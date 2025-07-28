@@ -24,7 +24,7 @@ use axum::{
 };
 use cda_interfaces::{
     DiagComm, DiagCommAction, DiagCommType, UdsEcu,
-    datatypes::{ComponentDataInfo, SdSdg},
+    datatypes::{ComponentConfigurationsInfo, ComponentDataInfo, SdSdg},
     diagservices::{DiagServiceResponse, DiagServiceResponseType, UdsPayloadData},
     file_manager::FileManager,
 };
@@ -283,6 +283,7 @@ pub async fn route<
                     .put(put_ecu_lock_handler)
                     .get(get_ecu_active_lock),
             )
+            .route("/configurations", routing::get(ecu_configuration_handler))
             .route("/data", routing::get(ecu_data_handler))
             .route(
                 "/data/{service}",
@@ -475,6 +476,27 @@ async fn post_and_put_component_handler<
     match uds.detect_variant(&ecu_name).await {
         Ok(()) => (StatusCode::CREATED, ()).into_response(),
         Err(e) => ErrorWrapper(ApiError::BadRequest(e)).into_response(),
+    }
+}
+
+async fn ecu_configuration_handler<
+    R: DiagServiceResponse + Send + Sync,
+    T: UdsEcu + Send + Sync + Clone,
+    U: FileManager + Send + Sync + Clone,
+>(
+    State(WebserverEcuState { ecu_name, uds, .. }): State<WebserverEcuState<R, T, U>>,
+) -> Response {
+    match uds.get_components_configuration_info(&ecu_name).await {
+        Ok(mut items) => {
+            let sovd_component_configuration = SovdComponentConfigurations {
+                items: items
+                    .drain(0..)
+                    .map(SovdComponentConfigurationsItem::from)
+                    .collect::<Vec<SovdComponentConfigurationsItem>>(),
+            };
+            (StatusCode::OK, Json(sovd_component_configuration)).into_response()
+        }
+        Err(e) => ErrorWrapper(ApiError::from(e)).into_response(),
     }
 }
 
@@ -761,6 +783,41 @@ impl From<ComponentDataInfo> for SovdComponentItem {
             category: info.category,
             id: info.id,
             name: info.name,
+        }
+    }
+}
+
+#[derive(Deserialize, Serialize, Debug)]
+struct SovdComponentConfigurations {
+    items: Vec<SovdComponentConfigurationsItem>,
+}
+
+#[derive(Deserialize, Serialize, Debug)]
+struct SovdComponentConfigurationsItem {
+    pub id: String,
+    pub name: String,
+    pub configurations_type: String,
+
+    #[serde(rename = "x-sovd2uds-ServiceAbstract")]
+    pub service_abstract: Vec<String>,
+}
+
+impl From<ComponentConfigurationsInfo> for SovdComponentConfigurationsItem {
+    fn from(info: ComponentConfigurationsInfo) -> Self {
+        SovdComponentConfigurationsItem {
+            id: info.id,
+            name: info.name,
+            configurations_type: info.configurations_type,
+            service_abstract: info
+                .service_abstract
+                .iter()
+                .map(|service_abstract| {
+                    service_abstract
+                        .iter()
+                        .map(|byte| format!("{byte:02X}"))
+                        .collect()
+                })
+                .collect(),
         }
     }
 }

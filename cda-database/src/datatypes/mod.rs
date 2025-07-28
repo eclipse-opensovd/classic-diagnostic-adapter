@@ -88,7 +88,8 @@ pub struct DiagnosticDatabase {
     pub state_charts: StateChartMap,
     pub state_chart_lookup: HashMap<String, Id>,
     pub base_state_chart_lookup: BaseStateChartMap,
-    pub functional_classes: HashMap<String, FunctClass>,
+    pub functional_classes_lookup: FunctionalClassesLookupMap,
+    pub functional_classes: HashMap<Id, String>,
 }
 
 #[derive(Debug)]
@@ -205,8 +206,16 @@ impl DiagnosticDatabase {
             variants.get(&base_variant_id).map_or(&[], |v| &v.sdgs),
         );
         let sds = get_sds(&ecu_data);
-
-        let functional_classes = get_functional_classes(&ecu_data, &services);
+        let functional_classes: HashMap<Id, String> = ecu_data
+            .funct_classes
+            .iter()
+            .filter_map(|fc| {
+                fc.id
+                    .as_ref()
+                    .map(|id| (id.value, fc.short_name.to_string()))
+            })
+            .collect();
+        let functional_classes_lookup = get_functional_classes_lookup(&ecu_data, &services);
 
         Ok(DiagnosticDatabase {
             ecu_database_path,
@@ -230,6 +239,7 @@ impl DiagnosticDatabase {
             state_chart_lookup,
             base_state_chart_lookup,
             functional_classes,
+            functional_classes_lookup,
         })
     }
 

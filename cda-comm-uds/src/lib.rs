@@ -22,8 +22,8 @@ use cda_interfaces::{
     SecurityAccess, ServicePayload, TesterPresentControlMessage, TesterPresentMode,
     TesterPresentType, TransmissionParameters, UdsEcu, UdsResponse,
     datatypes::{
-        DataTransferError, DataTransferMetaData, DataTransferStatus, Ecu, Gateway,
-        NetworkStructure, RetryPolicy,
+        ComponentConfigurationsInfo, DataTransferError, DataTransferMetaData, DataTransferStatus,
+        Ecu, Gateway, NetworkStructure, RetryPolicy,
     },
     diagservices::{DiagServiceResponse, DiagServiceResponseType, UdsPayloadData},
     service_ids,
@@ -713,6 +713,18 @@ impl<S: EcuGateway, R: DiagServiceResponse, T: EcuManager<Response = R>> UdsEcu
             .get_components_data_info();
 
         Ok(items)
+    }
+
+    async fn get_components_configuration_info(
+        &self,
+        ecu: &str,
+    ) -> Result<Vec<ComponentConfigurationsInfo>, DiagServiceError> {
+        self.ecus
+            .get(ecu)
+            .ok_or(DiagServiceError::NotFound)?
+            .read()
+            .await
+            .get_components_configurations_info()
     }
 
     async fn get_components_single_ecu_jobs_info(

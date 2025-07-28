@@ -17,7 +17,9 @@ use hashbrown::{HashMap, HashSet};
 
 use crate::{
     DiagComm, DiagServiceError, DoipComParamProvider, Id, SecurityAccess, UdsComParamProvider,
-    datatypes::{ComplexComParamValue, ComponentDataInfo, SdSdg, single_ecu},
+    datatypes::{
+        ComplexComParamValue, ComponentConfigurationsInfo, ComponentDataInfo, SdSdg, single_ecu,
+    },
     diagservices::{DiagServiceResponse, UdsPayloadData},
 };
 
@@ -182,6 +184,10 @@ pub trait EcuManager:
     fn lookup_service_by_sid(&self, service_id: u8) -> Result<Vec<String>, DiagServiceError>;
     /// Retrieve all `read` services for the current ECU variant.
     fn get_components_data_info(&self) -> Vec<ComponentDataInfo>;
+    /// Retrieve all configuration type services for the current ECU variant.
+    fn get_components_configurations_info(
+        &self,
+    ) -> Result<Vec<ComponentConfigurationsInfo>, DiagServiceError>;
     /// Retrieve all 'single ecu' jobs for the current ECU variant.
     fn get_components_single_ecu_jobs_info(&self) -> Vec<ComponentDataInfo>;
 }

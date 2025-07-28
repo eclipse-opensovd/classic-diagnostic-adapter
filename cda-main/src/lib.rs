@@ -25,7 +25,7 @@ use cda_core::{DiagServiceResponseStruct, EcuManager};
 use cda_database::{FileManager, ProtoLoadConfig};
 use cda_interfaces::{
     Protocol, TesterPresentControlMessage,
-    datatypes::ComParams,
+    datatypes::{ComParams, DatabaseNamingConvention},
     file_manager::{Chunk, ChunkType},
 };
 use cda_sovd::WebServerConfig;
@@ -50,6 +50,7 @@ pub async fn load_databases(
     databases_path: &str,
     protocol: Protocol,
     com_params: ComParams,
+    database_naming_convention: DatabaseNamingConvention,
 ) -> (DatabaseMap, FileManagerMap) {
     let databases: Arc<RwLock<HashMap<String, EcuManager>>> = Arc::new(RwLock::new(HashMap::new()));
 
@@ -96,6 +97,7 @@ pub async fn load_databases(
             let paths = mddfiles.to_vec();
             let database_count = Arc::clone(&databases_count);
             let com_params = Arc::clone(&com_params);
+            let database_naming_convention = database_naming_convention.clone();
 
             database_load_futures.push(cda_interfaces::spawn_named!(
                 &format!("load-database-{i}"),
@@ -107,6 +109,7 @@ pub async fn load_databases(
                         paths,
                         database_count,
                         com_params,
+                        database_naming_convention,
                     )
                     .await;
                 }
@@ -159,6 +162,7 @@ async fn load_database(
     paths: Vec<(PathBuf, u64)>,
     database_count: Arc<AtomicUsize>,
     com_params: Arc<ComParams>,
+    database_naming_convention: DatabaseNamingConvention,
 ) {
     for (mddfile, _) in paths {
         match cda_database::load_proto_data(
@@ -209,6 +213,7 @@ async fn load_database(
                     &ecu_payload,
                     protocol,
                     &com_params,
+                    database_naming_convention.clone(),
                 )
                 .map_err(|e| format!("Failed to create DiagServiceManager: {e:?}"))
                 {

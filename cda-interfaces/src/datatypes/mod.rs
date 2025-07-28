@@ -13,6 +13,7 @@
 
 pub use com_params::*;
 pub use component::*;
+pub use database_naming_convention::*;
 pub use execution::*;
 pub use jobs::*;
 pub use networkstructure::*;
@@ -21,6 +22,7 @@ pub use state::*;
 
 mod com_params;
 mod component;
+mod database_naming_convention;
 mod execution;
 mod jobs;
 mod networkstructure;

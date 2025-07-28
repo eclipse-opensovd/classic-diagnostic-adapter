@@ -21,18 +21,20 @@ use crate::{
     proto::dataformat::EcuData,
 };
 
-pub type FunctClassMap = HashMap<String, FunctClass>;
+pub type FunctionalClassesLookupMap = HashMap<String, FunctClassesServiceMap>;
+
+pub type FunctionalClassesMap = HashMap<u32, String>;
 
 #[derive(Debug)]
 #[cfg_attr(feature = "deepsize", derive(DeepSizeOf))]
-pub struct FunctClass {
+pub struct FunctClassesServiceMap {
     pub services: HashMap<u32, DbDiagComm>,
 }
 
-pub fn get_functional_classes(
+pub fn get_functional_classes_lookup(
     ecu_data: &EcuData,
     services: &DiagnosticServiceMap,
-) -> FunctClassMap {
+) -> FunctionalClassesLookupMap {
     ecu_data
         .funct_classes
         .iter()
@@ -60,7 +62,10 @@ pub fn get_functional_classes(
                 .filter_map(Option::from)
                 .collect();
 
-            (class.short_name.to_lowercase(), FunctClass { services })
+            (
+                class.short_name.to_lowercase(),
+                FunctClassesServiceMap { services },
+            )
         })
         .collect()
 }
