@@ -14,19 +14,20 @@
 use std::{sync::Arc, time::Duration};
 
 use cda_database::datatypes::{
-    self, DataOperation, DataType, DiagnosticDatabase, DiagnosticService, LogicalAddressType,
-    MuxDop, StateChart, resolve_comparam,
+    self, DataOperation, DataType, DiagCodedTypeVariant, DiagnosticDatabase, DiagnosticService,
+    LogicalAddressType, MuxDop, StateChart, resolve_comparam,
 };
 use cda_interfaces::{
     DiagComm, DiagCommAction, DiagCommType, DiagServiceError, EcuAddressProvider, EcuState,
     Protocol, STRINGS, SecurityAccess, ServicePayload,
     datatypes::{
-        AddressingMode, ComParams, ComplexComParamValue, ComponentDataInfo, RetryPolicy, SdSdg,
-        TesterPresentSendType, semantics, single_ecu,
+        AddressingMode, ComParams, ComplexComParamValue, ComponentConfigurationsInfo,
+        ComponentDataInfo, DatabaseNamingConvention, RetryPolicy, SdSdg, TesterPresentSendType,
+        semantics, single_ecu,
     },
     diagservices::{DiagServiceResponse, DiagServiceResponseType, UdsPayloadData},
-    get_string, get_string_from_option_with_default, get_string_with_default, service_ids,
-    spawn_named, util,
+    get_string, get_string_from_option, get_string_from_option_with_default,
+    get_string_with_default, service_ids, spawn_named, util,
 };
 use hashbrown::{HashMap, HashSet};
 use parking_lot::Mutex;
@@ -46,6 +47,7 @@ use crate::diag_kernel::{
 
 pub struct EcuManager {
     pub(crate) ecu_data: DiagnosticDatabase,
+    database_naming_convention: DatabaseNamingConvention,
     tester_address: u16,
     logical_address: u16,
     logical_gateway_address: u16,
@@ -620,7 +622,7 @@ impl cda_interfaces::EcuManager for EcuManager {
         service_id: u8,
     ) -> Result<DiagComm, DiagServiceError> {
         self.ecu_data
-            .functional_classes
+            .functional_classes_lookup
             .get(func_class_name)
             .ok_or(DiagServiceError::NotFound)
             .and_then(|fc| {
@@ -924,6 +926,115 @@ impl cda_interfaces::EcuManager for EcuManager {
                 )
             })
     }
+
+    /// Returns all services in /configuration, i.e. 0x22 and 0x2E
+    /// that are in the functional group varcoding.
+    fn get_components_configurations_info(
+        &self,
+    ) -> Result<Vec<ComponentConfigurationsInfo>, DiagServiceError> {
+        let var_coding_func_class = self
+            .ecu_data
+            .functional_classes
+            .iter()
+            .find(|(_, name)| {
+                name.to_lowercase() == self.database_naming_convention.functional_class_varcoding
+            })
+            .map(|(&id, _)| id)
+            .ok_or(DiagServiceError::NotFound)?;
+
+        let configuration_sids = [
+            service_ids::READ_DATA_BY_IDENTIFIER,
+            service_ids::WRITE_DATA_BY_IDENTIFIER,
+        ];
+
+        let variant = self
+            .variant
+            .as_ref()
+            .and_then(|v| self.ecu_data.variants.get(&v.id))
+            .or_else(|| self.ecu_data.variants.get(&self.ecu_data.base_variant_id))
+            .ok_or(DiagServiceError::NotFound)?;
+
+        let base_variant = self
+            .ecu_data
+            .variants
+            .get(&self.ecu_data.base_variant_id)
+            .ok_or(DiagServiceError::NotFound)?;
+
+        // Maps a common abbreviated service short name (using the configured affixes) to
+        // a vector of bytes of: service_id, ID_parameter_coded_const
+        let mut result_map: HashMap<String, HashSet<Vec<u8>>> = HashMap::new();
+
+        // Maps common short name to long name
+        let mut long_name_map: HashMap<String, String> = HashMap::new();
+
+        // Iterate over all services of the variant and the base
+        variant
+            .services
+            .iter()
+            .chain(base_variant.services.iter())
+            .filter_map(|id| {
+                self.ecu_data.services.get(id).filter(|service| {
+                    service.funct_class == var_coding_func_class
+                        && configuration_sids.contains(&service.service_id)
+                })
+            })
+            .for_each(|service| {
+                let (bitlength, coded_const_value) =
+                    match self.get_service_id_parameter_value(&service) {
+                        Some(value) => value,
+                        None => return,
+                    };
+
+                // trim short names so write and read services are grouped together
+                let common_short_name =
+                    get_string_with_default!(service.short_name, |short_name| {
+                        self.database_naming_convention
+                            .trim_short_name_affixes(&short_name)
+                    });
+
+                // trim the long name so we can return a descriptive name
+                if !long_name_map.contains_key(&common_short_name)
+                    && let Some(long_name) =
+                        get_string_from_option!(service.long_name, |long_name| {
+                            self.database_naming_convention
+                                .trim_long_name_affixes(&long_name)
+                        })
+                {
+                    long_name_map.insert(common_short_name.clone(), long_name);
+                }
+
+                // collect the coded const bytes of the parameter expressing the ID
+                let id_param_bytes =
+                    &coded_const_value.to_be_bytes()[(4 - (bitlength / 8)) as usize..];
+
+                // compile the first bytes of the raw uds payload
+                let mut service_abstract_entry = Vec::with_capacity(1 + id_param_bytes.len());
+                service_abstract_entry.push(service.service_id);
+                service_abstract_entry.extend_from_slice(id_param_bytes);
+
+                result_map
+                    .entry(common_short_name)
+                    .or_default()
+                    .insert(service_abstract_entry);
+            });
+
+        let mut result: Vec<_> = result_map
+            .into_iter()
+            .map(
+                |(common_short_name, abstracts)| ComponentConfigurationsInfo {
+                    name: long_name_map
+                        .get(&common_short_name)
+                        .cloned()
+                        .unwrap_or_default(),
+                    id: common_short_name,
+                    configurations_type: "parameter".to_owned(),
+                    service_abstract: abstracts.into_iter().collect(),
+                },
+            )
+            .collect();
+        result.sort_by(|a, b| a.id.cmp(&b.id));
+        Ok(result)
+    }
 }
 
 impl cda_interfaces::UdsComParamProvider for EcuManager {
@@ -1036,6 +1147,7 @@ impl EcuManager {
         ecu_data_blob: &[u8],
         protocol: Protocol,
         com_params: &ComParams,
+        database_naming_convention: DatabaseNamingConvention,
     ) -> Result<Self, DiagServiceError> {
         let database = DiagnosticDatabase::new(ecu_database_path, ecu_data_blob)?;
         let variant_detection = variant_detection::prepare_variant_detection(&database)?;
@@ -1172,6 +1284,7 @@ impl EcuManager {
 
         let res = Self {
             ecu_data: database,
+            database_naming_convention,
             tester_address: logical_tester_address,
             logical_address: logical_ecu_address,
             logical_gateway_address,
@@ -1798,5 +1911,126 @@ impl EcuManager {
         ));
 
         Ok(())
+    }
+
+    /// Returns the bit length and value of the service ID parameter for a given
+    /// `DiagnosticService`, if available.
+    ///
+    /// Searches the associated request for a `CodedConst` parameter with the configured
+    /// semantic and checks if the type and value are valid.
+    ///
+    /// Returns a tuple `(bitlength, value)` or `None` if no matching parameter is found.
+    fn get_service_id_parameter_value(&self, service: &&DiagnosticService) -> Option<(u32, u32)> {
+        let request = match self.ecu_data.requests.get(&service.request_id) {
+            Some(request) => request,
+            None => {
+                log::warn!(
+                            target: &self.ecu_data.ecu_name,
+                            "No request found for service {service:#?}");
+                return None;
+            }
+        };
+
+        // iterate over the request parameters to find the coded const parameter
+        // with the configured semantics
+        let coded_const = request.params.iter().find_map(|param_ref| {
+            self.ecu_data.params.get(param_ref).and_then(|param| {
+                let semantic = param.semantic.and_then(|sem| STRINGS.get(sem));
+                match semantic {
+                    Some(sem)
+                        if sem
+                            == self
+                                .database_naming_convention
+                                .configuration_service_parameter_semantic_id =>
+                    {
+                        match &param.value {
+                            datatypes::ParameterValue::CodedConst(coded_const) => Some(coded_const),
+                            _ => None,
+                        }
+                    }
+                    _ => None,
+                }
+            })
+        });
+        let coded_const = match coded_const {
+            Some(coded_const) => coded_const,
+            None => {
+                log::warn!(target: &self.ecu_data.ecu_name,
+                            "No coded const found for service {service:#?}");
+                return None;
+            }
+        };
+
+        // Ensure the coded const has a compatible type
+        let coded_const_type = match self
+            .ecu_data
+            .diag_coded_types
+            .get(&coded_const.diag_coded_type)
+        {
+            Some(coded_const_type) => coded_const_type,
+            None => {
+                log::warn!(target: &self.ecu_data.ecu_name, "No diag coded type found \
+                             for coded const {coded_const:#?}");
+                return None;
+            }
+        };
+
+        if coded_const_type.base_datatype != DataType::UInt32 {
+            log::warn!(target: &self.ecu_data.ecu_name, "Coded const {coded_const:#?} has \
+                        unexpected base datatype {:#?}, expected UInt32",
+                        coded_const_type.base_datatype);
+            return None;
+        }
+
+        let bitlength = match &coded_const_type.type_ {
+            DiagCodedTypeVariant::LeadingLengthInfo(_) => {
+                log::warn!(target: &self.ecu_data.ecu_name, "Coded const {coded_const:#?} \
+                        has unexpected type LeadingLengthInfo, expected StandardLength");
+                return None;
+            }
+            DiagCodedTypeVariant::MinMaxLength(_) => {
+                log::warn!(target: &self.ecu_data.ecu_name, "Coded const {coded_const:#?} \
+                        has unexpected type MinMaxLength, expected StandardLength");
+                return None;
+            }
+            DiagCodedTypeVariant::StandardLength(standard_length_type) => {
+                if standard_length_type.bitmask.is_some() {
+                    log::warn!(target: &self.ecu_data.ecu_name,
+                                "Coded const.type standard_length_type {standard_length_type:#?} \
+                                has unexpected bitmask, expected StandardLength without bitmask");
+                    return None;
+                }
+                match standard_length_type.bit_length {
+                    16 | 24 | 32 => standard_length_type.bit_length,
+                    _ => {
+                        log::warn!(target: &self.ecu_data.ecu_name,
+                                    "Coded const {coded_const:#?} has unexpected bit length {:#?},\
+                                     expected 16, 24 or 32", standard_length_type.bit_length);
+                        return None;
+                    }
+                }
+            }
+        };
+
+        // lookup the coded const value in the strings
+        let coded_const_value = match STRINGS.get(coded_const.value) {
+            Some(value) => value,
+            None => {
+                log::warn!(target: &self.ecu_data.ecu_name,
+                            "No coded const value found for {coded_const:#?}");
+                return None;
+            }
+        };
+
+        let coded_const_value = match coded_const_value.parse::<u32>() {
+            Ok(value) => value,
+            Err(e) => {
+                log::warn!(target: &self.ecu_data.ecu_name,
+                            "Coded const value '{coded_const_value}' could not be parsed as u32:\
+                             {e}");
+                return None;
+            }
+        };
+        Some((bitlength, coded_const_value))
     }
 }

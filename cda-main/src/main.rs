@@ -15,7 +15,7 @@ use std::sync::Arc;
 
 use clap::{Parser, command};
 use futures::future::FutureExt;
-use opensovd_cda_lib::shutdown_signal;
+use opensovd_cda_lib::{config::configfile::ConfigSanity, shutdown_signal};
 use tokio::sync::mpsc;
 use tracing_subscriber::layer::SubscriberExt as _;
 
@@ -63,6 +63,7 @@ async fn main() -> Result<(), String> {
         println!("Using default values");
         opensovd_cda_lib::config::default_config()
     });
+    config.validate_sanity()?;
 
     args.update_config(&mut config);
 
@@ -109,8 +110,13 @@ async fn main() -> Result<(), String> {
         cda_interfaces::Protocol::DoIp
     };
 
-    let (databases, file_managers) =
-        opensovd_cda_lib::load_databases(&database_path, protocol, config.com_params.clone()).await;
+    let (databases, file_managers) = opensovd_cda_lib::load_databases(
+        &database_path,
+        protocol,
+        config.com_params,
+        config.database_naming_convention,
+    )
+    .await;
 
     let webserver_config = cda_sovd::WebServerConfig {
         host: config.server.address.clone(),

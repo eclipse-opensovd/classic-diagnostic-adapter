@@ -39,6 +39,7 @@ pub struct DiagnosticService {
     /// allowed ecu states to execute this service.
     pub precondition_states: Vec<Id>,
     pub transitions: HashMap<Id, Id>,
+    pub funct_class: Id,
 }
 
 #[derive(Debug)]
@@ -131,7 +132,27 @@ pub(super) fn get_services(
                 .as_ref()
                 .ok_or_else(|| ref_optional_none("DiagService.id"))?
                 .value;
-
+            let funct_class = ds
+                .diag_comm
+                .as_ref()
+                .ok_or_else(|| {
+                    DiagServiceError::InvalidDatabase(
+                        "Corrupted DB: Service has no DiagComm".to_owned(),
+                    )
+                })?
+                .funct_class
+                .ok_or_else(|| {
+                    DiagServiceError::InvalidDatabase(
+                        "Corrupted DB: Service has no functional class".to_owned(),
+                    )
+                })?
+                .r#ref
+                .ok_or_else(|| {
+                    DiagServiceError::InvalidDatabase(
+                        "Corrupted DB: Service functional class has no ref".to_owned(),
+                    )
+                })?
+                .value;
             let pos_responses = ds
                 .pos_responses
                 .iter()
@@ -317,6 +338,7 @@ pub(super) fn get_services(
                     sdgs,
                     precondition_states,
                     transitions,
+                    funct_class,
                 },
             ))
         })

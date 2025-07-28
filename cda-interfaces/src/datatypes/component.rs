@@ -16,3 +16,10 @@ pub struct ComponentDataInfo {
     pub id: String,
     pub name: String,
 }
+
+pub struct ComponentConfigurationsInfo {
+    pub id: String,
+    pub name: String,
+    pub configurations_type: String,
+    pub service_abstract: Vec<Vec<u8>>,
+}

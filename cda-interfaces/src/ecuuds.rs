@@ -16,8 +16,8 @@ use std::time::Duration;
 use crate::{
     DiagComm, DiagServiceError, SecurityAccess,
     datatypes::{
-        ComplexComParamValue, ComponentDataInfo, DataTransferMetaData, NetworkStructure, SdSdg,
-        single_ecu,
+        ComplexComParamValue, ComponentConfigurationsInfo, ComponentDataInfo, DataTransferMetaData,
+        NetworkStructure, SdSdg, single_ecu,
     },
     diagservices::{DiagServiceResponse, UdsPayloadData},
 };
@@ -55,6 +55,13 @@ pub trait UdsEcu: Send + Sync + 'static {
         &self,
         ecu: &str,
     ) -> impl Future<Output = Result<Vec<ComponentDataInfo>, String>> + Send;
+    /// Retrieve all configuration type services for the given ECU on the detected variant.
+    /// # Errors
+    /// Will return `Err` if the ECU does not exist
+    fn get_components_configuration_info(
+        &self,
+        ecu: &str,
+    ) -> impl Future<Output = Result<Vec<ComponentConfigurationsInfo>, DiagServiceError>> + Send;
     /// Retrieve all single ecu jobs for the given ECU on the detected variant.
     /// # Errors
     /// Will return `Err` if the ECU does not exist.
