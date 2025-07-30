@@ -1,0 +1,225 @@
+/*
+ * Copyright (c) 2025 The Contributors to Eclipse OpenSOVD (see CONTRIBUTORS)
+ *
+ * See the NOTICE file(s) distributed with this work for additional
+ * information regarding copyright ownership.
+ *
+ * This program and the accompanying materials are made available under the
+ * terms of the Apache License Version 2.0 which is available at
+ * https://www.apache.org/licenses/LICENSE-2.0
+ *
+ * SPDX-License-Identifier: Apache-2.0
+ */
+
+use std::time::Duration;
+
+use crate::{
+    DiagComm, DiagServiceError, SecurityAccess,
+    datatypes::{
+        ComplexComParamValue, ComponentDataInfo, DataTransferMetaData, NetworkStructure, SdSdg,
+        single_ecu,
+    },
+    diagservices::{DiagServiceResponse, UdsPayloadData},
+};
+
+/// UDS communication interface
+pub trait UdsEcu: Send + Sync + 'static {
+    type Response: DiagServiceResponse;
+    /// Returns a list of loaded ECUs.
+    /// They are not necessarily online, but have been loaded from the database.
+    fn get_ecus(&self) -> impl Future<Output = Vec<String>> + Send;
+    /// Fetches the network structure of the ECUs, including their connections and addresses.
+    fn get_network_structure(&self) -> impl Future<Output = NetworkStructure> + Send;
+    /// Retrieve the Special Data Groups (SDGs) for the given ECU.
+    /// SDGs provide textual information.
+    /// For example, they are used to provide meta information about the ECU, like the bus interface
+    /// or the AUTOSAR version.
+    /// # Errors
+    /// Will return `Err` if the ECU does not exist or if the service is not available.
+    fn get_sdgs(
+        &self,
+        ecu: &str,
+        service: Option<&DiagComm>,
+    ) -> impl Future<Output = Result<Vec<SdSdg>, String>> + Send;
+    /// Retrieves the communication parameters for a specific ECU.
+    /// # Errors
+    /// Will return `Err` if the ECU does not exist.
+    fn get_comparams(
+        &self,
+        ecu: &str,
+    ) -> impl Future<Output = Result<ComplexComParamValue, String>> + Send;
+    /// Retrieve all `read` services for the given ECU on the detected variant.
+    /// # Errors
+    /// Will return `Err` if the ECU does not exist.
+    fn get_components_data_info(
+        &self,
+        ecu: &str,
+    ) -> impl Future<Output = Result<Vec<ComponentDataInfo>, String>> + Send;
+    /// Retrieve all single ecu jobs for the given ECU on the detected variant.
+    /// # Errors
+    /// Will return `Err` if the ECU does not exist.
+    fn get_components_single_ecu_jobs_info(
+        &self,
+        ecu: &str,
+    ) -> impl Future<Output = Result<Vec<ComponentDataInfo>, String>> + Send;
+    /// Retrieve a specific single ecu job for the given ECU.
+    fn get_single_ecu_job(
+        &self,
+        ecu: &str,
+        job_name: &str,
+    ) -> impl Future<Output = Result<single_ecu::Job, DiagServiceError>> + Send;
+    /// Send a message via the given DiagComm and Payload to the ECU.
+    /// The timeout is set to the given duration, instead of the default timeout.
+    /// Can be used to override the default timeout for a specific request, especially
+    /// for requests which expect to take longer.
+    fn send_with_timeout(
+        &self,
+        ecu_name: &str,
+        service: DiagComm,
+        payload: Option<UdsPayloadData>,
+        map_to_json: bool,
+        timeout: Duration,
+    ) -> impl Future<Output = Result<Self::Response, DiagServiceError>> + Send;
+    /// Send a message via the given DiagComm and Payload to the ECU.
+    /// The default timeouts of the ECU, read from the communication parameters, will be used.
+    /// # Error
+    /// Will return `Err` if the ECU does not exist or if the request fails.
+    fn send(
+        &self,
+        ecu_name: &str,
+        service: DiagComm,
+        payload: Option<UdsPayloadData>,
+        map_to_json: bool,
+    ) -> impl Future<Output = Result<Self::Response, DiagServiceError>> + Send;
+    /// Set the session for the given ECU.
+    /// No authentication is done by the implementation itself, it is assumed that the
+    /// caller has already set the appropriate security access if required.
+    /// If not the ECU will return a negative response
+    /// Expiration is used to reset the ECU to the default session after the given duration.
+    /// Upon positive response, the internally tracked session is updated.
+    /// # Errors
+    /// * DiagServiceError::NotFound if the ECU or service lookup failed.
+    ///
+    /// Forwards errors from the `send` function.
+    fn set_ecu_session(
+        &self,
+        ecu_name: &str,
+        session: &str,
+        expiration: Duration,
+    ) -> impl Future<Output = Result<Self::Response, DiagServiceError>> + Send;
+    /// Set the security access for the given ECU.
+    /// The returned `SecurityAccess` defines whether further authentication is required
+    /// `SecurityAccess::RequestSeed` means that the reply contains a seed to calculate a key,
+    ///  `SecurityAccess::SendKey` sends the key calculated by the seed, to the ECU.
+    /// On a positive response after sending the key, the internally tracked session is updated.
+    ///
+    /// Expiration is used to reset the ECU to the default security access after the given duration
+    /// # Errors
+    /// * DiagServiceError::NotFound if the ECU or service lookup failed.
+    ///
+    /// Forwards errors from the `send` function.
+    fn set_ecu_security_access(
+        &self,
+        ecu_name: &str,
+        level: &str,
+        seed_service: Option<&String>,
+        authentication_data: Option<UdsPayloadData>,
+        expiration: Duration,
+    ) -> impl Future<Output = Result<(SecurityAccess, Self::Response), DiagServiceError>> + Send;
+    /// Retrieve service to reset the ECU.
+    fn get_ecu_reset_services(
+        &self,
+        ecu_name: &str,
+    ) -> impl Future<Output = Result<Vec<String>, DiagServiceError>> + Send;
+    /// Get the current session of the ECU.
+    fn ecu_session(
+        &self,
+        ecu_name: &str,
+    ) -> impl Future<Output = Result<String, DiagServiceError>> + Send;
+    /// Get the current security access level of the ECU.
+    fn ecu_security_access(
+        &self,
+        ecu_name: &str,
+    ) -> impl Future<Output = Result<String, DiagServiceError>> + Send;
+    /// Lookup the service id on the ECU and restrict the result to the function class.
+    /// After the successful lookup, the found service will be executed with the given payload.
+    /// # Errors
+    /// * DiagServiceError::NotFound if the ECU or service lookup failed.
+    ///
+    /// Furthermore, errors from the `send` function are forwarded.
+    fn ecu_exec_service_from_function_class(
+        &self,
+        ecu_name: &str,
+        func_class_name: &str,
+        service_id: u8,
+        data: UdsPayloadData,
+    ) -> impl Future<Output = Result<Self::Response, DiagServiceError>> + Send;
+    /// Start a flash transfer for the given ECU.
+    /// Setting the ECU into the appropriate session and security access must be done
+    /// before calling this function, otherwise the ECU will not accept the transfer.
+    /// # Errors
+    /// * DiagServiceError::InvalidRequest
+    ///   * A transfer is already in progress for the given ECU.
+    ///   * The given file path does not exist or is not readable.
+    ///   * The offset and length do not match the file size.
+    /// * DiagServiceError::NotFound
+    ///   * The ECU with the given name does not exist.
+    fn ecu_flash_transfer_start(
+        &self,
+        ecu_name: &str,
+        func_class_name: &str,
+        file_path: &str,
+        offset: u64,
+        length: u64,
+        transfer_meta_data: DataTransferMetaData,
+    ) -> impl Future<Output = Result<(), DiagServiceError>> + Send;
+    /// Once the transfer has finished transfer exit must be called to finalize the transfer.
+    /// No new transfer can be started before this is called.
+    /// # Errors
+    /// * DiagServiceError::NotFound
+    ///  * The ECU with the given name does not exist.
+    ///  * The transfer with the given ID does not exist.
+    /// * DiagServiceError::InvalidRequest
+    ///   * The transfer is not in a state where it can be exited, e.g. it is still in progress.
+    ///   * Failures on retrieving the transfer exit status.
+    fn ecu_flash_transfer_exit(
+        &self,
+        ecu_name: &str,
+        id: &str,
+    ) -> impl Future<Output = Result<(), DiagServiceError>> + Send;
+    /// Fetch all flash transfers for the given ECU.
+    /// # Errors
+    /// * DiagServiceError::NotFound
+    ///   * The ECU with the given name does not exist.
+    fn ecu_flash_transfer_status(
+        &self,
+        ecu_name: &str,
+    ) -> impl Future<Output = Result<Vec<DataTransferMetaData>, DiagServiceError>> + Send;
+    /// Fetch the status of a specific flash transfer by its ID.
+    /// # Errors
+    /// * DiagServiceError::NotFound
+    ///   * The ECU with the given name does not exist.
+    ///   * The transfer with the given ID does not exist.
+    fn ecu_flash_transfer_status_id(
+        &self,
+        ecu_name: &str,
+        id: &str,
+    ) -> impl Future<Output = Result<DataTransferMetaData, DiagServiceError>> + Send;
+
+    /// Trigger variant detection for the given ECU.
+    /// # Errors
+    /// Will return `Err` if the variant detection cannot be triggered, e.g. if the given ECU
+    /// does not exist or no service for variant detection is available.
+    fn detect_variant(&self, ecu_name: &str) -> impl Future<Output = Result<(), String>> + Send;
+
+    /// Get the name of the variant for the given ECU.
+    /// # Errors
+    /// Will return Err if the ECU does not exist.
+    /// If the variant is cannot be resolved, "Unknown" will be returned.
+    fn get_variant(&self, ecu_name: &str) -> impl Future<Output = Result<String, String>> + Send;
+
+    /// trigger the variant detection process for all ECUs.
+    /// Main work will be done in the background, there is no result returned,
+    /// as the data is internally stored and used in `EcuUds`
+    fn start_variant_detection(&self) -> impl Future<Output = ()> + Send;
+}

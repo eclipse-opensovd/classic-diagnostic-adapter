@@ -1,0 +1,40 @@
+# SPDX-FileCopyrightText: 2025 The Contributors to Eclipse OpenSOVD (see CONTRIBUTORS)
+#
+# SPDX-License-Identifier: Apache-2.0
+
+[package]
+name = "cda-core"
+version = "0.1.0"
+edition = "2024"
+publish = false
+description = "Diagnostic Core of CDA"
+homepage = "https://github.com/eclipse-opensovd/classic-diagnostic-adapter"
+license = "Apache-2.0"
+
+[lib]
+path = "src/lib.rs"
+
+[dependencies]
+# internal dependencies
+cda-interfaces = { path = "../cda-interfaces" }
+cda-database = { path = "../cda-database" }
+# external
+hashbrown = { version = "0.15", features = ["serde"] }
+hex = "0.4.3"
+parking_lot = "0.12.4"
+serde = { version = "1.0" }
+serde_json = "1.0"
+tokio = { version = "1.43.0", default-features = false }
+
+# logging
+log = "0.4"
+tracing = "0.1.41"
+
+[dev-dependencies]
+tokio = { version = "1.43.0", default-features = false, features = [
+  "test-util",
+  "macros",
+] }
+
+[features]
+default = []
