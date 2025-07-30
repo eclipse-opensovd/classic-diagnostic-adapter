@@ -1,0 +1,52 @@
+# SPDX-FileCopyrightText: 2025 The Contributors to Eclipse OpenSOVD (see CONTRIBUTORS)
+#
+# SPDX-License-Identifier: Apache-2.0
+
+[package]
+name = "cda-database"
+version = "0.1.0"
+edition = "2024"
+publish = false
+description = "ECU Database for CDA"
+homepage = "https://github.com/eclipse-opensovd/classic-diagnostic-adapter"
+license = "Apache-2.0"
+
+[lib]
+path = "src/lib.rs"
+
+[dependencies]
+# internal dependencies
+cda-interfaces = { path = "../cda-interfaces" }
+# external
+bitvec = "1.0.1"
+hashbrown = { version = "0.15", features = ["serde"] }
+prost = "0.14"
+# tokio
+tokio = { version = "1.43.0", default-features = false, features = [
+  "rt",
+  "sync",
+  "io-util",
+  "time",
+] }
+# v4 - Version 4 UUIDs with random data.
+uuid = { version = "1.16.0", features = ["v4"] }
+xz2 = { version = "0.1.6", features = ["static"] }
+
+# logging
+log = "0.4"
+# tracing = "0.1.41"
+
+# runtime size info
+deepsize = { version = "0.2.0", features = ["hashbrown"], optional = true }
+
+# serde
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+
+[build-dependencies]
+prost-build = "0.14.1"
+
+[features]
+default = []
+deepsize = ["dep:deepsize"]
+gen-protos = []

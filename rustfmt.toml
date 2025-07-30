@@ -1,0 +1,13 @@
+# SPDX-FileCopyrightText: 2025 The Contributors to Eclipse OpenSOVD (see CONTRIBUTORS)
+#
+# SPDX-License-Identifier: Apache-2.0
+
+max_width = 100
+
+# in case rustfmt stopps working again, enable these options
+# to get more information about the error
+# requires to run rustfmt with nightly toolchain
+# for example: `rustfmt +nightly src/diagtype/mod.rs --edition 2024 --verbose`
+# error_on_unformatted = true
+# error_on_line_overflow = true
+#format_strings = true

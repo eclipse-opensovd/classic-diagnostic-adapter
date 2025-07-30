@@ -1,0 +1,1049 @@
+/*
+ * Copyright (c) 2025 The Contributors to Eclipse OpenSOVD (see CONTRIBUTORS)
+ *
+ * See the NOTICE file(s) distributed with this work for additional
+ * information regarding copyright ownership.
+ *
+ * This program and the accompanying materials are made available under the
+ * terms of the Apache License Version 2.0 which is available at
+ * https://www.apache.org/licenses/LICENSE-2.0
+ *
+ * SPDX-License-Identifier: Apache-2.0
+ */
+
+// diagnostic_description.proto uses camelCase to stay close to the original odx descriptors
+syntax = "proto3";
+
+option java_multiple_files = true;
+option java_package = "org.eclipse.opensovd.cda.mdd";
+option java_outer_classname = "DiagnosticDescriptionFormatProto";
+
+package dataformat;
+
+message ObjectID {
+  uint32 value = 1;
+}
+
+message SD {
+  ObjectID id = 1;
+  optional string value = 2;
+  optional string si = 3;
+  optional string ti = 4;
+
+  message Ref {
+    ObjectID ref = 1;
+  }
+}
+
+message SDOrSDG {
+  oneof SDxorSDG {
+    SD.Ref sd = 1;
+    SDG.Ref sdg = 2;
+  }
+}
+
+message SDG {
+  ObjectID id = 1;
+
+  message SDGCaption {
+    string shortName = 1;
+  }
+
+  optional SDGCaption caption = 2;
+  repeated SDOrSDG sds = 3;
+
+  optional string si = 4;
+
+  message Ref {
+    ObjectID ref = 1;
+  }
+}
+
+message SDGS {
+  ObjectID id = 1;
+
+  repeated SDG.Ref sdgs = 2;
+
+  message Ref {
+    ObjectID ref = 1;
+  }
+}
+
+message Audience {
+  ObjectID id = 1;
+
+  repeated AdditionalAudience.Ref enabledAudiences = 2;
+  repeated AdditionalAudience.Ref disabledAudiences = 3;
+  bool isSupplier = 4;
+  bool isDevelopment = 5;
+  bool isManufacturing = 6;
+  bool isAfterSales = 7;
+  bool isAfterMarket = 8;
+
+  message Ref {
+    ObjectID ref = 1;
+  }
+}
+
+message DiagCodedType {
+  enum DiagCodedTypeName {
+    LEADING_LENGTH_INFO_TYPE = 0;
+    MIN_MAX_LENGTH_TYPE = 1;
+    PARAM_LENGTH_INFO_TYPE = 2;
+    STANDARD_LENGTH_TYPE = 3;
+  }
+
+  message LeadingLengthInfoType {
+    uint32 bitLength = 1;
+  }
+
+  message MinMaxLengthType {
+    enum Termination {
+      END_OF_PDU = 0;
+      ZERO = 1;
+      HEX_FF = 2;
+    }
+
+    uint32 minLength = 1;
+    optional uint32 maxLength = 2;
+    Termination termination = 3;
+  }
+
+  message ParamLengthInfoType {
+    Param.Ref lengthKey = 1;
+  }
+
+  message StandardLengthType {
+    uint32 bitLength = 1;
+    optional bytes bitMask = 2;
+    optional bool condensed = 3; // default false
+  }
+
+  ObjectID id = 1;
+  DiagCodedTypeName type = 2;
+  optional string baseTypeEncoding = 3;
+  DataType baseDataType = 4;
+  optional bool isHighLowByteOrder = 5; // default true
+
+  oneof SpecificData {
+    LeadingLengthInfoType leadingLengthInfoType = 6;
+    MinMaxLengthType minMaxLengthType = 7;
+    ParamLengthInfoType paramLengthInfoType = 8;
+    StandardLengthType standardLengthType = 9;
+  }
+
+  message Ref {
+    ObjectID ref = 1;
+  }
+
+  enum DataType {
+    A_INT_32 = 0;
+    A_UINT_32 = 1;
+    A_FLOAT_32 = 2;
+    A_ASCIISTRING = 3;
+    A_UTF_8_STRING = 4;
+    A_UNICODE_2_STRING = 5;
+    A_BYTEFIELD = 6;
+    A_FLOAT_64 = 7;
+  }
+}
+
+message Text {
+  optional string value = 1;
+  optional string ti = 2;
+}
+
+message Limit {
+  string value = 1;
+  IntervalType intervalType = 2;
+
+  enum IntervalType {
+    OPEN = 0;
+    CLOSED = 1;
+    INFINITE = 2;
+  }
+}
+
+message CompuValues {
+  optional double v = 1;
+  optional string vt = 2;
+  optional string vtTi = 3;
+}
+message CompuScale {
+  optional Text shortLabel = 1;
+  optional Limit lowerLimit = 2;
+  optional Limit upperLimit = 3;
+  optional CompuValues inverseValues = 4;
+  optional CompuValues consts = 5;
+  optional CompuRationalCoEffs rationalCoEffs = 6;
+
+  message CompuRationalCoEffs {
+    repeated double numerator = 1;
+    repeated double denominator = 2;
+  }
+}
+
+message CompuMethod {
+  optional CompuCategory category = 1;
+  optional CompuInternalToPhys internalToPhys = 2;
+  optional CompuPhysToInternal physToInternal = 3;
+
+  message CompuInternalToPhys {
+    repeated CompuScale compuScales = 1;
+    optional ProgCode progCode = 2;
+    optional CompuDefaultValue compuDefaultValue = 3;
+  }
+
+  message CompuPhysToInternal {
+    optional ProgCode progCode = 1;
+    repeated CompuScale compuScales = 2;
+    optional CompuDefaultValue compuDefaultValue = 3;
+  }
+
+  enum CompuCategory {
+    IDENTICAL = 0;
+    LINEAR = 1;
+    SCALE_LINEAR = 2;
+    TEXT_TABLE = 3;
+    COMPU_CODE = 4;
+    TAB_INTP = 5;
+    RAT_FUNC = 6;
+    SCALE_RAT_FUNC = 7;
+  }
+
+  message CompuDefaultValue {
+    optional CompuValues values = 1;
+    optional CompuValues inverseValues = 2;
+  }
+}
+
+message PhysicalType {
+  optional uint32 precision = 1;
+  DataType baseDataType = 2;
+  optional Radix displayRadix = 3;
+
+  enum DataType {
+    A_INT_32 = 0;
+    A_UINT_32 = 1;
+    A_FLOAT_32 = 2;
+    A_ASCIISTRING = 3;
+    A_UTF_8_STRING = 4;
+    A_UNICODE_2_STRING = 5;
+    A_BYTEFIELD = 6;
+    A_FLOAT_64 = 7;
+  }
+
+  enum Radix {
+    HEX = 0;
+    DEC = 1;
+    BIN = 2;
+    OCT = 3;
+  }
+}
+
+message Unit {
+  ObjectID id = 1;
+
+  string shortName = 2;
+  string displayName = 3;
+  optional double factorsitounit = 4;
+  optional double offsetitounit = 5;
+  optional PhysicalDimension.Ref physicalDimension = 6;
+
+  message Ref {
+    ObjectID ref = 1;
+  }
+}
+
+message ScaleConstr {
+  optional Text shortLabel = 1;
+  Limit lowerLimit = 2;
+  Limit upperLimit = 3;
+  ValidType validity = 4;
+
+  enum ValidType {
+    VALID = 0;
+    NOT_VALID = 1;
+    NOT_DEFINED = 2;
+    NOT_AVAILABLE = 3;
+  }
+}
+
+message InternalConstr {
+  optional Limit lowerLimit = 1;
+  optional Limit upperLimit = 2;
+  repeated ScaleConstr scaleConstr = 3;
+}
+
+message DTC {
+  ObjectID id = 1;
+
+  string shortName = 2;
+  uint32 troubleCode = 3;
+  optional string displayTroubleCode = 4;
+  optional Text text = 5;
+  optional uint32 level = 6;
+  optional SDGS.Ref sdgs = 7;
+  optional bool isTemporary = 8;
+
+  message Ref {
+    ObjectID ref = 1;
+  }
+}
+
+message DOP {
+  enum DOPType {
+    REGULAR = 0;
+    ENV_DATA_DESC = 1;
+    MUX = 2;
+    DYNAMIC_END_MARKER_FIELD = 3;
+    DYNAMIC_LENGTH_FIELD = 4;
+    END_OF_PDU_FIELD = 5;
+    STATIC_FIELD = 6;
+    ENV_DATA = 7;
+    STRUCTURE = 8;
+    DTC = 9;
+  }
+  ObjectID id = 1;
+
+  DOPType dopType = 2;
+  string shortName = 3;
+  SDGS.Ref sdgs = 4;
+
+  oneof SpecificData {
+    NormalDOP normalDop = 5;
+    EndOfPduField endOfPduField = 6;
+    StaticField staticField = 7;
+    EnvDataDesc envDataDesc = 8;
+    EnvData envData = 9;
+    DTCDOP dtcDop = 10;
+    Structure structure = 11;
+    MUXDOP muxDop = 12;
+    DynamicLengthField dynamicLengthField = 13;
+  }
+
+  message Ref {
+    ObjectID ref = 1;
+  }
+
+  message NormalDOP {
+    CompuMethod compuMethod = 1;
+    DiagCodedType.Ref diagCodedType = 2;
+    PhysicalType physicalType = 3;
+    optional InternalConstr internalConstr = 4;
+    optional Unit.Ref unitRef = 5;
+    optional InternalConstr physConstr = 6;
+  }
+
+  message Field {
+    optional DOP.Ref basicStructure = 1;
+    optional string basicStructureShortNameRef = 2;
+    optional DOP.Ref envDataDesc = 3;
+    optional string envDataDescShortNameRef = 4;
+    optional bool isVisible = 5;
+  }
+
+  message StaticField {
+    uint32 fixedNumberOfItems = 1;
+    uint32 itemByteSize = 2;
+    optional Field field = 3;
+  }
+
+  message EndOfPduField {
+    optional uint32 maxNumberOfItems = 1;
+    optional uint32 minNumberOfItems = 2;
+    optional Field field = 3;
+  }
+
+  message EnvDataDesc {
+    optional string paramShortName = 1;
+    optional string paramPathShortName = 2;
+    repeated DOP.Ref envDatas = 3;
+  }
+
+  message EnvData {
+    repeated uint32 dtcValues = 1;
+    repeated Param.Ref params = 2;
+  }
+
+  message Structure {
+    repeated Param.Ref params = 1;
+    optional uint32 byteSize = 2;
+    bool isVisible = 3;
+  }
+
+  message DTCDOP {
+    DiagCodedType.Ref diagCodedType = 1;
+    PhysicalType physicalType = 2;
+    CompuMethod compuMethod = 3;
+
+    repeated DTC.Ref dtcs = 4;
+    optional bool isVisible = 5;
+  }
+
+  message MUXDOP {
+    uint32 bytePosition = 1;
+    SwitchKey switchKey = 2;
+    optional DefaultCase defaultCase = 3;
+    repeated Case cases = 4;
+    optional bool isVisible = 5;
+
+    message SwitchKey {
+      uint32 bytePosition = 1;
+      optional uint32 bitPosition = 2;
+      DOP.Ref dop = 3;
+    }
+
+    message DefaultCase {
+      string shortName = 1;
+      optional LongName longName = 2;
+      optional DOP.Ref structure = 3;
+    }
+
+    message Case {
+      string shortName = 1;
+      optional LongName longName = 2;
+      DOP.Ref structure = 3;
+      Limit lowerLimit = 4;
+      Limit upperLimit = 5;
+    }
+  }
+
+  message DynamicLengthField {
+    uint32 offset = 1;
+    optional Field field = 3;
+    DetermineNumberOfItems determineNumberOfItems = 4;
+
+    message DetermineNumberOfItems {
+      uint32 bytePosition = 1;
+      uint32 bitPosition = 2;
+      DOP.Ref dop = 3;
+    }
+  }
+}
+
+message LongName {
+  optional string value = 1;
+  optional string ti = 2;
+}
+
+message State {
+  ObjectID id = 1;
+
+  string shortName = 2;
+  optional LongName longName = 3;
+
+  message Ref {
+    ObjectID ref = 1;
+  }
+}
+
+message StateChart {
+  ObjectID id = 1;
+
+  string shortName = 2;
+  string semantic = 3;
+  repeated StateTransition.Ref stateTransitions = 4;
+  string startStateShortNameRef = 5;
+  repeated State.Ref states = 6;
+
+  message Ref {
+    ObjectID ref = 1;
+  }
+}
+
+message StateTransition {
+  ObjectID id = 1;
+
+  string shortName = 2;
+  string sourceShortNameRef = 3;
+  string targetShortNameRef = 4;
+
+  message Ref {
+    ObjectID ref = 1;
+  }
+}
+
+message StateTransitionRef {
+  ObjectID id = 1;
+
+   optional string value = 2;
+   optional StateTransition.Ref stateTransition = 3;
+
+  message Ref {
+    ObjectID ref = 1;
+  }
+}
+
+message PreConditionStateRef {
+  ObjectID id = 1;
+
+  optional string value = 2;
+  optional Param.Ref inParamIf = 3;
+  optional string inParamPathShortName = 4;
+
+  State.Ref state = 5;
+
+  message Ref {
+    ObjectID ref = 1;
+  }
+}
+
+message TableRow {
+  ObjectID id = 1;
+
+  string shortName = 2;
+  optional LongName longName = 3;
+  string key = 4;
+  optional DOP.Ref dop = 5;
+  optional DOP.Ref structure = 6;
+  reserved 7; // was structureShortNameRef = 7;, can probably be deleted when we do final renumbering
+  optional SDGS.Ref sdgs = 8;
+  optional Audience.Ref audience = 9;
+  repeated FunctClass.Ref functClassRefs = 10;
+  repeated StateTransitionRef.Ref stateTransitionRefs = 11;
+  repeated PreConditionStateRef.Ref preConditionStateRefs = 12;
+
+  optional bool isExecutable = 13;
+  optional string semantic = 14;
+  optional bool isMandatory = 15;
+  optional bool isFinal = 16;
+
+  message Ref {
+    ObjectID ref = 1;
+  }
+}
+
+message TableDiagCommConnector {
+  oneof DiagComm {
+    DiagService.Ref diagService = 1;
+    SingleEcuJob.Ref singleEcuJob = 2;
+  }
+  string semantic = 3;
+}
+
+message Table {
+  ObjectID id = 1;
+  optional string semantic = 2;
+
+  string shortName = 3;
+  optional LongName longName = 4;
+  optional string keyLabel = 5;
+  optional string structLabel = 6;
+  optional DOP.Ref keyDop = 7;
+
+  repeated TableRow.Ref rows = 8;
+
+  repeated TableDiagCommConnector diagCommConnector = 9;
+
+  optional SDGS.Ref sdgs = 11;
+
+  message Ref {
+    ObjectID ref = 1;
+  }
+}
+
+message Param {
+  enum ParamType {
+    CODED_CONST = 0;
+    DYNAMIC = 1;
+    LENGTH_KEY = 2;
+    MATCHING_REQUEST_PARAM = 3;
+    NRC_CONST = 4;
+    PHYS_CONST = 5;
+    RESERVED = 6;
+    SYSTEM = 7;
+    TABLE_ENTRY = 8;
+    TABLE_KEY = 9;
+    TABLE_STRUCT = 10;
+    VALUE = 11;
+  }
+
+  ObjectID id = 1;
+
+  ParamType paramType = 2;
+  string shortName = 3;
+  optional string semantic = 4;
+  optional SDGS.Ref sdgs = 5;
+
+  // PositionableParam
+  optional string physicalDefaultValue = 6;
+  optional uint32 bytePosition = 7;
+  optional uint32 bitPosition = 8; // allowed: 0-7
+
+  message CodedConst {
+    string codedValue = 1;
+    DiagCodedType.Ref diagCodedType = 2;
+  }
+
+  message Dynamic {
+  }
+
+  message LengthKeyRef {
+    DOP.Ref dop = 1;
+  }
+
+  message MatchingRequestParam {
+    int32 requestBytePos = 1;
+    uint32 byteLength = 2;
+  }
+
+  message NrcConst {
+    repeated string codedValues = 1;
+    optional DiagCodedType.Ref diagCodedType = 2;
+  }
+
+  message PhysConst {
+    string physConstantValue = 1;
+    optional DOP.Ref dop = 2;
+  }
+
+  message Reserved {
+    uint32 bitLength = 1;
+  }
+
+  message System {
+    DOP.Ref dop = 1;
+    string sysParam = 3;
+  }
+
+  message TableEntry {
+    Param param = 1;
+    RowFragment target = 2;
+    TableRow.Ref tableRow = 3;
+
+    enum RowFragment {
+      KEY = 0;
+      STRUCT = 1;
+    }
+  }
+
+  message TableKey {
+    oneof TableKeyReference {
+      Table.Ref table = 1;
+      TableRow.Ref tableRow = 2;
+    }
+  }
+
+  message TableStruct {
+    Param.Ref tableKey = 1;
+  }
+
+  message Value {
+    optional string physicalDefaultValue = 1;
+    DOP.Ref dop = 2;
+  }
+
+  oneof SpecificData {
+    CodedConst codedConst = 9;
+    Dynamic dynamic = 10;
+    MatchingRequestParam matchingRequestParam = 11;
+    NrcConst nrcConst = 12;
+    PhysConst physConst = 13;
+    Reserved reserved = 14;
+    Value value = 15;
+    TableEntry tableEntry = 16;
+    TableKey tableKey = 17;
+    TableStruct tableStruct = 18;
+    System system = 19;
+    LengthKeyRef lengthKeyRef = 20;
+  }
+
+
+  message Ref {
+    ObjectID ref = 1;
+  }
+}
+
+message FunctClass {
+  ObjectID id = 1;
+  string shortName = 2;
+
+  message Ref {
+    ObjectID ref = 1;
+  }
+}
+
+message Request {
+  ObjectID id = 1;
+  repeated Param.Ref params = 2;
+  optional SDGS.Ref sdgs = 3;
+
+  message Ref {
+    ObjectID ref = 1;
+  }
+}
+
+message Response {
+  enum ResponseType {
+    POS_RESPONSE = 0;
+    NEG_RESPONSE = 1;
+    GLOBAL_NEG_RESPONSE = 2;
+  }
+
+  ObjectID id = 1;
+
+  ResponseType responseType = 2;
+  repeated Param.Ref params = 3;
+  optional SDGS.Ref sdgs = 4;
+
+  message Ref {
+    ObjectID ref = 1;
+  }
+}
+
+message AdditionalAudience {
+  ObjectID id = 1;
+
+  string shortName = 2;
+  optional LongName longName = 3;
+
+  message Ref {
+    ObjectID ref = 1;
+  }
+}
+
+message DiagComm {
+  string shortName = 1;
+  optional LongName longName = 2;
+  string semantic = 3;
+  optional FunctClass.Ref functClass = 4;
+  optional SDGS.Ref sdgs = 5;
+  optional DiagClassType diagClassType = 6;
+  repeated PreConditionStateRef.Ref preConditionStateRefs = 7;
+  repeated StateTransitionRef.Ref stateTransitionRefs = 8;
+  repeated Protocol.Ref protocols = 9;
+
+  optional Audience.Ref audience = 10;
+  optional bool isMandatory = 11;
+  optional bool isExecutable = 12;
+  optional bool isFinal = 13;
+
+  enum DiagClassType {
+    START_COMM = 0;
+    STOP_COMM = 1;
+    VARIANT_IDENTIFICATION = 2;
+    READ_DYN_DEFINED_MESSAGE = 3;
+    DYN_DEF_MESSAGE = 4;
+    CLEAR_DYN_DEF_MESSAGE = 5;
+  }
+}
+
+message DiagService {
+  ObjectID id = 1;
+
+  DiagComm diagComm = 2;
+
+  Request.Ref request = 5;
+  repeated Response.Ref posResponses = 6;
+  repeated Response.Ref negResponses = 7;
+  reserved 8; // TODO pos response suppressable
+
+  optional bool isCyclic = 9;
+  optional bool isMultiple = 10;
+  optional Addressing addressing = 11;
+  optional TransmissionMode transmissionMode = 12;
+
+  repeated ComParamRef comParamRefs = 13;
+
+  message Ref {
+    ObjectID ref = 1;
+  }
+
+  enum TransmissionMode {
+    SEND_ONLY = 0;
+    RECEIVE_ONLY = 1;
+    SEND_AND_RECEIVE = 2;
+    SEND_OR_RECEIVE = 3;
+  }
+
+  enum Addressing {
+    FUNCTIONAL = 0;
+    PHYSICAL = 1;
+    FUNCTIONAL_OR_PHYSICAL = 2;
+  }
+}
+
+message ProgCode {
+  string codeFile = 1;
+  optional string encryption = 2;
+  optional string syntax = 3;
+  string revision = 4;
+  string entrypoint = 5;
+  repeated Library.Ref library = 6;
+}
+
+message JobParam {
+  string shortName = 1;
+  optional LongName longName = 2;
+  optional string physicalDefaultValue = 3; // only used in input params
+  DOP.Ref dopBase = 4;
+  optional string semantic = 5;
+}
+
+message SingleEcuJob {
+  ObjectID id = 1;
+
+  DiagComm diagComm = 2;
+  repeated ProgCode progCodes = 3;
+  repeated JobParam inputParams = 4;
+  repeated JobParam outputParams = 5;
+  repeated JobParam negOutputParams = 6;
+
+  message Ref {
+    ObjectID ref = 1;
+  }
+}
+
+message MatchingParameter {
+  string expectedValue = 1;
+  DiagService.Ref diagService = 2;
+  Param.Ref outParam = 3;
+  optional bool usePhysicalAddressing = 4;
+}
+
+message VariantPattern {
+  repeated MatchingParameter matchingParameter = 1;
+}
+
+message DiagLayer {
+  string shortName = 1;
+  optional LongName longName = 2;
+  repeated FunctClass.Ref functClasses = 3;
+  repeated ComParamRef comParamRefs = 4;
+
+  repeated DiagService.Ref diagServices = 5;
+  repeated SingleEcuJob.Ref singleEcuJobs = 6;
+  reserved 7; // TODO MultipleEcuJobs
+  repeated StateChart.Ref stateCharts = 8;
+  repeated AdditionalAudience.Ref additionalAudiences = 9;
+
+  optional SDGS.Ref sdgs = 10;
+}
+
+message FunctionalGroup {
+  ObjectID id = 1;
+  DiagLayer diagLayer = 2;
+}
+
+message Variant {
+  ObjectID id = 1;
+  DiagLayer diagLayer = 2;
+  bool isBaseVariant = 3;
+  repeated VariantPattern variantPattern = 4;
+}
+
+message ComplexValue {
+  ObjectID id = 1;
+
+  repeated ComplexValueEntry entries = 2;
+
+  message ComplexValueEntry {
+    oneof Value {
+      string simpleValue = 1;
+      ComplexValue complexValue = 2;
+    }
+  }
+
+  message Ref {
+    ObjectID ref = 1;
+  }
+}
+
+message Protocol {
+  ObjectID id = 1;
+
+  DiagLayer diagLayer = 2;
+
+  ComParamSpec comParamSpec = 4;
+  optional ProtStack.Ref protStack = 5;
+  repeated Protocol.Ref parentRefs = 6;
+
+  message Ref  {
+    ObjectID ref = 1;
+  }
+}
+
+message ComParamRef {
+  optional string simpleValue = 1;
+  optional ComplexValue complexValue = 2;
+  ComParam.Ref comParam = 3;
+  optional Protocol.Ref protocol = 4;
+  optional ProtStack.Ref protStack = 5;
+}
+
+message ComParam {
+  ObjectID id = 1;
+
+  ComParamType comParamType = 2;
+
+  string shortName = 3;
+  optional LongName longName = 4;
+  string paramClass = 5;
+  StandardisationLevel cpType = 6;
+  optional uint32 displayLevel = 7;
+  Usage cpUsage = 8;
+
+  oneof SpecificData {
+    RegularComParam regular = 9;
+    ComplexComParam complex = 10;
+  }
+
+  enum ComParamType {
+    REGULAR = 0;
+    COMPLEX = 1;
+  }
+
+  message RegularComParam {
+    optional string physicalDefaultValue = 1;
+    optional DOP.Ref dop = 2;
+  }
+
+  message ComplexComParam {
+    repeated ComParam.Ref comParams = 1;
+    repeated ComplexValue complexPhysicalDefaultValues = 2;
+    optional bool allowMultipleValues = 3;
+  }
+
+  enum StandardisationLevel {
+    STANDARD = 0;
+    OEM_SPECIFIC = 1;
+    OPTIONAL = 2;
+    OEM_OPTIONAL = 3;
+  }
+
+  enum Usage {
+    ECU_SOFTWARE = 0;
+    ECU_COMM = 1;
+    APPLICATION = 2;
+    TESTER = 3;
+  }
+
+  message Ref {
+    ObjectID ref = 1;
+  }
+}
+
+message PhysicalDimension {
+  ObjectID id = 1;
+
+  string shortName = 2;
+  optional LongName longName = 3;
+  optional int32 lengthExp = 4;
+  optional int32 massExp = 5;
+  optional int32 timeExp = 6;
+  optional int32 currentExp = 7;
+  optional int32 temperatureExp = 8;
+  optional int32 molarAmountExp = 9;
+  optional int32 luminousIntensityExp = 10;
+
+  message Ref {
+    ObjectID ref = 1;
+  }
+}
+
+message UnitGroup {
+  string shortName = 1;
+  optional LongName longName = 2;
+  repeated Unit.Ref unitrefs = 3;
+
+  enum UnitGroupCategory {
+      COUNTRY = 0;
+      EQUIV_UNITS = 1;
+  }
+}
+
+message UnitSpec {
+  repeated UnitGroup unitGroups = 1;
+  repeated Unit units = 2;
+  repeated PhysicalDimension physicalDimensions = 3;
+  optional SDGS sdgs = 4;
+}
+
+message ComParamSubSet {
+  ObjectID id = 1;
+
+  repeated ComParam.Ref comParams = 2;
+  repeated ComParam.Ref complexComParams = 3;
+  repeated DOP.Ref dataObjectProps = 4;
+  UnitSpec unitSpec = 5;
+
+  message Ref {
+    ObjectID ref = 1;
+  }
+}
+
+message ProtStack {
+  ObjectID id = 1;
+
+  string shortName = 2;
+  optional LongName longName = 3;
+  string pduProtocolType = 4;
+  string physicalLinkType = 5;
+  repeated ComParamSubSet.Ref comparamSubSetRefs = 6;
+
+  message Ref {
+    ObjectID ref = 1;
+  }
+}
+
+message ComParamSpec {
+  repeated ProtStack.Ref protStacks = 1;
+}
+
+message Library {
+  ObjectID id = 1;
+
+  string shortName = 2;
+  optional LongName longName = 3;
+  string codeFile = 4;
+  optional string encryption = 5;
+  string syntax = 6;
+  optional string entryPoint = 7;
+
+  message Ref {
+    ObjectID ref = 1;
+  }
+}
+
+message EcuData {
+  string version = 31;
+  string ecuName = 1;
+  string revision = 2;
+  map<string, string> metadata = 32;
+  repeated FeatureFlag feature_flags = 33;
+
+  repeated FunctClass functClasses = 3;
+  repeated Unit units = 4;
+  repeated DOP dops = 5;
+  repeated Table tables = 6;
+  repeated TableRow tableRows = 34;
+  repeated Param params = 7;
+  repeated Request requests = 8;
+  repeated Response responses = 9;
+  repeated DiagCodedType diagCodedTypes = 10;
+  repeated SD sds = 11;
+  repeated SDG sdgs = 12;
+  repeated SDGS sdgss = 13;
+  repeated DiagService diagServices = 14;
+  repeated SingleEcuJob singleEcuJobs = 15;
+  repeated Variant variants = 16;
+  repeated FunctionalGroup functionalGroups = 17;
+  repeated DTC dtcs = 18;
+  repeated Audience audiences = 19;
+  repeated AdditionalAudience additionalAudiences = 20;
+  repeated State states = 21;
+  repeated PreConditionStateRef preConditionStateRefs = 22;
+  repeated StateTransition stateTransitions = 23;
+  repeated StateTransitionRef stateTransitionRefs = 24;
+  repeated StateChart stateCharts = 25;
+  repeated ComParam comParams = 26;
+  repeated ComParamSubSet comParamSubSets = 27;
+  repeated Protocol protocols = 28;
+  repeated ProtStack protStacks = 29;
+  repeated Library libraries = 30;
+
+  enum FeatureFlag {
+    RESERVED = 0;
+  }
+}

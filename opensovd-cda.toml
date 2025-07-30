@@ -1,0 +1,11 @@
+# SPDX-FileCopyrightText: 2025 The Contributors to Eclipse OpenSOVD (see CONTRIBUTORS)
+#
+# SPDX-License-Identifier: Apache-2.0
+
+databases_path = "."
+
+[doip]
+tester_address = "127.0.0.1"
+
+[logging.otel]
+enabled = false

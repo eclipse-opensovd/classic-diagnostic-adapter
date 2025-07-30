@@ -1,0 +1,91 @@
+/*
+ * Copyright (c) 2025 The Contributors to Eclipse OpenSOVD (see CONTRIBUTORS)
+ *
+ * See the NOTICE file(s) distributed with this work for additional
+ * information regarding copyright ownership.
+ *
+ * This program and the accompanying materials are made available under the
+ * terms of the Apache License Version 2.0 which is available at
+ * https://www.apache.org/licenses/LICENSE-2.0
+ *
+ * SPDX-License-Identifier: Apache-2.0
+ */
+
+// file_format.proto uses lower_snake_case as is common in rust (our main target language)
+
+syntax = "proto3";
+
+option java_multiple_files = true;
+option java_package = "org.eclipse.opensovd.cda.mdd";
+option java_outer_classname = "FileFormatProto";
+
+package fileformat;
+
+message Encryption {
+  string encryption_algorithm = 1;
+  optional bytes key_identifier = 2;
+}
+
+message Chunk {
+  // Defines the type of chunk data
+  DataType type = 1;
+  // Name of the chunk (could be a filename)
+  optional string name = 2;
+  // metadata for this chunk
+  map<string, string> metadata = 3;
+  // signatures of the data
+  repeated Signature signatures = 4;
+
+  // algorithm name for any compression applied to data
+  optional string compression_algorithm = 5;
+  // uncompressed size - could be used to allocate memory / stop if size exceeds some maximum
+  // required if a compression algorithm is set
+  optional uint64 uncompressed_size = 6;
+
+  optional Encryption encryption = 7;
+
+  // mime type of the (uncompressed) content (optional, missing means application/octet-stream)
+  optional string mimeType = 9;
+
+  // chunk data - optional in case the metadata is the actual data for this chunk
+  optional bytes data = 8;
+
+  enum DataType {
+    DIAGNOSTIC_DESCRIPTION = 0;
+    // A JAR file associated with the diagnostic description, may be referenced by single ecu jobs, and data from them might be needed in the CDA
+    JAR_FILE = 1;
+    // Files included in a jar-file. name of chunk is: "<jar-file>::<path-in-jar>"
+    JAR_FILE_PARTIAL = 2;
+    // file that gets embedded, could be an embedded odx-f, or a binary flashware, when the format is used for flashing
+    EMBEDDED_FILE = 3;
+
+    // ids until 1024 are reserved for future usages
+    VENDOR_SPECIFIC = 1024;
+  }
+}
+
+message Signature {
+  // used signature algorithm, just a string since the handling in the CDA can be dynamic through a plugin
+  string algorithm = 1;
+  // key identifier to identify the key used for the signature - this allows you to add multiple signatures (e.g. dev and prod)
+  optional bytes key_identifier = 2;
+  // additional metadata for misc. purposes
+  map<string, string> metadata = 3;
+  // actual signature data
+  bytes signature = 4;
+}
+
+message MDDFile {
+  string version = 1;
+  repeated FeatureFlag feature_flags = 2;
+  string ecu_name = 3;
+  string revision = 4;
+  map<string, string> metadata = 5;
+  repeated Chunk chunks = 6;
+  // Instead of individually signing each chunk, you sign all of them together
+  optional Signature chunksSignature = 7;
+
+  enum FeatureFlag {
+    RESERVED = 0; // Not used yet
+  }
+}

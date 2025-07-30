@@ -1,0 +1,6 @@
+# SPDX-FileCopyrightText: 2025 The Contributors to Eclipse OpenSOVD (see CONTRIBUTORS)
+#
+# SPDX-License-Identifier: Apache-2.0
+
+## set line threshold a bit higher than the default 100
+too-many-lines-threshold = 130

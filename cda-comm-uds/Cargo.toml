@@ -1,0 +1,40 @@
+# SPDX-FileCopyrightText: 2025 The Contributors to Eclipse OpenSOVD (see CONTRIBUTORS)
+#
+# SPDX-License-Identifier: Apache-2.0
+
+[package]
+name = "cda-comm-uds"
+version = "0.1.0"
+edition = "2024"
+publish = false
+description = "UDS communication layer used in CDA"
+homepage = "https://github.com/eclipse-opensovd/classic-diagnostic-adapter"
+license = "Apache-2.0"
+
+[lib]
+path = "src/lib.rs"
+
+[dependencies]
+# internal dependencies
+cda-interfaces = { path = "../cda-interfaces" }
+# external
+hashbrown = { version = "0.15", features = ["serde"] }
+
+# tls
+openssl = { version = "0.10", features = ["vendored"] }
+
+socket2 = { version = "0.5", features = ["all"] }
+#tokio
+tokio = { version = "1.43.0", default-features = false, features = [
+  "sync",
+  "fs",
+  "time",
+  "rt",
+] }
+
+# logging
+log = "0.4"
+tracing = "0.1.41"
+
+[features]
+default = []
