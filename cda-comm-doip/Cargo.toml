@@ -5,18 +5,18 @@
 [package]
 name = "cda-comm-doip"
 version = "0.1.0"
-edition = "2024"
+edition.workspace = true
 publish = false
 description = "DoIP communication layer used in CDA"
-homepage = "https://github.com/eclipse-opensovd/classic-diagnostic-adapter"
-license = "Apache-2.0"
+homepage.workspace = true
+license.workspace = true
 
 [lib]
 path = "src/lib.rs"
 
 [dependencies]
 # internal dependencies
-cda-interfaces = { path = "../cda-interfaces" }
+cda-interfaces = { workspace = true }
 # external
 hashbrown = { version = "0.15", features = ["serde"] }
 # DoIP

@@ -5,11 +5,11 @@
 [package]
 name = "opensovd-cda"
 version = "0.1.0"
-edition = "2024"
+edition.workspace = true
 publish = false
 description = "Eclipse OpenSOVD CDA - A modern open source Classic Diagnostic Adapter written in Rust"
-homepage = "https://github.com/eclipse-opensovd/classic-diagnostic-adapter"
-license = "Apache-2.0"
+homepage.workspace = true
+license.workspace = true
 
 [[bin]]
 name = "opensovd-cda"
@@ -20,13 +20,13 @@ name = "opensovd_cda_lib"
 path = "src/lib.rs"
 
 [dependencies]
-cda-core = { path = "../cda-core" }
-cda-comm-doip = { path = "../cda-comm-doip" }
-cda-comm-uds = { path = "../cda-comm-uds" }
-cda-database = { path = "../cda-database" }
-cda-interfaces = { path = "../cda-interfaces" }
-cda-sovd = { path = "../cda-sovd" }
-cda-tracing = { path = "../cda-tracing" }
+cda-core = { workspace = true }
+cda-comm-doip = { workspace = true }
+cda-comm-uds = { workspace = true }
+cda-database = { workspace = true }
+cda-interfaces = { workspace = true }
+cda-sovd = { workspace = true }
+cda-tracing = { workspace = true }
 # args
 clap = { version = "4.5", features = ["derive"] }
 # config
