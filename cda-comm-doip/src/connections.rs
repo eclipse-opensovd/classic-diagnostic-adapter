@@ -25,8 +25,7 @@ use tokio::sync::{Mutex, RwLock, broadcast, mpsc, watch};
 
 use crate::{
     ConnectionError, DiagnosticResponse, DoipConnection, DoipEcu, DoipTarget, LOG_TARGET,
-    NRC_BUSY_REPEAT_REQUEST, NRC_RESPONSE_PENDING, NRC_TEMPORARILY_NOT_AVAILABLE,
-    SLEEP_INTERVAL_MS,
+    NRC_BUSY_REPEAT_REQUEST, NRC_RESPONSE_PENDING, NRC_TEMPORARILY_NOT_AVAILABLE, SLEEP_INTERVAL,
     ecu_connection::{self, ECUConnection, EcuConnectionTarget},
 };
 
@@ -361,7 +360,7 @@ fn spawn_gateway_sender_task(
                     }
                     drop(lock);
                 },
-                _ = tokio::time::sleep(Duration::from_millis(SLEEP_INTERVAL_MS)) => {
+                _ = tokio::time::sleep(SLEEP_INTERVAL) => {
                     let lock = send_mtx.lock().await;
                     if send_pending_status(&send_pending_tx, true).is_err() {
                         break;

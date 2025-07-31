@@ -11,7 +11,11 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-use std::{fmt::Display, sync::Arc, time::Instant};
+use std::{
+    fmt::Display,
+    sync::Arc,
+    time::{Duration, Instant},
+};
 
 use cda_interfaces::{
     DiagServiceError, DoipComParamProvider, EcuAddressProvider, EcuGateway, ServicePayload,
@@ -26,7 +30,7 @@ mod ecu_connection;
 mod vir_vam;
 
 const LOG_TARGET: &str = "ECU Gateway";
-const SLEEP_INTERVAL_MS: u64 = 30000;
+const SLEEP_INTERVAL: Duration = Duration::from_millis(30000);
 
 const NRC_BUSY_REPEAT_REQUEST: u8 = 0x21;
 const NRC_RESPONSE_PENDING: u8 = 0x78;
