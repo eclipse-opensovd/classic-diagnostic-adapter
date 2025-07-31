@@ -5,11 +5,11 @@
 [package]
 name = "cda-tracing"
 version = "0.1.0"
-edition = "2024"
+edition.workspace = true
 publish = false
 description = "SOVD webserver used in CDA"
-homepage = "https://github.com/eclipse-opensovd/classic-diagnostic-adapter"
-license = "Apache-2.0"
+homepage.workspace = true
+license.workspace = true
 
 [lib]
 path = "src/lib.rs"

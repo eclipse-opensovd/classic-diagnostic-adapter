@@ -2,6 +2,33 @@
 #
 # SPDX-License-Identifier: Apache-2.0
 
+[workspace.package]
+edition = "2024"
+license = "Apache-2.0"
+homepage = "https://github.com/eclipse-opensovd/classic-diagnostic-adapter"
+
+[workspace]
+resolver = "3"
+members = [
+  "cda-database",
+  "cda-interfaces",
+  "cda-core",
+  "cda-comm-doip",
+  "cda-comm-uds",
+  "cda-sovd",
+  "cda-main",
+  "cda-tracing",
+]
+
+[workspace.dependencies]
+cda-interfaces = { path = "cda-interfaces" }
+cda-core = { path = "cda-core" }
+cda-comm-doip = { path = "cda-comm-doip" }
+cda-comm-uds = { path = "cda-comm-uds" }
+cda-database = { path = "cda-database" }
+cda-sovd = { path = "cda-sovd" }
+cda-tracing = { path = "cda-tracing" }
+
 [workspace.lints.clippy]
 # enable pedantic
 pedantic = { level = "warn", priority = -1 }
@@ -20,16 +47,3 @@ debug = true
 
 [patch.crates-io]
 deepsize = { git = "https://github.com/theswiftfox/deepsize.git", branch = "main" }
-
-[workspace]
-resolver = "3"
-members = [
-  "cda-database",
-  "cda-interfaces",
-  "cda-core",
-  "cda-comm-doip",
-  "cda-comm-uds",
-  "cda-sovd",
-  "cda-main",
-  "cda-tracing",
-]

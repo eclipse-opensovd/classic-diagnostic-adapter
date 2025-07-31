@@ -5,19 +5,19 @@
 [package]
 name = "cda-core"
 version = "0.1.0"
-edition = "2024"
+edition.workspace = true
 publish = false
 description = "Diagnostic Core of CDA"
-homepage = "https://github.com/eclipse-opensovd/classic-diagnostic-adapter"
-license = "Apache-2.0"
+homepage.workspace = true
+license.workspace = true
 
 [lib]
 path = "src/lib.rs"
 
 [dependencies]
 # internal dependencies
-cda-interfaces = { path = "../cda-interfaces" }
-cda-database = { path = "../cda-database" }
+cda-interfaces = { workspace = true }
+cda-database = { workspace = true }
 # external
 hashbrown = { version = "0.15", features = ["serde"] }
 hex = "0.4.3"
