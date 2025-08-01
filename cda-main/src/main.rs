@@ -155,34 +155,26 @@ async fn main() -> Result<(), String> {
         }
     };
 
-    let webserver_future = opensovd_cda_lib::start_webserver(
+    match opensovd_cda_lib::start_webserver(
         flash_files_path,
         file_managers,
         webserver_config,
         uds,
-        shutdown_signal(),
-    );
-
-    tokio::select! {
-        webserver_res = webserver_future => {
-            match webserver_res {
-                Ok(Ok(())) => unreachable!(
-                    "Somehow the webserver started \
-                    and exited immediately without an error."
-                ),
-                Ok(Err(e)) => {
-                    log::error!(target: "main", "Failed to start webserver: {e:?}");
-                    std::process::exit(1);
-                },
-                Err(je) => if je.is_panic() {
-                    let reason = je.into_panic();
-                    log::error!(target: "main", "Webserver thread panicked: {reason:?}");
-                }
+        clonable_shutdown_signal,
+    )
+    .await
+    {
+        Ok(Ok(())) => log::info!(target: "main", "Shutting down..."),
+        Ok(Err(e)) => {
+            log::error!(target: "main", "Failed to start webserver: {e:?}");
+            std::process::exit(1);
+        }
+        Err(je) => {
+            if je.is_panic() {
+                let reason = je.into_panic();
+                log::error!(target: "main", "Webserver thread panicked: {reason:?}");
+                std::process::exit(1);
             }
-        },
-
-        () = shutdown_signal() => {
-            log::info!(target: "main", "Shutting down...");
         }
     }
 
