@@ -11,5 +11,3 @@ header:
   paths:
     - '**/*.toml'
 
-  paths-ignore:
-    - '.cargo/'
