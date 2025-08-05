@@ -200,7 +200,7 @@ impl DiagCodedTypeVariant {
                 bits.extend_from_raw_slice(&input_data[0..limited_len as usize]);
                 bits.into_vec()
             }
-            DiagCodedTypeVariant::MinMaxLength(_min_max_length_type) => todo!(),
+            DiagCodedTypeVariant::MinMaxLength(_min_max_length_type) => todo!(), // todo mohalex
             DiagCodedTypeVariant::StandardLength(slt) => {
                 let mapped_bytes =
                     Self::get_bytes_from_bit_length(input_data, slt.bit_length as usize);
@@ -304,5 +304,7 @@ mod tests {
         });
         let result = variant.apply(&input_data);
         assert_eq!(result, vec![0x56, 0x0A]);
+
+        // todo mohalex test MinMaxLengthType
     }
 }

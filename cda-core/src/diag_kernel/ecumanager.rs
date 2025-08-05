@@ -14,8 +14,9 @@
 use std::{sync::Arc, time::Duration};
 
 use cda_database::datatypes::{
-    self, DataOperation, DataType, DiagnosticDatabase, DiagnosticService, LogicalAddressType,
-    MuxDop, StateChart, resolve_comparam,
+    self, CompuCategory, CompuFunction, CompuMethod, DOPType, DataOperation, DataOperationVariant,
+    DataType, DiagCodedType, DiagnosticDatabase, DiagnosticService, LogicalAddressType, MuxDop,
+    NormalDop, Parameter, StateChart, resolve_comparam,
 };
 use cda_interfaces::{
     DiagComm, DiagCommAction, DiagCommType, DiagServiceError, EcuAddressProvider, EcuState,
@@ -505,10 +506,7 @@ impl cda_interfaces::EcuManager for EcuManager {
                         ))
                     })?;
 
-                    let uds_val = operations::diag_coded_type_to_uds(
-                        diag_type.base_datatype,
-                        &coded_const_value,
-                    )?;
+                    let uds_val = Self::const_value_to_uds(param, diag_type, &coded_const_value)?;
 
                     match diag_type.type_ {
                         datatypes::DiagCodedTypeVariant::LeadingLengthInfo(ref val) => {
@@ -1032,12 +1030,11 @@ impl EcuManager {
     /// Will return `Err` if the ECU database cannot be loaded correctly due to different reasons,
     /// like the format being incompatible or required information missing from the database.
     pub fn new(
-        ecu_database_path: String,
-        ecu_data_blob: &[u8],
         protocol: Protocol,
         com_params: &ComParams,
+        database: DiagnosticDatabase,
     ) -> Result<Self, DiagServiceError> {
-        let database = DiagnosticDatabase::new(ecu_database_path, ecu_data_blob)?;
+        //let database = DiagnosticDatabase::new(ecu_database_path, ecu_data_blob)?;
         let variant_detection = variant_detection::prepare_variant_detection(&database)?;
 
         let data_protocol: datatypes::Protocol = into_db_protocol(protocol);
@@ -1343,11 +1340,10 @@ impl EcuManager {
                         param.short_name
                     ))
                 })?;
-                let expected =
-                    operations::diag_coded_type_to_uds(diag_type.base_datatype, &const_value)?
-                        .into_iter()
-                        // .filter(|v| *v != 0) // remove 0 padding
-                        .collect::<Vec<_>>();
+                let expected = Self::const_value_to_uds(param, diag_type, &const_value)?
+                    .into_iter()
+                    // .filter(|v| *v != 0) // remove 0 padding
+                    .collect::<Vec<_>>();
                 let expected = &expected[expected.len() - value.data.len()..];
                 if value.data != expected {
                     return Err(DiagServiceError::BadPayload(format!(
@@ -1461,6 +1457,7 @@ impl EcuManager {
                             let mapped_data = diag_type.type_.apply(&uds_data);
                             Ok(Some(mapped_data))
                         }
+                        // todo mohalex
                         datatypes::DataOperationVariant::EndOfPdu(_end_of_pdu_dop) => todo!(),
                         datatypes::DataOperationVariant::Structure(_structure_dop) => todo!(),
                         datatypes::DataOperationVariant::EnvDataDesc(_env_data_desc_dop) => {
@@ -1617,13 +1614,13 @@ impl EcuManager {
                 }
             }
             datatypes::DataOperationVariant::EnvDataDesc(ref _env_data_desc_dop) => {
-                log::warn!(target: "map_dop", "EnvDataDesc not supported");
+                log::warn!(target: "map_dop", "EnvDataDesc not supported"); // todo mohalex
             }
             datatypes::DataOperationVariant::EnvData(ref _env_data_dop) => {
-                log::warn!(target: "map_dop", "EnvData not supported");
+                log::warn!(target: "map_dop", "EnvData not supported"); // todo mohalex
             }
             datatypes::DataOperationVariant::Dtc(ref _dtc_dop) => {
-                log::warn!(target: "map_dop", "DTC not supported");
+                log::warn!(target: "map_dop", "DTC not supported"); // todo mohalex
             }
             datatypes::DataOperationVariant::StaticField(ref static_field_dop) => {
                 let static_field_size = (static_field_dop.item_byte_size
@@ -1798,5 +1795,259 @@ impl EcuManager {
         ));
 
         Ok(())
+    }
+
+    fn const_value_to_uds(
+        param: &Parameter,
+        diag_type: &DiagCodedType,
+        coded_const_value: &String,
+    ) -> Result<Vec<u8>, DiagServiceError> {
+        let json_val =
+            serde_json::from_str::<serde_json::Value>(&coded_const_value).map_err(|e| {
+                DiagServiceError::ParameterConversionError(format!(
+                    "Failed to parse coded const value for param {}: {}",
+                    param.short_name, e
+                ))
+            })?;
+
+        let uds_val = json_value_to_uds_data(diag_type.base_datatype, None, &json_val)?;
+        Ok(uds_val)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::vec;
+
+    use cda_database::datatypes::{
+        CodedConst, CompuCategory, CompuFunction, CompuMethod, DOPType, DataOperation,
+        DataOperationVariant, DataType, DiagCodedType, DiagCodedTypeVariant, NormalDop, Parameter,
+        ParameterValue, Request, Response, ResponseType, StandardLengthType,
+    };
+    use cda_interfaces::{EcuManager, STRINGS};
+    use serde_json::json;
+
+    use super::*;
+
+    fn create_service(
+        db: &mut DiagnosticDatabase,
+        sid: u8,
+        params_request: Vec<cda_interfaces::Id>,
+        mut params_pos_response: Vec<cda_interfaces::Id>,
+        mut params_neg_response: Vec<cda_interfaces::Id>,
+    ) -> DiagComm {
+        let base_id = db.services.keys().max().unwrap_or(&0) + 1;
+        let service_key = base_id;
+
+        let short_name = "testservice";
+        let diag_type_sid = create_datatype(
+            db,
+            DiagCodedTypeVariant::StandardLength(StandardLengthType {
+                bit_length: 8,
+                bitmask: None,
+                condensed: false,
+            }),
+        );
+
+        let param_sid = create_param(
+            db,
+            &format!("{short_name}_sid"),
+            ParameterValue::CodedConst(CodedConst {
+                value: STRINGS.get_or_insert(&sid.to_string()),
+                diag_coded_type: diag_type_sid,
+            }),
+            0,
+        );
+        params_pos_response.push(param_sid);
+        let pos_response = create_response(db, ResponseType::Positive, params_pos_response.clone());
+        // if !params_pos_response.is_empty() {
+        //     params_pos_response.push(pos_response);
+        // }
+
+        // todo
+        // if !neg_responses.is_empty() {
+        //     neg_responses.push(response_sid);
+        // }
+
+        // todo add neg_response
+        let request = create_request(db, params_request);
+
+        db.services.insert(
+            service_key,
+            datatypes::DiagnosticService {
+                service_id: service_ids::WRITE_DATA_BY_IDENTIFIER,
+                request_id: request,
+                pos_responses: params_pos_response,
+                neg_responses: params_neg_response,
+                com_param_refs: vec![],
+                short_name: STRINGS.get_or_insert(short_name),
+                semantic: 0,
+                long_name: None,
+                sdgs: vec![],
+                precondition_states: vec![],
+                transitions: Default::default(),
+            },
+        );
+        db.base_service_lookup
+            .insert(short_name.to_lowercase(), service_key);
+
+        DiagComm {
+            name: short_name.to_owned(),
+            action: DiagCommAction::Write,
+            type_: DiagCommType::Configurations,
+            lookup_name: Some(short_name.to_owned()),
+        }
+    }
+
+    fn create_datatype(
+        db: &mut DiagnosticDatabase,
+        variant: DiagCodedTypeVariant,
+    ) -> cda_interfaces::Id {
+        let data_type_id = db.diag_coded_types.keys().max().unwrap_or(&0) + 1;
+        db.diag_coded_types.insert(
+            data_type_id,
+            DiagCodedType {
+                // testing that different datatypes are (de)serialized correctly
+                // is done in operations.rs
+                base_datatype: DataType::UInt32,
+                type_: variant,
+            },
+        );
+        data_type_id
+    }
+
+    fn create_dop(
+        db: &mut DiagnosticDatabase,
+        type_: DOPType,
+        variant: DataOperationVariant,
+    ) -> cda_interfaces::Id {
+        let dop_id = db.data_operations.keys().max().unwrap_or(&0) + 1;
+        db.data_operations.insert(
+            dop_id,
+            DataOperation {
+                type_,
+                short_name: Default::default(),
+                variant,
+            },
+        );
+        dop_id
+    }
+
+    fn create_request(
+        db: &mut DiagnosticDatabase,
+        param_ids: Vec<cda_interfaces::Id>,
+    ) -> cda_interfaces::Id {
+        let request_id = db.requests.keys().max().unwrap_or(&0) + 1;
+        db.requests
+            .insert(request_id, Request { params: param_ids });
+        request_id
+    }
+
+    fn create_response(
+        db: &mut DiagnosticDatabase,
+        response_type: ResponseType,
+        param_ids: Vec<cda_interfaces::Id>,
+    ) -> cda_interfaces::Id {
+        let response_id = db.responses.keys().max().unwrap_or(&0) + 1;
+        db.responses.insert(
+            response_id,
+            Response {
+                response_type,
+                params: param_ids,
+            },
+        );
+        response_id
+    }
+
+    fn create_param(
+        db: &mut DiagnosticDatabase,
+        name: &str,
+        value: ParameterValue,
+        byte_pos: u32,
+    ) -> cda_interfaces::Id {
+        let param_id = db.params.keys().max().unwrap_or(&0) + 1;
+        db.params.insert(
+            param_id,
+            Parameter {
+                short_name: STRINGS.get_or_insert(name),
+                value,
+                byte_pos,
+                bit_pos: 0,
+                semantic: Some(STRINGS.get_or_insert(semantics::DATA)),
+            },
+        );
+        param_id
+    }
+
+    #[test]
+    fn convert_from_uds() {
+        let mut db = super::DiagnosticDatabase::default();
+
+        let diag_type_id = create_datatype(
+            &mut db,
+            DiagCodedTypeVariant::StandardLength(StandardLengthType {
+                bit_length: 32,
+                bitmask: None,
+                condensed: false,
+            }),
+        );
+        // todo mohalex test some other flavours of dops too
+        let dop_id = create_dop(
+            &mut db,
+            DOPType::Regular,
+            DataOperationVariant::Normal(NormalDop {
+                diag_type: diag_type_id,
+                compu_method: CompuMethod {
+                    category: CompuCategory::Identical,
+                    internal_to_phys: CompuFunction { scales: vec![] },
+                },
+                unit: None,
+            }),
+        );
+
+        // let request_param_id = create_param(
+        //     &mut db,
+        //     "request",
+        //     dop_id,
+        //     ParameterValue::Value(datatypes::ValueData {
+        //         default_value: None,
+        //         dop: dop_id,
+        //     }),
+        // );
+
+        let response_param_id = create_param(
+            &mut db,
+            "response",
+            ParameterValue::Value(datatypes::ValueData {
+                default_value: None,
+                dop: dop_id,
+            }),
+            5,
+        );
+
+        let sid = 0x42_u8;
+        let service = create_service(&mut db, sid, vec![], vec![response_param_id], vec![]);
+
+        let ecu_manager =
+            super::EcuManager::new(super::Protocol::DoIp, &super::ComParams::default(), db)
+                .unwrap();
+
+        let t = ecu_manager
+            .convert_from_uds(
+                &service,
+                &[0x42, 0x00, 0x00, 0x00, 0x42, 0x12, 0x34, 0x56, 0x78],
+                true,
+            )
+            .unwrap();
+        assert_eq!(
+            t.serialize_to_json().unwrap(),
+            json!({
+                "uint32_param": {
+                    "data": [sid, 0x00, 0x00, 0x00, 0x99],
+                    "data_type": "UInt32",
+                    "compu_method": null
+                }
+            })
+        );
     }
 }

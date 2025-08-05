@@ -304,7 +304,7 @@ fn compu_convert(
                     )
                 })?
         }
-        datatypes::CompuCategory::ScaleLinear => todo!(),
+        datatypes::CompuCategory::ScaleLinear => todo!(), // todo mohalex
         datatypes::CompuCategory::TextTable => {
             let Some(value) = value.as_str().map(|s| s.replace('"', "")) else {
                 return Err(DiagServiceError::UdsLookupError(
@@ -389,34 +389,6 @@ pub(in crate::diag_kernel) fn extend_with_bit_pos(
         }
     } else {
         payload.extend(value);
-    }
-}
-
-pub(in crate::diag_kernel) fn diag_coded_type_to_uds(
-    diag_type: DataType,
-    val: &str,
-) -> Result<Vec<u8>, DiagServiceError> {
-    match diag_type {
-        DataType::Int32 => val
-            .parse::<i32>()
-            .map(|v| v.to_be_bytes().to_vec())
-            .map_err(|e| DiagServiceError::ParameterConversionError(e.to_string())),
-        DataType::UInt32 => val
-            .parse::<u32>()
-            .map(|v| v.to_be_bytes().to_vec())
-            .map_err(|e| DiagServiceError::ParameterConversionError(e.to_string())),
-        DataType::Float32 => val
-            .parse::<f32>()
-            .map(|v| v.to_be_bytes().to_vec())
-            .map_err(|e| DiagServiceError::ParameterConversionError(e.to_string())),
-        DataType::AsciiString => todo!(),
-        DataType::Utf8String => Ok(val.as_bytes().to_vec()),
-        DataType::Unicode2String => todo!(),
-        DataType::ByteField => todo!(),
-        DataType::Float64 => val
-            .parse::<f64>()
-            .map(|v| v.to_be_bytes().to_vec())
-            .map_err(|e| DiagServiceError::ParameterConversionError(e.to_string())),
     }
 }
 

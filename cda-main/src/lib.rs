@@ -204,13 +204,21 @@ async fn load_database(
                     continue;
                 };
 
-                let diagservicemanager = match EcuManager::new(
+                let diag_db = match cda_database::datatypes::DiagnosticDatabase::new(
                     mddfile.to_str().unwrap().to_owned(),
                     &ecu_payload,
-                    protocol,
-                    &com_params,
                 )
-                .map_err(|e| format!("Failed to create DiagServiceManager: {e:?}"))
+                .map_err(|e| format!("Failed to load database: {e:?}"))
+                {
+                    Ok(database) => database,
+                    Err(e) => {
+                        log::error!(target: "main", "Failed to load database: {e:?}");
+                        continue;
+                    }
+                };
+
+                let diagservicemanager = match EcuManager::new(protocol, &com_params, diag_db)
+                    .map_err(|e| format!("Failed to create DiagServiceManager: {e:?}"))
                 {
                     Ok(manager) => manager,
                     Err(e) => {
