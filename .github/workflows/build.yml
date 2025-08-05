@@ -80,3 +80,17 @@ jobs:
         run: cargo deny check sources
       - name: Check banned practises
         run: cargo deny check bans
+
+  check_copyright_headers:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v3
+      - name: Check Rust License Header
+        uses: apache/skywalking-eyes/header@v0.7.0
+        with:
+          config: .licenserc_rust.yaml
+      - name: Check Toml License Header
+        uses: apache/skywalking-eyes/header@v0.7.0
+        with:
+          config: .licenserc_toml.yaml
+
