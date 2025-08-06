@@ -11,6 +11,10 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+use bitvec::order::Msb0;
+use bitvec::slice::BitSlice;
+use bitvec::vec::BitVec;
+use bitvec::view::BitView;
 use cda_database::datatypes::{self, CompuMethod, CompuScale, DataType};
 use cda_interfaces::{DiagServiceError, STRINGS};
 
@@ -392,51 +396,83 @@ pub(in crate::diag_kernel) fn extend_with_bit_pos(
     }
 }
 
+fn extract_bits(
+    bits: usize,
+    bit_pos: u32,
+    byte_pos: usize,
+    mask: Option<&Vec<u8>>,
+    uds_payload: &[u8],
+) -> Vec<u8> {
+    if bits == 0 {
+        return Vec::new();
+    }
+
+    // Calculate how many bytes we need for the result
+    let result_bytes = (bits + 7) / 8;
+    let mut result = vec![0u8; result_bytes];
+
+    // Calculate global bit positions
+    let start_global_bit = (byte_pos * 8) + bit_pos as usize;
+
+    // Extract each bit
+    for i in 0..bits {
+        let global_bit_pos = start_global_bit + i;
+        let source_byte_idx = global_bit_pos / 8;
+        let source_bit_idx = global_bit_pos % 8;
+
+        // Check bounds
+        if source_byte_idx >= uds_payload.len() {
+            break;
+        }
+
+        // Extract bit from source
+        let source_byte = uds_payload[source_byte_idx];
+        let bit_value = (source_byte >> (7 - source_bit_idx)) & 1;
+
+        // Apply mask if provided
+        let masked_bit = if let Some(mask_vec) = mask {
+            if source_byte_idx < mask_vec.len() {
+                let mask_byte = mask_vec[source_byte_idx];
+                let mask_bit = (mask_byte >> (7 - source_bit_idx)) & 1;
+                bit_value & mask_bit
+            } else {
+                bit_value
+            }
+        } else {
+            bit_value
+        };
+
+        // Calculate position in result
+        // We want MSB padding, so the first extracted bit goes to position (result_bits - bits)
+        let result_bits = result_bytes * 8;
+        let padding_bits = result_bits - bits;
+        let result_bit_pos = padding_bits + i;
+        let result_byte_idx = result_bit_pos / 8;
+        let result_bit_idx = result_bit_pos % 8;
+
+        // Set bit in result
+        if result_byte_idx < result.len() {
+            result[result_byte_idx] |= masked_bit << (7 - result_bit_idx);
+        }
+    }
+
+    result
+}
+
 pub(in crate::diag_kernel) fn extract_diag_data_container(
     param: &datatypes::Parameter,
     payload: &mut Payload,
     diag_type: &datatypes::DiagCodedType,
     compu_method: Option<&CompuMethod>,
 ) -> DiagDataTypeContainer {
-    fn extract_bits(
-        mut bits: usize,
-        byte_pos: usize,
-        mask: Option<&Vec<u8>>,
-        uds_payload: &[u8],
-    ) -> Vec<u8> {
-        let mut data = Vec::new();
-        let mut idx: usize = 0;
-
-        while bits > 8 {
-            let mut byte = uds_payload[byte_pos + idx];
-            if let Some(mask) = &mask
-                && mask.len() > idx
-            {
-                byte &= mask[idx];
-            }
-            data.push(byte);
-            bits -= 8;
-            idx += 1;
-        }
-        if bits > 0 {
-            let mut byte = uds_payload[byte_pos + idx];
-            if let Some(mask) = &mask
-                && mask.len() > idx
-            {
-                byte &= mask[idx];
-            }
-            data.push(byte & (0xFF >> (8 - bits)));
-        }
-        data
-    }
-
     // todo: handle cases where param.bitPosition is not None or 0
     let byte_pos = param.byte_pos as usize;
     let uds_payload = payload.data();
 
     let data = match diag_type.type_ {
         datatypes::DiagCodedTypeVariant::LeadingLengthInfo(bits) => {
-            let length_info_bytes = extract_bits(bits as usize, byte_pos, None, uds_payload);
+            let length_info_bytes =
+                extract_bits(bits as usize, param.bit_pos, byte_pos, None, uds_payload);
             let len = match length_info_bytes.len() {
                 1 => uds_payload[byte_pos] as usize,
                 2 => {
@@ -492,6 +528,7 @@ pub(in crate::diag_kernel) fn extract_diag_data_container(
         },
         datatypes::DiagCodedTypeVariant::StandardLength(ref v) => extract_bits(
             v.bit_length as usize,
+            param.bit_pos,
             byte_pos,
             v.bitmask.as_ref(),
             uds_payload,
@@ -726,10 +763,120 @@ fn decode_hex(value: &str) -> Result<Vec<u8>, DiagServiceError> {
 
 #[cfg(test)]
 mod tests {
+    use super::*;
+    use crate::DiagDataTypeContainer;
+    use crate::diag_kernel::payload::Payload;
+    use cda_database::datatypes;
     use cda_database::datatypes::{
         CompuCategory, CompuFunction, CompuMethod, CompuRationalCoefficients, CompuScale,
-        CompuValues, DataType, IntervalType, Limit,
+        CompuValues, DataType, DiagCodedType, IntervalType, Limit, Parameter, ParameterValue,
+        ValueData,
     };
+
+    fn test_extract_diag_data_container_standard_length(
+        byte_pos: u32,
+        bit_pos: u32,
+        bit_len: u32,
+        payload: Vec<u8>,
+        expected: Vec<u8>,
+    ) {
+        let data = super::extract_diag_data_container(
+            &Parameter {
+                short_name: 0,
+                byte_pos,
+                bit_pos,
+                value: ParameterValue::Value(ValueData {
+                    default_value: None,
+                    dop: 0,
+                }),
+                semantic: None,
+            },
+            &mut Payload::new(&payload),
+            &DiagCodedType {
+                type_: datatypes::DiagCodedTypeVariant::StandardLength(
+                    datatypes::StandardLengthType {
+                        bit_length: bit_len,
+                        bitmask: None,
+                        condensed: false,
+                    },
+                ),
+                base_datatype: DataType::ByteField,
+            },
+            None,
+        );
+
+        match data {
+            DiagDataTypeContainer::RawContainer(raw) => {
+                assert_eq!(raw.data, expected);
+            }
+            _ => panic!("Expected container type"),
+        }
+    }
+
+    #[test]
+    fn extract_diag_data_container_byte_pos_1_bit_pos_3_len_8() {
+        test_extract_diag_data_container_standard_length(1, 3, 7, vec![0x01, 0xff, 0x03], vec![0x7c]);
+    }
+
+    #[test]
+    fn extract_diag_data_container_byte_pos_0_bit_pos_5_len_13() {
+        // extracting 13 bits starting from bit position 5 in byte 0
+        // 10101011 11001101 01000010
+        // 01234--- -----------
+        //      011 11001101 01
+        //     00001111 00110101  -> msb padded
+        //     [ 0x15 ] [ 0x35 ]
+        test_extract_diag_data_container_standard_length(0, 5, 13, vec![0xab, 0xcd, 0x42], vec![015, 0x35]);
+    }
+
+    #[test]
+    fn extract_diag_data_container_byte_pos_0_bit_pos_5_len_3() {
+        test_extract_diag_data_container_standard_length(0, 5, 3, vec![0xab], vec![0x03]);
+    }
+
+    #[test]
+    fn extract_diag_data_container_byte_pos_0_bit_pos_0_len_16() {
+        test_extract_diag_data_container_standard_length(0, 0, 16, vec![0xab, 0xcd], vec![0xab, 0xcd]);
+    }
+
+    #[test]
+    fn extract_diag_data_container_byte_pos_0_bit_pos_0_len_18() {
+        // extracting 18 bits starting from bit position 0 in byte 0
+        // 1111 1111 1111 1111 1111 1111
+        // ---- ---- ---- --
+        // 1111 1111 1111 11 --> we're padding MSB and need 6 more bits
+        // 0000 0011 1111 1111 1111 1111
+        // [  0x03 ] [  0xff ] [  0xff ]
+        test_extract_diag_data_container_standard_length(0, 0, 18, vec![0xff, 0xff, 0xff], vec![0x03, 0xff, 0xff]);
+    }
+
+    #[test]
+    fn test_extract_bits_with_mask() {
+        let uds_payload = vec![0b10101010, 0b11001100];
+        let mask = vec![0b11110000, 0b00001111];
+        let result = extract_bits(8, 0, 0, Some(&mask), &uds_payload);
+        assert_eq!(result, vec![0b10100000]);
+
+        let result = extract_bits(8, 0, 1, Some(&mask), &uds_payload);
+        assert_eq!(result, vec![0b00001100]);
+
+        let result = extract_bits(4, 4, 0, Some(&mask), &uds_payload);
+        assert_eq!(result, vec![0b00000000]);
+    }
+
+    #[test]
+    fn test_extract_bits_partial_mask() {
+        let uds_payload = vec![0b10101010, 0b11001100];
+        let mask = vec![0b11110000];
+        let result = extract_bits(8, 0, 0, Some(&mask), &uds_payload);
+        assert_eq!(result, vec![0b10100000]);
+
+        let result = extract_bits(8, 0, 1, Some(&mask), &uds_payload);
+        assert_eq!(result, vec![0b11001100]); // No mask applied to second byte
+
+        let result = extract_bits(4, 4, 0, Some(&mask), &uds_payload);
+        assert_eq!(result, vec![0b00000000]);
+    }
 
     #[test]
     fn test_param_with_bit_pos() {

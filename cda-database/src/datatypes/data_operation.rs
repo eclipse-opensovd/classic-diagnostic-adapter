@@ -58,6 +58,7 @@ pub enum DataOperationVariant {
     EnvData(EnvDataDop),
     Dtc(DtcDop),
     StaticField(StaticFieldDop),
+    DynamicField(),
     Mux(MuxDop),
 }
 #[derive(Debug)]
@@ -491,6 +492,7 @@ fn get_dop_variant(
             })
         }
         Some(dop::SpecificData::DynamicLengthField(_)) => {
+            // todo mohalex
             return Err(DiagServiceError::ParameterConversionError(
                 "dynamicLengthField not implemented yet".into(),
             ));

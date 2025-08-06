@@ -46,6 +46,7 @@ pub struct CodedConst {
 }
 #[derive(Debug)]
 #[cfg_attr(feature = "deepsize", derive(DeepSizeOf))]
+/// Repetition of data from request
 pub struct MatchingRequestParam {
     pub request_byte_pos: i32,
     pub byte_length: u32,

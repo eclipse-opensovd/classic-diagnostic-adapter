@@ -400,6 +400,7 @@ dependencies = [
 name = "cda-core"
 version = "0.1.0"
 dependencies = [
+ "bitvec",
  "cda-database",
  "cda-interfaces",
  "hashbrown 0.15.4",

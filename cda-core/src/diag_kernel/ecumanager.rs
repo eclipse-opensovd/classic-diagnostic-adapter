@@ -14,7 +14,7 @@
 use std::{sync::Arc, time::Duration};
 
 use cda_database::datatypes::{
-    self, CompuCategory, CompuFunction, CompuMethod, DOPType, DataOperation, DataOperationVariant,
+    self, DataOperation,
     DataType, DiagCodedType, DiagnosticDatabase, DiagnosticService, LogicalAddressType, MuxDop,
     NormalDop, Parameter, StateChart, resolve_comparam,
 };
@@ -1431,8 +1431,11 @@ impl EcuManager {
         match &param.value {
             datatypes::ParameterValue::CodedConst(_coded_const) => Ok(None),
             datatypes::ParameterValue::MatchingRequestParam(_matching_request_param) => {
-                // todo can this even be mapped to UDS request?
-                Ok(None)
+                // matching-request-param, dynamic and nrc-const can only
+                // appear in a response according to ISO_22901-1:2008-11 (odx spec)
+                Err(DiagServiceError::InvalidRequest(
+                    "MatchingRequestParam cannot be used in a request".to_owned(),
+                ))
             }
             datatypes::ParameterValue::Value(value_data) => {
                 if let Some(dop) = self.ecu_data.data_operations.get(&value_data.dop) {
@@ -1458,6 +1461,8 @@ impl EcuManager {
                             Ok(Some(mapped_data))
                         }
                         // todo mohalex
+                        // make sure to limit the number of items to `max-number-of-items`
+                        // see internal-ticket-you-know-which
                         datatypes::DataOperationVariant::EndOfPdu(_end_of_pdu_dop) => todo!(),
                         datatypes::DataOperationVariant::Structure(_structure_dop) => todo!(),
                         datatypes::DataOperationVariant::EnvDataDesc(_env_data_desc_dop) => {
@@ -1470,6 +1475,12 @@ impl EcuManager {
                         }
                         datatypes::DataOperationVariant::Mux(_static_field_dop) => {
                             todo!()
+                        }
+                        datatypes::DataOperationVariant::DynamicField() => {
+                            // cannot happen in a request by definition
+                            Err(DiagServiceError::InvalidRequest(
+                                "DynamicField cannot be used in a request".to_owned(),
+                            ))
                         }
                     }
                 } else {
@@ -1564,6 +1575,8 @@ impl EcuManager {
                 );
             }
             datatypes::DataOperationVariant::EndOfPdu(ref v) => {
+                // When a response is read the values of `max-number-of-items`
+                // is deliberately ignored, according to the ODX specification.
                 let struct_ = self.get_basic_structure(v.field.basic_structure)?;
 
                 uds_payload.push_slice(param.byte_pos as usize, uds_payload.len())?;
@@ -1658,6 +1671,9 @@ impl EcuManager {
             }
             datatypes::DataOperationVariant::Mux(ref mux_dop) => {
                 self.map_mux(mapped_service, uds_payload, data, short_name, mux_dop)?;
+            }
+            datatypes::DataOperationVariant::DynamicField() => {
+                todo!()
             }
         }
 
@@ -1819,15 +1835,15 @@ impl EcuManager {
 mod tests {
     use std::vec;
 
+    use super::*;
     use cda_database::datatypes::{
         CodedConst, CompuCategory, CompuFunction, CompuMethod, DOPType, DataOperation,
-        DataOperationVariant, DataType, DiagCodedType, DiagCodedTypeVariant, NormalDop, Parameter,
-        ParameterValue, Request, Response, ResponseType, StandardLengthType,
+        DataOperationVariant, DataType, DiagCodedType, DiagCodedTypeVariant, DopField, NormalDop,
+        Parameter, ParameterValue, Request, Response, ResponseType, StandardLengthType,
     };
     use cda_interfaces::{EcuManager, STRINGS};
+    use datatypes::{EndOfPduDop, StaticFieldDop};
     use serde_json::json;
-
-    use super::*;
 
     fn create_service(
         db: &mut DiagnosticDatabase,
@@ -1857,19 +1873,44 @@ mod tests {
                 diag_coded_type: diag_type_sid,
             }),
             0,
+            0,
         );
-        params_pos_response.push(param_sid);
-        let pos_response = create_response(db, ResponseType::Positive, params_pos_response.clone());
-        // if !params_pos_response.is_empty() {
-        //     params_pos_response.push(pos_response);
-        // }
 
-        // todo
-        // if !neg_responses.is_empty() {
-        //     neg_responses.push(response_sid);
-        // }
+        params_pos_response.push(create_param(
+            db,
+            &format!("{short_name}_pos_sid"),
+            ParameterValue::CodedConst(CodedConst {
+                value: STRINGS.get_or_insert(&sid.to_string()),
+                diag_coded_type: diag_type_sid,
+            }),
+            0,
+            0,
+        ));
 
-        // todo add neg_response
+        params_neg_response.push(create_param(
+            db,
+            &format!("{short_name}_neg_response"),
+            ParameterValue::CodedConst(CodedConst {
+                value: STRINGS.get_or_insert(&0x7f_u8.to_string()),
+                diag_coded_type: diag_type_sid,
+            }),
+            0,
+            0,
+        ));
+        params_neg_response.push(create_param(
+            db,
+            &format!("{short_name}_neg_sid"),
+            ParameterValue::CodedConst(CodedConst {
+                value: STRINGS.get_or_insert(&sid.to_string()),
+                diag_coded_type: diag_type_sid,
+            }),
+            1,
+            0,
+        ));
+
+        let pos_res_id =create_response(db, ResponseType::Positive, params_pos_response.clone());
+        let neg_res_id = create_response(db, ResponseType::Negative, params_neg_response.clone());
+
         let request = create_request(db, params_request);
 
         db.services.insert(
@@ -1877,8 +1918,8 @@ mod tests {
             datatypes::DiagnosticService {
                 service_id: service_ids::WRITE_DATA_BY_IDENTIFIER,
                 request_id: request,
-                pos_responses: params_pos_response,
-                neg_responses: params_neg_response,
+                pos_responses: vec![pos_res_id],
+                neg_responses: vec![neg_res_id],
                 com_param_refs: vec![],
                 short_name: STRINGS.get_or_insert(short_name),
                 semantic: 0,
@@ -1964,6 +2005,7 @@ mod tests {
         name: &str,
         value: ParameterValue,
         byte_pos: u32,
+        bit_pos: u32,
     ) -> cda_interfaces::Id {
         let param_id = db.params.keys().max().unwrap_or(&0) + 1;
         db.params.insert(
@@ -1972,28 +2014,30 @@ mod tests {
                 short_name: STRINGS.get_or_insert(name),
                 value,
                 byte_pos,
-                bit_pos: 0,
+                bit_pos,
                 semantic: Some(STRINGS.get_or_insert(semantics::DATA)),
             },
         );
         param_id
     }
 
-    #[test]
-    fn convert_from_uds() {
-        let mut db = super::DiagnosticDatabase::default();
-
+    fn create_normal_dop(
+        db: &mut DiagnosticDatabase,
+        name: &str,
+        bit_length: u32,
+        byte_pos: u32,
+    ) -> cda_interfaces::Id {
         let diag_type_id = create_datatype(
-            &mut db,
+            db,
             DiagCodedTypeVariant::StandardLength(StandardLengthType {
-                bit_length: 32,
+                bit_length,
                 bitmask: None,
                 condensed: false,
             }),
         );
-        // todo mohalex test some other flavours of dops too
+
         let dop_id = create_dop(
-            &mut db,
+            db,
             DOPType::Regular,
             DataOperationVariant::Normal(NormalDop {
                 diag_type: diag_type_id,
@@ -2005,49 +2049,340 @@ mod tests {
             }),
         );
 
-        // let request_param_id = create_param(
-        //     &mut db,
-        //     "request",
-        //     dop_id,
-        //     ParameterValue::Value(datatypes::ValueData {
-        //         default_value: None,
-        //         dop: dop_id,
-        //     }),
-        // );
-
-        let response_param_id = create_param(
-            &mut db,
-            "response",
+        create_param(
+            db,
+            name,
             ParameterValue::Value(datatypes::ValueData {
                 default_value: None,
                 dop: dop_id,
             }),
-            5,
-        );
+            byte_pos,
+            0,
+        )
+    }
+
+    // todo mohalex
+    // #[test]
+    // fn convert_from_uds_normal_dop_incomplete_payload() {
+    //     let mut db = super::DiagnosticDatabase::default();
+
+    //     let dop_32_bit_pos_1 = create_normal_dop(&mut db, "dop_32_bit_pos_1", 32, 1);
+
+    //     let sid = 0x42_u8;
+    //     let service = create_service(
+    //         &mut db,
+    //         sid,
+    //         vec![],
+    //         vec![dop_32_bit_pos_1],
+    //         vec![],
+    //     );
+
+    //     let ecu_manager =
+    //         super::EcuManager::new(super::Protocol::DoIp, &super::ComParams::default(), db)
+    //             .unwrap();
+
+    //     assert!(ecu_manager.convert_from_uds(&service, &[sid, 0x01, 0x02], true).is_err());
+    // }
+
+    #[test]
+    fn convert_from_uds_normal_dop() {
+        let mut db = super::DiagnosticDatabase::default();
+
+        let dop_32_bit_pos_1 = create_normal_dop(&mut db, "dop_32_bit_pos_1", 32, 1);
+        let dop_3_bit_pos_2 = create_normal_dop(&mut db, "dop_3_bit_pos_2", 3, 2);
+        let dop_18_bit_pos_2 = create_normal_dop(&mut db, "dop_18_bit_pos_2", 18, 2);
 
         let sid = 0x42_u8;
-        let service = create_service(&mut db, sid, vec![], vec![response_param_id], vec![]);
+        let service = create_service(
+            &mut db,
+            sid,
+            vec![],
+            vec![/*dop_32_bit_pos_1,dop_3_bit_pos_2,*/ dop_18_bit_pos_2],
+            vec![],
+        );
 
         let ecu_manager =
             super::EcuManager::new(super::Protocol::DoIp, &super::ComParams::default(), db)
                 .unwrap();
 
-        let t = ecu_manager
-            .convert_from_uds(
-                &service,
-                &[0x42, 0x00, 0x00, 0x00, 0x42, 0x12, 0x34, 0x56, 0x78],
-                true,
-            )
+        let response = ecu_manager
+            .convert_from_uds(&service, &[sid, 0x01, 0x02, 0x03, 0x04, 0x05], true)
             .unwrap();
         assert_eq!(
-            t.serialize_to_json().unwrap(),
+            response.serialize_to_json().unwrap(),
             json!({
-                "uint32_param": {
-                    "data": [sid, 0x00, 0x00, 0x00, 0x99],
-                    "data_type": "UInt32",
-                    "compu_method": null
-                }
+                "testservice_pos_sid": sid,
+                "dop_32_bit_pos_1": u32::from_be_bytes([0x01, 0x02, 0x03, 0x04]),
+                "dop_3_bit_pos_2": 0x02, // taking 3 bytes from the second byte of the payload
+                // MSB of 0x04 are 0, therefore our expected result matches bytes 3 and 4
+                "dop_18_bit_pos_2": u32::from_be_bytes([0x00, 0x00, 0x02, 0x03])
             })
         );
     }
 }
+
+// #[test]
+// fn convert_from_uds() {
+//     let mut db = super::DiagnosticDatabase::default();
+//
+//     let diag_type_id = create_datatype(
+//         &mut db,
+//         DiagCodedTypeVariant::StandardLength(StandardLengthType {
+//             bit_length: 32,
+//             bitmask: None,
+//             condensed: false,
+//         }),
+//     );
+//
+//     let normal_dop = create_dop(
+//         &mut db,
+//         DOPType::Regular,
+//         DataOperationVariant::Normal(NormalDop {
+//             diag_type: diag_type_id,
+//             compu_method: CompuMethod {
+//                 category: CompuCategory::Identical,
+//                 internal_to_phys: CompuFunction { scales: vec![] },
+//             },
+//             unit: None,
+//         }),
+//     );
+//
+//     let normal_dop_param = create_param(
+//         &mut db,
+//         "normal_dop",
+//         ParameterValue::Value(datatypes::ValueData {
+//             default_value: None,
+//             dop: normal_dop,
+//         }),
+//         5,
+//     );
+//
+//     // DOPType::EnvDataDesc --> DataOperationVariant::EnvDataDesc(EnvDataDescDop)
+//     let env_data_desc_dop = create_dop(
+//         &mut db,
+//         DOPType::EnvDataDesc,
+//         DataOperationVariant::EnvDataDesc(datatypes::EnvDataDescDop {
+//             // todo mohalex
+//             param_short_name: None,
+//             param_path_short_name: None,
+//             env_data_dops: vec![],
+//         }),
+//     );
+//     let env_data_desc_param = create_param(
+//         &mut db,
+//         "env_data_desc_dop",
+//         ParameterValue::Value(datatypes::ValueData {
+//             default_value: None,
+//             dop: env_data_desc_dop,
+//         }),
+//         6,
+//     );
+//
+//     // DOPType::Mux --> DataOperationVariant::Mux(MuxDop)
+//     let mux_dop = create_dop(
+//         &mut db,
+//         DOPType::Mux,
+//         DataOperationVariant::Mux(MuxDop {
+//             byte_position: 0,
+//             switch_key: None,
+//             default_case: None,
+//             cases: vec![],
+//             is_visible: false,
+//         }),
+//     );
+//     let mux_param = create_param(
+//         &mut db,
+//         "mux_dop",
+//         ParameterValue::Value(datatypes::ValueData {
+//             default_value: None,
+//             dop: mux_dop,
+//         }),
+//         7,
+//     );
+//
+//     // DOPType::DynamicEndMarkerField --> DataOperationVariant::DynamicField()
+//     let dynamic_end_marker_dop = create_dop(
+//         &mut db,
+//         DOPType::DynamicEndMarkerField,
+//         DataOperationVariant::DynamicField(),
+//     );
+//     let dynamic_end_marker_param = create_param(
+//         &mut db,
+//         "dynamic_end_marker_dop",
+//         ParameterValue::Value(datatypes::ValueData {
+//             default_value: None,
+//             dop: dynamic_end_marker_dop,
+//         }),
+//         8,
+//     );
+//
+//     // DOPType::DynamicLengthField --> DataOperationVariant::DynamicField()
+//     let dynamic_length_dop = create_dop(
+//         &mut db,
+//         DOPType::DynamicLengthField,
+//         DataOperationVariant::DynamicField(),
+//     );
+//     let dynamic_length_param = create_param(
+//         &mut db,
+//         "dynamic_length_dop",
+//         ParameterValue::Value(datatypes::ValueData {
+//             default_value: None,
+//             dop: dynamic_length_dop,
+//         }),
+//         9,
+//     );
+//
+//     // DOPType::EndOfPduField --> DataOperationVariant::EndOfPdu(EndOfPduDop)
+//     let end_of_pdu_dop = create_dop(
+//         &mut db,
+//         DOPType::EndOfPduField,
+//         DataOperationVariant::EndOfPdu(EndOfPduDop {
+//             min_items: 0,
+//             max_items: 0,
+//             field: DopField {
+//                 basic_structure: 0,
+//                 basic_structure_short_name: None,
+//                 env_data_desc: None,
+//                 env_data_desc_short_name: None,
+//                 is_visible: false,
+//             },
+//         }),
+//     );
+//     let end_of_pdu_param = create_param(
+//         &mut db,
+//         "end_of_pdu_dop",
+//         ParameterValue::Value(datatypes::ValueData {
+//             default_value: None,
+//             dop: end_of_pdu_dop,
+//         }),
+//         10,
+//     );
+//
+//     // DOPType::StaticField --> DataOperationVariant::StaticField(StaticFieldDop)
+//     let static_field_dop = create_dop(
+//         &mut db,
+//         DOPType::StaticField,
+//         DataOperationVariant::StaticField(StaticFieldDop {
+//             fixed_number_of_items: 0,
+//             item_byte_size: 0,
+//             field: DopField {
+//                 basic_structure: 0,
+//                 basic_structure_short_name: None,
+//                 env_data_desc: None,
+//                 env_data_desc_short_name: None,
+//                 is_visible: false,
+//             },
+//         }),
+//     );
+//     let static_field_param = create_param(
+//         &mut db,
+//         "static_field_dop",
+//         ParameterValue::Value(datatypes::ValueData {
+//             default_value: None,
+//             dop: static_field_dop,
+//         }),
+//         11,
+//     );
+//
+//     // DOPType::EnvData --> DataOperationVariant::EnvData(EnvDataDop)
+//     let env_data_dop = create_dop(
+//         &mut db,
+//         DOPType::EnvData,
+//         DataOperationVariant::EnvData(datatypes::EnvDataDop { dtc_values: vec![] }),
+//     );
+//     let env_data_param = create_param(
+//         &mut db,
+//         "env_data_dop",
+//         ParameterValue::Value(datatypes::ValueData {
+//             default_value: None,
+//             dop: env_data_dop,
+//         }),
+//         12,
+//     );
+//
+//     // DOPType::Structure --> DataOperationVariant::Structure(StructureDop)
+//     let structure_dop = create_dop(
+//         &mut db,
+//         DOPType::Structure,
+//         DataOperationVariant::Structure(datatypes::StructureDop {
+//             params: vec![],
+//             byte_size: 0,
+//             visible: false,
+//         }),
+//     );
+//     let structure_param = create_param(
+//         &mut db,
+//         "structure_dop",
+//         ParameterValue::Value(datatypes::ValueData {
+//             default_value: None,
+//             dop: structure_dop,
+//         }),
+//         13,
+//     );
+//
+//     // DOPType::Dtc --> DataOperationVariant::Dtc(DtcDop)
+//     let dtc_dop = create_dop(
+//         &mut db,
+//         DOPType::Dtc,
+//         DataOperationVariant::Dtc(datatypes::DtcDop {
+//             diag_coded_type: 0,
+//             physical_type: None,
+//             compu_method: CompuMethod {
+//                 category: CompuCategory::Identical,
+//                 internal_to_phys: CompuFunction { scales: vec![] },
+//             },
+//             dtc_refs: vec![],
+//             is_visible: false,
+//         }),
+//     );
+//     let dtc_param = create_param(
+//         &mut db,
+//         "dtc_dop",
+//         ParameterValue::Value(datatypes::ValueData {
+//             default_value: None,
+//             dop: dtc_dop,
+//         }),
+//         14,
+//     );
+//
+//     let sid = 0x42_u8;
+//     let service = create_service(
+//         &mut db,
+//         sid,
+//         vec![],
+//         vec![
+//             normal_dop_param,
+//             env_data_desc_param,
+//             mux_param,
+//             dynamic_end_marker_param,
+//             dynamic_length_param,
+//             end_of_pdu_param,
+//             static_field_param,
+//             env_data_param,
+//             structure_param,
+//         ],
+//         vec![],
+//     );
+//
+//     let ecu_manager =
+//         super::EcuManager::new(super::Protocol::DoIp, &super::ComParams::default(), db)
+//             .unwrap();
+//
+//     let t = ecu_manager
+//         .convert_from_uds(
+//             &service,
+//             &[0x42, 0x00, 0x00, 0x00, 0x42, 0x12, 0x34, 0x56, 0x78],
+//             true,
+//         )
+//         .unwrap();
+//     assert_eq!(
+//         t.serialize_to_json().unwrap(),
+//         json!({
+//             "uint32_param": {
+//                 "data": [sid, 0x00, 0x00, 0x00, 0x99],
+//                 "data_type": "UInt32",
+//                 "compu_method": null
+//             }
+//         })
+//     );
+// }
