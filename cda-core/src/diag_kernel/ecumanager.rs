@@ -364,10 +364,10 @@ impl cda_interfaces::EcuManager for EcuManager {
                         .get(&coded_const.diag_coded_type)
                     {
                         Some(coded_const_type) => {
-                            if coded_const_type.base_datatype != DataType::UInt32 {
+                            if coded_const_type.base_datatype() != DataType::UInt32 {
                                 break;
                             }
-                            match &coded_const_type.type_ {
+                            match &coded_const_type.type_() {
                                 DiagCodedTypeVariant::StandardLength(standard_length) => {
                                     standard_length
                                 }
@@ -637,31 +637,17 @@ impl cda_interfaces::EcuManager for EcuManager {
                     })?;
 
                     let uds_val = operations::diag_coded_type_to_uds(
-                        diag_type.base_datatype,
+                        diag_type.base_datatype(),
                         &coded_const_value,
                     )?;
 
-                    match diag_type.type_ {
-                        datatypes::DiagCodedTypeVariant::LeadingLengthInfo(ref val) => {
-                            let byte_len = (val / 8).max(1) as usize;
-                            uds.extend(&uds_val[uds_val.len() - byte_len..]);
-                        }
-                        datatypes::DiagCodedTypeVariant::MinMaxLength(_) => {
-                            todo!("what type is min/max length?? bits, bytes? sausages?")
-                        }
-                        datatypes::DiagCodedTypeVariant::StandardLength(ref val) => {
-                            let byte_len = (val.bit_length / 8).max(1) as usize;
-                            if let Some(mask) = &val.bitmask {
-                                for i in uds_val.len() - byte_len..uds_val.len() {
-                                    uds.push(uds_val[i] & mask[i]);
-                                }
-                            } else {
-                                uds.extend(&uds_val[uds_val.len() - byte_len..]);
-                            }
-                        }
-                    }
+                    diag_type.encode(
+                        uds_val,
+                        &mut uds,
+                        param.byte_pos as usize,
+                        param.bit_pos as usize,
+                    )?;
                 }
-                // skip for now. maybe validate payload according to params and their constraints?
                 _ => break,
             }
         }
@@ -680,14 +666,9 @@ impl cda_interfaces::EcuManager for EcuManager {
                                 param.short_name
                             ))
                         })?;
-                        if let Some(value) = json_values.get(&short_name)
-                            && let Some(uds_val) = self.map_param_to_uds(param, value)?
-                        {
-                            operations::extend_with_bit_pos(
-                                &mut uds,
-                                uds_val,
-                                param.bit_pos as usize,
-                            );
+
+                        if let Some(value) = json_values.get(&short_name) {
+                            self.map_param_to_uds(param, value, &mut uds)?;
                         }
                     }
                 }
@@ -1561,7 +1542,7 @@ impl EcuManager {
                     ))?;
 
                 let value =
-                    operations::extract_diag_data_container(param, uds_payload, diag_type, None);
+                    operations::extract_diag_data_container(param, uds_payload, diag_type, None)?;
 
                 let value = match value {
                     DiagDataTypeContainer::RawContainer(diag_data_type_container_raw) => {
@@ -1586,9 +1567,8 @@ impl EcuManager {
                     ))
                 })?;
                 let expected =
-                    operations::diag_coded_type_to_uds(diag_type.base_datatype, &const_value)?
+                    operations::diag_coded_type_to_uds(diag_type.base_datatype(), &const_value)?
                         .into_iter()
-                        // .filter(|v| *v != 0) // remove 0 padding
                         .collect::<Vec<_>>();
                 let expected = &expected[expected.len() - value.data.len()..];
                 if value.data != expected {
@@ -1700,12 +1680,7 @@ impl EcuManager {
                     "Parameter '{short_name}' not part of the request body"
                 )))?;
 
-            let mut uds_value = self.map_param_to_uds(param, param_value)?.ok_or(
-                DiagServiceError::InvalidDatabase(format!(
-                    "Could not map '{param_value}' to uds for parameter '{short_name}'"
-                )),
-            )?;
-            uds_data.append(&mut uds_value);
+            self.map_param_to_uds(param, param_value, &mut uds_data)?;
         }
 
         Ok(uds_data)
@@ -1715,12 +1690,13 @@ impl EcuManager {
         &self,
         param: &datatypes::Parameter,
         value: &serde_json::Value,
-    ) -> Result<Option<Vec<u8>>, DiagServiceError> {
+        payload: &mut Vec<u8>,
+    ) -> Result<(), DiagServiceError> {
         match &param.value {
-            datatypes::ParameterValue::CodedConst(_coded_const) => Ok(None),
+            datatypes::ParameterValue::CodedConst(_coded_const) => Ok(()),
             datatypes::ParameterValue::MatchingRequestParam(_matching_request_param) => {
                 // todo can this even be mapped to UDS request?
-                Ok(None)
+                Ok(())
             }
             datatypes::ParameterValue::Value(value_data) => {
                 if let Some(dop) = self.ecu_data.data_operations.get(&value_data.dop) {
@@ -1738,12 +1714,17 @@ impl EcuManager {
                                 ));
                             };
                             let uds_data = json_value_to_uds_data(
-                                diag_type.base_datatype,
+                                diag_type.base_datatype(),
                                 Some(&normal_dop.compu_method),
                                 value,
                             )?;
-                            let mapped_data = diag_type.type_.apply(&uds_data);
-                            Ok(Some(mapped_data))
+                            diag_type.encode(
+                                uds_data,
+                                payload,
+                                param.byte_pos as usize,
+                                param.bit_pos as usize,
+                            )?;
+                            Ok(())
                         }
                         datatypes::DataOperationVariant::EndOfPdu(end_of_pdu_dop) => {
                             let Some(value) = value.as_array() else {
@@ -1762,12 +1743,11 @@ impl EcuManager {
                             let structure =
                                 self.get_basic_structure(end_of_pdu_dop.field.basic_structure)?;
 
-                            let mut uds_data = Vec::new();
                             for v in value {
                                 let mut chunk = self.map_nested_struct_to_uds(structure, v)?;
-                                uds_data.append(&mut chunk);
+                                payload.append(&mut chunk);
                             }
-                            Ok(Some(uds_data))
+                            Ok(())
                         }
                         datatypes::DataOperationVariant::Structure(_structure_dop) => todo!(),
                         datatypes::DataOperationVariant::EnvDataDesc(_env_data_desc_dop) => {
@@ -1800,7 +1780,7 @@ impl EcuManager {
                     mapped.push(0x0);
                     bits -= 8;
                 }
-                Ok(Some(mapped))
+                Ok(())
             }
         }
     }
@@ -1870,7 +1850,7 @@ impl EcuManager {
                         uds_payload,
                         diag_coded_type,
                         Some(compu_method),
-                    ),
+                    )?,
                 );
             }
             datatypes::DataOperationVariant::EndOfPdu(ref v) => {
@@ -2020,6 +2000,7 @@ impl EcuManager {
             DiagDataTypeContainer::RawContainer(DiagDataTypeContainerRaw {
                 data: vec![*payload],
                 data_type: DataType::UInt32,
+                bit_len: u32::BITS as usize,
                 compu_method: None,
             }),
         );
@@ -2169,14 +2150,14 @@ impl EcuManager {
             }
         };
 
-        if coded_const_type.base_datatype != DataType::UInt32 {
+        if coded_const_type.base_datatype() != DataType::UInt32 {
             log::warn!(target: &self.ecu_data.ecu_name, "Coded const {coded_const:#?} has \
                         unexpected base datatype {:#?}, expected UInt32",
-                        coded_const_type.base_datatype);
+                        coded_const_type.base_datatype());
             return None;
         }
 
-        let bitlength = match &coded_const_type.type_ {
+        let bitlength = match &coded_const_type.type_() {
             DiagCodedTypeVariant::LeadingLengthInfo(_) => {
                 log::warn!(target: &self.ecu_data.ecu_name, "Coded const {coded_const:#?} \
                         has unexpected type LeadingLengthInfo, expected StandardLength");

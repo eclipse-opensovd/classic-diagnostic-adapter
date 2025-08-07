@@ -370,28 +370,6 @@ fn u32_padded_bytes(data: &[u8]) -> Result<[u8; 4], DiagServiceError> {
     Ok(bytes)
 }
 
-pub(in crate::diag_kernel) fn extend_with_bit_pos(
-    payload: &mut Vec<u8>,
-    value: Vec<u8>,
-    bit_pos: usize,
-) {
-    if bit_pos != 0 && bit_pos < 8 {
-        let target_mask = 0xFF >> (8 - bit_pos) as u8;
-        let first_val = value.first().copied().unwrap_or(0) << bit_pos;
-        // todo: do we need to handle the case that the bytes that we shifted out
-        // need to be moved to the next byte?
-        if let Some(last_byte) = payload.last_mut() {
-            *last_byte &= target_mask; // clear the bits that are not set
-            *last_byte |= first_val; // set the bits that are set in the value
-            payload.extend(&value[1..]); // extend with the rest of the value
-        } else {
-            payload.extend(value); // not sure if we can end up here, but just in case
-        }
-    } else {
-        payload.extend(value);
-    }
-}
-
 pub(in crate::diag_kernel) fn diag_coded_type_to_uds(
     diag_type: DataType,
     val: &str,
@@ -425,115 +403,22 @@ pub(in crate::diag_kernel) fn extract_diag_data_container(
     payload: &mut Payload,
     diag_type: &datatypes::DiagCodedType,
     compu_method: Option<&CompuMethod>,
-) -> DiagDataTypeContainer {
-    fn extract_bits(
-        mut bits: usize,
-        byte_pos: usize,
-        mask: Option<&Vec<u8>>,
-        uds_payload: &[u8],
-    ) -> Vec<u8> {
-        let mut data = Vec::new();
-        let mut idx: usize = 0;
-
-        while bits > 8 {
-            let mut byte = uds_payload[byte_pos + idx];
-            if let Some(mask) = &mask
-                && mask.len() > idx
-            {
-                byte &= mask[idx];
-            }
-            data.push(byte);
-            bits -= 8;
-            idx += 1;
-        }
-        if bits > 0 {
-            let mut byte = uds_payload[byte_pos + idx];
-            if let Some(mask) = &mask
-                && mask.len() > idx
-            {
-                byte &= mask[idx];
-            }
-            data.push(byte & (0xFF >> (8 - bits)));
-        }
-        data
-    }
-
-    // todo: handle cases where param.bitPosition is not None or 0
+) -> Result<DiagDataTypeContainer, DiagServiceError> {
     let byte_pos = param.byte_pos as usize;
     let uds_payload = payload.data();
+    let (data, bit_len) = diag_type.decode(uds_payload, byte_pos, param.bit_pos as usize)?;
 
-    let data = match diag_type.type_ {
-        datatypes::DiagCodedTypeVariant::LeadingLengthInfo(bits) => {
-            let length_info_bytes = extract_bits(bits as usize, byte_pos, None, uds_payload);
-            let len = match length_info_bytes.len() {
-                1 => uds_payload[byte_pos] as usize,
-                2 => {
-                    u16::from_be_bytes([uds_payload[byte_pos], uds_payload[byte_pos + 1]]) as usize
-                }
-                3 => u32::from_be_bytes([
-                    0,
-                    uds_payload[byte_pos],
-                    uds_payload[byte_pos + 1],
-                    uds_payload[byte_pos + 2],
-                ]) as usize,
-                4 => u32::from_be_bytes([
-                    uds_payload[byte_pos],
-                    uds_payload[byte_pos + 1],
-                    uds_payload[byte_pos + 2],
-                    uds_payload[byte_pos + 3],
-                ]) as usize,
-                n @ 5..=8 => {
-                    let mut bytes = [0u8; 8];
-                    match n {
-                        5 => bytes[3..].copy_from_slice(&uds_payload[byte_pos..byte_pos + 5]),
-                        6 => bytes[2..].copy_from_slice(&uds_payload[byte_pos..byte_pos + 6]),
-                        7 => bytes[1..].copy_from_slice(&uds_payload[byte_pos..byte_pos + 7]),
-                        8 => bytes.copy_from_slice(&uds_payload[byte_pos..byte_pos + 8]),
-                        _ => unreachable!(),
-                    }
-                    u64::from_be_bytes(bytes) as usize
-                }
-                _ => 0,
-            };
-            if len > 0 {
-                uds_payload[byte_pos..byte_pos + len].to_vec()
-            } else {
-                Vec::new()
-            }
-        }
-        datatypes::DiagCodedTypeVariant::MinMaxLength(ref e) => match e.termination {
-            datatypes::Termination::EndOfPdu => uds_payload[byte_pos..].to_vec(),
-            datatypes::Termination::Zero => {
-                let mut end_pos = byte_pos;
-                while end_pos < uds_payload.len() && uds_payload[end_pos] != 0 {
-                    end_pos += 1;
-                }
-                uds_payload[byte_pos..end_pos].to_vec()
-            }
-            datatypes::Termination::HexFF => {
-                let mut end_pos = byte_pos;
-                while end_pos < uds_payload.len() && uds_payload[end_pos] != 0xFF {
-                    end_pos += 1;
-                }
-                uds_payload[byte_pos..end_pos].to_vec()
-            }
-        },
-        datatypes::DiagCodedTypeVariant::StandardLength(ref v) => extract_bits(
-            v.bit_length as usize,
-            byte_pos,
-            v.bitmask.as_ref(),
-            uds_payload,
-        ),
-    };
-
-    let data_type = diag_type.base_datatype;
+    let data_type = diag_type.base_datatype();
     payload.set_last_byte_pos_read(byte_pos + data.len() + 1);
 
-    DiagDataTypeContainer::RawContainer(DiagDataTypeContainerRaw {
-        data,
-        data_type,
-        compu_method: compu_method.cloned(),
-    })
+    Ok(DiagDataTypeContainer::RawContainer(
+        DiagDataTypeContainerRaw {
+            data,
+            bit_len,
+            data_type,
+            compu_method: compu_method.cloned(),
+        },
+    ))
 }
 
 pub(in crate::diag_kernel) fn json_value_to_uds_data(
@@ -758,21 +643,6 @@ mod tests {
         CompuCategory, CompuFunction, CompuMethod, CompuRationalCoefficients, CompuScale,
         CompuValues, DataType, IntervalType, Limit,
     };
-
-    #[test]
-    fn test_param_with_bit_pos() {
-        let bit_pos = 4;
-        let mut payload = vec![0x00, 0x01, 0x02];
-
-        println!("... 0x{:08b}", payload[2]);
-
-        let value = vec![0x08];
-
-        super::extend_with_bit_pos(&mut payload, value, bit_pos);
-        assert_eq!(payload, vec![0x00, 0x01, 0x82]);
-
-        println!("... 0x{:08b}", payload[2]);
-    }
 
     #[test]
     fn test_hex_values() {
