@@ -508,19 +508,19 @@ impl cda_interfaces::EcuManager for EcuManager {
                     })?;
 
                     let uds_val = operations::diag_coded_type_to_uds(
-                        diag_type.base_datatype,
+                        *diag_type.base_datatype(),
                         &coded_const_value,
                     )?;
 
-                    match diag_type.type_ {
-                        datatypes::DiagCodedTypeVariant::LeadingLengthInfo(ref val) => {
+                    match diag_type.type_() {
+                        datatypes::DiagCodedTypeVariant::LeadingLengthInfo(val) => {
                             let byte_len = (val / 8).max(1) as usize;
                             uds.extend(&uds_val[uds_val.len() - byte_len..]);
                         }
                         datatypes::DiagCodedTypeVariant::MinMaxLength(_) => {
                             todo!("what type is min/max length?? bits, bytes? sausages?")
                         }
-                        datatypes::DiagCodedTypeVariant::StandardLength(ref val) => {
+                        datatypes::DiagCodedTypeVariant::StandardLength(val) => {
                             let byte_len = (val.bit_length / 8).max(1) as usize;
                             if let Some(mask) = &val.bitmask {
                                 for i in uds_val.len() - byte_len..uds_val.len() {
@@ -1432,7 +1432,7 @@ impl EcuManager {
                     ))?;
 
                 let value =
-                    operations::extract_diag_data_container(param, uds_payload, diag_type, None);
+                    operations::extract_diag_data_container(param, uds_payload, diag_type, None)?;
 
                 let value = match value {
                     DiagDataTypeContainer::RawContainer(diag_data_type_container_raw) => {
@@ -1457,7 +1457,7 @@ impl EcuManager {
                     ))
                 })?;
                 let expected =
-                    operations::diag_coded_type_to_uds(diag_type.base_datatype, &const_value)?
+                    operations::diag_coded_type_to_uds(*diag_type.base_datatype(), &const_value)?
                         .into_iter()
                         // .filter(|v| *v != 0) // remove 0 padding
                         .collect::<Vec<_>>();
@@ -1567,11 +1567,11 @@ impl EcuManager {
                                 ));
                             };
                             let uds_data = json_value_to_uds_data(
-                                diag_type.base_datatype,
+                                *diag_type.base_datatype(),
                                 Some(&normal_dop.compu_method),
                                 value,
                             )?;
-                            let mapped_data = diag_type.type_.apply(&uds_data);
+                            let mapped_data = diag_type.encode(&uds_data)?;
                             Ok(Some(mapped_data))
                         }
                         datatypes::DataOperationVariant::EndOfPdu(_end_of_pdu_dop) => todo!(),
@@ -1676,7 +1676,7 @@ impl EcuManager {
                         uds_payload,
                         diag_coded_type,
                         Some(compu_method),
-                    ),
+                    )?,
                 );
             }
             datatypes::DataOperationVariant::EndOfPdu(ref v) => {
@@ -1975,14 +1975,14 @@ impl EcuManager {
             }
         };
 
-        if coded_const_type.base_datatype != DataType::UInt32 {
+        if coded_const_type.base_datatype() != &DataType::UInt32 {
             log::warn!(target: &self.ecu_data.ecu_name, "Coded const {coded_const:#?} has \
                         unexpected base datatype {:#?}, expected UInt32",
-                        coded_const_type.base_datatype);
+                        coded_const_type.base_datatype());
             return None;
         }
 
-        let bitlength = match &coded_const_type.type_ {
+        let bitlength = match &coded_const_type.type_() {
             DiagCodedTypeVariant::LeadingLengthInfo(_) => {
                 log::warn!(target: &self.ecu_data.ecu_name, "Coded const {coded_const:#?} \
                         has unexpected type LeadingLengthInfo, expected StandardLength");
