@@ -16,11 +16,11 @@ use axum_extra::extract::Host;
 
 use crate::sovd::resource_response;
 
-pub(in crate::sovd) async fn get(Host(host): Host, OriginalUri(uri): OriginalUri) -> Response {
+pub(crate) async fn get(Host(host): Host, OriginalUri(uri): OriginalUri) -> Response {
     resource_response(&host, &uri, vec![("mdd-embedded-files", None)])
 }
 
-pub(in crate::sovd) mod mdd_embedded_files {
+pub(crate) mod mdd_embedded_files {
     use axum::{
         Json,
         extract::{Path, State},
@@ -32,10 +32,11 @@ pub(in crate::sovd) mod mdd_embedded_files {
         file_manager::{ChunkMetaData, FileManager},
     };
     use http::{StatusCode, header};
+    use sovd_interfaces::components::ecu::x::sovd2uds;
 
-    use crate::sovd::{SovdFile, SovdItems, WebserverEcuState, error::ApiError};
+    use crate::sovd::{WebserverEcuState, error::ApiError};
 
-    pub(in crate::sovd) async fn get<
+    pub(crate) async fn get<
         R: DiagServiceResponse + Send + Sync,
         T: UdsEcu + Send + Sync + Clone,
         U: FileManager + Send + Sync + Clone,
@@ -44,12 +45,12 @@ pub(in crate::sovd) mod mdd_embedded_files {
             mdd_embedded_files, ..
         }): State<WebserverEcuState<R, T, U>>,
     ) -> Response {
-        let items: SovdItems<SovdFile> = SovdItems {
+        let items = sovd2uds::bulk_data::embedded_files::get::Response {
             items: mdd_embedded_files
                 .list()
                 .await
                 .iter()
-                .map(|(id, meta)| SovdFile {
+                .map(|(id, meta)| sovd_interfaces::sovd2uds::File {
                     hash: None,
                     hash_algorithm: None,
                     id: id.clone(),
@@ -63,26 +64,29 @@ pub(in crate::sovd) mod mdd_embedded_files {
         (StatusCode::OK, Json(items)).into_response()
     }
 
-    pub(in crate::sovd) async fn get_id<
-        R: DiagServiceResponse + Send + Sync,
-        T: UdsEcu + Send + Sync + Clone,
-        U: FileManager + Send + Sync + Clone,
-    >(
-        Path(id): Path<String>,
-        State(WebserverEcuState {
-            mdd_embedded_files, ..
-        }): State<WebserverEcuState<R, T, U>>,
-    ) -> Response {
-        match mdd_embedded_files.get(&id).await {
-            Ok((meta, payload)) => (
-                StatusCode::OK,
-                [(header::CONTENT_TYPE, content_type_from_meta(&meta))],
-                payload,
-            )
-                .into_response(),
-            Err(e) => {
-                let api_error: ApiError = e.into();
-                api_error.into_response()
+    pub(crate) mod id {
+        use super::*;
+        pub(crate) async fn get<
+            R: DiagServiceResponse + Send + Sync,
+            T: UdsEcu + Send + Sync + Clone,
+            U: FileManager + Send + Sync + Clone,
+        >(
+            Path(id): Path<String>,
+            State(WebserverEcuState {
+                mdd_embedded_files, ..
+            }): State<WebserverEcuState<R, T, U>>,
+        ) -> Response {
+            match mdd_embedded_files.get(&id).await {
+                Ok((meta, payload)) => (
+                    StatusCode::OK,
+                    [(header::CONTENT_TYPE, content_type_from_meta(&meta))],
+                    payload,
+                )
+                    .into_response(),
+                Err(e) => {
+                    let api_error: ApiError = e.into();
+                    api_error.into_response()
+                }
             }
         }
     }

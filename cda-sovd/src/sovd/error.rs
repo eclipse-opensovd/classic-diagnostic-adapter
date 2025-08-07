@@ -24,9 +24,13 @@ use axum::{
 use cda_interfaces::{DiagServiceError, diagservices::DiagServiceResponse, file_manager::MddError};
 use hashbrown::HashMap;
 use serde::{Deserialize, Serialize};
+use sovd_interfaces::error::ErrorCode;
+#[cfg(feature = "swagger-ui")]
+use utoipa::ToSchema;
 
 #[allow(dead_code)]
 #[derive(Debug, Deserialize, Serialize)]
+#[cfg_attr(feature = "swagger-ui", derive(ToSchema))]
 pub enum ApiError {
     BadRequest(String),
     Forbidden(Option<String>),
@@ -114,92 +118,8 @@ impl IntoResponse for ApiError {
 pub struct ErrorWrapper(pub ApiError);
 
 #[derive(Serialize)]
-pub(super) struct ApiErrorResponse {
-    message: String,
-    error_code: SovdErrorCode,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    vendor_code: Option<SovdVendorErrorCode>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    parameters: Option<HashMap<String, serde_json::Value>>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    x_errorsource: Option<String>,
-}
-
-#[derive(Serialize)]
 #[serde(rename_all = "kebab-case")]
-// allowed, so we can pre-fill this with all sovd error codes
-// even though not all are used yet.
-#[allow(dead_code)]
-enum SovdErrorCode {
-    /// Details are specified in the `vendor_code`
-    VendorSpecific,
-
-    /// The Component which handles the request (e.g., an ECU)
-    /// has been queried by the SOVD server but did not respond.
-    NotResponding,
-
-    /// The Component receiving the request has answered with an
-    /// error.
-    /// For UDS, the message should include the service identifier
-    /// (Key: ‘service’ and Value of type number) and the negative
-    /// response code (Key: ‘nrc’ and Value of type number).
-    ErrorResponse,
-
-    /// The signature of the data in the payload is invalid.
-    InvalidSignature,
-
-    /// The request does not provide all information (e.g., parameter
-    /// values for an operation) required to complete the method.
-    /// The message should include references to the missing
-    /// information.
-    IncompleteRequest,
-
-    /// The response provided by the Component contains
-    /// information which could not be processed. E.g., the response
-    /// of an ECU does not match the conversion information known
-    /// to the SOVD server.
-    /// The message should include references to the parts of the
-    /// invalid response attribute as well as a reason why the
-    /// attribute is invalid.
-    InvalidResponseContent,
-
-    /// The SOVD server is not configured correctly, e.g., required
-    /// configuration files or other data is missing. The message
-    /// should include further information about the error. A client
-    /// shall assume that this error is fatal and a regular operation of
-    /// the SOVD server cannot be expected.
-    SovdServerMisconfigured,
-
-    /// The SOVD server is able to answer requests, but an internal
-    /// error occurred. The message should include further
-    /// information about the error
-    SovdServerFailure,
-
-    ///The SOVD client does not have the right to access the
-    /// resource.
-    InsufficientAccessRights,
-
-    /// The preconditions to execute the method are not fulfilled.
-    PreconditionsNotFulfilled,
-
-    /// An update is already in progress and not yet done or aborted.
-    UpdateProcessInProgress,
-
-    /// Automatic installation of update is not supported
-    UpdateAutomatedNotSupported,
-
-    /// An update is already in preparation and not yet done or
-    // aborted.
-    UpdatePreparationInProgress,
-
-    /// Another update is currently executed and not yet done or
-    // aborted
-    UpdateExecutionInProgress,
-}
-
-#[derive(Serialize)]
-#[serde(rename_all = "kebab-case")]
-enum SovdVendorErrorCode {
+enum VendorErrorCode {
     NotFound,
     BadRequest,
     RequestTimeout,
@@ -210,60 +130,70 @@ impl IntoResponse for ErrorWrapper {
         match self.0 {
             ApiError::Forbidden(message) => (
                 StatusCode::FORBIDDEN,
-                Json(ApiErrorResponse {
-                    message: message.unwrap_or_else(|| "Forbidden".into()),
-                    error_code: SovdErrorCode::InsufficientAccessRights,
-                    vendor_code: None,
-                    parameters: None,
-                    x_errorsource: None,
-                }),
+                Json(
+                    sovd_interfaces::error::ApiErrorResponse::<VendorErrorCode> {
+                        message: message.unwrap_or_else(|| "Forbidden".into()),
+                        error_code: ErrorCode::InsufficientAccessRights,
+                        vendor_code: None,
+                        parameters: None,
+                        error_source: None,
+                    },
+                ),
             ),
             ApiError::NotFound(message) => (
                 StatusCode::NOT_FOUND,
-                Json(ApiErrorResponse {
-                    message: message.unwrap_or_else(|| "Not Found".into()),
-                    error_code: SovdErrorCode::VendorSpecific,
-                    vendor_code: Some(SovdVendorErrorCode::NotFound),
-                    parameters: None,
-                    x_errorsource: None,
-                }),
+                Json(
+                    sovd_interfaces::error::ApiErrorResponse::<VendorErrorCode> {
+                        message: message.unwrap_or_else(|| "Not Found".into()),
+                        error_code: ErrorCode::VendorSpecific,
+                        vendor_code: Some(VendorErrorCode::NotFound),
+                        parameters: None,
+                        error_source: None,
+                    },
+                ),
             ),
             ApiError::InternalServerError(message) => (
                 StatusCode::INTERNAL_SERVER_ERROR,
-                Json(ApiErrorResponse {
-                    message: message.unwrap_or_else(|| "Internal Server Error".into()),
-                    error_code: SovdErrorCode::SovdServerFailure,
-                    vendor_code: None,
-                    parameters: None,
-                    x_errorsource: None,
-                }),
+                Json(
+                    sovd_interfaces::error::ApiErrorResponse::<VendorErrorCode> {
+                        message: message.unwrap_or_else(|| "Internal Server Error".into()),
+                        error_code: ErrorCode::SovdServerFailure,
+                        vendor_code: None,
+                        parameters: None,
+                        error_source: None,
+                    },
+                ),
             ),
             ApiError::Conflict(message) => (
                 StatusCode::CONFLICT,
-                Json(ApiErrorResponse {
-                    message,
-                    error_code: SovdErrorCode::PreconditionsNotFulfilled,
-                    vendor_code: None,
-                    parameters: None,
-                    x_errorsource: None,
-                }),
+                Json(
+                    sovd_interfaces::error::ApiErrorResponse::<VendorErrorCode> {
+                        message,
+                        error_code: ErrorCode::PreconditionsNotFulfilled,
+                        vendor_code: None,
+                        parameters: None,
+                        error_source: None,
+                    },
+                ),
             ),
             ApiError::BadRequest(message) => (
                 StatusCode::BAD_REQUEST,
-                Json(ApiErrorResponse {
-                    message,
-                    error_code: SovdErrorCode::VendorSpecific,
-                    vendor_code: Some(SovdVendorErrorCode::BadRequest),
-                    parameters: None,
-                    x_errorsource: None,
-                }),
+                Json(
+                    sovd_interfaces::error::ApiErrorResponse::<VendorErrorCode> {
+                        message,
+                        error_code: ErrorCode::VendorSpecific,
+                        vendor_code: Some(VendorErrorCode::BadRequest),
+                        parameters: None,
+                        error_source: None,
+                    },
+                ),
             ),
         }
         .into_response()
     }
 }
 
-pub(super) fn api_error_from_diag_response(response: impl DiagServiceResponse) -> Response {
+pub(crate) fn api_error_from_diag_response(response: impl DiagServiceResponse) -> Response {
     let nrc = match response.as_nrc() {
         Ok(nrc) => nrc,
         Err(e) => {
@@ -286,15 +216,15 @@ pub(super) fn api_error_from_diag_response(response: impl DiagServiceResponse) -
         parameters.insert("SID".to_owned(), sid);
     }
 
-    let error_response = ApiErrorResponse {
-        error_code: SovdErrorCode::ErrorResponse,
+    let error_response = sovd_interfaces::error::ApiErrorResponse::<VendorErrorCode> {
+        error_code: ErrorCode::ErrorResponse,
         message,
         parameters: if parameters.is_empty() {
             None
         } else {
             Some(parameters)
         },
-        x_errorsource: Some("ECU".to_owned()),
+        error_source: Some("ECU".to_owned()),
         vendor_code: None,
     };
     (StatusCode::BAD_GATEWAY, Json(error_response)).into_response()
@@ -309,24 +239,28 @@ pub(crate) async fn sovd_method_not_allowed_handler(
     match status {
         StatusCode::METHOD_NOT_ALLOWED => (
             StatusCode::METHOD_NOT_ALLOWED,
-            Json(ApiErrorResponse {
-                message: "Method not allowed".to_string(),
-                error_code: SovdErrorCode::VendorSpecific,
-                vendor_code: Some(SovdVendorErrorCode::BadRequest),
-                parameters: None,
-                x_errorsource: None,
-            }),
+            Json(
+                sovd_interfaces::error::ApiErrorResponse::<VendorErrorCode> {
+                    message: "Method not allowed".to_string(),
+                    error_code: ErrorCode::VendorSpecific,
+                    vendor_code: Some(VendorErrorCode::BadRequest),
+                    parameters: None,
+                    error_source: None,
+                },
+            ),
         )
             .into_response(),
         StatusCode::REQUEST_TIMEOUT => (
             StatusCode::REQUEST_TIMEOUT,
-            Json(ApiErrorResponse {
-                message: "Request timed out".to_string(),
-                error_code: SovdErrorCode::VendorSpecific,
-                vendor_code: Some(SovdVendorErrorCode::RequestTimeout),
-                parameters: None,
-                x_errorsource: None,
-            }),
+            Json(
+                sovd_interfaces::error::ApiErrorResponse::<VendorErrorCode> {
+                    message: "Request timed out".to_string(),
+                    error_code: ErrorCode::VendorSpecific,
+                    vendor_code: Some(VendorErrorCode::RequestTimeout),
+                    parameters: None,
+                    error_source: None,
+                },
+            ),
         )
             .into_response(),
         _ => resp,
@@ -336,12 +270,14 @@ pub(crate) async fn sovd_method_not_allowed_handler(
 pub(crate) async fn sovd_not_found_handler(uri: Uri) -> impl IntoResponse {
     (
         StatusCode::NOT_FOUND,
-        Json(ApiErrorResponse {
-            message: format!("Resource not found: {uri}"),
-            error_code: SovdErrorCode::VendorSpecific,
-            vendor_code: Some(SovdVendorErrorCode::NotFound),
-            parameters: None,
-            x_errorsource: None,
-        }),
+        Json(
+            sovd_interfaces::error::ApiErrorResponse::<VendorErrorCode> {
+                message: format!("Resource not found: {uri}"),
+                error_code: ErrorCode::VendorSpecific,
+                vendor_code: Some(VendorErrorCode::NotFound),
+                parameters: None,
+                error_source: None,
+            },
+        ),
     )
 }

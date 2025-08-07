@@ -16,6 +16,7 @@ members = [
   "cda-comm-doip",
   "cda-comm-uds",
   "cda-sovd",
+  "cda-sovd-interfaces",
   "cda-main",
   "cda-tracing",
 ]
@@ -28,6 +29,7 @@ cda-comm-uds = { path = "cda-comm-uds" }
 cda-database = { path = "cda-database" }
 cda-sovd = { path = "cda-sovd" }
 cda-tracing = { path = "cda-tracing" }
+sovd-interfaces = { path = "cda-sovd-interfaces" }
 
 [workspace.lints.clippy]
 # enable pedantic

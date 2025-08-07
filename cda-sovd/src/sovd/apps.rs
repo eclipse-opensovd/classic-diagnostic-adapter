@@ -16,34 +16,33 @@ use axum_extra::extract::Host;
 
 use crate::sovd::resource_response;
 
-pub(in crate::sovd) async fn get(Host(host): Host, OriginalUri(uri): OriginalUri) -> Response {
+pub(crate) async fn get(Host(host): Host, OriginalUri(uri): OriginalUri) -> Response {
     resource_response(&host, &uri, vec![("sovd2uds", None)])
 }
 
-pub(in crate::sovd) mod sovd2uds {
-    use axum::{extract::OriginalUri, response::Response};
-    use axum_extra::extract::Host;
+pub(crate) mod sovd2uds {
+    use super::*;
 
-    use crate::sovd::resource_response;
-
-    pub(in crate::sovd) async fn get(Host(host): Host, OriginalUri(uri): OriginalUri) -> Response {
+    #[cfg_attr(feature = "swagger-ui", utoipa::path(
+        get,
+        path = "/vehicle/v15/apps/sovd2uds",
+        responses(
+        (status = 200, description = "Successful response",
+            body = sovd_interfaces::ResourceResponse),
+        ),
+    ))]
+    pub(crate) async fn get(Host(host): Host, OriginalUri(uri): OriginalUri) -> Response {
         resource_response(&host, &uri, vec![("bulk-data", None)])
     }
 
-    pub(in crate::sovd) mod bulk_data {
-        use axum::{extract::OriginalUri, response::Response};
-        use axum_extra::extract::Host;
+    pub(crate) mod bulk_data {
+        use super::*;
 
-        use crate::sovd::resource_response;
-
-        pub(in crate::sovd) async fn get(
-            Host(host): Host,
-            OriginalUri(uri): OriginalUri,
-        ) -> Response {
+        pub(crate) async fn get(Host(host): Host, OriginalUri(uri): OriginalUri) -> Response {
             resource_response(&host, &uri, vec![("flashfiles", None)])
         }
 
-        pub(in crate::sovd) mod flash_files {
+        pub(crate) mod flash_files {
             use std::{path::PathBuf, sync::LazyLock};
 
             use axum::{
@@ -54,9 +53,7 @@ pub(in crate::sovd) mod sovd2uds {
             use http::StatusCode;
             use regex::Regex;
 
-            use crate::sovd::{
-                HashAlgorithm, SovdFile, SovdFileList, WebserverState, error::ApiError,
-            };
+            use crate::sovd::{WebserverState, error::ApiError};
 
             fn file_name_to_id(file_name: &str) -> String {
                 // Keeping the regex as a static Lazy variable to avoid recompilation
@@ -68,8 +65,13 @@ pub(in crate::sovd) mod sovd2uds {
                 RE.replace_all(file_name, "_").to_string()
             }
 
-            async fn process_directory(dir: PathBuf) -> Result<Vec<SovdFile>, ApiError> {
-                fn process(dir: &PathBuf, relative_sub_dir: Option<&PathBuf>) -> Vec<SovdFile> {
+            async fn process_directory(
+                dir: PathBuf,
+            ) -> Result<Vec<sovd_interfaces::sovd2uds::File>, ApiError> {
+                fn process(
+                    dir: &PathBuf,
+                    relative_sub_dir: Option<&PathBuf>,
+                ) -> Vec<sovd_interfaces::sovd2uds::File> {
                     std::fs::read_dir(dir)
                         .into_iter()
                         .flat_map(|entries| entries.filter_map(Result::ok))
@@ -81,9 +83,11 @@ pub(in crate::sovd) mod sovd2uds {
                                     || entry.file_name().to_string_lossy().to_string(),
                                     |rel| rel.join(entry.file_name()).to_string_lossy().to_string(),
                                 );
-                                Some(vec![SovdFile {
+                                Some(vec![sovd_interfaces::sovd2uds::File {
                                     hash: None,
-                                    hash_algorithm: Some(HashAlgorithm::None),
+                                    hash_algorithm: Some(
+                                        sovd_interfaces::sovd2uds::HashAlgorithm::None,
+                                    ),
                                     id: file_name_to_id(&file_name),
                                     mimetype: mime::APPLICATION_OCTET_STREAM
                                         .essence_str()
@@ -118,7 +122,7 @@ pub(in crate::sovd) mod sovd2uds {
                     })
             }
 
-            pub(in crate::sovd) async fn get(State(state): State<WebserverState>) -> Response {
+            pub(crate) async fn get(State(state): State<WebserverState>) -> Response {
                 let flash_files = &mut state.flash_data.as_ref().write().await;
                 let files = if let Some(flash_files_path) = &flash_files.path {
                     process_directory(flash_files_path.clone()).await
@@ -131,7 +135,8 @@ pub(in crate::sovd) mod sovd2uds {
                 match files {
                     Ok(files) => {
                         flash_files.files.clone_from(&files);
-                        let file_list = SovdFileList {
+                        let file_list =
+                            sovd_interfaces::apps::sovd2uds::bulk_data::flash_files::get::Response {
                             files,
                             path: flash_files.path.clone(),
                         };
