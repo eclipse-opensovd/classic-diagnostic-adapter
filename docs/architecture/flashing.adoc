@@ -1,0 +1,8 @@
+= Flashing
+
+Flashing via UDS generally follows the following sequence, OEMs might choose to call additional services or modify the sequence.
+
+[plantuml, "Flashing sequence", svg]
+----
+include::uds/flashing_sequence.puml[role=include]
+----

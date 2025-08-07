@@ -1,0 +1,12 @@
+= MDD Embedded Files API
+
+== Motivation
+
+When an ECU needs to be updated by utilizing the CDA, the client that wants to update the ECU can need additional data from the single-ecu-job embedded in the original `pdx`-file.
+
+The odx-converter offers an option to include code-files from the pdx, as well as partial contents from those files. This API allows the retrieval of s
+
+
+== Embedded Content Retrieval
+
+`/x-sovd2uds-bulk-data/mdd-embedded-files`

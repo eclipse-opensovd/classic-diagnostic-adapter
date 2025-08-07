@@ -1,11 +1,8 @@
 = architecture
+ifndef::imagesdir[:imagesdir: ./images]
 
 == overview
-.architecture overview
-[plantuml, "Architecture blocks", png]
-----
-include::architecture.puml[]
-----
+image::architecture.png[]
 
 == SOVD
 
@@ -18,6 +15,8 @@ The functionality is divided into three distinct modules:
 1. HTTP Server
 2. Translation between SOVD and Diagnostic Tester API
 3. OpenAPI Generation
+
+See xref:sovd-api/index.adoc[SOVD-API]
 
 == Diagnostic Tester
 
@@ -53,10 +52,10 @@ In the communication layer everything related to the communication with ECUs is 
 
 Implementation of UDS communication, with handling of NRCs, tester presents (either physical or functional, flag for every connection per address), timeouts, retries and actual data.
 
-See link:uds_communication.adoc[UDS Communication]
+See xref:uds_communication.adoc[UDS Communication]
 
 === DoIP
 
 Implementation of DoIP communication with handling of timeouts.
 
-See link:doip_communication.adoc[DoIP Communication]
+See xref:doip_communication.adoc[DoIP Communication]
