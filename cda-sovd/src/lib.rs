@@ -23,7 +23,9 @@ use tokio::net::TcpListener;
 use tower::Layer;
 use tower_http::trace::TraceLayer;
 
-mod sovd;
+#[cfg(feature = "swagger-ui")]
+mod openapi;
+pub(crate) mod sovd;
 
 // Consts for HTTP
 pub const SWAGGER_UI_ROUTE: &str = "/swagger-ui";
@@ -54,8 +56,6 @@ where
     T: UdsEcu + Send + Sync + Clone,
     M: FileManager,
 {
-    let mut app = Router::new();
-
     let clonable_shutdown_signal = shutdown_signal.shared();
 
     let vdetect = ecu_uds.clone();
@@ -63,22 +63,41 @@ where
         vdetect.start_variant_detection().await;
     });
 
-    app = create_trace_layer(
-        app.merge(sovd::route::<R, T, M>(&ecu_uds, flash_files_path, file_manager).await),
-    )
-    .layer(tower_http::timeout::TimeoutLayer::new(
-        std::time::Duration::from_secs(30),
-    ))
-    .layer(middleware::from_fn(
-        sovd::error::sovd_method_not_allowed_handler,
-    ))
-    .fallback(sovd::error::sovd_not_found_handler);
+    // Main application routes (with NormalizePathLayer)
+    let app_routes = {
+        let app = Router::new()
+            .merge(sovd::route::<R, T, M>(&ecu_uds, flash_files_path, file_manager).await);
+
+        create_trace_layer(app)
+            .layer(tower_http::normalize_path::NormalizePathLayer::trim_trailing_slash())
+            .layer(tower_http::timeout::TimeoutLayer::new(
+                std::time::Duration::from_secs(30),
+            ))
+            .layer(middleware::from_fn(
+                sovd::error::sovd_method_not_allowed_handler,
+            ))
+            .fallback(sovd::error::sovd_not_found_handler)
+    };
+
+    // Swagger UI routes (no NormalizePathLayer)
+    #[cfg(feature = "swagger-ui")]
+    let app_routes = {
+        let mut openapi = openapi::openapi();
+        openapi.paths.merge(openapi::paths(&ecu_uds).await);
+
+        let swagger_ui_routes = Router::new()
+            .merge(
+                utoipa_swagger_ui::SwaggerUi::new(SWAGGER_UI_ROUTE)
+                    .config(utoipa_swagger_ui::Config::default().validator_url("none"))
+                    .url(OPENAPI_JSON_ROUTE, openapi),
+            )
+            .layer(tower_http::cors::CorsLayer::permissive())
+            .layer(TraceLayer::new_for_http());
+        app_routes.merge(swagger_ui_routes)
+    };
 
     let middleware = tower::util::MapRequestLayer::new(rewrite_request_uri);
-    let app_with_middleware = middleware.layer(app);
-
-    let app_with_middleware = tower_http::normalize_path::NormalizePathLayer::trim_trailing_slash()
-        .layer(app_with_middleware);
+    let app_with_middleware = middleware.layer(app_routes);
 
     let listen_address = format!("{}:{}", config.host, config.port);
     match TcpListener::bind(&listen_address).await {

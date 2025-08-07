@@ -11,92 +11,51 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-use std::sync::Arc;
+use std::time::Duration;
 
 use axum::{
     Json,
-    response::{IntoResponse, Response},
+    extract::State,
+    http::StatusCode,
+    response::{IntoResponse as _, Response},
 };
-use cda_interfaces::datatypes::semantics;
-use http::StatusCode;
-use serde::{Deserialize, Serialize};
+use axum_extra::extract::WithRejection;
+use cda_interfaces::{
+    UdsEcu,
+    datatypes::semantics,
+    diagservices::{DiagServiceResponse, DiagServiceResponseType},
+    file_manager::FileManager,
+};
+use hashbrown::HashMap;
+use serde::Serialize;
+use sovd_interfaces::components::ecu::modes as sovd_modes;
 
 use crate::sovd::{
+    WebserverEcuState,
     auth::Claims,
-    error::ApiError,
-    locking::{Locks, all_locks_owned, get_locks},
+    error::{ApiError, api_error_from_diag_response},
+    locks::validate_lock,
 };
 
 const SESSION_NAME: &str = "Diagnostic session";
 const SECURITY_NAME: &str = "Security access";
 
-#[derive(Serialize)]
-struct SovdModeCollectionItem {
-    id: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    name: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    translation_id: Option<String>,
-}
-
-#[derive(Serialize)]
-struct SovdModeResponseBody {
-    // todo after POC: add open api schema for ?include_schema=true
-    items: Vec<SovdModeCollectionItem>,
-}
-
-#[derive(Debug, Deserialize)]
-struct SovdPutModeKey {
-    #[serde(rename = "Send_Key")]
-    send_key: String,
-}
-
-#[derive(Debug, Deserialize)]
-pub(in crate::sovd) struct SovdPutModeRequestBody {
-    value: String,
-    /// Defines after how many seconds the
-    /// mode expires and should therefore
-    /// be automatically reset to the mode’s
-    // default value
-    // It's optional although strictly speaking it should be required
-    // when following the sovd standard.
-    // todo after POC: if strict mode is enabled, this should be required see issue #84
-    mode_expiration: Option<u64>,
-
-    #[serde(rename = "Key")]
-    key: Option<SovdPutModeKey>,
-}
-
-#[derive(Debug, Serialize)]
-struct SovdPutModeResponseBody<T> {
-    id: String,
-    value: T,
-}
-
-#[derive(Debug, Serialize)]
-struct SovdMode<T> {
-    #[serde(skip_serializing_if = "Option::is_none")]
-    name: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    translation_id: Option<String>,
-    value: T,
-    // todo after POC: add open api schema for ?include_schema=true
-}
-
-pub(in crate::sovd) async fn get_modes() -> Response {
+pub(crate) async fn get() -> Response {
     (
         StatusCode::OK,
-        Json(SovdModeResponseBody {
+        Json(sovd_modes::get::Response {
             items: vec![
-                SovdModeCollectionItem {
-                    id: semantics::SESSION.to_owned(),
+                sovd_modes::Mode {
+                    id: Some(semantics::SESSION.to_owned()),
                     name: Some(SESSION_NAME.to_string()),
                     translation_id: None,
+                    value: None,
                 },
-                SovdModeCollectionItem {
-                    id: semantics::SECURITY.to_owned(),
+                sovd_modes::Mode {
+                    id: Some(semantics::SECURITY.to_owned()),
                     name: Some(SECURITY_NAME.to_string()),
                     translation_id: None,
+                    value: None,
                 },
             ],
         }),
@@ -104,51 +63,10 @@ pub(in crate::sovd) async fn get_modes() -> Response {
         .into_response()
 }
 
-async fn validate_lock(claims: &Claims, ecu_name: &String, locks: Arc<Locks>) -> Option<Response> {
-    let ecu_lock = locks.ecu.lock_ro().await;
-    let ecu_locks = get_locks(claims, &ecu_lock, Some(ecu_name));
+pub(crate) mod session {
+    use super::*;
 
-    let vehicle_lock = locks.vehicle.lock_ro().await;
-    let vehicle_locks = get_locks(claims, &vehicle_lock, None);
-    // todo once functional locks are _actually_ locking the ecu, checking the vehicle lock is
-    // not needed anymore
-    if ecu_locks.items.is_empty() && vehicle_locks.items.is_empty() {
-        return Some(
-            ApiError::Forbidden(Some("Required ECU lock is missing".to_string())).into_response(),
-        );
-    }
-
-    if let Err(e) = all_locks_owned(&ecu_lock, claims) {
-        return Some(e.into_response());
-    }
-    None
-}
-
-pub(in crate::sovd) mod session {
-    use std::time::Duration;
-
-    use axum::{
-        Json,
-        extract::State,
-        http::StatusCode,
-        response::{IntoResponse as _, Response},
-    };
-    use axum_extra::extract::WithRejection;
-    use cda_interfaces::{
-        UdsEcu,
-        datatypes::semantics,
-        diagservices::{DiagServiceResponse, DiagServiceResponseType},
-        file_manager::FileManager,
-    };
-
-    use crate::sovd::{
-        WebserverEcuState,
-        auth::Claims,
-        error::{ApiError, api_error_from_diag_response},
-        modes::{SovdMode, SovdPutModeRequestBody, SovdPutModeResponseBody, validate_lock},
-    };
-
-    pub(in crate::sovd) async fn put_session<
+    pub(crate) async fn put<
         R: DiagServiceResponse + Send + Sync,
         T: UdsEcu + Send + Sync + Clone,
         U: FileManager + Send + Sync + Clone,
@@ -160,7 +78,10 @@ pub(in crate::sovd) mod session {
             ecu_name,
             ..
         }): State<WebserverEcuState<R, T, U>>,
-        WithRejection(Json(request_body), _): WithRejection<Json<SovdPutModeRequestBody>, ApiError>,
+        WithRejection(Json(request_body), _): WithRejection<
+            Json<sovd_modes::put::Request>,
+            ApiError,
+        >,
     ) -> Response {
         if let Some(response) = validate_lock(&claims, &ecu_name, locks).await {
             return response;
@@ -177,7 +98,7 @@ pub(in crate::sovd) mod session {
             Ok(response) => match response.response_type() {
                 DiagServiceResponseType::Positive => (
                     StatusCode::OK,
-                    Json(SovdPutModeResponseBody {
+                    Json(sovd_modes::put::Response {
                         id: semantics::SECURITY.to_owned(),
                         value: request_body.value.clone(),
                     }),
@@ -189,7 +110,7 @@ pub(in crate::sovd) mod session {
         }
     }
 
-    pub(in crate::sovd) async fn get_session<
+    pub(crate) async fn get<
         R: DiagServiceResponse + Send + Sync,
         T: UdsEcu + Send + Sync + Clone,
         U: FileManager + Send + Sync + Clone,
@@ -199,9 +120,10 @@ pub(in crate::sovd) mod session {
         match uds.ecu_session(&ecu_name).await {
             Ok(security_mode) => (
                 StatusCode::OK,
-                Json(&SovdMode {
+                Json(&sovd_modes::Mode {
+                    id: None,
                     name: Some(semantics::SESSION.to_owned()),
-                    value: security_mode,
+                    value: Some(security_mode),
                     translation_id: None,
                 }),
             )
@@ -214,31 +136,10 @@ pub(in crate::sovd) mod session {
     }
 }
 
-pub(in crate::sovd) mod security {
-    use std::time::Duration;
+pub(crate) mod security {
+    use cda_interfaces::{SecurityAccess, diagservices::UdsPayloadData};
 
-    use axum::{
-        Json,
-        extract::State,
-        http::StatusCode,
-        response::{IntoResponse, Response},
-    };
-    use axum_extra::extract::WithRejection;
-    use cda_interfaces::{
-        SecurityAccess, UdsEcu,
-        datatypes::semantics,
-        diagservices::{DiagServiceResponse, DiagServiceResponseType, UdsPayloadData},
-        file_manager::FileManager,
-    };
-    use hashbrown::HashMap;
-    use serde::Serialize;
-
-    use crate::sovd::{
-        WebserverEcuState,
-        auth::Claims,
-        error::{ApiError, api_error_from_diag_response},
-        modes::{SovdMode, SovdPutModeRequestBody, SovdPutModeResponseBody, validate_lock},
-    };
+    use super::*;
 
     #[derive(Serialize)]
     struct SovdSeed {
@@ -252,7 +153,7 @@ pub(in crate::sovd) mod security {
         seed: SovdSeed,
     }
 
-    pub(crate) async fn get_security<
+    pub(crate) async fn get<
         R: DiagServiceResponse + Send + Sync,
         T: UdsEcu + Send + Sync + Clone,
         U: FileManager + Send + Sync + Clone,
@@ -272,9 +173,10 @@ pub(in crate::sovd) mod security {
         match uds.ecu_security_access(&ecu_name).await {
             Ok(security_mode) => (
                 StatusCode::OK,
-                Json(&SovdMode {
+                Json(&sovd_modes::Mode {
+                    id: None,
                     name: Some(semantics::SECURITY.to_owned()),
-                    value: security_mode,
+                    value: Some(security_mode),
                     translation_id: None,
                 }),
             )
@@ -286,7 +188,7 @@ pub(in crate::sovd) mod security {
         }
     }
 
-    pub(in crate::sovd) async fn put_security<
+    pub(crate) async fn put<
         R: DiagServiceResponse + Send + Sync,
         T: UdsEcu + Send + Sync + Clone,
         U: FileManager + Send + Sync + Clone,
@@ -298,7 +200,10 @@ pub(in crate::sovd) mod security {
             locks,
             ..
         }): State<WebserverEcuState<R, T, U>>,
-        WithRejection(Json(request_body), _): WithRejection<Json<SovdPutModeRequestBody>, ApiError>,
+        WithRejection(Json(request_body), _): WithRejection<
+            Json<sovd_modes::put::Request>,
+            ApiError,
+        >,
     ) -> Response {
         fn split_at_last_underscore(input: &str) -> (String, Option<String>) {
             let parts: Vec<&str> = input.split('_').collect();
@@ -375,7 +280,7 @@ pub(in crate::sovd) mod security {
 
                     SecurityAccess::SendKey(_) => (
                         StatusCode::OK,
-                        Json(SovdPutModeResponseBody {
+                        Json(sovd_modes::put::Response {
                             id: semantics::SECURITY.to_owned(),
                             value: request_body.value.clone(),
                         }),
