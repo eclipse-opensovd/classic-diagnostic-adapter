@@ -105,6 +105,14 @@ pub trait EcuManager:
         raw_payload: &[u8],
         map_to_json: bool,
     ) -> Result<Self::Response, DiagServiceError>;
+    /// Creates a `ServicePayload` and processes transitions based on raw UDS data,
+    /// as received from a generic data endpoint.
+    ///
+    /// Returns the `ServicePayload` with resolved transitions.
+    ///
+    /// # Errors
+    /// Returns `Err` if the payload cannot be matched to any diagnostic service.
+    fn check_genericservice(&self, rawdata: Vec<u8>) -> Result<ServicePayload, DiagServiceError>;
     /// Converts given `UdsPayloadData` into a UDS request payload for the given `DiagService`.
     ///
     /// # Errors

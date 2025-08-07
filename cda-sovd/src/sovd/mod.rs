@@ -37,8 +37,8 @@ use uuid::Uuid;
 
 use crate::sovd::{
     components::ecu::{
-        configurations, data, modes, operations, x_single_ecu_jobs, x_sovd2uds_bulk_data,
-        x_sovd2uds_download,
+        configurations, data, genericservice, modes, operations, x_single_ecu_jobs,
+        x_sovd2uds_bulk_data, x_sovd2uds_download,
     },
     locks::{LockType, Locks},
 };
@@ -196,6 +196,7 @@ pub async fn route<
                     .post(data::diag_service::post)
                     .put(data::diag_service::put),
             )
+            .route("/genericservice", routing::put(genericservice::put))
             .route(
                 "/operations/comparam/executions",
                 routing::get(operations::comparams::executions::get)

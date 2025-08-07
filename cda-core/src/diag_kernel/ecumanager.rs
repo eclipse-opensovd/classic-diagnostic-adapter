@@ -15,7 +15,7 @@ use std::{sync::Arc, time::Duration};
 
 use cda_database::datatypes::{
     self, DataOperation, DataType, DiagCodedTypeVariant, DiagnosticDatabase, DiagnosticService,
-    LogicalAddressType, MuxDop, StateChart, resolve_comparam,
+    LogicalAddressType, MuxDop, ParameterValue, StateChart, resolve_comparam,
 };
 use cda_interfaces::{
     DiagComm, DiagCommAction, DiagCommType, DiagServiceError, EcuAddressProvider, EcuState,
@@ -306,6 +306,135 @@ impl cda_interfaces::EcuManager for EcuManager {
             .collect();
 
         Ok(mapped)
+    }
+
+    fn check_genericservice(&self, rawdata: Vec<u8>) -> Result<ServicePayload, DiagServiceError> {
+        if rawdata.len() < 3 {
+            return Err(DiagServiceError::BadPayload(
+                "Expected at least 3 bytes".to_owned(),
+            ));
+        }
+
+        let variant = self
+            .variant
+            .as_ref()
+            .and_then(|v| self.ecu_data.variants.get(&v.id))
+            .or_else(|| self.ecu_data.variants.get(&self.ecu_data.base_variant_id))
+            .ok_or(DiagServiceError::NotFound)?;
+
+        let base_variant = self
+            .ecu_data
+            .variants
+            .get(&self.ecu_data.base_variant_id)
+            .ok_or(DiagServiceError::NotFound)?;
+
+        // match the coded consts for very basic types until a match is not possible
+        // anymore because the types are dynamic or unexpected. if at least three bytes
+        // were matched, assume we have a matched service
+        let mapped_service = variant
+            .services
+            .iter()
+            .chain(base_variant.services.iter())
+            .find_map(|service_id| {
+                let service = match self.ecu_data.services.get(service_id) {
+                    Some(service) => service,
+                    None => return None,
+                };
+
+                let request = match self.ecu_data.requests.get(&service.request_id) {
+                    Some(params) => params,
+                    None => return None,
+                };
+
+                let mut rawdata_pos = 0usize;
+                let mut matched = true;
+
+                for param_id in request.params.iter() {
+                    let param = match self.ecu_data.params.get(param_id) {
+                        Some(param) => param,
+                        None => continue,
+                    };
+                    let coded_const = match &param.value {
+                        ParameterValue::CodedConst(c) => c,
+                        _ => break,
+                    };
+                    let coded_const_type = match self
+                        .ecu_data
+                        .diag_coded_types
+                        .get(&coded_const.diag_coded_type)
+                    {
+                        Some(coded_const_type) => {
+                            if coded_const_type.base_datatype != DataType::UInt32 {
+                                break;
+                            }
+                            match &coded_const_type.type_ {
+                                DiagCodedTypeVariant::StandardLength(standard_length) => {
+                                    standard_length
+                                }
+                                _ => break,
+                            }
+                        }
+                        None => break,
+                    };
+                    if !matches!(coded_const_type.bit_length, 8 | 16 | 32)
+                        || coded_const_type.condensed
+                        || coded_const_type.bitmask.is_some()
+                    {
+                        break;
+                    }
+
+                    let coded_const_value = match STRINGS.get(coded_const.value) {
+                        None => break,
+                        Some(v) => match v.parse::<u32>() {
+                            Ok(val) => val,
+                            Err(_) => break,
+                        },
+                    };
+                    // Guard against out of bounds access
+                    if rawdata_pos + (coded_const_type.bit_length / 8) as usize > rawdata.len() {
+                        break;
+                    }
+
+                    let rawdata_param_value = match coded_const_type.bit_length {
+                        8 => rawdata[rawdata_pos] as u32,
+                        16 => u16::from_be_bytes([rawdata[rawdata_pos], rawdata[rawdata_pos + 1]])
+                            as u32,
+                        32 => u32::from_be_bytes([
+                            rawdata[rawdata_pos],
+                            rawdata[rawdata_pos + 1],
+                            rawdata[rawdata_pos + 2],
+                            rawdata[rawdata_pos + 3],
+                        ]),
+                        _ => unreachable!(),
+                    };
+
+                    matched = rawdata_param_value == coded_const_value;
+                    if !matched {
+                        break;
+                    }
+                    rawdata_pos += (coded_const_type.bit_length / 8) as usize;
+                }
+                // if at least 3 bytes are matched, the ID param was matched
+                if matched && rawdata_pos >= 3 {
+                    Some(service)
+                } else {
+                    None
+                }
+            })
+            .ok_or(DiagServiceError::NotFound)?;
+
+        let sec_ctrl = self.access_control.lock();
+        let new_session = mapped_service.transitions.get(&sec_ctrl.session);
+        let new_sec = mapped_service.transitions.get(&sec_ctrl.security);
+        drop(sec_ctrl);
+
+        Ok(ServicePayload {
+            data: rawdata,
+            new_session_id: new_session.copied(),
+            new_security_access_id: new_sec.copied(),
+            source_address: self.tester_address,
+            target_address: self.logical_address,
+        })
     }
 
     /// Convert a UDS payload given as `u8` slice into a `DiagServiceResponse`.
