@@ -27,6 +27,7 @@ use crate::sovd::{
 
 pub(crate) mod configurations;
 pub(crate) mod data;
+pub(crate) mod genericservice;
 pub(crate) mod modes;
 pub(crate) mod operations;
 pub(crate) mod x_single_ecu_jobs;

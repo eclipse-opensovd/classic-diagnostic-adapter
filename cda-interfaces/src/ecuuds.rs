@@ -98,6 +98,18 @@ pub trait UdsEcu: Send + Sync + 'static {
         payload: Option<UdsPayloadData>,
         map_to_json: bool,
     ) -> impl Future<Output = Result<Self::Response, DiagServiceError>> + Send;
+    /// Send a raw uds packet to the ECU
+    /// The initial bytes of the packet are analyzed to resolve the diag-service,
+    /// but the rest of the data is not validated / checked for consistency
+    /// # Error
+    /// Will return `Err` if the ECU does not exist, the diag-service cannot be
+    /// resolved or if the request fails.
+    fn send_genericservice(
+        &self,
+        ecu_name: &str,
+        payload: Vec<u8>,
+        timeout: Option<Duration>,
+    ) -> impl Future<Output = Result<Vec<u8>, DiagServiceError>> + Send;
     /// Set the session for the given ECU.
     /// No authentication is done by the implementation itself, it is assumed that the
     /// caller has already set the appropriate security access if required.

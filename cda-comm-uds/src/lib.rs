@@ -673,6 +673,31 @@ impl<S: EcuGateway, R: DiagServiceResponse, T: EcuManager<Response = R>> UdsEcu
         }
     }
 
+    async fn send_genericservice(
+        &self,
+        ecu_name: &str,
+        payload: Vec<u8>,
+        timeout: Option<Duration>,
+    ) -> Result<Vec<u8>, DiagServiceError> {
+        log::trace!(target: LOG_TARGET, "Sending raw uds packet on {ecu_name}: {payload:?}");
+
+        let payload = self
+            .ecus
+            .get(ecu_name)
+            .ok_or(DiagServiceError::NotFound)?
+            .read()
+            .await
+            .check_genericservice(payload)?;
+
+        match self
+            .send_with_raw_payload(ecu_name, payload, timeout, true)
+            .await?
+        {
+            Some(response) => Ok(response.data),
+            None => Ok(Vec::new()),
+        }
+    }
+
     async fn get_sdgs(
         &self,
         ecu_name: &str,
