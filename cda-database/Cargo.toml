@@ -18,7 +18,6 @@ path = "src/lib.rs"
 # internal dependencies
 cda-interfaces = { workspace = true }
 # external
-bitvec = "1.0.1"
 hashbrown = { version = "0.15", features = ["serde"] }
 prost = "0.14"
 # tokio

@@ -40,6 +40,7 @@ pub enum DiagDataTypeContainer {
 #[derive(Debug)]
 pub struct DiagDataTypeContainerRaw {
     pub data: Vec<u8>,
+    pub bit_len: usize,
     pub data_type: DataType,
     pub compu_method: Option<CompuMethod>,
 }
