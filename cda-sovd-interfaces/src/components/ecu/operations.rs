@@ -102,6 +102,7 @@ pub mod comparams {
         }
 
         #[derive(Deserialize, Serialize, Clone)]
+        #[serde(rename_all = "lowercase")]
         #[cfg_attr(feature = "swagger-ui", derive(ToSchema))]
         pub enum Capability {
             Execute,
