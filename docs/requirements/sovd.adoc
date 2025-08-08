@@ -1,0 +1,65 @@
+[#_sovd]
+= SOVD (ISO 17978-1)
+
+The guiding principle behind this document is to specify the requirements for an ISO 17978-1 compatible API in the Eclipse OpenSOVD Classic Diagnostic Adapter (CDA).
+
+== Technical
+=== HTTP-Server
+
+The HTTP Server has to support multiple connections,
+
+==== Configurable port
+The CDA must provide an HTTP- or HTTPS-server running on a configurable port.
+
+=== HTTPS
+In case of HTTPS, the certificate/key must be providable through the configuration, or a plugin.
+
+== API
+
+=== Entities
+
+=== Paths
+
+==== Vehicle
+==== Functional groups
+==== ECUs
+
+=== Extensions to the ISO specification
+
+==== Flash API
+
+===== General
+[.specitem, oft-sid="req~sovd.api.flashing.general~1", oft-needs="arch"]
+
+A Flash-API is required to support flashing of ECUs, utilizing SIDs `34`, `36` & `37`. It needs to enable efficient transfer of the data, without sending the individual data transfers via REST.
+
+Flashing is the process of updating the firmware of an ECU.
+
+
+.Rationale
+[.rationale]
+Handling for the aforementioned SIDs isn't defined in the ISO specification, it is however an important use-case to be able to update the firmware on ECUs.
+
+===== Security
+[.specitem, oft-sid="req~sovd.api.flashing.security~1", oft-needs="arch"]
+
+The source of the data to be sent for flashing, must be restrictable to a path and its subdirectories via configuration.
+
+.Rationale
+[.rationale]
+Without restrictions to the path, an attacker could exfiltrate arbitrary accessible data.
+
+
+=== OpenAPI-Documentation
+
+=== Security
+
+Since vendors have different requirements and systems regarding security, security related functionality has to be implemented in a plugin.
+
+==== Token validation
+==== Audiences
+
+== Standalone OpenAPI-Generator
+[.specitem, oft-sid="req~sovd.api.openapi.generator~1"]
+
+A standalone OpenAPI generator must be provided, which allows the creation of a full OpenAPI document for a single ECU, with a set of ECU variants, and audiences.

@@ -1,0 +1,31 @@
+= Requirements
+:doctype: book
+:title: Classic Diagnostic Adapter Requirements
+
+== Introduction
+
+The Classic Diagnostics Adapters purpose is to provide an SOVD API for legacy ECUs. Communication with legacy ECUs is facilitated by utilizing UDS. It must support DoIP, and may support additional transports in the future.
+
+In this requirements documentation, the sections represent the functional requirements for the communication on both ends, and some generic requirements for the program itself.
+
+The actual architecture and implementation details must be done in different documents for traceability and separation of concerns.
+
+=== Tracing
+[.specitem, oft-sid="req~main.tracing.programmatically~1", oft-needs="impl"]
+
+Tracing between requirements, architecture, design, implementation & tests is facilitated with https://github.com/itsallcode/openfasttrace[openfasttrace].
+
+== Terminology
+
+The key words "MUST", "MUST NOT", "REQUIRED", "SHALL", "SHALL NOT", "SHOULD", "SHOULD NOT", "RECOMMENDED", "MAY", and "OPTIONAL" in this document are to be interpreted as described in https://datatracker.ietf.org/doc/html/rfc2119[RFC 2119].
+
+include::general.adoc[]
+
+include::sovd.adoc[]
+
+include::uds.adoc[]
+
+include::doip.adoc[]
+
+include::plugins.adoc[]
+

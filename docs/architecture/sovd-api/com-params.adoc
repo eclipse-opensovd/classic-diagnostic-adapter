@@ -1,0 +1,11 @@
+= Communication Parameters (ComParams)
+
+== Motivation
+
+When using the CDA to communicate with classic ECUs, a client needs the ability to modify the communications parameters like timeouts and retries on-the-fly. This API provides a way to do this.
+
+== Retrieving
+
+`/operations/comparam`
+
+== Modifying

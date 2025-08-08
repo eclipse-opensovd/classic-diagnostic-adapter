@@ -1,0 +1,67 @@
+= Flash-API
+
+== Introduction
+To allow flashing functionality, as described in xref:../flashing.adoc[flashing], the SOVD-API from ISO 17978-3 needs to be extended with the functionality defined in this document.
+
+The standard doesn't define how the required services should be mapped in the Classic Diagnostic Adapter.
+
+[#_paths]
+== API
+
+The following paths are required for the flashing API.
+
+
+=== Management of flash-files
+
+[cols="1,1,1,1"]
+|===
+| Method | Path | Description | Notes
+
+|GET
+|`/apps/sovd2uds/bulk-data/flashfiles`
+|Returns a list of entries which represent files in the configured flash folder and its subfolders.
+|Flash folder needs to be configured
+
+|===
+
+=== Data Transfer
+
+All paths are prefixed with `/components/{ecu}`.
+
+
+[cols="1,1,1,1"]
+|===
+| Method | Path | Description | Notes
+
+|GET
+|`/apps/sovd2uds/bulk-data/flashfiles`
+|Returns a list of entries which represent files in the configured flash folder and its subfolders.
+|Flash folder needs to be configured
+
+|PUT
+|`/x-sovd2uds-download/requestdownload`
+|Calls the RequestDownload Service (`34`)
+|Returns an object with an `id`
+
+|POST
+|`/x-sovd2uds-download/flashtransfer`
+|Transfers data in file given by id from an offset for a given length in settable chunk-sizes. It uses repeated calls to service `36` to transfer the data.
+|Plans: API will be extended to also allow starting the transfer directly with absolute file paths
+
+|GET
+|`/x-sovd2uds-download/flashtransfer`
+|Retrieve the ids of the running flash transfers
+|--
+
+|GET
+|`/x-sovd2uds-download/flashtransfer/{id}`
+|Retrieve the status of the transfer with `id`
+|--
+
+|PUT
+|`/x-sovd2uds-download/transferexit`
+|Calls the transfer exit service (`37`)
+|--
+
+|===
+
