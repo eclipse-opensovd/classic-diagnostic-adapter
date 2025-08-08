@@ -69,7 +69,6 @@ where
             .merge(sovd::route::<R, T, M>(&ecu_uds, flash_files_path, file_manager).await);
 
         create_trace_layer(app)
-            .layer(tower_http::normalize_path::NormalizePathLayer::trim_trailing_slash())
             .layer(tower_http::timeout::TimeoutLayer::new(
                 std::time::Duration::from_secs(30),
             ))
@@ -97,7 +96,9 @@ where
     };
 
     let middleware = tower::util::MapRequestLayer::new(rewrite_request_uri);
-    let app_with_middleware = middleware.layer(app_routes);
+    let trim_trailing_slash_middleware =
+        tower_http::normalize_path::NormalizePathLayer::trim_trailing_slash().layer(app_routes);
+    let app_with_middleware = middleware.layer(trim_trailing_slash_middleware);
 
     let listen_address = format!("{}:{}", config.host, config.port);
     match TcpListener::bind(&listen_address).await {
@@ -139,7 +140,12 @@ where
                 )
             })
             .on_request(|request: &axum::http::Request<_>, _span: &tracing::Span| {
-                log::info!(target: "webserver", "Request: {:?} {}", request.method(), request.uri());
+                log::info!(
+                    target: "webserver",
+                    "Request: {:?} {}",
+                    request.method(),
+                    request.uri()
+                );
             })
             .on_response(
                 |response: &axum::http::Response<_>,
