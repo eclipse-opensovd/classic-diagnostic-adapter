@@ -304,7 +304,6 @@ pub(crate) mod service {
 
         use crate::sovd::{
             self, WebserverEcuState, api_error_from_diag_response,
-            data::Op,
             error::{ApiError, ErrorWrapper},
         };
 
@@ -446,7 +445,6 @@ pub(crate) mod service {
                         (StatusCode::OK, Bytes::from_owner(data)).into_response()
                     }
                 }
-                Op::Update => unreachable!("No put handler registered"),
             }
         }
 
@@ -537,6 +535,11 @@ pub(crate) mod service {
                     }
                 }
             }
+        }
+
+        enum Op {
+            Read,
+            Write,
         }
     }
 }

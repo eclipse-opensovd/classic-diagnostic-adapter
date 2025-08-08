@@ -70,3 +70,50 @@ impl IntoSovd for ComponentConfigurationsInfo {
         }
     }
 }
+
+pub(crate) mod diag_service {
+    use axum::{
+        body::Bytes,
+        extract::{Path, State},
+        response::{IntoResponse, Response},
+    };
+    use cda_interfaces::{
+        DiagComm, DiagCommAction, DiagCommType, UdsEcu, diagservices::DiagServiceResponse,
+        file_manager::FileManager,
+    };
+    use http::HeaderMap;
+
+    use crate::sovd::{
+        WebserverEcuState,
+        components::ecu::data_request,
+        error::{ApiError, ErrorWrapper},
+    };
+
+    pub(crate) async fn put<
+        R: DiagServiceResponse + Send + Sync,
+        T: UdsEcu + Send + Sync + Clone,
+        U: FileManager + Send + Sync + Clone,
+    >(
+        headers: HeaderMap,
+        Path(service): Path<String>,
+        State(WebserverEcuState { ecu_name, uds, .. }): State<WebserverEcuState<R, T, U>>,
+        body: Bytes,
+    ) -> Response {
+        if service.contains('/') {
+            return ErrorWrapper(ApiError::BadRequest("Invalid path".to_owned())).into_response();
+        }
+        data_request::<T>(
+            DiagComm {
+                name: service.clone(),
+                action: DiagCommAction::Write,
+                type_: DiagCommType::Configurations,
+                lookup_name: None,
+            },
+            &ecu_name,
+            &uds,
+            headers,
+            body,
+        )
+        .await
+    }
+}

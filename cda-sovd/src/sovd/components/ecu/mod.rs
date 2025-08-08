@@ -13,16 +13,22 @@
 
 use axum::{
     Json,
+    body::Bytes,
     extract::{Query, State},
     response::{IntoResponse, Response},
 };
-use cda_interfaces::{UdsEcu, diagservices::DiagServiceResponse, file_manager::FileManager};
-use http::StatusCode;
+use cda_interfaces::{
+    DiagComm, UdsEcu,
+    diagservices::{DiagServiceResponse, DiagServiceResponseType},
+    file_manager::FileManager,
+};
+use http::{HeaderMap, StatusCode, header};
 use serde::Deserialize;
 
 use crate::sovd::{
     IntoSovd, WebserverEcuState,
-    error::{ApiError, ErrorWrapper},
+    error::{ApiError, ErrorWrapper, api_error_from_diag_response},
+    get_payload_data,
 };
 
 pub(crate) mod configurations;
@@ -72,6 +78,7 @@ pub(crate) async fn get<
             variant,
             locks: format!("{base_path}/locks"),
             operations: format!("{base_path}/operations"),
+            configurations: format!("{base_path}/configurations"),
             data: format!("{base_path}/data"),
             sdgs: sdgs.map(|sdgs| sdgs.into_sovd()),
             single_ecu_jobs: format!("{base_path}/x-single-ecu-jobs"),
@@ -139,6 +146,84 @@ impl IntoSovd for cda_interfaces::datatypes::ComParamSimpleValue {
                     offset_to_si_unit: u.offset_to_si_unit,
                 }
             }),
+        }
+    }
+}
+
+async fn data_request<T: UdsEcu + Send + Sync + Clone>(
+    service: DiagComm,
+    ecu_name: &str,
+    gateway: &T,
+    headers: HeaderMap,
+    body: Bytes,
+) -> Response {
+    let data = match get_payload_data::<sovd_interfaces::components::ecu::data::DataRequestPayload>(
+        &headers, &body,
+    ) {
+        Ok(value) => value,
+        Err(e) => return ErrorWrapper(e).into_response(),
+    };
+
+    let (response_mime, map_to_json) = match headers.get(header::ACCEPT) {
+        Some(v)
+            if v == mime::APPLICATION_JSON.essence_str() || v == mime::STAR_STAR.essence_str() =>
+        {
+            (Some(v), true)
+        }
+        Some(v) if v == mime::APPLICATION_OCTET_STREAM.essence_str() => (Some(v), false),
+        Some(unsupported) => {
+            return ErrorWrapper(ApiError::BadRequest(format!(
+                "Unsupported Accept: {unsupported:?}"
+            )))
+            .into_response();
+        }
+        _ => (None, true),
+    };
+
+    let response = match gateway
+        .send(ecu_name, service.clone(), data, map_to_json)
+        .await
+        .map_err(std::convert::Into::into)
+    {
+        Err(e) => return ErrorWrapper(e).into_response(),
+        Ok(v) => v,
+    };
+
+    if let DiagServiceResponseType::Negative = response.response_type() {
+        return api_error_from_diag_response(response).into_response();
+    }
+
+    match response_mime {
+        Some(v) if v == mime::APPLICATION_OCTET_STREAM.essence_str() => {
+            let data = response.get_raw().to_vec();
+            (StatusCode::OK, Bytes::from_owner(data)).into_response()
+        }
+        _ => {
+            let mapped_data = match response
+                .into_json()
+                .map_err(|e| ApiError::InternalServerError(Some(format!("{e:?}"))))
+            {
+                Err(e) => {
+                    return ErrorWrapper(ApiError::InternalServerError(Some(format!(
+                        "Failed to serialize response: {e:?}"
+                    ))))
+                    .into_response();
+                }
+                Ok(v) => v,
+            };
+
+            if mapped_data.is_null() {
+                StatusCode::NO_CONTENT.into_response()
+            } else {
+                (
+                    StatusCode::OK,
+                    Json(sovd_interfaces::DataItem {
+                        id: service.name.to_lowercase(),
+                        data: mapped_data,
+                    }),
+                )
+                    .into_response()
+            }
         }
     }
 }

@@ -11,12 +11,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-use axum::body::Bytes;
-use cda_interfaces::diagservices::DiagServiceResponseType;
-use http::header;
-
 use super::*;
-use crate::sovd::{error::api_error_from_diag_response, get_payload_data};
 
 pub(crate) async fn get<
     R: DiagServiceResponse + Send + Sync,
@@ -37,13 +32,26 @@ pub(crate) async fn get<
 }
 
 pub(crate) mod diag_service {
-    use axum::extract::Path;
-    use cda_interfaces::{DiagComm, DiagCommAction, DiagCommType};
+    use axum::{
+        Json,
+        body::Bytes,
+        extract::{Path, Query, State},
+        response::{IntoResponse, Response},
+    };
+    use cda_interfaces::{
+        DiagComm, DiagCommAction, DiagCommType, UdsEcu, diagservices::DiagServiceResponse,
+        file_manager::FileManager,
+    };
     use hashbrown::HashMap;
-    use http::HeaderMap;
+    use http::{HeaderMap, StatusCode};
     use sovd_interfaces::components::ecu::data::service::get::DiagServiceQuery;
 
-    use super::*;
+    use crate::sovd::{
+        IntoSovd, WebserverEcuState,
+        components::ecu::data_request,
+        error::{ApiError, ErrorWrapper},
+    };
+
     async fn get_sdgs_handler<T: UdsEcu + Send + Sync + Clone>(
         service: String,
         ecu_name: &str,
@@ -105,21 +113,24 @@ pub(crate) mod diag_service {
         if Some(true) == query.include_sdgs {
             get_sdgs_handler::<T>(diag_service, &ecu_name, &uds).await
         } else {
-            data_request::<T>(Op::Read, diag_service, &ecu_name, &uds, headers, body).await
+            if diag_service.contains('/') {
+                return ErrorWrapper(ApiError::BadRequest("Invalid path".to_owned()))
+                    .into_response();
+            }
+            data_request::<T>(
+                DiagComm {
+                    name: diag_service,
+                    action: DiagCommAction::Read,
+                    type_: DiagCommType::Data,
+                    lookup_name: None,
+                },
+                &ecu_name,
+                &uds,
+                headers,
+                body,
+            )
+            .await
         }
-    }
-
-    pub(crate) async fn post<
-        R: DiagServiceResponse + Send + Sync,
-        T: UdsEcu + Send + Sync + Clone,
-        U: FileManager + Send + Sync + Clone,
-    >(
-        headers: HeaderMap,
-        Path(service): Path<String>,
-        State(WebserverEcuState { ecu_name, uds, .. }): State<WebserverEcuState<R, T, U>>,
-        body: Bytes,
-    ) -> Response {
-        data_request::<T>(Op::Write, service, &ecu_name, &uds, headers, body).await
     }
 
     pub(crate) async fn put<
@@ -132,111 +143,21 @@ pub(crate) mod diag_service {
         State(WebserverEcuState { ecu_name, uds, .. }): State<WebserverEcuState<R, T, U>>,
         body: Bytes,
     ) -> Response {
-        data_request::<T>(Op::Update, service, &ecu_name, &uds, headers, body).await
-    }
-
-    async fn data_request<T: UdsEcu + Send + Sync + Clone>(
-        op: Op,
-        service_name: String,
-        ecu_name: &str,
-        gateway: &T,
-        headers: HeaderMap,
-        body: Bytes,
-    ) -> Response {
-        if service_name.contains('/') {
+        if service.contains('/') {
             return ErrorWrapper(ApiError::BadRequest("Invalid path".to_owned())).into_response();
         }
-        let service = match op {
-            Op::Read => DiagComm {
-                name: service_name.clone(),
-                action: DiagCommAction::Read,
-                type_: DiagCommType::Data,
-                lookup_name: None,
-            },
-            Op::Write | Op::Update => DiagComm {
-                name: service_name.clone(),
+        data_request::<T>(
+            DiagComm {
+                name: service.clone(),
                 action: DiagCommAction::Write,
                 type_: DiagCommType::Configurations,
                 lookup_name: None,
             },
-        };
-
-        let data = match get_payload_data::<
-            sovd_interfaces::components::ecu::data::DataRequestPayload,
-        >(&headers, &body)
-        {
-            Ok(value) => value,
-            Err(e) => return ErrorWrapper(e).into_response(),
-        };
-
-        let (response_mime, map_to_json) = match headers.get(header::ACCEPT) {
-            Some(v)
-                if v == mime::APPLICATION_JSON.essence_str()
-                    || v == mime::STAR_STAR.essence_str() =>
-            {
-                (Some(v), true)
-            }
-            Some(v) if v == mime::APPLICATION_OCTET_STREAM.essence_str() => (Some(v), false),
-            Some(unsupported) => {
-                return ErrorWrapper(ApiError::BadRequest(format!(
-                    "Unsupported Accept: {unsupported:?}"
-                )))
-                .into_response();
-            }
-            _ => (None, true),
-        };
-
-        let response = match gateway
-            .send(ecu_name, service, data, map_to_json)
-            .await
-            .map_err(std::convert::Into::into)
-        {
-            Err(e) => return ErrorWrapper(e).into_response(),
-            Ok(v) => v,
-        };
-
-        if let DiagServiceResponseType::Negative = response.response_type() {
-            return api_error_from_diag_response(response).into_response();
-        }
-
-        match response_mime {
-            Some(v) if v == mime::APPLICATION_OCTET_STREAM.essence_str() => {
-                let data = response.get_raw().to_vec();
-                (StatusCode::OK, Bytes::from_owner(data)).into_response()
-            }
-            _ => {
-                let mapped_data = match response
-                    .into_json()
-                    .map_err(|e| ApiError::InternalServerError(Some(format!("{e:?}"))))
-                {
-                    Err(e) => {
-                        return ErrorWrapper(ApiError::InternalServerError(Some(format!(
-                            "Failed to serialize response: {e:?}"
-                        ))))
-                        .into_response();
-                    }
-                    Ok(v) => v,
-                };
-
-                if mapped_data.is_null() {
-                    StatusCode::NO_CONTENT.into_response()
-                } else {
-                    (
-                        StatusCode::OK,
-                        Json(sovd_interfaces::DataItem {
-                            id: service_name.to_lowercase(),
-                            data: mapped_data,
-                        }),
-                    )
-                        .into_response()
-                }
-            }
-        }
+            &ecu_name,
+            &uds,
+            headers,
+            body,
+        )
+        .await
     }
-}
-
-pub(crate) enum Op {
-    Read,
-    Write,
-    Update,
 }

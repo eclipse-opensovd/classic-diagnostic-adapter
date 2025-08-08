@@ -61,11 +61,19 @@ pub struct DiagComm {
 
 #[derive(Debug, Clone)]
 #[cfg_attr(feature = "deepsize", derive(DeepSizeOf))]
+/// Enum representing diagnostic communication types according to ASAM SOVD.
+///
+/// Can be mapped to UDS service prefixes with [`DiagCommType::service_prefix`]
 pub enum DiagCommType {
+    /// Service Prefix `0x2E`
     Configurations,
+    /// Service Prefix `0x22`
     Data,
+    /// Service Prefixes `0x14`, `0x19`
     Faults,
+    /// Service Prefixes `0x10`, `0x11`, `0x28`, `0x85`, `0x27`, `0x29`
     Modes,
+    /// Service Prefixes `0x2F`, `0x31`, `0x34`, `0x36`, `0x37`
     Operations,
 }
 

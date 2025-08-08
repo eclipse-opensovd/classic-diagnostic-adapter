@@ -30,6 +30,7 @@ pub struct Ecu {
     pub locks: String,
     pub operations: String,
     pub data: String,
+    pub configurations: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub sdgs: Option<Vec<SdSdg>>,
     #[serde(rename = "x-single-ecu-jobs")]

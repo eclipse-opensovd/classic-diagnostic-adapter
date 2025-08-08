@@ -189,12 +189,14 @@ pub async fn route<
                     .get(locks::ecu::lock::get),
             )
             .route("/configurations", routing::get(configurations::get))
+            .route(
+                "/configurations/{diag_service}",
+                routing::put(configurations::diag_service::put),
+            )
             .route("/data", routing::get(data::get))
             .route(
                 "/data/{diag_service}",
-                routing::get(data::diag_service::get)
-                    .post(data::diag_service::post)
-                    .put(data::diag_service::put),
+                routing::get(data::diag_service::get).put(data::diag_service::put),
             )
             .route(
                 "/operations/comparam/executions",
