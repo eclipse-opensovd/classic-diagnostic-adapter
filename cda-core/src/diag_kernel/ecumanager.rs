@@ -1539,6 +1539,48 @@ impl EcuManager {
         }
         Ok(())
     }
+    fn map_nested_struct_to_uds(
+        &self,
+        structure: &datatypes::StructureDop,
+        value: &serde_json::Value,
+    ) -> Result<Vec<u8>, DiagServiceError> {
+        let mut uds_data: Vec<u8> = Vec::new();
+        let Some(value) = value.as_object() else {
+            return Err(DiagServiceError::InvalidRequest(format!(
+                "Expected value to be object type, but it was: {value:#?}"
+            )));
+        };
+        for param in structure.params.iter() {
+            let param =
+                self.ecu_data
+                    .params
+                    .get(param)
+                    .ok_or(DiagServiceError::InvalidDatabase(
+                        "StaticField Param not found".to_owned(),
+                    ))?;
+            let short_name = STRINGS.get(param.short_name).ok_or_else(|| {
+                DiagServiceError::InvalidDatabase(format!(
+                    "Unable to find short name for paramId: {}",
+                    param.short_name
+                ))
+            })?;
+
+            let param_value = value
+                .get(&short_name)
+                .ok_or(DiagServiceError::InvalidRequest(format!(
+                    "Parameter '{short_name}' not part of the request body"
+                )))?;
+
+            let mut uds_value = self.map_param_to_uds(param, param_value)?.ok_or(
+                DiagServiceError::InvalidDatabase(format!(
+                    "Could not map '{param_value}' to uds for parameter '{short_name}'"
+                )),
+            )?;
+            uds_data.append(&mut uds_value);
+        }
+
+        Ok(uds_data)
+    }
 
     fn map_param_to_uds(
         &self,
@@ -1574,7 +1616,30 @@ impl EcuManager {
                             let mapped_data = diag_type.type_.apply(&uds_data);
                             Ok(Some(mapped_data))
                         }
-                        datatypes::DataOperationVariant::EndOfPdu(_end_of_pdu_dop) => todo!(),
+                        datatypes::DataOperationVariant::EndOfPdu(end_of_pdu_dop) => {
+                            let Some(value) = value.as_array() else {
+                                return Err(DiagServiceError::InvalidRequest(
+                                    "Expected array value".to_owned(),
+                                ));
+                            };
+                            // Check length of provided array
+                            if value.len() < end_of_pdu_dop.min_items as usize
+                                || value.len() > end_of_pdu_dop.max_items as usize
+                            {
+                                return Err(DiagServiceError::InvalidRequest(
+                                    "EndOfPdu expected different amount of items".to_owned(),
+                                ));
+                            }
+                            let structure =
+                                self.get_basic_structure(end_of_pdu_dop.field.basic_structure)?;
+
+                            let mut uds_data = Vec::new();
+                            for v in value {
+                                let mut chunk = self.map_nested_struct_to_uds(structure, v)?;
+                                uds_data.append(&mut chunk);
+                            }
+                            Ok(Some(uds_data))
+                        }
                         datatypes::DataOperationVariant::Structure(_structure_dop) => todo!(),
                         datatypes::DataOperationVariant::EnvDataDesc(_env_data_desc_dop) => {
                             todo!()
