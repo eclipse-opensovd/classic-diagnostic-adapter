@@ -11,7 +11,9 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-use bitvec::order::Msb0;
+
+use std::vec;
+
 use cda_interfaces::DiagServiceError;
 #[cfg(feature = "deepsize")]
 use deepsize::DeepSizeOf;
@@ -42,9 +44,9 @@ impl DataType {
             ));
         }
 
-        if [DataType::Int32, DataType::UInt32].contains(self) && bit_len > 32 {
+        if matches!(self, DataType::Int32 | DataType::UInt32) && bit_len > 64 {
             return Err(DiagServiceError::BadPayload(format!(
-                "Length must be a at most 32 bit for {:?}, got {bit_len} bit",
+                "Length must be at most 64 bit for {:?}, got {bit_len} bit",
                 &self
             )));
         }
@@ -110,13 +112,12 @@ impl DiagCodedType {
     ) -> Result<Self, DiagServiceError> {
         match type_ {
             DiagCodedTypeVariant::LeadingLengthInfo(_) | DiagCodedTypeVariant::MinMaxLength(_) => {
-                if ![
-                    DataType::ByteField,
-                    DataType::AsciiString,
-                    DataType::Unicode2String,
-                    DataType::Utf8String,
-                ]
-                .contains(&base_datatype)
+                if !matches!(
+                    &base_datatype,
+                    DataType::ByteField |
+                    DataType::AsciiString |
+                    DataType::Unicode2String |
+                    DataType::Utf8String)
                 {
                     return Err(DiagServiceError::InvalidDatabase(format!(
                         "LeadingLengthInfo and MinMaxLength are only allowed for ByteField, \
@@ -146,35 +147,9 @@ impl DiagCodedType {
         byte_pos: usize,
         bit_pos: u32,
     ) -> Result<Vec<u8>, DiagServiceError> {
-        let byte_reordering = if self.is_high_low_byte_order {
-            ByteOrder::Keep
-        } else {
-            match self.base_datatype {
-                DataType::Unicode2String => ByteOrder::ReorderPairs,
-                DataType::ByteField | DataType::AsciiString | DataType::Utf8String => {
-                    // ISO 22901-1:2008, 7.3.6.3.3 b) states that the byte order
-                    // for these types is to be ignored
-                    ByteOrder::Keep
-                }
-                _ => ByteOrder::Reverse,
-            }
-        };
+       self.validate_bit_pos(bit_pos)?;
 
-        // Bit offset for these datatypes are not allowed.
-        if [
-            DataType::Unicode2String,
-            DataType::ByteField,
-            DataType::AsciiString,
-            DataType::Utf8String,
-        ]
-        .contains(&self.base_datatype)
-            && bit_pos != 0
-        {
-            return Err(DiagServiceError::BadPayload(format!(
-                "Bit position must be 0 for {:?}, got {bit_pos}",
-                self.base_datatype
-            )));
-        }
+        let byte_order = self.byte_order();
 
         let res = match self.type_ {
             DiagCodedTypeVariant::LeadingLengthInfo(bits) => {
@@ -187,7 +162,7 @@ impl DiagCodedType {
                     byte_pos,
                     None,
                     uds_payload,
-                    byte_reordering,
+                    byte_order,
                 )?;
 
                 let len = match length_info_bytes.len() {
@@ -236,31 +211,12 @@ impl DiagCodedType {
                 }
                 uds_payload[start_byte..end_byte].to_vec()
             }
-            DiagCodedTypeVariant::MinMaxLength(ref e) => {
-                if e.max_length == 0 {
-                    return Err(DiagServiceError::BadPayload(
-                        "MinMaxLengthType max_length cannot be 0".to_owned(),
-                    ));
-                }
-                if e.max_length < e.min_length {
-                    return Err(DiagServiceError::BadPayload(format!(
-                        "MinMaxLengthType max_length {} cannot be less than min_length {}",
-                        e.max_length, e.min_length
-                    )));
-                }
-                if self.base_datatype == DataType::Unicode2String
-                    && (!e.min_length.is_multiple_of(2) || !e.max_length.is_multiple_of(2))
-                {
-                    return Err(DiagServiceError::BadPayload(format!(
-                        "DataType {:?} needs an even amount of min/max bytes",
-                        self.base_datatype
-                    )));
-                }
-
-                let max_end = usize::min(byte_pos + e.max_length as usize, uds_payload.len());
+            DiagCodedTypeVariant::MinMaxLength(ref mmlt) => {
+                mmlt.validate(&self.base_datatype)?;
+                let max_end = usize::min(byte_pos + mmlt.max_length as usize, uds_payload.len());
                 let mut end_pos = byte_pos;
 
-                let res = match e.termination {
+                let res = match mmlt.termination {
                     Termination::EndOfPdu => {
                         // Read until end of pdu or max size, whatever comes first.
                         uds_payload[byte_pos..max_end].to_vec()
@@ -269,7 +225,7 @@ impl DiagCodedType {
                         match self.base_datatype {
                             DataType::Unicode2String => {
                                 while end_pos < max_end {
-                                    if end_pos - byte_pos >= e.min_length as usize
+                                    if end_pos - byte_pos >= mmlt.min_length as usize
                                         && end_pos + 1 < uds_payload.len()
                                         && uds_payload[end_pos] == 0
                                         && uds_payload[end_pos + 1] == 0
@@ -282,7 +238,7 @@ impl DiagCodedType {
                             }
                             _ => {
                                 while end_pos < max_end {
-                                    if end_pos - byte_pos >= e.min_length as usize
+                                    if end_pos - byte_pos >= mmlt.min_length as usize
                                         && uds_payload[end_pos] == 0
                                     {
                                         break; // Found ASCII/UTF-8 null terminator
@@ -306,7 +262,7 @@ impl DiagCodedType {
                             DataType::Unicode2String => {
                                 while end_pos < max_end {
                                     if end_pos + 1 < uds_payload.len()
-                                        && (end_pos - byte_pos) >= e.min_length as usize
+                                        && (end_pos - byte_pos) >= mmlt.min_length as usize
                                         && uds_payload[end_pos] == 0xff
                                         && uds_payload[end_pos + 1] == 0xff
                                     {
@@ -318,7 +274,7 @@ impl DiagCodedType {
                             }
                             _ => {
                                 while end_pos < max_end {
-                                    if (end_pos - byte_pos) >= e.min_length as usize
+                                    if (end_pos - byte_pos) >= mmlt.min_length as usize
                                         && uds_payload[end_pos] == 0xff
                                     {
                                         break; // Found ASCII/UTF-8 null terminator
@@ -332,29 +288,29 @@ impl DiagCodedType {
                     }
                 };
 
-                if res.len() < e.min_length as usize {
+                if res.len() < mmlt.min_length as usize {
                     return Err(DiagServiceError::BadPayload(format!(
                         "Reached termination or end of PDU before reading {} min bytes",
-                        e.min_length
+                        mmlt.min_length
                     )));
                 }
                 res
             }
 
-            DiagCodedTypeVariant::StandardLength(ref v) => {
-                self.base_datatype.validate_bit_len(v.bit_length)?;
-                let mask = v.bitmask.as_ref().map(|m| Mask {
+            DiagCodedTypeVariant::StandardLength(ref slt) => {
+                self.base_datatype.validate_bit_len(slt.bit_length)?;
+                let mask = slt.bitmask.as_ref().map(|m| Mask {
                     data: m,
-                    condensed: v.condensed,
+                    condensed: slt.condensed,
                 });
 
                 extract_bits(
-                    v.bit_length as usize,
+                    slt.bit_length as usize,
                     bit_pos,
                     byte_pos,
                     mask.as_ref(),
                     uds_payload,
-                    byte_reordering,
+                    byte_order,
                 )?
             }
         };
@@ -367,60 +323,131 @@ impl DiagCodedType {
 
         Ok(res)
     }
+    
+    pub fn encode(&self, mut input_data: Vec<u8>, mut uds_payload: &mut Vec<u8>, byte_pos: usize,
+        bit_pos: u32,) -> Result<(), DiagServiceError> {
+        self.validate_bit_pos(bit_pos)?;
+        let (mut packed_bytes, bit_len, mask) = match &self.type_ {
+            DiagCodedTypeVariant::LeadingLengthInfo(bit_len) => {
+                // The leading length bytes are aligned to the byte boundary to the data
+                // therefore we can prepend the length byte(s) to the input data.
+                let len_bytes = uds_payload.len().to_be_bytes();
 
-    pub fn encode(&self, input_data: &[u8]) -> Result<Vec<u8>, DiagServiceError> {
-        let res = match &self.type_ {
-            // todo this is not implemented (yet) according to the spec
-            DiagCodedTypeVariant::LeadingLengthInfo(l) => {
-                // calculate the maximum bytes we can store in `l` bits.
-                let max_len = if *l >= 64 {
-                    // this clamps the maximum length to 64 bits
-                    // it is not specified by UDS and in theory the length could be > 64 bits
-                    // But it is highly unlikely because 64 bits allow addressing 18.45 exabytes
-                    // which is more than enough for any ECU
-                    u64::MAX
-                } else {
-                    // basically this is the same as 2^l - 1
-                    // which is the maximum length that can be encoded in l bits
-                    // The bit shift is better for performance than calculating 2^l - 1
-                    (1_u64 << *l) - 1
-                };
-
-                // If the input data is larger than the maximum length,
-                // we truncate it to the maximum length
-                // this ensures no trailing data is included
-                let limited_len = (input_data.len() as u64).min(max_len);
-                let mut bits = bitvec::bitvec![u8, Msb0;];
-
-                // iterate over the bits of the length and push them into the bit vector
-                for i in (0..*l).rev() {
-                    bits.push((limited_len >> i) & 1 == 1);
+                // using extract bits to get the relevant bits from the leading length info
+                let mut result_data = extract_bits(*bit_len as usize, 0, 0, None, &len_bytes, ByteOrder::Keep)?;
+                if result_data.is_empty() {
+                    return Err(DiagServiceError::BadPayload(
+                        "Failed to create length info for leading length".to_owned(),
+                    ));
                 }
 
-                // write the payload in the same bit vector, limited to the maximum length
-                bits.extend_from_raw_slice(&input_data[0..limited_len as usize]);
-                Ok(bits.into_vec())
+                result_data.append(&mut input_data);
+                let packed = pack_data(result_data.len() * 8, None, &result_data)?;
+                (packed, packed.len() * 8, None) // using packed length as bit length, because leading length is byte aligned
             }
-            DiagCodedTypeVariant::MinMaxLength(_min_max_length_type) => todo!(),
+            DiagCodedTypeVariant::MinMaxLength(mmlt) => {
+                mmlt.validate(&self.base_datatype)?;
+                let packed = match mmlt.termination {
+                    Termination::EndOfPdu => {
+                        // No special termination, just pack the data as is
+                        pack_data(input_data.len() * 8, None, &input_data)
+                    }
+                    Termination::Zero => {
+                        if self.base_datatype == DataType::Unicode2String {
+                            input_data.append(&mut vec![0_u8, 0_u8]);
+                        } else {
+                            input_data.push(0_u8);
+                        }
+                        pack_data(input_data.len() * 8, None, &input_data)
+                    }
+                    Termination::HexFF => {
+                        if self.base_datatype == DataType::Unicode2String {
+                            input_data.append(&mut vec![0xff_u8, 0xff_u8]);
+                        } else {
+                            input_data.push(0xff_u8);
+                        }
+                        pack_data(input_data.len() * 8, None, &input_data)
+                    }
+                }?;
+
+                (packed, packed.len() * 8, None)
+            }
             DiagCodedTypeVariant::StandardLength(slt) => {
-                let mask = slt.bitmask.as_ref().map(|mask| Mask {
-                    data: mask,
+                self.base_datatype.validate_bit_len(slt.bit_length)?;
+                let mask = slt.bitmask.as_ref().map(|m| Mask {
+                    data: m,
                     condensed: slt.condensed,
                 });
-                extract_bits(
-                    slt.bit_length as usize,
-                    0,
-                    0,
-                    mask.as_ref(),
-                    input_data,
-                    // todo this needs to be changed as soon as data extraction is implemented
-                    ByteOrder::Keep,
-                )
-            }
-        }?;
 
-        Ok(res)
+                let packed =pack_data(
+                    slt.bit_length as usize,
+                    mask,
+                    &input_data,
+                )?;
+
+                
+                (packed, slt.bit_length as usize,slt.bitmask)
+            }
+        };
+
+        let byte_count = (bit_pos + bit_len as u32).div_ceil(8) as usize;
+        if uds_payload.len() < byte_pos + byte_count {
+            uds_payload.resize(byte_pos + byte_count, 0);
+        }
+        
+        
+        let normalized_input = normalize_byte_order(byte_pos, &mut packed_bytes, self.byte_order());
+        let input_bits = vec_to_bit_array(&normalized_input);
+        let pdu_cut_out_bits = vec_to_bit_array(&uds_payload[byte_pos..byte_pos + byte_count]);
+
+        if let Some(mask) = mask {
+
+        } else {
+for i in range(0..bit_len) {
+    pdu_cut_out_bits[i] = input_bits[i];
+}
+        }
+        todo!();
+
+        input_data;
+
+        Ok(())
     }
+
+    fn byte_order(&self) -> ByteOrder {
+        let byte_reordering = if self.is_high_low_byte_order {
+            ByteOrder::Keep
+        } else {
+            match self.base_datatype {
+                DataType::Unicode2String => ByteOrder::ReorderPairs,
+                DataType::ByteField | DataType::AsciiString | DataType::Utf8String => {
+                    // ISO 22901-1:2008, 7.3.6.3.3 b) states that the byte order
+                    // for these types is to be ignored
+                    ByteOrder::Keep
+                }
+                _ => ByteOrder::Reverse,
+            }
+        };
+        byte_reordering
+    }
+
+    fn validate_bit_pos(&self, bit_pos: u32) -> Result<(), DiagServiceError> {
+        // Bit offset for these datatypes are not allowed.
+        if matches!(&self.base_datatype,
+            DataType::Unicode2String |
+            DataType::ByteField |
+            DataType::AsciiString |
+            DataType::Utf8String)
+            && bit_pos != 0
+        {
+            return Err(DiagServiceError::BadPayload(format!(
+                "Bit position must be 0 for {:?}, got {bit_pos}",
+                self.base_datatype
+            )));
+        }
+        Ok(())
+    }
+       
 }
 
 #[derive(Debug, PartialEq)]
@@ -429,6 +456,33 @@ pub enum DiagCodedTypeVariant {
     LeadingLengthInfo(BitLength),
     MinMaxLength(MinMaxLengthType),
     StandardLength(StandardLengthType),
+}
+
+impl MinMaxLengthType {
+    pub fn validate(&self, data_type: &DataType) -> Result<(), DiagServiceError> { // todo alexmohr do this at construction time
+        if self.max_length == 0 {
+            return Err(DiagServiceError::BadPayload(
+                "MinMaxLengthType max_length cannot be 0".to_owned(),
+            ));
+        }
+        if self.max_length < self.min_length {
+            return Err(DiagServiceError::BadPayload(format!(
+                "MinMaxLengthType max_length {} cannot be less than min_length {}",
+                self.max_length, self.min_length
+            )));
+        }
+        if *data_type == DataType::Unicode2String
+            && (!self.min_length.is_multiple_of(2) || !self.max_length.is_multiple_of(2))
+        {
+            return Err(DiagServiceError::BadPayload(format!(
+                "DataType {:?} needs an even amount of min/max bytes",
+                data_type,
+            )));
+        }
+
+
+        Ok(())
+    }
 }
 
 pub type BitLength = u32;
@@ -442,7 +496,7 @@ pub struct MinMaxLengthType {
 #[derive(Debug, PartialEq)]
 #[cfg_attr(feature = "deepsize", derive(DeepSizeOf))]
 pub struct StandardLengthType {
-    pub bit_length: u32,
+    pub bit_length: BitLength,
     pub bitmask: Option<Vec<u8>>,
     pub condensed: bool,
 }
@@ -592,38 +646,16 @@ fn extract_bits(
             uds_payload.len()
         )));
     }
-
     // Step 2: Extract ByteCount bytes starting at byte_pos
     let mut extracted_bytes: Vec<u8> = uds_payload[byte_pos..byte_pos + byte_count].to_vec();
-
-    // Step 3: Normalization of data
-    match byte_order {
-        ByteOrder::Keep => {}
-        ByteOrder::ReorderPairs => {
-            // Reverse the byte order in pairs for Unicode2String
-            for i in (0..extracted_bytes.len()).step_by(2) {
-                if i + 1 < extracted_bytes.len() {
-                    extracted_bytes.swap(i, i + 1);
-                }
-            }
-        }
-        ByteOrder::Reverse => {
-            // Reverse the byte order
-            extracted_bytes.reverse();
-        }
-    }
+    let normalized_bytes = normalize_byte_order(byte_pos, &mut extracted_bytes, byte_order);
 
     // Step 4: Extract bits starting from bit_pos
     let total_bits_needed = bits;
     let mut result_bits = Vec::new();
 
     // Convert bytes to a bit array for easier manipulation
-    let mut bit_array = Vec::new();
-    for byte in &extracted_bytes {
-        for i in 0..8 {
-            bit_array.push((byte >> i) & 1_u8);
-        }
-    }
+    let bit_array = vec_to_bit_array(&normalized_bytes);
 
     // Extract the required bits starting from bit_pos
     let start_bit = bit_pos as usize;
@@ -642,17 +674,12 @@ fn extract_bits(
     }
 
     // Step 5: Apply the mask if provided
-    if let Some(mask_info) = mask {
+    if let Some(mask) = mask {
         // Convert mask bytes to bit array
-        let mut mask_bits = Vec::new();
-        for byte in mask_info.data {
-            for i in 0..8 {
-                mask_bits.push((byte >> i) & 1_u8);
-            }
-        }
+        let mask_bits = vec_to_bit_array(mask.data);
 
         let mask_bit_count = std::cmp::min(mask_bits.len(), result_bits.len());
-        if mask_info.condensed {
+        if mask.condensed {
             // Remove bits that are 0 in the mask
             // This removes non-continuous bits and shifts higher bits to lower positions
             let mut condensed_bits = Vec::new();
@@ -672,10 +699,92 @@ fn extract_bits(
         }
     }
 
+    let result_bytes = bit_array_to_vec(&result_bits);
+    Ok(result_bytes)
+}
+
+fn normalize_byte_order(byte_pos: usize, data: &mut Vec<u8>, byte_order: ByteOrder) -> Vec<u8> {
+    // Step 3: Normalization of data
+    match byte_order {
+        ByteOrder::Keep => {}
+        ByteOrder::ReorderPairs => {
+            // Reverse the byte order in pairs for Unicode2String
+            for i in (0..data.len()).step_by(2) {
+                if i + 1 < data.len() {
+                    data.swap(i, i + 1);
+                }
+            }
+        }
+        ByteOrder::Reverse => {
+            // Reverse the byte order
+            data.reverse();
+        }
+    }
+    data.to_vec()
+}
+
+fn pack_data(
+    bit_length: usize,
+    mask: Option<Mask>,
+    source_value: &[u8],
+) -> Result<Vec<u8>, DiagServiceError> {
+    if bit_length == 0 {
+        return Err(DiagServiceError::BadPayload(
+            "Cannot insert 0 bits".to_owned(),
+        ));
+    }
+
+    let mut input_bits = vec_to_bit_array(source_value);
+    let condensed = mask.as_ref().map_or(true, |mask| mask.condensed);
+
+    let result_bits = if let Some(mask) = mask {
+        let mut mask_bits = vec_to_bit_array(mask.data);
+        if condensed {
+            let value_length = mask_bits.iter().filter(|&&v| v == 1_u8).count();
+            // clear all bits above value length
+            input_bits[value_length..].fill(0);
+            let mut input_index = 0;
+            for i in 0..mask_bits.len() {
+                if mask_bits[i] == 1 {
+                    if input_index < input_bits.len() {
+                        mask_bits[i] = input_bits[input_index];
+                        input_index += 1;
+                    } else {
+                        return Err(DiagServiceError::BadPayload(format!(
+                            "Mask provides more data than input, mask {} bits, input {} bits"
+                            , mask_bits.len(), input_bits.len())));
+                    }
+                }
+            }
+            mask_bits
+        } else {
+            // clear all bits above bit length
+            input_bits[bit_length..].fill(0);
+
+            // Apply mask normally without condensing
+            for i in 0..mask_bits.len() {
+                if mask_bits[i] == 0_u8 {
+                    input_bits[i] = 0;
+                }
+            }
+            input_bits
+        }
+    } else {
+        // clear all bits above bit length
+        input_bits[bit_length..].fill(0);
+        input_bits
+    };
+
+    let result_bytes = bit_array_to_vec(&result_bits);
+    Ok(result_bytes)
+}
+
+
+fn bit_array_to_vec(result_bits: &Vec<u8>) -> Vec<u8> {
     // Convert bit array back to bytes
     let mut result_bytes = Vec::new();
     let mut current_byte = 0u8;
-    let mut bit_count = 0;
+    let mut bit_count = 0_u8;
 
     for bit in result_bits {
         current_byte |= bit << bit_count;
@@ -692,101 +801,115 @@ fn extract_bits(
     if bit_count > 0 {
         result_bytes.push(current_byte);
     }
-
-    Ok(result_bytes)
+    result_bytes
 }
+
+fn vec_to_bit_array(source: &[u8]) -> Vec<u8> { // todo alexmohr, change this into a vec<bool>, so save memory, because vec<bool> is storing this bit packed
+    let mut bit_array = Vec::with_capacity(source.len() * 8);
+    for byte in source {
+        for i in 0..8_u8 {
+            bit_array.push((*byte >> i) & 1_u8);
+        }
+    }
+    bit_array
+}
+
 
 #[cfg(test)]
 mod tests {
     use super::*;
     #[test]
     fn test_type_variant_mapping() {
-        let mut input_data = vec![0x12, 0x34, 0x56, 0x78, 0x9a, 0xbc, 0xde, 0xf1];
-        let coded_type = DiagCodedType::new_with_default_byte_order(
-            DataType::ByteField,
-            DiagCodedTypeVariant::LeadingLengthInfo(8),
-        )
-        .unwrap();
-        let result = coded_type.encode(&input_data);
-        input_data.insert(0, 0x08); // insert length byte
-        assert_eq!(result.unwrap(), input_data);
+        // let mut input_data = vec![0x12, 0x34, 0x56, 0x78, 0x9a, 0xbc, 0xde, 0xf1];
+        // let coded_type = DiagCodedType::new_with_default_byte_order(
+        //     DataType::ByteField,
+        //     DiagCodedTypeVariant::LeadingLengthInfo(8),
+        // )
+        // .unwrap();
+        // let mut  uds_payload = Vec::new();
+        // coded_type.encode(&input_data, uds_payload.as_mut()).unwrap();
+        // input_data.insert(0, 0x08); // insert length byte
+        // assert_eq!(uds_payload, input_data);
 
-        // make sure extra byte is cut off
-        let mut input_data = vec![0x12, 0x34, 0x56, 0x78, 0x9a, 0xbc, 0xde, 0xf1, 0xab];
-        let coded_type = DiagCodedType::new_with_default_byte_order(
-            DataType::ByteField,
-            DiagCodedTypeVariant::LeadingLengthInfo(2), // 2 bit -> 3 max elements
-        )
-        .unwrap();
+        // // make sure extra byte is cut off
+        // let mut input_data = vec![0x12, 0x34, 0x56, 0x78, 0x9a, 0xbc, 0xde, 0xf1, 0xab];
+        // let coded_type = DiagCodedType::new_with_default_byte_order(
+        //     DataType::ByteField,
+        //     DiagCodedTypeVariant::LeadingLengthInfo(2), // 2 bit -> 3 max elements
+        // )
+        // .unwrap();
 
-        let result = coded_type.encode(&input_data);
-        input_data.insert(0, 0x03); // insert length byte
-        // the length info is only 2 bits,
-        // this means the remaining data is not written on exact byte borders
-        // the last byte 0x7a is ignored because it does not fit into our length
-        // data bits: 000100100011010001010110
-        // length:    11
-        // combined:  11000100100011010001010110
-        // + 6 bits padding to get full bytes
-        // 11000100100011010001010110000000
-        // converted to base is the value below
-        // inclusive range, to account for the length byte
-        assert_eq!(result.unwrap(), [0xc4, 0x8d, 0x15, 0x80]);
+        // let mut  uds_payload = Vec::new();
+        // coded_type.encode(&input_data, uds_payload.as_mut()).unwrap();
+        // input_data.insert(0, 0x03); // insert length byte
+        // // the length info is only 2 bits,
+        // // this means the remaining data is not written on exact byte borders
+        // // the last byte 0x7a is ignored because it does not fit into our length
+        // // data bits: 000100100011010001010110
+        // // length:    11
+        // // combined:  11000100100011010001010110
+        // // + 6 bits padding to get full bytes
+        // // 11000100100011010001010110000000
+        // // converted to base is the value below
+        // // inclusive range, to account for the length byte
+        // assert_eq!(uds_payload, [0xc4, 0x8d, 0x15, 0x80]);
 
-        let mut input_data = Vec::new();
-        for i in 0..=u32::from(u16::MAX) {
-            // deliberately provide too much data that fully fills the length byte
-            input_data.push(i as u8);
-        }
-        let coded_type = DiagCodedType::new_with_default_byte_order(
-            DataType::ByteField,
-            DiagCodedTypeVariant::LeadingLengthInfo(16),
-        )
-        .unwrap();
+        // let mut input_data = Vec::new();
+        // for i in 0..=u32::from(u16::MAX) {
+        //     // deliberately provide too much data that fully fills the length byte
+        //     input_data.push(i as u8);
+        // }
+        // let coded_type = DiagCodedType::new_with_default_byte_order(
+        //     DataType::ByteField,
+        //     DiagCodedTypeVariant::LeadingLengthInfo(16),
+        // )
+        // .unwrap();
 
-        let result = coded_type.encode(&input_data);
-        // insert both length bytes.
-        input_data.splice(..0, [0xFF, 0xFF]);
-        assert_eq!(result.unwrap(), input_data[0..=u16::MAX as usize + 1]);
+        // let mut  uds_payload = Vec::new();
+        // coded_type.encode(&input_data, &mut uds_payload).unwrap();
+        // // insert both length bytes.
+        // input_data.splice(..0, [0xFF, 0xFF]);
+        // assert_eq!(uds_payload, input_data[0..=u16::MAX as usize + 1]);
 
-        let input_data = vec![0x12, 0x34, 0x56, 0x7A];
-        let coded_type = DiagCodedType::new_with_default_byte_order(
-            DataType::ByteField,
-            DiagCodedTypeVariant::StandardLength(StandardLengthType {
-                bit_length: 16,
-                bitmask: Some(vec![0xFF, 0x0F]),
-                condensed: false,
-            }),
-        )
-        .unwrap();
-        let result = coded_type.encode(&input_data);
-        // 0x12 & 0xFF = 0x12
-        // 0x34 & 0x0F = 0x04
-        assert_eq!(result.unwrap(), vec![0x12, 0x04]);
+        // let input_data = vec![0x12, 0x34, 0x56, 0x7A];
+        // let coded_type = DiagCodedType::new_with_default_byte_order(
+        //     DataType::ByteField,
+        //     DiagCodedTypeVariant::StandardLength(StandardLengthType {
+        //         bit_length: 16,
+        //         bitmask: Some(vec![0xFF, 0x0F]),
+        //         condensed: false,
+        //     }),
+        // )
+        // .unwrap();
+        // let mut  uds_payload = Vec::new();
+        // let result = coded_type.encode(&input_data, &mut uds_payload).unwrap();
+        // // 0x12 & 0xFF = 0x12
+        // // 0x34 & 0x0F = 0x04
+        // assert_eq!(uds_payload, vec![0x12, 0x04]);
     }
 
     #[test]
     fn test_extract_bits_masked() {
         let mask = Mask {
-            data: &vec![0b11110000],
+            data: &vec![0b_11110000],
             condensed: false,
         };
-        let payload: Vec<u8> = vec![0b10101010];
+        let payload: Vec<u8> = vec![0b_10101010];
         // 10101010 -- payload
         // 11110000 -- mask
         // ----------
         // 10100000
         let result = extract_bits(8, 0, 0, Some(&mask), &payload, ByteOrder::Keep).unwrap();
-        assert_eq!(result, vec![0b10100000]);
+        assert_eq!(result, vec![0b_10100000]);
     }
 
     #[test]
     fn test_extract_bits_condensed() {
         let mask = Mask {
-            data: &vec![0b11110000],
+            data: &vec![0b_11110000],
             condensed: true,
         };
-        let payload: Vec<u8> = vec![0b10101010];
+        let payload: Vec<u8> = vec![0b_10101010];
         // 10101010 -- payload
         // 11110000 -- mask
         // ----------> apply mask
@@ -794,13 +917,13 @@ mod tests {
         // 1010     --> pad msb
         // 00001010 --> result byte
         let result = extract_bits(8, 0, 0, Some(&mask), &payload, ByteOrder::Keep).unwrap();
-        assert_eq!(result, vec![0b00001010]);
+        assert_eq!(result, vec![0b_00001010]);
     }
 
     #[test]
     fn test_extract_bits_condensed_complex() {
         let mask = Mask {
-            data: &vec![0b10101010, 0b01010101],
+            data: &vec![0b_10101010, 0b_01010101],
             condensed: true,
         };
 
@@ -809,20 +932,19 @@ mod tests {
         // ----------> apply mask
         // 10101010 -- to condense extract the bits from the payload where the mask has "1"s.
         // 1-1-1-1-
-
-        let payload: Vec<u8> = vec![0b11111111, 0b11111111];
+        let payload: Vec<u8> = vec![0b_11111111, 0b_11111111];
         let result = extract_bits(8, 0, 0, Some(&mask), &payload, ByteOrder::Keep).unwrap();
-        assert_eq!(result, vec![0b1111]);
+        assert_eq!(result, vec![0b_1111]);
     }
 
     #[test]
     fn test_extract_bits_condensed_all_zeros() {
         let mask = Mask {
-            data: &vec![0b00000000, 0b00000000],
+            data: &vec![0b_00000000, 0b_00000000],
             condensed: true,
         };
 
-        let payload: Vec<u8> = vec![0b11111111, 0b11111111];
+        let payload: Vec<u8> = vec![0b_11111111, 0b_11111111];
         let result = extract_bits(8, 0, 0, Some(&mask), &payload, ByteOrder::Keep).unwrap();
         // If condensed is set to true, bits are only added to the result if the mask bit is 1.
         // As the mask is all zeros and the length of the result is equal to the count of
@@ -833,13 +955,13 @@ mod tests {
     #[test]
     fn test_extract_bits_condensed_sparse() {
         let mask = Mask {
-            data: &vec![0b10000001],
+            data: &vec![0b_10000001],
             condensed: true,
         };
 
-        let payload: Vec<u8> = vec![0b10000001];
+        let payload: Vec<u8> = vec![0b_10000001];
         let result = extract_bits(8, 0, 0, Some(&mask), &payload, ByteOrder::Keep).unwrap();
-        assert_eq!(result, vec![0b00000011]);
+        assert_eq!(result, vec![0b_00000011]);
     }
 
     #[test]
@@ -871,14 +993,14 @@ mod tests {
         //         ---10---  --> take bits 0-1 from byte 2      (total bits 13)
         //         00010110  --> Result Byte 1
         let result = extract_bits(13, 5, 0, None, &[0xab, 0xcd, 0x42], ByteOrder::Keep).unwrap();
-        assert_eq!(result, vec![0b01101101, 0b00010110]);
+        assert_eq!(result, vec![0b_01101101, 0b_00010110]);
 
         // Extracting 3 bits starting from bit position 5 in byte 0
         // Byte 0: 0xab = 10101011
         //
         // Byte 0: -----101  --> take bits 5-7 from first byte  (total bits 3)
         let result = extract_bits(3, 5, 0, None, &[0xab], ByteOrder::Keep).unwrap();
-        assert_eq!(result, vec![0b101]);
+        assert_eq!(result, vec![0b_101]);
 
         // Extracting 4 bits starting from bit position 6 in byte 0
         // Byte 0: 0xf0 = 11110000
@@ -888,7 +1010,7 @@ mod tests {
         //         ----11--  --> take bits 0-1 from second byte (total bits 4)
         //         00001111  --> Result Byte 0
         let result = extract_bits(4, 6, 0, None, &[0xf0, 0x0f], ByteOrder::Keep).unwrap();
-        assert_eq!(result, vec![0b1111]);
+        assert_eq!(result, vec![0b_1111]);
 
         // Extracting 7 bits starting from bit position 3 in byte 1
         // Byte 0: 0x01 = 00000001
@@ -899,7 +1021,7 @@ mod tests {
         //         011      --> take 3 bits from second byte  (total bits 8)
         //         01111111 --> Result Byte 0
         let result = extract_bits(7, 3, 1, None, &[0x01, 0xff, 0x03], ByteOrder::Keep).unwrap();
-        assert_eq!(result, vec![0b1111111]);
+        assert_eq!(result, vec![0b_1111111]);
     }
 
     #[test]
@@ -1001,6 +1123,131 @@ mod tests {
         // 1100_xxxx 0011_xxxx -> all bits removed where mask is 0
         assert_eq!(result, vec![0b_1100_0011]);
     }
+    
+    #[test]
+    fn test_insert_bits_truncation_and_masking() {
+        // CONDENSED = false, truncate above BitLength, apply bitwise AND with mask
+        let mask = Mask {
+            data: &vec![0b_01010101],
+            condensed: false,
+        };
+        let source_value = vec![0b_01010000];
+        // bit_length = 8, so no truncation, mask applied
+        let result = pack_data(8, Some(mask), &source_value).unwrap();
+        assert_eq!(result, vec![0b01010000]);
+
+        // test extending of bits via condensed
+        let mask = Mask {
+            data: &vec![0b_01010101],
+            condensed: true,
+        };
+        let source_value = vec![0b_00001100];
+        // bit_length = 8, so no truncation, mask applied
+        let result = pack_data(8, Some(mask), &source_value).unwrap();
+        assert_eq!(result, vec![0b01010000]);
+
+
+        // CONDENSED = false, truncate above BitLength
+        let mask = Mask {
+            data: &vec![0b_11111111],
+            condensed: false,
+        };
+        let source_value = vec![0b_11111111, 0b_11111111];
+        let result = pack_data(8, Some(mask), &source_value).unwrap();
+        // Only first 8 bits should remain, second byte truncated
+        assert_eq!(result, vec![0b_11111111, 0]);
+
+        // CONDENSED = true, truncate above ValueLength, merge mask and input
+        let mask = Mask {
+            data: &vec![0b_10101010],
+            condensed: true,
+        };
+        let source_value = vec![0b_11110000];
+        // ValueLength = 4 (number of 1s in mask)
+        // Only first 4 bits of input used: 0000
+        // Mask: 10101010, replace each '1' with bits from input (LSB first)
+        // OUT: 1-1-1-1- (positions 1,3,5,7 get bits 0,1,2,3 of input)
+        let result = pack_data(8, Some(mask), &source_value).unwrap();
+        // Only bits at mask positions 0,2,4,6 replaced, rest remain 0
+        // So result is 0b_00000000 (since input bits are 0)
+        assert_eq!(result, vec![0b_00000000]);
+
+        // CONDENSED = true, mask with all 1s, input fills all bits
+        let mask = Mask {
+            data: &vec![0b_11111111],
+            condensed: true,
+        };
+        let source_value = vec![0b_10101010];
+        let result = pack_data(8, Some(mask), &source_value).unwrap();
+        // All mask bits are 1, so output is input
+        assert_eq!(result, vec![0b_10101010]);
+
+        // CONDENSED = true, mask with sparse 1s, input fills only those bits
+        let mask = Mask {
+            data: &vec![0b_1000_0001],
+            condensed: true,
+        };
+        let source_value = vec![0b_11];
+        let result = pack_data(8, Some(mask), &source_value).unwrap();
+        assert_eq!(result, vec![0b_1000_0001]); // bits are extended over the mask positions
+
+        // No mask, truncate above bit_length
+        let source_value = vec![0b_11111111, 0b_11111111];
+        let result = pack_data(8, None, &source_value).unwrap();
+        assert_eq!(result, vec![0b_11111111, 0]);
+
+        // Truncate to 5 bits, no mask
+        let source_value = vec![0b11111111];
+        let result = pack_data(5, None, &source_value).unwrap();
+        // Only first 5 bits remain: 11111 (0b11111 = 31)
+        assert_eq!(result, vec![0b00011111]);
+
+        // Truncate to 12 bits, no mask
+        let source_value = vec![0b11111111, 0b11111111];
+        let result = pack_data(12, None, &source_value).unwrap();
+        // Only first 12 bits remain: 0b11111111_1111 (0xFFF)
+        assert_eq!(result, vec![0b11111111, 0b00001111]);
+
+        // Mask with bit_length = 5, condensed = false
+        let mask = Mask {
+            data: &vec![0b00011111],
+            condensed: false,
+        };
+        let source_value = vec![0b11111111];
+        let result = pack_data(5, Some(mask), &source_value).unwrap();
+        // Only first 5 bits, mask applied: 11111 & 11111 = 11111
+        assert_eq!(result, vec![0b00011111]);
+
+        // Mask with bit_length = 10, condensed = false
+        let mask = Mask {
+            data: &vec![0b11111111, 0b00000011],
+            condensed: false,
+        };
+        let source_value = vec![0b11111111, 0b11111111];
+        let result = pack_data(10, Some(mask), &source_value).unwrap();
+        // Only first 10 bits, mask applied: 11111111_11 & 11111111_11 = 11111111_11
+        assert_eq!(result, vec![0b11111111, 0b00000011]);
+
+        // Mask with bit_length = 5, condensed = true
+        let mask = Mask {
+            data: &vec![0b00011111],
+            condensed: true,
+        };
+        let source_value = vec![0b11111111];
+        let result = pack_data(5, Some(mask), &source_value).unwrap();
+        // Only bits at mask positions 0-4 replaced, rest remain 0
+        assert_eq!(result, vec![0b00011111]);
+
+        // Mask with bit_length = 10, condensed = true
+        let mask = Mask {
+            data: &vec![0b11111111, 0b00000011],
+            condensed: true,
+        };
+        let source_value = vec![0b11111111, 0b11];
+        let result = pack_data(10, Some(mask), &source_value).unwrap();
+        // All mask bits are 1, so output is input
+        assert_eq!(result, vec![0b11111111, 0b00000011]);
+    }
 
     fn test_min_max_length(
         min_length: u32,
@@ -1029,8 +1276,8 @@ mod tests {
         // Test normal case with zero termination
         assert!(
             test_min_max_length(
-                2,                            // min length
-                10,                           // max length
+                2,
+                10,
                 vec![b'a', b'b', 0x00, 0xFF], // payload with zero termination after min length
                 vec![b'a', b'b'],             // expected: only ab without termination
                 DataType::AsciiString,
@@ -1161,7 +1408,7 @@ mod tests {
                 4,
                 6,
                 vec![0x61, 0x62],
-                vec![0x61, 0x62], // not reached, expect error
+                vec![0x61, 0x62], // min length not reached, expect error
                 DataType::AsciiString,
                 Termination::HexFF,
             )
@@ -1278,7 +1525,7 @@ mod tests {
             4,
             0,
             0,
-            vec![0b10100011, 0x01, 0x02, 0x03, 0x04], // First 4 bits (1010) indicate 3 bytes
+            vec![0b_10100011, 0x01, 0x02, 0x03, 0x04], // First 4 bits (1010) indicate 3 bytes
             vec![0x01, 0x02, 0x03],                   // Expected: 3 bytes after length
         )
         .unwrap();

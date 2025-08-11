@@ -551,14 +551,9 @@ impl cda_interfaces::EcuManager for EcuManager {
                                 param.short_name
                             ))
                         })?;
-                        if let Some(value) = json_values.get(&short_name)
-                            && let Some(uds_val) = self.map_param_to_uds(param, value)?
-                        {
-                            operations::extend_with_bit_pos(
-                                &mut uds,
-                                uds_val,
-                                param.bit_pos as usize,
-                            );
+                        
+                        if let Some(value) = json_values.get(&short_name) {
+                            self.map_param_to_uds(param, value, &mut uds)?;
                         }
                     }
                 }
@@ -1544,12 +1539,13 @@ impl EcuManager {
         &self,
         param: &datatypes::Parameter,
         value: &serde_json::Value,
-    ) -> Result<Option<Vec<u8>>, DiagServiceError> {
+        payload: &mut Vec<u8>,
+    ) -> Result<(), DiagServiceError> {
         match &param.value {
-            datatypes::ParameterValue::CodedConst(_coded_const) => Ok(None),
+            datatypes::ParameterValue::CodedConst(_coded_const) => Ok(()),
             datatypes::ParameterValue::MatchingRequestParam(_matching_request_param) => {
                 // todo can this even be mapped to UDS request?
-                Ok(None)
+                Ok(())
             }
             datatypes::ParameterValue::Value(value_data) => {
                 if let Some(dop) = self.ecu_data.data_operations.get(&value_data.dop) {
@@ -1571,8 +1567,8 @@ impl EcuManager {
                                 Some(&normal_dop.compu_method),
                                 value,
                             )?;
-                            let mapped_data = diag_type.encode(&uds_data)?;
-                            Ok(Some(mapped_data))
+                            diag_type.encode(&uds_data, payload, param.byte_pos, param.bit_pos)?;
+                            Ok(())
                         }
                         datatypes::DataOperationVariant::EndOfPdu(_end_of_pdu_dop) => todo!(),
                         datatypes::DataOperationVariant::Structure(_structure_dop) => todo!(),
@@ -1606,7 +1602,7 @@ impl EcuManager {
                     mapped.push(0x0);
                     bits -= 8;
                 }
-                Ok(Some(mapped))
+                Ok(())
             }
         }
     }
