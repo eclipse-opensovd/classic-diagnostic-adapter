@@ -480,6 +480,7 @@ fn create_socket(
     socket
         .set_reuse_address(true)
         .map_err(|e| format!("DoipGateway: Failed to set reuse address: {e:?}"))?;
+    #[cfg(target_family = "unix")]
     socket
         .set_reuse_port(true)
         .map_err(|e| format!("DoipGateway: Failed to set reuse port: {e:?}"))?;
