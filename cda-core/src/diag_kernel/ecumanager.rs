@@ -1567,7 +1567,7 @@ impl EcuManager {
                                 Some(&normal_dop.compu_method),
                                 value,
                             )?;
-                            diag_type.encode(&uds_data, payload, param.byte_pos, param.bit_pos)?;
+                            diag_type.encode(uds_data, payload, param.byte_pos as usize, param.bit_pos)?;
                             Ok(())
                         }
                         datatypes::DataOperationVariant::EndOfPdu(_end_of_pdu_dop) => todo!(),
