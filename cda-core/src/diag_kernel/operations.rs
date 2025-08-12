@@ -370,28 +370,6 @@ fn u32_padded_bytes(data: &[u8]) -> Result<[u8; 4], DiagServiceError> {
     Ok(bytes)
 }
 
-pub(in crate::diag_kernel) fn extend_with_bit_pos(
-    payload: &mut Vec<u8>,
-    value: Vec<u8>,
-    bit_pos: usize,
-) {
-    if bit_pos != 0 && bit_pos < 8 {
-        let target_mask = 0xFF >> (8 - bit_pos) as u8;
-        let first_val = value.first().copied().unwrap_or(0) << bit_pos;
-        // todo: do we need to handle the case that the bytes that we shifted out
-        // need to be moved to the next byte?
-        if let Some(last_byte) = payload.last_mut() {
-            *last_byte &= target_mask; // clear the bits that are not set
-            *last_byte |= first_val; // set the bits that are set in the value
-            payload.extend(&value[1..]); // extend with the rest of the value
-        } else {
-            payload.extend(value); // not sure if we can end up here, but just in case
-        }
-    } else {
-        payload.extend(value);
-    }
-}
-
 pub(in crate::diag_kernel) fn diag_coded_type_to_uds(
     diag_type: DataType,
     val: &str,

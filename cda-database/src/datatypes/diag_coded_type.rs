@@ -418,8 +418,8 @@ impl DiagCodedType {
                 let mask_bit = (mask_byte >> (i % 8)) & 1;
                 if mask_bit == 1 {
                     let cut_out_bit_index = bit_pos as usize + i;
-                    let cut_out_byte =pdu_cut_out.len() - 1 - (i/8);
                     let cut_out_bit = cut_out_bit_index % 8;
+                    let cut_out_byte = cut_out_bit_index / 8;
                     pdu_cut_out[cut_out_byte] &= !(1 << cut_out_bit);
                 }
             }
@@ -431,9 +431,9 @@ impl DiagCodedType {
             let input_bit = i % 8;
             let input_bit_val = (normalized_input[input_byte] >> input_bit) & 1;
 
-            let cut_out_byte = pdu_cut_out.len() - input_byte - 1;
             let cut_out_bit_index = bit_pos as usize + i;
             let cut_out_bit = cut_out_bit_index % 8;
+            let cut_out_byte = cut_out_bit_index / 8;
 
             pdu_cut_out[cut_out_byte] |= input_bit_val << cut_out_bit;
         }
@@ -820,31 +820,25 @@ fn pack_data(
 
             let mut input_bit_index = 0;
 
-            // Iterate through each bit in the mask
-            for (byte_idx, &mask_byte) in mask_data.iter().enumerate() {
-                for bit_pos in 0..8 {
-                    let mask_bit_index = byte_idx * 8 + bit_pos;
-
-                    // Check if this mask bit is set
-                    if (mask_byte >> bit_pos) & 1 == 1 {
-                        // Check if we have input data for this position
-                        if input_bit_index < bit_length && input_bit_index / 8 < source_value.len()
-                        {
+            // Iterate through each bit in the mask (LSB first)
+            for mask_bit_index in 0..(mask_data.len() * 8) {
+                let mask_byte_idx = mask_bit_index / 8;
+                let mask_bit_pos = mask_bit_index % 8;
+                if mask_byte_idx < mask_data.len() {
+                    let mask_bit = (mask_data[mask_byte_idx] >> mask_bit_pos) & 1;
+                    if mask_bit == 1 {
+                        // Copy input bit to result at mask position (LSB first)
+                        if input_bit_index < bit_length && input_bit_index / 8 < source_value.len() {
                             let input_byte_idx = input_bit_index / 8;
                             let input_bit_pos = input_bit_index % 8;
-
-                            // Extract bit from input
                             let input_bit = (source_value[input_byte_idx] >> input_bit_pos) & 1;
-
-                            // Set bit in result if input bit is 1
                             if input_bit == 1 {
                                 let result_byte_idx = mask_bit_index / 8;
-                                let result_bit_pos = mask_bit_index % 8;
+                                let result_bit_pos = mask_bit_pos;
                                 if result_byte_idx < result.len() {
                                     result[result_byte_idx] |= 1 << result_bit_pos;
                                 }
                             }
-
                             input_bit_index += 1;
                         } else if input_bit_index >= value_length * 8 {
                             return Err(DiagServiceError::BadPayload(format!(
@@ -860,12 +854,16 @@ fn pack_data(
             Ok(result)
         } else {
             // Non-condensed: apply mask directly
-            let result_byte_len = std::cmp::max((bit_length + 7) / 8, source_value.len());
+            let result_byte_len =(bit_length + 7) / 8;
             let mut result = vec![0u8; result_byte_len];
 
             // Copy input data up to bit_length
             let copy_bytes = std::cmp::min(source_value.len(), (bit_length + 7) / 8);
-            result[..copy_bytes].copy_from_slice(&source_value[..copy_bytes]);
+            let source_len = source_value.len();
+            let result_len = result.len();
+            let copy_bytes = std::cmp::min(source_len, result_len);
+
+            result[(result_len - copy_bytes)..].copy_from_slice(&source_value[(source_len - copy_bytes)..]);
 
             clear_bits_above_bit_len(bit_length, &mut result);
 
@@ -878,12 +876,15 @@ fn pack_data(
             Ok(result)
         }
     } else {
-        // No mask: just copy data and clear bits beyond bit_length
+        // No mask: just copy data and clear bits beyond bit_length (LSB first)
         let result_byte_len = (bit_length + 7) / 8;
-        let copy_bytes = std::cmp::min(source_value.len(), result_byte_len);
         let mut result = vec![0u8; result_byte_len];
 
-        result[..copy_bytes].copy_from_slice(&source_value[..copy_bytes]);
+        let source_len = source_value.len();
+        let result_len = result.len();
+        let copy_bytes = std::cmp::min(source_len, result_len);
+
+        result[(result_len - copy_bytes)..].copy_from_slice(&source_value[(source_len - copy_bytes)..]);
 
         clear_bits_above_bit_len(bit_length, &mut result);
 
@@ -1148,7 +1149,7 @@ mod tests {
             &[0x12, 0x34, 0x56, 0x78],
             ByteOrder::Reverse,
         )
-        .unwrap();
+            .unwrap();
         assert_eq!(result, vec![0x78, 0x56, 0x34, 0x12]);
 
         // Test Unicode2String byte pair reversal
@@ -1160,7 +1161,7 @@ mod tests {
             &[0x12, 0x34, 0x56, 0x78],
             ByteOrder::ReorderPairs,
         )
-        .unwrap();
+            .unwrap();
         assert_eq!(result, vec![0x34, 0x12, 0x78, 0x56]);
 
         // Test Unicode2String byte pair reversal with odd number of bytes
@@ -1193,7 +1194,7 @@ mod tests {
             &[0b_1100_1100, 0b_0011_0011],
             ByteOrder::Reverse,
         )
-        .unwrap();
+            .unwrap();
         // First reverse bytes, then apply mask:
         // 1100_1100 0011_0011
         // 1111_0000 1111_0000
@@ -1206,6 +1207,13 @@ mod tests {
 
     #[test]
     fn test_data_packing() {
+        // simple case, no mask, no truncation
+        let source_value = vec![0,0,0,4];
+        // bit_length = 8, so no truncation, mask applied
+        let result = pack_data(4, None, &source_value).unwrap();
+        assert_eq!(result, vec![4]);
+
+
         // CONDENSED = false, truncate above BitLength, apply bitwise AND with mask
         let mask = Mask {
             data: &vec![0b_0101_0101],
@@ -1234,7 +1242,7 @@ mod tests {
         let source_value = vec![0b_1111_1111, 0b_1111_1111];
         let result = pack_data(8, Some(mask), &source_value).unwrap();
         // Only first 8 bits should remain, second byte truncated
-        assert_eq!(result, vec![0b_1111_1111, 0]);
+        assert_eq!(result, vec![0b_1111_1111]);
 
         // CONDENSED = true, truncate above ValueLength, merge mask and input
         let mask = Mask {
@@ -1362,7 +1370,7 @@ mod tests {
                 DataType::AsciiString,
                 Termination::Zero,
             )
-            .is_ok()
+                .is_ok()
         );
 
         // Test reaching max length without termination
@@ -1375,7 +1383,7 @@ mod tests {
                 DataType::AsciiString,
                 Termination::Zero,
             )
-            .is_ok()
+                .is_ok()
         );
     }
 
@@ -1391,7 +1399,7 @@ mod tests {
                 DataType::Utf8String,
                 Termination::HexFF,
             )
-            .is_ok()
+                .is_ok()
         );
 
         // Test reaching end of PDU after min length
@@ -1404,7 +1412,7 @@ mod tests {
                 DataType::Utf8String,
                 Termination::HexFF,
             )
-            .is_ok()
+                .is_ok()
         );
     }
 
@@ -1419,7 +1427,7 @@ mod tests {
             DataType::Unicode2String,
             Termination::Zero,
         )
-        .unwrap();
+            .unwrap();
 
         assert!(
             test_min_max_length(
@@ -1430,7 +1438,7 @@ mod tests {
                 DataType::Unicode2String,
                 Termination::Zero,
             )
-            .is_err()
+                .is_err()
         );
 
         assert!(
@@ -1442,7 +1450,7 @@ mod tests {
                 DataType::Unicode2String,
                 Termination::Zero,
             )
-            .is_err()
+                .is_err()
         );
     }
 
@@ -1457,7 +1465,7 @@ mod tests {
             DataType::AsciiString,
             Termination::Zero,
         )
-        .unwrap();
+            .unwrap();
 
         // Test zero byte in content should not terminate when max_length reached
         test_min_max_length(
@@ -1468,7 +1476,7 @@ mod tests {
             DataType::AsciiString,
             Termination::Zero,
         )
-        .unwrap();
+            .unwrap();
 
         // Test FF termination not included when max_length reached
         test_min_max_length(
@@ -1479,7 +1487,7 @@ mod tests {
             DataType::AsciiString,
             Termination::HexFF,
         )
-        .unwrap();
+            .unwrap();
 
         // Test end of PDU before reaching min_length
         assert!(
@@ -1491,7 +1499,7 @@ mod tests {
                 DataType::AsciiString,
                 Termination::HexFF,
             )
-            .is_err()
+                .is_err()
         );
     }
 
@@ -1507,7 +1515,7 @@ mod tests {
                 DataType::ByteField,
                 Termination::EndOfPdu,
             )
-            .is_err()
+                .is_err()
         );
 
         // Test exact min_length payload
@@ -1519,7 +1527,7 @@ mod tests {
             DataType::ByteField,
             Termination::EndOfPdu,
         )
-        .unwrap();
+            .unwrap();
 
         // Test exact max_length payload
         test_min_max_length(
@@ -1530,7 +1538,7 @@ mod tests {
             DataType::ByteField,
             Termination::EndOfPdu,
         )
-        .unwrap();
+            .unwrap();
     }
 
     fn test_leading_length(
@@ -1559,7 +1567,7 @@ mod tests {
             vec![0x03, 0xab, 0xcd, 0xef], // First byte (0x03) indicates 3 bytes follow
             vec![0xab, 0xcd, 0xef],       // Expected: 3 bytes after length byte
         )
-        .unwrap();
+            .unwrap();
     }
 
     #[test]
@@ -1571,7 +1579,7 @@ mod tests {
             vec![0x00, 0x02, 0xcd, 0xef], // First two bytes (0x0002) indicate 2 bytes follow
             vec![0xcd, 0xef],             // Expected: 2 bytes after length bytes
         )
-        .unwrap();
+            .unwrap();
     }
 
     #[test]
@@ -1583,7 +1591,7 @@ mod tests {
             vec![0x00, 0x00, 0x00, 0x02, 0xcd, 0xef], // First four bytes indicate 2 bytes follow
             vec![0xcd, 0xef],                         // Expected: 2 bytes after length bytes
         )
-        .unwrap();
+            .unwrap();
     }
 
     #[test]
@@ -1595,7 +1603,7 @@ mod tests {
             vec![0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x02, 0xcd, 0xef],
             vec![0xcd, 0xef],
         )
-        .unwrap();
+            .unwrap();
     }
 
     #[test]
@@ -1607,7 +1615,7 @@ mod tests {
             vec![0b_1010_0011, 0x01, 0x02, 0x03, 0x04], // First 4 bits (1010) indicate 3 bytes
             vec![0x01, 0x02, 0x03],                     // Expected: 3 bytes after length
         )
-        .unwrap();
+            .unwrap();
     }
 
     #[test]
@@ -1619,7 +1627,7 @@ mod tests {
             vec![0x03, 0xab, 0xcd, 0xef], // First 3 bits indicate 3 bytes follow
             vec![0xab, 0xcd, 0xef],
         )
-        .unwrap();
+            .unwrap();
     }
     #[test]
     fn test_leading_length_insufficient_data() {
@@ -1631,7 +1639,7 @@ mod tests {
                 vec![0x03, 0xab], // Indicates 3 bytes but only 1 byte available
                 vec![],
             )
-            .is_err()
+                .is_err()
         );
     }
 
@@ -1758,7 +1766,7 @@ mod tests {
             DataType::AsciiString,
             Termination::Zero,
         )
-        .unwrap();
+            .unwrap();
     }
 
     #[test]
@@ -1774,7 +1782,7 @@ mod tests {
             DataType::Utf8String,
             Termination::HexFF,
         )
-        .unwrap();
+            .unwrap();
     }
 
     #[test]
@@ -1790,7 +1798,7 @@ mod tests {
             DataType::Unicode2String,
             Termination::Zero,
         )
-        .unwrap();
+            .unwrap();
     }
 
     #[test]
@@ -1806,7 +1814,7 @@ mod tests {
             DataType::Unicode2String,
             Termination::HexFF,
         )
-        .unwrap();
+            .unwrap();
     }
 
     #[test]
@@ -1821,7 +1829,7 @@ mod tests {
             DataType::ByteField,
             Termination::EndOfPdu,
         )
-        .unwrap();
+            .unwrap();
     }
 
     fn test_encode_standard_length(
@@ -1865,7 +1873,7 @@ mod tests {
             expected,
             DataType::ByteField,
         )
-        .unwrap();
+            .unwrap();
     }
 
     #[test]
@@ -1880,7 +1888,7 @@ mod tests {
             vec![0x12, 0x04],
             DataType::ByteField,
         )
-        .unwrap();
+            .unwrap();
     }
 
     #[test]
@@ -1951,7 +1959,7 @@ mod tests {
                 condensed: false,
             }),
         )
-        .unwrap();
+            .unwrap();
 
         // Encode into payload, modifying only unmasked bits
         diag_type
@@ -1983,7 +1991,7 @@ mod tests {
         #[test]
         fn test_encode_standard_length_masked_partial_protection() {
             // Initial payload with alternating bits
-            let mut uds_payload = vec![0b_10101010, 0b_01010101];
+            let mut uds_payload = vec![0b_1010_1010, 0b_0101_0101];
             // Input data to encode
             let input = vec![0b_11001100, 0b_00110011];
             // Mask: protect only bits 0 and 7 in both bytes
@@ -2006,9 +2014,9 @@ mod tests {
             // For byte 0:
             // bits 0 and 7: original
             // bits 1-6: (original & !mask) | (input & !mask)
-            let expected0 = (0b_10101010 & 0b_10000001)
+            let expected0 = (0b_1010_1010 & 0b_10000001)
                 | ((0b_10101010 & !0b_10000001) | (0b_11001100 & !0b_10000001));
-            let expected1 = (0b_01010101 & 0b_10000001)
+            let expected1 = (0b_0101_0101 & 0b_10000001)
                 | ((0b_01010101 & !0b_10000001) | (0b_00110011 & !0b_10000001));
             assert_eq!(uds_payload, vec![expected0, expected1]);
         }
@@ -2100,7 +2108,7 @@ mod tests {
         let input = vec![0b_1010_1010, 0b_1100_1100, 0b_1111_0000];
         // Mask: protect upper nibble of each byte
         let bitmask = vec![0xF0, 0xF0, 0xF0];
-        let diag_type = DiagCodedType::new_with_default_byte_order(
+        let diag_type = DiagCodedType::new_high_low_byte_order(
             DataType::ByteField,
             DiagCodedTypeVariant::StandardLength(StandardLengthType {
                 bit_length: 24,
@@ -2110,6 +2118,7 @@ mod tests {
         )
         .unwrap();
 
+        // Encode into payload at byte offset 3, bit offset 5
         diag_type
             .encode(input.clone(), &mut uds_payload, 3, 5)
             .unwrap();
@@ -2133,7 +2142,7 @@ mod tests {
         let input = vec![0b_11001100];
         // Mask: only bits 1,3,5,7 in each byte
         let bitmask = vec![0b_10101010, 0b_10101010, 0b_10101010];
-        let diag_type = DiagCodedType::new_with_default_byte_order(
+        let diag_type = DiagCodedType::new_high_low_byte_order(
             DataType::ByteField,
             DiagCodedTypeVariant::StandardLength(StandardLengthType {
                 bit_length: 24,
@@ -2143,6 +2152,7 @@ mod tests {
         )
         .unwrap();
 
+        // Encode into payload at byte offset 3, bit offset 5
         diag_type
             .encode(input.clone(), &mut uds_payload, 3, 5)
             .unwrap();
@@ -2204,8 +2214,8 @@ mod tests {
         assert_eq!(
             uds_payload,
             vec![ 42, 37, 18,
-                0b_1100_0011,
-                0b_1010_1000,
+                  0b_1100_0011,
+                  0b_1010_1000,
                   192
             ]
         );
@@ -2226,7 +2236,7 @@ mod tests {
                 condensed: false,
             }),
         )
-        .unwrap();
+            .unwrap();
 
         // Encode into payload at byte offset 3, bit offset 5
         diag_type
