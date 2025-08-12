@@ -324,14 +324,14 @@ impl DiagCodedType {
         Ok(res)
     }
     
-    pub fn encode(&self, mut input_data: Vec<u8>, mut uds_payload: &mut Vec<u8>, byte_pos: usize,
+    pub fn encode(&self, mut input_data: Vec<u8>, uds_payload: &mut Vec<u8>, byte_pos: usize,
         bit_pos: u32,) -> Result<(), DiagServiceError> {
         self.validate_bit_pos(bit_pos)?;
         let (mut packed_bytes, bit_len, mask) = match &self.type_ {
             DiagCodedTypeVariant::LeadingLengthInfo(bit_len) => {
                 // The leading length bytes are aligned to the byte boundary to the data
                 // therefore we can prepend the length byte(s) to the input data.
-                let len_bytes = uds_payload.len().to_be_bytes();
+                let len_bytes = input_data.len().to_be_bytes();
 
                 // using extract bits to get the relevant bits from the leading length info
                 let mut result_data = extract_bits(*bit_len as usize, 0, 0, None, &len_bytes, ByteOrder::Keep)?;
@@ -343,7 +343,8 @@ impl DiagCodedType {
 
                 result_data.append(&mut input_data);
                 let packed = pack_data(result_data.len() * 8, None, &result_data)?;
-                (packed, packed.len() * 8, None) // using packed length as bit length, because leading length is byte aligned
+                let len = packed.len() * 8;
+                (packed, len, None) // using packed length as bit length, because leading length is byte aligned
             }
             DiagCodedTypeVariant::MinMaxLength(mmlt) => {
                 mmlt.validate(&self.base_datatype)?;
@@ -370,7 +371,8 @@ impl DiagCodedType {
                     }
                 }?;
 
-                (packed, packed.len() * 8, None)
+                let len = packed.len() * 8;
+                (packed, len, None)
             }
             DiagCodedTypeVariant::StandardLength(slt) => {
                 self.base_datatype.validate_bit_len(slt.bit_length)?;
@@ -379,14 +381,14 @@ impl DiagCodedType {
                     condensed: slt.condensed,
                 });
 
-                let packed =pack_data(
+                let packed = pack_data(
                     slt.bit_length as usize,
                     mask,
                     &input_data,
                 )?;
 
                 
-                (packed, slt.bit_length as usize,slt.bitmask)
+                (packed, slt.bit_length as usize,slt.bitmask.clone())
             }
         };
 
@@ -394,28 +396,36 @@ impl DiagCodedType {
         if uds_payload.len() < byte_pos + byte_count {
             uds_payload.resize(byte_pos + byte_count, 0);
         }
-        
-        
-        let normalized_input = normalize_byte_order(byte_pos, &mut packed_bytes, self.byte_order());
-        let input_bits = vec_to_bit_array(&normalized_input);
-        let pdu_cut_out_bits = vec_to_bit_array(&uds_payload[byte_pos..byte_pos + byte_count]);
+
+        let normalized_input = normalize_byte_order(&mut packed_bytes, self.byte_order());
+        let pdu_cut_out = &mut uds_payload[byte_pos..byte_pos + byte_count];
 
         if let Some(mask) = mask {
+            // Iterate through the bytes of the cut-out and the mask, applying the mask.
+            for i in 0..byte_count {
+                let mask_byte = mask[i];
+                let mut data_byte = pdu_cut_out[i];
 
+                // Apply the mask:  If a bit in the mask is 1, clear the corresponding bit in the data byte.
+                data_byte &= !mask_byte;
+
+                // Now apply the input
+                data_byte |= normalized_input[i] & mask_byte;
+
+                // Update the PDU cut-out with the masked value
+                pdu_cut_out[i] = data_byte;
+            }
         } else {
-for i in range(0..bit_len) {
-    pdu_cut_out_bits[i] = input_bits[i];
-}
+            // In this case, copy the normalized input directly into the PDU cut-out.
+            pdu_cut_out.copy_from_slice(&normalized_input[..byte_count]);
         }
-        todo!();
 
-        input_data;
 
         Ok(())
     }
 
     fn byte_order(&self) -> ByteOrder {
-        let byte_reordering = if self.is_high_low_byte_order {
+        if self.is_high_low_byte_order {
             ByteOrder::Keep
         } else {
             match self.base_datatype {
@@ -427,8 +437,7 @@ for i in range(0..bit_len) {
                 }
                 _ => ByteOrder::Reverse,
             }
-        };
-        byte_reordering
+        }
     }
 
     fn validate_bit_pos(&self, bit_pos: u32) -> Result<(), DiagServiceError> {
@@ -475,8 +484,7 @@ impl MinMaxLengthType {
             && (!self.min_length.is_multiple_of(2) || !self.max_length.is_multiple_of(2))
         {
             return Err(DiagServiceError::BadPayload(format!(
-                "DataType {:?} needs an even amount of min/max bytes",
-                data_type,
+                "DataType {data_type:?} needs an even amount of min/max bytes",
             )));
         }
 
@@ -606,7 +614,6 @@ struct Mask<'a> {
     data: &'a Vec<u8>,
     condensed: bool,
 }
-
 fn extract_bits(
     bits: usize,
     bit_pos: u32,
@@ -621,24 +628,28 @@ fn extract_bits(
             "BitPosition range is 0..=7, got {bit_pos}",
         )));
     }
-
     if byte_pos >= uds_payload.len() {
         return Err(DiagServiceError::BadPayload(format!(
             "BytePosition {byte_pos} is out of bounds for payload length {}",
             uds_payload.len()
         )));
     }
-
     if bits == 0 {
         return Err(DiagServiceError::BadPayload(
             "Cannot extract 0 bits".to_owned(),
         ));
     }
 
-    // Step N: Corresponds with the steps defined in ISO 22901-1:2008 7.3.6.3.2
     // Step 1: Calculate ByteCount using ceiling function
-    let byte_count = (bit_pos + bits as u32).div_ceil(8) as usize;
-
+    // Not using div_ceil here because implementing it again is measurably faster
+    // The following numbers are from a benchmark, and are an average of 3 run with 5*10^6 iterations
+    // each
+    //          mask  	    condensed	normal
+    // ceil	    4.447730293	5.913945188	4.033881121
+    // manual   4.262537672	5.68874875	3.937747568
+    // improved 4.16%	    3.81%	    2.38%
+    #[allow(clippy::manual_div_ceil)]
+    let byte_count = ((bit_pos + bits as u32 + 7) / 8) as usize;
     if byte_pos + byte_count > uds_payload.len() {
         return Err(DiagServiceError::BadPayload(format!(
             "Input too short: need {byte_count} bytes starting at byte {byte_pos}, but payload \
@@ -646,64 +657,223 @@ fn extract_bits(
             uds_payload.len()
         )));
     }
+
     // Step 2: Extract ByteCount bytes starting at byte_pos
     let mut extracted_bytes: Vec<u8> = uds_payload[byte_pos..byte_pos + byte_count].to_vec();
-    let normalized_bytes = normalize_byte_order(byte_pos, &mut extracted_bytes, byte_order);
+    let normalized_bytes = normalize_byte_order(&mut extracted_bytes, byte_order);
 
-    // Step 4: Extract bits starting from bit_pos
+    // Step 4: Extract bits using bitwise operations instead of bit arrays
     let total_bits_needed = bits;
-    let mut result_bits = Vec::new();
+    #[allow(clippy::manual_div_ceil)]
+    let result_byte_count = (total_bits_needed + 7) / 8;
+    let mut result_bytes = vec![0u8; result_byte_count];
 
-    // Convert bytes to a bit array for easier manipulation
-    let bit_array = vec_to_bit_array(&normalized_bytes);
-
-    // Extract the required bits starting from bit_pos
-    let start_bit = bit_pos as usize;
-    if start_bit + total_bits_needed > bit_array.len() {
-        return Err(DiagServiceError::BadPayload(format!(
-            "Not enough bits available: requested {total_bits_needed} bits starting at bit \
-             position {start_bit}, but only {} bits available",
-            bit_array.len()
-        )));
-    }
-
+    // Extract bits
     for i in 0..total_bits_needed {
-        if start_bit + i < bit_array.len() {
-            result_bits.push(bit_array[start_bit + i]);
+        let src_bit_index = bit_pos as usize + i;
+        let src_byte_index = src_bit_index / 8;
+        let src_bit_offset = src_bit_index % 8;
+
+        if src_byte_index < normalized_bytes.len() {
+            let bit_value = (normalized_bytes[src_byte_index] >> src_bit_offset) & 1;
+
+            let dst_byte_index = i / 8;
+            let dst_bit_offset = i % 8;
+
+            if bit_value != 0 {
+                result_bytes[dst_byte_index] |= 1 << dst_bit_offset;
+            }
         }
     }
 
     // Step 5: Apply the mask if provided
     if let Some(mask) = mask {
-        // Convert mask bytes to bit array
-        let mask_bits = vec_to_bit_array(mask.data);
+        let mask_bit_count = std::cmp::min(mask.data.len() * 8, total_bits_needed);
 
-        let mask_bit_count = std::cmp::min(mask_bits.len(), result_bits.len());
         if mask.condensed {
-            // Remove bits that are 0 in the mask
-            // This removes non-continuous bits and shifts higher bits to lower positions
-            let mut condensed_bits = Vec::new();
+            // Count set bits first to pre-allocate
+            let mut set_bits_count = 0;
             for i in 0..mask_bit_count {
-                if mask_bits[i] == 1_u8 {
-                    condensed_bits.push(result_bits[i]);
+                let mask_byte_index = i / 8;
+                let mask_bit_offset = i % 8;
+                if mask_byte_index < mask.data.len() {
+                    let mask_bit = (mask.data[mask_byte_index] >> mask_bit_offset) & 1;
+                    if mask_bit != 0 {
+                        set_bits_count += 1;
+                    }
                 }
             }
-            result_bits = condensed_bits;
+
+            // Create condensed result
+            #[allow(clippy::manual_div_ceil)]
+            let condensed_byte_count = (set_bits_count + 7) / 8;
+            let mut condensed_bytes = vec![0u8; condensed_byte_count];
+            let mut condensed_bit_index = 0;
+
+            for i in 0..mask_bit_count {
+                let mask_byte_index = i / 8;
+                let mask_bit_offset = i % 8;
+
+                if mask_byte_index < mask.data.len() {
+                    let mask_bit = (mask.data[mask_byte_index] >> mask_bit_offset) & 1;
+
+                    if mask_bit != 0 {
+                        // Get the bit from result_bytes
+                        let result_byte_index = i / 8;
+                        let result_bit_offset = i % 8;
+
+                        if result_byte_index < result_bytes.len() {
+                            let result_bit = (result_bytes[result_byte_index] >> result_bit_offset) & 1;
+
+                            if result_bit != 0 {
+                                let condensed_byte_index = condensed_bit_index / 8;
+                                let condensed_bit_offset = condensed_bit_index % 8;
+                                condensed_bytes[condensed_byte_index] |= 1 << condensed_bit_offset;
+                            }
+                        }
+                        condensed_bit_index += 1;
+                    }
+                }
+            }
+            result_bytes = condensed_bytes;
         } else {
             // Apply mask normally without condensing
             for i in 0..mask_bit_count {
-                if mask_bits[i] == 0_u8 {
-                    result_bits[i] = 0;
+                let mask_byte_index = i / 8;
+                let mask_bit_offset = i % 8;
+
+                if mask_byte_index < mask.data.len() {
+                    let mask_bit = (mask.data[mask_byte_index] >> mask_bit_offset) & 1;
+
+                    if mask_bit == 0 {
+                        let result_byte_index = i / 8;
+                        let result_bit_offset = i % 8;
+
+                        if result_byte_index < result_bytes.len() {
+                            result_bytes[result_byte_index] &= !(1 << result_bit_offset);
+                        }
+                    }
                 }
             }
         }
     }
 
-    let result_bytes = bit_array_to_vec(&result_bits);
     Ok(result_bytes)
 }
 
-fn normalize_byte_order(byte_pos: usize, data: &mut Vec<u8>, byte_order: ByteOrder) -> Vec<u8> {
+fn pack_data(
+    bit_length: usize,
+    mask: Option<Mask>,
+    source_value: &[u8],
+) -> Result<Vec<u8>, DiagServiceError> {
+    fn clear_bits_above_bit_len(bit_length: usize, result: &mut [u8]) {
+        if bit_length % 8 != 0 {
+            let last_byte_idx = bit_length / 8;
+            if last_byte_idx < result.len() {
+                let bits_to_keep = bit_length % 8;
+                let mask_byte = (1u8 << bits_to_keep) - 1;
+                result[last_byte_idx] &= mask_byte;
+            }
+        }
+    }
+
+
+    if bit_length == 0 {
+        return Err(DiagServiceError::BadPayload(
+            "Cannot insert 0 bits".to_owned(),
+        ));
+    }
+
+    let condensed = mask.as_ref().is_some_and( |m| m.condensed);
+
+    if let Some(mask) = mask {
+        let mask_data = &mask.data;
+
+        if condensed {
+            // Count how many mask bits are set to 1
+            let value_length = mask_data.iter()
+                .map(|&byte| byte.count_ones() as usize)
+                .sum::<usize>();
+
+            // Calculate result size in bytes
+            let result_byte_len = (mask_data.len() * 8 + 7) / 8;
+            let mut result = vec![0u8; result_byte_len];
+
+            let mut input_bit_index = 0;
+
+            // Iterate through each bit in the mask
+            for (byte_idx, &mask_byte) in mask_data.iter().enumerate() {
+                for bit_pos in 0..8 {
+                    let mask_bit_index = byte_idx * 8 + bit_pos;
+
+                    // Check if this mask bit is set
+                    if (mask_byte >> bit_pos) & 1 == 1 {
+                        // Check if we have input data for this position
+                        if input_bit_index < bit_length && input_bit_index / 8 < source_value.len() {
+                            let input_byte_idx = input_bit_index / 8;
+                            let input_bit_pos = input_bit_index % 8;
+
+                            // Extract bit from input
+                            let input_bit = (source_value[input_byte_idx] >> input_bit_pos) & 1;
+
+                            // Set bit in result if input bit is 1
+                            if input_bit == 1 {
+                                let result_byte_idx = mask_bit_index / 8;
+                                let result_bit_pos = mask_bit_index % 8;
+                                if result_byte_idx < result.len() {
+                                    result[result_byte_idx] |= 1 << result_bit_pos;
+                                }
+                            }
+
+                            input_bit_index += 1;
+                        } else if input_bit_index >= value_length * 8 {
+                            return Err(DiagServiceError::BadPayload(format!(
+                                "Mask provides more data than input, mask {} bits, input {} bits",
+                                mask_data.len() * 8, source_value.len() * 8
+                            )));
+                        }
+                    }
+                }
+            }
+
+            Ok(result)
+        } else {
+            // Non-condensed: apply mask directly
+            let result_byte_len = std::cmp::max(
+                (bit_length + 7) / 8,
+                source_value.len()
+            );
+            let mut result = vec![0u8; result_byte_len];
+
+            // Copy input data up to bit_length
+            let copy_bytes = std::cmp::min(source_value.len(), (bit_length + 7) / 8);
+            result[..copy_bytes].copy_from_slice(&source_value[..copy_bytes]);
+
+            clear_bits_above_bit_len(bit_length, &mut result);
+
+            // Apply mask - clear bits where mask is 0
+            let mask_bytes = std::cmp::min(mask_data.len(), result.len());
+            for i in 0..mask_bytes {
+                result[i] &= mask_data[i];
+            }
+
+            Ok(result)
+        }
+    } else {
+        // No mask: just copy data and clear bits beyond bit_length
+        let result_byte_len = (bit_length + 7) / 8;
+        let copy_bytes = std::cmp::min(source_value.len(), result_byte_len);
+        let mut result = vec![0u8; result_byte_len];
+
+        result[..copy_bytes].copy_from_slice(&source_value[..copy_bytes]);
+
+        clear_bits_above_bit_len(bit_length, &mut result);
+
+        Ok(result)
+    }
+}
+
+fn normalize_byte_order(data: &mut [u8], byte_order: ByteOrder) -> Vec<u8> {
     // Step 3: Normalization of data
     match byte_order {
         ByteOrder::Keep => {}
@@ -722,98 +892,6 @@ fn normalize_byte_order(byte_pos: usize, data: &mut Vec<u8>, byte_order: ByteOrd
     }
     data.to_vec()
 }
-
-fn pack_data(
-    bit_length: usize,
-    mask: Option<Mask>,
-    source_value: &[u8],
-) -> Result<Vec<u8>, DiagServiceError> {
-    if bit_length == 0 {
-        return Err(DiagServiceError::BadPayload(
-            "Cannot insert 0 bits".to_owned(),
-        ));
-    }
-
-    let mut input_bits = vec_to_bit_array(source_value);
-    let condensed = mask.as_ref().map_or(true, |mask| mask.condensed);
-
-    let result_bits = if let Some(mask) = mask {
-        let mut mask_bits = vec_to_bit_array(mask.data);
-        if condensed {
-            let value_length = mask_bits.iter().filter(|&&v| v == 1_u8).count();
-            // clear all bits above value length
-            input_bits[value_length..].fill(0);
-            let mut input_index = 0;
-            for i in 0..mask_bits.len() {
-                if mask_bits[i] == 1 {
-                    if input_index < input_bits.len() {
-                        mask_bits[i] = input_bits[input_index];
-                        input_index += 1;
-                    } else {
-                        return Err(DiagServiceError::BadPayload(format!(
-                            "Mask provides more data than input, mask {} bits, input {} bits"
-                            , mask_bits.len(), input_bits.len())));
-                    }
-                }
-            }
-            mask_bits
-        } else {
-            // clear all bits above bit length
-            input_bits[bit_length..].fill(0);
-
-            // Apply mask normally without condensing
-            for i in 0..mask_bits.len() {
-                if mask_bits[i] == 0_u8 {
-                    input_bits[i] = 0;
-                }
-            }
-            input_bits
-        }
-    } else {
-        // clear all bits above bit length
-        input_bits[bit_length..].fill(0);
-        input_bits
-    };
-
-    let result_bytes = bit_array_to_vec(&result_bits);
-    Ok(result_bytes)
-}
-
-
-fn bit_array_to_vec(result_bits: &Vec<u8>) -> Vec<u8> {
-    // Convert bit array back to bytes
-    let mut result_bytes = Vec::new();
-    let mut current_byte = 0u8;
-    let mut bit_count = 0_u8;
-
-    for bit in result_bits {
-        current_byte |= bit << bit_count;
-        bit_count += 1;
-
-        if bit_count == 8 {
-            result_bytes.push(current_byte);
-            current_byte = 0;
-            bit_count = 0;
-        }
-    }
-
-    // Add the last partial byte if there are remaining bits
-    if bit_count > 0 {
-        result_bytes.push(current_byte);
-    }
-    result_bytes
-}
-
-fn vec_to_bit_array(source: &[u8]) -> Vec<u8> { // todo alexmohr, change this into a vec<bool>, so save memory, because vec<bool> is storing this bit packed
-    let mut bit_array = Vec::with_capacity(source.len() * 8);
-    for byte in source {
-        for i in 0..8_u8 {
-            bit_array.push((*byte >> i) & 1_u8);
-        }
-    }
-    bit_array
-}
-
 
 #[cfg(test)]
 mod tests {
@@ -891,25 +969,25 @@ mod tests {
     #[test]
     fn test_extract_bits_masked() {
         let mask = Mask {
-            data: &vec![0b_11110000],
+            data: &vec![0b_1111_0000],
             condensed: false,
         };
-        let payload: Vec<u8> = vec![0b_10101010];
+        let payload: Vec<u8> = vec![0b_1010_1010];
         // 10101010 -- payload
         // 11110000 -- mask
         // ----------
         // 10100000
         let result = extract_bits(8, 0, 0, Some(&mask), &payload, ByteOrder::Keep).unwrap();
-        assert_eq!(result, vec![0b_10100000]);
+        assert_eq!(result, vec![0b_1010_0000]);
     }
 
     #[test]
     fn test_extract_bits_condensed() {
         let mask = Mask {
-            data: &vec![0b_11110000],
+            data: &vec![0b_1111_0000],
             condensed: true,
         };
-        let payload: Vec<u8> = vec![0b_10101010];
+        let payload: Vec<u8> = vec![0b_1010_1010];
         // 10101010 -- payload
         // 11110000 -- mask
         // ----------> apply mask
@@ -917,13 +995,13 @@ mod tests {
         // 1010     --> pad msb
         // 00001010 --> result byte
         let result = extract_bits(8, 0, 0, Some(&mask), &payload, ByteOrder::Keep).unwrap();
-        assert_eq!(result, vec![0b_00001010]);
+        assert_eq!(result, vec![0b_0000_1010]);
     }
 
     #[test]
     fn test_extract_bits_condensed_complex() {
         let mask = Mask {
-            data: &vec![0b_10101010, 0b_01010101],
+            data: &vec![0b_1010_1010, 0b_0101_0101],
             condensed: true,
         };
 
@@ -932,7 +1010,7 @@ mod tests {
         // ----------> apply mask
         // 10101010 -- to condense extract the bits from the payload where the mask has "1"s.
         // 1-1-1-1-
-        let payload: Vec<u8> = vec![0b_11111111, 0b_11111111];
+        let payload: Vec<u8> = vec![0b_1111_1111, 0b_1111_1111];
         let result = extract_bits(8, 0, 0, Some(&mask), &payload, ByteOrder::Keep).unwrap();
         assert_eq!(result, vec![0b_1111]);
     }
@@ -940,11 +1018,11 @@ mod tests {
     #[test]
     fn test_extract_bits_condensed_all_zeros() {
         let mask = Mask {
-            data: &vec![0b_00000000, 0b_00000000],
+            data: &vec![0b_0000_0000, 0b_0000_0000],
             condensed: true,
         };
 
-        let payload: Vec<u8> = vec![0b_11111111, 0b_11111111];
+        let payload: Vec<u8> = vec![0b_1111_1111, 0b_1111_1111];
         let result = extract_bits(8, 0, 0, Some(&mask), &payload, ByteOrder::Keep).unwrap();
         // If condensed is set to true, bits are only added to the result if the mask bit is 1.
         // As the mask is all zeros and the length of the result is equal to the count of
@@ -955,13 +1033,13 @@ mod tests {
     #[test]
     fn test_extract_bits_condensed_sparse() {
         let mask = Mask {
-            data: &vec![0b_10000001],
+            data: &vec![0b_1000_0001],
             condensed: true,
         };
 
-        let payload: Vec<u8> = vec![0b_10000001];
+        let payload: Vec<u8> = vec![0b_1000_0001];
         let result = extract_bits(8, 0, 0, Some(&mask), &payload, ByteOrder::Keep).unwrap();
-        assert_eq!(result, vec![0b_00000011]);
+        assert_eq!(result, vec![0b_0000_0011]);
     }
 
     #[test]
@@ -993,7 +1071,7 @@ mod tests {
         //         ---10---  --> take bits 0-1 from byte 2      (total bits 13)
         //         00010110  --> Result Byte 1
         let result = extract_bits(13, 5, 0, None, &[0xab, 0xcd, 0x42], ByteOrder::Keep).unwrap();
-        assert_eq!(result, vec![0b_01101101, 0b_00010110]);
+        assert_eq!(result, vec![0b_0110_1101, 0b_0001_0110]);
 
         // Extracting 3 bits starting from bit position 5 in byte 0
         // Byte 0: 0xab = 10101011
@@ -1021,23 +1099,7 @@ mod tests {
         //         011      --> take 3 bits from second byte  (total bits 8)
         //         01111111 --> Result Byte 0
         let result = extract_bits(7, 3, 1, None, &[0x01, 0xff, 0x03], ByteOrder::Keep).unwrap();
-        assert_eq!(result, vec![0b_1111111]);
-    }
-
-    #[test]
-    fn test_extract_bits_byte_position_cases() {
-        // Test byte position with different bit lengths
-        let result = extract_bits(8, 0, 1, None, &[0x00, 0xff, 0x00], ByteOrder::Keep).unwrap();
-        assert_eq!(result, vec![0xff]);
-
-        // Test byte position with bit position and longer length
-        let result = extract_bits(16, 0, 1, None, &[0x00, 0xab, 0xcd], ByteOrder::Keep).unwrap();
-        assert_eq!(result, vec![0xab, 0xcd]);
-
-        // Test byte position with 3 bytes of data
-        let result =
-            extract_bits(24, 0, 1, None, &[0x00, 0x11, 0x22, 0x33], ByteOrder::Keep).unwrap();
-        assert_eq!(result, vec![0x11, 0x22, 0x33]);
+        assert_eq!(result, vec![0b_1111_111]);
     }
 
     #[test]
@@ -1123,46 +1185,46 @@ mod tests {
         // 1100_xxxx 0011_xxxx -> all bits removed where mask is 0
         assert_eq!(result, vec![0b_1100_0011]);
     }
-    
+
     #[test]
-    fn test_insert_bits_truncation_and_masking() {
+    fn test_data_packing() {
         // CONDENSED = false, truncate above BitLength, apply bitwise AND with mask
         let mask = Mask {
-            data: &vec![0b_01010101],
+            data: &vec![0b_0101_0101],
             condensed: false,
         };
-        let source_value = vec![0b_01010000];
+        let source_value = vec![0b_0101_0000];
         // bit_length = 8, so no truncation, mask applied
         let result = pack_data(8, Some(mask), &source_value).unwrap();
-        assert_eq!(result, vec![0b01010000]);
+        assert_eq!(result, vec![0b_0101_0000]);
 
         // test extending of bits via condensed
         let mask = Mask {
-            data: &vec![0b_01010101],
+            data: &vec![0b_0101_0101],
             condensed: true,
         };
-        let source_value = vec![0b_00001100];
+        let source_value = vec![0b_0000_1100];
         // bit_length = 8, so no truncation, mask applied
         let result = pack_data(8, Some(mask), &source_value).unwrap();
-        assert_eq!(result, vec![0b01010000]);
+        assert_eq!(result, vec![0b_0101_0000]);
 
 
         // CONDENSED = false, truncate above BitLength
         let mask = Mask {
-            data: &vec![0b_11111111],
+            data: &vec![0b_1111_1111],
             condensed: false,
         };
-        let source_value = vec![0b_11111111, 0b_11111111];
+        let source_value = vec![0b_1111_1111, 0b_1111_1111];
         let result = pack_data(8, Some(mask), &source_value).unwrap();
         // Only first 8 bits should remain, second byte truncated
-        assert_eq!(result, vec![0b_11111111, 0]);
+        assert_eq!(result, vec![0b_1111_1111, 0]);
 
         // CONDENSED = true, truncate above ValueLength, merge mask and input
         let mask = Mask {
-            data: &vec![0b_10101010],
+            data: &vec![0b_1010_1010],
             condensed: true,
         };
-        let source_value = vec![0b_11110000];
+        let source_value = vec![0b_1111_0000];
         // ValueLength = 4 (number of 1s in mask)
         // Only first 4 bits of input used: 0000
         // Mask: 10101010, replace each '1' with bits from input (LSB first)
@@ -1174,13 +1236,13 @@ mod tests {
 
         // CONDENSED = true, mask with all 1s, input fills all bits
         let mask = Mask {
-            data: &vec![0b_11111111],
+            data: &vec![0b_1111_1111],
             condensed: true,
         };
-        let source_value = vec![0b_10101010];
+        let source_value = vec![0b_1010_1010];
         let result = pack_data(8, Some(mask), &source_value).unwrap();
         // All mask bits are 1, so output is input
-        assert_eq!(result, vec![0b_10101010]);
+        assert_eq!(result, vec![0b_1010_1010]);
 
         // CONDENSED = true, mask with sparse 1s, input fills only those bits
         let mask = Mask {
@@ -1192,9 +1254,9 @@ mod tests {
         assert_eq!(result, vec![0b_1000_0001]); // bits are extended over the mask positions
 
         // No mask, truncate above bit_length
-        let source_value = vec![0b_11111111, 0b_11111111];
+        let source_value = vec![0b_1111_1111, 0b_1111_1111];
         let result = pack_data(8, None, &source_value).unwrap();
-        assert_eq!(result, vec![0b_11111111, 0]);
+        assert_eq!(result, vec![0b_1111_1111]);
 
         // Truncate to 5 bits, no mask
         let source_value = vec![0b11111111];
@@ -1525,7 +1587,7 @@ mod tests {
             4,
             0,
             0,
-            vec![0b_10100011, 0x01, 0x02, 0x03, 0x04], // First 4 bits (1010) indicate 3 bytes
+            vec![0b_1010_0011, 0x01, 0x02, 0x03, 0x04], // First 4 bits (1010) indicate 3 bytes
             vec![0x01, 0x02, 0x03],                   // Expected: 3 bytes after length
         )
         .unwrap();
@@ -1597,5 +1659,325 @@ mod tests {
     fn test_byte_field_length_violation() {
         assert!(DataType::ByteField.validate_bit_len(0).is_err());
         assert!(DataType::ByteField.validate_bit_len(8).is_ok());
+    }
+
+    fn test_encode_leading_length(
+        bit_length: u32,
+        input_data: Vec<u8>,
+        expected: Vec<u8>,
+    ) -> Result<(), DiagServiceError> {
+        let diag_type = DiagCodedType::new_with_default_byte_order(
+            DataType::ByteField,
+            DiagCodedTypeVariant::LeadingLengthInfo(bit_length),
+        )?;
+        let mut uds_payload = Vec::new();
+        diag_type.encode(input_data.clone(), &mut uds_payload, 0, 0)?;
+        assert_eq!(uds_payload, expected);
+        Ok(())
+    }
+
+    #[test]
+    fn test_encode_leading_length_8bit() {
+        let input = vec![0xab, 0xcd, 0xef];
+        let mut expected = vec![0x03];
+        expected.extend(input.clone());
+        test_encode_leading_length(8, input, expected).unwrap();
+    }
+
+    #[test]
+    fn test_encode_leading_length_16bit() {
+        let input = vec![0xcd, 0xef];
+        let mut expected = vec![0x00, 0x02];
+        expected.extend(input.clone());
+        test_encode_leading_length(16, input, expected).unwrap();
+    }
+
+    #[test]
+    fn test_encode_leading_length_32bit() {
+        let input = vec![0xcd, 0xef];
+        let mut expected = vec![0x00, 0x00, 0x00, 0x02];
+        expected.extend(input.clone());
+        test_encode_leading_length(32, input, expected).unwrap();
+    }
+
+    #[test]
+    fn test_encode_leading_length_4bit() {
+        let input = vec![0x01, 0x02, 0x03];
+        // 4 bits for length (3), then 3 bytes
+        // The encoding will pack the length and data together, so just check that encode runs
+        test_encode_leading_length(4, input, vec![]).unwrap();
+    }
+
+    fn test_encode_min_max_length(
+        min_length: u32,
+        max_length: u32,
+        input_data: Vec<u8>,
+        expected: Vec<u8>,
+        base_datatype: DataType,
+        termination: Termination,
+    ) -> Result<(), DiagServiceError> {
+        let diag_type = DiagCodedType::new_with_default_byte_order(
+            base_datatype,
+            DiagCodedTypeVariant::MinMaxLength(MinMaxLengthType {
+                min_length,
+                max_length,
+                termination,
+            }),
+        )?;
+        let mut uds_payload = Vec::new();
+        diag_type.encode(input_data.clone(), &mut uds_payload, 0, 0)?;
+        assert_eq!(uds_payload, expected);
+        Ok(())
+    }
+
+    #[test]
+    fn test_encode_min_max_length_ascii_zero_termination() {
+        let input = vec![b'a', b'b'];
+        let mut expected = input.clone();
+        expected.push(0x00);
+        test_encode_min_max_length(
+            2,
+            10,
+            input,
+            expected,
+            DataType::AsciiString,
+            Termination::Zero,
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn test_encode_min_max_length_utf8_ff_termination() {
+        let input = vec![0x68, 0x69];
+        let mut expected = input.clone();
+        expected.push(0xFF);
+        test_encode_min_max_length(
+            2,
+            10,
+            input,
+            expected,
+            DataType::Utf8String,
+            Termination::HexFF,
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn test_encode_min_max_length_unicode2_zero_termination() {
+        let input = vec![0x00, 0x61, 0x00, 0x62];
+        let mut expected = input.clone();
+        expected.extend(vec![0x00, 0x00]);
+        test_encode_min_max_length(
+            4,
+            8,
+            input,
+            expected,
+            DataType::Unicode2String,
+            Termination::Zero,
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn test_encode_min_max_length_unicode2_ff_termination() {
+        let input = vec![0x00, 0x61, 0x00, 0x62];
+        let mut expected = input.clone();
+        expected.extend(vec![0xFF, 0xFF]);
+        test_encode_min_max_length(
+            4,
+            8,
+            input,
+            expected,
+            DataType::Unicode2String,
+            Termination::HexFF,
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn test_encode_min_max_length_bytefield_end_of_pdu() {
+        let input = vec![0x01, 0x02, 0x03];
+        let expected = input.clone();
+        test_encode_min_max_length(
+            2,
+            4,
+            input,
+            expected,
+            DataType::ByteField,
+            Termination::EndOfPdu,
+        )
+        .unwrap();
+    }
+
+    fn test_encode_standard_length(
+        bit_length: u32,
+        bitmask: Option<Vec<u8>>,
+        condensed: bool,
+        input_data: Vec<u8>,
+        expected: Vec<u8>,
+        base_datatype: DataType,
+    ) -> Result<(), DiagServiceError> {
+        let diag_type = DiagCodedType::new_with_default_byte_order(
+            base_datatype,
+            DiagCodedTypeVariant::StandardLength(StandardLengthType {
+                bit_length,
+                bitmask: bitmask.clone(),
+                condensed,
+            }),
+        )?;
+        let mut uds_payload = vec![0; ((bit_length + 7) / 8) as usize];
+        diag_type.encode(input_data.clone(), &mut uds_payload, 0, 0)?;
+        assert_eq!(uds_payload, expected);
+        Ok(())
+    }
+
+    #[test]
+    fn test_encode_standard_length_no_mask() {
+        let input = vec![0x12, 0x34];
+        let expected = input.clone();
+        test_encode_standard_length(
+            16,
+            None,
+            false,
+            input,
+            expected,
+            DataType::ByteField,
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn test_encode_standard_length_with_mask() {
+        let input = vec![0x12, 0x34];
+        let expected = vec![0x12, 0x04];
+        test_encode_standard_length(
+            16,
+            Some(vec![0xFF, 0x0F]),
+            false,
+            input,
+            expected,
+            DataType::ByteField,
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn test_encode_standard_length_condensed() {
+        let input = vec![0x12, 0x34];
+        // For condensed, just check that encode runs and output is as expected for mask
+        test_encode_standard_length(
+            16,
+            Some(vec![0xFF, 0x0F]),
+            true,
+            input,
+            vec![0x12, 0x04],
+            DataType::ByteField,
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn test_encode_standard_length_ascii_string() {
+        let input = vec![b'A', b'B'];
+        let expected = input.clone();
+        test_encode_standard_length(
+            16,
+            None,
+            false,
+            input,
+            expected,
+            DataType::AsciiString,
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn test_encode_standard_length_utf8_string() {
+        let input = vec![0x68, 0x69];
+        let expected = input.clone();
+        test_encode_standard_length(
+            16,
+            None,
+            false,
+            input,
+            expected,
+            DataType::Utf8String,
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn test_encode_standard_length_unicode2_string() {
+        let input = vec![0x00, 0x61, 0x00, 0x62];
+        let expected = input.clone();
+        test_encode_standard_length(
+            32,
+            None,
+            false,
+            input,
+            expected,
+            DataType::Unicode2String,
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn test_encode_standard_length_float32() {
+        let input = vec![0x12, 0x34, 0x56, 0x78];
+        let expected = input.clone();
+        test_encode_standard_length(
+            32,
+            None,
+            false,
+            input,
+            expected,
+            DataType::Float32,
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn test_encode_standard_length_float64() {
+        let input = vec![0x12, 0x34, 0x56, 0x78, 0x9a, 0xbc, 0xde, 0xf1];
+        let expected = input.clone();
+        test_encode_standard_length(
+            64,
+            None,
+            false,
+            input,
+            expected,
+            DataType::Float64,
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn test_encode_standard_length_uint32() {
+        let input = vec![0x12, 0x34, 0x56, 0x78];
+        let expected = input.clone();
+        test_encode_standard_length(
+            32,
+            None,
+            false,
+            input,
+            expected,
+            DataType::UInt32,
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn test_encode_standard_length_int32() {
+        let input = vec![0x12, 0x34, 0x56, 0x78];
+        let expected = input.clone();
+        test_encode_standard_length(
+            32,
+            None,
+            false,
+            input,
+            expected,
+            DataType::Int32,
+        )
+        .unwrap();
     }
 }
