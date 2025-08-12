@@ -1623,7 +1623,7 @@ checksum = "32a282da65faaf38286cf3be983213fcf1d2e2a58700e808f83f4ea9a4804bc0"
 [[package]]
 name = "mimalloc"
 version = "3.0.1"
-source = "git+https://github.com/theswiftfox/mimalloc.git?rev=7a6f28b#7a6f28b407f3c83b10641b62a50386c76b5939e8"
+source = "git+https://github.com/theswiftfox/mimalloc.git?rev=afbaaa5#afbaaa50e6df2e28be0c721c55463cc52e86b89a"
 dependencies = [
  "cc",
  "libc",
