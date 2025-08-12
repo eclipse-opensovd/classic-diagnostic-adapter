@@ -54,6 +54,7 @@ Additionally the import granularity is set to `crate` to group all imports from 
 - Use `Arc`, `Mutex`, and `RwLock` for shared state, as seen in the codebase.
 - Use logging macros, like `log::info!`, as appropriate to record relevant information.
 - Annotate functions with `tracing::instrument` when they are important for creating new tracing spans.
+- Error messages should start with a capital letter.
 
 ## Licensing & Dependencies
 
