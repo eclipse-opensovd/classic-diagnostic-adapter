@@ -81,6 +81,26 @@ jobs:
       - name: Check banned practises
         run: cargo deny check bans
 
+  build_windows:
+    runs-on: windows-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          submodules: false
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: 1.88.0
+          components: clippy, rustfmt
+      - name: Cache Rust dependencies
+        uses: Swatinem/rust-cache@v2
+      - name: Build
+        run: cargo build --locked --verbose
+      - name: Test
+        run: cargo test --locked -- --show-output
+
   check_copyright_headers:
     runs-on: ubuntu-latest
     steps:
