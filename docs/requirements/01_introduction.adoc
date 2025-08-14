@@ -1,0 +1,8 @@
+[#_requirements_introduction]
+= Introduction
+
+The Classic Diagnostics Adapters purpose is to provide an SOVD API for legacy ECUs. Communication with legacy ECUs is facilitated by utilizing UDS. It must support DoIP, and may support additional transports in the future.
+
+In this requirements documentation, the sections represent the functional requirements for the communication on both ends, and some generic requirements for the program itself.
+
+The actual architecture and implementation details must be done in different documents for traceability and separation of concerns.
