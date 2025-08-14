@@ -22,8 +22,65 @@ pub mod sovd2uds {
 
     pub mod data {
         pub mod network_structure {
+            use serde::Serialize;
+
+            #[derive(Serialize)]
+            #[serde(rename_all = "PascalCase")]
+            #[cfg_attr(feature = "openapi", derive(schemars::JsonSchema))]
+            pub struct Ecu {
+                /// ECU name
+                pub qualifier: String,
+                /// ECU variant
+                pub variant: String,
+                /// ECU state \[Online, Offline, NotTested]
+                #[serde(rename = "EcuState")]
+                pub state: String,
+                /// ECU logical address
+                pub logical_address: String,
+                /// ECU link '\<ecu>\_on\_\<protocol>'
+                pub logical_link: String,
+            }
+
+            #[derive(Serialize)]
+            #[serde(rename_all = "PascalCase")]
+            #[cfg_attr(feature = "openapi", derive(schemars::JsonSchema))]
+            pub struct Gateway {
+                /// Gateway ECU name
+                pub name: String,
+                /// Network (IP) address
+                pub network_address: String,
+                /// Logical ECU address
+                pub logical_address: String,
+                /// List of ECUs connected via gateway
+                pub ecus: Vec<Ecu>,
+            }
+
+            #[derive(Serialize)]
+            #[serde(rename_all = "PascalCase")]
+            #[cfg_attr(feature = "openapi", derive(schemars::JsonSchema))]
+            pub struct FunctionalGroup {
+                pub qualifier: String,
+                pub ecus: Vec<Ecu>,
+            }
+
+            #[derive(Serialize)]
+            #[serde(rename_all = "PascalCase")]
+            #[cfg_attr(feature = "openapi", derive(schemars::JsonSchema))]
+            pub struct NetworkStructure {
+                pub functional_groups: Vec<FunctionalGroup>,
+                pub gateways: Vec<Gateway>,
+            }
+
             pub mod get {
-                pub type Response = crate::DataItem;
+                use serde::Serialize;
+
+                #[derive(Serialize)]
+                #[cfg_attr(feature = "openapi", derive(schemars::JsonSchema))]
+                #[cfg_attr(feature = "openapi", schemars(rename = "NetworkStructureResponse"))]
+                pub struct Response {
+                    pub id: String,
+                    pub data: Vec<crate::apps::sovd2uds::data::network_structure::NetworkStructure>,
+                }
             }
         }
     }

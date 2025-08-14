@@ -16,6 +16,7 @@ pub(crate) mod comparams {
     pub(crate) mod executions {
         use std::sync::Arc;
 
+        use aide::{UseApi, transform::TransformOperation};
         use axum::{
             Json,
             extract::{OriginalUri, Path, State},
@@ -50,6 +51,18 @@ pub(crate) mod comparams {
             handler_read(comparam_executions).await
         }
 
+        pub(crate) fn docs_get(op: TransformOperation) -> TransformOperation {
+            op.description("Get all comparam executions")
+                .response_with::<200, Json<sovd_comparams::executions::get::Response>, _>(|res| {
+                    res.description("Response with all comparam executions.")
+                        .example(sovd_comparams::executions::get::Response {
+                            items: vec![sovd_comparams::executions::Item {
+                                id: "b7e2c1a2-3f4d-4e6a-9c8b-2a1d5e7f8c9b".to_string(),
+                            }],
+                        })
+                })
+        }
+
         pub(crate) async fn post<
             R: DiagServiceResponse + Send + Sync,
             T: UdsEcu + Send + Sync + Clone,
@@ -59,7 +72,7 @@ pub(crate) mod comparams {
                 comparam_executions,
                 ..
             }): State<WebserverEcuState<R, T, U>>,
-            Host(host): Host,
+            UseApi(Host(host), _): UseApi<Host, String>,
             OriginalUri(uri): OriginalUri,
             request_body: Option<Json<sovd_comparams::executions::update::Request>>,
         ) -> Response {
@@ -70,6 +83,19 @@ pub(crate) mod comparams {
                 None
             };
             handler_write(comparam_executions, path, body).await
+        }
+
+        pub(crate) fn docs_post(op: TransformOperation) -> TransformOperation {
+            op.description("Create a new comparam execution")
+                .response_with::<202, Json<sovd_comparams::executions::update::Response>, _>(
+                    |res| {
+                        res.description("Comparam execution created successfully.")
+                            .example(sovd_comparams::executions::update::Response {
+                                id: "b7e2c1a2-3f4d-4e6a-9c8b-2a1d5e7f8c9b".to_string(),
+                                status: sovd_comparams::executions::Status::Running,
+                            })
+                    },
+                )
         }
 
         pub(crate) async fn handler_read(
@@ -132,12 +158,13 @@ pub(crate) mod comparams {
 
         pub(crate) mod id {
             use super::*;
+            use crate::{openapi, sovd::components::IdPathParam};
             pub(crate) async fn get<
                 R: DiagServiceResponse + Send + Sync,
                 T: UdsEcu + Send + Sync + Clone,
                 U: FileManager + Send + Sync + Clone,
             >(
-                Path(id): Path<String>,
+                Path(id): Path<IdPathParam>,
                 State(WebserverEcuState {
                     ecu_name,
                     uds,
@@ -193,12 +220,27 @@ pub(crate) mod comparams {
                     .into_response()
             }
 
+            pub(crate) fn docs_get(op: TransformOperation) -> TransformOperation {
+                op.description("Get a specific comparam execution")
+                    .response_with::<200, Json<sovd_comparams::executions::id::get::Response>, _>(
+                        |res| {
+                            res.description("Response with comparam execution details.")
+                                .example(sovd_comparams::executions::id::get::Response {
+                                    capability: sovd_comparams::executions::Capability::Execute,
+                                    parameters: HashMap::new(),
+                                    status: sovd_comparams::executions::Status::Running,
+                                })
+                        },
+                    )
+                    .with(openapi::comparam_execution_errors)
+            }
+
             pub(crate) async fn delete<
                 R: DiagServiceResponse + Send + Sync,
                 T: UdsEcu + Send + Sync + Clone,
                 U: FileManager + Send + Sync + Clone,
             >(
-                Path(id): Path<String>,
+                Path(id): Path<IdPathParam>,
                 State(WebserverEcuState {
                     comparam_executions,
                     ..
@@ -221,17 +263,25 @@ pub(crate) mod comparams {
                 StatusCode::NO_CONTENT.into_response()
             }
 
+            pub(crate) fn docs_delete(op: TransformOperation) -> TransformOperation {
+                op.description("Delete a specific comparam execution")
+                    .response_with::<204, (), _>(|res| {
+                        res.description("Comparam execution deleted successfully.")
+                    })
+                    .with(openapi::comparam_execution_errors)
+            }
+
             pub(crate) async fn put<
                 R: DiagServiceResponse + Send + Sync,
                 T: UdsEcu + Send + Sync + Clone,
                 U: FileManager + Send + Sync + Clone,
             >(
-                Path(id): Path<String>,
+                Path(id): Path<IdPathParam>,
                 State(WebserverEcuState {
                     comparam_executions,
                     ..
                 }): State<WebserverEcuState<R, T, U>>,
-                Host(host): Host,
+                UseApi(Host(host), _): UseApi<Host, String>,
                 OriginalUri(uri): OriginalUri,
                 WithRejection(Json(request), _): WithRejection<
                     Json<sovd_comparams::executions::update::Request>,
@@ -279,6 +329,20 @@ pub(crate) mod comparams {
                 )
                     .into_response()
             }
+
+            pub(crate) fn docs_put(op: TransformOperation) -> TransformOperation {
+                op.description("Update a specific comparam execution")
+                    .response_with::<202, Json<sovd_comparams::executions::update::Response>, _>(
+                        |res| {
+                            res.description("Comparam execution updated successfully.")
+                                .example(sovd_comparams::executions::update::Response {
+                                    id: "example_id".to_string(),
+                                    status: sovd_comparams::executions::Status::Running,
+                                })
+                        },
+                    )
+                    .with(openapi::comparam_execution_errors)
+            }
         }
     }
 }
@@ -287,6 +351,7 @@ pub(crate) mod service {
     pub(crate) mod executions {
         use std::str::FromStr;
 
+        use aide::transform::TransformOperation;
         use axum::{
             Json,
             body::Bytes,
@@ -302,22 +367,37 @@ pub(crate) mod service {
         use http::header;
         use sovd_interfaces::components::ecu::operations::service::executions as sovd_executions;
 
-        use crate::sovd::{
-            self, WebserverEcuState, api_error_from_diag_response,
-            error::{ApiError, ErrorWrapper},
+        use crate::{
+            openapi,
+            sovd::{
+                self, WebserverEcuState, api_error_from_diag_response,
+                error::{ApiError, ErrorWrapper},
+            },
         };
+
+        openapi::aide_helper::gen_path_param!(OperationServicePathParam service String);
 
         pub(crate) async fn get<
             R: DiagServiceResponse + Send + Sync,
             T: UdsEcu + Send + Sync + Clone,
             U: FileManager + Send + Sync + Clone,
         >(
-            Path(service): Path<String>,
+            Path(OperationServicePathParam { service }): Path<OperationServicePathParam>,
             State(WebserverEcuState { ecu_name, uds, .. }): State<WebserverEcuState<R, T, U>>,
             headers: HeaderMap,
-            body: Bytes,
         ) -> Response {
-            ecu_operation_handler::<T>(Op::Read, service, &ecu_name, &uds, headers, body).await
+            ecu_operation_handler::<T>(Op::Read, service, &ecu_name, &uds, headers, None).await
+        }
+
+        pub(crate) fn docs_get(op: TransformOperation) -> TransformOperation {
+            op.description("Get all executions")
+                .response_with::<200, Json<sovd_interfaces::Items<String>>, _>(|res| {
+                    res.description("List of all comparam executions.").example(
+                        sovd_interfaces::Items {
+                            items: vec!["e7a1c2b2-4f3a-4c8e-9b2a-8d6e2f7c1a5b".to_string()],
+                        },
+                    )
+                })
         }
 
         pub(crate) async fn post<
@@ -325,12 +405,28 @@ pub(crate) mod service {
             T: UdsEcu + Send + Sync + Clone,
             U: FileManager + Send + Sync + Clone,
         >(
-            Path(service): Path<String>,
+            Path(OperationServicePathParam { service }): Path<OperationServicePathParam>,
             State(WebserverEcuState { ecu_name, uds, .. }): State<WebserverEcuState<R, T, U>>,
             headers: HeaderMap,
             body: Bytes,
         ) -> Response {
-            ecu_operation_handler::<T>(Op::Write, service, &ecu_name, &uds, headers, body).await
+            ecu_operation_handler::<T>(Op::Write, service, &ecu_name, &uds, headers, Some(body))
+                .await
+        }
+
+        pub(crate) fn docs_post(op: TransformOperation) -> TransformOperation {
+            openapi::request_json_and_octet::<sovd_executions::Request>(op)
+                .description("Create a new execution")
+                .with(openapi::ecu_service_response)
+                .response_with::<204, (), _>(|res| {
+                    res.description(
+                        "Comparam execution created successfully without response content.",
+                    )
+                })
+                .with(openapi::error_bad_request)
+                .with(openapi::error_not_found)
+                .with(openapi::error_internal_server)
+                .with(openapi::error_bad_gateway)
         }
 
         async fn ecu_operation_handler<T: UdsEcu + Send + Sync + Clone>(
@@ -339,7 +435,7 @@ pub(crate) mod service {
             ecu_name: &str,
             uds: &T,
             headers: HeaderMap,
-            body: Bytes,
+            body: Option<Bytes>,
         ) -> Response {
             match op {
                 Op::Read => (
@@ -348,6 +444,12 @@ pub(crate) mod service {
                 )
                     .into_response(),
                 Op::Write => {
+                    let Some(body) = body else {
+                        return ErrorWrapper(ApiError::BadRequest(
+                            "Missing request body".to_owned(),
+                        ))
+                        .into_response();
+                    };
                     if service == "reset" {
                         return ecu_reset_handler::<T>(service, ecu_name, uds, body).await;
                     }

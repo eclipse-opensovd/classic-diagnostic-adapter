@@ -30,10 +30,13 @@ use tokio::{
 };
 use uuid::Uuid;
 
-use crate::sovd::{
-    IntoSovd, WebserverEcuState, WebserverState,
-    auth::Claims,
-    error::{ApiError, ErrorWrapper},
+use crate::{
+    openapi,
+    sovd::{
+        IntoSovd, WebserverEcuState, WebserverState,
+        auth::Claims,
+        error::{ApiError, ErrorWrapper},
+    },
 };
 
 // later this likely will be a Vector of locks to support non exclusive locks
@@ -160,18 +163,24 @@ impl LockType {
     }
 }
 
+openapi::aide_helper::gen_path_param!(LockPathParam lock String);
+
 pub(crate) mod ecu {
+    use aide::{UseApi, axum::IntoApiResponse, transform::TransformOperation};
+
     use super::*;
+    use crate::sovd;
 
     pub(crate) mod lock {
         use super::*;
+        use crate::openapi;
         pub(crate) async fn delete<
             R: DiagServiceResponse + Send + Sync,
             T: UdsEcu + Send + Sync + Clone,
             U: FileManager + Send + Sync + Clone,
         >(
-            Path(lock): Path<String>,
-            claims: Claims,
+            Path(lock): Path<LockPathParam>,
+            UseApi(claims, _): UseApi<Claims, ()>,
             State(WebserverEcuState {
                 ecu_name, locks, ..
             }): State<WebserverEcuState<R, T, U>>,
@@ -179,13 +188,20 @@ pub(crate) mod ecu {
             delete_handler(&locks.ecu, &lock, claims, Some(&ecu_name)).await
         }
 
+        pub(crate) fn docs_delete(op: TransformOperation) -> TransformOperation {
+            op.description("Delete a specific lock.")
+                .response_with::<204, (), _>(|res| res.description("Lock deleted successfully."))
+                .with(openapi::lock_not_found)
+                .with(openapi::lock_not_owned)
+        }
+
         pub(crate) async fn put<
             R: DiagServiceResponse + Send + Sync,
             T: UdsEcu + Send + Sync + Clone,
             U: FileManager + Send + Sync + Clone,
         >(
-            Path(lock): Path<String>,
-            claims: Claims,
+            Path(lock): Path<LockPathParam>,
+            UseApi(claims, _): UseApi<Claims, ()>,
             State(WebserverEcuState {
                 ecu_name, locks, ..
             }): State<WebserverEcuState<R, T, U>>,
@@ -197,16 +213,35 @@ pub(crate) mod ecu {
             put_handler(&locks.ecu, &lock, claims, Some(&ecu_name), body).await
         }
 
+        pub(crate) fn docs_put(op: TransformOperation) -> TransformOperation {
+            op.description("Update a specific lock.")
+                .response_with::<204, (), _>(|res| res.description("Lock updated successfully."))
+                .with(openapi::lock_not_found)
+                .with(openapi::lock_not_owned)
+        }
+
         pub(crate) async fn get<
             R: DiagServiceResponse + Send + Sync,
             T: UdsEcu + Send + Sync + Clone,
             U: FileManager + Send + Sync + Clone,
         >(
-            Path(lock): Path<String>,
-            _: Claims,
+            Path(lock): Path<LockPathParam>,
+            _: UseApi<Claims, ()>,
             State(state): State<WebserverEcuState<R, T, U>>,
         ) -> Response {
             get_id_handler(&state.locks.ecu, &lock, None).await
+        }
+
+        pub(crate) fn docs_get(op: TransformOperation) -> TransformOperation {
+            op.description("Get a specific lock.")
+                .response_with::<200, Json<sovd_interfaces::locking::id::get::Response>, _>(|res| {
+                    res.description("Response with the lock details.").example(
+                        sovd_interfaces::locking::id::get::Response {
+                            lock_expiration: "2025-01-01T00:00:00Z".to_string(),
+                        },
+                    )
+                })
+                .with(openapi::lock_not_found)
         }
     }
 
@@ -215,7 +250,7 @@ pub(crate) mod ecu {
         T: UdsEcu + Send + Sync + Clone,
         U: FileManager + Send + Sync + Clone,
     >(
-        claims: Claims,
+        UseApi(claims, _): UseApi<Claims, ()>,
         State(WebserverEcuState {
             ecu_name, locks, ..
         }): State<WebserverEcuState<R, T, U>>,
@@ -223,7 +258,7 @@ pub(crate) mod ecu {
             Json<sovd_interfaces::locking::Request>,
             ApiError,
         >,
-    ) -> Response {
+    ) -> impl IntoApiResponse {
         let vehicle_ro_lock = vehicle_read_lock(&locks, &claims).await;
         if let Err(e) = vehicle_ro_lock {
             return ErrorWrapper(e).into_response();
@@ -241,61 +276,86 @@ pub(crate) mod ecu {
         post_handler(&locks.ecu, &claims, Some(&ecu_name), body, None).await
     }
 
+    pub(crate) fn docs_post(op: TransformOperation) -> TransformOperation {
+        op.description("Create a lock for an ECU")
+            .response_with::<200, Json<sovd_interfaces::locking::post_put::Response>, _>(|res| {
+                res.example(sovd_interfaces::locking::post_put::Response {
+                    id: "550e8400-e29b-41d4-a716-446655440000".to_string(),
+                    owned: Some(true),
+                })
+                .description("Lock created successfully.")
+            })
+            .response_with::<
+                403,
+                Json<sovd_interfaces::error::ApiErrorResponse::<sovd::error::ApiError>>,
+                 _>(|res| {
+                res.description("Lock is already owned by someone else.")
+            })
+            .response_with::<
+            409,
+            Json<sovd_interfaces::error::ApiErrorResponse::<sovd::error::ApiError>>,
+            _>(|res| {
+                res.description("Functional lock prevents setting lock.")
+            })
+    }
+
     pub(crate) async fn get<
         R: DiagServiceResponse + Send + Sync,
         T: UdsEcu + Send + Sync + Clone,
         U: FileManager + Send + Sync + Clone,
     >(
-        claims: Claims,
+        UseApi(claims, _): UseApi<Claims, ()>,
         State(WebserverEcuState {
             ecu_name, locks, ..
         }): State<WebserverEcuState<R, T, U>>,
     ) -> Response {
         get_handler(&locks.ecu, claims, Some(&ecu_name)).await
     }
+
+    pub(crate) fn docs_get(op: TransformOperation) -> TransformOperation {
+        op.description("Get all locks")
+            .response_with::<200, Json<sovd_interfaces::locking::get::Response>, _>(|res| {
+                res.example(sovd_interfaces::locking::get::Response {
+                    items: vec![sovd_interfaces::locking::Lock {
+                        id: "550e8400-e29b-41d4-a716-446655440000".to_string(),
+                        owned: Some(true),
+                    }],
+                })
+                .description("List of ECU locks.")
+            })
+    }
 }
 
 pub(crate) mod vehicle {
+    use aide::{UseApi, transform::TransformOperation};
+
     use super::*;
+    use crate::openapi;
 
     pub(crate) mod lock {
-        use super::*;
+        use aide::transform::TransformOperation;
 
-        #[cfg_attr(feature = "swagger-ui", utoipa::path(
-            delete,
-            path = "/vehicle/v15/locks/{lock}",
-            responses(
-                (status = 201, description = "Lock deleted.",),
-                (status = 404, description = "Lock not found.",
-                    body = sovd_interfaces::error::ApiErrorResponse::<ApiError>),
-                (status = 403, description = "Lock not owned.",
-                    body = sovd_interfaces::error::ApiErrorResponse::<ApiError>),
-            ),
-        ))]
+        use super::*;
+        use crate::openapi;
+
         pub(crate) async fn delete(
-            Path(lock): Path<String>,
-            claims: Claims,
+            Path(lock): Path<LockPathParam>,
+            UseApi(claims, _): UseApi<Claims, ()>,
             State(state): State<WebserverState>,
         ) -> Response {
             delete_handler(&state.locks.vehicle, &lock, claims, None).await
         }
 
-        #[cfg_attr(feature = "swagger-ui", utoipa::path(
-            post,
-            path = "/vehicle/v15/locks/{lock}",
-            request_body = sovd_interfaces::locking::Request,
-            responses(
-                (status = 200, description = "Successful response",
-                    body = sovd_interfaces::locking::post_put::Response),
-                (status = 404, description = "Not Found",
-                    body = sovd_interfaces::error::ApiErrorResponse::<ApiError>),
-                (status = 403, description = "Lock not owned",
-                    body = sovd_interfaces::error::ApiErrorResponse::<ApiError>),
-            ),
-        ))]
+        pub(crate) fn docs_delete(op: TransformOperation) -> TransformOperation {
+            op.description("Delete a vehicle lock")
+                .response_with::<201, (), _>(|res| res.description("Lock deleted."))
+                .with(openapi::lock_not_found)
+                .with(openapi::lock_not_owned)
+        }
+
         pub(crate) async fn put(
-            Path(lock): Path<String>,
-            claims: Claims,
+            Path(lock): Path<LockPathParam>,
+            UseApi(claims, _): UseApi<Claims, ()>,
             State(state): State<WebserverState>,
             WithRejection(Json(body), _): WithRejection<
                 Json<sovd_interfaces::locking::Request>,
@@ -305,41 +365,37 @@ pub(crate) mod vehicle {
             put_handler(&state.locks.vehicle, &lock, claims, None, body).await
         }
 
-        #[cfg_attr(feature = "swagger-ui", utoipa::path(
-            get,
-            path = "/vehicle/v15/locks/{lock}",
-            responses(
-                (status = 201, description = "Lock deleted.",),
-                (status = 404, description = "Lock not found.",
-                    body = sovd_interfaces::error::ApiErrorResponse::<ApiError>),
-                (status = 403, description = "Lock not owned.",
-                    body = sovd_interfaces::error::ApiErrorResponse::<ApiError>),
-            ),
-        ))]
+        pub(crate) fn docs_put(op: TransformOperation) -> TransformOperation {
+            op.description("Update a vehicle lock")
+                .response_with::<201, (), _>(|res| res.description("Lock updated successfully."))
+                .with(openapi::lock_not_found)
+                .with(openapi::lock_not_owned)
+        }
+
         pub(crate) async fn get(
-            Path(lock): Path<String>,
-            _: Claims,
+            Path(lock): Path<LockPathParam>,
+            UseApi(_, _): UseApi<Claims, ()>,
             State(state): State<WebserverState>,
         ) -> Response {
             get_id_handler(&state.locks.vehicle, &lock, None).await
         }
+
+        pub(crate) fn docs_get(op: TransformOperation) -> TransformOperation {
+            op.description("Get a specific vehicle lock")
+                .response_with::<200, Json<sovd_interfaces::locking::id::get::Response>, _>(|res| {
+                    res.description("Response with the lock details.").example(
+                        sovd_interfaces::locking::id::get::Response {
+                            lock_expiration: "2025-01-01T00:00:00Z".to_string(),
+                        },
+                    )
+                })
+                .with(openapi::lock_not_found)
+                .with(openapi::lock_not_owned)
+        }
     }
 
-    #[cfg_attr(feature = "swagger-ui", utoipa::path(
-    post,
-    path = "/vehicle/v15/locks",
-    request_body = sovd_interfaces::locking::Request,
-    responses(
-        (status = 200, description = "Successful response",
-            body = sovd_interfaces::locking::post_put::Response),
-        (status = 404, description = "Not Found",
-            body = sovd_interfaces::error::ApiErrorResponse::<ApiError>),
-        (status = 403, description = "Lock not owned",
-            body = sovd_interfaces::error::ApiErrorResponse::<ApiError>),
-    ),
-    ))]
     pub(crate) async fn post(
-        claims: Claims,
+        UseApi(claims, _): UseApi<Claims, ()>,
         State(state): State<WebserverState>,
         WithRejection(Json(body), _): WithRejection<
             Json<sovd_interfaces::locking::Request>,
@@ -376,40 +432,75 @@ pub(crate) mod vehicle {
         .await
     }
 
-    #[cfg_attr(feature = "swagger-ui", utoipa::path(
-        get,
-        path = "/vehicle/v15/locks/{lock}",
-        responses(
-                (status = 201, description = "Lock deleted.",),
-                (status = 404, description = "Lock not found.",
-                    body = sovd_interfaces::error::ApiErrorResponse::<ApiError>),
-                (status = 403, description = "Lock not owned.",
-                    body = sovd_interfaces::error::ApiErrorResponse::<ApiError>),
-        ),
-    ))]
-    pub(crate) async fn get(claims: Claims, State(state): State<WebserverState>) -> Response {
+    pub(crate) fn docs_post(op: TransformOperation) -> TransformOperation {
+        op.description("Create a vehicle lock")
+            .response_with::<200, Json<sovd_interfaces::locking::post_put::Response>, _>(|res| {
+                res.example(sovd_interfaces::locking::post_put::Response {
+                    id: "550e8400-e29b-41d4-a716-446655440000".to_string(),
+                    owned: Some(true),
+                })
+                .description("Vehicle lock created successfully.")
+            })
+            .with(openapi::lock_not_owned)
+    }
+
+    pub(crate) async fn get(
+        UseApi(claims, _): UseApi<Claims, ()>,
+        State(state): State<WebserverState>,
+    ) -> Response {
         get_handler(&state.locks.vehicle, claims, None).await
+    }
+
+    pub(crate) fn docs_get(op: TransformOperation) -> TransformOperation {
+        op.description("Get all vehicle locks")
+            .response_with::<200, Json<sovd_interfaces::locking::get::Response>, _>(|res| {
+                res.example(sovd_interfaces::locking::get::Response {
+                    items: vec![sovd_interfaces::locking::Lock {
+                        id: "550e8400-e29b-41d4-a716-446655440000".to_string(),
+                        owned: Some(true),
+                    }],
+                })
+                .description("List of vehicle locks.")
+            })
     }
 }
 
 pub(crate) mod functional_group {
+    use aide::{UseApi, transform::TransformOperation};
+
     use super::*;
+    use crate::openapi;
+
+    openapi::aide_helper::gen_path_param!(FunctionalGroupLockPathParam group String);
 
     pub(crate) mod lock {
         use super::*;
 
+        openapi::aide_helper::gen_path_param!(FunctionalGroupLockWithIdPathParam group String lock String);
+
         pub(crate) async fn delete(
-            Path((group, lock)): Path<(String, String)>,
+            Path(FunctionalGroupLockWithIdPathParam { group, lock }): Path<
+                FunctionalGroupLockWithIdPathParam,
+            >,
             State(state): State<WebserverState>,
-            claims: Claims,
+            UseApi(claims, _): UseApi<Claims, ()>,
         ) -> Response {
             delete_handler(&state.locks.functional_group, &lock, claims, Some(&group)).await
         }
 
+        pub(crate) fn docs_delete(op: TransformOperation) -> TransformOperation {
+            op.description("Delete a functional group lock")
+                .response_with::<204, (), _>(|res| res.description("Lock deleted successfully."))
+                .with(openapi::lock_not_found)
+                .with(openapi::lock_not_owned)
+        }
+
         pub(crate) async fn put(
-            Path((group, lock)): Path<(String, String)>,
+            Path(FunctionalGroupLockWithIdPathParam { group, lock }): Path<
+                FunctionalGroupLockWithIdPathParam,
+            >,
             State(state): State<WebserverState>,
-            claims: Claims,
+            UseApi(claims, _): UseApi<Claims, ()>,
             WithRejection(Json(body), _): WithRejection<
                 Json<sovd_interfaces::locking::Request>,
                 ApiError,
@@ -424,18 +515,41 @@ pub(crate) mod functional_group {
             )
             .await
         }
+
+        pub(crate) fn docs_put(op: TransformOperation) -> TransformOperation {
+            op.description("Update a functional group lock")
+                .response_with::<204, (), _>(|res| res.description("Lock updated successfully."))
+                .with(openapi::lock_not_found)
+                .with(openapi::lock_not_owned)
+        }
+
         pub(crate) async fn get(
-            Path(lock): Path<String>,
-            _: Claims,
+            Path(FunctionalGroupLockWithIdPathParam { group, lock }): Path<
+                FunctionalGroupLockWithIdPathParam,
+            >,
+            UseApi(_, _): UseApi<Claims, ()>,
             State(state): State<WebserverState>,
         ) -> Response {
-            get_id_handler(&state.locks.functional_group, &lock, None).await
+            get_id_handler(&state.locks.functional_group, &lock, Some(&group)).await
+        }
+
+        pub(crate) fn docs_get(op: TransformOperation) -> TransformOperation {
+            op.description("Get a specific functional group lock")
+                .response_with::<200, Json<sovd_interfaces::locking::id::get::Response>, _>(|res| {
+                    res.description("Response with the lock details.").example(
+                        sovd_interfaces::locking::id::get::Response {
+                            lock_expiration: "2025-01-01T00:00:00Z".to_string(),
+                        },
+                    )
+                })
+                .with(openapi::lock_not_found)
+                .with(openapi::lock_not_owned)
         }
     }
 
     pub(crate) async fn post(
-        Path(group): Path<String>,
-        claims: Claims,
+        Path(group): Path<FunctionalGroupLockPathParam>,
+        UseApi(claims, _): UseApi<Claims, ()>,
         State(state): State<WebserverState>,
         WithRejection(Json(body), _): WithRejection<
             Json<sovd_interfaces::locking::Request>,
@@ -458,8 +572,37 @@ pub(crate) mod functional_group {
         .await
     }
 
-    pub(crate) async fn get(claims: Claims, State(state): State<WebserverState>) -> Response {
-        get_handler(&state.locks.functional_group, claims, None).await
+    pub(crate) fn docs_post(op: TransformOperation) -> TransformOperation {
+        op.description("Create a functional group lock")
+            .response_with::<200, Json<sovd_interfaces::locking::post_put::Response>, _>(|res| {
+                res.example(sovd_interfaces::locking::post_put::Response {
+                    id: "550e8400-e29b-41d4-a716-446655440000".to_string(),
+                    owned: Some(true),
+                })
+                .description("Functional group lock created successfully.")
+            })
+            .with(openapi::lock_not_owned)
+    }
+
+    pub(crate) async fn get(
+        Path(group): Path<FunctionalGroupLockPathParam>,
+        UseApi(claims, _): UseApi<Claims, ()>,
+        State(state): State<WebserverState>,
+    ) -> Response {
+        get_handler(&state.locks.functional_group, claims, Some(&group)).await
+    }
+
+    pub(crate) fn docs_get(op: TransformOperation) -> TransformOperation {
+        op.description("Get all functional group locks")
+            .response_with::<200, Json<sovd_interfaces::locking::get::Response>, _>(|res| {
+                res.example(sovd_interfaces::locking::get::Response {
+                    items: vec![sovd_interfaces::locking::Lock {
+                        id: "550e8400-e29b-41d4-a716-446655440000".to_string(),
+                        owned: Some(true),
+                    }],
+                })
+                .description("List of functional group locks.")
+            })
     }
 }
 

@@ -13,15 +13,13 @@
 
 use hashbrown::HashMap;
 use serde::Serialize;
-#[cfg(feature = "swagger-ui")]
-use utoipa::ToSchema;
 
 #[derive(Serialize)]
 #[serde(rename_all = "kebab-case")]
 // allowed, so we can pre-fill this with all sovd error codes
 // even though not all are used yet.
 #[allow(dead_code)]
-#[cfg_attr(feature = "swagger-ui", derive(ToSchema))]
+#[cfg_attr(feature = "openapi", derive(schemars::JsonSchema))]
 pub enum ErrorCode {
     /// Details are specified in the `vendor_code`
     VendorSpecific,
@@ -88,7 +86,7 @@ pub enum ErrorCode {
 }
 
 #[derive(Serialize)]
-#[cfg_attr(feature = "swagger-ui", derive(ToSchema))]
+#[cfg_attr(feature = "openapi", derive(schemars::JsonSchema))]
 pub struct ApiErrorResponse<T> {
     pub message: String,
     pub error_code: ErrorCode,

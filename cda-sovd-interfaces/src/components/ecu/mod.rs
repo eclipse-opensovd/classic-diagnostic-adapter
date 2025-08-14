@@ -13,8 +13,6 @@
 
 use hashbrown::HashMap;
 use serde::{Deserialize, Serialize};
-#[cfg(feature = "swagger-ui")]
-use utoipa::ToSchema;
 
 use crate::Items;
 
@@ -22,7 +20,7 @@ pub mod modes;
 pub mod operations;
 
 #[derive(Serialize)]
-#[cfg_attr(feature = "swagger-ui", derive(ToSchema))]
+#[cfg_attr(feature = "openapi", derive(schemars::JsonSchema))]
 pub struct Ecu {
     pub id: String,
     pub name: String,
@@ -40,7 +38,7 @@ pub struct Ecu {
 pub type ComponentData = Items<ComponentDataInfo>;
 
 #[derive(Deserialize, Serialize, Debug)]
-#[cfg_attr(feature = "swagger-ui", derive(ToSchema))]
+#[cfg_attr(feature = "openapi", derive(schemars::JsonSchema))]
 pub struct ComponentDataInfo {
     pub category: String,
     pub id: String,
@@ -49,7 +47,7 @@ pub struct ComponentDataInfo {
 
 #[derive(Debug, Serialize)]
 #[serde(untagged)]
-#[cfg_attr(feature = "swagger-ui", derive(ToSchema))]
+#[cfg_attr(feature = "openapi", derive(schemars::JsonSchema))]
 pub enum SdSdg {
     /// A single special data group
     Sd {
@@ -77,20 +75,21 @@ pub enum SdSdg {
         /// The list of SD or SDGs in the SDG
         #[serde(skip_serializing_if = "Vec::is_empty")]
         #[serde(default)]
-        // defining the value type as Vec<Object>
-        // so the swagger-ui is showing the field as {}
-        #[cfg_attr(feature = "swagger-ui", schema(value_type = Vec<Object>, no_recursion))]
+        #[cfg_attr(
+            feature = "openapi",
+            schemars(with = "Vec<serde_json::Map<String, serde_json::Value>>")
+        )]
         sdgs: Vec<SdSdg>,
     },
 }
 
 #[derive(Serialize)]
-#[cfg_attr(feature = "swagger-ui", derive(ToSchema))]
+#[cfg_attr(feature = "openapi", derive(schemars::JsonSchema))]
 pub struct ServicesSdgs {
     pub items: HashMap<String, ServiceSdgs>,
 }
 #[derive(Serialize)]
-#[cfg_attr(feature = "swagger-ui", derive(ToSchema))]
+#[cfg_attr(feature = "openapi", derive(schemars::JsonSchema))]
 pub struct ServiceSdgs {
     pub sdgs: Vec<SdSdg>,
 }
@@ -104,11 +103,13 @@ pub mod configurations {
     use super::*;
 
     #[derive(Deserialize, Serialize, Debug)]
+    #[cfg_attr(feature = "openapi", derive(schemars::JsonSchema))]
     pub struct Components {
         pub items: Vec<ComponentItem>,
     }
 
     #[derive(Deserialize, Serialize, Debug)]
+    #[cfg_attr(feature = "openapi", derive(schemars::JsonSchema))]
     pub struct ComponentItem {
         pub id: String,
         pub name: String,
@@ -132,6 +133,7 @@ pub mod data {
     use crate::Payload;
 
     #[derive(Deserialize)]
+    #[cfg_attr(feature = "openapi", derive(schemars::JsonSchema))]
     pub struct DataRequestPayload {
         data: HashMap<String, serde_json::Value>,
     }
@@ -147,7 +149,7 @@ pub mod data {
         pub mod get {
             use super::*;
             #[derive(Deserialize)]
-            #[cfg_attr(feature = "swagger-ui", derive(ToSchema))]
+            #[cfg_attr(feature = "openapi", derive(schemars::JsonSchema))]
             pub struct DiagServiceQuery {
                 #[serde(rename = "x-include-sdgs")]
                 pub include_sdgs: Option<bool>,
@@ -177,6 +179,8 @@ pub mod x {
                 pub mod post {
                     use serde::{Deserialize, Serialize};
                     #[derive(Debug, Deserialize)]
+                    #[cfg_attr(feature = "openapi", derive(schemars::JsonSchema))]
+                    #[cfg_attr(feature = "openapi", schemars(rename = "FlashTransferRequest"))]
                     pub struct Request {
                         #[serde(rename = "blocksequencecounter")]
                         pub block_sequence_counter: u8,
@@ -187,6 +191,8 @@ pub mod x {
                     }
 
                     #[derive(Debug, Serialize)]
+                    #[cfg_attr(feature = "openapi", derive(schemars::JsonSchema))]
+                    #[cfg_attr(feature = "openapi", schemars(rename = "FlashTransferResponse"))]
                     pub struct Response {
                         pub id: String,
                     }
@@ -196,6 +202,7 @@ pub mod x {
 
                     #[derive(Serialize, Clone)]
                     #[serde(rename_all = "PascalCase")]
+                    #[cfg_attr(feature = "openapi", derive(schemars::JsonSchema))]
                     pub struct DataTransferMetaData {
                         pub acknowledged_bytes: u64,
                         pub blocksize: usize,
@@ -208,12 +215,14 @@ pub mod x {
                     }
 
                     #[derive(Serialize, Clone)]
+                    #[cfg_attr(feature = "openapi", derive(schemars::JsonSchema))]
                     pub struct DataTransferError {
                         pub text: String,
                     }
 
                     #[derive(Serialize, Debug, Clone, PartialEq)]
                     #[serde(rename_all = "lowercase")]
+                    #[cfg_attr(feature = "openapi", derive(schemars::JsonSchema))]
                     // allow unused because not all variants are used in the sovd
                     // context yet but are needed to match the CDA internal types
                     // and are useful for an sovd server as well
@@ -240,14 +249,18 @@ pub mod x {
                     use serde::{Deserialize, Serialize};
 
                     #[derive(Deserialize)]
+                    #[cfg_attr(feature = "openapi", derive(schemars::JsonSchema))]
+                    #[cfg_attr(feature = "openapi", schemars(rename = "RequestDownloadRequest"))]
                     pub struct Request {
                         #[serde(rename = "requestdownload")]
                         pub parameters: HashMap<String, serde_json::Value>,
                     }
                     #[derive(Serialize)]
+                    #[cfg_attr(feature = "openapi", derive(schemars::JsonSchema))]
+                    #[cfg_attr(feature = "openapi", schemars(rename = "RequestDownloadResponse"))]
                     pub struct Response {
                         #[serde(rename = "requestdownload")]
-                        pub parameters: serde_json::Value,
+                        pub parameters: serde_json::Map<String, serde_json::Value>,
                     }
                 }
             }
@@ -258,6 +271,7 @@ pub mod x {
         use serde::{Deserialize, Serialize};
 
         #[derive(Serialize, Deserialize)]
+        #[cfg_attr(feature = "openapi", derive(schemars::JsonSchema))]
         pub struct LongName {
             #[serde(skip_serializing_if = "Option::is_none")]
             #[serde(default)]
@@ -269,6 +283,7 @@ pub mod x {
         }
 
         #[derive(Serialize, Deserialize)]
+        #[cfg_attr(feature = "openapi", derive(schemars::JsonSchema))]
         pub struct Param {
             pub short_name: String,
 
@@ -288,6 +303,7 @@ pub mod x {
         }
 
         #[derive(Serialize, Deserialize)]
+        #[cfg_attr(feature = "openapi", derive(schemars::JsonSchema))]
         pub struct ProgCode {
             pub code_file: String,
             #[serde(skip_serializing_if = "Option::is_none")]
@@ -304,6 +320,7 @@ pub mod x {
         }
 
         #[derive(Serialize, Deserialize)]
+        #[cfg_attr(feature = "openapi", derive(schemars::JsonSchema))]
         pub struct Job {
             #[serde(rename = "x-input-params")]
             pub input_params: Vec<Param>,

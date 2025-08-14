@@ -11,7 +11,10 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+use sovd_interfaces::error::ApiErrorResponse;
+
 use super::*;
+use crate::sovd;
 
 pub(crate) async fn get<
     R: DiagServiceResponse + Send + Sync,
@@ -31,7 +34,35 @@ pub(crate) async fn get<
     }
 }
 
+pub(crate) fn docs_get(op: TransformOperation) -> TransformOperation {
+    op.description("Get all ECU data.")
+        .response_with::<200, Json<sovd_interfaces::components::ecu::data::get::Response>, _>(
+            |res| {
+                res.description("Response with all data.").example(
+                    sovd_interfaces::components::ecu::data::get::Response {
+                        items: vec![sovd_interfaces::components::ecu::ComponentDataInfo {
+                            category: "example_category".to_string(),
+                            id: "example_id".to_string(),
+                            name: "example_name".to_string(),
+                        }],
+                    },
+                )
+            },
+        )
+        .response_with::<400, Json<ApiErrorResponse<sovd::error::VendorErrorCode>>, _>(|res| {
+            res.description("Error while fetching data from ECU.")
+                .example(sovd_interfaces::error::ApiErrorResponse {
+                    message: "Failed to fetch ECU data".to_string(),
+                    error_code: sovd_interfaces::error::ErrorCode::VendorSpecific,
+                    vendor_code: Some(sovd::error::VendorErrorCode::BadRequest),
+                    parameters: None,
+                    error_source: Some("ECU".to_string()),
+                })
+        })
+}
+
 pub(crate) mod diag_service {
+    use aide::transform::{TransformOperation, TransformParameter};
     use axum::{
         Json,
         body::Bytes,
@@ -46,10 +77,13 @@ pub(crate) mod diag_service {
     use http::{HeaderMap, StatusCode};
     use sovd_interfaces::components::ecu::data::service::get::DiagServiceQuery;
 
-    use crate::sovd::{
-        IntoSovd, WebserverEcuState,
-        components::ecu::data_request,
-        error::{ApiError, ErrorWrapper},
+    use crate::{
+        openapi,
+        sovd::{
+            IntoSovd, WebserverEcuState,
+            components::ecu::{DiagServicePathParam, data_request},
+            error::{ApiError, ErrorWrapper},
+        },
     };
 
     async fn get_sdgs_handler<T: UdsEcu + Send + Sync + Clone>(
@@ -105,10 +139,9 @@ pub(crate) mod diag_service {
         U: FileManager + Send + Sync + Clone,
     >(
         headers: HeaderMap,
-        Path(diag_service): Path<String>,
+        Path(DiagServicePathParam { diag_service }): Path<DiagServicePathParam>,
         Query(query): Query<DiagServiceQuery>,
         State(WebserverEcuState { ecu_name, uds, .. }): State<WebserverEcuState<R, T, U>>,
-        body: Bytes,
     ) -> Response {
         if Some(true) == query.include_sdgs {
             get_sdgs_handler::<T>(diag_service, &ecu_name, &uds).await
@@ -127,10 +160,24 @@ pub(crate) mod diag_service {
                 &ecu_name,
                 &uds,
                 headers,
-                body,
+                None,
             )
             .await
         }
+    }
+
+    pub(crate) fn docs_get(op: TransformOperation) -> TransformOperation {
+        op.description("Get a specific diagnostic service.")
+            .parameter("x-include-sdgs", |op: TransformParameter<bool>| {
+                op.description("Set to true to include sdgs.")
+            })
+            .with(openapi::ecu_service_response)
+            .with(openapi::error_forbidden)
+            .with(openapi::error_not_found)
+            .with(openapi::error_internal_server)
+            .with(openapi::error_conflict)
+            .with(openapi::error_bad_request)
+            .with(openapi::error_bad_gateway)
     }
 
     pub(crate) async fn put<
@@ -139,7 +186,9 @@ pub(crate) mod diag_service {
         U: FileManager + Send + Sync + Clone,
     >(
         headers: HeaderMap,
-        Path(service): Path<String>,
+        Path(DiagServicePathParam {
+            diag_service: service,
+        }): Path<DiagServicePathParam>,
         State(WebserverEcuState { ecu_name, uds, .. }): State<WebserverEcuState<R, T, U>>,
         body: Bytes,
     ) -> Response {
@@ -156,8 +205,22 @@ pub(crate) mod diag_service {
             &ecu_name,
             &uds,
             headers,
-            body,
+            Some(body),
         )
         .await
+    }
+
+    pub(crate) fn docs_put(op: TransformOperation) -> TransformOperation {
+        openapi::request_json_and_octet::<
+            sovd_interfaces::components::ecu::data::DataRequestPayload
+        >(op)
+            .description("Update data for a specific data service")
+            .with(openapi::ecu_service_response)
+            .with(openapi::error_forbidden)
+            .with(openapi::error_not_found)
+            .with(openapi::error_internal_server)
+            .with(openapi::error_conflict)
+            .with(openapi::error_bad_request)
+            .with(openapi::error_bad_gateway)
     }
 }

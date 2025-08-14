@@ -11,6 +11,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+use aide::transform::TransformOperation;
 use axum::{
     Json,
     extract::State,
@@ -49,6 +50,20 @@ pub(crate) async fn get<
     }
 }
 
+pub(crate) fn docs_get(op: TransformOperation) -> TransformOperation {
+    op.description("Get all configuration services for the component")
+        .response_with::<200, Json<sovd_configurations::get::Response>, _>(|res| {
+            res.example(sovd_configurations::get::Response {
+                items: vec![sovd_configurations::ComponentItem {
+                    id: "example_id".into(),
+                    name: "example_name".into(),
+                    configurations_type: "example_type".into(),
+                    service_abstract: vec!["example_service".into()],
+                }],
+            })
+        })
+}
+
 impl IntoSovd for ComponentConfigurationsInfo {
     type SovdType = sovd_configurations::ComponentItem;
 
@@ -72,6 +87,7 @@ impl IntoSovd for ComponentConfigurationsInfo {
 }
 
 pub(crate) mod diag_service {
+    use aide::transform::TransformOperation;
     use axum::{
         body::Bytes,
         extract::{Path, State},
@@ -83,10 +99,13 @@ pub(crate) mod diag_service {
     };
     use http::HeaderMap;
 
-    use crate::sovd::{
-        WebserverEcuState,
-        components::ecu::data_request,
-        error::{ApiError, ErrorWrapper},
+    use crate::{
+        openapi,
+        sovd::{
+            WebserverEcuState,
+            components::ecu::{DiagServicePathParam, data_request},
+            error::{ApiError, ErrorWrapper},
+        },
     };
 
     pub(crate) async fn put<
@@ -95,7 +114,9 @@ pub(crate) mod diag_service {
         U: FileManager + Send + Sync + Clone,
     >(
         headers: HeaderMap,
-        Path(service): Path<String>,
+        Path(DiagServicePathParam {
+            diag_service: service,
+        }): Path<DiagServicePathParam>,
         State(WebserverEcuState { ecu_name, uds, .. }): State<WebserverEcuState<R, T, U>>,
         body: Bytes,
     ) -> Response {
@@ -112,8 +133,22 @@ pub(crate) mod diag_service {
             &ecu_name,
             &uds,
             headers,
-            body,
+            Some(body),
         )
         .await
+    }
+
+    pub(crate) fn docs_put(op: TransformOperation) -> TransformOperation {
+        openapi::request_json_and_octet::<
+            sovd_interfaces::components::ecu::data::DataRequestPayload
+        >(op)
+            .description("Update data for a specific configuration service")
+            .with(openapi::ecu_service_response)
+            .with(openapi::error_forbidden)
+            .with(openapi::error_not_found)
+            .with(openapi::error_internal_server)
+            .with(openapi::error_conflict)
+            .with(openapi::error_bad_request)
+            .with(openapi::error_bad_gateway)
     }
 }

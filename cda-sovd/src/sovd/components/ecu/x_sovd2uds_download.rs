@@ -11,6 +11,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+use aide::UseApi;
 use axum::{
     extract::OriginalUri,
     response::{IntoResponse, Response},
@@ -61,7 +62,10 @@ async fn sovd_to_func_class_service_exec<T: UdsEcu + Send + Sync + Clone>(
     Ok(mapped_data)
 }
 
-pub(crate) async fn get(Host(host): Host, OriginalUri(uri): OriginalUri) -> Response {
+pub(crate) async fn get(
+    UseApi(Host(host), _): UseApi<Host, String>,
+    OriginalUri(uri): OriginalUri,
+) -> Response {
     resource_response(
         &host,
         &uri,
@@ -70,6 +74,7 @@ pub(crate) async fn get(Host(host): Host, OriginalUri(uri): OriginalUri) -> Resp
 }
 
 pub(crate) mod request_download {
+    use aide::transform::TransformOperation;
     use axum::{
         Json,
         extract::State,
@@ -81,9 +86,15 @@ pub(crate) mod request_download {
     };
     use sovd_interfaces::components::ecu::x::sovd2uds;
 
-    use crate::sovd::{
-        WebserverEcuState,
-        x_sovd2uds_download::{FLASH_DOWNLOAD_UPLOAD_FUNC_CLASS, sovd_to_func_class_service_exec},
+    use crate::{
+        openapi,
+        sovd::{
+            WebserverEcuState,
+            error::ErrorWrapper,
+            x_sovd2uds_download::{
+                FLASH_DOWNLOAD_UPLOAD_FUNC_CLASS, sovd_to_func_class_service_exec,
+            },
+        },
     };
 
     pub(crate) async fn put<
@@ -103,21 +114,46 @@ pub(crate) mod request_download {
         )
         .await
         {
-            Ok(mapped_data) => (
+            Ok(serde_json::Value::Object(mapped_data)) => (
                 StatusCode::OK,
                 Json(sovd2uds::download::request_download::put::Response {
                     parameters: mapped_data,
                 }),
             )
                 .into_response(),
+            Ok(val) => ErrorWrapper(crate::sovd::error::ApiError::InternalServerError(Some(
+                format!("Expected a map, got: {val:?}"),
+            )))
+            .into_response(),
             Err(response) => response,
         }
+    }
+
+    pub(crate) fn docs_put(op: TransformOperation) -> TransformOperation {
+        op.description("Execute the request download service on the component")
+            .response_with::<200, Json<sovd2uds::download::request_download::put::Response>, _>(
+                |res| {
+                    res.example(sovd2uds::download::request_download::put::Response {
+                        parameters: [
+                            ("val1".to_owned(), serde_json::json!("example1")),
+                            ("val2".to_owned(), serde_json::json!(123456)),
+                        ]
+                        .into_iter()
+                        .collect(),
+                    })
+                },
+            )
+            .with(openapi::error_bad_request)
+            .with(openapi::error_not_found)
+            .with(openapi::error_internal_server)
+            .with(openapi::error_bad_gateway)
     }
 }
 
 pub(crate) mod flash_transfer {
     use std::path::PathBuf;
 
+    use aide::transform::TransformOperation;
     use axum::{
         Json,
         extract::{Path, State},
@@ -128,10 +164,13 @@ pub(crate) mod flash_transfer {
     use sovd_interfaces::components::ecu::x::sovd2uds;
     use uuid::Uuid;
 
-    use crate::sovd::{
-        IntoSovd, WebserverEcuState,
-        error::{ApiError, ErrorWrapper},
-        x_sovd2uds_download::FLASH_DOWNLOAD_UPLOAD_FUNC_CLASS,
+    use crate::{
+        openapi,
+        sovd::{
+            IntoSovd, WebserverEcuState,
+            error::{ApiError, ErrorWrapper},
+            x_sovd2uds_download::FLASH_DOWNLOAD_UPLOAD_FUNC_CLASS,
+        },
     };
 
     pub(crate) async fn post<
@@ -200,6 +239,20 @@ pub(crate) mod flash_transfer {
         }
     }
 
+    pub(crate) fn docs_post(op: TransformOperation) -> TransformOperation {
+        op.description("Start a flash transfer for a file")
+            .input::<Json<sovd2uds::download::flash_transfer::post::Request>>()
+            .response_with::<200, Json<sovd2uds::download::flash_transfer::post::Response>, _>(
+                |res| {
+                    res.example(sovd2uds::download::flash_transfer::post::Response {
+                        id: "123e4567-e89b-12d3-a456-426614174000".to_owned(),
+                    })
+                },
+            )
+            .with(openapi::error_bad_request)
+            .with(openapi::error_not_found)
+    }
+
     pub(crate) async fn get<
         R: DiagServiceResponse + Send + Sync,
         T: UdsEcu + Send + Sync + Clone,
@@ -213,14 +266,31 @@ pub(crate) mod flash_transfer {
         }
     }
 
+    pub(crate) fn docs_get(op: TransformOperation) -> TransformOperation {
+        use sovd2uds::download::flash_transfer::get::{DataTransferMetaData, DataTransferStatus};
+        op.description("Get all flash transfers for the component")
+            .response_with::<200, Json<Vec<DataTransferMetaData>>, _>(|res| {
+                res.example(vec![DataTransferMetaData {
+                    acknowledged_bytes: 0,
+                    blocksize: 1024,
+                    next_block_sequence_counter: 1,
+                    id: "123e4567-e89b-12d3-a456-426614174000".to_owned(),
+                    file_id: "file-id".to_owned(),
+                    status: DataTransferStatus::Queued,
+                    error: None,
+                }])
+            })
+    }
+
     pub(crate) mod id {
         use super::*;
+        use crate::sovd::components::IdPathParam;
         pub(crate) async fn get<
             R: DiagServiceResponse + Send + Sync,
             T: UdsEcu + Send + Sync + Clone,
             U: FileManager + Send + Sync + Clone,
         >(
-            Path(id): Path<String>,
+            Path(id): Path<IdPathParam>,
             State(WebserverEcuState { ecu_name, uds, .. }): State<WebserverEcuState<R, T, U>>,
         ) -> Response {
             match uds.ecu_flash_transfer_status_id(&ecu_name, &id).await {
@@ -229,18 +299,48 @@ pub(crate) mod flash_transfer {
             }
         }
 
+        pub(crate) fn docs_get(op: TransformOperation) -> TransformOperation {
+            use sovd2uds::download::flash_transfer::get::{
+                DataTransferMetaData, DataTransferStatus,
+            };
+
+            op.description("Get flash transfer status for a specific transfer")
+                .response_with::<200, Json<DataTransferMetaData>, _>(|res| {
+                    res.example(DataTransferMetaData {
+                        acknowledged_bytes: 0,
+                        blocksize: 1024,
+                        next_block_sequence_counter: 1,
+                        id: "123e4567-e89b-12d3-a456-426614174000".to_owned(),
+                        file_id: "file-id".to_owned(),
+                        status: DataTransferStatus::Queued,
+                        error: None,
+                    })
+                })
+                .with(openapi::error_not_found)
+        }
+
         pub(crate) async fn delete<
             R: DiagServiceResponse + Send + Sync,
             T: UdsEcu + Send + Sync + Clone,
             U: FileManager + Send + Sync + Clone,
         >(
-            Path(id): Path<String>,
+            Path(id): Path<IdPathParam>,
             State(WebserverEcuState { ecu_name, uds, .. }): State<WebserverEcuState<R, T, U>>,
         ) -> Response {
             match uds.ecu_flash_transfer_exit(&ecu_name, &id).await {
                 Ok(()) => StatusCode::NO_CONTENT.into_response(),
                 Err(e) => ErrorWrapper(e.into()).into_response(),
             }
+        }
+
+        pub(crate) fn docs_delete(op: TransformOperation) -> TransformOperation {
+            op.description(
+                "Remove an aborted or finished flashtransfer to allow new flashtransfers to be \
+                 started.",
+            )
+            .response_with::<204, (), _>(|res| res)
+            .with(openapi::error_not_found)
+            .with(openapi::error_bad_request)
         }
     }
 
@@ -293,6 +393,7 @@ pub(crate) mod flash_transfer {
 }
 
 pub(crate) mod transferexit {
+    use aide::transform::TransformOperation;
     use axum::{
         extract::State,
         response::{IntoResponse, Response},
@@ -303,9 +404,14 @@ pub(crate) mod transferexit {
     use hashbrown::HashMap;
     use http::StatusCode;
 
-    use crate::sovd::{
-        WebserverEcuState,
-        x_sovd2uds_download::{FLASH_DOWNLOAD_UPLOAD_FUNC_CLASS, sovd_to_func_class_service_exec},
+    use crate::{
+        openapi,
+        sovd::{
+            WebserverEcuState,
+            x_sovd2uds_download::{
+                FLASH_DOWNLOAD_UPLOAD_FUNC_CLASS, sovd_to_func_class_service_exec,
+            },
+        },
     };
 
     pub(crate) async fn put<
@@ -327,5 +433,13 @@ pub(crate) mod transferexit {
             Ok(_) => StatusCode::NO_CONTENT.into_response(),
             Err(response) => response,
         }
+    }
+
+    pub(crate) fn docs_put(op: TransformOperation) -> TransformOperation {
+        op.description("Exit a transfer session")
+            .response_with::<204, (), _>(|res| res)
+            .with(openapi::error_bad_request)
+            .with(openapi::error_not_found)
+            .with(openapi::error_bad_gateway)
     }
 }
