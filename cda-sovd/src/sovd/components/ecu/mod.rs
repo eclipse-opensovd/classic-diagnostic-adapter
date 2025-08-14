@@ -11,6 +11,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+use aide::{axum::IntoApiResponse, transform::TransformOperation};
 use axum::{
     Json,
     body::Bytes,
@@ -23,12 +24,16 @@ use cda_interfaces::{
     file_manager::FileManager,
 };
 use http::{HeaderMap, StatusCode, header};
+use schemars::JsonSchema;
 use serde::Deserialize;
 
-use crate::sovd::{
-    IntoSovd, WebserverEcuState,
-    error::{ApiError, ErrorWrapper, api_error_from_diag_response},
-    get_payload_data,
+use crate::{
+    openapi,
+    sovd::{
+        IntoSovd, WebserverEcuState,
+        error::{ApiError, ErrorWrapper, api_error_from_diag_response},
+        get_payload_data,
+    },
 };
 
 pub(crate) mod configurations;
@@ -40,7 +45,7 @@ pub(crate) mod x_single_ecu_jobs;
 pub(crate) mod x_sovd2uds_bulk_data;
 pub(crate) mod x_sovd2uds_download;
 
-#[derive(Deserialize)]
+#[derive(Deserialize, JsonSchema)]
 pub(crate) struct ComponentQuery {
     #[serde(rename = "x-include-sdgs")]
     pub include_sdgs: Option<bool>,
@@ -53,7 +58,7 @@ pub(crate) async fn get<
 >(
     State(WebserverEcuState { ecu_name, uds, .. }): State<WebserverEcuState<R, T, U>>,
     Query(query): Query<ComponentQuery>,
-) -> Response {
+) -> impl IntoApiResponse {
     let base_path = format!("http://localhost:20002/vehicle/v15/components/{ecu_name}");
     let variant = match uds.get_variant(&ecu_name).await {
         Ok(v) => v,
@@ -87,6 +92,30 @@ pub(crate) async fn get<
     )
         .into_response()
 }
+
+pub(crate) fn docs_get(op: TransformOperation) -> TransformOperation {
+    op.description("Get ECU details")
+        .response_with::<200, Json<sovd_interfaces::components::ecu::Ecu>, _>(|res| {
+            res.example(sovd_interfaces::components::ecu::Ecu {
+                id: "my_ecu".to_string(),
+                name: "My ECU".to_string(),
+                variant: "Variant1".to_string(),
+                locks: "http://localhost:20002/vehicle/v15/components/my_ecu/locks".to_string(),
+                operations: "http://localhost:20002/vehicle/v15/components/my_ecu/operations"
+                    .to_string(),
+                data: "http://localhost:20002/vehicle/v15/components/my_ecu/data".to_string(),
+                configurations:
+                    "http://localhost:20002/vehicle/v15/components/my_ecu/configurations"
+                        .to_string(),
+                sdgs: None,
+                single_ecu_jobs:
+                    "http://localhost:20002/vehicle/v15/components/my_ecu/x-single-ecu-jobs"
+                        .to_string(),
+            })
+            .description("Response with ECU information (i.e. detected variant) and service URLs")
+        })
+}
+
 pub(crate) async fn post<
     R: DiagServiceResponse + Send + Sync,
     T: UdsEcu + Send + Sync + Clone,
@@ -105,6 +134,11 @@ pub(crate) async fn put<
     State(WebserverEcuState { ecu_name, uds, .. }): State<WebserverEcuState<R, T, U>>,
 ) -> Response {
     update(&ecu_name, uds).await
+}
+
+pub(crate) fn docs_put(op: TransformOperation) -> TransformOperation {
+    op.description("Trigger ECU variant detection")
+        .response_with::<201, (), _>(|res| res.description("ECU variant detection triggered."))
 }
 
 async fn update<T: UdsEcu + Send + Sync + Clone>(ecu_name: &str, uds: T) -> Response {
@@ -151,18 +185,24 @@ impl IntoSovd for cda_interfaces::datatypes::ComParamSimpleValue {
     }
 }
 
+openapi::aide_helper::gen_path_param!(DiagServicePathParam diag_service String);
+
 async fn data_request<T: UdsEcu + Send + Sync + Clone>(
     service: DiagComm,
     ecu_name: &str,
     gateway: &T,
     headers: HeaderMap,
-    body: Bytes,
+    body: Option<Bytes>,
 ) -> Response {
-    let data = match get_payload_data::<sovd_interfaces::components::ecu::data::DataRequestPayload>(
-        &headers, &body,
-    ) {
-        Ok(value) => value,
-        Err(e) => return ErrorWrapper(e).into_response(),
+    let data = if let Some(body) = body {
+        match get_payload_data::<sovd_interfaces::components::ecu::data::DataRequestPayload>(
+            &headers, &body,
+        ) {
+            Ok(value) => value,
+            Err(e) => return ErrorWrapper(e).into_response(),
+        }
+    } else {
+        None
     };
 
     let (response_mime, map_to_json) = match headers.get(header::ACCEPT) {
@@ -215,15 +255,20 @@ async fn data_request<T: UdsEcu + Send + Sync + Clone>(
 
             if mapped_data.is_null() {
                 StatusCode::NO_CONTENT.into_response()
-            } else {
+            } else if let serde_json::Value::Object(mapped_data) = mapped_data {
                 (
                     StatusCode::OK,
-                    Json(sovd_interfaces::DataItem {
+                    Json(sovd_interfaces::ObjectDataItem {
                         id: service.name.to_lowercase(),
                         data: mapped_data,
                     }),
                 )
                     .into_response()
+            } else {
+                ErrorWrapper(ApiError::InternalServerError(Some(format!(
+                    "Unexpected response format: {mapped_data:?}"
+                ))))
+                .into_response()
             }
         }
     }

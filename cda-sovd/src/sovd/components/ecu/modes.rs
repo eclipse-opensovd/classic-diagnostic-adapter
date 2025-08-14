@@ -13,6 +13,7 @@
 
 use std::time::Duration;
 
+use aide::transform::TransformOperation;
 use axum::{
     Json,
     extract::State,
@@ -63,15 +64,41 @@ pub(crate) async fn get() -> Response {
         .into_response()
 }
 
+pub(crate) fn docs_get(op: TransformOperation) -> TransformOperation {
+    op.description("Get the available modes for the ECU")
+        .response_with::<200, Json<sovd_modes::get::Response>, _>(|res| {
+            res.description("Available modes for the ECU")
+                .example(sovd_modes::get::Response {
+                    items: vec![
+                        sovd_modes::Mode {
+                            id: Some(semantics::SESSION.to_owned()),
+                            name: Some(SESSION_NAME.to_string()),
+                            translation_id: None,
+                            value: None,
+                        },
+                        sovd_modes::Mode {
+                            id: Some(semantics::SECURITY.to_owned()),
+                            name: Some(SECURITY_NAME.to_string()),
+                            translation_id: None,
+                            value: None,
+                        },
+                    ],
+                })
+        })
+}
+
 pub(crate) mod session {
+    use aide::UseApi;
+
     use super::*;
+    use crate::openapi;
 
     pub(crate) async fn put<
         R: DiagServiceResponse + Send + Sync,
         T: UdsEcu + Send + Sync + Clone,
         U: FileManager + Send + Sync + Clone,
     >(
-        claims: Claims,
+        UseApi(claims, _): UseApi<Claims, ()>,
         State(WebserverEcuState {
             locks,
             uds,
@@ -110,6 +137,24 @@ pub(crate) mod session {
         }
     }
 
+    pub(crate) fn docs_put(op: TransformOperation) -> TransformOperation {
+        op.description("Switch session of ECU")
+            .input::<Json<sovd_modes::put::Request>>()
+            .response_with::<200, Json<sovd_modes::put::Response<String>>, _>(|res| {
+                res.description("Session switched successfully").example(
+                    sovd_modes::put::Response {
+                        id: semantics::SECURITY.to_owned(),
+                        value: "default".to_string(),
+                    },
+                )
+            })
+            .with(openapi::error_not_found)
+            .with(openapi::error_forbidden)
+            .with(openapi::error_bad_request)
+            .with(openapi::error_internal_server)
+            .with(openapi::error_bad_gateway)
+    }
+
     pub(crate) async fn get<
         R: DiagServiceResponse + Send + Sync,
         T: UdsEcu + Send + Sync + Clone,
@@ -134,12 +179,28 @@ pub(crate) mod session {
             }
         }
     }
+
+    pub(crate) fn docs_get(op: TransformOperation) -> TransformOperation {
+        op.description("Get the current session mode for the ECU")
+            .response_with::<200, Json<sovd_modes::Mode<String>>, _>(|res| {
+                res.description("Current session mode for the ECU")
+                    .example(sovd_modes::Mode {
+                        id: None,
+                        name: Some(SESSION_NAME.to_string()),
+                        translation_id: None,
+                        value: Some("default".to_string()),
+                    })
+            })
+            .with(openapi::error_not_found)
+    }
 }
 
 pub(crate) mod security {
+    use aide::UseApi;
     use cda_interfaces::{SecurityAccess, diagservices::UdsPayloadData};
 
     use super::*;
+    use crate::openapi;
 
     #[derive(Serialize)]
     struct SovdSeed {
@@ -158,7 +219,7 @@ pub(crate) mod security {
         T: UdsEcu + Send + Sync + Clone,
         U: FileManager + Send + Sync + Clone,
     >(
-        claims: Claims,
+        UseApi(claims, _): UseApi<Claims, ()>,
         State(WebserverEcuState {
             ecu_name,
             locks,
@@ -188,12 +249,26 @@ pub(crate) mod security {
         }
     }
 
+    pub(crate) fn docs_get(op: TransformOperation) -> TransformOperation {
+        op.description("Get the current security access mode for the ECU")
+            .response_with::<200, Json<sovd_modes::Mode<String>>, _>(|res| {
+                res.description("Current security access mode for the ECU")
+                    .example(sovd_modes::Mode {
+                        id: None,
+                        name: Some(SECURITY_NAME.to_string()),
+                        translation_id: None,
+                        value: Some("level_1".to_owned()),
+                    })
+            })
+            .with(openapi::error_not_found)
+    }
+
     pub(crate) async fn put<
         R: DiagServiceResponse + Send + Sync,
         T: UdsEcu + Send + Sync + Clone,
         U: FileManager + Send + Sync + Clone,
     >(
-        claims: Claims,
+        UseApi(claims, _): UseApi<Claims, ()>,
         State(WebserverEcuState {
             uds,
             ecu_name,
@@ -291,5 +366,21 @@ pub(crate) mod security {
             },
             Err(e) => ApiError::from(e).into_response(),
         }
+    }
+
+    pub(crate) fn docs_put(op: TransformOperation) -> TransformOperation {
+        op.description("Set the security access mode for the ECU")
+            .input::<Json<sovd_modes::put::Request>>()
+            .response_with::<200, Json<sovd_modes::put::Response<String>>, _>(|res| {
+                res.description("Response for setting the security access mode")
+                    .example(sovd_modes::put::Response {
+                        id: semantics::SECURITY.to_owned(),
+                        value: "level_2".to_owned(),
+                    })
+            })
+            .with(openapi::error_not_found)
+            .with(openapi::error_bad_request)
+            .with(openapi::error_internal_server)
+            .with(openapi::error_bad_gateway)
     }
 }

@@ -13,6 +13,7 @@
 
 use std::sync::LazyLock;
 
+use aide::axum::IntoApiResponse;
 use axum::{
     Json, RequestPartsExt,
     extract::FromRequestParts,
@@ -25,10 +26,11 @@ use axum_extra::{
     headers::{Authorization, authorization::Bearer},
 };
 use jsonwebtoken::{DecodingKey, EncodingKey, Header, Validation, decode, encode};
+use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 
-use crate::sovd::error::ApiError;
+use crate::sovd::error::{ApiError, ErrorWrapper};
 
 // allowed because the variant for enabled auth needs the Result
 #[allow(clippy::unnecessary_wraps)]
@@ -54,20 +56,26 @@ fn check_auth_payload(payload: &AuthPayload) -> Result<(), AuthError> {
 
 pub(crate) async fn authorize(
     WithRejection(Json(payload), _): WithRejection<Json<AuthPayload>, ApiError>,
-) -> Result<Json<AuthBody>, AuthError> {
+) -> impl IntoApiResponse {
     // Check if the user sent the credentials
-    check_auth_payload(&payload)?;
+    if let Err(e) = check_auth_payload(&payload) {
+        return ErrorWrapper(ApiError::Forbidden(Some(format!("{e:?}")))).into_response();
+    }
 
     let claims = Claims {
         sub: payload.client_id,
         exp: 2_000_000_000, // May 2033
     };
     // Create the authorization token
-    let token = encode(&Header::default(), &claims, &KEYS.encoding)
-        .map_err(|_| AuthError::TokenCreation)?;
+    let token = match encode(&Header::default(), &claims, &KEYS.encoding) {
+        Ok(token) => token,
+        Err(_) => {
+            return ErrorWrapper(ApiError::InternalServerError(None)).into_response();
+        }
+    };
 
     // Send the authorized token
-    Ok(Json(AuthBody::new(token, claims.exp)))
+    (StatusCode::OK, Json(AuthBody::new(token, claims.exp))).into_response()
 }
 
 impl AuthBody {
@@ -149,7 +157,7 @@ impl Keys {
     }
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize, JsonSchema)]
 pub(crate) struct Claims {
     // dummy implementation for now
     // must be filled with remaining fields
@@ -158,14 +166,14 @@ pub(crate) struct Claims {
     exp: usize,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, JsonSchema)]
 pub(crate) struct AuthBody {
     access_token: String,
     token_type: String,
     expires_in: usize,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, JsonSchema)]
 pub(crate) struct AuthPayload {
     client_id: String,
     // allowing unused because client_secret

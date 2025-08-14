@@ -12,6 +12,7 @@
  */
 
 pub(crate) mod single_ecu {
+    use aide::transform::TransformOperation;
     use axum::{
         Json,
         extract::{Path, State},
@@ -20,10 +21,15 @@ pub(crate) mod single_ecu {
     };
     use cda_interfaces::{UdsEcu, diagservices::DiagServiceResponse, file_manager::FileManager};
 
-    use crate::sovd::{
-        IntoSovd, WebserverEcuState,
-        error::{ApiError, ErrorWrapper},
+    use crate::{
+        openapi,
+        sovd::{
+            IntoSovd, WebserverEcuState,
+            error::{ApiError, ErrorWrapper},
+        },
     };
+
+    openapi::aide_helper::gen_path_param!(ExecutionJobPathParam job_name String);
 
     pub(crate) async fn get<
         R: DiagServiceResponse + Send + Sync,
@@ -43,6 +49,20 @@ pub(crate) mod single_ecu {
         }
     }
 
+    pub(crate) fn docs_get(op: TransformOperation) -> TransformOperation {
+        op.description("Get list of single-ecu-jobs for component")
+            .response_with::<200, Json<sovd_interfaces::components::ecu::ComponentData>, _>(|res| {
+                res.example(sovd_interfaces::components::ecu::ComponentData {
+                    items: vec![sovd_interfaces::components::ecu::ComponentDataInfo {
+                        id: "hard_reset".to_owned(),
+                        name: "Hard Reset".to_owned(),
+                        category: "function".to_owned(),
+                    }],
+                })
+            })
+            .with(openapi::error_bad_request)
+    }
+
     pub(crate) mod name {
         use super::*;
         pub(crate) async fn get<
@@ -50,7 +70,7 @@ pub(crate) mod single_ecu {
             T: UdsEcu + Send + Sync + Clone,
             U: FileManager + Send + Sync + Clone,
         >(
-            Path(job_name): Path<String>,
+            Path(job_name): Path<ExecutionJobPathParam>,
             State(WebserverEcuState { uds, ecu_name, .. }): State<WebserverEcuState<R, T, U>>,
         ) -> Response {
             uds.get_single_ecu_job(&ecu_name, &job_name)
@@ -59,6 +79,23 @@ pub(crate) mod single_ecu {
                     |e| ErrorWrapper(e.into()).into_response(),
                     |job| (StatusCode::OK, Json(job.into_sovd())).into_response(),
                 )
+        }
+
+        pub(crate) fn docs_get(op: TransformOperation) -> TransformOperation {
+            op.description("Get single-ecu-job by name for component")
+                .response_with::<
+                    200,
+                    Json<sovd_interfaces::components::ecu::x::single_ecu_job::Job>,
+                    _>(|res| {
+                        res.example(sovd_interfaces::components::ecu::x::single_ecu_job::Job {
+                            input_params: vec![],
+                            output_params: vec![],
+                            neg_output_params: vec![],
+                            prog_codes: vec![],
+                        })
+                    },
+                )
+                .with(openapi::error_not_found)
         }
     }
 

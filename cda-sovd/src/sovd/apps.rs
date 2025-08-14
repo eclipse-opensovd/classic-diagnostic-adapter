@@ -11,40 +11,43 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+use aide::UseApi;
 use axum::{extract::OriginalUri, response::Response};
 use axum_extra::extract::Host;
 
-use crate::sovd::resource_response;
+use crate::sovd::{IntoSovd, resource_response};
 
-pub(crate) async fn get(Host(host): Host, OriginalUri(uri): OriginalUri) -> Response {
+pub(crate) async fn get(
+    UseApi(Host(host), _): UseApi<Host, String>,
+    OriginalUri(uri): OriginalUri,
+) -> Response {
     resource_response(&host, &uri, vec![("sovd2uds", None)])
 }
 
 pub(crate) mod sovd2uds {
     use super::*;
 
-    #[cfg_attr(feature = "swagger-ui", utoipa::path(
-        get,
-        path = "/vehicle/v15/apps/sovd2uds",
-        responses(
-        (status = 200, description = "Successful response",
-            body = sovd_interfaces::ResourceResponse),
-        ),
-    ))]
-    pub(crate) async fn get(Host(host): Host, OriginalUri(uri): OriginalUri) -> Response {
+    pub(crate) async fn get(
+        UseApi(Host(host), _): UseApi<Host, String>,
+        OriginalUri(uri): OriginalUri,
+    ) -> Response {
         resource_response(&host, &uri, vec![("bulk-data", None)])
     }
 
     pub(crate) mod bulk_data {
         use super::*;
 
-        pub(crate) async fn get(Host(host): Host, OriginalUri(uri): OriginalUri) -> Response {
+        pub(crate) async fn get(
+            UseApi(Host(host), _): UseApi<Host, String>,
+            OriginalUri(uri): OriginalUri,
+        ) -> Response {
             resource_response(&host, &uri, vec![("flashfiles", None)])
         }
 
         pub(crate) mod flash_files {
             use std::{path::PathBuf, sync::LazyLock};
 
+            use aide::transform::TransformOperation;
             use axum::{
                 Json,
                 extract::State,
@@ -145,6 +148,137 @@ pub(crate) mod sovd2uds {
                     Err(e) => e.into_response(),
                 }
             }
+
+            pub(crate) fn docs_get(op: TransformOperation) -> TransformOperation {
+                use sovd_interfaces::apps::sovd2uds::bulk_data::flash_files::get::Response;
+                op.description("Get the list of flash files available")
+                    .response_with::<200, Json<Response>, _>(|res| {
+                        res.description("Successful response").example(Response {
+                            path: Some("example/path/to/flash/files".into()),
+                            files: vec![sovd_interfaces::sovd2uds::File {
+                                id: "example_file".to_string(),
+                                mimetype: "application/octet-stream".to_string(),
+                                size: 1234,
+                                hash: None,
+                                hash_algorithm: Some(
+                                    sovd_interfaces::sovd2uds::HashAlgorithm::None,
+                                ),
+                                origin_path: "example/path/to/file.bin".to_string(),
+                            }],
+                        })
+                    })
+            }
+        }
+    }
+
+    pub(crate) mod data {
+        pub(crate) mod networkstructure {
+            use std::vec;
+
+            use aide::transform::TransformOperation;
+            use axum::{
+                Json,
+                extract::State,
+                response::{IntoResponse as _, Response},
+            };
+            use cda_interfaces::UdsEcu;
+            use http::StatusCode;
+
+            use crate::sovd::IntoSovd;
+
+            pub(crate) async fn get<T: UdsEcu>(State(gateway): State<T>) -> Response {
+                let networkstructure_data = gateway.get_network_structure().await.into_sovd();
+
+                (
+                    StatusCode::OK,
+                    Json(
+                        sovd_interfaces::apps::sovd2uds::data::network_structure::get::Response {
+                            id: "networkstructure".to_owned(),
+                            data: vec![networkstructure_data],
+                        },
+                    ),
+                )
+                    .into_response()
+            }
+
+            pub(crate) fn docs_get(op: TransformOperation) -> TransformOperation {
+                use sovd_interfaces::apps::sovd2uds::data::network_structure::{
+                    Gateway, NetworkStructure, get::Response,
+                };
+
+                op.description("Get the network structure of the Vehicle")
+                    .response_with::<200, Json<Response>, _>(|res| {
+                        res.description("Successful response").example(Response {
+                            id: "networkstructure".to_owned(),
+                            data: vec![NetworkStructure {
+                                functional_groups: vec![],
+                                gateways: vec![Gateway {
+                                    name: "Gateway1".to_owned(),
+                                    network_address: "1.2.3.4".to_owned(),
+                                    logical_address: "0x1234".to_owned(),
+                                    ecus: vec![],
+                                }],
+                            }],
+                        })
+                    })
+            }
+        }
+    }
+}
+
+impl IntoSovd for cda_interfaces::datatypes::NetworkStructure {
+    type SovdType = sovd_interfaces::apps::sovd2uds::data::network_structure::NetworkStructure;
+
+    fn into_sovd(self) -> Self::SovdType {
+        Self::SovdType {
+            functional_groups: self
+                .functional_groups
+                .into_iter()
+                .map(|fg| fg.into_sovd())
+                .collect(),
+            gateways: self
+                .gateways
+                .into_iter()
+                .map(|gateway| gateway.into_sovd())
+                .collect(),
+        }
+    }
+}
+
+impl IntoSovd for cda_interfaces::datatypes::Gateway {
+    type SovdType = sovd_interfaces::apps::sovd2uds::data::network_structure::Gateway;
+
+    fn into_sovd(self) -> Self::SovdType {
+        Self::SovdType {
+            name: self.name,
+            network_address: self.network_address,
+            logical_address: self.logical_address,
+            ecus: self.ecus.into_iter().map(|ecu| ecu.into_sovd()).collect(),
+        }
+    }
+}
+
+impl IntoSovd for cda_interfaces::datatypes::FunctionalGroup {
+    type SovdType = sovd_interfaces::apps::sovd2uds::data::network_structure::FunctionalGroup;
+
+    fn into_sovd(self) -> Self::SovdType {
+        Self::SovdType {
+            qualifier: self.qualifier,
+            ecus: self.ecus.into_iter().map(|ecu| ecu.into_sovd()).collect(),
+        }
+    }
+}
+
+impl IntoSovd for cda_interfaces::datatypes::Ecu {
+    type SovdType = sovd_interfaces::apps::sovd2uds::data::network_structure::Ecu;
+
+    fn into_sovd(self) -> Self::SovdType {
+        Self::SovdType {
+            qualifier: self.qualifier,
+            variant: self.variant,
+            state: self.state,
+            logical_address: self.logical_address,
+            logical_link: self.logical_link,
         }
     }
 }

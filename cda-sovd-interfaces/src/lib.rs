@@ -13,8 +13,6 @@
 
 use hashbrown::HashMap;
 use serde::{Deserialize, Serialize};
-#[cfg(feature = "swagger-ui")]
-use utoipa::ToSchema;
 
 pub mod apps;
 pub mod components;
@@ -26,7 +24,7 @@ pub trait Payload {
 }
 
 #[derive(Serialize)]
-#[cfg_attr(feature = "swagger-ui", derive(ToSchema))]
+#[cfg_attr(feature = "openapi", derive(schemars::JsonSchema))]
 pub struct Resource {
     pub href: String,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -35,22 +33,29 @@ pub struct Resource {
 }
 
 #[derive(Deserialize, Serialize, Debug)]
-#[cfg_attr(feature = "swagger-ui", derive(ToSchema))]
+#[cfg_attr(feature = "openapi", derive(schemars::JsonSchema))]
 pub struct Items<T> {
     pub items: Vec<T>,
 }
 
-#[cfg_attr(feature = "swagger-ui", derive(ToSchema))]
 #[derive(Serialize)]
+#[cfg_attr(feature = "openapi", derive(schemars::JsonSchema))]
 pub struct ResourceResponse {
     pub items: Vec<Resource>,
 }
 
 #[derive(Deserialize, Serialize, Debug)]
-#[cfg_attr(feature = "swagger-ui", derive(ToSchema))]
-pub struct DataItem {
+#[cfg_attr(feature = "openapi", derive(schemars::JsonSchema))]
+pub struct ObjectDataItem {
     pub id: String,
-    pub data: serde_json::Value,
+    pub data: serde_json::Map<String, serde_json::Value>,
+}
+
+#[derive(Deserialize, Serialize, Debug)]
+#[cfg_attr(feature = "openapi", derive(schemars::JsonSchema))]
+pub struct ArrayDataItem {
+    pub id: String,
+    pub data: Vec<serde_json::Value>,
 }
 
 pub mod sovd2uds {
@@ -59,6 +64,7 @@ pub mod sovd2uds {
     use serde::Serialize;
 
     #[derive(Serialize)]
+    #[cfg_attr(feature = "openapi", derive(schemars::JsonSchema))]
     pub struct FileList {
         #[serde(rename = "items")]
         pub files: Vec<File>,
@@ -67,6 +73,7 @@ pub mod sovd2uds {
     }
 
     #[derive(Serialize, Debug, Clone)]
+    #[cfg_attr(feature = "openapi", derive(schemars::JsonSchema))]
     pub struct File {
         #[serde(skip_serializing_if = "Option::is_none")]
         pub hash: Option<String>,
@@ -79,6 +86,7 @@ pub mod sovd2uds {
         pub origin_path: String,
     }
     #[derive(Serialize, Debug, Clone)]
+    #[cfg_attr(feature = "openapi", derive(schemars::JsonSchema))]
     pub enum HashAlgorithm {
         None,
         // todo: support hashing algorithms

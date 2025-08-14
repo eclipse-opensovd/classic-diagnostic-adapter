@@ -13,25 +13,27 @@
 
 use std::{path::PathBuf, sync::Arc};
 
+use aide::{
+    axum::{ApiRouter as Router, routing},
+    transform::TransformOperation,
+};
 use auth::authorize;
 use axum::{
-    Json, Router,
+    Json,
     body::Bytes,
-    extract::State,
     http::{HeaderMap, StatusCode},
     response::{IntoResponse, Response},
-    routing,
 };
 use cda_interfaces::{
     UdsEcu,
     diagservices::{DiagServiceResponse, UdsPayloadData},
     file_manager::FileManager,
 };
-use error::{ApiError, ErrorWrapper, api_error_from_diag_response};
+use error::{ApiError, api_error_from_diag_response};
 use hashbrown::HashMap;
 use http::{Uri, header};
 use indexmap::IndexMap;
-use sovd_interfaces::components::ecu as sovd_ecu;
+use sovd_interfaces::{components::ecu as sovd_ecu, sovd2uds::FileList};
 use tokio::sync::RwLock;
 use uuid::Uuid;
 
@@ -110,7 +112,6 @@ pub(crate) fn resource_response(
     (StatusCode::OK, Json(components)).into_response()
 }
 
-#[allow(clippy::too_many_lines)] // todo refactor this, to solve the warning
 pub async fn route<
     R: DiagServiceResponse,
     T: UdsEcu + Send + Sync + Clone + 'static,
@@ -138,157 +139,88 @@ pub async fn route<
     };
 
     let ecus = ecu_names.clone();
-    let mut router = Router::new().route(
+    let mut router = Router::new().api_route(
         "/vehicle/v15/components",
-        routing::get(|| async move {
-            (
-                StatusCode::OK,
-                Json(sovd_interfaces::ResourceResponse {
-                    items: ecus
-                        .iter()
-                        .map(|ecu| sovd_interfaces::Resource {
-                            href: format!("http://localhost:20002/Vehicle/v15/components/{ecu}"),
-                            id: Some(ecu.to_lowercase()),
-                            name: ecu.clone(),
+        routing::get_with(
+            || async move {
+                (
+                    StatusCode::OK,
+                    Json(sovd_interfaces::ResourceResponse {
+                        items: ecus
+                            .iter()
+                            .map(|ecu| sovd_interfaces::Resource {
+                                href: format!(
+                                    "http://localhost:20002/Vehicle/v15/components/{ecu}"
+                                ),
+                                id: Some(ecu.to_lowercase()),
+                                name: ecu.clone(),
+                            })
+                            .collect::<Vec<sovd_interfaces::Resource>>(),
+                    }),
+                )
+                    .into_response()
+            },
+            |op: TransformOperation| {
+                op.description("Get a list of the available components with their paths")
+                    .response_with::<200, Json<sovd_interfaces::ResourceResponse>, _>(|res| {
+                        res.example(sovd_interfaces::ResourceResponse {
+                            items: vec![sovd_interfaces::Resource {
+                                href: "http://localhost:20002/Vehicle/v15/components/my_ecu".into(),
+                                id: Some("my_ecu".into()),
+                                name: "My ECU".into(),
+                            }],
                         })
-                        .collect::<Vec<sovd_interfaces::Resource>>(),
-                }),
-            )
-                .into_response()
-        }),
+                    })
+            },
+        ),
     );
 
     for ecu_name in ecu_names.drain(0..) {
-        let ecu_lower = ecu_name.to_lowercase();
-        let ecu_state = WebserverEcuState {
-            ecu_name: ecu_lower.clone(),
-            uds: uds.clone(),
-            locks: Arc::<Locks>::clone(&state.locks),
-            comparam_executions: Arc::new(RwLock::new(IndexMap::new())),
-            flash_data: Arc::clone(&flash_data),
-            mdd_embedded_files: Arc::new(file_manager.remove(&ecu_lower).unwrap()),
-            _phantom: std::marker::PhantomData::<R>,
-        };
-        let ecu_path = format!("/vehicle/v15/components/{ecu_lower}");
-
-        let nested = Router::new()
-            .route(
-                "/",
-                routing::get(components::ecu::get)
-                    .post(components::ecu::post)
-                    .put(components::ecu::put),
-            )
-            .route(
-                "/locks",
-                routing::post(locks::ecu::post).get(locks::ecu::get),
-            )
-            .route(
-                "/locks/{lock}",
-                routing::delete(locks::ecu::lock::delete)
-                    .put(locks::ecu::lock::put)
-                    .get(locks::ecu::lock::get),
-            )
-            .route("/configurations", routing::get(configurations::get))
-            .route(
-                "/configurations/{diag_service}",
-                routing::put(configurations::diag_service::put),
-            )
-            .route("/data", routing::get(data::get))
-            .route(
-                "/data/{diag_service}",
-                routing::get(data::diag_service::get).put(data::diag_service::put),
-            )
-            .route("/genericservice", routing::put(genericservice::put))
-            .route(
-                "/operations/comparam/executions",
-                routing::get(operations::comparams::executions::get)
-                    .post(operations::comparams::executions::post),
-            )
-            .route(
-                "/operations/comparam/executions/{id}",
-                routing::get(operations::comparams::executions::id::get)
-                    .delete(operations::comparams::executions::id::delete)
-                    .put(operations::comparams::executions::id::put),
-            )
-            .route(
-                "/operations/{service}/executions",
-                routing::get(operations::service::executions::get)
-                    .post(operations::service::executions::post),
-            )
-            .route("/modes", routing::get(modes::get))
-            .route(
-                "/modes/session",
-                routing::get(modes::session::get).put(modes::session::put),
-            )
-            .route(
-                "/modes/security",
-                routing::get(modes::security::get).put(modes::security::put),
-            )
-            .route(
-                "/x-single-ecu-jobs",
-                routing::get(x_single_ecu_jobs::single_ecu::get),
-            )
-            .route(
-                "/x-single-ecu-jobs/{name}",
-                routing::get(x_single_ecu_jobs::single_ecu::name::get),
-            )
-            .route(
-                "/x-sovd2uds-download",
-                routing::get(x_sovd2uds_download::get),
-            )
-            .route(
-                "/x-sovd2uds-download/requestdownload",
-                routing::put(x_sovd2uds_download::request_download::put),
-            )
-            .route(
-                "/x-sovd2uds-download/flashtransfer",
-                routing::post(x_sovd2uds_download::flash_transfer::post)
-                    .get(x_sovd2uds_download::flash_transfer::get),
-            )
-            .route(
-                "/x-sovd2uds-download/flashtransfer/{id}",
-                routing::get(x_sovd2uds_download::flash_transfer::id::get)
-                    .delete(x_sovd2uds_download::flash_transfer::id::delete),
-            )
-            .route(
-                "/x-sovd2uds-download/transferexit",
-                routing::put(x_sovd2uds_download::transferexit::put),
-            )
-            .route(
-                "/x-sovd2uds-bulk-data",
-                routing::get(x_sovd2uds_bulk_data::get),
-            )
-            .route(
-                "/x-sovd2uds-bulk-data/mdd-embedded-files",
-                routing::get(x_sovd2uds_bulk_data::mdd_embedded_files::get),
-            )
-            .route(
-                "/x-sovd2uds-bulk-data/mdd-embedded-files/{id}",
-                routing::get(x_sovd2uds_bulk_data::mdd_embedded_files::id::get),
-            )
-            .with_state(ecu_state);
-        router = router.nest(&ecu_path, nested);
+        let (ecu_path, nested) =
+            ecu_route::<R, T, U>(&ecu_name, uds, &state, &flash_data, &mut file_manager);
+        router = router.nest_api_service(&ecu_path, nested);
     }
+
     router
-        .route(
+        .api_route(
             "/vehicle/v15/locks",
-            routing::post(locks::vehicle::post).get(locks::vehicle::get),
+            routing::post_with(locks::vehicle::post, locks::vehicle::docs_post)
+                .get_with(locks::vehicle::get, locks::vehicle::docs_get),
         )
-        .route(
+        .api_route(
             "/vehicle/v15/locks/{lock}",
-            routing::delete(locks::vehicle::lock::delete)
-                .put(locks::vehicle::lock::put)
-                .get(locks::vehicle::lock::get),
+            routing::get_with(locks::vehicle::lock::get, locks::vehicle::lock::docs_get)
+                .put_with(locks::vehicle::lock::put, locks::vehicle::lock::docs_put)
+                .delete_with(
+                    locks::vehicle::lock::delete,
+                    locks::vehicle::lock::docs_delete,
+                ),
         )
-        .route(
+        .api_route(
             "/vehicle/v15/functions/functionalgroups/{group}/locks",
-            routing::post(locks::functional_group::post).get(locks::functional_group::get),
+            routing::post_with(
+                locks::functional_group::post,
+                locks::functional_group::docs_post,
+            )
+            .get_with(
+                locks::functional_group::get,
+                locks::functional_group::docs_get,
+            ),
         )
-        .route(
+        .api_route(
             "/vehicle/v15/functions/functionalgroups/{group}/locks/{lock}",
-            routing::delete(locks::functional_group::lock::delete)
-                .put(locks::functional_group::lock::put)
-                .get(locks::functional_group::lock::get),
+            routing::get_with(
+                locks::functional_group::lock::get,
+                locks::functional_group::lock::docs_get,
+            )
+            .put_with(
+                locks::functional_group::lock::put,
+                locks::functional_group::lock::docs_put,
+            )
+            .delete_with(
+                locks::functional_group::lock::delete,
+                locks::functional_group::lock::docs_delete,
+            ),
         )
         .route("/vehicle/v15/apps", routing::get(apps::get))
         .route(
@@ -299,40 +231,211 @@ pub async fn route<
             "/vehicle/v15/apps/sovd2uds/bulk-data",
             routing::get(apps::sovd2uds::bulk_data::get),
         )
-        .route(
+        .api_route(
             "/vehicle/v15/apps/sovd2uds/bulk-data/flashfiles",
-            routing::get(apps::sovd2uds::bulk_data::flash_files::get),
+            routing::get_with(
+                apps::sovd2uds::bulk_data::flash_files::get,
+                apps::sovd2uds::bulk_data::flash_files::docs_get,
+            ),
         )
         .route("/vehicle/v15/authorize", routing::post(authorize))
         .with_state(state)
-        .route(
-            // todo move this into the apps module
+        .api_route(
             "/vehicle/v15/apps/sovd2uds/data/networkstructure",
-            routing::get(|State(gateway): State<T>| async move {
-                let networkstructure_data =
-                    match serde_json::to_value(vec![gateway.get_network_structure().await]) {
-                        Ok(v) => v,
-                        Err(e) => {
-                            return ErrorWrapper(ApiError::InternalServerError(Some(format!(
-                                "Failed to create network structure json: {e:?}"
-                            ))))
-                            .into_response();
-                        }
-                    };
-
-                (
-                    StatusCode::OK,
-                    Json(
-                        sovd_interfaces::apps::sovd2uds::data::network_structure::get::Response {
-                            id: "networkstructure".to_owned(),
-                            data: networkstructure_data,
-                        },
-                    ),
-                )
-                    .into_response()
-            }),
+            routing::get_with(
+                apps::sovd2uds::data::networkstructure::get::<T>,
+                apps::sovd2uds::data::networkstructure::docs_get,
+            ),
         )
         .with_state(uds.clone())
+}
+
+fn ecu_route<
+    R: DiagServiceResponse,
+    T: UdsEcu + Clone,
+    U: FileManager + Send + Sync + Clone + 'static,
+>(
+    ecu_name: &str,
+    uds: &T,
+    state: &WebserverState,
+    flash_data: &Arc<RwLock<FileList>>,
+    file_manager: &mut HashMap<String, U>,
+) -> (String, Router) {
+    let ecu_lower = ecu_name.to_lowercase();
+    let ecu_state = WebserverEcuState {
+        ecu_name: ecu_lower.clone(),
+        uds: uds.clone(),
+        locks: Arc::<Locks>::clone(&state.locks),
+        comparam_executions: Arc::new(RwLock::new(IndexMap::new())),
+        flash_data: Arc::clone(flash_data),
+        mdd_embedded_files: Arc::new(file_manager.remove(&ecu_lower).unwrap()),
+        _phantom: std::marker::PhantomData::<R>,
+    };
+    let ecu_path = format!("/vehicle/v15/components/{ecu_lower}");
+
+    let router = Router::new()
+        .api_route(
+            "/",
+            routing::get_with(components::ecu::get, components::ecu::docs_get)
+                .post_with(components::ecu::post, components::ecu::docs_put)
+                .put_with(components::ecu::put, components::ecu::docs_put),
+        )
+        .api_route(
+            "/locks",
+            routing::post_with(locks::ecu::post, locks::ecu::docs_post)
+                .get_with(locks::ecu::get, locks::ecu::docs_get),
+        )
+        .api_route(
+            "/locks/{lock}",
+            routing::delete_with(locks::ecu::lock::delete, locks::ecu::lock::docs_delete)
+                .put_with(locks::ecu::lock::put, locks::ecu::lock::docs_put)
+                .get_with(locks::ecu::lock::get, locks::ecu::lock::docs_get),
+        )
+        .api_route(
+            "/configurations",
+            routing::get_with(configurations::get, configurations::docs_get),
+        )
+        .api_route(
+            "/configurations/{diag_service}",
+            routing::put_with(
+                configurations::diag_service::put,
+                configurations::diag_service::docs_put,
+            ),
+        )
+        .api_route("/data", routing::get_with(data::get, data::docs_get))
+        .api_route(
+            "/data/{diag_service}",
+            routing::get_with(data::diag_service::get, data::diag_service::docs_get)
+                .put_with(data::diag_service::put, data::diag_service::docs_put),
+        )
+        .api_route(
+            "/genericservice",
+            routing::put_with(genericservice::put, genericservice::docs_put),
+        )
+        .api_route(
+            "/operations/comparam/executions",
+            routing::get_with(
+                operations::comparams::executions::get,
+                operations::comparams::executions::docs_get,
+            )
+            .post_with(
+                operations::comparams::executions::post,
+                operations::comparams::executions::docs_post,
+            ),
+        )
+        .api_route(
+            "/operations/comparam/executions/{id}",
+            routing::get_with(
+                operations::comparams::executions::id::get,
+                operations::comparams::executions::id::docs_get,
+            )
+            .delete_with(
+                operations::comparams::executions::id::delete,
+                operations::comparams::executions::id::docs_delete,
+            )
+            .put_with(
+                operations::comparams::executions::id::put,
+                operations::comparams::executions::id::docs_put,
+            ),
+        )
+        .api_route(
+            "/operations/{service}/executions",
+            routing::get_with(
+                operations::service::executions::get,
+                operations::service::executions::docs_get,
+            )
+            .post_with(
+                operations::service::executions::post,
+                operations::service::executions::docs_post,
+            ),
+        )
+        .api_route("/modes", routing::get_with(modes::get, modes::docs_get))
+        .api_route(
+            "/modes/session",
+            routing::get_with(modes::session::get, modes::session::docs_get)
+                .put_with(modes::session::put, modes::session::docs_put),
+        )
+        .api_route(
+            "/modes/security",
+            routing::get_with(modes::security::get, modes::security::docs_get)
+                .put_with(modes::security::put, modes::security::docs_put),
+        )
+        .api_route(
+            "/x-single-ecu-jobs",
+            routing::get_with(
+                x_single_ecu_jobs::single_ecu::get,
+                x_single_ecu_jobs::single_ecu::docs_get,
+            ),
+        )
+        .api_route(
+            "/x-single-ecu-jobs/{job_name}",
+            routing::get_with(
+                x_single_ecu_jobs::single_ecu::name::get,
+                x_single_ecu_jobs::single_ecu::name::docs_get,
+            ),
+        )
+        .route(
+            "/x-sovd2uds-download",
+            routing::get(x_sovd2uds_download::get),
+        )
+        .api_route(
+            "/x-sovd2uds-download/requestdownload",
+            routing::put_with(
+                x_sovd2uds_download::request_download::put,
+                x_sovd2uds_download::request_download::docs_put,
+            ),
+        )
+        .api_route(
+            "/x-sovd2uds-download/flashtransfer",
+            routing::post_with(
+                x_sovd2uds_download::flash_transfer::post,
+                x_sovd2uds_download::flash_transfer::docs_post,
+            )
+            .get_with(
+                x_sovd2uds_download::flash_transfer::get,
+                x_sovd2uds_download::flash_transfer::docs_get,
+            ),
+        )
+        .api_route(
+            "/x-sovd2uds-download/flashtransfer/{id}",
+            routing::get_with(
+                x_sovd2uds_download::flash_transfer::id::get,
+                x_sovd2uds_download::flash_transfer::id::docs_get,
+            )
+            .delete_with(
+                x_sovd2uds_download::flash_transfer::id::delete,
+                x_sovd2uds_download::flash_transfer::id::docs_delete,
+            ),
+        )
+        .api_route(
+            "/x-sovd2uds-download/transferexit",
+            routing::put_with(
+                x_sovd2uds_download::transferexit::put,
+                x_sovd2uds_download::transferexit::docs_put,
+            ),
+        )
+        .route(
+            "/x-sovd2uds-bulk-data",
+            routing::get(x_sovd2uds_bulk_data::get),
+        )
+        .api_route(
+            "/x-sovd2uds-bulk-data/mdd-embedded-files",
+            routing::get_with(
+                x_sovd2uds_bulk_data::mdd_embedded_files::get,
+                x_sovd2uds_bulk_data::mdd_embedded_files::docs_get,
+            ),
+        )
+        .api_route(
+            "/x-sovd2uds-bulk-data/mdd-embedded-files/{id}",
+            routing::get_with(
+                x_sovd2uds_bulk_data::mdd_embedded_files::id::get,
+                x_sovd2uds_bulk_data::mdd_embedded_files::id::docs_get,
+            ),
+        )
+        .with_state(ecu_state)
+        .with_path_items(|op| op.tag(ecu_name));
+
+    (ecu_path, router)
 }
 
 fn get_payload_data<'a, T>(
@@ -360,26 +463,7 @@ where
                 Some(UdsPayloadData::ParameterMap(sovd_request.get_data_map()))
             }
             Some(Ok(v)) if v.essence_str() == mime::APPLICATION_OCTET_STREAM.essence_str() => {
-                let content_length = headers
-                    .get(header::CONTENT_LENGTH)
-                    .ok_or_else(|| ApiError::BadRequest("Missing Content-Length".to_owned()))
-                    .and_then(|v| {
-                        v.to_str()
-                            .map_err(|e| {
-                                ApiError::BadRequest(format!("Invalid Content-Length: {e:?}"))
-                            })
-                            .and_then(|v| {
-                                v.parse::<usize>().map_err(|e| {
-                                    ApiError::BadRequest(format!("Invalid Content-Length: {e}"))
-                                })
-                            })
-                    })?;
-
-                if content_length == 0 {
-                    return Ok(None);
-                }
-
-                Some(UdsPayloadData::Raw(body.to_vec()))
+                get_octet_stream_payload(headers, body)?
             }
             Some(Ok(v)) => {
                 return Err(ApiError::BadRequest(format!(
@@ -390,4 +474,27 @@ where
             _ => None,
         },
     )
+}
+
+fn get_octet_stream_payload(
+    headers: &HeaderMap,
+    body: &Bytes,
+) -> Result<Option<UdsPayloadData>, ApiError> {
+    let content_length = headers
+        .get(header::CONTENT_LENGTH)
+        .ok_or_else(|| ApiError::BadRequest("Missing Content-Length".to_owned()))
+        .and_then(|v| {
+            v.to_str()
+                .map_err(|e| ApiError::BadRequest(format!("Invalid Content-Length: {e:?}")))
+                .and_then(|v| {
+                    v.parse::<usize>()
+                        .map_err(|e| ApiError::BadRequest(format!("Invalid Content-Length: {e}")))
+                })
+        })?;
+
+    if content_length == 0 {
+        return Ok(None);
+    }
+
+    Ok(Some(UdsPayloadData::Raw(body.to_vec())))
 }

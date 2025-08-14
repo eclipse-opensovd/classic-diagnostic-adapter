@@ -14,6 +14,7 @@
 use serde::Serialize;
 
 #[derive(Debug, Serialize)]
+#[cfg_attr(feature = "openapi", derive(schemars::JsonSchema))]
 pub struct Mode<T> {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub id: Option<String>,
@@ -37,12 +38,15 @@ pub mod put {
     use serde::{Deserialize, Serialize};
 
     #[derive(Debug, Deserialize)]
+    #[cfg_attr(feature = "openapi", derive(schemars::JsonSchema))]
     pub struct ModeKey {
         #[serde(rename = "Send_Key")]
         pub send_key: String,
     }
 
     #[derive(Debug, Deserialize)]
+    #[cfg_attr(feature = "openapi", derive(schemars::JsonSchema))]
+    #[cfg_attr(feature = "openapi", schemars(rename = "UpdateModesRequest"))]
     pub struct Request {
         pub value: String,
         /// Defines after how many seconds the
@@ -59,6 +63,8 @@ pub mod put {
     }
 
     #[derive(Debug, Serialize)]
+    #[cfg_attr(feature = "openapi", derive(schemars::JsonSchema))]
+    #[cfg_attr(feature = "openapi", schemars(rename = "UpdateModesResponse"))]
     pub struct Response<T> {
         pub id: String,
         pub value: T,
