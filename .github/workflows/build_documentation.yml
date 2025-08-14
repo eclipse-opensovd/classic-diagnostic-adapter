@@ -1,0 +1,27 @@
+name: Build documentation
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build_documentation:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          submodules: false
+      - name: Make doctoolchain executable
+        run: | 
+          chmod a+x docs/dtcw
+      - name: Run doctoolchain
+        run: |
+          cd docs
+          ./dtcw docker generateHTML

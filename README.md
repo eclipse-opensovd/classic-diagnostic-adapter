@@ -7,9 +7,9 @@ compatibility bridge between traditional (legacy) diagnostic interfaces and the 
 diagnostic architecture used in next-generation vehicles.
 
 It facilitates the communication to the actual ECUs, by translating the SOVD calls with the
-diagnostic description of the ECU to its UDS via DoIP counterpart. SOVD-REST-Requests are translated into their
-respective UDS via DoIP counterparts. It handles the communication to the ECUs, by using the communication
-parameters from the diagnostic description.
+diagnostic description of the ECU to its UDS via DoIP counterpart. 
+
+It handles the communication to the ECUs, by using the communication parameters from the diagnostic description.
 
 ## goals
 
@@ -105,4 +105,4 @@ In a second terminal window start `tokio-console` and it should automatically co
 
 ### architecture
 
-see [overview](docs/overview/index.adoc)
+see [overview](docs/architecture/index.adoc)

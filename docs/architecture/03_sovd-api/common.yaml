@@ -1,0 +1,140 @@
+openapi: 3.1.0
+info:
+  version: 1.1.0
+  title: CDA Common-API
+components:
+  parameters:
+    IncludeSchema:
+      in: query
+      name: include-schema
+      description: "Specifies if a response should include schema information with a definition of all the properties"
+      content:
+        schema:
+          type: boolean
+          required: false
+
+  schemas:
+    GenericError:
+      type: object
+      description: "Generic Error Type"
+      required:
+        - error_code
+        - message
+      properties:
+        error_code:
+          type: string
+          enum:
+            - error-response
+            - incomplete-request
+            - insufficient-access-rights
+            - invalid-response-content
+            - invalid-signature
+            - lock-broken
+            - not-responding
+            - precondition-not-fulfilled
+            - sovd-server-failure
+            - sovd-server-misconfigured
+            - update-automated-not-supported
+            - update-execution-in-progress
+            - update-preparation-in-progress
+            - update-process-in-progress
+            - vendor-specific
+        vendor_code:
+          type: string
+          description: "Vendor specific error code, required if value of error_code is 'vendor-specific'"
+        message:
+          type: string
+        translation_id:
+          type: string
+        parameters:
+          type: object
+          additionalProperties: true
+
+    DataError:
+      type: object
+      properties:
+        path:
+          type: string
+          format: json-pointer
+        error:
+          $ref: '#/components/schemas/GenericError'
+
+    EntityReferenceArray:
+      type: array
+      description: "An array of EntityReference"
+      items:
+        $ref: '#/components/schemas/EntityReference'
+
+    EntityReference:
+      type: object
+      description: "References an Entity"
+      required:
+        - id
+        - name
+        - href
+      properties:
+        id:
+          type: string
+          description: "Identifier of the Entity"
+        name:
+          type: string
+          description: "Name for the Entity"
+        translation_id:
+          type: string
+          description: "Identifier for client-side translations"
+        href:
+          type: string
+          description: "URI of the entity including the base"
+
+    PhysicalDimension:
+      type: object
+      description: "Physical Dimensions structure defining exponents from SI-Units"
+      required:
+        - id
+      properties:
+        id:
+          type: string
+        length:
+          type: integer
+          description: "Exponent for length in Meter (m) (default 0, only set if != 0)"
+        mass:
+          type: integer
+          description: "Exponent for mass in Kilogram (kg) (default 0, only set if != 0)"
+        time:
+          type: integer
+          description: "Exponent for time in Seconds (s) (default 0, only set if != 0)"
+        current:
+          type: integer
+          description: "Exponent for electric current in Ampere (A) (default 0, only set if != 0)"
+        temperature:
+          type: integer
+          description: "Exponent for thermodynamic temperature in Kelvin (K) (default 0, only set if != 0)"
+        molar_amount:
+          type: integer
+          description: "Exponent for amount of substance in Mole (mole) (default 0, only set if != 0)"
+        luminous_intensity:
+          type: integer
+          description: "Exponent for luminous intensity in Candela (cd) (default 0, only set if != 0)"
+        plane_angle:
+          type: integer
+          description: "Exponent for inclination in Degree (deg) (default 0, only set if != 0)"
+
+    SovdUnitType:
+      type: object
+      required:
+        - display_name
+      properties:
+        display_name:
+          type: string
+          description: "Displayable Name for the unit type (e.g. Microseconds)"
+        reference:
+          type: string
+          description: "Identifier of this unit for localization purposes, as provided by ODX_RS_UNIT_LIB.odx-d"
+        factor_si_to_unit:
+          type: number
+          description: "Factor in calculation of the defined unit (default is 1)"
+        offset_si_to_unit:
+          type: number
+          description: "Offset in calculation of the defined unit (default is 0)"
+        physical_dimension:
+          $ref: '#/components/schemas/PhysicalDimension'

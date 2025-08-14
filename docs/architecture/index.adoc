@@ -1,0 +1,23 @@
+[#_cda_architecture]
+= Architecture
+:doctype: book
+
+:numbered:
+
+// 1. Overview
+include::01_overview.adoc[leveloffset=+1]
+
+// 2. Terminology
+include::02_terminology.adoc[leveloffset=+1]
+
+// 3. SOVD-API
+include::03_sovd-api/index.adoc[leveloffset=+1]
+
+// 4. Communication
+include::04_communication/index.adoc[leveloffset=+1]
+
+// 5. Diagnostic Tester
+include::05_diagnostic-tester/index.adoc[leveloffset=+1]
+
+// 6. Plugins
+include::06_plugins/index.adoc[leveloffset=+1]

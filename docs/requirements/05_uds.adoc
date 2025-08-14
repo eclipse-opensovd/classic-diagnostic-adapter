@@ -1,0 +1,7 @@
+[#_requirements_uds]
+= UDS (ISO 14229)
+
+:numbered:
+
+
+== Communication
