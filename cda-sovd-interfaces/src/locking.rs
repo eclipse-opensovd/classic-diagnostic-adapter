@@ -12,13 +12,11 @@
  */
 
 use serde::{Deserialize, Serialize};
-#[cfg(feature = "swagger-ui")]
-use utoipa::ToSchema;
 
 use crate::Items;
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
-#[cfg_attr(feature = "swagger-ui", derive(ToSchema))]
+#[cfg_attr(feature = "openapi", derive(schemars::JsonSchema))]
 pub struct Lock {
     pub id: String,
 
@@ -29,7 +27,8 @@ pub struct Lock {
 }
 
 #[derive(Serialize, Deserialize)]
-#[cfg_attr(feature = "swagger-ui", derive(ToSchema))]
+#[cfg_attr(feature = "openapi", derive(schemars::JsonSchema))]
+#[cfg_attr(feature = "openapi", schemars(rename = "CreateLockRequest"))]
 pub struct Request {
     pub lock_expiration: u64,
 }
@@ -51,7 +50,8 @@ pub mod id {
     pub mod get {
         use super::*;
         #[derive(Serialize, Deserialize)]
-        #[cfg_attr(feature = "swagger-ui", derive(ToSchema))]
+        #[cfg_attr(feature = "openapi", derive(schemars::JsonSchema))]
+        #[cfg_attr(feature = "openapi", schemars(rename = "LockResponse"))]
         pub struct Response {
             pub lock_expiration: String,
         }

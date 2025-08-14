@@ -12,3 +12,5 @@
  */
 
 pub(crate) mod ecu;
+
+crate::openapi::aide_helper::gen_path_param!(IdPathParam id String);

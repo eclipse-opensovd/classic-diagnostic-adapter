@@ -18,10 +18,12 @@ use cda_interfaces::{
     file_manager::FileManager,
 };
 use http::{HeaderMap, header};
-use sovd_interfaces::components::ecu::data::DataRequestPayload;
 
 use super::*;
-use crate::sovd::{WebserverEcuState, get_payload_data};
+use crate::{
+    openapi,
+    sovd::{WebserverEcuState, get_octet_stream_payload},
+};
 
 pub(crate) async fn put<
     R: DiagServiceResponse + Send + Sync,
@@ -42,21 +44,26 @@ pub(crate) async fn put<
             .into_response();
         }
     };
-
-    let data = match get_payload_data::<DataRequestPayload>(&headers, &body) {
-        Ok(value) => value,
-        Err(e) => return ErrorWrapper(e).into_response(),
-    };
-    let uds_raw_payload = match data {
-        Some(UdsPayloadData::Raw(raw_data)) => raw_data,
+    match headers.get(header::CONTENT_TYPE) {
+        Some(v) if v == mime::APPLICATION_OCTET_STREAM.essence_str() => (),
         _ => {
             return ErrorWrapper(ApiError::BadRequest(format!(
-                "Unsupported payload, only Content-Type {} containing the raw uds packet is \
-                 supported ",
+                "Unsupported Content-Type, only {} is supported",
                 mime::APPLICATION_OCTET_STREAM
             )))
             .into_response();
         }
+    }
+
+    let data = match get_octet_stream_payload(&headers, &body) {
+        Ok(value) => value,
+        Err(e) => return ErrorWrapper(e).into_response(),
+    };
+    let Some(UdsPayloadData::Raw(uds_raw_payload)) = data else {
+        return ErrorWrapper(ApiError::InternalServerError(Some(
+            "Failure reading payload data.".to_owned(),
+        )))
+        .into_response();
     };
 
     let ecu_response = match uds
@@ -69,4 +76,15 @@ pub(crate) async fn put<
     };
     // Return the raw response
     (StatusCode::OK, Bytes::from_owner(ecu_response)).into_response()
+}
+
+pub(crate) fn docs_put(op: TransformOperation) -> TransformOperation {
+    openapi::request_octet(op)
+        .description("Send a generic service request to the ECU")
+        .response_with::<200, &[u8], _>(|res| res.description("Raw ECU response as bytes"))
+        .with(openapi::error_bad_request)
+        .with(openapi::error_forbidden)
+        .with(openapi::error_internal_server)
+        .with(openapi::error_not_found)
+        .id("ecu_genericservice_put")
 }

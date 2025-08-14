@@ -22,8 +22,56 @@ pub mod sovd2uds {
 
     pub mod data {
         pub mod network_structure {
+            use serde::Serialize;
+
+            #[derive(Serialize)]
+            #[serde(rename_all = "PascalCase")]
+            #[cfg_attr(feature = "openapi", derive(schemars::JsonSchema))]
+            pub struct Ecu {
+                pub qualifier: String, // name
+                pub variant: String,   // variant
+                #[serde(rename = "EcuState")]
+                pub state: String, // Online, Offline, NotTested ...
+                pub logical_address: String,
+                pub logical_link: String, // ${qualifier}_on_${protocol}
+            }
+
+            #[derive(Serialize)]
+            #[serde(rename_all = "PascalCase")]
+            #[cfg_attr(feature = "openapi", derive(schemars::JsonSchema))]
+            pub struct Gateway {
+                pub name: String,
+                pub network_address: String,
+                pub logical_address: String,
+                pub ecus: Vec<Ecu>,
+            }
+
+            #[derive(Serialize)]
+            #[serde(rename_all = "PascalCase")]
+            #[cfg_attr(feature = "openapi", derive(schemars::JsonSchema))]
+            pub struct FunctionalGroup {
+                pub qualifier: String,
+                pub ecus: Vec<Ecu>,
+            }
+
+            #[derive(Serialize)]
+            #[serde(rename_all = "PascalCase")]
+            #[cfg_attr(feature = "openapi", derive(schemars::JsonSchema))]
+            pub struct NetworkStructure {
+                pub functional_groups: Vec<FunctionalGroup>,
+                pub gateways: Vec<Gateway>,
+            }
+
             pub mod get {
-                pub type Response = crate::DataItem;
+                use serde::Serialize;
+
+                #[derive(Serialize)]
+                #[cfg_attr(feature = "openapi", derive(schemars::JsonSchema))]
+                #[cfg_attr(feature = "openapi", schemars(rename = "NetworkStructureResponse"))]
+                pub struct Response {
+                    pub id: String,
+                    pub data: Vec<crate::apps::sovd2uds::data::network_structure::NetworkStructure>,
+                }
             }
         }
     }

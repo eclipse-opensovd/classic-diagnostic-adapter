@@ -11,10 +11,13 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+use std::sync::Arc;
+
+use aide::{axum::ApiRouter as Router, openapi::OpenApi, swagger::Swagger};
 use axum::{
-    Router, ServiceExt,
+    Extension, Json, ServiceExt,
     http::{self, Request},
-    middleware,
+    middleware, routing,
 };
 use cda_interfaces::{UdsEcu, diagservices::DiagServiceResponse, file_manager::FileManager};
 use futures::future::FutureExt;
@@ -23,7 +26,6 @@ use tokio::net::TcpListener;
 use tower::Layer;
 use tower_http::trace::TraceLayer;
 
-#[cfg(feature = "swagger-ui")]
 mod openapi;
 pub(crate) mod sovd;
 
@@ -63,10 +65,22 @@ where
         vdetect.start_variant_detection().await;
     });
 
+    aide::generate::on_error(|e| {
+        if let aide::Error::DuplicateRequestBody = e {
+            // skip DuplicateRequestBody
+            // those are triggered when overwriting the input type
+            return;
+        }
+        log::error!(target: "webserver", "OpenAPI generation error: {e}");
+    });
+    aide::generate::extract_schemas(true);
+    let mut api = OpenApi::default();
+
     // Main application routes (with NormalizePathLayer)
     let app_routes = {
         let app = Router::new()
-            .merge(sovd::route::<R, T, M>(&ecu_uds, flash_files_path, file_manager).await);
+            .merge(sovd::route::<R, T, M>(&ecu_uds, flash_files_path, file_manager).await)
+            .finish_api_with(&mut api, openapi::api_docs);
 
         create_trace_layer(app)
             .layer(tower_http::timeout::TimeoutLayer::new(
@@ -76,23 +90,17 @@ where
                 sovd::error::sovd_method_not_allowed_handler,
             ))
             .fallback(sovd::error::sovd_not_found_handler)
-    };
-
-    // Swagger UI routes (no NormalizePathLayer)
-    #[cfg(feature = "swagger-ui")]
-    let app_routes = {
-        let mut openapi = openapi::openapi();
-        openapi.paths.merge(openapi::paths(&ecu_uds).await);
-
-        let swagger_ui_routes = Router::new()
-            .merge(
-                utoipa_swagger_ui::SwaggerUi::new(SWAGGER_UI_ROUTE)
-                    .config(utoipa_swagger_ui::Config::default().validator_url("none"))
-                    .url(OPENAPI_JSON_ROUTE, openapi),
+            .route(
+                SWAGGER_UI_ROUTE,
+                Swagger::new(OPENAPI_JSON_ROUTE).axum_route().into(),
             )
-            .layer(tower_http::cors::CorsLayer::permissive())
-            .layer(TraceLayer::new_for_http());
-        app_routes.merge(swagger_ui_routes)
+            .route(
+                OPENAPI_JSON_ROUTE,
+                routing::get(|Extension(api): Extension<Arc<OpenApi>>| async move {
+                    Json((*api).clone())
+                }),
+            )
+            .layer(Extension(Arc::new(api)))
     };
 
     let middleware = tower::util::MapRequestLayer::new(rewrite_request_uri);
@@ -123,7 +131,7 @@ fn rewrite_request_uri<B>(mut req: Request<B>) -> Request<B> {
     req
 }
 
-fn create_trace_layer<S>(route: Router<S>) -> Router<S>
+fn create_trace_layer<S>(route: axum::Router<S>) -> axum::Router<S>
 where
     S: Clone + Send + Sync + 'static,
 {
