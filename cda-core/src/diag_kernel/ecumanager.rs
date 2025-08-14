@@ -551,7 +551,7 @@ impl cda_interfaces::EcuManager for EcuManager {
                                 param.short_name
                             ))
                         })?;
-                        
+
                         if let Some(value) = json_values.get(&short_name) {
                             self.map_param_to_uds(param, value, &mut uds)?;
                         }
@@ -1567,7 +1567,12 @@ impl EcuManager {
                                 Some(&normal_dop.compu_method),
                                 value,
                             )?;
-                            diag_type.encode(uds_data, payload, param.byte_pos as usize, param.bit_pos)?;
+                            diag_type.encode(
+                                uds_data,
+                                payload,
+                                param.byte_pos as usize,
+                                param.bit_pos as usize,
+                            )?;
                             Ok(())
                         }
                         datatypes::DataOperationVariant::EndOfPdu(_end_of_pdu_dop) => todo!(),
@@ -1822,6 +1827,7 @@ impl EcuManager {
             DiagDataTypeContainer::RawContainer(DiagDataTypeContainerRaw {
                 data: vec![*payload],
                 data_type: DataType::UInt32,
+                bit_len: 32,
                 compu_method: None,
             }),
         );

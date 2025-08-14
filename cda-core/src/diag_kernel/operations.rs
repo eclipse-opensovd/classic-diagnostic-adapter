@@ -406,14 +406,15 @@ pub(in crate::diag_kernel) fn extract_diag_data_container(
 ) -> Result<DiagDataTypeContainer, DiagServiceError> {
     let byte_pos = param.byte_pos as usize;
     let uds_payload = payload.data();
-    let data = diag_type.decode(uds_payload, byte_pos, param.bit_pos)?;
+    let unpacked = diag_type.decode(uds_payload, byte_pos, param.bit_pos as usize)?;
 
     let data_type = diag_type.base_datatype();
-    payload.set_last_byte_pos_read(byte_pos + data.len() + 1);
+    payload.set_last_byte_pos_read(byte_pos + unpacked.data.len() + 1);
 
     Ok(DiagDataTypeContainer::RawContainer(
         DiagDataTypeContainerRaw {
-            data,
+            data: unpacked.data,
+            bit_len: unpacked.bit_len,
             data_type: *data_type,
             compu_method: compu_method.cloned(),
         },
