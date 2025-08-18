@@ -13,6 +13,7 @@
 
 use std::fmt::Display;
 
+use aide::OperationOutput;
 use axum::{
     Json,
     body::Body,
@@ -25,12 +26,9 @@ use cda_interfaces::{DiagServiceError, diagservices::DiagServiceResponse, file_m
 use hashbrown::HashMap;
 use serde::{Deserialize, Serialize};
 use sovd_interfaces::error::ErrorCode;
-#[cfg(feature = "swagger-ui")]
-use utoipa::ToSchema;
 
 #[allow(dead_code)]
-#[derive(Debug, Deserialize, Serialize)]
-#[cfg_attr(feature = "swagger-ui", derive(ToSchema))]
+#[derive(Debug, Deserialize, Serialize, schemars::JsonSchema)]
 pub enum ApiError {
     BadRequest(String),
     Forbidden(Option<String>),
@@ -117,12 +115,16 @@ impl IntoResponse for ApiError {
 
 pub struct ErrorWrapper(pub ApiError);
 
-#[derive(Serialize)]
+#[derive(Serialize, schemars::JsonSchema)]
 #[serde(rename_all = "kebab-case")]
-enum VendorErrorCode {
+pub enum VendorErrorCode {
     NotFound,
     BadRequest,
     RequestTimeout,
+}
+
+impl OperationOutput for ErrorWrapper {
+    type Inner = sovd_interfaces::error::ApiErrorResponse<VendorErrorCode>;
 }
 
 impl IntoResponse for ErrorWrapper {
