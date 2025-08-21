@@ -1,0 +1,41 @@
+name: Generate documentation
+
+on:
+  push:
+    tags:
+      - 'v*'
+    branches:
+      - main
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  actions: write
+
+jobs:
+  build_documentation:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          submodules: false
+      - name: Make doctoolchain executable
+        run: | 
+          chmod a+x docs/dtcw
+      - name: Run doctoolchain
+        id: run-dtcw
+        run: |
+          cd docs
+          ./dtcw docker generateHTML
+      - name: Upload documentation (html)
+        uses: actions/upload-artifact@v4
+        id: upload-docs-html
+        with:
+          if-no-files-found: 'error'
+          name: 'docs-html'
+          retention-days: 7
+          path: |
+            docs/build/html5/
+          

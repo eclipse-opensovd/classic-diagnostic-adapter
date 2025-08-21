@@ -1,0 +1,186 @@
+@startuml
+title flash-sequence using standard UDS
+
+participant Client
+participant CDA
+participant ECU
+participant "Other ECUs" as OtherECUs
+
+!pragma teoz true
+
+opt Unidirectional Authentication APCE
+    note right of Client : This authentication is typically required for all ECUs, to be able to set DTC/commctrl on them as well
+    Client -> CDA : POST /modes/authentication (verifyCertificateUnidirectional)
+    activate CDA
+    CDA -> ECU : Authentication (29 01 02 ...)
+    activate ECU
+    ECU -> ECU : Generate Challenge
+    ECU -> CDA : ACK (with challenge)
+    deactivate ECU
+    CDA -> Client : HTTP 200 (OK with challenge)
+    deactivate CDA
+
+    Client -> Client : Sign challenge
+
+    Client -> CDA : POST /modes/authentication (proofOfOwnership)
+    activate CDA
+    CDA -> ECU : Authentication (29 03 ...)
+    activate ECU
+    ECU -> ECU : Verify
+    ECU -> CDA : ACK
+    deactivate ECU
+    CDA -> Client : HTTP 200 (OK)
+    deactivate CDA
+end
+
+opt Communication Control and DTC handling
+    Client -> CDA : POST /modes/dtcsetting (off)
+    activate CDA
+    CDA -> OtherECUs : ControlDTCSetting (85 02)
+    activate OtherECUs
+    OtherECUs -> CDA : ACK
+    deactivate OtherECUs
+    CDA -> Client : HTTP 200 (OK)
+    deactivate CDA
+
+    Client -> CDA : POST /modes/commctrl (enableRxAndDisableTx)
+    activate CDA
+    CDA -> OtherECUs : CommunicationControl (28 01)
+    activate OtherECUs
+    OtherECUs -> CDA : ACK
+    deactivate OtherECUs
+    CDA -> Client : HTTP 200 (OK)
+    deactivate CDA
+end
+
+group Switch into Bootloader
+    note over CDA: All /operations-calls can also be asynchronous,\ndepending on definition of the routine
+
+    Client -> CDA : POST /modes/session (programming)
+    activate CDA
+    CDA -> ECU : Programming Session (10 02)
+    activate ECU
+    note over ECU : ECU reboots, reconnection etc.
+    ECU -> CDA : ACK
+    deactivate ECU
+    CDA -> Client : HTTP 200 (OK)
+    deactivate CDA
+end
+
+group Security Access for Bootloader
+    Client -> CDA : POST /modes/security (request seed level xx)
+    activate CDA
+    CDA -> ECU : Security Access Request Seed (27 xx)
+    activate ECU
+    ECU -> CDA : ACK (seed)
+    deactivate ECU
+    CDA -> Client : HTTP 200 (OK with seed)
+    deactivate CDA
+
+    Client -> Client : Sign Seed
+
+    Client -> CDA: POST /modes/security (send key level xx)
+    activate CDA
+    CDA -> ECU : Security Access Send Key (key) (27 xx+1 ...)
+    activate ECU
+    ECU -> CDA : ACK
+    deactivate ECU
+    CDA -> Client : HTTP 200 (OK)
+    deactivate CDA
+end
+
+group Prepare Flash Memory
+    Client -> CDA: POST /operations/eraseMemory/executions
+    activate CDA
+    CDA -> ECU : eraseMemory (31 01 FF 00)
+    activate ECU
+    ECU -> CDA : ACK
+    deactivate ECU
+    CDA -> Client : HTTP 200 (OK)
+    deactivate CDA
+end
+
+loop Transfer all segments
+    group RequestDownload
+        Client -> CDA: PUT /x-sovd2uds-download/requestdownload
+        activate CDA
+        CDA -> ECU : RequestDownload (34 ...)
+        activate ECU
+        ECU -> CDA : ACK
+        deactivate ECU
+        CDA -> Client: HTTP 200 (OK)
+        deactivate CDA
+    end
+
+    group TransferData
+        Client -> CDA: POST /x-sovd2uds-download/flashtransfer
+        activate CDA
+        CDA -> Client: HTTP 200 (OK with flash transfer id)
+        deactivate CDA
+
+        loop until data transfer is completed
+            CDA -> ECU: TransferData (36 xx ...)
+            activate CDA
+            activate ECU
+            ECU -> CDA : ACK
+            deactivate ECU
+            deactivate CDA
+        end
+        & loop poll transfer status until finished
+            note right of Client: Polling is independent\nto transfer of data
+            Client -> CDA: GET /x-sovd2uds-download/flashtransfer/{id}
+            activate CDA
+            CDA -> Client: HTTP 200 (OK with transfer status)
+            deactivate CDA
+        end
+    end
+
+    group TransferExit
+        Client -> CDA: PUT /x-sovd2uds-download/transferexit
+        activate CDA
+        CDA -> ECU : RequestTransferExit (37)
+        activate ECU
+        ECU -> CDA : ACK
+        deactivate ECU
+        CDA -> Client: HTTP 200 (OK)
+        deactivate CDA
+    end
+end
+
+opt Verification of transferred data
+    Client -> CDA: POST /operations/verifyData/executions
+    activate CDA
+    CDA -> ECU : Verify data was transferred successfully (31 01 xx yy)
+    activate ECU
+    ECU -> CDA : ACK
+    deactivate ECU
+    CDA -> Client: HTTP 200 (OK)
+    deactivate CDA
+end
+
+
+group Check if all dependencies are ok
+    Client -> CDA: POST /operations/checkProgrammingDependencies/executions
+    activate CDA
+    CDA -> ECU: checkProgrammingDependencies (31 01 FF 01)
+    activate ECU
+    ECU -> CDA : ACK
+    deactivate ECU
+    CDA -> Client: HTTP 200 (OK)
+    deactivate CDA
+end
+
+opt Reset ECU if required
+    Client -> CDA: PUT /status/reset (type)
+    activate CDA
+    CDA -> ECU: Reset (11 xx)
+    activate ECU
+    note over ECU : ECU reboots, reconnection etc.
+    ECU -> CDA : ACK
+    deactivate ECU
+    CDA -> Client: HTTP 200 (OK)
+    deactivate CDA
+end
+
+note right of Client: restore authentication/safe-state/etc.
+@enduml

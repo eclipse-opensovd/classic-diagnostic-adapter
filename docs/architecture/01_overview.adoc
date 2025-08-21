@@ -1,15 +1,17 @@
-= architecture
+[#_architecture_overview]
+= Overview
+ifdef::rootpath[]
+:imagesdir: {rootpath}/images
+endif::rootpath[]
+ifndef::rootpath[]
+:imagesdir: ../images
+endif::rootpath[]
 
-== overview
-.architecture overview
-[plantuml, "Architecture blocks", png]
-----
-include::architecture.puml[]
-----
+image::architecture/overview.png[]
 
 == SOVD
 
-The SOVD component manages incoming SOVD requests and translates them into calls to the Diagnostic Tester API. It includes an HTTP server to receive SOVD requests and an OpenAPI generator to create documentation for API endpoints.
+The SOVD block manages incoming SOVD requests and translates them into calls to the Diagnostic Tester API. It includes an HTTP server to receive SOVD requests and an OpenAPI generator to create documentation for API endpoints.
 
 Additionally, the OpenAPI generator can be used as a standalone component to generate comprehensive documentation for ECU variants.
 
@@ -53,10 +55,7 @@ In the communication layer everything related to the communication with ECUs is 
 
 Implementation of UDS communication, with handling of NRCs, tester presents (either physical or functional, flag for every connection per address), timeouts, retries and actual data.
 
-See link:uds_communication.adoc[UDS Communication]
-
 === DoIP
 
 Implementation of DoIP communication with handling of timeouts.
 
-See link:doip_communication.adoc[DoIP Communication]

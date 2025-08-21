@@ -1,0 +1,6 @@
+[#_requirements_diagnostic_tester]
+= Diagnostic Tester
+
+:numbered:
+
+== API

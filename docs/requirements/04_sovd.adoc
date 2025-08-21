@@ -1,0 +1,169 @@
+[#_requirements_sovd]
+= SOVD (ISO 17978-1)
+
+:numbered:
+
+The guiding principle behind this document is to specify the requirements for an ISO 17978-1 compatible API in the Eclipse OpenSOVD Classic Diagnostic Adapter (CDA).
+
+== Technical
+=== HTTP-Server
+[.specitem, oft-sid="req~sovd.http.server.parallelity~1" oft-needs="arch"]
+
+The HTTP Server has to support multiple connections, and calls should be handled asynchronously.
+
+.Rationale
+[.rationale]
+Multiple clients might use the CDA at the same time, and asynchronous handling generally improves performance due to reduced thread count.
+
+
+==== Configurable port
+[.specitem, oft-sid="req~sovd.http.port.configurable~1" oft-needs="arch"]
+
+The CDA must provide an HTTP- or HTTPS-server running on a configurable port.
+
+
+=== HTTPS
+[.specitem, oft-sid="req~sovd.https.certificate~1" oft-needs="arch"]
+
+In case of HTTPS, the certificate/key must be providable through the configuration, or a plugin.
+
+.Rationale
+[.rationale]
+
+Certificates/Keys might be stored in an HSM, therefore platform specific code might be needed for access.
+
+TODO: Maybe connection establishment/encryption also needs to be done through HSM?
+
+
+== API
+
+=== Entities
+
+==== Data Types
+[.specitem, oft-sid="req~sovd.api.data-types.mapping~1" oft-needs="arch"]
+
+Data types must be mapped as specified by ISO 17978-3.
+
+Additionally, for the data type `A_BYTEFIELD`, the format `hex` must be supported - see xref:_bytefield_as_hex
+
+==== JSON data types
+[.specitem, oft-sid="req~sovd.api.data-types.json~1" oft-needs="arch"]
+
+Used JSON data types must be mapped as specified by ISO 17978-3.
+
+=== Paths
+
+==== Mapping of a standardized resource collection
+[.specitem, oft-sid="req~sovd.api.standard-resource-collection-mapping~1" oft-needs="arch"]
+
+The standardized resource collection for `/components/+{ecu-name}+` must be mapped as follows:
+
+[cols="1,1,1"]
+|===
+|SID (base 16)|REST path|Comment
+
+|10
+| /modes/session
+|
+
+|11
+| /operations/reset +
+/status/restart
+|
+
+|14 +
+19
+| /faults/
+|
+
+|22 +
+2E
+| /data/+{data-identifier}+ +
+/configurations/+{data-identifier}+
+|category & classification between paths is handled by the functional class with configuration
+
+|27
+| /modes/security
+|
+
+|28
+|/modes/commctrl
+|
+
+|29
+| /modes/authentication
+|
+
+|34 +
+36 +
+37
+| /x-sovd2uds-download/requestdownload +
+/x-sovd2uds-download/flashtransfer +
+/x-sovd2uds-download/transferexit
+| `flashtransfer` handles the whole transfer, not for individual calls
+
+|3E
+| --
+| handled internally by CDA
+
+|85
+|/modes/dtcsetting
+|
+
+|===
+
+
+==== Vehicle
+==== Functional groups
+==== ECUs
+
+=== Extensions to the ISO specification
+
+[#_bytefield_as_hex]
+==== Data Type A_BYTEFIELD
+[.specitem, oft-sid="req~sovd.api.datatypes.hexoutput~1", oft-needs="arch"]
+
+For the data type `A_BYTEFIELD` the json output type `string` with the format `hex` must be supported through an optional query-parameter. Using `hex` means, that the binary data must be base16-encoded, either with or without preceding `0x` prefixes.
+
+
+.Rationale
+[.rationale]
+Handling base64 encoded binary directly can be compatibility challenge for offboard testers accessing the CDA. Manual debugging can also be simplified by directly seeing the hexadecimal encoded data, since it's easier to process for humans.
+
+==== Flash API
+
+===== General
+[.specitem, oft-sid="req~sovd.api.flash-api~1", oft-needs="arch"]
+
+A Flash-API is required to support flashing of ECUs, utilizing SIDs 34~16~, 36~16~ & 37~16~. It needs to enable efficient transfer of the data, without sending the individual data transfers via REST.
+
+Flashing is the process of updating the firmware of an ECU.
+
+
+.Rationale
+[.rationale]
+Handling for the aforementioned SIDs isn't defined in the ISO specification, it is however an important use-case to be able to update the firmware on ECUs.
+
+===== Security
+[.specitem, oft-sid="req~sovd.api.flashing.security~1", oft-needs="arch"]
+
+The source of the data to be sent for flashing, must be restrictable to a path and its subdirectories via configuration.
+
+.Rationale
+[.rationale]
+Without restrictions to the path, an attacker could exfiltrate arbitrary accessible data.
+
+
+=== OpenAPI-Documentation
+
+=== Security
+
+Since vendors have different requirements and systems regarding security, security related functionality has to be implemented in a plugin.
+
+==== Token validation
+==== Audiences
+
+== Standalone OpenAPI-Generator
+[.specitem, oft-sid="req~sovd.api.openapi.generator~1"]
+
+A standalone OpenAPI generator must be provided, which allows the creation of a full OpenAPI document for a single ECU, with a set of ECU variants, and audiences.

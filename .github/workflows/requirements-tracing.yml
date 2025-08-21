@@ -1,0 +1,52 @@
+# SPDX-FileCopyrightText: 2025 The Contributors to Eclipse OpenSOVD (see CONTRIBUTORS)
+#
+# SPDX-License-Identifier: Apache-2.0
+
+name: Check Requirements Traceability with OpenFastTrace
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  actions: write
+
+jobs:
+  tracing:
+    name: Run OpenFastTrace
+    runs-on: ubuntu-latest
+    env:
+      TRACING_REPORT_FILE_NAME: oft-tracing-report.html
+    outputs:
+      tracing-report-url: ${{ steps.upload-tracing-report.artifact-url }}
+    steps:
+      - uses: actions/checkout@v4
+# [impl->req~main.tracing.programmatically~1]]
+      - name: Run OpenFastTrace
+        id: run-oft
+        uses: itsallcode/openfasttrace-github-action@v0
+        with:
+          report-format: "html"
+          report-filename: ${{ env.TRACING_REPORT_FILE_NAME }}
+          file-patterns: "docs cda-* .github"
+
+      - name: Upload tracing report (html)
+        uses: actions/upload-artifact@v4
+        id: upload-tracing-report
+        if: ${{ steps.run-oft.outputs.oft-exit-code != '' }}
+        with:
+          name: tracing-report-html
+          path: ${{ env.TRACING_REPORT_FILE_NAME }}
+# TODO once requirements are traceable, enforce it with the exit code
+#      - name: "Determine exit code"
+#        run: |
+#          exit ${{ steps.run-oft.outputs.oft-exit-code }}
+# allow failing requirements tracing pipeline for now
+# display the error code instead
+      - name: "Output exit code"
+        run: |
+          echo ${{ steps.run-oft.outputs.oft-exit-code }}
