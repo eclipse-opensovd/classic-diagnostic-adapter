@@ -1,0 +1,6 @@
+[#_architecture_sovd_api_introduction]
+= Introduction
+
+Eclipse OpenSOVD Classic Diagnostic Adapter aims to be compatible with the ISO/DIS 17978-3:2025 SOVD standard.
+
+This chapter specifies the specific implementation of that standard, as well as extensions to it, which are required for some use-cases.

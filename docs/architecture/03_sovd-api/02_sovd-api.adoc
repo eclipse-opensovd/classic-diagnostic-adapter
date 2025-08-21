@@ -1,0 +1,172 @@
+[#_architecture_sovd_api_standard]
+= SOVD-API
+
+:numbered:
+
+ifndef::rootpath[]
+:rootpath: ../..
+endif::rootpath[]
+
+
+== Data Types
+
+In the following sections the data type mapping to/from JSON are defined.
+
+=== Mapping of ODX types
+[.specitem, oft-sid="arch~sovd.api.data-types.mapping~1" oft-covers="req~sovd.api.data-types.mapping~1"]
+
+Data types must be mapped as follows:
+
+[cols="1,1,1"]
+|===
+|ODX data type|JSON data type (format)|Comment
+
+|A_ASCIISTRING
+|string
+|
+
+|A_BOOLEAN
+|boolean
+|
+
+|A_BYTEFIELD
+|string (byte \| hex)
+| see xref:{rootpath}/requirements/04_sovd.adoc#_bytefield_as_hex[Requirements: Bytefield as hex]
+
+|A_FLOAT32
+|number (float)
+|
+
+|A_FLOAT64
+|number (double)
+|
+
+|A_INT32
+|integer (int32)
+|
+
+|A_UINT32
+|integer (int64)
+|
+
+|A_UNICODE2STRING
+|string
+|
+
+|A_UTF8STRING
+|string
+|
+
+|===
+
+=== Primitive JSON types
+[.specitem, oft-sid="arch~sovd.api.data-types.json~1" oft-covers="req~sovd.api.data-types.json~1"]
+
+All primitive json types (string, array, number, integer, boolean and object) can be used.
+
+For string, the following format identifiers can be used:
+[cols="1,1,1"]
+|===
+|JSON type|JSON format|Comment
+
+|string
+|byte
+|Base64 encoded binary data
+
+|string
+|hex
+|Hexadecimal encoded binary data (e.g. f0cacc1a). Can be prefixed with 0x and contain spaces.
+
+|string
+|uuid
+|UUID identifier according to link:https://www.rfc-editor.org/rfc/rfc4122[RFC 4122]
+
+|string
+|uri
+|Absolute URI according to link:https://www.rfc-editor.org/rfc/rfc3986[RFC 3986]
+
+|string
+|uri-reference
+|Relative URI according to link:https://www.rfc-editor.org/rfc/rfc3986[RFC 3986]
+
+|string
+|json-pointer
+|Pointer to a specific value within the JSON according to link:https://www.rfc-editor.org/rfc/rfc6901[RFC 6901]
+
+|===
+
+#TODO# More string formats required?
+
+=== Mapping of complex data types
+#TODO#
+
+
+=== Bulk Data
+
+#TODO#
+
+== Entities
+
+[.specitem, oft-sid="arch~sovd.api.standard-resource-collection-mapping~1" oft-covers="req~sovd.api.standard-resource-collection-mapping~1"]
+
+Every ECU with a `mdd`-file is an entity within the `/components` entity collection.
+
+This doesn't include the `mdd` files used for xref:{rootpath}/architecture/03_sovd-api/03_extensions/02_functional-comm-api.adoc#_architecture_sovd_api_iso_extensions_functional_comm[functional communication]
+
+== ECU resource collection
+
+The resource collection for ECUs is defined in an OpenAPI Specification: xref:{rootpath}/architecture/03_sovd-api/ecu_resource_collection.yaml[ECU Resource Collection Specification]
+
+== Data Resources -- SID 22~16~ & 2E~16~
+
+#TODO#
+
+== Configurations -- SID 22~16~ & 2E~16~
+
+#TODO#
+
+== Operations
+
+#TODO#
+
+=== Routines
+
+#TODO#
+
+=== Synchronous -- SID 31~16~ (Start only)
+=== Asynchronous -- SID 31~16~ (Start, Stop, RequestResults)
+
+=== IOControl -- SID 2A~16~
+
+== Modes
+
+#TODO#
+
+=== Session -- SID 10~16~
+
+`/modes/session`
+
+=== Security -- SID 27~16~
+
+`/modes/security`
+
+=== Authentication -- SID 29~16~
+
+NOTE: This is technically a deviation to the Table 343 in the ISO-API. The table in the ISO is wrong, since 8.3.2 and 8.3.3 describe them separately.
+
+`/modes/authentication`
+
+=== Communication Control -- SID 85~16~
+
+`/modes/commctrl`
+
+=== DTC Setting -- SID 28~16~
+
+`/modes/dtcsetting`
+
+== Faults -- SID 14~16~ & 19~16~
+
+#TODO#
+
+`/faults`
+

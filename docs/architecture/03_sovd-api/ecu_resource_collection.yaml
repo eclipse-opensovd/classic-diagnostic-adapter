@@ -1,0 +1,120 @@
+openapi: 3.1.0
+info:
+  version: 0.0.1
+  title: Resource collection for ECU in CDA
+
+tags:
+  - name: components
+    description: Endpoints related to components
+
+components:
+  parameters:
+    EcuName:
+      in: query
+      name: "ecu-name"
+      description: "Name of the ECU"
+      required: true
+      schema:
+        type: string
+
+  schemas:
+    EcuDetectionStatus:
+      type: string
+      description: "Status of the ECU"
+      example: "Online"
+      enum:
+        - Unknown # No communication with the ECU was done, status is unknown
+        - Online # Last known status is that the ECU is online
+        - Offline # Last known status is that the ECU is offline (not reachable)
+        - Duplicate # ECU is reachable, but variant detection couldn't detect an exact match, and another ECU with the same logical address exists
+
+    EcuData:
+      type: object
+      properties:
+        id:
+          type: string
+          description: "path name for that ECU (typically lower-case ecuName)"
+          example: ecu112
+        name:
+          type: string
+          description: "name of ecu, as defined in ODX"
+          example: ECU112
+        variant:
+          type: string
+          description: "The detected variant of the ECU -- base variant if no ecu was detected"
+          example: Variant-1
+        status:
+          $ref: '#/components/schemas/EcuDetectionStatus'
+        locks:
+          type: string
+          format: uri-reference
+          description: "path to locks"
+          example: 'http://localhost:1234/components/ecu112/locks'
+        configurations:
+          type: string
+          format: uri-reference
+          description: "path to configurations"
+          example: 'http://localhost:1234/components/ecu112/configurations'
+        data:
+          type: string
+          format: uri-reference
+          description: "path to data"
+          example: 'http://localhost:1234/components/ecu112/data'
+        modes:
+          type: string
+          format: uri-reference
+          description: "path to modes"
+          example: 'http://localhost:1234/components/ecu112/modes'
+        genericservice:
+          type: string
+          format: uri-reference
+          description: "path to generic service"
+          example: 'http://localhost:1234/components/ecu112/genericservice'
+        x-sovd2uds-download:
+          type: string
+          format: uri-reference
+          description: "path to sovd2uds download"
+          example: 'http://localhost:1234/components/ecu112/x-sovd2uds-download'
+        faults:
+          type: string
+          format: uri-reference
+          description: "path to faults"
+          example: 'http://localhost:1234/components/ecu112/faults'
+
+  responses:
+    EcuStatus:
+      description: "Successful request, information of ECU and subsequent paths are returned"
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/EcuData'
+
+
+paths:
+  /components:
+    get:
+      summary: "Retrieve list of entities (= ECUs)"
+      tags:
+        - components
+      responses:
+        "200":
+          $ref: 'common.yaml#/components/schemas/EntityReferenceArray'
+
+  /components/{ecu-name}:
+    parameters:
+      - $ref: "#/components/parameters/EcuName"
+
+    get:
+      summary: "Retrieve information about the ECU"
+      tags:
+        - components
+      responses:
+        "200":
+          $ref: '#/components/responses/EcuStatus'
+    put:
+      summary: "Trigger variant detection of the ECU, returns after variant was detected with new data"
+      tags:
+        - components
+      responses:
+        "200":
+          $ref: "#/components/responses/EcuStatus"

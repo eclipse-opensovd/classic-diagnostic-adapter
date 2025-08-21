@@ -1,0 +1,13 @@
+[#_architecture_sovd_api_iso_extensions_mdd_embedded_files]
+= MDD Embedded Files API
+
+== Motivation
+
+When an additional private SOVD-Server is tasked with providing functionality that replaces classic offboard-tester functionality, utilizing the CDA, additional data from the single-ecu-job embedded in the original `pdx`-file can be required.
+
+The odx-converter offers an option to include code-files from the pdx, as well as partial contents from those files. This API allows the retrieval of these files.
+
+
+== Embedded Content Retrieval
+
+#TODO# `/x-sovd2uds-bulk-data/mdd-embedded-files`

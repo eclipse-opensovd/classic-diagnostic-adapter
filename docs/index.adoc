@@ -1,0 +1,15 @@
+[#_classic_diagnostic_adapter_full]
+= Classic Diagnostic Adapter
+:toc: left
+:toclevels: 4
+
+:rootpath: .
+
+:numbered:
+
+// 1. Requirements
+include::requirements/index.adoc[leveloffset=1]
+
+// 2. Architecture
+include::architecture/index.adoc[leveloffset=1]
+

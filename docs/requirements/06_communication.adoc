@@ -1,0 +1,23 @@
+[#_requirements_doip]
+= Communication
+
+:numbered:
+
+== DoIP (ISO 13400)
+
+
+=== Communication
+==== Discovery
+==== Establishment
+==== Parameters
+
+=== API
+
+== UDS (ISO 14229)
+
+=== Communication
+==== Parameters
+==== Timeouts
+==== Online Detection
+
+=== API

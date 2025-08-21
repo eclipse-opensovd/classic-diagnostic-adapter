@@ -1,0 +1,10 @@
+[#_architecture_sovd_api_iso_extensions_single_ecu_jobs]
+= Single ECU Jobs
+
+== Motivation
+
+When a client wants to replace the classical single-ecu-jobs from the odx description, it could need the original input/output parameters from those jobs. This API provides the data for the single-ecu-jobs, which were present in the original odx at the time of conversion.
+
+== Retrieving data
+
+#TODO# `/x-single-ecu-jobs`

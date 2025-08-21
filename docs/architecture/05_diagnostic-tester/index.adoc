@@ -1,0 +1,4 @@
+[#_architecture_diagnostic_tester]
+= Diagnostic Tester
+
+#TODO#

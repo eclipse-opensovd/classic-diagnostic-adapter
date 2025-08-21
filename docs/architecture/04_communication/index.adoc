@@ -1,0 +1,8 @@
+[#_architecture_communication]
+= Communication
+
+:numbered:
+
+include::01_doip_communication.adoc[leveloffset=+1]
+
+include::02_uds_communication.adoc[leveloffset=+1]
