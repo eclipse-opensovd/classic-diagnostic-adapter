@@ -31,6 +31,9 @@ cda-sovd = { path = "cda-sovd" }
 cda-tracing = { path = "cda-tracing" }
 sovd-interfaces = { path = "cda-sovd-interfaces" }
 
+# ensure all crates use the same version of schemars
+schemars = { git = "https://github.com/theswiftfox/schemars.git", rev = "d264067" }
+
 [workspace.lints.clippy]
 # enable pedantic
 pedantic = { level = "warn", priority = -1 }

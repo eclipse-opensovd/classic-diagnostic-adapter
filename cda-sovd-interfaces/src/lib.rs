@@ -49,6 +49,9 @@ pub struct ResourceResponse {
 pub struct ObjectDataItem {
     pub id: String,
     pub data: serde_json::Map<String, serde_json::Value>,
+    #[schemars(skip)]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub schema: Option<schemars::Schema>,
 }
 
 #[derive(Deserialize, Serialize, Debug)]

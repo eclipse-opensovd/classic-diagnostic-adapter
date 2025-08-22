@@ -20,9 +20,7 @@ hashbrown = { version = "0.15", features = ["serde"] }
 chrono = "0.4.40"
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
-schemars = { git = "https://github.com/theswiftfox/schemars.git", rev = "d264067", optional = true, features = [
-  "hashbrown",
-] }
+schemars = { workspace = true, optional = true, features = ["hashbrown"] }
 
 [features]
 default = []

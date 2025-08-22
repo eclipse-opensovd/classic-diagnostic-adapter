@@ -19,7 +19,7 @@ use axum::{
     response::{IntoResponse, Response},
 };
 use cda_interfaces::{
-    DiagComm, UdsEcu,
+    DiagComm, SchemaProvider, UdsEcu,
     diagservices::{DiagServiceResponse, DiagServiceResponseType},
     file_manager::FileManager,
 };
@@ -30,7 +30,7 @@ use serde::Deserialize;
 use crate::{
     openapi,
     sovd::{
-        IntoSovd, WebserverEcuState,
+        IntoSovd, WebserverEcuState, create_response_schema,
         error::{ApiError, ErrorWrapper, api_error_from_diag_response},
         get_payload_data,
     },
@@ -187,12 +187,13 @@ impl IntoSovd for cda_interfaces::datatypes::ComParamSimpleValue {
 
 openapi::aide_helper::gen_path_param!(DiagServicePathParam diag_service String);
 
-async fn data_request<T: UdsEcu + Send + Sync + Clone>(
+async fn data_request<T: UdsEcu + SchemaProvider + Clone>(
     service: DiagComm,
     ecu_name: &str,
     gateway: &T,
     headers: HeaderMap,
     body: Option<Bytes>,
+    include_schema: bool,
 ) -> Response {
     let data = if let Some(body) = body {
         match get_payload_data::<sovd_interfaces::components::ecu::data::DataRequestPayload>(
@@ -219,6 +220,31 @@ async fn data_request<T: UdsEcu + Send + Sync + Clone>(
             .into_response();
         }
         _ => (None, true),
+    };
+
+    if !map_to_json && include_schema {
+        return ErrorWrapper(ApiError::BadRequest(
+            "Cannot use include-schema with non-JSON response".to_string(),
+        ))
+        .into_response();
+    }
+
+    let schema = if include_schema {
+        match gateway
+            .schema_for_responses(ecu_name, &service)
+            .await
+            .map(|desc| desc.into_schema())
+        {
+            Ok(Some(data_schema)) => Some(create_response_schema!(
+                sovd_interfaces::ObjectDataItem,
+                "data",
+                data_schema
+            )),
+            Err(e) => return ErrorWrapper(e.into()).into_response(),
+            _ => None,
+        }
+    } else {
+        None
     };
 
     let response = match gateway
@@ -261,6 +287,7 @@ async fn data_request<T: UdsEcu + Send + Sync + Clone>(
                     Json(sovd_interfaces::ObjectDataItem {
                         id: service.name.to_lowercase(),
                         data: mapped_data,
+                        schema,
                     }),
                 )
                     .into_response()

@@ -27,6 +27,8 @@ pub use ecumanager::*;
 mod ecuuds;
 pub use ecuuds::*;
 pub mod file_manager;
+mod schema;
+pub use schema::*;
 
 /// # strings module
 /// This module contains a type that allows to store unique strings and use references to them

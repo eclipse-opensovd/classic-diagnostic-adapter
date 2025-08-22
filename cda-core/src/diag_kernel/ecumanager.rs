@@ -1458,7 +1458,7 @@ impl EcuManager {
         ),
         err,
     )]
-    fn lookup_diag_comm(
+    pub(in crate::diag_kernel) fn lookup_diag_comm(
         &self,
         diag_comm: &DiagComm,
     ) -> Result<&DiagnosticService, DiagServiceError> {

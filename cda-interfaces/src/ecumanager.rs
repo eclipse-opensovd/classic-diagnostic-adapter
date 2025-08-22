@@ -16,7 +16,8 @@ use std::time::Duration;
 use hashbrown::{HashMap, HashSet};
 
 use crate::{
-    DiagComm, DiagServiceError, DoipComParamProvider, Id, SecurityAccess, UdsComParamProvider,
+    DiagComm, DiagServiceError, DoipComParamProvider, EcuSchemaProvider, Id, SecurityAccess,
+    UdsComParamProvider,
     datatypes::{
         ComplexComParamValue, ComponentConfigurationsInfo, ComponentDataInfo, SdSdg, single_ecu,
     },
@@ -63,7 +64,13 @@ pub trait EcuAddressProvider: Send + Sync + 'static {
 }
 
 pub trait EcuManager:
-    DoipComParamProvider + UdsComParamProvider + EcuAddressProvider + Send + Sync + 'static
+    DoipComParamProvider
+    + UdsComParamProvider
+    + EcuAddressProvider
+    + EcuSchemaProvider
+    + Send
+    + Sync
+    + 'static
 {
     type Response: DiagServiceResponse;
     #[must_use]

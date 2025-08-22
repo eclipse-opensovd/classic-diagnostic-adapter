@@ -287,13 +287,13 @@ pub(crate) mod ecu {
             })
             .response_with::<
                 403,
-                Json<sovd_interfaces::error::ApiErrorResponse::<sovd::error::ApiError>>,
+                Json<sovd_interfaces::error::ApiErrorResponse::<sovd::error::VendorErrorCode>>,
                  _>(|res| {
                 res.description("Lock is already owned by someone else.")
             })
             .response_with::<
             409,
-            Json<sovd_interfaces::error::ApiErrorResponse::<sovd::error::ApiError>>,
+            Json<sovd_interfaces::error::ApiErrorResponse::<sovd::error::VendorErrorCode>>,
             _>(|res| {
                 res.description("Functional lock prevents setting lock.")
             })

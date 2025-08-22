@@ -153,6 +153,8 @@ pub mod data {
             pub struct DiagServiceQuery {
                 #[serde(rename = "x-include-sdgs")]
                 pub include_sdgs: Option<bool>,
+                #[serde(rename = "include-schema")]
+                pub include_schema: Option<bool>,
             }
         }
     }
