@@ -19,7 +19,7 @@ use std::{
 
 use cda_interfaces::{
     DiagComm, DiagCommAction, DiagCommType, DiagServiceError, EcuGateway, EcuManager,
-    SecurityAccess, ServicePayload, TesterPresentControlMessage, TesterPresentMode,
+    SchemaProvider, SecurityAccess, ServicePayload, TesterPresentControlMessage, TesterPresentMode,
     TesterPresentType, TransmissionParameters, UdsEcu, UdsResponse,
     datatypes::{
         ComponentConfigurationsInfo, DataTransferError, DataTransferMetaData, DataTransferStatus,
@@ -1143,6 +1143,32 @@ impl<S: EcuGateway, R: DiagServiceResponse, T: EcuManager<Response = R>> UdsEcu
         }
         let cloned = self.clone();
         cloned.start_variant_detection_for_ecus(ecus)
+    }
+}
+
+impl<S: EcuGateway, R: DiagServiceResponse, T: EcuManager<Response = R>> SchemaProvider
+    for UdsManager<S, R, T>
+{
+    async fn schema_for_request(
+        &self,
+        ecu: &str,
+        service: &DiagComm,
+    ) -> Result<cda_interfaces::SchemaDescription, DiagServiceError> {
+        let Some(ecu) = self.ecus.get(ecu) else {
+            return Err(DiagServiceError::NotFound);
+        };
+        ecu.read().await.schema_for_request(service)
+    }
+
+    async fn schema_for_responses(
+        &self,
+        ecu: &str,
+        service: &DiagComm,
+    ) -> Result<cda_interfaces::SchemaDescription, DiagServiceError> {
+        let Some(ecu) = self.ecus.get(ecu) else {
+            return Err(DiagServiceError::NotFound);
+        };
+        ecu.read().await.schema_for_responses(service)
     }
 }
 

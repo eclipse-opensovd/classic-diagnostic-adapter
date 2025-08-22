@@ -19,7 +19,9 @@ use axum::{
     http::{self, Request},
     middleware, routing,
 };
-use cda_interfaces::{UdsEcu, diagservices::DiagServiceResponse, file_manager::FileManager};
+use cda_interfaces::{
+    SchemaProvider, UdsEcu, diagservices::DiagServiceResponse, file_manager::FileManager,
+};
 use futures::future::FutureExt;
 use hashbrown::HashMap;
 use tokio::net::TcpListener;
@@ -55,7 +57,7 @@ pub async fn launch_webserver<F, R, T, M>(
 where
     F: Future<Output = ()> + Send + 'static,
     R: DiagServiceResponse,
-    T: UdsEcu + Send + Sync + Clone,
+    T: UdsEcu + SchemaProvider + Clone,
     M: FileManager,
 {
     let clonable_shutdown_signal = shutdown_signal.shared();

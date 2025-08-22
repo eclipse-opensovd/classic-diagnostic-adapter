@@ -94,8 +94,8 @@ pub(crate) mod diag_service {
         response::{IntoResponse, Response},
     };
     use cda_interfaces::{
-        DiagComm, DiagCommAction, DiagCommType, UdsEcu, diagservices::DiagServiceResponse,
-        file_manager::FileManager,
+        DiagComm, DiagCommAction, DiagCommType, SchemaProvider, UdsEcu,
+        diagservices::DiagServiceResponse, file_manager::FileManager,
     };
     use http::HeaderMap;
 
@@ -110,7 +110,7 @@ pub(crate) mod diag_service {
 
     pub(crate) async fn put<
         R: DiagServiceResponse + Send + Sync,
-        T: UdsEcu + Send + Sync + Clone,
+        T: UdsEcu + SchemaProvider + Clone,
         U: FileManager + Send + Sync + Clone,
     >(
         headers: HeaderMap,
@@ -134,6 +134,7 @@ pub(crate) mod diag_service {
             &uds,
             headers,
             Some(body),
+            false,
         )
         .await
     }

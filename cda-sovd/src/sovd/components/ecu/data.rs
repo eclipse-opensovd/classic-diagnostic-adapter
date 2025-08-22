@@ -70,8 +70,8 @@ pub(crate) mod diag_service {
         response::{IntoResponse, Response},
     };
     use cda_interfaces::{
-        DiagComm, DiagCommAction, DiagCommType, UdsEcu, diagservices::DiagServiceResponse,
-        file_manager::FileManager,
+        DiagComm, DiagCommAction, DiagCommType, SchemaProvider, UdsEcu,
+        diagservices::DiagServiceResponse, file_manager::FileManager,
     };
     use hashbrown::HashMap;
     use http::{HeaderMap, StatusCode};
@@ -135,7 +135,7 @@ pub(crate) mod diag_service {
 
     pub(crate) async fn get<
         R: DiagServiceResponse + Send + Sync,
-        T: UdsEcu + Send + Sync + Clone,
+        T: UdsEcu + SchemaProvider + Send + Sync + Clone,
         U: FileManager + Send + Sync + Clone,
     >(
         headers: HeaderMap,
@@ -161,6 +161,7 @@ pub(crate) mod diag_service {
                 &uds,
                 headers,
                 None,
+                query.include_schema.unwrap_or(false),
             )
             .await
         }
@@ -181,8 +182,8 @@ pub(crate) mod diag_service {
     }
 
     pub(crate) async fn put<
-        R: DiagServiceResponse + Send + Sync,
-        T: UdsEcu + Send + Sync + Clone,
+        R: DiagServiceResponse + Send + Sync, // todo: remove + Send + Sync as its redundant
+        T: UdsEcu + SchemaProvider + Clone,
         U: FileManager + Send + Sync + Clone,
     >(
         headers: HeaderMap,
@@ -206,6 +207,7 @@ pub(crate) mod diag_service {
             &uds,
             headers,
             Some(body),
+            false,
         )
         .await
     }

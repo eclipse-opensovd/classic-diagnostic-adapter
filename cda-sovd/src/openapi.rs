@@ -156,6 +156,7 @@ pub(crate) fn ecu_service_response(op: TransformOperation) -> TransformOperation
                     ]
                     .into_iter()
                     .collect(),
+                    schema: None,
                 });
         res.inner().content.insert(
             "application/octet-stream".to_owned(),

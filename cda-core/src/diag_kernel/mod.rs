@@ -23,6 +23,7 @@ pub(crate) mod ecumanager;
 mod iso_14229_nrc;
 mod operations;
 mod payload;
+mod schema;
 mod variant_detection;
 
 #[derive(Debug)]

@@ -25,7 +25,7 @@ use axum::{
     response::{IntoResponse, Response},
 };
 use cda_interfaces::{
-    UdsEcu,
+    SchemaProvider, UdsEcu,
     diagservices::{DiagServiceResponse, UdsPayloadData},
     file_manager::FileManager,
 };
@@ -112,11 +112,7 @@ pub(crate) fn resource_response(
     (StatusCode::OK, Json(components)).into_response()
 }
 
-pub async fn route<
-    R: DiagServiceResponse,
-    T: UdsEcu + Send + Sync + Clone + 'static,
-    U: FileManager + Send + Sync + Clone + 'static,
->(
+pub async fn route<R: DiagServiceResponse, T: UdsEcu + SchemaProvider + Clone, U: FileManager>(
     uds: &T,
     flash_files_path: String,
     mut file_manager: HashMap<String, U>,
@@ -252,7 +248,7 @@ pub async fn route<
 
 fn ecu_route<
     R: DiagServiceResponse,
-    T: UdsEcu + Clone,
+    T: UdsEcu + SchemaProvider + Clone,
     U: FileManager + Send + Sync + Clone + 'static,
 >(
     ecu_name: &str,
@@ -498,3 +494,29 @@ fn get_octet_stream_payload(
 
     Ok(Some(UdsPayloadData::Raw(body.to_vec())))
 }
+
+macro_rules! create_response_schema {
+    ($base_type:ty, $target_field:expr, $sub_schema:ident) => {{
+        use schemars::JsonSchema as _;
+
+        let mut generator =
+            schemars::SchemaGenerator::new(schemars::generate::SchemaSettings::draft07());
+        let mut schema = <$base_type>::json_schema(&mut generator);
+
+        if let Some(props) = schema.get_mut("properties") {
+            if let Some(obj) = props.as_object_mut() {
+                obj.insert($target_field.into(), $sub_schema.to_value());
+                obj.insert("errors".to_owned(), schemars::json_schema!({
+                    "items": [
+                        { "$ref": "#/components/schemas/ApiErrorResponse" }
+                    ],
+                    "type": "array",
+                    }).into()
+                );
+            }
+        }
+
+        schema
+    }};
+}
+pub(crate) use create_response_schema;

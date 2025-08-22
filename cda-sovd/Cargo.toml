@@ -35,9 +35,7 @@ aide = { git = "https://github.com/theswiftfox/aide.git", rev = "2e68af1", featu
   "axum-extra-headers",
   "macros",
 ] } # openapi generation
-schemars = { git = "https://github.com/theswiftfox/schemars.git", rev = "d264067", features = [
-  "hashbrown",
-] }
+schemars = { workspace = true, features = ["hashbrown"] }
 
 # web server
 axum = { version = "0.8", default-features = false, features = [
