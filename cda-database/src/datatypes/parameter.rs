@@ -20,7 +20,7 @@ use crate::{
     proto::dataformat::{EcuData, param},
 };
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 #[cfg_attr(feature = "deepsize", derive(DeepSizeOf))]
 pub struct Parameter {
     pub short_name: StringId,
@@ -30,33 +30,44 @@ pub struct Parameter {
     pub semantic: Option<StringId>,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 #[cfg_attr(feature = "deepsize", derive(DeepSizeOf))]
 pub enum ParameterValue {
+    /// Fixed parameter values, which the user cannot change.
+    /// For example the service id.
     CodedConst(CodedConst),
+    /// Only used for replies, this is referencing data
+    /// in the request that belongs to the response.
     MatchingRequestParam(MatchingRequestParam),
+    /// Value references a DOP to convert a concrete value
+    /// from the physical representation into the coded value.
+    /// The physical default value is used when no value is provided.
+    /// This mechanism is also used to re-use `Value` as type for PhysConst.
     Value(ValueData),
+    /// Reserved bits in the payload.
+    /// Currently only used in the CDA for padding when creating UDS payloads
     Reserved(ReservedParam),
 }
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 #[cfg_attr(feature = "deepsize", derive(DeepSizeOf))]
 pub struct CodedConst {
     pub value: StringId,
     pub diag_coded_type: Id,
 }
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 #[cfg_attr(feature = "deepsize", derive(DeepSizeOf))]
+/// Repetition of data from request
 pub struct MatchingRequestParam {
     pub request_byte_pos: i32,
     pub byte_length: u32,
 }
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 #[cfg_attr(feature = "deepsize", derive(DeepSizeOf))]
 pub struct ValueData {
     pub default_value: Option<StringId>,
     pub dop: Id,
 }
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 #[cfg_attr(feature = "deepsize", derive(DeepSizeOf))]
 pub struct ReservedParam {
     pub bit_length: u32,
@@ -130,6 +141,8 @@ pub(super) fn get_parameters(ecu_data: &EcuData, ecu_db_path: &str) -> Parameter
                     ));
                 }
                 non_impl => {
+                    // Currently not implemented:
+                    // TableKey, TableStruct, TableEntry, Dynamic, System, NrcConst
                     return Err(DiagServiceError::InvalidDatabase(format!(
                         "Param SpecificData({:?}) not implemented",
                         std::mem::discriminant(non_impl)

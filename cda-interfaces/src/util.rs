@@ -10,6 +10,7 @@
  *
  * SPDX-License-Identifier: Apache-2.0
  */
+use crate::DiagServiceError;
 
 pub mod tracing {
     #[must_use]
@@ -47,4 +48,66 @@ pub mod tokio_ext {
             tokio::task::spawn($future)
         }};
     }
+}
+
+pub fn u32_padded_bytes(data: &[u8]) -> Result<[u8; 4], DiagServiceError> {
+    if data.len() > 4 {
+        return Err(DiagServiceError::ParameterConversionError(format!(
+            "Invalid data length for I32: {}",
+            data.len()
+        )));
+    }
+    let padd = 4 - data.len();
+    let bytes: [u8; 4] = if padd > 0 {
+        let mut padded: Vec<u8> = vec![0u8; padd];
+        padded.extend(data.to_vec());
+        padded
+            .try_into()
+            .expect("The padded 8 byte value can never exceed the 8 bytes")
+    } else {
+        data.try_into()
+            .expect("Converting an < 8 byte vector into an 8 byte array.")
+    };
+    Ok(bytes)
+}
+pub fn f64_padded_bytes(data: &[u8]) -> Result<[u8; 8], DiagServiceError> {
+    if data.len() > 8 {
+        return Err(DiagServiceError::ParameterConversionError(format!(
+            "Invalid data length for F64: {}",
+            data.len()
+        )));
+    }
+    let padd = 8 - data.len();
+    let bytes: [u8; 8] = if padd > 0 {
+        let mut padded: Vec<u8> = vec![0u8; padd];
+        padded.extend(data.to_vec());
+        padded
+            .try_into()
+            .expect("The padded 8 byte value can never exceed the 8 bytes")
+    } else {
+        data.try_into()
+            .expect("Converting an < 8 byte vector into an 8 byte array.")
+    };
+    Ok(bytes)
+}
+
+pub fn decode_hex(value: &str) -> Result<Vec<u8>, DiagServiceError> {
+    if !value.chars().all(|c| c.is_ascii_hexdigit()) {
+        return Err(DiagServiceError::ParameterConversionError(
+            "Non-hex character found".to_owned(),
+        ));
+    }
+    let value = if value.len().is_multiple_of(2) {
+        value
+    } else {
+        &format!(
+            "{}0{}",
+            &value[..value.len() - 1],
+            &value[value.len() - 1..]
+        )
+    };
+
+    hex::decode(value).map_err(|e| {
+        DiagServiceError::ParameterConversionError(format!("Invalid hex value, error={e}"))
+    })
 }

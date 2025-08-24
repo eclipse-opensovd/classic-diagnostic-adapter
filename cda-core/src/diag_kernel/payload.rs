@@ -68,16 +68,6 @@ impl<'a> Payload<'a> {
         self.last_byte_pos_read = 0;
     }
 
-    pub(in crate::diag_kernel) fn set_pos(&mut self, pos: usize) -> Result<(), DiagServiceError> {
-        if pos > self.len() {
-            return Err(DiagServiceError::BadPayload(
-                "Position out of bounds".to_owned(),
-            ));
-        }
-        self.current_index = pos;
-        Ok(())
-    }
-
     pub(in crate::diag_kernel) fn len(&self) -> usize {
         if let Some(&(start, end)) = self.slices.back() {
             end - start
@@ -103,12 +93,21 @@ impl<'a> Payload<'a> {
         start: usize,
         end: usize,
     ) -> Result<(), DiagServiceError> {
-        if start > end || end > self.data.len() {
+        // when pushing a new slice, it's _relative_ to the last slice or the whole data if no slice
+        let current_start = self.pos();
+        let current_len = self.len();
+
+        if start > end || end > current_len {
             return Err(DiagServiceError::BadPayload(
                 "Invalid range for restricting view".to_owned(),
             ));
         }
-        self.slices.push_back((start, end));
+
+        // Convert relative positions to absolute positions
+        let absolute_start = current_start + start;
+        let absolute_end = current_start + end;
+
+        self.slices.push_back((absolute_start, absolute_end));
         Ok(())
     }
 
@@ -136,9 +135,9 @@ mod tests {
 
         assert!(payload.push_slice(0, 10).is_ok());
         assert_eq!(payload.data(), &raw_payload[0..10]);
-        assert!(payload.push_slice(10, 20).is_ok());
-        assert_eq!(payload.data(), &raw_payload[10..20]);
-        assert!(payload.push_slice(0, 30).is_err()); // out of bounds
+        assert!(payload.push_slice(0, 10).is_ok()); // relative to previous slice (0..10)
+        assert_eq!(payload.data(), &raw_payload[0..10]);
+        assert!(payload.push_slice(0, 15).is_err()); // out of bounds of current slice
 
         assert!(payload.pop_slice().is_ok());
         assert!(payload.pop_slice().is_ok());

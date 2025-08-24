@@ -11,7 +11,9 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-use cda_interfaces::{DiagServiceError, STRINGS, StringId, datatypes::Unit, get_string};
+use cda_interfaces::{
+    DiagServiceError, STRINGS, StringId, datatypes::Unit, get_string, util::decode_hex,
+};
 #[cfg(feature = "deepsize")]
 use deepsize::DeepSizeOf;
 
@@ -131,8 +133,8 @@ pub struct Case {
     pub short_name: StringId,
     pub long_name: Option<LongName>,
     pub structure: Option<Id>,
-    pub lower_limit: Result<Limit, DiagServiceError>,
-    pub upper_limit: Result<Limit, DiagServiceError>,
+    pub lower_limit: Option<Limit>,
+    pub upper_limit: Option<Limit>,
 }
 
 #[derive(Debug)]
@@ -197,8 +199,8 @@ pub struct CompuFunction {
 #[derive(Clone, Debug)]
 #[cfg_attr(feature = "deepsize", derive(DeepSizeOf))]
 pub struct CompuScale {
-    pub lower_limit: Result<Limit, DiagServiceError>,
-    pub upper_limit: Result<Limit, DiagServiceError>,
+    pub lower_limit: Option<Limit>,
+    pub upper_limit: Option<Limit>,
     pub rational_coefficients: Option<CompuRationalCoefficients>,
     pub consts: Option<CompuValues>,
 }
@@ -210,7 +212,7 @@ pub struct CompuValues {
     pub vt_ti: Option<StringId>,
 }
 
-#[derive(Copy, Clone, Debug)]
+#[derive(Copy, Clone, Debug, PartialEq)]
 #[cfg_attr(feature = "deepsize", derive(DeepSizeOf))]
 pub enum IntervalType {
     Open,
@@ -221,9 +223,91 @@ pub enum IntervalType {
 #[derive(Clone, Debug)]
 #[cfg_attr(feature = "deepsize", derive(DeepSizeOf))]
 pub struct Limit {
-    pub value: f64,
+    /// A limit can be a numeric type, a string or a byte field.
+    /// Numeric types are compared numerically
+    /// For strings only the equals operator is supported
+    /// For byte fields comparison works like this:
+    /// * Values are padded with 0x00 until they are the same length
+    /// * Right most byte is least significant (Big endian order)
+    /// * Read large unsigned int from the limit and the comparision target
+    ///   and compare numerically.
+    pub value: String,
     pub interval_type: IntervalType,
 }
+
+impl TryInto<u32> for &Limit {
+    type Error = DiagServiceError;
+    fn try_into(self) -> Result<u32, Self::Error> {
+        let f: f64 = self.try_into()?;
+        Ok(f as u32)
+    }
+}
+
+impl TryInto<i32> for &Limit {
+    type Error = DiagServiceError;
+    fn try_into(self) -> Result<i32, Self::Error> {
+        let f: f64 = self.try_into()?;
+        Ok(f as i32)
+    }
+}
+
+impl TryInto<f32> for &Limit {
+    type Error = DiagServiceError;
+    fn try_into(self) -> Result<f32, Self::Error> {
+        self.value.parse().map_err(|e| {
+            DiagServiceError::ParameterConversionError(format!(
+                "Cannot convert Limit with value {} into f32, {e:?}",
+                self.value
+            ))
+        })
+    }
+}
+
+impl TryInto<f64> for &Limit {
+    type Error = DiagServiceError;
+    fn try_into(self) -> Result<f64, Self::Error> {
+        self.value.parse().map_err(|e| {
+            DiagServiceError::ParameterConversionError(format!(
+                "Cannot convert Limit with value {} into f64, {e:?}",
+                self.value
+            ))
+        })
+    }
+}
+
+impl TryInto<Vec<u8>> for &Limit {
+    type Error = DiagServiceError;
+    fn try_into(self) -> Result<Vec<u8>, Self::Error> {
+        self.value
+            .split_whitespace()
+            .map(|value| {
+                if value.chars().all(|c| c.is_ascii_digit()) {
+                    value
+                        .parse::<u8>()
+                        .map(|v| v.to_be_bytes().to_vec())
+                        .map_err(|_| {
+                            DiagServiceError::ParameterConversionError(
+                                "Invalid value type for ByteField".to_owned(),
+                            )
+                        })
+                } else if value.contains('.') {
+                    let float_value = value.parse::<f64>().map_err(|e| {
+                        DiagServiceError::ParameterConversionError(format!(
+                            "Invalid value for float, error={e}"
+                        ))
+                    })?;
+                    Ok((float_value as u8).to_be_bytes().to_vec())
+                } else if let Some(stripped) = value.to_lowercase().strip_prefix("0x") {
+                    decode_hex(stripped)
+                } else {
+                    decode_hex(value)
+                }
+            })
+            .collect::<Result<Vec<_>, DiagServiceError>>()
+            .map(|vecs| vecs.into_iter().flatten().collect())
+    }
+}
+
 #[derive(Clone, Debug)]
 #[cfg_attr(feature = "deepsize", derive(DeepSizeOf))]
 pub struct CompuRationalCoefficients {
@@ -454,8 +538,8 @@ fn get_dop_variant(
                             .as_ref()
                             .and_then(|s| s.r#ref.as_ref())
                             .map(|s| s.value),
-                        lower_limit: get_limit(case.lower_limit.as_ref()),
-                        upper_limit: get_limit(case.upper_limit.as_ref()),
+                        lower_limit: get_limit(case.lower_limit.as_ref())?,
+                        upper_limit: get_limit(case.upper_limit.as_ref())?,
                     })
                 })
                 .collect::<Result<Vec<_>, DiagServiceError>>()?;
@@ -561,8 +645,8 @@ fn get_compu_method(
                             .compu_scales
                             .iter()
                             .map(|s| {
-                                let lower_limit = get_limit(s.lower_limit.as_ref());
-                                let upper_limit = get_limit(s.upper_limit.as_ref());
+                                let lower_limit = get_limit(s.lower_limit.as_ref())?;
+                                let upper_limit = get_limit(s.upper_limit.as_ref())?;
 
                                 let consts = s.consts.as_ref().map(|c| CompuValues {
                                     v: c.v(),
@@ -589,28 +673,15 @@ fn get_compu_method(
     })
 }
 
-fn get_limit(limit: Option<&dataformat::Limit>) -> Result<Limit, DiagServiceError> {
-    // Even a valid database contains empty limits, we just assume INFINITE for them
-    let default = dataformat::Limit {
-        value: String::new(),
-        interval_type: limit::IntervalType::Infinite as i32,
-    };
-    let l = limit.unwrap_or(&default);
-
-    let val = if l.value.is_empty() {
-        Ok(0.0f64)
-    } else {
-        l.value.parse::<f64>().map_err(|_| {
-            DiagServiceError::InvalidDatabase(format!(
-                "failed to parse lower limit {} as f64",
-                l.value
-            ))
+fn get_limit(limit: Option<&dataformat::Limit>) -> Result<Option<Limit>, DiagServiceError> {
+    limit
+        .map(|l| {
+            l.interval_type.try_into().map(|interval_type| Limit {
+                value: l.value.clone(),
+                interval_type,
+            })
         })
-    }?;
-    Ok(Limit {
-        value: val,
-        interval_type: l.interval_type.try_into()?,
-    })
+        .transpose()
 }
 
 fn get_dop_field(f: &dop::Field) -> Result<DopField, DiagServiceError> {
@@ -732,5 +803,175 @@ impl TryFrom<i32> for Radix {
         dataformat::physical_type::Radix::try_from(value)
             .map_err(|_| DiagServiceError::InvalidDatabase(format!("Invalid Radix value: {value}")))
             .map(Self::from)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_limit_try_into_vec_u8_hex_values() {
+        let limit = Limit {
+            value: "0x01 0x02 0x03".to_string(),
+            interval_type: IntervalType::Closed,
+        };
+
+        let result: Result<Vec<u8>, _> = (&limit).try_into();
+        assert_eq!(result.unwrap(), vec![0x01, 0x02, 0x03]);
+    }
+
+    #[test]
+    fn test_limit_try_into_vec_u8_hex_without_prefix() {
+        let limit = Limit {
+            value: "AB CD EF".to_string(),
+            interval_type: IntervalType::Closed,
+        };
+
+        let result: Result<Vec<u8>, _> = (&limit).try_into();
+        assert_eq!(result.unwrap(), vec![0xAB, 0xCD, 0xEF]);
+    }
+
+    #[test]
+    fn test_limit_try_into_vec_u8_mixed_case_hex() {
+        let limit = Limit {
+            value: "0xAa 0xBb 0xCc".to_string(),
+            interval_type: IntervalType::Closed,
+        };
+
+        let result: Result<Vec<u8>, _> = (&limit).try_into();
+        assert_eq!(result.unwrap(), vec![0xAA, 0xBB, 0xCC]);
+    }
+
+    #[test]
+    fn test_limit_try_into_vec_u8_numeric_values() {
+        let limit = Limit {
+            value: "1 2 255".to_string(),
+            interval_type: IntervalType::Closed,
+        };
+
+        let result: Result<Vec<u8>, _> = (&limit).try_into();
+        assert_eq!(result.unwrap(), vec![1, 2, 255]);
+    }
+
+    #[test]
+    fn test_limit_try_into_vec_u8_float_values() {
+        let limit = Limit {
+            value: "1.5 2.7 255.9".to_string(),
+            interval_type: IntervalType::Closed,
+        };
+
+        let result: Result<Vec<u8>, _> = (&limit).try_into();
+        assert_eq!(result.unwrap(), vec![1, 2, 255]);
+    }
+
+    #[test]
+    fn test_limit_try_into_vec_u8_mixed_values() {
+        let limit = Limit {
+            value: "0x01 2 3.5 0xFF".to_string(),
+            interval_type: IntervalType::Closed,
+        };
+
+        let result: Result<Vec<u8>, _> = (&limit).try_into();
+        assert_eq!(result.unwrap(), vec![1, 2, 3, 255]);
+    }
+
+    #[test]
+    fn test_limit_try_into_vec_u8_single_value() {
+        let limit = Limit {
+            value: "0x42".to_string(),
+            interval_type: IntervalType::Closed,
+        };
+
+        let result: Result<Vec<u8>, _> = (&limit).try_into();
+        assert_eq!(result.unwrap(), vec![0x42]);
+    }
+
+    #[test]
+    fn test_limit_try_into_vec_u8_empty_string() {
+        let limit = Limit {
+            value: "".to_string(),
+            interval_type: IntervalType::Closed,
+        };
+
+        let result: Result<Vec<u8>, _> = (&limit).try_into();
+        assert_eq!(result.unwrap(), Vec::<u8>::new());
+    }
+
+    #[test]
+    fn test_limit_try_into_vec_u8_whitespace_only() {
+        let limit = Limit {
+            value: "   ".to_string(),
+            interval_type: IntervalType::Closed,
+        };
+
+        let result: Result<Vec<u8>, _> = (&limit).try_into();
+        assert_eq!(result.unwrap(), Vec::<u8>::new());
+    }
+
+    #[test]
+    fn test_limit_try_into_vec_u8_numeric_overflow() {
+        let limit = Limit {
+            value: "256".to_string(),
+            interval_type: IntervalType::Closed,
+        };
+
+        let result: Result<Vec<u8>, _> = (&limit).try_into();
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_limit_try_into_vec_u8_invalid_hex() {
+        let limit = Limit {
+            value: "0xGG".to_string(),
+            interval_type: IntervalType::Closed,
+        };
+
+        let result: Result<Vec<u8>, _> = (&limit).try_into();
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_limit_try_into_vec_u8_invalid_float() {
+        let limit = Limit {
+            value: "not.a.number".to_string(),
+            interval_type: IntervalType::Closed,
+        };
+
+        let result: Result<Vec<u8>, _> = (&limit).try_into();
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_limit_try_into_vec_u8_multi_byte_hex() {
+        let limit = Limit {
+            value: "0x1234 0x5678".to_string(),
+            interval_type: IntervalType::Closed,
+        };
+
+        let result: Result<Vec<u8>, _> = (&limit).try_into();
+        assert_eq!(result.unwrap(), vec![0x12, 0x34, 0x56, 0x78]);
+    }
+
+    #[test]
+    fn test_limit_try_into_vec_u8_zero_values() {
+        let limit = Limit {
+            value: "0x00 0 0.0".to_string(),
+            interval_type: IntervalType::Closed,
+        };
+
+        let result: Result<Vec<u8>, _> = (&limit).try_into();
+        assert_eq!(result.unwrap(), vec![0, 0, 0]);
+    }
+
+    #[test]
+    fn test_limit_try_into_vec_u8_extra_whitespace() {
+        let limit = Limit {
+            value: "  0x01   0x02  0x03  ".to_string(),
+            interval_type: IntervalType::Closed,
+        };
+
+        let result: Result<Vec<u8>, _> = (&limit).try_into();
+        assert_eq!(result.unwrap(), vec![1, 2, 3]);
     }
 }

@@ -208,9 +208,18 @@ async fn load_database(
                     continue;
                 };
 
-                let diagservicemanager = match EcuManager::new(
+                let diag_data_base = match cda_database::datatypes::DiagnosticDatabase::new(
                     mddfile.to_str().unwrap().to_owned(),
                     &ecu_payload,
+                ) {
+                    Ok(db) => db,
+                    Err(e) => {
+                        log::error!(target: "main", "Failed to create database from MDD file: {} with error: {e}", mddfile.display());
+                        continue;
+                    }
+                };
+                let diag_service_manager = match EcuManager::new(
+                    diag_data_base,
                     protocol,
                     &com_params,
                     database_naming_convention.clone(),
@@ -226,7 +235,7 @@ async fn load_database(
                 database
                     .write()
                     .await
-                    .insert(ecu_name.clone(), diagservicemanager);
+                    .insert(ecu_name.clone(), diag_service_manager);
                 database_count.fetch_add(1, Ordering::SeqCst);
 
                 let filtered_chunks: Vec<Chunk> = [
