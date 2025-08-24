@@ -10,8 +10,11 @@
  *
  * SPDX-License-Identifier: Apache-2.0
  */
-
-use std::sync::LazyLock;
+use std::{
+    fmt::{Debug, Display},
+    ops::Deref,
+    sync::LazyLock,
+};
 
 use hashbrown::HashMap;
 use parking_lot::RwLock;
@@ -30,7 +33,41 @@ pub struct Strings {
 }
 
 /// Type alias for string IDs, which are simply indices into the `Vec<String>` in `Strings`.
-pub type StringId = usize;
+#[derive(Default, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct StringId(usize);
+
+impl StringId {
+    pub const MAX: Self = Self(usize::MAX);
+}
+impl Display for StringId {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "StringId({})",
+            STRINGS.get(*self).unwrap_or("<unknown>".to_owned())
+        )
+    }
+}
+
+impl Debug for StringId {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        std::fmt::Display::fmt(self, f)
+    }
+}
+
+impl Deref for StringId {
+    type Target = usize;
+
+    fn deref(&self) -> &Self::Target {
+        &self.0
+    }
+}
+
+impl From<usize> for StringId {
+    fn from(value: usize) -> Self {
+        Self(value)
+    }
+}
 
 impl Strings {
     pub fn new() -> Self {
@@ -54,7 +91,7 @@ impl Strings {
     /// [slice::get](https://doc.rust-lang.org/std/primitive.slice.html#method.get)
     /// is used to safely access the string at the index,
     pub fn get(&self, id: StringId) -> Option<String> {
-        self.strings.read().get(id).cloned()
+        self.strings.read().get(*id).cloned()
     }
 
     /// Get a `StringId` for a given `String` value, inserting it if it does not exist.
@@ -65,8 +102,9 @@ impl Strings {
         let mut strings = self.strings.write();
         strings.push(value.to_owned());
         let id = strings.len() - 1;
-        self.lookup.write().insert(value.to_owned(), id);
-        id
+        let str_id: StringId = id.into();
+        self.lookup.write().insert(value.to_owned(), str_id);
+        str_id
     }
 }
 
