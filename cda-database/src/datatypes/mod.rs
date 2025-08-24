@@ -149,6 +149,35 @@ fn option_str_to_string(opt: Option<&String>) -> Option<StringId> {
     opt.map(|s| STRINGS.get_or_insert(s))
 }
 
+impl Default for DiagnosticDatabase {
+    fn default() -> Self {
+        DiagnosticDatabase {
+            ecu_database_path: String::new(),
+            ecu_name: String::new(),
+            services: HashMap::new(),
+            requests: HashMap::new(),
+            responses: HashMap::new(),
+            params: HashMap::new(),
+            com_params: HashMap::new(),
+            diag_coded_types: HashMap::new(),
+            data_operations: HashMap::new(),
+            variants: HashMap::new(),
+            base_variant_id: 0,
+            base_service_lookup: HashMap::new(),
+            protocols: HashMap::new(),
+            sdgs: HashMap::new(),
+            sds: HashMap::new(),
+            single_ecu_jobs: HashMap::new(),
+            base_single_ecu_job_lookup: HashMap::new(),
+            state_charts: HashMap::new(),
+            state_chart_lookup: HashMap::new(),
+            base_state_chart_lookup: HashMap::new(),
+            functional_classes_lookup: Default::default(),
+            functional_classes: HashMap::new(),
+        }
+    }
+}
+
 impl DiagnosticDatabase {
     pub fn new(ecu_database_path: String, ecu_data_blob: &[u8]) -> Result<Self, DiagServiceError> {
         let ecu_data = read_ecudata(ecu_data_blob).map_err(DiagServiceError::InvalidDatabase)?;

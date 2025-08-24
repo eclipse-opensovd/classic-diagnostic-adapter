@@ -345,11 +345,19 @@ impl DiagCodedType {
             return Ok((Vec::new(), 0));
         }
 
+        let end_pos = start_pos + (bit_len.div_ceil(8));
+        if uds_payload.len() < end_pos {
+            return Err(DiagServiceError::BadPayload(format!(
+                "Payload too short, expected at least {end_pos} bytes, got {}",
+                uds_payload.len()
+            )));
+        }
+
         unpack_data(
             bit_len,
             bit_pos,
             mask.as_ref(),
-            &uds_payload[start_pos..start_pos + (bit_len.div_ceil(8))],
+            &uds_payload[start_pos..end_pos],
             byte_order,
         )
     }
@@ -556,7 +564,11 @@ fn inject_bits(
 /// * `bit_pos` - Bit position to start, counting starts at least significant bit.
 ///   Valid range is 0..=7.
 /// * `data` - Source data slice.
-fn extract_bits(bit_len: usize, bit_pos: usize, data: &[u8]) -> Result<Vec<u8>, DiagServiceError> {
+pub fn extract_bits(
+    bit_len: usize,
+    bit_pos: usize,
+    data: &[u8],
+) -> Result<Vec<u8>, DiagServiceError> {
     if bit_pos > 7 {
         return Err(DiagServiceError::BadPayload(format!(
             "BitPosition range is 0..=7, got {bit_pos}",

@@ -14,8 +14,8 @@
 use std::{sync::Arc, time::Duration};
 
 use cda_database::datatypes::{
-    self, DataOperation, DataType, DiagCodedTypeVariant, DiagnosticDatabase, DiagnosticService,
-    LogicalAddressType, MuxDop, ParameterValue, StateChart, resolve_comparam,
+    self, DataType, DiagCodedTypeVariant, DiagnosticDatabase, DiagnosticService,
+    LogicalAddressType, StateChart, resolve_comparam,
 };
 use cda_interfaces::{
     DiagComm, DiagCommAction, DiagCommType, DiagServiceError, EcuAddressProvider, EcuState,
@@ -34,13 +34,13 @@ use parking_lot::Mutex;
 use tokio::task::JoinHandle;
 
 use crate::diag_kernel::{
-    Variant,
+    DiagDataValue, Variant,
     diagservices::{
         DiagDataTypeContainer, DiagDataTypeContainerRaw, DiagServiceResponseStruct,
         MappedDiagServiceResponsePayload,
     },
     into_db_protocol,
-    operations::{self, json_value_to_uds_data},
+    operations::{self, json_value_to_uds_data, uds_data_to_serializable},
     payload::Payload,
     variant_detection,
 };
@@ -355,7 +355,7 @@ impl cda_interfaces::EcuManager for EcuManager {
                         None => continue,
                     };
                     let coded_const = match &param.value {
-                        ParameterValue::CodedConst(c) => c,
+                        datatypes::ParameterValue::CodedConst(c) => c,
                         _ => break,
                     };
                     let coded_const_type = match self
@@ -1253,13 +1253,11 @@ impl EcuManager {
     /// Will return `Err` if the ECU database cannot be loaded correctly due to different reasons,
     /// like the format being incompatible or required information missing from the database.
     pub fn new(
-        ecu_database_path: String,
-        ecu_data_blob: &[u8],
+        database: DiagnosticDatabase,
         protocol: Protocol,
         com_params: &ComParams,
         database_naming_convention: DatabaseNamingConvention,
     ) -> Result<Self, DiagServiceError> {
-        let database = DiagnosticDatabase::new(ecu_database_path, ecu_data_blob)?;
         let variant_detection = variant_detection::prepare_variant_detection(&database)?;
 
         let data_protocol: datatypes::Protocol = into_db_protocol(protocol);
@@ -1634,7 +1632,7 @@ impl EcuManager {
             }
             datatypes::ParameterValue::Value(ref v) => {
                 if let Some(dop) = self.ecu_data.data_operations.get(&v.dop) {
-                    self.map_dop(mapped_service, dop, param, uds_payload, data)?;
+                    self.map_dop_from_uds(mapped_service, dop, param, uds_payload, data)?;
                 } else {
                     log::error!(target: &self.ecu_data.ecu_name,
                         "{param_name} DoP lookup failed for id {}",
@@ -1648,12 +1646,156 @@ impl EcuManager {
         }
         Ok(())
     }
-    fn map_nested_struct_to_uds(
+
+    fn map_mux_to_uds(
+        &self,
+        mux_dop: &datatypes::MuxDop,
+        value: &serde_json::Value,
+        uds_payload: &mut Vec<u8>,
+    ) -> Result<(), DiagServiceError> {
+        let Some(value) = value.as_object() else {
+            return Err(DiagServiceError::InvalidRequest(format!(
+                "Expected value to be object type, but it was: {value:#?}"
+            )));
+        };
+
+        let switch_key = &mux_dop
+            .switch_key
+            .as_ref()
+            .ok_or(DiagServiceError::InvalidDatabase(
+                "Mux switch key is None".to_owned(),
+            ))?;
+        let switch_key_dop = switch_key
+            .dop
+            .ok_or(DiagServiceError::InvalidDatabase(
+                "Mux switch key DoP is None".to_owned(),
+            ))
+            .and_then(|dop_key| {
+                self.ecu_data.data_operations.get(&dop_key).ok_or(
+                    DiagServiceError::InvalidDatabase("Mux switch key DoP not found".to_owned()),
+                )
+            })?;
+
+        match switch_key_dop.variant {
+            datatypes::DataOperationVariant::Normal(ref normal_dop) => {
+                let switch_key_diag_type = self
+                    .ecu_data
+                    .diag_coded_types
+                    .get(&normal_dop.diag_type)
+                    .ok_or(DiagServiceError::InvalidDatabase(
+                        "DiagCodedType lookup for Mux switch key failed".to_owned(),
+                    ))?;
+
+                let selector = value.get("Selector");
+                let mut mux_payload = Vec::new();
+
+                let switch_key_value = if let Some(selector) = selector {
+                    json_value_to_uds_data(
+                        switch_key_diag_type.base_datatype(),
+                        Some(&normal_dop.compu_method),
+                        selector,
+                    )
+                } else {
+                    let default = match mux_dop.default_case.as_ref() {
+                        Some(default_case) => default_case,
+                        None => {
+                            return Err(DiagServiceError::InvalidRequest(
+                                "No Selector field in json and no default case in Mux".to_owned(),
+                            ));
+                        }
+                    };
+
+                    let limit = if let Some(upper) = default.upper_limit.as_ref() {
+                        upper
+                    } else if let Some(lower) = default.lower_limit.as_ref() {
+                        lower
+                    } else {
+                        return Err(DiagServiceError::InvalidDatabase(
+                            "Default case has no upper or lower limit".to_owned(),
+                        ));
+                    };
+
+                    Ok(match switch_key_diag_type.base_datatype() {
+                        DataType::Int32 => <&datatypes::Limit as TryInto<i32>>::try_into(limit)?
+                            .to_be_bytes()
+                            .to_vec(),
+                        DataType::UInt32 => <&datatypes::Limit as TryInto<u32>>::try_into(limit)?
+                            .to_be_bytes()
+                            .to_vec(),
+                        DataType::Float32 => <&datatypes::Limit as TryInto<f32>>::try_into(limit)?
+                            .to_be_bytes()
+                            .to_vec(),
+                        DataType::Float64 => <&datatypes::Limit as TryInto<f64>>::try_into(limit)?
+                            .to_be_bytes()
+                            .to_vec(),
+                        DataType::AsciiString | DataType::Utf8String | DataType::Unicode2String => {
+                            limit.value.as_bytes().to_vec()
+                        }
+                        DataType::ByteField => {
+                            <&datatypes::Limit as TryInto<Vec<u8>>>::try_into(limit)?
+                        }
+                    })
+                }?;
+
+                switch_key_diag_type.encode(
+                    switch_key_value.clone(),
+                    &mut mux_payload,
+                    switch_key.byte_position as usize,
+                    switch_key.bit_position as usize,
+                )?;
+
+                let selector = uds_data_to_serializable(
+                    switch_key_diag_type.base_datatype(),
+                    None,
+                    &mux_payload,
+                )?;
+
+                let case = mux_case_from_selector_value(mux_dop, &selector)
+                    .or(mux_dop.default_case.as_ref())
+                    .ok_or_else(|| {
+                        DiagServiceError::InvalidRequest(
+                            "Cannot find selector value or default case".to_owned(),
+                        )
+                    })?;
+
+                if let Some(structure) = case
+                    .structure
+                    .map(|id| self.get_basic_structure(id))
+                    .transpose()?
+                    .flatten()
+                {
+                    let case_name = get_string!(case.short_name).map_err(|_| {
+                        DiagServiceError::InvalidDatabase(
+                            "Mux case short name not found".to_owned(),
+                        )
+                    })?;
+
+                    let struct_data =
+                        value
+                            .get(&case_name)
+                            .ok_or(DiagServiceError::BadPayload(format!(
+                                "Mux case {case_name} value not found in json",
+                            )))?;
+                    let mut struct_payload = Vec::new();
+                    self.map_struct_to_uds(structure, struct_data, &mut struct_payload)?;
+                    mux_payload.extend_from_slice(&struct_payload);
+                }
+
+                uds_payload.extend_from_slice(&mux_payload);
+                Ok(())
+            }
+            _ => Err(DiagServiceError::InvalidDatabase(
+                "Mux switch key DoP is not a NormalDoP".to_owned(),
+            )),
+        }
+    }
+
+    fn map_struct_to_uds(
         &self,
         structure: &datatypes::StructureDop,
         value: &serde_json::Value,
-    ) -> Result<Vec<u8>, DiagServiceError> {
-        let mut uds_data: Vec<u8> = Vec::new();
+        payload: &mut Vec<u8>,
+    ) -> Result<(), DiagServiceError> {
         let Some(value) = value.as_object() else {
             return Err(DiagServiceError::InvalidRequest(format!(
                 "Expected value to be object type, but it was: {value:#?}"
@@ -1669,7 +1811,7 @@ impl EcuManager {
                     ))?;
             let short_name = STRINGS.get(param.short_name).ok_or_else(|| {
                 DiagServiceError::InvalidDatabase(format!(
-                    "Unable to find short name for paramId: {}",
+                    "Unable to find short name for param: {}",
                     param.short_name
                 ))
             })?;
@@ -1680,10 +1822,9 @@ impl EcuManager {
                     "Parameter '{short_name}' not part of the request body"
                 )))?;
 
-            self.map_param_to_uds(param, param_value, &mut uds_data)?;
+            self.map_param_to_uds(param, param_value, payload)?;
         }
-
-        Ok(uds_data)
+        Ok(())
     }
 
     fn map_param_to_uds(
@@ -1692,11 +1833,14 @@ impl EcuManager {
         value: &serde_json::Value,
         payload: &mut Vec<u8>,
     ) -> Result<(), DiagServiceError> {
+        //  ISO_22901-1:2008-11 7.3.5.4
+        //  MATCHING-REQUEST-PARAM, DYNAMIC and NRC-CONST are only allowed in responses
         match &param.value {
             datatypes::ParameterValue::CodedConst(_coded_const) => Ok(()),
             datatypes::ParameterValue::MatchingRequestParam(_matching_request_param) => {
-                // todo can this even be mapped to UDS request?
-                Ok(())
+                Err(DiagServiceError::InvalidRequest(
+                    "MatchingRequestParam cannot be used in a request".to_owned(),
+                ))
             }
             datatypes::ParameterValue::Value(value_data) => {
                 if let Some(dop) = self.ecu_data.data_operations.get(&value_data.dop) {
@@ -1740,16 +1884,21 @@ impl EcuManager {
                                     "EndOfPdu expected different amount of items".to_owned(),
                                 ));
                             }
-                            let structure =
-                                self.get_basic_structure(end_of_pdu_dop.field.basic_structure)?;
-
+                            let structure = self
+                                .get_basic_structure(end_of_pdu_dop.field.basic_structure)?
+                                .ok_or_else(|| {
+                                    DiagServiceError::InvalidDatabase(
+                                        "EndOfPdu failed to find struct".to_owned(),
+                                    )
+                                })?;
                             for v in value {
-                                let mut chunk = self.map_nested_struct_to_uds(structure, v)?;
-                                payload.append(&mut chunk);
+                                self.map_struct_to_uds(structure, v, payload)?;
                             }
                             Ok(())
                         }
-                        datatypes::DataOperationVariant::Structure(_structure_dop) => todo!(),
+                        datatypes::DataOperationVariant::Structure(structure_dop) => {
+                            self.map_struct_to_uds(structure_dop, value, payload)
+                        }
                         datatypes::DataOperationVariant::EnvDataDesc(_env_data_desc_dop) => {
                             todo!()
                         }
@@ -1758,8 +1907,8 @@ impl EcuManager {
                         datatypes::DataOperationVariant::StaticField(_static_field_dop) => {
                             todo!()
                         }
-                        datatypes::DataOperationVariant::Mux(_static_field_dop) => {
-                            todo!()
+                        datatypes::DataOperationVariant::Mux(mux_dop) => {
+                            self.map_mux_to_uds(mux_dop, value, payload)
                         }
                     }
                 } else {
@@ -1785,14 +1934,13 @@ impl EcuManager {
         }
     }
 
-    fn map_nested_struct(
+    fn map_struct_from_uds(
         &self,
         structure: &datatypes::StructureDop,
         mapped_service: &DiagnosticService,
         uds_payload: &mut Payload,
-        nested_structs: &mut Vec<HashMap<String, DiagDataTypeContainer>>,
-    ) -> Result<(), DiagServiceError> {
-        let mut nested_data = HashMap::new();
+    ) -> Result<HashMap<String, DiagDataTypeContainer>, DiagServiceError> {
+        let mut data = HashMap::new();
         for param in structure.params.iter() {
             let param =
                 self.ecu_data
@@ -1807,22 +1955,26 @@ impl EcuManager {
                     param.short_name
                 ))
             })?;
-            self.map_param_from_uds(
-                mapped_service,
-                param,
-                &short_name,
-                uds_payload,
-                &mut nested_data,
-            )?;
+            self.map_param_from_uds(mapped_service, param, &short_name, uds_payload, &mut data)?;
         }
-        nested_structs.push(nested_data);
+        Ok(data)
+    }
+
+    fn map_nested_struct_from_uds(
+        &self,
+        structure: &datatypes::StructureDop,
+        mapped_service: &DiagnosticService,
+        uds_payload: &mut Payload,
+        nested_structs: &mut Vec<HashMap<String, DiagDataTypeContainer>>,
+    ) -> Result<(), DiagServiceError> {
+        nested_structs.push(self.map_struct_from_uds(structure, mapped_service, uds_payload)?);
         Ok(())
     }
 
-    fn map_dop(
+    fn map_dop_from_uds(
         &self,
         mapped_service: &DiagnosticService,
-        dop: &DataOperation,
+        dop: &datatypes::DataOperation,
         param: &datatypes::Parameter,
         uds_payload: &mut Payload,
         data: &mut MappedDiagServiceResponsePayload,
@@ -1832,6 +1984,7 @@ impl EcuManager {
                 "Unable to find short name for param in Strings".to_string(),
             )
         })?;
+
         match dop.variant {
             datatypes::DataOperationVariant::Normal(ref normal_dop) => {
                 let diag_coded_type = self
@@ -1854,7 +2007,15 @@ impl EcuManager {
                 );
             }
             datatypes::DataOperationVariant::EndOfPdu(ref v) => {
-                let struct_ = self.get_basic_structure(v.field.basic_structure)?;
+                // When a response is read the values of `max-number-of-items`
+                // is deliberately ignored, according to ISO 22901:2008 7.3.6.10.6
+                let struct_ = self
+                    .get_basic_structure(v.field.basic_structure)?
+                    .ok_or_else(|| {
+                        DiagServiceError::InvalidDatabase(
+                            "EndOfPdu failed to find struct".to_owned(),
+                        )
+                    })?;
 
                 uds_payload.push_slice(param.byte_pos as usize, uds_payload.len())?;
                 if struct_.byte_size > 0 {
@@ -1869,7 +2030,7 @@ impl EcuManager {
 
                 let mut nested_structs = Vec::new();
                 loop {
-                    self.map_nested_struct(
+                    self.map_nested_struct_from_uds(
                         struct_,
                         mapped_service,
                         uds_payload,
@@ -1922,8 +2083,14 @@ impl EcuManager {
                         uds_payload.len(),
                     )));
                 }
-                let basic_structure =
-                    self.get_basic_structure(static_field_dop.field.basic_structure)?;
+                let basic_structure = self
+                    .get_basic_structure(static_field_dop.field.basic_structure)?
+                    .ok_or_else(|| {
+                        DiagServiceError::InvalidDatabase(
+                            "StaticField failed to find struct".to_owned(),
+                        )
+                    })?;
+
                 let mut nested_structs = Vec::new();
 
                 for i in 0..static_field_dop.fixed_number_of_items {
@@ -1931,7 +2098,7 @@ impl EcuManager {
                     let end = start + static_field_dop.item_byte_size as usize;
                     uds_payload.push_slice(start, end)?;
 
-                    self.map_nested_struct(
+                    self.map_nested_struct_from_uds(
                         basic_structure,
                         mapped_service,
                         uds_payload,
@@ -1947,21 +2114,24 @@ impl EcuManager {
                 );
             }
             datatypes::DataOperationVariant::Mux(ref mux_dop) => {
-                self.map_mux(mapped_service, uds_payload, data, short_name, mux_dop)?;
+                uds_payload.push_slice(param.byte_pos as usize, uds_payload.len())?;
+                self.map_mux_from_uds(mapped_service, uds_payload, data, short_name, mux_dop)?;
+                uds_payload.pop_slice()?;
             }
         }
 
         Ok(())
     }
 
-    fn map_mux(
+    fn map_mux_from_uds(
         &self,
         mapped_service: &DiagnosticService,
         uds_payload: &mut Payload,
         data: &mut MappedDiagServiceResponsePayload,
         short_name: String,
-        mux_dop: &MuxDop,
+        mux_dop: &datatypes::MuxDop,
     ) -> Result<(), DiagServiceError> {
+        // Byte pos is the relative position of the data in the uds_payload
         let byte_pos = mux_dop.byte_position as usize;
         if uds_payload.len() < byte_pos + 1 {
             return Err(DiagServiceError::BadPayload(format!(
@@ -1970,83 +2140,114 @@ impl EcuManager {
             )));
         }
 
-        uds_payload.set_pos(byte_pos)?;
-        let payload = &uds_payload.data()[0];
-        let payload_value = f64::from(*payload);
-        let case = mux_dop
-            .cases
-            .iter()
-            .find(
-                |case| match (case.lower_limit.as_ref(), case.upper_limit.as_ref()) {
-                    (Ok(lower_limit), Ok(upper_limit)) => {
-                        lower_limit.value <= payload_value && upper_limit.value >= payload_value
-                    }
-                    _ => false,
-                },
-            )
-            .ok_or_else(|| {
-                DiagServiceError::BadPayload(format!(
-                    "Mux case not found for value: {payload_value}"
-                ))
-            })?;
+        let switch_key = &mux_dop
+            .switch_key
+            .as_ref()
+            .ok_or(DiagServiceError::InvalidDatabase(
+                "Mux switch key not defined".to_owned(),
+            ))?;
 
-        let structure = self.get_basic_structure(case.structure.unwrap())?;
-        let case_name = get_string!(case.short_name).map_err(|_| {
-            DiagServiceError::InvalidDatabase("Mux case short name not found".to_owned())
-        })?;
+        // Byte position of the switch key is relative to the mux byte position
         let mut mux_data = HashMap::new();
-        mux_data.insert(
-            "Selector".to_owned(),
-            DiagDataTypeContainer::RawContainer(DiagDataTypeContainerRaw {
-                data: vec![*payload],
-                data_type: DataType::UInt32,
-                bit_len: u32::BITS as usize,
-                compu_method: None,
-            }),
-        );
-
-        let mut case_data = HashMap::new();
-        for param in structure.params.iter() {
-            let param =
-                self.ecu_data
-                    .params
-                    .get(param)
+        let dop = switch_key
+            .dop
+            .ok_or(DiagServiceError::InvalidDatabase(
+                "Mux switch key DoP is None".to_owned(),
+            ))
+            .and_then(|dop_key| {
+                self.ecu_data.data_operations.get(&dop_key).ok_or(
+                    DiagServiceError::InvalidDatabase("Mux switch key DoP not found".to_owned()),
+                )
+            })?;
+        match dop.variant {
+            datatypes::DataOperationVariant::Normal(ref normal_dop) => {
+                let switch_key_diag_type = self
+                    .ecu_data
+                    .diag_coded_types
+                    .get(&normal_dop.diag_type)
                     .ok_or(DiagServiceError::InvalidDatabase(
-                        "Structure Param not found".to_owned(),
+                        "DiagCodedType lookup for Mux switch key failed".to_owned(),
                     ))?;
-            uds_payload.push_slice(byte_pos + 1, uds_payload.len())?;
-            self.map_param_from_uds(
-                mapped_service,
-                param,
-                &short_name,
-                uds_payload,
-                &mut case_data,
-            )?;
-            uds_payload.pop_slice()?;
+
+                let (switch_key_data, bit_len) = switch_key_diag_type.decode(
+                    uds_payload
+                        .data()
+                        .get(switch_key.byte_position as usize..)
+                        .ok_or(DiagServiceError::BadPayload(
+                            "Not enough bytes to get switch key".to_owned(),
+                        ))?,
+                    switch_key.byte_position as usize,
+                    switch_key.bit_position as usize,
+                )?;
+
+                let switch_key_data_len = switch_key_data.len();
+                let switch_key_value = operations::uds_data_to_serializable(
+                    switch_key_diag_type.base_datatype(),
+                    None,
+                    &switch_key_data,
+                )?;
+
+                mux_data.insert(
+                    "Selector".to_owned(),
+                    DiagDataTypeContainer::RawContainer(DiagDataTypeContainerRaw {
+                        data: switch_key_data,
+                        data_type: switch_key_diag_type.base_datatype(),
+                        bit_len,
+                        compu_method: None,
+                    }),
+                );
+
+                let case = mux_case_from_selector_value(mux_dop, &switch_key_value)
+                    .or(mux_dop.default_case.as_ref())
+                    .ok_or(DiagServiceError::BadPayload(
+                        "Switch key value not found in mux cases and no default case defined"
+                            .to_owned(),
+                    ))?;
+
+                let case_name = get_string!(case.short_name).map_err(|_| {
+                    DiagServiceError::InvalidDatabase("Mux case short name not found".to_owned())
+                })?;
+
+                // Omitting the structure from a (default) case is valid and can be used
+                // to have a valid switch key that is not connected with further data.
+                if let Some(structure_id) = case.structure {
+                    let structure = self.get_basic_structure(structure_id)?;
+                    if let Some(structure) = structure {
+                        uds_payload.push_slice(
+                            byte_pos + switch_key_data_len + switch_key.byte_position as usize,
+                            uds_payload.len(),
+                        )?;
+                        let case_data =
+                            self.map_struct_from_uds(structure, mapped_service, uds_payload)?;
+                        uds_payload.pop_slice()?;
+                        mux_data.insert(case_name, DiagDataTypeContainer::Struct(case_data));
+                    }
+                }
+                data.insert(short_name, DiagDataTypeContainer::Struct(mux_data));
+                Ok(())
+            }
+            _ => Err(DiagServiceError::InvalidDatabase(
+                "Mux switch key DoP is not a NormalDoP".to_owned(),
+            )),
         }
-        mux_data.insert(case_name, DiagDataTypeContainer::Struct(case_data));
-        data.insert(short_name, DiagDataTypeContainer::Struct(mux_data));
-        Ok(())
     }
 
     fn get_basic_structure(
         &self,
-        basic_strucure_id: cda_interfaces::Id,
-    ) -> Result<&datatypes::StructureDop, DiagServiceError> {
-        let basic_structure = self
-            .ecu_data
+        basic_structure_id: cda_interfaces::Id,
+    ) -> Result<Option<&datatypes::StructureDop>, DiagServiceError> {
+        self.ecu_data
             .data_operations
-            .get(&basic_strucure_id)
-            .ok_or(DiagServiceError::InvalidDatabase(
-                "BasicStructure Dop not found".to_owned(),
-            ))?;
-        let datatypes::DataOperationVariant::Structure(ref struct_) = basic_structure.variant
-        else {
-            return Err(DiagServiceError::InvalidDatabase(
-                "BasicStructure Dop not a structure".to_owned(),
-            ));
-        };
-        Ok(struct_)
+            .get(&basic_structure_id)
+            .map(|dop| {
+                let datatypes::DataOperationVariant::Structure(ref struct_) = dop.variant else {
+                    return Err(DiagServiceError::InvalidDatabase(
+                        "BasicStructure Dop not a structure".to_owned(),
+                    ));
+                };
+                Ok(struct_)
+            })
+            .transpose()
     }
 
     fn state_chart(&self, semantic: &str) -> Result<&StateChart, DiagServiceError> {
@@ -2207,5 +2408,927 @@ impl EcuManager {
             }
         };
         Some((bitlength, coded_const_value))
+    }
+}
+
+fn mux_case_from_selector_value<'a>(
+    mux_dop: &'a datatypes::MuxDop,
+    switch_key_value: &DiagDataValue,
+) -> Option<&'a datatypes::Case> {
+    mux_dop.cases.iter().find(|case| {
+        let (lower_limit, upper_limit) = (case.lower_limit.as_ref(), case.upper_limit.as_ref());
+        switch_key_value.within_limits(upper_limit, lower_limit)
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use std::vec;
+
+    use cda_database::datatypes::{
+        CodedConst, CompuCategory, CompuFunction, CompuMethod, DOPType, DataOperation,
+        DataOperationVariant, DataType, DiagCodedType, DiagCodedTypeVariant, IntervalType, Limit,
+        NormalDop, Parameter, ParameterValue, Request, Response, ResponseType, StandardLengthType,
+        SwitchKey,
+    };
+    use cda_interfaces::{EcuManager, STRINGS, StringId};
+    use serde_json::json;
+
+    use super::*;
+
+    fn create_service(
+        db: &mut DiagnosticDatabase,
+        sid: u8,
+        params_request: Vec<cda_interfaces::Id>,
+        mut params_pos_response: Vec<cda_interfaces::Id>,
+        mut params_neg_response: Vec<cda_interfaces::Id>,
+    ) -> DiagComm {
+        let base_id = db.services.keys().max().unwrap_or(&0) + 1;
+        let service_key = base_id;
+
+        let short_name = "test_service";
+        let diag_type_sid = create_datatype(
+            db,
+            DiagCodedTypeVariant::StandardLength(StandardLengthType {
+                bit_length: 8,
+                bitmask: None,
+                condensed: false,
+            }),
+            DataType::UInt32,
+        );
+
+        params_pos_response.push(create_param(
+            db,
+            &format!("{short_name}_pos_sid"),
+            ParameterValue::CodedConst(CodedConst {
+                value: STRINGS.get_or_insert(&sid.to_string()),
+                diag_coded_type: diag_type_sid,
+            }),
+            0,
+            0,
+        ));
+
+        params_neg_response.push(create_param(
+            db,
+            &format!("{short_name}_neg_response"),
+            ParameterValue::CodedConst(CodedConst {
+                value: STRINGS.get_or_insert(&0x7f_u8.to_string()),
+                diag_coded_type: diag_type_sid,
+            }),
+            0,
+            0,
+        ));
+        params_neg_response.push(create_param(
+            db,
+            &format!("{short_name}_neg_sid"),
+            ParameterValue::CodedConst(CodedConst {
+                value: STRINGS.get_or_insert(&sid.to_string()),
+                diag_coded_type: diag_type_sid,
+            }),
+            1,
+            0,
+        ));
+
+        let pos_res_id = create_response(db, ResponseType::Positive, params_pos_response.clone());
+        let neg_res_id = create_response(db, ResponseType::Negative, params_neg_response.clone());
+
+        let request = create_request(db, params_request);
+
+        db.services.insert(
+            service_key,
+            datatypes::DiagnosticService {
+                service_id: service_ids::WRITE_DATA_BY_IDENTIFIER,
+                request_id: request,
+                pos_responses: vec![pos_res_id],
+                neg_responses: vec![neg_res_id],
+                com_param_refs: vec![],
+                short_name: STRINGS.get_or_insert(short_name),
+                semantic: StringId::default(),
+                long_name: None,
+                sdgs: vec![],
+                precondition_states: vec![],
+                transitions: Default::default(),
+                funct_class: 0,
+            },
+        );
+        db.base_service_lookup
+            .insert(short_name.to_lowercase(), service_key);
+
+        DiagComm {
+            name: short_name.to_owned(),
+            action: DiagCommAction::Write,
+            type_: DiagCommType::Configurations,
+            lookup_name: Some(short_name.to_owned()),
+        }
+    }
+
+    fn create_datatype(
+        db: &mut DiagnosticDatabase,
+        variant: DiagCodedTypeVariant,
+        data_type: DataType,
+    ) -> cda_interfaces::Id {
+        let data_type_id = db.diag_coded_types.keys().max().unwrap_or(&0) + 1;
+        db.diag_coded_types.insert(
+            data_type_id,
+            DiagCodedType::new_high_low_byte_order(data_type, variant).unwrap(),
+        );
+        data_type_id
+    }
+
+    fn create_dop(
+        db: &mut DiagnosticDatabase,
+        type_: DOPType,
+        variant: DataOperationVariant,
+    ) -> cda_interfaces::Id {
+        let dop_id = db.data_operations.keys().max().unwrap_or(&0) + 1;
+        db.data_operations.insert(
+            dop_id,
+            DataOperation {
+                type_,
+                short_name: Default::default(),
+                variant,
+            },
+        );
+        dop_id
+    }
+
+    fn create_request(
+        db: &mut DiagnosticDatabase,
+        param_ids: Vec<cda_interfaces::Id>,
+    ) -> cda_interfaces::Id {
+        let request_id = db.requests.keys().max().unwrap_or(&0) + 1;
+        db.requests
+            .insert(request_id, Request { params: param_ids });
+        request_id
+    }
+
+    fn create_response(
+        db: &mut DiagnosticDatabase,
+        response_type: ResponseType,
+        param_ids: Vec<cda_interfaces::Id>,
+    ) -> cda_interfaces::Id {
+        let response_id = db.responses.keys().max().unwrap_or(&0) + 1;
+        db.responses.insert(
+            response_id,
+            Response {
+                response_type,
+                params: param_ids,
+            },
+        );
+        response_id
+    }
+
+    fn create_param(
+        db: &mut DiagnosticDatabase,
+        name: &str,
+        value: ParameterValue,
+        byte_pos: u32,
+        bit_pos: u32,
+    ) -> cda_interfaces::Id {
+        let param_id = db.params.keys().max().unwrap_or(&0) + 1;
+        let param = Parameter {
+            short_name: STRINGS.get_or_insert(name),
+            value,
+            byte_pos,
+            bit_pos,
+            semantic: Some(STRINGS.get_or_insert(semantics::DATA)),
+        };
+        db.params.insert(param_id, param);
+        param_id
+    }
+
+    fn create_value_param(
+        db: &mut DiagnosticDatabase,
+        name: &str,
+        dop: cda_interfaces::Id,
+        byte_pos: u32,
+        bit_pos: u32,
+    ) -> cda_interfaces::Id {
+        create_param(
+            db,
+            name,
+            ParameterValue::Value(datatypes::ValueData {
+                default_value: None,
+                dop,
+            }),
+            byte_pos,
+            bit_pos,
+        )
+    }
+
+    fn create_mux_dop(
+        db: &mut DiagnosticDatabase,
+        mux_byte_pos: u32,
+        default_case: Option<datatypes::Case>,
+        switch_key: Option<SwitchKey>,
+        cases: Vec<datatypes::Case>,
+    ) -> cda_interfaces::Id {
+        assert!(
+            default_case.is_some() || switch_key.is_some(),
+            "At least one of default_case or switch_key must be provided for MuxDop"
+        );
+
+        create_dop(
+            db,
+            DOPType::Regular,
+            DataOperationVariant::Mux(datatypes::MuxDop {
+                byte_position: mux_byte_pos,
+                switch_key,
+                default_case,
+                cases,
+                is_visible: false,
+            }),
+        )
+    }
+
+    fn create_normal_dop(
+        db: &mut DiagnosticDatabase,
+        bitmask: Option<Vec<u8>>,
+        bit_length: u32,
+        data_type: DataType,
+    ) -> cda_interfaces::Id {
+        let diag_type_id = create_datatype(
+            db,
+            DiagCodedTypeVariant::StandardLength(StandardLengthType {
+                bit_length,
+                bitmask,
+                condensed: false,
+            }),
+            data_type,
+        );
+
+        create_dop(
+            db,
+            DOPType::Regular,
+            DataOperationVariant::Normal(NormalDop {
+                diag_type: diag_type_id,
+                compu_method: CompuMethod {
+                    category: CompuCategory::Identical,
+                    internal_to_phys: CompuFunction { scales: vec![] },
+                },
+                unit: None,
+            }),
+        )
+    }
+
+    fn create_switch_key(
+        db: &mut DiagnosticDatabase,
+        byte_position: u32,
+        bit_position: u32,
+        bit_length: u32,
+        data_type: DataType,
+    ) -> SwitchKey {
+        let dop = create_normal_dop(db, None, bit_length, data_type);
+        SwitchKey {
+            byte_position,
+            bit_position,
+            dop: Some(dop),
+        }
+    }
+
+    fn create_structure(
+        db: &mut DiagnosticDatabase,
+        name: &str,
+        byte_size: u32,
+        params: Vec<cda_interfaces::Id>,
+    ) -> cda_interfaces::Id {
+        let structure_id = db.data_operations.keys().max().unwrap_or(&0) + 1;
+        db.data_operations.insert(
+            structure_id,
+            DataOperation {
+                type_: DOPType::Structure,
+                short_name: name.to_string(),
+                variant: DataOperationVariant::Structure(datatypes::StructureDop {
+                    params,
+                    byte_size,
+                    visible: false,
+                }),
+            },
+        );
+        structure_id
+    }
+
+    fn create_case<T: Default + ToString>(
+        short_name: &str,
+        lower_limit: Option<T>,
+        upper_limit: Option<T>,
+        structure: Option<cda_interfaces::Id>,
+    ) -> datatypes::Case {
+        datatypes::Case {
+            short_name: STRINGS.get_or_insert(short_name),
+            lower_limit: Some(Limit {
+                value: lower_limit.unwrap_or_default().to_string(),
+                interval_type: IntervalType::Infinite,
+            }),
+            upper_limit: Some(Limit {
+                value: upper_limit.unwrap_or_default().to_string(),
+                interval_type: IntervalType::Infinite,
+            }),
+            structure,
+            long_name: None,
+        }
+    }
+
+    fn create_ecu_manager_with_struct_service() -> (super::EcuManager, DiagComm, u8) {
+        let mut db = DiagnosticDatabase::default();
+
+        // Create DOPs for structure parameters
+        let param1_dop = create_normal_dop(&mut db, None, 16, DataType::UInt32);
+        let param2_dop = create_normal_dop(&mut db, None, 32, DataType::Float32);
+        let param3_dop = create_normal_dop(&mut db, None, 32, DataType::AsciiString);
+
+        // Create parameters for the structure
+        let struct_param1 = create_value_param(&mut db, "param1", param1_dop, 0, 0);
+        let struct_param2 = create_value_param(&mut db, "param2", param2_dop, 2, 0);
+        let struct_param3 = create_value_param(&mut db, "param3", param3_dop, 6, 0);
+
+        // Create the structure
+        let structure_id = create_structure(
+            &mut db,
+            "test_structure",
+            10,
+            vec![struct_param1, struct_param2, struct_param3],
+        );
+
+        // Create main parameter that uses the structure
+        let main_param = create_param(
+            &mut db,
+            "main_param",
+            ParameterValue::Value(datatypes::ValueData {
+                default_value: None,
+                dop: structure_id,
+            }),
+            0,
+            0,
+        );
+
+        let sid = 0x2E_u8;
+        let service = create_service(&mut db, sid, vec![main_param], vec![], vec![]);
+
+        let ecu_manager = super::EcuManager::new(
+            db,
+            Protocol::DoIp,
+            &ComParams::default(),
+            DatabaseNamingConvention::default(),
+        )
+        .unwrap();
+
+        (ecu_manager, service, sid)
+    }
+
+    fn create_ecu_manager_with_mux_service_and_default_case() -> (super::EcuManager, DiagComm, u8) {
+        let mut db = DiagnosticDatabase::default();
+        let default_structure_param_1_dop = create_normal_dop(&mut db, None, 8, DataType::UInt32);
+        let default_structure_param_1 = create_value_param(
+            &mut db,
+            "default_structure_param_1",
+            default_structure_param_1_dop,
+            0,
+            0,
+        );
+        let default_structure = create_structure(
+            &mut db,
+            "default_structure",
+            0,
+            vec![default_structure_param_1],
+        );
+        let default_case = create_case(
+            "default_case",
+            Some(0x5814),
+            Some(0x5814),
+            Some(default_structure),
+        );
+
+        let (ecu_manager, service, sid) =
+            create_ecu_manager_with_mux_service(Some(db), None, Some(default_case));
+        (ecu_manager, service, sid)
+    }
+
+    fn create_ecu_manager_with_mux_service(
+        db: Option<DiagnosticDatabase>,
+        switch_key: Option<SwitchKey>,
+        default_case: Option<datatypes::Case>,
+    ) -> (super::EcuManager, DiagComm, u8) {
+        let mut db = db.unwrap_or_default();
+
+        // Create DOPs
+        // Testing here without masks only.
+        // Data extraction is done via DiagCodedType where masks and odd bit positions
+        // are tested in depth.
+        // Testing this here as well is redundant and would make the tests too complex.
+        let mux_1_case_1_params_dop_1 = create_normal_dop(&mut db, None, 32, DataType::Float32);
+        let mux_1_case_1_params_dop_2 = create_normal_dop(&mut db, None, 8, DataType::UInt32);
+
+        let mux_1_case_2_params_dop_1 = create_normal_dop(&mut db, None, 16, DataType::Int32);
+        let mux_1_case_2_params_dop_2 = create_normal_dop(&mut db, None, 32, DataType::AsciiString);
+
+        // Create parameters for case 1
+        let mux_1_case_1_params = [
+            create_value_param(
+                &mut db,
+                "mux_1_case_1_param_1",
+                mux_1_case_1_params_dop_1,
+                0,
+                0,
+            ),
+            create_value_param(
+                &mut db,
+                "mux_1_case_1_param_2",
+                mux_1_case_1_params_dop_2,
+                4,
+                0,
+            ),
+        ];
+
+        // Create parameters for case 2
+        let mux_1_case_2_params = [
+            create_value_param(
+                &mut db,
+                "mux_1_case_2_param_1",
+                mux_1_case_2_params_dop_1,
+                1,
+                0,
+            ),
+            create_value_param(
+                &mut db,
+                "mux_1_case_2_param_2",
+                mux_1_case_2_params_dop_2,
+                4,
+                0,
+            ),
+        ];
+
+        // Create structures
+        let mux_1_case_1_structure = create_structure(
+            &mut db,
+            "mux_1_case_1_structure",
+            7,
+            mux_1_case_1_params.to_vec(),
+        );
+
+        let mux_1_case_2_structure = create_structure(
+            &mut db,
+            "mux_1_case_2_structure",
+            7,
+            mux_1_case_2_params.to_vec(),
+        );
+
+        let mux_1_case_1 = create_case(
+            "mux_1_case_1",
+            Some(1.0),
+            Some(10.0),
+            Some(mux_1_case_1_structure),
+        );
+
+        let mux_1_case_2 = create_case(
+            "mux_1_case_2",
+            Some(11.0),
+            Some(600.0),
+            Some(mux_1_case_2_structure),
+        );
+
+        let mux_1_case_3 = create_case("mux_1_case_2", Some("test"), Some("test"), None);
+
+        let mux_1_switch_key =
+            switch_key.unwrap_or_else(|| create_switch_key(&mut db, 0, 0, 16, DataType::UInt32));
+        let mux_1 = create_mux_dop(
+            &mut db,
+            0,
+            default_case,
+            Some(mux_1_switch_key),
+            vec![mux_1_case_1, mux_1_case_2, mux_1_case_3],
+        );
+        let mux_1_param = create_param(
+            &mut db,
+            "mux_1_param",
+            ParameterValue::Value(datatypes::ValueData {
+                default_value: None,
+                dop: mux_1,
+            }),
+            2,
+            0,
+        );
+
+        let sid = 0x42_u8;
+        let service = create_service(&mut db, sid, vec![mux_1_param], vec![mux_1_param], vec![]);
+
+        let ecu_manager = super::EcuManager::new(
+            db,
+            Protocol::DoIp,
+            &ComParams::default(),
+            DatabaseNamingConvention::default(),
+        )
+        .unwrap();
+        (ecu_manager, service, sid)
+    }
+
+    #[test]
+    fn test_mux_from_uds_invalid_case_no_default() {
+        let (ecu_manager, service, sid) = create_ecu_manager_with_mux_service(None, None, None);
+        let response = ecu_manager.convert_from_uds(
+            &service,
+            &[
+                // Service ID
+                sid,
+                // This does not belong to our mux, it's here to test, if the start byte is used
+                0xff, // Mux param starts here
+                // there is no switch value for 0xffff
+                0xff, 0xff,
+            ],
+            true,
+        );
+        assert!(response.is_err());
+    }
+
+    #[test]
+    fn test_mux_from_uds_invalid_case_with_default() {
+        let (ecu_manager, service, sid) = create_ecu_manager_with_mux_service_and_default_case();
+        let response = ecu_manager
+            .convert_from_uds(
+                &service,
+                &[
+                    // Service ID
+                    sid,
+                    // This does not belong to our mux, it's here to test, if the start byte is used
+                    0xff, // Mux param starts here
+                    // there is no switch value for 0xffff, but we have a default case
+                    0xff, 0xff, 0x42, // value for param 1 of default structure
+                ],
+                true,
+            )
+            .unwrap();
+        assert_eq!(
+            response.serialize_to_json().unwrap(),
+            json!({
+                "mux_1_param": {
+                        "Selector": 0xffff,
+                        "default_case": {
+                            "default_structure_param_1": 0x42,
+                        }
+                },
+                "test_service_pos_sid": sid
+                }
+            )
+        );
+    }
+
+    #[test]
+    fn test_mux_from_uds_invalid_payload() {
+        let (ecu_manager, service, sid) = create_ecu_manager_with_mux_service(None, None, None);
+        let response = ecu_manager.convert_from_uds(
+            &service,
+            &[
+                // Service ID
+                sid,
+                // This does not belong to our mux, it's here to test, if the start byte is used
+                0xff, // Mux param starts here
+                // + switch key byte 0
+                0x0, 0x0a, // valid switch key but no data, expect error from decode.
+            ],
+            true,
+        );
+        assert!(response.is_err());
+    }
+
+    #[test]
+    fn test_mux_from_uds_empty_structure() {
+        let (ecu_manager, service, sid) = create_ecu_manager_with_mux_service(None, None, None);
+        let response = ecu_manager.convert_from_uds(
+            &service,
+            &[
+                // Service ID
+                sid,
+                // This does not belong to our mux, it's here to test, if the start byte is used
+                0xff, // Mux param starts here
+                // + switch key byte 0
+                0x00, 0x0a, // valid switch key but no data, expect error from decode.
+            ],
+            true,
+        );
+        assert!(response.is_err());
+        if let Err(e) = response {
+            assert!(e.to_string().contains("too short"));
+        }
+    }
+
+    #[test]
+    fn test_mux_from_and_to_uds_case_1() {
+        let (ecu_manager, service, sid) = create_ecu_manager_with_mux_service(None, None, None);
+        // skip formatting, to keep the comments on the bytes they belong to.
+        let param_1_value: f32 = 13.37;
+        let param_1_bytes = param_1_value.to_be_bytes();
+        // skip formatting, to keep the comments on the bytes they belong to.
+        #[rustfmt::skip]
+        let data = [
+            // Service ID
+            sid,
+            // This does not belong to our mux, it's here to test, if the start byte is used
+            0xff,
+            // Mux param starts here
+            // + switch key byte 0
+            0x00,
+            // Switch key byte 1
+            0x05,
+            // value for param 1
+            param_1_bytes[0], param_1_bytes[1], param_1_bytes[2], param_1_bytes[3],
+            0x07, // value for param 2
+        ];
+
+        let mux_1_json = json!({
+           "mux_1_param": {
+                "Selector": 5,
+                "mux_1_case_1": {
+                    "mux_1_case_1_param_1": param_1_value,
+                    "mux_1_case_1_param_2": 7
+                }
+            },
+        });
+
+        test_mux_from_and_to_uds(ecu_manager, &service, sid, &data.to_vec(), mux_1_json);
+    }
+
+    #[test]
+    fn test_mux_from_and_to_uds_case_2() {
+        let (ecu_manager, service, sid) = create_ecu_manager_with_mux_service(None, None, None);
+        // skip formatting, to keep the comments on the bytes they belong to.
+        #[rustfmt::skip]
+        let data = [
+            // Service ID
+            sid,
+            // This does not belong to our mux, it's here to test, if the start byte is used
+            0xff,
+            // Mux param starts here
+            // + switch key byte 0
+            0x00,
+            // switch key byte 1
+            0xaa,
+            // unused byte, param 1 starts here relative to byte 1 of the switch key
+            0xff,
+            // byte 0 of param 1
+            0x42,
+            // byte 1 of param 1
+            0x42,
+            // unused byte, param 2 starts here relative to byte 4 of the switch key
+            0x00,
+            // 4 bytes of param 2 (ascii 'test')
+            0x74, 0x65, 0x73, 0x74
+        ];
+
+        let mux_1_json = json!({
+            "mux_1_param": {
+                "Selector": 0xaa,
+                "mux_1_case_2": {
+                    "mux_1_case_2_param_1": 0x4242,
+                    "mux_1_case_2_param_2": "test"
+                }
+            }
+        });
+
+        test_mux_from_and_to_uds(ecu_manager, &service, sid, &data.to_vec(), mux_1_json);
+    }
+
+    #[test]
+    fn test_mux_from_and_to_uds_case_3() {
+        let mut db = DiagnosticDatabase::default();
+        let switch_key = create_switch_key(&mut db, 0, 0, 32, DataType::AsciiString);
+        let (ecu_manager, service, sid) =
+            create_ecu_manager_with_mux_service(Some(db), Some(switch_key), None);
+        // skip formatting, to keep the comments on the bytes they belong to.
+        #[rustfmt::skip]
+        let data = [
+            // Service ID
+            sid,
+            // This does not belong to our mux, it's here to test, if the start byte is used
+            0xff,
+            // Mux param starts here
+            // switch selector bytes 'test'
+            0x74, 0x65, 0x73, 0x74,
+            // Case 3 has no structure, so nothing more follows
+        ];
+
+        let mux_1_json = json!({
+            "mux_1_param": {
+                "Selector": "test",
+            }
+        });
+
+        test_mux_from_and_to_uds(ecu_manager, &service, sid, &data.to_vec(), mux_1_json);
+    }
+
+    fn test_mux_from_and_to_uds(
+        ecu_manager: super::EcuManager,
+        service: &DiagComm,
+        sid: u8,
+        data: &Vec<u8>,
+        mux_1_json: serde_json::Value,
+    ) {
+        let response = ecu_manager.convert_from_uds(service, data, true).unwrap();
+
+        // JSON for the response assertion
+        let expected_response_json = {
+            let mut merged = mux_1_json.clone();
+            merged
+                .as_object_mut()
+                .unwrap()
+                .insert("test_service_pos_sid".to_string(), json!(sid));
+            merged
+        };
+
+        // Test from payload to json
+        assert_eq!(
+            response.serialize_to_json().unwrap(),
+            expected_response_json
+        );
+
+        let payload_data =
+            UdsPayloadData::ParameterMap(serde_json::from_value(mux_1_json).unwrap());
+        let mut service_payload = ecu_manager
+            .create_uds_payload(service, Some(payload_data))
+            .unwrap();
+        // The bytes set below are not modified by the create_uds_payload function,
+        // because they do not belong to the mux param.
+        // Setting them manually here, so we can check the full payload.
+        service_payload.data[0] = data[0];
+        service_payload.data[1] = data[1];
+        service_payload.data[4] = data[4];
+
+        // Test from json to payload
+        assert_eq!(*service_payload.data, *data);
+    }
+
+    #[test]
+    fn test_map_struct_to_uds() {
+        let (ecu_manager, service, _sid) = create_ecu_manager_with_struct_service();
+
+        // Test data for the structure
+        let test_value = json!({
+            "param1": 0x1234,
+            "param2": 42.42,
+            "param3": "test"
+        });
+
+        let payload_data =
+            UdsPayloadData::ParameterMap(HashMap::from([("main_param".to_string(), test_value)]));
+
+        let result = ecu_manager.create_uds_payload(&service, Some(payload_data));
+
+        assert!(result.is_ok());
+        let service_payload = result.unwrap();
+
+        // Verify the UDS payload contains the expected structure data
+        // Adding the service ID is done in the diag_kernel, so we are only creating
+        // the payloads for the parameters here.
+        // param1 (2 bytes) + param2 (4 bytes) + param3 (4 bytes)
+        assert_eq!(service_payload.data.len(), 10);
+
+        // Check param1 (uint16 at byte 0-1)
+        assert_eq!(service_payload.data[0], 0x12);
+        assert_eq!(service_payload.data[1], 0x34);
+
+        // Check param2 (float32 at byte 2-5)
+        let float_bytes = 42.42_f32.to_be_bytes();
+        assert_eq!(&service_payload.data[2..6], &float_bytes);
+
+        // Check param3 (ascii string at byte 6-9)
+        assert_eq!(&service_payload.data[6..10], b"test");
+    }
+
+    #[test]
+    fn test_map_struct_to_uds_missing_parameter() {
+        let (ecu_manager, service, _) = create_ecu_manager_with_struct_service();
+
+        // Test data missing param2
+        let test_value = json!({
+            "param1": 0x1234
+            // param2 is missing
+        });
+
+        let payload_data =
+            UdsPayloadData::ParameterMap(HashMap::from([("main_param".to_string(), test_value)]));
+
+        let result = ecu_manager.create_uds_payload(&service, Some(payload_data));
+
+        // Should fail because param2 is missing
+        assert!(result.is_err());
+        if let Err(e) = result {
+            assert!(
+                e.to_string()
+                    .contains("Parameter 'param2' not part of the request body")
+            );
+        }
+    }
+
+    #[test]
+    fn test_map_struct_to_uds_invalid_json_type() {
+        let (ecu_manager, service, _) = create_ecu_manager_with_struct_service();
+
+        // Test data with wrong type (array instead of object)
+        let test_value = json!([1, 2, 3]);
+
+        let payload_data =
+            UdsPayloadData::ParameterMap(HashMap::from([("main_param".to_string(), test_value)]));
+
+        let result = ecu_manager.create_uds_payload(&service, Some(payload_data));
+
+        // Should fail because we provided an array instead of an object
+        assert!(result.is_err());
+        if let Err(e) = result {
+            assert!(e.to_string().contains("Expected value to be object type"));
+        }
+    }
+
+    #[test]
+    fn test_map_mux_to_uds_with_default_case() {
+        fn test_default(
+            ecu_manager: &super::EcuManager,
+            service: &DiagComm,
+            test_value: serde_json::Value,
+            select_value: u16,
+        ) {
+            let payload_data =
+                UdsPayloadData::ParameterMap(serde_json::from_value(test_value).unwrap());
+
+            let service_payload = ecu_manager
+                .create_uds_payload(service, Some(payload_data))
+                .unwrap();
+
+            // Non-checked bytes do not belong to the mux param, so they are not set
+            assert_eq!(service_payload.data[0], 0);
+            assert_eq!(service_payload.data[1], 0);
+            // Check switch key
+            assert_eq!(service_payload.data[2], ((select_value >> 8) & 0xFF) as u8);
+            assert_eq!(service_payload.data[3], (select_value & 0xFF) as u8);
+
+            // Check default_param
+            assert_eq!(service_payload.data[4], 0x42);
+        }
+
+        let (ecu_manager, service, _sid) = create_ecu_manager_with_mux_service_and_default_case();
+        let with_selector = json!({
+            "mux_1_param": {
+                "Selector": 0xffff,
+                "default_case": {
+                    "default_structure_param_1": 0x42,
+                }
+            },
+        });
+
+        let without_selector = json!({
+            "mux_1_param": {
+                "default_case": {
+                    "default_structure_param_1": 0x42,
+                }
+            },
+        });
+
+        test_default(&ecu_manager, &service, with_selector, 0xffff);
+        // when not selector value is given,
+        // the switch key will use the limit value of the default value
+        test_default(&ecu_manager, &service, without_selector, 0x5814);
+    }
+
+    #[test]
+    fn test_map_mux_to_uds_invalid_json_type() {
+        let (ecu_manager, service, _) = create_ecu_manager_with_mux_service(None, None, None);
+
+        // Test data with wrong type (array instead of object)
+        let test_value = json!([1, 2, 3]);
+
+        let payload_data =
+            UdsPayloadData::ParameterMap(HashMap::from([("mux_1_param".to_string(), test_value)]));
+
+        let result = ecu_manager.create_uds_payload(&service, Some(payload_data));
+
+        // Should fail because we provided an array instead of an object
+        assert!(result.is_err());
+        if let Err(e) = result {
+            assert!(e.to_string().contains("Expected value to be object type"));
+        }
+    }
+
+    #[test]
+    fn test_map_mux_to_uds_missing_case_data() {
+        let (ecu_manager, service, _) = create_ecu_manager_with_mux_service(None, None, None);
+
+        // Test data with valid selector but missing case data
+        let test_value = json!({
+            "mux_1_param": {
+                "Selector": 0x0a,
+            },
+        });
+
+        let payload_data =
+            UdsPayloadData::ParameterMap(serde_json::from_value(test_value).unwrap());
+
+        let result = ecu_manager.create_uds_payload(&service, Some(payload_data));
+
+        // Should fail because case1 data is missing
+        assert!(result.is_err());
+        if let Err(e) = result {
+            assert!(
+                e.to_string()
+                    .contains("Mux case mux_1_case_1 value not found in json")
+            );
+        }
     }
 }

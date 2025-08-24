@@ -12,7 +12,7 @@
  */
 
 use cda_database::datatypes::{self, CompuMethod, CompuScale, DataType};
-use cda_interfaces::{DiagServiceError, STRINGS};
+use cda_interfaces::{DiagServiceError, STRINGS, util::decode_hex};
 
 use crate::diag_kernel::{
     DiagDataValue,
@@ -40,47 +40,7 @@ pub(in crate::diag_kernel) fn uds_data_to_serializable(
         }
     }
 
-    Ok(match diag_type {
-        DataType::Int32 | DataType::UInt32 | DataType::Float32 => {
-            let bytes = u32_padded_bytes(data)?;
-            match diag_type {
-                DataType::Int32 => DiagDataValue::Int32(i32::from_be_bytes(bytes)),
-                DataType::UInt32 => DiagDataValue::UInt32(u32::from_be_bytes(bytes)),
-                DataType::Float32 => DiagDataValue::Float32(f32::from_be_bytes(bytes)),
-                _ => unreachable!(),
-            }
-        }
-        DataType::AsciiString | DataType::Utf8String | DataType::Unicode2String => {
-            let outval = if diag_type == DataType::AsciiString {
-                data.iter().map(|&b| b as char).collect::<String>()
-            } else {
-                String::from_utf8(data.to_vec())
-                    .map_err(|e| DiagServiceError::ParameterConversionError(e.to_string()))?
-            };
-            DiagDataValue::String(outval)
-        }
-        DataType::ByteField => DiagDataValue::ByteField(data.to_vec()),
-        DataType::Float64 => {
-            if data.len() > 8 {
-                return Err(DiagServiceError::ParameterConversionError(format!(
-                    "Invalid data length for F64: {}",
-                    data.len()
-                )));
-            }
-            let padd = 8 - data.len();
-            let bytes: [u8; 8] = if padd > 0 {
-                let mut padded: Vec<u8> = vec![0u8; padd];
-                padded.extend(data.to_vec());
-                padded
-                    .try_into()
-                    .expect("The padded 8 byte value can never exceed the 8 bytes")
-            } else {
-                data.try_into()
-                    .expect("Converting an < 8 byte vector into an 8 byte array.")
-            };
-            DiagDataValue::Float64(f64::from_be_bytes(bytes))
-        }
-    })
+    DiagDataValue::new(diag_type, data)
 }
 
 fn compu_lookup(
@@ -89,18 +49,17 @@ fn compu_lookup(
     category: datatypes::CompuCategory,
     data: &[u8],
 ) -> Result<DiagDataValue, DiagServiceError> {
-    let lookup = u32::from_be_bytes(u32_padded_bytes(data)?);
+    let lookup = DiagDataValue::new(diag_type, data)?;
     match compu_method.internal_to_phys.scales.iter().find(|scale| {
-        let lower = &scale.lower_limit;
-        let upper = &scale.upper_limit;
+        let lower = scale.lower_limit.as_ref();
+        let upper = scale.upper_limit.as_ref();
 
-        (lower.is_err() || lower.as_ref().unwrap().value as u32 <= lookup)
-            && (upper.is_err() || upper.as_ref().unwrap().value as u32 >= lookup)
+        lookup.within_limits(upper, lower)
     }) {
         Some(scale) => match category {
             datatypes::CompuCategory::Identical => unreachable!("Already handled"),
             datatypes::CompuCategory::Linear => {
-                let val = if scale.rational_coefficients.is_some()
+                if scale.rational_coefficients.is_some()
                     && scale
                         .rational_coefficients
                         .as_ref()
@@ -116,48 +75,12 @@ fn compu_lookup(
                         .is_empty()
                 {
                     let coeffs = scale.rational_coefficients.as_ref().unwrap();
-                    coeffs.numerator[0] + f64::from(lookup) * coeffs.numerator[1]
+                    let lookup_val: f64 = lookup.try_into()?;
+                    let val = coeffs.numerator[0] + lookup_val * coeffs.numerator[1];
+                    DiagDataValue::from_number(val, diag_type)
                 } else {
-                    let lower = match scale.lower_limit.as_ref().map(|l| match l.interval_type {
-                        datatypes::IntervalType::Open => f64::from(lookup) > l.value,
-                        datatypes::IntervalType::Closed => f64::from(lookup) >= l.value,
-                        datatypes::IntervalType::Infinite => true,
-                    }) {
-                        Ok(l) => l,
-                        Err(e) => {
-                            return Err(DiagServiceError::UdsLookupError(format!(
-                                "Value out of range for Linear Compu: {e:?}"
-                            )));
-                        }
-                    };
-                    let upper = match scale.upper_limit.as_ref().map(|u| match u.interval_type {
-                        datatypes::IntervalType::Open => f64::from(lookup) < u.value,
-                        datatypes::IntervalType::Closed => f64::from(lookup) <= u.value,
-                        datatypes::IntervalType::Infinite => true,
-                    }) {
-                        Ok(u) => u,
-                        Err(e) => {
-                            return Err(DiagServiceError::UdsLookupError(format!(
-                                "Value out of range for Linear Compu: {e:?}"
-                            )));
-                        }
-                    };
-                    if lower && upper {
-                        f64::from(lookup)
-                    } else {
-                        return Err(DiagServiceError::UdsLookupError(
-                            "Value out of range for Linear Compu".to_owned(),
-                        ));
-                    }
-                };
-
-                Ok(match diag_type {
-                    DataType::Int32 => DiagDataValue::Int32(val as i32),
-                    DataType::UInt32 => DiagDataValue::UInt32(val as u32),
-                    DataType::Float32 => DiagDataValue::Float32(val as f32),
-                    DataType::Float64 => DiagDataValue::Float64(val),
-                    _ => unreachable!(),
-                })
+                    Ok(lookup)
+                }
             }
             datatypes::CompuCategory::ScaleLinear => {
                 if scale.rational_coefficients.is_none()
@@ -181,14 +104,9 @@ fn compu_lookup(
                     ));
                 }
                 let coeffs = scale.rational_coefficients.as_ref().unwrap();
-                let val = f64::from(lookup) * coeffs.numerator[0] / coeffs.denominator[0];
-                Ok(match diag_type {
-                    DataType::Int32 => DiagDataValue::Int32(val as i32),
-                    DataType::UInt32 => DiagDataValue::UInt32(val as u32),
-                    DataType::Float32 => DiagDataValue::Float32(val as f32),
-                    DataType::Float64 => DiagDataValue::Float64(val),
-                    _ => unreachable!(),
-                })
+                let lookup_val: f64 = lookup.try_into()?;
+                let val = lookup_val * coeffs.numerator[0] / coeffs.denominator[0];
+                DiagDataValue::from_number(val, diag_type)
             }
             datatypes::CompuCategory::TextTable => {
                 let consts = scale.consts.as_ref().ok_or_else(|| {
@@ -208,6 +126,7 @@ fn compu_lookup(
             }
         },
         None => {
+            let lookup: u32 = lookup.try_into()?;
             if lookup <= 0xFF {
                 Ok(DiagDataValue::String(
                     iso_14229_nrc::get_nrc_code(lookup as u8).to_owned(),
@@ -317,7 +236,6 @@ fn compu_convert(
                 .scales
                 .iter()
                 .find_map(|scale| {
-                    // log::info!("scale: {:?}", scale);
                     if let Some(text) = scale
                         .consts
                         .as_ref()
@@ -325,18 +243,30 @@ fn compu_convert(
                         .and_then(|text| STRINGS.get(text))
                         && value == text
                     {
-                        return scale.lower_limit.as_ref().map(|limit| limit.value).ok();
+                        return scale.lower_limit.as_ref();
                     }
                     None
                 })
             {
-                return Ok(match diag_type {
-                    DataType::Int32 => (value as i32).to_be_bytes().to_vec(),
-                    DataType::UInt32 => (value as u32).to_be_bytes().to_vec(),
-                    DataType::Float32 => (value as f32).to_be_bytes().to_vec(),
-                    DataType::Float64 => value.to_be_bytes().to_vec(),
+                return match diag_type {
+                    DataType::Int32 => {
+                        let v: i32 = value.try_into()?;
+                        Ok(v.to_be_bytes().to_vec())
+                    }
+                    DataType::UInt32 => {
+                        let v: u32 = value.try_into()?;
+                        Ok(v.to_be_bytes().to_vec())
+                    }
+                    DataType::Float32 => {
+                        let v: f32 = value.try_into()?;
+                        Ok(v.to_be_bytes().to_vec())
+                    }
+                    DataType::Float64 => {
+                        let v: f64 = value.try_into()?;
+                        Ok(v.to_be_bytes().to_vec())
+                    }
                     _ => unreachable!(),
-                });
+                };
             }
             Err(DiagServiceError::UdsLookupError(
                 "Failed to find matching TextTable value".to_owned(),
@@ -347,27 +277,6 @@ fn compu_convert(
         datatypes::CompuCategory::RatFunc => todo!(),
         datatypes::CompuCategory::ScaleRatFunc => todo!(),
     }
-}
-
-fn u32_padded_bytes(data: &[u8]) -> Result<[u8; 4], DiagServiceError> {
-    if data.len() > 4 {
-        return Err(DiagServiceError::ParameterConversionError(format!(
-            "Invalid data length for I32: {}",
-            data.len()
-        )));
-    }
-    let padd = 4 - data.len();
-    let bytes: [u8; 4] = if padd > 0 {
-        let mut padded: Vec<u8> = vec![0u8; padd];
-        padded.extend(data.to_vec());
-        padded
-            .try_into()
-            .expect("The padded 8 byte value can never exceed the 8 bytes")
-    } else {
-        data.try_into()
-            .expect("Converting an < 8 byte vector into an 8 byte array.")
-    };
-    Ok(bytes)
 }
 
 pub(in crate::diag_kernel) fn diag_coded_type_to_uds(
@@ -621,22 +530,6 @@ fn json_value_to_byte_vector(
     data
 }
 
-fn decode_hex(value: &str) -> Result<Vec<u8>, DiagServiceError> {
-    let value = if value.len().is_multiple_of(2) {
-        value
-    } else {
-        &format!(
-            "{}0{}",
-            &value[..value.len() - 1],
-            &value[value.len() - 1..]
-        )
-    };
-
-    hex::decode(value).map_err(|e| {
-        DiagServiceError::ParameterConversionError(format!("Invalid hex value, error={e}"))
-    })
-}
-
 #[cfg(test)]
 mod tests {
     use cda_database::datatypes::{
@@ -799,12 +692,12 @@ mod tests {
                         denominator: vec![1.0],
                     }),
                     consts: None,
-                    lower_limit: Ok(Limit {
-                        value: 0.0,
+                    lower_limit: Some(Limit {
+                        value: "0.0".to_owned(),
                         interval_type: IntervalType::Open,
                     }),
-                    upper_limit: Ok(Limit {
-                        value: 100.0,
+                    upper_limit: Some(Limit {
+                        value: "100.0".to_owned(),
                         interval_type: IntervalType::Closed,
                     }),
                 }],
@@ -871,12 +764,12 @@ mod tests {
                         denominator: vec![denominator],
                     }),
                     consts: None,
-                    lower_limit: Ok(Limit {
-                        value: 0.0,
+                    lower_limit: Some(Limit {
+                        value: "0.0".to_owned(),
                         interval_type: IntervalType::Open,
                     }),
-                    upper_limit: Ok(Limit {
-                        value: 200.0,
+                    upper_limit: Some(Limit {
+                        value: "200.0".to_owned(),
                         interval_type: IntervalType::Closed,
                     }),
                 }],
@@ -912,12 +805,12 @@ mod tests {
                 vt: Some(cda_interfaces::STRINGS.get_or_insert("TestValue")),
                 vt_ti: None,
             }),
-            lower_limit: Ok(Limit {
-                value: 42.0,
+            lower_limit: Some(Limit {
+                value: "42.0".to_owned(),
                 interval_type: IntervalType::Closed,
             }),
-            upper_limit: Ok(Limit {
-                value: 100.0,
+            upper_limit: Some(Limit {
+                value: "100.0".to_owned(),
                 interval_type: IntervalType::Closed,
             }),
         };
