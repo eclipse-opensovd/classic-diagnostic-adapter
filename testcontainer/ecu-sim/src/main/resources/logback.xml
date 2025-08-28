@@ -1,0 +1,19 @@
+<configuration>
+    <statusListener class="ch.qos.logback.core.status.NopStatusListener" />
+
+    <appender name="STDOUT" class="ch.qos.logback.core.ConsoleAppender">
+        <!-- encoders are assigned the type
+             ch.qos.logback.classic.encoder.PatternLayoutEncoder by default -->
+        <encoder>
+            <pattern>%cyan(%d{HH:mm:ss.SSS}) %highlight(%-5level) %green([%thread]) %magenta(%logger{12}) %boldWhite(%mdc{ecu:-NONE}) %msg%n</pattern>
+        </encoder>
+    </appender>
+
+    <logger name="library.SimulatedEcu" level="debug" />
+    <logger name="library.DoipEntity" level="debug" />
+    <logger name="SimEcu" level="debug" />
+
+    <root level="info">
+        <appender-ref ref="STDOUT" />
+    </root>
+</configuration>
