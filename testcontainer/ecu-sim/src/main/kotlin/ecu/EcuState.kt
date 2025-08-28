@@ -1,0 +1,95 @@
+@file:OptIn(ExperimentalUuidApi::class)
+
+package ecu
+
+import NrcException
+import RequestResponseData
+import kotlinx.serialization.Serializable
+import kotlin.uuid.ExperimentalUuidApi
+import kotlin.uuid.Uuid
+
+@Serializable
+data class EcuState(
+    var variant: Variant = Variant.APPLICATION,
+    var sessionState: SessionState = SessionState.DEFAULT,
+    var securityAccess: SecurityAccess = SecurityAccess.LOCKED,
+    var authentication: Authentication = Authentication.UNAUTHENTICATED,
+    val blocks: List<DataBlock> = listOf(
+        DataBlock(
+            id = Uuid.parse("11000000-0000-0000-0000-000000000000"),
+            type = DataBlockType.BOOT,
+            softwareVersion = MajorMinorPatch(1.toByte(), 2.toByte(), 3.toByte()),
+            partNumber = "1100000000"
+        ),
+        DataBlock(
+            id = Uuid.parse("12000000-0000-0000-0000-000000000000"),
+            type = DataBlockType.CODE,
+            softwareVersion = MajorMinorPatch(2.toByte(), 3.toByte(), 4.toByte()),
+            partNumber = "1200000000"
+        ),
+        DataBlock(
+            id = Uuid.parse("13000000-0000-0000-0000-000000000000"),
+            type = DataBlockType.DATA,
+            softwareVersion = MajorMinorPatch(3.toByte(), 4.toByte(), 5.toByte()),
+            partNumber = "1300000000"
+        ),
+    ),
+    var vin: String = System.getenv("OVERRIDE_VIN") ?: "OPENSOVDCDAISBEST",
+    var hardResetForSeconds: Int = 0,
+    var maxNumberOfBlockLength: Int = 65535,
+)
+
+@Serializable
+data class DataBlock(
+    val id: Uuid,
+    val type: DataBlockType,
+    var softwareVersion: MajorMinorPatch,
+    var partNumber: String,
+)
+
+@Serializable
+class MajorMinorPatch(
+    val major: Byte,
+    val minor: Byte,
+    val patch: Byte
+) {
+    val asByteArray: ByteArray
+        get() =
+            byteArrayOf(this.major, this.minor, this.patch)
+
+    val asString: String
+        get() =
+            String.format("%02d.%02d.%02d", this.major.toUByte().toInt(), this.minor.toUByte().toInt(), this.patch.toUByte().toInt())
+}
+
+@Serializable
+class YearMonthDayBCD(
+    val year: Byte,
+    val month: Byte,
+    val day: Byte,
+) {
+    val asByteArray: ByteArray
+        get() =
+            byteArrayOf(year, month, day)
+}
+
+fun RequestResponseData.ensureEcuModeIn(vararg modes: Variant) {
+    val ecuState = ecu.ecuState()
+    if (!modes.contains(ecuState.variant)) {
+        throw NrcException(NrcError.RequestOutOfRange)
+    }
+}
+
+fun RequestResponseData.ensureSessionIn(vararg session: SessionState) {
+    val ecuState = ecu.ecuState()
+    if (!session.contains(ecuState.sessionState)) {
+        throw NrcException(NrcError.RequestOutOfRange)
+    }
+}
+
+fun RequestResponseData.ensureSecurityAccessIn(vararg securityAccess: SecurityAccess) {
+    val ecuState = ecu.ecuState()
+    if (!securityAccess.contains(ecuState.securityAccess)) {
+        throw NrcException(NrcError.SecurityAccessDenied)
+    }
+}
