@@ -636,7 +636,7 @@ impl cda_interfaces::EcuManager for EcuManager {
                         ))
                     })?;
 
-                    let uds_val = operations::diag_coded_type_to_uds(
+                    let uds_val = operations::string_to_vec_u8(
                         diag_type.base_datatype(),
                         &coded_const_value,
                     )?;
@@ -1565,7 +1565,7 @@ impl EcuManager {
                     ))
                 })?;
                 let expected =
-                    operations::diag_coded_type_to_uds(diag_type.base_datatype(), &const_value)?
+                    operations::string_to_vec_u8(diag_type.base_datatype(), &const_value)?
                         .into_iter()
                         .collect::<Vec<_>>();
                 let expected = &expected[expected.len() - value.data.len()..];
