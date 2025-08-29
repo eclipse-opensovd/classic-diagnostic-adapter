@@ -318,7 +318,7 @@ pub(in crate::diag_kernel) fn extract_diag_data_container(
     let (data, bit_len) = diag_type.decode(uds_payload, byte_pos, param.bit_pos as usize)?;
 
     let data_type = diag_type.base_datatype();
-    payload.set_last_byte_pos_read(byte_pos + data.len() + 1);
+    payload.set_last_read_byte_pos(byte_pos + data.len());
 
     Ok(DiagDataTypeContainer::RawContainer(
         DiagDataTypeContainerRaw {
