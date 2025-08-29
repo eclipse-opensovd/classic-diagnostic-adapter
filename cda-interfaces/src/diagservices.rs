@@ -13,7 +13,11 @@
 
 use hashbrown::HashMap;
 
-use crate::{DataParseError, DiagServiceError, util};
+use crate::{
+    DataParseError, DiagServiceError,
+    datatypes::{DtcField, DtcRecord},
+    util,
+};
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum DiagServiceResponseType {
@@ -51,6 +55,9 @@ pub trait DiagServiceResponse: Sized + Send + Sync + 'static {
     fn get_raw(&self) -> &[u8];
     fn into_json(self) -> Result<DiagServiceJsonResponse, DiagServiceError>;
     fn as_nrc(&self) -> Result<MappedNRC, String>;
+
+    /// Extract data trouble codes from the response, if any.
+    fn get_dtcs(&self) -> Result<Vec<(DtcField, DtcRecord)>, DiagServiceError>;
 }
 
 #[derive(Debug)]

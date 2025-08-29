@@ -20,15 +20,17 @@ use std::{
 use cda_interfaces::{
     DiagComm, DiagCommAction, DiagCommType, DiagServiceError, EcuGateway, EcuManager,
     SchemaProvider, SecurityAccess, ServicePayload, TesterPresentControlMessage, TesterPresentMode,
-    TesterPresentType, TransmissionParameters, UdsEcu, UdsResponse,
+    TesterPresentType, TransmissionParameters, UdsEcu, UdsResponse, datatypes,
     datatypes::{
         ComponentConfigurationsInfo, DataTransferError, DataTransferMetaData, DataTransferStatus,
-        Ecu, Gateway, NetworkStructure, RetryPolicy,
+        DtcMask, DtcReadInformationFunction, DtcRecordAndStatus, Ecu, Gateway, NetworkStructure,
+        RetryPolicy,
     },
     diagservices::{DiagServiceResponse, DiagServiceResponseType, UdsPayloadData},
     service_ids,
 };
 use hashbrown::HashMap;
+use strum::IntoEnumIterator;
 use tokio::{
     fs::File,
     io::{AsyncReadExt, AsyncSeekExt, BufReader},
@@ -36,7 +38,7 @@ use tokio::{
     task::JoinHandle,
 };
 
-type EcuIdentifer = String;
+type EcuIdentifier = String;
 
 struct UdsParameters {
     timeout_default: Duration,
@@ -67,8 +69,8 @@ pub struct TesterPresentTask {
 pub struct UdsManager<S: EcuGateway, R: DiagServiceResponse, T: EcuManager<Response = R>> {
     ecus: Arc<HashMap<String, RwLock<T>>>,
     gateway: S,
-    data_transfers: Arc<Mutex<HashMap<EcuIdentifer, EcuDataTransfer>>>,
-    tester_present_tasks: Arc<RwLock<HashMap<EcuIdentifer, TesterPresentTask>>>,
+    data_transfers: Arc<Mutex<HashMap<EcuIdentifier, EcuDataTransfer>>>,
+    tester_present_tasks: Arc<RwLock<HashMap<EcuIdentifier, TesterPresentTask>>>,
     _phantom: std::marker::PhantomData<R>,
 }
 
@@ -873,7 +875,7 @@ impl<S: EcuGateway, R: DiagServiceResponse, T: EcuManager<Response = R>> UdsEcu
             .read()
             .await;
 
-        let reset_services = diag_manager.lookup_service_by_sid(service_ids::ECU_RESET)?;
+        let reset_services = diag_manager.lookup_service_names_by_sid(service_ids::ECU_RESET)?;
         drop(diag_manager);
         Ok(reset_services)
     }
@@ -1143,6 +1145,179 @@ impl<S: EcuGateway, R: DiagServiceResponse, T: EcuManager<Response = R>> UdsEcu
         }
         let cloned = self.clone();
         cloned.start_variant_detection_for_ecus(ecus)
+    }
+
+    async fn ecu_dtc_by_mask(
+        &self,
+        ecu_name: &str,
+        status: Option<HashMap<String, serde_json::Value>>,
+        severity: Option<u32>,
+        scope: Option<String>,
+    ) -> Result<Vec<DtcRecordAndStatus>, DiagServiceError> {
+        let ecu = self.ecus.get(ecu_name).ok_or(DiagServiceError::NotFound)?;
+        let mut all_dtcs = HashMap::new();
+        let scoped_services: Vec<_> = ecu
+            .read()
+            .await
+            .lookup_dtc_services(vec![
+                DtcReadInformationFunction::FaultMemoryByStatusMask,
+                DtcReadInformationFunction::UserMemoryDtcByStatusMask,
+            ])?
+            .into_iter()
+            .filter(|(_, lookup)| {
+                scope
+                    .as_ref()
+                    .is_none_or(|scope| *scope == lookup.scope.to_lowercase())
+            })
+            .collect();
+        if scoped_services.is_empty() {
+            return Err(DiagServiceError::RequestNotSupported(format!(
+                "ECU {ecu_name} does not support fault memory {}",
+                scope.map(|s| format!("for scope {s}")).unwrap_or_default()
+            )));
+        }
+
+        let mask = if let Some(status) = status {
+            let mut mask = 0x00_u8;
+            // Status can contain more than the mask bits, thus we need to track
+            // if any of the status fields is a mask bit.
+            // If not use the default mask.
+            let mut any_mask_bit_set = false;
+
+            for mask_bit in DtcMask::iter() {
+                let mask_bit_str = mask_bit.to_string().to_lowercase();
+                if let Some(val) = status.get(&mask_bit_str)
+                    && status_value_to_bool(val)?
+                {
+                    any_mask_bit_set = true;
+                    mask |= mask_bit as u8;
+                }
+            }
+
+            if any_mask_bit_set { mask } else { u8::MAX }
+        } else {
+            u8::MAX
+        };
+
+        for (_, lookup) in scoped_services {
+            let payload = UdsPayloadData::Raw(vec![mask]);
+            let response = self
+                .send(ecu_name, lookup.service, Some(payload), true)
+                .await?;
+            let raw = response.get_raw();
+            let active_dtcs = response.get_dtcs()?;
+
+            let mut byte_pos = active_dtcs
+                .first()
+                .map(|(f, _)| f.byte_pos)
+                .unwrap_or_default();
+            for (field, record) in active_dtcs {
+                // Skip bytes that are reserved for the DTC code.
+                // The mask byte comes right after that.
+                byte_pos += field.bit_len.div_ceil(8) + 1;
+                let status_byte =
+                    raw.get(byte_pos as usize)
+                        .copied()
+                        .ok_or(DiagServiceError::BadPayload(format!(
+                            "Failed to get status byte for DTC {:X}",
+                            record.code
+                        )))?;
+
+                all_dtcs.insert(
+                    record.code,
+                    DtcRecordAndStatus {
+                        record,
+                        scope: lookup.scope.clone(),
+                        status: get_dtc_status_for_mask(status_byte),
+                    },
+                );
+            }
+
+            if mask == 0xff || mask == 0x00 {
+                for record in lookup.dtcs.into_iter() {
+                    all_dtcs.entry(record.code).or_insert(DtcRecordAndStatus {
+                        record,
+                        scope: lookup.scope.clone(),
+                        status: get_dtc_status_for_mask(0),
+                    });
+                }
+            }
+        }
+
+        Ok(all_dtcs
+            .into_values()
+            .filter(|dtc| severity.as_ref().is_none_or(|s| dtc.record.severity <= *s))
+            .collect::<Vec<_>>())
+    }
+}
+
+fn status_value_to_bool(val: &serde_json::Value) -> Result<bool, DiagServiceError> {
+    fn int_to_bool(int_val: u64) -> Result<bool, DiagServiceError> {
+        if int_val != 0 && int_val != 1 {
+            Err(DiagServiceError::InvalidRequest(
+                "Invalid status value for mask bit must be 0 or 1 if using integers".to_owned(),
+            ))
+        } else {
+            Ok(int_val == 1)
+        }
+    }
+    match val {
+        serde_json::Value::String(str_val) => {
+            if let Ok(int_val) = str_val.parse::<u64>() {
+                int_to_bool(int_val)
+            } else if let Ok(bool_val) = str_val.parse::<bool>() {
+                Ok(bool_val)
+            } else {
+                Err(DiagServiceError::InvalidRequest(
+                    "Status value string is neither a valid integer nor boolean".to_owned(),
+                ))
+            }
+        }
+        serde_json::Value::Bool(bool_val) => Ok(*bool_val),
+        serde_json::Value::Number(num_val) => {
+            if let Some(int_val) = num_val.as_u64() {
+                int_to_bool(int_val)
+            } else {
+                Err(DiagServiceError::InvalidRequest(
+                    "Status value cannot be parsed as u64".to_owned(),
+                ))
+            }
+        }
+        _ => Err(DiagServiceError::InvalidRequest(
+            "Status value must be a string, boolean or integer".to_owned(),
+        )),
+    }
+}
+
+macro_rules! check_flag {
+    ($status_byte:expr, $flag:ident) => {
+        ($status_byte & $flag) == $flag
+    };
+}
+
+fn get_dtc_status_for_mask(mask: u8) -> datatypes::DtcStatus {
+    let test_failed = DtcMask::TestFailed as u8;
+    let test_failed_this_operation_cycle = DtcMask::TestFailedThisOperationCycle as u8;
+    let pending_dtc = DtcMask::PendingDtc as u8;
+    let confirmed_dtc = DtcMask::ConfirmedDtc as u8;
+    let test_not_completed_since_last_clear = DtcMask::TestNotCompletedSinceLastClear as u8;
+    let test_failed_since_last_clear = DtcMask::TestFailedSinceLastClear as u8;
+    let test_not_completed_this_operation_cycle = DtcMask::TestNotCompletedThisOperationCycle as u8;
+    let warning_indicator_requested = DtcMask::WarningIndicatorRequested as u8;
+
+    datatypes::DtcStatus {
+        test_failed: check_flag!(mask, test_failed),
+        test_failed_this_operation_cycle: check_flag!(mask, test_failed_this_operation_cycle),
+        pending_dtc: check_flag!(mask, pending_dtc),
+        confirmed_dtc: check_flag!(mask, confirmed_dtc),
+        test_not_completed_since_last_clear: check_flag!(mask, test_not_completed_since_last_clear),
+        test_failed_since_last_clear: check_flag!(mask, test_failed_since_last_clear),
+        test_not_completed_this_operation_cycle: check_flag!(
+            mask,
+            test_not_completed_this_operation_cycle
+        ),
+        warning_indicator_requested: check_flag!(mask, warning_indicator_requested),
+        mask,
     }
 }
 

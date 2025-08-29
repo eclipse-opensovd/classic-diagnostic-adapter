@@ -16,6 +16,7 @@ use std::time::Instant;
 use cda_database::datatypes::{CompuMethod, DataType};
 use cda_interfaces::{
     DiagComm, DiagServiceError,
+    datatypes::{DtcField, DtcRecord},
     diagservices::{
         DiagServiceJsonResponse, DiagServiceResponse, DiagServiceResponseType, FieldParseError,
         MappedNRC,
@@ -33,11 +34,25 @@ pub struct DiagServiceResponseStruct {
     pub response_type: DiagServiceResponseType,
 }
 
+pub const DTC_CODE_BIT_LEN: u32 = 24;
+
+#[derive(Debug)]
+pub struct DiagDataContainerDtc {
+    pub code: u32,
+    pub display_code: Option<String>,
+    pub fault_name: String,
+    pub severity: u32,
+    pub bit_pos: u32,
+    pub bit_len: u32,
+    pub byte_pos: u32,
+}
+
 #[derive(Debug)]
 pub enum DiagDataTypeContainer {
     RawContainer(DiagDataTypeContainerRaw),
     Struct(HashMap<String, DiagDataTypeContainer>),
     RepeatingStruct(Vec<HashMap<String, DiagDataTypeContainer>>),
+    DtcStruct(DiagDataContainerDtc),
 }
 
 #[derive(Debug)]
@@ -125,6 +140,61 @@ impl DiagServiceResponse for DiagServiceResponseStruct {
     fn is_empty(&self) -> bool {
         self.data.is_empty()
     }
+
+    fn get_dtcs(&self) -> Result<Vec<(DtcField, DtcRecord)>, DiagServiceError> {
+        fn get(container: &DiagDataTypeContainer) -> Option<Vec<&DiagDataContainerDtc>> {
+            match container {
+                DiagDataTypeContainer::DtcStruct(dtc) => Some(vec![dtc]),
+                DiagDataTypeContainer::Struct(s) => {
+                    let results: Vec<_> = s
+                        .values()
+                        .map(|container| get(container).unwrap_or_default())
+                        .collect();
+                    Some(results.into_iter().flatten().collect())
+                }
+                DiagDataTypeContainer::RepeatingStruct(r) => {
+                    let results = r
+                        .iter()
+                        .map(|m| {
+                            m.values()
+                                .map(|container| get(container).unwrap_or_default())
+                                .collect::<Vec<_>>()
+                        })
+                        .collect::<Vec<_>>();
+                    Some(results.into_iter().flatten().flatten().collect())
+                }
+                _ => None,
+            }
+        }
+
+        let mut dtcs = Vec::new();
+        for container in self
+            .mapped_data
+            .as_ref()
+            .ok_or_else(|| DiagServiceError::BadPayload("No mapped data available".to_owned()))?
+            .data
+            .values()
+        {
+            if let Some(container_dtcs) = get(container) {
+                dtcs.extend(container_dtcs.into_iter().map(|dtc| {
+                    (
+                        DtcField {
+                            bit_pos: dtc.bit_pos,
+                            bit_len: dtc.bit_len,
+                            byte_pos: dtc.byte_pos,
+                        },
+                        DtcRecord {
+                            code: dtc.code,
+                            display_code: dtc.display_code.clone(),
+                            fault_name: dtc.fault_name.clone(),
+                            severity: dtc.severity,
+                        },
+                    )
+                }));
+            }
+        }
+        Ok(dtcs)
+    }
 }
 
 impl DiagServiceResponseStruct {
@@ -208,10 +278,28 @@ impl DiagServiceResponseStruct {
                         }
                         DiagDataValue::RepeatingStruct(nested_vec)
                     }
+                    DiagDataTypeContainer::DtcStruct(dtc) => create_dtc(dtc),
                 };
                 inner_mapped.insert(k.clone(), val);
             }
             Ok(())
+        }
+
+        fn create_dtc(dtc: &DiagDataContainerDtc) -> DiagDataValue {
+            let mut map = HashMap::new();
+            map.insert("code".to_owned(), DiagDataValue::UInt32(dtc.code));
+            if let Some(display_code) = &dtc.display_code {
+                map.insert(
+                    "display_code".to_owned(),
+                    DiagDataValue::String(display_code.clone()),
+                );
+            }
+            map.insert(
+                "fault_name".to_owned(),
+                DiagDataValue::String(dtc.fault_name.clone()),
+            );
+            map.insert("severity".to_owned(), DiagDataValue::UInt32(dtc.severity));
+            DiagDataValue::Struct(map)
         }
 
         match data {
@@ -235,6 +323,7 @@ impl DiagServiceResponseStruct {
                 }
                 Ok(DiagDataValue::RepeatingStruct(mapped))
             }
+            DiagDataTypeContainer::DtcStruct(dtc) => Ok(create_dtc(dtc)),
         }
     }
 }

@@ -23,7 +23,7 @@ tokio = { version = "1.43.0", default-features = false, features = ["net"] }
 futures = { version = "0.3" }                                                # external
 hashbrown = { version = "0.15", features = ["serde"] }
 
-aide = { git = "https://github.com/theswiftfox/aide.git", rev = "2e68af1", features = [
+aide = { git = "https://github.com/theswiftfox/aide.git", rev = "e533403", features = [
   "axum",
   "swagger",
   "http",
@@ -34,6 +34,7 @@ aide = { git = "https://github.com/theswiftfox/aide.git", rev = "2e68af1", featu
   "axum-query",
   "axum-extra-headers",
   "macros",
+  "serde_qs",
 ] } # openapi generation
 schemars = { workspace = true, features = ["hashbrown"] }
 
@@ -54,6 +55,7 @@ jsonwebtoken = "9.3.1"
 mime = "0.3.17"
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
+serde_qs = { version = "1.0.0-rc.3", features = ["axum"] }
 regex = "1.11.1"
 # v4 - Version 4 UUIDs with random data.
 uuid = { version = "1.16.0", features = ["v4"] }
@@ -69,6 +71,7 @@ tower-http = { version = "0.6", default-features = false, features = [
 # logging
 log = "0.4"
 tracing = "0.1.41"
+percent-encoding = "2.3.1"
 
 [features]
 default = []

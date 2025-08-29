@@ -45,7 +45,8 @@ pub enum ParameterValue {
     /// This mechanism is also used to re-use `Value` as type for PhysConst.
     Value(ValueData),
     /// Reserved bits in the payload.
-    /// Currently only used in the CDA for padding when creating UDS payloads
+    /// Currently used in the CDA for padding when creating UDS payloads and to provide
+    /// values for DTCs, to make sure reserved DTC bits are extracted correctly.
     Reserved(ReservedParam),
 }
 #[derive(Debug, Clone)]

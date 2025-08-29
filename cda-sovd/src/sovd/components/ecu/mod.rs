@@ -41,6 +41,7 @@ use crate::{
 
 pub(crate) mod configurations;
 pub(crate) mod data;
+pub(crate) mod faults;
 pub(crate) mod genericservice;
 pub(crate) mod modes;
 pub(crate) mod operations;
@@ -87,6 +88,7 @@ pub(crate) async fn get<R: DiagServiceResponse, T: UdsEcu + Clone, U: FileManage
             data: format!("{base_path}/data"),
             sdgs: sdgs.map(|sdgs| sdgs.into_sovd()),
             single_ecu_jobs: format!("{base_path}/x-single-ecu-jobs"),
+            faults: format!("{base_path}/faults"),
         }),
     )
         .into_response()
@@ -110,6 +112,7 @@ pub(crate) fn docs_get(op: TransformOperation) -> TransformOperation {
                 single_ecu_jobs:
                     "http://localhost:20002/vehicle/v15/components/my_ecu/x-single-ecu-jobs"
                         .to_string(),
+                faults: "http://localhost:20002/vehicle/v15/components/my_ecu/faults".to_string(),
             })
             .description("Response with ECU information (i.e. detected variant) and service URLs")
         })
