@@ -162,10 +162,11 @@ pub enum Radix {
     Oct,
 }
 
+/// A dop field may either reference a basic structure or an env data desc
 #[derive(Debug)]
 #[cfg_attr(feature = "deepsize", derive(DeepSizeOf))]
 pub struct DopField {
-    pub basic_structure: Id,
+    pub basic_structure: Option<Id>,
     pub basic_structure_short_name: Option<StringId>,
     pub env_data_desc: Option<Id>,
     pub env_data_desc_short_name: Option<StringId>,
@@ -689,13 +690,8 @@ fn get_dop_field(f: &dop::Field) -> Result<DopField, DiagServiceError> {
         basic_structure: f
             .basic_structure
             .as_ref()
-            .ok_or_else(|| {
-                DiagServiceError::InvalidDatabase("Dop basic structure ref not set.".to_owned())
-            })?
-            .r#ref
-            .as_ref()
-            .ok_or_else(|| ref_optional_none("Field.basicStructure.ref_pb"))?
-            .value,
+            .and_then(|e| e.r#ref.as_ref())
+            .map(|e| e.value),
         basic_structure_short_name: option_str_to_string(f.basic_structure_short_name_ref.as_ref()),
         env_data_desc: f
             .env_data_desc

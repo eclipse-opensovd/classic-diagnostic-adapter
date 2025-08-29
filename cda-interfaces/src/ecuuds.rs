@@ -17,7 +17,7 @@ use crate::{
     DiagComm, DiagServiceError, SecurityAccess,
     datatypes::{
         ComplexComParamValue, ComponentConfigurationsInfo, ComponentDataInfo, DataTransferMetaData,
-        NetworkStructure, SdSdg, single_ecu,
+        Fault, NetworkStructure, SdSdg, single_ecu,
     },
     diagservices::{DiagServiceResponse, UdsPayloadData},
 };
@@ -241,4 +241,13 @@ pub trait UdsEcu: Send + Sync + 'static {
     /// Main work will be done in the background, there is no result returned,
     /// as the data is internally stored and used in `EcuUds`
     fn start_variant_detection(&self) -> impl Future<Output = ()> + Send;
+
+    // Retrieve all faults for the given ECU, with optional filtering by status, severity and scope.
+    fn get_faults(
+        &self,
+        ecu_name: &str,
+        status: Option<Vec<String>>,
+        severity: Option<String>,
+        scope: Option<String>,
+    ) -> impl Future<Output = Result<Vec<Fault>, DiagServiceError>> + Send;
 }

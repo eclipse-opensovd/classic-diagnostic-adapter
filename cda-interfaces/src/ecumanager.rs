@@ -18,7 +18,8 @@ use hashbrown::{HashMap, HashSet};
 use crate::{
     DiagComm, DiagServiceError, DoipComParamProvider, Id, SecurityAccess, UdsComParamProvider,
     datatypes::{
-        ComplexComParamValue, ComponentConfigurationsInfo, ComponentDataInfo, SdSdg, single_ecu,
+        ComplexComParamValue, ComponentConfigurationsInfo, ComponentDataInfo, Fault, SdSdg,
+        single_ecu,
     },
     diagservices::{DiagServiceResponse, UdsPayloadData},
 };
@@ -189,7 +190,7 @@ pub trait EcuManager:
     /// This will first look up the service in the current variant, then in the base variant
     /// # Errors
     /// Will return `Err` if either the variant or base variant cannot be resolved.
-    fn lookup_service_by_sid(&self, service_id: u8) -> Result<Vec<String>, DiagServiceError>;
+    fn lookup_service_names_by_sid(&self, service_id: u8) -> Result<Vec<String>, DiagServiceError>;
     /// Retrieve all `read` services for the current ECU variant.
     fn get_components_data_info(&self) -> Vec<ComponentDataInfo>;
     /// Retrieve all configuration type services for the current ECU variant.
@@ -198,6 +199,15 @@ pub trait EcuManager:
     ) -> Result<Vec<ComponentConfigurationsInfo>, DiagServiceError>;
     /// Retrieve all 'single ecu' jobs for the current ECU variant.
     fn get_components_single_ecu_jobs_info(&self) -> Vec<ComponentDataInfo>;
+
+    /// Retrieve all faults from the ECU.
+    fn faults(
+        &self,
+        ecu_name: &str,
+        status: Option<Vec<String>>,
+        severity: Option<String>,
+        scope: Option<String>,
+    ) -> Result<Vec<Fault>, DiagServiceError>;
 }
 
 impl Protocol {

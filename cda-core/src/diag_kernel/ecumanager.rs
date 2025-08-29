@@ -14,20 +14,21 @@
 use std::{sync::Arc, time::Duration};
 
 use cda_database::datatypes::{
-    self, DataType, DiagCodedTypeVariant, DiagnosticDatabase, DiagnosticService,
-    LogicalAddressType, StateChart, resolve_comparam,
+    self, DataOperationVariant, DataType, DiagCodedTypeVariant, DiagnosticDatabase,
+    DiagnosticService, DtcDop, LogicalAddressType, Parameter, ParameterValue,
+    ParameterValue::CodedConst, StateChart, resolve_comparam,
 };
 use cda_interfaces::{
     DiagComm, DiagCommAction, DiagCommType, DiagServiceError, EcuAddressProvider, EcuState,
     Protocol, STRINGS, SecurityAccess, ServicePayload,
     datatypes::{
         AddressingMode, ComParams, ComplexComParamValue, ComponentConfigurationsInfo,
-        ComponentDataInfo, DatabaseNamingConvention, RetryPolicy, SdSdg, TesterPresentSendType,
-        semantics, single_ecu,
+        ComponentDataInfo, DatabaseNamingConvention, Fault, RetryPolicy, SdSdg,
+        TesterPresentSendType, semantics, single_ecu,
     },
     diagservices::{DiagServiceResponse, DiagServiceResponseType, UdsPayloadData},
     get_string, get_string_from_option, get_string_from_option_with_default,
-    get_string_with_default, service_ids, spawn_named, util,
+    get_string_with_default, service_ids, spawn_named, sub_functions, util,
 };
 use hashbrown::{HashMap, HashSet};
 use parking_lot::Mutex;
@@ -747,31 +748,11 @@ impl cda_interfaces::EcuManager for EcuManager {
     /// This will first look up the service in the current variant, then in the base variant
     /// # Errors
     /// Will return `Err` if either the variant or base variant cannot be resolved.
-    fn lookup_service_by_sid(&self, service_id: u8) -> Result<Vec<String>, DiagServiceError> {
-        let variant = self
-            .variant
-            .as_ref()
-            .and_then(|v| self.ecu_data.variants.get(&v.id))
-            .or_else(|| self.ecu_data.variants.get(&self.ecu_data.base_variant_id))
-            .ok_or(DiagServiceError::NotFound)?;
-
-        let base_variant = self
-            .ecu_data
-            .variants
-            .get(&self.ecu_data.base_variant_id)
-            .ok_or(DiagServiceError::NotFound)?;
-
-        let service_ids = variant.services.iter().chain(base_variant.services.iter());
-        let services = service_ids
-            .filter_map(|id| {
-                self.ecu_data.services.get(id).and_then(|service| {
-                    if service.service_id == service_id {
-                        STRINGS.get(service.short_name)
-                    } else {
-                        None
-                    }
-                })
-            })
+    fn lookup_service_names_by_sid(&self, service_id: u8) -> Result<Vec<String>, DiagServiceError> {
+        let services = self
+            .lookup_services_by_sid(service_id)?
+            .iter()
+            .filter_map(|service| get_string!(service.short_name).ok())
             .collect::<Vec<_>>();
 
         Ok(services)
@@ -1144,6 +1125,109 @@ impl cda_interfaces::EcuManager for EcuManager {
             .collect();
         result.sort_by(|a, b| a.id.cmp(&b.id));
         Ok(result)
+    }
+
+    fn faults(
+        &self,
+        ecu_name: &str,
+        status: Option<Vec<String>>,
+        severity: Option<String>,
+        scope: Option<String>,
+    ) -> Result<Vec<Fault>, DiagServiceError> {
+        // pub struct Dtc {
+        //     #[prost(message, optional, tag = "1")]
+        //     pub id: ::core::option::Option<ObjectId>,
+        //     #[prost(string, tag = "2")]
+        //     pub short_name: ::prost::alloc::string::String,
+        //     #[prost(uint32, tag = "3")]
+        //     pub trouble_code: u32,
+        //     #[prost(string, optional, tag = "4")]
+        //     pub display_trouble_code: ::core::option::Option<::prost::alloc::string::String>,
+        //     #[prost(message, optional, tag = "5")]
+        //     pub text: ::core::option::Option<Text>,
+        //     #[prost(uint32, optional, tag = "6")]
+        //     pub level: ::core::option::Option<u32>,
+        //     #[prost(message, optional, tag = "7")]
+        //     pub sdgs: ::core::option::Option<sdgs::Ref>,
+        //     #[prost(bool, optional, tag = "8")]
+        //     pub is_temporary: ::core::option::Option<bool>,
+        // }
+
+        // {
+        //     "code": "164456",
+        //     "scope": "faultmem",
+        //     "display_code": "P164456",
+        //     "fault_name": "An incorrect variant coding or configuration was detected.",
+        //     "severity": 2,
+        //     "status": {
+        //     "mask": "9",
+        //     "testFailed": "1",
+        //     "testFailedThisMonitoringCycle": "0",
+        //     "pendingDTC": "0",
+        //     "confirmedDTC": "1",
+        //     "testNotCompletedSinceLastClear": "0",
+        //     "testFailedSinceLastClear": "0",
+        //     "testNotCompletedThisMonitoringCycle": "0",
+        //     "warningIndicatorRequested": "0"
+        // }
+        // },
+        let dtc_services =  self.lookup_services_by_sid( service_ids::READ_DTC_INFORMATION)?.iter()
+           .filter(|service| {
+               self.ecu_data.requests.get(&service.request_id)
+                   .is_some_and(|req| req.params.iter().any(|param_ref| {
+                       self.ecu_data.params.get(param_ref)
+                           .is_some_and(|param| {
+                               if let CodedConst(c) = &param.value {
+                                   STRINGS.get(c.value)
+                                       .is_some_and(|value| {
+                                           println!("{}, {:?}", value, STRINGS.get(service.short_name));
+                                           value.to_lowercase() == sub_functions::read_dtc_information::REPORT_DTC_BY_STATUS_MASK.to_string()
+                                               || value.to_lowercase() == sub_functions::read_dtc_information::REPORT_USER_DEF_MEMORY_DTC_BY_STATUS_MASK.to_string()
+                                       })
+                               } else {
+                                   false
+                               }
+                           })
+                   }))
+           }).collect::<Vec<_>>();
+
+        todo!();
+
+        //     match dop.variant {
+        //         DataOperationVariant::Dtc(dtc_dop) => {
+        //             self.ecu_data.dt
+        //             dtc_dop.dtc_refs
+        //         }
+        //         _ => return None,
+        //     }
+        // })
+        // let mut comparams = HashMap::new();
+        //
+        // // ensure base variant is handled first
+        // // and maybe be overwritten by variant specific comparams
+        // let variants = [
+        //     Some(self.ecu_data.base_variant_id),
+        //     self.variant.as_ref().map(|v| v.id),
+        // ];
+        //
+        //
+        //
+        // variants
+        //     .iter()
+        //     .filter_map(|maybe_id| maybe_id.and_then(|id| self.ecu_data.variants.get(&id)))
+        //     .flat_map(|v| &v.com_params)
+        //     .filter(|cp| cp.protocol_id == Some(*protocol_id))
+        //     .for_each(|cp| match resolve_comparam(&self.ecu_data, cp) {
+        //         Ok((name, value)) => {
+        //             comparams.insert(name, value);
+        //         }
+        //         Err(e) => {
+        //             log::warn!(target: &self.ecu_data.ecu_name,
+        // "Error resolving ComParam: {e:?}");
+        //         }
+        //     });
+        //
+        // comparams
     }
 }
 
@@ -1760,7 +1844,7 @@ impl EcuManager {
 
                 if let Some(structure) = case
                     .structure
-                    .map(|id| self.get_basic_structure(id))
+                    .map(|id| self.get_basic_structure(Some(id)))
                     .transpose()?
                     .flatten()
                 {
@@ -1899,16 +1983,20 @@ impl EcuManager {
                         datatypes::DataOperationVariant::Structure(structure_dop) => {
                             self.map_struct_to_uds(structure_dop, value, payload)
                         }
-                        datatypes::DataOperationVariant::EnvDataDesc(_env_data_desc_dop) => {
-                            todo!()
-                        }
-                        datatypes::DataOperationVariant::EnvData(_env_data_dop) => todo!(),
-                        datatypes::DataOperationVariant::Dtc(_dtc_dop) => todo!(),
                         datatypes::DataOperationVariant::StaticField(_static_field_dop) => {
                             todo!()
                         }
                         datatypes::DataOperationVariant::Mux(mux_dop) => {
                             self.map_mux_to_uds(mux_dop, value, payload)
+                        }
+                        datatypes::DataOperationVariant::EnvDataDesc(_)
+                        | datatypes::DataOperationVariant::EnvData(_)
+                        | datatypes::DataOperationVariant::Dtc(_) => {
+                            // This might change, if we add an MCD layer
+                            unreachable!(
+                                "EnvData(Desc) and DTC DoPs will not be mapped via parameters to \
+                                 request, but handled via a dedicated 'faults' endpoint"
+                            )
                         }
                     }
                 } else {
@@ -2210,18 +2298,16 @@ impl EcuManager {
 
                 // Omitting the structure from a (default) case is valid and can be used
                 // to have a valid switch key that is not connected with further data.
-                if let Some(structure_id) = case.structure {
-                    let structure = self.get_basic_structure(structure_id)?;
-                    if let Some(structure) = structure {
-                        uds_payload.push_slice(
-                            byte_pos + switch_key_data_len + switch_key.byte_position as usize,
-                            uds_payload.len(),
-                        )?;
-                        let case_data =
-                            self.map_struct_from_uds(structure, mapped_service, uds_payload)?;
-                        uds_payload.pop_slice()?;
-                        mux_data.insert(case_name, DiagDataTypeContainer::Struct(case_data));
-                    }
+                let structure = self.get_basic_structure(case.structure)?;
+                if let Some(structure) = structure {
+                    uds_payload.push_slice(
+                        byte_pos + switch_key_data_len + switch_key.byte_position as usize,
+                        uds_payload.len(),
+                    )?;
+                    let case_data =
+                        self.map_struct_from_uds(structure, mapped_service, uds_payload)?;
+                    uds_payload.pop_slice()?;
+                    mux_data.insert(case_name, DiagDataTypeContainer::Struct(case_data));
                 }
                 data.insert(short_name, DiagDataTypeContainer::Struct(mux_data));
                 Ok(())
@@ -2234,8 +2320,12 @@ impl EcuManager {
 
     fn get_basic_structure(
         &self,
-        basic_structure_id: cda_interfaces::Id,
+        basic_structure_id: Option<cda_interfaces::Id>,
     ) -> Result<Option<&datatypes::StructureDop>, DiagServiceError> {
+        let basic_structure_id = match basic_structure_id {
+            Some(id) => id,
+            None => return Ok(None),
+        };
         self.ecu_data
             .data_operations
             .get(&basic_structure_id)
@@ -2408,6 +2498,39 @@ impl EcuManager {
             }
         };
         Some((bitlength, coded_const_value))
+    }
+
+    fn lookup_services_by_sid(
+        &self,
+        service_id: u8,
+    ) -> Result<Vec<&DiagnosticService>, DiagServiceError> {
+        let variant = self
+            .variant
+            .as_ref()
+            .and_then(|v| self.ecu_data.variants.get(&v.id))
+            .or_else(|| self.ecu_data.variants.get(&self.ecu_data.base_variant_id))
+            .ok_or(DiagServiceError::NotFound)?;
+
+        let base_variant = self
+            .ecu_data
+            .variants
+            .get(&self.ecu_data.base_variant_id)
+            .ok_or(DiagServiceError::NotFound)?;
+
+        let service_ids = variant.services.iter().chain(base_variant.services.iter());
+        let services = service_ids
+            .filter_map(|id| {
+                self.ecu_data.services.get(id).and_then(|service| {
+                    if service.service_id == service_id {
+                        Some(service)
+                    } else {
+                        None
+                    }
+                })
+            })
+            .collect::<Vec<_>>();
+
+        Ok(services)
     }
 }
 

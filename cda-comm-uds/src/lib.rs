@@ -23,7 +23,7 @@ use cda_interfaces::{
     TesterPresentType, TransmissionParameters, UdsEcu, UdsResponse,
     datatypes::{
         ComponentConfigurationsInfo, DataTransferError, DataTransferMetaData, DataTransferStatus,
-        Ecu, Gateway, NetworkStructure, RetryPolicy,
+        Ecu, Fault, Gateway, NetworkStructure, RetryPolicy,
     },
     diagservices::{DiagServiceResponse, DiagServiceResponseType, UdsPayloadData},
     service_ids,
@@ -36,7 +36,7 @@ use tokio::{
     task::JoinHandle,
 };
 
-type EcuIdentifer = String;
+type EcuIdentifier = String;
 
 struct UdsParameters {
     timeout_default: Duration,
@@ -67,8 +67,8 @@ pub struct TesterPresentTask {
 pub struct UdsManager<S: EcuGateway, R: DiagServiceResponse, T: EcuManager<Response = R>> {
     ecus: Arc<HashMap<String, RwLock<T>>>,
     gateway: S,
-    data_transfers: Arc<Mutex<HashMap<EcuIdentifer, EcuDataTransfer>>>,
-    tester_present_tasks: Arc<RwLock<HashMap<EcuIdentifer, TesterPresentTask>>>,
+    data_transfers: Arc<Mutex<HashMap<EcuIdentifier, EcuDataTransfer>>>,
+    tester_present_tasks: Arc<RwLock<HashMap<EcuIdentifier, TesterPresentTask>>>,
     _phantom: std::marker::PhantomData<R>,
 }
 
@@ -873,7 +873,7 @@ impl<S: EcuGateway, R: DiagServiceResponse, T: EcuManager<Response = R>> UdsEcu
             .read()
             .await;
 
-        let reset_services = diag_manager.lookup_service_by_sid(service_ids::ECU_RESET)?;
+        let reset_services = diag_manager.lookup_service_names_by_sid(service_ids::ECU_RESET)?;
         drop(diag_manager);
         Ok(reset_services)
     }
@@ -1143,6 +1143,22 @@ impl<S: EcuGateway, R: DiagServiceResponse, T: EcuManager<Response = R>> UdsEcu
         }
         let cloned = self.clone();
         cloned.start_variant_detection_for_ecus(ecus)
+    }
+
+    async fn get_faults(
+        &self,
+        ecu_name: &str,
+        status: Option<Vec<String>>,
+        severity: Option<String>,
+        scope: Option<String>,
+    ) -> Result<Vec<Fault>, DiagServiceError> {
+        let ecu = self.ecus.get(ecu_name).ok_or(DiagServiceError::NotFound)?;
+        ecu.read()
+            .await
+            .faults(ecu_name, status, severity, scope)
+            .expect("TODO: panic message");
+
+        todo!()
     }
 }
 

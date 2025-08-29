@@ -123,6 +123,17 @@ pub mod service_ids {
     pub const CONTROL_DTC_SETTING: u8 = 0x85;
 }
 
+pub mod sub_functions {
+    pub mod read_dtc_information {
+        pub const REPORT_DTC_BY_STATUS_MASK: u8 = 0x02;
+        pub const REPORT_DTC_SNAPSHOT_RECORD_BY_DTC_NUMBER: u8 = 0x04;
+        pub const REPORT_DTC_EXT_DATA_RECORD_BY_DTC_NUMBER: u8 = 0x06;
+        pub const REPORT_USER_DEF_MEMORY_DTC_BY_STATUS_MASK: u8 = 0x17;
+        pub const REPORT_USER_DEF_MEMORY_DTC_SNAPSHOT_RECORD_BY_DTC_NUMBER: u8 = 0x18;
+        pub const REPORT_USER_DEF_MEMORY_DTC_EXT_DATA_RECORD_BY_DTC_NUMBER: u8 = 0x19;
+    }
+}
+
 impl DiagCommType {
     #[must_use]
     /// This function returns the service prefix for the given `DiagCommType`
