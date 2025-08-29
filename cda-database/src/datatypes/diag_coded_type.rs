@@ -22,6 +22,8 @@ use crate::{
     proto::dataformat::{self, diag_coded_type},
 };
 
+pub type BitLength = u32;
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[cfg_attr(feature = "deepsize", derive(DeepSizeOf))]
 pub enum DataType {
@@ -868,7 +870,6 @@ pub enum DiagCodedTypeVariant {
     StandardLength(StandardLengthType),
 }
 
-pub type BitLength = u32;
 #[derive(Debug, PartialEq)]
 #[cfg_attr(feature = "deepsize", derive(DeepSizeOf))]
 pub struct MinMaxLengthType {

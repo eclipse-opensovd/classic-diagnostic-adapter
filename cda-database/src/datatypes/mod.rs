@@ -33,6 +33,7 @@ const LOG_TARGET: &str = "ECU-Db-Mapping";
 pub use comparam::*;
 pub use data_operation::*;
 pub use diag_coded_type::*;
+pub use dtc::*;
 pub use functional_classes::*;
 pub use jobs::*;
 pub use parameter::*;
@@ -44,6 +45,7 @@ pub use variant::*;
 pub(crate) mod comparam;
 pub(crate) mod data_operation;
 pub(crate) mod diag_coded_type;
+pub(crate) mod dtc;
 pub(crate) mod functional_classes;
 pub(crate) mod jobs;
 pub(crate) mod parameter;
@@ -64,6 +66,7 @@ pub type ProtocolMap = HashMap<Id, Protocol>;
 pub type BaseServiceMap = HashMap<String, Id>;
 pub type SdgMap = HashMap<Id, Sdg>;
 pub type SdMap = HashMap<Id, Sd>;
+pub type DtcMap = HashMap<Id, Dtc>;
 
 #[derive(Debug)]
 #[cfg_attr(feature = "deepsize", derive(DeepSizeOf))]
@@ -90,6 +93,7 @@ pub struct DiagnosticDatabase {
     pub base_state_chart_lookup: BaseStateChartMap,
     pub functional_classes_lookup: FunctionalClassesLookupMap,
     pub functional_classes: HashMap<Id, String>,
+    pub dtcs: DtcMap,
 }
 
 #[derive(Debug)]
@@ -174,6 +178,7 @@ impl Default for DiagnosticDatabase {
             base_state_chart_lookup: HashMap::new(),
             functional_classes_lookup: Default::default(),
             functional_classes: HashMap::new(),
+            dtcs: HashMap::new(),
         }
     }
 }
@@ -246,6 +251,8 @@ impl DiagnosticDatabase {
             .collect();
         let functional_classes_lookup = get_functional_classes_lookup(&ecu_data, &services);
 
+        let dtc_records = get_dtcs(&ecu_data, &ecu_database_path);
+
         Ok(DiagnosticDatabase {
             ecu_database_path,
             ecu_name: ecu_data.ecu_name.to_string(),
@@ -269,6 +276,7 @@ impl DiagnosticDatabase {
             base_state_chart_lookup,
             functional_classes,
             functional_classes_lookup,
+            dtcs: dtc_records,
         })
     }
 

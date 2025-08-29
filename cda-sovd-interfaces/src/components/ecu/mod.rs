@@ -33,6 +33,7 @@ pub struct Ecu {
     pub sdgs: Option<Vec<SdSdg>>,
     #[serde(rename = "x-single-ecu-jobs")]
     pub single_ecu_jobs: String,
+    pub faults: String,
 }
 
 pub type ComponentData = Items<ComponentDataInfo>;
@@ -349,6 +350,108 @@ pub mod x {
                 .as_ref()
                 .and_then(|ln| ln.value.as_ref().or(ln.ti.as_ref()))
                 .is_none()
+        }
+    }
+}
+
+pub mod faults {
+    use super::*;
+    pub mod get {
+        use super::*;
+
+        /// Representation of a fault / DTC (Diagnostic Trouble Code)
+        /// as described in the OpenSOVD specification.
+        /// The following fields are omitted because the CDA does not provide
+        /// this information:
+        /// * Symptom
+        /// * Translation IDs
+        ///
+        /// This is still compliant with the OpenSOVD specification, as these fields are optional.
+        #[derive(Serialize)]
+        #[cfg_attr(feature = "openapi", derive(schemars::JsonSchema))]
+        pub struct Fault {
+            ///Fault code in the native representation of the entity.
+            pub code: String,
+            // Defines the scope.
+            // The capability description defines which scopes are supported.
+            #[serde(skip_serializing_if = "Option::is_none")]
+            pub scope: Option<String>,
+            /// Display representation of the fault code.
+            #[serde(skip_serializing_if = "Option::is_none")]
+            pub display_code: Option<String>,
+            /// Name / description of the fault code.
+            pub fault_name: String,
+            /// Severity defines the impact of the fault on the system.
+            #[serde(skip_serializing_if = "Option::is_none")]
+            pub severity: Option<u32>,
+            /// Detailed status information as key value pairs.
+            #[serde(skip_serializing_if = "Option::is_none")]
+            pub status: Option<FaultStatus>,
+        }
+
+        #[derive(Debug, Serialize, Deserialize)]
+        #[cfg_attr(feature = "openapi", derive(schemars::JsonSchema))]
+        /// Query parameters for filtering DTC by the given fields.
+        pub struct FaultQuery {
+            /// Filters the elements based on a status, if the value ia a full match.
+            /// To allow multiple values the parameter is repeated. (0..*), they are 'OR' combined.
+            /// Currently supported  (case-insensitive) keys are:
+            /// * confirmedDtc
+            /// * mask
+            /// * pendingDtc
+            /// * testFailed
+            /// * testFailedSinceLastClear
+            /// * testFailedThisOperationCycle
+            /// * testNotCompletedSinceLastClear
+            /// * testNotCompletedThisOperationCycle
+            /// * warningIndicatorRequested
+            ///
+            /// Additional keys are not read from the database at this time.
+            /// The value can be allowed values for these keys are 0|1 or true|false.
+            ///
+            /// Example:
+            ///
+            /// `?status[confirmedDtc]=true&status[warningIndicatorRequested]=1`
+            pub status: Option<HashMap<String, serde_json::Value>>,
+            /// Filters the elements based on their severity
+            pub severity: Option<u32>,
+            /// The scope to retrieve faults for. If not provided, all scopes are considered.
+            pub scope: Option<String>,
+            #[serde(rename = "include-schema")]
+            pub include_schema: Option<bool>,
+        }
+
+        #[derive(Serialize, Debug)]
+        #[cfg_attr(feature = "openapi", derive(schemars::JsonSchema))]
+        #[serde(rename_all = "camelCase")]
+        pub struct FaultStatus {
+            #[serde(skip_serializing_if = "Option::is_none")]
+            pub test_failed: Option<bool>,
+            #[serde(skip_serializing_if = "Option::is_none")]
+            pub test_failed_this_operation_cycle: Option<bool>,
+            #[serde(skip_serializing_if = "Option::is_none")]
+            pub pending_dtc: Option<bool>,
+            #[serde(skip_serializing_if = "Option::is_none")]
+            pub confirmed_dtc: Option<bool>,
+            #[serde(skip_serializing_if = "Option::is_none")]
+            pub test_not_completed_since_last_clear: Option<bool>,
+            #[serde(skip_serializing_if = "Option::is_none")]
+            pub test_failed_since_last_clear: Option<bool>,
+            #[serde(skip_serializing_if = "Option::is_none")]
+            pub test_not_completed_this_operation_cycle: Option<bool>,
+            #[serde(skip_serializing_if = "Option::is_none")]
+            pub warning_indicator_requested: Option<bool>,
+            #[serde(skip_serializing_if = "Option::is_none")]
+            pub mask: Option<String>,
+        }
+
+        #[derive(Serialize)]
+        #[cfg_attr(feature = "openapi", derive(schemars::JsonSchema))]
+        pub struct Response {
+            pub items: Vec<Fault>,
+            #[cfg_attr(feature = "openapi", schemars(skip))]
+            #[serde(skip_serializing_if = "Option::is_none")]
+            pub schema: Option<schemars::Schema>,
         }
     }
 }

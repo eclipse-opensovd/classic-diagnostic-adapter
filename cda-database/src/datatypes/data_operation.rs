@@ -164,11 +164,30 @@ pub enum Radix {
 
 #[derive(Debug)]
 #[cfg_attr(feature = "deepsize", derive(DeepSizeOf))]
+pub struct DopFieldBasicStruct {
+    pub struct_id: Id,
+    pub name: Option<StringId>,
+}
+
+#[derive(Debug)]
+#[cfg_attr(feature = "deepsize", derive(DeepSizeOf))]
+pub struct DopFieldEnvDataDesc {
+    pub env_data_desc: Id,
+    pub name: Option<StringId>,
+}
+
+#[derive(Debug)]
+#[cfg_attr(feature = "deepsize", derive(DeepSizeOf))]
+pub enum DopFieldValue {
+    BasicStruct(DopFieldBasicStruct),
+    EnvDataDesc(DopFieldEnvDataDesc),
+}
+
+/// A dop field may either reference a basic structure or an env data desc.
+#[derive(Debug)]
+#[cfg_attr(feature = "deepsize", derive(DeepSizeOf))]
 pub struct DopField {
-    pub basic_structure: Id,
-    pub basic_structure_short_name: Option<StringId>,
-    pub env_data_desc: Option<Id>,
-    pub env_data_desc_short_name: Option<StringId>,
+    pub value: DopFieldValue,
     pub is_visible: bool,
 }
 
@@ -693,26 +712,62 @@ fn get_limit(limit: Option<&dataformat::Limit>) -> Result<Option<Limit>, DiagSer
 }
 
 fn get_dop_field(f: &dop::Field) -> Result<DopField, DiagServiceError> {
-    Ok(DopField {
-        basic_structure: f
-            .basic_structure
-            .as_ref()
-            .ok_or_else(|| {
-                DiagServiceError::InvalidDatabase("Dop basic structure ref not set.".to_owned())
-            })?
+    fn create_dop_field_from_basic_structure(
+        f: &dop::Field,
+        dop_ref: &dop::Ref,
+    ) -> Result<DopField, DiagServiceError> {
+        let ref_value = dop_ref
             .r#ref
             .as_ref()
-            .ok_or_else(|| ref_optional_none("Field.basicStructure.ref_pb"))?
-            .value,
-        basic_structure_short_name: option_str_to_string(f.basic_structure_short_name_ref.as_ref()),
-        env_data_desc: f
-            .env_data_desc
+            .ok_or_else(|| {
+                DiagServiceError::InvalidDatabase(
+                    "DopField.basicStructure.ref_pb is missing".to_owned(),
+                )
+            })?
+            .value;
+
+        Ok(DopField {
+            value: DopFieldValue::BasicStruct(DopFieldBasicStruct {
+                struct_id: ref_value,
+                name: option_str_to_string(f.basic_structure_short_name_ref.as_ref()),
+            }),
+            is_visible: f.is_visible(),
+        })
+    }
+
+    fn create_dop_field_from_env_data_desc(
+        f: &dop::Field,
+        dop_ref: &dop::Ref,
+    ) -> Result<DopField, DiagServiceError> {
+        let ref_value = dop_ref
+            .r#ref
             .as_ref()
-            .and_then(|e| e.r#ref.as_ref())
-            .map(|e| e.value),
-        env_data_desc_short_name: option_str_to_string(f.env_data_desc_short_name_ref.as_ref()),
-        is_visible: f.is_visible(),
-    })
+            .ok_or_else(|| {
+                DiagServiceError::InvalidDatabase(
+                    "DopField.envDataDesc.ref_pb is missing".to_owned(),
+                )
+            })?
+            .value;
+
+        Ok(DopField {
+            value: DopFieldValue::EnvDataDesc(DopFieldEnvDataDesc {
+                env_data_desc: ref_value,
+                name: option_str_to_string(f.env_data_desc_short_name_ref.as_ref()),
+            }),
+            is_visible: f.is_visible(),
+        })
+    }
+
+    match (&f.basic_structure, &f.env_data_desc) {
+        (Some(dop_ref), None) => create_dop_field_from_basic_structure(f, dop_ref),
+        (None, Some(dop_ref)) => create_dop_field_from_env_data_desc(f, dop_ref),
+        (Some(_), Some(_)) => Err(DiagServiceError::InvalidDatabase(
+            "DopField has both basicStructure and envDataDesc".to_owned(),
+        )),
+        (None, None) => Err(DiagServiceError::InvalidDatabase(
+            "DopField has neither basicStructure nor envDataDesc".to_owned(),
+        )),
+    }
 }
 
 impl From<dop::DopType> for DOPType {

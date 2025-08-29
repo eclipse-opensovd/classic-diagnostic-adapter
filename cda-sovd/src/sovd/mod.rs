@@ -39,7 +39,7 @@ use uuid::Uuid;
 
 use crate::sovd::{
     components::ecu::{
-        configurations, data, genericservice, modes, operations, x_single_ecu_jobs,
+        configurations, data, faults, genericservice, modes, operations, x_single_ecu_jobs,
         x_sovd2uds_bulk_data, x_sovd2uds_download,
     },
     locks::{LockType, Locks},
@@ -424,6 +424,7 @@ fn ecu_route<
                 x_sovd2uds_bulk_data::mdd_embedded_files::id::docs_get,
             ),
         )
+        .api_route("/faults", routing::get_with(faults::get, faults::docs_get))
         .with_state(ecu_state)
         .with_path_items(|op| op.tag(ecu_name));
 

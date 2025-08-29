@@ -128,11 +128,21 @@ where
 }
 
 fn rewrite_request_uri<B>(mut req: Request<B>) -> Request<B> {
-    let new_uri = req.uri().to_string().to_lowercase().parse().unwrap();
+    let uri = req.uri();
+    // Decode URI here, so we can use query params later without
+    // needing to decode them later on.
+    let decoded = percent_encoding::percent_decode_str(
+        uri.path_and_query()
+            .map(|pq| pq.as_str())
+            .unwrap_or_default(),
+    )
+    .decode_utf8()
+    .unwrap_or_else(|_| uri.to_string().into());
+
+    let new_uri = decoded.to_lowercase().parse().unwrap();
     *req.uri_mut() = new_uri;
     req
 }
-
 fn create_trace_layer<S>(route: axum::Router<S>) -> axum::Router<S>
 where
     S: Clone + Send + Sync + 'static,

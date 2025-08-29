@@ -28,6 +28,7 @@ use axum::{
 use cda_interfaces::{DiagServiceError, diagservices::DiagServiceResponse, file_manager::MddError};
 use hashbrown::HashMap;
 use serde::{Deserialize, Serialize};
+use serde_qs::axum::QsQueryRejection;
 use sovd_interfaces::error::ErrorCode;
 
 #[allow(dead_code)]
@@ -64,7 +65,7 @@ impl From<DiagServiceError> for ApiError {
             | DiagServiceError::InvalidSession(_)
             | DiagServiceError::UnknownOperation
             | DiagServiceError::UnexpectedResponse
-            | DiagServiceError::RequestNotSupported
+            | DiagServiceError::RequestNotSupported(_)
             | DiagServiceError::Timeout
             | DiagServiceError::DataError(_)
             | DiagServiceError::AccessDenied(_) => ApiError::BadRequest(value.to_string()),
@@ -121,6 +122,12 @@ impl From<QueryRejection> for ApiError {
 impl IntoResponse for ApiError {
     fn into_response(self) -> Response {
         ErrorWrapper(self).into_response()
+    }
+}
+
+impl From<QsQueryRejection> for ApiError {
+    fn from(e: QsQueryRejection) -> Self {
+        ApiError::BadRequest(e.to_string())
     }
 }
 

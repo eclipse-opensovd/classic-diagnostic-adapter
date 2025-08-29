@@ -11,7 +11,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-use cda_database::datatypes::{self, DiagnosticDatabase};
+use cda_database::datatypes::{self, DiagnosticDatabase, DopFieldValue};
 use cda_interfaces::{
     DiagComm, DiagServiceError, EcuAddressProvider, EcuSchemaProvider, Id, STRINGS,
     SchemaDescription,
@@ -314,15 +314,24 @@ fn map_dop_field_to_schema(
     ecu_db: &DiagnosticDatabase,
     request_id: Option<Id>,
 ) -> Option<schemars::Schema> {
-    ecu_db
-        .data_operations
-        .get(&dop_field.basic_structure)
-        .and_then(|dop| {
-            let datatypes::DataOperationVariant::Structure(struct_) = &dop.variant else {
-                return None;
-            };
-            map_struct_to_schema(struct_, ctx, ecu_db, request_id)
-        })
+    match &dop_field.value {
+        DopFieldValue::BasicStruct(basic_struct) => ecu_db
+            .data_operations
+            .get(&basic_struct.struct_id)
+            .and_then(|dop| {
+                let datatypes::DataOperationVariant::Structure(struct_) = &dop.variant else {
+                    return None;
+                };
+                map_struct_to_schema(struct_, ctx, ecu_db, request_id)
+            }),
+        DopFieldValue::EnvDataDesc(_) => {
+            tracing::trace!(
+                "Mapping {ctx}: EnvDataDesc DopFields are not yet supported in JSON Schema. \
+                 skipping"
+            );
+            None
+        }
+    }
 }
 
 fn map_mux_to_schema(

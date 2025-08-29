@@ -14,16 +14,16 @@
 use std::{sync::Arc, time::Duration};
 
 use cda_database::datatypes::{
-    self, DataType, DiagCodedTypeVariant, DiagnosticDatabase, DiagnosticService,
-    LogicalAddressType, StateChart, resolve_comparam,
+    self, DataType, DiagCodedTypeVariant, DiagnosticDatabase, DiagnosticService, DopFieldValue,
+    DtcDop, LogicalAddressType, Parameter, ParameterValue, StateChart, resolve_comparam,
 };
 use cda_interfaces::{
     DiagComm, DiagCommAction, DiagCommType, DiagServiceError, EcuAddressProvider, EcuState,
     Protocol, STRINGS, SecurityAccess, ServicePayload,
     datatypes::{
         AddressingMode, ComParams, ComplexComParamValue, ComponentConfigurationsInfo,
-        ComponentDataInfo, DatabaseNamingConvention, RetryPolicy, SdSdg, TesterPresentSendType,
-        semantics, single_ecu,
+        ComponentDataInfo, DatabaseNamingConvention, DtcLookup, DtcReadInformationFunction,
+        DtcRecord, RetryPolicy, SdSdg, TesterPresentSendType, semantics, single_ecu,
     },
     diagservices::{DiagServiceResponse, DiagServiceResponseType, FieldParseError, UdsPayloadData},
     get_string, get_string_from_option, get_string_from_option_with_default,
@@ -34,7 +34,7 @@ use parking_lot::Mutex;
 use tokio::task::JoinHandle;
 
 use crate::{
-    MappedResponseData,
+    DTC_CODE_BIT_LEN, DiagDataContainerDtc, MappedResponseData,
     diag_kernel::{
         DiagDataValue, Variant,
         diagservices::{
@@ -616,7 +616,10 @@ impl cda_interfaces::EcuManager for EcuManager {
             .ecu_data
             .requests
             .get(&mapped_service.request_id)
-            .ok_or(DiagServiceError::RequestNotSupported)?;
+            .ok_or(DiagServiceError::RequestNotSupported(format!(
+                "Service '{}' is not supported",
+                diag_service.name
+            )))?;
 
         let mut mapped_params = request
             .params
@@ -656,7 +659,7 @@ impl cda_interfaces::EcuManager for EcuManager {
                         ))
                     })?;
 
-                    let uds_val = operations::diag_coded_type_to_uds(
+                    let uds_val = operations::string_to_vec_u8(
                         diag_type.base_datatype(),
                         &coded_const_value,
                     )?;
@@ -767,31 +770,11 @@ impl cda_interfaces::EcuManager for EcuManager {
     /// This will first look up the service in the current variant, then in the base variant
     /// # Errors
     /// Will return `Err` if either the variant or base variant cannot be resolved.
-    fn lookup_service_by_sid(&self, service_id: u8) -> Result<Vec<String>, DiagServiceError> {
-        let variant = self
-            .variant
-            .as_ref()
-            .and_then(|v| self.ecu_data.variants.get(&v.id))
-            .or_else(|| self.ecu_data.variants.get(&self.ecu_data.base_variant_id))
-            .ok_or(DiagServiceError::NotFound)?;
-
-        let base_variant = self
-            .ecu_data
-            .variants
-            .get(&self.ecu_data.base_variant_id)
-            .ok_or(DiagServiceError::NotFound)?;
-
-        let service_ids = variant.services.iter().chain(base_variant.services.iter());
-        let services = service_ids
-            .filter_map(|id| {
-                self.ecu_data.services.get(id).and_then(|service| {
-                    if service.service_id == service_id {
-                        STRINGS.get(service.short_name)
-                    } else {
-                        None
-                    }
-                })
-            })
+    fn lookup_service_names_by_sid(&self, service_id: u8) -> Result<Vec<String>, DiagServiceError> {
+        let services = self
+            .lookup_services_by_sid(service_id)?
+            .iter()
+            .filter_map(|service| get_string!(service.short_name).ok())
             .collect::<Vec<_>>();
 
         Ok(services)
@@ -1164,6 +1147,99 @@ impl cda_interfaces::EcuManager for EcuManager {
             .collect();
         result.sort_by(|a, b| a.id.cmp(&b.id));
         Ok(result)
+    }
+
+    fn lookup_dtc_services(
+        &self,
+        service_types: Vec<DtcReadInformationFunction>,
+    ) -> Result<HashMap<DtcReadInformationFunction, DtcLookup>, DiagServiceError> {
+        self.lookup_services_by_sid(service_ids::READ_DTC_INFORMATION)?
+            .into_iter()
+            .filter_map(|service| {
+                self.ecu_data
+                    .requests
+                    .get(&service.request_id)
+                    .and_then(|req| {
+                        req.params.iter().find_map(|param_ref| {
+                            self.ecu_data.params.get(param_ref).and_then(|param| {
+                                let sub_function_id = match &param.value {
+                                    ParameterValue::CodedConst(c) => match get_string!(c.value) {
+                                        Ok(name) => name,
+                                        Err(_) => return None,
+                                    },
+                                    _ => return None,
+                                };
+
+                                service_types
+                                    .iter()
+                                    .find(|s| ((*s).clone() as u8).to_string() == *sub_function_id)
+                                    .map(|dsp| (service, dsp))
+                            })
+                        })
+                    })
+            })
+            .map(|(service, dtc_service_type)| {
+                let scope = self
+                    .ecu_data
+                    .functional_classes
+                    .get(&service.funct_class)
+                    .map(|s| s.replace("_", ""))
+                    .unwrap_or(dtc_service_type.default_scope().to_owned());
+
+                let service_short_name = get_string!(service.short_name)?;
+                let params = self
+                    .ecu_data
+                    .responses
+                    .iter()
+                    .find(|(id, resp)| {
+                        resp.response_type == datatypes::ResponseType::Positive
+                            && service.pos_responses.contains(id)
+                    })
+                    .map(|(_, resp)| {
+                        resp.params
+                            .iter()
+                            .filter_map(|param_id| self.ecu_data.params.get(param_id))
+                            .collect::<Vec<_>>()
+                    })
+                    .ok_or_else(|| {
+                        DiagServiceError::ParameterConversionError(
+                            "No positive response found for DTC service".to_owned(),
+                        )
+                    })?;
+
+                let dtc_dop = self.find_dtc_dop_in_params(params)?;
+                let dtcs: Vec<_> = dtc_dop
+                    .map(|dtc_param| {
+                        dtc_param
+                            .dtc_refs
+                            .iter()
+                            .filter_map(|dtc_ref| self.ecu_data.dtcs.get(dtc_ref))
+                            .map(|dtc| DtcRecord {
+                                code: dtc.code,
+                                display_code: get_string_from_option!(dtc.display_code),
+                                fault_name: get_string_from_option!(dtc.fault_name)
+                                    .unwrap_or_else(|| format!("DTC_{}", dtc.code)),
+                                severity: dtc.severity,
+                            })
+                            .collect()
+                    })
+                    .unwrap_or_default();
+
+                Ok((
+                    dtc_service_type.clone(),
+                    DtcLookup {
+                        scope,
+                        service: DiagComm {
+                            name: service_short_name.clone(),
+                            action: DiagCommAction::Read,
+                            type_: DiagCommType::Faults,
+                            lookup_name: Some(service_short_name),
+                        },
+                        dtcs,
+                    },
+                ))
+            })
+            .collect()
     }
 }
 
@@ -1576,6 +1652,11 @@ impl EcuManager {
                             "RepeatingStruct not supported for UDS payload".to_owned(),
                         ));
                     }
+                    DiagDataTypeContainer::DtcStruct(_dtc) => {
+                        return Err(DiagServiceError::ParameterConversionError(
+                            "DtcStruct not supported for UDS payload".to_owned(),
+                        ));
+                    }
                 };
 
                 let const_value = STRINGS.get(c.value).ok_or_else(|| {
@@ -1585,7 +1666,7 @@ impl EcuManager {
                     ))
                 })?;
                 let expected =
-                    operations::diag_coded_type_to_uds(diag_type.base_datatype(), &const_value)?
+                    operations::string_to_vec_u8(diag_type.base_datatype(), &const_value)?
                         .into_iter()
                         .collect::<Vec<_>>();
                 let expected = &expected[expected.len() - value.data.len()..];
@@ -1660,8 +1741,31 @@ impl EcuManager {
                     );
                 }
             }
-            datatypes::ParameterValue::Reserved(_) => {
-                // skip for now
+            datatypes::ParameterValue::Reserved(ref r) => {
+                let coded_type = datatypes::DiagCodedType::new_high_low_byte_order(
+                    DataType::UInt32,
+                    DiagCodedTypeVariant::StandardLength(datatypes::StandardLengthType {
+                        bit_length: r.bit_length,
+                        bitmask: None,
+                        condensed: false,
+                    }),
+                )?;
+
+                let (param_data, bit_len) = coded_type.decode(
+                    uds_payload.data(),
+                    param.byte_pos as usize,
+                    param.bit_pos as usize,
+                )?;
+
+                data.insert(
+                    param_name.to_owned(),
+                    DiagDataTypeContainer::RawContainer(DiagDataTypeContainerRaw {
+                        data: param_data,
+                        bit_len,
+                        data_type: DataType::UInt32,
+                        compu_method: None,
+                    }),
+                );
             }
         }
         Ok(())
@@ -1907,9 +2011,18 @@ impl EcuManager {
                                     "EndOfPdu expected different amount of items".to_owned(),
                                 ));
                             }
-                            let structure = self
-                                .get_basic_structure(end_of_pdu_dop.field.basic_structure)?
-                                .ok_or_else(|| {
+
+                            let s = match &end_of_pdu_dop.field.value {
+                                DopFieldValue::BasicStruct(s) => s,
+                                DopFieldValue::EnvDataDesc(_) => {
+                                    return Err(DiagServiceError::InvalidDatabase(
+                                        "EndOfPdu failed does not contain a struct".to_owned(),
+                                    ));
+                                }
+                            };
+
+                            let structure =
+                                self.get_basic_structure(s.struct_id)?.ok_or_else(|| {
                                     DiagServiceError::InvalidDatabase(
                                         "EndOfPdu failed to find struct".to_owned(),
                                     )
@@ -1922,16 +2035,20 @@ impl EcuManager {
                         datatypes::DataOperationVariant::Structure(structure_dop) => {
                             self.map_struct_to_uds(structure_dop, value, payload)
                         }
-                        datatypes::DataOperationVariant::EnvDataDesc(_env_data_desc_dop) => {
-                            todo!()
-                        }
-                        datatypes::DataOperationVariant::EnvData(_env_data_dop) => todo!(),
-                        datatypes::DataOperationVariant::Dtc(_dtc_dop) => todo!(),
                         datatypes::DataOperationVariant::StaticField(_static_field_dop) => {
                             todo!()
                         }
                         datatypes::DataOperationVariant::Mux(mux_dop) => {
                             self.map_mux_to_uds(mux_dop, value, payload)
+                        }
+                        datatypes::DataOperationVariant::EnvDataDesc(_)
+                        | datatypes::DataOperationVariant::EnvData(_)
+                        | datatypes::DataOperationVariant::Dtc(_) => {
+                            Err(DiagServiceError::InvalidDatabase(
+                                "EnvData(Desc) and DTC DoPs cannot be mapped via parameters to \
+                                 request, but handled via a dedicated 'faults' endpoint"
+                                    .to_owned(),
+                            ))
                         }
                     }
                 } else {
@@ -2033,35 +2150,41 @@ impl EcuManager {
                 // When a response is read the values of `max-number-of-items`
                 // and `min-number-of-items` are deliberately ignored,
                 // according to ISO 22901:2008 7.3.6.10.6
-                let struct_ = self
-                    .get_basic_structure(end_of_pdu_dop.field.basic_structure)?
-                    .ok_or_else(|| {
-                        DiagServiceError::InvalidDatabase(
-                            "EndOfPdu failed to find struct".to_owned(),
-                        )
-                    })?;
+                let s = match &end_of_pdu_dop.field.value {
+                    DopFieldValue::BasicStruct(s) => s,
+                    DopFieldValue::EnvDataDesc(_) => {
+                        return Err(DiagServiceError::InvalidDatabase(
+                            "EndOfPdu failed does not contain a struct".to_owned(),
+                        ));
+                    }
+                };
+                let struct_ = self.get_basic_structure(s.struct_id)?.ok_or_else(|| {
+                    DiagServiceError::InvalidDatabase("EndOfPdu failed to find struct".to_owned())
+                })?;
 
                 let mut nested_structs = Vec::new();
                 uds_payload.consume();
                 loop {
                     uds_payload.push_slice_to_abs_end(uds_payload.last_read_byte_pos())?;
-                    match self.map_nested_struct_from_uds(
-                        struct_,
-                        mapped_service,
-                        uds_payload,
-                        &mut nested_structs,
-                    ) {
-                        Ok(_) => {}
-                        Err(e) => {
-                            match e {
-                                DiagServiceError::NotEnoughData { .. } => {
-                                    // Not enough data left to parse another struct, exit loop
-                                    // and ignore eventual leftover bytes
-                                    log::warn!("{e}");
-                                    uds_payload.pop_slice()?;
-                                    break;
+                    if !uds_payload.exhausted() {
+                        match self.map_nested_struct_from_uds(
+                            struct_,
+                            mapped_service,
+                            uds_payload,
+                            &mut nested_structs,
+                        ) {
+                            Ok(_) => {}
+                            Err(e) => {
+                                match e {
+                                    DiagServiceError::NotEnoughData { .. } => {
+                                        // Not enough data left to parse another struct, exit loop
+                                        // and ignore eventual leftover bytes
+                                        log::warn!("{e}");
+                                        uds_payload.pop_slice()?;
+                                        break;
+                                    }
+                                    _ => return Err(e),
                                 }
-                                _ => return Err(e),
                             }
                         }
                     }
@@ -2097,8 +2220,47 @@ impl EcuManager {
             datatypes::DataOperationVariant::EnvData(ref _env_data_dop) => {
                 log::warn!(target: "map_dop", "EnvData not supported");
             }
-            datatypes::DataOperationVariant::Dtc(ref _dtc_dop) => {
-                log::warn!(target: "map_dop", "DTC not supported");
+            datatypes::DataOperationVariant::Dtc(ref dtc_dop) => {
+                let coded_type = self
+                    .ecu_data
+                    .diag_coded_types
+                    .get(&dtc_dop.diag_coded_type)
+                    .ok_or(DiagServiceError::InvalidDatabase(
+                        "DTC DiagCodedType lookup failed".to_owned(),
+                    ))?;
+
+                let (dtc_value, _size) = coded_type.decode(
+                    uds_payload.data(),
+                    param.byte_pos as usize,
+                    param.bit_pos as usize,
+                )?;
+
+                let code: u32 =
+                    DiagDataValue::new(coded_type.base_datatype(), &dtc_value)?.try_into()?;
+
+                let record = dtc_dop
+                    .dtc_refs
+                    .iter()
+                    .find_map(|id| {
+                        let dtc = self.ecu_data.dtcs.get(id)?;
+                        if dtc.code == code { Some(dtc) } else { None }
+                    })
+                    .ok_or(DiagServiceError::BadPayload(format!(
+                        "No DTC with code {code} found in DTC references",
+                    )))?;
+
+                data.insert(
+                    "DtcRecord".to_owned(),
+                    DiagDataTypeContainer::DtcStruct(DiagDataContainerDtc {
+                        code,
+                        display_code: get_string_from_option!(record.display_code),
+                        fault_name: get_string_from_option_with_default!(record.fault_name),
+                        severity: record.severity,
+                        bit_pos: param.bit_pos,
+                        bit_len: DTC_CODE_BIT_LEN,
+                        byte_pos: param.byte_pos,
+                    }),
+                );
             }
             datatypes::DataOperationVariant::StaticField(ref static_field_dop) => {
                 let static_field_size = (static_field_dop.item_byte_size
@@ -2110,13 +2272,20 @@ impl EcuManager {
                         uds_payload.len(),
                     )));
                 }
-                let basic_structure = self
-                    .get_basic_structure(static_field_dop.field.basic_structure)?
-                    .ok_or_else(|| {
-                        DiagServiceError::InvalidDatabase(
-                            "StaticField failed to find struct".to_owned(),
-                        )
-                    })?;
+                let s = match &static_field_dop.field.value {
+                    DopFieldValue::BasicStruct(s) => s,
+                    DopFieldValue::EnvDataDesc(_) => {
+                        return Err(DiagServiceError::InvalidDatabase(
+                            "EndOfPdu failed does not contain a struct".to_owned(),
+                        ));
+                    }
+                };
+
+                let basic_structure = self.get_basic_structure(s.struct_id)?.ok_or_else(|| {
+                    DiagServiceError::InvalidDatabase(
+                        "StaticField failed to find struct".to_owned(),
+                    )
+                })?;
 
                 let mut nested_structs = Vec::new();
 
@@ -2426,6 +2595,87 @@ impl EcuManager {
             }
         };
         Some((bitlength, coded_const_value))
+    }
+
+    fn lookup_services_by_sid(
+        &self,
+        service_id: u8,
+    ) -> Result<Vec<&DiagnosticService>, DiagServiceError> {
+        let variant = self
+            .variant
+            .as_ref()
+            .and_then(|v| self.ecu_data.variants.get(&v.id))
+            .or_else(|| self.ecu_data.variants.get(&self.ecu_data.base_variant_id))
+            .ok_or(DiagServiceError::NotFound)?;
+
+        let base_variant = self
+            .ecu_data
+            .variants
+            .get(&self.ecu_data.base_variant_id)
+            .ok_or(DiagServiceError::NotFound)?;
+
+        let service_ids = variant.services.iter().chain(base_variant.services.iter());
+        let services = service_ids
+            .filter_map(|id| {
+                self.ecu_data.services.get(id).and_then(|service| {
+                    if service.service_id == service_id {
+                        Some(service)
+                    } else {
+                        None
+                    }
+                })
+            })
+            .collect::<Vec<_>>();
+
+        Ok(services)
+    }
+
+    fn find_dtc_dop_in_params<'a>(
+        &'a self,
+        params: Vec<&'a Parameter>,
+    ) -> Result<Option<&'a DtcDop>, DiagServiceError> {
+        for p in params {
+            if let datatypes::ParameterValue::Value(value) = &p.value
+                && let Some(dop) = self.ecu_data.data_operations.get(&value.dop)
+            {
+                match &dop.variant {
+                    datatypes::DataOperationVariant::Dtc(dtc) => return Ok(Some(dtc)),
+                    datatypes::DataOperationVariant::EndOfPdu(end_of_pdu) => {
+                        match &end_of_pdu.field.value {
+                            DopFieldValue::BasicStruct(s) => {
+                                if let Some(s) = self.get_basic_structure(s.struct_id)? {
+                                    let params: Vec<&Parameter> = s
+                                        .params
+                                        .iter()
+                                        .filter_map(|id| self.ecu_data.params.get(id))
+                                        .collect();
+                                    if let Some(result) = self.find_dtc_dop_in_params(params)? {
+                                        return Ok(Some(result));
+                                    }
+                                }
+                            }
+                            _ => {
+                                return Err(DiagServiceError::InvalidDatabase(
+                                    "EndOfPdu does not contain a struct".to_owned(),
+                                ));
+                            }
+                        }
+                    }
+                    datatypes::DataOperationVariant::Structure(structure) => {
+                        let params: Vec<&Parameter> = structure
+                            .params
+                            .iter()
+                            .filter_map(|id| self.ecu_data.params.get(id))
+                            .collect();
+                        if let Some(result) = self.find_dtc_dop_in_params(params)? {
+                            return Ok(Some(result));
+                        }
+                    }
+                    _ => {}
+                }
+            }
+        }
+        Ok(None)
     }
 }
 
@@ -2970,10 +3220,10 @@ mod tests {
                 min_items,
                 max_items,
                 field: DopField {
-                    basic_structure: item_structure,
-                    basic_structure_short_name: Some(STRINGS.get_or_insert("item_structure")),
-                    env_data_desc: None,
-                    env_data_desc_short_name: None,
+                    value: DopFieldValue::BasicStruct(datatypes::DopFieldBasicStruct {
+                        struct_id: item_structure,
+                        name: Some(STRINGS.get_or_insert("item_structure")),
+                    }),
                     is_visible: false,
                 },
             }),
@@ -3003,6 +3253,74 @@ mod tests {
         .unwrap();
 
         (ecu_manager, service, sid)
+    }
+
+    fn create_ecu_manager_with_dtc() -> (super::EcuManager, DiagComm, u8, u32) {
+        let mut db = DiagnosticDatabase::default();
+
+        // Create DTC DiagCodedType
+        let dtc_diag_type_id = create_datatype(
+            &mut db,
+            DiagCodedTypeVariant::StandardLength(StandardLengthType {
+                bit_length: 32,
+                bitmask: None,
+                condensed: false,
+            }),
+            DataType::UInt32,
+        );
+
+        // Create DTC record
+        let dtc_code = 0xDEADBEEF;
+        let dtc_id = db.dtcs.keys().max().unwrap_or(&0) + 1;
+        db.dtcs.insert(
+            dtc_id,
+            datatypes::Dtc {
+                code: dtc_code,
+                display_code: Some(STRINGS.get_or_insert("P1234")),
+                fault_name: Some(STRINGS.get_or_insert("TestFault")),
+                severity: 2,
+            },
+        );
+
+        // Create DtcDop
+        let dtc_dop_id = create_dop(
+            &mut db,
+            DOPType::Regular,
+            DataOperationVariant::Dtc(DtcDop {
+                diag_coded_type: dtc_diag_type_id,
+                physical_type: None,
+                compu_method: CompuMethod {
+                    category: CompuCategory::Identical,
+                    internal_to_phys: CompuFunction { scales: vec![] },
+                },
+                dtc_refs: vec![dtc_id],
+                is_visible: false,
+            }),
+        );
+
+        // Create parameter using DtcDop
+        let dtc_param_id = create_param(
+            &mut db,
+            "dtc_param",
+            ParameterValue::Value(datatypes::ValueData {
+                default_value: None,
+                dop: dtc_dop_id,
+            }),
+            1, // after SID
+            0, // bit position
+        );
+
+        // Create service
+        let sid = 0x19_u8;
+        let service = create_service(&mut db, sid, vec![], vec![dtc_param_id], vec![]);
+        let ecu_manager = super::EcuManager::new(
+            db,
+            Protocol::DoIp,
+            &ComParams::default(),
+            DatabaseNamingConvention::default(),
+        )
+        .unwrap();
+        (ecu_manager, service, sid, dtc_code)
     }
 
     #[test]
@@ -3571,6 +3889,30 @@ mod tests {
                     "item_param2": 0x9ABC
                 }
             ],
+            "test_service_pos_sid": sid
+        });
+
+        assert_eq!(response.serialize_to_json().unwrap().data, expected_json);
+    }
+
+    #[test]
+    fn test_map_dtc_from_uds() {
+        let (ecu_manager, service, sid, dtc_code) = create_ecu_manager_with_dtc();
+
+        let mut payload = vec![sid];
+        payload.extend_from_slice(&dtc_code.to_be_bytes());
+
+        let response = ecu_manager
+            .convert_from_uds(&service, &payload, true)
+            .unwrap();
+
+        let expected_json = json!({
+            "DtcRecord": {
+                "code": dtc_code,
+                "display_code": "P1234",
+                "fault_name": "TestFault",
+                "severity": 2,
+            },
             "test_service_pos_sid": sid
         });
 
