@@ -347,10 +347,10 @@ impl DiagCodedType {
 
         let end_pos = start_pos + (bit_len.div_ceil(8));
         if uds_payload.len() < end_pos {
-            return Err(DiagServiceError::BadPayload(format!(
-                "Payload too short, expected at least {end_pos} bytes, got {}",
-                uds_payload.len()
-            )));
+            return Err(DiagServiceError::NotEnoughData {
+                expected: end_pos,
+                actual: uds_payload.len(),
+            });
         }
 
         unpack_data(

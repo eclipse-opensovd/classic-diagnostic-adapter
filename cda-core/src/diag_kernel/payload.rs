@@ -19,7 +19,7 @@ pub(in crate::diag_kernel) struct Payload<'a> {
     data: &'a [u8],
     current_index: usize,
     slices: VecDeque<(usize, usize)>,
-    last_byte_pos_read: usize,
+    last_read_byte_pos: usize,
 }
 
 impl<'a> Payload<'a> {
@@ -28,23 +28,19 @@ impl<'a> Payload<'a> {
             data,
             current_index: 0,
             slices: VecDeque::new(),
-            last_byte_pos_read: 0,
+            last_read_byte_pos: 0,
         }
     }
-    pub(in crate::diag_kernel) fn set_last_byte_pos_read(&mut self, pos: usize) {
+    pub(in crate::diag_kernel) fn set_last_read_byte_pos(&mut self, pos: usize) {
         if pos > self.len() {
-            self.last_byte_pos_read = self.len();
+            self.last_read_byte_pos = self.len();
         } else {
-            self.last_byte_pos_read = pos;
+            self.last_read_byte_pos = pos;
         }
     }
 
-    pub(in crate::diag_kernel) fn advance(&mut self, len: usize) {
-        if self.pos() + len > self.len() {
-            self.current_index = self.data.len(); // Move to the end if we exceed
-        } else {
-            self.current_index += len;
-        }
+    pub(in crate::diag_kernel) fn last_read_byte_pos(&self) -> usize {
+        self.last_read_byte_pos
     }
 
     pub(in crate::diag_kernel) fn data(&self) -> &[u8] {
@@ -64,8 +60,13 @@ impl<'a> Payload<'a> {
     }
 
     pub(in crate::diag_kernel) fn consume(&mut self) {
-        self.advance(self.last_byte_pos_read + 1);
-        self.last_byte_pos_read = 0;
+        let advance_len = self.last_read_byte_pos;
+        if self.pos() + advance_len > self.data.len() {
+            self.current_index = self.data.len(); // Move to the end if we exceed
+        } else {
+            self.current_index += advance_len;
+        }
+        self.last_read_byte_pos = 0;
     }
 
     pub(in crate::diag_kernel) fn len(&self) -> usize {
@@ -88,6 +89,13 @@ impl<'a> Payload<'a> {
         self.data.get(self.pos())
     }
 
+    pub(in crate::diag_kernel) fn push_slice_to_abs_end(
+        &mut self,
+        start: usize,
+    ) -> Result<(), DiagServiceError> {
+        self.push_slice(start, self.data.len())
+    }
+
     pub(in crate::diag_kernel) fn push_slice(
         &mut self,
         start: usize,
@@ -105,7 +113,7 @@ impl<'a> Payload<'a> {
 
         // Convert relative positions to absolute positions
         let absolute_start = current_start + start;
-        let absolute_end = current_start + end;
+        let absolute_end = (current_start + end).min(self.data.len());
 
         self.slices.push_back((absolute_start, absolute_end));
         Ok(())
@@ -142,7 +150,8 @@ mod tests {
         assert!(payload.pop_slice().is_ok());
         assert!(payload.pop_slice().is_ok());
 
-        payload.advance(20);
+        payload.set_last_read_byte_pos(20);
+        payload.consume();
         assert!(payload.exhausted()); // should be exhausted now
     }
 }

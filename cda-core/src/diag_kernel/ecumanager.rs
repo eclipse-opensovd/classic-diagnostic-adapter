@@ -1878,7 +1878,9 @@ impl EcuManager {
                             };
                             // Check length of provided array
                             if value.len() < end_of_pdu_dop.min_items as usize
-                                || value.len() > end_of_pdu_dop.max_items as usize
+                                || end_of_pdu_dop
+                                    .max_items
+                                    .is_some_and(|max| max as usize > value.len())
                             {
                                 return Err(DiagServiceError::InvalidRequest(
                                     "EndOfPdu expected different amount of items".to_owned(),
@@ -2006,43 +2008,54 @@ impl EcuManager {
                     )?,
                 );
             }
-            datatypes::DataOperationVariant::EndOfPdu(ref v) => {
+            datatypes::DataOperationVariant::EndOfPdu(ref end_of_pdu_dop) => {
                 // When a response is read the values of `max-number-of-items`
                 // is deliberately ignored, according to ISO 22901:2008 7.3.6.10.6
                 let struct_ = self
-                    .get_basic_structure(v.field.basic_structure)?
+                    .get_basic_structure(end_of_pdu_dop.field.basic_structure)?
                     .ok_or_else(|| {
                         DiagServiceError::InvalidDatabase(
                             "EndOfPdu failed to find struct".to_owned(),
                         )
                     })?;
 
-                uds_payload.push_slice(param.byte_pos as usize, uds_payload.len())?;
-                if struct_.byte_size > 0 {
-                    let struct_count = uds_payload.len() / struct_.byte_size as usize;
-                    if struct_count > v.max_items as usize {
-                        return Err(DiagServiceError::BadPayload(format!(
-                            "Too many items in EndOfPduField: {} > {}",
-                            struct_count, v.max_items
-                        )));
-                    }
-                }
-
                 let mut nested_structs = Vec::new();
+                uds_payload.consume();
                 loop {
-                    self.map_nested_struct_from_uds(
+                    uds_payload.push_slice_to_abs_end(uds_payload.last_read_byte_pos())?;
+                    match self.map_nested_struct_from_uds(
                         struct_,
                         mapped_service,
                         uds_payload,
                         &mut nested_structs,
-                    )?;
+                    ) {
+                        Ok(_) => {}
+                        Err(e) => {
+                            match e {
+                                DiagServiceError::NotEnoughData { .. } => {
+                                    // Not enough data left to parse another struct, exit loop
+                                    // and ignore eventual leftover bytes
+                                    log::warn!("{e}");
+                                    uds_payload.pop_slice()?;
+                                    break;
+                                }
+                                _ => return Err(e),
+                            }
+                        }
+                    }
                     uds_payload.consume();
+                    uds_payload.pop_slice()?;
                     if uds_payload.exhausted() {
                         break;
                     }
                 }
 
-                uds_payload.pop_slice()?;
+                if nested_structs.len() < end_of_pdu_dop.min_items as usize {
+                    return Err(DiagServiceError::NotEnoughData {
+                        expected: end_of_pdu_dop.min_items as usize,
+                        actual: nested_structs.len(),
+                    });
+                }
 
                 data.insert(
                     short_name,
@@ -2051,11 +2064,10 @@ impl EcuManager {
             }
             datatypes::DataOperationVariant::Structure(ref structure) => {
                 if uds_payload.len() < structure.byte_size as usize {
-                    return Err(DiagServiceError::BadPayload(format!(
-                        "Not enough data for structure: {} < {}",
-                        uds_payload.len(),
-                        structure.byte_size
-                    )));
+                    return Err(DiagServiceError::NotEnoughData {
+                        expected: structure.byte_size as usize,
+                        actual: uds_payload.len(),
+                    });
                 }
                 for param in structure.params.iter() {
                     let param = self.ecu_data.params.get(param).ok_or(
@@ -2427,9 +2439,9 @@ mod tests {
 
     use cda_database::datatypes::{
         CodedConst, CompuCategory, CompuFunction, CompuMethod, DOPType, DataOperation,
-        DataOperationVariant, DataType, DiagCodedType, DiagCodedTypeVariant, IntervalType, Limit,
-        NormalDop, Parameter, ParameterValue, Request, Response, ResponseType, StandardLengthType,
-        SwitchKey,
+        DataOperationVariant, DataType, DiagCodedType, DiagCodedTypeVariant, DopField,
+        IntervalType, Limit, NormalDop, Parameter, ParameterValue, Request, Response, ResponseType,
+        StandardLengthType, SwitchKey,
     };
     use cda_interfaces::{EcuManager, STRINGS, StringId};
     use serde_json::json;
@@ -2922,6 +2934,71 @@ mod tests {
         (ecu_manager, service, sid)
     }
 
+    fn create_ecu_manager_with_end_pdu_service(
+        min_items: u32,
+        max_items: Option<u32>,
+    ) -> (super::EcuManager, DiagComm, u8) {
+        let mut db = DiagnosticDatabase::default();
+
+        // Create DOPs for structure parameters within the EndOfPdu
+        let item_param1_dop = create_normal_dop(&mut db, None, 8, DataType::UInt32);
+        let item_param2_dop = create_normal_dop(&mut db, None, 16, DataType::UInt32);
+
+        // Create parameters for the repeating structure
+        let item_param1 = create_value_param(&mut db, "item_param1", item_param1_dop, 0, 0);
+        let item_param2 = create_value_param(&mut db, "item_param2", item_param2_dop, 1, 0);
+
+        // Create the basic structure that will be repeated
+        let item_structure = create_structure(
+            &mut db,
+            "item_structure",
+            3, // byte_size: 1 byte + 2 bytes = 3 bytes per item
+            vec![item_param1, item_param2],
+        );
+
+        // Create EndOfPdu DOP
+        let end_pdu_dop = create_dop(
+            &mut db,
+            DOPType::Regular,
+            DataOperationVariant::EndOfPdu(datatypes::EndOfPduDop {
+                min_items,
+                max_items,
+                field: DopField {
+                    basic_structure: item_structure,
+                    basic_structure_short_name: Some(STRINGS.get_or_insert("item_structure")),
+                    env_data_desc: None,
+                    env_data_desc_short_name: None,
+                    is_visible: false,
+                },
+            }),
+        );
+
+        // Create main parameter that uses the EndOfPdu
+        let main_param = create_param(
+            &mut db,
+            "end_pdu_param",
+            ParameterValue::Value(datatypes::ValueData {
+                default_value: None,
+                dop: end_pdu_dop,
+            }),
+            1, // Start at byte position 1 (after SID)
+            0, // Bit position 0, start at byte border
+        );
+
+        let sid = 0x22_u8;
+        let service = create_service(&mut db, sid, vec![], vec![main_param], vec![]);
+
+        let ecu_manager = super::EcuManager::new(
+            db,
+            Protocol::DoIp,
+            &ComParams::default(),
+            DatabaseNamingConvention::default(),
+        )
+        .unwrap();
+
+        (ecu_manager, service, sid)
+    }
+
     #[test]
     fn test_mux_from_uds_invalid_case_no_default() {
         let (ecu_manager, service, sid) = create_ecu_manager_with_mux_service(None, None, None);
@@ -3005,10 +3082,8 @@ mod tests {
             ],
             true,
         );
-        assert!(response.is_err());
-        if let Err(e) = response {
-            assert!(e.to_string().contains("too short"));
-        }
+
+        assert!(response.unwrap_err().to_string().contains("too short"));
     }
 
     #[test]
@@ -3323,12 +3398,156 @@ mod tests {
         let result = ecu_manager.create_uds_payload(&service, Some(payload_data));
 
         // Should fail because case1 data is missing
-        assert!(result.is_err());
-        if let Err(e) = result {
-            assert!(
-                e.to_string()
-                    .contains("Mux case mux_1_case_1 value not found in json")
-            );
-        }
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("Mux case mux_1_case_1 value not found in json")
+        );
+    }
+
+    #[test]
+    fn test_map_struct_from_uds_end_pdu_min_items_not_reached() {
+        let (ecu_manager, service, sid) = create_ecu_manager_with_end_pdu_service(3, Some(2));
+        // Each item is 3 bytes: 1 byte for param1 + 2 bytes for param2
+        let data = vec![
+            sid, // Service ID
+            // First item
+            0x42, // item_param1 = 0x42
+            0x12, 0x34, // item_param2 = 0x1234
+            // Second item (exactly at the limit)
+            0x99, // item_param1 = 0x99
+            0x56, 0x78, // item_param2 = 0x5678
+        ];
+
+        let response = ecu_manager.convert_from_uds(&service, &data, true);
+        assert!(
+            response
+                .unwrap_err()
+                .to_string()
+                .contains("Payload too short, expected at least 3 bytes, got 2 bytes")
+        );
+    }
+
+    #[test]
+    fn test_map_struct_from_uds_end_pdu_exact_max_items() {
+        let (ecu_manager, service, sid) = create_ecu_manager_with_end_pdu_service(1, Some(2));
+
+        // Create payload with exactly 2 items (the max_items limit)
+        // Each item is 3 bytes: 1 byte for param1 + 2 bytes for param2
+        let data = vec![
+            sid, // Service ID
+            // First item
+            0x42, // item_param1 = 0x42
+            0x12, 0x34, // item_param2 = 0x1234
+            // Second item (exactly at the limit)
+            0x99, // item_param1 = 0x99
+            0x56, 0x78, // item_param2 = 0x5678
+        ];
+
+        let response = ecu_manager.convert_from_uds(&service, &data, true).unwrap();
+
+        let expected_json = json!({
+            "end_pdu_param": [
+                {
+                    "item_param1": 0x42,
+                    "item_param2": 0x1234
+                },
+                {
+                    "item_param1": 0x99,
+                    "item_param2": 0x5678
+                }
+            ],
+            "test_service_pos_sid": sid
+        });
+
+        assert_eq!(response.serialize_to_json().unwrap(), expected_json);
+    }
+
+    #[test]
+    fn test_map_struct_from_uds_end_pdu_exceeds_max_items() {
+        let (ecu_manager, service, sid) = create_ecu_manager_with_end_pdu_service(1, Some(2));
+
+        // Create payload with 3 items (exceeds max_items = 2)
+        let data = vec![
+            sid, // Service ID
+            0x42, 0x12, 0x34, // First item
+            0x99, 0x56, 0x78, // Second item
+            // A complete third element would not be ignored as specified in the ODX standard
+            0xAA, 0xFF, // Third item, incomplete and exceeding limit, will be ignored
+        ];
+
+        let response = ecu_manager.convert_from_uds(&service, &data, true).unwrap();
+        let expected_json = json!({
+            "end_pdu_param": [
+                {
+                    "item_param1": 0x42,
+                    "item_param2": 0x1234
+                },
+                {
+                    "item_param1": 0x99,
+                    "item_param2": 0x5678
+                }
+            ],
+            "test_service_pos_sid": sid
+        });
+
+        // extra data at the end is ignored.
+        assert_eq!(response.serialize_to_json().unwrap(), expected_json);
+    }
+
+    #[test]
+    fn test_map_struct_from_uds_end_pdu_no_max_no_min_no_data() {
+        let (ecu_manager, service, sid) = create_ecu_manager_with_end_pdu_service(0, None);
+
+        // Valid payload, as min_items = 0 and no max_items
+        // Only the SID is present, no items follow
+        let data = vec![
+            sid, // Service ID
+        ];
+
+        let response = ecu_manager.convert_from_uds(&service, &data, true).unwrap();
+        let expected_json = json!({
+            "end_pdu_param": [
+            ],
+            "test_service_pos_sid": sid
+        });
+
+        assert_eq!(response.serialize_to_json().unwrap(), expected_json);
+    }
+
+    #[test]
+    fn test_map_struct_from_uds_end_pdu_no_maximum() {
+        let (ecu_manager, service, sid) = create_ecu_manager_with_end_pdu_service(1, None);
+
+        // Create payload with 3 items (exceeds max_items = 2)
+        let data = vec![
+            sid, // Service ID
+            0x42, 0x12, 0x34, // First item
+            0x99, 0x56, 0x78, // Second item
+            0xAA, 0x9A, 0xBC, // Third item
+            0xD0, 0x0F, // extra data at the end, will be ignored
+        ];
+
+        let response = ecu_manager.convert_from_uds(&service, &data, true).unwrap();
+        let expected_json = json!({
+            "end_pdu_param": [
+                {
+                    "item_param1": 0x42,
+                    "item_param2": 0x1234
+                },
+                {
+                    "item_param1": 0x99,
+                    "item_param2": 0x5678
+                },
+                 {
+                    "item_param1": 0xAA,
+                    "item_param2": 0x9ABC
+                }
+            ],
+            "test_service_pos_sid": sid
+        });
+
+        assert_eq!(response.serialize_to_json().unwrap(), expected_json);
     }
 }

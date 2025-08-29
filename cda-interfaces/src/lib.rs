@@ -176,6 +176,13 @@ pub enum DiagServiceError {
     UnknownOperation,
     UdsLookupError(String),
     BadPayload(String),
+    /// Similar to `BadPayload` but indicates that the data received is insufficient to
+    /// process the request.
+    /// Used to abort reading data gracefully when the data is incomplete or end of pdu is reached.
+    NotEnoughData {
+        expected: usize,
+        actual: usize,
+    },
     VariantDetectionError(String),
     InvalidSession(String),
     SendFailed(String),
@@ -204,6 +211,10 @@ impl Display for DiagServiceError {
             DiagServiceError::UnknownOperation => write!(f, "Unknown operation"),
             DiagServiceError::UdsLookupError(msg) => write!(f, "UDS lookup error: {msg}"),
             DiagServiceError::BadPayload(msg) => write!(f, "Bad payload: {msg}"),
+            DiagServiceError::NotEnoughData { expected, actual } => write!(
+                f,
+                "Payload too short, expected at least {expected} bytes, got {actual} bytes"
+            ),
             DiagServiceError::VariantDetectionError(msg) => {
                 write!(f, "Variant detection error: {msg}")
             }
