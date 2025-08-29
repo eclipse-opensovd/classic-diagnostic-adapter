@@ -55,6 +55,7 @@ impl From<DiagServiceError> for ApiError {
             | DiagServiceError::SendFailed(_)
             | DiagServiceError::ParameterConversionError(_)
             | DiagServiceError::BadPayload(_)
+            | DiagServiceError::NotEnoughData(_)
             | DiagServiceError::NoResponse(_)
             | DiagServiceError::Nack(_)
             | DiagServiceError::InvalidSession(_)
