@@ -23,8 +23,8 @@ use axum::{
 };
 use axum_extra::extract::WithRejection;
 use cda_interfaces::{
-    UdsEcu,
-    datatypes::semantics,
+    DiagServiceError, UdsEcu,
+    datatypes::{DTC, semantics},
     diagservices::{DiagServiceResponse, DiagServiceResponseType},
     file_manager::FileManager,
 };
@@ -40,7 +40,7 @@ use crate::{
     sovd::{
         WebserverEcuState,
         auth::Claims,
-        error::{ApiError, api_error_from_diag_response},
+        error::{ApiError, ErrorWrapper, api_error_from_diag_response},
         locks::validate_lock,
     },
 };
@@ -53,10 +53,16 @@ pub(crate) async fn get<
     State(WebserverEcuState { ecu_name, uds, .. }): State<WebserverEcuState<R, T, U>>,
     Query(query): Query<FaultQuery>,
 ) -> Response {
-    let faults = uds
-        .get_faults(&ecu_name, query.status, query.severity, query.scope)
-        .await;
-    todo!();
+    let dtcs = match uds
+        .ecu_dtc_by_mask(&ecu_name, query.status, query.severity, query.scope)
+        .await
+    {
+        Ok(r) => r,
+        Err(e) => {
+            return ApiError::from(e).into_response();
+        }
+    };
+    todo!("2");
 }
 
 pub(crate) fn docs_get(op: TransformOperation) -> TransformOperation {

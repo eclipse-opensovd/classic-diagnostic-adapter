@@ -22,8 +22,10 @@ use cda_interfaces::{
     SecurityAccess, ServicePayload, TesterPresentControlMessage, TesterPresentMode,
     TesterPresentType, TransmissionParameters, UdsEcu, UdsResponse,
     datatypes::{
-        ComponentConfigurationsInfo, DataTransferError, DataTransferMetaData, DataTransferStatus,
-        Ecu, Fault, Gateway, NetworkStructure, RetryPolicy,
+        ComponentConfigurationsInfo, DTC, DataTransferError, DataTransferMetaData,
+        DataTransferStatus,
+        DtcServiceType::{FaultMemoryByStatusMask, UserMemoryDtcByStatusMask},
+        Ecu, Gateway, NetworkStructure, RetryPolicy,
     },
     diagservices::{DiagServiceResponse, DiagServiceResponseType, UdsPayloadData},
     service_ids,
@@ -1145,20 +1147,42 @@ impl<S: EcuGateway, R: DiagServiceResponse, T: EcuManager<Response = R>> UdsEcu
         cloned.start_variant_detection_for_ecus(ecus)
     }
 
-    async fn get_faults(
+    async fn ecu_dtc_by_mask(
         &self,
         ecu_name: &str,
         status: Option<Vec<String>>,
         severity: Option<String>,
         scope: Option<String>,
-    ) -> Result<Vec<Fault>, DiagServiceError> {
+    ) -> Result<Vec<DTC>, DiagServiceError> {
         let ecu = self.ecus.get(ecu_name).ok_or(DiagServiceError::NotFound)?;
-        ecu.read()
+        for (_, (_, diag_comm)) in ecu
+            .read()
             .await
-            .faults(ecu_name, status, severity, scope)
-            .expect("TODO: panic message");
+            .lookup_dtc_services(vec![FaultMemoryByStatusMask, UserMemoryDtcByStatusMask])?
+            .into_iter()
+            .filter(|(_, (service_scope, _))| {
+                scope.as_ref().is_none_or(|scope| scope == service_scope)
+            })
+        {
+            // todo status must be filtered via mask, this is what 'status' is for.
+            // i.e. looks like this in the rest api: status[confirmedDtc]
+            // bits:
+            // 0: testFailed,
+            // 1: testFailedThisOperationCycle,
+            // 2: pendingDTC,
+            // 3: confirmedDTC
+            // 4: testNotCompletedSinceLastClear,
+            // 5: testFailedSinceLastClear,
+            // 6: testNotCompletedThisOperationCycle
+            // 7: warningIndicatorRequested
+            let mask = 0xFF_u8;
+            let payload = UdsPayloadData::Raw(vec![mask]);
+            let response = self.send(ecu_name, diag_comm, Some(payload), true).await?;
+            let json = response.into_json()?;
+            println!("{}", json);
+        }
 
-        todo!()
+        todo!("here")
     }
 }
 

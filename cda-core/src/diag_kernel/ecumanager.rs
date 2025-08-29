@@ -19,16 +19,16 @@ use cda_database::datatypes::{
     ParameterValue::CodedConst, StateChart, resolve_comparam,
 };
 use cda_interfaces::{
-    DiagComm, DiagCommAction, DiagCommType, DiagServiceError, EcuAddressProvider, EcuState,
+    DiagComm, DiagCommAction, DiagCommType, DiagServiceError, EcuAddressProvider, EcuState, Id,
     Protocol, STRINGS, SecurityAccess, ServicePayload,
     datatypes::{
         AddressingMode, ComParams, ComplexComParamValue, ComponentConfigurationsInfo,
-        ComponentDataInfo, DatabaseNamingConvention, Fault, RetryPolicy, SdSdg,
+        ComponentDataInfo, DTC, DatabaseNamingConvention, DtcServiceType, RetryPolicy, SdSdg,
         TesterPresentSendType, semantics, single_ecu,
     },
     diagservices::{DiagServiceResponse, DiagServiceResponseType, UdsPayloadData},
     get_string, get_string_from_option, get_string_from_option_with_default,
-    get_string_with_default, service_ids, spawn_named, sub_functions, util,
+    get_string_with_default, service_ids, spawn_named, util,
 };
 use hashbrown::{HashMap, HashSet};
 use parking_lot::Mutex;
@@ -1127,107 +1127,83 @@ impl cda_interfaces::EcuManager for EcuManager {
         Ok(result)
     }
 
-    fn faults(
+    fn lookup_dtc_services(
         &self,
-        ecu_name: &str,
-        status: Option<Vec<String>>,
-        severity: Option<String>,
-        scope: Option<String>,
-    ) -> Result<Vec<Fault>, DiagServiceError> {
-        // pub struct Dtc {
-        //     #[prost(message, optional, tag = "1")]
-        //     pub id: ::core::option::Option<ObjectId>,
-        //     #[prost(string, tag = "2")]
-        //     pub short_name: ::prost::alloc::string::String,
-        //     #[prost(uint32, tag = "3")]
-        //     pub trouble_code: u32,
-        //     #[prost(string, optional, tag = "4")]
-        //     pub display_trouble_code: ::core::option::Option<::prost::alloc::string::String>,
-        //     #[prost(message, optional, tag = "5")]
-        //     pub text: ::core::option::Option<Text>,
-        //     #[prost(uint32, optional, tag = "6")]
-        //     pub level: ::core::option::Option<u32>,
-        //     #[prost(message, optional, tag = "7")]
-        //     pub sdgs: ::core::option::Option<sdgs::Ref>,
-        //     #[prost(bool, optional, tag = "8")]
-        //     pub is_temporary: ::core::option::Option<bool>,
-        // }
+        dtc_service_types: Vec<DtcServiceType>,
+    ) -> Result<HashMap<DtcServiceType, (String, DiagComm)>, DiagServiceError> {
+        let map = self
+            .lookup_services_by_sid(service_ids::READ_DTC_INFORMATION)?
+            .into_iter()
+            .filter_map(|service| {
+                self.ecu_data
+                    .requests
+                    .get(&service.request_id)
+                    .and_then(|req| {
+                        req.params.iter().find_map(|param_ref| {
+                            self.ecu_data.params.get(param_ref).and_then(|param| {
+                                let coded_const_param_value = match &param.value {
+                                    datatypes::ParameterValue::CodedConst(c) => {
+                                        match get_string!(c.value) {
+                                            Ok(name) => name,
+                                            Err(_) => return None,
+                                        }
+                                    }
+                                    _ => return None,
+                                };
 
-        // {
-        //     "code": "164456",
-        //     "scope": "faultmem",
-        //     "display_code": "P164456",
-        //     "fault_name": "An incorrect variant coding or configuration was detected.",
-        //     "severity": 2,
-        //     "status": {
-        //     "mask": "9",
-        //     "testFailed": "1",
-        //     "testFailedThisMonitoringCycle": "0",
-        //     "pendingDTC": "0",
-        //     "confirmedDTC": "1",
-        //     "testNotCompletedSinceLastClear": "0",
-        //     "testFailedSinceLastClear": "0",
-        //     "testNotCompletedThisMonitoringCycle": "0",
-        //     "warningIndicatorRequested": "0"
-        // }
-        // },
-        let dtc_services =  self.lookup_services_by_sid( service_ids::READ_DTC_INFORMATION)?.iter()
-           .filter(|service| {
-               self.ecu_data.requests.get(&service.request_id)
-                   .is_some_and(|req| req.params.iter().any(|param_ref| {
-                       self.ecu_data.params.get(param_ref)
-                           .is_some_and(|param| {
-                               if let CodedConst(c) = &param.value {
-                                   STRINGS.get(c.value)
-                                       .is_some_and(|value| {
-                                           println!("{}, {:?}", value, STRINGS.get(service.short_name));
-                                           value.to_lowercase() == sub_functions::read_dtc_information::REPORT_DTC_BY_STATUS_MASK.to_string()
-                                               || value.to_lowercase() == sub_functions::read_dtc_information::REPORT_USER_DEF_MEMORY_DTC_BY_STATUS_MASK.to_string()
-                                       })
-                               } else {
-                                   false
-                               }
-                           })
-                   }))
-           }).collect::<Vec<_>>();
+                                dtc_service_types
+                                    .iter()
+                                    .find(|s| {
+                                        ((*s).clone() as u8).to_string() == *coded_const_param_value
+                                    })
+                                    .map(|dtc_service_type| {
+                                        let default_name = match dtc_service_type {
+                                            DtcServiceType::FaultMemoryByStatusMask
+                                            | DtcServiceType::FaultMemoryExtDataRecordByDtcNumber
+                                            | DtcServiceType::FaultMemorySnapshotRecordByDtcNumber
+                                            => "FaultMem",
+                                            DtcServiceType::UserMemoryDtcByStatusMask
+                                            | DtcServiceType::UserMemoryDtcExtDataRecordByDtcNumber
+                                            | DtcServiceType::UserMemoryDtcSnapshotRecordByDtcNumber
+                                            => "UserMem",
+                                        };
 
-        todo!();
+                                        let service_short_name =
+                                            match get_string!(service.short_name) {
+                                                Ok(name) => name,
+                                                Err(_) => return None,
+                                            };
 
-        //     match dop.variant {
-        //         DataOperationVariant::Dtc(dtc_dop) => {
-        //             self.ecu_data.dt
-        //             dtc_dop.dtc_refs
-        //         }
-        //         _ => return None,
-        //     }
-        // })
-        // let mut comparams = HashMap::new();
-        //
-        // // ensure base variant is handled first
-        // // and maybe be overwritten by variant specific comparams
-        // let variants = [
-        //     Some(self.ecu_data.base_variant_id),
-        //     self.variant.as_ref().map(|v| v.id),
-        // ];
-        //
-        //
-        //
-        // variants
-        //     .iter()
-        //     .filter_map(|maybe_id| maybe_id.and_then(|id| self.ecu_data.variants.get(&id)))
-        //     .flat_map(|v| &v.com_params)
-        //     .filter(|cp| cp.protocol_id == Some(*protocol_id))
-        //     .for_each(|cp| match resolve_comparam(&self.ecu_data, cp) {
-        //         Ok((name, value)) => {
-        //             comparams.insert(name, value);
-        //         }
-        //         Err(e) => {
-        //             log::warn!(target: &self.ecu_data.ecu_name,
-        // "Error resolving ComParam: {e:?}");
-        //         }
-        //     });
-        //
-        // comparams
+                                        Some((
+                                            (*dtc_service_type).clone(),
+                                            (
+                                                self.ecu_data
+                                                    .functional_classes
+                                                    .get(&service.funct_class)
+                                                    .map(|s| s.replace("_", ""))
+                                                    .unwrap_or(default_name.to_owned()),
+                                                DiagComm {
+                                                    name: service_short_name.clone(),
+                                                    action: DiagCommAction::Read,
+                                                    type_: DiagCommType::Faults,
+                                                    lookup_name: Some(service_short_name),
+                                                },
+                                            ),
+                                        ))
+                                    })
+                            })
+                        })
+                    })
+            })
+            .filter_map(|s| match s {
+                Some(v) => Some(v),
+                None => {
+                    log::error!("Could not resolve DTC service type to a service");
+                    None
+                }
+            })
+            .collect();
+        Ok(map)
     }
 }
 

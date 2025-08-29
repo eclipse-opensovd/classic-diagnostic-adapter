@@ -1,7 +1,18 @@
 use hashbrown::HashMap;
 
-pub struct Fault {
-    ///Fault code in the native representation of the entity.
+#[repr(u8)]
+#[derive(Clone, PartialEq, Eq, Hash)]
+pub enum DtcServiceType {
+    FaultMemoryByStatusMask = 0x02,
+    FaultMemorySnapshotRecordByDtcNumber = 0x04,
+    FaultMemoryExtDataRecordByDtcNumber = 0x06,
+    UserMemoryDtcByStatusMask = 0x17,
+    UserMemoryDtcSnapshotRecordByDtcNumber = 0x18,
+    UserMemoryDtcExtDataRecordByDtcNumber = 0x19,
+}
+
+pub struct DTC {
+    /// Fault code in the native representation of the entity.
     pub code: String,
     // Defines the scope
     // The capability description defines which scopes are supported
