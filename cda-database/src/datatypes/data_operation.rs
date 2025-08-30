@@ -66,7 +66,7 @@ pub enum DataOperationVariant {
 #[cfg_attr(feature = "deepsize", derive(DeepSizeOf))]
 pub struct EndOfPduDop {
     pub min_items: u32,
-    pub max_items: u32,
+    pub max_items: Option<u32>,
     pub field: DopField,
 }
 #[derive(Debug)]
@@ -411,8 +411,8 @@ fn get_dop_variant(
                 })
                 .and_then(get_dop_field)?;
             DataOperationVariant::EndOfPdu(EndOfPduDop {
-                min_items: eop.min_number_of_items(),
-                max_items: eop.max_number_of_items(),
+                min_items: eop.min_number_of_items(), // 0 means no minimum
+                max_items: eop.max_number_of_items,
                 field,
             })
         }
