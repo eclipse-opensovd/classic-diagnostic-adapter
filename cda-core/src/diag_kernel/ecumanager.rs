@@ -533,6 +533,7 @@ impl cda_interfaces::EcuManager for EcuManager {
                         param.short_name
                     ))
                 })?;
+                uds_payload.set_last_read_byte_pos(param.byte_pos as usize);
                 self.map_param_from_uds(
                     mapped_service,
                     param,
