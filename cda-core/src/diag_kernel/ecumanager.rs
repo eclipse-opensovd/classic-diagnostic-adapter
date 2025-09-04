@@ -2010,7 +2010,8 @@ impl EcuManager {
             }
             datatypes::DataOperationVariant::EndOfPdu(ref end_of_pdu_dop) => {
                 // When a response is read the values of `max-number-of-items`
-                // is deliberately ignored, according to ISO 22901:2008 7.3.6.10.6
+                // and `min-number-of-items` are deliberately ignored,
+                // according to ISO 22901:2008 7.3.6.10.6
                 let struct_ = self
                     .get_basic_structure(end_of_pdu_dop.field.basic_structure)?
                     .ok_or_else(|| {
@@ -2048,13 +2049,6 @@ impl EcuManager {
                     if uds_payload.exhausted() {
                         break;
                     }
-                }
-
-                if nested_structs.len() < end_of_pdu_dop.min_items as usize {
-                    return Err(DiagServiceError::NotEnoughData {
-                        expected: end_of_pdu_dop.min_items as usize,
-                        actual: nested_structs.len(),
-                    });
                 }
 
                 data.insert(
@@ -3420,13 +3414,23 @@ mod tests {
             0x56, 0x78, // item_param2 = 0x5678
         ];
 
-        let response = ecu_manager.convert_from_uds(&service, &data, true);
-        assert!(
-            response
-                .unwrap_err()
-                .to_string()
-                .contains("Payload too short, expected at least 3 bytes, got 2 bytes")
-        );
+        let response = ecu_manager.convert_from_uds(&service, &data, true).unwrap();
+
+        let expected_json = json!({
+            "end_pdu_param": [
+                {
+                    "item_param1": 0x42,
+                    "item_param2": 0x1234
+                },
+                {
+                    "item_param1": 0x99,
+                    "item_param2": 0x5678
+                }
+            ],
+            "test_service_pos_sid": sid
+        });
+
+        assert_eq!(response.serialize_to_json().unwrap(), expected_json);
     }
 
     #[test]
