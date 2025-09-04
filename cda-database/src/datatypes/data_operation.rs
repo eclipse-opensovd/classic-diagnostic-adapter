@@ -266,6 +266,10 @@ impl TryInto<f32> for &Limit {
 impl TryInto<f64> for &Limit {
     type Error = DiagServiceError;
     fn try_into(self) -> Result<f64, Self::Error> {
+        if self.value.is_empty() {
+            // treat empty string as 0
+            return Ok(f64::default());
+        }
         self.value.parse().map_err(|e| {
             DiagServiceError::ParameterConversionError(format!(
                 "Cannot convert Limit with value {} into f64, {e:?}",
