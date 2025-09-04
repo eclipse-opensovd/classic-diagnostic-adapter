@@ -2148,8 +2148,9 @@ impl EcuManager {
         let byte_pos = mux_dop.byte_position as usize;
         if uds_payload.len() < byte_pos + 1 {
             return Err(DiagServiceError::BadPayload(format!(
-                "Not enough data for mux: {} < {byte_pos}",
+                "Not enough data for mux: {} < {}",
                 uds_payload.len(),
+                byte_pos + 1,
             )));
         }
 
@@ -2193,7 +2194,6 @@ impl EcuManager {
                     switch_key.bit_position as usize,
                 )?;
 
-                let switch_key_data_len = switch_key_data.len();
                 let switch_key_value = operations::uds_data_to_serializable(
                     switch_key_diag_type.base_datatype(),
                     None,
@@ -2226,10 +2226,7 @@ impl EcuManager {
                 if let Some(structure_id) = case.structure {
                     let structure = self.get_basic_structure(structure_id)?;
                     if let Some(structure) = structure {
-                        uds_payload.push_slice(
-                            byte_pos + switch_key_data_len + switch_key.byte_position as usize,
-                            uds_payload.len(),
-                        )?;
+                        uds_payload.push_slice(byte_pos, uds_payload.len())?;
                         let case_data =
                             self.map_struct_from_uds(structure, mapped_service, uds_payload)?;
                         uds_payload.pop_slice()?;
@@ -2906,7 +2903,7 @@ mod tests {
             switch_key.unwrap_or_else(|| create_switch_key(&mut db, 0, 0, 16, DataType::UInt32));
         let mux_1 = create_mux_dop(
             &mut db,
-            0,
+            2,
             default_case,
             Some(mux_1_switch_key),
             vec![mux_1_case_1, mux_1_case_2, mux_1_case_3],
@@ -3009,7 +3006,8 @@ mod tests {
                 // Service ID
                 sid,
                 // This does not belong to our mux, it's here to test, if the start byte is used
-                0xff, // Mux param starts here
+                0xff,
+                // Mux param starts here
                 // there is no switch value for 0xffff
                 0xff, 0xff,
             ],
@@ -3028,9 +3026,12 @@ mod tests {
                     // Service ID
                     sid,
                     // This does not belong to our mux, it's here to test, if the start byte is used
-                    0xff, // Mux param starts here
+                    0xff,
+                    // Mux param starts here
                     // there is no switch value for 0xffff, but we have a default case
-                    0xff, 0xff, 0x42, // value for param 1 of default structure
+                    0xff, 0xff, //
+                    // value for param 1 of default structure
+                    0x42,
                 ],
                 true,
             )
@@ -3084,7 +3085,12 @@ mod tests {
             true,
         );
 
-        assert!(response.unwrap_err().to_string().contains("too short"));
+        assert!(
+            response
+                .unwrap_err()
+                .to_string()
+                .contains("Not enough data for mux")
+        );
     }
 
     #[test]
