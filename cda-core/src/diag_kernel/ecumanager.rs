@@ -2146,13 +2146,6 @@ impl EcuManager {
     ) -> Result<(), DiagServiceError> {
         // Byte pos is the relative position of the data in the uds_payload
         let byte_pos = mux_dop.byte_position as usize;
-        if uds_payload.len() < byte_pos + 1 {
-            return Err(DiagServiceError::BadPayload(format!(
-                "Not enough data for mux: {} < {}",
-                uds_payload.len(),
-                byte_pos + 1,
-            )));
-        }
 
         let switch_key = &mux_dop
             .switch_key
@@ -3085,11 +3078,12 @@ mod tests {
             true,
         );
 
-        assert!(
-            response
-                .unwrap_err()
-                .to_string()
-                .contains("Not enough data for mux")
+        assert_eq!(
+            response.unwrap_err(),
+            DiagServiceError::NotEnoughData {
+                expected: 4, // the case expects 4 bytes for the float param
+                actual: 0
+            }
         );
     }
 
