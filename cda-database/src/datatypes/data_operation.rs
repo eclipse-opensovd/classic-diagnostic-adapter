@@ -826,7 +826,7 @@ mod tests {
         };
 
         let result: Result<f32, _> = (&limit).try_into();
-        assert_eq!(result.unwrap(), 0.0f32);
+        assert_eq!(result.unwrap(), 0.0_f32);
     }
 
     #[test]
@@ -837,18 +837,18 @@ mod tests {
         };
 
         let result: Result<f64, _> = (&limit).try_into();
-        assert_eq!(result.unwrap(), 0.0f64);
+        assert_eq!(result.unwrap(), 0.0_f64);
     }
 
     #[test]
-    fn test_limit_try_into_u64_empty_string() {
+    fn test_limit_try_into_u32_empty_string() {
         let limit = Limit {
             value: "".to_string(),
             interval_type: IntervalType::Closed,
         };
 
         let result: Result<u32, _> = (&limit).try_into();
-        assert_eq!(result.unwrap(), 0u32);
+        assert_eq!(result.unwrap(), 0_u32);
     }
 
     #[test]
