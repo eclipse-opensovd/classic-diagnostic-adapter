@@ -56,7 +56,7 @@ end
 group Switch into Bootloader
     note over CDA: All /operations-calls can also be asynchronous,\ndepending on definition of the routine
 
-    Client -> CDA : POST /modes/session (programming)
+    Client -> CDA : PUT /modes/session (programming)
     activate CDA
     CDA -> ECU : Programming Session (10 02)
     activate ECU
@@ -171,7 +171,8 @@ group Check if all dependencies are ok
 end
 
 opt Reset ECU if required
-    Client -> CDA: PUT /status/reset (type)
+    note right of Client: There's an issue with using the standard /status/reset in CDA, see Issue 40
+    Client -> CDA: PUT /status/reset (ResetType)
     activate CDA
     CDA -> ECU: Reset (11 xx)
     activate ECU

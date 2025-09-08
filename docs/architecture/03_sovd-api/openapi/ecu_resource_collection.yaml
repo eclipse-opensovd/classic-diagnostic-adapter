@@ -8,15 +8,6 @@ tags:
     description: Endpoints related to components
 
 components:
-  parameters:
-    EcuName:
-      in: query
-      name: "ecu-name"
-      description: "Name of the ECU"
-      required: true
-      schema:
-        type: string
-
   schemas:
     EcuDetectionStatus:
       type: string
@@ -102,7 +93,7 @@ paths:
 
   /components/{ecu-name}:
     parameters:
-      - $ref: "#/components/parameters/EcuName"
+      - $ref: "common.yaml#/components/parameters/EcuName"
 
     get:
       summary: "Retrieve information about the ECU"
@@ -118,3 +109,5 @@ paths:
       responses:
         "200":
           $ref: "#/components/responses/EcuStatus"
+        default:
+          $ref: "common.yaml#/components/responses/SovdGenericErrorResponse"

@@ -1,6 +1,7 @@
 [#_sovd_api_iso_extensions]
 = Extensions to ISO standard API
-
+:toc:
+:toclevels: 3
 :numbered:
 
 // 1. Flash-API

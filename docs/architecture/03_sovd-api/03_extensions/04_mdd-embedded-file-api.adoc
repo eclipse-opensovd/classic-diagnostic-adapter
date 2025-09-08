@@ -1,13 +1,44 @@
 [#_architecture_sovd_api_iso_extensions_mdd_embedded_files]
 = MDD Embedded Files API
+:toc:
+:numbered:
+
+ifndef::rootpath[]
+:rootpath: ../../..
+endif::rootpath[]
 
 == Motivation
 
-When an additional private SOVD-Server is tasked with providing functionality that replaces classic offboard-tester functionality, utilizing the CDA, additional data from the single-ecu-job embedded in the original `pdx`-file can be required.
+When an additional private SOVD-Server is tasked with providing functionality that replaces classic offboard-tester
+functionality, additional data from the single-ecu-jobs embedded in the original `pdx`-file can be required.
 
-The odx-converter offers an option to include code-files from the pdx, as well as partial contents from those files. This API allows the retrieval of these files.
+The odx-converter offers an option to include code-files from the pdx, as well as partial contents from those files.
+This API allows the retrieval of these files.
 
 
 == Embedded Content Retrieval
 
-#TODO# `/x-sovd2uds-bulk-data/mdd-embedded-files`
+The API to retrieve embedded files utilizes a bulk-data endpoint,
+as defined in xref:{rootpath}/architecture/03_sovd-api/02_sovd-api.adoc#_architecture_sovd_bulk_data[Architecture: SOVD Bulk Data]
+
+Endpoints within `/components/+{ecuName}+`:
+
+|===
+|Method|Path|Description
+
+|GET
+|/x-sovd2uds-bulk-data/mdd-embedded-files
+|Returns a list of items which represent the files and their metadata
+
+|GET
+|/x-sovd2uds-bulk-data/mdd-embedded-files/+{id}+
+|Returns an item, which is the data that was embedded
+
+|===
+
+Other methods are not allowed (e.g. data can't be modified), and will return
+an HTTP 405 error code.
+
+#TODO# OpenAPI?
+
+#TODO# maybe move to a general bulk-data endpoint?
