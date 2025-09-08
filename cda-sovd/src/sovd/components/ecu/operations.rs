@@ -361,16 +361,16 @@ pub(crate) mod service {
         };
         use cda_interfaces::{
             DiagComm, DiagCommAction, DiagCommType, UdsEcu,
-            diagservices::{DiagServiceResponse, DiagServiceResponseType},
+            diagservices::{DiagServiceJsonResponse, DiagServiceResponse, DiagServiceResponseType},
             file_manager::FileManager,
         };
-        use http::header;
         use sovd_interfaces::components::ecu::operations::service::executions as sovd_executions;
 
         use crate::{
             openapi,
             sovd::{
                 self, WebserverEcuState, api_error_from_diag_response,
+                components::field_parse_errors_to_json,
                 error::{ApiError, ErrorWrapper},
             },
         };
@@ -417,7 +417,27 @@ pub(crate) mod service {
         pub(crate) fn docs_post(op: TransformOperation) -> TransformOperation {
             openapi::request_json_and_octet::<sovd_executions::Request>(op)
                 .description("Create a new execution")
-                .with(openapi::ecu_service_response)
+                .response_with::<200, Json<sovd_executions::Response>, _>(|res| {
+                    let mut res = res
+                        .description(
+                            "Comparam execution created successfully without response content.",
+                        )
+                        .example(sovd_executions::Response {
+                            parameters: serde_json::Map::from_iter([(
+                                "example_param".to_string(),
+                                serde_json::Value::String("example_value".to_string()),
+                            )]),
+                            errors: vec![],
+                        });
+                    res.inner().content.insert(
+                        "application/octet-stream".to_owned(),
+                        aide::openapi::MediaType {
+                            example: Some(serde_json::json!([0xabu8, 0xcd, 0xef, 0x00])),
+                            ..Default::default()
+                        },
+                    );
+                    res
+                })
                 .response_with::<204, (), _>(|res| {
                     res.description(
                         "Comparam execution created successfully without response content.",
@@ -525,9 +545,23 @@ pub(crate) mod service {
                         return api_error_from_diag_response(response).into_response();
                     }
 
+                    if response.is_empty() {
+                        return StatusCode::NO_CONTENT.into_response();
+                    }
+
                     if map_to_json {
-                        let mapped_data = match response.into_json() {
-                            Ok(v) => v,
+                        let (mapped_data, errors) = match response.into_json() {
+                            Ok(DiagServiceJsonResponse {
+                                data: serde_json::Value::Object(mapped_data),
+                                errors,
+                            }) => (mapped_data, errors),
+                            Ok(v) => {
+                                return ErrorWrapper(ApiError::InternalServerError(Some(format!(
+                                    "Expected JSON object but got: {}",
+                                    v.data
+                                ))))
+                                .into_response();
+                            }
                             Err(e) => {
                                 return ErrorWrapper(ApiError::InternalServerError(Some(format!(
                                     "{e:?}"
@@ -539,6 +573,7 @@ pub(crate) mod service {
                             StatusCode::OK,
                             Json(sovd_executions::Response {
                                 parameters: mapped_data,
+                                errors: field_parse_errors_to_json(errors),
                             }),
                         )
                             .into_response()
@@ -618,8 +653,27 @@ pub(crate) mod service {
                     if response.is_empty() {
                         StatusCode::NO_CONTENT.into_response()
                     } else {
-                        let response_data = match response.into_json() {
-                            Ok(v) => v,
+                        let (response_data, errors) = match response.into_json() {
+                            Ok(DiagServiceJsonResponse {
+                                data: serde_json::Value::Object(mapped_data),
+                                errors,
+                            }) => (mapped_data, errors),
+                            Ok(DiagServiceJsonResponse {
+                                data: serde_json::Value::Null,
+                                errors,
+                            }) => {
+                                if errors.is_empty() {
+                                    return StatusCode::NO_CONTENT.into_response();
+                                }
+                                (serde_json::Map::new(), errors)
+                            }
+                            Ok(v) => {
+                                return ErrorWrapper(ApiError::InternalServerError(Some(format!(
+                                    "Expected JSON object but got: {}",
+                                    v.data
+                                ))))
+                                .into_response();
+                            }
                             Err(e) => {
                                 return ErrorWrapper(ApiError::InternalServerError(Some(format!(
                                     "{e:?}"
@@ -631,6 +685,7 @@ pub(crate) mod service {
                             StatusCode::OK,
                             Json(sovd_executions::Response {
                                 parameters: response_data,
+                                errors: field_parse_errors_to_json(errors),
                             }),
                         )
                             .into_response()

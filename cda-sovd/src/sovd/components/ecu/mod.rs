@@ -20,7 +20,7 @@ use axum::{
 };
 use cda_interfaces::{
     DiagComm, SchemaProvider, UdsEcu,
-    diagservices::{DiagServiceResponse, DiagServiceResponseType},
+    diagservices::{DiagServiceJsonResponse, DiagServiceResponse, DiagServiceResponseType},
     file_manager::FileManager,
 };
 use http::{HeaderMap, StatusCode, header};
@@ -30,7 +30,9 @@ use serde::Deserialize;
 use crate::{
     openapi,
     sovd::{
-        IntoSovd, WebserverEcuState, create_response_schema,
+        IntoSovd, WebserverEcuState,
+        components::field_parse_errors_to_json,
+        create_response_schema,
         error::{ApiError, ErrorWrapper, api_error_from_diag_response},
         get_payload_data,
     },
@@ -279,14 +281,19 @@ async fn data_request<T: UdsEcu + SchemaProvider + Clone>(
                 Ok(v) => v,
             };
 
-            if mapped_data.is_null() {
+            if mapped_data.data.is_null() {
                 StatusCode::NO_CONTENT.into_response()
-            } else if let serde_json::Value::Object(mapped_data) = mapped_data {
+            } else if let DiagServiceJsonResponse {
+                data: serde_json::Value::Object(mapped_data),
+                errors,
+            } = mapped_data
+            {
                 (
                     StatusCode::OK,
                     Json(sovd_interfaces::ObjectDataItem {
                         id: service.name.to_lowercase(),
                         data: mapped_data,
+                        errors: field_parse_errors_to_json(errors),
                         schema,
                     }),
                 )

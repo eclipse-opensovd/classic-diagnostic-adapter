@@ -13,7 +13,7 @@
 
 use hashbrown::HashMap;
 
-use crate::{DiagServiceError, util};
+use crate::{DataParseError, DiagServiceError, util};
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum DiagServiceResponseType {
@@ -27,12 +27,29 @@ pub struct MappedNRC {
     pub sid: Option<u8>,
 }
 
+#[derive(Debug, PartialEq, Eq)]
+pub struct FieldParseError {
+    pub path: String,
+    pub error: DataParseError,
+}
+
+/// Wrapping struct for mapping a Response to JSON
+///
+/// The fields contain the mapped response and a list
+/// of errors for fields where the data could not be
+/// interpreted.
+#[derive(Debug, PartialEq, Eq)]
+pub struct DiagServiceJsonResponse {
+    pub data: serde_json::Value,
+    pub errors: Vec<FieldParseError>,
+}
+
 pub trait DiagServiceResponse: Sized + Send + Sync + 'static {
     fn is_empty(&self) -> bool;
     fn service_name(&self) -> String;
     fn response_type(&self) -> DiagServiceResponseType;
     fn get_raw(&self) -> &[u8];
-    fn into_json(self) -> Result<serde_json::Value, DiagServiceError>;
+    fn into_json(self) -> Result<DiagServiceJsonResponse, DiagServiceError>;
     fn as_nrc(&self) -> Result<MappedNRC, String>;
 }
 
@@ -56,5 +73,11 @@ impl std::fmt::Display for UdsPayloadData {
                 }
             }
         }
+    }
+}
+
+impl DiagServiceJsonResponse {
+    pub fn is_empty(&self) -> bool {
+        self.data.is_null() && self.errors.is_empty()
     }
 }

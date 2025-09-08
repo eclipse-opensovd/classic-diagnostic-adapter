@@ -495,20 +495,64 @@ fn get_octet_stream_payload(
     Ok(Some(UdsPayloadData::Raw(body.to_vec())))
 }
 
+/// Helper Fn to remove descriptions from a schema, in cases where a
+/// schema reduced on the necessary parameters for automated parsing is
+/// desired.
+///
+/// Due to schemars not offering an option to skip generating
+/// the description from rusts docstrings as a workaround the generated
+/// json Value of the schema is traversed recursively and all descriptions
+/// are removed.
+fn remove_descriptions_recursive(value: &mut serde_json::Value) {
+    if let Some(obj) = value.as_object_mut() {
+        obj.remove("description");
+        for v in obj.values_mut() {
+            if v.is_object() || v.is_array() {
+                remove_descriptions_recursive(v);
+            }
+        }
+    } else if let Some(arr) = value.as_array_mut() {
+        for v in arr {
+            if v.is_object() || v.is_array() {
+                remove_descriptions_recursive(v);
+            }
+        }
+    }
+}
+
+/// This Macro allows to generate a schema for Responses including
+/// the definitions for data errors.
+///
+/// # Arguments
+/// - `base_type`: The base type for the response schema.
+/// - `target_field`: The field in the base type where the sub schema should be inserted.
+/// - `sub_schema`: The sub schema to be inserted.
+///
+/// # Returns
+/// A codeblock that returns the enriched response schema
 macro_rules! create_response_schema {
     ($base_type:ty, $target_field:expr, $sub_schema:ident) => {{
         use schemars::JsonSchema as _;
+        use crate::sovd::error::VendorErrorCode;
+        use sovd_interfaces::error::DataError;
 
         let mut generator =
-            schemars::SchemaGenerator::new(schemars::generate::SchemaSettings::draft07());
+            schemars::SchemaGenerator::new(
+                schemars::generate::SchemaSettings::draft07()
+                    .with(|s| {
+                        s.inline_subschemas = true
+                    })
+            );
         let mut schema = <$base_type>::json_schema(&mut generator);
+        let mut error_schema = DataError::<VendorErrorCode>::json_schema(&mut generator).to_value();
+        crate::sovd::remove_descriptions_recursive(&mut error_schema);
 
         if let Some(props) = schema.get_mut("properties") {
             if let Some(obj) = props.as_object_mut() {
                 obj.insert($target_field.into(), $sub_schema.to_value());
                 obj.insert("errors".to_owned(), schemars::json_schema!({
                     "items": [
-                        { "$ref": "#/components/schemas/ApiErrorResponse" }
+                        error_schema
                     ],
                     "type": "array",
                     }).into()

@@ -16,7 +16,10 @@ use std::time::Instant;
 use cda_database::datatypes::{CompuMethod, DataType};
 use cda_interfaces::{
     DiagComm, DiagServiceError,
-    diagservices::{DiagServiceResponse, DiagServiceResponseType, MappedNRC},
+    diagservices::{
+        DiagServiceJsonResponse, DiagServiceResponse, DiagServiceResponseType, FieldParseError,
+        MappedNRC,
+    },
 };
 use hashbrown::HashMap;
 
@@ -26,7 +29,7 @@ use crate::diag_kernel::{DiagDataValue, operations};
 pub struct DiagServiceResponseStruct {
     pub service: DiagComm,
     pub data: Vec<u8>,
-    pub mapped_data: Option<MappedDiagServiceResponsePayload>,
+    pub mapped_data: Option<MappedResponseData>,
     pub response_type: DiagServiceResponseType,
 }
 
@@ -47,6 +50,12 @@ pub struct DiagDataTypeContainerRaw {
 
 pub type MappedDiagServiceResponsePayload = HashMap<String, DiagDataTypeContainer>;
 
+#[derive(Debug)]
+pub struct MappedResponseData {
+    pub data: MappedDiagServiceResponsePayload,
+    pub errors: Vec<FieldParseError>,
+}
+
 impl DiagServiceResponse for DiagServiceResponseStruct {
     fn service_name(&self) -> String {
         self.service.name.clone()
@@ -59,12 +68,16 @@ impl DiagServiceResponse for DiagServiceResponseStruct {
         &self.data
     }
 
-    fn into_json(self) -> Result<serde_json::Value, cda_interfaces::DiagServiceError> {
+    fn into_json(self) -> Result<DiagServiceJsonResponse, cda_interfaces::DiagServiceError> {
         self.serialize_to_json()
     }
 
     fn as_nrc(&self) -> Result<MappedNRC, String> {
-        let Some(mapped_data) = &self.mapped_data else {
+        let Some(MappedResponseData {
+            data: mapped_data,
+            errors: _,
+        }) = &self.mapped_data
+        else {
             return Err("Unexpected negative response from ECU".to_owned());
         };
         let nrc_code = mapped_data
@@ -75,6 +88,7 @@ impl DiagServiceResponse for DiagServiceResponseStruct {
                     let message = match operations::uds_data_to_serializable(
                         nrc.data_type,
                         nrc.compu_method.as_ref(),
+                        true,
                         &nrc.data,
                     )
                     .unwrap_or_else(|_| DiagDataValue::String("Unknown".to_owned()))
@@ -119,28 +133,45 @@ impl DiagServiceResponseStruct {
     /// # Errors
     /// Returns `Err` in case any currently unsupported Nesting of containers or if serde
     /// internally has an error when calling serialize on the elements.
-    pub fn serialize_to_json(self) -> Result<serde_json::Value, DiagServiceError> {
-        let data = self.get_mapped_payload()?;
+    pub fn serialize_to_json(self) -> Result<DiagServiceJsonResponse, DiagServiceError> {
+        let MappedResponseData { data, mut errors } = self.get_mapped_payload()?;
         if data.is_empty() {
-            return Ok(serde_json::Value::Null);
+            return Ok(DiagServiceJsonResponse {
+                data: serde_json::Value::Null,
+                errors,
+            });
         }
         let start = Instant::now();
         let mapped_data = data
             .iter()
-            .map(|(k, v)| -> Result<(_, _), DiagServiceError> {
-                Ok((k.clone(), Self::map_data(v)?))
+            .filter_map(|(k, v)| -> Option<Result<(_, _), DiagServiceError>> {
+                let mapped = match Self::map_data(v) {
+                    Ok(m) => m,
+                    Err(e) => {
+                        if let DiagServiceError::DataError(ref error) = e {
+                            errors.push(FieldParseError {
+                                path: format!("/{k}"),
+                                error: error.clone(),
+                            });
+                            return None;
+                        }
+                        return Some(Err(e));
+                    }
+                };
+                Some(Ok((k.clone(), mapped)))
             })
             .collect::<Result<HashMap<_, _>, DiagServiceError>>()
             .and_then(|mapped| {
                 serde_json::to_value(&mapped)
                     .map_err(|e| DiagServiceError::ParameterConversionError(e.to_string()))
-            });
+            })
+            .map(|data| DiagServiceJsonResponse { data, errors });
         let end = Instant::now();
         log::debug!(target: "serialize_to_json", "Mapped data to JSON in {:?}", end - start);
         mapped_data
     }
 
-    fn get_mapped_payload(self) -> Result<MappedDiagServiceResponsePayload, DiagServiceError> {
+    fn get_mapped_payload(self) -> Result<MappedResponseData, DiagServiceError> {
         match self.mapped_data {
             Some(mapped_data) => Ok(mapped_data),
             None => Err(DiagServiceError::BadPayload(
@@ -159,6 +190,7 @@ impl DiagServiceResponseStruct {
                         operations::uds_data_to_serializable(
                             raw.data_type,
                             raw.compu_method.as_ref(),
+                            false,
                             &raw.data,
                         )?
                     }
@@ -186,6 +218,7 @@ impl DiagServiceResponseStruct {
             DiagDataTypeContainer::RawContainer(raw) => Ok(operations::uds_data_to_serializable(
                 raw.data_type,
                 raw.compu_method.as_ref(),
+                false,
                 &raw.data,
             )?),
             DiagDataTypeContainer::Struct(hash_map) => {

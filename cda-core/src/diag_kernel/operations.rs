@@ -12,7 +12,10 @@
  */
 
 use cda_database::datatypes::{self, CompuMethod, CompuScale, DataType};
-use cda_interfaces::{DiagServiceError, STRINGS, util::decode_hex};
+use cda_interfaces::{
+    DataParseError, DiagServiceError, STRINGS,
+    util::{decode_hex, tracing::print_hex},
+};
 
 use crate::diag_kernel::{
     DiagDataValue,
@@ -24,6 +27,7 @@ use crate::diag_kernel::{
 pub(in crate::diag_kernel) fn uds_data_to_serializable(
     diag_type: DataType,
     compu_method: Option<&CompuMethod>,
+    is_negative_response: bool,
     data: &[u8],
 ) -> Result<DiagDataValue, DiagServiceError> {
     if data.is_empty() {
@@ -35,7 +39,15 @@ pub(in crate::diag_kernel) fn uds_data_to_serializable(
         if let Some(compu_method) = compu_method {
             match compu_method.category {
                 datatypes::CompuCategory::Identical => break 'compu,
-                category => return compu_lookup(diag_type, compu_method, category, data),
+                category => {
+                    return compu_lookup(
+                        diag_type,
+                        compu_method,
+                        category,
+                        is_negative_response,
+                        data,
+                    );
+                }
             }
         }
     }
@@ -47,6 +59,7 @@ fn compu_lookup(
     diag_type: DataType,
     compu_method: &CompuMethod,
     category: datatypes::CompuCategory,
+    is_negative_response: bool,
     data: &[u8],
 ) -> Result<DiagDataValue, DiagServiceError> {
     let lookup = DiagDataValue::new(diag_type, data)?;
@@ -126,15 +139,23 @@ fn compu_lookup(
             }
         },
         None => {
-            let lookup: u32 = lookup.try_into()?;
-            if lookup <= 0xFF {
-                Ok(DiagDataValue::String(
-                    iso_14229_nrc::get_nrc_code(lookup as u8).to_owned(),
-                ))
+            // lookup NRCs from iso for negative responses
+            if is_negative_response {
+                let lookup: u32 = lookup.try_into()?;
+                if lookup <= 0xFF {
+                    Ok(DiagDataValue::String(
+                        iso_14229_nrc::get_nrc_code(lookup as u8).to_owned(),
+                    ))
+                } else {
+                    Ok(DiagDataValue::String(
+                        format!("Unknown ({lookup})").to_owned(),
+                    ))
+                }
             } else {
-                Ok(DiagDataValue::String(
-                    format!("Unknown ({lookup})").to_owned(),
-                ))
+                Err(DiagServiceError::DataError(DataParseError {
+                    value: print_hex(data, 20),
+                    details: "Value outside of expected range".to_owned(),
+                }))
             }
         }
     }

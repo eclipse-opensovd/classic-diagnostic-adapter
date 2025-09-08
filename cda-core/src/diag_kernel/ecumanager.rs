@@ -25,7 +25,7 @@ use cda_interfaces::{
         ComponentDataInfo, DatabaseNamingConvention, RetryPolicy, SdSdg, TesterPresentSendType,
         semantics, single_ecu,
     },
-    diagservices::{DiagServiceResponse, DiagServiceResponseType, UdsPayloadData},
+    diagservices::{DiagServiceResponse, DiagServiceResponseType, FieldParseError, UdsPayloadData},
     get_string, get_string_from_option, get_string_from_option_with_default,
     get_string_with_default, service_ids, spawn_named, util,
 };
@@ -33,16 +33,19 @@ use hashbrown::{HashMap, HashSet};
 use parking_lot::Mutex;
 use tokio::task::JoinHandle;
 
-use crate::diag_kernel::{
-    DiagDataValue, Variant,
-    diagservices::{
-        DiagDataTypeContainer, DiagDataTypeContainerRaw, DiagServiceResponseStruct,
-        MappedDiagServiceResponsePayload,
+use crate::{
+    MappedResponseData,
+    diag_kernel::{
+        DiagDataValue, Variant,
+        diagservices::{
+            DiagDataTypeContainer, DiagDataTypeContainerRaw, DiagServiceResponseStruct,
+            MappedDiagServiceResponsePayload,
+        },
+        into_db_protocol,
+        operations::{self, json_value_to_uds_data, uds_data_to_serializable},
+        payload::Payload,
+        variant_detection,
     },
-    into_db_protocol,
-    operations::{self, json_value_to_uds_data, uds_data_to_serializable},
-    payload::Payload,
-    variant_detection,
 };
 
 pub struct EcuManager {
@@ -520,6 +523,7 @@ impl cda_interfaces::EcuManager for EcuManager {
                     response_type: DiagServiceResponseType::Positive,
                 });
             }
+            let mut mapping_errors = Vec::new();
             for param in params.iter() {
                 let semantic = param.semantic.and_then(|sem| STRINGS.get(sem));
                 if semantic.is_some_and(|semantic| {
@@ -534,27 +538,42 @@ impl cda_interfaces::EcuManager for EcuManager {
                     ))
                 })?;
                 uds_payload.set_last_read_byte_pos(param.byte_pos as usize);
-                self.map_param_from_uds(
+                match self.map_param_from_uds(
                     mapped_service,
                     param,
                     &short_name,
                     &mut uds_payload,
                     &mut data,
-                )?;
+                ) {
+                    Ok(()) => {}
+                    Err(DiagServiceError::DataError(error)) => {
+                        mapping_errors.push(FieldParseError {
+                            path: format!("/{short_name}"),
+                            error,
+                        });
+                    }
+                    Err(e) => return Err(e),
+                }
             }
             let resp = match t {
                 datatypes::ResponseType::Negative | datatypes::ResponseType::GlobalNegative => {
                     DiagServiceResponseStruct {
                         service: diag_service.clone(),
                         data: raw_uds_payload,
-                        mapped_data: Some(data),
+                        mapped_data: Some(MappedResponseData {
+                            data,
+                            errors: mapping_errors,
+                        }),
                         response_type: DiagServiceResponseType::Negative,
                     }
                 }
                 datatypes::ResponseType::Positive => DiagServiceResponseStruct {
                     service: diag_service.clone(),
                     data: raw_uds_payload,
-                    mapped_data: Some(data),
+                    mapped_data: Some(MappedResponseData {
+                        data,
+                        errors: mapping_errors,
+                    }),
                     response_type: DiagServiceResponseType::Positive,
                 },
             };
@@ -1748,6 +1767,7 @@ impl EcuManager {
                 let selector = uds_data_to_serializable(
                     switch_key_diag_type.base_datatype(),
                     None,
+                    false,
                     &mux_payload,
                 )?;
 
@@ -2184,6 +2204,7 @@ impl EcuManager {
                 let switch_key_value = operations::uds_data_to_serializable(
                     switch_key_diag_type.base_datatype(),
                     None,
+                    false,
                     &switch_key_data,
                 )?;
 
@@ -3024,7 +3045,7 @@ mod tests {
             )
             .unwrap();
         assert_eq!(
-            response.serialize_to_json().unwrap(),
+            response.serialize_to_json().unwrap().data,
             json!({
                 "mux_1_param": {
                         "Selector": 0xffff,
@@ -3206,7 +3227,7 @@ mod tests {
 
         // Test from payload to json
         assert_eq!(
-            response.serialize_to_json().unwrap(),
+            response.serialize_to_json().unwrap().data,
             expected_response_json
         );
 
@@ -3431,7 +3452,7 @@ mod tests {
             "test_service_pos_sid": sid
         });
 
-        assert_eq!(response.serialize_to_json().unwrap(), expected_json);
+        assert_eq!(response.serialize_to_json().unwrap().data, expected_json);
     }
 
     #[test]
@@ -3466,7 +3487,7 @@ mod tests {
             "test_service_pos_sid": sid
         });
 
-        assert_eq!(response.serialize_to_json().unwrap(), expected_json);
+        assert_eq!(response.serialize_to_json().unwrap().data, expected_json);
     }
 
     #[test]
@@ -3498,7 +3519,7 @@ mod tests {
         });
 
         // extra data at the end is ignored.
-        assert_eq!(response.serialize_to_json().unwrap(), expected_json);
+        assert_eq!(response.serialize_to_json().unwrap().data, expected_json);
     }
 
     #[test]
@@ -3518,7 +3539,7 @@ mod tests {
             "test_service_pos_sid": sid
         });
 
-        assert_eq!(response.serialize_to_json().unwrap(), expected_json);
+        assert_eq!(response.serialize_to_json().unwrap().data, expected_json);
     }
 
     #[test]
@@ -3553,6 +3574,6 @@ mod tests {
             "test_service_pos_sid": sid
         });
 
-        assert_eq!(response.serialize_to_json().unwrap(), expected_json);
+        assert_eq!(response.serialize_to_json().unwrap().data, expected_json);
     }
 }
