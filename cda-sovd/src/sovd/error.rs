@@ -17,7 +17,10 @@ use aide::OperationOutput;
 use axum::{
     Json,
     body::Body,
-    extract::{Request, rejection::JsonRejection},
+    extract::{
+        Request,
+        rejection::{JsonRejection, QueryRejection},
+    },
     http::{StatusCode, Uri},
     middleware::Next,
     response::{IntoResponse, Response},
@@ -105,6 +108,12 @@ impl From<std::io::Error> for ApiError {
 
 impl From<JsonRejection> for ApiError {
     fn from(e: JsonRejection) -> Self {
+        ApiError::BadRequest(e.body_text())
+    }
+}
+
+impl From<QueryRejection> for ApiError {
+    fn from(e: QueryRejection) -> Self {
         ApiError::BadRequest(e.body_text())
     }
 }

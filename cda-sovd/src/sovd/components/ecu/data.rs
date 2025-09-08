@@ -69,6 +69,7 @@ pub(crate) mod diag_service {
         extract::{Path, Query, State},
         response::{IntoResponse, Response},
     };
+    use axum_extra::extract::WithRejection;
     use cda_interfaces::{
         DiagComm, DiagCommAction, DiagCommType, SchemaProvider, UdsEcu,
         diagservices::DiagServiceResponse, file_manager::FileManager,
@@ -140,7 +141,7 @@ pub(crate) mod diag_service {
     >(
         headers: HeaderMap,
         Path(DiagServicePathParam { diag_service }): Path<DiagServicePathParam>,
-        Query(query): Query<DiagServiceQuery>,
+        WithRejection(Query(query), _): WithRejection<Query<DiagServiceQuery>, ApiError>,
         State(WebserverEcuState { ecu_name, uds, .. }): State<WebserverEcuState<R, T, U>>,
     ) -> Response {
         if Some(true) == query.include_sdgs {
