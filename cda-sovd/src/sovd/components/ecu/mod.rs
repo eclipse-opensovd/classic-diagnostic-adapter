@@ -23,7 +23,7 @@ use cda_interfaces::{
     diagservices::{DiagServiceJsonResponse, DiagServiceResponse, DiagServiceResponseType},
     file_manager::FileManager,
 };
-use http::{HeaderMap, StatusCode, header};
+use http::{HeaderMap, StatusCode};
 use schemars::JsonSchema;
 use serde::Deserialize;
 
@@ -31,7 +31,7 @@ use crate::{
     openapi,
     sovd::{
         IntoSovd, WebserverEcuState,
-        components::field_parse_errors_to_json,
+        components::{field_parse_errors_to_json, get_content_type_and_accept},
         create_response_schema,
         error::{ApiError, ErrorWrapper, api_error_from_diag_response},
         get_payload_data,
@@ -197,9 +197,16 @@ async fn data_request<T: UdsEcu + SchemaProvider + Clone>(
     body: Option<Bytes>,
     include_schema: bool,
 ) -> Response {
+    let (content_type, accept) = match get_content_type_and_accept(&headers) {
+        Ok(v) => v,
+        Err(e) => return ErrorWrapper(e).into_response(),
+    };
+
     let data = if let Some(body) = body {
         match get_payload_data::<sovd_interfaces::components::ecu::data::DataRequestPayload>(
-            &headers, &body,
+            content_type.as_ref(),
+            &headers,
+            &body,
         ) {
             Ok(value) => value,
             Err(e) => return ErrorWrapper(e).into_response(),
@@ -208,20 +215,15 @@ async fn data_request<T: UdsEcu + SchemaProvider + Clone>(
         None
     };
 
-    let (response_mime, map_to_json) = match headers.get(header::ACCEPT) {
-        Some(v)
-            if v == mime::APPLICATION_JSON.essence_str() || v == mime::STAR_STAR.essence_str() =>
-        {
-            (Some(v), true)
-        }
-        Some(v) if v == mime::APPLICATION_OCTET_STREAM.essence_str() => (Some(v), false),
-        Some(unsupported) => {
+    let map_to_json = match (accept.type_(), accept.subtype()) {
+        (mime::APPLICATION, mime::JSON) => true,
+        (mime::APPLICATION, mime::OCTET_STREAM) => false,
+        unsupported => {
             return ErrorWrapper(ApiError::BadRequest(format!(
                 "Unsupported Accept: {unsupported:?}"
             )))
             .into_response();
         }
-        _ => (None, true),
     };
 
     if !map_to_json && include_schema {
@@ -262,48 +264,49 @@ async fn data_request<T: UdsEcu + SchemaProvider + Clone>(
         return api_error_from_diag_response(response).into_response();
     }
 
-    match response_mime {
-        Some(v) if v == mime::APPLICATION_OCTET_STREAM.essence_str() => {
-            let data = response.get_raw().to_vec();
-            (StatusCode::OK, Bytes::from_owner(data)).into_response()
-        }
-        _ => {
-            let mapped_data = match response
-                .into_json()
-                .map_err(|e| ApiError::InternalServerError(Some(format!("{e:?}"))))
-            {
-                Err(e) => {
-                    return ErrorWrapper(ApiError::InternalServerError(Some(format!(
-                        "Failed to serialize response: {e:?}"
-                    ))))
-                    .into_response();
-                }
-                Ok(v) => v,
-            };
+    if response.is_empty() {
+        return StatusCode::NO_CONTENT.into_response();
+    }
 
-            if mapped_data.data.is_null() {
-                StatusCode::NO_CONTENT.into_response()
-            } else if let DiagServiceJsonResponse {
+    if map_to_json {
+        let (mapped_data, errors) = match response.into_json() {
+            Ok(DiagServiceJsonResponse {
                 data: serde_json::Value::Object(mapped_data),
                 errors,
-            } = mapped_data
-            {
-                (
-                    StatusCode::OK,
-                    Json(sovd_interfaces::ObjectDataItem {
-                        id: service.name.to_lowercase(),
-                        data: mapped_data,
-                        errors: field_parse_errors_to_json(errors),
-                        schema,
-                    }),
-                )
-                    .into_response()
-            } else {
-                ErrorWrapper(ApiError::InternalServerError(Some(format!(
-                    "Unexpected response format: {mapped_data:?}"
-                ))))
-                .into_response()
+            }) => (mapped_data, errors),
+            Ok(DiagServiceJsonResponse {
+                data: serde_json::Value::Null,
+                errors,
+            }) => {
+                if errors.is_empty() {
+                    return StatusCode::NO_CONTENT.into_response();
+                }
+                (serde_json::Map::new(), errors)
             }
-        }
+            Ok(v) => {
+                return ErrorWrapper(ApiError::InternalServerError(Some(format!(
+                    "Expected JSON object but got: {}",
+                    v.data
+                ))))
+                .into_response();
+            }
+            Err(e) => {
+                return ErrorWrapper(ApiError::InternalServerError(Some(format!("{e:?}"))))
+                    .into_response();
+            }
+        };
+        (
+            StatusCode::OK,
+            Json(sovd_interfaces::ObjectDataItem {
+                id: service.name.to_lowercase(),
+                data: mapped_data,
+                errors: field_parse_errors_to_json(errors),
+                schema,
+            }),
+        )
+            .into_response()
+    } else {
+        let data = response.get_raw().to_vec();
+        (StatusCode::OK, Bytes::from_owner(data)).into_response()
     }
 }

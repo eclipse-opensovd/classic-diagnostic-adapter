@@ -349,8 +349,6 @@ pub(crate) mod comparams {
 
 pub(crate) mod service {
     pub(crate) mod executions {
-        use std::str::FromStr;
-
         use aide::transform::TransformOperation;
         use axum::{
             Json,
@@ -370,7 +368,7 @@ pub(crate) mod service {
             openapi,
             sovd::{
                 self, WebserverEcuState, api_error_from_diag_response,
-                components::field_parse_errors_to_json,
+                components::{field_parse_errors_to_json, get_content_type_and_accept},
                 error::{ApiError, ErrorWrapper},
             },
         };
@@ -473,7 +471,13 @@ pub(crate) mod service {
                     if service == "reset" {
                         return ecu_reset_handler::<T>(service, ecu_name, uds, body).await;
                     }
-                    let Some(content_type) = headers.get(header::CONTENT_TYPE) else {
+
+                    let content_type_and_accept = match get_content_type_and_accept(&headers) {
+                        Ok(v) => v,
+                        Err(e) => return ErrorWrapper(e).into_response(),
+                    };
+
+                    let (Some(content_type), accept) = content_type_and_accept else {
                         return ErrorWrapper(ApiError::BadRequest(
                             "Missing Content-Type".to_owned(),
                         ))
@@ -487,55 +491,24 @@ pub(crate) mod service {
                         lookup_name: None,
                     };
 
-                    let data =
-                        match sovd::get_payload_data::<sovd_executions::Request>(&headers, &body) {
-                            Ok(v) => v,
-                            Err(e) => return ErrorWrapper(e).into_response(),
-                        };
-
-                    let accept_header = headers.get(header::ACCEPT).map_or(content_type, |v| {
-                        if v == mime::STAR_STAR.essence_str() {
-                            content_type
-                        } else {
-                            v
-                        }
-                    });
-                    let response_mime = match accept_header.to_str() {
-                        Ok(v) => v
-                            .split(';')
-                            .next()
-                            .map(str::trim)
-                            .ok_or_else(|| {
-                                format!("invalid or empty accept header {accept_header:?}")
-                            })
-                            .and_then(|s| {
-                                mime::Mime::from_str(s).map_err(|_| {
-                                    format!("failed to parse mime type {accept_header:?}")
-                                })
-                            }),
-                        Err(_) => Err(format!(
-                            "Neither accept header or content type is set or not a valid string: \
-                             {accept_header:?}"
-                        )),
+                    let data = match sovd::get_payload_data::<sovd_executions::Request>(
+                        Some(&content_type),
+                        &headers,
+                        &body,
+                    ) {
+                        Ok(v) => v,
+                        Err(e) => return ErrorWrapper(e).into_response(),
                     };
 
-                    let response_mime = match response_mime {
-                        Ok(mime) => mime,
-                        Err(err) => {
-                            return ErrorWrapper(ApiError::BadRequest(err)).into_response();
-                        }
-                    };
-
-                    if response_mime != mime::APPLICATION_OCTET_STREAM
-                        && response_mime != mime::APPLICATION_JSON
+                    if accept != mime::APPLICATION_OCTET_STREAM && accept != mime::APPLICATION_JSON
                     {
                         return ErrorWrapper(ApiError::BadRequest(format!(
-                            "Unsupported Accept header: {accept_header:?}"
+                            "Unsupported Accept header: {accept:?}"
                         )))
                         .into_response();
                     }
 
-                    let map_to_json = response_mime == mime::APPLICATION_JSON;
+                    let map_to_json = accept == mime::APPLICATION_JSON;
                     let response = match uds.send(ecu_name, diag_service, data, map_to_json).await {
                         Ok(v) => v,
                         Err(e) => return ErrorWrapper(e.into()).into_response(),
