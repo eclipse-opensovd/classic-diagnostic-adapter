@@ -18,6 +18,7 @@ use axum::{
     extract::{Query, State},
     response::{IntoResponse, Response},
 };
+use axum_extra::extract::WithRejection;
 use cda_interfaces::{
     DiagComm, SchemaProvider, UdsEcu,
     diagservices::{DiagServiceJsonResponse, DiagServiceResponse, DiagServiceResponseType},
@@ -59,7 +60,7 @@ pub(crate) async fn get<
     U: FileManager + Send + Sync + Clone,
 >(
     State(WebserverEcuState { ecu_name, uds, .. }): State<WebserverEcuState<R, T, U>>,
-    Query(query): Query<ComponentQuery>,
+    WithRejection(Query(query), _): WithRejection<Query<ComponentQuery>, ApiError>,
 ) -> impl IntoApiResponse {
     let base_path = format!("http://localhost:20002/vehicle/v15/components/{ecu_name}");
     let variant = match uds.get_variant(&ecu_name).await {
