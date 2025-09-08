@@ -263,6 +263,9 @@ pub mod x {
                     pub struct Response {
                         #[serde(rename = "requestdownload")]
                         pub parameters: serde_json::Map<String, serde_json::Value>,
+                        #[cfg_attr(feature = "openapi", schemars(skip))]
+                        #[serde(skip_serializing_if = "Vec::is_empty")]
+                        pub errors: Vec<serde_json::Value>,
                     }
                 }
             }

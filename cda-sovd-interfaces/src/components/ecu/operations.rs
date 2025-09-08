@@ -170,8 +170,12 @@ pub mod service {
         use crate::Payload;
 
         #[derive(Serialize)]
+        #[cfg_attr(feature = "openapi", derive(schemars::JsonSchema))]
         pub struct Response {
-            pub parameters: serde_json::Value,
+            pub parameters: serde_json::Map<String, serde_json::Value>,
+            #[cfg_attr(feature = "openapi", schemars(skip))]
+            #[serde(skip_serializing_if = "Vec::is_empty")]
+            pub errors: Vec<serde_json::Value>,
         }
 
         #[derive(Deserialize, Serialize, Debug)]

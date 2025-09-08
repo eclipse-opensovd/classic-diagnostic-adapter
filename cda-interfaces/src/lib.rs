@@ -195,6 +195,14 @@ pub enum DiagServiceError {
     EcuOffline(String),
     Timeout,
     AccessDenied(String),
+    DataError(DataParseError),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg_attr(feature = "deepsize", derive(DeepSizeOf))]
+pub struct DataParseError {
+    pub value: String,
+    pub details: String,
 }
 
 impl Display for DiagServiceError {
@@ -233,6 +241,9 @@ impl Display for DiagServiceError {
             DiagServiceError::EcuOffline(ecu) => write!(f, "Ecu {ecu} offline"),
             DiagServiceError::Timeout => write!(f, "Timeout"),
             DiagServiceError::AccessDenied(msg) => write!(f, "Access denied: {msg}"),
+            DiagServiceError::DataError(DataParseError { value, details }) => {
+                write!(f, "Data parse error: value='{value}', details='{details}'")
+            }
         }
     }
 }

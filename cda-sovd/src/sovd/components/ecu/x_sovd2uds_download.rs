@@ -19,7 +19,9 @@ use axum::{
 use axum_extra::extract::Host;
 use cda_interfaces::{
     UdsEcu,
-    diagservices::{DiagServiceResponse, DiagServiceResponseType, UdsPayloadData},
+    diagservices::{
+        DiagServiceJsonResponse, DiagServiceResponse, DiagServiceResponseType, UdsPayloadData,
+    },
 };
 use hashbrown::HashMap;
 
@@ -36,7 +38,7 @@ async fn sovd_to_func_class_service_exec<T: UdsEcu + Send + Sync + Clone>(
     ecu_name: &str,
     service_id: u8,
     parameters: HashMap<String, serde_json::Value>,
-) -> Result<serde_json::Value, Response> {
+) -> Result<DiagServiceJsonResponse, Response> {
     let params = UdsPayloadData::ParameterMap(parameters);
     let response = match uds
         .ecu_exec_service_from_function_class(ecu_name, func_class, service_id, params)
@@ -58,7 +60,6 @@ async fn sovd_to_func_class_service_exec<T: UdsEcu + Send + Sync + Clone>(
             );
         }
     };
-
     Ok(mapped_data)
 }
 
@@ -82,7 +83,10 @@ pub(crate) mod request_download {
         response::{IntoResponse as _, Response},
     };
     use cda_interfaces::{
-        UdsEcu, diagservices::DiagServiceResponse, file_manager::FileManager, service_ids,
+        UdsEcu,
+        diagservices::{DiagServiceJsonResponse, DiagServiceResponse},
+        file_manager::FileManager,
+        service_ids,
     };
     use sovd_interfaces::components::ecu::x::sovd2uds;
 
@@ -90,6 +94,7 @@ pub(crate) mod request_download {
         openapi,
         sovd::{
             WebserverEcuState,
+            components::field_parse_errors_to_json,
             error::ErrorWrapper,
             x_sovd2uds_download::{
                 FLASH_DOWNLOAD_UPLOAD_FUNC_CLASS, sovd_to_func_class_service_exec,
@@ -114,15 +119,19 @@ pub(crate) mod request_download {
         )
         .await
         {
-            Ok(serde_json::Value::Object(mapped_data)) => (
+            Ok(DiagServiceJsonResponse {
+                data: serde_json::Value::Object(mapped_data),
+                errors,
+            }) => (
                 StatusCode::OK,
                 Json(sovd2uds::download::request_download::put::Response {
                     parameters: mapped_data,
+                    errors: field_parse_errors_to_json(errors),
                 }),
             )
                 .into_response(),
             Ok(val) => ErrorWrapper(crate::sovd::error::ApiError::InternalServerError(Some(
-                format!("Expected a map, got: {val:?}"),
+                format!("Expected a map, got: {}", val.data),
             )))
             .into_response(),
             Err(response) => response,
@@ -140,6 +149,7 @@ pub(crate) mod request_download {
                         ]
                         .into_iter()
                         .collect(),
+                        errors: vec![],
                     })
                 },
             )

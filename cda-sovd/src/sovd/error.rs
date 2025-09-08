@@ -63,6 +63,7 @@ impl From<DiagServiceError> for ApiError {
             | DiagServiceError::UnexpectedResponse
             | DiagServiceError::RequestNotSupported
             | DiagServiceError::Timeout
+            | DiagServiceError::DataError(_)
             | DiagServiceError::AccessDenied(_) => ApiError::BadRequest(value.to_string()),
         }
     }
@@ -119,9 +120,19 @@ pub struct ErrorWrapper(pub ApiError);
 #[derive(Serialize, schemars::JsonSchema)]
 #[serde(rename_all = "kebab-case")]
 pub enum VendorErrorCode {
+    /// The requested resource was not found.
     NotFound,
+    /// The request could not be completed due to some faults with the request.
+    ///
+    /// eg. An unexpected request parameter was provided, or the necessary
+    /// preconditions are not met.
     BadRequest,
+    /// The request could not be completed within the configured time limit.
     RequestTimeout,
+    /// An error occured when trying to convert the UDS message to JSON
+    ///
+    /// eg. A Value received by the ECU was outside of the expected range
+    ErrorInterpretingMessage,
 }
 
 impl OperationOutput for ErrorWrapper {

@@ -93,6 +93,7 @@ impl VariantDetection {
             .map(|(service, res)| {
                 let json = res.into_json()?;
                 let params = json
+                    .data
                     .as_object()
                     .ok_or_else(|| {
                         DiagServiceError::ParameterConversionError(

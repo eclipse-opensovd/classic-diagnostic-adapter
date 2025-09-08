@@ -49,7 +49,10 @@ pub struct ResourceResponse {
 pub struct ObjectDataItem {
     pub id: String,
     pub data: serde_json::Map<String, serde_json::Value>,
-    #[schemars(skip)]
+    #[cfg_attr(feature = "openapi", schemars(skip))]
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub errors: Vec<serde_json::Value>,
+    #[cfg_attr(feature = "openapi", schemars(skip))]
     #[serde(skip_serializing_if = "Option::is_none")]
     pub schema: Option<schemars::Schema>,
 }

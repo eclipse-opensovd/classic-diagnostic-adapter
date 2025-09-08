@@ -98,3 +98,10 @@ pub struct ApiErrorResponse<T> {
     #[serde(rename = "x-errorsource")]
     pub error_source: Option<String>,
 }
+
+#[derive(Serialize)]
+#[cfg_attr(feature = "openapi", derive(schemars::JsonSchema))]
+pub struct DataError<T> {
+    pub path: String,
+    pub error: ApiErrorResponse<T>,
+}
