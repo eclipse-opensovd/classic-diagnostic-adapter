@@ -11,6 +11,7 @@ tasks.register("openApiCopy") {
             }
             def target = new File(outputDir, filePath)
             println("Copy ${srcFile} to ${target}")
+            target.mkdirs()
             Files.copy(srcFile.toPath(), target.toPath(), StandardCopyOption.REPLACE_EXISTING)
         }
     }

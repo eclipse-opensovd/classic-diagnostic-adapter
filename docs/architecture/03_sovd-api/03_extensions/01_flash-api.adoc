@@ -1,5 +1,11 @@
 [#_architecture_sovd_api_iso_extensions_flash_api]
 = Flash-API
+:toc:
+:numbered:
+
+ifndef::rootpath[]
+:rootpath: ../../..
+endif::rootpath[]
 
 [.specitem, oft-sid="arch~sovd.api.flash-api~1" oft-covers="req~sovd.api.flash-api~1"]
 
@@ -29,7 +35,7 @@ The following paths are required for the flashing API.
 | Method | Path | Description | Notes
 
 |GET
-|`/apps/sovd2uds/bulk-data/flashfiles`
+|/apps/sovd2uds/bulk-data/flashfiles
 |Returns a list of entries which represent files in the configured flash folder and its subfolders.
 |Flash folder needs to be configured
 
@@ -39,33 +45,32 @@ The following paths are required for the flashing API.
 
 All paths are prefixed with `/components/+{ecu-name}+`.
 
-
 [cols="1,1,1,1"]
 |===
 | Method | Path | Description | Notes
 
 |PUT
-|`/x-sovd2uds-download/requestdownload`
+|/x-sovd2uds-download/requestdownload
 |Calls the RequestDownload Service 34~16~
 |Returns an object with an `id`
 
 |POST
-|`/x-sovd2uds-download/flashtransfer`
+|/x-sovd2uds-download/flashtransfer
 |Transfers data in file given by id from an offset for a given length in settable chunk-sizes. It uses repeated calls to service 36~16~ to transfer the data.
 |Plans: API will be extended to also allow starting the transfer directly with absolute file paths
 
 |GET
-|`/x-sovd2uds-download/flashtransfer`
+|/x-sovd2uds-download/flashtransfer
 |Retrieve the ids of the running flash transfers
 |--
 
 |GET
-|`/x-sovd2uds-download/flashtransfer/+{id}+`
+|/x-sovd2uds-download/flashtransfer/+{id}+
 |Retrieve the status of the transfer with `id`
 |--
 
 |PUT
-|`/x-sovd2uds-download/transferexit`
+|/x-sovd2uds-download/transferexit
 |Calls the transfer exit service 37~16~
 |--
 

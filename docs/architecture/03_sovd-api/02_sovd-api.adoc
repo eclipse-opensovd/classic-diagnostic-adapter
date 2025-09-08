@@ -1,6 +1,6 @@
 [#_architecture_sovd_api_standard]
 = SOVD-API
-
+:toc:
 :numbered:
 
 ifndef::rootpath[]
@@ -31,7 +31,7 @@ Data types must be mapped as follows:
 
 |A_BYTEFIELD
 |string (byte \| hex)
-| see xref:{rootpath}/requirements/04_sovd.adoc#_bytefield_as_hex[Requirements: Bytefield as hex]
+| see xref:{rootpath}/requirements/04_sovd.adoc#_requirements_bytefield_as_hex[Requirements: Bytefield as hex]
 
 |A_FLOAT32
 |number (float)
@@ -102,8 +102,43 @@ For string, the following format identifiers can be used:
 
 
 === Bulk Data
+[#_architecture_sovd_bulk_data]
 
-#TODO#
+Bulk-Data endpoints allow the management of bulk data, like files which are to be used for flashing.
+
+Paths are required to be in the following structure: `/bulk-data/+{category}+/+{id}+`. For extensions,
+the name `bulk-data` may only be used in the end of a path element.
+
+|===
+|Method|Path|Description
+
+|GET
+|/bulk-data/+{category}+
+|Retrieves a list of entries in that category and their ids
+
+|GET
+|/bulk-data/+{category}/{entry-id}+
+|Downloads the data for the entry. The mime type is determined by the server,
+and content of the data.
+
+|POST
+|/bulk-data/+{category}+
+|Uploads data to the category, additional metadata (e.g. filename) can be
+provided through Content-Disposition: form-data
+
+|DELETE
+|/bulk-data/+{category}+
+|Requests the deletion of all data for that category
+
+|DELETE
+|/bulk-data/+{category}/{entry-id}+
+|Requests the deletion of a specific entry
+
+|===
+
+IMPORTANT: All calls to the aforementioned endpoints can fail with reasonable HTTP status codes (e.g. 401, 403, 409, 501), depending on the context & state.
+
+#TODO# openapi description (maybe in architecture?)
 
 == Entities
 
@@ -115,54 +150,256 @@ This doesn't include the `mdd` files used for xref:{rootpath}/architecture/03_so
 
 == ECU resource collection
 
-The resource collection for ECUs is defined in an OpenAPI Specification: xref:{rootpath}/architecture/03_sovd-api/ecu_resource_collection.yaml[ECU Resource Collection Specification]
+The resource collection for ECUs is defined in an OpenAPI Specification: xref:{rootpath}/architecture/03_sovd-api/openapi/ecu_resource_collection.yaml[ECU Resource Collection Specification]
 
 == Data Resources -- SID 22~16~ & 2E~16~
 
-#TODO#
+Data resources for ECUs are available in the standardized resource collection within the path `/components/+{ecu-name}+/data`.
+
+The data main path returns a list of the data identifiers available as `/data/+{data-identifier}+`,
+as well as metadata.
+
+A data identifier in the list is described with the following attributes (all string):
+
+|===
+|Attribute|Description
+
+|id
+|Path element id (i.e. short name)
+
+|name
+|Name of the element (i.e. long name)
+
+|category
+|Category of the element
+|===
+
+#TODO# openapi
+
+=== Naming
+
+Names for data resources are determined by taking all diag-services defined for 22~16~ and 2E~16~ --
+their short-name is taken as a base and processed by removing configurable prefixes/suffixes, to determine
+the data identifier within the `/data/+{data-identifier}+` path.
+
+=== Categories
+
+The category of a data identifier must be mappable with configuration, in which the functional class name
+is mapped to a category name.
+
+The following standard categories are defined by the standard:
+
+|===
+|Name|Description
+
+|identData
+|Identification data -- everything related to the identification of an ECU/Vehicle
+
+|currentData
+|Measurement data which can dynamically change
+
+|storedData
+|Parameters stored in the ECU
+
+|sysInfo
+|System information - data related to system resources, that can change dynamically (e.g. memory consumption)
+
+|===
+
+Additional custom categories must be prefixed with `x-sovd2uds-`, or in custom vendor configuration with a vendor
+specific prefix, different to `x-sovd2uds`.
+
+Services without a mapping should be ignored, to allow a separation between configuration & data services.
 
 == Configurations -- SID 22~16~ & 2E~16~
 
-#TODO#
+Names for data resources are determined by taking all diag-services defined for 22~16~ and 2E~16~, and filtering
+them for a configurable functional class name. Their short-name is taken as a base and processed by removing
+configurable prefixes/suffixes, to determine the data identifier within the `/configurations/+{data-identifier}+` path.
+
+The returned item properties for the `/configurations` item list are:
+
+|===
+|Attribute|Description
+
+|id
+|Path element id (i.e. short name)
+
+|name
+|Name of the element (i.e. long name)
+
+|type
+|Always `parameter`
+
+|x-sovd2uds-serviceAbstract
+|Array of strings containing the SIDs and data identifier as hexadecimal string (e.g. ["2E1234", "221234"])
+
+|===
+
+NOTE: `x-sovd2uds-serviceAbstract` is an extension to the standard.
+
+.Rationale for serviceAbstract
+
+Coding data files might not include the matching name for a service, or detailed json parameters which would
+be required to code an ECU. Therefore, a "reverse lookup" to the name can be required, so a client without
+access to the diagnostic description is able to code an ECU just with the `2E 1234 <payload>` data,
+utilizing the `application/octet-stream` extension for a `PUT /configurations/+{data-identifier}+` call.
 
 == Operations
 
-#TODO#
+Operations in the CDA are Routines (31~16~), Reset (11~16~), and an extension to configure
+communication parameters.
 
-=== Routines
+=== Reset -- SID 11~16~
 
-#TODO#
+For compatibility with SOVD version 1.0 and earlier, the operations `/operations/ecureset` and
+`/operations/reset` to reset an ECU must be supported.
 
-=== Synchronous -- SID 31~16~ (Start only)
-=== Asynchronous -- SID 31~16~ (Start, Stop, RequestResults)
+=== Routines -- SID 31~16~
+
+All services with the SID 31~16~ are considered for operations -- as with data, their short names are
+preprocessed by removing configurable prefixes/suffixes to determine routine identifiers available as
+the `/operations/+{routine-identifier}+` path.
+
+The items in the list of items available under `/operations` must include the following attributes:
+
+|===
+|Attribute|Type|Description
+
+|id
+|string
+|Path element for the routine identifier (i.e. short name)
+
+|name
+|string
+|Name of the routine (long name)
+
+|proximity_proof_required
+|boolean
+|Always `false`
+
+|asynchronous_execution
+|boolean
+|Either `true` or `false`, depends on the defined subfunctions for the routine
+
+|===
+
+==== Synchronous -- Start only
+
+When a routine only defines the `Start` subfunction, it is considered Synchronous. This means
+that the return for `asynchronous_execution` in the list will be `false`, and that a call to
+execute the routine with `POST /operations/+{routine-name}+/executions` is executed synchronously,
+and will directly return the response from the ECU.
+
+==== Asynchronous -- Start, Stop & RequestResults
+
+When a routine subfunctions other than `Start`, it is considered Asynchronous. This means
+that the return for `asynchronous_execution` in the list will be `true`, and that a call to
+execute the routine with `POST /operations/+{routine-name}+/executions` is executed on the ECU,
+and will return the response from the ECU, as well as an `id` for calling the RequestResults
+subfunction with `GET /operations/+{routine-name}+/executions/+{id}+`.
+
+Additionally, calling `DELETE /operations/+{routine-name}+/executions/+{id}+` is possible to
+call the Stop subfunction of the routine.
+
+If any of the sub functions are not available, the call will result in an error, unless the
+`x-sovd2uds-supressService` query parameter is set to true.
+
+If DELETE is called, and an ECU error is encountered, the `id` will not be deleted, unless the
+query parameter `x-sovd2uds-force` is set to true. This allows the client to handle
+returned errors, and to call the Stop subfunction again.
 
 === IOControl -- SID 2A~16~
 
+NOTE: Not supported at this time
+
 == Modes
 
-#TODO#
-
 === Session -- SID 10~16~
+[#_architecture_sovd_session]
 
-`/modes/session`
+The endpoint `/modes/session` can be used to determine the current ECU session, as well as
+trying to switch into a different session.
+
+|===
+|Method|Path|Description
+
+|GET
+|/modes/session
+|Returns the current session
+
+|PUT
+|/modes/session
+|Tries to switch into the specified session
+
+|===
+
+The format for the request body is:
+
+[source,json]
+----
+{
+  "value": "<session name>",
+  "mode_expiration": 3600
+}
+----
+
+The names of the sessions for the field `value`  are determined by the short-name for the state in the
+ECUs state chart for the SID 10~16~ services. It is case-insensitive.
+
+The field `mode_expiration` is optional, if set, it determines the time in seconds how long the session
+should be active. Once that time expires, the session is automatically reset to the default session.
+
+In the response body, `id` and `value` must be included.
+
+See also chapter 7.16 in ISO 17978-3.
 
 === Security -- SID 27~16~
 
-`/modes/security`
+The endpoints are available under the path `/modes/security`.
+
+Works similar to xref:_architecture_sovd_session[Session] defined in the previous chapter. The names
+of the security access levels are determined through the state charts for the SID 27~16~ services.
 
 === Authentication -- SID 29~16~
 
-NOTE: This is technically a deviation to the Table 343 in the ISO-API. The table in the ISO is wrong, since 8.3.2 and 8.3.3 describe them separately.
+NOTE: This is technically a deviation to the Table 343 in the ISO-API. The table in the ISO is misleading, since 8.3.2 and 8.3.3 describe them separately.
 
-`/modes/authentication`
+The endpoints are available under `/modes/authentication`. A `PUT` call needs to provide a request body containing
+`value` with the desired subfunction (names are determined by UDS standard), and a `parameters` field containing
+all request parameters.
 
-=== Communication Control -- SID 85~16~
+Diagnostic data descriptions have to specify the used services including the subfunction individually, so the
+request parameters can be converted into UDS payloads.
 
-`/modes/commctrl`
+=== Communication Control -- SID 28~16~
 
-=== DTC Setting -- SID 28~16~
+To control the communication parameters of an ECU, the path `/modes/commctrl` is offered, which can be called
+similarly to xref:_architecture_sovd_session[sessions] (without expiration).
 
-`/modes/dtcsetting`
+The attribute `value` allows the following subfunction names based on the UDS standard:
+
+* enableRxAndEnableTx
+* enableRxAndDisableTx
+* disableRxAndEnableTx
+* disableRxAndDisableTx
+
+Matching 28~16~ service entries must be present in the diagnostic description. Parameters can be provided
+through an additional `parameters` attribute.
+
+NOTE: Other values are not supported.
+
+=== DTC Setting -- SID 85~16~
+
+To control the dtc settings of an ECU, the path `/modes/dtcsetting` is offered, which can be called
+similarly to xref:_architecture_sovd_session[sessions] (without expiration).
+
+The attribute `value` allows the values `off` and `on`, to call the corresponding subfunctions on the ECU.
+
+Matching 85~16~ service entries must be present in the diagnostic description. Parameters can be provided
+through an additional `parameters` attribute.
+
+NOTE: Other specific extensions to the values are not supported.
 
 == Faults -- SID 14~16~ & 19~16~
 

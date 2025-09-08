@@ -116,7 +116,7 @@ a|
 |CP_P6Max
 |Timeout after sending a successful request, for the complete reception of the response message (in µS)
 |1000000
-|In case of a timeout CP_RepeatReqCountApp has to be used to retry until a final timeout is reported
+|In case of a timeout, CP_RepeatReqCountApp has to be used to retry, until exhausted, or a completion timeout is reached
 
 |CP_P6Star
 |Enhanced timeout after receiving a NRC 0x78 to wait for the complete reception of the response message (in µS)

@@ -12,6 +12,13 @@ components:
         schema:
           type: boolean
           required: false
+    EcuName:
+      in: query
+      name: "ecu-name"
+      description: "Name of the ECU"
+      required: true
+      schema:
+        type: string
 
   schemas:
     GenericError:
@@ -48,6 +55,7 @@ components:
           type: string
         parameters:
           type: object
+          description: "Additional parameters for additional information for the error - e.g. NRC code in case of an error-response"
           additionalProperties: true
 
     DataError:
@@ -138,3 +146,19 @@ components:
           description: "Offset in calculation of the defined unit (default is 0)"
         physical_dimension:
           $ref: '#/components/schemas/PhysicalDimension'
+  responses:
+    SovdGenericErrorResponse:
+      description: "General SOVD Error"
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/GenericError'
+
+    SovdEcuErrorResponse:
+      description: "General SOVD Error with possible binary error from ECU"
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/GenericError'
+        application/octet-stream:
+          description: "In case of error the octet stream will be a single byte with a NRC-Code"

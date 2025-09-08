@@ -54,6 +54,8 @@ inputFiles = [
         [file: 'requirements/05_diagnostic_tester.adoc', formats: ['html', 'pdf']],
         [file: 'requirements/06_communication.adoc', formats: ['html', 'pdf']],
         [file: 'requirements/07_plugins.adoc', formats: ['html', 'pdf']],
+
+        [file: 'architecture/03_sovd-api/openapi/common.yaml'],
 ]
 //[file: 'architecture/03_sovd-api/common.yaml', formats: ['html', 'pdf']],
 //[file: 'architecture/03_sovd-api/ecu_resource_collection.yaml', formats: ['html', 'pdf']],
@@ -92,8 +94,10 @@ openApiCopy = [:]
 
 openApiCopy.with {
     inputFiles = [
-            "architecture/03_sovd-api/common.yaml",
-            "architecture/03_sovd-api/ecu_resource_collection.yaml",
+            "architecture/03_sovd-api/openapi/common.yaml",
+            "architecture/03_sovd-api/openapi/ecu_resource_collection.yaml",
+            "architecture/03_sovd-api/openapi/single-ecu-jobs.yaml",
+            "architecture/03_sovd-api/openapi/mdd-embedded-files.yaml",
     ]
 }
 

@@ -1,0 +1,141 @@
+openapi: 3.1.0
+info:
+  version: 0.0.1
+  title: Endpoints related to single ecu jobs
+
+tags:
+  - name: single-ecu-jobs
+    description: Endpoints related to single ecu jobs
+
+components:
+  schemas:
+    SingleEcuJobsListEntry:
+      type: object
+      required:
+        - id
+        - name
+      properties:
+        id:
+          type: string
+        name:
+          type: string
+        category:
+          type: string
+
+    SingleEcuJobsList:
+      type: object
+      properties:
+        items:
+          type: array
+          items:
+            $ref: "#/components/schemas/SingleEcuJobsListEntry"
+
+    LongName:
+      type: object
+      required:
+        - value
+      properties:
+        value:
+          type: string
+        ti:
+          type: string
+
+    SingleEcuJobInputParameter:
+      type: object
+      required:
+        - short_name
+        - semantic
+      properties:
+        short_name:
+          type: string
+        physical_default_value:
+          type: string
+        semantic:
+          type: string
+        long_name:
+          $ref: "#/components/schemas/LongName"
+
+    SingleEcuJobOutputParameter:
+      type: object
+      required:
+        - short_name
+        - semantic
+      properties:
+        short_name:
+          type: string
+        semantic:
+          type: string
+        long_name:
+          $ref: "#/components/schemas/LongName"
+
+    SingleEcuJobProgCode:
+      type: object
+      required:
+        - code_file
+        - revision
+        - entrypoint
+      properties:
+        code_file:
+          type: string
+        syntax:
+          type: string
+        revision:
+          type: string
+        entrypoint:
+          type: string
+        encryption:
+          type: string
+
+    SingleEcuJob:
+      type: object
+      properties:
+        x-input-params:
+          type: array
+          items:
+            $ref: "#/components/schemas/SingleEcuJobInputParameter"
+        x-output-params:
+          type: array
+          items:
+            $ref: "#/components/schemas/SingleEcuJobOutputParameter"
+        x-neg-output-params:
+          type: array
+          items:
+            $ref: "#/components/schemas/SingleEcuJobOutputParameter"
+        x-prog-code:
+          type: array
+          items:
+            $ref: "#/components/schemas/SingleEcuJobProgCode"
+paths:
+  /components/{ecu-name}/x-single-ecu-jobs:
+    parameters:
+      - $ref: "common.yaml#/components/parameters/EcuName"
+    get:
+      summary: "Retrieves list of single ecu jobs"
+      tags:
+        - single-ecu-jobs
+      responses:
+        "200":
+          description: "Successful request"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SingleEcuJobsList"
+
+  /components/{ecu-name}/x-single-ecu-jobs/{id}:
+    parameters:
+      - $ref: "common.yaml#/components/parameters/EcuName"
+      - name: id
+        in: query
+        schema:
+          type: string
+    get:
+      summary: "Retrieves list of single ecu jobs"
+      tags:
+        - single-ecu-jobs
+      responses:
+        "200":
+          description: "Successful request"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SingleEcuJob"
