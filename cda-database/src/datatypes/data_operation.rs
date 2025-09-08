@@ -254,6 +254,10 @@ impl TryInto<i32> for &Limit {
 impl TryInto<f32> for &Limit {
     type Error = DiagServiceError;
     fn try_into(self) -> Result<f32, Self::Error> {
+        if self.value.is_empty() {
+            // treat empty string as 0
+            return Ok(f32::default());
+        }
         self.value.parse().map_err(|e| {
             DiagServiceError::ParameterConversionError(format!(
                 "Cannot convert Limit with value {} into f32, {e:?}",
@@ -266,6 +270,10 @@ impl TryInto<f32> for &Limit {
 impl TryInto<f64> for &Limit {
     type Error = DiagServiceError;
     fn try_into(self) -> Result<f64, Self::Error> {
+        if self.value.is_empty() {
+            // treat empty string as 0
+            return Ok(f64::default());
+        }
         self.value.parse().map_err(|e| {
             DiagServiceError::ParameterConversionError(format!(
                 "Cannot convert Limit with value {} into f64, {e:?}",
@@ -809,6 +817,39 @@ impl TryFrom<i32> for Radix {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_limit_try_into_f32_empty_string() {
+        let limit = Limit {
+            value: "".to_string(),
+            interval_type: IntervalType::Closed,
+        };
+
+        let result: Result<f32, _> = (&limit).try_into();
+        assert_eq!(result.unwrap(), 0.0_f32);
+    }
+
+    #[test]
+    fn test_limit_try_into_f64_empty_string() {
+        let limit = Limit {
+            value: "".to_string(),
+            interval_type: IntervalType::Closed,
+        };
+
+        let result: Result<f64, _> = (&limit).try_into();
+        assert_eq!(result.unwrap(), 0.0_f64);
+    }
+
+    #[test]
+    fn test_limit_try_into_u32_empty_string() {
+        let limit = Limit {
+            value: "".to_string(),
+            interval_type: IntervalType::Closed,
+        };
+
+        let result: Result<u32, _> = (&limit).try_into();
+        assert_eq!(result.unwrap(), 0_u32);
+    }
 
     #[test]
     fn test_limit_try_into_vec_u8_hex_values() {
