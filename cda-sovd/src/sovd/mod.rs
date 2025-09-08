@@ -435,41 +435,30 @@ fn ecu_route<
 }
 
 fn get_payload_data<'a, T>(
+    content_type: Option<&mime::Mime>,
     headers: &HeaderMap,
     body: &'a Bytes,
 ) -> Result<Option<UdsPayloadData>, ApiError>
 where
     T: sovd_interfaces::Payload + serde::de::Deserialize<'a>,
 {
-    Ok(
-        match headers.get(header::CONTENT_TYPE).map(|h| {
-            h.to_str()
-                .map_err(|e| ApiError::BadRequest(format!("Unable to read mime-type: {e:}")))
-                .and_then(|s| {
-                    s.parse::<mime::Mime>()
-                        .map_err(|e| ApiError::BadRequest(format!("Invalid mime-type: {e:?}")))
-                })
-        }) {
-            Some(Err(e)) => {
-                return Err(e);
-            }
-            Some(Ok(v)) if v.essence_str() == mime::APPLICATION_JSON.essence_str() => {
-                let sovd_request = serde_json::from_slice::<T>(body)
-                    .map_err(|e| ApiError::BadRequest(format!("Invalid JSON: {e:?}")))?;
-                Some(UdsPayloadData::ParameterMap(sovd_request.get_data_map()))
-            }
-            Some(Ok(v)) if v.essence_str() == mime::APPLICATION_OCTET_STREAM.essence_str() => {
-                get_octet_stream_payload(headers, body)?
-            }
-            Some(Ok(v)) => {
-                return Err(ApiError::BadRequest(format!(
-                    "Unsupported mime-type: {v:?}"
-                )));
-            }
-
-            _ => None,
-        },
-    )
+    let content_type = match content_type {
+        Some(content_type) => content_type,
+        None => return Ok(None),
+    };
+    Ok(match (content_type.type_(), content_type.subtype()) {
+        (mime::APPLICATION, mime::JSON) => {
+            let sovd_request = serde_json::from_slice::<T>(body)
+                .map_err(|e| ApiError::BadRequest(format!("Invalid JSON: {e:?}")))?;
+            Some(UdsPayloadData::ParameterMap(sovd_request.get_data_map()))
+        }
+        (mime::APPLICATION, mime::OCTET_STREAM) => get_octet_stream_payload(headers, body)?,
+        _ => {
+            return Err(ApiError::BadRequest(format!(
+                "Unsupported mime-type: {content_type:?}"
+            )));
+        }
+    })
 }
 
 fn get_octet_stream_payload(
