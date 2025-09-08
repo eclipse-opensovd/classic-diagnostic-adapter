@@ -13,7 +13,8 @@
 
 use cda_database::datatypes::{self, DiagnosticDatabase};
 use cda_interfaces::{
-    DiagComm, DiagServiceError, EcuSchemaProvider, Id, STRINGS, SchemaDescription,
+    DiagComm, DiagServiceError, EcuAddressProvider, EcuSchemaProvider, Id, STRINGS,
+    SchemaDescription,
 };
 
 use crate::EcuManager;
@@ -25,9 +26,10 @@ impl EcuSchemaProvider for EcuManager {
     ) -> Result<SchemaDescription, DiagServiceError> {
         let mapped_service = self.lookup_diag_comm(service)?;
         let Some(request) = self.ecu_data.requests.get(&mapped_service.request_id) else {
-            return Err(DiagServiceError::InvalidRequest(format!(
-                "Unable to lookup request for {} in the ECU Database.",
-                service.name
+            return Err(DiagServiceError::InvalidDatabase(format!(
+                "The request referenced by {} could not be found in the ECU Database of {}.",
+                service.name,
+                self.ecu_name()
             )));
         };
         let ctx = STRINGS
@@ -52,9 +54,10 @@ impl EcuSchemaProvider for EcuManager {
         let mut responses = Vec::new();
         for id in &mapped_service.pos_responses {
             let Some(response) = self.ecu_data.responses.get(id) else {
-                return Err(DiagServiceError::InvalidRequest(format!(
-                    "Unable to lookup resposne for {} in the ECU Database.",
-                    service.name
+                return Err(DiagServiceError::InvalidDatabase(format!(
+                    "A response referenced by {} could not be found in the ECU Database of {}.",
+                    service.name,
+                    self.ecu_name()
                 )));
             };
             let schema = response.json_schema(&ctx, &self.ecu_data, request_id);
