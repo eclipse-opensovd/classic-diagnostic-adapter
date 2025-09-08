@@ -300,7 +300,7 @@ async fn data_request<T: UdsEcu + SchemaProvider + Clone>(
             Json(sovd_interfaces::ObjectDataItem {
                 id: service.name.to_lowercase(),
                 data: mapped_data,
-                errors: field_parse_errors_to_json(errors),
+                errors: field_parse_errors_to_json(errors, "data"),
                 schema,
             }),
         )

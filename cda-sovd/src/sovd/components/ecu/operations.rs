@@ -546,7 +546,7 @@ pub(crate) mod service {
                             StatusCode::OK,
                             Json(sovd_executions::Response {
                                 parameters: mapped_data,
-                                errors: field_parse_errors_to_json(errors),
+                                errors: field_parse_errors_to_json(errors, "parameters"),
                             }),
                         )
                             .into_response()
@@ -658,7 +658,7 @@ pub(crate) mod service {
                             StatusCode::OK,
                             Json(sovd_executions::Response {
                                 parameters: response_data,
-                                errors: field_parse_errors_to_json(errors),
+                                errors: field_parse_errors_to_json(errors, "parameters"),
                             }),
                         )
                             .into_response()
