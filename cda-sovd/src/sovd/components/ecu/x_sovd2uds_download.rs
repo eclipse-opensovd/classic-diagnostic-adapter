@@ -126,7 +126,7 @@ pub(crate) mod request_download {
                 StatusCode::OK,
                 Json(sovd2uds::download::request_download::put::Response {
                     parameters: mapped_data,
-                    errors: field_parse_errors_to_json(errors),
+                    errors: field_parse_errors_to_json(errors, "parameters"),
                 }),
             )
                 .into_response(),
