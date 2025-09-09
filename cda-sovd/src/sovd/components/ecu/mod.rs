@@ -241,7 +241,7 @@ async fn data_request<T: UdsEcu + SchemaProvider + Clone>(
             .map(|desc| desc.into_schema())
         {
             Ok(Some(data_schema)) => Some(create_response_schema!(
-                sovd_interfaces::ObjectDataItem,
+                sovd_interfaces::ObjectDataItem<VendorErrorCode>,
                 "data",
                 data_schema
             )),

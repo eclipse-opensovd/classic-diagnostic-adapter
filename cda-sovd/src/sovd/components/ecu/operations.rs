@@ -369,7 +369,7 @@ pub(crate) mod service {
             sovd::{
                 self, WebserverEcuState, api_error_from_diag_response,
                 components::{field_parse_errors_to_json, get_content_type_and_accept},
-                error::{ApiError, ErrorWrapper},
+                error::{ApiError, ErrorWrapper, VendorErrorCode},
             },
         };
 
@@ -415,7 +415,7 @@ pub(crate) mod service {
         pub(crate) fn docs_post(op: TransformOperation) -> TransformOperation {
             openapi::request_json_and_octet::<sovd_executions::Request>(op)
                 .description("Create a new execution")
-                .response_with::<200, Json<sovd_executions::Response>, _>(|res| {
+                .response_with::<200, Json<sovd_executions::Response<VendorErrorCode>>, _>(|res| {
                     let mut res = res
                         .description(
                             "Comparam execution created successfully without response content.",

@@ -510,7 +510,7 @@ fn remove_descriptions_recursive(value: &mut serde_json::Value) {
 }
 
 /// This Macro allows to generate a schema for Responses including
-/// the definitions for data errors.
+/// the inlined schema for the target field.
 ///
 /// # Arguments
 /// - `base_type`: The base type for the response schema.
@@ -522,30 +522,20 @@ fn remove_descriptions_recursive(value: &mut serde_json::Value) {
 macro_rules! create_response_schema {
     ($base_type:ty, $target_field:expr, $sub_schema:ident) => {{
         use schemars::JsonSchema as _;
-        use crate::sovd::error::VendorErrorCode;
-        use sovd_interfaces::error::DataError;
 
-        let mut generator =
-            schemars::SchemaGenerator::new(
-                schemars::generate::SchemaSettings::draft07()
-                    .with(|s| {
-                        s.inline_subschemas = true
-                    })
-            );
+        use crate::sovd::error::VendorErrorCode;
+
+        let mut generator = schemars::SchemaGenerator::new(
+            schemars::generate::SchemaSettings::draft07().with(|s| s.inline_subschemas = true),
+        );
         let mut schema = <$base_type>::json_schema(&mut generator);
-        let mut error_schema = DataError::<VendorErrorCode>::json_schema(&mut generator).to_value();
-        crate::sovd::remove_descriptions_recursive(&mut error_schema);
 
         if let Some(props) = schema.get_mut("properties") {
             if let Some(obj) = props.as_object_mut() {
                 obj.insert($target_field.into(), $sub_schema.to_value());
-                obj.insert("errors".to_owned(), schemars::json_schema!({
-                    "items": [
-                        error_schema
-                    ],
-                    "type": "array",
-                    }).into()
-                );
+                if let Some(mut errs) = obj.get_mut("errors") {
+                    crate::sovd::remove_descriptions_recursive(&mut errs);
+                }
             }
         }
 

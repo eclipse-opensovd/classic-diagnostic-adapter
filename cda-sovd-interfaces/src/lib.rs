@@ -14,6 +14,8 @@
 use hashbrown::HashMap;
 use serde::{Deserialize, Serialize};
 
+use crate::error::DataError;
+
 pub mod apps;
 pub mod components;
 pub mod error;
@@ -44,14 +46,13 @@ pub struct ResourceResponse {
     pub items: Vec<Resource>,
 }
 
-#[derive(Deserialize, Serialize, Debug)]
+#[derive(Serialize, Debug)]
 #[cfg_attr(feature = "openapi", derive(schemars::JsonSchema))]
-pub struct ObjectDataItem {
+pub struct ObjectDataItem<T> {
     pub id: String,
     pub data: serde_json::Map<String, serde_json::Value>,
-    #[cfg_attr(feature = "openapi", schemars(skip))]
     #[serde(skip_serializing_if = "Vec::is_empty")]
-    pub errors: Vec<serde_json::Value>,
+    pub errors: Vec<DataError<T>>,
     #[cfg_attr(feature = "openapi", schemars(skip))]
     #[serde(skip_serializing_if = "Option::is_none")]
     pub schema: Option<schemars::Schema>,

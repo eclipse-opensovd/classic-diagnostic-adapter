@@ -250,6 +250,8 @@ pub mod x {
                     use hashbrown::HashMap;
                     use serde::{Deserialize, Serialize};
 
+                    use crate::error::DataError;
+
                     #[derive(Deserialize)]
                     #[cfg_attr(feature = "openapi", derive(schemars::JsonSchema))]
                     #[cfg_attr(feature = "openapi", schemars(rename = "RequestDownloadRequest"))]
@@ -260,12 +262,11 @@ pub mod x {
                     #[derive(Serialize)]
                     #[cfg_attr(feature = "openapi", derive(schemars::JsonSchema))]
                     #[cfg_attr(feature = "openapi", schemars(rename = "RequestDownloadResponse"))]
-                    pub struct Response {
+                    pub struct Response<T> {
                         #[serde(rename = "requestdownload")]
                         pub parameters: serde_json::Map<String, serde_json::Value>,
-                        #[cfg_attr(feature = "openapi", schemars(skip))]
                         #[serde(skip_serializing_if = "Vec::is_empty")]
-                        pub errors: Vec<serde_json::Value>,
+                        pub errors: Vec<DataError<T>>,
                     }
                 }
             }

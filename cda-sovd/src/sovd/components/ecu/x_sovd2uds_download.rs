@@ -95,7 +95,7 @@ pub(crate) mod request_download {
         sovd::{
             WebserverEcuState,
             components::field_parse_errors_to_json,
-            error::ErrorWrapper,
+            error::{ErrorWrapper, VendorErrorCode},
             x_sovd2uds_download::{
                 FLASH_DOWNLOAD_UPLOAD_FUNC_CLASS, sovd_to_func_class_service_exec,
             },
@@ -140,7 +140,10 @@ pub(crate) mod request_download {
 
     pub(crate) fn docs_put(op: TransformOperation) -> TransformOperation {
         op.description("Execute the request download service on the component")
-            .response_with::<200, Json<sovd2uds::download::request_download::put::Response>, _>(
+            .response_with::<
+                200,
+                Json<sovd2uds::download::request_download::put::Response<VendorErrorCode>>,
+                _>(
                 |res| {
                     res.example(sovd2uds::download::request_download::put::Response {
                         parameters: [

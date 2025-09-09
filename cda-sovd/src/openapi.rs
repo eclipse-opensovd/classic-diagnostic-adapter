@@ -19,7 +19,7 @@ use axum::Json;
 use schemars::JsonSchema;
 use sovd_interfaces::error::ApiErrorResponse;
 
-use crate::sovd;
+use crate::sovd::{self, error::VendorErrorCode};
 
 pub(crate) mod aide_helper {
     /// Helper macro to generate path params that have an openapi
@@ -144,7 +144,7 @@ fn add_octet_request(mut op: TransformOperation) -> TransformOperation {
 }
 
 pub(crate) fn ecu_service_response(op: TransformOperation) -> TransformOperation {
-    op.response_with::<200, Json<sovd_interfaces::ObjectDataItem>, _>(|res| {
+    op.response_with::<200, Json<sovd_interfaces::ObjectDataItem<VendorErrorCode>>, _>(|res| {
         let mut res =
             res.description("ECU Response as JSON")
                 .example(sovd_interfaces::ObjectDataItem {
