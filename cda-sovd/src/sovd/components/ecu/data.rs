@@ -16,11 +16,7 @@ use sovd_interfaces::error::ApiErrorResponse;
 use super::*;
 use crate::sovd;
 
-pub(crate) async fn get<
-    R: DiagServiceResponse + Send + Sync,
-    T: UdsEcu + Send + Sync + Clone,
-    U: FileManager + Send + Sync + Clone,
->(
+pub(crate) async fn get<R: DiagServiceResponse, T: UdsEcu + Clone, U: FileManager>(
     State(WebserverEcuState { ecu_name, uds, .. }): State<WebserverEcuState<R, T, U>>,
 ) -> Response {
     match uds.get_components_data_info(&ecu_name).await {
@@ -87,7 +83,7 @@ pub(crate) mod diag_service {
         },
     };
 
-    async fn get_sdgs_handler<T: UdsEcu + Send + Sync + Clone>(
+    async fn get_sdgs_handler<T: UdsEcu + Clone>(
         service: String,
         ecu_name: &str,
         gateway: &T,
@@ -135,9 +131,9 @@ pub(crate) mod diag_service {
     }
 
     pub(crate) async fn get<
-        R: DiagServiceResponse + Send + Sync,
+        R: DiagServiceResponse,
         T: UdsEcu + SchemaProvider + Send + Sync + Clone,
-        U: FileManager + Send + Sync + Clone,
+        U: FileManager,
     >(
         headers: HeaderMap,
         Path(DiagServicePathParam { diag_service }): Path<DiagServicePathParam>,
@@ -183,9 +179,9 @@ pub(crate) mod diag_service {
     }
 
     pub(crate) async fn put<
-        R: DiagServiceResponse + Send + Sync, // todo: remove + Send + Sync as its redundant
+        R: DiagServiceResponse,
         T: UdsEcu + SchemaProvider + Clone,
-        U: FileManager + Send + Sync + Clone,
+        U: FileManager,
     >(
         headers: HeaderMap,
         Path(DiagServicePathParam {

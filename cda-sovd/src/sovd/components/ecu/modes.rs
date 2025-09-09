@@ -93,11 +93,7 @@ pub(crate) mod session {
     use super::*;
     use crate::openapi;
 
-    pub(crate) async fn put<
-        R: DiagServiceResponse + Send + Sync,
-        T: UdsEcu + Send + Sync + Clone,
-        U: FileManager + Send + Sync + Clone,
-    >(
+    pub(crate) async fn put<R: DiagServiceResponse, T: UdsEcu + Clone, U: FileManager>(
         UseApi(claims, _): UseApi<Claims, ()>,
         State(WebserverEcuState {
             locks,
@@ -155,11 +151,7 @@ pub(crate) mod session {
             .with(openapi::error_bad_gateway)
     }
 
-    pub(crate) async fn get<
-        R: DiagServiceResponse + Send + Sync,
-        T: UdsEcu + Send + Sync + Clone,
-        U: FileManager + Send + Sync + Clone,
-    >(
+    pub(crate) async fn get<R: DiagServiceResponse, T: UdsEcu + Clone, U: FileManager>(
         State(WebserverEcuState { uds, ecu_name, .. }): State<WebserverEcuState<R, T, U>>,
     ) -> Response {
         match uds.ecu_session(&ecu_name).await {
@@ -214,11 +206,7 @@ pub(crate) mod security {
         seed: SovdSeed,
     }
 
-    pub(crate) async fn get<
-        R: DiagServiceResponse + Send + Sync,
-        T: UdsEcu + Send + Sync + Clone,
-        U: FileManager + Send + Sync + Clone,
-    >(
+    pub(crate) async fn get<R: DiagServiceResponse, T: UdsEcu + Clone, U: FileManager>(
         UseApi(claims, _): UseApi<Claims, ()>,
         State(WebserverEcuState {
             ecu_name,
@@ -263,11 +251,7 @@ pub(crate) mod security {
             .with(openapi::error_not_found)
     }
 
-    pub(crate) async fn put<
-        R: DiagServiceResponse + Send + Sync,
-        T: UdsEcu + Send + Sync + Clone,
-        U: FileManager + Send + Sync + Clone,
-    >(
+    pub(crate) async fn put<R: DiagServiceResponse, T: UdsEcu + Clone, U: FileManager>(
         UseApi(claims, _): UseApi<Claims, ()>,
         State(WebserverEcuState {
             uds,

@@ -25,11 +25,7 @@ use crate::{
     sovd::{WebserverEcuState, get_octet_stream_payload},
 };
 
-pub(crate) async fn put<
-    R: DiagServiceResponse + Send + Sync,
-    T: UdsEcu + Send + Sync + Clone,
-    U: FileManager + Send + Sync + Clone,
->(
+pub(crate) async fn put<R: DiagServiceResponse, T: UdsEcu + Clone, U: FileManager>(
     headers: HeaderMap,
     State(WebserverEcuState { ecu_name, uds, .. }): State<WebserverEcuState<R, T, U>>,
     body: Bytes,

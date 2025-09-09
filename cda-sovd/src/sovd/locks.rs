@@ -174,11 +174,7 @@ pub(crate) mod ecu {
     pub(crate) mod lock {
         use super::*;
         use crate::openapi;
-        pub(crate) async fn delete<
-            R: DiagServiceResponse + Send + Sync,
-            T: UdsEcu + Send + Sync + Clone,
-            U: FileManager + Send + Sync + Clone,
-        >(
+        pub(crate) async fn delete<R: DiagServiceResponse, T: UdsEcu + Clone, U: FileManager>(
             Path(lock): Path<LockPathParam>,
             UseApi(claims, _): UseApi<Claims, ()>,
             State(WebserverEcuState {
@@ -195,11 +191,7 @@ pub(crate) mod ecu {
                 .with(openapi::lock_not_owned)
         }
 
-        pub(crate) async fn put<
-            R: DiagServiceResponse + Send + Sync,
-            T: UdsEcu + Send + Sync + Clone,
-            U: FileManager + Send + Sync + Clone,
-        >(
+        pub(crate) async fn put<R: DiagServiceResponse, T: UdsEcu + Clone, U: FileManager>(
             Path(lock): Path<LockPathParam>,
             UseApi(claims, _): UseApi<Claims, ()>,
             State(WebserverEcuState {
@@ -220,11 +212,7 @@ pub(crate) mod ecu {
                 .with(openapi::lock_not_owned)
         }
 
-        pub(crate) async fn get<
-            R: DiagServiceResponse + Send + Sync,
-            T: UdsEcu + Send + Sync + Clone,
-            U: FileManager + Send + Sync + Clone,
-        >(
+        pub(crate) async fn get<R: DiagServiceResponse, T: UdsEcu + Clone, U: FileManager>(
             Path(lock): Path<LockPathParam>,
             _: UseApi<Claims, ()>,
             State(state): State<WebserverEcuState<R, T, U>>,
@@ -245,11 +233,7 @@ pub(crate) mod ecu {
         }
     }
 
-    pub(crate) async fn post<
-        R: DiagServiceResponse + Send + Sync,
-        T: UdsEcu + Send + Sync + Clone,
-        U: FileManager + Send + Sync + Clone,
-    >(
+    pub(crate) async fn post<R: DiagServiceResponse, T: UdsEcu + Clone, U: FileManager>(
         UseApi(claims, _): UseApi<Claims, ()>,
         State(WebserverEcuState {
             ecu_name, locks, ..
@@ -299,11 +283,7 @@ pub(crate) mod ecu {
             })
     }
 
-    pub(crate) async fn get<
-        R: DiagServiceResponse + Send + Sync,
-        T: UdsEcu + Send + Sync + Clone,
-        U: FileManager + Send + Sync + Clone,
-    >(
+    pub(crate) async fn get<R: DiagServiceResponse, T: UdsEcu + Clone, U: FileManager>(
         UseApi(claims, _): UseApi<Claims, ()>,
         State(WebserverEcuState {
             ecu_name, locks, ..

@@ -56,11 +56,7 @@ trait IntoSovd {
     fn into_sovd(self) -> Self::SovdType;
 }
 
-pub(crate) struct WebserverEcuState<
-    R: DiagServiceResponse,
-    T: UdsEcu + Send + Sync + Clone,
-    U: FileManager + Send + Sync + Clone,
-> {
+pub(crate) struct WebserverEcuState<R: DiagServiceResponse, T: UdsEcu + Clone, U: FileManager> {
     ecu_name: String,
     uds: T,
     locks: Arc<Locks>,
@@ -71,8 +67,8 @@ pub(crate) struct WebserverEcuState<
     _phantom: std::marker::PhantomData<R>,
 }
 
-impl<R: DiagServiceResponse, T: UdsEcu + Send + Sync + Clone, U: FileManager + Send + Sync + Clone>
-    Clone for WebserverEcuState<R, T, U>
+impl<R: DiagServiceResponse, T: UdsEcu + Clone, U: FileManager> Clone
+    for WebserverEcuState<R, T, U>
 {
     fn clone(&self) -> Self {
         Self {
@@ -249,7 +245,7 @@ pub async fn route<R: DiagServiceResponse, T: UdsEcu + SchemaProvider + Clone, U
 fn ecu_route<
     R: DiagServiceResponse,
     T: UdsEcu + SchemaProvider + Clone,
-    U: FileManager + Send + Sync + Clone + 'static,
+    U: FileManager + 'static,
 >(
     ecu_name: &str,
     uds: &T,

@@ -29,11 +29,7 @@ use crate::sovd::{
     error::{ApiError, ErrorWrapper},
 };
 
-pub(crate) async fn get<
-    R: DiagServiceResponse + Send + Sync,
-    T: UdsEcu + Send + Sync + Clone,
-    U: FileManager + Send + Sync + Clone,
->(
+pub(crate) async fn get<R: DiagServiceResponse, T: UdsEcu + Clone, U: FileManager>(
     State(WebserverEcuState { ecu_name, uds, .. }): State<WebserverEcuState<R, T, U>>,
 ) -> Response {
     match uds.get_components_configuration_info(&ecu_name).await {
@@ -109,9 +105,9 @@ pub(crate) mod diag_service {
     };
 
     pub(crate) async fn put<
-        R: DiagServiceResponse + Send + Sync,
+        R: DiagServiceResponse,
         T: UdsEcu + SchemaProvider + Clone,
-        U: FileManager + Send + Sync + Clone,
+        U: FileManager,
     >(
         headers: HeaderMap,
         Path(DiagServicePathParam {

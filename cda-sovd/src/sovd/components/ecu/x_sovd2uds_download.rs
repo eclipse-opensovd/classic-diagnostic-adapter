@@ -32,7 +32,7 @@ use crate::sovd::{
 
 const FLASH_DOWNLOAD_UPLOAD_FUNC_CLASS: &str = "flash_download_upload";
 
-async fn sovd_to_func_class_service_exec<T: UdsEcu + Send + Sync + Clone>(
+async fn sovd_to_func_class_service_exec<T: UdsEcu + Clone>(
     uds: &T,
     func_class: &str,
     ecu_name: &str,
@@ -102,11 +102,7 @@ pub(crate) mod request_download {
         },
     };
 
-    pub(crate) async fn put<
-        R: DiagServiceResponse + Send + Sync,
-        T: UdsEcu + Send + Sync + Clone,
-        U: FileManager + Send + Sync + Clone,
-    >(
+    pub(crate) async fn put<R: DiagServiceResponse, T: UdsEcu + Clone, U: FileManager>(
         State(WebserverEcuState { ecu_name, uds, .. }): State<WebserverEcuState<R, T, U>>,
         body: Json<sovd2uds::download::request_download::put::Request>,
     ) -> Response {
@@ -186,11 +182,7 @@ pub(crate) mod flash_transfer {
         },
     };
 
-    pub(crate) async fn post<
-        R: DiagServiceResponse + Send + Sync,
-        T: UdsEcu + Send + Sync + Clone,
-        U: FileManager + Send + Sync + Clone,
-    >(
+    pub(crate) async fn post<R: DiagServiceResponse, T: UdsEcu + Clone, U: FileManager>(
         State(WebserverEcuState {
             ecu_name,
             uds,
@@ -266,11 +258,7 @@ pub(crate) mod flash_transfer {
             .with(openapi::error_not_found)
     }
 
-    pub(crate) async fn get<
-        R: DiagServiceResponse + Send + Sync,
-        T: UdsEcu + Send + Sync + Clone,
-        U: FileManager + Send + Sync + Clone,
-    >(
+    pub(crate) async fn get<R: DiagServiceResponse, T: UdsEcu + Clone, U: FileManager>(
         State(WebserverEcuState { ecu_name, uds, .. }): State<WebserverEcuState<R, T, U>>,
     ) -> Response {
         match uds.ecu_flash_transfer_status(&ecu_name).await {
@@ -298,11 +286,7 @@ pub(crate) mod flash_transfer {
     pub(crate) mod id {
         use super::*;
         use crate::sovd::components::IdPathParam;
-        pub(crate) async fn get<
-            R: DiagServiceResponse + Send + Sync,
-            T: UdsEcu + Send + Sync + Clone,
-            U: FileManager + Send + Sync + Clone,
-        >(
+        pub(crate) async fn get<R: DiagServiceResponse, T: UdsEcu + Clone, U: FileManager>(
             Path(id): Path<IdPathParam>,
             State(WebserverEcuState { ecu_name, uds, .. }): State<WebserverEcuState<R, T, U>>,
         ) -> Response {
@@ -332,11 +316,7 @@ pub(crate) mod flash_transfer {
                 .with(openapi::error_not_found)
         }
 
-        pub(crate) async fn delete<
-            R: DiagServiceResponse + Send + Sync,
-            T: UdsEcu + Send + Sync + Clone,
-            U: FileManager + Send + Sync + Clone,
-        >(
+        pub(crate) async fn delete<R: DiagServiceResponse, T: UdsEcu + Clone, U: FileManager>(
             Path(id): Path<IdPathParam>,
             State(WebserverEcuState { ecu_name, uds, .. }): State<WebserverEcuState<R, T, U>>,
         ) -> Response {
@@ -427,11 +407,7 @@ pub(crate) mod transferexit {
         },
     };
 
-    pub(crate) async fn put<
-        R: DiagServiceResponse + Send + Sync,
-        T: UdsEcu + Send + Sync + Clone,
-        U: FileManager + Send + Sync + Clone,
-    >(
+    pub(crate) async fn put<R: DiagServiceResponse, T: UdsEcu + Clone, U: FileManager>(
         State(WebserverEcuState { ecu_name, uds, .. }): State<WebserverEcuState<R, T, U>>,
     ) -> Response {
         match sovd_to_func_class_service_exec::<T>(
