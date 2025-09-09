@@ -14,7 +14,7 @@
 use hashbrown::HashMap;
 use serde::Serialize;
 
-#[derive(Serialize)]
+#[derive(Serialize, Debug)]
 #[serde(rename_all = "kebab-case")]
 // allowed, so we can pre-fill this with all sovd error codes
 // even though not all are used yet.
@@ -85,7 +85,7 @@ pub enum ErrorCode {
     UpdateExecutionInProgress,
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, Debug)]
 #[cfg_attr(feature = "openapi", derive(schemars::JsonSchema))]
 pub struct ApiErrorResponse<T> {
     pub message: String,
@@ -99,7 +99,7 @@ pub struct ApiErrorResponse<T> {
     pub error_source: Option<String>,
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, Debug)]
 #[cfg_attr(feature = "openapi", derive(schemars::JsonSchema))]
 pub struct DataError<T> {
     pub path: String,

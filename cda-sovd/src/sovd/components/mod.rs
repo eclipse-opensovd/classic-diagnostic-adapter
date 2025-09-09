@@ -52,19 +52,13 @@ impl From<FieldParseErrorWrapper> for DataError<VendorErrorCode> {
 fn field_parse_errors_to_json(
     errors: impl IntoIterator<Item = FieldParseError>,
     data_field_ref: &str,
-) -> Vec<serde_json::Value> {
+) -> Vec<DataError<VendorErrorCode>> {
     errors
         .into_iter()
-        .filter_map(|v| {
+        .map(|v| {
             let mut data_error = DataError::from(FieldParseErrorWrapper(v));
             data_error.path = format!("/{data_field_ref}{}", data_error.path);
-            match serde_json::to_value(data_error) {
-                Ok(v) => Some(v),
-                Err(e) => {
-                    log::warn!(target: "cda-sovd", "Failed to serialize data error: {e:?}");
-                    None
-                }
-            }
+            data_error
         })
         .collect()
 }
