@@ -41,11 +41,7 @@ pub(crate) mod mdd_embedded_files {
 
     use crate::sovd::{WebserverEcuState, error::ApiError};
 
-    pub(crate) async fn get<
-        R: DiagServiceResponse + Send + Sync,
-        T: UdsEcu + Send + Sync + Clone,
-        U: FileManager + Send + Sync + Clone,
-    >(
+    pub(crate) async fn get<R: DiagServiceResponse, T: UdsEcu + Clone, U: FileManager>(
         State(WebserverEcuState {
             mdd_embedded_files, ..
         }): State<WebserverEcuState<R, T, U>>,
@@ -90,11 +86,7 @@ pub(crate) mod mdd_embedded_files {
     pub(crate) mod id {
         use super::*;
         use crate::{openapi, sovd::components::IdPathParam};
-        pub(crate) async fn get<
-            R: DiagServiceResponse + Send + Sync,
-            T: UdsEcu + Send + Sync + Clone,
-            U: FileManager + Send + Sync + Clone,
-        >(
+        pub(crate) async fn get<R: DiagServiceResponse, T: UdsEcu + Clone, U: FileManager>(
             Path(id): Path<IdPathParam>,
             State(WebserverEcuState {
                 mdd_embedded_files, ..

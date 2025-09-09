@@ -31,11 +31,7 @@ pub(crate) mod single_ecu {
 
     openapi::aide_helper::gen_path_param!(ExecutionJobPathParam job_name String);
 
-    pub(crate) async fn get<
-        R: DiagServiceResponse + Send + Sync,
-        T: UdsEcu + Send + Sync + Clone,
-        U: FileManager + Send + Sync + Clone,
-    >(
+    pub(crate) async fn get<R: DiagServiceResponse, T: UdsEcu + Clone, U: FileManager>(
         State(WebserverEcuState { uds, ecu_name, .. }): State<WebserverEcuState<R, T, U>>,
     ) -> Response {
         match uds.get_components_single_ecu_jobs_info(&ecu_name).await {
@@ -65,11 +61,7 @@ pub(crate) mod single_ecu {
 
     pub(crate) mod name {
         use super::*;
-        pub(crate) async fn get<
-            R: DiagServiceResponse + Send + Sync,
-            T: UdsEcu + Send + Sync + Clone,
-            U: FileManager + Send + Sync + Clone,
-        >(
+        pub(crate) async fn get<R: DiagServiceResponse, T: UdsEcu + Clone, U: FileManager>(
             Path(job_name): Path<ExecutionJobPathParam>,
             State(WebserverEcuState { uds, ecu_name, .. }): State<WebserverEcuState<R, T, U>>,
         ) -> Response {

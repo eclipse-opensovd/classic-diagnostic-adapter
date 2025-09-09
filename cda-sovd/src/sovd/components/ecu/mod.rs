@@ -54,11 +54,7 @@ pub(crate) struct ComponentQuery {
     pub include_sdgs: Option<bool>,
 }
 
-pub(crate) async fn get<
-    R: DiagServiceResponse + Send + Sync,
-    T: UdsEcu + Send + Sync + Clone,
-    U: FileManager + Send + Sync + Clone,
->(
+pub(crate) async fn get<R: DiagServiceResponse, T: UdsEcu + Clone, U: FileManager>(
     State(WebserverEcuState { ecu_name, uds, .. }): State<WebserverEcuState<R, T, U>>,
     WithRejection(Query(query), _): WithRejection<Query<ComponentQuery>, ApiError>,
 ) -> impl IntoApiResponse {
@@ -119,21 +115,13 @@ pub(crate) fn docs_get(op: TransformOperation) -> TransformOperation {
         })
 }
 
-pub(crate) async fn post<
-    R: DiagServiceResponse + Send + Sync,
-    T: UdsEcu + Send + Sync + Clone,
-    U: FileManager + Send + Sync + Clone,
->(
+pub(crate) async fn post<R: DiagServiceResponse, T: UdsEcu + Clone, U: FileManager>(
     State(WebserverEcuState { ecu_name, uds, .. }): State<WebserverEcuState<R, T, U>>,
 ) -> Response {
     update(&ecu_name, uds).await
 }
 
-pub(crate) async fn put<
-    R: DiagServiceResponse + Send + Sync,
-    T: UdsEcu + Send + Sync + Clone,
-    U: FileManager + Send + Sync + Clone,
->(
+pub(crate) async fn put<R: DiagServiceResponse, T: UdsEcu + Clone, U: FileManager>(
     State(WebserverEcuState { ecu_name, uds, .. }): State<WebserverEcuState<R, T, U>>,
 ) -> Response {
     update(&ecu_name, uds).await
@@ -144,7 +132,7 @@ pub(crate) fn docs_put(op: TransformOperation) -> TransformOperation {
         .response_with::<201, (), _>(|res| res.description("ECU variant detection triggered."))
 }
 
-async fn update<T: UdsEcu + Send + Sync + Clone>(ecu_name: &str, uds: T) -> Response {
+async fn update<T: UdsEcu + Clone>(ecu_name: &str, uds: T) -> Response {
     match uds.detect_variant(ecu_name).await {
         Ok(()) => (StatusCode::CREATED, ()).into_response(),
         Err(e) => ErrorWrapper(ApiError::BadRequest(e)).into_response(),

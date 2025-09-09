@@ -38,11 +38,7 @@ pub(crate) mod comparams {
             error::{ApiError, ErrorWrapper},
         };
 
-        pub(crate) async fn get<
-            R: DiagServiceResponse + Send + Sync,
-            T: UdsEcu + Send + Sync + Clone,
-            U: FileManager + Send + Sync + Clone,
-        >(
+        pub(crate) async fn get<R: DiagServiceResponse, T: UdsEcu + Clone, U: FileManager>(
             State(WebserverEcuState {
                 comparam_executions,
                 ..
@@ -63,11 +59,7 @@ pub(crate) mod comparams {
                 })
         }
 
-        pub(crate) async fn post<
-            R: DiagServiceResponse + Send + Sync,
-            T: UdsEcu + Send + Sync + Clone,
-            U: FileManager + Send + Sync + Clone,
-        >(
+        pub(crate) async fn post<R: DiagServiceResponse, T: UdsEcu + Clone, U: FileManager>(
             State(WebserverEcuState {
                 comparam_executions,
                 ..
@@ -159,11 +151,7 @@ pub(crate) mod comparams {
         pub(crate) mod id {
             use super::*;
             use crate::{openapi, sovd::components::IdPathParam};
-            pub(crate) async fn get<
-                R: DiagServiceResponse + Send + Sync,
-                T: UdsEcu + Send + Sync + Clone,
-                U: FileManager + Send + Sync + Clone,
-            >(
+            pub(crate) async fn get<R: DiagServiceResponse, T: UdsEcu + Clone, U: FileManager>(
                 Path(id): Path<IdPathParam>,
                 State(WebserverEcuState {
                     ecu_name,
@@ -236,9 +224,9 @@ pub(crate) mod comparams {
             }
 
             pub(crate) async fn delete<
-                R: DiagServiceResponse + Send + Sync,
-                T: UdsEcu + Send + Sync + Clone,
-                U: FileManager + Send + Sync + Clone,
+                R: DiagServiceResponse,
+                T: UdsEcu + Clone,
+                U: FileManager,
             >(
                 Path(id): Path<IdPathParam>,
                 State(WebserverEcuState {
@@ -271,11 +259,7 @@ pub(crate) mod comparams {
                     .with(openapi::comparam_execution_errors)
             }
 
-            pub(crate) async fn put<
-                R: DiagServiceResponse + Send + Sync,
-                T: UdsEcu + Send + Sync + Clone,
-                U: FileManager + Send + Sync + Clone,
-            >(
+            pub(crate) async fn put<R: DiagServiceResponse, T: UdsEcu + Clone, U: FileManager>(
                 Path(id): Path<IdPathParam>,
                 State(WebserverEcuState {
                     comparam_executions,
@@ -375,11 +359,7 @@ pub(crate) mod service {
 
         openapi::aide_helper::gen_path_param!(OperationServicePathParam service String);
 
-        pub(crate) async fn get<
-            R: DiagServiceResponse + Send + Sync,
-            T: UdsEcu + Send + Sync + Clone,
-            U: FileManager + Send + Sync + Clone,
-        >(
+        pub(crate) async fn get<R: DiagServiceResponse, T: UdsEcu + Clone, U: FileManager>(
             Path(OperationServicePathParam { service }): Path<OperationServicePathParam>,
             State(WebserverEcuState { ecu_name, uds, .. }): State<WebserverEcuState<R, T, U>>,
             headers: HeaderMap,
@@ -398,11 +378,7 @@ pub(crate) mod service {
                 })
         }
 
-        pub(crate) async fn post<
-            R: DiagServiceResponse + Send + Sync,
-            T: UdsEcu + Send + Sync + Clone,
-            U: FileManager + Send + Sync + Clone,
-        >(
+        pub(crate) async fn post<R: DiagServiceResponse, T: UdsEcu + Clone, U: FileManager>(
             Path(OperationServicePathParam { service }): Path<OperationServicePathParam>,
             State(WebserverEcuState { ecu_name, uds, .. }): State<WebserverEcuState<R, T, U>>,
             headers: HeaderMap,
@@ -447,7 +423,7 @@ pub(crate) mod service {
                 .with(openapi::error_bad_gateway)
         }
 
-        async fn ecu_operation_handler<T: UdsEcu + Send + Sync + Clone>(
+        async fn ecu_operation_handler<T: UdsEcu + Clone>(
             op: Op,
             service: String,
             ecu_name: &str,
@@ -558,7 +534,7 @@ pub(crate) mod service {
             }
         }
 
-        async fn ecu_reset_handler<T: UdsEcu + Send + Sync + Clone>(
+        async fn ecu_reset_handler<T: UdsEcu + Clone>(
             service: String,
             ecu_name: &str,
             uds: &T,
