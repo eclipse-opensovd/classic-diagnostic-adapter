@@ -21,9 +21,11 @@ use auth::authorize;
 use axum::{
     Json,
     body::Bytes,
+    extract::Query,
     http::{HeaderMap, StatusCode},
     response::{IntoResponse, Response},
 };
+use axum_extra::extract::WithRejection;
 use cda_interfaces::{
     SchemaProvider, UdsEcu,
     diagservices::{DiagServiceResponse, UdsPayloadData},
@@ -93,6 +95,7 @@ pub(crate) fn resource_response(
     host: &str,
     uri: &Uri,
     resources: Vec<(&str, Option<&str>)>,
+    include_schema: bool,
 ) -> Response {
     let base_path = format!("http://{host}{uri}");
     let items = resources
@@ -104,7 +107,13 @@ pub(crate) fn resource_response(
         })
         .collect();
 
-    let components = sovd_interfaces::ResourceResponse { items };
+    let schema = if include_schema {
+        Some(crate::sovd::create_schema!(sovd_interfaces::Resource))
+    } else {
+        None
+    };
+
+    let components = sovd_interfaces::ResourceResponse { items, schema };
     (StatusCode::OK, Json(components)).into_response()
 }
 
@@ -118,6 +127,7 @@ pub async fn route<R: DiagServiceResponse, T: UdsEcu + SchemaProvider + Clone, U
     let flash_data = Arc::new(RwLock::new(sovd_interfaces::sovd2uds::FileList {
         files: Vec::new(),
         path: Some(PathBuf::from(flash_files_path)),
+        schema: None,
     }));
     let state = WebserverState {
         locks: Arc::new(Locks {
@@ -134,7 +144,17 @@ pub async fn route<R: DiagServiceResponse, T: UdsEcu + SchemaProvider + Clone, U
     let mut router = Router::new().api_route(
         "/vehicle/v15/components",
         routing::get_with(
-            || async move {
+            |WithRejection(Query(query), _): WithRejection<
+                Query<sovd_interfaces::IncludeSchemaQuery>,
+                ApiError,
+            >| async move {
+                let schema = if query.include_schema.unwrap_or(false) {
+                    Some(crate::sovd::create_schema!(
+                        sovd_interfaces::ResourceResponse
+                    ))
+                } else {
+                    None
+                };
                 (
                     StatusCode::OK,
                     Json(sovd_interfaces::ResourceResponse {
@@ -148,6 +168,7 @@ pub async fn route<R: DiagServiceResponse, T: UdsEcu + SchemaProvider + Clone, U
                                 name: ecu.clone(),
                             })
                             .collect::<Vec<sovd_interfaces::Resource>>(),
+                        schema,
                     }),
                 )
                     .into_response()
@@ -161,6 +182,7 @@ pub async fn route<R: DiagServiceResponse, T: UdsEcu + SchemaProvider + Clone, U
                                 id: Some("my_ecu".into()),
                                 name: "My ECU".into(),
                             }],
+                            schema: None,
                         })
                     })
             },
@@ -529,7 +551,11 @@ macro_rules! create_response_schema {
 
         if let Some(props) = schema.get_mut("properties") {
             if let Some(obj) = props.as_object_mut() {
-                obj.insert($target_field.into(), $sub_schema.to_value());
+                let value = match $sub_schema {
+                    None => serde_json::Value::Null,
+                    Some(s) => s.to_value(),
+                };
+                obj.insert($target_field.into(), value);
                 if let Some(mut errs) = obj.get_mut("errors") {
                     crate::sovd::remove_descriptions_recursive(&mut errs);
                 }
@@ -540,3 +566,18 @@ macro_rules! create_response_schema {
     }};
 }
 pub(crate) use create_response_schema;
+
+/// This Macro allows to generate a schema for a type.
+/// Ensures that the schema is generated with inlined subschemas
+/// and draft07 settings.
+macro_rules! create_schema {
+    ($type_:ty) => {{
+        use schemars::JsonSchema as _;
+
+        let mut generator = schemars::SchemaGenerator::new(
+            schemars::generate::SchemaSettings::draft07().with(|s| s.inline_subschemas = true),
+        );
+        <$type_>::json_schema(&mut generator)
+    }};
+}
+pub(crate) use create_schema;

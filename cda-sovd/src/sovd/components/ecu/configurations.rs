@@ -14,9 +14,10 @@
 use aide::transform::TransformOperation;
 use axum::{
     Json,
-    extract::State,
+    extract::{Query, State},
     response::{IntoResponse, Response},
 };
+use axum_extra::extract::WithRejection;
 use cda_interfaces::{
     UdsEcu, datatypes::ComponentConfigurationsInfo, diagservices::DiagServiceResponse,
     file_manager::FileManager,
@@ -25,13 +26,22 @@ use http::StatusCode;
 use sovd_interfaces::components::ecu::configurations as sovd_configurations;
 
 use crate::sovd::{
-    IntoSovd, WebserverEcuState,
+    IntoSovd, WebserverEcuState, create_schema,
     error::{ApiError, ErrorWrapper},
 };
 
 pub(crate) async fn get<R: DiagServiceResponse, T: UdsEcu + Clone, U: FileManager>(
     State(WebserverEcuState { ecu_name, uds, .. }): State<WebserverEcuState<R, T, U>>,
+    WithRejection(Query(query), _): WithRejection<
+        Query<sovd_configurations::ConfigurationsQuery>,
+        ApiError,
+    >,
 ) -> Response {
+    let schema = if query.include_schema.unwrap_or(false) {
+        Some(create_schema!(sovd_configurations::get::Response))
+    } else {
+        None
+    };
     match uds.get_components_configuration_info(&ecu_name).await {
         Ok(mut items) => {
             let sovd_component_configuration = sovd_configurations::get::Response {
@@ -39,6 +49,7 @@ pub(crate) async fn get<R: DiagServiceResponse, T: UdsEcu + Clone, U: FileManage
                     .drain(0..)
                     .map(|c| c.into_sovd())
                     .collect::<Vec<sovd_configurations::ComponentItem>>(),
+                schema,
             };
             (StatusCode::OK, Json(sovd_component_configuration)).into_response()
         }
@@ -56,6 +67,7 @@ pub(crate) fn docs_get(op: TransformOperation) -> TransformOperation {
                     configurations_type: "example_type".into(),
                     service_abstract: vec!["example_service".into()],
                 }],
+                schema: None,
             })
         })
 }
@@ -86,14 +98,16 @@ pub(crate) mod diag_service {
     use aide::transform::TransformOperation;
     use axum::{
         body::Bytes,
-        extract::{Path, State},
+        extract::{Path, Query, State},
         response::{IntoResponse, Response},
     };
+    use axum_extra::extract::WithRejection;
     use cda_interfaces::{
         DiagComm, DiagCommAction, DiagCommType, SchemaProvider, UdsEcu,
         diagservices::DiagServiceResponse, file_manager::FileManager,
     };
     use http::HeaderMap;
+    use sovd_interfaces::components::ecu::configurations as sovd_configurations;
 
     use crate::{
         openapi,
@@ -113,6 +127,10 @@ pub(crate) mod diag_service {
         Path(DiagServicePathParam {
             diag_service: service,
         }): Path<DiagServicePathParam>,
+        WithRejection(Query(query), _): WithRejection<
+            Query<sovd_configurations::ConfigurationsQuery>,
+            ApiError,
+        >,
         State(WebserverEcuState { ecu_name, uds, .. }): State<WebserverEcuState<R, T, U>>,
         body: Bytes,
     ) -> Response {
@@ -130,7 +148,7 @@ pub(crate) mod diag_service {
             &uds,
             headers,
             Some(body),
-            false,
+            query.include_schema.unwrap_or(false),
         )
         .await
     }

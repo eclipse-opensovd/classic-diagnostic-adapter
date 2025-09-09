@@ -80,6 +80,9 @@ pub mod sovd2uds {
                 pub struct Response {
                     pub id: String,
                     pub data: Vec<crate::apps::sovd2uds::data::network_structure::NetworkStructure>,
+                    #[cfg_attr(feature = "openapi", schemars(skip))]
+                    #[serde(skip_serializing_if = "Option::is_none")]
+                    pub schema: Option<schemars::Schema>,
                 }
             }
         }

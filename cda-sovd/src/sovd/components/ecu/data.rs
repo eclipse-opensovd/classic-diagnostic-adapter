@@ -14,15 +14,27 @@
 use sovd_interfaces::error::ApiErrorResponse;
 
 use super::*;
-use crate::sovd;
+use crate::sovd::{self, create_schema};
 
 pub(crate) async fn get<R: DiagServiceResponse, T: UdsEcu + Clone, U: FileManager>(
+    WithRejection(Query(query), _): WithRejection<
+        Query<sovd_interfaces::components::ecu::data::get::Query>,
+        ApiError,
+    >,
     State(WebserverEcuState { ecu_name, uds, .. }): State<WebserverEcuState<R, T, U>>,
 ) -> Response {
+    let schema = if query.include_schema.unwrap_or(false) {
+        Some(create_schema!(
+            sovd_interfaces::components::ecu::data::get::Response
+        ))
+    } else {
+        None
+    };
     match uds.get_components_data_info(&ecu_name).await {
         Ok(mut items) => {
             let sovd_component_data = sovd_interfaces::components::ecu::data::get::Response {
                 items: items.drain(0..).map(|info| info.into_sovd()).collect(),
+                schema,
             };
             (StatusCode::OK, Json(sovd_component_data)).into_response()
         }
@@ -41,6 +53,7 @@ pub(crate) fn docs_get(op: TransformOperation) -> TransformOperation {
                             id: "example_id".to_string(),
                             name: "example_name".to_string(),
                         }],
+                        schema: None,
                     },
                 )
             },
@@ -72,7 +85,6 @@ pub(crate) mod diag_service {
     };
     use hashbrown::HashMap;
     use http::{HeaderMap, StatusCode};
-    use sovd_interfaces::components::ecu::data::service::get::DiagServiceQuery;
 
     use crate::{
         openapi,
@@ -137,7 +149,10 @@ pub(crate) mod diag_service {
     >(
         headers: HeaderMap,
         Path(DiagServicePathParam { diag_service }): Path<DiagServicePathParam>,
-        WithRejection(Query(query), _): WithRejection<Query<DiagServiceQuery>, ApiError>,
+        WithRejection(Query(query), _): WithRejection<
+            Query<sovd_interfaces::components::ComponentQuery>,
+            ApiError,
+        >,
         State(WebserverEcuState { ecu_name, uds, .. }): State<WebserverEcuState<R, T, U>>,
     ) -> Response {
         if Some(true) == query.include_sdgs {
@@ -187,6 +202,10 @@ pub(crate) mod diag_service {
         Path(DiagServicePathParam {
             diag_service: service,
         }): Path<DiagServicePathParam>,
+        WithRejection(Query(query), _): WithRejection<
+            Query<sovd_interfaces::components::ecu::data::service::put::Query>,
+            ApiError,
+        >,
         State(WebserverEcuState { ecu_name, uds, .. }): State<WebserverEcuState<R, T, U>>,
         body: Bytes,
     ) -> Response {
@@ -204,7 +223,7 @@ pub(crate) mod diag_service {
             &uds,
             headers,
             Some(body),
-            false,
+            query.include_schema.unwrap_or(false),
         )
         .await
     }

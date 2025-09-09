@@ -24,7 +24,9 @@ pub struct Mode<T> {
     pub translation_id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub value: Option<T>,
-    // todo after POC: add open api schema for ?include_schema=true
+    #[cfg_attr(feature = "openapi", schemars(skip))]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub schema: Option<schemars::Schema>,
 }
 
 pub mod get {
@@ -32,10 +34,13 @@ pub mod get {
     use crate::Items;
 
     pub type Response = Items<Mode<()>>;
+    pub type Query = crate::IncludeSchemaQuery;
 }
 
 pub mod put {
     use serde::{Deserialize, Serialize};
+
+    pub type Query = crate::IncludeSchemaQuery;
 
     #[derive(Debug, Deserialize)]
     #[cfg_attr(feature = "openapi", derive(schemars::JsonSchema))]
@@ -68,5 +73,8 @@ pub mod put {
     pub struct Response<T> {
         pub id: String,
         pub value: T,
+        #[cfg_attr(feature = "openapi", schemars(skip))]
+        #[serde(skip_serializing_if = "Option::is_none")]
+        pub schema: Option<schemars::Schema>,
     }
 }

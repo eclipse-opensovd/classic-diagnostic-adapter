@@ -12,16 +12,28 @@
  */
 
 use aide::UseApi;
-use axum::{extract::OriginalUri, response::Response};
-use axum_extra::extract::Host;
+use axum::{
+    extract::{OriginalUri, Query},
+    response::Response,
+};
+use axum_extra::extract::{Host, WithRejection};
 
-use crate::sovd::{IntoSovd, resource_response};
+use crate::sovd::{IntoSovd, error::ApiError, resource_response};
 
 pub(crate) async fn get(
     UseApi(Host(host), _): UseApi<Host, String>,
+    WithRejection(Query(query), _): WithRejection<
+        Query<sovd_interfaces::IncludeSchemaQuery>,
+        ApiError,
+    >,
     OriginalUri(uri): OriginalUri,
 ) -> Response {
-    resource_response(&host, &uri, vec![("sovd2uds", None)])
+    resource_response(
+        &host,
+        &uri,
+        vec![("sovd2uds", None)],
+        query.include_schema.unwrap_or(false),
+    )
 }
 
 pub(crate) mod sovd2uds {
@@ -29,9 +41,18 @@ pub(crate) mod sovd2uds {
 
     pub(crate) async fn get(
         UseApi(Host(host), _): UseApi<Host, String>,
+        WithRejection(Query(query), _): WithRejection<
+            Query<sovd_interfaces::IncludeSchemaQuery>,
+            ApiError,
+        >,
         OriginalUri(uri): OriginalUri,
     ) -> Response {
-        resource_response(&host, &uri, vec![("bulk-data", None)])
+        resource_response(
+            &host,
+            &uri,
+            vec![("bulk-data", None)],
+            query.include_schema.unwrap_or(false),
+        )
     }
 
     pub(crate) mod bulk_data {
@@ -39,9 +60,18 @@ pub(crate) mod sovd2uds {
 
         pub(crate) async fn get(
             UseApi(Host(host), _): UseApi<Host, String>,
+            WithRejection(Query(query), _): WithRejection<
+                Query<sovd_interfaces::IncludeSchemaQuery>,
+                ApiError,
+            >,
             OriginalUri(uri): OriginalUri,
         ) -> Response {
-            resource_response(&host, &uri, vec![("flashfiles", None)])
+            resource_response(
+                &host,
+                &uri,
+                vec![("flashfiles", None)],
+                query.include_schema.unwrap_or(false),
+            )
         }
 
         pub(crate) mod flash_files {
@@ -50,13 +80,14 @@ pub(crate) mod sovd2uds {
             use aide::transform::TransformOperation;
             use axum::{
                 Json,
-                extract::State,
+                extract::{Query, State},
                 response::{IntoResponse, Response},
             };
+            use axum_extra::extract::WithRejection;
             use http::StatusCode;
             use regex::Regex;
 
-            use crate::sovd::{WebserverState, error::ApiError};
+            use crate::sovd::{WebserverState, create_schema, error::ApiError};
 
             fn file_name_to_id(file_name: &str) -> String {
                 // Keeping the regex as a static Lazy variable to avoid recompilation
@@ -125,7 +156,13 @@ pub(crate) mod sovd2uds {
                     })
             }
 
-            pub(crate) async fn get(State(state): State<WebserverState>) -> Response {
+            pub(crate) async fn get(
+                WithRejection(Query(query), _): WithRejection<
+                    Query<sovd_interfaces::IncludeSchemaQuery>,
+                    ApiError,
+                >,
+                State(state): State<WebserverState>,
+            ) -> Response {
                 let flash_files = &mut state.flash_data.as_ref().write().await;
                 let files = if let Some(flash_files_path) = &flash_files.path {
                     process_directory(flash_files_path.clone()).await
@@ -135,6 +172,14 @@ pub(crate) mod sovd2uds {
                     )))
                 };
 
+                let schema = if query.include_schema.unwrap_or(false) {
+                    Some(create_schema!(
+                        sovd_interfaces::apps::sovd2uds::bulk_data::flash_files::get::Response
+                    ))
+                } else {
+                    None
+                };
+
                 match files {
                     Ok(files) => {
                         flash_files.files.clone_from(&files);
@@ -142,6 +187,7 @@ pub(crate) mod sovd2uds {
                             sovd_interfaces::apps::sovd2uds::bulk_data::flash_files::get::Response {
                             files,
                             path: flash_files.path.clone(),
+                            schema,
                         };
                         (StatusCode::OK, Json(file_list)).into_response()
                     }
@@ -165,6 +211,7 @@ pub(crate) mod sovd2uds {
                                 ),
                                 origin_path: "example/path/to/file.bin".to_string(),
                             }],
+                            schema: None,
                         })
                     })
             }
@@ -178,16 +225,31 @@ pub(crate) mod sovd2uds {
             use aide::transform::TransformOperation;
             use axum::{
                 Json,
-                extract::State,
+                extract::{Query, State},
                 response::{IntoResponse as _, Response},
             };
+            use axum_extra::extract::WithRejection;
             use cda_interfaces::UdsEcu;
             use http::StatusCode;
 
-            use crate::sovd::IntoSovd;
+            use crate::sovd::{IntoSovd, create_schema, error::ApiError};
 
-            pub(crate) async fn get<T: UdsEcu>(State(gateway): State<T>) -> Response {
+            pub(crate) async fn get<T: UdsEcu>(
+                WithRejection(Query(query), _): WithRejection<
+                    Query<sovd_interfaces::IncludeSchemaQuery>,
+                    ApiError,
+                >,
+                State(gateway): State<T>,
+            ) -> Response {
                 let networkstructure_data = gateway.get_network_structure().await.into_sovd();
+
+                let schema = if query.include_schema.unwrap_or(false) {
+                    Some(create_schema!(
+                        sovd_interfaces::apps::sovd2uds::data::network_structure::get::Response
+                    ))
+                } else {
+                    None
+                };
 
                 (
                     StatusCode::OK,
@@ -195,6 +257,7 @@ pub(crate) mod sovd2uds {
                         sovd_interfaces::apps::sovd2uds::data::network_structure::get::Response {
                             id: "networkstructure".to_owned(),
                             data: vec![networkstructure_data],
+                            schema,
                         },
                     ),
                 )
@@ -219,6 +282,7 @@ pub(crate) mod sovd2uds {
                                     ecus: vec![],
                                 }],
                             }],
+                            schema: None,
                         })
                     })
             }

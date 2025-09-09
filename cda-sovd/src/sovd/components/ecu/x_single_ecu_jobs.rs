@@ -15,16 +15,17 @@ pub(crate) mod single_ecu {
     use aide::transform::TransformOperation;
     use axum::{
         Json,
-        extract::{Path, State},
+        extract::{Path, Query, State},
         http::StatusCode,
         response::{IntoResponse as _, Response},
     };
+    use axum_extra::extract::WithRejection;
     use cda_interfaces::{UdsEcu, diagservices::DiagServiceResponse, file_manager::FileManager};
 
     use crate::{
         openapi,
         sovd::{
-            IntoSovd, WebserverEcuState,
+            IntoSovd, WebserverEcuState, create_schema,
             error::{ApiError, ErrorWrapper},
         },
     };
@@ -32,12 +33,24 @@ pub(crate) mod single_ecu {
     openapi::aide_helper::gen_path_param!(ExecutionJobPathParam job_name String);
 
     pub(crate) async fn get<R: DiagServiceResponse, T: UdsEcu + Clone, U: FileManager>(
+        WithRejection(Query(query), _): WithRejection<
+            Query<sovd_interfaces::IncludeSchemaQuery>,
+            ApiError,
+        >,
         State(WebserverEcuState { uds, ecu_name, .. }): State<WebserverEcuState<R, T, U>>,
     ) -> Response {
+        let schema = if query.include_schema.unwrap_or(false) {
+            Some(create_schema!(
+                sovd_interfaces::components::ecu::ComponentData
+            ))
+        } else {
+            None
+        };
         match uds.get_components_single_ecu_jobs_info(&ecu_name).await {
             Ok(mut items) => {
                 let sovd_component_data = sovd_interfaces::components::ecu::ComponentData {
                     items: items.drain(0..).map(|c| c.into_sovd()).collect(),
+                    schema,
                 };
                 (StatusCode::OK, Json(sovd_component_data)).into_response()
             }
@@ -54,6 +67,7 @@ pub(crate) mod single_ecu {
                         name: "Hard Reset".to_owned(),
                         category: "function".to_owned(),
                     }],
+                    schema: None,
                 })
             })
             .with(openapi::error_bad_request)
@@ -63,14 +77,27 @@ pub(crate) mod single_ecu {
         use super::*;
         pub(crate) async fn get<R: DiagServiceResponse, T: UdsEcu + Clone, U: FileManager>(
             Path(job_name): Path<ExecutionJobPathParam>,
+            WithRejection(Query(query), _): WithRejection<
+                Query<sovd_interfaces::IncludeSchemaQuery>,
+                ApiError,
+            >,
             State(WebserverEcuState { uds, ecu_name, .. }): State<WebserverEcuState<R, T, U>>,
         ) -> Response {
-            uds.get_single_ecu_job(&ecu_name, &job_name)
+            let mut job = match uds
+                .get_single_ecu_job(&ecu_name, &job_name)
                 .await
-                .map_or_else(
-                    |e| ErrorWrapper(e.into()).into_response(),
-                    |job| (StatusCode::OK, Json(job.into_sovd())).into_response(),
-                )
+                .map(|job| job.into_sovd())
+            {
+                Ok(job) => job,
+                Err(e) => return ErrorWrapper(e.into()).into_response().into_response(),
+            };
+            if query.include_schema.unwrap_or(false) {
+                job.schema = Some(create_schema!(
+                    sovd_interfaces::components::ecu::x::single_ecu_job::Job
+                ));
+            }
+
+            (StatusCode::OK, Json(job)).into_response()
         }
 
         pub(crate) fn docs_get(op: TransformOperation) -> TransformOperation {
@@ -84,6 +111,7 @@ pub(crate) mod single_ecu {
                             output_params: vec![],
                             neg_output_params: vec![],
                             prog_codes: vec![],
+                            schema: None,
                         })
                     },
                 )
@@ -189,6 +217,7 @@ pub(crate) mod single_ecu {
                     .into_iter()
                     .map(|pc| pc.into_sovd())
                     .collect(),
+                schema: None,
             }
         }
     }

@@ -300,6 +300,7 @@ pub(crate) mod ecu {
                         id: "550e8400-e29b-41d4-a716-446655440000".to_string(),
                         owned: Some(true),
                     }],
+                    schema: None,
                 })
                 .description("List of ECU locks.")
             })
@@ -439,6 +440,7 @@ pub(crate) mod vehicle {
                         id: "550e8400-e29b-41d4-a716-446655440000".to_string(),
                         owned: Some(true),
                     }],
+                    schema: None,
                 })
                 .description("List of vehicle locks.")
             })
@@ -580,6 +582,7 @@ pub(crate) mod functional_group {
                         id: "550e8400-e29b-41d4-a716-446655440000".to_string(),
                         owned: Some(true),
                     }],
+                    schema: None,
                 })
                 .description("List of functional group locks.")
             })
@@ -660,6 +663,7 @@ pub(crate) fn get_locks(
                 .filter(|(map_key, _)| entity_name == Some(*map_key))
                 .filter_map(|(_, lock_opt)| lock_opt.as_ref().map(|l| l.to_sovd_lock(claims)))
                 .collect(),
+            schema: None,
         },
         ReadLock::OptionLock(l) => sovd_interfaces::locking::get::Response {
             items: l
@@ -667,6 +671,7 @@ pub(crate) fn get_locks(
                 .map(|lock| lock.to_sovd_lock(claims))
                 .into_iter()
                 .collect(),
+            schema: None,
         },
     }
 }

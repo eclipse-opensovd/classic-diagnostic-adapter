@@ -134,7 +134,12 @@ pub mod comparams {
             pub struct Response {
                 pub id: String,
                 pub status: Status,
+                #[cfg_attr(feature = "openapi", schemars(skip))]
+                #[serde(skip_serializing_if = "Option::is_none")]
+                pub schema: Option<schemars::Schema>,
             }
+
+            pub type Query = crate::IncludeSchemaQuery;
         }
 
         pub mod get {
@@ -142,6 +147,7 @@ pub mod comparams {
             use crate::Items;
 
             pub type Response = Items<Item>;
+            pub type Query = crate::IncludeSchemaQuery;
         }
 
         pub mod id {
@@ -157,7 +163,12 @@ pub mod comparams {
                     // use trait items here to allow for other execution types than comparam
                     pub parameters: HashMap<String, ComParamValue>,
                     pub status: Status,
+                    #[cfg_attr(feature = "openapi", schemars(skip))]
+                    #[serde(skip_serializing_if = "Option::is_none")]
+                    pub schema: Option<schemars::Schema>,
                 }
+
+                pub type Query = crate::IncludeSchemaQuery;
             }
         }
     }
@@ -175,6 +186,9 @@ pub mod service {
             pub parameters: serde_json::Map<String, serde_json::Value>,
             #[serde(skip_serializing_if = "Vec::is_empty")]
             pub errors: Vec<DataError<T>>,
+            #[cfg_attr(feature = "openapi", schemars(skip))]
+            #[serde(skip_serializing_if = "Option::is_none")]
+            pub schema: Option<schemars::Schema>,
         }
 
         #[derive(Deserialize, Serialize, Debug)]
@@ -193,5 +207,7 @@ pub mod service {
                     .map_or(HashMap::new(), std::clone::Clone::clone)
             }
         }
+
+        pub type Query = crate::IncludeSchemaQuery;
     }
 }

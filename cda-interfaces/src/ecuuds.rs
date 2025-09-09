@@ -175,6 +175,15 @@ pub trait UdsEcu: Send + Sync + 'static {
         service_id: u8,
         data: UdsPayloadData,
     ) -> impl Future<Output = Result<Self::Response, DiagServiceError>> + Send;
+    /// Lookup a service on the ECU by a given function class name and service id.
+    /// # Errors
+    /// * DiagServiceError::NotFound if the ECU or service lookup failed.
+    fn ecu_lookup_service_through_func_class(
+        &self,
+        ecu_name: &str,
+        func_class_name: &str,
+        service_id: u8,
+    ) -> impl Future<Output = Result<DiagComm, DiagServiceError>> + Send;
     /// Start a flash transfer for the given ECU.
     /// Setting the ECU into the appropriate session and security access must be done
     /// before calling this function, otherwise the ECU will not accept the transfer.

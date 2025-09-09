@@ -19,7 +19,7 @@ pub(crate) mod comparams {
         use aide::{UseApi, transform::TransformOperation};
         use axum::{
             Json,
-            extract::{OriginalUri, Path, State},
+            extract::{OriginalUri, Path, Query, State},
             http::{StatusCode, header},
             response::{IntoResponse as _, Response},
         };
@@ -34,17 +34,21 @@ pub(crate) mod comparams {
         use uuid::Uuid;
 
         use crate::sovd::{
-            IntoSovd, WebserverEcuState,
+            IntoSovd, WebserverEcuState, create_schema,
             error::{ApiError, ErrorWrapper},
         };
 
         pub(crate) async fn get<R: DiagServiceResponse, T: UdsEcu + Clone, U: FileManager>(
+            WithRejection(Query(query), _): WithRejection<
+                Query<sovd_comparams::executions::get::Query>,
+                ApiError,
+            >,
             State(WebserverEcuState {
                 comparam_executions,
                 ..
             }): State<WebserverEcuState<R, T, U>>,
         ) -> Response {
-            handler_read(comparam_executions).await
+            handler_read(comparam_executions, query.include_schema.unwrap_or(false)).await
         }
 
         pub(crate) fn docs_get(op: TransformOperation) -> TransformOperation {
@@ -55,11 +59,16 @@ pub(crate) mod comparams {
                             items: vec![sovd_comparams::executions::Item {
                                 id: "b7e2c1a2-3f4d-4e6a-9c8b-2a1d5e7f8c9b".to_string(),
                             }],
+                            schema: None,
                         })
                 })
         }
 
         pub(crate) async fn post<R: DiagServiceResponse, T: UdsEcu + Clone, U: FileManager>(
+            WithRejection(Query(query), _): WithRejection<
+                Query<sovd_comparams::executions::get::Query>,
+                ApiError,
+            >,
             State(WebserverEcuState {
                 comparam_executions,
                 ..
@@ -74,7 +83,13 @@ pub(crate) mod comparams {
             } else {
                 None
             };
-            handler_write(comparam_executions, path, body).await
+            handler_write(
+                comparam_executions,
+                path,
+                body,
+                query.include_schema.unwrap_or(false),
+            )
+            .await
         }
 
         pub(crate) fn docs_post(op: TransformOperation) -> TransformOperation {
@@ -85,6 +100,7 @@ pub(crate) mod comparams {
                             .example(sovd_comparams::executions::update::Response {
                                 id: "b7e2c1a2-3f4d-4e6a-9c8b-2a1d5e7f8c9b".to_string(),
                                 status: sovd_comparams::executions::Status::Running,
+                                schema: None,
                             })
                     },
                 )
@@ -92,7 +108,13 @@ pub(crate) mod comparams {
 
         pub(crate) async fn handler_read(
             executions: Arc<RwLock<IndexMap<Uuid, sovd_comparams::Execution>>>,
+            include_schema: bool,
         ) -> Response {
+            let schema = if include_schema {
+                Some(create_schema!(sovd_comparams::executions::get::Response))
+            } else {
+                None
+            };
             (
                 StatusCode::OK,
                 Json(sovd_comparams::executions::get::Response {
@@ -102,6 +124,7 @@ pub(crate) mod comparams {
                         .keys()
                         .map(|id| sovd_comparams::executions::Item { id: id.to_string() })
                         .collect::<Vec<_>>(),
+                    schema,
                 }),
             )
                 .into_response()
@@ -110,6 +133,7 @@ pub(crate) mod comparams {
             executions: Arc<RwLock<IndexMap<Uuid, sovd_comparams::Execution>>>,
             base_path: String,
             request: Option<sovd_comparams::executions::update::Request>,
+            include_schema: bool,
         ) -> Response {
             // todo: not in scope for now: request can take body with
             // { timeout: INT, parameters: { ... }, proximity_response: STRING }
@@ -128,9 +152,16 @@ pub(crate) mod comparams {
                 }
             }
 
+            let schema = if include_schema {
+                Some(create_schema!(sovd_comparams::executions::update::Response))
+            } else {
+                None
+            };
+
             let create_execution_response = sovd_comparams::executions::update::Response {
                 id: id.to_string(),
                 status: sovd_comparams::executions::Status::Running,
+                schema,
             };
             executions.insert(
                 id,
@@ -153,6 +184,10 @@ pub(crate) mod comparams {
             use crate::{openapi, sovd::components::IdPathParam};
             pub(crate) async fn get<R: DiagServiceResponse, T: UdsEcu + Clone, U: FileManager>(
                 Path(id): Path<IdPathParam>,
+                WithRejection(Query(query), _): WithRejection<
+                    Query<sovd_comparams::executions::get::Query>,
+                    ApiError,
+                >,
                 State(WebserverEcuState {
                     ecu_name,
                     uds,
@@ -197,12 +232,21 @@ pub(crate) mod comparams {
                     parameters.insert(k, v);
                 }
 
+                let schema = if query.include_schema.unwrap_or(false) {
+                    Some(create_schema!(
+                        sovd_comparams::executions::id::get::Response
+                    ))
+                } else {
+                    None
+                };
+
                 (
                     StatusCode::OK,
                     Json(sovd_comparams::executions::id::get::Response {
                         capability,
                         parameters,
                         status,
+                        schema,
                     }),
                 )
                     .into_response()
@@ -217,6 +261,7 @@ pub(crate) mod comparams {
                                     capability: sovd_comparams::executions::Capability::Execute,
                                     parameters: HashMap::new(),
                                     status: sovd_comparams::executions::Status::Running,
+                                    schema: None,
                                 })
                         },
                     )
@@ -261,6 +306,10 @@ pub(crate) mod comparams {
 
             pub(crate) async fn put<R: DiagServiceResponse, T: UdsEcu + Clone, U: FileManager>(
                 Path(id): Path<IdPathParam>,
+                WithRejection(Query(query), _): WithRejection<
+                    Query<sovd_comparams::executions::update::Query>,
+                    ApiError,
+                >,
                 State(WebserverEcuState {
                     comparam_executions,
                     ..
@@ -303,12 +352,19 @@ pub(crate) mod comparams {
                     }
                 }
 
+                let schema = if query.include_schema.unwrap_or(false) {
+                    Some(create_schema!(sovd_comparams::executions::update::Response))
+                } else {
+                    None
+                };
+
                 (
                     StatusCode::ACCEPTED,
                     [(header::LOCATION, path)],
                     Json(sovd_comparams::executions::update::Response {
                         id: id.to_string(),
                         status: execution.status.clone(),
+                        schema,
                     }),
                 )
                     .into_response()
@@ -322,6 +378,7 @@ pub(crate) mod comparams {
                                 .example(sovd_comparams::executions::update::Response {
                                     id: "example_id".to_string(),
                                     status: sovd_comparams::executions::Status::Running,
+                                    schema: None,
                                 })
                         },
                     )
@@ -337,12 +394,13 @@ pub(crate) mod service {
         use axum::{
             Json,
             body::Bytes,
-            extract::{Path, State},
+            extract::{Path, Query, State},
             http::{HeaderMap, StatusCode},
             response::{IntoResponse as _, Response},
         };
+        use axum_extra::extract::WithRejection;
         use cda_interfaces::{
-            DiagComm, DiagCommAction, DiagCommType, UdsEcu,
+            DiagComm, DiagCommAction, DiagCommType, SchemaProvider, UdsEcu,
             diagservices::{DiagServiceJsonResponse, DiagServiceResponse, DiagServiceResponseType},
             file_manager::FileManager,
         };
@@ -353,18 +411,33 @@ pub(crate) mod service {
             sovd::{
                 self, WebserverEcuState, api_error_from_diag_response,
                 components::{field_parse_errors_to_json, get_content_type_and_accept},
+                create_response_schema, create_schema,
                 error::{ApiError, ErrorWrapper, VendorErrorCode},
             },
         };
 
         openapi::aide_helper::gen_path_param!(OperationServicePathParam service String);
 
-        pub(crate) async fn get<R: DiagServiceResponse, T: UdsEcu + Clone, U: FileManager>(
+        pub(crate) async fn get<
+            R: DiagServiceResponse,
+            T: UdsEcu + SchemaProvider + Clone,
+            U: FileManager,
+        >(
             Path(OperationServicePathParam { service }): Path<OperationServicePathParam>,
+            WithRejection(Query(query), _): WithRejection<Query<sovd_executions::Query>, ApiError>,
             State(WebserverEcuState { ecu_name, uds, .. }): State<WebserverEcuState<R, T, U>>,
             headers: HeaderMap,
         ) -> Response {
-            ecu_operation_handler::<T>(Op::Read, service, &ecu_name, &uds, headers, None).await
+            ecu_operation_handler::<T>(
+                Op::Read,
+                service,
+                &ecu_name,
+                &uds,
+                headers,
+                None,
+                query.include_schema.unwrap_or(false),
+            )
+            .await
         }
 
         pub(crate) fn docs_get(op: TransformOperation) -> TransformOperation {
@@ -373,19 +446,33 @@ pub(crate) mod service {
                     res.description("List of all comparam executions.").example(
                         sovd_interfaces::Items {
                             items: vec!["e7a1c2b2-4f3a-4c8e-9b2a-8d6e2f7c1a5b".to_string()],
+                            schema: None,
                         },
                     )
                 })
         }
 
-        pub(crate) async fn post<R: DiagServiceResponse, T: UdsEcu + Clone, U: FileManager>(
+        pub(crate) async fn post<
+            R: DiagServiceResponse,
+            T: UdsEcu + SchemaProvider + Clone,
+            U: FileManager,
+        >(
             Path(OperationServicePathParam { service }): Path<OperationServicePathParam>,
+            WithRejection(Query(query), _): WithRejection<Query<sovd_executions::Query>, ApiError>,
             State(WebserverEcuState { ecu_name, uds, .. }): State<WebserverEcuState<R, T, U>>,
             headers: HeaderMap,
             body: Bytes,
         ) -> Response {
-            ecu_operation_handler::<T>(Op::Write, service, &ecu_name, &uds, headers, Some(body))
-                .await
+            ecu_operation_handler::<T>(
+                Op::Write,
+                service,
+                &ecu_name,
+                &uds,
+                headers,
+                Some(body),
+                query.include_schema.unwrap_or(false),
+            )
+            .await
         }
 
         pub(crate) fn docs_post(op: TransformOperation) -> TransformOperation {
@@ -402,6 +489,7 @@ pub(crate) mod service {
                                 serde_json::Value::String("example_value".to_string()),
                             )]),
                             errors: vec![],
+                            schema: None,
                         });
                     res.inner().content.insert(
                         "application/octet-stream".to_owned(),
@@ -423,20 +511,33 @@ pub(crate) mod service {
                 .with(openapi::error_bad_gateway)
         }
 
-        async fn ecu_operation_handler<T: UdsEcu + Clone>(
+        async fn ecu_operation_handler<T: UdsEcu + SchemaProvider + Clone>(
             op: Op,
             service: String,
             ecu_name: &str,
             uds: &T,
             headers: HeaderMap,
             body: Option<Bytes>,
+            include_schema: bool,
         ) -> Response {
             match op {
-                Op::Read => (
-                    StatusCode::OK,
-                    Json(sovd_interfaces::Items::<String> { items: Vec::new() }),
-                )
-                    .into_response(),
+                Op::Read => {
+                    // todo: this should return the actual executions.
+                    // and also the correct schema in that case
+                    let schema = if include_schema {
+                        Some(create_schema!(sovd_interfaces::Items<String>))
+                    } else {
+                        None
+                    };
+                    (
+                        StatusCode::OK,
+                        Json(sovd_interfaces::Items::<String> {
+                            items: Vec::new(),
+                            schema,
+                        }),
+                    )
+                        .into_response()
+                }
                 Op::Write => {
                     let Some(body) = body else {
                         return ErrorWrapper(ApiError::BadRequest(
@@ -445,7 +546,14 @@ pub(crate) mod service {
                         .into_response();
                     };
                     if service == "reset" {
-                        return ecu_reset_handler::<T>(service, ecu_name, uds, body).await;
+                        return ecu_reset_handler::<T>(
+                            service,
+                            ecu_name,
+                            uds,
+                            body,
+                            include_schema,
+                        )
+                        .await;
                     }
 
                     let content_type_and_accept = match get_content_type_and_accept(&headers) {
@@ -485,6 +593,30 @@ pub(crate) mod service {
                     }
 
                     let map_to_json = accept == mime::APPLICATION_JSON;
+
+                    let schema = if map_to_json && include_schema {
+                        let subschema = match uds
+                            .schema_for_responses(ecu_name, &diag_service)
+                            .await
+                            .map(|desc| desc.into_schema())
+                        {
+                            Ok(v) => v,
+                            Err(e) => {
+                                log::error!(
+                                    "Failed to get schema for diag service {diag_service:?}: {e:?}"
+                                );
+                                None
+                            }
+                        };
+                        Some(create_response_schema!(
+                            sovd_executions::Response<VendorErrorCode>,
+                            "parameters",
+                            subschema
+                        ))
+                    } else {
+                        None
+                    };
+
                     let response = match uds.send(ecu_name, diag_service, data, map_to_json).await {
                         Ok(v) => v,
                         Err(e) => return ErrorWrapper(e.into()).into_response(),
@@ -523,6 +655,7 @@ pub(crate) mod service {
                             Json(sovd_executions::Response {
                                 parameters: mapped_data,
                                 errors: field_parse_errors_to_json(errors, "parameters"),
+                                schema,
                             }),
                         )
                             .into_response()
@@ -534,11 +667,12 @@ pub(crate) mod service {
             }
         }
 
-        async fn ecu_reset_handler<T: UdsEcu + Clone>(
+        async fn ecu_reset_handler<T: UdsEcu + SchemaProvider + Clone>(
             service: String,
             ecu_name: &str,
             uds: &T,
             body: Bytes,
+            include_schema: bool,
         ) -> Response {
             // todo: in the future we have to handle possible parameters for the reset service
             let request_parameters = match serde_json::from_slice::<sovd_executions::Request>(&body)
@@ -589,6 +723,29 @@ pub(crate) mod service {
                 lookup_name: Some(value_str.to_owned()),
             };
 
+            let schema = if include_schema {
+                let subschema = match uds
+                    .schema_for_responses(ecu_name, &diag_service)
+                    .await
+                    .map(|desc| desc.into_schema())
+                {
+                    Ok(v) => v,
+                    Err(e) => {
+                        log::error!(
+                            "Failed to get schema for diag service {diag_service:?}: {e:?}"
+                        );
+                        None
+                    }
+                };
+                Some(create_response_schema!(
+                    sovd_executions::Response<VendorErrorCode>,
+                    "parameters",
+                    subschema
+                ))
+            } else {
+                None
+            };
+
             let response = match uds.send(ecu_name, diag_service, None, true).await {
                 Ok(v) => v,
                 Err(e) => return ErrorWrapper(e.into()).into_response(),
@@ -635,6 +792,7 @@ pub(crate) mod service {
                             Json(sovd_executions::Response {
                                 parameters: response_data,
                                 errors: field_parse_errors_to_json(errors, "parameters"),
+                                schema,
                             }),
                         )
                             .into_response()
