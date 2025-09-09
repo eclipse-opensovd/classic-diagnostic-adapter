@@ -892,6 +892,17 @@ impl<S: EcuGateway, R: DiagServiceResponse, T: EcuManager<Response = R>> UdsEcu
         self.send(ecu_name, request, Some(data), true).await
     }
 
+    async fn ecu_lookup_service_through_func_class(
+        &self,
+        ecu_name: &str,
+        func_class_name: &str,
+        service_id: u8,
+    ) -> Result<DiagComm, DiagServiceError> {
+        let ecu_diag_service = self.ecus.get(ecu_name).ok_or(DiagServiceError::NotFound)?;
+        let ecu = ecu_diag_service.read().await;
+        ecu.lookup_service_through_func_class(func_class_name, service_id)
+    }
+
     async fn ecu_flash_transfer_start(
         &self,
         ecu_name: &str,

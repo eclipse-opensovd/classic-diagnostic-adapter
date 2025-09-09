@@ -11,8 +11,19 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+use serde::Deserialize;
+
 pub mod ecu;
 
 pub mod get {
     pub type Response = crate::ResourceResponse;
+}
+
+#[derive(Deserialize)]
+#[cfg_attr(feature = "openapi", derive(schemars::JsonSchema))]
+pub struct ComponentQuery {
+    #[serde(rename = "x-include-sdgs")]
+    pub include_sdgs: Option<bool>,
+    #[serde(rename = "include-schema")]
+    pub include_schema: Option<bool>,
 }

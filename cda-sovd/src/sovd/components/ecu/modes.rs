@@ -16,7 +16,7 @@ use std::time::Duration;
 use aide::transform::TransformOperation;
 use axum::{
     Json,
-    extract::State,
+    extract::{Query, State},
     http::StatusCode,
     response::{IntoResponse as _, Response},
 };
@@ -34,6 +34,7 @@ use sovd_interfaces::components::ecu::modes as sovd_modes;
 use crate::sovd::{
     WebserverEcuState,
     auth::Claims,
+    create_schema,
     error::{ApiError, api_error_from_diag_response},
     locks::validate_lock,
 };
@@ -41,7 +42,14 @@ use crate::sovd::{
 const SESSION_NAME: &str = "Diagnostic session";
 const SECURITY_NAME: &str = "Security access";
 
-pub(crate) async fn get() -> Response {
+pub(crate) async fn get(
+    WithRejection(Query(query), _): WithRejection<Query<sovd_modes::get::Query>, ApiError>,
+) -> Response {
+    let schema = if query.include_schema.unwrap_or(false) {
+        Some(create_schema!(sovd_modes::get::Response))
+    } else {
+        None
+    };
     (
         StatusCode::OK,
         Json(sovd_modes::get::Response {
@@ -51,14 +59,17 @@ pub(crate) async fn get() -> Response {
                     name: Some(SESSION_NAME.to_string()),
                     translation_id: None,
                     value: None,
+                    schema: None,
                 },
                 sovd_modes::Mode {
                     id: Some(semantics::SECURITY.to_owned()),
                     name: Some(SECURITY_NAME.to_string()),
                     translation_id: None,
                     value: None,
+                    schema: None,
                 },
             ],
+            schema,
         }),
     )
         .into_response()
@@ -75,14 +86,17 @@ pub(crate) fn docs_get(op: TransformOperation) -> TransformOperation {
                             name: Some(SESSION_NAME.to_string()),
                             translation_id: None,
                             value: None,
+                            schema: None,
                         },
                         sovd_modes::Mode {
                             id: Some(semantics::SECURITY.to_owned()),
                             name: Some(SECURITY_NAME.to_string()),
                             translation_id: None,
                             value: None,
+                            schema: None,
                         },
                     ],
+                    schema: None,
                 })
         })
 }
@@ -109,6 +123,7 @@ pub(crate) mod session {
             ecu_name,
             ..
         }): State<WebserverEcuState<R, T, U>>,
+        WithRejection(Query(query), _): WithRejection<Query<sovd_modes::put::Query>, ApiError>,
         WithRejection(Json(request_body), _): WithRejection<
             Json<sovd_modes::put::Request>,
             ApiError,
@@ -117,6 +132,11 @@ pub(crate) mod session {
         if let Some(response) = validate_lock(&claims, &ecu_name, locks).await {
             return response;
         }
+        let schema = if query.include_schema.unwrap_or(false) {
+            Some(create_schema!(sovd_modes::put::Response::<String>))
+        } else {
+            None
+        };
         tracing::info!("Setting ECU session mode");
         match uds
             .set_ecu_session(
@@ -132,6 +152,7 @@ pub(crate) mod session {
                     Json(sovd_modes::put::Response {
                         id: semantics::SECURITY.to_owned(),
                         value: request_body.value.clone(),
+                        schema,
                     }),
                 )
                     .into_response(),
@@ -149,6 +170,7 @@ pub(crate) mod session {
                     sovd_modes::put::Response {
                         id: semantics::SECURITY.to_owned(),
                         value: "default".to_string(),
+                        schema: None,
                     },
                 )
             })
@@ -160,8 +182,14 @@ pub(crate) mod session {
     }
 
     pub(crate) async fn get<R: DiagServiceResponse, T: UdsEcu + Clone, U: FileManager>(
+        WithRejection(Query(query), _): WithRejection<Query<sovd_modes::get::Query>, ApiError>,
         State(WebserverEcuState { uds, ecu_name, .. }): State<WebserverEcuState<R, T, U>>,
     ) -> Response {
+        let _schema = if query.include_schema.unwrap_or(false) {
+            Some(create_schema!(sovd_modes::Mode::<String>))
+        } else {
+            None
+        };
         match uds.ecu_session(&ecu_name).await {
             Ok(security_mode) => (
                 StatusCode::OK,
@@ -170,6 +198,7 @@ pub(crate) mod session {
                     name: Some(semantics::SESSION.to_owned()),
                     value: Some(security_mode),
                     translation_id: None,
+                    schema: None,
                 }),
             )
                 .into_response(),
@@ -189,6 +218,7 @@ pub(crate) mod session {
                         name: Some(SESSION_NAME.to_string()),
                         translation_id: None,
                         value: Some("default".to_string()),
+                        schema: None,
                     })
             })
             .with(openapi::error_not_found)
@@ -202,20 +232,23 @@ pub(crate) mod security {
     use super::*;
     use crate::openapi;
 
-    #[derive(Serialize)]
+    #[derive(Serialize, schemars::JsonSchema)]
     struct SovdSeed {
         #[serde(rename = "Request_Seed")]
         request_seed: String,
     }
 
-    #[derive(Serialize)]
+    #[derive(Serialize, schemars::JsonSchema)]
     struct SovdRequestSeedResponse {
         id: String,
         seed: SovdSeed,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        schema: Option<schemars::Schema>,
     }
 
     pub(crate) async fn get<R: DiagServiceResponse, T: UdsEcu + Clone, U: FileManager>(
         UseApi(claims, _): UseApi<Claims, ()>,
+        WithRejection(Query(query), _): WithRejection<Query<sovd_modes::get::Query>, ApiError>,
         State(WebserverEcuState {
             ecu_name,
             locks,
@@ -226,6 +259,11 @@ pub(crate) mod security {
         if let Some(value) = validate_lock(&claims, &ecu_name, locks).await {
             return value;
         }
+        let schema = if query.include_schema.unwrap_or(false) {
+            Some(create_schema!(sovd_modes::Mode::<String>))
+        } else {
+            None
+        };
 
         match uds.ecu_security_access(&ecu_name).await {
             Ok(security_mode) => (
@@ -235,6 +273,7 @@ pub(crate) mod security {
                     name: Some(semantics::SECURITY.to_owned()),
                     value: Some(security_mode),
                     translation_id: None,
+                    schema,
                 }),
             )
                 .into_response(),
@@ -254,6 +293,7 @@ pub(crate) mod security {
                         name: Some(SECURITY_NAME.to_string()),
                         translation_id: None,
                         value: Some("level_1".to_owned()),
+                        schema: None,
                     })
             })
             .with(openapi::error_not_found)
@@ -261,6 +301,7 @@ pub(crate) mod security {
 
     pub(crate) async fn put<R: DiagServiceResponse, T: UdsEcu + Clone, U: FileManager>(
         UseApi(claims, _): UseApi<Claims, ()>,
+        WithRejection(Query(query), _): WithRejection<Query<sovd_modes::put::Query>, ApiError>,
         State(WebserverEcuState {
             uds,
             ecu_name,
@@ -328,6 +369,11 @@ pub(crate) mod security {
             Ok((security_access, response)) => match response.response_type() {
                 DiagServiceResponseType::Positive => match security_access {
                     SecurityAccess::RequestSeed(_) => {
+                        let schema = if query.include_schema.unwrap_or(false) {
+                            Some(create_schema!(SovdRequestSeedResponse))
+                        } else {
+                            None
+                        };
                         let seed = response
                             .get_raw()
                             .iter()
@@ -340,19 +386,28 @@ pub(crate) mod security {
                             Json(SovdRequestSeedResponse {
                                 id: semantics::SECURITY.to_owned(),
                                 seed: SovdSeed { request_seed: seed },
+                                schema,
                             }),
                         )
                             .into_response()
                     }
 
-                    SecurityAccess::SendKey(_) => (
-                        StatusCode::OK,
-                        Json(sovd_modes::put::Response {
-                            id: semantics::SECURITY.to_owned(),
-                            value: request_body.value.clone(),
-                        }),
-                    )
-                        .into_response(),
+                    SecurityAccess::SendKey(_) => {
+                        let schema = if query.include_schema.unwrap_or(false) {
+                            Some(create_schema!(sovd_modes::put::Response::<String>))
+                        } else {
+                            None
+                        };
+                        (
+                            StatusCode::OK,
+                            Json(sovd_modes::put::Response {
+                                id: semantics::SECURITY.to_owned(),
+                                value: request_body.value.clone(),
+                                schema,
+                            }),
+                        )
+                            .into_response()
+                    }
                 },
                 DiagServiceResponseType::Negative => api_error_from_diag_response(response),
             },
@@ -368,6 +423,7 @@ pub(crate) mod security {
                     .example(sovd_modes::put::Response {
                         id: semantics::SECURITY.to_owned(),
                         value: "level_2".to_owned(),
+                        schema: None,
                     })
             })
             .with(openapi::error_not_found)

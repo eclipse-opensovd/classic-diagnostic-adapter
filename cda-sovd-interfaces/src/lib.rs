@@ -38,12 +38,18 @@ pub struct Resource {
 #[cfg_attr(feature = "openapi", derive(schemars::JsonSchema))]
 pub struct Items<T> {
     pub items: Vec<T>,
+    #[cfg_attr(feature = "openapi", schemars(skip))]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub schema: Option<schemars::Schema>,
 }
 
 #[derive(Serialize)]
 #[cfg_attr(feature = "openapi", derive(schemars::JsonSchema))]
 pub struct ResourceResponse {
     pub items: Vec<Resource>,
+    #[cfg_attr(feature = "openapi", schemars(skip))]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub schema: Option<schemars::Schema>,
 }
 
 #[derive(Serialize, Debug)]
@@ -65,6 +71,13 @@ pub struct ArrayDataItem {
     pub data: Vec<serde_json::Value>,
 }
 
+#[derive(Deserialize)]
+#[cfg_attr(feature = "openapi", derive(schemars::JsonSchema))]
+pub struct IncludeSchemaQuery {
+    #[serde(rename = "include-schema")]
+    pub include_schema: Option<bool>,
+}
+
 pub mod sovd2uds {
     use std::path::PathBuf;
 
@@ -77,6 +90,9 @@ pub mod sovd2uds {
         pub files: Vec<File>,
         #[serde(skip_serializing)]
         pub path: Option<PathBuf>,
+        #[cfg_attr(feature = "openapi", schemars(skip))]
+        #[serde(skip_serializing_if = "Option::is_none")]
+        pub schema: Option<schemars::Schema>,
     }
 
     #[derive(Serialize, Debug, Clone)]

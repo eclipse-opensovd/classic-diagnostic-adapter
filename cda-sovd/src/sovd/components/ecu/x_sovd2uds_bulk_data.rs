@@ -12,25 +12,38 @@
  */
 
 use aide::UseApi;
-use axum::{extract::OriginalUri, response::Response};
-use axum_extra::extract::Host;
+use axum::{
+    extract::{OriginalUri, Query},
+    response::Response,
+};
+use axum_extra::extract::{Host, WithRejection};
 
-use crate::sovd::resource_response;
+use crate::sovd::{error::ApiError, resource_response};
 
 pub(crate) async fn get(
+    WithRejection(Query(query), _): WithRejection<
+        Query<sovd_interfaces::IncludeSchemaQuery>,
+        ApiError,
+    >,
     UseApi(Host(host), _): UseApi<Host, String>,
     OriginalUri(uri): OriginalUri,
 ) -> Response {
-    resource_response(&host, &uri, vec![("mdd-embedded-files", None)])
+    resource_response(
+        &host,
+        &uri,
+        vec![("mdd-embedded-files", None)],
+        query.include_schema.unwrap_or(false),
+    )
 }
 
 pub(crate) mod mdd_embedded_files {
     use aide::transform::TransformOperation;
     use axum::{
         Json,
-        extract::{Path, State},
+        extract::{Path, Query, State},
         response::{IntoResponse, Response},
     };
+    use axum_extra::extract::WithRejection;
     use cda_interfaces::{
         UdsEcu,
         diagservices::DiagServiceResponse,
@@ -39,13 +52,24 @@ pub(crate) mod mdd_embedded_files {
     use http::{StatusCode, header};
     use sovd_interfaces::components::ecu::x::sovd2uds;
 
-    use crate::sovd::{WebserverEcuState, error::ApiError};
+    use crate::sovd::{WebserverEcuState, create_schema, error::ApiError};
 
     pub(crate) async fn get<R: DiagServiceResponse, T: UdsEcu + Clone, U: FileManager>(
+        WithRejection(Query(query), _): WithRejection<
+            Query<sovd2uds::bulk_data::embedded_files::get::Query>,
+            ApiError,
+        >,
         State(WebserverEcuState {
             mdd_embedded_files, ..
         }): State<WebserverEcuState<R, T, U>>,
     ) -> Response {
+        let schema = if query.include_schema.unwrap_or(false) {
+            Some(create_schema!(
+                sovd2uds::bulk_data::embedded_files::get::Response
+            ))
+        } else {
+            None
+        };
         let items = sovd2uds::bulk_data::embedded_files::get::Response {
             items: mdd_embedded_files
                 .list()
@@ -60,6 +84,7 @@ pub(crate) mod mdd_embedded_files {
                     origin_path: meta.name.clone(),
                 })
                 .collect(),
+            schema,
         };
 
         (StatusCode::OK, Json(items)).into_response()
@@ -78,6 +103,7 @@ pub(crate) mod mdd_embedded_files {
                             hash_algorithm: None,
                             origin_path: "example/path/to/file".to_owned(),
                         }],
+                        schema: None,
                     })
                 },
             )

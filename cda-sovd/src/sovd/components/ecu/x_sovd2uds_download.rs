@@ -13,10 +13,10 @@
 
 use aide::UseApi;
 use axum::{
-    extract::OriginalUri,
+    extract::{OriginalUri, Query},
     response::{IntoResponse, Response},
 };
-use axum_extra::extract::Host;
+use axum_extra::extract::{Host, WithRejection};
 use cda_interfaces::{
     UdsEcu,
     diagservices::{
@@ -64,6 +64,10 @@ async fn sovd_to_func_class_service_exec<T: UdsEcu + Clone>(
 }
 
 pub(crate) async fn get(
+    WithRejection(Query(query), _): WithRejection<
+        Query<sovd_interfaces::IncludeSchemaQuery>,
+        ApiError,
+    >,
     UseApi(Host(host), _): UseApi<Host, String>,
     OriginalUri(uri): OriginalUri,
 ) -> Response {
@@ -71,6 +75,7 @@ pub(crate) async fn get(
         &host,
         &uri,
         vec![("RequestDownload", Some("requestdownload"))],
+        query.include_schema.unwrap_or(false),
     )
 }
 
@@ -78,12 +83,13 @@ pub(crate) mod request_download {
     use aide::transform::TransformOperation;
     use axum::{
         Json,
-        extract::State,
+        extract::{Query, State},
         http::StatusCode,
         response::{IntoResponse as _, Response},
     };
+    use axum_extra::extract::WithRejection;
     use cda_interfaces::{
-        UdsEcu,
+        SchemaProvider, UdsEcu,
         diagservices::{DiagServiceJsonResponse, DiagServiceResponse},
         file_manager::FileManager,
         service_ids,
@@ -95,17 +101,56 @@ pub(crate) mod request_download {
         sovd::{
             WebserverEcuState,
             components::field_parse_errors_to_json,
-            error::{ErrorWrapper, VendorErrorCode},
+            create_response_schema,
+            error::{ApiError, ErrorWrapper, VendorErrorCode},
             x_sovd2uds_download::{
                 FLASH_DOWNLOAD_UPLOAD_FUNC_CLASS, sovd_to_func_class_service_exec,
             },
         },
     };
 
-    pub(crate) async fn put<R: DiagServiceResponse, T: UdsEcu + Clone, U: FileManager>(
+    pub(crate) async fn put<
+        R: DiagServiceResponse,
+        T: UdsEcu + SchemaProvider + Clone,
+        U: FileManager,
+    >(
+        WithRejection(Query(query), _): WithRejection<
+            Query<sovd_interfaces::IncludeSchemaQuery>,
+            ApiError,
+        >,
         State(WebserverEcuState { ecu_name, uds, .. }): State<WebserverEcuState<R, T, U>>,
         body: Json<sovd2uds::download::request_download::put::Request>,
     ) -> Response {
+        let schema = if query.include_schema.unwrap_or(false) {
+            'schema: {
+                let Ok(service) = uds
+                    .ecu_lookup_service_through_func_class(
+                        &ecu_name,
+                        FLASH_DOWNLOAD_UPLOAD_FUNC_CLASS,
+                        service_ids::REQUEST_DOWNLOAD,
+                    )
+                    .await
+                else {
+                    break 'schema None;
+                };
+
+                let Ok(subschema) = uds
+                    .schema_for_responses(&ecu_name, &service)
+                    .await
+                    .map(|s| s.into_schema())
+                else {
+                    break 'schema None;
+                };
+
+                Some(create_response_schema!(
+                    sovd2uds::download::request_download::put::Response<VendorErrorCode>,
+                    "parameters",
+                    subschema
+                ))
+            }
+        } else {
+            None
+        };
         match sovd_to_func_class_service_exec::<T>(
             &uds,
             FLASH_DOWNLOAD_UPLOAD_FUNC_CLASS,
@@ -123,9 +168,27 @@ pub(crate) mod request_download {
                 Json(sovd2uds::download::request_download::put::Response {
                     parameters: mapped_data,
                     errors: field_parse_errors_to_json(errors, "parameters"),
+                    schema,
                 }),
             )
                 .into_response(),
+            Ok(DiagServiceJsonResponse {
+                data: serde_json::Value::Null,
+                errors,
+            }) => {
+                if errors.is_empty() {
+                    return StatusCode::NO_CONTENT.into_response();
+                }
+                (
+                    StatusCode::OK,
+                    Json(sovd2uds::download::request_download::put::Response {
+                        parameters: serde_json::Map::new(),
+                        errors: field_parse_errors_to_json(errors, "parameters"),
+                        schema,
+                    }),
+                )
+                    .into_response()
+            }
             Ok(val) => ErrorWrapper(crate::sovd::error::ApiError::InternalServerError(Some(
                 format!("Expected a map, got: {}", val.data),
             )))
@@ -149,6 +212,7 @@ pub(crate) mod request_download {
                         .into_iter()
                         .collect(),
                         errors: vec![],
+                        schema: None,
                     })
                 },
             )
@@ -165,9 +229,10 @@ pub(crate) mod flash_transfer {
     use aide::transform::TransformOperation;
     use axum::{
         Json,
-        extract::{Path, State},
+        extract::{Path, Query, State},
         response::{IntoResponse, Response},
     };
+    use axum_extra::extract::WithRejection;
     use cda_interfaces::{UdsEcu, diagservices::DiagServiceResponse, file_manager::FileManager};
     use http::StatusCode;
     use sovd_interfaces::components::ecu::x::sovd2uds;
@@ -176,13 +241,17 @@ pub(crate) mod flash_transfer {
     use crate::{
         openapi,
         sovd::{
-            IntoSovd, WebserverEcuState,
+            IntoSovd, WebserverEcuState, create_schema,
             error::{ApiError, ErrorWrapper},
             x_sovd2uds_download::FLASH_DOWNLOAD_UPLOAD_FUNC_CLASS,
         },
     };
 
     pub(crate) async fn post<R: DiagServiceResponse, T: UdsEcu + Clone, U: FileManager>(
+        WithRejection(Query(query), _): WithRejection<
+            Query<sovd_interfaces::IncludeSchemaQuery>,
+            ApiError,
+        >,
         State(WebserverEcuState {
             ecu_name,
             uds,
@@ -228,11 +297,20 @@ pub(crate) mod flash_transfer {
                     )
                     .await
                 {
-                    Ok(()) => (
-                        StatusCode::OK,
-                        Json(sovd2uds::download::flash_transfer::post::Response { id }),
-                    )
-                        .into_response(),
+                    Ok(()) => {
+                        let schema = if query.include_schema.unwrap_or(false) {
+                            Some(create_schema!(
+                                sovd2uds::download::flash_transfer::post::Response
+                            ))
+                        } else {
+                            None
+                        };
+                        (
+                            StatusCode::OK,
+                            Json(sovd2uds::download::flash_transfer::post::Response { id, schema }),
+                        )
+                            .into_response()
+                    }
                     Err(e) => ErrorWrapper(e.into()).into_response(),
                 }
             }
@@ -251,6 +329,7 @@ pub(crate) mod flash_transfer {
                 |res| {
                     res.example(sovd2uds::download::flash_transfer::post::Response {
                         id: "123e4567-e89b-12d3-a456-426614174000".to_owned(),
+                        schema: None,
                     })
                 },
             )
@@ -259,10 +338,28 @@ pub(crate) mod flash_transfer {
     }
 
     pub(crate) async fn get<R: DiagServiceResponse, T: UdsEcu + Clone, U: FileManager>(
+        WithRejection(Query(query), _): WithRejection<
+            Query<sovd_interfaces::IncludeSchemaQuery>,
+            ApiError,
+        >,
         State(WebserverEcuState { ecu_name, uds, .. }): State<WebserverEcuState<R, T, U>>,
     ) -> Response {
+        let schema = if query.include_schema.unwrap_or(false) {
+            Some(create_schema!(
+                sovd2uds::download::flash_transfer::get::Response
+            ))
+        } else {
+            None
+        };
         match uds.ecu_flash_transfer_status(&ecu_name).await {
-            Ok(data) => (StatusCode::OK, Json(data.into_sovd())).into_response(),
+            Ok(data) => {
+                let items = data.into_sovd();
+                (
+                    StatusCode::OK,
+                    Json(sovd2uds::download::flash_transfer::get::Response { items, schema }),
+                )
+                    .into_response()
+            }
             Err(e) => ErrorWrapper(e.into()).into_response(),
         }
     }
@@ -270,17 +367,23 @@ pub(crate) mod flash_transfer {
     pub(crate) fn docs_get(op: TransformOperation) -> TransformOperation {
         use sovd2uds::download::flash_transfer::get::{DataTransferMetaData, DataTransferStatus};
         op.description("Get all flash transfers for the component")
-            .response_with::<200, Json<Vec<DataTransferMetaData>>, _>(|res| {
-                res.example(vec![DataTransferMetaData {
-                    acknowledged_bytes: 0,
-                    blocksize: 1024,
-                    next_block_sequence_counter: 1,
-                    id: "123e4567-e89b-12d3-a456-426614174000".to_owned(),
-                    file_id: "file-id".to_owned(),
-                    status: DataTransferStatus::Queued,
-                    error: None,
-                }])
-            })
+            .response_with::<200, Json<sovd2uds::download::flash_transfer::get::Response>, _>(
+                |res| {
+                    res.example(sovd2uds::download::flash_transfer::get::Response {
+                        items: vec![DataTransferMetaData {
+                            acknowledged_bytes: 0,
+                            blocksize: 1024,
+                            next_block_sequence_counter: 1,
+                            id: "123e4567-e89b-12d3-a456-426614174000".to_owned(),
+                            file_id: "file-id".to_owned(),
+                            status: DataTransferStatus::Queued,
+                            error: None,
+                            schema: None,
+                        }],
+                        schema: None,
+                    })
+                },
+            )
     }
 
     pub(crate) mod id {
@@ -288,10 +391,22 @@ pub(crate) mod flash_transfer {
         use crate::sovd::components::IdPathParam;
         pub(crate) async fn get<R: DiagServiceResponse, T: UdsEcu + Clone, U: FileManager>(
             Path(id): Path<IdPathParam>,
+            WithRejection(Query(query), _): WithRejection<
+                Query<sovd_interfaces::IncludeSchemaQuery>,
+                ApiError,
+            >,
             State(WebserverEcuState { ecu_name, uds, .. }): State<WebserverEcuState<R, T, U>>,
         ) -> Response {
             match uds.ecu_flash_transfer_status_id(&ecu_name, &id).await {
-                Ok(data) => (StatusCode::OK, Json(data.into_sovd())).into_response(),
+                Ok(data) => {
+                    let mut data = data.into_sovd();
+                    if query.include_schema.unwrap_or(false) {
+                        data.schema = Some(create_schema!(
+                            sovd2uds::download::flash_transfer::get::DataTransferMetaData
+                        ));
+                    }
+                    (StatusCode::OK, Json(data)).into_response()
+                }
                 Err(e) => ErrorWrapper(e.into()).into_response(),
             }
         }
@@ -311,6 +426,7 @@ pub(crate) mod flash_transfer {
                         file_id: "file-id".to_owned(),
                         status: DataTransferStatus::Queued,
                         error: None,
+                        schema: None,
                     })
                 })
                 .with(openapi::error_not_found)
@@ -372,6 +488,7 @@ pub(crate) mod flash_transfer {
                 error: self
                     .error
                     .map(|e| e.into_iter().map(|e| e.into_sovd()).collect()),
+                schema: None,
             }
         }
     }

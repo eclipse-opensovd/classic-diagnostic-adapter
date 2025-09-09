@@ -25,15 +25,13 @@ use cda_interfaces::{
     file_manager::FileManager,
 };
 use http::{HeaderMap, StatusCode};
-use schemars::JsonSchema;
-use serde::Deserialize;
 
 use crate::{
     openapi,
     sovd::{
         IntoSovd, WebserverEcuState,
         components::{field_parse_errors_to_json, get_content_type_and_accept},
-        create_response_schema,
+        create_response_schema, create_schema,
         error::{ApiError, ErrorWrapper, api_error_from_diag_response},
         get_payload_data,
     },
@@ -49,15 +47,12 @@ pub(crate) mod x_single_ecu_jobs;
 pub(crate) mod x_sovd2uds_bulk_data;
 pub(crate) mod x_sovd2uds_download;
 
-#[derive(Deserialize, JsonSchema)]
-pub(crate) struct ComponentQuery {
-    #[serde(rename = "x-include-sdgs")]
-    pub include_sdgs: Option<bool>,
-}
-
 pub(crate) async fn get<R: DiagServiceResponse, T: UdsEcu + Clone, U: FileManager>(
     State(WebserverEcuState { ecu_name, uds, .. }): State<WebserverEcuState<R, T, U>>,
-    WithRejection(Query(query), _): WithRejection<Query<ComponentQuery>, ApiError>,
+    WithRejection(Query(query), _): WithRejection<
+        Query<sovd_interfaces::components::ComponentQuery>,
+        ApiError,
+    >,
 ) -> impl IntoApiResponse {
     let base_path = format!("http://localhost:20002/vehicle/v15/components/{ecu_name}");
     let variant = match uds.get_variant(&ecu_name).await {
@@ -65,17 +60,27 @@ pub(crate) async fn get<R: DiagServiceResponse, T: UdsEcu + Clone, U: FileManage
         Err(e) => return ErrorWrapper(ApiError::BadRequest(e)).into_response(),
     };
 
-    let mut sdgs = None;
-    if Some(true) == query.include_sdgs {
-        sdgs = match uds
+    let sdgs = if query.include_sdgs.unwrap_or(false) {
+        match uds
             .get_sdgs(&ecu_name, None)
             .await
             .map_err(ApiError::BadRequest)
         {
-            Ok(v) => Some(v),
+            Ok(v) => Some(v.into_iter().map(|sdg| sdg.into_sovd()).collect()),
             Err(e) => return ErrorWrapper(e).into_response(),
         }
-    }
+    } else {
+        None
+    };
+
+    let schema = if query.include_schema.unwrap_or(false) {
+        Some(create_schema!(
+            sovd_interfaces::components::ecu::get::Response
+        ))
+    } else {
+        None
+    };
+
     (
         StatusCode::OK,
         Json(sovd_interfaces::components::ecu::get::Response {
@@ -86,9 +91,10 @@ pub(crate) async fn get<R: DiagServiceResponse, T: UdsEcu + Clone, U: FileManage
             operations: format!("{base_path}/operations"),
             configurations: format!("{base_path}/configurations"),
             data: format!("{base_path}/data"),
-            sdgs: sdgs.map(|sdgs| sdgs.into_sovd()),
+            sdgs,
             single_ecu_jobs: format!("{base_path}/x-single-ecu-jobs"),
             faults: format!("{base_path}/faults"),
+            schema,
         }),
     )
         .into_response()
@@ -113,6 +119,7 @@ pub(crate) fn docs_get(op: TransformOperation) -> TransformOperation {
                     "http://localhost:20002/vehicle/v15/components/my_ecu/x-single-ecu-jobs"
                         .to_string(),
                 faults: "http://localhost:20002/vehicle/v15/components/my_ecu/faults".to_string(),
+                schema: None,
             })
             .description("Response with ECU information (i.e. detected variant) and service URLs")
         })
@@ -231,13 +238,12 @@ async fn data_request<T: UdsEcu + SchemaProvider + Clone>(
             .await
             .map(|desc| desc.into_schema())
         {
-            Ok(Some(data_schema)) => Some(create_response_schema!(
+            Ok(data_schema) => Some(create_response_schema!(
                 sovd_interfaces::ObjectDataItem<VendorErrorCode>,
                 "data",
                 data_schema
             )),
             Err(e) => return ErrorWrapper(e.into()).into_response(),
-            _ => None,
         }
     } else {
         None

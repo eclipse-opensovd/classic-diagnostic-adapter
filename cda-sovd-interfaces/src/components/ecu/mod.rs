@@ -34,6 +34,9 @@ pub struct Ecu {
     #[serde(rename = "x-single-ecu-jobs")]
     pub single_ecu_jobs: String,
     pub faults: String,
+    #[cfg_attr(feature = "openapi", schemars(skip))]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub schema: Option<schemars::Schema>,
 }
 
 pub type ComponentData = Items<ComponentDataInfo>;
@@ -107,6 +110,9 @@ pub mod configurations {
     #[cfg_attr(feature = "openapi", derive(schemars::JsonSchema))]
     pub struct Components {
         pub items: Vec<ComponentItem>,
+        #[cfg_attr(feature = "openapi", schemars(skip))]
+        #[serde(skip_serializing_if = "Option::is_none")]
+        pub schema: Option<schemars::Schema>,
     }
 
     #[derive(Deserialize, Serialize, Debug)]
@@ -119,6 +125,8 @@ pub mod configurations {
         #[serde(rename = "x-sovd2uds-ServiceAbstract")]
         pub service_abstract: Vec<String>,
     }
+
+    pub type ConfigurationsQuery = crate::IncludeSchemaQuery;
 
     pub mod get {
         use super::*;
@@ -146,23 +154,15 @@ pub mod data {
     }
 
     pub mod service {
-        use super::*;
-        pub mod get {
-            use super::*;
-            #[derive(Deserialize)]
-            #[cfg_attr(feature = "openapi", derive(schemars::JsonSchema))]
-            pub struct DiagServiceQuery {
-                #[serde(rename = "x-include-sdgs")]
-                pub include_sdgs: Option<bool>,
-                #[serde(rename = "include-schema")]
-                pub include_schema: Option<bool>,
-            }
+        pub mod put {
+            pub type Query = crate::IncludeSchemaQuery;
         }
     }
 
     pub mod get {
         use super::*;
         pub type Response = ComponentData;
+        pub type Query = crate::IncludeSchemaQuery;
     }
 }
 
@@ -174,6 +174,7 @@ pub mod x {
                     use crate::{Items, sovd2uds::File};
 
                     pub type Response = Items<File>;
+                    pub type Query = crate::IncludeSchemaQuery;
                 }
             }
         }
@@ -198,10 +199,15 @@ pub mod x {
                     #[cfg_attr(feature = "openapi", schemars(rename = "FlashTransferResponse"))]
                     pub struct Response {
                         pub id: String,
+                        #[cfg_attr(feature = "openapi", schemars(skip))]
+                        #[serde(skip_serializing_if = "Option::is_none")]
+                        pub schema: Option<schemars::Schema>,
                     }
                 }
                 pub mod get {
                     use serde::Serialize;
+
+                    use crate::Items;
 
                     #[derive(Serialize, Clone)]
                     #[serde(rename_all = "PascalCase")]
@@ -215,6 +221,9 @@ pub mod x {
                         pub status: DataTransferStatus,
                         #[serde(skip_serializing_if = "Option::is_none")]
                         pub error: Option<Vec<DataTransferError>>,
+                        #[cfg_attr(feature = "openapi", schemars(skip))]
+                        #[serde(skip_serializing_if = "Option::is_none")]
+                        pub schema: Option<schemars::Schema>,
                     }
 
                     #[derive(Serialize, Clone)]
@@ -237,7 +246,7 @@ pub mod x {
                         Queued,
                     }
 
-                    pub type Response = Vec<DataTransferMetaData>;
+                    pub type Response = Items<DataTransferMetaData>;
 
                     pub mod id {
                         use super::*;
@@ -268,6 +277,9 @@ pub mod x {
                         pub parameters: serde_json::Map<String, serde_json::Value>,
                         #[serde(skip_serializing_if = "Vec::is_empty")]
                         pub errors: Vec<DataError<T>>,
+                        #[cfg_attr(feature = "openapi", schemars(skip))]
+                        #[serde(skip_serializing_if = "Option::is_none")]
+                        pub schema: Option<schemars::Schema>,
                     }
                 }
             }
@@ -340,6 +352,10 @@ pub mod x {
 
             #[serde(rename = "x-prog-code")]
             pub prog_codes: Vec<ProgCode>,
+
+            #[cfg_attr(feature = "openapi", schemars(skip))]
+            #[serde(skip_serializing_if = "Option::is_none")]
+            pub schema: Option<schemars::Schema>,
         }
 
         // Clippy would prefer if we would pass Option<&LongName> instead.
