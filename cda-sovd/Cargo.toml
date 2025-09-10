@@ -17,7 +17,7 @@ path = "src/lib.rs"
 [dependencies]
 # internal dependencies
 cda-interfaces = { workspace = true }
-sovd-interfaces = { workspace = true, features = ["openapi"] }
+sovd-interfaces = { workspace = true }
 
 tokio = { workspace = true, features = ["net"] }
 futures = { workspace = true }                         # external

@@ -26,7 +26,7 @@ pub mod sovd2uds {
 
             #[derive(Serialize)]
             #[serde(rename_all = "PascalCase")]
-            #[cfg_attr(feature = "openapi", derive(schemars::JsonSchema))]
+            #[derive(schemars::JsonSchema)]
             pub struct Ecu {
                 /// ECU name
                 pub qualifier: String,
@@ -43,7 +43,7 @@ pub mod sovd2uds {
 
             #[derive(Serialize)]
             #[serde(rename_all = "PascalCase")]
-            #[cfg_attr(feature = "openapi", derive(schemars::JsonSchema))]
+            #[derive(schemars::JsonSchema)]
             pub struct Gateway {
                 /// Gateway ECU name
                 pub name: String,
@@ -57,7 +57,7 @@ pub mod sovd2uds {
 
             #[derive(Serialize)]
             #[serde(rename_all = "PascalCase")]
-            #[cfg_attr(feature = "openapi", derive(schemars::JsonSchema))]
+            #[derive(schemars::JsonSchema)]
             pub struct FunctionalGroup {
                 pub qualifier: String,
                 pub ecus: Vec<Ecu>,
@@ -65,7 +65,7 @@ pub mod sovd2uds {
 
             #[derive(Serialize)]
             #[serde(rename_all = "PascalCase")]
-            #[cfg_attr(feature = "openapi", derive(schemars::JsonSchema))]
+            #[derive(schemars::JsonSchema)]
             pub struct NetworkStructure {
                 pub functional_groups: Vec<FunctionalGroup>,
                 pub gateways: Vec<Gateway>,
@@ -74,13 +74,12 @@ pub mod sovd2uds {
             pub mod get {
                 use serde::Serialize;
 
-                #[derive(Serialize)]
-                #[cfg_attr(feature = "openapi", derive(schemars::JsonSchema))]
-                #[cfg_attr(feature = "openapi", schemars(rename = "NetworkStructureResponse"))]
+                #[derive(Serialize, schemars::JsonSchema)]
+                #[schemars(rename = "NetworkStructureResponse")]
                 pub struct Response {
                     pub id: String,
                     pub data: Vec<crate::apps::sovd2uds::data::network_structure::NetworkStructure>,
-                    #[cfg_attr(feature = "openapi", schemars(skip))]
+                    #[schemars(skip)]
                     #[serde(skip_serializing_if = "Option::is_none")]
                     pub schema: Option<schemars::Schema>,
                 }

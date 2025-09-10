@@ -19,15 +19,13 @@ pub mod comparams {
 
     use super::*;
 
-    #[derive(Deserialize, Serialize, Clone, Debug)]
-    #[cfg_attr(feature = "openapi", derive(schemars::JsonSchema))]
+    #[derive(Deserialize, Serialize, Clone, Debug, schemars::JsonSchema)]
     pub struct Unit {
         pub factor_to_si_unit: Option<f64>,
         pub offset_to_si_unit: Option<f64>,
     }
 
-    #[derive(Serialize, Clone)]
-    #[cfg_attr(feature = "openapi", derive(schemars::JsonSchema))]
+    #[derive(Serialize, Clone, schemars::JsonSchema)]
     pub struct ComParamSimpleValue {
         pub value: String,
         pub unit: Option<Unit>,
@@ -66,13 +64,10 @@ pub mod comparams {
 
     #[derive(Deserialize, Serialize, Clone)]
     #[serde(untagged)]
-    #[cfg_attr(feature = "openapi", derive(schemars::JsonSchema))]
+    #[derive(schemars::JsonSchema)]
     pub enum ComParamValue {
         Simple(ComParamSimpleValue),
-        #[cfg_attr(
-            feature = "openapi",
-            schemars(with = "serde_json::Map<String, serde_json::Value>")
-        )]
+        #[schemars(with = "serde_json::Map<String, serde_json::Value>")]
         Complex(ComplexComParamValue),
     }
 
@@ -90,7 +85,7 @@ pub mod comparams {
 
         #[derive(Deserialize, Serialize, Clone)]
         #[serde(rename_all = "lowercase")]
-        #[cfg_attr(feature = "openapi", derive(schemars::JsonSchema))]
+        #[derive(schemars::JsonSchema)]
         pub enum Status {
             Running,
             Completed,
@@ -99,7 +94,7 @@ pub mod comparams {
 
         #[derive(Deserialize, Serialize, Clone)]
         #[serde(rename_all = "lowercase")]
-        #[cfg_attr(feature = "openapi", derive(schemars::JsonSchema))]
+        #[derive(schemars::JsonSchema)]
         pub enum Capability {
             Execute,
             Stop,
@@ -108,8 +103,7 @@ pub mod comparams {
             Status,
         }
 
-        #[derive(Serialize)]
-        #[cfg_attr(feature = "openapi", derive(schemars::JsonSchema))]
+        #[derive(Serialize, schemars::JsonSchema)]
         pub struct Item {
             pub id: String,
         }
@@ -119,8 +113,8 @@ pub mod comparams {
             // todo: which ones are optional or not
             #[derive(Deserialize)]
             #[allow(dead_code)]
-            #[cfg_attr(feature = "openapi", derive(schemars::JsonSchema))]
-            #[cfg_attr(feature = "openapi", schemars(rename = "UpdateExecutionRequest"))]
+            #[derive(schemars::JsonSchema)]
+            #[schemars(rename = "UpdateExecutionRequest")]
             pub struct Request {
                 pub capability: Option<Capability>,
                 pub timeout: Option<u32>,
@@ -128,13 +122,12 @@ pub mod comparams {
                 pub proximity_response: Option<String>,
             }
 
-            #[derive(Serialize)]
-            #[cfg_attr(feature = "openapi", derive(schemars::JsonSchema))]
-            #[cfg_attr(feature = "openapi", schemars(rename = "UpdateExecutionResponse"))]
+            #[derive(Serialize, schemars::JsonSchema)]
+            #[schemars(rename = "UpdateExecutionResponse")]
             pub struct Response {
                 pub id: String,
                 pub status: Status,
-                #[cfg_attr(feature = "openapi", schemars(skip))]
+                #[schemars(skip)]
                 #[serde(skip_serializing_if = "Option::is_none")]
                 pub schema: Option<schemars::Schema>,
             }
@@ -154,16 +147,15 @@ pub mod comparams {
             use super::*;
             pub mod get {
                 use super::*;
-                #[derive(Serialize)]
-                #[cfg_attr(feature = "openapi", derive(schemars::JsonSchema))]
-                #[cfg_attr(feature = "openapi", schemars(rename = "GetExecutionResponse"))]
+                #[derive(Serialize, schemars::JsonSchema)]
+                #[schemars(rename = "GetExecutionResponse")]
                 pub struct Response {
                     pub capability: Capability,
                     // todo: probably out of scope for now:
                     // use trait items here to allow for other execution types than comparam
                     pub parameters: HashMap<String, ComParamValue>,
                     pub status: Status,
-                    #[cfg_attr(feature = "openapi", schemars(skip))]
+                    #[schemars(skip)]
                     #[serde(skip_serializing_if = "Option::is_none")]
                     pub schema: Option<schemars::Schema>,
                 }
@@ -180,20 +172,18 @@ pub mod service {
         use super::*;
         use crate::{Payload, error::DataError};
 
-        #[derive(Serialize)]
-        #[cfg_attr(feature = "openapi", derive(schemars::JsonSchema))]
+        #[derive(Serialize, schemars::JsonSchema)]
         pub struct Response<T> {
             pub parameters: serde_json::Map<String, serde_json::Value>,
             #[serde(skip_serializing_if = "Vec::is_empty")]
             pub errors: Vec<DataError<T>>,
-            #[cfg_attr(feature = "openapi", schemars(skip))]
+            #[schemars(skip)]
             #[serde(skip_serializing_if = "Option::is_none")]
             pub schema: Option<schemars::Schema>,
         }
 
-        #[derive(Deserialize, Serialize, Debug)]
-        #[cfg_attr(feature = "openapi", derive(schemars::JsonSchema))]
-        #[cfg_attr(feature = "openapi", schemars(rename = "FlashTransferRequest"))]
+        #[derive(Deserialize, Serialize, Debug, schemars::JsonSchema)]
+        #[schemars(rename = "FlashTransferRequest")]
         pub struct Request {
             #[serde(skip_serializing_if = "Option::is_none")]
             pub timeout: Option<u32>,

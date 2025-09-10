@@ -20,9 +20,8 @@ hashbrown = { workspace = true, features = ["serde"] }
 chrono = { workspace = true }
 serde = { workspace = true, features = ["derive"] }
 serde_json = { workspace = true }
-schemars = { workspace = true, optional = true, features = ["hashbrown"] }
+schemars = { workspace = true, features = ["hashbrown"] }
 
 [features]
 default = []
-openapi = ["dep:schemars"]
 auth = []

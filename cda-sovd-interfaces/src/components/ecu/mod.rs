@@ -19,8 +19,7 @@ use crate::Items;
 pub mod modes;
 pub mod operations;
 
-#[derive(Serialize)]
-#[cfg_attr(feature = "openapi", derive(schemars::JsonSchema))]
+#[derive(Serialize, schemars::JsonSchema)]
 pub struct Ecu {
     pub id: String,
     pub name: String,
@@ -34,15 +33,14 @@ pub struct Ecu {
     #[serde(rename = "x-single-ecu-jobs")]
     pub single_ecu_jobs: String,
     pub faults: String,
-    #[cfg_attr(feature = "openapi", schemars(skip))]
+    #[schemars(skip)]
     #[serde(skip_serializing_if = "Option::is_none")]
     pub schema: Option<schemars::Schema>,
 }
 
 pub type ComponentData = Items<ComponentDataInfo>;
 
-#[derive(Deserialize, Serialize, Debug)]
-#[cfg_attr(feature = "openapi", derive(schemars::JsonSchema))]
+#[derive(Deserialize, Serialize, Debug, schemars::JsonSchema)]
 pub struct ComponentDataInfo {
     pub category: String,
     pub id: String,
@@ -51,7 +49,7 @@ pub struct ComponentDataInfo {
 
 #[derive(Debug, Serialize)]
 #[serde(untagged)]
-#[cfg_attr(feature = "openapi", derive(schemars::JsonSchema))]
+#[derive(schemars::JsonSchema)]
 pub enum SdSdg {
     /// A single special data group
     Sd {
@@ -79,21 +77,16 @@ pub enum SdSdg {
         /// The list of SD or SDGs in the SDG
         #[serde(skip_serializing_if = "Vec::is_empty")]
         #[serde(default)]
-        #[cfg_attr(
-            feature = "openapi",
-            schemars(with = "Vec<serde_json::Map<String, serde_json::Value>>")
-        )]
+        #[schemars(with = "Vec<serde_json::Map<String, serde_json::Value>>")]
         sdgs: Vec<SdSdg>,
     },
 }
 
-#[derive(Serialize)]
-#[cfg_attr(feature = "openapi", derive(schemars::JsonSchema))]
+#[derive(Serialize, schemars::JsonSchema)]
 pub struct ServicesSdgs {
     pub items: HashMap<String, ServiceSdgs>,
 }
-#[derive(Serialize)]
-#[cfg_attr(feature = "openapi", derive(schemars::JsonSchema))]
+#[derive(Serialize, schemars::JsonSchema)]
 pub struct ServiceSdgs {
     pub sdgs: Vec<SdSdg>,
 }
@@ -106,17 +99,15 @@ pub mod get {
 pub mod configurations {
     use super::*;
 
-    #[derive(Deserialize, Serialize, Debug)]
-    #[cfg_attr(feature = "openapi", derive(schemars::JsonSchema))]
+    #[derive(Deserialize, Serialize, Debug, schemars::JsonSchema)]
     pub struct Components {
         pub items: Vec<ComponentItem>,
-        #[cfg_attr(feature = "openapi", schemars(skip))]
+        #[schemars(skip)]
         #[serde(skip_serializing_if = "Option::is_none")]
         pub schema: Option<schemars::Schema>,
     }
 
-    #[derive(Deserialize, Serialize, Debug)]
-    #[cfg_attr(feature = "openapi", derive(schemars::JsonSchema))]
+    #[derive(Deserialize, Serialize, Debug, schemars::JsonSchema)]
     pub struct ComponentItem {
         pub id: String,
         pub name: String,
@@ -141,8 +132,7 @@ pub mod data {
     use super::*;
     use crate::Payload;
 
-    #[derive(Deserialize)]
-    #[cfg_attr(feature = "openapi", derive(schemars::JsonSchema))]
+    #[derive(Deserialize, schemars::JsonSchema)]
     pub struct DataRequestPayload {
         data: HashMap<String, serde_json::Value>,
     }
@@ -182,9 +172,8 @@ pub mod x {
             pub mod flash_transfer {
                 pub mod post {
                     use serde::{Deserialize, Serialize};
-                    #[derive(Debug, Deserialize)]
-                    #[cfg_attr(feature = "openapi", derive(schemars::JsonSchema))]
-                    #[cfg_attr(feature = "openapi", schemars(rename = "FlashTransferRequest"))]
+                    #[derive(Debug, Deserialize, schemars::JsonSchema)]
+                    #[schemars(rename = "FlashTransferRequest")]
                     pub struct Request {
                         #[serde(rename = "blocksequencecounter")]
                         pub block_sequence_counter: u8,
@@ -194,12 +183,11 @@ pub mod x {
                         pub id: String,
                     }
 
-                    #[derive(Debug, Serialize)]
-                    #[cfg_attr(feature = "openapi", derive(schemars::JsonSchema))]
-                    #[cfg_attr(feature = "openapi", schemars(rename = "FlashTransferResponse"))]
+                    #[derive(Debug, Serialize, schemars::JsonSchema)]
+                    #[schemars(rename = "FlashTransferResponse")]
                     pub struct Response {
                         pub id: String,
-                        #[cfg_attr(feature = "openapi", schemars(skip))]
+                        #[schemars(skip)]
                         #[serde(skip_serializing_if = "Option::is_none")]
                         pub schema: Option<schemars::Schema>,
                     }
@@ -211,7 +199,7 @@ pub mod x {
 
                     #[derive(Serialize, Clone)]
                     #[serde(rename_all = "PascalCase")]
-                    #[cfg_attr(feature = "openapi", derive(schemars::JsonSchema))]
+                    #[derive(schemars::JsonSchema)]
                     pub struct DataTransferMetaData {
                         pub acknowledged_bytes: u64,
                         pub blocksize: usize,
@@ -221,20 +209,19 @@ pub mod x {
                         pub status: DataTransferStatus,
                         #[serde(skip_serializing_if = "Option::is_none")]
                         pub error: Option<Vec<DataTransferError>>,
-                        #[cfg_attr(feature = "openapi", schemars(skip))]
+                        #[schemars(skip)]
                         #[serde(skip_serializing_if = "Option::is_none")]
                         pub schema: Option<schemars::Schema>,
                     }
 
-                    #[derive(Serialize, Clone)]
-                    #[cfg_attr(feature = "openapi", derive(schemars::JsonSchema))]
+                    #[derive(Serialize, Clone, schemars::JsonSchema)]
                     pub struct DataTransferError {
                         pub text: String,
                     }
 
                     #[derive(Serialize, Debug, Clone, PartialEq)]
                     #[serde(rename_all = "lowercase")]
-                    #[cfg_attr(feature = "openapi", derive(schemars::JsonSchema))]
+                    #[derive(schemars::JsonSchema)]
                     // allow unused because not all variants are used in the sovd
                     // context yet but are needed to match the CDA internal types
                     // and are useful for an sovd server as well
@@ -262,22 +249,20 @@ pub mod x {
 
                     use crate::error::DataError;
 
-                    #[derive(Deserialize)]
-                    #[cfg_attr(feature = "openapi", derive(schemars::JsonSchema))]
-                    #[cfg_attr(feature = "openapi", schemars(rename = "RequestDownloadRequest"))]
+                    #[derive(Deserialize, schemars::JsonSchema)]
+                    #[schemars(rename = "RequestDownloadRequest")]
                     pub struct Request {
                         #[serde(rename = "requestdownload")]
                         pub parameters: HashMap<String, serde_json::Value>,
                     }
-                    #[derive(Serialize)]
-                    #[cfg_attr(feature = "openapi", derive(schemars::JsonSchema))]
-                    #[cfg_attr(feature = "openapi", schemars(rename = "RequestDownloadResponse"))]
+                    #[derive(Serialize, schemars::JsonSchema)]
+                    #[schemars(rename = "RequestDownloadResponse")]
                     pub struct Response<T> {
                         #[serde(rename = "requestdownload")]
                         pub parameters: serde_json::Map<String, serde_json::Value>,
                         #[serde(skip_serializing_if = "Vec::is_empty")]
                         pub errors: Vec<DataError<T>>,
-                        #[cfg_attr(feature = "openapi", schemars(skip))]
+                        #[schemars(skip)]
                         #[serde(skip_serializing_if = "Option::is_none")]
                         pub schema: Option<schemars::Schema>,
                     }
@@ -289,8 +274,7 @@ pub mod x {
     pub mod single_ecu_job {
         use serde::{Deserialize, Serialize};
 
-        #[derive(Serialize, Deserialize)]
-        #[cfg_attr(feature = "openapi", derive(schemars::JsonSchema))]
+        #[derive(Serialize, Deserialize, schemars::JsonSchema)]
         pub struct LongName {
             #[serde(skip_serializing_if = "Option::is_none")]
             #[serde(default)]
@@ -301,8 +285,7 @@ pub mod x {
             pub ti: Option<String>,
         }
 
-        #[derive(Serialize, Deserialize)]
-        #[cfg_attr(feature = "openapi", derive(schemars::JsonSchema))]
+        #[derive(Serialize, Deserialize, schemars::JsonSchema)]
         pub struct Param {
             pub short_name: String,
 
@@ -321,8 +304,7 @@ pub mod x {
             pub long_name: Option<LongName>,
         }
 
-        #[derive(Serialize, Deserialize)]
-        #[cfg_attr(feature = "openapi", derive(schemars::JsonSchema))]
+        #[derive(Serialize, Deserialize, schemars::JsonSchema)]
         pub struct ProgCode {
             pub code_file: String,
             #[serde(skip_serializing_if = "Option::is_none")]
@@ -338,8 +320,7 @@ pub mod x {
             pub entrypoint: String,
         }
 
-        #[derive(Serialize, Deserialize)]
-        #[cfg_attr(feature = "openapi", derive(schemars::JsonSchema))]
+        #[derive(Serialize, Deserialize, schemars::JsonSchema)]
         pub struct Job {
             #[serde(rename = "x-input-params")]
             pub input_params: Vec<Param>,
@@ -353,7 +334,7 @@ pub mod x {
             #[serde(rename = "x-prog-code")]
             pub prog_codes: Vec<ProgCode>,
 
-            #[cfg_attr(feature = "openapi", schemars(skip))]
+            #[schemars(skip)]
             #[serde(skip_serializing_if = "Option::is_none")]
             pub schema: Option<schemars::Schema>,
         }
@@ -383,8 +364,7 @@ pub mod faults {
         /// * Translation IDs
         ///
         /// This is still compliant with the OpenSOVD specification, as these fields are optional.
-        #[derive(Serialize)]
-        #[cfg_attr(feature = "openapi", derive(schemars::JsonSchema))]
+        #[derive(Serialize, schemars::JsonSchema)]
         pub struct Fault {
             ///Fault code in the native representation of the entity.
             pub code: String,
@@ -405,8 +385,7 @@ pub mod faults {
             pub status: Option<FaultStatus>,
         }
 
-        #[derive(Debug, Serialize, Deserialize)]
-        #[cfg_attr(feature = "openapi", derive(schemars::JsonSchema))]
+        #[derive(Debug, Serialize, Deserialize, schemars::JsonSchema)]
         /// Query parameters for filtering DTC by the given fields.
         pub struct FaultQuery {
             /// Filters the elements based on a status, if the value ia a full match.
@@ -437,8 +416,7 @@ pub mod faults {
             pub include_schema: Option<bool>,
         }
 
-        #[derive(Serialize, Debug)]
-        #[cfg_attr(feature = "openapi", derive(schemars::JsonSchema))]
+        #[derive(Serialize, Debug, schemars::JsonSchema)]
         #[serde(rename_all = "camelCase")]
         pub struct FaultStatus {
             #[serde(skip_serializing_if = "Option::is_none")]
@@ -461,11 +439,10 @@ pub mod faults {
             pub mask: Option<String>,
         }
 
-        #[derive(Serialize)]
-        #[cfg_attr(feature = "openapi", derive(schemars::JsonSchema))]
+        #[derive(Serialize, schemars::JsonSchema)]
         pub struct Response {
             pub items: Vec<Fault>,
-            #[cfg_attr(feature = "openapi", schemars(skip))]
+            #[schemars(skip)]
             #[serde(skip_serializing_if = "Option::is_none")]
             pub schema: Option<schemars::Schema>,
         }

@@ -19,7 +19,7 @@ use serde::Serialize;
 // allowed, so we can pre-fill this with all sovd error codes
 // even though not all are used yet.
 #[allow(dead_code)]
-#[cfg_attr(feature = "openapi", derive(schemars::JsonSchema))]
+#[derive(schemars::JsonSchema)]
 pub enum ErrorCode {
     /// Details are specified in the `vendor_code`
     VendorSpecific,
@@ -85,8 +85,7 @@ pub enum ErrorCode {
     UpdateExecutionInProgress,
 }
 
-#[derive(Serialize, Debug)]
-#[cfg_attr(feature = "openapi", derive(schemars::JsonSchema))]
+#[derive(Serialize, Debug, schemars::JsonSchema)]
 pub struct ApiErrorResponse<T> {
     pub message: String,
     pub error_code: ErrorCode,
@@ -99,8 +98,7 @@ pub struct ApiErrorResponse<T> {
     pub error_source: Option<String>,
 }
 
-#[derive(Serialize, Debug)]
-#[cfg_attr(feature = "openapi", derive(schemars::JsonSchema))]
+#[derive(Serialize, Debug, schemars::JsonSchema)]
 pub struct DataError<T> {
     pub path: String,
     pub error: ApiErrorResponse<T>,
