@@ -60,7 +60,11 @@ pub(crate) async fn authorize(
 ) -> impl IntoApiResponse {
     // Check if the user sent the credentials
     if let Err(e) = check_auth_payload(&payload) {
-        return ErrorWrapper(ApiError::Forbidden(Some(format!("{e:?}")))).into_response();
+        return ErrorWrapper {
+            error: ApiError::Forbidden(Some(format!("{e:?}"))),
+            include_schema: false,
+        }
+        .into_response();
     }
 
     let claims = Claims {
@@ -71,7 +75,11 @@ pub(crate) async fn authorize(
     let token = match encode(&Header::default(), &claims, &KEYS.encoding) {
         Ok(token) => token,
         Err(_) => {
-            return ErrorWrapper(ApiError::InternalServerError(None)).into_response();
+            return ErrorWrapper {
+                error: ApiError::InternalServerError(None),
+                include_schema: false,
+            }
+            .into_response();
         }
     };
 

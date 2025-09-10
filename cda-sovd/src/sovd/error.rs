@@ -119,19 +119,26 @@ impl From<QueryRejection> for ApiError {
     }
 }
 
-impl IntoResponse for ApiError {
-    fn into_response(self) -> Response {
-        ErrorWrapper(self).into_response()
-    }
-}
-
 impl From<QsQueryRejection> for ApiError {
     fn from(e: QsQueryRejection) -> Self {
         ApiError::BadRequest(e.to_string())
     }
 }
 
-pub struct ErrorWrapper(pub ApiError);
+impl IntoResponse for ApiError {
+    fn into_response(self) -> Response {
+        ErrorWrapper {
+            error: self,
+            include_schema: false,
+        }
+        .into_response()
+    }
+}
+
+pub struct ErrorWrapper {
+    pub error: ApiError,
+    pub include_schema: bool,
+}
 
 #[derive(Serialize, schemars::JsonSchema)]
 #[serde(rename_all = "kebab-case")]
@@ -157,7 +164,18 @@ impl OperationOutput for ErrorWrapper {
 
 impl IntoResponse for ErrorWrapper {
     fn into_response(self) -> Response {
-        match self.0 {
+        let schema = if self.include_schema {
+            let mut schema = crate::sovd::create_schema!(
+                sovd_interfaces::error::ApiErrorResponse<VendorErrorCode>
+            );
+            if let Some(props) = schema.get_mut("properties") {
+                crate::sovd::remove_descriptions_recursive(props);
+            }
+            Some(schema)
+        } else {
+            None
+        };
+        match self.error {
             ApiError::Forbidden(message) => (
                 StatusCode::FORBIDDEN,
                 Json(
@@ -167,6 +185,7 @@ impl IntoResponse for ErrorWrapper {
                         vendor_code: None,
                         parameters: None,
                         error_source: None,
+                        schema,
                     },
                 ),
             ),
@@ -179,6 +198,7 @@ impl IntoResponse for ErrorWrapper {
                         vendor_code: Some(VendorErrorCode::NotFound),
                         parameters: None,
                         error_source: None,
+                        schema,
                     },
                 ),
             ),
@@ -191,6 +211,7 @@ impl IntoResponse for ErrorWrapper {
                         vendor_code: None,
                         parameters: None,
                         error_source: None,
+                        schema,
                     },
                 ),
             ),
@@ -203,6 +224,7 @@ impl IntoResponse for ErrorWrapper {
                         vendor_code: None,
                         parameters: None,
                         error_source: None,
+                        schema,
                     },
                 ),
             ),
@@ -215,6 +237,7 @@ impl IntoResponse for ErrorWrapper {
                         vendor_code: Some(VendorErrorCode::BadRequest),
                         parameters: None,
                         error_source: None,
+                        schema,
                     },
                 ),
             ),
@@ -223,13 +246,19 @@ impl IntoResponse for ErrorWrapper {
     }
 }
 
-pub(crate) fn api_error_from_diag_response(response: impl DiagServiceResponse) -> Response {
+pub(crate) fn api_error_from_diag_response(
+    response: impl DiagServiceResponse,
+    include_schema: bool,
+) -> Response {
     let nrc = match response.as_nrc() {
         Ok(nrc) => nrc,
         Err(e) => {
-            return ApiError::InternalServerError(Some(format!(
-                "Failed to convert response to NRC: {e}"
-            )))
+            return ErrorWrapper {
+                error: ApiError::InternalServerError(Some(format!(
+                    "Failed to convert response to NRC: {e}"
+                ))),
+                include_schema,
+            }
             .into_response();
         }
     };
@@ -246,6 +275,14 @@ pub(crate) fn api_error_from_diag_response(response: impl DiagServiceResponse) -
         parameters.insert("SID".to_owned(), sid);
     }
 
+    let schema = if include_schema {
+        Some(crate::sovd::create_schema!(
+            sovd_interfaces::error::ApiErrorResponse<VendorErrorCode>
+        ))
+    } else {
+        None
+    };
+
     let error_response = sovd_interfaces::error::ApiErrorResponse::<VendorErrorCode> {
         error_code: ErrorCode::ErrorResponse,
         message,
@@ -256,6 +293,7 @@ pub(crate) fn api_error_from_diag_response(response: impl DiagServiceResponse) -
         },
         error_source: Some("ECU".to_owned()),
         vendor_code: None,
+        schema,
     };
     (StatusCode::BAD_GATEWAY, Json(error_response)).into_response()
 }
@@ -276,6 +314,7 @@ pub(crate) async fn sovd_method_not_allowed_handler(
                     vendor_code: Some(VendorErrorCode::BadRequest),
                     parameters: None,
                     error_source: None,
+                    schema: None,
                 },
             ),
         )
@@ -289,6 +328,7 @@ pub(crate) async fn sovd_method_not_allowed_handler(
                     vendor_code: Some(VendorErrorCode::RequestTimeout),
                     parameters: None,
                     error_source: None,
+                    schema: None,
                 },
             ),
         )
@@ -307,6 +347,7 @@ pub(crate) async fn sovd_not_found_handler(uri: Uri) -> impl IntoResponse {
                 vendor_code: Some(VendorErrorCode::NotFound),
                 parameters: None,
                 error_source: None,
+                schema: None,
             },
         ),
     )

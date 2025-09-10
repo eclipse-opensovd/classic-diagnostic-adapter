@@ -193,6 +193,7 @@ pub(crate) fn error_forbidden(op: TransformOperation) -> TransformOperation {
             vendor_code: None,
             parameters: None,
             error_source: None,
+            schema: None,
         })
     })
 }
@@ -206,6 +207,7 @@ pub(crate) fn error_not_found(op: TransformOperation) -> TransformOperation {
                 vendor_code: Some(sovd::error::VendorErrorCode::NotFound),
                 parameters: None,
                 error_source: None,
+                schema: None,
             })
     })
 }
@@ -219,6 +221,7 @@ pub(crate) fn error_bad_gateway(op: TransformOperation) -> TransformOperation {
                 vendor_code: None,
                 parameters: None,
                 error_source: Some("ECU".to_string()),
+                schema: None,
             })
     })
 }
@@ -232,6 +235,7 @@ pub(crate) fn error_internal_server(op: TransformOperation) -> TransformOperatio
                 vendor_code: None,
                 parameters: None,
                 error_source: None,
+                schema: None,
             })
     })
 }
@@ -245,6 +249,7 @@ pub(crate) fn error_conflict(op: TransformOperation) -> TransformOperation {
                 vendor_code: None,
                 parameters: None,
                 error_source: None,
+                schema: None,
             })
     })
 }
@@ -258,6 +263,7 @@ pub(crate) fn error_bad_request(op: TransformOperation) -> TransformOperation {
                 vendor_code: Some(sovd::error::VendorErrorCode::BadRequest),
                 parameters: None,
                 error_source: None,
+                schema: None,
             })
     })
 }
@@ -271,6 +277,7 @@ pub(crate) fn comparam_execution_errors(op: TransformOperation) -> TransformOper
                 vendor_code: Some(sovd::error::VendorErrorCode::BadRequest),
                 parameters: None,
                 error_source: None,
+                schema: None,
             })
     })
     .response_with::<404, Json<ApiErrorResponse<sovd::error::VendorErrorCode>>, _>(|res| {
@@ -281,6 +288,7 @@ pub(crate) fn comparam_execution_errors(op: TransformOperation) -> TransformOper
                 vendor_code: Some(sovd::error::VendorErrorCode::NotFound),
                 parameters: None,
                 error_source: None,
+                schema: None,
             })
     })
 }

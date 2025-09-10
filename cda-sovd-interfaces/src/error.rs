@@ -96,6 +96,8 @@ pub struct ApiErrorResponse<T> {
     #[serde(skip_serializing_if = "Option::is_none")]
     #[serde(rename = "x-errorsource")]
     pub error_source: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub schema: Option<schemars::Schema>,
 }
 
 #[derive(Serialize, Debug, schemars::JsonSchema)]

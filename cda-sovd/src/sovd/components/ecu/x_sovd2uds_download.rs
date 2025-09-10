@@ -38,6 +38,7 @@ async fn sovd_to_func_class_service_exec<T: UdsEcu + Clone>(
     ecu_name: &str,
     service_id: u8,
     parameters: HashMap<String, serde_json::Value>,
+    include_schema: bool,
 ) -> Result<DiagServiceJsonResponse, Response> {
     let params = UdsPayloadData::ParameterMap(parameters);
     let response = match uds
@@ -45,19 +46,27 @@ async fn sovd_to_func_class_service_exec<T: UdsEcu + Clone>(
         .await
     {
         Ok(v) => v,
-        Err(e) => return Err(ErrorWrapper(e.into()).into_response()),
+        Err(e) => {
+            return Err(ErrorWrapper {
+                error: e.into(),
+                include_schema,
+            }
+            .into_response());
+        }
     };
 
     if let DiagServiceResponseType::Negative = response.response_type() {
-        return Err(api_error_from_diag_response(response).into_response());
+        return Err(api_error_from_diag_response(response, include_schema).into_response());
     }
 
     let mapped_data = match response.into_json() {
         Ok(v) => v,
         Err(e) => {
-            return Err(
-                ErrorWrapper(ApiError::InternalServerError(Some(format!("{e:?}")))).into_response(),
-            );
+            return Err(ErrorWrapper {
+                error: ApiError::InternalServerError(Some(format!("{e:?}"))),
+                include_schema,
+            }
+            .into_response());
         }
     };
     Ok(mapped_data)
@@ -121,7 +130,8 @@ pub(crate) mod request_download {
         State(WebserverEcuState { ecu_name, uds, .. }): State<WebserverEcuState<R, T, U>>,
         body: Json<sovd2uds::download::request_download::put::Request>,
     ) -> Response {
-        let schema = if query.include_schema.unwrap_or(false) {
+        let include_schema = query.include_schema.unwrap_or(false);
+        let schema = if include_schema {
             'schema: {
                 let Ok(service) = uds
                     .ecu_lookup_service_through_func_class(
@@ -157,6 +167,7 @@ pub(crate) mod request_download {
             &ecu_name,
             service_ids::REQUEST_DOWNLOAD,
             body.parameters.clone(),
+            include_schema,
         )
         .await
         {
@@ -189,9 +200,13 @@ pub(crate) mod request_download {
                 )
                     .into_response()
             }
-            Ok(val) => ErrorWrapper(crate::sovd::error::ApiError::InternalServerError(Some(
-                format!("Expected a map, got: {}", val.data),
-            )))
+            Ok(val) => ErrorWrapper {
+                error: ApiError::InternalServerError(Some(format!(
+                    "Expected a map, got: {}",
+                    val.data
+                ))),
+                include_schema,
+            }
             .into_response(),
             Err(response) => response,
         }
@@ -260,6 +275,7 @@ pub(crate) mod flash_transfer {
         }): State<WebserverEcuState<R, T, U>>,
         body: Json<sovd2uds::download::flash_transfer::post::Request>,
     ) -> Response {
+        let include_schema = query.include_schema.unwrap_or(false);
         match flash_data
             .read()
             .await
@@ -298,7 +314,7 @@ pub(crate) mod flash_transfer {
                     .await
                 {
                     Ok(()) => {
-                        let schema = if query.include_schema.unwrap_or(false) {
+                        let schema = if include_schema {
                             Some(create_schema!(
                                 sovd2uds::download::flash_transfer::post::Response
                             ))
@@ -311,14 +327,18 @@ pub(crate) mod flash_transfer {
                         )
                             .into_response()
                     }
-                    Err(e) => ErrorWrapper(e.into()).into_response(),
+                    Err(e) => ErrorWrapper {
+                        error: e.into(),
+                        include_schema,
+                    }
+                    .into_response(),
                 }
             }
-            None => (
-                StatusCode::NOT_FOUND,
-                ApiError::NotFound(Some(format!("File with id '{}' not found", body.id))),
-            )
-                .into_response(),
+            None => ErrorWrapper {
+                error: ApiError::NotFound(Some(format!("File with id '{}' not found", body.id))),
+                include_schema,
+            }
+            .into_response(),
         }
     }
 
@@ -344,7 +364,8 @@ pub(crate) mod flash_transfer {
         >,
         State(WebserverEcuState { ecu_name, uds, .. }): State<WebserverEcuState<R, T, U>>,
     ) -> Response {
-        let schema = if query.include_schema.unwrap_or(false) {
+        let include_schema = query.include_schema.unwrap_or(false);
+        let schema = if include_schema {
             Some(create_schema!(
                 sovd2uds::download::flash_transfer::get::Response
             ))
@@ -360,7 +381,11 @@ pub(crate) mod flash_transfer {
                 )
                     .into_response()
             }
-            Err(e) => ErrorWrapper(e.into()).into_response(),
+            Err(e) => ErrorWrapper {
+                error: e.into(),
+                include_schema,
+            }
+            .into_response(),
         }
     }
 
@@ -397,17 +422,22 @@ pub(crate) mod flash_transfer {
             >,
             State(WebserverEcuState { ecu_name, uds, .. }): State<WebserverEcuState<R, T, U>>,
         ) -> Response {
+            let include_schema = query.include_schema.unwrap_or(false);
             match uds.ecu_flash_transfer_status_id(&ecu_name, &id).await {
                 Ok(data) => {
                     let mut data = data.into_sovd();
-                    if query.include_schema.unwrap_or(false) {
+                    if include_schema {
                         data.schema = Some(create_schema!(
                             sovd2uds::download::flash_transfer::get::DataTransferMetaData
                         ));
                     }
                     (StatusCode::OK, Json(data)).into_response()
                 }
-                Err(e) => ErrorWrapper(e.into()).into_response(),
+                Err(e) => ErrorWrapper {
+                    error: e.into(),
+                    include_schema,
+                }
+                .into_response(),
             }
         }
 
@@ -438,7 +468,11 @@ pub(crate) mod flash_transfer {
         ) -> Response {
             match uds.ecu_flash_transfer_exit(&ecu_name, &id).await {
                 Ok(()) => StatusCode::NO_CONTENT.into_response(),
-                Err(e) => ErrorWrapper(e.into()).into_response(),
+                Err(e) => ErrorWrapper {
+                    error: e.into(),
+                    include_schema: false,
+                }
+                .into_response(),
             }
         }
 
@@ -533,6 +567,7 @@ pub(crate) mod transferexit {
             &ecu_name,
             service_ids::REQUEST_TRANSFER_EXIT,
             HashMap::new(),
+            false,
         )
         .await
         {
