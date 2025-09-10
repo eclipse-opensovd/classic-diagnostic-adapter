@@ -54,10 +54,17 @@ pub(crate) async fn get<R: DiagServiceResponse, T: UdsEcu + Clone, U: FileManage
         ApiError,
     >,
 ) -> impl IntoApiResponse {
+    let include_schema = query.include_schema.unwrap_or(false);
     let base_path = format!("http://localhost:20002/vehicle/v15/components/{ecu_name}");
     let variant = match uds.get_variant(&ecu_name).await {
         Ok(v) => v,
-        Err(e) => return ErrorWrapper(ApiError::BadRequest(e)).into_response(),
+        Err(e) => {
+            return ErrorWrapper {
+                error: ApiError::BadRequest(e),
+                include_schema,
+            }
+            .into_response();
+        }
     };
 
     let sdgs = if query.include_sdgs.unwrap_or(false) {
@@ -67,13 +74,19 @@ pub(crate) async fn get<R: DiagServiceResponse, T: UdsEcu + Clone, U: FileManage
             .map_err(ApiError::BadRequest)
         {
             Ok(v) => Some(v.into_iter().map(|sdg| sdg.into_sovd()).collect()),
-            Err(e) => return ErrorWrapper(e).into_response(),
+            Err(e) => {
+                return ErrorWrapper {
+                    error: e,
+                    include_schema,
+                }
+                .into_response();
+            }
         }
     } else {
         None
     };
 
-    let schema = if query.include_schema.unwrap_or(false) {
+    let schema = if include_schema {
         Some(create_schema!(
             sovd_interfaces::components::ecu::get::Response
         ))
@@ -145,7 +158,11 @@ pub(crate) fn docs_put(op: TransformOperation) -> TransformOperation {
 async fn update<T: UdsEcu + Clone>(ecu_name: &str, uds: T) -> Response {
     match uds.detect_variant(ecu_name).await {
         Ok(()) => (StatusCode::CREATED, ()).into_response(),
-        Err(e) => ErrorWrapper(ApiError::BadRequest(e)).into_response(),
+        Err(e) => ErrorWrapper {
+            error: ApiError::BadRequest(e),
+            include_schema: false,
+        }
+        .into_response(),
     }
 }
 
@@ -198,7 +215,13 @@ async fn data_request<T: UdsEcu + SchemaProvider + Clone>(
 ) -> Response {
     let (content_type, accept) = match get_content_type_and_accept(&headers) {
         Ok(v) => v,
-        Err(e) => return ErrorWrapper(e).into_response(),
+        Err(e) => {
+            return ErrorWrapper {
+                error: e,
+                include_schema,
+            }
+            .into_response();
+        }
     };
 
     let data = if let Some(body) = body {
@@ -208,7 +231,13 @@ async fn data_request<T: UdsEcu + SchemaProvider + Clone>(
             &body,
         ) {
             Ok(value) => value,
-            Err(e) => return ErrorWrapper(e).into_response(),
+            Err(e) => {
+                return ErrorWrapper {
+                    error: e,
+                    include_schema,
+                }
+                .into_response();
+            }
         }
     } else {
         None
@@ -218,17 +247,21 @@ async fn data_request<T: UdsEcu + SchemaProvider + Clone>(
         (mime::APPLICATION, mime::JSON) => true,
         (mime::APPLICATION, mime::OCTET_STREAM) => false,
         unsupported => {
-            return ErrorWrapper(ApiError::BadRequest(format!(
-                "Unsupported Accept: {unsupported:?}"
-            )))
+            return ErrorWrapper {
+                error: ApiError::BadRequest(format!("Unsupported Accept: {unsupported:?}")),
+                include_schema,
+            }
             .into_response();
         }
     };
 
     if !map_to_json && include_schema {
-        return ErrorWrapper(ApiError::BadRequest(
-            "Cannot use include-schema with non-JSON response".to_string(),
-        ))
+        return ErrorWrapper {
+            error: ApiError::BadRequest(
+                "Cannot use include-schema with non-JSON response".to_string(),
+            ),
+            include_schema,
+        }
         .into_response();
     }
 
@@ -243,7 +276,13 @@ async fn data_request<T: UdsEcu + SchemaProvider + Clone>(
                 "data",
                 data_schema
             )),
-            Err(e) => return ErrorWrapper(e.into()).into_response(),
+            Err(e) => {
+                return ErrorWrapper {
+                    error: e.into(),
+                    include_schema,
+                }
+                .into_response();
+            }
         }
     } else {
         None
@@ -254,12 +293,18 @@ async fn data_request<T: UdsEcu + SchemaProvider + Clone>(
         .await
         .map_err(std::convert::Into::into)
     {
-        Err(e) => return ErrorWrapper(e).into_response(),
+        Err(e) => {
+            return ErrorWrapper {
+                error: e,
+                include_schema,
+            }
+            .into_response();
+        }
         Ok(v) => v,
     };
 
     if let DiagServiceResponseType::Negative = response.response_type() {
-        return api_error_from_diag_response(response).into_response();
+        return api_error_from_diag_response(response, include_schema).into_response();
     }
 
     if response.is_empty() {
@@ -282,15 +327,21 @@ async fn data_request<T: UdsEcu + SchemaProvider + Clone>(
                 (serde_json::Map::new(), errors)
             }
             Ok(v) => {
-                return ErrorWrapper(ApiError::InternalServerError(Some(format!(
-                    "Expected JSON object but got: {}",
-                    v.data
-                ))))
+                return ErrorWrapper {
+                    error: ApiError::InternalServerError(Some(format!(
+                        "Expected JSON object but got: {}",
+                        v.data
+                    ))),
+                    include_schema,
+                }
                 .into_response();
             }
             Err(e) => {
-                return ErrorWrapper(ApiError::InternalServerError(Some(format!("{e:?}"))))
-                    .into_response();
+                return ErrorWrapper {
+                    error: ApiError::InternalServerError(Some(format!("{e:?}"))),
+                    include_schema,
+                }
+                .into_response();
             }
         };
         (

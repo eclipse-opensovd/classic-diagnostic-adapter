@@ -181,7 +181,7 @@ pub(crate) mod ecu {
                 ecu_name, locks, ..
             }): State<WebserverEcuState<R, T, U>>,
         ) -> Response {
-            delete_handler(&locks.ecu, &lock, claims, Some(&ecu_name)).await
+            delete_handler(&locks.ecu, &lock, claims, Some(&ecu_name), false).await
         }
 
         pub(crate) fn docs_delete(op: TransformOperation) -> TransformOperation {
@@ -202,7 +202,7 @@ pub(crate) mod ecu {
                 ApiError,
             >,
         ) -> Response {
-            put_handler(&locks.ecu, &lock, claims, Some(&ecu_name), body).await
+            put_handler(&locks.ecu, &lock, claims, Some(&ecu_name), body, false).await
         }
 
         pub(crate) fn docs_put(op: TransformOperation) -> TransformOperation {
@@ -217,7 +217,7 @@ pub(crate) mod ecu {
             _: UseApi<Claims, ()>,
             State(state): State<WebserverEcuState<R, T, U>>,
         ) -> Response {
-            get_id_handler(&state.locks.ecu, &lock, None).await
+            get_id_handler(&state.locks.ecu, &lock, None, false).await
         }
 
         pub(crate) fn docs_get(op: TransformOperation) -> TransformOperation {
@@ -245,19 +245,24 @@ pub(crate) mod ecu {
     ) -> impl IntoApiResponse {
         let vehicle_ro_lock = vehicle_read_lock(&locks, &claims).await;
         if let Err(e) = vehicle_ro_lock {
-            return ErrorWrapper(e).into_response();
+            return ErrorWrapper {
+                error: e,
+                include_schema: false,
+            }
+            .into_response();
         }
 
         // only for POC, later we have to check if ecu is in the functional group
         let functional_lock = locks.functional_group.lock_ro().await;
         if functional_lock.is_any_locked() {
-            return ErrorWrapper(ApiError::Conflict(
-                "functional lock prevents setting ecu lock".to_owned(),
-            ))
+            return ErrorWrapper {
+                error: ApiError::Conflict("functional lock prevents setting ecu lock".to_owned()),
+                include_schema: false,
+            }
             .into_response();
         }
 
-        post_handler(&locks.ecu, &claims, Some(&ecu_name), body, None).await
+        post_handler(&locks.ecu, &claims, Some(&ecu_name), body, None, false).await
     }
 
     pub(crate) fn docs_post(op: TransformOperation) -> TransformOperation {
@@ -324,7 +329,7 @@ pub(crate) mod vehicle {
             UseApi(claims, _): UseApi<Claims, ()>,
             State(state): State<WebserverState>,
         ) -> Response {
-            delete_handler(&state.locks.vehicle, &lock, claims, None).await
+            delete_handler(&state.locks.vehicle, &lock, claims, None, false).await
         }
 
         pub(crate) fn docs_delete(op: TransformOperation) -> TransformOperation {
@@ -343,7 +348,7 @@ pub(crate) mod vehicle {
                 ApiError,
             >,
         ) -> Response {
-            put_handler(&state.locks.vehicle, &lock, claims, None, body).await
+            put_handler(&state.locks.vehicle, &lock, claims, None, body, false).await
         }
 
         pub(crate) fn docs_put(op: TransformOperation) -> TransformOperation {
@@ -358,7 +363,7 @@ pub(crate) mod vehicle {
             UseApi(_, _): UseApi<Claims, ()>,
             State(state): State<WebserverState>,
         ) -> Response {
-            get_id_handler(&state.locks.vehicle, &lock, None).await
+            get_id_handler(&state.locks.vehicle, &lock, None, false).await
         }
 
         pub(crate) fn docs_get(op: TransformOperation) -> TransformOperation {
@@ -386,21 +391,39 @@ pub(crate) mod vehicle {
         let mut vehicle_rw_lock = state.locks.vehicle.lock_rw().await;
         let vehicle_lock = match vehicle_rw_lock.get_mut(None) {
             Ok(lock) => lock,
-            Err(e) => return ErrorWrapper(e).into_response(),
+            Err(e) => {
+                return ErrorWrapper {
+                    error: e,
+                    include_schema: false,
+                }
+                .into_response();
+            }
         };
 
         if let Err(e) = validate_claim(None, &claims, vehicle_lock.as_ref()) {
-            return ErrorWrapper(e).into_response();
+            return ErrorWrapper {
+                error: e,
+                include_schema: false,
+            }
+            .into_response();
         }
 
         let ecu_locks = state.locks.ecu.lock_ro().await;
         if let Err(e) = all_locks_owned(&ecu_locks, &claims) {
-            return ErrorWrapper(e).into_response();
+            return ErrorWrapper {
+                error: e,
+                include_schema: false,
+            }
+            .into_response();
         }
 
         let functional_locks = state.locks.functional_group.lock_ro().await;
         if let Err(e) = all_locks_owned(&functional_locks, &claims) {
-            return ErrorWrapper(e).into_response();
+            return ErrorWrapper {
+                error: e,
+                include_schema: false,
+            }
+            .into_response();
         }
 
         post_handler(
@@ -409,6 +432,7 @@ pub(crate) mod vehicle {
             None,
             body,
             Some(vehicle_rw_lock),
+            false,
         )
         .await
     }
@@ -467,7 +491,14 @@ pub(crate) mod functional_group {
             State(state): State<WebserverState>,
             UseApi(claims, _): UseApi<Claims, ()>,
         ) -> Response {
-            delete_handler(&state.locks.functional_group, &lock, claims, Some(&group)).await
+            delete_handler(
+                &state.locks.functional_group,
+                &lock,
+                claims,
+                Some(&group),
+                false,
+            )
+            .await
         }
 
         pub(crate) fn docs_delete(op: TransformOperation) -> TransformOperation {
@@ -494,6 +525,7 @@ pub(crate) mod functional_group {
                 claims,
                 Some(&group),
                 body,
+                false,
             )
             .await
         }
@@ -512,7 +544,7 @@ pub(crate) mod functional_group {
             UseApi(_, _): UseApi<Claims, ()>,
             State(state): State<WebserverState>,
         ) -> Response {
-            get_id_handler(&state.locks.functional_group, &lock, Some(&group)).await
+            get_id_handler(&state.locks.functional_group, &lock, Some(&group), false).await
         }
 
         pub(crate) fn docs_get(op: TransformOperation) -> TransformOperation {
@@ -540,7 +572,11 @@ pub(crate) mod functional_group {
     ) -> Response {
         let vehicle_ro_lock = vehicle_read_lock(&state.locks, &claims).await;
         if let Err(e) = vehicle_ro_lock {
-            return ErrorWrapper(e).into_response();
+            return ErrorWrapper {
+                error: e,
+                include_schema: false,
+            }
+            .into_response();
         }
 
         // todo (out of scope for poc) check if any of the ecus is already locked]
@@ -550,6 +586,7 @@ pub(crate) mod functional_group {
             Some(&group),
             body,
             None,
+            false,
         )
         .await
     }
@@ -680,6 +717,7 @@ pub(crate) async fn validate_lock(
     claims: &Claims,
     ecu_name: &String,
     locks: Arc<Locks>,
+    include_schema: bool,
 ) -> Option<Response> {
     let ecu_lock = locks.ecu.lock_ro().await;
     let ecu_locks = get_locks(claims, &ecu_lock, Some(ecu_name));
@@ -690,12 +728,22 @@ pub(crate) async fn validate_lock(
     // not needed anymore
     if ecu_locks.items.is_empty() && vehicle_locks.items.is_empty() {
         return Some(
-            ApiError::Forbidden(Some("Required ECU lock is missing".to_string())).into_response(),
+            ErrorWrapper {
+                error: ApiError::Forbidden(Some("Required ECU lock is missing".to_string())),
+                include_schema,
+            }
+            .into_response(),
         );
     }
 
     if let Err(e) = all_locks_owned(&ecu_lock, claims) {
-        return Some(e.into_response());
+        return Some(
+            ErrorWrapper {
+                error: e,
+                include_schema,
+            }
+            .into_response(),
+        );
     }
     None
 }
@@ -713,27 +761,46 @@ async fn delete_handler(
     lock_id: &str,
     claims: Claims,
     entity_name: Option<&String>,
+    include_schema: bool,
 ) -> Response {
     tracing::info!("Attempting to delete lock");
 
     let mut rw_lock = lock.lock_rw().await;
     let entity_lock = match rw_lock.get_mut(entity_name) {
         Ok(lock) => lock,
-        Err(e) => return ErrorWrapper(e).into_response(),
+        Err(e) => {
+            return ErrorWrapper {
+                error: e,
+                include_schema,
+            }
+            .into_response();
+        }
     };
 
     if let Err(e) = validate_claim(Some(lock_id), &claims, entity_lock.as_ref()) {
-        return ErrorWrapper(e).into_response();
+        return ErrorWrapper {
+            error: e,
+            include_schema,
+        }
+        .into_response();
     }
 
     if let Some(l) = entity_lock {
         l.deletion_task.abort();
         if let Err(e) = rw_lock.delete(entity_name) {
-            return ErrorWrapper(e).into_response();
+            return ErrorWrapper {
+                error: e,
+                include_schema,
+            }
+            .into_response();
         }
         StatusCode::NO_CONTENT.into_response()
     } else {
-        ApiError::NotFound(Some("No lock found".to_owned())).into_response()
+        ErrorWrapper {
+            error: ApiError::NotFound(Some("No lock found".to_owned())),
+            include_schema,
+        }
+        .into_response()
     }
 }
 
@@ -751,6 +818,7 @@ async fn post_handler(
     entity_name: Option<&String>,
     expiration: sovd_interfaces::locking::Request,
     rw_lock: Option<WriteLock<'_>>,
+    include_schema: bool,
 ) -> Response {
     tracing::info!("Attempting to create lock");
 
@@ -761,7 +829,13 @@ async fn post_handler(
 
     let lock_opt = match rw_lock.get_mut(entity_name) {
         Ok(lock) => lock,
-        Err(e) => return ErrorWrapper(e).into_response(),
+        Err(e) => {
+            return ErrorWrapper {
+                error: e,
+                include_schema,
+            }
+            .into_response();
+        }
     };
 
     if lock_opt.is_some() {
@@ -776,7 +850,11 @@ async fn post_handler(
             lock,
         ) {
             Ok(lock) => (StatusCode::CREATED, Json(lock)).into_response(),
-            Err(e) => ErrorWrapper(e).into_response(),
+            Err(e) => ErrorWrapper {
+                error: e,
+                include_schema,
+            }
+            .into_response(),
         }
     } else {
         match create_lock(claims, expiration, lock, entity_name) {
@@ -784,7 +862,11 @@ async fn post_handler(
                 *lock_opt = Some(new_lock);
                 (StatusCode::CREATED, Json(&lock_opt.as_ref().unwrap().sovd)).into_response()
             }
-            Err(e) => ErrorWrapper(e).into_response(),
+            Err(e) => ErrorWrapper {
+                error: e,
+                include_schema,
+            }
+            .into_response(),
         }
     }
 }
@@ -804,18 +886,29 @@ async fn put_handler(
     claims: Claims,
     entity_name: Option<&String>,
     expiration: sovd_interfaces::locking::Request,
+    include_schema: bool,
 ) -> Response {
     tracing::info!("Attempting to update lock");
 
     let mut rw_lock = lock.lock_rw().await;
     let entity_lock = match rw_lock.get_mut(entity_name) {
         Ok(lock) => lock,
-        Err(e) => return ErrorWrapper(e).into_response(),
+        Err(e) => {
+            return ErrorWrapper {
+                error: e,
+                include_schema,
+            }
+            .into_response();
+        }
     };
 
     match update_lock(lock_id, &claims, entity_lock, expiration, entity_name, lock) {
         Ok(_) => StatusCode::NO_CONTENT.into_response(),
-        Err(e) => ErrorWrapper(e).into_response(),
+        Err(e) => ErrorWrapper {
+            error: e,
+            include_schema,
+        }
+        .into_response(),
     }
 }
 
@@ -845,6 +938,7 @@ async fn get_id_handler(
     lock: &LockType,
     lock_id: &String,
     entity_name: Option<&String>,
+    include_schema: bool,
 ) -> Response {
     tracing::info!("Getting active lock by ID");
     let ro_lock = lock.lock_ro().await;
@@ -853,9 +947,10 @@ async fn get_id_handler(
 
         (StatusCode::OK, Json(&sovd_lock_info)).into_response()
     } else {
-        ErrorWrapper(ApiError::NotFound(Some(format!(
-            "no lock found with id {lock_id}"
-        ))))
+        ErrorWrapper {
+            error: ApiError::NotFound(Some(format!("no lock found with id {lock_id}"))),
+            include_schema,
+        }
         .into_response()
     }
 }

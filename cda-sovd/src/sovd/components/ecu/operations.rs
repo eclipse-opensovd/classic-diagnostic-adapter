@@ -195,11 +195,15 @@ pub(crate) mod comparams {
                     ..
                 }): State<WebserverEcuState<R, T, U>>,
             ) -> Response {
+                let include_schema = query.include_schema.unwrap_or(false);
                 let id = match Uuid::parse_str(&id) {
                     Ok(v) => v,
                     Err(e) => {
-                        return ErrorWrapper(ApiError::BadRequest(format!("{e:?}")))
-                            .into_response();
+                        return ErrorWrapper {
+                            error: ApiError::BadRequest(format!("{e:?}")),
+                            include_schema,
+                        }
+                        .into_response();
                     }
                 };
                 let mut executions: Vec<sovd_comparams::Execution> = Vec::new();
@@ -212,7 +216,13 @@ pub(crate) mod comparams {
                         ApiError::NotFound(Some(format!("Execution with id {id} not found")))
                     }) {
                     Ok((idx, _, v)) => (idx, v.clone()),
-                    Err(e) => return ErrorWrapper(e).into_response(),
+                    Err(e) => {
+                        return ErrorWrapper {
+                            error: e,
+                            include_schema,
+                        }
+                        .into_response();
+                    }
                 };
                 let capability = execution.capability.clone();
                 let status = execution.status.clone();
@@ -225,14 +235,20 @@ pub(crate) mod comparams {
 
                 let mut parameters = match uds.get_comparams(&ecu_name).await {
                     Ok(v) => v.into_sovd(),
-                    Err(e) => return ErrorWrapper(ApiError::BadRequest(e)).into_response(),
+                    Err(e) => {
+                        return ErrorWrapper {
+                            error: ApiError::BadRequest(e),
+                            include_schema,
+                        }
+                        .into_response();
+                    }
                 };
 
                 for (k, v) in executions.into_iter().flat_map(|e| e.comparam_override) {
                     parameters.insert(k, v);
                 }
 
-                let schema = if query.include_schema.unwrap_or(false) {
+                let schema = if include_schema {
                     Some(create_schema!(
                         sovd_comparams::executions::id::get::Response
                     ))
@@ -282,15 +298,21 @@ pub(crate) mod comparams {
                 let id = match Uuid::parse_str(&id) {
                     Ok(v) => v,
                     Err(e) => {
-                        return ErrorWrapper(ApiError::BadRequest(format!("{e:?}")))
-                            .into_response();
+                        return ErrorWrapper {
+                            error: ApiError::BadRequest(format!("{e:?}")),
+                            include_schema: false,
+                        }
+                        .into_response();
                     }
                 };
                 let mut executions = comparam_executions.write().await;
                 if executions.shift_remove(&id).is_none() {
-                    return ErrorWrapper(ApiError::NotFound(Some(format!(
-                        "Execution with id {id} not found"
-                    ))))
+                    return ErrorWrapper {
+                        error: ApiError::NotFound(Some(format!(
+                            "Execution with id {id} not found"
+                        ))),
+                        include_schema: false,
+                    }
                     .into_response();
                 }
                 StatusCode::NO_CONTENT.into_response()
@@ -321,11 +343,15 @@ pub(crate) mod comparams {
                     ApiError,
                 >,
             ) -> Response {
+                let include_schema = query.include_schema.unwrap_or(false);
                 let id = match Uuid::parse_str(&id) {
                     Ok(v) => v,
                     Err(e) => {
-                        return ErrorWrapper(ApiError::BadRequest(format!("{e:?}")))
-                            .into_response();
+                        return ErrorWrapper {
+                            error: ApiError::BadRequest(format!("{e:?}")),
+                            include_schema,
+                        }
+                        .into_response();
                     }
                 };
                 let path = format!("http://{host}{uri}");
@@ -343,7 +369,13 @@ pub(crate) mod comparams {
                         ApiError::NotFound(Some(format!("Execution with id {id} not found")))
                     }) {
                         Ok(v) => v,
-                        Err(e) => return ErrorWrapper(e).into_response(),
+                        Err(e) => {
+                            return ErrorWrapper {
+                                error: e,
+                                include_schema,
+                            }
+                            .into_response();
+                        }
                     };
 
                 if let Some(comparam_values) = request.parameters {
@@ -352,7 +384,7 @@ pub(crate) mod comparams {
                     }
                 }
 
-                let schema = if query.include_schema.unwrap_or(false) {
+                let schema = if include_schema {
                     Some(create_schema!(sovd_comparams::executions::update::Response))
                 } else {
                     None
@@ -540,9 +572,10 @@ pub(crate) mod service {
                 }
                 Op::Write => {
                     let Some(body) = body else {
-                        return ErrorWrapper(ApiError::BadRequest(
-                            "Missing request body".to_owned(),
-                        ))
+                        return ErrorWrapper {
+                            error: ApiError::BadRequest("Missing request body".to_owned()),
+                            include_schema,
+                        }
                         .into_response();
                     };
                     if service == "reset" {
@@ -558,13 +591,20 @@ pub(crate) mod service {
 
                     let content_type_and_accept = match get_content_type_and_accept(&headers) {
                         Ok(v) => v,
-                        Err(e) => return ErrorWrapper(e).into_response(),
+                        Err(e) => {
+                            return ErrorWrapper {
+                                error: e,
+                                include_schema,
+                            }
+                            .into_response();
+                        }
                     };
 
                     let (Some(content_type), accept) = content_type_and_accept else {
-                        return ErrorWrapper(ApiError::BadRequest(
-                            "Missing Content-Type".to_owned(),
-                        ))
+                        return ErrorWrapper {
+                            error: ApiError::BadRequest("Missing Content-Type".to_owned()),
+                            include_schema,
+                        }
                         .into_response();
                     };
 
@@ -581,14 +621,23 @@ pub(crate) mod service {
                         &body,
                     ) {
                         Ok(v) => v,
-                        Err(e) => return ErrorWrapper(e).into_response(),
+                        Err(e) => {
+                            return ErrorWrapper {
+                                error: e,
+                                include_schema,
+                            }
+                            .into_response();
+                        }
                     };
 
                     if accept != mime::APPLICATION_OCTET_STREAM && accept != mime::APPLICATION_JSON
                     {
-                        return ErrorWrapper(ApiError::BadRequest(format!(
-                            "Unsupported Accept header: {accept:?}"
-                        )))
+                        return ErrorWrapper {
+                            error: ApiError::BadRequest(format!(
+                                "Unsupported Accept header: {accept:?}"
+                            )),
+                            include_schema,
+                        }
                         .into_response();
                     }
 
@@ -619,11 +668,18 @@ pub(crate) mod service {
 
                     let response = match uds.send(ecu_name, diag_service, data, map_to_json).await {
                         Ok(v) => v,
-                        Err(e) => return ErrorWrapper(e.into()).into_response(),
+                        Err(e) => {
+                            return ErrorWrapper {
+                                error: e.into(),
+                                include_schema,
+                            }
+                            .into_response();
+                        }
                     };
 
                     if let DiagServiceResponseType::Negative = response.response_type() {
-                        return api_error_from_diag_response(response).into_response();
+                        return api_error_from_diag_response(response, include_schema)
+                            .into_response();
                     }
 
                     if response.is_empty() {
@@ -637,16 +693,20 @@ pub(crate) mod service {
                                 errors,
                             }) => (mapped_data, errors),
                             Ok(v) => {
-                                return ErrorWrapper(ApiError::InternalServerError(Some(format!(
-                                    "Expected JSON object but got: {}",
-                                    v.data
-                                ))))
+                                return ErrorWrapper {
+                                    error: ApiError::InternalServerError(Some(format!(
+                                        "Expected JSON object but got: {}",
+                                        v.data
+                                    ))),
+                                    include_schema,
+                                }
                                 .into_response();
                             }
                             Err(e) => {
-                                return ErrorWrapper(ApiError::InternalServerError(Some(format!(
-                                    "{e:?}"
-                                ))))
+                                return ErrorWrapper {
+                                    error: ApiError::InternalServerError(Some(format!("{e:?}"))),
+                                    include_schema,
+                                }
                                 .into_response();
                             }
                         };
@@ -681,38 +741,56 @@ pub(crate) mod service {
             {
                 Some(v) => v,
                 None => {
-                    return ErrorWrapper(ApiError::BadRequest("Invalid request body".to_string()))
-                        .into_response();
+                    return ErrorWrapper {
+                        error: ApiError::BadRequest("Invalid request body".to_string()),
+                        include_schema,
+                    }
+                    .into_response();
                 }
             };
 
             let Some(value) = request_parameters.get("value") else {
-                return ErrorWrapper(ApiError::BadRequest(
-                    "Missing 'value' parameter in request body".to_owned(),
-                ))
+                return ErrorWrapper {
+                    error: ApiError::BadRequest(
+                        "Missing 'value' parameter in request body".to_owned(),
+                    ),
+                    include_schema,
+                }
                 .into_response();
             };
 
             let Some(value_str) = value.as_str() else {
-                return ErrorWrapper(ApiError::BadRequest(
-                    "The 'value' parameter must be a string".to_owned(),
-                ))
+                return ErrorWrapper {
+                    error: ApiError::BadRequest(
+                        "The 'value' parameter must be a string".to_owned(),
+                    ),
+                    include_schema,
+                }
                 .into_response();
             };
 
             let allowed_values = match uds.get_ecu_reset_services(ecu_name).await {
                 Ok(v) => v,
-                Err(e) => return ErrorWrapper(e.into()).into_response(),
+                Err(e) => {
+                    return ErrorWrapper {
+                        error: e.into(),
+                        include_schema,
+                    }
+                    .into_response();
+                }
             };
 
             if !allowed_values
                 .iter()
                 .any(|v| v.eq_ignore_ascii_case(value_str))
             {
-                return ErrorWrapper(ApiError::BadRequest(format!(
-                    "Invalid value for reset service: {value_str}. Allowed values: [{}]",
-                    allowed_values.join(", ")
-                )))
+                return ErrorWrapper {
+                    error: ApiError::BadRequest(format!(
+                        "Invalid value for reset service: {value_str}. Allowed values: [{}]",
+                        allowed_values.join(", ")
+                    )),
+                    include_schema,
+                }
                 .into_response();
             }
 
@@ -748,12 +826,18 @@ pub(crate) mod service {
 
             let response = match uds.send(ecu_name, diag_service, None, true).await {
                 Ok(v) => v,
-                Err(e) => return ErrorWrapper(e.into()).into_response(),
+                Err(e) => {
+                    return ErrorWrapper {
+                        error: e.into(),
+                        include_schema,
+                    }
+                    .into_response();
+                }
             };
 
             match response.response_type() {
                 DiagServiceResponseType::Negative => {
-                    api_error_from_diag_response(response).into_response()
+                    api_error_from_diag_response(response, include_schema).into_response()
                 }
                 DiagServiceResponseType::Positive => {
                     if response.is_empty() {
@@ -774,16 +858,20 @@ pub(crate) mod service {
                                 (serde_json::Map::new(), errors)
                             }
                             Ok(v) => {
-                                return ErrorWrapper(ApiError::InternalServerError(Some(format!(
-                                    "Expected JSON object but got: {}",
-                                    v.data
-                                ))))
+                                return ErrorWrapper {
+                                    error: ApiError::InternalServerError(Some(format!(
+                                        "Expected JSON object but got: {}",
+                                        v.data
+                                    ))),
+                                    include_schema,
+                                }
                                 .into_response();
                             }
                             Err(e) => {
-                                return ErrorWrapper(ApiError::InternalServerError(Some(format!(
-                                    "{e:?}"
-                                ))))
+                                return ErrorWrapper {
+                                    error: ApiError::InternalServerError(Some(format!("{e:?}"))),
+                                    include_schema,
+                                }
                                 .into_response();
                             }
                         };

@@ -85,6 +85,9 @@ pub enum SdSdg {
 #[derive(Serialize, schemars::JsonSchema)]
 pub struct ServicesSdgs {
     pub items: HashMap<String, ServiceSdgs>,
+    #[schemars(skip)]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub schema: Option<schemars::Schema>,
 }
 #[derive(Serialize, schemars::JsonSchema)]
 pub struct ServiceSdgs {

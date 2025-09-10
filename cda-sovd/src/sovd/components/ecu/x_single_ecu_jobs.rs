@@ -39,7 +39,8 @@ pub(crate) mod single_ecu {
         >,
         State(WebserverEcuState { uds, ecu_name, .. }): State<WebserverEcuState<R, T, U>>,
     ) -> Response {
-        let schema = if query.include_schema.unwrap_or(false) {
+        let include_schema = query.include_schema.unwrap_or(false);
+        let schema = if include_schema {
             Some(create_schema!(
                 sovd_interfaces::components::ecu::ComponentData
             ))
@@ -54,7 +55,11 @@ pub(crate) mod single_ecu {
                 };
                 (StatusCode::OK, Json(sovd_component_data)).into_response()
             }
-            Err(e) => ErrorWrapper(ApiError::BadRequest(e)).into_response(),
+            Err(e) => ErrorWrapper {
+                error: ApiError::BadRequest(e),
+                include_schema,
+            }
+            .into_response(),
         }
     }
 
@@ -83,15 +88,22 @@ pub(crate) mod single_ecu {
             >,
             State(WebserverEcuState { uds, ecu_name, .. }): State<WebserverEcuState<R, T, U>>,
         ) -> Response {
+            let include_schema = query.include_schema.unwrap_or(false);
             let mut job = match uds
                 .get_single_ecu_job(&ecu_name, &job_name)
                 .await
                 .map(|job| job.into_sovd())
             {
                 Ok(job) => job,
-                Err(e) => return ErrorWrapper(e.into()).into_response().into_response(),
+                Err(e) => {
+                    return ErrorWrapper {
+                        error: e.into(),
+                        include_schema,
+                    }
+                    .into_response();
+                }
             };
-            if query.include_schema.unwrap_or(false) {
+            if include_schema {
                 job.schema = Some(create_schema!(
                     sovd_interfaces::components::ecu::x::single_ecu_job::Job
                 ));

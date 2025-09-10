@@ -44,6 +44,7 @@ impl From<FieldParseErrorWrapper> for DataError<VendorErrorCode> {
                     ),
                 ])),
                 error_source: None,
+                schema: None,
             },
         }
     }

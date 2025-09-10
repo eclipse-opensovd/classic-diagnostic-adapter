@@ -87,7 +87,10 @@ pub(crate) mod sovd2uds {
             use http::StatusCode;
             use regex::Regex;
 
-            use crate::sovd::{WebserverState, create_schema, error::ApiError};
+            use crate::sovd::{
+                WebserverState, create_schema,
+                error::{ApiError, ErrorWrapper},
+            };
 
             fn file_name_to_id(file_name: &str) -> String {
                 // Keeping the regex as a static Lazy variable to avoid recompilation
@@ -163,6 +166,7 @@ pub(crate) mod sovd2uds {
                 >,
                 State(state): State<WebserverState>,
             ) -> Response {
+                let include_schema = query.include_schema.unwrap_or(false);
                 let flash_files = &mut state.flash_data.as_ref().write().await;
                 let files = if let Some(flash_files_path) = &flash_files.path {
                     process_directory(flash_files_path.clone()).await
@@ -172,7 +176,7 @@ pub(crate) mod sovd2uds {
                     )))
                 };
 
-                let schema = if query.include_schema.unwrap_or(false) {
+                let schema = if include_schema {
                     Some(create_schema!(
                         sovd_interfaces::apps::sovd2uds::bulk_data::flash_files::get::Response
                     ))
@@ -191,7 +195,11 @@ pub(crate) mod sovd2uds {
                         };
                         (StatusCode::OK, Json(file_list)).into_response()
                     }
-                    Err(e) => e.into_response(),
+                    Err(e) => ErrorWrapper {
+                        error: e,
+                        include_schema,
+                    }
+                    .into_response(),
                 }
             }
 

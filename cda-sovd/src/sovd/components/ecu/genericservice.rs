@@ -33,32 +33,45 @@ pub(crate) async fn put<R: DiagServiceResponse, T: UdsEcu + Clone, U: FileManage
     match headers.get(header::ACCEPT) {
         Some(v) if v == mime::APPLICATION_OCTET_STREAM.essence_str() => (Some(v), false),
         _ => {
-            return ErrorWrapper(ApiError::BadRequest(format!(
-                "Unsupported Accept, only {} is supported",
-                mime::APPLICATION_OCTET_STREAM
-            )))
+            return ErrorWrapper {
+                error: ApiError::BadRequest(format!(
+                    "Unsupported Accept, only {} is supported",
+                    mime::APPLICATION_OCTET_STREAM
+                )),
+                include_schema: false,
+            }
             .into_response();
         }
     };
     match headers.get(header::CONTENT_TYPE) {
         Some(v) if v == mime::APPLICATION_OCTET_STREAM.essence_str() => (),
         _ => {
-            return ErrorWrapper(ApiError::BadRequest(format!(
-                "Unsupported Content-Type, only {} is supported",
-                mime::APPLICATION_OCTET_STREAM
-            )))
+            return ErrorWrapper {
+                error: ApiError::BadRequest(format!(
+                    "Unsupported Content-Type, only {} is supported",
+                    mime::APPLICATION_OCTET_STREAM
+                )),
+                include_schema: false,
+            }
             .into_response();
         }
     }
 
     let data = match get_octet_stream_payload(&headers, &body) {
         Ok(value) => value,
-        Err(e) => return ErrorWrapper(e).into_response(),
+        Err(e) => {
+            return ErrorWrapper {
+                error: e,
+                include_schema: false,
+            }
+            .into_response();
+        }
     };
     let Some(UdsPayloadData::Raw(uds_raw_payload)) = data else {
-        return ErrorWrapper(ApiError::InternalServerError(Some(
-            "Failure reading payload data.".to_owned(),
-        )))
+        return ErrorWrapper {
+            error: ApiError::InternalServerError(Some("Failure reading payload data.".to_owned())),
+            include_schema: false,
+        }
         .into_response();
     };
 
@@ -67,7 +80,13 @@ pub(crate) async fn put<R: DiagServiceResponse, T: UdsEcu + Clone, U: FileManage
         .await
         .map_err(std::convert::Into::into)
     {
-        Err(e) => return ErrorWrapper(e).into_response(),
+        Err(e) => {
+            return ErrorWrapper {
+                error: e,
+                include_schema: false,
+            }
+            .into_response();
+        }
         Ok(v) => v,
     };
     // Return the raw response

@@ -111,7 +111,10 @@ pub(crate) mod mdd_embedded_files {
 
     pub(crate) mod id {
         use super::*;
-        use crate::{openapi, sovd::components::IdPathParam};
+        use crate::{
+            openapi,
+            sovd::{components::IdPathParam, error::ErrorWrapper},
+        };
         pub(crate) async fn get<R: DiagServiceResponse, T: UdsEcu + Clone, U: FileManager>(
             Path(id): Path<IdPathParam>,
             State(WebserverEcuState {
@@ -125,10 +128,11 @@ pub(crate) mod mdd_embedded_files {
                     payload,
                 )
                     .into_response(),
-                Err(e) => {
-                    let api_error: ApiError = e.into();
-                    api_error.into_response()
+                Err(e) => ErrorWrapper {
+                    error: ApiError::from(e),
+                    include_schema: false,
                 }
+                .into_response(),
             }
         }
         pub(crate) fn docs_get(op: TransformOperation) -> TransformOperation {

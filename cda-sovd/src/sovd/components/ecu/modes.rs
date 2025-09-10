@@ -105,7 +105,7 @@ pub(crate) mod session {
     use aide::UseApi;
 
     use super::*;
-    use crate::openapi;
+    use crate::{openapi, sovd::error::ErrorWrapper};
 
     #[tracing::instrument(
         skip(claims, locks, uds),
@@ -129,10 +129,11 @@ pub(crate) mod session {
             ApiError,
         >,
     ) -> Response {
-        if let Some(response) = validate_lock(&claims, &ecu_name, locks).await {
+        let include_schema = query.include_schema.unwrap_or(false);
+        if let Some(response) = validate_lock(&claims, &ecu_name, locks, include_schema).await {
             return response;
         }
-        let schema = if query.include_schema.unwrap_or(false) {
+        let schema = if include_schema {
             Some(create_schema!(sovd_modes::put::Response::<String>))
         } else {
             None
@@ -156,9 +157,15 @@ pub(crate) mod session {
                     }),
                 )
                     .into_response(),
-                DiagServiceResponseType::Negative => api_error_from_diag_response(response),
+                DiagServiceResponseType::Negative => {
+                    api_error_from_diag_response(response, include_schema)
+                }
             },
-            Err(e) => ApiError::from(e).into_response(),
+            Err(e) => ErrorWrapper {
+                error: ApiError::from(e),
+                include_schema,
+            }
+            .into_response(),
         }
     }
 
@@ -185,7 +192,8 @@ pub(crate) mod session {
         WithRejection(Query(query), _): WithRejection<Query<sovd_modes::get::Query>, ApiError>,
         State(WebserverEcuState { uds, ecu_name, .. }): State<WebserverEcuState<R, T, U>>,
     ) -> Response {
-        let _schema = if query.include_schema.unwrap_or(false) {
+        let include_schema = query.include_schema.unwrap_or(false);
+        let schema = if include_schema {
             Some(create_schema!(sovd_modes::Mode::<String>))
         } else {
             None
@@ -198,14 +206,15 @@ pub(crate) mod session {
                     name: Some(semantics::SESSION.to_owned()),
                     value: Some(security_mode),
                     translation_id: None,
-                    schema: None,
+                    schema,
                 }),
             )
                 .into_response(),
-            Err(e) => {
-                let api_error: ApiError = e.into();
-                api_error.into_response()
+            Err(e) => ErrorWrapper {
+                error: ApiError::from(e),
+                include_schema,
             }
+            .into_response(),
         }
     }
 
@@ -230,7 +239,7 @@ pub(crate) mod security {
     use cda_interfaces::{SecurityAccess, diagservices::UdsPayloadData};
 
     use super::*;
-    use crate::openapi;
+    use crate::{openapi, sovd::error::ErrorWrapper};
 
     #[derive(Serialize, schemars::JsonSchema)]
     struct SovdSeed {
@@ -256,10 +265,11 @@ pub(crate) mod security {
             ..
         }): State<WebserverEcuState<R, T, U>>,
     ) -> Response {
-        if let Some(value) = validate_lock(&claims, &ecu_name, locks).await {
+        let include_schema = query.include_schema.unwrap_or(false);
+        if let Some(value) = validate_lock(&claims, &ecu_name, locks, include_schema).await {
             return value;
         }
-        let schema = if query.include_schema.unwrap_or(false) {
+        let schema = if include_schema {
             Some(create_schema!(sovd_modes::Mode::<String>))
         } else {
             None
@@ -277,10 +287,11 @@ pub(crate) mod security {
                 }),
             )
                 .into_response(),
-            Err(e) => {
-                let api_error: ApiError = e.into();
-                api_error.into_response()
+            Err(e) => ErrorWrapper {
+                error: ApiError::from(e),
+                include_schema,
             }
+            .into_response(),
         }
     }
 
@@ -325,7 +336,9 @@ pub(crate) mod security {
             }
         }
 
-        if let Some(value) = validate_lock(&claims, &ecu_name, locks).await {
+        let include_schema = query.include_schema.unwrap_or(false);
+
+        if let Some(value) = validate_lock(&claims, &ecu_name, locks, include_schema).await {
             return value;
         }
 
@@ -333,20 +346,32 @@ pub(crate) mod security {
         let key = request_body.key.map(|k| k.send_key);
 
         if request_seed_service.is_some() && key.is_some() {
-            return ApiError::BadRequest(
-                "RequestSeed and SendKey cannot be used at the same time.".to_string(),
-            )
+            return ErrorWrapper {
+                error: ApiError::BadRequest(
+                    "RequestSeed and SendKey cannot be used at the same time.".to_string(),
+                ),
+                include_schema,
+            }
             .into_response();
         }
         if request_seed_service.is_none() && key.is_none() {
-            return ApiError::BadRequest("RequestSeed is not set but no key is given.".to_string())
-                .into_response();
+            return ErrorWrapper {
+                error: ApiError::BadRequest(
+                    "RequestSeed is not set but no key is given.".to_string(),
+                ),
+                include_schema,
+            }
+            .into_response();
         }
 
         let payload = if let Some(key) = key {
             let mut data = HashMap::new();
             let Ok(value) = serde_json::to_value(&key) else {
-                return ApiError::BadRequest("Failed to serialize key".to_string()).into_response();
+                return ErrorWrapper {
+                    error: ApiError::BadRequest("Failed to serialize key".to_string()),
+                    include_schema,
+                }
+                .into_response();
             };
 
             data.insert("Send_Key".to_string(), value);
@@ -409,9 +434,15 @@ pub(crate) mod security {
                             .into_response()
                     }
                 },
-                DiagServiceResponseType::Negative => api_error_from_diag_response(response),
+                DiagServiceResponseType::Negative => {
+                    api_error_from_diag_response(response, include_schema)
+                }
             },
-            Err(e) => ApiError::from(e).into_response(),
+            Err(e) => ErrorWrapper {
+                error: ApiError::from(e),
+                include_schema,
+            }
+            .into_response(),
         }
     }
 
