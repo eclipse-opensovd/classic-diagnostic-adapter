@@ -13,8 +13,7 @@
 
 use serde::Serialize;
 
-#[derive(Debug, Serialize)]
-#[cfg_attr(feature = "openapi", derive(schemars::JsonSchema))]
+#[derive(Debug, Serialize, schemars::JsonSchema)]
 pub struct Mode<T> {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub id: Option<String>,
@@ -24,7 +23,7 @@ pub struct Mode<T> {
     pub translation_id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub value: Option<T>,
-    #[cfg_attr(feature = "openapi", schemars(skip))]
+    #[schemars(skip)]
     #[serde(skip_serializing_if = "Option::is_none")]
     pub schema: Option<schemars::Schema>,
 }
@@ -42,16 +41,14 @@ pub mod put {
 
     pub type Query = crate::IncludeSchemaQuery;
 
-    #[derive(Debug, Deserialize)]
-    #[cfg_attr(feature = "openapi", derive(schemars::JsonSchema))]
+    #[derive(Debug, Deserialize, schemars::JsonSchema)]
     pub struct ModeKey {
         #[serde(rename = "Send_Key")]
         pub send_key: String,
     }
 
-    #[derive(Debug, Deserialize)]
-    #[cfg_attr(feature = "openapi", derive(schemars::JsonSchema))]
-    #[cfg_attr(feature = "openapi", schemars(rename = "UpdateModesRequest"))]
+    #[derive(Debug, Deserialize, schemars::JsonSchema)]
+    #[schemars(rename = "UpdateModesRequest")]
     pub struct Request {
         pub value: String,
         /// Defines after how many seconds the
@@ -67,13 +64,12 @@ pub mod put {
         pub key: Option<ModeKey>,
     }
 
-    #[derive(Debug, Serialize)]
-    #[cfg_attr(feature = "openapi", derive(schemars::JsonSchema))]
-    #[cfg_attr(feature = "openapi", schemars(rename = "UpdateModesResponse"))]
+    #[derive(Debug, Serialize, schemars::JsonSchema)]
+    #[schemars(rename = "UpdateModesResponse")]
     pub struct Response<T> {
         pub id: String,
         pub value: T,
-        #[cfg_attr(feature = "openapi", schemars(skip))]
+        #[schemars(skip)]
         #[serde(skip_serializing_if = "Option::is_none")]
         pub schema: Option<schemars::Schema>,
     }

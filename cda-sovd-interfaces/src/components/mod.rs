@@ -19,8 +19,7 @@ pub mod get {
     pub type Response = crate::ResourceResponse;
 }
 
-#[derive(Deserialize)]
-#[cfg_attr(feature = "openapi", derive(schemars::JsonSchema))]
+#[derive(Deserialize, schemars::JsonSchema)]
 pub struct ComponentQuery {
     #[serde(rename = "x-include-sdgs")]
     pub include_sdgs: Option<bool>,

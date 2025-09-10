@@ -15,8 +15,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::Items;
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
-#[cfg_attr(feature = "openapi", derive(schemars::JsonSchema))]
+#[derive(Clone, Debug, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct Lock {
     pub id: String,
 
@@ -26,9 +25,8 @@ pub struct Lock {
     pub owned: Option<bool>,
 }
 
-#[derive(Serialize, Deserialize)]
-#[cfg_attr(feature = "openapi", derive(schemars::JsonSchema))]
-#[cfg_attr(feature = "openapi", schemars(rename = "CreateLockRequest"))]
+#[derive(Serialize, Deserialize, schemars::JsonSchema)]
+#[schemars(rename = "CreateLockRequest")]
 pub struct Request {
     pub lock_expiration: u64,
 }
@@ -49,9 +47,8 @@ pub mod id {
     use super::*;
     pub mod get {
         use super::*;
-        #[derive(Serialize, Deserialize)]
-        #[cfg_attr(feature = "openapi", derive(schemars::JsonSchema))]
-        #[cfg_attr(feature = "openapi", schemars(rename = "LockResponse"))]
+        #[derive(Serialize, Deserialize, schemars::JsonSchema)]
+        #[schemars(rename = "LockResponse")]
         pub struct Response {
             pub lock_expiration: String,
         }

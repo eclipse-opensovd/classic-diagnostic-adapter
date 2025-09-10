@@ -25,8 +25,7 @@ pub trait Payload {
     fn get_data_map(&self) -> HashMap<String, serde_json::Value>;
 }
 
-#[derive(Serialize)]
-#[cfg_attr(feature = "openapi", derive(schemars::JsonSchema))]
+#[derive(Serialize, schemars::JsonSchema)]
 pub struct Resource {
     pub href: String,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -34,45 +33,40 @@ pub struct Resource {
     pub name: String,
 }
 
-#[derive(Deserialize, Serialize, Debug)]
-#[cfg_attr(feature = "openapi", derive(schemars::JsonSchema))]
+#[derive(Deserialize, Serialize, Debug, schemars::JsonSchema)]
 pub struct Items<T> {
     pub items: Vec<T>,
-    #[cfg_attr(feature = "openapi", schemars(skip))]
+    #[schemars(skip)]
     #[serde(skip_serializing_if = "Option::is_none")]
     pub schema: Option<schemars::Schema>,
 }
 
-#[derive(Serialize)]
-#[cfg_attr(feature = "openapi", derive(schemars::JsonSchema))]
+#[derive(Serialize, schemars::JsonSchema)]
 pub struct ResourceResponse {
     pub items: Vec<Resource>,
-    #[cfg_attr(feature = "openapi", schemars(skip))]
+    #[schemars(skip)]
     #[serde(skip_serializing_if = "Option::is_none")]
     pub schema: Option<schemars::Schema>,
 }
 
-#[derive(Serialize, Debug)]
-#[cfg_attr(feature = "openapi", derive(schemars::JsonSchema))]
+#[derive(Serialize, Debug, schemars::JsonSchema)]
 pub struct ObjectDataItem<T> {
     pub id: String,
     pub data: serde_json::Map<String, serde_json::Value>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub errors: Vec<DataError<T>>,
-    #[cfg_attr(feature = "openapi", schemars(skip))]
+    #[schemars(skip)]
     #[serde(skip_serializing_if = "Option::is_none")]
     pub schema: Option<schemars::Schema>,
 }
 
-#[derive(Deserialize, Serialize, Debug)]
-#[cfg_attr(feature = "openapi", derive(schemars::JsonSchema))]
+#[derive(Deserialize, Serialize, Debug, schemars::JsonSchema)]
 pub struct ArrayDataItem {
     pub id: String,
     pub data: Vec<serde_json::Value>,
 }
 
-#[derive(Deserialize)]
-#[cfg_attr(feature = "openapi", derive(schemars::JsonSchema))]
+#[derive(Deserialize, schemars::JsonSchema)]
 pub struct IncludeSchemaQuery {
     #[serde(rename = "include-schema")]
     pub include_schema: Option<bool>,
@@ -83,20 +77,18 @@ pub mod sovd2uds {
 
     use serde::Serialize;
 
-    #[derive(Serialize)]
-    #[cfg_attr(feature = "openapi", derive(schemars::JsonSchema))]
+    #[derive(Serialize, schemars::JsonSchema)]
     pub struct FileList {
         #[serde(rename = "items")]
         pub files: Vec<File>,
         #[serde(skip_serializing)]
         pub path: Option<PathBuf>,
-        #[cfg_attr(feature = "openapi", schemars(skip))]
+        #[schemars(skip)]
         #[serde(skip_serializing_if = "Option::is_none")]
         pub schema: Option<schemars::Schema>,
     }
 
-    #[derive(Serialize, Debug, Clone)]
-    #[cfg_attr(feature = "openapi", derive(schemars::JsonSchema))]
+    #[derive(Serialize, Debug, Clone, schemars::JsonSchema)]
     pub struct File {
         #[serde(skip_serializing_if = "Option::is_none")]
         pub hash: Option<String>,
@@ -108,8 +100,7 @@ pub mod sovd2uds {
         #[serde(rename = "x-sovd2uds-OrigPath")]
         pub origin_path: String,
     }
-    #[derive(Serialize, Debug, Clone)]
-    #[cfg_attr(feature = "openapi", derive(schemars::JsonSchema))]
+    #[derive(Serialize, Debug, Clone, schemars::JsonSchema)]
     pub enum HashAlgorithm {
         None,
         // todo: support hashing algorithms
