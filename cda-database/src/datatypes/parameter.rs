@@ -74,7 +74,14 @@ pub struct ReservedParam {
     pub bit_length: u32,
 }
 
-pub(super) fn get_parameters(ecu_data: &EcuData, ecu_db_path: &str) -> ParameterMap {
+#[tracing::instrument(
+    skip(ecu_data),
+    fields(
+        ecu_db_path = %_ecu_db_path,
+        param_count = ecu_data.params.len()
+    )
+)]
+pub(super) fn get_parameters(ecu_data: &EcuData, _ecu_db_path: &str) -> ParameterMap {
     ecu_data
         .params
         .iter()
@@ -166,7 +173,7 @@ pub(super) fn get_parameters(ecu_data: &EcuData, ecu_db_path: &str) -> Parameter
         .filter_map(|res| match res {
             Ok((id, param)) => Some((id, param)),
             Err(e) => {
-                log::debug!(target: &ecu_db_path, "Error processing parameter: {e:?}");
+                tracing::debug!(error = ?e, "Error processing parameter");
                 None
             }
         })

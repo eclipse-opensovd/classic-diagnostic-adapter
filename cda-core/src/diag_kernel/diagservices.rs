@@ -11,8 +11,6 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-use std::time::Instant;
-
 use cda_database::datatypes::{CompuMethod, DataType};
 use cda_interfaces::{
     DiagComm, DiagServiceError,
@@ -203,6 +201,7 @@ impl DiagServiceResponseStruct {
     /// # Errors
     /// Returns `Err` in case any currently unsupported Nesting of containers or if serde
     /// internally has an error when calling serialize on the elements.
+    #[tracing::instrument(skip(self), fields(service_name = %self.service.name))]
     pub fn serialize_to_json(self) -> Result<DiagServiceJsonResponse, DiagServiceError> {
         let MappedResponseData { data, mut errors } = self.get_mapped_payload()?;
         if data.is_empty() {
@@ -211,7 +210,8 @@ impl DiagServiceResponseStruct {
                 errors,
             });
         }
-        let start = Instant::now();
+
+        let start = std::time::Instant::now();
         let mapped_data = data
             .iter()
             .filter_map(|(k, v)| -> Option<Result<(_, _), DiagServiceError>> {
@@ -236,8 +236,9 @@ impl DiagServiceResponseStruct {
                     .map_err(|e| DiagServiceError::ParameterConversionError(e.to_string()))
             })
             .map(|data| DiagServiceJsonResponse { data, errors });
-        let end = Instant::now();
-        log::debug!(target: "serialize_to_json", "Mapped data to JSON in {:?}", end - start);
+        let end = std::time::Instant::now();
+
+        tracing::debug!(mapping_duration = ?{end - start}, "JSON mapping completed");
         mapped_data
     }
 

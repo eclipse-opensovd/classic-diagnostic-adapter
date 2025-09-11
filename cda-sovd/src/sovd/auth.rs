@@ -35,8 +35,9 @@ use crate::sovd::error::{ApiError, ErrorWrapper};
 // allowed because the variant for enabled auth needs the Result
 #[allow(clippy::unnecessary_wraps)]
 #[cfg(not(feature = "auth"))]
+#[tracing::instrument(skip(_payload))]
 fn check_auth_payload(_payload: &AuthPayload) -> Result<(), AuthError> {
-    log::debug!("Skipping auth payload check, ignoring credentials");
+    tracing::debug!("Skipping auth payload check, ignoring credentials");
     Ok(())
 }
 
@@ -115,13 +116,13 @@ where
             .extract::<TypedHeader<Authorization<Bearer>>>()
             .await
             .map_err(|e| {
-                log::warn!("Failed to extract token: {e}");
+                tracing::warn!(error = %e, "Failed to extract token");
                 AuthError::InvalidToken
             })?;
         // Decode the user data
         let token_data =
             decode::<Claims>(bearer.token(), &KEYS.decoding, &validation()).map_err(|e| {
-                log::warn!("Failed to decode token: {e}");
+                tracing::warn!(error = %e, "Failed to decode token");
                 AuthError::InvalidToken
             })?;
         Ok(token_data.claims)

@@ -24,7 +24,7 @@ use hashbrown::HashMap;
 use tokio::sync::{Mutex, RwLock, broadcast, mpsc, watch};
 
 use crate::{
-    ConnectionError, DiagnosticResponse, DoipConnection, DoipEcu, DoipTarget, LOG_TARGET,
+    ConnectionError, DiagnosticResponse, DoipConnection, DoipEcu, DoipTarget,
     NRC_BUSY_REPEAT_REQUEST, NRC_RESPONSE_PENDING, NRC_TEMPORARILY_NOT_AVAILABLE, SLEEP_INTERVAL,
     ecu_connection::{self, ECUConnection, EcuConnectionTarget},
 };
@@ -38,6 +38,14 @@ struct ConnectionSettings {
     max_retry_attempts: u32,
 }
 
+#[tracing::instrument(
+    skip(doip_connections, ecus, gateway_ecu_map, tester_present),
+    fields(
+        gateway_ecu = %gateway.ecu,
+        gateway_ip = %gateway.ip,
+        logical_address = %format!("{:#06x}", gateway.logical_address)
+    )
+)]
 pub(crate) async fn handle_gateway_connection<T>(
     gateway: DoipTarget,
     doip_connections: &Arc<RwLock<Vec<Arc<DoipConnection>>>>,
@@ -101,7 +109,7 @@ where
 
     let doip_ecus = create_ecu_receiver_map(ecu_ids, &sender, &receiver);
 
-    log::info!(target: &gateway.ecu, "Connected to {} on logical address {:#06x}", gateway.ecu, gateway.logical_address);
+    tracing::info!("Connected to gateway");
     doip_connections
         .write()
         .await
@@ -113,6 +121,7 @@ where
     Ok(gateway.logical_address)
 }
 
+#[tracing::instrument(skip(sender, receiver), fields(ecu_count = ecus.len()))]
 fn create_ecu_receiver_map(
     ecus: Vec<u16>,
     sender: &mpsc::Sender<DiagnosticMessage>, // sender is shared between all ecus of a gateway
@@ -131,7 +140,7 @@ fn create_ecu_receiver_map(
                 );
             }
             None => {
-                log::warn!(target: LOG_TARGET, "ECU {logical_address} not found in receiver map");
+                tracing::warn!(logical_address = %format!("{:#06x}", logical_address), "ECU not found in receiver map");
             }
         }
     }
@@ -139,6 +148,15 @@ fn create_ecu_receiver_map(
     doip_ecus
 }
 
+#[allow(clippy::type_complexity)]
+#[tracing::instrument(
+    skip(routing_activation_request, tester_present, connection_settings),
+    fields(
+        gateway_ip = %gateway_ip,
+        gateway_name = %gateway_name,
+        ecu_count = ecus.len()
+    )
+)]
 async fn connection_handler(
     gateway_ip: String,
     gateway_name: String,
@@ -153,8 +171,6 @@ async fn connection_handler(
     ),
     String,
 > {
-    let log_target = format!("{gateway_name} ({gateway_ip})");
-
     // channel to send messages to the gateway / ecus
     let (intx, inrx) = mpsc::channel::<DiagnosticMessage>(50);
 
@@ -179,7 +195,7 @@ async fn connection_handler(
         setup_connection(
             routing_activation_request,
             &gateway_ip,
-            &log_target,
+            &gateway_name,
             connection_settings.connect_timeout,
             connection_settings.routing_activation,
         )
@@ -212,29 +228,38 @@ async fn connection_handler(
     );
     spawn_gateway_receiver_task(
         gateway_ip.clone(),
-        log_target.clone(),
+        gateway_name.clone(),
         outtx,
         Arc::<Mutex<EcuConnectionTarget>>::clone(&gateway_conn),
         send_pending_rx,
         conn_reset_tx,
     );
-    spawn_tester_present_task(gateway_name, log_target, tester_present, send_pending_tx);
+    spawn_tester_present_task(
+        gateway_name.clone(),
+        gateway_ip.clone(),
+        tester_present,
+        send_pending_tx,
+    );
 
     // no need to wait until the connection is alive, we will reconnect automatically anyway
     Ok((intx, outrx))
 }
 
+#[tracing::instrument(
+    skip(routing_activation_request),
+    fields(gateway_ip, connect_timeout_ms = connect_timeout.as_millis())
+)]
 async fn setup_connection(
     routing_activation_request: RoutingActivationRequest,
     gateway_ip: &str,
-    log_target: &str,
+    gateway_name: &str,
     connect_timeout: Duration,
     routing_activation_timeout: Duration,
 ) -> Result<EcuConnectionTarget, String> {
     ecu_connection::establish_ecu_connection(
         gateway_ip,
+        gateway_name,
         routing_activation_request,
-        log_target,
         connect_timeout,
         routing_activation_timeout,
     )
@@ -256,13 +281,13 @@ fn spawn_connection_reset_task(
                 if let Some(reason) = conn_reset_rx.recv().await {
                     let mut conn_mtx = conn_reset.lock().await;
                     let conn = &mut *conn_mtx;
-                    log::info!(target: &conn.log_target, "Resetting connection due to {reason}");
+                    tracing::info!(reason = %reason, "Resetting connection");
 
                     'reconnect: loop {
                         let new_connection = setup_connection(
                             routing_activation_request,
                             &gateway_ip,
-                            &conn.log_target,
+                            &conn.gateway_name,
                             connection_timeouts.connect_timeout,
                             connection_timeouts.routing_activation,
                         )
@@ -270,28 +295,30 @@ fn spawn_connection_reset_task(
 
                         match new_connection {
                             Ok(conn) => {
-                                log::info!(target: &conn.log_target, "Connection reset successful");
+                                tracing::info!("Connection reset successful");
                                 *conn_mtx = conn;
                                 while !conn_reset_rx.is_empty() {
                                     // drain the receiver to avoid resetting the connection again
                                     // immediately after a reset
                                     if conn_reset_rx.recv().await.is_none() {
-                                        log::warn!("Connection reset receiver closed");
+                                        tracing::warn!("Connection reset receiver closed");
                                         return;
                                     }
                                 }
                                 break 'reconnect;
                             }
                             Err(e) => {
-                                log::error!(
-                                    "Failed to reset connection: {e:?}, retrying in {:?}",
-                                    connection_timeouts.retry_delay
+                                tracing::error!(
+                                    error = ?e,
+                                    retry_delay = ?connection_timeouts.retry_delay,
+                                    "Failed to reset connection, retrying"
                                 );
                                 tokio::time::sleep(connection_timeouts.retry_delay).await;
                                 reconnect_attempts += 1;
                                 if reconnect_attempts >= connection_timeouts.max_retry_attempts {
-                                    log::error!(
-                                        target: &conn.log_target,
+                                    tracing::error!(
+                                        attempts = reconnect_attempts,
+                                        max_attempts = connection_timeouts.max_retry_attempts,
                                         "Max reconnect attempts reached, giving up"
                                     );
                                     return;
@@ -300,7 +327,7 @@ fn spawn_connection_reset_task(
                         }
                     }
                 } else {
-                    log::warn!("Connection reset receiver closed");
+                    tracing::warn!("Connection reset receiver closed");
                     break;
                 }
             }
@@ -322,7 +349,7 @@ fn spawn_gateway_sender_task(
             value: bool,
         ) -> Result<(), ()> {
             send_pending_tx.send(value).map_err(|_| {
-                log::warn!("Send pending receiver closed");
+                tracing::warn!("Send pending receiver closed");
             })
         }
 
@@ -345,14 +372,15 @@ fn spawn_gateway_sender_task(
                         .send(DoipPayload::DiagnosticMessage(msg))
                         .await
                     {
-                        log::error!(target: &conn.log_target, "Failed to send message: {e:?}");
+                        tracing::error!(error = ?e, "Failed to send message");
                     }
 
                     let send_after = start.elapsed() - lock_after;
-                    log::debug!(
-                        target: LOG_TARGET, "Send request in {:?}, \
-                        got conn_lock after {:?}, sent payload after {:?}",
-                        start.elapsed(), lock_after, send_after
+                    tracing::debug!(
+                        total_duration = ?start.elapsed(),
+                        lock_duration = ?lock_after,
+                        send_duration = ?send_after,
+                        "DoIP send request timing"
                     );
                     // inform the rx task that we are done sending
                     if send_pending_status(&send_pending_tx, false).is_err() {
@@ -366,16 +394,22 @@ fn spawn_gateway_sender_task(
                         break;
                     }
 
-                    let (alive_response, log_target) = {
+                    let (alive_response, conn_gateway_name, conn_gateway_ip) = {
                         let mut conn_mtx = gateway_conn.lock().await;
                         let conn = &mut *conn_mtx;
-                        (send_alive_request(conn).await, conn.log_target.clone())
+                        (
+                            send_alive_request(conn).await,
+                            conn.gateway_name.clone(),
+                            conn.gateway_ip.clone(),
+                        )
                     };
 
                     if let Err(e) = alive_response {
-                        log::error!(
-                            target: &log_target,
-                            "Failed to send alive check request: {e:?}, resetting connection"
+                        tracing::error!(
+                            error = ?e,
+                            gateway_name = %conn_gateway_name,
+                            gateway_ip = %conn_gateway_ip,
+                            "Failed to send alive check request, resetting connection"
                         );
                         // no need for any 'sleep' here, the reset task holds the connection
                         // lock until the connection is ready again.
@@ -383,9 +417,9 @@ fn spawn_gateway_sender_task(
                             .send("Unable to send alive check request".to_owned())
                             .await
                         {
-                            log::error!(
-                                target: &log_target,
-                                "Failed to send connection reset request: {e:?}"
+                            tracing::error!(
+                                error = ?e,
+                                "Failed to send connection reset request"
                             );
                             // if the reset channel is closed, we cannot reset the connection
                             // and there is no point in continuing
@@ -403,9 +437,17 @@ fn spawn_gateway_sender_task(
     });
 }
 
+#[tracing::instrument(
+    skip(outtx, gateway_conn, send_pending_rx, reset_tx),
+    fields(
+        gateway_ip = %gateway_ip,
+        gateway_name = %gateway_name,
+        active_ecus = outtx.len()
+    )
+)]
 fn spawn_gateway_receiver_task(
     gateway_ip: String,
-    log_target: String,
+    gateway_name: String,
     outtx: HashMap<u16, broadcast::Sender<Result<DiagnosticResponse, String>>>,
     gateway_conn: Arc<Mutex<EcuConnectionTarget>>,
     mut send_pending_rx: watch::Receiver<bool>,
@@ -415,37 +457,54 @@ fn spawn_gateway_receiver_task(
     // tokio::select! macro block
 
     async fn handle_send_pending(
-        log_target: &str,
+        gateway_name: &str,
+        gateway_ip: &str,
         send_pending_rx: &mut watch::Receiver<bool>,
         send_pending_result: Result<(), watch::error::RecvError>,
     ) -> Result<(), ()> {
         let request_received = std::time::Instant::now();
         if send_pending_result.is_ok() {
-            log::debug!(target: &log_target, "Received tx request, unlocking connection");
+            tracing::debug!(
+                gateway_name = %gateway_name,
+                gateway_ip = %gateway_ip,
+                "Received tx request, unlocking connection"
+            );
             let send_pending = *send_pending_rx.borrow();
             if send_pending {
                 match send_pending_rx.changed().await {
                     Ok(()) => {
-                        log::debug!(
-                            "Send done after {:?}, continue rx await",
-                            request_received.elapsed()
+                        tracing::debug!(
+                            gateway_name = %gateway_name,
+                            gateway_ip = %gateway_ip,
+                            request_duration = ?request_received.elapsed(),
+                            "Send done, continue rx await"
                         );
                     }
                     Err(e) => {
-                        log::warn!("Send pending receiver closed: {e:?}");
+                        tracing::warn!(
+                            gateway_name = %gateway_name,
+                            gateway_ip = %gateway_ip,
+                            error = ?e,
+                            "Send pending receiver closed"
+                        );
                         return Err(());
                     }
                 }
             }
             Ok(())
         } else {
-            log::warn!(target: log_target, "Send pending receiver closed");
+            tracing::warn!(
+                gateway_name = %gateway_name,
+                gateway_ip = %gateway_ip,
+                "Send pending receiver closed"
+            );
             Err(())
         }
     }
 
     async fn handle_response(
-        log_target: &str,
+        gateway_name: &str,
+        gateway_ip: &str,
         outtx: &HashMap<u16, broadcast::Sender<Result<DiagnosticResponse, String>>>,
         reset_tx: &mpsc::Sender<ConnectionResetReason>,
         response: Option<Result<DiagnosticResponse, ConnectionError>>,
@@ -454,7 +513,12 @@ fn spawn_gateway_receiver_task(
             Some(Ok(response)) => {
                 match response {
                     DiagnosticResponse::Ack(source_address) => {
-                        log::debug!(target: &log_target, "Received ACK");
+                        tracing::debug!(
+                            gateway_name = %gateway_name,
+                            gateway_ip = %gateway_ip,
+                            source_address = %source_address,
+                            "Received ACK"
+                        );
                         outtx
                             .get(&source_address)
                             .map(|router| router.send(Ok(response)));
@@ -467,14 +531,14 @@ fn spawn_gateway_receiver_task(
                             .map(|router| router.send(Ok(response)));
                     }
                     DiagnosticResponse::Msg(msg) => {
-                        log::debug!(target: &log_target, "UDS OK - Returning response");
+                        tracing::debug!("UDS OK - Returning response");
                         let addr = u16::from_be_bytes(msg.source_address);
                         outtx
                             .get(&addr)
                             .map(|router| router.send(Ok(DiagnosticResponse::Msg(msg))));
                     }
                     DiagnosticResponse::Nack(nack) => {
-                        log::debug!(target: &log_target, "Received NACK: {nack:?}");
+                        tracing::debug!(nack = ?nack, "Received NACK");
                         let addr = u16::from_be_bytes(nack.source_address);
                         outtx
                             .get(&addr)
@@ -482,14 +546,15 @@ fn spawn_gateway_receiver_task(
                     }
                     DiagnosticResponse::GenericNack(_) => {
                         // todo implement generic NACK handling according to spec #22
-                        log::error!(target: &log_target, "Received Generic NACK");
+                        tracing::error!("Received Generic NACK");
                     }
                     DiagnosticResponse::AliveCheckResponse => {
-                        log::debug!(target: &log_target,
-                            "Received Alive Check Response. Probably ECU responded too slow");
+                        tracing::debug!(
+                            "Received Alive Check Response. Probably ECU responded too slow"
+                        );
                     }
                     DiagnosticResponse::TesterPresentNRC(c) => {
-                        log::debug!(target: &log_target, "Received Tester Present NRC: {c:?}");
+                        tracing::debug!(nrc = ?c, "Received Tester Present NRC");
                     }
                 }
             }
@@ -500,18 +565,14 @@ fn spawn_gateway_receiver_task(
                             .send("Connection has been closed.".to_owned())
                             .await
                         {
-                            log::error!(
-                                target: &log_target,
-                                "Failed to send connection reset request: {e:?}"
-                            );
+                            tracing::error!(error = ?e, "Failed to send connection reset request");
                         }
                     }
                     _ => {
                         // for POC purposes we just log the error and do not reset the connection
-                        log::error!(
-                            target: &log_target,
-                            "Error reading response: {err:?}, \
-                            either due to timeout or decoding issue"
+                        tracing::error!(
+                            error = ?err,
+                            "Error reading response, either due to timeout or decoding issue"
                         );
                     }
                 }
@@ -525,10 +586,7 @@ fn spawn_gateway_receiver_task(
     cda_interfaces::spawn_named!(&format!("gateway-receiver-{gateway_ip}"), async move {
         'receive: loop {
             if outtx.iter().all(|(_, tx)| tx.receiver_count() == 0) {
-                log::debug!(
-                    target: &log_target,
-                    "All out channels closed. Shutting down connection"
-                );
+                tracing::debug!("All out channels closed. Shutting down connection");
                 break;
             }
 
@@ -536,7 +594,8 @@ fn spawn_gateway_receiver_task(
             tokio::select! {
                 send_pending_result = send_pending_rx.changed() => {
                     if let Err(()) = handle_send_pending(
-                        &log_target,
+                        &gateway_name,
+                        &gateway_ip,
                         &mut send_pending_rx,
                         send_pending_result
                     ).await {
@@ -553,16 +612,23 @@ fn spawn_gateway_receiver_task(
                     // data on the connection
                     try_read(Duration::MAX, &mut conn.ecu_connection).await
                 } => {
-                    handle_response(&log_target, &outtx, &reset_tx, response).await;
+                    handle_response(&gateway_name, &gateway_ip, &outtx, &reset_tx, response).await;
                 }
             }
         }
     });
 }
 
+#[tracing::instrument(
+    skip(tester_present, send_pending_tx),
+    fields(
+        gateway_name = %gateway_name,
+        gateway_ip = %gateway_ip
+    )
+)]
 fn spawn_tester_present_task(
     gateway_name: String,
-    log_target: String,
+    gateway_ip: String,
     tester_present: mpsc::Sender<TesterPresentControlMessage>,
     send_pending_tx: watch::Sender<bool>,
 ) {
@@ -579,8 +645,7 @@ fn spawn_tester_present_task(
                 .await
                 .is_err()
             {
-                log::error!(target: &log_target,
-                    "Failed to send start tester present control message");
+                tracing::error!("Failed to send start tester present control message");
             }
 
             send_pending_tx.closed().await;
@@ -595,8 +660,7 @@ fn spawn_tester_present_task(
                 .await
                 .is_err()
             {
-                log::error!(target: &log_target,
-                    "Failed to send stop tester present control message");
+                tracing::error!("Failed to send stop tester present control message");
             }
         }
     );
@@ -606,23 +670,23 @@ async fn send_alive_request(conn: &mut EcuConnectionTarget) -> Result<(), ()> {
     async fn handle_alive_request_response(conn: &mut EcuConnectionTarget) {
         match try_read(Duration::from_millis(1000), &mut conn.ecu_connection).await {
             Some(Ok(DiagnosticResponse::AliveCheckResponse)) => {
-                log::debug!(target: &conn.log_target, "Alive check OK");
+                tracing::debug!("Alive check OK");
             }
             Some(Ok(DiagnosticResponse::Ack(_))) => {
-                log::debug!(target: &conn.log_target, "Received ACK");
+                tracing::debug!("Received ACK");
                 Box::pin(handle_alive_request_response(conn)).await;
             }
             Some(Ok(DiagnosticResponse::GenericNack(_))) => {
-                log::debug!(target: &conn.log_target, "Received Generic NACK");
+                tracing::debug!("Received Generic NACK");
             }
             Some(Ok(msg)) => {
-                log::error!(target: &conn.log_target, "Received Unrelated msg: {msg:?}");
+                tracing::error!(msg = ?msg, "Received Unrelated msg");
             }
             Some(Err(e)) => {
-                log::error!(target: &conn.log_target, "Error reading alive check response: {e}");
+                tracing::error!(error = %e, "Error reading alive check response");
             }
             None => {
-                log::debug!(target: &conn.log_target, "Timeout waiting for alive check response");
+                tracing::debug!("Timeout waiting for alive check response");
             }
         }
     }
@@ -638,7 +702,7 @@ async fn send_alive_request(conn: &mut EcuConnectionTarget) -> Result<(), ()> {
             Ok(())
         }
         Err(e) => {
-            log::error!(target: &conn.log_target, "Failed to send alive check request: {e:?}");
+            tracing::error!(error = ?e, "Failed to send alive check request");
             Err(())
         }
     }
@@ -666,10 +730,10 @@ async fn try_read(
                         let source_address = u16::from_be_bytes(msg.source_address);
                         let response = match error_code {
                             NRC_RESPONSE_PENDING => {
-                                log::debug!(
-                                    target: LOG_TARGET,
-                                     "UDS NRC - Response pending {:?}",
-                                     msg.message);
+                                tracing::debug!(
+                                    message = ?msg.message,
+                                    "UDS NRC - Response pending"
+                                );
                                 DiagnosticResponse::Pending(source_address)
                             }
                             NRC_BUSY_REPEAT_REQUEST => {
@@ -687,7 +751,7 @@ async fn try_read(
                 DoipPayload::DiagnosticMessageNack(nack) => Ok(DiagnosticResponse::Nack(nack)),
                 DoipPayload::GenericNack(nack) => Ok(DiagnosticResponse::GenericNack(nack)),
                 DoipPayload::DiagnosticMessageAck(ack) => {
-                    log::debug!(target: LOG_TARGET, "Received diagnostic message ack");
+                    tracing::debug!("Received diagnostic message ack");
                     Ok(DiagnosticResponse::Ack(u16::from_be_bytes(
                         ack.source_address,
                     )))

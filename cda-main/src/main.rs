@@ -56,6 +56,7 @@ struct AppArgs {
 }
 
 #[tokio::main]
+#[tracing::instrument]
 async fn main() -> Result<(), String> {
     let args = AppArgs::parse();
     let mut config = opensovd_cda_lib::config::load_config().unwrap_or_else(|e| {
@@ -98,7 +99,7 @@ async fn main() -> Result<(), String> {
 
     cda_tracing::init_tracing(tracing.with(layers))?;
 
-    log::info!(target: "main", "Starting CDA...");
+    tracing::info!("Starting CDA...");
 
     let database_path = config.databases_path.clone();
 
@@ -141,7 +142,7 @@ async fn main() -> Result<(), String> {
     {
         Ok(gateway) => gateway,
         Err(e) => {
-            log::error!(target: "main", "Failed to create diagnostic gateway: {e}");
+            tracing::error!(error = %e, "Failed to create diagnostic gateway");
             return Err(e);
         }
     };
@@ -156,7 +157,7 @@ async fn main() -> Result<(), String> {
     {
         Ok(uds) => uds,
         Err(e) => {
-            log::error!(target: "main", "Failed to create uds manger: {e}");
+            tracing::error!(error = %e, "Failed to create uds manager");
             return Err(e);
         }
     };
@@ -170,15 +171,15 @@ async fn main() -> Result<(), String> {
     )
     .await
     {
-        Ok(Ok(())) => log::info!(target: "main", "Shutting down..."),
+        Ok(Ok(())) => tracing::info!("Shutting down..."),
         Ok(Err(e)) => {
-            log::error!(target: "main", "Failed to start webserver: {e:?}");
+            tracing::error!(error = ?e, "Failed to start webserver");
             std::process::exit(1);
         }
         Err(je) => {
             if je.is_panic() {
                 let reason = je.into_panic();
-                log::error!(target: "main", "Webserver thread panicked: {reason:?}");
+                tracing::error!(panic_reason = ?reason, "Webserver thread panicked");
                 std::process::exit(1);
             }
         }
@@ -188,6 +189,7 @@ async fn main() -> Result<(), String> {
 }
 
 impl AppArgs {
+    #[tracing::instrument(skip(self, config))]
     fn update_config(self, config: &mut opensovd_cda_lib::config::configfile::Configuration) {
         if let Some(onboard_tester) = self.onboard_tester {
             config.onboard_tester = onboard_tester;

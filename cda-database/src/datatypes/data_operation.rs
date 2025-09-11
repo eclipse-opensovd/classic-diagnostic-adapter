@@ -18,9 +18,7 @@ use cda_interfaces::{
 use deepsize::DeepSizeOf;
 
 use crate::{
-    datatypes::{
-        DOPMap, DataType, Id, LOG_TARGET, LongName, option_str_to_string, ref_optional_none,
-    },
+    datatypes::{DOPMap, DataType, Id, LongName, option_str_to_string, ref_optional_none},
     proto::dataformat::{
         self, EcuData,
         dop::{self},
@@ -342,6 +340,7 @@ pub struct CompuRationalCoefficients {
     pub denominator: Vec<f64>,
 }
 
+#[tracing::instrument(skip(ecu_data), fields(dop_count = ecu_data.dops.len()))]
 pub(super) fn get_data_operations(ecu_data: &EcuData) -> DOPMap {
     ecu_data
         .dops
@@ -366,7 +365,7 @@ pub(super) fn get_data_operations(ecu_data: &EcuData) -> DOPMap {
         .filter_map(|res: Result<_, DiagServiceError>| match res {
             Ok(res) => Some(res),
             Err(e) => {
-                log::debug!(target: LOG_TARGET, "Error processing DOP: {e:?}");
+                tracing::debug!(error = ?e, "Error processing DOP");
                 None
             }
         })
@@ -607,7 +606,6 @@ fn get_dop_variant(
             ));
         }
         None => {
-            // log::debug!(target: LOG_TARGET, "DOP without SpecificData: {d:?}");
             return Err(DiagServiceError::InvalidDatabase(format!(
                 "DOP id[{dop_id}] {} has no Variant set",
                 d.short_name

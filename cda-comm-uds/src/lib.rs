@@ -59,8 +59,6 @@ struct EcuDataTransfer {
     task: JoinHandle<()>,
 }
 
-const LOG_TARGET: &str = "UdsManager";
-
 pub struct TesterPresentTask {
     pub type_: TesterPresentType,
     pub task: JoinHandle<()>,
@@ -100,8 +98,9 @@ impl<S: EcuGateway, R: DiagServiceResponse, T: EcuManager<Response = R>> UdsMana
         cda_interfaces::spawn_named!("tester-present-receiver", async move {
             while let Some(tp_cm) = tester_present_receiver.recv().await {
                 if let Err(e) = tp_uds_clone.control_tester_present(tp_cm).await {
-                    log::error!(
-                        "control_tester_present return error: {e:?}, message is discarded.",
+                    tracing::error!(
+                        error = ?e,
+                        "control_tester_present returned error, message discarded"
                     );
                 }
             }
@@ -110,6 +109,10 @@ impl<S: EcuGateway, R: DiagServiceResponse, T: EcuManager<Response = R>> UdsMana
         Ok(manager)
     }
 
+    #[tracing::instrument(
+        skip(self, service, payload),
+        fields(ecu_name, service_name = %service.name, has_payload = payload.is_some())
+    )]
     async fn send_with_optional_timeout(
         &self,
         ecu_name: &str,
@@ -119,7 +122,7 @@ impl<S: EcuGateway, R: DiagServiceResponse, T: EcuManager<Response = R>> UdsMana
         timeout: Option<Duration>,
     ) -> Result<R, DiagServiceError> {
         let start = Instant::now();
-        log::debug!(target: LOG_TARGET, "Sending on {ecu_name} to {service:?}, {payload:?}");
+        tracing::debug!(service = ?service, payload = ?payload, "Sending UDS request");
         let ecu = self.ecus.get(ecu_name).ok_or(DiagServiceError::NotFound)?;
         let payload = {
             let ecu = ecu.read().await;
@@ -145,21 +148,21 @@ impl<S: EcuGateway, R: DiagServiceResponse, T: EcuManager<Response = R>> UdsMana
         };
 
         let response_mapped = start.elapsed() - payload_build_after - response_after;
-        log::debug!(
-            target: LOG_TARGET,
-            "Handled UDS request in {:?}.
-            payload build after {:?},
-            got response after {:?},
-            mapped response after {:?}",
-            start.elapsed(),
-            payload_build_after,
-            response_after,
-            response_mapped,
+        tracing::debug!(
+            total_duration = ?start.elapsed(),
+            payload_build_duration = ?payload_build_after,
+            response_duration = ?response_after,
+            mapping_duration = ?response_mapped,
+            "UDS request timing breakdown"
         );
 
         response
     }
 
+    #[tracing::instrument(
+        skip(self, payload),
+        fields(ecu_name, expect_response, payload_size = payload.data.len())
+    )]
     async fn send_with_raw_payload(
         &self,
         ecu_name: &str,
@@ -257,9 +260,9 @@ impl<S: EcuGateway, R: DiagServiceResponse, T: EcuManager<Response = R>> UdsMana
                                 }
 
                                 let sleep_time = uds_params.rc_21_repeat_request_time;
-                                log::debug!(
-                                    "BusyRepeatRequest received for {ecu_name}, resending in \
-                                     {sleep_time:?}"
+                                tracing::debug!(
+                                    sleep_time = ?sleep_time,
+                                    "BusyRepeatRequest received, resending after delay"
                                 );
                                 tokio::time::sleep(sleep_time).await;
                                 continue 'send; // continue 'send, will resend the message
@@ -275,9 +278,9 @@ impl<S: EcuGateway, R: DiagServiceResponse, T: EcuManager<Response = R>> UdsMana
                                 }
 
                                 let sleep_time = uds_params.rc_94_repeat_request_time;
-                                log::debug!(
-                                    "TemporarilyNotAvailable received for {ecu_name}, resending \
-                                     in {sleep_time:?}"
+                                tracing::debug!(
+                                    sleep_time = ?sleep_time,
+                                    "TemporarilyNotAvailable received, resending after delay"
                                 );
                                 tokio::time::sleep(sleep_time).await;
                                 continue 'send; // continue 'send, will resend the message
@@ -291,9 +294,8 @@ impl<S: EcuGateway, R: DiagServiceResponse, T: EcuManager<Response = R>> UdsMana
                                 ) {
                                     break 'read_uds_messages Err(e);
                                 }
-                                log::debug!(
-                                    "ResponsePending received for {ecu_name}, continue waiting \
-                                     for final response"
+                                tracing::debug!(
+                                    "ResponsePending received, continue waiting for final response"
                                 );
                                 rx_timeout_next = Some(uds_params.rc_78_timeout);
                                 continue 'read_uds_messages; // continue reading UDS frames
@@ -313,7 +315,7 @@ impl<S: EcuGateway, R: DiagServiceResponse, T: EcuManager<Response = R>> UdsMana
                         }
                     }
                     Ok(None) => {
-                        log::warn!("None response received for {ecu_name}");
+                        tracing::warn!("None response received");
                         break 'read_uds_messages Err(DiagServiceError::UnexpectedResponse);
                     }
                     Err(_) => {
@@ -327,19 +329,20 @@ impl<S: EcuGateway, R: DiagServiceResponse, T: EcuManager<Response = R>> UdsMana
         };
 
         let finish = start.elapsed() - sent_after;
-        log::debug!(
-            target: LOG_TARGET,
-            "Handled RAW UDS request in {:?}.
-            sent payload after {:?},
-            got response after {:?}",
-            start.elapsed(),
-            sent_after,
-            finish
+        tracing::debug!(
+            total_duration = ?start.elapsed(),
+            send_duration = ?sent_after,
+            receive_duration = ?finish,
+            "Raw UDS request timing breakdown"
         );
 
         response.map(Option::from)
     }
 
+    #[tracing::instrument(
+        skip(self, request, status_sender, reader),
+        fields(ecu_name, transfer_length = length, request_name = %request.name)
+    )]
     async fn transfer_ecu_data(
         &self,
         ecu_name: &str,
@@ -359,10 +362,7 @@ impl<S: EcuGateway, R: DiagServiceResponse, T: EcuManager<Response = R>> UdsMana
                 dt.meta_data.error = Some(vec![DataTransferError { text: reason }])
             }
             if let Err(e) = sender.send(true) {
-                log::error!(
-                    target: LOG_TARGET,
-                    "Failed to send data transfer aborted signal: {e:?}"
-                );
+                tracing::error!(error = ?e, "Failed to send data transfer aborted signal");
             }
         }
 
@@ -371,10 +371,7 @@ impl<S: EcuGateway, R: DiagServiceResponse, T: EcuManager<Response = R>> UdsMana
             let transfer = match lock.get_mut(ecu_name) {
                 Some(transfer) => transfer,
                 None => {
-                    log::error!(
-                        target: LOG_TARGET,
-                        "No transfer for {ecu_name} found, cannot start data transfer"
-                    );
+                    tracing::error!("No transfer found, cannot start data transfer");
                     return;
                 }
             };
@@ -436,10 +433,7 @@ impl<S: EcuGateway, R: DiagServiceResponse, T: EcuManager<Response = R>> UdsMana
                 let transfer = match lock.get_mut(ecu_name) {
                     Some(transfer) => transfer,
                     None => {
-                        log::error!(
-                            target: LOG_TARGET,
-                            "No transfer for {ecu_name} found, cannot update data transfer"
-                        );
+                        tracing::error!("No transfer found, cannot update data transfer");
                         return;
                     }
                 };
@@ -452,9 +446,9 @@ impl<S: EcuGateway, R: DiagServiceResponse, T: EcuManager<Response = R>> UdsMana
                 if remaining_bytes == 0 {
                     transfer.meta_data.status = DataTransferStatus::Finished;
                     if let Err(e) = status_sender.send(true) {
-                        log::error!(
-                            target: LOG_TARGET,
-                            "Failed to send data transfer aborted signal: {e:?}"
+                        tracing::error!(
+                            error = ?e,
+                            "Failed to send data transfer completion signal"
                         );
                     }
                 }
@@ -468,16 +462,10 @@ impl<S: EcuGateway, R: DiagServiceResponse, T: EcuManager<Response = R>> UdsMana
             cda_interfaces::spawn_named!(&format!("variant-detection-{ecu_name}"), async move {
                 match vd.detect_variant(&ecu_name).await {
                     Ok(()) => {
-                        log::trace!(
-                            target: LOG_TARGET,
-                            "Variant detection for {ecu_name} successful"
-                        );
+                        tracing::trace!("Variant detection successful");
                     }
                     Err(e) => {
-                        log::info!(
-                            target: LOG_TARGET,
-                            "Variant detection for {ecu_name} failed: {e}"
-                        );
+                        tracing::info!(error = %e, "Variant detection failed");
                     }
                 }
             });
@@ -515,7 +503,7 @@ impl<S: EcuGateway, R: DiagServiceResponse, T: EcuManager<Response = R>> UdsMana
                     async move {
                         loop {
                             if let Err(e) = uds.send_tester_present(&control_msg).await {
-                                log::error!("Failed to send tester present: {e}")
+                                tracing::error!(error = %e, "Failed to send tester present")
                             }
                             tokio::time::sleep(interval).await;
                         }
@@ -651,11 +639,10 @@ impl<S: EcuGateway, R: DiagServiceResponse, T: EcuManager<Response = R>> UdsEcu
                 {
                     gateway.network_address = gateway_network_address;
                 } else {
-                    log::warn!(
-                        target: LOG_TARGET,
-                        "No IP address found for gateway {} with logical address {}",
-                        ecu.ecu_name(),
-                        logical_address_string
+                    tracing::warn!(
+                        gateway_name = %ecu.ecu_name(),
+                        logical_address = %logical_address_string,
+                        "No IP address found for gateway"
                     );
                 }
             }
@@ -681,7 +668,7 @@ impl<S: EcuGateway, R: DiagServiceResponse, T: EcuManager<Response = R>> UdsEcu
         payload: Vec<u8>,
         timeout: Option<Duration>,
     ) -> Result<Vec<u8>, DiagServiceError> {
-        log::trace!(target: LOG_TARGET, "Sending raw uds packet on {ecu_name}: {payload:?}");
+        tracing::trace!(ecu_name = %ecu_name, payload = ?payload, "Sending raw UDS packet");
 
         let payload = self
             .ecus
@@ -811,7 +798,7 @@ impl<S: EcuGateway, R: DiagServiceResponse, T: EcuManager<Response = R>> UdsEcu
         session: &str,
         expiration: Duration,
     ) -> Result<Self::Response, DiagServiceError> {
-        log::info!("Setting session for {ecu_name} to {session}");
+        tracing::info!(ecu_name = %ecu_name, session = %session, "Setting session");
         let ecu_diag_service = self.ecus.get(ecu_name).ok_or(DiagServiceError::NotFound)?;
         let (session_id, dc) = ecu_diag_service
             .read()
@@ -1093,9 +1080,10 @@ impl<S: EcuGateway, R: DiagServiceResponse, T: EcuManager<Response = R>> UdsEcu
                 {
                     Ok(response) => response,
                     Err(e) => {
-                        log::debug!(
-                            target: LOG_TARGET,
-                            "Failed to send variant detection request for {name}: {e}"
+                        tracing::debug!(
+                            request_name = %name,
+                            error = %e,
+                            "Failed to send variant detection request"
                         );
                         break 'variant_detection_calls; // no need to continue if one fails
                     }
@@ -1135,10 +1123,7 @@ impl<S: EcuGateway, R: DiagServiceResponse, T: EcuManager<Response = R>> UdsEcu
             if let Err(DiagServiceError::EcuOffline(_)) =
                 self.gateway.ecu_online(ecu_name, db).await
             {
-                log::debug!(
-                    target: LOG_TARGET,
-                    "Skip variant detection for ECU {ecu_name}: offline"
-                );
+                tracing::debug!(ecu_name = %ecu_name, "Skip variant detection: ECU offline");
                 continue;
             }
             ecus.push(ecu_name.to_owned());
@@ -1355,25 +1340,23 @@ fn validate_timeout_by_policy(
 ) -> Result<(), DiagServiceError> {
     match policy {
         RetryPolicy::Disabled => {
-            log::debug!(target: LOG_TARGET,
-                    "Disabled busy repeat policy for {ecu_name}, aborting");
+            tracing::debug!(ecu_name = %ecu_name, "Disabled busy repeat policy, aborting");
             Err(DiagServiceError::Timeout)
         }
         RetryPolicy::ContinueUntilTimeout => {
             if elapsed > completion_timeout {
-                log::warn!(target: LOG_TARGET,
-                        "Busy repeat for {ecu_name} took too long, aborting");
+                tracing::warn!(ecu_name = %ecu_name, "Busy repeat took too long, aborting");
                 Err(DiagServiceError::Timeout)
             } else {
-                log::debug!(target: LOG_TARGET,
-                        "Received busy repeat request for {ecu_name}, retrying");
+                tracing::debug!(ecu_name = %ecu_name, "Received busy repeat request, retrying");
                 Ok(())
             }
         }
         RetryPolicy::ContinueUnlimited => {
-            log::debug!(
-                target: LOG_TARGET,
-                "Received busy repeat request for {ecu_name}, retrying, with unlimited retries");
+            tracing::debug!(
+                ecu_name = %ecu_name,
+                "Received busy repeat request, retrying with unlimited retries"
+            );
             Ok(())
         }
     }

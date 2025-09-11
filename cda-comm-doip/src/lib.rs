@@ -13,6 +13,7 @@
 
 use std::{
     fmt::Display,
+    future::Future,
     sync::Arc,
     time::{Duration, Instant},
 };
@@ -29,7 +30,6 @@ mod connections;
 mod ecu_connection;
 mod vir_vam;
 
-const LOG_TARGET: &str = "ECU Gateway";
 const SLEEP_INTERVAL: Duration = Duration::from_millis(30000);
 
 const NRC_BUSY_REPEAT_REQUEST: u8 = 0x21;
@@ -56,6 +56,7 @@ pub struct DoipDiagGateway<T: EcuAddressProvider + DoipComParamProvider> {
     socket: Arc<Mutex<doip_sockets::udp::UdpSocket>>,
 }
 
+#[derive(Debug)]
 struct DoipTarget {
     ip: String,
     ecu: String,
@@ -120,6 +121,10 @@ impl TryFrom<DiagnosticResponse> for Option<UdsResponse> {
 }
 
 impl<T: EcuAddressProvider + DoipComParamProvider> DoipDiagGateway<T> {
+    #[tracing::instrument(
+        skip(ecus, variant_detection, tester_present, shutdown_signal),
+        fields(tester_ip, gateway_port, ecu_count = ecus.len())
+    )]
     pub async fn new<F>(
         tester_ip: &str,
         gateway_port: u16,
@@ -131,7 +136,7 @@ impl<T: EcuAddressProvider + DoipComParamProvider> DoipDiagGateway<T> {
     where
         F: Future<Output = ()> + Clone + Send + 'static,
     {
-        log::info!(target: LOG_TARGET, "Initializing DoipDiagGateway");
+        tracing::info!("Initializing DoipDiagGateway");
 
         let mut socket = create_socket(tester_ip, gateway_port)?;
 
@@ -151,7 +156,7 @@ impl<T: EcuAddressProvider + DoipComParamProvider> DoipDiagGateway<T> {
                 socket: Arc::new(Mutex::new(socket)),
             }
         } else {
-            log::info!(target: LOG_TARGET, "{} gateways found", gateways.len());
+            tracing::info!(gateway_count = gateways.len(), "Gateways found");
 
             // create mapping gateway_logical_address -> Vec<ecu_logical_address>
             let mut gateway_ecu_map: HashMap<u16, Vec<u16>> = HashMap::new();
@@ -283,7 +288,7 @@ impl<T: EcuAddressProvider + DoipComParamProvider> EcuGateway for DoipDiagGatewa
                 async move {
                     let mut ecu = ecu_mtx.lock().await;
                     let lock_acquired = start.elapsed();
-                    log::debug!("ecu {} lock acquired", transmission_params.ecu_name);
+                    tracing::debug!(ecu_name = %transmission_params.ecu_name, "ECU lock acquired");
 
                     // Clear any pending messages
                     while ecu.receiver.try_recv().is_ok() {}
@@ -309,7 +314,7 @@ impl<T: EcuAddressProvider + DoipComParamProvider> EcuGateway for DoipDiagGatewa
                     {
                         Ok(Ok(result)) => match result {
                             Ok(DiagnosticResponse::Ack(_)) => {
-                                log::debug!(target: LOG_TARGET, "Received ACK");
+                                tracing::debug!("Received ACK");
                             }
                             Ok(DiagnosticResponse::GenericNack(nack)) => {
                                 // todo #22: handle generic NACK
@@ -409,8 +414,7 @@ impl<T: EcuAddressProvider + DoipComParamProvider> EcuGateway for DoipDiagGatewa
                                 }
                             }
                             _ = response_sender.closed() => {
-                                log::debug!(target: LOG_TARGET,
-                                "Response sender closed, aborting loop");
+                                tracing::debug!("Response sender closed, aborting loop");
                                 break;
                             }
                         }
@@ -418,17 +422,13 @@ impl<T: EcuAddressProvider + DoipComParamProvider> EcuGateway for DoipDiagGatewa
 
                     let rx_done =
                         start.elapsed() - lock_acquired - send_and_ackd_after - receiver_flushed;
-                    log::debug!(
-                        target: LOG_TARGET,
-                        "Handled DOIP request in {:?}.\
-                        acquired lock after {:?}, receiver flushed after {:?}, \
-                        sent payload and got ack after {:?}, \
-                        processed responses after {:?}",
-                        start.elapsed(),
-                        lock_acquired,
-                        receiver_flushed,
-                        send_and_ackd_after,
-                        rx_done,
+                    tracing::debug!(
+                        total_duration = ?start.elapsed(),
+                        lock_duration = ?lock_acquired,
+                        flush_duration = ?receiver_flushed,
+                        send_ack_duration = ?send_and_ackd_after,
+                        response_duration = ?rx_done,
+                        "Handled DOIP request timing breakdown"
                     );
                 }
             }
@@ -533,7 +533,7 @@ async fn try_send_uds_response(
     response: Result<Option<UdsResponse>, DiagServiceError>,
 ) -> bool {
     if let Err(err) = response_sender.send(response).await {
-        log::error!(target: LOG_TARGET, "Failed to send response: {err}");
+        tracing::error!(error = %err, "Failed to send response");
         return false;
     }
     true

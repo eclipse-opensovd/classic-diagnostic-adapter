@@ -42,7 +42,15 @@ pub enum SdOrSdgRef {
     Sdg(Id),
 }
 
-pub(super) fn get_sdgs(ecu_data: &EcuData, ecu_db_path: &str, ids: &[Id]) -> SdgMap {
+#[tracing::instrument(
+    skip(ecu_data, ids),
+    fields(
+        ecu_db_path = %_ecu_db_path,
+        sdg_count = ecu_data.sdgs.len(),
+        id_count = ids.len()
+    )
+)]
+pub(super) fn get_sdgs(ecu_data: &EcuData, _ecu_db_path: &str, ids: &[Id]) -> SdgMap {
     ecu_data
         .sdgs
         .iter()
@@ -70,7 +78,7 @@ pub(super) fn get_sdgs(ecu_data: &EcuData, ecu_db_path: &str, ids: &[Id]) -> Sdg
                                     Some(SdOrSdgRef::Sdg(id.value))
                                 }
                                 _ => {
-                                    log::warn!(target: &ecu_db_path, "SDOrSDG has no value");
+                                    tracing::warn!("SDOrSDG has no value");
                                     None
                                 }
                             })
@@ -82,6 +90,7 @@ pub(super) fn get_sdgs(ecu_data: &EcuData, ecu_db_path: &str, ids: &[Id]) -> Sdg
         .collect()
 }
 
+#[tracing::instrument(skip(ecu_data), fields(sd_count = ecu_data.sds.len()))]
 pub(super) fn get_sds(ecu_data: &EcuData) -> SdMap {
     ecu_data
         .sds

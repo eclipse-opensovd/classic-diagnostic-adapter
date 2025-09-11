@@ -397,7 +397,6 @@ dependencies = [
  "doip-definitions",
  "doip-sockets",
  "hashbrown 0.15.4",
- "log",
  "openssl",
  "socket2",
  "tokio",
@@ -410,7 +409,6 @@ version = "0.1.0"
 dependencies = [
  "cda-interfaces",
  "hashbrown 0.15.4",
- "log",
  "openssl",
  "serde_json",
  "socket2",
@@ -426,7 +424,6 @@ dependencies = [
  "cda-database",
  "cda-interfaces",
  "hashbrown 0.15.4",
- "log",
  "num-traits",
  "parking_lot",
  "schemars",
@@ -443,12 +440,12 @@ dependencies = [
  "cda-interfaces",
  "deepsize",
  "hashbrown 0.15.4",
- "log",
  "prost 0.14.1",
  "prost-build",
  "serde",
  "serde_json",
  "tokio",
+ "tracing",
  "uuid",
  "xz2",
 ]
@@ -467,6 +464,7 @@ dependencies = [
  "strum",
  "strum_macros",
  "tokio",
+ "tracing",
 ]
 
 [[package]]
@@ -483,7 +481,6 @@ dependencies = [
  "http",
  "indexmap 2.10.0",
  "jsonwebtoken",
- "log",
  "mime",
  "percent-encoding",
  "regex",
@@ -505,7 +502,6 @@ version = "0.1.0"
 dependencies = [
  "console-subscriber",
  "hashbrown 0.15.4",
- "log",
  "nu-ansi-term",
  "opentelemetry",
  "opentelemetry-otlp",
@@ -517,7 +513,6 @@ dependencies = [
  "tracing",
  "tracing-appender",
  "tracing-core",
- "tracing-log",
  "tracing-opentelemetry",
  "tracing-subscriber",
 ]
@@ -1810,7 +1805,6 @@ dependencies = [
  "futures",
  "hashbrown 0.15.4",
  "http",
- "log",
  "mimalloc",
  "mime",
  "nu-ansi-term",
@@ -1822,7 +1816,6 @@ dependencies = [
  "tracing",
  "tracing-appender",
  "tracing-core",
- "tracing-log",
  "tracing-subscriber",
 ]
 
@@ -3268,7 +3261,6 @@ dependencies = [
  "thread_local",
  "tracing",
  "tracing-core",
- "tracing-log",
  "tracing-serde",
 ]
 

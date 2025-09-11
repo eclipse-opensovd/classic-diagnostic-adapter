@@ -181,13 +181,9 @@ impl cda_interfaces::EcuManager for EcuManager {
                 ))
             }) {
             Ok(v) => {
-                log::info!(target: &self.ecu_data.ecu_name, "Detected variant: {}", v.name);
-                log::debug!(target: &self.ecu_data.ecu_name, "Internal ID: {}", v.id);
+                tracing::info!(variant_name = %v.name, variant_id = %v.id, "Detected variant");
                 if let Err(e) = self.ecu_data.load_variant_sdgs(v.id) {
-                    log::warn!(
-                        target: &self.ecu_data.ecu_name,
-                        "Error loading variant SDGs: {e:?}"
-                    );
+                    tracing::warn!(error = ?e, "Error loading variant SDGs");
                 }
                 self.variant = Some(v);
 
@@ -199,7 +195,7 @@ impl cda_interfaces::EcuManager for EcuManager {
                 Ok(())
             }
             Err(e) => {
-                log::debug!(target: &self.ecu_data.ecu_name, "No Variant detected..Unload DB");
+                tracing::debug!("No variant detected, unloading DB");
                 self.ecu_data.unload();
                 Err(e)
             }
@@ -210,6 +206,7 @@ impl cda_interfaces::EcuManager for EcuManager {
         &self.variant_detection.diag_service_requests
     }
 
+    #[tracing::instrument(skip(self), fields(ecu_name = %self.ecu_data.ecu_name))]
     fn comparams(&self) -> ComplexComParamValue {
         let mut comparams = HashMap::new();
 
@@ -246,7 +243,7 @@ impl cda_interfaces::EcuManager for EcuManager {
                     comparams.insert(name, value);
                 }
                 Err(e) => {
-                    log::warn!(target: &self.ecu_data.ecu_name, "Error resolving ComParam: {e:?}");
+                    tracing::warn!(error = ?e, "Error resolving ComParam");
                 }
             });
 
@@ -716,9 +713,9 @@ impl cda_interfaces::EcuManager for EcuManager {
     /// # Errors
     /// Will return `Err` if the job cannot be found in the database
     /// Unlikely other case is that neither a lookup in the current nor the base variant succeeded.
+    #[tracing::instrument(skip(self), fields(ecu_name = %self.ecu_name(), job_name))]
     fn lookup_single_ecu_job(&self, job_name: &str) -> Result<single_ecu::Job, DiagServiceError> {
-        let log_target = format!("Lookup Single ECU Job [{}].[{job_name}]", self.ecu_name());
-        log::debug!(target: &log_target, "Looking job");
+        tracing::debug!("Looking up single ECU job");
 
         self.variant
             .as_ref()
@@ -736,10 +733,7 @@ impl cda_interfaces::EcuManager for EcuManager {
                     .get(id)
                     .ok_or_else(|| {
                         // this should not happen, there should always be a base variant.
-                        log::warn!(
-                            target: &log_target,
-                            "job reference could not be resolved to a job"
-                        );
+                        tracing::warn!("Job reference could not be resolved to a job");
                         DiagServiceError::NotFound
                     })
                     .map(std::convert::Into::into)
@@ -787,7 +781,9 @@ impl cda_interfaces::EcuManager for EcuManager {
             .filter_map(|(_, service)| {
                 if get_string!(service.short_name)
                     .map(|short_name| short_name.ends_with("_Read"))
-                    .inspect_err(|e| log::error!("{e}"))
+                    .inspect_err(
+                        |e| tracing::error!(error = %e, "Error getting service short name"),
+                    )
                     != Ok(true)
                 {
                     return None;
@@ -839,8 +835,11 @@ impl cda_interfaces::EcuManager for EcuManager {
         security_access: cda_interfaces::Id,
         expiration: Duration,
     ) -> Result<(), DiagServiceError> {
-        log::debug!(target: &self.ecu_data.ecu_name,
-            "Setting security_access to {security_access}");
+        tracing::debug!(
+            ecu_name = %self.ecu_data.ecu_name,
+            security_access = %security_access,
+            "Setting security access"
+        );
         self.access_control.lock().security = security_access;
         self.start_reset_task(expiration)
     }
@@ -861,13 +860,13 @@ impl cda_interfaces::EcuManager for EcuManager {
             })
             .map(|(_, state)| state)
             .ok_or_else(|| {
-                log::warn!("Session {session} not found in state chart");
+                tracing::warn!(session = %session, "Session not found in state chart");
                 DiagServiceError::NotFound
             })?;
 
         let session = self.access_control.lock().session;
         let current_session = session_state_chart.states.get(&session).ok_or_else(|| {
-            log::error!("Current session {session} does not exist");
+            tracing::error!(current_session = %session, "Current session does not exist");
             DiagServiceError::NotFound
         })?;
 
@@ -876,10 +875,11 @@ impl cda_interfaces::EcuManager for EcuManager {
             .get(&target_session.id)
             .and_then(|transition| transition.session)
             .ok_or_else(|| {
-                log::debug!(
-                    "No transition from {} to {session} exists, available transitions: {:#?}",
-                    get_string_with_default!(current_session.short_name),
-                    current_session.transitions,
+                tracing::debug!(
+                    current_session = %get_string_with_default!(current_session.short_name),
+                    target_session = %session,
+                    available_transitions = ?current_session.transitions,
+                    "No transition from current session to target session exists"
                 );
                 DiagServiceError::NotFound
             })?;
@@ -889,12 +889,18 @@ impl cda_interfaces::EcuManager for EcuManager {
             .services
             .get(&session_service_id)
             .ok_or_else(|| {
-                log::warn!("Session service {session_service_id} not found in ECU data");
+                tracing::warn!(
+                    session_service_id = %session_service_id,
+                    "Session service not found in ECU data"
+                );
                 DiagServiceError::NotFound
             })?;
 
         let name = STRINGS.get(session_service.short_name).ok_or_else(|| {
-            log::warn!("Session service {session_service_id} has no short name");
+            tracing::warn!(
+                session_service_id = %session_service_id,
+                "Session service has no short name"
+            );
             DiagServiceError::NotFound
         })?;
 
@@ -928,7 +934,7 @@ impl cda_interfaces::EcuManager for EcuManager {
             })
             .map(|(_, state)| state)
             .ok_or_else(|| {
-                log::warn!("Security access '{level}' not found in state chart");
+                tracing::warn!(security_level = %level, "Security access not found in state chart");
                 DiagServiceError::NotFound
             })?;
 
@@ -936,9 +942,9 @@ impl cda_interfaces::EcuManager for EcuManager {
             .states
             .get(&session_control.security)
             .ok_or_else(|| {
-                log::error!(
-                    "Current security access state {} does not exit",
-                    session_control.security
+                tracing::error!(
+                    current_security_state = %session_control.security,
+                    "Current security access state does not exist"
                 );
                 DiagServiceError::NotFound
             })?;
@@ -948,10 +954,11 @@ impl cda_interfaces::EcuManager for EcuManager {
             .get(&target_access_level.id)
             .and_then(|transition| transition.security_access)
             .ok_or_else(|| {
-                log::debug!(
-                    "No transition from {:?} to {level} exists, available transitions: {:#?}",
-                    STRINGS.get(current_access.short_name),
-                    current_access.transitions,
+                tracing::debug!(
+                    current_access = ?STRINGS.get(current_access.short_name),
+                    target_level = %level,
+                    available_transitions = ?current_access.transitions,
+                    "No transition from current access to target level exists"
                 );
                 DiagServiceError::NotFound
             })?;
@@ -963,12 +970,18 @@ impl cda_interfaces::EcuManager for EcuManager {
                 .services
                 .get(&security_service_id)
                 .ok_or_else(|| {
-                    log::warn!("Session service {security_service_id} not found in ECU data");
+                    tracing::warn!(
+                        security_service_id = %security_service_id,
+                        "Security service not found in ECU data"
+                    );
                     DiagServiceError::NotFound
                 })?;
 
             let name = STRINGS.get(security_service.short_name).ok_or_else(|| {
-                log::warn!("Diagnostic Service {security_service_id} has no short name");
+                tracing::warn!(
+                    security_service_id = %security_service_id,
+                    "Security service has no short name"
+                );
                 DiagServiceError::NotFound
             })?;
 
@@ -1006,7 +1019,7 @@ impl cda_interfaces::EcuManager for EcuManager {
                     })
                 })
                 .ok_or_else(|| {
-                    log::warn!("Security service not found in ECU data");
+                    tracing::warn!("Security service not found in ECU data");
                     DiagServiceError::NotFound
                 })?;
             Ok(SecurityAccess::RequestSeed(DiagComm {
@@ -1568,8 +1581,7 @@ impl EcuManager {
         }
         .to_lowercase();
 
-        let log_target = format!("Lookup Diag Service [{}].[{lookup_name}]", self.ecu_name());
-        log::debug!(target: &log_target, "Looking up service");
+        tracing::debug!(lookup_name = %lookup_name, "Looking up diagnostic service");
 
         let lookup = self
             .variant
@@ -1582,10 +1594,9 @@ impl EcuManager {
             })
             .or(self.ecu_data.base_service_lookup.get(&lookup_name))
             .or_else(|| {
-                log::warn!(
-                    target: &log_target,
-                    "Service not found in detected variant or base variant, \
-                    trying to find in all variants"
+                tracing::warn!(
+                    "Service not found in detected variant or base variant, trying to find in all \
+                     variants"
                 );
                 self.ecu_data
                     .variants
@@ -1596,10 +1607,7 @@ impl EcuManager {
         let service = lookup.ok_or(DiagServiceError::NotFound).and_then(|id| {
             self.ecu_data.services.get(id).ok_or_else(|| {
                 // this should not happen, there should always be a base variant.
-                log::warn!(
-                    target: &log_target,
-                    "service reference could not be resolved to a service"
-                );
+                tracing::warn!("Service reference could not be resolved to a service");
                 DiagServiceError::NotFound
             })
         })?;
@@ -1609,8 +1617,11 @@ impl EcuManager {
             .service_prefix()
             .contains(&service.service_id)
         {
-            log::warn!(target: &log_target, "Service ID prefix mismatch. Got {:?}, expected {:?}",
-                service.service_id, diag_comm.type_.service_prefix());
+            tracing::warn!(
+                actual_service_id = ?service.service_id,
+                expected_prefix = ?diag_comm.type_.service_prefix(),
+                "Service ID prefix mismatch"
+            );
             return Err(DiagServiceError::NotFound);
         }
 
@@ -1735,9 +1746,11 @@ impl EcuManager {
                 if let Some(dop) = self.ecu_data.data_operations.get(&v.dop) {
                     self.map_dop_from_uds(mapped_service, dop, param, uds_payload, data)?;
                 } else {
-                    log::error!(target: &self.ecu_data.ecu_name,
-                        "{param_name} DoP lookup failed for id {}",
-                        v.dop
+                    tracing::error!(
+                        ecu_name = %self.ecu_data.ecu_name,
+                        param_name = %param_name,
+                        dop_id = %v.dop,
+                        "DoP lookup failed"
                     );
                 }
             }
@@ -1974,9 +1987,10 @@ impl EcuManager {
                             let Some(diag_type) =
                                 self.ecu_data.diag_coded_types.get(&normal_dop.diag_type)
                             else {
-                                log::error!(target: &self.ecu_data.ecu_name,
-                                    "Unable to lookup DiagCodedType for param: {}",
-                                    param.short_name
+                                tracing::error!(
+                                    ecu_name = %self.ecu_data.ecu_name,
+                                    param_short_name = %param.short_name,
+                                    "Unable to lookup DiagCodedType for param"
                                 );
                                 return Err(DiagServiceError::InvalidDatabase(
                                     "Unable to lookup DiagCodedType".to_owned(),
@@ -2052,9 +2066,10 @@ impl EcuManager {
                         }
                     }
                 } else {
-                    log::error!(target: &self.ecu_data.ecu_name,
-                        "DoP lookup failed for id {}",
-                        value_data.dop
+                    tracing::error!(
+                        ecu_name = %self.ecu_data.ecu_name,
+                        dop_id = %value_data.dop,
+                        "DoP lookup failed"
                     );
                     Err(DiagServiceError::InvalidDatabase(
                         "DoP lookup failed".to_owned(),
@@ -2179,7 +2194,11 @@ impl EcuManager {
                                     DiagServiceError::NotEnoughData { .. } => {
                                         // Not enough data left to parse another struct, exit loop
                                         // and ignore eventual leftover bytes
-                                        log::warn!("{e}");
+                                        tracing::warn!(
+                                            error = %e,
+                                            "Not enough data left to parse another struct, \
+                                             ignoring leftover bytes"
+                                        );
                                         uds_payload.pop_slice()?;
                                         break;
                                     }
@@ -2215,10 +2234,10 @@ impl EcuManager {
                 }
             }
             datatypes::DataOperationVariant::EnvDataDesc(ref _env_data_desc_dop) => {
-                log::warn!(target: "map_dop", "EnvDataDesc not supported");
+                tracing::warn!("EnvDataDesc not supported");
             }
             datatypes::DataOperationVariant::EnvData(ref _env_data_dop) => {
-                log::warn!(target: "map_dop", "EnvData not supported");
+                tracing::warn!("EnvData not supported");
             }
             datatypes::DataOperationVariant::Dtc(ref dtc_dop) => {
                 let coded_type = self
@@ -2487,9 +2506,11 @@ impl EcuManager {
         let request = match self.ecu_data.requests.get(&service.request_id) {
             Some(request) => request,
             None => {
-                log::warn!(
-                            target: &self.ecu_data.ecu_name,
-                            "No request found for service {service:#?}");
+                tracing::warn!(
+                    ecu_name = %self.ecu_data.ecu_name,
+                    service = ?service,
+                    "No request found for service"
+                );
                 return None;
             }
         };
@@ -2518,8 +2539,11 @@ impl EcuManager {
         let coded_const = match coded_const {
             Some(coded_const) => coded_const,
             None => {
-                log::warn!(target: &self.ecu_data.ecu_name,
-                            "No coded const found for service {service:#?}");
+                tracing::warn!(
+                    ecu_name = %self.ecu_data.ecu_name,
+                    service = ?service,
+                    "No coded const found for service"
+                );
                 return None;
             }
         };
@@ -2532,43 +2556,61 @@ impl EcuManager {
         {
             Some(coded_const_type) => coded_const_type,
             None => {
-                log::warn!(target: &self.ecu_data.ecu_name, "No diag coded type found \
-                             for coded const {coded_const:#?}");
+                tracing::warn!(
+                    ecu_name = %self.ecu_data.ecu_name,
+                    coded_const = ?coded_const,
+                    "No diag coded type found for coded const"
+                );
                 return None;
             }
         };
 
         if coded_const_type.base_datatype() != DataType::UInt32 {
-            log::warn!(target: &self.ecu_data.ecu_name, "Coded const {coded_const:#?} has \
-                        unexpected base datatype {:#?}, expected UInt32",
-                        coded_const_type.base_datatype());
+            tracing::warn!(
+                ecu_name = %self.ecu_data.ecu_name,
+                coded_const = ?coded_const,
+                base_datatype = ?coded_const_type.base_datatype(),
+                "Coded const has unexpected base datatype, expected UInt32"
+            );
             return None;
         }
 
         let bitlength = match &coded_const_type.type_() {
             DiagCodedTypeVariant::LeadingLengthInfo(_) => {
-                log::warn!(target: &self.ecu_data.ecu_name, "Coded const {coded_const:#?} \
-                        has unexpected type LeadingLengthInfo, expected StandardLength");
+                tracing::warn!(
+                    ecu_name = %self.ecu_data.ecu_name,
+                    coded_const = ?coded_const,
+                    "Coded const has unexpected type LeadingLengthInfo, expected StandardLength"
+                );
                 return None;
             }
             DiagCodedTypeVariant::MinMaxLength(_) => {
-                log::warn!(target: &self.ecu_data.ecu_name, "Coded const {coded_const:#?} \
-                        has unexpected type MinMaxLength, expected StandardLength");
+                tracing::warn!(
+                    ecu_name = %self.ecu_data.ecu_name,
+                    coded_const = ?coded_const,
+                    "Coded const has unexpected type MinMaxLength, expected StandardLength"
+                );
                 return None;
             }
             DiagCodedTypeVariant::StandardLength(standard_length_type) => {
                 if standard_length_type.bitmask.is_some() {
-                    log::warn!(target: &self.ecu_data.ecu_name,
-                                "Coded const.type standard_length_type {standard_length_type:#?} \
-                                has unexpected bitmask, expected StandardLength without bitmask");
+                    tracing::warn!(
+                        ecu_name = %self.ecu_data.ecu_name,
+                        standard_length_type = ?standard_length_type,
+                        "Coded const type standard_length_type has unexpected bitmask, \
+                         expected StandardLength without bitmask"
+                    );
                     return None;
                 }
                 match standard_length_type.bit_length {
                     16 | 24 | 32 => standard_length_type.bit_length,
                     _ => {
-                        log::warn!(target: &self.ecu_data.ecu_name,
-                                    "Coded const {coded_const:#?} has unexpected bit length {:#?},\
-                                     expected 16, 24 or 32", standard_length_type.bit_length);
+                        tracing::warn!(
+                            ecu_name = %self.ecu_data.ecu_name,
+                            coded_const = ?coded_const,
+                            bit_length = %standard_length_type.bit_length,
+                            "Coded const has unexpected bit length, expected 16, 24 or 32"
+                        );
                         return None;
                     }
                 }
@@ -2579,8 +2621,11 @@ impl EcuManager {
         let coded_const_value = match STRINGS.get(coded_const.value) {
             Some(value) => value,
             None => {
-                log::warn!(target: &self.ecu_data.ecu_name,
-                            "No coded const value found for {coded_const:#?}");
+                tracing::warn!(
+                    ecu_name = %self.ecu_data.ecu_name,
+                    coded_const = ?coded_const,
+                    "No coded const value found"
+                );
                 return None;
             }
         };
@@ -2588,9 +2633,12 @@ impl EcuManager {
         let coded_const_value = match coded_const_value.parse::<u32>() {
             Ok(value) => value,
             Err(e) => {
-                log::warn!(target: &self.ecu_data.ecu_name,
-                            "Coded const value '{coded_const_value}' could not be parsed as u32:\
-                             {e}");
+                tracing::warn!(
+                    ecu_name = %self.ecu_data.ecu_name,
+                    coded_const_value = %coded_const_value,
+                    error = %e,
+                    "Coded const value could not be parsed as u32"
+                );
                 return None;
             }
         };

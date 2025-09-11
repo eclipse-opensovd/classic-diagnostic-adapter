@@ -52,7 +52,8 @@ pub(crate) enum EcuConnectionVariant {
 
 pub(crate) struct EcuConnectionTarget {
     pub(crate) ecu_connection: EcuConnectionVariant,
-    pub(crate) log_target: String,
+    pub(crate) gateway_name: String,
+    pub(crate) gateway_ip: String,
 }
 
 impl ECUConnection for EcuConnectionVariant {
@@ -72,10 +73,19 @@ impl ECUConnection for EcuConnectionVariant {
     }
 }
 
+#[tracing::instrument(
+    skip(routing_activation_request),
+    fields(
+        gateway_ip,
+        gateway_name,
+        connect_timeout_ms = connect_timeout.as_millis(),
+        routing_timeout_ms = routing_activation_timeout.as_millis()
+    )
+)]
 pub(crate) async fn establish_ecu_connection(
     gateway_ip: &str,
+    gateway_name: &str,
     routing_activation_request: RoutingActivationRequest,
-    log_target: &str,
     connect_timeout: Duration,
     routing_activation_timeout: Duration,
 ) -> Result<EcuConnectionTarget, String> {
@@ -102,39 +112,42 @@ pub(crate) async fn establish_ecu_connection(
     match try_read_routing_activation_response(
         routing_activation_timeout,
         &mut gateway_conn,
-        log_target,
+        gateway_name,
+        gateway_ip,
     )
     .await
     {
         Ok(msg) => {
             match msg.activation_code {
                 ActivationCode::SuccessfullyActivated => {
-                    log::info!(target: &log_target, "Routing activated");
+                    tracing::info!("Routing activated");
                     // Routing activated
                     Ok(EcuConnectionTarget {
                         ecu_connection: gateway_conn,
-                        log_target: log_target.to_owned(),
+                        gateway_name: gateway_name.to_owned(),
+                        gateway_ip: gateway_ip.to_owned(),
                     })
                 }
                 ActivationCode::DeniedRequestEncryptedTLSConnection => {
-                    log::info!(target: &log_target, "TLS connection requested");
-                    let log_target = if log_target.ends_with("[TLS]") {
-                        log_target.to_owned()
+                    tracing::info!("TLS connection requested");
+                    let tls_gateway_name = if gateway_name.ends_with("[TLS]") {
+                        gateway_name.to_owned()
                     } else {
-                        format!("{log_target} [TLS]")
+                        format!("{gateway_name} [TLS]")
                     };
 
                     establish_tls_ecu_connection(
                         gateway_ip,
+                        &tls_gateway_name,
                         routing_activation_request,
                         connect_timeout,
                         routing_activation_timeout,
-                        &log_target,
                     )
                     .await
                     .map(|conn| EcuConnectionTarget {
                         ecu_connection: conn,
-                        log_target,
+                        gateway_name: tls_gateway_name,
+                        gateway_ip: gateway_ip.to_owned(),
                     })
                 }
                 _ => Err(format!(
@@ -147,12 +160,21 @@ pub(crate) async fn establish_ecu_connection(
     }
 }
 
+#[tracing::instrument(
+    skip(routing_activation_request),
+    fields(
+        gateway_ip,
+        gateway_name,
+        connect_timeout_ms = connnect_timeout.as_millis(),
+        routing_timeout_ms = routing_activation_timeout.as_millis()
+    )
+)]
 pub(crate) async fn establish_tls_ecu_connection(
     gateway_ip: &str,
+    gateway_name: &str,
     routing_activation_request: RoutingActivationRequest,
     connnect_timeout: Duration,
     routing_activation_timeout: Duration,
-    log_target: &String,
 ) -> Result<EcuConnectionVariant, String> {
     let mut gateway_conn: EcuConnectionVariant = match tokio::time::timeout(
         connnect_timeout,
@@ -181,7 +203,8 @@ pub(crate) async fn establish_tls_ecu_connection(
     match try_read_routing_activation_response(
         routing_activation_timeout,
         &mut gateway_conn,
-        log_target,
+        gateway_name,
+        gateway_ip,
     )
     .await
     {
@@ -192,22 +215,35 @@ pub(crate) async fn establish_tls_ecu_connection(
                     msg.activation_code
                 ));
             }
-            log::info!(target: &log_target, "Routing activated");
+            tracing::info!("Routing activated");
             Ok(gateway_conn) // Routing activated
         }
         Err(e) => Err(format!("Failed to activate routing: {e:?}")),
     }
 }
 
+#[tracing::instrument(
+    skip(reader),
+    fields(
+        gateway_name = %_gateway_name,
+        gateway_ip   = %_gateway_ip,
+        timeout_ms   = timeout.as_millis(),
+    )
+)]
 async fn try_read_routing_activation_response(
     timeout: std::time::Duration,
     reader: &mut impl ECUConnection,
-    log_target: &str,
+    _gateway_name: &str,
+    _gateway_ip: &str,
 ) -> Result<RoutingActivationResponse, String> {
     match tokio::time::timeout(timeout, reader.read()).await {
         Ok(Some(Ok(msg))) => match msg.payload {
             DoipPayload::RoutingActivationResponse(routing_activation_response) => {
-                log::debug!(target: &log_target, "Received routing activation response from source {:02x?} with logical address {:02x?}", routing_activation_response.source_address, routing_activation_response.logical_address);
+                tracing::debug!(
+                    source_address = ?routing_activation_response.source_address,
+                    logical_address = ?routing_activation_response.logical_address,
+                    "Received routing activation response"
+                );
                 Ok(routing_activation_response)
             }
             _ => Err(format!("Received non-routing activation response: {msg:?}")),

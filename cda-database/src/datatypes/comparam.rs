@@ -98,16 +98,17 @@ pub(super) fn get_comparams(ecu_data: &dataformat::EcuData) -> ComParamMap {
         .collect::<ComParamMap>()
 }
 
+#[tracing::instrument(skip(r), fields(ctx = %_ctx))]
 pub(super) fn map_comparam_ref(
     r: &dataformat::ComParamRef,
-    ctx: &str,
+    _ctx: &str,
 ) -> Option<Result<ComParamRef, DiagServiceError>> {
     let Some(com_param_id) = r
         .com_param
         .as_ref()
         .and_then(|cpr| cpr.r#ref.as_ref().map(|obid| obid.value))
     else {
-        log::debug!(target: ctx, "Skipping ComParamRef with no comParam.ref_pb");
+        tracing::debug!("Skipping ComParamRef with no comParam.ref_pb");
         return None;
     };
     let complex_value = match r.complex_value.as_ref().map(map_complex_value).transpose() {

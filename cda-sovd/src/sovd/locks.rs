@@ -695,13 +695,21 @@ pub(crate) async fn validate_lock(
     None
 }
 
+#[tracing::instrument(
+    skip(lock, claims),
+    fields(
+        lock_id,
+        lock_type = %lock,
+        entity_name = ?entity_name
+    )
+)]
 async fn delete_handler(
     lock: &LockType,
     lock_id: &str,
     claims: Claims,
     entity_name: Option<&String>,
 ) -> Response {
-    log::info!("trying to delete lock {lock_id} from {lock}");
+    tracing::info!("Attempting to delete lock");
 
     let mut rw_lock = lock.lock_rw().await;
     let entity_lock = match rw_lock.get_mut(entity_name) {
@@ -724,6 +732,14 @@ async fn delete_handler(
     }
 }
 
+#[tracing::instrument(
+    skip(lock, claims, rw_lock, expiration),
+    fields(
+        lock_type = %lock,
+        entity_name = ?entity_name,
+        lock_expiration = %expiration.lock_expiration
+    )
+)]
 async fn post_handler(
     lock: &LockType,
     claims: &Claims,
@@ -731,12 +747,7 @@ async fn post_handler(
     expiration: sovd_interfaces::locking::Request,
     rw_lock: Option<WriteLock<'_>>,
 ) -> Response {
-    log::info!(
-        "trying to lock {} {} for {}s",
-        lock,
-        entity_name.map_or(String::new(), |s| format!("on entity {s} ")),
-        expiration.lock_expiration
-    );
+    tracing::info!("Attempting to create lock");
 
     let mut rw_lock = match rw_lock {
         Some(lock) => lock,
@@ -773,6 +784,15 @@ async fn post_handler(
     }
 }
 
+#[tracing::instrument(
+    skip(lock, claims, expiration),
+    fields(
+        lock_id,
+        lock_type = %lock,
+        entity_name = ?entity_name,
+        lock_expiration = %expiration.lock_expiration
+    )
+)]
 async fn put_handler(
     lock: &LockType,
     lock_id: &str,
@@ -780,7 +800,7 @@ async fn put_handler(
     entity_name: Option<&String>,
     expiration: sovd_interfaces::locking::Request,
 ) -> Response {
-    log::info!("trying to update lock {lock_id} from {lock}");
+    tracing::info!("Attempting to update lock");
 
     let mut rw_lock = lock.lock_rw().await;
     let entity_lock = match rw_lock.get_mut(entity_name) {
@@ -794,19 +814,34 @@ async fn put_handler(
     }
 }
 
+#[tracing::instrument(
+    skip(lock, claims),
+    fields(
+        lock_type = %lock,
+        entity_name = ?entity_name
+    )
+)]
 async fn get_handler(lock: &LockType, claims: Claims, entity_name: Option<&String>) -> Response {
-    log::info!("getting locks from {entity_name:?} with id {lock}");
+    tracing::info!("Getting locks");
     let ro_lock = lock.lock_ro().await;
     let locks = get_locks(&claims, &ro_lock, entity_name);
     (StatusCode::OK, Json(&locks)).into_response()
 }
 
+#[tracing::instrument(
+    skip(lock),
+    fields(
+        lock_id = %lock_id,
+        lock_type = %lock,
+        entity_name = ?entity_name
+    )
+)]
 async fn get_id_handler(
     lock: &LockType,
     lock_id: &String,
     entity_name: Option<&String>,
 ) -> Response {
-    log::info!("getting active lock from {entity_name:?} with id {lock}");
+    tracing::info!("Getting active lock by ID");
     let ro_lock = lock.lock_ro().await;
     if let Some(entity_lock) = ro_lock.get(entity_name, Some(lock_id)) {
         let sovd_lock_info: sovd_interfaces::locking::id::get::Response = entity_lock.into_sovd();
@@ -873,7 +908,11 @@ fn schedule_token_deletion(
 
     let join_handle = task::spawn(async move {
         sleep_until(target_instant).await; // cancellation point when task is aborted
-        log::debug!("Deletion task woke up, trying to delete lock {lock_id} from {lock}");
+        tracing::debug!(
+            lock_id = %lock_id,
+            lock_type = %lock,
+            "Deletion task woke up, attempting to delete lock"
+        );
 
         let mut rw_lock = lock.lock_rw().await;
         let entity_lock_result = rw_lock.get_mut(entity.as_ref());
@@ -883,14 +922,22 @@ fn schedule_token_deletion(
                     if current_lock.sovd.id == lock_id {
                         *entity_lock = None;
                     } else {
-                        log::warn!("Lock id has changed before deletion");
+                        tracing::warn!(
+                            expected_id = %lock_id,
+                            actual_id = %current_lock.sovd.id,
+                            "Lock ID has changed before deletion"
+                        );
                     }
                 } else {
-                    log::warn!("Lock not found for deletion");
+                    tracing::warn!(lock_id = %lock_id, "Lock not found for deletion");
                 }
             }
             Err(e) => {
-                log::error!("Failed to delete lock: {e}");
+                tracing::error!(
+                    lock_id = %lock_id,
+                    error = %e,
+                    "Failed to delete lock"
+                );
             }
         }
     });

@@ -47,11 +47,9 @@ tokio = { version = "1.43.0", features = [
   "signal",
 ] }
 # logging & tracing
-log = "0.4"
 tracing = "0.1.41"
 tracing-core = "0.1.34"
 tracing-appender = "0.2.3"
-tracing-log = "0.2.0"
 tracing-subscriber = { version = "0.3.20", default-features = false, features = [
   "ansi",
   "chrono",
@@ -60,7 +58,6 @@ tracing-subscriber = { version = "0.3.20", default-features = false, features = 
   "json",
   "parking_lot",
   "std",
-  "tracing-log",
 ] }
 strip-ansi-escapes = "0.2.1" # Strip ANSI escape codes from strings, used for file logging
 nu-ansi-term = "0.50" # ANSI terminal support for terminal log output

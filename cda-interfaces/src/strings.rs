@@ -95,6 +95,7 @@ impl Strings {
     }
 
     /// Get a `StringId` for a given `String` value, inserting it if it does not exist.
+    #[tracing::instrument(skip(self), fields(string_length = value.len()))]
     pub fn get_or_insert(&self, value: &str) -> StringId {
         if let Some(id) = self.lookup.read().get(value) {
             return *id;
@@ -185,7 +186,7 @@ macro_rules! get_string_with_default {
         match $id {
             Ok(s) => s,
             Err(e) => {
-                log::error!("{e}");
+                tracing::error!(error = %e, "String lookup failed, using empty string");
                 String::new() // Return an empty string if the ID is not found
             }
         }
@@ -227,7 +228,7 @@ macro_rules! get_string_from_option {
         $opt.and_then(|id| match cda_interfaces::get_string!(id) {
             Ok(s) => Some(s),
             Err(e) => {
-                log::error!("{e}");
+                tracing::error!(error = %e, "String lookup failed, returning None");
                 None // Return None if the ID is not found
             }
         })

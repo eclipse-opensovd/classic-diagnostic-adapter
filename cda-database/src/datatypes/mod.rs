@@ -18,29 +18,26 @@ use cda_interfaces::{
     datatypes::{ComParamConfig, ComParamValue, DeserializableCompParam},
     get_string_with_default,
 };
+pub use comparam::*;
+pub use data_operation::*;
 #[cfg(feature = "deepsize")]
 use deepsize::DeepSizeOf;
+pub use diag_coded_type::*;
+pub use dtc::*;
+pub use functional_classes::*;
 use hashbrown::HashMap;
+pub use jobs::*;
+pub use parameter::*;
+pub use sd_sdg::*;
 use serde::Serialize;
+pub use service::*;
+pub use state_charts::*;
+pub use variant::*;
 
 use crate::{
     mdd_data::{load_ecudata, read_ecudata},
     proto::dataformat::EcuData,
 };
-
-const LOG_TARGET: &str = "ECU-Db-Mapping";
-
-pub use comparam::*;
-pub use data_operation::*;
-pub use diag_coded_type::*;
-pub use dtc::*;
-pub use functional_classes::*;
-pub use jobs::*;
-pub use parameter::*;
-pub use sd_sdg::*;
-pub use service::*;
-pub use state_charts::*;
-pub use variant::*;
 
 pub(crate) mod comparam;
 pub(crate) mod data_operation;
@@ -367,6 +364,13 @@ impl DiagnosticDatabase {
         }
     }
 
+    #[tracing::instrument(
+        skip(self),
+        fields(
+            protocol = ?protocol,
+            param_name = %com_param.name
+        )
+    )]
     pub fn find_com_param<T: DeserializableCompParam + Serialize + Debug + Clone>(
         &self,
         protocol: &Protocol,
@@ -378,27 +382,36 @@ impl DiagnosticDatabase {
                 match T::parse_from_db(&simple.value, simple.unit.as_ref()) {
                     Ok(value) => value,
                     Err(_) => {
-                        log::warn!(
-                            "Failed to deserialize Simple Value for com param {} with value {}",
-                            com_param.name,
-                            simple.value,
+                        tracing::warn!(
+                            param_name = %com_param.name,
+                            param_value = %simple.value,
+                            unit = ?simple.unit,
+                            "Failed to deserialize Simple Value for com param, using default"
                         );
                         com_param.default.clone()
                     }
                 }
             }
             Ok(ComParamValue::Complex(_)) => {
-                log::warn!(
-                    "using fallback for {}, error: unexpected Complex value",
-                    com_param.name
+                tracing::warn!(
+                    param_name = %com_param.name,
+                    "Using fallback for complex value - unexpected Complex value type"
                 );
                 com_param.default.clone()
             }
             Err(e) => {
                 if let DiagServiceError::DatabaseEntryNotFound(e) = &e {
-                    log::debug!("using fallback for {}, error: {e}", com_param.name);
+                    tracing::debug!(
+                        param_name = %com_param.name,
+                        error = %e,
+                        "Using fallback - database entry not found"
+                    );
                 } else {
-                    log::warn!("using fallback for {}, error: {e}", com_param.name);
+                    tracing::warn!(
+                        param_name = %com_param.name,
+                        error = %e,
+                        "Using fallback - lookup error"
+                    );
                 }
                 com_param.default.clone()
             }
