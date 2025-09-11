@@ -47,6 +47,14 @@ pub struct WebServerConfig {
 /// Will return `Err` in case that the webserver couldn´t be launched.
 /// This can be caused due to invalid config, ports or addresses already
 /// being in use or an error when initializing the `DoIP` gateway.
+#[tracing::instrument(
+    skip(config, ecu_uds, file_manager, shutdown_signal),
+    fields(
+        host = %config.host,
+        port = %config.port,
+        flash_files_path = %flash_files_path
+    )
+)]
 pub async fn launch_webserver<F, R, T, M>(
     config: WebServerConfig,
     ecu_uds: T,
@@ -73,7 +81,7 @@ where
             // those are triggered when overwriting the input type
             return;
         }
-        log::error!(target: "webserver", "OpenAPI generation error: {e}");
+        tracing::error!(error = %e, "OpenAPI generation error");
     });
     aide::generate::extract_schemas(true);
     let mut api = OpenApi::default();
@@ -113,14 +121,18 @@ where
     let listen_address = format!("{}:{}", config.host, config.port);
     match TcpListener::bind(&listen_address).await {
         Ok(listener) => {
-            log::info!(target: "main", "Listening on: {listen_address}");
+            tracing::info!(listen_address = %listen_address, "Server listening");
             axum::serve(listener, app_with_middleware.into_make_service())
                 .with_graceful_shutdown(clonable_shutdown_signal)
                 .await
                 .map_err(|e| format!("Axum serve error: {e}"))?;
         }
         Err(e) => {
-            log::error!(target: "main", "Failed to bind to: {listen_address}: {e}");
+            tracing::error!(
+                listen_address = %listen_address,
+                error = %e,
+                "Failed to bind to address"
+            );
         }
     }
 
@@ -160,22 +172,18 @@ where
                 )
             })
             .on_request(|request: &axum::http::Request<_>, _span: &tracing::Span| {
-                log::info!(
-                    target: "webserver",
-                    "Request: {:?} {}",
-                    request.method(),
-                    request.uri()
+                tracing::debug!(
+                    method = %request.method(),
+                    path = %request.uri(),
+                    "Request received"
                 );
             })
             .on_response(
                 |response: &axum::http::Response<_>,
                  latency: std::time::Duration,
                  span: &tracing::Span| {
-                    log::info!(target: "webserver", "Response: {} in {:?}",
-                        response.status(), latency);
-
                     span.record("status_code", response.status().as_u16());
-                    span.record("latency", format!("{latency:?}",));
+                    span.record("latency", format!("{latency:?}"));
                 },
             )
             .on_failure(
@@ -191,8 +199,8 @@ where
                             return; // Ignore 502 errors
                         }
                     }
-                    log::error!(target: "webserver", "Error: {error} in {latency:?}");
                     span.record("error", error.to_string());
+                    tracing::error!("HTTP request failed");
                 },
             ),
     )

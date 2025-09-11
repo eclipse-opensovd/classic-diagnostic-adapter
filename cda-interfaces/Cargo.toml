@@ -27,6 +27,8 @@ deepsize = { version = "0.2.0", features = ["hashbrown"], optional = true }
 hex = "0.4.3"
 strum = "0.27.2"
 strum_macros = "0.27.2"
+# logging
+tracing = "0.1.41"
 
 [features]
 default = []

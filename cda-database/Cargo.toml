@@ -32,8 +32,7 @@ uuid = { version = "1.16.0", features = ["v4"] }
 xz2 = { version = "0.1.6", features = ["static"] }
 
 # logging
-log = "0.4"
-# tracing = "0.1.41"
+tracing = "0.1.41"
 
 # runtime size info
 deepsize = { version = "0.2.0", features = ["hashbrown"], optional = true }

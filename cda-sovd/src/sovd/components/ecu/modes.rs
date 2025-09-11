@@ -93,6 +93,14 @@ pub(crate) mod session {
     use super::*;
     use crate::openapi;
 
+    #[tracing::instrument(
+        skip(claims, locks, uds),
+        fields(
+            ecu_name = %ecu_name,
+            session_value = %request_body.value,
+            mode_expiration = ?request_body.mode_expiration
+        )
+    )]
     pub(crate) async fn put<R: DiagServiceResponse, T: UdsEcu + Clone, U: FileManager>(
         UseApi(claims, _): UseApi<Claims, ()>,
         State(WebserverEcuState {
@@ -109,7 +117,7 @@ pub(crate) mod session {
         if let Some(response) = validate_lock(&claims, &ecu_name, locks).await {
             return response;
         }
-        log::info!("sovd set session to {}", request_body.value);
+        tracing::info!("Setting ECU session mode");
         match uds
             .set_ecu_session(
                 &ecu_name,

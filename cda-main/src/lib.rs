@@ -34,6 +34,7 @@ use tokio::{
     signal,
     sync::{RwLock, mpsc},
 };
+use tracing::Instrument;
 
 pub mod config;
 
@@ -46,6 +47,7 @@ const DB_PARALLEL_LOAD_TASKS: usize = 2;
 pub type DatabaseMap = HashMap<String, RwLock<EcuManager>>;
 pub type FileManagerMap = HashMap<String, FileManager>;
 
+#[tracing::instrument(skip(com_params, database_naming_convention), fields(databases_path))]
 pub async fn load_databases(
     databases_path: &str,
     protocol: Protocol,
@@ -65,8 +67,7 @@ pub async fn load_databases(
         let files = match std::fs::read_dir(databases_path) {
             Ok(files) => files,
             Err(e) => {
-                log::error!(target: "main", "Failed to read \
-                    directory: {databases_path:?} with error: {e}");
+                tracing::error!(error = %e, "Failed to read directory");
                 break 'load_database;
             }
         };
@@ -88,8 +89,7 @@ pub async fn load_databases(
 
         let chunk_size = (files.len() / DB_PARALLEL_LOAD_TASKS + 1).max(1);
 
-        log::info!(target: "main",
-            "Loading databases from {databases_path} with chunks of size {chunk_size}");
+        tracing::info!(chunk_size = %chunk_size, "Loading databases");
 
         for (i, mddfiles) in files.chunks(chunk_size).enumerate() {
             let database = Arc::clone(&databases);
@@ -113,6 +113,7 @@ pub async fn load_databases(
                     )
                     .await;
                 }
+                .instrument(tracing::info_span!("load_database_chunk", chunk_id = i))
             ));
         }
     }
@@ -120,12 +121,12 @@ pub async fn load_databases(
     for f in database_load_futures {
         tokio::select! {
             () = shutdown_signal() => {
-                log::info!(target: "main", "Shutdown triggered. Aborting DB load...");
+                tracing::info!("Shutdown triggered. Aborting DB load...");
                 std::process::exit(0);
             },
             res = f =>{
                 if let Err(e) = res {
-                    log::error!(target: "main", "Failed to load ecu data: {e:?}");
+                    tracing::error!(error = ?e, "Failed to load ecu data");
                 }
             }
         }
@@ -145,16 +146,16 @@ pub async fn load_databases(
         .map(|(k, v)| (k.to_lowercase().to_string(), v))
         .collect::<HashMap<String, FileManager>>();
 
-    log::info!(target: "main", "Loaded {} databases in {:?}",
-        databases_count.load(Ordering::Relaxed), end - start);
+    tracing::info!(database_count = %databases_count.load(Ordering::Relaxed), duration = ?{end - start}, "Loaded databases");
     if databases_count.load(Ordering::Relaxed) == 0 {
-        log::error!(target: "main", "Database load failed, no databases found");
+        tracing::error!("Database load failed, no databases found");
         std::process::exit(1);
     }
 
     (databases, file_managers)
 }
 
+#[tracing::instrument(skip_all, fields(paths_count = paths.len()))]
 async fn load_database(
     protocol: Protocol,
     database: Arc<RwLock<HashMap<String, EcuManager>>>,
@@ -192,10 +193,7 @@ async fn load_database(
         ) {
             Ok((ecu_name, mut proto_data)) => {
                 let Some(ecu_data) = proto_data.remove(&ChunkType::DiagnosticDescription) else {
-                    log::error!(
-                        "No diagnostic description found in MDD file: {}",
-                        mddfile.display()
-                    );
+                    tracing::error!(mdd_file = %mddfile.display(), "No diagnostic description found in MDD file");
                     continue;
                 };
 
@@ -204,7 +202,7 @@ async fn load_database(
                 {
                     payload
                 } else {
-                    log::error!("No payload found in diagnostic description for ECU: {ecu_name}",);
+                    tracing::error!(ecu_name = %ecu_name, "No payload found in diagnostic description for ECU");
                     continue;
                 };
 
@@ -214,7 +212,7 @@ async fn load_database(
                 ) {
                     Ok(db) => db,
                     Err(e) => {
-                        log::error!(target: "main", "Failed to create database from MDD file: {} with error: {e}", mddfile.display());
+                        tracing::error!(mdd_file = %mddfile.display(), error = %e, "Failed to create database from MDD file");
                         continue;
                     }
                 };
@@ -228,7 +226,7 @@ async fn load_database(
                 {
                     Ok(manager) => manager,
                     Err(e) => {
-                        log::error!(target: "main", "Failed to create DiagServiceManager: {e:?}");
+                        tracing::error!(ecu_name = %ecu_name, error = ?e, "Failed to create DiagServiceManager");
                         continue;
                     }
                 };
@@ -263,13 +261,13 @@ async fn load_database(
                 );
             }
             Err(e) => {
-                log::error!(target: "main",
-                    "Failed to load ecu data from file: {} with error: {e}", mddfile.display());
+                tracing::error!(mdd_file = %mddfile.display(), error = %e, "Failed to load ecu data from file");
             }
         }
     }
 }
 
+#[tracing::instrument(skip_all, fields(database_count = databases.len()))]
 pub async fn create_uds_manager(
     gateway: DoipDiagGateway<EcuManager>,
     databases: Arc<HashMap<String, RwLock<EcuManager>>>,
@@ -289,6 +287,10 @@ pub async fn create_uds_manager(
 /// Creates a new diagnostic gateway for the webserver.
 /// # Errors
 /// Returns a string error if the gateway cannot be initialized.
+#[tracing::instrument(
+    skip(databases, variant_detection, tester_present, shutdown_signal),
+    fields(database_count = databases.len())
+)]
 pub async fn create_diagnostic_gateway(
     databases: Arc<HashMap<String, RwLock<EcuManager>>>,
     doip_tester_address: &str,
@@ -308,6 +310,10 @@ pub async fn create_diagnostic_gateway(
     .await
 }
 
+#[tracing::instrument(
+    skip(file_managers, webserver_config, ecu_uds, shutdown_signal),
+    fields(file_manager_count = file_managers.len())
+)]
 pub fn start_webserver(
     flash_files_path: String,
     file_managers: HashMap<String, FileManager>,

@@ -11,7 +11,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-use std::{sync::Arc, time::Duration};
+use std::{future::Future, sync::Arc, time::Duration};
 
 use cda_interfaces::{DoipComParamProvider, EcuAddressProvider, TesterPresentControlMessage};
 use doip_definitions::{
@@ -22,8 +22,9 @@ use doip_sockets::udp::UdpSocket;
 use hashbrown::HashMap;
 use tokio::sync::{RwLock, mpsc};
 
-use crate::{DoipDiagGateway, DoipTarget, LOG_TARGET, connections::handle_gateway_connection};
+use crate::{DoipDiagGateway, DoipTarget, connections::handle_gateway_connection};
 
+#[tracing::instrument(skip(socket, ecus, shutdown_signal), fields(gateway_port))]
 pub(crate) async fn get_vehicle_identification<T, F>(
     socket: &mut UdpSocket,
     gateway_port: u16,
@@ -35,7 +36,7 @@ where
     F: Future<Output = ()> + Clone + Send + 'static,
 {
     // send VIR
-    log::info!(target: LOG_TARGET, "Broadcasting VIR");
+    tracing::info!("Broadcasting VIR");
     let broadcast_ip = "255.255.255.255";
     socket
         .send(
@@ -65,10 +66,7 @@ where
                         }
                         match handle_vam::<T>(ecus, doip_msg, source_addr).await {
                             Ok(gateway) => gateways.push(gateway),
-                            Err(e) => log::error!(
-                                target: LOG_TARGET,
-                                "Failed to handle VAM: {e:?}"
-                            ),
+                            Err(e) => tracing::error!(error = ?e, "Failed to handle VAM"),
                         }
                     }
                     Ok(Some(Err(e))) => return Err(format!("Failed to receive VAMs: {e:?}")),
@@ -105,8 +103,11 @@ pub(crate) async fn listen_for_vams<T, F>(
     ) {
         match handle_vam::<T>(&gateway.ecus, doip_msg, source_addr).await {
             Ok(doip_target) => {
-                log::debug!(target: LOG_TARGET, "VAM received from {} on logical address {:#06x}",
-                    doip_target.ecu, doip_target.logical_address);
+                tracing::debug!(
+                    ecu_name = %doip_target.ecu,
+                    logical_address = %format!("{:#06x}", doip_target.logical_address),
+                    "VAM received"
+                );
                 if gateway
                     .logical_address_to_connection
                     .read()
@@ -114,7 +115,7 @@ pub(crate) async fn listen_for_vams<T, F>(
                     .get(&doip_target.logical_address)
                     .is_none()
                 {
-                    log::info!(target: LOG_TARGET, "New Gateway ECU detected: {}", doip_target.ecu);
+                    tracing::info!(ecu_name = %doip_target.ecu, "New Gateway ECU detected");
 
                     match handle_gateway_connection::<T>(
                         doip_target,
@@ -126,30 +127,34 @@ pub(crate) async fn listen_for_vams<T, F>(
                     .await
                     {
                         Ok(logical_address) => {
-                            // log::info!(target: LOG_TARGET, "New Gateway connection established");
                             gateway.logical_address_to_connection.write().await.insert(
                                 logical_address,
                                 gateway.doip_connections.read().await.len() - 1,
                             );
-                            // log::info!(target: LOG_TARGET, "New Gateway connection stored");
                             if let Some(ecus) = gateway_ecu_name_map.get(&logical_address) {
                                 if let Err(e) = variant_detection.send(ecus.clone()).await {
-                                    log::error!(target: LOG_TARGET,
-                                        "Failed to send variant detection request: {e:?}");
+                                    tracing::error!(
+                                        error = ?e,
+                                        "Failed to send variant detection request"
+                                    );
                                 } else {
-                                    log::info!(target: LOG_TARGET,
-                                        "Variant detection request sent for ECUs: {ecus:?}");
+                                    tracing::info!(
+                                        ecus = ?ecus,
+                                        "Variant detection request sent"
+                                    );
                                 }
                             }
                         }
                         Err(e) => {
-                            log::error!(target: LOG_TARGET,
-                                "Failed to handle new Gateway connection: {e:?}");
+                            tracing::error!(
+                                error = ?e,
+                                "Failed to handle new Gateway connection"
+                            );
                         }
                     }
                 }
             }
-            Err(e) => log::warn!(target: LOG_TARGET, "Failed to handle VAM: {e:?}"),
+            Err(e) => tracing::warn!(error = ?e, "Failed to handle VAM"),
         }
     }
 
@@ -170,7 +175,7 @@ pub(crate) async fn listen_for_vams<T, F>(
             .push(ecu.ecu_name().to_lowercase());
     }
 
-    log::info!(target: LOG_TARGET, "Listening for spontaneous VAMs");
+    tracing::info!("Listening for spontaneous VAMs");
 
     cda_interfaces::spawn_named!(
         "vam-listen",
@@ -207,7 +212,7 @@ where
 {
     match doip_msg.payload {
         DoipPayload::VehicleAnnouncementMessage(vam) => {
-            log::debug!(target: LOG_TARGET, "VAM received, parsing ...");
+            tracing::debug!("VAM received, parsing ...");
             let mut matched_ecu = None;
             for (name, ecu) in ecus.iter() {
                 if ecu.read().await.logical_address().to_be_bytes() == vam.logical_address {
@@ -217,12 +222,11 @@ where
             }
             if let Some(ecu) = matched_ecu {
                 let logical_address = u16::from_be_bytes(vam.logical_address);
-                log::debug!(
-                    target: LOG_TARGET,
-                    "Matching ECU found {} on {} logical address {:#06x}",
-                    ecu,
-                    source_addr.ip(),
-                    logical_address
+                tracing::debug!(
+                    ecu_name = %ecu,
+                    source_ip = %source_addr.ip(),
+                    logical_address = %format!("{:#06x}", logical_address),
+                    "Matching ECU found"
                 );
                 Ok(DoipTarget {
                     ip: source_addr.ip().to_string(),
@@ -230,7 +234,7 @@ where
                     logical_address,
                 })
             } else {
-                log::warn!(target: LOG_TARGET, "VAM received but no matching ECU found");
+                tracing::warn!("VAM received but no matching ECU found");
                 Err(format!(
                     "No matching ECU found for VAM: {:02x?}",
                     vam.logical_address

@@ -66,9 +66,11 @@ impl FileManager {
                             entry.last_accessed.map(|last_accessed| {
                                 let elapsed = now.duration_since(last_accessed);
                                 if elapsed >= cache_lifetime {
-                                    log::debug!(
-                                        "Removing expired cache entry for file {}",
-                                        entry.chunk.meta_data.name
+                                    tracing::debug!(
+                                        file_name = %entry.chunk.meta_data.name,
+                                        elapsed = ?elapsed,
+                                        cache_lifetime = ?cache_lifetime,
+                                        "Removing expired cache entry for file"
                                     );
                                     entry.chunk.payload = None;
                                     None

@@ -53,7 +53,7 @@ pub(super) fn get_dtcs(ecu_data: &EcuData, ecu_db_path: &str) -> DtcMap {
         .filter_map(|res: Result<(u32, Dtc), DiagServiceError>| match res {
             Ok((id, param)) => Some((id, param)),
             Err(e) => {
-                log::debug!(target: &ecu_db_path, "Error processing dtc: {e:?}");
+                tracing::error!(error = %e, ecu_db_path = %ecu_db_path, "Error processing dtc");
                 None
             }
         })

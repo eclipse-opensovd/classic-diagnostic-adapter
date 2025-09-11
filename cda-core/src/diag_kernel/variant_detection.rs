@@ -30,6 +30,10 @@ pub(super) struct VariantDetection {
     pub(crate) variant_param_map: HashMap<u32, VariantPatterns>,
 }
 
+#[tracing::instrument(
+    skip(diagnostic_database),
+    fields(variants_count = diagnostic_database.variants.len())
+)]
 pub(super) fn prepare_variant_detection(
     diagnostic_database: &datatypes::DiagnosticDatabase,
 ) -> Result<VariantDetection, DiagServiceError> {
@@ -84,6 +88,10 @@ pub(super) fn prepare_variant_detection(
 }
 
 impl VariantDetection {
+    #[tracing::instrument(
+        skip(self, service_responses),
+        fields(response_count = service_responses.len())
+    )]
     pub(super) fn evaluate_variant<T: DiagServiceResponse + Sized>(
         &self,
         service_responses: HashMap<String, T>,
@@ -135,11 +143,10 @@ impl VariantDetection {
             })
             .map(|(id, _)| *id)
             .ok_or_else(|| {
-                log::debug!(
-                    target: "variant_detection",
-                    "No variant found for expected services: {:#?}
-                    Received: {service_responses:#?}",
-                    self.variant_param_map
+                tracing::debug!(
+                    expected_services = ?self.variant_param_map,
+                    received_responses = ?service_responses,
+                    "No variant found for expected services"
                 );
                 DiagServiceError::VariantDetectionError("No variant found".to_owned())
             })

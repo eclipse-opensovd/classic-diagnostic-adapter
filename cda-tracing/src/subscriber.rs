@@ -16,7 +16,6 @@ use std::path::Path;
 use hashbrown::{HashMap, HashSet};
 use nu_ansi_term::{Color, Style};
 use tracing::{Event, Level, Subscriber, field::Visit};
-use tracing_log::NormalizeEvent;
 use tracing_subscriber::{
     field::VisitOutput as _,
     fmt::{
@@ -70,8 +69,7 @@ where
     ) -> std::fmt::Result {
         let colored = self.colored && writer.has_ansi_escapes();
 
-        let normalized_meta = event.normalized_metadata();
-        let meta = normalized_meta.as_ref().unwrap_or_else(|| event.metadata());
+        let meta = event.metadata();
 
         let dimmed_style = Style::new().dimmed();
         let lvl_style = CdaFormatter::style_for(*meta.level());
@@ -92,7 +90,9 @@ where
         write_colored!(writer, colored, lvl_style, "{}", meta.level());
 
         write_colored!(writer, colored, dimmed_style, " in ");
-        if meta.name() != "log event" && !meta.name().starts_with("event src/") {
+        if meta.name() != "log event"
+            && !(meta.name().starts_with("event cda-") && meta.name().contains("/src/"))
+        {
             write_colored!(writer, colored, bold_style, "{}", meta.name());
         } else {
             write_colored!(writer, colored, bold_style, "{}", meta.target());

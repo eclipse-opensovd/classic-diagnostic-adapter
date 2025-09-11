@@ -21,7 +21,6 @@ use crate::proto::{dataformat, fileformat, fileformat::chunk::DataType as ChunkD
 
 pub mod files;
 
-const LOG_TARGET: &str = "ECU Database";
 // "MDD version 0      \u0000";
 const FILE_MAGIC_HEX_STR: &str = "4d44442076657273696f6e203020202020202000";
 
@@ -34,6 +33,7 @@ fn file_magic_bytes() -> Vec<u8> {
     bytes
 }
 
+#[derive(Debug)]
 pub struct ProtoLoadConfig {
     pub load_data: bool,
     pub type_: ChunkType,
@@ -58,9 +58,13 @@ impl From<&ChunkType> for ChunkDataType {
 /// Returns an error if the chunk data cannot be loaded, such as if the MDD file is not found,
 /// also returns the error from `load_chunk_data` if the chunk data cannot be read
 /// or parsed correctly.
+#[tracing::instrument(
+    skip(chunk),
+    fields(mdd_file, chunk_name = %chunk.meta_data.name)
+)]
 pub fn load_chunk<'a>(chunk: &'a mut Chunk, mdd_file: &str) -> Result<&'a Vec<u8>, MddError> {
     if chunk.payload.is_none() {
-        log::debug!(target: LOG_TARGET, "Loading data from file {mdd_file}");
+        tracing::debug!("Loading data from file");
         let chunk_data = load_chunk_data(mdd_file, chunk)?;
         chunk.payload = Some(chunk_data);
     }
@@ -134,11 +138,17 @@ fn load_chunk_data(mdd_file: &str, chunk: &Chunk) -> Result<Vec<u8>, MddError> {
 /// * The magic bytes do not match the expected format.
 /// * Parsing the MDD file fails.
 /// * Decompressing the data fails.
+#[tracing::instrument(
+    fields(
+        mdd_file,
+        config_count = load_info.len()
+    )
+)]
 pub fn load_proto_data(
     mdd_file: &str,
     load_info: &[ProtoLoadConfig],
 ) -> Result<(String, HashMap<ChunkType, Vec<Chunk>>), MddError> {
-    log::trace!(target: LOG_TARGET, "Loading ECU data from file: {mdd_file}");
+    tracing::trace!("Loading ECU data from file");
     let start = Instant::now();
     let mut filein = std::fs::File::open(mdd_file)
         .map_err(|e| MddError::Io(format!("Failed to open mdd file: {e}")))?;
@@ -218,7 +228,12 @@ pub fn load_proto_data(
 
     let end = Instant::now();
 
-    log::trace!(target: LOG_TARGET, "Loaded {} data in {:?}", proto_file.ecu_name,  end - start);
+    tracing::trace!(
+        ecu_name = %proto_file.ecu_name,
+        duration = ?end.saturating_duration_since(start),
+        chunks_loaded = proto_data.len(),
+        "Loaded ECU data"
+    );
     Ok((proto_file.ecu_name.to_string(), proto_data))
 }
 
