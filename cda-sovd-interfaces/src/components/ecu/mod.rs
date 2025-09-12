@@ -201,7 +201,7 @@ pub mod x {
                     use crate::Items;
 
                     #[derive(Serialize, Clone)]
-                    #[serde(rename_all = "PascalCase")]
+                    #[serde(rename_all = "camelCase")]
                     #[derive(schemars::JsonSchema)]
                     pub struct DataTransferMetaData {
                         pub acknowledged_bytes: u64,
