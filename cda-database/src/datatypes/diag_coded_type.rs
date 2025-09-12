@@ -891,7 +891,7 @@ impl MinMaxLengthType {
                 ));
             }
 
-            if max_length > min_length {
+            if max_length < min_length {
                 return Err(DiagServiceError::BadPayload(format!(
                     "MinMaxLengthType max_length {max_length} cannot be less than min_length \
                      {min_length}",
@@ -2642,5 +2642,20 @@ mod tests {
         let (result, bit_len) = apply_condensed_mask_packing(&input, &mask, 0);
         assert_eq!(result, vec![0b_0101_0000]);
         assert_eq!(bit_len, 8);
+    }
+
+    #[test]
+    fn test_min_max_length_type_error_on_max_less_than_min() {
+        let min_length = 10;
+        let max_length = Some(5);
+        let termination = Termination::EndOfPdu;
+        let result = MinMaxLengthType::new(min_length, max_length, termination);
+        assert!(result.is_err());
+        assert_eq!(
+            result.unwrap_err(),
+            DiagServiceError::BadPayload(
+                "MinMaxLengthType max_length 5 cannot be less than min_length 10".to_owned()
+            )
+        );
     }
 }
