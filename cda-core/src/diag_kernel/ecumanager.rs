@@ -1183,10 +1183,13 @@ impl cda_interfaces::EcuManager for EcuManager {
                                     _ => return None,
                                 };
 
-                                service_types
-                                    .iter()
-                                    .find(|s| ((*s).clone() as u8).to_string() == *sub_function_id)
-                                    .map(|dsp| (service, dsp))
+                                service_types.iter().find_map(|s| {
+                                    if ((*s).clone() as u8).to_string() == *sub_function_id {
+                                        Some((service, s))
+                                    } else {
+                                        None
+                                    }
+                                })
                             })
                         })
                     })
