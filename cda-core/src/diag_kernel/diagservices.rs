@@ -81,7 +81,7 @@ impl DiagServiceResponse for DiagServiceResponseStruct {
         &self.data
     }
 
-    fn into_json(self) -> Result<DiagServiceJsonResponse, cda_interfaces::DiagServiceError> {
+    fn into_json(self) -> Result<DiagServiceJsonResponse, DiagServiceError> {
         self.serialize_to_json()
     }
 
@@ -215,7 +215,7 @@ impl DiagServiceResponseStruct {
         let mapped_data = data
             .iter()
             .filter_map(|(k, v)| -> Option<Result<(_, _), DiagServiceError>> {
-                let mapped = match Self::map_data(v) {
+                let mapped = match Self::map_data(v, &mut errors, &format!("/{k}")) {
                     Ok(m) => m,
                     Err(e) => {
                         if let DiagServiceError::DataError(ref error) = e {
@@ -250,10 +250,16 @@ impl DiagServiceResponseStruct {
             )),
         }
     }
-    fn map_data(data: &DiagDataTypeContainer) -> Result<DiagDataValue, DiagServiceError> {
+    fn map_data(
+        data: &DiagDataTypeContainer,
+        errors: &mut Vec<FieldParseError>,
+        path: &str,
+    ) -> Result<DiagDataValue, DiagServiceError> {
         fn create_struct(
             hash_map: &HashMap<String, DiagDataTypeContainer>,
             inner_mapped: &mut HashMap<String, DiagDataValue>,
+            errors: &mut Vec<FieldParseError>,
+            path: &str,
         ) -> Result<(), DiagServiceError> {
             for (k, v) in hash_map {
                 let val = match v {
@@ -267,15 +273,48 @@ impl DiagServiceResponseStruct {
                     }
                     DiagDataTypeContainer::Struct(s) => {
                         let mut nested_mapped = HashMap::new();
-                        create_struct(s, &mut nested_mapped)?;
-                        DiagDataValue::Struct(nested_mapped)
+                        match create_struct(
+                            s,
+                            &mut nested_mapped,
+                            errors,
+                            format!("{path}/{k}").as_str(),
+                        ) {
+                            Ok(_) => DiagDataValue::Struct(nested_mapped),
+                            Err(e) => {
+                                if let DiagServiceError::DataError(ref error) = e {
+                                    errors.push(FieldParseError {
+                                        path: format!("{path}/{k}"),
+                                        error: error.clone(),
+                                    });
+                                    DiagDataValue::Struct(HashMap::default())
+                                } else {
+                                    return Err(e);
+                                }
+                            }
+                        }
                     }
                     DiagDataTypeContainer::RepeatingStruct(vec) => {
                         let mut nested_vec = Vec::new();
                         for inner_hash_map in vec {
                             let mut inner_mapped = HashMap::new();
-                            create_struct(inner_hash_map, &mut inner_mapped)?;
-                            nested_vec.push(inner_mapped);
+                            match create_struct(
+                                inner_hash_map,
+                                &mut inner_mapped,
+                                errors,
+                                format!("{path}/{k}").as_str(),
+                            ) {
+                                Ok(_) => nested_vec.push(inner_mapped),
+                                Err(e) => {
+                                    if let DiagServiceError::DataError(ref error) = e {
+                                        errors.push(FieldParseError {
+                                            path: format!("{path}/{k}"),
+                                            error: error.clone(),
+                                        });
+                                    } else {
+                                        return Err(e);
+                                    }
+                                }
+                            }
                         }
                         DiagDataValue::RepeatingStruct(nested_vec)
                     }
@@ -312,14 +351,14 @@ impl DiagServiceResponseStruct {
             )?),
             DiagDataTypeContainer::Struct(hash_map) => {
                 let mut mapped = HashMap::new();
-                create_struct(hash_map, &mut mapped)?;
+                create_struct(hash_map, &mut mapped, errors, path)?;
                 Ok(DiagDataValue::Struct(mapped))
             }
             DiagDataTypeContainer::RepeatingStruct(vec) => {
                 let mut mapped = Vec::new();
                 for hash_map in vec {
                     let mut inner_mapped = HashMap::new();
-                    create_struct(hash_map, &mut inner_mapped)?;
+                    create_struct(hash_map, &mut inner_mapped, errors, path)?;
                     mapped.push(inner_mapped);
                 }
                 Ok(DiagDataValue::RepeatingStruct(mapped))

@@ -111,3 +111,120 @@ pub fn decode_hex(value: &str) -> Result<Vec<u8>, DiagServiceError> {
         DiagServiceError::ParameterConversionError(format!("Invalid hex value, error={e}"))
     })
 }
+
+/// Read a given number of bits from the data slice starting at the given bit position.
+/// Used to extract bits from a PDU payload.
+/// # Arguments
+/// * `bit_len` - Number of bits to extract.
+/// * `bit_pos` - Bit position to start, counting starts at least significant bit.
+///   Valid range is 0..=7.
+/// * `data` - Source data slice.
+pub fn extract_bits(
+    bit_len: usize,
+    bit_pos: usize,
+    data: &[u8],
+) -> Result<Vec<u8>, DiagServiceError> {
+    if bit_pos > 7 {
+        return Err(DiagServiceError::BadPayload(format!(
+            "BitPosition range is 0..=7, got {bit_pos}",
+        )));
+    }
+
+    if bit_len == 0 {
+        return Err(DiagServiceError::BadPayload(
+            "Cannot extract 0 bits".to_owned(),
+        ));
+    }
+
+    if bit_pos + bit_len > data.len() * 8 {
+        return Err(DiagServiceError::BadPayload(format!(
+            "Bit position {bit_pos} with length {bit_len} exceeds data length {} bits",
+            data.len() * 8
+        )));
+    }
+
+    let result_byte_count = bit_len.div_ceil(8);
+    let mut result_bytes = vec![0u8; result_byte_count];
+
+    for i in 0..bit_len {
+        let src_bit_index = bit_pos + i;
+        let src_byte_index = data.len() - (src_bit_index / 8) - 1;
+        let src_bit_offset = src_bit_index % 8;
+
+        let bit_value = (data[src_byte_index] >> src_bit_offset) & 1;
+
+        let dst_byte_index = result_byte_count - (i / 8) - 1;
+        let dst_bit_offset = i % 8;
+
+        result_bytes[dst_byte_index] |= bit_value << dst_bit_offset;
+    }
+
+    Ok(result_bytes)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn test_extract_bits_standard_length_cases() {
+        let result = extract_bits(4, 5, &[0b_1100_0011, 0b_1010_1000]).unwrap();
+        assert_eq!(result, vec![0b_1101]);
+
+        let result = extract_bits(8, 0, &[0b_1010_1000]).unwrap();
+        assert_eq!(result, vec![0b_1010_1000]);
+
+        let result = extract_bits(8, 0, &[0xff, 0x00]).unwrap();
+        assert_eq!(result, vec![0]);
+
+        // Test standard length with byte alignment
+        // 16 bits from 2 bytes, no offset
+        // Should extract bytes as is since we're starting at bit 0
+        let result = extract_bits(16, 0, &[0xab, 0xcd]).unwrap();
+        assert_eq!(result, vec![0xab, 0xcd]);
+
+        // bits are read LSB first, therefore 18 bits 1, which means 6 most significant bits = 0
+        let result = extract_bits(18, 0, &[0xff, 0xff, 0xff]).unwrap();
+        assert_eq!(result, vec![0b_11, 0xff, 0xff]);
+
+        // Extracting 13 bits starting from bit position 5
+        // 101010111100110101000010 -- input
+        //      1010101111001101010 -- from bit pos 5
+        //            1111001101010 -- 13 bits
+        //        00011110 01101010 -- 2 result bytes
+        let result = extract_bits(13, 5, &[0b_1010_1011, 0b_1100_1101, 0b_0100_0010]).unwrap();
+        assert_eq!(result, vec![0b_0001_1110, 0b_0110_1010]);
+
+        // Extracting 3 bits starting from bit position 5
+        // Byte 0: 0xab = 10101011
+        //
+        // Byte 0: -----101  --> take bits 5-7 from first byte  (total bits 3)
+        let result = extract_bits(3, 5, &[0xab]).unwrap();
+        assert_eq!(result, vec![0b_101]);
+
+        // Extracting 4 bits starting from bit position 6
+        // 1111000000001111 -- input
+        //       1111000000 -- from bit pos 6
+        //          1000000 -- 5 bits
+        let result = extract_bits(7, 6, &[0b_1111_0000, 0b_0000_1111]).unwrap();
+        assert_eq!(result, vec![0b_0100_0000]);
+    }
+
+    #[test]
+    fn test_extract_bits_error_cases() {
+        // Test insufficient data
+        assert!(extract_bits(16, 0, &[0xab]).is_err());
+
+        // Test invalid bit position
+        assert!(extract_bits(8, 8, &[0xff]).is_err());
+
+        // Test zero bits
+        assert!(extract_bits(0, 0, &[0xff]).is_err());
+    }
+
+    #[test]
+    fn test_extract_bits_basic() {
+        let src = [0b_1010_1010];
+        let result = extract_bits(8, 0, &src).unwrap();
+        assert_eq!(result, vec![0b_1010_1010]);
+    }
+}

@@ -17,7 +17,7 @@ use deepsize::DeepSizeOf;
 
 use crate::{
     datatypes::{Id, ParameterMap, option_str_to_string, ref_optional_none},
-    proto::dataformat::{EcuData, param},
+    proto::dataformat::{EcuData, param, param::table_key::TableKeyReference},
 };
 
 #[derive(Debug, Clone)]
@@ -48,6 +48,8 @@ pub enum ParameterValue {
     /// Currently used in the CDA for padding when creating UDS payloads and to provide
     /// values for DTCs, to make sure reserved DTC bits are extracted correctly.
     Reserved(ReservedParam),
+
+    TableStructParam(TableStructParam),
 }
 #[derive(Debug, Clone)]
 #[cfg_attr(feature = "deepsize", derive(DeepSizeOf))]
@@ -72,6 +74,13 @@ pub struct ValueData {
 #[cfg_attr(feature = "deepsize", derive(DeepSizeOf))]
 pub struct ReservedParam {
     pub bit_length: u32,
+}
+
+#[derive(Debug, Clone)]
+#[cfg_attr(feature = "deepsize", derive(DeepSizeOf))]
+pub struct TableStructParam {
+    pub request_byte_pos: u32,
+    pub bit_position: u32,
 }
 
 #[tracing::instrument(
@@ -143,6 +152,74 @@ pub(super) fn get_parameters(ecu_data: &EcuData, _ecu_db_path: &str) -> Paramete
                         .ok_or_else(|| ref_optional_none("PhysConst.dop.ref_pb"))?
                         .value,
                 }),
+                Some(param::SpecificData::TableKey(t)) => t
+                    .table_key_reference
+                    .as_ref()
+                    .ok_or_else(|| {
+                        DiagServiceError::InvalidDatabase("TableKey has no reference.".to_owned())
+                    })
+                    .and_then(|table_key| match table_key {
+                        TableKeyReference::Table(table_ref) => table_ref
+                            .r#ref
+                            .ok_or_else(|| ref_optional_none("Table.ref"))
+                            .and_then(|table_ref_val| {
+                                ecu_data
+                                    .tables
+                                    .iter()
+                                    .find(|table| {
+                                        table
+                                            .id
+                                            .is_some_and(|t_id| t_id.value == table_ref_val.value)
+                                    })
+                                    .ok_or_else(|| {
+                                        DiagServiceError::InvalidDatabase(
+                                            "TableKey reference not found in EcuData.tables"
+                                                .to_owned(),
+                                        )
+                                    })
+                            })
+                            .and_then(|table| {
+                                Ok(ParameterValue::Value(ValueData {
+                                    default_value: Some(STRINGS.get_or_insert(&table.short_name)),
+                                    dop: table
+                                        .key_dop
+                                        .as_ref()
+                                        .ok_or_else(|| {
+                                            DiagServiceError::InvalidDatabase(
+                                                "Param Table has no key DOP set.".to_owned(),
+                                            )
+                                        })?
+                                        .r#ref
+                                        .as_ref()
+                                        .ok_or_else(|| ref_optional_none("Table.key_dop.ref"))?
+                                        .value,
+                                }))
+                            }),
+                        TableKeyReference::TableRow(_row) => {
+                            Err(DiagServiceError::InvalidDatabase(
+                                "TableRow reference not yet implemented".to_owned(),
+                            ))
+                        }
+                    })?,
+                Some(param::SpecificData::TableStruct(t)) => t
+                    .table_key
+                    .iter()
+                    .find_map(|key_ref| {
+                        key_ref.r#ref.and_then(|param_id| {
+                            ecu_data.params.iter().find(|table_key| {
+                                table_key.id.is_some_and(|id| id.value == param_id.value)
+                            })
+                        })
+                    })
+                    .map(|p| {
+                        ParameterValue::TableStructParam(TableStructParam {
+                            request_byte_pos: p.byte_position(),
+                            bit_position: p.bit_position(),
+                        })
+                    })
+                    .ok_or(DiagServiceError::InvalidDatabase(
+                        "TableStruct parameter has no valid TableKey reference.".to_owned(),
+                    ))?,
                 None => {
                     return Err(DiagServiceError::InvalidDatabase(
                         "Param SpecificData not found".to_owned(),

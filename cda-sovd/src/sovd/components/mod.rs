@@ -15,7 +15,10 @@ use cda_interfaces::diagservices::FieldParseError;
 use hashbrown::HashMap;
 use sovd_interfaces::error::DataError;
 
-use crate::sovd::error::{ApiError, VendorErrorCode};
+use crate::sovd::{
+    IntoSovd,
+    error::{ApiError, VendorErrorCode},
+};
 
 pub(crate) mod ecu;
 
@@ -62,6 +65,14 @@ fn field_parse_errors_to_json(
             data_error
         })
         .collect()
+}
+
+impl IntoSovd for FieldParseError {
+    type SovdType = DataError<VendorErrorCode>;
+
+    fn into_sovd(self) -> Self::SovdType {
+        FieldParseErrorWrapper(self).into()
+    }
 }
 
 fn get_content_type_and_accept(

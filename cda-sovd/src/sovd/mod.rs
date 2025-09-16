@@ -35,6 +35,7 @@ use error::{ApiError, api_error_from_diag_response};
 use hashbrown::HashMap;
 use http::{Uri, header};
 use indexmap::IndexMap;
+use schemars::Schema;
 use sovd_interfaces::{components::ecu as sovd_ecu, sovd2uds::FileList};
 use tokio::sync::RwLock;
 use uuid::Uuid;
@@ -56,6 +57,11 @@ pub(crate) mod locks;
 trait IntoSovd {
     type SovdType;
     fn into_sovd(self) -> Self::SovdType;
+}
+
+trait IntoSovdWithSchema {
+    type SovdType;
+    fn into_sovd_with_schema(self, include_schema: bool) -> Result<Self::SovdType, ApiError>;
 }
 
 pub(crate) struct WebserverEcuState<R: DiagServiceResponse, T: UdsEcu + Clone, U: FileManager> {
@@ -447,6 +453,10 @@ fn ecu_route<
             ),
         )
         .api_route("/faults", routing::get_with(faults::get, faults::docs_get))
+        .api_route(
+            "/faults/{id}",
+            routing::get_with(faults::id::get, faults::id::docs_get),
+        )
         .with_state(ecu_state)
         .with_path_items(|op| op.tag(ecu_name));
 
@@ -501,6 +511,17 @@ fn get_octet_stream_payload(
     }
 
     Ok(Some(UdsPayloadData::Raw(body.to_vec())))
+}
+
+/// Helper Fn to convert a serde_json::Value into a schemars::Schema, without cloning
+fn value_to_schema(mut value: serde_json::Value) -> Result<Schema, ApiError> {
+    let value = value
+        .as_object_mut()
+        .map(std::mem::take)
+        .ok_or(ApiError::InternalServerError(Some(
+            "Failed to create schema".to_string(),
+        )))?;
+    Ok(schemars::Schema::from(value))
 }
 
 /// Helper Fn to remove descriptions from a schema, in cases where a

@@ -48,6 +48,31 @@ impl SchemaDescription {
     pub fn into_schema(self) -> Option<schemars::Schema> {
         self.schema
     }
+
+    pub fn get_param_properties(&self) -> Option<&serde_json::Map<String, serde_json::Value>> {
+        let properties = self.schema()?;
+
+        let properties = properties.as_object()?;
+        let response_properties = schema_find_recursive(properties, "properties")?.as_object()?;
+        schema_find_recursive(response_properties, "properties")?.as_object()
+    }
+}
+
+fn schema_find_recursive<'a>(
+    obj: &'a serde_json::Map<String, serde_json::Value>,
+    key: &str,
+) -> Option<&'a serde_json::Value> {
+    for (k, v) in obj {
+        if k == key {
+            return Some(v);
+        }
+        if let Some(nested_obj) = v.as_object()
+            && let Some(found) = schema_find_recursive(nested_obj, key)
+        {
+            return Some(found);
+        }
+    }
+    None
 }
 
 pub trait EcuSchemaProvider {

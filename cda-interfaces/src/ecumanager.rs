@@ -206,10 +206,10 @@ pub trait EcuManager:
     ) -> Result<Vec<ComponentConfigurationsInfo>, DiagServiceError>;
     /// Retrieve all 'single ecu' jobs for the current ECU variant.
     fn get_components_single_ecu_jobs_info(&self) -> Vec<ComponentDataInfo>;
-
+    /// Lookup DTC services for the given service types in the current ECU variant.
     fn lookup_dtc_services(
         &self,
-        service_types: Vec<crate::datatypes::DtcReadInformationFunction>,
+        service_types: Vec<DtcReadInformationFunction>,
     ) -> Result<HashMap<DtcReadInformationFunction, DtcLookup>, DiagServiceError>;
 }
 

@@ -14,16 +14,18 @@
 use std::{sync::Arc, time::Duration};
 
 use cda_database::datatypes::{
-    self, DataType, DiagCodedTypeVariant, DiagnosticDatabase, DiagnosticService, DopFieldValue,
-    DtcDop, LogicalAddressType, Parameter, ParameterValue, StateChart, resolve_comparam,
+    self, DataOperationVariant, DataType, DiagCodedTypeVariant, DiagnosticDatabase,
+    DiagnosticService, DopFieldValue, DtcDop, LogicalAddressType, Parameter, ParameterValue,
+    StateChart, resolve_comparam,
 };
 use cda_interfaces::{
     DiagComm, DiagCommAction, DiagCommType, DiagServiceError, EcuAddressProvider, EcuState,
     Protocol, STRINGS, SecurityAccess, ServicePayload,
     datatypes::{
         AddressingMode, ComParams, ComplexComParamValue, ComponentConfigurationsInfo,
-        ComponentDataInfo, DatabaseNamingConvention, DtcLookup, DtcReadInformationFunction,
-        DtcRecord, RetryPolicy, SdSdg, TesterPresentSendType, semantics, single_ecu,
+        ComponentDataInfo, DTC_CODE_BIT_LEN, DatabaseNamingConvention, DtcLookup,
+        DtcReadInformationFunction, DtcRecord, RetryPolicy, SdSdg, TesterPresentSendType,
+        semantics, single_ecu,
     },
     diagservices::{DiagServiceResponse, DiagServiceResponseType, FieldParseError, UdsPayloadData},
     get_string, get_string_from_option, get_string_from_option_with_default,
@@ -34,7 +36,7 @@ use parking_lot::Mutex;
 use tokio::task::JoinHandle;
 
 use crate::{
-    DTC_CODE_BIT_LEN, DiagDataContainerDtc, MappedResponseData,
+    DiagDataContainerDtc, MappedResponseData,
     diag_kernel::{
         DiagDataValue, Variant,
         diagservices::{
@@ -42,7 +44,7 @@ use crate::{
             MappedDiagServiceResponsePayload,
         },
         into_db_protocol,
-        operations::{self, json_value_to_uds_data, uds_data_to_serializable},
+        operations::{self, json_value_to_uds_data},
         payload::Payload,
         variant_detection,
     },
@@ -1173,25 +1175,32 @@ impl cda_interfaces::EcuManager for EcuManager {
                     .requests
                     .get(&service.request_id)
                     .and_then(|req| {
-                        req.params.iter().find_map(|param_ref| {
-                            self.ecu_data.params.get(param_ref).and_then(|param| {
-                                let sub_function_id = match &param.value {
-                                    ParameterValue::CodedConst(c) => match get_string!(c.value) {
-                                        Ok(name) => name,
-                                        Err(_) => return None,
-                                    },
-                                    _ => return None,
-                                };
+                        let params: Vec<&Parameter> = req
+                            .params
+                            .iter()
+                            .filter_map(|p| self.ecu_data.params.get(p))
+                            .collect();
 
-                                service_types.iter().find_map(|s| {
-                                    if ((*s).clone() as u8).to_string() == *sub_function_id {
-                                        Some((service, s))
-                                    } else {
-                                        None
-                                    }
-                                })
+                        let sub_function_id =
+                            params
+                                .iter()
+                                .find(|p| p.byte_pos == 1)
+                                .and_then(|p| match &p.value {
+                                    ParameterValue::CodedConst(c) => get_string!(c.value).ok(),
+                                    _ => None,
+                                });
+
+                        if let Some(sub_function_id) = sub_function_id {
+                            service_types.iter().find_map(|s| {
+                                if ((*s).clone() as u8).to_string() == *sub_function_id {
+                                    Some((service, s))
+                                } else {
+                                    None
+                                }
                             })
-                        })
+                        } else {
+                            None
+                        }
                     })
             })
             .map(|(service, dtc_service_type)| {
@@ -1225,9 +1234,8 @@ impl cda_interfaces::EcuManager for EcuManager {
 
                 let dtc_dop = self.find_dtc_dop_in_params(params)?;
                 let dtcs: Vec<_> = dtc_dop
-                    .map(|dtc_param| {
-                        dtc_param
-                            .dtc_refs
+                    .map(|dop| {
+                        dop.dtc_refs
                             .iter()
                             .filter_map(|dtc_ref| self.ecu_data.dtcs.get(dtc_ref))
                             .map(|dtc| DtcRecord {
@@ -1783,6 +1791,9 @@ impl EcuManager {
                     }),
                 );
             }
+            ParameterValue::TableStructParam(ref ts) => {
+                tracing::error!("TableStructParam {ts:#?} not implemented.");
+            }
         }
         Ok(())
     }
@@ -1884,7 +1895,7 @@ impl EcuManager {
                     switch_key.bit_position as usize,
                 )?;
 
-                let selector = uds_data_to_serializable(
+                let selector = operations::uds_data_to_serializable(
                     switch_key_diag_type.base_datatype(),
                     None,
                     false,
@@ -2053,7 +2064,9 @@ impl EcuManager {
                             self.map_struct_to_uds(structure_dop, value, payload)
                         }
                         datatypes::DataOperationVariant::StaticField(_static_field_dop) => {
-                            todo!()
+                            Err(DiagServiceError::ParameterConversionError(
+                                "Mapping StaticField DoP to UDS payload not implemented".to_owned(),
+                            ))
                         }
                         datatypes::DataOperationVariant::Mux(mux_dop) => {
                             self.map_mux_to_uds(mux_dop, value, payload)
@@ -2064,6 +2077,12 @@ impl EcuManager {
                             Err(DiagServiceError::InvalidDatabase(
                                 "EnvData(Desc) and DTC DoPs cannot be mapped via parameters to \
                                  request, but handled via a dedicated 'faults' endpoint"
+                                    .to_owned(),
+                            ))
+                        }
+                        DataOperationVariant::DynamicLengthField(_) => {
+                            Err(DiagServiceError::ParameterConversionError(
+                                "Mapping DynamicLengthField DoP to UDS payload not implemented"
                                     .to_owned(),
                             ))
                         }
@@ -2089,6 +2108,9 @@ impl EcuManager {
                 }
                 Ok(())
             }
+            ParameterValue::TableStructParam(_) => Err(DiagServiceError::ParameterConversionError(
+                "Mapping TableStructParam DoP to UDS payload not implemented".to_owned(),
+            )),
         }
     }
 
@@ -2263,12 +2285,9 @@ impl EcuManager {
                 let record = dtc_dop
                     .dtc_refs
                     .iter()
-                    .find_map(|id| {
-                        let dtc = self.ecu_data.dtcs.get(id)?;
-                        if dtc.code == code { Some(dtc) } else { None }
-                    })
+                    .find_map(|id| self.ecu_data.dtcs.get(id))
                     .ok_or(DiagServiceError::BadPayload(format!(
-                        "No DTC with code {code} found in DTC references",
+                        "No DTC with code {code:X} found in DTC references",
                     )))?;
 
                 data.insert(
@@ -2336,6 +2355,100 @@ impl EcuManager {
                 self.map_mux_from_uds(mapped_service, uds_payload, data, short_name, mux_dop)?;
                 uds_payload.pop_slice()?;
             }
+            DataOperationVariant::DynamicLengthField(ref dynamic_length_field_dop) => {
+                let num_items_dop = self
+                    .ecu_data
+                    .data_operations
+                    .get(&dynamic_length_field_dop.num_items_dop)
+                    .ok_or(DiagServiceError::InvalidDatabase(
+                        "DynamicLengthField determine_number_of_items_dop not found".to_owned(),
+                    ))?;
+
+                let num_items_dop = match &num_items_dop.variant {
+                    DataOperationVariant::Normal(n) => n,
+                    _ => {
+                        return Err(DiagServiceError::InvalidDatabase(
+                            "DynamicLengthField num_items_dop is not a NormalDoP".to_owned(),
+                        ));
+                    }
+                };
+
+                let num_items_diag_type = self
+                    .ecu_data
+                    .diag_coded_types
+                    .get(&num_items_dop.diag_type)
+                    .ok_or(DiagServiceError::InvalidDatabase(
+                        "DiagCodedType lookup for DynamicLengthField failed".to_owned(),
+                    ))?;
+
+                let (num_items_data, _bit_len) = num_items_diag_type.decode(
+                    uds_payload.data().get(param.byte_pos as usize..).ok_or(
+                        DiagServiceError::BadPayload(
+                            "Not enough bytes to get DynamicLengthField item count".to_owned(),
+                        ),
+                    )?,
+                    dynamic_length_field_dop.num_items_byte_pos as usize,
+                    dynamic_length_field_dop.num_items_bit_pos as usize,
+                )?;
+
+                let num_items_diag_val = operations::uds_data_to_serializable(
+                    DataType::UInt32, // Using hard coded UInt32 as per ISO 22901-1:2008
+                    None,             // Also according per spec, no compu method defined.
+                    false,
+                    &num_items_data,
+                )?;
+
+                let repeated_dop = self
+                    .ecu_data
+                    .data_operations
+                    .get(&dynamic_length_field_dop.repeated_dop_id)
+                    .ok_or(DiagServiceError::InvalidDatabase(
+                        "DynamicLengthField repeated_dop not found".to_owned(),
+                    ))?;
+
+                let num_items: u32 = num_items_diag_val.try_into()?;
+                uds_payload.set_last_read_byte_pos(
+                    dynamic_length_field_dop.num_items_byte_pos as usize + num_items_data.len(),
+                );
+
+                let mut repeated_data = Vec::new();
+
+                uds_payload.push_slice(
+                    dynamic_length_field_dop.first_element_offset,
+                    uds_payload.len(),
+                )?;
+                let mut start = uds_payload.last_read_byte_pos() + uds_payload.bytes_to_skip();
+
+                for _ in 0..num_items {
+                    uds_payload.push_slice(start, uds_payload.len())?;
+
+                    match &repeated_dop.variant {
+                        DataOperationVariant::Structure(s) => {
+                            let struct_data =
+                                self.map_struct_from_uds(s, mapped_service, uds_payload)?;
+                            repeated_data.push(struct_data);
+                        }
+                        DataOperationVariant::EnvDataDesc(_) => {
+                            tracing::warn!("DynamicLengthField with EnvDataDesc not implemented");
+                        }
+                        _ => {
+                            uds_payload.pop_slice()?;
+                            return Err(DiagServiceError::InvalidDatabase(
+                                "DynamicLengthField repeated_dop is not a StructureDoP".to_owned(),
+                            ));
+                        }
+                    }
+
+                    uds_payload.pop_slice()?;
+                    start += uds_payload.last_read_byte_pos() + uds_payload.bytes_to_skip();
+                }
+                uds_payload.pop_slice()?;
+                uds_payload.set_last_read_byte_pos(start - 1);
+                data.insert(
+                    short_name,
+                    DiagDataTypeContainer::RepeatingStruct(repeated_data),
+                );
+            }
         }
 
         Ok(())
@@ -2394,10 +2507,11 @@ impl EcuManager {
 
                 let switch_key_value = operations::uds_data_to_serializable(
                     switch_key_diag_type.base_datatype(),
-                    None,
+                    Some(&normal_dop.compu_method),
                     false,
                     &switch_key_data,
                 )?;
+                uds_payload.set_bytes_to_skip(switch_key_data.len());
 
                 mux_data.insert(
                     "Selector".to_owned(),
@@ -2412,8 +2526,11 @@ impl EcuManager {
                 let case = mux_case_from_selector_value(mux_dop, &switch_key_value)
                     .or(mux_dop.default_case.as_ref())
                     .ok_or(DiagServiceError::BadPayload(
-                        "Switch key value not found in mux cases and no default case defined"
-                            .to_owned(),
+                        format!(
+                            "Switch key value not found in mux cases and no default case defined \
+                             for MUX {short_name}"
+                        )
+                        .to_owned(),
                     ))?;
 
                 let case_name = get_string!(case.short_name).map_err(|_| {
@@ -3046,6 +3163,67 @@ mod tests {
             structure,
             long_name: None,
         }
+    }
+
+    fn create_ecu_manager_with_dynamic_length_field_service() -> (super::EcuManager, DiagComm, u8) {
+        let mut db = DiagnosticDatabase::default();
+
+        // Create DOPs for structure parameters
+        let num_items_dop = create_normal_dop(&mut db, None, 8, DataType::UInt32);
+        let item_param_dop = create_normal_dop(&mut db, None, 16, DataType::UInt32);
+
+        // Create parameter for number of items
+        let num_items_param = create_value_param(&mut db, "num_items", num_items_dop, 1, 0);
+
+        // Create parameter for the repeated item
+        let item_param = create_value_param(&mut db, "item_param", item_param_dop, 0, 0);
+
+        // Create the structure for the repeated item
+        let item_structure_id = create_structure(&mut db, "item_structure", 2, vec![item_param]);
+
+        // Create DynamicLengthField DoP
+        let dynamic_length_field_dop = create_dop(
+            &mut db,
+            DOPType::Regular,
+            DataOperationVariant::DynamicLengthField(datatypes::DynamicLengthDop {
+                num_items_dop,
+                num_items_byte_pos: 0,
+                num_items_bit_pos: 0,
+                first_element_offset: 1,
+                repeated_dop_id: item_structure_id,
+            }),
+        );
+
+        // Create main parameter that uses the DynamicLengthField
+        let main_param = create_param(
+            &mut db,
+            "main_param",
+            ParameterValue::Value(datatypes::ValueData {
+                default_value: None,
+                dop: dynamic_length_field_dop,
+            }),
+            1,
+            0,
+        );
+
+        let sid = 0x2E_u8;
+        let service = create_service(
+            &mut db,
+            sid,
+            vec![num_items_param],
+            vec![main_param],
+            vec![],
+        );
+
+        let ecu_manager = super::EcuManager::new(
+            db,
+            Protocol::DoIp,
+            &ComParams::default(),
+            DatabaseNamingConvention::default(),
+        )
+        .unwrap();
+
+        (ecu_manager, service, sid)
     }
 
     fn create_ecu_manager_with_struct_service() -> (super::EcuManager, DiagComm, u8) {
@@ -3968,5 +4146,50 @@ mod tests {
         });
 
         assert_eq!(response.serialize_to_json().unwrap().data, expected_json);
+    }
+
+    #[test]
+    fn test_map_dynamic_length_field_from_uds() {
+        let (ecu_manager, service, sid) = create_ecu_manager_with_dynamic_length_field_service();
+        let payload = vec![
+            sid,  // Service ID
+            0x03, // 3 total fields
+            0x11, 0x22, 0x33, 0x44, 0x55, 0x66,
+        ];
+
+        let response = ecu_manager
+            .convert_from_uds(&service, &payload, true)
+            .unwrap();
+
+        let expected_json = json!({
+            "main_param": [
+               { "item_param": 0x1122, },
+               { "item_param": 0x3344, },
+               { "item_param": 0x5566, },
+            ],
+             "test_service_pos_sid": sid
+        });
+
+        assert_eq!(response.serialize_to_json().unwrap().data, expected_json);
+    }
+
+    #[test]
+    fn test_map_dynamic_length_field_from_uds_not_enough_data() {
+        let (ecu_manager, service, sid) = create_ecu_manager_with_dynamic_length_field_service();
+        let payload = vec![
+            sid,  // Service ID
+            0x03, // 3 total fields, but only 2 are provided
+            0x11, 0x22, 0x33, 0x44,
+        ];
+
+        let response = ecu_manager.convert_from_uds(&service, &payload, true);
+
+        assert_eq!(
+            response.err(),
+            Some(DiagServiceError::NotEnoughData {
+                expected: 2,
+                actual: 0
+            })
+        );
     }
 }
