@@ -148,7 +148,7 @@ pub async fn route<R: DiagServiceResponse, T: UdsEcu + SchemaProvider + Clone, U
                 Query<sovd_interfaces::IncludeSchemaQuery>,
                 ApiError,
             >| async move {
-                let schema = if query.include_schema.unwrap_or(false) {
+                let schema = if query.include_schema {
                     Some(crate::sovd::create_schema!(
                         sovd_interfaces::ResourceResponse
                     ))

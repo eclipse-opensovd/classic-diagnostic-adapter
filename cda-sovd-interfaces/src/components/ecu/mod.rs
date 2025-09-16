@@ -415,8 +415,8 @@ pub mod faults {
             pub severity: Option<u32>,
             /// The scope to retrieve faults for. If not provided, all scopes are considered.
             pub scope: Option<String>,
-            #[serde(rename = "include-schema")]
-            pub include_schema: Option<bool>,
+            #[serde(rename = "include-schema", default)]
+            pub include_schema: bool,
         }
 
         #[derive(Serialize, Debug, schemars::JsonSchema)]

@@ -39,7 +39,7 @@ pub(crate) mod single_ecu {
         >,
         State(WebserverEcuState { uds, ecu_name, .. }): State<WebserverEcuState<R, T, U>>,
     ) -> Response {
-        let include_schema = query.include_schema.unwrap_or(false);
+        let include_schema = query.include_schema;
         let schema = if include_schema {
             Some(create_schema!(
                 sovd_interfaces::components::ecu::ComponentData
@@ -88,7 +88,7 @@ pub(crate) mod single_ecu {
             >,
             State(WebserverEcuState { uds, ecu_name, .. }): State<WebserverEcuState<R, T, U>>,
         ) -> Response {
-            let include_schema = query.include_schema.unwrap_or(false);
+            let include_schema = query.include_schema;
             let mut job = match uds
                 .get_single_ecu_job(&ecu_name, &job_name)
                 .await

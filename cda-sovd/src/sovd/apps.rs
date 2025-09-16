@@ -28,12 +28,7 @@ pub(crate) async fn get(
     >,
     OriginalUri(uri): OriginalUri,
 ) -> Response {
-    resource_response(
-        &host,
-        &uri,
-        vec![("sovd2uds", None)],
-        query.include_schema.unwrap_or(false),
-    )
+    resource_response(&host, &uri, vec![("sovd2uds", None)], query.include_schema)
 }
 
 pub(crate) mod sovd2uds {
@@ -47,12 +42,7 @@ pub(crate) mod sovd2uds {
         >,
         OriginalUri(uri): OriginalUri,
     ) -> Response {
-        resource_response(
-            &host,
-            &uri,
-            vec![("bulk-data", None)],
-            query.include_schema.unwrap_or(false),
-        )
+        resource_response(&host, &uri, vec![("bulk-data", None)], query.include_schema)
     }
 
     pub(crate) mod bulk_data {
@@ -70,7 +60,7 @@ pub(crate) mod sovd2uds {
                 &host,
                 &uri,
                 vec![("flashfiles", None)],
-                query.include_schema.unwrap_or(false),
+                query.include_schema,
             )
         }
 
@@ -166,7 +156,7 @@ pub(crate) mod sovd2uds {
                 >,
                 State(state): State<WebserverState>,
             ) -> Response {
-                let include_schema = query.include_schema.unwrap_or(false);
+                let include_schema = query.include_schema;
                 let flash_files = &mut state.flash_data.as_ref().write().await;
                 let files = if let Some(flash_files_path) = &flash_files.path {
                     process_directory(flash_files_path.clone()).await
@@ -251,7 +241,7 @@ pub(crate) mod sovd2uds {
             ) -> Response {
                 let networkstructure_data = gateway.get_network_structure().await.into_sovd();
 
-                let schema = if query.include_schema.unwrap_or(false) {
+                let schema = if query.include_schema {
                     Some(create_schema!(
                         sovd_interfaces::apps::sovd2uds::data::network_structure::get::Response
                     ))

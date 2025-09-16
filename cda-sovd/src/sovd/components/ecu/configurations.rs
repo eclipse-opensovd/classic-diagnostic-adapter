@@ -37,8 +37,7 @@ pub(crate) async fn get<R: DiagServiceResponse, T: UdsEcu + Clone, U: FileManage
         ApiError,
     >,
 ) -> Response {
-    let include_schema = query.include_schema.unwrap_or(false);
-    let schema = if include_schema {
+    let schema = if query.include_schema {
         Some(create_schema!(sovd_configurations::get::Response))
     } else {
         None
@@ -56,7 +55,7 @@ pub(crate) async fn get<R: DiagServiceResponse, T: UdsEcu + Clone, U: FileManage
         }
         Err(e) => ErrorWrapper {
             error: ApiError::from(e),
-            include_schema,
+            include_schema: query.include_schema,
         }
         .into_response(),
     }
@@ -139,7 +138,7 @@ pub(crate) mod diag_service {
         State(WebserverEcuState { ecu_name, uds, .. }): State<WebserverEcuState<R, T, U>>,
         body: Bytes,
     ) -> Response {
-        let include_schema = query.include_schema.unwrap_or(false);
+        let include_schema = query.include_schema;
         if service.contains('/') {
             return ErrorWrapper {
                 error: ApiError::BadRequest("Invalid path".to_owned()),

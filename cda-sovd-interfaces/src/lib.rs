@@ -68,8 +68,8 @@ pub struct ArrayDataItem {
 
 #[derive(Deserialize, schemars::JsonSchema)]
 pub struct IncludeSchemaQuery {
-    #[serde(rename = "include-schema")]
-    pub include_schema: Option<bool>,
+    #[serde(rename = "include-schema", default)]
+    pub include_schema: bool,
 }
 
 pub mod sovd2uds {
