@@ -21,8 +21,8 @@ pub mod get {
 
 #[derive(Deserialize, schemars::JsonSchema)]
 pub struct ComponentQuery {
-    #[serde(rename = "x-include-sdgs")]
-    pub include_sdgs: Option<bool>,
-    #[serde(rename = "include-schema")]
-    pub include_schema: Option<bool>,
+    #[serde(rename = "x-include-sdgs", default)]
+    pub include_sdgs: bool,
+    #[serde(rename = "include-schema", default)]
+    pub include_schema: bool,
 }

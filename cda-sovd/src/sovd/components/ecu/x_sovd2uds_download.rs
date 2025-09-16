@@ -84,7 +84,7 @@ pub(crate) async fn get(
         &host,
         &uri,
         vec![("RequestDownload", Some("requestdownload"))],
-        query.include_schema.unwrap_or(false),
+        query.include_schema,
     )
 }
 
@@ -130,7 +130,7 @@ pub(crate) mod request_download {
         State(WebserverEcuState { ecu_name, uds, .. }): State<WebserverEcuState<R, T, U>>,
         body: Json<sovd2uds::download::request_download::put::Request>,
     ) -> Response {
-        let include_schema = query.include_schema.unwrap_or(false);
+        let include_schema = query.include_schema;
         let schema = if include_schema {
             'schema: {
                 let Ok(service) = uds
@@ -275,7 +275,7 @@ pub(crate) mod flash_transfer {
         }): State<WebserverEcuState<R, T, U>>,
         body: Json<sovd2uds::download::flash_transfer::post::Request>,
     ) -> Response {
-        let include_schema = query.include_schema.unwrap_or(false);
+        let include_schema = query.include_schema;
         match flash_data
             .read()
             .await
@@ -364,7 +364,7 @@ pub(crate) mod flash_transfer {
         >,
         State(WebserverEcuState { ecu_name, uds, .. }): State<WebserverEcuState<R, T, U>>,
     ) -> Response {
-        let include_schema = query.include_schema.unwrap_or(false);
+        let include_schema = query.include_schema;
         let schema = if include_schema {
             Some(create_schema!(
                 sovd2uds::download::flash_transfer::get::Response
@@ -422,7 +422,7 @@ pub(crate) mod flash_transfer {
             >,
             State(WebserverEcuState { ecu_name, uds, .. }): State<WebserverEcuState<R, T, U>>,
         ) -> Response {
-            let include_schema = query.include_schema.unwrap_or(false);
+            let include_schema = query.include_schema;
             match uds.ecu_flash_transfer_status_id(&ecu_name, &id).await {
                 Ok(data) => {
                     let mut data = data.into_sovd();

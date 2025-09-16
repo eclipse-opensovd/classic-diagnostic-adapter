@@ -32,7 +32,7 @@ pub(crate) async fn get(
         &host,
         &uri,
         vec![("mdd-embedded-files", None)],
-        query.include_schema.unwrap_or(false),
+        query.include_schema,
     )
 }
 
@@ -63,7 +63,7 @@ pub(crate) mod mdd_embedded_files {
             mdd_embedded_files, ..
         }): State<WebserverEcuState<R, T, U>>,
     ) -> Response {
-        let schema = if query.include_schema.unwrap_or(false) {
+        let schema = if query.include_schema {
             Some(create_schema!(
                 sovd2uds::bulk_data::embedded_files::get::Response
             ))

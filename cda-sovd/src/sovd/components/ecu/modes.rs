@@ -45,7 +45,7 @@ const SECURITY_NAME: &str = "Security access";
 pub(crate) async fn get(
     WithRejection(Query(query), _): WithRejection<Query<sovd_modes::get::Query>, ApiError>,
 ) -> Response {
-    let schema = if query.include_schema.unwrap_or(false) {
+    let schema = if query.include_schema {
         Some(create_schema!(sovd_modes::get::Response))
     } else {
         None
@@ -129,7 +129,7 @@ pub(crate) mod session {
             ApiError,
         >,
     ) -> Response {
-        let include_schema = query.include_schema.unwrap_or(false);
+        let include_schema = query.include_schema;
         if let Some(response) = validate_lock(&claims, &ecu_name, locks, include_schema).await {
             return response;
         }
@@ -192,7 +192,7 @@ pub(crate) mod session {
         WithRejection(Query(query), _): WithRejection<Query<sovd_modes::get::Query>, ApiError>,
         State(WebserverEcuState { uds, ecu_name, .. }): State<WebserverEcuState<R, T, U>>,
     ) -> Response {
-        let include_schema = query.include_schema.unwrap_or(false);
+        let include_schema = query.include_schema;
         let schema = if include_schema {
             Some(create_schema!(sovd_modes::Mode::<String>))
         } else {
@@ -265,7 +265,7 @@ pub(crate) mod security {
             ..
         }): State<WebserverEcuState<R, T, U>>,
     ) -> Response {
-        let include_schema = query.include_schema.unwrap_or(false);
+        let include_schema = query.include_schema;
         if let Some(value) = validate_lock(&claims, &ecu_name, locks, include_schema).await {
             return value;
         }
@@ -336,7 +336,7 @@ pub(crate) mod security {
             }
         }
 
-        let include_schema = query.include_schema.unwrap_or(false);
+        let include_schema = query.include_schema;
 
         if let Some(value) = validate_lock(&claims, &ecu_name, locks, include_schema).await {
             return value;
@@ -394,7 +394,7 @@ pub(crate) mod security {
             Ok((security_access, response)) => match response.response_type() {
                 DiagServiceResponseType::Positive => match security_access {
                     SecurityAccess::RequestSeed(_) => {
-                        let schema = if query.include_schema.unwrap_or(false) {
+                        let schema = if query.include_schema {
                             Some(create_schema!(SovdRequestSeedResponse))
                         } else {
                             None
@@ -418,7 +418,7 @@ pub(crate) mod security {
                     }
 
                     SecurityAccess::SendKey(_) => {
-                        let schema = if query.include_schema.unwrap_or(false) {
+                        let schema = if query.include_schema {
                             Some(create_schema!(sovd_modes::put::Response::<String>))
                         } else {
                             None

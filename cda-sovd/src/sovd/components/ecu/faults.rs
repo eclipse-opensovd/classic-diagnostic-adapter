@@ -101,7 +101,7 @@ pub(crate) async fn get<
         }
     };
 
-    let schema = if query.include_schema.is_some_and(|v| v) {
+    let schema = if query.include_schema {
         match create_faults_schema() {
             Ok(schema) => Some(schema),
             Err(e) => return e.into_response(),

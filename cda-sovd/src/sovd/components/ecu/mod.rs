@@ -54,7 +54,7 @@ pub(crate) async fn get<R: DiagServiceResponse, T: UdsEcu + Clone, U: FileManage
         ApiError,
     >,
 ) -> impl IntoApiResponse {
-    let include_schema = query.include_schema.unwrap_or(false);
+    let include_schema = query.include_schema;
     let base_path = format!("http://localhost:20002/vehicle/v15/components/{ecu_name}");
     let variant = match uds.get_variant(&ecu_name).await {
         Ok(v) => v,
@@ -67,7 +67,7 @@ pub(crate) async fn get<R: DiagServiceResponse, T: UdsEcu + Clone, U: FileManage
         }
     };
 
-    let sdgs = if query.include_sdgs.unwrap_or(false) {
+    let sdgs = if query.include_sdgs {
         match uds
             .get_sdgs(&ecu_name, None)
             .await

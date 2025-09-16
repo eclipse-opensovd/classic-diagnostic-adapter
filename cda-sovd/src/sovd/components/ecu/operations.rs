@@ -48,7 +48,7 @@ pub(crate) mod comparams {
                 ..
             }): State<WebserverEcuState<R, T, U>>,
         ) -> Response {
-            handler_read(comparam_executions, query.include_schema.unwrap_or(false)).await
+            handler_read(comparam_executions, query.include_schema).await
         }
 
         pub(crate) fn docs_get(op: TransformOperation) -> TransformOperation {
@@ -83,13 +83,7 @@ pub(crate) mod comparams {
             } else {
                 None
             };
-            handler_write(
-                comparam_executions,
-                path,
-                body,
-                query.include_schema.unwrap_or(false),
-            )
-            .await
+            handler_write(comparam_executions, path, body, query.include_schema).await
         }
 
         pub(crate) fn docs_post(op: TransformOperation) -> TransformOperation {
@@ -195,7 +189,7 @@ pub(crate) mod comparams {
                     ..
                 }): State<WebserverEcuState<R, T, U>>,
             ) -> Response {
-                let include_schema = query.include_schema.unwrap_or(false);
+                let include_schema = query.include_schema;
                 let id = match Uuid::parse_str(&id) {
                     Ok(v) => v,
                     Err(e) => {
@@ -343,7 +337,7 @@ pub(crate) mod comparams {
                     ApiError,
                 >,
             ) -> Response {
-                let include_schema = query.include_schema.unwrap_or(false);
+                let include_schema = query.include_schema;
                 let id = match Uuid::parse_str(&id) {
                     Ok(v) => v,
                     Err(e) => {
@@ -467,7 +461,7 @@ pub(crate) mod service {
                 &uds,
                 headers,
                 None,
-                query.include_schema.unwrap_or(false),
+                query.include_schema,
             )
             .await
         }
@@ -502,7 +496,7 @@ pub(crate) mod service {
                 &uds,
                 headers,
                 Some(body),
-                query.include_schema.unwrap_or(false),
+                query.include_schema,
             )
             .await
         }

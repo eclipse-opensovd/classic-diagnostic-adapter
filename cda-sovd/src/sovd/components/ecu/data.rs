@@ -23,8 +23,7 @@ pub(crate) async fn get<R: DiagServiceResponse, T: UdsEcu + Clone, U: FileManage
     >,
     State(WebserverEcuState { ecu_name, uds, .. }): State<WebserverEcuState<R, T, U>>,
 ) -> Response {
-    let include_schema = query.include_schema.unwrap_or(false);
-    let schema = if include_schema {
+    let schema = if query.include_schema {
         Some(create_schema!(
             sovd_interfaces::components::ecu::data::get::Response
         ))
@@ -41,7 +40,7 @@ pub(crate) async fn get<R: DiagServiceResponse, T: UdsEcu + Clone, U: FileManage
         }
         Err(e) => ErrorWrapper {
             error: ApiError::BadRequest(e),
-            include_schema,
+            include_schema: query.include_schema,
         }
         .into_response(),
     }
@@ -177,8 +176,8 @@ pub(crate) mod diag_service {
         >,
         State(WebserverEcuState { ecu_name, uds, .. }): State<WebserverEcuState<R, T, U>>,
     ) -> Response {
-        let include_schema = query.include_schema.unwrap_or(false);
-        if Some(true) == query.include_sdgs {
+        let include_schema = query.include_schema;
+        if query.include_sdgs {
             get_sdgs_handler::<T>(diag_service, &ecu_name, &uds, include_schema).await
         } else {
             if diag_service.contains('/') {
@@ -235,7 +234,7 @@ pub(crate) mod diag_service {
         State(WebserverEcuState { ecu_name, uds, .. }): State<WebserverEcuState<R, T, U>>,
         body: Bytes,
     ) -> Response {
-        let include_schema = query.include_schema.unwrap_or(false);
+        let include_schema = query.include_schema;
         if service.contains('/') {
             return ErrorWrapper {
                 error: ApiError::BadRequest("Invalid path".to_owned()),
