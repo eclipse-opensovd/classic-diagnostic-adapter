@@ -59,6 +59,7 @@ pub enum DataOperationVariant {
     Dtc(DtcDop),
     StaticField(StaticFieldDop),
     Mux(MuxDop),
+    DynamicLengthField(DynamicLengthDop),
 }
 #[derive(Debug)]
 #[cfg_attr(feature = "deepsize", derive(DeepSizeOf))]
@@ -141,6 +142,19 @@ pub struct SwitchKey {
     pub byte_position: u32,
     pub bit_position: u32,
     pub dop: Option<Id>,
+}
+
+#[derive(Debug)]
+#[cfg_attr(feature = "deepsize", derive(DeepSizeOf))]
+pub struct DynamicLengthDop {
+    pub num_items_byte_pos: u32,
+    pub num_items_bit_pos: u32,
+    pub num_items_dop: Id,
+
+    /// Determines the offset from the start of the param to where the repeated
+    /// data begins.
+    pub first_element_offset: usize,
+    pub repeated_dop_id: Id,
 }
 
 #[derive(Debug)]
@@ -246,7 +260,7 @@ pub struct Limit {
     /// For byte fields comparison works like this:
     /// * Values are padded with 0x00 until they are the same length
     /// * Right most byte is least significant (Big endian order)
-    /// * Read large unsigned int from the limit and the comparision target
+    /// * Read large unsigned int from the limit and the comparison target
     ///   and compare numerically.
     pub value: String,
     pub interval_type: IntervalType,
@@ -346,11 +360,7 @@ pub(super) fn get_data_operations(ecu_data: &EcuData) -> DOPMap {
         .dops
         .iter()
         .map(|d| {
-            let dop_id =
-                d.id.as_ref()
-                    .ok_or_else(|| ref_optional_none("DOP.id"))?
-                    .value;
-
+            let dop_id = get_dop_id(d)?;
             let variant = get_dop_variant(d, dop_id, ecu_data)?;
 
             Ok((
@@ -600,10 +610,69 @@ fn get_dop_variant(
                 is_visible: mux.is_visible(),
             })
         }
-        Some(dop::SpecificData::DynamicLengthField(_)) => {
-            return Err(DiagServiceError::ParameterConversionError(
-                "dynamicLengthField not implemented yet".into(),
-            ));
+        Some(dop::SpecificData::DynamicLengthField(dlf)) => {
+            let number_of_items = if let Some(number_of_items) = dlf.determine_number_of_items {
+                number_of_items
+            } else {
+                return Err(DiagServiceError::InvalidDatabase(format!(
+                    "DynamicLengthField DOP id[{dop_id}] without determineNumberOfItems"
+                )));
+            };
+
+            let dop_field = dlf
+                .field
+                .as_ref()
+                .ok_or_else(|| {
+                    DiagServiceError::InvalidDatabase(format!(
+                        "DynamicLengthField DOP id[{dop_id}] without field"
+                    ))
+                })
+                .and_then(|f| {
+                    if let Some(basic_struct) = f
+                        .basic_structure
+                        .and_then(|s| s.r#ref)
+                        .map(|r| r.value)
+                        .and_then(|id| {
+                            ecu_data
+                                .dops
+                                .iter()
+                                .find(|dop| dop.id.is_some_and(|dop_id| dop_id.value == id))
+                        })
+                    {
+                        Ok(basic_struct)
+                    } else if let Some(env_data_desc) = f
+                        .env_data_desc
+                        .and_then(|s| s.r#ref)
+                        .map(|r| r.value)
+                        .and_then(|id| {
+                            ecu_data
+                                .dops
+                                .iter()
+                                .find(|dop| dop.id.is_some_and(|dop_id| dop_id.value == id))
+                        })
+                    {
+                        Ok(env_data_desc)
+                    } else {
+                        Err(DiagServiceError::InvalidDatabase(format!(
+                            "DOP id[{dop_id}] has neither basic_structure nor env_data_desc set"
+                        )))
+                    }
+                })?;
+
+            let repeated_dop_id = get_dop_id(dop_field)?;
+
+            DataOperationVariant::DynamicLengthField(DynamicLengthDop {
+                num_items_byte_pos: number_of_items.byte_position,
+                num_items_bit_pos: number_of_items.bit_position,
+                num_items_dop: number_of_items
+                    .dop
+                    .and_then(|dop_ref| dop_ref.r#ref.map(|ref_id| ref_id.value))
+                    .ok_or(DiagServiceError::InvalidDatabase(
+                        "DynamicLengthField DOP without determineNumberOfItems.dop".to_owned(),
+                    ))?,
+                first_element_offset: dlf.offset as usize,
+                repeated_dop_id,
+            })
         }
         None => {
             return Err(DiagServiceError::InvalidDatabase(format!(
@@ -639,6 +708,14 @@ fn fallback_factors(u: &dataformat::Unit) -> Option<f64> {
     } else {
         None
     }
+}
+
+fn get_dop_id(dop: &dataformat::Dop) -> Result<u32, DiagServiceError> {
+    Ok(dop
+        .id
+        .as_ref()
+        .ok_or_else(|| ref_optional_none("DOP.id"))?
+        .value)
 }
 
 fn get_compu_method(

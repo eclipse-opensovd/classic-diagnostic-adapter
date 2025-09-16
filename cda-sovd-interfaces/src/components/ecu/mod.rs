@@ -200,9 +200,8 @@ pub mod x {
 
                     use crate::Items;
 
-                    #[derive(Serialize, Clone)]
+                    #[derive(Serialize, Clone, schemars::JsonSchema)]
                     #[serde(rename_all = "camelCase")]
-                    #[derive(schemars::JsonSchema)]
                     pub struct DataTransferMetaData {
                         pub acknowledged_bytes: u64,
                         pub blocksize: usize,
@@ -356,40 +355,64 @@ pub mod x {
 
 pub mod faults {
     use super::*;
+
+    /// Representation of a fault / DTC (Diagnostic Trouble Code)
+    /// as described in the OpenSOVD specification.
+    /// The following fields are omitted because the CDA does not provide
+    /// this information:
+    /// * Symptom
+    /// * Translation IDs
+    ///
+    /// This is still compliant with the OpenSOVD specification, as these fields are optional.
+    #[derive(Serialize, schemars::JsonSchema)]
+    pub struct Fault {
+        ///Fault code in the native representation of the entity.
+        pub code: String,
+        // Defines the scope.
+        // The capability description defines which scopes are supported.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        pub scope: Option<String>,
+        /// Display representation of the fault code.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        pub display_code: Option<String>,
+        /// Name / description of the fault code.
+        pub fault_name: String,
+        /// Severity defines the impact of the fault on the system.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        pub severity: Option<u32>,
+        /// Detailed status information as key value pairs.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        pub status: Option<FaultStatus>,
+    }
+
+    #[derive(Serialize, Debug, schemars::JsonSchema)]
+    pub struct FaultStatus {
+        #[serde(skip_serializing_if = "Option::is_none")]
+        pub test_failed: Option<bool>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        pub test_failed_this_operation_cycle: Option<bool>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        pub pending_dtc: Option<bool>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        pub confirmed_dtc: Option<bool>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        pub test_not_completed_since_last_clear: Option<bool>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        pub test_failed_since_last_clear: Option<bool>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        pub test_not_completed_this_operation_cycle: Option<bool>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        pub warning_indicator_requested: Option<bool>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        pub mask: Option<String>,
+    }
+
     pub mod get {
         use super::*;
 
-        /// Representation of a fault / DTC (Diagnostic Trouble Code)
-        /// as described in the OpenSOVD specification.
-        /// The following fields are omitted because the CDA does not provide
-        /// this information:
-        /// * Symptom
-        /// * Translation IDs
-        ///
-        /// This is still compliant with the OpenSOVD specification, as these fields are optional.
-        #[derive(Serialize, schemars::JsonSchema)]
-        pub struct Fault {
-            ///Fault code in the native representation of the entity.
-            pub code: String,
-            // Defines the scope.
-            // The capability description defines which scopes are supported.
-            #[serde(skip_serializing_if = "Option::is_none")]
-            pub scope: Option<String>,
-            /// Display representation of the fault code.
-            #[serde(skip_serializing_if = "Option::is_none")]
-            pub display_code: Option<String>,
-            /// Name / description of the fault code.
-            pub fault_name: String,
-            /// Severity defines the impact of the fault on the system.
-            #[serde(skip_serializing_if = "Option::is_none")]
-            pub severity: Option<u32>,
-            /// Detailed status information as key value pairs.
-            #[serde(skip_serializing_if = "Option::is_none")]
-            pub status: Option<FaultStatus>,
-        }
-
         #[derive(Debug, Serialize, Deserialize, schemars::JsonSchema)]
         /// Query parameters for filtering DTC by the given fields.
+        #[serde(rename_all = "camelCase")]
         pub struct FaultQuery {
             /// Filters the elements based on a status, if the value ia a full match.
             /// To allow multiple values the parameter is repeated. (0..*), they are 'OR' combined.
@@ -419,35 +442,74 @@ pub mod faults {
             pub include_schema: bool,
         }
 
-        #[derive(Serialize, Debug, schemars::JsonSchema)]
-        #[serde(rename_all = "camelCase")]
-        pub struct FaultStatus {
-            #[serde(skip_serializing_if = "Option::is_none")]
-            pub test_failed: Option<bool>,
-            #[serde(skip_serializing_if = "Option::is_none")]
-            pub test_failed_this_operation_cycle: Option<bool>,
-            #[serde(skip_serializing_if = "Option::is_none")]
-            pub pending_dtc: Option<bool>,
-            #[serde(skip_serializing_if = "Option::is_none")]
-            pub confirmed_dtc: Option<bool>,
-            #[serde(skip_serializing_if = "Option::is_none")]
-            pub test_not_completed_since_last_clear: Option<bool>,
-            #[serde(skip_serializing_if = "Option::is_none")]
-            pub test_failed_since_last_clear: Option<bool>,
-            #[serde(skip_serializing_if = "Option::is_none")]
-            pub test_not_completed_this_operation_cycle: Option<bool>,
-            #[serde(skip_serializing_if = "Option::is_none")]
-            pub warning_indicator_requested: Option<bool>,
-            #[serde(skip_serializing_if = "Option::is_none")]
-            pub mask: Option<String>,
-        }
-
         #[derive(Serialize, schemars::JsonSchema)]
         pub struct Response {
             pub items: Vec<Fault>,
             #[schemars(skip)]
             #[serde(skip_serializing_if = "Option::is_none")]
             pub schema: Option<schemars::Schema>,
+        }
+    }
+
+    pub mod id {
+        use super::*;
+        pub mod get {
+            use super::*;
+            use crate::{default_true, error::DataError};
+
+            #[derive(Serialize, Deserialize, schemars::JsonSchema)]
+            #[serde(rename_all = "kebab-case")]
+            pub struct DtcIdQuery {
+                /// If true, extended dtc data from 0x19 06 is included in the response
+                #[serde(default = "default_true")]
+                pub include_extended_data: bool,
+                /// If true, snapshot data from 0x19 04 is included in the response
+                #[serde(default = "default_true")]
+                pub include_snapshot_data: bool,
+                pub include_schema: bool,
+            }
+
+            #[derive(Serialize, schemars::JsonSchema)]
+            pub struct Snapshot {
+                #[serde(rename = "DTCSnapshotRecordNumberOfIdentifiers")]
+                pub number_of_identifiers: u64,
+                #[serde(rename = "DTCSnapshotRecord")]
+                pub record: Vec<serde_json::Value>,
+            }
+
+            #[derive(Serialize, schemars::JsonSchema)]
+            pub struct ExtendedSnapshots<T> {
+                #[serde(skip_serializing_if = "Option::is_none")]
+                pub data: Option<HashMap<String, Snapshot>>,
+                #[serde(skip_serializing_if = "Option::is_none")]
+                pub errors: Option<Vec<DataError<T>>>,
+            }
+
+            #[derive(Serialize, schemars::JsonSchema)]
+            pub struct ExtendedDataRecords<T> {
+                #[serde(skip_serializing_if = "Option::is_none")]
+                pub data: Option<HashMap<String, serde_json::Value>>,
+                #[serde(skip_serializing_if = "Option::is_none")]
+                pub errors: Option<Vec<DataError<T>>>,
+            }
+
+            #[derive(Serialize, schemars::JsonSchema)]
+            pub struct EnvironmentData<T> {
+                #[serde(skip_serializing_if = "Option::is_none")]
+                pub extended_data_records: Option<ExtendedDataRecords<T>>,
+
+                #[serde(skip_serializing_if = "Option::is_none")]
+                pub snapshots: Option<ExtendedSnapshots<T>>,
+            }
+
+            #[derive(Serialize, schemars::JsonSchema)]
+            pub struct ExtendedFault<T> {
+                pub item: Fault,
+                #[serde(skip_serializing_if = "Option::is_none")]
+                pub environment_data: Option<EnvironmentData<T>>,
+                #[serde(skip_serializing_if = "Option::is_none")]
+                pub schema: Option<schemars::Schema>,
+            }
         }
     }
 }

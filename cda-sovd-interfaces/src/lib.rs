@@ -21,6 +21,10 @@ pub mod components;
 pub mod error;
 pub mod locking;
 
+fn default_true() -> bool {
+    true
+}
+
 pub trait Payload {
     fn get_data_map(&self) -> HashMap<String, serde_json::Value>;
 }

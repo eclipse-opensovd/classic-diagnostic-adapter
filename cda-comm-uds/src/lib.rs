@@ -18,13 +18,16 @@ use std::{
 };
 
 use cda_interfaces::{
-    DiagComm, DiagCommAction, DiagCommType, DiagServiceError, EcuGateway, EcuManager,
-    SchemaProvider, SecurityAccess, ServicePayload, TesterPresentControlMessage, TesterPresentMode,
-    TesterPresentType, TransmissionParameters, UdsEcu, UdsResponse, datatypes,
+    DiagComm, DiagCommAction, DiagCommType, DiagServiceError,
+    DiagServiceError::InvalidRequest,
+    EcuGateway, EcuManager, SchemaDescription, SchemaProvider, SecurityAccess, ServicePayload,
+    TesterPresentControlMessage, TesterPresentMode, TesterPresentType, TransmissionParameters,
+    UdsEcu, UdsResponse, datatypes,
     datatypes::{
-        ComponentConfigurationsInfo, DataTransferError, DataTransferMetaData, DataTransferStatus,
-        DtcMask, DtcReadInformationFunction, DtcRecordAndStatus, Ecu, Gateway, NetworkStructure,
-        RetryPolicy,
+        ComponentConfigurationsInfo, DTC_CODE_BIT_LEN, DataTransferError, DataTransferMetaData,
+        DataTransferStatus, DtcCode, DtcExtendedInfo, DtcMask, DtcReadInformationFunction,
+        DtcRecordAndStatus, DtcSnapshot, Ecu, ExtendedDataRecords, ExtendedSnapshots, Gateway,
+        NetworkStructure, RetryPolicy,
     },
     diagservices::{DiagServiceResponse, DiagServiceResponseType, UdsPayloadData},
     service_ids,
@@ -563,6 +566,224 @@ impl<S: EcuGateway, R: DiagServiceResponse, T: EcuManager<Response = R>> UdsMana
             Ok(_) => Ok(()),
             Err(e) => Err(e),
         }
+    }
+
+    async fn request_extended_data(
+        &self,
+        ecu_name: &str,
+        dtc_code: DtcCode,
+        service_types: Vec<DtcReadInformationFunction>,
+        include_schema: bool,
+    ) -> Result<(R, String, Option<SchemaDescription>), DiagServiceError> {
+        let ecu = self.ecus.get(ecu_name).ok_or(DiagServiceError::NotFound)?;
+        let (_, extended_data_lookup) = ecu
+            .read()
+            .await
+            .lookup_dtc_services(service_types)?
+            .into_iter()
+            .find(|(_, lookup)| lookup.dtcs.iter().any(|dtc| dtc.code == dtc_code))
+            .ok_or(DiagServiceError::InvalidRequest(format!(
+                "DTC {dtc_code:X} not found in ECU {ecu_name}"
+            )))?;
+
+        let mut raw_payload = cda_interfaces::util::extract_bits(
+            DTC_CODE_BIT_LEN as usize,
+            0,
+            &dtc_code.to_be_bytes(),
+        )?;
+        raw_payload.push(0xFF); // record number, 0xFF means all records or all memory
+        let uds_payload = UdsPayloadData::Raw(raw_payload);
+
+        let schema = if include_schema {
+            Some(
+                self.schema_for_responses(ecu_name, &extended_data_lookup.service)
+                    .await?,
+            )
+        } else {
+            None
+        };
+
+        let response = self
+            .send(
+                ecu_name,
+                extended_data_lookup.service,
+                Some(uds_payload),
+                true,
+            )
+            .await?;
+
+        Ok((response, extended_data_lookup.scope, schema))
+    }
+
+    async fn map_extended_data(
+        &self,
+        ecu_name: &str,
+        dtc_code: DtcCode,
+        include_schema: bool,
+    ) -> Result<(Option<ExtendedDataRecords>, Option<serde_json::Value>), DiagServiceError> {
+        fn extract_schema_properties(schema_desc: &SchemaDescription) -> Option<serde_json::Value> {
+            // todo after solving #54: we are missing the 'Selector' and the case name here
+            let schema = schema_desc
+                .get_param_properties()?
+                .values()
+                .filter_map(|p| p.as_object())
+                .find(|obj| obj.contains_key("any-of"));
+
+            schema.map(|schema| serde_json::Value::Object(schema.clone()))
+        }
+
+        let (extended_data_response, _scope, schema_desc) = self
+            .request_extended_data(
+                ecu_name,
+                dtc_code,
+                vec![
+                    DtcReadInformationFunction::FaultMemoryExtDataRecordByDtcNumber,
+                    DtcReadInformationFunction::UserMemoryDtcExtDataRecordByDtcNumber,
+                ],
+                include_schema,
+            )
+            .await?;
+
+        let schema = if include_schema {
+            extract_schema_properties(&schema_desc.ok_or(DiagServiceError::InvalidRequest(
+                "Schema requested but not found".to_string(),
+            ))?)
+        } else {
+            None
+        };
+
+        let extended_data_json = extended_data_response.into_json()?;
+        let extended_data: Option<HashMap<_, _>> =
+            extended_data_json.data.as_object().and_then(|obj| {
+                obj.iter()
+                    .find_map(|(_, value)| value.as_array())
+                    .map(|arr| {
+                        arr.iter()
+                            .filter_map(|item| {
+                                item.as_object().and_then(|obj| {
+                                    let record = obj.iter().find_map(|(_, v)| v.as_object());
+                                    let record_number = obj.iter().find_map(|(_, v)| {
+                                        if !v.is_object() { Some(v) } else { None }
+                                    });
+
+                                    if let (Some(record_number), Some(record)) =
+                                        (record_number, record)
+                                    {
+                                        Some((
+                                            record_number.to_string().replace('"', ""),
+                                            serde_json::Value::Object(record.clone()),
+                                        ))
+                                    } else {
+                                        None
+                                    }
+                                })
+                            })
+                            .collect::<HashMap<_, _>>()
+                    })
+            });
+
+        Ok((
+            Some(ExtendedDataRecords {
+                data: extended_data,
+                errors: if extended_data_json.errors.is_empty() {
+                    None
+                } else {
+                    Some(extended_data_json.errors)
+                },
+            }),
+            schema,
+        ))
+    }
+
+    async fn map_snapshots(
+        &self,
+        ecu_name: &str,
+        dtc_code: DtcCode,
+        include_schema: bool,
+    ) -> Result<(Option<ExtendedSnapshots>, Option<serde_json::Value>), DiagServiceError> {
+        fn extract_schema_properties(schema_desc: &SchemaDescription) -> Option<serde_json::Value> {
+            let param_properties = schema_desc.get_param_properties()?;
+            let mut schema = serde_json::Map::new();
+
+            // Todo when solving #54: We are missing the mux case name in the schema.
+            for (key, value) in param_properties.iter() {
+                if value.is_array() || value.get("type").is_some_and(|t| t == "integer") {
+                    schema.insert(key.clone(), value.clone());
+                }
+            }
+
+            if schema.is_empty() {
+                None
+            } else {
+                Some(serde_json::Value::Object(schema))
+            }
+        }
+
+        let (snapshot_data_response, _scope, schema_desc) = self
+            .request_extended_data(
+                ecu_name,
+                dtc_code,
+                vec![
+                    DtcReadInformationFunction::FaultMemorySnapshotRecordByDtcNumber,
+                    DtcReadInformationFunction::UserMemoryDtcSnapshotRecordByDtcNumber,
+                ],
+                include_schema,
+            )
+            .await?;
+
+        let schema = if include_schema {
+            extract_schema_properties(&schema_desc.ok_or(DiagServiceError::InvalidRequest(
+                "Schema requested but not found".to_string(),
+            ))?)
+        } else {
+            None
+        };
+
+        let snapshot_json = snapshot_data_response.into_json()?;
+        let snapshot_data: Option<HashMap<_, _>> = snapshot_json
+            .data
+            .as_object()
+            .and_then(|obj| obj.values().find_map(|value| value.as_array()))
+            .map(|params| {
+                params
+                    .iter()
+                    .filter_map(|param| param.as_object())
+                    .flat_map(|obj| {
+                        let records = obj.values().find_map(|v| v.as_array());
+                        let number_of_identifiers = obj.values().find_map(|v| v.as_number());
+                        let record_number_of_snapshot = obj.values().find(|v| v.is_string());
+                        if let (
+                            Some(records),
+                            Some(number_of_identifiers),
+                            Some(record_number_of_snapshot),
+                        ) = (records, number_of_identifiers, record_number_of_snapshot)
+                        {
+                            Some((
+                                record_number_of_snapshot.to_string().replace('"', ""),
+                                (DtcSnapshot {
+                                    number_of_identifiers: number_of_identifiers
+                                        .as_u64()
+                                        .unwrap_or_default(),
+                                    record: records.clone(),
+                                }),
+                            ))
+                        } else {
+                            None
+                        }
+                    })
+                    .collect()
+            });
+        Ok((
+            Some(ExtendedSnapshots {
+                data: snapshot_data,
+                errors: if snapshot_json.errors.is_empty() {
+                    None
+                } else {
+                    Some(snapshot_json.errors)
+                },
+            }),
+            schema,
+        ))
     }
 }
 
@@ -1149,7 +1370,7 @@ impl<S: EcuGateway, R: DiagServiceResponse, T: EcuManager<Response = R>> UdsEcu
         status: Option<HashMap<String, serde_json::Value>>,
         severity: Option<u32>,
         scope: Option<String>,
-    ) -> Result<Vec<DtcRecordAndStatus>, DiagServiceError> {
+    ) -> Result<HashMap<DtcCode, DtcRecordAndStatus>, DiagServiceError> {
         let ecu = self.ecus.get(ecu_name).ok_or(DiagServiceError::NotFound)?;
         let mut all_dtcs = HashMap::new();
         let scoped_services: Vec<_> = ecu
@@ -1163,7 +1384,7 @@ impl<S: EcuGateway, R: DiagServiceResponse, T: EcuManager<Response = R>> UdsEcu
             .filter(|(_, lookup)| {
                 scope
                     .as_ref()
-                    .is_none_or(|scope| *scope == lookup.scope.to_lowercase())
+                    .is_none_or(|scope| scope.to_lowercase() == lookup.scope.to_lowercase())
             })
             .collect();
         if scoped_services.is_empty() {
@@ -1241,9 +1462,48 @@ impl<S: EcuGateway, R: DiagServiceResponse, T: EcuManager<Response = R>> UdsEcu
         }
 
         Ok(all_dtcs
-            .into_values()
-            .filter(|dtc| severity.as_ref().is_none_or(|s| dtc.record.severity <= *s))
-            .collect::<Vec<_>>())
+            .into_iter()
+            .filter(|(_code, dtc)| severity.as_ref().is_none_or(|s| dtc.record.severity <= *s))
+            .collect())
+    }
+
+    async fn ecu_dtc_extended(
+        &self,
+        ecu_name: &str,
+        sae_dtc: &str,
+        include_extended_data: bool,
+        include_snapshot: bool,
+        include_schema: bool,
+    ) -> Result<DtcExtendedInfo, DiagServiceError> {
+        let dtc_code = sae_to_dtc_code(sae_dtc)?;
+
+        let (snapshots, snapshot_schema) = if include_snapshot {
+            self.map_snapshots(ecu_name, dtc_code, include_schema)
+                .await?
+        } else {
+            (None, None)
+        };
+
+        let (extended_records, extended_schema) = if include_extended_data {
+            self.map_extended_data(ecu_name, dtc_code, include_schema)
+                .await?
+        } else {
+            (None, None)
+        };
+
+        let mut dtc_by_mask = self.ecu_dtc_by_mask(ecu_name, None, None, None).await?;
+
+        let record_and_status = dtc_by_mask.remove(&dtc_code).ok_or(InvalidRequest(format!(
+            "DTC {sae_dtc} not found in ECU {ecu_name}"
+        )))?;
+
+        Ok(DtcExtendedInfo {
+            record_and_status,
+            extended_data_records: extended_records,
+            extended_data_records_schema: extended_schema,
+            snapshots,
+            snapshots_schema: snapshot_schema,
+        })
     }
 }
 
@@ -1371,4 +1631,61 @@ fn validate_timeout_by_policy(
             Ok(())
         }
     }
+}
+
+fn sae_to_dtc_code(sae_dtc: &str) -> Result<DtcCode, DiagServiceError> {
+    if sae_dtc.len() != 7 {
+        return Err(InvalidRequest(format!("Invalid SAE dtc code '{sae_dtc}'")));
+    }
+
+    // All urls are converted to lowercase, thus we do the same here,
+    // even if SAE dtc codes are usually uppercase.
+    let sae_dtc = sae_dtc.to_lowercase();
+
+    // System
+    // 00 - Powertrain (P)
+    // 01 - Chassis (C)
+    // 10 - Body (B)
+    // 11 - Network Communications (U)
+    let system = match sae_dtc.chars().next().ok_or(InvalidRequest(format!(
+        "Invalid SAE dtc code '{sae_dtc}', missing system"
+    )))? {
+        'p' => 0,
+        'c' => 1,
+        'b' => 2,
+        'u' => 3,
+        _ => {
+            return Err(InvalidRequest(format!(
+                "Unknown system digit in SAE dtc code '{sae_dtc}'"
+            )));
+        }
+    };
+
+    // Group:
+    // 00 - SAE/ISO Controlled (0)
+    // 01 - Manufacturer Controlled (1)
+    // 10 - For (P) SAE/ISO / Rest Manufacturer Controlled (2)
+    // 11 - SAE/ISO Controlled (3)
+    let group = match sae_dtc.chars().nth(1).ok_or(InvalidRequest(format!(
+        "Invalid SAE dtc code '{sae_dtc}', missing group"
+    )))? {
+        '0' => 0,
+        '1' => 1,
+        '2' => 2,
+        '3' => 3,
+        _ => {
+            return Err(InvalidRequest(format!(
+                "Unknown group digit in SAE dtc code '{sae_dtc}'"
+            )));
+        }
+    };
+
+    let hex_part = &sae_dtc[2..];
+    let code = DtcCode::from_str_radix(hex_part, 16).map_err(|_| {
+        InvalidRequest(format!(
+            "Invalid hex characters in SAE dtc code '{sae_dtc}'"
+        ))
+    })?;
+
+    Ok((system << 22) | (group << 20) | code)
 }

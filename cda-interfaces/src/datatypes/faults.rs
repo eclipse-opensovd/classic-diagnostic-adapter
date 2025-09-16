@@ -10,18 +10,21 @@
  *
  * SPDX-License-Identifier: Apache-2.0
  */
-
+use hashbrown::HashMap;
 use serde::{Deserialize, Serialize};
+use strum::IntoEnumIterator;
 
-use crate::DiagComm;
+use crate::{DiagComm, diagservices::FieldParseError};
 
 pub type DtcCode = u32;
+
+pub const DTC_CODE_BIT_LEN: u32 = 24;
 
 /// Provides the supported Types of DTC functions
 /// Essentially the byte values
 /// are sub functions for service 0x19 (Read DTC information)
 #[repr(u8)]
-#[derive(Clone, PartialEq, Eq, Hash)]
+#[derive(Clone, PartialEq, Eq, Hash, strum_macros::EnumIter)]
 pub enum DtcReadInformationFunction {
     FaultMemoryByStatusMask = 0x02,
     FaultMemorySnapshotRecordByDtcNumber = 0x04,
@@ -37,19 +40,22 @@ impl DtcReadInformationFunction {
     /// Otherwise, the functional class name will be used instead.
     pub fn default_scope(&self) -> &str {
         match self {
-            DtcReadInformationFunction::FaultMemoryByStatusMask
-            | DtcReadInformationFunction::FaultMemoryExtDataRecordByDtcNumber
-            | DtcReadInformationFunction::FaultMemorySnapshotRecordByDtcNumber => "FaultMem",
-            DtcReadInformationFunction::UserMemoryDtcByStatusMask
-            | DtcReadInformationFunction::UserMemoryDtcExtDataRecordByDtcNumber
-            | DtcReadInformationFunction::UserMemoryDtcSnapshotRecordByDtcNumber => "UserMem",
+            Self::FaultMemoryByStatusMask
+            | Self::FaultMemoryExtDataRecordByDtcNumber
+            | Self::FaultMemorySnapshotRecordByDtcNumber => "FaultMem",
+            Self::UserMemoryDtcByStatusMask
+            | Self::UserMemoryDtcExtDataRecordByDtcNumber
+            | Self::UserMemoryDtcSnapshotRecordByDtcNumber => "UserMem",
         }
+    }
+
+    pub fn all() -> Vec<Self> {
+        Self::iter().collect()
     }
 }
 
 #[repr(u8)]
 #[derive(Clone, strum_macros::EnumIter, strum_macros::Display, strum_macros::EnumString)]
-#[strum(serialize_all = "camelCase")]
 pub enum DtcMask {
     TestFailed = 0x01,
     TestFailedThisOperationCycle = 0x02,
@@ -61,12 +67,21 @@ pub enum DtcMask {
     WarningIndicatorRequested = 0x80,
 }
 
+impl DtcMask {
+    pub fn all_bits() -> u8 {
+        let mut mask = 0u8;
+        Self::iter().for_each(|m| mask |= m as u8);
+        mask
+    }
+}
+
 pub struct DtcLookup {
     pub scope: String,
     pub service: DiagComm,
     pub dtcs: Vec<DtcRecord>,
 }
 
+#[derive(Debug)]
 pub struct DtcRecord {
     pub code: DtcCode,
     pub display_code: Option<String>,
@@ -76,6 +91,7 @@ pub struct DtcRecord {
 
 /// Used to describe the position of a DTC field in the UDS payload.
 /// Necessary to parse DTCs from the raw UDS response.
+#[derive(Debug)]
 pub struct DtcField {
     pub bit_pos: u32,
     pub bit_len: u32,
@@ -83,7 +99,6 @@ pub struct DtcField {
 }
 
 #[derive(Serialize, Deserialize, Debug, Default)]
-#[serde(rename_all = "camelCase")]
 pub struct DtcStatus {
     pub test_failed: bool,
     pub test_failed_this_operation_cycle: bool,
@@ -96,8 +111,33 @@ pub struct DtcStatus {
     pub mask: u8,
 }
 
+#[derive(Debug)]
 pub struct DtcRecordAndStatus {
     pub record: DtcRecord,
     pub scope: String,
     pub status: DtcStatus,
+}
+
+#[derive(Debug)]
+pub struct DtcSnapshot {
+    pub number_of_identifiers: u64,
+    pub record: Vec<serde_json::Value>,
+}
+
+pub struct ExtendedSnapshots {
+    pub data: Option<HashMap<String, DtcSnapshot>>,
+    pub errors: Option<Vec<FieldParseError>>,
+}
+
+pub struct ExtendedDataRecords {
+    pub data: Option<HashMap<String, serde_json::Value>>,
+    pub errors: Option<Vec<FieldParseError>>,
+}
+
+pub struct DtcExtendedInfo {
+    pub record_and_status: DtcRecordAndStatus,
+    pub extended_data_records: Option<ExtendedDataRecords>,
+    pub extended_data_records_schema: Option<serde_json::Value>,
+    pub snapshots: Option<ExtendedSnapshots>,
+    pub snapshots_schema: Option<serde_json::Value>,
 }

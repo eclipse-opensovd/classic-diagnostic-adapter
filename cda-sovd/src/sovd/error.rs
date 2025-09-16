@@ -152,7 +152,7 @@ pub enum VendorErrorCode {
     BadRequest,
     /// The request could not be completed within the configured time limit.
     RequestTimeout,
-    /// An error occured when trying to convert the UDS message to JSON
+    /// An error occurred when trying to convert the UDS message to JSON
     ///
     /// eg. A Value received by the ECU was outside of the expected range
     ErrorInterpretingMessage,

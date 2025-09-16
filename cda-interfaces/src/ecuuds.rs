@@ -19,7 +19,7 @@ use crate::{
     DiagComm, DiagServiceError, SecurityAccess,
     datatypes::{
         ComplexComParamValue, ComponentConfigurationsInfo, ComponentDataInfo, DataTransferMetaData,
-        DtcRecordAndStatus, NetworkStructure, SdSdg, single_ecu,
+        DtcCode, DtcExtendedInfo, DtcRecordAndStatus, NetworkStructure, SdSdg, single_ecu,
     },
     diagservices::{DiagServiceResponse, UdsPayloadData},
 };
@@ -254,11 +254,24 @@ pub trait UdsEcu: Send + Sync + 'static {
     fn start_variant_detection(&self) -> impl Future<Output = ()> + Send;
 
     // Retrieve all faults for the given ECU, with optional filtering by status, severity and scope.
+    // W/o fmt::skip 'impl Future...' is put on the same line by rustfmt,
+    // then it complains about the line being too long...
+    #[rustfmt::skip]
     fn ecu_dtc_by_mask(
         &self,
         ecu_name: &str,
         status: Option<HashMap<String, serde_json::Value>>,
         severity: Option<u32>,
         scope: Option<String>,
-    ) -> impl Future<Output = Result<Vec<DtcRecordAndStatus>, DiagServiceError>> + Send;
+    ) -> impl
+        Future<Output = Result<HashMap<DtcCode, DtcRecordAndStatus>, DiagServiceError>> + Send;
+
+    fn ecu_dtc_extended(
+        &self,
+        ecu_name: &str,
+        sae_dtc: &str,
+        include_extended_data: bool,
+        include_snapshot: bool,
+        include_schema: bool,
+    ) -> impl Future<Output = Result<DtcExtendedInfo, DiagServiceError>> + Send;
 }

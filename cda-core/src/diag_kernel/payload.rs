@@ -20,6 +20,7 @@ pub(in crate::diag_kernel) struct Payload<'a> {
     current_index: usize,
     slices: VecDeque<(usize, usize)>,
     last_read_byte_pos: usize,
+    bytes_to_skip: usize,
 }
 
 impl<'a> Payload<'a> {
@@ -29,6 +30,7 @@ impl<'a> Payload<'a> {
             current_index: 0,
             slices: VecDeque::new(),
             last_read_byte_pos: 0,
+            bytes_to_skip: 0,
         }
     }
     pub(in crate::diag_kernel) fn set_last_read_byte_pos(&mut self, pos: usize) {
@@ -37,6 +39,14 @@ impl<'a> Payload<'a> {
         } else {
             self.last_read_byte_pos = pos;
         }
+    }
+
+    pub(in crate::diag_kernel) fn set_bytes_to_skip(&mut self, count: usize) {
+        self.bytes_to_skip += count;
+    }
+
+    pub(in crate::diag_kernel) fn bytes_to_skip(&self) -> usize {
+        self.bytes_to_skip
     }
 
     pub(in crate::diag_kernel) fn last_read_byte_pos(&self) -> usize {
@@ -60,13 +70,14 @@ impl<'a> Payload<'a> {
     }
 
     pub(in crate::diag_kernel) fn consume(&mut self) {
-        let advance_len = self.last_read_byte_pos;
+        let advance_len = self.last_read_byte_pos + self.bytes_to_skip;
         if self.pos() + advance_len > self.data.len() {
             self.current_index = self.data.len(); // Move to the end if we exceed
         } else {
             self.current_index += advance_len;
         }
         self.last_read_byte_pos = 0;
+        self.bytes_to_skip = 0;
     }
 
     pub(in crate::diag_kernel) fn len(&self) -> usize {

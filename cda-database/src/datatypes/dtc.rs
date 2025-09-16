@@ -11,7 +11,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-use cda_interfaces::{DiagServiceError, StringId};
+use cda_interfaces::{DiagServiceError, StringId, datatypes::DtcCode};
 #[cfg(feature = "deepsize")]
 use deepsize::DeepSizeOf;
 
@@ -23,7 +23,7 @@ use crate::{
 #[derive(Debug, Clone)]
 #[cfg_attr(feature = "deepsize", derive(DeepSizeOf))]
 pub struct Dtc {
-    pub code: u32,
+    pub code: DtcCode,
     pub display_code: Option<StringId>,
     pub fault_name: Option<StringId>,
     pub severity: u32,

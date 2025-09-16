@@ -11,7 +11,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-use cda_database::datatypes::{self, DiagnosticDatabase, DopFieldValue};
+use cda_database::datatypes::{self, DataOperationVariant, DiagnosticDatabase, DopFieldValue};
 use cda_interfaces::{
     DiagComm, DiagServiceError, EcuAddressProvider, EcuSchemaProvider, Id, STRINGS,
     SchemaDescription,
@@ -288,6 +288,43 @@ fn params_to_schema(
                     name,
                     map_mux_to_schema(mux_dop, ctx, ecu_db, request_id).into(),
                 );
+            }
+            datatypes::DataOperationVariant::DynamicLengthField(dynamic_length_field) => {
+                let repeated_dop = if let Some(dop) = ecu_db
+                    .data_operations
+                    .get(&dynamic_length_field.repeated_dop_id)
+                {
+                    dop
+                } else {
+                    tracing::trace!(
+                        "Mapping {ctx}: Repeated DOP not found in ECU database. skipping"
+                    );
+                    continue;
+                };
+
+                match &repeated_dop.variant {
+                    DataOperationVariant::Structure(structure_dop) => {
+                        if let Some(struct_schema) =
+                            map_struct_to_schema(structure_dop, ctx, ecu_db, request_id)
+                        {
+                            schema
+                                .insert(name, serde_json::Value::Array(vec![struct_schema.into()]));
+                        }
+                    }
+                    DataOperationVariant::EnvDataDesc(_) => {
+                        tracing::trace!(
+                            "Mapping {ctx}: Repeated DOP is an EnvDataDesc which is not yet \
+                             supported in JSON Schema. skipping"
+                        );
+                    }
+                    _ => {
+                        tracing::trace!(
+                            "Mapping {ctx}: Repeated DOP is not a Structure or EnvDataDesc. \
+                             skipping"
+                        );
+                        continue;
+                    }
+                }
             }
         }
     }
