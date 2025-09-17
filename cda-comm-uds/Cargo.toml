@@ -18,26 +18,20 @@ path = "src/lib.rs"
 # internal dependencies
 cda-interfaces = { workspace = true }
 # external
-hashbrown = { version = "0.15", features = ["serde"] }
+hashbrown = { workspace = true, features = ["serde"] }
 
 # tls
-openssl = { version = "0.10", features = ["vendored"] }
+openssl = { workspace = true, features = ["vendored"] }
 
-socket2 = { version = "0.5", features = ["all"] }
+socket2 = { workspace = true, features = ["all"] }
 #tokio
-tokio = { version = "1.43.0", default-features = false, features = [
-  "sync",
-  "fs",
-  "time",
-  "rt",
-  "io-util",
-] }
+tokio = { workspace = true, features = ["sync", "fs", "time", "rt", "io-util"] }
 
-serde_json = "1.0"
+serde_json = { workspace = true }
 
 # logging & tracing
-tracing = "0.1.41"
-strum = "0.27.2"
+tracing = { workspace = true }
+strum = { workspace = true }
 
 [features]
 default = []

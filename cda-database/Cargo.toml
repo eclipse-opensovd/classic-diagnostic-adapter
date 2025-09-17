@@ -18,31 +18,26 @@ path = "src/lib.rs"
 # internal dependencies
 cda-interfaces = { workspace = true }
 # external
-hashbrown = { version = "0.15", features = ["serde"] }
-prost = "0.14"
+hashbrown = { workspace = true, features = ["serde"] }
+prost = { workspace = true }
 # tokio
-tokio = { version = "1.43.0", default-features = false, features = [
-  "rt",
-  "sync",
-  "io-util",
-  "time",
-] }
+tokio = { workspace = true, features = ["rt", "sync", "io-util", "time"] }
 # v4 - Version 4 UUIDs with random data.
-uuid = { version = "1.16.0", features = ["v4"] }
-xz2 = { version = "0.1.6", features = ["static"] }
+uuid = { workspace = true, features = ["v4"] }
+xz2 = { workspace = true, features = ["static"] }
 
 # logging
-tracing = "0.1.41"
+tracing = { workspace = true }
 
 # runtime size info
-deepsize = { version = "0.2.0", features = ["hashbrown"], optional = true }
+deepsize = { workspace = true, features = ["hashbrown"], optional = true }
 
 # serde
-serde = { version = "1.0", features = ["derive"] }
-serde_json = "1.0"
+serde = { workspace = true, features = ["derive"] }
+serde_json = { workspace = true }
 
 [build-dependencies]
-prost-build = "0.14.1"
+prost-build = { workspace = true }
 
 [features]
 default = []
