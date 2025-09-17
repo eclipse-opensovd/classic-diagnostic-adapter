@@ -18,24 +18,20 @@ path = "src/lib.rs"
 # internal dependencies
 cda-interfaces = { workspace = true }
 # external
-hashbrown = { version = "0.15", features = ["serde"] }
+hashbrown = { workspace = true, features = ["serde"] }
 # DoIP
 doip-definitions = { git = "https://github.com/theswiftfox/doip-definitions.git", rev = "bdeab8c" }
 doip-sockets = { git = "https://github.com/theswiftfox/doip-sockets.git", rev = "0771453", features = [
   "ssl",
 ] }
 # tls
-openssl = { version = "0.10", features = ["vendored"] }
+openssl = { workspace = true, features = ["vendored"] }
 
-socket2 = { version = "0.5", features = ["all"] }
+socket2 = { workspace = true, features = ["all"] }
 #tokio
-tokio = { version = "1.43.0", default-features = false, features = [
-  "time",
-  "fs",
-  "sync",
-] }
+tokio = { workspace = true, features = ["time", "fs", "sync"] }
 # logging & tracing
-tracing = "0.1.41"
+tracing = { workspace = true }
 
 [features]
 default = []

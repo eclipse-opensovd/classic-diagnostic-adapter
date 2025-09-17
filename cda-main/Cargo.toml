@@ -28,18 +28,15 @@ cda-interfaces = { workspace = true }
 cda-sovd = { workspace = true }
 cda-tracing = { workspace = true }
 # args
-clap = { version = "4.5", features = ["derive"] }
+clap = { workspace = true, features = ["derive"] }
 # config
-figment = { version = "0.10.19", default-features = false, features = [
-  "env",
-  "toml",
-] }
-futures = { version = "0.3" }
-hashbrown = { version = "0.15", features = ["serde"] }
+figment = { workspace = true, features = ["env", "toml"] }
+futures = { workspace = true }
+hashbrown = { workspace = true, features = ["serde"] }
 # allocator
 mimalloc = { git = "https://github.com/theswiftfox/mimalloc.git", rev = "afbaaa5" }
-serde = { version = "1.0", features = ["derive"] }
-tokio = { version = "1.43.0", features = [
+serde = { workspace = true, features = ["derive"] }
+tokio = { workspace = true, features = [
   "rt-multi-thread",
   "macros",
   "io-util",
@@ -47,10 +44,10 @@ tokio = { version = "1.43.0", features = [
   "signal",
 ] }
 # logging & tracing
-tracing = "0.1.41"
-tracing-core = "0.1.34"
-tracing-appender = "0.2.3"
-tracing-subscriber = { version = "0.3.20", default-features = false, features = [
+tracing = { workspace = true }
+tracing-core = { workspace = true }
+tracing-appender = { workspace = true }
+tracing-subscriber = { workspace = true, features = [
   "ansi",
   "chrono",
   "env-filter",
@@ -60,15 +57,15 @@ tracing-subscriber = { version = "0.3.20", default-features = false, features = 
   "std",
 ] }
 strip-ansi-escapes = "0.2.1" # Strip ANSI escape codes from strings, used for file logging
-nu-ansi-term = "0.50" # ANSI terminal support for terminal log output
+nu-ansi-term = { workspace = true } # ANSI terminal support for terminal log output
 
 [dev-dependencies]
-chrono = "0.4.40"
-ctor = "0.1.23"
-http = "1.3.1"
-mime = "0.3.17"
-reqwest = "0.12.22"
-serde_json = "1.0"
+chrono = { workspace = true }
+ctor = { workspace = true }
+http = { workspace = true }
+mime = { workspace = true }
+reqwest = { workspace = true }
+serde_json = { workspace = true }
 
 [features]
 default = []
