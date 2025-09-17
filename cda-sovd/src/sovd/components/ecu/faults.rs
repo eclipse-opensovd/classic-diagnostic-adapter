@@ -23,7 +23,6 @@ use cda_interfaces::{
     UdsEcu, datatypes::DtcRecordAndStatus, diagservices::DiagServiceResponse,
     file_manager::FileManager,
 };
-use schemars::JsonSchema;
 use serde_qs::axum::QsQuery;
 use sovd_interfaces::components::ecu::{
     faults,
@@ -32,7 +31,7 @@ use sovd_interfaces::components::ecu::{
 
 use crate::{
     openapi,
-    sovd::{IntoSovd, WebserverEcuState, error::ApiError},
+    sovd::{IntoSovd, WebserverEcuState, create_schema, error::ApiError},
 };
 
 impl IntoSovd for DtcRecordAndStatus {
@@ -67,10 +66,7 @@ impl IntoSovd for DtcRecordAndStatus {
 }
 
 fn create_faults_schema() -> Result<schemars::Schema, ApiError> {
-    let mut generator = schemars::SchemaGenerator::new(
-        schemars::generate::SchemaSettings::draft07().with(|s| s.inline_subschemas = true),
-    );
-    let schema = Fault::json_schema(&mut generator);
+    let schema = create_schema!(Fault);
     let mut val = schema.to_value();
 
     crate::sovd::remove_descriptions_recursive(&mut val);

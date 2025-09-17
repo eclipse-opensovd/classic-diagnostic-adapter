@@ -59,6 +59,8 @@ pub(crate) async fn get(
                     name: Some(SESSION_NAME.to_string()),
                     translation_id: None,
                     value: None,
+                    // we do not include the subschemas as the complete schema
+                    // included in the root of the response already contains them
                     schema: None,
                 },
                 sovd_modes::Mode {
