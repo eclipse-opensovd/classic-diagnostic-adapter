@@ -6,6 +6,7 @@ databases_path = "."
 
 [doip]
 tester_address = "127.0.0.1"
+tester_subnet = "255.255.0.0"
 
 [logging.otel]
 enabled = false

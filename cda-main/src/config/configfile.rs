@@ -37,6 +37,7 @@ pub struct ServerConfig {
 #[derive(Deserialize, Serialize, Clone, Debug)]
 pub struct DoipConfig {
     pub tester_address: String,
+    pub tester_subnet: String,
     pub gateway_port: u16,
 }
 
@@ -57,6 +58,7 @@ impl Default for Configuration {
             },
             doip: DoipConfig {
                 tester_address: "10.2.1.240".to_owned(),
+                tester_subnet: "255.255.0.0".to_owned(),
                 gateway_port: 13400,
             },
             logging: cda_tracing::LoggingConfig::default(),
