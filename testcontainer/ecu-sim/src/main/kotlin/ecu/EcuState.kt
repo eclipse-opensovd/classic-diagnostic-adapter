@@ -11,6 +11,7 @@ import kotlin.uuid.Uuid
 @Serializable
 data class EcuState(
     var variant: Variant = Variant.APPLICATION,
+    var variantPattern: VariantPattern = VariantPattern(boot = "FF 00 00", application = "00 01 01"),
     var sessionState: SessionState = SessionState.DEFAULT,
     var securityAccess: SecurityAccess = SecurityAccess.LOCKED,
     var authentication: Authentication = Authentication.UNAUTHENTICATED,
@@ -34,9 +35,15 @@ data class EcuState(
             partNumber = "1300000000"
         ),
     ),
-    var vin: String = System.getenv("OVERRIDE_VIN") ?: "OPENSOVDCDAISBEST",
+    var vin: String = System.getenv("OVERRIDE_VIN") ?: "SCEDT26T8BD005261",
     var hardResetForSeconds: Int = 0,
     var maxNumberOfBlockLength: Int = 65535,
+)
+
+@Serializable
+data class VariantPattern(
+    val boot: String,
+    val application: String,
 )
 
 @Serializable

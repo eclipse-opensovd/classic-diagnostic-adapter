@@ -1,0 +1,263 @@
+<?xml version="1.0" encoding="UTF-8" ?>
+<ODX MODEL-VERSION="2.2.0" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+     xsi:noNamespaceSchemaLocation="odx_2_2_0.xsd">
+    <COMPARAM-SUBSET ID="ISO_14229_5" CATEGORY="TRANSPORT">
+        <SHORT-NAME>ISO_14229_5</SHORT-NAME>
+        <COMPARAMS>
+            <COMPARAM ID="ISO_14229_5.CP_P2Star"
+                      CPTYPE="STANDARD"
+                      CPUSAGE="TESTER"
+                      PARAM-CLASS="COM">
+                <SHORT-NAME>CP_P2Star</SHORT-NAME>
+                <PHYSICAL-DEFAULT-VALUE>1000000</PHYSICAL-DEFAULT-VALUE>
+                <DATA-OBJECT-PROP-REF ID-REF="IDENTICAL_A_UINT32_MicroSeconds"/>
+            </COMPARAM>
+            <COMPARAM ID="ISO_14229_5.CP_P2Max"
+                      CPTYPE="STANDARD"
+                      CPUSAGE="TESTER"
+                      PARAM-CLASS="COM">
+                <SHORT-NAME>CP_P2Max</SHORT-NAME>
+                <PHYSICAL-DEFAULT-VALUE>1000000</PHYSICAL-DEFAULT-VALUE>
+                <DATA-OBJECT-PROP-REF ID-REF="IDENTICAL_A_UINT32_MicroSeconds"/>
+            </COMPARAM>
+            <COMPARAM ID="ISO_14229_5.CP_P6Max"
+                      CPTYPE="STANDARD"
+                      CPUSAGE="TESTER"
+                      PARAM-CLASS="COM">
+                <SHORT-NAME>CP_P6Max</SHORT-NAME>
+                <PHYSICAL-DEFAULT-VALUE>1000000</PHYSICAL-DEFAULT-VALUE>
+                <DATA-OBJECT-PROP-REF ID-REF="IDENTICAL_A_UINT32_MicroSeconds"/>
+            </COMPARAM>
+            <COMPARAM ID="ISO_14229_5.CP_P6Star"
+                      CPTYPE="STANDARD"
+                      CPUSAGE="TESTER"
+                      PARAM-CLASS="COM">
+                <SHORT-NAME>CP_P6Star</SHORT-NAME>
+                <PHYSICAL-DEFAULT-VALUE>1000000</PHYSICAL-DEFAULT-VALUE>
+                <DATA-OBJECT-PROP-REF ID-REF="IDENTICAL_A_UINT32_MicroSeconds"/>
+            </COMPARAM>
+            <COMPARAM ID="ISO_14229_5.CP_RC21CompletionTimeout" PARAM-CLASS="ERRHDL" CPTYPE="STANDARD"
+                      CPUSAGE="TESTER">
+                <SHORT-NAME>CP_RC21CompletionTimeout</SHORT-NAME>
+                <PHYSICAL-DEFAULT-VALUE>1300000</PHYSICAL-DEFAULT-VALUE>
+                <DATA-OBJECT-PROP-REF ID-REF="IDENTICAL_A_UINT32_MicroSeconds"/>
+            </COMPARAM>
+            <COMPARAM ID="ISO_14229_5.CP_RC21Handling" CPTYPE="STANDARD" CPUSAGE="TESTER" PARAM-CLASS="ERRHDL">
+                <SHORT-NAME>CP_RC21Handling</SHORT-NAME>
+                <PHYSICAL-DEFAULT-VALUE>Disabled</PHYSICAL-DEFAULT-VALUE>
+                <DATA-OBJECT-PROP-REF ID-REF="TEXTTABLE_RC21Handling"/>
+            </COMPARAM>
+            <COMPARAM ID="ISO_14229_5.CP_RC21RequestTime" PARAM-CLASS="ERRHDL" CPTYPE="OPTIONAL"
+                      CPUSAGE="TESTER">
+                <SHORT-NAME>CP_RC21RequestTime</SHORT-NAME>
+                <PHYSICAL-DEFAULT-VALUE>2000000</PHYSICAL-DEFAULT-VALUE>
+                <DATA-OBJECT-PROP-REF ID-REF="IDENTICAL_A_UINT32_MicroSeconds"/>
+            </COMPARAM>
+            <COMPARAM ID="ISO_14229_5.CP_RC78CompletionTimeout" PARAM-CLASS="ERRHDL" CPTYPE="STANDARD"
+                      CPUSAGE="TESTER">
+                <SHORT-NAME>CP_RC78CompletionTimeout</SHORT-NAME>
+                <PHYSICAL-DEFAULT-VALUE>1300000</PHYSICAL-DEFAULT-VALUE>
+                <DATA-OBJECT-PROP-REF ID-REF="IDENTICAL_A_UINT32_MicroSeconds"/>
+            </COMPARAM>
+            <COMPARAM ID="ISO_14229_5.CP_RC78Handling" CPTYPE="STANDARD" CPUSAGE="TESTER" PARAM-CLASS="ERRHDL">
+                <SHORT-NAME>CP_RC78Handling</SHORT-NAME>
+                <PHYSICAL-DEFAULT-VALUE>Disabled</PHYSICAL-DEFAULT-VALUE>
+                <DATA-OBJECT-PROP-REF ID-REF="TEXTTABLE_RC21Handling"/>
+            </COMPARAM>
+            <COMPARAM ID="ISO_14229_5.CP_RC94CompletionTimeout" PARAM-CLASS="ERRHDL" CPTYPE="STANDARD"
+                      CPUSAGE="TESTER">
+                <SHORT-NAME>CP_RC94CompletionTimeout</SHORT-NAME>
+                <PHYSICAL-DEFAULT-VALUE>1300000</PHYSICAL-DEFAULT-VALUE>
+                <DATA-OBJECT-PROP-REF ID-REF="IDENTICAL_A_UINT32_MicroSeconds"/>
+            </COMPARAM>
+            <COMPARAM ID="ISO_14229_5.CP_RC94Handling" CPTYPE="STANDARD" CPUSAGE="TESTER" PARAM-CLASS="ERRHDL">
+                <SHORT-NAME>CP_RC94Handling</SHORT-NAME>
+                <PHYSICAL-DEFAULT-VALUE>Disabled</PHYSICAL-DEFAULT-VALUE>
+                <DATA-OBJECT-PROP-REF ID-REF="TEXTTABLE_RC21Handling"/>
+            </COMPARAM>
+            <COMPARAM ID="ISO_14229_5.CP_RC94RequestTime" PARAM-CLASS="ERRHDL" CPTYPE="OPTIONAL"
+                      CPUSAGE="TESTER">
+                <SHORT-NAME>CP_RC94RequestTime</SHORT-NAME>
+                <PHYSICAL-DEFAULT-VALUE>2000000</PHYSICAL-DEFAULT-VALUE>
+                <DATA-OBJECT-PROP-REF ID-REF="IDENTICAL_A_UINT32_MicroSeconds"/>
+            </COMPARAM>
+        </COMPARAMS>
+        <DATA-OBJECT-PROPS>
+            <DATA-OBJECT-PROP ID="IDENTICAL_A_UINT32_CONSTR_0_255">
+                <SHORT-NAME>IDENTICAL_A_UINT32_CONSTR_0_255</SHORT-NAME>
+                <COMPU-METHOD>
+                    <CATEGORY>IDENTICAL</CATEGORY>
+                </COMPU-METHOD>
+                <DIAG-CODED-TYPE BASE-DATA-TYPE="A_UINT32" xsi:type="STANDARD-LENGTH-TYPE">
+                    <BIT-LENGTH>32</BIT-LENGTH>
+                </DIAG-CODED-TYPE>
+                <PHYSICAL-TYPE BASE-DATA-TYPE="A_UINT32" DISPLAY-RADIX="HEX"/>
+                <INTERNAL-CONSTR>
+                    <LOWER-LIMIT>0</LOWER-LIMIT>
+                    <UPPER-LIMIT>255</UPPER-LIMIT>
+                </INTERNAL-CONSTR>
+            </DATA-OBJECT-PROP>
+            <DATA-OBJECT-PROP ID="IDENTICAL_A_UINT32_CONSTR_0_65535">
+                <SHORT-NAME>IDENTICAL_A_UINT32_CONSTR_0_65535</SHORT-NAME>
+                <COMPU-METHOD>
+                    <CATEGORY>IDENTICAL</CATEGORY>
+                </COMPU-METHOD>
+                <DIAG-CODED-TYPE BASE-DATA-TYPE="A_UINT32" xsi:type="STANDARD-LENGTH-TYPE">
+                    <BIT-LENGTH>32</BIT-LENGTH>
+                </DIAG-CODED-TYPE>
+                <PHYSICAL-TYPE BASE-DATA-TYPE="A_UINT32" DISPLAY-RADIX="HEX"/>
+                <INTERNAL-CONSTR>
+                    <LOWER-LIMIT>0</LOWER-LIMIT>
+                    <UPPER-LIMIT>65535</UPPER-LIMIT>
+                </INTERNAL-CONSTR>
+            </DATA-OBJECT-PROP>
+            <DATA-OBJECT-PROP ID="IDENTICAL_A_UINT32_MicroSeconds">
+                <SHORT-NAME>IDENTICAL_A_UINT32_MicroSeconds</SHORT-NAME>
+                <COMPU-METHOD>
+                    <CATEGORY>IDENTICAL</CATEGORY>
+                </COMPU-METHOD>
+                <DIAG-CODED-TYPE BASE-DATA-TYPE="A_UINT32" xsi:type="STANDARD-LENGTH-TYPE">
+                    <BIT-LENGTH>32</BIT-LENGTH>
+                </DIAG-CODED-TYPE>
+                <PHYSICAL-TYPE BASE-DATA-TYPE="A_UINT32"/>
+                <UNIT-REF ID-REF="MicroSecond"/>
+            </DATA-OBJECT-PROP>
+            <DATA-OBJECT-PROP ID="IDENTICAL_ASCII_CONSTR_END_OF_PDU_1_128">
+                <SHORT-NAME>IDENTICAL_ASCII_CONSTR_END_OF_PDU_1_128</SHORT-NAME>
+                <COMPU-METHOD>
+                    <CATEGORY>IDENTICAL</CATEGORY>
+                </COMPU-METHOD>
+                <DIAG-CODED-TYPE BASE-DATA-TYPE="A_ASCIISTRING" TERMINATION="END-OF-PDU" xsi:type="MIN-MAX-LENGTH-TYPE">
+                    <MAX-LENGTH>128</MAX-LENGTH>
+                    <MIN-LENGTH>1</MIN-LENGTH>
+                </DIAG-CODED-TYPE>
+                <PHYSICAL-TYPE BASE-DATA-TYPE="A_UNICODE2STRING"/>
+            </DATA-OBJECT-PROP>
+            <DATA-OBJECT-PROP ID="TEXTTABLE_RC21Handling">
+                <SHORT-NAME>TEXTTABLE_RC21Handling</SHORT-NAME>
+                <COMPU-METHOD>
+                    <CATEGORY>TEXTTABLE</CATEGORY>
+                    <COMPU-INTERNAL-TO-PHYS>
+                        <COMPU-SCALES>
+                            <COMPU-SCALE>
+                                <LOWER-LIMIT>0</LOWER-LIMIT>
+                                <COMPU-CONST>
+                                    <VT>Disabled</VT>
+                                </COMPU-CONST>
+                            </COMPU-SCALE>
+                            <COMPU-SCALE>
+                                <LOWER-LIMIT>1</LOWER-LIMIT>
+                                <COMPU-CONST>
+                                    <VT>Continue until RC21 timeout</VT>
+                                </COMPU-CONST>
+                            </COMPU-SCALE>
+                            <COMPU-SCALE>
+                                <LOWER-LIMIT>2</LOWER-LIMIT>
+                                <COMPU-CONST>
+                                    <VT>Continue unlimited</VT>
+                                </COMPU-CONST>
+                            </COMPU-SCALE>
+                        </COMPU-SCALES>
+                    </COMPU-INTERNAL-TO-PHYS>
+                </COMPU-METHOD>
+                <DIAG-CODED-TYPE BASE-DATA-TYPE="A_UINT32" xsi:type="STANDARD-LENGTH-TYPE">
+                    <BIT-LENGTH>32</BIT-LENGTH>
+                </DIAG-CODED-TYPE>
+                <PHYSICAL-TYPE BASE-DATA-TYPE="A_UNICODE2STRING"/>
+                <INTERNAL-CONSTR>
+                    <LOWER-LIMIT>0</LOWER-LIMIT>
+                    <UPPER-LIMIT>2</UPPER-LIMIT>
+                </INTERNAL-CONSTR>
+            </DATA-OBJECT-PROP>
+            <DATA-OBJECT-PROP ID="TEXTTABLE_RC78Handling">
+                <SHORT-NAME>TEXTTABLE_RC78Handling</SHORT-NAME>
+                <COMPU-METHOD>
+                    <CATEGORY>TEXTTABLE</CATEGORY>
+                    <COMPU-INTERNAL-TO-PHYS>
+                        <COMPU-SCALES>
+                            <COMPU-SCALE>
+                                <LOWER-LIMIT>0</LOWER-LIMIT>
+                                <COMPU-CONST>
+                                    <VT>Disabled</VT>
+                                </COMPU-CONST>
+                            </COMPU-SCALE>
+                            <COMPU-SCALE>
+                                <LOWER-LIMIT>1</LOWER-LIMIT>
+                                <COMPU-CONST>
+                                    <VT>Continue until RC78 timeout</VT>
+                                </COMPU-CONST>
+                            </COMPU-SCALE>
+                            <COMPU-SCALE>
+                                <LOWER-LIMIT>2</LOWER-LIMIT>
+                                <COMPU-CONST>
+                                    <VT>Continue unlimited</VT>
+                                </COMPU-CONST>
+                            </COMPU-SCALE>
+                        </COMPU-SCALES>
+                    </COMPU-INTERNAL-TO-PHYS>
+                </COMPU-METHOD>
+                <DIAG-CODED-TYPE BASE-DATA-TYPE="A_UINT32" xsi:type="STANDARD-LENGTH-TYPE">
+                    <BIT-LENGTH>32</BIT-LENGTH>
+                </DIAG-CODED-TYPE>
+                <PHYSICAL-TYPE BASE-DATA-TYPE="A_UNICODE2STRING"/>
+                <INTERNAL-CONSTR>
+                    <LOWER-LIMIT>0</LOWER-LIMIT>
+                    <UPPER-LIMIT>2</UPPER-LIMIT>
+                </INTERNAL-CONSTR>
+            </DATA-OBJECT-PROP>
+            <DATA-OBJECT-PROP ID="TEXTTABLE_RC94Handling">
+                <SHORT-NAME>TEXTTABLE_RC94Handling</SHORT-NAME>
+                <COMPU-METHOD>
+                    <CATEGORY>TEXTTABLE</CATEGORY>
+                    <COMPU-INTERNAL-TO-PHYS>
+                        <COMPU-SCALES>
+                            <COMPU-SCALE>
+                                <LOWER-LIMIT>0</LOWER-LIMIT>
+                                <COMPU-CONST>
+                                    <VT>Disabled</VT>
+                                </COMPU-CONST>
+                            </COMPU-SCALE>
+                            <COMPU-SCALE>
+                                <LOWER-LIMIT>1</LOWER-LIMIT>
+                                <COMPU-CONST>
+                                    <VT>Continue until RC94 timeout</VT>
+                                </COMPU-CONST>
+                            </COMPU-SCALE>
+                            <COMPU-SCALE>
+                                <LOWER-LIMIT>2</LOWER-LIMIT>
+                                <COMPU-CONST>
+                                    <VT>Continue unlimited</VT>
+                                </COMPU-CONST>
+                            </COMPU-SCALE>
+                        </COMPU-SCALES>
+                    </COMPU-INTERNAL-TO-PHYS>
+                </COMPU-METHOD>
+                <DIAG-CODED-TYPE BASE-DATA-TYPE="A_UINT32" xsi:type="STANDARD-LENGTH-TYPE">
+                    <BIT-LENGTH>32</BIT-LENGTH>
+                </DIAG-CODED-TYPE>
+                <PHYSICAL-TYPE BASE-DATA-TYPE="A_UNICODE2STRING"/>
+                <INTERNAL-CONSTR>
+                    <LOWER-LIMIT>0</LOWER-LIMIT>
+                    <UPPER-LIMIT>2</UPPER-LIMIT>
+                </INTERNAL-CONSTR>
+            </DATA-OBJECT-PROP>
+        </DATA-OBJECT-PROPS>
+        <UNIT-SPEC>
+            <UNITS>
+                <UNIT ID="MicroSecond">
+                    <SHORT-NAME>Microsecond</SHORT-NAME>
+                    <DISPLAY-NAME>µS</DISPLAY-NAME>
+                    <FACTOR-SI-TO-UNIT>1E-006</FACTOR-SI-TO-UNIT>
+                    <OFFSET-SI-TO-UNIT>0</OFFSET-SI-TO-UNIT>
+                    <PHYSICAL-DIMENSION-REF ID-REF="Time"/>
+                </UNIT>
+            </UNITS>
+            <PHYSICAL-DIMENSIONS>
+                <PHYSICAL-DIMENSION ID="Time">
+                    <SHORT-NAME>Time</SHORT-NAME>
+                    <TIME-EXP>1</TIME-EXP>
+                </PHYSICAL-DIMENSION>
+            </PHYSICAL-DIMENSIONS>
+        </UNIT-SPEC>
+    </COMPARAM-SUBSET>
+</ODX>

@@ -1,0 +1,51 @@
+from odxtools.comparaminstance import ComparamInstance
+from odxtools.database import Database
+from odxtools.odxlink import OdxLinkRef
+
+
+def generate_comparam_refs(ecu_name: str,
+                           logical_address: int,
+                           gateway_address: int,
+                           functional_address: int,
+                           database: Database) -> list[ComparamInstance]:
+    refs = []
+
+    gw_addr = database.comparam_subsets.get("ISO_13400_2").comparams["CP_DoIPLogicalGatewayAddress"]
+    cp_gw = ComparamInstance(value=str(gateway_address),
+                             spec_ref=OdxLinkRef.from_id(gw_addr.odx_id),
+                             protocol_snref="UDS_Ethernet_DoIP")
+    refs.append(cp_gw)
+
+    funct_addr = database.comparam_subsets.get("ISO_13400_2").comparams["CP_DoIPLogicalFunctionalAddress"]
+    cp_fa = ComparamInstance(value=str(functional_address),
+                             spec_ref=OdxLinkRef.from_id(funct_addr.odx_id),
+                             protocol_snref="UDS_Ethernet_DoIP")
+    refs.append(cp_fa)
+
+    resp_id = database.comparam_subsets.get("ISO_13400_2").complex_comparams["CP_UniqueRespIdTable"]
+    cp_resp = ComparamInstance(value=[str(logical_address), str(0), ecu_name],
+                               spec_ref=OdxLinkRef.from_id(resp_id.odx_id),
+                               protocol_snref="UDS_Ethernet_DoIP")
+    refs.append(cp_resp)
+
+    gw_addr_dobt = database.comparam_subsets.get("ISO_13400_2").comparams["CP_DoIPLogicalGatewayAddress"]
+    cp_gw_dobt = ComparamInstance(value=str(gateway_address),
+                                  spec_ref=OdxLinkRef.from_id(gw_addr_dobt.odx_id),
+                                  protocol_snref="UDS_Ethernet_DoIP_DOBT")
+    refs.append(cp_gw_dobt)
+
+    funct_addr_dobt = database.comparam_subsets.get("ISO_13400_2").comparams["CP_DoIPLogicalFunctionalAddress"]
+    cp_fa_dobt = ComparamInstance(value=str(functional_address),
+                                  spec_ref=OdxLinkRef.from_id(funct_addr_dobt.odx_id),
+                                  protocol_snref="UDS_Ethernet_DoIP_DOBT")
+    refs.append(cp_fa_dobt)
+
+    resp_id_dobt = database.comparam_subsets.get("ISO_13400_2").complex_comparams["CP_UniqueRespIdTable"]
+    cp_resp_dobt = ComparamInstance(value=[str(logical_address), str(0), ecu_name],
+                                    spec_ref=OdxLinkRef.from_id(resp_id_dobt.odx_id),
+                                    protocol_snref="UDS_Ethernet_DoIP_DOBT")
+    refs.append(cp_resp_dobt)
+
+    return refs
+
+
