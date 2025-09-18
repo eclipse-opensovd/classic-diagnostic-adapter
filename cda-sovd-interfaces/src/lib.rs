@@ -66,7 +66,7 @@ pub struct ArrayDataItem {
     pub data: Vec<serde_json::Value>,
 }
 
-#[derive(Deserialize, schemars::JsonSchema)]
+#[derive(Deserialize, Debug, schemars::JsonSchema)]
 pub struct IncludeSchemaQuery {
     #[serde(rename = "include-schema", default)]
     pub include_schema: bool,

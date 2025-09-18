@@ -645,8 +645,10 @@ pub(crate) mod service {
                         {
                             Ok(v) => v,
                             Err(e) => {
-                                log::error!(
-                                    "Failed to get schema for diag service {diag_service:?}: {e:?}"
+                                tracing::error!(
+                                    error = ?e,
+                                    diag_service = ?diag_service,
+                                    "Failed to get schema for diag service"
                                 );
                                 None
                             }
@@ -803,8 +805,10 @@ pub(crate) mod service {
                 {
                     Ok(v) => v,
                     Err(e) => {
-                        log::error!(
-                            "Failed to get schema for diag service {diag_service:?}: {e:?}"
+                        tracing::error!(
+                            error = ?e,
+                            diag_service = ?diag_service,
+                            "Failed to get schema for diag service"
                         );
                         None
                     }
