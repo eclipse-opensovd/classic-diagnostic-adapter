@@ -63,11 +63,9 @@ doip-definitions = "3.0.13"
 doip-sockets = "0.2.4"
 
 # ---- tracing & logging crates----
-log = "0.4"
 tracing = "0.1.41"
 tracing-core = "0.1.34"
 tracing-appender = "0.2.3"
-tracing-log = "0.2.0"
 tracing-opentelemetry = "0.31.0"
 tracing-subscriber = { version = "0.3.20", default-features = false }
 strip-ansi-escapes = "0.2.1"

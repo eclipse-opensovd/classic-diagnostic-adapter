@@ -20,10 +20,8 @@ cda-interfaces = { workspace = true }
 # external
 hashbrown = { workspace = true, features = ["serde"] }
 # DoIP
-doip-definitions = { git = "https://github.com/theswiftfox/doip-definitions.git", rev = "bdeab8c" }
-doip-sockets = { git = "https://github.com/theswiftfox/doip-sockets.git", rev = "0771453", features = [
-  "ssl",
-] }
+doip-definitions = { workspace = true }
+doip-sockets = { workspace = true, features = ["ssl"] }
 # tls
 openssl = { workspace = true, features = ["vendored"] }
 

@@ -32,8 +32,8 @@ tracing-subscriber = { workspace = true, features = [
   "parking_lot",
   "std",
 ] }
-strip-ansi-escapes = "0.2.1" # Strip ANSI escape codes from strings, used for file logging
-nu-ansi-term = "0.50" # ANSI terminal support for terminal log output
+strip-ansi-escapes = { workspace = true } # Strip ANSI escape codes from strings, used for file logging
+nu-ansi-term = { workspace = true } # ANSI terminal support for terminal log output
 # otel
 opentelemetry = { workspace = true, features = ["trace"] }
 opentelemetry_sdk = { workspace = true, features = ["trace"] }
