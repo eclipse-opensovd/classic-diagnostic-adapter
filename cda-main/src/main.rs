@@ -29,6 +29,9 @@ struct AppArgs {
     tester_address: Option<String>,
 
     #[arg(long)]
+    tester_subnet: Option<String>,
+
+    #[arg(long)]
     gateway_port: Option<u16>,
 
     // cannot use Action::SetTrue as it will treat
@@ -133,6 +136,7 @@ async fn main() -> Result<(), String> {
     let diagnostic_gateway = match opensovd_cda_lib::create_diagnostic_gateway(
         Arc::clone(&databases),
         &config.doip.tester_address,
+        &config.doip.tester_subnet,
         config.doip.gateway_port,
         variant_detection_tx,
         tester_present_tx,
@@ -202,6 +206,9 @@ impl AppArgs {
         }
         if let Some(tester_address) = self.tester_address {
             config.doip.tester_address = tester_address;
+        }
+        if let Some(tester_subnet) = self.tester_subnet {
+            config.doip.tester_subnet = tester_subnet;
         }
         if let Some(gateway_port) = self.gateway_port {
             config.doip.gateway_port = gateway_port;

@@ -27,6 +27,7 @@ use crate::{DoipDiagGateway, DoipTarget, connections::handle_gateway_connection}
 #[tracing::instrument(skip(socket, ecus, shutdown_signal), fields(gateway_port))]
 pub(crate) async fn get_vehicle_identification<T, F>(
     socket: &mut UdpSocket,
+    netmask: u32,
     gateway_port: u16,
     ecus: &Arc<HashMap<String, RwLock<T>>>,
     shutdown_signal: F,
@@ -64,8 +65,9 @@ where
                             // skip our own VIR
                             continue;
                         }
-                        match handle_vam::<T>(ecus, doip_msg, source_addr).await {
-                            Ok(gateway) => gateways.push(gateway),
+                        match handle_vam::<T>(ecus, doip_msg, source_addr, netmask).await {
+                            Ok(Some(gateway)) => gateways.push(gateway),
+                            Ok(None) => { /* ignore non-matching VAMs */ }
                             Err(e) => tracing::error!(error = ?e, "Failed to handle VAM"),
                         }
                     }
@@ -83,6 +85,7 @@ where
 }
 
 pub(crate) async fn listen_for_vams<T, F>(
+    netmask: u32,
     gateway: DoipDiagGateway<T>,
     variant_detection: mpsc::Sender<Vec<String>>,
     tester_present: mpsc::Sender<TesterPresentControlMessage>,
@@ -91,18 +94,29 @@ pub(crate) async fn listen_for_vams<T, F>(
     T: EcuAddressProvider + DoipComParamProvider,
     F: Future<Output = ()> + Clone + Send + 'static,
 {
+    #[derive(Debug)]
+    struct DoipMessageContext {
+        doip_msg: doip_definitions::message::DoipMessage,
+        source_addr: std::net::SocketAddr,
+        netmask: u32,
+    }
+
     #[tracing::instrument(skip(gateway, gateway_ecu_map, gateway_ecu_name_map, variant_detection))]
     async fn handle_doip_response<T: EcuAddressProvider + DoipComParamProvider>(
         gateway: &DoipDiagGateway<T>,
-        doip_msg: doip_definitions::message::DoipMessage,
-        source_addr: std::net::SocketAddr,
+        doip_msg_ctx: DoipMessageContext,
         gateway_ecu_map: &HashMap<u16, Vec<u16>>,
         gateway_ecu_name_map: &HashMap<u16, Vec<String>>,
         variant_detection: mpsc::Sender<Vec<String>>,
         tester_present: mpsc::Sender<TesterPresentControlMessage>,
     ) {
-        match handle_vam::<T>(&gateway.ecus, doip_msg, source_addr).await {
-            Ok(doip_target) => {
+        let DoipMessageContext {
+            doip_msg,
+            source_addr,
+            netmask,
+        } = doip_msg_ctx;
+        match handle_vam::<T>(&gateway.ecus, doip_msg, source_addr, netmask).await {
+            Ok(Some(doip_target)) => {
                 tracing::debug!(
                     ecu_name = %doip_target.ecu,
                     logical_address = %format!("{:#06x}", doip_target.logical_address),
@@ -154,6 +168,7 @@ pub(crate) async fn listen_for_vams<T, F>(
                     }
                 }
             }
+            Ok(None) => { /* ignore non-matching VAMs */ }
             Err(e) => tracing::warn!(error = ?e, "Failed to handle VAM"),
         }
     }
@@ -190,7 +205,7 @@ pub(crate) async fn listen_for_vams<T, F>(
                     Some(Ok((doip_msg, source_addr))) = socket.recv() => {
                         if let DoipPayload::VehicleAnnouncementMessage(_) = &doip_msg.payload {
                             handle_doip_response(
-                                &gateway, doip_msg, source_addr,
+                                &gateway, DoipMessageContext { doip_msg, source_addr, netmask },
                                 &gateway_ecu_map, &gateway_ecu_name_map, variant_detection.clone(),
                                 tester_present.clone(),
                             ).await;
@@ -206,10 +221,27 @@ async fn handle_vam<T>(
     ecus: &Arc<HashMap<String, RwLock<T>>>,
     doip_msg: doip_definitions::message::DoipMessage,
     source_addr: std::net::SocketAddr,
-) -> Result<DoipTarget, String>
+    netmask: u32,
+) -> Result<Option<DoipTarget>, String>
 where
     T: EcuAddressProvider,
 {
+    match source_addr {
+        std::net::SocketAddr::V4(socket_addr_v4) => {
+            if socket_addr_v4.ip().to_bits() & netmask != netmask {
+                tracing::warn!(
+                    source_ip = %source_addr.ip(),
+                    subnet_mask = ?netmask,
+                    "Ignoring VAM from outside tester subnet"
+                );
+                return Ok(None);
+            }
+        }
+        std::net::SocketAddr::V6(_) => {
+            // ipv6 is not expected nor supported
+            return Ok(None);
+        }
+    }
     match doip_msg.payload {
         DoipPayload::VehicleAnnouncementMessage(vam) => {
             tracing::debug!("VAM received, parsing ...");
@@ -228,11 +260,11 @@ where
                     logical_address = %format!("{:#06x}", logical_address),
                     "Matching ECU found"
                 );
-                Ok(DoipTarget {
+                Ok(Some(DoipTarget {
                     ip: source_addr.ip().to_string(),
                     ecu: ecu.clone(),
                     logical_address,
-                })
+                }))
             } else {
                 tracing::warn!("VAM received but no matching ECU found");
                 Err(format!(

@@ -294,6 +294,7 @@ pub async fn create_uds_manager(
 pub async fn create_diagnostic_gateway(
     databases: Arc<HashMap<String, RwLock<EcuManager>>>,
     doip_tester_address: &str,
+    doip_tester_subnet: &str,
     doip_gateway_port: u16,
     variant_detection: mpsc::Sender<Vec<String>>,
     tester_present: mpsc::Sender<TesterPresentControlMessage>,
@@ -301,6 +302,7 @@ pub async fn create_diagnostic_gateway(
 ) -> Result<DoipDiagGateway<EcuManager>, String> {
     DoipDiagGateway::new(
         doip_tester_address,
+        doip_tester_subnet,
         doip_gateway_port,
         databases,
         variant_detection,

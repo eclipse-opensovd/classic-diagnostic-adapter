@@ -127,6 +127,7 @@ impl<T: EcuAddressProvider + DoipComParamProvider> DoipDiagGateway<T> {
     )]
     pub async fn new<F>(
         tester_ip: &str,
+        tester_subnet: &str,
         gateway_port: u16,
         ecus: Arc<HashMap<String, RwLock<T>>>,
         variant_detection: mpsc::Sender<Vec<String>>,
@@ -139,9 +140,11 @@ impl<T: EcuAddressProvider + DoipComParamProvider> DoipDiagGateway<T> {
         tracing::info!("Initializing DoipDiagGateway");
 
         let mut socket = create_socket(tester_ip, gateway_port)?;
+        let mask = create_netmask(tester_ip, tester_subnet)?;
 
         let gateways = vir_vam::get_vehicle_identification::<T, F>(
             &mut socket,
+            mask,
             gateway_port,
             &ecus,
             shutdown_signal.clone(),
@@ -198,6 +201,7 @@ impl<T: EcuAddressProvider + DoipComParamProvider> DoipDiagGateway<T> {
         };
 
         vir_vam::listen_for_vams(
+            mask,
             gateway.clone(),
             variant_detection,
             tester_present,
@@ -456,6 +460,17 @@ impl<T: EcuAddressProvider + DoipComParamProvider> EcuGateway for DoipDiagGatewa
             .ok_or_else(|| DiagServiceError::EcuOffline(ecu_name.to_string()))?;
         Ok(())
     }
+}
+
+fn create_netmask(tester_ip: &str, tester_subnet: &str) -> Result<u32, String> {
+    let ip = tester_ip
+        .parse::<std::net::Ipv4Addr>()
+        .map_err(|e| format!("DoipGateway: Failed to parse tester IP address: {e:?}"))?;
+    let subnet = tester_subnet
+        .parse::<std::net::Ipv4Addr>()
+        .map_err(|e| format!("DoipGateway: Failed to parse tester subnet mask: {e:?}"))?;
+
+    Ok(ip.to_bits() & subnet.to_bits())
 }
 
 fn create_socket(
