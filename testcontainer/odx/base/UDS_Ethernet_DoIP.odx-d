@@ -1,0 +1,22 @@
+<?xml version="1.0" encoding="UTF-8" ?>
+<ODX MODEL-VERSION="2.2.0" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+     xsi:noNamespaceSchemaLocation="odx_2_2_0.xsd">
+    <DIAG-LAYER-CONTAINER ID="DLC.UDS_Ethernet_DoIP">
+        <SHORT-NAME>UDS_Ethernet_DoIP</SHORT-NAME>
+        <PROTOCOLS>
+            <PROTOCOL ID="PROTO.UDS_Ethernet_DoIP">
+                <SHORT-NAME>UDS_Ethernet_DoIP</SHORT-NAME>
+                <COMPARAM-REFS>
+                    <COMPARAM-REF ID-REF="ISO_13400_2.CP_DoIPLogicalTesterAddress"
+                                  DOCREF="ISO_13400_2" DOCTYPE="COMPARAM-SUBSET">
+                        <SIMPLE-VALUE>65024</SIMPLE-VALUE>
+                        <PROTOCOL-SNREF SHORT-NAME="UDS_Ethernet_DoIP"/>
+                    </COMPARAM-REF>
+                </COMPARAM-REFS>
+                <COMPARAM-SPEC-REF ID-REF="ISO_14229_5_on_ISO_13400_2" DOCREF="ISO_14229_5_on_ISO_13400_2"
+                                   DOCTYPE="COMPARAM-SPEC"/>
+                <PROT-STACK-SNREF SHORT-NAME="ISO_14229_5_on_ISO_13400_2"/>
+            </PROTOCOL>
+        </PROTOCOLS>
+    </DIAG-LAYER-CONTAINER>
+</ODX>

@@ -1,0 +1,18 @@
+<?xml version="1.0" encoding="UTF-8" ?>
+<ODX MODEL-VERSION="2.2.0" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+     xsi:noNamespaceSchemaLocation="odx_2_2_0.xsd">
+    <COMPARAM-SPEC ID="ISO_14229_5_on_ISO_13400_2">
+        <SHORT-NAME>ISO_14229_5_on_ISO_13400_2</SHORT-NAME>
+        <PROT-STACKS>
+            <PROT-STACK ID="PROT_STACK.ISO_14229_5_on_ISO_13400_2">
+                <SHORT-NAME>ISO_14229_5_on_ISO_13400_2</SHORT-NAME>
+                <PDU-PROTOCOL-TYPE>ISO_14229_5_on_ISO_13400_2</PDU-PROTOCOL-TYPE>
+                <PHYSICAL-LINK-TYPE>IEEE_802_3</PHYSICAL-LINK-TYPE>
+                <COMPARAM-SUBSET-REFS>
+                    <COMPARAM-SUBSET-REF ID-REF="ISO_14229_5" DOCREF="ISO_14229_5" DOCTYPE="COMPARAM-SUBSET"/>
+                    <COMPARAM-SUBSET-REF ID-REF="ISO_13400_2" DOCREF="ISO_13400_2" DOCTYPE="COMPARAM-SUBSET"/>
+                </COMPARAM-SUBSET-REFS>
+            </PROT-STACK>
+        </PROT-STACKS>
+    </COMPARAM-SPEC>
+</ODX>

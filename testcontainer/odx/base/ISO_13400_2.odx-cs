@@ -1,0 +1,91 @@
+<?xml version="1.0" encoding="UTF-8" ?>
+<ODX MODEL-VERSION="2.2.0" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+     xsi:noNamespaceSchemaLocation="odx_2_2_0.xsd">
+    <COMPARAM-SUBSET ID="ISO_13400_2" CATEGORY="TRANSPORT">
+        <SHORT-NAME>ISO_13400_2</SHORT-NAME>
+        <COMPARAMS>
+            <COMPARAM ID="ISO_13400_2.CP_DoIPLogicalGatewayAddress"
+                      CPTYPE="STANDARD"
+                      CPUSAGE="TESTER"
+                      PARAM-CLASS="COM">
+                <SHORT-NAME>CP_DoIPLogicalGatewayAddress</SHORT-NAME>
+                <PHYSICAL-DEFAULT-VALUE>1</PHYSICAL-DEFAULT-VALUE>
+                <DATA-OBJECT-PROP-REF ID-REF="IDENTICAL_A_UINT32_CONSTR_0_65535" DOCREF="ISO_14229_5"
+                                      DOCTYPE="COMPARAM-SUBSET"/>
+            </COMPARAM>
+            <COMPARAM ID="ISO_13400_2.CP_DoIPLogicalTesterAddress" PARAM-CLASS="COM" CPTYPE="STANDARD" CPUSAGE="TESTER">
+                <SHORT-NAME>CP_DoIPLogicalTesterAddress</SHORT-NAME>
+                <PHYSICAL-DEFAULT-VALUE>65024</PHYSICAL-DEFAULT-VALUE>
+                <DATA-OBJECT-PROP-REF ID-REF="IDENTICAL_A_UINT32_CONSTR_0_65535" DOCREF="ISO_14229_5"
+                                      DOCTYPE="COMPARAM-SUBSET"/>
+            </COMPARAM>
+            <COMPARAM ID="ISO_13400_2.CP_DoIPLogicalFunctionalAddress"
+                      CPTYPE="STANDARD"
+                      CPUSAGE="TESTER"
+                      PARAM-CLASS="COM">
+                <SHORT-NAME>CP_DoIPLogicalFunctionalAddress</SHORT-NAME>
+                <PHYSICAL-DEFAULT-VALUE>65535</PHYSICAL-DEFAULT-VALUE>
+                <DATA-OBJECT-PROP-REF ID-REF="IDENTICAL_A_UINT32_CONSTR_0_65535" DOCREF="ISO_14229_5"
+                                      DOCTYPE="COMPARAM-SUBSET"/>
+            </COMPARAM>
+            <COMPARAM ID="ISO_13400_2.CP_RepeatReqCountTrans" PARAM-CLASS="ERRHDL" CPTYPE="OPTIONAL"
+                      CPUSAGE="TESTER">
+                <SHORT-NAME>CP_RepeatReqCountTrans</SHORT-NAME>
+                <PHYSICAL-DEFAULT-VALUE>0</PHYSICAL-DEFAULT-VALUE>
+                <DATA-OBJECT-PROP-REF ID-REF="IDENTICAL_A_UINT32_CONSTR_0_255" DOCREF="ISO_14229_5"
+                                      DOCTYPE="COMPARAM-SUBSET"/>
+            </COMPARAM>
+            <COMPARAM ID="ISO_13400_2.CP_DoIPNumberOfRetries" PARAM-CLASS="COM" CPTYPE="STANDARD"
+                      CPUSAGE="TESTER">
+                <SHORT-NAME>CP_DoIPNumberOfRetries</SHORT-NAME>
+                <PHYSICAL-DEFAULT-VALUE>0</PHYSICAL-DEFAULT-VALUE>
+                <DATA-OBJECT-PROP-REF ID-REF="IDENTICAL_A_UINT32_MicroSeconds" DOCREF="ISO_14229_5" DOCTYPE="COMPARAM-SUBSET" />
+            </COMPARAM>
+            <COMPARAM ID="ISO_13400_2.CP_DoIPDiagnosticAckTimeout" PARAM-CLASS="TIMING" CPTYPE="OPTIONAL"
+                      CPUSAGE="TESTER">
+                <SHORT-NAME>CP_DoIPDiagnosticAckTimeout</SHORT-NAME>
+                <PHYSICAL-DEFAULT-VALUE>2000000</PHYSICAL-DEFAULT-VALUE>
+                <DATA-OBJECT-PROP-REF ID-REF="IDENTICAL_A_UINT32_MicroSeconds" DOCREF="ISO_14229_5" DOCTYPE="COMPARAM-SUBSET" />
+            </COMPARAM>
+            <COMPARAM ID="ISO_13400_2.CP_DoIPRetryPeriod" PARAM-CLASS="TIMING" CPTYPE="OPTIONAL"
+                      CPUSAGE="TESTER">
+                <SHORT-NAME>CP_DoIPRetryPeriod</SHORT-NAME>
+                <PHYSICAL-DEFAULT-VALUE>1000000</PHYSICAL-DEFAULT-VALUE>
+                <DATA-OBJECT-PROP-REF ID-REF="IDENTICAL_A_UINT32_MicroSeconds" DOCREF="ISO_14229_5" DOCTYPE="COMPARAM-SUBSET" />
+            </COMPARAM>
+            <COMPARAM ID="ISO_13400_2.CP_DoIPRoutingActivationTimeout" PARAM-CLASS="TIMING" CPTYPE="OPTIONAL"
+                      CPUSAGE="TESTER">
+                <SHORT-NAME>CP_DoIPRoutingActivationTimeout</SHORT-NAME>
+                <PHYSICAL-DEFAULT-VALUE>1000000</PHYSICAL-DEFAULT-VALUE>
+                <DATA-OBJECT-PROP-REF ID-REF="IDENTICAL_A_UINT32_MicroSeconds" DOCREF="ISO_14229_5" DOCTYPE="COMPARAM-SUBSET" />
+            </COMPARAM>
+        </COMPARAMS>
+        <COMPLEX-COMPARAMS>
+            <COMPLEX-COMPARAM ID="ISO_13400_2.CP_UniqueRespIdTable" PARAM-CLASS="UNIQUE_ID" CPTYPE="STANDARD"
+                              CPUSAGE="ECU-COMM" ALLOW-MULTIPLE-VALUES="true">
+                <SHORT-NAME>CP_UniqueRespIdTable</SHORT-NAME>
+                <COMPARAM ID="ISO_13400_2.CP_DoIPLogicalEcuAddress" PARAM-CLASS="UNIQUE_ID" CPTYPE="STANDARD"
+                          CPUSAGE="TESTER">
+                    <SHORT-NAME>CP_DoIPLogicalEcuAddress</SHORT-NAME>
+                    <PHYSICAL-DEFAULT-VALUE>1</PHYSICAL-DEFAULT-VALUE>
+                    <DATA-OBJECT-PROP-REF ID-REF="IDENTICAL_A_UINT32_CONSTR_0_65535" DOCREF="ISO_14229_5"
+                                          DOCTYPE="COMPARAM-SUBSET"/>
+                </COMPARAM>
+                <COMPARAM ID="ISO_13400_2.CP_DoIPSecondaryLogicalECUResponseAddress" PARAM-CLASS="UNIQUE_ID"
+                          CPTYPE="STANDARD" CPUSAGE="TESTER">
+                    <SHORT-NAME>CP_DoIPSecondaryLogicalECUResponseAddress</SHORT-NAME>
+                    <PHYSICAL-DEFAULT-VALUE>0</PHYSICAL-DEFAULT-VALUE>
+                    <DATA-OBJECT-PROP-REF ID-REF="IDENTICAL_A_UINT32_CONSTR_0_65535" DOCREF="ISO_14229_5"
+                                          DOCTYPE="COMPARAM-SUBSET"/>
+                </COMPARAM>
+                <COMPARAM ID="ISO_13400_2.CP_ECULayerShortName" PARAM-CLASS="UNIQUE_ID" CPTYPE="STANDARD"
+                          CPUSAGE="TESTER">
+                    <SHORT-NAME>CP_ECULayerShortName</SHORT-NAME>
+                    <PHYSICAL-DEFAULT-VALUE>None</PHYSICAL-DEFAULT-VALUE>
+                    <DATA-OBJECT-PROP-REF ID-REF="IDENTICAL_ASCII_CONSTR_END_OF_PDU_1_128" DOCREF="ISO_14229_5"
+                                          DOCTYPE="COMPARAM-SUBSET"/>
+                </COMPARAM>
+            </COMPLEX-COMPARAM>
+        </COMPLEX-COMPARAMS>
+    </COMPARAM-SUBSET>
+</ODX>
