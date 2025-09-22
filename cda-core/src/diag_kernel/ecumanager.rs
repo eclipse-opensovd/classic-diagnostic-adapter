@@ -691,6 +691,10 @@ impl cda_interfaces::EcuManager for EcuManager {
 
                         if let Some(value) = json_values.get(&short_name) {
                             self.map_param_to_uds(param, value, &mut uds)?;
+                        } else {
+                            return Err(DiagServiceError::BadPayload(format!(
+                                "Missing parameter: {short_name}"
+                            )));
                         }
                     }
                 }
