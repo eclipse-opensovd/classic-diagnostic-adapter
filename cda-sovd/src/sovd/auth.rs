@@ -28,7 +28,7 @@ use axum_extra::{
 use jsonwebtoken::{DecodingKey, EncodingKey, Header, Validation, decode, encode};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
-use serde_json::json;
+use thiserror::Error;
 
 use crate::sovd::error::{ApiError, ErrorWrapper};
 
@@ -125,13 +125,15 @@ where
             .await
             .map_err(|e| {
                 tracing::warn!(error = %e, "Failed to extract token");
-                AuthError::InvalidToken
+                AuthError::NoTokenProvided
             })?;
         // Decode the user data
         let token_data =
             decode::<Claims>(bearer.token(), &KEYS.decoding, &validation()).map_err(|e| {
                 tracing::warn!(error = %e, "Failed to decode token");
-                AuthError::InvalidToken
+                AuthError::InvalidToken {
+                    details: "Token could not be decoded".to_string(),
+                }
             })?;
         Ok(token_data.claims)
     }
@@ -139,16 +141,18 @@ where
 
 impl IntoResponse for AuthError {
     fn into_response(self) -> Response {
-        let (status, error_message) = match self {
-            AuthError::WrongCredentials => (StatusCode::UNAUTHORIZED, "Wrong credentials"),
-            AuthError::MissingCredentials => (StatusCode::BAD_REQUEST, "Missing credentials"),
-            AuthError::TokenCreation => (StatusCode::INTERNAL_SERVER_ERROR, "Token creation error"),
-            AuthError::InvalidToken => (StatusCode::BAD_REQUEST, "Invalid token"),
+        // If auth header was missing return 401 without body,
+        // else return sovd error with 403 and the error message
+        // see SOVD 6.15.6 Request Header for Access-Restricted Resources
+        let error_message = match &self {
+            AuthError::NoTokenProvided => return StatusCode::UNAUTHORIZED.into_response(),
+            error => error.to_string(),
         };
-        let body = Json(json!({
-            "error": error_message,
-        }));
-        (status, body).into_response()
+        ErrorWrapper {
+            error: ApiError::Forbidden(Some(error_message)),
+            include_schema: false,
+        }
+        .into_response()
     }
 }
 
@@ -170,7 +174,7 @@ impl Keys {
 pub(crate) struct Claims {
     // dummy implementation for now
     // must be filled with remaining fields
-    // once we are using token master
+    // once we are using a proper auth provider
     pub(crate) sub: String,
     exp: usize,
 }
@@ -194,15 +198,19 @@ pub(crate) struct AuthPayload {
 // allowing dead code because WrongCredentials and MissingCredentials
 // are only used when the auth feature is enabled
 #[allow(dead_code)]
-#[derive(Debug)]
+#[derive(Error, Debug)]
 pub(crate) enum AuthError {
+    #[error("No token provided in the request")]
+    NoTokenProvided,
+    #[error("Wrong credentials provided in the request")]
     WrongCredentials,
+    #[error("No credentials provided in the request")]
     MissingCredentials,
-    TokenCreation,
-    InvalidToken,
+    #[error("Invalid token: {details}")]
+    InvalidToken { details: String },
 }
 
 static KEYS: LazyLock<Keys> = LazyLock::new(|| {
-    // todo, set up proper secret when adding token master in
+    // todo, set up proper secret when adding jwt provider in
     Keys::new("secret".as_bytes())
 });
