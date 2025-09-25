@@ -27,6 +27,7 @@ cda-database = { workspace = true }
 cda-interfaces = { workspace = true }
 cda-sovd = { workspace = true }
 cda-tracing = { workspace = true }
+cda-plugin-security = { workspace = true }
 # args
 clap = { workspace = true, features = ["derive"] }
 # config

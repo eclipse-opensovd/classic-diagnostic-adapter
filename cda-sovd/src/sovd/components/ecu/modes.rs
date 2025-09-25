@@ -32,9 +32,7 @@ use serde::Serialize;
 use sovd_interfaces::components::ecu::modes::{self as sovd_modes, ModeType};
 
 use crate::sovd::{
-    WebserverEcuState,
-    auth::Claims,
-    create_schema,
+    WebserverEcuState, create_schema,
     error::{ApiError, api_error_from_diag_response},
     locks::validate_lock,
 };
@@ -108,6 +106,7 @@ pub(crate) mod id {
 
     use aide::UseApi;
     use axum::extract::Path;
+    use cda_plugin_security::SecurityPluginExtractor;
 
     use super::*;
     use crate::{openapi, sovd::error::ErrorWrapper};
@@ -120,7 +119,7 @@ pub(crate) mod id {
     }
 
     pub(crate) async fn get<R: DiagServiceResponse, T: UdsEcu + Clone, U: FileManager>(
-        UseApi(claims, _): UseApi<Claims, ()>,
+        UseApi(SecurityPluginExtractor(sec_plugin), _): UseApi<SecurityPluginExtractor, ()>,
         WithRejection(Query(query), _): WithRejection<Query<sovd_modes::Query>, ApiError>,
         State(state): State<WebserverEcuState<R, T, U>>,
         Path(mode_str): Path<String>,
@@ -131,7 +130,7 @@ pub(crate) mod id {
         };
         match mode {
             ModeType::Session => session::get(query, state).await,
-            ModeType::Security => security::get(claims, query, state).await,
+            ModeType::Security => security::get(sec_plugin, query, state).await,
         }
     }
 
@@ -151,7 +150,7 @@ pub(crate) mod id {
     }
 
     pub(crate) async fn put<R: DiagServiceResponse, T: UdsEcu + Clone, U: FileManager>(
-        UseApi(claims, _): UseApi<Claims, ()>,
+        UseApi(SecurityPluginExtractor(sec_plugin), _): UseApi<SecurityPluginExtractor, ()>,
         WithRejection(Query(query), _): WithRejection<Query<sovd_modes::Query>, ApiError>,
         State(state): State<WebserverEcuState<R, T, U>>,
         Path(mode_str): Path<String>,
@@ -165,8 +164,12 @@ pub(crate) mod id {
             Err(e) => return e.into_response(),
         };
         match mode {
-            ModeType::Session => session::put(mode_str, claims, query, state, request_body).await,
-            ModeType::Security => security::put(mode_str, claims, query, state, request_body).await,
+            ModeType::Session => {
+                session::put(mode_str, sec_plugin, query, state, request_body).await
+            }
+            ModeType::Security => {
+                security::put(mode_str, sec_plugin, query, state, request_body).await
+            }
         }
     }
 
@@ -190,11 +193,13 @@ pub(crate) mod id {
 }
 
 pub(crate) mod session {
+    use cda_plugin_security::SecurityPlugin;
+
     use super::*;
     use crate::sovd::error::ErrorWrapper;
 
     #[tracing::instrument(
-        skip(claims, locks, uds),
+        skip(locks, uds, sec_plugin),
         fields(
             ecu_name = %ecu_name,
             session_value = %request_body.value,
@@ -203,7 +208,7 @@ pub(crate) mod session {
     )]
     pub(crate) async fn put<R: DiagServiceResponse, T: UdsEcu + Clone, U: FileManager>(
         id: String,
-        claims: Claims,
+        sec_plugin: Box<dyn SecurityPlugin>,
         query: sovd_modes::Query,
         WebserverEcuState {
             locks,
@@ -213,8 +218,9 @@ pub(crate) mod session {
         }: WebserverEcuState<R, T, U>,
         request_body: sovd_modes::put::Request,
     ) -> Response {
+        let claims = sec_plugin.as_auth_plugin().claims();
         let include_schema = query.include_schema;
-        if let Some(response) = validate_lock(&claims, &ecu_name, locks, include_schema).await {
+        if let Some(response) = validate_lock(&claims, &ecu_name, &locks, include_schema).await {
             return response;
         }
         let schema = if include_schema {
@@ -294,6 +300,7 @@ pub(crate) mod session {
 
 pub(crate) mod security {
     use cda_interfaces::{SecurityAccess, diagservices::UdsPayloadData};
+    use cda_plugin_security::SecurityPlugin;
 
     use super::*;
     use crate::sovd::error::ErrorWrapper;
@@ -313,7 +320,7 @@ pub(crate) mod security {
     }
 
     pub(crate) async fn get<R: DiagServiceResponse, T: UdsEcu + Clone, U: FileManager>(
-        claims: Claims,
+        sec_plugin: Box<dyn SecurityPlugin>,
         query: sovd_modes::Query,
         WebserverEcuState {
             ecu_name,
@@ -322,8 +329,9 @@ pub(crate) mod security {
             ..
         }: WebserverEcuState<R, T, U>,
     ) -> Response {
+        let claims = sec_plugin.as_auth_plugin().claims();
         let include_schema = query.include_schema;
-        if let Some(value) = validate_lock(&claims, &ecu_name, locks, include_schema).await {
+        if let Some(value) = validate_lock(&claims, &ecu_name, &locks, include_schema).await {
             return value;
         }
         let schema = if include_schema {
@@ -354,7 +362,7 @@ pub(crate) mod security {
 
     pub(crate) async fn put<R: DiagServiceResponse, T: UdsEcu + Clone, U: FileManager>(
         id: String,
-        claims: Claims,
+        sec_plugin: Box<dyn SecurityPlugin>,
         query: sovd_modes::Query,
         WebserverEcuState {
             uds,
@@ -364,6 +372,7 @@ pub(crate) mod security {
         }: WebserverEcuState<R, T, U>,
         request_body: sovd_modes::put::Request,
     ) -> Response {
+        let claims = sec_plugin.as_auth_plugin().claims();
         fn split_at_last_underscore(input: &str) -> (String, Option<String>) {
             let parts: Vec<&str> = input.split('_').collect();
 
@@ -378,7 +387,7 @@ pub(crate) mod security {
 
         let include_schema = query.include_schema;
 
-        if let Some(value) = validate_lock(&claims, &ecu_name, locks, include_schema).await {
+        if let Some(value) = validate_lock(&claims, &ecu_name, &locks, include_schema).await {
             return value;
         }
 

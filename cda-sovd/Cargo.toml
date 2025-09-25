@@ -17,13 +17,16 @@ path = "src/lib.rs"
 [dependencies]
 # internal dependencies
 cda-interfaces = { workspace = true }
+cda-plugin-security = { workspace = true }
 sovd-interfaces = { workspace = true }
 
 tokio = { workspace = true, features = ["net"] }
 futures = { workspace = true }                         # external
 hashbrown = { workspace = true, features = ["serde"] }
 
-aide = { git = "https://github.com/theswiftfox/aide.git", rev = "e533403", features = [
+async-trait = { workspace = true }
+
+aide = { workspace = true, features = [
   "axum",
   "swagger",
   "http",
