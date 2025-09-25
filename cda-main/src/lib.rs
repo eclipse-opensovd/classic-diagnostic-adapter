@@ -28,6 +28,7 @@ use cda_interfaces::{
     datatypes::{ComParams, DatabaseNamingConvention},
     file_manager::{Chunk, ChunkType},
 };
+use cda_plugin_security::DefaultAuthPlugin;
 use cda_sovd::WebServerConfig;
 use hashbrown::HashMap;
 use tokio::{
@@ -324,7 +325,7 @@ pub fn start_webserver(
     shutdown_signal: impl std::future::Future<Output = ()> + Send + 'static,
 ) -> tokio::task::JoinHandle<Result<(), String>> {
     cda_interfaces::spawn_named!("webserver", async move {
-        cda_sovd::launch_webserver::<_, DiagServiceResponseStruct, _, _>(
+        cda_sovd::launch_webserver::<_, DiagServiceResponseStruct, _, _, DefaultAuthPlugin>(
             webserver_config,
             ecu_uds,
             flash_files_path,

@@ -19,7 +19,7 @@ use serde::Serialize;
 // allowed, so we can pre-fill this with all sovd error codes
 // even though not all are used yet.
 #[allow(dead_code)]
-#[derive(schemars::JsonSchema)]
+#[derive(schemars::JsonSchema, PartialEq, Eq)]
 pub enum ErrorCode {
     /// Details are specified in the `vendor_code`
     VendorSpecific,

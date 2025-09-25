@@ -19,6 +19,7 @@ members = [
   "cda-sovd-interfaces",
   "cda-main",
   "cda-tracing",
+  "cda-plugin-security",
 ]
 
 [workspace.dependencies]
@@ -27,11 +28,13 @@ cda-core = { path = "cda-core" }
 cda-comm-doip = { path = "cda-comm-doip" }
 cda-comm-uds = { path = "cda-comm-uds" }
 cda-database = { path = "cda-database" }
+cda-plugin-security = { path = "cda-plugin-security" }
 cda-sovd = { path = "cda-sovd" }
 cda-tracing = { path = "cda-tracing" }
 sovd-interfaces = { path = "cda-sovd-interfaces" }
 
 # ---- common crates ----
+async-trait = "0.1.89"
 thiserror = "2.0.16"
 hashbrown = "0.15"
 num-traits = "0.2"
