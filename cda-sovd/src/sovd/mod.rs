@@ -23,6 +23,7 @@ use axum::{
     body::Bytes,
     extract::Query,
     http::{HeaderMap, StatusCode},
+    middleware,
     response::{IntoResponse, Response},
 };
 use axum_extra::extract::WithRejection;
@@ -40,12 +41,16 @@ use sovd_interfaces::{components::ecu as sovd_ecu, sovd2uds::FileList};
 use tokio::sync::RwLock;
 use uuid::Uuid;
 
-use crate::sovd::{
-    components::ecu::{
-        configurations, data, faults, genericservice, modes, operations, x_single_ecu_jobs,
-        x_sovd2uds_bulk_data, x_sovd2uds_download,
+use crate::{
+    plugins::auth_middleware,
+    sovd::{
+        auth::DefaultAuthPlugin,
+        components::ecu::{
+            configurations, data, faults, genericservice, modes, operations, x_single_ecu_jobs,
+            x_sovd2uds_bulk_data, x_sovd2uds_download,
+        },
+        locks::{LockType, Locks},
     },
-    locks::{LockType, Locks},
 };
 
 pub(crate) mod apps;
@@ -53,6 +58,12 @@ pub(crate) mod auth;
 pub(crate) mod components;
 pub(crate) mod error;
 pub(crate) mod locks;
+
+macro_rules! auth_layer {
+    ($plugin:ty) => {
+        middleware::from_fn(auth_middleware::<$plugin>)
+    };
+}
 
 trait IntoSovd {
     type SovdType;
@@ -91,10 +102,21 @@ impl<R: DiagServiceResponse, T: UdsEcu + Clone, U: FileManager> Clone
     }
 }
 
-#[derive(Clone)]
 pub(crate) struct WebserverState {
     locks: Arc<Locks>,
     flash_data: Arc<RwLock<sovd_interfaces::sovd2uds::FileList>>,
+}
+
+/// Clone implementation that does not clone the auth_state
+/// auth_state is only set by the middleware and should not
+/// be cloned for each request
+impl Clone for WebserverState {
+    fn clone(&self) -> Self {
+        Self {
+            locks: self.locks.clone(),
+            flash_data: self.flash_data.clone(),
+        }
+    }
 }
 
 pub(crate) fn resource_response(
@@ -205,7 +227,8 @@ pub async fn route<R: DiagServiceResponse, T: UdsEcu + SchemaProvider + Clone, U
         .api_route(
             "/vehicle/v15/locks",
             routing::post_with(locks::vehicle::post, locks::vehicle::docs_post)
-                .get_with(locks::vehicle::get, locks::vehicle::docs_get),
+                .get_with(locks::vehicle::get, locks::vehicle::docs_get)
+                .layer(auth_layer!(DefaultAuthPlugin)),
         )
         .api_route(
             "/vehicle/v15/locks/{lock}",
@@ -214,7 +237,8 @@ pub async fn route<R: DiagServiceResponse, T: UdsEcu + SchemaProvider + Clone, U
                 .delete_with(
                     locks::vehicle::lock::delete,
                     locks::vehicle::lock::docs_delete,
-                ),
+                )
+                .layer(auth_layer!(DefaultAuthPlugin)),
         )
         .api_route(
             "/vehicle/v15/functions/functionalgroups/{group}/locks",
@@ -225,7 +249,8 @@ pub async fn route<R: DiagServiceResponse, T: UdsEcu + SchemaProvider + Clone, U
             .get_with(
                 locks::functional_group::get,
                 locks::functional_group::docs_get,
-            ),
+            )
+            .layer(auth_layer!(DefaultAuthPlugin)),
         )
         .api_route(
             "/vehicle/v15/functions/functionalgroups/{group}/locks/{lock}",
@@ -240,7 +265,8 @@ pub async fn route<R: DiagServiceResponse, T: UdsEcu + SchemaProvider + Clone, U
             .delete_with(
                 locks::functional_group::lock::delete,
                 locks::functional_group::lock::docs_delete,
-            ),
+            )
+            .layer(auth_layer!(DefaultAuthPlugin)),
         )
         .route("/vehicle/v15/apps", routing::get(apps::get))
         .route(
@@ -372,13 +398,18 @@ fn ecu_route<
         .api_route("/modes", routing::get_with(modes::get, modes::docs_get))
         .api_route(
             "/modes/session",
-            routing::get_with(modes::session::get, modes::session::docs_get)
-                .put_with(modes::session::put, modes::session::docs_put),
+            routing::get_with(modes::session::get, modes::session::docs_get),
+        )
+        .api_route(
+            "/modes/session",
+            routing::put_with(modes::session::put, modes::session::docs_put)
+                .layer(auth_layer!(DefaultAuthPlugin)),
         )
         .api_route(
             "/modes/security",
             routing::get_with(modes::security::get, modes::security::docs_get)
-                .put_with(modes::security::put, modes::security::docs_put),
+                .put_with(modes::security::put, modes::security::docs_put)
+                .layer(auth_layer!(DefaultAuthPlugin)),
         )
         .api_route(
             "/x-single-ecu-jobs",

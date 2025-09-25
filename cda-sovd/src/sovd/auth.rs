@@ -14,12 +14,8 @@
 use std::sync::LazyLock;
 
 use aide::axum::IntoApiResponse;
-use axum::{
-    Json, RequestPartsExt,
-    extract::FromRequestParts,
-    http::{StatusCode, request::Parts},
-    response::{IntoResponse, Response},
-};
+use async_trait::async_trait;
+use axum::{Json, RequestPartsExt, http::StatusCode, response::IntoResponse};
 use axum_extra::{
     TypedHeader,
     extract::WithRejection,
@@ -28,9 +24,13 @@ use axum_extra::{
 use jsonwebtoken::{DecodingKey, EncodingKey, Header, Validation, decode, encode};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
-use thiserror::Error;
 
-use crate::sovd::error::{ApiError, ErrorWrapper};
+use crate::{
+    plugins::{
+        AuthApi, AuthError, Claims as ClaimsTrait, SecurityApi, SecurityPlugin, SecurityPluginType,
+    },
+    sovd::error::{ApiError, ErrorWrapper},
+};
 
 // allowed because the variant for enabled auth needs the Result
 #[allow(clippy::unnecessary_wraps)]
@@ -112,13 +112,29 @@ fn validation() -> Validation {
     validation
 }
 
-impl<S> FromRequestParts<S> for Claims
-where
-    S: Send + Sync,
-{
-    type Rejection = AuthError;
+impl ClaimsTrait for Claims {
+    fn sub(&self) -> &str {
+        &self.sub
+    }
 
-    async fn from_request_parts(parts: &mut Parts, _state: &S) -> Result<Self, Self::Rejection> {
+    fn exp(&self) -> usize {
+        self.exp
+    }
+}
+
+#[derive(Clone, Default)]
+pub struct DefaultAuthPlugin {
+    claims: Option<Claims>,
+}
+
+impl SecurityPluginType for DefaultAuthPlugin {}
+
+#[async_trait]
+impl AuthApi for DefaultAuthPlugin {
+    async fn validate_token(
+        &mut self,
+        parts: &mut axum::http::request::Parts,
+    ) -> Result<(), crate::plugins::AuthError> {
         // Extract the token from the authorization header
         let TypedHeader(Authorization(bearer)) = parts
             .extract::<TypedHeader<Authorization<Bearer>>>()
@@ -135,24 +151,27 @@ where
                     details: "Token could not be decoded".to_string(),
                 }
             })?;
-        Ok(token_data.claims)
+        self.claims = Some(token_data.claims);
+        Ok(())
+    }
+
+    fn claims(&self) -> Result<Box<&dyn ClaimsTrait>, AuthError> {
+        match &self.claims {
+            Some(c) => Ok(Box::new(c)),
+            None => Err(AuthError::MissingCredentials),
+        }
     }
 }
 
-impl IntoResponse for AuthError {
-    fn into_response(self) -> Response {
-        // If auth header was missing return 401 without body,
-        // else return sovd error with 403 and the error message
-        // see SOVD 6.15.6 Request Header for Access-Restricted Resources
-        let error_message = match &self {
-            AuthError::NoTokenProvided => return StatusCode::UNAUTHORIZED.into_response(),
-            error => error.to_string(),
-        };
-        ErrorWrapper {
-            error: ApiError::Forbidden(Some(error_message)),
-            include_schema: false,
-        }
-        .into_response()
+impl SecurityApi for DefaultAuthPlugin {}
+
+impl SecurityPlugin for DefaultAuthPlugin {
+    fn as_auth_plugin(&self) -> &dyn AuthApi {
+        self
+    }
+
+    fn as_security_plugin(&self) -> &dyn SecurityApi {
+        self
     }
 }
 
@@ -170,7 +189,7 @@ impl Keys {
     }
 }
 
-#[derive(Debug, Serialize, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub(crate) struct Claims {
     // dummy implementation for now
     // must be filled with remaining fields
@@ -193,21 +212,6 @@ pub(crate) struct AuthPayload {
     // will not be used when auth feature is disabled
     #[allow(unused)]
     client_secret: String,
-}
-
-// allowing dead code because WrongCredentials and MissingCredentials
-// are only used when the auth feature is enabled
-#[allow(dead_code)]
-#[derive(Error, Debug)]
-pub(crate) enum AuthError {
-    #[error("No token provided in the request")]
-    NoTokenProvided,
-    #[error("Wrong credentials provided in the request")]
-    WrongCredentials,
-    #[error("No credentials provided in the request")]
-    MissingCredentials,
-    #[error("Invalid token: {details}")]
-    InvalidToken { details: String },
 }
 
 static KEYS: LazyLock<Keys> = LazyLock::new(|| {

@@ -23,6 +23,8 @@ tokio = { workspace = true, features = ["net"] }
 futures = { workspace = true }                         # external
 hashbrown = { workspace = true, features = ["serde"] }
 
+async-trait = { workspace = true }
+
 aide = { git = "https://github.com/theswiftfox/aide.git", rev = "e533403", features = [
   "axum",
   "swagger",

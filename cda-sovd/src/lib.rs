@@ -29,6 +29,7 @@ use tower::Layer;
 use tower_http::trace::TraceLayer;
 
 mod openapi;
+pub mod plugins;
 pub(crate) mod sovd;
 
 // Consts for HTTP
