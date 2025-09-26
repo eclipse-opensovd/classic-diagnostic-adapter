@@ -129,10 +129,7 @@ pub(crate) mod session {
             ApiError,
         >,
     ) -> Response {
-        let claims = match sec_plugin.as_auth_plugin().claims() {
-            Err(e) => return e.into_response(),
-            Ok(c) => c,
-        };
+        let claims = sec_plugin.as_auth_plugin().claims();
         let include_schema = query.include_schema;
         if let Some(response) = validate_lock(&claims, &ecu_name, &locks, include_schema).await {
             return response;
@@ -269,10 +266,7 @@ pub(crate) mod security {
             ..
         }): State<WebserverEcuState<R, T, U>>,
     ) -> Response {
-        let claims = match sec_plugin.as_auth_plugin().claims() {
-            Err(e) => return e.into_response(),
-            Ok(c) => c,
-        };
+        let claims = sec_plugin.as_auth_plugin().claims();
         let include_schema = query.include_schema;
         if let Some(value) = validate_lock(&claims, &ecu_name, &locks, include_schema).await {
             return value;
@@ -332,10 +326,7 @@ pub(crate) mod security {
             ApiError,
         >,
     ) -> Response {
-        let claims = match sec_plugin.as_auth_plugin().claims() {
-            Err(e) => return e.into_response(),
-            Ok(c) => c,
-        };
+        let claims = sec_plugin.as_auth_plugin().claims();
         fn split_at_last_underscore(input: &str) -> (String, Option<String>) {
             let parts: Vec<&str> = input.split('_').collect();
 

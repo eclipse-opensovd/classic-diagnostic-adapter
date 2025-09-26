@@ -181,10 +181,7 @@ pub(crate) mod ecu {
                 ecu_name, locks, ..
             }): State<WebserverEcuState<R, T, U>>,
         ) -> Response {
-            let claims = match sec_plugin.as_auth_plugin().claims() {
-                Err(e) => return e.into_response(),
-                Ok(c) => c,
-            };
+            let claims = sec_plugin.as_auth_plugin().claims();
 
             delete_handler(&locks.ecu, &lock, &claims, Some(&ecu_name), false).await
         }
@@ -207,10 +204,7 @@ pub(crate) mod ecu {
                 ApiError,
             >,
         ) -> Response {
-            let claims = match sec_plugin.as_auth_plugin().claims() {
-                Err(e) => return e.into_response(),
-                Ok(c) => c,
-            };
+            let claims = sec_plugin.as_auth_plugin().claims();
             put_handler(&locks.ecu, &lock, &claims, Some(&ecu_name), body, false).await
         }
 
@@ -223,12 +217,9 @@ pub(crate) mod ecu {
 
         pub(crate) async fn get<R: DiagServiceResponse, T: UdsEcu + Clone, U: FileManager>(
             Path(lock): Path<LockPathParam>,
-            UseApi(sec_plugin, _): UseApi<SecurityPluginExtractor, ()>,
+            UseApi(_sec_plugin, _): UseApi<SecurityPluginExtractor, ()>,
             State(state): State<WebserverEcuState<R, T, U>>,
         ) -> Response {
-            if let Err(e) = sec_plugin.as_auth_plugin().claims() {
-                return e.into_response();
-            };
             get_id_handler(&state.locks.ecu, &lock, None, false).await
         }
 
@@ -255,10 +246,7 @@ pub(crate) mod ecu {
             ApiError,
         >,
     ) -> impl IntoApiResponse {
-        let claims = match sec_plugin.as_auth_plugin().claims() {
-            Err(e) => return e.into_response(),
-            Ok(c) => c,
-        };
+        let claims = sec_plugin.as_auth_plugin().claims();
         let vehicle_ro_lock = vehicle_read_lock(&locks, &claims).await;
         if let Err(e) = vehicle_ro_lock {
             return ErrorWrapper {
@@ -310,10 +298,7 @@ pub(crate) mod ecu {
             ecu_name, locks, ..
         }): State<WebserverEcuState<R, T, U>>,
     ) -> Response {
-        let claims = match sec_plugin.as_auth_plugin().claims() {
-            Err(e) => return e.into_response(),
-            Ok(c) => c,
-        };
+        let claims = sec_plugin.as_auth_plugin().claims();
         get_handler(&locks.ecu, &claims, Some(&ecu_name)).await
     }
 
@@ -346,10 +331,7 @@ pub(crate) mod vehicle {
             UseApi(sec_plugin, _): UseApi<SecurityPluginExtractor, ()>,
             State(state): State<WebserverState>,
         ) -> Response {
-            let claims = match sec_plugin.as_auth_plugin().claims() {
-                Err(e) => return e.into_response(),
-                Ok(c) => c,
-            };
+            let claims = sec_plugin.as_auth_plugin().claims();
             delete_handler(&state.locks.vehicle, &lock, &claims, None, false).await
         }
 
@@ -369,10 +351,7 @@ pub(crate) mod vehicle {
                 ApiError,
             >,
         ) -> Response {
-            let claims = match sec_plugin.as_auth_plugin().claims() {
-                Err(e) => return e.into_response(),
-                Ok(c) => c,
-            };
+            let claims = sec_plugin.as_auth_plugin().claims();
             put_handler(&state.locks.vehicle, &lock, &claims, None, body, false).await
         }
 
@@ -385,12 +364,9 @@ pub(crate) mod vehicle {
 
         pub(crate) async fn get(
             Path(lock): Path<LockPathParam>,
-            UseApi(sec_plugin, _): UseApi<SecurityPluginExtractor, ()>,
+            UseApi(_sec_plugin, _): UseApi<SecurityPluginExtractor, ()>,
             State(state): State<WebserverState>,
         ) -> Response {
-            if let Err(e) = sec_plugin.as_auth_plugin().claims() {
-                return e.into_response();
-            }
             get_id_handler(&state.locks.vehicle, &lock, None, false).await
         }
 
@@ -416,10 +392,7 @@ pub(crate) mod vehicle {
             ApiError,
         >,
     ) -> Response {
-        let claims = match sec_plugin.as_auth_plugin().claims() {
-            Err(e) => return e.into_response(),
-            Ok(c) => c,
-        };
+        let claims = sec_plugin.as_auth_plugin().claims();
         let mut vehicle_rw_lock = state.locks.vehicle.lock_rw().await;
         let vehicle_lock = match vehicle_rw_lock.get_mut(None) {
             Ok(lock) => lock,
@@ -485,10 +458,7 @@ pub(crate) mod vehicle {
         UseApi(sec_plugin, _): UseApi<SecurityPluginExtractor, ()>,
         State(state): State<WebserverState>,
     ) -> Response {
-        let claims = match sec_plugin.as_auth_plugin().claims() {
-            Err(e) => return e.into_response(),
-            Ok(c) => c,
-        };
+        let claims = sec_plugin.as_auth_plugin().claims();
         get_handler(&state.locks.vehicle, &claims, None).await
     }
 
@@ -527,10 +497,7 @@ pub(crate) mod functional_group {
             State(state): State<WebserverState>,
             UseApi(sec_plugin, _): UseApi<SecurityPluginExtractor, ()>,
         ) -> Response {
-            let claims = match sec_plugin.as_auth_plugin().claims() {
-                Err(e) => return e.into_response(),
-                Ok(c) => c,
-            };
+            let claims = sec_plugin.as_auth_plugin().claims();
             delete_handler(
                 &state.locks.functional_group,
                 &lock,
@@ -559,10 +526,7 @@ pub(crate) mod functional_group {
                 ApiError,
             >,
         ) -> Response {
-            let claims = match sec_plugin.as_auth_plugin().claims() {
-                Err(e) => return e.into_response(),
-                Ok(c) => c,
-            };
+            let claims = sec_plugin.as_auth_plugin().claims();
             put_handler(
                 &state.locks.functional_group,
                 &lock,
@@ -585,12 +549,9 @@ pub(crate) mod functional_group {
             Path(FunctionalGroupLockWithIdPathParam { group, lock }): Path<
                 FunctionalGroupLockWithIdPathParam,
             >,
-            UseApi(sec_plugin, _): UseApi<SecurityPluginExtractor, ()>,
+            UseApi(_sec_plugin, _): UseApi<SecurityPluginExtractor, ()>,
             State(state): State<WebserverState>,
         ) -> Response {
-            if let Err(e) = sec_plugin.as_auth_plugin().claims() {
-                return e.into_response();
-            }
             get_id_handler(&state.locks.functional_group, &lock, Some(&group), false).await
         }
 
@@ -617,10 +578,7 @@ pub(crate) mod functional_group {
             ApiError,
         >,
     ) -> Response {
-        let claims = match sec_plugin.as_auth_plugin().claims() {
-            Err(e) => return e.into_response(),
-            Ok(c) => c,
-        };
+        let claims = sec_plugin.as_auth_plugin().claims();
         let vehicle_ro_lock = vehicle_read_lock(&state.locks, &claims).await;
         if let Err(e) = vehicle_ro_lock {
             return ErrorWrapper {
@@ -659,10 +617,7 @@ pub(crate) mod functional_group {
         UseApi(sec_plugin, _): UseApi<SecurityPluginExtractor, ()>,
         State(state): State<WebserverState>,
     ) -> Response {
-        let claims = match sec_plugin.as_auth_plugin().claims() {
-            Err(e) => return e.into_response(),
-            Ok(c) => c,
-        };
+        let claims = sec_plugin.as_auth_plugin().claims();
         get_handler(&state.locks.functional_group, &claims, Some(&group)).await
     }
 

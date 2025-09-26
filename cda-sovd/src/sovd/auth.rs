@@ -21,13 +21,15 @@ use axum_extra::{
     extract::WithRejection,
     headers::{Authorization, authorization::Bearer},
 };
+use http::request::Parts;
 use jsonwebtoken::{DecodingKey, EncodingKey, Header, Validation, decode, encode};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
 use crate::{
     plugins::{
-        AuthApi, AuthError, Claims as ClaimsTrait, SecurityApi, SecurityPlugin, SecurityPluginType,
+        AuthApi, AuthError, Claims as ClaimsTrait, SecurityApi, SecurityPlugin,
+        SecurityPluginInitializer, SecurityPluginType,
     },
     sovd::error::{ApiError, ErrorWrapper},
 };
@@ -122,19 +124,20 @@ impl ClaimsTrait for Claims {
     }
 }
 
-#[derive(Clone, Default)]
 pub struct DefaultAuthPlugin {
-    claims: Option<Claims>,
+    claims: Claims,
 }
 
-impl SecurityPluginType for DefaultAuthPlugin {}
+#[derive(Default)]
+pub struct DefaultAuthPluginInitializer;
+impl SecurityPluginType for DefaultAuthPluginInitializer {}
 
 #[async_trait]
-impl AuthApi for DefaultAuthPlugin {
-    async fn validate_token(
-        &mut self,
-        parts: &mut axum::http::request::Parts,
-    ) -> Result<(), crate::plugins::AuthError> {
+impl SecurityPluginInitializer for DefaultAuthPluginInitializer {
+    async fn initialize_from_request_parts(
+        &self,
+        parts: &mut Parts,
+    ) -> Result<Box<dyn SecurityPlugin>, AuthError> {
         // Extract the token from the authorization header
         let TypedHeader(Authorization(bearer)) = parts
             .extract::<TypedHeader<Authorization<Bearer>>>()
@@ -151,15 +154,16 @@ impl AuthApi for DefaultAuthPlugin {
                     details: "Token could not be decoded".to_string(),
                 }
             })?;
-        self.claims = Some(token_data.claims);
-        Ok(())
-    }
 
-    fn claims(&self) -> Result<Box<&dyn ClaimsTrait>, AuthError> {
-        match &self.claims {
-            Some(c) => Ok(Box::new(c)),
-            None => Err(AuthError::MissingCredentials),
-        }
+        Ok(Box::new(DefaultAuthPlugin {
+            claims: token_data.claims,
+        }))
+    }
+}
+
+impl AuthApi for DefaultAuthPlugin {
+    fn claims(&self) -> Box<&dyn ClaimsTrait> {
+        Box::new(&self.claims)
     }
 }
 

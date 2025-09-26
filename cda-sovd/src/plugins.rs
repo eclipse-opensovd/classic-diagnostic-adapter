@@ -33,14 +33,8 @@ pub trait Claims: Send + Sync {
     fn exp(&self) -> usize;
 }
 
-#[async_trait]
 pub trait AuthApi: Send + Sync + 'static {
-    async fn validate_token(
-        &mut self,
-        parts: &mut axum::http::request::Parts,
-    ) -> Result<(), AuthError>;
-
-    fn claims(&self) -> Result<Box<&dyn Claims>, AuthError>;
+    fn claims(&self) -> Box<&dyn Claims>;
 }
 
 pub trait SecurityApi: Send + Sync + 'static {
@@ -53,18 +47,18 @@ pub trait SecurityPlugin: SecurityApi + AuthApi {
     fn as_security_plugin(&self) -> &dyn SecurityApi;
 }
 
-pub trait SecurityPluginType: SecurityPlugin + Default + Clone {}
-
 #[async_trait]
-impl AuthApi for Box<dyn AuthApi> {
-    async fn validate_token(
-        &mut self,
-        parts: &mut axum::http::request::Parts,
-    ) -> Result<(), AuthError> {
-        (**self).validate_token(parts).await
-    }
+pub trait SecurityPluginInitializer: Send + Sync {
+    async fn initialize_from_request_parts(
+        &self,
+        parts: &mut Parts,
+    ) -> Result<Box<dyn SecurityPlugin>, AuthError>;
+}
 
-    fn claims(&self) -> Result<Box<&dyn Claims>, AuthError> {
+pub trait SecurityPluginType: SecurityPluginInitializer + Default + 'static {}
+
+impl AuthApi for Box<dyn AuthApi> {
+    fn claims(&self) -> Box<&dyn Claims> {
         (**self).claims()
     }
 }
@@ -89,30 +83,16 @@ impl Claims for Box<&dyn Claims> {
     }
 }
 
-pub type SecurityPluginData = Arc<dyn SecurityPlugin>;
+pub type SecurityPluginData = Box<dyn SecurityPlugin>;
+pub type SecurityPluginInitializerType = Arc<dyn SecurityPluginInitializer>;
 
-pub async fn auth_middleware<A: SecurityPluginType>(req: Request, next: Next) -> Response {
-    let (mut parts, body) = req.into_parts();
-
-    let mut auth_state = A::default();
-    match auth_state.validate_token(&mut parts).await {
-        Ok(()) => {
-            let auth_state = Arc::new(auth_state);
-            let Ok(claims) = auth_state.claims() else {
-                tracing::warn!("Auth plugin did not return claims after successful validation");
-                return AuthError::Internal.into_response();
-            };
-            tracing::debug!(sub = %claims.sub(), exp = %claims.exp(), "Authorized request");
-            let mut req = axum::http::Request::from_parts(parts, body);
-            let shared_plugin = auth_state as SecurityPluginData;
-            req.extensions_mut().insert(shared_plugin);
-            next.run(req).await
-        }
-        Err(e) => {
-            tracing::warn!(error = ?e, "Unauthorized request");
-            e.into_response()
-        }
-    }
+pub async fn security_plugin_middleware<A: SecurityPluginType>(
+    mut req: Request,
+    next: Next,
+) -> Response {
+    let security_plugin = Arc::new(A::default()) as SecurityPluginInitializerType;
+    req.extensions_mut().insert(security_plugin);
+    next.run(req).await
 }
 
 pub struct SecurityPluginExtractor(SecurityPluginData);
@@ -132,11 +112,13 @@ where
     type Rejection = AuthError;
 
     async fn from_request_parts(parts: &mut Parts, _state: &S) -> Result<Self, Self::Rejection> {
-        let auth_state = parts
+        let initializer = parts
             .extensions
-            .remove::<SecurityPluginData>()
+            .remove::<SecurityPluginInitializerType>()
             .ok_or(AuthError::Internal)?;
-        Ok(SecurityPluginExtractor(auth_state))
+
+        let plugin = initializer.initialize_from_request_parts(parts).await?;
+        Ok(SecurityPluginExtractor(plugin))
     }
 }
 
@@ -147,6 +129,12 @@ impl IntoResponse for AuthError {
         // see SOVD 6.15.6 Request Header for Access-Restricted Resources
         let error_message = match &self {
             AuthError::NoTokenProvided => return StatusCode::UNAUTHORIZED.into_response(),
+            AuthError::Internal => {
+                return ApiError::InternalServerError(Some(
+                    "Misconfiguration of Security Plugin".to_string(),
+                ))
+                .into_response();
+            }
             error => error.to_string(),
         };
         ErrorWrapper {
