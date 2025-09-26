@@ -1,0 +1,5 @@
+*.xsd
+*.pdx
+*.mdd
+*.mdd.log
+__pycache__

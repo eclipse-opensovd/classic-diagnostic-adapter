@@ -1,6 +1,7 @@
 package ecu
 
 import RequestsData
+import library.decodeHex
 import utils.combine
 import java.text.SimpleDateFormat
 import java.time.ZoneOffset
@@ -18,6 +19,15 @@ class SoftwareIdentifierResponse(vararg val softwareVersionIdentifier: MajorMino
 
 @OptIn(ExperimentalTime::class)
 fun RequestsData.addDiagnosticRequests() {
+    request("22 F1 00", name = "Identification_Read") {
+        val ecuState = ecu.ecuState()
+        val identification = when (ecuState.variant) {
+            Variant.BOOT -> ecuState.variantPattern.boot.decodeHex()
+            Variant.APPLICATION -> ecuState.variantPattern.application.decodeHex()
+        }
+        ack(identification)
+    }
+
     request("22 F1 80", name = "BootSoftwareIdentificationDataIdentifier_Read") {
         val ecuState = ecu.ecuState()
         val bootBlockVersions = ecuState.blocks.filter { it.type == DataBlockType.BOOT }.map { it.softwareVersion }
@@ -166,5 +176,12 @@ fun RequestsData.addDiagnosticRequests() {
 
     request("22 FF 00", name = "UDSVersionDataIdentifier_Read") {
         nrc(NrcError.RequestOutOfRange)
+    }
+
+    request("3E 00", name = "TesterPresent", loglevel = LogLevel.TRACE) {
+        ack()
+    }
+
+    request("3E 80", name = "TesterPresent_SuppressResponse", loglevel = LogLevel.TRACE) {
     }
 }

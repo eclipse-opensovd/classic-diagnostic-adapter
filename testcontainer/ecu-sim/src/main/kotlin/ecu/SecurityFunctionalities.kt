@@ -2,6 +2,8 @@ package ecu
 
 import NrcError
 import RequestsData
+import utils.getByteArray
+import utils.messagePayload
 import java.util.*
 
 fun RequestsData.addSecurityAccessRequests() {
@@ -32,13 +34,14 @@ fun RequestsData.addSecurityAccessRequests() {
             if (level == null) {
                 nrc(NrcError.RequestOutOfRange)
             } else {
-                val data = this.message.copyOfRange(2, this.message.size - 1)
+                val messagePayload = this.messagePayload()
+                val data = messagePayload.getByteArray(messagePayload.limit())
                 var seed by ecu.storedProperty { ByteArray(0) }
 
                 if (seed.size == 8) {
                     // Use a super secure algorithm
-                    val rot13 = seed.map { it.toUByte().plus(13u).toByte() }.toByteArray()
-                    if (data.contentEquals(rot13)) {
+                    val expectedData = seed.map { it.toUByte().plus(13u).toByte() }.toByteArray()
+                    if (data.contentEquals(expectedData)) {
                         ecuState.securityAccess = level
                         @Suppress("AssignedValueIsNeverRead")
                         seed = ByteArray(0)
