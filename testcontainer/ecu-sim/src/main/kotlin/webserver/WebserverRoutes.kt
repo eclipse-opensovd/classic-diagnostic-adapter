@@ -109,11 +109,11 @@ fun Route.addRecordingRoutes() {
 }
 
 fun Route.addDtcFaultsRoutes() {
-    get("/dtc/{ecu}") {
+    get("/{ecu}/dtc") {
         call.respond(mapOf("items" to FaultMemory.entries.map { mapOf("name" to it.name) }))
     }
 
-    get("/dtc/{ecu}/{faultMemory}") {
+    get("/{ecu}/dtc/{faultMemory}") {
         val ecu = findByEcuName(call) ?: return@get
         val dtcFaults = ecu.dtcFaultsByApplicationCall(call) ?: return@get
         val response = dtcFaults.values.map { it.toDto() }
@@ -121,7 +121,7 @@ fun Route.addDtcFaultsRoutes() {
         call.respond(response)
     }
 
-    put("/dtc/{ecu}/{faultMemory}") {
+    put("/{ecu}/dtc/{faultMemory}") {
         val ecu = findByEcuName(call) ?: return@put
         val dtcFaults = ecu.dtcFaultsByApplicationCall(call) ?: return@put
         val dto = call.receive<DtcFaultDto>()
@@ -131,7 +131,7 @@ fun Route.addDtcFaultsRoutes() {
         call.respond(HttpStatusCode.Created, mapOf("message" to "DTC was created"))
     }
 
-    delete("/dtc/{ecu}/{faultMemory}/{faultId}") {
+    delete("/{ecu}/dtc/{faultMemory}/{faultId}") {
         val ecu = findByEcuName(call) ?: return@delete
         val faultId = call.parameters["faultId"]!!.dtcToId()
         val dtcFaults = ecu.dtcFaultsByApplicationCall(call) ?: return@delete
@@ -140,7 +140,7 @@ fun Route.addDtcFaultsRoutes() {
         call.respond(HttpStatusCode.OK, mapOf("message" to "DTCs were deleted"))
     }
 
-    delete("/dtc/{ecu}/{faultMemory}") {
+    delete("/{ecu}/dtc/{faultMemory}") {
         val ecu = findByEcuName(call) ?: return@delete
         val dtcFaults = ecu.dtcFaultsByApplicationCall(call) ?: return@delete
         dtcFaults.clear()

@@ -84,4 +84,14 @@ fun RequestsData.addSessionRequests() {
         val response = DiagnosticSessionControlResponse()
         ack(response.asByteArray)
     }
+
+    request("10 44", name = "CustomSession") {
+        val ecuState = ecu.ecuState()
+        ecuState.sessionState = SessionState.CUSTOM
+
+        enableS3Timeout()
+
+        val response = DiagnosticSessionControlResponse()
+        ack(response.asByteArray)
+    }
 }

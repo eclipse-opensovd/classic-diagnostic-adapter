@@ -13,7 +13,8 @@ enum class SessionState(val value: Byte) {
     DEFAULT(0x01),
     PROGRAMMING(0x02),
     EXTENDED(0x03),
-    SAFETY(0x04)
+    SAFETY(0x04),
+    CUSTOM(0x23),
 }
 
 @Serializable

@@ -1,7 +1,6 @@
 FROM eclipse-temurin:21
 
-#comment this in if you need to locally debug container issues
-#RUN apt-get -y update && apt-get -y install tcpdump vim iproute2 jq
+RUN apt-get -y update && apt-get -y install tcpdump vim iproute2 jq
 
 WORKDIR /app
 
