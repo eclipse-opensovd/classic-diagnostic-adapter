@@ -32,6 +32,7 @@ cda-tracing = { path = "cda-tracing" }
 sovd-interfaces = { path = "cda-sovd-interfaces" }
 
 # ---- common crates ----
+thiserror = "2.0.16"
 hashbrown = "0.15"
 num-traits = "0.2"
 parking_lot = "0.12.4"
