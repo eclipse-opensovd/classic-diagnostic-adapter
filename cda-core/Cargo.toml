@@ -18,6 +18,8 @@ path = "src/lib.rs"
 # internal dependencies
 cda-interfaces = { workspace = true }
 cda-database = { workspace = true }
+cda-plugin-security = { workspace = true }
+
 # external
 hashbrown = { workspace = true, features = ["serde"] }
 num-traits = { workspace = true }

@@ -16,13 +16,20 @@ use std::time::Duration;
 use hashbrown::HashMap;
 
 use crate::{
-    DiagComm, DiagServiceError, SecurityAccess,
+    DiagComm, DiagServiceError, DynamicPlugin, SecurityAccess,
     datatypes::{
         ComplexComParamValue, ComponentConfigurationsInfo, ComponentDataInfo, DataTransferMetaData,
         DtcCode, DtcExtendedInfo, DtcRecordAndStatus, NetworkStructure, SdSdg, single_ecu,
     },
     diagservices::{DiagServiceResponse, UdsPayloadData},
 };
+
+pub struct FlashTransferStartParams<'a> {
+    pub file_path: &'a str,
+    pub offset: u64,
+    pub length: u64,
+    pub transfer_meta_data: DataTransferMetaData,
+}
 
 /// UDS communication interface
 pub trait UdsEcu: Send + Sync + 'static {
@@ -85,6 +92,7 @@ pub trait UdsEcu: Send + Sync + 'static {
         &self,
         ecu_name: &str,
         service: DiagComm,
+        security_plugin: &DynamicPlugin,
         payload: Option<UdsPayloadData>,
         map_to_json: bool,
         timeout: Duration,
@@ -97,6 +105,7 @@ pub trait UdsEcu: Send + Sync + 'static {
         &self,
         ecu_name: &str,
         service: DiagComm,
+        security_plugin: &DynamicPlugin,
         payload: Option<UdsPayloadData>,
         map_to_json: bool,
     ) -> impl Future<Output = Result<Self::Response, DiagServiceError>> + Send;
@@ -109,6 +118,7 @@ pub trait UdsEcu: Send + Sync + 'static {
     fn send_genericservice(
         &self,
         ecu_name: &str,
+        security_plugin: &DynamicPlugin,
         payload: Vec<u8>,
         timeout: Option<Duration>,
     ) -> impl Future<Output = Result<Vec<u8>, DiagServiceError>> + Send;
@@ -126,6 +136,7 @@ pub trait UdsEcu: Send + Sync + 'static {
         &self,
         ecu_name: &str,
         session: &str,
+        security_plugin: &DynamicPlugin,
         expiration: Duration,
     ) -> impl Future<Output = Result<Self::Response, DiagServiceError>> + Send;
     /// Set the security access for the given ECU.
@@ -145,6 +156,7 @@ pub trait UdsEcu: Send + Sync + 'static {
         level: &str,
         seed_service: Option<&String>,
         authentication_data: Option<UdsPayloadData>,
+        security_plugin: &DynamicPlugin,
         expiration: Duration,
     ) -> impl Future<Output = Result<(SecurityAccess, Self::Response), DiagServiceError>> + Send;
     /// Retrieve service to reset the ECU.
@@ -173,6 +185,7 @@ pub trait UdsEcu: Send + Sync + 'static {
         ecu_name: &str,
         func_class_name: &str,
         service_id: u8,
+        security_plugin: &DynamicPlugin,
         data: UdsPayloadData,
     ) -> impl Future<Output = Result<Self::Response, DiagServiceError>> + Send;
     /// Lookup a service on the ECU by a given function class name and service id.
@@ -184,6 +197,7 @@ pub trait UdsEcu: Send + Sync + 'static {
         func_class_name: &str,
         service_id: u8,
     ) -> impl Future<Output = Result<DiagComm, DiagServiceError>> + Send;
+
     /// Start a flash transfer for the given ECU.
     /// Setting the ECU into the appropriate session and security access must be done
     /// before calling this function, otherwise the ECU will not accept the transfer.
@@ -194,14 +208,12 @@ pub trait UdsEcu: Send + Sync + 'static {
     ///   * The offset and length do not match the file size.
     /// * DiagServiceError::NotFound
     ///   * The ECU with the given name does not exist.
-    fn ecu_flash_transfer_start(
+    fn ecu_flash_transfer_start<'a>(
         &self,
         ecu_name: &str,
         func_class_name: &str,
-        file_path: &str,
-        offset: u64,
-        length: u64,
-        transfer_meta_data: DataTransferMetaData,
+        security_plugin: &DynamicPlugin,
+        parameters: FlashTransferStartParams<'a>,
     ) -> impl Future<Output = Result<(), DiagServiceError>> + Send;
     /// Once the transfer has finished transfer exit must be called to finalize the transfer.
     /// No new transfer can be started before this is called.
@@ -260,6 +272,7 @@ pub trait UdsEcu: Send + Sync + 'static {
     fn ecu_dtc_by_mask(
         &self,
         ecu_name: &str,
+        security_plugin: &DynamicPlugin,
         status: Option<HashMap<String, serde_json::Value>>,
         severity: Option<u32>,
         scope: Option<String>,
@@ -269,6 +282,7 @@ pub trait UdsEcu: Send + Sync + 'static {
     fn ecu_dtc_extended(
         &self,
         ecu_name: &str,
+        security_plugin: &DynamicPlugin,
         sae_dtc: &str,
         include_extended_data: bool,
         include_snapshot: bool,

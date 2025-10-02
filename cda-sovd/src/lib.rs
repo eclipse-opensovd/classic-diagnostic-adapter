@@ -22,6 +22,7 @@ use axum::{
 use cda_interfaces::{
     SchemaProvider, UdsEcu, diagservices::DiagServiceResponse, file_manager::FileManager,
 };
+use cda_plugin_security::SecurityPluginLoader;
 use futures::future::FutureExt;
 use hashbrown::HashMap;
 use tokio::net::TcpListener;
@@ -55,7 +56,7 @@ pub struct WebServerConfig {
         flash_files_path = %flash_files_path
     )
 )]
-pub async fn launch_webserver<F, R, T, M>(
+pub async fn launch_webserver<F, R, T, M, S>(
     config: WebServerConfig,
     ecu_uds: T,
     flash_files_path: String,
@@ -67,6 +68,7 @@ where
     R: DiagServiceResponse,
     T: UdsEcu + SchemaProvider + Clone,
     M: FileManager,
+    S: SecurityPluginLoader,
 {
     let clonable_shutdown_signal = shutdown_signal.shared();
 
@@ -89,7 +91,7 @@ where
     // Main application routes (with NormalizePathLayer)
     let app_routes = {
         let app = Router::new()
-            .merge(sovd::route::<R, T, M>(&ecu_uds, flash_files_path, file_manager).await)
+            .merge(sovd::route::<R, T, M, S>(&ecu_uds, flash_files_path, file_manager).await)
             .finish_api_with(&mut api, openapi::api_docs);
 
         create_trace_layer(app)

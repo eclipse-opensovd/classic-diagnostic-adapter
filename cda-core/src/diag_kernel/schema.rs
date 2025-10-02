@@ -16,10 +16,11 @@ use cda_interfaces::{
     DiagComm, DiagServiceError, EcuAddressProvider, EcuSchemaProvider, Id, STRINGS,
     SchemaDescription,
 };
+use cda_plugin_security::SecurityPlugin;
 
 use crate::EcuManager;
 
-impl EcuSchemaProvider for EcuManager {
+impl<S: SecurityPlugin> EcuSchemaProvider for EcuManager<S> {
     fn schema_for_request(
         &self,
         service: &DiagComm,

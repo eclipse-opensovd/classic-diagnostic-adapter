@@ -32,9 +32,7 @@ use serde::Serialize;
 use sovd_interfaces::components::ecu::modes as sovd_modes;
 
 use crate::sovd::{
-    WebserverEcuState,
-    auth::Claims,
-    create_schema,
+    WebserverEcuState, create_schema,
     error::{ApiError, api_error_from_diag_response},
     locks::validate_lock,
 };
@@ -105,12 +103,14 @@ pub(crate) fn docs_get(op: TransformOperation) -> TransformOperation {
 
 pub(crate) mod session {
     use aide::UseApi;
+    use cda_interfaces::DynamicPlugin;
+    use cda_plugin_security::Secured;
 
     use super::*;
     use crate::{openapi, sovd::error::ErrorWrapper};
 
     #[tracing::instrument(
-        skip(claims, locks, uds),
+        skip(locks, uds, security_plugin),
         fields(
             ecu_name = %ecu_name,
             session_value = %request_body.value,
@@ -118,7 +118,7 @@ pub(crate) mod session {
         )
     )]
     pub(crate) async fn put<R: DiagServiceResponse, T: UdsEcu + Clone, U: FileManager>(
-        UseApi(claims, _): UseApi<Claims, ()>,
+        UseApi(Secured(security_plugin), _): UseApi<Secured, ()>,
         State(WebserverEcuState {
             locks,
             uds,
@@ -131,8 +131,9 @@ pub(crate) mod session {
             ApiError,
         >,
     ) -> Response {
+        let claims = security_plugin.as_auth_plugin().claims();
         let include_schema = query.include_schema;
-        if let Some(response) = validate_lock(&claims, &ecu_name, locks, include_schema).await {
+        if let Some(response) = validate_lock(&claims, &ecu_name, &locks, include_schema).await {
             return response;
         }
         let schema = if include_schema {
@@ -145,6 +146,7 @@ pub(crate) mod session {
             .set_ecu_session(
                 &ecu_name,
                 &request_body.value,
+                &(security_plugin as DynamicPlugin),
                 Duration::from_secs(request_body.mode_expiration.unwrap_or(u64::MAX)),
             )
             .await
@@ -238,7 +240,8 @@ pub(crate) mod session {
 
 pub(crate) mod security {
     use aide::UseApi;
-    use cda_interfaces::{SecurityAccess, diagservices::UdsPayloadData};
+    use cda_interfaces::{DynamicPlugin, SecurityAccess, diagservices::UdsPayloadData};
+    use cda_plugin_security::Secured;
 
     use super::*;
     use crate::{openapi, sovd::error::ErrorWrapper};
@@ -258,7 +261,7 @@ pub(crate) mod security {
     }
 
     pub(crate) async fn get<R: DiagServiceResponse, T: UdsEcu + Clone, U: FileManager>(
-        UseApi(claims, _): UseApi<Claims, ()>,
+        UseApi(sec_plugin, _): UseApi<Secured, ()>,
         WithRejection(Query(query), _): WithRejection<Query<sovd_modes::get::Query>, ApiError>,
         State(WebserverEcuState {
             ecu_name,
@@ -267,8 +270,9 @@ pub(crate) mod security {
             ..
         }): State<WebserverEcuState<R, T, U>>,
     ) -> Response {
+        let claims = sec_plugin.as_auth_plugin().claims();
         let include_schema = query.include_schema;
-        if let Some(value) = validate_lock(&claims, &ecu_name, locks, include_schema).await {
+        if let Some(value) = validate_lock(&claims, &ecu_name, &locks, include_schema).await {
             return value;
         }
         let schema = if include_schema {
@@ -313,7 +317,7 @@ pub(crate) mod security {
     }
 
     pub(crate) async fn put<R: DiagServiceResponse, T: UdsEcu + Clone, U: FileManager>(
-        UseApi(claims, _): UseApi<Claims, ()>,
+        UseApi(Secured(security_plugin), _): UseApi<Secured, ()>,
         WithRejection(Query(query), _): WithRejection<Query<sovd_modes::put::Query>, ApiError>,
         State(WebserverEcuState {
             uds,
@@ -326,6 +330,7 @@ pub(crate) mod security {
             ApiError,
         >,
     ) -> Response {
+        let claims = security_plugin.as_auth_plugin().claims();
         fn split_at_last_underscore(input: &str) -> (String, Option<String>) {
             let parts: Vec<&str> = input.split('_').collect();
 
@@ -340,7 +345,7 @@ pub(crate) mod security {
 
         let include_schema = query.include_schema;
 
-        if let Some(value) = validate_lock(&claims, &ecu_name, locks, include_schema).await {
+        if let Some(value) = validate_lock(&claims, &ecu_name, &locks, include_schema).await {
             return value;
         }
 
@@ -389,6 +394,7 @@ pub(crate) mod security {
                 &level,
                 request_seed_service.as_ref(),
                 payload,
+                &(security_plugin as DynamicPlugin),
                 Duration::from_secs(request_body.mode_expiration.unwrap_or(u64::MAX)),
             )
             .await
