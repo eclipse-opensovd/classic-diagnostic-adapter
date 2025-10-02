@@ -510,7 +510,18 @@ fn get_octet_stream_payload(
         return Ok(None);
     }
 
-    Ok(Some(UdsPayloadData::Raw(body.to_vec())))
+    let mut data = body.to_vec();
+
+    if data.len() < content_length {
+        return Err(ApiError::BadRequest(format!(
+            "Invalid Content-Length: {content_length} is bigger than the size of the data {}",
+            data.len()
+        )));
+    }
+
+    data.truncate(content_length);
+
+    Ok(Some(UdsPayloadData::Raw(data)))
 }
 
 /// Helper Fn to convert a serde_json::Value into a schemars::Schema, without cloning

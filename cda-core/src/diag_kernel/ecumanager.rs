@@ -311,9 +311,9 @@ impl cda_interfaces::EcuManager for EcuManager {
     }
 
     fn check_genericservice(&self, rawdata: Vec<u8>) -> Result<ServicePayload, DiagServiceError> {
-        if rawdata.len() < 3 {
+        if rawdata.is_empty() {
             return Err(DiagServiceError::BadPayload(
-                "Expected at least 3 bytes".to_owned(),
+                "Expected at least 1 byte".to_owned(),
             ));
         }
 
@@ -330,9 +330,12 @@ impl cda_interfaces::EcuManager for EcuManager {
             .get(&self.ecu_data.base_variant_id)
             .ok_or(DiagServiceError::NotFound)?;
 
-        // match the coded consts for very basic types until a match is not possible
-        // anymore because the types are dynamic or unexpected. if at least three bytes
-        // were matched, assume we have a matched service
+        // iterate through the services and for each service, resolve the parameters
+        // sort the parameters by byte_pos & bit_pos, and take the first parameter
+        // this is the service id. check if the provided rawdata matches the expected
+        // bytes for the service id, and if yes, return this service.
+        // If no service with a matching SIDRQ can be found, DiagServiceError::NotFound
+        // is returned to the caller.
         let mapped_service = variant
             .services
             .iter()
@@ -344,80 +347,65 @@ impl cda_interfaces::EcuManager for EcuManager {
                 };
 
                 let request = match self.ecu_data.requests.get(&service.request_id) {
-                    Some(params) => params,
+                    Some(request) => request,
                     None => return None,
                 };
 
-                let mut rawdata_pos = 0usize;
-                let mut matched = true;
+                let mut params = request
+                    .params
+                    .iter()
+                    .filter_map(|id| self.ecu_data.params.get(id))
+                    .collect::<Vec<_>>();
 
-                for param_id in request.params.iter() {
-                    let param = match self.ecu_data.params.get(param_id) {
-                        Some(param) => param,
-                        None => continue,
-                    };
-                    let coded_const = match &param.value {
-                        datatypes::ParameterValue::CodedConst(c) => c,
-                        _ => break,
-                    };
-                    let coded_const_type = match self
-                        .ecu_data
-                        .diag_coded_types
-                        .get(&coded_const.diag_coded_type)
-                    {
-                        Some(coded_const_type) => {
-                            if coded_const_type.base_datatype() != DataType::UInt32 {
-                                break;
-                            }
-                            match &coded_const_type.type_() {
-                                DiagCodedTypeVariant::StandardLength(standard_length) => {
-                                    standard_length
-                                }
-                                _ => break,
-                            }
-                        }
-                        None => break,
-                    };
-                    if !matches!(coded_const_type.bit_length, 8 | 16 | 32)
-                        || coded_const_type.condensed
-                        || coded_const_type.bitmask.is_some()
-                    {
-                        break;
-                    }
+                params.sort_by(|p1, p2| match p1.byte_pos.cmp(&p2.byte_pos) {
+                    std::cmp::Ordering::Equal => p1.bit_pos.cmp(&p2.bit_pos),
+                    ord => ord,
+                });
 
-                    let coded_const_value = match STRINGS.get(coded_const.value) {
-                        None => break,
-                        Some(v) => match v.parse::<u32>() {
-                            Ok(val) => val,
-                            Err(_) => break,
-                        },
-                    };
-                    // Guard against out of bounds access
-                    if rawdata_pos + (coded_const_type.bit_length / 8) as usize > rawdata.len() {
-                        break;
-                    }
+                let sid_param = params.first()?;
 
-                    let rawdata_param_value = match coded_const_type.bit_length {
-                        8 => rawdata[rawdata_pos] as u32,
-                        16 => u16::from_be_bytes([rawdata[rawdata_pos], rawdata[rawdata_pos + 1]])
-                            as u32,
-                        32 => u32::from_be_bytes([
-                            rawdata[rawdata_pos],
-                            rawdata[rawdata_pos + 1],
-                            rawdata[rawdata_pos + 2],
-                            rawdata[rawdata_pos + 3],
-                        ]),
-                        _ => unreachable!(),
-                    };
+                // SIDRQ should always be a CodedConst
+                let datatypes::ParameterValue::CodedConst(coded_const) = &sid_param.value else {
+                    return None;
+                };
 
-                    matched = rawdata_param_value == coded_const_value;
-                    if !matched {
-                        break;
-                    }
-                    rawdata_pos += (coded_const_type.bit_length / 8) as usize;
+                let coded_const_type = self
+                    .ecu_data
+                    .diag_coded_types
+                    .get(&coded_const.diag_coded_type)?;
+
+                if coded_const_type.base_datatype() != DataType::UInt32 {
+                    return None;
                 }
-                // if at least 3 bytes are matched, the ID param was matched
-                if matched && rawdata_pos >= 3 {
+
+                let DiagCodedTypeVariant::StandardLength(standard_length_type) =
+                    coded_const_type.type_()
+                else {
+                    return None;
+                };
+
+                // SIDRQ should not be condensed, or contain a bitmask
+                if standard_length_type.condensed || standard_length_type.bitmask.is_some() {
+                    return None;
+                }
+
+                let sid_val = STRINGS
+                    .get(coded_const.value)
+                    .and_then(|v| v.parse::<u16>().ok())?;
+
+                // according to ISO_14229 SIDRQ is defined as XX16 eg, max 2 bytes
+                let raw_val = match standard_length_type.bit_length {
+                    8 => rawdata[0] as u16,
+                    16 => {
+                        if rawdata.len() < 2 {
+                            return None;
+                        }
+                        u16::from_be_bytes([rawdata[0], rawdata[1]])
+                    }
+                    _ => return None,
+                };
+
+                if raw_val == sid_val {
                     Some(service)
                 } else {
                     None
