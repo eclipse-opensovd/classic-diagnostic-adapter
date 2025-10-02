@@ -76,7 +76,10 @@ pub(crate) fn docs_get(op: TransformOperation) -> TransformOperation {
 }
 
 pub(crate) mod diag_service {
-    use aide::transform::{TransformOperation, TransformParameter};
+    use aide::{
+        UseApi,
+        transform::{TransformOperation, TransformParameter},
+    };
     use axum::{
         Json,
         body::Bytes,
@@ -88,6 +91,7 @@ pub(crate) mod diag_service {
         DiagComm, DiagCommAction, DiagCommType, SchemaProvider, UdsEcu,
         diagservices::DiagServiceResponse, file_manager::FileManager,
     };
+    use cda_plugin_security::Secured;
     use hashbrown::HashMap;
     use http::{HeaderMap, StatusCode};
 
@@ -169,6 +173,7 @@ pub(crate) mod diag_service {
         U: FileManager,
     >(
         headers: HeaderMap,
+        UseApi(Secured(security_plugin), _): UseApi<Secured, ()>,
         Path(DiagServicePathParam { diag_service }): Path<DiagServicePathParam>,
         WithRejection(Query(query), _): WithRejection<
             Query<sovd_interfaces::components::ComponentQuery>,
@@ -198,6 +203,7 @@ pub(crate) mod diag_service {
                 &uds,
                 headers,
                 None,
+                security_plugin,
                 include_schema,
             )
             .await
@@ -224,6 +230,7 @@ pub(crate) mod diag_service {
         U: FileManager,
     >(
         headers: HeaderMap,
+        UseApi(Secured(security_plugin), _): UseApi<Secured, ()>,
         Path(DiagServicePathParam {
             diag_service: service,
         }): Path<DiagServicePathParam>,
@@ -253,6 +260,7 @@ pub(crate) mod diag_service {
             &uds,
             headers,
             Some(body),
+            security_plugin,
             include_schema,
         )
         .await

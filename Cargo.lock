@@ -423,6 +423,7 @@ version = "0.1.0"
 dependencies = [
  "cda-database",
  "cda-interfaces",
+ "cda-plugin-security",
  "hashbrown 0.15.4",
  "num-traits",
  "parking_lot",

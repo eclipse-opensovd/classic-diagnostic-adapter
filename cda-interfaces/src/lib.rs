@@ -44,6 +44,8 @@ pub mod util;
 
 pub type Id = u32;
 
+pub type DynamicPlugin = Box<dyn std::any::Any + Send + Sync>;
+
 #[derive(Debug, Clone)]
 #[cfg_attr(feature = "deepsize", derive(DeepSizeOf))]
 pub enum DiagCommAction {
@@ -196,6 +198,8 @@ pub enum DiagServiceError {
     Timeout,
     AccessDenied(String),
     DataError(DataParseError),
+    /// Returned in case the provided value for security plugin cannot be used as SecurityApi
+    InvalidSecurityPlugin,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -243,6 +247,9 @@ impl Display for DiagServiceError {
             DiagServiceError::AccessDenied(msg) => write!(f, "Access denied: {msg}"),
             DiagServiceError::DataError(DataParseError { value, details }) => {
                 write!(f, "Data parse error: value='{value}', details='{details}'")
+            }
+            DiagServiceError::InvalidSecurityPlugin => {
+                write!(f, "Invalid security plugin provided")
             }
         }
     }

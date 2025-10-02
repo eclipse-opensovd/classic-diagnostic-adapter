@@ -28,7 +28,7 @@ use cda_interfaces::{
     datatypes::{ComParams, DatabaseNamingConvention},
     file_manager::{Chunk, ChunkType},
 };
-use cda_plugin_security::DefaultAuthPlugin;
+use cda_plugin_security::{DefaultSecurityPlugin, SecurityPlugin};
 use cda_sovd::WebServerConfig;
 use hashbrown::HashMap;
 use tokio::{
@@ -45,17 +45,18 @@ static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
 // todo scope after poc: make this configurable
 const DB_PARALLEL_LOAD_TASKS: usize = 2;
 
-pub type DatabaseMap = HashMap<String, RwLock<EcuManager>>;
+pub type DatabaseMap<S> = HashMap<String, RwLock<EcuManager<S>>>;
 pub type FileManagerMap = HashMap<String, FileManager>;
 
 #[tracing::instrument(skip(com_params, database_naming_convention), fields(databases_path))]
-pub async fn load_databases(
+pub async fn load_databases<S: SecurityPlugin>(
     databases_path: &str,
     protocol: Protocol,
     com_params: ComParams,
     database_naming_convention: DatabaseNamingConvention,
-) -> (DatabaseMap, FileManagerMap) {
-    let databases: Arc<RwLock<HashMap<String, EcuManager>>> = Arc::new(RwLock::new(HashMap::new()));
+) -> (DatabaseMap<S>, FileManagerMap) {
+    let databases: Arc<RwLock<HashMap<String, EcuManager<S>>>> =
+        Arc::new(RwLock::new(HashMap::new()));
 
     let file_managers: Arc<RwLock<HashMap<String, FileManager>>> =
         Arc::new(RwLock::new(HashMap::new()));
@@ -138,7 +139,7 @@ pub async fn load_databases(
         .await
         .drain()
         .map(|(k, v)| (k.to_lowercase().to_string(), RwLock::new(v)))
-        .collect::<HashMap<String, RwLock<EcuManager>>>();
+        .collect::<HashMap<String, RwLock<EcuManager<S>>>>();
 
     let file_managers = file_managers
         .write()
@@ -157,9 +158,9 @@ pub async fn load_databases(
 }
 
 #[tracing::instrument(skip_all, fields(paths_count = paths.len()))]
-async fn load_database(
+async fn load_database<S: SecurityPlugin>(
     protocol: Protocol,
-    database: Arc<RwLock<HashMap<String, EcuManager>>>,
+    database: Arc<RwLock<HashMap<String, EcuManager<S>>>>,
     file_managers: Arc<RwLock<HashMap<String, FileManager>>>,
     paths: Vec<(PathBuf, u64)>,
     database_count: Arc<AtomicUsize>,
@@ -268,14 +269,16 @@ async fn load_database(
     }
 }
 
+type UdsManagerType<S> =
+    UdsManager<DoipDiagGateway<EcuManager<S>>, DiagServiceResponseStruct, EcuManager<S>>;
+
 #[tracing::instrument(skip_all, fields(database_count = databases.len()))]
-pub async fn create_uds_manager(
-    gateway: DoipDiagGateway<EcuManager>,
-    databases: Arc<HashMap<String, RwLock<EcuManager>>>,
+pub async fn create_uds_manager<S: SecurityPlugin>(
+    gateway: DoipDiagGateway<EcuManager<S>>,
+    databases: Arc<HashMap<String, RwLock<EcuManager<S>>>>,
     variant_detection_receiver: mpsc::Receiver<Vec<String>>,
     tester_present_sender: mpsc::Receiver<TesterPresentControlMessage>,
-) -> Result<UdsManager<DoipDiagGateway<EcuManager>, DiagServiceResponseStruct, EcuManager>, String>
-{
+) -> Result<UdsManagerType<S>, String> {
     UdsManager::new(
         gateway,
         databases,
@@ -292,15 +295,15 @@ pub async fn create_uds_manager(
     skip(databases, variant_detection, tester_present, shutdown_signal),
     fields(database_count = databases.len())
 )]
-pub async fn create_diagnostic_gateway(
-    databases: Arc<HashMap<String, RwLock<EcuManager>>>,
+pub async fn create_diagnostic_gateway<S: SecurityPlugin>(
+    databases: Arc<DatabaseMap<S>>,
     doip_tester_address: &str,
     doip_tester_subnet: &str,
     doip_gateway_port: u16,
     variant_detection: mpsc::Sender<Vec<String>>,
     tester_present: mpsc::Sender<TesterPresentControlMessage>,
     shutdown_signal: impl std::future::Future<Output = ()> + Send + Clone + 'static,
-) -> Result<DoipDiagGateway<EcuManager>, String> {
+) -> Result<DoipDiagGateway<EcuManager<S>>, String> {
     DoipDiagGateway::new(
         doip_tester_address,
         doip_tester_subnet,
@@ -317,15 +320,15 @@ pub async fn create_diagnostic_gateway(
     skip(file_managers, webserver_config, ecu_uds, shutdown_signal),
     fields(file_manager_count = file_managers.len())
 )]
-pub fn start_webserver(
+pub fn start_webserver<S: SecurityPlugin>(
     flash_files_path: String,
     file_managers: HashMap<String, FileManager>,
     webserver_config: WebServerConfig,
-    ecu_uds: UdsManager<DoipDiagGateway<EcuManager>, DiagServiceResponseStruct, EcuManager>,
+    ecu_uds: UdsManager<DoipDiagGateway<EcuManager<S>>, DiagServiceResponseStruct, EcuManager<S>>,
     shutdown_signal: impl std::future::Future<Output = ()> + Send + 'static,
 ) -> tokio::task::JoinHandle<Result<(), String>> {
     cda_interfaces::spawn_named!("webserver", async move {
-        cda_sovd::launch_webserver::<_, DiagServiceResponseStruct, _, _, DefaultAuthPlugin>(
+        cda_sovd::launch_webserver::<_, DiagServiceResponseStruct, _, _, DefaultSecurityPlugin>(
             webserver_config,
             ecu_uds,
             flash_files_path,

@@ -13,6 +13,7 @@
 
 use std::sync::Arc;
 
+use cda_plugin_security::DefaultSecurityPluginData;
 use clap::{Parser, command};
 use futures::future::FutureExt;
 use opensovd_cda_lib::{config::configfile::ConfigSanity, shutdown_signal};
@@ -114,7 +115,7 @@ async fn main() -> Result<(), String> {
         cda_interfaces::Protocol::DoIp
     };
 
-    let (databases, file_managers) = opensovd_cda_lib::load_databases(
+    let (databases, file_managers) = opensovd_cda_lib::load_databases::<DefaultSecurityPluginData>(
         &database_path,
         protocol,
         config.com_params,

@@ -106,7 +106,7 @@ pub(crate) mod id {
 
     use aide::UseApi;
     use axum::extract::Path;
-    use cda_plugin_security::SecurityPluginExtractor;
+    use cda_plugin_security::Secured;
 
     use super::*;
     use crate::{openapi, sovd::error::ErrorWrapper};
@@ -119,7 +119,7 @@ pub(crate) mod id {
     }
 
     pub(crate) async fn get<R: DiagServiceResponse, T: UdsEcu + Clone, U: FileManager>(
-        UseApi(SecurityPluginExtractor(sec_plugin), _): UseApi<SecurityPluginExtractor, ()>,
+        UseApi(Secured(sec_plugin), _): UseApi<Secured, ()>,
         WithRejection(Query(query), _): WithRejection<Query<sovd_modes::Query>, ApiError>,
         State(state): State<WebserverEcuState<R, T, U>>,
         Path(mode_str): Path<String>,
@@ -150,7 +150,7 @@ pub(crate) mod id {
     }
 
     pub(crate) async fn put<R: DiagServiceResponse, T: UdsEcu + Clone, U: FileManager>(
-        UseApi(SecurityPluginExtractor(sec_plugin), _): UseApi<SecurityPluginExtractor, ()>,
+        UseApi(Secured(sec_plugin), _): UseApi<Secured, ()>,
         WithRejection(Query(query), _): WithRejection<Query<sovd_modes::Query>, ApiError>,
         State(state): State<WebserverEcuState<R, T, U>>,
         Path(mode_str): Path<String>,
@@ -193,13 +193,14 @@ pub(crate) mod id {
 }
 
 pub(crate) mod session {
+    use cda_interfaces::DynamicPlugin;
     use cda_plugin_security::SecurityPlugin;
 
     use super::*;
     use crate::sovd::error::ErrorWrapper;
 
     #[tracing::instrument(
-        skip(locks, uds, sec_plugin),
+        skip(locks, uds, security_plugin),
         fields(
             ecu_name = %ecu_name,
             session_value = %request_body.value,
@@ -208,7 +209,7 @@ pub(crate) mod session {
     )]
     pub(crate) async fn put<R: DiagServiceResponse, T: UdsEcu + Clone, U: FileManager>(
         id: String,
-        sec_plugin: Box<dyn SecurityPlugin>,
+        security_plugin: Box<dyn SecurityPlugin>,
         query: sovd_modes::Query,
         WebserverEcuState {
             locks,
@@ -218,7 +219,7 @@ pub(crate) mod session {
         }: WebserverEcuState<R, T, U>,
         request_body: sovd_modes::put::Request,
     ) -> Response {
-        let claims = sec_plugin.as_auth_plugin().claims();
+        let claims = security_plugin.as_auth_plugin().claims();
         let include_schema = query.include_schema;
         if let Some(response) = validate_lock(&claims, &ecu_name, &locks, include_schema).await {
             return response;
@@ -233,6 +234,7 @@ pub(crate) mod session {
             .set_ecu_session(
                 &ecu_name,
                 &request_body.value,
+                &(security_plugin as DynamicPlugin),
                 Duration::from_secs(request_body.mode_expiration.unwrap_or(u64::MAX)),
             )
             .await
@@ -299,7 +301,7 @@ pub(crate) mod session {
 }
 
 pub(crate) mod security {
-    use cda_interfaces::{SecurityAccess, diagservices::UdsPayloadData};
+    use cda_interfaces::{DynamicPlugin, SecurityAccess, diagservices::UdsPayloadData};
     use cda_plugin_security::SecurityPlugin;
 
     use super::*;
@@ -362,7 +364,7 @@ pub(crate) mod security {
 
     pub(crate) async fn put<R: DiagServiceResponse, T: UdsEcu + Clone, U: FileManager>(
         id: String,
-        sec_plugin: Box<dyn SecurityPlugin>,
+        security_plugin: Box<dyn SecurityPlugin>,
         query: sovd_modes::Query,
         WebserverEcuState {
             uds,
@@ -372,7 +374,7 @@ pub(crate) mod security {
         }: WebserverEcuState<R, T, U>,
         request_body: sovd_modes::put::Request,
     ) -> Response {
-        let claims = sec_plugin.as_auth_plugin().claims();
+        let claims = security_plugin.as_auth_plugin().claims();
         fn split_at_last_underscore(input: &str) -> (String, Option<String>) {
             let parts: Vec<&str> = input.split('_').collect();
 
@@ -436,6 +438,7 @@ pub(crate) mod security {
                 &level,
                 request_seed_service.as_ref(),
                 payload,
+                &(security_plugin as DynamicPlugin),
                 Duration::from_secs(request_body.mode_expiration.unwrap_or(u64::MAX)),
             )
             .await

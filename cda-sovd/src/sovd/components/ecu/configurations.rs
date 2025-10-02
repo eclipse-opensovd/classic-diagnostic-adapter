@@ -99,7 +99,7 @@ impl IntoSovd for ComponentConfigurationsInfo {
 }
 
 pub(crate) mod diag_service {
-    use aide::transform::TransformOperation;
+    use aide::{UseApi, transform::TransformOperation};
     use axum::{
         body::Bytes,
         extract::{Path, Query, State},
@@ -110,6 +110,7 @@ pub(crate) mod diag_service {
         DiagComm, DiagCommAction, DiagCommType, SchemaProvider, UdsEcu,
         diagservices::DiagServiceResponse, file_manager::FileManager,
     };
+    use cda_plugin_security::Secured;
     use http::HeaderMap;
     use sovd_interfaces::components::ecu::configurations as sovd_configurations;
 
@@ -128,6 +129,7 @@ pub(crate) mod diag_service {
         U: FileManager,
     >(
         headers: HeaderMap,
+        UseApi(Secured(security_plugin), _): UseApi<Secured, ()>,
         Path(DiagServicePathParam {
             diag_service: service,
         }): Path<DiagServicePathParam>,
@@ -157,6 +159,7 @@ pub(crate) mod diag_service {
             &uds,
             headers,
             Some(body),
+            security_plugin,
             include_schema,
         )
         .await

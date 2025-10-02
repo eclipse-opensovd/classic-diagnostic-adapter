@@ -11,7 +11,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-use std::{ops::Deref, sync::Arc};
+use std::{any::Any, ops::Deref, sync::Arc};
 
 use aide::axum::IntoApiResponse;
 use async_trait::async_trait;
@@ -30,7 +30,7 @@ use sovd_interfaces::error::{ApiErrorResponse, ErrorCode};
 use thiserror::Error;
 
 mod default_security_plugin;
-pub use default_security_plugin::DefaultAuthPlugin;
+pub use default_security_plugin::{DefaultSecurityPlugin, DefaultSecurityPluginData};
 
 pub trait Claims: Send + Sync {
     fn sub(&self) -> &str;
@@ -51,7 +51,7 @@ impl AuthApi for Box<dyn AuthApi> {
     }
 }
 
-pub trait SecurityPlugin: SecurityApi + AuthApi {
+pub trait SecurityPlugin: Any + SecurityApi + AuthApi {
     fn as_auth_plugin(&self) -> &dyn AuthApi;
 
     fn as_security_plugin(&self) -> &dyn SecurityApi;
@@ -112,14 +112,14 @@ pub trait AuthorizationRequestHandler: Send + Sync {
     async fn authorize(body_bytes: Bytes) -> impl IntoApiResponse;
 }
 
-pub trait SecurityPluginType:
+pub trait SecurityPluginLoader:
     SecurityPluginInitializer + AuthorizationRequestHandler + Default + 'static
 {
 }
 
 type SecurityPluginInitializerType = Arc<dyn SecurityPluginInitializer>;
 
-pub async fn security_plugin_middleware<A: SecurityPluginType>(
+pub async fn security_plugin_middleware<A: SecurityPluginLoader>(
     mut req: Request,
     next: Next,
 ) -> Response {
@@ -129,9 +129,9 @@ pub async fn security_plugin_middleware<A: SecurityPluginType>(
 }
 
 pub type SecurityPluginData = Box<dyn SecurityPlugin>;
-pub struct SecurityPluginExtractor(pub SecurityPluginData);
+pub struct Secured(pub SecurityPluginData);
 
-impl Deref for SecurityPluginExtractor {
+impl Deref for Secured {
     type Target = dyn SecurityPlugin;
 
     fn deref(&self) -> &Self::Target {
@@ -139,7 +139,7 @@ impl Deref for SecurityPluginExtractor {
     }
 }
 
-impl<S> FromRequestParts<S> for SecurityPluginExtractor
+impl<S> FromRequestParts<S> for Secured
 where
     S: Send + Sync,
 {
@@ -152,7 +152,7 @@ where
             .ok_or(AuthError::Internal)?;
 
         let plugin = initializer.initialize_from_request_parts(parts).await?;
-        Ok(SecurityPluginExtractor(plugin))
+        Ok(Secured(plugin))
     }
 }
 
