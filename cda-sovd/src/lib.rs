@@ -22,7 +22,7 @@ use axum::{
 use cda_interfaces::{
     SchemaProvider, UdsEcu, diagservices::DiagServiceResponse, file_manager::FileManager,
 };
-use cda_plugin_security::SecurityPluginType;
+use cda_plugin_security::SecurityPluginLoader;
 use futures::future::FutureExt;
 use hashbrown::HashMap;
 use tokio::net::TcpListener;
@@ -68,7 +68,7 @@ where
     R: DiagServiceResponse,
     T: UdsEcu + SchemaProvider + Clone,
     M: FileManager,
-    S: SecurityPluginType,
+    S: SecurityPluginLoader,
 {
     let clonable_shutdown_signal = shutdown_signal.shared();
 

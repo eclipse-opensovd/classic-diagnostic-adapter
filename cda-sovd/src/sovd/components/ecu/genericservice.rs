@@ -11,12 +11,14 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+use aide::UseApi;
 use axum::{body::Bytes, extract::State, response::Response};
 use cda_interfaces::{
     UdsEcu,
     diagservices::{DiagServiceResponse, UdsPayloadData},
     file_manager::FileManager,
 };
+use cda_plugin_security::Secured;
 use http::{HeaderMap, header};
 
 use super::*;
@@ -27,6 +29,7 @@ use crate::{
 
 pub(crate) async fn put<R: DiagServiceResponse, T: UdsEcu + Clone, U: FileManager>(
     headers: HeaderMap,
+    UseApi(Secured(security_plugin), _): UseApi<Secured, ()>,
     State(WebserverEcuState { ecu_name, uds, .. }): State<WebserverEcuState<R, T, U>>,
     body: Bytes,
 ) -> Response {
@@ -76,7 +79,12 @@ pub(crate) async fn put<R: DiagServiceResponse, T: UdsEcu + Clone, U: FileManage
     };
 
     let ecu_response = match uds
-        .send_genericservice(&ecu_name, uds_raw_payload, None)
+        .send_genericservice(
+            &ecu_name,
+            &(security_plugin as DynamicPlugin),
+            uds_raw_payload,
+            None,
+        )
         .await
         .map_err(std::convert::Into::into)
     {

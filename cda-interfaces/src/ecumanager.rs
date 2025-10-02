@@ -16,8 +16,8 @@ use std::time::Duration;
 use hashbrown::{HashMap, HashSet};
 
 use crate::{
-    DiagComm, DiagServiceError, DoipComParamProvider, EcuSchemaProvider, Id, SecurityAccess,
-    UdsComParamProvider,
+    DiagComm, DiagServiceError, DoipComParamProvider, DynamicPlugin, EcuSchemaProvider, Id,
+    SecurityAccess, UdsComParamProvider,
     datatypes::{
         ComplexComParamValue, ComponentConfigurationsInfo, ComponentDataInfo, DtcLookup,
         DtcReadInformationFunction, SdSdg, single_ecu,
@@ -120,7 +120,11 @@ pub trait EcuManager:
     ///
     /// # Errors
     /// Returns `Err` if the payload cannot be matched to any diagnostic service.
-    fn check_genericservice(&self, rawdata: Vec<u8>) -> Result<ServicePayload, DiagServiceError>;
+    fn check_genericservice(
+        &self,
+        security_plugin: &DynamicPlugin,
+        rawdata: Vec<u8>,
+    ) -> Result<ServicePayload, DiagServiceError>;
     /// Converts given `UdsPayloadData` into a UDS request payload for the given `DiagService`.
     ///
     /// # Errors
@@ -130,6 +134,7 @@ pub trait EcuManager:
     fn create_uds_payload(
         &self,
         diag_service: &DiagComm,
+        security_plugin: &DynamicPlugin,
         data: Option<UdsPayloadData>,
     ) -> Result<ServicePayload, DiagServiceError>;
     /// Looks up a single ECU job by name for the current ECU variant.
@@ -211,6 +216,11 @@ pub trait EcuManager:
         &self,
         service_types: Vec<DtcReadInformationFunction>,
     ) -> Result<HashMap<DtcReadInformationFunction, DtcLookup>, DiagServiceError>;
+    fn is_service_allowed(
+        &self,
+        service: &DiagComm,
+        security_plugin: &DynamicPlugin,
+    ) -> Result<(), DiagServiceError>;
 }
 
 impl Protocol {

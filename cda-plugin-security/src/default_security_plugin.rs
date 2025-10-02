@@ -29,7 +29,7 @@ use sovd_interfaces::error::{ApiErrorResponse, ErrorCode};
 
 use crate::{
     AuthApi, AuthError, AuthorizationRequestHandler, Claims as ClaimsTrait, SecurityApi,
-    SecurityPlugin, SecurityPluginInitializer, SecurityPluginType,
+    SecurityPlugin, SecurityPluginInitializer, SecurityPluginLoader,
 };
 
 // allowed because the variant for enabled auth needs the Result
@@ -90,16 +90,16 @@ impl ClaimsTrait for Claims {
     }
 }
 
-pub struct DefaultAuthPluginData {
+pub struct DefaultSecurityPluginData {
     claims: Claims,
 }
 
 #[derive(Default)]
-pub struct DefaultAuthPlugin;
-impl SecurityPluginType for DefaultAuthPlugin {}
+pub struct DefaultSecurityPlugin;
+impl SecurityPluginLoader for DefaultSecurityPlugin {}
 
 #[async_trait]
-impl AuthorizationRequestHandler for DefaultAuthPlugin {
+impl AuthorizationRequestHandler for DefaultSecurityPlugin {
     async fn authorize(body_bytes: Bytes) -> impl IntoApiResponse {
         let payload = match axum::extract::Json::<AuthPayload>::from_bytes(&body_bytes) {
             Ok(payload) => payload.0,
@@ -165,7 +165,7 @@ impl AuthorizationRequestHandler for DefaultAuthPlugin {
 }
 
 #[async_trait]
-impl SecurityPluginInitializer for DefaultAuthPlugin {
+impl SecurityPluginInitializer for DefaultSecurityPlugin {
     async fn initialize_from_request_parts(
         &self,
         parts: &mut Parts,
@@ -187,19 +187,19 @@ impl SecurityPluginInitializer for DefaultAuthPlugin {
                 }
             })?;
 
-        Ok(Box::new(DefaultAuthPluginData {
+        Ok(Box::new(DefaultSecurityPluginData {
             claims: token_data.claims,
         }))
     }
 }
 
-impl AuthApi for DefaultAuthPluginData {
+impl AuthApi for DefaultSecurityPluginData {
     fn claims(&self) -> Box<&dyn ClaimsTrait> {
         Box::new(&self.claims)
     }
 }
 
-impl SecurityApi for DefaultAuthPluginData {
+impl SecurityApi for DefaultSecurityPluginData {
     fn validate_service(
         &self,
         _service: &DiagnosticService,
@@ -208,7 +208,7 @@ impl SecurityApi for DefaultAuthPluginData {
     }
 }
 
-impl SecurityPlugin for DefaultAuthPluginData {
+impl SecurityPlugin for DefaultSecurityPluginData {
     fn as_auth_plugin(&self) -> &dyn AuthApi {
         self
     }

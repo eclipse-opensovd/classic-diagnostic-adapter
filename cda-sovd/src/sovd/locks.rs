@@ -167,7 +167,7 @@ openapi::aide_helper::gen_path_param!(LockPathParam lock String);
 
 pub(crate) mod ecu {
     use aide::{UseApi, axum::IntoApiResponse, transform::TransformOperation};
-    use cda_plugin_security::SecurityPluginExtractor;
+    use cda_plugin_security::Secured;
 
     use super::*;
     use crate::sovd;
@@ -177,7 +177,7 @@ pub(crate) mod ecu {
         use crate::openapi;
         pub(crate) async fn delete<R: DiagServiceResponse, T: UdsEcu + Clone, U: FileManager>(
             Path(lock): Path<LockPathParam>,
-            UseApi(sec_plugin, _): UseApi<SecurityPluginExtractor, ()>,
+            UseApi(sec_plugin, _): UseApi<Secured, ()>,
             State(WebserverEcuState {
                 ecu_name, locks, ..
             }): State<WebserverEcuState<R, T, U>>,
@@ -196,7 +196,7 @@ pub(crate) mod ecu {
 
         pub(crate) async fn put<R: DiagServiceResponse, T: UdsEcu + Clone, U: FileManager>(
             Path(lock): Path<LockPathParam>,
-            UseApi(sec_plugin, _): UseApi<SecurityPluginExtractor, ()>,
+            UseApi(sec_plugin, _): UseApi<Secured, ()>,
             State(WebserverEcuState {
                 ecu_name, locks, ..
             }): State<WebserverEcuState<R, T, U>>,
@@ -218,7 +218,7 @@ pub(crate) mod ecu {
 
         pub(crate) async fn get<R: DiagServiceResponse, T: UdsEcu + Clone, U: FileManager>(
             Path(lock): Path<LockPathParam>,
-            UseApi(_sec_plugin, _): UseApi<SecurityPluginExtractor, ()>,
+            UseApi(_sec_plugin, _): UseApi<Secured, ()>,
             State(state): State<WebserverEcuState<R, T, U>>,
         ) -> Response {
             get_id_handler(&state.locks.ecu, &lock, None, false).await
@@ -238,7 +238,7 @@ pub(crate) mod ecu {
     }
 
     pub(crate) async fn post<R: DiagServiceResponse, T: UdsEcu + Clone, U: FileManager>(
-        UseApi(sec_plugin, _): UseApi<SecurityPluginExtractor, ()>,
+        UseApi(sec_plugin, _): UseApi<Secured, ()>,
         State(WebserverEcuState {
             ecu_name, locks, ..
         }): State<WebserverEcuState<R, T, U>>,
@@ -294,7 +294,7 @@ pub(crate) mod ecu {
     }
 
     pub(crate) async fn get<R: DiagServiceResponse, T: UdsEcu + Clone, U: FileManager>(
-        UseApi(sec_plugin, _): UseApi<SecurityPluginExtractor, ()>,
+        UseApi(sec_plugin, _): UseApi<Secured, ()>,
         State(WebserverEcuState {
             ecu_name, locks, ..
         }): State<WebserverEcuState<R, T, U>>,
@@ -320,7 +320,7 @@ pub(crate) mod ecu {
 
 pub(crate) mod vehicle {
     use aide::{UseApi, transform::TransformOperation};
-    use cda_plugin_security::SecurityPluginExtractor;
+    use cda_plugin_security::Secured;
 
     use super::*;
     use crate::openapi;
@@ -330,7 +330,7 @@ pub(crate) mod vehicle {
 
         pub(crate) async fn delete(
             Path(lock): Path<LockPathParam>,
-            UseApi(sec_plugin, _): UseApi<SecurityPluginExtractor, ()>,
+            UseApi(sec_plugin, _): UseApi<Secured, ()>,
             State(state): State<WebserverState>,
         ) -> Response {
             let claims = sec_plugin.as_auth_plugin().claims();
@@ -346,7 +346,7 @@ pub(crate) mod vehicle {
 
         pub(crate) async fn put(
             Path(lock): Path<LockPathParam>,
-            UseApi(sec_plugin, _): UseApi<SecurityPluginExtractor, ()>,
+            UseApi(sec_plugin, _): UseApi<Secured, ()>,
             State(state): State<WebserverState>,
             WithRejection(Json(body), _): WithRejection<
                 Json<sovd_interfaces::locking::Request>,
@@ -366,7 +366,7 @@ pub(crate) mod vehicle {
 
         pub(crate) async fn get(
             Path(lock): Path<LockPathParam>,
-            UseApi(_sec_plugin, _): UseApi<SecurityPluginExtractor, ()>,
+            UseApi(_sec_plugin, _): UseApi<Secured, ()>,
             State(state): State<WebserverState>,
         ) -> Response {
             get_id_handler(&state.locks.vehicle, &lock, None, false).await
@@ -387,7 +387,7 @@ pub(crate) mod vehicle {
     }
 
     pub(crate) async fn post(
-        UseApi(sec_plugin, _): UseApi<SecurityPluginExtractor, ()>,
+        UseApi(sec_plugin, _): UseApi<Secured, ()>,
         State(state): State<WebserverState>,
         WithRejection(Json(body), _): WithRejection<
             Json<sovd_interfaces::locking::Request>,
@@ -457,7 +457,7 @@ pub(crate) mod vehicle {
     }
 
     pub(crate) async fn get(
-        UseApi(sec_plugin, _): UseApi<SecurityPluginExtractor, ()>,
+        UseApi(sec_plugin, _): UseApi<Secured, ()>,
         State(state): State<WebserverState>,
     ) -> Response {
         let claims = sec_plugin.as_auth_plugin().claims();
@@ -481,7 +481,7 @@ pub(crate) mod vehicle {
 
 pub(crate) mod functional_group {
     use aide::{UseApi, transform::TransformOperation};
-    use cda_plugin_security::SecurityPluginExtractor;
+    use cda_plugin_security::Secured;
 
     use super::*;
     use crate::openapi;
@@ -500,7 +500,7 @@ pub(crate) mod functional_group {
                 FunctionalGroupLockWithIdPathParam,
             >,
             State(state): State<WebserverState>,
-            UseApi(sec_plugin, _): UseApi<SecurityPluginExtractor, ()>,
+            UseApi(sec_plugin, _): UseApi<Secured, ()>,
         ) -> Response {
             let claims = sec_plugin.as_auth_plugin().claims();
             delete_handler(
@@ -525,7 +525,7 @@ pub(crate) mod functional_group {
                 FunctionalGroupLockWithIdPathParam,
             >,
             State(state): State<WebserverState>,
-            UseApi(sec_plugin, _): UseApi<SecurityPluginExtractor, ()>,
+            UseApi(sec_plugin, _): UseApi<Secured, ()>,
             WithRejection(Json(body), _): WithRejection<
                 Json<sovd_interfaces::locking::Request>,
                 ApiError,
@@ -554,7 +554,7 @@ pub(crate) mod functional_group {
             Path(FunctionalGroupLockWithIdPathParam { group, lock }): Path<
                 FunctionalGroupLockWithIdPathParam,
             >,
-            UseApi(_sec_plugin, _): UseApi<SecurityPluginExtractor, ()>,
+            UseApi(_sec_plugin, _): UseApi<Secured, ()>,
             State(state): State<WebserverState>,
         ) -> Response {
             get_id_handler(&state.locks.functional_group, &lock, Some(&group), false).await
@@ -576,7 +576,7 @@ pub(crate) mod functional_group {
 
     pub(crate) async fn post(
         Path(group): Path<FunctionalGroupLockPathParam>,
-        UseApi(sec_plugin, _): UseApi<SecurityPluginExtractor, ()>,
+        UseApi(sec_plugin, _): UseApi<Secured, ()>,
         State(state): State<WebserverState>,
         WithRejection(Json(body), _): WithRejection<
             Json<sovd_interfaces::locking::Request>,
@@ -619,7 +619,7 @@ pub(crate) mod functional_group {
 
     pub(crate) async fn get(
         Path(group): Path<FunctionalGroupLockPathParam>,
-        UseApi(sec_plugin, _): UseApi<SecurityPluginExtractor, ()>,
+        UseApi(sec_plugin, _): UseApi<Secured, ()>,
         State(state): State<WebserverState>,
     ) -> Response {
         let claims = sec_plugin.as_auth_plugin().claims();

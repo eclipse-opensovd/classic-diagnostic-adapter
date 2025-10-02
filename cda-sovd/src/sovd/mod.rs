@@ -31,7 +31,7 @@ use cda_interfaces::{
     diagservices::{DiagServiceResponse, UdsPayloadData},
     file_manager::FileManager,
 };
-use cda_plugin_security::{SecurityPluginType, security_plugin_middleware};
+use cda_plugin_security::{SecurityPluginLoader, security_plugin_middleware};
 use error::{ApiError, api_error_from_diag_response};
 use hashbrown::HashMap;
 use http::{Uri, header};
@@ -138,7 +138,7 @@ pub async fn route<
     R: DiagServiceResponse,
     T: UdsEcu + SchemaProvider + Clone,
     U: FileManager,
-    S: SecurityPluginType,
+    S: SecurityPluginLoader,
 >(
     uds: &T,
     flash_files_path: String,

@@ -11,7 +11,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-use aide::transform::TransformOperation;
+use aide::{UseApi, transform::TransformOperation};
 use axum::{
     Json,
     extract::State,
@@ -20,9 +20,10 @@ use axum::{
 };
 use axum_extra::extract::WithRejection;
 use cda_interfaces::{
-    UdsEcu, datatypes::DtcRecordAndStatus, diagservices::DiagServiceResponse,
+    DynamicPlugin, UdsEcu, datatypes::DtcRecordAndStatus, diagservices::DiagServiceResponse,
     file_manager::FileManager,
 };
+use cda_plugin_security::Secured;
 use serde_qs::axum::QsQuery;
 use sovd_interfaces::components::ecu::{
     faults,
@@ -73,11 +74,18 @@ pub(crate) async fn get<
     T: UdsEcu + Send + Sync + Clone,
     U: FileManager + Send + Sync + Clone,
 >(
+    UseApi(Secured(security_plugin), _): UseApi<Secured, ()>,
     State(WebserverEcuState { ecu_name, uds, .. }): State<WebserverEcuState<R, T, U>>,
     WithRejection(QsQuery(query), _): WithRejection<QsQuery<FaultQuery>, ApiError>,
 ) -> Response {
     let dtcs = match uds
-        .ecu_dtc_by_mask(&ecu_name, query.status, query.severity, query.scope)
+        .ecu_dtc_by_mask(
+            &ecu_name,
+            &(security_plugin as DynamicPlugin),
+            query.status,
+            query.severity,
+            query.scope,
+        )
         .await
     {
         Ok(r) => r,
@@ -121,8 +129,13 @@ pub(crate) fn docs_get(op: TransformOperation) -> TransformOperation {
 }
 
 pub(crate) mod id {
+    use aide::UseApi;
     use axum::extract::{Path, Query};
-    use cda_interfaces::datatypes::{self};
+    use cda_interfaces::{
+        DynamicPlugin,
+        datatypes::{self},
+    };
+    use cda_plugin_security::Secured;
     use sovd_interfaces::{
         components::ecu::faults::id::get::{
             DtcIdQuery, EnvironmentData, ExtendedDataRecords, ExtendedFault, ExtendedSnapshots,
@@ -252,6 +265,7 @@ pub(crate) mod id {
         T: UdsEcu + Send + Sync + Clone,
         U: FileManager + Send + Sync + Clone,
     >(
+        UseApi(Secured(security_plugin), _): UseApi<Secured, ()>,
         Path(id): Path<IdPathParam>,
         Query(query): Query<DtcIdQuery>,
         State(WebserverEcuState { ecu_name, uds, .. }): State<WebserverEcuState<R, T, U>>,
@@ -259,6 +273,7 @@ pub(crate) mod id {
         match uds
             .ecu_dtc_extended(
                 &ecu_name,
+                &(security_plugin as DynamicPlugin),
                 &id,
                 query.include_extended_data,
                 query.include_snapshot_data,
