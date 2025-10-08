@@ -146,7 +146,7 @@ impl<S: EcuGateway, R: DiagServiceResponse, T: EcuManager<Response = R>> UdsMana
                 .expect("ECU name has been already checked")
                 .read()
                 .await
-                .convert_from_uds(&service, &msg.expect("response expected").data, map_to_json),
+                .convert_from_uds(&service, &msg.expect("response expected"), map_to_json),
             Err(e) => Err(e),
         };
 
@@ -235,21 +235,6 @@ impl<S: EcuGateway, R: DiagServiceResponse, T: EcuManager<Response = R>> UdsMana
                     Ok(Some(result)) => {
                         match result {
                             Ok(Some(UdsResponse::Message(msg))) => {
-                                if let Some(new_session) = payload.new_session_id.as_ref() {
-                                    ecu.write()
-                                        .await
-                                        .set_session(*new_session, Duration::from_secs(u64::MAX))?;
-                                }
-
-                                if let Some(new_security_access) =
-                                    payload.new_security_access_id.as_ref()
-                                {
-                                    ecu.write().await.set_security_access(
-                                        *new_security_access,
-                                        Duration::from_secs(u64::MAX),
-                                    )?;
-                                }
-
                                 break 'read_uds_messages Ok(msg);
                             }
                             Ok(Some(UdsResponse::BusyRepeatRequest(_))) => {
