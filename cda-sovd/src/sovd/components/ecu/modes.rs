@@ -150,15 +150,27 @@ pub(crate) mod session {
             .await
         {
             Ok(response) => match response.response_type() {
-                DiagServiceResponseType::Positive => (
-                    StatusCode::OK,
-                    Json(sovd_modes::put::Response {
-                        id: semantics::SECURITY.to_owned(),
-                        value: request_body.value.clone(),
-                        schema,
-                    }),
-                )
-                    .into_response(),
+                DiagServiceResponseType::Positive => {
+                    let value = match uds.ecu_session(&ecu_name).await {
+                        Ok(session) => session,
+                        Err(e) => {
+                            return ErrorWrapper {
+                                error: ApiError::from(e),
+                                include_schema,
+                            }
+                            .into_response();
+                        }
+                    };
+                    (
+                        StatusCode::OK,
+                        Json(sovd_modes::put::Response {
+                            id: semantics::SECURITY.to_owned(),
+                            value,
+                            schema,
+                        }),
+                    )
+                        .into_response()
+                }
                 DiagServiceResponseType::Negative => {
                     api_error_from_diag_response(response, include_schema)
                 }
