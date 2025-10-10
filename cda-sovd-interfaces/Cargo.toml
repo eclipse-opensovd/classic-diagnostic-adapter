@@ -21,6 +21,7 @@ chrono = { workspace = true }
 serde = { workspace = true, features = ["derive"] }
 serde_json = { workspace = true }
 schemars = { workspace = true, features = ["hashbrown"] }
+strum = { workspace = true, features = ["derive"] }
 
 [features]
 default = []

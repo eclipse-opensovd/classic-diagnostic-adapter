@@ -29,7 +29,7 @@ use cda_interfaces::{
 };
 use hashbrown::HashMap;
 use serde::Serialize;
-use sovd_interfaces::components::ecu::modes as sovd_modes;
+use sovd_interfaces::components::ecu::modes::{self as sovd_modes, ModeType};
 
 use crate::sovd::{
     WebserverEcuState,
@@ -43,7 +43,7 @@ const SESSION_NAME: &str = "Diagnostic session";
 const SECURITY_NAME: &str = "Security access";
 
 pub(crate) async fn get(
-    WithRejection(Query(query), _): WithRejection<Query<sovd_modes::get::Query>, ApiError>,
+    WithRejection(Query(query), _): WithRejection<Query<sovd_modes::Query>, ApiError>,
 ) -> Response {
     let schema = if query.include_schema {
         Some(create_schema!(sovd_modes::get::Response))
@@ -55,7 +55,7 @@ pub(crate) async fn get(
         Json(sovd_modes::get::Response {
             items: vec![
                 sovd_modes::Mode {
-                    id: Some(semantics::SESSION.to_owned()),
+                    id: Some(ModeType::Session.to_string()),
                     name: Some(SESSION_NAME.to_string()),
                     translation_id: None,
                     value: None,
@@ -64,7 +64,7 @@ pub(crate) async fn get(
                     schema: None,
                 },
                 sovd_modes::Mode {
-                    id: Some(semantics::SECURITY.to_owned()),
+                    id: Some(ModeType::Security.to_string()),
                     name: Some(SECURITY_NAME.to_string()),
                     translation_id: None,
                     value: None,
@@ -84,14 +84,14 @@ pub(crate) fn docs_get(op: TransformOperation) -> TransformOperation {
                 .example(sovd_modes::get::Response {
                     items: vec![
                         sovd_modes::Mode {
-                            id: Some(semantics::SESSION.to_owned()),
+                            id: Some(ModeType::Session.to_string()),
                             name: Some(SESSION_NAME.to_string()),
                             translation_id: None,
                             value: None,
                             schema: None,
                         },
                         sovd_modes::Mode {
-                            id: Some(semantics::SECURITY.to_owned()),
+                            id: Some(ModeType::Security.to_string()),
                             name: Some(SECURITY_NAME.to_string()),
                             translation_id: None,
                             value: None,
@@ -103,11 +103,95 @@ pub(crate) fn docs_get(op: TransformOperation) -> TransformOperation {
         })
 }
 
-pub(crate) mod session {
+pub(crate) mod id {
+    use std::str::FromStr as _;
+
     use aide::UseApi;
+    use axum::extract::Path;
 
     use super::*;
     use crate::{openapi, sovd::error::ErrorWrapper};
+
+    fn deserialize_mode(mode_str: &str, include_schema: bool) -> Result<ModeType, ErrorWrapper> {
+        ModeType::from_str(mode_str).map_err(|e| ErrorWrapper {
+            error: ApiError::BadRequest(format!("Invalid mode type '{mode_str}': {e}")),
+            include_schema,
+        })
+    }
+
+    pub(crate) async fn get<R: DiagServiceResponse, T: UdsEcu + Clone, U: FileManager>(
+        UseApi(claims, _): UseApi<Claims, ()>,
+        WithRejection(Query(query), _): WithRejection<Query<sovd_modes::Query>, ApiError>,
+        State(state): State<WebserverEcuState<R, T, U>>,
+        Path(mode_str): Path<String>,
+    ) -> Response {
+        let mode = match deserialize_mode(&mode_str, query.include_schema) {
+            Ok(m) => m,
+            Err(e) => return e.into_response(),
+        };
+        match mode {
+            ModeType::Session => session::get(query, state).await,
+            ModeType::Security => security::get(claims, query, state).await,
+        }
+    }
+
+    pub(crate) fn docs_get(op: TransformOperation) -> TransformOperation {
+        op.description("Get the current value of the given mode for the ECU")
+            .response_with::<200, Json<sovd_modes::Mode<String>>, _>(|res| {
+                res.description("Current mode value for the ECU")
+                    .example(sovd_modes::Mode {
+                        id: None,
+                        name: Some(SESSION_NAME.to_string()),
+                        translation_id: None,
+                        value: Some("default".to_string()),
+                        schema: None,
+                    })
+            })
+            .with(openapi::error_not_found)
+    }
+
+    pub(crate) async fn put<R: DiagServiceResponse, T: UdsEcu + Clone, U: FileManager>(
+        UseApi(claims, _): UseApi<Claims, ()>,
+        WithRejection(Query(query), _): WithRejection<Query<sovd_modes::Query>, ApiError>,
+        State(state): State<WebserverEcuState<R, T, U>>,
+        Path(mode_str): Path<String>,
+        WithRejection(Json(request_body), _): WithRejection<
+            Json<sovd_modes::put::Request>,
+            ApiError,
+        >,
+    ) -> Response {
+        let mode = match deserialize_mode(&mode_str, query.include_schema) {
+            Ok(m) => m,
+            Err(e) => return e.into_response(),
+        };
+        match mode {
+            ModeType::Session => session::put(mode_str, claims, query, state, request_body).await,
+            ModeType::Security => security::put(mode_str, claims, query, state, request_body).await,
+        }
+    }
+
+    pub(crate) fn docs_put(op: TransformOperation) -> TransformOperation {
+        op.description("update the mode with a new value")
+            .input::<Json<sovd_modes::put::Request>>()
+            .response_with::<200, Json<sovd_modes::put::Response<String>>, _>(|res| {
+                res.description("Mode updated successfully")
+                    .example(sovd_modes::put::Response {
+                        id: ModeType::Session.to_string(),
+                        value: "default".to_string(),
+                        schema: None,
+                    })
+            })
+            .with(openapi::error_not_found)
+            .with(openapi::error_forbidden)
+            .with(openapi::error_bad_request)
+            .with(openapi::error_internal_server)
+            .with(openapi::error_bad_gateway)
+    }
+}
+
+pub(crate) mod session {
+    use super::*;
+    use crate::sovd::error::ErrorWrapper;
 
     #[tracing::instrument(
         skip(claims, locks, uds),
@@ -118,18 +202,16 @@ pub(crate) mod session {
         )
     )]
     pub(crate) async fn put<R: DiagServiceResponse, T: UdsEcu + Clone, U: FileManager>(
-        UseApi(claims, _): UseApi<Claims, ()>,
-        State(WebserverEcuState {
+        id: String,
+        claims: Claims,
+        query: sovd_modes::Query,
+        WebserverEcuState {
             locks,
             uds,
             ecu_name,
             ..
-        }): State<WebserverEcuState<R, T, U>>,
-        WithRejection(Query(query), _): WithRejection<Query<sovd_modes::put::Query>, ApiError>,
-        WithRejection(Json(request_body), _): WithRejection<
-            Json<sovd_modes::put::Request>,
-            ApiError,
-        >,
+        }: WebserverEcuState<R, T, U>,
+        request_body: sovd_modes::put::Request,
     ) -> Response {
         let include_schema = query.include_schema;
         if let Some(response) = validate_lock(&claims, &ecu_name, locks, include_schema).await {
@@ -163,11 +245,7 @@ pub(crate) mod session {
                     };
                     (
                         StatusCode::OK,
-                        Json(sovd_modes::put::Response {
-                            id: semantics::SECURITY.to_owned(),
-                            value,
-                            schema,
-                        }),
+                        Json(sovd_modes::put::Response { id, value, schema }),
                     )
                         .into_response()
                 }
@@ -183,28 +261,9 @@ pub(crate) mod session {
         }
     }
 
-    pub(crate) fn docs_put(op: TransformOperation) -> TransformOperation {
-        op.description("Switch session of ECU")
-            .input::<Json<sovd_modes::put::Request>>()
-            .response_with::<200, Json<sovd_modes::put::Response<String>>, _>(|res| {
-                res.description("Session switched successfully").example(
-                    sovd_modes::put::Response {
-                        id: semantics::SECURITY.to_owned(),
-                        value: "default".to_string(),
-                        schema: None,
-                    },
-                )
-            })
-            .with(openapi::error_not_found)
-            .with(openapi::error_forbidden)
-            .with(openapi::error_bad_request)
-            .with(openapi::error_internal_server)
-            .with(openapi::error_bad_gateway)
-    }
-
     pub(crate) async fn get<R: DiagServiceResponse, T: UdsEcu + Clone, U: FileManager>(
-        WithRejection(Query(query), _): WithRejection<Query<sovd_modes::get::Query>, ApiError>,
-        State(WebserverEcuState { uds, ecu_name, .. }): State<WebserverEcuState<R, T, U>>,
+        query: sovd_modes::Query,
+        WebserverEcuState { uds, ecu_name, .. }: WebserverEcuState<R, T, U>,
     ) -> Response {
         let include_schema = query.include_schema;
         let schema = if include_schema {
@@ -217,7 +276,7 @@ pub(crate) mod session {
                 StatusCode::OK,
                 Json(&sovd_modes::Mode {
                     id: None,
-                    name: Some(semantics::SESSION.to_owned()),
+                    name: Some(ModeType::Session.to_string()),
                     value: Some(security_mode),
                     translation_id: None,
                     schema,
@@ -231,29 +290,13 @@ pub(crate) mod session {
             .into_response(),
         }
     }
-
-    pub(crate) fn docs_get(op: TransformOperation) -> TransformOperation {
-        op.description("Get the current session mode for the ECU")
-            .response_with::<200, Json<sovd_modes::Mode<String>>, _>(|res| {
-                res.description("Current session mode for the ECU")
-                    .example(sovd_modes::Mode {
-                        id: None,
-                        name: Some(SESSION_NAME.to_string()),
-                        translation_id: None,
-                        value: Some("default".to_string()),
-                        schema: None,
-                    })
-            })
-            .with(openapi::error_not_found)
-    }
 }
 
 pub(crate) mod security {
-    use aide::UseApi;
     use cda_interfaces::{SecurityAccess, diagservices::UdsPayloadData};
 
     use super::*;
-    use crate::{openapi, sovd::error::ErrorWrapper};
+    use crate::sovd::error::ErrorWrapper;
 
     #[derive(Serialize, schemars::JsonSchema)]
     struct SovdSeed {
@@ -270,14 +313,14 @@ pub(crate) mod security {
     }
 
     pub(crate) async fn get<R: DiagServiceResponse, T: UdsEcu + Clone, U: FileManager>(
-        UseApi(claims, _): UseApi<Claims, ()>,
-        WithRejection(Query(query), _): WithRejection<Query<sovd_modes::get::Query>, ApiError>,
-        State(WebserverEcuState {
+        claims: Claims,
+        query: sovd_modes::Query,
+        WebserverEcuState {
             ecu_name,
             locks,
             uds,
             ..
-        }): State<WebserverEcuState<R, T, U>>,
+        }: WebserverEcuState<R, T, U>,
     ) -> Response {
         let include_schema = query.include_schema;
         if let Some(value) = validate_lock(&claims, &ecu_name, locks, include_schema).await {
@@ -294,7 +337,7 @@ pub(crate) mod security {
                 StatusCode::OK,
                 Json(&sovd_modes::Mode {
                     id: None,
-                    name: Some(semantics::SECURITY.to_owned()),
+                    name: Some(ModeType::Security.to_string()),
                     value: Some(security_mode),
                     translation_id: None,
                     schema,
@@ -309,34 +352,17 @@ pub(crate) mod security {
         }
     }
 
-    pub(crate) fn docs_get(op: TransformOperation) -> TransformOperation {
-        op.description("Get the current security access mode for the ECU")
-            .response_with::<200, Json<sovd_modes::Mode<String>>, _>(|res| {
-                res.description("Current security access mode for the ECU")
-                    .example(sovd_modes::Mode {
-                        id: None,
-                        name: Some(SECURITY_NAME.to_string()),
-                        translation_id: None,
-                        value: Some("level_1".to_owned()),
-                        schema: None,
-                    })
-            })
-            .with(openapi::error_not_found)
-    }
-
     pub(crate) async fn put<R: DiagServiceResponse, T: UdsEcu + Clone, U: FileManager>(
-        UseApi(claims, _): UseApi<Claims, ()>,
-        WithRejection(Query(query), _): WithRejection<Query<sovd_modes::put::Query>, ApiError>,
-        State(WebserverEcuState {
+        id: String,
+        claims: Claims,
+        query: sovd_modes::Query,
+        WebserverEcuState {
             uds,
             ecu_name,
             locks,
             ..
-        }): State<WebserverEcuState<R, T, U>>,
-        WithRejection(Json(request_body), _): WithRejection<
-            Json<sovd_modes::put::Request>,
-            ApiError,
-        >,
+        }: WebserverEcuState<R, T, U>,
+        request_body: sovd_modes::put::Request,
     ) -> Response {
         fn split_at_last_underscore(input: &str) -> (String, Option<String>) {
             let parts: Vec<&str> = input.split('_').collect();
@@ -440,7 +466,7 @@ pub(crate) mod security {
                         (
                             StatusCode::OK,
                             Json(sovd_modes::put::Response {
-                                id: semantics::SECURITY.to_owned(),
+                                id,
                                 value: request_body.value.clone(),
                                 schema,
                             }),
@@ -458,22 +484,5 @@ pub(crate) mod security {
             }
             .into_response(),
         }
-    }
-
-    pub(crate) fn docs_put(op: TransformOperation) -> TransformOperation {
-        op.description("Set the security access mode for the ECU")
-            .input::<Json<sovd_modes::put::Request>>()
-            .response_with::<200, Json<sovd_modes::put::Response<String>>, _>(|res| {
-                res.description("Response for setting the security access mode")
-                    .example(sovd_modes::put::Response {
-                        id: semantics::SECURITY.to_owned(),
-                        value: "level_2".to_owned(),
-                        schema: None,
-                    })
-            })
-            .with(openapi::error_not_found)
-            .with(openapi::error_bad_request)
-            .with(openapi::error_internal_server)
-            .with(openapi::error_bad_gateway)
     }
 }

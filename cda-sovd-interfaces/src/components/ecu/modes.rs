@@ -12,6 +12,7 @@
  */
 
 use serde::Serialize;
+use strum::{Display, EnumString};
 
 #[derive(Debug, Serialize, schemars::JsonSchema)]
 pub struct Mode<T> {
@@ -28,18 +29,24 @@ pub struct Mode<T> {
     pub schema: Option<schemars::Schema>,
 }
 
+#[derive(Display, EnumString)]
+#[strum(serialize_all = "lowercase")]
+pub enum ModeType {
+    Session,
+    Security,
+}
+
+pub type Query = crate::IncludeSchemaQuery;
+
 pub mod get {
     use super::*;
     use crate::Items;
 
     pub type Response = Items<Mode<()>>;
-    pub type Query = crate::IncludeSchemaQuery;
 }
 
 pub mod put {
     use serde::{Deserialize, Serialize};
-
-    pub type Query = crate::IncludeSchemaQuery;
 
     #[derive(Debug, Deserialize, schemars::JsonSchema)]
     pub struct ModeKey {
