@@ -110,7 +110,7 @@ pub trait EcuManager:
     fn convert_from_uds(
         &self,
         diag_service: &DiagComm,
-        raw_payload: &[u8],
+        payload: &ServicePayload,
         map_to_json: bool,
     ) -> Result<Self::Response, DiagServiceError>;
     /// Creates a `ServicePayload` and processes transitions based on raw UDS data,

@@ -434,11 +434,11 @@ impl cda_interfaces::EcuManager for EcuManager {
     /// elements of the response cannot be correctly mapped from the raw data.
     #[tracing::instrument(
         target = "convert_from_uds",
-        skip(self, diag_service, raw_payload),
+        skip(self, diag_service, payload),
         fields(
             ecu_name = self.ecu_data.ecu_name,
             service = diag_service.name,
-            input = util::tracing::print_hex(raw_payload, 10),
+            input = util::tracing::print_hex(&payload.data, 10),
             output = tracing::field::Empty,
         ),
         err
@@ -446,11 +446,11 @@ impl cda_interfaces::EcuManager for EcuManager {
     fn convert_from_uds(
         &self,
         diag_service: &DiagComm,
-        raw_payload: &[u8],
+        payload: &ServicePayload,
         map_to_json: bool,
     ) -> Result<DiagServiceResponseStruct, DiagServiceError> {
         let mapped_service = self.lookup_diag_comm(diag_service)?;
-        let mut uds_payload = Payload::new(raw_payload);
+        let mut uds_payload = Payload::new(&payload.data);
         let sid = uds_payload
             .first()
             .ok_or_else(|| DiagServiceError::BadPayload("Missing SID".to_owned()))?
@@ -490,6 +490,16 @@ impl cda_interfaces::EcuManager for EcuManager {
                     }
             })
         }) {
+            // in case of a positive response update potential session or security access changes
+            if *t == datatypes::ResponseType::Positive {
+                if let Some(new_session) = payload.new_session_id.as_ref() {
+                    self.set_session(*new_session, Duration::from_secs(u64::MAX))?;
+                }
+
+                if let Some(new_security_access) = payload.new_security_access_id.as_ref() {
+                    self.set_security_access(*new_security_access, Duration::from_secs(u64::MAX))?;
+                }
+            }
             let raw_uds_payload = {
                 let base_offset = params
                     .iter()
@@ -3544,12 +3554,22 @@ mod tests {
         (ecu_manager, service, sid, dtc_code)
     }
 
+    fn create_payload(data: Vec<u8>) -> ServicePayload {
+        ServicePayload {
+            data,
+            source_address: 0u16,
+            target_address: 0u16,
+            new_security_access_id: None,
+            new_session_id: None,
+        }
+    }
+
     #[test]
     fn test_mux_from_uds_invalid_case_no_default() {
         let (ecu_manager, service, sid) = create_ecu_manager_with_mux_service(None, None, None);
         let response = ecu_manager.convert_from_uds(
             &service,
-            &[
+            &create_payload(vec![
                 // Service ID
                 sid,
                 // This does not belong to our mux, it's here to test, if the start byte is used
@@ -3557,7 +3577,7 @@ mod tests {
                 // Mux param starts here
                 // there is no switch value for 0xffff
                 0xff, 0xff,
-            ],
+            ]),
             true,
         );
         assert!(response.is_err());
@@ -3569,7 +3589,7 @@ mod tests {
         let response = ecu_manager
             .convert_from_uds(
                 &service,
-                &[
+                &create_payload(vec![
                     // Service ID
                     sid,
                     // This does not belong to our mux, it's here to test, if the start byte is used
@@ -3579,7 +3599,7 @@ mod tests {
                     0xff, 0xff, //
                     // value for param 1 of default structure
                     0x42,
-                ],
+                ]),
                 true,
             )
             .unwrap();
@@ -3603,14 +3623,14 @@ mod tests {
         let (ecu_manager, service, sid) = create_ecu_manager_with_mux_service(None, None, None);
         let response = ecu_manager.convert_from_uds(
             &service,
-            &[
+            &create_payload(vec![
                 // Service ID
                 sid,
                 // This does not belong to our mux, it's here to test, if the start byte is used
                 0xff, // Mux param starts here
                 // + switch key byte 0
                 0x0, 0x0a, // valid switch key but no data, expect error from decode.
-            ],
+            ]),
             true,
         );
         assert!(response.is_err());
@@ -3621,14 +3641,14 @@ mod tests {
         let (ecu_manager, service, sid) = create_ecu_manager_with_mux_service(None, None, None);
         let response = ecu_manager.convert_from_uds(
             &service,
-            &[
+            &create_payload(vec![
                 // Service ID
                 sid,
                 // This does not belong to our mux, it's here to test, if the start byte is used
                 0xff, // Mux param starts here
                 // + switch key byte 0
                 0x00, 0x0a, // valid switch key but no data, expect error from decode.
-            ],
+            ]),
             true,
         );
 
@@ -3752,7 +3772,9 @@ mod tests {
         data: &Vec<u8>,
         mux_1_json: serde_json::Value,
     ) {
-        let response = ecu_manager.convert_from_uds(service, data, true).unwrap();
+        let response = ecu_manager
+            .convert_from_uds(service, &create_payload(data.to_vec()), true)
+            .unwrap();
 
         // JSON for the response assertion
         let expected_response_json = {
@@ -3975,7 +3997,9 @@ mod tests {
             0x56, 0x78, // item_param2 = 0x5678
         ];
 
-        let response = ecu_manager.convert_from_uds(&service, &data, true).unwrap();
+        let response = ecu_manager
+            .convert_from_uds(&service, &create_payload(data), true)
+            .unwrap();
 
         let expected_json = json!({
             "end_pdu_param": [
@@ -4010,7 +4034,9 @@ mod tests {
             0x56, 0x78, // item_param2 = 0x5678
         ];
 
-        let response = ecu_manager.convert_from_uds(&service, &data, true).unwrap();
+        let response = ecu_manager
+            .convert_from_uds(&service, &create_payload(data), true)
+            .unwrap();
 
         let expected_json = json!({
             "end_pdu_param": [
@@ -4042,7 +4068,9 @@ mod tests {
             0xAA, 0xFF, // Third item, incomplete and exceeding limit, will be ignored
         ];
 
-        let response = ecu_manager.convert_from_uds(&service, &data, true).unwrap();
+        let response = ecu_manager
+            .convert_from_uds(&service, &create_payload(data), true)
+            .unwrap();
         let expected_json = json!({
             "end_pdu_param": [
                 {
@@ -4071,7 +4099,9 @@ mod tests {
             sid, // Service ID
         ];
 
-        let response = ecu_manager.convert_from_uds(&service, &data, true).unwrap();
+        let response = ecu_manager
+            .convert_from_uds(&service, &create_payload(data), true)
+            .unwrap();
         let expected_json = json!({
             "end_pdu_param": [
             ],
@@ -4094,7 +4124,9 @@ mod tests {
             0xD0, 0x0F, // extra data at the end, will be ignored
         ];
 
-        let response = ecu_manager.convert_from_uds(&service, &data, true).unwrap();
+        let response = ecu_manager
+            .convert_from_uds(&service, &create_payload(data), true)
+            .unwrap();
         let expected_json = json!({
             "end_pdu_param": [
                 {
@@ -4124,7 +4156,7 @@ mod tests {
         payload.extend_from_slice(&dtc_code.to_be_bytes());
 
         let response = ecu_manager
-            .convert_from_uds(&service, &payload, true)
+            .convert_from_uds(&service, &create_payload(payload), true)
             .unwrap();
 
         let expected_json = json!({
@@ -4150,7 +4182,7 @@ mod tests {
         ];
 
         let response = ecu_manager
-            .convert_from_uds(&service, &payload, true)
+            .convert_from_uds(&service, &create_payload(payload), true)
             .unwrap();
 
         let expected_json = json!({
@@ -4174,7 +4206,7 @@ mod tests {
             0x11, 0x22, 0x33, 0x44,
         ];
 
-        let response = ecu_manager.convert_from_uds(&service, &payload, true);
+        let response = ecu_manager.convert_from_uds(&service, &create_payload(payload), true);
 
         assert_eq!(
             response.err(),
