@@ -19,3 +19,7 @@ pub mod dataformat;
 #[rustfmt::skip]
 #[allow(clippy::all, dead_code)]
 pub mod fileformat;
+
+#[rustfmt::skip]
+#[allow(clippy::all, dead_code, unused_imports)]
+pub mod diagnostic_description;
