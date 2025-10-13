@@ -107,8 +107,8 @@ pub(crate) mod diag_service {
     };
     use axum_extra::extract::WithRejection;
     use cda_interfaces::{
-        DiagComm, DiagCommAction, DiagCommType, SchemaProvider, UdsEcu,
-        diagservices::DiagServiceResponse, file_manager::FileManager,
+        DiagComm, DiagCommType, SchemaProvider, UdsEcu, diagservices::DiagServiceResponse,
+        file_manager::FileManager,
     };
     use cda_plugin_security::Secured;
     use http::HeaderMap;
@@ -151,7 +151,6 @@ pub(crate) mod diag_service {
         data_request::<T>(
             DiagComm {
                 name: service.clone(),
-                action: DiagCommAction::Write,
                 type_: DiagCommType::Configurations,
                 lookup_name: None,
             },

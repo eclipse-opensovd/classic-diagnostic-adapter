@@ -13,8 +13,11 @@
 
 use std::fmt::Debug;
 
-use cda_database::datatypes::{DataType, IntervalType, Limit};
-use cda_interfaces::{DiagServiceError, Protocol, STRINGS};
+use cda_database::{
+    datatypes,
+    datatypes::{DataType, IntervalType, Limit},
+};
+use cda_interfaces::DiagServiceError;
 use hashbrown::HashMap;
 use serde::{Serialize, Serializer};
 
@@ -222,17 +225,29 @@ impl TryInto<u32> for DiagDataValue {
     }
 }
 
-#[derive(Clone)]
-pub struct Variant {
-    pub name: String,
-    pub(crate) id: u32,
-}
+pub fn into_db_protocol(
+    database: &datatypes::DiagnosticDatabase,
+    protocol: cda_interfaces::Protocol,
+) -> Result<datatypes::Protocol<'_>, DiagServiceError> {
+    let protocol = database
+        .diag_layers()?
+        .iter()
+        .flat_map(|dl| dl.com_param_refs().into_iter().flatten())
+        .flat_map(|cp_ref| cp_ref.protocol())
+        .find(|p| {
+            p.diag_layer()
+                .and_then(|dl| dl.short_name())
+                .is_some_and(|sn| sn == protocol.value())
+        })
+        .map(datatypes::Protocol)
+        .ok_or_else(|| {
+            DiagServiceError::InvalidDatabase(format!(
+                "Protocol {} not found in database",
+                protocol.value()
+            ))
+        })?;
 
-#[must_use]
-pub fn into_db_protocol(val: Protocol) -> cda_database::datatypes::Protocol {
-    cda_database::datatypes::Protocol {
-        short_name: STRINGS.get_or_insert(val.value()),
-    }
+    Ok(protocol)
 }
 
 impl Serialize for DiagDataValue {

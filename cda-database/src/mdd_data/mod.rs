@@ -13,11 +13,18 @@
 
 use std::{io::Read, time::Instant};
 
-use cda_interfaces::file_manager::{Chunk, ChunkMetaData, ChunkType, MddError};
+use cda_interfaces::{
+    datatypes::FlatbBufConfig,
+    file_manager::{Chunk, ChunkMetaData, ChunkType, MddError},
+};
+use flatbuffers::VerifierOptions;
 use hashbrown::HashMap;
 use prost::Message;
 
-use crate::proto::{dataformat, fileformat, fileformat::chunk::DataType as ChunkDataType};
+use crate::{
+    flatbuf::diagnostic_description::dataformat,
+    proto::{fileformat, fileformat::chunk::DataType as ChunkDataType},
+};
 
 pub mod files;
 
@@ -237,8 +244,36 @@ pub fn load_proto_data(
     Ok((proto_file.ecu_name.to_string(), proto_data))
 }
 
-pub(crate) fn read_ecudata(bytes: &[u8]) -> Result<dataformat::EcuData, String> {
-    let ecu_data = dataformat::EcuData::decode(&mut std::io::Cursor::new(bytes))
-        .map_err(|e| format!("Failed to parse ECU data: {e}"))?;
-    Ok(ecu_data)
+pub(crate) fn read_ecudata(
+    bytes: &[u8],
+    flatbuf_config: FlatbBufConfig,
+) -> Result<dataformat::EcuData<'_>, String> {
+    let start = Instant::now();
+    let ecu_data = if flatbuf_config.verify {
+        dataformat::root_as_ecu_data_with_opts(
+            &VerifierOptions {
+                max_depth: flatbuf_config.max_depth,
+                max_tables: flatbuf_config.max_tables,
+                max_apparent_size: flatbuf_config.max_apparent_size,
+                ignore_missing_null_terminator: flatbuf_config.ignore_missing_null_terminator,
+            },
+            bytes,
+        )
+        .map_err(|e| format!("Failed to parse ECU data: {e}"))
+    } else {
+        Ok(unsafe {
+            // unsafe but around 10x faster.
+            // can be used when previously verified and trusted data is loaded.
+            dataformat::root_as_ecu_data_unchecked(bytes)
+        })
+    };
+
+    let end = Instant::now();
+    tracing::trace!(
+        duration = ?end.saturating_duration_since(start),
+        ecu_name = %ecu_data.as_ref()
+            .ok().and_then(|ecu_data| ecu_data.ecu_name()).unwrap_or("unknown"),
+        "Parsed flatbuff data"
+    );
+    ecu_data
 }

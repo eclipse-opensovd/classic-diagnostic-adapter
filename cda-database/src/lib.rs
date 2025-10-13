@@ -12,6 +12,7 @@
  */
 
 pub mod datatypes;
+pub(crate) mod flatbuf;
 pub(crate) mod mdd_data;
 pub(crate) mod proto;
 

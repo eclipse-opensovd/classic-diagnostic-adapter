@@ -76,13 +76,15 @@ fn schema_find_recursive<'a>(
 }
 
 pub trait EcuSchemaProvider {
-    fn schema_for_request(&self, service: &DiagComm)
-    -> Result<SchemaDescription, DiagServiceError>;
+    fn schema_for_request(
+        &self,
+        service: &DiagComm,
+    ) -> impl Future<Output = Result<SchemaDescription, DiagServiceError>> + Send;
 
     fn schema_for_responses(
         &self,
         service: &DiagComm,
-    ) -> Result<SchemaDescription, DiagServiceError>;
+    ) -> impl Future<Output = Result<SchemaDescription, DiagServiceError>> + Send;
 }
 
 pub trait SchemaProvider {

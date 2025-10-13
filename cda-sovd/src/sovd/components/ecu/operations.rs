@@ -231,7 +231,7 @@ pub(crate) mod comparams {
                     Ok(v) => v.into_sovd(),
                     Err(e) => {
                         return ErrorWrapper {
-                            error: ApiError::BadRequest(e),
+                            error: e.into(),
                             include_schema,
                         }
                         .into_response();
@@ -426,7 +426,7 @@ pub(crate) mod service {
         };
         use axum_extra::extract::WithRejection;
         use cda_interfaces::{
-            DiagComm, DiagCommAction, DiagCommType, DynamicPlugin, SchemaProvider, UdsEcu,
+            DiagComm, DiagCommType, DynamicPlugin, SchemaProvider, UdsEcu,
             diagservices::{DiagServiceJsonResponse, DiagServiceResponse, DiagServiceResponseType},
             file_manager::FileManager,
         };
@@ -596,7 +596,6 @@ pub(crate) mod service {
 
             let diag_service = DiagComm {
                 name: service.clone(),
-                action: DiagCommAction::Start,
                 type_: DiagCommType::Operations,
                 lookup_name: None,
             };
@@ -788,7 +787,6 @@ pub(crate) mod service {
 
             let diag_service = DiagComm {
                 name: service.clone(),
-                action: DiagCommAction::Start,
                 type_: DiagCommType::Modes, // ecureset is in modes
                 lookup_name: Some(value_str.to_owned()),
             };

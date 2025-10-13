@@ -56,7 +56,7 @@ pub trait UdsEcu: Send + Sync + 'static {
     fn get_comparams(
         &self,
         ecu: &str,
-    ) -> impl Future<Output = Result<ComplexComParamValue, String>> + Send;
+    ) -> impl Future<Output = Result<ComplexComParamValue, DiagServiceError>> + Send;
     /// Retrieve all `read` services for the given ECU on the detected variant.
     /// # Errors
     /// Will return `Err` if the ECU does not exist.

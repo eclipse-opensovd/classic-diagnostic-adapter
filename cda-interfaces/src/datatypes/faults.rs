@@ -24,7 +24,7 @@ pub const DTC_CODE_BIT_LEN: u32 = 24;
 /// Essentially the byte values
 /// are sub functions for service 0x19 (Read DTC information)
 #[repr(u8)]
-#[derive(Clone, PartialEq, Eq, Hash, strum_macros::EnumIter)]
+#[derive(Clone, Copy, PartialEq, Eq, Hash, strum_macros::EnumIter)]
 pub enum DtcReadInformationFunction {
     FaultMemoryByStatusMask = 0x02,
     FaultMemorySnapshotRecordByDtcNumber = 0x04,

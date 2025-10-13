@@ -42,8 +42,6 @@ pub(crate) mod strings;
 pub use strings::*;
 pub mod util;
 
-pub type Id = u32;
-
 pub type DynamicPlugin = Box<dyn std::any::Any + Send + Sync>;
 
 #[derive(Debug, Clone)]
@@ -58,16 +56,34 @@ pub enum DiagCommAction {
 #[cfg_attr(feature = "deepsize", derive(DeepSizeOf))]
 pub struct DiagComm {
     pub name: String,
-    pub action: DiagCommAction,
     pub type_: DiagCommType,
     pub lookup_name: Option<String>,
+}
+
+impl DiagComm {
+    pub fn action(&self) -> DiagCommAction {
+        self.type_.clone().into()
+    }
+}
+
+impl From<DiagCommType> for DiagCommAction {
+    fn from(value: DiagCommType) -> Self {
+        match value {
+            DiagCommType::Configurations => DiagCommAction::Write,
+            DiagCommType::Data => DiagCommAction::Read,
+            // actually Clear or Read, but doesn't matter here
+            DiagCommType::Faults => DiagCommAction::Start,
+            DiagCommType::Modes => DiagCommAction::Start,
+            DiagCommType::Operations => DiagCommAction::Start,
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
 #[cfg_attr(feature = "deepsize", derive(DeepSizeOf))]
 /// Enum representing diagnostic communication types according to ASAM SOVD.
 ///
-/// Can be mapped to UDS service prefixes with [`DiagCommType::service_prefix`]
+/// Can be mapped to UDS service prefixes with [`DiagCommType::service_prefixes`]
 pub enum DiagCommType {
     /// Service Prefix `0x2E`
     Configurations,
@@ -81,10 +97,38 @@ pub enum DiagCommType {
     Operations,
 }
 
+impl TryFrom<u8> for DiagCommType {
+    type Error = DiagServiceError;
+
+    fn try_from(value: u8) -> Result<Self, Self::Error> {
+        match value {
+            service_ids::WRITE_DATA_BY_IDENTIFIER => Ok(DiagCommType::Configurations),
+            service_ids::READ_DATA_BY_IDENTIFIER => Ok(DiagCommType::Data),
+            service_ids::CLEAR_DIAGNOSTIC_INFORMATION | service_ids::READ_DTC_INFORMATION => {
+                Ok(DiagCommType::Faults)
+            }
+            service_ids::SESSION_CONTROL
+            | service_ids::ECU_RESET
+            | service_ids::SECURITY_ACCESS
+            | service_ids::COMMUNICATION_CONTROL
+            | service_ids::AUTHENTICATION
+            | service_ids::CONTROL_DTC_SETTING => Ok(DiagCommType::Modes),
+            service_ids::INPUT_OUTPUT_CONTROL_BY_IDENTIFIER
+            | service_ids::ROUTINE_CONTROL
+            | service_ids::REQUEST_DOWNLOAD
+            | service_ids::TRANSFER_DATA
+            | service_ids::REQUEST_TRANSFER_EXIT => Ok(DiagCommType::Operations),
+            _ => Err(DiagServiceError::InvalidRequest(format!(
+                "Invalid DiagCommType value: {value}"
+            ))),
+        }
+    }
+}
+
 #[derive(Clone)]
 pub enum SecurityAccess {
     RequestSeed(DiagComm),
-    SendKey((Id, DiagComm)),
+    SendKey(DiagComm),
 }
 
 #[derive(Clone, Debug)]
@@ -127,10 +171,36 @@ pub mod service_ids {
     pub const CONTROL_DTC_SETTING: u8 = 0x85;
 }
 
+const CONFIGURATIONS_PREFIXES: [u8; 1] = [service_ids::WRITE_DATA_BY_IDENTIFIER];
+
+const DATA_PREFIXES: [u8; 1] = [service_ids::READ_DATA_BY_IDENTIFIER];
+
+const FAULTS_PREFIXES: [u8; 2] = [
+    service_ids::CLEAR_DIAGNOSTIC_INFORMATION,
+    service_ids::READ_DTC_INFORMATION,
+];
+
+const MODES_PREFIXES: [u8; 6] = [
+    service_ids::SESSION_CONTROL,
+    service_ids::ECU_RESET,
+    service_ids::SECURITY_ACCESS,
+    service_ids::COMMUNICATION_CONTROL,
+    service_ids::AUTHENTICATION,
+    service_ids::CONTROL_DTC_SETTING,
+];
+
+const OPERATIONS_PREFIXES: [u8; 5] = [
+    service_ids::INPUT_OUTPUT_CONTROL_BY_IDENTIFIER,
+    service_ids::ROUTINE_CONTROL,
+    service_ids::REQUEST_DOWNLOAD,
+    service_ids::TRANSFER_DATA,
+    service_ids::REQUEST_TRANSFER_EXIT,
+];
+
 impl DiagCommType {
     #[must_use]
     /// This function returns the service prefix for the given `DiagCommType`
-    /// acccording to ASAM_SOVD_BS_V1-0-0
+    /// according to ASAM_SOVD_BS_V1-0-0
     /// # Service Prefixes Mapping
     ///  - `0x2E` -> `<entity>/configurations`
     ///  - `0x22` -> `<entity>/data`
@@ -141,29 +211,13 @@ impl DiagCommType {
     ///  - `0x27 | 0x29` -> `<entity>/modes/security`
     ///  - `0x14 | 0x19` -> `<entity>/faults`
     ///  - `0x2F | 0x31` -> `<entity>/operations`
-    pub fn service_prefix(&self) -> Vec<u8> {
+    pub fn service_prefixes(&self) -> &'static [u8] {
         match self {
-            DiagCommType::Configurations => vec![service_ids::WRITE_DATA_BY_IDENTIFIER],
-            DiagCommType::Data => vec![service_ids::READ_DATA_BY_IDENTIFIER],
-            DiagCommType::Faults => vec![
-                service_ids::CLEAR_DIAGNOSTIC_INFORMATION,
-                service_ids::READ_DTC_INFORMATION,
-            ],
-            DiagCommType::Modes => vec![
-                service_ids::SESSION_CONTROL,
-                service_ids::ECU_RESET,
-                service_ids::SECURITY_ACCESS,
-                service_ids::COMMUNICATION_CONTROL,
-                service_ids::AUTHENTICATION,
-                service_ids::CONTROL_DTC_SETTING,
-            ],
-            DiagCommType::Operations => vec![
-                service_ids::INPUT_OUTPUT_CONTROL_BY_IDENTIFIER,
-                service_ids::ROUTINE_CONTROL,
-                service_ids::REQUEST_DOWNLOAD,
-                service_ids::TRANSFER_DATA,
-                service_ids::REQUEST_TRANSFER_EXIT,
-            ],
+            DiagCommType::Configurations => &CONFIGURATIONS_PREFIXES,
+            DiagCommType::Data => &DATA_PREFIXES,
+            DiagCommType::Faults => &FAULTS_PREFIXES,
+            DiagCommType::Modes => &MODES_PREFIXES,
+            DiagCommType::Operations => &OPERATIONS_PREFIXES,
         }
     }
 }
@@ -260,7 +314,8 @@ impl std::fmt::Display for DiagComm {
         write!(
             f,
             "DiagService ( name: {}, operation: {:?} )",
-            self.name, self.action
+            self.name,
+            self.action()
         )
     }
 }

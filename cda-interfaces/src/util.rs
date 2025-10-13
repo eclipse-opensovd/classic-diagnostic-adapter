@@ -162,6 +162,13 @@ pub fn extract_bits(
     Ok(result_bytes)
 }
 
+/// Fast ASCII-only case-insensitive prefix check without allocations.
+/// Returns true if `text` starts with `prefix`.
+#[inline]
+pub fn starts_with_ignore_ascii_case(text: &str, prefix: &str) -> bool {
+    text.len() >= prefix.len() && text[..prefix.len()].eq_ignore_ascii_case(prefix)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -471,7 +471,7 @@ pub(crate) mod security {
 
                     SecurityAccess::SendKey(_) => {
                         let schema = if query.include_schema {
-                            Some(create_schema!(sovd_modes::put::Response::<String>))
+                            Some(create_schema!(sovd_modes::put::Response<String>))
                         } else {
                             None
                         };
