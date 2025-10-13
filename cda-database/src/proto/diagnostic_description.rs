@@ -16260,11 +16260,11 @@ impl<'a> ComParamRef<'a> {
 
 
   #[inline]
-  pub fn simple_value(&self) -> Option<&'a str> {
+  pub fn simple_value(&self) -> Option<SimpleValue<'a>> {
     // Safety:
     // Created from valid Table for this object
     // which contains a valid value in this slot
-    unsafe { self._tab.get::<flatbuffers::ForwardsUOffset<&str>>(ComParamRef::VT_SIMPLE_VALUE, None)}
+    unsafe { self._tab.get::<flatbuffers::ForwardsUOffset<SimpleValue>>(ComParamRef::VT_SIMPLE_VALUE, None)}
   }
   #[inline]
   pub fn complex_value(&self) -> Option<ComplexValue<'a>> {
@@ -16303,7 +16303,7 @@ impl flatbuffers::Verifiable for ComParamRef<'_> {
   ) -> Result<(), flatbuffers::InvalidFlatbuffer> {
     use self::flatbuffers::Verifiable;
     v.visit_table(pos)?
-     .visit_field::<flatbuffers::ForwardsUOffset<&str>>("simple_value", Self::VT_SIMPLE_VALUE, false)?
+     .visit_field::<flatbuffers::ForwardsUOffset<SimpleValue>>("simple_value", Self::VT_SIMPLE_VALUE, false)?
      .visit_field::<flatbuffers::ForwardsUOffset<ComplexValue>>("complex_value", Self::VT_COMPLEX_VALUE, false)?
      .visit_field::<flatbuffers::ForwardsUOffset<ComParam>>("com_param", Self::VT_COM_PARAM, false)?
      .visit_field::<flatbuffers::ForwardsUOffset<Protocol>>("protocol", Self::VT_PROTOCOL, false)?
@@ -16313,7 +16313,7 @@ impl flatbuffers::Verifiable for ComParamRef<'_> {
   }
 }
 pub struct ComParamRefArgs<'a> {
-    pub simple_value: Option<flatbuffers::WIPOffset<&'a str>>,
+    pub simple_value: Option<flatbuffers::WIPOffset<SimpleValue<'a>>>,
     pub complex_value: Option<flatbuffers::WIPOffset<ComplexValue<'a>>>,
     pub com_param: Option<flatbuffers::WIPOffset<ComParam<'a>>>,
     pub protocol: Option<flatbuffers::WIPOffset<Protocol<'a>>>,
@@ -16338,8 +16338,8 @@ pub struct ComParamRefBuilder<'a: 'b, 'b, A: flatbuffers::Allocator + 'a> {
 }
 impl<'a: 'b, 'b, A: flatbuffers::Allocator + 'a> ComParamRefBuilder<'a, 'b, A> {
   #[inline]
-  pub fn add_simple_value(&mut self, simple_value: flatbuffers::WIPOffset<&'b  str>) {
-    self.fbb_.push_slot_always::<flatbuffers::WIPOffset<_>>(ComParamRef::VT_SIMPLE_VALUE, simple_value);
+  pub fn add_simple_value(&mut self, simple_value: flatbuffers::WIPOffset<SimpleValue<'b >>) {
+    self.fbb_.push_slot_always::<flatbuffers::WIPOffset<SimpleValue>>(ComParamRef::VT_SIMPLE_VALUE, simple_value);
   }
   #[inline]
   pub fn add_complex_value(&mut self, complex_value: flatbuffers::WIPOffset<ComplexValue<'b >>) {

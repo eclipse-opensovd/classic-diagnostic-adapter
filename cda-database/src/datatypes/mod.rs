@@ -38,6 +38,7 @@ use crate::{
     mdd_data::{load_ecudata, read_ecudata},
     proto::dataformat::EcuData,
 };
+use crate::mdd_data::read_ecudata_new;
 
 pub(crate) mod comparam;
 pub(crate) mod data_operation;
@@ -182,6 +183,10 @@ impl Default for DiagnosticDatabase {
 
 impl DiagnosticDatabase {
     pub fn new(ecu_database_path: String, ecu_data_blob: &[u8]) -> Result<Self, DiagServiceError> {
+        std::fs::write("/tmp/foo.bin", ecu_data_blob).unwrap();
+
+        let ecu_data = read_ecudata_new(ecu_data_blob).map_err(DiagServiceError::InvalidDatabase)?;
+        println!("{ecu_data:?}");
         let ecu_data = read_ecudata(ecu_data_blob).map_err(DiagServiceError::InvalidDatabase)?;
 
         let requests = get_requests(&ecu_data)?;
@@ -298,7 +303,6 @@ impl DiagnosticDatabase {
     pub fn load_variant_sdgs(&mut self, variant_id: Id) -> Result<(), DiagServiceError> {
         let (_, ecu_data_blob) = load_ecudata(&self.ecu_database_path)
             .map_err(|e| DiagServiceError::InvalidDatabase(e.to_string()))?;
-        // let mut ecu_data_reader = quick_protobuf::BytesReader::from_bytes(&ecu_data_blob);
         let ecu_data = read_ecudata(&ecu_data_blob).map_err(DiagServiceError::InvalidDatabase)?;
 
         let sdgs = get_sdgs(
