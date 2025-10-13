@@ -43,6 +43,7 @@ futures = "0.3"
 regex = "1.11.1"
 uuid = "1.16.0"
 prost = "0.14"
+flatbuffers = "25.9.23"
 xz2 = "0.1.6"
 hex = "0.4.3"
 strum = "0.27.2"
@@ -113,3 +114,4 @@ schemars = { git = "https://github.com/theswiftfox/schemars.git", rev = "d264067
 aide = { git = "https://github.com/theswiftfox/aide.git", rev = "e533403" }
 doip-definitions = { git = "https://github.com/theswiftfox/doip-definitions.git", rev = "bdeab8c" }
 doip-sockets = { git = "https://github.com/theswiftfox/doip-sockets.git", rev = "0771453" }
+flatbuffers = { git = "https://github.com/theswiftfox/flatbuffers.git", rev = "6181c985" }
