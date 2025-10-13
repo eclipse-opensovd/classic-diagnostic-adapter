@@ -10,9 +10,8 @@
  *
  * SPDX-License-Identifier: Apache-2.0
  */
-
 use cda_interfaces::datatypes::{
-    ComParams, DatabaseNamingConvention, DiagnosticServiceAffixPosition,
+    ComParams, DatabaseNamingConvention, DiagnosticServiceAffixPosition, FlatbBufConfig,
 };
 use serde::{Deserialize, Serialize};
 
@@ -26,6 +25,7 @@ pub struct Configuration {
     pub flash_files_path: String,
     pub com_params: ComParams,
     pub database_naming_convention: DatabaseNamingConvention,
+    pub flat_buf: FlatbBufConfig,
 }
 
 #[derive(Deserialize, Serialize, Clone, Debug)]
@@ -64,6 +64,7 @@ impl Default for Configuration {
             logging: cda_tracing::LoggingConfig::default(),
             com_params: ComParams::default(),
             database_naming_convention: DatabaseNamingConvention::default(),
+            flat_buf: FlatbBufConfig::default(),
         }
     }
 }

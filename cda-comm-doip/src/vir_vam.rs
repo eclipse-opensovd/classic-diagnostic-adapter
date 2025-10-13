@@ -178,6 +178,8 @@ pub(crate) async fn listen_for_vams<T, F>(
     let mut gateway_ecu_name_map: HashMap<u16, Vec<String>> = HashMap::new();
     for ecu_lock in gateway.ecus.values() {
         let ecu = ecu_lock.read().await;
+        let ecu_name = ecu.ecu_name();
+
         let addr = ecu.logical_address();
         let gateway = ecu.logical_gateway_address();
         gateway_ecu_map
@@ -187,7 +189,7 @@ pub(crate) async fn listen_for_vams<T, F>(
         gateway_ecu_name_map
             .entry(gateway)
             .or_insert_with(Vec::new)
-            .push(ecu.ecu_name().to_lowercase());
+            .push(ecu_name.to_lowercase());
     }
 
     tracing::info!("Listening for spontaneous VAMs");

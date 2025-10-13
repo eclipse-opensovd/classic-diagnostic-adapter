@@ -11,25 +11,9 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-pub use com_params::*;
-pub use component::*;
-pub use database_naming_convention::*;
-pub use execution::*;
-pub use faults::*;
-pub use flatbuf_config::*;
-pub use jobs::*;
-pub use networkstructure::*;
-pub use sdg::*;
-pub use state::*;
+// @generated
 
-mod com_params;
-mod component;
-mod database_naming_convention;
-mod execution;
-mod faults;
-mod flatbuf_config;
-mod jobs;
-mod networkstructure;
-mod sdg;
-pub mod semantics;
-mod state;
+
+#[rustfmt::skip]
+#[allow(clippy::all, dead_code, unused_imports)]
+pub mod diagnostic_description;

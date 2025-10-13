@@ -14,89 +14,361 @@
 use std::fmt::Debug;
 
 use cda_interfaces::{
-    DiagComm, DiagCommAction, DiagCommType, DiagServiceError, Id, STRINGS, StringId,
-    datatypes::{ComParamConfig, ComParamValue, DeserializableCompParam},
-    get_string_with_default,
+    DiagServiceError,
+    datatypes::{ComParamConfig, ComParamValue, DeserializableCompParam, FlatbBufConfig},
 };
 pub use comparam::*;
 pub use data_operation::*;
 #[cfg(feature = "deepsize")]
 use deepsize::DeepSizeOf;
 pub use diag_coded_type::*;
-pub use dtc::*;
-pub use functional_classes::*;
-use hashbrown::HashMap;
-pub use jobs::*;
-pub use parameter::*;
-pub use sd_sdg::*;
+use ouroboros::self_referencing;
 use serde::Serialize;
 pub use service::*;
-pub use state_charts::*;
-pub use variant::*;
 
 use crate::{
+    datatypes,
+    flatbuf::diagnostic_description::dataformat,
     mdd_data::{load_ecudata, read_ecudata},
-    proto::dataformat::EcuData,
 };
+
+#[cfg(feature = "database-builder")]
+pub mod database_builder;
 
 pub(crate) mod comparam;
 pub(crate) mod data_operation;
 pub(crate) mod diag_coded_type;
 pub(crate) mod dtc;
-pub(crate) mod functional_classes;
 pub(crate) mod jobs;
-pub(crate) mod parameter;
-pub(crate) mod sd_sdg;
 pub(crate) mod service;
-pub(crate) mod state_charts;
-pub(crate) mod variant;
 
-pub type DiagnosticServiceMap = HashMap<Id, DiagnosticService>;
-pub type RequestMap = HashMap<Id, Request>;
-pub type ResponseMap = HashMap<Id, Response>;
-pub type ParameterMap = HashMap<Id, Parameter>;
-pub type ComParamMap = HashMap<Id, ComParam>;
-pub type DiagCodedTypeMap = HashMap<Id, DiagCodedType>;
-pub type DOPMap = HashMap<Id, DataOperation>;
-pub type VariantMap = HashMap<Id, Variant>;
-pub type ProtocolMap = HashMap<Id, Protocol>;
-pub type BaseServiceMap = HashMap<String, Id>;
-pub type SdgMap = HashMap<Id, Sdg>;
-pub type SdMap = HashMap<Id, Sd>;
-pub type DtcMap = HashMap<Id, Dtc>;
+#[macro_export]
+macro_rules! dataformat_wrapper {
+    ($name:ident, $inner:ty) => {
+        #[repr(transparent)]
+        #[derive(Clone, Debug)]
+        pub struct $name(pub $inner);
+
+        impl std::ops::Deref for $name {
+            type Target = $inner;
+
+            fn deref(&self) -> &Self::Target {
+                &self.0
+            }
+        }
+
+        impl From<$inner> for $name {
+            fn from(inner: $inner) -> Self {
+                $name(inner)
+            }
+        }
+    };
+    ($name:ident<$lt:lifetime>, $inner:ty) => {
+        #[repr(transparent)]
+        #[derive(Clone, Debug)]
+        pub struct $name<$lt>(pub $inner);
+
+        impl<$lt> std::ops::Deref for $name<$lt> {
+            type Target = $inner;
+
+            fn deref(&self) -> &Self::Target {
+                &self.0
+            }
+        }
+
+        impl<$lt> From<$inner> for $name<$lt> {
+            fn from(inner: $inner) -> Self {
+                $name(inner)
+            }
+        }
+    };
+}
+
+macro_rules! impl_diag_coded_type {
+    ($type_name:ident) => {
+        impl $type_name<'_> {
+            pub fn diag_coded_type(&self) -> Result<DiagCodedType, DiagServiceError> {
+                if let Some(dc) = self.0.diag_coded_type() {
+                    dc.try_into()
+                } else {
+                    Err(DiagServiceError::InvalidDatabase(format!(
+                        "Expected DiagCodedType for {}",
+                        stringify!($type_name)
+                    )))
+                }
+            }
+        }
+    };
+}
+
+dataformat_wrapper!(EcuDb<'a>, dataformat::EcuData<'a>);
+dataformat_wrapper!(ParentRef<'a>, dataformat::ParentRef<'a>);
+dataformat_wrapper!(Variant<'a>, dataformat::Variant<'a>);
+dataformat_wrapper!(Protocol<'a>, dataformat::Protocol<'a>);
+dataformat_wrapper!(State<'a>, dataformat::State<'a>);
+dataformat_wrapper!(StateChart<'a>, dataformat::StateChart<'a>);
+
+// Requests, Responses...
+dataformat_wrapper!(DiagService<'a>, dataformat::DiagService<'a>);
+dataformat_wrapper!(DiagComm<'a>, dataformat::DiagComm<'a>);
+dataformat_wrapper!(DiagLayer<'a>, dataformat::DiagLayer<'a>);
+dataformat_wrapper!(Parameter<'a>, dataformat::Param<'a>);
+dataformat_wrapper!(Request<'a>, dataformat::Request<'a>);
+dataformat_wrapper!(Response<'a>, dataformat::Response<'a>);
+
+// DOPS
+dataformat_wrapper!(DopField<'a>, dataformat::Field<'a>);
+dataformat_wrapper!(DataOperation<'a>, dataformat::DOP<'a>);
+dataformat_wrapper!(StructureDop<'a>, dataformat::Structure<'a>);
+dataformat_wrapper!(MuxDop<'a>, dataformat::MUXDOP<'a>);
+dataformat_wrapper!(DtcDop<'a>, dataformat::DTCDOP<'a>);
+dataformat_wrapper!(NormalDop<'a>, dataformat::NormalDOP<'a>);
+dataformat_wrapper!(EndOfPdu<'a>, dataformat::EndOfPduField<'a>);
+dataformat_wrapper!(DynamicLengthField<'a>, dataformat::DynamicLengthField<'a>);
+dataformat_wrapper!(EnvDataDescDop<'a>, dataformat::EnvDataDesc<'a>);
+dataformat_wrapper!(EnvDataDop<'a>, dataformat::EnvData<'a>);
+dataformat_wrapper!(StaticFieldDop<'a>, dataformat::StaticField<'a>);
+dataformat_wrapper!(DynamicLengthDop<'a>, dataformat::DynamicLengthField<'a>);
+dataformat_wrapper!(SdOrSdg<'a>, dataformat::SDOrSDG<'a>);
+dataformat_wrapper!(Sdgs<'a>, dataformat::SDGS<'a>);
+
+impl_diag_coded_type!(DtcDop);
+impl_diag_coded_type!(NormalDop);
+
+// Multiplexer
+dataformat_wrapper!(Case<'a>, dataformat::Case<'a>);
+dataformat_wrapper!(DefaultCase<'a>, dataformat::DefaultCase<'a>);
+
+dataformat_wrapper!(DbDataType, dataformat::DataType);
+
+impl DefaultCase<'_> {
+    pub fn case_struct_dop(&self) -> Option<StructureDop<'_>> {
+        self.0
+            .structure()
+            .and_then(|s| s.specific_data_as_structure().map(|d| d.into()))
+    }
+}
+
+impl DiagService<'_> {
+    pub fn request_id(&self) -> Option<u8> {
+        self.find_request_sid_or_sub_func_param(0, 0)
+            .map(|(sid, _)| sid as u8)
+    }
+
+    pub fn request_sub_function_id(&self) -> Option<(u16, u32)> {
+        self.find_request_sid_or_sub_func_param(1, 0)
+    }
+
+    fn find_request_sid_or_sub_func_param(
+        &self,
+        byte_pos: u32,
+        bit_pos: u32,
+    ) -> Option<(u16, u32)> {
+        let request = self.0.request()?;
+        let params = request.params()?;
+
+        params.iter().find_map(|p| {
+            if p.byte_position().unwrap_or(0) != byte_pos
+                || p.bit_position().unwrap_or(0) != bit_pos
+            {
+                return None;
+            }
+
+            let coded_const = p.specific_data_as_coded_const()?;
+            let diag_coded_type = coded_const.diag_coded_type()?;
+            if diag_coded_type.base_data_type() != (*DbDataType::A_UINT_32) {
+                return None;
+            }
+
+            let standard_length_type = diag_coded_type.specific_data_as_standard_length_type()?;
+
+            // SIDRQ validation
+            if standard_length_type.condensed() || standard_length_type.bit_mask().is_some() {
+                return None;
+            }
+
+            // Parse value
+            let value = coded_const.coded_value()?.parse::<u16>().ok()?;
+            Some((value, standard_length_type.bit_length()))
+        })
+    }
+}
+
+impl TryInto<cda_interfaces::DiagComm> for DiagService<'_> {
+    type Error = DiagServiceError;
+
+    fn try_into(self) -> Result<cda_interfaces::DiagComm, Self::Error> {
+        let diag_comm = self.diag_comm().ok_or(DiagServiceError::InvalidDatabase(
+            "DiagService missing diag_comm".to_owned(),
+        ))?;
+        let name = diag_comm
+            .short_name()
+            .ok_or(DiagServiceError::InvalidDatabase(
+                "DiagService missing name".to_owned(),
+            ))?
+            .to_owned();
+
+        let service_id = self.request_id().ok_or(DiagServiceError::InvalidDatabase(
+            "DiagService missing request_id".to_owned(),
+        ))?;
+
+        Ok(cda_interfaces::DiagComm {
+            name,
+            type_: service_id.try_into()?,
+            lookup_name: self
+                .diag_comm()
+                .and_then(|dc| dc.short_name())
+                .map(ToOwned::to_owned),
+        })
+    }
+}
+
+impl DbDataType {
+    pub const A_INT_32: Self = Self(dataformat::DataType::A_INT_32);
+    pub const A_UINT_32: Self = Self(dataformat::DataType::A_UINT_32);
+    pub const A_FLOAT_32: Self = Self(dataformat::DataType::A_FLOAT_32);
+    pub const A_ASCIISTRING: Self = Self(dataformat::DataType::A_ASCIISTRING);
+    pub const A_UTF_8_STRING: Self = Self(dataformat::DataType::A_UTF_8_STRING);
+    pub const A_UNICODE_2_STRING: Self = Self(dataformat::DataType::A_UNICODE_2_STRING);
+    pub const A_BYTEFIELD: Self = Self(dataformat::DataType::A_BYTEFIELD);
+    pub const A_FLOAT_64: Self = Self(dataformat::DataType::A_FLOAT_64);
+}
+
+impl From<DataType> for dataformat::DataType {
+    fn from(value: DataType) -> Self {
+        match value {
+            DataType::Int32 => dataformat::DataType::A_INT_32,
+            DataType::UInt32 => dataformat::DataType::A_UINT_32,
+            DataType::Float32 => dataformat::DataType::A_FLOAT_32,
+            DataType::Float64 => dataformat::DataType::A_FLOAT_64,
+            DataType::AsciiString => dataformat::DataType::A_ASCIISTRING,
+            DataType::Utf8String => dataformat::DataType::A_UTF_8_STRING,
+            DataType::Unicode2String => dataformat::DataType::A_UNICODE_2_STRING,
+            DataType::ByteField => dataformat::DataType::A_BYTEFIELD,
+        }
+    }
+}
+
+impl From<CompuCategory> for dataformat::CompuCategory {
+    fn from(value: CompuCategory) -> Self {
+        match value {
+            CompuCategory::Identical => dataformat::CompuCategory::IDENTICAL,
+            CompuCategory::Linear => dataformat::CompuCategory::LINEAR,
+            CompuCategory::ScaleLinear => dataformat::CompuCategory::SCALE_LINEAR,
+            CompuCategory::TextTable => dataformat::CompuCategory::TEXT_TABLE,
+            CompuCategory::CompuCode => dataformat::CompuCategory::COMPU_CODE,
+            CompuCategory::TabIntp => dataformat::CompuCategory::TAB_INTP,
+            CompuCategory::RatFunc => dataformat::CompuCategory::RAT_FUNC,
+            CompuCategory::ScaleRatFunc => dataformat::CompuCategory::SCALE_RAT_FUNC,
+        }
+    }
+}
+
+pub enum ParamType {
+    CodedConst,
+    Dynamic,
+    LengthKey,
+    MatchingRequestParam,
+    NrcConst,
+    PhysConst,
+    Reserved,
+    System,
+    TableEntry,
+    TableKey,
+    TableStruct,
+    Value,
+}
+
+#[derive(PartialEq, Eq, Debug)]
+pub enum ParentRefType {
+    NONE,
+    Variant,
+    Protocol,
+    FunctionalGroup,
+    TableDop,
+    EcuSharedData,
+}
+
+impl TryFrom<dataformat::ParamType> for ParamType {
+    type Error = DiagServiceError;
+
+    fn try_from(value: dataformat::ParamType) -> Result<Self, Self::Error> {
+        match value {
+            dataformat::ParamType::CODED_CONST => Ok(ParamType::CodedConst),
+            dataformat::ParamType::DYNAMIC => Ok(ParamType::Dynamic),
+            dataformat::ParamType::LENGTH_KEY => Ok(ParamType::LengthKey),
+            dataformat::ParamType::MATCHING_REQUEST_PARAM => Ok(ParamType::MatchingRequestParam),
+            dataformat::ParamType::NRC_CONST => Ok(ParamType::NrcConst),
+            dataformat::ParamType::PHYS_CONST => Ok(ParamType::PhysConst),
+            dataformat::ParamType::RESERVED => Ok(ParamType::Reserved),
+            dataformat::ParamType::SYSTEM => Ok(ParamType::System),
+            dataformat::ParamType::TABLE_ENTRY => Ok(ParamType::TableEntry),
+            dataformat::ParamType::TABLE_KEY => Ok(ParamType::TableKey),
+            dataformat::ParamType::TABLE_STRUCT => Ok(ParamType::TableStruct),
+            dataformat::ParamType::VALUE => Ok(ParamType::Value),
+            _ => Err(DiagServiceError::InvalidDatabase(format!(
+                "Unknown ParamType: {value:?}",
+            ))),
+        }
+    }
+}
+
+impl TryFrom<dataformat::ParentRefType> for ParentRefType {
+    type Error = DiagServiceError;
+
+    fn try_from(value: dataformat::ParentRefType) -> Result<Self, Self::Error> {
+        match value {
+            dataformat::ParentRefType::NONE => Ok(ParentRefType::NONE),
+            dataformat::ParentRefType::Variant => Ok(ParentRefType::Variant),
+            dataformat::ParentRefType::Protocol => Ok(ParentRefType::Protocol),
+            dataformat::ParentRefType::FunctionalGroup => Ok(ParentRefType::FunctionalGroup),
+            dataformat::ParentRefType::TableDop => Ok(ParentRefType::TableDop),
+            dataformat::ParentRefType::EcuSharedData => Ok(ParentRefType::EcuSharedData),
+            _ => Err(DiagServiceError::InvalidDatabase(format!(
+                "Unknown ParentRefType: {value:?}",
+            ))),
+        }
+    }
+}
+
+impl Parameter<'_> {
+    pub fn byte_position(&self) -> u32 {
+        self.0.byte_position().unwrap_or(0)
+    }
+    pub fn bit_position(&self) -> u32 {
+        self.0.bit_position().unwrap_or(0)
+    }
+    pub fn param_type(&self) -> Result<ParamType, DiagServiceError> {
+        self.0.param_type().try_into()
+    }
+}
+
+impl From<dataformat::LongName<'_>> for LongName {
+    fn from(val: dataformat::LongName<'_>) -> Self {
+        LongName {
+            value: val.value().map(ToOwned::to_owned),
+            ti: val.ti().map(ToOwned::to_owned),
+        }
+    }
+}
+
+#[self_referencing]
+#[cfg_attr(feature = "deepsize", derive(DeepSizeOf))]
+#[derive(Debug)]
+struct EcuData {
+    blob: Vec<u8>,
+
+    #[borrows(blob)]
+    #[covariant]
+    pub data: dataformat::EcuData<'this>,
+}
 
 #[derive(Debug)]
 #[cfg_attr(feature = "deepsize", derive(DeepSizeOf))]
 pub struct DiagnosticDatabase {
     ecu_database_path: String,
-    pub ecu_name: String,
-    pub services: DiagnosticServiceMap,
-    pub requests: RequestMap,
-    pub responses: ResponseMap,
-    pub params: ParameterMap,
-    pub com_params: ComParamMap,
-    pub diag_coded_types: DiagCodedTypeMap,
-    pub data_operations: DOPMap,
-    pub variants: VariantMap,
-    pub base_variant_id: Id,
-    pub base_service_lookup: BaseServiceMap,
-    pub protocols: ProtocolMap,
-    pub sdgs: SdgMap,
-    pub sds: SdMap,
-    pub single_ecu_jobs: SingleEcuJobMap,
-    pub base_single_ecu_job_lookup: BaseSingleEcuJobMap,
-    pub state_charts: StateChartMap,
-    pub state_chart_lookup: HashMap<String, Id>,
-    pub base_state_chart_lookup: BaseStateChartMap,
-    pub functional_classes_lookup: FunctionalClassesLookupMap,
-    pub functional_classes: HashMap<Id, String>,
-    pub dtcs: DtcMap,
-}
-
-#[derive(Debug)]
-#[cfg_attr(feature = "deepsize", derive(DeepSizeOf))]
-pub struct Protocol {
-    pub short_name: StringId,
+    ecu_data: Option<EcuData>,
+    flatbuf_config: FlatbBufConfig,
 }
 
 #[derive(Clone)]
@@ -114,214 +386,58 @@ pub enum LogicalAddressType {
     Functional(String),
 }
 
-#[derive(Debug)]
-#[cfg_attr(feature = "deepsize", derive(DeepSizeOf))]
-pub struct DbDiagComm {
-    action: DiagCommAction,
-    type_: DiagCommType,
-    pub(crate) lookup_name: StringId,
-}
-
-impl From<&DbDiagComm> for DiagComm {
-    fn from(db_diag_comm: &DbDiagComm) -> Self {
-        let name = get_string_with_default!(db_diag_comm.lookup_name);
-        DiagComm {
-            name: name.clone(),
-            action: db_diag_comm.action.clone(),
-            type_: db_diag_comm.type_.clone(),
-            lookup_name: Some(name),
-        }
-    }
-}
-
 #[derive(Debug, Clone)]
 #[cfg_attr(feature = "deepsize", derive(DeepSizeOf))]
 pub struct LongName {
-    pub value: Option<StringId>,
-    pub ti: Option<StringId>,
-}
-
-const REF_OPTIONAL_NONE_MSG: &str = "ID Reference is not set";
-fn ref_optional_none(ctx: &str) -> DiagServiceError {
-    DiagServiceError::InvalidDatabase(format!("{REF_OPTIONAL_NONE_MSG} in {ctx}"))
-}
-
-fn option_str_to_string(opt: Option<&String>) -> Option<StringId> {
-    opt.map(|s| STRINGS.get_or_insert(s))
-}
-
-impl Default for DiagnosticDatabase {
-    fn default() -> Self {
-        DiagnosticDatabase {
-            ecu_database_path: String::new(),
-            ecu_name: String::new(),
-            services: HashMap::new(),
-            requests: HashMap::new(),
-            responses: HashMap::new(),
-            params: HashMap::new(),
-            com_params: HashMap::new(),
-            diag_coded_types: HashMap::new(),
-            data_operations: HashMap::new(),
-            variants: HashMap::new(),
-            base_variant_id: 0,
-            base_service_lookup: HashMap::new(),
-            protocols: HashMap::new(),
-            sdgs: HashMap::new(),
-            sds: HashMap::new(),
-            single_ecu_jobs: HashMap::new(),
-            base_single_ecu_job_lookup: HashMap::new(),
-            state_charts: HashMap::new(),
-            state_chart_lookup: HashMap::new(),
-            base_state_chart_lookup: HashMap::new(),
-            functional_classes_lookup: Default::default(),
-            functional_classes: HashMap::new(),
-            dtcs: HashMap::new(),
-        }
-    }
+    pub value: Option<String>,
+    pub ti: Option<String>,
 }
 
 impl DiagnosticDatabase {
-    pub fn new(ecu_database_path: String, ecu_data_blob: &[u8]) -> Result<Self, DiagServiceError> {
-        let ecu_data = read_ecudata(ecu_data_blob).map_err(DiagServiceError::InvalidDatabase)?;
-
-        let requests = get_requests(&ecu_data)?;
-        let params = get_parameters(&ecu_data, &ecu_database_path);
-
-        let services = get_services(&ecu_data, &requests, &params)?;
-        let dops = get_data_operations(&ecu_data);
-
-        let com_params = get_comparams(&ecu_data);
-        let diag_coded_types = get_diag_coded_types(&ecu_data);
-
-        let single_ecu_jobs = get_single_ecu_jobs(&ecu_data)?;
-        let (state_charts, state_chart_lookup) = get_state_charts(&ecu_data, &services)?;
-
-        let (variants, base_variant_id) =
-            create_variant_map(&ecu_data, &services, &single_ecu_jobs, &state_charts)?;
-
-        if base_variant_id == 0 {
-            return Err(DiagServiceError::InvalidDatabase(
-                "No base variant found.".to_owned(),
-            ));
-        }
-        let base_service_lookup: BaseServiceMap = variants
-            .get(&base_variant_id)
-            .ok_or_else(|| {
-                DiagServiceError::InvalidDatabase("Base variant not found in variants.".to_owned())
-            })?
-            .service_lookup
-            .clone();
-
-        let base_single_ecu_job_lookup: BaseSingleEcuJobMap = variants
-            .get(&base_variant_id)
-            .ok_or_else(|| {
-                DiagServiceError::InvalidDatabase("Base variant not found in variants.".to_owned())
-            })?
-            .single_ecu_job_lookup
-            .clone();
-
-        let base_state_chart_lookup: BaseStateChartMap = variants
-            .get(&base_variant_id)
-            .ok_or_else(|| {
-                DiagServiceError::InvalidDatabase("Base variant not found in variants.".to_owned())
-            })?
-            .state_charts_lookup
-            .clone();
-
-        let responses = get_responses(&ecu_data)?;
-        let protocols = get_protocols(&ecu_data)?;
-
-        let sdgs = get_sdgs(
-            &ecu_data,
-            &ecu_database_path,
-            variants.get(&base_variant_id).map_or(&[], |v| &v.sdgs),
-        );
-        let sds = get_sds(&ecu_data);
-        let functional_classes: HashMap<Id, String> = ecu_data
-            .funct_classes
-            .iter()
-            .filter_map(|fc| {
-                fc.id
-                    .as_ref()
-                    .map(|id| (id.value, fc.short_name.to_string()))
-            })
-            .collect();
-        let functional_classes_lookup = get_functional_classes_lookup(&ecu_data, &services);
-
-        let dtc_records = get_dtcs(&ecu_data, &ecu_database_path);
-
+    pub fn new(
+        ecu_database_path: String,
+        ecu_data_blob: Vec<u8>,
+        flatbuf_config: FlatbBufConfig,
+    ) -> Result<Self, DiagServiceError> {
         Ok(DiagnosticDatabase {
             ecu_database_path,
-            ecu_name: ecu_data.ecu_name.to_string(),
-            services,
-            requests,
-            responses,
-            params,
-            com_params,
-            diag_coded_types,
-            data_operations: dops,
-            variants,
-            base_variant_id,
-            base_service_lookup,
-            protocols,
-            sdgs,
-            sds,
-            single_ecu_jobs,
-            base_single_ecu_job_lookup,
-            state_charts,
-            state_chart_lookup,
-            base_state_chart_lookup,
-            functional_classes,
-            functional_classes_lookup,
-            dtcs: dtc_records,
+            ecu_data: Some(
+                EcuDataBuilder {
+                    blob: ecu_data_blob,
+                    data_builder: |ecu_data_blob| {
+                        read_ecudata(ecu_data_blob, flatbuf_config.clone()).unwrap()
+                    },
+                }
+                .build(),
+            ),
+            flatbuf_config,
         })
     }
 
     pub fn is_loaded(&self) -> bool {
-        !self.services.is_empty() // todo: add more checks
+        self.ecu_data.is_some()
     }
 
     pub fn unload(&mut self) {
-        self.services = HashMap::new();
-        self.requests = HashMap::new();
-        self.responses = HashMap::new();
-        self.params = HashMap::new();
-        self.com_params = HashMap::new();
-        self.diag_coded_types = HashMap::new();
-        self.data_operations = HashMap::new();
-        self.variants = HashMap::new();
-        self.protocols = HashMap::new();
-        self.single_ecu_jobs = HashMap::new();
-        self.base_single_ecu_job_lookup = HashMap::new();
-    }
-
-    pub fn load_variant_sdgs(&mut self, variant_id: Id) -> Result<(), DiagServiceError> {
-        let (_, ecu_data_blob) = load_ecudata(&self.ecu_database_path)
-            .map_err(|e| DiagServiceError::InvalidDatabase(e.to_string()))?;
-        // let mut ecu_data_reader = quick_protobuf::BytesReader::from_bytes(&ecu_data_blob);
-        let ecu_data = read_ecudata(&ecu_data_blob).map_err(DiagServiceError::InvalidDatabase)?;
-
-        let sdgs = get_sdgs(
-            &ecu_data,
-            &self.ecu_database_path,
-            self.variants.get(&variant_id).map_or(&[], |v| &v.sdgs),
-        );
-
-        self.sdgs.extend(sdgs);
-        Ok(())
+        self.ecu_data = None;
     }
 
     pub fn load(&mut self) -> Result<(), DiagServiceError> {
         let ecu_data = load_ecudata(&self.ecu_database_path)
             .map_err(|e| DiagServiceError::InvalidDatabase(e.to_string()))?;
-        *self = DiagnosticDatabase::new(self.ecu_database_path.clone(), &ecu_data.1)?;
+        *self = DiagnosticDatabase::new(
+            self.ecu_database_path.clone(),
+            ecu_data.1,
+            self.flatbuf_config.clone(),
+        )?;
         Ok(())
     }
 
     pub fn find_logical_address(
         &self,
         type_: LogicalAddressType,
-        protocol: &Protocol,
+        diag_database: &DiagnosticDatabase,
+        protocol: &dataformat::Protocol,
     ) -> Result<u16, DiagServiceError> {
         let (param_name, additional_param_name) = match type_ {
             LogicalAddressType::Ecu(response_id_table, ecu_address) => {
@@ -330,9 +446,8 @@ impl DiagnosticDatabase {
             LogicalAddressType::Gateway(p) => (p, None),
             LogicalAddressType::Functional(p) => (p, None),
         };
-        let logical_address_lookup_result = comparam::lookup(self, protocol, &param_name)?;
 
-        match logical_address_lookup_result {
+        match comparam::lookup(diag_database, protocol, &param_name)? {
             ComParamValue::Simple(simple_value) => {
                 let val_as_u16 = simple_value.value.parse::<u16>().map_err(|e| {
                     DiagServiceError::ParameterConversionError(format!("Invalid address: {e}"))
@@ -364,6 +479,35 @@ impl DiagnosticDatabase {
         }
     }
 
+    pub fn ecu_data(&self) -> Result<&dataformat::EcuData<'_>, DiagServiceError> {
+        self.ecu_data
+            .as_ref()
+            .ok_or_else(|| DiagServiceError::InvalidDatabase("ECU data not loaded".to_owned()))
+            .map(|ecu_data| ecu_data.borrow_data())
+    }
+
+    pub fn diag_layers(&self) -> Result<Vec<datatypes::DiagLayer<'_>>, DiagServiceError> {
+        Ok(self
+            .ecu_data()?
+            .variants()
+            .into_iter()
+            .flat_map(|vars| vars.iter())
+            .filter_map(|variant| variant.diag_layer())
+            .map(datatypes::DiagLayer)
+            .collect::<Vec<_>>())
+    }
+
+    pub fn base_variant(&'_ self) -> Result<Variant<'_>, DiagServiceError> {
+        let ecu_data = self.ecu_data()?;
+        ecu_data
+            .variants()
+            .and_then(|variants| variants.iter().find(|v| v.is_base_variant()))
+            .ok_or_else(|| {
+                DiagServiceError::InvalidDatabase("No base variant found in ECU data.".to_owned())
+            })
+            .map(Variant)
+    }
+
     #[tracing::instrument(
         skip(self),
         fields(
@@ -373,7 +517,7 @@ impl DiagnosticDatabase {
     )]
     pub fn find_com_param<T: DeserializableCompParam + Serialize + Debug + Clone>(
         &self,
-        protocol: &Protocol,
+        protocol: &dataformat::Protocol,
         com_param: &ComParamConfig<T>,
     ) -> T {
         let lookup_result = comparam::lookup(self, protocol, &com_param.name);
@@ -417,29 +561,4 @@ impl DiagnosticDatabase {
             }
         }
     }
-}
-
-fn get_protocols(ecu_data: &EcuData) -> Result<ProtocolMap, DiagServiceError> {
-    ecu_data
-        .protocols
-        .iter()
-        .map(|p| {
-            let short_name_id = STRINGS.get_or_insert(
-                &p.diag_layer
-                    .as_ref()
-                    .ok_or_else(|| {
-                        DiagServiceError::InvalidDatabase("Protocol has no DiagLayer.".to_owned())
-                    })?
-                    .short_name,
-            );
-            Ok((
-                p.id.as_ref()
-                    .ok_or_else(|| ref_optional_none("Protocol.id"))?
-                    .value,
-                Protocol {
-                    short_name: short_name_id,
-                },
-            ))
-        })
-        .collect::<Result<ProtocolMap, DiagServiceError>>()
 }

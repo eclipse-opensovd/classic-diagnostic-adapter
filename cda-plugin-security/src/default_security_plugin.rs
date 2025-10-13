@@ -20,7 +20,6 @@ use axum_extra::{
     TypedHeader,
     headers::{Authorization, authorization::Bearer},
 };
-use cda_database::datatypes::DiagnosticService;
 use http::request::Parts;
 use jsonwebtoken::{DecodingKey, EncodingKey, Header, Validation, decode, encode};
 use schemars::JsonSchema;
@@ -202,7 +201,7 @@ impl AuthApi for DefaultSecurityPluginData {
 impl SecurityApi for DefaultSecurityPluginData {
     fn validate_service(
         &self,
-        _service: &DiagnosticService,
+        _service: &cda_database::datatypes::DiagService,
     ) -> Result<(), cda_interfaces::DiagServiceError> {
         Ok(())
     }

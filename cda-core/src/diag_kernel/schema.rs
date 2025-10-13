@@ -10,60 +10,56 @@
  *
  * SPDX-License-Identifier: Apache-2.0
  */
-
-use cda_database::datatypes::{self, DataOperationVariant, DiagnosticDatabase, DopFieldValue};
-use cda_interfaces::{
-    DiagComm, DiagServiceError, EcuAddressProvider, EcuSchemaProvider, Id, STRINGS,
-    SchemaDescription,
-};
+use cda_database::datatypes::{self, DiagService, DiagnosticDatabase};
+use cda_interfaces::{DiagServiceError, EcuAddressProvider, EcuSchemaProvider, SchemaDescription};
 use cda_plugin_security::SecurityPlugin;
 
 use crate::EcuManager;
 
 impl<S: SecurityPlugin> EcuSchemaProvider for EcuManager<S> {
-    fn schema_for_request(
+    async fn schema_for_request(
         &self,
-        service: &DiagComm,
+        service: &cda_interfaces::DiagComm,
     ) -> Result<SchemaDescription, DiagServiceError> {
-        let mapped_service = self.lookup_diag_comm(service)?;
-        let Some(request) = self.ecu_data.requests.get(&mapped_service.request_id) else {
-            return Err(DiagServiceError::InvalidDatabase(format!(
-                "The request referenced by {} could not be found in the ECU Database of {}.",
+        let mapped_service = self.lookup_diag_service(service).await?;
+        let ctx = service_context(service, &mapped_service);
+
+        let request = mapped_service.request().map(datatypes::Request).ok_or(
+            DiagServiceError::InvalidDatabase(format!(
+                "Missing request for service {} in ecu {}.",
                 service.name,
                 self.ecu_name()
-            )));
-        };
-        let ctx = STRINGS
-            .get(mapped_service.short_name)
-            .unwrap_or_else(|| format!("{}_{}", service.name, service.action));
-        let schema = request.json_schema(&ctx, &self.ecu_data);
+            )),
+        )?;
+        let schema = request.json_schema(&ctx, &self.diag_database);
 
         Ok(schema)
     }
 
-    fn schema_for_responses(
+    async fn schema_for_responses(
         &self,
-        service: &DiagComm,
+        service: &cda_interfaces::DiagComm,
     ) -> Result<SchemaDescription, DiagServiceError> {
-        let mapped_service = self.lookup_diag_comm(service)?;
-        let ctx = STRINGS
-            .get(mapped_service.short_name)
-            .unwrap_or_else(|| format!("{}_{}", service.name, service.action));
+        let mapped_service = self.lookup_diag_service(service).await?;
+        let request = mapped_service
+            .request()
+            .ok_or(DiagServiceError::InvalidDatabase(format!(
+                "Missing request for service {} in ecu {}.",
+                service.name,
+                self.ecu_name()
+            )))?;
 
-        let request_id = mapped_service.request_id;
+        let ctx = service_context(service, &mapped_service);
+        let responses: Vec<SchemaDescription> = mapped_service
+            .pos_responses()
+            .map(|rs| {
+                rs.iter()
+                    .map(datatypes::Response)
+                    .map(|resp| resp.json_schema(&ctx, &self.diag_database, request.into()))
+                    .collect()
+            })
+            .unwrap_or_default();
 
-        let mut responses = Vec::new();
-        for id in &mapped_service.pos_responses {
-            let Some(response) = self.ecu_data.responses.get(id) else {
-                return Err(DiagServiceError::InvalidDatabase(format!(
-                    "A response referenced by {} could not be found in the ECU Database of {}.",
-                    service.name,
-                    self.ecu_name()
-                )));
-            };
-            let schema = response.json_schema(&ctx, &self.ecu_data, request_id);
-            responses.push(schema);
-        }
         let main_schema = match responses.len() {
             0 => None,
             1 => responses.into_iter().next().and_then(|it| it.into_schema()),
@@ -82,12 +78,36 @@ impl<S: SecurityPlugin> EcuSchemaProvider for EcuManager<S> {
     }
 }
 
+fn service_context(service: &cda_interfaces::DiagComm, mapped_service: &DiagService) -> String {
+    mapped_service
+        .diag_comm()
+        .and_then(|dc| dc.short_name().map(ToOwned::to_owned))
+        .unwrap_or_else(|| {
+            let action = mapped_service
+                .request_id()
+                .and_then(|id| id.try_into().ok())
+                .map(
+                    |type_: cda_interfaces::DiagCommType| -> cda_interfaces::DiagCommAction {
+                        type_.into()
+                    },
+                );
+
+            format!(
+                "{}_{}",
+                service.name,
+                action
+                    .map(|a| a.to_string())
+                    .unwrap_or_else(|| "<unknown action>".to_string())
+            )
+        })
+}
+
 pub(crate) trait ResponseJsonSchema {
     fn json_schema(
         &self,
         ctx: &str,
         ecu_db: &DiagnosticDatabase,
-        request_id: Id,
+        request: datatypes::Request,
     ) -> SchemaDescription;
 }
 
@@ -95,9 +115,16 @@ pub(crate) trait RequestJsonSchema {
     fn json_schema(&self, ctx: &str, ecu_db: &DiagnosticDatabase) -> SchemaDescription;
 }
 
-impl RequestJsonSchema for datatypes::Request {
+impl RequestJsonSchema for datatypes::Request<'_> {
     fn json_schema(&self, ctx: &str, ecu_db: &DiagnosticDatabase) -> SchemaDescription {
-        let schema = params_to_schema(&self.params, ctx, ecu_db, None);
+        let schema = if let Some(params) = &self
+            .params()
+            .map(|params| params.iter().map(datatypes::Parameter).collect::<Vec<_>>())
+        {
+            params_to_schema(params, ctx, ecu_db, Some(self))
+        } else {
+            None
+        };
 
         SchemaDescription::new(
             format!("Request_{ctx}"),
@@ -107,14 +134,21 @@ impl RequestJsonSchema for datatypes::Request {
     }
 }
 
-impl ResponseJsonSchema for datatypes::Response {
+impl ResponseJsonSchema for datatypes::Response<'_> {
     fn json_schema(
         &self,
         ctx: &str,
         ecu_db: &DiagnosticDatabase,
-        request_id: Id,
+        request: datatypes::Request,
     ) -> SchemaDescription {
-        let schema = params_to_schema(&self.params, ctx, ecu_db, Some(request_id));
+        let schema = if let Some(params) = &self
+            .params()
+            .map(|params| params.iter().map(datatypes::Parameter).collect::<Vec<_>>())
+        {
+            params_to_schema(params, ctx, ecu_db, Some(&request))
+        } else {
+            None
+        };
 
         SchemaDescription::new(
             format!("Response_{ctx}"),
@@ -125,54 +159,36 @@ impl ResponseJsonSchema for datatypes::Response {
 }
 
 fn params_to_schema(
-    params: &[cda_interfaces::Id],
+    params: &[datatypes::Parameter],
     ctx: &str,
     ecu_db: &DiagnosticDatabase,
-    request_id: Option<Id>,
+    request: Option<&datatypes::Request>,
 ) -> Option<schemars::Schema> {
     let mut schema: Option<schemars::Schema> = None;
 
     for param in params {
-        let Some(param) = ecu_db.params.get(param) else {
-            tracing::trace!("Mapping {ctx}: Parameter not found in ECU database. skipping");
+        let Some(name) = param.short_name().map(ToOwned::to_owned) else {
+            tracing::trace!("Mapping {ctx}: Parameter short name is None. skipping");
             continue;
         };
-        let Some(name) = STRINGS.get(param.short_name) else {
-            tracing::trace!("Mapping {ctx}: Parameter short name not found in strings. skipping");
-            continue;
-        };
-        let val = if let datatypes::ParameterValue::MatchingRequestParam(matching) = &param.value {
-            let Some(request_id) = request_id else {
+        let val = if let Some(matching) = &param.specific_data_as_matching_request_param() {
+            let Some(request) = request else {
                 tracing::trace!(
                     "Mapping {ctx}: Parameter is a MatchingRequestParam within a request context."
                 );
                 continue;
             };
-            let Some(val) = ecu_db
-                .requests
-                .get(&request_id)
-                .and_then(|req| {
-                    req.params.iter().find_map(|p| {
-                        ecu_db.params.get(p).and_then(|p| {
-                            // note: check explicitly if its safe to convert it to a u32
-                            // if it is < 0 we can safely assume that no param will match
-                            if matching.request_byte_pos > 0
-                                && (p.byte_pos == matching.request_byte_pos as u32)
-                            {
-                                Some(p)
-                            } else {
-                                None
-                            }
+
+            let Some(val) = request.params().and_then(|p| {
+                p.iter()
+                    .find(|params| {
+                        params.byte_position().is_some_and(|bp| {
+                            let request_bp = matching.request_byte_pos();
+                            request_bp >= 0 && bp == matching.request_byte_pos() as u32
                         })
                     })
-                })
-                .and_then(|matching_param| {
-                    let datatypes::ParameterValue::Value(val) = &matching_param.value else {
-                        return None;
-                    };
-                    Some(val)
-                })
-            else {
+                    .and_then(|matching_param| matching_param.specific_data_as_value())
+            }) else {
                 tracing::trace!(
                     "Mapping {ctx}: Matching request parameter not found in request. skipping"
                 );
@@ -180,22 +196,24 @@ fn params_to_schema(
             };
             val
         } else {
-            let datatypes::ParameterValue::Value(val) = &param.value else {
-                tracing::trace!("Mapping {ctx}: Parameter is not a value. skipping");
-                continue;
-            };
-            val
+            match param.specific_data_as_value() {
+                Some(v) => v,
+                None => {
+                    tracing::trace!(
+                        "Mapping {ctx}: Parameter is not a value or matching request param. \
+                         skipping"
+                    );
+                    continue;
+                }
+            }
         };
-        let Some(dop) = ecu_db.data_operations.get(&val.dop) else {
-            tracing::trace!("Mapping {ctx}: DOP not found in ECU database. skipping");
+
+        let Some(dop) = val.dop().map(datatypes::DataOperation) else {
+            tracing::trace!("Mapping {ctx}: Parameter DOP not found in ECU database. skipping");
             continue;
         };
-        let default_value = match val.default_value {
-            Some(ref_) => STRINGS.get(ref_),
-            None => None,
-        }
-        .unwrap_or_default();
 
+        let default_value = val.physical_default_value().unwrap_or_default();
         let schema = match schema {
             Some(ref mut s) => s,
             None => {
@@ -204,11 +222,31 @@ fn params_to_schema(
             }
         };
 
-        match &dop.variant {
+        let variant = match dop.variant() {
+            Ok(v) => v,
+            Err(e) => {
+                tracing::trace!("Mapping {ctx}: Failed to get DOP variant: {}. skipping", e);
+                continue;
+            }
+        };
+
+        match variant {
             datatypes::DataOperationVariant::Normal(normal_dop) => {
                 // todo: schould we add a description or something
                 // regarding how the DOPs work? (scales, ...)
-                let type_ = match normal_dop.compu_method.category {
+                let Some(category) = normal_dop
+                    .compu_method()
+                    .map(|cm| cm.category())
+                    .map(|category| category.into())
+                else {
+                    tracing::trace!(
+                        "Mapping {ctx}: Compu Method or Category not found in ECU database. \
+                         skipping"
+                    );
+                    continue;
+                };
+
+                let type_ = match category {
                     datatypes::CompuCategory::TextTable => "string".to_owned(),
                     datatypes::CompuCategory::Identical
                     | datatypes::CompuCategory::Linear
@@ -217,8 +255,7 @@ fn params_to_schema(
                     | datatypes::CompuCategory::RatFunc
                     | datatypes::CompuCategory::ScaleRatFunc
                     | datatypes::CompuCategory::CompuCode => {
-                        let Some(datatype) = ecu_db.diag_coded_types.get(&normal_dop.diag_type)
-                        else {
+                        let Some(datatype) = normal_dop.diag_coded_type().ok() else {
                             tracing::trace!(
                                 "Mapping {ctx}: Coded Type not found in ECU database. skipping"
                             );
@@ -238,9 +275,12 @@ fn params_to_schema(
                 );
             }
             datatypes::DataOperationVariant::EndOfPdu(end_of_pdu_dop) => {
-                if let Some(end_of_pdu_schema) =
-                    map_dop_field_to_schema(&end_of_pdu_dop.field, ctx, ecu_db, request_id)
-                {
+                if let Some(end_of_pdu_schema) = map_dop_field_to_schema(
+                    end_of_pdu_dop.field().map(datatypes::DopField).as_ref(),
+                    ctx,
+                    ecu_db,
+                    request,
+                ) {
                     schema.insert(
                         name,
                         schemars::json_schema!({
@@ -253,15 +293,18 @@ fn params_to_schema(
             }
             datatypes::DataOperationVariant::Structure(structure_dop) => {
                 if let Some(struct_schema) =
-                    map_struct_to_schema(structure_dop, ctx, ecu_db, request_id)
+                    map_struct_to_schema(&structure_dop, ctx, ecu_db, request)
                 {
                     schema.insert(name, struct_schema.into());
                 }
             }
             datatypes::DataOperationVariant::StaticField(static_field_dop) => {
-                if let Some(static_field_schema) =
-                    map_dop_field_to_schema(&static_field_dop.field, ctx, ecu_db, request_id)
-                {
+                if let Some(static_field_schema) = map_dop_field_to_schema(
+                    static_field_dop.field().map(datatypes::DopField).as_ref(),
+                    ctx,
+                    ecu_db,
+                    request,
+                ) {
                     schema.insert(name, static_field_schema.into());
                 }
             }
@@ -287,45 +330,35 @@ fn params_to_schema(
             datatypes::DataOperationVariant::Mux(mux_dop) => {
                 schema.insert(
                     name,
-                    map_mux_to_schema(mux_dop, ctx, ecu_db, request_id).into(),
+                    map_mux_to_schema(&mux_dop, ctx, ecu_db, request).into(),
                 );
             }
             datatypes::DataOperationVariant::DynamicLengthField(dynamic_length_field) => {
-                let repeated_dop = if let Some(dop) = ecu_db
-                    .data_operations
-                    .get(&dynamic_length_field.repeated_dop_id)
+                if let Some(structure_dop) = dynamic_length_field
+                    .field()
+                    .and_then(|f| f.basic_structure())
+                    .and_then(|s| s.specific_data_as_structure())
                 {
-                    dop
+                    if let Some(struct_schema) =
+                        map_struct_to_schema(&(structure_dop.into()), ctx, ecu_db, request)
+                    {
+                        schema.insert(name, serde_json::Value::Array(vec![struct_schema.into()]));
+                    }
+                } else if let Some(_env_data_desc) =
+                    dynamic_length_field.field().and_then(|f| f.env_data_desc())
+                {
+                    tracing::trace!(
+                        "Mapping {ctx}: DynamicLengthField DopField is an EnvDataDesc which is \
+                         not yet supported in JSON Schema. skipping"
+                    );
+                    continue;
                 } else {
                     tracing::trace!(
-                        "Mapping {ctx}: Repeated DOP not found in ECU database. skipping"
+                        "Mapping {ctx}: DynamicLengthField DopField value is neither BasicStruct \
+                         nor EnvDataDesc. skipping"
                     );
                     continue;
                 };
-
-                match &repeated_dop.variant {
-                    DataOperationVariant::Structure(structure_dop) => {
-                        if let Some(struct_schema) =
-                            map_struct_to_schema(structure_dop, ctx, ecu_db, request_id)
-                        {
-                            schema
-                                .insert(name, serde_json::Value::Array(vec![struct_schema.into()]));
-                        }
-                    }
-                    DataOperationVariant::EnvDataDesc(_) => {
-                        tracing::trace!(
-                            "Mapping {ctx}: Repeated DOP is an EnvDataDesc which is not yet \
-                             supported in JSON Schema. skipping"
-                        );
-                    }
-                    _ => {
-                        tracing::trace!(
-                            "Mapping {ctx}: Repeated DOP is not a Structure or EnvDataDesc. \
-                             skipping"
-                        );
-                        continue;
-                    }
-                }
             }
         }
     }
@@ -341,34 +374,41 @@ fn map_struct_to_schema(
     struct_: &datatypes::StructureDop,
     ctx: &str,
     ecu_db: &DiagnosticDatabase,
-    request_id: Option<Id>,
+    request: Option<&datatypes::Request>,
 ) -> Option<schemars::Schema> {
-    params_to_schema(&struct_.params, ctx, ecu_db, request_id)
+    let params = struct_
+        .params()
+        .map(|params| params.iter().map(datatypes::Parameter).collect::<Vec<_>>())
+        .unwrap_or_default();
+    params_to_schema(&params, ctx, ecu_db, request)
 }
 
 fn map_dop_field_to_schema(
-    dop_field: &datatypes::DopField,
+    dop_field: Option<&datatypes::DopField>,
     ctx: &str,
     ecu_db: &DiagnosticDatabase,
-    request_id: Option<Id>,
+    request: Option<&datatypes::Request>,
 ) -> Option<schemars::Schema> {
-    match &dop_field.value {
-        DopFieldValue::BasicStruct(basic_struct) => ecu_db
-            .data_operations
-            .get(&basic_struct.struct_id)
-            .and_then(|dop| {
-                let datatypes::DataOperationVariant::Structure(struct_) = &dop.variant else {
-                    return None;
-                };
-                map_struct_to_schema(struct_, ctx, ecu_db, request_id)
-            }),
-        DopFieldValue::EnvDataDesc(_) => {
-            tracing::trace!(
-                "Mapping {ctx}: EnvDataDesc DopFields are not yet supported in JSON Schema. \
-                 skipping"
-            );
-            None
-        }
+    let Some(dop_field) = dop_field else {
+        tracing::trace!("Mapping {ctx}: DopField is None. skipping");
+        return None;
+    };
+
+    if let Some(basic_struct) = dop_field
+        .basic_structure()
+        .and_then(|s| s.specific_data_as_structure().map(datatypes::StructureDop))
+    {
+        map_struct_to_schema(&basic_struct, ctx, ecu_db, request)
+    } else if let Some(_env_data_desc) = dop_field.env_data_desc() {
+        tracing::trace!(
+            "Mapping {ctx}: EnvDataDesc DopFields are not yet supported in JSON Schema. skipping"
+        );
+        None
+    } else {
+        tracing::trace!(
+            "Mapping {ctx}: DopField value is neither BasicStruct nor EnvDataDesc. skipping"
+        );
+        None
     }
 }
 
@@ -376,22 +416,26 @@ fn map_mux_to_schema(
     mux: &datatypes::MuxDop,
     ctx: &str,
     ecu_db: &DiagnosticDatabase,
-    request_id: Option<Id>,
+    request: Option<&datatypes::Request>,
 ) -> schemars::Schema {
     let mut schemas: Vec<serde_json::Value> = Vec::new();
+    if let Some(cases) = mux.cases() {
+        // probably an any-of here instead of a list?
+        for case in cases {
+            let Some(case_struct) = case
+                .structure()
+                .and_then(|s| s.specific_data_as_structure())
+                .map(datatypes::StructureDop)
+            else {
+                tracing::trace!(
+                    "Mapping {ctx}: Mux case structure not found or not a StructureDop. skipping"
+                );
+                continue;
+            };
 
-    // probably an any-of here instead of a list?
-    for case in &mux.cases {
-        let Some(datatypes::DataOperationVariant::Structure(case_struct)) = &case
-            .structure
-            .and_then(|id| ecu_db.data_operations.get(&id))
-            .map(|dop| &dop.variant)
-        else {
-            continue;
-        };
-
-        if let Some(case_schema) = map_struct_to_schema(case_struct, ctx, ecu_db, request_id) {
-            schemas.push(case_schema.into());
+            if let Some(case_schema) = map_struct_to_schema(&case_struct, ctx, ecu_db, request) {
+                schemas.push(case_schema.into());
+            }
         }
     }
     schemars::json_schema!({

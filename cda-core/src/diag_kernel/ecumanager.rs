@@ -13,33 +13,29 @@
 
 use std::{sync::Arc, time::Duration};
 
-use cda_database::datatypes::{
-    self, DataOperationVariant, DataType, DiagCodedTypeVariant, DiagnosticDatabase,
-    DiagnosticService, DopFieldValue, DtcDop, LogicalAddressType, Parameter, ParameterValue,
-    StateChart, resolve_comparam,
-};
+use cda_database::datatypes;
 use cda_interfaces::{
-    DiagComm, DiagCommAction, DiagCommType, DiagServiceError, DynamicPlugin, EcuAddressProvider,
-    EcuState, Protocol, STRINGS, SecurityAccess, ServicePayload,
+    DiagCommAction, DiagCommType, DiagServiceError, DynamicPlugin, EcuState, Protocol, STRINGS,
+    SecurityAccess, ServicePayload, StringId,
     datatypes::{
         AddressingMode, ComParams, ComplexComParamValue, ComponentConfigurationsInfo,
         ComponentDataInfo, DTC_CODE_BIT_LEN, DatabaseNamingConvention, DtcLookup,
-        DtcReadInformationFunction, DtcRecord, RetryPolicy, SdSdg, TesterPresentSendType,
-        semantics, single_ecu,
+        DtcReadInformationFunction, RetryPolicy, SdSdg, TesterPresentSendType, semantics,
+        single_ecu,
     },
     diagservices::{DiagServiceResponse, DiagServiceResponseType, FieldParseError, UdsPayloadData},
-    get_string, get_string_from_option, get_string_from_option_with_default,
-    get_string_with_default, service_ids, spawn_named, util,
+    service_ids, spawn_named, util,
+    util::starts_with_ignore_ascii_case,
 };
 use cda_plugin_security::SecurityPlugin;
 use hashbrown::{HashMap, HashSet};
 use parking_lot::Mutex;
-use tokio::task::JoinHandle;
+use tokio::{sync::RwLock, task::JoinHandle};
 
 use crate::{
     DiagDataContainerDtc, MappedResponseData,
     diag_kernel::{
-        DiagDataValue, Variant,
+        DiagDataValue,
         diagservices::{
             DiagDataTypeContainer, DiagDataTypeContainerRaw, DiagServiceResponseStruct,
             MappedDiagServiceResponsePayload,
@@ -52,7 +48,9 @@ use crate::{
 };
 
 pub struct EcuManager<S: SecurityPlugin> {
-    pub(crate) ecu_data: DiagnosticDatabase,
+    pub(crate) diag_database: datatypes::DiagnosticDatabase,
+    db_cache: DbCache,
+    ecu_name: String,
     database_naming_convention: DatabaseNamingConvention,
     tester_address: u16,
     logical_address: u16,
@@ -69,7 +67,7 @@ pub struct EcuManager<S: SecurityPlugin> {
     connection_retry_attempts: u32,
 
     variant_detection: variant_detection::VariantDetection,
-    variant: Option<Variant>,
+    variant_index: Option<usize>,
     state: EcuState,
     protocol: Protocol,
     access_control: Arc<Mutex<SessionControl>>,
@@ -98,11 +96,28 @@ pub struct EcuManager<S: SecurityPlugin> {
 }
 
 struct SessionControl {
-    session: cda_interfaces::Id,
-    security: cda_interfaces::Id,
+    session: Option<String>,
+    security: Option<String>,
     /// resets session and or security access back to the default
     /// after a given time
     access_reset_task: Option<JoinHandle<()>>,
+}
+
+#[derive(Default)]
+struct DbCache {
+    pub(crate) diag_services: RwLock<HashMap<StringId, Option<CacheLocation>>>,
+}
+
+impl DbCache {
+    pub(crate) async fn reset(&mut self) {
+        self.diag_services.write().await.clear();
+    }
+}
+
+enum CacheLocation {
+    Variant(usize),
+    BaseVariant(usize),
+    EcuShared(usize),
 }
 
 impl<S: SecurityPlugin> cda_interfaces::EcuAddressProvider for EcuManager<S> {
@@ -123,7 +138,7 @@ impl<S: SecurityPlugin> cda_interfaces::EcuAddressProvider for EcuManager<S> {
     }
 
     fn ecu_name(&self) -> String {
-        self.ecu_data.ecu_name.clone()
+        self.ecu_name.clone()
     }
 }
 
@@ -131,7 +146,10 @@ impl<S: SecurityPlugin> cda_interfaces::EcuManager for EcuManager<S> {
     type Response = DiagServiceResponseStruct;
 
     fn variant_name(&self) -> Option<String> {
-        self.variant.as_ref().map(|v| v.name.clone())
+        self.variant()?
+            .diag_layer()?
+            .short_name()
+            .map(ToOwned::to_owned)
     }
 
     fn state(&self) -> EcuState {
@@ -143,7 +161,7 @@ impl<S: SecurityPlugin> cda_interfaces::EcuManager for EcuManager<S> {
     }
 
     fn is_loaded(&self) -> bool {
-        self.ecu_data.is_loaded()
+        self.diag_database.is_loaded()
     }
 
     /// This allows to (re)load a database after unloading it during runtime, which could happen
@@ -154,15 +172,15 @@ impl<S: SecurityPlugin> cda_interfaces::EcuManager for EcuManager<S> {
     /// Will return `Err` if during runtime the ECU file has been removed or changed
     /// in a way that the error causes mentioned in `Self::new` occur.
     fn load(&mut self) -> Result<(), DiagServiceError> {
-        self.ecu_data.load()
+        self.diag_database.load()
     }
 
     #[tracing::instrument(
         target = "variant detection check",
         skip(self, service_responses),
-        fields(ecu_name = self.ecu_data.ecu_name),
+        fields(ecu_name = self.ecu_name),
     )]
-    fn detect_variant<T: DiagServiceResponse + Sized>(
+    async fn detect_variant<T: DiagServiceResponse + Sized>(
         &mut self,
         service_responses: HashMap<String, T>,
     ) -> Result<(), DiagServiceError> {
@@ -171,37 +189,44 @@ impl<S: SecurityPlugin> cda_interfaces::EcuManager for EcuManager<S> {
             return Ok(());
         }
         self.state = EcuState::Online;
-        let variant_id = self.variant_detection.evaluate_variant(service_responses)?;
         match self
-            .ecu_data
-            .variants
-            .get(&variant_id)
-            .map(|v| Variant {
-                name: v.short_name.clone(),
-                id: variant_id,
-            })
-            .ok_or_else(|| {
-                DiagServiceError::VariantDetectionError(format!(
-                    "Variant ID {variant_id} not found in DB"
-                ))
-            }) {
+            .variant_detection
+            .evaluate_variant(service_responses, &self.diag_database)
+        {
             Ok(v) => {
-                tracing::info!(variant_name = %v.name, variant_id = %v.id, "Detected variant");
-                if let Err(e) = self.ecu_data.load_variant_sdgs(v.id) {
-                    tracing::warn!(error = ?e, "Error loading variant SDGs");
+                let variant_name = (*v)
+                    .diag_layer()
+                    .and_then(|d| d.short_name())
+                    .unwrap_or_default();
+
+                let variant_index = self.diag_database.ecu_data().ok().and_then(|ecu_data| {
+                    ecu_data.variants().and_then(|variants| {
+                        variants.iter().position(|variant| {
+                            variant
+                                .diag_layer()
+                                .and_then(|dl| dl.short_name())
+                                .is_some_and(|name| name == variant_name)
+                        })
+                    })
+                });
+
+                if self.variant_index != variant_index {
+                    self.variant_index = variant_index;
+                    // reset cache, because services may have the same lookup names
+                    // but differ in parameters etc. between variants
+                    self.db_cache.reset().await;
                 }
-                self.variant = Some(v);
 
                 // todo read this from the variant detection instead of assuming default, see #110
                 let mut access = self.access_control.lock();
-                access.security = self.default_state(semantics::SECURITY)?;
-                access.session = self.default_state(semantics::SESSION)?;
+                access.security = Some(self.default_state(semantics::SECURITY)?);
+                access.session = Some(self.default_state(semantics::SESSION)?);
 
                 Ok(())
             }
             Err(e) => {
                 tracing::debug!("No variant detected, unloading DB");
-                self.ecu_data.unload();
+                self.diag_database.unload();
                 Err(e)
             }
         }
@@ -211,104 +236,101 @@ impl<S: SecurityPlugin> cda_interfaces::EcuManager for EcuManager<S> {
         &self.variant_detection.diag_service_requests
     }
 
-    #[tracing::instrument(skip(self), fields(ecu_name = %self.ecu_data.ecu_name))]
-    fn comparams(&self) -> ComplexComParamValue {
-        let mut comparams = HashMap::new();
-
+    #[tracing::instrument(skip(self), fields(ecu_name = self.ecu_name))]
+    fn comparams(&self) -> Result<ComplexComParamValue, DiagServiceError> {
         // ensure base variant is handled first
         // and maybe be overwritten by variant specific comparams
-        let variants = [
-            Some(self.ecu_data.base_variant_id),
-            self.variant.as_ref().map(|v| v.id),
-        ];
+        let variants = [Some(self.diag_database.base_variant()?), self.variant()];
 
-        let protocol_id = self
-            .ecu_data
-            .protocols
+        Ok(variants
             .iter()
-            .find_map(|(id, protocol)| {
-                if STRINGS
-                    .get(protocol.short_name)
-                    .is_some_and(|p| p == self.protocol.value())
-                {
-                    Some(id)
-                } else {
-                    None
-                }
+            .filter_map(|v| v.as_ref())
+            .filter_map(|v| v.diag_layer())
+            .filter_map(|dl| dl.com_param_refs())
+            .flat_map(|cp_ref_vec| cp_ref_vec.iter())
+            .filter(|cp_ref| {
+                cp_ref.protocol().is_some_and(|p| {
+                    p.diag_layer().is_some_and(|dl| {
+                        dl.short_name()
+                            .is_some_and(|name| name == self.protocol.value())
+                    })
+                })
             })
-            .expect("Protocol not found in DB");
-
-        variants
-            .iter()
-            .filter_map(|maybe_id| maybe_id.and_then(|id| self.ecu_data.variants.get(&id)))
-            .flat_map(|v| &v.com_params)
-            .filter(|cp| cp.protocol_id == Some(*protocol_id))
-            .for_each(|cp| match resolve_comparam(&self.ecu_data, cp) {
-                Ok((name, value)) => {
-                    comparams.insert(name, value);
-                }
-                Err(e) => {
-                    tracing::warn!(error = ?e, "Error resolving ComParam");
-                }
-            });
-
-        comparams
+            .filter_map(|cp_ref| datatypes::resolve_comparam(&cp_ref).ok())
+            .collect())
     }
 
-    fn sdgs(&self, service: Option<&DiagComm>) -> Result<Vec<SdSdg>, DiagServiceError> {
-        fn map_sd_sdg(
-            ecu_data: &datatypes::DiagnosticDatabase,
-            sd_or_sdg_ref: &datatypes::SdOrSdgRef,
-        ) -> Option<SdSdg> {
-            match sd_or_sdg_ref {
-                datatypes::SdOrSdgRef::Sd(id) => ecu_data.sds.get(id).map(|sd| SdSdg::Sd {
-                    value: sd.value.and_then(|value| STRINGS.get(value)),
-                    si: sd.si.and_then(|si| STRINGS.get(si)),
-                    ti: sd.ti.and_then(|ti| STRINGS.get(ti)),
-                }),
-                datatypes::SdOrSdgRef::Sdg(id) => ecu_data.sdgs.get(id).map(|sdg| SdSdg::Sdg {
-                    caption: sdg.caption.and_then(|caption| STRINGS.get(caption)),
-                    si: sdg.si.and_then(|si| STRINGS.get(si)),
+    async fn sdgs(
+        &self,
+        service: Option<&cda_interfaces::DiagComm>,
+    ) -> Result<Vec<SdSdg>, DiagServiceError> {
+        fn map_sd_sdg(sd_or_sdg: &datatypes::SdOrSdg) -> Option<SdSdg> {
+            if let Some(sd) = (*sd_or_sdg).sd_or_sdg_as_sd() {
+                Some(SdSdg::Sd {
+                    value: sd.value().map(|s| s.to_owned()),
+                    si: sd.si().map(ToOwned::to_owned),
+                    ti: sd.ti().map(ToOwned::to_owned),
+                })
+            } else if let Some(sdg) = (*sd_or_sdg).sd_or_sdg_as_sdg() {
+                Some(SdSdg::Sdg {
+                    caption: sdg.caption_sn().map(ToOwned::to_owned),
+                    si: sdg.si().map(ToOwned::to_owned),
                     sdgs: sdg
-                        .sdgs
-                        .iter()
-                        .filter_map(|sd_or_sdg| map_sd_sdg(ecu_data, sd_or_sdg))
-                        .collect(),
-                }),
+                        .sds()
+                        .map(|sds| {
+                            sds.iter()
+                                .map(datatypes::SdOrSdg)
+                                .filter_map(|sd_or_sdg| map_sd_sdg(&sd_or_sdg))
+                                .collect()
+                        })
+                        .unwrap_or_default(),
+                })
+            } else {
+                tracing::warn!("SDOrSDG has no value");
+                None
             }
         }
 
-        let ids = if let Some(service) = service {
-            self.lookup_diag_comm(service)
-                .map(|service| service.sdgs.clone())
-                .unwrap_or_default()
+        let sdgs = if let Some(service) = service {
+            self.lookup_diag_service(service)
+                .await?
+                .diag_comm()
+                .and_then(|sdg| sdg.sdgs())
+                .map(datatypes::Sdgs)
         } else {
-            self.variant
+            self.variant()
                 .as_ref()
-                .and_then(|v| self.ecu_data.variants.get(&v.id).map(|v| v.sdgs.clone()))
+                .and_then(|v| v.diag_layer().and_then(|dl| dl.sdgs()))
                 .or_else(|| {
-                    self.ecu_data
-                        .variants
-                        .get(&self.ecu_data.base_variant_id)
-                        .map(|v| v.sdgs.clone())
+                    self.diag_database
+                        .base_variant()
+                        .ok()?
+                        .diag_layer()
+                        .and_then(|dl| dl.sdgs())
                 })
-                .ok_or_else(|| DiagServiceError::InvalidDatabase("No SDG found in DB".to_owned()))?
-        };
+                .map(datatypes::Sdgs)
+        }
+        .ok_or_else(|| DiagServiceError::InvalidDatabase("No SDG found in DB".to_owned()))?;
 
-        let mapped = ids
-            .iter()
-            .filter_map(|sdg_id| {
-                self.ecu_data.sdgs.get(sdg_id).map(|sdg| SdSdg::Sdg {
-                    caption: sdg.caption.and_then(|caption| STRINGS.get(caption)),
-                    si: sdg.si.and_then(|si| STRINGS.get(si)),
-                    sdgs: sdg
-                        .sdgs
-                        .iter()
-                        .filter_map(|sd_or_sdg| map_sd_sdg(&self.ecu_data, sd_or_sdg))
-                        .collect(),
-                })
+        let mapped = sdgs
+            .sdgs()
+            .map(|sdgs| {
+                sdgs.iter()
+                    .map(|sdg| SdSdg::Sdg {
+                        caption: sdg.caption_sn().map(ToOwned::to_owned),
+                        si: sdg.si().map(ToOwned::to_owned),
+                        sdgs: sdg
+                            .sds()
+                            .map(|sds| {
+                                sds.iter()
+                                    .filter_map(|sd_or_sdg| map_sd_sdg(&sd_or_sdg.into()))
+                                    .collect()
+                            })
+                            .unwrap_or_default(),
+                    })
+                    .collect::<Vec<_>>()
             })
-            .collect();
+            .unwrap_or_default();
 
         Ok(mapped)
     }
@@ -324,18 +346,16 @@ impl<S: SecurityPlugin> cda_interfaces::EcuManager for EcuManager<S> {
             ));
         }
 
-        let variant = self
-            .variant
-            .as_ref()
-            .and_then(|v| self.ecu_data.variants.get(&v.id))
-            .or_else(|| self.ecu_data.variants.get(&self.ecu_data.base_variant_id))
-            .ok_or(DiagServiceError::NotFound)?;
+        let variant = match self.variant() {
+            Some(v) => v,
+            None => {
+                return Err(DiagServiceError::InvalidDatabase(
+                    "No variant selected".to_owned(),
+                ));
+            }
+        };
 
-        let base_variant = self
-            .ecu_data
-            .variants
-            .get(&self.ecu_data.base_variant_id)
-            .ok_or(DiagServiceError::NotFound)?;
+        let base_variant = self.diag_database.base_variant()?;
 
         // iterate through the services and for each service, resolve the parameters
         // sort the parameters by byte_pos & bit_pos, and take the first parameter
@@ -344,93 +364,40 @@ impl<S: SecurityPlugin> cda_interfaces::EcuManager for EcuManager<S> {
         // If no service with a matching SIDRQ can be found, DiagServiceError::NotFound
         // is returned to the caller.
         let mapped_service = variant
-            .services
-            .iter()
-            .chain(base_variant.services.iter())
-            .find_map(|service_id| {
-                let service = match self.ecu_data.services.get(service_id) {
-                    Some(service) => service,
-                    None => return None,
-                };
-
-                let request = match self.ecu_data.requests.get(&service.request_id) {
-                    Some(request) => request,
-                    None => return None,
-                };
-
-                let mut params = request
-                    .params
-                    .iter()
-                    .filter_map(|id| self.ecu_data.params.get(id))
-                    .collect::<Vec<_>>();
-
-                params.sort_by(|p1, p2| match p1.byte_pos.cmp(&p2.byte_pos) {
-                    std::cmp::Ordering::Equal => p1.bit_pos.cmp(&p2.bit_pos),
-                    ord => ord,
-                });
-
-                let sid_param = params.first()?;
-
-                // SIDRQ should always be a CodedConst
-                let datatypes::ParameterValue::CodedConst(coded_const) = &sid_param.value else {
-                    return None;
-                };
-
-                let coded_const_type = self
-                    .ecu_data
-                    .diag_coded_types
-                    .get(&coded_const.diag_coded_type)?;
-
-                if coded_const_type.base_datatype() != DataType::UInt32 {
-                    return None;
-                }
-
-                let DiagCodedTypeVariant::StandardLength(standard_length_type) =
-                    coded_const_type.type_()
-                else {
-                    return None;
-                };
-
-                // SIDRQ should not be condensed, or contain a bitmask
-                if standard_length_type.condensed || standard_length_type.bitmask.is_some() {
-                    return None;
-                }
-
-                let sid_val = STRINGS
-                    .get(coded_const.value)
-                    .and_then(|v| v.parse::<u16>().ok())?;
-
-                // according to ISO_14229 SIDRQ is defined as XX16 eg, max 2 bytes
-                let raw_val = match standard_length_type.bit_length {
-                    8 => rawdata[0] as u16,
-                    16 => {
-                        if rawdata.len() < 2 {
-                            return None;
-                        }
-                        u16::from_be_bytes([rawdata[0], rawdata[1]])
-                    }
-                    _ => return None,
-                };
-
-                if raw_val == sid_val {
+            .diag_layer()
+            .and_then(|dl| dl.diag_services())
+            .into_iter()
+            .flatten()
+            .chain(
+                base_variant
+                    .diag_layer()
+                    .and_then(|dl| dl.diag_services())
+                    .into_iter()
+                    .flatten(),
+            )
+            .map(datatypes::DiagService)
+            .find_map(|service| {
+                let service_id = service.request_id()?;
+                if rawdata[0] == service_id {
                     Some(service)
                 } else {
                     None
                 }
             })
             .ok_or(DiagServiceError::NotFound)?;
+        let mapped_dc = mapped_service.diag_comm().map(datatypes::DiagComm).ok_or(
+            DiagServiceError::InvalidDatabase("Service is missing DiagComm".to_owned()),
+        )?;
 
-        Self::check_security_plugin(security_plugin, mapped_service)?;
+        Self::check_security_plugin(security_plugin, &mapped_service)?;
 
-        let sec_ctrl = self.access_control.lock();
-        let new_session = mapped_service.transitions.get(&sec_ctrl.session);
-        let new_sec = mapped_service.transitions.get(&sec_ctrl.security);
-        drop(sec_ctrl);
+        let (new_session, new_security) =
+            self.lookup_state_transition_by_diagcomm_for_active(mapped_dc);
 
         Ok(ServicePayload {
             data: rawdata,
-            new_session_id: new_session.copied(),
-            new_security_access_id: new_sec.copied(),
+            new_session,
+            new_security,
             source_address: self.tester_address,
             target_address: self.logical_address,
         })
@@ -445,83 +412,80 @@ impl<S: SecurityPlugin> cda_interfaces::EcuManager for EcuManager<S> {
         target = "convert_from_uds",
         skip(self, diag_service, payload),
         fields(
-            ecu_name = self.ecu_data.ecu_name,
+            ecu_name = self.ecu_name,
             service = diag_service.name,
             input = util::tracing::print_hex(&payload.data, 10),
             output = tracing::field::Empty,
         ),
         err
     )]
-    fn convert_from_uds(
+    async fn convert_from_uds(
         &self,
-        diag_service: &DiagComm,
+        diag_service: &cda_interfaces::DiagComm,
         payload: &ServicePayload,
         map_to_json: bool,
     ) -> Result<DiagServiceResponseStruct, DiagServiceError> {
-        let mapped_service = self.lookup_diag_comm(diag_service)?;
+        let mapped_service = self.lookup_diag_service(diag_service).await?;
+        let mapped_diag_comm = mapped_service
+            .diag_comm()
+            .map(datatypes::DiagComm)
+            .ok_or_else(|| DiagServiceError::InvalidDatabase("No DiagComm found".to_owned()))?;
+
         let mut uds_payload = Payload::new(&payload.data);
         let sid = uds_payload
             .first()
             .ok_or_else(|| DiagServiceError::BadPayload("Missing SID".to_owned()))?
             .to_string();
 
-        let responses = self
-            .ecu_data
-            .responses
-            .iter()
-            .filter(|(id, _)| {
-                mapped_service.pos_responses.iter().any(|pr| pr == *id)
-                    || mapped_service.neg_responses.iter().any(|nr| nr == *id)
-            })
-            .map(|(_, r)| -> Result<_, DiagServiceError> {
-                let response_type = r.response_type;
-                let mut params: Vec<&datatypes::Parameter> = r
-                    .params
-                    .iter()
-                    .map(|param_ref| self.param_lookup(*param_ref))
-                    .collect::<Result<Vec<_>, DiagServiceError>>()?;
-                params.sort_by(|a, b| a.byte_pos.cmp(&b.byte_pos).then(a.bit_pos.cmp(&b.bit_pos)));
-
-                Ok((response_type, params))
-            })
-            .collect::<Result<Vec<_>, DiagServiceError>>()?;
+        let responses: Vec<_> = mapped_service
+            .pos_responses()
+            .into_iter()
+            .flatten()
+            .chain(mapped_service.neg_responses().into_iter().flatten())
+            .collect();
 
         let mut data = HashMap::new();
-
-        if let Some((t, params)) = responses.iter().find(|(_, params)| {
-            params.iter().any(|p| {
-                p.byte_pos == 0u32
-                    && match p.value {
-                        datatypes::ParameterValue::CodedConst(ref c) => {
-                            STRINGS.get(c.value) == Some(sid.clone())
-                        }
-                        _ => false,
-                    }
+        if let Some((response, params)) = responses.iter().find_map(|r| {
+            r.params().and_then(|params| {
+                let params: Vec<datatypes::Parameter> =
+                    params.iter().map(datatypes::Parameter).collect();
+                if params.iter().any(|p| {
+                    p.byte_position() == 0
+                        && p.specific_data_as_coded_const()
+                            .is_some_and(|c| c.coded_value().is_some_and(|v| v == sid))
+                }) {
+                    Some((r, params))
+                } else {
+                    None
+                }
             })
         }) {
+            let response_type = response.response_type().try_into()?;
             // in case of a positive response update potential session or security access changes
-            if *t == datatypes::ResponseType::Positive {
-                if let Some(new_session) = payload.new_session_id.as_ref() {
-                    self.set_session(*new_session, Duration::from_secs(u64::MAX))?;
-                }
+            if response_type == datatypes::ResponseType::Positive {
+                let (new_session, new_security) =
+                    self.lookup_state_transition_by_diagcomm_for_active(mapped_diag_comm);
 
-                if let Some(new_security_access) = payload.new_security_access_id.as_ref() {
-                    self.set_security_access(*new_security_access, Duration::from_secs(u64::MAX))?;
+                if let Some(new_session) = new_session {
+                    self.set_session(&new_session, Duration::from_secs(u64::MAX))?
+                }
+                if let Some(new_security_access) = new_security {
+                    self.set_security_access(&new_security_access, Duration::from_secs(u64::MAX))?;
                 }
             }
+
             let raw_uds_payload = {
                 let base_offset = params
                     .iter()
-                    .find(|p| {
-                        p.semantic
-                            .and_then(|sem| STRINGS.get(sem))
-                            .is_some_and(|semantic| semantic == semantics::DATA)
-                    })
-                    .map_or(0, |p| p.byte_pos);
+                    .filter(|p| p.semantic().is_some_and(|s| s == semantics::DATA))
+                    .map(|p| p.byte_position())
+                    .min()
+                    .unwrap_or(0);
                 &uds_payload.data()[base_offset as usize..]
             }
             .to_vec();
-            if *t == datatypes::ResponseType::Positive && !map_to_json {
+
+            if response_type == datatypes::ResponseType::Positive && !map_to_json {
                 return Ok(DiagServiceResponseStruct {
                     service: diag_service.clone(),
                     data: raw_uds_payload,
@@ -531,23 +495,23 @@ impl<S: SecurityPlugin> cda_interfaces::EcuManager for EcuManager<S> {
             }
             let mut mapping_errors = Vec::new();
             for param in params.iter() {
-                let semantic = param.semantic.and_then(|sem| STRINGS.get(sem));
+                let semantic = param.semantic();
                 if semantic.is_some_and(|semantic| {
                     semantic != semantics::DATA && semantic != semantics::SERVICEIDRQ
                 }) {
                     continue;
                 }
-                let short_name = STRINGS.get(param.short_name).ok_or_else(|| {
-                    DiagServiceError::InvalidDatabase(format!(
-                        "Unable to find short name for param: {}",
-                        param.short_name
-                    ))
+                let short_name = param.short_name().ok_or_else(|| {
+                    DiagServiceError::InvalidDatabase(
+                        "Unable to find short name for param".to_owned(),
+                    )
                 })?;
-                uds_payload.set_last_read_byte_pos(param.byte_pos as usize);
+
+                uds_payload.set_last_read_byte_pos(param.byte_position() as usize);
                 match self.map_param_from_uds(
-                    mapped_service,
+                    &mapped_service,
                     param,
-                    &short_name,
+                    short_name,
                     &mut uds_payload,
                     &mut data,
                 ) {
@@ -561,7 +525,8 @@ impl<S: SecurityPlugin> cda_interfaces::EcuManager for EcuManager<S> {
                     Err(e) => return Err(e),
                 }
             }
-            let resp = match t {
+
+            let resp = match response_type {
                 datatypes::ResponseType::Negative | datatypes::ResponseType::GlobalNegative => {
                     DiagServiceResponseStruct {
                         service: diag_service.clone(),
@@ -588,100 +553,100 @@ impl<S: SecurityPlugin> cda_interfaces::EcuManager for EcuManager<S> {
 
             Ok(resp)
         } else {
-            Err(DiagServiceError::UdsLookupError(format!(
-                "No matching response found for Service ID {sid}"
-            )))
+            // Returning a response here, because even valid databases may not define a
+            // response for a service.
+            tracing::debug!("No matching response found for SID: {sid}");
+            Ok(DiagServiceResponseStruct {
+                service: diag_service.clone(),
+                data: payload.data.clone(),
+                mapped_data: None,
+                response_type: DiagServiceResponseType::Positive,
+            })
         }
     }
 
-    /// Converts given `UdsPayloadData` into a UDS request payload for the given `DiagService`.
-    ///
-    /// # Errors
-    /// Will return `Err` in cases where the `UdsPayloadData` doesn´t provide required parameters
-    /// for the `DiagService` request or if elements of the `UdsPayloadData` cannot be mapped to
-    /// the raw UDS bytestream.
     #[tracing::instrument(
         target = "create_uds_payload",
         skip(self, diag_service, security_plugin, data),
         fields(
-            ecu_name = self.ecu_data.ecu_name,
+            ecu_name = self.ecu_name,
             service = diag_service.name,
-            action = diag_service.action.to_string(),
+            action = diag_service.action().to_string(),
             input = data.as_ref().map_or_else(|| "None".to_owned(), ToString::to_string),
             output = tracing::field::Empty
         ),
         err
     )]
-    fn create_uds_payload(
+    async fn create_uds_payload(
         &self,
-        diag_service: &DiagComm,
+        diag_service: &cda_interfaces::DiagComm,
         security_plugin: &DynamicPlugin,
         data: Option<UdsPayloadData>,
     ) -> Result<ServicePayload, DiagServiceError> {
-        let mapped_service = self.lookup_diag_comm(diag_service)?;
-
-        Self::check_security_plugin(security_plugin, mapped_service)?;
-
-        let request = self
-            .ecu_data
-            .requests
-            .get(&mapped_service.request_id)
+        let mapped_service = self.lookup_diag_service(diag_service).await?;
+        let mapped_dc = mapped_service
+            .diag_comm()
+            .ok_or(DiagServiceError::InvalidDatabase(
+                "No DiagComm found".to_owned(),
+            ))?;
+        let request = mapped_service
+            .request()
             .ok_or(DiagServiceError::RequestNotSupported(format!(
                 "Service '{}' is not supported",
                 diag_service.name
             )))?;
 
-        let mut mapped_params = request
-            .params
-            .iter()
-            .map(|param_ref| {
-                self.ecu_data
-                    .params
-                    .get(param_ref)
-                    .ok_or(DiagServiceError::InvalidDatabase(
-                        "Unable to find all parameters for request".to_owned(),
-                    ))
-            })
-            .collect::<Result<Vec<_>, DiagServiceError>>()?;
+        Self::check_security_plugin(security_plugin, &mapped_service)?;
 
-        mapped_params.sort_by(|a, b| a.byte_pos.cmp(&b.byte_pos).then(a.bit_pos.cmp(&b.bit_pos)));
+        let mut mapped_params = request
+            .params()
+            .map(|params| {
+                params
+                    .iter()
+                    .map(datatypes::Parameter)
+                    .collect::<Vec<datatypes::Parameter>>()
+            })
+            .unwrap_or_default();
+
+        mapped_params.sort_by(|a, b| {
+            a.byte_position()
+                .cmp(&b.byte_position())
+                .then(a.bit_position().cmp(&b.bit_position()))
+        });
 
         let mut uds: Vec<u8> = Vec::new();
 
         let mut num_consts = 0;
         for param in &mapped_params {
-            match param.value {
-                datatypes::ParameterValue::CodedConst(ref coded_const) => {
-                    num_consts += 1;
-                    let diag_type = self
-                        .ecu_data
-                        .diag_coded_types
-                        .get(&coded_const.diag_coded_type)
+            if let Some(coded_const) = param.specific_data_as_coded_const() {
+                num_consts += 1;
+                let diag_type: datatypes::DiagCodedType = coded_const
+                    .diag_coded_type()
+                    .and_then(|t| {
+                        let type_: Option<datatypes::DiagCodedType> = t.try_into().ok();
+                        type_
+                    })
+                    .ok_or(DiagServiceError::InvalidDatabase(format!(
+                        "Param '{}' is missing DiagCodedType",
+                        param.short_name().unwrap_or_default()
+                    )))?;
+                let coded_const_value =
+                    coded_const
+                        .coded_value()
                         .ok_or(DiagServiceError::InvalidDatabase(format!(
-                            "Could not lookup DiagCodedType for param: {}",
-                            param.short_name
+                            "Param '{}' is missing coded value",
+                            param.short_name().unwrap_or_default()
                         )))?;
 
-                    let coded_const_value = STRINGS.get(coded_const.value).ok_or_else(|| {
-                        DiagServiceError::InvalidDatabase(format!(
-                            "Unable to find coded const value for param: {}",
-                            param.short_name
-                        ))
-                    })?;
+                let uds_val =
+                    operations::string_to_vec_u8(diag_type.base_datatype(), coded_const_value)?;
 
-                    let uds_val = operations::string_to_vec_u8(
-                        diag_type.base_datatype(),
-                        &coded_const_value,
-                    )?;
-
-                    diag_type.encode(
-                        uds_val,
-                        &mut uds,
-                        param.byte_pos as usize,
-                        param.bit_pos as usize,
-                    )?;
-                }
-                _ => break,
+                diag_type.encode(
+                    uds_val,
+                    &mut uds,
+                    param.byte_position() as usize,
+                    param.bit_position() as usize,
+                )?;
             }
         }
         if let Some(data) = data {
@@ -690,18 +655,20 @@ impl<S: SecurityPlugin> cda_interfaces::EcuManager for EcuManager<S> {
                 UdsPayloadData::ParameterMap(json_values) => {
                     // todo: check if json_values is empty...
                     for param in mapped_params.iter().skip(num_consts) {
-                        if uds.len() < param.byte_pos as usize {
-                            uds.extend(vec![0x0; param.byte_pos as usize - uds.len()]);
+                        if uds.len() < param.byte_position() as usize {
+                            uds.extend(vec![0x0; param.byte_position() as usize - uds.len()]);
                         }
-                        let short_name = STRINGS.get(param.short_name).ok_or_else(|| {
+                        let short_name = param.short_name().ok_or_else(|| {
                             DiagServiceError::InvalidDatabase(format!(
                                 "Unable to find short name for param: {}",
-                                param.short_name
+                                param.short_name().unwrap_or_default()
                             ))
                         })?;
 
-                        if let Some(value) = json_values.get(&short_name) {
-                            self.map_param_to_uds(param, value, &mut uds)?;
+                        if let Some(value) = json_values.get(short_name) {
+                            // Setting parent byte position
+                            // to 0 because this is the uppermost level.
+                            self.map_param_to_uds(param, value, &mut uds, 0)?;
                         } else {
                             return Err(DiagServiceError::BadPayload(format!(
                                 "Missing parameter: {short_name}"
@@ -711,18 +678,16 @@ impl<S: SecurityPlugin> cda_interfaces::EcuManager for EcuManager<S> {
                 }
             }
         }
-        let sec_ctrl = self.access_control.lock();
-        let new_session = mapped_service.transitions.get(&sec_ctrl.session);
-        let new_sec = mapped_service.transitions.get(&sec_ctrl.security);
-        drop(sec_ctrl);
 
+        let (new_session, new_security) =
+            self.lookup_state_transition_by_diagcomm_for_active(mapped_dc.into());
         tracing::Span::current().record("output", util::tracing::print_hex(&uds, 10));
         Ok(ServicePayload {
             data: uds,
             source_address: self.tester_address,
             target_address: self.logical_address,
-            new_session_id: new_session.copied(),
-            new_security_access_id: new_sec.copied(),
+            new_session,
+            new_security,
         })
     }
 
@@ -730,31 +695,41 @@ impl<S: SecurityPlugin> cda_interfaces::EcuManager for EcuManager<S> {
     /// # Errors
     /// Will return `Err` if the job cannot be found in the database
     /// Unlikely other case is that neither a lookup in the current nor the base variant succeeded.
-    #[tracing::instrument(skip(self), fields(ecu_name = %self.ecu_name(), job_name))]
+    #[tracing::instrument(skip(self), fields(ecu_name = self.ecu_name, job_name))]
     fn lookup_single_ecu_job(&self, job_name: &str) -> Result<single_ecu::Job, DiagServiceError> {
         tracing::debug!("Looking up single ECU job");
 
-        self.variant
-            .as_ref()
+        self.variant()
             .and_then(|variant| {
-                self.ecu_data
-                    .variants
-                    .get(&variant.id)
-                    .and_then(|variant| variant.single_ecu_job_lookup.get(job_name))
-            })
-            .or(self.ecu_data.base_single_ecu_job_lookup.get(job_name))
-            .ok_or(DiagServiceError::NotFound)
-            .and_then(|id| {
-                self.ecu_data
-                    .single_ecu_jobs
-                    .get(id)
-                    .ok_or_else(|| {
-                        // this should not happen, there should always be a base variant.
-                        tracing::warn!("Job reference could not be resolved to a job");
-                        DiagServiceError::NotFound
+                variant.diag_layer().and_then(|diag_layer| {
+                    diag_layer.single_ecu_jobs().and_then(|jobs| {
+                        jobs.iter().find(|j| {
+                            j.diag_comm().is_some_and(|dc| {
+                                dc.short_name()
+                                    .is_some_and(|n| n.eq_ignore_ascii_case(job_name))
+                            })
+                        })
                     })
-                    .map(std::convert::Into::into)
+                })
             })
+            .or_else(|| {
+                self.diag_database
+                    .base_variant()
+                    .ok()?
+                    .diag_layer()
+                    .and_then(|diag_layer| {
+                        diag_layer.single_ecu_jobs().and_then(|jobs| {
+                            jobs.iter().find(|j| {
+                                j.diag_comm().is_some_and(|dc| {
+                                    dc.short_name()
+                                        .is_some_and(|n| n.eq_ignore_ascii_case(job_name))
+                                })
+                            })
+                        })
+                    })
+            })
+            .map(|j| j.into())
+            .ok_or(DiagServiceError::NotFound)
     }
 
     /// Lookup a service by a given function class name and service id.
@@ -764,17 +739,23 @@ impl<S: SecurityPlugin> cda_interfaces::EcuManager for EcuManager<S> {
         &self,
         func_class_name: &str,
         service_id: u8,
-    ) -> Result<DiagComm, DiagServiceError> {
-        self.ecu_data
-            .functional_classes_lookup
-            .get(func_class_name)
-            .ok_or(DiagServiceError::NotFound)
-            .and_then(|fc| {
-                fc.services
-                    .get(&u32::from(service_id))
-                    .ok_or(DiagServiceError::NotFound)
-                    .map(std::convert::Into::into)
-            })
+    ) -> Result<cda_interfaces::DiagComm, DiagServiceError> {
+        self.search_diag_services(|service| {
+            service
+                .diag_comm()
+                .and_then(|dc| {
+                    dc.funct_class().and_then(|classes| {
+                        classes.iter().find(|fc| {
+                            fc.short_name()
+                                .is_some_and(|name| name.eq_ignore_ascii_case(func_class_name))
+                        })
+                    })
+                })
+                .filter(|_| service.request_id().is_some_and(|id| id == service_id))
+                .is_some()
+        })
+        .and_then(|service| service.try_into().ok())
+        .ok_or(DiagServiceError::NotFound)
     }
 
     /// Lookup a service by its service id for the current ECU variant.
@@ -785,152 +766,101 @@ impl<S: SecurityPlugin> cda_interfaces::EcuManager for EcuManager<S> {
         let services = self
             .lookup_services_by_sid(service_id)?
             .iter()
-            .filter_map(|service| get_string!(service.short_name).ok())
+            .filter_map(|service| service.diag_comm())
+            .filter_map(|dc| dc.short_name())
+            .map(ToOwned::to_owned)
             .collect::<Vec<_>>();
 
         Ok(services)
     }
 
     fn get_components_data_info(&self) -> Vec<ComponentDataInfo> {
-        self.ecu_data
-            .services
+        self.get_diag_layer_all_variants()
             .iter()
-            .filter_map(|(_, service)| {
-                if get_string!(service.short_name)
-                    .map(|short_name| short_name.ends_with("_Read"))
-                    .inspect_err(
-                        |e| tracing::error!(error = %e, "Error getting service short name"),
-                    )
-                    != Ok(true)
-                {
+            .filter_map(|dl| dl.diag_services())
+            .flat_map(|svcs| svcs.iter())
+            .map(datatypes::DiagService)
+            .filter_map(|service| {
+                let diag_comm = service.diag_comm()?;
+                let short_name = diag_comm.short_name()?;
+                if !short_name.ends_with("_Read") {
                     return None;
                 }
                 Some(ComponentDataInfo {
-                    category: get_string_with_default!(service.semantic, |semantic| {
-                        semantic.to_lowercase()
-                    }),
-                    id: get_string_with_default!(service.short_name, |short_name| {
-                        short_name.replace("_Read", "").to_lowercase()
-                    }),
-                    name: get_string_from_option_with_default!(service.long_name, |long_name| {
-                        long_name.replace(" Read", "")
-                    }),
+                    category: diag_comm.semantic().unwrap_or_default().to_owned(),
+                    id: diag_comm
+                        .short_name()
+                        .map(|s| s.replace("_Read", "").to_lowercase())
+                        .unwrap_or_default(),
+                    name: diag_comm
+                        .long_name()
+                        .and_then(|ln| ln.value().map(|v| v.to_owned().replace(" Read", "")))
+                        .unwrap_or_default(),
                 })
             })
             .collect()
     }
 
     fn get_components_single_ecu_jobs_info(&self) -> Vec<ComponentDataInfo> {
-        self.ecu_data
-            .single_ecu_jobs
+        self.get_diag_layer_all_variants()
             .iter()
-            .flat_map(|(_, job)| {
+            .filter_map(|dl| dl.single_ecu_jobs())
+            .flat_map(|jobs| jobs.iter())
+            .filter_map(|job| {
+                let diag_comm = job.diag_comm()?;
+                let semantic = diag_comm.semantic()?;
                 Some(ComponentDataInfo {
-                    category: get_string_with_default!(job.semantic, |semantic| semantic
-                        .to_lowercase()),
-                    id: get_string_with_default!(job.short_name, |short_name| short_name
-                        .replace("_Read", "")
-                        .to_lowercase()),
-                    name: get_string_from_option_with_default!(job.long_name),
+                    category: semantic.to_lowercase(),
+                    id: diag_comm
+                        .short_name()
+                        .map(|n| n.strip_suffix("_Read").unwrap_or(n).to_lowercase())
+                        .unwrap_or_default(),
+                    name: diag_comm
+                        .long_name()
+                        .and_then(|ln| ln.value().map(ToOwned::to_owned))
+                        .unwrap_or_default(),
                 })
-                .into_iter()
             })
             .collect()
     }
 
-    fn set_session(
-        &self,
-        session: cda_interfaces::Id,
-        expiration: Duration,
-    ) -> Result<(), DiagServiceError> {
-        self.access_control.lock().session = session;
+    fn set_session(&self, session: &str, expiration: Duration) -> Result<(), DiagServiceError> {
+        self.access_control.lock().session = Some(session.to_owned());
         self.start_reset_task(expiration)
     }
 
     fn set_security_access(
         &self,
-        security_access: cda_interfaces::Id,
+        security_access: &str,
         expiration: Duration,
     ) -> Result<(), DiagServiceError> {
         tracing::debug!(
-            ecu_name = %self.ecu_data.ecu_name,
+        ecu_name = self.ecu_name,
             security_access = %security_access,
             "Setting security access"
         );
-        self.access_control.lock().security = security_access;
+        self.access_control.lock().security = Some(security_access.to_owned());
         self.start_reset_task(expiration)
     }
 
     fn lookup_session_change(
         &self,
-        session: &str,
-    ) -> Result<(cda_interfaces::Id, DiagComm), DiagServiceError> {
-        let session_state_chart = self.state_chart(semantics::SESSION)?;
-        let lookup_session = session.to_lowercase();
+        target_session_name: &str,
+    ) -> Result<cda_interfaces::DiagComm, DiagServiceError> {
+        let current_session_name =
+            self.access_control
+                .lock()
+                .session
+                .clone()
+                .ok_or(DiagServiceError::InvalidSession(
+                    "ECU session is none".to_string(),
+                ))?;
 
-        let target_session = session_state_chart
-            .states
-            .iter()
-            .find(|(_, state)| {
-                STRINGS
-                    .get(state.short_name)
-                    .is_some_and(|name| name == lookup_session)
-            })
-            .map(|(_, state)| state)
-            .ok_or_else(|| {
-                tracing::warn!(session = %session, "Session not found in state chart");
-                DiagServiceError::NotFound
-            })?;
-
-        let session = self.access_control.lock().session;
-        let current_session = session_state_chart.states.get(&session).ok_or_else(|| {
-            tracing::error!(current_session = %session, "Current session does not exist");
-            DiagServiceError::NotFound
-        })?;
-
-        let session_service_id = current_session
-            .transitions
-            .get(&target_session.id)
-            .and_then(|transition| transition.session)
-            .ok_or_else(|| {
-                tracing::debug!(
-                    current_session = %get_string_with_default!(current_session.short_name),
-                    target_session = %session,
-                    available_transitions = ?current_session.transitions,
-                    "No transition from current session to target session exists"
-                );
-                DiagServiceError::NotFound
-            })?;
-
-        let session_service = self
-            .ecu_data
-            .services
-            .get(&session_service_id)
-            .ok_or_else(|| {
-                tracing::warn!(
-                    session_service_id = %session_service_id,
-                    "Session service not found in ECU data"
-                );
-                DiagServiceError::NotFound
-            })?;
-
-        let name = STRINGS.get(session_service.short_name).ok_or_else(|| {
-            tracing::warn!(
-                session_service_id = %session_service_id,
-                "Session service has no short name"
-            );
-            DiagServiceError::NotFound
-        })?;
-
-        Ok((
-            target_session.id,
-            DiagComm {
-                name: name.clone(),
-                action: DiagCommAction::Start,
-                type_: DiagCommType::Modes,
-                lookup_name: Some(name),
-            },
-        ))
+        self.lookup_state_transition_for_active(
+            semantics::SESSION,
+            &current_session_name,
+            target_session_name,
+        )
     }
 
     fn lookup_security_access_change(
@@ -939,137 +869,79 @@ impl<S: SecurityPlugin> cda_interfaces::EcuManager for EcuManager<S> {
         seed_service: Option<&String>,
         has_key: bool,
     ) -> Result<SecurityAccess, DiagServiceError> {
-        let security_state_chart = self.state_chart(semantics::SECURITY)?;
-        let session_control = self.access_control.lock();
-        let lookup_level = level.to_lowercase();
-
-        let target_access_level = security_state_chart
-            .states
-            .iter()
-            .find(|(_, state)| {
-                STRINGS
-                    .get(state.short_name)
-                    .is_some_and(|name| name.to_lowercase() == lookup_level)
-            })
-            .map(|(_, state)| state)
-            .ok_or_else(|| {
-                tracing::warn!(security_level = %level, "Security access not found in state chart");
-                DiagServiceError::NotFound
-            })?;
-
-        let current_access = security_state_chart
-            .states
-            .get(&session_control.security)
-            .ok_or_else(|| {
-                tracing::error!(
-                    current_security_state = %session_control.security,
-                    "Current security access state does not exist"
-                );
-                DiagServiceError::NotFound
-            })?;
-
-        let security_service_id = current_access
-            .transitions
-            .get(&target_access_level.id)
-            .and_then(|transition| transition.security_access)
-            .ok_or_else(|| {
-                tracing::debug!(
-                    current_access = ?STRINGS.get(current_access.short_name),
-                    target_level = %level,
-                    available_transitions = ?current_access.transitions,
-                    "No transition from current access to target level exists"
-                );
-                DiagServiceError::NotFound
-            })?;
+        let current_security_name = self.security_access()?;
 
         if has_key {
-            // calling this service will change the security access level
-            let security_service = self
-                .ecu_data
-                .services
-                .get(&security_service_id)
-                .ok_or_else(|| {
-                    tracing::warn!(
-                        security_service_id = %security_service_id,
-                        "Security service not found in ECU data"
-                    );
-                    DiagServiceError::NotFound
-                })?;
-
-            let name = STRINGS.get(security_service.short_name).ok_or_else(|| {
-                tracing::warn!(
-                    security_service_id = %security_service_id,
-                    "Security service has no short name"
-                );
-                DiagServiceError::NotFound
-            })?;
-
-            Ok(SecurityAccess::SendKey((
-                target_access_level.id,
-                DiagComm {
-                    name: name.clone(),
-                    action: DiagCommAction::Start,
-                    type_: DiagCommType::Modes,
-                    lookup_name: Some(name),
-                },
-            )))
+            let security_service = self.lookup_state_transition_for_active(
+                semantics::SECURITY,
+                &current_security_name,
+                level,
+            )?;
+            Ok(SecurityAccess::SendKey(security_service))
         } else {
-            let security_access_services: Vec<_> = self
-                .ecu_data
-                .services
-                .values()
-                .filter(|service| service.service_id == service_ids::SECURITY_ACCESS)
-                .collect();
+            let request_seed_service = self
+                .lookup_services_by_sid(service_ids::SECURITY_ACCESS)?
+                .into_iter()
+                .find(|service| {
+                    let service: datatypes::DiagService = (**service).into();
 
-            let seed_service_name = security_access_services
-                .iter()
-                .find_map(|service| {
-                    let name = STRINGS.get(service.short_name)?;
-                    seed_service
-                        .as_ref()
-                        .filter(|v| name.to_lowercase().contains(&v.to_lowercase()))
-                        .map(|_| name)
+                    let sid = match service.request_id() {
+                        Some(sid) => sid,
+                        None => return false,
+                    };
+
+                    let (sub_func, _) = match service.request_sub_function_id() {
+                        Some(sub_func) => sub_func,
+                        None => return false,
+                    };
+
+                    let name_matches = if let Some(seed_service_name) = seed_service {
+                        service.diag_comm().is_some_and(|dc| {
+                            dc.short_name().is_some_and(|n| {
+                                let n = n.replace("_", "");
+                                starts_with_ignore_ascii_case(&n, seed_service_name)
+                            })
+                        })
+                    } else {
+                        true
+                    };
+
+                    // ISO 14229-1:2020 specifies the given ranges for request seed
+                    // 2 parameters: sid_rq and sub_func
+                    // needed because the ranges for request seed and send key overlap
+                    sid == service_ids::SECURITY_ACCESS
+                        && matches!(sub_func, 1 | 3..=5 | 7..=41)
+                        && service
+                            .request()
+                            .is_some_and(|r| r.params().is_some_and(|p| p.len() == 2))
+                        && name_matches
                 })
-                .or_else(|| {
-                    security_access_services.iter().find_map(|service| {
-                        STRINGS
-                            .get(service.short_name)
-                            .filter(|name| name.to_lowercase().contains("seed"))
-                    })
-                })
-                .ok_or_else(|| {
-                    tracing::warn!("Security service not found in ECU data");
-                    DiagServiceError::NotFound
-                })?;
-            Ok(SecurityAccess::RequestSeed(DiagComm {
-                name: seed_service_name.clone(),
-                action: DiagCommAction::Start,
-                type_: DiagCommType::Modes,
-                lookup_name: Some(seed_service_name),
-            }))
+                .ok_or(DiagServiceError::NotFound)?;
+
+            let request_seed_service = request_seed_service.try_into()?;
+
+            Ok(SecurityAccess::RequestSeed(request_seed_service))
         }
     }
 
-    fn session(&self) -> String {
-        let session = self.access_control.lock().session;
-        self.state_chart(semantics::SESSION)
-            .map_or("Unknown".to_owned(), |chart| {
-                chart.states.get(&session).map_or_else(
-                    || "Unknown".to_owned(),
-                    |state| get_string_with_default!(state.short_name),
-                )
-            })
+    fn session(&self) -> Result<String, DiagServiceError> {
+        self.access_control
+            .lock()
+            .session
+            .clone()
+            .ok_or(DiagServiceError::InvalidSession(
+                "ECU session is none".to_string(),
+            ))
     }
 
-    fn security_access(&self) -> String {
-        let security_access = self.access_control.lock().security;
-        self.state_chart(semantics::SECURITY)
-            .map_or("Unknown".to_owned(), |chart| {
-                chart.states.get(&security_access).map_or_else(
-                    || "Unknown".to_owned(),
-                    |state| get_string_with_default!(state.short_name),
-                )
-            })
+    fn security_access(&self) -> Result<String, DiagServiceError> {
+        self.access_control
+            .lock()
+            .security
+            .clone()
+            .ok_or(DiagServiceError::InvalidSession(
+                "ECU security is none".to_string(),
+            ))
     }
 
     /// Returns all services in /configuration, i.e. 0x22 and 0x2E
@@ -1077,33 +949,35 @@ impl<S: SecurityPlugin> cda_interfaces::EcuManager for EcuManager<S> {
     fn get_components_configurations_info(
         &self,
     ) -> Result<Vec<ComponentConfigurationsInfo>, DiagServiceError> {
-        let var_coding_func_class = self
-            .ecu_data
-            .functional_classes
+        let diag_layers = [
+            self.variant().and_then(|v| v.diag_layer()),
+            self.diag_database
+                .base_variant()
+                .ok()
+                .and_then(|v| v.diag_layer()),
+        ]
+        .into_iter()
+        .flatten()
+        .map(|dl| dl.into())
+        .collect::<Vec<datatypes::DiagLayer>>();
+
+        let var_coding_func_class_short_name = diag_layers
             .iter()
-            .find(|(_, name)| {
-                name.to_lowercase() == self.database_naming_convention.functional_class_varcoding
+            .filter_map(|dl| dl.funct_classes())
+            .flat_map(|fc_vec| fc_vec.iter())
+            .find_map(|fc| {
+                fc.short_name().filter(|name| {
+                    name.eq_ignore_ascii_case(
+                        &self.database_naming_convention.functional_class_varcoding,
+                    )
+                })
             })
-            .map(|(&id, _)| id)
             .ok_or(DiagServiceError::NotFound)?;
 
         let configuration_sids = [
             service_ids::READ_DATA_BY_IDENTIFIER,
             service_ids::WRITE_DATA_BY_IDENTIFIER,
         ];
-
-        let variant = self
-            .variant
-            .as_ref()
-            .and_then(|v| self.ecu_data.variants.get(&v.id))
-            .or_else(|| self.ecu_data.variants.get(&self.ecu_data.base_variant_id))
-            .ok_or(DiagServiceError::NotFound)?;
-
-        let base_variant = self
-            .ecu_data
-            .variants
-            .get(&self.ecu_data.base_variant_id)
-            .ok_or(DiagServiceError::NotFound)?;
 
         // Maps a common abbreviated service short name (using the configured affixes) to
         // a vector of bytes of: service_id, ID_parameter_coded_const
@@ -1113,48 +987,69 @@ impl<S: SecurityPlugin> cda_interfaces::EcuManager for EcuManager<S> {
         let mut long_name_map: HashMap<String, String> = HashMap::new();
 
         // Iterate over all services of the variant and the base
-        variant
-            .services
+        diag_layers
             .iter()
-            .chain(base_variant.services.iter())
-            .filter_map(|id| {
-                self.ecu_data.services.get(id).filter(|service| {
-                    service.funct_class == var_coding_func_class
-                        && configuration_sids.contains(&service.service_id)
+            .filter_map(|dl| dl.diag_services())
+            .flat_map(|services| services.iter())
+            .map(datatypes::DiagService)
+            .filter(|service| {
+                service
+                    .request_id()
+                    .is_some_and(|id| configuration_sids.contains(&id))
+            })
+            .filter_map(|service| {
+                service
+                    .diag_comm()
+                    .map(|dc| (service, datatypes::DiagComm(dc)))
+            })
+            .filter(|(_, dc)| {
+                dc.funct_class().is_some_and(|fc| {
+                    fc.iter().any(|fc| {
+                        fc.short_name()
+                            .is_some_and(|n| n == var_coding_func_class_short_name)
+                    })
                 })
             })
-            .for_each(|service| {
-                let (bitlength, coded_const_value) =
-                    match self.get_service_id_parameter_value(&service) {
-                        Some(value) => value,
-                        None => return,
-                    };
-
+            .for_each(|(service, diag_comm)| {
                 // trim short names so write and read services are grouped together
-                let common_short_name =
-                    get_string_with_default!(service.short_name, |short_name| {
+                let common_short_name = diag_comm
+                    .short_name()
+                    .map(|short_name| {
                         self.database_naming_convention
-                            .trim_short_name_affixes(&short_name)
-                    });
+                            .trim_short_name_affixes(short_name)
+                    })
+                    .unwrap_or_default();
 
                 // trim the long name so we can return a descriptive name
                 if !long_name_map.contains_key(&common_short_name)
-                    && let Some(long_name) =
-                        get_string_from_option!(service.long_name, |long_name| {
+                    && let Some(long_name) = diag_comm.long_name().and_then(|ln| {
+                        ln.value().map(|long_name| {
                             self.database_naming_convention
-                                .trim_long_name_affixes(&long_name)
+                                .trim_long_name_affixes(long_name)
                         })
+                    })
                 {
                     long_name_map.insert(common_short_name.clone(), long_name);
                 }
 
+                let service_id = match service.request_id() {
+                    Some(v) => v,
+                    None => return,
+                };
+
+                let (sub_function_id, sub_func_id_bit_len) = match service.request_sub_function_id()
+                {
+                    Some(v) => v,
+                    None => return,
+                };
+
                 // collect the coded const bytes of the parameter expressing the ID
                 let id_param_bytes =
-                    &coded_const_value.to_be_bytes()[(4 - (bitlength / 8)) as usize..];
+                    &sub_function_id.to_be_bytes()[(4 - (sub_func_id_bit_len as usize / 8))..];
 
                 // compile the first bytes of the raw uds payload
                 let mut service_abstract_entry = Vec::with_capacity(1 + id_param_bytes.len());
-                service_abstract_entry.push(service.service_id);
+                service_abstract_entry.push(service_id);
                 service_abstract_entry.extend_from_slice(id_param_bytes);
 
                 result_map
@@ -1188,60 +1083,41 @@ impl<S: SecurityPlugin> cda_interfaces::EcuManager for EcuManager<S> {
         self.lookup_services_by_sid(service_ids::READ_DTC_INFORMATION)?
             .into_iter()
             .filter_map(|service| {
-                self.ecu_data
-                    .requests
-                    .get(&service.request_id)
-                    .and_then(|req| {
-                        let params: Vec<&Parameter> = req
-                            .params
-                            .iter()
-                            .filter_map(|p| self.ecu_data.params.get(p))
-                            .collect();
+                let sub_function_id = match service.request_sub_function_id() {
+                    Some((sub_function_id, _)) => sub_function_id,
+                    None => return None,
+                };
 
-                        let sub_function_id =
-                            params
-                                .iter()
-                                .find(|p| p.byte_pos == 1)
-                                .and_then(|p| match &p.value {
-                                    ParameterValue::CodedConst(c) => get_string!(c.value).ok(),
-                                    _ => None,
-                                });
-
-                        if let Some(sub_function_id) = sub_function_id {
-                            service_types.iter().find_map(|s| {
-                                if ((*s).clone() as u8).to_string() == *sub_function_id {
-                                    Some((service, s))
-                                } else {
-                                    None
-                                }
-                            })
-                        } else {
-                            None
-                        }
-                    })
+                service_types
+                    .iter()
+                    .find(|st| (**st as u16) == sub_function_id)
+                    .map(|st| (service, st))
             })
             .map(|(service, dtc_service_type)| {
-                let scope = self
-                    .ecu_data
-                    .functional_classes
-                    .get(&service.funct_class)
+                let scope = service
+                    .diag_comm()
+                    .and_then(|dc| dc.funct_class())
+                    // using first fc for lack of better option
+                    .and_then(|fc| fc.iter().next())
+                    .and_then(|fc| fc.short_name())
                     .map(|s| s.replace("_", ""))
                     .unwrap_or(dtc_service_type.default_scope().to_owned());
 
-                let service_short_name = get_string!(service.short_name)?;
-                let params = self
-                    .ecu_data
-                    .responses
-                    .iter()
-                    .find(|(id, resp)| {
-                        resp.response_type == datatypes::ResponseType::Positive
-                            && service.pos_responses.contains(id)
-                    })
-                    .map(|(_, resp)| {
-                        resp.params
+                let service_short_name = service
+                    .diag_comm()
+                    .and_then(|dc| dc.short_name().map(ToOwned::to_owned))
+                    .ok_or_else(|| {
+                        DiagServiceError::InvalidDatabase("No DiagComm found".to_owned())
+                    })?;
+
+                let params: Vec<datatypes::Parameter> = service
+                    .pos_responses()
+                    .map(|responses| {
+                        responses
                             .iter()
-                            .filter_map(|param_id| self.ecu_data.params.get(param_id))
-                            .collect::<Vec<_>>()
+                            .flat_map(|r| r.params().into_iter().flatten())
+                            .map(datatypes::Parameter)
+                            .collect()
                     })
                     .ok_or_else(|| {
                         DiagServiceError::ParameterConversionError(
@@ -1249,30 +1125,26 @@ impl<S: SecurityPlugin> cda_interfaces::EcuManager for EcuManager<S> {
                         )
                     })?;
 
-                let dtc_dop = self.find_dtc_dop_in_params(params)?;
-                let dtcs: Vec<_> = dtc_dop
-                    .map(|dop| {
-                        dop.dtc_refs
-                            .iter()
-                            .filter_map(|dtc_ref| self.ecu_data.dtcs.get(dtc_ref))
-                            .map(|dtc| DtcRecord {
-                                code: dtc.code,
-                                display_code: get_string_from_option!(dtc.display_code),
-                                fault_name: get_string_from_option!(dtc.fault_name)
-                                    .unwrap_or_else(|| format!("DTC_{}", dtc.code)),
-                                severity: dtc.severity,
-                            })
-                            .collect()
+                let dtcs: Vec<cda_interfaces::datatypes::DtcRecord> = self
+                    .find_dtc_dop_in_params(&params)?
+                    .and_then(|dtc_dop| {
+                        dtc_dop.dtcs().map(|dtcs| {
+                            dtcs.iter()
+                                .map(|dtc| {
+                                    let record: cda_interfaces::datatypes::DtcRecord = dtc.into();
+                                    record
+                                })
+                                .collect()
+                        })
                     })
                     .unwrap_or_default();
 
                 Ok((
-                    dtc_service_type.clone(),
+                    *dtc_service_type,
                     DtcLookup {
                         scope,
-                        service: DiagComm {
+                        service: cda_interfaces::DiagComm {
                             name: service_short_name.clone(),
-                            action: DiagCommAction::Read,
                             type_: DiagCommType::Faults,
                             lookup_name: Some(service_short_name),
                         },
@@ -1283,13 +1155,13 @@ impl<S: SecurityPlugin> cda_interfaces::EcuManager for EcuManager<S> {
             .collect()
     }
 
-    fn is_service_allowed(
+    async fn is_service_allowed(
         &self,
-        service: &DiagComm,
+        service: &cda_interfaces::DiagComm,
         security_plugin: &DynamicPlugin,
     ) -> Result<(), DiagServiceError> {
-        let mapped_service = self.lookup_diag_comm(service)?;
-        Self::check_security_plugin(security_plugin, mapped_service)
+        let mapped_service = self.lookup_diag_service(service).await?;
+        Self::check_security_plugin(security_plugin, &mapped_service)
     }
 }
 
@@ -1399,40 +1271,57 @@ impl<S: SecurityPlugin> EcuManager<S> {
     /// Will return `Err` if the ECU database cannot be loaded correctly due to different reasons,
     /// like the format being incompatible or required information missing from the database.
     pub fn new(
-        database: DiagnosticDatabase,
+        database: datatypes::DiagnosticDatabase,
         protocol: Protocol,
         com_params: &ComParams,
         database_naming_convention: DatabaseNamingConvention,
     ) -> Result<Self, DiagServiceError> {
         let variant_detection = variant_detection::prepare_variant_detection(&database)?;
 
-        let data_protocol: datatypes::Protocol = into_db_protocol(protocol);
+        let data_protocol = into_db_protocol(&database, protocol)?;
 
-        let logical_gateway_address = database
-            .find_logical_address(
-                LogicalAddressType::Gateway(com_params.doip.logical_gateway_address.name.clone()),
-                &data_protocol,
-            )
-            .unwrap_or(com_params.doip.logical_gateway_address.default);
+        let logical_gateway_address = match database.find_logical_address(
+            datatypes::LogicalAddressType::Gateway(
+                com_params.doip.logical_gateway_address.name.clone(),
+            ),
+            &database,
+            &data_protocol,
+        ) {
+            Ok(address) => address,
+            Err(e) => {
+                tracing::error!("Failed to find logical gateway address: {e}");
+                com_params.doip.logical_gateway_address.default
+            }
+        };
 
-        let logical_ecu_address = database
-            .find_logical_address(
-                LogicalAddressType::Ecu(
-                    com_params.doip.logical_response_id_table_name.clone(),
-                    com_params.doip.logical_ecu_address.name.clone(),
-                ),
-                &data_protocol,
-            )
-            .unwrap_or(com_params.doip.logical_ecu_address.default);
+        let logical_ecu_address = match database.find_logical_address(
+            datatypes::LogicalAddressType::Ecu(
+                com_params.doip.logical_response_id_table_name.clone(),
+                com_params.doip.logical_ecu_address.name.clone(),
+            ),
+            &database,
+            &data_protocol,
+        ) {
+            Ok(address) => address,
+            Err(e) => {
+                tracing::error!("Failed to find logical ECU address: {e}");
+                com_params.doip.logical_ecu_address.default
+            }
+        };
 
-        let logical_functional_address = database
-            .find_logical_address(
-                LogicalAddressType::Functional(
-                    com_params.doip.logical_functional_address.name.clone(),
-                ),
-                &data_protocol,
-            )
-            .unwrap_or(com_params.doip.logical_functional_address.default);
+        let logical_functional_address = match database.find_logical_address(
+            datatypes::LogicalAddressType::Functional(
+                com_params.doip.logical_functional_address.name.clone(),
+            ),
+            &database,
+            &data_protocol,
+        ) {
+            Ok(address) => address,
+            Err(e) => {
+                tracing::error!("Failed to find logical functional address: {e}");
+                com_params.doip.logical_functional_address.default
+            }
+        };
 
         let logical_tester_address =
             database.find_com_param(&data_protocol, &com_params.doip.logical_tester_address);
@@ -1536,8 +1425,16 @@ impl<S: SecurityPlugin> EcuManager<S> {
         let timeout_default =
             database.find_com_param(&data_protocol, &com_params.uds.timeout_default);
 
+        let ecu_name = database
+            .ecu_data()?
+            .ecu_name()
+            .map(|name| name.to_owned())
+            .ok_or_else(|| DiagServiceError::InvalidDatabase("ECU name not found".to_owned()))?;
+
         let res = Self {
-            ecu_data: database,
+            diag_database: database,
+            db_cache: Default::default(),
+            ecu_name,
             database_naming_convention,
             tester_address: logical_tester_address,
             logical_address: logical_ecu_address,
@@ -1552,12 +1449,12 @@ impl<S: SecurityPlugin> EcuManager<S> {
             connection_retry_delay,
             connection_retry_attempts,
             variant_detection,
-            variant: None,
+            variant_index: None,
             state: EcuState::NotTested,
             protocol,
             access_control: Arc::new(Mutex::new(SessionControl {
-                session: 0,
-                security: 0,
+                session: None,
+                security: None,
                 access_reset_task: None,
             })),
             tester_present_retry_policy: tester_present_retry_policy.into(),
@@ -1584,108 +1481,270 @@ impl<S: SecurityPlugin> EcuManager<S> {
 
         Ok(res)
     }
-    fn param_lookup(&self, param_id: u32) -> Result<&datatypes::Parameter, DiagServiceError> {
-        self.ecu_data
-            .params
-            .get(&param_id)
-            .ok_or(DiagServiceError::InvalidDatabase(format!(
-                "Param ID {param_id} not present in DB"
-            )))
+
+    fn variant(&self) -> Option<datatypes::Variant<'_>> {
+        let idx = self.variant_index?;
+        let variants = self.diag_database.ecu_data().ok()?.variants()?;
+        Some(variants.get(idx).into())
     }
 
-    #[tracing::instrument(
-        target = "lookup_diag_comm",
-        skip(self, diag_comm),
-        fields(
-            ecu_name = self.ecu_data.ecu_name,
-            diag_comm_name = diag_comm.name,
-            action = ?diag_comm.action,
-            type_ = ?diag_comm.type_
-        ),
-        err,
-    )]
-    pub(in crate::diag_kernel) fn lookup_diag_comm(
+    fn get_diag_layer_all_variants(&self) -> Vec<datatypes::DiagLayer<'_>> {
+        let ecu_data = match self.diag_database.ecu_data() {
+            Ok(d) => d,
+            Err(e) => {
+                tracing::warn!(error = ?e, "Failed to get ECU data");
+                return Vec::new();
+            }
+        };
+
+        ecu_data
+            .variants()
+            .into_iter()
+            .flat_map(|vars| vars.iter())
+            .filter_map(|variant| variant.diag_layer())
+            .map(datatypes::DiagLayer)
+            .collect::<Vec<_>>()
+    }
+
+    /// Lookup a diagnostic service by its diag comm definition.
+    /// This is treated special with a cache because it is used for *every* UDS request.
+    pub(in crate::diag_kernel) async fn lookup_diag_service(
         &self,
-        diag_comm: &DiagComm,
-    ) -> Result<&DiagnosticService, DiagServiceError> {
+        diag_comm: &cda_interfaces::DiagComm,
+    ) -> Result<datatypes::DiagService<'_>, DiagServiceError> {
         let lookup_name = if let Some(name) = &diag_comm.lookup_name {
             name.to_owned()
         } else {
-            match diag_comm.action {
+            match diag_comm.action() {
                 DiagCommAction::Read => format!("{}_Read", diag_comm.name),
                 DiagCommAction::Write => format!("{}_Write", diag_comm.name),
                 DiagCommAction::Start => format!("{}_Start", diag_comm.name),
             }
         }
         .to_lowercase();
+        let lookup_id = STRINGS.get_or_insert(&lookup_name);
 
-        tracing::debug!(lookup_name = %lookup_name, "Looking up diagnostic service");
-
-        let lookup = self
-            .variant
-            .as_ref()
-            .and_then(|variant| {
-                self.ecu_data
-                    .variants
-                    .get(&variant.id)
-                    .and_then(|variant| variant.service_lookup.get(&lookup_name))
-            })
-            .or(self.ecu_data.base_service_lookup.get(&lookup_name))
-            .or_else(|| {
-                tracing::warn!(
-                    "Service not found in detected variant or base variant, trying to find in all \
-                     variants"
-                );
-                self.ecu_data
-                    .variants
-                    .iter()
-                    .find_map(|(_, variant)| variant.service_lookup.get(&lookup_name))
-            });
-
-        let service = lookup.ok_or(DiagServiceError::NotFound).and_then(|id| {
-            self.ecu_data.services.get(id).ok_or_else(|| {
-                // this should not happen, there should always be a base variant.
-                tracing::warn!("Service reference could not be resolved to a service");
-                DiagServiceError::NotFound
-            })
-        })?;
-
-        if !diag_comm
-            .type_
-            .service_prefix()
-            .contains(&service.service_id)
-        {
-            tracing::warn!(
-                actual_service_id = ?service.service_id,
-                expected_prefix = ?diag_comm.type_.service_prefix(),
-                "Service ID prefix mismatch"
-            );
-            return Err(DiagServiceError::NotFound);
+        if let Some(Some(location)) = self.db_cache.diag_services.read().await.get(&lookup_id) {
+            return match self.get_service_by_location(location) {
+                Some(service) => Ok(service),
+                None => Err(DiagServiceError::NotFound), // cached negative result
+            };
         }
 
-        Ok(service)
+        let prefixes = diag_comm.type_.service_prefixes();
+        let predicate = |service: &datatypes::DiagService<'_>| {
+            service.diag_comm().is_some_and(|dc| {
+                dc.short_name()
+                    .is_some_and(|name| starts_with_ignore_ascii_case(name, &lookup_name))
+            }) && service
+                .request_id()
+                .is_some_and(|sid| prefixes.contains(&sid))
+        };
+
+        // Search and cache the location
+        if let Some((service, location)) = self.search_with_location(&predicate) {
+            self.db_cache
+                .diag_services
+                .write()
+                .await
+                .insert(lookup_id, Some(location));
+            return Ok(service);
+        }
+
+        self.db_cache
+            .diag_services
+            .write()
+            .await
+            .insert(lookup_id, None);
+        Err(DiagServiceError::NotFound)
+    }
+
+    fn search_with_location<F>(
+        &self,
+        predicate: &F,
+    ) -> Option<(datatypes::DiagService<'_>, CacheLocation)>
+    where
+        F: Fn(&datatypes::DiagService<'_>) -> bool,
+    {
+        // Search in variant
+        if let Some((idx, service)) = self
+            .variant()
+            .and_then(|v| v.diag_layer())
+            .and_then(|dl| dl.diag_services())
+            .and_then(|services| {
+                services.iter().enumerate().find_map(|(idx, s)| {
+                    let service = datatypes::DiagService(s);
+                    predicate(&service).then_some((idx, service))
+                })
+            })
+        {
+            return Some((service, CacheLocation::Variant(idx)));
+        }
+
+        // Search in base variant
+        if let Some((idx, service)) = self
+            .diag_database
+            .base_variant()
+            .ok()
+            .and_then(|v| v.diag_layer())
+            .and_then(|dl| dl.diag_services())
+            .and_then(|services| {
+                services.iter().enumerate().find_map(|(idx, s)| {
+                    let service = datatypes::DiagService(s);
+                    predicate(&service).then_some((idx, service))
+                })
+            })
+        {
+            return Some((service, CacheLocation::BaseVariant(idx)));
+        }
+
+        // Search in ECU shared
+        if let Some((idx, service)) = self.find_ecu_shared_services().and_then(|services| {
+            services
+                .iter()
+                .enumerate()
+                .find_map(|(idx, s)| predicate(s).then_some((idx, s.clone())))
+        }) {
+            return Some((service, CacheLocation::EcuShared(idx)));
+        }
+
+        None
+    }
+
+    fn get_service_by_location(
+        &self,
+        location: &CacheLocation,
+    ) -> Option<datatypes::DiagService<'_>> {
+        match location {
+            CacheLocation::Variant(idx) => self
+                .variant()
+                .and_then(|v| v.diag_layer())
+                .and_then(|dl| dl.diag_services())
+                .map(|s| s.get(*idx))
+                .map(datatypes::DiagService),
+            CacheLocation::BaseVariant(idx) => self
+                .diag_database
+                .base_variant()
+                .ok()
+                .and_then(|v| v.diag_layer())
+                .and_then(|dl| dl.diag_services())
+                .map(|s| s.get(*idx))
+                .map(datatypes::DiagService),
+            CacheLocation::EcuShared(idx) => self
+                .find_ecu_shared_services()
+                .and_then(|services| services.get(*idx).cloned()),
+        }
+    }
+
+    fn search_diag_services<F>(&self, mut predicate: F) -> Option<datatypes::DiagService<'_>>
+    where
+        F: for<'a> FnMut(&datatypes::DiagService<'a>) -> bool,
+    {
+        // Search in current variant
+        if let Some(service) = self
+            .variant()
+            .and_then(|v| v.diag_layer())
+            .and_then(|dl| dl.diag_services())
+            .and_then(|services| {
+                services.into_iter().find_map(|service| {
+                    let service = datatypes::DiagService(service);
+                    predicate(&service).then_some(service)
+                })
+            })
+        {
+            return Some(service);
+        }
+
+        // Search in base variant
+        if let Some(service) = self
+            .diag_database
+            .base_variant()
+            .ok()
+            .and_then(|v| v.diag_layer())
+            .and_then(|dl| dl.diag_services())
+            .and_then(|services| {
+                services.into_iter().find_map(|service| {
+                    let service = datatypes::DiagService(service);
+                    predicate(&service).then_some(service)
+                })
+            })
+        {
+            return Some(service);
+        }
+
+        // Search in ECU shared services
+        self.find_ecu_shared_services()?
+            .into_iter()
+            .find(|service| predicate(service))
+    }
+
+    fn find_ecu_shared_services(&self) -> Option<Vec<datatypes::DiagService<'_>>> {
+        fn find_ecu_shared_services_recursive<'a>(
+            parent_refs: impl Iterator<Item = impl Into<datatypes::ParentRef<'a>>>,
+        ) -> Option<Vec<datatypes::DiagService<'a>>> {
+            parent_refs.into_iter().find_map(|parent_ref| {
+                let parent_ref = parent_ref.into();
+
+                match parent_ref.ref_type().try_into() {
+                    Ok(datatypes::ParentRefType::EcuSharedData) => Some(
+                        parent_ref
+                            .ref__as_ecu_shared_data()
+                            .and_then(|ecu_shared| ecu_shared.diag_layer())
+                            .and_then(|dl| dl.diag_services())
+                            .into_iter()
+                            .flatten()
+                            .map(datatypes::DiagService)
+                            .collect(),
+                    ),
+                    Ok(datatypes::ParentRefType::FunctionalGroup) => parent_ref
+                        .ref__as_functional_group()
+                        .and_then(|fg| fg.parent_refs())
+                        .and_then(|nested_refs| {
+                            find_ecu_shared_services_recursive(nested_refs.iter())
+                        }),
+                    _ => None,
+                }
+            })
+        }
+
+        self.diag_database
+            .ecu_data()
+            .ok()?
+            .functional_groups()?
+            .iter()
+            .find_map(|fg| {
+                fg.parent_refs().and_then(|parent_refs| {
+                    find_ecu_shared_services_recursive(parent_refs.iter().map(datatypes::ParentRef))
+                })
+            })
     }
 
     fn map_param_from_uds(
         &self,
-        mapped_service: &DiagnosticService,
+        mapped_service: &datatypes::DiagService,
         param: &datatypes::Parameter,
         param_name: &str,
         uds_payload: &mut Payload,
         data: &mut MappedDiagServiceResponsePayload,
     ) -> Result<(), DiagServiceError> {
-        match param.value {
-            datatypes::ParameterValue::CodedConst(ref c) => {
-                let diag_type = self
-                    .ecu_data
-                    .diag_coded_types
-                    .get(&c.diag_coded_type)
+        match param.param_type()? {
+            datatypes::ParamType::CodedConst => {
+                let c = param.specific_data_as_coded_const().ok_or(
+                    DiagServiceError::InvalidDatabase(
+                        "Expected CodedConst specific data".to_owned(),
+                    ),
+                )?;
+
+                let diag_type: datatypes::DiagCodedType = c
+                    .diag_coded_type()
+                    .map(|dct| dct.try_into())
+                    .transpose()?
                     .ok_or(DiagServiceError::InvalidDatabase(
-                        "Unable to lookup DiagCodedType".to_owned(),
+                        "Expected DiagCodedType in CodedConst specific data".to_owned(),
                     ))?;
 
                 let value =
-                    operations::extract_diag_data_container(param, uds_payload, diag_type, None)?;
+                    operations::extract_diag_data_container(param, uds_payload, &diag_type, None)?;
 
                 let value = match value {
                     DiagDataTypeContainer::RawContainer(diag_data_type_container_raw) => {
@@ -1707,22 +1766,20 @@ impl<S: SecurityPlugin> EcuManager<S> {
                         ));
                     }
                 };
-
-                let const_value = STRINGS.get(c.value).ok_or_else(|| {
-                    DiagServiceError::InvalidDatabase(format!(
-                        "Unable to find coded const value for param: {}",
-                        param.short_name
-                    ))
-                })?;
+                let const_value = c.coded_value().ok_or(DiagServiceError::InvalidDatabase(
+                    "CodedConst has no coded value".to_owned(),
+                ))?;
                 let expected =
-                    operations::string_to_vec_u8(diag_type.base_datatype(), &const_value)?
+                    operations::string_to_vec_u8(diag_type.base_datatype(), const_value)?
                         .into_iter()
                         .collect::<Vec<_>>();
                 let expected = &expected[expected.len() - value.data.len()..];
                 if value.data != expected {
                     return Err(DiagServiceError::BadPayload(format!(
                         "{}: Expected {:?}, got {:?}",
-                        param.short_name, expected, value.data
+                        param.short_name().unwrap_or_default(),
+                        expected,
+                        value.data
                     )));
                 }
 
@@ -1731,46 +1788,43 @@ impl<S: SecurityPlugin> EcuManager<S> {
                     DiagDataTypeContainer::RawContainer(value),
                 );
             }
-            datatypes::ParameterValue::MatchingRequestParam(ref v) => {
-                let request = self
-                    .ecu_data
-                    .requests
-                    .get(&mapped_service.request_id)
-                    .ok_or_else(|| {
-                        DiagServiceError::UdsLookupError(
-                            "Unable to map concrete requests to service".to_owned(),
-                        )
-                    })?;
-                let params = request
-                    .params
-                    .iter()
-                    .map(|p| {
-                        self.ecu_data
-                            .params
-                            .get(p)
-                            .ok_or(DiagServiceError::InvalidDatabase(
-                                "Param lookup failed".to_owned(),
-                            ))
+            datatypes::ParamType::MatchingRequestParam => {
+                let matching_req_param = param.specific_data_as_matching_request_param().ok_or(
+                    DiagServiceError::InvalidDatabase(
+                        "Expected MatchingRequestParam specific data".to_owned(),
+                    ),
+                )?;
+
+                let request = mapped_service
+                    .request()
+                    .ok_or(DiagServiceError::InvalidDatabase(
+                        "Expected request for service".to_owned(),
+                    ))?;
+
+                let matching_request_param = request
+                    .params()
+                    .and_then(|params| {
+                        params.iter().map(datatypes::Parameter).find(|p| {
+                            p.byte_position() == matching_req_param.request_byte_pos() as u32
+                        })
                     })
-                    .collect::<Result<Vec<_>, DiagServiceError>>()?;
-                let matching_request_param = params
-                    .iter()
-                    .find(|p| p.byte_pos == v.request_byte_pos as u32)
                     .ok_or_else(|| {
                         DiagServiceError::UdsLookupError(format!(
                             "No matching request parameter found for {}",
-                            param.short_name
+                            param.short_name().unwrap_or_default()
                         ))
                     })?;
-                let param_byte_pos = param.byte_pos;
-                let pop = (v.request_byte_pos as u32) < param_byte_pos;
+
+                // using unwrap here is ok, we validated that the byte position is set above.
+                let param_byte_pos = param.byte_position();
+                let pop = (matching_req_param.request_byte_pos() as u32) < param_byte_pos;
                 if pop {
-                    uds_payload.push_slice(param.byte_pos as usize, uds_payload.len())?;
+                    uds_payload.push_slice(param_byte_pos as usize, uds_payload.len())?;
                 }
 
                 self.map_param_from_uds(
                     mapped_service,
-                    matching_request_param,
+                    &matching_request_param,
                     param_name,
                     uds_payload,
                     data,
@@ -1780,32 +1834,41 @@ impl<S: SecurityPlugin> EcuManager<S> {
                     uds_payload.pop_slice()?;
                 }
             }
-            datatypes::ParameterValue::Value(ref v) => {
-                if let Some(dop) = self.ecu_data.data_operations.get(&v.dop) {
-                    self.map_dop_from_uds(mapped_service, dop, param, uds_payload, data)?;
-                } else {
-                    tracing::error!(
-                        ecu_name = %self.ecu_data.ecu_name,
-                        param_name = %param_name,
-                        dop_id = %v.dop,
-                        "DoP lookup failed"
-                    );
-                }
+            datatypes::ParamType::Value => {
+                let v = param
+                    .specific_data_as_value()
+                    .ok_or(DiagServiceError::InvalidDatabase(
+                        "Expected Value specific data".to_owned(),
+                    ))?;
+
+                let dop = v.dop().map(datatypes::DataOperation).ok_or(
+                    DiagServiceError::InvalidDatabase("Value DoP is None".to_owned()),
+                )?;
+                self.map_dop_from_uds(mapped_service, &dop, param, uds_payload, data)?;
             }
-            datatypes::ParameterValue::Reserved(ref r) => {
+            datatypes::ParamType::Reserved => {
+                let r =
+                    param
+                        .specific_data_as_reserved()
+                        .ok_or(DiagServiceError::InvalidDatabase(
+                            "Expected Reserved specific data".to_owned(),
+                        ))?;
+
                 let coded_type = datatypes::DiagCodedType::new_high_low_byte_order(
-                    DataType::UInt32,
-                    DiagCodedTypeVariant::StandardLength(datatypes::StandardLengthType {
-                        bit_length: r.bit_length,
-                        bitmask: None,
-                        condensed: false,
-                    }),
+                    datatypes::DataType::UInt32,
+                    datatypes::DiagCodedTypeVariant::StandardLength(
+                        datatypes::StandardLengthType {
+                            bit_length: r.bit_length(),
+                            bit_mask: None,
+                            condensed: false,
+                        },
+                    ),
                 )?;
 
                 let (param_data, bit_len) = coded_type.decode(
                     uds_payload.data(),
-                    param.byte_pos as usize,
-                    param.bit_pos as usize,
+                    param.byte_position() as usize,
+                    param.bit_position() as usize,
                 )?;
 
                 data.insert(
@@ -1813,13 +1876,34 @@ impl<S: SecurityPlugin> EcuManager<S> {
                     DiagDataTypeContainer::RawContainer(DiagDataTypeContainerRaw {
                         data: param_data,
                         bit_len,
-                        data_type: DataType::UInt32,
+                        data_type: datatypes::DataType::UInt32,
                         compu_method: None,
                     }),
                 );
             }
-            ParameterValue::TableStructParam(ref ts) => {
-                tracing::error!("TableStructParam {ts:#?} not implemented.");
+            datatypes::ParamType::TableEntry => {
+                tracing::error!("TableStructParam not implemented.");
+            }
+            datatypes::ParamType::Dynamic => {
+                tracing::error!("Dynamic ParamType not implemented.");
+            }
+            datatypes::ParamType::LengthKey => {
+                tracing::error!("LengthKey ParamType not implemented.");
+            }
+            datatypes::ParamType::NrcConst => {
+                tracing::error!("NrcConst ParamType not implemented.");
+            }
+            datatypes::ParamType::PhysConst => {
+                tracing::error!("PhysConst ParamType not implemented.");
+            }
+            datatypes::ParamType::System => {
+                tracing::error!("System ParamType not implemented.");
+            }
+            datatypes::ParamType::TableKey => {
+                tracing::error!("TableKey ParamType not implemented.");
+            }
+            datatypes::ParamType::TableStruct => {
+                tracing::error!("TableStruct ParamType not implemented.");
             }
         }
         Ok(())
@@ -1838,125 +1922,83 @@ impl<S: SecurityPlugin> EcuManager<S> {
         };
 
         let switch_key = &mux_dop
-            .switch_key
-            .as_ref()
+            .switch_key()
             .ok_or(DiagServiceError::InvalidDatabase(
                 "Mux switch key is None".to_owned(),
             ))?;
-        let switch_key_dop = switch_key
-            .dop
-            .ok_or(DiagServiceError::InvalidDatabase(
-                "Mux switch key DoP is None".to_owned(),
-            ))
-            .and_then(|dop_key| {
-                self.ecu_data.data_operations.get(&dop_key).ok_or(
-                    DiagServiceError::InvalidDatabase("Mux switch key DoP not found".to_owned()),
-                )
-            })?;
+        let switch_key_dop = switch_key.dop().map(datatypes::DataOperation).ok_or(
+            DiagServiceError::InvalidDatabase("Mux switch key DoP is None".to_owned()),
+        )?;
 
-        match switch_key_dop.variant {
-            datatypes::DataOperationVariant::Normal(ref normal_dop) => {
-                let switch_key_diag_type = self
-                    .ecu_data
-                    .diag_coded_types
-                    .get(&normal_dop.diag_type)
-                    .ok_or(DiagServiceError::InvalidDatabase(
-                        "DiagCodedType lookup for Mux switch key failed".to_owned(),
-                    ))?;
-
-                let selector = value.get("Selector");
+        match switch_key_dop.variant()? {
+            datatypes::DataOperationVariant::Normal(normal_dop) => {
+                let switch_key_diag_type = normal_dop.diag_coded_type()?;
                 let mut mux_payload = Vec::new();
 
-                let switch_key_value = if let Some(selector) = selector {
-                    json_value_to_uds_data(
-                        switch_key_diag_type.base_datatype(),
-                        Some(&normal_dop.compu_method),
-                        selector,
-                    )
-                } else {
-                    let default = match mux_dop.default_case.as_ref() {
-                        Some(default_case) => default_case,
-                        None => {
-                            return Err(DiagServiceError::InvalidRequest(
-                                "No Selector field in json and no default case in Mux".to_owned(),
-                            ));
-                        }
-                    };
+                // Process selector and encode switch key if present
+                let selected_case = value
+                    .get("Selector")
+                    .or(Some(&serde_json::Value::String("0".to_owned())))
+                    .map(|selector| -> Result<_, DiagServiceError> {
+                        let switch_key_value = json_value_to_uds_data(
+                            switch_key_diag_type.base_datatype(),
+                            normal_dop.compu_method().map(|m| m.into()),
+                            selector,
+                        )?;
 
-                    let limit = if let Some(upper) = default.upper_limit.as_ref() {
-                        upper
-                    } else if let Some(lower) = default.lower_limit.as_ref() {
-                        lower
-                    } else {
-                        return Err(DiagServiceError::InvalidDatabase(
-                            "Default case has no upper or lower limit".to_owned(),
-                        ));
-                    };
+                        switch_key_diag_type.encode(
+                            switch_key_value.clone(),
+                            &mut mux_payload,
+                            switch_key.byte_position() as usize,
+                            switch_key.bit_position().unwrap_or(0) as usize,
+                        )?;
 
-                    Ok(match switch_key_diag_type.base_datatype() {
-                        DataType::Int32 => <&datatypes::Limit as TryInto<i32>>::try_into(limit)?
-                            .to_be_bytes()
-                            .to_vec(),
-                        DataType::UInt32 => <&datatypes::Limit as TryInto<u32>>::try_into(limit)?
-                            .to_be_bytes()
-                            .to_vec(),
-                        DataType::Float32 => <&datatypes::Limit as TryInto<f32>>::try_into(limit)?
-                            .to_be_bytes()
-                            .to_vec(),
-                        DataType::Float64 => <&datatypes::Limit as TryInto<f64>>::try_into(limit)?
-                            .to_be_bytes()
-                            .to_vec(),
-                        DataType::AsciiString | DataType::Utf8String | DataType::Unicode2String => {
-                            limit.value.as_bytes().to_vec()
-                        }
-                        DataType::ByteField => {
-                            <&datatypes::Limit as TryInto<Vec<u8>>>::try_into(limit)?
-                        }
+                        let selector = operations::uds_data_to_serializable(
+                            switch_key_diag_type.base_datatype(),
+                            None,
+                            false,
+                            &mux_payload,
+                        )?;
+
+                        Ok(
+                            mux_case_struct_from_selector_value(mux_dop, &selector).and_then(
+                                |(case, struct_)| case.short_name().map(|name| (name, struct_)),
+                            ),
+                        )
                     })
-                }?;
+                    .transpose()?
+                    .flatten();
 
-                switch_key_diag_type.encode(
-                    switch_key_value.clone(),
-                    &mut mux_payload,
-                    switch_key.byte_position as usize,
-                    switch_key.bit_position as usize,
-                )?;
-
-                let selector = operations::uds_data_to_serializable(
-                    switch_key_diag_type.base_datatype(),
-                    None,
-                    false,
-                    &mux_payload,
-                )?;
-
-                let case = mux_case_from_selector_value(mux_dop, &selector)
-                    .or(mux_dop.default_case.as_ref())
+                // Get case name and structure from selected case or default
+                let (case_name, struct_) = selected_case
+                    .or_else(|| {
+                        mux_dop.default_case().and_then(|default_case| {
+                            default_case.short_name().and_then(|name| {
+                                default_case
+                                    .structure()
+                                    .and_then(|s| {
+                                        s.specific_data_as_structure().map(|s| Some(s.into()))
+                                    })
+                                    .map(|struct_| (name, struct_))
+                            })
+                        })
+                    })
                     .ok_or_else(|| {
                         DiagServiceError::InvalidRequest(
                             "Cannot find selector value or default case".to_owned(),
                         )
                     })?;
 
-                if let Some(structure) = case
-                    .structure
-                    .map(|id| self.get_basic_structure(id))
-                    .transpose()?
-                    .flatten()
-                {
-                    let case_name = get_string!(case.short_name).map_err(|_| {
-                        DiagServiceError::InvalidDatabase(
-                            "Mux case short name not found".to_owned(),
-                        )
+                if let Some(struct_) = struct_ {
+                    let struct_data = value.get(case_name).ok_or_else(|| {
+                        DiagServiceError::BadPayload(format!(
+                            "Mux case {case_name} value not found in json"
+                        ))
                     })?;
 
-                    let struct_data =
-                        value
-                            .get(&case_name)
-                            .ok_or(DiagServiceError::BadPayload(format!(
-                                "Mux case {case_name} value not found in json",
-                            )))?;
                     let mut struct_payload = Vec::new();
-                    self.map_struct_to_uds(structure, struct_data, &mut struct_payload)?;
+                    self.map_struct_to_uds(&struct_, 0, struct_data, &mut struct_payload)?;
+
                     mux_payload.extend_from_slice(&struct_payload);
                 }
 
@@ -1972,6 +2014,7 @@ impl<S: SecurityPlugin> EcuManager<S> {
     fn map_struct_to_uds(
         &self,
         structure: &datatypes::StructureDop,
+        struct_byte_pos: usize,
         value: &serde_json::Value,
         payload: &mut Vec<u8>,
     ) -> Result<(), DiagServiceError> {
@@ -1980,30 +2023,27 @@ impl<S: SecurityPlugin> EcuManager<S> {
                 "Expected value to be object type, but it was: {value:#?}"
             )));
         };
-        for param in structure.params.iter() {
-            let param =
-                self.ecu_data
-                    .params
-                    .get(param)
-                    .ok_or(DiagServiceError::InvalidDatabase(
-                        "StaticField Param not found".to_owned(),
-                    ))?;
-            let short_name = STRINGS.get(param.short_name).ok_or_else(|| {
-                DiagServiceError::InvalidDatabase(format!(
-                    "Unable to find short name for param: {}",
-                    param.short_name
-                ))
-            })?;
 
-            let param_value = value
-                .get(&short_name)
-                .ok_or(DiagServiceError::InvalidRequest(format!(
-                    "Parameter '{short_name}' not part of the request body"
-                )))?;
+        structure
+            .params()
+            .into_iter()
+            .flatten()
+            .map(datatypes::Parameter)
+            .try_for_each(|param| {
+                let short_name = param.short_name().ok_or_else(|| {
+                    DiagServiceError::InvalidDatabase(
+                        "Unable to find short name for param".to_owned(),
+                    )
+                })?;
 
-            self.map_param_to_uds(param, param_value, payload)?;
-        }
-        Ok(())
+                let param_value = value
+                    .get(short_name)
+                    .ok_or(DiagServiceError::InvalidRequest(format!(
+                        "Parameter '{short_name}' not part of the request body"
+                    )))?;
+
+                self.map_param_to_uds(&param, param_value, payload, struct_byte_pos)
+            })
     }
 
     fn map_param_to_uds(
@@ -2011,122 +2051,130 @@ impl<S: SecurityPlugin> EcuManager<S> {
         param: &datatypes::Parameter,
         value: &serde_json::Value,
         payload: &mut Vec<u8>,
+        parent_byte_pos: usize,
     ) -> Result<(), DiagServiceError> {
         //  ISO_22901-1:2008-11 7.3.5.4
         //  MATCHING-REQUEST-PARAM, DYNAMIC and NRC-CONST are only allowed in responses
-        match &param.value {
-            datatypes::ParameterValue::CodedConst(_coded_const) => Ok(()),
-            datatypes::ParameterValue::MatchingRequestParam(_matching_request_param) => {
-                Err(DiagServiceError::InvalidRequest(
-                    "MatchingRequestParam cannot be used in a request".to_owned(),
-                ))
-            }
-            datatypes::ParameterValue::Value(value_data) => {
-                if let Some(dop) = self.ecu_data.data_operations.get(&value_data.dop) {
-                    match &dop.variant {
-                        datatypes::DataOperationVariant::Normal(normal_dop) => {
-                            let Some(diag_type) =
-                                self.ecu_data.diag_coded_types.get(&normal_dop.diag_type)
-                            else {
-                                tracing::error!(
-                                    ecu_name = %self.ecu_data.ecu_name,
-                                    param_short_name = %param.short_name,
-                                    "Unable to lookup DiagCodedType for param"
-                                );
-                                return Err(DiagServiceError::InvalidDatabase(
-                                    "Unable to lookup DiagCodedType".to_owned(),
-                                ));
-                            };
-                            let uds_data = json_value_to_uds_data(
-                                diag_type.base_datatype(),
-                                Some(&normal_dop.compu_method),
-                                value,
-                            )?;
-                            diag_type.encode(
-                                uds_data,
-                                payload,
-                                param.byte_pos as usize,
-                                param.bit_pos as usize,
-                            )?;
-                            Ok(())
-                        }
-                        datatypes::DataOperationVariant::EndOfPdu(end_of_pdu_dop) => {
-                            let Some(value) = value.as_array() else {
-                                return Err(DiagServiceError::InvalidRequest(
-                                    "Expected array value".to_owned(),
-                                ));
-                            };
-                            // Check length of provided array
-                            if value.len() < end_of_pdu_dop.min_items as usize
-                                || end_of_pdu_dop
-                                    .max_items
-                                    .is_some_and(|max| max as usize > value.len())
-                            {
-                                return Err(DiagServiceError::InvalidRequest(
-                                    "EndOfPdu expected different amount of items".to_owned(),
-                                ));
-                            }
+        match param.param_type()? {
+            datatypes::ParamType::CodedConst => Ok(()),
+            datatypes::ParamType::MatchingRequestParam => Err(DiagServiceError::InvalidRequest(
+                "MatchingRequestParam only supported for responses".to_owned(),
+            )),
+            datatypes::ParamType::Value => {
+                let value_data =
+                    param
+                        .specific_data_as_value()
+                        .ok_or(DiagServiceError::InvalidDatabase(
+                            "Expected Value specific data".to_owned(),
+                        ))?;
 
-                            let s = match &end_of_pdu_dop.field.value {
-                                DopFieldValue::BasicStruct(s) => s,
-                                DopFieldValue::EnvDataDesc(_) => {
-                                    return Err(DiagServiceError::InvalidDatabase(
-                                        "EndOfPdu failed does not contain a struct".to_owned(),
-                                    ));
-                                }
-                            };
-
-                            let structure =
-                                self.get_basic_structure(s.struct_id)?.ok_or_else(|| {
-                                    DiagServiceError::InvalidDatabase(
-                                        "EndOfPdu failed to find struct".to_owned(),
-                                    )
-                                })?;
-                            for v in value {
-                                self.map_struct_to_uds(structure, v, payload)?;
-                            }
-                            Ok(())
-                        }
-                        datatypes::DataOperationVariant::Structure(structure_dop) => {
-                            self.map_struct_to_uds(structure_dop, value, payload)
-                        }
-                        datatypes::DataOperationVariant::StaticField(_static_field_dop) => {
-                            Err(DiagServiceError::ParameterConversionError(
-                                "Mapping StaticField DoP to UDS payload not implemented".to_owned(),
-                            ))
-                        }
-                        datatypes::DataOperationVariant::Mux(mux_dop) => {
-                            self.map_mux_to_uds(mux_dop, value, payload)
-                        }
-                        datatypes::DataOperationVariant::EnvDataDesc(_)
-                        | datatypes::DataOperationVariant::EnvData(_)
-                        | datatypes::DataOperationVariant::Dtc(_) => {
-                            Err(DiagServiceError::InvalidDatabase(
-                                "EnvData(Desc) and DTC DoPs cannot be mapped via parameters to \
-                                 request, but handled via a dedicated 'faults' endpoint"
-                                    .to_owned(),
-                            ))
-                        }
-                        DataOperationVariant::DynamicLengthField(_) => {
-                            Err(DiagServiceError::ParameterConversionError(
-                                "Mapping DynamicLengthField DoP to UDS payload not implemented"
-                                    .to_owned(),
-                            ))
-                        }
+                let dop = match value_data.dop().map(datatypes::DataOperation) {
+                    Some(dop) => dop,
+                    None => {
+                        return Err(DiagServiceError::InvalidDatabase(
+                            "DoP lookup failed".to_owned(),
+                        ));
                     }
-                } else {
-                    tracing::error!(
-                        ecu_name = %self.ecu_data.ecu_name,
-                        dop_id = %value_data.dop,
-                        "DoP lookup failed"
-                    );
-                    Err(DiagServiceError::InvalidDatabase(
-                        "DoP lookup failed".to_owned(),
-                    ))
+                };
+                match dop.variant()? {
+                    datatypes::DataOperationVariant::Normal(normal_dop) => {
+                        let diag_type = normal_dop.diag_coded_type()?;
+                        let uds_data = json_value_to_uds_data(
+                            diag_type.base_datatype(),
+                            normal_dop.compu_method().map(|m| m.into()),
+                            value,
+                        )?;
+                        diag_type.encode(
+                            uds_data,
+                            payload,
+                            parent_byte_pos + param.byte_position() as usize,
+                            param.bit_position() as usize,
+                        )?;
+                        Ok(())
+                    }
+                    datatypes::DataOperationVariant::EndOfPdu(end_of_pdu_dop) => {
+                        let Some(value) = value.as_array() else {
+                            return Err(DiagServiceError::InvalidRequest(
+                                "Expected array value".to_owned(),
+                            ));
+                        };
+                        // Check length of provided array
+                        if value.len() < end_of_pdu_dop.min_number_of_items().unwrap_or(0) as usize
+                            || end_of_pdu_dop
+                                .max_number_of_items()
+                                .is_some_and(|max| max > value.len() as u32)
+                        {
+                            return Err(DiagServiceError::InvalidRequest(
+                                "EndOfPdu expected different amount of items".to_owned(),
+                            ));
+                        }
+
+                        let structure = match end_of_pdu_dop.field().and_then(|s| {
+                            s.basic_structure().map(|s| {
+                                s.specific_data_as_structure().map(datatypes::StructureDop)
+                            })
+                        }) {
+                            Some(s) => s,
+                            None => {
+                                return Err(DiagServiceError::InvalidDatabase(
+                                    "EndOfPdu has no basic structure".to_owned(),
+                                ));
+                            }
+                        }
+                        .ok_or(DiagServiceError::InvalidDatabase(
+                            "EndOfPdu basic structure lookup failed".to_owned(),
+                        ))?;
+
+                        for v in value {
+                            self.map_struct_to_uds(
+                                &structure,
+                                param.byte_position() as usize + parent_byte_pos,
+                                v,
+                                payload,
+                            )?;
+                        }
+                        Ok(())
+                    }
+                    datatypes::DataOperationVariant::Structure(structure_dop) => self
+                        .map_struct_to_uds(
+                            &structure_dop,
+                            param.byte_position() as usize + parent_byte_pos,
+                            value,
+                            payload,
+                        ),
+                    datatypes::DataOperationVariant::StaticField(_static_field) => {
+                        Err(DiagServiceError::ParameterConversionError(
+                            "Mapping StaticField DoP to UDS payload not implemented".to_owned(),
+                        ))
+                    }
+                    datatypes::DataOperationVariant::Mux(mux_dop) => {
+                        self.map_mux_to_uds(&mux_dop, value, payload)
+                    }
+                    datatypes::DataOperationVariant::EnvDataDesc(_)
+                    | datatypes::DataOperationVariant::EnvData(_)
+                    | datatypes::DataOperationVariant::Dtc(_) => {
+                        Err(DiagServiceError::InvalidDatabase(
+                            "EnvData(Desc) and DTC DoPs cannot be mapped via parameters to \
+                             request, but handled via a dedicated 'faults' endpoint"
+                                .to_owned(),
+                        ))
+                    }
+                    datatypes::DataOperationVariant::DynamicLengthField(_dynamic_length_field) => {
+                        Err(DiagServiceError::ParameterConversionError(
+                            "Mapping DynamicLengthField DoP to UDS payload not implemented"
+                                .to_owned(),
+                        ))
+                    }
                 }
             }
-            datatypes::ParameterValue::Reserved(reserved_param) => {
-                let mut bits = reserved_param.bit_length as usize;
+            datatypes::ParamType::Reserved => {
+                let reserved_param =
+                    param
+                        .specific_data_as_reserved()
+                        .ok_or(DiagServiceError::InvalidDatabase(
+                            "Expected Reserved specific data".to_owned(),
+                        ))?;
+                let mut bits = reserved_param.bit_length() as usize;
                 let mut mapped = Vec::new();
                 // pad full bytes
                 while bits > 8 {
@@ -2135,8 +2183,29 @@ impl<S: SecurityPlugin> EcuManager<S> {
                 }
                 Ok(())
             }
-            ParameterValue::TableStructParam(_) => Err(DiagServiceError::ParameterConversionError(
+            datatypes::ParamType::TableStruct => Err(DiagServiceError::ParameterConversionError(
                 "Mapping TableStructParam DoP to UDS payload not implemented".to_owned(),
+            )),
+            datatypes::ParamType::Dynamic => Err(DiagServiceError::ParameterConversionError(
+                "Mapping Dynamic DoP to UDS payload not implemented".to_owned(),
+            )),
+            datatypes::ParamType::LengthKey => Err(DiagServiceError::ParameterConversionError(
+                "Mapping LengthKey DoP to UDS payload not implemented".to_owned(),
+            )),
+            datatypes::ParamType::NrcConst => Err(DiagServiceError::ParameterConversionError(
+                "Mapping NrcConst DoP to UDS payload not implemented".to_owned(),
+            )),
+            datatypes::ParamType::PhysConst => Err(DiagServiceError::ParameterConversionError(
+                "Mapping PhysConst DoP to UDS payload not implemented".to_owned(),
+            )),
+            datatypes::ParamType::System => Err(DiagServiceError::ParameterConversionError(
+                "Mapping System DoP to UDS payload not implemented".to_owned(),
+            )),
+            datatypes::ParamType::TableEntry => Err(DiagServiceError::ParameterConversionError(
+                "Mapping TableEntry DoP to UDS payload not implemented".to_owned(),
+            )),
+            datatypes::ParamType::TableKey => Err(DiagServiceError::ParameterConversionError(
+                "Mapping TableKey DoP to UDS payload not implemented".to_owned(),
             )),
         }
     }
@@ -2144,25 +2213,28 @@ impl<S: SecurityPlugin> EcuManager<S> {
     fn map_struct_from_uds(
         &self,
         structure: &datatypes::StructureDop,
-        mapped_service: &DiagnosticService,
+        mapped_service: &datatypes::DiagService,
         uds_payload: &mut Payload,
     ) -> Result<HashMap<String, DiagDataTypeContainer>, DiagServiceError> {
         let mut data = HashMap::new();
-        for param in structure.params.iter() {
-            let param =
-                self.ecu_data
-                    .params
-                    .get(param)
-                    .ok_or(DiagServiceError::InvalidDatabase(
-                        "StaticField Param not found".to_owned(),
-                    ))?;
-            let short_name = STRINGS.get(param.short_name).ok_or_else(|| {
-                DiagServiceError::InvalidDatabase(format!(
-                    "Unable to find short name for param: {}",
-                    param.short_name
-                ))
+        let params = match structure.params() {
+            Some(p) => p,
+            None => {
+                return Ok(data);
+            }
+        };
+
+        for param in params.iter() {
+            let short_name = param.short_name().ok_or_else(|| {
+                DiagServiceError::InvalidDatabase("Unable to find short name for param".to_owned())
             })?;
-            self.map_param_from_uds(mapped_service, param, &short_name, uds_payload, &mut data)?;
+            self.map_param_from_uds(
+                mapped_service,
+                &param.into(),
+                short_name,
+                uds_payload,
+                &mut data,
+            )?;
         }
         Ok(data)
     }
@@ -2170,7 +2242,7 @@ impl<S: SecurityPlugin> EcuManager<S> {
     fn map_nested_struct_from_uds(
         &self,
         structure: &datatypes::StructureDop,
-        mapped_service: &DiagnosticService,
+        mapped_service: &datatypes::DiagService,
         uds_payload: &mut Payload,
         nested_structs: &mut Vec<HashMap<String, DiagDataTypeContainer>>,
     ) -> Result<(), DiagServiceError> {
@@ -2180,62 +2252,53 @@ impl<S: SecurityPlugin> EcuManager<S> {
 
     fn map_dop_from_uds(
         &self,
-        mapped_service: &DiagnosticService,
+        mapped_service: &datatypes::DiagService,
         dop: &datatypes::DataOperation,
         param: &datatypes::Parameter,
         uds_payload: &mut Payload,
         data: &mut MappedDiagServiceResponsePayload,
     ) -> Result<(), DiagServiceError> {
-        let short_name = STRINGS.get(param.short_name).ok_or_else(|| {
-            DiagServiceError::InvalidDatabase(
-                "Unable to find short name for param in Strings".to_string(),
-            )
-        })?;
+        let short_name = param
+            .short_name()
+            .ok_or_else(|| {
+                DiagServiceError::InvalidDatabase(
+                    "Unable to find short name for param in Strings".to_string(),
+                )
+            })?
+            .to_owned();
 
-        match dop.variant {
-            datatypes::DataOperationVariant::Normal(ref normal_dop) => {
-                let diag_coded_type = self
-                    .ecu_data
-                    .diag_coded_types
-                    .get(&normal_dop.diag_type)
-                    .ok_or(DiagServiceError::InvalidDatabase(
-                        "DiagCodedType lookup for NormalDoP failed".to_owned(),
-                    ))?;
+        match dop.variant()? {
+            datatypes::DataOperationVariant::Normal(normal_dop) => {
+                let diag_coded_type = normal_dop.diag_coded_type()?;
+                let compu_method = normal_dop.compu_method().map(|s| s.into()).ok_or(
+                    DiagServiceError::InvalidDatabase(format!(
+                        "param {short_name} has no compu method"
+                    )),
+                )?;
 
-                let compu_method = &normal_dop.compu_method;
                 data.insert(
                     short_name,
                     operations::extract_diag_data_container(
                         param,
                         uds_payload,
-                        diag_coded_type,
+                        &diag_coded_type,
                         Some(compu_method),
                     )?,
                 );
             }
-            datatypes::DataOperationVariant::EndOfPdu(ref end_of_pdu_dop) => {
+            datatypes::DataOperationVariant::EndOfPdu(end_of_pdu_dop) => {
                 // When a response is read the values of `max-number-of-items`
                 // and `min-number-of-items` are deliberately ignored,
                 // according to ISO 22901:2008 7.3.6.10.6
-                let s = match &end_of_pdu_dop.field.value {
-                    DopFieldValue::BasicStruct(s) => s,
-                    DopFieldValue::EnvDataDesc(_) => {
-                        return Err(DiagServiceError::InvalidDatabase(
-                            "EndOfPdu failed does not contain a struct".to_owned(),
-                        ));
-                    }
-                };
-                let struct_ = self.get_basic_structure(s.struct_id)?.ok_or_else(|| {
-                    DiagServiceError::InvalidDatabase("EndOfPdu failed to find struct".to_owned())
-                })?;
-
+                let struct_ =
+                    extract_struct_dop_from_field(end_of_pdu_dop.field().map(datatypes::DopField))?;
                 let mut nested_structs = Vec::new();
                 uds_payload.consume();
                 loop {
                     uds_payload.push_slice_to_abs_end(uds_payload.last_read_byte_pos())?;
                     if !uds_payload.exhausted() {
                         match self.map_nested_struct_from_uds(
-                            struct_,
+                            &struct_,
                             mapped_service,
                             uds_payload,
                             &mut nested_structs,
@@ -2271,48 +2334,49 @@ impl<S: SecurityPlugin> EcuManager<S> {
                     DiagDataTypeContainer::RepeatingStruct(nested_structs),
                 );
             }
-            datatypes::DataOperationVariant::Structure(ref structure) => {
-                if uds_payload.len() < structure.byte_size as usize {
+
+            datatypes::DataOperationVariant::Structure(structure_dop) => {
+                let byte_size =
+                    structure_dop
+                        .byte_size()
+                        .ok_or(DiagServiceError::InvalidDatabase(
+                            "Structure has no byte size".to_owned(),
+                        ))? as usize;
+
+                if uds_payload.len() < byte_size {
                     return Err(DiagServiceError::NotEnoughData {
-                        expected: structure.byte_size as usize,
+                        expected: byte_size,
                         actual: uds_payload.len(),
                     });
                 }
-                for param in structure.params.iter() {
-                    let param = self.ecu_data.params.get(param).ok_or(
-                        DiagServiceError::InvalidDatabase("Structure Param not found".to_owned()),
-                    )?;
-                    self.map_param_from_uds(mapped_service, param, &short_name, uds_payload, data)?;
+
+                if let Some(params) = structure_dop.params() {
+                    for param in params.iter().map(datatypes::Parameter) {
+                        self.map_param_from_uds(
+                            mapped_service,
+                            &param,
+                            &short_name,
+                            uds_payload,
+                            data,
+                        )?;
+                    }
                 }
             }
-            datatypes::DataOperationVariant::EnvDataDesc(ref _env_data_desc_dop) => {
-                tracing::warn!("EnvDataDesc not supported");
-            }
-            datatypes::DataOperationVariant::EnvData(ref _env_data_dop) => {
-                tracing::warn!("EnvData not supported");
-            }
-            datatypes::DataOperationVariant::Dtc(ref dtc_dop) => {
-                let coded_type = self
-                    .ecu_data
-                    .diag_coded_types
-                    .get(&dtc_dop.diag_coded_type)
-                    .ok_or(DiagServiceError::InvalidDatabase(
-                        "DTC DiagCodedType lookup failed".to_owned(),
-                    ))?;
+            datatypes::DataOperationVariant::Dtc(dtc_dop) => {
+                let coded_type: datatypes::DiagCodedType = dtc_dop.diag_coded_type()?;
 
                 let (dtc_value, _size) = coded_type.decode(
                     uds_payload.data(),
-                    param.byte_pos as usize,
-                    param.bit_pos as usize,
+                    param.byte_position() as usize,
+                    param.bit_position() as usize,
                 )?;
 
                 let code: u32 =
                     DiagDataValue::new(coded_type.base_datatype(), &dtc_value)?.try_into()?;
 
                 let record = dtc_dop
-                    .dtc_refs
-                    .iter()
-                    .find_map(|id| self.ecu_data.dtcs.get(id))
+                    .dtcs()
+                    .and_then(|dtcs| dtcs.iter().find(|dtc| dtc.trouble_code() == code))
                     .ok_or(DiagServiceError::BadPayload(format!(
                         "No DTC with code {code:X} found in DTC references",
                     )))?;
@@ -2321,49 +2385,42 @@ impl<S: SecurityPlugin> EcuManager<S> {
                     "DtcRecord".to_owned(),
                     DiagDataTypeContainer::DtcStruct(DiagDataContainerDtc {
                         code,
-                        display_code: get_string_from_option!(record.display_code),
-                        fault_name: get_string_from_option_with_default!(record.fault_name),
-                        severity: record.severity,
-                        bit_pos: param.bit_pos,
+                        display_code: record.display_trouble_code().map(ToOwned::to_owned),
+                        fault_name: record
+                            .text()
+                            .and_then(|text| text.value().map(|s| s.to_owned()))
+                            .unwrap_or_default(),
+                        severity: record.level().unwrap_or_default(),
+                        bit_pos: param.byte_position(),
                         bit_len: DTC_CODE_BIT_LEN,
-                        byte_pos: param.byte_pos,
+                        byte_pos: param.byte_position(),
                     }),
                 );
             }
-            datatypes::DataOperationVariant::StaticField(ref static_field_dop) => {
-                let static_field_size = (static_field_dop.item_byte_size
-                    * static_field_dop.fixed_number_of_items)
+            datatypes::DataOperationVariant::StaticField(static_field_dop) => {
+                let static_field_size = (static_field_dop.item_byte_size()
+                    * static_field_dop.fixed_number_of_items())
                     as usize;
+
                 if uds_payload.len() < static_field_size {
                     return Err(DiagServiceError::BadPayload(format!(
                         "Not enough data for static field: {} < {static_field_size}",
                         uds_payload.len(),
                     )));
                 }
-                let s = match &static_field_dop.field.value {
-                    DopFieldValue::BasicStruct(s) => s,
-                    DopFieldValue::EnvDataDesc(_) => {
-                        return Err(DiagServiceError::InvalidDatabase(
-                            "EndOfPdu failed does not contain a struct".to_owned(),
-                        ));
-                    }
-                };
-
-                let basic_structure = self.get_basic_structure(s.struct_id)?.ok_or_else(|| {
-                    DiagServiceError::InvalidDatabase(
-                        "StaticField failed to find struct".to_owned(),
-                    )
-                })?;
-
+                let basic_structure = extract_struct_dop_from_field(
+                    static_field_dop.field().map(datatypes::DopField),
+                )?;
                 let mut nested_structs = Vec::new();
 
-                for i in 0..static_field_dop.fixed_number_of_items {
-                    let start = (param.byte_pos + i * static_field_dop.item_byte_size) as usize;
-                    let end = start + static_field_dop.item_byte_size as usize;
+                for i in 0..static_field_dop.fixed_number_of_items() {
+                    let param_byte_pos = param.byte_position();
+                    let start = (param_byte_pos + i * static_field_dop.item_byte_size()) as usize;
+                    let end = start + static_field_dop.item_byte_size() as usize;
                     uds_payload.push_slice(start, end)?;
 
                     self.map_nested_struct_from_uds(
-                        basic_structure,
+                        &basic_structure,
                         mapped_service,
                         uds_payload,
                         &mut nested_structs,
@@ -2377,93 +2434,92 @@ impl<S: SecurityPlugin> EcuManager<S> {
                     DiagDataTypeContainer::RepeatingStruct(nested_structs),
                 );
             }
-            datatypes::DataOperationVariant::Mux(ref mux_dop) => {
-                uds_payload.push_slice(param.byte_pos as usize, uds_payload.len())?;
-                self.map_mux_from_uds(mapped_service, uds_payload, data, short_name, mux_dop)?;
+            datatypes::DataOperationVariant::Mux(mux_dop) => {
+                let param_byte_pos = param.byte_position();
+                uds_payload.push_slice(param_byte_pos as usize, uds_payload.len())?;
+                self.map_mux_from_uds(mapped_service, uds_payload, data, short_name, &mux_dop)?;
                 uds_payload.pop_slice()?;
             }
-            DataOperationVariant::DynamicLengthField(ref dynamic_length_field_dop) => {
-                let num_items_dop = self
-                    .ecu_data
-                    .data_operations
-                    .get(&dynamic_length_field_dop.num_items_dop)
+            datatypes::DataOperationVariant::DynamicLengthField(dynamic_length_field_dop) => {
+                let determine_num_items = dynamic_length_field_dop
+                    .determine_number_of_items()
                     .ok_or(DiagServiceError::InvalidDatabase(
-                        "DynamicLengthField determine_number_of_items_dop not found".to_owned(),
+                        "DynamicLengthField determine_number_of_items_of_items is None".to_owned(),
                     ))?;
 
-                let num_items_dop = match &num_items_dop.variant {
-                    DataOperationVariant::Normal(n) => n,
-                    _ => {
-                        return Err(DiagServiceError::InvalidDatabase(
-                            "DynamicLengthField num_items_dop is not a NormalDoP".to_owned(),
-                        ));
-                    }
-                };
-
-                let num_items_diag_type = self
-                    .ecu_data
-                    .diag_coded_types
-                    .get(&num_items_dop.diag_type)
+                let determine_num_items_dop = determine_num_items
+                    .dop()
+                    .map(datatypes::DataOperation)
                     .ok_or(DiagServiceError::InvalidDatabase(
-                        "DiagCodedType lookup for DynamicLengthField failed".to_owned(),
+                        "DynamicLengthField determine_number_of_items DoP is None".to_owned(),
                     ))?;
+
+                let num_items_dop = determine_num_items_dop
+                    .specific_data_as_normal_dop()
+                    .map(datatypes::NormalDop)
+                    .ok_or(DiagServiceError::InvalidDatabase(
+                        "DynamicLengthField num_items DoP is not a NormalDoP".to_owned(),
+                    ))?;
+
+                let num_items_diag_type: datatypes::DiagCodedType =
+                    num_items_dop.diag_coded_type()?;
 
                 let (num_items_data, _bit_len) = num_items_diag_type.decode(
-                    uds_payload.data().get(param.byte_pos as usize..).ok_or(
-                        DiagServiceError::BadPayload(
+                    uds_payload
+                        .data()
+                        .get(param.byte_position() as usize..)
+                        .ok_or(DiagServiceError::BadPayload(
                             "Not enough bytes to get DynamicLengthField item count".to_owned(),
-                        ),
-                    )?,
-                    dynamic_length_field_dop.num_items_byte_pos as usize,
-                    dynamic_length_field_dop.num_items_bit_pos as usize,
+                        ))?,
+                    determine_num_items.byte_position() as usize,
+                    determine_num_items.bit_position() as usize,
                 )?;
 
                 let num_items_diag_val = operations::uds_data_to_serializable(
-                    DataType::UInt32, // Using hard coded UInt32 as per ISO 22901-1:2008
-                    None,             // Also according per spec, no compu method defined.
+                    datatypes::DataType::UInt32, // Using hard coded UInt32 as per ISO 22901-1:2008
+                    None, // Also according per spec, no compu method defined.
                     false,
                     &num_items_data,
                 )?;
 
-                let repeated_dop = self
-                    .ecu_data
-                    .data_operations
-                    .get(&dynamic_length_field_dop.repeated_dop_id)
-                    .ok_or(DiagServiceError::InvalidDatabase(
-                        "DynamicLengthField repeated_dop not found".to_owned(),
-                    ))?;
+                let repeated_dop =
+                    dynamic_length_field_dop
+                        .field()
+                        .ok_or(DiagServiceError::InvalidDatabase(
+                            "DynamicLengthField field is None".to_owned(),
+                        ))?;
 
                 let num_items: u32 = num_items_diag_val.try_into()?;
-                uds_payload.set_last_read_byte_pos(
-                    dynamic_length_field_dop.num_items_byte_pos as usize + num_items_data.len(),
-                );
+                let num_items_byte_pos = determine_num_items.byte_position() as usize;
+                uds_payload.set_last_read_byte_pos(num_items_byte_pos + num_items_data.len());
 
                 let mut repeated_data = Vec::new();
 
                 uds_payload.push_slice(
-                    dynamic_length_field_dop.first_element_offset,
+                    dynamic_length_field_dop.offset() as usize,
                     uds_payload.len(),
                 )?;
                 let mut start = uds_payload.last_read_byte_pos() + uds_payload.bytes_to_skip();
 
                 for _ in 0..num_items {
                     uds_payload.push_slice(start, uds_payload.len())?;
-
-                    match &repeated_dop.variant {
-                        DataOperationVariant::Structure(s) => {
-                            let struct_data =
-                                self.map_struct_from_uds(s, mapped_service, uds_payload)?;
-                            repeated_data.push(struct_data);
-                        }
-                        DataOperationVariant::EnvDataDesc(_) => {
-                            tracing::warn!("DynamicLengthField with EnvDataDesc not implemented");
-                        }
-                        _ => {
-                            uds_payload.pop_slice()?;
-                            return Err(DiagServiceError::InvalidDatabase(
-                                "DynamicLengthField repeated_dop is not a StructureDoP".to_owned(),
-                            ));
-                        }
+                    if let Some(s) = repeated_dop
+                        .basic_structure()
+                        .and_then(|d| d.specific_data_as_structure().map(datatypes::StructureDop))
+                    {
+                        let struct_data =
+                            self.map_struct_from_uds(&s, mapped_service, uds_payload)?;
+                        repeated_data.push(struct_data);
+                    } else if repeated_dop.env_data_desc().is_some() {
+                        tracing::warn!("DynamicLengthField with EnvDataDesc not implemented");
+                        uds_payload.pop_slice()?;
+                        continue;
+                    } else {
+                        uds_payload.pop_slice()?;
+                        return Err(DiagServiceError::InvalidDatabase(
+                            "DynamicLengthField repeated_dop is neither Structure nor EnvDataDesc"
+                                .to_owned(),
+                        ));
                     }
 
                     uds_payload.pop_slice()?;
@@ -2476,6 +2532,11 @@ impl<S: SecurityPlugin> EcuManager<S> {
                     DiagDataTypeContainer::RepeatingStruct(repeated_data),
                 );
             }
+
+            _ => tracing::warn!(
+                "DOP variant not supported yet: {:?}",
+                dop.specific_data_type().variant_name().unwrap_or("Unknown")
+            ),
         }
 
         Ok(())
@@ -2483,58 +2544,45 @@ impl<S: SecurityPlugin> EcuManager<S> {
 
     fn map_mux_from_uds(
         &self,
-        mapped_service: &DiagnosticService,
+        mapped_service: &datatypes::DiagService,
         uds_payload: &mut Payload,
         data: &mut MappedDiagServiceResponsePayload,
         short_name: String,
         mux_dop: &datatypes::MuxDop,
     ) -> Result<(), DiagServiceError> {
         // Byte pos is the relative position of the data in the uds_payload
-        let byte_pos = mux_dop.byte_position as usize;
+        let byte_pos = mux_dop.byte_position() as usize;
 
         let switch_key = &mux_dop
-            .switch_key
-            .as_ref()
+            .switch_key()
             .ok_or(DiagServiceError::InvalidDatabase(
                 "Mux switch key not defined".to_owned(),
             ))?;
 
         // Byte position of the switch key is relative to the mux byte position
         let mut mux_data = HashMap::new();
-        let dop = switch_key
-            .dop
-            .ok_or(DiagServiceError::InvalidDatabase(
-                "Mux switch key DoP is None".to_owned(),
-            ))
-            .and_then(|dop_key| {
-                self.ecu_data.data_operations.get(&dop_key).ok_or(
-                    DiagServiceError::InvalidDatabase("Mux switch key DoP not found".to_owned()),
-                )
-            })?;
-        match dop.variant {
-            datatypes::DataOperationVariant::Normal(ref normal_dop) => {
-                let switch_key_diag_type = self
-                    .ecu_data
-                    .diag_coded_types
-                    .get(&normal_dop.diag_type)
-                    .ok_or(DiagServiceError::InvalidDatabase(
-                        "DiagCodedType lookup for Mux switch key failed".to_owned(),
-                    ))?;
+        let dop = switch_key.dop().map(datatypes::DataOperation).ok_or(
+            DiagServiceError::InvalidDatabase("Mux switch key DoP is None".to_owned()),
+        )?;
+
+        match dop.variant()? {
+            datatypes::DataOperationVariant::Normal(normal_dop) => {
+                let switch_key_diag_type = normal_dop.diag_coded_type()?;
 
                 let (switch_key_data, bit_len) = switch_key_diag_type.decode(
                     uds_payload
                         .data()
-                        .get(switch_key.byte_position as usize..)
+                        .get(switch_key.byte_position() as usize..)
                         .ok_or(DiagServiceError::BadPayload(
                             "Not enough bytes to get switch key".to_owned(),
                         ))?,
-                    switch_key.byte_position as usize,
-                    switch_key.bit_position as usize,
+                    switch_key.byte_position() as usize,
+                    switch_key.bit_position().unwrap_or(0) as usize,
                 )?;
 
                 let switch_key_value = operations::uds_data_to_serializable(
                     switch_key_diag_type.base_datatype(),
-                    Some(&normal_dop.compu_method),
+                    normal_dop.compu_method().map(|cm| cm.into()).as_ref(),
                     false,
                     &switch_key_data,
                 )?;
@@ -2543,39 +2591,55 @@ impl<S: SecurityPlugin> EcuManager<S> {
                 mux_data.insert(
                     "Selector".to_owned(),
                     DiagDataTypeContainer::RawContainer(DiagDataTypeContainerRaw {
-                        data: switch_key_data,
+                        data: switch_key_data.to_vec(),
                         data_type: switch_key_diag_type.base_datatype(),
                         bit_len,
                         compu_method: None,
                     }),
                 );
 
-                let case = mux_case_from_selector_value(mux_dop, &switch_key_value)
-                    .or(mux_dop.default_case.as_ref())
-                    .ok_or(DiagServiceError::BadPayload(
-                        format!(
-                            "Switch key value not found in mux cases and no default case defined \
-                             for MUX {short_name}"
-                        )
-                        .to_owned(),
-                    ))?;
-
-                let case_name = get_string!(case.short_name).map_err(|_| {
-                    DiagServiceError::InvalidDatabase("Mux case short name not found".to_owned())
-                })?;
+                let (case_name, case_structure) =
+                    mux_case_struct_from_selector_value(mux_dop, &switch_key_value)
+                        .map(|(case, case_struct)| {
+                            let name =
+                                case.short_name().ok_or(DiagServiceError::InvalidDatabase(
+                                    "Mux case short name not found".to_owned(),
+                                ))?;
+                            Ok::<_, DiagServiceError>((name.to_owned(), case_struct))
+                        })
+                        .transpose()?
+                        .map_or_else(
+                            || {
+                                mux_dop
+                                    .default_case()
+                                    .and_then(|default| {
+                                        let name = default.short_name()?.to_owned();
+                                        let case_struct = default.structure().and_then(|s| {
+                                            s.specific_data_as_structure()
+                                                .map(datatypes::StructureDop)
+                                        });
+                                        Some((name, case_struct))
+                                    })
+                                    .ok_or_else(|| {
+                                        DiagServiceError::BadPayload(format!(
+                                            "Switch key value not found in mux cases and no \
+                                             default case defined for MUX {short_name}"
+                                        ))
+                                    })
+                            },
+                            Ok,
+                        )?;
 
                 // Omitting the structure from a (default) case is valid and can be used
                 // to have a valid switch key that is not connected with further data.
-                if let Some(structure_id) = case.structure {
-                    let structure = self.get_basic_structure(structure_id)?;
-                    if let Some(structure) = structure {
-                        uds_payload.push_slice(byte_pos, uds_payload.len())?;
-                        let case_data =
-                            self.map_struct_from_uds(structure, mapped_service, uds_payload)?;
-                        uds_payload.pop_slice()?;
-                        mux_data.insert(case_name, DiagDataTypeContainer::Struct(case_data));
-                    }
+                if let Some(case_structure) = case_structure {
+                    uds_payload.push_slice(byte_pos, uds_payload.len())?;
+                    let case_data =
+                        self.map_struct_from_uds(&case_structure, mapped_service, uds_payload)?;
+                    uds_payload.pop_slice()?;
+                    mux_data.insert(case_name, DiagDataTypeContainer::Struct(case_data));
                 }
+
                 data.insert(short_name, DiagDataTypeContainer::Struct(mux_data));
                 Ok(())
             }
@@ -2585,42 +2649,155 @@ impl<S: SecurityPlugin> EcuManager<S> {
         }
     }
 
-    fn get_basic_structure(
+    fn lookup_state_transition(
         &self,
-        basic_structure_id: cda_interfaces::Id,
-    ) -> Result<Option<&datatypes::StructureDop>, DiagServiceError> {
-        self.ecu_data
-            .data_operations
-            .get(&basic_structure_id)
-            .map(|dop| {
-                let datatypes::DataOperationVariant::Structure(ref struct_) = dop.variant else {
-                    return Err(DiagServiceError::InvalidDatabase(
-                        "BasicStructure Dop not a structure".to_owned(),
-                    ));
-                };
-                Ok(struct_)
+        diag_comm: &datatypes::DiagComm,
+        state_chart: &datatypes::StateChart,
+        current_state: &str,
+    ) -> Option<String> {
+        diag_comm
+            .state_transition_refs()?
+            .iter()
+            .find_map(|st_ref| {
+                let state_transition = st_ref.state_transition()?;
+                state_chart
+                    .state_transitions()?
+                    .iter()
+                    .find(|chart_st| chart_st.source_short_name_ref() == Some(current_state))
+                    .and_then(|_| {
+                        state_transition
+                            .target_short_name_ref()
+                            .map(|t| t.to_owned())
+                    })
             })
-            .transpose()
     }
 
-    fn state_chart(&self, semantic: &str) -> Result<&StateChart, DiagServiceError> {
-        let state_chart = self
-            .variant
-            .as_ref()
-            .and_then(|variant| {
-                self.ecu_data
-                    .variants
-                    .get(&variant.id)
-                    .and_then(|variant| variant.state_charts_lookup.get(semantic))
+    fn lookup_state_transition_by_diagcomm_for_active(
+        &self,
+        diag_comm: datatypes::DiagComm,
+    ) -> (Option<String>, Option<String>) {
+        // not using lookup_state_chart, so we spare one lookup of the state charts
+        let base_variant = match self.diag_database.base_variant() {
+            Ok(v) => v,
+            Err(_) => return (None, None),
+        };
+
+        let state_charts = base_variant.diag_layer().and_then(|dl| dl.state_charts());
+        let state_chart_session = state_charts.as_ref().and_then(|charts| {
+            charts.iter().find(|c| {
+                c.semantic()
+                    .is_some_and(|n| n.eq_ignore_ascii_case(semantics::SESSION))
             })
-            .or_else(|| self.ecu_data.base_state_chart_lookup.get(semantic))
-            .or_else(|| self.ecu_data.state_chart_lookup.get(semantic))
-            .and_then(|state_chart_id| self.ecu_data.state_charts.get(state_chart_id))
-            .ok_or(DiagServiceError::NotFound)?;
-        Ok(state_chart)
+        });
+        let state_chart_security = state_charts.as_ref().and_then(|charts| {
+            charts.iter().find(|c| {
+                c.semantic()
+                    .is_some_and(|n| n.eq_ignore_ascii_case(semantics::SECURITY))
+            })
+        });
+
+        let access_ctrl = self.access_control.lock();
+        let new_session = access_ctrl.session.as_ref().and_then(|session| {
+            state_chart_session
+                .and_then(|sc| self.lookup_state_transition(&diag_comm, &(sc.into()), session))
+        });
+        let new_security = access_ctrl.security.as_ref().and_then(|session| {
+            state_chart_security
+                .and_then(|sc| self.lookup_state_transition(&diag_comm, &(sc.into()), session))
+        });
+
+        (new_session, new_security)
     }
-    fn default_state(&self, semantic: &str) -> Result<cda_interfaces::Id, DiagServiceError> {
-        self.state_chart(semantic).map(|sec| sec.default_state)
+
+    fn lookup_state_transition_for_active(
+        &self,
+        semantic: &str,
+        current_state: &str,
+        target_state: &str,
+    ) -> Result<cda_interfaces::DiagComm, DiagServiceError> {
+        let base_variant = self.diag_database.base_variant()?;
+        let semantic_transitions = base_variant
+            .diag_layer()
+            .and_then(|dl| dl.state_charts())
+            .and_then(|charts| {
+                charts.iter().find_map(|c| {
+                    if c.semantic()
+                        .is_some_and(|n| n.eq_ignore_ascii_case(semantic))
+                    {
+                        c.state_transitions()
+                    } else {
+                        None
+                    }
+                })
+            })
+            .ok_or_else(|| {
+                tracing::error!(
+                    ecu_name = self.ecu_name,
+                    semantic = %semantic,
+                    "State chart with given semantic not found in base variant"
+                );
+                DiagServiceError::NotFound
+            })?;
+
+        let service = self
+            .search_diag_services(|s| {
+                s.diag_comm()
+                    .and_then(|dc| dc.state_transition_refs())
+                    .map(|st_refs| {
+                        st_refs.iter().any(|st_ref| {
+                            st_ref
+                                .state_transition()
+                                .map(|st| {
+                                    st.source_short_name_ref()
+                                        .is_some_and(|n| n.eq_ignore_ascii_case(current_state))
+                                        && st
+                                            .target_short_name_ref()
+                                            .is_some_and(|n| n.eq_ignore_ascii_case(target_state))
+                                        && semantic_transitions
+                                            .iter()
+                                            .any(|semantic| semantic == st)
+                                })
+                                .unwrap_or(false)
+                        })
+                    })
+                    .unwrap_or(false)
+            })
+            .ok_or_else(|| {
+                tracing::error!(
+                    current_state,
+                    target_state,
+                    semantic,
+                    "Failed to find service for state transition"
+                );
+                DiagServiceError::NotFound
+            })?;
+
+        service.try_into()
+    }
+
+    fn lookup_state_chart(
+        &self,
+        semantic: &str,
+    ) -> Result<datatypes::StateChart<'_>, DiagServiceError> {
+        self.diag_database
+            .base_variant()?
+            .diag_layer()
+            .and_then(|dl| dl.state_charts())
+            .and_then(|sc| {
+                sc.iter()
+                    .find(|sc| sc.semantic().is_some_and(|sem| sem == semantic))
+            })
+            .map(datatypes::StateChart)
+            .ok_or(DiagServiceError::NotFound)
+    }
+
+    fn default_state(&self, semantic: &str) -> Result<String, DiagServiceError> {
+        self.lookup_state_chart(semantic)?
+            .start_state_short_name_ref()
+            .map(ToOwned::to_owned)
+            .ok_or(DiagServiceError::InvalidDatabase(
+                "No start state defined in state chart".to_owned(),
+            ))
     }
     fn start_reset_task(&self, expiration: Duration) -> Result<(), DiagServiceError> {
         let session_control = Arc::clone(&self.access_control);
@@ -2629,12 +2806,12 @@ impl<S: SecurityPlugin> EcuManager<S> {
         let default_session = self.default_state(semantics::SESSION)?;
 
         self.access_control.lock().access_reset_task = Some(spawn_named!(
-            &format!("access-reset-{}", self.ecu_name()),
+            &format!("access-reset-{}", self.ecu_name),
             async move {
                 tokio::time::sleep(expiration).await;
                 let mut access = session_control.lock();
-                access.security = default_security;
-                access.session = default_session;
+                access.security = Some(default_security);
+                access.session = Some(default_session);
                 access.access_reset_task = None;
             }
         ));
@@ -2642,235 +2819,90 @@ impl<S: SecurityPlugin> EcuManager<S> {
         Ok(())
     }
 
-    /// Returns the bit length and value of the service ID parameter for a given
-    /// `DiagnosticService`, if available.
-    ///
-    /// Searches the associated request for a `CodedConst` parameter with the configured
-    /// semantic and checks if the type and value are valid.
-    ///
-    /// Returns a tuple `(bitlength, value)` or `None` if no matching parameter is found.
-    fn get_service_id_parameter_value(&self, service: &&DiagnosticService) -> Option<(u32, u32)> {
-        let request = match self.ecu_data.requests.get(&service.request_id) {
-            Some(request) => request,
-            None => {
-                tracing::warn!(
-                    ecu_name = %self.ecu_data.ecu_name,
-                    service = ?service,
-                    "No request found for service"
-                );
-                return None;
-            }
-        };
-
-        // iterate over the request parameters to find the coded const parameter
-        // with the configured semantics
-        let coded_const = request.params.iter().find_map(|param_ref| {
-            self.ecu_data.params.get(param_ref).and_then(|param| {
-                let semantic = param.semantic.and_then(|sem| STRINGS.get(sem));
-                match semantic {
-                    Some(sem)
-                        if sem
-                            == self
-                                .database_naming_convention
-                                .configuration_service_parameter_semantic_id =>
-                    {
-                        match &param.value {
-                            datatypes::ParameterValue::CodedConst(coded_const) => Some(coded_const),
-                            _ => None,
-                        }
-                    }
-                    _ => None,
-                }
-            })
-        });
-        let coded_const = match coded_const {
-            Some(coded_const) => coded_const,
-            None => {
-                tracing::warn!(
-                    ecu_name = %self.ecu_data.ecu_name,
-                    service = ?service,
-                    "No coded const found for service"
-                );
-                return None;
-            }
-        };
-
-        // Ensure the coded const has a compatible type
-        let coded_const_type = match self
-            .ecu_data
-            .diag_coded_types
-            .get(&coded_const.diag_coded_type)
-        {
-            Some(coded_const_type) => coded_const_type,
-            None => {
-                tracing::warn!(
-                    ecu_name = %self.ecu_data.ecu_name,
-                    coded_const = ?coded_const,
-                    "No diag coded type found for coded const"
-                );
-                return None;
-            }
-        };
-
-        if coded_const_type.base_datatype() != DataType::UInt32 {
-            tracing::warn!(
-                ecu_name = %self.ecu_data.ecu_name,
-                coded_const = ?coded_const,
-                base_datatype = ?coded_const_type.base_datatype(),
-                "Coded const has unexpected base datatype, expected UInt32"
-            );
-            return None;
-        }
-
-        let bitlength = match &coded_const_type.type_() {
-            DiagCodedTypeVariant::LeadingLengthInfo(_) => {
-                tracing::warn!(
-                    ecu_name = %self.ecu_data.ecu_name,
-                    coded_const = ?coded_const,
-                    "Coded const has unexpected type LeadingLengthInfo, expected StandardLength"
-                );
-                return None;
-            }
-            DiagCodedTypeVariant::MinMaxLength(_) => {
-                tracing::warn!(
-                    ecu_name = %self.ecu_data.ecu_name,
-                    coded_const = ?coded_const,
-                    "Coded const has unexpected type MinMaxLength, expected StandardLength"
-                );
-                return None;
-            }
-            DiagCodedTypeVariant::StandardLength(standard_length_type) => {
-                if standard_length_type.bitmask.is_some() {
-                    tracing::warn!(
-                        ecu_name = %self.ecu_data.ecu_name,
-                        standard_length_type = ?standard_length_type,
-                        "Coded const type standard_length_type has unexpected bitmask, \
-                         expected StandardLength without bitmask"
-                    );
-                    return None;
-                }
-                match standard_length_type.bit_length {
-                    16 | 24 | 32 => standard_length_type.bit_length,
-                    _ => {
-                        tracing::warn!(
-                            ecu_name = %self.ecu_data.ecu_name,
-                            coded_const = ?coded_const,
-                            bit_length = %standard_length_type.bit_length,
-                            "Coded const has unexpected bit length, expected 16, 24 or 32"
-                        );
-                        return None;
-                    }
-                }
-            }
-        };
-
-        // lookup the coded const value in the strings
-        let coded_const_value = match STRINGS.get(coded_const.value) {
-            Some(value) => value,
-            None => {
-                tracing::warn!(
-                    ecu_name = %self.ecu_data.ecu_name,
-                    coded_const = ?coded_const,
-                    "No coded const value found"
-                );
-                return None;
-            }
-        };
-
-        let coded_const_value = match coded_const_value.parse::<u32>() {
-            Ok(value) => value,
-            Err(e) => {
-                tracing::warn!(
-                    ecu_name = %self.ecu_data.ecu_name,
-                    coded_const_value = %coded_const_value,
-                    error = %e,
-                    "Coded const value could not be parsed as u32"
-                );
-                return None;
-            }
-        };
-        Some((bitlength, coded_const_value))
-    }
-
     fn lookup_services_by_sid(
         &self,
         service_id: u8,
-    ) -> Result<Vec<&DiagnosticService>, DiagServiceError> {
-        let variant = self
-            .variant
-            .as_ref()
-            .and_then(|v| self.ecu_data.variants.get(&v.id))
-            .or_else(|| self.ecu_data.variants.get(&self.ecu_data.base_variant_id))
-            .ok_or(DiagServiceError::NotFound)?;
-
-        let base_variant = self
-            .ecu_data
-            .variants
-            .get(&self.ecu_data.base_variant_id)
-            .ok_or(DiagServiceError::NotFound)?;
-
-        let service_ids = variant.services.iter().chain(base_variant.services.iter());
-        let services = service_ids
-            .filter_map(|id| {
-                self.ecu_data.services.get(id).and_then(|service| {
-                    if service.service_id == service_id {
-                        Some(service)
-                    } else {
-                        None
-                    }
-                })
-            })
+    ) -> Result<Vec<datatypes::DiagService<'_>>, DiagServiceError> {
+        let base_variant = self.diag_database.base_variant()?;
+        let services = self
+            .variant()
+            .and_then(|v| v.diag_layer().and_then(|dl| dl.diag_services()))
+            .into_iter()
+            .flatten()
+            .chain(
+                base_variant
+                    .diag_layer()
+                    .and_then(|dl| dl.diag_services())
+                    .into_iter()
+                    .flatten(),
+            )
+            .map(datatypes::DiagService)
+            .chain(
+                // Search in ECU shared services referenced by base variant
+                self.find_ecu_shared_services().into_iter().flatten(),
+            )
+            .filter(|s| s.request_id().is_some_and(|req_id| req_id == service_id))
             .collect::<Vec<_>>();
 
-        Ok(services)
+        if services.is_empty() {
+            Err(DiagServiceError::NotFound)
+        } else {
+            Ok(services)
+        }
     }
 
     fn find_dtc_dop_in_params<'a>(
-        &'a self,
-        params: Vec<&'a Parameter>,
-    ) -> Result<Option<&'a DtcDop>, DiagServiceError> {
+        &self,
+        params: &Vec<datatypes::Parameter<'a>>,
+    ) -> Result<Option<datatypes::DtcDop<'a>>, DiagServiceError> {
         for p in params {
-            if let datatypes::ParameterValue::Value(value) = &p.value
-                && let Some(dop) = self.ecu_data.data_operations.get(&value.dop)
-            {
-                match &dop.variant {
-                    datatypes::DataOperationVariant::Dtc(dtc) => return Ok(Some(dtc)),
-                    datatypes::DataOperationVariant::EndOfPdu(end_of_pdu) => {
-                        match &end_of_pdu.field.value {
-                            DopFieldValue::BasicStruct(s) => {
-                                if let Some(s) = self.get_basic_structure(s.struct_id)? {
-                                    let params: Vec<&Parameter> = s
-                                        .params
-                                        .iter()
-                                        .filter_map(|id| self.ecu_data.params.get(id))
-                                        .collect();
-                                    if let Some(result) = self.find_dtc_dop_in_params(params)? {
-                                        return Ok(Some(result));
-                                    }
-                                }
-                            }
-                            _ => {
-                                return Err(DiagServiceError::InvalidDatabase(
-                                    "EndOfPdu does not contain a struct".to_owned(),
-                                ));
-                            }
-                        }
-                    }
-                    datatypes::DataOperationVariant::Structure(structure) => {
-                        let params: Vec<&Parameter> = structure
-                            .params
-                            .iter()
-                            .filter_map(|id| self.ecu_data.params.get(id))
-                            .collect();
-                        if let Some(result) = self.find_dtc_dop_in_params(params)? {
-                            return Ok(Some(result));
-                        }
-                    }
-                    _ => {}
-                }
+            let Some(value) = p.specific_data_as_value() else {
+                continue;
+            };
+            let Some(dop) = value.dop() else { continue };
+
+            if let Some(dtc_dop) = dop.specific_data_as_dtcdop() {
+                return Ok(Some(datatypes::DtcDop(dtc_dop)));
+            }
+
+            // Recursively search in nested structures
+            let nested_params = self.extract_nested_params(&dop.into())?;
+            if let Some(result) = self.find_dtc_dop_in_params(&nested_params)? {
+                return Ok(Some(result));
             }
         }
         Ok(None)
+    }
+
+    fn extract_nested_params<'a>(
+        &self,
+        dop: &datatypes::DataOperation<'a>,
+    ) -> Result<Vec<datatypes::Parameter<'a>>, DiagServiceError> {
+        if let Some(end_of_pdu_dop) = dop.specific_data_as_end_of_pdu_field() {
+            let struct_ = end_of_pdu_dop
+                .field()
+                .and_then(|f| f.basic_structure())
+                .and_then(|s| s.specific_data_as_structure())
+                .ok_or_else(|| {
+                    DiagServiceError::InvalidDatabase(
+                        "EndOfPdu does not contain a struct".to_owned(),
+                    )
+                })?;
+
+            return Ok(struct_
+                .params()
+                .map(|params| params.iter().map(datatypes::Parameter).collect())
+                .unwrap_or_default());
+        }
+
+        if let Some(structure_dop) = dop.specific_data_as_structure() {
+            return Ok(structure_dop
+                .params()
+                .map(|params| params.iter().map(datatypes::Parameter).collect())
+                .unwrap_or_default());
+        }
+
+        Ok(Vec::new())
     }
 
     /// Validate security access via plugin
@@ -2878,7 +2910,7 @@ impl<S: SecurityPlugin> EcuManager<S> {
     /// this is used internally, when we don't want to have this run the check again
     fn check_security_plugin(
         security_plugin: &DynamicPlugin,
-        service: &DiagnosticService,
+        service: &datatypes::DiagService,
     ) -> Result<(), DiagServiceError> {
         if let Some(()) = security_plugin.downcast_ref::<()>() {
             tracing::info!("Void security plugin provided, skipping security check");
@@ -2893,14 +2925,38 @@ impl<S: SecurityPlugin> EcuManager<S> {
     }
 }
 
-fn mux_case_from_selector_value<'a>(
+fn mux_case_struct_from_selector_value<'a>(
     mux_dop: &'a datatypes::MuxDop,
     switch_key_value: &DiagDataValue,
-) -> Option<&'a datatypes::Case> {
-    mux_dop.cases.iter().find(|case| {
-        let (lower_limit, upper_limit) = (case.lower_limit.as_ref(), case.upper_limit.as_ref());
-        switch_key_value.within_limits(upper_limit, lower_limit)
+) -> Option<(datatypes::Case<'a>, Option<datatypes::StructureDop<'a>>)> {
+    mux_dop.cases().and_then(|cases| {
+        cases
+            .iter()
+            .find(|case| {
+                let lower_limit = case.lower_limit().map(|l| l.into());
+                let upper_limit = case.upper_limit().map(|l| l.into());
+                switch_key_value.within_limits(upper_limit.as_ref(), lower_limit.as_ref())
+            })
+            .map(|case| {
+                let struct_dop = case
+                    .structure()
+                    .and_then(|s| s.specific_data_as_structure().map(datatypes::StructureDop));
+                (case.into(), struct_dop)
+            })
     })
+}
+
+fn extract_struct_dop_from_field(
+    field: Option<datatypes::DopField>,
+) -> Result<datatypes::StructureDop, DiagServiceError> {
+    field
+        .and_then(|f| {
+            f.basic_structure()
+                .and_then(|s| s.specific_data_as_structure().map(datatypes::StructureDop))
+        })
+        .ok_or(DiagServiceError::InvalidDatabase(
+            "Field none or does not contain a struct".to_owned(),
+        ))
 }
 
 #[cfg(test)]
@@ -2908,13 +2964,15 @@ mod tests {
     use std::vec;
 
     use cda_database::datatypes::{
-        CodedConst, CompuCategory, CompuFunction, CompuMethod, DOPType, DataOperation,
-        DataOperationVariant, DataType, DiagCodedType, DiagCodedTypeVariant, DopField,
-        IntervalType, Limit, NormalDop, Parameter, ParameterValue, Request, Response, ResponseType,
-        StandardLengthType, SwitchKey,
+        DataType, Limit, ResponseType,
+        database_builder::{
+            Addressing, DiagClassType, DiagCommParams, DiagLayerParams, DiagServiceParams, DopType,
+            EcuDataBuilder, EcuDataParams, SpecificDOPData, TransmissionMode,
+        },
     };
-    use cda_interfaces::{DynamicPlugin, EcuManager, STRINGS, StringId};
+    use cda_interfaces::{EcuManager, Protocol};
     use cda_plugin_security::DefaultSecurityPluginData;
+    use flatbuffers::WIPOffset;
     use serde_json::json;
 
     use super::*;
@@ -2926,349 +2984,170 @@ mod tests {
         }};
     }
 
-    fn create_service(
-        db: &mut DiagnosticDatabase,
-        sid: u8,
-        params_request: Vec<cda_interfaces::Id>,
-        mut params_pos_response: Vec<cda_interfaces::Id>,
-        mut params_neg_response: Vec<cda_interfaces::Id>,
-    ) -> DiagComm {
-        let base_id = db.services.keys().max().unwrap_or(&0) + 1;
-        let service_key = base_id;
-
-        let short_name = "test_service";
-        let diag_type_sid = create_datatype(
-            db,
-            DiagCodedTypeVariant::StandardLength(StandardLengthType {
-                bit_length: 8,
-                bitmask: None,
-                condensed: false,
-            }),
-            DataType::UInt32,
-        );
-
-        params_pos_response.push(create_param(
-            db,
-            &format!("{short_name}_pos_sid"),
-            ParameterValue::CodedConst(CodedConst {
-                value: STRINGS.get_or_insert(&sid.to_string()),
-                diag_coded_type: diag_type_sid,
-            }),
-            0,
-            0,
-        ));
-
-        params_neg_response.push(create_param(
-            db,
-            &format!("{short_name}_neg_response"),
-            ParameterValue::CodedConst(CodedConst {
-                value: STRINGS.get_or_insert(&0x7f_u8.to_string()),
-                diag_coded_type: diag_type_sid,
-            }),
-            0,
-            0,
-        ));
-        params_neg_response.push(create_param(
-            db,
-            &format!("{short_name}_neg_sid"),
-            ParameterValue::CodedConst(CodedConst {
-                value: STRINGS.get_or_insert(&sid.to_string()),
-                diag_coded_type: diag_type_sid,
-            }),
-            1,
-            0,
-        ));
-
-        let pos_res_id = create_response(db, ResponseType::Positive, params_pos_response.clone());
-        let neg_res_id = create_response(db, ResponseType::Negative, params_neg_response.clone());
-
-        let request = create_request(db, params_request);
-
-        db.services.insert(
-            service_key,
-            datatypes::DiagnosticService {
-                service_id: service_ids::WRITE_DATA_BY_IDENTIFIER,
-                request_id: request,
-                pos_responses: vec![pos_res_id],
-                neg_responses: vec![neg_res_id],
-                com_param_refs: vec![],
-                short_name: STRINGS.get_or_insert(short_name),
-                semantic: StringId::default(),
-                long_name: None,
-                sdgs: vec![],
-                precondition_states: vec![],
-                transitions: Default::default(),
-                funct_class: 0,
-            },
-        );
-        db.base_service_lookup
-            .insert(short_name.to_lowercase(), service_key);
-
-        DiagComm {
-            name: short_name.to_owned(),
-            action: DiagCommAction::Write,
-            type_: DiagCommType::Configurations,
-            lookup_name: Some(short_name.to_owned()),
-        }
-    }
-
-    fn create_datatype(
-        db: &mut DiagnosticDatabase,
-        variant: DiagCodedTypeVariant,
-        data_type: DataType,
-    ) -> cda_interfaces::Id {
-        let data_type_id = db.diag_coded_types.keys().max().unwrap_or(&0) + 1;
-        db.diag_coded_types.insert(
-            data_type_id,
-            DiagCodedType::new_high_low_byte_order(data_type, variant).unwrap(),
-        );
-        data_type_id
-    }
-
-    fn create_dop(
-        db: &mut DiagnosticDatabase,
-        type_: DOPType,
-        variant: DataOperationVariant,
-    ) -> cda_interfaces::Id {
-        let dop_id = db.data_operations.keys().max().unwrap_or(&0) + 1;
-        db.data_operations.insert(
-            dop_id,
-            DataOperation {
-                type_,
-                short_name: Default::default(),
-                variant,
-            },
-        );
-        dop_id
-    }
-
-    fn create_request(
-        db: &mut DiagnosticDatabase,
-        param_ids: Vec<cda_interfaces::Id>,
-    ) -> cda_interfaces::Id {
-        let request_id = db.requests.keys().max().unwrap_or(&0) + 1;
-        db.requests
-            .insert(request_id, Request { params: param_ids });
-        request_id
-    }
-
-    fn create_response(
-        db: &mut DiagnosticDatabase,
-        response_type: ResponseType,
-        param_ids: Vec<cda_interfaces::Id>,
-    ) -> cda_interfaces::Id {
-        let response_id = db.responses.keys().max().unwrap_or(&0) + 1;
-        db.responses.insert(
-            response_id,
-            Response {
-                response_type,
-                params: param_ids,
-            },
-        );
-        response_id
-    }
-
-    fn create_param(
-        db: &mut DiagnosticDatabase,
-        name: &str,
-        value: ParameterValue,
-        byte_pos: u32,
-        bit_pos: u32,
-    ) -> cda_interfaces::Id {
-        let param_id = db.params.keys().max().unwrap_or(&0) + 1;
-        let param = Parameter {
-            short_name: STRINGS.get_or_insert(name),
-            value,
-            byte_pos,
-            bit_pos,
-            semantic: Some(STRINGS.get_or_insert(semantics::DATA)),
-        };
-        db.params.insert(param_id, param);
-        param_id
-    }
-
-    fn create_value_param(
-        db: &mut DiagnosticDatabase,
-        name: &str,
-        dop: cda_interfaces::Id,
-        byte_pos: u32,
-        bit_pos: u32,
-    ) -> cda_interfaces::Id {
-        create_param(
-            db,
-            name,
-            ParameterValue::Value(datatypes::ValueData {
-                default_value: None,
-                dop,
-            }),
-            byte_pos,
-            bit_pos,
-        )
-    }
-
-    fn create_mux_dop(
-        db: &mut DiagnosticDatabase,
-        mux_byte_pos: u32,
-        default_case: Option<datatypes::Case>,
-        switch_key: Option<SwitchKey>,
-        cases: Vec<datatypes::Case>,
-    ) -> cda_interfaces::Id {
-        assert!(
-            default_case.is_some() || switch_key.is_some(),
-            "At least one of default_case or switch_key must be provided for MuxDop"
-        );
-
-        create_dop(
-            db,
-            DOPType::Regular,
-            DataOperationVariant::Mux(datatypes::MuxDop {
-                byte_position: mux_byte_pos,
-                switch_key,
-                default_case,
-                cases,
-                is_visible: false,
-            }),
-        )
-    }
-
-    fn create_normal_dop(
-        db: &mut DiagnosticDatabase,
-        bitmask: Option<Vec<u8>>,
-        bit_length: u32,
-        data_type: DataType,
-    ) -> cda_interfaces::Id {
-        let diag_type_id = create_datatype(
-            db,
-            DiagCodedTypeVariant::StandardLength(StandardLengthType {
-                bit_length,
-                bitmask,
-                condensed: false,
-            }),
-            data_type,
-        );
-
-        create_dop(
-            db,
-            DOPType::Regular,
-            DataOperationVariant::Normal(NormalDop {
-                diag_type: diag_type_id,
-                compu_method: CompuMethod {
-                    category: CompuCategory::Identical,
-                    internal_to_phys: CompuFunction { scales: vec![] },
-                },
-                unit: None,
-            }),
-        )
-    }
-
-    fn create_switch_key(
-        db: &mut DiagnosticDatabase,
-        byte_position: u32,
-        bit_position: u32,
-        bit_length: u32,
-        data_type: DataType,
-    ) -> SwitchKey {
-        let dop = create_normal_dop(db, None, bit_length, data_type);
-        SwitchKey {
-            byte_position,
-            bit_position,
-            dop: Some(dop),
-        }
-    }
-
-    fn create_structure(
-        db: &mut DiagnosticDatabase,
-        name: &str,
-        byte_size: u32,
-        params: Vec<cda_interfaces::Id>,
-    ) -> cda_interfaces::Id {
-        let structure_id = db.data_operations.keys().max().unwrap_or(&0) + 1;
-        db.data_operations.insert(
-            structure_id,
-            DataOperation {
-                type_: DOPType::Structure,
-                short_name: name.to_string(),
-                variant: DataOperationVariant::Structure(datatypes::StructureDop {
-                    params,
-                    byte_size,
-                    visible: false,
-                }),
-            },
-        );
-        structure_id
-    }
-
-    fn create_case<T: Default + ToString>(
-        short_name: &str,
-        lower_limit: Option<T>,
-        upper_limit: Option<T>,
-        structure: Option<cda_interfaces::Id>,
-    ) -> datatypes::Case {
-        datatypes::Case {
-            short_name: STRINGS.get_or_insert(short_name),
-            lower_limit: Some(Limit {
-                value: lower_limit.unwrap_or_default().to_string(),
-                interval_type: IntervalType::Infinite,
-            }),
-            upper_limit: Some(Limit {
-                value: upper_limit.unwrap_or_default().to_string(),
-                interval_type: IntervalType::Infinite,
-            }),
-            structure,
-            long_name: None,
-        }
-    }
-
-    fn create_ecu_manager_with_dynamic_length_field_service()
-    -> (super::EcuManager<DefaultSecurityPluginData>, DiagComm, u8) {
-        let mut db = DiagnosticDatabase::default();
+    fn create_ecu_manager_with_dynamic_length_field_service() -> (
+        super::EcuManager<DefaultSecurityPluginData>,
+        cda_interfaces::DiagComm,
+        u8,
+    ) {
+        let mut db_builder = EcuDataBuilder::new();
+        let u8_diag_type = db_builder.create_diag_coded_type_standard_length(8, DataType::UInt32);
+        let u16_diag_type = db_builder.create_diag_coded_type_standard_length(16, DataType::UInt32);
+        let protocol = db_builder.create_protocol(Protocol::DoIp.value(), None, None, None);
+        let cp_ref = db_builder.create_com_param_ref(None, None, None, Some(protocol), None);
+        let compu_identical =
+            db_builder.create_compu_method(datatypes::CompuCategory::Identical, None, None);
 
         // Create DOPs for structure parameters
-        let num_items_dop = create_normal_dop(&mut db, None, 8, DataType::UInt32);
-        let item_param_dop = create_normal_dop(&mut db, None, 16, DataType::UInt32);
-
-        // Create parameter for number of items
-        let num_items_param = create_value_param(&mut db, "num_items", num_items_dop, 1, 0);
-
-        // Create parameter for the repeated item
-        let item_param = create_value_param(&mut db, "item_param", item_param_dop, 0, 0);
+        let num_items_dop = {
+            let num_items_dop_specific_data = db_builder
+                .create_normal_specific_dop_data(
+                    Some(compu_identical),
+                    Some(u8_diag_type),
+                    None,
+                    None,
+                    None,
+                    None,
+                )
+                .value_offset();
+            db_builder.create_dop(
+                *DopType::REGULAR,
+                Some("num_items_dop"),
+                None,
+                *SpecificDOPData::NormalDOP,
+                Some(num_items_dop_specific_data),
+            )
+        };
 
         // Create the structure for the repeated item
-        let item_structure_id = create_structure(&mut db, "item_structure", 2, vec![item_param]);
+        let repeated_struct = {
+            let item_param_dop_specific_data = db_builder
+                .create_normal_specific_dop_data(
+                    Some(compu_identical),
+                    Some(u16_diag_type),
+                    None,
+                    None,
+                    None,
+                    None,
+                )
+                .value_offset();
+            let item_param_dop = db_builder.create_dop(
+                *DopType::REGULAR,
+                Some("item_param_dop"),
+                None,
+                *SpecificDOPData::NormalDOP,
+                Some(item_param_dop_specific_data),
+            );
 
-        // Create DynamicLengthField DoP
-        let dynamic_length_field_dop = create_dop(
-            &mut db,
-            DOPType::Regular,
-            DataOperationVariant::DynamicLengthField(datatypes::DynamicLengthDop {
-                num_items_dop,
-                num_items_byte_pos: 0,
-                num_items_bit_pos: 0,
-                first_element_offset: 1,
-                repeated_dop_id: item_structure_id,
-            }),
-        );
+            // Create parameter for the repeated item
+            let item_param = db_builder.create_value_param("item_param", item_param_dop, 0, 0);
+            db_builder.create_structure(Some(vec![item_param]), Some(2), true)
+        };
 
-        // Create main parameter that uses the DynamicLengthField
-        let main_param = create_param(
-            &mut db,
-            "main_param",
-            ParameterValue::Value(datatypes::ValueData {
-                default_value: None,
-                dop: dynamic_length_field_dop,
-            }),
-            1,
-            0,
-        );
+        let dynamic_length_field_dop = {
+            // Create DynamicLengthField DoP
+            let dynamic_length_field_dop_specific_data = db_builder
+                .create_dynamic_length_specific_dop_data(
+                    1,
+                    0,
+                    0,
+                    num_items_dop,
+                    Some(repeated_struct),
+                )
+                .value_offset();
+
+            db_builder.create_dop(
+                *DopType::REGULAR,
+                Some("dynamic_length_field_dop"),
+                None,
+                *SpecificDOPData::DynamicLengthField,
+                Some(dynamic_length_field_dop_specific_data),
+            )
+        };
 
         let sid = 0x2E_u8;
-        let service = create_service(
-            &mut db,
-            sid,
-            vec![num_items_param],
-            vec![main_param],
-            vec![],
-        );
+        let dc_name = "TestDynamicLengthFieldService";
+        let diag_comm = db_builder.create_diag_comm(DiagCommParams {
+            short_name: dc_name,
+            long_name: None,
+            semantic: None,
+            funct_class: None,
+            sdgs: None,
+            diag_class_type: DiagClassType::START_COMM,
+            pre_condition_state_refs: None,
+            state_transition_refs: None,
+            protocols: Some(vec![protocol]),
+            audience: None,
+            is_mandatory: false,
+            is_executable: true,
+            is_final: true,
+        });
+
+        let request = {
+            let request_num_items_param =
+                db_builder.create_value_param("num_items", num_items_dop, 1, 0);
+            let sid_param = db_builder.create_coded_const_param(
+                "sid",
+                &sid.to_string(),
+                0,
+                0,
+                8,
+                DataType::UInt32,
+            );
+
+            db_builder.create_request(Some(vec![sid_param, request_num_items_param]), None)
+        };
+
+        // Build response
+        let pos_response = {
+            let sid_param = db_builder.create_coded_const_param(
+                "test_service_pos_sid",
+                &sid.to_string(),
+                0,
+                0,
+                8,
+                DataType::UInt32,
+            );
+            let pos_response_param =
+                db_builder.create_value_param("pos_response_param", dynamic_length_field_dop, 1, 0);
+            db_builder.create_response(
+                ResponseType::Positive,
+                Some(vec![sid_param, pos_response_param]),
+                None,
+            )
+        };
+
+        let diag_service = db_builder.create_diag_service(DiagServiceParams {
+            diag_comm: Some(diag_comm),
+            request: Some(request),
+            pos_responses: vec![pos_response],
+            neg_responses: vec![],
+            is_cyclic: false,
+            is_multiple: false,
+            addressing: *Addressing::FUNCTIONAL_OR_PHYSICAL,
+            transmission_mode: *TransmissionMode::SEND_AND_RECEIVE,
+            com_param_refs: None,
+        });
+
+        let diag_layer = db_builder.create_diag_layer(DiagLayerParams {
+            short_name: "TestVariantDiagLayer",
+            long_name: None,
+            funct_classes: None,
+            com_param_refs: Some(vec![cp_ref]),
+            diag_services: Some(vec![diag_service]),
+            ..Default::default()
+        });
+
+        let variant = db_builder.create_variant(diag_layer, true, None, None);
+        let ecu_data = db_builder.create_ecu_data_and_finish(EcuDataParams {
+            revision: "revision_1",
+            version: "1.0.0",
+            variants: Some(vec![variant]),
+            ..Default::default()
+        });
+
+        let db =
+            datatypes::DiagnosticDatabase::new(Default::default(), ecu_data, Default::default())
+                .unwrap();
 
         let ecu_manager = super::EcuManager::new(
             db,
@@ -3278,45 +3157,184 @@ mod tests {
         )
         .unwrap();
 
-        (ecu_manager, service, sid)
+        let dc = cda_interfaces::DiagComm {
+            name: dc_name.to_owned(),
+            type_: DiagCommType::Configurations,
+            lookup_name: Some(dc_name.to_owned()),
+        };
+
+        (ecu_manager, dc, sid)
     }
 
-    fn create_ecu_manager_with_struct_service()
-    -> (super::EcuManager<DefaultSecurityPluginData>, DiagComm, u8) {
-        let mut db = DiagnosticDatabase::default();
+    fn create_ecu_manager_with_struct_service(
+        struct_byte_pos: u32,
+    ) -> (
+        super::EcuManager<DefaultSecurityPluginData>,
+        cda_interfaces::DiagComm,
+        u8,
+        u32,
+    ) {
+        let mut db_builder = EcuDataBuilder::new();
+        let protocol = db_builder.create_protocol(Protocol::DoIp.value(), None, None, None);
+        let cp_ref = db_builder.create_com_param_ref(None, None, None, Some(protocol), None);
 
-        // Create DOPs for structure parameters
-        let param1_dop = create_normal_dop(&mut db, None, 16, DataType::UInt32);
-        let param2_dop = create_normal_dop(&mut db, None, 32, DataType::Float32);
-        let param3_dop = create_normal_dop(&mut db, None, 32, DataType::AsciiString);
+        // Create the structure with parameters
+        let (structure_dop, structure_byte_len) = {
+            let compu_identical =
+                db_builder.create_compu_method(datatypes::CompuCategory::Identical, None, None);
+            let u16_diag_type =
+                db_builder.create_diag_coded_type_standard_length(16, DataType::UInt32);
+            let f32_diag_type =
+                db_builder.create_diag_coded_type_standard_length(32, DataType::Float32);
+            let ascii_diag_type =
+                db_builder.create_diag_coded_type_standard_length(32, DataType::AsciiString);
 
-        // Create parameters for the structure
-        let struct_param1 = create_value_param(&mut db, "param1", param1_dop, 0, 0);
-        let struct_param2 = create_value_param(&mut db, "param2", param2_dop, 2, 0);
-        let struct_param3 = create_value_param(&mut db, "param3", param3_dop, 6, 0);
+            // Create DOPs for structure parameters
+            let param1_dop = {
+                let param1_dop_specific_data = db_builder
+                    .create_normal_specific_dop_data(
+                        Some(compu_identical),
+                        Some(u16_diag_type),
+                        None,
+                        None,
+                        None,
+                        None,
+                    )
+                    .value_offset();
 
-        // Create the structure
-        let structure_id = create_structure(
-            &mut db,
-            "test_structure",
-            10,
-            vec![struct_param1, struct_param2, struct_param3],
-        );
+                db_builder.create_dop(
+                    *DopType::REGULAR,
+                    Some("param1_dop"),
+                    None,
+                    *SpecificDOPData::NormalDOP,
+                    Some(param1_dop_specific_data),
+                )
+            };
 
-        // Create main parameter that uses the structure
-        let main_param = create_param(
-            &mut db,
-            "main_param",
-            ParameterValue::Value(datatypes::ValueData {
-                default_value: None,
-                dop: structure_id,
-            }),
-            0,
-            0,
-        );
+            let param2_dop = {
+                let param2_dop_specific_data = db_builder
+                    .create_normal_specific_dop_data(
+                        Some(compu_identical),
+                        Some(f32_diag_type),
+                        None,
+                        None,
+                        None,
+                        None,
+                    )
+                    .value_offset();
+
+                db_builder.create_dop(
+                    *DopType::REGULAR,
+                    Some("param2_dop"),
+                    None,
+                    *SpecificDOPData::NormalDOP,
+                    Some(param2_dop_specific_data),
+                )
+            };
+
+            let param3_dop = {
+                let param3_dop_specific_data = db_builder
+                    .create_normal_specific_dop_data(
+                        Some(compu_identical),
+                        Some(ascii_diag_type),
+                        None,
+                        None,
+                        None,
+                        None,
+                    )
+                    .value_offset();
+                db_builder.create_dop(
+                    *DopType::REGULAR,
+                    Some("param3_dop"),
+                    None,
+                    *SpecificDOPData::NormalDOP,
+                    Some(param3_dop_specific_data),
+                )
+            };
+
+            // Create parameters for the structure
+            let struct_param1 = db_builder.create_value_param("param1", param1_dop, 0, 0);
+            let struct_param2 = db_builder.create_value_param("param2", param2_dop, 2, 0);
+            let struct_param3 = db_builder.create_value_param("param3", param3_dop, 6, 0);
+
+            let struct_byte_len = 10; // 2 + 4 + 4 bytes
+            let structure = db_builder.create_structure(
+                Some(vec![struct_param1, struct_param2, struct_param3]),
+                Some(struct_byte_len),
+                true,
+            );
+
+            // Wrap the structure in a DOP
+            (
+                db_builder.create_structure_dop("test_structure_dop", structure),
+                struct_byte_len,
+            )
+        };
 
         let sid = 0x2E_u8;
-        let service = create_service(&mut db, sid, vec![main_param], vec![], vec![]);
+        let dc_name = "TestStructService";
+        let diag_comm = db_builder.create_diag_comm(DiagCommParams {
+            short_name: dc_name,
+            long_name: None,
+            semantic: None,
+            funct_class: None,
+            sdgs: None,
+            diag_class_type: DiagClassType::START_COMM,
+            pre_condition_state_refs: None,
+            state_transition_refs: None,
+            protocols: Some(vec![protocol]),
+            audience: None,
+            is_mandatory: false,
+            is_executable: true,
+            is_final: true,
+        });
+
+        let request = {
+            let sid_param = db_builder.create_coded_const_param(
+                "sid",
+                &sid.to_string(),
+                0,
+                0,
+                8,
+                DataType::UInt32,
+            );
+            let main_param =
+                db_builder.create_value_param("main_param", structure_dop, struct_byte_pos, 0);
+            db_builder.create_request(Some(vec![sid_param, main_param]), None)
+        };
+
+        let diag_service = db_builder.create_diag_service(DiagServiceParams {
+            diag_comm: Some(diag_comm),
+            request: Some(request),
+            pos_responses: vec![],
+            neg_responses: vec![],
+            is_cyclic: false,
+            is_multiple: false,
+            addressing: *Addressing::FUNCTIONAL_OR_PHYSICAL,
+            transmission_mode: *TransmissionMode::SEND_AND_RECEIVE,
+            com_param_refs: None,
+        });
+
+        let diag_layer = db_builder.create_diag_layer(DiagLayerParams {
+            short_name: "TestVariantDiagLayer",
+            long_name: None,
+            funct_classes: None,
+            com_param_refs: Some(vec![cp_ref]),
+            diag_services: Some(vec![diag_service]),
+            ..Default::default()
+        });
+
+        let variant = db_builder.create_variant(diag_layer, true, None, None);
+        let ecu_data = db_builder.create_ecu_data_and_finish(EcuDataParams {
+            revision: "revision_1",
+            version: "1.0.0",
+            variants: Some(vec![variant]),
+            ..Default::default()
+        });
+
+        let db =
+            datatypes::DiagnosticDatabase::new(Default::default(), ecu_data, Default::default())
+                .unwrap();
 
         let ecu_manager = super::EcuManager::new(
             db,
@@ -3326,145 +3344,345 @@ mod tests {
         )
         .unwrap();
 
-        (ecu_manager, service, sid)
+        let dc = cda_interfaces::DiagComm {
+            name: dc_name.to_owned(),
+            type_: DiagCommType::Configurations,
+            lookup_name: Some(dc_name.to_owned()),
+        };
+
+        (ecu_manager, dc, sid, structure_byte_len)
     }
 
-    fn create_ecu_manager_with_mux_service_and_default_case()
-    -> (super::EcuManager<DefaultSecurityPluginData>, DiagComm, u8) {
-        let mut db = DiagnosticDatabase::default();
-        let default_structure_param_1_dop = create_normal_dop(&mut db, None, 8, DataType::UInt32);
-        let default_structure_param_1 = create_value_param(
-            &mut db,
-            "default_structure_param_1",
-            default_structure_param_1_dop,
-            0,
-            0,
-        );
-        let default_structure = create_structure(
-            &mut db,
-            "default_structure",
-            0,
-            vec![default_structure_param_1],
-        );
-        let default_case = create_case(
-            "default_case",
-            Some(0x5814),
-            Some(0x5814),
-            Some(default_structure),
-        );
+    fn create_ecu_manager_with_mux_service_and_default_case() -> (
+        super::EcuManager<DefaultSecurityPluginData>,
+        cda_interfaces::DiagComm,
+        u8,
+    ) {
+        let mut db_builder = EcuDataBuilder::new();
+        let u8_diag_type = db_builder.create_diag_coded_type_standard_length(8, DataType::UInt32);
+        let compu_identical =
+            db_builder.create_compu_method(datatypes::CompuCategory::Identical, None, None);
 
-        let (ecu_manager, service, sid) =
-            create_ecu_manager_with_mux_service(Some(db), None, Some(default_case));
-        (ecu_manager, service, sid)
+        // Create DOP for default structure parameter
+        let default_structure_param_1 = {
+            let default_structure_param_1_dop_specific_data = db_builder
+                .create_normal_specific_dop_data(
+                    Some(compu_identical),
+                    Some(u8_diag_type),
+                    None,
+                    None,
+                    None,
+                    None,
+                )
+                .value_offset();
+            let default_structure_param_1_dop = db_builder.create_dop(
+                *DopType::REGULAR,
+                Some("default_structure_param_1_dop"),
+                None,
+                *SpecificDOPData::NormalDOP,
+                Some(default_structure_param_1_dop_specific_data),
+            );
+
+            // Create parameter for default structure
+            db_builder.create_value_param(
+                "default_structure_param_1",
+                default_structure_param_1_dop,
+                0,
+                0,
+            )
+        };
+
+        // Create default structure
+        let default_structure =
+            db_builder.create_structure(Some(vec![default_structure_param_1]), Some(1), true);
+        let default_case = db_builder.create_default_case("default_case", Some(default_structure));
+
+        create_ecu_manager_with_mux_service(Some(db_builder), None, Some(default_case))
     }
 
     fn create_ecu_manager_with_mux_service(
-        db: Option<DiagnosticDatabase>,
-        switch_key: Option<SwitchKey>,
-        default_case: Option<datatypes::Case>,
-    ) -> (super::EcuManager<DefaultSecurityPluginData>, DiagComm, u8) {
-        let mut db = db.unwrap_or_default();
+        db_builder: Option<EcuDataBuilder>,
+        switch_key: Option<WIPOffset<datatypes::database_builder::SwitchKey>>,
+        default_case: Option<WIPOffset<datatypes::database_builder::DefaultCase>>,
+    ) -> (
+        super::EcuManager<DefaultSecurityPluginData>,
+        cda_interfaces::DiagComm,
+        u8,
+    ) {
+        let mut db_builder = db_builder.unwrap_or_default();
 
-        // Create DOPs
-        // Testing here without masks only.
-        // Data extraction is done via DiagCodedType where masks and odd bit positions
-        // are tested in depth.
-        // Testing this here as well is redundant and would make the tests too complex.
-        let mux_1_case_1_params_dop_1 = create_normal_dop(&mut db, None, 32, DataType::Float32);
-        let mux_1_case_1_params_dop_2 = create_normal_dop(&mut db, None, 8, DataType::UInt32);
+        let u8_diag_type = db_builder.create_diag_coded_type_standard_length(8, DataType::UInt32);
+        let u16_diag_type = db_builder.create_diag_coded_type_standard_length(16, DataType::UInt32);
+        let i16_diag_type = db_builder.create_diag_coded_type_standard_length(16, DataType::Int32);
+        let f32_diag_type =
+            db_builder.create_diag_coded_type_standard_length(32, DataType::Float32);
+        let ascii_diag_type =
+            db_builder.create_diag_coded_type_standard_length(32, DataType::AsciiString);
+        let protocol = db_builder.create_protocol(Protocol::DoIp.value(), None, None, None);
+        let cp_ref = db_builder.create_com_param_ref(None, None, None, Some(protocol), None);
+        let compu_identical =
+            db_builder.create_compu_method(datatypes::CompuCategory::Identical, None, None);
 
-        let mux_1_case_2_params_dop_1 = create_normal_dop(&mut db, None, 16, DataType::Int32);
-        let mux_1_case_2_params_dop_2 = create_normal_dop(&mut db, None, 32, DataType::AsciiString);
+        // Create DOPs for case 1 parameters
+        let mux_1_case_1_params_dop_1 = {
+            let mux_1_case_1_params_dop_1_specific_data = db_builder
+                .create_normal_specific_dop_data(
+                    Some(compu_identical),
+                    Some(f32_diag_type),
+                    None,
+                    None,
+                    None,
+                    None,
+                )
+                .value_offset();
+            db_builder.create_dop(
+                *DopType::REGULAR,
+                Some("mux_1_case_1_params_dop_1"),
+                None,
+                *SpecificDOPData::NormalDOP,
+                Some(mux_1_case_1_params_dop_1_specific_data),
+            )
+        };
+
+        let mux_1_case_1_params_dop_2 = {
+            let mux_1_case_1_params_dop_2_specific_data = db_builder
+                .create_normal_specific_dop_data(
+                    Some(compu_identical),
+                    Some(u8_diag_type),
+                    None,
+                    None,
+                    None,
+                    None,
+                )
+                .value_offset();
+            db_builder.create_dop(
+                *DopType::REGULAR,
+                Some("mux_1_case_1_params_dop_2"),
+                None,
+                *SpecificDOPData::NormalDOP,
+                Some(mux_1_case_1_params_dop_2_specific_data),
+            )
+        };
+
+        let mux_1_case_2_params_dop_1 = {
+            let mux_1_case_2_params_dop_1_specific_data = db_builder
+                .create_normal_specific_dop_data(
+                    Some(compu_identical),
+                    Some(i16_diag_type),
+                    None,
+                    None,
+                    None,
+                    None,
+                )
+                .value_offset();
+            db_builder.create_dop(
+                *DopType::REGULAR,
+                Some("mux_1_case_2_params_dop_1"),
+                None,
+                *SpecificDOPData::NormalDOP,
+                Some(mux_1_case_2_params_dop_1_specific_data),
+            )
+        };
+
+        let mux_1_case_2_params_dop_2 = {
+            let mux_1_case_2_params_dop_2_specific_data = db_builder
+                .create_normal_specific_dop_data(
+                    Some(compu_identical),
+                    Some(ascii_diag_type),
+                    None,
+                    None,
+                    None,
+                    None,
+                )
+                .value_offset();
+            db_builder.create_dop(
+                *DopType::REGULAR,
+                Some("mux_1_case_2_params_dop_2"),
+                None,
+                *SpecificDOPData::NormalDOP,
+                Some(mux_1_case_2_params_dop_2_specific_data),
+            )
+        };
 
         // Create parameters for case 1
-        let mux_1_case_1_params = [
-            create_value_param(
-                &mut db,
-                "mux_1_case_1_param_1",
-                mux_1_case_1_params_dop_1,
-                0,
-                0,
-            ),
-            create_value_param(
-                &mut db,
-                "mux_1_case_1_param_2",
-                mux_1_case_1_params_dop_2,
-                4,
-                0,
-            ),
-        ];
+        let mux_1_case_1_param_1 =
+            db_builder.create_value_param("mux_1_case_1_param_1", mux_1_case_1_params_dop_1, 0, 0);
+        let mux_1_case_1_param_2 =
+            db_builder.create_value_param("mux_1_case_1_param_2", mux_1_case_1_params_dop_2, 4, 0);
 
         // Create parameters for case 2
-        let mux_1_case_2_params = [
-            create_value_param(
-                &mut db,
-                "mux_1_case_2_param_1",
-                mux_1_case_2_params_dop_1,
-                1,
-                0,
-            ),
-            create_value_param(
-                &mut db,
-                "mux_1_case_2_param_2",
-                mux_1_case_2_params_dop_2,
-                4,
-                0,
-            ),
-        ];
+        let mux_1_case_2_param_1 =
+            db_builder.create_value_param("mux_1_case_2_param_1", mux_1_case_2_params_dop_1, 1, 0);
+        let mux_1_case_2_param_2 =
+            db_builder.create_value_param("mux_1_case_2_param_2", mux_1_case_2_params_dop_2, 4, 0);
 
         // Create structures
-        let mux_1_case_1_structure = create_structure(
-            &mut db,
-            "mux_1_case_1_structure",
-            7,
-            mux_1_case_1_params.to_vec(),
+        let mux_1_case_1_structure = db_builder.create_structure(
+            Some(vec![mux_1_case_1_param_1, mux_1_case_1_param_2]),
+            Some(7),
+            true,
         );
 
-        let mux_1_case_2_structure = create_structure(
-            &mut db,
-            "mux_1_case_2_structure",
-            7,
-            mux_1_case_2_params.to_vec(),
+        let mux_1_case_2_structure = db_builder.create_structure(
+            Some(vec![mux_1_case_2_param_1, mux_1_case_2_param_2]),
+            Some(7),
+            true,
         );
 
-        let mux_1_case_1 = create_case(
+        // Create cases using the new helper method
+        let mux_1_case_1 = db_builder.create_case(
             "mux_1_case_1",
-            Some(1.0),
-            Some(10.0),
+            Some(Limit {
+                value: 1.0.to_string(),
+                interval_type: datatypes::IntervalType::Infinite,
+            }),
+            Some(Limit {
+                value: 10.0.to_string(),
+                interval_type: datatypes::IntervalType::Infinite,
+            }),
             Some(mux_1_case_1_structure),
         );
 
-        let mux_1_case_2 = create_case(
+        let mux_1_case_2 = db_builder.create_case(
             "mux_1_case_2",
-            Some(11.0),
-            Some(600.0),
+            Some(Limit {
+                value: 11.0.to_string(),
+                interval_type: datatypes::IntervalType::Infinite,
+            }),
+            Some(Limit {
+                value: 600.0.to_string(),
+                interval_type: datatypes::IntervalType::Infinite,
+            }),
             Some(mux_1_case_2_structure),
         );
 
-        let mux_1_case_3 = create_case("mux_1_case_2", Some("test"), Some("test"), None);
-
-        let mux_1_switch_key =
-            switch_key.unwrap_or_else(|| create_switch_key(&mut db, 0, 0, 16, DataType::UInt32));
-        let mux_1 = create_mux_dop(
-            &mut db,
-            2,
-            default_case,
-            Some(mux_1_switch_key),
-            vec![mux_1_case_1, mux_1_case_2, mux_1_case_3],
-        );
-        let mux_1_param = create_param(
-            &mut db,
-            "mux_1_param",
-            ParameterValue::Value(datatypes::ValueData {
-                default_value: None,
-                dop: mux_1,
+        let mux_1_case_3 = db_builder.create_case(
+            "mux_1_case_3",
+            Some(Limit {
+                value: "test".to_owned(),
+                interval_type: datatypes::IntervalType::Infinite,
             }),
-            2,
-            0,
+            None,
+            None,
         );
 
-        let sid = 0x42_u8;
-        let service = create_service(&mut db, sid, vec![mux_1_param], vec![mux_1_param], vec![]);
+        // Create switch key if not provided
+        let mux_1_switch_key = switch_key.unwrap_or_else(|| {
+            let switch_key_dop_specific_data = db_builder
+                .create_normal_specific_dop_data(
+                    Some(compu_identical),
+                    Some(u16_diag_type),
+                    None,
+                    None,
+                    None,
+                    None,
+                )
+                .value_offset();
+            let switch_key_dop = db_builder.create_dop(
+                *DopType::REGULAR,
+                Some("switch_key_dop"),
+                None,
+                *SpecificDOPData::NormalDOP,
+                Some(switch_key_dop_specific_data),
+            );
+
+            db_builder.create_switch_key(0, Some(0), Some(switch_key_dop))
+        });
+
+        let cases = vec![mux_1_case_1, mux_1_case_2, mux_1_case_3];
+
+        // Create mux DOP specific data
+        let mux_dop = db_builder.create_mux_dop(
+            "mux_dop",
+            2,
+            Some(mux_1_switch_key),
+            default_case,
+            Some(cases),
+            true,
+        );
+
+        let sid = 0x22;
+        let dc_name = "TestMuxService";
+        let diag_comm = db_builder.create_diag_comm(DiagCommParams {
+            short_name: dc_name,
+            long_name: None,
+            semantic: None,
+            funct_class: None,
+            sdgs: None,
+            diag_class_type: DiagClassType::START_COMM,
+            pre_condition_state_refs: None,
+            state_transition_refs: None,
+            protocols: Some(vec![protocol]),
+            audience: None,
+            is_mandatory: false,
+            is_executable: true,
+            is_final: true,
+        });
+
+        // Create request with mux parameter
+        let request = {
+            let sid_param = db_builder.create_coded_const_param(
+                "sid",
+                &sid.to_string(),
+                0,
+                0,
+                8,
+                DataType::UInt32,
+            );
+            let mux_param = db_builder.create_value_param("mux_1_param", mux_dop, 2, 0);
+            db_builder.create_request(Some(vec![sid_param, mux_param]), None)
+        };
+
+        // Create response with mux parameter
+        let pos_response = {
+            let sid_param = db_builder.create_coded_const_param(
+                "test_service_pos_sid",
+                &sid.to_string(),
+                0,
+                0,
+                8,
+                DataType::UInt32,
+            );
+            let mux_param = db_builder.create_value_param("mux_1_param", mux_dop, 2, 0);
+            db_builder.create_response(
+                ResponseType::Positive,
+                Some(vec![sid_param, mux_param]),
+                None,
+            )
+        };
+
+        let diag_service = db_builder.create_diag_service(DiagServiceParams {
+            diag_comm: Some(diag_comm),
+            request: Some(request),
+            pos_responses: vec![pos_response],
+            neg_responses: vec![],
+            is_cyclic: false,
+            is_multiple: false,
+            addressing: *Addressing::FUNCTIONAL_OR_PHYSICAL,
+            transmission_mode: *TransmissionMode::SEND_AND_RECEIVE,
+            com_param_refs: None,
+        });
+
+        let diag_layer = db_builder.create_diag_layer(DiagLayerParams {
+            short_name: "TestVariantDiagLayer",
+            long_name: None,
+            funct_classes: None,
+            com_param_refs: Some(vec![cp_ref]),
+            diag_services: Some(vec![diag_service]),
+            ..Default::default()
+        });
+
+        let variant = db_builder.create_variant(diag_layer, true, None, None);
+        let ecu_data = db_builder.create_ecu_data_and_finish(EcuDataParams {
+            revision: "revision_1",
+            version: "1.0.0",
+            variants: Some(vec![variant]),
+            ..Default::default()
+        });
+
+        let db =
+            datatypes::DiagnosticDatabase::new(Default::default(), ecu_data, Default::default())
+                .unwrap();
 
         let ecu_manager = super::EcuManager::new(
             db,
@@ -3473,62 +3691,169 @@ mod tests {
             DatabaseNamingConvention::default(),
         )
         .unwrap();
-        (ecu_manager, service, sid)
+
+        let dc = cda_interfaces::DiagComm {
+            name: dc_name.to_owned(),
+            type_: DiagCommType::Data,
+            lookup_name: Some(dc_name.to_owned()),
+        };
+
+        (ecu_manager, dc, sid)
     }
 
     fn create_ecu_manager_with_end_pdu_service(
         min_items: u32,
         max_items: Option<u32>,
-    ) -> (super::EcuManager<DefaultSecurityPluginData>, DiagComm, u8) {
-        let mut db = DiagnosticDatabase::default();
+    ) -> (
+        super::EcuManager<DefaultSecurityPluginData>,
+        cda_interfaces::DiagComm,
+        u8,
+    ) {
+        let mut db_builder = EcuDataBuilder::new();
+        let u8_diag_type = db_builder.create_diag_coded_type_standard_length(8, DataType::UInt32);
+        let u16_diag_type = db_builder.create_diag_coded_type_standard_length(16, DataType::UInt32);
+        let protocol = db_builder.create_protocol(Protocol::DoIp.value(), None, None, None);
+        let cp_ref = db_builder.create_com_param_ref(None, None, None, Some(protocol), None);
+        let compu_identical =
+            db_builder.create_compu_method(datatypes::CompuCategory::Identical, None, None);
 
         // Create DOPs for structure parameters within the EndOfPdu
-        let item_param1_dop = create_normal_dop(&mut db, None, 8, DataType::UInt32);
-        let item_param2_dop = create_normal_dop(&mut db, None, 16, DataType::UInt32);
+        let item_param1_dop = {
+            let item_param1_dop_specific_data = db_builder
+                .create_normal_specific_dop_data(
+                    Some(compu_identical),
+                    Some(u8_diag_type),
+                    None,
+                    None,
+                    None,
+                    None,
+                )
+                .value_offset();
+            db_builder.create_dop(
+                *DopType::REGULAR,
+                Some("item_param1_dop"),
+                None,
+                *SpecificDOPData::NormalDOP,
+                Some(item_param1_dop_specific_data),
+            )
+        };
+
+        let item_param2_dop = {
+            let item_param2_dop_specific_data = db_builder
+                .create_normal_specific_dop_data(
+                    Some(compu_identical),
+                    Some(u16_diag_type),
+                    None,
+                    None,
+                    None,
+                    None,
+                )
+                .value_offset();
+            db_builder.create_dop(
+                *DopType::REGULAR,
+                Some("item_param2_dop"),
+                None,
+                *SpecificDOPData::NormalDOP,
+                Some(item_param2_dop_specific_data),
+            )
+        };
 
         // Create parameters for the repeating structure
-        let item_param1 = create_value_param(&mut db, "item_param1", item_param1_dop, 0, 0);
-        let item_param2 = create_value_param(&mut db, "item_param2", item_param2_dop, 1, 0);
+        let item_param1 = db_builder.create_value_param("item_param1", item_param1_dop, 0, 0);
+        let item_param2 = db_builder.create_value_param("item_param2", item_param2_dop, 1, 0);
 
         // Create the basic structure that will be repeated
-        let item_structure = create_structure(
-            &mut db,
-            "item_structure",
-            3, // byte_size: 1 byte + 2 bytes = 3 bytes per item
-            vec![item_param1, item_param2],
+        let item_structure = db_builder.create_structure(
+            Some(vec![item_param1, item_param2]),
+            Some(3), // byte_size: 1 byte + 2 bytes = 3 bytes per item
+            true,
         );
 
-        // Create EndOfPdu DOP
-        let end_pdu_dop = create_dop(
-            &mut db,
-            DOPType::Regular,
-            DataOperationVariant::EndOfPdu(datatypes::EndOfPduDop {
-                min_items,
-                max_items,
-                field: DopField {
-                    value: DopFieldValue::BasicStruct(datatypes::DopFieldBasicStruct {
-                        struct_id: item_structure,
-                        name: Some(STRINGS.get_or_insert("item_structure")),
-                    }),
-                    is_visible: false,
-                },
-            }),
-        );
-
-        // Create main parameter that uses the EndOfPdu
-        let main_param = create_param(
-            &mut db,
-            "end_pdu_param",
-            ParameterValue::Value(datatypes::ValueData {
-                default_value: None,
-                dop: end_pdu_dop,
-            }),
-            1, // Start at byte position 1 (after SID)
-            0, // Bit position 0, start at byte border
-        );
+        // Create EndOfPdu DOP using the new helper method
+        let end_pdu_dop =
+            db_builder.create_end_of_pdu_field_dop(min_items, max_items, Some(item_structure));
 
         let sid = 0x22_u8;
-        let service = create_service(&mut db, sid, vec![], vec![main_param], vec![]);
+        let dc_name = "TestEndOfPduService";
+        let diag_comm = db_builder.create_diag_comm(DiagCommParams {
+            short_name: dc_name,
+            long_name: None,
+            semantic: None,
+            funct_class: None,
+            sdgs: None,
+            diag_class_type: DiagClassType::START_COMM,
+            pre_condition_state_refs: None,
+            state_transition_refs: None,
+            protocols: Some(vec![protocol]),
+            audience: None,
+            is_mandatory: false,
+            is_executable: true,
+            is_final: true,
+        });
+
+        // Create request
+        let request = {
+            let sid_param = db_builder.create_coded_const_param(
+                "sid",
+                &sid.to_string(),
+                0,
+                0,
+                8,
+                DataType::UInt32,
+            );
+            db_builder.create_request(Some(vec![sid_param]), None)
+        };
+
+        // Create response with EndOfPdu parameter
+        let pos_response = {
+            let sid_param = db_builder.create_coded_const_param(
+                "test_service_pos_sid",
+                &sid.to_string(),
+                0,
+                0,
+                8,
+                DataType::UInt32,
+            );
+            let end_pdu_param = db_builder.create_value_param("end_pdu_param", end_pdu_dop, 1, 0);
+            db_builder.create_response(
+                ResponseType::Positive,
+                Some(vec![sid_param, end_pdu_param]),
+                None,
+            )
+        };
+
+        let diag_service = db_builder.create_diag_service(DiagServiceParams {
+            diag_comm: Some(diag_comm),
+            request: Some(request),
+            pos_responses: vec![pos_response],
+            neg_responses: vec![],
+            is_cyclic: false,
+            is_multiple: false,
+            addressing: *Addressing::FUNCTIONAL_OR_PHYSICAL,
+            transmission_mode: *TransmissionMode::SEND_AND_RECEIVE,
+            com_param_refs: None,
+        });
+
+        let diag_layer = db_builder.create_diag_layer(DiagLayerParams {
+            short_name: "TestVariantDiagLayer",
+            long_name: None,
+            funct_classes: None,
+            com_param_refs: Some(vec![cp_ref]),
+            diag_services: Some(vec![diag_service]),
+            ..Default::default()
+        });
+
+        let variant = db_builder.create_variant(diag_layer, true, None, None);
+        let ecu_data = db_builder.create_ecu_data_and_finish(EcuDataParams {
+            revision: "revision_1",
+            version: "1.0.0",
+            variants: Some(vec![variant]),
+            ..Default::default()
+        });
+
+        let db =
+            datatypes::DiagnosticDatabase::new(Default::default(), ecu_data, Default::default())
+                .unwrap();
 
         let ecu_manager = super::EcuManager::new(
             db,
@@ -3538,72 +3863,116 @@ mod tests {
         )
         .unwrap();
 
-        (ecu_manager, service, sid)
+        let dc = cda_interfaces::DiagComm {
+            name: dc_name.to_owned(),
+            type_: DiagCommType::Data,
+            lookup_name: Some(dc_name.to_owned()),
+        };
+
+        (ecu_manager, dc, sid)
     }
 
     fn create_ecu_manager_with_dtc() -> (
         super::EcuManager<DefaultSecurityPluginData>,
-        DiagComm,
+        cda_interfaces::DiagComm,
         u8,
         u32,
     ) {
-        let mut db = DiagnosticDatabase::default();
+        let mut db_builder = EcuDataBuilder::new();
+        let u32_diag_type = db_builder.create_diag_coded_type_standard_length(32, DataType::UInt32);
+        let protocol = db_builder.create_protocol(Protocol::DoIp.value(), None, None, None);
+        let cp_ref = db_builder.create_com_param_ref(None, None, None, Some(protocol), None);
+        let compu_identical =
+            db_builder.create_compu_method(datatypes::CompuCategory::Identical, None, None);
 
-        // Create DTC DiagCodedType
-        let dtc_diag_type_id = create_datatype(
-            &mut db,
-            DiagCodedTypeVariant::StandardLength(StandardLengthType {
-                bit_length: 32,
-                bitmask: None,
-                condensed: false,
-            }),
-            DataType::UInt32,
-        );
-
-        // Create DTC record
         let dtc_code = 0xDEADBEEF;
-        let dtc_id = db.dtcs.keys().max().unwrap_or(&0) + 1;
-        db.dtcs.insert(
-            dtc_id,
-            datatypes::Dtc {
-                code: dtc_code,
-                display_code: Some(STRINGS.get_or_insert("P1234")),
-                fault_name: Some(STRINGS.get_or_insert("TestFault")),
-                severity: 2,
-            },
-        );
+        let dtc = db_builder.create_dtc(dtc_code, Some("P1234"), Some("TestFault"), 2);
 
-        // Create DtcDop
-        let dtc_dop_id = create_dop(
-            &mut db,
-            DOPType::Regular,
-            DataOperationVariant::Dtc(DtcDop {
-                diag_coded_type: dtc_diag_type_id,
-                physical_type: None,
-                compu_method: CompuMethod {
-                    category: CompuCategory::Identical,
-                    internal_to_phys: CompuFunction { scales: vec![] },
-                },
-                dtc_refs: vec![dtc_id],
-                is_visible: false,
-            }),
-        );
+        let dtc_dop =
+            db_builder.create_dtc_dop(u32_diag_type, Some(vec![dtc]), Some(compu_identical));
 
-        // Create parameter using DtcDop
-        let dtc_param_id = create_param(
-            &mut db,
-            "dtc_param",
-            ParameterValue::Value(datatypes::ValueData {
-                default_value: None,
-                dop: dtc_dop_id,
-            }),
-            1, // after SID
-            0, // bit position
-        );
-
-        // Create service
         let sid = 0x19_u8;
-        let service = create_service(&mut db, sid, vec![], vec![dtc_param_id], vec![]);
+        let dc_name = "TestDtcService";
+        let diag_comm = db_builder.create_diag_comm(DiagCommParams {
+            short_name: dc_name,
+            long_name: None,
+            semantic: None,
+            funct_class: None,
+            sdgs: None,
+            diag_class_type: DiagClassType::START_COMM,
+            pre_condition_state_refs: None,
+            state_transition_refs: None,
+            protocols: Some(vec![protocol]),
+            audience: None,
+            is_mandatory: false,
+            is_executable: true,
+            is_final: true,
+        });
+
+        // Create request
+        let request = {
+            let sid_param = db_builder.create_coded_const_param(
+                "sid",
+                &sid.to_string(),
+                0,
+                0,
+                8,
+                DataType::UInt32,
+            );
+            db_builder.create_request(Some(vec![sid_param]), None)
+        };
+
+        // Create response with DTC parameter
+        let pos_response = {
+            let sid_param = db_builder.create_coded_const_param(
+                "test_service_pos_sid",
+                &sid.to_string(),
+                0,
+                0,
+                8,
+                DataType::UInt32,
+            );
+            let dtc_param = db_builder.create_value_param("dtc_param", dtc_dop, 1, 0);
+            db_builder.create_response(
+                ResponseType::Positive,
+                Some(vec![sid_param, dtc_param]),
+                None,
+            )
+        };
+
+        let diag_service = db_builder.create_diag_service(DiagServiceParams {
+            diag_comm: Some(diag_comm),
+            request: Some(request),
+            pos_responses: vec![pos_response],
+            neg_responses: vec![],
+            is_cyclic: false,
+            is_multiple: false,
+            addressing: *Addressing::FUNCTIONAL_OR_PHYSICAL,
+            transmission_mode: *TransmissionMode::SEND_AND_RECEIVE,
+            com_param_refs: None,
+        });
+
+        let diag_layer = db_builder.create_diag_layer(DiagLayerParams {
+            short_name: "TestVariantDiagLayer",
+            long_name: None,
+            funct_classes: None,
+            com_param_refs: Some(vec![cp_ref]),
+            diag_services: Some(vec![diag_service]),
+            ..Default::default()
+        });
+
+        let variant = db_builder.create_variant(diag_layer, true, None, None);
+        let ecu_data = db_builder.create_ecu_data_and_finish(EcuDataParams {
+            revision: "revision_1",
+            version: "1.0.0",
+            variants: Some(vec![variant]),
+            ..Default::default()
+        });
+
+        let db =
+            datatypes::DiagnosticDatabase::new(Default::default(), ecu_data, Default::default())
+                .unwrap();
+
         let ecu_manager = super::EcuManager::new(
             db,
             Protocol::DoIp,
@@ -3611,7 +3980,14 @@ mod tests {
             DatabaseNamingConvention::default(),
         )
         .unwrap();
-        (ecu_manager, service, sid, dtc_code)
+
+        let dc = cda_interfaces::DiagComm {
+            name: dc_name.to_owned(),
+            type_: DiagCommType::Faults,
+            lookup_name: Some(dc_name.to_owned()),
+        };
+
+        (ecu_manager, dc, sid, dtc_code)
     }
 
     fn create_payload(data: Vec<u8>) -> ServicePayload {
@@ -3619,32 +3995,34 @@ mod tests {
             data,
             source_address: 0u16,
             target_address: 0u16,
-            new_security_access_id: None,
-            new_session_id: None,
+            new_security: None,
+            new_session: None,
         }
     }
 
-    #[test]
-    fn test_mux_from_uds_invalid_case_no_default() {
+    #[tokio::test]
+    async fn test_mux_from_uds_invalid_case_no_default() {
         let (ecu_manager, service, sid) = create_ecu_manager_with_mux_service(None, None, None);
-        let response = ecu_manager.convert_from_uds(
-            &service,
-            &create_payload(vec![
-                // Service ID
-                sid,
-                // This does not belong to our mux, it's here to test, if the start byte is used
-                0xff,
-                // Mux param starts here
-                // there is no switch value for 0xffff
-                0xff, 0xff,
-            ]),
-            true,
-        );
+        let response = ecu_manager
+            .convert_from_uds(
+                &service,
+                &create_payload(vec![
+                    // Service ID
+                    sid,
+                    // This does not belong to our mux, it's here to test, if the start byte is used
+                    0xff,
+                    // Mux param starts here
+                    // there is no switch value for 0xffff
+                    0xff, 0xff,
+                ]),
+                true,
+            )
+            .await;
         assert!(response.is_err());
     }
 
-    #[test]
-    fn test_mux_from_uds_invalid_case_with_default() {
+    #[tokio::test]
+    async fn test_mux_from_uds_invalid_case_with_default() {
         let (ecu_manager, service, sid) = create_ecu_manager_with_mux_service_and_default_case();
         let response = ecu_manager
             .convert_from_uds(
@@ -3662,6 +4040,7 @@ mod tests {
                 ]),
                 true,
             )
+            .await
             .unwrap();
         assert_eq!(
             response.serialize_to_json().unwrap().data,
@@ -3678,39 +4057,43 @@ mod tests {
         );
     }
 
-    #[test]
-    fn test_mux_from_uds_invalid_payload() {
+    #[tokio::test]
+    async fn test_mux_from_uds_invalid_payload() {
         let (ecu_manager, service, sid) = create_ecu_manager_with_mux_service(None, None, None);
-        let response = ecu_manager.convert_from_uds(
-            &service,
-            &create_payload(vec![
-                // Service ID
-                sid,
-                // This does not belong to our mux, it's here to test, if the start byte is used
-                0xff, // Mux param starts here
-                // + switch key byte 0
-                0x0, 0x0a, // valid switch key but no data, expect error from decode.
-            ]),
-            true,
-        );
+        let response = ecu_manager
+            .convert_from_uds(
+                &service,
+                &create_payload(vec![
+                    // Service ID
+                    sid,
+                    // This does not belong to our mux, it's here to test, if the start byte is used
+                    0xff, // Mux param starts here
+                    // + switch key byte 0
+                    0x0, 0x0a, // valid switch key but no data, expect error from decode.
+                ]),
+                true,
+            )
+            .await;
         assert!(response.is_err());
     }
 
-    #[test]
-    fn test_mux_from_uds_empty_structure() {
+    #[tokio::test]
+    async fn test_mux_from_uds_empty_structure() {
         let (ecu_manager, service, sid) = create_ecu_manager_with_mux_service(None, None, None);
-        let response = ecu_manager.convert_from_uds(
-            &service,
-            &create_payload(vec![
-                // Service ID
-                sid,
-                // This does not belong to our mux, it's here to test, if the start byte is used
-                0xff, // Mux param starts here
-                // + switch key byte 0
-                0x00, 0x0a, // valid switch key but no data, expect error from decode.
-            ]),
-            true,
-        );
+        let response = ecu_manager
+            .convert_from_uds(
+                &service,
+                &create_payload(vec![
+                    // Service ID
+                    sid,
+                    // This does not belong to our mux, it's here to test, if the start byte is used
+                    0xff, // Mux param starts here
+                    // + switch key byte 0
+                    0x00, 0x0a, // valid switch key but no data, expect error from decode.
+                ]),
+                true,
+            )
+            .await;
 
         assert_eq!(
             response.unwrap_err(),
@@ -3721,8 +4104,8 @@ mod tests {
         );
     }
 
-    #[test]
-    fn test_mux_from_and_to_uds_case_1() {
+    #[tokio::test]
+    async fn test_mux_from_and_to_uds_case_1() {
         let (ecu_manager, service, sid) = create_ecu_manager_with_mux_service(None, None, None);
         // skip formatting, to keep the comments on the bytes they belong to.
         let param_1_value: f32 = 13.37;
@@ -3754,11 +4137,11 @@ mod tests {
             },
         });
 
-        test_mux_from_and_to_uds(ecu_manager, &service, sid, &data.to_vec(), mux_1_json);
+        test_mux_from_and_to_uds(ecu_manager, &service, sid, &data.to_vec(), mux_1_json).await;
     }
 
-    #[test]
-    fn test_mux_from_and_to_uds_case_2() {
+    #[tokio::test]
+    async fn test_mux_from_and_to_uds_case_2() {
         let (ecu_manager, service, sid) = create_ecu_manager_with_mux_service(None, None, None);
         // skip formatting, to keep the comments on the bytes they belong to.
         #[rustfmt::skip]
@@ -3794,15 +4177,41 @@ mod tests {
             }
         });
 
-        test_mux_from_and_to_uds(ecu_manager, &service, sid, &data.to_vec(), mux_1_json);
+        test_mux_from_and_to_uds(ecu_manager, &service, sid, &data.to_vec(), mux_1_json).await;
     }
 
-    #[test]
-    fn test_mux_from_and_to_uds_case_3() {
-        let mut db = DiagnosticDatabase::default();
-        let switch_key = create_switch_key(&mut db, 0, 0, 32, DataType::AsciiString);
+    #[tokio::test]
+    async fn test_mux_from_and_to_uds_case_3() {
+        let mut db_builder = EcuDataBuilder::new();
+        // Create switch key if not provided
+        let switch_key = {
+            let ascii_string_diag_type =
+                db_builder.create_diag_coded_type_standard_length(32, DataType::AsciiString);
+            let compu_identical =
+                db_builder.create_compu_method(datatypes::CompuCategory::Identical, None, None);
+            let switch_key_dop_specific_data = db_builder
+                .create_normal_specific_dop_data(
+                    Some(compu_identical),
+                    Some(ascii_string_diag_type),
+                    None,
+                    None,
+                    None,
+                    None,
+                )
+                .value_offset();
+            let switch_key_dop = db_builder.create_dop(
+                *DopType::REGULAR,
+                Some("switch_key_dop"),
+                None,
+                *SpecificDOPData::NormalDOP,
+                Some(switch_key_dop_specific_data),
+            );
+
+            db_builder.create_switch_key(0, Some(0), Some(switch_key_dop))
+        };
+
         let (ecu_manager, service, sid) =
-            create_ecu_manager_with_mux_service(Some(db), Some(switch_key), None);
+            create_ecu_manager_with_mux_service(Some(db_builder), Some(switch_key), None);
         // skip formatting, to keep the comments on the bytes they belong to.
         #[rustfmt::skip]
         let data = [
@@ -3822,18 +4231,19 @@ mod tests {
             }
         });
 
-        test_mux_from_and_to_uds(ecu_manager, &service, sid, &data.to_vec(), mux_1_json);
+        test_mux_from_and_to_uds(ecu_manager, &service, sid, &data.to_vec(), mux_1_json).await;
     }
 
-    fn test_mux_from_and_to_uds(
+    async fn test_mux_from_and_to_uds(
         ecu_manager: super::EcuManager<DefaultSecurityPluginData>,
-        service: &DiagComm,
+        service: &cda_interfaces::DiagComm,
         sid: u8,
         data: &Vec<u8>,
         mux_1_json: serde_json::Value,
     ) {
         let response = ecu_manager
             .convert_from_uds(service, &create_payload(data.to_vec()), true)
+            .await
             .unwrap();
 
         // JSON for the response assertion
@@ -3856,11 +4266,11 @@ mod tests {
             UdsPayloadData::ParameterMap(serde_json::from_value(mux_1_json).unwrap());
         let mut service_payload = ecu_manager
             .create_uds_payload(service, &skip_sec_plugin!(), Some(payload_data))
+            .await
             .unwrap();
         // The bytes set below are not modified by the create_uds_payload function,
         // because they do not belong to the mux param.
         // Setting them manually here, so we can check the full payload.
-        service_payload.data[0] = data[0];
         service_payload.data[1] = data[1];
         service_payload.data[4] = data[4];
 
@@ -3868,9 +4278,9 @@ mod tests {
         assert_eq!(*service_payload.data, *data);
     }
 
-    #[test]
-    fn test_map_struct_to_uds() {
-        let (ecu_manager, service, _sid) = create_ecu_manager_with_struct_service();
+    async fn validate_struct_payload(struct_byte_pos: u32) {
+        let (ecu_manager, service, sid, struct_byte_len) =
+            create_ecu_manager_with_struct_service(struct_byte_pos);
 
         // Test data for the structure
         let test_value = json!({
@@ -3882,33 +4292,51 @@ mod tests {
         let payload_data =
             UdsPayloadData::ParameterMap(HashMap::from([("main_param".to_string(), test_value)]));
 
-        let result =
-            ecu_manager.create_uds_payload(&service, &skip_sec_plugin!(), Some(payload_data));
+        let result = ecu_manager
+            .create_uds_payload(&service, &skip_sec_plugin!(), Some(payload_data))
+            .await;
 
-        assert!(result.is_ok());
         let service_payload = result.unwrap();
 
-        // Verify the UDS payload contains the expected structure data
-        // Adding the service ID is done in the diag_kernel, so we are only creating
-        // the payloads for the parameters here.
-        // param1 (2 bytes) + param2 (4 bytes) + param3 (4 bytes)
-        assert_eq!(service_payload.data.len(), 10);
+        // sid (1 byte) + gap (4 bytes) + param1 (2 bytes) + param2 (4 bytes) + param3 (4 bytes)
+        // sid is missing here because byte pos starts at 0,
+        // so we would have to add 1 more byte for sid
+        // and subtract one for the gap
+        assert_eq!(
+            service_payload.data.len(),
+            (struct_byte_pos + struct_byte_len) as usize
+        );
 
-        // Check param1 (uint16 at byte 0-1)
-        assert_eq!(service_payload.data[0], 0x12);
-        assert_eq!(service_payload.data[1], 0x34);
+        // Check sid
+        assert_eq!(service_payload.data[0], sid);
 
-        // Check param2 (float32 at byte 2-5)
+        let payload = &service_payload.data[struct_byte_pos as usize..];
+
+        // Check param1
+        assert_eq!(payload[0], 0x12);
+        assert_eq!(payload[1], 0x34);
+
+        // Check param2
         let float_bytes = 42.42_f32.to_be_bytes();
-        assert_eq!(&service_payload.data[2..6], &float_bytes);
+        assert_eq!(&payload[2..6], &float_bytes);
 
-        // Check param3 (ascii string at byte 6-9)
-        assert_eq!(&service_payload.data[6..10], b"test");
+        // Check param3
+        assert_eq!(&payload[6..10], b"test");
     }
 
-    #[test]
-    fn test_map_struct_to_uds_missing_parameter() {
-        let (ecu_manager, service, _) = create_ecu_manager_with_struct_service();
+    #[tokio::test]
+    async fn test_map_struct_to_uds() {
+        validate_struct_payload(1).await;
+    }
+
+    #[tokio::test]
+    async fn test_map_struct_to_uds_with_gap_in_payload() {
+        validate_struct_payload(5).await;
+    }
+
+    #[tokio::test]
+    async fn test_map_struct_to_uds_missing_parameter() {
+        let (ecu_manager, service, _, _) = create_ecu_manager_with_struct_service(1);
 
         // Test data missing param2
         let test_value = json!({
@@ -3919,8 +4347,9 @@ mod tests {
         let payload_data =
             UdsPayloadData::ParameterMap(HashMap::from([("main_param".to_string(), test_value)]));
 
-        let result =
-            ecu_manager.create_uds_payload(&service, &skip_sec_plugin!(), Some(payload_data));
+        let result = ecu_manager
+            .create_uds_payload(&service, &skip_sec_plugin!(), Some(payload_data))
+            .await;
 
         // Should fail because param2 is missing
         assert!(result.is_err());
@@ -3932,9 +4361,9 @@ mod tests {
         }
     }
 
-    #[test]
-    fn test_map_struct_to_uds_invalid_json_type() {
-        let (ecu_manager, service, _) = create_ecu_manager_with_struct_service();
+    #[tokio::test]
+    async fn test_map_struct_to_uds_invalid_json_type() {
+        let (ecu_manager, service, _, _) = create_ecu_manager_with_struct_service(1);
 
         // Test data with wrong type (array instead of object)
         let test_value = json!([1, 2, 3]);
@@ -3942,8 +4371,9 @@ mod tests {
         let payload_data =
             UdsPayloadData::ParameterMap(HashMap::from([("main_param".to_string(), test_value)]));
 
-        let result =
-            ecu_manager.create_uds_payload(&service, &skip_sec_plugin!(), Some(payload_data));
+        let result = ecu_manager
+            .create_uds_payload(&service, &skip_sec_plugin!(), Some(payload_data))
+            .await;
 
         // Should fail because we provided an array instead of an object
         assert!(result.is_err());
@@ -3952,24 +4382,27 @@ mod tests {
         }
     }
 
-    #[test]
-    fn test_map_mux_to_uds_with_default_case() {
-        fn test_default(
+    #[tokio::test]
+    async fn test_map_mux_to_uds_with_default_case() {
+        async fn test_default(
             ecu_manager: &super::EcuManager<DefaultSecurityPluginData>,
-            service: &DiagComm,
+            service: &cda_interfaces::DiagComm,
             test_value: serde_json::Value,
             select_value: u16,
+            sid: u8,
         ) {
             let payload_data =
                 UdsPayloadData::ParameterMap(serde_json::from_value(test_value).unwrap());
 
             let service_payload = ecu_manager
                 .create_uds_payload(service, &skip_sec_plugin!(), Some(payload_data))
+                .await
                 .unwrap();
 
             // Non-checked bytes do not belong to the mux param, so they are not set
-            assert_eq!(service_payload.data[0], 0);
+            assert_eq!(service_payload.data[0], sid);
             assert_eq!(service_payload.data[1], 0);
+
             // Check switch key
             assert_eq!(service_payload.data[2], ((select_value >> 8) & 0xFF) as u8);
             assert_eq!(service_payload.data[3], (select_value & 0xFF) as u8);
@@ -3978,7 +4411,7 @@ mod tests {
             assert_eq!(service_payload.data[4], 0x42);
         }
 
-        let (ecu_manager, service, _sid) = create_ecu_manager_with_mux_service_and_default_case();
+        let (ecu_manager, service, sid) = create_ecu_manager_with_mux_service_and_default_case();
         let with_selector = json!({
             "mux_1_param": {
                 "Selector": 0xffff,
@@ -3996,14 +4429,14 @@ mod tests {
             },
         });
 
-        test_default(&ecu_manager, &service, with_selector, 0xffff);
+        test_default(&ecu_manager, &service, with_selector, 0xffff, sid).await;
         // when not selector value is given,
         // the switch key will use the limit value of the default value
-        test_default(&ecu_manager, &service, without_selector, 0x5814);
+        test_default(&ecu_manager, &service, without_selector, 0, sid).await;
     }
 
-    #[test]
-    fn test_map_mux_to_uds_invalid_json_type() {
+    #[tokio::test]
+    async fn test_map_mux_to_uds_invalid_json_type() {
         let (ecu_manager, service, _) = create_ecu_manager_with_mux_service(None, None, None);
 
         // Test data with wrong type (array instead of object)
@@ -4012,18 +4445,23 @@ mod tests {
         let payload_data =
             UdsPayloadData::ParameterMap(HashMap::from([("mux_1_param".to_string(), test_value)]));
 
-        let result =
-            ecu_manager.create_uds_payload(&service, &skip_sec_plugin!(), Some(payload_data));
+        let result = ecu_manager
+            .create_uds_payload(&service, &skip_sec_plugin!(), Some(payload_data))
+            .await;
 
         // Should fail because we provided an array instead of an object
         assert!(result.is_err());
         if let Err(e) = result {
-            assert!(e.to_string().contains("Expected value to be object type"));
+            assert!(
+                e.to_string().contains("Expected value to be object type"),
+                "Expected error message to contain 'Expected value to be object type', but got: \
+                 {e}",
+            );
         }
     }
 
-    #[test]
-    fn test_map_mux_to_uds_missing_case_data() {
+    #[tokio::test]
+    async fn test_map_mux_to_uds_missing_case_data() {
         let (ecu_manager, service, _) = create_ecu_manager_with_mux_service(None, None, None);
 
         // Test data with valid selector but missing case data
@@ -4036,8 +4474,9 @@ mod tests {
         let payload_data =
             UdsPayloadData::ParameterMap(serde_json::from_value(test_value).unwrap());
 
-        let result =
-            ecu_manager.create_uds_payload(&service, &skip_sec_plugin!(), Some(payload_data));
+        let result = ecu_manager
+            .create_uds_payload(&service, &skip_sec_plugin!(), Some(payload_data))
+            .await;
 
         // Should fail because case1 data is missing
         assert!(
@@ -4048,8 +4487,8 @@ mod tests {
         );
     }
 
-    #[test]
-    fn test_map_struct_from_uds_end_pdu_min_items_not_reached() {
+    #[tokio::test]
+    async fn test_map_struct_from_uds_end_pdu_min_items_not_reached() {
         let (ecu_manager, service, sid) = create_ecu_manager_with_end_pdu_service(3, Some(2));
         // Each item is 3 bytes: 1 byte for param1 + 2 bytes for param2
         let data = vec![
@@ -4064,6 +4503,7 @@ mod tests {
 
         let response = ecu_manager
             .convert_from_uds(&service, &create_payload(data), true)
+            .await
             .unwrap();
 
         let expected_json = json!({
@@ -4083,8 +4523,8 @@ mod tests {
         assert_eq!(response.serialize_to_json().unwrap().data, expected_json);
     }
 
-    #[test]
-    fn test_map_struct_from_uds_end_pdu_exact_max_items() {
+    #[tokio::test]
+    async fn test_map_struct_from_uds_end_pdu_exact_max_items() {
         let (ecu_manager, service, sid) = create_ecu_manager_with_end_pdu_service(1, Some(2));
 
         // Create payload with exactly 2 items (the max_items limit)
@@ -4101,6 +4541,7 @@ mod tests {
 
         let response = ecu_manager
             .convert_from_uds(&service, &create_payload(data), true)
+            .await
             .unwrap();
 
         let expected_json = json!({
@@ -4120,8 +4561,8 @@ mod tests {
         assert_eq!(response.serialize_to_json().unwrap().data, expected_json);
     }
 
-    #[test]
-    fn test_map_struct_from_uds_end_pdu_exceeds_max_items() {
+    #[tokio::test]
+    async fn test_map_struct_from_uds_end_pdu_exceeds_max_items() {
         let (ecu_manager, service, sid) = create_ecu_manager_with_end_pdu_service(1, Some(2));
 
         // Create payload with 3 items (exceeds max_items = 2)
@@ -4135,6 +4576,7 @@ mod tests {
 
         let response = ecu_manager
             .convert_from_uds(&service, &create_payload(data), true)
+            .await
             .unwrap();
         let expected_json = json!({
             "end_pdu_param": [
@@ -4154,8 +4596,8 @@ mod tests {
         assert_eq!(response.serialize_to_json().unwrap().data, expected_json);
     }
 
-    #[test]
-    fn test_map_struct_from_uds_end_pdu_no_max_no_min_no_data() {
+    #[tokio::test]
+    async fn test_map_struct_from_uds_end_pdu_no_max_no_min_no_data() {
         let (ecu_manager, service, sid) = create_ecu_manager_with_end_pdu_service(0, None);
 
         // Valid payload, as min_items = 0 and no max_items
@@ -4166,6 +4608,7 @@ mod tests {
 
         let response = ecu_manager
             .convert_from_uds(&service, &create_payload(data), true)
+            .await
             .unwrap();
         let expected_json = json!({
             "end_pdu_param": [
@@ -4176,8 +4619,8 @@ mod tests {
         assert_eq!(response.serialize_to_json().unwrap().data, expected_json);
     }
 
-    #[test]
-    fn test_map_struct_from_uds_end_pdu_no_maximum() {
+    #[tokio::test]
+    async fn test_map_struct_from_uds_end_pdu_no_maximum() {
         let (ecu_manager, service, sid) = create_ecu_manager_with_end_pdu_service(1, None);
 
         // Create payload with 3 items (exceeds max_items = 2)
@@ -4191,6 +4634,7 @@ mod tests {
 
         let response = ecu_manager
             .convert_from_uds(&service, &create_payload(data), true)
+            .await
             .unwrap();
         let expected_json = json!({
             "end_pdu_param": [
@@ -4213,8 +4657,8 @@ mod tests {
         assert_eq!(response.serialize_to_json().unwrap().data, expected_json);
     }
 
-    #[test]
-    fn test_map_dtc_from_uds() {
+    #[tokio::test]
+    async fn test_map_dtc_from_uds() {
         let (ecu_manager, service, sid, dtc_code) = create_ecu_manager_with_dtc();
 
         let mut payload = vec![sid];
@@ -4222,6 +4666,7 @@ mod tests {
 
         let response = ecu_manager
             .convert_from_uds(&service, &create_payload(payload), true)
+            .await
             .unwrap();
 
         let expected_json = json!({
@@ -4237,8 +4682,8 @@ mod tests {
         assert_eq!(response.serialize_to_json().unwrap().data, expected_json);
     }
 
-    #[test]
-    fn test_map_dynamic_length_field_from_uds() {
+    #[tokio::test]
+    async fn test_map_dynamic_length_field_from_uds() {
         let (ecu_manager, service, sid) = create_ecu_manager_with_dynamic_length_field_service();
         let payload = vec![
             sid,  // Service ID
@@ -4248,10 +4693,11 @@ mod tests {
 
         let response = ecu_manager
             .convert_from_uds(&service, &create_payload(payload), true)
+            .await
             .unwrap();
 
         let expected_json = json!({
-            "main_param": [
+            "pos_response_param": [
                { "item_param": 0x1122, },
                { "item_param": 0x3344, },
                { "item_param": 0x5566, },
@@ -4262,8 +4708,8 @@ mod tests {
         assert_eq!(response.serialize_to_json().unwrap().data, expected_json);
     }
 
-    #[test]
-    fn test_map_dynamic_length_field_from_uds_not_enough_data() {
+    #[tokio::test]
+    async fn test_map_dynamic_length_field_from_uds_not_enough_data() {
         let (ecu_manager, service, sid) = create_ecu_manager_with_dynamic_length_field_service();
         let payload = vec![
             sid,  // Service ID
@@ -4271,7 +4717,9 @@ mod tests {
             0x11, 0x22, 0x33, 0x44,
         ];
 
-        let response = ecu_manager.convert_from_uds(&service, &create_payload(payload), true);
+        let response = ecu_manager
+            .convert_from_uds(&service, &create_payload(payload), true)
+            .await;
 
         assert_eq!(
             response.err(),

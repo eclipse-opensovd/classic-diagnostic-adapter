@@ -14,7 +14,7 @@
 use std::sync::Arc;
 
 use cda_plugin_security::DefaultSecurityPluginData;
-use clap::{Parser, command};
+use clap::Parser;
 use futures::future::FutureExt;
 use opensovd_cda_lib::{config::configfile::ConfigSanity, shutdown_signal};
 use tokio::sync::mpsc;
@@ -120,6 +120,7 @@ async fn main() -> Result<(), String> {
         protocol,
         config.com_params,
         config.database_naming_convention,
+        config.flat_buf,
     )
     .await;
 

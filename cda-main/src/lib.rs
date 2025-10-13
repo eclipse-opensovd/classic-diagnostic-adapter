@@ -25,7 +25,7 @@ use cda_core::{DiagServiceResponseStruct, EcuManager};
 use cda_database::{FileManager, ProtoLoadConfig};
 use cda_interfaces::{
     Protocol, TesterPresentControlMessage,
-    datatypes::{ComParams, DatabaseNamingConvention},
+    datatypes::{ComParams, DatabaseNamingConvention, FlatbBufConfig},
     file_manager::{Chunk, ChunkType},
 };
 use cda_plugin_security::{DefaultSecurityPlugin, SecurityPlugin};
@@ -54,6 +54,7 @@ pub async fn load_databases<S: SecurityPlugin>(
     protocol: Protocol,
     com_params: ComParams,
     database_naming_convention: DatabaseNamingConvention,
+    flat_buf_settings: FlatbBufConfig,
 ) -> (DatabaseMap<S>, FileManagerMap) {
     let databases: Arc<RwLock<HashMap<String, EcuManager<S>>>> =
         Arc::new(RwLock::new(HashMap::new()));
@@ -100,6 +101,7 @@ pub async fn load_databases<S: SecurityPlugin>(
             let database_count = Arc::clone(&databases_count);
             let com_params = Arc::clone(&com_params);
             let database_naming_convention = database_naming_convention.clone();
+            let flat_buf_settings = flat_buf_settings.clone();
 
             database_load_futures.push(cda_interfaces::spawn_named!(
                 &format!("load-database-{i}"),
@@ -112,6 +114,7 @@ pub async fn load_databases<S: SecurityPlugin>(
                         database_count,
                         com_params,
                         database_naming_convention,
+                        flat_buf_settings,
                     )
                     .await;
                 }
@@ -157,6 +160,7 @@ pub async fn load_databases<S: SecurityPlugin>(
     (databases, file_managers)
 }
 
+#[allow(clippy::too_many_arguments)]
 #[tracing::instrument(skip_all, fields(paths_count = paths.len()))]
 async fn load_database<S: SecurityPlugin>(
     protocol: Protocol,
@@ -166,6 +170,7 @@ async fn load_database<S: SecurityPlugin>(
     database_count: Arc<AtomicUsize>,
     com_params: Arc<ComParams>,
     database_naming_convention: DatabaseNamingConvention,
+    flat_buf_settings: FlatbBufConfig,
 ) {
     for (mddfile, _) in paths {
         match cda_database::load_proto_data(
@@ -210,7 +215,8 @@ async fn load_database<S: SecurityPlugin>(
 
                 let diag_data_base = match cda_database::datatypes::DiagnosticDatabase::new(
                     mddfile.to_str().unwrap().to_owned(),
-                    &ecu_payload,
+                    ecu_payload,
+                    flat_buf_settings.clone(),
                 ) {
                     Ok(db) => db,
                     Err(e) => {

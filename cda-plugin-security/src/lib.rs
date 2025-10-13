@@ -22,7 +22,6 @@ use axum::{
     middleware::Next,
     response::{IntoResponse, Response},
 };
-use cda_database::datatypes::DiagnosticService;
 use cda_interfaces::DiagServiceError;
 use hashbrown::HashMap;
 use http::{StatusCode, request::Parts};
@@ -42,7 +41,10 @@ pub trait AuthApi: Send + Sync + 'static {
 }
 
 pub trait SecurityApi: Send + Sync + 'static {
-    fn validate_service(&self, service: &DiagnosticService) -> Result<(), DiagServiceError>;
+    fn validate_service(
+        &self,
+        service: &cda_database::datatypes::DiagService,
+    ) -> Result<(), DiagServiceError>;
 }
 
 impl AuthApi for Box<dyn AuthApi> {

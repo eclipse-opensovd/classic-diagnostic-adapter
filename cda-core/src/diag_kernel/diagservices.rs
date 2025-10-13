@@ -11,7 +11,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-use cda_database::datatypes::{CompuMethod, DataType};
+use cda_database::datatypes::{self, DataType};
 use cda_interfaces::{
     DiagComm, DiagServiceError,
     datatypes::{DtcField, DtcRecord},
@@ -58,7 +58,7 @@ pub struct DiagDataTypeContainerRaw {
     pub data: Vec<u8>,
     pub bit_len: usize,
     pub data_type: DataType,
-    pub compu_method: Option<CompuMethod>,
+    pub compu_method: Option<datatypes::CompuMethod>,
 }
 
 pub type MappedDiagServiceResponsePayload = HashMap<String, DiagDataTypeContainer>;

@@ -66,6 +66,9 @@ schemars = "1.0.4"
 aide = "0.15.0"
 doip-definitions = "3.0.13"
 doip-sockets = "0.2.4"
+ouroboros = "0.18.5"
+toml = "0.9.8"
+cargo_toml = "0.22.3"
 
 # ---- tracing & logging crates----
 tracing = "0.1.41"
