@@ -35,10 +35,9 @@ pub use state_charts::*;
 pub use variant::*;
 
 use crate::{
-    mdd_data::{load_ecudata, read_ecudata},
+    mdd_data::{load_ecudata, read_ecudata, read_ecudata_new},
     proto::dataformat::EcuData,
 };
-use crate::mdd_data::read_ecudata_new;
 
 pub(crate) mod comparam;
 pub(crate) mod data_operation;
@@ -185,7 +184,8 @@ impl DiagnosticDatabase {
     pub fn new(ecu_database_path: String, ecu_data_blob: &[u8]) -> Result<Self, DiagServiceError> {
         std::fs::write("/tmp/foo.bin", ecu_data_blob).unwrap();
 
-        let ecu_data = read_ecudata_new(ecu_data_blob).map_err(DiagServiceError::InvalidDatabase)?;
+        let ecu_data =
+            read_ecudata_new(ecu_data_blob).map_err(DiagServiceError::InvalidDatabase)?;
         println!("{ecu_data:?}");
         let ecu_data = read_ecudata(ecu_data_blob).map_err(DiagServiceError::InvalidDatabase)?;
 

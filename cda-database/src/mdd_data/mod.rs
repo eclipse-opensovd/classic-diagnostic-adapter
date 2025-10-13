@@ -12,12 +12,16 @@
  */
 
 use std::{io::Read, time::Instant};
-use flatbuffers::VerifierOptions;
+
 use cda_interfaces::file_manager::{Chunk, ChunkMetaData, ChunkType, MddError};
+use flatbuffers::VerifierOptions;
 use hashbrown::HashMap;
 use prost::Message;
 
-use crate::proto::{dataformat, diagnostic_description::dataformat as flatbuf, fileformat, fileformat::chunk::DataType as ChunkDataType};
+use crate::proto::{
+    dataformat, diagnostic_description::dataformat as flatbuf, fileformat,
+    fileformat::chunk::DataType as ChunkDataType,
+};
 
 pub mod files;
 
@@ -244,16 +248,16 @@ pub(crate) fn read_ecudata(bytes: &[u8]) -> Result<dataformat::EcuData, String> 
 }
 
 pub(crate) fn read_ecudata_new(bytes: &[u8]) -> Result<flatbuf::EcuData<'_>, String> {
-
-    let ecu_data = flatbuf::root_as_ecu_data_with_opts(&VerifierOptions {
-        max_depth: 10_000_000, // todo use some sane limits.
-        max_tables: f,
-        max_apparent_size: 10000000000000,
-        ignore_missing_null_terminator: false,
-    }, bytes)
-        .map_err(|e| format!("Failed to parse ECU data: {e}"))?;
+    let ecu_data = flatbuf::root_as_ecu_data_with_opts(
+        &VerifierOptions {
+            max_depth: 10_000_000, // todo use some sane limits.
+            max_tables: f,
+            max_apparent_size: 10000000000000,
+            ignore_missing_null_terminator: false,
+        },
+        bytes,
+    )
+    .map_err(|e| format!("Failed to parse ECU data: {e}"))?;
 
     Ok(ecu_data)
 }
-
-
