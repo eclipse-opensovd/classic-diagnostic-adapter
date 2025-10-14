@@ -285,9 +285,6 @@ pub(crate) mod id {
                     "Fault details with optional extended data, snapshot data and schema",
                 )
             })
-            .parameter::<DtcIdQuery, _>("query", |param| {
-                param.description("Query parameters for filtering DTC data")
-            })
             .with(openapi::error_bad_request)
             .with(openapi::error_forbidden)
             .with(openapi::error_not_found)
