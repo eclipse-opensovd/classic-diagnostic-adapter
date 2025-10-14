@@ -21,6 +21,7 @@ cda-interfaces = { workspace = true }
 hashbrown = { workspace = true, features = ["serde"] }
 prost = { workspace = true }
 flatbuffers = { workspace = true }
+ouroboros = { workspace = true }
 # tokio
 tokio = { workspace = true, features = ["rt", "sync", "io-util", "time"] }
 # v4 - Version 4 UUIDs with random data.

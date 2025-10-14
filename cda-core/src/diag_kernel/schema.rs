@@ -25,7 +25,7 @@ impl EcuSchemaProvider for EcuManager {
         service: &DiagComm,
     ) -> Result<SchemaDescription, DiagServiceError> {
         let mapped_service = self.lookup_diag_comm(service)?;
-        let Some(request) = self.ecu_data.requests.get(&mapped_service.request_id) else {
+        let Some(request) = self.diag_database.requests.get(&mapped_service.request_id) else {
             return Err(DiagServiceError::InvalidDatabase(format!(
                 "The request referenced by {} could not be found in the ECU Database of {}.",
                 service.name,
@@ -35,7 +35,7 @@ impl EcuSchemaProvider for EcuManager {
         let ctx = STRINGS
             .get(mapped_service.short_name)
             .unwrap_or_else(|| format!("{}_{}", service.name, service.action));
-        let schema = request.json_schema(&ctx, &self.ecu_data);
+        let schema = request.json_schema(&ctx, &self.diag_database);
 
         Ok(schema)
     }
@@ -53,14 +53,14 @@ impl EcuSchemaProvider for EcuManager {
 
         let mut responses = Vec::new();
         for id in &mapped_service.pos_responses {
-            let Some(response) = self.ecu_data.responses.get(id) else {
+            let Some(response) = self.diag_database.responses.get(id) else {
                 return Err(DiagServiceError::InvalidDatabase(format!(
                     "A response referenced by {} could not be found in the ECU Database of {}.",
                     service.name,
                     self.ecu_name()
                 )));
             };
-            let schema = response.json_schema(&ctx, &self.ecu_data, request_id);
+            let schema = response.json_schema(&ctx, &self.diag_database, request_id);
             responses.push(schema);
         }
         let main_schema = match responses.len() {

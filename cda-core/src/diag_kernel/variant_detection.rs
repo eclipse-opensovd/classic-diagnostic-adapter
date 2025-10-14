@@ -27,64 +27,7 @@ pub(super) type VariantPatterns = Vec<ExpectedParamMap>;
 
 pub(super) struct VariantDetection {
     pub(crate) diag_service_requests: HashSet<DiagServiceId>,
-    pub(crate) variant_param_map: HashMap<u32, VariantPatterns>,
-}
-
-#[tracing::instrument(
-    skip(diagnostic_database),
-    fields(variants_count = diagnostic_database.variants.len())
-)]
-pub(super) fn prepare_variant_detection(
-    diagnostic_database: &datatypes::DiagnosticDatabase,
-) -> Result<VariantDetection, DiagServiceError> {
-    let mut diag_service_requests = HashSet::new();
-    let mut variant_param_map: HashMap<u32, VariantPatterns> = HashMap::new();
-    for (id, v) in &diagnostic_database.variants {
-        if v.is_base {
-            continue;
-        }
-
-        let mut patterns = Vec::new();
-        for p in &v.pattern {
-            let mut expected_param_map: ExpectedParamMap = HashMap::new();
-            for mp in &p.matching_parameters {
-                let diag_service_id = diagnostic_database
-                    .services
-                    .get(&mp.service_id)
-                    .and_then(|s| STRINGS.get(s.short_name))
-                    .ok_or_else(|| {
-                        DiagServiceError::InvalidDatabase("DiagService not found".to_owned())
-                    })?;
-                let expected_value = STRINGS.get(mp.expected_value).ok_or_else(|| {
-                    DiagServiceError::InvalidDatabase("Expected value not found".to_owned())
-                })?;
-                let parameter = diagnostic_database
-                    .params
-                    .get(&mp.param_id)
-                    .and_then(|p| STRINGS.get(p.short_name))
-                    .ok_or_else(|| {
-                        DiagServiceError::InvalidDatabase("Parameter not found".to_owned())
-                    })?;
-
-                let expected_param_value = ExpectedParamValue {
-                    expected_value,
-                    parameter,
-                };
-                diag_service_requests.insert(diag_service_id.clone());
-                expected_param_map
-                    .entry(diag_service_id)
-                    .or_insert(Vec::new())
-                    .push(expected_param_value);
-            }
-            patterns.push(expected_param_map);
-        }
-        variant_param_map.insert(*id, patterns);
-    }
-
-    Ok(VariantDetection {
-        diag_service_requests,
-        variant_param_map,
-    })
+    //pub(crate) variant_param_map: HashMap<u32, VariantPatterns>,
 }
 
 impl VariantDetection {
@@ -95,7 +38,8 @@ impl VariantDetection {
     pub(super) fn evaluate_variant<T: DiagServiceResponse + Sized>(
         &self,
         service_responses: HashMap<String, T>,
-    ) -> Result<u32, DiagServiceError> {
+        diagnostic_database: &datatypes::DiagnosticDatabase,
+    ) -> Result<datatypes::Variant, DiagServiceError> {
         let service_responses = service_responses
             .into_iter()
             .map(|(service, res)| {
@@ -120,35 +64,55 @@ impl VariantDetection {
             })
             .collect::<Result<HashMap<String, HashMap<String, String>>, DiagServiceError>>()?;
 
-        self.variant_param_map
+        diagnostic_database.ecu_data().variants()
+            .ok_or_else(|| DiagServiceError::InvalidDatabase("No variants found".to_owned()))?
             .iter()
-            .find(|(_, patterns)| {
-                patterns.iter().any(|expected_services| {
-                    expected_services.iter().all(|(service, expected_params)| {
-                        expected_params.iter().all(|expected_param| {
-                            service_responses
-                                .get(service)
-                                .and_then(|params| {
-                                    params
-                                        .iter()
-                                        .find(|(name, _)| **name == expected_param.parameter)
-                                        .map(|(_name, value)| {
-                                            value.replace('"', "") == expected_param.expected_value
-                                        })
+            .find(|variant| {
+                if variant.is_base_variant() {
+                    return false;
+                }
+
+                variant.variant_pattern()
+                    .map(|patterns| {
+                        patterns.iter().any(|pattern| {
+                            pattern.matching_parameter()
+                                .map(|params| {
+                                    params.iter().all(|matching_param| {
+                                        let expected_value = matching_param.expected_value().unwrap_or_default();
+                                        let expected_param = matching_param.out_param()
+                                            .and_then(|out_param| out_param.short_name())
+                                            .unwrap_or_default();
+                                        let service = matching_param.diag_service()
+                                            .and_then(|ds| ds.diag_comm())
+                                            .and_then(|dc| dc.short_name())
+                                            .unwrap_or_default();
+
+                                        service_responses
+                                            .get(service)
+                                            .and_then(|params| {
+                                                params
+                                                    .iter()
+                                                    .find(|(name, _)| **name == expected_param)
+                                                    .map(|(_name, value)| {
+                                                        value.replace('"', "") == expected_value
+                                                    })
+                                            })
+                                            .unwrap_or(false)
+                                    })
                                 })
                                 .unwrap_or(false)
                         })
                     })
-                })
+                    .unwrap_or(false)
             })
-            .map(|(id, _)| *id)
+            .cloned()
             .ok_or_else(|| {
                 tracing::debug!(
-                    expected_services = ?self.variant_param_map,
-                    received_responses = ?service_responses,
-                    "No variant found for expected services"
-                );
+            received_responses = ?service_responses,
+            "No variant found for expected services"
+        );
                 DiagServiceError::VariantDetectionError("No variant found".to_owned())
             })
+
     }
 }

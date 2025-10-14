@@ -19,7 +19,7 @@ use hashbrown::HashMap;
 use prost::Message;
 
 use crate::proto::{
-    dataformat, diagnostic_description::dataformat as flatbuf, fileformat,
+    diagnostic_description::dataformat, fileformat,
     fileformat::chunk::DataType as ChunkDataType,
 };
 
@@ -241,18 +241,12 @@ pub fn load_proto_data(
     Ok((proto_file.ecu_name.to_string(), proto_data))
 }
 
-pub(crate) fn read_ecudata(bytes: &[u8]) -> Result<dataformat::EcuData, String> {
-    let ecu_data = dataformat::EcuData::decode(&mut std::io::Cursor::new(bytes))
-        .map_err(|e| format!("Failed to parse ECU data: {e}"))?;
-    Ok(ecu_data)
-}
-
-pub(crate) fn read_ecudata_new(bytes: &[u8]) -> Result<flatbuf::EcuData<'_>, String> {
-    let ecu_data = flatbuf::root_as_ecu_data_with_opts(
+pub(crate) fn read_ecudata(bytes: &[u8]) -> Result<dataformat::EcuData<'_>, String> {
+    let ecu_data = dataformat::root_as_ecu_data_with_opts(
         &VerifierOptions {
-            max_depth: 10_000_000, // todo use some sane limits.
-            max_tables: f,
-            max_apparent_size: 10000000000000,
+            max_depth: 64, // same as default
+            max_tables: 100_000_000,
+            max_apparent_size: 1 << 31, // same as default
             ignore_missing_null_terminator: false,
         },
         bytes,

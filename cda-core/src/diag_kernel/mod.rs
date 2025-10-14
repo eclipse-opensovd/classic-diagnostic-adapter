@@ -222,12 +222,6 @@ impl TryInto<u32> for DiagDataValue {
     }
 }
 
-#[derive(Clone)]
-pub struct Variant {
-    pub name: String,
-    pub(crate) id: u32,
-}
-
 #[must_use]
 pub fn into_db_protocol(val: Protocol) -> cda_database::datatypes::Protocol {
     cda_database::datatypes::Protocol {
