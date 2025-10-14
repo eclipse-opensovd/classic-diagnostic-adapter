@@ -20,10 +20,14 @@ pub mod modes;
 pub mod operations;
 
 #[derive(Serialize, schemars::JsonSchema)]
+#[schemars(
+    extend("additionalProperties" = {"variant": schemars::schema_for!(HashMap::<String,String>)})
+)]
 pub struct Ecu {
     pub id: String,
     pub name: String,
-    pub variant: String,
+    #[schemars(skip)]
+    pub variant: HashMap<String, String>,
     pub locks: String,
     pub operations: String,
     pub data: String,
