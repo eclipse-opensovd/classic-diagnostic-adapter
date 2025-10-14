@@ -853,6 +853,7 @@ impl cda_interfaces::EcuManager for EcuManager {
         session: &str,
     ) -> Result<(cda_interfaces::Id, DiagComm), DiagServiceError> {
         let session_state_chart = self.state_chart(semantics::SESSION)?;
+        let lookup_session = session.to_lowercase();
 
         let target_session = session_state_chart
             .states
@@ -860,7 +861,7 @@ impl cda_interfaces::EcuManager for EcuManager {
             .find(|(_, state)| {
                 STRINGS
                     .get(state.short_name)
-                    .is_some_and(|name| name == session)
+                    .is_some_and(|name| name == lookup_session)
             })
             .map(|(_, state)| state)
             .ok_or_else(|| {
@@ -927,6 +928,7 @@ impl cda_interfaces::EcuManager for EcuManager {
     ) -> Result<SecurityAccess, DiagServiceError> {
         let security_state_chart = self.state_chart(semantics::SECURITY)?;
         let session_control = self.access_control.lock();
+        let lookup_level = level.to_lowercase();
 
         let target_access_level = security_state_chart
             .states
@@ -934,7 +936,7 @@ impl cda_interfaces::EcuManager for EcuManager {
             .find(|(_, state)| {
                 STRINGS
                     .get(state.short_name)
-                    .is_some_and(|name| name.to_lowercase() == level.to_lowercase())
+                    .is_some_and(|name| name.to_lowercase() == lookup_level)
             })
             .map(|(_, state)| state)
             .ok_or_else(|| {
