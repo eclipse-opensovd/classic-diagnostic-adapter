@@ -42,7 +42,7 @@ pub(crate) mod strings;
 pub use strings::*;
 pub mod util;
 
-pub type Id = u32;
+pub type Id = u32; // todo alexmohr, remove this?
 
 #[derive(Debug, Clone)]
 #[cfg_attr(feature = "deepsize", derive(DeepSizeOf))]
@@ -56,9 +56,20 @@ pub enum DiagCommAction {
 #[cfg_attr(feature = "deepsize", derive(DeepSizeOf))]
 pub struct DiagComm {
     pub name: String,
-    pub action: DiagCommAction,
     pub type_: DiagCommType,
     pub lookup_name: Option<String>,
+}
+
+impl DiagComm {
+    pub fn action(&self) -> DiagCommAction {
+        match self.type_ {
+            DiagCommType::Configurations => DiagCommAction::Write,
+            DiagCommType::Data => DiagCommAction::Read,
+            DiagCommType::Faults => DiagCommAction::Start, // actually Clear or Read, but doesn't matter here
+            DiagCommType::Modes => DiagCommAction::Start,
+            DiagCommType::Operations => DiagCommAction::Start,
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -77,6 +88,34 @@ pub enum DiagCommType {
     Modes,
     /// Service Prefixes `0x2F`, `0x31`, `0x34`, `0x36`, `0x37`
     Operations,
+}
+
+impl TryFrom<u8> for DiagCommType {
+    type Error = DiagServiceError;
+
+    fn try_from(value: u8) -> Result<Self, Self::Error> {
+        match value {
+            service_ids::WRITE_DATA_BY_IDENTIFIER => Ok(DiagCommType::Configurations),
+            service_ids::READ_DATA_BY_IDENTIFIER => Ok(DiagCommType::Data),
+            service_ids::CLEAR_DIAGNOSTIC_INFORMATION | service_ids::READ_DTC_INFORMATION => {
+                Ok(DiagCommType::Faults)
+            }
+            service_ids::SESSION_CONTROL
+            | service_ids::ECU_RESET
+            | service_ids::SECURITY_ACCESS
+            | service_ids::COMMUNICATION_CONTROL
+            | service_ids::AUTHENTICATION
+            | service_ids::CONTROL_DTC_SETTING => Ok(DiagCommType::Modes),
+            service_ids::INPUT_OUTPUT_CONTROL_BY_IDENTIFIER
+            | service_ids::ROUTINE_CONTROL
+            | service_ids::REQUEST_DOWNLOAD
+            | service_ids::TRANSFER_DATA
+            | service_ids::REQUEST_TRANSFER_EXIT => Ok(DiagCommType::Operations),
+            _ => Err(DiagServiceError::InvalidRequest(format!(
+                "Invalid DiagCommType value: {value}"
+            ))),
+        }
+    }
 }
 
 #[derive(Clone)]

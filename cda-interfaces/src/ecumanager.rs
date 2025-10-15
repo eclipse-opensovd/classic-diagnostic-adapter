@@ -44,8 +44,8 @@ pub struct ServicePayload {
     pub data: Vec<u8>,
     pub source_address: u16,
     pub target_address: u16,
-    pub new_session_id: Option<Id>,
-    pub new_security_access_id: Option<Id>,
+    pub new_session: Option<String>,
+    pub new_security: Option<String>,
 }
 
 /// Trait to provide communication parameters for an ECU.
@@ -144,7 +144,7 @@ pub trait EcuManager:
     /// setting the session and security access back to the default value.
     /// To do this the defaults have to looked up which might fail.
     /// In that case the error is forwarded
-    fn set_session(&self, session: Id, expiration: Duration) -> Result<(), DiagServiceError>;
+    fn set_session(&self, session: String, expiration: Duration) -> Result<(), DiagServiceError>;
     /// Update the internally tracked ecu security access.
     /// Has to be called after changing the session, to make sure the transition lookup keep working
     /// # Errors
@@ -154,14 +154,14 @@ pub trait EcuManager:
     /// In that case the error is forwarded
     fn set_security_access(
         &self,
-        security_access: Id,
+        security_access: String,
         expiration: Duration,
     ) -> Result<(), DiagServiceError>;
     /// Lookup the transition between the active session and the requested one.
     /// # Errors
     /// * `DiagServiceError::AccessDenied` if no transition exists
     /// * `DiagServiceError::NotFound` on various lookup errors.
-    fn lookup_session_change(&self, session: &str) -> Result<(Id, DiagComm), DiagServiceError>;
+    fn lookup_session_change(&self, session: &str) -> Result<DiagComm, DiagServiceError>;
     /// Lookup the transition from the current security state to the given one.
     /// As switching to a new security state might need authentication.
     /// * `RequestSeed(DiagComm)`: A seeds needs to be requested via the provided diag comm.
@@ -191,7 +191,7 @@ pub trait EcuManager:
     fn lookup_service_through_func_class(
         &self,
         func_class_name: &str,
-        service_id: u8,
+        service_name: &str,
     ) -> Result<DiagComm, DiagServiceError>;
     /// Lookup a service by its service id for the current ECU variant.
     /// This will first look up the service in the current variant, then in the base variant

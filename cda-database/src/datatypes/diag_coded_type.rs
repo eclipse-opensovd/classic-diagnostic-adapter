@@ -17,6 +17,7 @@ use cda_interfaces::DiagServiceError;
 #[cfg(feature = "deepsize")]
 use deepsize::DeepSizeOf;
 
+use crate::proto::diagnostic_description::dataformat;
 
 pub type BitLength = u32;
 
@@ -73,6 +74,26 @@ impl DataType {
     }
 }
 
+impl TryFrom<dataformat::DataType> for DataType {
+    type Error = DiagServiceError;
+
+    fn try_from(value: dataformat::DataType) -> Result<Self, Self::Error> {
+        match value {
+            dataformat::DataType::A_UINT_32 => Ok(Self::UInt32),
+            dataformat::DataType::A_INT_32 => Ok(Self::Int32),
+            dataformat::DataType::A_FLOAT_32 => Ok(Self::Float32),
+            dataformat::DataType::A_FLOAT_64 => Ok(Self::Float64),
+            dataformat::DataType::A_ASCIISTRING => Ok(Self::AsciiString),
+            dataformat::DataType::A_UTF_8_STRING => Ok(Self::Utf8String),
+            dataformat::DataType::A_UNICODE_2_STRING => Ok(Self::Unicode2String),
+            dataformat::DataType::A_BYTEFIELD => Ok(Self::ByteField),
+            _ => Err(DiagServiceError::InvalidDatabase(
+                "Unsupported DataType".to_owned(),
+            )),
+        }
+    }
+}
+
 #[derive(Debug)]
 #[cfg_attr(feature = "deepsize", derive(DeepSizeOf))]
 pub struct DiagCodedType {
@@ -80,6 +101,18 @@ pub struct DiagCodedType {
     type_: DiagCodedTypeVariant,
     /// Indicates if the byte order is high-low (Big Endian, default) or low-high (Little Endian).
     is_high_low_byte_order: bool,
+}
+
+impl TryFrom<dataformat::DiagCodedType<'_>> for DiagCodedType {
+    type Error = DiagServiceError;
+
+    fn try_from(value: dataformat::DiagCodedType) -> Result<Self, Self::Error> {
+        Ok(Self {
+            base_datatype: value.base_data_type().try_into()?,
+            type_: value.try_into()?,
+            is_high_low_byte_order: value.is_high_low_byte_order(),
+        })
+    }
 }
 
 #[derive(Copy, Clone)]
@@ -816,6 +849,58 @@ pub enum DiagCodedTypeVariant {
     StandardLength(StandardLengthType),
 }
 
+impl TryFrom<dataformat::DiagCodedType<'_>> for DiagCodedTypeVariant {
+    type Error = DiagServiceError;
+
+    fn try_from(value: dataformat::DiagCodedType) -> Result<Self, Self::Error> {
+        match value.specific_data_type() {
+            dataformat::SpecificDataType::StandardLengthType => {
+                value
+                    .specific_data_as_standard_length_type()
+                    .map(|s| {
+                        DiagCodedTypeVariant::StandardLength(StandardLengthType {
+                            bit_length: s.bit_length(),
+                            bitmask: s.bit_mask().map(|v| {
+                                v.iter().collect::<Vec<u8>>() // need to convert from flatbuf vector to standard vec.
+                            }),
+                            condensed: s.condensed(),
+                        })
+                    })
+                    .ok_or_else(|| {
+                        DiagServiceError::InvalidDatabase(
+                            "DiagCodedType SpecificData StandardLengthType not found".to_owned(),
+                        )
+                    })
+            }
+            dataformat::SpecificDataType::LeadingLengthInfoType => value
+                .specific_data_as_leading_length_info_type()
+                .map(|l| DiagCodedTypeVariant::LeadingLengthInfo(l.bit_length()))
+                .ok_or_else(|| {
+                    DiagServiceError::InvalidDatabase(
+                        "DiagCodedType SpecificData LeadingLengthInfoType not found".to_owned(),
+                    )
+                }),
+            dataformat::SpecificDataType::MinMaxLengthType => value
+                .specific_data_as_min_max_length_type()
+                .ok_or_else(|| {
+                    DiagServiceError::InvalidDatabase(
+                        "DiagCodedType SpecificData MinMaxLengthType not found".to_owned(),
+                    )
+                })
+                .and_then(|m| {
+                    let termination = m.termination().try_into()?;
+                    MinMaxLengthType::new(m.min_length(), m.max_length(), termination)
+                        .map(DiagCodedTypeVariant::MinMaxLength)
+                }),
+            dataformat::SpecificDataType::ParamLengthInfoType => {
+                Err(DiagServiceError::InvalidDatabase(
+                    "DiagCodedType SpecificData ParamLengthInfoType not supported".to_owned(),
+                ))
+            }
+        }
+    }
+}
+
 #[derive(Debug, PartialEq)]
 #[cfg_attr(feature = "deepsize", derive(DeepSizeOf))]
 pub struct MinMaxLengthType {
@@ -882,104 +967,21 @@ pub enum Termination {
     Zero,
     HexFF,
 }
-//
-// pub(super) fn get_diag_coded_types(ecu_data: &dataformat::EcuData) -> DiagCodedTypeMap {
-//     ecu_data
-//         .diag_coded_types
-//         .iter()
-//         .map(|dct| {
-//             let is_high_low_byte_order = dct.is_high_low_byte_order.unwrap_or(true);
-//             let base_datatype = dct.base_data_type.try_into()?;
-//             let type_ = match &dct.specific_data {
-//                 Some(diag_coded_type::SpecificData::LeadingLengthInfoType(l)) => {
-//                     DiagCodedTypeVariant::LeadingLengthInfo(l.bit_length)
-//                 }
-//                 Some(diag_coded_type::SpecificData::MinMaxLengthType(m)) => {
-//                     match MinMaxLengthType::new(
-//                         m.min_length,
-//                         m.max_length,
-//                         match m.termination.try_into().ok() {
-//                             Some(diag_coded_type::min_max_length_type::Termination::EndOfPdu) => {
-//                                 Termination::EndOfPdu
-//                             }
-//                             Some(diag_coded_type::min_max_length_type::Termination::Zero) => {
-//                                 Termination::Zero
-//                             }
-//                             Some(diag_coded_type::min_max_length_type::Termination::HexFf) => {
-//                                 Termination::HexFF
-//                             }
-//                             None => {
-//                                 return Err(DiagServiceError::InvalidDatabase(
-//                                     "DiagCodedType SpecificData termination not found".to_owned(),
-//                                 ));
-//                             }
-//                         },
-//                     ) {
-//                         Ok(mmlt) => DiagCodedTypeVariant::MinMaxLength(mmlt),
-//                         Err(e) => {
-//                             return Err(e);
-//                         }
-//                     }
-//                 }
-//                 Some(diag_coded_type::SpecificData::StandardLengthType(l)) => {
-//                     DiagCodedTypeVariant::StandardLength(StandardLengthType {
-//                         bit_length: l.bit_length,
-//                         bitmask: l.bit_mask.clone(),
-//                         condensed: l.condensed(),
-//                     })
-//                 }
-//                 Some(diag_coded_type::SpecificData::ParamLengthInfoType(_)) => {
-//                     // todo! implement
-//                     return Err(DiagServiceError::InvalidDatabase(
-//                         "DiagCodedType SpecificData ParamLengthInfoType not supported".to_owned(),
-//                     ));
-//                 }
-//                 None => {
-//                     return Err(DiagServiceError::InvalidDatabase(
-//                         "DiagCodedType SpecificData not found".to_owned(),
-//                     ));
-//                 }
-//             };
-//             Ok((
-//                 dct.id
-//                     .as_ref()
-//                     .ok_or_else(|| ref_optional_none("DiagCodedType.id"))?
-//                     .value,
-//                 DiagCodedType::new(base_datatype, type_, is_high_low_byte_order)?,
-//             ))
-//         })
-//         .filter_map(Result::ok)
-//         .collect::<DiagCodedTypeMap>()
-// }
-//
-// impl From<dataformat::diag_coded_type::DataType> for DataType {
-//     fn from(data_type: dataformat::diag_coded_type::DataType) -> Self {
-//         match data_type {
-//             dataformat::diag_coded_type::DataType::AInt32 => DataType::Int32,
-//             dataformat::diag_coded_type::DataType::AUint32 => DataType::UInt32,
-//             dataformat::diag_coded_type::DataType::AFloat32 => DataType::Float32,
-//             dataformat::diag_coded_type::DataType::AAsciistring => DataType::AsciiString,
-//             dataformat::diag_coded_type::DataType::AUtf8String => DataType::Utf8String,
-//             dataformat::diag_coded_type::DataType::AUnicode2String => DataType::Unicode2String,
-//             dataformat::diag_coded_type::DataType::ABytefield => DataType::ByteField,
-//             dataformat::diag_coded_type::DataType::AFloat64 => DataType::Float64,
-//         }
-//     }
-// }
 
-// impl TryFrom<i32> for DataType {
-//     type Error = DiagServiceError;
-//
-//     fn try_from(value: i32) -> Result<Self, Self::Error> {
-//         dataformat::DataType::try_from(value)
-//             .map_err(|_| {
-//                 DiagServiceError::InvalidDatabase(format!(
-//                     "DiagCodedType base_data_type {value:?} not found"
-//                 ))
-//             })
-//             .map(Self::from)
-//     }
-// }
+impl TryFrom<dataformat::Termination> for Termination {
+    type Error = DiagServiceError;
+
+    fn try_from(value: dataformat::Termination) -> Result<Self, Self::Error> {
+        match value {
+            dataformat::Termination::END_OF_PDU => Ok(Termination::EndOfPdu),
+            dataformat::Termination::ZERO => Ok(Termination::Zero),
+            dataformat::Termination::HEX_FF => Ok(Termination::HexFF),
+            _ => Err(DiagServiceError::InvalidDatabase(
+                "Termination not found".to_owned(),
+            )),
+        }
+    }
+}
 
 #[cfg(test)]
 mod tests {

@@ -11,7 +11,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-use cda_database::datatypes::{self, CompuMethod, CompuScale, DataType};
+use cda_database::datatypes::{self};
 use cda_interfaces::{
     DataParseError, DiagServiceError, STRINGS,
     util::{decode_hex, tracing::print_hex},
@@ -25,8 +25,8 @@ use crate::diag_kernel::{
 };
 
 pub(in crate::diag_kernel) fn uds_data_to_serializable(
-    diag_type: DataType,
-    compu_method: Option<&CompuMethod>,
+    diag_type: datatypes::DataType,
+    compu_method: Option<&datatypes::CompuMethod>,
     is_negative_response: bool,
     data: &[u8],
 ) -> Result<DiagDataValue, DiagServiceError> {
@@ -37,8 +37,8 @@ pub(in crate::diag_kernel) fn uds_data_to_serializable(
 
     'compu: {
         if let Some(compu_method) = compu_method {
-            match compu_method.category {
-                datatypes::CompuCategory::Identical => break 'compu,
+            match compu_method.category().into() {
+                datatypes::CompuCategory::IDENTICAL => break 'compu,
                 category => {
                     return compu_lookup(
                         diag_type,
@@ -56,82 +56,69 @@ pub(in crate::diag_kernel) fn uds_data_to_serializable(
 }
 
 fn compu_lookup(
-    diag_type: DataType,
-    compu_method: &CompuMethod,
+    diag_type: datatypes::DataType,
+    compu_method: &datatypes::CompuMethod,
     category: datatypes::CompuCategory,
     is_negative_response: bool,
     data: &[u8],
 ) -> Result<DiagDataValue, DiagServiceError> {
     let lookup = DiagDataValue::new(diag_type, data)?;
-    match compu_method.internal_to_phys.scales.iter().find(|scale| {
-        let lower = scale.lower_limit.as_ref();
-        let upper = scale.upper_limit.as_ref();
+    match compu_method.internal_to_phys().and_then(|itp| {
+        itp.compu_scales().and_then(|scales| {
+            scales.iter().find(|scale| {
+                let lower: Option<datatypes::Limit> = scale.lower_limit().map(|l| l.into());
+                let upper: Option<datatypes::Limit> = scale.upper_limit().map(|l| l.into());
 
-        lookup.within_limits(upper, lower)
+                lookup.within_limits(upper.as_ref(), lower.as_ref())
+            })
+        })
     }) {
         Some(scale) => match category {
-            datatypes::CompuCategory::Identical => unreachable!("Already handled"),
-            datatypes::CompuCategory::Linear => {
-                if scale.rational_coefficients.is_some()
-                    && scale
-                        .rational_coefficients
-                        .as_ref()
-                        .unwrap()
-                        .numerator
-                        .len()
-                        == 2
-                    && scale
-                        .rational_coefficients
-                        .as_ref()
-                        .unwrap()
-                        .denominator
-                        .is_empty()
+            datatypes::CompuCategory::IDENTICAL => unreachable!("Already handled"),
+            datatypes::CompuCategory::LINEAR => {
+                if let Some(rational_co_effs) = scale.rational_co_effs()
+                    && rational_co_effs.numerator().is_some_and(|n| n.len() == 2)
+                    && rational_co_effs.denominator().is_none_or(|d| d.is_empty())
                 {
-                    let coeffs = scale.rational_coefficients.as_ref().unwrap();
+                    let coeffs = scale.rational_co_effs().unwrap();
+                    let numerator = coeffs.numerator().unwrap(); // safe unwraps, checked above
                     let lookup_val: f64 = lookup.try_into()?;
-                    let val = coeffs.numerator[0] + lookup_val * coeffs.numerator[1];
+                    let val = numerator[0] + lookup_val * numerator[1];
                     DiagDataValue::from_number(val, diag_type)
                 } else {
                     Ok(lookup)
                 }
             }
-            datatypes::CompuCategory::ScaleLinear => {
-                if scale.rational_coefficients.is_none()
-                    || scale
-                        .rational_coefficients
-                        .as_ref()
-                        .unwrap()
-                        .numerator
-                        .len()
-                        != 1
-                    || scale
-                        .rational_coefficients
-                        .as_ref()
-                        .unwrap()
-                        .denominator
-                        .len()
-                        != 1
+            datatypes::CompuCategory::SCALE_LINEAR => {
+                if scale.rational_co_effs().is_none()
+                    || scale.rational_co_effs().is_some_and(|co_eff| {
+                        co_eff.numerator().is_none_or(|n| {
+                            n.len() != 1 || co_eff.denominator().is_none_or(|d| d.len() != 1)
+                        })
+                    })
                 {
                     return Err(DiagServiceError::UdsLookupError(
                         "Invalid SCALE_LINEAR CoEffs".to_owned(),
                     ));
                 }
-                let coeffs = scale.rational_coefficients.as_ref().unwrap();
+                let coeffs = scale.rational_co_effs().unwrap();
                 let lookup_val: f64 = lookup.try_into()?;
-                let val = lookup_val * coeffs.numerator[0] / coeffs.denominator[0];
+                let numerator = coeffs.numerator().unwrap(); // safe unwraps, checked above
+                let denominator = coeffs.denominator().unwrap();
+
+                let val = lookup_val * numerator[0] / denominator[0];
                 DiagDataValue::from_number(val, diag_type)
             }
-            datatypes::CompuCategory::TextTable => {
-                let consts = scale.consts.as_ref().ok_or_else(|| {
+            datatypes::CompuCategory::TEXT_TABLE => {
+                let consts = scale.consts().ok_or_else(|| {
                     DiagServiceError::InvalidDatabase("TextTable lookup has no Consts".to_owned())
                 })?;
                 let mapped_value = consts
-                    .vt
-                    .or(consts.vt_ti)
-                    .and_then(|v| STRINGS.get(v))
+                    .vt()
                     .ok_or_else(|| {
                         DiagServiceError::UdsLookupError("failed to read compu value".to_owned())
-                    })?;
+                    })?
+                    .to_owned();
                 Ok(DiagDataValue::String(mapped_value))
             }
             _ => {
@@ -162,127 +149,135 @@ fn compu_lookup(
 }
 
 fn compu_convert(
-    diag_type: DataType,
-    compu_method: &CompuMethod,
+    diag_type: datatypes::DataType,
+    compu_method: &datatypes::CompuMethod,
     category: datatypes::CompuCategory,
     value: &serde_json::Value,
 ) -> Result<Vec<u8>, DiagServiceError> {
     match category {
-        datatypes::CompuCategory::Identical => todo!(),
-        datatypes::CompuCategory::Linear => {
-            compu_method
-                .internal_to_phys
-                .scales
-                .first()
-                .map(|scale| {
-                    fn calculate<T>(input: f64, scale: &CompuScale) -> Result<f64, DiagServiceError>
-                    where
-                        f64: From<T>,
-                        T: std::str::FromStr,
-                        T::Err: std::fmt::Debug,
-                    {
-                        let coeffs = scale.rational_coefficients.as_ref().ok_or_else(|| {
-                            DiagServiceError::UdsLookupError(
-                                "Rational coefficients not found".to_owned(),
-                            )
-                        })?;
+        datatypes::CompuCategory::IDENTICAL => todo!(),
+        datatypes::CompuCategory::LINEAR => compu_method
+            .internal_to_phys()
+            .and_then(|itp| itp.compu_scales().and_then(|scales| scales.iter().next()))
+            .map(|scale| {
+                fn calculate<T>(
+                    input: f64,
+                    scale: datatypes::CompuScale,
+                ) -> Result<f64, DiagServiceError>
+                where
+                    f64: From<T>,
+                    T: std::str::FromStr,
+                    T::Err: std::fmt::Debug,
+                {
+                    let coeffs = scale.rational_co_effs().ok_or_else(|| {
+                        DiagServiceError::UdsLookupError(
+                            "Rational coefficients not found".to_owned(),
+                        )
+                    })?;
 
-                        let offset = coeffs.numerator.first().unwrap_or(&0.0);
-                        let factor = coeffs.numerator.get(1).unwrap_or(&1.0);
-                        let denominator = coeffs.denominator.first().unwrap_or(&1.0);
+                    let numerator = coeffs.numerator().ok_or(DiagServiceError::InvalidDatabase(
+                        "Numerator coefficients missing".to_owned(),
+                    ))?;
 
-                        Ok((offset + factor * input) / denominator)
-                    }
+                    let denominator =
+                        coeffs
+                            .denominator()
+                            .ok_or(DiagServiceError::InvalidDatabase(
+                                "Denominator coefficients missing".to_owned(),
+                            ))?;
 
-                    let value = if value.is_number() {
-                        value.as_f64().ok_or_else(|| {
+                    let offset = numerator.iter().nth(0).unwrap_or(0.0);
+                    let factor = numerator.iter().nth(1).unwrap_or(1.0);
+                    let denominator = denominator.iter().nth(0).unwrap_or(1.0);
+
+                    Ok((offset + factor * input) / denominator)
+                }
+
+                let value = if value.is_number() {
+                    value.as_f64().ok_or_else(|| {
+                        DiagServiceError::ParameterConversionError(
+                            "Failed to get compu value as f64".to_owned(),
+                        )
+                    })?
+                } else if value.is_string() {
+                    let trimmed = value
+                        .as_str()
+                        .ok_or_else(|| {
                             DiagServiceError::ParameterConversionError(
-                                "Failed to get compu value as f64".to_owned(),
+                                "Empty value is not allowed for compu value".to_owned(),
                             )
                         })?
-                    } else if value.is_string() {
-                        let trimmed = value
-                            .as_str()
-                            .ok_or_else(|| {
-                                DiagServiceError::ParameterConversionError(
-                                    "Empty value is not allowed for compu value".to_owned(),
-                                )
-                            })?
-                            .trim_matches('"');
-                        trimmed.parse::<f64>().map_err(|_| {
-                            DiagServiceError::ParameterConversionError(
-                                "Failed to parse string as f64".to_string(),
-                            )
-                        })?
-                    } else {
-                        return Err(DiagServiceError::ParameterConversionError(
-                            "Value is not a number or string".to_owned(),
-                        ));
-                    };
+                        .trim_matches('"');
+                    trimmed.parse::<f64>().map_err(|_| {
+                        DiagServiceError::ParameterConversionError(
+                            "Failed to parse string as f64".to_string(),
+                        )
+                    })?
+                } else {
+                    return Err(DiagServiceError::ParameterConversionError(
+                        "Value is not a number or string".to_owned(),
+                    ));
+                };
 
-                    match diag_type {
-                        DataType::Int32 => calculate::<i32>(value, scale)
-                            .map(|r| (r as i32).to_be_bytes().to_vec()),
-                        DataType::UInt32 => calculate::<u32>(value, scale)
-                            .map(|r| (r as u32).to_be_bytes().to_vec()),
-                        DataType::Float32 => calculate::<f32>(value, scale)
-                            .map(|r| (r as f32).to_be_bytes().to_vec()),
-                        DataType::Float64 => {
-                            calculate::<f64>(value, scale).map(|r| r.to_be_bytes().to_vec())
-                        }
-                        _ => {
-                            unreachable!(
-                                "Database only support Int32, UInt32, Float32 and Float64 for \
-                                 linear scaling"
-                            );
-                        }
+                match diag_type {
+                    datatypes::DataType::Int32 => calculate::<i32>(value, scale.into())
+                        .map(|r| (r as i32).to_be_bytes().to_vec()),
+                    datatypes::DataType::UInt32 => calculate::<u32>(value, scale.into())
+                        .map(|r| (r as u32).to_be_bytes().to_vec()),
+                    datatypes::DataType::Float32 => calculate::<f32>(value, scale.into())
+                        .map(|r| (r as f32).to_be_bytes().to_vec()),
+                    datatypes::DataType::Float64 => {
+                        calculate::<f64>(value, scale.into()).map(|r| r.to_be_bytes().to_vec())
                     }
-                })
-                .ok_or_else(|| {
-                    DiagServiceError::UdsLookupError(
-                        "Failed to find scales for linear scaling".to_owned(),
-                    )
-                })?
-        }
-        datatypes::CompuCategory::ScaleLinear => todo!(),
-        datatypes::CompuCategory::TextTable => {
+                    _ => {
+                        unreachable!(
+                            "Database only support Int32, UInt32, Float32 and Float64 for linear \
+                             scaling"
+                        );
+                    }
+                }
+            })
+            .ok_or_else(|| {
+                DiagServiceError::UdsLookupError(
+                    "Failed to find scales for linear scaling".to_owned(),
+                )
+            })?,
+        datatypes::CompuCategory::SCALE_LINEAR => todo!(),
+        datatypes::CompuCategory::TEXT_TABLE => {
             let Some(value) = value.as_str().map(|s| s.replace('"', "")) else {
                 return Err(DiagServiceError::UdsLookupError(
                     "Failed to convert value to string".to_owned(),
                 ));
             };
 
-            if let Some(value) = compu_method
-                .internal_to_phys
-                .scales
-                .iter()
-                .find_map(|scale| {
-                    if let Some(text) = scale
-                        .consts
-                        .as_ref()
-                        .and_then(|consts| consts.vt.or(consts.vt_ti))
-                        .and_then(|text| STRINGS.get(text))
-                        && value == text
-                    {
-                        return scale.lower_limit.as_ref();
-                    }
-                    None
+            if let Some(value) = compu_method.internal_to_phys().and_then(|itp| {
+                itp.compu_scales().and_then(|scales| {
+                    scales.iter().find_map(|scale| {
+                        if let Some(text) = scale
+                            .consts()
+                            .and_then(|consts| consts.vt_ti().or(consts.vt()))
+                            && value == text
+                        {
+                            return scale.lower_limit();
+                        }
+                        None
+                    })
                 })
-            {
+            }) {
                 return match diag_type {
-                    DataType::Int32 => {
+                    datatypes::DataType::Int32 => {
                         let v: i32 = value.try_into()?;
                         Ok(v.to_be_bytes().to_vec())
                     }
-                    DataType::UInt32 => {
+                    datatypes::DataType::UInt32 => {
                         let v: u32 = value.try_into()?;
                         Ok(v.to_be_bytes().to_vec())
                     }
-                    DataType::Float32 => {
+                    datatypes::DataType::Float32 => {
                         let v: f32 = value.try_into()?;
                         Ok(v.to_be_bytes().to_vec())
                     }
-                    DataType::Float64 => {
+                    datatypes::DataType::Float64 => {
                         let v: f64 = value.try_into()?;
                         Ok(v.to_be_bytes().to_vec())
                     }
@@ -293,20 +288,23 @@ fn compu_convert(
                 "Failed to find matching TextTable value".to_owned(),
             ))
         }
-        datatypes::CompuCategory::CompuCode => todo!(),
-        datatypes::CompuCategory::TabIntp => todo!(),
-        datatypes::CompuCategory::RatFunc => todo!(),
-        datatypes::CompuCategory::ScaleRatFunc => todo!(),
+        datatypes::CompuCategory::COMPU_CODE => todo!(),
+        datatypes::CompuCategory::TAB_INTP => todo!(),
+        datatypes::CompuCategory::RAT_FUNC => todo!(),
+        datatypes::CompuCategory::SCALE_RAT_FUNC => todo!(),
     }
 }
 
 pub(in crate::diag_kernel) fn extract_diag_data_container(
     param: &datatypes::Parameter,
     payload: &mut Payload,
-    diag_type: &datatypes::DiagCodedType,
-    compu_method: Option<&CompuMethod>,
+    diag_type: datatypes::DiagCodedType,
+    compu_method: Option<&datatypes::CompuMethod>,
 ) -> Result<DiagDataTypeContainer, DiagServiceError> {
-    let byte_pos = param.byte_pos as usize;
+    let byte_pos = param
+        .byte_position()
+        .ok_or(DiagServiceError::InvalidDatabase("Byte Postion is empty"))?
+        as usize;
     let uds_payload = payload.data();
     let (data, bit_len) = diag_type.decode(uds_payload, byte_pos, param.bit_pos as usize)?;
 

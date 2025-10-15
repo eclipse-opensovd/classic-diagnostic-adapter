@@ -10,7 +10,6 @@
 //  *
 //  * SPDX-License-Identifier: Apache-2.0
 //  */
-//
 // use cda_interfaces::{DiagServiceError, STRINGS, StringId, service_ids};
 // #[cfg(feature = "deepsize")]
 // use deepsize::DeepSizeOf;

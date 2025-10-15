@@ -13,7 +13,10 @@
 
 use std::fmt::Debug;
 
-use cda_database::datatypes::{DataType, IntervalType, Limit};
+use cda_database::{
+    datatypes,
+    datatypes::{DataType, IntervalType, Limit},
+};
 use cda_interfaces::{DiagServiceError, Protocol, STRINGS};
 use hashbrown::HashMap;
 use serde::{Serialize, Serializer};

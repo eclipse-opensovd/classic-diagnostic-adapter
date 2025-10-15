@@ -18,8 +18,8 @@ use cda_interfaces::{
 #[cfg(feature = "deepsize")]
 use deepsize::DeepSizeOf;
 use hashbrown::HashMap;
-use crate::datatypes::{DiagnosticDatabase};
-use crate::proto::diagnostic_description::dataformat;
+
+use crate::{datatypes::DiagnosticDatabase, proto::diagnostic_description::dataformat};
 //
 // use crate::{datatypes::{
 //     ComParamMap, DataOperation, DataOperationVariant, DiagnosticDatabase, Id, Protocol,
@@ -181,15 +181,16 @@ pub(super) fn lookup(
         .and_then(|dl| dl.com_param_refs())
         .and_then(|params| {
             params.iter().find(|cp_ref| {
-                cp_ref.com_param().is_some_and(|c| {
-                    c.short_name().is_some_and(|name| name == param_name)
-                })
+                cp_ref
+                    .com_param()
+                    .is_some_and(|c| c.short_name().is_some_and(|name| name == param_name))
             })
-        }).ok_or(DiagServiceError::DatabaseEntryNotFound(format!(
-        "Failed to find {param_name}"
-    )))?;
+        })
+        .ok_or(DiagServiceError::DatabaseEntryNotFound(format!(
+            "Failed to find {param_name}"
+        )))?;
 
-    let (_, cp) = resolve_with_value(ecu_data, &cp_ref)?;
+    let (_, cp) = resolve_com_param_ref(ecu_data, &cp_ref)?;
 
     Ok(cp)
 }
@@ -210,42 +211,56 @@ pub(super) fn lookup(
 //     resolve_with_value(ecu_data, cpref, comparam)
 // }
 
-fn resolve_with_value(
+pub fn resolve_com_param_ref(
     ecu_data: &DiagnosticDatabase,
-    cpref: &dataformat::ComParamRef,
+    cp_ref: &dataformat::ComParamRef,
 ) -> Result<(String, ComParamValue), DiagServiceError> {
-    let short_name = cpref
-        .com_param()
-        .and_then(|cp| cp.short_name())
-        .ok_or(DiagServiceError::InvalidDatabase("ComParamRef has no com_param short name".to_string()))?;
+    let short_name = cp_ref.com_param().and_then(|cp| cp.short_name()).ok_or(
+        DiagServiceError::InvalidDatabase("ComParamRef has no com_param short name".to_string()),
+    )?;
 
-    if cpref.simple_value().is_some() &&
-        cpref.complex_value().is_some()
-    {
+    if cp_ref.simple_value().is_some() && cp_ref.complex_value().is_some() {
         return Err(DiagServiceError::InvalidDatabase(format!(
             "ComParamRef for {} has both simple and complex value",
             short_name,
         )));
     }
 
-    let com_param = cpref.com_param().ok_or(DiagServiceError::InvalidDatabase("ComParamRef has no com_param".to_string()))?;
+    let com_param = cp_ref.com_param().ok_or(DiagServiceError::InvalidDatabase(
+        "ComParamRef has no com_param".to_string(),
+    ))?;
     resolve_com_param(ecu_data, &com_param)
 }
 
-fn resolve_com_param(ecu_data: &DiagnosticDatabase, com_param: &dataformat::ComParam) -> Result<(String, ComParamValue), DiagServiceError> {
-    let param_short_name = com_param.short_name().ok_or(DiagServiceError::InvalidDatabase("ComParam in ComplexComParam has no short name".to_string()))?.to_owned();
+fn resolve_com_param(
+    ecu_data: &DiagnosticDatabase,
+    com_param: &dataformat::ComParam,
+) -> Result<(String, ComParamValue), DiagServiceError> {
+    let param_short_name = com_param
+        .short_name()
+        .ok_or(DiagServiceError::InvalidDatabase(
+            "ComParam in ComplexComParam has no short name".to_string(),
+        ))?
+        .to_owned();
     if let Some(regular) = com_param.specific_data_as_regular_com_param() {
-        let dop = regular.dop().ok_or(DiagServiceError::InvalidDatabase("Regular ComParam has no DOP".to_string()))?;
+        let dop = regular.dop().ok_or(DiagServiceError::InvalidDatabase(
+            "Regular ComParam has no DOP".to_string(),
+        ))?;
         let unit = extract_dop_unit(&dop);
         let default_value = regular.physical_default_value().map(|s| s.to_owned());
-        Ok((param_short_name, ComParamValue::Simple(ComParamSimpleValue {
-            value: default_value.unwrap_or_default(),
-            unit,
-        })))
+        Ok((
+            param_short_name,
+            ComParamValue::Simple(ComParamSimpleValue {
+                value: default_value.unwrap_or_default(),
+                unit,
+            }),
+        ))
     } else if let Some(_complex) = com_param.specific_data_as_complex_com_param() {
         resolve_complex_value(ecu_data, &com_param)
     } else {
-        Err(DiagServiceError::InvalidDatabase("ComParam is neither regular nor complex".to_string()))
+        Err(DiagServiceError::InvalidDatabase(
+            "ComParam is neither regular nor complex".to_string(),
+        ))
     }
 }
 
@@ -253,13 +268,27 @@ fn resolve_complex_value(
     ecu_data: &DiagnosticDatabase,
     com_param: &dataformat::ComParam,
 ) -> Result<(String, ComParamValue), DiagServiceError> {
-    let complex_com_param = com_param.specific_data_as_complex_com_param().ok_or(DiagServiceError::InvalidDatabase("ComParam is not complex".to_string()))?;
-    let short_name = com_param.short_name()
-        .ok_or(DiagServiceError::InvalidDatabase("ComParamRef has no com_param short name".to_string()))?.to_owned();
+    let complex_com_param =
+        com_param
+            .specific_data_as_complex_com_param()
+            .ok_or(DiagServiceError::InvalidDatabase(
+                "ComParam is not complex".to_string(),
+            ))?;
+    let short_name = com_param
+        .short_name()
+        .ok_or(DiagServiceError::InvalidDatabase(
+            "ComParamRef has no com_param short name".to_string(),
+        ))?
+        .to_owned();
     let entries = if let Some(com_params) = complex_com_param.com_params() {
-        com_params.iter().map(|param| -> Result<(String, ComParamValue), DiagServiceError> {
-            resolve_com_param(ecu_data, &param)
-        }).collect::<Result<HashMap<_, _>, DiagServiceError>>()?
+        com_params
+            .iter()
+            .map(
+                |param| -> Result<(String, ComParamValue), DiagServiceError> {
+                    resolve_com_param(ecu_data, &param)
+                },
+            )
+            .collect::<Result<HashMap<_, _>, DiagServiceError>>()?
     } else {
         HashMap::new()
     };

@@ -99,8 +99,8 @@ impl TryFrom<DiagnosticResponse> for Option<UdsResponse> {
                 data: msg.message,
                 source_address: u16::from_be_bytes(msg.source_address),
                 target_address: u16::from_be_bytes(msg.target_address),
-                new_session_id: None,
-                new_security_access_id: None,
+                new_session: None,
+                new_security: None,
             }))),
             DiagnosticResponse::Pending(addr) => Ok(Some(UdsResponse::ResponsePending(addr))),
             DiagnosticResponse::BusyRepeatRequest(addr) => {

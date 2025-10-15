@@ -27,7 +27,37 @@ pub(super) type VariantPatterns = Vec<ExpectedParamMap>;
 
 pub(super) struct VariantDetection {
     pub(crate) diag_service_requests: HashSet<DiagServiceId>,
-    //pub(crate) variant_param_map: HashMap<u32, VariantPatterns>,
+}
+
+pub(super) fn prepare_variant_detection(
+    diagnostic_database: &datatypes::DiagnosticDatabase,
+) -> Result<VariantDetection, DiagServiceError> {
+    let diag_service_requests: HashSet<_> = diagnostic_database
+        .ecu_data()?
+        .variants()
+        .map(|variants| {
+            variants
+                .iter()
+                .filter(|v| !v.is_base_variant())
+                .flat_map(|v| {
+                    v.variant_pattern().into_iter().flat_map(|patterns| {
+                        patterns.iter().flat_map(|pattern| {
+                            pattern.matching_parameter().into_iter().flat_map(|params| {
+                                params.iter().filter_map(|mp| {
+                                    mp.diag_service()
+                                        .map(|ds| ds.diag_comm().map(|dc| dc.short_name()))
+                                })
+                            })
+                        })
+                    })
+                })
+        })
+        .flatten()
+        .collect();
+
+    Ok(VariantDetection {
+        diag_service_requests,
+    })
 }
 
 impl VariantDetection {
@@ -64,7 +94,9 @@ impl VariantDetection {
             })
             .collect::<Result<HashMap<String, HashMap<String, String>>, DiagServiceError>>()?;
 
-        diagnostic_database.ecu_data().variants()
+        diagnostic_database
+            .ecu_data()
+            .variants()
             .ok_or_else(|| DiagServiceError::InvalidDatabase("No variants found".to_owned()))?
             .iter()
             .find(|variant| {
@@ -72,17 +104,22 @@ impl VariantDetection {
                     return false;
                 }
 
-                variant.variant_pattern()
+                variant
+                    .variant_pattern()
                     .map(|patterns| {
                         patterns.iter().any(|pattern| {
-                            pattern.matching_parameter()
+                            pattern
+                                .matching_parameter()
                                 .map(|params| {
                                     params.iter().all(|matching_param| {
-                                        let expected_value = matching_param.expected_value().unwrap_or_default();
-                                        let expected_param = matching_param.out_param()
+                                        let expected_value =
+                                            matching_param.expected_value().unwrap_or_default();
+                                        let expected_param = matching_param
+                                            .out_param()
                                             .and_then(|out_param| out_param.short_name())
                                             .unwrap_or_default();
-                                        let service = matching_param.diag_service()
+                                        let service = matching_param
+                                            .diag_service()
                                             .and_then(|ds| ds.diag_comm())
                                             .and_then(|dc| dc.short_name())
                                             .unwrap_or_default();
@@ -108,11 +145,10 @@ impl VariantDetection {
             .cloned()
             .ok_or_else(|| {
                 tracing::debug!(
-            received_responses = ?service_responses,
-            "No variant found for expected services"
-        );
+                    received_responses = ?service_responses,
+                    "No variant found for expected services"
+                );
                 DiagServiceError::VariantDetectionError("No variant found".to_owned())
             })
-
     }
 }

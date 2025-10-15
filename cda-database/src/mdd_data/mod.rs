@@ -19,8 +19,7 @@ use hashbrown::HashMap;
 use prost::Message;
 
 use crate::proto::{
-    diagnostic_description::dataformat, fileformat,
-    fileformat::chunk::DataType as ChunkDataType,
+    diagnostic_description::dataformat, fileformat, fileformat::chunk::DataType as ChunkDataType,
 };
 
 pub mod files;

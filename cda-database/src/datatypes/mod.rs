@@ -11,14 +11,60 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-use std::fmt::Debug;
-use std::ops::Deref;
-use ouroboros::{self_referencing};
+use std::{fmt::Debug, ops::Deref};
+
 use cda_interfaces::{
-    DiagComm, DiagCommAction, DiagCommType, DiagServiceError, Id, STRINGS, StringId,
+    DiagServiceError, Id, STRINGS, StringId,
     datatypes::{ComParamConfig, ComParamValue, DeserializableCompParam},
-    get_string_with_default,
 };
+pub use comparam::*;
+pub use data_operation::*;
+#[cfg(feature = "deepsize")]
+use deepsize::DeepSizeOf;
+pub use diag_coded_type::*;
+use ouroboros::self_referencing;
+// pub use dtc::*;
+// pub use functional_classes::*;
+// use hashbrown::HashMap;
+// pub use jobs::*;
+// pub use parameter::*;
+// pub use sd_sdg::*;
+use serde::Serialize;
+
+// pub use service::*;
+// pub use state_charts::*;
+// pub use variant::*;
+use crate::{
+    datatypes,
+    mdd_data::{load_ecudata, read_ecudata},
+    proto::diagnostic_description::dataformat,
+};
+
+pub(crate) mod comparam;
+pub(crate) mod data_operation;
+pub(crate) mod diag_coded_type;
+pub(crate) mod dtc;
+pub(crate) mod functional_classes;
+pub(crate) mod jobs;
+pub(crate) mod parameter;
+pub(crate) mod sd_sdg;
+pub(crate) mod service;
+pub(crate) mod state_charts;
+pub(crate) mod variant;
+
+// pub type DiagnosticServiceMap = HashMap<Id, DiagnosticService>;
+// pub type RequestMap = HashMap<Id, Request>;
+// pub type ResponseMap = HashMap<Id, Response>;
+// pub type ParameterMap = HashMap<Id, Parameter>;
+// pub type ComParamMap = HashMap<Id, ComParam>;
+// pub type DiagCodedTypeMap = HashMap<Id, DiagCodedType>;
+// pub type DOPMap = HashMap<Id, DataOperation>;
+// pub type VariantMap = HashMap<StringId, Variant>;
+// pub type ProtocolMap = HashMap<Id, Protocol>;
+// pub type BaseServiceMap = HashMap<String, Id>;
+// pub type SdgMap = HashMap<Id, Sdg>;
+// pub type SdMap = HashMap<Id, Sd>;
+// pub type DtcMap = HashMap<Id, Dtc>;
 
 macro_rules! dataformat_wrapper {
     ($name:ident, $inner:ty) => {
@@ -47,53 +93,165 @@ macro_rules! dataformat_wrapper {
     };
 }
 
+dataformat_wrapper!(Protocol<'a>, dataformat::Protocol<'a>);
+
+dataformat_wrapper!(State<'a>, dataformat::State<'a>);
+dataformat_wrapper!(StateChart<'a>, dataformat::StateChart<'a>);
+
 dataformat_wrapper!(Variant<'a>, dataformat::Variant<'a>);
 dataformat_wrapper!(SdOrSdg<'a>, dataformat::SDOrSDG<'a>);
+dataformat_wrapper!(Sdgs<'a>, dataformat::SDGS<'a>);
 
-pub use data_operation::*;
-#[cfg(feature = "deepsize")]
-use deepsize::DeepSizeOf;
-pub use diag_coded_type::*;
-// pub use dtc::*;
-// pub use functional_classes::*;
-// use hashbrown::HashMap;
-// pub use jobs::*;
-// pub use parameter::*;
-// pub use sd_sdg::*;
-use serde::Serialize;
-// pub use service::*;
-// pub use state_charts::*;
-// pub use variant::*;
+dataformat_wrapper!(DiagService<'a>, dataformat::DiagService<'a>);
+dataformat_wrapper!(DiagComm<'a>, dataformat::DiagComm<'a>);
+dataformat_wrapper!(DiagLayer<'a>, dataformat::DiagLayer<'a>);
 
-use crate::{mdd_data::{load_ecudata, read_ecudata}, proto::diagnostic_description::dataformat};
+dataformat_wrapper!(Field<'a>, dataformat::Field<'a>);
+dataformat_wrapper!(DataOperation<'a>, dataformat::DOP<'a>);
+dataformat_wrapper!(DataOperationVariant, dataformat::SpecificDOPData);
+dataformat_wrapper!(StructureDop<'a>, dataformat::Structure<'a>);
+dataformat_wrapper!(MuxDop<'a>, dataformat::MUXDOP<'a>);
+dataformat_wrapper!(CompuMethod<'a>, dataformat::CompuMethod<'a>); // todo alexmohr, might need the internal type back.
+dataformat_wrapper!(CompuCategory, dataformat::CompuCategory); // todo alexmohr, might need the internal type back.
+dataformat_wrapper!(CompuScale<'a>, dataformat::CompuScale<'a>); // todo alexmohr, might need the internal type back.
 
-pub(crate) mod comparam;
-pub(crate) mod data_operation;
-pub(crate) mod diag_coded_type;
-pub(crate) mod dtc;
-pub(crate) mod functional_classes;
-pub(crate) mod jobs;
-pub(crate) mod parameter;
-pub(crate) mod sd_sdg;
-pub(crate) mod service;
-pub(crate) mod state_charts;
-pub(crate) mod variant;
+dataformat_wrapper!(DbDataType, dataformat::DataType);
 
+dataformat_wrapper!(Parameter<'a>, dataformat::Param<'a>);
+dataformat_wrapper!(ResponseType, dataformat::ResponseType);
+dataformat_wrapper!(ParamType, dataformat::ParamType);
 
-// pub type DiagnosticServiceMap = HashMap<Id, DiagnosticService>;
-// pub type RequestMap = HashMap<Id, Request>;
-// pub type ResponseMap = HashMap<Id, Response>;
-// pub type ParameterMap = HashMap<Id, Parameter>;
-// pub type ComParamMap = HashMap<Id, ComParam>;
-// pub type DiagCodedTypeMap = HashMap<Id, DiagCodedType>;
-// pub type DOPMap = HashMap<Id, DataOperation>;
-// pub type VariantMap = HashMap<StringId, Variant>;
-// pub type ProtocolMap = HashMap<Id, Protocol>;
-// pub type BaseServiceMap = HashMap<String, Id>;
-// pub type SdgMap = HashMap<Id, Sdg>;
-// pub type SdMap = HashMap<Id, Sd>;
-// pub type DtcMap = HashMap<Id, Dtc>;
+impl DiagService<'_> {
+    pub fn request_id(&self) -> Option<(u16, StandardLengthType)> {
+        let request = self.0.request()?;
+        let params = request.params()?;
+        let sid = params.iter().map(Parameter).find_map(|p| {
+            if p.byte_pos() == 0 && p.bit_pos() == 0 {
+                p.specific_data_as_coded_const()
+            } else {
+                None
+            }
+        })?;
 
+        if sid
+            .diag_coded_type()
+            .is_none_or(|t| t.base_data_type().0 != (*(datatypes::DbDataType::A_UINT_32)).0)
+        {
+            return None;
+        }
+
+        let standard_length_type = sid
+            .diag_coded_type()
+            .and_then(|t| t.specific_data_as_standard_length_type())?;
+
+        // SIDRQ should not be condensed, or contain a bitmask
+        if standard_length_type.condensed() || standard_length_type.bit_mask().is_some() {
+            return None;
+        }
+
+        // according to ISO_14229 SIDRQ is defined as XX16 eg, max 2 bytes
+        if let Some(sid) = sid.coded_value().and_then(|v| v.parse::<u16>().ok()) {
+            Some((sid, standard_length_type.into()))
+        } else {
+            None
+        }
+    }
+}
+
+impl TryInto<cda_interfaces::DiagComm> for DiagService {
+    type Error = DiagServiceError;
+
+    fn try_into(self) -> Result<cda_interfaces::DiagComm, Self::Error> {
+        let diag_comm = self.diag_comm().ok_or(DiagServiceError::InvalidDatabase(
+            "DiagService missing diag_comm".to_owned(),
+        ))?;
+        let name = diag_comm
+            .short_name()
+            .ok_or(DiagServiceError::InvalidDatabase(
+                "DiagService missing name".to_owned(),
+            ))?
+            .to_owned();
+        let service_prefix = if let Some((id, _)) = self.request_id() {
+            (id >> 8) as u8
+        } else {
+            return Err(DiagServiceError::InvalidDatabase(
+                "DiagService missing service_prefix".to_owned(),
+            ));
+        };
+
+        Ok(cda_interfaces::DiagComm {
+            name,
+            type_: service_prefix.try_into()?,
+            lookup_name: None,
+        })
+    }
+}
+
+#[allow(non_upper_case_globals)] // allowed in auto generated code too, to keep it consistent
+impl DataOperationVariant {
+    pub const NONE: Self = Self(dataformat::SpecificDOPData::NONE);
+    pub const NormalDOP: Self = Self(dataformat::SpecificDOPData::NormalDOP);
+    pub const EndOfPduField: Self = Self(dataformat::SpecificDOPData::EndOfPduField);
+    pub const StaticField: Self = Self(dataformat::SpecificDOPData::StaticField);
+    pub const EnvDataDesc: Self = Self(dataformat::SpecificDOPData::EnvDataDesc);
+    pub const EnvData: Self = Self(dataformat::SpecificDOPData::EnvData);
+    pub const DTCDOP: Self = Self(dataformat::SpecificDOPData::DTCDOP);
+    pub const Structure: Self = Self(dataformat::SpecificDOPData::Structure);
+    pub const MUXDOP: Self = Self(dataformat::SpecificDOPData::MUXDOP);
+    pub const DynamicLengthField: Self = Self(dataformat::SpecificDOPData::DynamicLengthField);
+}
+
+impl DbDataType {
+    pub const A_INT_32: Self = Self(dataformat::DataType::A_INT_32);
+    pub const A_UINT_32: Self = Self(dataformat::DataType::A_UINT_32);
+    pub const A_FLOAT_32: Self = Self(dataformat::DataType::A_FLOAT_32);
+    pub const A_ASCIISTRING: Self = Self(dataformat::DataType::A_ASCIISTRING);
+    pub const A_UTF_8_STRING: Self = Self(dataformat::DataType::A_UTF_8_STRING);
+    pub const A_UNICODE_2_STRING: Self = Self(dataformat::DataType::A_UNICODE_2_STRING);
+    pub const A_BYTEFIELD: Self = Self(dataformat::DataType::A_BYTEFIELD);
+    pub const A_FLOAT_64: Self = Self(dataformat::DataType::A_FLOAT_64);
+}
+
+impl ParamType {
+    pub const CODED_CONST: Self = Self(dataformat::ParamType::CODED_CONST);
+    pub const DYNAMIC: Self = Self(dataformat::ParamType::DYNAMIC);
+    pub const LENGTH_KEY: Self = Self(dataformat::ParamType::LENGTH_KEY);
+    pub const MATCHING_REQUEST_PARAM: Self = Self(dataformat::ParamType::MATCHING_REQUEST_PARAM);
+    pub const NRC_CONST: Self = Self(dataformat::ParamType::NRC_CONST);
+    pub const PHYS_CONST: Self = Self(dataformat::ParamType::PHYS_CONST);
+    pub const RESERVED: Self = Self(dataformat::ParamType::RESERVED);
+    pub const SYSTEM: Self = Self(dataformat::ParamType::SYSTEM);
+    pub const TABLE_ENTRY: Self = Self(dataformat::ParamType::TABLE_ENTRY);
+    pub const TABLE_KEY: Self = Self(dataformat::ParamType::TABLE_KEY);
+    pub const TABLE_STRUCT: Self = Self(dataformat::ParamType::TABLE_STRUCT);
+    pub const VALUE: Self = Self(dataformat::ParamType::VALUE);
+}
+
+impl ResponseType {
+    pub const POS_RESPONSE: Self = Self(dataformat::ResponseType::POS_RESPONSE);
+    pub const NEG_RESPONSE: Self = Self(dataformat::ResponseType::NEG_RESPONSE);
+    pub const GLOBAL_NEG_RESPONSE: Self = Self(dataformat::ResponseType::GLOBAL_NEG_RESPONSE);
+}
+
+impl CompuCategory {
+    pub const IDENTICAL: Self = Self(dataformat::CompuCategory::IDENTICAL);
+    pub const LINEAR: Self = Self(dataformat::CompuCategory::LINEAR);
+    pub const SCALE_LINEAR: Self = Self(dataformat::CompuCategory::SCALE_LINEAR);
+    pub const TEXT_TABLE: Self = Self(dataformat::CompuCategory::TEXT_TABLE);
+    pub const COMPU_CODE: Self = Self(dataformat::CompuCategory::COMPU_CODE);
+    pub const TAB_INTP: Self = Self(dataformat::CompuCategory::TAB_INTP);
+    pub const RAT_FUNC: Self = Self(dataformat::CompuCategory::RAT_FUNC);
+    pub const SCALE_RAT_FUNC: Self = Self(dataformat::CompuCategory::SCALE_RAT_FUNC);
+}
+
+impl Parameter {
+    pub fn byte_pos(&self) -> u32 {
+        self.0.byte_position().unwrap_or(0)
+    }
+    pub fn bit_pos(&self) -> u32 {
+        self.0.bit_position().unwrap_or(0)
+    }
+}
 
 #[self_referencing]
 #[cfg_attr(feature = "deepsize", derive(DeepSizeOf))]
@@ -112,10 +270,7 @@ pub struct DiagnosticDatabase {
     ecu_database_path: String,
     pub ecu_name: String,
     ecu_data: Option<EcuData>,
-
-
-
-   // pub variants: VariantMap,
+    // pub variants: VariantMap,
     // pub services: DiagnosticServiceMap,
     // pub requests: RequestMap,
     // pub responses: ResponseMap,
@@ -139,8 +294,6 @@ pub struct DiagnosticDatabase {
     // pub dtcs: DtcMap,
 }
 
-
-
 #[derive(Clone)]
 pub enum LogicalAddressType {
     /// Lookup for the ECU address.
@@ -156,25 +309,17 @@ pub enum LogicalAddressType {
     Functional(String),
 }
 
-#[derive(Debug)]
-#[cfg_attr(feature = "deepsize", derive(DeepSizeOf))]
-pub struct DbDiagComm {
-    action: DiagCommAction,
-    type_: DiagCommType,
-    pub(crate) lookup_name: StringId,
-}
-
-impl From<&DbDiagComm> for DiagComm {
-    fn from(db_diag_comm: &DbDiagComm) -> Self {
-        let name = get_string_with_default!(db_diag_comm.lookup_name);
-        DiagComm {
-            name: name.clone(),
-            action: db_diag_comm.action.clone(),
-            type_: db_diag_comm.type_.clone(),
-            lookup_name: Some(name),
-        }
-    }
-}
+// impl From<&DbDiagComm> for DiagComm {
+//     fn from(db_diag_comm: &DbDiagComm) -> Self {
+//         let name = get_string_with_default!(db_diag_comm.lookup_name);
+//         DiagComm {
+//             name: name.clone(),
+//             action: db_diag_comm.action.clone(),
+//             type_: db_diag_comm.type_.clone(),
+//             lookup_name: Some(name),
+//         }
+//     }
+// }
 
 #[derive(Debug, Clone)]
 #[cfg_attr(feature = "deepsize", derive(DeepSizeOf))]
@@ -205,26 +350,30 @@ fn option_str_to_string(opt: Option<&String>) -> Option<StringId> {
 //     }
 // }
 
-impl DiagnosticDatabase{
-    pub fn new(ecu_database_path: String, ecu_data_blob: Vec<u8>) -> Result<Self, DiagServiceError> {
-        let ecu_data =
-            read_ecudata(&ecu_data_blob).map_err(DiagServiceError::InvalidDatabase)?;
-        let ecu_name = ecu_data.ecu_name().ok_or(
-            DiagServiceError::InvalidDatabase("ECU name is missing in ECU data".to_owned()),
-        )?.to_string();
-
+impl DiagnosticDatabase {
+    pub fn new(
+        ecu_database_path: String,
+        ecu_data_blob: Vec<u8>,
+    ) -> Result<Self, DiagServiceError> {
+        let ecu_data = read_ecudata(&ecu_data_blob).map_err(DiagServiceError::InvalidDatabase)?;
+        let ecu_name = ecu_data
+            .ecu_name()
+            .ok_or(DiagServiceError::InvalidDatabase(
+                "ECU name is missing in ECU data".to_owned(),
+            ))?
+            .to_string();
 
         Ok(DiagnosticDatabase {
             ecu_database_path,
             ecu_name,
-            ecu_data: Some(EcuDataBuilder {
-                blob: ecu_data_blob,
-                data_builder: |ecu_data_blob| {
-                    read_ecudata(ecu_data_blob).unwrap()
+            ecu_data: Some(
+                EcuDataBuilder {
+                    blob: ecu_data_blob,
+                    data_builder: |ecu_data_blob| read_ecudata(ecu_data_blob).unwrap(),
                 }
-            }.build())
+                .build(),
+            ),
         })
-
 
         // let params = get_parameters(&ecu_data, &ecu_database_path);
         //
@@ -290,21 +439,18 @@ impl DiagnosticDatabase{
         // let functional_classes_lookup = get_functional_classes_lookup(&ecu_data, &services);
         //
         // let dtc_records = get_dtcs(&ecu_data, &ecu_database_path);
-
-
     }
-
 
     pub fn is_loaded(&self) -> bool {
         self.ecu_data.is_some()
     }
 
     pub fn unload(&mut self) {
-       self.ecu_data = None;
+        self.ecu_data = None;
     }
 
     //  todo alexmohr
-    pub fn load_variant_sdgs(&mut self, variant_: &Variant) -> Result<(), DiagServiceError> {
+    pub fn load_variant_sdgs(&mut self, _variant: &Variant) -> Result<(), DiagServiceError> {
         // let (_, ecu_data_blob) = load_ecudata(&self.ecu_database_path)
         //     .map_err(|e| DiagServiceError::InvalidDatabase(e.to_string()))?;
         // let ecu_data = read_ecudata(&ecu_data_blob).map_err(DiagServiceError::InvalidDatabase)?;
@@ -316,7 +462,7 @@ impl DiagnosticDatabase{
         // );
         //
         // self.sdgs.extend(sdgs);
-         Ok(())
+        Ok(())
     }
 
     pub fn load(&mut self) -> Result<(), DiagServiceError> {
@@ -373,22 +519,21 @@ impl DiagnosticDatabase{
     }
 
     pub fn ecu_data(&self) -> Result<&dataformat::EcuData<'_>, DiagServiceError> {
-        self.ecu_data.as_ref()
+        self.ecu_data
+            .as_ref()
             .ok_or_else(|| DiagServiceError::InvalidDatabase("ECU data not loaded".to_owned()))
             .map(|ecu_data| ecu_data.borrow_data())
     }
 
     pub fn base_variant(&'_ self) -> Result<Variant<'_>, DiagServiceError> {
         let ecu_data = self.ecu_data()?;
-        ecu_data.variants()
-            .and_then(|variants| {
-                variants.iter()
-                    .find(|v| v.is_base_variant())
-            }).ok_or_else(|| {
-            DiagServiceError::InvalidDatabase("No base variant found in ECU data.".to_owned())
-        })
+        ecu_data
+            .variants()
+            .and_then(|variants| variants.iter().find(|v| v.is_base_variant()))
+            .ok_or_else(|| {
+                DiagServiceError::InvalidDatabase("No base variant found in ECU data.".to_owned())
+            })
             .map(Variant)
-
     }
 
     #[tracing::instrument(
@@ -403,8 +548,6 @@ impl DiagnosticDatabase{
         protocol: &dataformat::Protocol,
         com_param: &ComParamConfig<T>,
     ) -> T {
-
-
         let lookup_result = comparam::lookup(self, protocol, &com_param.name);
         match lookup_result {
             Ok(ComParamValue::Simple(simple)) => {

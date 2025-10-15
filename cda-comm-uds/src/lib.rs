@@ -538,8 +538,8 @@ impl<S: EcuGateway, R: DiagServiceResponse, T: EcuManager<Response = R>> UdsMana
                     data: vec![service_ids::TESTER_PRESENT, 0x80],
                     source_address: ecu.read().await.tester_address(),
                     target_address: ecu.read().await.logical_functional_address(),
-                    new_session_id: None,
-                    new_security_access_id: None,
+                    new_session: None,
+                    new_security: None,
                 }
             }
         };
