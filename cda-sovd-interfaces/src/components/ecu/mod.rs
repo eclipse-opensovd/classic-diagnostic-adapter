@@ -23,7 +23,7 @@ pub mod operations;
 pub struct Ecu {
     pub id: String,
     pub name: String,
-    pub variant: String,
+    pub variant: HashMap<String, String>,
     pub locks: String,
     pub operations: String,
     pub data: String,
