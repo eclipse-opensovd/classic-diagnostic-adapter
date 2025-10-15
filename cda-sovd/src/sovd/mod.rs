@@ -371,14 +371,9 @@ fn ecu_route<
         )
         .api_route("/modes", routing::get_with(modes::get, modes::docs_get))
         .api_route(
-            "/modes/session",
-            routing::get_with(modes::session::get, modes::session::docs_get)
-                .put_with(modes::session::put, modes::session::docs_put),
-        )
-        .api_route(
-            "/modes/security",
-            routing::get_with(modes::security::get, modes::security::docs_get)
-                .put_with(modes::security::put, modes::security::docs_put),
+            "/modes/{mode-id}",
+            routing::get_with(modes::id::get, modes::id::docs_get)
+                .put_with(modes::id::put, modes::id::docs_put),
         )
         .api_route(
             "/x-single-ecu-jobs",
