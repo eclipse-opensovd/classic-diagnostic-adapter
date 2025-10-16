@@ -11,6 +11,41 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+//! # Default Security Plugin Implementation
+//!
+//! This module provides the default security plugin implementation that demonstrates
+//! the security plugin architecture and provides a functional JWT-based authentication
+//! system for development and production use.
+//!
+//! ## JWT-Based Authentication
+//!
+//! The default implementation uses JSON Web Tokens (JWT) for stateless authentication:
+//! - Supports configurable token expiration
+//! - Implements Bearer token authentication for API requests
+//! - Provides secure token validation with signature verification
+//!
+//! ## Feature-Based Security
+//!
+//! The default plugin supports conditional compilation features:
+//! - **auth feature disabled**: Bypasses credential validation (development/testing)
+//! - **auth feature enabled**: Enforces proper credential validation (production)
+//!
+//! ## Authorization Endpoint Example
+//!
+//! The implementation provides an example authorization endpoint that:
+//! - Accepts client credentials (`client_id`, `client_secret`)
+//! - Validates credentials against a simple authentication mechanism
+//! - Returns JWT access tokens for subsequent API requests
+//! - Handles authentication errors with appropriate HTTP status codes
+//!
+//! ## Token Validation
+//!
+//! Token validation includes:
+//! - Extraction of Bearer tokens from Authorization headers
+//! - JWT signature validation (when auth feature is enabled)
+//! - Token expiration checking
+//! - User claims extraction for downstream services
+
 use std::sync::LazyLock;
 
 use aide::axum::IntoApiResponse;
@@ -20,7 +55,7 @@ use axum_extra::{
     TypedHeader,
     headers::{Authorization, authorization::Bearer},
 };
-use http::request::Parts;
+use http::{HeaderMap, request::Parts};
 use jsonwebtoken::{DecodingKey, EncodingKey, Header, Validation, decode, encode};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
@@ -89,17 +124,42 @@ impl ClaimsTrait for Claims {
     }
 }
 
+/// Default security plugin data containing validated user claims.
+///
+/// This struct represents an initialized security plugin instance that contains
+/// validated JWT claims. It implements both [`AuthApi`] and [`SecurityApi`] to
+/// provide complete authentication and authorization capabilities.
 pub struct DefaultSecurityPluginData {
     claims: Claims,
 }
 
+/// Default security plugin implementation.
+///
+/// This is the default security plugin that provides JWT-based authentication
+/// and basic authorization capabilities. It serves as both a functional
+/// implementation for development/production use and as an example for
+/// custom security plugin implementations.
+///
+/// ## Features
+///
+/// - JWT token generation and validation
+/// - Bearer token authentication
+/// - Feature-based credential validation
+/// - SOVD-compliant error responses
+/// - Integration with authorization endpoint
+///
+/// ### Feature flags
+/// The default plugin supports conditional compilation features:
+/// - **auth feature disabled**: Bypasses credential validation (development/testing)
+/// - **auth feature enabled**: Enforces proper credential validation (production)
+///
 #[derive(Default)]
 pub struct DefaultSecurityPlugin;
 impl SecurityPluginLoader for DefaultSecurityPlugin {}
 
 #[async_trait]
 impl AuthorizationRequestHandler for DefaultSecurityPlugin {
-    async fn authorize(body_bytes: Bytes) -> impl IntoApiResponse {
+    async fn authorize(_headers: HeaderMap, body_bytes: Bytes) -> impl IntoApiResponse {
         let payload = match axum::extract::Json::<AuthPayload>::from_bytes(&body_bytes) {
             Ok(payload) => payload.0,
             Err(e) => {
@@ -228,25 +288,45 @@ impl Keys {
     }
 }
 
+/// JWT claims structure for the default security plugin.
+///
+/// This struct represents the claims contained within JWT tokens issued by
+/// the default security plugin. It includes standard JWT claims for user
+/// identification and token validation.
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct Claims {
     // dummy implementation for now
     // must be filled with remaining fields
     // once we are using a proper auth provider
+    /// Subject (user identifier) of the token
     sub: String,
+    /// Expiration time as Unix timestamp
     exp: usize,
 }
 
+/// Authorization response body containing access token information.
+///
+/// This struct represents the successful response from the authorization endpoint,
+/// containing the access token and related metadata according to OAuth 2.0 standards.
 #[derive(Debug, Serialize, JsonSchema)]
 pub struct AuthBody {
+    /// The access token string (JWT)
     access_token: String,
+    /// The type of token (always "Bearer")
     token_type: String,
+    /// Token expiration time in seconds from epoch
     expires_in: usize,
 }
 
+/// Authorization request payload containing client credentials.
+///
+/// This struct represents the request body for the authorization endpoint,
+/// containing the client credentials required for authentication.
 #[derive(Debug, Deserialize, JsonSchema)]
 pub struct AuthPayload {
+    /// Client identifier for authentication
     client_id: String,
+    /// Client secret for authentication
     // allowing unused because client_secret
     // will not be used when auth feature is disabled
     #[allow(unused)]
