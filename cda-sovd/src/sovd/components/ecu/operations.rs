@@ -416,7 +416,7 @@ pub(crate) mod comparams {
 
 pub(crate) mod service {
     pub(crate) mod executions {
-        use aide::transform::TransformOperation;
+        use aide::{UseApi, transform::TransformOperation};
         use axum::{
             Json,
             body::Bytes,
@@ -426,10 +426,11 @@ pub(crate) mod service {
         };
         use axum_extra::extract::WithRejection;
         use cda_interfaces::{
-            DiagComm, DiagCommAction, DiagCommType, SchemaProvider, UdsEcu,
+            DiagComm, DiagCommAction, DiagCommType, DynamicPlugin, SchemaProvider, UdsEcu,
             diagservices::{DiagServiceJsonResponse, DiagServiceResponse, DiagServiceResponseType},
             file_manager::FileManager,
         };
+        use cda_plugin_security::{Secured, SecurityPlugin};
         use sovd_interfaces::components::ecu::operations::service::executions as sovd_executions;
 
         use crate::{
@@ -449,21 +450,11 @@ pub(crate) mod service {
             T: UdsEcu + SchemaProvider + Clone,
             U: FileManager,
         >(
-            Path(OperationServicePathParam { service }): Path<OperationServicePathParam>,
+            UseApi(Secured(_security_plugin), _): UseApi<Secured, ()>,
             WithRejection(Query(query), _): WithRejection<Query<sovd_executions::Query>, ApiError>,
-            State(WebserverEcuState { ecu_name, uds, .. }): State<WebserverEcuState<R, T, U>>,
-            headers: HeaderMap,
+            State(_state): State<WebserverEcuState<R, T, U>>,
         ) -> Response {
-            ecu_operation_handler::<T>(
-                Op::Read,
-                service,
-                &ecu_name,
-                &uds,
-                headers,
-                None,
-                query.include_schema,
-            )
-            .await
+            ecu_operation_read_handler(query.include_schema).await
         }
 
         pub(crate) fn docs_get(op: TransformOperation) -> TransformOperation {
@@ -483,19 +474,20 @@ pub(crate) mod service {
             T: UdsEcu + SchemaProvider + Clone,
             U: FileManager,
         >(
+            UseApi(Secured(security_plugin), _): UseApi<Secured, ()>,
             Path(OperationServicePathParam { service }): Path<OperationServicePathParam>,
             WithRejection(Query(query), _): WithRejection<Query<sovd_executions::Query>, ApiError>,
             State(WebserverEcuState { ecu_name, uds, .. }): State<WebserverEcuState<R, T, U>>,
             headers: HeaderMap,
             body: Bytes,
         ) -> Response {
-            ecu_operation_handler::<T>(
-                Op::Write,
+            ecu_operation_write_handler::<T>(
                 service,
                 &ecu_name,
                 &uds,
                 headers,
                 Some(body),
+                security_plugin,
                 query.include_schema,
             )
             .await
@@ -537,189 +529,192 @@ pub(crate) mod service {
                 .with(openapi::error_bad_gateway)
         }
 
-        async fn ecu_operation_handler<T: UdsEcu + SchemaProvider + Clone>(
-            op: Op,
+        async fn ecu_operation_read_handler(include_schema: bool) -> Response {
+            // todo: this should return the actual executions.
+            // and also the correct schema in that case
+            let schema = if include_schema {
+                Some(create_schema!(sovd_interfaces::Items<String>))
+            } else {
+                None
+            };
+            (
+                StatusCode::OK,
+                Json(sovd_interfaces::Items::<String> {
+                    items: Vec::new(),
+                    schema,
+                }),
+            )
+                .into_response()
+        }
+
+        async fn ecu_operation_write_handler<T: UdsEcu + SchemaProvider + Clone>(
             service: String,
             ecu_name: &str,
             uds: &T,
             headers: HeaderMap,
             body: Option<Bytes>,
+            security_plugin: Box<dyn SecurityPlugin>,
             include_schema: bool,
         ) -> Response {
-            match op {
-                Op::Read => {
-                    // todo: this should return the actual executions.
-                    // and also the correct schema in that case
-                    let schema = if include_schema {
-                        Some(create_schema!(sovd_interfaces::Items<String>))
-                    } else {
-                        None
-                    };
-                    (
-                        StatusCode::OK,
-                        Json(sovd_interfaces::Items::<String> {
-                            items: Vec::new(),
-                            schema,
-                        }),
-                    )
-                        .into_response()
+            let Some(body) = body else {
+                return ErrorWrapper {
+                    error: ApiError::BadRequest("Missing request body".to_owned()),
+                    include_schema,
                 }
-                Op::Write => {
-                    let Some(body) = body else {
-                        return ErrorWrapper {
-                            error: ApiError::BadRequest("Missing request body".to_owned()),
-                            include_schema,
-                        }
-                        .into_response();
-                    };
-                    if service == "reset" {
-                        return ecu_reset_handler::<T>(
-                            service,
-                            ecu_name,
-                            uds,
-                            body,
-                            include_schema,
-                        )
-                        .await;
+                .into_response();
+            };
+            if service == "reset" {
+                return ecu_reset_handler::<T>(
+                    service,
+                    ecu_name,
+                    uds,
+                    body,
+                    security_plugin,
+                    include_schema,
+                )
+                .await;
+            }
+
+            let content_type_and_accept = match get_content_type_and_accept(&headers) {
+                Ok(v) => v,
+                Err(e) => {
+                    return ErrorWrapper {
+                        error: e,
+                        include_schema,
                     }
-
-                    let content_type_and_accept = match get_content_type_and_accept(&headers) {
-                        Ok(v) => v,
-                        Err(e) => {
-                            return ErrorWrapper {
-                                error: e,
-                                include_schema,
-                            }
-                            .into_response();
-                        }
-                    };
-
-                    let (Some(content_type), accept) = content_type_and_accept else {
-                        return ErrorWrapper {
-                            error: ApiError::BadRequest("Missing Content-Type".to_owned()),
-                            include_schema,
-                        }
-                        .into_response();
-                    };
-
-                    let diag_service = DiagComm {
-                        name: service.clone(),
-                        action: DiagCommAction::Start,
-                        type_: DiagCommType::Operations,
-                        lookup_name: None,
-                    };
-
-                    let data = match sovd::get_payload_data::<sovd_executions::Request>(
-                        Some(&content_type),
-                        &headers,
-                        &body,
-                    ) {
-                        Ok(v) => v,
-                        Err(e) => {
-                            return ErrorWrapper {
-                                error: e,
-                                include_schema,
-                            }
-                            .into_response();
-                        }
-                    };
-
-                    if accept != mime::APPLICATION_OCTET_STREAM && accept != mime::APPLICATION_JSON
-                    {
-                        return ErrorWrapper {
-                            error: ApiError::BadRequest(format!(
-                                "Unsupported Accept header: {accept:?}"
-                            )),
-                            include_schema,
-                        }
-                        .into_response();
-                    }
-
-                    let map_to_json = accept == mime::APPLICATION_JSON;
-
-                    let schema = if map_to_json && include_schema {
-                        let subschema = match uds
-                            .schema_for_responses(ecu_name, &diag_service)
-                            .await
-                            .map(|desc| desc.into_schema())
-                        {
-                            Ok(v) => v,
-                            Err(e) => {
-                                tracing::error!(
-                                    error = ?e,
-                                    diag_service = ?diag_service,
-                                    "Failed to get schema for diag service"
-                                );
-                                None
-                            }
-                        };
-                        Some(create_response_schema!(
-                            sovd_executions::Response<VendorErrorCode>,
-                            "parameters",
-                            subschema
-                        ))
-                    } else {
-                        None
-                    };
-
-                    let response = match uds.send(ecu_name, diag_service, data, map_to_json).await {
-                        Ok(v) => v,
-                        Err(e) => {
-                            return ErrorWrapper {
-                                error: e.into(),
-                                include_schema,
-                            }
-                            .into_response();
-                        }
-                    };
-
-                    if let DiagServiceResponseType::Negative = response.response_type() {
-                        return api_error_from_diag_response(response, include_schema)
-                            .into_response();
-                    }
-
-                    if response.is_empty() {
-                        return StatusCode::NO_CONTENT.into_response();
-                    }
-
-                    if map_to_json {
-                        let (mapped_data, errors) = match response.into_json() {
-                            Ok(DiagServiceJsonResponse {
-                                data: serde_json::Value::Object(mapped_data),
-                                errors,
-                            }) => (mapped_data, errors),
-                            Ok(v) => {
-                                return ErrorWrapper {
-                                    error: ApiError::InternalServerError(Some(format!(
-                                        "Expected JSON object but got: {}",
-                                        v.data
-                                    ))),
-                                    include_schema,
-                                }
-                                .into_response();
-                            }
-                            Err(e) => {
-                                return ErrorWrapper {
-                                    error: ApiError::InternalServerError(Some(format!("{e:?}"))),
-                                    include_schema,
-                                }
-                                .into_response();
-                            }
-                        };
-                        (
-                            StatusCode::OK,
-                            Json(sovd_executions::Response {
-                                parameters: mapped_data,
-                                errors: field_parse_errors_to_json(errors, "parameters"),
-                                schema,
-                            }),
-                        )
-                            .into_response()
-                    } else {
-                        let data = response.get_raw().to_vec();
-                        (StatusCode::OK, Bytes::from_owner(data)).into_response()
-                    }
+                    .into_response();
                 }
+            };
+
+            let (Some(content_type), accept) = content_type_and_accept else {
+                return ErrorWrapper {
+                    error: ApiError::BadRequest("Missing Content-Type".to_owned()),
+                    include_schema,
+                }
+                .into_response();
+            };
+
+            let diag_service = DiagComm {
+                name: service.clone(),
+                action: DiagCommAction::Start,
+                type_: DiagCommType::Operations,
+                lookup_name: None,
+            };
+
+            let data = match sovd::get_payload_data::<sovd_executions::Request>(
+                Some(&content_type),
+                &headers,
+                &body,
+            ) {
+                Ok(v) => v,
+                Err(e) => {
+                    return ErrorWrapper {
+                        error: e,
+                        include_schema,
+                    }
+                    .into_response();
+                }
+            };
+
+            if accept != mime::APPLICATION_OCTET_STREAM && accept != mime::APPLICATION_JSON {
+                return ErrorWrapper {
+                    error: ApiError::BadRequest(format!("Unsupported Accept header: {accept:?}")),
+                    include_schema,
+                }
+                .into_response();
+            }
+
+            let map_to_json = accept == mime::APPLICATION_JSON;
+
+            let schema = if map_to_json && include_schema {
+                let subschema = match uds
+                    .schema_for_responses(ecu_name, &diag_service)
+                    .await
+                    .map(|desc| desc.into_schema())
+                {
+                    Ok(v) => v,
+                    Err(e) => {
+                        tracing::error!(
+                            error = ?e,
+                            diag_service = ?diag_service,
+                            "Failed to get schema for diag service"
+                        );
+                        None
+                    }
+                };
+                Some(create_response_schema!(
+                    sovd_executions::Response<VendorErrorCode>,
+                    "parameters",
+                    subschema
+                ))
+            } else {
+                None
+            };
+
+            let response = match uds
+                .send(
+                    ecu_name,
+                    diag_service,
+                    &(security_plugin as DynamicPlugin),
+                    data,
+                    map_to_json,
+                )
+                .await
+            {
+                Ok(v) => v,
+                Err(e) => {
+                    return ErrorWrapper {
+                        error: e.into(),
+                        include_schema,
+                    }
+                    .into_response();
+                }
+            };
+
+            if let DiagServiceResponseType::Negative = response.response_type() {
+                return api_error_from_diag_response(response, include_schema).into_response();
+            }
+
+            if response.is_empty() {
+                return StatusCode::NO_CONTENT.into_response();
+            }
+
+            if map_to_json {
+                let (mapped_data, errors) = match response.into_json() {
+                    Ok(DiagServiceJsonResponse {
+                        data: serde_json::Value::Object(mapped_data),
+                        errors,
+                    }) => (mapped_data, errors),
+                    Ok(v) => {
+                        return ErrorWrapper {
+                            error: ApiError::InternalServerError(Some(format!(
+                                "Expected JSON object but got: {}",
+                                v.data
+                            ))),
+                            include_schema,
+                        }
+                        .into_response();
+                    }
+                    Err(e) => {
+                        return ErrorWrapper {
+                            error: ApiError::InternalServerError(Some(format!("{e:?}"))),
+                            include_schema,
+                        }
+                        .into_response();
+                    }
+                };
+                (
+                    StatusCode::OK,
+                    Json(sovd_executions::Response {
+                        parameters: mapped_data,
+                        errors: field_parse_errors_to_json(errors, "parameters"),
+                        schema,
+                    }),
+                )
+                    .into_response()
+            } else {
+                let data = response.get_raw().to_vec();
+                (StatusCode::OK, Bytes::from_owner(data)).into_response()
             }
         }
 
@@ -728,6 +723,7 @@ pub(crate) mod service {
             ecu_name: &str,
             uds: &T,
             body: Bytes,
+            security_plugin: Box<dyn SecurityPlugin>,
             include_schema: bool,
         ) -> Response {
             // todo: in the future we have to handle possible parameters for the reset service
@@ -822,7 +818,16 @@ pub(crate) mod service {
                 None
             };
 
-            let response = match uds.send(ecu_name, diag_service, None, true).await {
+            let response = match uds
+                .send(
+                    ecu_name,
+                    diag_service,
+                    &(security_plugin as DynamicPlugin),
+                    None,
+                    true,
+                )
+                .await
+            {
                 Ok(v) => v,
                 Err(e) => {
                     return ErrorWrapper {
@@ -885,11 +890,6 @@ pub(crate) mod service {
                     }
                 }
             }
-        }
-
-        enum Op {
-            Read,
-            Write,
         }
     }
 }

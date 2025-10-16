@@ -17,12 +17,12 @@ use aide::{
     axum::{ApiRouter as Router, routing},
     transform::TransformOperation,
 };
-use auth::authorize;
 use axum::{
     Json,
     body::Bytes,
     extract::Query,
     http::{HeaderMap, StatusCode},
+    middleware,
     response::{IntoResponse, Response},
 };
 use axum_extra::extract::WithRejection;
@@ -31,6 +31,7 @@ use cda_interfaces::{
     diagservices::{DiagServiceResponse, UdsPayloadData},
     file_manager::FileManager,
 };
+use cda_plugin_security::{SecurityPluginLoader, security_plugin_middleware};
 use error::{ApiError, api_error_from_diag_response};
 use hashbrown::HashMap;
 use http::{Uri, header};
@@ -49,7 +50,6 @@ use crate::sovd::{
 };
 
 pub(crate) mod apps;
-pub(crate) mod auth;
 pub(crate) mod components;
 pub(crate) mod error;
 pub(crate) mod locks;
@@ -91,10 +91,21 @@ impl<R: DiagServiceResponse, T: UdsEcu + Clone, U: FileManager> Clone
     }
 }
 
-#[derive(Clone)]
 pub(crate) struct WebserverState {
     locks: Arc<Locks>,
     flash_data: Arc<RwLock<sovd_interfaces::sovd2uds::FileList>>,
+}
+
+/// Clone implementation that does not clone the auth_state
+/// auth_state is only set by the middleware and should not
+/// be cloned for each request
+impl Clone for WebserverState {
+    fn clone(&self) -> Self {
+        Self {
+            locks: self.locks.clone(),
+            flash_data: self.flash_data.clone(),
+        }
+    }
 }
 
 pub(crate) fn resource_response(
@@ -123,7 +134,12 @@ pub(crate) fn resource_response(
     (StatusCode::OK, Json(components)).into_response()
 }
 
-pub async fn route<R: DiagServiceResponse, T: UdsEcu + SchemaProvider + Clone, U: FileManager>(
+pub async fn route<
+    R: DiagServiceResponse,
+    T: UdsEcu + SchemaProvider + Clone,
+    U: FileManager,
+    S: SecurityPluginLoader,
+>(
     uds: &T,
     flash_files_path: String,
     mut file_manager: HashMap<String, U>,
@@ -258,7 +274,7 @@ pub async fn route<R: DiagServiceResponse, T: UdsEcu + SchemaProvider + Clone, U
                 apps::sovd2uds::bulk_data::flash_files::docs_get,
             ),
         )
-        .route("/vehicle/v15/authorize", routing::post(authorize))
+        .route("/vehicle/v15/authorize", routing::post(S::authorize))
         .with_state(state)
         .api_route(
             "/vehicle/v15/apps/sovd2uds/data/networkstructure",
@@ -267,6 +283,7 @@ pub async fn route<R: DiagServiceResponse, T: UdsEcu + SchemaProvider + Clone, U
                 apps::sovd2uds::data::networkstructure::docs_get,
             ),
         )
+        .layer(middleware::from_fn(security_plugin_middleware::<S>))
         .with_state(uds.clone())
 }
 

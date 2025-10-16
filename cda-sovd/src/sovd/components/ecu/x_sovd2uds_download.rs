@@ -18,11 +18,12 @@ use axum::{
 };
 use axum_extra::extract::{Host, WithRejection};
 use cda_interfaces::{
-    UdsEcu,
+    DynamicPlugin, UdsEcu,
     diagservices::{
         DiagServiceJsonResponse, DiagServiceResponse, DiagServiceResponseType, UdsPayloadData,
     },
 };
+use cda_plugin_security::SecurityPlugin;
 use hashbrown::HashMap;
 
 use crate::sovd::{
@@ -38,11 +39,18 @@ async fn sovd_to_func_class_service_exec<T: UdsEcu + Clone>(
     ecu_name: &str,
     service_id: u8,
     parameters: HashMap<String, serde_json::Value>,
+    security_plugin: Box<dyn SecurityPlugin>,
     include_schema: bool,
 ) -> Result<DiagServiceJsonResponse, Response> {
     let params = UdsPayloadData::ParameterMap(parameters);
     let response = match uds
-        .ecu_exec_service_from_function_class(ecu_name, func_class, service_id, params)
+        .ecu_exec_service_from_function_class(
+            ecu_name,
+            func_class,
+            service_id,
+            &(security_plugin as DynamicPlugin),
+            params,
+        )
         .await
     {
         Ok(v) => v,
@@ -89,7 +97,7 @@ pub(crate) async fn get(
 }
 
 pub(crate) mod request_download {
-    use aide::transform::TransformOperation;
+    use aide::{UseApi, transform::TransformOperation};
     use axum::{
         Json,
         extract::{Query, State},
@@ -103,6 +111,7 @@ pub(crate) mod request_download {
         file_manager::FileManager,
         service_ids,
     };
+    use cda_plugin_security::Secured;
     use sovd_interfaces::components::ecu::x::sovd2uds;
 
     use crate::{
@@ -123,6 +132,7 @@ pub(crate) mod request_download {
         T: UdsEcu + SchemaProvider + Clone,
         U: FileManager,
     >(
+        UseApi(Secured(security_plugin), _): UseApi<Secured, ()>,
         WithRejection(Query(query), _): WithRejection<
             Query<sovd_interfaces::IncludeSchemaQuery>,
             ApiError,
@@ -167,6 +177,7 @@ pub(crate) mod request_download {
             &ecu_name,
             service_ids::REQUEST_DOWNLOAD,
             body.parameters.clone(),
+            security_plugin,
             include_schema,
         )
         .await
@@ -241,14 +252,18 @@ pub(crate) mod request_download {
 pub(crate) mod flash_transfer {
     use std::path::PathBuf;
 
-    use aide::transform::TransformOperation;
+    use aide::{UseApi, transform::TransformOperation};
     use axum::{
         Json,
         extract::{Path, Query, State},
         response::{IntoResponse, Response},
     };
     use axum_extra::extract::WithRejection;
-    use cda_interfaces::{UdsEcu, diagservices::DiagServiceResponse, file_manager::FileManager};
+    use cda_interfaces::{
+        DynamicPlugin, FlashTransferStartParams, UdsEcu, diagservices::DiagServiceResponse,
+        file_manager::FileManager,
+    };
+    use cda_plugin_security::Secured;
     use http::StatusCode;
     use sovd_interfaces::components::ecu::x::sovd2uds;
     use uuid::Uuid;
@@ -263,6 +278,7 @@ pub(crate) mod flash_transfer {
     };
 
     pub(crate) async fn post<R: DiagServiceResponse, T: UdsEcu + Clone, U: FileManager>(
+        UseApi(Secured(security_plugin), _): UseApi<Secured, ()>,
         WithRejection(Query(query), _): WithRejection<
             Query<sovd_interfaces::IncludeSchemaQuery>,
             ApiError,
@@ -299,17 +315,20 @@ pub(crate) mod flash_transfer {
                     .ecu_flash_transfer_start(
                         &ecu_name,
                         FLASH_DOWNLOAD_UPLOAD_FUNC_CLASS,
-                        &flash_data
-                            .read()
-                            .await
-                            .path
-                            .as_ref()
-                            .unwrap_or(&PathBuf::new())
-                            .join(&file.origin_path)
-                            .to_string_lossy(),
-                        body.offset,
-                        body.length,
-                        transfer,
+                        &(security_plugin as DynamicPlugin),
+                        FlashTransferStartParams {
+                            file_path: &flash_data
+                                .read()
+                                .await
+                                .path
+                                .as_ref()
+                                .unwrap_or(&PathBuf::new())
+                                .join(&file.origin_path)
+                                .to_string_lossy(),
+                            offset: body.offset,
+                            length: body.length,
+                            transfer_meta_data: transfer,
+                        },
                     )
                     .await
                 {
@@ -463,6 +482,7 @@ pub(crate) mod flash_transfer {
         }
 
         pub(crate) async fn delete<R: DiagServiceResponse, T: UdsEcu + Clone, U: FileManager>(
+            UseApi(Secured(_security_plugin), _): UseApi<Secured, ()>,
             Path(id): Path<IdPathParam>,
             State(WebserverEcuState { ecu_name, uds, .. }): State<WebserverEcuState<R, T, U>>,
         ) -> Response {
@@ -537,7 +557,7 @@ pub(crate) mod flash_transfer {
 }
 
 pub(crate) mod transferexit {
-    use aide::transform::TransformOperation;
+    use aide::{UseApi, transform::TransformOperation};
     use axum::{
         extract::State,
         response::{IntoResponse, Response},
@@ -545,6 +565,7 @@ pub(crate) mod transferexit {
     use cda_interfaces::{
         UdsEcu, diagservices::DiagServiceResponse, file_manager::FileManager, service_ids,
     };
+    use cda_plugin_security::Secured;
     use hashbrown::HashMap;
     use http::StatusCode;
 
@@ -559,6 +580,7 @@ pub(crate) mod transferexit {
     };
 
     pub(crate) async fn put<R: DiagServiceResponse, T: UdsEcu + Clone, U: FileManager>(
+        UseApi(Secured(security_plugin), _): UseApi<Secured, ()>,
         State(WebserverEcuState { ecu_name, uds, .. }): State<WebserverEcuState<R, T, U>>,
     ) -> Response {
         match sovd_to_func_class_service_exec::<T>(
@@ -567,6 +589,7 @@ pub(crate) mod transferexit {
             &ecu_name,
             service_ids::REQUEST_TRANSFER_EXIT,
             HashMap::new(),
+            security_plugin,
             false,
         )
         .await

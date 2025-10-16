@@ -21,6 +21,7 @@ use axum::{
 };
 use axum_extra::extract::WithRejection;
 use cda_interfaces::{UdsEcu, diagservices::DiagServiceResponse, file_manager::FileManager};
+use cda_plugin_security::Claims;
 use chrono::{DateTime, SecondsFormat, Utc};
 use hashbrown::HashMap;
 use tokio::{
@@ -34,7 +35,6 @@ use crate::{
     openapi,
     sovd::{
         IntoSovd, WebserverEcuState, WebserverState,
-        auth::Claims,
         error::{ApiError, ErrorWrapper},
     },
 };
@@ -167,6 +167,7 @@ openapi::aide_helper::gen_path_param!(LockPathParam lock String);
 
 pub(crate) mod ecu {
     use aide::{UseApi, axum::IntoApiResponse, transform::TransformOperation};
+    use cda_plugin_security::Secured;
 
     use super::*;
     use crate::sovd;
@@ -176,12 +177,14 @@ pub(crate) mod ecu {
         use crate::openapi;
         pub(crate) async fn delete<R: DiagServiceResponse, T: UdsEcu + Clone, U: FileManager>(
             Path(lock): Path<LockPathParam>,
-            UseApi(claims, _): UseApi<Claims, ()>,
+            UseApi(sec_plugin, _): UseApi<Secured, ()>,
             State(WebserverEcuState {
                 ecu_name, locks, ..
             }): State<WebserverEcuState<R, T, U>>,
         ) -> Response {
-            delete_handler(&locks.ecu, &lock, claims, Some(&ecu_name), false).await
+            let claims = sec_plugin.as_auth_plugin().claims();
+
+            delete_handler(&locks.ecu, &lock, &claims, Some(&ecu_name), false).await
         }
 
         pub(crate) fn docs_delete(op: TransformOperation) -> TransformOperation {
@@ -193,7 +196,7 @@ pub(crate) mod ecu {
 
         pub(crate) async fn put<R: DiagServiceResponse, T: UdsEcu + Clone, U: FileManager>(
             Path(lock): Path<LockPathParam>,
-            UseApi(claims, _): UseApi<Claims, ()>,
+            UseApi(sec_plugin, _): UseApi<Secured, ()>,
             State(WebserverEcuState {
                 ecu_name, locks, ..
             }): State<WebserverEcuState<R, T, U>>,
@@ -202,7 +205,8 @@ pub(crate) mod ecu {
                 ApiError,
             >,
         ) -> Response {
-            put_handler(&locks.ecu, &lock, claims, Some(&ecu_name), body, false).await
+            let claims = sec_plugin.as_auth_plugin().claims();
+            put_handler(&locks.ecu, &lock, &claims, Some(&ecu_name), body, false).await
         }
 
         pub(crate) fn docs_put(op: TransformOperation) -> TransformOperation {
@@ -214,7 +218,7 @@ pub(crate) mod ecu {
 
         pub(crate) async fn get<R: DiagServiceResponse, T: UdsEcu + Clone, U: FileManager>(
             Path(lock): Path<LockPathParam>,
-            _: UseApi<Claims, ()>,
+            UseApi(_sec_plugin, _): UseApi<Secured, ()>,
             State(state): State<WebserverEcuState<R, T, U>>,
         ) -> Response {
             get_id_handler(&state.locks.ecu, &lock, None, false).await
@@ -234,7 +238,7 @@ pub(crate) mod ecu {
     }
 
     pub(crate) async fn post<R: DiagServiceResponse, T: UdsEcu + Clone, U: FileManager>(
-        UseApi(claims, _): UseApi<Claims, ()>,
+        UseApi(sec_plugin, _): UseApi<Secured, ()>,
         State(WebserverEcuState {
             ecu_name, locks, ..
         }): State<WebserverEcuState<R, T, U>>,
@@ -243,6 +247,7 @@ pub(crate) mod ecu {
             ApiError,
         >,
     ) -> impl IntoApiResponse {
+        let claims = sec_plugin.as_auth_plugin().claims();
         let vehicle_ro_lock = vehicle_read_lock(&locks, &claims).await;
         if let Err(e) = vehicle_ro_lock {
             return ErrorWrapper {
@@ -289,12 +294,13 @@ pub(crate) mod ecu {
     }
 
     pub(crate) async fn get<R: DiagServiceResponse, T: UdsEcu + Clone, U: FileManager>(
-        UseApi(claims, _): UseApi<Claims, ()>,
+        UseApi(sec_plugin, _): UseApi<Secured, ()>,
         State(WebserverEcuState {
             ecu_name, locks, ..
         }): State<WebserverEcuState<R, T, U>>,
     ) -> Response {
-        get_handler(&locks.ecu, claims, Some(&ecu_name)).await
+        let claims = sec_plugin.as_auth_plugin().claims();
+        get_handler(&locks.ecu, &claims, Some(&ecu_name)).await
     }
 
     pub(crate) fn docs_get(op: TransformOperation) -> TransformOperation {
@@ -314,22 +320,21 @@ pub(crate) mod ecu {
 
 pub(crate) mod vehicle {
     use aide::{UseApi, transform::TransformOperation};
+    use cda_plugin_security::Secured;
 
     use super::*;
     use crate::openapi;
 
     pub(crate) mod lock {
-        use aide::transform::TransformOperation;
-
         use super::*;
-        use crate::openapi;
 
         pub(crate) async fn delete(
             Path(lock): Path<LockPathParam>,
-            UseApi(claims, _): UseApi<Claims, ()>,
+            UseApi(sec_plugin, _): UseApi<Secured, ()>,
             State(state): State<WebserverState>,
         ) -> Response {
-            delete_handler(&state.locks.vehicle, &lock, claims, None, false).await
+            let claims = sec_plugin.as_auth_plugin().claims();
+            delete_handler(&state.locks.vehicle, &lock, &claims, None, false).await
         }
 
         pub(crate) fn docs_delete(op: TransformOperation) -> TransformOperation {
@@ -341,14 +346,15 @@ pub(crate) mod vehicle {
 
         pub(crate) async fn put(
             Path(lock): Path<LockPathParam>,
-            UseApi(claims, _): UseApi<Claims, ()>,
+            UseApi(sec_plugin, _): UseApi<Secured, ()>,
             State(state): State<WebserverState>,
             WithRejection(Json(body), _): WithRejection<
                 Json<sovd_interfaces::locking::Request>,
                 ApiError,
             >,
         ) -> Response {
-            put_handler(&state.locks.vehicle, &lock, claims, None, body, false).await
+            let claims = sec_plugin.as_auth_plugin().claims();
+            put_handler(&state.locks.vehicle, &lock, &claims, None, body, false).await
         }
 
         pub(crate) fn docs_put(op: TransformOperation) -> TransformOperation {
@@ -360,7 +366,7 @@ pub(crate) mod vehicle {
 
         pub(crate) async fn get(
             Path(lock): Path<LockPathParam>,
-            UseApi(_, _): UseApi<Claims, ()>,
+            UseApi(_sec_plugin, _): UseApi<Secured, ()>,
             State(state): State<WebserverState>,
         ) -> Response {
             get_id_handler(&state.locks.vehicle, &lock, None, false).await
@@ -381,13 +387,14 @@ pub(crate) mod vehicle {
     }
 
     pub(crate) async fn post(
-        UseApi(claims, _): UseApi<Claims, ()>,
+        UseApi(sec_plugin, _): UseApi<Secured, ()>,
         State(state): State<WebserverState>,
         WithRejection(Json(body), _): WithRejection<
             Json<sovd_interfaces::locking::Request>,
             ApiError,
         >,
     ) -> Response {
+        let claims = sec_plugin.as_auth_plugin().claims();
         let mut vehicle_rw_lock = state.locks.vehicle.lock_rw().await;
         let vehicle_lock = match vehicle_rw_lock.get_mut(None) {
             Ok(lock) => lock,
@@ -450,10 +457,11 @@ pub(crate) mod vehicle {
     }
 
     pub(crate) async fn get(
-        UseApi(claims, _): UseApi<Claims, ()>,
+        UseApi(sec_plugin, _): UseApi<Secured, ()>,
         State(state): State<WebserverState>,
     ) -> Response {
-        get_handler(&state.locks.vehicle, claims, None).await
+        let claims = sec_plugin.as_auth_plugin().claims();
+        get_handler(&state.locks.vehicle, &claims, None).await
     }
 
     pub(crate) fn docs_get(op: TransformOperation) -> TransformOperation {
@@ -473,6 +481,7 @@ pub(crate) mod vehicle {
 
 pub(crate) mod functional_group {
     use aide::{UseApi, transform::TransformOperation};
+    use cda_plugin_security::Secured;
 
     use super::*;
     use crate::openapi;
@@ -482,19 +491,22 @@ pub(crate) mod functional_group {
     pub(crate) mod lock {
         use super::*;
 
-        openapi::aide_helper::gen_path_param!(FunctionalGroupLockWithIdPathParam group String lock String);
+        openapi::aide_helper::gen_path_param!(
+            FunctionalGroupLockWithIdPathParam group String lock String
+        );
 
         pub(crate) async fn delete(
             Path(FunctionalGroupLockWithIdPathParam { group, lock }): Path<
                 FunctionalGroupLockWithIdPathParam,
             >,
             State(state): State<WebserverState>,
-            UseApi(claims, _): UseApi<Claims, ()>,
+            UseApi(sec_plugin, _): UseApi<Secured, ()>,
         ) -> Response {
+            let claims = sec_plugin.as_auth_plugin().claims();
             delete_handler(
                 &state.locks.functional_group,
                 &lock,
-                claims,
+                &claims,
                 Some(&group),
                 false,
             )
@@ -513,16 +525,17 @@ pub(crate) mod functional_group {
                 FunctionalGroupLockWithIdPathParam,
             >,
             State(state): State<WebserverState>,
-            UseApi(claims, _): UseApi<Claims, ()>,
+            UseApi(sec_plugin, _): UseApi<Secured, ()>,
             WithRejection(Json(body), _): WithRejection<
                 Json<sovd_interfaces::locking::Request>,
                 ApiError,
             >,
         ) -> Response {
+            let claims = sec_plugin.as_auth_plugin().claims();
             put_handler(
                 &state.locks.functional_group,
                 &lock,
-                claims,
+                &claims,
                 Some(&group),
                 body,
                 false,
@@ -541,7 +554,7 @@ pub(crate) mod functional_group {
             Path(FunctionalGroupLockWithIdPathParam { group, lock }): Path<
                 FunctionalGroupLockWithIdPathParam,
             >,
-            UseApi(_, _): UseApi<Claims, ()>,
+            UseApi(_sec_plugin, _): UseApi<Secured, ()>,
             State(state): State<WebserverState>,
         ) -> Response {
             get_id_handler(&state.locks.functional_group, &lock, Some(&group), false).await
@@ -563,13 +576,14 @@ pub(crate) mod functional_group {
 
     pub(crate) async fn post(
         Path(group): Path<FunctionalGroupLockPathParam>,
-        UseApi(claims, _): UseApi<Claims, ()>,
+        UseApi(sec_plugin, _): UseApi<Secured, ()>,
         State(state): State<WebserverState>,
         WithRejection(Json(body), _): WithRejection<
             Json<sovd_interfaces::locking::Request>,
             ApiError,
         >,
     ) -> Response {
+        let claims = sec_plugin.as_auth_plugin().claims();
         let vehicle_ro_lock = vehicle_read_lock(&state.locks, &claims).await;
         if let Err(e) = vehicle_ro_lock {
             return ErrorWrapper {
@@ -605,10 +619,11 @@ pub(crate) mod functional_group {
 
     pub(crate) async fn get(
         Path(group): Path<FunctionalGroupLockPathParam>,
-        UseApi(claims, _): UseApi<Claims, ()>,
+        UseApi(sec_plugin, _): UseApi<Secured, ()>,
         State(state): State<WebserverState>,
     ) -> Response {
-        get_handler(&state.locks.functional_group, claims, Some(&group)).await
+        let claims = sec_plugin.as_auth_plugin().claims();
+        get_handler(&state.locks.functional_group, &claims, Some(&group)).await
     }
 
     pub(crate) fn docs_get(op: TransformOperation) -> TransformOperation {
@@ -627,7 +642,7 @@ pub(crate) mod functional_group {
 }
 
 fn create_lock(
-    claims: &Claims,
+    claims: &impl Claims,
     expiration: sovd_interfaces::locking::Request,
     lock_type: &LockType,
     entity_name: Option<&String>,
@@ -654,7 +669,7 @@ fn create_lock(
         owned: None,
     };
     Ok(Lock {
-        owner: claims.sub.clone(),
+        owner: claims.sub().to_owned(),
         sovd: sovd_lock,
         expiration: utc_expiration,
         deletion_task: token_deletion_task,
@@ -663,7 +678,7 @@ fn create_lock(
 
 fn update_lock(
     lock_id: &str,
-    claim: &Claims,
+    claim: &impl Claims,
     entity_lock: &mut Option<Lock>,
     expiration: sovd_interfaces::locking::Request,
     entity_name: Option<&String>,
@@ -689,7 +704,7 @@ fn update_lock(
 }
 
 pub(crate) fn get_locks(
-    claims: &Claims,
+    claims: &impl Claims,
     locks: &ReadLock,
     entity_name: Option<&String>,
 ) -> sovd_interfaces::locking::get::Response {
@@ -714,9 +729,9 @@ pub(crate) fn get_locks(
 }
 
 pub(crate) async fn validate_lock(
-    claims: &Claims,
+    claims: &impl Claims,
     ecu_name: &String,
-    locks: Arc<Locks>,
+    locks: &Locks,
     include_schema: bool,
 ) -> Option<Response> {
     let ecu_lock = locks.ecu.lock_ro().await;
@@ -759,7 +774,7 @@ pub(crate) async fn validate_lock(
 async fn delete_handler(
     lock: &LockType,
     lock_id: &str,
-    claims: Claims,
+    claims: &impl Claims,
     entity_name: Option<&String>,
     include_schema: bool,
 ) -> Response {
@@ -777,7 +792,7 @@ async fn delete_handler(
         }
     };
 
-    if let Err(e) = validate_claim(Some(lock_id), &claims, entity_lock.as_ref()) {
+    if let Err(e) = validate_claim(Some(lock_id), claims, entity_lock.as_ref()) {
         return ErrorWrapper {
             error: e,
             include_schema,
@@ -814,7 +829,7 @@ async fn delete_handler(
 )]
 async fn post_handler(
     lock: &LockType,
-    claims: &Claims,
+    claims: &impl Claims,
     entity_name: Option<&String>,
     expiration: sovd_interfaces::locking::Request,
     rw_lock: Option<WriteLock<'_>>,
@@ -883,7 +898,7 @@ async fn post_handler(
 async fn put_handler(
     lock: &LockType,
     lock_id: &str,
-    claims: Claims,
+    claims: &impl Claims,
     entity_name: Option<&String>,
     expiration: sovd_interfaces::locking::Request,
     include_schema: bool,
@@ -902,7 +917,7 @@ async fn put_handler(
         }
     };
 
-    match update_lock(lock_id, &claims, entity_lock, expiration, entity_name, lock) {
+    match update_lock(lock_id, claims, entity_lock, expiration, entity_name, lock) {
         Ok(_) => StatusCode::NO_CONTENT.into_response(),
         Err(e) => ErrorWrapper {
             error: e,
@@ -919,10 +934,14 @@ async fn put_handler(
         entity_name = ?entity_name
     )
 )]
-async fn get_handler(lock: &LockType, claims: Claims, entity_name: Option<&String>) -> Response {
+async fn get_handler(
+    lock: &LockType,
+    claims: &impl Claims,
+    entity_name: Option<&String>,
+) -> Response {
     tracing::info!("Getting locks");
     let ro_lock = lock.lock_ro().await;
-    let locks = get_locks(&claims, &ro_lock, entity_name);
+    let locks = get_locks(claims, &ro_lock, entity_name);
     (StatusCode::OK, Json(&locks)).into_response()
 }
 
@@ -957,11 +976,11 @@ async fn get_id_handler(
 
 fn validate_claim(
     lock_id: Option<&str>,
-    claim: &Claims,
+    claim: &impl Claims,
     lock_opt: Option<&Lock>,
 ) -> Result<(), ApiError> {
     if let Some(lock) = lock_opt
-        && (claim.sub != lock.owner || lock_id.is_some_and(|id| id != lock.sovd.id))
+        && (claim.sub() != lock.owner || lock_id.is_some_and(|id| id != lock.sovd.id))
     {
         return Err(ApiError::Forbidden(Some(
             "lock validation failed".to_owned(),
@@ -973,7 +992,7 @@ fn validate_claim(
 
 async fn vehicle_read_lock<'a>(
     locks: &'a Locks,
-    claims: &'a Claims,
+    claims: &impl Claims,
 ) -> Result<ReadLock<'a>, ApiError> {
     // hold the read lock until we have the ecu lock
     let vehicle_ro_lock = locks.vehicle.lock_ro().await;
@@ -1043,7 +1062,7 @@ fn schedule_token_deletion(
     });
     Ok(join_handle)
 }
-pub(crate) fn all_locks_owned(locks: &ReadLock, claims: &Claims) -> Result<(), ApiError> {
+pub(crate) fn all_locks_owned(locks: &ReadLock, claims: &impl Claims) -> Result<(), ApiError> {
     match locks {
         ReadLock::HashMapLock(l) => {
             for lock in l.values() {
@@ -1066,10 +1085,10 @@ impl IntoSovd for &Lock {
 }
 
 impl Lock {
-    fn to_sovd_lock(&self, claims: &Claims) -> sovd_interfaces::locking::Lock {
+    fn to_sovd_lock(&self, claims: &impl Claims) -> sovd_interfaces::locking::Lock {
         sovd_interfaces::locking::Lock {
             id: self.sovd.id.clone(),
-            owned: Some(claims.sub == self.owner),
+            owned: Some(claims.sub() == self.owner),
         }
     }
 }

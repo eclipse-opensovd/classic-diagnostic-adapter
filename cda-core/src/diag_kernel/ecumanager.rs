@@ -19,8 +19,8 @@ use cda_database::datatypes::{
     StateChart, resolve_comparam,
 };
 use cda_interfaces::{
-    DiagComm, DiagCommAction, DiagCommType, DiagServiceError, EcuAddressProvider, EcuState,
-    Protocol, STRINGS, SecurityAccess, ServicePayload,
+    DiagComm, DiagCommAction, DiagCommType, DiagServiceError, DynamicPlugin, EcuAddressProvider,
+    EcuState, Protocol, STRINGS, SecurityAccess, ServicePayload,
     datatypes::{
         AddressingMode, ComParams, ComplexComParamValue, ComponentConfigurationsInfo,
         ComponentDataInfo, DTC_CODE_BIT_LEN, DatabaseNamingConvention, DtcLookup,
@@ -31,6 +31,7 @@ use cda_interfaces::{
     get_string, get_string_from_option, get_string_from_option_with_default,
     get_string_with_default, service_ids, spawn_named, util,
 };
+use cda_plugin_security::SecurityPlugin;
 use hashbrown::{HashMap, HashSet};
 use parking_lot::Mutex;
 use tokio::task::JoinHandle;
@@ -50,7 +51,7 @@ use crate::{
     },
 };
 
-pub struct EcuManager {
+pub struct EcuManager<S: SecurityPlugin> {
     pub(crate) ecu_data: DiagnosticDatabase,
     database_naming_convention: DatabaseNamingConvention,
     tester_address: u16,
@@ -92,6 +93,8 @@ pub struct EcuManager {
     rc_94_completion_timeout: Duration,
     rc_94_repeat_request_time: Duration,
     timeout_default: Duration,
+
+    security_plugin_phantom: std::marker::PhantomData<S>,
 }
 
 struct SessionControl {
@@ -102,7 +105,7 @@ struct SessionControl {
     access_reset_task: Option<JoinHandle<()>>,
 }
 
-impl cda_interfaces::EcuAddressProvider for EcuManager {
+impl<S: SecurityPlugin> cda_interfaces::EcuAddressProvider for EcuManager<S> {
     fn tester_address(&self) -> u16 {
         self.tester_address
     }
@@ -124,7 +127,7 @@ impl cda_interfaces::EcuAddressProvider for EcuManager {
     }
 }
 
-impl cda_interfaces::EcuManager for EcuManager {
+impl<S: SecurityPlugin> cda_interfaces::EcuManager for EcuManager<S> {
     type Response = DiagServiceResponseStruct;
 
     fn variant_name(&self) -> Option<String> {
@@ -310,7 +313,11 @@ impl cda_interfaces::EcuManager for EcuManager {
         Ok(mapped)
     }
 
-    fn check_genericservice(&self, rawdata: Vec<u8>) -> Result<ServicePayload, DiagServiceError> {
+    fn check_genericservice(
+        &self,
+        security_plugin: &DynamicPlugin,
+        rawdata: Vec<u8>,
+    ) -> Result<ServicePayload, DiagServiceError> {
         if rawdata.is_empty() {
             return Err(DiagServiceError::BadPayload(
                 "Expected at least 1 byte".to_owned(),
@@ -412,6 +419,8 @@ impl cda_interfaces::EcuManager for EcuManager {
                 }
             })
             .ok_or(DiagServiceError::NotFound)?;
+
+        Self::check_security_plugin(security_plugin, mapped_service)?;
 
         let sec_ctrl = self.access_control.lock();
         let new_session = mapped_service.transitions.get(&sec_ctrl.session);
@@ -593,7 +602,7 @@ impl cda_interfaces::EcuManager for EcuManager {
     /// the raw UDS bytestream.
     #[tracing::instrument(
         target = "create_uds_payload",
-        skip(self, diag_service, data),
+        skip(self, diag_service, security_plugin, data),
         fields(
             ecu_name = self.ecu_data.ecu_name,
             service = diag_service.name,
@@ -606,9 +615,13 @@ impl cda_interfaces::EcuManager for EcuManager {
     fn create_uds_payload(
         &self,
         diag_service: &DiagComm,
+        security_plugin: &DynamicPlugin,
         data: Option<UdsPayloadData>,
     ) -> Result<ServicePayload, DiagServiceError> {
         let mapped_service = self.lookup_diag_comm(diag_service)?;
+
+        Self::check_security_plugin(security_plugin, mapped_service)?;
+
         let request = self
             .ecu_data
             .requests
@@ -1269,9 +1282,18 @@ impl cda_interfaces::EcuManager for EcuManager {
             })
             .collect()
     }
+
+    fn is_service_allowed(
+        &self,
+        service: &DiagComm,
+        security_plugin: &DynamicPlugin,
+    ) -> Result<(), DiagServiceError> {
+        let mapped_service = self.lookup_diag_comm(service)?;
+        Self::check_security_plugin(security_plugin, mapped_service)
+    }
 }
 
-impl cda_interfaces::UdsComParamProvider for EcuManager {
+impl<S: SecurityPlugin> cda_interfaces::UdsComParamProvider for EcuManager<S> {
     fn tester_present_retry_policy(&self) -> bool {
         self.tester_present_retry_policy
     }
@@ -1331,7 +1353,7 @@ impl cda_interfaces::UdsComParamProvider for EcuManager {
     }
 }
 
-impl cda_interfaces::DoipComParamProvider for EcuManager {
+impl<S: SecurityPlugin> cda_interfaces::DoipComParamProvider for EcuManager<S> {
     fn nack_number_of_retries(&self) -> &HashMap<u8, u32> {
         &self.nack_number_of_retries
     }
@@ -1358,7 +1380,7 @@ impl cda_interfaces::DoipComParamProvider for EcuManager {
     }
 }
 
-impl EcuManager {
+impl<S: SecurityPlugin> EcuManager<S> {
     /// Load diagnostic database for given path
     ///
     /// The created `DiagServiceManager` stores the loaded database as well as some
@@ -1557,6 +1579,7 @@ impl EcuManager {
             rc_94_completion_timeout,
             rc_94_repeat_request_time,
             timeout_default,
+            security_plugin_phantom: std::marker::PhantomData::<S>,
         };
 
         Ok(res)
@@ -2849,6 +2872,25 @@ impl EcuManager {
         }
         Ok(None)
     }
+
+    /// Validate security access via plugin
+    /// allows passing a `Box::new(())` to skip security checks
+    /// this is used internally, when we don't want to have this run the check again
+    fn check_security_plugin(
+        security_plugin: &DynamicPlugin,
+        service: &DiagnosticService,
+    ) -> Result<(), DiagServiceError> {
+        if let Some(()) = security_plugin.downcast_ref::<()>() {
+            tracing::info!("Void security plugin provided, skipping security check");
+            return Ok(());
+        }
+        let security_plugin = security_plugin
+            .downcast_ref::<S>()
+            .ok_or(DiagServiceError::InvalidSecurityPlugin)
+            .map(|p| p.as_security_plugin())?;
+
+        security_plugin.validate_service(service)
+    }
 }
 
 fn mux_case_from_selector_value<'a>(
@@ -2871,10 +2913,18 @@ mod tests {
         IntervalType, Limit, NormalDop, Parameter, ParameterValue, Request, Response, ResponseType,
         StandardLengthType, SwitchKey,
     };
-    use cda_interfaces::{EcuManager, STRINGS, StringId};
+    use cda_interfaces::{DynamicPlugin, EcuManager, STRINGS, StringId};
+    use cda_plugin_security::DefaultSecurityPluginData;
     use serde_json::json;
 
     use super::*;
+
+    macro_rules! skip_sec_plugin {
+        () => {{
+            let skip_sec_plugin: DynamicPlugin = Box::new(());
+            skip_sec_plugin
+        }};
+    }
 
     fn create_service(
         db: &mut DiagnosticDatabase,
@@ -3169,7 +3219,8 @@ mod tests {
         }
     }
 
-    fn create_ecu_manager_with_dynamic_length_field_service() -> (super::EcuManager, DiagComm, u8) {
+    fn create_ecu_manager_with_dynamic_length_field_service()
+    -> (super::EcuManager<DefaultSecurityPluginData>, DiagComm, u8) {
         let mut db = DiagnosticDatabase::default();
 
         // Create DOPs for structure parameters
@@ -3230,7 +3281,8 @@ mod tests {
         (ecu_manager, service, sid)
     }
 
-    fn create_ecu_manager_with_struct_service() -> (super::EcuManager, DiagComm, u8) {
+    fn create_ecu_manager_with_struct_service()
+    -> (super::EcuManager<DefaultSecurityPluginData>, DiagComm, u8) {
         let mut db = DiagnosticDatabase::default();
 
         // Create DOPs for structure parameters
@@ -3277,7 +3329,8 @@ mod tests {
         (ecu_manager, service, sid)
     }
 
-    fn create_ecu_manager_with_mux_service_and_default_case() -> (super::EcuManager, DiagComm, u8) {
+    fn create_ecu_manager_with_mux_service_and_default_case()
+    -> (super::EcuManager<DefaultSecurityPluginData>, DiagComm, u8) {
         let mut db = DiagnosticDatabase::default();
         let default_structure_param_1_dop = create_normal_dop(&mut db, None, 8, DataType::UInt32);
         let default_structure_param_1 = create_value_param(
@@ -3309,7 +3362,7 @@ mod tests {
         db: Option<DiagnosticDatabase>,
         switch_key: Option<SwitchKey>,
         default_case: Option<datatypes::Case>,
-    ) -> (super::EcuManager, DiagComm, u8) {
+    ) -> (super::EcuManager<DefaultSecurityPluginData>, DiagComm, u8) {
         let mut db = db.unwrap_or_default();
 
         // Create DOPs
@@ -3426,7 +3479,7 @@ mod tests {
     fn create_ecu_manager_with_end_pdu_service(
         min_items: u32,
         max_items: Option<u32>,
-    ) -> (super::EcuManager, DiagComm, u8) {
+    ) -> (super::EcuManager<DefaultSecurityPluginData>, DiagComm, u8) {
         let mut db = DiagnosticDatabase::default();
 
         // Create DOPs for structure parameters within the EndOfPdu
@@ -3488,7 +3541,12 @@ mod tests {
         (ecu_manager, service, sid)
     }
 
-    fn create_ecu_manager_with_dtc() -> (super::EcuManager, DiagComm, u8, u32) {
+    fn create_ecu_manager_with_dtc() -> (
+        super::EcuManager<DefaultSecurityPluginData>,
+        DiagComm,
+        u8,
+        u32,
+    ) {
         let mut db = DiagnosticDatabase::default();
 
         // Create DTC DiagCodedType
@@ -3768,7 +3826,7 @@ mod tests {
     }
 
     fn test_mux_from_and_to_uds(
-        ecu_manager: super::EcuManager,
+        ecu_manager: super::EcuManager<DefaultSecurityPluginData>,
         service: &DiagComm,
         sid: u8,
         data: &Vec<u8>,
@@ -3797,7 +3855,7 @@ mod tests {
         let payload_data =
             UdsPayloadData::ParameterMap(serde_json::from_value(mux_1_json).unwrap());
         let mut service_payload = ecu_manager
-            .create_uds_payload(service, Some(payload_data))
+            .create_uds_payload(service, &skip_sec_plugin!(), Some(payload_data))
             .unwrap();
         // The bytes set below are not modified by the create_uds_payload function,
         // because they do not belong to the mux param.
@@ -3824,7 +3882,8 @@ mod tests {
         let payload_data =
             UdsPayloadData::ParameterMap(HashMap::from([("main_param".to_string(), test_value)]));
 
-        let result = ecu_manager.create_uds_payload(&service, Some(payload_data));
+        let result =
+            ecu_manager.create_uds_payload(&service, &skip_sec_plugin!(), Some(payload_data));
 
         assert!(result.is_ok());
         let service_payload = result.unwrap();
@@ -3860,7 +3919,8 @@ mod tests {
         let payload_data =
             UdsPayloadData::ParameterMap(HashMap::from([("main_param".to_string(), test_value)]));
 
-        let result = ecu_manager.create_uds_payload(&service, Some(payload_data));
+        let result =
+            ecu_manager.create_uds_payload(&service, &skip_sec_plugin!(), Some(payload_data));
 
         // Should fail because param2 is missing
         assert!(result.is_err());
@@ -3882,7 +3942,8 @@ mod tests {
         let payload_data =
             UdsPayloadData::ParameterMap(HashMap::from([("main_param".to_string(), test_value)]));
 
-        let result = ecu_manager.create_uds_payload(&service, Some(payload_data));
+        let result =
+            ecu_manager.create_uds_payload(&service, &skip_sec_plugin!(), Some(payload_data));
 
         // Should fail because we provided an array instead of an object
         assert!(result.is_err());
@@ -3894,7 +3955,7 @@ mod tests {
     #[test]
     fn test_map_mux_to_uds_with_default_case() {
         fn test_default(
-            ecu_manager: &super::EcuManager,
+            ecu_manager: &super::EcuManager<DefaultSecurityPluginData>,
             service: &DiagComm,
             test_value: serde_json::Value,
             select_value: u16,
@@ -3903,7 +3964,7 @@ mod tests {
                 UdsPayloadData::ParameterMap(serde_json::from_value(test_value).unwrap());
 
             let service_payload = ecu_manager
-                .create_uds_payload(service, Some(payload_data))
+                .create_uds_payload(service, &skip_sec_plugin!(), Some(payload_data))
                 .unwrap();
 
             // Non-checked bytes do not belong to the mux param, so they are not set
@@ -3951,7 +4012,8 @@ mod tests {
         let payload_data =
             UdsPayloadData::ParameterMap(HashMap::from([("mux_1_param".to_string(), test_value)]));
 
-        let result = ecu_manager.create_uds_payload(&service, Some(payload_data));
+        let result =
+            ecu_manager.create_uds_payload(&service, &skip_sec_plugin!(), Some(payload_data));
 
         // Should fail because we provided an array instead of an object
         assert!(result.is_err());
@@ -3974,7 +4036,8 @@ mod tests {
         let payload_data =
             UdsPayloadData::ParameterMap(serde_json::from_value(test_value).unwrap());
 
-        let result = ecu_manager.create_uds_payload(&service, Some(payload_data));
+        let result =
+            ecu_manager.create_uds_payload(&service, &skip_sec_plugin!(), Some(payload_data));
 
         // Should fail because case1 data is missing
         assert!(

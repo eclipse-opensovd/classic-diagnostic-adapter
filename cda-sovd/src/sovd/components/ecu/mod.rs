@@ -20,10 +20,11 @@ use axum::{
 };
 use axum_extra::extract::WithRejection;
 use cda_interfaces::{
-    DiagComm, SchemaProvider, UdsEcu,
+    DiagComm, DynamicPlugin, SchemaProvider, UdsEcu,
     diagservices::{DiagServiceJsonResponse, DiagServiceResponse, DiagServiceResponseType},
     file_manager::FileManager,
 };
+use cda_plugin_security::SecurityPlugin;
 use hashbrown::HashMap;
 use http::{HeaderMap, StatusCode};
 
@@ -212,6 +213,7 @@ async fn data_request<T: UdsEcu + SchemaProvider + Clone>(
     gateway: &T,
     headers: HeaderMap,
     body: Option<Bytes>,
+    security_plugin: Box<dyn SecurityPlugin>,
     include_schema: bool,
 ) -> Response {
     let (content_type, accept) = match get_content_type_and_accept(&headers) {
@@ -290,7 +292,13 @@ async fn data_request<T: UdsEcu + SchemaProvider + Clone>(
     };
 
     let response = match gateway
-        .send(ecu_name, service.clone(), data, map_to_json)
+        .send(
+            ecu_name,
+            service.clone(),
+            &(security_plugin as DynamicPlugin),
+            data,
+            map_to_json,
+        )
         .await
         .map_err(std::convert::Into::into)
     {
