@@ -42,7 +42,8 @@ To see the available command line options run `./opensovd-cda -h`
 
 ### prerequisites
 
-You need to install a rust compiler & sdk - we recommend using [rustup](https://rustup.rs/) for this.
+You need to install a rust compiler & sdk - we recommend using [rustup](https://rustup.rs/) for this.  
+The minimum required version of the toolchain is [Rust 1.88.0](https://blog.rust-lang.org/2025/06/26/Rust-1.88.0/).
 
 ### build the executable
 
@@ -52,11 +53,11 @@ cargo build --release
 
 ## developing
 
-### Codestyle
+### codestyle
 
 see [codestyle](CODESTYLE.md)
 
-### Testing
+### testing
 
 Unittests are placed in the relevant module as usual in rust:
 ```rust
