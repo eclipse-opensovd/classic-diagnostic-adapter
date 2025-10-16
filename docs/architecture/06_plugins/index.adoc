@@ -1,4 +1,220 @@
 [#_architecture_plugins]
 = Plugins
+ifdef::rootpath[]
+:imagesdir: {rootpath}/images
+endif::rootpath[]
+ifndef::rootpath[]
+:imagesdir: ../images
+endif::rootpath[]
 
-#TODO#
+== Overview
+
+The plugin system in the Classic Diagnostic Adapter (CDA) provides extensibility for vendor-specific functionality that cannot be standardized across all implementations. Plugins enable customization of security mechanisms, authentication flows, and other domain-specific requirements while maintaining the core diagnostic functionality.
+
+The plugin architecture is designed around trait-based interfaces that allow runtime polymorphism and flexible configuration. This approach ensures that the CDA can adapt to different deployment environments and vendor requirements without requiring modifications to the core codebase.
+
+== Security Plugin Architecture
+
+The security plugin system is the primary plugin implementation within the CDA, responsible for authentication, authorization, and access control throughout the diagnostic session.
+
+=== Core Traits
+
+The security plugin system is built around several key traits that define the plugin interface:
+
+==== SecurityPlugin
+The main trait that combines authentication and authorization capabilities:
+
+```rust
+pub trait SecurityPlugin: Any + SecurityApi + AuthApi {
+    fn as_auth_plugin(&self) -> &dyn AuthApi;
+    fn as_security_plugin(&self) -> &dyn SecurityApi;
+}
+```
+
+==== AuthApi
+Provides access to user claims:
+
+```rust
+pub trait AuthApi: Send + Sync + 'static {
+    fn claims(&self) -> Box<&dyn Claims>;
+}
+```
+
+==== SecurityApi
+Validates diagnostic service requests based on security policies:
+
+```rust
+pub trait SecurityApi: Send + Sync + 'static {
+    fn validate_service(&self, service: &DiagnosticService) -> Result<(), DiagServiceError>;
+}
+```
+
+==== SecurityPluginLoader
+Combines initialization and authorization request handling capabilities:
+
+```rust
+pub trait SecurityPluginLoader:
+    SecurityPluginInitializer + AuthorizationRequestHandler + Default + 'static
+{
+}
+```
+
+=== Plugin Lifecycle
+
+The security plugin follows a specific lifecycle during request processing:
+
+1. **Middleware Registration**: The security plugin middleware is registered during router setup
+2. **Request Interception**: Each incoming request passes through the security middleware
+3. **Plugin Initialization**: The plugin extracts authentication information from request headers and creates the plugin instance
+4. **Request Processing**: The initialized plugin instance is made available to route handlers
+5. **Service Validation**: Diagnostic services are validated against security policies before execution
+
+=== Middleware Integration
+
+The security plugin integrates with the Axum web framework through middleware:
+
+```rust
+pub async fn security_plugin_middleware<A: SecurityPluginLoader>(
+    mut req: Request,
+    next: Next,
+) -> Response
+```
+
+This middleware:
+- Creates a plugin initializer instance
+- Injects it into the request extensions
+- Passes control to the next middleware/handler
+- Ensures plugin availability throughout the request lifecycle
+
+The middleware is applied to protected routes in the SOVD module:
+
+```rust
+.layer(middleware::from_fn(security_plugin_middleware::<S>))
+```
+
+=== Authorization Endpoint
+
+The plugin system allows for providing a standardized authorization endpoint at `/vehicle/v15/authorize`.
+
+== Default Security Plugin
+
+The CDA includes a default security plugin implementation (`DefaultSecurityPlugin`) that provides:
+
+=== Example Authorization Endpoint
+- Accepts client credentials (client_id, client_secret)
+- Validates credentials against the plugin's authentication mechanism
+- Returns JWT access tokens for subsequent API requests
+- Handles authentication errors with appropriate HTTP status codes
+
+=== JWT-Based Authentication
+- Uses JSON Web Tokens (JWT) for stateless authentication
+- Supports configurable token expiration
+- Implements Bearer token authentication for API requests
+
+=== Feature-Based Security
+The default plugin supports conditional compilation features:
+
+- **auth feature disabled**: Bypasses credential validation (development/testing)
+- **auth feature enabled**: Enforces proper credential validation (production)
+
+=== Token Validation
+- Extracts Bearer tokens from Authorization headers
+- Validates JWT signatures and expiration times
+- Provides user claims to downstream services
+
+=== Service Authorization
+The default implementation allows all diagnostic services but provides the framework for custom authorization logic.
+
+== Plugin Configuration
+
+Security plugins are configured through Rust's type system and feature flags:
+
+=== Compile-Time Configuration
+```toml
+[features]
+default = []
+auth = []
+```
+
+=== Runtime Integration
+Plugins are integrated into the main application through type parameters:
+
+```rust
+pub async fn launch_webserver<F, R, T, M, S>(
+    // ... other parameters
+) -> Result<(), String>
+where
+    S: SecurityPluginLoader,
+```
+
+== Extension Points
+
+The plugin system provides several extension points for custom implementations:
+
+=== Custom Authentication Providers
+Implement `AuthorizationRequestHandler` to support:
+- OAuth 2.0 / OpenID Connect integration
+- LDAP/Active Directory authentication
+- Custom token validation mechanisms
+- Multi-factor authentication
+
+=== Custom Authorization Logic
+Implement `SecurityApi` to support:
+- Role-based access control (RBAC)
+- Attribute-based access control (ABAC)
+- Fine-grained service permissions
+- Dynamic policy evaluation
+
+=== Error Handling
+Custom error types and HTTP responses through:
+- `AuthError` enumeration
+- SOVD-compliant error responses
+- Vendor-specific error codes
+
+== Security Considerations
+
+=== Token Security
+- JWT secrets should be properly managed in production environments
+- Token expiration should be configured appropriately for the use case
+- Secure transmission of tokens over HTTPS is recommended
+
+=== Plugin Isolation
+- Plugins operate within the main application process
+- Memory safety is ensured through Rust's ownership system
+- Plugin failures are contained and reported appropriately
+
+=== Audit and Logging
+- Authentication events are logged through the tracing framework
+- Failed authentication attempts are recorded
+- Security-related errors include appropriate detail levels
+
+== Future Extensions
+
+The plugin architecture is designed to support additional plugin types:
+
+=== Logging Plugins
+- Custom log formatting and destinations
+- Integration with external logging systems
+- Performance metrics collection
+
+=== Safety Plugins
+- Functional safety compliance validation
+- Diagnostic session safety checks
+- Emergency shutdown procedures
+
+=== Custom Endpoint Plugins
+- Vendor-specific API extensions
+- Additional data formats and protocols
+- Integration with external systems
+
+== Implementation Guidelines
+
+When implementing custom security plugins:
+
+1. **Trait Implementation**: Implement all required traits for your use case
+2. **Error Handling**: Use appropriate error types and status codes
+3. **Performance**: Minimize overhead in middleware operations
+4. **Testing**: Provide comprehensive test coverage for security logic
+5. **Documentation**: Document any vendor-specific behavior or requirements
+
+The plugin system provides a flexible foundation for extending the CDA's security capabilities while maintaining compatibility with the SOVD standard and ensuring consistent behavior across different deployment scenarios.
