@@ -38,4 +38,34 @@ jobs:
           retention-days: 7
           path: |
             docs/build/html5/
+  build_rustdoc_security_plugin:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          submodules: false
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: 1.88.0
+      - name: Cache Rust dependencies
+        uses: Swatinem/rust-cache@v2
+      - name: Clean docs folder
+        run: cargo clean --doc
+      - name: Build docs
+        run: cargo doc --no-deps -p cda-plugin-security
+      - name: Remove lock file
+        run: rm target/doc/.lock
+      - name: Add redirect
+        run: echo '<meta http-equiv="refresh" content="0;url=cda_plugin_security/index.html">' > target/doc/index.html
+      - name: Upload documentation (rustdoc)
+        uses: actions/upload-artifact@v4
+        id: upload-rustdoc
+        with:
+          if-no-files-found: 'error'
+          name: 'rustdoc'
+          retention-days: 7
+          path: |
+            target/doc/
           
