@@ -16,7 +16,7 @@ use std::time::Duration;
 use hashbrown::{HashMap, HashSet};
 
 use crate::{
-    DiagComm, DiagServiceError, DoipComParamProvider, EcuSchemaProvider, Id, SecurityAccess,
+    DiagComm, DiagServiceError, DoipComParamProvider, EcuSchemaProvider, SecurityAccess,
     UdsComParamProvider,
     datatypes::{
         ComplexComParamValue, ComponentConfigurationsInfo, ComponentDataInfo, DtcLookup,
@@ -100,7 +100,7 @@ pub trait EcuManager:
     ) -> Result<(), DiagServiceError>;
     fn get_variant_detection_requests(&self) -> &HashSet<String>;
     /// Communication parameters for the ECU.
-    fn comparams(&self) -> ComplexComParamValue;
+    fn comparams(&self) -> Result<ComplexComParamValue, DiagServiceError>;
     fn sdgs(&self, service: Option<&DiagComm>) -> Result<Vec<SdSdg>, DiagServiceError>;
     /// Convert a UDS payload given as `u8` slice into a `DiagServiceResponse`.
     ///
@@ -144,7 +144,7 @@ pub trait EcuManager:
     /// setting the session and security access back to the default value.
     /// To do this the defaults have to looked up which might fail.
     /// In that case the error is forwarded
-    fn set_session(&self, session: String, expiration: Duration) -> Result<(), DiagServiceError>;
+    fn set_session(&self, session: &str, expiration: Duration) -> Result<(), DiagServiceError>;
     /// Update the internally tracked ecu security access.
     /// Has to be called after changing the session, to make sure the transition lookup keep working
     /// # Errors
@@ -154,7 +154,7 @@ pub trait EcuManager:
     /// In that case the error is forwarded
     fn set_security_access(
         &self,
-        security_access: String,
+        security_access: &str,
         expiration: Duration,
     ) -> Result<(), DiagServiceError>;
     /// Lookup the transition between the active session and the requested one.
@@ -180,18 +180,18 @@ pub trait EcuManager:
     ) -> Result<SecurityAccess, DiagServiceError>;
     /// Retrieves the name of the current ecu session, i.e. 'extended', 'programming' or 'default'.
     /// The examples above differ depending on the parameterization of the ECU.
-    fn session(&self) -> String;
+    fn session(&self) -> Result<String, DiagServiceError>;
     /// Retrieves the name of the current ecu security level,
     /// i.e. 'level_42'
     /// The exact values depends on the ECU parameterization.
-    fn security_access(&self) -> String;
+    fn security_access(&self) -> Result<String, DiagServiceError>;
     /// Lookup a service by a given function class name and service id.
     /// # Errors
     /// Will return `Err` if the lookup failed
     fn lookup_service_through_func_class(
         &self,
         func_class_name: &str,
-        service_name: &str,
+        service_id: u8,
     ) -> Result<DiagComm, DiagServiceError>;
     /// Lookup a service by its service id for the current ECU variant.
     /// This will first look up the service in the current variant, then in the base variant

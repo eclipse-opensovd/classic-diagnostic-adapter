@@ -11,7 +11,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-use cda_database::datatypes::{CompuMethod, DataType};
+use cda_database::datatypes::{self, DataType};
 use cda_interfaces::{
     DiagComm, DiagServiceError,
     datatypes::{DtcField, DtcRecord},
@@ -28,7 +28,7 @@ use crate::diag_kernel::{DiagDataValue, operations};
 pub struct DiagServiceResponseStruct {
     pub service: DiagComm,
     pub data: Vec<u8>,
-    pub mapped_data: Option<MappedResponseData>,
+    pub mapped_data: Option<MappedResponseData<'static>>,
     pub response_type: DiagServiceResponseType,
 }
 
@@ -58,14 +58,14 @@ pub struct DiagDataTypeContainerRaw {
     pub data: Vec<u8>,
     pub bit_len: usize,
     pub data_type: DataType,
-    pub compu_method: Option<CompuMethod>,
+    pub compu_method: Option<datatypes::CompuMethod<'static>>,
 }
 
-pub type MappedDiagServiceResponsePayload = HashMap<String, DiagDataTypeContainer>;
+pub type MappedDiagServiceResponsePayload<'a> = HashMap<String, DiagDataTypeContainer<'a>>;
 
 #[derive(Debug)]
-pub struct MappedResponseData {
-    pub data: MappedDiagServiceResponsePayload,
+pub struct MappedResponseData<'a> {
+    pub data: MappedDiagServiceResponsePayload<'a>,
     pub errors: Vec<FieldParseError>,
 }
 
@@ -140,7 +140,9 @@ impl DiagServiceResponse for DiagServiceResponseStruct {
     }
 
     fn get_dtcs(&self) -> Result<Vec<(DtcField, DtcRecord)>, DiagServiceError> {
-        fn get(container: &DiagDataTypeContainer) -> Option<Vec<&DiagDataContainerDtc>> {
+        fn get<'a>(
+            container: &'a DiagDataTypeContainer<'a>,
+        ) -> Option<Vec<&'a DiagDataContainerDtc>> {
             match container {
                 DiagDataTypeContainer::DtcStruct(dtc) => Some(vec![dtc]),
                 DiagDataTypeContainer::Struct(s) => {
@@ -195,7 +197,7 @@ impl DiagServiceResponse for DiagServiceResponseStruct {
     }
 }
 
-impl DiagServiceResponseStruct {
+impl<'a> DiagServiceResponseStruct<'_> {
     /// This function tries to serialize the `DiagServiceResponse` into a SOVD style JSON.
     ///
     /// # Errors
@@ -242,7 +244,7 @@ impl DiagServiceResponseStruct {
         mapped_data
     }
 
-    fn get_mapped_payload(self) -> Result<MappedResponseData, DiagServiceError> {
+    fn get_mapped_payload(self) -> Result<MappedResponseData<'a>, DiagServiceError> {
         match self.mapped_data {
             Some(mapped_data) => Ok(mapped_data),
             None => Err(DiagServiceError::BadPayload(

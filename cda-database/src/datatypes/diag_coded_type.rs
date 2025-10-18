@@ -897,6 +897,9 @@ impl TryFrom<dataformat::DiagCodedType<'_>> for DiagCodedTypeVariant {
                     "DiagCodedType SpecificData ParamLengthInfoType not supported".to_owned(),
                 ))
             }
+            _ => Err(DiagServiceError::InvalidDatabase(
+                "DiagCodedType SpecificData not found".to_owned(),
+            )),
         }
     }
 }

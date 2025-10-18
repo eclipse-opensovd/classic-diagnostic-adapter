@@ -14,7 +14,7 @@
 use std::{fmt::Debug, ops::Deref};
 
 use cda_interfaces::{
-    DiagServiceError, Id, STRINGS, StringId,
+    DiagServiceError, STRINGS, StringId,
     datatypes::{ComParamConfig, ComParamValue, DeserializableCompParam},
 };
 pub use comparam::*;
@@ -23,17 +23,8 @@ pub use data_operation::*;
 use deepsize::DeepSizeOf;
 pub use diag_coded_type::*;
 use ouroboros::self_referencing;
-// pub use dtc::*;
-// pub use functional_classes::*;
-// use hashbrown::HashMap;
-// pub use jobs::*;
-// pub use parameter::*;
-// pub use sd_sdg::*;
 use serde::Serialize;
 
-// pub use service::*;
-// pub use state_charts::*;
-// pub use variant::*;
 use crate::{
     datatypes,
     mdd_data::{load_ecudata, read_ecudata},
@@ -69,6 +60,7 @@ pub(crate) mod variant;
 macro_rules! dataformat_wrapper {
     ($name:ident, $inner:ty) => {
         #[repr(transparent)]
+        #[derive(Debug)]
         pub struct $name(pub $inner);
 
         impl Deref for $name {
@@ -81,6 +73,7 @@ macro_rules! dataformat_wrapper {
     };
     ($name:ident<$lt:lifetime>, $inner:ty) => {
         #[repr(transparent)]
+        #[derive(Debug)]
         pub struct $name<$lt>(pub $inner);
 
         impl<$lt> Deref for $name<$lt> {
@@ -109,8 +102,14 @@ dataformat_wrapper!(DiagLayer<'a>, dataformat::DiagLayer<'a>);
 dataformat_wrapper!(Field<'a>, dataformat::Field<'a>);
 dataformat_wrapper!(DataOperation<'a>, dataformat::DOP<'a>);
 dataformat_wrapper!(DataOperationVariant, dataformat::SpecificDOPData);
+
 dataformat_wrapper!(StructureDop<'a>, dataformat::Structure<'a>);
 dataformat_wrapper!(MuxDop<'a>, dataformat::MUXDOP<'a>);
+dataformat_wrapper!(DtcDop<'a>, dataformat::DTCDOP<'a>);
+dataformat_wrapper!(NormalDop<'a>, dataformat::NormalDOP<'a>);
+
+dataformat_wrapper!(Case<'a>, dataformat::Case<'a>);
+
 dataformat_wrapper!(CompuMethod<'a>, dataformat::CompuMethod<'a>); // todo alexmohr, might need the internal type back.
 dataformat_wrapper!(CompuCategory, dataformat::CompuCategory); // todo alexmohr, might need the internal type back.
 dataformat_wrapper!(CompuScale<'a>, dataformat::CompuScale<'a>); // todo alexmohr, might need the internal type back.
@@ -121,12 +120,31 @@ dataformat_wrapper!(Parameter<'a>, dataformat::Param<'a>);
 dataformat_wrapper!(ResponseType, dataformat::ResponseType);
 dataformat_wrapper!(ParamType, dataformat::ParamType);
 
+struct DiagServiceRequestMetaData {
+    pub id: u8,
+}
+
 impl DiagService<'_> {
-    pub fn request_id(&self) -> Option<(u16, StandardLengthType)> {
+    pub fn request_id(&self) -> Option<u8> {
+        match self.find_request_sid_or_sub_func_param(0, 0) {
+            Some((sid, _)) => Some(sid as u8),
+            None => None,
+        }
+    }
+
+    pub fn request_sub_function_id(&self) -> Option<(u16, u32)> {
+        self.find_request_sid_or_sub_func_param(1, 0)
+    }
+
+    fn find_request_sid_or_sub_func_param(
+        &self,
+        byte_pos: u32,
+        bit_pos: u32,
+    ) -> Option<(u16, u32)> {
         let request = self.0.request()?;
         let params = request.params()?;
         let sid = params.iter().map(Parameter).find_map(|p| {
-            if p.byte_pos() == 0 && p.bit_pos() == 0 {
+            if p.byte_position() == byte_pos && p.bit_position() == bit_pos {
                 p.specific_data_as_coded_const()
             } else {
                 None
@@ -135,7 +153,7 @@ impl DiagService<'_> {
 
         if sid
             .diag_coded_type()
-            .is_none_or(|t| t.base_data_type().0 != (*(datatypes::DbDataType::A_UINT_32)).0)
+            .is_none_or(|t| t.base_data_type() != (*(datatypes::DbDataType::A_UINT_32)))
         {
             return None;
         }
@@ -149,16 +167,14 @@ impl DiagService<'_> {
             return None;
         }
 
-        // according to ISO_14229 SIDRQ is defined as XX16 eg, max 2 bytes
-        if let Some(sid) = sid.coded_value().and_then(|v| v.parse::<u16>().ok()) {
-            Some((sid, standard_length_type.into()))
-        } else {
-            None
+        match sid.coded_value().and_then(|v| v.parse::<u16>().ok()) {
+            Some(val) => Some((val, standard_length_type.bit_length())),
+            None => None,
         }
     }
 }
 
-impl TryInto<cda_interfaces::DiagComm> for DiagService {
+impl TryInto<cda_interfaces::DiagComm> for DiagService<'_> {
     type Error = DiagServiceError;
 
     fn try_into(self) -> Result<cda_interfaces::DiagComm, Self::Error> {
@@ -171,19 +187,22 @@ impl TryInto<cda_interfaces::DiagComm> for DiagService {
                 "DiagService missing name".to_owned(),
             ))?
             .to_owned();
-        let service_prefix = if let Some((id, _)) = self.request_id() {
-            (id >> 8) as u8
-        } else {
-            return Err(DiagServiceError::InvalidDatabase(
-                "DiagService missing service_prefix".to_owned(),
-            ));
-        };
+
+        let service_id = self.request_id().ok_or(DiagServiceError::InvalidDatabase(
+            "DiagService missing request_id".to_owned(),
+        ))?;
 
         Ok(cda_interfaces::DiagComm {
             name,
-            type_: service_prefix.try_into()?,
+            type_: service_id.try_into()?,
             lookup_name: None,
         })
+    }
+}
+
+impl DataOperation<'_> {
+    fn specific_data_type(&self) -> DataOperationVariant {
+        DataOperationVariant(self.0.specific_data_type())
     }
 }
 
@@ -244,12 +263,41 @@ impl CompuCategory {
     pub const SCALE_RAT_FUNC: Self = Self(dataformat::CompuCategory::SCALE_RAT_FUNC);
 }
 
-impl Parameter {
-    pub fn byte_pos(&self) -> u32 {
+impl Parameter<'_> {
+    pub fn byte_position(&self) -> u32 {
         self.0.byte_position().unwrap_or(0)
     }
-    pub fn bit_pos(&self) -> u32 {
+    pub fn bit_position(&self) -> u32 {
         self.0.bit_position().unwrap_or(0)
+    }
+    pub fn param_type(&self) -> ParamType {
+        ParamType(self.0.param_type())
+    }
+}
+
+impl NormalDop<'_> {
+    pub fn diag_coded_type(&self) -> Result<DiagCodedType, DiagServiceError> {
+        if let Some(dc) = self.0.diag_coded_type() {
+            dc.try_into()
+        } else {
+            Err(DiagServiceError::InvalidDatabase(
+                "Expected DiagCodedType for DataOperation".to_owned(),
+            ))
+        }
+    }
+}
+
+impl Into<cda_interfaces::datatypes::DtcRecord> for dataformat::DTC<'_> {
+    fn into(self) -> cda_interfaces::datatypes::DtcRecord {
+        cda_interfaces::datatypes::DtcRecord {
+            code: self.trouble_code(),
+            display_code: self.display_trouble_code().map(|s| s.to_owned()),
+            fault_name: self
+                .short_name()
+                .map(|s| s.to_owned())
+                .unwrap_or_else(|| format!("DTC_{}", self.trouble_code())),
+            severity: self.level().unwrap_or_default().to_owned(),
+        }
     }
 }
 
@@ -374,71 +422,6 @@ impl DiagnosticDatabase {
                 .build(),
             ),
         })
-
-        // let params = get_parameters(&ecu_data, &ecu_database_path);
-        //
-        // let services = get_services(&ecu_data, &requests, &params)?;
-        // let dops = get_data_operations(&ecu_data);
-        //
-        // let com_params = get_comparams(&ecu_data);
-        // let diag_coded_types = get_diag_coded_types(&ecu_data);
-        //
-        // let single_ecu_jobs = get_single_ecu_jobs(&ecu_data)?;
-        // let (state_charts, state_chart_lookup) = get_state_charts(&ecu_data, &services)?;
-        //
-        // let (variants, base_variant_id) =
-        //     create_variant_map(&ecu_data, &services, &single_ecu_jobs, &state_charts)?;
-        //
-        // if base_variant_id == 0 {
-        //     return Err(DiagServiceError::InvalidDatabase(
-        //         "No base variant found.".to_owned(),
-        //     ));
-        // }
-        // let base_service_lookup: BaseServiceMap = variants
-        //     .get(&base_variant_id)
-        //     .ok_or_else(|| {
-        //         DiagServiceError::InvalidDatabase("Base variant not found in variants.".to_owned())
-        //     })?
-        //     .service_lookup
-        //     .clone();
-        //
-        // let base_single_ecu_job_lookup: BaseSingleEcuJobMap = variants
-        //     .get(&base_variant_id)
-        //     .ok_or_else(|| {
-        //         DiagServiceError::InvalidDatabase("Base variant not found in variants.".to_owned())
-        //     })?
-        //     .single_ecu_job_lookup
-        //     .clone();
-        //
-        // let base_state_chart_lookup: BaseStateChartMap = variants
-        //     .get(&base_variant_id)
-        //     .ok_or_else(|| {
-        //         DiagServiceError::InvalidDatabase("Base variant not found in variants.".to_owned())
-        //     })?
-        //     .state_charts_lookup
-        //     .clone();
-        //
-        // let responses = get_responses(&ecu_data)?;
-        // let protocols = get_protocols(&ecu_data)?;
-        //
-        // let sdgs = get_sdgs(
-        //     &ecu_data,
-        //     &ecu_database_path,
-        //     variants.get(&base_variant_id).map_or(&[], |v| &v.sdgs),
-        // );
-        // let sds = get_sds(&ecu_data);
-        // let functional_classes: HashMap<Id, String> = ecu_data
-        //     .funct_classes
-        //     .iter()
-        //     .filter_map(|fc| {
-        //         fc.id
-        //             .as_ref()
-        //             .map(|id| (id.value, fc.short_name.to_string()))
-        //     })
-        //     .collect();
-        // let functional_classes_lookup = get_functional_classes_lookup(&ecu_data, &services);
-        //
-        // let dtc_records = get_dtcs(&ecu_data, &ecu_database_path);
     }
 
     pub fn is_loaded(&self) -> bool {

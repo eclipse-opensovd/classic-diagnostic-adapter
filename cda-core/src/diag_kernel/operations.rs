@@ -11,7 +11,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-use cda_database::datatypes::{self};
+use cda_database::datatypes::{self, DataType};
 use cda_interfaces::{
     DataParseError, DiagServiceError, STRINGS,
     util::{decode_hex, tracing::print_hex},
@@ -83,7 +83,7 @@ fn compu_lookup(
                     let coeffs = scale.rational_co_effs().unwrap();
                     let numerator = coeffs.numerator().unwrap(); // safe unwraps, checked above
                     let lookup_val: f64 = lookup.try_into()?;
-                    let val = numerator[0] + lookup_val * numerator[1];
+                    let val = numerator.iter().get(0) + lookup_val * numerator[1];
                     DiagDataValue::from_number(val, diag_type)
                 } else {
                     Ok(lookup)
@@ -295,18 +295,15 @@ fn compu_convert(
     }
 }
 
-pub(in crate::diag_kernel) fn extract_diag_data_container(
-    param: &datatypes::Parameter,
-    payload: &mut Payload,
+pub(in crate::diag_kernel) fn extract_diag_data_container<'a>(
+    param: &'a datatypes::Parameter<'a>,
+    payload: &'a mut Payload<'a>,
     diag_type: datatypes::DiagCodedType,
-    compu_method: Option<&datatypes::CompuMethod>,
-) -> Result<DiagDataTypeContainer, DiagServiceError> {
-    let byte_pos = param
-        .byte_position()
-        .ok_or(DiagServiceError::InvalidDatabase("Byte Postion is empty"))?
-        as usize;
+    compu_method: Option<datatypes::CompuMethod<'a>>,
+) -> Result<DiagDataTypeContainer<'a>, DiagServiceError> {
+    let byte_pos = param.byte_position() as usize;
     let uds_payload = payload.data();
-    let (data, bit_len) = diag_type.decode(uds_payload, byte_pos, param.bit_pos as usize)?;
+    let (data, bit_len) = diag_type.decode(uds_payload, byte_pos, param.bit_position() as usize)?;
 
     let data_type = diag_type.base_datatype();
     payload.set_last_read_byte_pos(byte_pos + data.len());
@@ -316,22 +313,22 @@ pub(in crate::diag_kernel) fn extract_diag_data_container(
             data,
             bit_len,
             data_type,
-            compu_method: compu_method.cloned(),
+            compu_method,
         },
     ))
 }
 
 pub(in crate::diag_kernel) fn json_value_to_uds_data(
-    diag_type: DataType,
-    compu_method: Option<&CompuMethod>,
+    diag_type: datatypes::DataType,
+    compu_method: Option<&datatypes::CompuMethod>,
     json_value: &serde_json::Value,
 ) -> Result<Vec<u8>, DiagServiceError> {
     'compu: {
         if let Some(compu_method) = compu_method {
-            match compu_method.category {
-                datatypes::CompuCategory::Identical => break 'compu,
+            match compu_method.category() {
+                datatypes::CompuCategory::IDENTICAL(_) => break 'compu,
                 category => {
-                    return compu_convert(diag_type, compu_method, category, json_value);
+                    return compu_convert(diag_type, compu_method, category.into(), json_value);
                 }
             }
         }

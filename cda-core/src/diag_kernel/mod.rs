@@ -13,10 +13,7 @@
 
 use std::fmt::Debug;
 
-use cda_database::{
-    datatypes,
-    datatypes::{DataType, IntervalType, Limit},
-};
+use cda_database::datatypes::{DataType, IntervalType, Limit};
 use cda_interfaces::{DiagServiceError, Protocol, STRINGS};
 use hashbrown::HashMap;
 use serde::{Serialize, Serializer};
@@ -225,12 +222,12 @@ impl TryInto<u32> for DiagDataValue {
     }
 }
 
-#[must_use]
-pub fn into_db_protocol(val: Protocol) -> cda_database::datatypes::Protocol {
-    cda_database::datatypes::Protocol {
-        short_name: STRINGS.get_or_insert(val.value()),
-    }
-}
+// #[must_use] // todo alexmohr
+// pub fn into_db_protocol(val: Protocol) -> cda_database::datatypes::Protocol {
+//     cda_database::datatypes::Protocol {
+//         0: Protocol {},
+//     }
+// }
 
 impl Serialize for DiagDataValue {
     fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>

@@ -11,7 +11,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-use cda_database::datatypes::{self, DataOperationVariant, DiagnosticDatabase, DopFieldValue};
+use cda_database::datatypes::{self, DataOperationVariant, DiagnosticDatabase};
 use cda_interfaces::{
     DiagComm, DiagServiceError, EcuAddressProvider, EcuSchemaProvider, Id, STRINGS,
     SchemaDescription,
@@ -124,7 +124,7 @@ impl ResponseJsonSchema for datatypes::Response {
 }
 
 fn params_to_schema(
-    params: &[cda_interfaces::Id],
+    params: &[datatypes::Parameter],
     ctx: &str,
     ecu_db: &DiagnosticDatabase,
     request_id: Option<Id>,
@@ -132,15 +132,11 @@ fn params_to_schema(
     let mut schema: Option<schemars::Schema> = None;
 
     for param in params {
-        let Some(param) = ecu_db.params.get(param) else {
-            tracing::trace!("Mapping {ctx}: Parameter not found in ECU database. skipping");
+        let Some(name) = param.short_name() else {
+            tracing::trace!("Mapping {ctx}: Parameter short name is None. skipping");
             continue;
         };
-        let Some(name) = STRINGS.get(param.short_name) else {
-            tracing::trace!("Mapping {ctx}: Parameter short name not found in strings. skipping");
-            continue;
-        };
-        let val = if let datatypes::ParameterValue::MatchingRequestParam(matching) = &param.value {
+        let val = if let Some(matching) = &param.specific_data_as_matching_request_param() {
             let Some(request_id) = request_id else {
                 tracing::trace!(
                     "Mapping {ctx}: Parameter is a MatchingRequestParam within a request context."
@@ -208,14 +204,14 @@ fn params_to_schema(
                 // todo: schould we add a description or something
                 // regarding how the DOPs work? (scales, ...)
                 let type_ = match normal_dop.compu_method.category {
-                    datatypes::CompuCategory::TextTable => "string".to_owned(),
-                    datatypes::CompuCategory::Identical
-                    | datatypes::CompuCategory::Linear
-                    | datatypes::CompuCategory::ScaleLinear
-                    | datatypes::CompuCategory::TabIntp
-                    | datatypes::CompuCategory::RatFunc
-                    | datatypes::CompuCategory::ScaleRatFunc
-                    | datatypes::CompuCategory::CompuCode => {
+                    datatypes::CompuCategory::TEXT_TABLE => "string".to_owned(),
+                    datatypes::CompuCategory::IDENTICAL
+                    | datatypes::CompuCategory::LINEAR
+                    | datatypes::CompuCategory::SCALE_LINEAR
+                    | datatypes::CompuCategory::TAB_INTP
+                    | datatypes::CompuCategory::RAT_FUNC
+                    | datatypes::CompuCategory::SCALE_RAT_FUNC
+                    | datatypes::CompuCategory::COMPU_CODE => {
                         let Some(datatype) = ecu_db.diag_coded_types.get(&normal_dop.diag_type)
                         else {
                             tracing::trace!(
@@ -303,7 +299,7 @@ fn params_to_schema(
                 };
 
                 match &repeated_dop.variant {
-                    DataOperationVariant::Structure(structure_dop) => {
+                    DataOperationVariant::Structure => {
                         if let Some(struct_schema) =
                             map_struct_to_schema(structure_dop, ctx, ecu_db, request_id)
                         {

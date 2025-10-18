@@ -195,22 +195,6 @@ pub(super) fn lookup(
     Ok(cp)
 }
 
-// pub fn resolve_comparam(
-//     ecu_data: &DiagnosticDatabase,
-//     cpref: &diagnostic_description::dataformat::ComParamRef,
-// ) -> Result<(String, ComParamValue), DiagServiceError> {
-//     let comparam = ecu_data
-//         .com_params
-//         .get(&cpref.com_param_id)
-//         .ok_or_else(|| {
-//             DiagServiceError::InvalidDatabase(format!(
-//                 "ComParam ID {} not present in DB",
-//                 cpref.com_param_id
-//             ))
-//         })?;
-//     resolve_with_value(ecu_data, cpref, comparam)
-// }
-
 pub fn resolve_com_param_ref(
     ecu_data: &DiagnosticDatabase,
     cp_ref: &dataformat::ComParamRef,

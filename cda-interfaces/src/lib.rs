@@ -121,7 +121,7 @@ impl TryFrom<u8> for DiagCommType {
 #[derive(Clone)]
 pub enum SecurityAccess {
     RequestSeed(DiagComm),
-    SendKey((Id, DiagComm)),
+    SendKey(DiagComm),
 }
 
 #[derive(Clone, Debug)]
@@ -292,7 +292,8 @@ impl std::fmt::Display for DiagComm {
         write!(
             f,
             "DiagService ( name: {}, operation: {:?} )",
-            self.name, self.action
+            self.name,
+            self.action()
         )
     }
 }

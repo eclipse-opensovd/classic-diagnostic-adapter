@@ -18,7 +18,7 @@ use std::{
 };
 
 use cda_interfaces::{
-    DiagComm, DiagCommAction, DiagCommType, DiagServiceError,
+    DiagComm, DiagCommType, DiagServiceError,
     DiagServiceError::InvalidRequest,
     EcuGateway, EcuManager, SchemaDescription, SchemaProvider, SecurityAccess, ServicePayload,
     TesterPresentControlMessage, TesterPresentMode, TesterPresentType, TransmissionParameters,
@@ -911,13 +911,12 @@ impl<S: EcuGateway, R: DiagServiceResponse, T: EcuManager<Response = R>> UdsEcu
     async fn get_comparams(
         &self,
         ecu: &str,
-    ) -> Result<cda_interfaces::datatypes::ComplexComParamValue, String> {
+    ) -> Result<cda_interfaces::datatypes::ComplexComParamValue, DiagServiceError> {
         let ecu = self
             .ecus
             .get(ecu)
-            .ok_or_else(|| format!("Unknown ECU: {ecu}"))?;
-        let comparams = ecu.read().await.comparams();
-        Ok(comparams)
+            .ok_or_else(|| DiagServiceError::NotFound)?;
+        ecu.read().await.comparams()
     }
 
     async fn get_components_data_info(
@@ -1006,7 +1005,7 @@ impl<S: EcuGateway, R: DiagServiceResponse, T: EcuManager<Response = R>> UdsEcu
     ) -> Result<Self::Response, DiagServiceError> {
         tracing::info!(ecu_name = %ecu_name, session = %session, "Setting session");
         let ecu_diag_service = self.ecus.get(ecu_name).ok_or(DiagServiceError::NotFound)?;
-        let (session_id, dc) = ecu_diag_service
+        let dc = ecu_diag_service
             .read()
             .await
             .lookup_session_change(session)?;
@@ -1015,7 +1014,7 @@ impl<S: EcuGateway, R: DiagServiceResponse, T: EcuManager<Response = R>> UdsEcu
             DiagServiceResponseType::Positive => {
                 // update ecu DiagServiceManagers internal state.
                 let ecu = ecu_diag_service.read().await;
-                ecu.set_session(session_id, expiration)?;
+                ecu.set_session(session, expiration)?;
                 Ok(result)
             }
             DiagServiceResponseType::Negative => Ok(result),
@@ -1040,7 +1039,7 @@ impl<S: EcuGateway, R: DiagServiceResponse, T: EcuManager<Response = R>> UdsEcu
                 security_access.clone(),
                 self.send(ecu_name, dc.clone(), None, false).await?,
             )),
-            SecurityAccess::SendKey((id, dc)) => {
+            SecurityAccess::SendKey(dc) => {
                 let result = self
                     .send(ecu_name, dc.clone(), authentication_data, true)
                     .await?;
@@ -1048,7 +1047,7 @@ impl<S: EcuGateway, R: DiagServiceResponse, T: EcuManager<Response = R>> UdsEcu
                     DiagServiceResponseType::Positive => {
                         // update ecu DiagServiceManagers internal state.
                         let ecu = ecu_diag_service.read().await;
-                        ecu.set_security_access(*id, expiration)?;
+                        ecu.set_security_access(level, expiration)?;
                         Ok((security_access, result))
                     }
                     DiagServiceResponseType::Negative => Ok((security_access, result)),
@@ -1076,13 +1075,13 @@ impl<S: EcuGateway, R: DiagServiceResponse, T: EcuManager<Response = R>> UdsEcu
     async fn ecu_session(&self, ecu_name: &str) -> Result<String, DiagServiceError> {
         let ecu_diag_service = self.ecus.get(ecu_name).ok_or(DiagServiceError::NotFound)?;
         let ecu = ecu_diag_service.read().await;
-        Ok(ecu.session())
+        ecu.session()
     }
 
     async fn ecu_security_access(&self, ecu_name: &str) -> Result<String, DiagServiceError> {
         let ecu_diag_service = self.ecus.get(ecu_name).ok_or(DiagServiceError::NotFound)?;
         let ecu = ecu_diag_service.read().await;
-        Ok(ecu.security_access())
+        ecu.security_access()
     }
 
     async fn ecu_exec_service_from_function_class(
@@ -1259,21 +1258,10 @@ impl<S: EcuGateway, R: DiagServiceResponse, T: EcuManager<Response = R>> UdsEcu
             .get_variant_detection_requests()
             .iter()
             .map(|req| {
-                let (name, type_) = req.split_once('_').unwrap();
-                let operation = match type_ {
-                    "Read" => DiagCommAction::Read,
-                    "Write" => DiagCommAction::Write,
-                    unknown => {
-                        return Err(format!(
-                            "Variant Detection for ECU {ecu_name} failed due to unknown operation \
-                             type {unknown}"
-                        ));
-                    }
-                };
-
+                let (name, _) = req.split_once('_').unwrap();
+                // todo alexmohr, make sure variant detection still works
                 let service = DiagComm {
                     name: name.to_owned(),
-                    action: operation,
                     type_: DiagCommType::Data,
                     lookup_name: None,
                 };

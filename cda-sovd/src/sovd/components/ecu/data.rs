@@ -85,8 +85,8 @@ pub(crate) mod diag_service {
     };
     use axum_extra::extract::WithRejection;
     use cda_interfaces::{
-        DiagComm, DiagCommAction, DiagCommType, SchemaProvider, UdsEcu,
-        diagservices::DiagServiceResponse, file_manager::FileManager,
+        DiagComm, DiagCommType, SchemaProvider, UdsEcu, diagservices::DiagServiceResponse,
+        file_manager::FileManager,
     };
     use hashbrown::HashMap;
     use http::{HeaderMap, StatusCode};
@@ -110,19 +110,16 @@ pub(crate) mod diag_service {
         let service_ops = vec![
             DiagComm {
                 name: service.clone(),
-                action: DiagCommAction::Read,
                 type_: DiagCommType::Data,
                 lookup_name: None,
             },
             DiagComm {
                 name: service.clone(),
-                action: DiagCommAction::Write,
                 type_: DiagCommType::Data,
                 lookup_name: None,
             },
             DiagComm {
                 name: service,
-                action: DiagCommAction::Start,
                 type_: DiagCommType::Data,
                 lookup_name: None,
             },
@@ -145,7 +142,7 @@ pub(crate) mod diag_service {
                         continue;
                     }
                     resp.items.insert(
-                        format!("{}_{:?}", service.name, service.action).to_lowercase(),
+                        format!("{}_{:?}", service.name, service.action()).to_lowercase(),
                         sovd_interfaces::components::ecu::ServiceSdgs {
                             sdgs: sdgs.into_sovd(),
                         },
@@ -190,7 +187,6 @@ pub(crate) mod diag_service {
             data_request::<T>(
                 DiagComm {
                     name: diag_service,
-                    action: DiagCommAction::Read,
                     type_: DiagCommType::Data,
                     lookup_name: None,
                 },
@@ -245,7 +241,6 @@ pub(crate) mod diag_service {
         data_request::<T>(
             DiagComm {
                 name: service.clone(),
-                action: DiagCommAction::Write,
                 type_: DiagCommType::Configurations,
                 lookup_name: None,
             },
