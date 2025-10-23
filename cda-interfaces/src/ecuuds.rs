@@ -49,7 +49,7 @@ pub trait UdsEcu: Send + Sync + 'static {
         &self,
         ecu: &str,
         service: Option<&DiagComm>,
-    ) -> impl Future<Output = Result<Vec<SdSdg>, String>> + Send;
+    ) -> impl Future<Output = Result<Vec<SdSdg>, DiagServiceError>> + Send;
     /// Retrieves the communication parameters for a specific ECU.
     /// # Errors
     /// Will return `Err` if the ECU does not exist.
@@ -63,7 +63,7 @@ pub trait UdsEcu: Send + Sync + 'static {
     fn get_components_data_info(
         &self,
         ecu: &str,
-    ) -> impl Future<Output = Result<Vec<ComponentDataInfo>, String>> + Send;
+    ) -> impl Future<Output = Result<Vec<ComponentDataInfo>, DiagServiceError>> + Send;
     /// Retrieve all configuration type services for the given ECU on the detected variant.
     /// # Errors
     /// Will return `Err` if the ECU does not exist
@@ -77,7 +77,7 @@ pub trait UdsEcu: Send + Sync + 'static {
     fn get_components_single_ecu_jobs_info(
         &self,
         ecu: &str,
-    ) -> impl Future<Output = Result<Vec<ComponentDataInfo>, String>> + Send;
+    ) -> impl Future<Output = Result<Vec<ComponentDataInfo>, DiagServiceError>> + Send;
     /// Retrieve a specific single ecu job for the given ECU.
     fn get_single_ecu_job(
         &self,
@@ -260,13 +260,19 @@ pub trait UdsEcu: Send + Sync + 'static {
     /// # Errors
     /// Will return `Err` if the variant detection cannot be triggered, e.g. if the given ECU
     /// does not exist or no service for variant detection is available.
-    fn detect_variant(&self, ecu_name: &str) -> impl Future<Output = Result<(), String>> + Send;
+    fn detect_variant(
+        &self,
+        ecu_name: &str,
+    ) -> impl Future<Output = Result<(), DiagServiceError>> + Send;
 
     /// Get the name of the variant for the given ECU.
     /// # Errors
     /// Will return Err if the ECU does not exist.
     /// If the variant is cannot be resolved, "Unknown" will be returned.
-    fn get_variant(&self, ecu_name: &str) -> impl Future<Output = Result<String, String>> + Send;
+    fn get_variant(
+        &self,
+        ecu_name: &str,
+    ) -> impl Future<Output = Result<String, DiagServiceError>> + Send;
 
     /// trigger the variant detection process for all ECUs.
     /// Main work will be done in the background, there is no result returned,

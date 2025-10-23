@@ -20,7 +20,8 @@ use axum::{
     middleware, routing,
 };
 use cda_interfaces::{
-    SchemaProvider, UdsEcu, diagservices::DiagServiceResponse, file_manager::FileManager,
+    DiagServiceError, SchemaProvider, UdsEcu, diagservices::DiagServiceResponse,
+    file_manager::FileManager,
 };
 use cda_plugin_security::SecurityPluginLoader;
 use futures::future::FutureExt;
@@ -62,7 +63,7 @@ pub async fn launch_webserver<F, R, T, M, S>(
     flash_files_path: String,
     file_manager: HashMap<String, M>,
     shutdown_signal: F,
-) -> Result<(), String>
+) -> Result<(), DiagServiceError>
 where
     F: Future<Output = ()> + Send + 'static,
     R: DiagServiceResponse,
@@ -127,7 +128,7 @@ where
             axum::serve(listener, app_with_middleware.into_make_service())
                 .with_graceful_shutdown(clonable_shutdown_signal)
                 .await
-                .map_err(|e| format!("Axum serve error: {e}"))?;
+                .map_err(|e| DiagServiceError::ResourceError(format!("Axum serve error: {e}")))?;
         }
         Err(e) => {
             tracing::error!(

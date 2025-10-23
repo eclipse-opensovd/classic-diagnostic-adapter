@@ -13,6 +13,7 @@
 
 use std::sync::Arc;
 
+use cda_interfaces::DiagServiceError;
 use cda_plugin_security::{DefaultSecurityPlugin, DefaultSecurityPluginData};
 use clap::Parser;
 use futures::future::FutureExt;
@@ -61,14 +62,16 @@ struct AppArgs {
 
 #[tokio::main]
 #[tracing::instrument]
-async fn main() -> Result<(), String> {
+async fn main() -> Result<(), DiagServiceError> {
     let args = AppArgs::parse();
     let mut config = opensovd_cda_lib::config::load_config().unwrap_or_else(|e| {
         println!("Failed to load configuration: {e}");
         println!("Using default values");
         opensovd_cda_lib::config::default_config()
     });
-    config.validate_sanity()?;
+    config
+        .validate_sanity()
+        .map_err(|err| DiagServiceError::ConfigurationError(err.to_string()))?;
 
     args.update_config(&mut config);
 
@@ -85,7 +88,8 @@ async fn main() -> Result<(), String> {
             config.logging.otel.endpoint
         );
         let (guard, metrics_layer, otel_layer) =
-            cda_tracing::new_otel_subscriber(&config.logging.otel)?;
+            cda_tracing::new_otel_subscriber(&config.logging.otel)
+                .map_err(|err| DiagServiceError::ResourceError(err.to_string()))?;
         layers.push(metrics_layer);
         layers.push(otel_layer);
         Some(guard)
@@ -93,15 +97,16 @@ async fn main() -> Result<(), String> {
         None
     };
     let _guard = if config.logging.log_file_config.enabled {
-        let (guard, file_layer) =
-            cda_tracing::new_file_subscriber(&config.logging.log_file_config)?;
+        let (guard, file_layer) = cda_tracing::new_file_subscriber(&config.logging.log_file_config)
+            .map_err(|err| DiagServiceError::ResourceError(err.to_string()))?;
         layers.push(file_layer);
         Some(guard)
     } else {
         None
     };
 
-    cda_tracing::init_tracing(tracing.with(layers))?;
+    cda_tracing::init_tracing(tracing.with(layers))
+        .map_err(|err| DiagServiceError::ResourceError(err.to_string()))?;
 
     tracing::info!("Starting CDA...");
 
@@ -147,7 +152,7 @@ async fn main() -> Result<(), String> {
         Ok(gateway) => gateway,
         Err(e) => {
             tracing::error!(error = %e, "Failed to create diagnostic gateway");
-            return Err(e);
+            return Err(DiagServiceError::ResourceError(e.to_string()));
         }
     };
 

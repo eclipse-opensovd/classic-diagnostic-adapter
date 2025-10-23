@@ -51,6 +51,8 @@ impl From<DiagServiceError> for ApiError {
             | DiagServiceError::DatabaseEntryNotFound(_)
             | DiagServiceError::VariantDetectionError(_)
             | DiagServiceError::EcuOffline(_)
+            | DiagServiceError::ConfigurationError(_)
+            | DiagServiceError::ResourceError(_)
             | DiagServiceError::ConnectionClosed
             | DiagServiceError::InvalidRequest(_)
             | DiagServiceError::SendFailed(_)
@@ -61,7 +63,7 @@ impl From<DiagServiceError> for ApiError {
             | DiagServiceError::Nack(_)
             | DiagServiceError::InvalidSession(_)
             | DiagServiceError::UnknownOperation
-            | DiagServiceError::UnexpectedResponse
+            | DiagServiceError::UnexpectedResponse(_)
             | DiagServiceError::RequestNotSupported(_)
             | DiagServiceError::Timeout
             | DiagServiceError::DataError(_)

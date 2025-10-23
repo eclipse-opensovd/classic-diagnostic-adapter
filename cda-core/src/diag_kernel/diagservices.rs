@@ -85,13 +85,15 @@ impl DiagServiceResponse for DiagServiceResponseStruct {
         self.serialize_to_json()
     }
 
-    fn as_nrc(&self) -> Result<MappedNRC, String> {
+    fn as_nrc(&self) -> Result<MappedNRC, DiagServiceError> {
         let Some(MappedResponseData {
             data: mapped_data,
             errors: _,
         }) = &self.mapped_data
         else {
-            return Err("Unexpected negative response from ECU".to_owned());
+            return Err(DiagServiceError::UnexpectedResponse(
+                "Unexpected negative response from ECU".to_owned(),
+            ));
         };
         let nrc_code = mapped_data
             .get("NRC")

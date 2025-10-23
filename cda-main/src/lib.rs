@@ -19,12 +19,12 @@ use std::{
     },
 };
 
-use cda_comm_doip::DoipDiagGateway;
+use cda_comm_doip::{DoipDiagGateway, DoipGatewaySetupError};
 use cda_comm_uds::UdsManager;
 use cda_core::{DiagServiceResponseStruct, EcuManager};
 use cda_database::{FileManager, ProtoLoadConfig};
 use cda_interfaces::{
-    Protocol,
+    DiagServiceError, Protocol,
     datatypes::{ComParams, DatabaseNamingConvention, FlatbBufConfig},
     file_manager::{Chunk, ChunkType},
 };
@@ -302,7 +302,7 @@ pub async fn create_diagnostic_gateway<S: SecurityPlugin>(
     doip_gateway_port: u16,
     variant_detection: mpsc::Sender<Vec<String>>,
     shutdown_signal: impl std::future::Future<Output = ()> + Send + Clone + 'static,
-) -> Result<DoipDiagGateway<EcuManager<S>>, String> {
+) -> Result<DoipDiagGateway<EcuManager<S>>, DoipGatewaySetupError> {
     DoipDiagGateway::new(
         doip_tester_address,
         doip_tester_subnet,
@@ -324,7 +324,7 @@ pub fn start_webserver<S: SecurityPlugin, L: SecurityPluginLoader>(
     webserver_config: WebServerConfig,
     ecu_uds: UdsManager<DoipDiagGateway<EcuManager<S>>, DiagServiceResponseStruct, EcuManager<S>>,
     shutdown_signal: impl std::future::Future<Output = ()> + Send + 'static,
-) -> tokio::task::JoinHandle<Result<(), String>> {
+) -> tokio::task::JoinHandle<Result<(), DiagServiceError>> {
     cda_interfaces::spawn_named!("webserver", async move {
         cda_sovd::launch_webserver::<_, DiagServiceResponseStruct, _, _, L>(
             webserver_config,

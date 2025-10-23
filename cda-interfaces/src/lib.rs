@@ -254,12 +254,14 @@ pub enum DiagServiceError {
     InvalidSession(String),
     SendFailed(String),
     Nack(u8),
-    UnexpectedResponse,
+    UnexpectedResponse(String),
     NoResponse(String),
     ConnectionClosed,
     EcuOffline(String),
     Timeout,
     AccessDenied(String),
+    ConfigurationError(String),
+    ResourceError(String),
     DataError(DataParseError),
     /// Returned in case the provided value for security plugin cannot be used as `SecurityApi`
     InvalidSecurityPlugin,
@@ -302,12 +304,14 @@ impl Display for DiagServiceError {
                 write!(f, "Sending message failed {msg}")
             }
             DiagServiceError::Nack(code) => write!(f, "Received Nack, code={code:?}"),
-            DiagServiceError::UnexpectedResponse => write!(f, "Unexpected response"),
+            DiagServiceError::UnexpectedResponse(msg) => write!(f, "Unexpected response. {msg}"),
             DiagServiceError::NoResponse(msg) => write!(f, "No response {msg}"),
             DiagServiceError::ConnectionClosed => write!(f, "Connection closed"),
             DiagServiceError::EcuOffline(ecu) => write!(f, "Ecu {ecu} offline"),
             DiagServiceError::Timeout => write!(f, "Timeout"),
             DiagServiceError::AccessDenied(msg) => write!(f, "Access denied: {msg}"),
+            DiagServiceError::ConfigurationError(msg) => write!(f, "Configuration error: {msg}"),
+            DiagServiceError::ResourceError(msg) => write!(f, "Resource error: {msg}"),
             DiagServiceError::DataError(DataParseError { value, details }) => {
                 write!(f, "Data parse error: value='{value}', details='{details}'")
             }
