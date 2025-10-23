@@ -181,8 +181,7 @@ impl<T: EcuAddressProvider + DoipComParamProvider> DoipDiagGateway<T> {
         .await
         .map_err(|err| {
             DoipGatewaySetupError::ResourceError(format!(
-                "Could not get vehicle identification. {}",
-                err.to_string()
+                "Could not get vehicle identification. {err}"
             ))
         })?;
 
