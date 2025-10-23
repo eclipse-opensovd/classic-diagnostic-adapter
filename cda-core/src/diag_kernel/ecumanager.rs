@@ -380,7 +380,7 @@ impl<S: SecurityPlugin> cda_interfaces::EcuManager for EcuManager<S> {
                     None
                 }
             })
-            .ok_or(DiagServiceError::NotFound)?;
+            .ok_or(DiagServiceError::NotFound(None))?;
         let mapped_dc = mapped_service.diag_comm().map(datatypes::DiagComm).ok_or(
             DiagServiceError::InvalidDatabase("Service is missing DiagComm".to_owned()),
         )?;
@@ -716,7 +716,7 @@ impl<S: SecurityPlugin> cda_interfaces::EcuManager for EcuManager<S> {
                     })
             })
             .map(Into::into)
-            .ok_or(DiagServiceError::NotFound)
+            .ok_or(DiagServiceError::NotFound(None))
     }
 
     /// Lookup a service by a given function class name and service id.
@@ -742,7 +742,7 @@ impl<S: SecurityPlugin> cda_interfaces::EcuManager for EcuManager<S> {
                 .is_some()
         })
         .and_then(|service| service.try_into().ok())
-        .ok_or(DiagServiceError::NotFound)
+        .ok_or(DiagServiceError::NotFound(None))
     }
 
     /// Lookup a service by its service id for the current ECU variant.
@@ -900,7 +900,7 @@ impl<S: SecurityPlugin> cda_interfaces::EcuManager for EcuManager<S> {
                             .is_some_and(|r| r.params().is_some_and(|p| p.len() == 2))
                         && name_matches
                 })
-                .ok_or(DiagServiceError::NotFound)?;
+                .ok_or(DiagServiceError::NotFound(None))?;
 
             let request_seed_service = request_seed_service.try_into()?;
 
@@ -984,7 +984,7 @@ impl<S: SecurityPlugin> cda_interfaces::EcuManager for EcuManager<S> {
                     )
                 })
             })
-            .ok_or(DiagServiceError::NotFound)?;
+            .ok_or(DiagServiceError::NotFound(None))?;
 
         let configuration_sids = [
             service_ids::READ_DATA_BY_IDENTIFIER,
@@ -1551,7 +1551,7 @@ impl<S: SecurityPlugin> EcuManager<S> {
         if let Some(Some(location)) = self.db_cache.diag_services.read().await.get(&lookup_id) {
             return match self.get_service_by_location(location) {
                 Some(service) => Ok(service),
-                None => Err(DiagServiceError::NotFound), // cached negative result
+                None => Err(DiagServiceError::NotFound(None)), // cached negative result
             };
         }
 
@@ -1580,7 +1580,7 @@ impl<S: SecurityPlugin> EcuManager<S> {
             .write()
             .await
             .insert(lookup_id, None);
-        Err(DiagServiceError::NotFound)
+        Err(DiagServiceError::NotFound(None))
     }
 
     fn search_with_location<F>(
@@ -2945,7 +2945,7 @@ impl<S: SecurityPlugin> EcuManager<S> {
                     semantic = %semantic,
                     "State chart with given semantic not found in base variant"
                 );
-                DiagServiceError::NotFound
+                DiagServiceError::NotFound(None)
             })?;
 
         let service = self
@@ -2972,7 +2972,7 @@ impl<S: SecurityPlugin> EcuManager<S> {
                     semantic,
                     "Failed to find service for state transition"
                 );
-                DiagServiceError::NotFound
+                DiagServiceError::NotFound(None)
             })?;
 
         service.try_into()
@@ -2991,7 +2991,7 @@ impl<S: SecurityPlugin> EcuManager<S> {
                     .find(|sc| sc.semantic().is_some_and(|sem| sem == semantic))
             })
             .map(datatypes::StateChart)
-            .ok_or(DiagServiceError::NotFound)
+            .ok_or(DiagServiceError::NotFound(None))
     }
 
     fn default_state(&self, semantic: &str) -> Result<String, DiagServiceError> {
@@ -3048,7 +3048,7 @@ impl<S: SecurityPlugin> EcuManager<S> {
             .collect::<Vec<_>>();
 
         if services.is_empty() {
-            Err(DiagServiceError::NotFound)
+            Err(DiagServiceError::NotFound(None))
         } else {
             Ok(services)
         }

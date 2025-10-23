@@ -21,6 +21,7 @@ path = "src/lib.rs"
 hashbrown = { workspace = true }
 serde = { workspace = true, features = ["derive"] }
 tokio = { workspace = true }
+thiserror = { workspace = true }
 # logging & tracing
 tracing = { workspace = true }
 tracing-core = { workspace = true }

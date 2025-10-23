@@ -13,12 +13,20 @@
 
 use std::sync::Arc;
 
+use cda_interfaces::{DiagServiceError, DoipGatewaySetupError};
 use cda_plugin_security::{DefaultSecurityPlugin, DefaultSecurityPluginData};
+use cda_tracing::TracingSetupError;
 use clap::Parser;
 use futures::future::FutureExt;
 use opensovd_cda_lib::{config::configfile::ConfigSanity, shutdown_signal};
+use thiserror::Error;
 use tokio::sync::mpsc;
 use tracing_subscriber::layer::SubscriberExt as _;
+
+use crate::AppError::{
+    ConfigurationError, ConnectionError, DataError, InitializationFailed, NotFound, ResourceError,
+    RuntimeError, ServerError,
+};
 
 #[derive(Parser, Debug)]
 #[command(version, about, long_about = None)]
@@ -59,9 +67,99 @@ struct AppArgs {
     log_file_name: Option<String>,
 }
 
+#[derive(Error, Debug)]
+pub enum AppError {
+    #[error("Initialization failed `{0}`")]
+    InitializationFailed(String),
+    #[error("Resource error: `{0}`")]
+    ResourceError(String),
+    #[error("Connection error `{0}`")]
+    ConnectionError(String),
+    #[error("Configuration error `{0}`")]
+    ConfigurationError(String),
+    #[error("Data error `{0}`")]
+    DataError(String),
+    #[error("Error during execution `{0}`")]
+    RuntimeError(String),
+    #[error("Not found: `{0}`")]
+    NotFound(String),
+    #[error("Server error: `{0}`")]
+    ServerError(String),
+}
+
+impl From<TracingSetupError> for AppError {
+    fn from(value: TracingSetupError) -> Self {
+        match value {
+            TracingSetupError::ResourceCreationFailed(_) => ResourceError(value.to_string()),
+            TracingSetupError::SubscriberInitializationFailed(_) => {
+                InitializationFailed(value.to_string())
+            }
+        }
+    }
+}
+
+impl From<DoipGatewaySetupError> for AppError {
+    fn from(value: DoipGatewaySetupError) -> Self {
+        match value {
+            DoipGatewaySetupError::InvalidAddress(_) => ConnectionError(value.to_string()),
+
+            DoipGatewaySetupError::SocketCreationFailed(_)
+            | DoipGatewaySetupError::PortBindFailed(_) => InitializationFailed(value.to_string()),
+
+            DoipGatewaySetupError::InvalidConfiguration(_) => ConfigurationError(value.to_string()),
+
+            DoipGatewaySetupError::ResourceError(_) => ResourceError(value.to_string()),
+
+            DoipGatewaySetupError::ServerError(_) => ServerError(value.to_string()),
+        }
+    }
+}
+
+impl From<DiagServiceError> for AppError {
+    fn from(value: DiagServiceError) -> Self {
+        match value {
+            DiagServiceError::RequestNotSupported(_)
+            | DiagServiceError::BadPayload(_)
+            | DiagServiceError::ConnectionClosed
+            | DiagServiceError::UnexpectedResponse(_)
+            | DiagServiceError::EcuOffline(_)
+            | DiagServiceError::NoResponse(_)
+            | DiagServiceError::SendFailed(_)
+            | DiagServiceError::InvalidAddress(_)
+            | DiagServiceError::InvalidRequest(_)
+            | DiagServiceError::Timeout => ConnectionError(value.to_string()),
+
+            DiagServiceError::ParameterConversionError(_)
+            | DiagServiceError::UnknownOperation
+            | DiagServiceError::UdsLookupError(_)
+            | DiagServiceError::VariantDetectionError(_)
+            | DiagServiceError::AccessDenied(_)
+            | DiagServiceError::InvalidSession(_)
+            | DiagServiceError::Nack(_) => RuntimeError(value.to_string()),
+
+            DiagServiceError::InvalidSecurityPlugin => ConfigurationError(value.to_string()),
+
+            DiagServiceError::ResourceError(_) => ResourceError(value.to_string()),
+
+            DiagServiceError::NotFound(Some(_)) => NotFound(value.to_string()),
+
+            DiagServiceError::NotFound(None) => NotFound("Resource could not be found.".to_owned()),
+
+            DiagServiceError::DataError(_)
+            | DiagServiceError::InvalidDatabase(_)
+            | DiagServiceError::DatabaseEntryNotFound(_)
+            | DiagServiceError::NotEnoughData { .. } => DataError(value.to_string()),
+
+            DiagServiceError::SetupError(_) | DiagServiceError::ConfigurationError(_) => {
+                InitializationFailed(value.to_string())
+            }
+        }
+    }
+}
+
 #[tokio::main]
 #[tracing::instrument]
-async fn main() -> Result<(), String> {
+async fn main() -> Result<(), AppError> {
     let args = AppArgs::parse();
     let mut config = opensovd_cda_lib::config::load_config().unwrap_or_else(|e| {
         println!("Failed to load configuration: {e}");
@@ -147,7 +245,7 @@ async fn main() -> Result<(), String> {
         Ok(gateway) => gateway,
         Err(e) => {
             tracing::error!(error = %e, "Failed to create diagnostic gateway");
-            return Err(e);
+            return Err(e.into());
         }
     };
 
