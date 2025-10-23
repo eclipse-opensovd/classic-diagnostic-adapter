@@ -45,7 +45,7 @@ pub(crate) async fn get<R: DiagServiceResponse, T: UdsEcu + Clone, U: FileManage
             (StatusCode::OK, Json(sovd_component_data)).into_response()
         }
         Err(e) => ErrorWrapper {
-            error: ApiError::BadRequest(e),
+            error: e.into(),
             include_schema: query.include_schema,
         }
         .into_response(),
@@ -160,7 +160,7 @@ pub(crate) mod diag_service {
                 }
                 Err(e) => {
                     return ErrorWrapper {
-                        error: ApiError::BadRequest(e),
+                        error: e.into(),
                         include_schema,
                     }
                     .into_response();

@@ -60,7 +60,7 @@ pub trait DiagServiceResponse: Sized + Send + Sync + 'static {
     /// Map the response as a Negative Response Code (NRC).
     /// # Errors
     /// Returns `String` if on failure to map the response as NRC.
-    fn as_nrc(&self) -> Result<MappedNRC, String>;
+    fn as_nrc(&self) -> Result<MappedNRC, DiagServiceError>;
 
     /// Extract data trouble codes from the response, if any.
     /// # Errors

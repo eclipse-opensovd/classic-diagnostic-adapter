@@ -18,11 +18,15 @@ workspace = true
 path = "src/lib.rs"
 
 [dependencies]
+# internal dependencies
+cda-tracing = { workspace = true }
+
 hashbrown = { workspace = true, features = ["serde"] }
 parking_lot = { workspace = true }
 schemars = { workspace = true }
 serde = { workspace = true, features = ["derive"] }
 serde_json = { workspace = true }
+thiserror = { workspace = true }
 #tokio
 tokio = { workspace = true, features = ["sync"] }
 # runtime size info
