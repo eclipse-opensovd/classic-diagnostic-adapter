@@ -21,6 +21,7 @@ use hashbrown::HashMap;
 use thiserror::Error;
 use tokio::sync::{Mutex, RwLock, broadcast, mpsc, watch};
 
+use crate::connections::EcuError::EcuConnectionError;
 use crate::{
     ConnectionError, DiagnosticResponse, DoipConnection, DoipEcu, DoipTarget,
     NRC_BUSY_REPEAT_REQUEST, NRC_RESPONSE_PENDING, NRC_TEMPORARILY_NOT_AVAILABLE, SLEEP_INTERVAL,
@@ -41,12 +42,14 @@ struct ConnectionSettings {
 pub enum EcuError {
     #[error("Resource not found: `{0}`")]
     ResourceNotFound(String),
-    #[error("Connection Error: `{0}`")]
-    ConnectionError(String),
-    #[error("The connection timed out: `{0}`")]
-    ConnectionTimeout(String),
-    #[error("Routing error: `{0}`")]
-    RoutingError(String),
+    #[error("Connection error: `{0}`")]
+    EcuConnectionError(ConnectionError),
+}
+
+impl From<ConnectionError> for EcuError {
+    fn from(value: ConnectionError) -> Self {
+        EcuConnectionError(value)
+    }
 }
 
 #[tracing::instrument(
@@ -116,10 +119,12 @@ where
     {
         Ok((sender, receiver)) => (sender, receiver),
         Err(e) => {
-            return Err(EcuError::ConnectionError(format!(
-                "Failed to connect to {}: {}",
-                gateway.ecu, e
-            )));
+            return Err(EcuError::EcuConnectionError(
+                ConnectionError::ConnectionFailed(format!(
+                    "Failed to connect to {}: {}",
+                    gateway.ecu, e
+                )),
+            ));
         }
     };
 
@@ -265,7 +270,7 @@ async fn setup_connection(
     gateway_name: &str,
     connect_timeout: Duration,
     routing_activation_timeout: Duration,
-) -> Result<EcuConnectionTarget, EcuError> {
+) -> Result<EcuConnectionTarget, ConnectionError> {
     ecu_connection::establish_ecu_connection(
         gateway_ip,
         gateway_name,

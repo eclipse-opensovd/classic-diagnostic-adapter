@@ -75,7 +75,7 @@ struct DoipConnection {
     ip: String,
 }
 
-#[derive(Error, Debug)]
+#[derive(Error, Debug, Clone)]
 enum ConnectionError {
     #[error("Connection closed.")]
     Closed,
@@ -83,6 +83,12 @@ enum ConnectionError {
     Decoding(String),
     #[error("Invalid message: `{0}")]
     InvalidMessage(String),
+    #[error("Connection timeout: `{0}`")]
+    Timeout(String),
+    #[error("Connection failed: `{0}`")]
+    ConnectionFailed(String),
+    #[error("Routing error: `{0}`")]
+    RoutingError(String),
 }
 
 #[derive(Error, Debug)]
