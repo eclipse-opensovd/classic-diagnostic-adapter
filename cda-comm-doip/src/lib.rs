@@ -103,6 +103,26 @@ pub enum DoipGatewaySetupError {
     ResourceError(String),
 }
 
+impl From<DoipGatewaySetupError> for DiagServiceError {
+    fn from(value: DoipGatewaySetupError) -> Self {
+        match value {
+            DoipGatewaySetupError::InvalidAddress(_) => {
+                DiagServiceError::InvalidAddress(value.to_string())
+            }
+            DoipGatewaySetupError::SocketCreationFailed(_)
+            | DoipGatewaySetupError::PortBindFailed(_) => {
+                DiagServiceError::SetupError(value.to_string())
+            }
+            DoipGatewaySetupError::InvalidConfiguration(_) => {
+                DiagServiceError::ConfigurationError(value.to_string())
+            }
+            DoipGatewaySetupError::ResourceError(_) => {
+                DiagServiceError::ResourceError(value.to_string())
+            }
+        }
+    }
+}
+
 impl Display for DoipGatewaySetupError {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
         match self {

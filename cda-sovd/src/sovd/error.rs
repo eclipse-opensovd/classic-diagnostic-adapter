@@ -52,10 +52,12 @@ impl From<DiagServiceError> for ApiError {
             | DiagServiceError::VariantDetectionError(_)
             | DiagServiceError::EcuOffline(_)
             | DiagServiceError::ConfigurationError(_)
+            | DiagServiceError::SetupError(_)
             | DiagServiceError::ResourceError(_)
             | DiagServiceError::ConnectionClosed
             | DiagServiceError::InvalidRequest(_)
             | DiagServiceError::SendFailed(_)
+            | DiagServiceError::InvalidAddress(_)
             | DiagServiceError::ParameterConversionError(_)
             | DiagServiceError::BadPayload(_)
             | DiagServiceError::NotEnoughData { .. }

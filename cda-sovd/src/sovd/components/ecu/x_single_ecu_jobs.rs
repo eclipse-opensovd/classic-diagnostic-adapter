@@ -59,7 +59,7 @@ pub(crate) mod single_ecu {
                 (StatusCode::OK, Json(sovd_component_data)).into_response()
             }
             Err(e) => ErrorWrapper {
-                error: ApiError::BadRequest(e.to_string()),
+                error: e.into(),
                 include_schema,
             }
             .into_response(),

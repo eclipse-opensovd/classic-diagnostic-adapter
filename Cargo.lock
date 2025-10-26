@@ -476,6 +476,7 @@ dependencies = [
 name = "cda-interfaces"
 version = "0.1.0"
 dependencies = [
+ "cda-tracing",
  "deepsize",
  "hashbrown 0.15.4",
  "hex",

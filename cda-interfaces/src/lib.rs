@@ -16,6 +16,8 @@ use std::{
     time::Duration,
 };
 
+use cda_tracing::TracingSetupError;
+
 mod com_param_handling;
 pub use com_param_handling::*;
 pub mod datatypes;
@@ -252,6 +254,7 @@ pub enum DiagServiceError {
     },
     VariantDetectionError(String),
     InvalidSession(String),
+    InvalidAddress(String),
     SendFailed(String),
     Nack(u8),
     UnexpectedResponse(String),
@@ -263,8 +266,22 @@ pub enum DiagServiceError {
     ConfigurationError(String),
     ResourceError(String),
     DataError(DataParseError),
+    SetupError(String),
     /// Returned in case the provided value for security plugin cannot be used as `SecurityApi`
     InvalidSecurityPlugin,
+}
+
+impl From<TracingSetupError> for DiagServiceError {
+    fn from(value: TracingSetupError) -> Self {
+        match &value {
+            TracingSetupError::ResourceCreationFailed(_) => {
+                DiagServiceError::ResourceError(value.to_string())
+            }
+            TracingSetupError::SubscriberInitializationFailed(_) => {
+                DiagServiceError::SetupError(value.to_string())
+            }
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -300,6 +317,9 @@ impl Display for DiagServiceError {
             DiagServiceError::InvalidSession(msg) => {
                 write!(f, "{msg}")
             }
+            DiagServiceError::InvalidAddress(msg) => {
+                write!(f, "{msg}")
+            }
             DiagServiceError::SendFailed(msg) => {
                 write!(f, "Sending message failed {msg}")
             }
@@ -312,6 +332,7 @@ impl Display for DiagServiceError {
             DiagServiceError::AccessDenied(msg) => write!(f, "Access denied: {msg}"),
             DiagServiceError::ConfigurationError(msg) => write!(f, "Configuration error: {msg}"),
             DiagServiceError::ResourceError(msg) => write!(f, "Resource error: {msg}"),
+            DiagServiceError::SetupError(msg) => write!(f, "Setup error: {msg}"),
             DiagServiceError::DataError(DataParseError { value, details }) => {
                 write!(f, "Data parse error: value='{value}', details='{details}'")
             }
