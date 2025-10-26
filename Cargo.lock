@@ -415,6 +415,7 @@ dependencies = [
  "hashbrown 0.15.4",
  "openssl",
  "socket2",
+ "thiserror 2.0.16",
  "tokio",
  "tracing",
 ]
@@ -556,6 +557,7 @@ dependencies = [
  "opentelemetry_sdk",
  "serde",
  "strip-ansi-escapes",
+ "thiserror 2.0.16",
  "tokio",
  "tracing",
  "tracing-appender",

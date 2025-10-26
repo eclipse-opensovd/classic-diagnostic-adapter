@@ -11,13 +11,14 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-use std::{fmt::Display, sync::Arc, time::Duration};
+use std::{sync::Arc, time::Duration};
 
 use cda_interfaces::{DoipComParamProvider, EcuAddressProvider, service_ids};
 use doip_definitions::payload::{
     ActivationType, AliveCheckRequest, DiagnosticMessage, DoipPayload, RoutingActivationRequest,
 };
 use hashbrown::HashMap;
+use thiserror::Error;
 use tokio::sync::{Mutex, RwLock, broadcast, mpsc, watch};
 
 use crate::{
@@ -36,23 +37,16 @@ struct ConnectionSettings {
     max_retry_attempts: u32,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Error, Debug, Clone)]
 pub enum EcuError {
+    #[error("Resource not found: `{0}`")]
     ResourceNotFound(String),
+    #[error("Connection Error: `{0}`")]
     ConnectionError(String),
+    #[error("The connection timed out: `{0}`")]
     ConnectionTimeout(String),
+    #[error("Routing error: `{0}`")]
     RoutingError(String),
-}
-
-impl Display for EcuError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            EcuError::ResourceNotFound(e) => write!(f, "Resource not found: {e}"),
-            EcuError::ConnectionError(e) => write!(f, "Connection Error: {e}"),
-            EcuError::ConnectionTimeout(e) => write!(f, "The connection timed out: {e}"),
-            EcuError::RoutingError(e) => write!(f, "Routing Error: {e}"),
-        }
-    }
 }
 
 #[tracing::instrument(

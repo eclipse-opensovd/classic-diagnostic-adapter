@@ -12,7 +12,7 @@
  */
 
 use std::{
-    fmt::{Display, Formatter},
+    fmt::Display,
     future::Future,
     sync::Arc,
     time::{Duration, Instant},
@@ -24,6 +24,7 @@ use cda_interfaces::{
 };
 use doip_definitions::payload::{DiagnosticMessage, DiagnosticMessageNack, GenericNack};
 use hashbrown::HashMap;
+use thiserror::Error;
 use tokio::sync::{Mutex, RwLock, broadcast, mpsc};
 
 use crate::connections::EcuError;
@@ -94,12 +95,17 @@ impl Display for ConnectionError {
     }
 }
 
-#[derive(Debug)]
+#[derive(Error, Debug)]
 pub enum DoipGatewaySetupError {
+    #[error("Invalid address: `{0}`")]
     InvalidAddress(String),
+    #[error("Socket error: `{0}`")]
     SocketCreationFailed(String),
+    #[error("Port error: `{0}`")]
     PortBindFailed(String),
+    #[error("Configuration error: `{0}`")]
     InvalidConfiguration(String),
+    #[error("Resource error: `{0}`")]
     ResourceError(String),
 }
 
@@ -119,20 +125,6 @@ impl From<DoipGatewaySetupError> for DiagServiceError {
             DoipGatewaySetupError::ResourceError(_) => {
                 DiagServiceError::ResourceError(value.to_string())
             }
-        }
-    }
-}
-
-impl Display for DoipGatewaySetupError {
-    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
-        match self {
-            DoipGatewaySetupError::InvalidAddress(msg) => write!(f, "Invalid address: {msg}"),
-            DoipGatewaySetupError::SocketCreationFailed(msg) => write!(f, "Socket error: {msg}"),
-            DoipGatewaySetupError::PortBindFailed(msg) => write!(f, "Port error: {msg}"),
-            DoipGatewaySetupError::InvalidConfiguration(msg) => {
-                write!(f, "Configuration error: {msg}")
-            }
-            DoipGatewaySetupError::ResourceError(msg) => write!(f, "Resource error: {msg}"),
         }
     }
 }

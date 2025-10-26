@@ -10,10 +10,9 @@
  *
  * SPDX-License-Identifier: Apache-2.0
  */
-use std::fmt::{Display, Formatter};
-
 use opentelemetry::trace::TracerProvider;
 use serde::{Deserialize, Serialize};
+use thiserror::Error;
 use tracing_appender::non_blocking::WorkerGuard;
 use tracing_subscriber::{
     EnvFilter, Layer, Registry,
@@ -29,23 +28,12 @@ pub mod subscriber;
 const DEFAULT_LOG_FILE_NAME: &str = "opensovd-cda.log";
 const DEFAULT_LOG_FILE_PATH: &str = "/var/log/opensovd-cda";
 
-#[derive(Debug)]
+#[derive(Error, Debug)]
 pub enum TracingSetupError {
+    #[error("Failed to create tracing resource: `{0}`")]
     ResourceCreationFailed(String),
+    #[error("Failed to initialize tracing subscriber: `{0}`")]
     SubscriberInitializationFailed(String),
-}
-
-impl Display for TracingSetupError {
-    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
-        match self {
-            TracingSetupError::ResourceCreationFailed(msg) => {
-                write!(f, "Failed to create tracing resource: {msg}")
-            }
-            TracingSetupError::SubscriberInitializationFailed(msg) => {
-                write!(f, "Failed to initialize tracing subscriber: {msg}")
-            }
-        }
-    }
 }
 
 #[derive(Deserialize, Serialize, Clone, Debug)]
