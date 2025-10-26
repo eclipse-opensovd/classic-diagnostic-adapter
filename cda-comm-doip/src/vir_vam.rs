@@ -72,8 +72,8 @@ where
                             Err(e) => tracing::error!(error = ?e, "Failed to handle VAM"),
                         }
                     }
-                    Ok(Some(Err(e))) => return Err(DiagServiceError::UnexpectedResponse(
-                        format!("Failed to receive VAMs: {e:?}")
+                    Ok(Some(Err(e))) => return Err(DiagServiceError::UnexpectedResponse(Some(
+                        format!("Failed to receive VAMs: {e:?}"))
                     )),
                     Ok(None) => return Err(DiagServiceError::ConnectionClosed),
                     Err(_) => {

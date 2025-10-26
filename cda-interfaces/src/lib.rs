@@ -257,7 +257,7 @@ pub enum DiagServiceError {
     InvalidAddress(String),
     SendFailed(String),
     Nack(u8),
-    UnexpectedResponse(String),
+    UnexpectedResponse(Option<String>),
     NoResponse(String),
     ConnectionClosed,
     EcuOffline(String),
@@ -324,7 +324,10 @@ impl Display for DiagServiceError {
                 write!(f, "Sending message failed {msg}")
             }
             DiagServiceError::Nack(code) => write!(f, "Received Nack, code={code:?}"),
-            DiagServiceError::UnexpectedResponse(msg) => write!(f, "Unexpected response. {msg}"),
+            DiagServiceError::UnexpectedResponse(Some(msg)) => {
+                write!(f, "Unexpected response. {msg}")
+            }
+            DiagServiceError::UnexpectedResponse(None) => write!(f, "Unexpected response."),
             DiagServiceError::NoResponse(msg) => write!(f, "No response {msg}"),
             DiagServiceError::ConnectionClosed => write!(f, "Connection closed"),
             DiagServiceError::EcuOffline(ecu) => write!(f, "Ecu {ecu} offline"),

@@ -384,7 +384,7 @@ impl<T: EcuAddressProvider + DoipComParamProvider> EcuGateway for DoipDiagGatewa
                                 // before sending anything else.
                                 try_send_uds_response(
                                     &response_sender,
-                                    Err(DiagServiceError::UnexpectedResponse("".to_owned())),
+                                    Err(DiagServiceError::UnexpectedResponse(None)),
                                 )
                                 .await;
                                 return;

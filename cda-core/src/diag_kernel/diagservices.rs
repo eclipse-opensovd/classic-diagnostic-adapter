@@ -91,9 +91,9 @@ impl DiagServiceResponse for DiagServiceResponseStruct {
             errors: _,
         }) = &self.mapped_data
         else {
-            return Err(DiagServiceError::UnexpectedResponse(
+            return Err(DiagServiceError::UnexpectedResponse(Some(
                 "Unexpected negative response from ECU".to_owned(),
-            ));
+            )));
         };
         let nrc_code = mapped_data
             .get("NRC")

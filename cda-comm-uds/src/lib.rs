@@ -263,7 +263,7 @@ impl<S: EcuGateway, R: DiagServiceResponse, T: EcuManager<Response = R>> UdsMana
                             }
                             Ok(_) => {
                                 break 'read_uds_messages Err(
-                                    DiagServiceError::UnexpectedResponse("".to_owned()),
+                                    DiagServiceError::UnexpectedResponse(None),
                                 );
                             }
                             Err(e) => {
@@ -279,9 +279,7 @@ impl<S: EcuGateway, R: DiagServiceResponse, T: EcuManager<Response = R>> UdsMana
                     }
                     Ok(None) => {
                         tracing::warn!("None response received");
-                        break 'read_uds_messages Err(DiagServiceError::UnexpectedResponse(
-                            "".to_owned(),
-                        ));
+                        break 'read_uds_messages Err(DiagServiceError::UnexpectedResponse(None));
                     }
                     Err(_) => {
                         // error means the tokio::time::timeout

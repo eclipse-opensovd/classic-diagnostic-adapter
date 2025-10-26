@@ -268,13 +268,13 @@ async fn try_read_routing_activation_response(
                 );
                 Ok(routing_activation_response)
             }
-            _ => Err(DiagServiceError::UnexpectedResponse(format!(
+            _ => Err(DiagServiceError::UnexpectedResponse(Some(format!(
                 "Received non-routing activation response: {msg:?}"
-            ))),
+            )))),
         },
-        Ok(Some(Err(e))) => Err(DiagServiceError::UnexpectedResponse(format!(
+        Ok(Some(Err(e))) => Err(DiagServiceError::UnexpectedResponse(Some(format!(
             "Error reading from gateway: {e:?}"
-        ))),
+        )))),
         Ok(None) => Err(DiagServiceError::ConnectionClosed),
         Err(_) => Err(DiagServiceError::Timeout),
     }
