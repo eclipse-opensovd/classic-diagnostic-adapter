@@ -12,7 +12,6 @@
  */
 
 use std::{
-    fmt::Display,
     future::Future,
     sync::Arc,
     time::{Duration, Instant},
@@ -76,23 +75,14 @@ struct DoipConnection {
     ip: String,
 }
 
-#[derive(Debug)]
+#[derive(Error, Debug)]
 enum ConnectionError {
+    #[error("Connection closed.")]
     Closed,
+    #[error("Decoding error: `{0}`")]
     Decoding(String),
+    #[error("Invalid message: `{0}")]
     InvalidMessage(String),
-    SendFailed(String),
-}
-
-impl Display for ConnectionError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            ConnectionError::Closed => write!(f, "Connection closed"),
-            ConnectionError::Decoding(e) => write!(f, "Decoding error: {e}"),
-            ConnectionError::InvalidMessage(e) => write!(f, "Invalid message: {e}"),
-            ConnectionError::SendFailed(e) => write!(f, "Failed to send message: {e}"),
-        }
-    }
 }
 
 #[derive(Error, Debug)]

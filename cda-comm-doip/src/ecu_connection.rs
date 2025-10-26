@@ -18,8 +18,7 @@ use doip_definitions::{
     message::DoipMessage,
     payload::{ActivationCode, DoipPayload, RoutingActivationRequest, RoutingActivationResponse},
 };
-
-use crate::{ConnectionError, connections::EcuError};
+use crate::connections::EcuError;
 
 const ENABLED_SSL_CIPHERS: [&str; 4] = [
     "ECDHE-RSA-AES128-GCM-SHA256",
@@ -40,7 +39,7 @@ const ELIPTIC_CURVE_GROUPS: [&str; 8] = [
 ];
 
 pub(crate) trait ECUConnection {
-    async fn send(&mut self, msg: DoipPayload) -> Result<(), ConnectionError>
+    async fn send(&mut self, msg: DoipPayload) -> Result<(), DiagServiceError>
     where
         Self: std::borrow::Borrow<Self>;
     async fn read(&mut self) -> Option<Result<DoipMessage, doip_sockets::Error>>
@@ -60,12 +59,12 @@ pub(crate) struct EcuConnectionTarget {
 }
 
 impl ECUConnection for EcuConnectionVariant {
-    async fn send(&mut self, msg: DoipPayload) -> Result<(), ConnectionError> {
+    async fn send(&mut self, msg: DoipPayload) -> Result<(), DiagServiceError> {
         match self {
             EcuConnectionVariant::Tls(conn) => conn.send(msg).await,
             EcuConnectionVariant::Plain(conn) => conn.send(msg).await,
         }
-        .map_err(|e| ConnectionError::SendFailed(format!("Failed to send message: {e:?}")))
+        .map_err(|e| DiagServiceError::SendFailed(format!("Failed to send message: {e:?}")))
     }
 
     async fn read(&mut self) -> Option<Result<DoipMessage, doip_sockets::Error>> {
