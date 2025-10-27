@@ -113,7 +113,10 @@ impl<S: EcuGateway, R: DiagServiceResponse, T: EcuManager<Response = R>> UdsMana
     ) -> Result<R, DiagServiceError> {
         let start = Instant::now();
         tracing::debug!(service = ?service, payload = ?payload, "Sending UDS request");
-        let ecu = self.ecus.get(ecu_name).ok_or(DiagServiceError::NotFound)?;
+        let ecu = self
+            .ecus
+            .get(ecu_name)
+            .ok_or(DiagServiceError::NotFound(None))?;
         let payload = {
             let ecu = ecu.read().await;
             ecu.create_uds_payload(&service, security_plugin, payload)
@@ -170,7 +173,10 @@ impl<S: EcuGateway, R: DiagServiceResponse, T: EcuManager<Response = R>> UdsMana
     ) -> Result<Option<ServicePayload>, DiagServiceError> {
         let start = std::time::Instant::now();
 
-        let ecu = self.ecus.get(ecu_name).ok_or(DiagServiceError::NotFound)?;
+        let ecu = self
+            .ecus
+            .get(ecu_name)
+            .ok_or(DiagServiceError::NotFound(None))?;
         let (uds_params, transmission_params) = Self::ecu_send_params(ecu).await;
 
         let rx_timeout = timeout.unwrap_or(uds_params.timeout_default);
@@ -485,7 +491,7 @@ impl<S: EcuGateway, R: DiagServiceResponse, T: EcuManager<Response = R>> UdsMana
                     let ecu = self
                         .ecus
                         .get(&control_msg.ecu)
-                        .ok_or(DiagServiceError::NotFound)?;
+                        .ok_or(DiagServiceError::NotFound(None))?;
                     ecu.read().await.tester_present_time()
                 };
 
@@ -547,7 +553,7 @@ impl<S: EcuGateway, R: DiagServiceResponse, T: EcuManager<Response = R>> UdsMana
             let ecu = self
                 .ecus
                 .get(&control_msg.ecu)
-                .ok_or(DiagServiceError::NotFound)?;
+                .ok_or(DiagServiceError::NotFound(None))?;
             let target_address = match &control_msg.type_ {
                 TesterPresentType::Functional(_) => ecu.read().await.logical_functional_address(),
                 TesterPresentType::Ecu(_) => ecu.read().await.logical_address(),
@@ -578,7 +584,10 @@ impl<S: EcuGateway, R: DiagServiceResponse, T: EcuManager<Response = R>> UdsMana
         service_types: Vec<DtcReadInformationFunction>,
         include_schema: bool,
     ) -> Result<(R, String, Option<SchemaDescription>), DiagServiceError> {
-        let ecu = self.ecus.get(ecu_name).ok_or(DiagServiceError::NotFound)?;
+        let ecu = self
+            .ecus
+            .get(ecu_name)
+            .ok_or(DiagServiceError::NotFound(None))?;
         let (_, extended_data_lookup) = ecu
             .read()
             .await
@@ -923,7 +932,7 @@ impl<S: EcuGateway, R: DiagServiceResponse, T: EcuManager<Response = R>> UdsEcu
         let payload = self
             .ecus
             .get(ecu_name)
-            .ok_or(DiagServiceError::NotFound)?
+            .ok_or(DiagServiceError::NotFound(None))?
             .read()
             .await
             .check_genericservice(security_plugin, payload)?;
@@ -947,7 +956,7 @@ impl<S: EcuGateway, R: DiagServiceResponse, T: EcuManager<Response = R>> UdsEcu
                 let ecu = ecu.read().await;
                 ecu.sdgs(service).await
             }
-            None => Err(DiagServiceError::ResourceError("ECU not found".to_owned())),
+            None => Err(DiagServiceError::NotFound(Some("ECU not found".to_owned()))),
         }
     }
 
@@ -955,7 +964,7 @@ impl<S: EcuGateway, R: DiagServiceResponse, T: EcuManager<Response = R>> UdsEcu
         &self,
         ecu: &str,
     ) -> Result<cda_interfaces::datatypes::ComplexComParamValue, DiagServiceError> {
-        let ecu = self.ecus.get(ecu).ok_or(DiagServiceError::NotFound)?;
+        let ecu = self.ecus.get(ecu).ok_or(DiagServiceError::NotFound(None))?;
         ecu.read().await.comparams()
     }
 
@@ -966,7 +975,7 @@ impl<S: EcuGateway, R: DiagServiceResponse, T: EcuManager<Response = R>> UdsEcu
         let items = self
             .ecus
             .get(ecu)
-            .ok_or_else(|| DiagServiceError::ResourceError(format!("Unknown ECU: {ecu}")))?
+            .ok_or_else(|| DiagServiceError::NotFound(Some(format!("Unknown ECU: {ecu}"))))?
             .read()
             .await
             .get_components_data_info();
@@ -980,7 +989,7 @@ impl<S: EcuGateway, R: DiagServiceResponse, T: EcuManager<Response = R>> UdsEcu
     ) -> Result<Vec<ComponentConfigurationsInfo>, DiagServiceError> {
         self.ecus
             .get(ecu)
-            .ok_or(DiagServiceError::NotFound)?
+            .ok_or(DiagServiceError::NotFound(None))?
             .read()
             .await
             .get_components_configurations_info()
@@ -993,7 +1002,7 @@ impl<S: EcuGateway, R: DiagServiceResponse, T: EcuManager<Response = R>> UdsEcu
         let items = self
             .ecus
             .get(ecu)
-            .ok_or_else(|| DiagServiceError::ResourceError(format!("Unknown ECU: {ecu}")))?
+            .ok_or_else(|| DiagServiceError::NotFound(Some(format!("Unknown ECU: {ecu}"))))?
             .read()
             .await
             .get_components_single_ecu_jobs_info();
@@ -1008,7 +1017,7 @@ impl<S: EcuGateway, R: DiagServiceResponse, T: EcuManager<Response = R>> UdsEcu
     ) -> Result<cda_interfaces::datatypes::single_ecu::Job, DiagServiceError> {
         self.ecus
             .get(ecu)
-            .ok_or(DiagServiceError::NotFound)?
+            .ok_or(DiagServiceError::NotFound(None))?
             .read()
             .await
             .lookup_single_ecu_job(job_name)
@@ -1061,7 +1070,10 @@ impl<S: EcuGateway, R: DiagServiceResponse, T: EcuManager<Response = R>> UdsEcu
         expiration: Duration,
     ) -> Result<Self::Response, DiagServiceError> {
         tracing::info!(ecu_name = %ecu_name, session = %session, "Setting session");
-        let ecu_diag_service = self.ecus.get(ecu_name).ok_or(DiagServiceError::NotFound)?;
+        let ecu_diag_service = self
+            .ecus
+            .get(ecu_name)
+            .ok_or(DiagServiceError::NotFound(None))?;
         let dc = ecu_diag_service
             .read()
             .await
@@ -1087,7 +1099,10 @@ impl<S: EcuGateway, R: DiagServiceResponse, T: EcuManager<Response = R>> UdsEcu
         security_plugin: &DynamicPlugin,
         expiration: Duration,
     ) -> Result<(SecurityAccess, R), DiagServiceError> {
-        let ecu_diag_service = self.ecus.get(ecu_name).ok_or(DiagServiceError::NotFound)?;
+        let ecu_diag_service = self
+            .ecus
+            .get(ecu_name)
+            .ok_or(DiagServiceError::NotFound(None))?;
         let security_access = ecu_diag_service
             .read()
             .await
@@ -1126,7 +1141,7 @@ impl<S: EcuGateway, R: DiagServiceResponse, T: EcuManager<Response = R>> UdsEcu
         ecu_name: &str,
         level: &str,
     ) -> Result<String, DiagServiceError> {
-        let ecu_diag_service = self.ecus.get(ecu_name).ok_or(DiagServiceError::NotFound)?;
+        let ecu_diag_service = self.ecus.get(ecu_name).ok_or(DiagServiceError::NotFound(None))?;
         let security_access = ecu_diag_service
             .read()
             .await
@@ -1149,7 +1164,7 @@ impl<S: EcuGateway, R: DiagServiceResponse, T: EcuManager<Response = R>> UdsEcu
         let diag_manager = self
             .ecus
             .get(ecu_name)
-            .ok_or(DiagServiceError::NotFound)?
+            .ok_or(DiagServiceError::NotFound(None))?
             .read()
             .await;
 
@@ -1159,13 +1174,19 @@ impl<S: EcuGateway, R: DiagServiceResponse, T: EcuManager<Response = R>> UdsEcu
     }
 
     async fn ecu_session(&self, ecu_name: &str) -> Result<String, DiagServiceError> {
-        let ecu_diag_service = self.ecus.get(ecu_name).ok_or(DiagServiceError::NotFound)?;
+        let ecu_diag_service = self
+            .ecus
+            .get(ecu_name)
+            .ok_or(DiagServiceError::NotFound(None))?;
         let ecu = ecu_diag_service.read().await;
         ecu.session()
     }
 
     async fn ecu_security_access(&self, ecu_name: &str) -> Result<String, DiagServiceError> {
-        let ecu_diag_service = self.ecus.get(ecu_name).ok_or(DiagServiceError::NotFound)?;
+        let ecu_diag_service = self
+            .ecus
+            .get(ecu_name)
+            .ok_or(DiagServiceError::NotFound(None))?;
         let ecu = ecu_diag_service.read().await;
         ecu.security_access()
     }
@@ -1178,7 +1199,10 @@ impl<S: EcuGateway, R: DiagServiceResponse, T: EcuManager<Response = R>> UdsEcu
         security_plugin: &DynamicPlugin,
         data: UdsPayloadData,
     ) -> Result<R, DiagServiceError> {
-        let ecu_diag_service = self.ecus.get(ecu_name).ok_or(DiagServiceError::NotFound)?;
+        let ecu_diag_service = self
+            .ecus
+            .get(ecu_name)
+            .ok_or(DiagServiceError::NotFound(None))?;
         let ecu = ecu_diag_service.read().await;
         let request = ecu.lookup_service_through_func_class(func_class_name, service_id)?;
         self.send(ecu_name, request, security_plugin, Some(data), true)
@@ -1191,7 +1215,10 @@ impl<S: EcuGateway, R: DiagServiceResponse, T: EcuManager<Response = R>> UdsEcu
         func_class_name: &str,
         service_id: u8,
     ) -> Result<DiagComm, DiagServiceError> {
-        let ecu_diag_service = self.ecus.get(ecu_name).ok_or(DiagServiceError::NotFound)?;
+        let ecu_diag_service = self
+            .ecus
+            .get(ecu_name)
+            .ok_or(DiagServiceError::NotFound(None))?;
         let ecu = ecu_diag_service.read().await;
         ecu.lookup_service_through_func_class(func_class_name, service_id)
     }
@@ -1242,7 +1269,10 @@ impl<S: EcuGateway, R: DiagServiceResponse, T: EcuManager<Response = R>> UdsEcu
                 DiagServiceError::InvalidRequest(format!("Failed to seek to offset in file: {e:?}"))
             })?;
 
-        let ecu = self.ecus.get(ecu_name).ok_or(DiagServiceError::NotFound)?;
+        let ecu = self
+            .ecus
+            .get(ecu_name)
+            .ok_or(DiagServiceError::NotFound(None))?;
         let request = ecu
             .read()
             .await
@@ -1285,9 +1315,9 @@ impl<S: EcuGateway, R: DiagServiceResponse, T: EcuManager<Response = R>> UdsEcu
         id: &str,
     ) -> Result<(), DiagServiceError> {
         let mut lock = self.data_transfers.lock().await;
-        let transfer = lock.get(ecu_name).ok_or(DiagServiceError::NotFound)?;
+        let transfer = lock.get(ecu_name).ok_or(DiagServiceError::NotFound(None))?;
         if transfer.meta_data.id != id {
-            return Err(DiagServiceError::NotFound);
+            return Err(DiagServiceError::NotFound(None));
         }
 
         if !matches!(
@@ -1300,7 +1330,9 @@ impl<S: EcuGateway, R: DiagServiceResponse, T: EcuManager<Response = R>> UdsEcu
             )));
         }
 
-        let mut transfer = lock.remove(ecu_name).ok_or(DiagServiceError::NotFound)?;
+        let mut transfer = lock
+            .remove(ecu_name)
+            .ok_or(DiagServiceError::NotFound(None))?;
 
         if let Err(e) = transfer.status_receiver.changed().await {
             return Err(DiagServiceError::InvalidRequest(format!(
@@ -1325,7 +1357,7 @@ impl<S: EcuGateway, R: DiagServiceResponse, T: EcuManager<Response = R>> UdsEcu
             .await
             .get(ecu_name)
             .map(|transfer| transfer.meta_data.clone())
-            .ok_or(DiagServiceError::NotFound)?;
+            .ok_or(DiagServiceError::NotFound(None))?;
 
         Ok(vec![meta_data.clone()])
     }
@@ -1339,7 +1371,7 @@ impl<S: EcuGateway, R: DiagServiceResponse, T: EcuManager<Response = R>> UdsEcu
             .await?
             .into_iter()
             .find(|transfer| transfer.id == id)
-            .ok_or(DiagServiceError::NotFound)
+            .ok_or(DiagServiceError::NotFound(None))
     }
 
     #[tracing::instrument(skip(self), err)]
@@ -1454,7 +1486,10 @@ impl<S: EcuGateway, R: DiagServiceResponse, T: EcuManager<Response = R>> UdsEcu
         severity: Option<u32>,
         scope: Option<String>,
     ) -> Result<HashMap<DtcCode, DtcRecordAndStatus>, DiagServiceError> {
-        let ecu = self.ecus.get(ecu_name).ok_or(DiagServiceError::NotFound)?;
+        let ecu = self
+            .ecus
+            .get(ecu_name)
+            .ok_or(DiagServiceError::NotFound(None))?;
         let mut all_dtcs = HashMap::new();
         let scoped_services: Vec<_> = ecu
             .read()
@@ -1693,7 +1728,7 @@ impl<S: EcuGateway, R: DiagServiceResponse, T: EcuManager<Response = R>> UdsEcu
         let groups = self
             .ecus
             .get(ecu_name)
-            .ok_or(DiagServiceError::NotFound)?
+            .ok_or(DiagServiceError::NotFound(None))?
             .read()
             .await
             .functional_groups();
@@ -1780,7 +1815,7 @@ impl<S: EcuGateway, R: DiagServiceResponse, T: EcuManager<Response = R>> SchemaP
         service: &DiagComm,
     ) -> Result<cda_interfaces::SchemaDescription, DiagServiceError> {
         let Some(ecu) = self.ecus.get(ecu) else {
-            return Err(DiagServiceError::NotFound);
+            return Err(DiagServiceError::NotFound(None));
         };
         ecu.read().await.schema_for_request(service).await
     }
@@ -1791,7 +1826,7 @@ impl<S: EcuGateway, R: DiagServiceResponse, T: EcuManager<Response = R>> SchemaP
         service: &DiagComm,
     ) -> Result<cda_interfaces::SchemaDescription, DiagServiceError> {
         let Some(ecu) = self.ecus.get(ecu) else {
-            return Err(DiagServiceError::NotFound);
+            return Err(DiagServiceError::NotFound(None));
         };
         ecu.read().await.schema_for_responses(service).await
     }

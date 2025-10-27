@@ -236,7 +236,7 @@ impl DiagCommType {
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[cfg_attr(feature = "deepsize", derive(DeepSizeOf))]
 pub enum DiagServiceError {
-    NotFound,
+    NotFound(Option<String>),
     RequestNotSupported(String),
     InvalidDatabase(String),
     DatabaseEntryNotFound(String),
@@ -294,7 +294,8 @@ pub struct DataParseError {
 impl Display for DiagServiceError {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
         match self {
-            DiagServiceError::NotFound => write!(f, "Not found"),
+            DiagServiceError::NotFound(Some(msg)) => write!(f, "Not found: {msg}"),
+            DiagServiceError::NotFound(None) => write!(f, "Not found"),
             DiagServiceError::RequestNotSupported(msg) => write!(f, "Request not supported: {msg}"),
             DiagServiceError::InvalidDatabase(msg) => write!(f, "Invalid database: {msg}"),
             DiagServiceError::DatabaseEntryNotFound(msg) => {
