@@ -19,12 +19,12 @@ use std::{
     },
 };
 
-use cda_comm_doip::{DoipDiagGateway, DoipGatewaySetupError};
+use cda_comm_doip::DoipDiagGateway;
 use cda_comm_uds::UdsManager;
 use cda_core::{DiagServiceResponseStruct, EcuManager};
 use cda_database::{FileManager, ProtoLoadConfig};
 use cda_interfaces::{
-    DiagServiceError, Protocol,
+    DoipGatewaySetupError, Protocol,
     datatypes::{ComParams, DatabaseNamingConvention, FlatbBufConfig},
     file_manager::{Chunk, ChunkType},
 };
@@ -324,7 +324,7 @@ pub fn start_webserver<S: SecurityPlugin, L: SecurityPluginLoader>(
     webserver_config: WebServerConfig,
     ecu_uds: UdsManager<DoipDiagGateway<EcuManager<S>>, DiagServiceResponseStruct, EcuManager<S>>,
     shutdown_signal: impl std::future::Future<Output = ()> + Send + 'static,
-) -> tokio::task::JoinHandle<Result<(), DiagServiceError>> {
+) -> tokio::task::JoinHandle<Result<(), DoipGatewaySetupError>> {
     cda_interfaces::spawn_named!("webserver", async move {
         cda_sovd::launch_webserver::<_, DiagServiceResponseStruct, _, _, L>(
             webserver_config,

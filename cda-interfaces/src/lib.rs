@@ -11,12 +11,12 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+use cda_tracing::TracingSetupError;
 use std::{
     fmt::{Display, Formatter},
     time::Duration,
 };
-
-use cda_tracing::TracingSetupError;
+use thiserror::Error;
 
 mod com_param_handling;
 pub use com_param_handling::*;
@@ -279,6 +279,42 @@ impl From<TracingSetupError> for DiagServiceError {
             }
             TracingSetupError::SubscriberInitializationFailed(_) => {
                 DiagServiceError::SetupError(value.to_string())
+            }
+        }
+    }
+}
+
+#[derive(Error, Debug)]
+pub enum DoipGatewaySetupError {
+    #[error("Invalid address: `{0}`")]
+    InvalidAddress(String),
+    #[error("Socket error: `{0}`")]
+    SocketCreationFailed(String),
+    #[error("Port error: `{0}`")]
+    PortBindFailed(String),
+    #[error("Configuration error: `{0}`")]
+    InvalidConfiguration(String),
+    #[error("Resource error: `{0}`")]
+    ResourceError(String),
+    #[error("Server error: `{0}`")]
+    ServerError(String),
+}
+
+impl From<DoipGatewaySetupError> for DiagServiceError {
+    fn from(value: DoipGatewaySetupError) -> Self {
+        match value {
+            DoipGatewaySetupError::InvalidAddress(_) => {
+                DiagServiceError::InvalidAddress(value.to_string())
+            }
+            DoipGatewaySetupError::SocketCreationFailed(_)
+            | DoipGatewaySetupError::PortBindFailed(_) => {
+                DiagServiceError::SetupError(value.to_string())
+            }
+            DoipGatewaySetupError::InvalidConfiguration(_) => {
+                DiagServiceError::ConfigurationError(value.to_string())
+            }
+            DoipGatewaySetupError::ResourceError(_) | DoipGatewaySetupError::ServerError(_) => {
+                DiagServiceError::ResourceError(value.to_string())
             }
         }
     }

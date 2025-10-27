@@ -18,7 +18,7 @@ use std::{
 };
 
 use cda_interfaces::{
-    DiagServiceError, DoipComParamProvider, EcuAddressProvider, EcuGateway, ServicePayload,
+    DiagServiceError, DoipGatewaySetupError, DoipComParamProvider, EcuAddressProvider, EcuGateway, ServicePayload,
     TransmissionParameters, UdsResponse,
 };
 use doip_definitions::payload::{DiagnosticMessage, DiagnosticMessageNack, GenericNack};
@@ -89,40 +89,6 @@ enum ConnectionError {
     ConnectionFailed(String),
     #[error("Routing error: `{0}`")]
     RoutingError(String),
-}
-
-#[derive(Error, Debug)]
-pub enum DoipGatewaySetupError {
-    #[error("Invalid address: `{0}`")]
-    InvalidAddress(String),
-    #[error("Socket error: `{0}`")]
-    SocketCreationFailed(String),
-    #[error("Port error: `{0}`")]
-    PortBindFailed(String),
-    #[error("Configuration error: `{0}`")]
-    InvalidConfiguration(String),
-    #[error("Resource error: `{0}`")]
-    ResourceError(String),
-}
-
-impl From<DoipGatewaySetupError> for DiagServiceError {
-    fn from(value: DoipGatewaySetupError) -> Self {
-        match value {
-            DoipGatewaySetupError::InvalidAddress(_) => {
-                DiagServiceError::InvalidAddress(value.to_string())
-            }
-            DoipGatewaySetupError::SocketCreationFailed(_)
-            | DoipGatewaySetupError::PortBindFailed(_) => {
-                DiagServiceError::SetupError(value.to_string())
-            }
-            DoipGatewaySetupError::InvalidConfiguration(_) => {
-                DiagServiceError::ConfigurationError(value.to_string())
-            }
-            DoipGatewaySetupError::ResourceError(_) => {
-                DiagServiceError::ResourceError(value.to_string())
-            }
-        }
-    }
 }
 
 impl TryFrom<DiagnosticResponse> for Option<UdsResponse> {
