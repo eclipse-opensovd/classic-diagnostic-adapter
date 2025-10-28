@@ -11,11 +11,12 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-use cda_tracing::TracingSetupError;
 use std::{
     fmt::{Display, Formatter},
     time::Duration,
 };
+
+use cda_tracing::TracingSetupError;
 use thiserror::Error;
 
 mod com_param_handling;

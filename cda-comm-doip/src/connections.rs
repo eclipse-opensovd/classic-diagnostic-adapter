@@ -21,10 +21,10 @@ use hashbrown::HashMap;
 use thiserror::Error;
 use tokio::sync::{Mutex, RwLock, broadcast, mpsc, watch};
 
-use crate::connections::EcuError::EcuConnectionError;
 use crate::{
     ConnectionError, DiagnosticResponse, DoipConnection, DoipEcu, DoipTarget,
     NRC_BUSY_REPEAT_REQUEST, NRC_RESPONSE_PENDING, NRC_TEMPORARILY_NOT_AVAILABLE, SLEEP_INTERVAL,
+    connections::EcuError::EcuConnectionError,
     ecu_connection::{self, ECUConnection, EcuConnectionTarget},
 };
 

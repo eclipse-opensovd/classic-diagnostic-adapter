@@ -13,12 +13,13 @@
 
 use std::time::Duration;
 
-use crate::ConnectionError;
 use cda_interfaces::DiagServiceError;
 use doip_definitions::{
     message::DoipMessage,
     payload::{ActivationCode, DoipPayload, RoutingActivationRequest, RoutingActivationResponse},
 };
+
+use crate::ConnectionError;
 
 const ENABLED_SSL_CIPHERS: [&str; 4] = [
     "ECDHE-RSA-AES128-GCM-SHA256",
