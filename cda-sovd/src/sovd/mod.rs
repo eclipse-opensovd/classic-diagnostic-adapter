@@ -91,7 +91,8 @@ impl<R: DiagServiceResponse, T: UdsEcu + Clone, U: FileManager> Clone
     }
 }
 
-pub(crate) struct WebserverState {
+pub(crate) struct WebserverState<T: UdsEcu + Clone> {
+    uds: T,
     locks: Arc<Locks>,
     flash_data: Arc<RwLock<sovd_interfaces::sovd2uds::FileList>>,
 }
@@ -99,9 +100,10 @@ pub(crate) struct WebserverState {
 /// Clone implementation that does not clone the auth_state
 /// auth_state is only set by the middleware and should not
 /// be cloned for each request
-impl Clone for WebserverState {
+impl<T: UdsEcu + Clone> Clone for WebserverState<T> {
     fn clone(&self) -> Self {
         Self {
+            uds: self.uds.clone(),
             locks: self.locks.clone(),
             flash_data: self.flash_data.clone(),
         }
@@ -152,6 +154,7 @@ pub async fn route<
         schema: None,
     }));
     let state = WebserverState {
+        uds: uds.clone(),
         locks: Arc::new(Locks {
             vehicle: LockType::Vehicle(Arc::new(RwLock::new(None))),
             ecu: LockType::Ecu(Arc::new(RwLock::new(
@@ -294,7 +297,7 @@ fn ecu_route<
 >(
     ecu_name: &str,
     uds: &T,
-    state: &WebserverState,
+    state: &WebserverState<T>,
     flash_data: &Arc<RwLock<FileList>>,
     file_manager: &mut HashMap<String, U>,
 ) -> (String, Router) {

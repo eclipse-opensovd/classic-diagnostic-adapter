@@ -95,8 +95,8 @@ pub enum TesterPresentMode {
 
 #[derive(Clone, Debug)]
 pub enum TesterPresentType {
-    Functional,
-    // Ecu, // todo support tester present for single ecus
+    Functional(String),
+    Ecu(String),
 }
 
 #[derive(Clone, Debug)]
@@ -125,6 +125,13 @@ pub mod service_ids {
     pub const REQUEST_TRANSFER_EXIT: u8 = 0x37;
     pub const TESTER_PRESENT: u8 = 0x3E;
     pub const CONTROL_DTC_SETTING: u8 = 0x85;
+}
+
+impl TesterPresentType {
+    #[must_use]
+    pub fn is_functional(&self) -> bool {
+        matches!(self, TesterPresentType::Functional(_))
+    }
 }
 
 impl DiagCommType {

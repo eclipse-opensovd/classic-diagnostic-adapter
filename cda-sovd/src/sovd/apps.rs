@@ -74,6 +74,7 @@ pub(crate) mod sovd2uds {
                 response::{IntoResponse, Response},
             };
             use axum_extra::extract::WithRejection;
+            use cda_interfaces::UdsEcu;
             use http::StatusCode;
             use regex::Regex;
 
@@ -149,12 +150,12 @@ pub(crate) mod sovd2uds {
                     })
             }
 
-            pub(crate) async fn get(
+            pub(crate) async fn get<T: UdsEcu + Clone>(
                 WithRejection(Query(query), _): WithRejection<
                     Query<sovd_interfaces::IncludeSchemaQuery>,
                     ApiError,
                 >,
-                State(state): State<WebserverState>,
+                State(state): State<WebserverState<T>>,
             ) -> Response {
                 let include_schema = query.include_schema;
                 let flash_files = &mut state.flash_data.as_ref().write().await;

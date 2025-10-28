@@ -13,10 +13,7 @@
 
 use std::{sync::Arc, time::Duration};
 
-use cda_interfaces::{
-    DoipComParamProvider, EcuAddressProvider, TesterPresentControlMessage, TesterPresentMode,
-    TesterPresentType, service_ids,
-};
+use cda_interfaces::{DoipComParamProvider, EcuAddressProvider, service_ids};
 use doip_definitions::payload::{
     ActivationType, AliveCheckRequest, DiagnosticMessage, DoipPayload, RoutingActivationRequest,
 };
@@ -39,7 +36,7 @@ struct ConnectionSettings {
 }
 
 #[tracing::instrument(
-    skip(doip_connections, ecus, gateway_ecu_map, tester_present),
+    skip(doip_connections, ecus, gateway_ecu_map),
     fields(
         gateway_ecu = %gateway.ecu,
         gateway_ip = %gateway.ip,
@@ -51,7 +48,6 @@ pub(crate) async fn handle_gateway_connection<T>(
     doip_connections: &Arc<RwLock<Vec<Arc<DoipConnection>>>>,
     ecus: &Arc<HashMap<String, RwLock<T>>>,
     gateway_ecu_map: &HashMap<u16, Vec<u16>>,
-    tester_present: mpsc::Sender<TesterPresentControlMessage>,
 ) -> Result<u16, String>
 where
     T: EcuAddressProvider + DoipComParamProvider,
@@ -90,7 +86,6 @@ where
         gateway.ip.clone(),
         gateway.ecu.clone(),
         routing_activation_request,
-        tester_present,
         ecu_ids.clone(),
         ConnectionSettings {
             routing_activation: routing_activation_timeout,
@@ -150,7 +145,7 @@ fn create_ecu_receiver_map(
 
 #[allow(clippy::type_complexity)]
 #[tracing::instrument(
-    skip(routing_activation_request, tester_present, connection_settings),
+    skip(routing_activation_request, connection_settings),
     fields(
         gateway_ip = %gateway_ip,
         gateway_name = %gateway_name,
@@ -161,7 +156,6 @@ async fn connection_handler(
     gateway_ip: String,
     gateway_name: String,
     routing_activation_request: RoutingActivationRequest,
-    tester_present: mpsc::Sender<TesterPresentControlMessage>,
     ecus: Vec<u16>,
     connection_settings: ConnectionSettings,
 ) -> Result<
@@ -234,12 +228,12 @@ async fn connection_handler(
         send_pending_rx,
         conn_reset_tx,
     );
-    spawn_tester_present_task(
-        gateway_name.clone(),
-        gateway_ip.clone(),
-        tester_present,
-        send_pending_tx,
-    );
+    // spawn_tester_present_task(
+    //     gateway_name.clone(),
+    //     gateway_ip.clone(),
+    //     tester_present,
+    //     send_pending_tx,
+    // );
 
     // no need to wait until the connection is alive, we will reconnect automatically anyway
     Ok((intx, outrx))
@@ -617,53 +611,6 @@ fn spawn_gateway_receiver_task(
             }
         }
     });
-}
-
-#[tracing::instrument(
-    skip(tester_present, send_pending_tx),
-    fields(
-        gateway_name = %gateway_name,
-        gateway_ip = %gateway_ip
-    )
-)]
-fn spawn_tester_present_task(
-    gateway_name: String,
-    gateway_ip: String,
-    tester_present: mpsc::Sender<TesterPresentControlMessage>,
-    send_pending_tx: watch::Sender<bool>,
-) {
-    cda_interfaces::spawn_named!(
-        &format!("tester-present-gateway-{gateway_name}"),
-        async move {
-            if tester_present
-                .send(TesterPresentControlMessage {
-                    mode: TesterPresentMode::Start,
-                    type_: TesterPresentType::Functional,
-                    ecu: gateway_name.clone(),
-                    interval: None,
-                })
-                .await
-                .is_err()
-            {
-                tracing::error!("Failed to send start tester present control message");
-            }
-
-            send_pending_tx.closed().await;
-
-            if tester_present
-                .send(TesterPresentControlMessage {
-                    mode: TesterPresentMode::Stop,
-                    type_: TesterPresentType::Functional,
-                    ecu: gateway_name,
-                    interval: None,
-                })
-                .await
-                .is_err()
-            {
-                tracing::error!("Failed to send stop tester present control message");
-            }
-        }
-    );
 }
 
 async fn send_alive_request(conn: &mut EcuConnectionTarget) -> Result<(), ()> {

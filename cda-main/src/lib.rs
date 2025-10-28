@@ -24,7 +24,7 @@ use cda_comm_uds::UdsManager;
 use cda_core::{DiagServiceResponseStruct, EcuManager};
 use cda_database::{FileManager, ProtoLoadConfig};
 use cda_interfaces::{
-    Protocol, TesterPresentControlMessage,
+    Protocol,
     datatypes::{ComParams, DatabaseNamingConvention},
     file_manager::{Chunk, ChunkType},
 };
@@ -277,22 +277,15 @@ pub async fn create_uds_manager<S: SecurityPlugin>(
     gateway: DoipDiagGateway<EcuManager<S>>,
     databases: Arc<HashMap<String, RwLock<EcuManager<S>>>>,
     variant_detection_receiver: mpsc::Receiver<Vec<String>>,
-    tester_present_sender: mpsc::Receiver<TesterPresentControlMessage>,
 ) -> Result<UdsManagerType<S>, String> {
-    UdsManager::new(
-        gateway,
-        databases,
-        variant_detection_receiver,
-        tester_present_sender,
-    )
-    .await
+    UdsManager::new(gateway, databases, variant_detection_receiver).await
 }
 
 /// Creates a new diagnostic gateway for the webserver.
 /// # Errors
 /// Returns a string error if the gateway cannot be initialized.
 #[tracing::instrument(
-    skip(databases, variant_detection, tester_present, shutdown_signal),
+    skip(databases, variant_detection, shutdown_signal),
     fields(database_count = databases.len())
 )]
 pub async fn create_diagnostic_gateway<S: SecurityPlugin>(
@@ -301,7 +294,6 @@ pub async fn create_diagnostic_gateway<S: SecurityPlugin>(
     doip_tester_subnet: &str,
     doip_gateway_port: u16,
     variant_detection: mpsc::Sender<Vec<String>>,
-    tester_present: mpsc::Sender<TesterPresentControlMessage>,
     shutdown_signal: impl std::future::Future<Output = ()> + Send + Clone + 'static,
 ) -> Result<DoipDiagGateway<EcuManager<S>>, String> {
     DoipDiagGateway::new(
@@ -310,7 +302,6 @@ pub async fn create_diagnostic_gateway<S: SecurityPlugin>(
         doip_gateway_port,
         databases,
         variant_detection,
-        tester_present,
         shutdown_signal,
     )
     .await

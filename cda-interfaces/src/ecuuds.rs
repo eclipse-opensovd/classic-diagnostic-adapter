@@ -16,7 +16,7 @@ use std::time::Duration;
 use hashbrown::HashMap;
 
 use crate::{
-    DiagComm, DiagServiceError, DynamicPlugin, SecurityAccess,
+    DiagComm, DiagServiceError, DynamicPlugin, SecurityAccess, TesterPresentType,
     datatypes::{
         ComplexComParamValue, ComponentConfigurationsInfo, ComponentDataInfo, DataTransferMetaData,
         DtcCode, DtcExtendedInfo, DtcRecordAndStatus, NetworkStructure, SdSdg, single_ecu,
@@ -264,6 +264,19 @@ pub trait UdsEcu: Send + Sync + 'static {
     /// Main work will be done in the background, there is no result returned,
     /// as the data is internally stored and used in `EcuUds`
     fn start_variant_detection(&self) -> impl Future<Output = ()> + Send;
+
+    /// Start sending periodic tester present messages to keep the session alive.
+    /// The interval is defined per ECU in the communication parameters.
+    fn start_tester_present(
+        &self,
+        type_: TesterPresentType,
+    ) -> impl Future<Output = Result<(), DiagServiceError>> + Send;
+
+    /// Stop sending periodic tester present messages.
+    fn stop_tester_present(
+        &self,
+        type_: TesterPresentType,
+    ) -> impl Future<Output = Result<(), DiagServiceError>> + Send;
 
     // Retrieve all faults for the given ECU, with optional filtering by status, severity and scope.
     // W/o fmt::skip 'impl Future...' is put on the same line by rustfmt,
