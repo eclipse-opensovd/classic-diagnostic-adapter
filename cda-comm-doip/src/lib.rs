@@ -20,7 +20,7 @@ use std::{
 
 use cda_interfaces::{
     DiagServiceError, DoipComParamProvider, EcuAddressProvider, EcuGateway, ServicePayload,
-    TesterPresentControlMessage, TransmissionParameters, UdsResponse,
+    TransmissionParameters, UdsResponse,
 };
 use doip_definitions::payload::{DiagnosticMessage, DiagnosticMessageNack, GenericNack};
 use hashbrown::HashMap;
@@ -125,7 +125,7 @@ impl<T: EcuAddressProvider + DoipComParamProvider> DoipDiagGateway<T> {
     /// # Errors
     /// Returns `String` if initialization fails, e.g. when socket creation fails.
     #[tracing::instrument(
-        skip(ecus, variant_detection, tester_present, shutdown_signal),
+        skip(ecus, variant_detection, shutdown_signal),
         fields(tester_ip, gateway_port, ecu_count = ecus.len())
     )]
     pub async fn new<F>(
@@ -134,7 +134,6 @@ impl<T: EcuAddressProvider + DoipComParamProvider> DoipDiagGateway<T> {
         gateway_port: u16,
         ecus: Arc<HashMap<String, RwLock<T>>>,
         variant_detection: mpsc::Sender<Vec<String>>,
-        tester_present: mpsc::Sender<TesterPresentControlMessage>,
         shutdown_signal: F,
     ) -> Result<Self, String>
     where
@@ -186,7 +185,6 @@ impl<T: EcuAddressProvider + DoipComParamProvider> DoipDiagGateway<T> {
                     &doip_connections,
                     &ecus,
                     &gateway_ecu_map,
-                    tester_present.clone(),
                 )
                 .await
                 {
@@ -203,14 +201,7 @@ impl<T: EcuAddressProvider + DoipComParamProvider> DoipDiagGateway<T> {
             }
         };
 
-        vir_vam::listen_for_vams(
-            mask,
-            gateway.clone(),
-            variant_detection,
-            tester_present,
-            shutdown_signal,
-        )
-        .await;
+        vir_vam::listen_for_vams(mask, gateway.clone(), variant_detection, shutdown_signal).await;
 
         Ok(gateway)
     }

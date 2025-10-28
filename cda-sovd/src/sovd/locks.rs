@@ -11,7 +11,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-use std::{fmt, option::Option, sync::Arc, time::Duration};
+use std::{fmt, option::Option, pin::Pin, sync::Arc, time::Duration};
 
 use axum::{
     Json,
@@ -20,7 +20,9 @@ use axum::{
     response::{IntoResponse, Response},
 };
 use axum_extra::extract::WithRejection;
-use cda_interfaces::{UdsEcu, diagservices::DiagServiceResponse, file_manager::FileManager};
+use cda_interfaces::{
+    TesterPresentType, UdsEcu, diagservices::DiagServiceResponse, file_manager::FileManager,
+};
 use cda_plugin_security::Claims;
 use chrono::{DateTime, SecondsFormat, Utc};
 use hashbrown::HashMap;
@@ -43,12 +45,75 @@ use crate::{
 pub(crate) type LockHashMap = HashMap<String, Option<Lock>>;
 pub(crate) type LockOption = Option<Lock>;
 
-#[derive(Debug)]
 pub(crate) struct Lock {
     sovd: sovd_interfaces::locking::Lock,
     expiration: DateTime<Utc>,
     owner: String,
     deletion_task: JoinHandle<()>,
+    _cleanup_on_drop: LockCleanupOnDrop,
+}
+
+impl Lock {
+    fn new(
+        sovd: sovd_interfaces::locking::Lock,
+        expiration: DateTime<Utc>,
+        owner: String,
+        deletion_task: JoinHandle<()>,
+        cleanup_fn: LockCleanupFnHelper,
+    ) -> Self {
+        Self {
+            sovd,
+            expiration,
+            owner,
+            deletion_task,
+            _cleanup_on_drop: LockCleanupOnDrop(Some(cleanup_fn)),
+        }
+    }
+}
+
+/// Type alias for the async cleanup closure called when dropping a lock
+type LockCleanupFn = dyn FnOnce() -> Pin<Box<dyn Future<Output = ()> + Send>> + Send + Sync;
+
+/// Wrapper struct to hold an async closure
+///
+/// This is needed because `AsyncFnOnce` cannot be used directly as a trait object
+/// And the returned Future needs to be pinned. To reduce the complexity at caller site,
+/// the `new` function of this helper struct takes care of that
+struct LockCleanupFnHelper {
+    func: Box<LockCleanupFn>,
+}
+
+impl LockCleanupFnHelper {
+    fn new<F, Out>(f: F) -> Self
+    where
+        F: FnOnce() -> Out + Send + Sync + 'static,
+        Out: Future<Output = ()> + Send + 'static,
+    {
+        Self {
+            func: Box::new(move || Box::pin(f())),
+        }
+    }
+
+    async fn call(self) {
+        (self.func)().await;
+    }
+}
+
+/// Helper struct to ensure that the cleanup function is called when the lock is dropped
+///
+/// We want to remove any tester present calls related to this lock when the lock is deleted
+/// and to ensure that it is not forgotten, each lock is created with its cleanup function
+/// and this struct ensures that the function is called when the lock is dropped
+struct LockCleanupOnDrop(Option<LockCleanupFnHelper>);
+
+impl Drop for LockCleanupOnDrop {
+    fn drop(&mut self) {
+        if let Some(drop_fn) = self.0.take() {
+            tokio::spawn(async move {
+                drop_fn.call().await;
+            });
+        }
+    }
 }
 
 pub(crate) struct Locks {
@@ -57,7 +122,7 @@ pub(crate) struct Locks {
     pub functional_group: LockType,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 pub(crate) enum LockType {
     Vehicle(Arc<RwLock<LockOption>>),
     Ecu(Arc<RwLock<LockHashMap>>),
@@ -248,7 +313,10 @@ pub(crate) mod ecu {
     pub(crate) async fn post<R: DiagServiceResponse, T: UdsEcu + Clone, U: FileManager>(
         UseApi(sec_plugin, _): UseApi<Secured, ()>,
         State(WebserverEcuState {
-            ecu_name, locks, ..
+            ecu_name,
+            locks,
+            uds,
+            ..
         }): State<WebserverEcuState<R, T, U>>,
         WithRejection(Json(body), _): WithRejection<
             Json<sovd_interfaces::locking::Request>,
@@ -275,7 +343,16 @@ pub(crate) mod ecu {
             .into_response();
         }
 
-        post_handler(&locks.ecu, &claims, Some(&ecu_name), body, None, false).await
+        post_handler(
+            &uds,
+            &locks.ecu,
+            &claims,
+            Some(&ecu_name),
+            body,
+            None,
+            false,
+        )
+        .await
     }
 
     pub(crate) fn docs_post(op: TransformOperation) -> TransformOperation {
@@ -328,6 +405,7 @@ pub(crate) mod ecu {
 
 pub(crate) mod vehicle {
     use aide::{UseApi, transform::TransformOperation};
+    use cda_interfaces::UdsEcu;
     use cda_plugin_security::Secured;
 
     use super::{
@@ -338,16 +416,18 @@ pub(crate) mod vehicle {
     use crate::openapi;
 
     pub(crate) mod lock {
+        use cda_interfaces::UdsEcu;
+
         use super::{
             ApiError, Json, LockPathParam, Path, Response, Secured, State, TransformOperation,
             UseApi, WebserverState, WithRejection, delete_handler, get_id_handler, openapi,
             put_handler,
         };
 
-        pub(crate) async fn delete(
+        pub(crate) async fn delete<T: UdsEcu + Clone>(
             Path(lock): Path<LockPathParam>,
             UseApi(sec_plugin, _): UseApi<Secured, ()>,
-            State(state): State<WebserverState>,
+            State(state): State<WebserverState<T>>,
         ) -> Response {
             let claims = sec_plugin.as_auth_plugin().claims();
             delete_handler(&state.locks.vehicle, &lock, &claims, None, false).await
@@ -360,10 +440,10 @@ pub(crate) mod vehicle {
                 .with(openapi::lock_not_owned)
         }
 
-        pub(crate) async fn put(
+        pub(crate) async fn put<T: UdsEcu + Clone>(
             Path(lock): Path<LockPathParam>,
             UseApi(sec_plugin, _): UseApi<Secured, ()>,
-            State(state): State<WebserverState>,
+            State(state): State<WebserverState<T>>,
             WithRejection(Json(body), _): WithRejection<
                 Json<sovd_interfaces::locking::Request>,
                 ApiError,
@@ -380,10 +460,10 @@ pub(crate) mod vehicle {
                 .with(openapi::lock_not_owned)
         }
 
-        pub(crate) async fn get(
+        pub(crate) async fn get<T: UdsEcu + Clone>(
             Path(lock): Path<LockPathParam>,
             UseApi(_sec_plugin, _): UseApi<Secured, ()>,
-            State(state): State<WebserverState>,
+            State(state): State<WebserverState<T>>,
         ) -> Response {
             get_id_handler(&state.locks.vehicle, &lock, None, false).await
         }
@@ -402,9 +482,9 @@ pub(crate) mod vehicle {
         }
     }
 
-    pub(crate) async fn post(
+    pub(crate) async fn post<T: UdsEcu + Clone>(
         UseApi(sec_plugin, _): UseApi<Secured, ()>,
-        State(state): State<WebserverState>,
+        State(state): State<WebserverState<T>>,
         WithRejection(Json(body), _): WithRejection<
             Json<sovd_interfaces::locking::Request>,
             ApiError,
@@ -450,6 +530,7 @@ pub(crate) mod vehicle {
         }
 
         post_handler(
+            &state.uds,
             &state.locks.vehicle,
             &claims,
             None,
@@ -472,9 +553,9 @@ pub(crate) mod vehicle {
             .with(openapi::lock_not_owned)
     }
 
-    pub(crate) async fn get(
+    pub(crate) async fn get<T: UdsEcu + Clone>(
         UseApi(sec_plugin, _): UseApi<Secured, ()>,
-        State(state): State<WebserverState>,
+        State(state): State<WebserverState<T>>,
     ) -> Response {
         let claims = sec_plugin.as_auth_plugin().claims();
         get_handler(&state.locks.vehicle, &claims, None).await
@@ -497,6 +578,7 @@ pub(crate) mod vehicle {
 
 pub(crate) mod functional_group {
     use aide::{UseApi, transform::TransformOperation};
+    use cda_interfaces::UdsEcu;
     use cda_plugin_security::Secured;
 
     use super::{
@@ -509,6 +591,8 @@ pub(crate) mod functional_group {
     openapi::aide_helper::gen_path_param!(FunctionalGroupLockPathParam group String);
 
     pub(crate) mod lock {
+        use cda_interfaces::UdsEcu;
+
         use super::{
             ApiError, Json, Path, Response, Secured, State, TransformOperation, UseApi,
             WebserverState, WithRejection, delete_handler, get_id_handler, openapi, put_handler,
@@ -518,11 +602,11 @@ pub(crate) mod functional_group {
             FunctionalGroupLockWithIdPathParam group String lock String
         );
 
-        pub(crate) async fn delete(
+        pub(crate) async fn delete<T: UdsEcu + Clone>(
             Path(FunctionalGroupLockWithIdPathParam { group, lock }): Path<
                 FunctionalGroupLockWithIdPathParam,
             >,
-            State(state): State<WebserverState>,
+            State(state): State<WebserverState<T>>,
             UseApi(sec_plugin, _): UseApi<Secured, ()>,
         ) -> Response {
             let claims = sec_plugin.as_auth_plugin().claims();
@@ -543,11 +627,11 @@ pub(crate) mod functional_group {
                 .with(openapi::lock_not_owned)
         }
 
-        pub(crate) async fn put(
+        pub(crate) async fn put<T: UdsEcu + Clone>(
             Path(FunctionalGroupLockWithIdPathParam { group, lock }): Path<
                 FunctionalGroupLockWithIdPathParam,
             >,
-            State(state): State<WebserverState>,
+            State(state): State<WebserverState<T>>,
             UseApi(sec_plugin, _): UseApi<Secured, ()>,
             WithRejection(Json(body), _): WithRejection<
                 Json<sovd_interfaces::locking::Request>,
@@ -573,12 +657,12 @@ pub(crate) mod functional_group {
                 .with(openapi::lock_not_owned)
         }
 
-        pub(crate) async fn get(
+        pub(crate) async fn get<T: UdsEcu + Clone>(
             Path(FunctionalGroupLockWithIdPathParam { group, lock }): Path<
                 FunctionalGroupLockWithIdPathParam,
             >,
             UseApi(_sec_plugin, _): UseApi<Secured, ()>,
-            State(state): State<WebserverState>,
+            State(state): State<WebserverState<T>>,
         ) -> Response {
             get_id_handler(&state.locks.functional_group, &lock, Some(&group), false).await
         }
@@ -597,10 +681,10 @@ pub(crate) mod functional_group {
         }
     }
 
-    pub(crate) async fn post(
+    pub(crate) async fn post<T: UdsEcu + Clone>(
         Path(group): Path<FunctionalGroupLockPathParam>,
         UseApi(sec_plugin, _): UseApi<Secured, ()>,
-        State(state): State<WebserverState>,
+        State(state): State<WebserverState<T>>,
         WithRejection(Json(body), _): WithRejection<
             Json<sovd_interfaces::locking::Request>,
             ApiError,
@@ -618,6 +702,7 @@ pub(crate) mod functional_group {
 
         // todo (out of scope for poc) check if any of the ecus is already locked]
         post_handler(
+            &state.uds,
             &state.locks.functional_group,
             &claims,
             Some(&group),
@@ -640,10 +725,10 @@ pub(crate) mod functional_group {
             .with(openapi::lock_not_owned)
     }
 
-    pub(crate) async fn get(
+    pub(crate) async fn get<T: UdsEcu + Clone>(
         Path(group): Path<FunctionalGroupLockPathParam>,
         UseApi(sec_plugin, _): UseApi<Secured, ()>,
-        State(state): State<WebserverState>,
+        State(state): State<WebserverState<T>>,
     ) -> Response {
         let claims = sec_plugin.as_auth_plugin().claims();
         get_handler(&state.locks.functional_group, &claims, Some(&group)).await
@@ -664,7 +749,8 @@ pub(crate) mod functional_group {
     }
 }
 
-fn create_lock(
+async fn create_lock<T: UdsEcu + Clone>(
+    uds: &T,
     claims: &impl Claims,
     expiration: sovd_interfaces::locking::Request,
     lock_type: &LockType,
@@ -685,18 +771,46 @@ fn create_lock(
         utc_expiration,
     )?;
 
+    let cleanup_fn = {
+        match lock_type {
+            LockType::Ecu(_) => {
+                let ecu_name = entity_name
+                    .ok_or_else(|| ApiError::BadRequest("No ECU name provided".to_owned()))?
+                    .to_owned();
+                let tp_type = TesterPresentType::Ecu(ecu_name);
+                uds.start_tester_present(tp_type.clone())
+                    .await
+                    .map_err(ApiError::from)?;
+
+                let uds = (*uds).clone();
+                LockCleanupFnHelper::new(async move || {
+                    if let Err(e) = uds.stop_tester_present(tp_type).await {
+                        tracing::error!("Failed to stop tester present for lock cleanup: {}", e);
+                    }
+                })
+            }
+            l => {
+                let lock_type_name = l.to_string();
+                LockCleanupFnHelper::new(async move || {
+                    tracing::trace!("No cleanup implemented for lock type {lock_type_name}");
+                })
+            }
+        }
+    };
+
     // setting owned to none here, because the SOVD specification states describes
     // the return value w/o the owned field
     let sovd_lock = sovd_interfaces::locking::Lock {
         id: id.to_string(),
         owned: None,
     };
-    Ok(Lock {
-        owner: claims.sub().to_owned(),
-        sovd: sovd_lock,
-        expiration: utc_expiration,
-        deletion_task: token_deletion_task,
-    })
+    Ok(Lock::new(
+        sovd_lock,
+        utc_expiration,
+        claims.sub().to_owned(),
+        token_deletion_task,
+        cleanup_fn,
+    ))
 }
 
 fn update_lock(
@@ -843,14 +957,15 @@ async fn delete_handler(
 }
 
 #[tracing::instrument(
-    skip(lock, claims, rw_lock, expiration),
+    skip(uds, lock, claims, rw_lock, expiration),
     fields(
         lock_type = %lock,
         entity_name = ?entity_name,
         lock_expiration = %expiration.lock_expiration
     )
 )]
-async fn post_handler(
+async fn post_handler<T: UdsEcu + Clone>(
+    uds: &T,
     lock: &LockType,
     claims: &impl Claims,
     entity_name: Option<&String>,
@@ -895,7 +1010,7 @@ async fn post_handler(
             .into_response(),
         }
     } else {
-        match create_lock(claims, expiration, lock, entity_name) {
+        match create_lock(uds, claims, expiration, lock, entity_name).await {
             Ok(new_lock) => {
                 *lock_opt = Some(new_lock);
                 (StatusCode::CREATED, Json(&lock_opt.as_ref().unwrap().sovd)).into_response()

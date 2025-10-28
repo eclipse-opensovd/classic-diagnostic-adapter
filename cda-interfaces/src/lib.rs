@@ -140,8 +140,8 @@ pub enum TesterPresentMode {
 
 #[derive(Clone, Debug)]
 pub enum TesterPresentType {
-    Functional,
-    // Ecu, // todo support tester present for single ecus
+    Functional(String),
+    Ecu(String),
 }
 
 #[derive(Clone, Debug)]
@@ -197,6 +197,13 @@ const OPERATIONS_PREFIXES: [u8; 5] = [
     service_ids::TRANSFER_DATA,
     service_ids::REQUEST_TRANSFER_EXIT,
 ];
+
+impl TesterPresentType {
+    #[must_use]
+    pub fn is_functional(&self) -> bool {
+        matches!(self, TesterPresentType::Functional(_))
+    }
+}
 
 impl DiagCommType {
     #[must_use]

@@ -1149,6 +1149,11 @@ impl<S: SecurityPlugin> cda_interfaces::EcuManager for EcuManager<S> {
         let mapped_service = self.lookup_diag_service(service).await?;
         Self::check_security_plugin(security_plugin, &mapped_service)
     }
+
+    fn functional_group(&self) -> String {
+        // todo: read this from database!
+        "fgl_uds_ethernet_doip_dobt".to_owned()
+    }
 }
 
 impl<S: SecurityPlugin> cda_interfaces::UdsComParamProvider for EcuManager<S> {
