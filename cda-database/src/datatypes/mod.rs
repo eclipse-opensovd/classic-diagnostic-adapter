@@ -612,4 +612,21 @@ impl DiagnosticDatabase {
             }
         }
     }
+
+    /// Get all functional groups from the ECU data
+    /// # Errors
+    /// `DiagServiceError::InvalidDatabase` if ECU data is not loaded or no functional groups found
+    pub fn functional_groups(
+        &self,
+    ) -> Result<Vec<dataformat::FunctionalGroup<'_>>, DiagServiceError> {
+        let ecu_data = self.ecu_data()?;
+        ecu_data
+            .functional_groups()
+            .map(|groups| groups.iter().collect())
+            .ok_or_else(|| {
+                DiagServiceError::InvalidDatabase(
+                    "No functional groups found in ECU data.".to_owned(),
+                )
+            })
+    }
 }

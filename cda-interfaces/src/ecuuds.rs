@@ -301,4 +301,12 @@ pub trait UdsEcu: Send + Sync + 'static {
         include_snapshot: bool,
         include_schema: bool,
     ) -> impl Future<Output = Result<DtcExtendedInfo, DiagServiceError>> + Send;
+
+    /// Get the functional groups an ECU belongs to.
+    /// # Errors
+    /// Returns `DiagServiceError::NotFound` if the ECU is not found.
+    fn ecu_functional_groups(
+        &self,
+        ecu_name: &str,
+    ) -> impl Future<Output = Result<Vec<String>, DiagServiceError>> + Send;
 }

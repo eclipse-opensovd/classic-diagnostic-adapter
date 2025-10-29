@@ -1150,9 +1150,18 @@ impl<S: SecurityPlugin> cda_interfaces::EcuManager for EcuManager<S> {
         Self::check_security_plugin(security_plugin, &mapped_service)
     }
 
-    fn functional_group(&self) -> String {
-        // todo: read this from database!
-        "fgl_uds_ethernet_doip_dobt".to_owned()
+    fn functional_groups(&self) -> Vec<String> {
+        let Ok(groups) = self.diag_database.functional_groups() else {
+            return Vec::new();
+        };
+        groups
+            .into_iter()
+            .filter_map(|group| {
+                group
+                    .diag_layer()
+                    .and_then(|dl| dl.short_name().map(str::to_lowercase))
+            })
+            .collect::<Vec<_>>()
     }
 }
 

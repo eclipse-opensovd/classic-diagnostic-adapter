@@ -1573,8 +1573,41 @@ impl<S: EcuGateway, R: DiagServiceResponse, T: EcuManager<Response = R>> UdsEcu
                 })
                 .await
             }
-            TesterPresentType::Functional(ref _functional_group) => {
-                todo!()
+            TesterPresentType::Functional(ref functional_group) => {
+                // find gateway ecus that are in the given functional group
+                for (name, ecu) in self.ecus.iter() {
+                    if ecu.read().await.logical_address()
+                        != ecu.read().await.logical_gateway_address()
+                    {
+                        continue; // skip non gateway ECUs
+                    }
+                    if !ecu
+                        .read()
+                        .await
+                        .functional_groups()
+                        .contains(functional_group)
+                    {
+                        continue; // skip ECUs not in the functional group
+                    }
+                    if let Err(e) = self
+                        .control_tester_present(TesterPresentControlMessage {
+                            mode: TesterPresentMode::Start,
+                            type_: type_.clone(),
+                            ecu: name.clone(),
+                            interval: None,
+                        })
+                        .await
+                    {
+                        tracing::warn!(
+                            functional_group = %functional_group,
+                            ecu_name = %name,
+                            error = %e,
+                            "Failed to start tester present for ECU in functional group"
+                        );
+                    }
+                }
+
+                Ok(())
             }
         }
     }
@@ -1591,10 +1624,54 @@ impl<S: EcuGateway, R: DiagServiceResponse, T: EcuManager<Response = R>> UdsEcu
                 })
                 .await
             }
-            TesterPresentType::Functional(ref _functional_group) => {
-                todo!()
+            TesterPresentType::Functional(ref functional_group) => {
+                // todo: extract this into a function functional_group_name -> Vec<ecu_name>
+                for (name, ecu) in self.ecus.iter() {
+                    if ecu.read().await.logical_address()
+                        != ecu.read().await.logical_gateway_address()
+                    {
+                        continue; // skip non gateway ECUs
+                    }
+                    if !ecu
+                        .read()
+                        .await
+                        .functional_groups()
+                        .contains(functional_group)
+                    {
+                        continue; // skip ECUs not in the functional group
+                    }
+                    if let Err(e) = self
+                        .control_tester_present(TesterPresentControlMessage {
+                            mode: TesterPresentMode::Stop,
+                            type_: type_.clone(),
+                            ecu: name.clone(),
+                            interval: None,
+                        })
+                        .await
+                    {
+                        tracing::warn!(
+                            functional_group = %functional_group,
+                            ecu_name = %name,
+                            error = %e,
+                            "Failed to stop tester present for ECU in functional group"
+                        );
+                    }
+                }
+
+                Ok(())
             }
         }
+    }
+
+    async fn ecu_functional_groups(&self, ecu_name: &str) -> Result<Vec<String>, DiagServiceError> {
+        let groups = self
+            .ecus
+            .get(ecu_name)
+            .ok_or(DiagServiceError::NotFound)?
+            .read()
+            .await
+            .functional_groups();
+        Ok(groups)
     }
 }
 

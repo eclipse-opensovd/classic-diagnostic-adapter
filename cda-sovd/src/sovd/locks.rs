@@ -50,7 +50,7 @@ pub(crate) struct Lock {
     expiration: DateTime<Utc>,
     owner: String,
     deletion_task: JoinHandle<()>,
-    _cleanup_on_drop: LockCleanupOnDrop,
+    cleanup_fn: LockCleanupFnHelper,
 }
 
 impl Lock {
@@ -66,7 +66,7 @@ impl Lock {
             expiration,
             owner,
             deletion_task,
-            _cleanup_on_drop: LockCleanupOnDrop(Some(cleanup_fn)),
+            cleanup_fn,
         }
     }
 }
@@ -96,23 +96,6 @@ impl LockCleanupFnHelper {
 
     async fn call(self) {
         (self.func)().await;
-    }
-}
-
-/// Helper struct to ensure that the cleanup function is called when the lock is dropped
-///
-/// We want to remove any tester present calls related to this lock when the lock is deleted
-/// and to ensure that it is not forgotten, each lock is created with its cleanup function
-/// and this struct ensures that the function is called when the lock is dropped
-struct LockCleanupOnDrop(Option<LockCleanupFnHelper>);
-
-impl Drop for LockCleanupOnDrop {
-    fn drop(&mut self) {
-        if let Some(drop_fn) = self.0.take() {
-            tokio::spawn(async move {
-                drop_fn.call().await;
-            });
-        }
     }
 }
 
@@ -187,21 +170,30 @@ impl WriteLock<'_> {
         }
     }
 
-    pub(crate) fn delete(&mut self, entity_name: Option<&String>) -> Result<(), ApiError> {
+    pub(crate) async fn delete(&mut self, entity_name: Option<&String>) -> Result<(), ApiError> {
         match self {
             WriteLock::HashMapLock(l) => {
                 let entity_name = entity_name.ok_or_else(|| {
                     ApiError::BadRequest("cannot delete, no entity name provided".to_owned())
                 })?;
-                if l.remove(entity_name).is_none() {
-                    return Err(ApiError::NotFound(Some(format!(
-                        "cannot delete, no entity {entity_name} is not locked",
-                    ))));
+                match l.remove(entity_name) {
+                    Some(e) => {
+                        if let Some(e) = e {
+                            e.cleanup_fn.call().await;
+                        }
+                    }
+                    None => {
+                        return Err(ApiError::NotFound(Some(format!(
+                            "cannot delete, no entity {entity_name} is not locked",
+                        ))));
+                    }
                 }
                 Ok(())
             }
             WriteLock::OptionLock(l) => {
-                **l = None;
+                if let Some(e) = l.take() {
+                    e.cleanup_fn.call().await;
+                }
                 Ok(())
             }
         }
@@ -586,7 +578,10 @@ pub(crate) mod functional_group {
         WithRejection, delete_handler, get_handler, get_id_handler, post_handler, put_handler,
         vehicle_read_lock,
     };
-    use crate::openapi;
+    use crate::{
+        openapi,
+        sovd::locks::{LockType, delete_lock},
+    };
 
     openapi::aide_helper::gen_path_param!(FunctionalGroupLockPathParam group String);
 
@@ -700,7 +695,55 @@ pub(crate) mod functional_group {
             .into_response();
         }
 
-        // todo (out of scope for poc) check if any of the ecus is already locked]
+        match &state.locks.ecu {
+            LockType::Ecu(eculocks) => {
+                let mut functionalgroup_ecus = Vec::new();
+                for (ecu, lock_info) in eculocks.read().await.iter() {
+                    let ecu_functional_groups = match state
+                        .uds
+                        .ecu_functional_groups(ecu)
+                        .await
+                        .map_err(ApiError::from)
+                    {
+                        Ok(groups) => groups,
+                        Err(e) => {
+                            return ErrorWrapper {
+                                error: e,
+                                include_schema: false,
+                            }
+                            .into_response();
+                        }
+                    };
+                    if !ecu_functional_groups.contains(&group) {
+                        continue;
+                    }
+                    if let Some(lock_info) = lock_info {
+                        if lock_info.owner != claims.sub() {
+                            return ErrorWrapper {
+                                error: ApiError::Conflict(format!(
+                                    "ECU {ecu} is locked by different user. This prevents setting \
+                                     functional group lock"
+                                )),
+                                include_schema: false,
+                            }
+                            .into_response();
+                        }
+                        functionalgroup_ecus.push((ecu.clone(), lock_info.sovd.id.clone()));
+                    }
+                }
+                for (ecu, id) in functionalgroup_ecus {
+                    if let Err(e) = delete_lock(&state.locks.ecu, &id, &claims, Some(&ecu)).await {
+                        return ErrorWrapper {
+                            error: e,
+                            include_schema: false,
+                        }
+                        .into_response();
+                    }
+                }
+            }
+            _ => unreachable!(),
+        }
+
         post_handler(
             &state.uds,
             &state.locks.functional_group,
@@ -776,7 +819,7 @@ async fn create_lock<T: UdsEcu + Clone>(
             LockType::Ecu(_) => {
                 let ecu_name = entity_name
                     .ok_or_else(|| ApiError::BadRequest("No ECU name provided".to_owned()))?
-                    .to_owned();
+                    .to_lowercase();
                 let tp_type = TesterPresentType::Ecu(ecu_name);
                 uds.start_tester_present(tp_type.clone())
                     .await
@@ -785,16 +828,33 @@ async fn create_lock<T: UdsEcu + Clone>(
                 let uds = (*uds).clone();
                 LockCleanupFnHelper::new(async move || {
                     if let Err(e) = uds.stop_tester_present(tp_type).await {
-                        tracing::error!("Failed to stop tester present for lock cleanup: {}", e);
+                        tracing::error!("Failed to stop tester present for lock cleanup: {e}");
+                    } else {
+                        tracing::info!("Tester present stopped for ECU lock cleanup");
                     }
                 })
             }
-            l => {
-                let lock_type_name = l.to_string();
+            LockType::FunctionalGroup(_) => {
+                let functional_group_name = entity_name
+                    .ok_or_else(|| {
+                        ApiError::BadRequest("No functional group name provided".to_owned())
+                    })?
+                    .to_lowercase();
+                let tp_type = TesterPresentType::Functional(functional_group_name);
+                uds.start_tester_present(tp_type.clone())
+                    .await
+                    .map_err(ApiError::from)?;
+                let uds = (*uds).clone();
                 LockCleanupFnHelper::new(async move || {
-                    tracing::trace!("No cleanup implemented for lock type {lock_type_name}");
+                    if let Err(e) = uds.stop_tester_present(tp_type).await {
+                        tracing::error!("Failed to stop tester present for lock cleanup: {e}");
+                    }
+                    tracing::info!("Tester present stopped for functional group lock cleanup");
                 })
             }
+            LockType::Vehicle(_) => LockCleanupFnHelper::new(async move || {
+                tracing::trace!("No cleanup implemented for vehicle lock type");
+            }),
         }
     };
 
@@ -900,6 +960,26 @@ pub(crate) async fn validate_lock(
     None
 }
 
+async fn delete_lock(
+    lock: &LockType,
+    lock_id: &str,
+    claims: &impl Claims,
+    entity_name: Option<&String>,
+) -> Result<(), ApiError> {
+    let mut rw_lock = lock.lock_rw().await;
+    let entity_lock = rw_lock.get_mut(entity_name)?;
+
+    validate_claim(Some(lock_id), claims, entity_lock.as_ref())?;
+
+    if let Some(l) = entity_lock {
+        l.deletion_task.abort();
+        rw_lock.delete(entity_name).await?;
+        Ok(())
+    } else {
+        Err(ApiError::NotFound(Some("No lock found".to_owned())))
+    }
+}
+
 #[tracing::instrument(
     skip(lock, claims),
     fields(
@@ -917,42 +997,13 @@ async fn delete_handler(
 ) -> Response {
     tracing::info!("Attempting to delete lock");
 
-    let mut rw_lock = lock.lock_rw().await;
-    let entity_lock = match rw_lock.get_mut(entity_name) {
-        Ok(lock) => lock,
-        Err(e) => {
-            return ErrorWrapper {
-                error: e,
-                include_schema,
-            }
-            .into_response();
-        }
-    };
-
-    if let Err(e) = validate_claim(Some(lock_id), claims, entity_lock.as_ref()) {
-        return ErrorWrapper {
+    match delete_lock(lock, lock_id, claims, entity_name).await {
+        Ok(()) => StatusCode::NO_CONTENT.into_response(),
+        Err(e) => ErrorWrapper {
             error: e,
             include_schema,
         }
-        .into_response();
-    }
-
-    if let Some(l) = entity_lock {
-        l.deletion_task.abort();
-        if let Err(e) = rw_lock.delete(entity_name) {
-            return ErrorWrapper {
-                error: e,
-                include_schema,
-            }
-            .into_response();
-        }
-        StatusCode::NO_CONTENT.into_response()
-    } else {
-        ErrorWrapper {
-            error: ApiError::NotFound(Some("No lock found".to_owned())),
-            include_schema,
-        }
-        .into_response()
+        .into_response(),
     }
 }
 
