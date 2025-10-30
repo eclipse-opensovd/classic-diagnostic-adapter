@@ -13,7 +13,10 @@
 
 use sovd_interfaces::error::ApiErrorResponse;
 
-use super::*;
+use super::{
+    ApiError, DiagServiceResponse, ErrorWrapper, FileManager, IntoResponse, Json, Query, Response,
+    State, StatusCode, TransformOperation, UdsEcu, WebserverEcuState, WithRejection,
+};
 use crate::sovd::{self, create_schema};
 
 pub(crate) async fn get<R: DiagServiceResponse, T: UdsEcu + Clone, U: FileManager>(
@@ -33,7 +36,10 @@ pub(crate) async fn get<R: DiagServiceResponse, T: UdsEcu + Clone, U: FileManage
     match uds.get_components_data_info(&ecu_name).await {
         Ok(mut items) => {
             let sovd_component_data = sovd_interfaces::components::ecu::data::get::Response {
-                items: items.drain(0..).map(|info| info.into_sovd()).collect(),
+                items: items
+                    .drain(0..)
+                    .map(crate::sovd::IntoSovd::into_sovd)
+                    .collect(),
                 schema,
             };
             (StatusCode::OK, Json(sovd_component_data)).into_response()

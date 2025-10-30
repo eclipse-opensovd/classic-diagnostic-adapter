@@ -11,6 +11,9 @@ description = "SOVD webserver used in CDA"
 homepage.workspace = true
 license.workspace = true
 
+[lints]
+workspace = true
+
 [lib]
 path = "src/lib.rs"
 

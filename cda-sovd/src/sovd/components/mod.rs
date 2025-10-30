@@ -24,8 +24,8 @@ pub(crate) mod ecu;
 
 crate::openapi::aide_helper::gen_path_param!(IdPathParam id String);
 
-/// Wrapper Struct around [FieldParseError] to allow implementing
-/// [From] for [DataError<VendorErrorCode>]
+/// Wrapper Struct around [`FieldParseError`] to allow implementing
+/// [From] for [`DataError`<VendorErrorCode>]
 struct FieldParseErrorWrapper(FieldParseError);
 impl From<FieldParseErrorWrapper> for DataError<VendorErrorCode> {
     fn from(value: FieldParseErrorWrapper) -> Self {

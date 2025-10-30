@@ -15,5 +15,5 @@
 
 
 #[rustfmt::skip]
-#[allow(clippy::all, dead_code, unused_imports)]
+#[allow(clippy::all, dead_code, unused_imports, warnings)]
 pub mod diagnostic_description;

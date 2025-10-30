@@ -51,11 +51,8 @@ impl From<DiagServiceError> for ApiError {
             | DiagServiceError::DatabaseEntryNotFound(_)
             | DiagServiceError::VariantDetectionError(_)
             | DiagServiceError::EcuOffline(_)
-            | DiagServiceError::ConnectionClosed => {
-                ApiError::InternalServerError(Some(value.to_string()))
-            }
-
-            DiagServiceError::InvalidRequest(_)
+            | DiagServiceError::ConnectionClosed
+            | DiagServiceError::InvalidRequest(_)
             | DiagServiceError::SendFailed(_)
             | DiagServiceError::ParameterConversionError(_)
             | DiagServiceError::BadPayload(_)
@@ -250,7 +247,7 @@ impl IntoResponse for ErrorWrapper {
 }
 
 pub(crate) fn api_error_from_diag_response(
-    response: impl DiagServiceResponse,
+    response: &impl DiagServiceResponse,
     include_schema: bool,
 ) -> Response {
     let nrc = match response.as_nrc() {

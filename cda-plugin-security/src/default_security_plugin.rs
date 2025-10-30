@@ -140,22 +140,19 @@ impl AuthorizationRequestHandler for DefaultSecurityPlugin {
             exp: 2_000_000_000, // May 2033
         };
         // Create the authorization token
-        let token = match encode(&Header::default(), &claims, &KEYS.encoding) {
-            Ok(token) => token,
-            Err(_) => {
-                return (
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    Json(ApiErrorResponse::<()> {
-                        message: "Internal server error".to_string(),
-                        error_code: ErrorCode::SovdServerFailure,
-                        vendor_code: None,
-                        parameters: None,
-                        error_source: None,
-                        schema: None,
-                    }),
-                )
-                    .into_response();
-            }
+        let Ok(token) = encode(&Header::default(), &claims, &KEYS.encoding) else {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ApiErrorResponse::<()> {
+                    message: "Internal server error".to_string(),
+                    error_code: ErrorCode::SovdServerFailure,
+                    vendor_code: None,
+                    parameters: None,
+                    error_source: None,
+                    schema: None,
+                }),
+            )
+                .into_response();
         };
 
         // Send the authorized token

@@ -32,7 +32,7 @@ pub mod sovd2uds {
                 pub qualifier: String,
                 /// ECU variant
                 pub variant: String,
-                /// ECU state \[Online, Offline, NotTested]
+                /// ECU state \[Online, Offline, `NotTested`]
                 #[serde(rename = "EcuState")]
                 pub state: String,
                 /// ECU logical address

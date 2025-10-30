@@ -158,13 +158,14 @@ pub struct EcuDataBuilder<'a> {
     max_param_id: u32,
 }
 
-impl<'a> Default for EcuDataBuilder<'a> {
+impl Default for EcuDataBuilder<'_> {
     fn default() -> Self {
         Self::new()
     }
 }
 
 impl<'a> EcuDataBuilder<'a> {
+    #[must_use]
     pub fn new() -> Self {
         Self {
             fbb: flatbuffers::FlatBufferBuilder::new(),
@@ -463,7 +464,7 @@ impl<'a> EcuDataBuilder<'a> {
 
     pub fn create_param(
         &mut self,
-        params: ParameterParams<'a>,
+        params: &ParameterParams<'a>,
     ) -> WIPOffset<dataformat::Param<'a>> {
         let short_name_offset = params.short_name.map(|s| self.fbb.create_string(s));
         let semantic_offset = params.semantic.map(|s| self.fbb.create_string(s));
@@ -511,7 +512,7 @@ impl<'a> EcuDataBuilder<'a> {
             .value_offset(),
         );
 
-        self.create_param(ParameterParams {
+        self.create_param(&ParameterParams {
             param_type: dataformat::ParamType::CODED_CONST,
             short_name: Some(name),
             semantic: None,
@@ -542,7 +543,7 @@ impl<'a> EcuDataBuilder<'a> {
             .value_offset(),
         );
 
-        self.create_param(ParameterParams {
+        self.create_param(&ParameterParams {
             param_type: dataformat::ParamType::VALUE,
             short_name: Some(name),
             semantic: None,

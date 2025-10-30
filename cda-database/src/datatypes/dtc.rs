@@ -16,11 +16,11 @@ impl From<dataformat::DTC<'_>> for cda_interfaces::datatypes::DtcRecord {
     fn from(val: dataformat::DTC<'_>) -> Self {
         cda_interfaces::datatypes::DtcRecord {
             code: val.trouble_code(),
-            display_code: val.display_trouble_code().map(|s| s.to_owned()),
-            fault_name: val
-                .short_name()
-                .map(|s| s.to_owned())
-                .unwrap_or_else(|| format!("DTC_{}", val.trouble_code())),
+            display_code: val.display_trouble_code().map(ToOwned::to_owned),
+            fault_name: val.short_name().map_or_else(
+                || format!("DTC_{}", val.trouble_code()),
+                std::borrow::ToOwned::to_owned,
+            ),
             severity: val.level().unwrap_or_default().to_owned(),
         }
     }

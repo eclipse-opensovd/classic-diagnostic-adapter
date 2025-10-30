@@ -153,20 +153,12 @@ async fn main() -> Result<(), String> {
         }
     };
 
-    let uds = match opensovd_cda_lib::create_uds_manager(
+    let uds = opensovd_cda_lib::create_uds_manager(
         diagnostic_gateway,
         databases,
         variant_detection_rx,
         tester_present_rx,
-    )
-    .await
-    {
-        Ok(uds) => uds,
-        Err(e) => {
-            tracing::error!(error = %e, "Failed to create uds manager");
-            return Err(e);
-        }
-    };
+    );
 
     match opensovd_cda_lib::start_webserver(
         flash_files_path,

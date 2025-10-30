@@ -50,6 +50,9 @@ pub mod tokio_ext {
     }
 }
 
+/// Pad a byte slice to 4 bytes for u32 conversion.
+/// # Errors
+/// Returns `DiagServiceError::ParameterConversionError` if the input slice is longer than 4 bytes.
 pub fn u32_padded_bytes(data: &[u8]) -> Result<[u8; 4], DiagServiceError> {
     if data.len() > 4 {
         return Err(DiagServiceError::ParameterConversionError(format!(
@@ -61,15 +64,24 @@ pub fn u32_padded_bytes(data: &[u8]) -> Result<[u8; 4], DiagServiceError> {
     let bytes: [u8; 4] = if padd > 0 {
         let mut padded: Vec<u8> = vec![0u8; padd];
         padded.extend(data.to_vec());
-        padded
-            .try_into()
-            .expect("The padded 8 byte value can never exceed the 8 bytes")
+        padded.try_into().map_err(|_| {
+            DiagServiceError::ParameterConversionError(
+                "The padded 4 byte value can never exceed the 4 bytes".to_owned(),
+            )
+        })?
     } else {
-        data.try_into()
-            .expect("Converting an < 8 byte vector into an 8 byte array.")
+        data.try_into().map_err(|_| {
+            DiagServiceError::ParameterConversionError(
+                "Converting an < 4 byte vector into a 4 byte array.".to_owned(),
+            )
+        })?
     };
     Ok(bytes)
 }
+/// Pad a byte slice to 8 bytes for f64 conversion.
+/// # Errors
+/// Returns `DiagServiceError::ParameterConversionError` if the input slice is longer than
+/// 8 bytes.
 pub fn f64_padded_bytes(data: &[u8]) -> Result<[u8; 8], DiagServiceError> {
     if data.len() > 8 {
         return Err(DiagServiceError::ParameterConversionError(format!(
@@ -81,16 +93,27 @@ pub fn f64_padded_bytes(data: &[u8]) -> Result<[u8; 8], DiagServiceError> {
     let bytes: [u8; 8] = if padd > 0 {
         let mut padded: Vec<u8> = vec![0u8; padd];
         padded.extend(data.to_vec());
-        padded
-            .try_into()
-            .expect("The padded 8 byte value can never exceed the 8 bytes")
+        padded.try_into().map_err(|_| {
+            DiagServiceError::ParameterConversionError(
+                "The padded 8 byte value can never exceed the 8 bytes".to_owned(),
+            )
+        })?
     } else {
-        data.try_into()
-            .expect("Converting an < 8 byte vector into an 8 byte array.")
+        data.try_into().map_err(|_| {
+            DiagServiceError::ParameterConversionError(
+                "Converting an < 8 byte vector into an 8 byte array.".to_owned(),
+            )
+        })?
     };
     Ok(bytes)
 }
 
+/// Decode a hex string into a byte vector.
+/// If the string has an odd length, it is padded with a leading '0' for the last byte.
+/// Example: "A3F" -> [0xA3, 0x0F]
+/// # Errors
+/// Returns `DiagServiceError::ParameterConversionError` if the string contains
+/// non-hex characters or is otherwise invalid.
 pub fn decode_hex(value: &str) -> Result<Vec<u8>, DiagServiceError> {
     if !value.chars().all(|c| c.is_ascii_hexdigit()) {
         return Err(DiagServiceError::ParameterConversionError(
@@ -119,6 +142,11 @@ pub fn decode_hex(value: &str) -> Result<Vec<u8>, DiagServiceError> {
 /// * `bit_pos` - Bit position to start, counting starts at least significant bit.
 ///   Valid range is 0..=7.
 /// * `data` - Source data slice.
+/// # Errors
+/// * `DiagServiceError::BadPayload` - If the bit position is out of range,
+///   or if the bit length is zero, or if the bit position + length exceeds data length.
+/// # Returns
+/// A vector containing the extracted bits packed into bytes.
 pub fn extract_bits(
     bit_len: usize,
     bit_pos: usize,
@@ -165,6 +193,7 @@ pub fn extract_bits(
 /// Fast ASCII-only case-insensitive prefix check without allocations.
 /// Returns true if `text` starts with `prefix`.
 #[inline]
+#[must_use]
 pub fn starts_with_ignore_ascii_case(text: &str, prefix: &str) -> bool {
     text.len() >= prefix.len() && text[..prefix.len()].eq_ignore_ascii_case(prefix)
 }
@@ -233,5 +262,13 @@ mod tests {
         let src = [0b_1010_1010];
         let result = extract_bits(8, 0, &src).unwrap();
         assert_eq!(result, vec![0b_1010_1010]);
+    }
+
+    #[test]
+    fn test_decode_hex() {
+        let result = decode_hex("A3F").unwrap();
+        assert_eq!(result, vec![0xA3, 0x0F]);
+        let result = decode_hex("0A3F").unwrap();
+        assert_eq!(result, vec![0x0A, 0x3F]);
     }
 }

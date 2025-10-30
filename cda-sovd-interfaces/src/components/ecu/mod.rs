@@ -95,12 +95,12 @@ pub struct ServiceSdgs {
 }
 
 pub mod get {
-    use super::*;
+    use super::Ecu;
     pub type Response = Ecu;
 }
 
 pub mod configurations {
-    use super::*;
+    use super::{Deserialize, Serialize};
 
     #[derive(Deserialize, Serialize, Debug, schemars::JsonSchema)]
     pub struct Components {
@@ -123,7 +123,7 @@ pub mod configurations {
     pub type ConfigurationsQuery = crate::IncludeSchemaQuery;
 
     pub mod get {
-        use super::*;
+        use super::Components;
         pub type Response = Components;
     }
 }
@@ -132,7 +132,7 @@ pub mod data {
     use hashbrown::HashMap;
     use serde::Deserialize;
 
-    use super::*;
+    use super::ComponentData;
     use crate::Payload;
 
     #[derive(Deserialize, schemars::JsonSchema)]
@@ -153,7 +153,7 @@ pub mod data {
     }
 
     pub mod get {
-        use super::*;
+        use super::ComponentData;
         pub type Response = ComponentData;
         pub type Query = crate::IncludeSchemaQuery;
     }
@@ -238,7 +238,7 @@ pub mod x {
                     pub type Response = Items<DataTransferMetaData>;
 
                     pub mod id {
-                        use super::*;
+                        use super::DataTransferMetaData;
                         pub type Response = DataTransferMetaData;
                     }
                 }
@@ -354,16 +354,16 @@ pub mod x {
 }
 
 pub mod faults {
-    use super::*;
+    use super::{Deserialize, HashMap, Serialize};
 
     /// Representation of a fault / DTC (Diagnostic Trouble Code)
-    /// as described in the OpenSOVD specification.
+    /// as described in the `OpenSOVD` specification.
     /// The following fields are omitted because the CDA does not provide
     /// this information:
     /// * Symptom
     /// * Translation IDs
     ///
-    /// This is still compliant with the OpenSOVD specification, as these fields are optional.
+    /// This is still compliant with the `OpenSOVD` specification, as these fields are optional.
     #[derive(Serialize, schemars::JsonSchema)]
     pub struct Fault {
         ///Fault code in the native representation of the entity.
@@ -408,7 +408,7 @@ pub mod faults {
     }
 
     pub mod get {
-        use super::*;
+        use super::{Deserialize, Fault, HashMap, Serialize};
 
         #[derive(Debug, Serialize, Deserialize, schemars::JsonSchema)]
         /// Query parameters for filtering DTC by the given fields.
@@ -452,9 +452,9 @@ pub mod faults {
     }
 
     pub mod id {
-        use super::*;
+        use super::{Deserialize, Fault, HashMap, Serialize};
         pub mod get {
-            use super::*;
+            use super::{Deserialize, Fault, HashMap, Serialize};
             use crate::{default_true, error::DataError};
 
             #[derive(Serialize, Deserialize, schemars::JsonSchema)]

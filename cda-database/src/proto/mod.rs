@@ -14,5 +14,5 @@
 // @generated
 
 #[rustfmt::skip]
-#[allow(clippy::all, dead_code)]
+#[allow(clippy::all, dead_code, warnings)]
 pub mod fileformat;

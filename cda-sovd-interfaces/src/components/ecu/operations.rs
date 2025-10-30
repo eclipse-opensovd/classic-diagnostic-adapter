@@ -17,7 +17,7 @@ use serde::{Deserialize, Serialize};
 pub mod comparams {
     use serde::Deserializer;
 
-    use super::*;
+    use super::{Deserialize, HashMap, Serialize};
 
     #[derive(Deserialize, Serialize, Clone, Debug, schemars::JsonSchema)]
     pub struct Unit {
@@ -81,7 +81,7 @@ pub mod comparams {
     }
 
     pub mod executions {
-        use super::*;
+        use super::{ComParamValue, Deserialize, HashMap, Serialize};
 
         #[derive(Deserialize, Serialize, Clone)]
         #[serde(rename_all = "lowercase")]
@@ -109,7 +109,7 @@ pub mod comparams {
         }
 
         pub mod update {
-            use super::*;
+            use super::{Capability, ComParamValue, Deserialize, HashMap, Serialize, Status};
             // todo: which ones are optional or not
             #[derive(Deserialize)]
             #[allow(dead_code)]
@@ -136,7 +136,7 @@ pub mod comparams {
         }
 
         pub mod get {
-            use super::*;
+            use super::Item;
             use crate::Items;
 
             pub type Response = Items<Item>;
@@ -144,9 +144,9 @@ pub mod comparams {
         }
 
         pub mod id {
-            use super::*;
+            use super::{Capability, ComParamValue, HashMap, Serialize, Status};
             pub mod get {
-                use super::*;
+                use super::{Capability, ComParamValue, HashMap, Serialize, Status};
                 #[derive(Serialize, schemars::JsonSchema)]
                 #[schemars(rename = "GetExecutionResponse")]
                 pub struct Response {
@@ -167,9 +167,9 @@ pub mod comparams {
 }
 
 pub mod service {
-    use super::*;
+    use super::{Deserialize, HashMap, Serialize};
     pub mod executions {
-        use super::*;
+        use super::{Deserialize, HashMap, Serialize};
         use crate::{Payload, error::DataError};
 
         #[derive(Serialize, schemars::JsonSchema)]

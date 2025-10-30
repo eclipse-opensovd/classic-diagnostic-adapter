@@ -100,6 +100,9 @@ pub trait EcuManager:
     ) -> impl Future<Output = Result<(), DiagServiceError>> + Send;
     fn get_variant_detection_requests(&self) -> &HashSet<String>;
     /// Communication parameters for the ECU.
+    /// # Errors
+    /// Will return `DiagServiceError` if the communication
+    /// parameters cannot be found in the database.
     fn comparams(&self) -> Result<ComplexComParamValue, DiagServiceError>;
     fn sdgs(
         &self,
@@ -189,10 +192,16 @@ pub trait EcuManager:
     ) -> Result<SecurityAccess, DiagServiceError>;
     /// Retrieves the name of the current ecu session, i.e. 'extended', 'programming' or 'default'.
     /// The examples above differ depending on the parameterization of the ECU.
+    /// # Errors
+    /// Will return `DiagServiceError` if the session cannot be found in the database
+    /// or no session is currently set or no variant is loaded.
     fn session(&self) -> Result<String, DiagServiceError>;
     /// Retrieves the name of the current ecu security level,
-    /// i.e. 'level_42'
+    /// i.e. `level_42`
     /// The exact values depends on the ECU parameterization.
+    /// # Errors
+    /// Will return `DiagServiceError` if the security access cannot be found in the database
+    /// or no security access is currently set or no variant is loaded.
     fn security_access(&self) -> Result<String, DiagServiceError>;
     /// Lookup a service by a given function class name and service id.
     /// # Errors
@@ -210,12 +219,16 @@ pub trait EcuManager:
     /// Retrieve all `read` services for the current ECU variant.
     fn get_components_data_info(&self) -> Vec<ComponentDataInfo>;
     /// Retrieve all configuration type services for the current ECU variant.
+    /// # Errors
+    /// Returns `DiagServiceError` if the lookup failed.
     fn get_components_configurations_info(
         &self,
     ) -> Result<Vec<ComponentConfigurationsInfo>, DiagServiceError>;
     /// Retrieve all 'single ecu' jobs for the current ECU variant.
     fn get_components_single_ecu_jobs_info(&self) -> Vec<ComponentDataInfo>;
     /// Lookup DTC services for the given service types in the current ECU variant.
+    /// # Errors
+    /// Returns `DiagServiceError` if the lookup failed.
     fn lookup_dtc_services(
         &self,
         service_types: Vec<DtcReadInformationFunction>,

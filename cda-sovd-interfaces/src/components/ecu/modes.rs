@@ -39,7 +39,7 @@ pub enum ModeType {
 pub type Query = crate::IncludeSchemaQuery;
 
 pub mod get {
-    use super::*;
+    use super::Mode;
     use crate::Items;
 
     pub type Response = Items<Mode<()>>;

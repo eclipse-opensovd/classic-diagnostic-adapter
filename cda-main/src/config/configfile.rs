@@ -43,6 +43,8 @@ pub struct DoipConfig {
 
 pub trait ConfigSanity {
     /// Checks the configuration for common mistakes and returns an error message if found.
+    /// # Errors
+    /// Returns `Err(String)` if a sanity check fails, with a descriptive error message.
     fn validate_sanity(&self) -> Result<(), String>;
 }
 
@@ -80,6 +82,8 @@ impl ConfigSanity for Configuration {
 impl ConfigSanity for DatabaseNamingConvention {
     fn validate_sanity(&self) -> Result<(), String> {
         const SHORT_NAME_AFFIX_KEY: &str = "database_naming_convention.short_name_affixes";
+        const LONG_NAME_AFFIX_KEY: &str = "database_naming_convention.long_name_affixes";
+
         // Check short name affixes
         for affix in &self.short_name_affixes {
             match self.short_name_affix_position {
@@ -99,7 +103,7 @@ impl ConfigSanity for DatabaseNamingConvention {
                 }
             }
         }
-        const LONG_NAME_AFFIX_KEY: &str = "database_naming_convention.long_name_affixes";
+
         // Check long name affixes
         for affix in &self.long_name_affixes {
             match self.long_name_affix_position {

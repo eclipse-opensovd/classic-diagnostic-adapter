@@ -64,7 +64,7 @@ async fn sovd_to_func_class_service_exec<T: UdsEcu + Clone>(
     };
 
     if let DiagServiceResponseType::Negative = response.response_type() {
-        return Err(api_error_from_diag_response(response, include_schema).into_response());
+        return Err(api_error_from_diag_response(&response, include_schema).into_response());
     }
 
     let mapped_data = match response.into_json() {
@@ -157,7 +157,7 @@ pub(crate) mod request_download {
                 let Ok(subschema) = uds
                     .schema_for_responses(&ecu_name, &service)
                     .await
-                    .map(|s| s.into_schema())
+                    .map(cda_interfaces::SchemaDescription::into_schema)
                 else {
                     break 'schema None;
                 };
@@ -233,7 +233,7 @@ pub(crate) mod request_download {
                     res.example(sovd2uds::download::request_download::put::Response {
                         parameters: [
                             ("val1".to_owned(), serde_json::json!("example1")),
-                            ("val2".to_owned(), serde_json::json!(123456)),
+                            ("val2".to_owned(), serde_json::json!(123_456)),
                         ]
                         .into_iter()
                         .collect(),
@@ -431,7 +431,11 @@ pub(crate) mod flash_transfer {
     }
 
     pub(crate) mod id {
-        use super::*;
+        use super::{
+            ApiError, DiagServiceResponse, ErrorWrapper, FileManager, IntoResponse, IntoSovd, Json,
+            Path, Query, Response, Secured, State, StatusCode, TransformOperation, UdsEcu, UseApi,
+            WebserverEcuState, WithRejection, create_schema, openapi, sovd2uds,
+        };
         use crate::sovd::components::IdPathParam;
         pub(crate) async fn get<R: DiagServiceResponse, T: UdsEcu + Clone, U: FileManager>(
             Path(id): Path<IdPathParam>,
@@ -539,9 +543,11 @@ pub(crate) mod flash_transfer {
                 id: self.id,
                 file_id: self.file_id,
                 status: self.status.into_sovd(),
-                error: self
-                    .error
-                    .map(|e| e.into_iter().map(|e| e.into_sovd()).collect()),
+                error: self.error.map(|e| {
+                    e.into_iter()
+                        .map(crate::sovd::IntoSovd::into_sovd)
+                        .collect()
+                }),
                 schema: None,
             }
         }
@@ -551,7 +557,9 @@ pub(crate) mod flash_transfer {
         type SovdType = Vec<sovd2uds::download::flash_transfer::get::DataTransferMetaData>;
 
         fn into_sovd(self) -> Self::SovdType {
-            self.into_iter().map(|md| md.into_sovd()).collect()
+            self.into_iter()
+                .map(crate::sovd::IntoSovd::into_sovd)
+                .collect()
         }
     }
 }

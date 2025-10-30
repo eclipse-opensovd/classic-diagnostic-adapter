@@ -41,6 +41,9 @@ pub trait AuthApi: Send + Sync + 'static {
 }
 
 pub trait SecurityApi: Send + Sync + 'static {
+    /// Validate if the given service can be accessed by the current user.
+    /// # Errors
+    /// Returns `DiagServiceError` if the service is not accessible.
     fn validate_service(
         &self,
         service: &cda_database::datatypes::DiagService,

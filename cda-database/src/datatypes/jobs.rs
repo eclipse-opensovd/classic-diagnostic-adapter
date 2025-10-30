@@ -28,7 +28,7 @@ impl From<dataformat::JobParam<'_>> for cda_interfaces::datatypes::single_ecu::P
             short_name: val.short_name().map(ToOwned::to_owned).unwrap_or_default(),
             physical_default_value: val.physical_default_value().map(ToOwned::to_owned),
             semantic: val.semantic().map(ToOwned::to_owned),
-            long_name: val.long_name().map(|ln| ln.into()),
+            long_name: val.long_name().map(Into::into),
         }
     }
 }
@@ -50,15 +50,15 @@ impl From<dataformat::SingleEcuJob<'_>> for cda_interfaces::datatypes::single_ec
         cda_interfaces::datatypes::single_ecu::Job {
             input_params: val
                 .input_params()
-                .map(|p| p.iter().map(|jp| jp.into()).collect())
+                .map(|p| p.iter().map(Into::into).collect())
                 .unwrap_or_default(),
             output_params: val
                 .output_params()
-                .map(|p| p.iter().map(|jp| jp.into()).collect())
+                .map(|p| p.iter().map(Into::into).collect())
                 .unwrap_or_default(),
             neg_output_params: val
                 .neg_output_params()
-                .map(|p| p.iter().map(|jp| jp.into()).collect())
+                .map(|p| p.iter().map(Into::into).collect())
                 .unwrap_or_default(),
             prog_codes: val
                 .prog_codes()

@@ -39,13 +39,11 @@ pub(super) fn lookup(
                 cp_ref
                     .protocol()
                     .and_then(|p| p.diag_layer().and_then(|dl| dl.short_name()))
-                    .map(|sn| sn == protocol_name)
-                    .unwrap_or(false)
+                    .is_some_and(|sn| sn == protocol_name)
                     && cp_ref
                         .com_param()
                         .and_then(|cp| cp.short_name())
-                        .map(|n| n == param_name)
-                        .unwrap_or(false)
+                        .is_some_and(|n| n == param_name)
             })
         })
         .ok_or(DiagServiceError::DatabaseEntryNotFound(format!(
@@ -120,6 +118,9 @@ fn resolve_with_value(
     }
 }
 
+/// Resolve a `ComParamRef` into its name and value.
+/// # Errors
+/// If the `ComParamRef` is invalid or has no value.
 pub fn resolve_comparam(
     cpref: &dataformat::ComParamRef,
 ) -> Result<(String, ComParamValue), DiagServiceError> {

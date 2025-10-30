@@ -241,13 +241,13 @@ pub fn load_proto_data(
         chunks_loaded = proto_data.len(),
         "Loaded ECU data"
     );
-    Ok((proto_file.ecu_name.to_string(), proto_data))
+    Ok((proto_file.ecu_name.clone(), proto_data))
 }
 
-pub(crate) fn read_ecudata(
-    bytes: &[u8],
-    flatbuf_config: FlatbBufConfig,
-) -> Result<dataformat::EcuData<'_>, String> {
+pub(crate) fn read_ecudata<'a>(
+    bytes: &'a [u8],
+    flatbuf_config: &FlatbBufConfig,
+) -> Result<dataformat::EcuData<'a>, String> {
     let start = Instant::now();
     let ecu_data = if flatbuf_config.verify {
         dataformat::root_as_ecu_data_with_opts(
@@ -272,7 +272,7 @@ pub(crate) fn read_ecudata(
     tracing::trace!(
         duration = ?end.saturating_duration_since(start),
         ecu_name = %ecu_data.as_ref()
-            .ok().and_then(|ecu_data| ecu_data.ecu_name()).unwrap_or("unknown"),
+            .ok().and_then(dataformat::EcuData::ecu_name).unwrap_or("unknown"),
         "Parsed flatbuff data"
     );
     ecu_data

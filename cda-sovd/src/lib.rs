@@ -147,7 +147,7 @@ fn rewrite_request_uri<B>(mut req: Request<B>) -> Request<B> {
     // needing to decode them later on.
     let decoded = percent_encoding::percent_decode_str(
         uri.path_and_query()
-            .map(|pq| pq.as_str())
+            .map(http::uri::PathAndQuery::as_str)
             .unwrap_or_default(),
     )
     .decode_utf8()
