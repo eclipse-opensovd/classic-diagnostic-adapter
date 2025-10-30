@@ -87,6 +87,10 @@ macro_rules! dataformat_wrapper {
 macro_rules! impl_diag_coded_type {
     ($type_name:ident) => {
         impl $type_name<'_> {
+            /// Get the `DiagCodedType` of the type and convert into the cda interface type
+            /// # Errors
+            /// Returns `DiagServiceError` if the `DiagCodedType`
+            /// is not found or cannot be converted
             pub fn diag_coded_type(&self) -> Result<DiagCodedType, DiagServiceError> {
                 if let Some(dc) = self.0.diag_coded_type() {
                     dc.try_into()
@@ -142,23 +146,31 @@ dataformat_wrapper!(DefaultCase<'a>, dataformat::DefaultCase<'a>);
 dataformat_wrapper!(DbDataType, dataformat::DataType);
 
 impl DefaultCase<'_> {
+    #[must_use]
     pub fn case_struct_dop(&self) -> Option<StructureDop<'_>> {
         self.0
             .structure()
-            .and_then(|s| s.specific_data_as_structure().map(|d| d.into()))
+            .and_then(|s| s.specific_data_as_structure().map(Into::into))
     }
 }
 
 impl DiagService<'_> {
+    #[must_use]
     pub fn request_id(&self) -> Option<u8> {
+        // allow the truncation, so we can re-use the same conversion function
+        // for the sub-function id which is u16
+        // per ISO 14229-1 the SID is 1 byte
+        #[allow(clippy::cast_possible_truncation)]
         self.find_request_sid_or_sub_func_param(0, 0)
             .map(|(sid, _)| sid as u8)
     }
 
+    #[must_use]
     pub fn request_sub_function_id(&self) -> Option<(u16, u32)> {
         self.find_request_sid_or_sub_func_param(1, 0)
     }
 
+    #[must_use]
     fn find_request_sid_or_sub_func_param(
         &self,
         byte_pos: u32,
@@ -332,12 +344,18 @@ impl TryFrom<dataformat::ParentRefType> for ParentRefType {
 }
 
 impl Parameter<'_> {
+    #[must_use]
     pub fn byte_position(&self) -> u32 {
         self.0.byte_position().unwrap_or(0)
     }
+    #[must_use]
     pub fn bit_position(&self) -> u32 {
         self.0.bit_position().unwrap_or(0)
     }
+    /// Get the `ParamType` of the Parameter
+    /// # Errors
+    /// Returns if the `ParamType` cannot be converted i.e. the flatbuf type
+    /// has an unknown value.
     pub fn param_type(&self) -> Result<ParamType, DiagServiceError> {
         self.0.param_type().try_into()
     }
@@ -394,6 +412,11 @@ pub struct LongName {
 }
 
 impl DiagnosticDatabase {
+    /// Create a new `DiagnosticDatabase` from the given ECU database path and ECU data blob.
+    /// # Errors
+    /// Returns an error if the ECU data blob cannot be read.
+    /// # Panics
+    /// When `FlatBufConfig::verify` is disabled and an invalid ECU data blob is provided.
     pub fn new(
         ecu_database_path: String,
         ecu_data_blob: Vec<u8>,
@@ -405,7 +428,7 @@ impl DiagnosticDatabase {
                 EcuDataBuilder {
                     blob: ecu_data_blob,
                     data_builder: |ecu_data_blob| {
-                        read_ecudata(ecu_data_blob, flatbuf_config.clone()).unwrap()
+                        read_ecudata(ecu_data_blob, &flatbuf_config).unwrap()
                     },
                 }
                 .build(),
@@ -414,6 +437,7 @@ impl DiagnosticDatabase {
         })
     }
 
+    #[must_use]
     pub fn is_loaded(&self) -> bool {
         self.ecu_data.is_some()
     }
@@ -422,6 +446,11 @@ impl DiagnosticDatabase {
         self.ecu_data = None;
     }
 
+    /// Load the ECU data from the ECU database path.
+    /// # Errors
+    /// Returns an error if the ECU data cannot be loaded.
+    /// # Panics
+    /// If the ECU data is invalid and `FlatbBufConfig::verify` is disabled.
     pub fn load(&mut self) -> Result<(), DiagServiceError> {
         let ecu_data = load_ecudata(&self.ecu_database_path)
             .map_err(|e| DiagServiceError::InvalidDatabase(e.to_string()))?;
@@ -433,6 +462,11 @@ impl DiagnosticDatabase {
         Ok(())
     }
 
+    /// Find the logical address of the given type in
+    /// the diagnostic database for the given protocol.
+    /// # Errors
+    /// * `DiagServiceError::DatabaseEntryNotFound` if the com param is not found or is invalid.
+    /// * `DiagServiceError::ParameterConversionError` if the com param value cannot be converted
     pub fn find_logical_address(
         &self,
         type_: LogicalAddressType,
@@ -443,8 +477,7 @@ impl DiagnosticDatabase {
             LogicalAddressType::Ecu(response_id_table, ecu_address) => {
                 (response_id_table, Some(ecu_address))
             }
-            LogicalAddressType::Gateway(p) => (p, None),
-            LogicalAddressType::Functional(p) => (p, None),
+            LogicalAddressType::Gateway(p) | LogicalAddressType::Functional(p) => (p, None),
         };
 
         match comparam::lookup(diag_database, protocol, &param_name)? {
@@ -479,6 +512,9 @@ impl DiagnosticDatabase {
         }
     }
 
+    /// Get the ECU data, which is the root of the database
+    /// # Errors
+    /// `DiagServiceError::InvalidDatabase` if ECU data is not loaded
     pub fn ecu_data(&self) -> Result<&dataformat::EcuData<'_>, DiagServiceError> {
         self.ecu_data
             .as_ref()
@@ -486,6 +522,19 @@ impl DiagnosticDatabase {
             .map(|ecu_data| ecu_data.borrow_data())
     }
 
+    /// Get the ECU name from the ECU data
+    /// # Errors
+    /// `DiagServiceError::InvalidDatabase` if ECU data is not loaded or ECU name not found
+    pub fn ecu_name(&self) -> Result<String, DiagServiceError> {
+        self.ecu_data()?
+            .ecu_name()
+            .map(ToOwned::to_owned)
+            .ok_or_else(|| DiagServiceError::InvalidDatabase("ECU name not found".to_owned()))
+    }
+
+    /// Get all diagnostic layers from the ECU data
+    /// # Errors
+    /// `DiagServiceError::InvalidDatabase` if ECU data is not loaded
     pub fn diag_layers(&self) -> Result<Vec<datatypes::DiagLayer<'_>>, DiagServiceError> {
         Ok(self
             .ecu_data()?
@@ -497,11 +546,14 @@ impl DiagnosticDatabase {
             .collect::<Vec<_>>())
     }
 
+    /// Get the base variant from the ECU data
+    /// # Errors
+    /// `DiagServiceError::InvalidDatabase` if no base variant is found
     pub fn base_variant(&'_ self) -> Result<Variant<'_>, DiagServiceError> {
         let ecu_data = self.ecu_data()?;
         ecu_data
             .variants()
-            .and_then(|variants| variants.iter().find(|v| v.is_base_variant()))
+            .and_then(|variants| variants.iter().find(dataformat::Variant::is_base_variant))
             .ok_or_else(|| {
                 DiagServiceError::InvalidDatabase("No base variant found in ECU data.".to_owned())
             })
@@ -523,17 +575,16 @@ impl DiagnosticDatabase {
         let lookup_result = comparam::lookup(self, protocol, &com_param.name);
         match lookup_result {
             Ok(ComParamValue::Simple(simple)) => {
-                match T::parse_from_db(&simple.value, simple.unit.as_ref()) {
-                    Ok(value) => value,
-                    Err(_) => {
-                        tracing::warn!(
-                            param_name = %com_param.name,
-                            param_value = %simple.value,
-                            unit = ?simple.unit,
-                            "Failed to deserialize Simple Value for com param, using default"
-                        );
-                        com_param.default.clone()
-                    }
+                if let Ok(value) = T::parse_from_db(&simple.value, simple.unit.as_ref()) {
+                    value
+                } else {
+                    tracing::warn!(
+                        param_name = %com_param.name,
+                        param_value = %simple.value,
+                        unit = ?simple.unit,
+                        "Failed to deserialize Simple Value for com param, using default"
+                    );
+                    com_param.default.clone()
                 }
             }
             Ok(ComParamValue::Complex(_)) => {

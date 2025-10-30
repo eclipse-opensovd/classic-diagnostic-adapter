@@ -102,8 +102,7 @@ impl<'a> From<dataformat::CompuMethod<'a>> for CompuMethod {
             category: value.category().into(),
             internal_to_phys: value
                 .internal_to_phys()
-                .map(Into::into)
-                .unwrap_or(CompuFunction { scales: vec![] }),
+                .map_or(CompuFunction { scales: vec![] }, Into::into),
         }
     }
 }
@@ -143,8 +142,8 @@ impl<'a> From<dataformat::CompuScale<'a>> for CompuScale {
                 }),
             consts: value.consts().map(|c| CompuValues {
                 v: c.v().unwrap_or_default(),
-                vt: c.vt().map(|s| s.to_owned()),
-                vt_ti: c.vt_ti().map(|s| s.to_owned()),
+                vt: c.vt().map(ToOwned::to_owned),
+                vt_ti: c.vt_ti().map(ToOwned::to_owned),
             }),
         }
     }
@@ -172,11 +171,19 @@ pub struct Limit {
     pub value: String,
     pub interval_type: IntervalType,
 }
-
 impl TryInto<u32> for &Limit {
     type Error = DiagServiceError;
     fn try_into(self) -> Result<u32, Self::Error> {
         let f: f64 = self.try_into()?;
+        if f < f64::from(u32::MIN) || f > f64::from(u32::MAX) || !f.is_finite() {
+            return Err(DiagServiceError::ParameterConversionError(format!(
+                "Cannot convert Limit with value {} into u32, value is negative",
+                self.value
+            )));
+        }
+        // checked above
+        #[allow(clippy::cast_possible_truncation)]
+        #[allow(clippy::cast_sign_loss)]
         Ok(f as u32)
     }
 }
@@ -185,6 +192,15 @@ impl TryInto<i32> for &Limit {
     type Error = DiagServiceError;
     fn try_into(self) -> Result<i32, Self::Error> {
         let f: f64 = self.try_into()?;
+        if f < f64::from(i32::MIN) || f > f64::from(i32::MAX) || !f.is_finite() {
+            return Err(DiagServiceError::ParameterConversionError(format!(
+                "Cannot convert Limit with value {} into i32, value out of range",
+                self.value
+            )));
+        }
+
+        // checked above
+        #[allow(clippy::cast_possible_truncation)]
         Ok(f as i32)
     }
 }
@@ -242,6 +258,9 @@ impl TryInto<Vec<u8>> for &Limit {
                             "Invalid value for float, error={e}"
                         ))
                     })?;
+                    // this is expected behavior when converting from a float.
+                    #[allow(clippy::cast_possible_truncation)]
+                    #[allow(clippy::cast_sign_loss)]
                     Ok((float_value as u8).to_be_bytes().to_vec())
                 } else if let Some(stripped) = value.to_lowercase().strip_prefix("0x") {
                     decode_hex(stripped)
@@ -268,13 +287,16 @@ impl From<dataformat::IntervalType> for IntervalType {
         match val {
             dataformat::IntervalType::OPEN => IntervalType::Open,
             dataformat::IntervalType::CLOSED => IntervalType::Closed,
-            dataformat::IntervalType::INFINITE => IntervalType::Infinite,
             _ => IntervalType::Infinite,
         }
     }
 }
 
 impl datatypes::DataOperation<'_> {
+    /// Get the specific data variant of the `DataOperation`.
+    /// # Errors
+    /// Returns an error if the specific data type is not recognized or if the specific data is
+    /// missing.
     pub fn variant(&self) -> Result<DataOperationVariant<'_>, DiagServiceError> {
         macro_rules! get_specific_data {
             ($method:ident, $variant:ident, $type_name:literal) => {

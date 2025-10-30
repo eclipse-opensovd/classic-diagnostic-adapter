@@ -61,6 +61,7 @@ pub struct DiagComm {
 }
 
 impl DiagComm {
+    #[must_use]
     pub fn action(&self) -> DiagCommAction {
         self.type_.clone().into()
     }
@@ -71,10 +72,10 @@ impl From<DiagCommType> for DiagCommAction {
         match value {
             DiagCommType::Configurations => DiagCommAction::Write,
             DiagCommType::Data => DiagCommAction::Read,
-            // actually Clear or Read, but doesn't matter here
-            DiagCommType::Faults => DiagCommAction::Start,
-            DiagCommType::Modes => DiagCommAction::Start,
-            DiagCommType::Operations => DiagCommAction::Start,
+            // Faults is actually Clear or Read, but doesn't matter here
+            DiagCommType::Faults | DiagCommType::Modes | DiagCommType::Operations => {
+                DiagCommAction::Start
+            }
         }
     }
 }
@@ -252,7 +253,7 @@ pub enum DiagServiceError {
     Timeout,
     AccessDenied(String),
     DataError(DataParseError),
-    /// Returned in case the provided value for security plugin cannot be used as SecurityApi
+    /// Returned in case the provided value for security plugin cannot be used as `SecurityApi`
     InvalidSecurityPlugin,
 }
 

@@ -51,6 +51,7 @@ impl DatabaseNamingConvention {
     /// The first matching affix is removed and the result is returned.
     /// Affixes must be lowercase for correct matching.
     /// Returns the trimmed name or the original if no affix matches.
+    #[must_use]
     pub fn trim_long_name_affixes(&self, long_name: &str) -> String {
         let long_name_lowercase = long_name.to_lowercase();
         for affix in &self.long_name_affixes {
@@ -72,6 +73,7 @@ impl DatabaseNamingConvention {
     /// The first matching affix is removed and the result is returned.
     /// Affixes must be lowercase for correct matching.
     /// Returns the trimmed name or the original if no affix matches.
+    #[must_use]
     pub fn trim_short_name_affixes(&self, short_name: &str) -> String {
         let short_name_lowercase = short_name.to_lowercase();
         for affix in &self.short_name_affixes {
@@ -93,7 +95,8 @@ impl DatabaseNamingConvention {
 impl Default for DatabaseNamingConvention {
     /// Creates a default configuration that assumes data is suffixed, with '_dump' as
     /// the last suffix for short names, followed by '_write' or '_read'.
-    /// 'configuration_service_parameter_semantic_id' is used to identify the parameter of a service
+    /// '`configuration_service_parameter_semantic_id`'
+    /// is used to identify the parameter of a service
     /// that distinguishes services from each other.
     /// The long name is the description; the same trimming rules apply.
     fn default() -> Self {

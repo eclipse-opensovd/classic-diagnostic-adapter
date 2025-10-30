@@ -90,7 +90,7 @@ fn compu_lookup(
                     let coeffs = scale.rational_coefficients.as_ref().unwrap();
                     let lookup_val: f64 = lookup.try_into()?;
                     let val = coeffs.numerator[0] + lookup_val * coeffs.numerator[1];
-                    DiagDataValue::from_number(val, diag_type)
+                    DiagDataValue::from_number(&val, diag_type)
                 } else {
                     Ok(lookup)
                 }
@@ -119,7 +119,7 @@ fn compu_lookup(
                 let coeffs = scale.rational_coefficients.as_ref().unwrap();
                 let lookup_val: f64 = lookup.try_into()?;
                 let val = lookup_val * coeffs.numerator[0] / coeffs.denominator[0];
-                DiagDataValue::from_number(val, diag_type)
+                DiagDataValue::from_number(&val, diag_type)
             }
             datatypes::CompuCategory::TextTable => {
                 let consts = scale.consts.as_ref().ok_or_else(|| {
@@ -140,6 +140,8 @@ fn compu_lookup(
                 let lookup: u32 = lookup.try_into()?;
                 if lookup <= 0xFF {
                     Ok(DiagDataValue::String(
+                        // Okay because the NRC is defined as u8
+                        #[allow(clippy::cast_possible_truncation)]
                         iso_14229_nrc::get_nrc_code(lookup as u8).to_owned(),
                     ))
                 } else {
@@ -157,6 +159,9 @@ fn compu_lookup(
     }
 }
 
+// Casting and truncating is defined in the ISO instead of rounding
+#[allow(clippy::cast_possible_truncation)]
+#[allow(clippy::cast_sign_loss)]
 fn compu_convert(
     diag_type: datatypes::DataType,
     compu_method: &datatypes::CompuMethod,
@@ -352,6 +357,9 @@ pub(in crate::diag_kernel) fn json_value_to_uds_data(
     }
 }
 
+// truncating values and sign loss is expected when converting float values into a vec<u8>
+#[allow(clippy::cast_possible_truncation)]
+#[allow(clippy::cast_sign_loss)]
 pub(in crate::diag_kernel) fn string_to_vec_u8(
     data_type: DataType,
     value: &str,
@@ -458,7 +466,12 @@ fn json_value_to_byte_vector(
             )));
         }
 
-        Ok((value as i32).to_be_bytes().to_vec())
+        Ok(i32::try_from(value)
+            .map_err(|e| {
+                DiagServiceError::ParameterConversionError(format!("Failed to convert to i32 {e}"))
+            })?
+            .to_be_bytes()
+            .to_vec())
     }
 
     let data: Result<Vec<u8>, DiagServiceError> = if json_value.is_string() {
@@ -478,12 +491,15 @@ fn json_value_to_byte_vector(
                 i64::from(u32::MAX),
                 data_type,
             ),
-            DataType::Float32 => json_value
-                .as_f64()
-                .ok_or(DiagServiceError::ParameterConversionError(
-                    "Invalid value for Float32".to_owned(),
-                ))
-                .map(|v| (v as f32).to_be_bytes().to_vec()),
+            DataType::Float32 => {
+                #[allow(clippy::cast_possible_truncation)] // truncating f64 to f32 is intended here
+                json_value
+                    .as_f64()
+                    .ok_or(DiagServiceError::ParameterConversionError(
+                        "Invalid value for Float32".to_owned(),
+                    ))
+                    .map(|v| (v as f32).to_be_bytes().to_vec())
+            }
             DataType::Float64 => json_value
                 .as_f64()
                 .ok_or(DiagServiceError::ParameterConversionError(

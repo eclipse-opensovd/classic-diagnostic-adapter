@@ -11,6 +11,9 @@ description = "Eclipse OpenSOVD CDA - A modern open source Classic Diagnostic Ad
 homepage.workspace = true
 license.workspace = true
 
+[lints]
+workspace = true
+
 [[bin]]
 name = "opensovd-cda"
 path = "src/main.rs"

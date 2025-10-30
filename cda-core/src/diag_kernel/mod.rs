@@ -71,7 +71,7 @@ impl DiagDataValue {
     }
 
     fn from_number<T: num_traits::ToPrimitive + num_traits::ToBytes + ToString + Debug>(
-        value: T,
+        value: &T,
         diag_type: DataType,
     ) -> Result<Self, DiagServiceError> {
         match diag_type {
@@ -140,8 +140,8 @@ impl DiagDataValue {
                 // Determine max length for padding
                 let max_len = [
                     v.len(),
-                    upper_bytes.as_ref().map_or(0, |u| u.len()),
-                    lower_bytes.as_ref().map_or(0, |l| l.len()),
+                    upper_bytes.as_ref().map_or(0, std::vec::Vec::len),
+                    lower_bytes.as_ref().map_or(0, std::vec::Vec::len),
                 ]
                 .into_iter()
                 .max()
@@ -203,19 +203,25 @@ impl TryInto<u32> for DiagDataValue {
             }),
             DiagDataValue::UInt32(i) => Ok(i),
             DiagDataValue::Float32(f) => {
-                if f < 0.0 || f > (u32::MAX as f32) {
+                if f < 0.0 || f64::from(f) > f64::from(u32::MAX) {
                     return Err(DiagServiceError::ParameterConversionError(
                         "Float32 value out of u32 range".to_owned(),
                     ));
                 }
+                // validated above, safe to cast
+                #[allow(clippy::cast_possible_truncation)]
+                #[allow(clippy::cast_sign_loss)]
                 Ok(f as u32)
             }
             DiagDataValue::Float64(f) => {
-                if f < 0.0 || f > (u32::MAX as f64) {
+                if f < 0.0 || f > f64::from(u32::MAX) {
                     return Err(DiagServiceError::ParameterConversionError(
                         "Float64 value out of u32 range".to_owned(),
                     ));
                 }
+                // validated above, safe to cast
+                #[allow(clippy::cast_possible_truncation)]
+                #[allow(clippy::cast_sign_loss)]
                 Ok(f as u32)
             }
             _ => Err(DiagServiceError::ParameterConversionError(
@@ -233,7 +239,7 @@ pub fn into_db_protocol(
         .diag_layers()?
         .iter()
         .flat_map(|dl| dl.com_param_refs().into_iter().flatten())
-        .flat_map(|cp_ref| cp_ref.protocol())
+        .filter_map(|cp_ref| cp_ref.protocol())
         .find(|p| {
             p.diag_layer()
                 .and_then(|dl| dl.short_name())

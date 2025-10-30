@@ -169,11 +169,19 @@ pub(crate) mod ecu {
     use aide::{UseApi, axum::IntoApiResponse, transform::TransformOperation};
     use cda_plugin_security::Secured;
 
-    use super::*;
+    use super::{
+        ApiError, DiagServiceResponse, ErrorWrapper, FileManager, IntoResponse, Json,
+        LockPathParam, Path, Response, State, UdsEcu, WebserverEcuState, WithRejection,
+        delete_handler, get_handler, get_id_handler, post_handler, put_handler, vehicle_read_lock,
+    };
     use crate::sovd;
 
     pub(crate) mod lock {
-        use super::*;
+        use super::{
+            ApiError, DiagServiceResponse, FileManager, Json, LockPathParam, Path, Response,
+            Secured, State, TransformOperation, UdsEcu, UseApi, WebserverEcuState, WithRejection,
+            delete_handler, get_id_handler, put_handler,
+        };
         use crate::openapi;
         pub(crate) async fn delete<R: DiagServiceResponse, T: UdsEcu + Clone, U: FileManager>(
             Path(lock): Path<LockPathParam>,
@@ -322,11 +330,19 @@ pub(crate) mod vehicle {
     use aide::{UseApi, transform::TransformOperation};
     use cda_plugin_security::Secured;
 
-    use super::*;
+    use super::{
+        ApiError, ErrorWrapper, IntoResponse, Json, LockPathParam, Path, Response, State,
+        WebserverState, WithRejection, all_locks_owned, delete_handler, get_handler,
+        get_id_handler, post_handler, put_handler, validate_claim,
+    };
     use crate::openapi;
 
     pub(crate) mod lock {
-        use super::*;
+        use super::{
+            ApiError, Json, LockPathParam, Path, Response, Secured, State, TransformOperation,
+            UseApi, WebserverState, WithRejection, delete_handler, get_id_handler, openapi,
+            put_handler,
+        };
 
         pub(crate) async fn delete(
             Path(lock): Path<LockPathParam>,
@@ -483,13 +499,20 @@ pub(crate) mod functional_group {
     use aide::{UseApi, transform::TransformOperation};
     use cda_plugin_security::Secured;
 
-    use super::*;
+    use super::{
+        ApiError, ErrorWrapper, IntoResponse, Json, Path, Response, State, WebserverState,
+        WithRejection, delete_handler, get_handler, get_id_handler, post_handler, put_handler,
+        vehicle_read_lock,
+    };
     use crate::openapi;
 
     openapi::aide_helper::gen_path_param!(FunctionalGroupLockPathParam group String);
 
     pub(crate) mod lock {
-        use super::*;
+        use super::{
+            ApiError, Json, Path, Response, Secured, State, TransformOperation, UseApi,
+            WebserverState, WithRejection, delete_handler, get_id_handler, openapi, put_handler,
+        };
 
         openapi::aide_helper::gen_path_param!(
             FunctionalGroupLockWithIdPathParam group String lock String

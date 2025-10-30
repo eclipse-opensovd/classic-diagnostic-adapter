@@ -161,7 +161,7 @@ impl DiagServiceResponse for DiagServiceResponseStruct {
                         .collect::<Vec<_>>();
                     Some(results.into_iter().flatten().flatten().collect())
                 }
-                _ => None,
+                DiagDataTypeContainer::RawContainer(_) => None,
             }
         }
 
@@ -279,7 +279,7 @@ impl DiagServiceResponseStruct {
                             errors,
                             format!("{path}/{k}").as_str(),
                         ) {
-                            Ok(_) => DiagDataValue::Struct(nested_mapped),
+                            Ok(()) => DiagDataValue::Struct(nested_mapped),
                             Err(e) => {
                                 if let DiagServiceError::DataError(ref error) = e {
                                     errors.push(FieldParseError {
@@ -303,7 +303,7 @@ impl DiagServiceResponseStruct {
                                 errors,
                                 format!("{path}/{k}").as_str(),
                             ) {
-                                Ok(_) => nested_vec.push(inner_mapped),
+                                Ok(()) => nested_vec.push(inner_mapped),
                                 Err(e) => {
                                     if let DiagServiceError::DataError(ref error) = e {
                                         errors.push(FieldParseError {

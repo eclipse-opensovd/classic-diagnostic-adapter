@@ -102,7 +102,7 @@ fn get_flatbuffers_info() -> std::io::Result<(String, String)> {
 #[cfg(feature = "gen-flatbuffers")]
 fn generate_flatbuffers() -> std::io::Result<()> {
     let (flatc_repo, flatc_rev) = get_flatbuffers_info()?;
-    let flatc_dir = PathBuf::from(out_dir()?).join("flatc");
+    let flatc_dir = std::path::PathBuf::from(out_dir()?).join("flatc");
 
     if !flatc_dir.exists() {
         std::process::Command::new("git")
@@ -169,6 +169,7 @@ fn out_dir() -> Result<String, std::io::Error> {
     Ok(out_dir)
 }
 
+#[cfg(any(feature = "gen-protos", feature = "gen-flatbuffers"))]
 fn main() -> std::io::Result<()> {
     #[cfg(feature = "gen-protos")]
     generate_protos()?;
@@ -178,3 +179,6 @@ fn main() -> std::io::Result<()> {
 
     Ok(())
 }
+
+#[cfg(not(any(feature = "gen-protos", feature = "gen-flatbuffers")))]
+fn main() {}

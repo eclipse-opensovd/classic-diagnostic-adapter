@@ -65,7 +65,9 @@ impl FileManager {
                         .filter_map(|entry| {
                             entry.last_accessed.map(|last_accessed| {
                                 let elapsed = now.duration_since(last_accessed);
-                                if elapsed >= cache_lifetime {
+                                if let Some(lifetime) = cache_lifetime.checked_sub(elapsed) {
+                                    Some(lifetime)
+                                } else {
                                     tracing::debug!(
                                         file_name = %entry.chunk.meta_data.name,
                                         elapsed = ?elapsed,
@@ -74,8 +76,6 @@ impl FileManager {
                                     );
                                     entry.chunk.payload = None;
                                     None
-                                } else {
-                                    Some(cache_lifetime - elapsed)
                                 }
                             })
                         })

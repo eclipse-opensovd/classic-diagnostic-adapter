@@ -106,7 +106,10 @@ pub(crate) async fn get<
     };
 
     let faults = faults::get::Response {
-        items: dtcs.into_values().map(|dtc| dtc.into_sovd()).collect(),
+        items: dtcs
+            .into_values()
+            .map(crate::sovd::IntoSovd::into_sovd)
+            .collect(),
         schema,
     };
 
@@ -166,9 +169,11 @@ pub(crate) mod id {
         fn into_sovd(self) -> Self::SovdType {
             Self::SovdType {
                 data: self.data,
-                errors: self
-                    .errors
-                    .map(|v| v.into_iter().map(|e| e.into_sovd()).collect()),
+                errors: self.errors.map(|v| {
+                    v.into_iter()
+                        .map(crate::sovd::IntoSovd::into_sovd)
+                        .collect()
+                }),
             }
         }
     }
@@ -181,9 +186,11 @@ pub(crate) mod id {
                 data: self
                     .data
                     .map(|d| d.into_iter().map(|(k, v)| (k, v.into_sovd())).collect()),
-                errors: self
-                    .errors
-                    .map(|v| v.into_iter().map(|e| e.into_sovd()).collect()),
+                errors: self.errors.map(|v| {
+                    v.into_iter()
+                        .map(crate::sovd::IntoSovd::into_sovd)
+                        .collect()
+                }),
             }
         }
     }
@@ -201,8 +208,10 @@ pub(crate) mod id {
                     || self.extended_data_records.is_some()
                 {
                     Some(EnvironmentData {
-                        snapshots: self.snapshots.map(|s| s.into_sovd()),
-                        extended_data_records: self.extended_data_records.map(|e| e.into_sovd()),
+                        snapshots: self.snapshots.map(crate::sovd::IntoSovd::into_sovd),
+                        extended_data_records: self
+                            .extended_data_records
+                            .map(crate::sovd::IntoSovd::into_sovd),
                     })
                 } else {
                     None

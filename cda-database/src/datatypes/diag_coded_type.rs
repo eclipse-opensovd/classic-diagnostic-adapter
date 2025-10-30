@@ -35,7 +35,7 @@ pub enum DataType {
 }
 
 impl DataType {
-    fn validate_bit_len(&self, bit_len: BitLength) -> Result<(), DiagServiceError> {
+    fn validate_bit_len(self, bit_len: BitLength) -> Result<(), DiagServiceError> {
         if bit_len == 0 {
             return Err(DiagServiceError::BadPayload(
                 "Cannot extract data with length 0".to_owned(),
@@ -49,21 +49,21 @@ impl DataType {
             )));
         }
 
-        if &DataType::Float32 == self && bit_len != 32 {
+        if DataType::Float32 == self && bit_len != 32 {
             return Err(DiagServiceError::BadPayload(format!(
                 "Length must be exactly 32 bit for {:?}, got {bit_len} bit",
                 &self
             )));
         }
 
-        if &DataType::Float64 == self && bit_len != 64 {
+        if DataType::Float64 == self && bit_len != 64 {
             return Err(DiagServiceError::BadPayload(format!(
                 "Length must be exactly 64 bit for {:?}, got {bit_len} bit",
                 &self
             )));
         }
 
-        if &DataType::Unicode2String == self && !bit_len.is_multiple_of(16) {
+        if DataType::Unicode2String == self && !bit_len.is_multiple_of(16) {
             return Err(DiagServiceError::BadPayload(format!(
                 "Length must be a multiple of 16 bit for {:?}, got {bit_len} bit",
                 &self
@@ -121,7 +121,7 @@ enum ByteOrder {
     Keep,
 
     /// Byte order is reversed but acting in pairs of bytes
-    /// Needed for Unicode2String
+    /// Needed for `Unicode2String`
     ReorderPairs,
 
     /// Byte order is reversed
@@ -130,6 +130,8 @@ enum ByteOrder {
 
 impl DiagCodedType {
     /// Creates a new `DiagCodedType` with high-low byte order.
+    /// # Errors
+    /// Forwarding errors from `DiagCodedType::new`.
     pub fn new_high_low_byte_order(
         base_datatype: DataType,
         type_: DiagCodedTypeVariant,
@@ -139,6 +141,8 @@ impl DiagCodedType {
 
     /// Creates a new `DiagCodedType` with the given byte order.
     /// Set `is_high_low_byte_order` to `true` for high-low byte order (Big Endian),
+    /// # Errors
+    /// Returns `DiagServiceError` if the combination of base datatype and coded type is invalid.
     pub fn new(
         base_datatype: DataType,
         type_: DiagCodedTypeVariant,
@@ -169,7 +173,7 @@ impl DiagCodedType {
                     )));
                 }
             }
-            _ => {}
+            DiagCodedTypeVariant::StandardLength(_) => {}
         }
         Ok(Self {
             base_datatype,
@@ -178,10 +182,12 @@ impl DiagCodedType {
         })
     }
 
+    #[must_use]
     pub fn base_datatype(&self) -> DataType {
         self.base_datatype
     }
 
+    #[must_use]
     pub fn type_(&self) -> &DiagCodedTypeVariant {
         &self.type_
     }
@@ -199,6 +205,12 @@ impl DiagCodedType {
     /// The bit length will be necessary to convert the data into a physical value
     /// This function is implementing the data decoding logic as described in
     /// chapter 7.3.6.2. of ISO 22901-1:2008.
+    /// # Errors
+    /// Return `DiagServiceError` if decoding fails.
+    /// i.e.
+    /// * bit position is invalid for the data type
+    /// * not enough data in the `uds_payload`
+    /// * data length does not match expected length
     pub fn decode(
         &self,
         uds_payload: &[u8],
@@ -209,165 +221,16 @@ impl DiagCodedType {
         let byte_order = self.byte_order();
         let (bit_len, start_pos, mask) = match self.type_ {
             DiagCodedTypeVariant::LeadingLengthInfo(bits) => {
-                self.base_datatype.validate_bit_len(bits)?;
-
-                // The leading length parameter must be extracted separately
-                let (length_info_bytes, _len) = unpack_data(
-                    bits as usize,
-                    bit_pos,
-                    None,
-                    &uds_payload[byte_pos..bits.div_ceil(8) as usize],
-                    byte_order,
-                )?;
-
-                let len = match length_info_bytes.len() {
-                    1 => length_info_bytes[0] as usize,
-                    2 => u16::from_be_bytes([length_info_bytes[0], length_info_bytes[1]]) as usize,
-                    3 => u32::from_be_bytes([
-                        0,
-                        length_info_bytes[0],
-                        length_info_bytes[1],
-                        length_info_bytes[2],
-                    ]) as usize,
-                    4 => u32::from_be_bytes([
-                        length_info_bytes[0],
-                        length_info_bytes[1],
-                        length_info_bytes[2],
-                        length_info_bytes[3],
-                    ]) as usize,
-                    n @ 5..=8 => {
-                        let mut bytes = [0u8; 8];
-                        match n {
-                            5 => bytes[3..].copy_from_slice(&length_info_bytes[0..5]),
-                            6 => bytes[2..].copy_from_slice(&length_info_bytes[0..6]),
-                            7 => bytes[1..].copy_from_slice(&length_info_bytes[0..7]),
-                            8 => bytes.copy_from_slice(&length_info_bytes[0..8]),
-                            _ => unreachable!(),
-                        }
-                        u64::from_be_bytes(bytes) as usize
-                    }
-                    _ => {
-                        return Err(DiagServiceError::BadPayload(
-                            "unsupported leading length size".to_owned(),
-                        ));
-                    }
-                };
-
-                // The bits of the leading length are not part of the result.
-                // The data bytes start at the byte edge to the length.
-                let start_pos = byte_pos + length_info_bytes.len();
-                let end_pos = start_pos + len;
-                if end_pos > uds_payload.len() {
-                    return Err(DiagServiceError::BadPayload(format!(
-                        "Not enough data in payload: need {} bytes, but only {} bytes available",
-                        end_pos,
-                        uds_payload.len()
-                    )));
-                }
-                ((end_pos - start_pos) * 8, start_pos, None)
+                self.pos_info_leading_len(uds_payload, byte_pos, bit_pos, byte_order, bits)
             }
             DiagCodedTypeVariant::MinMaxLength(ref mmlt) => {
-                let max_end = if let Some(max_length) = mmlt.max_length {
-                    usize::min(byte_pos + max_length as usize, uds_payload.len())
-                } else {
-                    uds_payload.len()
-                };
-
-                let end_pos = match mmlt.termination {
-                    Termination::EndOfPdu => {
-                        // Read until end of pdu or max size, whatever comes first.
-                        max_end
-                    }
-                    Termination::Zero => {
-                        let mut end_pos = byte_pos;
-                        match self.base_datatype {
-                            DataType::Unicode2String => {
-                                while end_pos < max_end {
-                                    if end_pos - byte_pos >= mmlt.min_length as usize
-                                        && end_pos + 1 < uds_payload.len()
-                                        && uds_payload[end_pos] == 0
-                                        && uds_payload[end_pos + 1] == 0
-                                    {
-                                        break; // Found UTF-16 null terminator
-                                    }
-
-                                    end_pos += 2; // Unicode2String is 2 bytes per character
-                                }
-                            }
-                            _ => {
-                                while end_pos < max_end {
-                                    if end_pos - byte_pos >= mmlt.min_length as usize
-                                        && uds_payload[end_pos] == 0
-                                    {
-                                        break; // Found ASCII/UTF-8 null terminator
-                                    }
-                                    end_pos += 1;
-                                }
-                            }
-                        }
-
-                        if end_pos > uds_payload.len() {
-                            return Err(DiagServiceError::BadPayload(format!(
-                                "Not enough data in payload, needed {end_pos} bytes, got {} bytes",
-                                uds_payload.len()
-                            )));
-                        }
-
-                        end_pos
-                    }
-                    Termination::HexFF => {
-                        let mut end_pos = byte_pos;
-                        match self.base_datatype {
-                            DataType::Unicode2String => {
-                                while end_pos < max_end {
-                                    if end_pos + 1 < uds_payload.len()
-                                        && (end_pos - byte_pos) >= mmlt.min_length as usize
-                                        && uds_payload[end_pos] == 0xff
-                                        && uds_payload[end_pos + 1] == 0xff
-                                    {
-                                        break; // Found UTF-16 null terminator
-                                    }
-
-                                    end_pos += 2; // Unicode2String is 2 bytes per character
-                                }
-                            }
-                            _ => {
-                                while end_pos < max_end {
-                                    if (end_pos - byte_pos) >= mmlt.min_length as usize
-                                        && uds_payload[end_pos] == 0xff
-                                    {
-                                        break; // Found ASCII/UTF-8 null terminator
-                                    }
-                                    end_pos += 1;
-                                }
-                            }
-                        }
-
-                        end_pos
-                    }
-                };
-
-                let len = end_pos - byte_pos;
-                if len < mmlt.min_length as usize {
-                    return Err(DiagServiceError::BadPayload(format!(
-                        "Not enough data in payload, needed at least {} bytes, got {} bytes",
-                        mmlt.min_length, len
-                    )));
-                }
-
-                ((end_pos - byte_pos) * 8, byte_pos, None)
+                self.pos_info_min_max_len(uds_payload, byte_pos, mmlt)
             }
 
             DiagCodedTypeVariant::StandardLength(ref slt) => {
-                self.base_datatype.validate_bit_len(slt.bit_length)?;
-                let mask = slt.bit_mask.as_ref().map(|m| Mask {
-                    data: m.clone(),
-                    condensed: slt.condensed,
-                });
-
-                (slt.bit_length as usize, byte_pos, mask)
+                self.pos_info_standard_len(byte_pos, slt)
             }
-        };
+        }?;
 
         // no data extraction necessary here, skip it
         // for example this can happen  with end of pdu min max sizes, where min size = 0
@@ -393,6 +256,187 @@ impl DiagCodedType {
         )
     }
 
+    fn pos_info_standard_len(
+        &self,
+        byte_pos: usize,
+        slt: &StandardLengthType,
+    ) -> Result<(usize, usize, Option<Mask>), DiagServiceError> {
+        self.base_datatype.validate_bit_len(slt.bit_length)?;
+        let mask = slt.bit_mask.as_ref().map(|m| Mask {
+            data: m.clone(),
+            condensed: slt.condensed,
+        });
+
+        Ok((slt.bit_length as usize, byte_pos, mask))
+    }
+
+    fn pos_info_min_max_len(
+        &self,
+        uds_payload: &[u8],
+        byte_pos: usize,
+        mmlt: &MinMaxLengthType,
+    ) -> Result<(usize, usize, Option<Mask>), DiagServiceError> {
+        let max_end = if let Some(max_length) = mmlt.max_length {
+            usize::min(byte_pos + max_length as usize, uds_payload.len())
+        } else {
+            uds_payload.len()
+        };
+
+        let end_pos = match mmlt.termination {
+            Termination::EndOfPdu => {
+                // Read until end of pdu or max size, whatever comes first.
+                max_end
+            }
+            Termination::Zero => {
+                let mut end_pos = byte_pos;
+                match self.base_datatype {
+                    DataType::Unicode2String => {
+                        while end_pos < max_end {
+                            if end_pos - byte_pos >= mmlt.min_length as usize
+                                && end_pos + 1 < uds_payload.len()
+                                && uds_payload[end_pos] == 0
+                                && uds_payload[end_pos + 1] == 0
+                            {
+                                break; // Found UTF-16 null terminator
+                            }
+
+                            end_pos += 2; // Unicode2String is 2 bytes per character
+                        }
+                    }
+                    _ => {
+                        while end_pos < max_end {
+                            if end_pos - byte_pos >= mmlt.min_length as usize
+                                && uds_payload[end_pos] == 0
+                            {
+                                break; // Found ASCII/UTF-8 null terminator
+                            }
+                            end_pos += 1;
+                        }
+                    }
+                }
+
+                if end_pos > uds_payload.len() {
+                    return Err(DiagServiceError::BadPayload(format!(
+                        "Not enough data in payload, needed {end_pos} bytes, got {} bytes",
+                        uds_payload.len()
+                    )));
+                }
+
+                end_pos
+            }
+            Termination::HexFF => {
+                let mut end_pos = byte_pos;
+                match self.base_datatype {
+                    DataType::Unicode2String => {
+                        while end_pos < max_end {
+                            if end_pos + 1 < uds_payload.len()
+                                && (end_pos - byte_pos) >= mmlt.min_length as usize
+                                && uds_payload[end_pos] == 0xff
+                                && uds_payload[end_pos + 1] == 0xff
+                            {
+                                break; // Found UTF-16 null terminator
+                            }
+
+                            end_pos += 2; // Unicode2String is 2 bytes per character
+                        }
+                    }
+                    _ => {
+                        while end_pos < max_end {
+                            if (end_pos - byte_pos) >= mmlt.min_length as usize
+                                && uds_payload[end_pos] == 0xff
+                            {
+                                break; // Found ASCII/UTF-8 null terminator
+                            }
+                            end_pos += 1;
+                        }
+                    }
+                }
+
+                end_pos
+            }
+        };
+
+        let len = end_pos - byte_pos;
+        if len < mmlt.min_length as usize {
+            return Err(DiagServiceError::BadPayload(format!(
+                "Not enough data in payload, needed at least {} bytes, got {} bytes",
+                mmlt.min_length, len
+            )));
+        }
+
+        Ok(((end_pos - byte_pos) * 8, byte_pos, None))
+    }
+
+    fn pos_info_leading_len(
+        &self,
+        uds_payload: &[u8],
+        byte_pos: usize,
+        bit_pos: usize,
+        byte_order: ByteOrder,
+        bits: BitLength,
+    ) -> Result<(usize, usize, Option<Mask>), DiagServiceError> {
+        self.base_datatype.validate_bit_len(bits)?;
+
+        // The leading length parameter must be extracted separately
+        let (length_info_bytes, _len) = unpack_data(
+            bits as usize,
+            bit_pos,
+            None,
+            &uds_payload[byte_pos..bits.div_ceil(8) as usize],
+            byte_order,
+        )?;
+
+        let len = match length_info_bytes.len() {
+            1 => length_info_bytes[0] as usize,
+            2 => u16::from_be_bytes([length_info_bytes[0], length_info_bytes[1]]) as usize,
+            3 => u32::from_be_bytes([
+                0,
+                length_info_bytes[0],
+                length_info_bytes[1],
+                length_info_bytes[2],
+            ]) as usize,
+            4 => u32::from_be_bytes([
+                length_info_bytes[0],
+                length_info_bytes[1],
+                length_info_bytes[2],
+                length_info_bytes[3],
+            ]) as usize,
+            n @ 5..=8 => {
+                let mut bytes = [0u8; 8];
+                match n {
+                    5 => bytes[3..].copy_from_slice(&length_info_bytes[0..5]),
+                    6 => bytes[2..].copy_from_slice(&length_info_bytes[0..6]),
+                    7 => bytes[1..].copy_from_slice(&length_info_bytes[0..7]),
+                    8 => bytes.copy_from_slice(&length_info_bytes[0..8]),
+                    _ => unreachable!(),
+                }
+                usize::try_from(u64::from_be_bytes(bytes)).map_err(|_| {
+                    DiagServiceError::BadPayload(
+                        "Leading length info exceeds usize capacity".to_owned(),
+                    )
+                })?
+            }
+            _ => {
+                return Err(DiagServiceError::BadPayload(
+                    "unsupported leading length size".to_owned(),
+                ));
+            }
+        };
+
+        // The bits of the leading length are not part of the result.
+        // The data bytes start at the byte edge to the length.
+        let start_pos = byte_pos + length_info_bytes.len();
+        let end_pos = start_pos + len;
+        if end_pos > uds_payload.len() {
+            return Err(DiagServiceError::BadPayload(format!(
+                "Not enough data in payload: need {} bytes, but only {} bytes available",
+                end_pos,
+                uds_payload.len()
+            )));
+        }
+        Ok(((end_pos - start_pos) * 8, start_pos, None))
+    }
+
     /// Encodes input data into a UDS payload according to the coded type.
     /// No conversion from physical values is done here.
     ///
@@ -406,6 +450,8 @@ impl DiagCodedType {
     ///
     /// This function is implementing the data encoding logic as described in
     /// chapter 7.3.6.4 of ISO 22901-1:2008.
+    /// # Errors
+    /// `DiagServiceError::BadPayload`, if the payload is invalid or not enough data is available.
     pub fn encode(
         &self,
         mut input_data: Vec<u8>,
@@ -521,7 +567,7 @@ impl DiagCodedType {
     /// The types `Unicode2String`, `ByteField`, `AsciiString`, `Utf8String`
     /// as well as complex objects have to cover whole bytes, meaning
     /// the bit position must be 0 and the length must be a multiple of 8
-    /// (16 in case of A_UNICODE2STRING).
+    /// (16 in case of `A_UNICODE2STRING`).
     /// This remains true even if the bit-length of the data object is dynamically defined,
     /// through min max length or leading length info.
     fn validate_bit_pos(&self, bit_pos: usize) -> Result<(), DiagServiceError> {
@@ -542,7 +588,7 @@ impl DiagCodedType {
     }
 }
 
-/// Injects bits from source_data into dst_data at the given bit position and length.
+/// Injects bits from `source_data` into `dst_data` at the given bit position and length.
 /// Used to inject bits into a PDU payload.
 /// # Arguments
 /// * `bit_len` - Number of bits to inject.
@@ -620,14 +666,14 @@ fn apply_bit_mask(data: &mut [u8], mask: &[u8], bit_len: usize, bit_pos: usize) 
     }
 }
 
-/// The function iterates over the mask and collects up to bit_len bits with the following logic.
+/// The function iterates over the mask and collects up to `bit_len` bits with the following logic.
 /// * Iterate over each bit in the mask.
 /// * If the bit is 0, skip it.
 /// * If the bit is 1, extract the corresponding bit from the data at the given bit position.
 ///   and write this into a new result vector.
-/// * Stop when we have collected enough bits (up to bit_len).
+/// * Stop when we have collected enough bits (up to `bit_len`).
 /// * The returned result vector contains the condensed data, the new bit length is the number
-///   of bits collected, which is either equal to bit_len or the sum of '1's in the mask,
+///   of bits collected, which is either equal to `bit_len` or the sum of '1's in the mask,
 ///   whichever is smaller.
 ///
 /// For more details see chapter 7.3.6.3. e) in ISO 22901-1:2008.
@@ -749,9 +795,8 @@ fn unpack_data(
                 &bit_data,
                 bit_len,
             ));
-        } else {
-            apply_bit_mask(&mut bit_data, mask.data.as_slice(), bit_len, bit_pos);
         }
+        apply_bit_mask(&mut bit_data, mask.data.as_slice(), bit_len, bit_pos);
     }
     Ok((bit_data, bit_len))
 }
@@ -914,7 +959,15 @@ pub struct MinMaxLengthType {
     pub termination: Termination,
 }
 
+/// Creates a new `MinMaxLengthType` instance.
+/// # Errors
+/// Returns `DiagServiceError::BadPayload` if `max_length` is `Some(0)` or
+/// if `max_length` is less than `min_length`.
 impl MinMaxLengthType {
+    /// Creates a new `MinMaxLengthType` instance.
+    /// # Errors
+    /// Returns `DiagServiceError::BadPayload` if `max_length` is `Some(0)` or
+    /// if `max_length` is less than `min_length`.
     pub fn new(
         min_length: u32,
         max_length: Option<u32>,
@@ -944,14 +997,17 @@ impl MinMaxLengthType {
         Ok(instance)
     }
 
+    #[must_use]
     pub fn min_length(&self) -> u32 {
         self.min_length
     }
 
+    #[must_use]
     pub fn max_length(&self) -> Option<u32> {
         self.max_length
     }
 
+    #[must_use]
     pub fn termination(&self) -> &Termination {
         &self.termination
     }
@@ -1300,8 +1356,8 @@ mod tests {
     fn test_min_max_length(
         min_length: u32,
         max_length: u32,
-        payload: Vec<u8>,
-        expected: Vec<u8>,
+        payload: &[u8],
+        expected: &[u8],
         base_datatype: DataType,
         termination: Termination,
     ) -> Result<(), DiagServiceError> {
@@ -1319,8 +1375,8 @@ mod tests {
     fn test_min_max_length_with_byte_pos(
         min_length: u32,
         max_length: u32,
-        payload: Vec<u8>,
-        expected: Vec<u8>,
+        payload: &[u8],
+        expected: &[u8],
         byte_pos: usize,
         base_datatype: DataType,
         termination: Termination,
@@ -1334,7 +1390,7 @@ mod tests {
             }),
         )?;
 
-        let (data, bit_len) = diag_type.decode(&payload, byte_pos, 0)?;
+        let (data, bit_len) = diag_type.decode(payload, byte_pos, 0)?;
         assert_eq!(data, expected);
         assert_eq!(bit_len, expected.len() * 8);
         Ok(())
@@ -1347,8 +1403,8 @@ mod tests {
             test_min_max_length(
                 2,
                 10,
-                vec![b'a', b'b', 0x00, 0xFF], // payload with zero termination after min length
-                vec![b'a', b'b'],             // expected: only ab without termination
+                &[b'a', b'b', 0x00, 0xFF], // payload with zero termination after min length
+                b"ab",                     // expected: only ab without termination
                 DataType::AsciiString,
                 Termination::Zero,
             )
@@ -1360,8 +1416,8 @@ mod tests {
             test_min_max_length(
                 2,
                 4,
-                vec![b'a', b'b', b'c', b'd', 0x00], // payload longer than max_length
-                vec![b'a', b'b', b'c', b'd'],       // expected: only up to max_length
+                &[b'a', b'b', b'c', b'd', 0x00], // payload longer than max_length
+                b"abcd",                         // expected: only up to max_length
                 DataType::AsciiString,
                 Termination::Zero,
             )
@@ -1376,8 +1432,8 @@ mod tests {
             test_min_max_length(
                 2,
                 10,
-                vec![0x68, 0x69, 0xFF, 0x00], // "hi" followed by FF termination
-                vec![0x68, 0x69],             // expected: only "hi"
+                &[0x68, 0x69, 0xFF, 0x00], // "hi" followed by FF termination
+                &[0x68, 0x69],             // expected: only "hi"
                 DataType::Utf8String,
                 Termination::HexFF,
             )
@@ -1389,8 +1445,8 @@ mod tests {
             test_min_max_length(
                 2,
                 10,
-                vec![0x68, 0x69, 0x6F], // "hio" without termination
-                vec![0x68, 0x69, 0x6F], // expected: entire payload
+                &[0x68, 0x69, 0x6F], // "hio" without termination
+                &[0x68, 0x69, 0x6F], // expected: entire payload
                 DataType::Utf8String,
                 Termination::HexFF,
             )
@@ -1404,8 +1460,8 @@ mod tests {
         test_min_max_length(
             4, // min length in bytes, must be even
             8,
-            vec![0x00, 0x61, 0x00, 0x62, 0x00, 0x00], // "ab" followed by 0x0000
-            vec![0x00, 0x61, 0x00, 0x62],             // expected: only "ab"
+            &[0x00, 0x61, 0x00, 0x62, 0x00, 0x00], // "ab" followed by 0x0000
+            &[0x00, 0x61, 0x00, 0x62],             // expected: only "ab"
             DataType::Unicode2String,
             Termination::Zero,
         )
@@ -1415,8 +1471,8 @@ mod tests {
             test_min_max_length(
                 3, // odd min length - should fail
                 8,
-                vec![0x00, 0x61, 0x00, 0x62],
-                vec![],
+                &[0x00, 0x61, 0x00, 0x62],
+                &[],
                 DataType::Unicode2String,
                 Termination::Zero,
             )
@@ -1427,8 +1483,8 @@ mod tests {
             test_min_max_length(
                 4,
                 7, // odd max length - should fail
-                vec![0x00, 0x61, 0x00, 0x62],
-                vec![],
+                &[0x00, 0x61, 0x00, 0x62],
+                &[],
                 DataType::Unicode2String,
                 Termination::Zero,
             )
@@ -1442,8 +1498,8 @@ mod tests {
         test_min_max_length(
             2,
             6,
-            vec![0x61, 0x62, 0x00, 0x63, 0x64], // "ab\0cd"
-            vec![0x61, 0x62],                   // should only include "ab"
+            &[0x61, 0x62, 0x00, 0x63, 0x64], // "ab\0cd"
+            &[0x61, 0x62],                   // should only include "ab"
             DataType::AsciiString,
             Termination::Zero,
         )
@@ -1453,8 +1509,8 @@ mod tests {
         test_min_max_length(
             2,
             4,
-            vec![0x61, 0x00, 0x63, 0x64], // "a\0cd"
-            vec![0x61, 0x00, 0x63, 0x64], // should include full content
+            &[0x61, 0x00, 0x63, 0x64], // "a\0cd"
+            &[0x61, 0x00, 0x63, 0x64], // should include full content
             DataType::AsciiString,
             Termination::Zero,
         )
@@ -1464,8 +1520,8 @@ mod tests {
         test_min_max_length(
             2,
             3,
-            vec![0x61, 0x62, 0x63, 0xFF], // "abc\xFF"
-            vec![0x61, 0x62, 0x63],       // should not include FF
+            &[0x61, 0x62, 0x63, 0xFF], // "abc\xFF"
+            &[0x61, 0x62, 0x63],       // should not include FF
             DataType::AsciiString,
             Termination::HexFF,
         )
@@ -1475,8 +1531,8 @@ mod tests {
             test_min_max_length(
                 4,
                 6,
-                vec![0x61, 0x62],
-                vec![0x61, 0x62], // min length not reached, expect error
+                &[0x61, 0x62],
+                &[0x61, 0x62], // min length not reached, expect error
                 DataType::AsciiString,
                 Termination::HexFF,
             )
@@ -1488,15 +1544,15 @@ mod tests {
         bit_length: u32,
         byte_pos: usize,
         bit_pos: usize,
-        payload: Vec<u8>,
-        expected: Vec<u8>,
+        payload: &[u8],
+        expected: &[u8],
     ) -> Result<(), DiagServiceError> {
         let diag_type = DiagCodedType::new_high_low_byte_order(
             DataType::ByteField,
             DiagCodedTypeVariant::LeadingLengthInfo(bit_length),
         )?;
 
-        let (data, bit_len) = diag_type.decode(&payload, byte_pos, bit_pos)?;
+        let (data, bit_len) = diag_type.decode(payload, byte_pos, bit_pos)?;
         assert_eq!(data, expected);
         assert_eq!(bit_len, expected.len() * 8);
         Ok(())
@@ -1508,8 +1564,8 @@ mod tests {
             8,
             0,
             0,
-            vec![0x03, 0xab, 0xcd, 0xef], // First byte (0x03) indicates 3 bytes follow
-            vec![0xab, 0xcd, 0xef],       // Expected: 3 bytes after length byte
+            &[0x03, 0xab, 0xcd, 0xef], // First byte (0x03) indicates 3 bytes follow
+            &[0xab, 0xcd, 0xef],       // Expected: 3 bytes after length byte
         )
         .unwrap();
     }
@@ -1520,8 +1576,8 @@ mod tests {
             16,
             0,
             0,
-            vec![0x00, 0x02, 0xcd, 0xef], // First two bytes (0x0002) indicate 2 bytes follow
-            vec![0xcd, 0xef],             // Expected: 2 bytes after length bytes
+            &[0x00, 0x02, 0xcd, 0xef], // First two bytes (0x0002) indicate 2 bytes follow
+            &[0xcd, 0xef],             // Expected: 2 bytes after length bytes
         )
         .unwrap();
     }
@@ -1532,8 +1588,8 @@ mod tests {
             32,
             0,
             0,
-            vec![0x00, 0x00, 0x00, 0x02, 0xcd, 0xef], // First four bytes indicate 2 bytes follow
-            vec![0xcd, 0xef],                         // Expected: 2 bytes after length bytes
+            &[0x00, 0x00, 0x00, 0x02, 0xcd, 0xef], // First four bytes indicate 2 bytes follow
+            &[0xcd, 0xef],                         // Expected: 2 bytes after length bytes
         )
         .unwrap();
     }
@@ -1544,8 +1600,8 @@ mod tests {
             64,
             0,
             0,
-            vec![0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x02, 0xcd, 0xef],
-            vec![0xcd, 0xef],
+            &[0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x02, 0xcd, 0xef],
+            &[0xcd, 0xef],
         )
         .unwrap();
     }
@@ -1556,8 +1612,8 @@ mod tests {
             4,
             0,
             0,
-            vec![0b_1010_0011, 0x01, 0x02, 0x03, 0x04], // First 4 bits (1010) indicate 3 bytes
-            vec![0x01, 0x02, 0x03],                     // Expected: 3 bytes after length
+            &[0b_1010_0011, 0x01, 0x02, 0x03, 0x04], // First 4 bits (1010) indicate 3 bytes
+            &[0x01, 0x02, 0x03],                     // Expected: 3 bytes after length
         )
         .unwrap();
     }
@@ -1568,8 +1624,8 @@ mod tests {
             3,
             0,
             0,
-            vec![0x03, 0xab, 0xcd, 0xef], // First 3 bits indicate 3 bytes follow
-            vec![0xab, 0xcd, 0xef],
+            &[0x03, 0xab, 0xcd, 0xef], // First 3 bits indicate 3 bytes follow
+            &[0xab, 0xcd, 0xef],
         )
         .unwrap();
     }
@@ -1580,8 +1636,8 @@ mod tests {
                 8,
                 0,
                 0,
-                vec![0x03, 0xab], // Indicates 3 bytes but only 1 byte available
-                vec![],
+                &[0x03, 0xab], // Indicates 3 bytes but only 1 byte available
+                &[],
             )
             .is_err()
         );
@@ -1589,7 +1645,7 @@ mod tests {
 
     #[test]
     fn test_leading_length_zero() {
-        test_leading_length(8, 0, 0, vec![0x00, 0xff], vec![]).unwrap();
+        test_leading_length(8, 0, 0, &[0x00, 0xff], &[]).unwrap();
     }
 
     #[test]
@@ -1600,7 +1656,7 @@ mod tests {
         let expected: Vec<u8> = (0..max_length).collect();
         payload.extend(&expected);
 
-        test_leading_length(8, 0, 0, payload, expected).unwrap();
+        test_leading_length(8, 0, 0, &payload, &expected).unwrap();
     }
 
     #[test]
@@ -1632,15 +1688,15 @@ mod tests {
 
     fn test_encode_leading_length(
         bit_length: u32,
-        input_data: Vec<u8>,
-        expected: Vec<u8>,
+        input_data: &[u8],
+        expected: &[u8],
     ) -> Result<(), DiagServiceError> {
         let diag_type = DiagCodedType::new_high_low_byte_order(
             DataType::ByteField,
             DiagCodedTypeVariant::LeadingLengthInfo(bit_length),
         )?;
         let mut uds_payload = Vec::new();
-        diag_type.encode(input_data.clone(), &mut uds_payload, 0, 0)?;
+        diag_type.encode(input_data.to_owned(), &mut uds_payload, 0, 0)?;
         assert_eq!(uds_payload, expected);
         Ok(())
     }
@@ -1650,7 +1706,7 @@ mod tests {
         let input = vec![0xab, 0xcd, 0xef];
         let mut expected = vec![0x03];
         expected.extend(input.clone());
-        test_encode_leading_length(8, input, expected).unwrap();
+        test_encode_leading_length(8, &input, &expected).unwrap();
     }
 
     #[test]
@@ -1658,7 +1714,7 @@ mod tests {
         let input = vec![0xcd, 0xef];
         let mut expected = vec![0x00, 0x02];
         expected.extend(input.clone());
-        test_encode_leading_length(16, input, expected).unwrap();
+        test_encode_leading_length(16, &input, &expected).unwrap();
     }
 
     #[test]
@@ -1666,20 +1722,20 @@ mod tests {
         let input = vec![0xcd, 0xef];
         let mut expected = vec![0x00, 0x00, 0x00, 0x02];
         expected.extend(input.clone());
-        test_encode_leading_length(32, input, expected).unwrap();
+        test_encode_leading_length(32, &input, &expected).unwrap();
     }
 
     #[test]
     fn test_encode_leading_length_4bit() {
         let input = vec![0x01, 0x02, 0x03];
-        test_encode_leading_length(4, input, vec![3, 1, 2, 3]).unwrap();
+        test_encode_leading_length(4, &input, &[3, 1, 2, 3]).unwrap();
     }
 
     fn test_encode_min_max_length(
         min_length: u32,
         max_length: u32,
-        input_data: Vec<u8>,
-        expected: Vec<u8>,
+        input_data: &[u8],
+        expected: &[u8],
         base_datatype: DataType,
         termination: Termination,
     ) -> Result<(), DiagServiceError> {
@@ -1692,7 +1748,7 @@ mod tests {
             }),
         )?;
         let mut uds_payload = Vec::new();
-        diag_type.encode(input_data.clone(), &mut uds_payload, 0, 0)?;
+        diag_type.encode(input_data.to_vec(), &mut uds_payload, 0, 0)?;
         assert_eq!(uds_payload, expected);
         Ok(())
     }
@@ -1705,8 +1761,8 @@ mod tests {
         test_encode_min_max_length(
             2,
             10,
-            input,
-            expected,
+            &input,
+            &expected,
             DataType::AsciiString,
             Termination::Zero,
         )
@@ -1721,8 +1777,8 @@ mod tests {
         test_encode_min_max_length(
             2,
             10,
-            input,
-            expected,
+            &input,
+            &expected,
             DataType::Utf8String,
             Termination::HexFF,
         )
@@ -1737,8 +1793,8 @@ mod tests {
         test_encode_min_max_length(
             4,
             8,
-            input,
-            expected,
+            &input,
+            &expected,
             DataType::Unicode2String,
             Termination::Zero,
         )
@@ -1753,8 +1809,8 @@ mod tests {
         test_encode_min_max_length(
             4,
             8,
-            input,
-            expected,
+            &input,
+            &expected,
             DataType::Unicode2String,
             Termination::HexFF,
         )
@@ -1768,8 +1824,8 @@ mod tests {
         test_encode_min_max_length(
             2,
             4,
-            input,
-            expected,
+            &input,
+            &expected,
             DataType::ByteField,
             Termination::EndOfPdu,
         )
@@ -1778,16 +1834,16 @@ mod tests {
 
     fn test_encode_standard_length(
         bit_length: u32,
-        bitmask: Option<Vec<u8>>,
+        bit_mask: Option<&Vec<u8>>,
         condensed: bool,
-        input_data: Vec<u8>,
-        expected: Vec<u8>,
+        input_data: &[u8],
+        expected: &[u8],
         base_datatype: DataType,
     ) -> Result<(), DiagServiceError> {
         test_encode_standard_length_with_byte_pos(
             0,
             bit_length,
-            bitmask,
+            bit_mask,
             condensed,
             input_data,
             expected,
@@ -1798,43 +1854,44 @@ mod tests {
     fn test_encode_standard_length_with_byte_pos(
         byte_pos: usize,
         bit_length: u32,
-        bitmask: Option<Vec<u8>>,
+        bit_mask: Option<&Vec<u8>>,
         condensed: bool,
-        input_data: Vec<u8>,
-        expected: Vec<u8>,
+        input_data: &[u8],
+        expected: &[u8],
         base_datatype: DataType,
     ) -> Result<(), DiagServiceError> {
         let diag_type = DiagCodedType::new_high_low_byte_order(
             base_datatype,
             DiagCodedTypeVariant::StandardLength(StandardLengthType {
                 bit_length,
-                bit_mask: bitmask.clone(),
+                bit_mask: bit_mask.map(ToOwned::to_owned),
                 condensed,
             }),
         )?;
         let mut uds_payload = vec![0; bit_length.div_ceil(8) as usize];
-        diag_type.encode(input_data.clone(), &mut uds_payload, byte_pos, 0)?;
+        diag_type.encode(input_data.to_owned(), &mut uds_payload, byte_pos, 0)?;
         assert_eq!(uds_payload, expected);
         Ok(())
     }
 
     #[test]
     fn test_encode_standard_length_no_mask() {
-        let input = vec![0x12, 0x34];
-        let expected = input.clone();
-        test_encode_standard_length(16, None, false, input, expected, DataType::ByteField).unwrap();
+        let input = [0x12, 0x34];
+        let expected = input;
+        test_encode_standard_length(16, None, false, &input, &expected, DataType::ByteField)
+            .unwrap();
     }
 
     #[test]
     fn test_encode_standard_length_with_mask() {
-        let input = vec![0x12, 0x34];
-        let expected = vec![0x12, 0x04];
+        let input = [0x12, 0x34];
+        let expected = [0x12, 0x04];
         test_encode_standard_length(
             16,
-            Some(vec![0xFF, 0x0F]),
+            Some(&vec![0xFF, 0x0F]),
             false,
-            input,
-            expected,
+            &input,
+            &expected,
             DataType::ByteField,
         )
         .unwrap();
@@ -1850,13 +1907,13 @@ mod tests {
         // 0010 0011
         // 0010_0011
         // 0010_0000
-        let input = vec![0x12, 0x34];
+        let input = [0x12, 0x34];
         test_encode_standard_length(
             16,
-            Some(vec![0xFF, 0x0F]),
+            Some(&vec![0xFF, 0x0F]),
             true,
-            input,
-            vec![0b_0010_0011, 0b_0000_0100],
+            &input,
+            &[0b_0010_0011, 0b_0000_0100],
             DataType::ByteField,
         )
         .unwrap();
@@ -1864,45 +1921,45 @@ mod tests {
 
     #[test]
     fn test_encode_standard_length_ascii_string() {
-        let input = vec![b'A', b'B'];
-        let expected = input.clone();
-        test_encode_standard_length(16, None, false, input, expected, DataType::AsciiString)
+        let input = [b'A', b'B'];
+        let expected = input;
+        test_encode_standard_length(16, None, false, &input, &expected, DataType::AsciiString)
             .unwrap();
     }
 
     #[test]
     fn test_encode_standard_length_utf8_string() {
-        let input = vec![0x68, 0x69];
-        let expected = input.clone();
-        test_encode_standard_length(16, None, false, input, expected, DataType::Utf8String)
+        let input = [0x68, 0x69];
+        let expected = input;
+        test_encode_standard_length(16, None, false, &input, &expected, DataType::Utf8String)
             .unwrap();
     }
 
     #[test]
     fn test_encode_standard_length_unicode2_string() {
-        let input = vec![0x00, 0x61, 0x00, 0x62];
-        let expected = input.clone();
-        test_encode_standard_length(32, None, false, input, expected, DataType::Unicode2String)
+        let input = [0x00, 0x61, 0x00, 0x62];
+        let expected = input;
+        test_encode_standard_length(32, None, false, &input, &expected, DataType::Unicode2String)
             .unwrap();
     }
 
     #[test]
     fn test_encode_standard_length_float32() {
-        let input = vec![0x12, 0x34, 0x56, 0x78];
-        let expected = input.clone();
-        test_encode_standard_length(32, None, false, input, expected, DataType::Float32).unwrap();
+        let input = [0x12, 0x34, 0x56, 0x78];
+        let expected = input;
+        test_encode_standard_length(32, None, false, &input, &expected, DataType::Float32).unwrap();
     }
 
     #[test]
     fn test_encode_standard_length_float64() {
-        let input = vec![0x12, 0x34, 0x56, 0x78, 0x9a, 0xbc, 0xde, 0xf1];
-        let expected = input.clone();
-        test_encode_standard_length(64, None, false, input, expected, DataType::Float64).unwrap();
+        let input = [0x12, 0x34, 0x56, 0x78, 0x9a, 0xbc, 0xde, 0xf1];
+        let expected = input;
+        test_encode_standard_length(64, None, false, &input, &expected, DataType::Float64).unwrap();
     }
 
     #[test]
     fn test_encode_standard_length_uint32() {
-        let input = vec![0xff, 0xff, 0xff, 0xaa];
+        let input = [0xff, 0xff, 0xff, 0xaa];
         // expect 4 bytes payload, with 0xaa for the last byte
         // since we have to allocate 4 bytes to be able to allocate
         // data at index (byte pos) 3
@@ -1912,22 +1969,22 @@ mod tests {
             8,
             None,
             false,
-            input,
-            expected,
+            &input,
+            &expected,
             DataType::UInt32,
         )
         .unwrap();
 
-        let input = vec![0x12, 0x34, 0x56, 0x78];
-        let expected = input.clone();
-        test_encode_standard_length(32, None, false, input, expected, DataType::UInt32).unwrap();
+        let input = [0x12, 0x34, 0x56, 0x78];
+        let expected = input;
+        test_encode_standard_length(32, None, false, &input, &expected, DataType::UInt32).unwrap();
     }
 
     #[test]
     fn test_encode_standard_length_int32() {
-        let input = vec![0x12, 0x34, 0x56, 0x78];
-        let expected = input.clone();
-        test_encode_standard_length(32, None, false, input, expected, DataType::Int32).unwrap();
+        let input = [0x12, 0x34, 0x56, 0x78];
+        let expected = input;
+        test_encode_standard_length(32, None, false, &input, &expected, DataType::Int32).unwrap();
     }
 
     #[test]
@@ -1937,12 +1994,12 @@ mod tests {
         // Input data to encode
         let input = vec![0b_0000_1111, 0b_0101_0101];
         // Mask: protect upper 4 bits of first byte, lower 4 bits of second byte
-        let bitmask = vec![0b_1111_0000, 0b_0000_1111];
+        let bit_mask = vec![0b_1111_0000, 0b_0000_1111];
         let diag_type = DiagCodedType::new_high_low_byte_order(
             DataType::ByteField,
             DiagCodedTypeVariant::StandardLength(StandardLengthType {
                 bit_length: 16,
-                bit_mask: Some(bitmask.clone()),
+                bit_mask: Some(bit_mask.clone()),
                 condensed: false,
             }),
         )
@@ -1981,12 +2038,12 @@ mod tests {
         // Input data to encode
         let input = vec![0b_1100_1100, 0b_0011_0011];
         // Mask: protect only bits 0 and 7 in both bytes
-        let bitmask = vec![0b_1000_0001, 0b_1000_0001];
+        let bit_mask = vec![0b_1000_0001, 0b_1000_0001];
         let diag_type = DiagCodedType::new_high_low_byte_order(
             DataType::ByteField,
             DiagCodedTypeVariant::StandardLength(StandardLengthType {
                 bit_length: 16,
-                bit_mask: Some(bitmask.clone()),
+                bit_mask: Some(bit_mask.clone()),
                 condensed: false,
             }),
         )
@@ -2015,12 +2072,12 @@ mod tests {
         // Input data to encode (all zeros)
         let input = vec![0xFF, 0xFF];
         // Mask: protect all bits
-        let bitmask = vec![0x00, 0xFF];
+        let bit_mask = vec![0x00, 0xFF];
         let diag_type = DiagCodedType::new_high_low_byte_order(
             DataType::ByteField,
             DiagCodedTypeVariant::StandardLength(StandardLengthType {
                 bit_length: 16,
-                bit_mask: Some(bitmask.clone()),
+                bit_mask: Some(bit_mask.clone()),
                 condensed: false,
             }),
         )
@@ -2040,12 +2097,12 @@ mod tests {
         let input = vec![0xff, 0xff];
         // Mask: protect only upper nibble
         // will protect 0x0f for both payload bytes.
-        let bitmask = vec![0xF0, 0xF0];
+        let bit_mask = vec![0xF0, 0xF0];
         let diag_type = DiagCodedType::new_high_low_byte_order(
             DataType::ByteField,
             DiagCodedTypeVariant::StandardLength(StandardLengthType {
                 bit_length: 16,
-                bit_mask: Some(bitmask.clone()),
+                bit_mask: Some(bit_mask.clone()),
                 condensed: false,
             }),
         )
@@ -2062,12 +2119,12 @@ mod tests {
     fn test_encode_standard_length_masked_cut_out_middle_of_payload_condensed() {
         let mut uds_payload = vec![0b_1010_1010; 8];
         let input = vec![0b_1100_1100];
-        let bitmask = vec![0b_1110_1001, 0b_1101_1111, 0b_1101_1111];
+        let bit_mask = vec![0b_1110_1001, 0b_1101_1111, 0b_1101_1111];
         let diag_type = DiagCodedType::new_high_low_byte_order(
             DataType::Int32,
             DiagCodedTypeVariant::StandardLength(StandardLengthType {
                 bit_length: 24,
-                bit_mask: Some(bitmask.clone()),
+                bit_mask: Some(bit_mask.clone()),
                 condensed: true,
             }),
         )

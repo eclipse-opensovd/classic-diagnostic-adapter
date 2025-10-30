@@ -31,6 +31,7 @@ use crate::{
 
 type ConnectionResetReason = String;
 
+#[derive(Clone, Copy)]
 struct ConnectionSettings {
     routing_activation: Duration,
     retry_delay: Duration,
@@ -219,7 +220,7 @@ async fn connection_handler(
     let (send_pending_tx, send_pending_rx) = watch::channel::<bool>(false);
     let send_mtx = Arc::new(Mutex::new(()));
     spawn_gateway_sender_task(
-        gateway_ip.clone(),
+        &gateway_ip,
         inrx,
         Arc::<Mutex<EcuConnectionTarget>>::clone(&gateway_conn),
         conn_reset_tx.clone(),
@@ -336,7 +337,7 @@ fn spawn_connection_reset_task(
 }
 
 fn spawn_gateway_sender_task(
-    gateway_ip: String,
+    gateway_ip: &str,
     mut inrx: mpsc::Receiver<DiagnosticMessage>,
     gateway_conn: Arc<Mutex<EcuConnectionTarget>>,
     reset_tx: mpsc::Sender<ConnectionResetReason>,
@@ -375,7 +376,7 @@ fn spawn_gateway_sender_task(
                         tracing::error!(error = ?e, "Failed to send message");
                     }
 
-                    let send_after = start.elapsed() - lock_after;
+                    let send_after = start.elapsed().saturating_sub(lock_after);
                     tracing::debug!(
                         total_duration = ?start.elapsed(),
                         lock_duration = ?lock_after,
@@ -388,7 +389,7 @@ fn spawn_gateway_sender_task(
                     }
                     drop(lock);
                 },
-                _ = tokio::time::sleep(SLEEP_INTERVAL) => {
+                () = tokio::time::sleep(SLEEP_INTERVAL) => {
                     let lock = send_mtx.lock().await;
                     if send_pending_status(&send_pending_tx, true).is_err() {
                         break;
@@ -437,6 +438,9 @@ fn spawn_gateway_sender_task(
     });
 }
 
+/// allowed because there are two inline functions in here,
+/// that should be kept private to this function.
+#[allow(clippy::too_many_lines)]
 #[tracing::instrument(
     skip(outtx, gateway_conn, send_pending_rx, reset_tx),
     fields(
@@ -619,16 +623,19 @@ fn spawn_gateway_receiver_task(
     });
 }
 
+// Allow the underscore bindings because the variables
+// are not used, but we want them in the tracing fields.
+#[allow(clippy::used_underscore_binding)]
 #[tracing::instrument(
     skip(tester_present, send_pending_tx),
     fields(
         gateway_name = %gateway_name,
-        gateway_ip = %gateway_ip
+        gateway_ip = %_gateway_ip
     )
 )]
 fn spawn_tester_present_task(
     gateway_name: String,
-    gateway_ip: String,
+    _gateway_ip: String,
     tester_present: mpsc::Sender<TesterPresentControlMessage>,
     send_pending_tx: watch::Sender<bool>,
 ) {

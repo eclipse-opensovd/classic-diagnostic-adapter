@@ -454,7 +454,7 @@ pub(crate) mod service {
             WithRejection(Query(query), _): WithRejection<Query<sovd_executions::Query>, ApiError>,
             State(_state): State<WebserverEcuState<R, T, U>>,
         ) -> Response {
-            ecu_operation_read_handler(query.include_schema).await
+            ecu_operation_read_handler(query.include_schema)
         }
 
         pub(crate) fn docs_get(op: TransformOperation) -> TransformOperation {
@@ -529,7 +529,7 @@ pub(crate) mod service {
                 .with(openapi::error_bad_gateway)
         }
 
-        async fn ecu_operation_read_handler(include_schema: bool) -> Response {
+        fn ecu_operation_read_handler(include_schema: bool) -> Response {
             // todo: this should return the actual executions.
             // and also the correct schema in that case
             let schema = if include_schema {
@@ -547,6 +547,9 @@ pub(crate) mod service {
                 .into_response()
         }
 
+        // allowed for now, the current implementation does not contain a lot of
+        // potential to extract smaller functions
+        #[allow(clippy::too_many_lines)]
         async fn ecu_operation_write_handler<T: UdsEcu + SchemaProvider + Clone>(
             service: String,
             ecu_name: &str,
@@ -626,21 +629,7 @@ pub(crate) mod service {
             let map_to_json = accept == mime::APPLICATION_JSON;
 
             let schema = if map_to_json && include_schema {
-                let subschema = match uds
-                    .schema_for_responses(ecu_name, &diag_service)
-                    .await
-                    .map(|desc| desc.into_schema())
-                {
-                    Ok(v) => v,
-                    Err(e) => {
-                        tracing::error!(
-                            error = ?e,
-                            diag_service = ?diag_service,
-                            "Failed to get schema for diag service"
-                        );
-                        None
-                    }
-                };
+                let subschema = get_subschema(ecu_name, uds, &diag_service).await;
                 Some(create_response_schema!(
                     sovd_executions::Response<VendorErrorCode>,
                     "parameters",
@@ -671,7 +660,7 @@ pub(crate) mod service {
             };
 
             if let DiagServiceResponseType::Negative = response.response_type() {
-                return api_error_from_diag_response(response, include_schema).into_response();
+                return api_error_from_diag_response(&response, include_schema).into_response();
             }
 
             if response.is_empty() {
@@ -716,7 +705,9 @@ pub(crate) mod service {
                 (StatusCode::OK, Bytes::from_owner(data)).into_response()
             }
         }
-
+        // allowed for now, the current implementation does not contain a lot of
+        // potential to extract smaller functions
+        #[allow(clippy::too_many_lines)]
         async fn ecu_reset_handler<T: UdsEcu + SchemaProvider + Clone>(
             service: String,
             ecu_name: &str,
@@ -726,18 +717,16 @@ pub(crate) mod service {
             include_schema: bool,
         ) -> Response {
             // todo: in the future we have to handle possible parameters for the reset service
-            let request_parameters = match serde_json::from_slice::<sovd_executions::Request>(&body)
-                .ok()
-                .and_then(|v| v.parameters)
-            {
-                Some(v) => v,
-                None => {
-                    return ErrorWrapper {
-                        error: ApiError::BadRequest("Invalid request body".to_string()),
-                        include_schema,
-                    }
-                    .into_response();
+            let Some(request_parameters) =
+                serde_json::from_slice::<sovd_executions::Request>(&body)
+                    .ok()
+                    .and_then(|v| v.parameters)
+            else {
+                return ErrorWrapper {
+                    error: ApiError::BadRequest("Invalid request body".to_string()),
+                    include_schema,
                 }
+                .into_response();
             };
 
             let Some(value) = request_parameters.get("value") else {
@@ -792,21 +781,7 @@ pub(crate) mod service {
             };
 
             let schema = if include_schema {
-                let subschema = match uds
-                    .schema_for_responses(ecu_name, &diag_service)
-                    .await
-                    .map(|desc| desc.into_schema())
-                {
-                    Ok(v) => v,
-                    Err(e) => {
-                        tracing::error!(
-                            error = ?e,
-                            diag_service = ?diag_service,
-                            "Failed to get schema for diag service"
-                        );
-                        None
-                    }
-                };
+                let subschema = get_subschema(ecu_name, uds, &diag_service).await;
                 Some(create_response_schema!(
                     sovd_executions::Response<VendorErrorCode>,
                     "parameters",
@@ -838,7 +813,7 @@ pub(crate) mod service {
 
             match response.response_type() {
                 DiagServiceResponseType::Negative => {
-                    api_error_from_diag_response(response, include_schema).into_response()
+                    api_error_from_diag_response(&response, include_schema).into_response()
                 }
                 DiagServiceResponseType::Positive => {
                     if response.is_empty() {
@@ -889,6 +864,28 @@ pub(crate) mod service {
                 }
             }
         }
+
+        async fn get_subschema<T: SchemaProvider>(
+            ecu_name: &str,
+            uds: &T,
+            diag_service: &DiagComm,
+        ) -> Option<schemars::Schema> {
+            match uds
+                .schema_for_responses(ecu_name, diag_service)
+                .await
+                .map(cda_interfaces::SchemaDescription::into_schema)
+            {
+                Ok(v) => v,
+                Err(e) => {
+                    tracing::error!(
+                        error = ?e,
+                        diag_service = ?diag_service,
+                        "Failed to get schema for diag service"
+                    );
+                    None
+                }
+            }
+        }
     }
 }
 
@@ -897,6 +894,8 @@ mod tests {
     use sovd_interfaces::components::ecu::operations::comparams::ComParamSimpleValue;
 
     #[test]
+    // allowing float comparison because we actually want to test exact values here
+    #[allow(clippy::float_cmp)]
     fn com_param_simple_deserialization() {
         let json_data_string = "\"example_value\"";
         let deserialized_string: ComParamSimpleValue =

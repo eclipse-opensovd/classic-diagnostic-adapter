@@ -70,6 +70,7 @@ impl From<usize> for StringId {
 }
 
 impl Strings {
+    #[must_use]
     pub fn new() -> Self {
         Self {
             strings: RwLock::new(Vec::new()),

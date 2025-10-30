@@ -63,16 +63,16 @@ pub trait EcuGateway: Clone + Send + Sync + 'static {
     /// Multiple responses can be sent, e.g. for a request that requires multiple responses,
     /// i.e. response pending NRCs 0x78.
     /// # Errors
-    /// * DiagServiceError::EcuOffline if the ECU cannot be reached, is not found, or is offline.
-    /// * DiagServiceError::Nack when the ECU responds with a NACK, that cannot be
+    /// * `DiagServiceError::EcuOffline` if the ECU cannot be reached, is not found, or is offline.
+    /// * `DiagServiceError::Nack` when the ECU responds with a NACK, that cannot be
     ///   handled by the gateway.
     ///   In this case the error is informational,
     ///   and it will not be handled anymore by the UDS layer, but
     ///   will only be forwarded to i.e. SOVD to be returned to the client.
-    /// * DiagServiceError::UnexpectedResponse if the responses are out of order or unexpected,
+    /// * `DiagServiceError::UnexpectedResponse` if the responses are out of order or unexpected,
     ///   for example if a NACK/ACK was expected but a different response was received.
-    /// * DiagServiceError::NoResponse if an error occurs while waiting for a response
-    /// * DiagServiceError::Timeout if the nack/ack/response is
+    /// * `DiagServiceError::NoResponse` if an error occurs while waiting for a response
+    /// * `DiagServiceError::Timeout` if the nack/ack/response is
     ///   not received within the specified timeout.
     fn send(
         &self,
@@ -86,7 +86,7 @@ pub trait EcuGateway: Clone + Send + Sync + 'static {
     /// Returns an error if the ECU is not online or if the ECU cannot be reached.
     /// Otherwise, returns `Ok(())`.
     /// # Errors
-    ///  DiagServiceError::EcuOffline if the ECU cannot be reached, is not found, or is offline.
+    ///  `DiagServiceError::EcuOffline` if the ECU cannot be reached, is not found, or is offline.
     fn ecu_online<T: EcuAddressProvider>(
         &self,
         ecu_name: &str,

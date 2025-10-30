@@ -38,15 +38,15 @@ impl From<Request> for chrono::DateTime<chrono::Utc> {
 }
 
 pub mod get {
-    use super::*;
+    use super::{Items, Lock};
 
     pub type Response = Items<Lock>;
 }
 
 pub mod id {
-    use super::*;
+    use super::{Deserialize, Serialize};
     pub mod get {
-        use super::*;
+        use super::{Deserialize, Serialize};
         #[derive(Serialize, Deserialize, schemars::JsonSchema)]
         #[schemars(rename = "LockResponse")]
         pub struct Response {
@@ -56,6 +56,6 @@ pub mod id {
 }
 
 pub mod post_put {
-    use super::*;
+    use super::Lock;
     pub type Response = Lock;
 }

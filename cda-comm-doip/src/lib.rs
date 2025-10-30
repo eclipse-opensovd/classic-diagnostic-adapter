@@ -121,6 +121,9 @@ impl TryFrom<DiagnosticResponse> for Option<UdsResponse> {
 }
 
 impl<T: EcuAddressProvider + DoipComParamProvider> DoipDiagGateway<T> {
+    /// Create a new `DoipDiagGateway` instance.
+    /// # Errors
+    /// Returns `String` if initialization fails, e.g. when socket creation fails.
     #[tracing::instrument(
         skip(ecus, variant_detection, tester_present, shutdown_signal),
         fields(tester_ip, gateway_port, ecu_count = ecus.len())
@@ -241,7 +244,7 @@ impl<T: EcuAddressProvider + DoipComParamProvider> DoipDiagGateway<T> {
         }
 
         Err(DiagServiceError::EcuOffline(
-            transmission_params.ecu_name.to_string(),
+            transmission_params.ecu_name.clone(),
         ))
     }
 }
@@ -256,6 +259,9 @@ impl<T: EcuAddressProvider + DoipComParamProvider> EcuGateway for DoipDiagGatewa
             .map(|conn| conn.ip.clone())
     }
 
+    // most of this function is handling different error cases and timeouts.
+    // it is easier to comprehend when kept together.
+    #[allow(clippy::too_many_lines)]
     async fn send(
         &self,
         transmission_params: TransmissionParameters,
@@ -269,7 +275,7 @@ impl<T: EcuAddressProvider + DoipComParamProvider> EcuGateway for DoipDiagGatewa
             .read()
             .await
             .get(&transmission_params.gateway_address)
-            .ok_or_else(|| DiagServiceError::EcuOffline(transmission_params.ecu_name.to_owned()))?;
+            .ok_or_else(|| DiagServiceError::EcuOffline(transmission_params.ecu_name.clone()))?;
 
         if conn_idx >= self.doip_connections.read().await.len() {
             return Err(DiagServiceError::ConnectionClosed);
@@ -296,7 +302,7 @@ impl<T: EcuAddressProvider + DoipComParamProvider> EcuGateway for DoipDiagGatewa
 
                     // Clear any pending messages
                     while ecu.receiver.try_recv().is_ok() {}
-                    let receiver_flushed = start.elapsed() - lock_acquired;
+                    let receiver_flushed = start.elapsed().saturating_sub(lock_acquired);
 
                     let mut resend_counter = 0;
                     if let Err(e) = send_with_retries(
@@ -378,7 +384,10 @@ impl<T: EcuAddressProvider + DoipComParamProvider> EcuGateway for DoipDiagGatewa
                         }
                     }
 
-                    let send_and_ackd_after = start.elapsed() - lock_acquired - receiver_flushed;
+                    let send_and_ackd_after = start
+                        .elapsed()
+                        .saturating_sub(lock_acquired)
+                        .saturating_sub(receiver_flushed);
                     if !expect_uds_reply {
                         try_send_uds_response(&response_sender, Ok(None)).await;
                     }
@@ -389,43 +398,43 @@ impl<T: EcuAddressProvider + DoipComParamProvider> EcuGateway for DoipDiagGatewa
                     loop {
                         tokio::select! {
                             res = ecu.receiver.recv() => {
-                                match res {
-                                    Ok(res) => match res {
-                                        Ok(response) => {
-                                            if !try_send_uds_response(
-                                                &response_sender, response.try_into()).await {
-                                                break;
-                                            }
+                                if let Ok(res) = res { match res {
+                                    Ok(response) => {
+                                        if !try_send_uds_response(
+                                            &response_sender, response.try_into()).await {
+                                            break;
                                         }
-                                        Err(e) => {
-                                            if !try_send_uds_response(
-                                                    &response_sender,
-                                                    Err(DiagServiceError::NoResponse(
-                                                        format!(
-                                                            "Error while waiting for message, {e}")
-                                                ))).await {
-                                                break;
-                                            }
-                                        }
-                                    },
-                                    Err(_) => {
-                                        try_send_uds_response(&response_sender,
-                                            Err(DiagServiceError::NoResponse(
-                                                "ECU receiver unexpectedly closed".to_owned(),
-                                        ))).await;
-                                        break;
                                     }
+                                    Err(e) => {
+                                        if !try_send_uds_response(
+                                                &response_sender,
+                                                Err(DiagServiceError::NoResponse(
+                                                    format!(
+                                                        "Error while waiting for message, {e}")
+                                            ))).await {
+                                            break;
+                                        }
+                                    }
+                                } } else {
+                                    try_send_uds_response(&response_sender,
+                                        Err(DiagServiceError::NoResponse(
+                                            "ECU receiver unexpectedly closed".to_owned(),
+                                    ))).await;
+                                    break;
                                 }
                             }
-                            _ = response_sender.closed() => {
+                            () = response_sender.closed() => {
                                 tracing::debug!("Response sender closed, aborting loop");
                                 break;
                             }
                         }
                     }
 
-                    let rx_done =
-                        start.elapsed() - lock_acquired - send_and_ackd_after - receiver_flushed;
+                    let rx_done = start
+                        .elapsed()
+                        .saturating_sub(lock_acquired)
+                        .saturating_sub(send_and_ackd_after)
+                        .saturating_sub(receiver_flushed);
                     tracing::debug!(
                         total_duration = ?start.elapsed(),
                         lock_duration = ?lock_acquired,
@@ -518,9 +527,9 @@ fn create_socket(
 impl<T: EcuAddressProvider + DoipComParamProvider> Clone for DoipDiagGateway<T> {
     fn clone(&self) -> Self {
         Self {
-            doip_connections: self.doip_connections.clone(),
-            logical_address_to_connection: self.logical_address_to_connection.clone(),
-            ecus: self.ecus.clone(),
+            doip_connections: Arc::clone(&self.doip_connections),
+            logical_address_to_connection: Arc::clone(&self.logical_address_to_connection),
+            ecus: Arc::clone(&self.ecus),
             socket: Arc::clone(&self.socket),
         }
     }

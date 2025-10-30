@@ -53,10 +53,19 @@ pub trait DiagServiceResponse: Sized + Send + Sync + 'static {
     fn service_name(&self) -> String;
     fn response_type(&self) -> DiagServiceResponseType;
     fn get_raw(&self) -> &[u8];
+    /// Convert the response into a JSON representation.
+    /// # Errors
+    /// Returns `DiagServiceError` if the conversion fails, depending on what went wrong exactly.
     fn into_json(self) -> Result<DiagServiceJsonResponse, DiagServiceError>;
+    /// Map the response as a Negative Response Code (NRC).
+    /// # Errors
+    /// Returns `String` if on failure to map the response as NRC.
     fn as_nrc(&self) -> Result<MappedNRC, String>;
 
     /// Extract data trouble codes from the response, if any.
+    /// # Errors
+    /// Returns `DiagServiceError` if unable to extract DTCs, for example if
+    /// this is used on a response that is not mapped.
     fn get_dtcs(&self) -> Result<Vec<(DtcField, DtcRecord)>, DiagServiceError>;
 }
 
@@ -84,6 +93,7 @@ impl std::fmt::Display for UdsPayloadData {
 }
 
 impl DiagServiceJsonResponse {
+    #[must_use]
     pub fn is_empty(&self) -> bool {
         self.data.is_null() && self.errors.is_empty()
     }

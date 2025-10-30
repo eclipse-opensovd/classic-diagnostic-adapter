@@ -75,18 +75,18 @@ pub struct UdsManager<S: EcuGateway, R: DiagServiceResponse, T: EcuManager<Respo
 }
 
 impl<S: EcuGateway, R: DiagServiceResponse, T: EcuManager<Response = R>> UdsManager<S, R, T> {
-    pub async fn new(
+    pub fn new(
         gateway: S,
         ecus: Arc<HashMap<String, RwLock<T>>>,
         mut variant_detection_receiver: mpsc::Receiver<Vec<String>>,
         mut tester_present_receiver: mpsc::Receiver<TesterPresentControlMessage>,
-    ) -> Result<Self, String> {
+    ) -> Self {
         let manager = Self {
             ecus,
             gateway,
             data_transfers: Arc::new(Mutex::new(HashMap::new())),
             tester_present_tasks: Arc::new(RwLock::new(HashMap::new())),
-            _phantom: Default::default(),
+            _phantom: std::marker::PhantomData,
         };
 
         let vd_uds_clone = manager.clone();
@@ -108,7 +108,7 @@ impl<S: EcuGateway, R: DiagServiceResponse, T: EcuManager<Response = R>> UdsMana
             }
         });
 
-        Ok(manager)
+        manager
     }
 
     #[tracing::instrument(
@@ -138,7 +138,7 @@ impl<S: EcuGateway, R: DiagServiceResponse, T: EcuManager<Response = R>> UdsMana
         let response = self
             .send_with_raw_payload(ecu_name, payload, timeout, true)
             .await;
-        let response_after = start.elapsed() - payload_build_after;
+        let response_after = start.elapsed().saturating_sub(payload_build_after);
 
         let response = match response {
             Ok(msg) => {
@@ -153,7 +153,10 @@ impl<S: EcuGateway, R: DiagServiceResponse, T: EcuManager<Response = R>> UdsMana
             Err(e) => Err(e),
         };
 
-        let response_mapped = start.elapsed() - payload_build_after - response_after;
+        let response_mapped = start
+            .elapsed()
+            .saturating_sub(payload_build_after)
+            .saturating_sub(response_after);
         tracing::debug!(
             total_duration = ?start.elapsed(),
             payload_build_duration = ?payload_build_after,
@@ -165,6 +168,8 @@ impl<S: EcuGateway, R: DiagServiceResponse, T: EcuManager<Response = R>> UdsMana
         response
     }
 
+    // allowed for clarity, to make it clearer which of the loops is being continued
+    #[allow(clippy::needless_continue)]
     #[tracing::instrument(
         skip(self, payload),
         fields(ecu_name, expect_response, payload_size = payload.data.len())
@@ -179,29 +184,7 @@ impl<S: EcuGateway, R: DiagServiceResponse, T: EcuManager<Response = R>> UdsMana
         let start = std::time::Instant::now();
 
         let ecu = self.ecus.get(ecu_name).ok_or(DiagServiceError::NotFound)?;
-        let (uds_params, transmission_params) = {
-            let ecu = ecu.read().await;
-            (
-                UdsParameters {
-                    timeout_default: ecu.timeout_default(),
-                    rc_21_retry_policy: ecu.rc_21_retry_policy(),
-                    rc_21_completion_timeout: ecu.rc_21_completion_timeout(),
-                    rc_21_repeat_request_time: ecu.rc_21_repeat_request_time(),
-                    rc_78_retry_policy: ecu.rc_78_retry_policy(),
-                    rc_78_completion_timeout: ecu.rc_78_completion_timeout(),
-                    rc_78_timeout: ecu.rc_78_timeout(),
-                    rc_94_retry_policy: ecu.rc_94_retry_policy(),
-                    rc_94_completion_timeout: ecu.rc_94_completion_timeout(),
-                    rc_94_repeat_request_time: ecu.rc_94_repeat_request_time(),
-                },
-                TransmissionParameters {
-                    gateway_address: ecu.logical_gateway_address(),
-                    timeout_ack: ecu.diagnostic_ack_timeout(),
-                    ecu_name: ecu.ecu_name(),
-                    repeat_request_count_transmission: ecu.repeat_request_count_transmission(),
-                },
-            )
-        };
+        let (uds_params, transmission_params) = Self::ecu_send_params(ecu).await;
 
         let rx_timeout = timeout.unwrap_or(uds_params.timeout_default);
         let mut rx_timeout_next = None;
@@ -319,7 +302,7 @@ impl<S: EcuGateway, R: DiagServiceResponse, T: EcuManager<Response = R>> UdsMana
             break 'send (uds_result, sent_after);
         };
 
-        let finish = start.elapsed() - sent_after;
+        let finish = start.elapsed().saturating_sub(sent_after);
         tracing::debug!(
             total_duration = ?start.elapsed(),
             send_duration = ?sent_after,
@@ -328,6 +311,33 @@ impl<S: EcuGateway, R: DiagServiceResponse, T: EcuManager<Response = R>> UdsMana
         );
 
         response.map(Option::from)
+    }
+
+    async fn ecu_send_params(ecu: &RwLock<T>) -> (UdsParameters, TransmissionParameters) {
+        let (uds_params, transmission_params) = {
+            let ecu = ecu.read().await;
+            (
+                UdsParameters {
+                    timeout_default: ecu.timeout_default(),
+                    rc_21_retry_policy: ecu.rc_21_retry_policy(),
+                    rc_21_completion_timeout: ecu.rc_21_completion_timeout(),
+                    rc_21_repeat_request_time: ecu.rc_21_repeat_request_time(),
+                    rc_78_retry_policy: ecu.rc_78_retry_policy(),
+                    rc_78_completion_timeout: ecu.rc_78_completion_timeout(),
+                    rc_78_timeout: ecu.rc_78_timeout(),
+                    rc_94_retry_policy: ecu.rc_94_retry_policy(),
+                    rc_94_completion_timeout: ecu.rc_94_completion_timeout(),
+                    rc_94_repeat_request_time: ecu.rc_94_repeat_request_time(),
+                },
+                TransmissionParameters {
+                    gateway_address: ecu.logical_gateway_address(),
+                    timeout_ack: ecu.diagnostic_ack_timeout(),
+                    ecu_name: ecu.ecu_name(),
+                    repeat_request_count_transmission: ecu.repeat_request_count_transmission(),
+                },
+            )
+        };
+        (uds_params, transmission_params)
     }
 
     #[tracing::instrument(
@@ -350,7 +360,7 @@ impl<S: EcuGateway, R: DiagServiceResponse, T: EcuManager<Response = R>> UdsMana
         ) {
             if let Some(dt) = transfers.lock().await.get_mut(ecu_name) {
                 dt.meta_data.status = DataTransferStatus::Aborted;
-                dt.meta_data.error = Some(vec![DataTransferError { text: reason }])
+                dt.meta_data.error = Some(vec![DataTransferError { text: reason }]);
             }
             if let Err(e) = sender.send(true) {
                 tracing::error!(error = ?e, "Failed to send data transfer aborted signal");
@@ -359,12 +369,9 @@ impl<S: EcuGateway, R: DiagServiceResponse, T: EcuManager<Response = R>> UdsMana
 
         let (mut buffer, mut remaining_bytes, block_size, mut next_block_sequence_counter) = {
             let mut lock = self.data_transfers.lock().await;
-            let transfer = match lock.get_mut(ecu_name) {
-                Some(transfer) => transfer,
-                None => {
-                    tracing::error!("No transfer found, cannot start data transfer");
-                    return;
-                }
+            let Some(transfer) = lock.get_mut(ecu_name) else {
+                tracing::error!("No transfer found, cannot start data transfer");
+                return;
             };
             transfer.meta_data.status = DataTransferStatus::Running;
             (
@@ -430,12 +437,9 @@ impl<S: EcuGateway, R: DiagServiceResponse, T: EcuManager<Response = R>> UdsMana
 
             {
                 let mut lock = self.data_transfers.lock().await;
-                let transfer = match lock.get_mut(ecu_name) {
-                    Some(transfer) => transfer,
-                    None => {
-                        tracing::error!("No transfer found, cannot update data transfer");
-                        return;
-                    }
+                let Some(transfer) = lock.get_mut(ecu_name) else {
+                    tracing::error!("No transfer found, cannot update data transfer");
+                    return;
                 };
 
                 next_block_sequence_counter = next_block_sequence_counter.wrapping_add(1);
@@ -503,7 +507,7 @@ impl<S: EcuGateway, R: DiagServiceResponse, T: EcuManager<Response = R>> UdsMana
                     async move {
                         loop {
                             if let Err(e) = uds.send_tester_present(&control_msg).await {
-                                tracing::error!(error = %e, "Failed to send tester present")
+                                tracing::error!(error = %e, "Failed to send tester present");
                             }
                             tokio::time::sleep(interval).await;
                         }
@@ -664,7 +668,7 @@ impl<S: EcuGateway, R: DiagServiceResponse, T: EcuManager<Response = R>> UdsMana
                                 item.as_object().and_then(|obj| {
                                     let record = obj.iter().find_map(|(_, v)| v.as_object());
                                     let record_number = obj.iter().find_map(|(_, v)| {
-                                        if !v.is_object() { Some(v) } else { None }
+                                        if v.is_object() { None } else { Some(v) }
                                     });
 
                                     if let (Some(record_number), Some(record)) =
@@ -708,7 +712,7 @@ impl<S: EcuGateway, R: DiagServiceResponse, T: EcuManager<Response = R>> UdsMana
             let mut schema = serde_json::Map::new();
 
             // Todo when solving #54: We are missing the mux case name in the schema.
-            for (key, value) in param_properties.iter() {
+            for (key, value) in param_properties {
                 if value.is_array() || value.get("type").is_some_and(|t| t == "integer") {
                     schema.insert(key.clone(), value.clone());
                 }
@@ -751,7 +755,7 @@ impl<S: EcuGateway, R: DiagServiceResponse, T: EcuManager<Response = R>> UdsMana
                 params
                     .iter()
                     .filter_map(|param| param.as_object())
-                    .flat_map(|obj| {
+                    .filter_map(|obj| {
                         let records = obj.values().find_map(|v| v.as_array());
                         let number_of_identifiers = obj.values().find_map(|v| v.as_number());
                         let record_number_of_snapshot = obj.values().find(|v| v.is_string());
@@ -1154,12 +1158,12 @@ impl<S: EcuGateway, R: DiagServiceResponse, T: EcuManager<Response = R>> UdsEcu
         ecu.lookup_service_through_func_class(func_class_name, service_id)
     }
 
-    async fn ecu_flash_transfer_start<'a>(
+    async fn ecu_flash_transfer_start(
         &self,
         ecu_name: &str,
         func_class_name: &str,
         security_plugin: &DynamicPlugin,
-        parameters: FlashTransferStartParams<'a>,
+        parameters: FlashTransferStartParams<'_>,
     ) -> Result<(), DiagServiceError> {
         let FlashTransferStartParams {
             file_path,
@@ -1223,7 +1227,7 @@ impl<S: EcuGateway, R: DiagServiceResponse, T: EcuManager<Response = R>> UdsEcu
         let transfer_task =
             cda_interfaces::spawn_named!(&format!("flashtransfer-{ecu_name}"), async move {
                 uds.transfer_ecu_data(&ecu_name, length, request, sender, reader)
-                    .await
+                    .await;
             });
 
         transfer_lock.insert(
@@ -1319,7 +1323,7 @@ impl<S: EcuGateway, R: DiagServiceResponse, T: EcuManager<Response = R>> UdsEcu
                     .to_owned();
 
                 let service = DiagComm {
-                    name: name.to_owned(),
+                    name: name.clone(),
                     type_: DiagCommType::Data,
                     lookup_name: None,
                 };
@@ -1400,7 +1404,7 @@ impl<S: EcuGateway, R: DiagServiceResponse, T: EcuManager<Response = R>> UdsEcu
             ecus.push(ecu_name.to_owned());
         }
         let cloned = self.clone();
-        cloned.start_variant_detection_for_ecus(ecus)
+        cloned.start_variant_detection_for_ecus(ecus);
     }
 
     async fn ecu_dtc_by_mask(
@@ -1497,7 +1501,7 @@ impl<S: EcuGateway, R: DiagServiceResponse, T: EcuManager<Response = R>> UdsEcu
             }
 
             if mask == 0xff || mask == 0x00 {
-                for record in lookup.dtcs.into_iter() {
+                for record in lookup.dtcs {
                     all_dtcs.entry(record.code).or_insert(DtcRecordAndStatus {
                         record,
                         scope: lookup.scope.clone(),

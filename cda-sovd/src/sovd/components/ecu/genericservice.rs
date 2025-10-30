@@ -21,7 +21,7 @@ use cda_interfaces::{
 use cda_plugin_security::Secured;
 use http::{HeaderMap, header};
 
-use super::*;
+use super::{ApiError, DynamicPlugin, ErrorWrapper, IntoResponse, StatusCode, TransformOperation};
 use crate::{
     openapi,
     sovd::{WebserverEcuState, get_octet_stream_payload},
@@ -86,7 +86,7 @@ pub(crate) async fn put<R: DiagServiceResponse, T: UdsEcu + Clone, U: FileManage
             None,
         )
         .await
-        .map_err(std::convert::Into::into)
+        .map_err(Into::into)
     {
         Err(e) => {
             return ErrorWrapper {

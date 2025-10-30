@@ -50,7 +50,10 @@ pub(crate) mod single_ecu {
         match uds.get_components_single_ecu_jobs_info(&ecu_name).await {
             Ok(mut items) => {
                 let sovd_component_data = sovd_interfaces::components::ecu::ComponentData {
-                    items: items.drain(0..).map(|c| c.into_sovd()).collect(),
+                    items: items
+                        .drain(0..)
+                        .map(crate::sovd::IntoSovd::into_sovd)
+                        .collect(),
                     schema,
                 };
                 (StatusCode::OK, Json(sovd_component_data)).into_response()
@@ -92,7 +95,7 @@ pub(crate) mod single_ecu {
             let mut job = match uds
                 .get_single_ecu_job(&ecu_name, &job_name)
                 .await
-                .map(|job| job.into_sovd())
+                .map(crate::sovd::IntoSovd::into_sovd)
             {
                 Ok(job) => job,
                 Err(e) => {
@@ -156,7 +159,10 @@ pub(crate) mod single_ecu {
                 Self::Sdg { caption, si, sdgs } => Self::SovdType::Sdg {
                     caption: caption.clone(),
                     si: si.clone(),
-                    sdgs: sdgs.into_iter().map(|sdg| sdg.into_sovd()).collect(),
+                    sdgs: sdgs
+                        .into_iter()
+                        .map(crate::sovd::IntoSovd::into_sovd)
+                        .collect(),
                 },
             }
         }
@@ -166,7 +172,9 @@ pub(crate) mod single_ecu {
         type SovdType = Vec<sovd_interfaces::components::ecu::SdSdg>;
 
         fn into_sovd(self) -> Self::SovdType {
-            self.into_iter().map(|sdg| sdg.into_sovd()).collect()
+            self.into_iter()
+                .map(crate::sovd::IntoSovd::into_sovd)
+                .collect()
         }
     }
 
@@ -203,7 +211,7 @@ pub(crate) mod single_ecu {
                 short_name: self.short_name,
                 physical_default_value: self.physical_default_value,
                 semantic: self.semantic,
-                long_name: self.long_name.map(|ln| ln.into_sovd()),
+                long_name: self.long_name.map(crate::sovd::IntoSovd::into_sovd),
             }
         }
     }
@@ -212,7 +220,9 @@ pub(crate) mod single_ecu {
         type SovdType = Vec<sovd_interfaces::components::ecu::x::single_ecu_job::Param>;
 
         fn into_sovd(self) -> Self::SovdType {
-            self.into_iter().map(|p| p.into_sovd()).collect()
+            self.into_iter()
+                .map(crate::sovd::IntoSovd::into_sovd)
+                .collect()
         }
     }
 
@@ -227,7 +237,7 @@ pub(crate) mod single_ecu {
                 prog_codes: self
                     .prog_codes
                     .into_iter()
-                    .map(|pc| pc.into_sovd())
+                    .map(crate::sovd::IntoSovd::into_sovd)
                     .collect(),
                 schema: None,
             }

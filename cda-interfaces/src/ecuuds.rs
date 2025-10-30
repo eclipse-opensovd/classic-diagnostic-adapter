@@ -84,7 +84,7 @@ pub trait UdsEcu: Send + Sync + 'static {
         ecu: &str,
         job_name: &str,
     ) -> impl Future<Output = Result<single_ecu::Job, DiagServiceError>> + Send;
-    /// Send a message via the given DiagComm and Payload to the ECU.
+    /// Send a message via the given `DiagComm` and Payload to the ECU.
     /// The timeout is set to the given duration, instead of the default timeout.
     /// Can be used to override the default timeout for a specific request, especially
     /// for requests which expect to take longer.
@@ -97,7 +97,7 @@ pub trait UdsEcu: Send + Sync + 'static {
         map_to_json: bool,
         timeout: Duration,
     ) -> impl Future<Output = Result<Self::Response, DiagServiceError>> + Send;
-    /// Send a message via the given DiagComm and Payload to the ECU.
+    /// Send a message via the given `DiagComm` and Payload to the ECU.
     /// The default timeouts of the ECU, read from the communication parameters, will be used.
     /// # Error
     /// Will return `Err` if the ECU does not exist or if the request fails.
@@ -129,7 +129,7 @@ pub trait UdsEcu: Send + Sync + 'static {
     /// Expiration is used to reset the ECU to the default session after the given duration.
     /// Upon positive response, the internally tracked session is updated.
     /// # Errors
-    /// * DiagServiceError::NotFound if the ECU or service lookup failed.
+    /// * `DiagServiceError::NotFound` if the ECU or service lookup failed.
     ///
     /// Forwards errors from the `send` function.
     fn set_ecu_session(
@@ -147,7 +147,7 @@ pub trait UdsEcu: Send + Sync + 'static {
     ///
     /// Expiration is used to reset the ECU to the default security access after the given duration
     /// # Errors
-    /// * DiagServiceError::NotFound if the ECU or service lookup failed.
+    /// * `DiagServiceError::NotFound` if the ECU or service lookup failed.
     ///
     /// Forwards errors from the `send` function.
     fn set_ecu_security_access(
@@ -177,7 +177,7 @@ pub trait UdsEcu: Send + Sync + 'static {
     /// Lookup the service id on the ECU and restrict the result to the function class.
     /// After the successful lookup, the found service will be executed with the given payload.
     /// # Errors
-    /// * DiagServiceError::NotFound if the ECU or service lookup failed.
+    /// * `DiagServiceError::NotFound` if the ECU or service lookup failed.
     ///
     /// Furthermore, errors from the `send` function are forwarded.
     fn ecu_exec_service_from_function_class(
@@ -190,7 +190,7 @@ pub trait UdsEcu: Send + Sync + 'static {
     ) -> impl Future<Output = Result<Self::Response, DiagServiceError>> + Send;
     /// Lookup a service on the ECU by a given function class name and service id.
     /// # Errors
-    /// * DiagServiceError::NotFound if the ECU or service lookup failed.
+    /// * `DiagServiceError::NotFound` if the ECU or service lookup failed.
     fn ecu_lookup_service_through_func_class(
         &self,
         ecu_name: &str,
@@ -202,26 +202,26 @@ pub trait UdsEcu: Send + Sync + 'static {
     /// Setting the ECU into the appropriate session and security access must be done
     /// before calling this function, otherwise the ECU will not accept the transfer.
     /// # Errors
-    /// * DiagServiceError::InvalidRequest
+    /// * `DiagServiceError::InvalidRequest`
     ///   * A transfer is already in progress for the given ECU.
     ///   * The given file path does not exist or is not readable.
     ///   * The offset and length do not match the file size.
-    /// * DiagServiceError::NotFound
+    /// * `DiagServiceError::NotFound`
     ///   * The ECU with the given name does not exist.
-    fn ecu_flash_transfer_start<'a>(
+    fn ecu_flash_transfer_start(
         &self,
         ecu_name: &str,
         func_class_name: &str,
         security_plugin: &DynamicPlugin,
-        parameters: FlashTransferStartParams<'a>,
+        parameters: FlashTransferStartParams<'_>,
     ) -> impl Future<Output = Result<(), DiagServiceError>> + Send;
     /// Once the transfer has finished transfer exit must be called to finalize the transfer.
     /// No new transfer can be started before this is called.
     /// # Errors
-    /// * DiagServiceError::NotFound
+    /// * `DiagServiceError::NotFound`
     ///  * The ECU with the given name does not exist.
     ///  * The transfer with the given ID does not exist.
-    /// * DiagServiceError::InvalidRequest
+    /// * `DiagServiceError::InvalidRequest`
     ///   * The transfer is not in a state where it can be exited, e.g. it is still in progress.
     ///   * Failures on retrieving the transfer exit status.
     fn ecu_flash_transfer_exit(
@@ -231,7 +231,7 @@ pub trait UdsEcu: Send + Sync + 'static {
     ) -> impl Future<Output = Result<(), DiagServiceError>> + Send;
     /// Fetch all flash transfers for the given ECU.
     /// # Errors
-    /// * DiagServiceError::NotFound
+    /// * `DiagServiceError::NotFound`
     ///   * The ECU with the given name does not exist.
     fn ecu_flash_transfer_status(
         &self,
@@ -239,7 +239,7 @@ pub trait UdsEcu: Send + Sync + 'static {
     ) -> impl Future<Output = Result<Vec<DataTransferMetaData>, DiagServiceError>> + Send;
     /// Fetch the status of a specific flash transfer by its ID.
     /// # Errors
-    /// * DiagServiceError::NotFound
+    /// * `DiagServiceError::NotFound`
     ///   * The ECU with the given name does not exist.
     ///   * The transfer with the given ID does not exist.
     fn ecu_flash_transfer_status_id(

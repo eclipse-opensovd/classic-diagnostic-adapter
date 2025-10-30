@@ -38,6 +38,7 @@ impl DtcReadInformationFunction {
     /// Describes the default scope for each DTC function.
     /// This will be used if there is no associated functional class in the service definition.
     /// Otherwise, the functional class name will be used instead.
+    #[must_use]
     pub fn default_scope(&self) -> &str {
         match self {
             Self::FaultMemoryByStatusMask
@@ -49,6 +50,7 @@ impl DtcReadInformationFunction {
         }
     }
 
+    #[must_use]
     pub fn all() -> Vec<Self> {
         Self::iter().collect()
     }
@@ -68,6 +70,7 @@ pub enum DtcMask {
 }
 
 impl DtcMask {
+    #[must_use]
     pub fn all_bits() -> u8 {
         let mut mask = 0u8;
         Self::iter().for_each(|m| mask |= m as u8);
@@ -99,6 +102,8 @@ pub struct DtcField {
 }
 
 #[derive(Serialize, Deserialize, Debug, Default)]
+// The warning is allowed because the bools represent the status bits of a DTC.
+#[allow(clippy::struct_excessive_bools)]
 pub struct DtcStatus {
     pub test_failed: bool,
     pub test_failed_this_operation_cycle: bool,

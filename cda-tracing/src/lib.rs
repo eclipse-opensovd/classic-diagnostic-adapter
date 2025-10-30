@@ -56,6 +56,7 @@ pub struct TokioTracingConfig {
 
 type BoxedLayer<T> = Box<dyn Layer<T> + Send + Sync + 'static>;
 
+#[must_use]
 pub fn new() -> Layered<EnvFilter, Registry> {
     if std::env::var("RUST_LOG").is_err() {
         #[cfg(feature = "tokio-tracing")]
@@ -99,6 +100,9 @@ pub fn new_term_subscriber<S: tracing_core::Subscriber + for<'a> LookupSpan<'a>>
     term_subscriber.boxed()
 }
 
+/// Creates a new file subscriber layer.
+/// # Errors
+/// Returns a string error if the file subscriber cannot be created.
 pub fn new_file_subscriber<S: tracing_core::Subscriber + for<'a> LookupSpan<'a>>(
     config: &LogFileConfig,
 ) -> Result<(WorkerGuard, BoxedLayer<S>), String> {
@@ -138,6 +142,9 @@ pub fn new_file_subscriber<S: tracing_core::Subscriber + for<'a> LookupSpan<'a>>
     Ok((guard, file_subscriber.boxed()))
 }
 
+/// Creates a new OpenTelemetry subscriber layer.
+/// # Errors
+/// Returns a string error if the OpenTelemetry subscriber cannot be created.
 pub fn new_otel_subscriber<
     S: tracing_core::Subscriber + for<'a> LookupSpan<'a> + Send + Sync + 'static,
 >(

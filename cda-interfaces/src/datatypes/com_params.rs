@@ -33,6 +33,10 @@ pub struct ComParamConfig<T: Serialize + Debug> {
 }
 
 pub trait DeserializableCompParam: Sized {
+    /// Parse the com parameter from a database string representation
+    /// # Errors
+    /// Returns `String` if parsing fails, this might happen if the database
+    /// does not provide the expected type.
     fn parse_from_db(input: &str, unit: Option<&Unit>) -> Result<Self, String>;
 }
 
@@ -194,12 +198,12 @@ pub struct UdsComParams {
     pub timeout_default: ComParamConfig<Duration>,
 }
 
-/// Defines the Communication parameters which are used in the DoIP communication
+/// Defines the Communication parameters which are used in the `DoIP` communication
 #[derive(Deserialize, Serialize, Clone, Debug)]
 pub struct DoipComParams {
-    /// Logical address of a DoIP entity.
-    /// In case of directly reachable DoIP entity it's equal to the
-    /// LogicalEcuAddress, otherwise data will be sent via this address to the LogicalEcuAddress
+    /// Logical address of a `DoIP` entity.
+    /// In case of directly reachable `DoIP` entity it's equal to the
+    /// `LogicalEcuAddress`, otherwise data will be sent via this address to the `LogicalEcuAddress`
     pub logical_gateway_address: ComParamConfig<u16>,
 
     /// Only the ID of this com param is needed right now
@@ -221,7 +225,7 @@ pub struct DoipComParams {
     pub nack_number_of_retries: ComParamConfig<HashMap<String, u32>>,
 
     // todo use this n #22
-    /// Maximum time the tester waits for an ACK or NACK of the DoIP entity
+    /// Maximum time the tester waits for an ACK or NACK of the `DoIP` entity
     pub diagnostic_ack_timeout: ComParamConfig<Duration>,
 
     // todo use this n #22
@@ -482,31 +486,34 @@ impl DeserializableCompParam for Vec<u8> {
             return r;
         }
 
-        Ok(hex::decode(input).map_err(|e| format!("{e:?}"))?.to_vec())
+        Ok(hex::decode(input).map_err(|e| format!("{e:?}"))?.clone())
     }
 }
 
 impl DeserializableCompParam for AddressingMode {
     fn parse_from_db(input: &str, _unit: Option<&Unit>) -> Result<Self, String> {
-        AddressingMode::try_from(input.to_owned()).map_err(|e| e.to_string())
+        AddressingMode::try_from(input.to_owned()).map_err(|e| e.clone())
     }
 }
 
 impl DeserializableCompParam for RetryPolicy {
     fn parse_from_db(input: &str, _unit: Option<&Unit>) -> Result<Self, String> {
-        RetryPolicy::try_from(input.to_owned()).map_err(|e| e.to_string())
+        RetryPolicy::try_from(input.to_owned()).map_err(|e| e.clone())
     }
 }
 
 impl DeserializableCompParam for TesterPresentSendType {
     fn parse_from_db(input: &str, _unit: Option<&Unit>) -> Result<Self, String> {
-        TesterPresentSendType::try_from(input.to_owned()).map_err(|e| e.to_string())
+        TesterPresentSendType::try_from(input.to_owned()).map_err(|e| e.clone())
     }
 }
 
 impl DeserializableCompParam for Duration {
     fn parse_from_db(input: &str, unit: Option<&Unit>) -> Result<Self, String> {
-        let value = input.parse::<f64>().map_err(|e| e.to_string())?;
+        let value = input
+            .parse::<f64>()
+            .map_err(|e| e.clone())
+            .map_err(|e| e.to_string())?;
         if value <= 0.0 {
             return Err(format!("Invalid Duration '{value}'"));
         }
@@ -517,6 +524,12 @@ impl DeserializableCompParam for Duration {
             .unwrap_or(0.000_001);
         // base unit would be seconds, but internally use microseconds for better precision
         let result = std::panic::catch_unwind(|| {
+            // Warning allowed because the truncated value is still large
+            // enough to represent durations accurately.
+            // Losing the sign is not an issue here,
+            // because value is already checked to be positive.
+            #[allow(clippy::cast_possible_truncation)]
+            #[allow(clippy::cast_sign_loss)]
             Duration::from_micros((value * factor * 1_000_000_f64) as u64)
         });
 

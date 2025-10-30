@@ -141,14 +141,14 @@ pub async fn load_databases<S: SecurityPlugin>(
         .write()
         .await
         .drain()
-        .map(|(k, v)| (k.to_lowercase().to_string(), RwLock::new(v)))
+        .map(|(k, v)| (k.to_lowercase().clone(), RwLock::new(v)))
         .collect::<HashMap<String, RwLock<EcuManager<S>>>>();
 
     let file_managers = file_managers
         .write()
         .await
         .drain()
-        .map(|(k, v)| (k.to_lowercase().to_string(), v))
+        .map(|(k, v)| (k.to_lowercase().clone(), v))
         .collect::<HashMap<String, FileManager>>();
 
     tracing::info!(database_count = %databases_count.load(Ordering::Relaxed), duration = ?{end - start}, "Loaded databases");
@@ -278,20 +278,20 @@ async fn load_database<S: SecurityPlugin>(
 type UdsManagerType<S> =
     UdsManager<DoipDiagGateway<EcuManager<S>>, DiagServiceResponseStruct, EcuManager<S>>;
 
+/// Creates a new UDS manager for the webserver.
 #[tracing::instrument(skip_all, fields(database_count = databases.len()))]
-pub async fn create_uds_manager<S: SecurityPlugin>(
+pub fn create_uds_manager<S: SecurityPlugin>(
     gateway: DoipDiagGateway<EcuManager<S>>,
     databases: Arc<HashMap<String, RwLock<EcuManager<S>>>>,
     variant_detection_receiver: mpsc::Receiver<Vec<String>>,
     tester_present_sender: mpsc::Receiver<TesterPresentControlMessage>,
-) -> Result<UdsManagerType<S>, String> {
+) -> UdsManagerType<S> {
     UdsManager::new(
         gateway,
         databases,
         variant_detection_receiver,
         tester_present_sender,
     )
-    .await
 }
 
 /// Creates a new diagnostic gateway for the webserver.

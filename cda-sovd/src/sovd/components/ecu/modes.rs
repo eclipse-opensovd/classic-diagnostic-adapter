@@ -258,7 +258,7 @@ pub(crate) mod session {
                         .into_response()
                 }
                 DiagServiceResponseType::Negative => {
-                    api_error_from_diag_response(response, include_schema)
+                    api_error_from_diag_response(&response, include_schema)
                 }
             },
             Err(e) => ErrorWrapper {
@@ -374,7 +374,6 @@ pub(crate) mod security {
         }: WebserverEcuState<R, T, U>,
         request_body: sovd_modes::put::Request,
     ) -> Response {
-        let claims = security_plugin.as_auth_plugin().claims();
         fn split_at_last_underscore(input: &str) -> (String, Option<String>) {
             let parts: Vec<&str> = input.split('_').collect();
 
@@ -387,6 +386,7 @@ pub(crate) mod security {
             }
         }
 
+        let claims = security_plugin.as_auth_plugin().claims();
         let include_schema = query.include_schema;
 
         if let Some(value) = validate_lock(&claims, &ecu_name, &locks, include_schema).await {
@@ -487,7 +487,7 @@ pub(crate) mod security {
                     }
                 },
                 DiagServiceResponseType::Negative => {
-                    api_error_from_diag_response(response, include_schema)
+                    api_error_from_diag_response(&response, include_schema)
                 }
             },
             Err(e) => ErrorWrapper {
