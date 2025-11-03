@@ -74,3 +74,7 @@ serde_json = { workspace = true }
 [features]
 default = []
 tokio-tracing = ["cda-interfaces/tokio-tracing", "cda-tracing/tokio-tracing"]
+openssl-vendored = [
+  "cda-comm-doip/openssl-vendored",
+  "cda-comm-uds/openssl-vendored",
+]

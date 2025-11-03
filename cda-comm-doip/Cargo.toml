@@ -26,7 +26,7 @@ hashbrown = { workspace = true, features = ["serde"] }
 doip-definitions = { workspace = true }
 doip-sockets = { workspace = true, features = ["ssl"] }
 # tls
-openssl = { workspace = true, features = ["vendored"] }
+openssl = { workspace = true }
 
 socket2 = { workspace = true, features = ["all"] }
 #tokio
@@ -36,3 +36,4 @@ tracing = { workspace = true }
 
 [features]
 default = []
+openssl-vendored = ["openssl/vendored"]
