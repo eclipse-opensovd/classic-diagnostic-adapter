@@ -370,8 +370,16 @@ pub(in crate::diag_kernel) fn string_to_vec_u8(
             if value.chars().all(char::is_numeric) {
                 match data_type {
                     DataType::ByteField => value
-                        .parse::<u8>()
-                        .map(|v| v.to_be_bytes().to_vec())
+                        .parse::<u64>()
+                        .map(|v| {
+                            let bytes = v.to_be_bytes();
+                            // Find the first non-zero byte, or keep at least one byte
+                            let start = bytes
+                                .iter()
+                                .position(|&b| b != 0)
+                                .unwrap_or(bytes.len() - 1);
+                            bytes[start..].to_vec()
+                        })
                         .map_err(|_| {
                             DiagServiceError::ParameterConversionError(
                                 "Invalid value type for ByteField".to_owned(),
@@ -639,10 +647,10 @@ mod tests {
     }
 
     #[test]
-    fn test_invalid_byte_value() {
+    fn test_long_byte_value() {
         let json_value = serde_json::json!("256");
         let result = super::json_value_to_uds_data(DataType::ByteField, None, &json_value);
-        assert!(result.is_err());
+        assert_eq!(result, Ok(vec![0x01, 0x00]));
     }
 
     #[test]
