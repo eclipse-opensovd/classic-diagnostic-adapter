@@ -28,7 +28,7 @@ use cda_interfaces::{
     datatypes::{ComParams, DatabaseNamingConvention, FlatbBufConfig},
     file_manager::{Chunk, ChunkType},
 };
-use cda_plugin_security::{DefaultSecurityPlugin, SecurityPlugin};
+use cda_plugin_security::{SecurityPlugin, SecurityPluginLoader};
 use cda_sovd::WebServerConfig;
 use hashbrown::HashMap;
 use tokio::{
@@ -318,7 +318,7 @@ pub async fn create_diagnostic_gateway<S: SecurityPlugin>(
     skip(file_managers, webserver_config, ecu_uds, shutdown_signal),
     fields(file_manager_count = file_managers.len())
 )]
-pub fn start_webserver<S: SecurityPlugin>(
+pub fn start_webserver<S: SecurityPlugin, L: SecurityPluginLoader>(
     flash_files_path: String,
     file_managers: HashMap<String, FileManager>,
     webserver_config: WebServerConfig,
@@ -326,7 +326,7 @@ pub fn start_webserver<S: SecurityPlugin>(
     shutdown_signal: impl std::future::Future<Output = ()> + Send + 'static,
 ) -> tokio::task::JoinHandle<Result<(), String>> {
     cda_interfaces::spawn_named!("webserver", async move {
-        cda_sovd::launch_webserver::<_, DiagServiceResponseStruct, _, _, DefaultSecurityPlugin>(
+        cda_sovd::launch_webserver::<_, DiagServiceResponseStruct, _, _, L>(
             webserver_config,
             ecu_uds,
             flash_files_path,
