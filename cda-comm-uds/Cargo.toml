@@ -24,7 +24,7 @@ cda-interfaces = { workspace = true }
 hashbrown = { workspace = true, features = ["serde"] }
 
 # tls
-openssl = { workspace = true, features = ["vendored"] }
+openssl = { workspace = true }
 
 socket2 = { workspace = true, features = ["all"] }
 #tokio
@@ -38,3 +38,4 @@ strum = { workspace = true }
 
 [features]
 default = []
+openssl-vendored = ["openssl/vendored"]

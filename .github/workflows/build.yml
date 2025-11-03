@@ -20,7 +20,7 @@ concurrency:
 
 jobs:
   format_and_clippy_nightly_toolchain:
-    runs-on : ubuntu-latest
+    runs-on: ubuntu-latest
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
@@ -146,9 +146,10 @@ jobs:
       - name: Cache Rust dependencies
         uses: Swatinem/rust-cache@v2
       - name: Build
-        run: cargo build --locked --verbose
+        # enable openssl-vendored feature as we do not want to install openssl on windows runners
+        run: cargo build --locked --verbose --features openssl-vendored
       - name: Test
-        run: cargo test --locked -- --show-output
+        run: cargo test --locked --features openssl-vendored -- --show-output
 
   check_copyright_headers:
     runs-on: ubuntu-latest
