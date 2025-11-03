@@ -13,7 +13,7 @@
 
 use std::sync::Arc;
 
-use cda_plugin_security::DefaultSecurityPluginData;
+use cda_plugin_security::{DefaultSecurityPlugin, DefaultSecurityPluginData};
 use clap::Parser;
 use futures::future::FutureExt;
 use opensovd_cda_lib::{config::configfile::ConfigSanity, shutdown_signal};
@@ -154,7 +154,7 @@ async fn main() -> Result<(), String> {
     let uds =
         opensovd_cda_lib::create_uds_manager(diagnostic_gateway, databases, variant_detection_rx);
 
-    match opensovd_cda_lib::start_webserver(
+    match opensovd_cda_lib::start_webserver::<_, DefaultSecurityPlugin>(
         flash_files_path,
         file_managers,
         webserver_config,
