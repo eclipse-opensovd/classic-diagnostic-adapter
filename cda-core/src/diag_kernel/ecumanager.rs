@@ -1149,6 +1149,20 @@ impl<S: SecurityPlugin> cda_interfaces::EcuManager for EcuManager<S> {
         let mapped_service = self.lookup_diag_service(service).await?;
         Self::check_security_plugin(security_plugin, &mapped_service)
     }
+
+    fn functional_groups(&self) -> Vec<String> {
+        let Ok(groups) = self.diag_database.functional_groups() else {
+            return Vec::new();
+        };
+        groups
+            .into_iter()
+            .filter_map(|group| {
+                group
+                    .diag_layer()
+                    .and_then(|dl| dl.short_name().map(str::to_lowercase))
+            })
+            .collect::<Vec<_>>()
+    }
 }
 
 impl<S: SecurityPlugin> cda_interfaces::UdsComParamProvider for EcuManager<S> {

@@ -13,7 +13,7 @@
 
 use std::{future::Future, sync::Arc, time::Duration};
 
-use cda_interfaces::{DoipComParamProvider, EcuAddressProvider, TesterPresentControlMessage};
+use cda_interfaces::{DoipComParamProvider, EcuAddressProvider};
 use doip_definitions::{
     header::PayloadType,
     payload::{DoipPayload, VehicleIdentificationRequest},
@@ -88,7 +88,6 @@ pub(crate) async fn listen_for_vams<T, F>(
     netmask: u32,
     gateway: DoipDiagGateway<T>,
     variant_detection: mpsc::Sender<Vec<String>>,
-    tester_present: mpsc::Sender<TesterPresentControlMessage>,
     shutdown_signal: F,
 ) where
     T: EcuAddressProvider + DoipComParamProvider,
@@ -108,7 +107,6 @@ pub(crate) async fn listen_for_vams<T, F>(
         gateway_ecu_map: &HashMap<u16, Vec<u16>>,
         gateway_ecu_name_map: &HashMap<u16, Vec<String>>,
         variant_detection: mpsc::Sender<Vec<String>>,
-        tester_present: mpsc::Sender<TesterPresentControlMessage>,
     ) {
         let DoipMessageContext {
             doip_msg,
@@ -136,7 +134,6 @@ pub(crate) async fn listen_for_vams<T, F>(
                         &gateway.doip_connections,
                         &gateway.ecus,
                         gateway_ecu_map,
-                        tester_present,
                     )
                     .await
                     {
@@ -209,7 +206,6 @@ pub(crate) async fn listen_for_vams<T, F>(
                             handle_doip_response(
                                 &gateway, DoipMessageContext { doip_msg, source_addr, netmask },
                                 &gateway_ecu_map, &gateway_ecu_name_map, variant_detection.clone(),
-                                tester_present.clone(),
                             ).await;
                         }
                     }

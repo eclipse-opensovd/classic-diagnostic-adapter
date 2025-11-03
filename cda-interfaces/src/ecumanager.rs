@@ -86,6 +86,9 @@ pub trait EcuManager:
     #[must_use]
     fn is_loaded(&self) -> bool;
 
+    #[must_use]
+    fn functional_groups(&self) -> Vec<String>;
+
     /// This allows to (re)load a database after unloading it during runtime, which could happen
     /// if initially the ECU wasn´t responding but later another request
     /// for reprobing the ECU happens.

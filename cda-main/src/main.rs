@@ -132,7 +132,6 @@ async fn main() -> Result<(), String> {
     let clonable_shutdown_signal = shutdown_signal().shared();
 
     let (variant_detection_tx, variant_detection_rx) = mpsc::channel(50);
-    let (tester_present_tx, tester_present_rx) = mpsc::channel(10);
 
     let databases = Arc::new(databases);
     let diagnostic_gateway = match opensovd_cda_lib::create_diagnostic_gateway(
@@ -141,7 +140,6 @@ async fn main() -> Result<(), String> {
         &config.doip.tester_subnet,
         config.doip.gateway_port,
         variant_detection_tx,
-        tester_present_tx,
         clonable_shutdown_signal.clone(),
     )
     .await
@@ -153,12 +151,8 @@ async fn main() -> Result<(), String> {
         }
     };
 
-    let uds = opensovd_cda_lib::create_uds_manager(
-        diagnostic_gateway,
-        databases,
-        variant_detection_rx,
-        tester_present_rx,
-    );
+    let uds =
+        opensovd_cda_lib::create_uds_manager(diagnostic_gateway, databases, variant_detection_rx);
 
     match opensovd_cda_lib::start_webserver(
         flash_files_path,

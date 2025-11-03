@@ -79,7 +79,6 @@ impl<S: EcuGateway, R: DiagServiceResponse, T: EcuManager<Response = R>> UdsMana
         gateway: S,
         ecus: Arc<HashMap<String, RwLock<T>>>,
         mut variant_detection_receiver: mpsc::Receiver<Vec<String>>,
-        mut tester_present_receiver: mpsc::Receiver<TesterPresentControlMessage>,
     ) -> Self {
         let manager = Self {
             ecus,
@@ -93,18 +92,6 @@ impl<S: EcuGateway, R: DiagServiceResponse, T: EcuManager<Response = R>> UdsMana
         cda_interfaces::spawn_named!("variant-detection-receiver", async move {
             while let Some(ecus) = variant_detection_receiver.recv().await {
                 vd_uds_clone.start_variant_detection_for_ecus(ecus);
-            }
-        });
-
-        let mut tp_uds_clone = manager.clone();
-        cda_interfaces::spawn_named!("tester-present-receiver", async move {
-            while let Some(tp_cm) = tester_present_receiver.recv().await {
-                if let Err(e) = tp_uds_clone.control_tester_present(tp_cm).await {
-                    tracing::error!(
-                        error = ?e,
-                        "control_tester_present returned error, message discarded"
-                    );
-                }
             }
         });
 
@@ -477,17 +464,17 @@ impl<S: EcuGateway, R: DiagServiceResponse, T: EcuManager<Response = R>> UdsMana
     }
 
     async fn control_tester_present(
-        &mut self,
+        &self,
         control_msg: TesterPresentControlMessage,
-    ) -> Result<(), String> {
+    ) -> Result<(), DiagServiceError> {
         match control_msg.mode {
             TesterPresentMode::Start => {
                 let mut tester_presents = self.tester_present_tasks.write().await;
                 if tester_presents.get(&control_msg.ecu).is_some() {
-                    return Err(format!(
+                    return Err(DiagServiceError::InvalidRequest(format!(
                         "A tester present for {} is already running",
                         control_msg.ecu
-                    ));
+                    )));
                 }
 
                 let interval = if let Some(i) = control_msg.interval {
@@ -496,14 +483,22 @@ impl<S: EcuGateway, R: DiagServiceResponse, T: EcuManager<Response = R>> UdsMana
                     let ecu = self
                         .ecus
                         .get(&control_msg.ecu)
-                        .expect("ecu checked before and must exist");
+                        .ok_or(DiagServiceError::NotFound)?;
                     ecu.read().await.tester_present_time()
                 };
 
                 let mut uds = self.clone();
                 let msg_clone = control_msg.clone();
                 let task = cda_interfaces::spawn_named!(
-                    &format!("tester-present-{}", control_msg.ecu),
+                    &format!(
+                        "tester-present-{}{}",
+                        control_msg.ecu,
+                        if control_msg.type_.is_functional() {
+                            "-functional"
+                        } else {
+                            ""
+                        }
+                    ),
                     async move {
                         loop {
                             if let Err(e) = uds.send_tester_present(&control_msg).await {
@@ -530,10 +525,12 @@ impl<S: EcuGateway, R: DiagServiceResponse, T: EcuManager<Response = R>> UdsMana
                     .write()
                     .await
                     .remove(&control_msg.ecu)
-                    .ok_or(format!(
-                        "ECU {} has no active tester present task",
-                        control_msg.ecu
-                    ))?;
+                    .ok_or_else(|| {
+                        DiagServiceError::InvalidRequest(format!(
+                            "ECU {} has no active tester present task",
+                            control_msg.ecu
+                        ))
+                    })?;
                 tester_present.task.abort();
                 Ok(())
             }
@@ -544,19 +541,21 @@ impl<S: EcuGateway, R: DiagServiceResponse, T: EcuManager<Response = R>> UdsMana
         &mut self,
         control_msg: &TesterPresentControlMessage,
     ) -> Result<(), DiagServiceError> {
-        let payload = match control_msg.type_ {
-            TesterPresentType::Functional => {
-                let ecu = self
-                    .ecus
-                    .get(&control_msg.ecu)
-                    .ok_or(DiagServiceError::NotFound)?;
-                ServicePayload {
-                    data: vec![service_ids::TESTER_PRESENT, 0x80],
-                    source_address: ecu.read().await.tester_address(),
-                    target_address: ecu.read().await.logical_functional_address(),
-                    new_session: None,
-                    new_security: None,
-                }
+        let payload = {
+            let ecu = self
+                .ecus
+                .get(&control_msg.ecu)
+                .ok_or(DiagServiceError::NotFound)?;
+            let target_address = match &control_msg.type_ {
+                TesterPresentType::Functional(_) => ecu.read().await.logical_functional_address(),
+                TesterPresentType::Ecu(_) => ecu.read().await.logical_address(),
+            };
+            ServicePayload {
+                data: vec![service_ids::TESTER_PRESENT, 0x80],
+                source_address: ecu.read().await.tester_address(),
+                target_address,
+                new_session: None,
+                new_security: None,
             }
         };
 
@@ -1560,6 +1559,119 @@ impl<S: EcuGateway, R: DiagServiceResponse, T: EcuManager<Response = R>> UdsEcu
             snapshots,
             snapshots_schema: snapshot_schema,
         })
+    }
+
+    async fn start_tester_present(&self, type_: TesterPresentType) -> Result<(), DiagServiceError> {
+        match type_ {
+            TesterPresentType::Ecu(ref ecu_name) => {
+                let ecu = ecu_name.to_owned();
+                self.control_tester_present(TesterPresentControlMessage {
+                    mode: TesterPresentMode::Start,
+                    type_,
+                    ecu,
+                    interval: None,
+                })
+                .await
+            }
+            TesterPresentType::Functional(ref functional_group) => {
+                // find gateway ecus that are in the given functional group
+                for (name, ecu) in self.ecus.iter() {
+                    if ecu.read().await.logical_address()
+                        != ecu.read().await.logical_gateway_address()
+                    {
+                        continue; // skip non gateway ECUs
+                    }
+                    if !ecu
+                        .read()
+                        .await
+                        .functional_groups()
+                        .contains(functional_group)
+                    {
+                        continue; // skip ECUs not in the functional group
+                    }
+                    if let Err(e) = self
+                        .control_tester_present(TesterPresentControlMessage {
+                            mode: TesterPresentMode::Start,
+                            type_: type_.clone(),
+                            ecu: name.clone(),
+                            interval: None,
+                        })
+                        .await
+                    {
+                        tracing::warn!(
+                            functional_group = %functional_group,
+                            ecu_name = %name,
+                            error = %e,
+                            "Failed to start tester present for ECU in functional group"
+                        );
+                    }
+                }
+
+                Ok(())
+            }
+        }
+    }
+
+    async fn stop_tester_present(&self, type_: TesterPresentType) -> Result<(), DiagServiceError> {
+        match type_ {
+            TesterPresentType::Ecu(ref ecu_name) => {
+                let ecu = ecu_name.to_owned();
+                self.control_tester_present(TesterPresentControlMessage {
+                    mode: TesterPresentMode::Stop,
+                    type_,
+                    ecu,
+                    interval: None,
+                })
+                .await
+            }
+            TesterPresentType::Functional(ref functional_group) => {
+                // todo: extract this into a function functional_group_name -> Vec<ecu_name>
+                for (name, ecu) in self.ecus.iter() {
+                    if ecu.read().await.logical_address()
+                        != ecu.read().await.logical_gateway_address()
+                    {
+                        continue; // skip non gateway ECUs
+                    }
+                    if !ecu
+                        .read()
+                        .await
+                        .functional_groups()
+                        .contains(functional_group)
+                    {
+                        continue; // skip ECUs not in the functional group
+                    }
+                    if let Err(e) = self
+                        .control_tester_present(TesterPresentControlMessage {
+                            mode: TesterPresentMode::Stop,
+                            type_: type_.clone(),
+                            ecu: name.clone(),
+                            interval: None,
+                        })
+                        .await
+                    {
+                        tracing::warn!(
+                            functional_group = %functional_group,
+                            ecu_name = %name,
+                            error = %e,
+                            "Failed to stop tester present for ECU in functional group"
+                        );
+                    }
+                }
+
+                Ok(())
+            }
+        }
+    }
+
+    async fn ecu_functional_groups(&self, ecu_name: &str) -> Result<Vec<String>, DiagServiceError> {
+        let groups = self
+            .ecus
+            .get(ecu_name)
+            .ok_or(DiagServiceError::NotFound)?
+            .read()
+            .await
+            .functional_groups();
+        Ok(groups)
     }
 }
 
