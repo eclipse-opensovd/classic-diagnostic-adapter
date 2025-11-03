@@ -942,7 +942,7 @@ checksum = "1d674e81391d1e1ab681a28d99df07927c6d4aa5b027d7da16ba32d1d21ecd99"
 [[package]]
 name = "flatbuffers"
 version = "25.9.23"
-source = "git+https://github.com/theswiftfox/flatbuffers.git?rev=6181c985#6181c98570c9ec6a049a0c0b4772566e321bf928"
+source = "git+https://github.com/alexmohr/flatbuffers.git?rev=0ba3307d#0ba3307d110a6def7419ad1158245cdf47c6d0c5"
 dependencies = [
  "bitflags",
  "rustc_version",

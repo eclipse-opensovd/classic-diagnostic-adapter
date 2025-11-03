@@ -120,4 +120,4 @@ schemars = { git = "https://github.com/theswiftfox/schemars.git", rev = "d264067
 aide = { git = "https://github.com/theswiftfox/aide.git", rev = "e533403" }
 doip-definitions = { git = "https://github.com/theswiftfox/doip-definitions.git", rev = "bdeab8c" }
 doip-sockets = { git = "https://github.com/theswiftfox/doip-sockets.git", rev = "0771453" }
-flatbuffers = { git = "https://github.com/theswiftfox/flatbuffers.git", rev = "6181c985" }
+flatbuffers = { git = "https://github.com/alexmohr/flatbuffers.git", rev = "0ba3307d" }

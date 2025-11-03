@@ -1,0 +1,859 @@
+/*
+ * Copyright (c) 2025 The Contributors to Eclipse OpenSOVD (see CONTRIBUTORS)
+ *
+ * See the NOTICE file(s) distributed with this work for additional
+ * information regarding copyright ownership.
+ *
+ * This program and the accompanying materials are made available under the
+ * terms of the Apache License Version 2.0 which is available at
+ * https://www.apache.org/licenses/LICENSE-2.0
+ *
+ * SPDX-License-Identifier: Apache-2.0
+ */
+
+// diagnostic_description.fbs uses camelCase to stay close to the original odx descriptors
+
+namespace dataformat;
+
+table SD {
+    value: string;
+    si: string;
+    ti: string;
+}
+
+union SDxorSDG {
+    SD,
+    SDG
+}
+
+table SDOrSDG {
+    sd_or_sdg: SDxorSDG;
+}
+
+table SDG {
+    caption_sn: string;
+    sds: [SDOrSDG];
+    si: string;
+}
+
+table SDGS {
+    sdgs: [SDG];
+}
+
+table Audience {
+    enabled_audiences: [AdditionalAudience];
+    disabled_audiences: [AdditionalAudience];
+    is_supplier: bool;
+    is_development: bool;
+    is_manufacturing: bool;
+    is_after_sales: bool;
+    is_after_market: bool;
+}
+
+enum DiagCodedTypeName: byte {
+    LEADING_LENGTH_INFO_TYPE = 0,
+    MIN_MAX_LENGTH_TYPE = 1,
+    PARAM_LENGTH_INFO_TYPE = 2,
+    STANDARD_LENGTH_TYPE = 3
+}
+
+table LeadingLengthInfoType {
+    bit_length: uint32;
+}
+
+enum Termination: byte {
+    END_OF_PDU = 0,
+    ZERO = 1,
+    HEX_FF = 2
+}
+
+table MinMaxLengthType {
+    min_length: uint32;
+    max_length: uint32 = null;
+    termination: Termination;
+}
+
+table ParamLengthInfoType {
+    length_key: Param;
+}
+
+table StandardLengthType {
+    bit_length: uint32;
+    bit_mask: [ubyte];
+    condensed: bool = false;
+}
+
+enum DataType: byte {
+    A_INT_32 = 0,
+    A_UINT_32 = 1,
+    A_FLOAT_32 = 2,
+    A_ASCIISTRING = 3,
+    A_UTF_8_STRING = 4,
+    A_UNICODE_2_STRING = 5,
+    A_BYTEFIELD = 6,
+    A_FLOAT_64 = 7
+}
+
+union SpecificDataType {
+    LeadingLengthInfoType,
+    MinMaxLengthType,
+    ParamLengthInfoType,
+    StandardLengthType
+}
+
+table DiagCodedType {
+    type: DiagCodedTypeName;
+    base_type_encoding: string;
+    base_data_type: DataType;
+    is_high_low_byte_order: bool = true;
+    specific_data: SpecificDataType;
+}
+
+table Text {
+    value: string;
+    ti: string;
+}
+
+enum IntervalType: byte {
+    OPEN = 0,
+    CLOSED = 1,
+    INFINITE = 2
+}
+
+table Limit {
+    value: string;
+    interval_type: IntervalType;
+}
+
+table CompuValues {
+    v: double = null;
+    vt: string;
+    vt_ti: string;
+}
+
+table CompuRationalCoEffs {
+    numerator: [double];
+    denominator: [double];
+}
+
+table CompuScale {
+    short_label: Text;
+    lower_limit: Limit;
+    upper_limit: Limit;
+    inverse_values: CompuValues;
+    consts: CompuValues;
+    rational_co_effs: CompuRationalCoEffs;
+}
+
+enum CompuCategory: byte {
+    IDENTICAL = 0,
+    LINEAR = 1,
+    SCALE_LINEAR = 2,
+    TEXT_TABLE = 3,
+    COMPU_CODE = 4,
+    TAB_INTP = 5,
+    RAT_FUNC = 6,
+    SCALE_RAT_FUNC = 7
+}
+
+table CompuDefaultValue {
+    values: CompuValues;
+    inverse_values: CompuValues;
+}
+
+table CompuInternalToPhys {
+    compu_scales: [CompuScale];
+    prog_code: ProgCode;
+    compu_default_value: CompuDefaultValue;
+}
+
+table CompuPhysToInternal {
+    prog_code: ProgCode;
+    compu_scales: [CompuScale];
+    compu_default_value: CompuDefaultValue;
+}
+
+table CompuMethod {
+    category: CompuCategory;
+    internal_to_phys: CompuInternalToPhys;
+    phys_to_internal: CompuPhysToInternal;
+}
+
+enum PhysicalTypeDataType: byte {
+    A_INT_32 = 0,
+    A_UINT_32 = 1,
+    A_FLOAT_32 = 2,
+    A_ASCIISTRING = 3,
+    A_UTF_8_STRING = 4,
+    A_UNICODE_2_STRING = 5,
+    A_BYTEFIELD = 6,
+    A_FLOAT_64 = 7
+}
+
+enum Radix: byte {
+    HEX = 0,
+    DEC = 1,
+    BIN = 2,
+    OCT = 3
+}
+
+table PhysicalType {
+    precision: uint32 = null;
+    base_data_type: PhysicalTypeDataType;
+    display_radix: Radix;
+}
+
+table Unit {
+    short_name: string;
+    display_name: string;
+    factorsitounit: double = null;
+    offsetitounit: double = null;
+    physical_dimension: PhysicalDimension;
+}
+
+enum ValidType: byte {
+    VALID = 0,
+    NOT_VALID = 1,
+    NOT_DEFINED = 2,
+    NOT_AVAILABLE = 3
+}
+
+table ScaleConstr {
+    short_label: Text;
+    lower_limit: Limit;
+    upper_limit: Limit;
+    validity: ValidType;
+}
+
+table InternalConstr {
+    lower_limit: Limit;
+    upper_limit: Limit;
+    scale_constr: [ScaleConstr];
+}
+
+table DTC {
+    short_name: string;
+    trouble_code: uint32;
+    display_trouble_code: string;
+    text: Text;
+    level: uint32 = null;
+    sdgs: SDGS;
+    is_temporary: bool = false;
+}
+
+enum DOPType: byte {
+    REGULAR = 0,
+    ENV_DATA_DESC = 1,
+    MUX = 2,
+    DYNAMIC_END_MARKER_FIELD = 3,
+    DYNAMIC_LENGTH_FIELD = 4,
+    END_OF_PDU_FIELD = 5,
+    STATIC_FIELD = 6,
+    ENV_DATA = 7,
+    STRUCTURE = 8,
+    DTC = 9
+}
+
+table NormalDOP {
+    compu_method: CompuMethod;
+    diag_coded_type: DiagCodedType;
+    physical_type: PhysicalType;
+    internal_constr: InternalConstr;
+    unit_ref: Unit;
+    phys_constr: InternalConstr;
+}
+
+table Field {
+    basic_structure: DOP;
+    env_data_desc: DOP;
+    is_visible: bool = true;
+}
+
+table StaticField {
+    fixed_number_of_items: uint32;
+    item_byte_size: uint32;
+    field: Field;
+}
+
+table EndOfPduField {
+    max_number_of_items: uint32 = null;
+    min_number_of_items: uint32 = null;
+    field: Field;
+}
+
+table EnvDataDesc {
+    param_short_name: string;
+    param_path_short_name: string;
+    env_datas: [DOP];
+}
+
+table EnvData {
+    dtc_values: [uint32];
+    params: [Param];
+}
+
+table Structure {
+    params: [Param];
+    byte_size: uint32 = null;
+    is_visible: bool = true;
+}
+
+table DTCDOP {
+    diag_coded_type: DiagCodedType;
+    physical_type: PhysicalType;
+    compu_method: CompuMethod;
+    dtcs: [DTC];
+    is_visible: bool = false;
+}
+
+table LongName {
+    value: string;
+    ti: string;
+}
+
+table SwitchKey {
+    byte_position: uint32;
+    bit_position: uint32 = null;
+    dop: DOP;
+}
+
+table DefaultCase {
+    short_name: string;
+    long_name: LongName;
+    structure: DOP;
+}
+
+table Case {
+    short_name: string;
+    long_name: LongName;
+    structure: DOP;
+    lower_limit: Limit;
+    upper_limit: Limit;
+}
+
+table MUXDOP {
+    byte_position: uint32;
+    switch_key: SwitchKey;
+    default_case: DefaultCase;
+    cases: [Case];
+    is_visible: bool = false;
+}
+
+table DetermineNumberOfItems {
+    byte_position: uint32;
+    bit_position: uint32;
+    dop: DOP;
+}
+
+table DynamicLengthField {
+    offset: uint32;
+    field: Field;
+    determine_number_of_items: DetermineNumberOfItems;
+}
+
+union SpecificDOPData {
+    NormalDOP,
+    EndOfPduField,
+    StaticField,
+    EnvDataDesc,
+    EnvData,
+    DTCDOP,
+    Structure,
+    MUXDOP,
+    DynamicLengthField
+}
+
+table DOP {
+    dop_type: DOPType;
+    short_name: string;
+    sdgs: SDGS;
+    specific_data: SpecificDOPData;
+}
+
+table State {
+    short_name: string;
+    long_name: LongName;
+}
+
+table StateChart {
+    short_name: string;
+    semantic: string;
+    state_transitions: [StateTransition];
+    start_state_short_name_ref: string;
+    states: [State];
+}
+
+table StateTransition {
+    short_name: string;
+    source_short_name_ref: string;
+    target_short_name_ref: string;
+}
+
+table StateTransitionRef {
+    value: string;
+    state_transition: StateTransition;
+}
+
+table PreConditionStateRef {
+    value: string;
+    in_param_if_short_name: string;
+    in_param_path_short_name: string;
+    state: State;
+}
+
+table TableRow {
+    short_name: string;
+    long_name: LongName;
+    key: string;
+    dop: DOP;
+    structure: DOP;
+    sdgs: SDGS;
+    audience: Audience;
+    funct_class_refs: [FunctClass];
+    state_transition_refs: [StateTransitionRef];
+    pre_condition_state_refs: [PreConditionStateRef];
+    is_executable: bool = true;
+    semantic: string;
+    is_mandatory: bool = false;
+    is_final: bool = false;
+}
+
+union DiagServiceOrJob {
+    DiagService,
+    SingleEcuJob
+}
+
+table TableDiagCommConnector {
+    diag_comm: DiagServiceOrJob;
+    semantic: string;
+}
+
+table TableDop {
+    semantic: string;
+    short_name: string;
+    long_name: LongName;
+    key_label: string;
+    struct_label: string;
+    key_dop: DOP;
+    rows: [TableRow];
+    diag_comm_connector: [TableDiagCommConnector];
+    sdgs: SDGS;
+}
+
+enum ParamType: byte {
+    CODED_CONST = 0,
+    DYNAMIC = 1,
+    LENGTH_KEY = 2,
+    MATCHING_REQUEST_PARAM = 3,
+    NRC_CONST = 4,
+    PHYS_CONST = 5,
+    RESERVED = 6,
+    SYSTEM = 7,
+    TABLE_ENTRY = 8,
+    TABLE_KEY = 9,
+    TABLE_STRUCT = 10,
+    VALUE = 11
+}
+
+table CodedConst {
+    coded_value: string;
+    diag_coded_type: DiagCodedType;
+}
+
+table Dynamic {
+}
+
+table LengthKeyRef {
+    dop: DOP;
+}
+
+table MatchingRequestParam {
+    request_byte_pos: int32;
+    byte_length: uint32;
+}
+
+table NrcConst {
+    coded_values: [string];
+    diag_coded_type: DiagCodedType;
+}
+
+table PhysConst {
+    phys_constant_value: string;
+    dop: DOP;
+}
+
+table Reserved {
+    bit_length: uint32;
+}
+
+table System {
+    dop: DOP;
+    sys_param: string;
+}
+
+enum TableEntryRowFragment: byte {
+    KEY = 0,
+    STRUCT = 1
+}
+
+table TableEntry {
+    param: Param;
+    target: TableEntryRowFragment;
+    table_row: TableRow;
+}
+
+union TableKeyReference {
+    TableDop,
+    TableRow
+}
+
+table TableKey {
+    table_key_reference: TableKeyReference;
+}
+
+table TableStruct {
+    table_key: Param;
+}
+
+table Value {
+    physical_default_value: string;
+    dop: DOP;
+}
+
+union ParamSpecificData {
+    CodedConst,
+    Dynamic,
+    MatchingRequestParam,
+    NrcConst,
+    PhysConst,
+    Reserved,
+    Value,
+    TableEntry,
+    TableKey,
+    TableStruct,
+    System,
+    LengthKeyRef
+}
+
+table Param {
+    id: uint32;
+    param_type: ParamType;
+    short_name: string;
+    semantic: string;
+    sdgs: SDGS;
+    physical_default_value: string;
+    byte_position: uint32 = null;
+    bit_position: uint32 = null;
+    specific_data: ParamSpecificData;
+}
+
+table FunctClass {
+    short_name: string;
+}
+
+table Request {
+    params: [Param];
+    sdgs: SDGS;
+}
+
+enum ResponseType: byte {
+    POS_RESPONSE = 0,
+    NEG_RESPONSE = 1,
+    GLOBAL_NEG_RESPONSE = 2
+}
+
+table Response {
+    response_type: ResponseType;
+    params: [Param];
+    sdgs: SDGS;
+}
+
+table AdditionalAudience {
+    short_name: string;
+    long_name: LongName;
+}
+
+enum DiagClassType: byte {
+    START_COMM = 0,
+    STOP_COMM = 1,
+    VARIANT_IDENTIFICATION = 2,
+    READ_DYN_DEF_MESSAGE = 3,
+    DYN_DEF_MESSAGE = 4,
+    CLEAR_DYN_DEF_MESSAGE = 5
+}
+
+table DiagComm {
+    short_name: string;
+    long_name: LongName;
+    semantic: string;
+    funct_class: [FunctClass];
+    sdgs: SDGS;
+    diag_class_type: DiagClassType;
+    pre_condition_state_refs: [PreConditionStateRef];
+    state_transition_refs: [StateTransitionRef];
+    protocols: [Protocol];
+    audience: Audience;
+    is_mandatory: bool = false;
+    is_executable: bool = true;
+    is_final: bool = false;
+}
+
+enum TransmissionMode: byte {
+    SEND_ONLY = 0,
+    RECEIVE_ONLY = 1,
+    SEND_AND_RECEIVE = 2,
+    SEND_OR_RECEIVE = 3
+}
+
+enum Addressing: byte {
+    FUNCTIONAL = 0,
+    PHYSICAL = 1,
+    FUNCTIONAL_OR_PHYSICAL = 2
+}
+
+table DiagService {
+    diag_comm: DiagComm;
+    request: Request;
+    pos_responses: [Response];
+    neg_responses: [Response];
+    is_cyclic: bool = false;
+    is_multiple: bool = false;
+    addressing: Addressing;
+    transmission_mode: TransmissionMode;
+    com_param_refs: [ComParamRef];
+}
+
+table ProgCode {
+    code_file: string;
+    encryption: string;
+    syntax: string;
+    revision: string;
+    entrypoint: string;
+    library: [Library];
+}
+
+table JobParam {
+    short_name: string;
+    long_name: LongName;
+    physical_default_value: string;
+    dop_base: DOP;
+    semantic: string;
+}
+
+table SingleEcuJob {
+    diag_comm: DiagComm;
+    prog_codes: [ProgCode];
+    input_params: [JobParam];
+    output_params: [JobParam];
+    neg_output_params: [JobParam];
+}
+
+table MatchingParameter {
+    expected_value: string;
+    diag_service: DiagService;
+    out_param: Param;
+    use_physical_addressing: bool = null;
+}
+
+table VariantPattern {
+    matching_parameter: [MatchingParameter];
+}
+
+table DiagLayer {
+    short_name: string;
+    long_name: LongName;
+    funct_classes: [FunctClass];
+    com_param_refs: [ComParamRef];
+    diag_services: [DiagService];
+    single_ecu_jobs: [SingleEcuJob];
+    state_charts: [StateChart];
+    additional_audiences: [AdditionalAudience];
+    sdgs: SDGS;
+}
+
+table FunctionalGroup {
+    diag_layer: DiagLayer;
+    parent_refs: [ParentRef];
+}
+
+union ParentRefType {
+    Variant,
+    Protocol,
+    FunctionalGroup,
+    TableDop,
+    EcuSharedData
+}
+
+table ParentRef {
+    ref: ParentRefType;
+    not_inherited_diag_comm_short_names: [string];
+    not_inherited_variables_short_names: [string];
+    not_inherited_dops_short_names: [string];
+    not_inherited_tables_short_names: [string];
+    not_inherited_global_neg_responses_short_names: [string];
+}
+
+table EcuSharedData {
+    diag_layer: DiagLayer;
+}
+
+table Variant {
+    diag_layer: DiagLayer;
+    is_base_variant: bool = false;
+    variant_pattern: [VariantPattern];
+    parent_refs: [ParentRef];
+}
+
+table SimpleValue {
+    value: string;
+}
+
+union SimpleOrComplexValueEntry {
+    SimpleValue,
+    ComplexValue
+}
+
+table ComplexValue {
+    entries: [SimpleOrComplexValueEntry];
+}
+
+table Protocol {
+    diag_layer: DiagLayer;
+    com_param_spec: ComParamSpec;
+    prot_stack: ProtStack;
+    parent_refs: [Protocol];
+}
+
+table ComParamRef {
+    simple_value: SimpleValue;
+    complex_value: ComplexValue;
+    com_param: ComParam;
+    protocol: Protocol;
+    prot_stack: ProtStack;
+}
+
+enum ComParamType: byte {
+    REGULAR = 0,
+    COMPLEX = 1
+}
+
+table RegularComParam {
+    physical_default_value: string;
+    dop: DOP;
+}
+
+table ComplexComParam {
+    com_params: [ComParam];
+    complex_physical_default_values: [ComplexValue];
+    allow_multiple_values: bool = false;
+}
+
+enum ComParamStandardisationLevel: byte {
+    STANDARD = 0,
+    OEM_SPECIFIC = 1,
+    OPTIONAL = 2,
+    OEM_OPTIONAL = 3
+}
+
+enum ComParamUsage: byte {
+    ECU_SOFTWARE = 0,
+    ECU_COMM = 1,
+    APPLICATION = 2,
+    TESTER = 3
+}
+
+union ComParamSpecificData {
+    RegularComParam,
+    ComplexComParam
+}
+
+table ComParam {
+    com_param_type: ComParamType;
+    short_name: string;
+    long_name: LongName;
+    param_class: string;
+    cp_type: ComParamStandardisationLevel;
+    display_level: uint32 = null;
+    cp_usage: ComParamUsage;
+    specific_data: ComParamSpecificData;
+}
+
+table PhysicalDimension {
+    short_name: string;
+    long_name: LongName;
+    length_exp: int32 = null;
+    mass_exp: int32 = null;
+    time_exp: int32 = null;
+    current_exp: int32 = null;
+    temperature_exp: int32 = null;
+    molar_amount_exp: int32 = null;
+    luminous_intensity_exp: int32 = null;
+}
+
+enum UnitGroupCategory: byte {
+    COUNTRY = 0,
+    EQUIV_UNITS = 1
+}
+
+table UnitGroup {
+    short_name: string;
+    long_name: LongName;
+    unitrefs: [Unit];
+}
+
+table UnitSpec {
+    unit_groups: [UnitGroup];
+    units: [Unit];
+    physical_dimensions: [PhysicalDimension];
+    sdgs: SDGS;
+}
+
+table ComParamSubSet {
+    com_params: [ComParam];
+    complex_com_params: [ComParam];
+    data_object_props: [DOP];
+    unit_spec: UnitSpec;
+}
+
+table ProtStack {
+    short_name: string;
+    long_name: LongName;
+    pdu_protocol_type: string;
+    physical_link_type: string;
+    comparam_subset_refs: [ComParamSubSet];
+}
+
+table ComParamSpec {
+    prot_stacks: [ProtStack];
+}
+
+table Library {
+    short_name: string;
+    long_name: LongName;
+    code_file: string;
+    encryption: string;
+    syntax: string;
+    entry_point: string;
+}
+
+enum FeatureFlag: byte {
+    RESERVED = 0
+}
+
+table EcuData {
+    version: string;
+    ecu_name: string;
+    revision: string;
+    metadata: [KeyValue];
+    feature_flags: [FeatureFlag];
+    variants: [Variant];
+    functional_groups: [FunctionalGroup];
+    dtcs: [DTC];
+}
+
+table KeyValue {
+    key: string;
+    value: string;
+}
+
+root_type EcuData;
