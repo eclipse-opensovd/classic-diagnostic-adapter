@@ -278,6 +278,12 @@ pub trait UdsEcu: Send + Sync + 'static {
         type_: TesterPresentType,
     ) -> impl Future<Output = Result<(), DiagServiceError>> + Send;
 
+    /// Check if a tester present is active for the given type.
+    fn check_tester_present_active(
+        &self,
+        type_: &TesterPresentType,
+    ) -> impl Future<Output = bool> + Send;
+
     // Retrieve all faults for the given ECU, with optional filtering by status, severity and scope.
     // W/o fmt::skip 'impl Future...' is put on the same line by rustfmt,
     // then it complains about the line being too long...

@@ -791,6 +791,24 @@ impl<S: EcuGateway, R: DiagServiceResponse, T: EcuManager<Response = R>> UdsMana
             schema,
         ))
     }
+
+    async fn ecus_for_functional_group(&self, functional_group: &str) -> Vec<String> {
+        let mut ecu_names = Vec::new();
+        for (name, ecu) in self.ecus.iter() {
+            let ecu_guard = ecu.read().await;
+            if ecu_guard.logical_address() != ecu_guard.logical_gateway_address() {
+                continue; // skip non gateway ECUs
+            }
+            if !ecu_guard
+                .functional_groups()
+                .contains(&functional_group.to_owned())
+            {
+                continue; // skip ECUs not in the functional group
+            }
+            ecu_names.push(name.clone());
+        }
+        ecu_names
+    }
 }
 
 impl<S: EcuGateway, R: DiagServiceResponse, T: EcuManager<Response = R>> Clone
@@ -1574,21 +1592,7 @@ impl<S: EcuGateway, R: DiagServiceResponse, T: EcuManager<Response = R>> UdsEcu
                 .await
             }
             TesterPresentType::Functional(ref functional_group) => {
-                // find gateway ecus that are in the given functional group
-                for (name, ecu) in self.ecus.iter() {
-                    if ecu.read().await.logical_address()
-                        != ecu.read().await.logical_gateway_address()
-                    {
-                        continue; // skip non gateway ECUs
-                    }
-                    if !ecu
-                        .read()
-                        .await
-                        .functional_groups()
-                        .contains(functional_group)
-                    {
-                        continue; // skip ECUs not in the functional group
-                    }
+                for name in self.ecus_for_functional_group(functional_group).await {
                     if let Err(e) = self
                         .control_tester_present(TesterPresentControlMessage {
                             mode: TesterPresentMode::Start,
@@ -1606,7 +1610,6 @@ impl<S: EcuGateway, R: DiagServiceResponse, T: EcuManager<Response = R>> UdsEcu
                         );
                     }
                 }
-
                 Ok(())
             }
         }
@@ -1625,21 +1628,7 @@ impl<S: EcuGateway, R: DiagServiceResponse, T: EcuManager<Response = R>> UdsEcu
                 .await
             }
             TesterPresentType::Functional(ref functional_group) => {
-                // todo: extract this into a function functional_group_name -> Vec<ecu_name>
-                for (name, ecu) in self.ecus.iter() {
-                    if ecu.read().await.logical_address()
-                        != ecu.read().await.logical_gateway_address()
-                    {
-                        continue; // skip non gateway ECUs
-                    }
-                    if !ecu
-                        .read()
-                        .await
-                        .functional_groups()
-                        .contains(functional_group)
-                    {
-                        continue; // skip ECUs not in the functional group
-                    }
+                for name in self.ecus_for_functional_group(functional_group).await {
                     if let Err(e) = self
                         .control_tester_present(TesterPresentControlMessage {
                             mode: TesterPresentMode::Stop,
@@ -1657,8 +1646,23 @@ impl<S: EcuGateway, R: DiagServiceResponse, T: EcuManager<Response = R>> UdsEcu
                         );
                     }
                 }
-
                 Ok(())
+            }
+        }
+    }
+
+    async fn check_tester_present_active(&self, type_: &TesterPresentType) -> bool {
+        match type_ {
+            TesterPresentType::Ecu(ecu_name) => {
+                let tester_presents = self.tester_present_tasks.read().await;
+                tester_presents.get(ecu_name).is_some()
+            }
+            TesterPresentType::Functional(functional_group) => {
+                let ecu_names = self.ecus_for_functional_group(functional_group).await;
+                let tester_presents = self.tester_present_tasks.read().await;
+                ecu_names
+                    .iter()
+                    .all(|ecu| tester_presents.get(ecu).is_some())
             }
         }
     }
