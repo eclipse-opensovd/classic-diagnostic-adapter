@@ -284,9 +284,11 @@ pub(crate) mod ecu {
         pub(crate) async fn get<R: DiagServiceResponse, T: UdsEcu + Clone, U: FileManager>(
             Path(lock): Path<LockPathParam>,
             UseApi(_sec_plugin, _): UseApi<Secured, ()>,
-            State(state): State<WebserverEcuState<R, T, U>>,
+            State(WebserverEcuState {
+                ecu_name, locks, ..
+            }): State<WebserverEcuState<R, T, U>>,
         ) -> Response {
-            get_id_handler(&state.locks.ecu, &lock, None, false).await
+            get_id_handler(&locks.ecu, &lock, Some(&ecu_name), false).await
         }
 
         pub(crate) fn docs_get(op: TransformOperation) -> TransformOperation {
@@ -821,9 +823,11 @@ async fn create_lock<T: UdsEcu + Clone>(
                     .ok_or_else(|| ApiError::BadRequest("No ECU name provided".to_owned()))?
                     .to_lowercase();
                 let tp_type = TesterPresentType::Ecu(ecu_name);
-                uds.start_tester_present(tp_type.clone())
-                    .await
-                    .map_err(ApiError::from)?;
+                if !uds.check_tester_present_active(&tp_type).await {
+                    uds.start_tester_present(tp_type.clone())
+                        .await
+                        .map_err(ApiError::from)?;
+                }
 
                 let uds = (*uds).clone();
                 LockCleanupFnHelper::new(async move || {
