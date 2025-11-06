@@ -11,10 +11,10 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use strum::{Display, EnumString};
 
-#[derive(Debug, Serialize, schemars::JsonSchema)]
+#[derive(Debug, Deserialize, Serialize, schemars::JsonSchema)]
 pub struct Mode<T> {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub id: Option<String>,
@@ -48,13 +48,27 @@ pub mod get {
 pub mod put {
     use serde::{Deserialize, Serialize};
 
-    #[derive(Debug, Deserialize, schemars::JsonSchema)]
+    #[derive(Serialize, Deserialize, schemars::JsonSchema)]
+    pub struct SovdSeed {
+        #[serde(rename = "Request_Seed")]
+        pub request_seed: String,
+    }
+
+    #[derive(Serialize, Deserialize, schemars::JsonSchema)]
+    pub struct RequestSeedResponse {
+        pub id: String,
+        pub seed: SovdSeed,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        pub schema: Option<schemars::Schema>,
+    }
+
+    #[derive(Debug, Deserialize, Serialize, schemars::JsonSchema)]
     pub struct ModeKey {
-        #[serde(rename = "Send_Key")]
+        #[serde(rename = "Send_Key", alias = "Security")]
         pub send_key: String,
     }
 
-    #[derive(Debug, Deserialize, schemars::JsonSchema)]
+    #[derive(Debug, Deserialize, Serialize, schemars::JsonSchema)]
     #[schemars(rename = "UpdateModesRequest")]
     pub struct Request {
         pub value: String,
@@ -67,11 +81,11 @@ pub mod put {
         // todo (strict-mode): if strict mode is enabled, this should be required
         pub mode_expiration: Option<u64>,
 
-        #[serde(rename = "Key")]
+        #[serde(rename = "Key", alias = "SendKey")]
         pub key: Option<ModeKey>,
     }
 
-    #[derive(Debug, Serialize, schemars::JsonSchema)]
+    #[derive(Debug, Deserialize, Serialize, schemars::JsonSchema)]
     #[schemars(rename = "UpdateModesResponse")]
     pub struct Response<T> {
         pub id: String,

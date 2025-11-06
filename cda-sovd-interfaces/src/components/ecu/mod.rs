@@ -19,7 +19,7 @@ use crate::Items;
 pub mod modes;
 pub mod operations;
 
-#[derive(Serialize, schemars::JsonSchema)]
+#[derive(Debug, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct Ecu {
     pub id: String,
     pub name: String,
@@ -47,7 +47,7 @@ pub struct ComponentDataInfo {
     pub name: String,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, Deserialize)]
 #[serde(untagged)]
 #[derive(schemars::JsonSchema)]
 pub enum SdSdg {
@@ -82,14 +82,14 @@ pub enum SdSdg {
     },
 }
 
-#[derive(Serialize, schemars::JsonSchema)]
+#[derive(Serialize, Deserialize, schemars::JsonSchema)]
 pub struct ServicesSdgs {
     pub items: HashMap<String, ServiceSdgs>,
     #[schemars(skip)]
     #[serde(skip_serializing_if = "Option::is_none")]
     pub schema: Option<schemars::Schema>,
 }
-#[derive(Serialize, schemars::JsonSchema)]
+#[derive(Serialize, Deserialize, schemars::JsonSchema)]
 pub struct ServiceSdgs {
     pub sdgs: Vec<SdSdg>,
 }

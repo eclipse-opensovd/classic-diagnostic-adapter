@@ -1121,6 +1121,27 @@ impl<S: EcuGateway, R: DiagServiceResponse, T: EcuManager<Response = R>> UdsEcu
         }
     }
 
+    async fn get_send_key_param_name(
+        &self,
+        ecu_name: &str,
+        level: &str,
+    ) -> Result<String, DiagServiceError> {
+        let ecu_diag_service = self.ecus.get(ecu_name).ok_or(DiagServiceError::NotFound)?;
+        let security_access = ecu_diag_service
+            .read()
+            .await
+            .lookup_security_access_change(level, None, true)?;
+        match &security_access {
+            SecurityAccess::RequestSeed(_) => {
+                unreachable!("Not reached, because has key is set to true above")
+            }
+            SecurityAccess::SendKey(dc) => {
+                let ecu = ecu_diag_service.read().await;
+                ecu.get_send_key_param_name(dc).await
+            }
+        }
+    }
+
     async fn get_ecu_reset_services(
         &self,
         ecu_name: &str,

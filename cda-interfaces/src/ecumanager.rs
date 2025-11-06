@@ -193,6 +193,13 @@ pub trait EcuManager:
         seed_service: Option<&String>,
         has_key: bool,
     ) -> Result<SecurityAccess, DiagServiceError>;
+    /// Retrieves the name of the parameter used to send the key for security access.
+    /// # Errors
+    /// Will return `DiagServiceError` if the parameter cannot be found in the database
+    fn get_send_key_param_name(
+        &self,
+        diag_service: &DiagComm,
+    ) -> impl Future<Output = Result<String, DiagServiceError>> + Send;
     /// Retrieves the name of the current ecu session, i.e. 'extended', 'programming' or 'default'.
     /// The examples above differ depending on the parameterization of the ECU.
     /// # Errors
