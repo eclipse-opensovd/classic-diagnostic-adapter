@@ -118,10 +118,6 @@ impl ClaimsTrait for Claims {
     fn sub(&self) -> &str {
         &self.sub
     }
-
-    fn exp(&self) -> usize {
-        self.exp
-    }
 }
 
 /// Default security plugin data containing validated user claims.
