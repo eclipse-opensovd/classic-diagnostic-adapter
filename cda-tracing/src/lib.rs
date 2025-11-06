@@ -11,6 +11,8 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+use std::ops::Deref;
+
 use opentelemetry::trace::TracerProvider;
 use serde::{Deserialize, Serialize};
 use tracing_appender::non_blocking::WorkerGuard;
@@ -55,6 +57,16 @@ pub struct TokioTracingConfig {
 }
 
 type BoxedLayer<T> = Box<dyn Layer<T> + Send + Sync + 'static>;
+
+pub struct TracingWorkerGuard(WorkerGuard);
+
+impl Deref for TracingWorkerGuard {
+    type Target = WorkerGuard;
+
+    fn deref(&self) -> &Self::Target {
+        &self.0
+    }
+}
 
 #[must_use]
 pub fn new() -> Layered<EnvFilter, Registry> {
@@ -105,7 +117,7 @@ pub fn new_term_subscriber<S: tracing_core::Subscriber + for<'a> LookupSpan<'a>>
 /// Returns a string error if the file subscriber cannot be created.
 pub fn new_file_subscriber<S: tracing_core::Subscriber + for<'a> LookupSpan<'a>>(
     config: &LogFileConfig,
-) -> Result<(WorkerGuard, BoxedLayer<S>), String> {
+) -> Result<(TracingWorkerGuard, BoxedLayer<S>), String> {
     let appender = subscriber::file_log_writer(
         config.path.clone(),
         config.name.clone(),
@@ -139,7 +151,7 @@ pub fn new_file_subscriber<S: tracing_core::Subscriber + for<'a> LookupSpan<'a>>
         file_subscriber.with_filter(filter_fn)
     };
 
-    Ok((guard, file_subscriber.boxed()))
+    Ok((TracingWorkerGuard(guard), file_subscriber.boxed()))
 }
 
 /// Creates a new OpenTelemetry subscriber layer.

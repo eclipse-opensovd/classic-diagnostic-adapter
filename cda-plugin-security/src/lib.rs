@@ -132,8 +132,6 @@ pub use default_security_plugin::{DefaultSecurityPlugin, DefaultSecurityPluginDa
 pub trait Claims: Send + Sync {
     /// Returns the subject (user identifier) of the token.
     fn sub(&self) -> &str;
-    /// Returns the expiration time of the token as a Unix timestamp.
-    fn exp(&self) -> usize;
 }
 
 /// Provides access to authentication information and user claims.
@@ -208,19 +206,11 @@ impl Claims for Box<dyn Claims> {
     fn sub(&self) -> &str {
         (**self).sub()
     }
-
-    fn exp(&self) -> usize {
-        (**self).exp()
-    }
 }
 
 impl Claims for Box<&dyn Claims> {
     fn sub(&self) -> &str {
         (**self).sub()
-    }
-
-    fn exp(&self) -> usize {
-        (**self).exp()
     }
 }
 
