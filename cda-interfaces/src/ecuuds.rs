@@ -159,6 +159,14 @@ pub trait UdsEcu: Send + Sync + 'static {
         security_plugin: &DynamicPlugin,
         expiration: Duration,
     ) -> impl Future<Output = Result<(SecurityAccess, Self::Response), DiagServiceError>> + Send;
+    /// Get the name of the parameter used to send the key for the given ECU and security level.
+    /// # Errors
+    /// Returns an error if the ECU or security level is not found.
+    fn get_send_key_param_name(
+        &self,
+        ecu_name: &str,
+        level: &str,
+    ) -> impl Future<Output = Result<String, DiagServiceError>> + Send;
     /// Retrieve service to reset the ECU.
     fn get_ecu_reset_services(
         &self,

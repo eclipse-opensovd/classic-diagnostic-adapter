@@ -915,6 +915,34 @@ impl<S: SecurityPlugin> cda_interfaces::EcuManager for EcuManager<S> {
         }
     }
 
+    async fn get_send_key_param_name(
+        &self,
+        diag_service: &cda_interfaces::DiagComm,
+    ) -> Result<String, DiagServiceError> {
+        let mapped_service = self.lookup_diag_service(diag_service).await?;
+        let request = mapped_service
+            .request()
+            .ok_or(DiagServiceError::RequestNotSupported(format!(
+                "Service '{}' is not supported",
+                diag_service.name
+            )))?;
+
+        request
+            .params()
+            .and_then(|params| {
+                params.iter().find_map(|p| {
+                    if p.semantic().is_some_and(|s| s == semantics::DATA) {
+                        p.short_name().map(ToOwned::to_owned)
+                    } else {
+                        None
+                    }
+                })
+            })
+            .ok_or(DiagServiceError::InvalidDatabase(
+                "No parameter found for sending key".to_owned(),
+            ))
+    }
+
     fn session(&self) -> Result<String, DiagServiceError> {
         self.access_control
             .lock()

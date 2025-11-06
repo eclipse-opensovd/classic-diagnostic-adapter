@@ -28,7 +28,6 @@ use cda_interfaces::{
     file_manager::FileManager,
 };
 use hashbrown::HashMap;
-use serde::Serialize;
 use sovd_interfaces::components::ecu::modes::{self as sovd_modes, ModeType};
 
 use crate::sovd::{
@@ -275,7 +274,7 @@ pub(crate) mod session {
     ) -> Response {
         let include_schema = query.include_schema;
         let schema = if include_schema {
-            Some(create_schema!(sovd_modes::Mode::<String>))
+            Some(create_schema!(sovd_modes::Mode<String>))
         } else {
             None
         };
@@ -303,23 +302,10 @@ pub(crate) mod session {
 pub(crate) mod security {
     use cda_interfaces::{DynamicPlugin, SecurityAccess, diagservices::UdsPayloadData};
     use cda_plugin_security::SecurityPlugin;
+    use sovd_interfaces::components::ecu::modes::put::{RequestSeedResponse, SovdSeed};
 
     use super::*;
     use crate::sovd::error::ErrorWrapper;
-
-    #[derive(Serialize, schemars::JsonSchema)]
-    struct SovdSeed {
-        #[serde(rename = "Request_Seed")]
-        request_seed: String,
-    }
-
-    #[derive(Serialize, schemars::JsonSchema)]
-    struct SovdRequestSeedResponse {
-        id: String,
-        seed: SovdSeed,
-        #[serde(skip_serializing_if = "Option::is_none")]
-        schema: Option<schemars::Schema>,
-    }
 
     pub(crate) async fn get<R: DiagServiceResponse, T: UdsEcu + Clone, U: FileManager>(
         sec_plugin: Box<dyn SecurityPlugin>,
@@ -337,7 +323,7 @@ pub(crate) mod security {
             return value;
         }
         let schema = if include_schema {
-            Some(create_schema!(sovd_modes::Mode::<String>))
+            Some(create_schema!(sovd_modes::Mode<String>))
         } else {
             None
         };
@@ -425,7 +411,18 @@ pub(crate) mod security {
                 .into_response();
             };
 
-            data.insert("Send_Key".to_string(), value);
+            let param_name = match uds.get_send_key_param_name(&ecu_name, &level).await {
+                Ok(n) => n,
+                Err(e) => {
+                    return ErrorWrapper {
+                        error: ApiError::from(e),
+                        include_schema,
+                    }
+                    .into_response();
+                }
+            };
+
+            data.insert(param_name, value);
             let payload = UdsPayloadData::ParameterMap(data);
             Some(payload)
         } else {
@@ -447,7 +444,7 @@ pub(crate) mod security {
                 DiagServiceResponseType::Positive => match security_access {
                     SecurityAccess::RequestSeed(_) => {
                         let schema = if query.include_schema {
-                            Some(create_schema!(SovdRequestSeedResponse))
+                            Some(create_schema!(RequestSeedResponse))
                         } else {
                             None
                         };
@@ -460,7 +457,7 @@ pub(crate) mod security {
 
                         (
                             StatusCode::OK,
-                            Json(SovdRequestSeedResponse {
+                            Json(RequestSeedResponse {
                                 id: semantics::SECURITY.to_owned(),
                                 seed: SovdSeed { request_seed: seed },
                                 schema,
