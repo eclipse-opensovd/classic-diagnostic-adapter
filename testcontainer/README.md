@@ -1,9 +1,73 @@
-# Manual test setup
+# Test Setup
 
 NOTE: Implemented services in the odx are not fully tested yet with the CDA,
 and for some there are open issues to make them work.
 
-## Generate odx file(s)
+## Quick Start with Docker Compose (Recommended)
+
+### Prerequisites
+- Docker and Docker Compose installed
+- ODX converter built (optional, for PDX to MDD conversion)
+
+### Setup
+
+1. **Generate ODX files and prepare environment:**
+
+   ```sh
+   # Generate ODX files
+   cd testcontainer/odx
+   ./generate_docker.sh
+   cd ..
+   
+   # Build ECU simulator
+   cd ecu-sim
+   ./gradlew build shadowJar
+   cd ..
+   
+   # Convert PDX to MDD (if you have the converter)
+   cd odx
+   java -jar <path-to-odx-converter>/converter/build/libs/converter-all.jar FLXC1000.pdx
+   cd ..
+   
+   # Build and start all services
+   docker compose build
+   docker compose up -d
+   ```
+
+2. **Check service status:**
+   ```sh
+   docker compose ps
+   docker compose logs -f
+   ```
+
+3. **Access the services:**
+   - ECU Simulator Control API: http://localhost:8181
+   - CDA SOVD API: http://localhost:20002
+
+### Managing Services
+
+```sh
+# Stop all services
+docker compose down
+
+# Restart services
+docker compose restart
+
+# View logs
+docker compose logs -f cda
+docker compose logs -f ecu-sim
+
+# Rebuild after code changes
+docker compose build cda
+docker compose up -d cda
+```
+
+
+---
+
+## Manual Setup (Alternative)
+
+### Generate odx file(s)
 
 In the directory `testcontainer/odx`, run:
 
@@ -15,7 +79,7 @@ This should generate the PDX-files:
 
 - FLXDC1000.pdx
 
-## Build & run converter on pdx files
+### Build & run converter on pdx files
 
 Build the converter with `./gradlew shadowJar` in the odx-converter directory.
 
@@ -26,7 +90,7 @@ java -jar <path-to-odx-converter>/converter/build/libs/converter-all.jar FLXC100
 
 You should now have a `FLXC1000.mdd` and `FLXC1000.mdd.log` in the same directory.
 
-## Build & run the simulation
+### Build & run the simulation
 
 Goto `testcontainer/ecu-sim/docker`.
 
@@ -41,7 +105,7 @@ Run:
 ```
 Needs privileged access, so it can add more ip addresses to the network interface for multiple gateways.
 
-## Build & run the CDA
+### Build & run the CDA
 
 In the CDA main directory:
 ```sh

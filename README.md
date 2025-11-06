@@ -28,7 +28,7 @@ It handles the communication to the ECUs, by using the communication parameters 
 To run the CDA you will need at least one `MDD` file. Check out [eclipse-opensovd/odx-converter](https://github.com/eclipse-opensovd/odx-converter) on how to get started with creating `MDD`(s) from ODX.  
 
 > [!IMPORTANT]
-> Make sure to link this issue with the PR for your improvement. At the moment it is necessary to use the [floroks/flatbuffers-ng](https://github.com/eclipse-opensovd/odx-converter/tree/floroks/flatbuffers-ng) branch to create `MDD` files containing the ECU description in the flatbuf format.
+> At the moment it is necessary to use the [floroks/flatbuffers-ng](https://github.com/eclipse-opensovd/odx-converter/tree/floroks/flatbuffers-ng) branch to create `MDD` files containing the ECU description in the flatbuf format.
 
 
 Once you have the `MDD`(s) you can update the config in `opensovd-cda.toml` to point `databases_path` to the directory containing the files. Alternatively you can pass the config via arg `--databases-path MY_PATH`.
@@ -64,6 +64,8 @@ see [codestyle](CODESTYLE.md)
 
 ### testing
 
+#### unit tests
+
 Unittests are placed in the relevant module as usual in rust:
 ```rust
 ...
@@ -73,8 +75,97 @@ mod test {
 }
 ```
 
-Integration tests are not yet included, as they rely on ECU data and will be included once the 
-simluation & odx files without vendor relation are available.
+Run unit tests with:
+```shell
+cargo test --locked --lib
+```
+
+#### integration tests
+
+Integration tests are located in the `integration-tests/` directory and test the complete CDA system end-to-end, including:
+- SOVD API endpoints
+- ECU communication via DoIP
+- Session management and locking
+
+
+The integration test framework automatically manages the test environment by:
+1. Starting an ECU simulator
+2. Starting the CDA with appropriate configuration
+3. Running tests against the running system
+4. Cleaning up resources after tests complete
+
+##### running integration tests
+
+**Using Docker (Recommended):**
+
+Docker mode spins up the ECU simulator and CDA in isolated containers:
+
+```shell
+cargo test --locked --features integration-tests 
+```
+
+**Without Docker (For Development/Debugging):**
+
+Running locally allows easier debugging but requires manual setup:
+
+```shell
+# Set environment variable to disable Docker
+export CDA_INTEGRATION_TEST_USE_DOCKER=false
+
+# Optional set an IP address to bind the tester interface to
+# export CDA_INTEGRATION_TEST_TESTER_ADDRESS=
+
+# Run the tests
+cargo test --locked --features integration-tests 
+```
+
+When running without Docker, the ECU simulator and CDA will run as local processes with default ports (20002 for CDA, 13400 for DoIP gateway, 8181 for ECU sim control).
+Furthermore the local setup does _not_ automatically build the MDD files from ODX data, so ensure that the required MDD files are already present.
+
+##### environment variables
+
+The integration test framework supports the following environment variables:
+
+- **`CDA_INTEGRATION_TEST_USE_DOCKER`** (default: `true`)  
+  Controls whether to use Docker Compose or run services locally.
+  - `true`: Uses Docker Compose to run CDA and ECU simulator in containers
+  - `false`: Runs services as local processes (useful for debugging)
+  
+  Example:
+  ```shell
+  export CDA_INTEGRATION_TEST_USE_DOCKER=false
+  ```
+
+- **`CDA_INTEGRATION_TEST_TESTER_ADDRESS`** (default: `0.0.0.0`)  
+  Override the tester address used by the CDA when running without Docker. 
+  Some systems may require using a specific interface address (e.g., `127.0.0.1` or a specific network interface IP) for proper ECU simulator connectivity.
+  
+  Example:
+  ```shell
+  export CDA_INTEGRATION_TEST_TESTER_ADDRESS=127.0.0.1
+  ```
+
+##### test structure
+
+Tests use a shared runtime to avoid repeatedly starting/stopping the CDA and ECU simulator:
+- Tests can request exclusive or shared access to the test runtime
+- Exclusive tests hold a mutex lock to prevent concurrent execution
+- The test framework automatically finds available ports when using Docker
+- Test resources (Docker containers, processes) are automatically cleaned up on exit
+
+Example test:
+```rust
+#[tokio::test]
+async fn test_ecu_session_switching() {
+    // Request exclusive access to prevent concurrent modifications
+    let (runtime, _lock) = setup_integration_test(true).await.unwrap();
+    
+    // runtime.config contains CDA configuration
+    // runtime.ecu_sim contains ECU simulator connection info
+    
+    // ... perform test operations ...
+}
+```
 
 ### generate module dependency graph for workspace
 With the help of [cargo-depgraph](https://github.com/jplatte/cargo-depgraph) a simple diagram showing 

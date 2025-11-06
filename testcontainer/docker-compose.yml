@@ -1,0 +1,44 @@
+services:
+  ecu-sim:
+    build:
+      context: ./ecu-sim
+      dockerfile: docker/Dockerfile
+    privileged: true
+    cap_add:
+      - NET_ADMIN
+    environment:
+      - USE_MULTIPLE_IPS=true
+      - SIM_NETWORK_INTERFACE=eth0
+    ports:
+      - "${SIM_CONTROL_PORT:-8181}:8181"
+    networks:
+      - testcontainer-net
+    healthcheck:
+      test: ["CMD-SHELL", "curl -f http://localhost:8181/ || exit 1"]
+      interval: 1s
+      timeout: 5s
+      retries: 10
+      start_period: 30s
+    restart: unless-stopped
+
+  cda:
+    build:
+      context: ..
+      dockerfile: testcontainer/cda/Dockerfile
+    ports:
+      - "${CDA_PORT:-20002}:20002"
+    volumes:
+      - ./odx:/app/odx:ro
+    hostname: cda
+    networks:
+      - testcontainer-net
+    depends_on:
+      ecu-sim:
+        condition: service_healthy
+    environment:
+      - RUST_LOG=trace
+    command: ["-d", "/app/odx"]
+    restart: unless-stopped
+
+networks:
+  testcontainer-net:

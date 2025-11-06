@@ -20,9 +20,11 @@ members = [
   "cda-main",
   "cda-tracing",
   "cda-plugin-security",
+  "integration-tests",
 ]
 
 [workspace.dependencies]
+opensovd_cda_lib = { path = "cda-main", package = "opensovd-cda" }
 cda-interfaces = { path = "cda-interfaces" }
 cda-core = { path = "cda-core" }
 cda-comm-doip = { path = "cda-comm-doip" }
@@ -60,6 +62,7 @@ deepsize = "0.2.0"
 prost-build = "0.14.1"
 ctor = "0.1.23"
 reqwest = "0.12.22"
+url = "2.5.7"
 clap = "4.5"
 figment = "0.10.19"
 schemars = "1.0.4"
@@ -69,6 +72,7 @@ doip-sockets = "0.2.4"
 ouroboros = "0.18.5"
 toml = "0.9.8"
 cargo_toml = "0.22.3"
+libc = "0.2.162"
 
 # ---- tracing & logging crates----
 tracing = "0.1.41"

@@ -1,0 +1,69 @@
+# SPDX-FileCopyrightText: 2025 The Contributors to Eclipse OpenSOVD (see CONTRIBUTORS)
+#
+# SPDX-License-Identifier: Apache-2.0
+
+[package]
+name = "integration-tests"
+version = "0.1.0"
+edition.workspace = true
+publish = false
+description = "Integration tests for the whole Classic Diagnostic Adapter (CDA) system"
+homepage.workspace = true
+license.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+# internal dependencies
+cda-interfaces = { workspace = true }
+cda-sovd = { workspace = true }
+sovd-interfaces = { workspace = true }
+cda-tracing = { workspace = true }
+cda-plugin-security = { workspace = true }
+opensovd_cda_lib = { workspace = true }
+
+# External dependencies
+# runtime size info
+deepsize = { workspace = true, features = ["hashbrown"], optional = true }
+# tokio
+tokio = { workspace = true, features = ["rt", "sync", "io-util", "time"] }
+# serde
+serde = { workspace = true, features = ["derive"] }
+serde_json = { workspace = true }
+serde_qs = { workspace = true, features = ["axum"] }
+# http
+reqwest = { workspace = true }
+http = { workspace = true }
+mime = { workspace = true }
+url = { workspace = true }
+# logging
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true, features = [
+  "ansi",
+  "chrono",
+  "env-filter",
+  "fmt",
+  "json",
+  "parking_lot",
+  "std",
+] }
+# error
+thiserror = { workspace = true }
+# time
+chrono = { workspace = true }
+# future
+futures = { workspace = true }
+# libc
+libc = { workspace = true }
+
+
+[features]
+default = []
+integration-tests = []
+
+# Integration tests are only compiled when the feature is enabled.
+[[test]]
+name = "integration_tests"
+path = "tests/integration_tests.rs"
+required-features = ["integration-tests"]

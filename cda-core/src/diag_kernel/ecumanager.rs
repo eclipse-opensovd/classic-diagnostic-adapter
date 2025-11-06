@@ -24,7 +24,9 @@ use cda_interfaces::{
         single_ecu,
     },
     diagservices::{DiagServiceResponse, DiagServiceResponseType, FieldParseError, UdsPayloadData},
-    service_ids, spawn_named, util,
+    service_ids,
+    service_ids::NEGATIVE_RESPONSE,
+    spawn_named, util,
     util::starts_with_ignore_ascii_case,
 };
 use cda_plugin_security::SecurityPlugin;
@@ -428,8 +430,8 @@ impl<S: SecurityPlugin> cda_interfaces::EcuManager for EcuManager<S> {
         let mut uds_payload = Payload::new(&payload.data);
         let sid = uds_payload
             .first()
-            .ok_or_else(|| DiagServiceError::BadPayload("Missing SID".to_owned()))?
-            .to_string();
+            .ok_or_else(|| DiagServiceError::BadPayload("Missing SID".to_owned()))?;
+        let sid_value = sid.to_string();
 
         let responses: Vec<_> = mapped_service
             .pos_responses()
@@ -446,7 +448,7 @@ impl<S: SecurityPlugin> cda_interfaces::EcuManager for EcuManager<S> {
                 if params.iter().any(|p| {
                     p.byte_position() == 0
                         && p.specific_data_as_coded_const()
-                            .is_some_and(|c| c.coded_value().is_some_and(|v| v == sid))
+                            .is_some_and(|c| c.coded_value().is_some_and(|v| v == sid_value))
                 }) {
                     Some((r, params))
                 } else {
@@ -520,28 +522,13 @@ impl<S: SecurityPlugin> cda_interfaces::EcuManager for EcuManager<S> {
                 }
             }
 
-            let resp = match response_type {
-                datatypes::ResponseType::Negative | datatypes::ResponseType::GlobalNegative => {
-                    DiagServiceResponseStruct {
-                        service: diag_service.clone(),
-                        data: raw_uds_payload,
-                        mapped_data: Some(MappedResponseData {
-                            data,
-                            errors: mapping_errors,
-                        }),
-                        response_type: DiagServiceResponseType::Negative,
-                    }
-                }
-                datatypes::ResponseType::Positive => DiagServiceResponseStruct {
-                    service: diag_service.clone(),
-                    data: raw_uds_payload,
-                    mapped_data: Some(MappedResponseData {
-                        data,
-                        errors: mapping_errors,
-                    }),
-                    response_type: DiagServiceResponseType::Positive,
-                },
-            };
+            let resp = create_diag_service_response(
+                diag_service,
+                data,
+                response_type,
+                raw_uds_payload,
+                mapping_errors,
+            );
             tracing::Span::current()
                 .record("output", format!("Response: {:?}", resp.response_type));
 
@@ -549,12 +536,16 @@ impl<S: SecurityPlugin> cda_interfaces::EcuManager for EcuManager<S> {
         } else {
             // Returning a response here, because even valid databases may not define a
             // response for a service.
-            tracing::debug!("No matching response found for SID: {sid}");
+            tracing::debug!("No matching response found for SID: {sid_value}");
             Ok(DiagServiceResponseStruct {
                 service: diag_service.clone(),
                 data: payload.data.clone(),
                 mapped_data: None,
-                response_type: DiagServiceResponseType::Positive,
+                response_type: if *sid == NEGATIVE_RESPONSE {
+                    DiagServiceResponseType::Negative
+                } else {
+                    DiagServiceResponseType::Positive
+                },
             })
         }
     }
@@ -3163,6 +3154,37 @@ fn extract_struct_dop_from_field(
         ))
 }
 
+fn create_diag_service_response(
+    diag_service: &cda_interfaces::DiagComm,
+    data: HashMap<String, DiagDataTypeContainer>,
+    response_type: datatypes::ResponseType,
+    raw_uds_payload: Vec<u8>,
+    mapping_errors: Vec<FieldParseError>,
+) -> DiagServiceResponseStruct {
+    match response_type {
+        datatypes::ResponseType::Negative | datatypes::ResponseType::GlobalNegative => {
+            DiagServiceResponseStruct {
+                service: diag_service.clone(),
+                data: raw_uds_payload,
+                mapped_data: Some(MappedResponseData {
+                    data,
+                    errors: mapping_errors,
+                }),
+                response_type: DiagServiceResponseType::Negative,
+            }
+        }
+        datatypes::ResponseType::Positive => DiagServiceResponseStruct {
+            service: diag_service.clone(),
+            data: raw_uds_payload,
+            mapped_data: Some(MappedResponseData {
+                data,
+                errors: mapping_errors,
+            }),
+            response_type: DiagServiceResponseType::Positive,
+        },
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::vec;
@@ -3322,11 +3344,37 @@ mod tests {
             )
         };
 
+        let neg_response = {
+            let nack_param = db_builder.create_coded_const_param(
+                "test_service_nack",
+                &NEGATIVE_RESPONSE.to_string(),
+                0,
+                0,
+                8,
+                DataType::UInt32,
+            );
+
+            let sid_param = db_builder.create_coded_const_param(
+                "test_service_neg_sid",
+                &sid.to_string(),
+                1,
+                0,
+                8,
+                DataType::UInt32,
+            );
+
+            db_builder.create_response(
+                ResponseType::Negative,
+                Some(vec![nack_param, sid_param]),
+                None,
+            )
+        };
+
         let diag_service = db_builder.create_diag_service(DiagServiceParams {
             diag_comm: Some(diag_comm),
             request: Some(request),
             pos_responses: vec![pos_response],
-            neg_responses: vec![],
+            neg_responses: vec![neg_response],
             is_cyclic: false,
             is_multiple: false,
             addressing: *Addressing::FUNCTIONAL_OR_PHYSICAL,
@@ -4955,5 +5003,29 @@ mod tests {
                 actual: 0
             })
         );
+    }
+
+    #[tokio::test]
+    async fn test_negative_response() {
+        let (ecu_manager, service, sid) = create_ecu_manager_with_dynamic_length_field_service();
+        let payload = vec![0x7f, sid];
+
+        let response = ecu_manager
+            .convert_from_uds(&service, &create_payload(payload), true)
+            .await
+            .unwrap();
+        assert_eq!(response.response_type, DiagServiceResponseType::Negative);
+    }
+
+    #[tokio::test]
+    async fn test_negative_response_with_invalid_data_where_no_neg_response_is_defined() {
+        let (ecu_manager, service, sid) = create_ecu_manager_with_end_pdu_service(1, None);
+        let data = vec![0x7f, sid, 0x33];
+
+        let response = ecu_manager
+            .convert_from_uds(&service, &create_payload(data), true)
+            .await
+            .unwrap();
+        assert_eq!(response.response_type, DiagServiceResponseType::Negative);
     }
 }
