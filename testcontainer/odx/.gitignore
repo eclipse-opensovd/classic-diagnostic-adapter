@@ -1,5 +1,7 @@
 *.xsd
 *.pdx
-*.mdd
+# Actual MDD file must be tracked, because we cannot
+# generate it in the pipeline due to the converter.
+# In the future it maybe is an option to provide binaries for the converter.
 *.mdd.log
 __pycache__

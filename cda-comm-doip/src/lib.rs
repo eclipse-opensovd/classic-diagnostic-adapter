@@ -508,7 +508,7 @@ fn create_socket(
 
     socket
         .bind(&broadcast_addr.into())
-        .map_err(|e| format!("DoipGateway: Failed to bind socket: {e:?}"))?;
+        .map_err(|e| format!("DoipGateway: Failed to bind socket, ip {tester_ip}: {e:?}"))?;
 
     let std_sock: std::net::UdpSocket = socket.into();
     doip_sockets::udp::UdpSocket::from_std(std_sock)

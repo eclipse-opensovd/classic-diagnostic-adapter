@@ -35,12 +35,14 @@ fun RequestsData.addSecurityAccessRequests() {
                 nrc(NrcError.RequestOutOfRange)
             } else {
                 val messagePayload = this.messagePayload()
-                val data = messagePayload.getByteArray(messagePayload.limit())
+                messagePayload.get() // skip subFunction byte
+                val data = messagePayload.getByteArray(messagePayload.remaining())
                 var seed by ecu.storedProperty { ByteArray(0) }
 
                 if (seed.size == 8) {
                     // Use a super secure algorithm
                     val expectedData = seed.map { it.toUByte().plus(13u).toByte() }.toByteArray()
+
                     if (data.contentEquals(expectedData)) {
                         ecuState.securityAccess = level
                         @Suppress("AssignedValueIsNeverRead")

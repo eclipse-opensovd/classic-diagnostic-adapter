@@ -170,6 +170,7 @@ pub mod service_ids {
     pub const REQUEST_TRANSFER_EXIT: u8 = 0x37;
     pub const TESTER_PRESENT: u8 = 0x3E;
     pub const CONTROL_DTC_SETTING: u8 = 0x85;
+    pub const NEGATIVE_RESPONSE: u8 = 0x7F;
 }
 
 const CONFIGURATIONS_PREFIXES: [u8; 1] = [service_ids::WRITE_DATA_BY_IDENTIFIER];

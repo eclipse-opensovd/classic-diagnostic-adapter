@@ -27,6 +27,7 @@ from helper import (
     derived_id,
     functional_class_ref,
     ref,
+    negative_response,
 )
 
 
@@ -162,6 +163,9 @@ def add_send_key_service(
     )
     dlr.positive_responses.append(response)
 
+    neg_response = negative_response(dlr, short_name=f"NR_SendKey_Level_{level}")
+    dlr.negative_responses.append(neg_response)
+
     stt = find_state_transition(dlc, f"Locked_Level_{level}")
 
     service = DiagService(
@@ -169,6 +173,7 @@ def add_send_key_service(
         short_name=f"SendKey_Level_{level}",
         request_ref=ref(request),
         pos_response_refs=[ref(response)],
+        neg_response_refs=[ref(neg_response)],
         state_transition_refs=[
             StateTransitionRef(
                 ref_id=stt.odx_id.local_id, ref_docs=stt.odx_id.doc_fragments

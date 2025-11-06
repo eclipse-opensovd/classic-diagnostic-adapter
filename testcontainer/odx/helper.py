@@ -16,6 +16,11 @@ from odxtools.parameters.matchingrequestparameter import MatchingRequestParamete
 from odxtools.physicaltype import PhysicalType
 from odxtools.standardlengthtype import StandardLengthType
 from odxtools.statetransition import StateTransition
+from odxtools.response import Response, ResponseType
+from odxtools.nameditemlist import NamedItemList
+from odxtools.parameters.valueparameter import ValueParameter
+from odxtools.compumethods.compucategory import CompuCategory
+from odxtools.compumethods.compumethod import CompuMethod
 
 
 def find_state_transition(
@@ -129,6 +134,22 @@ def sid_parameter_pr(sid: int) -> CodedConstParameter:
         coded_value_raw=str(sid),
     )
 
+def sid_parameter_nr() -> CodedConstParameter:
+    return coded_const_int_parameter(
+        short_name="SID_NR",
+        semantic="SERVICE-ID",
+        byte_position=0,
+        coded_value_raw=str(0x7F),
+    )
+
+def sidrq_parameter_nr() -> MatchingRequestParameter:
+    return matching_request_parameter(
+        short_name="SIDRQ_NR",
+        semantic="SERVICEIDRQ",
+        byte_length=1,
+        byte_position=1,
+        request_byte_position=0
+    )
 
 def subfunction_rq(
     subfunction: int,
@@ -257,4 +278,41 @@ def texttable_int_str_dop(
             base_data_type=DataType.A_UINT32, bit_length=bit_length
         ),
         physical_type=PhysicalType(base_data_type=DataType.A_UNICODE2STRING),
+    )
+
+def negative_response(
+    dlr: DiagLayerRaw,
+    short_name: str,
+) -> Response:
+    nrc_dop = DataObjectProperty(
+        odx_id=derived_id(dlr, "DOP.NRC_{short_name}"),
+        short_name="NRC_{short_name}",
+        compu_method=CompuMethod(
+            category=CompuCategory.IDENTICAL,
+            physical_type=DataType.A_BYTEFIELD,
+            internal_type=DataType.A_BYTEFIELD,
+        ),
+        physical_type=PhysicalType(base_data_type=DataType.A_BYTEFIELD),
+        diag_coded_type=StandardLengthType(
+            base_data_type=DataType.A_UINT32, bit_length=8
+        ),
+    )
+    dlr.diag_data_dictionary_spec.data_object_props.append(nrc_dop)
+
+    return Response(
+        odx_id=derived_id(dlr, f"NR.{short_name}"),
+        short_name=short_name,
+        parameters=NamedItemList(
+            [
+                sid_parameter_nr(),
+                sidrq_parameter_nr(),
+                ValueParameter(
+                    short_name="NRC",
+                    semantic="DATA",
+                    byte_position=2,
+                    dop_ref=ref(nrc_dop),
+                ),
+            ]
+        ),
+        response_type=ResponseType.NEGATIVE,
     )
