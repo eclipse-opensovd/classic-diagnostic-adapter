@@ -237,6 +237,7 @@ impl DiagCommType {
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[cfg_attr(feature = "deepsize", derive(DeepSizeOf))]
 pub enum DiagServiceError {
+    /// Returned in case a resource can not be found
     NotFound(Option<String>),
     RequestNotSupported(String),
     InvalidDatabase(String),
@@ -265,6 +266,7 @@ pub enum DiagServiceError {
     Timeout,
     AccessDenied(String),
     ConfigurationError(String),
+    /// Returned in case a resource can be found but returns an error
     ResourceError(String),
     DataError(DataParseError),
     SetupError(String),

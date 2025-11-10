@@ -1913,6 +1913,7 @@ dependencies = [
  "serde",
  "serde_json",
  "strip-ansi-escapes",
+ "thiserror 2.0.16",
  "tokio",
  "tracing",
  "tracing-appender",
