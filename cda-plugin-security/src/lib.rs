@@ -11,6 +11,100 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+//! # Security Plugin System
+//!
+//! The security plugin system provides extensible authentication and authorization
+//! capabilities for the Classic Diagnostic Adapter (CDA). It enables customization
+//! of security mechanisms while maintaining compatibility with the SOVD standard.
+//!
+//! ## Middleware Integration
+//!
+//! The security plugin integrates with the Axum web framework through middleware.
+//! The [`security_plugin_middleware`] function:
+//! - Creates a plugin initializer instance
+//! - Injects it into the request extensions
+//! - Passes control to the next middleware/handler
+//! - Ensures plugin availability throughout the request lifecycle
+//!
+//! The middleware is applied to protected routes in the SOVD module:
+//!
+//! ```rust,ignore
+//! .layer(middleware::from_fn(security_plugin_middleware::<S>))
+//! ```
+//!
+//! ## Authorization Endpoint
+//!
+//! The plugin system allows for providing a standardized authorization endpoint
+//! at `/vehicle/v15/authorize` through the [`AuthorizationRequestHandler`] trait.
+//!
+//! ## Configuration
+//!
+//! ### Runtime Integration
+//! Security plugins are integrated into the main application through a type parameter:
+//!
+//! ```rust,ignore
+//! pub async fn launch_webserver<F, R, T, M, S>(
+//!     // ... other parameters
+//! ) -> Result<(), String>
+//! where
+//!     S: SecurityPluginLoader,
+//! ```
+//!
+//! ## Default Implementation
+//!
+//! See [`default_security_plugin::DefaultSecurityPlugin`] for details.
+//!
+//! ## Extension Points
+//!
+//! The plugin system provides several extension points for custom implementations:
+//!
+//! ### Custom Authentication Providers
+//! Implement [`AuthorizationRequestHandler`] to support:
+//! - OAuth 2.0 / `OpenID` Connect integration
+//! - LDAP/Active Directory authentication
+//! - Custom token validation mechanisms
+//! - Multi-factor authentication
+//!
+//! ### Custom Authorization Logic
+//! Implement [`SecurityApi`] to support:
+//! - Role-based access control (RBAC)
+//! - Attribute-based access control (ABAC)
+//! - Fine-grained service permissions
+//! - Dynamic policy evaluation
+//!
+//! ### Error Handling
+//! Custom error types and HTTP responses through:
+//! - [`AuthError`] enumeration
+//! - SOVD-compliant error responses
+//! - Vendor-specific error codes
+//!
+//! ## Security Considerations
+//!
+//! ### Token Security
+//! - JWT secrets should be properly managed in production environments
+//! - Token expiration should be configured appropriately for the use case
+//! - Secure transmission of tokens over HTTPS is recommended
+//!
+//! ### Plugin Isolation
+//! - Plugins operate within the main application process
+//! - Memory safety is ensured through Rust's ownership system
+//! - Plugin failures are contained and reported appropriately
+//!
+//! ### Audit and Logging
+//! - Authentication events are logged through the tracing framework
+//! - Failed authentication attempts are recorded
+//! - Security-related errors include appropriate detail levels
+//!
+//! ## Implementation Guidelines
+//!
+//! When implementing custom security plugins:
+//!
+//! 1. **Trait Implementation**: Implement all required traits for your use case
+//! 2. **Error Handling**: Use appropriate error types and status codes (Follow SOVD standard)
+//! 3. **Performance**: Minimize overhead in middleware operations
+//! 4. **Testing**: Provide comprehensive test coverage for security logic
+//! 5. **Documentation**: Document any vendor-specific behavior or requirements
+
 use std::{any::Any, ops::Deref, sync::Arc};
 
 use aide::axum::IntoApiResponse;
@@ -24,26 +118,59 @@ use axum::{
 };
 use cda_interfaces::DiagServiceError;
 use hashbrown::HashMap;
-use http::{StatusCode, request::Parts};
+use http::{HeaderMap, StatusCode, request::Parts};
 use sovd_interfaces::error::{ApiErrorResponse, ErrorCode};
 use thiserror::Error;
 
 mod default_security_plugin;
 pub use default_security_plugin::{DefaultSecurityPlugin, DefaultSecurityPluginData};
 
+/// Represents JWT claims that provide user identity and token metadata.
+///
+/// This trait abstracts the claims contained within authentication tokens,
+/// providing access to essential user information and token validation data.
 pub trait Claims: Send + Sync {
+    /// Returns the subject (user identifier) of the token.
     fn sub(&self) -> &str;
+    /// Returns the expiration time of the token as a Unix timestamp.
     fn exp(&self) -> usize;
 }
 
+/// Provides access to authentication information and user claims.
+///
+/// This trait handles authentication-related operations and provides access to
+/// user claims extracted from authentication tokens. It serves as the authentication
+/// component of the security plugin system.
 pub trait AuthApi: Send + Sync + 'static {
+    /// Returns the user claims associated with the current authentication context.
+    ///
+    /// The claims provide access to user identity information and token metadata
+    /// such as expiration times and subject identifiers.
     fn claims(&self) -> Box<&dyn Claims>;
 }
 
+/// Validates diagnostic service requests based on security policies.
+///
+/// This trait provides the authorization component of the security plugin system,
+/// allowing custom implementations to enforce access control policies for
+/// diagnostic services. It enables fine-grained control over which services
+/// can be executed based on the current security context.
 pub trait SecurityApi: Send + Sync + 'static {
-    /// Validate if the given service can be accessed by the current user.
+    /// Validates whether a diagnostic service can be executed.
+    ///
+    /// This method is called before executing diagnostic services to ensure
+    /// the current security context has sufficient permissions. Custom
+    /// implementations can enforce role-based access control (RBAC),
+    /// attribute-based access control (ABAC), or other authorization policies.
+    ///
+    /// # Arguments
+    /// * `service` - The diagnostic service to validate
+    ///
+    /// # Returns
+    /// * `Ok(())` if the service execution is authorized
+    ///
     /// # Errors
-    /// Returns `DiagServiceError` if the service is not accessible.
+    /// * `DiagServiceError` if the service execution is denied
     fn validate_service(
         &self,
         service: &cda_database::datatypes::DiagService,
@@ -56,9 +183,24 @@ impl AuthApi for Box<dyn AuthApi> {
     }
 }
 
+/// The main security plugin trait that combines authentication and authorization capabilities.
+///
+/// This trait represents a complete security plugin implementation that provides both
+/// authentication services (via [`AuthApi`]) and authorization services (via [`SecurityApi`]).
+/// It follows the plugin lifecycle during request processing:
+///
+/// 1. **Plugin Initialization**: Extract authentication information from request headers
+/// 2. **Request Processing**: Make the initialized plugin instance available to route handlers
+/// 3. **Service Validation**: Validate diagnostic services against security policies before
+///    execution
+///
+/// Custom security plugins should implement this trait to provide vendor-specific
+/// authentication and authorization logic.
 pub trait SecurityPlugin: Any + SecurityApi + AuthApi {
+    /// Returns a reference to the authentication API.
     fn as_auth_plugin(&self) -> &dyn AuthApi;
 
+    /// Returns a reference to the security API.
     fn as_security_plugin(&self) -> &dyn SecurityApi;
 }
 
@@ -82,18 +224,34 @@ impl Claims for Box<&dyn Claims> {
     }
 }
 
+/// Authentication and authorization errors that can occur during security plugin operations.
+///
+/// This enum provides comprehensive error handling for authentication and authorization
+/// failures, with support for SOVD-compliant error responses and vendor-specific error codes.
 #[derive(Error, Debug, PartialEq, Eq)]
 pub enum AuthError {
+    /// No authentication token was provided in the request.
+    ///
+    /// This error results in a 401 Unauthorized response without a body,
+    /// as specified in SOVD 7.23.6 Request Header for Access-Restricted Resources.
     #[error("No token provided in the request")]
     NoTokenProvided,
+    /// Wrong credentials were provided in the authentication request.
     #[error("Wrong credentials provided in the request")]
     WrongCredentials,
+    /// No credentials were provided in the authentication request.
     #[error("No credentials provided in the request")]
     MissingCredentials,
+    /// The provided token is invalid or malformed.
     #[error("Invalid token: {details}")]
     InvalidToken { details: String },
+    /// Internal misconfiguration of the Security Plugin.
     #[error("Misconfiguration of Security Plugin")]
     Internal,
+    /// Custom authentication error with detailed information.
+    ///
+    /// This variant allows for vendor-specific error handling with custom
+    /// HTTP status codes, error messages, and SOVD-compliant error codes.
     #[error("Authentication error: {message}")]
     Custom {
         http_status: StatusCode,
@@ -104,19 +262,56 @@ pub enum AuthError {
     },
 }
 
+/// Initializes security plugin instances from HTTP request data.
+///
+/// This trait handles the extraction of authentication information from HTTP requests
+/// and creates initialized security plugin instances. It is called during the middleware
+/// phase to prepare the security context for request processing.
 #[async_trait]
 pub trait SecurityPluginInitializer: Send + Sync {
+    /// Initializes a security plugin instance from request parts.
+    ///
+    /// This method extracts authentication information (such as Bearer tokens)
+    /// from the HTTP request headers and creates a fully initialized security
+    /// plugin instance that can be used for the duration of the request.
+    ///
+    /// # Arguments
+    /// * `parts` - Mutable reference to the HTTP request parts containing headers
+    ///
+    /// # Returns
+    /// * `Ok(Box<dyn SecurityPlugin>)` - Successfully initialized plugin instance
+    /// * `Err(AuthError)` - Authentication failure or initialization error
     async fn initialize_from_request_parts(
         &self,
         parts: &mut Parts,
     ) -> Result<Box<dyn SecurityPlugin>, AuthError>;
 }
 
+/// Handles authorization requests at the `/vehicle/v15/authorize` endpoint.
+///
+/// This trait provides the implementation for the authorization endpoint
 #[async_trait]
 pub trait AuthorizationRequestHandler: Send + Sync {
-    async fn authorize(body_bytes: Bytes) -> impl IntoApiResponse;
+    /// This method initiates an authorization flow that, depending on the
+    /// flow returns an access token or other forms of authentication data.
+    ///
+    /// # Arguments
+    /// * `headers` - The HTTP request headers
+    /// * `body_bytes` - The raw request body containing client credentials
+    ///
+    /// # Should Return
+    /// An HTTP response containing either:
+    /// - Success: An access token or other authentication data of some form
+    /// - Error: SOVD-compliant error response with appropriate status code
+    async fn authorize(headers: HeaderMap, body_bytes: Bytes) -> impl IntoApiResponse;
 }
 
+/// Complete security plugin loader that combines initialization and authorization capabilities.
+///
+/// This trait represents a complete security plugin implementation that can both
+/// initialize plugin instances from requests and handle authorization requests.
+/// It is used as the main interface for integrating security plugins into the
+/// web server framework.
 pub trait SecurityPluginLoader:
     SecurityPluginInitializer + AuthorizationRequestHandler + Default + 'static
 {
@@ -124,6 +319,37 @@ pub trait SecurityPluginLoader:
 
 type SecurityPluginInitializerType = Arc<dyn SecurityPluginInitializer>;
 
+/// Security plugin middleware for Axum web framework integration.
+///
+/// This middleware function integrates security plugins with the Axum web framework
+/// and handles the plugin lifecycle during request processing. It is applied to
+/// protected routes to ensure authentication and authorization are enforced.
+///
+/// ## Middleware Behavior
+///
+/// The middleware:
+/// - Creates a plugin initializer instance
+/// - Injects it into the request extensions
+/// - Passes control to the next middleware/handler
+/// - Ensures plugin availability throughout the request lifecycle
+///
+/// ## Usage
+///
+/// Apply this middleware to protected routes:
+///
+/// ```rust,ignore
+/// .layer(middleware::from_fn(security_plugin_middleware::<S>))
+/// ```
+///
+/// # Type Parameters
+/// * `A` - The security plugin loader type that implements [`SecurityPluginLoader`]
+///
+/// # Arguments
+/// * `req` - The incoming HTTP request
+/// * `next` - The next middleware or handler in the chain
+///
+/// # Returns
+/// The HTTP response from the downstream middleware/handler
 pub async fn security_plugin_middleware<A: SecurityPluginLoader>(
     mut req: Request,
     next: Next,
@@ -133,7 +359,26 @@ pub async fn security_plugin_middleware<A: SecurityPluginLoader>(
     next.run(req).await
 }
 
+/// Type alias for boxed security plugin instances.
 pub type SecurityPluginData = Box<dyn SecurityPlugin>;
+
+/// Axum extractor for security plugin instances.
+///
+/// This struct provides access to initialized security plugin instances within
+/// Axum route handlers. It implements the [`FromRequestParts`] trait to automatically
+/// extract the security plugin from request extensions populated by the middleware.
+///
+/// ## Usage in Route Handlers
+///
+/// ```rust,ignore
+/// async fn protected_route(Secured(security_plugin): Secured) -> Response {
+///     let claims = security_plugin.claims();
+///     // Use the security plugin for authorization checks
+/// }
+/// ```
+///
+/// The extractor will return an [`AuthError`] if no security plugin is available
+/// in the request extensions, indicating a middleware configuration issue.
 pub struct Secured(pub SecurityPluginData);
 
 impl Deref for Secured {
