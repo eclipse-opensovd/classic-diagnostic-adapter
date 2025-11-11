@@ -354,10 +354,7 @@ impl Display for DiagServiceError {
             DiagServiceError::VariantDetectionError(msg) => {
                 write!(f, "Variant detection error: {msg}")
             }
-            DiagServiceError::InvalidSession(msg) => {
-                write!(f, "{msg}")
-            }
-            DiagServiceError::InvalidAddress(msg) => {
+            DiagServiceError::InvalidSession(msg) | DiagServiceError::InvalidAddress(msg) => {
                 write!(f, "{msg}")
             }
             DiagServiceError::SendFailed(msg) => {

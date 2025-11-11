@@ -13,9 +13,7 @@
 
 use std::{future::Future, sync::Arc, time::Duration};
 
-use cda_interfaces::{
-    DiagServiceError, DoipComParamProvider, EcuAddressProvider,
-};
+use cda_interfaces::{DiagServiceError, DoipComParamProvider, EcuAddressProvider};
 use doip_definitions::{
     header::PayloadType,
     payload::{DoipPayload, VehicleIdentificationRequest},

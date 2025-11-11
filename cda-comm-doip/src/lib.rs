@@ -18,8 +18,8 @@ use std::{
 };
 
 use cda_interfaces::{
-    DiagServiceError, DoipGatewaySetupError, DoipComParamProvider, EcuAddressProvider, EcuGateway, ServicePayload,
-    TransmissionParameters, UdsResponse,
+    DiagServiceError, DoipComParamProvider, DoipGatewaySetupError, EcuAddressProvider, EcuGateway,
+    ServicePayload, TransmissionParameters, UdsResponse,
 };
 use doip_definitions::payload::{DiagnosticMessage, DiagnosticMessageNack, GenericNack};
 use hashbrown::HashMap;

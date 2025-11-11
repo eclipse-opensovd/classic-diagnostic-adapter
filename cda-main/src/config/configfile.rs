@@ -12,7 +12,9 @@
  */
 use cda_interfaces::{
     DiagServiceError,
-    datatypes::{ComParams, DatabaseNamingConvention, DiagnosticServiceAffixPosition, FlatbBufConfig}
+    datatypes::{
+        ComParams, DatabaseNamingConvention, DiagnosticServiceAffixPosition, FlatbBufConfig,
+    },
 };
 use serde::{Deserialize, Serialize};
 

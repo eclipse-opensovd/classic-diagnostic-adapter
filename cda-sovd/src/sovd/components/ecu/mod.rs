@@ -70,11 +70,7 @@ pub(crate) async fn get<R: DiagServiceResponse, T: UdsEcu + Clone, U: FileManage
     };
 
     let sdgs = if query.include_sdgs {
-        match uds
-            .get_sdgs(&ecu_name, None)
-            .await
-            .map_err(|error| error.into())
-        {
+        match uds.get_sdgs(&ecu_name, None).await {
             Ok(v) => Some(
                 v.into_iter()
                     .map(super::super::IntoSovd::into_sovd)
@@ -82,7 +78,7 @@ pub(crate) async fn get<R: DiagServiceResponse, T: UdsEcu + Clone, U: FileManage
             ),
             Err(e) => {
                 return ErrorWrapper {
-                    error: e,
+                    error: e.into(),
                     include_schema,
                 }
                 .into_response();
