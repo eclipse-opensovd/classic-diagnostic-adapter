@@ -27,10 +27,6 @@ It handles the communication to the ECUs, by using the communication parameters 
 
 To run the CDA you will need at least one `MDD` file. Check out [eclipse-opensovd/odx-converter](https://github.com/eclipse-opensovd/odx-converter) on how to get started with creating `MDD`(s) from ODX.  
 
-> [!IMPORTANT]
-> At the moment it is necessary to use the [floroks/flatbuffers-ng](https://github.com/eclipse-opensovd/odx-converter/tree/floroks/flatbuffers-ng) branch to create `MDD` files containing the ECU description in the flatbuf format.
-
-
 Once you have the `MDD`(s) you can update the config in `opensovd-cda.toml` to point `databases_path` to the directory containing the files. Alternatively you can pass the config via arg `--databases-path MY_PATH`.
 
 ### running
