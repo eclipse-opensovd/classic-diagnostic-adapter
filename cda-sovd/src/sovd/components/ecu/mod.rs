@@ -62,7 +62,7 @@ pub(crate) async fn get<R: DiagServiceResponse, T: UdsEcu + Clone, U: FileManage
         Ok(v) => HashMap::from([("name".to_owned(), v)]),
         Err(e) => {
             return ErrorWrapper {
-                error: ApiError::BadRequest(e),
+                error: e.into(),
                 include_schema,
             }
             .into_response();
@@ -70,11 +70,7 @@ pub(crate) async fn get<R: DiagServiceResponse, T: UdsEcu + Clone, U: FileManage
     };
 
     let sdgs = if query.include_sdgs {
-        match uds
-            .get_sdgs(&ecu_name, None)
-            .await
-            .map_err(ApiError::BadRequest)
-        {
+        match uds.get_sdgs(&ecu_name, None).await {
             Ok(v) => Some(
                 v.into_iter()
                     .map(super::super::IntoSovd::into_sovd)
@@ -82,7 +78,7 @@ pub(crate) async fn get<R: DiagServiceResponse, T: UdsEcu + Clone, U: FileManage
             ),
             Err(e) => {
                 return ErrorWrapper {
-                    error: e,
+                    error: e.into(),
                     include_schema,
                 }
                 .into_response();
@@ -165,7 +161,7 @@ async fn update<T: UdsEcu + Clone>(ecu_name: &str, uds: T) -> Response {
     match uds.detect_variant(ecu_name).await {
         Ok(()) => (StatusCode::CREATED, ()).into_response(),
         Err(e) => ErrorWrapper {
-            error: ApiError::BadRequest(e),
+            error: e.into(),
             include_schema: false,
         }
         .into_response(),

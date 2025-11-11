@@ -16,6 +16,9 @@ use std::{
     time::Duration,
 };
 
+use cda_tracing::TracingSetupError;
+use thiserror::Error;
+
 mod com_param_handling;
 pub use com_param_handling::*;
 pub mod datatypes;
@@ -234,7 +237,8 @@ impl DiagCommType {
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[cfg_attr(feature = "deepsize", derive(DeepSizeOf))]
 pub enum DiagServiceError {
-    NotFound,
+    /// Returned in case a resource can not be found
+    NotFound(Option<String>),
     RequestNotSupported(String),
     InvalidDatabase(String),
     DatabaseEntryNotFound(String),
@@ -252,17 +256,71 @@ pub enum DiagServiceError {
     },
     VariantDetectionError(String),
     InvalidSession(String),
+    InvalidAddress(String),
     SendFailed(String),
     Nack(u8),
-    UnexpectedResponse,
+    UnexpectedResponse(Option<String>),
     NoResponse(String),
     ConnectionClosed,
     EcuOffline(String),
     Timeout,
     AccessDenied(String),
+    ConfigurationError(String),
+    /// Returned in case a resource can be found but returns an error
+    ResourceError(String),
     DataError(DataParseError),
+    SetupError(String),
     /// Returned in case the provided value for security plugin cannot be used as `SecurityApi`
     InvalidSecurityPlugin,
+}
+
+impl From<TracingSetupError> for DiagServiceError {
+    fn from(value: TracingSetupError) -> Self {
+        match &value {
+            TracingSetupError::ResourceCreationFailed(_) => {
+                DiagServiceError::ResourceError(value.to_string())
+            }
+            TracingSetupError::SubscriberInitializationFailed(_) => {
+                DiagServiceError::SetupError(value.to_string())
+            }
+        }
+    }
+}
+
+#[derive(Error, Debug)]
+pub enum DoipGatewaySetupError {
+    #[error("Invalid address: `{0}`")]
+    InvalidAddress(String),
+    #[error("Socket error: `{0}`")]
+    SocketCreationFailed(String),
+    #[error("Port error: `{0}`")]
+    PortBindFailed(String),
+    #[error("Configuration error: `{0}`")]
+    InvalidConfiguration(String),
+    #[error("Resource error: `{0}`")]
+    ResourceError(String),
+    #[error("Server error: `{0}`")]
+    ServerError(String),
+}
+
+impl From<DoipGatewaySetupError> for DiagServiceError {
+    fn from(value: DoipGatewaySetupError) -> Self {
+        match value {
+            DoipGatewaySetupError::InvalidAddress(_) => {
+                DiagServiceError::InvalidAddress(value.to_string())
+            }
+            DoipGatewaySetupError::SocketCreationFailed(_)
+            | DoipGatewaySetupError::PortBindFailed(_) => {
+                DiagServiceError::SetupError(value.to_string())
+            }
+            DoipGatewaySetupError::InvalidConfiguration(_) => {
+                DiagServiceError::ConfigurationError(value.to_string())
+            }
+            DoipGatewaySetupError::ResourceError(_) | DoipGatewaySetupError::ServerError(_) => {
+                DiagServiceError::ResourceError(value.to_string())
+            }
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -275,7 +333,8 @@ pub struct DataParseError {
 impl Display for DiagServiceError {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
         match self {
-            DiagServiceError::NotFound => write!(f, "Not found"),
+            DiagServiceError::NotFound(Some(msg)) => write!(f, "Not found: {msg}"),
+            DiagServiceError::NotFound(None) => write!(f, "Not found"),
             DiagServiceError::RequestNotSupported(msg) => write!(f, "Request not supported: {msg}"),
             DiagServiceError::InvalidDatabase(msg) => write!(f, "Invalid database: {msg}"),
             DiagServiceError::DatabaseEntryNotFound(msg) => {
@@ -295,19 +354,25 @@ impl Display for DiagServiceError {
             DiagServiceError::VariantDetectionError(msg) => {
                 write!(f, "Variant detection error: {msg}")
             }
-            DiagServiceError::InvalidSession(msg) => {
+            DiagServiceError::InvalidSession(msg) | DiagServiceError::InvalidAddress(msg) => {
                 write!(f, "{msg}")
             }
             DiagServiceError::SendFailed(msg) => {
                 write!(f, "Sending message failed {msg}")
             }
             DiagServiceError::Nack(code) => write!(f, "Received Nack, code={code:?}"),
-            DiagServiceError::UnexpectedResponse => write!(f, "Unexpected response"),
+            DiagServiceError::UnexpectedResponse(Some(msg)) => {
+                write!(f, "Unexpected response. {msg}")
+            }
+            DiagServiceError::UnexpectedResponse(None) => write!(f, "Unexpected response."),
             DiagServiceError::NoResponse(msg) => write!(f, "No response {msg}"),
             DiagServiceError::ConnectionClosed => write!(f, "Connection closed"),
             DiagServiceError::EcuOffline(ecu) => write!(f, "Ecu {ecu} offline"),
             DiagServiceError::Timeout => write!(f, "Timeout"),
             DiagServiceError::AccessDenied(msg) => write!(f, "Access denied: {msg}"),
+            DiagServiceError::ConfigurationError(msg) => write!(f, "Configuration error: {msg}"),
+            DiagServiceError::ResourceError(msg) => write!(f, "Resource error: {msg}"),
+            DiagServiceError::SetupError(msg) => write!(f, "Setup error: {msg}"),
             DiagServiceError::DataError(DataParseError { value, details }) => {
                 write!(f, "Data parse error: value='{value}', details='{details}'")
             }
