@@ -15,7 +15,7 @@ use std::{sync::Arc, time::Duration};
 
 use cda_database::datatypes;
 use cda_interfaces::{
-    DiagCommAction, DiagCommType, DiagServiceError, DynamicPlugin, EcuState, HashMap,
+    DiagCommAction, DiagCommType, DiagServiceError, DynamicPlugin, EcuState, EcuVariant, HashMap,
     HashMapExtensions, HashSet, Protocol, STRINGS, SecurityAccess, ServicePayload, StringId,
     datatypes::{
         AddressingMode, ComParams, ComplexComParamValue, ComponentConfigurationsInfo,
@@ -69,7 +69,9 @@ pub struct EcuManager<S: SecurityPlugin> {
 
     variant_detection: variant_detection::VariantDetection,
     variant_index: Option<usize>,
-    state: EcuState,
+    variant: EcuVariant,
+    duplicating_ecu_names: Option<HashSet<String>>,
+
     protocol: Protocol,
     access_control: Arc<Mutex<SessionControl>>,
 
@@ -146,15 +148,12 @@ impl<S: SecurityPlugin> cda_interfaces::EcuAddressProvider for EcuManager<S> {
 impl<S: SecurityPlugin> cda_interfaces::EcuManager for EcuManager<S> {
     type Response = DiagServiceResponseStruct;
 
-    fn variant_name(&self) -> Option<String> {
-        self.variant()?
-            .diag_layer()?
-            .short_name()
-            .map(ToOwned::to_owned)
+    fn variant(&self) -> EcuVariant {
+        self.variant.clone()
     }
 
     fn state(&self) -> EcuState {
-        self.state
+        self.variant.state
     }
 
     fn protocol(&self) -> Protocol {
@@ -185,11 +184,32 @@ impl<S: SecurityPlugin> cda_interfaces::EcuManager for EcuManager<S> {
         &mut self,
         service_responses: HashMap<String, T>,
     ) -> Result<(), DiagServiceError> {
+        if !self.diag_database.is_loaded() {
+            tracing::debug!(ecu_name = %self.ecu_name, "Loading database for variant detection");
+            self.load()?;
+        }
+
         if service_responses.is_empty() {
-            self.state = EcuState::Offline;
+            let state = if matches!(
+                self.variant.state,
+                EcuState::Online
+                    | EcuState::Duplicate
+                    | EcuState::Disconnected
+                    | EcuState::NoVariantDetected
+            ) {
+                EcuState::Disconnected
+            } else {
+                EcuState::Offline
+            };
+
+            self.variant = EcuVariant {
+                name: None,
+                is_base_variant: false,
+                state,
+                logical_address: self.logical_address,
+            };
             return Ok(());
         }
-        self.state = EcuState::Online;
         match variant_detection::evaluate_variant(service_responses, &self.diag_database) {
             Ok(v) => {
                 let variant_name = (*v)
@@ -215,6 +235,20 @@ impl<S: SecurityPlugin> cda_interfaces::EcuManager for EcuManager<S> {
                     self.db_cache.reset().await;
                 }
 
+                let state = if variant_index.is_none() {
+                    tracing::warn!("Variant '{variant_name}' not found in database variants");
+                    EcuState::NoVariantDetected
+                } else {
+                    EcuState::Online
+                };
+
+                self.variant = EcuVariant {
+                    name: Some(variant_name.to_owned()),
+                    is_base_variant: v.is_base_variant(),
+                    state,
+                    logical_address: self.logical_address,
+                };
+
                 // todo read this from the variant detection instead of assuming default, see #110
                 let mut access = self.access_control.lock();
                 access.security = Some(self.default_state(semantics::SECURITY)?);
@@ -223,6 +257,12 @@ impl<S: SecurityPlugin> cda_interfaces::EcuManager for EcuManager<S> {
                 Ok(())
             }
             Err(e) => {
+                self.variant = EcuVariant {
+                    name: None,
+                    is_base_variant: false,
+                    state: EcuState::NoVariantDetected,
+                    logical_address: self.logical_address,
+                };
                 tracing::debug!("No variant detected, unloading DB");
                 self.diag_database.unload();
                 Err(e)
@@ -1185,6 +1225,19 @@ impl<S: SecurityPlugin> cda_interfaces::EcuManager for EcuManager<S> {
             })
             .collect::<Vec<_>>()
     }
+
+    fn set_duplicating_ecu_names(&mut self, duplicate_ecus: HashSet<String>) {
+        self.duplicating_ecu_names = Some(duplicate_ecus);
+    }
+
+    fn duplicating_ecu_names(&self) -> Option<&HashSet<String>> {
+        self.duplicating_ecu_names.as_ref()
+    }
+
+    fn mark_as_duplicate(&mut self) {
+        self.variant.state = EcuState::Duplicate;
+        self.diag_database.unload();
+    }
 }
 
 impl<S: SecurityPlugin> cda_interfaces::UdsComParamProvider for EcuManager<S> {
@@ -1473,7 +1526,13 @@ impl<S: SecurityPlugin> EcuManager<S> {
             connection_retry_attempts,
             variant_detection,
             variant_index: None,
-            state: EcuState::NotTested,
+            variant: EcuVariant {
+                name: None,
+                is_base_variant: false,
+                state: EcuState::NotTested,
+                logical_address: logical_ecu_address,
+            },
+            duplicating_ecu_names: None,
             protocol,
             access_control: Arc::new(Mutex::new(SessionControl {
                 session: None,
@@ -4270,6 +4329,227 @@ mod tests {
         (ecu_manager, dc, sid, dtc_code)
     }
 
+    #[allow(clippy::too_many_lines)] // must be kept together
+    fn create_ecu_manager_variant_detection() -> super::EcuManager<DefaultSecurityPluginData> {
+        let mut db_builder = EcuDataBuilder::new();
+        let protocol = db_builder.create_protocol(Protocol::DoIp.value(), None, None, None);
+        let cp_ref = db_builder.create_com_param_ref(None, None, None, Some(protocol), None);
+
+        let u8_diag_type = db_builder.create_diag_coded_type_standard_length(8, DataType::UInt32);
+        let compu_identical =
+            db_builder.create_compu_method(datatypes::CompuCategory::Identical, None, None);
+
+        // Create a variant detection service
+        let vd_service_sid = 0x22_u8;
+        let vd_service_name = "ReadVariantData";
+
+        // Create DOP for variant code response parameter
+        let variant_code_dop = {
+            let variant_code_dop_specific_data = db_builder
+                .create_normal_specific_dop_data(
+                    Some(compu_identical),
+                    Some(u8_diag_type),
+                    None,
+                    None,
+                    None,
+                    None,
+                )
+                .value_offset();
+            db_builder.create_dop(
+                *DopType::REGULAR,
+                Some("variant_code_dop"),
+                None,
+                *SpecificDOPData::NormalDOP,
+                Some(variant_code_dop_specific_data),
+            )
+        };
+
+        // Create the diagnostic communication
+        let vd_diag_comm = db_builder.create_diag_comm(DiagCommParams {
+            short_name: vd_service_name,
+            long_name: None,
+            semantic: None,
+            funct_class: None,
+            sdgs: None,
+            diag_class_type: DiagClassType::VARIANT_IDENTIFICATION,
+            pre_condition_state_refs: None,
+            state_transition_refs: None,
+            protocols: None,
+            audience: None,
+            is_mandatory: false,
+            is_executable: true,
+            is_final: false,
+        });
+
+        let vd_request = {
+            let sid_param = db_builder.create_coded_const_param(
+                "vd_service_sid",
+                &vd_service_sid.to_string(),
+                0,
+                0,
+                8,
+                DataType::UInt32,
+            );
+            db_builder.create_request(Some(vec![sid_param]), None)
+        };
+
+        let vd_pos_response = {
+            let sid_param = db_builder.create_coded_const_param(
+                "vd_service_pos_sid",
+                &(vd_service_sid + 0x40).to_string(),
+                0,
+                0,
+                8,
+                DataType::UInt32,
+            );
+            let variant_param =
+                db_builder.create_value_param("variant_code", variant_code_dop, 1, 0);
+            db_builder.create_response(
+                ResponseType::Positive,
+                Some(vec![sid_param, variant_param]),
+                None,
+            )
+        };
+
+        let vd_diag_service = db_builder.create_diag_service(DiagServiceParams {
+            diag_comm: Some(vd_diag_comm),
+            request: Some(vd_request),
+            pos_responses: vec![vd_pos_response],
+            neg_responses: vec![],
+            is_cyclic: false,
+            is_multiple: false,
+            addressing: *Addressing::FUNCTIONAL_OR_PHYSICAL,
+            transmission_mode: *TransmissionMode::SEND_AND_RECEIVE,
+            com_param_refs: None,
+        });
+
+        // Create state charts for session and security
+        let session_state_chart = {
+            let default_session_name = "DefaultSession";
+            let default_session_state = db_builder.create_state(default_session_name, None);
+
+            db_builder.create_state_chart(
+                "Session",
+                Some(semantics::SESSION),
+                None,
+                Some(default_session_name),
+                Some(vec![default_session_state]),
+            )
+        };
+
+        let security_state_chart = {
+            let default_security_name = "Locked";
+            let default_security_state = db_builder.create_state(default_security_name, None);
+
+            db_builder.create_state_chart(
+                "SecurityAccess",
+                Some(semantics::SECURITY),
+                None,
+                Some(default_security_name),
+                Some(vec![default_security_state]),
+            )
+        };
+
+        let sid_param = db_builder.create_coded_const_param(
+            "vd_service_pos_sid_base",
+            &(vd_service_sid + 0x40).to_string(),
+            0,
+            0,
+            8,
+            DataType::UInt32,
+        );
+
+        let variant_param = db_builder.create_value_param("variant_code", variant_code_dop, 1, 0);
+
+        let pos_response_variant_code = {
+            db_builder.create_response(
+                ResponseType::Positive,
+                Some(vec![sid_param, variant_param]),
+                None,
+            )
+        };
+        let diag_service = db_builder.create_diag_service(DiagServiceParams {
+            diag_comm: Some(vd_diag_comm),
+            request: Some(vd_request),
+            pos_responses: vec![pos_response_variant_code],
+            neg_responses: vec![],
+            is_cyclic: false,
+            is_multiple: false,
+            addressing: *Addressing::FUNCTIONAL_OR_PHYSICAL,
+            transmission_mode: *TransmissionMode::SEND_AND_RECEIVE,
+            com_param_refs: None,
+        });
+
+        // Create base variant with pattern matching variant_code = 0
+        let base_variant = {
+            let matching_param_base =
+                db_builder.create_matching_parameter("0", diag_service, variant_param);
+            let variant_pattern_base =
+                db_builder.create_variant_pattern(&vec![matching_param_base]);
+            let base_diag_layer = db_builder.create_diag_layer(DiagLayerParams {
+                short_name: "BaseVariant",
+                long_name: None,
+                funct_classes: None,
+                com_param_refs: Some(vec![cp_ref]),
+                diag_services: Some(vec![vd_diag_service]),
+                state_charts: Some(vec![session_state_chart, security_state_chart]),
+                ..Default::default()
+            });
+            db_builder.create_variant(
+                base_diag_layer,
+                true,
+                Some(vec![variant_pattern_base]),
+                None,
+            )
+        };
+
+        // Create second variant with pattern matching variant_code = 1
+        let specific_variant = {
+            let matching_param_base =
+                db_builder.create_matching_parameter("1", diag_service, variant_param);
+            let variant_pattern_base =
+                db_builder.create_variant_pattern(&vec![matching_param_base]);
+            let base_diag_layer = db_builder.create_diag_layer(DiagLayerParams {
+                short_name: "SpecificVariant",
+                long_name: None,
+                funct_classes: None,
+                com_param_refs: Some(vec![cp_ref]),
+                diag_services: Some(vec![vd_diag_service]),
+                state_charts: Some(vec![session_state_chart, security_state_chart]),
+                ..Default::default()
+            });
+            db_builder.create_variant(
+                base_diag_layer,
+                false,
+                Some(vec![variant_pattern_base]),
+                None,
+            )
+        };
+
+        let ecu_data = db_builder.create_ecu_data_and_finish(EcuDataParams {
+            ecu_name: "VariantDetectionEcu",
+            revision: "revision_1",
+            version: "1.0.0",
+            variants: Some(vec![base_variant, specific_variant]),
+            ..Default::default()
+        });
+
+        let db = datatypes::DiagnosticDatabase::new(
+            String::default(),
+            ecu_data,
+            FlatbBufConfig::default(),
+        )
+        .unwrap();
+
+        super::EcuManager::new(
+            db,
+            Protocol::DoIp,
+            &ComParams::default(),
+            DatabaseNamingConvention::default(),
+        )
+        .unwrap()
+    }
+
     fn create_payload(data: Vec<u8>) -> ServicePayload {
         ServicePayload {
             data,
@@ -5061,5 +5341,142 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(response.response_type, DiagServiceResponseType::Negative);
+    }
+
+    #[tokio::test]
+    async fn test_detect_variant_with_empty_responses_to_disconnected() {
+        let mut ecu_manager = create_ecu_manager_variant_detection();
+
+        for state in [
+            EcuState::Online,
+            EcuState::NoVariantDetected,
+            EcuState::Duplicate,
+            EcuState::Disconnected,
+        ] {
+            ecu_manager.variant.state = state;
+
+            let service_responses: HashMap<String, DiagServiceResponseStruct> = HashMap::new();
+            ecu_manager.detect_variant(service_responses).await.unwrap();
+
+            assert_eq!(ecu_manager.variant.name, None);
+            assert!(!ecu_manager.variant.is_base_variant);
+            assert_eq!(
+                ecu_manager.variant.state,
+                EcuState::Disconnected,
+                "State should transition to Disconnected from {state:?} with empty responses",
+            );
+        }
+    }
+
+    fn create_variant_response(
+        service_name: &str,
+        params: HashMap<String, u8>,
+    ) -> DiagServiceResponseStruct {
+        let service_comm = cda_interfaces::DiagComm {
+            name: service_name.to_owned(),
+            type_: DiagCommType::Configurations,
+            lookup_name: Some(service_name.to_owned()),
+        };
+
+        let data_map: HashMap<String, DiagDataTypeContainer> = params
+            .into_iter()
+            .map(|(key, value)| {
+                (
+                    key,
+                    DiagDataTypeContainer::RawContainer(DiagDataTypeContainerRaw {
+                        data: vec![value],
+                        bit_len: 8,
+                        data_type: DataType::UInt32,
+                        compu_method: None,
+                    }),
+                )
+            })
+            .collect();
+
+        DiagServiceResponseStruct {
+            service: service_comm,
+            data: vec![0x62, 0x01],
+            mapped_data: Some(MappedResponseData {
+                data: data_map,
+                errors: vec![],
+            }),
+            response_type: DiagServiceResponseType::Positive,
+        }
+    }
+
+    async fn detect_variant(
+        variant_id: u8,
+        is_base: bool,
+        name: String,
+        state: EcuState,
+        ecu_manger: Option<super::EcuManager<DefaultSecurityPluginData>>,
+    ) {
+        let mut ecu_manager = ecu_manger.unwrap_or(create_ecu_manager_variant_detection());
+
+        let response = create_variant_response(
+            "ReadVariantData",
+            [("variant_code".to_owned(), variant_id)]
+                .into_iter()
+                .collect(),
+        );
+
+        let mut service_responses = HashMap::new();
+        service_responses.insert("ReadVariantData".to_owned(), response);
+
+        ecu_manager.detect_variant(service_responses).await.unwrap();
+        assert_eq!(ecu_manager.variant.name, Some(name));
+        assert_eq!(ecu_manager.variant.is_base_variant, is_base);
+        assert_eq!(ecu_manager.variant.state, state);
+    }
+
+    #[tokio::test]
+    async fn test_detect_base_variant() {
+        detect_variant(0, true, "BaseVariant".to_owned(), EcuState::Online, None).await;
+    }
+
+    #[tokio::test]
+    async fn test_detect_specific_variant() {
+        detect_variant(
+            1,
+            false,
+            "SpecificVariant".to_owned(),
+            EcuState::Online,
+            None,
+        )
+        .await;
+    }
+
+    #[tokio::test]
+    async fn test_detect_unknown_variant() {
+        let mut ecu_manager = create_ecu_manager_variant_detection();
+        let response = create_variant_response(
+            "ReadVariantData",
+            [("variant_code".to_owned(), 42)].into_iter().collect(),
+        );
+
+        let mut service_responses = HashMap::new();
+        service_responses.insert("ReadVariantData".to_owned(), response);
+
+        assert_eq!(
+            ecu_manager
+                .detect_variant(service_responses)
+                .await
+                .err()
+                .unwrap(),
+            DiagServiceError::VariantDetectionError(
+                "No variant found for ECU VariantDetectionEcu".to_owned()
+            )
+        );
+
+        assert!(ecu_manager.variant.name.is_none());
+        assert!(!ecu_manager.variant.is_base_variant);
+        assert_eq!(ecu_manager.variant.state, EcuState::NoVariantDetected);
+    }
+
+    #[tokio::test]
+    async fn test_detect_variant_with_response_from_offline_to_online() {
+        let mut ecu_manager = create_ecu_manager_variant_detection();
+        ecu_manager.variant.state = EcuState::Offline;
+        detect_variant(0, true, "BaseVariant".to_owned(), EcuState::Online, None).await;
     }
 }

@@ -24,7 +24,8 @@ use cda_comm_uds::UdsManager;
 use cda_core::{DiagServiceResponseStruct, EcuManager};
 use cda_database::{FileManager, ProtoLoadConfig};
 use cda_interfaces::{
-    DoipGatewaySetupError, HashMap, HashMapExtensions, Protocol,
+    DoipGatewaySetupError, EcuAddressProvider, EcuManager as EcuManagerTrait, HashMap,
+    HashMapExtensions, HashSet, Protocol,
     datatypes::{ComParams, DatabaseNamingConvention, FlatbBufConfig},
     file_manager::{Chunk, ChunkType},
 };
@@ -143,6 +144,8 @@ pub async fn load_databases<S: SecurityPlugin>(
         .map(|(k, v)| (k.to_lowercase().clone(), RwLock::new(v)))
         .collect::<HashMap<String, RwLock<EcuManager<S>>>>();
 
+    mark_duplicate_ecus(&databases).await;
+
     let file_managers = file_managers
         .write()
         .await
@@ -157,6 +160,45 @@ pub async fn load_databases<S: SecurityPlugin>(
     }
 
     (databases, file_managers)
+}
+
+async fn mark_duplicate_ecus<S: SecurityPlugin>(
+    databases: &HashMap<String, RwLock<EcuManager<S>>>,
+) {
+    let mut ecus_by_address: HashMap<u16, HashMap<u16, Vec<String>>> = HashMap::new();
+    for (name, db_lock) in databases {
+        let db = db_lock.read().await;
+        let logical_address = db.logical_address();
+        let gateway_address = db.logical_gateway_address();
+        ecus_by_address
+            .entry(gateway_address)
+            .or_default()
+            .entry(logical_address)
+            .or_default()
+            .push(name.clone());
+    }
+
+    for logical_map in ecus_by_address.values() {
+        for ecu_names in logical_map.values() {
+            if ecu_names.len() <= 1 {
+                continue;
+            }
+
+            for ecu_name in ecu_names {
+                let Some(db_lock) = databases.get(ecu_name) else {
+                    continue;
+                };
+
+                let mut db = db_lock.write().await;
+                let duplicates: HashSet<String> = ecu_names
+                    .iter()
+                    .filter(|&name| name != ecu_name)
+                    .cloned()
+                    .collect();
+                db.set_duplicating_ecu_names(duplicates);
+            }
+        }
+    }
 }
 
 #[allow(clippy::too_many_arguments)]

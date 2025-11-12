@@ -446,6 +446,53 @@ impl<'a> EcuDataBuilder<'a> {
         dataformat::StateChart::create(&mut self.fbb, &state_chart_args)
     }
 
+    pub fn create_state(
+        &mut self,
+        short_name: &str,
+        long_name: Option<&str>,
+    ) -> WIPOffset<dataformat::State<'a>> {
+        let short_name_offset = self.fbb.create_string(short_name);
+        let long_name_offset = self.create_long_name(long_name);
+
+        let state_args = dataformat::StateArgs {
+            short_name: Some(short_name_offset),
+            long_name: long_name_offset,
+        };
+
+        dataformat::State::create(&mut self.fbb, &state_args)
+    }
+
+    pub fn create_matching_parameter(
+        &mut self,
+        expected_value: &str,
+        diag_service: WIPOffset<dataformat::DiagService<'a>>,
+        out_param: WIPOffset<dataformat::Param<'a>>,
+    ) -> WIPOffset<dataformat::MatchingParameter<'a>> {
+        let expected_value_offset = self.fbb.create_string(expected_value);
+
+        let matching_parameter_args = dataformat::MatchingParameterArgs {
+            expected_value: Some(expected_value_offset),
+            diag_service: Some(diag_service),
+            out_param: Some(out_param),
+            use_physical_addressing: None,
+        };
+
+        dataformat::MatchingParameter::create(&mut self.fbb, &matching_parameter_args)
+    }
+
+    pub fn create_variant_pattern(
+        &mut self,
+        matching_parameters: &Vec<WIPOffset<dataformat::MatchingParameter<'a>>>,
+    ) -> WIPOffset<dataformat::VariantPattern<'a>> {
+        let matching_parameters_vec = self.fbb.create_vector(matching_parameters);
+
+        let variant_pattern_args = dataformat::VariantPatternArgs {
+            matching_parameter: Some(matching_parameters_vec),
+        };
+
+        dataformat::VariantPattern::create(&mut self.fbb, &variant_pattern_args)
+    }
+
     pub fn create_additional_audience(
         &mut self,
         short_name: &str,

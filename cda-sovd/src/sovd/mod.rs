@@ -63,6 +63,34 @@ trait IntoSovdWithSchema {
     fn into_sovd_with_schema(self, include_schema: bool) -> Result<Self::SovdType, ApiError>;
 }
 
+impl IntoSovd for cda_interfaces::EcuVariant {
+    type SovdType = sovd_ecu::Variant;
+
+    fn into_sovd(self) -> Self::SovdType {
+        sovd_ecu::Variant {
+            name: self.name.unwrap_or("Unknown".to_string()),
+            is_base_variant: self.is_base_variant,
+            state: self.state.into_sovd(),
+            logical_address: format!("0x{:02x}", self.logical_address),
+        }
+    }
+}
+
+impl IntoSovd for cda_interfaces::EcuState {
+    type SovdType = sovd_ecu::State;
+
+    fn into_sovd(self) -> Self::SovdType {
+        match self {
+            cda_interfaces::EcuState::Online => sovd_ecu::State::Online,
+            cda_interfaces::EcuState::Offline => sovd_ecu::State::Offline,
+            cda_interfaces::EcuState::NotTested => sovd_ecu::State::NotTested,
+            cda_interfaces::EcuState::Duplicate => sovd_ecu::State::Duplicate,
+            cda_interfaces::EcuState::Disconnected => sovd_ecu::State::Disconnected,
+            cda_interfaces::EcuState::NoVariantDetected => sovd_ecu::State::NoVariantDetected,
+        }
+    }
+}
+
 #[derive(Debug, thiserror::Error)]
 enum SovdError {
     #[error("Failed to create route: {0}")]

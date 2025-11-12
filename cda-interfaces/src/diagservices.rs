@@ -29,7 +29,7 @@ pub struct MappedNRC {
     pub sid: Option<u8>,
 }
 
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct FieldParseError {
     pub path: String,
     pub error: DataParseError,
@@ -46,7 +46,7 @@ pub struct DiagServiceJsonResponse {
     pub errors: Vec<FieldParseError>,
 }
 
-pub trait DiagServiceResponse: Sized + Send + Sync + 'static {
+pub trait DiagServiceResponse: Sized + Send + Sync + 'static + Clone {
     fn is_empty(&self) -> bool;
     fn service_name(&self) -> String;
     fn response_type(&self) -> DiagServiceResponseType;
