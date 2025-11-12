@@ -19,11 +19,29 @@ use crate::Items;
 pub mod modes;
 pub mod operations;
 
+#[derive(Debug, Serialize, Deserialize, schemars::JsonSchema, PartialEq)]
+pub enum State {
+    Online,
+    Offline,
+    NotTested,
+    Duplicate,
+    Disconnected,
+    NoVariantDetected,
+}
+
+#[derive(Debug, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct Variant {
+    pub name: String,
+    pub is_base_variant: bool,
+    pub state: State,
+    pub logical_address: String,
+}
+
 #[derive(Debug, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct Ecu {
     pub id: String,
     pub name: String,
-    pub variant: HashMap<String, String>,
+    pub variant: Variant,
     pub locks: String,
     pub operations: String,
     pub data: String,
