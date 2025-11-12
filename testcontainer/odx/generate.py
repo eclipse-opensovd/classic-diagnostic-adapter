@@ -25,6 +25,7 @@ from reset import add_reset_services
 from security_access import add_security_access_services
 from shared import add_common_datatypes, add_state_charts, add_common_diag_comms
 from transferdata import add_transfer_services
+from typing import List, Tuple
 
 
 def add_variant(dlc: DiagLayerContainer, name: str, identification_pattern: int):
@@ -121,7 +122,11 @@ def add_base_variant(
 
 
 def generate_for_ecu(
-    ecu_name: str, logical_address: int, gateway_address: int, functional_address: int
+    ecu_name: str,
+    logical_address: int,
+    gateway_address: int,
+    functional_address: int,
+    variants: List[Tuple[str, int]],
 ):
     print(f"Generating for {ecu_name}")
     database = Database()
@@ -157,11 +162,12 @@ def generate_for_ecu(
         database=database,
     )
 
-    add_variant(
-        dlc=dlc, name=f"{ecu_name}_Boot_Variant", identification_pattern=0xFF0000
-    )
-
-    add_variant(dlc=dlc, name=f"{ecu_name}_App_0101", identification_pattern=0x000101)
+    for variant_name, identification_pattern in variants:
+        add_variant(
+            dlc=dlc,
+            name=f"{ecu_name}_{variant_name}",
+            identification_pattern=identification_pattern,
+        )
 
     database.diag_layer_containers.append(dlc)
 
@@ -174,4 +180,17 @@ generate_for_ecu(
     logical_address=0x1000,
     gateway_address=0x1000,
     functional_address=0xFFFF,
+    variants=[("Boot_Variant", 0xFF0000), ("App_0101", 0x000101)],
+)
+
+# mirror a use-case, where for different markets different hardware revisions
+# (for whatever reason) are used, but due to having the same function, the logical address would be the same.
+# The CDA should be able to differentiate those variants based on the variant response.
+# During variant detection on of the ECUs is selected, whereas the other is marked as duplicate.
+generate_for_ecu(
+    ecu_name="FLXCNG1000",
+    logical_address=0x1000,
+    gateway_address=0x1000,
+    functional_address=0xFFFF,
+    variants=[("App_1010", 0x001010)],
 )
