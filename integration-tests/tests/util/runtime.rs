@@ -28,6 +28,9 @@ static TEST_RUNTIME: OnceCell<TestRuntime> = OnceCell::const_new();
 
 static EXCLUSIVE_LOCK: LazyLock<Mutex<()>> = LazyLock::new(|| Mutex::new(()));
 
+static CDA_SHUTDOWN: LazyLock<Mutex<Option<tokio::sync::broadcast::Sender<()>>>> =
+    LazyLock::new(|| Mutex::new(None));
+
 /// Tokio isolates the runtime for each test.
 /// As we want to share the webserver over all tests, so we do not have to spin it up every time,
 /// a new static runtime is created in which the webserver task is running.
@@ -78,6 +81,13 @@ pub(crate) async fn setup_integration_test<'a>(
 }
 
 async fn initialize_runtime() -> Result<TestRuntime, TestingError> {
+    let tracing = cda_tracing::new();
+    let mut layers = vec![];
+    layers.push(cda_tracing::new_term_subscriber(
+        &cda_tracing::LoggingConfig::default(),
+    ));
+    cda_tracing::init_tracing(tracing.with(layers)).unwrap();
+
     // If docker is disabled, we run the sim and cda locally
     // this is useful for debugging tests
     // without having to rebuild the docker containers every time.
@@ -123,39 +133,29 @@ async fn initialize_runtime() -> Result<TestRuntime, TestingError> {
         database_naming_convention: Default::default(),
         flat_buf: Default::default(),
     };
+    config.validate_sanity().unwrap();
+    let ecu_sim = EcuSim {
+        host: host.clone(),
+        control_port: sim_control_port,
+    };
 
     register_cleanup();
     if use_docker {
         start_docker_compose(cda_port, gateway_port, sim_control_port)?;
     } else {
-        start_ecu_sim().await?;
-        // when using docker, docker compose contains the ready contains
-        wait_for_ecu_sim_ready(&host, sim_control_port).await?;
-        start_cda(config.clone());
+        start_ecu_sim(&ecu_sim).await?;
+        start_cda(config.clone()).await;
     }
 
     wait_for_cda_online(&config).await?;
 
-    Ok(TestRuntime {
-        config,
-        ecu_sim: EcuSim {
-            host,
-            control_port: sim_control_port,
-        },
-    })
+    Ok(TestRuntime { config, ecu_sim })
 }
 
-fn start_cda(config: Configuration) {
+async fn start_cda(config: Configuration) {
     // Some unwraps are used here, this is on purpose
     // as we want the tests to fail hard if CDA fails to start.
     TOKIO_RUNTIME.spawn(async move {
-        config.validate_sanity().unwrap();
-
-        let tracing = cda_tracing::new();
-        let mut layers = vec![];
-        layers.push(cda_tracing::new_term_subscriber(&config.logging));
-        cda_tracing::init_tracing(tracing.with(layers)).unwrap();
-
         tracing::info!("Starting CDA...");
 
         let database_path = config.databases_path.clone();
@@ -177,7 +177,13 @@ fn start_cda(config: Configuration) {
             port: config.server.port,
         };
 
-        let clonable_shutdown_signal = opensovd_cda_lib::shutdown_signal().shared();
+        let (shutdown_tx, mut shutdown_rx) = tokio::sync::broadcast::channel(1);
+        *CDA_SHUTDOWN.lock().await = Some(shutdown_tx);
+
+        let clonable_shutdown_signal = async move {
+            shutdown_rx.recv().await.ok();
+        }
+        .shared();
 
         let (variant_detection_tx, variant_detection_rx) = mpsc::channel(50);
 
@@ -237,6 +243,15 @@ fn start_cda(config: Configuration) {
     });
 }
 
+async fn stop_cda() -> Result<(), TestingError> {
+    if let Some(sender) = CDA_SHUTDOWN.lock().await.as_ref() {
+        sender.send(()).ok();
+        Ok(())
+    } else {
+        Err(TestingError::ProcessFailed("CDA not running".to_owned()))
+    }
+}
+
 fn start_docker_compose(
     cda_port: u16,
     gateway_port: u16,
@@ -260,22 +275,36 @@ fn start_docker_compose(
         .map_err(|e| TestingError::ProcessFailed(format!("Failed to build docker compose: {e}")))?;
     check_command_success(status, "docker compose build failed")?;
 
-    let status = std::process::Command::new("docker")
-        .arg("compose")
-        .arg("up")
-        .arg("-d")
+    docker_compose_up(None)
+}
+
+fn docker_compose_up(container: Option<String>) -> Result<(), TestingError> {
+    let test_container_dir = test_container_dir()?;
+    let mut cmd = std::process::Command::new("docker");
+    cmd.arg("compose").arg("up").arg("-d");
+    if let Some(container_name) = container {
+        cmd.arg(container_name);
+    }
+    let status = cmd
         .current_dir(&test_container_dir)
         .status()
         .map_err(|e| TestingError::ProcessFailed(format!("Failed to start docker compose: {e}")))?;
     check_command_success(status, "docker compose up failed")
 }
 
-fn stop_docker_compose() -> Result<(), TestingError> {
+fn docker_compose_down(container: Option<String>) -> Result<(), TestingError> {
     let test_container_dir = test_container_dir()?;
-    let status = std::process::Command::new("docker")
-        .arg("compose")
+    let mut cmd = std::process::Command::new("docker");
+    cmd.arg("compose")
         .arg("down")
-        .current_dir(&test_container_dir)
+        .arg("--remove-orphans")
+        .current_dir(&test_container_dir);
+
+    if let Some(container_name) = container {
+        cmd.arg(container_name);
+    }
+
+    let status = cmd
         .status()
         .map_err(|e| TestingError::ProcessFailed(format!("Failed to stop docker compose: {e}")))?;
     check_command_success(status, "docker compose down failed")
@@ -302,28 +331,33 @@ fn write_docker_env_file(
     Ok(())
 }
 
-async fn start_ecu_sim() -> Result<(), TestingError> {
-    let ecu_sim_dir = ecu_sim_dir()?;
-    if !ecu_sim_dir.exists() {
-        return Err(TestingError::PathNotFound(format!(
-            "ecu-sim run script not found at {ecu_sim_dir:?}"
-        )));
+pub(crate) async fn start_ecu_sim(sim: &EcuSim) -> Result<(), TestingError> {
+    if use_docker() {
+        docker_compose_up(Some("ecu-sim".to_owned()))?;
+    } else {
+        let ecu_sim_dir = ecu_sim_dir()?;
+        if !ecu_sim_dir.exists() {
+            return Err(TestingError::PathNotFound(format!(
+                "ecu-sim run script not found at {ecu_sim_dir:?}"
+            )));
+        }
+
+        let child = std::process::Command::new("bash")
+            .current_dir(&ecu_sim_dir)
+            .arg("gradlew")
+            .arg("run")
+            .spawn()
+            .map_err(|e| TestingError::ProcessFailed(format!("Failed to start ecu-sim: {e}")))?;
+
+        *ECU_SIM_PROCESS.lock().await = Some(child);
     }
-
-    let child = std::process::Command::new("bash")
-        .current_dir(&ecu_sim_dir)
-        .arg("gradlew")
-        .arg("run")
-        .spawn()
-        .map_err(|e| TestingError::ProcessFailed(format!("Failed to start ecu-sim: {e}")))?;
-
-    *ECU_SIM_PROCESS.lock().await = Some(child);
-
-    Ok(())
+    wait_for_ecu_sim_ready(&sim.host, sim.control_port).await
 }
 
-fn stop_ecu_sim() -> Result<(), TestingError> {
-    TOKIO_RUNTIME.block_on(async {
+pub(crate) async fn stop_ecu_sim() -> Result<(), TestingError> {
+    if use_docker() {
+        docker_compose_down(Some("ecu-sim".to_owned()))
+    } else {
         if let Some(mut child) = ECU_SIM_PROCESS.lock().await.take() {
             child.kill().map_err(|e| {
                 TestingError::ProcessFailed(format!("Failed to kill ecu-sim process: {e}"))
@@ -331,7 +365,40 @@ fn stop_ecu_sim() -> Result<(), TestingError> {
             child.wait().ok();
         }
         Ok(())
-    })
+    }
+}
+
+fn stop_ecu_sim_sync() -> Result<(), TestingError> {
+    TOKIO_RUNTIME.block_on(async { stop_ecu_sim().await })
+}
+
+fn docker_compose_restart(container: Option<String>) -> Result<(), TestingError> {
+    let test_container_dir = test_container_dir()?;
+    let mut cmd = std::process::Command::new("docker");
+    cmd.arg("compose").arg("restart");
+    if let Some(container_name) = container {
+        cmd.arg(container_name);
+    }
+    let status = cmd.current_dir(&test_container_dir).status().map_err(|e| {
+        TestingError::ProcessFailed(format!("Failed to restart docker compose: {e}"))
+    })?;
+    check_command_success(status, "docker compose restart failed")
+}
+
+pub(crate) async fn restart_cda(config: &Configuration) -> Result<(), TestingError> {
+    if use_docker() {
+        docker_compose_restart(Some("cda".to_owned()))?;
+    } else {
+        stop_cda().await?;
+        start_cda(config.clone()).await;
+    }
+    wait_for_cda_online(config).await
+}
+
+fn use_docker() -> bool {
+    std::env::var(CDA_INTEGRATION_TEST_USE_DOCKER)
+        .map(|s| s == "true")
+        .unwrap_or(true)
 }
 
 async fn wait_for_http_ready(url: String, service_name: &str) -> Result<(), TestingError> {
@@ -358,7 +425,7 @@ async fn wait_for_ecu_sim_ready(host: &str, sim_control_port: u16) -> Result<(),
     wait_for_http_ready(url, "ECU sim").await
 }
 
-async fn wait_for_cda_online(cfg: &Configuration) -> Result<(), TestingError> {
+pub(crate) async fn wait_for_cda_online(cfg: &Configuration) -> Result<(), TestingError> {
     let url = format!("http://{}:{}", cfg.server.address, cfg.server.port);
     wait_for_http_ready(url, "CDA").await
 }
@@ -435,11 +502,11 @@ fn register_cleanup() {
             .unwrap_or(true);
 
         if use_docker {
-            if let Err(e) = stop_docker_compose() {
+            if let Err(e) = docker_compose_down(None) {
                 eprintln!("Failed to stop docker compose: {}", e);
             }
         } else {
-            if let Err(e) = stop_ecu_sim() {
+            if let Err(e) = stop_ecu_sim_sync() {
                 eprintln!("Failed to stop ecu-sim: {}", e);
             }
         }
