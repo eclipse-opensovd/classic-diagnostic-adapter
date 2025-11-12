@@ -30,12 +30,23 @@ pub mod files;
 
 // "MDD version 0      \u0000";
 const FILE_MAGIC_HEX_STR: &str = "4d44442076657273696f6e203020202020202000";
+const FILE_MAGIC_BYTES_LEN: usize = FILE_MAGIC_HEX_STR.len() / 2;
 
-fn file_magic_bytes() -> Vec<u8> {
-    let mut bytes = Vec::new();
-    for i in (0..FILE_MAGIC_HEX_STR.len()).step_by(2) {
-        let byte = u8::from_str_radix(&FILE_MAGIC_HEX_STR[i..i + 2], 16).unwrap();
-        bytes.push(byte);
+const fn file_magic_bytes() -> [u8; FILE_MAGIC_BYTES_LEN] {
+    let string_bytes = FILE_MAGIC_HEX_STR.as_bytes();
+    let mut bytes = [0u8; FILE_MAGIC_BYTES_LEN];
+    let mut count = 0;
+    while count < bytes.len() {
+        let i = count * 2;
+        let str_b = [string_bytes[i], string_bytes[i + 1]];
+        let Ok(hex_str) = str::from_utf8(&str_b) else {
+            panic!("Non UTF-8 bytes in FILE_MAGIC_HEX_STR")
+        };
+        let Ok(b) = u8::from_str_radix(hex_str, 16) else {
+            panic!("Invalid hex value in FILE_MAGIC_HEX_STR")
+        };
+        bytes[count] = b;
+        count += 1;
     }
     bytes
 }
