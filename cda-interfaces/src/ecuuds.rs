@@ -14,7 +14,8 @@
 use std::time::Duration;
 
 use crate::{
-    DiagComm, DiagServiceError, DynamicPlugin, HashMap, SecurityAccess, TesterPresentType,
+    DiagComm, DiagServiceError, DynamicPlugin, EcuVariant, HashMap, SecurityAccess,
+    TesterPresentType,
     datatypes::{
         ComplexComParamValue, ComponentConfigurationsInfo, ComponentDataInfo, DataTransferMetaData,
         DtcCode, DtcExtendedInfo, DtcRecordAndStatus, NetworkStructure, SdSdg, single_ecu,
@@ -270,7 +271,7 @@ pub trait UdsEcu: Send + Sync + 'static {
     fn get_variant(
         &self,
         ecu_name: &str,
-    ) -> impl Future<Output = Result<String, DiagServiceError>> + Send;
+    ) -> impl Future<Output = Result<EcuVariant, DiagServiceError>> + Send;
 
     /// trigger the variant detection process for all ECUs.
     /// Main work will be done in the background, there is no result returned,

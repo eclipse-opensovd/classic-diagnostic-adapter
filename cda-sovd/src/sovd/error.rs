@@ -46,7 +46,7 @@ pub enum ApiError {
 impl From<DiagServiceError> for ApiError {
     fn from(value: DiagServiceError) -> Self {
         match &value {
-            DiagServiceError::UdsLookupError(_) | DiagServiceError::NotFound(Some(_) | None) => {
+            DiagServiceError::UdsLookupError(_) | DiagServiceError::NotFound(_) => {
                 ApiError::NotFound(Some(value.to_string()))
             }
 

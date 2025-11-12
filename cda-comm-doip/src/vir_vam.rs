@@ -86,6 +86,7 @@ where
     Ok(gateways)
 }
 
+#[allow(clippy::too_many_lines)] // allowed due to nested functions
 pub(crate) async fn listen_for_vams<T, F>(
     netmask: u32,
     gateway: DoipDiagGateway<T>,
@@ -127,8 +128,17 @@ pub(crate) async fn listen_for_vams<T, F>(
                     .read()
                     .await
                     .get(&doip_target.logical_address)
-                    .is_none()
+                    .is_some()
                 {
+                    // sending variant detection, will update the ECU state
+                    // (i.e. disconnected -> connected)
+                    send_variant_detection(
+                        gateway_ecu_name_map,
+                        &variant_detection,
+                        doip_target.logical_address,
+                    )
+                    .await;
+                } else {
                     tracing::info!(ecu_name = %doip_target.ecu, "New Gateway ECU detected");
 
                     match handle_gateway_connection::<T>(
@@ -144,19 +154,12 @@ pub(crate) async fn listen_for_vams<T, F>(
                                 logical_address,
                                 gateway.doip_connections.read().await.len() - 1,
                             );
-                            if let Some(ecus) = gateway_ecu_name_map.get(&logical_address) {
-                                if let Err(e) = variant_detection.send(ecus.clone()).await {
-                                    tracing::error!(
-                                        error = ?e,
-                                        "Failed to send variant detection request"
-                                    );
-                                } else {
-                                    tracing::info!(
-                                        ecus = ?ecus,
-                                        "Variant detection request sent"
-                                    );
-                                }
-                            }
+                            send_variant_detection(
+                                gateway_ecu_name_map,
+                                &variant_detection,
+                                logical_address,
+                            )
+                            .await;
                         }
                         Err(e) => {
                             tracing::error!(
@@ -169,6 +172,26 @@ pub(crate) async fn listen_for_vams<T, F>(
             }
             Ok(None) => { /* ignore non-matching VAMs */ }
             Err(e) => tracing::warn!(error = ?e, "Failed to handle VAM"),
+        }
+    }
+
+    async fn send_variant_detection(
+        gateway_ecu_name_map: &HashMap<u16, Vec<String>>,
+        variant_detection: &mpsc::Sender<Vec<String>>,
+        logical_address: u16,
+    ) {
+        if let Some(ecus) = gateway_ecu_name_map.get(&logical_address) {
+            if let Err(e) = variant_detection.send(ecus.clone()).await {
+                tracing::error!(
+                    error = ?e,
+                    "Failed to send variant detection request"
+                );
+            } else {
+                tracing::info!(
+                    ecus = ?ecus,
+                    "Variant detection request sent"
+                );
+            }
         }
     }
 

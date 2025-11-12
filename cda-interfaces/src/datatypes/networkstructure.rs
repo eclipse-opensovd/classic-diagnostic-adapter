@@ -13,13 +13,13 @@
 
 use serde::Serialize;
 
+use crate::EcuVariant;
+
 #[derive(Serialize)]
 #[serde(rename_all = "PascalCase")]
 pub struct Ecu {
-    pub qualifier: String, // name
-    pub variant: String,   // variant
-    #[serde(rename = "EcuState")]
-    pub state: String, // Online, Offline, NotTested ...
+    pub qualifier: String,   // name
+    pub variant: EcuVariant, // variant
     pub logical_address: String,
     pub logical_link: String, // ${qualifier}_on_${protocol}
 }

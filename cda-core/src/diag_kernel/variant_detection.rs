@@ -111,7 +111,18 @@ pub(super) fn evaluate_variant<T: DiagServiceResponse + Sized>(
                                         .iter()
                                         .find(|(name, _)| **name == expected_param)
                                         .map(|(_name, value)| {
-                                            value.replace('"', "") == expected_value
+                                            let matches = value.replace('"', "") == expected_value;
+                                            tracing::debug!(
+                                                service = %service,
+                                                parameter = %expected_param,
+                                                expected_value = %expected_value,
+                                                received_value = %value,
+                                                ecu = %diagnostic_database.ecu_name()
+                                                    .unwrap_or("Unknown".to_owned()),
+                                                matches = matches,
+                                                "Variant detection match result"
+                                            );
+                                            matches
                                         })
                                 })
                                 .unwrap_or(false)
@@ -120,18 +131,17 @@ pub(super) fn evaluate_variant<T: DiagServiceResponse + Sized>(
                 })
             })
         })
-        .or(variants.iter().find(|variant| {
-            // Closure is not redundant, as we cannot access the inner type
-            // of variant directly.
-            #[allow(clippy::redundant_closure)]
-            variant.is_base_variant()
-        }))
         .map(datatypes::Variant)
         .ok_or_else(move || {
             tracing::debug!(
                 received_responses = ?service_responses,
                 "No variant found for expected services"
             );
-            DiagServiceError::VariantDetectionError("No variant found".to_owned())
+            DiagServiceError::VariantDetectionError(format!(
+                "No variant found for ECU {}",
+                diagnostic_database
+                    .ecu_name()
+                    .unwrap_or("Unknown".to_owned())
+            ))
         })
 }

@@ -58,7 +58,7 @@ pub(crate) async fn get<R: DiagServiceResponse, T: UdsEcu + Clone, U: FileManage
     let include_schema = query.include_schema;
     let base_path = format!("http://localhost:20002/vehicle/v15/components/{ecu_name}");
     let variant = match uds.get_variant(&ecu_name).await {
-        Ok(v) => [("name".to_owned(), v)].into_iter().collect(),
+        Ok(v) => v,
         Err(e) => {
             return ErrorWrapper {
                 error: e.into(),
@@ -100,7 +100,7 @@ pub(crate) async fn get<R: DiagServiceResponse, T: UdsEcu + Clone, U: FileManage
         Json(sovd_interfaces::components::ecu::get::Response {
             id: ecu_name.to_lowercase(),
             name: ecu_name.clone(),
-            variant,
+            variant: variant.into_sovd(),
             locks: format!("{base_path}/locks"),
             operations: format!("{base_path}/operations"),
             configurations: format!("{base_path}/configurations"),
@@ -120,10 +120,12 @@ pub(crate) fn docs_get(op: TransformOperation) -> TransformOperation {
             res.example(sovd_interfaces::components::ecu::Ecu {
                 id: "my_ecu".to_string(),
                 name: "My ECU".to_string(),
-
-                variant: [("name".to_owned(), "Variant1".to_owned())]
-                    .into_iter()
-                    .collect(),
+                variant: sovd_interfaces::components::ecu::Variant {
+                    name: "Variant Name".to_owned(),
+                    is_base_variant: false,
+                    state: sovd_interfaces::components::ecu::State::Online,
+                    logical_address: "0x42".to_owned(),
+                },
                 locks: "http://localhost:20002/vehicle/v15/components/my_ecu/locks".to_string(),
                 operations: "http://localhost:20002/vehicle/v15/components/my_ecu/operations"
                     .to_string(),
