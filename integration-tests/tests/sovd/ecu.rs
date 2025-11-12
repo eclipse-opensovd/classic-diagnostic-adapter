@@ -27,7 +27,7 @@ use crate::{
         http::{
             auth_header, extract_field_from_json, response_to_json, response_to_t, send_cda_request,
         },
-        runtime::setup_integration_test,
+        runtime::{TestRuntime, restart_cda, setup_integration_test, start_ecu_sim, stop_ecu_sim},
     },
 };
 
@@ -80,10 +80,7 @@ async fn test_ecu_session_switching() {
         .await
         .unwrap();
     assert!(ecu.name.eq_ignore_ascii_case("flxc1000"));
-    assert_eq!(
-        ecu.variant.get("name"),
-        Some(&"FLXC1000_App_0101".to_string())
-    );
+    assert_eq!(ecu.variant.name, "FLXC1000_App_0101".to_string());
 
     switch_session(
         "this status does not exist",
@@ -120,10 +117,7 @@ async fn test_ecu_session_switching() {
     let ecu = ecu_status(&runtime.config, &auth, ecu_endpoint)
         .await
         .unwrap();
-    assert_eq!(
-        ecu.variant.get("name"),
-        Some(&"FLXC1000_Boot_Variant".to_string())
-    );
+    assert_eq!(ecu.variant.name, "FLXC1000_Boot_Variant".to_string());
 
     let seed_response = request_seed(
         "Level_5_RequestSeed".to_owned(),
@@ -201,6 +195,143 @@ async fn test_ecu_session_switching() {
         Method::DELETE,
     )
     .await;
+}
+
+#[tokio::test]
+async fn test_variant_detection_duplicates() {
+    let (runtime, _lock) = setup_integration_test(true).await.unwrap();
+    let auth = auth_header(&runtime.config, None).await.unwrap();
+
+    // Switch variant, and check if the NG variant is now online.
+    ecusim::switch_variant(&runtime.ecu_sim, "FLXC1000", "APPLICATION")
+        .await
+        .unwrap();
+    let ecu = ecu_status(&runtime.config, &auth, sovd::ECU_FLXC1000_ENDPOINT)
+        .await
+        .unwrap();
+    assert_eq!(
+        ecu.variant.state,
+        sovd_interfaces::components::ecu::State::Online
+    );
+    assert_eq!(ecu.variant.logical_address, "0x1000");
+
+    // Switch variant, and check if the NG variant is now online.
+    ecusim::switch_variant(&runtime.ecu_sim, "FLXC1000", "APPLICATION2")
+        .await
+        .unwrap();
+    force_variant_detection(&runtime.config, &auth, sovd::ECU_FLXC1000_ENDPOINT)
+        .await
+        .unwrap();
+
+    validate_ecu_state(
+        &runtime,
+        &auth,
+        sovd::ECU_FLXC1000_ENDPOINT,
+        sovd_interfaces::components::ecu::State::Duplicate,
+    )
+    .await;
+
+    validate_ecu_state(
+        &runtime,
+        &auth,
+        sovd::ECU_FLXCNG1000_ENDPOINT,
+        sovd_interfaces::components::ecu::State::Online,
+    )
+    .await;
+
+    // No variant associated with APPLICATION3, check if both ECUs are marked as NoVariantDetected
+    ecusim::switch_variant(&runtime.ecu_sim, "FLXC1000", "APPLICATION3")
+        .await
+        .unwrap();
+    force_variant_detection(&runtime.config, &auth, sovd::ECU_FLXC1000_ENDPOINT)
+        .await
+        .unwrap();
+    validate_ecu_state(
+        &runtime,
+        &auth,
+        sovd::ECU_FLXC1000_ENDPOINT,
+        sovd_interfaces::components::ecu::State::NoVariantDetected,
+    )
+    .await;
+    validate_ecu_state(
+        &runtime,
+        &auth,
+        sovd::ECU_FLXCNG1000_ENDPOINT,
+        sovd_interfaces::components::ecu::State::NoVariantDetected,
+    )
+    .await;
+
+    // Stop sim and check if ECUs are marked as disconnected after variant detection
+    stop_ecu_sim().await.unwrap();
+    force_variant_detection(&runtime.config, &auth, sovd::ECU_FLXCNG1000_ENDPOINT)
+        .await
+        .unwrap();
+
+    validate_ecu_state(
+        &runtime,
+        &auth,
+        sovd::ECU_FLXC1000_ENDPOINT,
+        sovd_interfaces::components::ecu::State::Disconnected,
+    )
+    .await;
+    validate_ecu_state(
+        &runtime,
+        &auth,
+        sovd::ECU_FLXCNG1000_ENDPOINT,
+        sovd_interfaces::components::ecu::State::Disconnected,
+    )
+    .await;
+
+    // restart CDA while sim is offline and check if ECUs are marked as offline
+    restart_cda(&runtime.config).await.unwrap();
+    validate_ecu_state(
+        &runtime,
+        &auth,
+        sovd::ECU_FLXC1000_ENDPOINT,
+        sovd_interfaces::components::ecu::State::Offline,
+    )
+    .await;
+    validate_ecu_state(
+        &runtime,
+        &auth,
+        sovd::ECU_FLXCNG1000_ENDPOINT,
+        sovd_interfaces::components::ecu::State::Offline,
+    )
+    .await;
+
+    // restart sim and wait for ECUs to come online,
+    // status should be detected without manual variant detection
+    start_ecu_sim(&runtime.ecu_sim).await.unwrap();
+    // todo: sim needs to run before CDA to work properly
+    restart_cda(&runtime.config).await.unwrap();
+
+    validate_ecu_state(
+        &runtime,
+        &auth,
+        sovd::ECU_FLXC1000_ENDPOINT,
+        sovd_interfaces::components::ecu::State::Online,
+    )
+    .await;
+    validate_ecu_state(
+        &runtime,
+        &auth,
+        sovd::ECU_FLXCNG1000_ENDPOINT,
+        sovd_interfaces::components::ecu::State::Duplicate,
+    )
+    .await;
+}
+
+async fn validate_ecu_state(
+    runtime: &TestRuntime,
+    auth: &HeaderMap,
+    ecu: &str,
+    expected_state: sovd_interfaces::components::ecu::State,
+) {
+    let ecu_status = ecu_status(&runtime.config, &auth, ecu).await.unwrap();
+    assert_eq!(
+        ecu_status.variant.state, expected_state,
+        "ECU {ecu} state does not match {ecu_status:?}"
+    );
 }
 
 async fn session(
