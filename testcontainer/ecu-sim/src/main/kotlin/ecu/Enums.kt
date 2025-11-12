@@ -5,7 +5,9 @@ import kotlinx.serialization.Serializable
 @Serializable
 enum class Variant {
     BOOT,
-    APPLICATION
+    APPLICATION,
+    APPLICATION2,
+    APPLICATION3,
 }
 
 @Serializable
