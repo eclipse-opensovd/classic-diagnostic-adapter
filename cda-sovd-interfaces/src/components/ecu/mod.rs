@@ -466,6 +466,7 @@ pub mod faults {
                 /// If true, snapshot data from 0x19 04 is included in the response
                 #[serde(default = "default_true")]
                 pub include_snapshot_data: bool,
+                #[serde(default)]
                 pub include_schema: bool,
             }
 
@@ -511,5 +512,26 @@ pub mod faults {
                 pub schema: Option<schemars::Schema>,
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn test_deserialize_dtc_id_query() {
+        let query_str = "include-extended-data=false&include-snapshot-data=true";
+        let query: super::faults::id::get::DtcIdQuery = serde_qs::from_str(query_str).unwrap();
+
+        assert!(!query.include_extended_data);
+        assert!(query.include_snapshot_data);
+        assert!(!query.include_schema);
+
+        let query_str_with_schema =
+            "include-extended-data=true&include-snapshot-data=false&include-schema=true";
+        let query_with_schema: super::faults::id::get::DtcIdQuery =
+            serde_qs::from_str(query_str_with_schema).unwrap();
+        assert!(query_with_schema.include_extended_data);
+        assert!(!query_with_schema.include_snapshot_data);
+        assert!(query_with_schema.include_schema);
     }
 }
