@@ -2839,6 +2839,7 @@ dependencies = [
  "schemars",
  "serde",
  "serde_json",
+ "serde_qs",
  "strum",
 ]
 

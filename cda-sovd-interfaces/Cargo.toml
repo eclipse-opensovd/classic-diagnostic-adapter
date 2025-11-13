@@ -26,6 +26,9 @@ serde_json = { workspace = true }
 schemars = { workspace = true, features = ["hashbrown"] }
 strum = { workspace = true, features = ["derive"] }
 
+[dev-dependencies]
+serde_qs = { workspace = true }
+
 [features]
 default = []
 auth = []
