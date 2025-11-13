@@ -19,7 +19,6 @@ from odxtools.statetransition import StateTransition
 from odxtools.response import Response, ResponseType
 from odxtools.nameditemlist import NamedItemList
 from odxtools.parameters.valueparameter import ValueParameter
-from odxtools.compumethods.compucategory import CompuCategory
 from odxtools.compumethods.compumethod import CompuMethod
 
 
@@ -134,6 +133,7 @@ def sid_parameter_pr(sid: int) -> CodedConstParameter:
         coded_value_raw=str(sid),
     )
 
+
 def sid_parameter_nr() -> CodedConstParameter:
     return coded_const_int_parameter(
         short_name="SID_NR",
@@ -142,14 +142,16 @@ def sid_parameter_nr() -> CodedConstParameter:
         coded_value_raw=str(0x7F),
     )
 
+
 def sidrq_parameter_nr() -> MatchingRequestParameter:
     return matching_request_parameter(
         short_name="SIDRQ_NR",
         semantic="SERVICEIDRQ",
         byte_length=1,
         byte_position=1,
-        request_byte_position=0
+        request_byte_position=0,
     )
+
 
 def subfunction_rq(
     subfunction: int,
@@ -279,6 +281,7 @@ def texttable_int_str_dop(
         ),
         physical_type=PhysicalType(base_data_type=DataType.A_UNICODE2STRING),
     )
+
 
 def negative_response(
     dlr: DiagLayerRaw,

@@ -22,7 +22,7 @@ jobs:
         with:
           submodules: false
       - name: Make doctoolchain executable
-        run: | 
+        run: |
           chmod a+x docs/dtcw
       - name: Run doctoolchain
         id: run-dtcw
@@ -68,4 +68,3 @@ jobs:
           retention-days: 7
           path: |
             target/doc/
-          

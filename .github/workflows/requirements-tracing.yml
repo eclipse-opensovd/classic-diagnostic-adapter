@@ -25,7 +25,7 @@ jobs:
       tracing-report-url: ${{ steps.upload-tracing-report.artifact-url }}
     steps:
       - uses: actions/checkout@v4
-# [impl->req~main.tracing.programmatically~1]]
+        # [impl->req~main.tracing.programmatically~1]]
       - name: Run OpenFastTrace
         id: run-oft
         uses: itsallcode/openfasttrace-github-action@v0
@@ -41,12 +41,12 @@ jobs:
         with:
           name: tracing-report-html
           path: ${{ env.TRACING_REPORT_FILE_NAME }}
-# TODO once requirements are traceable, enforce it with the exit code
-#      - name: "Determine exit code"
-#        run: |
-#          exit ${{ steps.run-oft.outputs.oft-exit-code }}
-# allow failing requirements tracing pipeline for now
-# display the error code instead
+          # TODO once requirements are traceable, enforce it with the exit code
+          #      - name: "Determine exit code"
+          #        run: |
+          #          exit ${{ steps.run-oft.outputs.oft-exit-code }}
+          # allow failing requirements tracing pipeline for now
+          # display the error code instead
       - name: "Output exit code"
         run: |
           echo ${{ steps.run-oft.outputs.oft-exit-code }}

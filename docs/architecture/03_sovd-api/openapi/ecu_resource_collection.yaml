@@ -80,7 +80,6 @@ components:
           schema:
             $ref: '#/components/schemas/EcuData'
 
-
 paths:
   /components:
     get:

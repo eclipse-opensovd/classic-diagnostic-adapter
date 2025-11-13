@@ -7,7 +7,7 @@ compatibility bridge between traditional (legacy) diagnostic interfaces and the 
 diagnostic architecture used in next-generation vehicles.
 
 It facilitates the communication to the actual ECUs, by translating the SOVD calls with the
-diagnostic description of the ECU to its UDS via DoIP counterpart. 
+diagnostic description of the ECU to its UDS via DoIP counterpart.
 
 It handles the communication to the ECUs, by using the communication parameters from the diagnostic description.
 
@@ -25,7 +25,7 @@ It handles the communication to the ECUs, by using the communication parameters 
 
 ### prerequisites
 
-To run the CDA you will need at least one `MDD` file. Check out [eclipse-opensovd/odx-converter](https://github.com/eclipse-opensovd/odx-converter) on how to get started with creating `MDD`(s) from ODX.  
+To run the CDA you will need at least one `MDD` file. Check out [eclipse-opensovd/odx-converter](https://github.com/eclipse-opensovd/odx-converter) on how to get started with creating `MDD`(s) from ODX.
 
 Once you have the `MDD`(s) you can update the config in `opensovd-cda.toml` to point `databases_path` to the directory containing the files. Alternatively you can pass the config via arg `--databases-path MY_PATH`.
 
@@ -43,7 +43,7 @@ To see the available command line options run `./opensovd-cda -h`
 
 ### prerequisites
 
-You need to install a rust compiler & sdk - we recommend using [rustup](https://rustup.rs/) for this.  
+You need to install a rust compiler & sdk - we recommend using [rustup](https://rustup.rs/) for this.
 The minimum required version of the toolchain is [Rust 1.88.0](https://blog.rust-lang.org/2025/06/26/Rust-1.88.0/).
 
 ### build the executable
@@ -97,7 +97,7 @@ The integration test framework automatically manages the test environment by:
 Docker mode spins up the ECU simulator and CDA in isolated containers:
 
 ```shell
-cargo test --locked --features integration-tests 
+cargo test --locked --features integration-tests
 ```
 
 **Without Docker (For Development/Debugging):**
@@ -112,7 +112,7 @@ export CDA_INTEGRATION_TEST_USE_DOCKER=false
 # export CDA_INTEGRATION_TEST_TESTER_ADDRESS=
 
 # Run the tests
-cargo test --locked --features integration-tests 
+cargo test --locked --features integration-tests
 ```
 
 When running without Docker, the ECU simulator and CDA will run as local processes with default ports (20002 for CDA, 13400 for DoIP gateway, 8181 for ECU sim control).
@@ -122,20 +122,20 @@ Furthermore the local setup does _not_ automatically build the MDD files from OD
 
 The integration test framework supports the following environment variables:
 
-- **`CDA_INTEGRATION_TEST_USE_DOCKER`** (default: `true`)  
+- **`CDA_INTEGRATION_TEST_USE_DOCKER`** (default: `true`)
   Controls whether to use Docker Compose or run services locally.
   - `true`: Uses Docker Compose to run CDA and ECU simulator in containers
   - `false`: Runs services as local processes (useful for debugging)
-  
+
   Example:
   ```shell
   export CDA_INTEGRATION_TEST_USE_DOCKER=false
   ```
 
-- **`CDA_INTEGRATION_TEST_TESTER_ADDRESS`** (default: `0.0.0.0`)  
-  Override the tester address used by the CDA when running without Docker. 
+- **`CDA_INTEGRATION_TEST_TESTER_ADDRESS`** (default: `0.0.0.0`)
+  Override the tester address used by the CDA when running without Docker.
   Some systems may require using a specific interface address (e.g., `127.0.0.1` or a specific network interface IP) for proper ECU simulator connectivity.
-  
+
   Example:
   ```shell
   export CDA_INTEGRATION_TEST_TESTER_ADDRESS=127.0.0.1
@@ -155,17 +155,17 @@ Example test:
 async fn test_ecu_session_switching() {
     // Request exclusive access to prevent concurrent modifications
     let (runtime, _lock) = setup_integration_test(true).await.unwrap();
-    
+
     // runtime.config contains CDA configuration
     // runtime.ecu_sim contains ECU simulator connection info
-    
+
     // ... perform test operations ...
 }
 ```
 
 ### generate module dependency graph for workspace
-With the help of [cargo-depgraph](https://github.com/jplatte/cargo-depgraph) a simple diagram showing 
-the relations between the workspace crates can be generated. To create a png from the output of 
+With the help of [cargo-depgraph](https://github.com/jplatte/cargo-depgraph) a simple diagram showing
+the relations between the workspace crates can be generated. To create a png from the output of
 cargo-depgraph, [Graphviz](https://graphviz.org/) is required.
 
 ```shell
@@ -173,8 +173,8 @@ cargo depgraph --target-deps --dedup-transitive-deps --workspace-only | dot -Tpn
 ```
 
 ### build with tokio-tracing for tokio-console
-To analyze the runtime during execution you can build and run the cda with 
-[tokio-console](https://github.com/tokio-rs/console) support.  
+To analyze the runtime during execution you can build and run the cda with
+[tokio-console](https://github.com/tokio-rs/console) support.
 
 #### install tokio-console
 ```shell

@@ -21,7 +21,7 @@ from helper import (
 def add_deauthentication(dlr: DiagLayerRaw):
     request = Request(
         odx_id=derived_id(dlr.odx_id, "RQ.RQ_Authentication_Deauthenticate"),
-        short_name=f"RQ_Authentication_Deauthenticate",
+        short_name="RQ_Authentication_Deauthenticate",
         parameters=NamedItemList(
             [
                 sid_parameter_rq(0x29),
@@ -33,7 +33,7 @@ def add_deauthentication(dlr: DiagLayerRaw):
     response = Response(
         response_type=ResponseType.POSITIVE,
         odx_id=derived_id(dlr, "PR.PR_Authentication_Deauthenticate"),
-        short_name=f"PR_Authentication_Deauthenticate",
+        short_name="PR_Authentication_Deauthenticate",
         parameters=NamedItemList(
             [
                 sid_parameter_pr(0x29 + 0x40),
@@ -46,7 +46,7 @@ def add_deauthentication(dlr: DiagLayerRaw):
     dlr.diag_comms_raw.append(
         DiagService(
             odx_id=derived_id(dlr, "DC.Authentication_Deauthenticate"),
-            short_name=f"Authentication_Deauthenticate",
+            short_name="Authentication_Deauthenticate",
             functional_class_refs=[functional_class_ref(dlr, "Authentication")],
             request_ref=ref(request.odx_id),
             pos_response_refs=[ref(response.odx_id)],
@@ -57,7 +57,7 @@ def add_deauthentication(dlr: DiagLayerRaw):
 def add_configuration(dlr: DiagLayerRaw):
     request = Request(
         odx_id=derived_id(dlr.odx_id, "RQ.RQ_Authentication_Configuration"),
-        short_name=f"RQ_Authentication_Configuration",
+        short_name="RQ_Authentication_Configuration",
         parameters=NamedItemList(
             [
                 sid_parameter_rq(0x29),
@@ -70,7 +70,7 @@ def add_configuration(dlr: DiagLayerRaw):
     response = Response(
         response_type=ResponseType.POSITIVE,
         odx_id=derived_id(dlr, "PR.PR_Authentication_Configuration"),
-        short_name=f"PR_Authentication_Configuration",
+        short_name="PR_Authentication_Configuration",
         parameters=NamedItemList(
             [
                 sid_parameter_pr(0x29 + 0x40),
@@ -89,7 +89,7 @@ def add_configuration(dlr: DiagLayerRaw):
     dlr.diag_comms_raw.append(
         DiagService(
             odx_id=derived_id(dlr, "DC.Authentication_Configuration"),
-            short_name=f"Authentication_Configuration",
+            short_name="Authentication_Configuration",
             functional_class_refs=[functional_class_ref(dlr, "Authentication")],
             request_ref=ref(request),
             pos_response_refs=[ref(response)],

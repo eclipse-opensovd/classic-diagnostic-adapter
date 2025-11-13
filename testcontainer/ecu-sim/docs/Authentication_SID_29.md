@@ -30,7 +30,7 @@ Valid roles are:
 ## Authentication with Challenge Response (ACR)
 
 ### Unidirectional
- 
+
 1. RequestChallengeForAuthentication (29 05)
 2. VerifyProofOfOwnershipUnidirectional (29 06)
 

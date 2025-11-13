@@ -79,7 +79,8 @@ def add_session_service(
 
 
 def add_state_chart_session(dlr: DiagLayerRaw):
-    doc_frags = dlr.odx_id.doc_fragments
+    # todo use doc_frags
+    # doc_frags = dlr.odx_id.doc_fragments
 
     states = ["Default", "Programming", "Extended", "Custom"]
 

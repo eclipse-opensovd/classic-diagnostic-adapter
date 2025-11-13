@@ -112,4 +112,3 @@ In case a connection was to be established as part of a diagnostic request, and 
 === communication
 
 NOTE: #TODO#
-
