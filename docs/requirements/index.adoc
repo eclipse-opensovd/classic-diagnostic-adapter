@@ -32,4 +32,3 @@ include::06_communication.adoc[leveloffset=+1]
 
 // 7. Plugins
 include::07_plugins.adoc[leveloffset=+1]
-

@@ -87,4 +87,3 @@ The plugin architecture is designed to support additional plugin types:
 - Vendor-specific API extensions
 - Additional data formats and protocols
 - Integration with external systems
-

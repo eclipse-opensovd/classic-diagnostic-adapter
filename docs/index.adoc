@@ -12,4 +12,3 @@ include::requirements/index.adoc[leveloffset=1]
 
 // 2. Architecture
 include::architecture/index.adoc[leveloffset=1]
-

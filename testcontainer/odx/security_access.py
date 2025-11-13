@@ -37,7 +37,8 @@ from helper import (
 
 
 def add_state_chart_security_access(dlr: DiagLayerRaw):
-    doc_frags = dlr.odx_id.doc_fragments
+    # todo use doc_frags
+    # doc_frags = dlr.odx_id.doc_fragments
 
     states = ["Locked", "Level_3", "Level_5", "Level_7"]
 
@@ -187,7 +188,7 @@ def add_send_key_service(
 
 def add_security_access_services(dlc: DiagLayerContainer, dlr: DiagLayerRaw):
     end_of_pdu_array_dop = DataObjectProperty(
-        odx_id=derived_id(dlr, f"DOP.SecurityAccess_EndOfPduByteArray"),
+        odx_id=derived_id(dlr, "DOP.SecurityAccess_EndOfPduByteArray"),
         short_name="SecurityAccess_EndOfPduByteArray",
         compu_method=CompuMethod(
             category=CompuCategory.IDENTICAL,

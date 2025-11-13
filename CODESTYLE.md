@@ -19,14 +19,14 @@ This repository follows most of the defaults in rustfmt, with some opinionated u
   - Error on line overflow and error if rustfmt is unable to format a section. This prevents rustfmt from silently skipping the rest of the file.
   - Enable formatting of strings.
 
-As we do not want to require nightly rust for the entire repository, these settings are not yet included in `rustfmt.toml` (but will be once stabilized).  
-Instead, run this command to apply the correct formatting:  
+As we do not want to require nightly rust for the entire repository, these settings are not yet included in `rustfmt.toml` (but will be once stabilized).
+Instead, run this command to apply the correct formatting:
 ```sh
 cargo +nightly fmt -- --check --config error_on_unformatted=true,error_on_line_overflow=true,format_strings=true,group_imports=StdExternalCrate,imports_granularity=Crate
 ```
 
-It is recommended to configure your IDE to use nightly rustfmt with these settings as well.  
-Example for VS Code:  
+It is recommended to configure your IDE to use nightly rustfmt with these settings as well.
+Example for VS Code:
 ```json
 "rust-analyzer.rustfmt.overrideCommand": [
     "rustfmt",

@@ -58,4 +58,3 @@ Implementation of UDS communication, with handling of NRCs, tester presents (eit
 === DoIP
 
 Implementation of DoIP communication with handling of timeouts.
-

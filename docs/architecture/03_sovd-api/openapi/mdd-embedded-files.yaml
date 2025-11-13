@@ -28,7 +28,6 @@ components:
           type: string
           description: "Original path of the file, as named by odx-converter"
 
-
     MddEmbeddedFilesList:
       type: object
       properties:
@@ -69,8 +68,7 @@ paths:
           description: "Successful request"
           content:
             "*":
-              description: "File contents with the mimetype that matches the content, as determined by odx-converter. 
-                            application/octet-stream of nothing is defined)"
+              description: "File contents with the mimetype that matches the content, as determined by odx-converter. application/octet-stream of nothing is defined)"
         "404":
           description: "Embedded file not found"
         default:

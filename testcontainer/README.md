@@ -18,17 +18,17 @@ and for some there are open issues to make them work.
    cd testcontainer/odx
    ./generate_docker.sh
    cd ..
-   
+
    # Build ECU simulator
    cd ecu-sim
    ./gradlew build shadowJar
    cd ..
-   
+
    # Convert PDX to MDD (if you have the converter)
    cd odx
    java -jar <path-to-odx-converter>/converter/build/libs/converter-all.jar FLXC1000.pdx
    cd ..
-   
+
    # Build and start all services
    docker compose build
    docker compose up -d
@@ -139,7 +139,7 @@ curl -s -X PUT -H "Authorization: Bearer $ACCESS_TOKEN" -H "Content-Type: applic
 curl -s -X PUT -H "Content-Type: application/json" "http://localhost:8181/FLXC1000/state" --data '{"variant": "BOOT"}'
 
 # force variant detection
-curl -s -X PUT -H "Authorization: Bearer $ACCESS_TOKEN" -H "Content-Type: application/json" "http://localhost:20002/vehicle/v15/components/FLXC1000" 
+curl -s -X PUT -H "Authorization: Bearer $ACCESS_TOKEN" -H "Content-Type: application/json" "http://localhost:20002/vehicle/v15/components/FLXC1000"
 
 # security access status
 curl -s -X GET -H "Authorization: Bearer $ACCESS_TOKEN" "http://localhost:20002/vehicle/v15/components/FLXC1000/modes/security" | jq .

@@ -31,7 +31,7 @@ def add_requestdownload_service(
     data_format_identifier_dop = find_dop_by_shortname(dlr, "IDENTICAL_UINT_8")
     memory_address_dop = DataObjectProperty(
         odx_id=derived_id(dlr, "DOP.MemoryAddressArray"),
-        short_name=f"MemoryAddressArray",
+        short_name="MemoryAddressArray",
         compu_method=CompuMethod(
             category=CompuCategory.IDENTICAL,
             physical_type=DataType.A_BYTEFIELD,
@@ -46,7 +46,7 @@ def add_requestdownload_service(
     dlr.diag_data_dictionary_spec.data_object_props.append(memory_address_dop)
     memory_size_dop = DataObjectProperty(
         odx_id=derived_id(dlr, "DOP.MemorySizeArray"),
-        short_name=f"MemorySizeArray",
+        short_name="MemorySizeArray",
         compu_method=CompuMethod(
             category=CompuCategory.IDENTICAL,
             physical_type=DataType.A_BYTEFIELD,
@@ -62,7 +62,7 @@ def add_requestdownload_service(
 
     requestdownload_request = Request(
         odx_id=derived_id(dlr, "RQ.RQ_RequestDownload"),
-        short_name=f"RQ_RequestDownload",
+        short_name="RQ_RequestDownload",
         parameters=NamedItemList(
             [
                 sid_parameter_rq(0x34),
@@ -98,7 +98,7 @@ def add_requestdownload_service(
     max_number_of_blocklength_dop = find_dop_by_shortname(dlr, "IDENTICAL_UINT_32")
     requestdownload_response = Response(
         odx_id=derived_id(dlr, "PR.PR_RequestDownload"),
-        short_name=f"PR_RequestDownload",
+        short_name="PR_RequestDownload",
         response_type=ResponseType.POSITIVE,
         parameters=NamedItemList(
             [
