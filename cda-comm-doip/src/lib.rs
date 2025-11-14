@@ -206,9 +206,15 @@ impl<T: EcuAddressProvider + DoipComParamProvider> DoipDiagGateway<T> {
         Ok(gateway)
     }
 
-    async fn get_doip_connection(&self, conn_idx: usize) -> Arc<DoipConnection> {
+    async fn get_doip_connection(
+        &self,
+        conn_idx: usize,
+    ) -> Result<Arc<DoipConnection>, DiagServiceError> {
         let lock = self.doip_connections.read().await;
-        Arc::clone(&lock[conn_idx])
+        let conn = lock
+            .get(conn_idx)
+            .ok_or(DiagServiceError::ConnectionClosed)?;
+        Ok(Arc::clone(conn))
     }
 
     async fn get_ecu_mtx(
@@ -272,7 +278,7 @@ impl<T: EcuAddressProvider + DoipComParamProvider> EcuGateway for DoipDiagGatewa
             return Err(DiagServiceError::ConnectionClosed);
         }
 
-        let doip_conn = self.get_doip_connection(conn_idx).await;
+        let doip_conn = self.get_doip_connection(conn_idx).await?;
         let ecu_mtx = self
             .get_ecu_mtx(&doip_conn, &message, &transmission_params)
             .await?;
@@ -453,7 +459,7 @@ impl<T: EcuAddressProvider + DoipComParamProvider> EcuGateway for DoipDiagGatewa
             .await
             .get(&ecu_lock.logical_gateway_address())
             .ok_or_else(|| DiagServiceError::EcuOffline(ecu_name.to_owned()))?;
-        let doip_conn = self.get_doip_connection(conn_idx).await;
+        let doip_conn = self.get_doip_connection(conn_idx).await?;
         doip_conn
             .ecus
             .get(&ecu_lock.logical_address())

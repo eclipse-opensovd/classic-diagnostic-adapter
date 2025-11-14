@@ -217,7 +217,11 @@ fn params_to_schema(
             s
         } else {
             schema = Some(schemars::json_schema!(true));
-            schema.as_mut().unwrap()
+            if let Some(ref mut s) = schema {
+                s
+            } else {
+                unreachable!("schema was just set to Some")
+            }
         };
 
         let variant = match dop.variant() {

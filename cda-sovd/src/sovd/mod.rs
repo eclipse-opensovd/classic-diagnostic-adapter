@@ -64,6 +64,12 @@ trait IntoSovdWithSchema {
     fn into_sovd_with_schema(self, include_schema: bool) -> Result<Self::SovdType, ApiError>;
 }
 
+#[derive(Debug, thiserror::Error)]
+enum SovdError {
+    #[error("Failed to create route: {0}")]
+    RouteError(String),
+}
+
 pub(crate) struct WebserverEcuState<R: DiagServiceResponse, T: UdsEcu + Clone, U: FileManager> {
     ecu_name: String,
     uds: T,
@@ -215,9 +221,14 @@ pub async fn route<
     );
 
     for ecu_name in ecu_names.drain(0..) {
-        let (ecu_path, nested) =
-            ecu_route::<R, T, U>(&ecu_name, uds, &state, &flash_data, &mut file_manager);
-        router = router.nest_api_service(&ecu_path, nested);
+        match ecu_route::<R, T, U>(&ecu_name, uds, &state, &flash_data, &mut file_manager) {
+            Ok((ecu_path, nested)) => {
+                router = router.nest_api_service(&ecu_path, nested);
+            }
+            Err(e) => {
+                tracing::error!(error = %e, "Failed to create route for ECU '{ecu_name}'");
+            }
+        }
     }
 
     vehicle_route::<T, S>(state, router)
@@ -309,7 +320,7 @@ fn ecu_route<
     state: &WebserverState<T>,
     flash_data: &Arc<RwLock<FileList>>,
     file_manager: &mut HashMap<String, U>,
-) -> (String, Router) {
+) -> Result<(String, Router), SovdError> {
     let ecu_lower = ecu_name.to_lowercase();
     let ecu_state = WebserverEcuState {
         ecu_name: ecu_lower.clone(),
@@ -317,7 +328,11 @@ fn ecu_route<
         locks: Arc::<Locks>::clone(&state.locks),
         comparam_executions: Arc::new(RwLock::new(IndexMap::new())),
         flash_data: Arc::clone(flash_data),
-        mdd_embedded_files: Arc::new(file_manager.remove(&ecu_lower).unwrap()),
+        mdd_embedded_files: Arc::new(file_manager.remove(&ecu_lower).ok_or_else(|| {
+            SovdError::RouteError(format!(
+                "FileManager for ECU '{ecu_name}' not found in provided FileManager map"
+            ))
+        })?),
         _phantom: std::marker::PhantomData::<R>,
     };
     let ecu_path = format!("/vehicle/v15/components/{ecu_lower}");
@@ -484,7 +499,7 @@ fn ecu_route<
         .with_state(ecu_state)
         .with_path_items(|op| op.tag(ecu_name));
 
-    (ecu_path, router)
+    Ok((ecu_path, router))
 }
 
 fn get_payload_data<'a, T>(

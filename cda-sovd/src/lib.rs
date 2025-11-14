@@ -153,7 +153,13 @@ fn rewrite_request_uri<B>(mut req: Request<B>) -> Request<B> {
     .decode_utf8()
     .unwrap_or_else(|_| uri.to_string().into());
 
-    let new_uri = decoded.to_lowercase().parse().unwrap();
+    let new_uri = match decoded.to_lowercase().parse() {
+        Ok(uri) => uri,
+        Err(e) => {
+            tracing::warn!(error = %e, "Failed to parse URI, using original");
+            uri.clone()
+        }
+    };
     *req.uri_mut() = new_uri;
     req
 }

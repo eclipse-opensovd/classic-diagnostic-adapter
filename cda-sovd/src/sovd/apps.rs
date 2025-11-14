@@ -91,6 +91,7 @@ pub(crate) mod sovd2uds {
                 // Keeping the regex as a static Lazy variable to avoid recompilation
                 // the expression is checked by clippy:
                 // https://rust-lang.github.io/rust-clippy/master/#invalid_regex
+                #[allow(clippy::unwrap_used)]
                 static RE: LazyLock<Regex> =
                     LazyLock::new(|| Regex::new(r"[^a-zA-Z0-9_]").unwrap());
                 // replace all non-alphanumeric characters, except underscore, with underscores

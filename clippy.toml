@@ -4,3 +4,6 @@
 
 ## set line threshold a bit higher than the default 100
 too-many-lines-threshold = 130
+
+## Unwrap is disallowed but accept it in test code
+allow-unwrap-in-tests = true

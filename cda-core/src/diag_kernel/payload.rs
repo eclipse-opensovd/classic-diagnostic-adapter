@@ -53,12 +53,15 @@ impl<'a> Payload<'a> {
         self.last_read_byte_pos
     }
 
-    pub(in crate::diag_kernel) fn data(&self) -> &[u8] {
+    pub(in crate::diag_kernel) fn data(&self) -> Result<&[u8], DiagServiceError> {
         if let Some(&(start, end)) = self.slices.back() {
-            &self.data[start..end]
+            self.data.get(start..end)
         } else {
-            &self.data[self.pos()..]
+            self.data.get(self.pos()..)
         }
+        .ok_or(DiagServiceError::BadPayload(
+            "Slice out of bounds".to_owned(),
+        ))
     }
 
     pub(in crate::diag_kernel) fn pos(&self) -> usize {
@@ -150,12 +153,12 @@ mod tests {
         ];
         let mut payload = super::Payload::new(&raw_payload);
         assert_eq!(payload.len(), 20);
-        assert_eq!(payload.data(), &raw_payload);
+        assert_eq!(payload.data().unwrap(), &raw_payload);
 
         assert!(payload.push_slice(0, 10).is_ok());
-        assert_eq!(payload.data(), &raw_payload[0..10]);
+        assert_eq!(payload.data().unwrap(), raw_payload.get(0..10).unwrap());
         assert!(payload.push_slice(0, 10).is_ok()); // relative to previous slice (0..10)
-        assert_eq!(payload.data(), &raw_payload[0..10]);
+        assert_eq!(payload.data().unwrap(), raw_payload.get(0..10).unwrap());
         assert!(payload.push_slice(0, 15).is_err()); // out of bounds of current slice
 
         assert!(payload.pop_slice().is_ok());

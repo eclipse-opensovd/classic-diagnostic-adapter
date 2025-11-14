@@ -97,7 +97,7 @@ impl DiagServiceResponse for DiagServiceResponseStruct {
             .get("NRC")
             .and_then(|container| match container {
                 DiagDataTypeContainer::RawContainer(nrc) => {
-                    let raw = u8::from_be(nrc.data[0]);
+                    let raw = u8::from_be(*nrc.data.first()?);
                     let message = match operations::uds_data_to_serializable(
                         nrc.data_type,
                         nrc.compu_method.as_ref(),
@@ -116,7 +116,9 @@ impl DiagServiceResponse for DiagServiceResponseStruct {
         let sid = mapped_data
             .get("SIDRQ_NR")
             .and_then(|container| match container {
-                DiagDataTypeContainer::RawContainer(sid) => Some(u8::from_be(sid.data[0])),
+                DiagDataTypeContainer::RawContainer(sid) => {
+                    sid.data.first().map(|&b| u8::from_be(b))
+                }
                 _ => None,
             });
 

@@ -1046,11 +1046,11 @@ async fn post_handler<T: UdsEcu + Clone>(
         }
     };
 
-    if lock_opt.is_some() {
+    if let Some(lock_opt_val) = lock_opt.as_ref() {
         // if the lock is already set, try to update it, update_lock is validating ownership
         match update_lock(
             // needs to be cloned, because we can either borrow lock mutably or non mutably
-            &lock_opt.as_ref().unwrap().sovd.id.clone(),
+            &lock_opt_val.sovd.id.clone(),
             claims,
             lock_opt,
             expiration,
@@ -1067,8 +1067,9 @@ async fn post_handler<T: UdsEcu + Clone>(
     } else {
         match create_lock(uds, claims, expiration, lock, entity_name).await {
             Ok(new_lock) => {
+                let response = (StatusCode::CREATED, Json(&new_lock.sovd)).into_response();
                 *lock_opt = Some(new_lock);
-                (StatusCode::CREATED, Json(&lock_opt.as_ref().unwrap().sovd)).into_response()
+                response
             }
             Err(e) => ErrorWrapper {
                 error: e,
