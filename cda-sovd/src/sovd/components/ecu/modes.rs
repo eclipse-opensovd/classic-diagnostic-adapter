@@ -365,7 +365,9 @@ pub(crate) mod security {
 
             if parts.len() > 2 {
                 let last_part = (*parts.last().unwrap()).to_string();
-                let remaining = parts[..parts.len() - 1].join("_");
+                let remaining = parts
+                    .get(..parts.len() - 1)
+                    .map_or_else(|| input.to_string(), |slice| slice.join("_"));
                 (remaining, Some(last_part))
             } else {
                 (input.to_string(), None)

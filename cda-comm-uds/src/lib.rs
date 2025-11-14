@@ -386,7 +386,18 @@ impl<S: EcuGateway, R: DiagServiceResponse, T: EcuManager<Response = R>> UdsMana
 
             let bytes_to_read = block_size.min(remaining_as_usize);
 
-            if let Err(e) = reader.read_exact(&mut buffer[..bytes_to_read]).await {
+            let Some(buffer_slice) = buffer.get_mut(..bytes_to_read) else {
+                set_transfer_aborted(
+                    ecu_name,
+                    &self.data_transfers,
+                    "Buffer slice out of bounds".to_owned(),
+                    &status_sender,
+                )
+                .await;
+                break;
+            };
+
+            if let Err(e) = reader.read_exact(buffer_slice).await {
                 set_transfer_aborted(
                     ecu_name,
                     &self.data_transfers,
@@ -399,7 +410,18 @@ impl<S: EcuGateway, R: DiagServiceResponse, T: EcuManager<Response = R>> UdsMana
 
             let mut buf = Vec::with_capacity(/*block sequence counter*/ 1 + bytes_to_read);
             buf.push(next_block_sequence_counter);
-            buf.extend_from_slice(&buffer[..bytes_to_read]);
+
+            let Some(buffer_data) = buffer.get(..bytes_to_read) else {
+                set_transfer_aborted(
+                    ecu_name,
+                    &self.data_transfers,
+                    "Buffer slice out of bounds".to_owned(),
+                    &status_sender,
+                )
+                .await;
+                break;
+            };
+            buf.extend_from_slice(buffer_data);
 
             let uds_payload = UdsPayloadData::Raw(buf);
             let result = self

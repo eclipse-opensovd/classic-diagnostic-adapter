@@ -15,15 +15,13 @@ use crate::DiagServiceError;
 pub mod tracing {
     #[must_use]
     pub fn print_hex(data: &[u8], max_size: usize) -> String {
-        if data.len() > max_size {
-            &data[..max_size]
-        } else {
-            data
-        }
-        .iter()
-        .map(|b| format!("{b:#04X}"))
-        .collect::<Vec<_>>()
-        .join(",")
+        let end = data.len().min(max_size);
+        data.get(..end)
+            .unwrap_or(data)
+            .iter()
+            .map(|b| format!("{b:#04X}"))
+            .collect::<Vec<_>>()
+            .join(",")
     }
 }
 
@@ -179,15 +177,51 @@ pub fn extract_bits(
         let src_byte_index = data.len() - (src_bit_index / 8) - 1;
         let src_bit_offset = src_bit_index % 8;
 
-        let bit_value = (data[src_byte_index] >> src_bit_offset) & 1;
+        let bit_value = data
+            .get(src_byte_index)
+            .ok_or_else(|| {
+                DiagServiceError::BadPayload("Source byte index out of bounds".to_owned())
+            })
+            .map(|byte| (byte >> src_bit_offset) & 1)?;
 
         let dst_byte_index = result_byte_count - (i / 8) - 1;
         let dst_bit_offset = i % 8;
 
-        result_bytes[dst_byte_index] |= bit_value << dst_bit_offset;
+        set_bit_checked(
+            &mut result_bytes,
+            dst_byte_index,
+            dst_bit_offset,
+            bit_value,
+            false,
+        )?;
     }
 
     Ok(result_bytes)
+}
+
+/// Set a bit in the result byte slice at the given byte index
+/// and bit offset and optionally clear it first.
+/// # Errors
+/// Returns `DiagServiceError::BadPayload` if the destination byte index is out of bounds.
+#[inline]
+pub fn set_bit_checked(
+    result_bytes: &mut [u8],
+    dst_byte_index: usize,
+    dst_bit_offset: usize,
+    bit_value: u8,
+    clear_bit: bool,
+) -> Result<(), DiagServiceError> {
+    if let Some(byte) = result_bytes.get_mut(dst_byte_index) {
+        if clear_bit {
+            *byte &= !(1 << dst_bit_offset);
+        }
+        *byte |= (bit_value & 1) << dst_bit_offset;
+        Ok(())
+    } else {
+        Err(DiagServiceError::BadPayload(
+            "Destination byte index out of bounds".to_owned(),
+        ))
+    }
 }
 
 /// Fast ASCII-only case-insensitive prefix check without allocations.

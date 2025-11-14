@@ -374,7 +374,7 @@ impl<S: SecurityPlugin> cda_interfaces::EcuManager for EcuManager<S> {
             .map(datatypes::DiagService)
             .find_map(|service| {
                 let service_id = service.request_id()?;
-                if rawdata[0] == service_id {
+                if rawdata.first()? == &service_id {
                     Some(service)
                 } else {
                     None
@@ -477,7 +477,9 @@ impl<S: SecurityPlugin> cda_interfaces::EcuManager for EcuManager<S> {
                     .map(datatypes::Parameter::byte_position)
                     .min()
                     .unwrap_or(0);
-                &uds_payload.data()[base_offset as usize..]
+                uds_payload.data()?.get(base_offset as usize..).ok_or(
+                    DiagServiceError::BadPayload("Payload offset out of bounds".to_owned()),
+                )?
             }
             .to_vec();
 
@@ -1052,9 +1054,11 @@ impl<S: SecurityPlugin> cda_interfaces::EcuManager for EcuManager<S> {
                 };
 
                 // collect the coded const bytes of the parameter expressing the ID
-                let id_param_bytes =
-                    &sub_function_id.to_be_bytes()[(4 - (sub_func_id_bit_len as usize / 8))..];
-
+                let bytes = sub_function_id.to_be_bytes();
+                let Some(id_param_bytes) = bytes.get((4 - (sub_func_id_bit_len as usize / 8))..)
+                else {
+                    return;
+                };
                 // compile the first bytes of the raw uds payload
                 let mut service_abstract_entry = Vec::with_capacity(1 + id_param_bytes.len());
                 service_abstract_entry.push(service_id);
@@ -1816,7 +1820,7 @@ impl<S: SecurityPlugin> EcuManager<S> {
         )?;
 
         let (param_data, bit_len) = coded_type.decode(
-            uds_payload.data(),
+            uds_payload.data()?,
             param.byte_position() as usize,
             param.bit_position() as usize,
         )?;
@@ -1973,7 +1977,9 @@ impl<S: SecurityPlugin> EcuManager<S> {
         let expected = operations::string_to_vec_u8(diag_type.base_datatype(), const_value)?
             .into_iter()
             .collect::<Vec<_>>();
-        let expected = &expected[expected.len() - value.data.len()..];
+        let expected = expected.get(expected.len() - value.data.len()..).ok_or(
+            DiagServiceError::BadPayload("Expected value slice out of bounds".to_owned()),
+        )?;
         if value.data != expected {
             return Err(DiagServiceError::BadPayload(format!(
                 "{}: Expected {:?}, got {:?}",
@@ -2464,7 +2470,7 @@ impl<S: SecurityPlugin> EcuManager<S> {
 
         let (num_items_data, _bit_len) = num_items_diag_type.decode(
             uds_payload
-                .data()
+                .data()?
                 .get(param.byte_position() as usize..)
                 .ok_or(DiagServiceError::BadPayload(
                     "Not enough bytes to get DynamicLengthField item count".to_owned(),
@@ -2601,7 +2607,7 @@ impl<S: SecurityPlugin> EcuManager<S> {
         let coded_type: datatypes::DiagCodedType = dtc_dop.diag_coded_type()?;
 
         let (dtc_value, _size) = coded_type.decode(
-            uds_payload.data(),
+            uds_payload.data()?,
             param.byte_position() as usize,
             param.bit_position() as usize,
         )?;
@@ -2776,7 +2782,7 @@ impl<S: SecurityPlugin> EcuManager<S> {
 
                 let (switch_key_data, bit_len) = switch_key_diag_type.decode(
                     uds_payload
-                        .data()
+                        .data()?
                         .get(switch_key.byte_position() as usize..)
                         .ok_or(DiagServiceError::BadPayload(
                             "Not enough bytes to get switch key".to_owned(),
@@ -4546,8 +4552,16 @@ mod tests {
         // The bytes set below are not modified by the create_uds_payload function,
         // because they do not belong to the mux param.
         // Setting them manually here, so we can check the full payload.
-        service_payload.data[1] = data[1];
-        service_payload.data[4] = data[4];
+        if let Some(byte) = service_payload.data.get_mut(1)
+            && let Some(&val) = data.get(1)
+        {
+            *byte = val;
+        }
+        if let Some(byte) = service_payload.data.get_mut(4)
+            && let Some(&val) = data.get(4)
+        {
+            *byte = val;
+        }
 
         // Test from json to payload
         assert_eq!(*service_payload.data, *data);
@@ -4583,20 +4597,23 @@ mod tests {
         );
 
         // Check sid
-        assert_eq!(service_payload.data[0], sid);
+        assert_eq!(service_payload.data.first().copied(), Some(sid));
 
-        let payload = &service_payload.data[struct_byte_pos as usize..];
+        let payload = service_payload
+            .data
+            .get(struct_byte_pos as usize..)
+            .unwrap();
 
         // Check param1
-        assert_eq!(payload[0], 0x12);
-        assert_eq!(payload[1], 0x34);
+        assert_eq!(payload.first().copied(), Some(0x12));
+        assert_eq!(payload.get(1).copied(), Some(0x34));
 
         // Check param2
         let float_bytes = 42.42_f32.to_be_bytes();
-        assert_eq!(&payload[2..6], &float_bytes);
+        assert_eq!(payload.get(2..6), Some(&float_bytes[..]));
 
         // Check param3
-        assert_eq!(&payload[6..10], b"test");
+        assert_eq!(payload.get(6..10), Some(&b"test"[..]));
     }
 
     #[tokio::test]
@@ -4675,15 +4692,21 @@ mod tests {
                 .unwrap();
 
             // Non-checked bytes do not belong to the mux param, so they are not set
-            assert_eq!(service_payload.data[0], sid);
-            assert_eq!(service_payload.data[1], 0);
+            assert_eq!(service_payload.data.first().copied(), Some(sid));
+            assert_eq!(service_payload.data.get(1).copied(), Some(0));
 
             // Check switch key
-            assert_eq!(service_payload.data[2], ((select_value >> 8) & 0xFF) as u8);
-            assert_eq!(service_payload.data[3], (select_value & 0xFF) as u8);
+            assert_eq!(
+                service_payload.data.get(2).copied(),
+                Some(((select_value >> 8) & 0xFF) as u8)
+            );
+            assert_eq!(
+                service_payload.data.get(3).copied(),
+                Some((select_value & 0xFF) as u8)
+            );
 
             // Check default_param
-            assert_eq!(service_payload.data[4], 0x42);
+            assert_eq!(service_payload.data.get(4).copied(), Some(0x42));
         }
 
         let (ecu_manager, service, sid) = create_ecu_manager_with_mux_service_and_default_case();
