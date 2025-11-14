@@ -92,7 +92,9 @@ impl IntoSovd for ComponentConfigurationsInfo {
                         .iter()
                         .fold(String::new(), |mut acc, byte| {
                             use std::fmt::Write;
-                            write!(&mut acc, "{byte:02X}").unwrap();
+                            if let Err(e) = write!(&mut acc, "{byte:02X}") {
+                                tracing::error!(error = ?e, "Error writing service abstract");
+                            }
                             acc
                         })
                 })

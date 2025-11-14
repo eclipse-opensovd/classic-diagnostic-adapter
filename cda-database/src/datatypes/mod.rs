@@ -422,17 +422,21 @@ impl DiagnosticDatabase {
         ecu_data_blob: Vec<u8>,
         flatbuf_config: FlatbBufConfig,
     ) -> Result<Self, DiagServiceError> {
+        let ecu_data = EcuDataTryBuilder {
+            blob: ecu_data_blob,
+            data_builder: |ecu_data_blob| {
+                read_ecudata(ecu_data_blob, &flatbuf_config).map_err(|e| {
+                    DiagServiceError::InvalidDatabase(format!(
+                        "Failed to read ECU data from blob: {e}"
+                    ))
+                })
+            },
+        }
+        .try_build()?;
+
         Ok(DiagnosticDatabase {
             ecu_database_path,
-            ecu_data: Some(
-                EcuDataBuilder {
-                    blob: ecu_data_blob,
-                    data_builder: |ecu_data_blob| {
-                        read_ecudata(ecu_data_blob, &flatbuf_config).unwrap()
-                    },
-                }
-                .build(),
-            ),
+            ecu_data: Some(ecu_data),
             flatbuf_config,
         })
     }

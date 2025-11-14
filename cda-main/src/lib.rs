@@ -173,8 +173,13 @@ async fn load_database<S: SecurityPlugin>(
     flat_buf_settings: FlatbBufConfig,
 ) {
     for (mddfile, _) in paths {
+        let Some(mdd_path) = mddfile.to_str().map(ToOwned::to_owned) else {
+            tracing::error!(mdd_file = %mddfile.display(), "Failed to convert MDD file path to string");
+            continue;
+        };
+
         match cda_database::load_proto_data(
-            mddfile.to_str().unwrap(),
+            &mdd_path,
             &[
                 ProtoLoadConfig {
                     type_: ChunkType::DiagnosticDescription,
@@ -214,7 +219,7 @@ async fn load_database<S: SecurityPlugin>(
                 };
 
                 let diag_data_base = match cda_database::datatypes::DiagnosticDatabase::new(
-                    mddfile.to_str().unwrap().to_owned(),
+                    mdd_path.clone(),
                     ecu_payload,
                     flat_buf_settings.clone(),
                 ) {
@@ -263,10 +268,10 @@ async fn load_database<S: SecurityPlugin>(
                     )
                     .collect();
 
-                file_managers.write().await.insert(
-                    ecu_name,
-                    FileManager::new(mddfile.to_str().unwrap().to_owned(), files),
-                );
+                file_managers
+                    .write()
+                    .await
+                    .insert(ecu_name, FileManager::new(mdd_path, files));
             }
             Err(e) => {
                 tracing::error!(mdd_file = %mddfile.display(), error = %e, "Failed to load ecu data from file");
