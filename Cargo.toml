@@ -110,6 +110,7 @@ similar_names = "allow"
 
 # additional lints
 clone_on_ref_ptr = "warn"
+indexing_slicing = "deny"
 
 [profile.release.package."*"]
 opt-level = 3

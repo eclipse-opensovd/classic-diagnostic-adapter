@@ -89,7 +89,21 @@ fn compu_lookup(
                 {
                     let coeffs = scale.rational_coefficients.as_ref().unwrap();
                     let lookup_val: f64 = lookup.try_into()?;
-                    let val = coeffs.numerator[0] + lookup_val * coeffs.numerator[1];
+                    let num0 =
+                        *coeffs
+                            .numerator
+                            .first()
+                            .ok_or(DiagServiceError::InvalidDatabase(
+                                "Missing numerator[0]".to_owned(),
+                            ))?;
+                    let num1 =
+                        *coeffs
+                            .numerator
+                            .get(1)
+                            .ok_or(DiagServiceError::InvalidDatabase(
+                                "Missing numerator[1]".to_owned(),
+                            ))?;
+                    let val = num0 + lookup_val * num1;
                     DiagDataValue::from_number(&val, diag_type)
                 } else {
                     Ok(lookup)
@@ -118,7 +132,20 @@ fn compu_lookup(
                 }
                 let coeffs = scale.rational_coefficients.as_ref().unwrap();
                 let lookup_val: f64 = lookup.try_into()?;
-                let val = lookup_val * coeffs.numerator[0] / coeffs.denominator[0];
+                let num0 = *coeffs
+                    .numerator
+                    .first()
+                    .ok_or(DiagServiceError::InvalidDatabase(
+                        "Missing numerator[0]".to_owned(),
+                    ))?;
+                let denom0 =
+                    *coeffs
+                        .denominator
+                        .first()
+                        .ok_or(DiagServiceError::InvalidDatabase(
+                            "Missing denominator[0]".to_owned(),
+                        ))?;
+                let val = lookup_val * num0 / denom0;
                 DiagDataValue::from_number(&val, diag_type)
             }
             datatypes::CompuCategory::TextTable => {
@@ -310,7 +337,7 @@ pub(in crate::diag_kernel) fn extract_diag_data_container(
     compu_method: Option<datatypes::CompuMethod>,
 ) -> Result<DiagDataTypeContainer, DiagServiceError> {
     let byte_pos = param.byte_position() as usize;
-    let uds_payload = payload.data();
+    let uds_payload = payload.data()?;
     let (data, bit_len) = diag_type.decode(uds_payload, byte_pos, param.bit_position() as usize)?;
 
     let data_type = diag_type.base_datatype();
@@ -371,19 +398,25 @@ pub(in crate::diag_kernel) fn string_to_vec_u8(
                 match data_type {
                     DataType::ByteField => value
                         .parse::<u64>()
-                        .map(|v| {
+                        .map_err(|_| {
+                            DiagServiceError::ParameterConversionError(
+                                "Invalid value type for ByteField, failed to parse to u64"
+                                    .to_owned(),
+                            )
+                        })
+                        .and_then(|v| {
                             let bytes = v.to_be_bytes();
                             // Find the first non-zero byte, or keep at least one byte
                             let start = bytes
                                 .iter()
                                 .position(|&b| b != 0)
                                 .unwrap_or(bytes.len() - 1);
-                            bytes[start..].to_vec()
-                        })
-                        .map_err(|_| {
-                            DiagServiceError::ParameterConversionError(
-                                "Invalid value type for ByteField".to_owned(),
-                            )
+                            bytes
+                                .get(start..)
+                                .ok_or(DiagServiceError::ParameterConversionError(
+                                    "Byte slice out of bounds".to_owned(),
+                                ))
+                                .map(<[u8]>::to_vec)
                         }),
                     DataType::Int32 => value
                         .parse::<i32>()
