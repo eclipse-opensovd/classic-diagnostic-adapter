@@ -784,7 +784,11 @@ fn apply_condensed_mask_unpacking(
 /// 0000: Copied the input bits at 0 and 1 into the 1s of the lower nibble
 /// 0101: Copied the input bits at 2 and 3 into the 1s of the upper nibble
 /// For more details see chapter 7.3.6.4 a) 5) in ISO 22901-1:2008.
-fn apply_condensed_mask_packing(data: &[u8], mask: &[u8], bit_pos: usize) -> (Vec<u8>, usize) {
+fn apply_condensed_mask_packing(
+    data: &[u8],
+    mask: &[u8],
+    bit_pos: usize,
+) -> Result<(Vec<u8>, usize), DiagServiceError> {
     let mut result = mask.to_vec();
     let mut data_bit_idx = 0;
     let mut mask_bit_idx = 0;
@@ -808,12 +812,12 @@ fn apply_condensed_mask_packing(data: &[u8], mask: &[u8], bit_pos: usize) -> (Ve
                 .get(data_byte_idx)
                 .map_or(0, |&byte| (byte >> data_bit_pos) & 1);
 
-            set_bit_checked(&mut result, mask_byte_idx, mask_bit_pos, data_bit, true).unwrap();
+            set_bit_checked(&mut result, mask_byte_idx, mask_bit_pos, data_bit, true)?;
             data_bit_idx += 1;
         }
     }
 
-    (result, mask_bit_idx)
+    Ok((result, mask_bit_idx))
 }
 
 #[derive(Clone)]
@@ -905,7 +909,7 @@ fn pack_data(
 
     if let Some(mask) = &mask {
         if mask.condensed {
-            Ok(apply_condensed_mask_packing(data, &mask.data, bit_pos))
+            apply_condensed_mask_packing(data, &mask.data, bit_pos)
         } else {
             let result_byte_len = bit_len.div_ceil(8);
             let mut result = vec![0u8; result_byte_len];
@@ -2653,7 +2657,7 @@ mod tests {
     fn test_apply_condensed_mask_packing_basic() {
         let input = [0b_0000_1100];
         let mask = [0b_0101_0101];
-        let (result, bit_len) = apply_condensed_mask_packing(&input, &mask, 0);
+        let (result, bit_len) = apply_condensed_mask_packing(&input, &mask, 0).unwrap();
         assert_eq!(result, vec![0b_0101_0000]);
         assert_eq!(bit_len, 8);
     }

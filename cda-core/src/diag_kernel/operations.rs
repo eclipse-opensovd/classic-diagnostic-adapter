@@ -72,22 +72,18 @@ fn compu_lookup(
         Some(scale) => match category {
             datatypes::CompuCategory::Identical => unreachable!("Already handled"),
             datatypes::CompuCategory::Linear => {
+                let rational_coefficients = scale.rational_coefficients.as_ref().ok_or(
+                    DiagServiceError::InvalidDatabase("Missing rational coefficients".to_owned()),
+                )?;
                 if scale.rational_coefficients.is_some()
-                    && scale
-                        .rational_coefficients
-                        .as_ref()
-                        .unwrap()
-                        .numerator
-                        .len()
-                        == 2
-                    && scale
-                        .rational_coefficients
-                        .as_ref()
-                        .unwrap()
-                        .denominator
-                        .is_empty()
+                    && rational_coefficients.numerator.len() == 2
+                    && rational_coefficients.denominator.is_empty()
                 {
-                    let coeffs = scale.rational_coefficients.as_ref().unwrap();
+                    let coeffs = scale.rational_coefficients.as_ref().ok_or(
+                        DiagServiceError::InvalidDatabase(
+                            "Missing rational coefficients".to_owned(),
+                        ),
+                    )?;
                     let lookup_val: f64 = lookup.try_into()?;
                     let num0 =
                         *coeffs
@@ -110,27 +106,21 @@ fn compu_lookup(
                 }
             }
             datatypes::CompuCategory::ScaleLinear => {
+                let rational_coefficients = scale.rational_coefficients.as_ref().ok_or(
+                    DiagServiceError::InvalidDatabase("Missing rational coefficients".to_owned()),
+                )?;
+
                 if scale.rational_coefficients.is_none()
-                    || scale
-                        .rational_coefficients
-                        .as_ref()
-                        .unwrap()
-                        .numerator
-                        .len()
-                        != 1
-                    || scale
-                        .rational_coefficients
-                        .as_ref()
-                        .unwrap()
-                        .denominator
-                        .len()
-                        != 1
+                    || rational_coefficients.numerator.len() != 1
+                    || rational_coefficients.denominator.len() != 1
                 {
                     return Err(DiagServiceError::UdsLookupError(
                         "Invalid SCALE_LINEAR CoEffs".to_owned(),
                     ));
                 }
-                let coeffs = scale.rational_coefficients.as_ref().unwrap();
+                let coeffs = scale.rational_coefficients.as_ref().ok_or(
+                    DiagServiceError::InvalidDatabase("Missing rational coefficients".to_owned()),
+                )?;
                 let lookup_val: f64 = lookup.try_into()?;
                 let num0 = *coeffs
                     .numerator
