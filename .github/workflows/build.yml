@@ -145,11 +145,17 @@ jobs:
           components: clippy, rustfmt
       - name: Cache Rust dependencies
         uses: Swatinem/rust-cache@v2
+      - name: Setup OpenSSL (Windows) Environment
+        run: |
+          echo "OPENSSL_DIR=$env:OPENSSL_DIR" >> $env:GITHUB_ENV
+          echo "OPENSSL_LIB_DIR=$env:OPENSSL_DIR\lib\VC\$env:RUNNER_ARCH\MD" >> $env:GITHUB_ENV
+          echo "OPENSSL_INCLUDE_DIR=$env:OPENSSL_DIR\include" >> $env:GITHUB_ENV
+        env:
+          OPENSSL_DIR: C:\Program Files\OpenSSL
       - name: Build
-        # enable openssl-vendored feature as we do not want to install openssl on windows runners
-        run: cargo build --locked --verbose --features openssl-vendored
+        run: cargo build --locked --verbose
       - name: Test
-        run: cargo test --locked --features openssl-vendored -- --show-output
+        run: cargo test --locked -- --show-output
 
   check_copyright_headers:
     runs-on: ubuntu-latest
