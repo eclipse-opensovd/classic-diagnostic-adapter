@@ -65,7 +65,6 @@ nu-ansi-term = { workspace = true } # ANSI terminal support for terminal log out
 
 [dev-dependencies]
 chrono = { workspace = true }
-ctor = { workspace = true }
 http = { workspace = true }
 mime = { workspace = true }
 reqwest = { workspace = true }
