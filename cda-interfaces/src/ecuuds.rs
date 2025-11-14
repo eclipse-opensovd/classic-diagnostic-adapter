@@ -16,7 +16,7 @@ use std::time::Duration;
 use hashbrown::HashMap;
 
 use crate::{
-    DiagComm, DiagServiceError, DynamicPlugin, SecurityAccess, TesterPresentType,
+    DiagComm, DiagServiceError, DynamicPlugin, EcuVariant, SecurityAccess, TesterPresentType,
     datatypes::{
         ComplexComParamValue, ComponentConfigurationsInfo, ComponentDataInfo, DataTransferMetaData,
         DtcCode, DtcExtendedInfo, DtcRecordAndStatus, NetworkStructure, SdSdg, single_ecu,
@@ -266,7 +266,10 @@ pub trait UdsEcu: Send + Sync + 'static {
     /// # Errors
     /// Will return Err if the ECU does not exist.
     /// If the variant is cannot be resolved, "Unknown" will be returned.
-    fn get_variant(&self, ecu_name: &str) -> impl Future<Output = Result<String, String>> + Send;
+    fn get_variant(
+        &self,
+        ecu_name: &str,
+    ) -> impl Future<Output = Result<EcuVariant, String>> + Send;
 
     /// trigger the variant detection process for all ECUs.
     /// Main work will be done in the background, there is no result returned,

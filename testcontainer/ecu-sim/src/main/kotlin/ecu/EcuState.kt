@@ -11,7 +11,7 @@ import kotlin.uuid.Uuid
 @Serializable
 data class EcuState(
     var variant: Variant = Variant.APPLICATION,
-    var variantPattern: VariantPattern = VariantPattern(boot = "FF 00 00", application = "00 01 01"),
+    var variantPattern: VariantPattern = VariantPattern(boot = "FF 00 00", application = "00 01 01", application2 = "00 10 10", application3 = "00 11 11"),
     var sessionState: SessionState = SessionState.DEFAULT,
     var securityAccess: SecurityAccess = SecurityAccess.LOCKED,
     var authentication: Authentication = Authentication.UNAUTHENTICATED,
@@ -44,6 +44,8 @@ data class EcuState(
 data class VariantPattern(
     val boot: String,
     val application: String,
+    val application2: String,
+    val application3: String,
 )
 
 @Serializable

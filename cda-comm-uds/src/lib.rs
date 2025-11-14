@@ -18,7 +18,7 @@ use std::{
 };
 
 use cda_interfaces::{
-    DiagComm, DiagCommType, DiagServiceError, DynamicPlugin, EcuGateway, EcuManager,
+    DiagComm, DiagCommType, DiagServiceError, DynamicPlugin, EcuGateway, EcuManager, EcuVariant,
     FlashTransferStartParams, SchemaDescription, SchemaProvider, SecurityAccess, ServicePayload,
     TesterPresentControlMessage, TesterPresentMode, TesterPresentType, TransmissionParameters,
     UdsEcu, UdsResponse, datatypes,
@@ -854,9 +854,7 @@ impl<S: EcuGateway, R: DiagServiceResponse, T: EcuManager<Response = R>> UdsEcu
             let ecu = ecu.read().await;
             let ecu_name = ecu.ecu_name();
 
-            let variant = ecu
-                .variant_name()
-                .unwrap_or_else(|| "BaseVariant".to_owned());
+            let variant = ecu.variant();
 
             let logical_address_string =
                 ecu.logical_address()
@@ -896,8 +894,7 @@ impl<S: EcuGateway, R: DiagServiceResponse, T: EcuManager<Response = R>> UdsEcu
 
             gateway.ecus.push(Ecu {
                 qualifier: ecu_name.clone(),
-                variant: variant.clone(),
-                state: ecu.state().to_string(),
+                variant,
                 logical_address: logical_address_string,
                 logical_link: format!("{}_on_{}", ecu_name, ecu.protocol().value()),
             });
@@ -1404,26 +1401,70 @@ impl<S: EcuGateway, R: DiagServiceResponse, T: EcuManager<Response = R>> UdsEcu
             }
         }
 
-        ecu.write()
+        let Some(mut duplicated_ecus) = ecu
+            .read()
             .await
-            .detect_variant(service_responses)
-            .await
-            .map_err(|e| format!("Failed to detect variant: {e:?}"))?;
+            .duplicating_ecu_names()
+            .cloned()
+            .filter(|d| !d.is_empty())
+        else {
+            // No duplicated ECUs, proceed with normal variant detection
+            return ecu
+                .write()
+                .await
+                .detect_variant(service_responses)
+                .await
+                .map_err(|e| format!("Failed to detect variant: {e:?}"));
+        };
+
+        // Try to detect variant for all duplicated ECUs
+        duplicated_ecus.insert(ecu_name.to_owned());
+        let mut ecu_with_variant_name = None;
+        for ecu_name in &duplicated_ecus {
+            if let Ok(ecu) = self
+                .ecus
+                .get(ecu_name)
+                .ok_or_else(|| format!("Unknown ECU: {ecu_name}"))
+            {
+                let detection_result = ecu
+                    .write()
+                    .await
+                    .detect_variant(service_responses.clone())
+                    .await;
+
+                if detection_result.is_ok()
+                    && ecu.read().await.variant().state == cda_interfaces::EcuState::Online
+                {
+                    ecu_with_variant_name = Some(ecu_name);
+                    break;
+                }
+            }
+        }
+
+        tracing::debug!("ECU with detected variant: {ecu_with_variant_name:?}");
+
+        if let Some(ecu_with_variant_name) = ecu_with_variant_name {
+            for ecu_name in &duplicated_ecus {
+                if ecu_name == ecu_with_variant_name {
+                    continue;
+                }
+
+                if let Some(ecu) = self.ecus.get(ecu_name) {
+                    ecu.write().await.mark_as_duplicate();
+                }
+            }
+        }
 
         Ok(())
     }
 
-    async fn get_variant(&self, ecu_name: &str) -> Result<String, String> {
+    async fn get_variant(&self, ecu_name: &str) -> Result<EcuVariant, String> {
         let ecu = self
             .ecus
             .get(ecu_name)
             .ok_or_else(|| format!("Unknown ECU: {ecu_name}"))?;
 
-        let variant = ecu
-            .read()
-            .await
-            .variant_name()
-            .unwrap_or_else(|| "Unknown".to_owned());
+        let variant = ecu.read().await.variant();
         Ok(variant)
     }
 
@@ -1436,9 +1477,24 @@ impl<S: EcuGateway, R: DiagServiceResponse, T: EcuManager<Response = R>> UdsEcu
             if let Err(DiagServiceError::EcuOffline(_)) =
                 self.gateway.ecu_online(ecu_name, db).await
             {
-                tracing::debug!(ecu_name = %ecu_name, "Skip variant detection: ECU offline");
+                // empty response means ECU is offline
+                if let Err(e) = db.write().await.detect_variant::<R>(HashMap::new()).await {
+                    tracing::error!(ecu_name = %ecu_name,
+                        "Failed to set ECU offline during variant detection: {e:?}");
+                }
                 continue;
             }
+
+            if db
+                .read()
+                .await
+                .duplicating_ecu_names()
+                .is_some_and(|d| ecus.iter().any(|e| d.contains(e)))
+            {
+                // Only do one variant detection for duplicated ECUs
+                continue;
+            }
+
             ecus.push(ecu_name.to_owned());
         }
         let cloned = self.clone();

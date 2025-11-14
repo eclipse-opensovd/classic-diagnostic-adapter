@@ -24,6 +24,8 @@ fun RequestsData.addDiagnosticRequests() {
         val identification = when (ecuState.variant) {
             Variant.BOOT -> ecuState.variantPattern.boot.decodeHex()
             Variant.APPLICATION -> ecuState.variantPattern.application.decodeHex()
+            Variant.APPLICATION2 -> ecuState.variantPattern.application2.decodeHex()
+            Variant.APPLICATION3 -> ecuState.variantPattern.application3.decodeHex()
         }
         ack(identification)
     }

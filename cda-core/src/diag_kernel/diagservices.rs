@@ -24,7 +24,7 @@ use hashbrown::HashMap;
 
 use crate::diag_kernel::{DiagDataValue, operations};
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct DiagServiceResponseStruct {
     pub service: DiagComm,
     pub data: Vec<u8>,
@@ -34,7 +34,7 @@ pub struct DiagServiceResponseStruct {
 
 pub const DTC_CODE_BIT_LEN: u32 = 24;
 
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 pub struct DiagDataContainerDtc {
     pub code: u32,
     pub display_code: Option<String>,
@@ -45,7 +45,7 @@ pub struct DiagDataContainerDtc {
     pub byte_pos: u32,
 }
 
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 pub enum DiagDataTypeContainer {
     RawContainer(DiagDataTypeContainerRaw),
     Struct(HashMap<String, DiagDataTypeContainer>),
@@ -53,7 +53,7 @@ pub enum DiagDataTypeContainer {
     DtcStruct(DiagDataContainerDtc),
 }
 
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 pub struct DiagDataTypeContainerRaw {
     pub data: Vec<u8>,
     pub bit_len: usize,
@@ -63,7 +63,7 @@ pub struct DiagDataTypeContainerRaw {
 
 pub type MappedDiagServiceResponsePayload = HashMap<String, DiagDataTypeContainer>;
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct MappedResponseData {
     pub data: MappedDiagServiceResponsePayload,
     pub errors: Vec<FieldParseError>,

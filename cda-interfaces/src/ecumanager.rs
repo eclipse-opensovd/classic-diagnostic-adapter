@@ -14,6 +14,7 @@
 use std::time::Duration;
 
 use hashbrown::{HashMap, HashSet};
+use serde::Serialize;
 
 use crate::{
     DiagComm, DiagServiceError, DoipComParamProvider, DynamicPlugin, EcuSchemaProvider,
@@ -25,11 +26,22 @@ use crate::{
     diagservices::{DiagServiceResponse, UdsPayloadData},
 };
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Debug, Serialize, PartialEq)]
 pub enum EcuState {
     Online,
     Offline,
     NotTested,
+    Duplicate,
+    Disconnected,
+    NoVariantDetected,
+}
+
+#[derive(Clone, Serialize)]
+pub struct EcuVariant {
+    pub name: Option<String>,
+    pub is_base_variant: bool,
+    pub state: EcuState,
+    pub logical_address: u16,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -75,7 +87,7 @@ pub trait EcuManager:
 {
     type Response: DiagServiceResponse;
     #[must_use]
-    fn variant_name(&self) -> Option<String>;
+    fn variant(&self) -> EcuVariant;
 
     #[must_use]
     fn state(&self) -> EcuState;
@@ -88,6 +100,17 @@ pub trait EcuManager:
 
     #[must_use]
     fn functional_groups(&self) -> Vec<String>;
+
+    /// Set the list of ECU names that share the same logical address.
+    fn set_duplicating_ecu_names(&mut self, duplicate_ecus: HashSet<String>);
+    /// Get the list of ECU names that share the same logical address.
+    #[must_use]
+    fn duplicating_ecu_names(&self) -> Option<&HashSet<String>>;
+    /// Mark this ECU as duplicate. Call this when a Variant was detected for another ECU
+    /// with the same logical address.
+    /// Sets the state to `EcuState::Duplicate` and unload the database.
+    /// Database will be reloaded before next variant detection.
+    fn mark_as_duplicate(&mut self);
 
     /// This allows to (re)load a database after unloading it during runtime, which could happen
     /// if initially the ECU wasn´t responding but later another request
@@ -266,6 +289,9 @@ impl std::fmt::Display for EcuState {
             EcuState::Online => write!(f, "Online"),
             EcuState::Offline => write!(f, "Offline"),
             EcuState::NotTested => write!(f, "NotTested"),
+            EcuState::Duplicate => write!(f, "Duplicate"),
+            EcuState::Disconnected => write!(f, "Disconnected"),
+            EcuState::NoVariantDetected => write!(f, "NoVariantDetected"),
         }
     }
 }
