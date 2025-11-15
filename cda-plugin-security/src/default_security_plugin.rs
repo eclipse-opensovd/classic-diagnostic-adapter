@@ -56,9 +56,9 @@ use axum_extra::{
     headers::{Authorization, authorization::Bearer},
 };
 use http::{HeaderMap, request::Parts};
-use jsonwebtoken::{DecodingKey, EncodingKey, Header, Validation, decode, encode};
+use jsonwebtoken::{DecodingKey, EncodingKey, Header, TokenData, encode};
 use schemars::JsonSchema;
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use sovd_interfaces::error::{ApiErrorResponse, ErrorCode};
 
 use crate::{
@@ -99,19 +99,35 @@ impl AuthBody {
     }
 }
 
-#[cfg(feature = "auth")]
-fn validation() -> Validation {
-    Validation::default()
+#[cfg(not(feature = "auth"))]
+fn decode_token<T: DeserializeOwned>(
+    token: &str,
+    _key: &DecodingKey,
+) -> Result<TokenData<T>, AuthError> {
+    decode_token_impl(jsonwebtoken::dangerous::insecure_decode::<T>(token))
 }
 
-#[cfg(not(feature = "auth"))]
-fn validation() -> Validation {
-    let mut validation = Validation::default();
-    validation.insecure_disable_signature_validation();
-    validation.validate_exp = false;
-    validation.validate_aud = false;
-    validation.validate_nbf = false;
-    validation
+#[cfg(feature = "auth")]
+fn decode_token<T: DeserializeOwned>(
+    token: &str,
+    key: &DecodingKey,
+) -> Result<TokenData<T>, AuthError> {
+    decode_token_impl(jsonwebtoken::decode::<T>(
+        token,
+        key,
+        &jsonwebtoken::Validation::default(),
+    ))
+}
+
+fn decode_token_impl<T>(
+    result: Result<TokenData<T>, jsonwebtoken::errors::Error>,
+) -> Result<TokenData<T>, AuthError> {
+    result.map_err(|e| {
+        tracing::warn!(error = %e, "Failed to decode token");
+        AuthError::InvalidToken {
+            details: "Token could not be decoded".to_string(),
+        }
+    })
 }
 
 impl ClaimsTrait for Claims {
@@ -231,13 +247,7 @@ impl SecurityPluginInitializer for DefaultSecurityPlugin {
                 AuthError::NoTokenProvided
             })?;
         // Decode the user data
-        let token_data =
-            decode::<Claims>(bearer.token(), &KEYS.decoding, &validation()).map_err(|e| {
-                tracing::warn!(error = %e, "Failed to decode token");
-                AuthError::InvalidToken {
-                    details: "Token could not be decoded".to_string(),
-                }
-            })?;
+        let token_data = decode_token::<Claims>(bearer.token(), &KEYS.decoding)?;
 
         Ok(Box::new(DefaultSecurityPluginData {
             claims: token_data.claims,

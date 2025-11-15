@@ -39,6 +39,7 @@ aide = { workspace = true, features = [
   "axum-original-uri",
   "axum-query",
   "axum-extra-headers",
+  "axum-extra-with-rejection",
   "macros",
   "serde_qs",
 ] } # openapi generation
@@ -53,7 +54,7 @@ axum = { workspace = true, features = [
   "matched-path",
   "original-uri",
 ] }
-axum-extra = { workspace = true, features = ["typed-header"] }
+axum-extra = { workspace = true, features = ["typed-header", "with-rejection"] }
 chrono = { workspace = true }
 http = { workspace = true }
 indexmap = { workspace = true }
