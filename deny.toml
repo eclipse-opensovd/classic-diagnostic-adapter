@@ -19,7 +19,9 @@ feature-depth = 1
 # More documentation for the advisories section can be found here:
 # https://embarkstudios.github.io/cargo-deny/checks/advisories/cfg.html
 [advisories]
-ignore = []
+ignore = [
+  { id = "RUSTSEC-2023-0071", reason = "Marvin side-channel impacts RSA CRT decryption; crate used only for signing/verification (RS256). No key gen/decryption paths executed." },
+]
 
 # This section is considered when running `cargo deny check licenses`
 # More documentation for the licenses section can be found here:
