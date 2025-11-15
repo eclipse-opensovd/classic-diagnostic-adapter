@@ -98,7 +98,7 @@ tower-http = "0.6"
 
 # ---- web/api crates----
 axum = { version = "0.8", default-features = false }
-axum-extra = { version = "0.12.2", features = ["with-rejection"] }
+axum-extra = { version = "0.12.2" }
 serde_qs = "1.0.0-rc.3"
 
 [workspace.lints.clippy]
