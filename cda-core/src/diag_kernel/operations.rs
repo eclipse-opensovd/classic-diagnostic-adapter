@@ -313,7 +313,7 @@ pub(in crate::diag_kernel) fn extract_diag_data_container(
     let (data, bit_len) = diag_type.decode(uds_payload, byte_pos, param.bit_position() as usize)?;
 
     let data_type = diag_type.base_datatype();
-    payload.set_last_read_byte_pos(byte_pos + data.len());
+    payload.set_last_read_byte_pos(byte_pos.saturating_add(data.len()));
 
     Ok(DiagDataTypeContainer::RawContainer(
         DiagDataTypeContainerRaw {
@@ -382,7 +382,7 @@ pub(in crate::diag_kernel) fn string_to_vec_u8(
                             let start = bytes
                                 .iter()
                                 .position(|&b| b != 0)
-                                .unwrap_or(bytes.len() - 1);
+                                .unwrap_or(bytes.len().saturating_sub(1));
                             bytes
                                 .get(start..)
                                 .ok_or(DiagServiceError::ParameterConversionError(

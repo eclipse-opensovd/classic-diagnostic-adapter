@@ -42,7 +42,7 @@ impl<'a> Payload<'a> {
     }
 
     pub(in crate::diag_kernel) fn set_bytes_to_skip(&mut self, count: usize) {
-        self.bytes_to_skip += count;
+        self.bytes_to_skip = self.bytes_to_skip.saturating_add(count);
     }
 
     pub(in crate::diag_kernel) fn bytes_to_skip(&self) -> usize {
@@ -73,11 +73,11 @@ impl<'a> Payload<'a> {
     }
 
     pub(in crate::diag_kernel) fn consume(&mut self) {
-        let advance_len = self.last_read_byte_pos + self.bytes_to_skip;
-        if self.pos() + advance_len > self.data.len() {
+        let advance_len = self.last_read_byte_pos.saturating_add(self.bytes_to_skip);
+        if self.pos().saturating_add(advance_len) > self.data.len() {
             self.current_index = self.data.len(); // Move to the end if we exceed
         } else {
-            self.current_index += advance_len;
+            self.current_index = self.current_index.saturating_add(advance_len);
         }
         self.last_read_byte_pos = 0;
         self.bytes_to_skip = 0;
@@ -85,7 +85,7 @@ impl<'a> Payload<'a> {
 
     pub(in crate::diag_kernel) fn len(&self) -> usize {
         if let Some(&(start, end)) = self.slices.back() {
-            end - start
+            end.saturating_sub(start)
         } else {
             self.data.len()
         }
@@ -126,8 +126,8 @@ impl<'a> Payload<'a> {
         }
 
         // Convert relative positions to absolute positions
-        let absolute_start = current_start + start;
-        let absolute_end = (current_start + end).min(self.data.len());
+        let absolute_start = current_start.saturating_add(start);
+        let absolute_end = current_start.saturating_add(end).min(self.data.len());
 
         self.slices.push_back((absolute_start, absolute_end));
         Ok(())

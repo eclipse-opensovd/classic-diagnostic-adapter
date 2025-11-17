@@ -271,7 +271,7 @@ impl<S: EcuGateway, R: DiagServiceResponse, T: EcuManager<Response = R>> UdsMana
                                         && msg.data.get(1) == sent_sid)
                                         || (msg.data.first()
                                             == sent_sid
-                                                .map(|sid| sid + UDS_RESPONSE_OFFSET)
+                                                .map(|sid| sid.saturating_add(UDS_RESPONSE_OFFSET))
                                                 .as_ref()))
                                 {
                                     break 'read_uds_messages Ok(msg);
@@ -484,7 +484,9 @@ impl<S: EcuGateway, R: DiagServiceResponse, T: EcuManager<Response = R>> UdsMana
                 break;
             }
 
-            let mut buf = Vec::with_capacity(/*block sequence counter*/ 1 + bytes_to_read);
+            let mut buf = Vec::with_capacity(
+                /*block sequence counter*/ 1usize.saturating_add(bytes_to_read),
+            );
             buf.push(next_block_sequence_counter);
 
             let Some(buffer_data) = buffer.get(..bytes_to_read) else {
@@ -529,9 +531,12 @@ impl<S: EcuGateway, R: DiagServiceResponse, T: EcuManager<Response = R>> UdsMana
 
                 next_block_sequence_counter = next_block_sequence_counter.wrapping_add(1);
                 transfer.meta_data.next_block_sequence_counter = next_block_sequence_counter;
-                transfer.meta_data.acknowledged_bytes += bytes_to_read as u64;
+                transfer.meta_data.acknowledged_bytes = transfer
+                    .meta_data
+                    .acknowledged_bytes
+                    .saturating_add(bytes_to_read as u64);
 
-                remaining_bytes -= bytes_to_read as u64;
+                remaining_bytes = remaining_bytes.saturating_sub(bytes_to_read as u64);
                 if remaining_bytes == 0 {
                     transfer.meta_data.status = DataTransferStatus::Finished;
                     if let Err(e) = status_sender.send(true) {
@@ -1300,7 +1305,7 @@ impl<S: EcuGateway, R: DiagServiceResponse, T: EcuManager<Response = R>> UdsEcu
         })?;
 
         let file_size = flash_file_meta_data.len();
-        if file_size < offset + length {
+        if file_size < offset.saturating_add(length) {
             return Err(DiagServiceError::InvalidRequest(format!(
                 "File size {file_size} is too small for the requested offset {offset} and length \
                  {length}",
@@ -1649,7 +1654,7 @@ impl<S: EcuGateway, R: DiagServiceResponse, T: EcuManager<Response = R>> UdsEcu
             for (field, record) in active_dtcs {
                 // Skip bytes that are reserved for the DTC code.
                 // The mask byte comes right after that.
-                byte_pos += field.bit_len.div_ceil(8) + 1;
+                byte_pos = byte_pos.saturating_add(field.bit_len.div_ceil(8).saturating_add(1));
                 let status_byte =
                     raw.get(byte_pos as usize)
                         .copied()

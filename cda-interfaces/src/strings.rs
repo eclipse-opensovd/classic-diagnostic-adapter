@@ -97,7 +97,7 @@ impl Strings {
         }
         let mut strings = self.strings.write();
         strings.push(value.to_owned());
-        let id = strings.len() - 1;
+        let id = strings.len().saturating_sub(1);
         let str_id: StringId = id.into();
         self.lookup.write().insert(value.to_owned(), str_id);
         str_id

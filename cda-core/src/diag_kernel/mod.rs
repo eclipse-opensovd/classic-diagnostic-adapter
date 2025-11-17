@@ -120,7 +120,7 @@ impl DiagDataValue {
         }
 
         fn pad_bytes_to_max_len(bytes: &[u8], target_len: usize) -> Vec<u8> {
-            let mut padded = vec![0u8; target_len - bytes.len()];
+            let mut padded = vec![0u8; target_len.saturating_sub(bytes.len())];
             padded.extend_from_slice(bytes);
             padded
         }

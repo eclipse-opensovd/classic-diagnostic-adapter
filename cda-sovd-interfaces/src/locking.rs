@@ -33,7 +33,11 @@ pub struct Request {
 
 impl From<Request> for chrono::DateTime<chrono::Utc> {
     fn from(value: Request) -> Self {
-        chrono::Utc::now() + std::time::Duration::from_secs(value.lock_expiration)
+        chrono::Utc::now()
+            .checked_add_signed(chrono::TimeDelta::seconds(
+                value.lock_expiration.try_into().unwrap_or(i64::MAX),
+            ))
+            .unwrap_or(chrono::Utc::now())
     }
 }
 

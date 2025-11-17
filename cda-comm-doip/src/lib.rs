@@ -204,8 +204,10 @@ impl<T: EcuAddressProvider + DoipComParamProvider> DoipDiagGateway<T> {
                 )
                 .await
                 {
-                    logical_address_to_connection
-                        .insert(logical_address, doip_connections.read().await.len() - 1);
+                    logical_address_to_connection.insert(
+                        logical_address,
+                        doip_connections.read().await.len().saturating_sub(1),
+                    );
                 }
             }
 
@@ -607,7 +609,7 @@ async fn send_with_retries(
     max_retries: u32,
 ) -> Result<(), DiagServiceError> {
     while let Err(e) = sender.send(msg.clone()).await {
-        *resend_counter += 1;
+        *resend_counter = resend_counter.saturating_add(1);
         if *resend_counter > max_retries {
             return Err(DiagServiceError::SendFailed(format!(
                 "Failed to send message after {max_retries} attempts: {e:?}",

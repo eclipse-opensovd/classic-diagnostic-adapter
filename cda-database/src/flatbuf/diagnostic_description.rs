@@ -18331,3 +18331,4 @@ pub fn finish_size_prefixed_ecu_data_buffer<'a, 'b, A: flatbuffers::Allocator + 
   fbb.finish_size_prefixed(root, None);
 }
 }  // pub mod dataformat
+

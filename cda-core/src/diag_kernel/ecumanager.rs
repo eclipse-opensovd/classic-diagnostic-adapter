@@ -647,10 +647,10 @@ impl<S: SecurityPlugin> cda_interfaces::EcuManager for EcuManager<S> {
 
         let mut uds: Vec<u8> = Vec::new();
 
-        let mut num_consts = 0;
+        let mut num_consts = 0usize;
         for param in &mapped_params {
             if let Some(coded_const) = param.specific_data_as_coded_const() {
-                num_consts += 1;
+                num_consts = num_consts.saturating_add(1);
                 let diag_type: datatypes::DiagCodedType = coded_const
                     .diag_coded_type()
                     .and_then(|t| {
@@ -687,7 +687,11 @@ impl<S: SecurityPlugin> cda_interfaces::EcuManager for EcuManager<S> {
                     // todo: check if json_values is empty...
                     for param in mapped_params.iter().skip(num_consts) {
                         if uds.len() < param.byte_position() as usize {
-                            uds.extend(vec![0x0; param.byte_position() as usize - uds.len()]);
+                            uds.extend(vec![
+                                0x0;
+                                (param.byte_position() as usize)
+                                    .saturating_sub(uds.len())
+                            ]);
                         }
                         let short_name = param.short_name().ok_or_else(|| {
                             DiagServiceError::InvalidDatabase(format!(
@@ -1099,12 +1103,14 @@ impl<S: SecurityPlugin> cda_interfaces::EcuManager for EcuManager<S> {
 
                 // collect the coded const bytes of the parameter expressing the ID
                 let bytes = sub_function_id.to_be_bytes();
-                let Some(id_param_bytes) = bytes.get((4 - (sub_func_id_bit_len as usize / 8))..)
+                let Some(id_param_bytes) =
+                    bytes.get(4usize.saturating_sub(sub_func_id_bit_len as usize / 8)..)
                 else {
                     return;
                 };
                 // compile the first bytes of the raw uds payload
-                let mut service_abstract_entry = Vec::with_capacity(1 + id_param_bytes.len());
+                let mut service_abstract_entry =
+                    Vec::with_capacity(1usize.saturating_add(id_param_bytes.len()));
                 service_abstract_entry.push(service_id);
                 service_abstract_entry.extend_from_slice(id_param_bytes);
 
@@ -2052,9 +2058,11 @@ impl<S: SecurityPlugin> EcuManager<S> {
         let expected = operations::string_to_vec_u8(diag_type.base_datatype(), const_value)?
             .into_iter()
             .collect::<Vec<_>>();
-        let expected = expected.get(expected.len() - value.data.len()..).ok_or(
-            DiagServiceError::BadPayload("Expected value slice out of bounds".to_owned()),
-        )?;
+        let expected = expected
+            .get(expected.len().saturating_sub(value.data.len())..)
+            .ok_or(DiagServiceError::BadPayload(
+                "Expected value slice out of bounds".to_owned(),
+            ))?;
         if value.data != expected {
             return Err(DiagServiceError::BadPayload(format!(
                 "{}: Expected {:?}, got {:?}",
@@ -2312,7 +2320,7 @@ impl<S: SecurityPlugin> EcuManager<S> {
                 diag_type.encode(
                     uds_data,
                     payload,
-                    parent_byte_pos + param.byte_position() as usize,
+                    parent_byte_pos.saturating_add(param.byte_position() as usize),
                     param.bit_position() as usize,
                 )?;
                 Ok(())
@@ -2356,7 +2364,7 @@ impl<S: SecurityPlugin> EcuManager<S> {
                 for v in value {
                     self.map_struct_to_uds(
                         &structure,
-                        param.byte_position() as usize + parent_byte_pos,
+                        (param.byte_position() as usize).saturating_add(parent_byte_pos),
                         v,
                         payload,
                     )?;
@@ -2365,7 +2373,7 @@ impl<S: SecurityPlugin> EcuManager<S> {
             }
             datatypes::DataOperationVariant::Structure(structure_dop) => self.map_struct_to_uds(
                 &structure_dop,
-                param.byte_position() as usize + parent_byte_pos,
+                (param.byte_position() as usize).saturating_add(parent_byte_pos),
                 value,
                 payload,
             ),
@@ -2570,7 +2578,7 @@ impl<S: SecurityPlugin> EcuManager<S> {
 
         let num_items: u32 = num_items_diag_val.try_into()?;
         let num_items_byte_pos = determine_num_items.byte_position() as usize;
-        uds_payload.set_last_read_byte_pos(num_items_byte_pos + num_items_data.len());
+        uds_payload.set_last_read_byte_pos(num_items_byte_pos.saturating_add(num_items_data.len()));
 
         let mut repeated_data = Vec::new();
 
@@ -2578,7 +2586,9 @@ impl<S: SecurityPlugin> EcuManager<S> {
             dynamic_length_field_dop.offset() as usize,
             uds_payload.len(),
         )?;
-        let mut start = uds_payload.last_read_byte_pos() + uds_payload.bytes_to_skip();
+        let mut start = uds_payload
+            .last_read_byte_pos()
+            .saturating_add(uds_payload.bytes_to_skip());
 
         for _ in 0..num_items {
             uds_payload.push_slice(start, uds_payload.len())?;
@@ -2601,10 +2611,14 @@ impl<S: SecurityPlugin> EcuManager<S> {
             }
 
             uds_payload.pop_slice()?;
-            start += uds_payload.last_read_byte_pos() + uds_payload.bytes_to_skip();
+            start = start.saturating_add(
+                uds_payload
+                    .last_read_byte_pos()
+                    .saturating_add(uds_payload.bytes_to_skip()),
+            );
         }
         uds_payload.pop_slice()?;
-        uds_payload.set_last_read_byte_pos(start - 1);
+        uds_payload.set_last_read_byte_pos(start.saturating_sub(1));
         data.insert(
             short_name,
             DiagDataTypeContainer::RepeatingStruct(repeated_data),
@@ -2637,8 +2651,10 @@ impl<S: SecurityPlugin> EcuManager<S> {
         short_name: String,
         static_field_dop: &datatypes::StaticFieldDop,
     ) -> Result<(), DiagServiceError> {
-        let static_field_size =
-            (static_field_dop.item_byte_size() * static_field_dop.fixed_number_of_items()) as usize;
+        let static_field_size = static_field_dop
+            .item_byte_size()
+            .saturating_mul(static_field_dop.fixed_number_of_items())
+            as usize;
 
         if uds_payload.len() < static_field_size {
             return Err(DiagServiceError::BadPayload(format!(
@@ -2652,8 +2668,10 @@ impl<S: SecurityPlugin> EcuManager<S> {
 
         for i in 0..static_field_dop.fixed_number_of_items() {
             let param_byte_pos = param.byte_position();
-            let start = (param_byte_pos + i * static_field_dop.item_byte_size()) as usize;
-            let end = start + static_field_dop.item_byte_size() as usize;
+            let start = (param_byte_pos
+                .saturating_add(i.saturating_mul(static_field_dop.item_byte_size())))
+                as usize;
+            let end = start.saturating_add(static_field_dop.item_byte_size() as usize);
             uds_payload.push_slice(start, end)?;
 
             self.map_nested_struct_from_uds(
@@ -4892,7 +4910,7 @@ mod tests {
         // and subtract one for the gap
         assert_eq!(
             service_payload.data.len(),
-            (struct_byte_pos + struct_byte_len) as usize
+            struct_byte_pos.saturating_add(struct_byte_len) as usize
         );
 
         // Check sid

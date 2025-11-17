@@ -1217,7 +1217,9 @@ fn schedule_token_deletion(
         .map(|std_duration| std_duration.as_secs())
         .unwrap_or(0);
 
-    let target_instant = Instant::now() + Duration::from_secs(secs);
+    let target_instant = Instant::now()
+        .checked_add(Duration::from_secs(secs))
+        .ok_or_else(|| ApiError::InternalServerError(Some("Timeout is too large".to_owned())))?;
 
     let join_handle = task::spawn(async move {
         sleep_until(target_instant).await; // cancellation point when task is aborted

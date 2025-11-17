@@ -35,6 +35,7 @@ const FILE_MAGIC_BYTES_LEN: usize = FILE_MAGIC_HEX_STR.len() / 2;
 // Allowed because constant functions cannot functions like .get() are not allowed in const fn.
 // However, as we would call panic! on a failure anyway it does not make a difference here.
 #[allow(clippy::indexing_slicing)]
+#[allow(clippy::arithmetic_side_effects)]
 const fn file_magic_bytes() -> [u8; FILE_MAGIC_BYTES_LEN] {
     let string_bytes = FILE_MAGIC_HEX_STR.as_bytes();
     let mut bytes = [0u8; FILE_MAGIC_BYTES_LEN];

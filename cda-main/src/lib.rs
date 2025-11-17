@@ -91,7 +91,11 @@ pub async fn load_databases<S: SecurityPlugin>(
 
         files.sort_by(|a, b| b.1.cmp(&a.1));
 
-        let chunk_size = (files.len() / DB_PARALLEL_LOAD_TASKS + 1).max(1);
+        let chunk_size = files
+            .len()
+            .checked_div(DB_PARALLEL_LOAD_TASKS.saturating_add(1))
+            .unwrap_or(1)
+            .max(1);
 
         tracing::info!(chunk_size = %chunk_size, "Loading databases");
 
@@ -154,7 +158,7 @@ pub async fn load_databases<S: SecurityPlugin>(
 
     let end = std::time::Instant::now();
 
-    tracing::info!(database_count = &databases.len(), duration = ?{end - start}, "Loaded databases");
+    tracing::info!(database_count = &databases.len(), duration = ?end.saturating_duration_since(start), "Loaded databases");
     if databases.is_empty() {
         tracing::error!("Database load failed, no databases found");
         std::process::exit(1);

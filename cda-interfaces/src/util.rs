@@ -58,8 +58,8 @@ pub fn u32_padded_bytes(data: &[u8]) -> Result<[u8; 4], DiagServiceError> {
             data.len()
         )));
     }
-    let padd = 4 - data.len();
-    let bytes: [u8; 4] = if padd > 0 {
+    let padd = 4usize.saturating_sub(data.len());
+    let bytes: [u8; 4] = if padd != 0 {
         let mut padded: Vec<u8> = vec![0u8; padd];
         padded.extend(data.to_vec());
         padded.try_into().map_err(|_| {
@@ -87,8 +87,8 @@ pub fn f64_padded_bytes(data: &[u8]) -> Result<[u8; 8], DiagServiceError> {
             data.len()
         )));
     }
-    let padd = 8 - data.len();
-    let bytes: [u8; 8] = if padd > 0 {
+    let padd = 8usize.saturating_sub(data.len());
+    let bytes: [u8; 8] = if padd != 0 {
         let mut padded: Vec<u8> = vec![0u8; padd];
         padded.extend(data.to_vec());
         padded.try_into().map_err(|_| {
@@ -123,8 +123,8 @@ pub fn decode_hex(value: &str) -> Result<Vec<u8>, DiagServiceError> {
     } else {
         &format!(
             "{}0{}",
-            &value[..value.len() - 1],
-            &value[value.len() - 1..]
+            &value[..value.len().saturating_sub(1)],
+            &value[value.len().saturating_sub(1)..]
         )
     };
 
@@ -162,10 +162,17 @@ pub fn extract_bits(
         ));
     }
 
-    if bit_pos + bit_len > data.len() * 8 {
+    if bit_pos
+        .checked_add(bit_len)
+        .ok_or_else(|| DiagServiceError::BadPayload("Bit operation overflow".to_owned()))?
+        > data
+            .len()
+            .checked_mul(8)
+            .ok_or_else(|| DiagServiceError::BadPayload("Bit operation overflow".to_owned()))?
+    {
         return Err(DiagServiceError::BadPayload(format!(
             "Bit position {bit_pos} with length {bit_len} exceeds data length {} bits",
-            data.len() * 8
+            data.len().saturating_mul(8)
         )));
     }
 
@@ -173,8 +180,13 @@ pub fn extract_bits(
     let mut result_bytes = vec![0u8; result_byte_count];
 
     for i in 0..bit_len {
-        let src_bit_index = bit_pos + i;
-        let src_byte_index = data.len() - (src_bit_index / 8) - 1;
+        let src_bit_index = bit_pos
+            .checked_add(i)
+            .ok_or_else(|| DiagServiceError::BadPayload("Bit index overflow".to_owned()))?;
+        let src_byte_index = data
+            .len()
+            .saturating_sub(src_bit_index / 8)
+            .saturating_sub(1);
         let src_bit_offset = src_bit_index % 8;
 
         let bit_value = data
@@ -184,7 +196,7 @@ pub fn extract_bits(
             })
             .map(|byte| (byte >> src_bit_offset) & 1)?;
 
-        let dst_byte_index = result_byte_count - (i / 8) - 1;
+        let dst_byte_index = result_byte_count.saturating_sub(i / 8).saturating_sub(1);
         let dst_bit_offset = i % 8;
 
         set_bit_checked(
