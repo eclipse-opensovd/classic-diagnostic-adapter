@@ -12,8 +12,7 @@
  */
 
 use cda_database::datatypes;
-use cda_interfaces::{DiagServiceError, diagservices::DiagServiceResponse};
-use hashbrown::{HashMap, HashSet};
+use cda_interfaces::{DiagServiceError, HashMap, HashSet, diagservices::DiagServiceResponse};
 
 pub(super) type DiagServiceId = String;
 

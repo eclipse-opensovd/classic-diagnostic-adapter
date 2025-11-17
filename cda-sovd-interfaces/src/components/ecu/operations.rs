@@ -11,7 +11,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-use hashbrown::HashMap;
+use cda_interfaces::{HashMap, HashMapExtensions};
 use serde::{Deserialize, Serialize};
 
 pub mod comparams {
@@ -167,9 +167,9 @@ pub mod comparams {
 }
 
 pub mod service {
-    use super::{Deserialize, HashMap, Serialize};
+    use super::{Deserialize, HashMap, HashMapExtensions, Serialize};
     pub mod executions {
-        use super::{Deserialize, HashMap, Serialize};
+        use super::{Deserialize, HashMap, HashMapExtensions, Serialize};
         use crate::{Payload, error::DataError};
 
         #[derive(Serialize, schemars::JsonSchema)]

@@ -24,13 +24,12 @@ use cda_comm_uds::UdsManager;
 use cda_core::{DiagServiceResponseStruct, EcuManager};
 use cda_database::{FileManager, ProtoLoadConfig};
 use cda_interfaces::{
-    DoipGatewaySetupError, Protocol,
+    DoipGatewaySetupError, HashMap, HashMapExtensions, Protocol,
     datatypes::{ComParams, DatabaseNamingConvention, FlatbBufConfig},
     file_manager::{Chunk, ChunkType},
 };
 use cda_plugin_security::{SecurityPlugin, SecurityPluginLoader};
 use cda_sovd::WebServerConfig;
-use hashbrown::HashMap;
 use tokio::{
     signal,
     sync::{RwLock, mpsc},
@@ -284,6 +283,8 @@ type UdsManagerType<S> =
     UdsManager<DoipDiagGateway<EcuManager<S>>, DiagServiceResponseStruct, EcuManager<S>>;
 
 /// Creates a new UDS manager for the webserver.
+// type alias does not allow specifying hasher, we set the hasher globally.
+#[allow(clippy::implicit_hasher)]
 #[tracing::instrument(skip_all, fields(database_count = databases.len()))]
 pub fn create_uds_manager<S: SecurityPlugin>(
     gateway: DoipDiagGateway<EcuManager<S>>,
@@ -319,6 +320,8 @@ pub async fn create_diagnostic_gateway<S: SecurityPlugin>(
     .await
 }
 
+// type alias does not allow specifying hasher, we set the hasher globally.
+#[allow(clippy::implicit_hasher)]
 #[tracing::instrument(
     skip(file_managers, webserver_config, ecu_uds, shutdown_signal),
     fields(file_manager_count = file_managers.len())

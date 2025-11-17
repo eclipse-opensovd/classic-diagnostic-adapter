@@ -11,9 +11,11 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-use std::path::Path;
+use std::{
+    collections::{HashMap, HashSet},
+    path::Path,
+};
 
-use hashbrown::{HashMap, HashSet};
 use nu_ansi_term::{Color, Style};
 use tracing::{Event, Level, Subscriber, field::Visit};
 use tracing_subscriber::{

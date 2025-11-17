@@ -13,10 +13,9 @@
 
 use std::{fmt::Debug, time::Duration};
 
-use hashbrown::HashMap;
 use serde::{Deserialize, Deserializer, Serialize, Serializer, de::DeserializeOwned};
 
-use crate::datatypes::Unit;
+use crate::{HashMap, datatypes::Unit};
 
 #[derive(Deserialize, Serialize, Clone, Debug, Default)]
 pub struct ComParams {
@@ -419,9 +418,11 @@ impl Default for DoipComParams {
             },
             nack_number_of_retries: ComParamConfig {
                 name: "CP_DoIPNumberOfRetries".to_owned(),
-                default: HashMap::from([
+                default: [
                     ("0x03".to_owned(), 3), // Out of memory
-                ]),
+                ]
+                .into_iter()
+                .collect(),
             },
             diagnostic_ack_timeout: ComParamConfig {
                 name: "CP_DoIPDiagnosticAckTimeout".to_owned(),
@@ -473,6 +474,8 @@ impl DeserializableCompParam for u16 {
     }
 }
 
+// type alias does not allow specifying hasher, we set the hasher globally.
+#[allow(clippy::implicit_hasher)]
 impl<T: DeserializeOwned> DeserializableCompParam for HashMap<String, T> {
     fn parse_from_db(input: &str, _unit: Option<&Unit>) -> Result<Self, String> {
         serde_json::from_str(input).map_err(|e| e.to_string())

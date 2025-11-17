@@ -15,8 +15,8 @@ use std::{sync::Arc, time::Duration};
 
 use cda_database::datatypes;
 use cda_interfaces::{
-    DiagCommAction, DiagCommType, DiagServiceError, DynamicPlugin, EcuState, Protocol, STRINGS,
-    SecurityAccess, ServicePayload, StringId,
+    DiagCommAction, DiagCommType, DiagServiceError, DynamicPlugin, EcuState, HashMap,
+    HashMapExtensions, HashSet, Protocol, STRINGS, SecurityAccess, ServicePayload, StringId,
     datatypes::{
         AddressingMode, ComParams, ComplexComParamValue, ComponentConfigurationsInfo,
         ComponentDataInfo, DTC_CODE_BIT_LEN, DatabaseNamingConvention, DtcLookup,
@@ -30,7 +30,6 @@ use cda_interfaces::{
     util::starts_with_ignore_ascii_case,
 };
 use cda_plugin_security::SecurityPlugin;
-use hashbrown::{HashMap, HashSet};
 use parking_lot::Mutex;
 use tokio::{sync::RwLock, task::JoinHandle};
 
@@ -4578,8 +4577,11 @@ mod tests {
             "param3": "test"
         });
 
-        let payload_data =
-            UdsPayloadData::ParameterMap(HashMap::from([("main_param".to_string(), test_value)]));
+        let payload_data = UdsPayloadData::ParameterMap(
+            [("main_param".to_string(), test_value)]
+                .into_iter()
+                .collect(),
+        );
 
         let result = ecu_manager
             .create_uds_payload(&service, &skip_sec_plugin!(), Some(payload_data))
@@ -4636,8 +4638,11 @@ mod tests {
             // param2 is missing
         });
 
-        let payload_data =
-            UdsPayloadData::ParameterMap(HashMap::from([("main_param".to_string(), test_value)]));
+        let payload_data = UdsPayloadData::ParameterMap(
+            [("main_param".to_string(), test_value)]
+                .into_iter()
+                .collect(),
+        );
 
         let result = ecu_manager
             .create_uds_payload(&service, &skip_sec_plugin!(), Some(payload_data))
@@ -4660,8 +4665,11 @@ mod tests {
         // Test data with wrong type (array instead of object)
         let test_value = json!([1, 2, 3]);
 
-        let payload_data =
-            UdsPayloadData::ParameterMap(HashMap::from([("main_param".to_string(), test_value)]));
+        let payload_data = UdsPayloadData::ParameterMap(
+            [("main_param".to_string(), test_value)]
+                .into_iter()
+                .collect(),
+        );
 
         let result = ecu_manager
             .create_uds_payload(&service, &skip_sec_plugin!(), Some(payload_data))
@@ -4740,8 +4748,11 @@ mod tests {
         // Test data with wrong type (array instead of object)
         let test_value = json!([1, 2, 3]);
 
-        let payload_data =
-            UdsPayloadData::ParameterMap(HashMap::from([("mux_1_param".to_string(), test_value)]));
+        let payload_data = UdsPayloadData::ParameterMap(
+            [("mux_1_param".to_string(), test_value)]
+                .into_iter()
+                .collect(),
+        );
 
         let result = ecu_manager
             .create_uds_payload(&service, &skip_sec_plugin!(), Some(payload_data))

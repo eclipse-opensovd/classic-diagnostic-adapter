@@ -19,9 +19,9 @@ use std::{
 
 use cda_interfaces::{
     DiagComm, DiagCommType, DiagServiceError, DynamicPlugin, EcuGateway, EcuManager,
-    FlashTransferStartParams, SchemaDescription, SchemaProvider, SecurityAccess, ServicePayload,
-    TesterPresentControlMessage, TesterPresentMode, TesterPresentType, TransmissionParameters,
-    UdsEcu, UdsResponse, datatypes,
+    FlashTransferStartParams, HashMap, HashMapExtensions, SchemaDescription, SchemaProvider,
+    SecurityAccess, ServicePayload, TesterPresentControlMessage, TesterPresentMode,
+    TesterPresentType, TransmissionParameters, UdsEcu, UdsResponse, datatypes,
     datatypes::{
         ComponentConfigurationsInfo, DTC_CODE_BIT_LEN, DataTransferError, DataTransferMetaData,
         DataTransferStatus, DtcCode, DtcExtendedInfo, DtcMask, DtcReadInformationFunction,
@@ -31,7 +31,6 @@ use cda_interfaces::{
     diagservices::{DiagServiceResponse, DiagServiceResponseType, UdsPayloadData},
     service_ids,
 };
-use hashbrown::HashMap;
 use strum::IntoEnumIterator;
 use tokio::{
     fs::File,
@@ -900,7 +899,7 @@ impl<S: EcuGateway, R: DiagServiceResponse, T: EcuManager<Response = R>> UdsEcu
 
             let gateway_addr = ecu.logical_gateway_address();
             let gateway = gateways
-                .entry_ref(&GatewayAddress(gateway_addr))
+                .entry(GatewayAddress(gateway_addr))
                 .or_insert(Gateway {
                     name: String::new(),
                     network_address: String::new(),
@@ -936,7 +935,7 @@ impl<S: EcuGateway, R: DiagServiceResponse, T: EcuManager<Response = R>> UdsEcu
 
         NetworkStructure {
             functional_groups: vec![],
-            gateways: gateways.into_iter().map(|(_, gateway)| gateway).collect(),
+            gateways: gateways.into_values().collect(),
         }
     }
 

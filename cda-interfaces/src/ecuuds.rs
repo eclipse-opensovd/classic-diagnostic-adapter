@@ -13,10 +13,8 @@
 
 use std::time::Duration;
 
-use hashbrown::HashMap;
-
 use crate::{
-    DiagComm, DiagServiceError, DynamicPlugin, SecurityAccess, TesterPresentType,
+    DiagComm, DiagServiceError, DynamicPlugin, HashMap, SecurityAccess, TesterPresentType,
     datatypes::{
         ComplexComParamValue, ComponentConfigurationsInfo, ComponentDataInfo, DataTransferMetaData,
         DtcCode, DtcExtendedInfo, DtcRecordAndStatus, NetworkStructure, SdSdg, single_ecu,

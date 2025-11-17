@@ -21,7 +21,6 @@ path = "src/lib.rs"
 # internal dependencies
 cda-interfaces = { workspace = true }
 # external
-hashbrown = { workspace = true, features = ["serde"] }
 prost = { workspace = true }
 flatbuffers = { workspace = true }
 ouroboros = { workspace = true }
@@ -35,7 +34,7 @@ xz2 = { workspace = true, features = ["static"] }
 tracing = { workspace = true }
 
 # runtime size info
-deepsize = { workspace = true, features = ["hashbrown"], optional = true }
+deepsize = { workspace = true, optional = true }
 
 # serde
 serde = { workspace = true, features = ["derive"] }

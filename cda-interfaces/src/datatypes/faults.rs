@@ -10,11 +10,10 @@
  *
  * SPDX-License-Identifier: Apache-2.0
  */
-use hashbrown::HashMap;
 use serde::{Deserialize, Serialize};
 use strum::IntoEnumIterator;
 
-use crate::{DiagComm, diagservices::FieldParseError};
+use crate::{DiagComm, HashMap, diagservices::FieldParseError};
 
 pub type DtcCode = u32;
 

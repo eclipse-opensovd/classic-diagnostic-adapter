@@ -18,13 +18,12 @@ use axum::{
 };
 use axum_extra::extract::{Host, WithRejection};
 use cda_interfaces::{
-    DynamicPlugin, UdsEcu,
+    DynamicPlugin, HashMap, UdsEcu,
     diagservices::{
         DiagServiceJsonResponse, DiagServiceResponse, DiagServiceResponseType, UdsPayloadData,
     },
 };
 use cda_plugin_security::SecurityPlugin;
-use hashbrown::HashMap;
 
 use crate::sovd::{
     error::{ApiError, ErrorWrapper, api_error_from_diag_response},
@@ -571,10 +570,10 @@ pub(crate) mod transferexit {
         response::{IntoResponse, Response},
     };
     use cda_interfaces::{
-        UdsEcu, diagservices::DiagServiceResponse, file_manager::FileManager, service_ids,
+        HashMap, HashMapExtensions, UdsEcu, diagservices::DiagServiceResponse,
+        file_manager::FileManager, service_ids,
     };
     use cda_plugin_security::Secured;
-    use hashbrown::HashMap;
     use http::StatusCode;
 
     use crate::{

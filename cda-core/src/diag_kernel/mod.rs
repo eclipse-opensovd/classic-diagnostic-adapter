@@ -17,8 +17,7 @@ use cda_database::{
     datatypes,
     datatypes::{DataType, IntervalType, Limit},
 };
-use cda_interfaces::DiagServiceError;
-use hashbrown::HashMap;
+use cda_interfaces::{DiagServiceError, HashMap};
 use serde::{Serialize, Serializer};
 
 pub(crate) mod diagservices;
@@ -284,6 +283,7 @@ impl Serialize for DiagDataValue {
 #[cfg(test)]
 mod tests {
     use cda_database::datatypes::IntervalType;
+    use cda_interfaces::HashMapExtensions;
 
     use super::*;
 

@@ -12,7 +12,6 @@
  */
 
 use cda_interfaces::diagservices::FieldParseError;
-use hashbrown::HashMap;
 use sovd_interfaces::error::DataError;
 
 use crate::sovd::{
@@ -36,16 +35,15 @@ impl From<FieldParseErrorWrapper> for DataError<VendorErrorCode> {
                 message: "Failed to parse parameter".to_owned(),
                 error_code: sovd_interfaces::error::ErrorCode::VendorSpecific,
                 vendor_code: Some(VendorErrorCode::ErrorInterpretingMessage),
-                parameters: Some(HashMap::from([
-                    (
-                        "details".to_string(),
-                        serde_json::Value::String(value.error.details),
-                    ),
-                    (
-                        "value".to_string(),
-                        serde_json::Value::String(value.error.value),
-                    ),
-                ])),
+                parameters: Some(
+                    [
+                        ("details", value.error.details),
+                        ("value", value.error.value),
+                    ]
+                    .into_iter()
+                    .map(|(k, v)| (k.to_string(), serde_json::Value::String(v)))
+                    .collect(),
+                ),
                 error_source: None,
                 schema: None,
             },

@@ -21,7 +21,6 @@ path = "src/lib.rs"
 # internal dependencies
 cda-interfaces = { workspace = true }
 # external
-hashbrown = { workspace = true, features = ["serde"] }
 thiserror = { workspace = true }
 # DoIP
 doip-definitions = { workspace = true }

@@ -13,13 +13,14 @@
 
 use std::{future::Future, sync::Arc, time::Duration};
 
-use cda_interfaces::{DiagServiceError, DoipComParamProvider, EcuAddressProvider};
+use cda_interfaces::{
+    DiagServiceError, DoipComParamProvider, EcuAddressProvider, HashMap, HashMapExtensions,
+};
 use doip_definitions::{
     header::PayloadType,
     payload::{DoipPayload, VehicleIdentificationRequest},
 };
 use doip_sockets::udp::UdpSocket;
-use hashbrown::HashMap;
 use tokio::sync::{RwLock, mpsc};
 
 use crate::{DoipDiagGateway, DoipTarget, connections::handle_gateway_connection};
@@ -180,13 +181,10 @@ pub(crate) async fn listen_for_vams<T, F>(
 
         let addr = ecu.logical_address();
         let gateway = ecu.logical_gateway_address();
-        gateway_ecu_map
-            .entry(gateway)
-            .or_insert_with(Vec::new)
-            .push(addr);
+        gateway_ecu_map.entry(gateway).or_default().push(addr);
         gateway_ecu_name_map
             .entry(gateway)
-            .or_insert_with(Vec::new)
+            .or_default()
             .push(ecu_name.to_lowercase());
     }
 

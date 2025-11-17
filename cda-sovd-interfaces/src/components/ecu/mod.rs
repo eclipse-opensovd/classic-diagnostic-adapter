@@ -11,7 +11,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-use hashbrown::HashMap;
+use cda_interfaces::HashMap;
 use serde::{Deserialize, Serialize};
 
 use crate::Items;
@@ -129,7 +129,7 @@ pub mod configurations {
 }
 
 pub mod data {
-    use hashbrown::HashMap;
+    use cda_interfaces::HashMap;
     use serde::Deserialize;
 
     use super::ComponentData;
@@ -246,7 +246,7 @@ pub mod x {
 
             pub mod request_download {
                 pub mod put {
-                    use hashbrown::HashMap;
+                    use cda_interfaces::HashMap;
                     use serde::{Deserialize, Serialize};
 
                     use crate::error::DataError;
