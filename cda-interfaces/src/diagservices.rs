@@ -11,10 +11,8 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-use hashbrown::HashMap;
-
 use crate::{
-    DataParseError, DiagServiceError,
+    DataParseError, DiagServiceError, HashMap,
     datatypes::{DtcField, DtcRecord},
     util,
 };

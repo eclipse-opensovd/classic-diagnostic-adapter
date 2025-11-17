@@ -13,11 +13,12 @@
 
 use std::{sync::Arc, time::Duration};
 
-use cda_interfaces::{DoipComParamProvider, EcuAddressProvider, service_ids};
+use cda_interfaces::{
+    DoipComParamProvider, EcuAddressProvider, HashMap, HashMapExtensions, service_ids,
+};
 use doip_definitions::payload::{
     ActivationType, AliveCheckRequest, DiagnosticMessage, DoipPayload, RoutingActivationRequest,
 };
-use hashbrown::HashMap;
 use thiserror::Error;
 use tokio::sync::{Mutex, RwLock, broadcast, mpsc, watch};
 

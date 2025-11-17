@@ -16,8 +16,9 @@ use std::{
     sync::LazyLock,
 };
 
-use hashbrown::HashMap;
 use parking_lot::RwLock;
+
+use crate::{HashMap, HashMapExtensions};
 
 /// Strings manager that provides a thread-safe way to store and retrieve strings by their IDs.
 ///

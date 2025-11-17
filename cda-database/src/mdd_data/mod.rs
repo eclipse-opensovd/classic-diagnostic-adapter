@@ -14,11 +14,11 @@
 use std::{io::Read, time::Instant};
 
 use cda_interfaces::{
+    HashMap,
     datatypes::FlatbBufConfig,
     file_manager::{Chunk, ChunkMetaData, ChunkType, MddError},
 };
 use flatbuffers::VerifierOptions;
-use hashbrown::HashMap;
 use prost::Message;
 
 use crate::{

@@ -11,7 +11,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-use hashbrown::HashMap;
+use crate::HashMap;
 
 #[derive(PartialEq, Eq, Hash, Clone, Debug)]
 pub enum ChunkType {

@@ -19,10 +19,9 @@ use std::{
 
 use cda_interfaces::{
     DiagServiceError, DoipComParamProvider, DoipGatewaySetupError, EcuAddressProvider, EcuGateway,
-    ServicePayload, TransmissionParameters, UdsResponse,
+    HashMap, HashMapExtensions, ServicePayload, TransmissionParameters, UdsResponse,
 };
 use doip_definitions::payload::{DiagnosticMessage, DiagnosticMessageNack, GenericNack};
-use hashbrown::HashMap;
 use thiserror::Error;
 use tokio::sync::{Mutex, RwLock, broadcast, mpsc};
 
@@ -177,10 +176,7 @@ impl<T: EcuAddressProvider + DoipComParamProvider> DoipDiagGateway<T> {
                 let ecu = ecu_lock.read().await;
                 let addr = ecu.logical_address();
                 let gateway = ecu.logical_gateway_address();
-                gateway_ecu_map
-                    .entry(gateway)
-                    .or_insert_with(Vec::new)
-                    .push(addr);
+                gateway_ecu_map.entry(gateway).or_default().push(addr);
             }
 
             let doip_connections: Arc<RwLock<Vec<Arc<DoipConnection>>>> =

@@ -13,11 +13,9 @@
 
 use std::time::Duration;
 
-use hashbrown::{HashMap, HashSet};
-
 use crate::{
-    DiagComm, DiagServiceError, DoipComParamProvider, DynamicPlugin, EcuSchemaProvider,
-    SecurityAccess, UdsComParamProvider,
+    DiagComm, DiagServiceError, DoipComParamProvider, DynamicPlugin, EcuSchemaProvider, HashMap,
+    HashSet, SecurityAccess, UdsComParamProvider,
     datatypes::{
         ComplexComParamValue, ComponentConfigurationsInfo, ComponentDataInfo, DtcLookup,
         DtcReadInformationFunction, SdSdg, single_ecu,

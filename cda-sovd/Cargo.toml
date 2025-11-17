@@ -25,8 +25,7 @@ sovd-interfaces = { workspace = true }
 cda-comm-doip = { workspace = true }
 
 tokio = { workspace = true, features = ["net"] }
-futures = { workspace = true }                         # external
-hashbrown = { workspace = true, features = ["serde"] }
+futures = { workspace = true }                   # external
 
 async-trait = { workspace = true }
 
@@ -44,7 +43,7 @@ aide = { workspace = true, features = [
   "macros",
   "serde_qs",
 ] } # openapi generation
-schemars = { workspace = true, features = ["hashbrown"] }
+schemars = { workspace = true }
 
 # web server
 axum = { workspace = true, features = [

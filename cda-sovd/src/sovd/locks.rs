@@ -21,11 +21,11 @@ use axum::{
 };
 use axum_extra::extract::WithRejection;
 use cda_interfaces::{
-    TesterPresentType, UdsEcu, diagservices::DiagServiceResponse, file_manager::FileManager,
+    HashMap, TesterPresentType, UdsEcu, diagservices::DiagServiceResponse,
+    file_manager::FileManager,
 };
 use cda_plugin_security::Claims;
 use chrono::{DateTime, SecondsFormat, Utc};
-use hashbrown::HashMap;
 use tokio::{
     sync::{RwLock, RwLockReadGuard, RwLockWriteGuard},
     task::{self, JoinHandle},
@@ -161,7 +161,7 @@ impl WriteLock<'_> {
         match self {
             WriteLock::HashMapLock(l) => {
                 if let Some(key) = entity_id {
-                    Ok(l.entry_ref(key).or_insert(None))
+                    Ok(l.entry(key.to_owned()).or_insert(None))
                 } else {
                     Err(ApiError::NotFound(Some("lock does not exist".to_owned())))
                 }

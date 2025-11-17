@@ -25,9 +25,9 @@ pub(crate) mod comparams {
         };
         use axum_extra::extract::{Host, WithRejection};
         use cda_interfaces::{
-            UdsEcu, diagservices::DiagServiceResponse, file_manager::FileManager,
+            HashMap, HashMapExtensions, UdsEcu, diagservices::DiagServiceResponse,
+            file_manager::FileManager,
         };
-        use hashbrown::HashMap;
         use indexmap::IndexMap;
         use sovd_interfaces::components::ecu::operations::comparams as sovd_comparams;
         use tokio::sync::RwLock;

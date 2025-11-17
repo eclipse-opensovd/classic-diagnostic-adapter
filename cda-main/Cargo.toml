@@ -36,7 +36,6 @@ clap = { workspace = true, features = ["derive"] }
 # config
 figment = { workspace = true, features = ["env", "toml"] }
 futures = { workspace = true }
-hashbrown = { workspace = true, features = ["serde"] }
 # allocator
 mimalloc = { git = "https://github.com/theswiftfox/mimalloc.git", rev = "afbaaa5" }
 serde = { workspace = true, features = ["derive"] }

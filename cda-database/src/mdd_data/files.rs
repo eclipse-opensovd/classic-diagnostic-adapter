@@ -16,8 +16,10 @@ use std::{
     time::{Duration, Instant},
 };
 
-use cda_interfaces::file_manager::{Chunk, ChunkMetaData, MddError};
-use hashbrown::HashMap;
+use cda_interfaces::{
+    HashMap,
+    file_manager::{Chunk, ChunkMetaData, MddError},
+};
 use tokio::sync::RwLock;
 
 use crate::mdd_data::load_chunk;

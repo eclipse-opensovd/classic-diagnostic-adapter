@@ -20,8 +20,6 @@ path = "src/lib.rs"
 [dependencies]
 # internal dependencies
 cda-interfaces = { workspace = true }
-# external
-hashbrown = { workspace = true, features = ["serde"] }
 
 # tls
 openssl = { workspace = true }

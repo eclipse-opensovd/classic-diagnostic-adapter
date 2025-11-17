@@ -25,8 +25,10 @@ use axum::{
     middleware::Next,
     response::{IntoResponse, Response},
 };
-use cda_interfaces::{DiagServiceError, diagservices::DiagServiceResponse, file_manager::MddError};
-use hashbrown::HashMap;
+use cda_interfaces::{
+    DiagServiceError, HashMap, HashMapExtensions, diagservices::DiagServiceResponse,
+    file_manager::MddError,
+};
 use serde::{Deserialize, Serialize};
 use serde_qs::axum::QsQueryRejection;
 use sovd_interfaces::error::ErrorCode;

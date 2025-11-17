@@ -38,7 +38,6 @@ sovd-interfaces = { path = "cda-sovd-interfaces" }
 # ---- common crates ----
 async-trait = "0.1.89"
 thiserror = "2.0.17"
-hashbrown = "0.16"
 num-traits = "0.2"
 parking_lot = "0.12.5"
 serde = "1.0"
@@ -72,6 +71,7 @@ ouroboros = "0.18.5"
 toml = "0.9.8"
 cargo_toml = "0.22.3"
 libc = "0.2.177"
+foldhash = "0.2.0"
 
 # ---- tracing & logging crates----
 tracing = "0.1.41"
@@ -121,8 +121,8 @@ debug = true
 
 [patch.crates-io]
 deepsize = { git = "https://github.com/theswiftfox/deepsize.git", branch = "main" }
-schemars = { git = "https://github.com/alexmohr/schemars.git", rev = "81747dc" }
-aide = { git = "https://github.com/alexmohr/aide.git", rev = "716f14f" }
+# Necessary because upstream is still using an older version of serde_qs (0.14 instead of 1.0.0-rc.3)
+aide = { git = "https://github.com/alexmohr/aide.git", rev = "56355cb" }
 doip-definitions = { git = "https://github.com/theswiftfox/doip-definitions.git", rev = "bdeab8c" }
 doip-sockets = { git = "https://github.com/theswiftfox/doip-sockets.git", rev = "0771453" }
 flatbuffers = { git = "https://github.com/alexmohr/flatbuffers.git", rev = "0ba3307d" }

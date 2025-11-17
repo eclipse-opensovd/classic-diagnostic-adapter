@@ -13,9 +13,10 @@
 
 use std::time::Duration;
 
-use hashbrown::HashMap;
-
-use crate::datatypes::{AddressingMode, RetryPolicy, TesterPresentSendType};
+use crate::{
+    HashMap,
+    datatypes::{AddressingMode, RetryPolicy, TesterPresentSendType},
+};
 
 pub trait UdsComParamProvider: Send + Sync + 'static {
     #[must_use]

@@ -11,7 +11,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-use hashbrown::HashMap;
+use cda_interfaces::HashMap;
 use serde::Serialize;
 
 #[derive(Serialize, Debug)]

@@ -94,11 +94,10 @@ pub(crate) mod diag_service {
     };
     use axum_extra::extract::WithRejection;
     use cda_interfaces::{
-        DiagComm, DiagCommType, SchemaProvider, UdsEcu, diagservices::DiagServiceResponse,
-        file_manager::FileManager,
+        DiagComm, DiagCommType, HashMap, HashMapExtensions, SchemaProvider, UdsEcu,
+        diagservices::DiagServiceResponse, file_manager::FileManager,
     };
     use cda_plugin_security::Secured;
-    use hashbrown::HashMap;
     use http::{HeaderMap, StatusCode};
 
     use crate::{

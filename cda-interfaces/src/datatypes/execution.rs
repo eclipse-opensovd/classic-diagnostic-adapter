@@ -11,7 +11,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-use hashbrown::HashMap;
+use crate::HashMap;
 
 #[derive(Clone, Debug)]
 pub struct Unit {

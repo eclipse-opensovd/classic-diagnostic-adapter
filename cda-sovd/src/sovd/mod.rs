@@ -27,13 +27,12 @@ use axum::{
 };
 use axum_extra::extract::WithRejection;
 use cda_interfaces::{
-    SchemaProvider, UdsEcu,
+    HashMap, HashMapExtensions, SchemaProvider, UdsEcu,
     diagservices::{DiagServiceResponse, UdsPayloadData},
     file_manager::FileManager,
 };
 use cda_plugin_security::{SecurityPluginLoader, security_plugin_middleware};
 use error::{ApiError, api_error_from_diag_response};
-use hashbrown::HashMap;
 use http::{Uri, header};
 use indexmap::IndexMap;
 use schemars::Schema;

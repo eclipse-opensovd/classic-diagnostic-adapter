@@ -25,7 +25,6 @@ use cda_interfaces::{
     file_manager::FileManager,
 };
 use cda_plugin_security::SecurityPlugin;
-use hashbrown::HashMap;
 use http::{HeaderMap, StatusCode};
 
 use crate::{
@@ -59,7 +58,7 @@ pub(crate) async fn get<R: DiagServiceResponse, T: UdsEcu + Clone, U: FileManage
     let include_schema = query.include_schema;
     let base_path = format!("http://localhost:20002/vehicle/v15/components/{ecu_name}");
     let variant = match uds.get_variant(&ecu_name).await {
-        Ok(v) => HashMap::from([("name".to_owned(), v)]),
+        Ok(v) => [("name".to_owned(), v)].into_iter().collect(),
         Err(e) => {
             return ErrorWrapper {
                 error: e.into(),
@@ -121,7 +120,10 @@ pub(crate) fn docs_get(op: TransformOperation) -> TransformOperation {
             res.example(sovd_interfaces::components::ecu::Ecu {
                 id: "my_ecu".to_string(),
                 name: "My ECU".to_string(),
-                variant: HashMap::from([("name".to_owned(), "Variant1".to_owned())]),
+
+                variant: [("name".to_owned(), "Variant1".to_owned())]
+                    .into_iter()
+                    .collect(),
                 locks: "http://localhost:20002/vehicle/v15/components/my_ecu/locks".to_string(),
                 operations: "http://localhost:20002/vehicle/v15/components/my_ecu/operations"
                     .to_string(),

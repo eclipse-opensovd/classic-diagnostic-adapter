@@ -13,14 +13,13 @@
 
 use cda_database::datatypes::{self, DataType};
 use cda_interfaces::{
-    DiagComm, DiagServiceError,
+    DiagComm, DiagServiceError, HashMap, HashMapExtensions,
     datatypes::{DtcField, DtcRecord},
     diagservices::{
         DiagServiceJsonResponse, DiagServiceResponse, DiagServiceResponseType, FieldParseError,
         MappedNRC,
     },
 };
-use hashbrown::HashMap;
 
 use crate::diag_kernel::{DiagDataValue, operations};
 

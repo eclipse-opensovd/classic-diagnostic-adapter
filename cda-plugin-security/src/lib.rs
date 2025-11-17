@@ -116,8 +116,7 @@ use axum::{
     middleware::Next,
     response::{IntoResponse, Response},
 };
-use cda_interfaces::DiagServiceError;
-use hashbrown::HashMap;
+use cda_interfaces::{DiagServiceError, HashMap};
 use http::{HeaderMap, StatusCode, request::Parts};
 use sovd_interfaces::error::{ApiErrorResponse, ErrorCode};
 use thiserror::Error;

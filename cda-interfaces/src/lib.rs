@@ -33,6 +33,14 @@ pub mod file_manager;
 mod schema;
 pub use schema::*;
 
+// Deliberately not using new type pattern here, to make sure all crates that take
+// std::collection::Hash* still work.
+// Together with the foldhash hasher, this is virtually the same as using hashbrown.
+pub type Hasher = foldhash::fast::RandomState;
+pub type HashMap<K, V> = std::collections::HashMap<K, V, Hasher>;
+pub type HashSet<V> = std::collections::HashSet<V, Hasher>;
+pub use foldhash::{HashMapExt as HashMapExtensions, HashSet as HashSetExtensions};
+
 /// # strings module
 /// This module contains a type that allows to store unique strings and use references to them
 /// instead of cloning the strings themselves in all places.<br>

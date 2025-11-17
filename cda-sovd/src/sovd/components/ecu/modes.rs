@@ -22,12 +22,11 @@ use axum::{
 };
 use axum_extra::extract::WithRejection;
 use cda_interfaces::{
-    UdsEcu,
+    HashMap, UdsEcu,
     datatypes::semantics,
     diagservices::{DiagServiceResponse, DiagServiceResponseType},
     file_manager::FileManager,
 };
-use hashbrown::HashMap;
 use sovd_interfaces::components::ecu::modes::{self as sovd_modes, ModeType};
 
 use crate::sovd::{
@@ -300,7 +299,9 @@ pub(crate) mod session {
 }
 
 pub(crate) mod security {
-    use cda_interfaces::{DynamicPlugin, SecurityAccess, diagservices::UdsPayloadData};
+    use cda_interfaces::{
+        DynamicPlugin, HashMapExtensions, SecurityAccess, diagservices::UdsPayloadData,
+    };
     use cda_plugin_security::SecurityPlugin;
     use sovd_interfaces::components::ecu::modes::put::{RequestSeedResponse, SovdSeed};
 

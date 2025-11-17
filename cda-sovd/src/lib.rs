@@ -20,12 +20,11 @@ use axum::{
     middleware, routing,
 };
 use cda_interfaces::{
-    DoipGatewaySetupError, SchemaProvider, UdsEcu, diagservices::DiagServiceResponse,
+    DoipGatewaySetupError, HashMap, SchemaProvider, UdsEcu, diagservices::DiagServiceResponse,
     file_manager::FileManager,
 };
 use cda_plugin_security::SecurityPluginLoader;
 use futures::future::FutureExt;
-use hashbrown::HashMap;
 use tokio::net::TcpListener;
 use tower::Layer;
 use tower_http::trace::TraceLayer;
@@ -49,6 +48,8 @@ pub struct WebServerConfig {
 /// Will return `Err` in case that the webserver couldn´t be launched.
 /// This can be caused due to invalid config, ports or addresses already
 /// being in use or an error when initializing the `DoIP` gateway.
+// type alias does not allow specifying hasher, we set the hasher globally.
+#[allow(clippy::implicit_hasher)]
 #[tracing::instrument(
     skip(config, ecu_uds, file_manager, shutdown_signal),
     fields(
