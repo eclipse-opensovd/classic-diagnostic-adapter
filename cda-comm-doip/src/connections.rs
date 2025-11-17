@@ -276,7 +276,7 @@ fn spawn_connection_reset_task(
         &format!("doip-connection-reset-{gateway_ip}"),
         Box::pin(async move {
             loop {
-                let mut reconnect_attempts = 0;
+                let mut reconnect_attempts = 0u32;
                 if let Some(reason) = conn_reset_rx.recv().await {
                     tracing::info!(reason = %reason, "Resetting connection");
                     let mut conn_guard = conn_reset.lock_connection().await;
@@ -315,7 +315,7 @@ fn spawn_connection_reset_task(
                                     "Failed to reset connection, retrying"
                                 );
                                 tokio::time::sleep(connection_timeouts.retry_delay).await;
-                                reconnect_attempts += 1;
+                                reconnect_attempts = reconnect_attempts.saturating_add(1);
                                 if reconnect_attempts >= connection_timeouts.max_retry_attempts {
                                     tracing::error!(
                                         attempts = reconnect_attempts,

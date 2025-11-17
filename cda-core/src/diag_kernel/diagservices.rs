@@ -241,7 +241,9 @@ impl DiagServiceResponseStruct {
             .map(|data| DiagServiceJsonResponse { data, errors });
         let end = std::time::Instant::now();
 
-        tracing::debug!(mapping_duration = ?{end - start}, "JSON mapping completed");
+        tracing::debug!(
+            mapping_duration = ?{end.saturating_duration_since(start)},
+            "JSON mapping completed");
         mapped_data
     }
 

@@ -15,6 +15,7 @@ use std::{sync::Arc, time::Duration};
 
 use aide::axum::{ApiRouter, routing};
 use axum::{Json, http::StatusCode};
+use cda_comm_doip::config::DoipConfig;
 use cda_sovd::RouteProvider;
 use futures::FutureExt;
 use opensovd_cda_lib::{DatabaseMap, FileManagerMap, config::configfile::ServerConfig};

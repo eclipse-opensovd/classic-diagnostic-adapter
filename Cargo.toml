@@ -118,6 +118,7 @@ similar_names = "allow"
 clone_on_ref_ptr = "warn"
 indexing_slicing = "deny"
 unwrap_used = "deny"
+arithmetic_side_effects = "deny"
 
 [profile.release.package."*"]
 opt-level = 3

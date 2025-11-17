@@ -157,7 +157,12 @@ pub(crate) async fn listen_for_vams<T, F>(
                         Ok(logical_address) => {
                             gateway.logical_address_to_connection.write().await.insert(
                                 logical_address,
-                                gateway.doip_connections.read().await.len() - 1,
+                                gateway
+                                    .doip_connections
+                                    .read()
+                                    .await
+                                    .len()
+                                    .saturating_sub(1),
                             );
                             send_variant_detection(
                                 gateway_ecu_name_map,

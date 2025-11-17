@@ -63,7 +63,7 @@ impl DatabaseNamingConvention {
             if self.long_name_affix_position == DiagnosticServiceAffixPosition::Suffix
                 && long_name_lowercase.ends_with(affix)
             {
-                return long_name[..long_name.len() - affix.len()].to_string();
+                return long_name[..long_name.len().saturating_sub(affix.len())].to_string();
             }
         }
         long_name.to_string()
@@ -85,7 +85,7 @@ impl DatabaseNamingConvention {
             if self.short_name_affix_position == DiagnosticServiceAffixPosition::Suffix
                 && short_name_lowercase.ends_with(affix)
             {
-                return short_name[..short_name.len() - affix.len()].to_string();
+                return short_name[..short_name.len().saturating_sub(affix.len())].to_string();
             }
         }
         short_name.to_string()

@@ -518,7 +518,7 @@ impl<'a> EcuDataBuilder<'a> {
         let physical_default_value_offset = params
             .physical_default_value
             .map(|v| self.fbb.create_string(v));
-        self.max_param_id += 1;
+        self.max_param_id = self.max_param_id.saturating_add(1);
 
         let param_args = dataformat::ParamArgs {
             id: self.max_param_id,
