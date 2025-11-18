@@ -75,34 +75,26 @@ fn compu_lookup(
                 let rational_coefficients = scale.rational_coefficients.as_ref().ok_or(
                     DiagServiceError::InvalidDatabase("Missing rational coefficients".to_owned()),
                 )?;
-                if scale.rational_coefficients.is_some()
-                    && rational_coefficients.numerator.len() == 2
+
+                if rational_coefficients.numerator.len() == 2
                     && rational_coefficients.denominator.is_empty()
                 {
-                    let coeffs = scale.rational_coefficients.as_ref().ok_or(
-                        DiagServiceError::InvalidDatabase(
-                            "Missing rational coefficients".to_owned(),
-                        ),
-                    )?;
                     let lookup_val: f64 = lookup.try_into()?;
-                    let num0 =
-                        *coeffs
-                            .numerator
-                            .first()
-                            .ok_or(DiagServiceError::InvalidDatabase(
-                                "Missing numerator[0]".to_owned(),
-                            ))?;
-                    let num1 =
-                        *coeffs
-                            .numerator
-                            .get(1)
-                            .ok_or(DiagServiceError::InvalidDatabase(
-                                "Missing numerator[1]".to_owned(),
-                            ))?;
+                    let num0 = *rational_coefficients.numerator.first().ok_or(
+                        DiagServiceError::InvalidDatabase("Missing numerator[0]".to_owned()),
+                    )?;
+                    let num1 = *rational_coefficients.numerator.get(1).ok_or(
+                        DiagServiceError::InvalidDatabase("Missing numerator[1]".to_owned()),
+                    )?;
                     let val = num0 + lookup_val * num1;
                     DiagDataValue::from_number(&val, diag_type)
                 } else {
-                    Ok(lookup)
+                    Err(DiagServiceError::InvalidDatabase(format!(
+                        "Invalid linear coefficients expected 2 numerators and 0 denominators, \
+                         got {} numerators and {} denominators",
+                        rational_coefficients.numerator.len(),
+                        rational_coefficients.denominator.len()
+                    )))
                 }
             }
             datatypes::CompuCategory::ScaleLinear => {
@@ -110,31 +102,21 @@ fn compu_lookup(
                     DiagServiceError::InvalidDatabase("Missing rational coefficients".to_owned()),
                 )?;
 
-                if scale.rational_coefficients.is_none()
-                    || rational_coefficients.numerator.len() != 1
+                if rational_coefficients.numerator.len() != 1
                     || rational_coefficients.denominator.len() != 1
                 {
                     return Err(DiagServiceError::UdsLookupError(
                         "Invalid SCALE_LINEAR CoEffs".to_owned(),
                     ));
                 }
-                let coeffs = scale.rational_coefficients.as_ref().ok_or(
-                    DiagServiceError::InvalidDatabase("Missing rational coefficients".to_owned()),
-                )?;
+
                 let lookup_val: f64 = lookup.try_into()?;
-                let num0 = *coeffs
-                    .numerator
-                    .first()
-                    .ok_or(DiagServiceError::InvalidDatabase(
-                        "Missing numerator[0]".to_owned(),
-                    ))?;
-                let denom0 =
-                    *coeffs
-                        .denominator
-                        .first()
-                        .ok_or(DiagServiceError::InvalidDatabase(
-                            "Missing denominator[0]".to_owned(),
-                        ))?;
+                let num0 = *rational_coefficients.numerator.first().ok_or(
+                    DiagServiceError::InvalidDatabase("Missing numerator[0]".to_owned()),
+                )?;
+                let denom0 = *rational_coefficients.denominator.first().ok_or(
+                    DiagServiceError::InvalidDatabase("Missing denominator[0]".to_owned()),
+                )?;
                 let val = lookup_val * num0 / denom0;
                 DiagDataValue::from_number(&val, diag_type)
             }
