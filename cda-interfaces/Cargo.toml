@@ -31,7 +31,6 @@ thiserror = { workspace = true }
 #tokio
 tokio = { workspace = true, features = ["sync"] }
 # runtime size info
-deepsize = { workspace = true, optional = true }
 hex = { workspace = true }
 strum = { workspace = true }
 strum_macros = { workspace = true }
@@ -40,5 +39,4 @@ tracing = { workspace = true }
 
 [features]
 default = []
-deepsize = ["dep:deepsize"]
 tokio-tracing = ["tokio/tracing"]

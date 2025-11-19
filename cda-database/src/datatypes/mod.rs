@@ -19,8 +19,6 @@ use cda_interfaces::{
 };
 pub use comparam::*;
 pub use data_operation::*;
-#[cfg(feature = "deepsize")]
-use deepsize::DeepSizeOf;
 pub use diag_coded_type::*;
 use ouroboros::self_referencing;
 use serde::Serialize;
@@ -371,7 +369,6 @@ impl From<dataformat::LongName<'_>> for LongName {
 }
 
 #[self_referencing]
-#[cfg_attr(feature = "deepsize", derive(DeepSizeOf))]
 #[derive(Debug)]
 struct EcuData {
     blob: Vec<u8>,
@@ -382,7 +379,6 @@ struct EcuData {
 }
 
 #[derive(Debug)]
-#[cfg_attr(feature = "deepsize", derive(DeepSizeOf))]
 pub struct DiagnosticDatabase {
     ecu_database_path: String,
     ecu_data: Option<EcuData>,
@@ -405,7 +401,6 @@ pub enum LogicalAddressType {
 }
 
 #[derive(Debug, Clone)]
-#[cfg_attr(feature = "deepsize", derive(DeepSizeOf))]
 pub struct LongName {
     pub value: Option<String>,
     pub ti: Option<String>,

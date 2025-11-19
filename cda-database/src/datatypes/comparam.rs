@@ -15,8 +15,6 @@ use cda_interfaces::{
     DiagServiceError, HashMap,
     datatypes::{ComParamSimpleValue, ComParamValue, Unit},
 };
-#[cfg(feature = "deepsize")]
-use deepsize::DeepSizeOf;
 
 use crate::flatbuf::diagnostic_description::dataformat;
 

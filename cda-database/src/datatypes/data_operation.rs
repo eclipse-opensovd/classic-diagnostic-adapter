@@ -13,8 +13,6 @@
 
 //
 use cda_interfaces::{DiagServiceError, util::decode_hex};
-#[cfg(feature = "deepsize")]
-use deepsize::DeepSizeOf;
 
 use crate::{datatypes, flatbuf::diagnostic_description::dataformat};
 
@@ -31,7 +29,6 @@ pub enum DataOperationVariant<'a> {
 }
 
 #[derive(Copy, Clone, Debug)]
-#[cfg_attr(feature = "deepsize", derive(DeepSizeOf))]
 pub enum CompuCategory {
     Identical,
     Linear,
@@ -44,19 +41,16 @@ pub enum CompuCategory {
 }
 
 #[derive(Clone, Debug)]
-#[cfg_attr(feature = "deepsize", derive(DeepSizeOf))]
 pub struct CompuMethod {
     pub category: CompuCategory,
     pub internal_to_phys: CompuFunction,
 }
 
 #[derive(Clone, Debug)]
-#[cfg_attr(feature = "deepsize", derive(DeepSizeOf))]
 pub struct CompuFunction {
     pub scales: Vec<CompuScale>,
 }
 #[derive(Clone, Debug)]
-#[cfg_attr(feature = "deepsize", derive(DeepSizeOf))]
 pub struct CompuScale {
     pub lower_limit: Option<Limit>,
     pub upper_limit: Option<Limit>,
@@ -64,14 +58,12 @@ pub struct CompuScale {
     pub consts: Option<CompuValues>,
 }
 #[derive(Clone, Debug)]
-#[cfg_attr(feature = "deepsize", derive(DeepSizeOf))]
 pub struct CompuValues {
     pub v: f64,
     pub vt: Option<String>,
     pub vt_ti: Option<String>,
 }
 #[derive(Clone, Debug)]
-#[cfg_attr(feature = "deepsize", derive(DeepSizeOf))]
 pub struct CompuRationalCoefficients {
     pub numerator: Vec<f64>,
     pub denominator: Vec<f64>,
@@ -150,7 +142,6 @@ impl<'a> From<dataformat::CompuScale<'a>> for CompuScale {
 }
 
 #[derive(Copy, Clone, Debug, PartialEq)]
-#[cfg_attr(feature = "deepsize", derive(DeepSizeOf))]
 pub enum IntervalType {
     Open,
     Closed,
@@ -158,7 +149,6 @@ pub enum IntervalType {
 }
 
 #[derive(Clone, Debug)]
-#[cfg_attr(feature = "deepsize", derive(DeepSizeOf))]
 pub struct Limit {
     /// A limit can be a numeric type, a string or a byte field.
     /// Numeric types are compared numerically

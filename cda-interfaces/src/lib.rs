@@ -56,7 +56,6 @@ pub mod util;
 pub type DynamicPlugin = Box<dyn std::any::Any + Send + Sync>;
 
 #[derive(Debug, Clone)]
-#[cfg_attr(feature = "deepsize", derive(DeepSizeOf))]
 pub enum DiagCommAction {
     Read,
     Write,
@@ -64,7 +63,6 @@ pub enum DiagCommAction {
 }
 
 #[derive(Debug, Clone)]
-#[cfg_attr(feature = "deepsize", derive(DeepSizeOf))]
 pub struct DiagComm {
     pub name: String,
     pub type_: DiagCommType,
@@ -92,7 +90,6 @@ impl From<DiagCommType> for DiagCommAction {
 }
 
 #[derive(Debug, Clone)]
-#[cfg_attr(feature = "deepsize", derive(DeepSizeOf))]
 /// Enum representing diagnostic communication types according to ASAM SOVD.
 ///
 /// Can be mapped to UDS service prefixes with [`DiagCommType::service_prefixes`]
@@ -243,7 +240,6 @@ impl DiagCommType {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-#[cfg_attr(feature = "deepsize", derive(DeepSizeOf))]
 pub enum DiagServiceError {
     /// Returned in case a resource can not be found
     NotFound(Option<String>),
@@ -332,7 +328,6 @@ impl From<DoipGatewaySetupError> for DiagServiceError {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-#[cfg_attr(feature = "deepsize", derive(DeepSizeOf))]
 pub struct DataParseError {
     pub value: String,
     pub details: String,

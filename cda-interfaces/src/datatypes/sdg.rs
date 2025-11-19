@@ -11,12 +11,9 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-#[cfg(feature = "deepsize")]
-use deepsize::DeepSizeOf;
 use serde::Serialize;
 
 #[derive(Debug, Serialize)]
-#[cfg_attr(feature = "deepsize", derive(DeepSizeOf))]
 #[serde(untagged)]
 pub enum SdSdg {
     /// A single special data group
