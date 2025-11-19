@@ -14,15 +14,12 @@
 use std::vec;
 
 use cda_interfaces::{DiagServiceError, util::set_bit_checked};
-#[cfg(feature = "deepsize")]
-use deepsize::DeepSizeOf;
 
 use crate::flatbuf::diagnostic_description::dataformat;
 
 pub type BitLength = u32;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-#[cfg_attr(feature = "deepsize", derive(DeepSizeOf))]
 pub enum DataType {
     Int32,
     UInt32,
@@ -95,7 +92,6 @@ impl TryFrom<dataformat::DataType> for DataType {
 }
 
 #[derive(Debug)]
-#[cfg_attr(feature = "deepsize", derive(DeepSizeOf))]
 pub struct DiagCodedType {
     base_datatype: DataType,
     type_: DiagCodedTypeVariant,
@@ -958,7 +954,6 @@ fn normalize_byte_order(data: &mut [u8], byte_order: ByteOrder) {
 }
 
 #[derive(Debug, PartialEq)]
-#[cfg_attr(feature = "deepsize", derive(DeepSizeOf))]
 pub enum DiagCodedTypeVariant {
     LeadingLengthInfo(BitLength),
     MinMaxLength(MinMaxLengthType),
@@ -1023,7 +1018,6 @@ impl TryFrom<dataformat::DiagCodedType<'_>> for DiagCodedTypeVariant {
 }
 
 #[derive(Debug, PartialEq)]
-#[cfg_attr(feature = "deepsize", derive(DeepSizeOf))]
 pub struct MinMaxLengthType {
     pub min_length: u32,
     pub max_length: Option<u32>,
@@ -1085,7 +1079,6 @@ impl MinMaxLengthType {
 }
 
 #[derive(Debug, PartialEq)]
-#[cfg_attr(feature = "deepsize", derive(DeepSizeOf))]
 pub struct StandardLengthType {
     pub bit_length: BitLength,
     pub bit_mask: Option<Vec<u8>>,
@@ -1093,7 +1086,6 @@ pub struct StandardLengthType {
 }
 
 #[derive(Debug, PartialEq)]
-#[cfg_attr(feature = "deepsize", derive(DeepSizeOf))]
 pub enum Termination {
     EndOfPdu,
     Zero,

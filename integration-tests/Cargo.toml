@@ -24,8 +24,6 @@ cda-plugin-security = { workspace = true }
 opensovd_cda_lib = { workspace = true }
 
 # External dependencies
-# runtime size info
-deepsize = { workspace = true, optional = true }
 # tokio
 tokio = { workspace = true, features = ["rt", "sync", "io-util", "time"] }
 # serde

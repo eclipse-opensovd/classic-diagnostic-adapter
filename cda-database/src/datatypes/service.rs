@@ -15,7 +15,6 @@ use cda_interfaces::DiagServiceError;
 
 use crate::flatbuf::diagnostic_description::dataformat;
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-#[cfg_attr(feature = "deepsize", derive(DeepSizeOf))]
 pub enum ResponseType {
     Positive,
     Negative,

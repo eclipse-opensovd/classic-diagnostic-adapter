@@ -33,9 +33,6 @@ xz2 = { workspace = true, features = ["static"] }
 # logging
 tracing = { workspace = true }
 
-# runtime size info
-deepsize = { workspace = true, optional = true }
-
 # serde
 serde = { workspace = true, features = ["derive"] }
 serde_json = { workspace = true }
@@ -47,7 +44,6 @@ toml = { workspace = true }
 
 [features]
 default = []
-deepsize = ["dep:deepsize"]
 gen-protos = []
 gen-flatbuffers = []
 

@@ -79,13 +79,6 @@ impl Strings {
         }
     }
 
-    #[cfg(feature = "deepsize")]
-    pub fn size(&self) -> usize {
-        let strings = self.strings.read().deep_size_of();
-        let lookup = self.lookup.read().deep_size_of();
-        strings + lookup
-    }
-
     /// Get a `String` by its `StringId` from the strings manager.
     ///
     /// `Strings` locks the internal `Vec` in read mode to allow concurrent reads,
