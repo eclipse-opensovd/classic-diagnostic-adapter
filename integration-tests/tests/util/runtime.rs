@@ -16,7 +16,9 @@ use std::{
     time::{Duration, Instant},
 };
 
+use cda_interfaces::datatypes::{ComParams, DatabaseNamingConvention, FlatbBufConfig};
 use cda_plugin_security::{DefaultSecurityPlugin, DefaultSecurityPluginData};
+use cda_tracing::LoggingConfig;
 use futures::FutureExt as _;
 use opensovd_cda_lib::config::configfile::{ConfigSanity, Configuration};
 use tokio::sync::{Mutex, MutexGuard, OnceCell, mpsc};
@@ -35,7 +37,7 @@ static CDA_SHUTDOWN: LazyLock<Mutex<Option<tokio::sync::broadcast::Sender<()>>>>
 /// As we want to share the webserver over all tests, so we do not have to spin it up every time,
 /// a new static runtime is created in which the webserver task is running.
 static TOKIO_RUNTIME: LazyLock<tokio::runtime::Runtime> =
-    LazyLock::new(|| tokio::runtime::Runtime::new().unwrap());
+    LazyLock::new(|| tokio::runtime::Runtime::new().expect("Failed to create Tokio runtime"));
 
 static ECU_SIM_PROCESS: LazyLock<Mutex<Option<std::process::Child>>> =
     LazyLock::new(|| Mutex::new(None));
@@ -82,11 +84,12 @@ pub(crate) async fn setup_integration_test<'a>(
 
 async fn initialize_runtime() -> Result<TestRuntime, TestingError> {
     let tracing = cda_tracing::new();
-    let mut layers = vec![];
-    layers.push(cda_tracing::new_term_subscriber(
+    let layers = vec![cda_tracing::new_term_subscriber(
         &cda_tracing::LoggingConfig::default(),
-    ));
-    cda_tracing::init_tracing(tracing.with(layers)).unwrap();
+    )];
+    cda_tracing::init_tracing(tracing.with(layers)).map_err(|e| {
+        TestingError::SetupError(format!("Failed to initialize tracing for tests: {e}"))
+    })?;
 
     // If docker is disabled, we run the sim and cda locally
     // this is useful for debugging tests
@@ -94,13 +97,13 @@ async fn initialize_runtime() -> Result<TestRuntime, TestingError> {
     let use_docker = std::env::var(CDA_INTEGRATION_TEST_USE_DOCKER)
         .map(|s| s == "true")
         .unwrap_or(true);
-    let host = if !use_docker {
+    let host = if use_docker {
+        "0.0.0.0".to_owned()
+    } else {
         // Allow overriding the tester address when not using docker.
         // This is useful, as on some systems, using 127.0.0.1 or 0.0.0.0 does not work properly
         // and the CDA will not reach the sim.
         std::env::var(CDA_INTEGRATION_TEST_TESTER_ADDRESS).unwrap_or("0.0.0.0".to_owned())
-    } else {
-        "0.0.0.0".to_owned()
     };
 
     let (cda_port, gateway_port, sim_control_port) = if use_docker {
@@ -125,15 +128,17 @@ async fn initialize_runtime() -> Result<TestRuntime, TestingError> {
             tester_subnet: "255.255.0.0".to_owned(),
             gateway_port,
         },
-        logging: Default::default(),
+        logging: LoggingConfig::default(),
         onboard_tester: true,
         databases_path,
-        flash_files_path: "".to_string(),
-        com_params: Default::default(),
-        database_naming_convention: Default::default(),
-        flat_buf: Default::default(),
+        flash_files_path: String::default(),
+        com_params: ComParams::default(),
+        database_naming_convention: DatabaseNamingConvention::default(),
+        flat_buf: FlatbBufConfig::default(),
     };
-    config.validate_sanity().unwrap();
+    config.validate_sanity().map_err(|e| {
+        TestingError::SetupError(format!("Configuration sanity check failed: {e:?}"))
+    })?;
     let ecu_sim = EcuSim {
         host: host.clone(),
         control_port: sim_control_port,
@@ -144,7 +149,7 @@ async fn initialize_runtime() -> Result<TestRuntime, TestingError> {
         start_docker_compose(cda_port, gateway_port, sim_control_port)?;
     } else {
         start_ecu_sim(&ecu_sim).await?;
-        start_cda(config.clone()).await;
+        start_cda(config.clone());
     }
 
     wait_for_cda_online(&config).await?;
@@ -152,7 +157,7 @@ async fn initialize_runtime() -> Result<TestRuntime, TestingError> {
     Ok(TestRuntime { config, ecu_sim })
 }
 
-async fn start_cda(config: Configuration) {
+fn start_cda(config: Configuration) {
     // Some unwraps are used here, this is on purpose
     // as we want the tests to fail hard if CDA fails to start.
     TOKIO_RUNTIME.spawn(async move {
@@ -319,9 +324,8 @@ fn write_docker_env_file(
     let env_file_path = test_container_dir.join(".env");
     let env_content = format!(
         "# Auto-generated environment file for integration tests\n# ECU Simulator Control \
-         Port\nSIM_CONTROL_PORT={}\n# ECU Simulator Gateway Port\nSIM_GATEWAY_PORT={}\n# CDA \
-         Service Port\nCDA_PORT={}\n",
-        sim_control_port, gateway_port, cda_port
+         Port\nSIM_CONTROL_PORT={sim_control_port}\n# ECU Simulator Gateway \
+         Port\nSIM_GATEWAY_PORT={gateway_port}\n# CDA Service Port\nCDA_PORT={cda_port}\n",
     );
 
     std::fs::write(&env_file_path, env_content)
@@ -338,7 +342,8 @@ pub(crate) async fn start_ecu_sim(sim: &EcuSim) -> Result<(), TestingError> {
         let ecu_sim_dir = ecu_sim_dir()?;
         if !ecu_sim_dir.exists() {
             return Err(TestingError::PathNotFound(format!(
-                "ecu-sim run script not found at {ecu_sim_dir:?}"
+                "ecu-sim run script not found at {}",
+                ecu_sim_dir.display()
             )));
         }
 
@@ -390,7 +395,7 @@ pub(crate) async fn restart_cda(config: &Configuration) -> Result<(), TestingErr
         docker_compose_restart(Some("cda".to_owned()))?;
     } else {
         stop_cda().await?;
-        start_cda(config.clone()).await;
+        start_cda(config.clone());
     }
     wait_for_cda_online(config).await
 }
@@ -443,12 +448,7 @@ fn mdd_file_path() -> Result<String, TestingError> {
             .ok()
             .and_then(|entries| {
                 entries.filter_map(Result::ok).find(|entry| {
-                    entry
-                        .path()
-                        .extension()
-                        .and_then(|ext| ext.to_str())
-                        .map(|ext| ext == "mdd")
-                        .unwrap_or(false)
+                    entry.path().extension().and_then(|ext| ext.to_str()) == Some("mdd")
                 })
             })
             .is_some()
@@ -457,7 +457,8 @@ fn mdd_file_path() -> Result<String, TestingError> {
     let odx_path = test_container_dir()?.join("odx");
     if !odx_path.exists() {
         return Err(TestingError::PathNotFound(format!(
-            "odx directory not found at {odx_path:?}"
+            "odx directory not found at {}",
+            odx_path.display()
         )));
     }
 
@@ -503,12 +504,10 @@ fn register_cleanup() {
 
         if use_docker {
             if let Err(e) = docker_compose_down(None) {
-                eprintln!("Failed to stop docker compose: {}", e);
+                eprintln!("Failed to stop docker compose: {e}");
             }
-        } else {
-            if let Err(e) = stop_ecu_sim_sync() {
-                eprintln!("Failed to stop ecu-sim: {}", e);
-            }
+        } else if let Err(e) = stop_ecu_sim_sync() {
+            eprintln!("Failed to stop ecu-sim: {e}");
         }
     }
     unsafe {
@@ -520,9 +519,9 @@ fn check_command_success(
     status: std::process::ExitStatus,
     error_msg: &str,
 ) -> Result<(), TestingError> {
-    if !status.success() {
-        Err(TestingError::ProcessFailed(error_msg.to_owned()))
-    } else {
+    if status.success() {
         Ok(())
+    } else {
+        Err(TestingError::ProcessFailed(error_msg.to_owned()))
     }
 }

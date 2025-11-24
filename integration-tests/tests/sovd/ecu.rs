@@ -31,6 +31,7 @@ use crate::{
     },
 };
 
+#[allow(clippy::too_many_lines)] // makes sense to keep test together
 #[tokio::test]
 async fn test_ecu_session_switching() {
     let (runtime, _lock) = setup_integration_test(true).await.unwrap();
@@ -94,7 +95,7 @@ async fn test_ecu_session_switching() {
 
     let switch_session_result = switch_session(
         "extended",
-        &&runtime.config,
+        &runtime.config,
         &auth,
         ecu_endpoint,
         StatusCode::OK,
@@ -156,6 +157,10 @@ async fn test_ecu_session_switching() {
     // including service id and prefix. Which has to be skipped for the key calculation.
     // In the ecu sim it's hard coded that we have to add 13 to each byte of the seed.
     // So we do that here to generate the correct key.
+    // The allowed clippy warnings are because we are intentionally doing wrapping arithmetic
+    // to match the kotlin implementation in the ecu sim.
+    #[allow(clippy::cast_sign_loss)]
+    #[allow(clippy::cast_possible_wrap)]
     let key = seed_response
         .seed
         .request_seed
@@ -224,7 +229,7 @@ async fn test_variant_detection_duplicates() {
         .unwrap();
 
     validate_ecu_state(
-        &runtime,
+        runtime,
         &auth,
         sovd::ECU_FLXC1000_ENDPOINT,
         sovd_interfaces::components::ecu::State::Duplicate,
@@ -232,7 +237,7 @@ async fn test_variant_detection_duplicates() {
     .await;
 
     validate_ecu_state(
-        &runtime,
+        runtime,
         &auth,
         sovd::ECU_FLXCNG1000_ENDPOINT,
         sovd_interfaces::components::ecu::State::Online,
@@ -247,14 +252,14 @@ async fn test_variant_detection_duplicates() {
         .await
         .unwrap();
     validate_ecu_state(
-        &runtime,
+        runtime,
         &auth,
         sovd::ECU_FLXC1000_ENDPOINT,
         sovd_interfaces::components::ecu::State::NoVariantDetected,
     )
     .await;
     validate_ecu_state(
-        &runtime,
+        runtime,
         &auth,
         sovd::ECU_FLXCNG1000_ENDPOINT,
         sovd_interfaces::components::ecu::State::NoVariantDetected,
@@ -268,14 +273,14 @@ async fn test_variant_detection_duplicates() {
         .unwrap();
 
     validate_ecu_state(
-        &runtime,
+        runtime,
         &auth,
         sovd::ECU_FLXC1000_ENDPOINT,
         sovd_interfaces::components::ecu::State::Disconnected,
     )
     .await;
     validate_ecu_state(
-        &runtime,
+        runtime,
         &auth,
         sovd::ECU_FLXCNG1000_ENDPOINT,
         sovd_interfaces::components::ecu::State::Disconnected,
@@ -285,14 +290,14 @@ async fn test_variant_detection_duplicates() {
     // restart CDA while sim is offline and check if ECUs are marked as offline
     restart_cda(&runtime.config).await.unwrap();
     validate_ecu_state(
-        &runtime,
+        runtime,
         &auth,
         sovd::ECU_FLXC1000_ENDPOINT,
         sovd_interfaces::components::ecu::State::Offline,
     )
     .await;
     validate_ecu_state(
-        &runtime,
+        runtime,
         &auth,
         sovd::ECU_FLXCNG1000_ENDPOINT,
         sovd_interfaces::components::ecu::State::Offline,
@@ -306,14 +311,14 @@ async fn test_variant_detection_duplicates() {
     restart_cda(&runtime.config).await.unwrap();
 
     validate_ecu_state(
-        &runtime,
+        runtime,
         &auth,
         sovd::ECU_FLXC1000_ENDPOINT,
         sovd_interfaces::components::ecu::State::Online,
     )
     .await;
     validate_ecu_state(
-        &runtime,
+        runtime,
         &auth,
         sovd::ECU_FLXCNG1000_ENDPOINT,
         sovd_interfaces::components::ecu::State::Duplicate,
@@ -327,7 +332,9 @@ async fn validate_ecu_state(
     ecu: &str,
     expected_state: sovd_interfaces::components::ecu::State,
 ) {
-    let ecu_status = ecu_status(&runtime.config, &auth, ecu).await.unwrap();
+    let ecu_status = ecu_status(&runtime.config, auth, ecu)
+        .await
+        .expect("failed to get ecu status");
     assert_eq!(
         ecu_status.variant.state, expected_state,
         "ECU {ecu} state does not match {ecu_status:?}"
@@ -425,9 +432,8 @@ async fn put_mode<T: DeserializeOwned, S: Serialize>(
     request: S,
     excepted_status: StatusCode,
 ) -> Result<Option<T>, TestingError> {
-    let request_body = serde_json::to_string(&request).map_err(|e| {
-        TestingError::InvalidData(format!("Failed to serialize request body: {}", e))
-    })?;
+    let request_body = serde_json::to_string(&request)
+        .map_err(|e| TestingError::InvalidData(format!("Failed to serialize request body: {e}")))?;
     let http_response = send_cda_request(
         config,
         &format!("{ecu_endpoint}/modes/{sub_path}"),
@@ -468,12 +474,12 @@ async fn ecu_status(
     ecu_endpoint: &str,
 ) -> Result<sovd_interfaces::components::ecu::get::Response, TestingError> {
     let http_response = send_cda_request(
-        &config,
+        config,
         ecu_endpoint,
         StatusCode::OK,
         Method::GET,
         None,
-        Some(&headers),
+        Some(headers),
     )
     .await?;
     response_to_t(&http_response)
@@ -485,12 +491,12 @@ async fn force_variant_detection(
     ecu_endpoint: &str,
 ) -> Result<(), TestingError> {
     send_cda_request(
-        &config,
+        config,
         ecu_endpoint,
         StatusCode::CREATED,
         Method::PUT,
         None,
-        Some(&headers),
+        Some(headers),
     )
     .await?;
     Ok(())

@@ -43,6 +43,8 @@ pub enum TestingError {
     InvalidUrl(String),
     #[error("Timeout: {0}")]
     Timeout(String),
+    #[error("Failed to setup the test environment: {0}")]
+    SetupError(String),
 }
 
 impl From<url::ParseError> for TestingError {

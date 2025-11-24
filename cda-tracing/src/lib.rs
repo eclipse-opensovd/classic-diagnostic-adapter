@@ -194,6 +194,9 @@ pub fn new_otel_subscriber<
     Ok((guard, metrics_layer.boxed(), otel_layer.boxed()))
 }
 
+/// Creates a new Tokio Tracing subscriber layer.
+/// # Errors
+/// Returns an error if the socket address cannot be parsed.
 #[cfg(feature = "tokio-tracing")]
 pub fn new_tokio_tracing<S: tracing_core::Subscriber + for<'a> LookupSpan<'a>>(
     config: &TokioTracingConfig,
@@ -204,7 +207,7 @@ pub fn new_tokio_tracing<S: tracing_core::Subscriber + for<'a> LookupSpan<'a>>(
         TracingSetupError::ResourceCreationFailed(format!("Invalid server address: {e}"))
     })?;
 
-    println!("Starting tokio tracing server at {}", server_addr);
+    println!("Starting tokio tracing server at {server_addr}");
     let mut builder = console_subscriber::ConsoleLayer::builder()
         .retention(config.retention)
         .server_addr(server_addr);

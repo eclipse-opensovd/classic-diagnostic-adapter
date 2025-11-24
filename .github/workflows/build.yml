@@ -49,8 +49,10 @@ jobs:
       - name: run clippy nightly
         run: cargo clippy --all-targets -- -D warnings
 
-  codegen:
+  all-features:
     runs-on: ubuntu-latest
+    env:
+      RUSTFLAGS: "--cfg tokio_unstable"
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
@@ -59,30 +61,16 @@ jobs:
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@master
         with:
-          toolchain: 1.88.0
+          toolchain: nightly-2025-07-14
+          components: clippy
+      - name: Cache Rust dependencies
+        uses: Swatinem/rust-cache@v2
       - name: Install Protoc
         uses: arduino/setup-protoc@v3
-      - name: Build with codegen
-        run: cargo build --locked --verbose --features gen-flatbuffers,gen-protos
-
-  features:
-    runs-on: ubuntu-latest
-    strategy:
-      matrix:
-        feature-set:
-          - "tokio-tracing"
-          - "auth"
-    steps:
-      - name: Checkout repository
-        uses: actions/checkout@v4
-        with:
-          submodules: false
-      - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@master
-        with:
-          toolchain: 1.88.0
-      - name: Build with features
-        run: cargo build --locked --verbose --features "${{ matrix.feature-set }}"
+      - name: Clippy
+        run: cargo clippy --locked --all-targets --all-features -- -D warnings
+      - name: Build
+        run: cargo build --locked --verbose --all-features
 
   build_and_test:
     runs-on: ubuntu-latest
