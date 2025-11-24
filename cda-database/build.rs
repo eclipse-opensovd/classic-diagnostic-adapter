@@ -12,7 +12,7 @@
  */
 
 #[cfg(any(feature = "gen-protos", feature = "gen-flatbuffers"))]
-const COPYRIGHT_HEADER: &str = r#"/*
+const COPYRIGHT_HEADER: &str = r"/*
  * Copyright (c) 2025 The Contributors to Eclipse OpenSOVD (see CONTRIBUTORS)
  *
  * See the NOTICE file(s) distributed with this work for additional
@@ -25,17 +25,17 @@ const COPYRIGHT_HEADER: &str = r#"/*
  * SPDX-License-Identifier: Apache-2.0
  */
 
-"#;
+";
 #[cfg(any(feature = "gen-protos", feature = "gen-flatbuffers"))]
 fn prepend_copyright(file_path: &str) -> std::io::Result<()> {
     let content = std::fs::read_to_string(file_path)?;
-    let new_content = format!("{}{}", COPYRIGHT_HEADER, content);
+    let new_content = format!("{COPYRIGHT_HEADER}{content}");
     std::fs::write(file_path, new_content)?;
     Ok(())
 }
 
 /// Build script for generating Rust code from Protocol Buffers definitions.
-/// prost_build places the generated files in OUT_DIR.
+/// `prost_build` places the generated files in `OUT_DIR`.
 /// This build script copies the generated files to the `src/proto/` directory
 /// so they can be checked into the repository.
 #[cfg(feature = "gen-protos")]
@@ -55,7 +55,7 @@ fn generate_protos() -> std::io::Result<()> {
     Ok(())
 }
 
-/// Retrieve FlatBuffers git repository and revision from workspace Cargo.toml
+/// Retrieve `FlatBuffers` git repository and revision from workspace Cargo.toml
 #[cfg(feature = "gen-flatbuffers")]
 fn get_flatbuffers_info() -> std::io::Result<(String, String)> {
     let workspace_manifest = std::env::var("CARGO_MANIFEST_DIR")
@@ -89,9 +89,16 @@ fn get_flatbuffers_info() -> std::io::Result<(String, String)> {
         })?;
 
     match flatbuffers.detail() {
-        Some(detail) if detail.git.is_some() && detail.rev.is_some() => {
-            Ok((detail.git.clone().unwrap(), detail.rev.clone().unwrap()))
-        }
+        Some(detail) if detail.git.is_some() && detail.rev.is_some() => Ok((
+            detail
+                .git
+                .clone()
+                .expect("Unable to fetch git url from dependency"),
+            detail
+                .rev
+                .clone()
+                .expect("Unable to fetch git url from dependency"),
+        )),
         _ => Err(std::io::Error::new(
             std::io::ErrorKind::NotFound,
             "flatbuffers git/rev not found in patch.crates-io",
@@ -106,11 +113,15 @@ fn generate_flatbuffers() -> std::io::Result<()> {
 
     if !flatc_dir.exists() {
         std::process::Command::new("git")
-            .args(&["clone", &flatc_repo, flatc_dir.to_str().unwrap()])
+            .args([
+                "clone",
+                &flatc_repo,
+                flatc_dir.to_str().expect("Invalid flatc path"),
+            ])
             .status()?;
 
         std::process::Command::new("git")
-            .args(&["checkout", &flatc_rev])
+            .args(["checkout", &flatc_rev])
             .current_dir(&flatc_dir)
             .status()?;
     }
@@ -121,12 +132,12 @@ fn generate_flatbuffers() -> std::io::Result<()> {
     // Build flatc
     if !flatc_binary.exists() {
         std::process::Command::new("cmake")
-            .args(&["-B", flatc_build_dir, "-S", "."])
+            .args(["-B", flatc_build_dir, "-S", "."])
             .current_dir(&flatc_dir)
             .status()?;
 
         std::process::Command::new("cmake")
-            .args(&["--build", flatc_build_dir, "--target", flatc_target])
+            .args(["--build", flatc_build_dir, "--target", flatc_target])
             .current_dir(&flatc_dir)
             .status()?;
     }
@@ -137,14 +148,11 @@ fn generate_flatbuffers() -> std::io::Result<()> {
     let schema_path = format!("{output_dir}{schema_name}.fbs");
 
     let status = std::process::Command::new(&flatc_binary)
-        .args(&["--rust", "-o", output_dir, &schema_path])
+        .args(["--rust", "-o", output_dir, &schema_path])
         .status()?;
 
     if !status.success() {
-        return Err(std::io::Error::new(
-            std::io::ErrorKind::Other,
-            "flatc compilation failed",
-        ));
+        return Err(std::io::Error::other("flatc compilation failed"));
     }
 
     let generated_file = format!("{output_dir}{schema_name}_generated.rs");
@@ -158,12 +166,7 @@ fn generate_flatbuffers() -> std::io::Result<()> {
 #[cfg(any(feature = "gen-protos", feature = "gen-flatbuffers"))]
 fn out_dir() -> Result<String, std::io::Error> {
     let out_dir = std::env::var_os("OUT_DIR")
-        .ok_or_else(|| {
-            std::io::Error::new(
-                std::io::ErrorKind::Other,
-                "OUT_DIR environment variable is not set",
-            )
-        })?
+        .ok_or_else(|| std::io::Error::other("OUT_DIR environment variable is not set"))?
         .into_string()
         .expect("OUT_DIR is not valid UTF-8");
     Ok(out_dir)

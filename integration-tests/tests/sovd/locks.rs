@@ -221,11 +221,19 @@ async fn ownership() -> Result<(), TestingError> {
         assert_eq!(lock_list_user_1.items.len(), 1);
         assert_eq!(lock_list_user_2.items.len(), 1);
 
-        assert_eq!(lock_list_user_1.items[0].id, lock_id);
-        assert_eq!(lock_list_user_2.items[0].id, lock_id);
+        let item_user_1 = lock_list_user_1
+            .items
+            .iter()
+            .find(|e| e.id == lock_id)
+            .unwrap_or_else(|| panic!("Owner lock id {lock_id} not found"));
+        let item_user_2 = lock_list_user_2
+            .items
+            .iter()
+            .find(|e| e.id == lock_id)
+            .unwrap_or_else(|| panic!("Other user lock id {lock_id} not found"));
 
-        assert!(lock_list_user_1.items[0].owned);
-        assert!(!lock_list_user_2.items[0].owned);
+        assert!(item_user_1.owned);
+        assert!(!item_user_2.owned);
 
         lock_operation(
             endpoint,
@@ -237,7 +245,6 @@ async fn ownership() -> Result<(), TestingError> {
         )
         .await;
 
-        // check if user 2 now can create locks
         let lock_id: String = response_to_json_to_field(
             &create_lock(
                 default_timeout(),
@@ -250,7 +257,13 @@ async fn ownership() -> Result<(), TestingError> {
             "id",
         )?;
         let lock_list_user_2: LockList = get_lock_list(&auth_other).await?;
-        assert!(lock_list_user_2.items[0].owned);
+        let item_user_2 = lock_list_user_2
+            .items
+            .iter()
+            .find(|e| e.id == lock_id)
+            .unwrap_or_else(|| panic!("After delete, user 2 lock id {lock_id} not found"));
+        assert!(item_user_2.owned);
+
         lock_operation(
             endpoint,
             Some(&lock_id),
@@ -287,7 +300,7 @@ pub(crate) async fn lock_operation(
     );
     send_cda_request(config, &lock_endpoint, status, method, None, Some(headers))
         .await
-        .unwrap()
+        .expect("lock operation failed")
 }
 
 pub(crate) async fn create_lock(
@@ -310,7 +323,7 @@ pub(crate) async fn create_lock(
         Some(auth),
     )
     .await
-    .unwrap()
+    .expect("Failed to create lock")
 }
 
 fn default_timeout() -> Duration {

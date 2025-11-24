@@ -21,7 +21,7 @@ pub(crate) async fn switch_variant(
 ) -> Result<(), TestingError> {
     let mut url = sim_endpoint(sim)?;
     url.path_segments_mut()
-        .map_err(|_| TestingError::InvalidUrl("cannot modify URL path".to_owned()))?
+        .map_err(|()| TestingError::InvalidUrl("cannot modify URL path".to_owned()))?
         .push(ecu)
         .push("state");
 

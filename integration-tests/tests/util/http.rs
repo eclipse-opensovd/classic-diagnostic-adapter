@@ -82,7 +82,7 @@ pub(crate) fn extract_field_from_json<T: DeserializeOwned + std::fmt::Debug>(
                         std::any::type_name::<T>()
                     )
                 })
-                .map_err(|e| TestingError::InvalidData(e.to_string()))
+                .map_err(TestingError::InvalidData)
         },
     )
 }
@@ -133,7 +133,7 @@ pub(crate) async fn send_cda_json_request(
         );
         headers
     } else {
-        headers.unwrap().clone()
+        headers.map_or_else(HeaderMap::new, Clone::clone)
     };
 
     send_cda_request(
