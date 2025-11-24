@@ -197,13 +197,12 @@ pub fn new_otel_subscriber<
 #[cfg(feature = "tokio-tracing")]
 pub fn new_tokio_tracing<S: tracing_core::Subscriber + for<'a> LookupSpan<'a>>(
     config: &TokioTracingConfig,
-) -> Result<BoxedLayer<S>, String> {
+) -> Result<BoxedLayer<S>, TracingSetupError> {
     use std::net::SocketAddr;
 
-    let server_addr: SocketAddr = config
-        .server
-        .parse()
-        .map_err(|e| format!("Invalid server address: {e}"))?;
+    let server_addr: SocketAddr = config.server.parse().map_err(|e| {
+        TracingSetupError::ResourceCreationFailed(format!("Invalid server address: {e}"))
+    })?;
 
     println!("Starting tokio tracing server at {}", server_addr);
     let mut builder = console_subscriber::ConsoleLayer::builder()

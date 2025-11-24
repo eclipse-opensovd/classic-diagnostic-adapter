@@ -65,6 +65,24 @@ jobs:
       - name: Build with codegen
         run: cargo build --locked --verbose --features gen-flatbuffers,gen-protos
 
+  features:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        feature-set:
+          - "tokio-tracing"
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          submodules: false
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: 1.88.0
+      - name: Build with features
+        run: cargo build --locked --verbose --features "${{ matrix.feature-set }}"
+
   build_and_test:
     runs-on: ubuntu-latest
 
