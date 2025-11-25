@@ -16,7 +16,10 @@ use std::{
     time::{Duration, Instant},
 };
 
-use cda_interfaces::datatypes::{ComParams, DatabaseNamingConvention, FlatbBufConfig};
+use cda_interfaces::{
+    FunctionalDescriptionConfig,
+    datatypes::{ComParams, DatabaseNamingConvention, FlatbBufConfig},
+};
 use cda_plugin_security::{DefaultSecurityPlugin, DefaultSecurityPluginData};
 use cda_sovd::DefaultRouteProvider;
 use cda_tracing::LoggingConfig;
@@ -126,6 +129,7 @@ async fn initialize_runtime() -> Result<TestRuntime, TestingError> {
         com_params: ComParams::default(),
         database_naming_convention: DatabaseNamingConvention::default(),
         flat_buf: FlatbBufConfig::default(),
+        functional_description: FunctionalDescriptionConfig::default(),
     };
     config.validate_sanity().map_err(|e| {
         TestingError::SetupError(format!("Configuration sanity check failed: {e:?}"))
@@ -176,6 +180,7 @@ fn start_cda(config: Configuration) {
                 config.com_params,
                 config.database_naming_convention,
                 config.flat_buf,
+                &config.functional_description,
             )
             .await;
 
@@ -224,6 +229,7 @@ fn start_cda(config: Configuration) {
             flash_files_path,
             file_managers,
             webserver_config,
+            config.functional_description,
             uds,
             clonable_shutdown_signal,
             None,

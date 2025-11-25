@@ -20,8 +20,8 @@ use axum::{
     middleware, routing,
 };
 use cda_interfaces::{
-    DoipGatewaySetupError, HashMap, SchemaProvider, UdsEcu, diagservices::DiagServiceResponse,
-    dlt_ctx, file_manager::FileManager,
+    DoipGatewaySetupError, FunctionalDescriptionConfig, HashMap, SchemaProvider, UdsEcu,
+    diagservices::DiagServiceResponse, dlt_ctx, file_manager::FileManager,
 };
 use cda_plugin_security::SecurityPluginLoader;
 use futures::future::FutureExt;
@@ -137,16 +137,9 @@ impl RouteProvider for DefaultRouteProvider {
 /// being in use or an error when initializing the `DoIP` gateway.
 // type alias does not allow specifying hasher, we set the hasher globally.
 #[allow(clippy::implicit_hasher)]
-#[tracing::instrument(
-    skip(config, ecu_uds, file_manager, shutdown_signal, additional_routes_provider),
-    fields(
-        host = %config.host,
-        port = %config.port,
-        flash_files_path = %flash_files_path
-    )
-)]
 pub async fn launch_webserver<F, R, T, M, S, U>(
-    config: WebServerConfig,
+    server_config: WebServerConfig,
+    functional_description_config: FunctionalDescriptionConfig,
     ecu_uds: T,
     flash_files_path: String,
     file_manager: HashMap<String, M>,
@@ -182,7 +175,15 @@ where
     // Main application routes (with NormalizePathLayer)
     let app_routes = {
         let app = Router::new()
-            .merge(sovd::route::<R, T, M, S>(&ecu_uds, flash_files_path, file_manager).await)
+            .merge(
+                sovd::route::<R, T, M, S>(
+                    functional_description_config,
+                    &ecu_uds,
+                    flash_files_path,
+                    file_manager,
+                )
+                .await,
+            )
             .merge(additional_routes_provider.map_or_else(Router::new, |_| {
                 let router = Router::new();
                 U::register_custom_routes(router)
@@ -215,7 +216,7 @@ where
         tower_http::normalize_path::NormalizePathLayer::trim_trailing_slash().layer(app_routes);
     let app_with_middleware = middleware.layer(trim_trailing_slash_middleware);
 
-    let listen_address = format!("{}:{}", config.host, config.port);
+    let listen_address = format!("{}:{}", server_config.host, server_config.port);
     match TcpListener::bind(&listen_address).await {
         Ok(listener) => {
             tracing::info!(listen_address = %listen_address, "Server listening");
