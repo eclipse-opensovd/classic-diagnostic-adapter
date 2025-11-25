@@ -29,7 +29,7 @@ use cda_interfaces::{
         ExtendedSnapshots, Gateway, NetworkStructure, RetryPolicy,
     },
     diagservices::{DiagServiceResponse, DiagServiceResponseType, UdsPayloadData},
-    service_ids,
+    dlt_ctx, service_ids,
 };
 use strum::IntoEnumIterator;
 use tokio::{
@@ -128,7 +128,12 @@ impl<S: EcuGateway, R: DiagServiceResponse, T: EcuManager<Response = R>> UdsMana
 
     #[tracing::instrument(
         skip(self, service, payload),
-        fields(ecu_name, service_name = %service.name, has_payload = payload.is_some())
+        fields(
+            ecu_name,
+            service_name = %service.name,
+            has_payload = payload.is_some(),
+            dlt_context = dlt_ctx!("UDS")
+        )
     )]
     async fn send_with_optional_timeout(
         &self,
@@ -188,7 +193,10 @@ impl<S: EcuGateway, R: DiagServiceResponse, T: EcuManager<Response = R>> UdsMana
     #[allow(clippy::too_many_lines)]
     #[tracing::instrument(
         skip(self, payload),
-        fields(ecu_name, expect_response, payload_size = payload.data.len())
+        fields(ecu_name,
+            expect_response,
+            payload_size = payload.data.len(),
+            dlt_context = dlt_ctx!("UDS"))
     )]
     async fn send_with_raw_payload(
         &self,
@@ -405,7 +413,11 @@ impl<S: EcuGateway, R: DiagServiceResponse, T: EcuManager<Response = R>> UdsMana
 
     #[tracing::instrument(
         skip(self, request, status_sender, reader),
-        fields(ecu_name, transfer_length = length, request_name = %request.name)
+        fields(
+            ecu_name,
+            transfer_length = length,
+            request_name = %request.name,
+            dlt_context = dlt_ctx!("UDS"))
     )]
     async fn transfer_ecu_data(
         &self,
@@ -550,6 +562,9 @@ impl<S: EcuGateway, R: DiagServiceResponse, T: EcuManager<Response = R>> UdsMana
         }
     }
 
+    #[tracing::instrument(skip_all,
+        fields(dlt_context = dlt_ctx!("UDS"))
+    )]
     fn start_variant_detection_for_ecus(&self, ecus: Vec<String>) {
         for ecu_name in ecus {
             let vd = self.clone();
@@ -934,6 +949,9 @@ impl<S: EcuGateway, R: DiagServiceResponse, T: EcuManager<Response = R>> UdsEcu
         self.ecus.keys().cloned().collect()
     }
 
+    #[tracing::instrument(skip_all,
+        fields(dlt_context = dlt_ctx!("UDS"))
+    )]
     async fn get_network_structure(&self) -> NetworkStructure {
         // it seems that an &u16 doesn't implement into for u16
         // this caused an issue with uds.entry_ref(...).or_insert(...)
@@ -1006,6 +1024,10 @@ impl<S: EcuGateway, R: DiagServiceResponse, T: EcuManager<Response = R>> UdsEcu
         }
     }
 
+    #[tracing::instrument(
+        skip_all,
+        fields(dlt_context = dlt_ctx!("UDS"))
+    )]
     async fn send_genericservice(
         &self,
         ecu_name: &str,
@@ -1133,6 +1155,9 @@ impl<S: EcuGateway, R: DiagServiceResponse, T: EcuManager<Response = R>> UdsEcu
         .await
     }
 
+    #[tracing::instrument(skip_all,
+        fields(dlt_context = dlt_ctx!("UDS"))
+    )]
     async fn set_ecu_session(
         &self,
         ecu_name: &str,
@@ -1422,7 +1447,11 @@ impl<S: EcuGateway, R: DiagServiceResponse, T: EcuManager<Response = R>> UdsEcu
             .ok_or(DiagServiceError::NotFound(None))
     }
 
-    #[tracing::instrument(skip(self), err)]
+    #[tracing::instrument(skip(self), err,
+        fields(
+            dlt_context = dlt_ctx!("UDS")
+        )
+    )]
     async fn detect_variant(&self, ecu_name: &str) -> Result<(), DiagServiceError> {
         let ecu = self.ecu_manager(ecu_name)?;
 
@@ -1550,6 +1579,9 @@ impl<S: EcuGateway, R: DiagServiceResponse, T: EcuManager<Response = R>> UdsEcu
         Ok(variant)
     }
 
+    #[tracing::instrument(skip_all,
+        fields(dlt_context = dlt_ctx!("UDS"))
+    )]
     async fn start_variant_detection(&self) {
         let mut ecus = Vec::new();
         for (ecu_name, db) in self.ecus.iter() {
@@ -1735,6 +1767,9 @@ impl<S: EcuGateway, R: DiagServiceResponse, T: EcuManager<Response = R>> UdsEcu
         })
     }
 
+    #[tracing::instrument(skip_all,
+        fields(dlt_context = dlt_ctx!("UDS"))
+    )]
     async fn start_tester_present(&self, type_: TesterPresentType) -> Result<(), DiagServiceError> {
         match type_ {
             TesterPresentType::Ecu(ref ecu_name) => {
@@ -1771,6 +1806,9 @@ impl<S: EcuGateway, R: DiagServiceResponse, T: EcuManager<Response = R>> UdsEcu
         }
     }
 
+    #[tracing::instrument(skip_all,
+        fields(dlt_context = dlt_ctx!("UDS"))
+    )]
     async fn stop_tester_present(&self, type_: TesterPresentType) -> Result<(), DiagServiceError> {
         match type_ {
             TesterPresentType::Ecu(ref ecu_name) => {
@@ -1933,6 +1971,9 @@ impl<S: EcuGateway, R: DiagServiceResponse, T: EcuManager<Response = R>> SchemaP
     }
 }
 
+#[tracing::instrument(skip_all,
+    fields(dlt_context = dlt_ctx!("UDS"))
+)]
 fn validate_timeout_by_policy(
     ecu_name: &str,
     policy: &RetryPolicy,

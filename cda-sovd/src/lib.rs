@@ -21,7 +21,7 @@ use axum::{
 };
 use cda_interfaces::{
     DoipGatewaySetupError, HashMap, SchemaProvider, UdsEcu, diagservices::DiagServiceResponse,
-    file_manager::FileManager,
+    dlt_ctx, file_manager::FileManager,
 };
 use cda_plugin_security::SecurityPluginLoader;
 use futures::future::FutureExt;
@@ -274,6 +274,7 @@ where
                         status_code = tracing::field::Empty,
                         latency = tracing::field::Empty,
                         error = tracing::field::Empty,
+                        dlt_context = dlt_ctx!("SOVD"),
                 )
             })
             .on_request(|request: &axum::http::Request<_>, _span: &tracing::Span| {

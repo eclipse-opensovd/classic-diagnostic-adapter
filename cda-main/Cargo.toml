@@ -84,3 +84,4 @@ openssl-vendored = [
   "cda-comm-doip/openssl-vendored",
   "cda-comm-uds/openssl-vendored",
 ]
+dlt-tracing = ["cda-tracing/dlt-tracing"]

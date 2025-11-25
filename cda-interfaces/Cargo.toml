@@ -47,3 +47,4 @@ tracing = { workspace = true }
 [features]
 default = []
 tokio-tracing = ["tokio/tracing"]
+dlt-tracing = []

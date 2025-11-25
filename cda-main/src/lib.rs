@@ -21,6 +21,7 @@ use cda_interfaces::{
     DoipGatewaySetupError, EcuAddressProvider, EcuManager as EcuManagerTrait, HashMap,
     HashMapEntry, HashMapExtensions, HashSet, Protocol,
     datatypes::{ComParams, DatabaseNamingConvention, FlatbBufConfig},
+    dlt_ctx,
     file_manager::{Chunk, ChunkType},
 };
 use cda_plugin_security::{SecurityPlugin, SecurityPluginLoader};
@@ -207,7 +208,13 @@ async fn mark_duplicate_ecus_by_address<S: SecurityPlugin>(
 }
 
 #[allow(clippy::too_many_arguments)]
-#[tracing::instrument(skip_all, fields(paths_count = paths.len()))]
+#[tracing::instrument(
+    skip_all,
+    fields(
+        paths_count = paths.len(),
+        dlt_context = dlt_ctx!("MAIN"),
+    )
+)]
 async fn load_database<S: SecurityPlugin>(
     protocol: Protocol,
     database: Arc<RwLock<LoadedEcuMap<S>>>,
@@ -393,7 +400,12 @@ type UdsManagerType<S> =
 /// Creates a new UDS manager for the webserver.
 // type alias does not allow specifying hasher, we set the hasher globally.
 #[allow(clippy::implicit_hasher)]
-#[tracing::instrument(skip_all, fields(database_count = databases.len()))]
+#[tracing::instrument(skip_all,
+    fields(
+        database_count = databases.len(),
+        dlt_context = dlt_ctx!("MAIN"),
+    )
+)]
 pub fn create_uds_manager<S: SecurityPlugin>(
     gateway: DoipDiagGateway<EcuManager<S>>,
     databases: Arc<HashMap<String, RwLock<EcuManager<S>>>>,
@@ -407,7 +419,10 @@ pub fn create_uds_manager<S: SecurityPlugin>(
 /// Returns a string error if the gateway cannot be initialized.
 #[tracing::instrument(
     skip(databases, variant_detection, shutdown_signal),
-    fields(database_count = databases.len())
+    fields(
+        database_count = databases.len(),
+        dlt_context = dlt_ctx!("MAIN"),
+    )
 )]
 pub async fn create_diagnostic_gateway<S: SecurityPlugin>(
     databases: Arc<DatabaseMap<S>>,
@@ -422,7 +437,10 @@ pub async fn create_diagnostic_gateway<S: SecurityPlugin>(
 #[allow(clippy::implicit_hasher)]
 #[tracing::instrument(
     skip(file_managers, webserver_config, ecu_uds, shutdown_signal, custom_route_provider),
-    fields(file_manager_count = file_managers.len())
+    fields(
+        file_manager_count = file_managers.len(),
+        dlt_context = dlt_ctx!("MAIN"),
+    )
 )]
 pub fn start_webserver<
     S: SecurityPlugin,

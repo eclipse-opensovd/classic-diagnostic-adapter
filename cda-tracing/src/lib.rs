@@ -45,6 +45,8 @@ pub struct LoggingConfig {
     pub otel: OtelConfig,
     #[cfg(feature = "tokio-tracing")]
     pub tokio_tracing: TokioTracingConfig,
+    #[cfg(feature = "dlt-tracing")]
+    pub dlt_tracing: DltTracingConfig,
 }
 
 #[derive(Deserialize, Serialize, Clone, Debug)]
@@ -62,6 +64,15 @@ pub struct TokioTracingConfig {
     pub retention: std::time::Duration,
     pub server: String,
     pub recording_path: Option<String>,
+}
+
+#[cfg(feature = "dlt-tracing")]
+#[derive(Deserialize, Serialize, Clone, Debug)]
+pub struct DltTracingConfig {
+    /// DLT application ID, max 4 characters
+    pub app_id: String,
+    pub app_description: String,
+    pub enabled: bool,
 }
 
 type BoxedLayer<T> = Box<dyn Layer<T> + Send + Sync + 'static>;
@@ -217,6 +228,25 @@ pub fn new_tokio_tracing<S: tracing_core::Subscriber + for<'a> LookupSpan<'a>>(
     Ok(builder.spawn().boxed())
 }
 
+/// Creates a new DLT Tracing subscriber layer.
+/// # Errors
+/// Returns an error if the DLT layer cannot be created, for example due to an invalid app ID.
+/// The app id is limited by DLT to 4 characters.
+#[cfg(feature = "dlt-tracing")]
+pub fn new_dlt_tracing<S: tracing_core::Subscriber + for<'a> LookupSpan<'a>>(
+    config: &DltTracingConfig,
+) -> Result<BoxedLayer<S>, TracingSetupError> {
+    let app_id = tracing_dlt::DltId::try_from(config.app_id.as_str()).map_err(|e| {
+        TracingSetupError::ResourceCreationFailed(format!("Invalid DLT app ID: {e}"))
+    })?;
+
+    tracing_dlt::DltLayer::new(&app_id, &config.app_description)
+        .map(Layer::boxed)
+        .map_err(|e| {
+            TracingSetupError::ResourceCreationFailed(format!("Failed to create DLT layer: {e}"))
+        })
+}
+
 #[cfg(feature = "tokio-tracing")]
 fn console_filter(meta: &tracing_core::Metadata<'_>) -> bool {
     // events will have *targets* beginning with "runtime"
@@ -249,6 +279,8 @@ impl Default for LoggingConfig {
             otel: OtelConfig::default(),
             #[cfg(feature = "tokio-tracing")]
             tokio_tracing: TokioTracingConfig::default(),
+            #[cfg(feature = "dlt-tracing")]
+            dlt_tracing: DltTracingConfig::default(),
         }
     }
 }
@@ -272,6 +304,17 @@ impl Default for TokioTracingConfig {
             retention: std::time::Duration::from_secs(60 * 60), // 1h
             server: "127.0.0.1:6669".to_owned(),
             recording_path: None,
+        }
+    }
+}
+
+#[cfg(feature = "dlt-tracing")]
+impl Default for DltTracingConfig {
+    fn default() -> Self {
+        Self {
+            app_id: "CDA".to_string(),
+            app_description: "Bridges SOVD to UDS for ECU communication.".to_string(),
+            enabled: true,
         }
     }
 }
