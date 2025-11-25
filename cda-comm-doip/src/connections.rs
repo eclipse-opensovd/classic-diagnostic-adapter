@@ -14,7 +14,7 @@
 use std::{sync::Arc, time::Duration};
 
 use cda_interfaces::{
-    DoipComParamProvider, EcuAddressProvider, HashMap, HashMapExtensions, service_ids,
+    DoipComParamProvider, EcuAddressProvider, HashMap, HashMapExtensions, dlt_ctx, service_ids,
 };
 use doip_definitions::payload::{
     ActivationType, AliveCheckRequest, DiagnosticMessage, DoipPayload, RoutingActivationRequest,
@@ -58,7 +58,8 @@ impl From<ConnectionError> for EcuError {
     fields(
         gateway_ecu = %gateway.ecu,
         gateway_ip = %gateway.ip,
-        logical_address = %format!("{:#06x}", gateway.logical_address)
+        logical_address = %format!("{:#06x}", gateway.logical_address),
+        dlt_context = dlt_ctx!("DOIP")
     )
 )]
 pub(crate) async fn handle_gateway_connection<T>(
@@ -143,7 +144,12 @@ where
     Ok(gateway.logical_address)
 }
 
-#[tracing::instrument(skip(sender, receiver), fields(ecu_count = ecus.len()))]
+#[tracing::instrument(skip(sender, receiver),
+    fields(
+        ecu_count = ecus.len(),
+        dlt_context = dlt_ctx!("DOIP")
+    )
+)]
 fn create_ecu_receiver_map(
     ecus: Vec<u16>,
     sender: &mpsc::Sender<DiagnosticMessage>, // sender is shared between all ecus of a gateway
@@ -177,7 +183,8 @@ fn create_ecu_receiver_map(
     fields(
         gateway_ip = %gateway_ip,
         gateway_name = %gateway_name,
-        ecu_count = ecus.len()
+        ecu_count = ecus.len(),
+        dlt_context = dlt_ctx!("DOIP"),
     )
 )]
 async fn connection_handler(
@@ -263,7 +270,11 @@ async fn connection_handler(
 
 #[tracing::instrument(
     skip(routing_activation_request),
-    fields(gateway_ip, connect_timeout_ms = connect_timeout.as_millis())
+    fields(
+        gateway_ip,
+        connect_timeout_ms = connect_timeout.as_millis(),
+        dlt_context = dlt_ctx!("DOIP")
+    )
 )]
 async fn setup_connection(
     routing_activation_request: RoutingActivationRequest,
@@ -461,7 +472,8 @@ fn spawn_gateway_sender_task(
     fields(
         gateway_ip = %gateway_ip,
         gateway_name = %gateway_name,
-        active_ecus = outtx.len()
+        active_ecus = outtx.len(),
+        dlt_context = dlt_ctx!("DOIP"),
     )
 )]
 fn spawn_gateway_receiver_task(
@@ -521,6 +533,10 @@ fn spawn_gateway_receiver_task(
         }
     }
 
+    #[tracing::instrument(
+        skip_all,
+        fields(dlt_context = dlt_ctx!("DOIP"))
+    )]
     async fn handle_response(
         gateway_name: &str,
         gateway_ip: &str,
@@ -550,7 +566,7 @@ fn spawn_gateway_receiver_task(
                             .map(|router| router.send(Ok(response)));
                     }
                     DiagnosticResponse::Msg(msg) => {
-                        tracing::debug!("UDS OK - Returning response");
+                        tracing::debug!("DOIP OK - Returning response");
                         let addr = u16::from_be_bytes(msg.source_address);
                         outtx
                             .get(&addr)
@@ -680,6 +696,10 @@ async fn send_alive_request(conn: &mut EcuConnectionTarget) -> Result<(), ()> {
     }
 }
 
+#[tracing::instrument(
+    skip_all,
+    fields(dlt_context = dlt_ctx!("DOIP"))
+)]
 async fn try_read(
     timeout: Duration,
     reader: &mut impl ECUConnection,
@@ -704,7 +724,7 @@ async fn try_read(
                             NRC_RESPONSE_PENDING => {
                                 tracing::debug!(
                                     message = ?msg.message,
-                                    "UDS NRC - Response pending"
+                                    "DOIP NRC - Response pending"
                                 );
                                 DiagnosticResponse::Pending(source_address)
                             }

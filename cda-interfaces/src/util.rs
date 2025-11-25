@@ -48,6 +48,28 @@ pub mod tokio_ext {
     }
 }
 
+pub mod dlt_ext {
+    #[macro_export]
+    #[cfg(feature = "dlt-tracing")]
+    macro_rules! dlt_ctx {
+        ($ctx_id:expr) => {
+            $ctx_id
+        };
+    }
+
+    #[macro_export]
+    #[cfg(not(feature = "dlt-tracing"))]
+    macro_rules! dlt_ctx {
+        ($ctx_id:expr) => {
+            // tracing, will not include this
+            // so dlt_context = dlt_ctx!("FOO")
+            // with disabled dlt-tracing feature will omit the
+            // dlt_context span completely
+            None::<&str>
+        };
+    }
+}
+
 /// Pad a byte slice to 4 bytes for u32 conversion.
 /// # Errors
 /// Returns `DiagServiceError::ParameterConversionError` if the input slice is longer than 4 bytes.

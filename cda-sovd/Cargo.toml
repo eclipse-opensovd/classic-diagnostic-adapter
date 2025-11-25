@@ -90,3 +90,4 @@ percent-encoding = { workspace = true }
 [features]
 default = []
 auth = []
+dlt-tracing = ["cda-interfaces/dlt-tracing"]

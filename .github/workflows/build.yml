@@ -52,7 +52,8 @@ jobs:
   all-features:
     runs-on: ubuntu-latest
     env:
-      RUSTFLAGS: "--cfg tokio_unstable"
+      RUSTFLAGS: "--cfg tokio_unstable -L /usr/local/lib"
+      PKG_CONFIG_PATH: "/usr/local/lib/pkgconfig:$PKG_CONFIG_PATH"
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
@@ -67,6 +68,8 @@ jobs:
         uses: Swatinem/rust-cache@v2
       - name: Install Protoc
         uses: arduino/setup-protoc@v3
+      - name: Setup DLT
+        uses: eclipse-opensovd/dlt-tracing-lib/.github/actions/setup-dlt@main
       - name: Clippy
         run: cargo clippy --locked --all-targets --all-features -- -D warnings
       - name: Build

@@ -12,7 +12,7 @@
  */
 
 //
-use cda_interfaces::{DiagServiceError, util::decode_hex};
+use cda_interfaces::{DiagServiceError, dlt_ctx, util::decode_hex};
 
 use crate::{datatypes, flatbuf::diagnostic_description::dataformat};
 
@@ -70,6 +70,12 @@ pub struct CompuRationalCoefficients {
 }
 
 impl From<dataformat::CompuCategory> for CompuCategory {
+    #[tracing::instrument(
+        skip_all,
+        fields(
+            dlt_context = dlt_ctx!("DB"),
+        )
+    )]
     fn from(value: dataformat::CompuCategory) -> Self {
         match value {
             dataformat::CompuCategory::IDENTICAL => CompuCategory::Identical,

@@ -49,3 +49,4 @@ cda-database = { workspace = true, features = ["database-builder"] }
 
 [features]
 default = []
+dlt-tracing = ["cda-interfaces/dlt-tracing"]

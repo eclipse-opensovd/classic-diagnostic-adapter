@@ -13,7 +13,7 @@
 
 use std::sync::Arc;
 
-use cda_interfaces::{DiagServiceError, DoipGatewaySetupError};
+use cda_interfaces::{DiagServiceError, DoipGatewaySetupError, dlt_ctx};
 use cda_plugin_security::{DefaultSecurityPlugin, DefaultSecurityPluginData};
 use cda_tracing::TracingSetupError;
 use clap::Parser;
@@ -158,7 +158,11 @@ impl From<DiagServiceError> for AppError {
 }
 
 #[tokio::main]
-#[tracing::instrument]
+#[tracing::instrument(
+    fields(
+        dlt_context = dlt_ctx!("MAIN"),
+    )
+)]
 async fn main() -> Result<(), AppError> {
     let args = AppArgs::parse();
     let mut config = opensovd_cda_lib::config::load_config().unwrap_or_else(|e| {
@@ -198,6 +202,8 @@ async fn main() -> Result<(), AppError> {
     } else {
         None
     };
+    #[cfg(feature = "dlt-tracing")]
+    layers.push(cda_tracing::new_dlt_tracing(&config.logging.dlt_tracing)?);
 
     cda_tracing::init_tracing(tracing.with(layers))?;
 
@@ -279,7 +285,11 @@ async fn main() -> Result<(), AppError> {
 }
 
 impl AppArgs {
-    #[tracing::instrument(skip(self, config))]
+    #[tracing::instrument(skip(self, config),
+        fields(
+            dlt_context = dlt_ctx!("MAIN"),
+        )
+    )]
     fn update_config(self, config: &mut opensovd_cda_lib::config::configfile::Configuration) {
         if let Some(onboard_tester) = self.onboard_tester {
             config.onboard_tester = onboard_tester;
