@@ -219,6 +219,7 @@ async fn main() -> Result<(), AppError> {
         config.com_params,
         config.database_naming_convention,
         config.flat_buf,
+        &config.functional_description,
     )
     .await;
 
@@ -256,6 +257,7 @@ async fn main() -> Result<(), AppError> {
         flash_files_path,
         file_managers,
         webserver_config,
+        config.functional_description,
         uds,
         clonable_shutdown_signal,
     )

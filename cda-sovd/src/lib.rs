@@ -20,8 +20,8 @@ use axum::{
     middleware, routing,
 };
 use cda_interfaces::{
-    DoipGatewaySetupError, SchemaProvider, UdsEcu, diagservices::DiagServiceResponse,
-    file_manager::FileManager,
+    DoipGatewaySetupError, FunctionalDescriptionConfig, SchemaProvider, UdsEcu,
+    diagservices::DiagServiceResponse, file_manager::FileManager,
 };
 use cda_plugin_security::SecurityPluginLoader;
 use futures::future::FutureExt;
@@ -49,16 +49,9 @@ pub struct WebServerConfig {
 /// Will return `Err` in case that the webserver couldn´t be launched.
 /// This can be caused due to invalid config, ports or addresses already
 /// being in use or an error when initializing the `DoIP` gateway.
-#[tracing::instrument(
-    skip(config, ecu_uds, file_manager, shutdown_signal),
-    fields(
-        host = %config.host,
-        port = %config.port,
-        flash_files_path = %flash_files_path
-    )
-)]
 pub async fn launch_webserver<F, R, T, M, S>(
-    config: WebServerConfig,
+    server_config: WebServerConfig,
+    functional_description_config: FunctionalDescriptionConfig,
     ecu_uds: T,
     flash_files_path: String,
     file_manager: HashMap<String, M>,
@@ -92,7 +85,15 @@ where
     // Main application routes (with NormalizePathLayer)
     let app_routes = {
         let app = Router::new()
-            .merge(sovd::route::<R, T, M, S>(&ecu_uds, flash_files_path, file_manager).await)
+            .merge(
+                sovd::route::<R, T, M, S>(
+                    functional_description_config,
+                    &ecu_uds,
+                    flash_files_path,
+                    file_manager,
+                )
+                .await,
+            )
             .finish_api_with(&mut api, openapi::api_docs);
 
         create_trace_layer(app)
@@ -121,7 +122,7 @@ where
         tower_http::normalize_path::NormalizePathLayer::trim_trailing_slash().layer(app_routes);
     let app_with_middleware = middleware.layer(trim_trailing_slash_middleware);
 
-    let listen_address = format!("{}:{}", config.host, config.port);
+    let listen_address = format!("{}:{}", server_config.host, server_config.port);
     match TcpListener::bind(&listen_address).await {
         Ok(listener) => {
             tracing::info!(listen_address = %listen_address, "Server listening");

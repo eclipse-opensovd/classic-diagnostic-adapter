@@ -24,7 +24,7 @@ use cda_comm_uds::UdsManager;
 use cda_core::{DiagServiceResponseStruct, EcuManager};
 use cda_database::{FileManager, ProtoLoadConfig};
 use cda_interfaces::{
-    DoipGatewaySetupError, Protocol,
+    DoipGatewaySetupError, EcuManagerType, FunctionalDescriptionConfig, Protocol,
     datatypes::{ComParams, DatabaseNamingConvention, FlatbBufConfig},
     file_manager::{Chunk, ChunkType},
 };
@@ -55,6 +55,7 @@ pub async fn load_databases<S: SecurityPlugin>(
     com_params: ComParams,
     database_naming_convention: DatabaseNamingConvention,
     flat_buf_settings: FlatbBufConfig,
+    func_description_cfg: &FunctionalDescriptionConfig,
 ) -> (DatabaseMap<S>, FileManagerMap) {
     let databases: Arc<RwLock<HashMap<String, EcuManager<S>>>> =
         Arc::new(RwLock::new(HashMap::new()));
@@ -102,6 +103,7 @@ pub async fn load_databases<S: SecurityPlugin>(
             let com_params = Arc::clone(&com_params);
             let database_naming_convention = database_naming_convention.clone();
             let flat_buf_settings = flat_buf_settings.clone();
+            let func_description_cfg = func_description_cfg.clone();
 
             database_load_futures.push(cda_interfaces::spawn_named!(
                 &format!("load-database-{i}"),
@@ -115,6 +117,7 @@ pub async fn load_databases<S: SecurityPlugin>(
                         com_params,
                         database_naming_convention,
                         flat_buf_settings,
+                        func_description_cfg,
                     )
                     .await;
                 }
@@ -171,6 +174,7 @@ async fn load_database<S: SecurityPlugin>(
     com_params: Arc<ComParams>,
     database_naming_convention: DatabaseNamingConvention,
     flat_buf_settings: FlatbBufConfig,
+    func_description_cfg: FunctionalDescriptionConfig,
 ) {
     for (mddfile, _) in paths {
         let Some(mdd_path) = mddfile.to_str().map(ToOwned::to_owned) else {
@@ -208,6 +212,11 @@ async fn load_database<S: SecurityPlugin>(
                     tracing::error!(mdd_file = %mddfile.display(), "No diagnostic description found in MDD file");
                     continue;
                 };
+                let ecu_type = if func_description_cfg.description_database == ecu_name {
+                    EcuManagerType::FunctionalDescription
+                } else {
+                    EcuManagerType::Ecu
+                };
 
                 let ecu_payload: Vec<u8> = if let Some(payload) =
                     ecu_data.into_iter().next().and_then(|c| c.payload)
@@ -234,6 +243,7 @@ async fn load_database<S: SecurityPlugin>(
                     protocol,
                     &com_params,
                     database_naming_convention.clone(),
+                    ecu_type,
                 )
                 .map_err(|e| format!("Failed to create DiagServiceManager: {e:?}"))
                 {
@@ -327,12 +337,14 @@ pub fn start_webserver<S: SecurityPlugin, L: SecurityPluginLoader>(
     flash_files_path: String,
     file_managers: HashMap<String, FileManager>,
     webserver_config: WebServerConfig,
+    functional_description_config: FunctionalDescriptionConfig,
     ecu_uds: UdsManager<DoipDiagGateway<EcuManager<S>>, DiagServiceResponseStruct, EcuManager<S>>,
     shutdown_signal: impl std::future::Future<Output = ()> + Send + 'static,
 ) -> tokio::task::JoinHandle<Result<(), DoipGatewaySetupError>> {
     cda_interfaces::spawn_named!("webserver", async move {
         cda_sovd::launch_webserver::<_, DiagServiceResponseStruct, _, _, L>(
             webserver_config,
+            functional_description_config,
             ecu_uds,
             flash_files_path,
             file_managers,

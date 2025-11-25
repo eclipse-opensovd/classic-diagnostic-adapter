@@ -74,6 +74,11 @@ pub trait EcuManager:
     + 'static
 {
     type Response: DiagServiceResponse;
+    /// This indicates whether the `EcuManager` is representing an ECU or
+    /// a functional description only.
+    #[must_use]
+    fn is_physical_ecu(&self) -> bool;
+
     #[must_use]
     fn variant_name(&self) -> Option<String>;
 
@@ -248,6 +253,12 @@ pub trait EcuManager:
         service: &DiagComm,
         security_plugin: &DynamicPlugin,
     ) -> impl Future<Output = Result<(), DiagServiceError>> + Send;
+}
+
+#[derive(PartialEq, Eq, Debug, Clone, Copy)]
+pub enum EcuManagerType {
+    Ecu,
+    FunctionalDescription,
 }
 
 impl Protocol {
