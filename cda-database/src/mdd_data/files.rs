@@ -17,7 +17,7 @@ use std::{
 };
 
 use cda_interfaces::{
-    HashMap,
+    HashMap, dlt_ctx,
     file_manager::{Chunk, ChunkMetaData, MddError},
 };
 use tokio::sync::RwLock;
@@ -36,6 +36,11 @@ struct CacheEntry {
 }
 
 impl FileManager {
+    #[tracing::instrument(skip_all,
+        fields(
+            dlt_context = dlt_ctx!("DB"),
+        )
+    )]
     #[must_use]
     pub fn new(mdd_path: String, files: Vec<Chunk>) -> Self {
         let mdd_name = mdd_path.split('/').next_back().unwrap_or("mdd").to_string();

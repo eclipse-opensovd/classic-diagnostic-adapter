@@ -14,7 +14,7 @@
 use std::{future::Future, sync::Arc, time::Duration};
 
 use cda_interfaces::{
-    DiagServiceError, DoipComParamProvider, EcuAddressProvider, HashMap, HashMapExtensions,
+    DiagServiceError, DoipComParamProvider, EcuAddressProvider, HashMap, HashMapExtensions, dlt_ctx,
 };
 use doip_definitions::{
     header::PayloadType,
@@ -24,7 +24,6 @@ use doip_sockets::udp::UdpSocket;
 use tokio::sync::{Mutex, RwLock, mpsc};
 
 use crate::{DoipDiagGateway, DoipTarget, connections::handle_gateway_connection};
-
 pub(crate) async fn get_vehicle_identification<T, F>(
     socket: &mut UdpSocket,
     netmask: u32,
@@ -106,7 +105,11 @@ pub(crate) async fn listen_for_vams<T, F>(
         netmask: u32,
     }
 
-    #[tracing::instrument(skip(gateway, gateway_ecu_map, gateway_ecu_name_map, variant_detection))]
+    #[tracing::instrument(skip(gateway, gateway_ecu_map, gateway_ecu_name_map, variant_detection),
+        fields(
+            dlt_context = dlt_ctx!("DOIP")
+        )
+    )]
     async fn handle_doip_response<T: EcuAddressProvider + DoipComParamProvider>(
         gateway: &DoipDiagGateway<T>,
         send_timeout: Duration,
@@ -185,6 +188,9 @@ pub(crate) async fn listen_for_vams<T, F>(
         }
     }
 
+    #[tracing::instrument(skip_all,
+        fields(dlt_context = dlt_ctx!("DOIP"))
+    )]
     async fn send_variant_detection(
         gateway_ecu_name_map: &HashMap<u16, Vec<String>>,
         variant_detection: &mpsc::Sender<Vec<String>>,
@@ -271,6 +277,9 @@ pub(crate) async fn listen_for_vams<T, F>(
     );
 }
 
+#[tracing::instrument(skip_all,
+    fields(dlt_context = dlt_ctx!("DOIP"))
+)]
 async fn handle_vam<T>(
     ecus: &Arc<HashMap<String, RwLock<T>>>,
     doip_msg: doip_definitions::message::DoipMessage,

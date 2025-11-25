@@ -46,3 +46,4 @@ tracing = { workspace = true }
 [features]
 default = []
 openssl-vendored = ["openssl/vendored"]
+dlt-tracing = ["cda-interfaces/dlt-tracing"]

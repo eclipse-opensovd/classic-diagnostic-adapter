@@ -11,7 +11,9 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 use cda_database::datatypes::{self, DiagService, DiagnosticDatabase};
-use cda_interfaces::{DiagServiceError, EcuAddressProvider, EcuSchemaProvider, SchemaDescription};
+use cda_interfaces::{
+    DiagServiceError, EcuAddressProvider, EcuSchemaProvider, SchemaDescription, dlt_ctx,
+};
 use cda_plugin_security::SecurityPlugin;
 
 use crate::EcuManager;
@@ -159,6 +161,11 @@ impl ResponseJsonSchema for datatypes::Response<'_> {
     }
 }
 
+#[tracing::instrument(skip_all,
+    fields(
+        dlt_context = dlt_ctx!("CORE"),
+    )
+)]
 fn params_to_schema(
     params: &[datatypes::Parameter],
     ctx: &str,
@@ -397,6 +404,11 @@ fn map_struct_to_schema(
     params_to_schema(&params, ctx, ecu_db, request)
 }
 
+#[tracing::instrument(skip_all,
+    fields(
+        dlt_context = dlt_ctx!("CORE"),
+    )
+)]
 fn map_dop_field_to_schema(
     dop_field: Option<&datatypes::DopField>,
     ctx: &str,
@@ -426,6 +438,11 @@ fn map_dop_field_to_schema(
     }
 }
 
+#[tracing::instrument(skip_all,
+    fields(
+        dlt_context = dlt_ctx!("CORE"),
+    )
+)]
 fn map_mux_to_schema(
     mux: &datatypes::MuxDop,
     ctx: &str,

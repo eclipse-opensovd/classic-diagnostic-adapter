@@ -19,7 +19,7 @@ use std::{
 
 use cda_interfaces::{
     DiagServiceError, DoipComParamProvider, DoipGatewaySetupError, EcuAddressProvider, EcuGateway,
-    HashMap, HashMapExtensions, ServicePayload, TransmissionParameters, UdsResponse,
+    HashMap, HashMapExtensions, ServicePayload, TransmissionParameters, UdsResponse, dlt_ctx,
 };
 use doip_definitions::payload::{DiagnosticMessage, DiagnosticMessageNack, GenericNack};
 use thiserror::Error;
@@ -132,7 +132,9 @@ impl<T: EcuAddressProvider + DoipComParamProvider> DoipDiagGateway<T> {
         fields(
             tester_ip = doip_config.tester_address,
             gateway_port = doip_config.gateway_port,
-            ecu_count = ecus.len())
+            ecu_count = ecus.len(),
+            dlt_context = dlt_ctx!("DOIP")
+        )
     )]
     pub async fn new<F>(
         doip_config: &DoipConfig,
@@ -285,6 +287,9 @@ impl<T: EcuAddressProvider + DoipComParamProvider> EcuGateway for DoipDiagGatewa
 
     // most of this function is handling different error cases and timeouts.
     // it is easier to comprehend when kept together.
+    #[tracing::instrument(skip_all,
+        fields(dlt_context = dlt_ctx!("DOIP"))
+    )]
     #[allow(clippy::too_many_lines)]
     async fn send(
         &self,
@@ -619,6 +624,9 @@ async fn send_with_retries(
     Ok(())
 }
 
+#[tracing::instrument(skip_all,
+    fields(dlt_context = dlt_ctx!("DOIP"))
+)]
 async fn try_send_uds_response(
     response_sender: &mpsc::Sender<Result<Option<UdsResponse>, DiagServiceError>>,
     response: Result<Option<UdsResponse>, DiagServiceError>,
