@@ -41,7 +41,7 @@ pub(crate) mod aide_helper {
         ($struct_name:ident $value_name:ident $type:ty) => {
             #[derive(serde::Deserialize, serde::Serialize, schemars::JsonSchema)]
             pub(crate) struct $struct_name {
-                $value_name: $type,
+                pub $value_name: $type,
             }
 
             impl std::ops::Deref for $struct_name {

@@ -12,8 +12,11 @@
 */
 
 pub use cda_comm_doip::config::DoipConfig;
-use cda_interfaces::datatypes::{
-    ComParams, DatabaseNamingConvention, DiagnosticServiceAffixPosition, FlatbBufConfig,
+use cda_interfaces::{
+    FunctionalDescriptionConfig,
+    datatypes::{
+        ComParams, DatabaseNamingConvention, DiagnosticServiceAffixPosition, FlatbBufConfig,
+    },
 };
 use serde::{Deserialize, Serialize};
 
@@ -30,6 +33,7 @@ pub struct Configuration {
     pub com_params: ComParams,
     pub database_naming_convention: DatabaseNamingConvention,
     pub flat_buf: FlatbBufConfig,
+    pub functional_description: FunctionalDescriptionConfig,
 }
 
 #[derive(Deserialize, Serialize, Clone, Debug)]
@@ -65,6 +69,9 @@ impl Default for Configuration {
             com_params: ComParams::default(),
             database_naming_convention: DatabaseNamingConvention::default(),
             flat_buf: FlatbBufConfig::default(),
+            functional_description: FunctionalDescriptionConfig {
+                description_database: "functional_groups".to_owned(),
+            },
         }
     }
 }
@@ -160,6 +167,9 @@ configuration_service_parameter_semantic_id = "ID"
 short_name_affixes = [ "Read_", "Write_" ]
 long_name_affixes = [ "Read ", "Write " ]
 
+[functional_description]
+description_database = "teapot"
+
 "#;
 
         let figment = Figment::from(Serialized::defaults(Configuration::default()))
@@ -203,7 +213,11 @@ long_name_affixes = [ "Read ", "Write " ]
             config
                 .database_naming_convention
                 .configuration_service_parameter_semantic_id,
-            "ID".to_string(),
+            "ID".to_owned(),
+        );
+        assert_eq!(
+            config.functional_description.description_database,
+            "teapot".to_owned()
         );
         Ok(())
     }

@@ -17,7 +17,10 @@ use std::{
 };
 
 use cda_core::DiagServiceResponseStruct;
-use cda_interfaces::datatypes::{ComParams, DatabaseNamingConvention, FlatbBufConfig};
+use cda_interfaces::{
+    FunctionalDescriptionConfig,
+    datatypes::{ComParams, DatabaseNamingConvention, FlatbBufConfig},
+};
 use cda_plugin_security::{DefaultSecurityPlugin, DefaultSecurityPluginData};
 use cda_tracing::LoggingConfig;
 use futures::FutureExt as _;
@@ -126,6 +129,7 @@ async fn initialize_runtime() -> Result<TestRuntime, TestingError> {
         com_params: ComParams::default(),
         database_naming_convention: DatabaseNamingConvention::default(),
         flat_buf: FlatbBufConfig::default(),
+        functional_description: FunctionalDescriptionConfig::default(),
     };
     config.validate_sanity().map_err(|e| {
         TestingError::SetupError(format!("Configuration sanity check failed: {e:?}"))
@@ -207,6 +211,7 @@ fn start_cda(config: Configuration) {
             config.flash_files_path.clone(),
             vehicle_data.file_managers,
             vehicle_data.locks,
+            config.functional_description,
         )
         .await
         .map_err(|e| {

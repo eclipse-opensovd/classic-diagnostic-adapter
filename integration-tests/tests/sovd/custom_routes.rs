@@ -139,6 +139,7 @@ async fn test_custom_demo_endpoint() {
                 String::new(),
                 file_managers,
                 Arc::new(Locks::new(ecu_names)),
+                FunctionalDescriptionConfig::default(),
             )
             .await
         }
