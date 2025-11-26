@@ -275,6 +275,7 @@ fn spawn_connection_reset_task(
                 let mut reconnect_attempts = 0;
                 if let Some(reason) = conn_reset_rx.recv().await {
                     tracing::info!(reason = %reason, "Resetting connection");
+                    let mut conn_guard = conn_reset.lock_connection().await;
 
                     'reconnect: loop {
                         let new_connection = ecu_connection::establish_ecu_connection(
@@ -289,7 +290,10 @@ fn spawn_connection_reset_task(
                         match new_connection {
                             Ok(conn) => {
                                 tracing::info!("Connection reset successful");
-                                conn_reset.replace_connection(conn).await;
+                                ecu_connection::EcuConnectionTarget::reconnect(
+                                    &mut conn_guard,
+                                    conn,
+                                );
                                 while !conn_reset_rx.is_empty() {
                                     // drain the receiver to avoid resetting the connection again
                                     // immediately after a reset
@@ -356,23 +360,30 @@ fn spawn_gateway_sender_task(
                     }
 
                     let start = std::time::Instant::now();
-                    let mut send_mtx = gateway_conn.lock_send().await;
-                    let conn = &mut *send_mtx;
-                    let lock_after = start.elapsed();
+                    let lock_after = match gateway_conn.lock_send().await {
+                        Ok(mut guard) => {
+                            let conn = guard.get_sender();
+                            let lock_after = start.elapsed();
 
-                    match tokio::time::timeout(Duration::from_secs(1), conn
-                        .send(DoipPayload::DiagnosticMessage(msg))
-                    )
-                        .await
-                    {
-                        Ok(Ok(())) => {},
-                        Ok(Err(e)) => {
-                            tracing::error!(error = ?e, "Failed to send message");
+                            match tokio::time::timeout(Duration::from_secs(1), conn
+                                .send(DoipPayload::DiagnosticMessage(msg))
+                            )
+                                .await
+                            {
+                                Ok(Ok(())) => {},
+                                Ok(Err(e)) => {
+                                    tracing::error!(error = ?e, "Failed to send message");
+                                }
+                                Err(e) => {
+                                    tracing::error!(error = ?e, "Timeout sending message");
+                                }
+                            }
+                            lock_after
+                        },
+                        Err(_) => {
+                            continue; // connection was closed
                         }
-                        Err(e) => {
-                            tracing::error!(error = ?e, "Timeout sending message");
-                        }
-                    }
+                    };
 
                     let send_after = start.elapsed().saturating_sub(lock_after);
                     tracing::debug!(
@@ -604,15 +615,25 @@ fn spawn_gateway_receiver_task(
                 },
 
                 response = async {
-                    let mut conn_mtx = gateway_conn.lock_read().await;
-                    let conn = &mut *conn_mtx;
+                    let Ok(mut conn_mtx) = gateway_conn.lock_read().await else {
+                        return None;
+                    };
+                    let conn = conn_mtx.get_reader();
 
                     // we can wait without actual timeout because this will be
                     // interrupted by the send_pending_rx when someone wants to send
                     // data on the connection
-                    try_read(Duration::MAX, conn).await
+                    Some(try_read(Duration::MAX, conn).await)
                 } => {
-                    handle_response(&gateway_name, &gateway_ip, &outtx, &reset_tx, response).await;
+                    if let Some(response) = response {
+                        handle_response(
+                            &gateway_name,
+                            &gateway_ip,
+                            &outtx,
+                            &reset_tx,
+                            response
+                        ).await;
+                    }
                 }
             }
         }
@@ -622,8 +643,10 @@ fn spawn_gateway_receiver_task(
 async fn send_alive_request(conn: &EcuConnectionTarget) -> Result<(), ()> {
     async fn handle_alive_request_response(conn: &EcuConnectionTarget) {
         if tokio::time::timeout(Duration::from_secs(1), async {
-            let mut reader_mtx = conn.lock_read().await;
-            let reader = &mut *reader_mtx;
+            let Ok(mut reader_mtx) = conn.lock_read().await else {
+                return;
+            };
+            let reader = reader_mtx.get_reader();
             match try_read(Duration::from_millis(1000), reader).await {
                 Some(Ok(DiagnosticResponse::AliveCheckResponse)) => {
                     tracing::debug!("Alive check OK");
@@ -654,9 +677,11 @@ async fn send_alive_request(conn: &EcuConnectionTarget) -> Result<(), ()> {
     }
 
     // TODO: handle alive request errors according to spec
-    match conn
-        .lock_send()
-        .await
+    let Ok(mut sender) = conn.lock_send().await else {
+        return Err(());
+    };
+    match sender
+        .get_sender()
         .send(DoipPayload::AliveCheckRequest(AliveCheckRequest {}))
         .await
     {

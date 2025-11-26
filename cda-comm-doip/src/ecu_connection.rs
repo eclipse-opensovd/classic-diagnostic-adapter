@@ -101,26 +101,71 @@ pub(crate) enum EcuConnectionSendVariant {
 }
 
 pub(crate) struct EcuConnectionTarget {
-    pub(crate) ecu_connection_rx: Mutex<EcuConnectionReadVariant>,
-    pub(crate) ecu_connection_tx: Mutex<EcuConnectionSendVariant>,
+    pub(crate) ecu_connection_rx: Mutex<Option<EcuConnectionReadVariant>>,
+    pub(crate) ecu_connection_tx: Mutex<Option<EcuConnectionSendVariant>>,
     pub(crate) gateway_name: String,
     pub(crate) gateway_ip: String,
 }
 
+pub struct EcuConnectionSendGuard<'a> {
+    guard: tokio::sync::MutexGuard<'a, Option<EcuConnectionSendVariant>>,
+}
+
+impl EcuConnectionSendGuard<'_> {
+    pub(crate) fn get_sender(&mut self) -> &mut EcuConnectionSendVariant {
+        self.guard.as_mut().expect("Sender should be Some")
+    }
+}
+
+pub struct EcuConnectionReadGuard<'a> {
+    guard: tokio::sync::MutexGuard<'a, Option<EcuConnectionReadVariant>>,
+}
+
+impl EcuConnectionReadGuard<'_> {
+    pub(crate) fn get_reader(&mut self) -> &mut EcuConnectionReadVariant {
+        self.guard.as_mut().expect("Reader should be Some")
+    }
+}
+
+pub struct EcuConnectionGuard<'a> {
+    read_guard: EcuConnectionReadGuard<'a>,
+    send_guard: EcuConnectionSendGuard<'a>,
+}
+
 impl EcuConnectionTarget {
-    pub(crate) async fn lock_send(&self) -> tokio::sync::MutexGuard<'_, EcuConnectionSendVariant> {
-        self.ecu_connection_tx.lock().await
+    pub(crate) async fn lock_send(&self) -> Result<EcuConnectionSendGuard<'_>, ConnectionError> {
+        let guard = self.ecu_connection_tx.lock().await;
+        match *guard {
+            Some(_) => Ok(EcuConnectionSendGuard { guard }),
+            None => Err(ConnectionError::Closed),
+        }
     }
 
-    pub(crate) async fn lock_read(&self) -> tokio::sync::MutexGuard<'_, EcuConnectionReadVariant> {
-        self.ecu_connection_rx.lock().await
+    pub(crate) async fn lock_read(&self) -> Result<EcuConnectionReadGuard<'_>, ConnectionError> {
+        let guard = self.ecu_connection_rx.lock().await;
+        match *guard {
+            Some(_) => Ok(EcuConnectionReadGuard { guard }),
+            None => Err(ConnectionError::Closed),
+        }
+    }
+    //todo: harden reconnect so it doesn't drop the new connection instantly again.
+    // probably need to lock read & write until both are replaced.
+    pub(crate) async fn lock_connection(&self) -> EcuConnectionGuard<'_> {
+        let ecu_connection_rx = self.ecu_connection_rx.lock().await;
+        let ecu_connection_tx = self.ecu_connection_tx.lock().await;
+        EcuConnectionGuard {
+            read_guard: EcuConnectionReadGuard {
+                guard: ecu_connection_rx,
+            },
+            send_guard: EcuConnectionSendGuard {
+                guard: ecu_connection_tx,
+            },
+        }
     }
 
-    pub(crate) async fn replace_connection(&self, new_target: EcuConnectionTarget) {
-        let mut ecu_connection_rx = self.ecu_connection_rx.lock().await;
-        let mut ecu_connection_tx = self.ecu_connection_tx.lock().await;
-        *ecu_connection_rx = new_target.ecu_connection_rx.into_inner();
-        *ecu_connection_tx = new_target.ecu_connection_tx.into_inner();
+    pub(crate) fn reconnect(guard: &mut EcuConnectionGuard<'_>, new_target: EcuConnectionTarget) {
+        *guard.read_guard.guard = new_target.ecu_connection_rx.into_inner();
+        *guard.send_guard.guard = new_target.ecu_connection_tx.into_inner();
     }
 }
 
@@ -200,8 +245,8 @@ pub(crate) async fn establish_ecu_connection(
                     let (read, write) = gateway_conn.into_split();
                     // Routing activated
                     Ok(EcuConnectionTarget {
-                        ecu_connection_tx: Mutex::new(write),
-                        ecu_connection_rx: Mutex::new(read),
+                        ecu_connection_tx: Mutex::new(Some(write)),
+                        ecu_connection_rx: Mutex::new(Some(read)),
                         gateway_name: gateway_name.to_owned(),
                         gateway_ip: gateway_ip.to_owned(),
                     })
@@ -303,8 +348,8 @@ pub(crate) async fn establish_tls_ecu_connection(
             tracing::info!("Routing activated");
             let (read, write) = gateway_conn.into_split();
             Ok(EcuConnectionTarget {
-                ecu_connection_tx: Mutex::new(write),
-                ecu_connection_rx: Mutex::new(read),
+                ecu_connection_tx: Mutex::new(Some(write)),
+                ecu_connection_rx: Mutex::new(Some(read)),
                 gateway_name: gateway_name.to_owned(),
                 gateway_ip: gateway_ip.to_owned(),
             }) // Routing activated
