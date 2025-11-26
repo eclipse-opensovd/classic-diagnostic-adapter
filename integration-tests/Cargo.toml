@@ -24,6 +24,8 @@ workspace = true
 [dependencies]
 # internal dependencies
 cda-interfaces = { workspace = true }
+cda-core = { workspace = true }
+cda-database = { workspace = true }
 cda-sovd = { workspace = true }
 sovd-interfaces = { workspace = true }
 cda-tracing = { workspace = true }
@@ -38,9 +40,12 @@ serde = { workspace = true, features = ["derive"] }
 serde_json = { workspace = true }
 serde_qs = { workspace = true, features = ["axum"] }
 # http
+aide = { workspace = true, features = ["axum"] }
+axum = { workspace = true }
 reqwest = { workspace = true }
 http = { workspace = true }
 mime = { workspace = true }
+schemars = { workspace = true }
 url = { workspace = true }
 # logging
 tracing = { workspace = true }

@@ -30,7 +30,7 @@ use cda_interfaces::{
     file_manager::{Chunk, ChunkType},
 };
 use cda_plugin_security::{SecurityPlugin, SecurityPluginLoader};
-use cda_sovd::WebServerConfig;
+use cda_sovd::{RouteProvider, WebServerConfig};
 use tokio::{
     signal,
     sync::{RwLock, mpsc},
@@ -355,23 +355,29 @@ pub async fn create_diagnostic_gateway<S: SecurityPlugin>(
 // type alias does not allow specifying hasher, we set the hasher globally.
 #[allow(clippy::implicit_hasher)]
 #[tracing::instrument(
-    skip(file_managers, webserver_config, ecu_uds, shutdown_signal),
+    skip(file_managers, webserver_config, ecu_uds, shutdown_signal, custom_route_provider),
     fields(file_manager_count = file_managers.len())
 )]
-pub fn start_webserver<S: SecurityPlugin, L: SecurityPluginLoader>(
+pub fn start_webserver<
+    S: SecurityPlugin,
+    L: SecurityPluginLoader,
+    R: RouteProvider + 'static + Send,
+>(
     flash_files_path: String,
     file_managers: HashMap<String, FileManager>,
     webserver_config: WebServerConfig,
     ecu_uds: UdsManager<DoipDiagGateway<EcuManager<S>>, DiagServiceResponseStruct, EcuManager<S>>,
     shutdown_signal: impl std::future::Future<Output = ()> + Send + 'static,
+    custom_route_provider: Option<R>,
 ) -> tokio::task::JoinHandle<Result<(), DoipGatewaySetupError>> {
     cda_interfaces::spawn_named!("webserver", async move {
-        cda_sovd::launch_webserver::<_, DiagServiceResponseStruct, _, _, L>(
+        cda_sovd::launch_webserver::<_, DiagServiceResponseStruct, _, _, L, R>(
             webserver_config,
             ecu_uds,
             flash_files_path,
             file_managers,
             shutdown_signal,
+            custom_route_provider,
         )
         .await
     })
