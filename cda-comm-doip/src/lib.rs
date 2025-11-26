@@ -25,8 +25,9 @@ use doip_definitions::payload::{DiagnosticMessage, DiagnosticMessageNack, Generi
 use thiserror::Error;
 use tokio::sync::{Mutex, RwLock, broadcast, mpsc};
 
-use crate::connections::EcuError;
+use crate::{config::DoipConfig, connections::EcuError};
 
+pub mod config;
 mod connections;
 mod ecu_connection;
 mod vir_vam;
@@ -127,13 +128,14 @@ impl<T: EcuAddressProvider + DoipComParamProvider> DoipDiagGateway<T> {
     /// # Errors
     /// Returns `String` if initialization fails, e.g. when socket creation fails.
     #[tracing::instrument(
-        skip(ecus, variant_detection, shutdown_signal),
-        fields(tester_ip, gateway_port, ecu_count = ecus.len())
+        skip(doip_config, ecus, variant_detection, shutdown_signal),
+        fields(
+            tester_ip = doip_config.tester_address,
+            gateway_port = doip_config.gateway_port,
+            ecu_count = ecus.len())
     )]
     pub async fn new<F>(
-        tester_ip: &str,
-        tester_subnet: &str,
-        gateway_port: u16,
+        doip_config: &DoipConfig,
         ecus: Arc<HashMap<String, RwLock<T>>>,
         variant_detection: mpsc::Sender<Vec<String>>,
         shutdown_signal: F,
@@ -141,6 +143,15 @@ impl<T: EcuAddressProvider + DoipComParamProvider> DoipDiagGateway<T> {
     where
         F: Future<Output = ()> + Clone + Send + 'static,
     {
+        let DoipConfig {
+            tester_address: tester_ip,
+            tester_subnet,
+            gateway_port,
+            send_timeout_ms,
+        } = doip_config;
+        let gateway_port = *gateway_port;
+        let send_timeout = Duration::from_millis(*send_timeout_ms);
+
         tracing::info!("Initializing DoipDiagGateway");
 
         let mut socket = create_socket(tester_ip, gateway_port)?;
@@ -189,6 +200,7 @@ impl<T: EcuAddressProvider + DoipComParamProvider> DoipDiagGateway<T> {
                     &doip_connections,
                     &ecus,
                     &gateway_ecu_map,
+                    send_timeout,
                 )
                 .await
                 {
@@ -205,7 +217,14 @@ impl<T: EcuAddressProvider + DoipComParamProvider> DoipDiagGateway<T> {
             }
         };
 
-        vir_vam::listen_for_vams(mask, gateway.clone(), variant_detection, shutdown_signal).await;
+        vir_vam::listen_for_vams(
+            mask,
+            gateway.clone(),
+            variant_detection,
+            send_timeout,
+            shutdown_signal,
+        )
+        .await;
 
         Ok(gateway)
     }
@@ -320,71 +339,88 @@ impl<T: EcuAddressProvider + DoipComParamProvider> EcuGateway for DoipDiagGatewa
                         return;
                     }
 
-                    match tokio::time::timeout(transmission_params.timeout_ack, ecu.receiver.recv())
+                    // allow continue expression here
+                    // as it makes it more clear on what exactly is happening.
+                    #[allow(clippy::needless_continue)]
+                    if let Ok(ack_received) =
+                        tokio::time::timeout(transmission_params.timeout_ack, async {
+                            'ack_waiting: loop {
+                                if let Ok(result) = ecu.receiver.recv().await {
+                                    match result {
+                                        Ok(DiagnosticResponse::Ack(_)) => {
+                                            tracing::debug!("Received ACK");
+                                            break 'ack_waiting true;
+                                        }
+                                        Ok(DiagnosticResponse::GenericNack(nack)) => {
+                                            // todo #22: handle generic NACK
+                                            try_send_uds_response(
+                                                &response_sender,
+                                                Err(DiagServiceError::Nack(u8::from(
+                                                    nack.nack_code,
+                                                ))),
+                                            )
+                                            .await;
+                                        }
+                                        Ok(DiagnosticResponse::Nack(nack)) => {
+                                            try_send_uds_response(
+                                                &response_sender,
+                                                Err(DiagServiceError::Nack(u8::from(
+                                                    nack.nack_code,
+                                                ))),
+                                            )
+                                            .await;
+                                        }
+                                        Ok(msg) => {
+                                            tracing::warn!(
+                                                "Expected ACK/NACK but received unexpected \
+                                                 message: {:?}",
+                                                msg
+                                            );
+                                            // any response but ACK/NACK is unexpected because
+                                            // every sent message should be answered with
+                                            // ACK or NACK before sending anything else.
+                                            // however, we should still continue waiting
+                                            // for ACK/NACK in case we get something unexpected,
+                                            // as some ECUs might not follow the spec properly.
+                                            continue 'ack_waiting;
+                                        }
+                                        Err(e) => {
+                                            try_send_uds_response(
+                                                &response_sender,
+                                                Err(DiagServiceError::NoResponse(format!(
+                                                    "Error while waiting for ACK/NACK, {e}"
+                                                ))),
+                                            )
+                                            .await;
+                                        }
+                                    }
+                                    // got a response but it was not an ACK,
+                                    break 'ack_waiting false;
+                                }
+                                // did not get anything from ecu receiver, meaning it is closed.
+                                try_send_uds_response(
+                                    &response_sender,
+                                    Err(DiagServiceError::NoResponse(
+                                        "ECU receiver unexpectedly closed".to_owned(),
+                                    )),
+                                )
+                                .await;
+                                break 'ack_waiting false;
+                            }
+                        })
                         .await
                     {
-                        Ok(Ok(result)) => match result {
-                            Ok(DiagnosticResponse::Ack(_)) => {
-                                tracing::debug!("Received ACK");
-                            }
-                            Ok(DiagnosticResponse::GenericNack(nack)) => {
-                                // todo #22: handle generic NACK
-                                try_send_uds_response(
-                                    &response_sender,
-                                    Err(DiagServiceError::Nack(u8::from(nack.nack_code))),
-                                )
-                                .await;
-                                return;
-                            }
-                            Ok(DiagnosticResponse::Nack(nack)) => {
-                                try_send_uds_response(
-                                    &response_sender,
-                                    Err(DiagServiceError::Nack(u8::from(nack.nack_code))),
-                                )
-                                .await;
-                                return;
-                            }
-                            Ok(_) => {
-                                // any response but ACK/NACK is unexpected because
-                                // every sent message should be answered with ACK or NACK
-                                // before sending anything else.
-                                try_send_uds_response(
-                                    &response_sender,
-                                    Err(DiagServiceError::UnexpectedResponse(Some(
-                                        "Expected ACK/NACK before payload data".to_owned(),
-                                    ))),
-                                )
-                                .await;
-                                return;
-                            }
-                            Err(e) => {
-                                try_send_uds_response(
-                                    &response_sender,
-                                    Err(DiagServiceError::NoResponse(format!(
-                                        "Error while waiting for ACK/NACK, {e}"
-                                    ))),
-                                )
-                                .await;
-                                return;
-                            }
-                        },
-                        Ok(Err(_)) => {
-                            try_send_uds_response(
-                                &response_sender,
-                                Err(DiagServiceError::NoResponse(
-                                    "ECU receiver unexpectedly closed".to_owned(),
-                                )),
-                            )
+                        if !ack_received {
+                            // no ack received, nothing furhter to do here.
+                            // receiver is already informed in the branches above.
+                            return;
+                        }
+                    } else {
+                        // timeout branch of tokio::select, no response received,
+                        // informing receiver about timeout and giving up.
+                        try_send_uds_response(&response_sender, Err(DiagServiceError::Timeout))
                             .await;
-                            return;
-                        }
-                        Err(_) => {
-                            // timeout branch of tokio::select, no response received,
-                            // informing receiver about timeout and giving up.
-                            try_send_uds_response(&response_sender, Err(DiagServiceError::Timeout))
-                                .await;
-                            return;
-                        }
+                        return;
                     }
 
                     let send_and_ackd_after = start

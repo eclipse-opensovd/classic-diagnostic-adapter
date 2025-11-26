@@ -26,7 +26,7 @@ use crate::{
     ConnectionError, DiagnosticResponse, DoipConnection, DoipEcu, DoipTarget,
     NRC_BUSY_REPEAT_REQUEST, NRC_RESPONSE_PENDING, NRC_TEMPORARILY_NOT_AVAILABLE, SLEEP_INTERVAL,
     connections::EcuError::EcuConnectionError,
-    ecu_connection::{self, ECUConnection, EcuConnectionTarget},
+    ecu_connection::{self, ECUConnectionRead, ECUConnectionSend as _, EcuConnectionTarget},
 };
 
 type ConnectionResetReason = String;
@@ -37,6 +37,7 @@ struct ConnectionSettings {
     retry_delay: Duration,
     connect_timeout: Duration,
     max_retry_attempts: u32,
+    send_timeout: Duration,
 }
 
 #[derive(Error, Debug, Clone)]
@@ -66,6 +67,7 @@ pub(crate) async fn handle_gateway_connection<T>(
     doip_connections: &Arc<RwLock<Vec<Arc<DoipConnection>>>>,
     ecus: &Arc<HashMap<String, RwLock<T>>>,
     gateway_ecu_map: &HashMap<u16, Vec<u16>>,
+    send_timeout: Duration,
 ) -> Result<u16, EcuError>
 where
     T: EcuAddressProvider + DoipComParamProvider,
@@ -114,6 +116,7 @@ where
             retry_delay: connection_retry_delay,
             connect_timeout: connection_timeout,
             max_retry_attempts: connection_retry_attempts,
+            send_timeout,
         },
     )
     .await
@@ -213,21 +216,21 @@ async fn connection_handler(
     }
 
     // setting up initial gateway connection
-    let gateway_conn = Arc::new(Mutex::new(
-        setup_connection(
-            routing_activation_request,
+    let gateway_conn = Arc::new(
+        ecu_connection::establish_ecu_connection(
             &gateway_ip,
             &gateway_name,
+            routing_activation_request,
             connection_settings.connect_timeout,
             connection_settings.routing_activation,
         )
         .await?,
-    ));
+    );
 
     // used by receiver / sender task to reset the connection
     let (conn_reset_tx, conn_reset_rx) = mpsc::channel::<ConnectionResetReason>(1);
     // task to handle connection resets and reconnects
-    let conn_reset = Arc::<Mutex<EcuConnectionTarget>>::clone(&gateway_conn);
+    let conn_reset = Arc::<EcuConnectionTarget>::clone(&gateway_conn);
     spawn_connection_reset_task(
         gateway_ip.clone(),
         routing_activation_request,
@@ -243,7 +246,8 @@ async fn connection_handler(
     spawn_gateway_sender_task(
         &gateway_ip,
         inrx,
-        Arc::<Mutex<EcuConnectionTarget>>::clone(&gateway_conn),
+        Arc::<EcuConnectionTarget>::clone(&gateway_conn),
+        connection_settings.send_timeout,
         conn_reset_tx.clone(),
         send_pending_tx.clone(),
         Arc::clone(&send_mtx),
@@ -252,7 +256,7 @@ async fn connection_handler(
         gateway_ip.clone(),
         gateway_name.clone(),
         outtx,
-        Arc::<Mutex<EcuConnectionTarget>>::clone(&gateway_conn),
+        Arc::<EcuConnectionTarget>::clone(&gateway_conn),
         send_pending_rx,
         conn_reset_tx,
     );
@@ -261,32 +265,11 @@ async fn connection_handler(
     Ok((intx, outrx))
 }
 
-#[tracing::instrument(
-    skip(routing_activation_request),
-    fields(gateway_ip, connect_timeout_ms = connect_timeout.as_millis())
-)]
-async fn setup_connection(
-    routing_activation_request: RoutingActivationRequest,
-    gateway_ip: &str,
-    gateway_name: &str,
-    connect_timeout: Duration,
-    routing_activation_timeout: Duration,
-) -> Result<EcuConnectionTarget, ConnectionError> {
-    ecu_connection::establish_ecu_connection(
-        gateway_ip,
-        gateway_name,
-        routing_activation_request,
-        connect_timeout,
-        routing_activation_timeout,
-    )
-    .await
-}
-
 fn spawn_connection_reset_task(
     gateway_ip: String,
     routing_activation_request: RoutingActivationRequest,
     mut conn_reset_rx: mpsc::Receiver<ConnectionResetReason>,
-    conn_reset: Arc<Mutex<EcuConnectionTarget>>,
+    conn_reset: Arc<EcuConnectionTarget>,
     connection_timeouts: ConnectionSettings,
 ) {
     cda_interfaces::spawn_named!(
@@ -295,15 +278,14 @@ fn spawn_connection_reset_task(
             loop {
                 let mut reconnect_attempts = 0;
                 if let Some(reason) = conn_reset_rx.recv().await {
-                    let mut conn_mtx = conn_reset.lock().await;
-                    let conn = &mut *conn_mtx;
                     tracing::info!(reason = %reason, "Resetting connection");
+                    let mut conn_guard = conn_reset.lock_connection().await;
 
                     'reconnect: loop {
-                        let new_connection = setup_connection(
-                            routing_activation_request,
+                        let new_connection = ecu_connection::establish_ecu_connection(
                             &gateway_ip,
-                            &conn.gateway_name,
+                            &conn_reset.gateway_name,
+                            routing_activation_request,
                             connection_timeouts.connect_timeout,
                             connection_timeouts.routing_activation,
                         )
@@ -312,7 +294,10 @@ fn spawn_connection_reset_task(
                         match new_connection {
                             Ok(conn) => {
                                 tracing::info!("Connection reset successful");
-                                *conn_mtx = conn;
+                                ecu_connection::EcuConnectionTarget::reconnect(
+                                    &mut conn_guard,
+                                    conn,
+                                );
                                 while !conn_reset_rx.is_empty() {
                                     // drain the receiver to avoid resetting the connection again
                                     // immediately after a reset
@@ -354,7 +339,8 @@ fn spawn_connection_reset_task(
 fn spawn_gateway_sender_task(
     gateway_ip: &str,
     mut inrx: mpsc::Receiver<DiagnosticMessage>,
-    gateway_conn: Arc<Mutex<EcuConnectionTarget>>,
+    gateway_conn: Arc<EcuConnectionTarget>,
+    send_timeout: Duration,
     reset_tx: mpsc::Sender<ConnectionResetReason>,
     send_pending_tx: watch::Sender<bool>,
     send_mtx: Arc<Mutex<()>>,
@@ -379,17 +365,30 @@ fn spawn_gateway_sender_task(
                     }
 
                     let start = std::time::Instant::now();
-                    let mut conn_mtx = gateway_conn.lock().await;
-                    let conn = &mut *conn_mtx;
-                    let lock_after = start.elapsed();
+                    let lock_after = match gateway_conn.lock_send().await {
+                        Ok(mut guard) => {
+                            let conn = guard.get_sender();
+                            let lock_after = start.elapsed();
 
-                    if let Err(e) = conn
-                        .ecu_connection
-                        .send(DoipPayload::DiagnosticMessage(msg))
-                        .await
-                    {
-                        tracing::error!(error = ?e, "Failed to send message");
-                    }
+                            match tokio::time::timeout(send_timeout, conn
+                                .send(DoipPayload::DiagnosticMessage(msg))
+                            )
+                                .await
+                            {
+                                Ok(Ok(())) => {},
+                                Ok(Err(e)) => {
+                                    tracing::error!(error = ?e, "Failed to send message");
+                                }
+                                Err(e) => {
+                                    tracing::error!(error = ?e, "Timeout sending message");
+                                }
+                            }
+                            lock_after
+                        },
+                        Err(_) => {
+                            continue; // connection was closed
+                        }
+                    };
 
                     let send_after = start.elapsed().saturating_sub(lock_after);
                     tracing::debug!(
@@ -411,12 +410,10 @@ fn spawn_gateway_sender_task(
                     }
 
                     let (alive_response, conn_gateway_name, conn_gateway_ip) = {
-                        let mut conn_mtx = gateway_conn.lock().await;
-                        let conn = &mut *conn_mtx;
                         (
-                            send_alive_request(conn).await,
-                            conn.gateway_name.clone(),
-                            conn.gateway_ip.clone(),
+                            send_alive_request(&gateway_conn).await,
+                            gateway_conn.gateway_name.clone(),
+                            gateway_conn.gateway_ip.clone(),
                         )
                     };
 
@@ -468,13 +465,12 @@ fn spawn_gateway_receiver_task(
     gateway_ip: String,
     gateway_name: String,
     outtx: HashMap<u16, broadcast::Sender<Result<DiagnosticResponse, EcuError>>>,
-    gateway_conn: Arc<Mutex<EcuConnectionTarget>>,
+    gateway_conn: Arc<EcuConnectionTarget>,
     mut send_pending_rx: watch::Receiver<bool>,
     reset_tx: mpsc::Sender<ConnectionResetReason>,
 ) {
     // note: the handlers are defined here, as rustfmt cannot format the correctly inside the
     // tokio::select! macro block
-
     async fn handle_send_pending(
         gateway_name: &str,
         gateway_ip: &str,
@@ -623,49 +619,73 @@ fn spawn_gateway_receiver_task(
                 },
 
                 response = async {
-                    let mut conn_mtx = gateway_conn.lock().await;
-                    let conn = &mut *conn_mtx;
+                    let Ok(mut conn_mtx) = gateway_conn.lock_read().await else {
+                        return None;
+                    };
+                    let conn = conn_mtx.get_reader();
 
                     // we can wait without actual timeout because this will be
                     // interrupted by the send_pending_rx when someone wants to send
                     // data on the connection
-                    try_read(Duration::MAX, &mut conn.ecu_connection).await
+                    Some(try_read(Duration::MAX, conn).await)
                 } => {
-                    handle_response(&gateway_name, &gateway_ip, &outtx, &reset_tx, response).await;
+                    if let Some(response) = response {
+                        handle_response(
+                            &gateway_name,
+                            &gateway_ip,
+                            &outtx,
+                            &reset_tx,
+                            response
+                        ).await;
+                    }
                 }
             }
         }
     });
 }
 
-async fn send_alive_request(conn: &mut EcuConnectionTarget) -> Result<(), ()> {
-    async fn handle_alive_request_response(conn: &mut EcuConnectionTarget) {
-        match try_read(Duration::from_millis(1000), &mut conn.ecu_connection).await {
-            Some(Ok(DiagnosticResponse::AliveCheckResponse)) => {
-                tracing::debug!("Alive check OK");
+async fn send_alive_request(conn: &EcuConnectionTarget) -> Result<(), ()> {
+    async fn handle_alive_request_response(conn: &EcuConnectionTarget) {
+        if tokio::time::timeout(Duration::from_secs(1), async {
+            let Ok(mut reader_mtx) = conn.lock_read().await else {
+                return;
+            };
+            let reader = reader_mtx.get_reader();
+            match try_read(Duration::from_millis(1000), reader).await {
+                Some(Ok(DiagnosticResponse::AliveCheckResponse)) => {
+                    tracing::debug!("Alive check OK");
+                }
+                Some(Ok(DiagnosticResponse::Ack(_))) => {
+                    tracing::debug!("Received ACK");
+                    Box::pin(handle_alive_request_response(conn)).await;
+                }
+                Some(Ok(DiagnosticResponse::GenericNack(_))) => {
+                    tracing::debug!("Received Generic NACK");
+                }
+                Some(Ok(msg)) => {
+                    tracing::error!(msg = ?msg, "Received Unrelated msg");
+                }
+                Some(Err(e)) => {
+                    tracing::error!(error = %e, "Error reading alive check response");
+                }
+                None => {
+                    tracing::debug!("Timeout waiting for alive check response");
+                }
             }
-            Some(Ok(DiagnosticResponse::Ack(_))) => {
-                tracing::debug!("Received ACK");
-                Box::pin(handle_alive_request_response(conn)).await;
-            }
-            Some(Ok(DiagnosticResponse::GenericNack(_))) => {
-                tracing::debug!("Received Generic NACK");
-            }
-            Some(Ok(msg)) => {
-                tracing::error!(msg = ?msg, "Received Unrelated msg");
-            }
-            Some(Err(e)) => {
-                tracing::error!(error = %e, "Error reading alive check response");
-            }
-            None => {
-                tracing::debug!("Timeout waiting for alive check response");
-            }
+        })
+        .await
+        .is_err()
+        {
+            tracing::debug!("Timeout waiting for alive check response");
         }
     }
 
     // TODO: handle alive request errors according to spec
-    match conn
-        .ecu_connection
+    let Ok(mut sender) = conn.lock_send().await else {
+        return Err(());
+    };
+    match sender
+        .get_sender()
         .send(DoipPayload::AliveCheckRequest(AliveCheckRequest {}))
         .await
     {
@@ -682,10 +702,10 @@ async fn send_alive_request(conn: &mut EcuConnectionTarget) -> Result<(), ()> {
 
 async fn try_read(
     timeout: Duration,
-    reader: &mut impl ECUConnection,
+    reader: &mut impl ECUConnectionRead,
 ) -> Option<Result<DiagnosticResponse, ConnectionError>> {
     async fn read_response(
-        reader: &mut impl ECUConnection,
+        reader: &mut impl ECUConnectionRead,
     ) -> Result<DiagnosticResponse, ConnectionError> {
         match reader.read().await {
             Some(Ok(msg)) => match msg.payload {
@@ -740,8 +760,7 @@ async fn try_read(
         }
     }
 
-    tokio::select! {
-        response = read_response(reader) => Some(response),
-        () = tokio::time::sleep(timeout) => None,
-    }
+    tokio::time::timeout(timeout, read_response(reader))
+        .await
+        .ok()
 }

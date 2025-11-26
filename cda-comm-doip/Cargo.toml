@@ -34,7 +34,9 @@ doip-definitions = { workspace = true }
 doip-sockets = { workspace = true, features = ["ssl"] }
 # tls
 openssl = { workspace = true }
+tokio-openssl = { workspace = true }
 
+serde = { workspace = true, features = ["derive"] }
 socket2 = { workspace = true, features = ["all"] }
 #tokio
 tokio = { workspace = true, features = ["time", "fs", "sync"] }
