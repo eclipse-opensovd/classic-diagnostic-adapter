@@ -6,17 +6,20 @@ dependencyResolutionManagement {
             version("kotlinVersion", "2.2.10")
             version("ktorVersion", "3.2.3")
             version("shadow", "8.1.1")
+            version("ktlint", "14.0.1")
 
             library("ktor-serialization", "io.ktor", "ktor-serialization-kotlinx-json").versionRef("ktorVersion")
             library("ktor-server-core", "io.ktor", "ktor-server-core").versionRef("ktorVersion")
             library("ktor-server-cio", "io.ktor", "ktor-server-cio").versionRef("ktorVersion")
             library(
-                "ktor-serialization-kotlinx-json", "io.ktor", "ktor-serialization-kotlinx-json"
+                "ktor-serialization-kotlinx-json",
+                "io.ktor",
+                "ktor-serialization-kotlinx-json",
             ).versionRef("ktorVersion")
             library(
                 "ktor-server-content-negotiation",
                 "io.ktor",
-                "ktor-server-content-negotiation"
+                "ktor-server-content-negotiation",
             ).versionRef("ktorVersion")
 
             library("doip-sim-dsl", "io.github.doip-sim-ecu:doip-sim-ecu-dsl:0.22.0")

@@ -24,7 +24,9 @@ enum class Variant {
 }
 
 @Serializable
-enum class SessionState(val value: Byte) {
+enum class SessionState(
+    val value: Byte,
+) {
     DEFAULT(0x01),
     PROGRAMMING(0x02),
     EXTENDED(0x03),
@@ -33,15 +35,17 @@ enum class SessionState(val value: Byte) {
 }
 
 @Serializable
-enum class SecurityAccess(val level: Byte) {
+enum class SecurityAccess(
+    val level: Byte,
+) {
     LOCKED(0),
     LEVEL_03(3),
     LEVEL_05(5),
-    LEVEL_07(7);
+    LEVEL_07(7),
+    ;
 
     companion object {
-        fun parse(level: Byte) =
-            entries.firstOrNull { it.level == level }
+        fun parse(level: Byte) = entries.firstOrNull { it.level == level }
     }
 }
 

@@ -25,25 +25,28 @@ import utils.to24BitByteArray
 import utils.toByteArray
 import java.nio.ByteBuffer
 
-private val AllAvailableStatusMask = DTCStatusMask(
-    testFailed = true,
-    testFailedThisOperationCycle = true,
-    pendingDtc = true,
-    confirmedDtc = true,
-    testNotCompletedSinceLastClear = true,
-    testFailedSinceLastClear = true,
-    testNotCompletedThisOperationCycle = true,
-    warningIndicatorRequested = true,
-)
+private val AllAvailableStatusMask =
+    DTCStatusMask(
+        testFailed = true,
+        testFailedThisOperationCycle = true,
+        pendingDtc = true,
+        confirmedDtc = true,
+        testNotCompletedSinceLastClear = true,
+        testFailedSinceLastClear = true,
+        testNotCompletedThisOperationCycle = true,
+        warningIndicatorRequested = true,
+    )
 
 fun RequestsData.addDtcRequests() {
     request("14 []", "ClearDiagnosticInformation") {
         val payload = messagePayload()
         val dtcCode = payload.get24BitInt()
-        val memory = if (payload.hasRemaining())
-            payload.get()
-        else
-            null
+        val memory =
+            if (payload.hasRemaining()) {
+                payload.get()
+            } else {
+                null
+            }
         FaultMemory.entries
             .filter { memory == null || it.memory == memory }
             .forEach { entry ->
@@ -59,10 +62,11 @@ fun RequestsData.addDtcRequests() {
     request("19 01 []", "ReadDTCInformation_NumberByStatusMask") {
         val statusMask = DTCStatusMask.parse(messagePayload())
         val faults = ecu.dtcFaults(FaultMemory.Standard).values.filter { it.status.matches(statusMask) }
-        val response = ReadDtcNumberOfDTCByStatusMaskResponse(
-            availabilityStatusMask = AllAvailableStatusMask,
-            dtcCount = faults.size.toUShort(),
-        )
+        val response =
+            ReadDtcNumberOfDTCByStatusMaskResponse(
+                availabilityStatusMask = AllAvailableStatusMask,
+                dtcCount = faults.size.toUShort(),
+            )
         ack(response.asByteArray)
     }
 
@@ -71,11 +75,12 @@ fun RequestsData.addDtcRequests() {
         val faults = ecu.dtcFaults(FaultMemory.Standard).values.filter { it.status.matches(request) }
         ecu.logger.info("Reporting ${faults.size} DTCs for status mask: ${request.asByte.toString(16)}")
 
-        val response = ReadDtcDTCByStatusMaskResponse(
-            // all fields are available
-            availabilityStatusMask = AllAvailableStatusMask,
-            records = faults.map { it.toDTCAndStatusRecord() }
-        )
+        val response =
+            ReadDtcDTCByStatusMaskResponse(
+                // all fields are available
+                availabilityStatusMask = AllAvailableStatusMask,
+                records = faults.map { it.toDTCAndStatusRecord() },
+            )
 
         ack(response.asByteArray)
     }
@@ -87,11 +92,12 @@ fun RequestsData.addDtcRequests() {
         if (fault == null) {
             nrc(NrcError.RequestOutOfRange)
         } else {
-            val response = ReadDtcDTCWithSnapshotRecordByDTCNbrResponse(
-                dtc = fault.id,
-                status = fault.status,
-                parameters = fault.snapshots
-            )
+            val response =
+                ReadDtcDTCWithSnapshotRecordByDTCNbrResponse(
+                    dtc = fault.id,
+                    status = fault.status,
+                    parameters = fault.snapshots,
+                )
             ack(response.asByteArray)
         }
     }
@@ -102,25 +108,26 @@ fun RequestsData.addDtcRequests() {
         if (fault == null) {
             nrc(NrcError.RequestOutOfRange)
         } else {
-            val response = ReadDtcReportDTCExtendedDataByDTCNbrResponse(
-                dtc = fault.id,
-                statusMask = fault.status,
-                extendedDataRecords = fault.extendedData.map {
-                    ExtendedDataRecord(
-                        recordNumber = it.recordNumber,
-                        recordData = it,
-                    )
-                },
-            )
+            val response =
+                ReadDtcReportDTCExtendedDataByDTCNbrResponse(
+                    dtc = fault.id,
+                    statusMask = fault.status,
+                    extendedDataRecords =
+                        fault.extendedData.map {
+                            ExtendedDataRecord(
+                                recordNumber = it.recordNumber,
+                                recordData = it,
+                            )
+                        },
+                )
             ack(response.asByteArray)
         }
     }
-
 }
 
 class ReadDtcDTCByStatusMaskResponse(
     val availabilityStatusMask: DTCStatusMask,
-    val records: List<DTCAndStatusRecord> = emptyList()
+    val records: List<DTCAndStatusRecord> = emptyList(),
 ) {
     val asByteArray: ByteArray
         get() {
@@ -185,7 +192,7 @@ class ReadDtcReportDTCExtendedDataByDTCNbrRequest(
 class ReadDtcReportDTCExtendedDataByDTCNbrResponse(
     val dtc: Int,
     val statusMask: DTCStatusMask,
-    val extendedDataRecords: List<ExtendedDataRecord> = emptyList()
+    val extendedDataRecords: List<ExtendedDataRecord> = emptyList(),
 ) {
     val asByteArray: ByteArray
         get() {

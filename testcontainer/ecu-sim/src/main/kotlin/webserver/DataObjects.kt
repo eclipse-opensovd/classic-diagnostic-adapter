@@ -15,7 +15,15 @@
 
 package webserver
 
-import ecu.*
+import ecu.Authentication
+import ecu.DataBlock
+import ecu.DataBlockType
+import ecu.DataTransferDownload
+import ecu.EcuState
+import ecu.MajorMinorPatch
+import ecu.SecurityAccess
+import ecu.SessionState
+import ecu.Variant
 import kotlinx.serialization.Serializable
 import library.toHexString
 import utils.toMajorMinorPatch
@@ -54,7 +62,7 @@ fun EcuState.toDto() =
         vin = this.vin,
         hardResetForSeconds = this.hardResetForSeconds,
         maxNumberOfBlockLength = this.maxNumberOfBlockLength,
-        blocks = this.blocks.map { it.toDto() }
+        blocks = this.blocks.map { it.toDto() },
     )
 
 @Serializable
@@ -67,14 +75,15 @@ data class DataTransferDownloadDto(
     val checksum: String?,
 )
 
-fun DataTransferDownload.toDto() = DataTransferDownloadDto(
-    addressAndLengthIdentifier = this.addressAndLengthIdentifier.toUByte(),
-    memoryAddress = this.memoryAddress.toHexString(),
-    memorySize = this.memorySize.toHexString(),
-    isActive = this.isActive,
-    dataTransferCount = this.dataTransferCount,
-    checksum = if (!this.isActive) this.checksum?.toHexString() else null,
-)
+fun DataTransferDownload.toDto() =
+    DataTransferDownloadDto(
+        addressAndLengthIdentifier = this.addressAndLengthIdentifier.toUByte(),
+        memoryAddress = this.memoryAddress.toHexString(),
+        memorySize = this.memorySize.toHexString(),
+        isActive = this.isActive,
+        dataTransferCount = this.dataTransferCount,
+        checksum = if (!this.isActive) this.checksum?.toHexString() else null,
+    )
 
 @Serializable
 data class DataBlockDto(
@@ -84,12 +93,13 @@ data class DataBlockDto(
     val partNumber: String?,
 )
 
-fun DataBlock.toDto() = DataBlockDto(
-    id = id,
-    type = type,
-    softwareVersion = softwareVersion.asString,
-    partNumber = partNumber,
-)
+fun DataBlock.toDto() =
+    DataBlockDto(
+        id = id,
+        type = type,
+        softwareVersion = softwareVersion.asString,
+        partNumber = partNumber,
+    )
 
 fun DataBlock.updateWith(dto: DataBlockDto) {
     this.softwareVersion = dto.softwareVersion?.toMajorMinorPatch() ?: this.softwareVersion

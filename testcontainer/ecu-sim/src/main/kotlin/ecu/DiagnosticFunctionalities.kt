@@ -22,24 +22,26 @@ import kotlin.time.Clock
 import kotlin.time.ExperimentalTime
 import kotlin.time.toJavaInstant
 
-class SoftwareIdentifierResponse(vararg val softwareVersionIdentifier: MajorMinorPatch) {
+class SoftwareIdentifierResponse(
+    vararg val softwareVersionIdentifier: MajorMinorPatch,
+) {
     val asByteArray: ByteArray
-        get() = byteArrayOf(softwareVersionIdentifier.size.toByte()) +
+        get() =
+            byteArrayOf(softwareVersionIdentifier.size.toByte()) +
                 softwareVersionIdentifier.map { it.asByteArray }.combine()
-
 }
-
 
 @OptIn(ExperimentalTime::class)
 fun RequestsData.addDiagnosticRequests() {
     request("22 F1 00", name = "Identification_Read") {
         val ecuState = ecu.ecuState()
-        val identification = when (ecuState.variant) {
-            Variant.BOOT -> ecuState.variantPattern.boot.decodeHex()
-            Variant.APPLICATION -> ecuState.variantPattern.application.decodeHex()
-            Variant.APPLICATION2 -> ecuState.variantPattern.application2.decodeHex()
-            Variant.APPLICATION3 -> ecuState.variantPattern.application3.decodeHex()
-        }
+        val identification =
+            when (ecuState.variant) {
+                Variant.BOOT -> ecuState.variantPattern.boot.decodeHex()
+                Variant.APPLICATION -> ecuState.variantPattern.application.decodeHex()
+                Variant.APPLICATION2 -> ecuState.variantPattern.application2.decodeHex()
+                Variant.APPLICATION3 -> ecuState.variantPattern.application3.decodeHex()
+            }
         ack(identification)
     }
 
@@ -155,7 +157,11 @@ fun RequestsData.addDiagnosticRequests() {
     }
 
     request("22 F1 99", name = "ProgrammingDateDataIdentifier_Read") {
-        val date = Clock.System.now().toJavaInstant().atZone(ZoneOffset.UTC)
+        val date =
+            Clock.System
+                .now()
+                .toJavaInstant()
+                .atZone(ZoneOffset.UTC)
         // get last 2 digits of year - signed byte will cause issues in 2080... we can live with that
         val year = (date.year % (date.year / 1000)).toByte()
         val month = date.month.value.toByte()
@@ -168,7 +174,11 @@ fun RequestsData.addDiagnosticRequests() {
     }
 
     request("22 F1 9B", name = "CalibrationDateDataIdentifier_Read") {
-        val date = Clock.System.now().toJavaInstant().atZone(ZoneOffset.UTC)
+        val date =
+            Clock.System
+                .now()
+                .toJavaInstant()
+                .atZone(ZoneOffset.UTC)
         val sdf = SimpleDateFormat("yyyy-MM-dd")
         ack(sdf.format(date).encodeToByteArray())
     }

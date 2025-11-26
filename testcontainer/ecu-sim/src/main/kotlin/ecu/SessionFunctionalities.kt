@@ -33,7 +33,9 @@ fun RequestResponseData.enableS3Timeout() {
             if (ecuState.sessionState != SessionState.DEFAULT ||
                 ecuState.securityAccess != SecurityAccess.LOCKED
             ) {
-                ecu.logger.info("Resetting ECU session, authenticationState and securityAccess to initial state, due to TesterPresent not being sent for 5 seconds")
+                ecu.logger.info(
+                    "Resetting ECU session, authenticationState and securityAccess to initial state, due to TesterPresent not being sent for 5 seconds",
+                )
                 ecuState.sessionState = SessionState.DEFAULT
                 ecuState.variant = Variant.APPLICATION
             }

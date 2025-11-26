@@ -41,33 +41,32 @@ fun saeDtcToInt(saeDtc: String): Int {
     // 01 - Chassis (C)
     // 10 - Body (B)
     // 11- Network Communications (U)
-    val system = when (saeDtc[0]) {
-        'P' -> 0
-        'C' -> 1
-        'B' -> 2
-        'U' -> 3
-        else -> throw IllegalArgumentException("Unknown system digit in SAE dtc code '$saeDtc'")
-    }
+    val system =
+        when (saeDtc[0]) {
+            'P' -> 0
+            'C' -> 1
+            'B' -> 2
+            'U' -> 3
+            else -> throw IllegalArgumentException("Unknown system digit in SAE dtc code '$saeDtc'")
+        }
 
     // Group:
     // 00 - SAE/ISO Controlled (0)
     // 01 - Manufacturer Controlled (1)
     // 10 - For (P) SAE/ISO / Rest Manufacturer Controlled (2)
     // 11 - SAE/ISO Controlled (3)
-    val group = when (saeDtc[1]) {
-        '0' -> 0
-        '1' -> 1
-        '2' -> 2
-        '3' -> 3
-        else -> throw IllegalArgumentException("Unknown group digit in SAE dtc code '$saeDtc'")
-    }
+    val group =
+        when (saeDtc[1]) {
+            '0' -> 0
+            '1' -> 1
+            '2' -> 2
+            '3' -> 3
+            else -> throw IllegalArgumentException("Unknown group digit in SAE dtc code '$saeDtc'")
+        }
 
     return (system shl 22) or (group shl 20) or saeDtc.substring(2).toInt(16)
-
 }
 
-fun Int.to24BitByteArray(): ByteArray =
-    byteArrayOf((this and 0xFF0000 shr 16).toByte(), (this and 0xFF00 shr 8).toByte(), this.toByte())
+fun Int.to24BitByteArray(): ByteArray = byteArrayOf((this and 0xFF0000 shr 16).toByte(), (this and 0xFF00 shr 8).toByte(), this.toByte())
 
-fun ByteBuffer.get24BitInt(): Int =
-    byteArrayOf(0x00, this.get(), this.get(), this.get()).toInt()
+fun ByteBuffer.get24BitInt(): Int = byteArrayOf(0x00, this.get(), this.get(), this.get()).toInt()
