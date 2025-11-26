@@ -18,6 +18,7 @@ use doip_definitions::{
     message::DoipMessage,
     payload::{ActivationCode, DoipPayload, RoutingActivationRequest, RoutingActivationResponse},
 };
+use tokio::sync::Mutex;
 
 use crate::ConnectionError;
 
@@ -39,27 +40,24 @@ const ELIPTIC_CURVE_GROUPS: [&str; 8] = [
     "brainpoolP512r1",
 ];
 
-pub(crate) trait ECUConnection {
-    async fn send(&mut self, msg: DoipPayload) -> Result<(), ConnectionError>
-    where
-        Self: std::borrow::Borrow<Self>;
+pub(crate) trait ECUConnectionRead {
     async fn read(&mut self) -> Option<Result<DoipMessage, doip_sockets::Error>>
     where
         Self: std::borrow::Borrow<Self>;
 }
 
-pub(crate) enum EcuConnectionVariant {
+pub(crate) trait ECUConnectionSend {
+    async fn send(&mut self, msg: DoipPayload) -> Result<(), ConnectionError>
+    where
+        Self: std::borrow::Borrow<Self>;
+}
+
+enum EcuConnectionVariant {
     Tls(doip_sockets::tcp::DoIpSslStream),
     Plain(doip_sockets::tcp::TcpStream),
 }
 
-pub(crate) struct EcuConnectionTarget {
-    pub(crate) ecu_connection: EcuConnectionVariant,
-    pub(crate) gateway_name: String,
-    pub(crate) gateway_ip: String,
-}
-
-impl ECUConnection for EcuConnectionVariant {
+impl EcuConnectionVariant {
     async fn send(&mut self, msg: DoipPayload) -> Result<(), ConnectionError> {
         match self {
             EcuConnectionVariant::Tls(conn) => conn.send(msg).await,
@@ -67,11 +65,80 @@ impl ECUConnection for EcuConnectionVariant {
         }
         .map_err(|e| ConnectionError::SendFailed(format!("Failed to send message: {e:?}")))
     }
-
     async fn read(&mut self) -> Option<Result<DoipMessage, doip_sockets::Error>> {
         match self {
             EcuConnectionVariant::Tls(conn) => conn.read().await,
             EcuConnectionVariant::Plain(conn) => conn.read().await,
+        }
+    }
+    fn into_split(self) -> (EcuConnectionReadVariant, EcuConnectionSendVariant) {
+        match self {
+            EcuConnectionVariant::Tls(conn) => {
+                let (read, write) = conn.into_split();
+                (
+                    EcuConnectionReadVariant::Tls(read),
+                    EcuConnectionSendVariant::Tls(write),
+                )
+            }
+            EcuConnectionVariant::Plain(conn) => {
+                let (read, write) = conn.into_split();
+                (
+                    EcuConnectionReadVariant::Plain(read),
+                    EcuConnectionSendVariant::Plain(write),
+                )
+            }
+        }
+    }
+}
+
+pub(crate) enum EcuConnectionReadVariant {
+    Tls(doip_sockets::tcp::TcpStreamReadHalf<tokio_openssl::SslStream<tokio::net::TcpStream>>),
+    Plain(doip_sockets::tcp::TcpStreamReadHalf<tokio::net::TcpStream>),
+}
+pub(crate) enum EcuConnectionSendVariant {
+    Tls(doip_sockets::tcp::TcpStreamWriteHalf<tokio_openssl::SslStream<tokio::net::TcpStream>>),
+    Plain(doip_sockets::tcp::TcpStreamWriteHalf<tokio::net::TcpStream>),
+}
+
+pub(crate) struct EcuConnectionTarget {
+    pub(crate) ecu_connection_rx: Mutex<EcuConnectionReadVariant>,
+    pub(crate) ecu_connection_tx: Mutex<EcuConnectionSendVariant>,
+    pub(crate) gateway_name: String,
+    pub(crate) gateway_ip: String,
+}
+
+impl EcuConnectionTarget {
+    pub(crate) async fn lock_send(&self) -> tokio::sync::MutexGuard<'_, EcuConnectionSendVariant> {
+        self.ecu_connection_tx.lock().await
+    }
+
+    pub(crate) async fn lock_read(&self) -> tokio::sync::MutexGuard<'_, EcuConnectionReadVariant> {
+        self.ecu_connection_rx.lock().await
+    }
+
+    pub(crate) async fn replace_connection(&self, new_target: EcuConnectionTarget) {
+        let mut ecu_connection_rx = self.ecu_connection_rx.lock().await;
+        let mut ecu_connection_tx = self.ecu_connection_tx.lock().await;
+        *ecu_connection_rx = new_target.ecu_connection_rx.into_inner();
+        *ecu_connection_tx = new_target.ecu_connection_tx.into_inner();
+    }
+}
+
+impl ECUConnectionSend for EcuConnectionSendVariant {
+    async fn send(&mut self, msg: DoipPayload) -> Result<(), ConnectionError> {
+        match self {
+            EcuConnectionSendVariant::Tls(conn) => conn.send(msg).await,
+            EcuConnectionSendVariant::Plain(conn) => conn.send(msg).await,
+        }
+        .map_err(|e| ConnectionError::SendFailed(format!("Failed to send message: {e:?}")))
+    }
+}
+
+impl ECUConnectionRead for EcuConnectionReadVariant {
+    async fn read(&mut self) -> Option<Result<DoipMessage, doip_sockets::Error>> {
+        match self {
+            EcuConnectionReadVariant::Tls(conn) => conn.read().await,
+            EcuConnectionReadVariant::Plain(conn) => conn.read().await,
         }
     }
 }
@@ -92,7 +159,7 @@ pub(crate) async fn establish_ecu_connection(
     connect_timeout: Duration,
     routing_activation_timeout: Duration,
 ) -> Result<EcuConnectionTarget, ConnectionError> {
-    let mut gateway_conn: EcuConnectionVariant = match tokio::time::timeout(
+    let mut gateway_conn = match tokio::time::timeout(
         connect_timeout,
         doip_sockets::tcp::TcpStream::connect(format!("{}:{}", gateway_ip, 13400)), // unencrypted
     )
@@ -130,9 +197,11 @@ pub(crate) async fn establish_ecu_connection(
             match msg.activation_code {
                 ActivationCode::SuccessfullyActivated => {
                     tracing::info!("Routing activated");
+                    let (read, write) = gateway_conn.into_split();
                     // Routing activated
                     Ok(EcuConnectionTarget {
-                        ecu_connection: gateway_conn,
+                        ecu_connection_tx: Mutex::new(write),
+                        ecu_connection_rx: Mutex::new(read),
                         gateway_name: gateway_name.to_owned(),
                         gateway_ip: gateway_ip.to_owned(),
                     })
@@ -153,11 +222,6 @@ pub(crate) async fn establish_ecu_connection(
                         routing_activation_timeout,
                     )
                     .await
-                    .map(|conn| EcuConnectionTarget {
-                        ecu_connection: conn,
-                        gateway_name: tls_gateway_name,
-                        gateway_ip: gateway_ip.to_owned(),
-                    })
                 }
                 _ => Err(ConnectionError::RoutingError(format!(
                     "Failed to activate routing: {:?}",
@@ -186,8 +250,8 @@ pub(crate) async fn establish_tls_ecu_connection(
     routing_activation_request: RoutingActivationRequest,
     connnect_timeout: Duration,
     routing_activation_timeout: Duration,
-) -> Result<EcuConnectionVariant, ConnectionError> {
-    let mut gateway_conn: EcuConnectionVariant = match tokio::time::timeout(
+) -> Result<EcuConnectionTarget, ConnectionError> {
+    let mut gateway_conn = match tokio::time::timeout(
         connnect_timeout,
         doip_sockets::tcp::DoIpSslStream::connect_with_ciphers(
             format!("{}:{}", gateway_ip, 3496),
@@ -237,7 +301,13 @@ pub(crate) async fn establish_tls_ecu_connection(
                 )));
             }
             tracing::info!("Routing activated");
-            Ok(gateway_conn) // Routing activated
+            let (read, write) = gateway_conn.into_split();
+            Ok(EcuConnectionTarget {
+                ecu_connection_tx: Mutex::new(write),
+                ecu_connection_rx: Mutex::new(read),
+                gateway_name: gateway_name.to_owned(),
+                gateway_ip: gateway_ip.to_owned(),
+            }) // Routing activated
         }
         Err(e) => Err(ConnectionError::RoutingError(format!(
             "Failed to activate routing: {e:?}"
@@ -258,7 +328,7 @@ pub(crate) async fn establish_tls_ecu_connection(
 )]
 async fn try_read_routing_activation_response(
     timeout: std::time::Duration,
-    reader: &mut impl ECUConnection,
+    reader: &mut EcuConnectionVariant,
     _gateway_name: &str,
     _gateway_ip: &str,
 ) -> Result<RoutingActivationResponse, DiagServiceError> {

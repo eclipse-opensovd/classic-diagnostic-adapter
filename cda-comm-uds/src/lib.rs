@@ -19,14 +19,14 @@ use std::{
 
 use cda_interfaces::{
     DiagComm, DiagCommType, DiagServiceError, DynamicPlugin, EcuGateway, EcuManager, EcuVariant,
-    FlashTransferStartParams, HashMap, HashMapExtensions, SchemaDescription, SchemaProvider,
-    SecurityAccess, ServicePayload, TesterPresentControlMessage, TesterPresentMode,
-    TesterPresentType, TransmissionParameters, UdsEcu, UdsResponse, datatypes,
+    FlashTransferStartParams, HashMap, HashMapExtensions, HashSet, HashSetExtensions,
+    SchemaDescription, SchemaProvider, SecurityAccess, ServicePayload, TesterPresentControlMessage,
+    TesterPresentMode, TesterPresentType, TransmissionParameters, UdsEcu, UdsResponse,
     datatypes::{
-        ComponentConfigurationsInfo, DTC_CODE_BIT_LEN, DataTransferError, DataTransferMetaData,
-        DataTransferStatus, DtcCode, DtcExtendedInfo, DtcMask, DtcReadInformationFunction,
-        DtcRecordAndStatus, DtcSnapshot, Ecu, ExtendedDataRecords, ExtendedSnapshots, Gateway,
-        NetworkStructure, RetryPolicy,
+        self, ComponentConfigurationsInfo, DTC_CODE_BIT_LEN, DataTransferError,
+        DataTransferMetaData, DataTransferStatus, DtcCode, DtcExtendedInfo, DtcMask,
+        DtcReadInformationFunction, DtcRecordAndStatus, DtcSnapshot, Ecu, ExtendedDataRecords,
+        ExtendedSnapshots, Gateway, NetworkStructure, RetryPolicy,
     },
     diagservices::{DiagServiceResponse, DiagServiceResponseType, UdsPayloadData},
     service_ids,
@@ -69,6 +69,7 @@ pub struct UdsManager<S: EcuGateway, R: DiagServiceResponse, T: EcuManager<Respo
     ecus: Arc<HashMap<String, RwLock<T>>>,
     gateway: S,
     data_transfers: Arc<Mutex<HashMap<EcuIdentifier, EcuDataTransfer>>>,
+    in_flight_ecus: Arc<RwLock<HashSet<u16>>>,
     tester_present_tasks: Arc<RwLock<HashMap<EcuIdentifier, TesterPresentTask>>>,
     _phantom: std::marker::PhantomData<R>,
 }
@@ -83,6 +84,7 @@ impl<S: EcuGateway, R: DiagServiceResponse, T: EcuManager<Response = R>> UdsMana
             ecus,
             gateway,
             data_transfers: Arc::new(Mutex::new(HashMap::new())),
+            in_flight_ecus: Arc::new(RwLock::new(HashSet::new())),
             tester_present_tasks: Arc::new(RwLock::new(HashMap::new())),
             _phantom: std::marker::PhantomData,
         };
@@ -163,6 +165,8 @@ impl<S: EcuGateway, R: DiagServiceResponse, T: EcuManager<Response = R>> UdsMana
 
     // allowed for clarity, to make it clearer which of the loops is being continued
     #[allow(clippy::needless_continue)]
+    // allow too many lines, as it is better to keep this together for now
+    #[allow(clippy::too_many_lines)]
     #[tracing::instrument(
         skip(self, payload),
         fields(ecu_name, expect_response, payload_size = payload.data.len())
@@ -174,12 +178,31 @@ impl<S: EcuGateway, R: DiagServiceResponse, T: EcuManager<Response = R>> UdsMana
         timeout: Option<Duration>,
         expect_response: bool,
     ) -> Result<Option<ServicePayload>, DiagServiceError> {
+        // todo: do we need to ensure that we do not send here
+        // when we have an ongoing data transfer as well?
         let start = std::time::Instant::now();
 
         let ecu = self.ecu_manager(ecu_name)?;
         let (uds_params, transmission_params) = Self::ecu_send_params(ecu).await;
+        let ecu_logical_address = ecu.read().await.logical_address();
+
+        // todo: what timeout should we use to wait till the ecu is 'free'?
+        tokio::time::timeout(Duration::from_secs(10), async {
+            let addr = ecu_logical_address;
+            while self.in_flight_ecus.read().await.contains(&addr) {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .map_err(|_| DiagServiceError::Timeout)?;
+
+        self.in_flight_ecus
+            .write()
+            .await
+            .insert(ecu_logical_address);
 
         let rx_timeout = timeout.unwrap_or(uds_params.timeout_default);
+        tracing::info!("Using RX timeout of {:?}", rx_timeout);
         let mut rx_timeout_next = None;
 
         // outer loop to retry sending frames, resend frames must deal with (N)ACK again
@@ -300,6 +323,11 @@ impl<S: EcuGateway, R: DiagServiceResponse, T: EcuManager<Response = R>> UdsMana
             };
             break 'send (uds_result, sent_after);
         };
+
+        self.in_flight_ecus
+            .write()
+            .await
+            .remove(&ecu_logical_address);
 
         let finish = start.elapsed().saturating_sub(sent_after);
         tracing::debug!(
@@ -849,6 +877,7 @@ impl<S: EcuGateway, R: DiagServiceResponse, T: EcuManager<Response = R>> Clone
             ecus: Arc::clone(&self.ecus),
             gateway: self.gateway.clone(),
             data_transfers: Arc::clone(&self.data_transfers),
+            in_flight_ecus: Arc::clone(&self.in_flight_ecus),
             tester_present_tasks: Arc::clone(&self.tester_present_tasks),
             _phantom: self._phantom,
         }
