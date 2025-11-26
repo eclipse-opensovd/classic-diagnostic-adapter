@@ -234,9 +234,7 @@ async fn main() -> Result<(), AppError> {
     let databases = Arc::new(databases);
     let diagnostic_gateway = match opensovd_cda_lib::create_diagnostic_gateway(
         Arc::clone(&databases),
-        &config.doip.tester_address,
-        &config.doip.tester_subnet,
-        config.doip.gateway_port,
+        &config.doip,
         variant_detection_tx,
         clonable_shutdown_signal.clone(),
     )

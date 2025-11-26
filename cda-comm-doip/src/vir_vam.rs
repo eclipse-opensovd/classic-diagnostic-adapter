@@ -91,6 +91,7 @@ pub(crate) async fn listen_for_vams<T, F>(
     netmask: u32,
     gateway: DoipDiagGateway<T>,
     variant_detection: mpsc::Sender<Vec<String>>,
+    send_timeout: Duration,
     shutdown_signal: F,
 ) where
     T: EcuAddressProvider + DoipComParamProvider,
@@ -106,6 +107,7 @@ pub(crate) async fn listen_for_vams<T, F>(
     #[tracing::instrument(skip(gateway, gateway_ecu_map, gateway_ecu_name_map, variant_detection))]
     async fn handle_doip_response<T: EcuAddressProvider + DoipComParamProvider>(
         gateway: &DoipDiagGateway<T>,
+        send_timeout: Duration,
         doip_msg_ctx: DoipMessageContext,
         gateway_ecu_map: &HashMap<u16, Vec<u16>>,
         gateway_ecu_name_map: &HashMap<u16, Vec<String>>,
@@ -146,6 +148,7 @@ pub(crate) async fn listen_for_vams<T, F>(
                         &gateway.doip_connections,
                         &gateway.ecus,
                         gateway_ecu_map,
+                        send_timeout,
                     )
                     .await
                     {
@@ -226,8 +229,12 @@ pub(crate) async fn listen_for_vams<T, F>(
                     Some(Ok((doip_msg, source_addr))) = socket.recv() => {
                         if let DoipPayload::VehicleAnnouncementMessage(_) = &doip_msg.payload {
                             handle_doip_response(
-                                &gateway, DoipMessageContext { doip_msg, source_addr, netmask },
-                                &gateway_ecu_map, &gateway_ecu_name_map, variant_detection.clone(),
+                                &gateway,
+                                send_timeout,
+                                DoipMessageContext { doip_msg, source_addr, netmask },
+                                &gateway_ecu_map,
+                                &gateway_ecu_name_map,
+                                variant_detection.clone(),
                             ).await;
                         }
                     }

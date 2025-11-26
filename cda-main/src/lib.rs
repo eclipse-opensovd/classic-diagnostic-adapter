@@ -19,7 +19,7 @@ use std::{
     },
 };
 
-use cda_comm_doip::DoipDiagGateway;
+use cda_comm_doip::{DoipDiagGateway, config::DoipConfig};
 use cda_comm_uds::UdsManager;
 use cda_core::{DiagServiceResponseStruct, EcuManager};
 use cda_database::{FileManager, ProtoLoadConfig};
@@ -345,21 +345,11 @@ pub fn create_uds_manager<S: SecurityPlugin>(
 )]
 pub async fn create_diagnostic_gateway<S: SecurityPlugin>(
     databases: Arc<DatabaseMap<S>>,
-    doip_tester_address: &str,
-    doip_tester_subnet: &str,
-    doip_gateway_port: u16,
+    doip_config: &DoipConfig,
     variant_detection: mpsc::Sender<Vec<String>>,
     shutdown_signal: impl std::future::Future<Output = ()> + Send + Clone + 'static,
 ) -> Result<DoipDiagGateway<EcuManager<S>>, DoipGatewaySetupError> {
-    DoipDiagGateway::new(
-        doip_tester_address,
-        doip_tester_subnet,
-        doip_gateway_port,
-        databases,
-        variant_detection,
-        shutdown_signal,
-    )
-    .await
+    DoipDiagGateway::new(doip_config, databases, variant_detection, shutdown_signal).await
 }
 
 // type alias does not allow specifying hasher, we set the hasher globally.

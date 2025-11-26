@@ -1,15 +1,17 @@
 /*
- * Copyright (c) 2025 The Contributors to Eclipse OpenSOVD (see CONTRIBUTORS)
- *
- * See the NOTICE file(s) distributed with this work for additional
- * information regarding copyright ownership.
- *
- * This program and the accompanying materials are made available under the
- * terms of the Apache License Version 2.0 which is available at
- * https://www.apache.org/licenses/LICENSE-2.0
- *
- * SPDX-License-Identifier: Apache-2.0
- */
+* Copyright (c) 2025 The Contributors to Eclipse OpenSOVD (see CONTRIBUTORS)
+*
+* See the NOTICE file(s) distributed with this work for additional
+* information regarding copyright ownership.
+*
+* This program and the accompanying materials are made available under the
+* terms of the Apache License Version 2.0 which is available at
+* https://www.apache.org/licenses/LICENSE-2.0
+*
+* SPDX-License-Identifier: Apache-2.0
+*/
+
+pub use cda_comm_doip::config::DoipConfig;
 use cda_interfaces::{
     DiagServiceError,
     datatypes::{
@@ -37,13 +39,6 @@ pub struct ServerConfig {
     pub port: u16,
 }
 
-#[derive(Deserialize, Serialize, Clone, Debug)]
-pub struct DoipConfig {
-    pub tester_address: String,
-    pub tester_subnet: String,
-    pub gateway_port: u16,
-}
-
 pub trait ConfigSanity {
     /// Checks the configuration for common mistakes and returns an error message if found.
     /// # Errors
@@ -65,6 +60,7 @@ impl Default for Configuration {
                 tester_address: "10.2.1.240".to_owned(),
                 tester_subnet: "255.255.0.0".to_owned(),
                 gateway_port: 13400,
+                send_timeout_ms: 1000,
             },
             logging: cda_tracing::LoggingConfig::default(),
             com_params: ComParams::default(),
