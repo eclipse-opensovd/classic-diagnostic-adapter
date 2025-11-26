@@ -24,30 +24,32 @@ import kotlin.uuid.Uuid
 @Serializable
 data class EcuState(
     var variant: Variant = Variant.APPLICATION,
-    var variantPattern: VariantPattern = VariantPattern(boot = "FF 00 00", application = "00 01 01", application2 = "00 10 10", application3 = "00 11 11"),
+    var variantPattern: VariantPattern =
+        VariantPattern(boot = "FF 00 00", application = "00 01 01", application2 = "00 10 10", application3 = "00 11 11"),
     var sessionState: SessionState = SessionState.DEFAULT,
     var securityAccess: SecurityAccess = SecurityAccess.LOCKED,
     var authentication: Authentication = Authentication.UNAUTHENTICATED,
-    val blocks: List<DataBlock> = listOf(
-        DataBlock(
-            id = Uuid.parse("11000000-0000-0000-0000-000000000000"),
-            type = DataBlockType.BOOT,
-            softwareVersion = MajorMinorPatch(1.toByte(), 2.toByte(), 3.toByte()),
-            partNumber = "1100000000"
+    val blocks: List<DataBlock> =
+        listOf(
+            DataBlock(
+                id = Uuid.parse("11000000-0000-0000-0000-000000000000"),
+                type = DataBlockType.BOOT,
+                softwareVersion = MajorMinorPatch(1.toByte(), 2.toByte(), 3.toByte()),
+                partNumber = "1100000000",
+            ),
+            DataBlock(
+                id = Uuid.parse("12000000-0000-0000-0000-000000000000"),
+                type = DataBlockType.CODE,
+                softwareVersion = MajorMinorPatch(2.toByte(), 3.toByte(), 4.toByte()),
+                partNumber = "1200000000",
+            ),
+            DataBlock(
+                id = Uuid.parse("13000000-0000-0000-0000-000000000000"),
+                type = DataBlockType.DATA,
+                softwareVersion = MajorMinorPatch(3.toByte(), 4.toByte(), 5.toByte()),
+                partNumber = "1300000000",
+            ),
         ),
-        DataBlock(
-            id = Uuid.parse("12000000-0000-0000-0000-000000000000"),
-            type = DataBlockType.CODE,
-            softwareVersion = MajorMinorPatch(2.toByte(), 3.toByte(), 4.toByte()),
-            partNumber = "1200000000"
-        ),
-        DataBlock(
-            id = Uuid.parse("13000000-0000-0000-0000-000000000000"),
-            type = DataBlockType.DATA,
-            softwareVersion = MajorMinorPatch(3.toByte(), 4.toByte(), 5.toByte()),
-            partNumber = "1300000000"
-        ),
-    ),
     var vin: String = System.getenv("OVERRIDE_VIN") ?: "SCEDT26T8BD005261",
     var hardResetForSeconds: Int = 0,
     var maxNumberOfBlockLength: Int = 65535,
@@ -73,7 +75,7 @@ data class DataBlock(
 class MajorMinorPatch(
     val major: Byte,
     val minor: Byte,
-    val patch: Byte
+    val patch: Byte,
 ) {
     val asByteArray: ByteArray
         get() =

@@ -17,7 +17,7 @@ import NrcError
 import RequestsData
 import utils.getByteArray
 import utils.messagePayload
-import java.util.*
+import kotlin.random.Random
 
 fun RequestsData.addSecurityAccessRequests() {
     request("27 []", name = "RequestSeed_SendKey") {
@@ -32,7 +32,7 @@ fun RequestsData.addSecurityAccessRequests() {
             } else {
                 // Create seed and fill with random data
                 val generatedSeed = ByteArray(8)
-                Random().nextBytes(generatedSeed)
+                Random.nextBytes(generatedSeed)
 
                 var seed by ecu.storedProperty { ByteArray(0) }
                 seed = generatedSeed
@@ -41,9 +41,10 @@ fun RequestsData.addSecurityAccessRequests() {
             }
         } else {
             // Send key
-            val level = SecurityAccess.parse(
-                level = (subFunction - 1).toByte()
-            )
+            val level =
+                SecurityAccess.parse(
+                    level = (subFunction - 1).toByte(),
+                )
             if (level == null) {
                 nrc(NrcError.RequestOutOfRange)
             } else {
@@ -69,6 +70,5 @@ fun RequestsData.addSecurityAccessRequests() {
                 }
             }
         }
-
     }
 }

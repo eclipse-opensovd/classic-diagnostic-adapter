@@ -19,8 +19,7 @@ import NetworkingData
 import RequestsData
 import addDtcRequests
 
-private fun generateDefaultEcuState() =
-    EcuState()
+private fun generateDefaultEcuState() = EcuState()
 
 fun NetworkingData.addDoipEntity(
     name: String,
@@ -29,7 +28,7 @@ fun NetworkingData.addDoipEntity(
     eid: ByteArray? = null,
     gid: ByteArray? = null,
     initialEcuState: EcuState? = null,
-    block: DoipEntityDataHandler = {}
+    block: DoipEntityDataHandler = {},
 ) {
     doipEntity(name) {
         val ecuState = initialEcuState ?: generateDefaultEcuState()

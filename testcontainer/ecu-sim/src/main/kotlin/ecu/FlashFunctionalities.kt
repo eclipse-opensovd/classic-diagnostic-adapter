@@ -38,7 +38,12 @@ class RequestDownloadRequest(
             val dataFormatIdentifier = data.get()
 
             val addressAndLengthFormatIdentifier = data.get()
-            val memAddressLength = addressAndLengthFormatIdentifier.and(0xF0.toByte()).toInt().shr(4).and(0x0F)
+            val memAddressLength =
+                addressAndLengthFormatIdentifier
+                    .and(0xF0.toByte())
+                    .toInt()
+                    .shr(4)
+                    .and(0x0F)
             val memoryAddress = ByteArray(memAddressLength)
             data.get(memoryAddress)
             val memSizeLength = addressAndLengthFormatIdentifier.and(0x0F.toByte()).toInt().and(0x0F)
@@ -61,7 +66,9 @@ class RequestDownloadResponse(
     val asByteArray: ByteArray
         get() = byteArrayOf(type.lengthInBytes.toByte()) + maxNumberOfBlockLength.toByteArray(type.lengthInBytes)
 
-    enum class IdentifierType(val lengthInBytes: Int) {
+    enum class IdentifierType(
+        val lengthInBytes: Int,
+    ) {
         UINT16(2),
         UINT32(4),
         UINT64(8),
@@ -93,7 +100,10 @@ class DataTransferDownload(
 
     private val checksumCalculator: MessageDigest = MessageDigest.getInstance("SHA1")
 
-    fun addDataTransfer(blockSequenceCounter: Int, data: ByteBuffer) {
+    fun addDataTransfer(
+        blockSequenceCounter: Int,
+        data: ByteBuffer,
+    ) {
         if (state != DataTransferState.IN_PROGRESS) {
             throw NrcException(NrcError.RequestSequenceError)
         } else if ((blockSequenceCounter % 256) != ((lastBlockSequenceCounter + 1) % 256)) {
@@ -129,11 +139,12 @@ fun RequestsData.addFlashRequests() {
             throw NrcException(NrcError.RequestSequenceError)
         }
 
-        val dataTransfer = DataTransferDownload(
-            addressAndLengthIdentifier = request.addressAndLengthIdentifier,
-            memoryAddress = request.memoryAddress,
-            memorySize = request.memorySize,
-        )
+        val dataTransfer =
+            DataTransferDownload(
+                addressAndLengthIdentifier = request.addressAndLengthIdentifier,
+                memoryAddress = request.memoryAddress,
+                memorySize = request.memorySize,
+            )
         dataTransfers.add(dataTransfer)
 
         val response = RequestDownloadResponse(RequestDownloadResponse.IdentifierType.UINT32, ecuState.maxNumberOfBlockLength.toULong())
@@ -156,9 +167,10 @@ fun RequestsData.addFlashRequests() {
             data = data,
         )
 
-        val response = TransferDataResponse(
-            blockSequenceCounter = blockSequenceCounter,
-        )
+        val response =
+            TransferDataResponse(
+                blockSequenceCounter = blockSequenceCounter,
+            )
 
         ack(response.asByteArray)
     }

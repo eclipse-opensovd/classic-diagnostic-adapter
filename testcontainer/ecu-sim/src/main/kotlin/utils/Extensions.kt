@@ -19,10 +19,13 @@ import RequestResponseData
 import ecu.MajorMinorPatch
 import ecu.YearMonthDayBCD
 import io.ktor.server.plugins.BadRequestException
+import kotlinx.io.bytestring.encode
 import library.toByteArray
 import java.io.ByteArrayOutputStream
 import java.nio.ByteBuffer
-import java.util.*
+import java.util.BitSet
+import kotlin.io.encoding.Base64
+import kotlin.random.Random
 import kotlin.uuid.ExperimentalUuidApi
 import kotlin.uuid.Uuid
 
@@ -44,13 +47,18 @@ fun ByteArray.toInt(): Int {
 
 fun ByteArray.toULong(): ULong =
     when (this.size) {
-        4 -> ByteBuffer.wrap(this).getInt(0).toULong().and(0xFFFFFFFF.toULong())
+        4 ->
+            ByteBuffer
+                .wrap(this)
+                .getInt(0)
+                .toULong()
+                .and(0xFFFFFFFF.toULong())
         8 -> ByteBuffer.wrap(this).getLong(0).toULong()
         else -> throw NotImplementedError("Converting Byte-Array to ULong (size ${this.size}) not implemented")
     }
 
-fun List<ByteArray>.concat(): ByteArray {
-    return if (this.isEmpty()) {
+fun List<ByteArray>.concat(): ByteArray =
+    if (this.isEmpty()) {
         ByteArray(0)
     } else if (this.size == 1) {
         this[0]
@@ -59,20 +67,17 @@ fun List<ByteArray>.concat(): ByteArray {
         this.forEach { byteBuffer.put(it) }
         byteBuffer.array()
     }
-}
 
-fun Int.toFittedByteArray(): ByteArray {
-    return if (this <= UByte.MAX_VALUE.toInt()) {
+fun Int.toFittedByteArray(): ByteArray =
+    if (this <= UByte.MAX_VALUE.toInt()) {
         byteArrayOf(this.toByte())
     } else if (this <= UShort.MAX_VALUE.toInt()) {
         this.toShort().toByteArray()
     } else {
         this.toByteArray()
     }
-}
 
-fun UShort.toByteArray(): ByteArray =
-    this.toShort().toByteArray()
+fun UShort.toByteArray(): ByteArray = this.toShort().toByteArray()
 
 fun Long.toByteArray(): ByteArray =
     byteArrayOf(
@@ -83,9 +88,8 @@ fun Long.toByteArray(): ByteArray =
         (this and 0xFF000000 shr 24).toByte(),
         (this and 0xFF0000 shr 16).toByte(),
         (this and 0xFF00 shr 8).toByte(),
-        (this and 0xFF).toByte()
+        (this and 0xFF).toByte(),
     )
-
 
 fun ULong.toByteArray(size: Int): ByteArray =
     when (size) {
@@ -104,37 +108,44 @@ fun BitSet.paddedByteArray(nBits: Int): ByteArray {
     return data
 }
 
-fun ByteArray.padLeft(length: Int, value: Byte = 0): ByteArray {
-    return if (this.size < length) {
-        val r = ByteArray(length) {
-            value
-        }
+fun ByteArray.padLeft(
+    length: Int,
+    value: Byte = 0,
+): ByteArray =
+    if (this.size < length) {
+        val r =
+            ByteArray(length) {
+                value
+            }
         System.arraycopy(this, 0, r, r.size - this.size, this.size)
         r
     } else {
         this
     }
-}
 
-fun ByteArray.padRight(length: Int, value: Byte = 0): ByteArray {
-    return if (this.size < length) {
-        val r = ByteArray(length) {
-            value
-        }
+fun ByteArray.padRight(
+    length: Int,
+    value: Byte = 0,
+): ByteArray =
+    if (this.size < length) {
+        val r =
+            ByteArray(length) {
+                value
+            }
         System.arraycopy(this, 0, r, 0, this.size)
         r
     } else {
         this
     }
-}
 
-fun ByteArray.encodeBase64(): String =
-    Base64.getEncoder().encodeToString(this)
+fun ByteArray.encodeBase64(): String = Base64.encode(this)
 
-fun String.decodeBase64(): ByteArray =
-    Base64.getDecoder().decode(this)
+fun String.decodeBase64(): ByteArray = Base64.decode(this)
 
-fun createSequencedByteArray(size: Int, first: Byte = 0x00): ByteArray {
+fun createSequencedByteArray(
+    size: Int,
+    first: Byte = 0x00,
+): ByteArray {
     val array = ByteArray(size)
     for (i in 0 until size) {
         array[i] = (i % 256).toByte()
@@ -147,19 +158,18 @@ fun createSequencedByteArray(size: Int, first: Byte = 0x00): ByteArray {
 
 fun createRandomByteArray(size: Int): ByteArray {
     val array = ByteArray(size)
-    Random().nextBytes(array)
+    Random.nextBytes(array)
     return array
 }
 
-fun RequestResponseData.messagePayload(offset: Int = -1): ByteBuffer {
-    return when (offset) {
+fun RequestResponseData.messagePayload(offset: Int = -1): ByteBuffer =
+    when (offset) {
         -1 -> {
             val calculatedOffset = this.caller.requestBytes.size
             ByteBuffer.wrap(this.message, calculatedOffset, this.message.size - calculatedOffset)
         }
         else -> ByteBuffer.wrap(this.message, offset, this.message.size - offset)
     }
-}
 
 fun ByteBuffer.getByteArray(length: Int): ByteArray {
     val data = ByteArray(length)
@@ -168,16 +178,16 @@ fun ByteBuffer.getByteArray(length: Int): ByteArray {
 }
 
 fun ByteBuffer.getLengthPrefixedByteArray(prefixLength: Int = 2): ByteArray {
-    val length = when (prefixLength) {
-        2 -> this.short.toUShort().toInt()
-        4 -> this.int.toUInt().toInt()
-        else -> throw UnsupportedOperationException("Unsupported prefix length")
-    }
+    val length =
+        when (prefixLength) {
+            2 -> this.short.toUShort().toInt()
+            4 -> this.int.toUInt().toInt()
+            else -> throw UnsupportedOperationException("Unsupported prefix length")
+        }
     return this.getByteArray(length)
 }
 
-fun String.toUuid(): Uuid =
-    Uuid.parse(this)
+fun String.toUuid(): Uuid = Uuid.parse(this)
 
 fun String.toMajorMinorPatch(): MajorMinorPatch {
     val split = Regex("([0-9]{1,2})\\.([0-9]{1,2})\\.([0-9]{1,2})")

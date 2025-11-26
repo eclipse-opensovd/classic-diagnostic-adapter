@@ -36,7 +36,7 @@ fun RequestsData.addAuthenticationRequests() {
     fun determineAuthenticationReturn(
         authentication: Authentication,
         success: AuthenticationReturnParameter =
-            AuthenticationReturnParameter.OWNERSHIP_VERIFIED__AUTHENTICATION_COMPLETE
+            AuthenticationReturnParameter.OWNERSHIP_VERIFIED__AUTHENTICATION_COMPLETE,
     ): AuthenticationReturnParameter =
         when (authentication) {
             Authentication.UNAUTHENTICATED -> AuthenticationReturnParameter.GENERAL_REJECT
@@ -52,23 +52,25 @@ fun RequestsData.addAuthenticationRequests() {
 
     request("29 01 []", "Authentication_VerifyCertificateUnidirectional") {
         VerifyCertificateUnidirectionalRequest.parse(messagePayload())
-        val response = VerifyCertificateUnidirectionalResponse(
-            authenticationReturn = AuthenticationReturnParameter.CERTIFICATE_VERIFIED__OWNERSHIP_VERIFICATION_NECESSARY,
-            challengeServer = createSequencedByteArray(16, 0x01),
-            ephemeralPublicKeyServer = createSequencedByteArray(16, 0x02),
-        )
+        val response =
+            VerifyCertificateUnidirectionalResponse(
+                authenticationReturn = AuthenticationReturnParameter.CERTIFICATE_VERIFIED__OWNERSHIP_VERIFICATION_NECESSARY,
+                challengeServer = createSequencedByteArray(16, 0x01),
+                ephemeralPublicKeyServer = createSequencedByteArray(16, 0x02),
+            )
         ack(response.asByteArray)
     }
 
     request("29 02 []", "Authentication_VerifyCertificateBidirectional") {
         VerifyCertificateBidirectionalRequest.parse(messagePayload())
-        val response = VerifyCertificateBidirectionalResponse(
-            authenticationReturn = AuthenticationReturnParameter.CERTIFICATE_VERIFIED__OWNERSHIP_VERIFICATION_NECESSARY,
-            challengeServer = createSequencedByteArray(16, 0x01),
-            certificateServer = createSequencedByteArray(16, 0x02),
-            ephemeralPublicKeyServer = createSequencedByteArray(16, 0x03),
-            proofOfOwnershipServer = createSequencedByteArray(16, 0x04),
-        )
+        val response =
+            VerifyCertificateBidirectionalResponse(
+                authenticationReturn = AuthenticationReturnParameter.CERTIFICATE_VERIFIED__OWNERSHIP_VERIFICATION_NECESSARY,
+                challengeServer = createSequencedByteArray(16, 0x01),
+                certificateServer = createSequencedByteArray(16, 0x02),
+                ephemeralPublicKeyServer = createSequencedByteArray(16, 0x03),
+                proofOfOwnershipServer = createSequencedByteArray(16, 0x04),
+            )
         ack(response.asByteArray)
     }
 
@@ -76,13 +78,15 @@ fun RequestsData.addAuthenticationRequests() {
         val request = ProofOfOwnershipRequest.parse(messagePayload())
         val ecuState = ecu.ecuState()
         ecuState.authentication = authenticationByProofOfOwnership(request.proofOfOwnershipClient)
-        val response = ProofOfOwnershipResponse(
-            authenticationReturn = determineAuthenticationReturn(
-                ecuState.authentication,
-                AuthenticationReturnParameter.OWNERSHIP_VERIFIED__AUTHENTICATION_COMPLETE
-            ),
-            sessionKeyInfo = createSequencedByteArray(16, 0x01),
-        )
+        val response =
+            ProofOfOwnershipResponse(
+                authenticationReturn =
+                    determineAuthenticationReturn(
+                        ecuState.authentication,
+                        AuthenticationReturnParameter.OWNERSHIP_VERIFIED__AUTHENTICATION_COMPLETE,
+                    ),
+                sessionKeyInfo = createSequencedByteArray(16, 0x01),
+            )
         ack(response.asByteArray)
     }
 
@@ -94,12 +98,13 @@ fun RequestsData.addAuthenticationRequests() {
 
     request("29 05 []", "Authentication_RequestChallengeForAuthentication") {
         RequestChallengeForAuthenticationRequest.parse(messagePayload())
-        val response = RequestChallengeForAuthenticationResponse(
-            authenticationReturn = AuthenticationReturnParameter.REQUEST_ACCEPTED,
-            algorithmIndicator = createSequencedByteArray(16, 0x01),
-            challengeServer = createSequencedByteArray(16, 0x02),
-            neededAdditionalParameter = createSequencedByteArray(16, 0x03),
-        )
+        val response =
+            RequestChallengeForAuthenticationResponse(
+                authenticationReturn = AuthenticationReturnParameter.REQUEST_ACCEPTED,
+                algorithmIndicator = createSequencedByteArray(16, 0x01),
+                challengeServer = createSequencedByteArray(16, 0x02),
+                neededAdditionalParameter = createSequencedByteArray(16, 0x03),
+            )
         ack(response.asByteArray)
     }
 
@@ -107,11 +112,12 @@ fun RequestsData.addAuthenticationRequests() {
         val request = VerifyProofOfOwnershipUnidirectionalRequest.parse(messagePayload())
         val ecuState = ecu.ecuState()
         ecuState.authentication = authenticationByProofOfOwnership(request.proofOfOwnershipClient)
-        val response = VerifyProofOfOwnershipUnidirectionalResponse(
-            authenticationReturn = determineAuthenticationReturn(ecuState.authentication),
-            algorithmIndicator = createSequencedByteArray(16, 0x01),
-            sessionKeyInfo = createSequencedByteArray(16, 0x02),
-        )
+        val response =
+            VerifyProofOfOwnershipUnidirectionalResponse(
+                authenticationReturn = determineAuthenticationReturn(ecuState.authentication),
+                algorithmIndicator = createSequencedByteArray(16, 0x01),
+                sessionKeyInfo = createSequencedByteArray(16, 0x02),
+            )
         ack(response.asByteArray)
     }
 
@@ -119,12 +125,13 @@ fun RequestsData.addAuthenticationRequests() {
         val request = VerifyProofOfOwnershipBidirectionalRequest.parse(messagePayload())
         val ecuState = ecu.ecuState()
         ecuState.authentication = authenticationByProofOfOwnership(request.proofOfOwnershipClient)
-        val response = VerifyProofOfOwnershipBidirectionalResponse(
-            authenticationReturn = determineAuthenticationReturn(ecuState.authentication),
-            algorithmIndicator = createSequencedByteArray(16, 0x01),
-            proofOfOwnershipServer = createSequencedByteArray(16, 0x02),
-            sessionKeyInfo = createSequencedByteArray(16, 0x03),
-        )
+        val response =
+            VerifyProofOfOwnershipBidirectionalResponse(
+                authenticationReturn = determineAuthenticationReturn(ecuState.authentication),
+                algorithmIndicator = createSequencedByteArray(16, 0x01),
+                proofOfOwnershipServer = createSequencedByteArray(16, 0x02),
+                sessionKeyInfo = createSequencedByteArray(16, 0x03),
+            )
         ack(response.asByteArray)
     }
 
@@ -135,7 +142,9 @@ fun RequestsData.addAuthenticationRequests() {
     }
 }
 
-enum class AuthenticationReturnParameter(val value: Byte) {
+enum class AuthenticationReturnParameter(
+    val value: Byte,
+) {
     REQUEST_ACCEPTED(0x00),
     GENERAL_REJECT(0x01),
     AUTHENTICATION_CONFIGURATION_APCE(0x02),
@@ -188,7 +197,8 @@ class VerifyCertificateUnidirectionalResponse(
     val ephemeralPublicKeyServer: ByteArray,
 ) {
     val asByteArray: ByteArray
-        get() = byteArrayOf(authenticationReturn.value) +
+        get() =
+            byteArrayOf(authenticationReturn.value) +
                 challengeServer.size.toShort().toByteArray() +
                 challengeServer +
                 ephemeralPublicKeyServer.size.toUShort().toByteArray() +
@@ -229,7 +239,8 @@ class VerifyCertificateBidirectionalResponse(
     val proofOfOwnershipServer: ByteArray,
 ) {
     val asByteArray: ByteArray
-        get() = byteArrayOf(authenticationReturn.value) +
+        get() =
+            byteArrayOf(authenticationReturn.value) +
                 challengeServer.size.toUShort().toByteArray() +
                 challengeServer +
                 certificateServer.size.toUShort().toByteArray() +
@@ -239,7 +250,6 @@ class VerifyCertificateBidirectionalResponse(
                 ephemeralPublicKeyServer.size.toUShort().toByteArray() +
                 ephemeralPublicKeyServer
 }
-
 
 class ProofOfOwnershipRequest(
     val proofOfOwnershipClient: ByteArray,
@@ -268,7 +278,8 @@ class ProofOfOwnershipResponse(
     val sessionKeyInfo: ByteArray,
 ) {
     val asByteArray: ByteArray
-        get() = byteArrayOf(authenticationReturn.value) +
+        get() =
+            byteArrayOf(authenticationReturn.value) +
                 sessionKeyInfo.size.toUShort().toByteArray() +
                 sessionKeyInfo
 }
@@ -328,7 +339,8 @@ class RequestChallengeForAuthenticationResponse(
     }
 
     val asByteArray: ByteArray
-        get() = byteArrayOf(authenticationReturn.value) +
+        get() =
+            byteArrayOf(authenticationReturn.value) +
                 algorithmIndicator +
                 challengeServer.size.toUShort().toByteArray() +
                 challengeServer +
@@ -336,12 +348,11 @@ class RequestChallengeForAuthenticationResponse(
                 neededAdditionalParameter
 }
 
-
 class VerifyProofOfOwnershipUnidirectionalRequest(
     val algorithmIndicator: ByteArray,
     val proofOfOwnershipClient: ByteArray,
     val challengeClient: ByteArray,
-    val additionalParameter: ByteArray = ByteArray(0)
+    val additionalParameter: ByteArray = ByteArray(0),
 ) {
     companion object {
         fun parse(buffer: ByteBuffer): VerifyProofOfOwnershipUnidirectionalRequest {
@@ -382,7 +393,8 @@ class VerifyProofOfOwnershipUnidirectionalResponse(
     }
 
     val asByteArray: ByteArray
-        get() = byteArrayOf(authenticationReturn.value) +
+        get() =
+            byteArrayOf(authenticationReturn.value) +
                 algorithmIndicator +
                 sessionKeyInfo.size.toUShort().toByteArray() +
                 sessionKeyInfo
@@ -392,7 +404,7 @@ class VerifyProofOfOwnershipBidirectionalRequest(
     val algorithmIndicator: ByteArray,
     val proofOfOwnershipClient: ByteArray,
     val challengeClient: ByteArray,
-    val additionalParameter: ByteArray = ByteArray(0)
+    val additionalParameter: ByteArray = ByteArray(0),
 ) {
     companion object {
         fun parse(buffer: ByteBuffer): VerifyProofOfOwnershipBidirectionalRequest {
@@ -434,7 +446,8 @@ class VerifyProofOfOwnershipBidirectionalResponse(
     }
 
     val asByteArray: ByteArray
-        get() = byteArrayOf(authenticationReturn.value) +
+        get() =
+            byteArrayOf(authenticationReturn.value) +
                 algorithmIndicator +
                 proofOfOwnershipServer.size.toUShort().toByteArray() +
                 proofOfOwnershipServer +

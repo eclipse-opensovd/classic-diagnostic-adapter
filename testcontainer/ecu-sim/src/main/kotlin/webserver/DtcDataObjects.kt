@@ -33,8 +33,11 @@ class DTCStatusMaskDto(
     var warningIndicatorRequested: Boolean?,
 )
 
-fun statusMaskFromDto(status: DTCStatusMaskDto?, statusMask: String?): DTCStatusMask {
-    return if (statusMask != null) {
+fun statusMaskFromDto(
+    status: DTCStatusMaskDto?,
+    statusMask: String?,
+): DTCStatusMask =
+    if (statusMask != null) {
         parse(ByteBuffer.wrap(byteArrayOf(statusMask.toUByte(16).toByte())))
     } else {
         DTCStatusMask(
@@ -48,7 +51,6 @@ fun statusMaskFromDto(status: DTCStatusMaskDto?, statusMask: String?): DTCStatus
             warningIndicatorRequested = status?.warningIndicatorRequested ?: false,
         )
     }
-}
 
 fun DTCStatusMask.toDto() =
     DTCStatusMaskDto(
@@ -61,7 +63,6 @@ fun DTCStatusMask.toDto() =
         testNotCompletedThisOperationCycle = testNotCompletedThisOperationCycle,
         warningIndicatorRequested = warningIndicatorRequested,
     )
-
 
 @Serializable
 class DtcFaultDto(

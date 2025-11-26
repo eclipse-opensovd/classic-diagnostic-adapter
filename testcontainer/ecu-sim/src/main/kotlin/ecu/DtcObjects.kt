@@ -17,16 +17,19 @@ import utils.concat
 import utils.paddedByteArray
 import utils.to24BitByteArray
 import java.nio.ByteBuffer
-import java.util.*
+import java.util.BitSet
+import java.util.Collections.emptyList
 import kotlin.experimental.and
 
-enum class FaultMemory(val memory: Byte) {
+enum class FaultMemory(
+    val memory: Byte,
+) {
     Standard(0x00),
-    Development(0x01);
+    Development(0x01),
+    ;
 
     companion object {
-        fun byName(name: String) =
-            entries.first { it.name == name }
+        fun byName(name: String) = entries.first { it.name == name }
     }
 }
 
@@ -45,12 +48,14 @@ class DtcFault(
 }
 
 @Suppress("unused", "EnumEntryName")
-enum class DTCFormatIdentifier(val data: Byte) {
+enum class DTCFormatIdentifier(
+    val data: Byte,
+) {
     Iso15031_6(0x00),
     Iso14229_1(0x01),
     SaeJ1939_73(0x02),
     Iso11992_4(0x03),
-    Iso27145_2(0x04)
+    Iso27145_2(0x04),
 }
 
 open class DTCStatusMask(
@@ -97,8 +102,7 @@ open class DTCStatusMask(
     val asByte: Byte
         get() = asByteArray[0]
 
-    fun matches(request: DTCStatusMask) =
-        (this.asByte and request.asByte) != 0.toByte()
+    fun matches(request: DTCStatusMask) = (this.asByte and request.asByte) != 0.toByte()
 }
 
 class DTCSnapshotParameter(
@@ -108,8 +112,8 @@ class DTCSnapshotParameter(
     val asByteArray: ByteArray
         get() {
             return byteArrayOf(recordNumber) +
-                    byteArrayOf(records.size.toUByte().toByte()) +
-                    records.map { it.asByteArray }.concat()
+                byteArrayOf(records.size.toUByte().toByte()) +
+                records.map { it.asByteArray }.concat()
         }
 }
 
@@ -125,7 +129,7 @@ interface DTCExtendedDataRecord {
 
 class DTCAndStatusRecord(
     val dtc: Int = 0, // 24 bit
-    val status: DTCStatusMask = DTCStatusMask()
+    val status: DTCStatusMask = DTCStatusMask(),
 ) {
     val asByteArray: ByteArray
         get() {

@@ -20,12 +20,16 @@ import ecu.FaultMemory
 import ecu.dataTransfersDownload
 import ecu.dtcFaults
 import ecu.ecuState
-import io.ktor.http.*
-import io.ktor.server.application.*
-import io.ktor.server.plugins.*
-import io.ktor.server.request.*
-import io.ktor.server.response.*
-import io.ktor.server.routing.*
+import io.ktor.http.HttpStatusCode
+import io.ktor.server.application.ApplicationCall
+import io.ktor.server.plugins.NotFoundException
+import io.ktor.server.request.receive
+import io.ktor.server.response.respond
+import io.ktor.server.routing.Route
+import io.ktor.server.routing.delete
+import io.ktor.server.routing.get
+import io.ktor.server.routing.post
+import io.ktor.server.routing.put
 import library.toHexString
 import networkInstances
 import org.slf4j.MDC
@@ -93,8 +97,7 @@ fun Route.addFlashTransferRoutes() {
     }
 }
 
-fun SimEcu.recordedData() =
-    this.storedProperty { mutableListOf<String>() }
+fun SimEcu.recordedData() = this.storedProperty { mutableListOf<String>() }
 
 fun Route.addRecordingRoutes() {
     post("/{ecu}/record") {
@@ -140,7 +143,11 @@ fun Route.addDtcFaultsRoutes() {
         val dto = call.receive<DtcFaultDto>()
         val dtcFault = dtcFaultFromDto(dto)
         dtcFaults[dtcFault.id] = dtcFault
-        ecu.logger.info("Adding DTC ${dtcFault.id.toString(16)} with status ${dtcFault.status.asByte.toString(16)} to ${call.parameters["faultMemory"].orEmpty()}")
+        ecu.logger.info(
+            "Adding DTC ${dtcFault.id.toString(
+                16,
+            )} with status ${dtcFault.status.asByte.toString(16)} to ${call.parameters["faultMemory"].orEmpty()}",
+        )
         call.respond(HttpStatusCode.Created, mapOf("message" to "DTC was created"))
     }
 
@@ -148,7 +155,7 @@ fun Route.addDtcFaultsRoutes() {
         val ecu = findByEcuName(call) ?: return@delete
         val faultId = call.parameters["faultId"]!!.dtcToId()
         val dtcFaults = ecu.dtcFaultsByApplicationCall(call) ?: return@delete
-        ecu.logger.info("Removing DTC ${faultId}} from ${call.parameters["faultMemory"].orEmpty()}")
+        ecu.logger.info("Removing DTC $faultId} from ${call.parameters["faultMemory"].orEmpty()}")
         dtcFaults.remove(faultId)
         call.respond(HttpStatusCode.OK, mapOf("message" to "DTCs were deleted"))
     }
@@ -168,7 +175,7 @@ private suspend fun SimEcu.dtcFaultsByApplicationCall(call: ApplicationCall) =
     } catch (_: Exception) {
         call.respond(
             HttpStatusCode.BadRequest,
-            mapOf("message" to "Fault memory ${call.parameters["faultMemory"].orEmpty()} doesn't exist")
+            mapOf("message" to "Fault memory ${call.parameters["faultMemory"].orEmpty()} doesn't exist"),
         )
         null
     }

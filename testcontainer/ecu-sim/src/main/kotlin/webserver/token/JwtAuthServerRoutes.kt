@@ -31,49 +31,51 @@ fun Route.addJwtAuthServerMockRoutes() {
         MDC.clear()
         log.info("/keys called")
         val rsaPublicKey = publicKey
-        val response = KeysResponse(
-            keys = listOf(
-                KeyResponse(
-                    e = rsaPublicKey.publicExponent.toByteArray().encodeUrlBase64(),
-                    n = rsaPublicKey.modulus.toByteArray().encodeUrlBase64(),
-                    alg = "RS256",
-                    kty = "RSA",
-                    use = "SIG",
-                    kid = "-"
-                )
+        val response =
+            KeysResponse(
+                keys =
+                    listOf(
+                        KeyResponse(
+                            e = rsaPublicKey.publicExponent.toByteArray().encodeUrlBase64(),
+                            n = rsaPublicKey.modulus.toByteArray().encodeUrlBase64(),
+                            alg = "RS256",
+                            kty = "RSA",
+                            use = "SIG",
+                            kid = "-",
+                        ),
+                    ),
             )
-        )
         call.respond(response)
     }
 
     post("/token") {
         MDC.clear()
         val params = call.receiveParameters()
-        val req = TokenRequest(
-            grantType = params["grant_type"],
-            clientId = params["client_id"],
-            clientSecret = params["client_secret"],
-            scope = params["scope"],
-        )
+        val req =
+            TokenRequest(
+                grantType = params["grant_type"],
+                clientId = params["client_id"],
+                clientSecret = params["client_secret"],
+                scope = params["scope"],
+            )
 
         log.info("/token called: $req")
         call.respond(HttpStatusCode.OK, generateTokenResponse(req))
     }
 }
 
-fun generateTokenResponse(tokenRequest: TokenRequest): TokenResponse {
-    return when (tokenRequest.grantType) {
+fun generateTokenResponse(tokenRequest: TokenRequest): TokenResponse =
+    when (tokenRequest.grantType) {
         "client_credentials" ->
             generateClientCredentialsResponse(
                 ClientCredentialsTokenRequest(
                     clientId = tokenRequest.clientId ?: throw BadRequestException("Requires client id"),
                     clientSecret = tokenRequest.clientSecret ?: throw BadRequestException("Requires client secret"),
-                    scopes = tokenRequest.scope?.split(" ") ?: emptyList()
-                )
+                    scopes = tokenRequest.scope?.split(" ") ?: emptyList(),
+                ),
             )
         else -> throw UnsupportedOperationException("grant type ${tokenRequest.grantType} isn't implemented yet")
     }
-}
 
 // form url encoded
 data class TokenRequest(
@@ -85,7 +87,7 @@ data class TokenRequest(
 
 @kotlinx.serialization.Serializable
 data class KeysResponse(
-    var keys: List<KeyResponse> = emptyList()
+    var keys: List<KeyResponse> = emptyList(),
 )
 
 @kotlinx.serialization.Serializable
@@ -98,5 +100,4 @@ data class KeyResponse(
     var kid: String?,
 )
 
-private fun ByteArray.encodeUrlBase64(): String =
-    Base64.getUrlEncoder().encodeToString(this)
+private fun ByteArray.encodeUrlBase64(): String = Base64.getUrlEncoder().encodeToString(this)

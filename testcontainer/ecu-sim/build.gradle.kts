@@ -6,6 +6,7 @@ plugins {
     kotlin("plugin.allopen") version libs.versions.kotlinVersion
     kotlin("plugin.serialization") version libs.versions.kotlinVersion
     id("com.github.johnrengelman.shadow") version libs.versions.shadow
+    id("org.jlleitschuh.gradle.ktlint") version libs.versions.ktlint
     application
 }
 
