@@ -19,9 +19,9 @@ use std::{
 
 use cda_interfaces::{
     DiagComm, DiagCommType, DiagServiceError, DynamicPlugin, EcuGateway, EcuManager, EcuVariant,
-    FlashTransferStartParams, HashMap, HashMapExtensions, HashSet, HashSetExtensions,
-    SchemaDescription, SchemaProvider, SecurityAccess, ServicePayload, TesterPresentControlMessage,
-    TesterPresentMode, TesterPresentType, TransmissionParameters, UdsEcu, UdsResponse,
+    FlashTransferStartParams, HashMap, HashMapExtensions, SchemaDescription, SchemaProvider,
+    SecurityAccess, ServicePayload, TesterPresentControlMessage, TesterPresentMode,
+    TesterPresentType, TransmissionParameters, UdsEcu, UdsResponse,
     datatypes::{
         self, ComponentConfigurationsInfo, DTC_CODE_BIT_LEN, DataTransferError,
         DataTransferMetaData, DataTransferStatus, DtcCode, DtcExtendedInfo, DtcMask,
@@ -35,7 +35,7 @@ use strum::IntoEnumIterator;
 use tokio::{
     fs::File,
     io::{AsyncReadExt, AsyncSeekExt, BufReader},
-    sync::{Mutex, RwLock, mpsc, watch},
+    sync::{Mutex, RwLock, Semaphore, mpsc, watch},
     task::JoinHandle,
 };
 
@@ -69,7 +69,7 @@ pub struct UdsManager<S: EcuGateway, R: DiagServiceResponse, T: EcuManager<Respo
     ecus: Arc<HashMap<String, RwLock<T>>>,
     gateway: S,
     data_transfers: Arc<Mutex<HashMap<EcuIdentifier, EcuDataTransfer>>>,
-    in_flight_ecus: Arc<RwLock<HashSet<u16>>>,
+    ecu_semaphores: Arc<Mutex<HashMap<u16, Arc<Semaphore>>>>,
     tester_present_tasks: Arc<RwLock<HashMap<EcuIdentifier, TesterPresentTask>>>,
     _phantom: std::marker::PhantomData<R>,
 }
@@ -84,7 +84,7 @@ impl<S: EcuGateway, R: DiagServiceResponse, T: EcuManager<Response = R>> UdsMana
             ecus,
             gateway,
             data_transfers: Arc::new(Mutex::new(HashMap::new())),
-            in_flight_ecus: Arc::new(RwLock::new(HashSet::new())),
+            ecu_semaphores: Arc::new(Mutex::new(HashMap::new())),
             tester_present_tasks: Arc::new(RwLock::new(HashMap::new())),
             _phantom: std::marker::PhantomData,
         };
@@ -187,19 +187,19 @@ impl<S: EcuGateway, R: DiagServiceResponse, T: EcuManager<Response = R>> UdsMana
         let ecu_logical_address = ecu.read().await.logical_address();
 
         // todo: what timeout should we use to wait till the ecu is 'free'?
-        tokio::time::timeout(Duration::from_secs(10), async {
-            let addr = ecu_logical_address;
-            while self.in_flight_ecus.read().await.contains(&addr) {
-                tokio::time::sleep(Duration::from_millis(10)).await;
-            }
-        })
-        .await
-        .map_err(|_| DiagServiceError::Timeout)?;
+        let semaphore = {
+            Arc::clone(
+                self.ecu_semaphores
+                    .lock()
+                    .await
+                    .entry(ecu_logical_address)
+                    .or_insert_with(|| Arc::new(Semaphore::new(1))),
+            )
+        };
 
-        self.in_flight_ecus
-            .write()
+        let ecu_sem = tokio::time::timeout(Duration::from_secs(10), semaphore.acquire())
             .await
-            .insert(ecu_logical_address);
+            .map_err(|_| DiagServiceError::Timeout)?;
 
         let rx_timeout = timeout.unwrap_or(uds_params.timeout_default);
         tracing::info!("Using RX timeout of {:?}", rx_timeout);
@@ -324,10 +324,7 @@ impl<S: EcuGateway, R: DiagServiceResponse, T: EcuManager<Response = R>> UdsMana
             break 'send (uds_result, sent_after);
         };
 
-        self.in_flight_ecus
-            .write()
-            .await
-            .remove(&ecu_logical_address);
+        drop(ecu_sem);
 
         let finish = start.elapsed().saturating_sub(sent_after);
         tracing::debug!(
@@ -877,7 +874,7 @@ impl<S: EcuGateway, R: DiagServiceResponse, T: EcuManager<Response = R>> Clone
             ecus: Arc::clone(&self.ecus),
             gateway: self.gateway.clone(),
             data_transfers: Arc::clone(&self.data_transfers),
-            in_flight_ecus: Arc::clone(&self.in_flight_ecus),
+            ecu_semaphores: Arc::clone(&self.ecu_semaphores),
             tester_present_tasks: Arc::clone(&self.tester_present_tasks),
             _phantom: self._phantom,
         }
