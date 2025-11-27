@@ -321,6 +321,7 @@ dependencies = [
  "socket2",
  "thiserror 2.0.17",
  "tokio",
+ "tokio-openssl",
  "tracing",
 ]
 

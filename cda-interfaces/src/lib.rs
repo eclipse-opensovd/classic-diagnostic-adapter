@@ -39,7 +39,7 @@ pub use schema::*;
 pub type Hasher = foldhash::fast::RandomState;
 pub type HashMap<K, V> = std::collections::HashMap<K, V, Hasher>;
 pub type HashSet<V> = std::collections::HashSet<V, Hasher>;
-pub use foldhash::{HashMapExt as HashMapExtensions, HashSet as HashSetExtensions};
+pub use foldhash::{HashMapExt as HashMapExtensions, HashSetExt as HashSetExtensions};
 
 /// # strings module
 /// This module contains a type that allows to store unique strings and use references to them
