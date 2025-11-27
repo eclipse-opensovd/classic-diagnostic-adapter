@@ -202,8 +202,9 @@ impl<S: EcuGateway, R: DiagServiceResponse, T: EcuManager<Response = R>> UdsMana
             .map_err(|_| DiagServiceError::Timeout)?;
 
         let rx_timeout = timeout.unwrap_or(uds_params.timeout_default);
-        tracing::info!("Using RX timeout of {:?}", rx_timeout);
         let mut rx_timeout_next = None;
+
+        let sent_sid = payload.data.first();
 
         // outer loop to retry sending frames, resend frames must deal with (N)ACK again
         let (response, sent_after) = 'send: loop {
@@ -237,7 +238,18 @@ impl<S: EcuGateway, R: DiagServiceResponse, T: EcuManager<Response = R>> UdsMana
                     Ok(Some(result)) => {
                         match result {
                             Ok(Some(UdsResponse::Message(msg))) => {
-                                break 'read_uds_messages Ok(msg);
+                                // if we received a response matching our sent SID, return it
+                                // other responses are logged as warnings and ignored.
+                                // todo: this should be handled by a struct
+                                if !msg.data.is_empty()
+                                    && ((msg.data.first() == Some(&service_ids::NEGATIVE_RESPONSE)
+                                        && msg.data.get(1) == sent_sid)
+                                        || (msg.data.first()
+                                            == sent_sid.map(|sid| sid + 0x40).as_ref()))
+                                {
+                                    break 'read_uds_messages Ok(msg);
+                                }
+                                tracing::warn!("Received unexpected UDS message: {:?}", msg);
                             }
                             Ok(Some(UdsResponse::BusyRepeatRequest(_))) => {
                                 if let Err(e) = validate_timeout_by_policy(
