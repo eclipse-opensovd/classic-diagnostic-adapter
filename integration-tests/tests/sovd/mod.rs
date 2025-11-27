@@ -11,6 +11,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+mod custom_routes;
 mod ecu;
 mod locks;
 

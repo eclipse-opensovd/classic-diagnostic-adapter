@@ -35,11 +35,98 @@ pub(crate) mod sovd;
 // Consts for HTTP
 pub const SWAGGER_UI_ROUTE: &str = "/swagger-ui";
 pub const OPENAPI_JSON_ROUTE: &str = "/openapi.json";
-
 #[derive(Clone)]
 pub struct WebServerConfig {
     pub host: String,
     pub port: u16,
+}
+
+/// Provide additional routes for the webserver.
+/// This will be registered **after** the main SOVD routes have been registered, therefore existing
+/// routes can be overridden.
+/// Be aware that there is no access to the internal state of the SOVD server.
+/// Custom routes be self-contained and are intended to provide vendor specific functionality,
+/// e.g. versioning in a custom format.
+///
+/// # Example
+///
+/// The following example shows how to implement a vendor specific route
+/// that accepts both GET and POST requests with aide documentation.
+/// Create the following struct and implement the `RouteProvider` trait, then pass it to
+/// `launch_webserver` as the `additional_routes_provider` parameter.
+///
+/// ```
+/// use aide::axum::{ApiRouter, routing, IntoApiResponse};
+/// use axum::{Json, http::StatusCode};
+/// use serde::{Deserialize, Serialize};
+/// use cda_sovd::RouteProvider;
+///
+/// #[derive(Serialize, Deserialize, schemars::JsonSchema)]
+/// struct DemoData {
+///     oem_name: String,
+///     version: String,
+/// }
+///
+/// struct DemoRouteProvider;
+///
+/// impl RouteProvider for DemoRouteProvider {
+///     fn register_custom_routes<S>(router: ApiRouter<S>) -> ApiRouter<S>
+///     where
+///         S: Clone + Send + Sync + 'static,
+///     {
+///         router.api_route(
+///             "/demo",
+///             routing::get_with(
+///                 || async {
+///                     (
+///                         StatusCode::OK,
+///                         Json(DemoData {
+///                             oem_name: "Eclipse Foundation".to_string(),
+///                             version: "1.0.0".to_string(),
+///                         }),
+///                     )
+///                 },
+///                 |op| {
+///                     op.description("Get demo data")
+///                         .response_with::<200, Json<DemoData>, _>(|res| {
+///                             res.example(DemoData {
+///                                 oem_name: "Eclipse Foundation".to_string(),
+///                                 version: "1.0.0".to_string(),
+///                             })
+///                         })
+///                 },
+///             )
+///                 .post_with(
+///                     |Json(payload): Json<DemoData>| async move {
+///                         // Echo back the payload
+///                         (StatusCode::CREATED, Json(payload))
+///                     },
+///                     |op| {
+///                         op.description("Create demo data")
+///                             .response_with::<201, Json<DemoData>, _>(|res| {
+///                                 res.description("Successfully created")
+///                             })
+///                     },
+///                 ),
+///         )
+///     }
+/// }
+///
+/// ```
+pub trait RouteProvider {
+    fn register_custom_routes<S>(router: Router<S>) -> Router<S>
+    where
+        S: Clone + Send + Sync + 'static;
+}
+
+pub struct DefaultRouteProvider;
+impl RouteProvider for DefaultRouteProvider {
+    fn register_custom_routes<S>(router: Router<S>) -> Router<S>
+    where
+        S: Send + Sync,
+    {
+        router
+    }
 }
 
 /// Launches the http(s) webserver for handling SOVD requests
@@ -51,19 +138,20 @@ pub struct WebServerConfig {
 // type alias does not allow specifying hasher, we set the hasher globally.
 #[allow(clippy::implicit_hasher)]
 #[tracing::instrument(
-    skip(config, ecu_uds, file_manager, shutdown_signal),
+    skip(config, ecu_uds, file_manager, shutdown_signal, additional_routes_provider),
     fields(
         host = %config.host,
         port = %config.port,
         flash_files_path = %flash_files_path
     )
 )]
-pub async fn launch_webserver<F, R, T, M, S>(
+pub async fn launch_webserver<F, R, T, M, S, U>(
     config: WebServerConfig,
     ecu_uds: T,
     flash_files_path: String,
     file_manager: HashMap<String, M>,
     shutdown_signal: F,
+    additional_routes_provider: Option<U>,
 ) -> Result<(), DoipGatewaySetupError>
 where
     F: Future<Output = ()> + Send + 'static,
@@ -71,6 +159,7 @@ where
     T: UdsEcu + SchemaProvider + Clone,
     M: FileManager,
     S: SecurityPluginLoader,
+    U: RouteProvider,
 {
     let clonable_shutdown_signal = shutdown_signal.shared();
 
@@ -94,6 +183,10 @@ where
     let app_routes = {
         let app = Router::new()
             .merge(sovd::route::<R, T, M, S>(&ecu_uds, flash_files_path, file_manager).await)
+            .merge(additional_routes_provider.map_or_else(Router::new, |_| {
+                let router = Router::new();
+                U::register_custom_routes(router)
+            }))
             .finish_api_with(&mut api, openapi::api_docs);
 
         create_trace_layer(app)

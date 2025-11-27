@@ -1562,6 +1562,10 @@ checksum = "c8fae54786f62fb2918dcfae3d568594e50eb9b5c25bf04371af6fe7516452fb"
 name = "integration-tests"
 version = "0.1.0"
 dependencies = [
+ "aide",
+ "axum",
+ "cda-core",
+ "cda-database",
  "cda-interfaces",
  "cda-plugin-security",
  "cda-sovd",
@@ -1573,6 +1577,7 @@ dependencies = [
  "mime",
  "opensovd-cda",
  "reqwest",
+ "schemars",
  "serde",
  "serde_json",
  "serde_qs",

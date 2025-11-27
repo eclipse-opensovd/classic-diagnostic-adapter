@@ -15,6 +15,7 @@ use std::sync::Arc;
 
 use cda_interfaces::{DiagServiceError, DoipGatewaySetupError};
 use cda_plugin_security::{DefaultSecurityPlugin, DefaultSecurityPluginData};
+use cda_sovd::DefaultRouteProvider;
 use cda_tracing::TracingSetupError;
 use clap::Parser;
 use futures::future::FutureExt;
@@ -252,12 +253,13 @@ async fn main() -> Result<(), AppError> {
     let uds =
         opensovd_cda_lib::create_uds_manager(diagnostic_gateway, databases, variant_detection_rx);
 
-    match opensovd_cda_lib::start_webserver::<_, DefaultSecurityPlugin>(
+    match opensovd_cda_lib::start_webserver::<_, DefaultSecurityPlugin, DefaultRouteProvider>(
         flash_files_path,
         file_managers,
         webserver_config,
         uds,
         clonable_shutdown_signal,
+        None, // additional routes may be used in an OEM context
     )
     .await
     {

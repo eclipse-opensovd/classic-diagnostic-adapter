@@ -18,9 +18,10 @@ use std::{
 
 use cda_interfaces::datatypes::{ComParams, DatabaseNamingConvention, FlatbBufConfig};
 use cda_plugin_security::{DefaultSecurityPlugin, DefaultSecurityPluginData};
+use cda_sovd::DefaultRouteProvider;
 use cda_tracing::LoggingConfig;
 use futures::FutureExt as _;
-use opensovd_cda_lib::config::configfile::{ConfigSanity, Configuration};
+use opensovd_cda_lib::config::configfile::{ConfigSanity, Configuration, ServerConfig};
 use tokio::sync::{Mutex, MutexGuard, OnceCell, mpsc};
 use tracing_subscriber::layer::SubscriberExt;
 
@@ -94,19 +95,8 @@ async fn initialize_runtime() -> Result<TestRuntime, TestingError> {
     // If docker is disabled, we run the sim and cda locally
     // this is useful for debugging tests
     // without having to rebuild the docker containers every time.
-    let use_docker = std::env::var(CDA_INTEGRATION_TEST_USE_DOCKER)
-        .map(|s| s == "true")
-        .unwrap_or(true);
-    let host = if use_docker {
-        "0.0.0.0".to_owned()
-    } else {
-        // Allow overriding the tester address when not using docker.
-        // This is useful, as on some systems, using 127.0.0.1 or 0.0.0.0 does not work properly
-        // and the CDA will not reach the sim.
-        std::env::var(CDA_INTEGRATION_TEST_TESTER_ADDRESS).unwrap_or("0.0.0.0".to_owned())
-    };
-
-    let (cda_port, gateway_port, sim_control_port) = if use_docker {
+    let host = host();
+    let (cda_port, gateway_port, sim_control_port) = if use_docker() {
         (
             find_available_tcp_port(&host)?,
             find_available_tcp_port(&host)?,
@@ -145,16 +135,27 @@ async fn initialize_runtime() -> Result<TestRuntime, TestingError> {
     };
 
     register_cleanup();
-    if use_docker {
+    if use_docker() {
         start_docker_compose(cda_port, gateway_port, sim_control_port)?;
     } else {
         start_ecu_sim(&ecu_sim).await?;
         start_cda(config.clone());
     }
 
-    wait_for_cda_online(&config).await?;
+    wait_for_cda_online(&config.server).await?;
 
     Ok(TestRuntime { config, ecu_sim })
+}
+
+pub(crate) fn host() -> String {
+    if use_docker() {
+        "0.0.0.0".to_owned()
+    } else {
+        // Allow overriding the tester address when not using docker.
+        // This is useful, as on some systems, using 127.0.0.1 or 0.0.0.0 does not work properly
+        // and the CDA will not reach the sim.
+        std::env::var(CDA_INTEGRATION_TEST_TESTER_ADDRESS).unwrap_or("0.0.0.0".to_owned())
+    }
 }
 
 fn start_cda(config: Configuration) {
@@ -216,12 +217,17 @@ fn start_cda(config: Configuration) {
             variant_detection_rx,
         );
 
-        let exit_code = match opensovd_cda_lib::start_webserver::<_, DefaultSecurityPlugin>(
+        let exit_code = match opensovd_cda_lib::start_webserver::<
+            _,
+            DefaultSecurityPlugin,
+            DefaultRouteProvider,
+        >(
             flash_files_path,
             file_managers,
             webserver_config,
             uds,
             clonable_shutdown_signal,
+            None,
         )
         .await
         {
@@ -397,7 +403,7 @@ pub(crate) async fn restart_cda(config: &Configuration) -> Result<(), TestingErr
         stop_cda().await?;
         start_cda(config.clone());
     }
-    wait_for_cda_online(config).await
+    wait_for_cda_online(&config.server).await
 }
 
 fn use_docker() -> bool {
@@ -430,8 +436,8 @@ async fn wait_for_ecu_sim_ready(host: &str, sim_control_port: u16) -> Result<(),
     wait_for_http_ready(url, "ECU sim").await
 }
 
-pub(crate) async fn wait_for_cda_online(cfg: &Configuration) -> Result<(), TestingError> {
-    let url = format!("http://{}:{}", cfg.server.address, cfg.server.port);
+pub(crate) async fn wait_for_cda_online(cfg: &ServerConfig) -> Result<(), TestingError> {
+    let url = format!("http://{}:{}", cfg.address, cfg.port);
     wait_for_http_ready(url, "CDA").await
 }
 
@@ -473,7 +479,7 @@ fn mdd_file_path() -> Result<String, TestingError> {
     Ok(odx_path.to_string_lossy().to_string())
 }
 
-fn find_available_tcp_port(listen_address: &str) -> Result<u16, TestingError> {
+pub(crate) fn find_available_tcp_port(listen_address: &str) -> Result<u16, TestingError> {
     use std::net::TcpListener;
     let listener = TcpListener::bind(format!("{listen_address}:0"))
         .map_err(|e| TestingError::InvalidNetworkConfig(e.to_string()))?;

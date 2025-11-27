@@ -539,7 +539,7 @@ fn create_socket(
 
     socket.bind(&broadcast_addr.into()).map_err(|e| {
         DoipGatewaySetupError::SocketCreationFailed(format!(
-            "DoipGateway: Failed to bind socket, ip {tester_ip}: {e:?}"
+            "DoipGateway: Failed to bind socket, ip {tester_ip}, port {gateway_port}: {e:?}"
         ))
     })?;
 

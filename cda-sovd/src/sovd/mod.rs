@@ -667,6 +667,7 @@ pub(crate) use create_response_schema;
 /// This Macro allows to generate a schema for a type.
 /// Ensures that the schema is generated with inlined subschemas
 /// and draft07 settings.
+#[macro_export]
 macro_rules! create_schema {
     ($type_:ty) => {{
         use schemars::JsonSchema as _;
@@ -677,4 +678,4 @@ macro_rules! create_schema {
         <$type_>::json_schema(&mut generator)
     }};
 }
-pub(crate) use create_schema;
+pub use create_schema;
