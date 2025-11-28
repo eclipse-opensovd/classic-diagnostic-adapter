@@ -16,6 +16,7 @@ use std::fmt::Debug;
 use cda_interfaces::{
     DiagServiceError,
     datatypes::{ComParamConfig, ComParamValue, DeserializableCompParam, FlatbBufConfig},
+    dlt_ctx,
 };
 pub use comparam::*;
 pub use data_operation::*;
@@ -563,7 +564,8 @@ impl DiagnosticDatabase {
         skip(self),
         fields(
             protocol = ?protocol,
-            param_name = %com_param.name
+            param_name = %com_param.name,
+            dlt_context = dlt_ctx!("DB"),
         )
     )]
     pub fn find_com_param<T: DeserializableCompParam + Serialize + Debug + Clone>(

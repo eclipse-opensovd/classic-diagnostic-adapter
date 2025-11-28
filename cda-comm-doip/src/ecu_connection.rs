@@ -13,14 +13,13 @@
 
 use std::time::Duration;
 
-use cda_interfaces::DiagServiceError;
+use cda_interfaces::{DiagServiceError, dlt_ctx};
 use doip_definitions::{
     message::DoipMessage,
     payload::{ActivationCode, DoipPayload, RoutingActivationRequest, RoutingActivationResponse},
 };
 
 use crate::ConnectionError;
-
 const ENABLED_SSL_CIPHERS: [&str; 4] = [
     "ECDHE-RSA-AES128-GCM-SHA256",
     "ECDHE-ECDSA-AES128-SHA256",
@@ -82,7 +81,8 @@ impl ECUConnection for EcuConnectionVariant {
         gateway_ip,
         gateway_name,
         connect_timeout_ms = connect_timeout.as_millis(),
-        routing_timeout_ms = routing_activation_timeout.as_millis()
+        routing_timeout_ms = routing_activation_timeout.as_millis(),
+        dlt_context = dlt_ctx!("DOIP"),
     )
 )]
 pub(crate) async fn establish_ecu_connection(
@@ -177,7 +177,8 @@ pub(crate) async fn establish_ecu_connection(
         gateway_ip,
         gateway_name,
         connect_timeout_ms = connnect_timeout.as_millis(),
-        routing_timeout_ms = routing_activation_timeout.as_millis()
+        routing_timeout_ms = routing_activation_timeout.as_millis(),
+        dlt_context = dlt_ctx!("DOIP"),
     )
 )]
 pub(crate) async fn establish_tls_ecu_connection(
@@ -254,6 +255,7 @@ pub(crate) async fn establish_tls_ecu_connection(
         gateway_name = %_gateway_name,
         gateway_ip   = %_gateway_ip,
         timeout_ms   = timeout.as_millis(),
+        dlt_context  = dlt_ctx!("DOIP"),
     )
 )]
 async fn try_read_routing_activation_response(

@@ -12,8 +12,9 @@
  */
 
 use cda_database::datatypes;
-use cda_interfaces::{DiagServiceError, HashMap, HashSet, diagservices::DiagServiceResponse};
-
+use cda_interfaces::{
+    DiagServiceError, HashMap, HashSet, diagservices::DiagServiceResponse, dlt_ctx,
+};
 pub(super) type DiagServiceId = String;
 
 pub(super) struct VariantDetection {
@@ -55,7 +56,10 @@ pub(super) fn prepare_variant_detection(
 
 #[tracing::instrument(
     skip(service_responses, diagnostic_database),
-    fields(response_count = service_responses.len())
+    fields(
+        response_count = service_responses.len(),
+        dlt_context = dlt_ctx!("CORE"),
+    )
 )]
 pub(super) fn evaluate_variant<T: DiagServiceResponse + Sized>(
     service_responses: HashMap<String, T>,

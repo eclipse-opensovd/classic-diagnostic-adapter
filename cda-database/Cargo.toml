@@ -53,6 +53,7 @@ toml = { workspace = true }
 default = []
 gen-protos = []
 gen-flatbuffers = []
+dlt-tracing = ["cda-interfaces/dlt-tracing"]
 
 # Guard the database builder, as it should not be used
 # in production code because creating the database manually

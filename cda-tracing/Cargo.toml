@@ -42,6 +42,7 @@ tracing-subscriber = { workspace = true, features = [
   "parking_lot",
   "std",
 ] }
+tracing-dlt = { workspace = true, optional = true }
 strip-ansi-escapes = { workspace = true } # Strip ANSI escape codes from strings, used for file logging
 nu-ansi-term = { workspace = true } # ANSI terminal support for terminal log output
 # otel
@@ -58,3 +59,5 @@ console-subscriber = { workspace = true, optional = true }
 [features]
 default = []
 tokio-tracing = ["dep:console-subscriber", "tokio/tracing"]
+dlt-tracing = ["dep:tracing-dlt"]
+dlt-tracing-load-control = ["dlt-tracing", "tracing-dlt?/trace_load_ctrl"]

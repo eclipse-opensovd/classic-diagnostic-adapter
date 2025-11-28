@@ -24,7 +24,7 @@ use cda_interfaces::{
         single_ecu,
     },
     diagservices::{DiagServiceResponse, DiagServiceResponseType, FieldParseError, UdsPayloadData},
-    service_ids,
+    dlt_ctx, service_ids,
     service_ids::NEGATIVE_RESPONSE,
     spawn_named, util,
     util::starts_with_ignore_ascii_case,
@@ -178,7 +178,10 @@ impl<S: SecurityPlugin> cda_interfaces::EcuManager for EcuManager<S> {
     #[tracing::instrument(
         target = "variant detection check",
         skip(self, service_responses),
-        fields(ecu_name = self.ecu_name),
+        fields(
+            ecu_name = self.ecu_name,
+            dlt_context = dlt_ctx!("CORE"),
+        ),
     )]
     async fn detect_variant<T: DiagServiceResponse + Sized>(
         &mut self,
@@ -274,7 +277,12 @@ impl<S: SecurityPlugin> cda_interfaces::EcuManager for EcuManager<S> {
         &self.variant_detection.diag_service_requests
     }
 
-    #[tracing::instrument(skip(self), fields(ecu_name = self.ecu_name))]
+    #[tracing::instrument(skip(self),
+        fields(
+            ecu_name = self.ecu_name,
+            dlt_context = dlt_ctx!("CORE"),
+        )
+    )]
     fn comparams(&self) -> Result<ComplexComParamValue, DiagServiceError> {
         // ensure base variant is handled first
         // and maybe be overwritten by variant specific comparams
@@ -298,6 +306,11 @@ impl<S: SecurityPlugin> cda_interfaces::EcuManager for EcuManager<S> {
             .collect())
     }
 
+    #[tracing::instrument(skip_all,
+        fields(
+            dlt_context = dlt_ctx!("CORE"),
+        )
+    )]
     async fn sdgs(
         &self,
         service: Option<&cda_interfaces::DiagComm>,
@@ -451,6 +464,7 @@ impl<S: SecurityPlugin> cda_interfaces::EcuManager for EcuManager<S> {
             service = diag_service.name,
             input = util::tracing::print_hex(&payload.data, 10),
             output = tracing::field::Empty,
+            dlt_context = dlt_ctx!("CORE"),
         ),
         err
     )]
@@ -599,7 +613,8 @@ impl<S: SecurityPlugin> cda_interfaces::EcuManager for EcuManager<S> {
             service = diag_service.name,
             action = diag_service.action().to_string(),
             input = data.as_ref().map_or_else(|| "None".to_owned(), ToString::to_string),
-            output = tracing::field::Empty
+            output = tracing::field::Empty,
+            dlt_context = dlt_ctx!("CORE"),
         ),
         err
     )]
@@ -721,7 +736,13 @@ impl<S: SecurityPlugin> cda_interfaces::EcuManager for EcuManager<S> {
     /// # Errors
     /// Will return `Err` if the job cannot be found in the database
     /// Unlikely other case is that neither a lookup in the current nor the base variant succeeded.
-    #[tracing::instrument(skip(self), fields(ecu_name = self.ecu_name, job_name))]
+    #[tracing::instrument(skip(self),
+        fields(
+            ecu_name = self.ecu_name,
+            dlt_context = dlt_ctx!("CORE"),
+            job_name
+        )
+    )]
     fn lookup_single_ecu_job(&self, job_name: &str) -> Result<single_ecu::Job, DiagServiceError> {
         tracing::debug!("Looking up single ECU job");
 
@@ -855,6 +876,11 @@ impl<S: SecurityPlugin> cda_interfaces::EcuManager for EcuManager<S> {
         self.start_reset_task(expiration)
     }
 
+    #[tracing::instrument(skip_all,
+        fields(
+            dlt_context = dlt_ctx!("CORE"),
+        )
+    )]
     fn set_security_access(
         &self,
         security_access: &str,
@@ -1346,6 +1372,11 @@ impl<S: SecurityPlugin> EcuManager<S> {
     /// Will return `Err` if the ECU database cannot be loaded correctly due to different reasons,
     /// like the format being incompatible or required information missing from the database.
     #[allow(clippy::too_many_lines)] // todo split into smaller functions
+    #[tracing::instrument(skip_all,
+        fields(
+            dlt_context = dlt_ctx!("CORE"),
+        )
+    )]
     pub fn new(
         database: datatypes::DiagnosticDatabase,
         protocol: Protocol,
@@ -1570,6 +1601,11 @@ impl<S: SecurityPlugin> EcuManager<S> {
         Some(variants.get(idx).into())
     }
 
+    #[tracing::instrument(skip_all,
+        fields(
+            dlt_context = dlt_ctx!("CORE"),
+        )
+    )]
     fn get_diag_layer_all_variants(&self) -> Vec<datatypes::DiagLayer<'_>> {
         let ecu_data = match self.diag_database.ecu_data() {
             Ok(d) => d,
@@ -1801,6 +1837,11 @@ impl<S: SecurityPlugin> EcuManager<S> {
             })
     }
 
+    #[tracing::instrument(skip_all,
+        fields(
+            dlt_context = dlt_ctx!("CORE"),
+        )
+    )]
     fn map_param_from_uds(
         &self,
         mapped_service: &datatypes::DiagService,
@@ -2412,6 +2453,11 @@ impl<S: SecurityPlugin> EcuManager<S> {
         Ok(())
     }
 
+    #[tracing::instrument(skip_all,
+        fields(
+            dlt_context = dlt_ctx!("CORE"),
+        )
+    )]
     fn map_dop_from_uds(
         &self,
         mapped_service: &datatypes::DiagService,
@@ -2495,6 +2541,11 @@ impl<S: SecurityPlugin> EcuManager<S> {
         Ok(())
     }
 
+    #[tracing::instrument(skip_all,
+        fields(
+            dlt_context = dlt_ctx!("CORE"),
+        )
+    )]
     fn map_dynamic_length_field_from_uds(
         &self,
         mapped_service: &datatypes::DiagService,
@@ -2726,6 +2777,11 @@ impl<S: SecurityPlugin> EcuManager<S> {
         Ok(())
     }
 
+    #[tracing::instrument(skip_all,
+        fields(
+            dlt_context = dlt_ctx!("CORE"),
+        )
+    )]
     fn map_end_of_pdu_dop_from_uds(
         &self,
         mapped_service: &datatypes::DiagService,
@@ -2976,6 +3032,11 @@ impl<S: SecurityPlugin> EcuManager<S> {
         (new_session, new_security)
     }
 
+    #[tracing::instrument(skip_all,
+        fields(
+            dlt_context = dlt_ctx!("CORE"),
+        )
+    )]
     fn lookup_state_transition_for_active(
         &self,
         semantic: &str,
@@ -3167,6 +3228,12 @@ impl<S: SecurityPlugin> EcuManager<S> {
     /// Validate security access via plugin
     /// allows passing a `Box::new(())` to skip security checks
     /// this is used internally, when we don't want to have this run the check again
+    #[tracing::instrument(
+        skip_all,
+        fields(
+            dlt_context = dlt_ctx!("CORE"),
+        )
+    )]
     fn check_security_plugin(
         security_plugin: &DynamicPlugin,
         service: &datatypes::DiagService,
