@@ -307,16 +307,24 @@ async fn test_variant_detection_duplicates() {
     // restart sim and wait for ECUs to come online,
     // status should be detected without manual variant detection
     start_ecu_sim(&runtime.ecu_sim).await.unwrap();
-    // todo: sim needs to run before CDA to work properly
-    restart_cda(&runtime.config).await.unwrap();
 
-    validate_ecu_state(
-        runtime,
-        &auth,
-        sovd::ECU_FLXC1000_ENDPOINT,
-        sovd_interfaces::components::ecu::State::Online,
-    )
-    .await;
+    // wait in loop, to check if the CDA receives the spontaneous VAM when is online
+    for attempt in 0..=5 {
+        let status = ecu_status(&runtime.config, &auth, sovd::ECU_FLXC1000_ENDPOINT)
+            .await
+            .expect("failed to get ecu status");
+
+        if status.variant.state == sovd_interfaces::components::ecu::State::Online {
+            break;
+        }
+
+        assert!(
+            attempt < 5,
+            "ECU did not come online in time, status {status:?}"
+        );
+        tokio::time::sleep(Duration::from_secs(1)).await;
+    }
+
     validate_ecu_state(
         runtime,
         &auth,

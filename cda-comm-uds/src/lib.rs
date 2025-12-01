@@ -19,9 +19,9 @@ use std::{
 
 use cda_interfaces::{
     DiagComm, DiagCommType, DiagServiceError, DynamicPlugin, EcuGateway, EcuManager, EcuVariant,
-    FlashTransferStartParams, HashMap, HashMapExtensions, SchemaDescription, SchemaProvider,
-    SecurityAccess, ServicePayload, TesterPresentControlMessage, TesterPresentMode,
-    TesterPresentType, TransmissionParameters, UdsEcu, UdsResponse,
+    FlashTransferStartParams, HashMap, HashMapExtensions, HashSet, HashSetExtensions,
+    SchemaDescription, SchemaProvider, SecurityAccess, ServicePayload, TesterPresentControlMessage,
+    TesterPresentMode, TesterPresentType, TransmissionParameters, UdsEcu, UdsResponse,
     datatypes::{
         self, ComponentConfigurationsInfo, DTC_CODE_BIT_LEN, DataTransferError,
         DataTransferMetaData, DataTransferStatus, DtcCode, DtcExtendedInfo, DtcMask,
@@ -94,7 +94,24 @@ impl<S: EcuGateway, R: DiagServiceResponse, T: EcuManager<Response = R>> UdsMana
         let vd_uds_clone = manager.clone();
         cda_interfaces::spawn_named!("variant-detection-receiver", async move {
             while let Some(ecus) = variant_detection_receiver.recv().await {
-                vd_uds_clone.start_variant_detection_for_ecus(ecus);
+                let mut processed_duplicates = HashSet::new();
+                let mut deduplicated_ecus = Vec::new();
+
+                for ecu_name in ecus {
+                    if processed_duplicates.contains(&ecu_name) {
+                        continue;
+                    }
+
+                    if let Some(ecu) = vd_uds_clone.ecus.get(&ecu_name) {
+                        let ecu_read = ecu.read().await;
+                        if let Some(duplicates) = ecu_read.duplicating_ecu_names() {
+                            processed_duplicates.extend(duplicates.iter().cloned());
+                        }
+                        deduplicated_ecus.push(ecu_name);
+                    }
+                }
+
+                vd_uds_clone.start_variant_detection_for_ecus(deduplicated_ecus);
             }
         });
 
