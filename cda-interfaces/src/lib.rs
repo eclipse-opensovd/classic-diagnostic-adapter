@@ -38,7 +38,11 @@ pub use schema::*;
 // Together with the foldhash hasher, this is virtually the same as using hashbrown.
 pub type Hasher = foldhash::fast::RandomState;
 pub type HashMap<K, V> = std::collections::HashMap<K, V, Hasher>;
+pub type HashMapEntry<'a, K, V> = std::collections::hash_map::Entry<'a, K, V>;
+
 pub type HashSet<V> = std::collections::HashSet<V, Hasher>;
+// Note: hash_set_entry is unstable, hence not defining it.
+
 pub use foldhash::{HashMapExt as HashMapExtensions, HashSetExt as HashSetExtensions};
 
 /// # strings module

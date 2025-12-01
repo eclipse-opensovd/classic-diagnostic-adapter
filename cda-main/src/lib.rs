@@ -11,13 +11,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-use std::{
-    path::PathBuf,
-    sync::{
-        Arc,
-        atomic::{AtomicUsize, Ordering},
-    },
-};
+use std::{path::PathBuf, sync::Arc};
 
 use cda_comm_doip::{DoipDiagGateway, config::DoipConfig};
 use cda_comm_uds::UdsManager;
@@ -25,7 +19,7 @@ use cda_core::{DiagServiceResponseStruct, EcuManager};
 use cda_database::{FileManager, ProtoLoadConfig};
 use cda_interfaces::{
     DoipGatewaySetupError, EcuAddressProvider, EcuManager as EcuManagerTrait, HashMap,
-    HashMapExtensions, HashSet, Protocol,
+    HashMapEntry, HashMapExtensions, HashSet, Protocol,
     datatypes::{ComParams, DatabaseNamingConvention, FlatbBufConfig},
     file_manager::{Chunk, ChunkType},
 };
@@ -48,6 +42,14 @@ const DB_PARALLEL_LOAD_TASKS: usize = 2;
 pub type DatabaseMap<S> = HashMap<String, RwLock<EcuManager<S>>>;
 pub type FileManagerMap = HashMap<String, FileManager>;
 
+#[derive(Debug)]
+struct EcuMetadata {
+    mdd_path: String,
+    valid: bool,
+}
+
+type LoadedEcuMap<S> = HashMap<String, (EcuManager<S>, EcuMetadata)>;
+
 #[tracing::instrument(skip(com_params, database_naming_convention), fields(databases_path))]
 pub async fn load_databases<S: SecurityPlugin>(
     databases_path: &str,
@@ -56,15 +58,14 @@ pub async fn load_databases<S: SecurityPlugin>(
     database_naming_convention: DatabaseNamingConvention,
     flat_buf_settings: FlatbBufConfig,
 ) -> (DatabaseMap<S>, FileManagerMap) {
-    let databases: Arc<RwLock<HashMap<String, EcuManager<S>>>> =
-        Arc::new(RwLock::new(HashMap::new()));
+    let databases: Arc<RwLock<LoadedEcuMap<S>>> = Arc::new(RwLock::new(HashMap::new()));
 
     let file_managers: Arc<RwLock<HashMap<String, FileManager>>> =
         Arc::new(RwLock::new(HashMap::new()));
+
     let com_params = Arc::new(com_params);
 
     let mut database_load_futures = Vec::new();
-    let databases_count = Arc::new(AtomicUsize::new(0));
     let start = std::time::Instant::now();
     'load_database: {
         let files = match std::fs::read_dir(databases_path) {
@@ -98,7 +99,6 @@ pub async fn load_databases<S: SecurityPlugin>(
             let database = Arc::clone(&databases);
             let file_managers = Arc::clone(&file_managers);
             let paths = mddfiles.to_vec();
-            let database_count = Arc::clone(&databases_count);
             let com_params = Arc::clone(&com_params);
             let database_naming_convention = database_naming_convention.clone();
             let flat_buf_settings = flat_buf_settings.clone();
@@ -111,7 +111,6 @@ pub async fn load_databases<S: SecurityPlugin>(
                         database,
                         file_managers,
                         paths,
-                        database_count,
                         com_params,
                         database_naming_convention,
                         flat_buf_settings,
@@ -136,15 +135,15 @@ pub async fn load_databases<S: SecurityPlugin>(
             }
         }
     }
-    let end = std::time::Instant::now();
+
     let databases = databases
         .write()
         .await
         .drain()
-        .map(|(k, v)| (k.to_lowercase().clone(), RwLock::new(v)))
+        .filter(|(_, (_, meta))| meta.valid)
+        .map(|(k, (ecu_manager, _))| (k.to_lowercase(), RwLock::new(ecu_manager)))
         .collect::<HashMap<String, RwLock<EcuManager<S>>>>();
-
-    mark_duplicate_ecus(&databases).await;
+    mark_duplicate_ecus_by_address(&databases).await;
 
     let file_managers = file_managers
         .write()
@@ -153,8 +152,10 @@ pub async fn load_databases<S: SecurityPlugin>(
         .map(|(k, v)| (k.to_lowercase().clone(), v))
         .collect::<HashMap<String, FileManager>>();
 
-    tracing::info!(database_count = %databases_count.load(Ordering::Relaxed), duration = ?{end - start}, "Loaded databases");
-    if databases_count.load(Ordering::Relaxed) == 0 {
+    let end = std::time::Instant::now();
+
+    tracing::info!(database_count = &databases.len(), duration = ?{end - start}, "Loaded databases");
+    if databases.is_empty() {
         tracing::error!("Database load failed, no databases found");
         std::process::exit(1);
     }
@@ -162,7 +163,7 @@ pub async fn load_databases<S: SecurityPlugin>(
     (databases, file_managers)
 }
 
-async fn mark_duplicate_ecus<S: SecurityPlugin>(
+async fn mark_duplicate_ecus_by_address<S: SecurityPlugin>(
     databases: &HashMap<String, RwLock<EcuManager<S>>>,
 ) {
     let mut ecus_by_address: HashMap<u16, HashMap<u16, Vec<String>>> = HashMap::new();
@@ -205,10 +206,9 @@ async fn mark_duplicate_ecus<S: SecurityPlugin>(
 #[tracing::instrument(skip_all, fields(paths_count = paths.len()))]
 async fn load_database<S: SecurityPlugin>(
     protocol: Protocol,
-    database: Arc<RwLock<HashMap<String, EcuManager<S>>>>,
+    database: Arc<RwLock<LoadedEcuMap<S>>>,
     file_managers: Arc<RwLock<HashMap<String, FileManager>>>,
     paths: Vec<(PathBuf, u64)>,
-    database_count: Arc<AtomicUsize>,
     com_params: Arc<ComParams>,
     database_naming_convention: DatabaseNamingConvention,
     flat_buf_settings: FlatbBufConfig,
@@ -284,11 +284,20 @@ async fn load_database<S: SecurityPlugin>(
                         continue;
                     }
                 };
-                database
-                    .write()
-                    .await
-                    .insert(ecu_name.clone(), diag_service_manager);
-                database_count.fetch_add(1, Ordering::SeqCst);
+
+                let ecu_metadata = EcuMetadata {
+                    mdd_path: mdd_path.clone(),
+                    valid: true,
+                };
+
+                check_duplicate_ecu_names(
+                    &database,
+                    &mdd_path,
+                    &ecu_name,
+                    diag_service_manager,
+                    ecu_metadata,
+                )
+                .await;
 
                 let filtered_chunks: Vec<Chunk> = [
                     ChunkType::JarFile,
@@ -315,8 +324,61 @@ async fn load_database<S: SecurityPlugin>(
                     .insert(ecu_name, FileManager::new(mdd_path, files));
             }
             Err(e) => {
-                tracing::error!(mdd_file = %mddfile.display(), error = %e, "Failed to load ecu data from file");
+                tracing::error!(
+                    mdd_file = %mddfile.display(),
+                    error = %e,
+                    "Failed to load ecu data from file");
             }
+        }
+    }
+}
+
+async fn check_duplicate_ecu_names<S: SecurityPlugin>(
+    database: &RwLock<LoadedEcuMap<S>>,
+    mdd_path: &String,
+    ecu_name: &String,
+    diag_service_manager: EcuManager<S>,
+    ecu_metadata: EcuMetadata,
+) {
+    let mut db_write = database.write().await;
+    match db_write.entry(ecu_name.clone()) {
+        HashMapEntry::Occupied(mut entry) => {
+            let (existing_ecu, existing_meta) = entry.get_mut();
+
+            if diag_service_manager.logical_address_eq(existing_ecu) {
+                if diag_service_manager.revision() > existing_ecu.revision() {
+                    tracing::warn!(
+                        ecu_name = %ecu_name,
+                        existing_mdd = %existing_meta.mdd_path,
+                        existing_revision = %existing_ecu.revision(),
+                        new_mdd = %mdd_path,
+                        new_revision = %diag_service_manager.revision(),
+                        "Replacing ECU with newer revision"
+                    );
+                    entry.insert((diag_service_manager, ecu_metadata));
+                } else {
+                    tracing::warn!(
+                        ecu_name = %ecu_name,
+                        existing_mdd = %existing_meta.mdd_path,
+                        existing_revision = %existing_ecu.revision(),
+                        new_mdd = %mdd_path,
+                        new_revision = %diag_service_manager.revision(),
+                        "Keeping existing ECU with newer or equal revision"
+                    );
+                }
+            } else {
+                tracing::error!(
+                    ecu_name = %ecu_name,
+                    "Duplicate ECU with different addresses. Marking as invalid."
+                );
+                existing_meta.valid = false;
+            }
+        }
+        HashMapEntry::Vacant(entry) => {
+            // Mark as invalid and remove later.
+            // Not removing now, because there might be multiple duplicates and
+            // if we would remove now, next duplicate would be added as new.
+            entry.insert((diag_service_manager, ecu_metadata));
         }
     }
 }

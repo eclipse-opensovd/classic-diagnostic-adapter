@@ -143,6 +143,11 @@ impl<S: SecurityPlugin> cda_interfaces::EcuAddressProvider for EcuManager<S> {
     fn ecu_name(&self) -> String {
         self.ecu_name.clone()
     }
+
+    fn logical_address_eq<T: cda_interfaces::EcuAddressProvider>(&self, other: &T) -> bool {
+        self.logical_address == other.logical_address()
+            && self.logical_gateway_address() == other.logical_gateway_address()
+    }
 }
 
 impl<S: SecurityPlugin> cda_interfaces::EcuManager for EcuManager<S> {
@@ -1237,6 +1242,18 @@ impl<S: SecurityPlugin> cda_interfaces::EcuManager for EcuManager<S> {
     fn mark_as_duplicate(&mut self) {
         self.variant.state = EcuState::Duplicate;
         self.diag_database.unload();
+    }
+
+    fn revision(&self) -> String {
+        // We cannot remove the closure because there is no direct
+        // access to the underlying flatbuf type, as it's not exported from the database
+        // crate.
+        #[allow(clippy::redundant_closure_for_method_calls)]
+        self.diag_database
+            .ecu_data()
+            .ok()
+            .and_then(|s| s.revision())
+            .map_or_else(|| "0.0.0".to_owned(), ToOwned::to_owned)
     }
 }
 
