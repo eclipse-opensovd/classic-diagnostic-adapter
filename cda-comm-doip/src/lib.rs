@@ -218,6 +218,8 @@ impl<T: EcuAddressProvider + DoipComParamProvider> DoipDiagGateway<T> {
         };
 
         vir_vam::listen_for_vams(
+            tester_ip.to_owned(),
+            gateway_port,
             mask,
             gateway.clone(),
             variant_detection,

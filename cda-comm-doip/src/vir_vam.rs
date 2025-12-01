@@ -21,7 +21,7 @@ use doip_definitions::{
     payload::{DoipPayload, VehicleIdentificationRequest},
 };
 use doip_sockets::udp::UdpSocket;
-use tokio::sync::{RwLock, mpsc};
+use tokio::sync::{Mutex, RwLock, mpsc};
 
 use crate::{DoipDiagGateway, DoipTarget, connections::handle_gateway_connection};
 
@@ -88,6 +88,8 @@ where
 
 #[allow(clippy::too_many_lines)] // allowed due to nested functions
 pub(crate) async fn listen_for_vams<T, F>(
+    tester_ip: String,
+    gateway_port: u16,
     netmask: u32,
     gateway: DoipDiagGateway<T>,
     variant_detection: mpsc::Sender<Vec<String>>,
@@ -219,8 +221,28 @@ pub(crate) async fn listen_for_vams<T, F>(
     cda_interfaces::spawn_named!(
         "vam-listen",
         Box::pin(async move {
+            let broadcast_ip = "0.0.0.0";
+            let broadcast_socket = if tester_ip == broadcast_ip {
+                Arc::clone(&gateway.socket)
+            } else {
+                match crate::create_socket(broadcast_ip, gateway_port) {
+                    Ok(sock) => Arc::new(Mutex::new(sock)),
+                    Err(e) => {
+                        tracing::warn!(
+                            broadcast_ip = %broadcast_ip,
+                            tester_ip = %tester_ip,
+                            gateway_port = %gateway_port,
+                            error = ?e,
+                            "Failed to bind broadcast socket, falling back to tester IP,\
+                             this can lead to missed VAMs"
+                        );
+                        Arc::clone(&gateway.socket)
+                    }
+                }
+            };
+
             loop {
-                let mut socket = gateway.socket.lock().await;
+                let mut socket = broadcast_socket.lock().await;
                 let signal = shutdown_signal.clone();
                 tokio::select! {
                     () = signal => {
@@ -237,7 +259,7 @@ pub(crate) async fn listen_for_vams<T, F>(
                                 variant_detection.clone(),
                             ).await;
                         }
-                    }
+                    },
                 }
             }
         })
