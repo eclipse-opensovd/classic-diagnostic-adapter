@@ -73,6 +73,8 @@ pub trait EcuAddressProvider: Send + Sync + 'static {
     fn logical_functional_address(&self) -> u16;
     #[must_use]
     fn ecu_name(&self) -> String;
+    #[must_use]
+    fn logical_address_eq<T: EcuAddressProvider>(&self, other: &T) -> bool;
 }
 
 pub trait EcuManager:
@@ -270,6 +272,9 @@ pub trait EcuManager:
         service: &DiagComm,
         security_plugin: &DynamicPlugin,
     ) -> impl Future<Output = Result<(), DiagServiceError>> + Send;
+    /// Retrieve the revision of the ECU variant if available,
+    /// otherwise return 0.0.0
+    fn revision(&self) -> String;
 }
 
 impl Protocol {
