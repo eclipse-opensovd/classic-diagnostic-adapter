@@ -47,7 +47,7 @@ jobs:
       - name: Formatting - check imports granularity
         run: cargo fmt -- --check --config imports_granularity=Crate
       - name: run clippy nightly
-        run: cargo clippy --all-targets -- -D warnings
+        run: cargo clippy --locked --all-targets -- -D warnings
 
   all-features:
     runs-on: ubuntu-latest
