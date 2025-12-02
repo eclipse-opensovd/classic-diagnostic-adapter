@@ -55,9 +55,6 @@ Additionally the import granularity is set to `crate` to group all imports from 
 - Use tracing macros, like `tracing::info!`, as appropriate to record relevant information.
 - Annotate functions with `tracing::instrument` when they are important for creating new tracing spans.
 - Error messages should start with a capital letter.
-- Literal suffixes (i.e. `u8` vs `_u8`) are preferably written without seperator.
-  Separting the suffix is allowed, to improve readability, for example for long base 2 literals (i.e. `0b_0000_0111_u8`).
-  This rule is not enforced by clippy to allow edge cases like the one mentioned above.
 
 ## Licensing & Dependencies
 
