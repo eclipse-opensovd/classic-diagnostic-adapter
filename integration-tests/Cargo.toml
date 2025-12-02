@@ -30,6 +30,7 @@ cda-sovd = { workspace = true }
 sovd-interfaces = { workspace = true }
 cda-tracing = { workspace = true }
 cda-plugin-security = { workspace = true }
+cda-comm-doip = { workspace = true }
 opensovd_cda_lib = { workspace = true }
 
 # External dependencies
