@@ -1566,6 +1566,7 @@ version = "0.1.0"
 dependencies = [
  "aide",
  "axum",
+ "cda-comm-doip",
  "cda-core",
  "cda-database",
  "cda-interfaces",

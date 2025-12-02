@@ -101,12 +101,17 @@ async fn test_custom_demo_endpoint() {
         DatabaseMap::default();
     let file_managers: FileManagerMap = FileManagerMap::default();
     let databases = Arc::new(databases);
+    let gateway_port = find_available_tcp_port(&host).expect("Failed to find available port");
     let (variant_tx, variant_rx) = tokio::sync::mpsc::channel(1);
+    let doip_config = DoipConfig {
+        tester_address: host.clone(),
+        tester_subnet: "255.255.255.0".to_owned(),
+        gateway_port,
+        send_timeout_ms: 5000,
+    };
     let gateway = opensovd_cda_lib::create_diagnostic_gateway(
         Arc::clone(&databases),
-        &host,
-        "255.255.255.0",
-        find_available_tcp_port(&host).expect("Failed to find available tcp port"),
+        &doip_config,
         variant_tx,
         shutdown_signal.clone(),
     )
