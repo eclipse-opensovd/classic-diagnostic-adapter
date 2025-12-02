@@ -533,7 +533,7 @@ impl DeserializableCompParam for Duration {
             // because value is already checked to be positive.
             #[allow(clippy::cast_possible_truncation)]
             #[allow(clippy::cast_sign_loss)]
-            Duration::from_micros((value * factor * 1_000_000_f64) as u64)
+            Duration::from_micros((value * factor * 1_000_000f64) as u64)
         });
 
         result.map_err(|_| "Unit conversion from micros failed".to_owned())

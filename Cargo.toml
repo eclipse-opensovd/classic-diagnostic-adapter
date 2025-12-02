@@ -121,6 +121,7 @@ clone_on_ref_ptr = "warn"
 indexing_slicing = "deny"
 unwrap_used = "deny"
 arithmetic_side_effects = "deny"
+separated_literal_suffix = "deny"
 
 [profile.release.package."*"]
 opt-level = 3

@@ -534,17 +534,17 @@ impl DiagCodedType {
                     }
                     Termination::Zero => {
                         if self.base_datatype == DataType::Unicode2String {
-                            input_data.append(&mut vec![0_u8, 0_u8]);
+                            input_data.append(&mut vec![0u8, 0u8]);
                         } else {
-                            input_data.push(0_u8);
+                            input_data.push(0u8);
                         }
                         pack_data(input_data.len().saturating_mul(8), 0, None, &input_data)
                     }
                     Termination::HexFF => {
                         if self.base_datatype == DataType::Unicode2String {
-                            input_data.append(&mut vec![0xff_u8, 0xff_u8]);
+                            input_data.append(&mut vec![0xffu8, 0xffu8]);
                         } else {
-                            input_data.push(0xff_u8);
+                            input_data.push(0xffu8);
                         }
                         pack_data(input_data.len().saturating_mul(8), 0, None, &input_data)
                     }
@@ -2302,7 +2302,7 @@ mod tests {
             DataType::Int32,
             DiagCodedTypeVariant::StandardLength(StandardLengthType {
                 bit_length: 4,
-                bit_mask: Some(vec![0b_0000_0111_u8]),
+                bit_mask: Some(vec![0b_0000_0111u8]),
                 condensed: false,
             }),
         )

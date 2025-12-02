@@ -1661,7 +1661,7 @@ impl<S: EcuGateway, R: DiagServiceResponse, T: EcuManager<Response = R>> UdsEcu
         }
 
         let mask = if let Some(status) = status {
-            let mut mask = 0x00_u8;
+            let mut mask = 0x00u8;
             // Status can contain more than the mask bits, thus we need to track
             // if any of the status fields is a mask bit.
             // If not use the default mask.

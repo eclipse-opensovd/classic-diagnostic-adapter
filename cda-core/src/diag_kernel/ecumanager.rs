@@ -3490,7 +3490,7 @@ mod tests {
             )
         };
 
-        let sid = 0x2E_u8;
+        let sid = 0x2Eu8;
         let dc_name = "TestDynamicLengthFieldService";
         let diag_comm = db_builder.create_diag_comm(DiagCommParams {
             short_name: dc_name,
@@ -3728,7 +3728,7 @@ mod tests {
             )
         };
 
-        let sid = 0x2E_u8;
+        let sid = 0x2Eu8;
         let dc_name = "TestStructService";
         let diag_comm = db_builder.create_diag_comm(DiagCommParams {
             short_name: dc_name,
@@ -4289,7 +4289,7 @@ mod tests {
         let end_pdu_dop =
             db_builder.create_end_of_pdu_field_dop(min_items, max_items, Some(item_structure));
 
-        let sid = 0x22_u8;
+        let sid = 0x22u8;
         let dc_name = "TestEndOfPduService";
         let diag_comm = db_builder.create_diag_comm(DiagCommParams {
             short_name: dc_name,
@@ -4410,7 +4410,7 @@ mod tests {
         let dtc_dop =
             db_builder.create_dtc_dop(u32_diag_type, Some(vec![dtc]), Some(compu_identical));
 
-        let sid = 0x19_u8;
+        let sid = 0x19u8;
         let dc_name = "TestDtcService";
         let diag_comm = db_builder.create_diag_comm(DiagCommParams {
             short_name: dc_name,
@@ -4523,7 +4523,7 @@ mod tests {
             db_builder.create_compu_method(datatypes::CompuCategory::Identical, None, None);
 
         // Create a variant detection service
-        let vd_service_sid = 0x22_u8;
+        let vd_service_sid = 0x22u8;
         let vd_service_name = "ReadVariantData";
 
         // Create DOP for variant code response parameter
@@ -5074,7 +5074,7 @@ mod tests {
         assert_eq!(payload.get(1).copied(), Some(0x34));
 
         // Check param2
-        let float_bytes = 42.42_f32.to_be_bytes();
+        let float_bytes = 42.42f32.to_be_bytes();
         assert_eq!(payload.get(2..6), Some(&float_bytes[..]));
 
         // Check param3
