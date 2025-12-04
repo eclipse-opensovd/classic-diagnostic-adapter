@@ -533,3 +533,9 @@ pub async fn shutdown_signal() {
         () = terminate => {},
     }
 }
+
+/// Retrieve the version of the opensovd-cda crate.
+#[must_use]
+pub fn cda_version() -> &'static str {
+    env!("CARGO_PKG_VERSION")
+}

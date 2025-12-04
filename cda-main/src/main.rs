@@ -18,6 +18,7 @@ use cda_tracing::TracingSetupError;
 use clap::Parser;
 use futures::future::FutureExt;
 use opensovd_cda_lib::{
+    cda_version,
     config::configfile::{ConfigSanity, Configuration},
     shutdown_signal,
 };
@@ -210,7 +211,7 @@ async fn main() -> Result<(), AppError> {
 
     cda_tracing::init_tracing(tracing.with(layers))?;
 
-    tracing::info!("Starting CDA...");
+    tracing::info!("Starting CDA - version {}", cda_version());
 
     let webserver_config = cda_sovd::WebServerConfig {
         host: config.server.address.clone(),
