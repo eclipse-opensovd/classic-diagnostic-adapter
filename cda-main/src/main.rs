@@ -17,7 +17,7 @@ use cda_plugin_security::{DefaultSecurityPlugin, DefaultSecurityPluginData};
 use clap::Parser;
 use futures::future::FutureExt;
 use opensovd_cda_lib::{
-    AppError,
+    AppError, cda_version,
     config::configfile::{ConfigSanity, Configuration},
     setup_tracing, shutdown_signal,
 };
@@ -79,7 +79,7 @@ async fn main() -> Result<(), AppError> {
     args.update_config(&mut config);
 
     let _tracing_guards = setup_tracing(&config)?;
-    tracing::info!("Starting CDA...");
+    tracing::info!("Starting CDA - version {}", cda_version());
 
     let webserver_config = cda_sovd::WebServerConfig {
         host: config.server.address.clone(),

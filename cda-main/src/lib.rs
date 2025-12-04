@@ -677,3 +677,9 @@ pub fn setup_tracing(config: &Configuration) -> Result<TracingGuards, TracingSet
         _otel: otel_guard,
     })
 }
+
+/// Retrieve the version of the opensovd-cda crate.
+#[must_use]
+pub fn cda_version() -> &'static str {
+    env!("CARGO_PKG_VERSION")
+}
