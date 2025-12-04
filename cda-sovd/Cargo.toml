@@ -90,3 +90,7 @@ percent-encoding = { workspace = true }
 [features]
 default = []
 auth = []
+
+[dev-dependencies]
+cda-interfaces = { workspace = true, features = ["test-utils"] }
+cda-plugin-security = { workspace = true, features = ["test-utils"] }

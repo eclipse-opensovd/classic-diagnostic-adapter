@@ -108,6 +108,10 @@ axum = { version = "0.8", default-features = false }
 axum-extra = { version = "0.12.2" }
 serde_qs = "1.0.0-rc.3"
 
+# ---- testing & mocking crates----
+mockall = "0.14.0"
+tokio-test = "1.48.0"
+
 [workspace.lints.clippy]
 # enable pedantic
 pedantic = { level = "warn", priority = -1 }

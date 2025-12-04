@@ -29,6 +29,10 @@ mod ecumanager;
 pub use ecumanager::*;
 mod ecuuds;
 pub use ecuuds::*;
+
+#[cfg(feature = "test-utils")]
+pub use ecuuds::mock;
+
 pub mod file_manager;
 mod schema;
 pub use schema::*;

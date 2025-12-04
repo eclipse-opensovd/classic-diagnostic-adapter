@@ -679,3 +679,63 @@ macro_rules! create_schema {
     }};
 }
 pub use create_schema;
+
+#[cfg(test)]
+pub mod test_utils {
+    //! Test utilities for creating mock SOVD components in tests.
+
+    use super::*;
+    use cda_interfaces::{UdsEcu, diagservices::DiagServiceResponse, file_manager::FileManager};
+    use cda_plugin_security::{SecurityPluginData, mock::TestSecurityPlugin};
+
+    /// Creates a test security plugin for use in tests.
+    ///
+    /// Returns a `SecurityPluginData` instance backed by the `TestSecurityPlugin` mock.
+    pub fn create_test_security_plugin() -> SecurityPluginData {
+        Box::new(TestSecurityPlugin)
+    }
+
+    /// Creates a test webserver ECU state for use in tests.
+    ///
+    /// # Arguments
+    /// * `ecu_name` - The name of the ECU
+    /// * `uds` - Mock UDS ECU implementation
+    /// * `file_manager` - Mock file manager implementation
+    ///
+    /// # Type Parameters
+    /// * `R` - DiagServiceResponse implementation
+    /// * `T` - UdsEcu implementation (must support Clone)
+    /// * `U` - FileManager implementation
+    pub fn create_test_webserver_state<
+        R: DiagServiceResponse,
+        T: UdsEcu + Clone,
+        U: FileManager,
+    >(
+        ecu_name: String,
+        uds: T,
+        file_manager: U,
+    ) -> WebserverEcuState<R, T, U> {
+        WebserverEcuState {
+            ecu_name: ecu_name.clone(),
+            uds,
+            locks: Arc::new(Locks {
+                vehicle: LockType::Vehicle(Arc::new(RwLock::new(None))),
+                ecu: LockType::Ecu(Arc::new(RwLock::new(
+                    [(ecu_name, None)].into_iter().collect(),
+                ))),
+                functional_group: LockType::FunctionalGroup(Arc::new(
+                    RwLock::new(HashMap::default()),
+                )),
+            }),
+            comparam_executions: Arc::new(RwLock::new(IndexMap::new())),
+            flash_data: Arc::new(RwLock::new(sovd_interfaces::sovd2uds::FileList {
+                files: Vec::new(),
+                path: Some(PathBuf::new()),
+                schema: None,
+            })),
+            mdd_embedded_files: Arc::new(file_manager),
+            _phantom: std::marker::PhantomData::<R>,
+        }
+    }
+}
+

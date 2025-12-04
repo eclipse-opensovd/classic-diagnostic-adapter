@@ -68,3 +68,27 @@ pub trait FileManager: Clone + Send + Sync + 'static {
         id: &str,
     ) -> impl Future<Output = Result<(ChunkMetaData, Vec<u8>), MddError>> + Send;
 }
+
+
+#[cfg(feature = "test-utils")]
+pub mod mock {
+    use super::{ChunkMetaData, MddError, FileManager};
+    use crate::HashMap;
+
+    mockall::mock! {
+        pub FileManager {}
+
+        impl Clone for FileManager {
+            fn clone(&self) -> Self;
+        }
+
+        impl FileManager for FileManager {
+            fn list(&self) -> impl std::future::Future<Output = HashMap<String, ChunkMetaData>> + Send;
+
+            fn get(
+                &self,
+                id: &str,
+            ) -> impl std::future::Future<Output = Result<(ChunkMetaData, Vec<u8>), MddError>> + Send;
+        }
+    }
+}
