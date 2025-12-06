@@ -56,6 +56,7 @@ pub struct CompuScale {
     pub upper_limit: Option<Limit>,
     pub rational_coefficients: Option<CompuRationalCoefficients>,
     pub consts: Option<CompuValues>,
+    pub inverse_values: Option<CompuValues>,
 }
 #[derive(Clone, Debug)]
 pub struct CompuValues {
@@ -90,6 +91,16 @@ impl From<dataformat::CompuCategory> for CompuCategory {
                 tracing::error!("Compu Category {:?} not recognized", value);
                 CompuCategory::Identical
             }
+        }
+    }
+}
+
+impl From<dataformat::CompuValues<'_>> for CompuValues {
+    fn from(value: dataformat::CompuValues) -> Self {
+        CompuValues {
+            v: value.v().unwrap_or(0.0),
+            vt: value.vt().map(ToOwned::to_owned),
+            vt_ti: value.vt_ti().map(ToOwned::to_owned),
         }
     }
 }
@@ -138,11 +149,8 @@ impl<'a> From<dataformat::CompuScale<'a>> for CompuScale {
                         .map(|dens| dens.iter().collect())
                         .unwrap_or_default(),
                 }),
-            consts: value.consts().map(|c| CompuValues {
-                v: c.v().unwrap_or_default(),
-                vt: c.vt().map(ToOwned::to_owned),
-                vt_ti: c.vt_ti().map(ToOwned::to_owned),
-            }),
+            consts: value.consts().map(Into::into),
+            inverse_values: value.inverse_values().map(Into::into),
         }
     }
 }
