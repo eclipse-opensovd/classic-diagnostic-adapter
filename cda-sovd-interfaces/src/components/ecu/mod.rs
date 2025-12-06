@@ -382,7 +382,7 @@ pub mod faults {
     /// * Translation IDs
     ///
     /// This is still compliant with the `OpenSOVD` specification, as these fields are optional.
-    #[derive(Serialize, schemars::JsonSchema)]
+    #[derive(Serialize, Deserialize, schemars::JsonSchema)]
     pub struct Fault {
         ///Fault code in the native representation of the entity.
         pub code: String,
@@ -403,7 +403,7 @@ pub mod faults {
         pub status: Option<FaultStatus>,
     }
 
-    #[derive(Serialize, Debug, schemars::JsonSchema)]
+    #[derive(Serialize, Deserialize, Debug, schemars::JsonSchema)]
     pub struct FaultStatus {
         #[serde(skip_serializing_if = "Option::is_none")]
         pub test_failed: Option<bool>,
@@ -460,7 +460,7 @@ pub mod faults {
             pub include_schema: bool,
         }
 
-        #[derive(Serialize, schemars::JsonSchema)]
+        #[derive(Serialize, Deserialize, schemars::JsonSchema)]
         pub struct Response {
             pub items: Vec<Fault>,
             #[schemars(skip)]
