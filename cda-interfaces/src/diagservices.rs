@@ -96,3 +96,28 @@ impl DiagServiceJsonResponse {
         self.data.is_null() && self.errors.is_empty()
     }
 }
+
+#[cfg(feature = "test-utils")]
+pub mod mock {
+    use crate::{DiagServiceError, datatypes, diagservices};
+
+    mockall::mock! {
+        pub DiagServiceResponse {}
+
+        impl diagservices::DiagServiceResponse for DiagServiceResponse {
+            fn is_empty(&self) -> bool;
+            fn service_name(&self) -> String;
+            fn get_raw(&self) -> &[u8];
+            fn into_json(self) -> Result<diagservices::DiagServiceJsonResponse, DiagServiceError>;
+            fn as_nrc(&self) -> Result<diagservices::MappedNRC, DiagServiceError>;
+            fn get_dtcs(&self) -> Result<
+                Vec<(datatypes::DtcField, datatypes::DtcRecord)>,
+                DiagServiceError>;
+            fn response_type(&self) -> diagservices::DiagServiceResponseType;
+        }
+
+        impl Clone for DiagServiceResponse {
+            fn clone(&self) -> Self;
+        }
+    }
+}

@@ -28,6 +28,8 @@ path = "src/lib.rs"
 # internal dependencies
 cda-interfaces = { workspace = true }
 
+async-trait = { workspace = true }
+
 # tls
 openssl = { workspace = true }
 

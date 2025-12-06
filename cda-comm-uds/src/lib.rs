@@ -17,6 +17,7 @@ use std::{
     time::{Duration, Instant},
 };
 
+use async_trait::async_trait;
 use cda_interfaces::{
     DiagComm, DiagCommType, DiagServiceError, DynamicPlugin, EcuGateway, EcuManager, EcuVariant,
     FlashTransferStartParams, HashMap, HashMapExtensions, HashSet, HashSetExtensions,
@@ -955,6 +956,7 @@ impl<S: EcuGateway, R: DiagServiceResponse, T: EcuManager<Response = R>> Clone
     }
 }
 
+#[async_trait]
 impl<S: EcuGateway, R: DiagServiceResponse, T: EcuManager<Response = R>> UdsEcu
     for UdsManager<S, R, T>
 {
