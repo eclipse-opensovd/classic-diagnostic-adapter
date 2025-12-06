@@ -91,3 +91,7 @@ percent-encoding = { workspace = true }
 default = []
 auth = []
 dlt-tracing = ["cda-interfaces/dlt-tracing"]
+
+[dev-dependencies]
+cda-interfaces = { workspace = true, features = ["test-utils"] }
+cda-plugin-security = { workspace = true, features = ["test-utils"] }
