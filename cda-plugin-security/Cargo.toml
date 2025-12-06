@@ -43,6 +43,9 @@ thiserror = { workspace = true }
 
 tracing = { workspace = true }
 
+mockall = { workspace = true, optional = true }
+
 [features]
 default = []
 auth = []
+test-utils = ["dep:mockall"]

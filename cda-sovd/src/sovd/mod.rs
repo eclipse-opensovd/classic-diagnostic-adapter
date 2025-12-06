@@ -672,3 +672,44 @@ macro_rules! create_schema {
     }};
 }
 pub use create_schema;
+
+#[cfg(test)]
+pub(crate) mod tests {
+
+    use cda_interfaces::{UdsEcu, diagservices::DiagServiceResponse, file_manager::FileManager};
+
+    use super::*;
+    use crate::sovd::locks::LockType;
+
+    pub fn create_test_webserver_state<
+        R: DiagServiceResponse,
+        T: UdsEcu + Clone,
+        U: FileManager,
+    >(
+        ecu_name: String,
+        uds: T,
+        file_manager: U,
+    ) -> WebserverEcuState<R, T, U> {
+        WebserverEcuState {
+            ecu_name: ecu_name.clone(),
+            uds,
+            locks: Arc::new(Locks {
+                vehicle: LockType::Vehicle(Arc::new(RwLock::new(None))),
+                ecu: LockType::Ecu(Arc::new(RwLock::new(
+                    [(ecu_name, None)].into_iter().collect(),
+                ))),
+                functional_group: LockType::FunctionalGroup(Arc::new(RwLock::new(
+                    HashMap::default(),
+                ))),
+            }),
+            comparam_executions: Arc::new(RwLock::new(IndexMap::new())),
+            flash_data: Arc::new(RwLock::new(FileList {
+                files: Vec::new(),
+                path: Some(PathBuf::new()),
+                schema: None,
+            })),
+            mdd_embedded_files: Arc::new(file_manager),
+            _phantom: std::marker::PhantomData::<R>,
+        }
+    }
+}

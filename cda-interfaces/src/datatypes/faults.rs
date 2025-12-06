@@ -83,7 +83,7 @@ pub struct DtcLookup {
     pub dtcs: Vec<DtcRecord>,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct DtcRecord {
     pub code: DtcCode,
     pub display_code: Option<String>,
@@ -93,14 +93,14 @@ pub struct DtcRecord {
 
 /// Used to describe the position of a DTC field in the UDS payload.
 /// Necessary to parse DTCs from the raw UDS response.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct DtcField {
     pub bit_pos: u32,
     pub bit_len: u32,
     pub byte_pos: u32,
 }
 
-#[derive(Serialize, Deserialize, Debug, Default)]
+#[derive(Serialize, Deserialize, Debug, Default, Clone)]
 // The warning is allowed because the bools represent the status bits of a DTC.
 #[allow(clippy::struct_excessive_bools)]
 pub struct DtcStatus {
@@ -115,14 +115,14 @@ pub struct DtcStatus {
     pub mask: u8,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct DtcRecordAndStatus {
     pub record: DtcRecord,
     pub scope: String,
     pub status: DtcStatus,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct DtcSnapshot {
     pub number_of_identifiers: u64,
     pub record: Vec<serde_json::Value>,
