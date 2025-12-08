@@ -684,8 +684,11 @@ impl<S: SecurityPlugin> cda_interfaces::EcuManager for EcuManager<S> {
                             param.short_name().unwrap_or_default()
                         )))?;
 
-                let uds_val =
-                    operations::string_to_vec_u8(diag_type.base_datatype(), coded_const_value)?;
+                let uds_val = json_value_to_uds_data(
+                    &diag_type,
+                    None,
+                    &serde_json::Value::from(coded_const_value),
+                )?;
 
                 diag_type.encode(
                     uds_val,
@@ -2096,9 +2099,13 @@ impl<S: SecurityPlugin> EcuManager<S> {
         let const_value = c.coded_value().ok_or(DiagServiceError::InvalidDatabase(
             "CodedConst has no coded value".to_owned(),
         ))?;
-        let expected = operations::string_to_vec_u8(diag_type.base_datatype(), const_value)?
-            .into_iter()
-            .collect::<Vec<_>>();
+        let expected = operations::json_value_to_uds_data(
+            &diag_type,
+            None,
+            &serde_json::Value::from(const_value),
+        )?
+        .into_iter()
+        .collect::<Vec<_>>();
         let expected = expected
             .get(expected.len().saturating_sub(value.data.len())..)
             .ok_or(DiagServiceError::BadPayload(
@@ -2152,7 +2159,7 @@ impl<S: SecurityPlugin> EcuManager<S> {
                     .or(Some(&serde_json::Value::String("0".to_owned())))
                     .map(|selector| -> Result<_, DiagServiceError> {
                         let switch_key_value = json_value_to_uds_data(
-                            switch_key_diag_type.base_datatype(),
+                            &switch_key_diag_type,
                             normal_dop.compu_method().map(Into::into),
                             selector,
                         )?;
@@ -2354,7 +2361,7 @@ impl<S: SecurityPlugin> EcuManager<S> {
             datatypes::DataOperationVariant::Normal(normal_dop) => {
                 let diag_type = normal_dop.diag_coded_type()?;
                 let uds_data = json_value_to_uds_data(
-                    diag_type.base_datatype(),
+                    &diag_type,
                     normal_dop.compu_method().map(Into::into),
                     value,
                 )?;
@@ -5062,6 +5069,37 @@ mod tests {
         if let Err(e) = result {
             assert!(e.to_string().contains("Expected value to be object type"));
         }
+    }
+
+    #[tokio::test]
+    async fn test_convert_to_uds_value_exceeds_bit_len() {
+        let struct_byte_pos = 1;
+        let (ecu_manager, service, _sid, _struct_byte_len) =
+            create_ecu_manager_with_struct_service(struct_byte_pos);
+
+        // Test data for the structure
+        let test_value = json!({
+            "param1": 0x0012_3456,  // exceeds 16 bits
+            "param2": 42.42,
+            "param3": "test"
+        });
+
+        let payload_data = UdsPayloadData::ParameterMap(
+            [("main_param".to_string(), test_value)]
+                .into_iter()
+                .collect(),
+        );
+
+        let result = ecu_manager
+            .create_uds_payload(&service, &skip_sec_plugin!(), Some(payload_data))
+            .await;
+
+        let conversion_error = result.unwrap_err();
+        assert!(
+            conversion_error
+                .to_string()
+                .contains("1193046 exceeds maximum 65535 for bit length 16")
+        );
     }
 
     #[tokio::test]

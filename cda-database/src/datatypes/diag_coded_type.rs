@@ -184,6 +184,17 @@ impl DiagCodedType {
     }
 
     #[must_use]
+    pub fn bit_len(&self) -> Option<BitLength> {
+        match &self.type_ {
+            DiagCodedTypeVariant::LeadingLengthInfo(bit_len) => Some(*bit_len),
+            DiagCodedTypeVariant::MinMaxLength(_min_max) => None,
+            DiagCodedTypeVariant::StandardLength(standard_length) => {
+                Some(standard_length.bit_length)
+            }
+        }
+    }
+
+    #[must_use]
     pub fn type_(&self) -> &DiagCodedTypeVariant {
         &self.type_
     }
@@ -551,6 +562,13 @@ impl DiagCodedType {
 
                 let (packed, len) =
                     pack_data(slt.bit_length as usize, 0, mask.as_ref(), &input_data)?;
+                if len > slt.bit_length as usize {
+                    return Err(DiagServiceError::BadPayload(format!(
+                        "StandardLengthType input data length {len} bits exceeds allowed length \
+                         {} bits",
+                        slt.bit_length
+                    )));
+                }
                 (packed, len, mask)
             }
         };
