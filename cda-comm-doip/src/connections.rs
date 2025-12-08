@@ -551,7 +551,7 @@ fn spawn_gateway_receiver_task(
         match response {
             Some(Ok(response)) => {
                 match response {
-                    DiagnosticResponse::Ack(source_address) => {
+                    DiagnosticResponse::Ack((source_address, _)) => {
                         tracing::debug!(
                             gateway_name = %gateway_name,
                             gateway_ip = %gateway_ip,
@@ -772,8 +772,9 @@ async fn try_read(
                 DoipPayload::GenericNack(nack) => Ok(DiagnosticResponse::GenericNack(nack)),
                 DoipPayload::DiagnosticMessageAck(ack) => {
                     tracing::debug!("Received diagnostic message ack");
-                    Ok(DiagnosticResponse::Ack(u16::from_be_bytes(
-                        ack.source_address,
+                    Ok(DiagnosticResponse::Ack((
+                        u16::from_be_bytes(ack.source_address),
+                        ack.previous_message,
                     )))
                 }
                 DoipPayload::AliveCheckResponse(_) => Ok(DiagnosticResponse::AliveCheckResponse),
