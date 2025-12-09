@@ -633,7 +633,7 @@ mod tests {
         let result = super::json_value_to_uds_data(DataType::ByteField, None, &json_value);
         assert_eq!(
             result,
-            Ok(vec![255, 10, 128, 0xde, 0xad, 0xbe, 0xef, 0xca, 0x07])
+            Ok(vec![255, 10, 128, 0xDE, 0xAD, 0xBE, 0xEF, 0xCA, 0x07])
         );
     }
 
@@ -641,7 +641,7 @@ mod tests {
     fn test_hex_long() {
         let json_value = serde_json::json!("c0ffeca7");
         let result = super::json_value_to_uds_data(DataType::ByteField, None, &json_value);
-        assert_eq!(result, Ok(vec![0xc0, 0xff, 0xec, 0xa7]));
+        assert_eq!(result, Ok(vec![0xC0, 0xFF, 0xEC, 0xA7]));
     }
 
     #[test]
@@ -662,7 +662,7 @@ mod tests {
     fn test_float_string() {
         let json_value = serde_json::json!("10.42");
 
-        let int_result = Ok(vec![0x00, 0x00, 0x00, 0x0a]);
+        let int_result = Ok(vec![0x00, 0x00, 0x00, 0x0A]);
         assert_eq!(
             super::json_value_to_uds_data(DataType::Int32, None, &json_value),
             int_result
@@ -673,7 +673,7 @@ mod tests {
         );
         assert_eq!(
             super::json_value_to_uds_data(DataType::ByteField, None, &json_value),
-            Ok(vec![0x0a])
+            Ok(vec![0x0A])
         );
 
         assert_eq!(
