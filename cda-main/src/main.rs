@@ -19,7 +19,7 @@ use cda_sovd::DefaultRouteProvider;
 use cda_tracing::TracingSetupError;
 use clap::Parser;
 use futures::future::FutureExt;
-use opensovd_cda_lib::{config::configfile::ConfigSanity, shutdown_signal};
+use opensovd_cda_lib::{cda_version, config::configfile::ConfigSanity, shutdown_signal};
 use thiserror::Error;
 use tokio::sync::mpsc;
 use tracing_subscriber::layer::SubscriberExt as _;
@@ -210,7 +210,7 @@ async fn main() -> Result<(), AppError> {
 
     cda_tracing::init_tracing(tracing.with(layers))?;
 
-    tracing::info!("Starting CDA...");
+    tracing::info!("Starting CDA - version {}", cda_version());
 
     let database_path = config.databases_path.clone();
 
