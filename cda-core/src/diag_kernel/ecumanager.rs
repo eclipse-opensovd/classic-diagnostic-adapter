@@ -4753,10 +4753,10 @@ mod tests {
                     // Service ID
                     sid,
                     // This does not belong to our mux, it's here to test, if the start byte is used
-                    0xff,
+                    0xFF,
                     // Mux param starts here
                     // there is no switch value for 0xffff
-                    0xff, 0xff,
+                    0xFF, 0xFF,
                 ]),
                 true,
             )
@@ -4774,10 +4774,10 @@ mod tests {
                     // Service ID
                     sid,
                     // This does not belong to our mux, it's here to test, if the start byte is used
-                    0xff,
+                    0xFF,
                     // Mux param starts here
                     // there is no switch value for 0xffff, but we have a default case
-                    0xff, 0xff, //
+                    0xFF, 0xFF, //
                     // value for param 1 of default structure
                     0x42,
                 ]),
@@ -4810,9 +4810,9 @@ mod tests {
                     // Service ID
                     sid,
                     // This does not belong to our mux, it's here to test, if the start byte is used
-                    0xff, // Mux param starts here
+                    0xFF, // Mux param starts here
                     // + switch key byte 0
-                    0x0, 0x0a, // valid switch key but no data, expect error from decode.
+                    0x0, 0x0A, // valid switch key but no data, expect error from decode.
                 ]),
                 true,
             )
@@ -4830,9 +4830,9 @@ mod tests {
                     // Service ID
                     sid,
                     // This does not belong to our mux, it's here to test, if the start byte is used
-                    0xff, // Mux param starts here
+                    0xFF, // Mux param starts here
                     // + switch key byte 0
-                    0x00, 0x0a, // valid switch key but no data, expect error from decode.
+                    0x00, 0x0A, // valid switch key but no data, expect error from decode.
                 ]),
                 true,
             )
@@ -5229,7 +5229,7 @@ mod tests {
             },
         });
 
-        test_default(&ecu_manager, &service, with_selector, 0xffff, sid).await;
+        test_default(&ecu_manager, &service, with_selector, 0xFFFF, sid).await;
         // when not selector value is given,
         // the switch key will use the limit value of the default value
         test_default(&ecu_manager, &service, without_selector, 0, sid).await;
@@ -5618,7 +5618,7 @@ mod tests {
     #[tokio::test]
     async fn test_negative_response() {
         let (ecu_manager, service, sid) = create_ecu_manager_with_dynamic_length_field_service();
-        let payload = vec![0x7f, sid];
+        let payload = vec![0x7F, sid];
 
         let response = ecu_manager
             .convert_from_uds(&service, &create_payload(payload), true)
@@ -5631,7 +5631,7 @@ mod tests {
     async fn test_negative_response_with_invalid_data_where_no_neg_response_is_defined() {
         let (ecu_manager, service, sid) =
             create_ecu_manager_with_end_pdu_service(1, None, EndOfPduStructureType::FixedSize);
-        let data = vec![0x7f, sid, 0x33];
+        let data = vec![0x7F, sid, 0x33];
 
         let response = ecu_manager
             .convert_from_uds(&service, &create_payload(data), true)

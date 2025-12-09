@@ -777,7 +777,7 @@ mod tests {
         let result = super::json_value_to_uds_data(&diag_type, None, &json_value);
         assert_eq!(
             result,
-            Ok(vec![255, 10, 128, 0xde, 0xad, 0xbe, 0xef, 0xca, 0x07])
+            Ok(vec![255, 10, 128, 0xDE, 0xAD, 0xBE, 0xEF, 0xCA, 0x07])
         );
     }
 
@@ -786,7 +786,7 @@ mod tests {
         let json_value = serde_json::json!("c0ffeca7");
         let diag_type = create_diag_coded_type(DataType::ByteField, None);
         let result = super::json_value_to_uds_data(&diag_type, None, &json_value);
-        assert_eq!(result, Ok(vec![0xc0, 0xff, 0xec, 0xa7]));
+        assert_eq!(result, Ok(vec![0xC0, 0xFF, 0xEC, 0xA7]));
     }
 
     #[test]
@@ -815,7 +815,7 @@ mod tests {
         let float32_type = create_diag_coded_type(DataType::Float32, None);
         let float64_type = create_diag_coded_type(DataType::Float64, None);
 
-        let int_result = Ok(vec![0x00, 0x00, 0x00, 0x0a]);
+        let int_result = Ok(vec![0x00, 0x00, 0x00, 0x0A]);
         assert_eq!(
             super::json_value_to_uds_data(&int32_type, None, &json_value),
             int_result
@@ -826,7 +826,7 @@ mod tests {
         );
         assert_eq!(
             super::json_value_to_uds_data(&bytefield_type, None, &json_value),
-            Ok(vec![0x0a])
+            Ok(vec![0x0A])
         );
 
         assert_eq!(

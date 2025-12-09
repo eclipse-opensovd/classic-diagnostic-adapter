@@ -739,7 +739,7 @@ async fn try_read(
             Some(Ok(msg)) => match msg.payload {
                 DoipPayload::DiagnosticMessage(msg) => {
                     // handle NRCs
-                    if let Some(&0x7f) = msg.message.first() {
+                    if let Some(&0x7F) = msg.message.first() {
                         let request_sid = msg.message.get(1).copied().unwrap_or(0);
                         let error_code = msg.message.get(2).copied().unwrap_or(0);
 
