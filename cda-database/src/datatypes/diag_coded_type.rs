@@ -346,10 +346,10 @@ impl DiagCodedType {
                         while end_pos < max_end {
                             if end_pos.saturating_add(1) < uds_payload.len()
                                 && end_pos.saturating_sub(byte_pos) >= mmlt.min_length as usize
-                                && uds_payload.get(end_pos).is_some_and(|&b| b == 0xff)
+                                && uds_payload.get(end_pos).is_some_and(|&b| b == 0xFF)
                                 && uds_payload
                                     .get(end_pos.saturating_add(1))
-                                    .is_some_and(|&b| b == 0xff)
+                                    .is_some_and(|&b| b == 0xFF)
                             {
                                 break; // Found UTF-16 null terminator
                             }
@@ -361,7 +361,7 @@ impl DiagCodedType {
                     _ => {
                         while end_pos < max_end {
                             if end_pos.saturating_sub(byte_pos) >= mmlt.min_length as usize
-                                && uds_payload.get(end_pos).is_some_and(|&b| b == 0xff)
+                                && uds_payload.get(end_pos).is_some_and(|&b| b == 0xFF)
                             {
                                 break; // Found ASCII/UTF-8 null terminator
                             }
@@ -542,9 +542,9 @@ impl DiagCodedType {
                     }
                     Termination::HexFF => {
                         if self.base_datatype == DataType::Unicode2String {
-                            input_data.append(&mut vec![0xffu8, 0xffu8]);
+                            input_data.append(&mut vec![0xFFu8, 0xFFu8]);
                         } else {
-                            input_data.push(0xffu8);
+                            input_data.push(0xFFu8);
                         }
                         pack_data(input_data.len().saturating_mul(8), 0, None, &input_data)
                     }
@@ -1677,8 +1677,8 @@ mod tests {
             8,
             0,
             0,
-            &[0x03, 0xab, 0xcd, 0xef], // First byte (0x03) indicates 3 bytes follow
-            &[0xab, 0xcd, 0xef],       // Expected: 3 bytes after length byte
+            &[0x03, 0xAB, 0xCD, 0xEF], // First byte (0x03) indicates 3 bytes follow
+            &[0xAB, 0xCD, 0xEF],       // Expected: 3 bytes after length byte
         )
         .unwrap();
     }
@@ -1689,8 +1689,8 @@ mod tests {
             16,
             0,
             0,
-            &[0x00, 0x02, 0xcd, 0xef], // First two bytes (0x0002) indicate 2 bytes follow
-            &[0xcd, 0xef],             // Expected: 2 bytes after length bytes
+            &[0x00, 0x02, 0xCD, 0xEF], // First two bytes (0x0002) indicate 2 bytes follow
+            &[0xCD, 0xEF],             // Expected: 2 bytes after length bytes
         )
         .unwrap();
     }
@@ -1701,8 +1701,8 @@ mod tests {
             32,
             0,
             0,
-            &[0x00, 0x00, 0x00, 0x02, 0xcd, 0xef], // First four bytes indicate 2 bytes follow
-            &[0xcd, 0xef],                         // Expected: 2 bytes after length bytes
+            &[0x00, 0x00, 0x00, 0x02, 0xCD, 0xEF], // First four bytes indicate 2 bytes follow
+            &[0xCD, 0xEF],                         // Expected: 2 bytes after length bytes
         )
         .unwrap();
     }
@@ -1713,8 +1713,8 @@ mod tests {
             64,
             0,
             0,
-            &[0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x02, 0xcd, 0xef],
-            &[0xcd, 0xef],
+            &[0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x02, 0xCD, 0xEF],
+            &[0xCD, 0xEF],
         )
         .unwrap();
     }
@@ -1737,8 +1737,8 @@ mod tests {
             3,
             0,
             0,
-            &[0x03, 0xab, 0xcd, 0xef], // First 3 bits indicate 3 bytes follow
-            &[0xab, 0xcd, 0xef],
+            &[0x03, 0xAB, 0xCD, 0xEF], // First 3 bits indicate 3 bytes follow
+            &[0xAB, 0xCD, 0xEF],
         )
         .unwrap();
     }
@@ -1749,7 +1749,7 @@ mod tests {
                 8,
                 0,
                 0,
-                &[0x03, 0xab], // Indicates 3 bytes but only 1 byte available
+                &[0x03, 0xAB], // Indicates 3 bytes but only 1 byte available
                 &[],
             )
             .is_err()
@@ -1758,7 +1758,7 @@ mod tests {
 
     #[test]
     fn test_leading_length_zero() {
-        test_leading_length(8, 0, 0, &[0x00, 0xff], &[]).unwrap();
+        test_leading_length(8, 0, 0, &[0x00, 0xFF], &[]).unwrap();
     }
 
     #[test]
@@ -1816,7 +1816,7 @@ mod tests {
 
     #[test]
     fn test_encode_leading_length_8bit() {
-        let input = vec![0xab, 0xcd, 0xef];
+        let input = vec![0xAB, 0xCD, 0xEF];
         let mut expected = vec![0x03];
         expected.extend(input.clone());
         test_encode_leading_length(8, &input, &expected).unwrap();
@@ -1824,7 +1824,7 @@ mod tests {
 
     #[test]
     fn test_encode_leading_length_16bit() {
-        let input = vec![0xcd, 0xef];
+        let input = vec![0xCD, 0xEF];
         let mut expected = vec![0x00, 0x02];
         expected.extend(input.clone());
         test_encode_leading_length(16, &input, &expected).unwrap();
@@ -1832,7 +1832,7 @@ mod tests {
 
     #[test]
     fn test_encode_leading_length_32bit() {
-        let input = vec![0xcd, 0xef];
+        let input = vec![0xCD, 0xEF];
         let mut expected = vec![0x00, 0x00, 0x00, 0x02];
         expected.extend(input.clone());
         test_encode_leading_length(32, &input, &expected).unwrap();
@@ -2065,18 +2065,18 @@ mod tests {
 
     #[test]
     fn test_encode_standard_length_float64() {
-        let input = [0x12, 0x34, 0x56, 0x78, 0x9a, 0xbc, 0xde, 0xf1];
+        let input = [0x12, 0x34, 0x56, 0x78, 0x9A, 0xBC, 0xDE, 0xF1];
         let expected = input;
         test_encode_standard_length(64, None, false, &input, &expected, DataType::Float64).unwrap();
     }
 
     #[test]
     fn test_encode_standard_length_uint32() {
-        let input = [0xff, 0xff, 0xff, 0xaa];
+        let input = [0xFF, 0xFF, 0xFF, 0xAA];
         // expect 4 bytes payload, with 0xaa for the last byte
         // since we have to allocate 4 bytes to be able to allocate
         // data at index (byte pos) 3
-        let expected = vec![0x00, 0x00, 0x00, 0xaa];
+        let expected = vec![0x00, 0x00, 0x00, 0xAA];
         test_encode_standard_length_with_byte_pos(
             3,
             8,
@@ -2207,7 +2207,7 @@ mod tests {
     #[test]
     fn test_encode_standard_length_masked_change_unprotected_bits_only() {
         let mut uds_payload = vec![0x00, 0x00];
-        let input = vec![0xff, 0xff];
+        let input = vec![0xFF, 0xFF];
         // Mask: protect only upper nibble
         // will protect 0x0f for both payload bytes.
         let bit_mask = vec![0xF0, 0xF0];
@@ -2401,40 +2401,40 @@ mod tests {
 
     #[test]
     fn test_decode_leading_length_8bit() {
-        let payload = vec![0x03, 0xab, 0xcd, 0xef];
+        let payload = vec![0x03, 0xAB, 0xCD, 0xEF];
         let diag_type = DiagCodedType::new_high_low_byte_order(
             DataType::ByteField,
             DiagCodedTypeVariant::LeadingLengthInfo(8),
         )
         .unwrap();
         let (data, bit_len) = diag_type.decode(&payload, 0, 0).unwrap();
-        assert_eq!(data, vec![0xab, 0xcd, 0xef]);
+        assert_eq!(data, vec![0xAB, 0xCD, 0xEF]);
         assert_eq!(bit_len, 24);
     }
 
     #[test]
     fn test_decode_leading_length_16bit() {
-        let payload = vec![0x00, 0x02, 0xcd, 0xef];
+        let payload = vec![0x00, 0x02, 0xCD, 0xEF];
         let diag_type = DiagCodedType::new_high_low_byte_order(
             DataType::ByteField,
             DiagCodedTypeVariant::LeadingLengthInfo(16),
         )
         .unwrap();
         let (data, bit_len) = diag_type.decode(&payload, 0, 0).unwrap();
-        assert_eq!(data, vec![0xcd, 0xef]);
+        assert_eq!(data, vec![0xCD, 0xEF]);
         assert_eq!(bit_len, 16);
     }
 
     #[test]
     fn test_decode_leading_length_32bit() {
-        let payload = vec![0x00, 0x00, 0x00, 0x02, 0xcd, 0xef];
+        let payload = vec![0x00, 0x00, 0x00, 0x02, 0xCD, 0xEF];
         let diag_type = DiagCodedType::new_high_low_byte_order(
             DataType::ByteField,
             DiagCodedTypeVariant::LeadingLengthInfo(32),
         )
         .unwrap();
         let (data, bit_len) = diag_type.decode(&payload, 0, 0).unwrap();
-        assert_eq!(data, vec![0xcd, 0xef]);
+        assert_eq!(data, vec![0xCD, 0xEF]);
         assert_eq!(bit_len, 16);
     }
 
@@ -2505,7 +2505,7 @@ mod tests {
     #[test]
     fn test_decode_min_max_length_end_of_pdu_termination() {
         // special case, we have no data at the end of the PDU
-        let payload = vec![0xaa, 0xbb];
+        let payload = vec![0xAA, 0xBB];
         let diag_type = DiagCodedType::new_high_low_byte_order(
             DataType::ByteField,
             DiagCodedTypeVariant::MinMaxLength(MinMaxLengthType {
@@ -2520,7 +2520,7 @@ mod tests {
         assert_eq!(bit_len, 0);
 
         // special case, we have no data at the end of the PDU
-        let payload = vec![0xaa, 0xbb, 0xcc, 0xdd];
+        let payload = vec![0xAA, 0xBB, 0xCC, 0xDD];
         let diag_type = DiagCodedType::new_high_low_byte_order(
             DataType::ByteField,
             DiagCodedTypeVariant::MinMaxLength(MinMaxLengthType {
@@ -2531,7 +2531,7 @@ mod tests {
         )
         .unwrap();
         let (data, bit_len) = diag_type.decode(&payload, 1, 0).unwrap();
-        assert_eq!(data, vec![0xbb, 0xcc, 0xdd]);
+        assert_eq!(data, vec![0xBB, 0xCC, 0xDD]);
         assert_eq!(bit_len, 24);
     }
 
@@ -2630,7 +2630,7 @@ mod tests {
     #[test]
     fn test_decode_error_cases() {
         // Insufficient data for leading length
-        let payload = vec![0x03, 0xab];
+        let payload = vec![0x03, 0xAB];
         let diag_type = DiagCodedType::new_high_low_byte_order(
             DataType::ByteField,
             DiagCodedTypeVariant::LeadingLengthInfo(8),

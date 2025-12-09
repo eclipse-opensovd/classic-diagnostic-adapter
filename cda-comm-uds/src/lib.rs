@@ -1720,7 +1720,7 @@ impl<S: EcuGateway, R: DiagServiceResponse, T: EcuManager<Response = R>> UdsEcu
                 );
             }
 
-            if mask == 0xff || mask == 0x00 {
+            if mask == 0xFF || mask == 0x00 {
                 for record in lookup.dtcs {
                     all_dtcs.entry(record.code).or_insert(DtcRecordAndStatus {
                         record,
