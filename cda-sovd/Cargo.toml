@@ -28,14 +28,14 @@ workspace = true
 # internal dependencies
 cda-interfaces = { workspace = true }
 cda-plugin-security = { workspace = true }
+cda-tracing = { workspace = true }
 sovd-interfaces = { workspace = true }
-cda-comm-doip = { workspace = true }
 
+# external
 tokio = { workspace = true, features = ["net"] }
-futures = { workspace = true }                   # external
+futures = { workspace = true }
 
-async-trait = { workspace = true }
-
+# openapi generation
 aide = { workspace = true, features = [
   "axum",
   "swagger",
@@ -49,7 +49,7 @@ aide = { workspace = true, features = [
   "axum-extra-with-rejection",
   "macros",
   "serde_qs",
-] } # openapi generation
+] }
 schemars = { workspace = true }
 
 # web server
@@ -90,4 +90,4 @@ percent-encoding = { workspace = true }
 [features]
 default = []
 auth = []
-dlt-tracing = ["cda-interfaces/dlt-tracing"]
+dlt-tracing = ["cda-interfaces/dlt-tracing", "cda-tracing/dlt-tracing"]

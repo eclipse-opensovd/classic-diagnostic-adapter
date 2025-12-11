@@ -25,6 +25,7 @@ workspace = true
 path = "src/lib.rs"
 
 [dependencies]
+cda-interfaces = { workspace = true }
 serde = { workspace = true, features = ["derive"] }
 tokio = { workspace = true }
 thiserror = { workspace = true }
@@ -55,6 +56,23 @@ opentelemetry-semantic-conventions = { workspace = true, features = [
 
 # tokio console
 console-subscriber = { workspace = true, optional = true }
+
+# http
+axum = { workspace = true, features = [
+  "http1",
+  "json",
+  "tokio",
+  "query",
+  "matched-path",
+  "original-uri",
+] }
+tower-http = { workspace = true, features = [
+  "cors",
+  "fs",
+  "normalize-path",
+  "timeout",
+  "trace",
+] }
 
 [features]
 default = []

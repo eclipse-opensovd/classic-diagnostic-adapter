@@ -23,6 +23,8 @@ use doip_definitions::{
 use doip_sockets::udp::UdpSocket;
 use tokio::sync::{Mutex, RwLock, mpsc};
 
+#[cfg(feature = "health")]
+use crate::health;
 use crate::{DoipDiagGateway, DoipTarget, connections::handle_gateway_connection};
 pub(crate) async fn get_vehicle_identification<T, F>(
     socket: &mut UdpSocket,
@@ -30,6 +32,7 @@ pub(crate) async fn get_vehicle_identification<T, F>(
     gateway_port: u16,
     ecus: &Arc<HashMap<String, RwLock<T>>>,
     shutdown_signal: F,
+    #[cfg(feature = "health")] health: Option<&Arc<RwLock<health::DoipHealthProvider>>>,
 ) -> Result<Vec<DoipTarget>, DiagServiceError>
 where
     T: EcuAddressProvider,
@@ -48,6 +51,11 @@ where
         .await
         .map_err(|e| DiagServiceError::SendFailed(format!("Failed to send VIR: {e:?}")))?;
 
+    #[cfg(feature = "health")]
+    if let Some(health) = health {
+        health.write().await.set_vir_sent(true);
+    }
+
     let mut gateways = Vec::new();
 
     let vam_timeout = Duration::from_millis(1000); // not the actual timeout from the spec ...
@@ -64,7 +72,9 @@ where
                             // skip our own VIR
                             continue;
                         }
-                        match handle_vam::<T>(ecus, doip_msg, source_addr, netmask).await {
+
+                        match handle_vam::<T>(ecus, doip_msg, source_addr, netmask,
+                                #[cfg(feature= "health")] health.map(AsRef::as_ref)).await {
                             Ok(Some(gateway)) => gateways.push(gateway),
                             Ok(None) => { /* ignore non-matching VAMs */ }
                             Err(e) => tracing::error!(error = ?e, "Failed to handle VAM"),
@@ -82,10 +92,12 @@ where
             }
         }
     }
+
     Ok(gateways)
 }
 
 #[allow(clippy::too_many_lines)] // allowed due to nested functions
+#[allow(clippy::too_many_arguments)] // allowed, as the 8th health argument depends on feature flag
 pub(crate) async fn listen_for_vams<T, F>(
     tester_ip: String,
     gateway_port: u16,
@@ -94,6 +106,7 @@ pub(crate) async fn listen_for_vams<T, F>(
     variant_detection: mpsc::Sender<Vec<String>>,
     send_timeout: Duration,
     shutdown_signal: F,
+    #[cfg(feature = "health")] health: Option<Arc<RwLock<health::DoipHealthProvider>>>,
 ) where
     T: EcuAddressProvider + DoipComParamProvider,
     F: Future<Output = ()> + Clone + Send + 'static,
@@ -105,7 +118,8 @@ pub(crate) async fn listen_for_vams<T, F>(
         netmask: u32,
     }
 
-    #[tracing::instrument(skip(gateway, gateway_ecu_map, gateway_ecu_name_map, variant_detection),
+    #[tracing::instrument(skip(
+            gateway, gateway_ecu_map, gateway_ecu_name_map, variant_detection, health),
         fields(
             dlt_context = dlt_ctx!("DOIP")
         )
@@ -117,13 +131,23 @@ pub(crate) async fn listen_for_vams<T, F>(
         gateway_ecu_map: &HashMap<u16, Vec<u16>>,
         gateway_ecu_name_map: &HashMap<u16, Vec<String>>,
         variant_detection: mpsc::Sender<Vec<String>>,
+        #[cfg(feature = "health")] health: Option<&Arc<RwLock<health::DoipHealthProvider>>>,
     ) {
         let DoipMessageContext {
             doip_msg,
             source_addr,
             netmask,
         } = doip_msg_ctx;
-        match handle_vam::<T>(&gateway.ecus, doip_msg, source_addr, netmask).await {
+        match handle_vam::<T>(
+            &gateway.ecus,
+            doip_msg,
+            source_addr,
+            netmask,
+            #[cfg(feature = "health")]
+            health.map(AsRef::as_ref),
+        )
+        .await
+        {
             Ok(Some(doip_target)) => {
                 tracing::debug!(
                     ecu_name = %doip_target.ecu,
@@ -154,6 +178,8 @@ pub(crate) async fn listen_for_vams<T, F>(
                         &gateway.ecus,
                         gateway_ecu_map,
                         send_timeout,
+                        #[cfg(feature = "health")]
+                        health,
                     )
                     .await
                     {
@@ -268,6 +294,7 @@ pub(crate) async fn listen_for_vams<T, F>(
                                 &gateway_ecu_map,
                                 &gateway_ecu_name_map,
                                 variant_detection.clone(),
+                               #[cfg(feature = "health")] health.as_ref()
                             ).await;
                         }
                     },
@@ -285,6 +312,7 @@ async fn handle_vam<T>(
     doip_msg: doip_definitions::message::DoipMessage,
     source_addr: std::net::SocketAddr,
     netmask: u32,
+    #[cfg(feature = "health")] health: Option<&RwLock<health::DoipHealthProvider>>,
 ) -> Result<Option<DoipTarget>, String>
 where
     T: EcuAddressProvider,
@@ -307,6 +335,11 @@ where
     }
     match doip_msg.payload {
         DoipPayload::VehicleAnnouncementMessage(vam) => {
+            #[cfg(feature = "health")]
+            if let Some(health) = health {
+                health.write().await.set_vam_received(true);
+            }
+
             tracing::debug!("VAM received, parsing ...");
             let mut matched_ecu = None;
             for (name, ecu) in ecus.iter() {

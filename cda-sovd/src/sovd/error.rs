@@ -54,8 +54,6 @@ impl From<DiagServiceError> for ApiError {
             | DiagServiceError::DatabaseEntryNotFound(_)
             | DiagServiceError::VariantDetectionError(_)
             | DiagServiceError::EcuOffline(_)
-            | DiagServiceError::ConfigurationError(_)
-            | DiagServiceError::SetupError(_)
             | DiagServiceError::ResourceError(_)
             | DiagServiceError::ConnectionClosed
             | DiagServiceError::InvalidRequest(_)

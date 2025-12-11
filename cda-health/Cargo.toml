@@ -10,11 +10,11 @@
 # SPDX-License-Identifier: Apache-2.0
 
 [package]
-name = "cda-interfaces"
+name = "cda-health"
 version = "0.1.0"
 edition.workspace = true
 publish = false
-description = "Interfaces and Types used in CDA"
+description = "Provides a health check interface"
 homepage.workspace = true
 license.workspace = true
 
@@ -25,25 +25,57 @@ workspace = true
 path = "src/lib.rs"
 
 [dependencies]
+# internal dependencies
+cda-tracing = { workspace = true }
+cda-interfaces = { workspace = true }
 
-foldhash = { workspace = true }
-
-parking_lot = { workspace = true }
+# external
+futures = { workspace = true }
 schemars = { workspace = true }
 serde = { workspace = true, features = ["derive"] }
 serde_json = { workspace = true }
 thiserror = { workspace = true }
-#tokio
+# tokio
 tokio = { workspace = true, features = ["sync"] }
-# runtime size info
-hex = { workspace = true }
-strum = { workspace = true }
-strum_macros = { workspace = true }
 # logging
 tracing = { workspace = true }
+
+# web server
+axum = { workspace = true, features = [
+  "http1",
+  "json",
+  "tokio",
+  "query",
+  "matched-path",
+  "original-uri",
+  "ws",
+] }
+tower = { workspace = true }
+tower-http = { workspace = true, features = [
+  "cors",
+  "fs",
+  "normalize-path",
+  "timeout",
+  "trace",
+] }
+
+aide = { workspace = true, features = [
+  "axum",
+  "swagger",
+  "http",
+  "axum-extra",
+  "axum-json",
+  "axum-matched-path",
+  "axum-original-uri",
+  "axum-query",
+  "axum-extra-headers",
+  "axum-extra-with-rejection",
+  "macros",
+  "serde_qs",
+] }
+chrono = { workspace = true }
 
 [features]
 default = []
 tokio-tracing = ["tokio/tracing"]
-dlt-tracing = []
-health = []
+dlt-tracing = ["cda-interfaces/dlt-tracing"]
