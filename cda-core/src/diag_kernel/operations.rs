@@ -11,7 +11,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-use cda_database::datatypes::{self, BitLength, CompuScale, DataType};
+use cda_database::datatypes::{self, BitLength, CompuMethod, CompuScale, DataType};
 use cda_interfaces::{
     DataParseError, DiagServiceError,
     util::{decode_hex, tracing::print_hex},
@@ -20,7 +20,7 @@ use cda_interfaces::{
 use crate::diag_kernel::{
     DiagDataValue,
     diagservices::{DiagDataTypeContainer, DiagDataTypeContainerRaw},
-    iso_14229_nrc,
+    iso_14229_nrc, pad_msb_to_len,
     payload::Payload,
 };
 
@@ -243,29 +243,80 @@ fn compu_lookup_text_table(scale: &CompuScale) -> Result<DiagDataValue, DiagServ
     Ok(DiagDataValue::String(mapped_value))
 }
 
-/// Helper function to parse a JSON value (number or string) into f64
-fn parse_json_to_f64(value: &serde_json::Value) -> Result<f64, DiagServiceError> {
-    if value.is_number() {
-        value.as_f64().ok_or_else(|| {
-            DiagServiceError::ParameterConversionError(
-                "Failed to get compu value as f64".to_owned(),
-            )
-        })
-    } else if value.is_string() {
-        let trimmed = value
-            .as_str()
-            .ok_or_else(|| {
-                DiagServiceError::ParameterConversionError(
-                    "Empty value is not allowed for compu value".to_owned(),
-                )
-            })?
-            .trim_matches('"');
-        trimmed.parse::<f64>().map_err(|_| {
-            DiagServiceError::ParameterConversionError("Failed to parse string as f64".to_string())
-        })
+fn parse_json_to_f64(
+    value: &serde_json::Value,
+    diag_type: &datatypes::DiagCodedType,
+) -> Result<f64, DiagServiceError> {
+    // numeric JSON values are used directly
+    if let Some(num) = value.as_f64() {
+        return Ok(num);
+    }
+
+    // we can accept the precision loss here since the value is being converted to f64 anyway
+    // when compu methods are applied.
+    #[allow(clippy::cast_precision_loss)]
+    if let Some(num) = value.as_i64() {
+        return Ok(num as f64);
+    }
+
+    // string values are convert to bytes then interpreted
+    if let Some(s) = value.as_str() {
+        let bytes = numeric_type_str_to_byte_vec(diag_type, s)?;
+        match diag_type.base_datatype() {
+            DataType::Int32 => {
+                let padded = pad_msb_to_len(&bytes, 4);
+                let array: [u8; 4] = padded.try_into().map_err(|_| {
+                    DiagServiceError::ParameterConversionError(
+                        "Invalid byte length for i32".to_owned(),
+                    )
+                })?;
+                Ok(f64::from(i32::from_be_bytes(array)))
+            }
+            DataType::UInt32 => {
+                let padded = pad_msb_to_len(&bytes, 4);
+                let array: [u8; 4] = padded.try_into().map_err(|_| {
+                    DiagServiceError::ParameterConversionError(
+                        "Invalid byte length for u32".to_owned(),
+                    )
+                })?;
+                Ok(f64::from(u32::from_be_bytes(array)))
+            }
+            DataType::Float32 => {
+                let padded = pad_msb_to_len(&bytes, 4);
+                let array: [u8; 4] = padded.try_into().map_err(|_| {
+                    DiagServiceError::ParameterConversionError(
+                        "Invalid byte length for f32".to_owned(),
+                    )
+                })?;
+                Ok(f64::from(f32::from_be_bytes(array)))
+            }
+            DataType::Float64 => {
+                let padded = pad_msb_to_len(&bytes, 8);
+                let array: [u8; 8] = padded.try_into().map_err(|_| {
+                    DiagServiceError::ParameterConversionError(
+                        "Invalid byte length for f64".to_owned(),
+                    )
+                })?;
+                Ok(f64::from_be_bytes(array))
+            }
+            DataType::ByteField => {
+                let padded = pad_msb_to_len(&bytes, 8);
+                let array: [u8; 8] = padded.try_into().map_err(|_| {
+                    DiagServiceError::ParameterConversionError(
+                        "Invalid byte length for u32".to_owned(),
+                    )
+                })?;
+                // allowed because byte field for compu convert is an edge case anyway.
+                #[allow(clippy::cast_precision_loss)]
+                Ok(u64::from_be_bytes(array) as f64)
+            }
+            _ => Err(DiagServiceError::ParameterConversionError(format!(
+                "Unsupported data type for numeric conversion: {diag_type:?}"
+            ))),
+        }
     } else {
         Err(DiagServiceError::ParameterConversionError(
-            "Value is not a number or string".to_owned(),
+            "Invalid JSON value for numeric conversion".to_owned(),
         ))
     }
 }
@@ -292,7 +343,7 @@ fn linear_scaled_value_to_bytes(
 
 // Casting and truncating is defined in the ISO instead of rounding
 fn compu_convert(
-    diag_type: datatypes::DataType,
+    diag_type: &datatypes::DiagCodedType,
     compu_method: &datatypes::CompuMethod,
     category: datatypes::CompuCategory,
     value: &serde_json::Value,
@@ -304,7 +355,7 @@ fn compu_convert(
             compu_convert_scale_linear(diag_type, compu_method, value)
         }
         datatypes::CompuCategory::TextTable => {
-            compu_convert_text_table(diag_type, compu_method, value)
+            compu_convert_text_table(diag_type.base_datatype(), compu_method, value)
         }
         datatypes::CompuCategory::CompuCode => todo!(),
         datatypes::CompuCategory::TabIntp => todo!(),
@@ -314,7 +365,7 @@ fn compu_convert(
 }
 
 fn compu_convert_linear(
-    diag_type: DataType,
+    diag_type: &datatypes::DiagCodedType,
     compu_method: &CompuMethod,
     value: &serde_json::Value,
 ) -> Result<Vec<u8>, DiagServiceError> {
@@ -334,7 +385,7 @@ fn compu_convert_linear(
             DiagServiceError::UdsLookupError("Failed to find scales for linear scaling".to_owned())
         })?;
 
-    let physical_value = parse_json_to_f64(value)?;
+    let physical_value = parse_json_to_f64(value, diag_type)?;
     let coeffs = scale.rational_coefficients.as_ref().ok_or_else(|| {
         DiagServiceError::UdsLookupError("LINEAR: Missing rational coefficients".to_owned())
     })?;
@@ -344,17 +395,17 @@ fn compu_convert_linear(
         physical_value,
         &ConversionDirection::PhysToInternal(scale.inverse_values.as_ref()),
     )?;
-    linear_scaled_value_to_bytes(internal_value, diag_type)
+    linear_scaled_value_to_bytes(internal_value, diag_type.base_datatype())
 }
 
 fn compu_convert_scale_linear(
-    diag_type: DataType,
+    diag_type: &datatypes::DiagCodedType,
     compu_method: &CompuMethod,
     value: &serde_json::Value,
 ) -> Result<Vec<u8>, DiagServiceError> {
     // ScaleLinear allows multiple scales with different ranges
     // We need to find the matching scale based on the input values limits
-    let physical_value = parse_json_to_f64(value)?;
+    let physical_value = parse_json_to_f64(value, diag_type)?;
 
     // Find the appropriate scale for the physical value
     // For phys to internal, we need to compute the physical range from internal limits
@@ -420,7 +471,7 @@ fn compu_convert_scale_linear(
         physical_value,
         &ConversionDirection::PhysToInternal(scale.inverse_values.as_ref()),
     )?;
-    linear_scaled_value_to_bytes(internal_value, diag_type)
+    linear_scaled_value_to_bytes(internal_value, diag_type.base_datatype())
 }
 
 fn compu_convert_text_table(
@@ -521,19 +572,18 @@ pub(in crate::diag_kernel) fn json_value_to_uds_data(
     compu_method: Option<datatypes::CompuMethod>,
     json_value: &serde_json::Value,
 ) -> Result<Vec<u8>, DiagServiceError> {
-    let base_type = diag_type.base_datatype();
     'compu: {
         if let Some(compu_method) = compu_method {
             match compu_method.category {
                 datatypes::CompuCategory::Identical => break 'compu,
                 category => {
-                    return compu_convert(base_type, &compu_method, category, json_value);
+                    return compu_convert(diag_type, &compu_method, category, json_value);
                 }
             }
         }
     }
 
-    match base_type {
+    match diag_type.base_datatype() {
         DataType::Int32
         | DataType::UInt32
         | DataType::Float32
@@ -564,16 +614,17 @@ fn numeric_type_str_to_byte_vec(
     // (basically all integer types)
     value
         .split_whitespace()
+        .flat_map(|v| v.split(','))
+        .filter(|v| !v.is_empty())
         .map(|value| {
             if value.chars().all(char::is_numeric) {
                 match base_type {
                     DataType::ByteField => value
                         .parse::<u64>()
                         .map_err(|_| {
-                            DiagServiceError::ParameterConversionError(
-                                "Invalid value type for ByteField, failed to parse to u64"
-                                    .to_owned(),
-                            )
+                            DiagServiceError::ParameterConversionError(format!(
+                                "Invalid value for ByteField: '{value}'"
+                            ))
                         })
                         .and_then(|v| {
                             if let Some(bit_len) = bit_len {
@@ -871,6 +922,8 @@ mod tests {
         .unwrap()
     }
 
+    use crate::diag_kernel::pad_msb_to_len;
+
     #[test]
     fn test_hex_values() {
         let json_value = serde_json::json!("0x11223344");
@@ -1072,48 +1125,33 @@ mod tests {
         };
 
         let value = serde_json::json!("42");
-        let result = super::compu_convert(
-            DataType::Int32,
-            &compu_method,
-            CompuCategory::Linear,
-            &value,
-        );
+        let int32_type = create_diag_coded_type(DataType::Int32, None);
+        let result =
+            super::compu_convert(&int32_type, &compu_method, CompuCategory::Linear, &value);
         assert_eq!(result.unwrap(), 42_i32.to_be_bytes().to_vec());
 
         let value = serde_json::json!("42.42");
-        let result = super::compu_convert(
-            DataType::Float32,
-            &compu_method,
-            CompuCategory::Linear,
-            &value,
-        );
+        let float32_type = create_diag_coded_type(DataType::Float32, None);
+        let result =
+            super::compu_convert(&float32_type, &compu_method, CompuCategory::Linear, &value);
         assert_eq!(result.unwrap(), 42.42_f32.to_be_bytes().to_vec());
 
         let value = serde_json::json!("42.4242");
-        let result = super::compu_convert(
-            DataType::Float64,
-            &compu_method,
-            CompuCategory::Linear,
-            &value,
-        );
+        let float64_type = create_diag_coded_type(DataType::Float64, None);
+        let result =
+            super::compu_convert(&float64_type, &compu_method, CompuCategory::Linear, &value);
         assert_eq!(result.unwrap(), 42.4242_f64.to_be_bytes().to_vec());
 
         let value = serde_json::json!(42);
-        let result = super::compu_convert(
-            DataType::Float64,
-            &compu_method,
-            CompuCategory::Linear,
-            &value,
-        );
+        let float64_type = create_diag_coded_type(DataType::Float64, None);
+        let result =
+            super::compu_convert(&float64_type, &compu_method, CompuCategory::Linear, &value);
         assert_eq!(result.unwrap(), 42_f64.to_be_bytes().to_vec());
 
         let value = serde_json::json!(42);
-        let result = super::compu_convert(
-            DataType::Int32,
-            &compu_method,
-            CompuCategory::Linear,
-            &value,
-        );
+        let int32_type = create_diag_coded_type(DataType::Int32, None);
+        let result =
+            super::compu_convert(&int32_type, &compu_method, CompuCategory::Linear, &value);
         assert_eq!(result.unwrap(), 42_i32.to_be_bytes().to_vec());
     }
 
@@ -1149,21 +1187,15 @@ mod tests {
         // physical->internal: given physical 170, internal = (0.5*170 - 1.23)/2 = 41.885
         // there is rounding but values are truncated when converting to integer types
         let value = serde_json::json!(170);
-        let result = super::compu_convert(
-            DataType::Int32,
-            &compu_method,
-            CompuCategory::Linear,
-            &value,
-        );
+        let int32_type = create_diag_coded_type(DataType::Int32, None);
+        let result =
+            super::compu_convert(&int32_type, &compu_method, CompuCategory::Linear, &value);
         assert_eq!(result.unwrap(), 41_i32.to_be_bytes().to_vec());
 
         let value = serde_json::json!(170.46);
-        let result = super::compu_convert(
-            DataType::Float32,
-            &compu_method,
-            CompuCategory::Linear,
-            &value,
-        );
+        let float32_type = create_diag_coded_type(DataType::Float32, None);
+        let result =
+            super::compu_convert(&float32_type, &compu_method, CompuCategory::Linear, &value);
         assert_eq!(result.unwrap(), 42.0_f32.to_be_bytes().to_vec());
     }
 
@@ -1195,21 +1227,15 @@ mod tests {
         };
 
         let value = serde_json::json!("TestValue");
-        let result = super::compu_convert(
-            DataType::Int32,
-            &compu_method,
-            CompuCategory::TextTable,
-            &value,
-        );
+        let int32_type = create_diag_coded_type(DataType::Int32, None);
+        let result =
+            super::compu_convert(&int32_type, &compu_method, CompuCategory::TextTable, &value);
         assert_eq!(result.unwrap(), 42_i32.to_be_bytes().to_vec());
 
         let value = serde_json::json!("NotFound");
-        let result = super::compu_convert(
-            DataType::Int32,
-            &compu_method,
-            CompuCategory::TextTable,
-            &value,
-        );
+        let int32_type = create_diag_coded_type(DataType::Int32, None);
+        let result =
+            super::compu_convert(&int32_type, &compu_method, CompuCategory::TextTable, &value);
         assert!(result.is_err());
     }
 
@@ -1315,7 +1341,6 @@ mod tests {
         assert!(super::validate_bit_len_unsigned(15u8, 4).is_ok());
         assert!(super::validate_bit_len_unsigned(16u8, 4).is_err());
     }
-
 
     #[test]
     fn test_compu_lookup_linear_multiple_scales_error() {
@@ -1462,8 +1487,9 @@ mod tests {
 
         // Inverse: y=1 -> x=0
         let value = serde_json::json!(1.0);
+        let float64_type = create_diag_coded_type(DataType::Float64, None);
         let result = super::compu_convert(
-            DataType::Float64,
+            &float64_type,
             &compu_method,
             CompuCategory::ScaleLinear,
             &value,
@@ -1481,8 +1507,9 @@ mod tests {
 
         // Inverse: y=3 -> x=1
         let value = serde_json::json!(3.0);
+        let float64_type = create_diag_coded_type(DataType::Float64, None);
         let result = super::compu_convert(
-            DataType::Float64,
+            &float64_type,
             &compu_method,
             CompuCategory::ScaleLinear,
             &value,
@@ -1500,8 +1527,9 @@ mod tests {
 
         // Inverse: y=4 -> x=1.5
         let value = serde_json::json!(4.0);
+        let float64_type = create_diag_coded_type(DataType::Float64, None);
         let result = super::compu_convert(
-            DataType::Float64,
+            &float64_type,
             &compu_method,
             CompuCategory::ScaleLinear,
             &value,
@@ -1520,8 +1548,9 @@ mod tests {
 
         // Inverse: y=5 -> x=2
         let value = serde_json::json!(5.0);
+        let float64_type = create_diag_coded_type(DataType::Float64, None);
         let result = super::compu_convert(
-            DataType::Float64,
+            &float64_type,
             &compu_method,
             CompuCategory::ScaleLinear,
             &value,
@@ -1539,8 +1568,9 @@ mod tests {
 
         // Inverse: y=6 -> x=3
         let value = serde_json::json!(6.0);
+        let float64_type = create_diag_coded_type(DataType::Float64, None);
         let result = super::compu_convert(
-            DataType::Float64,
+            &float64_type,
             &compu_method,
             CompuCategory::ScaleLinear,
             &value,
@@ -1558,8 +1588,9 @@ mod tests {
 
         // Inverse: y=7 -> x=4
         let value = serde_json::json!(7.0);
+        let float64_type = create_diag_coded_type(DataType::Float64, None);
         let result = super::compu_convert(
-            DataType::Float64,
+            &float64_type,
             &compu_method,
             CompuCategory::ScaleLinear,
             &value,
@@ -1594,8 +1625,9 @@ mod tests {
 
         // Inverse: y=8 should fail (constant function with V1=0 cannot be inverted)
         let value = serde_json::json!(8.0);
+        let float64_type = create_diag_coded_type(DataType::Float64, None);
         let result = super::compu_convert(
-            DataType::Float64,
+            &float64_type,
             &compu_method,
             CompuCategory::ScaleLinear,
             &value,
@@ -1741,13 +1773,99 @@ mod tests {
 
         // Test inverse conversion: physical 100.0 -> internal 5.0 (using inverse_values)
         let value = serde_json::json!(100.0);
+        let float64_type = create_diag_coded_type(DataType::Float64, None);
         let result = super::compu_convert(
-            DataType::Float64,
+            &float64_type,
             &compu_method,
             CompuCategory::ScaleLinear,
             &value,
         );
         assert!(result.is_ok());
         assert_eq!(result.unwrap(), 5.0_f64.to_be_bytes().to_vec());
+    }
+
+    #[test]
+    // the given data in the tests allows and requires exact float comparisons
+    #[allow(clippy::float_cmp)]
+    fn test_parse_json_to_f64() {
+        let f32_val = 1.0f32;
+        let bytes = f32_val.to_be_bytes();
+        let f64_val = f64::from_be_bytes(pad_msb_to_len(&bytes, 8).try_into().unwrap());
+        let i32_val = f64::from(i32::from_be_bytes(bytes));
+
+        // test hex representations
+        let hex_bytes_no_space = serde_json::json!(format!(
+            "0x{:02X}{:02X}{:02X}{:02X}",
+            bytes[0], bytes[1], bytes[2], bytes[3]
+        ));
+        let hex_bytes_space_in_hex = serde_json::json!(format!(
+            "0x{:02X} 0x{:02X} 0x{:02X} 0x{:02X}",
+            bytes[0], bytes[1], bytes[2], bytes[3]
+        ));
+        let hex_bytes_space_separated = serde_json::json!(format!(
+            "0x{:02X} 0x{:02X} 0x{:02X} 0x{:02X}",
+            bytes[0], bytes[1], bytes[2], bytes[3]
+        ));
+        let hex_bytes_comma_separated = serde_json::json!(format!(
+            "0x{:02X},0x{:02X},0x{:02X},0x{:02X}",
+            bytes[0], bytes[1], bytes[2], bytes[3]
+        ));
+        let hex_bytes_comma_space_separated = serde_json::json!(format!(
+            "0x{:02X}, 0x{:02X}, 0x{:02X}, 0x{:02X}",
+            bytes[0], bytes[1], bytes[2], bytes[3]
+        ));
+        let _hex_bytes_mixed = serde_json::json!(format!(
+            "0x{:02X} , 0x{:02X} 0x{:02X},0x{:02X}",
+            bytes[0], bytes[1], bytes[2], bytes[3]
+        ));
+        for (data_type, expected) in [
+            (DataType::ByteField, i32_val),
+            (DataType::Int32, i32_val),
+            (DataType::UInt32, i32_val),
+            (DataType::Float32, f64::from(f32_val)),
+            (DataType::Float64, f64_val),
+        ] {
+            let diag_coded_type = create_diag_coded_type(data_type, None);
+            for test_case in [
+                &hex_bytes_no_space,
+                &hex_bytes_space_in_hex,
+                &hex_bytes_space_separated,
+                &hex_bytes_comma_separated,
+                &hex_bytes_comma_space_separated,
+            ] {
+                let result = super::parse_json_to_f64(test_case, &diag_coded_type).unwrap();
+                assert_eq!(
+                    result, expected,
+                    "Failed for data type {data_type:?} with input {test_case:?}"
+                );
+            }
+        }
+
+        // test decimal representations
+        let str_decimal_int = serde_json::json!("1");
+        let str_decimal_float = serde_json::json!("1.0");
+        let decimal_int = serde_json::json!(1);
+        let decimal_float = serde_json::json!(1.0);
+        for data_type in [
+            DataType::ByteField,
+            DataType::Int32,
+            DataType::UInt32,
+            DataType::Float32,
+            DataType::Float64,
+        ] {
+            let diag_coded_type = create_diag_coded_type(data_type, None);
+            for test_case in [
+                &str_decimal_int,
+                &str_decimal_float,
+                &decimal_int,
+                &decimal_float,
+            ] {
+                let result = super::parse_json_to_f64(test_case, &diag_coded_type).unwrap();
+                assert_eq!(
+                    result, 1.0,
+                    "Failed for data type {data_type:?} with input {test_case:?}"
+                );
+            }
+        }
     }
 }
