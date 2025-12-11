@@ -20,7 +20,7 @@ use cda_interfaces::{
 use crate::diag_kernel::{
     DiagDataValue,
     diagservices::{DiagDataTypeContainer, DiagDataTypeContainerRaw},
-    iso_14229_nrc,
+    iso_14229_nrc, pad_msb_to_len,
     payload::Payload,
 };
 
@@ -243,29 +243,80 @@ fn compu_lookup_text_table(scale: &CompuScale) -> Result<DiagDataValue, DiagServ
     Ok(DiagDataValue::String(mapped_value))
 }
 
-/// Helper function to parse a JSON value (number or string) into f64
-fn parse_json_to_f64(value: &serde_json::Value) -> Result<f64, DiagServiceError> {
-    if value.is_number() {
-        value.as_f64().ok_or_else(|| {
-            DiagServiceError::ParameterConversionError(
-                "Failed to get compu value as f64".to_owned(),
-            )
-        })
-    } else if value.is_string() {
-        let trimmed = value
-            .as_str()
-            .ok_or_else(|| {
-                DiagServiceError::ParameterConversionError(
-                    "Empty value is not allowed for compu value".to_owned(),
-                )
-            })?
-            .trim_matches('"');
-        trimmed.parse::<f64>().map_err(|_| {
-            DiagServiceError::ParameterConversionError("Failed to parse string as f64".to_string())
-        })
+fn parse_json_to_f64(
+    value: &serde_json::Value,
+    data_type: DataType,
+) -> Result<f64, DiagServiceError> {
+    // numeric JSON values are used directly
+    if let Some(num) = value.as_f64() {
+        return Ok(num);
+    }
+
+    // we can accept the precision loss here since the value is being converted to f64 anyway
+    // when compu methods are applied.
+    #[allow(clippy::cast_precision_loss)]
+    if let Some(num) = value.as_i64() {
+        return Ok(num as f64);
+    }
+
+    // string values are convert to bytes then interpreted
+    if let Some(s) = value.as_str() {
+        let bytes = string_to_vec_u8(data_type, s)?;
+        match data_type {
+            DataType::Int32 => {
+                let padded = pad_msb_to_len(&bytes, 4);
+                let array: [u8; 4] = padded.try_into().map_err(|_| {
+                    DiagServiceError::ParameterConversionError(
+                        "Invalid byte length for i32".to_owned(),
+                    )
+                })?;
+                Ok(f64::from(i32::from_be_bytes(array)))
+            }
+            DataType::UInt32 => {
+                let padded = pad_msb_to_len(&bytes, 4);
+                let array: [u8; 4] = padded.try_into().map_err(|_| {
+                    DiagServiceError::ParameterConversionError(
+                        "Invalid byte length for u32".to_owned(),
+                    )
+                })?;
+                Ok(f64::from(u32::from_be_bytes(array)))
+            }
+            DataType::Float32 => {
+                let padded = pad_msb_to_len(&bytes, 4);
+                let array: [u8; 4] = padded.try_into().map_err(|_| {
+                    DiagServiceError::ParameterConversionError(
+                        "Invalid byte length for f32".to_owned(),
+                    )
+                })?;
+                Ok(f64::from(f32::from_be_bytes(array)))
+            }
+            DataType::Float64 => {
+                let padded = pad_msb_to_len(&bytes, 8);
+                let array: [u8; 8] = padded.try_into().map_err(|_| {
+                    DiagServiceError::ParameterConversionError(
+                        "Invalid byte length for f64".to_owned(),
+                    )
+                })?;
+                Ok(f64::from_be_bytes(array))
+            }
+            DataType::ByteField => {
+                let padded = pad_msb_to_len(&bytes, 8);
+                let array: [u8; 8] = padded.try_into().map_err(|_| {
+                    DiagServiceError::ParameterConversionError(
+                        "Invalid byte length for u32".to_owned(),
+                    )
+                })?;
+                // allowed because byte field for compu convert is an edge case anyway.
+                #[allow(clippy::cast_precision_loss)]
+                Ok(u64::from_be_bytes(array) as f64)
+            }
+            _ => Err(DiagServiceError::ParameterConversionError(format!(
+                "Unsupported data type for numeric conversion: {data_type:?}"
+            ))),
+        }
     } else {
         Err(DiagServiceError::ParameterConversionError(
-            "Value is not a number or string".to_owned(),
+            "Invalid JSON value for numeric conversion".to_owned(),
         ))
     }
 }
@@ -334,7 +385,7 @@ fn compu_convert_linear(
             DiagServiceError::UdsLookupError("Failed to find scales for linear scaling".to_owned())
         })?;
 
-    let physical_value = parse_json_to_f64(value)?;
+    let physical_value = parse_json_to_f64(value, diag_type)?;
     let coeffs = scale.rational_coefficients.as_ref().ok_or_else(|| {
         DiagServiceError::UdsLookupError("LINEAR: Missing rational coefficients".to_owned())
     })?;
@@ -354,7 +405,7 @@ fn compu_convert_scale_linear(
 ) -> Result<Vec<u8>, DiagServiceError> {
     // ScaleLinear allows multiple scales with different ranges
     // We need to find the matching scale based on the input values limits
-    let physical_value = parse_json_to_f64(value)?;
+    let physical_value = parse_json_to_f64(value, diag_type)?;
 
     // Find the appropriate scale for the physical value
     // For phys to internal, we need to compute the physical range from internal limits
@@ -548,16 +599,17 @@ pub(in crate::diag_kernel) fn string_to_vec_u8(
 ) -> Result<Vec<u8>, DiagServiceError> {
     value
         .split_whitespace()
+        .flat_map(|v| v.split(','))
+        .filter(|v| !v.is_empty())
         .map(|value| {
             if value.chars().all(char::is_numeric) {
                 match data_type {
                     DataType::ByteField => value
                         .parse::<u64>()
                         .map_err(|_| {
-                            DiagServiceError::ParameterConversionError(
-                                "Invalid value type for ByteField, failed to parse to u64"
-                                    .to_owned(),
-                            )
+                            DiagServiceError::ParameterConversionError(format!(
+                                "Invalid value for ByteField: '{value}'"
+                            ))
                         })
                         .and_then(|v| {
                             let bytes = v.to_be_bytes();
@@ -742,6 +794,8 @@ mod tests {
         CompuCategory, CompuFunction, CompuMethod, CompuRationalCoefficients, CompuScale,
         CompuValues, DataType, IntervalType, Limit,
     };
+
+    use crate::diag_kernel::pad_msb_to_len;
 
     #[test]
     fn test_hex_values() {
@@ -1485,5 +1539,88 @@ mod tests {
         );
         assert!(result.is_ok());
         assert_eq!(result.unwrap(), 5.0_f64.to_be_bytes().to_vec());
+    }
+
+    #[test]
+    // the given data in the tests allows and requires exact float comparisons
+    #[allow(clippy::float_cmp)]
+    fn test_parse_json_to_f64() {
+        let f32_val = 1.0f32;
+        let bytes = f32_val.to_be_bytes();
+        let f64_val = f64::from_be_bytes(pad_msb_to_len(&bytes, 8).try_into().unwrap());
+        let i32_val = f64::from(i32::from_be_bytes(bytes));
+
+        // test hex representations
+        let hex_bytes_no_space = serde_json::json!(format!(
+            "0x{:02X}{:02X}{:02X}{:02X}",
+            bytes[0], bytes[1], bytes[2], bytes[3]
+        ));
+        let hex_bytes_space_in_hex = serde_json::json!(format!(
+            "0x{:02X} 0x{:02X} 0x{:02X} 0x{:02X}",
+            bytes[0], bytes[1], bytes[2], bytes[3]
+        ));
+        let hex_bytes_space_separated = serde_json::json!(format!(
+            "0x{:02X} 0x{:02X} 0x{:02X} 0x{:02X}",
+            bytes[0], bytes[1], bytes[2], bytes[3]
+        ));
+        let hex_bytes_comma_separated = serde_json::json!(format!(
+            "0x{:02X},0x{:02X},0x{:02X},0x{:02X}",
+            bytes[0], bytes[1], bytes[2], bytes[3]
+        ));
+        let hex_bytes_comma_space_separated = serde_json::json!(format!(
+            "0x{:02X}, 0x{:02X}, 0x{:02X}, 0x{:02X}",
+            bytes[0], bytes[1], bytes[2], bytes[3]
+        ));
+        let _hex_bytes_mixed = serde_json::json!(format!(
+            "0x{:02X} , 0x{:02X} 0x{:02X},0x{:02X}",
+            bytes[0], bytes[1], bytes[2], bytes[3]
+        ));
+        for (data_type, expected) in [
+            (DataType::ByteField, i32_val),
+            (DataType::Int32, i32_val),
+            (DataType::UInt32, i32_val),
+            (DataType::Float32, f64::from(f32_val)),
+            (DataType::Float64, f64_val),
+        ] {
+            for test_case in [
+                &hex_bytes_no_space,
+                &hex_bytes_space_in_hex,
+                &hex_bytes_space_separated,
+                &hex_bytes_comma_separated,
+                &hex_bytes_comma_space_separated,
+            ] {
+                let result = super::parse_json_to_f64(test_case, data_type).unwrap();
+                assert_eq!(
+                    result, expected,
+                    "Failed for data type {data_type:?} with input {test_case:?}"
+                );
+            }
+        }
+
+        // test decimal representations
+        let str_decimal_int = serde_json::json!("1");
+        let str_decimal_float = serde_json::json!("1.0");
+        let decimal_int = serde_json::json!(1);
+        let decimal_float = serde_json::json!(1.0);
+        for data_type in [
+            DataType::ByteField,
+            DataType::Int32,
+            DataType::UInt32,
+            DataType::Float32,
+            DataType::Float64,
+        ] {
+            for test_case in [
+                &str_decimal_int,
+                &str_decimal_float,
+                &decimal_int,
+                &decimal_float,
+            ] {
+                let result = super::parse_json_to_f64(test_case, data_type).unwrap();
+                assert_eq!(
+                    result, 1.0,
+                    "Failed for data type {data_type:?} with input {test_case:?}"
+                );
+            }
+        }
     }
 }
