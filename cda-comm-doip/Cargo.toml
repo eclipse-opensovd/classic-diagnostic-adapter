@@ -27,6 +27,8 @@ path = "src/lib.rs"
 [dependencies]
 # internal dependencies
 cda-interfaces = { workspace = true }
+cda-health = { workspace = true, optional = true }
+
 # external
 thiserror = { workspace = true }
 # DoIP
@@ -37,6 +39,7 @@ openssl = { workspace = true }
 tokio-openssl = { workspace = true }
 
 serde = { workspace = true, features = ["derive"] }
+serde_json = { workspace = true }
 socket2 = { workspace = true, features = ["all"] }
 #tokio
 tokio = { workspace = true, features = ["time", "fs", "sync"] }
@@ -44,6 +47,7 @@ tokio = { workspace = true, features = ["time", "fs", "sync"] }
 tracing = { workspace = true }
 
 [features]
-default = []
+default = ["health"]
 openssl-vendored = ["openssl/vendored"]
 dlt-tracing = ["cda-interfaces/dlt-tracing"]
+health = ["cda-health"]

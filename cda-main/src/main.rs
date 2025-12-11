@@ -13,21 +13,15 @@
 
 use std::sync::Arc;
 
-use cda_interfaces::{DiagServiceError, DoipGatewaySetupError, dlt_ctx};
+use cda_interfaces::dlt_ctx;
 use cda_plugin_security::{DefaultSecurityPlugin, DefaultSecurityPluginData};
 use cda_sovd::DefaultRouteProvider;
-use cda_tracing::TracingSetupError;
 use clap::Parser;
 use futures::future::FutureExt;
-use opensovd_cda_lib::{cda_version, config::configfile::ConfigSanity, shutdown_signal};
-use thiserror::Error;
-use tokio::sync::mpsc;
-use tracing_subscriber::layer::SubscriberExt as _;
-
-use crate::AppError::{
-    ConfigurationError, ConnectionError, DataError, InitializationFailed, NotFound, ResourceError,
-    RuntimeError, ServerError,
+use opensovd_cda_lib::{
+    AppError, cda_version, config::configfile::ConfigSanity, setup_tracing, shutdown_signal,
 };
+use tokio::sync::mpsc;
 
 #[derive(Parser, Debug)]
 #[command(version, about, long_about = None)]
@@ -68,95 +62,27 @@ struct AppArgs {
     log_file_name: Option<String>,
 }
 
-#[derive(Error, Debug)]
-pub enum AppError {
-    #[error("Initialization failed `{0}`")]
-    InitializationFailed(String),
-    #[error("Resource error: `{0}`")]
-    ResourceError(String),
-    #[error("Connection error `{0}`")]
-    ConnectionError(String),
-    #[error("Configuration error `{0}`")]
-    ConfigurationError(String),
-    #[error("Data error `{0}`")]
-    DataError(String),
-    #[error("Error during execution `{0}`")]
-    RuntimeError(String),
-    #[error("Not found: `{0}`")]
-    NotFound(String),
-    #[error("Server error: `{0}`")]
-    ServerError(String),
+#[cfg(feature = "health")]
+fn setup_health_endpoint(
+    config: &opensovd_cda_lib::config::configfile::Configuration,
+    version: String,
+    providers: Vec<Arc<tokio::sync::RwLock<opensovd_cda_lib::health::DbHealthProvider>>>,
+) -> tokio::task::JoinHandle<Result<(), cda_health::HealthError>> {
+    let config = config.health.clone();
+    cda_interfaces::spawn_named!("health".to_owned(), async move {
+        cda_health::launch_webserver(&config, providers, shutdown_signal().shared(), version).await
+    })
 }
 
-impl From<TracingSetupError> for AppError {
-    fn from(value: TracingSetupError) -> Self {
-        match value {
-            TracingSetupError::ResourceCreationFailed(_) => ResourceError(value.to_string()),
-            TracingSetupError::SubscriberInitializationFailed(_) => {
-                InitializationFailed(value.to_string())
-            }
-        }
-    }
+#[cfg(feature = "health")]
+struct Health {
+    _server_handle: tokio::task::JoinHandle<Result<(), cda_health::HealthError>>,
+    db: Arc<tokio::sync::RwLock<opensovd_cda_lib::health::DbHealthProvider>>,
+    doip: Arc<tokio::sync::RwLock<cda_comm_doip::health::DoipHealthProvider>>,
 }
 
-impl From<DoipGatewaySetupError> for AppError {
-    fn from(value: DoipGatewaySetupError) -> Self {
-        match value {
-            DoipGatewaySetupError::InvalidAddress(_) => ConnectionError(value.to_string()),
-
-            DoipGatewaySetupError::SocketCreationFailed(_)
-            | DoipGatewaySetupError::PortBindFailed(_) => InitializationFailed(value.to_string()),
-
-            DoipGatewaySetupError::InvalidConfiguration(_) => ConfigurationError(value.to_string()),
-
-            DoipGatewaySetupError::ResourceError(_) => ResourceError(value.to_string()),
-
-            DoipGatewaySetupError::ServerError(_) => ServerError(value.to_string()),
-        }
-    }
-}
-
-impl From<DiagServiceError> for AppError {
-    fn from(value: DiagServiceError) -> Self {
-        match value {
-            DiagServiceError::RequestNotSupported(_)
-            | DiagServiceError::BadPayload(_)
-            | DiagServiceError::ConnectionClosed
-            | DiagServiceError::UnexpectedResponse(_)
-            | DiagServiceError::EcuOffline(_)
-            | DiagServiceError::NoResponse(_)
-            | DiagServiceError::SendFailed(_)
-            | DiagServiceError::InvalidAddress(_)
-            | DiagServiceError::InvalidRequest(_)
-            | DiagServiceError::Timeout => ConnectionError(value.to_string()),
-
-            DiagServiceError::ParameterConversionError(_)
-            | DiagServiceError::UnknownOperation
-            | DiagServiceError::UdsLookupError(_)
-            | DiagServiceError::VariantDetectionError(_)
-            | DiagServiceError::AccessDenied(_)
-            | DiagServiceError::InvalidSession(_)
-            | DiagServiceError::Nack(_) => RuntimeError(value.to_string()),
-
-            DiagServiceError::InvalidSecurityPlugin => ConfigurationError(value.to_string()),
-
-            DiagServiceError::ResourceError(_) => ResourceError(value.to_string()),
-
-            DiagServiceError::NotFound(Some(_)) => NotFound(value.to_string()),
-
-            DiagServiceError::NotFound(None) => NotFound("Resource could not be found.".to_owned()),
-
-            DiagServiceError::DataError(_)
-            | DiagServiceError::InvalidDatabase(_)
-            | DiagServiceError::DatabaseEntryNotFound(_)
-            | DiagServiceError::NotEnoughData { .. } => DataError(value.to_string()),
-
-            DiagServiceError::SetupError(_) | DiagServiceError::ConfigurationError(_) => {
-                InitializationFailed(value.to_string())
-            }
-        }
-    }
-}
+#[cfg(not(feature = "health"))]
+struct Health {}
 
 #[tokio::main]
 #[tracing::instrument(
@@ -174,46 +100,36 @@ async fn main() -> Result<(), AppError> {
     config.validate_sanity()?;
 
     args.update_config(&mut config);
-
-    let tracing = cda_tracing::new();
-    let mut layers = vec![];
-    layers.push(cda_tracing::new_term_subscriber(&config.logging));
-    #[cfg(feature = "tokio-tracing")]
-    layers.push(cda_tracing::new_tokio_tracing(
-        &config.logging.tokio_tracing,
-    )?);
-    let _otel_guard = if config.logging.otel.enabled {
-        println!(
-            "Starting OpenTelemetry tracing with {}",
-            config.logging.otel.endpoint
-        );
-        let (guard, metrics_layer, otel_layer) =
-            cda_tracing::new_otel_subscriber(&config.logging.otel)?;
-        layers.push(metrics_layer);
-        layers.push(otel_layer);
-        Some(guard)
-    } else {
-        None
-    };
-    let _guard = if config.logging.log_file_config.enabled {
-        let (guard, file_layer) =
-            cda_tracing::new_file_subscriber(&config.logging.log_file_config)?;
-        layers.push(file_layer);
-        Some(guard)
-    } else {
-        None
-    };
-    #[cfg(feature = "dlt-tracing")]
-    if config.logging.dlt_tracing.enabled {
-        layers.push(cda_tracing::new_dlt_tracing(&config.logging.dlt_tracing)?);
-    }
-
-    cda_tracing::init_tracing(tracing.with(layers))?;
+    let _tracing_guard = setup_tracing(&config);
 
     tracing::info!("Starting CDA - version {}", cda_version());
 
-    let database_path = config.databases_path.clone();
+    #[cfg(feature = "health")]
+    let health_endpoint_opt = if !config.health.enabled {
+        None
+    } else {
+        tracing::info!("Starting health endpoint...");
+        let db = Arc::new(tokio::sync::RwLock::new(
+            opensovd_cda_lib::health::DbHealthProvider::default(),
+        ));
+        let doip = Arc::new(tokio::sync::RwLock::new(
+            cda_comm_doip::health::DoipHealthProvider::default(),
+        ));
 
+        let providers = vec![Arc::clone(&db)];
+        let server_handle = setup_health_endpoint(&config, cda_version().to_owned(), providers);
+        Some(Health {
+            _server_handle: server_handle,
+            db,
+            doip,
+        })
+    };
+
+    #[cfg(not(feature = "health"))]
+    #[allow(unused_variables)]
+    let health_endpoint_opt: Option<Health> = None;
+
+    let database_path = config.databases_path.clone();
     let flash_files_path = config.flash_files_path.clone();
 
     let protocol = if config.onboard_tester {
@@ -228,8 +144,10 @@ async fn main() -> Result<(), AppError> {
         config.com_params,
         config.database_naming_convention,
         config.flat_buf,
+        #[cfg(feature = "health")]
+        health_endpoint_opt.as_ref().map(|hp| Arc::clone(&hp.db)),
     )
-    .await;
+    .await?;
 
     let webserver_config = cda_sovd::WebServerConfig {
         host: config.server.address.clone(),
@@ -246,6 +164,8 @@ async fn main() -> Result<(), AppError> {
         &config.doip,
         variant_detection_tx,
         clonable_shutdown_signal.clone(),
+        #[cfg(feature = "health")]
+        health_endpoint_opt.as_ref().map(|hp| Arc::clone(&hp.doip)),
     )
     .await
     {
@@ -271,6 +191,7 @@ async fn main() -> Result<(), AppError> {
     {
         Ok(Ok(())) => tracing::info!("Shutting down..."),
         Ok(Err(e)) => {
+            // todo alexmohr, optionally do not stop but keep health endpoint running
             tracing::error!(error = ?e, "Failed to start webserver");
             std::process::exit(1);
         }

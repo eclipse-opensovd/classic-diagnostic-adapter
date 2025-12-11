@@ -128,7 +128,7 @@ impl<T: EcuAddressProvider + DoipComParamProvider> DoipDiagGateway<T> {
     /// # Errors
     /// Returns `String` if initialization fails, e.g. when socket creation fails.
     #[tracing::instrument(
-        skip(doip_config, ecus, variant_detection, shutdown_signal),
+        skip(doip_config, ecus, variant_detection, shutdown_signal, health_provider),
         fields(
             tester_ip = doip_config.tester_address,
             gateway_port = doip_config.gateway_port,
@@ -141,6 +141,7 @@ impl<T: EcuAddressProvider + DoipComParamProvider> DoipDiagGateway<T> {
         ecus: Arc<HashMap<String, RwLock<T>>>,
         variant_detection: mpsc::Sender<Vec<String>>,
         shutdown_signal: F,
+        #[cfg(feature = "health")] health_provider: Option<Arc<RwLock<health::DoipHealthProvider>>>,
     ) -> Result<Self, DoipGatewaySetupError>
     where
         F: Future<Output = ()> + Clone + Send + 'static,
@@ -154,12 +155,17 @@ impl<T: EcuAddressProvider + DoipComParamProvider> DoipDiagGateway<T> {
         let gateway_port = *gateway_port;
         let send_timeout = Duration::from_millis(*send_timeout_ms);
 
+        cda_health::update_status!(health_provider, cda_health::Status::Starting);
         tracing::info!("Initializing DoipDiagGateway");
 
-        let mut socket = create_socket(tester_ip, gateway_port)?;
-        let mask = create_netmask(tester_ip, tester_subnet)?;
+        let mut socket =
+            cda_health::try_with_health!(health_provider, create_socket(tester_ip, gateway_port))?;
+        let mask = cda_health::try_with_health!(
+            health_provider,
+            create_netmask(tester_ip, tester_subnet)
+        )?;
 
-        let gateways = vir_vam::get_vehicle_identification::<T, F>(
+        let gateways = match vir_vam::get_vehicle_identification::<T, F>(
             &mut socket,
             mask,
             gateway_port,
@@ -167,13 +173,20 @@ impl<T: EcuAddressProvider + DoipComParamProvider> DoipDiagGateway<T> {
             shutdown_signal.clone(),
         )
         .await
-        .map_err(|err| {
-            DoipGatewaySetupError::ResourceError(format!(
-                "Could not get vehicle identification. {err}"
-            ))
-        })?;
+        {
+            Ok(gateways) => gateways,
+            Err(err) => {
+                let msg = format!("Could not get vehicle identification. {err}");
+                cda_health::update_status!(
+                    health_provider,
+                    cda_health::Status::Failed(msg.clone())
+                );
+                return Err(DoipGatewaySetupError::ResourceError(msg));
+            }
+        };
 
         let gateway = if gateways.is_empty() {
+            cda_health::update_status!(health_provider, cda_health::Status::Up);
             DoipDiagGateway {
                 doip_connections: Arc::new(RwLock::new(Vec::new())),
                 logical_address_to_connection: Arc::new(RwLock::new(HashMap::new())),
@@ -182,6 +195,10 @@ impl<T: EcuAddressProvider + DoipComParamProvider> DoipDiagGateway<T> {
             }
         } else {
             tracing::info!(gateway_count = gateways.len(), "Gateways found");
+            #[cfg(feature = "health")]
+            if let Some(health_provider) = &health_provider {
+                health_provider.write().await.gateways_found = gateways.len();
+            }
 
             // create mapping gateway_logical_address -> Vec<ecu_logical_address>
             let mut gateway_ecu_map: HashMap<u16, Vec<u16>> = HashMap::new();
@@ -636,4 +653,44 @@ async fn try_send_uds_response(
         return false;
     }
     true
+}
+
+#[cfg(feature = "health")]
+pub mod health {
+    pub struct DoipHealthProvider {
+        pub vir_send: bool,
+        pub gateways_found: usize,
+        pub status: cda_health::Status,
+    }
+
+    impl Default for DoipHealthProvider {
+        fn default() -> Self {
+            Self {
+                vir_send: false,
+                gateways_found: 0,
+                status: cda_health::Status::Pending,
+            }
+        }
+    }
+
+    impl cda_health::ComponentHealthProvider for DoipHealthProvider {
+        fn health(&self) -> cda_health::ComponentHealth {
+            #[derive(serde::Serialize)]
+            struct Details {
+                vir_send: bool,
+                gateways_found: usize,
+                error: Option<String>,
+            }
+
+            cda_health::ComponentHealth {
+                name: "Doip".to_owned(),
+                status: self.status.clone(),
+                details: serde_json::json!(Details {
+                    vir_send: false,
+                    gateways_found: 0,
+                    error: None,
+                }),
+            }
+        }
+    }
 }

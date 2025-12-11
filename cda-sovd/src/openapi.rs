@@ -19,7 +19,10 @@ use axum::Json;
 use schemars::JsonSchema;
 use sovd_interfaces::error::ApiErrorResponse;
 
-use crate::sovd::{self, error::VendorErrorCode};
+use crate::{
+    WebServerConfig,
+    sovd::{self, error::VendorErrorCode},
+};
 
 pub(crate) mod aide_helper {
     /// Helper macro to generate path params that have an openapi
@@ -74,7 +77,10 @@ pub(crate) mod aide_helper {
     pub(crate) use gen_path_param;
 }
 
-pub(crate) fn api_docs(api: TransformOpenApi) -> TransformOpenApi {
+pub(crate) fn api_docs(
+    api: TransformOpenApi,
+    web_server_config: WebServerConfig,
+) -> TransformOpenApi {
     api.title("Eclipse OpenSOVD - Classic Diagnostic Adapter")
         .summary(
             "In the SOVD (Service-Oriented Vehicle Diagnostics) context, a Classic Diagnostic \
@@ -100,7 +106,10 @@ pub(crate) fn api_docs(api: TransformOpenApi) -> TransformOpenApi {
             ..Default::default()
         })
         .server(Server {
-            url: "http://localhost:20002".to_owned(),
+            url: format!(
+                "http://{}:{}",
+                web_server_config.host, web_server_config.port
+            ),
             ..Default::default()
         })
 }

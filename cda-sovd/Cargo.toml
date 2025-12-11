@@ -28,6 +28,7 @@ workspace = true
 # internal dependencies
 cda-interfaces = { workspace = true }
 cda-plugin-security = { workspace = true }
+cda-tracing = { workspace = true }
 sovd-interfaces = { workspace = true }
 cda-comm-doip = { workspace = true }
 
@@ -90,4 +91,4 @@ percent-encoding = { workspace = true }
 [features]
 default = []
 auth = []
-dlt-tracing = ["cda-interfaces/dlt-tracing"]
+dlt-tracing = ["cda-interfaces/dlt-tracing", "cda-tracing/dlt-tracing"]

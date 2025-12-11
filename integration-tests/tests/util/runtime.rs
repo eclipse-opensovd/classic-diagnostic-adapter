@@ -438,6 +438,7 @@ async fn wait_for_ecu_sim_ready(host: &str, sim_control_port: u16) -> Result<(),
 pub(crate) async fn wait_for_cda_online(cfg: &ServerConfig) -> Result<(), TestingError> {
     let url = format!("http://{}:{}", cfg.address, cfg.port);
     wait_for_http_ready(url, "CDA").await
+    // todo alexmohr: read health endpoint instead and check ready status
 }
 
 fn ecu_sim_dir() -> Result<std::path::PathBuf, TestingError> {

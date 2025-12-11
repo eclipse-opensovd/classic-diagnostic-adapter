@@ -271,6 +271,61 @@ pub fn init_tracing<T: SubscriberInitExt>(subscriber: T) -> Result<(), TracingSe
     })
 }
 
+pub fn create_axum_trace_layer<S>(
+    route: axum::Router<S>,
+    context: Option<String>,
+) -> axum::Router<S>
+where
+    S: Clone + Send + Sync + 'static,
+{
+    route.layer(
+        tower_http::trace::TraceLayer::new_for_http()
+            .make_span_with(move |request: &axum::http::Request<_>| {
+                tracing::info_span!(
+                        "request",
+                    method = ?request.method(),
+                        path = request.uri().to_string(),
+                        status_code = tracing::field::Empty,
+                        latency = tracing::field::Empty,
+                        error = tracing::field::Empty,
+                        dlt_context = context,
+                )
+            })
+            .on_request(|request: &axum::http::Request<_>, _span: &tracing::Span| {
+                tracing::debug!(
+                    method = %request.method(),
+                    path = %request.uri(),
+                    "Request received"
+                );
+            })
+            .on_response(
+                |response: &axum::http::Response<_>,
+                 latency: std::time::Duration,
+                 span: &tracing::Span| {
+                    span.record("status_code", response.status().as_u16());
+                    span.record("latency", format!("{latency:?}"));
+                },
+            )
+            .on_failure(
+                |error: tower_http::classify::ServerErrorsFailureClass,
+                 latency: std::time::Duration,
+                 span: &tracing::Span| {
+                    span.record("latency", format!("{latency:?}"));
+                    if let tower_http::classify::ServerErrorsFailureClass::StatusCode(status) =
+                        error
+                    {
+                        span.record("status_code", status.as_u16());
+                        if status == axum::http::StatusCode::BAD_GATEWAY {
+                            return; // Ignore 502 errors
+                        }
+                    }
+                    span.record("error", error.to_string());
+                    tracing::error!("HTTP request failed");
+                },
+            ),
+    )
+}
+
 impl Default for LoggingConfig {
     fn default() -> Self {
         Self {

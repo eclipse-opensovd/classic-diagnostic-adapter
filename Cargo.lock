@@ -314,11 +314,13 @@ dependencies = [
 name = "cda-comm-doip"
 version = "0.1.0"
 dependencies = [
+ "cda-health",
  "cda-interfaces",
  "doip-definitions",
  "doip-sockets",
  "openssl",
  "serde",
+ "serde_json",
  "socket2",
  "thiserror 2.0.17",
  "tokio",
@@ -376,6 +378,26 @@ dependencies = [
 ]
 
 [[package]]
+name = "cda-health"
+version = "0.1.0"
+dependencies = [
+ "aide",
+ "axum",
+ "cda-interfaces",
+ "cda-tracing",
+ "chrono",
+ "futures",
+ "schemars",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.17",
+ "tokio",
+ "tower",
+ "tower-http",
+ "tracing",
+]
+
+[[package]]
 name = "cda-interfaces"
 version = "0.1.0"
 dependencies = [
@@ -424,6 +446,7 @@ dependencies = [
  "cda-comm-doip",
  "cda-interfaces",
  "cda-plugin-security",
+ "cda-tracing",
  "chrono",
  "futures",
  "http",
@@ -449,6 +472,7 @@ dependencies = [
 name = "cda-tracing"
 version = "0.1.0"
 dependencies = [
+ "axum",
  "console-subscriber",
  "nu-ansi-term",
  "opentelemetry",
@@ -459,6 +483,7 @@ dependencies = [
  "strip-ansi-escapes",
  "thiserror 2.0.17",
  "tokio",
+ "tower-http",
  "tracing",
  "tracing-appender",
  "tracing-core",
@@ -1939,6 +1964,7 @@ dependencies = [
  "cda-comm-uds",
  "cda-core",
  "cda-database",
+ "cda-health",
  "cda-interfaces",
  "cda-plugin-security",
  "cda-sovd",
