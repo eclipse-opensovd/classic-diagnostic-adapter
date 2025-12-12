@@ -311,6 +311,14 @@ pub(in crate::diag_kernel) fn extract_diag_data_container(
     let byte_pos = param.byte_position() as usize;
     let uds_payload = payload.data()?;
     let (data, bit_len) = diag_type.decode(uds_payload, byte_pos, param.bit_position() as usize)?;
+    if data.is_empty() {
+        // at least 1 byte expected, we are using NotEnoughData error here, because
+        // this might happen when parsing end of pdu and leftover bytes can be ignored
+        return Err(DiagServiceError::NotEnoughData {
+            expected: 1,
+            actual: 0,
+        });
+    }
 
     let data_type = diag_type.base_datatype();
     payload.set_last_read_byte_pos(byte_pos.saturating_add(data.len()));
