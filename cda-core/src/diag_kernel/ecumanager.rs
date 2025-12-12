@@ -2719,8 +2719,8 @@ impl<S: SecurityPlugin> EcuManager<S> {
 
         for i in 0..static_field_dop.fixed_number_of_items() {
             let param_byte_pos = param.byte_position();
-            let start = (param_byte_pos
-                .saturating_add(i.saturating_mul(static_field_dop.item_byte_size())))
+            let start = param_byte_pos
+                .saturating_add(i.saturating_mul(static_field_dop.item_byte_size()))
                 as usize;
             let end = start.saturating_add(static_field_dop.item_byte_size() as usize);
             uds_payload.push_slice(start, end)?;
@@ -2831,7 +2831,9 @@ impl<S: SecurityPlugin> EcuManager<S> {
         let struct_ =
             extract_struct_dop_from_field(end_of_pdu_dop.field().map(datatypes::DopField))?;
         let mut nested_structs = Vec::new();
-        uds_payload.consume();
+        if uds_payload.consume() == 0 {
+            return Ok(());
+        }
         loop {
             uds_payload.push_slice_to_abs_end(uds_payload.last_read_byte_pos())?;
             if !uds_payload.exhausted() {
@@ -2860,10 +2862,15 @@ impl<S: SecurityPlugin> EcuManager<S> {
                     }
                 }
             }
-            uds_payload.consume();
+            let consumed = uds_payload.consume();
             uds_payload.pop_slice()?;
             if uds_payload.exhausted() {
                 break;
+            } else if consumed == 0 {
+                return Err(DiagServiceError::BadPayload(
+                    "EndOfPdu did not consume any bytes, breaking potential infinite loop"
+                        .to_owned(),
+                ));
             }
         }
 
@@ -3356,7 +3363,7 @@ mod tests {
     use std::vec;
 
     use cda_database::datatypes::{
-        DataType, Limit, ResponseType,
+        DataType, DiagCodedTypeVariant, Limit, ResponseType,
         database_builder::{
             Addressing, DiagClassType, DiagCommParams, DiagLayerParams, DiagServiceParams, DopType,
             EcuDataBuilder, EcuDataParams, SpecificDOPData, TransmissionMode,
@@ -4134,11 +4141,18 @@ mod tests {
         (ecu_manager, dc, sid)
     }
 
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    enum EndOfPduStructureType {
+        FixedSize,
+        LeadingLengthDop,
+    }
+
     // allowed because creation of test data should kept together
     #[allow(clippy::too_many_lines)]
     fn create_ecu_manager_with_end_pdu_service(
         min_items: u32,
         max_items: Option<u32>,
+        structure_type: EndOfPduStructureType,
     ) -> (
         super::EcuManager<DefaultSecurityPluginData>,
         cda_interfaces::DiagComm,
@@ -4152,57 +4166,99 @@ mod tests {
         let compu_identical =
             db_builder.create_compu_method(datatypes::CompuCategory::Identical, None, None);
 
-        // Create DOPs for structure parameters within the EndOfPdu
-        let item_param1_dop = {
-            let item_param1_dop_specific_data = db_builder
-                .create_normal_specific_dop_data(
-                    Some(compu_identical),
-                    Some(u8_diag_type),
+        // Create the structure that will be repeated in EndOfPdu
+        let item_structure = match structure_type {
+            EndOfPduStructureType::LeadingLengthDop => {
+                // Create structure with leading length DOP
+                // The DiagCodedType with LeadingLengthInfo handles the length prefix automatically
+                let leading_length_diag_type = db_builder.create_diag_coded_type(
                     None,
-                    None,
-                    None,
-                    None,
+                    DataType::ByteField,
+                    true,
+                    DiagCodedTypeVariant::LeadingLengthInfo(8),
+                );
+
+                let data_dop = {
+                    let data_dop_specific_data = db_builder
+                        .create_normal_specific_dop_data(
+                            Some(compu_identical),
+                            Some(leading_length_diag_type),
+                            None,
+                            None,
+                            None,
+                            None,
+                        )
+                        .value_offset();
+                    db_builder.create_dop(
+                        *DopType::REGULAR,
+                        Some("data_dop"),
+                        None,
+                        *SpecificDOPData::NormalDOP,
+                        Some(data_dop_specific_data),
+                    )
+                };
+
+                let data_param = db_builder.create_value_param("data", data_dop, 0, 0);
+
+                // Create structure with just the data parameter
+                db_builder.create_structure(Some(vec![data_param]), None, true)
+            }
+            EndOfPduStructureType::FixedSize => {
+                // Create fixed-size structure (original behavior)
+                let item_param1_dop = {
+                    let item_param1_dop_specific_data = db_builder
+                        .create_normal_specific_dop_data(
+                            Some(compu_identical),
+                            Some(u8_diag_type),
+                            None,
+                            None,
+                            None,
+                            None,
+                        )
+                        .value_offset();
+                    db_builder.create_dop(
+                        *DopType::REGULAR,
+                        Some("item_param1_dop"),
+                        None,
+                        *SpecificDOPData::NormalDOP,
+                        Some(item_param1_dop_specific_data),
+                    )
+                };
+
+                let item_param2_dop = {
+                    let item_param2_dop_specific_data = db_builder
+                        .create_normal_specific_dop_data(
+                            Some(compu_identical),
+                            Some(u16_diag_type),
+                            None,
+                            None,
+                            None,
+                            None,
+                        )
+                        .value_offset();
+                    db_builder.create_dop(
+                        *DopType::REGULAR,
+                        Some("item_param2_dop"),
+                        None,
+                        *SpecificDOPData::NormalDOP,
+                        Some(item_param2_dop_specific_data),
+                    )
+                };
+
+                // Create parameters for the repeating structure
+                let item_param1 =
+                    db_builder.create_value_param("item_param1", item_param1_dop, 0, 0);
+                let item_param2 =
+                    db_builder.create_value_param("item_param2", item_param2_dop, 1, 0);
+
+                // Create the basic structure that will be repeated
+                db_builder.create_structure(
+                    Some(vec![item_param1, item_param2]),
+                    Some(3), // byte_size: 1 byte + 2 bytes = 3 bytes per item
+                    true,
                 )
-                .value_offset();
-            db_builder.create_dop(
-                *DopType::REGULAR,
-                Some("item_param1_dop"),
-                None,
-                *SpecificDOPData::NormalDOP,
-                Some(item_param1_dop_specific_data),
-            )
+            }
         };
-
-        let item_param2_dop = {
-            let item_param2_dop_specific_data = db_builder
-                .create_normal_specific_dop_data(
-                    Some(compu_identical),
-                    Some(u16_diag_type),
-                    None,
-                    None,
-                    None,
-                    None,
-                )
-                .value_offset();
-            db_builder.create_dop(
-                *DopType::REGULAR,
-                Some("item_param2_dop"),
-                None,
-                *SpecificDOPData::NormalDOP,
-                Some(item_param2_dop_specific_data),
-            )
-        };
-
-        // Create parameters for the repeating structure
-        let item_param1 = db_builder.create_value_param("item_param1", item_param1_dop, 0, 0);
-        let item_param2 = db_builder.create_value_param("item_param2", item_param2_dop, 1, 0);
-
-        // Create the basic structure that will be repeated
-        let item_structure = db_builder.create_structure(
-            Some(vec![item_param1, item_param2]),
-            Some(3), // byte_size: 1 byte + 2 bytes = 3 bytes per item
-            true,
-        );
 
         // Create EndOfPdu DOP using the new helper method
         let end_pdu_dop =
@@ -5180,7 +5236,8 @@ mod tests {
 
     #[tokio::test]
     async fn test_map_struct_from_uds_end_pdu_min_items_not_reached() {
-        let (ecu_manager, service, sid) = create_ecu_manager_with_end_pdu_service(3, Some(2));
+        let (ecu_manager, service, sid) =
+            create_ecu_manager_with_end_pdu_service(3, Some(2), EndOfPduStructureType::FixedSize);
         // Each item is 3 bytes: 1 byte for param1 + 2 bytes for param2
         let data = vec![
             sid, // Service ID
@@ -5216,7 +5273,8 @@ mod tests {
 
     #[tokio::test]
     async fn test_map_struct_from_uds_end_pdu_exact_max_items() {
-        let (ecu_manager, service, sid) = create_ecu_manager_with_end_pdu_service(1, Some(2));
+        let (ecu_manager, service, sid) =
+            create_ecu_manager_with_end_pdu_service(1, Some(2), EndOfPduStructureType::FixedSize);
 
         // Create payload with exactly 2 items (the max_items limit)
         // Each item is 3 bytes: 1 byte for param1 + 2 bytes for param2
@@ -5254,7 +5312,8 @@ mod tests {
 
     #[tokio::test]
     async fn test_map_struct_from_uds_end_pdu_exceeds_max_items() {
-        let (ecu_manager, service, sid) = create_ecu_manager_with_end_pdu_service(1, Some(2));
+        let (ecu_manager, service, sid) =
+            create_ecu_manager_with_end_pdu_service(1, Some(2), EndOfPduStructureType::FixedSize);
 
         // Create payload with 3 items (exceeds max_items = 2)
         let data = vec![
@@ -5289,7 +5348,8 @@ mod tests {
 
     #[tokio::test]
     async fn test_map_struct_from_uds_end_pdu_no_max_no_min_no_data() {
-        let (ecu_manager, service, sid) = create_ecu_manager_with_end_pdu_service(0, None);
+        let (ecu_manager, service, sid) =
+            create_ecu_manager_with_end_pdu_service(0, None, EndOfPduStructureType::FixedSize);
 
         // Valid payload, as min_items = 0 and no max_items
         // Only the SID is present, no items follow
@@ -5312,7 +5372,8 @@ mod tests {
 
     #[tokio::test]
     async fn test_map_struct_from_uds_end_pdu_no_maximum() {
-        let (ecu_manager, service, sid) = create_ecu_manager_with_end_pdu_service(1, None);
+        let (ecu_manager, service, sid) =
+            create_ecu_manager_with_end_pdu_service(1, None, EndOfPduStructureType::FixedSize);
 
         // Create payload with 3 items (exceeds max_items = 2)
         let data = vec![
@@ -5340,6 +5401,83 @@ mod tests {
                  {
                     "item_param1": 0xAA,
                     "item_param2": 0x9ABC
+                }
+            ],
+            "test_service_pos_sid": sid
+        });
+
+        assert_eq!(response.serialize_to_json().unwrap().data, expected_json);
+    }
+
+    #[tokio::test]
+    async fn test_map_struct_from_uds_end_pdu_incomplete_second_structure() {
+        // First structure is 8 bytes long, then next structure is indicated
+        // to be 42 bytes long but there is not enough data
+        let (ecu_manager, service, sid) = create_ecu_manager_with_end_pdu_service(
+            0,
+            None,
+            EndOfPduStructureType::LeadingLengthDop,
+        );
+
+        let mut data = vec![sid]; // Service ID
+
+        // First complete structure: 1 byte length + 8 bytes data = 9 bytes total
+        data.push(8); // Length byte indicating 8 bytes of data
+        data.extend(vec![0xAA; 8]); // 8 bytes of data
+
+        // Second incomplete structure: 1 byte length + insufficient data
+        data.push(42); // Length byte indicating 42 bytes of data
+        data.extend(vec![0xBB; 10]); // Only 10 bytes of data (should be 42)
+
+        let response_json_data = ecu_manager
+            .convert_from_uds(&service, &create_payload(data), true)
+            .await
+            .unwrap()
+            .serialize_to_json()
+            .unwrap()
+            .data;
+
+        let expected_json = json!({
+            "end_pdu_param": [
+                {
+                    "data": "0xAA 0xAA 0xAA 0xAA 0xAA 0xAA 0xAA 0xAA",
+                },
+            ],
+            "test_service_pos_sid": sid
+        });
+
+        assert_eq!(response_json_data, expected_json);
+    }
+
+    #[tokio::test]
+    async fn test_map_struct_from_uds_end_pdu_zero_length_second_structure() {
+        // First structure is 8 bytes long, then next structure is indicated
+        // to be 0 bytes long
+        let (ecu_manager, service, sid) = create_ecu_manager_with_end_pdu_service(
+            0,
+            None,
+            EndOfPduStructureType::LeadingLengthDop,
+        );
+
+        let mut data = vec![sid]; // Service ID
+
+        // First complete structure: 1 byte length + 8 bytes data = 33 bytes total
+        data.push(8); // Length byte indicating 32 bytes of data
+        data.extend(vec![0xAA; 8]); // 8 bytes of data
+
+        // Second structure with zero length: 1 byte length + 0 bytes data = 1 byte total
+        data.push(0); // Length byte indicating 0 bytes of data
+        data.push(42); // Garbage byte that should not be read as part of the structure
+
+        let response = ecu_manager
+            .convert_from_uds(&service, &create_payload(data), true)
+            .await
+            .unwrap();
+
+        let expected_json = json!({
+            "end_pdu_param": [
+                {
+                    "data": "0xAA 0xAA 0xAA 0xAA 0xAA 0xAA 0xAA 0xAA",
                 }
             ],
             "test_service_pos_sid": sid
@@ -5435,7 +5573,8 @@ mod tests {
 
     #[tokio::test]
     async fn test_negative_response_with_invalid_data_where_no_neg_response_is_defined() {
-        let (ecu_manager, service, sid) = create_ecu_manager_with_end_pdu_service(1, None);
+        let (ecu_manager, service, sid) =
+            create_ecu_manager_with_end_pdu_service(1, None, EndOfPduStructureType::FixedSize);
         let data = vec![0x7f, sid, 0x33];
 
         let response = ecu_manager

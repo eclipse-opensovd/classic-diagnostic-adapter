@@ -410,11 +410,10 @@ impl DiagCodedType {
         let start_pos = byte_pos.saturating_add(length_info_bytes.len());
         let end_pos = start_pos.saturating_add(len);
         if end_pos > uds_payload.len() {
-            return Err(DiagServiceError::BadPayload(format!(
-                "Not enough data in payload: need {} bytes, but only {} bytes available",
-                end_pos,
-                uds_payload.len()
-            )));
+            return Err(DiagServiceError::NotEnoughData {
+                expected: end_pos,
+                actual: uds_payload.len(),
+            });
         }
         Ok((
             end_pos.saturating_sub(start_pos).saturating_mul(8),

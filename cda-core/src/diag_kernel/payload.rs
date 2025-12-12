@@ -72,7 +72,7 @@ impl<'a> Payload<'a> {
         }
     }
 
-    pub(in crate::diag_kernel) fn consume(&mut self) {
+    pub(in crate::diag_kernel) fn consume(&mut self) -> usize {
         let advance_len = self.last_read_byte_pos.saturating_add(self.bytes_to_skip);
         if self.pos().saturating_add(advance_len) > self.data.len() {
             self.current_index = self.data.len(); // Move to the end if we exceed
@@ -81,6 +81,7 @@ impl<'a> Payload<'a> {
         }
         self.last_read_byte_pos = 0;
         self.bytes_to_skip = 0;
+        advance_len
     }
 
     pub(in crate::diag_kernel) fn len(&self) -> usize {
