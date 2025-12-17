@@ -1677,74 +1677,56 @@ impl<S: SecurityPlugin> EcuManager<S> {
             .collect::<Vec<_>>()
     }
 
-    #[tracing::instrument(skip_all,
-        fields(
-            dlt_context = dlt_ctx!("CORE"),
-        )
-    )]
-    fn lookup_state_transition_for_active(
-        &self,
-        semantic: &str,
-        current_state: &str,
-        target_state: &str,
-    ) -> Result<cda_interfaces::DiagComm, DiagServiceError> {
-        let base_variant = self.diag_database.base_variant()?;
-        let semantic_transitions = base_variant
-            .diag_layer()
-            .and_then(|dl| dl.state_charts())
-            .and_then(|charts| {
-                charts.iter().find_map(|c| {
-                    if c.semantic()
-                        .is_some_and(|n| n.eq_ignore_ascii_case(semantic))
-                    {
-                        c.state_transitions()
-                    } else {
-                        None
-                    }
-                })
-            })
-            .ok_or_else(|| {
-                tracing::error!(
-                    ecu_name = self.ecu_name,
-                    semantic = %semantic,
-                    "State chart with given semantic not found in base variant"
-                );
-                DiagServiceError::NotFound(format!(
-                    "State chart with semantic '{semantic}' not found in base variant"
-                ))
-            })?;
+    /// Lookup a diagnostic service by its diag comm definition.
+    /// This is treated special with a cache because it is used for *every* UDS request.
+    pub(in crate::diag_kernel) async fn lookup_diag_service(
+            diag_comm: &cda_interfaces::DiagComm,
+    ) -> Result<datatypes::DiagService<'_>, DiagServiceError> {
+        let lookup_name = if let Some(name) = &diag_comm.lookup_name {
+            name.to_owned()
+        } else {
+            match diag_comm.action() {
+                DiagCommAction::Read => format!("{}_Read", diag_comm.name),
+                DiagCommAction::Write => format!("{}_Write", diag_comm.name),
+                DiagCommAction::Start => format!("{}_Start", diag_comm.name),
+            }
+        }
+        .to_lowercase();
+        let lookup_id = STRINGS.get_or_insert(&lookup_name);
 
-        let service = self
-            .search_diag_services(|s| {
-                s.diag_comm()
-                    .and_then(|dc| dc.state_transition_refs())
-                    .is_some_and(|st_refs| {
-                        st_refs.iter().any(|st_ref| {
-                            st_ref.state_transition().is_some_and(|st| {
-                                st.source_short_name_ref()
-                                    .is_some_and(|n| n.eq_ignore_ascii_case(current_state))
-                                    && st
-                                        .target_short_name_ref()
-                                        .is_some_and(|n| n.eq_ignore_ascii_case(target_state))
-                                    && semantic_transitions.iter().any(|semantic| semantic == st)
-                            })
-                        })
-                    })
-            })
-            .ok_or_else(|| {
-                tracing::error!(
-                    current_state,
-                    target_state,
-                    semantic,
-                    "Failed to find service for state transition"
-                );
-                DiagServiceError::NotFound(format!(
-                    "No service found for state transition {current_state} -> {target_state} \
-                     ({semantic})"
-                ))
-            })?;
+        if let Some(Some(location)) = self.db_cache.diag_services.read().await.get(&lookup_id) {
+            return match self.get_service_by_location(location) {
+                Some(service) => Ok(service),
+                None => Err(DiagServiceError::NotFound(None)), // cached negative result
+            };
+        }
 
-        service.try_into()
+        let prefixes = diag_comm.type_.service_prefixes();
+        let predicate = |service: &datatypes::DiagService<'_>| {
+            service.diag_comm().is_some_and(|dc| {
+                dc.short_name()
+                    .is_some_and(|name| starts_with_ignore_ascii_case(name, &lookup_name))
+            }) && service
+                .request_id()
+                .is_some_and(|sid| prefixes.contains(&sid))
+        };
+
+         // Search and cache the location
+        if let Some((service, location)) = self.search_with_location(&predicate) {
+            self.db_cache
+                .diag_services
+                .write()
+                .await
+                .insert(lookup_id, Some(location));
+            return Ok(service);
+        }
+
+         self.db_cache
+            .diag_services
+            .write()
+            .await
+            .insert(lookup_id, None);
+        Err(DiagServiceError::NotFound(None))
     }
 
     fn search_with_location<F>(
@@ -3184,7 +3166,6 @@ impl<S: SecurityPlugin> EcuManager<S> {
         service.try_into()
     }
 
-
     fn lookup_state_chart(
         &self,
         semantic: &str,
@@ -3204,7 +3185,6 @@ impl<S: SecurityPlugin> EcuManager<S> {
                 ))
             })
     }
-
 
     fn default_state(&self, semantic: &str) -> Result<String, DiagServiceError> {
         self.lookup_state_chart(semantic)?
