@@ -402,6 +402,8 @@ impl<S: SecurityPlugin> cda_interfaces::EcuManager for EcuManager<S> {
             ));
         }
 
+        let sid = rawdata[0];
+
         let Some(variant) = self.variant() else {
             return Err(DiagServiceError::InvalidDatabase(
                 "No variant selected".to_owned(),
@@ -431,13 +433,13 @@ impl<S: SecurityPlugin> cda_interfaces::EcuManager for EcuManager<S> {
             .map(datatypes::DiagService)
             .find_map(|service| {
                 let service_id = service.request_id()?;
-                if rawdata.first()? == &service_id {
-                    Some(service)
-                } else {
-                    None
-                }
+                (sid == service_id).then_some(service)
             })
-            .ok_or(DiagServiceError::NotFound(None))?;
+            .ok_or_else(|| {
+                DiagServiceError::NotFound(format!(
+                    "No diagnostic service with SID 0x{sid:02X} found in variant or base variant"
+                ))
+            })?;
         let mapped_dc = mapped_service.diag_comm().map(datatypes::DiagComm).ok_or(
             DiagServiceError::InvalidDatabase("Service is missing DiagComm".to_owned()),
         )?;
@@ -455,6 +457,7 @@ impl<S: SecurityPlugin> cda_interfaces::EcuManager for EcuManager<S> {
             target_address: self.logical_address,
         })
     }
+
 
     /// Convert a UDS payload given as `u8` slice into a `DiagServiceResponse`.
     ///
@@ -745,7 +748,7 @@ impl<S: SecurityPlugin> cda_interfaces::EcuManager for EcuManager<S> {
     /// # Errors
     /// Will return `Err` if the job cannot be found in the database
     /// Unlikely other case is that neither a lookup in the current nor the base variant succeeded.
-    #[tracing::instrument(skip(self),
+        #[tracing::instrument(skip(self),
         fields(
             ecu_name = self.ecu_name,
             dlt_context = dlt_ctx!("CORE"),
@@ -785,8 +788,13 @@ impl<S: SecurityPlugin> cda_interfaces::EcuManager for EcuManager<S> {
                     })
             })
             .map(Into::into)
-            .ok_or(DiagServiceError::NotFound(None))
+            .ok_or_else(|| {
+                DiagServiceError::NotFound(format!(
+                    "Single ECU job '{job_name}' not found in variant or base variant"
+                ))
+            })
     }
+
 
     /// Lookup a service by a given function class name and service id.
     /// # Errors
@@ -811,8 +819,14 @@ impl<S: SecurityPlugin> cda_interfaces::EcuManager for EcuManager<S> {
                 .is_some()
         })
         .and_then(|service| service.try_into().ok())
-        .ok_or(DiagServiceError::NotFound(None))
+        .ok_or_else(|| {
+            DiagServiceError::NotFound(format!(
+                "Service with functional class '{func_class_name}' and SID 0x{service_id:02X} \
+                 not found"
+            ))
+        })
     }
+
 
     /// Lookup a service by its service id for the current ECU variant.
     /// This will first look up the service in the current variant, then in the base variant
@@ -974,13 +988,23 @@ impl<S: SecurityPlugin> cda_interfaces::EcuManager for EcuManager<S> {
                             .is_some_and(|r| r.params().is_some_and(|p| p.len() == 2))
                         && name_matches
                 })
-                .ok_or(DiagServiceError::NotFound(None))?;
+                .ok_or_else(|| {
+                    DiagServiceError::NotFound(format!(
+                        "No matching 'request seed' SecurityAccess service found for level \
+                         '{level}'{}",
+                        seed_service
+                            .as_ref()
+                            .map(|s| format!(" and seed service '{s}'"))
+                            .unwrap_or_default()
+                    ))
+                })?;
 
             let request_seed_service = request_seed_service.try_into()?;
 
             Ok(SecurityAccess::RequestSeed(request_seed_service))
         }
     }
+
 
     async fn get_send_key_param_name(
         &self,
@@ -1058,7 +1082,12 @@ impl<S: SecurityPlugin> cda_interfaces::EcuManager for EcuManager<S> {
                     )
                 })
             })
-            .ok_or(DiagServiceError::NotFound(None))?;
+            .ok_or_else(|| {
+                DiagServiceError::NotFound(format!(
+                    "Functional class '{}' for varcoding not found in any diagnostic layer",
+                    self.database_naming_convention.functional_class_varcoding
+                ))
+            })?;
 
         let configuration_sids = [
             service_ids::READ_DATA_BY_IDENTIFIER,
@@ -1163,6 +1192,7 @@ impl<S: SecurityPlugin> cda_interfaces::EcuManager for EcuManager<S> {
         result.sort_by(|a, b| a.id.cmp(&b.id));
         Ok(result)
     }
+
 
     fn lookup_dtc_services(
         &self,
@@ -1647,57 +1677,74 @@ impl<S: SecurityPlugin> EcuManager<S> {
             .collect::<Vec<_>>()
     }
 
-    /// Lookup a diagnostic service by its diag comm definition.
-    /// This is treated special with a cache because it is used for *every* UDS request.
-    pub(in crate::diag_kernel) async fn lookup_diag_service(
+    #[tracing::instrument(skip_all,
+        fields(
+            dlt_context = dlt_ctx!("CORE"),
+        )
+    )]
+    fn lookup_state_transition_for_active(
         &self,
-        diag_comm: &cda_interfaces::DiagComm,
-    ) -> Result<datatypes::DiagService<'_>, DiagServiceError> {
-        let lookup_name = if let Some(name) = &diag_comm.lookup_name {
-            name.to_owned()
-        } else {
-            match diag_comm.action() {
-                DiagCommAction::Read => format!("{}_Read", diag_comm.name),
-                DiagCommAction::Write => format!("{}_Write", diag_comm.name),
-                DiagCommAction::Start => format!("{}_Start", diag_comm.name),
-            }
-        }
-        .to_lowercase();
-        let lookup_id = STRINGS.get_or_insert(&lookup_name);
+        semantic: &str,
+        current_state: &str,
+        target_state: &str,
+    ) -> Result<cda_interfaces::DiagComm, DiagServiceError> {
+        let base_variant = self.diag_database.base_variant()?;
+        let semantic_transitions = base_variant
+            .diag_layer()
+            .and_then(|dl| dl.state_charts())
+            .and_then(|charts| {
+                charts.iter().find_map(|c| {
+                    if c.semantic()
+                        .is_some_and(|n| n.eq_ignore_ascii_case(semantic))
+                    {
+                        c.state_transitions()
+                    } else {
+                        None
+                    }
+                })
+            })
+            .ok_or_else(|| {
+                tracing::error!(
+                    ecu_name = self.ecu_name,
+                    semantic = %semantic,
+                    "State chart with given semantic not found in base variant"
+                );
+                DiagServiceError::NotFound(format!(
+                    "State chart with semantic '{semantic}' not found in base variant"
+                ))
+            })?;
 
-        if let Some(Some(location)) = self.db_cache.diag_services.read().await.get(&lookup_id) {
-            return match self.get_service_by_location(location) {
-                Some(service) => Ok(service),
-                None => Err(DiagServiceError::NotFound(None)), // cached negative result
-            };
-        }
+        let service = self
+            .search_diag_services(|s| {
+                s.diag_comm()
+                    .and_then(|dc| dc.state_transition_refs())
+                    .is_some_and(|st_refs| {
+                        st_refs.iter().any(|st_ref| {
+                            st_ref.state_transition().is_some_and(|st| {
+                                st.source_short_name_ref()
+                                    .is_some_and(|n| n.eq_ignore_ascii_case(current_state))
+                                    && st
+                                        .target_short_name_ref()
+                                        .is_some_and(|n| n.eq_ignore_ascii_case(target_state))
+                                    && semantic_transitions.iter().any(|semantic| semantic == st)
+                            })
+                        })
+                    })
+            })
+            .ok_or_else(|| {
+                tracing::error!(
+                    current_state,
+                    target_state,
+                    semantic,
+                    "Failed to find service for state transition"
+                );
+                DiagServiceError::NotFound(format!(
+                    "No service found for state transition {current_state} -> {target_state} \
+                     ({semantic})"
+                ))
+            })?;
 
-        let prefixes = diag_comm.type_.service_prefixes();
-        let predicate = |service: &datatypes::DiagService<'_>| {
-            service.diag_comm().is_some_and(|dc| {
-                dc.short_name()
-                    .is_some_and(|name| starts_with_ignore_ascii_case(name, &lookup_name))
-            }) && service
-                .request_id()
-                .is_some_and(|sid| prefixes.contains(&sid))
-        };
-
-        // Search and cache the location
-        if let Some((service, location)) = self.search_with_location(&predicate) {
-            self.db_cache
-                .diag_services
-                .write()
-                .await
-                .insert(lookup_id, Some(location));
-            return Ok(service);
-        }
-
-        self.db_cache
-            .diag_services
-            .write()
-            .await
-            .insert(lookup_id, None);
-        Err(DiagServiceError::NotFound(None))
+        service.try_into()
     }
 
     fn search_with_location<F>(
@@ -3099,7 +3146,9 @@ impl<S: SecurityPlugin> EcuManager<S> {
                     semantic = %semantic,
                     "State chart with given semantic not found in base variant"
                 );
-                DiagServiceError::NotFound(None)
+                DiagServiceError::NotFound(format!(
+                    "State chart with semantic '{semantic}' not found in base variant"
+                ))
             })?;
 
         let service = self
@@ -3126,11 +3175,15 @@ impl<S: SecurityPlugin> EcuManager<S> {
                     semantic,
                     "Failed to find service for state transition"
                 );
-                DiagServiceError::NotFound(None)
+                DiagServiceError::NotFound(format!(
+                    "No service found for state transition {current_state} -> {target_state} \
+                     ({semantic})"
+                ))
             })?;
 
         service.try_into()
     }
+
 
     fn lookup_state_chart(
         &self,
@@ -3145,8 +3198,13 @@ impl<S: SecurityPlugin> EcuManager<S> {
                     .find(|sc| sc.semantic().is_some_and(|sem| sem == semantic))
             })
             .map(datatypes::StateChart)
-            .ok_or(DiagServiceError::NotFound(None))
+            .ok_or_else(|| {
+                DiagServiceError::NotFound(format!(
+                    "State chart with semantic '{semantic}' not found in base variant"
+                ))
+            })
     }
+
 
     fn default_state(&self, semantic: &str) -> Result<String, DiagServiceError> {
         self.lookup_state_chart(semantic)?
@@ -3202,7 +3260,10 @@ impl<S: SecurityPlugin> EcuManager<S> {
             .collect::<Vec<_>>();
 
         if services.is_empty() {
-            Err(DiagServiceError::NotFound(None))
+            Err(DiagServiceError::NotFound(format!(
+                "No services with SID 0x{service_id:02X} found in variant, base variant, or ECU \
+                 shared data"
+            )))
         } else {
             Ok(services)
         }
