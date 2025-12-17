@@ -1677,6 +1677,7 @@ impl<S: SecurityPlugin> EcuManager<S> {
     /// Lookup a diagnostic service by its diag comm definition.
     /// This is treated special with a cache because it is used for *every* UDS request.
     pub(in crate::diag_kernel) async fn lookup_diag_service(
+        &self,
         diag_comm: &cda_interfaces::DiagComm,
     ) -> Result<datatypes::DiagService<'_>, DiagServiceError> {
         let lookup_name = if let Some(name) = &diag_comm.lookup_name {
