@@ -18,19 +18,23 @@ use cda_comm_uds::UdsManager;
 use cda_core::{DiagServiceResponseStruct, EcuManager};
 use cda_database::{FileManager, ProtoLoadConfig};
 use cda_interfaces::{
-    DoipGatewaySetupError, EcuAddressProvider, EcuManager as EcuManagerTrait, HashMap,
-    HashMapEntry, HashMapExtensions, HashSet, Protocol,
+    DiagServiceError, DoipGatewaySetupError, EcuAddressProvider, EcuManager as EcuManagerTrait,
+    HashMap, HashMapEntry, HashMapExtensions, HashSet, Protocol,
     datatypes::{ComParams, DatabaseNamingConvention, FlatbBufConfig},
     dlt_ctx,
     file_manager::{Chunk, ChunkType},
 };
 use cda_plugin_security::{SecurityPlugin, SecurityPluginLoader};
 use cda_sovd::{RouteProvider, WebServerConfig};
+use cda_tracing::{OtelGuard, TracingSetupError, TracingWorkerGuard};
 use tokio::{
     signal,
     sync::{RwLock, mpsc},
 };
 use tracing::Instrument;
+use tracing_subscriber::layer::SubscriberExt;
+
+use crate::config::configfile::Configuration;
 
 pub mod config;
 
@@ -43,6 +47,97 @@ const DB_PARALLEL_LOAD_TASKS: usize = 2;
 pub type DatabaseMap<S> = HashMap<String, RwLock<EcuManager<S>>>;
 pub type FileManagerMap = HashMap<String, FileManager>;
 
+#[derive(thiserror::Error, Debug)]
+pub enum AppError {
+    #[error("Initialization failed `{0}`")]
+    InitializationFailed(String),
+    #[error("Resource error: `{0}`")]
+    ResourceError(String),
+    #[error("Connection error `{0}`")]
+    ConnectionError(String),
+    #[error("Configuration error `{0}`")]
+    ConfigurationError(String),
+    #[error("Data error `{0}`")]
+    DataError(String),
+    #[error("Error during execution `{0}`")]
+    RuntimeError(String),
+    #[error("Not found: `{0}`")]
+    NotFound(String),
+    #[error("Server error: `{0}`")]
+    ServerError(String),
+}
+
+impl From<TracingSetupError> for AppError {
+    fn from(value: TracingSetupError) -> Self {
+        match value {
+            TracingSetupError::ResourceCreationFailed(_) => Self::ResourceError(value.to_string()),
+            TracingSetupError::SubscriberInitializationFailed(_) => {
+                Self::InitializationFailed(value.to_string())
+            }
+        }
+    }
+}
+
+impl From<DoipGatewaySetupError> for AppError {
+    fn from(value: DoipGatewaySetupError) -> Self {
+        match value {
+            DoipGatewaySetupError::InvalidAddress(_) => Self::ConnectionError(value.to_string()),
+
+            DoipGatewaySetupError::SocketCreationFailed(_)
+            | DoipGatewaySetupError::PortBindFailed(_) => {
+                Self::InitializationFailed(value.to_string())
+            }
+
+            DoipGatewaySetupError::InvalidConfiguration(_) => {
+                Self::ConfigurationError(value.to_string())
+            }
+
+            DoipGatewaySetupError::ResourceError(_) => Self::ResourceError(value.to_string()),
+
+            DoipGatewaySetupError::ServerError(_) => Self::ServerError(value.to_string()),
+        }
+    }
+}
+
+impl From<DiagServiceError> for AppError {
+    fn from(value: DiagServiceError) -> Self {
+        match value {
+            DiagServiceError::RequestNotSupported(_)
+            | DiagServiceError::BadPayload(_)
+            | DiagServiceError::ConnectionClosed
+            | DiagServiceError::UnexpectedResponse(_)
+            | DiagServiceError::EcuOffline(_)
+            | DiagServiceError::NoResponse(_)
+            | DiagServiceError::SendFailed(_)
+            | DiagServiceError::InvalidAddress(_)
+            | DiagServiceError::InvalidRequest(_)
+            | DiagServiceError::Timeout => Self::ConnectionError(value.to_string()),
+
+            DiagServiceError::ParameterConversionError(_)
+            | DiagServiceError::UnknownOperation
+            | DiagServiceError::UdsLookupError(_)
+            | DiagServiceError::VariantDetectionError(_)
+            | DiagServiceError::AccessDenied(_)
+            | DiagServiceError::InvalidSession(_)
+            | DiagServiceError::Nack(_) => Self::RuntimeError(value.to_string()),
+
+            DiagServiceError::InvalidSecurityPlugin => Self::ConfigurationError(value.to_string()),
+
+            DiagServiceError::ResourceError(_) => Self::ResourceError(value.to_string()),
+
+            DiagServiceError::NotFound(Some(_)) => Self::NotFound(value.to_string()),
+
+            DiagServiceError::NotFound(None) => {
+                Self::NotFound("Resource could not be found.".to_owned())
+            }
+            DiagServiceError::DataError(_)
+            | DiagServiceError::InvalidDatabase(_)
+            | DiagServiceError::DatabaseEntryNotFound(_)
+            | DiagServiceError::NotEnoughData { .. } => Self::DataError(value.to_string()),
+        }
+    }
+}
+
 #[derive(Debug)]
 struct EcuMetadata {
     mdd_path: String,
@@ -51,14 +146,47 @@ struct EcuMetadata {
 
 type LoadedEcuMap<S> = HashMap<String, (EcuManager<S>, EcuMetadata)>;
 
-#[tracing::instrument(skip(com_params, database_naming_convention), fields(databases_path))]
+#[cfg(feature = "health")]
+macro_rules! update_health_db_error {
+    ($health:expr, $key:expr, $error:expr) => {
+        if let Some(hp) = &$health {
+            hp.write().await.insert_error($key, $error);
+        }
+    };
+}
+
+#[cfg(not(feature = "health"))]
+macro_rules! update_health_db_error {
+    ($health:expr, $key:expr, $error:expr) => {};
+}
+
+#[inline]
+#[cfg(feature = "health")]
+fn mdd_file_name(mddfile: &std::path::Path) -> String {
+    // Use file name if possible, otherwise use full path as string
+    mddfile
+        .file_name()
+        .map_or(mddfile.display().to_string(), |s| {
+            s.to_string_lossy().to_string()
+        })
+}
+
+#[tracing::instrument(
+    skip(com_params, database_naming_convention, health),
+    fields(databases_path)
+)]
+/// Loads all databases from the specified path asynchronously.
+/// The amount of tasks is determined by `DB_PARALLEL_LOAD_TASKS`.
+/// # Errors
+/// Returns an `AppError` if loading the databases fails for any reason.
 pub async fn load_databases<S: SecurityPlugin>(
     databases_path: &str,
     protocol: Protocol,
     com_params: ComParams,
     database_naming_convention: DatabaseNamingConvention,
     flat_buf_settings: FlatbBufConfig,
-) -> (DatabaseMap<S>, FileManagerMap) {
+    #[cfg(feature = "health")] health: Option<Arc<RwLock<health::DbHealthProvider>>>,
+) -> Result<(DatabaseMap<S>, FileManagerMap), AppError> {
     let databases: Arc<RwLock<LoadedEcuMap<S>>> = Arc::new(RwLock::new(HashMap::new()));
 
     let file_managers: Arc<RwLock<HashMap<String, FileManager>>> =
@@ -73,6 +201,12 @@ pub async fn load_databases<S: SecurityPlugin>(
             Ok(files) => files,
             Err(e) => {
                 tracing::error!(error = %e, "Failed to read directory");
+                cda_interfaces::update_health_status!(
+                    health.as_deref(),
+                    cda_health::Status::Failed(format!(
+                        "Failed to read database directory, {databases_path}, error={e}"
+                    ))
+                );
                 break 'load_database;
             }
         };
@@ -98,6 +232,7 @@ pub async fn load_databases<S: SecurityPlugin>(
             .unwrap_or(1)
             .max(1);
 
+        cda_interfaces::update_health_status!(health.as_deref(), cda_health::Status::Starting);
         tracing::info!(chunk_size = %chunk_size, "Loading databases");
 
         for (i, mddfiles) in files.chunks(chunk_size).enumerate() {
@@ -107,6 +242,8 @@ pub async fn load_databases<S: SecurityPlugin>(
             let com_params = Arc::clone(&com_params);
             let database_naming_convention = database_naming_convention.clone();
             let flat_buf_settings = flat_buf_settings.clone();
+            #[cfg(feature = "health")]
+            let health = health.clone();
 
             database_load_futures.push(cda_interfaces::spawn_named!(
                 &format!("load-database-{i}"),
@@ -119,6 +256,8 @@ pub async fn load_databases<S: SecurityPlugin>(
                         com_params,
                         database_naming_convention,
                         flat_buf_settings,
+                        #[cfg(feature = "health")]
+                        health,
                     )
                     .await;
                 }
@@ -159,13 +298,22 @@ pub async fn load_databases<S: SecurityPlugin>(
 
     let end = std::time::Instant::now();
 
-    tracing::info!(database_count = &databases.len(), duration = ?end.saturating_duration_since(start), "Loaded databases");
+    tracing::info!(
+        database_count = &databases.len(),
+        duration = ?end.saturating_duration_since(start),
+        "Loaded databases");
+
     if databases.is_empty() {
         tracing::error!("Database load failed, no databases found");
-        std::process::exit(1);
+        cda_interfaces::update_health_status!(
+            health.as_deref(),
+            cda_health::Status::Failed("No databases found".to_owned())
+        );
+    } else {
+        cda_interfaces::update_health_status!(health.as_deref(), cda_health::Status::Up);
     }
 
-    (databases, file_managers)
+    Ok((databases, file_managers))
 }
 
 async fn mark_duplicate_ecus_by_address<S: SecurityPlugin>(
@@ -223,41 +371,26 @@ async fn load_database<S: SecurityPlugin>(
     com_params: Arc<ComParams>,
     database_naming_convention: DatabaseNamingConvention,
     flat_buf_settings: FlatbBufConfig,
+    #[cfg(feature = "health")] health: Option<Arc<RwLock<health::DbHealthProvider>>>,
 ) {
     for (mddfile, _) in paths {
         let Some(mdd_path) = mddfile.to_str().map(ToOwned::to_owned) else {
-            tracing::error!(mdd_file = %mddfile.display(), "Failed to convert MDD file path to string");
+            tracing::error!(
+                mdd_file = %mddfile.display(),
+                "Failed to convert MDD file path to string");
             continue;
         };
 
-        match cda_database::load_proto_data(
-            &mdd_path,
-            &[
-                ProtoLoadConfig {
-                    type_: ChunkType::DiagnosticDescription,
-                    load_data: true,
-                    name: None,
-                },
-                ProtoLoadConfig {
-                    type_: ChunkType::JarFile,
-                    load_data: false,
-                    name: None,
-                },
-                ProtoLoadConfig {
-                    type_: ChunkType::JarFilePartial,
-                    load_data: false,
-                    name: None,
-                },
-                ProtoLoadConfig {
-                    type_: ChunkType::EmbeddedFile,
-                    load_data: false,
-                    name: None,
-                },
-            ],
-        ) {
+        match cda_database::load_proto_data(&mdd_path, load_database_proto_load_cfg()) {
             Ok((ecu_name, mut proto_data)) => {
                 let Some(ecu_data) = proto_data.remove(&ChunkType::DiagnosticDescription) else {
-                    tracing::error!(mdd_file = %mddfile.display(), "No diagnostic description found in MDD file");
+                    tracing::error!(mdd_file = %mddfile.display(),
+                        "No diagnostic description found in MDD file");
+                    update_health_db_error!(
+                        health,
+                        mdd_file_name(&mddfile),
+                        "No diagnostic description found".to_owned()
+                    );
                     continue;
                 };
 
@@ -266,7 +399,14 @@ async fn load_database<S: SecurityPlugin>(
                 {
                     payload
                 } else {
-                    tracing::error!(ecu_name = %ecu_name, "No payload found in diagnostic description for ECU");
+                    tracing::error!(
+                        ecu_name = %ecu_name,
+                        "No payload found in diagnostic description for ECU");
+                    update_health_db_error!(
+                        health,
+                        mdd_file_name(&mddfile),
+                        format!("No payload found in diagnostic description for ECU {ecu_name}")
+                    );
                     continue;
                 };
 
@@ -277,7 +417,14 @@ async fn load_database<S: SecurityPlugin>(
                 ) {
                     Ok(db) => db,
                     Err(e) => {
-                        tracing::error!(mdd_file = %mddfile.display(), error = %e, "Failed to create database from MDD file");
+                        tracing::error!(
+                            mdd_file = %mddfile.display(),
+                            error = %e, "Failed to create database from MDD file");
+                        update_health_db_error!(
+                            health,
+                            mdd_file_name(&mddfile),
+                            format!("Failed to create database from MDD file: {e}")
+                        );
                         continue;
                     }
                 };
@@ -286,12 +433,18 @@ async fn load_database<S: SecurityPlugin>(
                     protocol,
                     &com_params,
                     database_naming_convention.clone(),
-                )
-                .map_err(|e| format!("Failed to create DiagServiceManager: {e:?}"))
-                {
+                ) {
                     Ok(manager) => manager,
                     Err(e) => {
-                        tracing::error!(ecu_name = %ecu_name, error = ?e, "Failed to create DiagServiceManager");
+                        tracing::error!(
+                            ecu_name = %ecu_name,
+                            error = ?e,
+                            "Failed to create DiagServiceManager");
+                        update_health_db_error!(
+                            health,
+                            mdd_file_name(&mddfile),
+                            format!("Failed to create DiagServiceManager for ECU {ecu_name}: {e}")
+                        );
                         continue;
                     }
                 };
@@ -310,38 +463,86 @@ async fn load_database<S: SecurityPlugin>(
                 )
                 .await;
 
-                let filtered_chunks: Vec<Chunk> = [
-                    ChunkType::JarFile,
-                    ChunkType::JarFilePartial,
-                    ChunkType::EmbeddedFile,
-                ]
-                .iter()
-                .filter_map(|chunk_type| proto_data.remove(chunk_type))
-                .flat_map(std::iter::IntoIterator::into_iter)
-                .collect();
+                insert_new_file_manager(&file_managers, mdd_path, ecu_name, proto_data).await;
 
-                let files: Vec<Chunk> = filtered_chunks
-                    .into_iter()
-                    .chain(
-                        proto_data
-                            .into_iter()
-                            .flat_map(|(_, chunks)| chunks.into_iter()),
-                    )
-                    .collect();
-
-                file_managers
-                    .write()
-                    .await
-                    .insert(ecu_name, FileManager::new(mdd_path, files));
+                #[cfg(feature = "health")]
+                if let Some(health) = &health {
+                    let database_count = health.read().await.loaded_databases();
+                    health
+                        .write()
+                        .await
+                        .set_loaded_databases(database_count.saturating_add(1));
+                }
             }
             Err(e) => {
                 tracing::error!(
                     mdd_file = %mddfile.display(),
                     error = %e,
                     "Failed to load ecu data from file");
+                update_health_db_error!(
+                    health,
+                    mdd_file_name(&mddfile),
+                    format!("Failed to load ecu data from file: {e}")
+                );
             }
         }
     }
+}
+
+fn load_database_proto_load_cfg<'a>() -> &'a [ProtoLoadConfig; 4] {
+    &[
+        ProtoLoadConfig {
+            type_: ChunkType::DiagnosticDescription,
+            load_data: true,
+            name: None,
+        },
+        ProtoLoadConfig {
+            type_: ChunkType::JarFile,
+            load_data: false,
+            name: None,
+        },
+        ProtoLoadConfig {
+            type_: ChunkType::JarFilePartial,
+            load_data: false,
+            name: None,
+        },
+        ProtoLoadConfig {
+            type_: ChunkType::EmbeddedFile,
+            load_data: false,
+            name: None,
+        },
+    ]
+}
+
+async fn insert_new_file_manager(
+    file_managers: &Arc<RwLock<HashMap<String, FileManager>>>,
+    mdd_path: String,
+    ecu_name: String,
+    mut proto_data: HashMap<ChunkType, Vec<Chunk>>,
+) {
+    let filtered_chunks: Vec<Chunk> = [
+        ChunkType::JarFile,
+        ChunkType::JarFilePartial,
+        ChunkType::EmbeddedFile,
+    ]
+    .iter()
+    .filter_map(|chunk_type| proto_data.remove(chunk_type))
+    .flat_map(IntoIterator::into_iter)
+    .collect();
+
+    let files: Vec<Chunk> = filtered_chunks
+        .into_iter()
+        .chain(
+            proto_data
+                .into_iter()
+                .flat_map(|(_, chunks)| chunks.into_iter()),
+        )
+        .collect();
+
+    file_managers
+        .write()
+        .await
+        .insert(ecu_name, FileManager::new(mdd_path, files));
 }
 
 async fn check_duplicate_ecu_names<S: SecurityPlugin>(
@@ -418,7 +619,7 @@ pub fn create_uds_manager<S: SecurityPlugin>(
 /// # Errors
 /// Returns a string error if the gateway cannot be initialized.
 #[tracing::instrument(
-    skip(databases, variant_detection, shutdown_signal),
+    skip(databases, variant_detection, shutdown_signal, health),
     fields(
         database_count = databases.len(),
         dlt_context = dlt_ctx!("MAIN"),
@@ -429,8 +630,19 @@ pub async fn create_diagnostic_gateway<S: SecurityPlugin>(
     doip_config: &DoipConfig,
     variant_detection: mpsc::Sender<Vec<String>>,
     shutdown_signal: impl std::future::Future<Output = ()> + Send + Clone + 'static,
+    #[cfg(feature = "health")] health: Option<
+        Arc<RwLock<cda_comm_doip::health::DoipHealthProvider>>,
+    >,
 ) -> Result<DoipDiagGateway<EcuManager<S>>, DoipGatewaySetupError> {
-    DoipDiagGateway::new(doip_config, databases, variant_detection, shutdown_signal).await
+    DoipDiagGateway::new(
+        doip_config,
+        databases,
+        variant_detection,
+        shutdown_signal,
+        #[cfg(feature = "health")]
+        health,
+    )
+    .await
 }
 
 // type alias does not allow specifying hasher, we set the hasher globally.
@@ -491,5 +703,329 @@ pub async fn shutdown_signal() {
     tokio::select! {
         () = ctrl_c => {},
         () = terminate => {},
+    }
+}
+
+pub struct TracingGuards {
+    _file: Option<TracingWorkerGuard>,
+    _otel: Option<OtelGuard>,
+}
+
+/// Setup the tracing to provide logs and analytics.
+/// # Errors
+/// Returns a `TracingSetupError` if the tracing setup fails.
+pub fn setup_tracing(config: &Configuration) -> Result<TracingGuards, TracingSetupError> {
+    let tracing = cda_tracing::new();
+    let mut layers = vec![];
+    layers.push(cda_tracing::new_term_subscriber(&config.logging));
+    #[cfg(feature = "tokio-tracing")]
+    layers.push(cda_tracing::new_tokio_tracing(
+        &config.logging.tokio_tracing,
+    )?);
+    let otel_guard = if config.logging.otel.enabled {
+        println!(
+            "Starting OpenTelemetry tracing with {}",
+            config.logging.otel.endpoint
+        );
+        let (guard, metrics_layer, otel_layer) =
+            cda_tracing::new_otel_subscriber(&config.logging.otel)?;
+        layers.push(metrics_layer);
+        layers.push(otel_layer);
+        Some(guard)
+    } else {
+        None
+    };
+
+    let file_guard = if config.logging.log_file_config.enabled {
+        let (guard, file_layer) =
+            cda_tracing::new_file_subscriber(&config.logging.log_file_config)?;
+        layers.push(file_layer);
+        Some(guard)
+    } else {
+        None
+    };
+
+    #[cfg(feature = "dlt-tracing")]
+    if config.logging.dlt_tracing.enabled {
+        layers.push(cda_tracing::new_dlt_tracing(&config.logging.dlt_tracing)?);
+    }
+
+    cda_tracing::init_tracing(tracing.with(layers))?;
+    Ok(TracingGuards {
+        _file: file_guard,
+        _otel: otel_guard,
+    })
+}
+
+/// Retrieve the version of the opensovd-cda crate.
+#[must_use]
+pub fn cda_version() -> &'static str {
+    env!("CARGO_PKG_VERSION")
+}
+
+/// Starts the CDA, with given security infrastructure, route provider and shutdown signal
+/// and optional health endpoint.
+/// # Errors
+/// `AppError` mapped from underlying errors.
+pub async fn start_cda<
+    F: Future<Output = ()> + Clone + Send + 'static,
+    S: SecurityPlugin,
+    L: SecurityPluginLoader,
+    R: RouteProvider + 'static + Send,
+>(
+    config: Configuration,
+    shutdown_signal: F,
+    #[cfg(feature = "health")] additional_providers: Option<
+        Vec<Arc<RwLock<dyn cda_health::ComponentHealthProvider>>>,
+    >,
+) -> Result<(), AppError> {
+    #[cfg(feature = "health")]
+    let (health_endpoint_opt, exit_on_fatal) = if config.health.enabled {
+        (
+            Some(health::setup_health_endpoint(
+                &config.health,
+                shutdown_signal.clone(),
+                additional_providers,
+            )),
+            config.health.exit_process_on_error,
+        )
+    } else {
+        (None, true)
+    };
+    #[cfg(not(feature = "health"))]
+    let exit_on_fatal = true;
+
+    let database_path = config.databases_path.clone();
+    let flash_files_path = config.flash_files_path.clone();
+
+    let protocol = if config.onboard_tester {
+        cda_interfaces::Protocol::DoIpDobt
+    } else {
+        cda_interfaces::Protocol::DoIp
+    };
+
+    let (databases, file_managers) = load_databases::<S>(
+        &database_path,
+        protocol,
+        config.com_params,
+        config.database_naming_convention,
+        config.flat_buf,
+        #[cfg(feature = "health")]
+        health_endpoint_opt.as_ref().map(|hp| Arc::clone(&hp.db)),
+    )
+    .await?;
+    if databases.is_empty() && exit_on_fatal {
+        return Err(AppError::ConfigurationError(
+            "No databases found".to_owned(),
+        ));
+    }
+
+    let webserver_config = WebServerConfig {
+        host: config.server.address.clone(),
+        port: config.server.port,
+    };
+
+    let (variant_detection_tx, variant_detection_rx) = mpsc::channel(50);
+
+    let databases = Arc::new(databases);
+    let serve_result = match create_diagnostic_gateway(
+        Arc::clone(&databases),
+        &config.doip,
+        variant_detection_tx,
+        shutdown_signal.clone(),
+        #[cfg(feature = "health")]
+        health_endpoint_opt.as_ref().map(|hp| Arc::clone(&hp.doip)),
+    )
+    .await
+    {
+        Ok(diagnostic_gateway) => {
+            let uds = create_uds_manager(diagnostic_gateway, databases, variant_detection_rx);
+            start_webserver::<S, L, R>(
+                flash_files_path,
+                file_managers,
+                webserver_config,
+                uds,
+                shutdown_signal,
+                None, // additional routes may be used in an OEM context
+            )
+            .await
+        }
+        Err(e) => Ok(Err(e)),
+    };
+
+    let serve_error = match serve_result {
+        Ok(Ok(())) => {
+            tracing::info!("Shutting down...");
+            false
+        }
+        Ok(Err(e)) => {
+            tracing::error!(error = ?e, "Failed to start webserver");
+            true
+        }
+        Err(je) => {
+            if je.is_panic() {
+                let reason = je.into_panic();
+                tracing::error!(panic_reason = ?reason, "Webserver thread panicked");
+                true
+            } else {
+                false
+            }
+        }
+    };
+
+    if serve_error && exit_on_fatal {
+        tracing::error!("Exiting due to fatal error");
+        std::process::exit(1);
+    }
+
+    #[cfg(feature = "health")]
+    if let Some(health_endpoint) = health_endpoint_opt
+        && !health::wait_health_endpoint_exit(health_endpoint.server_handle).await
+    {
+        std::process::exit(1);
+    }
+
+    if serve_error {
+        std::process::exit(1);
+    }
+
+    Ok(())
+}
+
+#[cfg(feature = "health")]
+pub mod health {
+    use std::sync::Arc;
+
+    use cda_interfaces::{HashMap, HashMapExtensions};
+    use serde::Serialize;
+    use tokio::sync::RwLock;
+
+    use crate::cda_version;
+
+    pub struct Health {
+        pub server_handle: tokio::task::JoinHandle<Result<(), cda_health::HealthError>>,
+        pub db: Arc<RwLock<DbHealthProvider>>,
+        pub doip: Arc<RwLock<cda_comm_doip::health::DoipHealthProvider>>,
+    }
+
+    pub fn setup_health_endpoint(
+        config: &cda_health::config::HealthConfig,
+        shutdown_signal: impl Future<Output = ()> + Send + Clone + 'static,
+        additional_providers: Option<Vec<Arc<RwLock<dyn cda_health::ComponentHealthProvider>>>>,
+    ) -> Health {
+        type ArcRwLockHealth = Arc<RwLock<dyn cda_health::ComponentHealthProvider>>;
+
+        tracing::info!("Starting health endpoint...");
+        let db = Arc::new(RwLock::new(DbHealthProvider::new()));
+        let doip = Arc::new(RwLock::new(cda_comm_doip::health::DoipHealthProvider::new()));
+
+        let mut providers: Vec<_> = vec![
+            Arc::clone(&db) as ArcRwLockHealth,
+            Arc::clone(&doip) as ArcRwLockHealth,
+        ];
+        if let Some(mut additional) = additional_providers {
+            providers.append(&mut additional);
+        }
+
+        let config = config.clone();
+
+        let server_handle = cda_interfaces::spawn_named!("health", async move {
+            cda_health::launch_webserver(
+                &config,
+                providers,
+                shutdown_signal,
+                cda_version().to_string(),
+            )
+            .await
+        });
+
+        Health {
+            server_handle,
+            db,
+            doip,
+        }
+    }
+
+    pub async fn wait_health_endpoint_exit(
+        join_handle: tokio::task::JoinHandle<Result<(), cda_health::HealthError>>,
+    ) -> bool {
+        match join_handle.await {
+            Ok(Ok(())) => {
+                tracing::info!("Health endpoint shut down gracefully.");
+                true
+            }
+            Ok(Err(e)) => {
+                tracing::error!(error = %e, "Health endpoint shut down with error.");
+                false
+            }
+            Err(je) => {
+                if je.is_panic() {
+                    let reason = je.into_panic();
+                    tracing::error!(panic_reason = ?reason, "Health endpoint thread panicked");
+                    false
+                } else {
+                    true
+                }
+            }
+        }
+    }
+
+    pub struct DbHealthProvider {
+        loaded_databases: usize,
+        errors: HashMap<String, String>,
+        status: cda_health::Status,
+    }
+
+    impl Default for DbHealthProvider {
+        fn default() -> Self {
+            Self::new()
+        }
+    }
+
+    impl DbHealthProvider {
+        #[must_use]
+        pub fn new() -> Self {
+            Self {
+                loaded_databases: 0,
+                errors: HashMap::new(),
+                status: cda_health::Status::Pending,
+            }
+        }
+
+        pub(crate) fn insert_error(&mut self, key: String, error: String) {
+            self.errors.insert(key, error);
+        }
+
+        pub(crate) fn set_status(&mut self, status: cda_health::Status) {
+            self.status = status;
+        }
+
+        pub(crate) fn loaded_databases(&self) -> usize {
+            self.loaded_databases
+        }
+
+        pub(crate) fn set_loaded_databases(&mut self, count: usize) {
+            self.loaded_databases = count;
+        }
+    }
+
+    impl cda_health::ComponentHealthProvider for DbHealthProvider {
+        fn health(&self) -> cda_health::ComponentHealth {
+            #[derive(Serialize)]
+            struct Details {
+                loaded_databases: usize,
+                #[serde(skip_serializing_if = "HashMap::is_empty")]
+                errors: HashMap<String, String>,
+            }
+
+            cda_health::ComponentHealth {
+                name: "Database".to_owned(),
+                status: self.status.clone(),
+                details: Some(serde_json::json!(Details {
+                    loaded_databases: self.loaded_databases,
+                    errors: self.errors.clone(),
+                })),
+            }
+        }
     }
 }

@@ -16,7 +16,6 @@ use std::{
     time::Duration,
 };
 
-use cda_tracing::TracingSetupError;
 use thiserror::Error;
 
 mod com_param_handling;
@@ -273,26 +272,11 @@ pub enum DiagServiceError {
     EcuOffline(String),
     Timeout,
     AccessDenied(String),
-    ConfigurationError(String),
     /// Returned in case a resource can be found but returns an error
     ResourceError(String),
     DataError(DataParseError),
-    SetupError(String),
     /// Returned in case the provided value for security plugin cannot be used as `SecurityApi`
     InvalidSecurityPlugin,
-}
-
-impl From<TracingSetupError> for DiagServiceError {
-    fn from(value: TracingSetupError) -> Self {
-        match &value {
-            TracingSetupError::ResourceCreationFailed(_) => {
-                DiagServiceError::ResourceError(value.to_string())
-            }
-            TracingSetupError::SubscriberInitializationFailed(_) => {
-                DiagServiceError::SetupError(value.to_string())
-            }
-        }
-    }
 }
 
 #[derive(Error, Debug)]
@@ -309,26 +293,6 @@ pub enum DoipGatewaySetupError {
     ResourceError(String),
     #[error("Server error: `{0}`")]
     ServerError(String),
-}
-
-impl From<DoipGatewaySetupError> for DiagServiceError {
-    fn from(value: DoipGatewaySetupError) -> Self {
-        match value {
-            DoipGatewaySetupError::InvalidAddress(_) => {
-                DiagServiceError::InvalidAddress(value.to_string())
-            }
-            DoipGatewaySetupError::SocketCreationFailed(_)
-            | DoipGatewaySetupError::PortBindFailed(_) => {
-                DiagServiceError::SetupError(value.to_string())
-            }
-            DoipGatewaySetupError::InvalidConfiguration(_) => {
-                DiagServiceError::ConfigurationError(value.to_string())
-            }
-            DoipGatewaySetupError::ResourceError(_) | DoipGatewaySetupError::ServerError(_) => {
-                DiagServiceError::ResourceError(value.to_string())
-            }
-        }
-    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -377,9 +341,7 @@ impl Display for DiagServiceError {
             DiagServiceError::EcuOffline(ecu) => write!(f, "Ecu {ecu} offline"),
             DiagServiceError::Timeout => write!(f, "Timeout"),
             DiagServiceError::AccessDenied(msg) => write!(f, "Access denied: {msg}"),
-            DiagServiceError::ConfigurationError(msg) => write!(f, "Configuration error: {msg}"),
             DiagServiceError::ResourceError(msg) => write!(f, "Resource error: {msg}"),
-            DiagServiceError::SetupError(msg) => write!(f, "Setup error: {msg}"),
             DiagServiceError::DataError(DataParseError { value, details }) => {
                 write!(f, "Data parse error: value='{value}', details='{details}'")
             }

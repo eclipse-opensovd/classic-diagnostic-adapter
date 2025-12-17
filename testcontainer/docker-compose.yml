@@ -38,6 +38,7 @@ services:
       dockerfile: testcontainer/cda/Dockerfile
     ports:
       - "${CDA_PORT:-20002}:20002"
+      - "${CDA_HEALTH_PORT:-20020}:${CDA_HEALTH_PORT:-20020}"
     volumes:
       - ./odx:/app/odx:ro
     hostname: cda
@@ -48,7 +49,9 @@ services:
         condition: service_healthy
     environment:
       - RUST_LOG=info
-    command: ["-d", "/app/odx"]
+      - CDA_HEALTH_PORT=${CDA_HEALTH_PORT:-20020}
+    command: ["-d", "/app/odx", "--health-listen-address", "0.0.0.0", # per default health listens on localhost only
+      "--health-listen-port", "${CDA_HEALTH_PORT:-20020}"]
     restart: unless-stopped
 
 networks:

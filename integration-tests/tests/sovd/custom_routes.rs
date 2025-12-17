@@ -18,7 +18,7 @@ use axum::{Json, http::StatusCode};
 use cda_comm_doip::config::DoipConfig;
 use cda_sovd::RouteProvider;
 use futures::FutureExt;
-use opensovd_cda_lib::{DatabaseMap, FileManagerMap, config::configfile::ServerConfig};
+use opensovd_cda_lib::{DatabaseMap, FileManagerMap};
 use reqwest::Method;
 use serde::{Deserialize, Serialize};
 
@@ -84,6 +84,13 @@ async fn test_custom_demo_endpoint() {
     // Use loopback since we don't need actual ECU connections for this test
     let host = host();
     let test_port = find_available_tcp_port(&host).expect("Failed to find available port");
+    let health_port = find_available_tcp_port(&host).expect("Failed to find available port");
+    let health_config = cda_health::config::HealthConfig {
+        address: host.clone(),
+        port: health_port,
+        enabled: true,
+        exit_process_on_error: false,
+    };
 
     let webserver_config = cda_sovd::WebServerConfig {
         host: host.clone(),
@@ -95,6 +102,18 @@ async fn test_custom_demo_endpoint() {
         shutdown_rx.recv().await.ok();
     }
     .shared();
+
+    let health_shutdown_signal = shutdown_signal.clone();
+    let health_config_clone = health_config.clone();
+    let _health_endpoint = cda_interfaces::spawn_named!("health", async move {
+        cda_health::launch_webserver::<dyn cda_health::ComponentHealthProvider, _>(
+            &health_config_clone,
+            vec![],
+            health_shutdown_signal,
+            "0.1".to_owned(),
+        )
+        .await
+    });
 
     // Empty db, file managers and gateway for testing
     let databases: DatabaseMap<cda_plugin_security::DefaultSecurityPluginData> =
@@ -114,6 +133,7 @@ async fn test_custom_demo_endpoint() {
         &doip_config,
         variant_tx,
         shutdown_signal.clone(),
+        None, // no health endpoint for demo endpoint test
     )
     .await
     .expect("Failed to create gateway");
@@ -144,12 +164,9 @@ async fn test_custom_demo_endpoint() {
 
     let url = reqwest::Url::parse(&format!("http://{host}:{test_port}/test")).expect("Invalid URL");
 
-    wait_for_cda_online(&ServerConfig {
-        address: host,
-        port: test_port,
-    })
-    .await
-    .expect("Webserver did not start in time");
+    wait_for_cda_online(&health_config)
+        .await
+        .expect("Webserver did not start in time");
 
     // Test GET request
     let get_response =
