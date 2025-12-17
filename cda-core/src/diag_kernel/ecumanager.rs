@@ -402,8 +402,6 @@ impl<S: SecurityPlugin> cda_interfaces::EcuManager for EcuManager<S> {
             ));
         }
 
-        let sid = rawdata[0];
-
         let Some(variant) = self.variant() else {
             return Err(DiagServiceError::InvalidDatabase(
                 "No variant selected".to_owned(),
@@ -433,7 +431,11 @@ impl<S: SecurityPlugin> cda_interfaces::EcuManager for EcuManager<S> {
             .map(datatypes::DiagService)
             .find_map(|service| {
                 let service_id = service.request_id()?;
-                (sid == service_id).then_some(service)
+                if rawdata.first()? == &service_id {
+                    Some(service)
+                } else {
+                    None
+                }
             })
             .ok_or_else(|| {
                 DiagServiceError::NotFound(format!(
@@ -457,7 +459,6 @@ impl<S: SecurityPlugin> cda_interfaces::EcuManager for EcuManager<S> {
             target_address: self.logical_address,
         })
     }
-
 
     /// Convert a UDS payload given as `u8` slice into a `DiagServiceResponse`.
     ///
@@ -748,7 +749,7 @@ impl<S: SecurityPlugin> cda_interfaces::EcuManager for EcuManager<S> {
     /// # Errors
     /// Will return `Err` if the job cannot be found in the database
     /// Unlikely other case is that neither a lookup in the current nor the base variant succeeded.
-        #[tracing::instrument(skip(self),
+    #[tracing::instrument(skip(self),
         fields(
             ecu_name = self.ecu_name,
             dlt_context = dlt_ctx!("CORE"),
@@ -795,7 +796,6 @@ impl<S: SecurityPlugin> cda_interfaces::EcuManager for EcuManager<S> {
             })
     }
 
-
     /// Lookup a service by a given function class name and service id.
     /// # Errors
     /// Will return `Err` if the lookup failed
@@ -826,7 +826,6 @@ impl<S: SecurityPlugin> cda_interfaces::EcuManager for EcuManager<S> {
             ))
         })
     }
-
 
     /// Lookup a service by its service id for the current ECU variant.
     /// This will first look up the service in the current variant, then in the base variant
@@ -1004,7 +1003,6 @@ impl<S: SecurityPlugin> cda_interfaces::EcuManager for EcuManager<S> {
             Ok(SecurityAccess::RequestSeed(request_seed_service))
         }
     }
-
 
     async fn get_send_key_param_name(
         &self,
@@ -1192,7 +1190,6 @@ impl<S: SecurityPlugin> cda_interfaces::EcuManager for EcuManager<S> {
         result.sort_by(|a, b| a.id.cmp(&b.id));
         Ok(result)
     }
-
 
     fn lookup_dtc_services(
         &self,
@@ -1680,7 +1677,7 @@ impl<S: SecurityPlugin> EcuManager<S> {
     /// Lookup a diagnostic service by its diag comm definition.
     /// This is treated special with a cache because it is used for *every* UDS request.
     pub(in crate::diag_kernel) async fn lookup_diag_service(
-            diag_comm: &cda_interfaces::DiagComm,
+        diag_comm: &cda_interfaces::DiagComm,
     ) -> Result<datatypes::DiagService<'_>, DiagServiceError> {
         let lookup_name = if let Some(name) = &diag_comm.lookup_name {
             name.to_owned()
@@ -1711,7 +1708,7 @@ impl<S: SecurityPlugin> EcuManager<S> {
                 .is_some_and(|sid| prefixes.contains(&sid))
         };
 
-         // Search and cache the location
+        // Search and cache the location
         if let Some((service, location)) = self.search_with_location(&predicate) {
             self.db_cache
                 .diag_services
@@ -1721,7 +1718,7 @@ impl<S: SecurityPlugin> EcuManager<S> {
             return Ok(service);
         }
 
-         self.db_cache
+        self.db_cache
             .diag_services
             .write()
             .await
