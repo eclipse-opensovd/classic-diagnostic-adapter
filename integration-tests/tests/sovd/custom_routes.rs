@@ -16,7 +16,11 @@ use std::{sync::Arc, time::Duration};
 use aide::axum::{ApiRouter, routing};
 use axum::{Json, http::StatusCode};
 use cda_comm_doip::config::DoipConfig;
-use cda_sovd::RouteProvider;
+use cda_interfaces::UdsEcu;
+use cda_sovd::{
+    Locks,
+    dynamic_router::{DynamicRouter},
+};
 use futures::FutureExt;
 use opensovd_cda_lib::{DatabaseMap, FileManagerMap, config::configfile::ServerConfig};
 use reqwest::Method;
@@ -33,50 +37,49 @@ struct TestData {
     version: String,
 }
 
-struct DemoRouteProvider;
-
-impl RouteProvider for DemoRouteProvider {
-    fn register_custom_routes<S>(router: ApiRouter<S>) -> ApiRouter<S>
-    where
-        S: Clone + Send + Sync + 'static,
-    {
-        router.api_route(
-            "/test",
-            routing::get_with(
-                || async {
-                    (
-                        StatusCode::OK,
-                        Json(TestData {
+async fn add_custom_routes(dynamic_router: &DynamicRouter) {
+    let custom_router = ApiRouter::new().api_route(
+        "/test",
+        routing::get_with(
+            || async {
+                (
+                    StatusCode::OK,
+                    Json(TestData {
+                        oem_name: "Eclipse Foundation".to_string(),
+                        version: "1.0.0".to_string(),
+                    }),
+                )
+            },
+            |op| {
+                // OpenAPI documentation for the GET /demo endpoint
+                op.description("Get demo data")
+                    .response_with::<200, Json<TestData>, _>(|res| {
+                        res.example(TestData {
                             oem_name: "Eclipse Foundation".to_string(),
                             version: "1.0.0".to_string(),
-                        }),
-                    )
-                },
-                |op| {
-                    // OpenAPI documentation for the GET /demo endpoint
-                    op.description("Get demo data")
-                        .response_with::<200, Json<TestData>, _>(|res| {
-                            res.example(TestData {
-                                oem_name: "Eclipse Foundation".to_string(),
-                                version: "1.0.0".to_string(),
-                            })
                         })
-                },
-            )
-            .post_with(
-                |Json(payload): Json<TestData>| async move {
-                    // Echo back the payload
-                    (StatusCode::CREATED, Json(payload))
-                },
-                |op| {
-                    op.description("Create demo data")
-                        .response_with::<201, Json<TestData>, _>(|res| {
-                            res.description("Successfully created")
-                        })
-                },
-            ),
+                    })
+            },
         )
-    }
+        .post_with(
+            |Json(payload): Json<TestData>| async move {
+                // Echo back the payload
+                (StatusCode::CREATED, Json(payload))
+            },
+            |op| {
+                op.description("Create demo data")
+                    .response_with::<201, Json<TestData>, _>(|res| {
+                        res.description("Successfully created")
+                    })
+            },
+        ),
+    );
+
+    // Update the router with the new routes,
+    // merge with existing router to preserve existing routes
+    dynamic_router
+        .update_router(move |old_router| old_router.merge(custom_router))
+        .await;
 }
 
 #[tokio::test]
@@ -119,24 +122,26 @@ async fn test_custom_demo_endpoint() {
     .expect("Failed to create gateway");
 
     let uds_manager = opensovd_cda_lib::create_uds_manager(gateway, databases, variant_rx);
-    let custom_route_provider = DemoRouteProvider;
     let server_handle = tokio::spawn({
         let shutdown_signal = shutdown_signal.clone();
         async move {
-            cda_sovd::launch_webserver::<
-                _,
+            // Launch the webserver with static routes
+            let dynamic_router =
+                cda_sovd::launch_webserver(webserver_config, shutdown_signal).await?;
+            add_custom_routes(&dynamic_router).await;
+
+            let ecu_names = uds_manager.get_ecus().await;
+            cda_sovd::add_vehicle_routes::<
                 cda_core::DiagServiceResponseStruct,
                 _,
                 _,
                 cda_plugin_security::DefaultSecurityPlugin,
-                DemoRouteProvider,
             >(
-                webserver_config,
+                &dynamic_router,
                 uds_manager,
                 String::new(),
                 file_managers,
-                shutdown_signal,
-                Some(custom_route_provider),
+                Arc::new(Locks::new(ecu_names)),
             )
             .await
         }
