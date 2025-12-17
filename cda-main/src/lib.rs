@@ -11,7 +11,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-use std::{path::PathBuf, sync::Arc};
+use std::{future::Future, path::PathBuf, sync::Arc};
 
 use cda_comm_doip::{DoipDiagGateway, config::DoipConfig};
 use cda_comm_uds::UdsManager;
@@ -19,18 +19,19 @@ use cda_core::{DiagServiceResponseStruct, EcuManager};
 use cda_database::{FileManager, ProtoLoadConfig};
 use cda_interfaces::{
     DoipGatewaySetupError, EcuAddressProvider, EcuManager as EcuManagerTrait, HashMap,
-    HashMapEntry, HashMapExtensions, HashSet, Protocol,
+    HashMapEntry, HashMapExtensions, HashSet, Protocol, UdsEcu,
     datatypes::{ComParams, DatabaseNamingConvention, FlatbBufConfig},
     dlt_ctx,
     file_manager::{Chunk, ChunkType},
 };
-use cda_plugin_security::{SecurityPlugin, SecurityPluginLoader};
-use cda_sovd::{RouteProvider, WebServerConfig};
+use cda_plugin_security::SecurityPlugin;
 use tokio::{
     signal,
     sync::{RwLock, mpsc},
 };
 use tracing::Instrument;
+
+use crate::config::configfile::Configuration;
 
 pub mod config;
 
@@ -50,6 +51,70 @@ struct EcuMetadata {
 }
 
 type LoadedEcuMap<S> = HashMap<String, (EcuManager<S>, EcuMetadata)>;
+
+pub struct VehicleData<S: SecurityPlugin> {
+    pub file_managers: FileManagerMap,
+    pub uds_manager: UdsManagerType<S>,
+}
+
+/// Loads vehicle databases and sets up SOVD routes in the webserver.
+/// # Errors
+/// Returns `DoipGatewaySetupError` if we failed to create the diagnostic gateway
+pub async fn load_vehicle_data<
+    F: Future<Output = ()> + Clone + Send + 'static,
+    S: SecurityPlugin,
+>(
+    config: &Configuration,
+    clonable_shutdown_signal: F,
+) -> Result<VehicleData<S>, DoipGatewaySetupError> {
+    // Load databases in the background
+    let database_path = config.databases_path.clone();
+    let protocol = if config.onboard_tester {
+        cda_interfaces::Protocol::DoIpDobt
+    } else {
+        cda_interfaces::Protocol::DoIp
+    };
+
+    let (databases, file_managers) = load_databases::<S>(
+        &database_path,
+        protocol,
+        config.com_params.clone(),
+        config.database_naming_convention.clone(),
+        config.flat_buf.clone(),
+    )
+    .await;
+
+    tracing::debug!("Databases loaded. Setting up diagnostic gateway...");
+
+    let (variant_detection_tx, variant_detection_rx) = mpsc::channel(50);
+    let databases = Arc::new(databases);
+    let diagnostic_gateway = match create_diagnostic_gateway(
+        Arc::clone(&databases),
+        &config.doip,
+        variant_detection_tx,
+        clonable_shutdown_signal.clone(),
+    )
+    .await
+    {
+        Ok(gateway) => gateway,
+        Err(e) => {
+            tracing::error!(error = %e, "Failed to create diagnostic gateway");
+            return Err(e);
+        }
+    };
+
+    let uds = create_uds_manager(diagnostic_gateway, databases, variant_detection_rx);
+    tracing::debug!("Starting variant detection");
+    let vdetect = uds.clone();
+    cda_interfaces::spawn_named!("startup-variant-detection", async move {
+        vdetect.start_variant_detection().await;
+    });
+
+    Ok(VehicleData {
+        uds_manager: uds,
+        file_managers,
+    })
+}
 
 #[tracing::instrument(skip(com_params, database_naming_convention), fields(databases_path))]
 pub async fn load_databases<S: SecurityPlugin>(
@@ -277,7 +342,9 @@ async fn load_database<S: SecurityPlugin>(
                 ) {
                     Ok(db) => db,
                     Err(e) => {
-                        tracing::error!(mdd_file = %mddfile.display(), error = %e, "Failed to create database from MDD file");
+                        tracing::error!(
+                            mdd_file = %mddfile.display(),
+                            error = %e, "Failed to create database from MDD file");
                         continue;
                     }
                 };
@@ -291,7 +358,9 @@ async fn load_database<S: SecurityPlugin>(
                 {
                     Ok(manager) => manager,
                     Err(e) => {
-                        tracing::error!(ecu_name = %ecu_name, error = ?e, "Failed to create DiagServiceManager");
+                        tracing::error!(
+                            ecu_name = %ecu_name, error = ?e,
+                                "Failed to create DiagServiceManager");
                         continue;
                     }
                 };
@@ -428,43 +497,9 @@ pub async fn create_diagnostic_gateway<S: SecurityPlugin>(
     databases: Arc<DatabaseMap<S>>,
     doip_config: &DoipConfig,
     variant_detection: mpsc::Sender<Vec<String>>,
-    shutdown_signal: impl std::future::Future<Output = ()> + Send + Clone + 'static,
+    shutdown_signal: impl Future<Output = ()> + Send + Clone + 'static,
 ) -> Result<DoipDiagGateway<EcuManager<S>>, DoipGatewaySetupError> {
     DoipDiagGateway::new(doip_config, databases, variant_detection, shutdown_signal).await
-}
-
-// type alias does not allow specifying hasher, we set the hasher globally.
-#[allow(clippy::implicit_hasher)]
-#[tracing::instrument(
-    skip(file_managers, webserver_config, ecu_uds, shutdown_signal, custom_route_provider),
-    fields(
-        file_manager_count = file_managers.len(),
-        dlt_context = dlt_ctx!("MAIN"),
-    )
-)]
-pub fn start_webserver<
-    S: SecurityPlugin,
-    L: SecurityPluginLoader,
-    R: RouteProvider + 'static + Send,
->(
-    flash_files_path: String,
-    file_managers: HashMap<String, FileManager>,
-    webserver_config: WebServerConfig,
-    ecu_uds: UdsManager<DoipDiagGateway<EcuManager<S>>, DiagServiceResponseStruct, EcuManager<S>>,
-    shutdown_signal: impl std::future::Future<Output = ()> + Send + 'static,
-    custom_route_provider: Option<R>,
-) -> tokio::task::JoinHandle<Result<(), DoipGatewaySetupError>> {
-    cda_interfaces::spawn_named!("webserver", async move {
-        cda_sovd::launch_webserver::<_, DiagServiceResponseStruct, _, _, L, R>(
-            webserver_config,
-            ecu_uds,
-            flash_files_path,
-            file_managers,
-            shutdown_signal,
-            custom_route_provider,
-        )
-        .await
-    })
 }
 
 /// Waits for a shutdown signal, such as Ctrl+C or SIGTERM (on unix).

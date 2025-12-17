@@ -11,17 +11,17 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-use std::sync::Arc;
-
+use cda_core::DiagServiceResponseStruct;
 use cda_interfaces::{DiagServiceError, DoipGatewaySetupError, dlt_ctx};
 use cda_plugin_security::{DefaultSecurityPlugin, DefaultSecurityPluginData};
-use cda_sovd::DefaultRouteProvider;
 use cda_tracing::TracingSetupError;
 use clap::Parser;
 use futures::future::FutureExt;
-use opensovd_cda_lib::{config::configfile::ConfigSanity, shutdown_signal};
+use opensovd_cda_lib::{
+    config::configfile::{ConfigSanity, Configuration},
+    shutdown_signal,
+};
 use thiserror::Error;
-use tokio::sync::mpsc;
 use tracing_subscriber::layer::SubscriberExt as _;
 
 use crate::AppError::{
@@ -212,25 +212,6 @@ async fn main() -> Result<(), AppError> {
 
     tracing::info!("Starting CDA...");
 
-    let database_path = config.databases_path.clone();
-
-    let flash_files_path = config.flash_files_path.clone();
-
-    let protocol = if config.onboard_tester {
-        cda_interfaces::Protocol::DoIpDobt
-    } else {
-        cda_interfaces::Protocol::DoIp
-    };
-
-    let (databases, file_managers) = opensovd_cda_lib::load_databases::<DefaultSecurityPluginData>(
-        &database_path,
-        protocol,
-        config.com_params,
-        config.database_naming_convention,
-        config.flat_buf,
-    )
-    .await;
-
     let webserver_config = cda_sovd::WebServerConfig {
         host: config.server.address.clone(),
         port: config.server.port,
@@ -238,50 +219,35 @@ async fn main() -> Result<(), AppError> {
 
     let clonable_shutdown_signal = shutdown_signal().shared();
 
-    let (variant_detection_tx, variant_detection_rx) = mpsc::channel(50);
+    let dynamic_router =
+        cda_sovd::launch_webserver(webserver_config.clone(), clonable_shutdown_signal.clone())
+            .await?;
 
-    let databases = Arc::new(databases);
-    let diagnostic_gateway = match opensovd_cda_lib::create_diagnostic_gateway(
-        Arc::clone(&databases),
-        &config.doip,
-        variant_detection_tx,
+    tracing::debug!("Webserver is running. Loading sovd routes...");
+
+    let vehicle_data = opensovd_cda_lib::load_vehicle_data::<_, DefaultSecurityPluginData>(
+        &config,
         clonable_shutdown_signal.clone(),
     )
     .await
-    {
-        Ok(gateway) => gateway,
-        Err(e) => {
-            tracing::error!(error = %e, "Failed to create diagnostic gateway");
-            return Err(e.into());
-        }
-    };
+    .map_err(|e| {
+        let err: AppError = e.into();
+        err
+    })?;
 
-    let uds =
-        opensovd_cda_lib::create_uds_manager(diagnostic_gateway, databases, variant_detection_rx);
-
-    match opensovd_cda_lib::start_webserver::<_, DefaultSecurityPlugin, DefaultRouteProvider>(
-        flash_files_path,
-        file_managers,
-        webserver_config,
-        uds,
-        clonable_shutdown_signal,
-        None, // additional routes may be used in an OEM context
+    cda_sovd::add_vehicle_routes::<DiagServiceResponseStruct, _, _, DefaultSecurityPlugin>(
+        &dynamic_router,
+        vehicle_data.uds_manager,
+        config.flash_files_path.clone(),
+        vehicle_data.file_managers,
     )
-    .await
-    {
-        Ok(Ok(())) => tracing::info!("Shutting down..."),
-        Ok(Err(e)) => {
-            tracing::error!(error = ?e, "Failed to start webserver");
-            std::process::exit(1);
-        }
-        Err(je) => {
-            if je.is_panic() {
-                let reason = je.into_panic();
-                tracing::error!(panic_reason = ?reason, "Webserver thread panicked");
-                std::process::exit(1);
-            }
-        }
-    }
+    .await?;
+
+    tracing::info!("CDA fully initialized and ready to serve requests");
+
+    // Wait for shutdown signal
+    clonable_shutdown_signal.await;
+    tracing::info!("Shutting down...");
 
     Ok(())
 }
@@ -292,7 +258,7 @@ impl AppArgs {
             dlt_context = dlt_ctx!("MAIN"),
         )
     )]
-    fn update_config(self, config: &mut opensovd_cda_lib::config::configfile::Configuration) {
+    fn update_config(self, config: &mut Configuration) {
         if let Some(onboard_tester) = self.onboard_tester {
             config.onboard_tester = onboard_tester;
         }

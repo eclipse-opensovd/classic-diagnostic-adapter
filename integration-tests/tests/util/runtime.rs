@@ -12,17 +12,17 @@
  */
 
 use std::{
-    sync::{Arc, LazyLock},
+    sync::LazyLock,
     time::{Duration, Instant},
 };
 
+use cda_core::DiagServiceResponseStruct;
 use cda_interfaces::datatypes::{ComParams, DatabaseNamingConvention, FlatbBufConfig};
 use cda_plugin_security::{DefaultSecurityPlugin, DefaultSecurityPluginData};
-use cda_sovd::DefaultRouteProvider;
 use cda_tracing::LoggingConfig;
 use futures::FutureExt as _;
 use opensovd_cda_lib::config::configfile::{ConfigSanity, Configuration, ServerConfig};
-use tokio::sync::{Mutex, MutexGuard, OnceCell, mpsc};
+use tokio::sync::{Mutex, MutexGuard, OnceCell};
 use tracing_subscriber::layer::SubscriberExt;
 
 use crate::util::TestingError;
@@ -165,20 +165,6 @@ fn start_cda(config: Configuration) {
     TOKIO_RUNTIME.spawn(async move {
         tracing::info!("Starting CDA...");
 
-        let database_path = config.databases_path.clone();
-        let flash_files_path = config.flash_files_path.clone();
-        let protocol = cda_interfaces::Protocol::DoIpDobt;
-
-        let (databases, file_managers) =
-            opensovd_cda_lib::load_databases::<DefaultSecurityPluginData>(
-                &database_path,
-                protocol,
-                config.com_params,
-                config.database_naming_convention,
-                config.flat_buf,
-            )
-            .await;
-
         let webserver_config = cda_sovd::WebServerConfig {
             host: config.server.address.clone(),
             port: config.server.port,
@@ -192,64 +178,47 @@ fn start_cda(config: Configuration) {
         }
         .shared();
 
-        let (variant_detection_tx, variant_detection_rx) = mpsc::channel(50);
+        // Launch the webserver with deferred initialization
+        let dynamic_router =
+            match cda_sovd::launch_webserver(webserver_config, clonable_shutdown_signal.clone())
+                .await
+            {
+                Ok(router) => router,
+                Err(e) => {
+                    tracing::error!(error = ?e, "Failed to launch webserver");
+                    std::process::exit(1);
+                }
+            };
 
-        let databases = Arc::new(databases);
-        let diagnostic_gateway = match opensovd_cda_lib::create_diagnostic_gateway(
-            Arc::clone(&databases),
-            &config.doip,
-            variant_detection_tx,
+        let vehicle_data = opensovd_cda_lib::load_vehicle_data::<_, DefaultSecurityPluginData>(
+            &config,
             clonable_shutdown_signal.clone(),
         )
         .await
-        {
-            Ok(gateway) => gateway,
-            Err(e) => {
-                tracing::error!(error = %e, "Failed to create diagnostic gateway");
-                std::process::exit(1);
-            }
-        };
+        .map_err(|e| {
+            tracing::error!({error=?e});
+            std::process::exit(1);
+        })
+        .unwrap();
 
-        let uds = opensovd_cda_lib::create_uds_manager(
-            diagnostic_gateway,
-            databases,
-            variant_detection_rx,
-        );
-
-        let exit_code = match opensovd_cda_lib::start_webserver::<
-            _,
-            DefaultSecurityPlugin,
-            DefaultRouteProvider,
-        >(
-            flash_files_path,
-            file_managers,
-            webserver_config,
-            uds,
-            clonable_shutdown_signal,
-            None,
+        cda_sovd::add_vehicle_routes::<DiagServiceResponseStruct, _, _, DefaultSecurityPlugin>(
+            &dynamic_router,
+            vehicle_data.uds_manager,
+            config.flash_files_path.clone(),
+            vehicle_data.file_managers,
         )
         .await
-        {
-            Ok(Ok(())) => {
-                tracing::info!("Shutting down...");
-                None
-            }
-            Ok(Err(e)) => {
-                tracing::error!(error = ?e, "Failed to start webserver");
-                Some(1)
-            }
-            Err(je) => {
-                if je.is_panic() {
-                    let reason = je.into_panic();
-                    tracing::error!(panic_reason = ?reason, "Webserver thread panicked");
-                }
-                Some(1)
-            }
-        };
+        .map_err(|e| {
+            tracing::error!({error=?e});
+            std::process::exit(1);
+        })
+        .unwrap();
 
-        if let Some(exit_code) = exit_code {
-            std::process::exit(exit_code);
-        }
+        tracing::info!("CDA fully initialized and ready to serve requests");
+
+        // Wait for shutdown signal
+        clonable_shutdown_signal.await;
+        tracing::info!("Shutting down...");
     });
 }
 
@@ -411,15 +380,25 @@ fn use_docker() -> bool {
         .unwrap_or(true)
 }
 
-async fn wait_for_http_ready(url: String, service_name: &str) -> Result<(), TestingError> {
+async fn wait_for_http_ready(
+    url: String,
+    service_name: &str,
+    result: Option<http::StatusCode>,
+) -> Result<(), TestingError> {
     let client = reqwest::Client::new();
     let start_time = Instant::now();
     let timeout = Duration::from_secs(10);
 
     while start_time.elapsed() < timeout {
         match client.get(&url).send().await {
-            Ok(_) => {
-                return Ok(());
+            Ok(response) => {
+                if let Some(expected_status) = result {
+                    if response.status() == expected_status {
+                        return Ok(());
+                    }
+                } else {
+                    return Ok(());
+                }
             }
             _ => tokio::time::sleep(Duration::from_millis(250)).await,
         }
@@ -432,12 +411,14 @@ async fn wait_for_http_ready(url: String, service_name: &str) -> Result<(), Test
 
 async fn wait_for_ecu_sim_ready(host: &str, sim_control_port: u16) -> Result<(), TestingError> {
     let url = format!("http://{host}:{sim_control_port}");
-    wait_for_http_ready(url, "ECU sim").await
+    wait_for_http_ready(url, "ECU sim", None).await
 }
 
 pub(crate) async fn wait_for_cda_online(cfg: &ServerConfig) -> Result<(), TestingError> {
-    let url = format!("http://{}:{}", cfg.address, cfg.port);
-    wait_for_http_ready(url, "CDA").await
+    // the endpoint below is chosen because it is only available once
+    // the vehicle routes are loaded in and works without authentication
+    let url = format!("http://{}:{}/vehicle/v15/components", cfg.address, cfg.port);
+    wait_for_http_ready(url, "CDA", Some(http::StatusCode::OK)).await
 }
 
 fn ecu_sim_dir() -> Result<std::path::PathBuf, TestingError> {
