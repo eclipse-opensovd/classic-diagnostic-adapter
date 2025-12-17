@@ -88,16 +88,6 @@ async fn main() -> Result<(), AppError> {
     tracing::info!("Starting CDA - version {}", cda_version());
     let clonable_shutdown_signal = shutdown_signal().shared();
 
-    #[cfg(feature = "health")]
-    let (health_sender, health_receiver) = tokio::sync::broadcast::channel(1);
-
-    #[cfg(feature = "health")]
-    let health_args = opensovd_cda_lib::health::HealthArgs {
-        additional_providers: None,
-        sender: health_sender,
-        receiver: health_receiver,
-    };
-
     opensovd_cda_lib::start_cda::<
         _,
         DefaultSecurityPluginData,
@@ -107,7 +97,7 @@ async fn main() -> Result<(), AppError> {
         config,
         clonable_shutdown_signal,
         #[cfg(feature = "health")]
-        health_args,
+        None,
     )
     .await
 }

@@ -684,44 +684,39 @@ pub mod health {
         vam_received: bool,
         status: cda_health::Status,
         gateway_connections: HashMap<String, ConnectionState>,
+    }
 
-        notifier: tokio::sync::broadcast::Sender<()>,
+    impl Default for DoipHealthProvider {
+        fn default() -> Self {
+            Self::new()
+        }
     }
 
     impl DoipHealthProvider {
         #[must_use]
-        pub fn new(notifier: tokio::sync::broadcast::Sender<()>) -> Self {
+        pub fn new() -> Self {
             Self {
                 vir_send: false,
                 vam_received: false,
                 status: cda_health::Status::Pending,
-                notifier,
                 gateway_connections: HashMap::new(),
             }
         }
 
         pub(crate) fn set_vir_sent(&mut self, sent: bool) {
             self.vir_send = sent;
-            self.send_notification();
         }
+
         pub(crate) fn set_vam_received(&mut self, received: bool) {
             self.vam_received = received;
-            self.send_notification();
         }
+
         pub(crate) fn set_connection_state(&mut self, gateway: &str, state: ConnectionState) {
             self.gateway_connections.insert(gateway.to_owned(), state);
-            self.send_notification();
         }
 
         pub(crate) fn set_status(&mut self, status: cda_health::Status) {
             self.status = status;
-            self.send_notification();
-        }
-
-        fn send_notification(&self) {
-            if let Err(e) = self.notifier.send(()) {
-                tracing::error!(error = %e, "Failed to notify health status change");
-            }
         }
     }
 

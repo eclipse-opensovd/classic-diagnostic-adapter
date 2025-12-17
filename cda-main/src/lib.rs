@@ -775,17 +775,17 @@ pub async fn start_cda<
 >(
     config: Configuration,
     shutdown_signal: F,
-    #[cfg(feature = "health")] health_args: health::HealthArgs,
+    #[cfg(feature = "health")] additional_providers: Option<
+        Vec<Arc<RwLock<dyn cda_health::ComponentHealthProvider>>>,
+    >,
 ) -> Result<(), AppError> {
     #[cfg(feature = "health")]
     let (health_endpoint_opt, exit_on_fatal) = if config.health.enabled {
         (
             Some(health::setup_health_endpoint(
                 &config.health,
-                &health_args.sender,
-                health_args.receiver,
                 shutdown_signal.clone(),
-                None, // may be used in an OEM context
+                additional_providers,
             )),
             config.health.exit_process_on_error,
         )
@@ -902,12 +902,6 @@ pub mod health {
 
     use crate::cda_version;
 
-    pub struct HealthArgs {
-        pub additional_providers: Option<Vec<Arc<RwLock<dyn cda_health::ComponentHealthProvider>>>>,
-        pub sender: tokio::sync::broadcast::Sender<()>,
-        pub receiver: tokio::sync::broadcast::Receiver<()>,
-    }
-
     pub struct Health {
         pub server_handle: tokio::task::JoinHandle<Result<(), cda_health::HealthError>>,
         pub db: Arc<RwLock<DbHealthProvider>>,
@@ -916,18 +910,14 @@ pub mod health {
 
     pub fn setup_health_endpoint(
         config: &cda_health::config::HealthConfig,
-        event_sender: &tokio::sync::broadcast::Sender<()>,
-        event_receiver: tokio::sync::broadcast::Receiver<()>,
         shutdown_signal: impl Future<Output = ()> + Send + Clone + 'static,
         additional_providers: Option<Vec<Arc<RwLock<dyn cda_health::ComponentHealthProvider>>>>,
     ) -> Health {
         type ArcRwLockHealth = Arc<RwLock<dyn cda_health::ComponentHealthProvider>>;
 
         tracing::info!("Starting health endpoint...");
-        let db = Arc::new(RwLock::new(DbHealthProvider::new(event_sender.clone())));
-        let doip = Arc::new(RwLock::new(cda_comm_doip::health::DoipHealthProvider::new(
-            event_sender.clone(),
-        )));
+        let db = Arc::new(RwLock::new(DbHealthProvider::new()));
+        let doip = Arc::new(RwLock::new(cda_comm_doip::health::DoipHealthProvider::new()));
 
         let mut providers: Vec<_> = vec![
             Arc::clone(&db) as ArcRwLockHealth,
@@ -945,7 +935,6 @@ pub mod health {
                 providers,
                 shutdown_signal,
                 cda_version().to_string(),
-                event_receiver,
             )
             .await
         });
@@ -985,28 +974,30 @@ pub mod health {
         loaded_databases: usize,
         errors: HashMap<String, String>,
         status: cda_health::Status,
-        notifier: tokio::sync::broadcast::Sender<()>,
+    }
+
+    impl Default for DbHealthProvider {
+        fn default() -> Self {
+            Self::new()
+        }
     }
 
     impl DbHealthProvider {
         #[must_use]
-        pub fn new(notifier: tokio::sync::broadcast::Sender<()>) -> Self {
+        pub fn new() -> Self {
             Self {
                 loaded_databases: 0,
                 errors: HashMap::new(),
                 status: cda_health::Status::Pending,
-                notifier,
             }
         }
 
         pub(crate) fn insert_error(&mut self, key: String, error: String) {
             self.errors.insert(key, error);
-            self.send_notification();
         }
 
         pub(crate) fn set_status(&mut self, status: cda_health::Status) {
             self.status = status;
-            self.send_notification();
         }
 
         pub(crate) fn loaded_databases(&self) -> usize {
@@ -1015,13 +1006,6 @@ pub mod health {
 
         pub(crate) fn set_loaded_databases(&mut self, count: usize) {
             self.loaded_databases = count;
-            self.send_notification();
-        }
-
-        fn send_notification(&self) {
-            if let Err(e) = self.notifier.send(()) {
-                tracing::error!(error = %e, "Failed to notify health status change");
-            }
         }
     }
 

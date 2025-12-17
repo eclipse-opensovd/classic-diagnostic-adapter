@@ -1641,7 +1641,6 @@ dependencies = [
  "sovd-interfaces",
  "thiserror 2.0.17",
  "tokio",
- "tokio-tungstenite",
  "tracing",
  "tracing-subscriber",
  "url",

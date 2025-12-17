@@ -103,7 +103,6 @@ async fn test_custom_demo_endpoint() {
     }
     .shared();
 
-    let (_tx, rx) = tokio::sync::broadcast::channel::<()>(1);
     let health_shutdown_signal = shutdown_signal.clone();
     let health_config_clone = health_config.clone();
     let _health_endpoint = cda_interfaces::spawn_named!("health", async move {
@@ -112,7 +111,6 @@ async fn test_custom_demo_endpoint() {
             vec![],
             health_shutdown_signal,
             "0.1".to_owned(),
-            rx,
         )
         .await
     });

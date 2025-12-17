@@ -24,10 +24,7 @@ use cda_interfaces::dlt_ctx;
 use cda_tracing::create_axum_trace_layer;
 use futures::FutureExt;
 use serde::{Deserialize, Serialize};
-use tokio::{
-    net::TcpListener,
-    sync::{RwLock, broadcast},
-};
+use tokio::{net::TcpListener, sync::RwLock};
 use tower::Layer;
 
 use crate::{config::HealthConfig, serve::rewrite_request_uri};
@@ -82,23 +79,16 @@ pub struct ComponentHealth {
     pub details: Option<serde_json::Value>,
 }
 
-struct WebserverState<T: ?Sized + ComponentHealthProvider, F: Future<Output = ()> + Send + 'static>
-{
+struct WebserverState<T: ?Sized + ComponentHealthProvider> {
     components: Vec<Arc<RwLock<T>>>,
     version: String,
-    shutdown_signal: F,
-    health_rx: broadcast::Receiver<()>,
 }
 
-impl<T: ?Sized + ComponentHealthProvider, F: Future<Output = ()> + Send + 'static + Clone> Clone
-    for WebserverState<T, F>
-{
+impl<T: ?Sized + ComponentHealthProvider> Clone for WebserverState<T> {
     fn clone(&self) -> Self {
         Self {
             components: self.components.clone(),
             version: self.version.clone(),
-            shutdown_signal: self.shutdown_signal.clone(),
-            health_rx: self.health_rx.resubscribe(),
         }
     }
 }
@@ -120,7 +110,6 @@ pub async fn launch_webserver<T, F>(
     providers: Vec<Arc<RwLock<T>>>,
     shutdown_signal: F,
     version: String,
-    receiver: broadcast::Receiver<()>,
 ) -> Result<(), HealthError>
 where
     // Relaxed size bounds to allow for trait objects, so it's
@@ -133,12 +122,7 @@ where
 
     let app_routes = {
         let app = Router::new()
-            .merge(serve::route::<T, F>(
-                providers,
-                version,
-                receiver,
-                clonable_shutdown_signal.clone(),
-            ))
+            .merge(serve::route::<T>(providers, version))
             .finish_api_with(&mut api, |api| api_docs(api, config.clone()));
 
         create_axum_trace_layer(app, "HLTH".to_owned())
@@ -223,7 +207,6 @@ mod serve {
 
     use aide::axum::{ApiRouter, RouterExt, routing};
     use axum::{Router, http::Request};
-    use futures::future::Shared;
     use tokio::sync::RwLock;
 
     use crate::{ComponentHealthProvider, WebserverState};
@@ -235,20 +218,13 @@ mod serve {
         req
     }
 
-    pub(crate) fn route<
-        T: ?Sized + ComponentHealthProvider + Sync + Send + 'static,
-        F: Future<Output = ()> + Send + 'static,
-    >(
+    pub(crate) fn route<T: ?Sized + ComponentHealthProvider + Sync + Send + 'static>(
         providers: Vec<Arc<RwLock<T>>>,
         version: String,
-        health_rx: tokio::sync::broadcast::Receiver<()>,
-        shutdown_signal: Shared<F>,
     ) -> ApiRouter {
         let state = WebserverState {
             components: providers,
             version,
-            shutdown_signal,
-            health_rx,
         };
 
         Router::new()
@@ -257,10 +233,6 @@ mod serve {
                 "/health/ready",
                 routing::get_with(health::ready::get, health::ready::docs_get),
             )
-            // WebSocket endpoint uses standard route instead of api_route because
-            // aide does not support WebSocketUpgrade extractors
-            // for OpenAPI documentation generation
-            .route("/health/ws", axum::routing::get(health::websocket::get))
             .with_state(state)
     }
 
@@ -278,15 +250,12 @@ mod serve {
         use crate::{
             ComponentHealth, ComponentHealthProvider, HealthResponse, Status, WebserverState,
         };
-        pub(crate) async fn get<
-            T: ?Sized + ComponentHealthProvider,
-            F: Future<Output = ()> + Send + 'static,
-        >(
+        pub(crate) async fn get<T: ?Sized + ComponentHealthProvider>(
             State(WebserverState {
                 components,
                 version,
                 ..
-            }): State<WebserverState<T, F>>,
+            }): State<WebserverState<T>>,
         ) -> Response {
             (
                 axum::http::StatusCode::OK,
@@ -340,8 +309,8 @@ mod serve {
 
         pub(crate) fn docs_get(op: TransformOperation) -> TransformOperation {
             op.description(
-                "Get the health status of the application. Appending `/ws` to the url opens a \
-                 WebSocket for real-time health updates. Details are optional and provided by the \
+                "Get the health status of the application. Use `/stream` endpoint for real-time \
+                 health updates via Server-Sent Events. Details are optional and provided by the \
                  specific health providers.",
             )
             .response_with::<200, Json<HealthResponse>, _>(|res| {
@@ -376,15 +345,12 @@ mod serve {
                 ComponentHealthProvider, Status, WebserverState, serve::health::health_response,
             };
 
-            pub(crate) async fn get<
-                T: ?Sized + ComponentHealthProvider,
-                F: Future<Output = ()> + Send + 'static,
-            >(
+            pub(crate) async fn get<T: ?Sized + ComponentHealthProvider>(
                 State(WebserverState {
                     components,
                     version,
                     ..
-                }): State<WebserverState<T, F>>,
+                }): State<WebserverState<T>>,
             ) -> Response {
                 let health = health_response(&components, version).await;
                 match health.status {
@@ -400,132 +366,6 @@ mod serve {
                 )
                 .response_with::<200, String, _>(|res| res.description("Application is ready"))
                 .response_with::<503, String, _>(|res| res.description("Application is not ready"))
-            }
-        }
-
-        pub(crate) mod websocket {
-            use std::sync::Arc;
-
-            use axum::{
-                extract::{
-                    State,
-                    ws::{WebSocket, WebSocketUpgrade},
-                },
-                response::Response,
-            };
-            use futures::{SinkExt, StreamExt};
-            use tokio::sync::{RwLock, broadcast};
-
-            use crate::{WebserverState, serve::health::health_response};
-
-            pub(crate) async fn get<
-                T: crate::ComponentHealthProvider + ?Sized + 'static,
-                F: Future<Output = ()> + Send + Clone + 'static,
-            >(
-                ws: WebSocketUpgrade,
-                State(WebserverState {
-                    health_rx,
-                    shutdown_signal,
-                    version,
-                    components,
-                }): State<WebserverState<T, F>>,
-            ) -> Response {
-                ws.on_upgrade(move |socket| {
-                    handle_ws(
-                        socket,
-                        health_rx,
-                        version,
-                        components.clone(),
-                        shutdown_signal,
-                    )
-                })
-            }
-
-            async fn handle_ws<
-                T: crate::ComponentHealthProvider + ?Sized + 'static,
-                F: Future<Output = ()> + Send + 'static + Clone,
-            >(
-                socket: WebSocket,
-                mut health_rx: broadcast::Receiver<()>,
-                version: String,
-                components: Vec<Arc<RwLock<T>>>,
-                shutdown_signal: F,
-            ) {
-                async fn send_health<T: crate::ComponentHealthProvider + ?Sized + 'static>(
-                    sender: &mut futures::stream::SplitSink<WebSocket, axum::extract::ws::Message>,
-                    components: &[Arc<RwLock<T>>],
-                    version: &str,
-                ) -> bool {
-                    let health = health_response(components, version.to_owned()).await;
-                    sender
-                        .send(axum::extract::ws::Message::Text(
-                            serde_json::json!(health).to_string().into(),
-                        ))
-                        .await
-                        .is_ok()
-                }
-
-                let (mut sender, mut receiver) = socket.split();
-
-                // Spawn a task to forward messages from the broadcast channel to the WebSocket
-                let mut send_task = tokio::spawn(async move {
-                    loop {
-                        // Send initial health status upon connection
-                        if !send_health(&mut sender, &components, &version).await {
-                            break;
-                        }
-
-                        let signal = shutdown_signal.clone();
-                        tokio::select! {
-                            msg_result = health_rx.recv() => {
-                                match msg_result {
-                                    Ok(()) => {
-                                        if !send_health(&mut sender, &components, &version).await {
-                                            break;
-                                        }
-                                    }
-                                    Err(e) => {
-                                        match e {
-                                            broadcast::error::RecvError::Lagged(count) => {
-                                                tracing::debug!(
-                                                    "Websocket lagged and missed {count} messages");
-                                            }
-                                            broadcast::error::RecvError::Closed => {
-                                                tracing::error!("Health broadcast channel closed");
-                                                break;
-                                            }
-                                        }
-                                    }
-                                }
-                            },
-                            () = signal => {
-                                if let Err(e) =
-                                    sender.send(axum::extract::ws::Message::Close(None)).await {
-                                   tracing::debug!(
-                                        "Failed to send websocket close during shutdown: {e}");
-                                }
-                                // Shutdown signal received
-                                break;
-                            }
-                        }
-                    }
-                });
-
-                // Spawn a task to handle incoming messages from the client
-                let mut recv_task = tokio::spawn(async move {
-                    while let Some(Ok(_msg)) = receiver.next().await {
-                        // We don't process incoming messages, just keep the connection alive
-                    }
-                });
-
-                tokio::select! {
-                    _ = &mut send_task => {
-                        recv_task.abort();
-                    }
-                    _ = &mut recv_task => {
-                        send_task.abort();
-                    }
-                }
             }
         }
     }

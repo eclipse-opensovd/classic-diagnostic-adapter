@@ -184,19 +184,12 @@ fn start_cda(config: Configuration) {
         }
         .shared();
 
-        let (health_sender, health_receiver) = tokio::sync::broadcast::channel(1);
-        let health_args = opensovd_cda_lib::health::HealthArgs {
-            additional_providers: None,
-            sender: health_sender,
-            receiver: health_receiver,
-        };
-
         opensovd_cda_lib::start_cda::<
             _,
             DefaultSecurityPluginData,
             DefaultSecurityPlugin,
             DefaultRouteProvider,
-        >(config, clonable_shutdown_signal, health_args)
+        >(config, clonable_shutdown_signal, None)
         .await
     });
 }
@@ -403,80 +396,47 @@ pub(crate) async fn wait_for_vam_received(
     config: &Configuration,
     timeout: Option<Duration>,
 ) -> Result<(), TestingError> {
-    use tokio_tungstenite::tungstenite::Message;
-
-    let ws_url = format!(
-        "ws://{}:{}/health/ws",
+    let url = format!(
+        "http://{}:{}/health",
         config.health.address, config.health.port
     );
 
+    let client = reqwest::Client::new();
     let timeout = timeout.unwrap_or(Duration::from_secs(10));
     let start_time = Instant::now();
 
     while start_time.elapsed() < timeout {
-        match tokio_tungstenite::connect_async(&ws_url).await {
-            Ok((mut ws_stream, _response)) => {
-                use futures::stream::StreamExt;
-
-                loop {
-                    // Check overall timeout
-                    if start_time.elapsed() >= timeout {
-                        break;
-                    }
-
-                    // Calculate remaining timeout for this read
-                    let remaining = timeout.saturating_sub(start_time.elapsed());
-                    match tokio::time::timeout(remaining, ws_stream.next()).await {
-                        Ok(Some(Ok(Message::Text(text)))) => {
-                            if let Ok(health) = serde_json::from_str::<HealthResponse>(&text) {
-                                let vam_rx = health
-                                    .components
-                                    .iter()
-                                    .find(|c| c.name.eq_ignore_ascii_case("doip"))
-                                    .and_then(|doip_component| {
-                                        doip_component
-                                            .details
-                                            .as_ref()
-                                            .and_then(|details| details.get("vam_received"))
-                                            .and_then(serde_json::Value::as_bool)
-                                    })
-                                    .unwrap_or(false);
-                                if vam_rx {
-                                    return Ok(());
-                                }
-                            }
-                        }
-                        Ok(Some(Ok(Message::Close(_)))) => {
-                            tracing::debug!("Health websocket closed by server");
-                            break;
-                        }
-                        Ok(Some(Ok(_))) => {
-                            // Other message types, continue
-                        }
-                        Ok(Some(Err(e))) => {
-                            tracing::debug!("Websocket error: {e}");
-                            break;
-                        }
-                        Ok(None) => {
-                            tracing::debug!("Websocket stream ended");
-                            break;
-                        }
-                        Err(_) => {
-                            tracing::debug!("Websocket receive timeout");
-                            break;
-                        }
+        match client.get(&url).send().await {
+            Ok(response) => {
+                if let Ok(text) = response.text().await
+                    && let Ok(health) = serde_json::from_str::<HealthResponse>(&text)
+                {
+                    let vam_rx = health
+                        .components
+                        .iter()
+                        .find(|c| c.name.eq_ignore_ascii_case("doip"))
+                        .and_then(|doip_component| {
+                            doip_component
+                                .details
+                                .as_ref()
+                                .and_then(|details| details.get("vam_received"))
+                                .and_then(serde_json::Value::as_bool)
+                        })
+                        .unwrap_or(false);
+                    if vam_rx {
+                        return Ok(());
                     }
                 }
             }
             Err(e) => {
-                tracing::debug!("Failed to connect to health websocket: {e}");
-                tokio::time::sleep(Duration::from_millis(250)).await;
+                tracing::debug!("Failed to poll health endpoint: {e}");
             }
         }
+        tokio::time::sleep(Duration::from_millis(250)).await;
     }
 
     Err(TestingError::ProcessFailed(format!(
-        "VAM was not received from the health websocket within {timeout:?}",
+        "VAM was not received from the health endpoint within {timeout:?}",
     )))
 }
 
