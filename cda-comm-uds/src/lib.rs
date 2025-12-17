@@ -124,7 +124,6 @@ impl<S: EcuGateway, R: DiagServiceResponse, T: EcuManager<Response = R>> UdsMana
             .ok_or_else(|| DiagServiceError::NotFound(format!("ECU {ecu_name} not found")))
     }
 
-
     #[tracing::instrument(
         skip(self, service, payload),
         fields(
@@ -1249,7 +1248,6 @@ impl<S: EcuGateway, R: DiagServiceResponse, T: EcuManager<Response = R>> UdsEcu
         }
     }
 
-
     async fn get_ecu_reset_services(
         &self,
         ecu_name: &str,
@@ -1432,7 +1430,6 @@ impl<S: EcuGateway, R: DiagServiceResponse, T: EcuManager<Response = R>> UdsEcu
         Ok(())
     }
 
-
     async fn ecu_flash_transfer_status(
         &self,
         ecu_name: &str,
@@ -1452,7 +1449,6 @@ impl<S: EcuGateway, R: DiagServiceResponse, T: EcuManager<Response = R>> UdsEcu
         Ok(vec![meta_data.clone()])
     }
 
-
     async fn ecu_flash_transfer_status_id(
         &self,
         ecu_name: &str,
@@ -1468,7 +1464,6 @@ impl<S: EcuGateway, R: DiagServiceResponse, T: EcuManager<Response = R>> UdsEcu
                 ))
             })
     }
-
 
     #[tracing::instrument(skip(self), err,
         fields(
@@ -1894,7 +1889,6 @@ impl<S: EcuGateway, R: DiagServiceResponse, T: EcuManager<Response = R>> UdsEcu
             .functional_groups();
         Ok(groups)
     }
-
 }
 
 fn status_value_to_bool(val: &serde_json::Value) -> Result<bool, DiagServiceError> {
