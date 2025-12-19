@@ -17,10 +17,7 @@ use aide::axum::{ApiRouter, routing};
 use axum::{Json, http::StatusCode};
 use cda_comm_doip::config::DoipConfig;
 use cda_interfaces::UdsEcu;
-use cda_sovd::{
-    Locks,
-    dynamic_router::{DynamicRouter},
-};
+use cda_sovd::{Locks, dynamic_router::DynamicRouter};
 use futures::FutureExt;
 use opensovd_cda_lib::{DatabaseMap, FileManagerMap, config::configfile::ServerConfig};
 use reqwest::Method;

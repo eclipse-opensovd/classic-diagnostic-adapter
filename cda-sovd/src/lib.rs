@@ -32,6 +32,8 @@ use tokio::net::TcpListener;
 use tower::{Layer, ServiceExt as TowerServiceExt};
 use tower_http::{normalize_path::NormalizePathLayer, trace::TraceLayer};
 
+pub use crate::sovd::locks::Locks;
+
 pub mod dynamic_router;
 mod openapi;
 pub(crate) mod sovd;
@@ -106,7 +108,7 @@ where
 // type alias does not allow specifying hasher, we set the hasher globally.
 #[allow(clippy::implicit_hasher)]
 #[tracing::instrument(
-    skip(dynamic_router, ecu_uds, file_manager),
+    skip(dynamic_router, ecu_uds, file_manager, locks),
     fields(
         flash_files_path = %flash_files_path
     )
@@ -116,6 +118,7 @@ pub async fn add_vehicle_routes<R, T, M, S>(
     ecu_uds: T,
     flash_files_path: String,
     file_manager: HashMap<String, M>,
+    locks: Arc<Locks>,
 ) -> Result<(), DoipGatewaySetupError>
 where
     R: DiagServiceResponse,
@@ -133,7 +136,7 @@ where
     });
     aide::generate::extract_schemas(true);
     let mut api = OpenApi::default();
-    let vehicle_router = sovd::route::<R, T, M, S>(&ecu_uds, flash_files_path, file_manager)
+    let vehicle_router = sovd::route::<R, T, M, S>(&ecu_uds, flash_files_path, file_manager, locks)
         .await
         .route(
             SWAGGER_UI_ROUTE,
