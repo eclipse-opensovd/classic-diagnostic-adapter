@@ -25,6 +25,7 @@ use cda_interfaces::{
     file_manager::{Chunk, ChunkType},
 };
 use cda_plugin_security::SecurityPlugin;
+use cda_sovd::Locks;
 use tokio::{
     signal,
     sync::{RwLock, mpsc},
@@ -55,6 +56,7 @@ type LoadedEcuMap<S> = HashMap<String, (EcuManager<S>, EcuMetadata)>;
 pub struct VehicleData<S: SecurityPlugin> {
     pub file_managers: FileManagerMap,
     pub uds_manager: UdsManagerType<S>,
+    pub locks: Arc<cda_sovd::Locks>,
 }
 
 /// Loads vehicle databases and sets up SOVD routes in the webserver.
@@ -110,9 +112,11 @@ pub async fn load_vehicle_data<
         vdetect.start_variant_detection().await;
     });
 
+    let ecu_names = uds.get_ecus().await;
     Ok(VehicleData {
         uds_manager: uds,
         file_managers,
+        locks: Arc::new(Locks::new(ecu_names)),
     })
 }
 
@@ -326,14 +330,15 @@ async fn load_database<S: SecurityPlugin>(
                     continue;
                 };
 
-                let ecu_payload: Vec<u8> = if let Some(payload) =
-                    ecu_data.into_iter().next().and_then(|c| c.payload)
-                {
-                    payload
-                } else {
-                    tracing::error!(ecu_name = %ecu_name, "No payload found in diagnostic description for ECU");
-                    continue;
-                };
+                let ecu_payload: Vec<u8> =
+                    if let Some(payload) = ecu_data.into_iter().next().and_then(|c| c.payload) {
+                        payload
+                    } else {
+                        tracing::error!(
+                        ecu_name = %ecu_name,
+                        "No payload found in diagnostic description for ECU");
+                        continue;
+                    };
 
                 let diag_data_base = match cda_database::datatypes::DiagnosticDatabase::new(
                     mdd_path.clone(),

@@ -27,7 +27,7 @@ use axum::{
 };
 use axum_extra::extract::WithRejection;
 use cda_interfaces::{
-    HashMap, HashMapExtensions, SchemaProvider, UdsEcu,
+    HashMap, SchemaProvider, UdsEcu,
     diagservices::{DiagServiceResponse, UdsPayloadData},
     file_manager::FileManager,
 };
@@ -35,17 +35,15 @@ use cda_plugin_security::{SecurityPluginLoader, security_plugin_middleware};
 use error::{ApiError, api_error_from_diag_response};
 use http::{Uri, header};
 use indexmap::IndexMap;
+pub use locks::Locks;
 use schemars::Schema;
 use sovd_interfaces::{components::ecu as sovd_ecu, sovd2uds::FileList};
 use tokio::sync::RwLock;
 use uuid::Uuid;
 
-use crate::sovd::{
-    components::ecu::{
-        configurations, data, faults, genericservice, modes, operations, x_single_ecu_jobs,
-        x_sovd2uds_bulk_data, x_sovd2uds_download,
-    },
-    locks::{LockType, Locks},
+use crate::sovd::components::ecu::{
+    configurations, data, faults, genericservice, modes, operations, x_single_ecu_jobs,
+    x_sovd2uds_bulk_data, x_sovd2uds_download,
 };
 
 pub(crate) mod apps;
@@ -178,6 +176,7 @@ pub async fn route<
     uds: &T,
     flash_files_path: String,
     mut file_manager: HashMap<String, U>,
+    locks: Arc<Locks>,
 ) -> Router {
     let mut ecu_names = uds.get_ecus().await;
 
@@ -188,13 +187,7 @@ pub async fn route<
     }));
     let state = WebserverState {
         uds: uds.clone(),
-        locks: Arc::new(Locks {
-            vehicle: LockType::Vehicle(Arc::new(RwLock::new(None))),
-            ecu: LockType::Ecu(Arc::new(RwLock::new(
-                ecu_names.iter().map(|ecu| (ecu.clone(), None)).collect(),
-            ))),
-            functional_group: LockType::FunctionalGroup(Arc::new(RwLock::new(HashMap::new()))),
-        }),
+        locks,
         flash_data: Arc::clone(&flash_data),
     };
 

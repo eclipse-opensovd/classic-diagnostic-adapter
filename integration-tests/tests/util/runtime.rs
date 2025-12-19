@@ -206,6 +206,7 @@ fn start_cda(config: Configuration) {
             vehicle_data.uds_manager,
             config.flash_files_path.clone(),
             vehicle_data.file_managers,
+            vehicle_data.locks,
         )
         .await
         .map_err(|e| {
