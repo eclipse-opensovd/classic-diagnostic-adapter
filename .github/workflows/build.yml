@@ -93,7 +93,7 @@ jobs:
       - name: Cache Rust dependencies
         uses: Swatinem/rust-cache@v2
       - name: Install cargo-deny
-        run: cargo install --locked --version 0.18.3 cargo-deny
+        run: cargo install --locked --version 0.18.9 cargo-deny
       - name: Install taplo toml toolkit
         run: cargo install --locked --version 0.10.0 taplo-cli
       - name: check fmt
