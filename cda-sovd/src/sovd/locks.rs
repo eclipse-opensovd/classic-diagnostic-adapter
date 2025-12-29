@@ -21,7 +21,7 @@ use axum::{
 };
 use axum_extra::extract::WithRejection;
 use cda_interfaces::{
-    HashMap, TesterPresentType, UdsEcu, diagservices::DiagServiceResponse,
+    HashMap, HashMapExtensions, TesterPresentType, UdsEcu, diagservices::DiagServiceResponse,
     file_manager::FileManager,
 };
 use cda_plugin_security::Claims;
@@ -42,10 +42,10 @@ use crate::{
 };
 
 // later this likely will be a Vector of locks to support non exclusive locks
-pub(crate) type LockHashMap = HashMap<String, Option<Lock>>;
-pub(crate) type LockOption = Option<Lock>;
+pub type LockHashMap = HashMap<String, Option<Lock>>;
+pub type LockOption = Option<Lock>;
 
-pub(crate) struct Lock {
+pub struct Lock {
     sovd: sovd_interfaces::locking::Lock,
     expiration: DateTime<Utc>,
     owner: String,
@@ -99,14 +99,27 @@ impl LockCleanupFnHelper {
     }
 }
 
-pub(crate) struct Locks {
+pub struct Locks {
     pub vehicle: LockType,
     pub ecu: LockType,
     pub functional_group: LockType,
 }
 
+impl Locks {
+    #[must_use]
+    pub fn new(ecu_names: Vec<String>) -> Self {
+        Self {
+            vehicle: LockType::Vehicle(Arc::new(RwLock::new(None))),
+            ecu: LockType::Ecu(Arc::new(RwLock::new(
+                ecu_names.into_iter().map(|ecu| (ecu, None)).collect(),
+            ))),
+            functional_group: LockType::FunctionalGroup(Arc::new(RwLock::new(HashMap::new()))),
+        }
+    }
+}
+
 #[derive(Clone)]
-pub(crate) enum LockType {
+pub enum LockType {
     Vehicle(Arc<RwLock<LockOption>>),
     Ecu(Arc<RwLock<LockHashMap>>),
     FunctionalGroup(Arc<RwLock<LockHashMap>>),
