@@ -46,6 +46,8 @@ jobs:
         run: cargo fmt -- --check --config group_imports=StdExternalCrate
       - name: Formatting - check imports granularity
         run: cargo fmt -- --check --config imports_granularity=Crate
+      - name: Formatting - check hex literals
+        run: cargo fmt -- --check --config hex_literal_case=Upper
       - name: run clippy nightly
         run: cargo clippy --locked --all-targets -- -D warnings
 

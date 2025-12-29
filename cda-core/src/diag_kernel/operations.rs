@@ -633,7 +633,7 @@ mod tests {
         let result = super::json_value_to_uds_data(DataType::ByteField, None, &json_value);
         assert_eq!(
             result,
-            Ok(vec![255, 10, 128, 0xde, 0xad, 0xbe, 0xef, 0xca, 0x07])
+            Ok(vec![255, 10, 128, 0xDE, 0xAD, 0xBE, 0xEF, 0xCA, 0x07])
         );
     }
 
@@ -641,7 +641,7 @@ mod tests {
     fn test_hex_long() {
         let json_value = serde_json::json!("c0ffeca7");
         let result = super::json_value_to_uds_data(DataType::ByteField, None, &json_value);
-        assert_eq!(result, Ok(vec![0xc0, 0xff, 0xec, 0xa7]));
+        assert_eq!(result, Ok(vec![0xC0, 0xFF, 0xEC, 0xA7]));
     }
 
     #[test]
@@ -662,7 +662,7 @@ mod tests {
     fn test_float_string() {
         let json_value = serde_json::json!("10.42");
 
-        let int_result = Ok(vec![0x00, 0x00, 0x00, 0x0a]);
+        let int_result = Ok(vec![0x00, 0x00, 0x00, 0x0A]);
         assert_eq!(
             super::json_value_to_uds_data(DataType::Int32, None, &json_value),
             int_result
@@ -673,7 +673,7 @@ mod tests {
         );
         assert_eq!(
             super::json_value_to_uds_data(DataType::ByteField, None, &json_value),
-            Ok(vec![0x0a])
+            Ok(vec![0x0A])
         );
 
         assert_eq!(
@@ -734,7 +734,7 @@ mod tests {
             CompuCategory::Linear,
             &value,
         );
-        assert_eq!(result.unwrap(), 42_i32.to_be_bytes().to_vec());
+        assert_eq!(result.unwrap(), 42i32.to_be_bytes().to_vec());
 
         let value = serde_json::json!("42.42");
         let result = super::compu_convert(
@@ -743,7 +743,7 @@ mod tests {
             CompuCategory::Linear,
             &value,
         );
-        assert_eq!(result.unwrap(), 42.42_f32.to_be_bytes().to_vec());
+        assert_eq!(result.unwrap(), 42.42f32.to_be_bytes().to_vec());
 
         let value = serde_json::json!("42.4242");
         let result = super::compu_convert(
@@ -752,7 +752,7 @@ mod tests {
             CompuCategory::Linear,
             &value,
         );
-        assert_eq!(result.unwrap(), 42.4242_f64.to_be_bytes().to_vec());
+        assert_eq!(result.unwrap(), 42.4242f64.to_be_bytes().to_vec());
 
         let value = serde_json::json!(42);
         let result = super::compu_convert(
@@ -761,7 +761,7 @@ mod tests {
             CompuCategory::Linear,
             &value,
         );
-        assert_eq!(result.unwrap(), 42_f64.to_be_bytes().to_vec());
+        assert_eq!(result.unwrap(), 42f64.to_be_bytes().to_vec());
 
         let value = serde_json::json!(42);
         let result = super::compu_convert(
@@ -770,7 +770,7 @@ mod tests {
             CompuCategory::Linear,
             &value,
         );
-        assert_eq!(result.unwrap(), 42_i32.to_be_bytes().to_vec());
+        assert_eq!(result.unwrap(), 42i32.to_be_bytes().to_vec());
     }
 
     #[test]
@@ -808,7 +808,7 @@ mod tests {
             CompuCategory::Linear,
             &value,
         );
-        assert_eq!(result.unwrap(), 170_i32.to_be_bytes().to_vec());
+        assert_eq!(result.unwrap(), 170i32.to_be_bytes().to_vec());
 
         let result = super::compu_convert(
             DataType::Float32,
@@ -816,7 +816,7 @@ mod tests {
             CompuCategory::Linear,
             &value,
         );
-        assert_eq!(result.unwrap(), 170.46_f32.to_be_bytes().to_vec());
+        assert_eq!(result.unwrap(), 170.46f32.to_be_bytes().to_vec());
     }
 
     #[test]
@@ -852,7 +852,7 @@ mod tests {
             CompuCategory::TextTable,
             &value,
         );
-        assert_eq!(result.unwrap(), 42_i32.to_be_bytes().to_vec());
+        assert_eq!(result.unwrap(), 42i32.to_be_bytes().to_vec());
 
         let value = serde_json::json!("NotFound");
         let result = super::compu_convert(
