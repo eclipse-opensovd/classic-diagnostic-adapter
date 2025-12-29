@@ -452,3 +452,141 @@ impl IntoResponse for AuthError {
             .into_response()
     }
 }
+
+#[cfg(feature = "test-utils")]
+pub mod mock {
+    use aide::axum::IntoApiResponse;
+    use async_trait::async_trait;
+    use axum::{Json, body::Bytes, http::StatusCode};
+    use cda_interfaces::DiagServiceError;
+    use http::{HeaderMap, request::Parts};
+
+    use crate::{
+        AuthApi, AuthError, AuthorizationRequestHandler, Claims, SecurityApi, SecurityPlugin,
+        SecurityPluginInitializer, SecurityPluginLoader,
+    };
+
+    mockall::mock! {
+        pub Claims {}
+        impl Claims for Claims {
+            fn sub(&self) -> &'static str;
+        }
+    }
+
+    mockall::mock! {
+        pub AuthApi {}
+
+        impl AuthApi for AuthApi {
+            fn claims(&self) -> Box<&'static dyn Claims>;
+        }
+    }
+
+    mockall::mock! {
+        pub SecurityApi {}
+
+        impl SecurityApi for SecurityApi {
+            fn validate_service<'a>(
+                &self,
+                service: &cda_database::datatypes::DiagService<'a>,
+            ) -> Result<(), DiagServiceError>;
+        }
+    }
+
+    mockall::mock! {
+        pub SecurityPlugin {}
+
+        impl Clone for SecurityPlugin {
+            fn clone(&self) -> Self;
+        }
+
+        impl AuthApi for SecurityPlugin {
+            fn claims(&self) -> Box<&'static dyn Claims>;
+        }
+
+        impl SecurityApi for SecurityPlugin {
+            fn validate_service<'a>(
+                &self,
+                service: &cda_database::datatypes::DiagService<'a>,
+            ) -> Result<(), DiagServiceError>;
+        }
+
+        impl SecurityPlugin for SecurityPlugin {
+            fn as_auth_plugin(&self) -> &dyn AuthApi;
+            fn as_security_plugin(&self) -> &dyn SecurityApi;
+        }
+    }
+
+    /// A simple test security plugin that always allows access.
+    ///
+    /// This struct provides a concrete implementation of the `SecurityPlugin` trait
+    /// that can be used in tests without requiring mock expectations. It always
+    /// returns successful results and provides a default test user.
+    #[derive(Clone)]
+    pub struct TestSecurityPlugin;
+
+    /// Test claims implementation with a fixed test user.
+    pub struct TestClaims;
+
+    impl Claims for TestClaims {
+        fn sub(&self) -> &'static str {
+            "test_user"
+        }
+    }
+
+    impl AuthApi for TestSecurityPlugin {
+        fn claims(&self) -> Box<&dyn Claims> {
+            Box::new(&TestClaims)
+        }
+    }
+
+    impl SecurityApi for TestSecurityPlugin {
+        fn validate_service(
+            &self,
+            _service: &cda_database::datatypes::DiagService<'_>,
+        ) -> Result<(), DiagServiceError> {
+            Ok(())
+        }
+    }
+
+    impl SecurityPlugin for TestSecurityPlugin {
+        fn as_auth_plugin(&self) -> &dyn AuthApi {
+            self
+        }
+
+        fn as_security_plugin(&self) -> &dyn SecurityApi {
+            self
+        }
+    }
+
+    impl Default for TestSecurityPlugin {
+        fn default() -> Self {
+            Self
+        }
+    }
+
+    #[async_trait]
+    impl SecurityPluginInitializer for TestSecurityPlugin {
+        async fn initialize_from_request_parts(
+            &self,
+            _parts: &mut Parts,
+        ) -> Result<Box<dyn SecurityPlugin>, AuthError> {
+            Ok(Box::new(Self))
+        }
+    }
+
+    #[async_trait]
+    impl AuthorizationRequestHandler for TestSecurityPlugin {
+        async fn authorize(_headers: HeaderMap, _body_bytes: Bytes) -> impl IntoApiResponse {
+            (
+                StatusCode::OK,
+                Json(serde_json::json!({
+                    "access_token": "test_token",
+                    "token_type": "Bearer",
+                    "expires_in": 3600
+                })),
+            )
+        }
+    }
+
+    impl SecurityPluginLoader for TestSecurityPlugin {}
+}
