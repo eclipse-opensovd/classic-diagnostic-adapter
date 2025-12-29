@@ -27,7 +27,10 @@ use crate::{
         http::{
             auth_header, extract_field_from_json, response_to_json, response_to_t, send_cda_request,
         },
-        runtime::{TestRuntime, restart_cda, setup_integration_test, start_ecu_sim, stop_ecu_sim},
+        runtime::{
+            TestRuntime, restart_cda, setup_integration_test, start_ecu_sim, stop_ecu_sim,
+            wait_for_vam_received,
+        },
     },
 };
 
@@ -308,30 +311,21 @@ async fn test_variant_detection_duplicates() {
     // status should be detected without manual variant detection
     start_ecu_sim(&runtime.ecu_sim).await.unwrap();
 
-    // wait in loop, to check if the CDA receives the spontaneous VAM when is online
-    for attempt in 0..=5 {
-        let status = ecu_status(&runtime.config, &auth, sovd::ECU_FLXC1000_ENDPOINT)
+    // wait for VAM to be received by checking the health endpoint
+    wait_for_vam_received(&runtime.config, None).await.unwrap();
+
+    // After we received the VAM, we still have to wait for the variant detection to complete.
+    for i in 0..=3 {
+        let status = ecu_status(&runtime.config, &auth, sovd::ECU_FLXCNG1000_ENDPOINT)
             .await
-            .expect("failed to get ecu status");
-
-        if status.variant.state == sovd_interfaces::components::ecu::State::Online {
-            break;
+            .unwrap();
+        if status.variant.state == sovd_interfaces::components::ecu::State::Duplicate {
+            return;
         }
-
-        assert!(
-            attempt < 5,
-            "ECU did not come online in time, status {status:?}"
-        );
-        tokio::time::sleep(Duration::from_secs(1)).await;
+        tokio::time::sleep(Duration::from_secs(i)).await;
     }
 
-    validate_ecu_state(
-        runtime,
-        &auth,
-        sovd::ECU_FLXCNG1000_ENDPOINT,
-        sovd_interfaces::components::ecu::State::Duplicate,
-    )
-    .await;
+    panic!("ECU FLXCNG1000 did not reach Duplicate state after restarting ECU sim");
 }
 
 async fn validate_ecu_state(
