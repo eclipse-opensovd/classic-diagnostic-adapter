@@ -19,7 +19,7 @@ use std::{
 
 use cda_interfaces::{
     DiagServiceError, DoipComParamProvider, DoipGatewaySetupError, EcuAddressProvider, EcuGateway,
-    HashMap, HashMapExtensions, ServicePayload, TransmissionParameters, UdsResponse, dlt_ctx,
+    HashMap, HashMapExtensions, ServicePayload, TransmissionParameters, UdsResponse, dlt_ctx, util,
 };
 use doip_definitions::payload::{DiagnosticMessage, DiagnosticMessageNack, GenericNack};
 use thiserror::Error;
@@ -42,7 +42,7 @@ const NRC_TEMPORARILY_NOT_AVAILABLE: u8 = 0x94;
 enum DiagnosticResponse {
     Msg(DiagnosticMessage),
     Pending(u16),
-    Ack(u16),
+    Ack((u16, Vec<u8>)),
     Nack(DiagnosticMessageNack),
     AliveCheckResponse,
     TesterPresentNRC(u8),
@@ -327,7 +327,12 @@ impl<T: EcuAddressProvider + DoipComParamProvider> EcuGateway for DoipDiagGatewa
                 async move {
                     let mut ecu = ecu_mtx.lock().await;
                     let lock_acquired = start.elapsed();
-                    tracing::debug!(ecu_name = %transmission_params.ecu_name, "ECU lock acquired");
+                    tracing::debug!(
+                        ecu_name = %transmission_params.ecu_name,
+                        locked_after = ?lock_acquired,
+                        message_data = %util::tracing::print_hex(&doip_message.message, 8),
+                        "Sending Message to ECU"
+                    );
 
                     // Clear any pending messages
                     while ecu.receiver.try_recv().is_ok() {}
@@ -356,8 +361,23 @@ impl<T: EcuAddressProvider + DoipComParamProvider> EcuGateway for DoipDiagGatewa
                             'ack_waiting: loop {
                                 if let Ok(result) = ecu.receiver.recv().await {
                                     match result {
-                                        Ok(DiagnosticResponse::Ack(_)) => {
+                                        Ok(DiagnosticResponse::Ack((_, prev))) => {
                                             tracing::debug!("Received ACK");
+                                            if !prev.is_empty()
+                                                && !doip_message.message.starts_with(&prev)
+                                            {
+                                                tracing::warn!(
+                                                    previous = %util::tracing::print_hex(
+                                                        &prev, 8
+                                                    ),
+                                                    sent = %util::tracing::print_hex(
+                                                        &doip_message.message, 8
+                                                    ),
+                                                    "ACK previous message does \
+                                                    not match sent message"
+                                                );
+                                                continue 'ack_waiting;
+                                            }
                                             break 'ack_waiting true;
                                         }
                                         Ok(DiagnosticResponse::GenericNack(nack)) => {
@@ -425,6 +445,10 @@ impl<T: EcuAddressProvider + DoipComParamProvider> EcuGateway for DoipDiagGatewa
                             return;
                         }
                     } else {
+                        tracing::warn!(
+                            "Timeout waiting for ACK/NACK from ECU after {:?}",
+                            transmission_params.timeout_ack
+                        );
                         // timeout branch of tokio::select, no response received,
                         // informing receiver about timeout and giving up.
                         try_send_uds_response(&response_sender, Err(DiagServiceError::Timeout))

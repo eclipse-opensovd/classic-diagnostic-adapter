@@ -461,6 +461,7 @@ impl<S: SecurityPlugin> cda_interfaces::EcuManager for EcuManager<S> {
     /// # Errors
     /// Will return `Err` in cases where the payload doesn´t match the expected UDS response, or if
     /// elements of the response cannot be correctly mapped from the raw data.
+    #[allow(clippy::too_many_lines)] // keep this together
     #[tracing::instrument(
         target = "convert_from_uds",
         skip(self, diag_service, payload),
@@ -485,11 +486,26 @@ impl<S: SecurityPlugin> cda_interfaces::EcuManager for EcuManager<S> {
             .map(datatypes::DiagComm)
             .ok_or_else(|| DiagServiceError::InvalidDatabase("No DiagComm found".to_owned()))?;
 
+        let sid = match payload.data.as_slice() {
+            [service_ids::NEGATIVE_RESPONSE, sid_nrq, ..] => *sid_nrq,
+            [service_ids::NEGATIVE_RESPONSE] => {
+                return Err(DiagServiceError::BadPayload(
+                    "NRC without accompanying SID_RQ received".to_owned(),
+                ));
+            }
+            [sid, ..] => *sid,
+            [] => {
+                return Err(DiagServiceError::BadPayload(
+                    "Missing service id".to_owned(),
+                ));
+            }
+        };
+
         let mut uds_payload = Payload::new(&payload.data);
-        let sid = uds_payload
-            .first()
-            .ok_or_else(|| DiagServiceError::BadPayload("Missing SID".to_owned()))?;
-        let sid_value = sid.to_string();
+        let response_first_byte = uds_payload.first().ok_or_else(|| {
+            DiagServiceError::BadPayload("Payload too short to read first byte".to_owned())
+        })?;
+        let response_first_byte_value = response_first_byte.to_string();
 
         let responses: Vec<_> = mapped_service
             .pos_responses()
@@ -505,8 +521,10 @@ impl<S: SecurityPlugin> cda_interfaces::EcuManager for EcuManager<S> {
                     params.iter().map(datatypes::Parameter).collect();
                 if params.iter().any(|p| {
                     p.byte_position() == 0
-                        && p.specific_data_as_coded_const()
-                            .is_some_and(|c| c.coded_value().is_some_and(|v| v == sid_value))
+                        && p.specific_data_as_coded_const().is_some_and(|c| {
+                            c.coded_value()
+                                .is_some_and(|v| v == response_first_byte_value)
+                        })
                 }) {
                     Some((r, params))
                 } else {
@@ -596,12 +614,12 @@ impl<S: SecurityPlugin> cda_interfaces::EcuManager for EcuManager<S> {
         } else {
             // Returning a response here, because even valid databases may not define a
             // response for a service.
-            tracing::debug!("No matching response found for SID: {sid_value}");
+            tracing::debug!("No matching response found for SID: {sid}");
             Ok(DiagServiceResponseStruct {
                 service: diag_service.clone(),
                 data: payload.data.clone(),
                 mapped_data: None,
-                response_type: if *sid == NEGATIVE_RESPONSE {
+                response_type: if *response_first_byte == NEGATIVE_RESPONSE {
                     DiagServiceResponseType::Negative
                 } else {
                     DiagServiceResponseType::Positive

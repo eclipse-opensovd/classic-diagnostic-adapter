@@ -145,7 +145,12 @@ impl<S: EcuGateway, R: DiagServiceResponse, T: EcuManager<Response = R>> UdsMana
         timeout: Option<Duration>,
     ) -> Result<R, DiagServiceError> {
         let start = Instant::now();
-        tracing::debug!(service = ?service, payload = ?payload, "Sending UDS request");
+        tracing::debug!(
+            service = ?service,
+            payload = ?payload.as_ref()
+                .map(std::string::ToString::to_string),
+            "Sending UDS request"
+        );
         let ecu = self.ecu_manager(ecu_name)?;
         let payload = {
             let ecu = ecu.read().await;
@@ -240,13 +245,13 @@ impl<S: EcuGateway, R: DiagServiceResponse, T: EcuManager<Response = R>> UdsMana
         let sent_sid = payload.data.first();
 
         // outer loop to retry sending frames, resend frames must deal with (N)ACK again
+        let (response_tx, mut response_rx) = mpsc::channel(2);
         let (response, sent_after) = 'send: loop {
-            let (response_tx, mut response_rx) = mpsc::channel(2);
             self.gateway
                 .send(
                     transmission_params.clone(),
                     payload.clone(),
-                    response_tx,
+                    response_tx.clone(),
                     expect_response,
                 )
                 .await?;
@@ -282,6 +287,7 @@ impl<S: EcuGateway, R: DiagServiceResponse, T: EcuManager<Response = R>> UdsMana
                                                 .map(|sid| sid.saturating_add(UDS_RESPONSE_OFFSET))
                                                 .as_ref()))
                                 {
+                                    tracing::debug!("Received expected UDS message: {:?}", msg);
                                     break 'read_uds_messages Ok(msg);
                                 }
                                 tracing::warn!("Received unexpected UDS message: {:?}", msg);
@@ -345,6 +351,10 @@ impl<S: EcuGateway, R: DiagServiceResponse, T: EcuManager<Response = R>> UdsMana
                                 );
                             }
                             Err(e) => {
+                                tracing::debug!(
+                                    error = ?e,
+                                    "Error receiving UDS response from gateway"
+                                );
                                 // i.e. happens when the response is a NACK
                                 // or no (n)ack was received before timeout.
                                 // The Gateway will handle these cases and only
@@ -364,13 +374,18 @@ impl<S: EcuGateway, R: DiagServiceResponse, T: EcuManager<Response = R>> UdsMana
                     Err(_) => {
                         // error means the tokio::time::timeout
                         // elapsed before a response was received
+                        tracing::debug!(
+                            "Timeout waiting for UDS response from gateway after {:?}",
+                            rx_timeout_next.unwrap_or(rx_timeout)
+                        );
                         break 'read_uds_messages Err(DiagServiceError::Timeout);
                     }
                 }
             };
+            tracing::debug!("Finished reading UDS messages from gateway");
             break 'send (uds_result, sent_after);
         };
-
+        drop(response_rx);
         drop(ecu_sem);
 
         let finish = start.elapsed().saturating_sub(sent_after);
