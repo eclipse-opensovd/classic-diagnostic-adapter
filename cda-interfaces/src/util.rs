@@ -70,6 +70,50 @@ pub mod dlt_ext {
     }
 }
 
+pub mod health_ext {
+    #[macro_export]
+    #[cfg(feature = "health")]
+    macro_rules! update_health_status {
+        ($health:expr, $status:expr) => {
+            if let Some(hp) = &$health {
+                let mut hp_write = hp.write().await.set_status($status);
+            }
+        };
+    }
+
+    #[macro_export]
+    #[cfg(not(feature = "health"))]
+    macro_rules! update_health_status {
+        ($health:expr, $status:expr) => {{}};
+    }
+
+    #[macro_export]
+    #[cfg(feature = "health")]
+    macro_rules! try_with_health {
+        ($health:expr, $expr:expr) => {
+            match $expr {
+                Ok(val) => Ok(val),
+                Err(e) => {
+                    cda_interfaces::update_health_status!(
+                        $health,
+                        cda_health::Status::Failed(e.to_string())
+                    );
+                    Err(e)
+                }
+            }
+        };
+    }
+
+    #[macro_export]
+    #[cfg(not(feature = "health"))]
+    macro_rules! try_with_health {
+        ($health:expr, $expr:expr) => {
+            // Just evaluate the expression without health tracking
+            $expr
+        };
+    }
+}
+
 /// Pad a byte slice to 4 bytes for u32 conversion.
 /// # Errors
 /// Returns `DiagServiceError::ParameterConversionError` if the input slice is longer than 4 bytes.

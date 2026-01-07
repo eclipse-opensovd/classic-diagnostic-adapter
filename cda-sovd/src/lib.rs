@@ -21,13 +21,13 @@ use axum::{
 };
 use cda_interfaces::{
     DoipGatewaySetupError, HashMap, SchemaProvider, UdsEcu, diagservices::DiagServiceResponse,
-    dlt_ctx, file_manager::FileManager,
+    file_manager::FileManager,
 };
 use cda_plugin_security::SecurityPluginLoader;
+use cda_tracing::create_axum_trace_layer;
 use futures::future::FutureExt;
 use tokio::net::TcpListener;
 use tower::Layer;
-use tower_http::trace::TraceLayer;
 
 mod openapi;
 pub(crate) mod sovd;
@@ -187,9 +187,9 @@ where
                 let router = Router::new();
                 U::register_custom_routes(router)
             }))
-            .finish_api_with(&mut api, openapi::api_docs);
+            .finish_api_with(&mut api, |api| openapi::api_docs(api, config.clone()));
 
-        create_trace_layer(app)
+        create_axum_trace_layer(app, "SOVD".to_owned())
             .layer(tower_http::timeout::TimeoutLayer::new(
                 std::time::Duration::from_secs(30),
             ))
@@ -259,55 +259,4 @@ fn rewrite_request_uri<B>(mut req: Request<B>) -> Request<B> {
     };
     *req.uri_mut() = new_uri;
     req
-}
-fn create_trace_layer<S>(route: axum::Router<S>) -> axum::Router<S>
-where
-    S: Clone + Send + Sync + 'static,
-{
-    route.layer(
-        TraceLayer::new_for_http()
-            .make_span_with(|request: &axum::http::Request<_>| {
-                tracing::info_span!(
-                        "request",
-                    method = ?request.method(),
-                        path = request.uri().to_string(),
-                        status_code = tracing::field::Empty,
-                        latency = tracing::field::Empty,
-                        error = tracing::field::Empty,
-                        dlt_context = dlt_ctx!("SOVD"),
-                )
-            })
-            .on_request(|request: &axum::http::Request<_>, _span: &tracing::Span| {
-                tracing::debug!(
-                    method = %request.method(),
-                    path = %request.uri(),
-                    "Request received"
-                );
-            })
-            .on_response(
-                |response: &axum::http::Response<_>,
-                 latency: std::time::Duration,
-                 span: &tracing::Span| {
-                    span.record("status_code", response.status().as_u16());
-                    span.record("latency", format!("{latency:?}"));
-                },
-            )
-            .on_failure(
-                |error: tower_http::classify::ServerErrorsFailureClass,
-                 latency: std::time::Duration,
-                 span: &tracing::Span| {
-                    span.record("latency", format!("{latency:?}"));
-                    if let tower_http::classify::ServerErrorsFailureClass::StatusCode(status) =
-                        error
-                    {
-                        span.record("status_code", status.as_u16());
-                        if status == http::StatusCode::BAD_GATEWAY {
-                            return; // Ignore 502 errors
-                        }
-                    }
-                    span.record("error", error.to_string());
-                    tracing::error!("HTTP request failed");
-                },
-            ),
-    )
 }

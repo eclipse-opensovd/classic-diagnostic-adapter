@@ -31,6 +31,25 @@ use crate::{
 
 type ConnectionResetReason = String;
 
+/// Macro to set connection state when the health feature is enabled
+#[cfg(feature = "health")]
+macro_rules! set_health_connection_state {
+    ($health:expr, $gateway_name:expr, $state:expr) => {
+        if let Some(health) = &$health {
+            health
+                .write()
+                .await
+                .set_connection_state(&$gateway_name, $state);
+        }
+    };
+}
+
+/// Empty macro when the health feature is disabled
+#[cfg(not(feature = "health"))]
+macro_rules! set_health_connection_state {
+    ($health:expr, $gateway_name:expr, $state:expr) => {};
+}
+
 #[derive(Clone, Copy)]
 struct ConnectionSettings {
     routing_activation: Duration,
@@ -55,7 +74,7 @@ impl From<ConnectionError> for EcuError {
 }
 
 #[tracing::instrument(
-    skip(doip_connections, ecus, gateway_ecu_map),
+    skip(doip_connections, ecus, gateway_ecu_map, health),
     fields(
         gateway_ecu = %gateway.ecu,
         gateway_ip = %gateway.ip,
@@ -69,6 +88,7 @@ pub(crate) async fn handle_gateway_connection<T>(
     ecus: &Arc<HashMap<String, RwLock<T>>>,
     gateway_ecu_map: &HashMap<u16, Vec<u16>>,
     send_timeout: Duration,
+    #[cfg(feature = "health")] health: Option<&Arc<RwLock<crate::health::DoipHealthProvider>>>,
 ) -> Result<u16, EcuError>
 where
     T: EcuAddressProvider + DoipComParamProvider,
@@ -119,6 +139,8 @@ where
             max_retry_attempts: connection_retry_attempts,
             send_timeout,
         },
+        #[cfg(feature = "health")]
+        health,
     )
     .await
     {
@@ -182,7 +204,7 @@ fn create_ecu_receiver_map(
 
 #[allow(clippy::type_complexity)]
 #[tracing::instrument(
-    skip(routing_activation_request, connection_settings),
+    skip(routing_activation_request, connection_settings, health),
     fields(
         gateway_ip = %gateway_ip,
         gateway_name = %gateway_name,
@@ -196,6 +218,7 @@ async fn connection_handler(
     routing_activation_request: RoutingActivationRequest,
     ecus: Vec<u16>,
     connection_settings: ConnectionSettings,
+    #[cfg(feature = "health")] health: Option<&Arc<RwLock<crate::health::DoipHealthProvider>>>,
 ) -> Result<
     (
         mpsc::Sender<DiagnosticMessage>,
@@ -222,17 +245,31 @@ async fn connection_handler(
         outrx.insert(ecu, rx);
     }
 
+    set_health_connection_state!(health, gateway_name, crate::ConnectionState::Connecting);
+
     // setting up initial gateway connection
-    let gateway_conn = Arc::new(
-        ecu_connection::establish_ecu_connection(
-            &gateway_ip,
-            &gateway_name,
-            routing_activation_request,
-            connection_settings.connect_timeout,
-            connection_settings.routing_activation,
-        )
-        .await?,
-    );
+    let gateway_conn = match ecu_connection::establish_ecu_connection(
+        &gateway_ip,
+        &gateway_name,
+        routing_activation_request,
+        connection_settings.connect_timeout,
+        connection_settings.routing_activation,
+    )
+    .await
+    {
+        Ok(connection) => {
+            set_health_connection_state!(health, gateway_name, crate::ConnectionState::Established);
+            Arc::new(connection)
+        }
+        Err(e) => {
+            set_health_connection_state!(
+                health,
+                gateway_name,
+                crate::ConnectionState::Disconnected
+            );
+            return Err(e.into());
+        }
+    };
 
     // used by receiver / sender task to reset the connection
     let (conn_reset_tx, conn_reset_rx) = mpsc::channel::<ConnectionResetReason>(1);
@@ -244,6 +281,8 @@ async fn connection_handler(
         conn_reset_rx,
         conn_reset,
         connection_settings,
+        #[cfg(feature = "health")]
+        health.map(Arc::clone),
     );
 
     // communication between send / receiver task to unlock the connection in the receiver task
@@ -284,6 +323,7 @@ fn spawn_connection_reset_task(
     mut conn_reset_rx: mpsc::Receiver<ConnectionResetReason>,
     conn_reset: Arc<EcuConnectionTarget>,
     connection_timeouts: ConnectionSettings,
+    #[cfg(feature = "health")] health: Option<Arc<RwLock<crate::health::DoipHealthProvider>>>,
 ) {
     cda_interfaces::spawn_named!(
         &format!("doip-connection-reset-{gateway_ip}"),
@@ -292,9 +332,20 @@ fn spawn_connection_reset_task(
                 let mut reconnect_attempts = 0u32;
                 if let Some(reason) = conn_reset_rx.recv().await {
                     tracing::info!(reason = %reason, "Resetting connection");
+                    set_health_connection_state!(
+                        health,
+                        conn_reset.gateway_name,
+                        crate::ConnectionState::Disconnected
+                    );
+
                     let mut conn_guard = conn_reset.lock_connection().await;
 
                     'reconnect: loop {
+                        set_health_connection_state!(
+                            health,
+                            conn_reset.gateway_name,
+                            crate::ConnectionState::Connecting
+                        );
                         let new_connection = ecu_connection::establish_ecu_connection(
                             &gateway_ip,
                             &conn_reset.gateway_name,
@@ -319,6 +370,12 @@ fn spawn_connection_reset_task(
                                         return;
                                     }
                                 }
+                                set_health_connection_state!(
+                                    health,
+                                    conn_reset.gateway_name,
+                                    crate::ConnectionState::Established
+                                );
+
                                 break 'reconnect;
                             }
                             Err(e) => {
@@ -327,6 +384,12 @@ fn spawn_connection_reset_task(
                                     retry_delay = ?connection_timeouts.retry_delay,
                                     "Failed to reset connection, retrying"
                                 );
+                                set_health_connection_state!(
+                                    health,
+                                    conn_reset.gateway_name,
+                                    crate::ConnectionState::Disconnected
+                                );
+
                                 tokio::time::sleep(connection_timeouts.retry_delay).await;
                                 reconnect_attempts = reconnect_attempts.saturating_add(1);
                                 if reconnect_attempts >= connection_timeouts.max_retry_attempts {

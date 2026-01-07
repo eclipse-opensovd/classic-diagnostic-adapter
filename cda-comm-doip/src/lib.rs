@@ -75,6 +75,16 @@ struct DoipConnection {
     ip: String,
 }
 
+#[derive(Clone, Debug, serde::Serialize)]
+// Unused when health feature is disabled,
+// but it simplifies setting the connection state when this type is always available.
+#[allow(dead_code)]
+pub(crate) enum ConnectionState {
+    Connecting,
+    Established,
+    Disconnected,
+}
+
 #[derive(Error, Debug, Clone)]
 enum ConnectionError {
     #[error("Connection closed.")]
@@ -128,7 +138,7 @@ impl<T: EcuAddressProvider + DoipComParamProvider> DoipDiagGateway<T> {
     /// # Errors
     /// Returns `String` if initialization fails, e.g. when socket creation fails.
     #[tracing::instrument(
-        skip(doip_config, ecus, variant_detection, shutdown_signal),
+        skip(doip_config, ecus, variant_detection, shutdown_signal, health),
         fields(
             tester_ip = doip_config.tester_address,
             gateway_port = doip_config.gateway_port,
@@ -141,6 +151,7 @@ impl<T: EcuAddressProvider + DoipComParamProvider> DoipDiagGateway<T> {
         ecus: Arc<HashMap<String, RwLock<T>>>,
         variant_detection: mpsc::Sender<Vec<String>>,
         shutdown_signal: F,
+        #[cfg(feature = "health")] health: Option<Arc<RwLock<health::DoipHealthProvider>>>,
     ) -> Result<Self, DoipGatewaySetupError>
     where
         F: Future<Output = ()> + Clone + Send + 'static,
@@ -154,26 +165,43 @@ impl<T: EcuAddressProvider + DoipComParamProvider> DoipDiagGateway<T> {
         let gateway_port = *gateway_port;
         let send_timeout = Duration::from_millis(*send_timeout_ms);
 
+        cda_interfaces::update_health_status!(health.as_deref(), cda_health::Status::Starting);
         tracing::info!("Initializing DoipDiagGateway");
 
-        let mut socket = create_socket(tester_ip, gateway_port)?;
-        let mask = create_netmask(tester_ip, tester_subnet)?;
+        let mut socket = cda_interfaces::try_with_health!(
+            health.as_deref(),
+            create_socket(tester_ip, gateway_port)
+        )?;
 
-        let gateways = vir_vam::get_vehicle_identification::<T, F>(
+        let mask = cda_interfaces::try_with_health!(
+            health.as_deref(),
+            create_netmask(tester_ip, tester_subnet)
+        )?;
+
+        let gateways = match vir_vam::get_vehicle_identification::<T, F>(
             &mut socket,
             mask,
             gateway_port,
             &ecus,
             shutdown_signal.clone(),
+            #[cfg(feature = "health")]
+            health.as_ref(),
         )
         .await
-        .map_err(|err| {
-            DoipGatewaySetupError::ResourceError(format!(
-                "Could not get vehicle identification. {err}"
-            ))
-        })?;
+        {
+            Ok(gateways) => gateways,
+            Err(err) => {
+                let msg = format!("Could not get vehicle identification. {err}");
+                cda_interfaces::update_health_status!(
+                    health.as_deref(),
+                    cda_health::Status::Failed(msg.clone())
+                );
+                return Err(DoipGatewaySetupError::ResourceError(msg));
+            }
+        };
 
         let gateway = if gateways.is_empty() {
+            cda_interfaces::update_health_status!(health.as_deref(), cda_health::Status::Up);
             DoipDiagGateway {
                 doip_connections: Arc::new(RwLock::new(Vec::new())),
                 logical_address_to_connection: Arc::new(RwLock::new(HashMap::new())),
@@ -182,7 +210,6 @@ impl<T: EcuAddressProvider + DoipComParamProvider> DoipDiagGateway<T> {
             }
         } else {
             tracing::info!(gateway_count = gateways.len(), "Gateways found");
-
             // create mapping gateway_logical_address -> Vec<ecu_logical_address>
             let mut gateway_ecu_map: HashMap<u16, Vec<u16>> = HashMap::new();
             for ecu_lock in ecus.values() {
@@ -203,6 +230,8 @@ impl<T: EcuAddressProvider + DoipComParamProvider> DoipDiagGateway<T> {
                     &ecus,
                     &gateway_ecu_map,
                     send_timeout,
+                    #[cfg(feature = "health")]
+                    health.as_ref(),
                 )
                 .await
                 {
@@ -213,6 +242,7 @@ impl<T: EcuAddressProvider + DoipComParamProvider> DoipDiagGateway<T> {
                 }
             }
 
+            cda_interfaces::update_health_status!(health.as_deref(), cda_health::Status::Up);
             DoipDiagGateway {
                 doip_connections,
                 logical_address_to_connection: Arc::new(RwLock::new(logical_address_to_connection)),
@@ -229,6 +259,8 @@ impl<T: EcuAddressProvider + DoipComParamProvider> DoipDiagGateway<T> {
             variant_detection,
             send_timeout,
             shutdown_signal,
+            #[cfg(feature = "health")]
+            health.map(|hp| Arc::clone(&hp)),
         )
         .await;
 
@@ -660,4 +692,76 @@ async fn try_send_uds_response(
         return false;
     }
     true
+}
+
+#[cfg(feature = "health")]
+pub mod health {
+    use cda_interfaces::{HashMap, HashMapExtensions};
+
+    use crate::ConnectionState;
+
+    pub struct DoipHealthProvider {
+        vir_send: bool,
+        /// Indicates if a vehicle announcement message has been received.
+        /// The flag does not influence the health status directly.
+        /// This provider can be 'Up' even if no VAM has been received yet.
+        vam_received: bool,
+        status: cda_health::Status,
+        gateway_connections: HashMap<String, ConnectionState>,
+    }
+
+    impl Default for DoipHealthProvider {
+        fn default() -> Self {
+            Self::new()
+        }
+    }
+
+    impl DoipHealthProvider {
+        #[must_use]
+        pub fn new() -> Self {
+            Self {
+                vir_send: false,
+                vam_received: false,
+                status: cda_health::Status::Pending,
+                gateway_connections: HashMap::new(),
+            }
+        }
+
+        pub(crate) fn set_vir_sent(&mut self, sent: bool) {
+            self.vir_send = sent;
+        }
+
+        pub(crate) fn set_vam_received(&mut self, received: bool) {
+            self.vam_received = received;
+        }
+
+        pub(crate) fn set_connection_state(&mut self, gateway: &str, state: ConnectionState) {
+            self.gateway_connections.insert(gateway.to_owned(), state);
+        }
+
+        pub(crate) fn set_status(&mut self, status: cda_health::Status) {
+            self.status = status;
+        }
+    }
+
+    impl cda_health::ComponentHealthProvider for DoipHealthProvider {
+        fn health(&self) -> cda_health::ComponentHealth {
+            #[derive(serde::Serialize)]
+            struct Details {
+                vir_send: bool,
+                vam_received: bool,
+                gateway_connections: HashMap<String, ConnectionState>,
+            }
+
+            cda_health::ComponentHealth {
+                name: "Doip".to_owned(),
+                status: self.status.clone(),
+                details: Some(serde_json::json!(Details {
+                    vir_send: self.vir_send,
+                    vam_received: self.vam_received,
+                    gateway_connections: self.gateway_connections.clone(),
+                })),
+            }
+        }
+    }
 }

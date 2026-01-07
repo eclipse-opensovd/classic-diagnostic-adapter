@@ -12,17 +12,19 @@
  */
 
 use std::{
-    sync::{Arc, LazyLock},
+    sync::LazyLock,
     time::{Duration, Instant},
 };
 
+use cda_health::{HealthResponse, config::HealthConfig};
 use cda_interfaces::datatypes::{ComParams, DatabaseNamingConvention, FlatbBufConfig};
 use cda_plugin_security::{DefaultSecurityPlugin, DefaultSecurityPluginData};
 use cda_sovd::DefaultRouteProvider;
 use cda_tracing::LoggingConfig;
 use futures::FutureExt as _;
-use opensovd_cda_lib::config::configfile::{ConfigSanity, Configuration, ServerConfig};
-use tokio::sync::{Mutex, MutexGuard, OnceCell, mpsc};
+use http::StatusCode;
+use opensovd_cda_lib::config::configfile::{ConfigSanity, Configuration};
+use tokio::sync::{Mutex, MutexGuard, OnceCell};
 use tracing_subscriber::layer::SubscriberExt;
 
 use crate::util::TestingError;
@@ -96,14 +98,15 @@ async fn initialize_runtime() -> Result<TestRuntime, TestingError> {
     // this is useful for debugging tests
     // without having to rebuild the docker containers every time.
     let host = host();
-    let (cda_port, gateway_port, sim_control_port) = if use_docker() {
+    let (cda_port, gateway_port, sim_control_port, health_port) = if use_docker() {
         (
+            find_available_tcp_port(&host)?,
             find_available_tcp_port(&host)?,
             find_available_tcp_port(&host)?,
             find_available_tcp_port(&host)?,
         )
     } else {
-        (20002, 13400, 8181) // default ports for local usage
+        (20002, 13400, 8181, 20020) // default ports for local usage
     };
 
     let databases_path = mdd_file_path()?;
@@ -112,6 +115,12 @@ async fn initialize_runtime() -> Result<TestRuntime, TestingError> {
         server: opensovd_cda_lib::config::configfile::ServerConfig {
             address: host.clone(),
             port: cda_port,
+        },
+        health: HealthConfig {
+            enabled: true,
+            address: host.clone(),
+            port: health_port,
+            exit_process_on_error: false,
         },
         doip: opensovd_cda_lib::config::configfile::DoipConfig {
             tester_address: host.clone(),
@@ -137,13 +146,15 @@ async fn initialize_runtime() -> Result<TestRuntime, TestingError> {
 
     register_cleanup();
     if use_docker() {
-        start_docker_compose(cda_port, gateway_port, sim_control_port)?;
+        start_docker_compose(cda_port, health_port, gateway_port, sim_control_port)?;
     } else {
         start_ecu_sim(&ecu_sim).await?;
         start_cda(config.clone());
     }
 
-    wait_for_cda_online(&config.server).await?;
+    if wait_for_cda_online(&config.health).await.is_err() {
+        std::process::exit(1);
+    }
 
     Ok(TestRuntime { config, ecu_sim })
 }
@@ -165,25 +176,6 @@ fn start_cda(config: Configuration) {
     TOKIO_RUNTIME.spawn(async move {
         tracing::info!("Starting CDA...");
 
-        let database_path = config.databases_path.clone();
-        let flash_files_path = config.flash_files_path.clone();
-        let protocol = cda_interfaces::Protocol::DoIpDobt;
-
-        let (databases, file_managers) =
-            opensovd_cda_lib::load_databases::<DefaultSecurityPluginData>(
-                &database_path,
-                protocol,
-                config.com_params,
-                config.database_naming_convention,
-                config.flat_buf,
-            )
-            .await;
-
-        let webserver_config = cda_sovd::WebServerConfig {
-            host: config.server.address.clone(),
-            port: config.server.port,
-        };
-
         let (shutdown_tx, mut shutdown_rx) = tokio::sync::broadcast::channel(1);
         *CDA_SHUTDOWN.lock().await = Some(shutdown_tx);
 
@@ -192,64 +184,13 @@ fn start_cda(config: Configuration) {
         }
         .shared();
 
-        let (variant_detection_tx, variant_detection_rx) = mpsc::channel(50);
-
-        let databases = Arc::new(databases);
-        let diagnostic_gateway = match opensovd_cda_lib::create_diagnostic_gateway(
-            Arc::clone(&databases),
-            &config.doip,
-            variant_detection_tx,
-            clonable_shutdown_signal.clone(),
-        )
-        .await
-        {
-            Ok(gateway) => gateway,
-            Err(e) => {
-                tracing::error!(error = %e, "Failed to create diagnostic gateway");
-                std::process::exit(1);
-            }
-        };
-
-        let uds = opensovd_cda_lib::create_uds_manager(
-            diagnostic_gateway,
-            databases,
-            variant_detection_rx,
-        );
-
-        let exit_code = match opensovd_cda_lib::start_webserver::<
+        opensovd_cda_lib::start_cda::<
             _,
+            DefaultSecurityPluginData,
             DefaultSecurityPlugin,
             DefaultRouteProvider,
-        >(
-            flash_files_path,
-            file_managers,
-            webserver_config,
-            uds,
-            clonable_shutdown_signal,
-            None,
-        )
+        >(config, clonable_shutdown_signal, None)
         .await
-        {
-            Ok(Ok(())) => {
-                tracing::info!("Shutting down...");
-                None
-            }
-            Ok(Err(e)) => {
-                tracing::error!(error = ?e, "Failed to start webserver");
-                Some(1)
-            }
-            Err(je) => {
-                if je.is_panic() {
-                    let reason = je.into_panic();
-                    tracing::error!(panic_reason = ?reason, "Webserver thread panicked");
-                }
-                Some(1)
-            }
-        };
-
-        if let Some(exit_code) = exit_code {
-            std::process::exit(exit_code);
-        }
     });
 }
 
@@ -264,6 +205,7 @@ async fn stop_cda() -> Result<(), TestingError> {
 
 fn start_docker_compose(
     cda_port: u16,
+    cda_health_port: u16,
     gateway_port: u16,
     sim_control_port: u16,
 ) -> Result<(), TestingError> {
@@ -273,6 +215,7 @@ fn start_docker_compose(
     write_docker_env_file(
         &test_container_dir,
         cda_port,
+        cda_health_port,
         gateway_port,
         sim_control_port,
     )?;
@@ -323,6 +266,7 @@ fn docker_compose_down(container: Option<String>) -> Result<(), TestingError> {
 fn write_docker_env_file(
     test_container_dir: &std::path::Path,
     cda_port: u16,
+    cda_health_port: u16,
     gateway_port: u16,
     sim_control_port: u16,
 ) -> Result<(), TestingError> {
@@ -330,7 +274,8 @@ fn write_docker_env_file(
     let env_content = format!(
         "# Auto-generated environment file for integration tests\n# ECU Simulator Control \
          Port\nSIM_CONTROL_PORT={sim_control_port}\n# ECU Simulator Gateway \
-         Port\nSIM_GATEWAY_PORT={gateway_port}\n# CDA Service Port\nCDA_PORT={cda_port}\n",
+         Port\nSIM_GATEWAY_PORT={gateway_port}\n# CDA Service Port\nCDA_PORT={cda_port}\n# CDA \
+         Health Port\nCDA_HEALTH_PORT={cda_health_port}\n",
     );
 
     std::fs::write(&env_file_path, env_content)
@@ -402,7 +347,7 @@ pub(crate) async fn restart_cda(config: &Configuration) -> Result<(), TestingErr
         stop_cda().await?;
         start_cda(config.clone());
     }
-    wait_for_cda_online(&config.server).await
+    wait_for_cda_online(&config.health).await
 }
 
 fn use_docker() -> bool {
@@ -411,33 +356,88 @@ fn use_docker() -> bool {
         .unwrap_or(true)
 }
 
-async fn wait_for_http_ready(url: String, service_name: &str) -> Result<(), TestingError> {
+async fn wait_for_http_ready(
+    url: String,
+    service_name: &str,
+    code: Option<StatusCode>,
+) -> Result<(), TestingError> {
     let client = reqwest::Client::new();
     let start_time = Instant::now();
     let timeout = Duration::from_secs(10);
 
     while start_time.elapsed() < timeout {
-        match client.get(&url).send().await {
-            Ok(_) => {
+        let response = client.get(&url).send().await;
+        tracing::debug!("Checking {service_name} readiness at {url}: {response:?}");
+        match response {
+            Ok(r) if code.is_none_or(|s| s == r.status()) => {
                 return Ok(());
             }
             _ => tokio::time::sleep(Duration::from_millis(250)).await,
         }
     }
 
-    Err(TestingError::ProcessFailed(format!(
-        "{service_name} did not become ready within {timeout:?}"
-    )))
+    let msg = format!("{service_name} did not become ready within {timeout:?}");
+    tracing::error!(msg);
+
+    Err(TestingError::ProcessFailed(msg))
 }
 
 async fn wait_for_ecu_sim_ready(host: &str, sim_control_port: u16) -> Result<(), TestingError> {
     let url = format!("http://{host}:{sim_control_port}");
-    wait_for_http_ready(url, "ECU sim").await
+    wait_for_http_ready(url, "ECU sim", None).await
 }
 
-pub(crate) async fn wait_for_cda_online(cfg: &ServerConfig) -> Result<(), TestingError> {
-    let url = format!("http://{}:{}", cfg.address, cfg.port);
-    wait_for_http_ready(url, "CDA").await
+pub(crate) async fn wait_for_cda_online(config: &HealthConfig) -> Result<(), TestingError> {
+    let url = format!("http://{}:{}/health/ready", config.address, config.port);
+    wait_for_http_ready(url, "CDA", Some(StatusCode::NO_CONTENT)).await
+}
+
+pub(crate) async fn wait_for_vam_received(
+    config: &Configuration,
+    timeout: Option<Duration>,
+) -> Result<(), TestingError> {
+    let url = format!(
+        "http://{}:{}/health",
+        config.health.address, config.health.port
+    );
+
+    let client = reqwest::Client::new();
+    let timeout = timeout.unwrap_or(Duration::from_secs(10));
+    let start_time = Instant::now();
+
+    while start_time.elapsed() < timeout {
+        match client.get(&url).send().await {
+            Ok(response) => {
+                if let Ok(text) = response.text().await
+                    && let Ok(health) = serde_json::from_str::<HealthResponse>(&text)
+                {
+                    let vam_rx = health
+                        .components
+                        .iter()
+                        .find(|c| c.name.eq_ignore_ascii_case("doip"))
+                        .and_then(|doip_component| {
+                            doip_component
+                                .details
+                                .as_ref()
+                                .and_then(|details| details.get("vam_received"))
+                                .and_then(serde_json::Value::as_bool)
+                        })
+                        .unwrap_or(false);
+                    if vam_rx {
+                        return Ok(());
+                    }
+                }
+            }
+            Err(e) => {
+                tracing::debug!("Failed to poll health endpoint: {e}");
+            }
+        }
+        tokio::time::sleep(Duration::from_millis(250)).await;
+    }
+
+    Err(TestingError::ProcessFailed(format!(
+        "VAM was not received from the health endpoint within {timeout:?}",
+    )))
 }
 
 fn ecu_sim_dir() -> Result<std::path::PathBuf, TestingError> {
