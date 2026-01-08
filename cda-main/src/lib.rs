@@ -26,11 +26,13 @@ use cda_interfaces::{
 };
 use cda_plugin_security::SecurityPlugin;
 use cda_sovd::Locks;
+use cda_tracing::{OtelGuard, TracingSetupError, TracingWorkerGuard};
 use tokio::{
     signal,
     sync::{RwLock, mpsc},
 };
 use tracing::Instrument;
+use tracing_subscriber::layer::SubscriberExt;
 
 use crate::config::configfile::Configuration;
 
@@ -326,7 +328,9 @@ async fn load_database<S: SecurityPlugin>(
         ) {
             Ok((ecu_name, mut proto_data)) => {
                 let Some(ecu_data) = proto_data.remove(&ChunkType::DiagnosticDescription) else {
-                    tracing::error!(mdd_file = %mddfile.display(), "No diagnostic description found in MDD file");
+                    tracing::error!(
+                        mdd_file = %mddfile.display(),
+                        "No diagnostic description found in MDD file");
                     continue;
                 };
 
@@ -532,4 +536,55 @@ pub async fn shutdown_signal() {
         () = ctrl_c => {},
         () = terminate => {},
     }
+}
+
+pub struct TracingGuards {
+    _file: Option<TracingWorkerGuard>,
+    _otel: Option<OtelGuard>,
+}
+
+/// Setup the tracing to provide logs and analytics.
+/// # Errors
+/// Returns a `TracingSetupError` if the tracing setup fails.
+pub fn setup_tracing(config: &Configuration) -> Result<TracingGuards, TracingSetupError> {
+    let tracing = cda_tracing::new();
+    let mut layers = vec![];
+    layers.push(cda_tracing::new_term_subscriber(&config.logging));
+    #[cfg(feature = "tokio-tracing")]
+    layers.push(cda_tracing::new_tokio_tracing(
+        &config.logging.tokio_tracing,
+    )?);
+    let otel_guard = if config.logging.otel.enabled {
+        println!(
+            "Starting OpenTelemetry tracing with {}",
+            config.logging.otel.endpoint
+        );
+        let (guard, metrics_layer, otel_layer) =
+            cda_tracing::new_otel_subscriber(&config.logging.otel)?;
+        layers.push(metrics_layer);
+        layers.push(otel_layer);
+        Some(guard)
+    } else {
+        None
+    };
+
+    let file_guard = if config.logging.log_file_config.enabled {
+        let (guard, file_layer) =
+            cda_tracing::new_file_subscriber(&config.logging.log_file_config)?;
+        layers.push(file_layer);
+        Some(guard)
+    } else {
+        None
+    };
+
+    #[cfg(feature = "dlt-tracing")]
+    if config.logging.dlt_tracing.enabled {
+        layers.push(cda_tracing::new_dlt_tracing(&config.logging.dlt_tracing)?);
+    }
+
+    cda_tracing::init_tracing(tracing.with(layers))?;
+    Ok(TracingGuards {
+        _file: file_guard,
+        _otel: otel_guard,
+    })
 }
