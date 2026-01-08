@@ -18,8 +18,8 @@ use cda_comm_uds::UdsManager;
 use cda_core::{DiagServiceResponseStruct, EcuManager};
 use cda_database::{FileManager, ProtoLoadConfig};
 use cda_interfaces::{
-    DoipGatewaySetupError, EcuAddressProvider, EcuManager as EcuManagerTrait, HashMap,
-    HashMapEntry, HashMapExtensions, HashSet, Protocol, UdsEcu,
+    DiagServiceError, DoipGatewaySetupError, EcuAddressProvider, EcuManager as EcuManagerTrait,
+    HashMap, HashMapEntry, HashMapExtensions, HashSet, Protocol, UdsEcu,
     datatypes::{ComParams, DatabaseNamingConvention, FlatbBufConfig},
     dlt_ctx,
     file_manager::{Chunk, ChunkType},
@@ -61,6 +61,93 @@ pub struct VehicleData<S: SecurityPlugin> {
     pub locks: Arc<cda_sovd::Locks>,
 }
 
+#[derive(thiserror::Error, Debug)]
+pub enum AppError {
+    #[error("Initialization failed `{0}`")]
+    InitializationFailed(String),
+    #[error("Resource error: `{0}`")]
+    ResourceError(String),
+    #[error("Connection error `{0}`")]
+    ConnectionError(String),
+    #[error("Configuration error `{0}`")]
+    ConfigurationError(String),
+    #[error("Data error `{0}`")]
+    DataError(String),
+    #[error("Error during execution `{0}`")]
+    RuntimeError(String),
+    #[error("Not found: `{0}`")]
+    NotFound(String),
+    #[error("Server error: `{0}`")]
+    ServerError(String),
+}
+
+impl From<DiagServiceError> for AppError {
+    fn from(value: DiagServiceError) -> Self {
+        match value {
+            DiagServiceError::RequestNotSupported(_)
+            | DiagServiceError::BadPayload(_)
+            | DiagServiceError::ConnectionClosed
+            | DiagServiceError::UnexpectedResponse(_)
+            | DiagServiceError::EcuOffline(_)
+            | DiagServiceError::NoResponse(_)
+            | DiagServiceError::SendFailed(_)
+            | DiagServiceError::InvalidAddress(_)
+            | DiagServiceError::InvalidRequest(_)
+            | DiagServiceError::Timeout => Self::ConnectionError(value.to_string()),
+
+            DiagServiceError::ParameterConversionError(_)
+            | DiagServiceError::UnknownOperation
+            | DiagServiceError::UdsLookupError(_)
+            | DiagServiceError::VariantDetectionError(_)
+            | DiagServiceError::AccessDenied(_)
+            | DiagServiceError::InvalidSession(_)
+            | DiagServiceError::Nack(_) => Self::RuntimeError(value.to_string()),
+
+            DiagServiceError::InvalidSecurityPlugin => Self::ConfigurationError(value.to_string()),
+
+            DiagServiceError::ResourceError(_) => Self::ResourceError(value.to_string()),
+
+            DiagServiceError::NotFound(Some(_)) => Self::NotFound(value.to_string()),
+
+            DiagServiceError::NotFound(None) => {
+                Self::NotFound("Resource could not be found.".to_owned())
+            }
+            DiagServiceError::DataError(_)
+            | DiagServiceError::InvalidDatabase(_)
+            | DiagServiceError::DatabaseEntryNotFound(_)
+            | DiagServiceError::NotEnoughData { .. } => Self::DataError(value.to_string()),
+        }
+    }
+}
+
+impl From<DoipGatewaySetupError> for AppError {
+    fn from(value: DoipGatewaySetupError) -> Self {
+        match value {
+            DoipGatewaySetupError::InvalidAddress(_) => Self::ConnectionError(value.to_string()),
+            DoipGatewaySetupError::SocketCreationFailed(_)
+            | DoipGatewaySetupError::PortBindFailed(_) => {
+                Self::InitializationFailed(value.to_string())
+            }
+            DoipGatewaySetupError::InvalidConfiguration(_) => {
+                Self::ConfigurationError(value.to_string())
+            }
+            DoipGatewaySetupError::ResourceError(_) => Self::ResourceError(value.to_string()),
+            DoipGatewaySetupError::ServerError(_) => Self::ServerError(value.to_string()),
+        }
+    }
+}
+
+impl From<TracingSetupError> for AppError {
+    fn from(value: TracingSetupError) -> Self {
+        match value {
+            TracingSetupError::ResourceCreationFailed(_) => Self::ResourceError(value.to_string()),
+            TracingSetupError::SubscriberInitializationFailed(_) => {
+                Self::InitializationFailed(value.to_string())
+            }
+        }
+    }
+}
+
 /// Loads vehicle databases and sets up SOVD routes in the webserver.
 /// # Errors
 /// Returns `DoipGatewaySetupError` if we failed to create the diagnostic gateway
@@ -70,7 +157,7 @@ pub async fn load_vehicle_data<
 >(
     config: &Configuration,
     clonable_shutdown_signal: F,
-) -> Result<VehicleData<S>, DoipGatewaySetupError> {
+) -> Result<VehicleData<S>, AppError> {
     // Load databases in the background
     let database_path = config.databases_path.clone();
     let protocol = if config.onboard_tester {
@@ -103,7 +190,7 @@ pub async fn load_vehicle_data<
         Ok(gateway) => gateway,
         Err(e) => {
             tracing::error!(error = %e, "Failed to create diagnostic gateway");
-            return Err(e);
+            return Err(e.into());
         }
     };
 
@@ -230,7 +317,9 @@ pub async fn load_databases<S: SecurityPlugin>(
 
     let end = std::time::Instant::now();
 
-    tracing::info!(database_count = &databases.len(), duration = ?end.saturating_duration_since(start), "Loaded databases");
+    tracing::info!(
+        database_count = &databases.len(),
+        duration = ?end.saturating_duration_since(start), "Loaded databases");
     if databases.is_empty() {
         tracing::error!("Database load failed, no databases found");
         std::process::exit(1);
