@@ -11,8 +11,6 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-use std::fmt::Display;
-
 use aide::OperationOutput;
 use axum::{
     Json,
@@ -34,12 +32,17 @@ use serde_qs::axum::QsQueryRejection;
 use sovd_interfaces::error::ErrorCode;
 
 #[allow(dead_code)]
-#[derive(Debug, Deserialize, Serialize, schemars::JsonSchema)]
+#[derive(Debug, Deserialize, Serialize, schemars::JsonSchema, thiserror::Error)]
 pub enum ApiError {
+    #[error("Bad Request: {0}")]
     BadRequest(String),
+    #[error("Forbidden: {}", .0.as_ref().map(|m| format!(": {m}")).unwrap_or_default())]
     Forbidden(Option<String>),
+    #[error("Not Found: {}", .0.as_ref().map(|m| format!(": {m}")).unwrap_or_default())]
     NotFound(Option<String>),
+    #[error("Internal Server Error: {}", .0.as_ref().map(|m| format!(": {m}")).unwrap_or_default())]
     InternalServerError(Option<String>),
+    #[error("Conflict: {0}")]
     Conflict(String),
 }
 
@@ -54,8 +57,6 @@ impl From<DiagServiceError> for ApiError {
             | DiagServiceError::DatabaseEntryNotFound(_)
             | DiagServiceError::VariantDetectionError(_)
             | DiagServiceError::EcuOffline(_)
-            | DiagServiceError::ConfigurationError(_)
-            | DiagServiceError::SetupError(_)
             | DiagServiceError::ResourceError(_)
             | DiagServiceError::ConnectionClosed
             | DiagServiceError::InvalidRequest(_)
@@ -89,22 +90,6 @@ impl From<MddError> for ApiError {
             | MddError::Parsing(s)
             | MddError::MissingData(s) => ApiError::InternalServerError(Some(s)),
             MddError::InvalidParameter(s) => ApiError::NotFound(Some(s)),
-        }
-    }
-}
-
-impl Display for ApiError {
-    fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
-        let (status, message) = match &self {
-            ApiError::BadRequest(message) => ("Bad Request", Some(message)),
-            ApiError::Forbidden(message) => ("Forbidden", message.as_ref()),
-            ApiError::NotFound(message) => ("Not Found", message.as_ref()),
-            ApiError::InternalServerError(message) => ("Internal Server Error", message.as_ref()),
-            ApiError::Conflict(message) => ("Conflict", Some(message)),
-        };
-        match message {
-            Some(message) => write!(f, "{status}: {message}"),
-            None => write!(f, "{status}"),
         }
     }
 }
