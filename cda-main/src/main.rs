@@ -19,10 +19,9 @@ use clap::Parser;
 use futures::future::FutureExt;
 use opensovd_cda_lib::{
     config::configfile::{ConfigSanity, Configuration},
-    shutdown_signal,
+    setup_tracing, shutdown_signal,
 };
 use thiserror::Error;
-use tracing_subscriber::layer::SubscriberExt as _;
 
 use crate::AppError::{
     ConfigurationError, ConnectionError, DataError, InitializationFailed, NotFound, ResourceError,
@@ -175,41 +174,7 @@ async fn main() -> Result<(), AppError> {
 
     args.update_config(&mut config);
 
-    let tracing = cda_tracing::new();
-    let mut layers = vec![];
-    layers.push(cda_tracing::new_term_subscriber(&config.logging));
-    #[cfg(feature = "tokio-tracing")]
-    layers.push(cda_tracing::new_tokio_tracing(
-        &config.logging.tokio_tracing,
-    )?);
-    let _otel_guard = if config.logging.otel.enabled {
-        println!(
-            "Starting OpenTelemetry tracing with {}",
-            config.logging.otel.endpoint
-        );
-        let (guard, metrics_layer, otel_layer) =
-            cda_tracing::new_otel_subscriber(&config.logging.otel)?;
-        layers.push(metrics_layer);
-        layers.push(otel_layer);
-        Some(guard)
-    } else {
-        None
-    };
-    let _guard = if config.logging.log_file_config.enabled {
-        let (guard, file_layer) =
-            cda_tracing::new_file_subscriber(&config.logging.log_file_config)?;
-        layers.push(file_layer);
-        Some(guard)
-    } else {
-        None
-    };
-    #[cfg(feature = "dlt-tracing")]
-    if config.logging.dlt_tracing.enabled {
-        layers.push(cda_tracing::new_dlt_tracing(&config.logging.dlt_tracing)?);
-    }
-
-    cda_tracing::init_tracing(tracing.with(layers))?;
-
+    let _tracing_guards = setup_tracing(&config)?;
     tracing::info!("Starting CDA...");
 
     let webserver_config = cda_sovd::WebServerConfig {
