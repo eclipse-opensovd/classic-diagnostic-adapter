@@ -147,10 +147,18 @@ fn compu_lookup(
                 compu_lookup_scale_linear(diag_type, lookup, scale)
             }
             datatypes::CompuCategory::TextTable => compu_lookup_text_table(scale),
-            datatypes::CompuCategory::CompuCode => todo!("CompuCode lookup not implemented"),
-            datatypes::CompuCategory::TabIntp => todo!("TabIntp lookup not implemented"),
-            datatypes::CompuCategory::RatFunc => todo!("RatFunc lookup not implemented"),
-            datatypes::CompuCategory::ScaleRatFunc => todo!("ScaleRatFunc lookup not implemented"),
+            datatypes::CompuCategory::CompuCode => Err(DiagServiceError::RequestNotSupported(
+                "compu_lookup for CompuCode is not implemented".to_owned(),
+            )),
+            datatypes::CompuCategory::TabIntp => Err(DiagServiceError::RequestNotSupported(
+                "compu_lookup for TabIntp is not implemented".to_owned(),
+            )),
+            datatypes::CompuCategory::RatFunc => Err(DiagServiceError::RequestNotSupported(
+                "compu_lookup for RatFunc is not implemented".to_owned(),
+            )),
+            datatypes::CompuCategory::ScaleRatFunc => Err(DiagServiceError::RequestNotSupported(
+                "compu_lookup for ScaleRatFunc is not implemented".to_owned(),
+            )),
         },
         None => {
             // lookup NRCs from iso for negative responses
@@ -349,7 +357,9 @@ fn compu_convert(
     value: &serde_json::Value,
 ) -> Result<Vec<u8>, DiagServiceError> {
     match category {
-        datatypes::CompuCategory::Identical => todo!(),
+        datatypes::CompuCategory::Identical => Err(DiagServiceError::RequestNotSupported(
+            "compu_convert for Identical is not implemented".to_owned(),
+        )),
         datatypes::CompuCategory::Linear => compu_convert_linear(diag_type, compu_method, value),
         datatypes::CompuCategory::ScaleLinear => {
             compu_convert_scale_linear(diag_type, compu_method, value)
@@ -357,10 +367,18 @@ fn compu_convert(
         datatypes::CompuCategory::TextTable => {
             compu_convert_text_table(diag_type.base_datatype(), compu_method, value)
         }
-        datatypes::CompuCategory::CompuCode => todo!(),
-        datatypes::CompuCategory::TabIntp => todo!(),
-        datatypes::CompuCategory::RatFunc => todo!(),
-        datatypes::CompuCategory::ScaleRatFunc => todo!(),
+        datatypes::CompuCategory::CompuCode => Err(DiagServiceError::RequestNotSupported(
+            "compu_convert for CompuCode is not implemented".to_owned(),
+        )),
+        datatypes::CompuCategory::TabIntp => Err(DiagServiceError::RequestNotSupported(
+            "compu_convert for TabIntp is not implemented".to_owned(),
+        )),
+        datatypes::CompuCategory::RatFunc => Err(DiagServiceError::RequestNotSupported(
+            "compu_convert for RatFunc is not implemented".to_owned(),
+        )),
+        datatypes::CompuCategory::ScaleRatFunc => Err(DiagServiceError::RequestNotSupported(
+            "compu_convert for ScaleRatFunc is not implemented".to_owned(),
+        )),
     }
 }
 
