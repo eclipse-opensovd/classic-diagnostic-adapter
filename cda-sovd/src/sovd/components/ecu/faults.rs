@@ -315,3 +315,135 @@ pub(crate) mod id {
             .id("ecu_faults_get")
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use cda_interfaces::{
+        HashMap,
+        datatypes::{DtcRecord, DtcStatus},
+        diagservices::mock::MockDiagServiceResponse,
+        file_manager::mock::MockFileManager,
+        mock::MockUdsEcu,
+    };
+    use cda_plugin_security::mock::TestSecurityPlugin;
+
+    use super::*;
+    use crate::sovd::tests::create_test_webserver_state;
+
+    #[tokio::test]
+    async fn test_get_faults() {
+        // Arrange
+        let ecu_name = "TestECU".to_string();
+        let mut mock_uds = MockUdsEcu::new();
+        let mock_file_manager = MockFileManager::new();
+
+        // Create test DTC data
+        let test_dtc = DtcRecordAndStatus {
+            record: DtcRecord {
+                code: 0x42,
+                display_code: Some("P1234".to_string()),
+                fault_name: "Test Fault".to_string(),
+                severity: 2,
+            },
+            scope: "FaultMem".to_string(),
+            status: DtcStatus {
+                test_failed: true,
+                test_failed_this_operation_cycle: false,
+                pending_dtc: false,
+                confirmed_dtc: true,
+                test_not_completed_since_last_clear: false,
+                test_failed_since_last_clear: true,
+                test_not_completed_this_operation_cycle: false,
+                warning_indicator_requested: false,
+                mask: 0x29,
+            },
+        };
+
+        let expected_dtcs = HashMap::from_iter([(test_dtc.record.code, test_dtc.clone())]);
+
+        // Setup mock expectations
+        mock_uds
+            .expect_ecu_dtc_by_mask()
+            .withf(|name, _, status, severity, scope| {
+                name == "TestECU" && status.is_none() && severity.is_none() && scope.is_none()
+            })
+            .times(1)
+            .returning(move |_, _, _, _, _| {
+                let dtcs = expected_dtcs.clone();
+                Ok(dtcs)
+            });
+
+        // Create state using test utility
+        let state = create_test_webserver_state::<
+            MockDiagServiceResponse,
+            MockUdsEcu,
+            MockFileManager,
+        >(ecu_name, mock_uds, mock_file_manager);
+
+        let query = FaultQuery {
+            status: None,
+            severity: None,
+            scope: None,
+            include_schema: false,
+        };
+
+        // Create security plugin using test utility
+        let security_plugin = Box::new(TestSecurityPlugin);
+        let response = get::<MockDiagServiceResponse, MockUdsEcu, MockFileManager>(
+            UseApi(Secured(security_plugin), std::marker::PhantomData),
+            State(state),
+            WithRejection(QsQuery(query), std::marker::PhantomData),
+        )
+        .await;
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("Failed to read response body");
+
+        let response_data: faults::get::Response =
+            serde_json::from_slice(&body).expect("Failed to deserialize response");
+
+        // Verify response structure
+        assert!(response_data.schema.is_none());
+        assert_eq!(response_data.items.len(), 1);
+
+        // Verify fault data using values from test_dtc
+        let fault = response_data
+            .items
+            .first()
+            .expect("Fault item should be present");
+        assert_eq!(fault.code, format!("{:X}", test_dtc.record.code));
+        assert_eq!(fault.display_code, test_dtc.record.display_code);
+        assert_eq!(fault.fault_name, test_dtc.record.fault_name);
+        assert_eq!(fault.severity, Some(test_dtc.record.severity));
+        assert_eq!(fault.scope, Some(test_dtc.scope.clone()));
+
+        // Verify fault status using values from test_dtc
+        let status = fault.status.as_ref().expect("Status should be present");
+        assert_eq!(status.test_failed, Some(test_dtc.status.test_failed));
+        assert_eq!(
+            status.test_failed_this_operation_cycle,
+            Some(test_dtc.status.test_failed_this_operation_cycle)
+        );
+        assert_eq!(status.pending_dtc, Some(test_dtc.status.pending_dtc));
+        assert_eq!(status.confirmed_dtc, Some(test_dtc.status.confirmed_dtc));
+        assert_eq!(
+            status.test_not_completed_since_last_clear,
+            Some(test_dtc.status.test_not_completed_since_last_clear)
+        );
+        assert_eq!(
+            status.test_failed_since_last_clear,
+            Some(test_dtc.status.test_failed_since_last_clear)
+        );
+        assert_eq!(
+            status.test_not_completed_this_operation_cycle,
+            Some(test_dtc.status.test_not_completed_this_operation_cycle)
+        );
+        assert_eq!(
+            status.warning_indicator_requested,
+            Some(test_dtc.status.warning_indicator_requested)
+        );
+        assert_eq!(status.mask, Some(format!("{:02X}", test_dtc.status.mask)));
+    }
+}
