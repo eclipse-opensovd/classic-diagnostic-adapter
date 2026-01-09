@@ -277,18 +277,18 @@ mod tests {
         let result = extract_bits(8, 0, &[0b_1010_1000]).unwrap();
         assert_eq!(result, vec![0b_1010_1000]);
 
-        let result = extract_bits(8, 0, &[0xff, 0x00]).unwrap();
+        let result = extract_bits(8, 0, &[0xFF, 0x00]).unwrap();
         assert_eq!(result, vec![0]);
 
         // Test standard length with byte alignment
         // 16 bits from 2 bytes, no offset
         // Should extract bytes as is since we're starting at bit 0
-        let result = extract_bits(16, 0, &[0xab, 0xcd]).unwrap();
-        assert_eq!(result, vec![0xab, 0xcd]);
+        let result = extract_bits(16, 0, &[0xAB, 0xCD]).unwrap();
+        assert_eq!(result, vec![0xAB, 0xCD]);
 
         // bits are read LSB first, therefore 18 bits 1, which means 6 most significant bits = 0
-        let result = extract_bits(18, 0, &[0xff, 0xff, 0xff]).unwrap();
-        assert_eq!(result, vec![0b_11, 0xff, 0xff]);
+        let result = extract_bits(18, 0, &[0xFF, 0xFF, 0xFF]).unwrap();
+        assert_eq!(result, vec![0b_11, 0xFF, 0xFF]);
 
         // Extracting 13 bits starting from bit position 5
         // 101010111100110101000010 -- input
@@ -302,7 +302,7 @@ mod tests {
         // Byte 0: 0xab = 10101011
         //
         // Byte 0: -----101  --> take bits 5-7 from first byte  (total bits 3)
-        let result = extract_bits(3, 5, &[0xab]).unwrap();
+        let result = extract_bits(3, 5, &[0xAB]).unwrap();
         assert_eq!(result, vec![0b_101]);
 
         // Extracting 4 bits starting from bit position 6
@@ -316,13 +316,13 @@ mod tests {
     #[test]
     fn test_extract_bits_error_cases() {
         // Test insufficient data
-        assert!(extract_bits(16, 0, &[0xab]).is_err());
+        assert!(extract_bits(16, 0, &[0xAB]).is_err());
 
         // Test invalid bit position
-        assert!(extract_bits(8, 8, &[0xff]).is_err());
+        assert!(extract_bits(8, 8, &[0xFF]).is_err());
 
         // Test zero bits
-        assert!(extract_bits(0, 0, &[0xff]).is_err());
+        assert!(extract_bits(0, 0, &[0xFF]).is_err());
     }
 
     #[test]

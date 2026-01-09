@@ -3490,7 +3490,7 @@ mod tests {
             )
         };
 
-        let sid = 0x2E_u8;
+        let sid = 0x2Eu8;
         let dc_name = "TestDynamicLengthFieldService";
         let diag_comm = db_builder.create_diag_comm(DiagCommParams {
             short_name: dc_name,
@@ -3728,7 +3728,7 @@ mod tests {
             )
         };
 
-        let sid = 0x2E_u8;
+        let sid = 0x2Eu8;
         let dc_name = "TestStructService";
         let diag_comm = db_builder.create_diag_comm(DiagCommParams {
             short_name: dc_name,
@@ -4289,7 +4289,7 @@ mod tests {
         let end_pdu_dop =
             db_builder.create_end_of_pdu_field_dop(min_items, max_items, Some(item_structure));
 
-        let sid = 0x22_u8;
+        let sid = 0x22u8;
         let dc_name = "TestEndOfPduService";
         let diag_comm = db_builder.create_diag_comm(DiagCommParams {
             short_name: dc_name,
@@ -4410,7 +4410,7 @@ mod tests {
         let dtc_dop =
             db_builder.create_dtc_dop(u32_diag_type, Some(vec![dtc]), Some(compu_identical));
 
-        let sid = 0x19_u8;
+        let sid = 0x19u8;
         let dc_name = "TestDtcService";
         let diag_comm = db_builder.create_diag_comm(DiagCommParams {
             short_name: dc_name,
@@ -4523,7 +4523,7 @@ mod tests {
             db_builder.create_compu_method(datatypes::CompuCategory::Identical, None, None);
 
         // Create a variant detection service
-        let vd_service_sid = 0x22_u8;
+        let vd_service_sid = 0x22u8;
         let vd_service_name = "ReadVariantData";
 
         // Create DOP for variant code response parameter
@@ -4753,10 +4753,10 @@ mod tests {
                     // Service ID
                     sid,
                     // This does not belong to our mux, it's here to test, if the start byte is used
-                    0xff,
+                    0xFF,
                     // Mux param starts here
                     // there is no switch value for 0xffff
-                    0xff, 0xff,
+                    0xFF, 0xFF,
                 ]),
                 true,
             )
@@ -4774,10 +4774,10 @@ mod tests {
                     // Service ID
                     sid,
                     // This does not belong to our mux, it's here to test, if the start byte is used
-                    0xff,
+                    0xFF,
                     // Mux param starts here
                     // there is no switch value for 0xffff, but we have a default case
-                    0xff, 0xff, //
+                    0xFF, 0xFF, //
                     // value for param 1 of default structure
                     0x42,
                 ]),
@@ -4810,9 +4810,9 @@ mod tests {
                     // Service ID
                     sid,
                     // This does not belong to our mux, it's here to test, if the start byte is used
-                    0xff, // Mux param starts here
+                    0xFF, // Mux param starts here
                     // + switch key byte 0
-                    0x0, 0x0a, // valid switch key but no data, expect error from decode.
+                    0x0, 0x0A, // valid switch key but no data, expect error from decode.
                 ]),
                 true,
             )
@@ -4830,9 +4830,9 @@ mod tests {
                     // Service ID
                     sid,
                     // This does not belong to our mux, it's here to test, if the start byte is used
-                    0xff, // Mux param starts here
+                    0xFF, // Mux param starts here
                     // + switch key byte 0
-                    0x00, 0x0a, // valid switch key but no data, expect error from decode.
+                    0x00, 0x0A, // valid switch key but no data, expect error from decode.
                 ]),
                 true,
             )
@@ -5074,7 +5074,7 @@ mod tests {
         assert_eq!(payload.get(1).copied(), Some(0x34));
 
         // Check param2
-        let float_bytes = 42.42_f32.to_be_bytes();
+        let float_bytes = 42.42f32.to_be_bytes();
         assert_eq!(payload.get(2..6), Some(&float_bytes[..]));
 
         // Check param3
@@ -5229,7 +5229,7 @@ mod tests {
             },
         });
 
-        test_default(&ecu_manager, &service, with_selector, 0xffff, sid).await;
+        test_default(&ecu_manager, &service, with_selector, 0xFFFF, sid).await;
         // when not selector value is given,
         // the switch key will use the limit value of the default value
         test_default(&ecu_manager, &service, without_selector, 0, sid).await;
@@ -5618,7 +5618,7 @@ mod tests {
     #[tokio::test]
     async fn test_negative_response() {
         let (ecu_manager, service, sid) = create_ecu_manager_with_dynamic_length_field_service();
-        let payload = vec![0x7f, sid];
+        let payload = vec![0x7F, sid];
 
         let response = ecu_manager
             .convert_from_uds(&service, &create_payload(payload), true)
@@ -5631,7 +5631,7 @@ mod tests {
     async fn test_negative_response_with_invalid_data_where_no_neg_response_is_defined() {
         let (ecu_manager, service, sid) =
             create_ecu_manager_with_end_pdu_service(1, None, EndOfPduStructureType::FixedSize);
-        let data = vec![0x7f, sid, 0x33];
+        let data = vec![0x7F, sid, 0x33];
 
         let response = ecu_manager
             .convert_from_uds(&service, &create_payload(data), true)

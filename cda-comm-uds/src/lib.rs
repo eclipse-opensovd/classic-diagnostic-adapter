@@ -1659,7 +1659,7 @@ impl<S: EcuGateway, R: DiagServiceResponse, T: EcuManager<Response = R>> UdsEcu
         }
 
         let mask = if let Some(status) = status {
-            let mut mask = 0x00_u8;
+            let mut mask = 0x00u8;
             // Status can contain more than the mask bits, thus we need to track
             // if any of the status fields is a mask bit.
             // If not use the default mask.
@@ -1720,7 +1720,7 @@ impl<S: EcuGateway, R: DiagServiceResponse, T: EcuManager<Response = R>> UdsEcu
                 );
             }
 
-            if mask == 0xff || mask == 0x00 {
+            if mask == 0xFF || mask == 0x00 {
                 for record in lookup.dtcs {
                     all_dtcs.entry(record.code).or_insert(DtcRecordAndStatus {
                         record,
