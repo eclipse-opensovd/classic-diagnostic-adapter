@@ -27,6 +27,16 @@ pub struct DynamicRouter {
 impl DynamicRouter {
     #[must_use]
     pub fn new() -> Self {
+        aide::generate::extract_schemas(true);
+        aide::generate::on_error(|e| {
+            if let aide::Error::DuplicateRequestBody = e {
+                // skip DuplicateRequestBody
+                // those are triggered when overwriting the input type
+                return;
+            }
+            tracing::error!(error = %e, "OpenAPI generation error");
+        });
+
         let router = create_trace_layer(ApiRouter::new())
             .layer(tower_http::timeout::TimeoutLayer::new(
                 std::time::Duration::from_secs(30),
@@ -55,6 +65,10 @@ impl DynamicRouter {
     {
         let mut router = self.router.write().await;
         *router = update_fn(router.clone());
+    }
+
+    pub async fn merge_routes(&self, new_routes: ApiRouter) {
+        self.update_router(|router| router.merge(new_routes)).await;
     }
 }
 

@@ -40,6 +40,7 @@ COPY cda-plugin-security/Cargo.toml ./cda-plugin-security/Cargo.toml
 COPY cda-sovd/Cargo.toml ./cda-sovd/Cargo.toml
 COPY cda-tracing/Cargo.toml ./cda-tracing/Cargo.toml
 COPY cda-sovd-interfaces/Cargo.toml ./cda-sovd-interfaces/Cargo.toml
+COPY cda-health/Cargo.toml ./cda-health/Cargo.toml
 COPY integration-tests/Cargo.toml ./integration-tests/Cargo.toml
 
 # Generate the recipe.json which describes dependencies
@@ -77,6 +78,7 @@ COPY cda-plugin-security ./cda-plugin-security
 COPY cda-sovd ./cda-sovd
 COPY cda-tracing ./cda-tracing
 COPY cda-sovd-interfaces ./cda-sovd-interfaces
+COPY cda-health ./cda-health/
 COPY integration-tests ./integration-tests
 
 ENV RUSTC_WRAPPER=sccache \
