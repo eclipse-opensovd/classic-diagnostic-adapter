@@ -541,6 +541,179 @@ impl<T: EcuAddressProvider + DoipComParamProvider> EcuGateway for DoipDiagGatewa
             .ok_or_else(|| DiagServiceError::EcuOffline(ecu_name.to_owned()))?;
         Ok(())
     }
+
+    async fn send_functional(
+        &self,
+        transmission_params: TransmissionParameters,
+        message: ServicePayload,
+        expected_ecu_logical_addrs: HashMap<u16, String>,
+        timeout: Duration,
+    ) -> Result<HashMap<String, Result<UdsResponse, DiagServiceError>>, DiagServiceError> {
+        let conn_idx = *self
+            .logical_address_to_connection
+            .read()
+            .await
+            .get(&transmission_params.gateway_address)
+            .ok_or_else(|| DiagServiceError::EcuOffline("Gateway not found".to_string()))?;
+
+        if conn_idx >= self.doip_connections.read().await.len() {
+            return Err(DiagServiceError::ConnectionClosed);
+        }
+
+        let doip_conn = self.get_doip_connection(conn_idx).await?;
+
+        // Get the gateway ECU for sending the functional request
+        let gateway_ecu = doip_conn
+            .ecus
+            .get(&transmission_params.gateway_address)
+            .ok_or_else(|| DiagServiceError::EcuOffline("Gateway ECU not found".to_string()))?;
+
+        let doip_message = DiagnosticMessage {
+            source_address: message.source_address.to_be_bytes(),
+            target_address: message.target_address.to_be_bytes(),
+            message: message.data.clone(),
+        };
+
+        let mut result_map = HashMap::new();
+        let expected_count = expected_ecu_logical_addrs.len();
+
+        tracing::debug!(
+            gateway_address = %transmission_params.gateway_address,
+            expected_ecus = expected_count,
+            message_data = %util::tracing::print_hex(&doip_message.message, 8),
+            "Sending functional request to gateway"
+        );
+
+        // Send the functional request once
+        let mut ecu = gateway_ecu.lock().await;
+        let mut ecu_mtxs = expected_ecu_logical_addrs
+            .iter()
+            .filter_map(|(addr, name)| {
+                if *addr == transmission_params.gateway_address {
+                    None
+                } else {
+                    doip_conn
+                        .ecus
+                        .get(addr)
+                        .cloned()
+                        .map(|ecu| (name.clone(), ecu))
+                }
+            })
+            .collect::<Vec<_>>();
+
+        // Clear any pending messages
+        while ecu.receiver.try_recv().is_ok() {}
+
+        let mut resend_counter = 0;
+        send_with_retries(
+            &doip_message,
+            &ecu.sender,
+            &mut resend_counter,
+            transmission_params.repeat_request_count_transmission,
+        )
+        .await?;
+
+        drop(ecu); // release lock before waiting for responses
+        ecu_mtxs.push((
+            transmission_params.ecu_name.to_lowercase(),
+            Arc::clone(gateway_ecu),
+        ));
+        let received_responses: Arc<RwLock<HashMap<String, Result<DiagnosticMessage, EcuError>>>> =
+            Arc::new(RwLock::new(HashMap::new()));
+        let mut futures = Vec::new();
+        for (name, ecu) in ecu_mtxs.drain(..) {
+            let received_responses = Arc::clone(&received_responses);
+            let fut = async move {
+                let mut lock = ecu.lock().await;
+                if let Some(response) = wait_for_ecu_response(&mut lock, timeout).await {
+                    received_responses.write().await.insert(name, response);
+                }
+            };
+            futures.push(fut);
+        }
+
+        futures::future::join_all(futures).await;
+
+        for (ecu_name, msg) in received_responses.write().await.drain() {
+            if !result_map.contains_key(&ecu_name) {
+                match msg {
+                    Ok(msg) => {
+                        let source_addr = u16::from_be_bytes(msg.source_address);
+
+                        let uds_response = UdsResponse::Message(ServicePayload {
+                            data: msg.message,
+                            source_address: source_addr,
+                            target_address: u16::from_be_bytes(msg.target_address),
+                            new_session: None,
+                            new_security: None,
+                        });
+
+                        result_map.insert(ecu_name.clone(), Ok(uds_response));
+
+                        tracing::debug!(
+                            ecu_name = %ecu_name,
+                            source_addr = source_addr,
+                            "Received functional response"
+                        );
+                    }
+                    Err(e) => {
+                        // todo: maybe not NoResponse error..
+                        result_map.insert(
+                            ecu_name.clone(),
+                            Err(DiagServiceError::NoResponse(format!("{e}"))),
+                        );
+                        tracing::debug!(
+                            ecu_name = %ecu_name,
+                            "Error receiving functional response: {e}"
+                        );
+                    }
+                }
+            }
+        }
+
+        // Mark ECUs that didn't respond as timeout errors
+        for (logical_addr, ecu_name) in &expected_ecu_logical_addrs {
+            if !result_map.contains_key(ecu_name) {
+                result_map.insert(ecu_name.clone(), Err(DiagServiceError::Timeout));
+                tracing::debug!(
+                    ecu_name = %ecu_name,
+                    logical_addr = logical_addr,
+                    "ECU did not respond to functional request"
+                );
+            }
+        }
+
+        Ok(result_map)
+    }
+}
+
+#[allow(clippy::needless_continue)] // allow continue as it improves readability
+async fn wait_for_ecu_response(
+    ecu: &mut DoipEcu,
+    timeout: Duration,
+) -> Option<Result<DiagnosticMessage, EcuError>> {
+    tokio::time::timeout(timeout, async {
+        loop {
+            match ecu.receiver.recv().await {
+                Ok(Ok(DiagnosticResponse::Msg(m))) => {
+                    return Some(Ok(m));
+                }
+                Ok(Ok(_ignore)) => {
+                    // Ignore other message types
+                    continue;
+                }
+                Ok(Err(e)) => {
+                    return Some(Err(e));
+                }
+                Err(_) => {
+                    // Receiver closed
+                    return None;
+                }
+            }
+        }
+    })
+    .await
+    .unwrap_or_default()
 }
 
 fn create_netmask(tester_ip: &str, tester_subnet: &str) -> Result<u32, DoipGatewaySetupError> {

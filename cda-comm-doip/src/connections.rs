@@ -570,8 +570,8 @@ fn spawn_gateway_receiver_task(
                             .map(|router| router.send(Ok(response)));
                     }
                     DiagnosticResponse::Msg(msg) => {
-                        tracing::debug!("DOIP OK - Returning response");
                         let addr = u16::from_be_bytes(msg.source_address);
+                        tracing::debug!("DOIP OK - Returning response from ECU {:04x}", addr);
                         outtx
                             .get(&addr)
                             .map(|router| router.send(Ok(DiagnosticResponse::Msg(msg))));

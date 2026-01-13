@@ -15,7 +15,7 @@ use std::time::Duration;
 
 use tokio::sync::{RwLock, mpsc};
 
-use crate::{DiagServiceError, EcuAddressProvider, ServicePayload};
+use crate::{DiagServiceError, EcuAddressProvider, HashMap, ServicePayload};
 
 #[derive(Debug, Clone)]
 pub enum UdsResponse {
@@ -92,4 +92,31 @@ pub trait EcuGateway: Clone + Send + Sync + 'static {
         ecu_name: &str,
         ecu_db: &RwLock<T>,
     ) -> impl Future<Output = Result<(), DiagServiceError>> + Send;
+
+    /// Send a functional request to a gateway using functional addressing.
+    /// The gateway will broadcast the request to all ECUs behind it.
+    /// This method waits for responses from multiple ECUs within the specified timeout.
+    ///
+    /// # Arguments
+    /// * `transmission_params` - Parameters for transmission including gateway address
+    /// * `message` - The UDS message to send
+    /// * `expected_ecu_logical_addrs` - Map of ECU logical addresses to their names
+    ///   that are expected to respond
+    /// * `timeout` - Maximum time to wait for responses
+    ///
+    /// # Returns
+    /// A map of ECU names to their responses (or timeout errors for non-responding ECUs)
+    ///
+    /// # Errors
+    /// * `DiagServiceError::EcuOffline` if the gateway cannot be reached
+    /// * Individual ECU errors are returned in the result map
+    fn send_functional(
+        &self,
+        transmission_params: TransmissionParameters,
+        message: ServicePayload,
+        expected_ecu_logical_addrs: HashMap<u16, String>,
+        timeout: Duration,
+    ) -> impl Future<
+        Output = Result<HashMap<String, Result<UdsResponse, DiagServiceError>>, DiagServiceError>,
+    > + Send;
 }

@@ -73,7 +73,7 @@ impl IntoSovd for FieldParseError {
     }
 }
 
-fn get_content_type_and_accept(
+pub(crate) fn get_content_type_and_accept(
     headers: &http::HeaderMap,
 ) -> Result<(Option<mime::Mime>, mime::Mime), ApiError> {
     let content_type = headers

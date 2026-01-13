@@ -68,6 +68,14 @@ pub struct TesterPresentTask {
     pub task: JoinHandle<()>,
 }
 
+struct PerGatewayInfo {
+    uds_params: UdsParameters,
+    transmission_params: TransmissionParameters,
+    source_address: u16,
+    functional_address: u16,
+    ecus: HashMap<u16, String>,
+}
+
 pub struct UdsManager<S: EcuGateway, R: DiagServiceResponse, T: EcuManager<Response = R>> {
     ecus: Arc<HashMap<String, RwLock<T>>>,
     gateway: S,
@@ -922,11 +930,15 @@ impl<S: EcuGateway, R: DiagServiceResponse, T: EcuManager<Response = R>> UdsMana
         ))
     }
 
-    async fn ecus_for_functional_group(&self, functional_group: &str) -> Vec<String> {
+    async fn ecus_for_functional_group(
+        &self,
+        functional_group: &str,
+        gateway_only: bool,
+    ) -> Vec<String> {
         let mut ecu_names = Vec::new();
         for (name, ecu) in self.ecus.iter() {
             let ecu_guard = ecu.read().await;
-            if ecu_guard.logical_address() != ecu_guard.logical_gateway_address() {
+            if gateway_only && ecu_guard.logical_address() != ecu_guard.logical_gateway_address() {
                 continue; // skip non gateway ECUs
             }
             if !ecu_guard
@@ -938,6 +950,71 @@ impl<S: EcuGateway, R: DiagServiceResponse, T: EcuManager<Response = R>> UdsMana
             ecu_names.push(name.clone());
         }
         ecu_names
+    }
+
+    /// Send a functional request to a single gateway and collect responses from all expected ECUs
+    async fn send_functional_to_gateway(
+        &self,
+        transmission_params: TransmissionParameters,
+        expected_ecus: HashMap<u16, String>,
+        service: DiagComm,
+        payload: ServicePayload,
+        map_to_json: bool,
+        timeout: Duration,
+    ) -> HashMap<String, Result<R, DiagServiceError>> {
+        // Send functional request and wait for responses
+        match self
+            .gateway
+            .send_functional(transmission_params, payload, expected_ecus.clone(), timeout)
+            .await
+        {
+            Ok(uds_responses) => {
+                let mut result_map = HashMap::new();
+
+                for (ecu_name, uds_result) in uds_responses {
+                    let Some(ecu_manager) = self.ecus.get(&ecu_name) else {
+                        result_map.insert(
+                            ecu_name.clone(),
+                            Err(DiagServiceError::NotFound(Some(ecu_name.clone()))),
+                        );
+                        continue;
+                    };
+
+                    match uds_result {
+                        Ok(UdsResponse::Message(msg)) => {
+                            // Process the response using the ECU's convert_from_uds
+                            let ecu_read = ecu_manager.read().await;
+                            let response =
+                                ecu_read.convert_from_uds(&service, &msg, map_to_json).await;
+                            result_map.insert(ecu_name, response);
+                        }
+                        Ok(_) => {
+                            // Other UDS response types shouldn't occur in functional communication
+                            result_map.insert(
+                                ecu_name,
+                                Err(DiagServiceError::UnexpectedResponse(Some(
+                                    "Unexpected UDS response type in functional communication"
+                                        .to_string(),
+                                ))),
+                            );
+                        }
+                        Err(e) => {
+                            result_map.insert(ecu_name, Err(e));
+                        }
+                    }
+                }
+
+                result_map
+            }
+            Err(e) => {
+                // Gateway-level error - return error for all ECUs
+                let mut result_map = HashMap::new();
+                for (_, ecu_name) in expected_ecus {
+                    result_map.insert(ecu_name, Err(e.clone()));
+                }
+                result_map
+            }
+        }
     }
 }
 
@@ -1807,7 +1884,7 @@ impl<S: EcuGateway, R: DiagServiceResponse, T: EcuManager<Response = R>> UdsEcu
                 .await
             }
             TesterPresentType::Functional(ref functional_group) => {
-                for name in self.ecus_for_functional_group(functional_group).await {
+                for name in self.ecus_for_functional_group(functional_group, true).await {
                     if let Err(e) = self
                         .control_tester_present(TesterPresentControlMessage {
                             mode: TesterPresentMode::Start,
@@ -1846,7 +1923,7 @@ impl<S: EcuGateway, R: DiagServiceResponse, T: EcuManager<Response = R>> UdsEcu
                 .await
             }
             TesterPresentType::Functional(ref functional_group) => {
-                for name in self.ecus_for_functional_group(functional_group).await {
+                for name in self.ecus_for_functional_group(functional_group, true).await {
                     if let Err(e) = self
                         .control_tester_present(TesterPresentControlMessage {
                             mode: TesterPresentMode::Stop,
@@ -1876,7 +1953,7 @@ impl<S: EcuGateway, R: DiagServiceResponse, T: EcuManager<Response = R>> UdsEcu
                 tester_presents.get(ecu_name).is_some()
             }
             TesterPresentType::Functional(functional_group) => {
-                let ecu_names = self.ecus_for_functional_group(functional_group).await;
+                let ecu_names = self.ecus_for_functional_group(functional_group, true).await;
                 let tester_presents = self.tester_present_tasks.read().await;
                 ecu_names
                     .iter()
@@ -1894,6 +1971,157 @@ impl<S: EcuGateway, R: DiagServiceResponse, T: EcuManager<Response = R>> UdsEcu
             .await
             .functional_groups();
         Ok(groups)
+    }
+
+    #[tracing::instrument(skip(self, security_plugin, payload),
+        fields(dlt_context = dlt_ctx!("UDS"))
+    )]
+    async fn send_functional_group(
+        &self,
+        functional_group: &str,
+        service: DiagComm,
+        security_plugin: &DynamicPlugin,
+        payload: Option<UdsPayloadData>,
+        map_to_json: bool,
+    ) -> HashMap<String, Result<R, DiagServiceError>> {
+        let ecu_list = self
+            .ecus_for_functional_group(functional_group, false)
+            .await;
+
+        if ecu_list.is_empty() {
+            tracing::warn!(
+                functional_group = %functional_group,
+                "No ECUs found in functional group"
+            );
+            return HashMap::new();
+        }
+
+        // todo: this should not be hardcoded but from config
+        let Some(globals_ecu) = self.ecus.get("functional_groups") else {
+            tracing::warn!(
+                functional_group = %functional_group,
+                "'functional_groups' ECU not found for functional group request"
+            );
+            return HashMap::new();
+        };
+
+        // Create service payload with functional address
+        let service_payload = {
+            let ecu_read = globals_ecu.read().await;
+            match ecu_read
+                .create_uds_payload(&service, security_plugin, payload)
+                .await
+            {
+                Ok(p) => p,
+                Err(e) => {
+                    // If payload creation fails, return error for all ECUs
+                    let mut result_map = HashMap::new();
+                    for ecu_name in ecu_list {
+                        result_map.insert(ecu_name, Err(e.clone()));
+                    }
+                    return result_map;
+                }
+            }
+        };
+
+        // Group ECUs by their gateway address
+        let mut ecus_by_gateway: HashMap<u16, PerGatewayInfo> = HashMap::new();
+        let mut ecu_infos_by_gateway = HashMap::<u16, HashMap<u16, String>>::new();
+
+        for ecu_name in &ecu_list {
+            if let Some(ecu) = self.ecus.get(ecu_name) {
+                let ecu_lock = ecu.read().await;
+                if !ecu_lock.is_physical_ecu() {
+                    // skip functional description ecu for this
+                    continue;
+                }
+                let tester_addr = ecu_lock.tester_address();
+                let gateway_addr = ecu_lock.logical_gateway_address();
+                let logical_addr = ecu_lock.logical_address();
+                let func_addr = ecu_lock.logical_functional_address();
+                drop(ecu_lock);
+                if gateway_addr == logical_addr {
+                    let (uds_params, transmission_params) = Self::ecu_send_params(ecu).await;
+                    if let Some(_old) = ecus_by_gateway.insert(
+                        gateway_addr,
+                        PerGatewayInfo {
+                            uds_params,
+                            transmission_params,
+                            source_address: tester_addr,
+                            functional_address: func_addr,
+                            ecus: HashMap::from_iter([(logical_addr, ecu_name.clone())]),
+                        },
+                    ) {
+                        tracing::warn!(
+                            functional_group = %functional_group,
+                            gateway_addr = %gateway_addr,
+                            "Multiple Gateway ecus detected for functional group request."
+                        );
+                        // todo: how do we resolve this properly?
+                        // check which one is online?
+                        // can we assume they have the same transmission params?
+                    }
+                } else {
+                    ecu_infos_by_gateway
+                        .entry(gateway_addr)
+                        .or_default()
+                        .insert(logical_addr, ecu_name.clone());
+                }
+            }
+        }
+
+        for (gateway_addr, ecu_info_list) in ecu_infos_by_gateway {
+            if let Some(gateway_info) = ecus_by_gateway.get_mut(&gateway_addr) {
+                gateway_info.ecus.extend(ecu_info_list);
+            } else {
+                tracing::warn!(
+                    functional_group = %functional_group,
+                    gateway_addr = %gateway_addr,
+                    "No gateway ECU found for functional group request."
+                );
+            }
+        }
+
+        tracing::debug!(
+            functional_group = %functional_group,
+            gateway_count = ecus_by_gateway.len(),
+            total_ecus = ecu_list.len(),
+            "Sending functional request to gateways"
+        );
+
+        let result_map = Arc::new(RwLock::new(HashMap::new()));
+
+        let mut futures = Vec::new();
+        for gw_infos in ecus_by_gateway.into_values() {
+            let service = service.clone();
+            let mut service_payload = service_payload.clone();
+            service_payload.source_address = gw_infos.source_address;
+            service_payload.target_address = gw_infos.functional_address;
+            let result_map = Arc::clone(&result_map);
+            let manager = self.clone();
+            let fut = async move {
+                let gateway_results = manager
+                    .send_functional_to_gateway(
+                        gw_infos.transmission_params,
+                        gw_infos.ecus,
+                        service,
+                        service_payload,
+                        map_to_json,
+                        gw_infos.uds_params.timeout_default,
+                    )
+                    .await;
+
+                result_map.write().await.extend(gateway_results);
+            };
+            futures.push(fut);
+        }
+
+        futures::future::join_all(futures).await;
+
+        let lock = result_map.read().await;
+        let result_map = lock.clone();
+        drop(lock);
+        result_map
     }
 }
 
