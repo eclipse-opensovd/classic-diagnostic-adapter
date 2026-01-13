@@ -10,11 +10,11 @@
 # SPDX-License-Identifier: Apache-2.0
 
 [package]
-name = "cda-interfaces"
+name = "cda-health"
 version = "0.1.0"
 edition.workspace = true
 publish = false
-description = "Interfaces and Types used in CDA"
+description = "Provides a health check interface"
 homepage.workspace = true
 license.workspace = true
 
@@ -26,30 +26,23 @@ path = "src/lib.rs"
 
 [dependencies]
 # internal dependencies
-foldhash = { workspace = true }
+cda-sovd = { workspace = true }
+cda-interfaces = { workspace = true }
 
-parking_lot = { workspace = true }
+# external
+async-trait = { workspace = true }
+futures = { workspace = true }
 schemars = { workspace = true }
 serde = { workspace = true, features = ["derive"] }
-serde_json = { workspace = true }
 thiserror = { workspace = true }
-async-trait = { workspace = true }
-#tokio
+# tokio
 tokio = { workspace = true, features = ["sync"] }
-# runtime size info
-hex = { workspace = true }
-strum = { workspace = true }
-strum_macros = { workspace = true }
-# logging
-tracing = { workspace = true }
 
-mockall = { version = "0.14.0", optional = true }
+# web server
+axum = { workspace = true, features = ["json"] }
 
-[dev-dependencies]
-tokio = { workspace = true, features = ["macros", "rt"] }
+aide = { workspace = true, features = ["axum"] }
+chrono = { workspace = true }
 
 [features]
 default = []
-tokio-tracing = ["tokio/tracing"]
-dlt-tracing = []
-test-utils = ["mockall"]

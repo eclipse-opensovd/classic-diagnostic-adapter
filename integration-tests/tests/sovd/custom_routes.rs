@@ -11,7 +11,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-use std::{sync::Arc, time::Duration};
+use std::sync::Arc;
 
 use aide::axum::{ApiRouter, routing};
 use axum::{Json, http::StatusCode};
@@ -19,7 +19,9 @@ use cda_comm_doip::config::DoipConfig;
 use cda_interfaces::{FunctionalDescriptionConfig, UdsEcu};
 use cda_sovd::{Locks, dynamic_router::DynamicRouter};
 use futures::FutureExt;
-use opensovd_cda_lib::{DatabaseMap, FileManagerMap, config::configfile::ServerConfig};
+use opensovd_cda_lib::{
+    DatabaseMap, FileManagerMap, cda_version, config::configfile::ServerConfig,
+};
 use reqwest::Method;
 use serde::{Deserialize, Serialize};
 
@@ -27,6 +29,8 @@ use crate::util::{
     http::response_to_t,
     runtime::{find_available_tcp_port, host, wait_for_cda_online},
 };
+
+const MAIN_HEALTH_COMPONENT_KEY: &str = "main";
 
 #[derive(Serialize, Deserialize, schemars::JsonSchema, Clone, Debug, PartialEq)]
 struct TestData {
@@ -109,11 +113,34 @@ async fn test_custom_demo_endpoint() {
         gateway_port,
         send_timeout_ms: 5000,
     };
+
+    let (dynamic_router, webserver_join_handle) =
+        cda_sovd::launch_webserver(webserver_config, shutdown_signal.clone())
+            .await
+            .expect("Failed to launch webserver");
+
+    let health = cda_health::add_health_routes(&dynamic_router, cda_version().to_owned()).await;
+    let main_health_provider = {
+        let provider = Arc::new(cda_health::StatusHealthProvider::new(
+            cda_health::Status::Starting,
+        ));
+        health
+            .register_provider(
+                MAIN_HEALTH_COMPONENT_KEY,
+                Arc::clone(&provider) as Arc<dyn cda_health::HealthProvider>,
+            )
+            .await
+            .expect("Failed to register main health provider");
+        provider
+    };
+    let health = Some(health);
+
     let gateway = opensovd_cda_lib::create_diagnostic_gateway(
         Arc::clone(&databases),
         &doip_config,
         variant_tx,
         shutdown_signal.clone(),
+        health.as_ref(),
     )
     .await
     .expect("Failed to create gateway");
@@ -129,40 +156,34 @@ async fn test_custom_demo_endpoint() {
             protocol_case_sensitive: false,
         },
     );
-    let server_handle = tokio::spawn({
-        let shutdown_signal = shutdown_signal.clone();
-        async move {
-            // Launch the webserver with static routes
-            let dynamic_router =
-                cda_sovd::launch_webserver(webserver_config, shutdown_signal).await?;
-            add_custom_routes(&dynamic_router).await;
+    add_custom_routes(&dynamic_router).await;
+    let ecu_names = uds_manager.get_ecus().await;
+    cda_sovd::add_vehicle_routes::<
+        cda_core::DiagServiceResponseStruct,
+        _,
+        _,
+        cda_plugin_security::DefaultSecurityPlugin,
+    >(
+        &dynamic_router,
+        uds_manager,
+        String::new(),
+        file_managers,
+        Arc::new(Locks::new(ecu_names)),
+        FunctionalDescriptionConfig {
+            description_database: "functional_groups".to_owned(),
+            enabled_functional_groups: None,
+            protocol_position: cda_interfaces::datatypes::DiagnosticServiceAffixPosition::Suffix,
+            protocol_case_sensitive: false,
+        },
+    )
+    .await
+    .expect("Failed to add vehicle routes");
 
-            let ecu_names = uds_manager.get_ecus().await;
-            cda_sovd::add_vehicle_routes::<
-                cda_core::DiagServiceResponseStruct,
-                _,
-                _,
-                cda_plugin_security::DefaultSecurityPlugin,
-            >(
-                &dynamic_router,
-                uds_manager,
-                String::new(),
-                file_managers,
-                Arc::new(Locks::new(ecu_names)),
-                FunctionalDescriptionConfig {
-                    description_database: "functional_groups".to_owned(),
-                    enabled_functional_groups: None,
-                    protocol_position:
-                        cda_interfaces::datatypes::DiagnosticServiceAffixPosition::Suffix,
-                    protocol_case_sensitive: false,
-                },
-            )
-            .await
-        }
-    });
+    main_health_provider
+        .update_status(cda_health::Status::Up)
+        .await;
 
     let url = reqwest::Url::parse(&format!("http://{host}:{test_port}/test")).expect("Invalid URL");
-
     wait_for_cda_online(&ServerConfig {
         address: host,
         port: test_port,
@@ -200,18 +221,8 @@ async fn test_custom_demo_endpoint() {
         response_to_t(&post_response).expect("Failed to parse POST response");
     assert_eq!(response_data, post_payload);
 
-    // Cleanup: shutdown the server
     shutdown_tx.send(()).ok();
-    tokio::select! {
-        () = tokio::time::sleep(Duration::from_secs(2)) => {
-            panic!("Webserver did not shut down in time");
-        }
-        result = server_handle => {
-            match result {
-                Ok(Ok(())) => {},
-                Ok(Err(e)) => panic!("Webserver error: {e:?}"),
-                Err(e) => panic!("Webserver task panicked: {e:?}"),
-            }
-        }
-    }
+    webserver_join_handle
+        .await
+        .expect("Failed to shutdown webserver");
 }

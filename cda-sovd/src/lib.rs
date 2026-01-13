@@ -65,7 +65,7 @@ pub struct WebServerConfig {
 pub async fn launch_webserver<F>(
     config: WebServerConfig,
     shutdown_signal: F,
-) -> Result<DynamicRouter, DoipGatewaySetupError>
+) -> Result<(DynamicRouter, tokio::task::JoinHandle<()>), DoipGatewaySetupError>
 where
     F: Future<Output = ()> + Clone + Send + 'static,
 {
@@ -76,7 +76,7 @@ where
     })?;
 
     let dynamic_router_for_service = dynamic_router.clone();
-    cda_interfaces::spawn_named!("webserver", async move {
+    let webserver_task = cda_interfaces::spawn_named!("webserver", async move {
         let service = tower::service_fn(move |request: Request<axum::body::Body>| {
             let dr = dynamic_router_for_service.clone();
             async move {
@@ -95,7 +95,7 @@ where
             .await;
     });
 
-    Ok(dynamic_router)
+    Ok((dynamic_router, webserver_task))
 }
 
 /// Add vehicle routes to the dynamic router
@@ -127,16 +127,6 @@ where
     M: FileManager + Send + Sync + 'static,
     S: SecurityPluginLoader,
 {
-    aide::generate::on_error(|e| {
-        if let aide::Error::DuplicateRequestBody = e {
-            // skip DuplicateRequestBody
-            // those are triggered when overwriting the input type
-            return;
-        }
-        tracing::error!(error = %e, "OpenAPI generation error");
-    });
-    aide::generate::extract_schemas(true);
-    let mut api = OpenApi::default();
     let vehicle_router = sovd::route::<R, T, M, S>(
         functional_group_config,
         &ecu_uds,
@@ -144,26 +134,45 @@ where
         file_manager,
         locks,
     )
-    .await
-    .route(
-        SWAGGER_UI_ROUTE,
-        Swagger::new(OPENAPI_JSON_ROUTE).axum_route(),
-    )
-    .route(
-        OPENAPI_JSON_ROUTE,
-        routing::get(|Extension(api): Extension<Arc<OpenApi>>| async move { Json((*api).clone()) }),
-    )
-    .finish_api_with(&mut api, openapi::api_docs)
-    .layer(Extension(Arc::new(api)));
+    .await;
 
     // Update the router with the new routes,
     // merge with existing router to preserve existing routes
-    dynamic_router
-        .update_router(move |old_router| old_router.merge(vehicle_router))
-        .await;
+    dynamic_router.merge_routes(vehicle_router).await;
 
     tracing::info!("Vehicle routes added to webserver");
     Ok(())
+}
+
+/// Add `OpenAPI` routes to the dynamic router, call this once all routes
+/// that should be documented are added, this will not update on further route additions and
+/// has to be called again.
+pub async fn add_openapi_routes(
+    dynamic_router: &DynamicRouter,
+    web_server_config: &WebServerConfig,
+) {
+    let server_url = format!(
+        "http://{}:{}",
+        web_server_config.host, web_server_config.port
+    );
+    let mut api = OpenApi::default();
+    dynamic_router
+        .update_router(|r| {
+            r.route(
+                SWAGGER_UI_ROUTE,
+                Swagger::new(OPENAPI_JSON_ROUTE).axum_route(),
+            )
+            .route(
+                OPENAPI_JSON_ROUTE,
+                routing::get(|Extension(api): Extension<Arc<OpenApi>>| async move {
+                    Json((*api).clone())
+                }),
+            )
+            .finish_api_with(&mut api, |api| openapi::api_docs(api, server_url))
+            .layer(Extension(Arc::new(api)))
+            .into()
+        })
+        .await;
 }
 
 fn rewrite_request_uri<B>(mut req: Request<B>) -> Request<B> {
@@ -188,6 +197,7 @@ fn rewrite_request_uri<B>(mut req: Request<B>) -> Request<B> {
     *req.uri_mut() = new_uri;
     req
 }
+
 fn create_trace_layer<S>(route: Router<S>) -> Router<S>
 where
     S: Clone + Send + Sync + 'static,

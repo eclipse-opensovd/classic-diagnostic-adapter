@@ -26,20 +26,29 @@ use crate::AppError;
 pub struct Configuration {
     pub server: ServerConfig,
     pub doip: DoipConfig,
+    pub database: DatabaseConfig,
     pub logging: cda_tracing::LoggingConfig,
     pub onboard_tester: bool,
-    pub databases_path: String,
     pub flash_files_path: String,
     pub com_params: ComParams,
-    pub database_naming_convention: DatabaseNamingConvention,
     pub flat_buf: FlatbBufConfig,
     pub functional_description: FunctionalDescriptionConfig,
+    #[cfg(feature = "health")]
+    pub health: cda_health::config::HealthConfig,
 }
 
 #[derive(Deserialize, Serialize, Clone, Debug)]
 pub struct ServerConfig {
     pub address: String,
     pub port: u16,
+}
+
+#[derive(Deserialize, Serialize, Clone, Debug)]
+pub struct DatabaseConfig {
+    pub path: String,
+    pub naming_convention: DatabaseNamingConvention,
+    /// If true, the application will exit if no database could be loaded.
+    pub exit_no_database_loaded: bool,
 }
 
 pub trait ConfigSanity {
@@ -53,12 +62,18 @@ impl Default for Configuration {
     fn default() -> Self {
         Configuration {
             onboard_tester: true,
-            databases_path: ".".to_owned(),
+            database: DatabaseConfig {
+                path: ".".to_owned(),
+                naming_convention: DatabaseNamingConvention::default(),
+                exit_no_database_loaded: false,
+            },
             flash_files_path: ".".to_owned(),
             server: ServerConfig {
                 address: "0.0.0.0".to_owned(),
                 port: 20002,
             },
+            #[cfg(feature = "health")]
+            health: cda_health::config::HealthConfig::default(),
             doip: DoipConfig {
                 tester_address: "10.2.1.240".to_owned(),
                 tester_subnet: "255.255.0.0".to_owned(),
@@ -67,7 +82,6 @@ impl Default for Configuration {
             },
             logging: cda_tracing::LoggingConfig::default(),
             com_params: ComParams::default(),
-            database_naming_convention: DatabaseNamingConvention::default(),
             flat_buf: FlatbBufConfig::default(),
             functional_description: FunctionalDescriptionConfig {
                 description_database: "functional_groups".to_owned(),
@@ -82,7 +96,7 @@ impl Default for Configuration {
 
 impl ConfigSanity for Configuration {
     fn validate_sanity(&self) -> Result<(), AppError> {
-        self.database_naming_convention.validate_sanity()?;
+        self.database.naming_convention.validate_sanity()?;
         // Add more checks for Configuration fields here if needed
         Ok(())
     }
@@ -149,9 +163,18 @@ mod tests {
     #[tokio::test]
     async fn load_config_toml() -> Result<(), Box<dyn std::error::Error>> {
         let config_str = r#"
-databases_path = "/app/database"
 flash_files_path = "/app/flash"
 onboard_tester = true
+
+[database]
+path = "/app/database"
+
+[database.naming_convention]
+short_name_affix_position = "Prefix"
+long_name_affix_position = "Prefix"
+configuration_service_parameter_semantic_id = "ID"
+short_name_affixes = [ "Read_", "Write_" ]
+long_name_affixes = [ "Read ", "Write " ]
 
 [logging.tokio_tracing]
 server = "0.0.0.0:6669"
@@ -163,13 +186,6 @@ endpoint = "http://jaeger:4317"
 [com_params.doip]
 nack_number_of_retries.default = {"0x03" = 42, "0x04" = 43}
 nack_number_of_retries.name = "CP_TEST"
-
-[database_naming_convention]
-short_name_affix_position = "Prefix"
-long_name_affix_position = "Prefix"
-configuration_service_parameter_semantic_id = "ID"
-short_name_affixes = [ "Read_", "Write_" ]
-long_name_affixes = [ "Read ", "Write " ]
 
 [functional_description]
 description_database = "teapot"
@@ -204,18 +220,19 @@ description_database = "teapot"
         );
 
         assert_eq!(
-            config.database_naming_convention.short_name_affix_position,
+            config.database.naming_convention.short_name_affix_position,
             DiagnosticServiceAffixPosition::Prefix,
         );
 
         assert_eq!(
-            config.database_naming_convention.long_name_affix_position,
+            config.database.naming_convention.long_name_affix_position,
             DiagnosticServiceAffixPosition::Prefix,
         );
 
         assert_eq!(
             config
-                .database_naming_convention
+                .database
+                .naming_convention
                 .configuration_service_parameter_semantic_id,
             "ID".to_owned(),
         );
@@ -229,7 +246,7 @@ description_database = "teapot"
     #[tokio::test]
     async fn load_config_toml_sanityfail_short_name() -> Result<(), Box<dyn std::error::Error>> {
         let config_str = r#"
-[database_naming_convention]
+[database.naming_convention]
 short_name_affix_position = "Prefix"
 short_name_affixes = [ " Read", " Write_" ]
 "#;
@@ -243,7 +260,7 @@ short_name_affixes = [ " Read", " Write_" ]
     #[tokio::test]
     async fn load_config_toml_sanityfail_long_name() -> Result<(), Box<dyn std::error::Error>> {
         let config_str = r#"
-[database_naming_convention]
+[database.naming_convention]
 long_name_affix_position = "Suffix"
 long_name_affixes = [ "Read ", "Write_ " ]
 "#;

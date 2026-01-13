@@ -12,11 +12,12 @@
  */
 
 use std::{
-    sync::LazyLock,
+    sync::{Arc, LazyLock},
     time::{Duration, Instant},
 };
 
 use cda_core::DiagServiceResponseStruct;
+use cda_health::config::HealthConfig;
 use cda_interfaces::{
     FunctionalDescriptionConfig,
     datatypes::{ComParams, DatabaseNamingConvention, FlatbBufConfig},
@@ -24,7 +25,10 @@ use cda_interfaces::{
 use cda_plugin_security::{DefaultSecurityPlugin, DefaultSecurityPluginData};
 use cda_tracing::LoggingConfig;
 use futures::FutureExt as _;
-use opensovd_cda_lib::config::configfile::{ConfigSanity, Configuration, ServerConfig};
+use opensovd_cda_lib::{
+    cda_version,
+    config::configfile::{ConfigSanity, Configuration, DatabaseConfig, ServerConfig},
+};
 use tokio::sync::{Mutex, MutexGuard, OnceCell};
 use tracing_subscriber::layer::SubscriberExt;
 
@@ -48,6 +52,8 @@ static ECU_SIM_PROCESS: LazyLock<Mutex<Option<std::process::Child>>> =
 
 const CDA_INTEGRATION_TEST_USE_DOCKER: &str = "CDA_INTEGRATION_TEST_USE_DOCKER";
 const CDA_INTEGRATION_TEST_TESTER_ADDRESS: &str = "CDA_INTEGRATION_TEST_TESTER_ADDRESS";
+
+const MAIN_HEALTH_COMPONENT_KEY: &str = "main";
 
 pub(crate) struct TestRuntime {
     pub(crate) config: Configuration,
@@ -109,8 +115,6 @@ async fn initialize_runtime() -> Result<TestRuntime, TestingError> {
         (20002, 13400, 8181) // default ports for local usage
     };
 
-    let databases_path = mdd_file_path()?;
-
     let config = Configuration {
         server: opensovd_cda_lib::config::configfile::ServerConfig {
             address: host.clone(),
@@ -122,12 +126,15 @@ async fn initialize_runtime() -> Result<TestRuntime, TestingError> {
             gateway_port,
             send_timeout_ms: 1000,
         },
+        database: DatabaseConfig {
+            path: mdd_file_path()?,
+            naming_convention: DatabaseNamingConvention::default(),
+            exit_no_database_loaded: true,
+        },
         logging: LoggingConfig::default(),
         onboard_tester: true,
-        databases_path,
         flash_files_path: String::default(),
         com_params: ComParams::default(),
-        database_naming_convention: DatabaseNamingConvention::default(),
         flat_buf: FlatbBufConfig::default(),
         functional_description: FunctionalDescriptionConfig {
             description_database: "functional_groups".to_owned(),
@@ -135,6 +142,7 @@ async fn initialize_runtime() -> Result<TestRuntime, TestingError> {
             protocol_position: cda_interfaces::datatypes::DiagnosticServiceAffixPosition::Suffix,
             protocol_case_sensitive: false,
         },
+        health: HealthConfig::default(),
     };
     config.validate_sanity().map_err(|e| {
         TestingError::SetupError(format!("Configuration sanity check failed: {e:?}"))
@@ -172,8 +180,6 @@ fn start_cda(config: Configuration) {
     // Some unwraps are used here, this is on purpose
     // as we want the tests to fail hard if CDA fails to start.
     TOKIO_RUNTIME.spawn(async move {
-        tracing::info!("Starting CDA...");
-
         let webserver_config = cda_sovd::WebServerConfig {
             host: config.server.address.clone(),
             port: config.server.port,
@@ -188,20 +194,41 @@ fn start_cda(config: Configuration) {
         .shared();
 
         // Launch the webserver with deferred initialization
-        let dynamic_router =
+        let (dynamic_router, webserver_join_handle) =
             match cda_sovd::launch_webserver(webserver_config, clonable_shutdown_signal.clone())
                 .await
             {
-                Ok(router) => router,
+                Ok((router, jh)) => (router, jh),
                 Err(e) => {
                     tracing::error!(error = ?e, "Failed to launch webserver");
                     std::process::exit(1);
                 }
             };
 
+        let health = cda_health::add_health_routes(&dynamic_router, cda_version().to_owned()).await;
+        let main_health_provider = {
+            let provider = Arc::new(cda_health::StatusHealthProvider::new(
+                cda_health::Status::Starting,
+            ));
+            health
+                .register_provider(
+                    MAIN_HEALTH_COMPONENT_KEY,
+                    Arc::clone(&provider) as Arc<dyn cda_health::HealthProvider>,
+                )
+                .await
+                .map_err(|e| {
+                    tracing::error!(error = %e, "Failed to register main health provider");
+                    std::process::exit(1);
+                })
+                .ok();
+            provider
+        };
+        let health = Some(health);
+
         let vehicle_data = opensovd_cda_lib::load_vehicle_data::<_, DefaultSecurityPluginData>(
             &config,
             clonable_shutdown_signal.clone(),
+            health.as_ref(),
         )
         .await
         .map_err(|e| {
@@ -226,10 +253,20 @@ fn start_cda(config: Configuration) {
         .unwrap();
 
         tracing::info!("CDA fully initialized and ready to serve requests");
+        main_health_provider
+            .update_status(cda_health::Status::Up)
+            .await;
 
         // Wait for shutdown signal
         clonable_shutdown_signal.await;
         tracing::info!("Shutting down...");
+        webserver_join_handle
+            .await
+            .map_err(|e| {
+                tracing::error!({error=?e}, "Webserver task join error");
+                std::process::exit(1);
+            })
+            .ok();
     });
 }
 
@@ -426,10 +463,8 @@ async fn wait_for_ecu_sim_ready(host: &str, sim_control_port: u16) -> Result<(),
 }
 
 pub(crate) async fn wait_for_cda_online(cfg: &ServerConfig) -> Result<(), TestingError> {
-    // the endpoint below is chosen because it is only available once
-    // the vehicle routes are loaded in and works without authentication
-    let url = format!("http://{}:{}/vehicle/v15/components", cfg.address, cfg.port);
-    wait_for_http_ready(url, "CDA", Some(http::StatusCode::OK)).await
+    let url = format!("http://{}:{}/health/ready", cfg.address, cfg.port);
+    wait_for_http_ready(url, "CDA", Some(http::StatusCode::NO_CONTENT)).await
 }
 
 fn ecu_sim_dir() -> Result<std::path::PathBuf, TestingError> {

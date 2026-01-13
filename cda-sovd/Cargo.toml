@@ -28,14 +28,13 @@ workspace = true
 # internal dependencies
 cda-interfaces = { workspace = true }
 cda-plugin-security = { workspace = true }
+cda-tracing = { workspace = true }
 sovd-interfaces = { workspace = true }
-cda-comm-doip = { workspace = true }
 
+# external
 tokio = { workspace = true, features = ["net"] }
-futures = { workspace = true }                   # external
 
-async-trait = { workspace = true }
-
+# openapi generation
 aide = { workspace = true, features = [
   "axum",
   "swagger",
@@ -49,7 +48,7 @@ aide = { workspace = true, features = [
   "axum-extra-with-rejection",
   "macros",
   "serde_qs",
-] } # openapi generation
+] }
 schemars = { workspace = true }
 
 # web server
@@ -65,7 +64,6 @@ axum-extra = { workspace = true, features = ["typed-header", "with-rejection"] }
 chrono = { workspace = true }
 http = { workspace = true }
 indexmap = { workspace = true }
-jsonwebtoken = { workspace = true }
 mime = { workspace = true }
 serde = { workspace = true, features = ["derive"] }
 serde_json = { workspace = true }

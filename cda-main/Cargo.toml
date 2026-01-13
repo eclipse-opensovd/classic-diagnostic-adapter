@@ -38,6 +38,7 @@ cda-interfaces = { workspace = true }
 cda-sovd = { workspace = true }
 cda-tracing = { workspace = true }
 cda-plugin-security = { workspace = true }
+cda-health = { workspace = true }
 # args
 clap = { workspace = true, features = ["derive"] }
 # config
@@ -56,8 +57,6 @@ tokio = { workspace = true, features = [
 # logging & tracing
 thiserror = { workspace = true }
 tracing = { workspace = true }
-tracing-core = { workspace = true }
-tracing-appender = { workspace = true }
 tracing-subscriber = { workspace = true, features = [
   "ansi",
   "chrono",
@@ -67,8 +66,6 @@ tracing-subscriber = { workspace = true, features = [
   "parking_lot",
   "std",
 ] }
-strip-ansi-escapes = { workspace = true } # Strip ANSI escape codes from strings, used for file logging
-nu-ansi-term = { workspace = true } # ANSI terminal support for terminal log output
 
 [dev-dependencies]
 chrono = { workspace = true }
@@ -78,10 +75,11 @@ reqwest = { workspace = true }
 serde_json = { workspace = true }
 
 [features]
-default = []
+default = ["health"]
 tokio-tracing = ["cda-interfaces/tokio-tracing", "cda-tracing/tokio-tracing"]
 openssl-vendored = [
   "cda-comm-doip/openssl-vendored",
   "cda-comm-uds/openssl-vendored",
 ]
 dlt-tracing = ["cda-tracing/dlt-tracing"]
+health = []
