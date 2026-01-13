@@ -45,6 +45,9 @@ static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
 // todo scope after poc: make this configurable
 const DB_PARALLEL_LOAD_TASKS: usize = 2;
 
+const DB_HEALTH_COMPONENT_KEY: &str = "database";
+const DOIP_HEALTH_COMPONENT_KEY: &str = "doip";
+
 pub type DatabaseMap<S> = HashMap<String, RwLock<EcuManager<S>>>;
 pub type FileManagerMap = HashMap<String, FileManager>;
 
@@ -60,6 +63,7 @@ pub struct VehicleData<S: SecurityPlugin> {
     pub file_managers: FileManagerMap,
     pub uds_manager: UdsManagerType<S>,
     pub locks: Arc<cda_sovd::Locks>,
+    pub databases: Arc<DatabaseMap<S>>,
 }
 
 #[derive(thiserror::Error, Debug)]
@@ -158,9 +162,10 @@ pub async fn load_vehicle_data<
 >(
     config: &Configuration,
     clonable_shutdown_signal: F,
+    health: Option<&cda_health::HealthState>,
 ) -> Result<VehicleData<S>, AppError> {
     // Load databases in the background
-    let database_path = config.databases_path.clone();
+    let database_path = config.database.path.clone();
     let protocol = if config.onboard_tester {
         cda_interfaces::Protocol::DoIpDobt
     } else {
@@ -171,13 +176,12 @@ pub async fn load_vehicle_data<
         &database_path,
         protocol,
         config.com_params.clone(),
-        config.database_naming_convention.clone(),
+        config.database.naming_convention.clone(),
         config.flat_buf.clone(),
         config.functional_description.clone(),
+        health,
     )
     .await;
-
-    tracing::debug!("Databases loaded. Setting up diagnostic gateway...");
 
     let (variant_detection_tx, variant_detection_rx) = mpsc::channel(50);
     let databases = Arc::new(databases);
@@ -186,6 +190,7 @@ pub async fn load_vehicle_data<
         &config.doip,
         variant_detection_tx,
         clonable_shutdown_signal.clone(),
+        health,
     )
     .await
     {
@@ -198,7 +203,7 @@ pub async fn load_vehicle_data<
 
     let uds = create_uds_manager(
         diagnostic_gateway,
-        databases,
+        Arc::clone(&databases),
         variant_detection_rx,
         &config.functional_description,
     );
@@ -213,10 +218,14 @@ pub async fn load_vehicle_data<
         uds_manager: uds,
         file_managers,
         locks: Arc::new(Locks::new(ecu_names)),
+        databases,
     })
 }
 
-#[tracing::instrument(skip(com_params, database_naming_convention), fields(databases_path))]
+#[tracing::instrument(
+    skip(com_params, database_naming_convention, health),
+    fields(databases_path)
+)]
 pub async fn load_databases<S: SecurityPlugin>(
     databases_path: &str,
     protocol: Protocol,
@@ -224,7 +233,26 @@ pub async fn load_databases<S: SecurityPlugin>(
     database_naming_convention: DatabaseNamingConvention,
     flat_buf_settings: FlatbBufConfig,
     func_description_cfg: FunctionalDescriptionConfig,
+    health: Option<&cda_health::HealthState>,
 ) -> (DatabaseMap<S>, FileManagerMap) {
+    let db_health_provider = if let Some(health_state) = health {
+        let provider = Arc::new(cda_health::StatusHealthProvider::new(
+            cda_health::Status::Starting,
+        ));
+        if let Err(e) = health_state
+            .register_provider(
+                DB_HEALTH_COMPONENT_KEY,
+                Arc::clone(&provider) as Arc<dyn cda_health::HealthProvider>,
+            )
+            .await
+        {
+            tracing::warn!(error = %e, "Failed to register database health provider");
+        }
+        Some(provider)
+    } else {
+        None
+    };
+
     let databases: Arc<RwLock<LoadedEcuMap<S>>> = Arc::new(RwLock::new(HashMap::new()));
 
     let file_managers: Arc<RwLock<HashMap<String, FileManager>>> =
@@ -239,6 +267,9 @@ pub async fn load_databases<S: SecurityPlugin>(
             Ok(files) => files,
             Err(e) => {
                 tracing::error!(error = %e, "Failed to read directory");
+                if let Some(provider) = &db_health_provider {
+                    provider.update_status(cda_health::Status::Failed).await;
+                }
                 break 'load_database;
             }
         };
@@ -329,12 +360,17 @@ pub async fn load_databases<S: SecurityPlugin>(
 
     tracing::info!(
         database_count = &databases.len(),
-        duration = ?end.saturating_duration_since(start), "Loaded databases");
-    if databases.is_empty() {
-        tracing::error!("Database load failed, no databases found");
-        std::process::exit(1);
-    }
+        duration = ?end.saturating_duration_since(start),
+        "Loaded databases");
+    let status = if databases.is_empty() {
+        cda_health::Status::Failed
+    } else {
+        cda_health::Status::Up
+    };
 
+    if let Some(provider) = db_health_provider {
+        provider.update_status(status).await;
+    }
     (databases, file_managers)
 }
 
@@ -397,7 +433,9 @@ async fn load_database<S: SecurityPlugin>(
 ) {
     for (mddfile, _) in paths {
         let Some(mdd_path) = mddfile.to_str().map(ToOwned::to_owned) else {
-            tracing::error!(mdd_file = %mddfile.display(), "Failed to convert MDD file path to string");
+            tracing::error!(
+                mdd_file = %mddfile.display(),
+                "Failed to convert MDD file path to string");
             continue;
         };
 
@@ -469,14 +507,13 @@ async fn load_database<S: SecurityPlugin>(
                     database_naming_convention.clone(),
                     ecu_type,
                     &func_description_cfg,
-                )
-                .map_err(|e| format!("Failed to create DiagServiceManager: {e:?}"))
-                {
+                ) {
                     Ok(manager) => manager,
                     Err(e) => {
                         tracing::error!(
-                            ecu_name = %ecu_name, error = ?e,
-                                "Failed to create DiagServiceManager");
+                            ecu_name = %ecu_name,
+                            error = ?e,
+                            "Failed to create DiagServiceManager");
                         continue;
                     }
                 };
@@ -609,7 +646,7 @@ pub fn create_uds_manager<S: SecurityPlugin>(
 /// # Errors
 /// Returns a string error if the gateway cannot be initialized.
 #[tracing::instrument(
-    skip(databases, variant_detection, shutdown_signal),
+    skip(databases, variant_detection, shutdown_signal, health),
     fields(
         database_count = databases.len(),
         dlt_context = dlt_ctx!("MAIN"),
@@ -620,8 +657,37 @@ pub async fn create_diagnostic_gateway<S: SecurityPlugin>(
     doip_config: &DoipConfig,
     variant_detection: mpsc::Sender<Vec<String>>,
     shutdown_signal: impl Future<Output = ()> + Send + Clone + 'static,
+    health: Option<&cda_health::HealthState>,
 ) -> Result<DoipDiagGateway<EcuManager<S>>, DoipGatewaySetupError> {
-    DoipDiagGateway::new(doip_config, databases, variant_detection, shutdown_signal).await
+    let doip_health_provider = if let Some(health_state) = health {
+        let provider = Arc::new(cda_health::StatusHealthProvider::new(
+            cda_health::Status::Starting,
+        ));
+        if let Err(e) = health_state
+            .register_provider(
+                DOIP_HEALTH_COMPONENT_KEY,
+                Arc::clone(&provider) as Arc<dyn cda_health::HealthProvider>,
+            )
+            .await
+        {
+            tracing::warn!(error = %e, "Failed to register DoIP health provider");
+        }
+        Some(provider)
+    } else {
+        None
+    };
+
+    let result =
+        DoipDiagGateway::new(doip_config, databases, variant_detection, shutdown_signal).await;
+    let status = if result.is_ok() {
+        cda_health::Status::Up
+    } else {
+        cda_health::Status::Failed
+    };
+    if let Some(provider) = doip_health_provider {
+        provider.update_status(status).await;
+    }
+    result
 }
 
 /// Waits for a shutdown signal, such as Ctrl+C or SIGTERM (on unix).

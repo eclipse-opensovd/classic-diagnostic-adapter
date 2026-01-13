@@ -11,6 +11,8 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+use std::sync::Arc;
+
 use cda_core::DiagServiceResponseStruct;
 use cda_interfaces::dlt_ctx;
 use cda_plugin_security::{DefaultSecurityPlugin, DefaultSecurityPluginData};
@@ -21,6 +23,9 @@ use opensovd_cda_lib::{
     config::configfile::{ConfigSanity, Configuration},
     setup_tracing, shutdown_signal,
 };
+
+#[cfg(feature = "health")]
+const MAIN_HEALTH_COMPONENT_KEY: &str = "main";
 
 #[derive(Parser, Debug)]
 #[command(version, about, long_about = None)]
@@ -59,6 +64,9 @@ struct AppArgs {
 
     #[arg(long)]
     log_file_name: Option<String>,
+
+    #[arg(long)]
+    exit_no_database_loaded: Option<bool>,
 }
 
 #[tokio::main]
@@ -88,17 +96,52 @@ async fn main() -> Result<(), AppError> {
 
     let clonable_shutdown_signal = shutdown_signal().shared();
 
-    let dynamic_router =
+    let (dynamic_router, webserver_task) =
         cda_sovd::launch_webserver(webserver_config.clone(), clonable_shutdown_signal.clone())
             .await?;
+
+    #[cfg(feature = "health")]
+    let (health_state, main_health_provider) = if config.health.enabled {
+        let health_state =
+            cda_health::add_health_routes(&dynamic_router, cda_version().to_owned()).await;
+        let main_health_provider = Arc::new(cda_health::StatusHealthProvider::new(
+            cda_health::Status::Starting,
+        ));
+
+        if let Err(e) = health_state
+            .register_provider(
+                MAIN_HEALTH_COMPONENT_KEY,
+                Arc::clone(&main_health_provider) as Arc<dyn cda_health::HealthProvider>,
+            )
+            .await
+        {
+            tracing::warn!(error = %e, "Failed to register main health provider");
+        }
+        (Some(health_state), Some(main_health_provider))
+    } else {
+        (None, None)
+    };
+
+    #[cfg(not(feature = "health"))]
+    let (health_state, main_health_provider): (
+        Option<cda_health::HealthState>,
+        Option<Arc<cda_health::StatusHealthProvider>>,
+    ) = (None, None);
 
     tracing::debug!("Webserver is running. Loading sovd routes...");
 
     let vehicle_data = opensovd_cda_lib::load_vehicle_data::<_, DefaultSecurityPluginData>(
         &config,
         clonable_shutdown_signal.clone(),
+        health_state.as_ref(),
     )
     .await?;
+
+    if vehicle_data.databases.is_empty() && config.database.exit_no_database_loaded {
+        return Err(AppError::ResourceError(
+            "No database loaded, exiting as configured".to_string(),
+        ));
+    }
 
     cda_sovd::add_vehicle_routes::<DiagServiceResponseStruct, _, _, DefaultSecurityPlugin>(
         &dynamic_router,
@@ -109,12 +152,19 @@ async fn main() -> Result<(), AppError> {
         config.functional_description,
     )
     .await?;
+    cda_sovd::add_openapi_routes(&dynamic_router, &webserver_config).await;
 
     tracing::info!("CDA fully initialized and ready to serve requests");
+    if let Some(provider) = main_health_provider {
+        provider.update_status(cda_health::Status::Up).await;
+    }
 
     // Wait for shutdown signal
     clonable_shutdown_signal.await;
     tracing::info!("Shutting down...");
+    webserver_task
+        .await
+        .map_err(|e| AppError::RuntimeError(format!("Webserver task join error: {e}")))?;
 
     Ok(())
 }
@@ -130,7 +180,10 @@ impl AppArgs {
             config.onboard_tester = onboard_tester;
         }
         if let Some(databases_path) = self.databases_path {
-            config.databases_path = databases_path;
+            config.database.path = databases_path;
+        }
+        if let Some(exit_no_database_loaded) = self.exit_no_database_loaded {
+            config.database.exit_no_database_loaded = exit_no_database_loaded;
         }
         if let Some(flash_files_path) = self.flash_files_path {
             config.flash_files_path = flash_files_path;

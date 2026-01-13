@@ -74,7 +74,9 @@ pub(crate) mod aide_helper {
     pub(crate) use gen_path_param;
 }
 
-pub(crate) fn api_docs(api: TransformOpenApi) -> TransformOpenApi {
+// Allowing pass by value here for the config, to prevent life-time issues with the
+// borrowed config in the closure.
+pub(crate) fn api_docs(api: TransformOpenApi, server_url: String) -> TransformOpenApi {
     api.title("Eclipse OpenSOVD - Classic Diagnostic Adapter")
         .summary(
             "In the SOVD (Service-Oriented Vehicle Diagnostics) context, a Classic Diagnostic \
@@ -100,7 +102,7 @@ pub(crate) fn api_docs(api: TransformOpenApi) -> TransformOpenApi {
             ..Default::default()
         })
         .server(Server {
-            url: "http://localhost:20002".to_owned(),
+            url: server_url,
             ..Default::default()
         })
 }

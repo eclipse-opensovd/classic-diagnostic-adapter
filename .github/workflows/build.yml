@@ -51,7 +51,7 @@ jobs:
       - name: run clippy nightly
         run: cargo clippy --locked --all-targets -- -D warnings
 
-  all-features:
+  features:
     runs-on: ubuntu-latest
     env:
       RUSTFLAGS: "--cfg tokio_unstable -L /usr/local/lib"
@@ -78,8 +78,15 @@ jobs:
         uses: eclipse-opensovd/dlt-tracing-lib/.github/actions/setup-dlt@main
       - name: Clippy
         run: cargo clippy --locked --all-targets --all-features -- -D warnings
-      - name: Build
+      - name: Build all features
         run: cargo build --locked --verbose --all-features
+      - name: Build minimal features
+        run: cargo build --locked --verbose --no-default-features
+      - name: Build minimal CDA only
+        # Building CDA only makes sure that optional dependencies
+        # from within the workspace are properly marked as optional and guarded
+        # with cfg flags.
+        run: cargo build --locked --verbose --no-default-features --package opensovd-cda
 
   build_and_test:
     runs-on: ubuntu-latest
