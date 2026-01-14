@@ -129,7 +129,10 @@ async fn initialize_runtime() -> Result<TestRuntime, TestingError> {
         com_params: ComParams::default(),
         database_naming_convention: DatabaseNamingConvention::default(),
         flat_buf: FlatbBufConfig::default(),
-        functional_description: FunctionalDescriptionConfig::default(),
+        functional_description: FunctionalDescriptionConfig {
+            description_database: "functional_groups".to_owned(),
+            enabled_functional_groups: None,
+        },
     };
     config.validate_sanity().map_err(|e| {
         TestingError::SetupError(format!("Configuration sanity check failed: {e:?}"))

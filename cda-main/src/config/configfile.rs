@@ -71,6 +71,7 @@ impl Default for Configuration {
             flat_buf: FlatbBufConfig::default(),
             functional_description: FunctionalDescriptionConfig {
                 description_database: "functional_groups".to_owned(),
+                enabled_functional_groups: None,
             },
         }
     }

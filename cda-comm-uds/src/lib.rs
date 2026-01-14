@@ -20,9 +20,10 @@ use std::{
 use async_trait::async_trait;
 use cda_interfaces::{
     DiagComm, DiagCommType, DiagServiceError, DynamicPlugin, EcuGateway, EcuManager, EcuVariant,
-    FlashTransferStartParams, HashMap, HashMapExtensions, HashSet, HashSetExtensions,
-    SchemaDescription, SchemaProvider, SecurityAccess, ServicePayload, TesterPresentControlMessage,
-    TesterPresentMode, TesterPresentType, TransmissionParameters, UdsEcu, UdsResponse,
+    FlashTransferStartParams, FunctionalDescriptionConfig, HashMap, HashMapExtensions, HashSet,
+    HashSetExtensions, SchemaDescription, SchemaProvider, SecurityAccess, ServicePayload,
+    TesterPresentControlMessage, TesterPresentMode, TesterPresentType, TransmissionParameters,
+    UdsEcu, UdsResponse,
     datatypes::{
         self, ComponentConfigurationsInfo, DTC_CODE_BIT_LEN, DataTransferError,
         DataTransferMetaData, DataTransferStatus, DtcCode, DtcExtendedInfo, DtcMask,
@@ -82,6 +83,7 @@ pub struct UdsManager<S: EcuGateway, R: DiagServiceResponse, T: EcuManager<Respo
     data_transfers: Arc<Mutex<HashMap<EcuIdentifier, EcuDataTransfer>>>,
     ecu_semaphores: Arc<Mutex<HashMap<u16, Arc<Semaphore>>>>,
     tester_present_tasks: Arc<RwLock<HashMap<EcuIdentifier, TesterPresentTask>>>,
+    functional_description_database: String,
     _phantom: std::marker::PhantomData<R>,
 }
 
@@ -90,6 +92,7 @@ impl<S: EcuGateway, R: DiagServiceResponse, T: EcuManager<Response = R>> UdsMana
         gateway: S,
         ecus: Arc<HashMap<String, RwLock<T>>>,
         mut variant_detection_receiver: mpsc::Receiver<Vec<String>>,
+        functional_description_config: &FunctionalDescriptionConfig,
     ) -> Self {
         let manager = Self {
             ecus,
@@ -97,6 +100,9 @@ impl<S: EcuGateway, R: DiagServiceResponse, T: EcuManager<Response = R>> UdsMana
             data_transfers: Arc::new(Mutex::new(HashMap::new())),
             ecu_semaphores: Arc::new(Mutex::new(HashMap::new())),
             tester_present_tasks: Arc::new(RwLock::new(HashMap::new())),
+            functional_description_database: functional_description_config
+                .description_database
+                .clone(),
             _phantom: std::marker::PhantomData,
         };
 
@@ -1028,6 +1034,7 @@ impl<S: EcuGateway, R: DiagServiceResponse, T: EcuManager<Response = R>> Clone
             data_transfers: Arc::clone(&self.data_transfers),
             ecu_semaphores: Arc::clone(&self.ecu_semaphores),
             tester_present_tasks: Arc::clone(&self.tester_present_tasks),
+            functional_description_database: self.functional_description_database.clone(),
             _phantom: self._phantom,
         }
     }
@@ -1996,11 +2003,11 @@ impl<S: EcuGateway, R: DiagServiceResponse, T: EcuManager<Response = R>> UdsEcu
             return HashMap::new();
         }
 
-        // todo: this should not be hardcoded but from config
-        let Some(globals_ecu) = self.ecus.get("functional_groups") else {
+        let Some(globals_ecu) = self.ecus.get(&self.functional_description_database) else {
             tracing::warn!(
                 functional_group = %functional_group,
-                "'functional_groups' ECU not found for functional group request"
+                description_database = %self.functional_description_database,
+                "Functional description database not found for functional group request"
             );
             return HashMap::new();
         };

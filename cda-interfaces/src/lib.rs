@@ -246,7 +246,7 @@ impl DiagCommType {
 #[derive(Deserialize, Serialize, Clone, Debug)]
 pub struct FunctionalDescriptionConfig {
     pub description_database: String,
-    // todo: additional configs like logical link?
+    pub enabled_functional_groups: Option<HashSet<String>>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Error)]

@@ -47,8 +47,20 @@ pub(crate) async fn create_functional_group_routes<T: UdsEcu + Clone>(
         .ecu_functional_groups(&functional_group_config.description_database)
         .await
         .map_err(|e| SovdError::RouteError(format!("Unable to get functional groups: {e}")))?;
+
+    // Filter groups based on config if enabled_functional_groups is set
+    let filtered_groups =
+        if let Some(enabled_groups) = &functional_group_config.enabled_functional_groups {
+            groups
+                .into_iter()
+                .filter(|group| enabled_groups.contains(group))
+                .collect::<Vec<_>>()
+        } else {
+            groups
+        };
+
     let mut router: Router = Router::new();
-    for group in groups {
+    for group in filtered_groups {
         let fg_state = WebserverFgState {
             uds: state.uds.clone(),
             locks: Arc::clone(&state.locks),

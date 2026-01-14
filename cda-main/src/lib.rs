@@ -196,7 +196,12 @@ pub async fn load_vehicle_data<
         }
     };
 
-    let uds = create_uds_manager(diagnostic_gateway, databases, variant_detection_rx);
+    let uds = create_uds_manager(
+        diagnostic_gateway,
+        databases,
+        variant_detection_rx,
+        &config.functional_description,
+    );
     tracing::debug!("Starting variant detection");
     let vdetect = uds.clone();
     cda_interfaces::spawn_named!("startup-variant-detection", async move {
@@ -589,8 +594,14 @@ pub fn create_uds_manager<S: SecurityPlugin>(
     gateway: DoipDiagGateway<EcuManager<S>>,
     databases: Arc<HashMap<String, RwLock<EcuManager<S>>>>,
     variant_detection_receiver: mpsc::Receiver<Vec<String>>,
+    functional_description_config: &FunctionalDescriptionConfig,
 ) -> UdsManagerType<S> {
-    UdsManager::new(gateway, databases, variant_detection_receiver)
+    UdsManager::new(
+        gateway,
+        databases,
+        variant_detection_receiver,
+        functional_description_config,
+    )
 }
 
 /// Creates a new diagnostic gateway for the webserver.

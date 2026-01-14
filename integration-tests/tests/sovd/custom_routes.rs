@@ -16,7 +16,7 @@ use std::{sync::Arc, time::Duration};
 use aide::axum::{ApiRouter, routing};
 use axum::{Json, http::StatusCode};
 use cda_comm_doip::config::DoipConfig;
-use cda_interfaces::UdsEcu;
+use cda_interfaces::{FunctionalDescriptionConfig, UdsEcu};
 use cda_sovd::{Locks, dynamic_router::DynamicRouter};
 use futures::FutureExt;
 use opensovd_cda_lib::{DatabaseMap, FileManagerMap, config::configfile::ServerConfig};
@@ -118,7 +118,15 @@ async fn test_custom_demo_endpoint() {
     .await
     .expect("Failed to create gateway");
 
-    let uds_manager = opensovd_cda_lib::create_uds_manager(gateway, databases, variant_rx);
+    let uds_manager = opensovd_cda_lib::create_uds_manager(
+        gateway,
+        databases,
+        variant_rx,
+        &cda_interfaces::FunctionalDescriptionConfig {
+            description_database: "functional_groups".to_owned(),
+            enabled_functional_groups: None,
+        },
+    );
     let server_handle = tokio::spawn({
         let shutdown_signal = shutdown_signal.clone();
         async move {
@@ -139,7 +147,10 @@ async fn test_custom_demo_endpoint() {
                 String::new(),
                 file_managers,
                 Arc::new(Locks::new(ecu_names)),
-                FunctionalDescriptionConfig::default(),
+                FunctionalDescriptionConfig {
+                    description_database: "functional_groups".to_owned(),
+                    enabled_functional_groups: None,
+                },
             )
             .await
         }
