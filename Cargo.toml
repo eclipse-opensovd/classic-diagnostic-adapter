@@ -27,6 +27,7 @@ members = [
   "cda-main",
   "cda-tracing",
   "cda-plugin-security",
+  "cda-health",
   "integration-tests",
 ]
 
@@ -40,6 +41,7 @@ cda-database = { path = "cda-database" }
 cda-plugin-security = { path = "cda-plugin-security" }
 cda-sovd = { path = "cda-sovd" }
 cda-tracing = { path = "cda-tracing" }
+cda-health = { path = "cda-health" }
 sovd-interfaces = { path = "cda-sovd-interfaces" }
 
 # ---- common crates ----

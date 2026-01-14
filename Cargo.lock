@@ -377,11 +377,27 @@ dependencies = [
 ]
 
 [[package]]
+name = "cda-health"
+version = "0.1.0"
+dependencies = [
+ "aide",
+ "async-trait",
+ "axum",
+ "cda-interfaces",
+ "cda-sovd",
+ "chrono",
+ "futures",
+ "schemars",
+ "serde",
+ "thiserror 2.0.17",
+ "tokio",
+]
+
+[[package]]
 name = "cda-interfaces"
 version = "0.1.0"
 dependencies = [
  "async-trait",
- "cda-tracing",
  "foldhash",
  "hex",
  "mockall",
@@ -422,17 +438,14 @@ name = "cda-sovd"
 version = "0.1.0"
 dependencies = [
  "aide",
- "async-trait",
  "axum",
  "axum-extra",
- "cda-comm-doip",
  "cda-interfaces",
  "cda-plugin-security",
+ "cda-tracing",
  "chrono",
- "futures",
  "http",
  "indexmap",
- "jsonwebtoken",
  "mime",
  "percent-encoding",
  "regex",
@@ -1606,6 +1619,7 @@ dependencies = [
  "cda-comm-doip",
  "cda-core",
  "cda-database",
+ "cda-health",
  "cda-interfaces",
  "cda-plugin-security",
  "cda-sovd",
@@ -1981,6 +1995,7 @@ dependencies = [
  "cda-comm-uds",
  "cda-core",
  "cda-database",
+ "cda-health",
  "cda-interfaces",
  "cda-plugin-security",
  "cda-sovd",
@@ -1992,16 +2007,12 @@ dependencies = [
  "http",
  "mimalloc",
  "mime",
- "nu-ansi-term",
  "reqwest",
  "serde",
  "serde_json",
- "strip-ansi-escapes",
  "thiserror 2.0.17",
  "tokio",
  "tracing",
- "tracing-appender",
- "tracing-core",
  "tracing-subscriber",
 ]
 

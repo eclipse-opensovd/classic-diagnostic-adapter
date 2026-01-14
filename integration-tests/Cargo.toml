@@ -31,6 +31,7 @@ sovd-interfaces = { workspace = true }
 cda-tracing = { workspace = true }
 cda-plugin-security = { workspace = true }
 cda-comm-doip = { workspace = true }
+cda-health = { workspace = true }
 opensovd_cda_lib = { workspace = true }
 
 # External dependencies
@@ -68,9 +69,9 @@ futures = { workspace = true }
 # libc
 libc = { workspace = true }
 
-
 [features]
-default = []
+# We need the health endpoint to check if the CDA is online
+default = ["opensovd_cda_lib/health"]
 integration-tests = []
 
 # Integration tests are only compiled when the feature is enabled.
