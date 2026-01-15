@@ -19,7 +19,8 @@ use std::{
 
 use cda_interfaces::{
     DiagServiceError, DoipComParamProvider, DoipGatewaySetupError, EcuAddressProvider, EcuGateway,
-    HashMap, HashMapExtensions, ServicePayload, TransmissionParameters, UdsResponse, dlt_ctx, util,
+    HashMap, HashMapExtensions, ServicePayload, TransmissionParameters, UdsResponse, dlt_ctx,
+    util::{self, tokio_ext},
 };
 use doip_definitions::payload::{DiagnosticMessage, DiagnosticMessageNack, GenericNack};
 use thiserror::Error;
@@ -76,7 +77,7 @@ struct DoipConnection {
 }
 
 #[derive(Error, Debug, Clone)]
-enum ConnectionError {
+pub enum ConnectionError {
     #[error("Connection closed.")]
     Closed,
     #[error("Decoding error: `{0}`")]
@@ -335,7 +336,7 @@ impl<T: EcuAddressProvider + DoipComParamProvider> EcuGateway for DoipDiagGatewa
                     );
 
                     // Clear any pending messages
-                    while ecu.receiver.try_recv().is_ok() {}
+                    tokio_ext::clear_pending_messages(&mut ecu.receiver);
                     let receiver_flushed = start.elapsed().saturating_sub(lock_acquired);
 
                     let mut resend_counter = 0;
@@ -571,7 +572,7 @@ impl<T: EcuAddressProvider + DoipComParamProvider> EcuGateway for DoipDiagGatewa
         let doip_message = DiagnosticMessage {
             source_address: message.source_address.to_be_bytes(),
             target_address: message.target_address.to_be_bytes(),
-            message: message.data.clone(),
+            message: message.data,
         };
 
         let mut result_map = HashMap::new();
@@ -602,7 +603,7 @@ impl<T: EcuAddressProvider + DoipComParamProvider> EcuGateway for DoipDiagGatewa
             .collect::<Vec<_>>();
 
         // Clear any pending messages
-        while ecu.receiver.try_recv().is_ok() {}
+        tokio_ext::clear_pending_messages(&mut ecu.receiver);
 
         let mut resend_counter = 0;
         send_with_retries(
@@ -618,15 +619,15 @@ impl<T: EcuAddressProvider + DoipComParamProvider> EcuGateway for DoipDiagGatewa
             transmission_params.ecu_name.to_lowercase(),
             Arc::clone(gateway_ecu),
         ));
-        let received_responses: Arc<RwLock<HashMap<String, Result<DiagnosticMessage, EcuError>>>> =
-            Arc::new(RwLock::new(HashMap::new()));
+        let received_responses: Arc<Mutex<HashMap<String, Result<DiagnosticMessage, EcuError>>>> =
+            Arc::new(Mutex::new(HashMap::new()));
         let mut futures = Vec::new();
         for (name, ecu) in ecu_mtxs.drain(..) {
             let received_responses = Arc::clone(&received_responses);
             let fut = async move {
                 let mut lock = ecu.lock().await;
                 if let Some(response) = wait_for_ecu_response(&mut lock, timeout).await {
-                    received_responses.write().await.insert(name, response);
+                    received_responses.lock().await.insert(name, response);
                 }
             };
             futures.push(fut);
@@ -634,7 +635,7 @@ impl<T: EcuAddressProvider + DoipComParamProvider> EcuGateway for DoipDiagGatewa
 
         futures::future::join_all(futures).await;
 
-        for (ecu_name, msg) in received_responses.write().await.drain() {
+        for (ecu_name, msg) in received_responses.lock().await.drain() {
             if !result_map.contains_key(&ecu_name) {
                 match msg {
                     Ok(msg) => {
@@ -657,15 +658,11 @@ impl<T: EcuAddressProvider + DoipComParamProvider> EcuGateway for DoipDiagGatewa
                         );
                     }
                     Err(e) => {
-                        // todo: maybe not NoResponse error..
-                        result_map.insert(
-                            ecu_name.clone(),
-                            Err(DiagServiceError::NoResponse(format!("{e}"))),
-                        );
                         tracing::debug!(
                             ecu_name = %ecu_name,
                             "Error receiving functional response: {e}"
                         );
+                        result_map.insert(ecu_name.clone(), Err(e.into()));
                     }
                 }
             }

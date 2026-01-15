@@ -14,7 +14,8 @@
 use std::{sync::Arc, time::Duration};
 
 use cda_interfaces::{
-    DoipComParamProvider, EcuAddressProvider, HashMap, HashMapExtensions, dlt_ctx, service_ids,
+    DataParseError, DiagServiceError, DoipComParamProvider, EcuAddressProvider, HashMap,
+    HashMapExtensions, dlt_ctx, service_ids,
 };
 use doip_definitions::payload::{
     ActivationType, AliveCheckRequest, DiagnosticMessage, DoipPayload, RoutingActivationRequest,
@@ -51,6 +52,29 @@ pub enum EcuError {
 impl From<ConnectionError> for EcuError {
     fn from(value: ConnectionError) -> Self {
         EcuConnectionError(value)
+    }
+}
+
+impl From<EcuError> for DiagServiceError {
+    fn from(value: EcuError) -> Self {
+        match value {
+            EcuError::ResourceNotFound(res) => DiagServiceError::ResourceError(res),
+            EcuConnectionError(connection_error) => match connection_error {
+                ConnectionError::Decoding(err) => DiagServiceError::DataError(DataParseError {
+                    value: err,
+                    details: String::new(),
+                }),
+                ConnectionError::InvalidMessage(msg) => {
+                    DiagServiceError::UnexpectedResponse(Some(msg))
+                }
+                ConnectionError::Timeout(_) => DiagServiceError::Timeout,
+                // map arbitrary connection errors to connection closed
+                ConnectionError::ConnectionFailed(_)
+                | ConnectionError::RoutingError(_)
+                | ConnectionError::SendFailed(_)
+                | ConnectionError::Closed => DiagServiceError::ConnectionClosed,
+            },
+        }
     }
 }
 

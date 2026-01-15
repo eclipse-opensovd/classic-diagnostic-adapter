@@ -434,6 +434,27 @@ fn handle_ecu_response<R: DiagServiceResponse>(
     }
 }
 
+fn map_to_json(include_schema: bool, accept: &mime::Mime) -> Result<bool, ErrorWrapper> {
+    Ok(match (accept.type_(), accept.subtype()) {
+        (mime::APPLICATION, mime::JSON) => true,
+        (mime::APPLICATION, mime::OCTET_STREAM) => {
+            return Err(ErrorWrapper {
+                error: ApiError::BadRequest(
+                    "application/octet-stream not supported for functional communication responses"
+                        .to_string(),
+                ),
+                include_schema,
+            });
+        }
+        unsupported => {
+            return Err(ErrorWrapper {
+                error: ApiError::BadRequest(format!("Unsupported Accept: {unsupported:?}")),
+                include_schema,
+            });
+        }
+    })
+}
+
 pub(crate) mod data {
     pub(crate) mod diag_service {
         use aide::{UseApi, transform::TransformOperation};
@@ -453,7 +474,7 @@ pub(crate) mod data {
             sovd::{
                 components::{ecu::DiagServicePathParam, get_content_type_and_accept},
                 error::{ApiError, ErrorWrapper, VendorErrorCode},
-                functional_groups::{WebserverFgState, handle_ecu_response},
+                functional_groups::{WebserverFgState, handle_ecu_response, map_to_json},
                 get_payload_data,
             },
         };
@@ -463,7 +484,7 @@ pub(crate) mod data {
             UseApi(Secured(security_plugin), _): UseApi<Secured, ()>,
             Path(DiagServicePathParam { diag_service }): Path<DiagServicePathParam>,
             WithRejection(Query(query), _): WithRejection<
-                Query<sovd_interfaces::components::functional_group::data::service::Query>,
+                Query<sovd_interfaces::components::functional_groups::data::service::Query>,
                 ApiError,
             >,
             State(WebserverFgState {
@@ -502,7 +523,7 @@ pub(crate) mod data {
                 "Get data from a functional group service - returns data for all ECUs in the group",
             )
             .response_with::<200, Json<
-                sovd_interfaces::components::functional_group::data::service::Response<
+                sovd_interfaces::components::functional_groups::data::service::Response<
                     VendorErrorCode,
                 >,
             >, _>(|res| {
@@ -510,7 +531,7 @@ pub(crate) mod data {
                     "Response with data from all ECUs in the functional group, keyed by ECU name",
                 )
                 .example(
-                    sovd_interfaces::components::functional_group::data::service::Response {
+                    sovd_interfaces::components::functional_groups::data::service::Response {
                         data: {
                             let mut map = HashMap::default();
                             let mut ecu1_data = serde_json::Map::new();
@@ -537,7 +558,7 @@ pub(crate) mod data {
                 diag_service: service,
             }): Path<DiagServicePathParam>,
             WithRejection(Query(query), _): WithRejection<
-                Query<sovd_interfaces::components::functional_group::data::service::Query>,
+                Query<sovd_interfaces::components::functional_groups::data::service::Query>,
                 ApiError,
             >,
             State(WebserverFgState {
@@ -574,13 +595,13 @@ pub(crate) mod data {
 
         pub(crate) fn docs_put(op: TransformOperation) -> TransformOperation {
             openapi::request_json_and_octet::<
-                sovd_interfaces::components::functional_group::data::DataRequestPayload,
+                sovd_interfaces::components::functional_groups::data::DataRequestPayload,
             >(op)
             .description(
                 "Update data for a functional group service - sends to all ECUs in the group",
             )
             .response_with::<200, Json<
-                sovd_interfaces::components::functional_group::data::service::Response<
+                sovd_interfaces::components::functional_groups::data::service::Response<
                     VendorErrorCode,
                 >,
             >, _>(|res| {
@@ -615,7 +636,7 @@ pub(crate) mod data {
 
             let data = if let Some(body) = body {
                 match get_payload_data::<
-                    sovd_interfaces::components::functional_group::data::DataRequestPayload,
+                    sovd_interfaces::components::functional_groups::data::DataRequestPayload,
                 >(content_type.as_ref(), &headers, &body)
                 {
                     Ok(value) => value,
@@ -631,26 +652,9 @@ pub(crate) mod data {
                 None
             };
 
-            let map_to_json = match (accept.type_(), accept.subtype()) {
-                (mime::APPLICATION, mime::JSON) => true,
-                (mime::APPLICATION, mime::OCTET_STREAM) => {
-                    return ErrorWrapper {
-                        error: ApiError::BadRequest(
-                            "application/octet-stream not supported for functional communication \
-                             responses"
-                                .to_string(),
-                        ),
-                        include_schema,
-                    }
-                    .into_response();
-                }
-                unsupported => {
-                    return ErrorWrapper {
-                        error: ApiError::BadRequest(format!("Unsupported Accept: {unsupported:?}")),
-                        include_schema,
-                    }
-                    .into_response();
-                }
+            let map_to_json = match map_to_json(include_schema, &accept) {
+                Ok(value) => value,
+                Err(e) => return e.into_response(),
             };
 
             if !map_to_json && include_schema {
@@ -685,7 +689,7 @@ pub(crate) mod data {
 
             let schema = if include_schema {
                 Some(crate::sovd::create_schema!(
-                    sovd_interfaces::components::functional_group::data::service::Response<
+                    sovd_interfaces::components::functional_groups::data::service::Response<
                         VendorErrorCode,
                     >
                 ))
@@ -696,7 +700,7 @@ pub(crate) mod data {
             (
                 StatusCode::OK,
                 Json(
-                    sovd_interfaces::components::functional_group::data::service::Response {
+                    sovd_interfaces::components::functional_groups::data::service::Response {
                         data: response_data,
                         errors,
                         schema,
@@ -728,7 +732,7 @@ pub(crate) mod operations {
             sovd::{
                 components::{ecu::DiagServicePathParam, get_content_type_and_accept},
                 error::{ApiError, ErrorWrapper, VendorErrorCode},
-                functional_groups::handle_ecu_response,
+                functional_groups::{handle_ecu_response, map_to_json},
                 get_payload_data,
             },
         };
@@ -740,7 +744,7 @@ pub(crate) mod operations {
                 diag_service: operation,
             }): Path<DiagServicePathParam>,
             WithRejection(Query(query), _): WithRejection<
-                Query<sovd_interfaces::components::functional_group::operations::service::Query>,
+                Query<sovd_interfaces::components::functional_groups::operations::service::Query>,
                 ApiError,
             >,
             State(WebserverFgState {
@@ -777,13 +781,13 @@ pub(crate) mod operations {
 
         pub(crate) fn docs_post(op: TransformOperation) -> TransformOperation {
             openapi::request_json_and_octet::<
-                sovd_interfaces::components::functional_group::operations::service::Request,
+                sovd_interfaces::components::functional_groups::operations::service::Request,
             >(op)
             .description(
                 "Execute an operation on a functional group - sends to all ECUs in the group",
             )
             .response_with::<200, Json<
-                sovd_interfaces::components::functional_group::operations::service::Response<
+                sovd_interfaces::components::functional_groups::operations::service::Response<
                     VendorErrorCode,
                 >,
             >, _>(|res| {
@@ -792,7 +796,7 @@ pub(crate) mod operations {
                      name",
                 )
                 .example(
-                    sovd_interfaces::components::functional_group::operations::service::Response {
+                    sovd_interfaces::components::functional_groups::operations::service::Response {
                         parameters: {
                             let mut map = HashMap::default();
                             let mut ecu1_params = serde_json::Map::new();
@@ -833,7 +837,7 @@ pub(crate) mod operations {
             };
 
             let data = match get_payload_data::<
-                sovd_interfaces::components::functional_group::operations::service::Request,
+                sovd_interfaces::components::functional_groups::operations::service::Request,
             >(content_type.as_ref(), &headers, &body)
             {
                 Ok(value) => value,
@@ -846,26 +850,9 @@ pub(crate) mod operations {
                 }
             };
 
-            let map_to_json = match (accept.type_(), accept.subtype()) {
-                (mime::APPLICATION, mime::JSON) => true,
-                (mime::APPLICATION, mime::OCTET_STREAM) => {
-                    return ErrorWrapper {
-                        error: ApiError::BadRequest(
-                            "application/octet-stream not supported for functional communication \
-                             responses"
-                                .to_string(),
-                        ),
-                        include_schema,
-                    }
-                    .into_response();
-                }
-                unsupported => {
-                    return ErrorWrapper {
-                        error: ApiError::BadRequest(format!("Unsupported Accept: {unsupported:?}")),
-                        include_schema,
-                    }
-                    .into_response();
-                }
+            let map_to_json = match map_to_json(include_schema, &accept) {
+                Ok(value) => value,
+                Err(e) => return e.into_response(),
             };
 
             // Send functional request to all ECUs in the group
@@ -896,7 +883,7 @@ pub(crate) mod operations {
 
             let schema = if include_schema {
                 Some(crate::sovd::create_schema!(
-                    sovd_interfaces::components::functional_group::operations::service::Response<
+                    sovd_interfaces::components::functional_groups::operations::service::Response<
                         VendorErrorCode,
                     >
                 ))
@@ -907,7 +894,7 @@ pub(crate) mod operations {
             (
                 StatusCode::OK,
                 Json(
-                    sovd_interfaces::components::functional_group::operations::service::Response {
+                    sovd_interfaces::components::functional_groups::operations::service::Response {
                         parameters: response_data,
                         errors,
                         schema,
