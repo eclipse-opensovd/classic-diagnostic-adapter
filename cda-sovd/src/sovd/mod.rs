@@ -256,20 +256,11 @@ async fn vehicle_route<T: UdsEcu + SchemaProvider + Clone, S: SecurityPluginLoad
     router: Router<WebserverState<T>>,
     functional_group_config: FunctionalDescriptionConfig,
 ) -> Router<T> {
-    let router = match functional_groups::create_functional_group_routes(
-        state.clone(),
-        functional_group_config,
-    )
-    .await
-    {
-        Ok(fg_router) => {
-            router.nest_api_service("/vehicle/v15/functions/functionalgroups", fg_router)
-        }
-        Err(e) => {
-            tracing::error!(error = %e, "Failed to create functional group routes. Server starting without functional group support.");
-            router
-        }
-    };
+    let router = router.nest_api_service(
+        "/vehicle/v15/functions/functionalgroups",
+        functional_groups::create_functional_group_routes(state.clone(), functional_group_config)
+            .await,
+    );
     router
         .api_route(
             "/vehicle/v15/locks",

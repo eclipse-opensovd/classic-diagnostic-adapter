@@ -26,7 +26,7 @@ use cda_interfaces::{
 use sovd_interfaces::error::ErrorCode;
 
 use crate::sovd::{
-    SovdError, WebserverState,
+    WebserverState,
     error::{ApiError, ErrorWrapper, VendorErrorCode},
     locks::Locks,
 };
@@ -41,12 +41,32 @@ pub(crate) struct WebserverFgState<T: UdsEcu + Clone> {
 pub(crate) async fn create_functional_group_routes<T: UdsEcu + Clone>(
     state: WebserverState<T>,
     functional_group_config: FunctionalDescriptionConfig,
-) -> Result<Router, SovdError> {
-    let groups = state
+) -> Router {
+    if !state
+        .uds
+        .get_ecus()
+        .await
+        .iter()
+        .any(|ecu| ecu.eq_ignore_ascii_case(&functional_group_config.description_database))
+    {
+        return create_error_fallback_route(format!(
+            "Functional Description Database '{}' is missing from loaded databases.",
+            functional_group_config.description_database
+        ));
+    }
+
+    let groups = match state
         .uds
         .ecu_functional_groups(&functional_group_config.description_database)
         .await
-        .map_err(|e| SovdError::RouteError(format!("Unable to get functional groups: {e}")))?;
+    {
+        Ok(groups) => groups,
+        Err(e) => {
+            return create_error_fallback_route(format!(
+                "Failed to get functional groups from functional description database: {e}"
+            ));
+        }
+    };
 
     // Filter groups based on config if enabled_functional_groups is set
     let filtered_groups =
@@ -58,6 +78,18 @@ pub(crate) async fn create_functional_group_routes<T: UdsEcu + Clone>(
         } else {
             groups
         };
+
+    if filtered_groups.is_empty() {
+        if let Some(filter) = functional_group_config.enabled_functional_groups {
+            return create_error_fallback_route(format!(
+                "No functional groups found in functional description database with given filter: \
+                 [{filter:?}]",
+            ));
+        }
+        return create_error_fallback_route(
+            "No functional groups found in the functional description database".to_owned(),
+        );
+    }
 
     let mut router: Router = Router::new();
     for group in filtered_groups {
@@ -71,7 +103,7 @@ pub(crate) async fn create_functional_group_routes<T: UdsEcu + Clone>(
             create_functional_group_route(fg_state),
         );
     }
-    Ok(router)
+    router
 }
 
 fn create_functional_group_route<T: UdsEcu + Clone>(fg_state: WebserverFgState<T>) -> Router {
@@ -99,6 +131,20 @@ fn create_functional_group_route<T: UdsEcu + Clone>(fg_state: WebserverFgState<T
             ),
         )
         .with_state(fg_state)
+}
+
+fn create_error_fallback_route(reason: String) -> Router {
+    Router::new().api_route(
+        "/{*subpath}",
+        routing::get(|| async move {
+            let error = ApiError::InternalServerError(Some(reason));
+            ErrorWrapper {
+                error,
+                include_schema: false,
+            }
+            .into_response()
+        }),
+    )
 }
 
 pub(crate) mod locks {
