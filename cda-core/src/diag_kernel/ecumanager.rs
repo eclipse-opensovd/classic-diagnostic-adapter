@@ -104,9 +104,10 @@ pub struct EcuManager<S: SecurityPlugin> {
 struct SessionControl {
     session: Option<String>,
     security: Option<String>,
-    /// resets session and or security access back to the default
-    /// after a given time
-    access_reset_task: Option<JoinHandle<()>>,
+    /// resets session back to the default after a given time
+    session_reset_task: Option<JoinHandle<()>>,
+    /// resets security access back to the default after a given time
+    security_reset_task: Option<JoinHandle<()>>,
 }
 
 #[derive(Default)]
@@ -546,10 +547,10 @@ impl<S: SecurityPlugin> cda_interfaces::EcuManager for EcuManager<S> {
                     self.lookup_state_transition_by_diagcomm_for_active(&mapped_diag_comm);
 
                 if let Some(new_session) = new_session {
-                    self.set_session(&new_session, Duration::from_secs(u64::MAX))?;
+                    self.set_session(&new_session, None)?;
                 }
                 if let Some(new_security_access) = new_security {
-                    self.set_security_access(&new_security_access, Duration::from_secs(u64::MAX))?;
+                    self.set_security_access(&new_security_access, None)?;
                 }
             }
 
@@ -908,9 +909,19 @@ impl<S: SecurityPlugin> cda_interfaces::EcuManager for EcuManager<S> {
             .collect()
     }
 
-    fn set_session(&self, session: &str, expiration: Duration) -> Result<(), DiagServiceError> {
+    fn set_session(
+        &self,
+        session: &str,
+        expiration: Option<Duration>,
+    ) -> Result<(), DiagServiceError> {
         self.access_control.lock().session = Some(session.to_owned());
-        self.start_reset_task(expiration)
+        if let Some(expiration) = expiration
+            && expiration > Duration::ZERO
+        {
+            self.start_session_reset_task(expiration)
+        } else {
+            Ok(())
+        }
     }
 
     #[tracing::instrument(skip_all,
@@ -921,7 +932,7 @@ impl<S: SecurityPlugin> cda_interfaces::EcuManager for EcuManager<S> {
     fn set_security_access(
         &self,
         security_access: &str,
-        expiration: Duration,
+        expiration: Option<Duration>,
     ) -> Result<(), DiagServiceError> {
         tracing::debug!(
         ecu_name = self.ecu_name,
@@ -929,7 +940,13 @@ impl<S: SecurityPlugin> cda_interfaces::EcuManager for EcuManager<S> {
             "Setting security access"
         );
         self.access_control.lock().security = Some(security_access.to_owned());
-        self.start_reset_task(expiration)
+        if let Some(expiration) = expiration
+            && expiration > Duration::ZERO
+        {
+            self.start_security_reset_task(expiration)
+        } else {
+            Ok(())
+        }
     }
 
     fn lookup_session_change(
@@ -1048,6 +1065,10 @@ impl<S: SecurityPlugin> cda_interfaces::EcuManager for EcuManager<S> {
             ))
     }
 
+    fn default_session(&self) -> Result<String, DiagServiceError> {
+        self.default_state(semantics::SESSION)
+    }
+
     fn security_access(&self) -> Result<String, DiagServiceError> {
         self.access_control
             .lock()
@@ -1056,6 +1077,10 @@ impl<S: SecurityPlugin> cda_interfaces::EcuManager for EcuManager<S> {
             .ok_or(DiagServiceError::InvalidSession(
                 "ECU security is none".to_string(),
             ))
+    }
+
+    fn default_security_access(&self) -> Result<String, DiagServiceError> {
+        self.default_state(semantics::SECURITY)
     }
 
     /// Returns all services in /configuration, i.e. 0x22 and 0x2E
@@ -3328,20 +3353,35 @@ impl<S: SecurityPlugin> EcuManager<S> {
                 "No start state defined in state chart".to_owned(),
             ))
     }
-    fn start_reset_task(&self, expiration: Duration) -> Result<(), DiagServiceError> {
-        let session_control = Arc::clone(&self.access_control);
 
-        let default_security = self.default_state(semantics::SECURITY)?;
+    fn start_session_reset_task(&self, expiration: Duration) -> Result<(), DiagServiceError> {
+        let session_control = Arc::clone(&self.access_control);
         let default_session = self.default_state(semantics::SESSION)?;
 
-        self.access_control.lock().access_reset_task = Some(spawn_named!(
-            &format!("access-reset-{}", self.ecu_name),
+        self.access_control.lock().session_reset_task = Some(spawn_named!(
+            &format!("session-reset-{}", self.ecu_name),
+            async move {
+                tokio::time::sleep(expiration).await;
+                let mut access = session_control.lock();
+                access.session = Some(default_session);
+                access.session_reset_task = None;
+            }
+        ));
+
+        Ok(())
+    }
+
+    fn start_security_reset_task(&self, expiration: Duration) -> Result<(), DiagServiceError> {
+        let session_control = Arc::clone(&self.access_control);
+        let default_security = self.default_state(semantics::SECURITY)?;
+
+        self.access_control.lock().security_reset_task = Some(spawn_named!(
+            &format!("security-reset-{}", self.ecu_name),
             async move {
                 tokio::time::sleep(expiration).await;
                 let mut access = session_control.lock();
                 access.security = Some(default_security);
-                access.session = Some(default_session);
-                access.access_reset_task = None;
+                access.security_reset_task = None;
             }
         ));
 

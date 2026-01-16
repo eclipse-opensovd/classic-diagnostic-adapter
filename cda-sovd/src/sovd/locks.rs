@@ -630,6 +630,11 @@ async fn create_lock<T: UdsEcu + Clone>(
         utc_expiration,
     )?;
 
+    // todo alexmohr actually do reset locks via reset_ecu_access
+    // when ecu lock: only for the specific ecu
+    // when functional group lock: for all ecus in the functional group
+    // when vehicle lock: for all ecus --> this might be expensive, maybe bench it?
+
     let cleanup_fn = {
         match lock_type {
             LockType::Ecu(_) => {

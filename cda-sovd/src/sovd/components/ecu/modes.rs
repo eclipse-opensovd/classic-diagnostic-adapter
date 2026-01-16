@@ -233,7 +233,7 @@ pub(crate) mod session {
                 &ecu_name,
                 &request_body.value,
                 &(security_plugin as DynamicPlugin),
-                Duration::from_secs(request_body.mode_expiration.unwrap_or(u64::MAX)),
+                request_body.mode_expiration.map(Duration::from_secs),
             )
             .await
         {
@@ -439,7 +439,7 @@ pub(crate) mod security {
                 request_seed_service.as_ref(),
                 payload,
                 &(security_plugin as DynamicPlugin),
-                Duration::from_secs(request_body.mode_expiration.unwrap_or(u64::MAX)),
+                request_body.mode_expiration.map(Duration::from_secs),
             )
             .await
         {

@@ -139,8 +139,23 @@ pub trait UdsEcu: Send + Sync + 'static {
         ecu_name: &str,
         session: &str,
         security_plugin: &DynamicPlugin,
-        expiration: Duration,
+        expiration: Option<Duration>,
     ) -> Result<Self::Response, DiagServiceError>;
+    /// Reset the session and security access of the given ECU to default.
+    /// # Errors
+    /// * `DiagServiceError::NotFound` if the ECU does not
+    ///     exist or the state chart/default session cannot be found.
+    /// * `DiagServiceError::InvalidDatabase` if no start state is defined in the state chart.
+    /// * `DiagServiceError::UnexpectedResponse` if the ECU returns a negative
+    ///     response when resetting the session.
+    ///
+    /// Forwards errors from the `set_ecu_session` and `send` functions.
+    async fn reset_ecu_session(
+        &self,
+        ecu_name: &str,
+        security_plugin: &DynamicPlugin,
+    ) -> Result<(), DiagServiceError>;
+
     /// Set the security access for the given ECU.
     /// The returned `SecurityAccess` defines whether further authentication is required
     /// `SecurityAccess::RequestSeed` means that the reply contains a seed to calculate a key,
@@ -159,8 +174,22 @@ pub trait UdsEcu: Send + Sync + 'static {
         seed_service: Option<&String>,
         authentication_data: Option<UdsPayloadData>,
         security_plugin: &DynamicPlugin,
-        expiration: Duration,
+        expiration: Option<Duration>,
     ) -> Result<(SecurityAccess, Self::Response), DiagServiceError>;
+    /// Reset the security access of the given ECU to default.
+    /// # Errors
+    /// * `DiagServiceError::NotFound` if the ECU does not exist or
+    ///     the state chart/default session cannot be found.
+    /// * `DiagServiceError::InvalidDatabase` if no start state is defined in the state chart.
+    /// * `DiagServiceError::UnexpectedResponse` if the ECU returns a negative
+    ///     response when resetting the session.
+    ///
+    /// Forwards errors from the `set_ecu_session` and `send` functions.
+    async fn reset_ecu_security_access(
+        &self,
+        ecu_name: &str,
+        security_plugin: &DynamicPlugin,
+    ) -> Result<(), DiagServiceError>;
     /// Get the name of the parameter used to send the key for the given ECU and security level.
     /// # Errors
     /// Returns an error if the ECU or security level is not found.
@@ -354,9 +383,9 @@ pub mod mock {
             fn clone(&self) -> Self;
         }
 
+        // allowed because the mock! macro generates references to Option types
+        #[allow(clippy::ref_option_ref)]
         #[async_trait]
-            // allowed because the mock! macro generates references to Option types
-    #[allow(clippy::ref_option_ref)]
         impl UdsEcu for UdsEcu {
             type Response = crate::diagservices::mock::MockDiagServiceResponse;
 
@@ -419,8 +448,18 @@ pub mod mock {
                 ecu_name: &str,
                 session: &str,
                 security_plugin: &DynamicPlugin,
-                expiration: Duration,
+                expiration: Option<Duration>,
             ) -> Result<<MockUdsEcu as UdsEcu>::Response, DiagServiceError>;
+            async fn reset_ecu_session(
+                &self,
+                ecu_name: &str,
+                security_plugin: &DynamicPlugin,
+            ) ->  Result<(), DiagServiceError>;
+            async fn reset_ecu_security_access(
+                &self,
+                ecu_name: &str,
+                security_plugin: &DynamicPlugin,
+            ) ->  Result<(), DiagServiceError>;
             #[mockall::concretize]
             async fn set_ecu_security_access(
                 &self,
@@ -429,7 +468,7 @@ pub mod mock {
                 seed_service: Option<&String>,
                 authentication_data: Option<UdsPayloadData>,
                 security_plugin: &DynamicPlugin,
-                expiration: Duration,
+                expiration: Option<Duration>,
             ) -> Result<(SecurityAccess, <MockUdsEcu as UdsEcu>::Response), DiagServiceError>;
             async fn get_send_key_param_name(
                 &self,
