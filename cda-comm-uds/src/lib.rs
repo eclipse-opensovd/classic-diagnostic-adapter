@@ -1050,6 +1050,10 @@ impl<S: EcuGateway, R: DiagServiceResponse, T: EcuManager<Response = R>> UdsEcu
     type Response = R;
 
     async fn get_ecus(&self) -> Vec<String> {
+        self.ecus.keys().cloned().collect()
+    }
+
+    async fn get_physical_ecus(&self) -> Vec<String> {
         self.ecus
             .keys()
             .filter(|ecu| **ecu != self.functional_description_database)

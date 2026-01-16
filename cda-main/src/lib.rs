@@ -208,7 +208,7 @@ pub async fn load_vehicle_data<
         vdetect.start_variant_detection().await;
     });
 
-    let ecu_names = uds.get_ecus().await;
+    let ecu_names = uds.get_physical_ecus().await;
     Ok(VehicleData {
         uds_manager: uds,
         file_managers,

@@ -39,6 +39,9 @@ pub trait UdsEcu: Send + Sync + 'static {
     /// Returns a list of loaded ECUs.
     /// They are not necessarily online, but have been loaded from the database.
     async fn get_ecus(&self) -> Vec<String>;
+    /// Returns a list of loaded ECUs, filtering out the functional description.
+    /// The same constraints as [get_ecus](UdsEcu::get_ecus)
+    async fn get_physical_ecus(&self) -> Vec<String>;
     /// Fetches the network structure of the ECUs, including their connections and addresses.
     async fn get_network_structure(&self) -> NetworkStructure;
     /// Retrieve the Special Data Groups (SDGs) for the given ECU.
@@ -358,6 +361,7 @@ pub mod mock {
             type Response = crate::diagservices::mock::MockDiagServiceResponse;
 
             async fn get_ecus(&self) -> Vec<String>;
+            async fn get_physical_ecus(&self) -> Vec<String>;
             async fn get_network_structure(&self) -> NetworkStructure;
             #[mockall::concretize]
             async fn get_sdgs(
