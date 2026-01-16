@@ -67,7 +67,7 @@ pub trait DiagServiceResponse: Sized + Send + Sync + 'static + Clone {
     fn get_dtcs(&self) -> Result<Vec<(DtcField, DtcRecord)>, DiagServiceError>;
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub enum UdsPayloadData {
     Raw(Vec<u8>),
     ParameterMap(HashMap<String, serde_json::Value>),

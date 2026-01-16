@@ -40,6 +40,8 @@ serde = { workspace = true, features = ["derive"] }
 socket2 = { workspace = true, features = ["all"] }
 #tokio
 tokio = { workspace = true, features = ["time", "fs", "sync"] }
+# futures
+futures = { workspace = true }
 # logging & tracing
 tracing = { workspace = true }
 

@@ -46,6 +46,10 @@ pub mod tokio_ext {
             tokio::task::spawn($future)
         }};
     }
+
+    pub fn clear_pending_messages<M: Clone>(receiver: &mut tokio::sync::broadcast::Receiver<M>) {
+        while receiver.try_recv().is_ok() {}
+    }
 }
 
 pub mod dlt_ext {

@@ -106,6 +106,7 @@ async fn main() -> Result<(), AppError> {
         config.flash_files_path.clone(),
         vehicle_data.file_managers,
         vehicle_data.locks,
+        config.functional_description,
     )
     .await?;
 

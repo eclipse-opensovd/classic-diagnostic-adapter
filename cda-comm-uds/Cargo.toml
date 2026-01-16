@@ -36,6 +36,8 @@ openssl = { workspace = true }
 socket2 = { workspace = true, features = ["all"] }
 #tokio
 tokio = { workspace = true, features = ["sync", "fs", "time", "rt", "io-util"] }
+#futures
+futures = { workspace = true }
 
 serde_json = { workspace = true }
 

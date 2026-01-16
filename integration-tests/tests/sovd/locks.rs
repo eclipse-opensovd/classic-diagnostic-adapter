@@ -35,7 +35,7 @@ async fn lock_unlock() -> Result<(), TestingError> {
     let (runtime, _lock) = setup_integration_test(true).await?;
     let auth = auth_header(&runtime.config, None).await?;
 
-    for endpoint in [FUNCTIONAL_GROUP_ENDPOINT, VEHICLE_ENDPOINT, &ecu_endpoint()] {
+    for endpoint in endpoints() {
         // Check if the lock is created successfully and deleted after the timeout
         {
             let expiration_timeout = Duration::from_secs(2);
@@ -133,6 +133,7 @@ async fn lock_unlock() -> Result<(), TestingError> {
     Ok(())
 }
 
+#[cfg(feature = "functional-locks-tests")]
 #[tokio::test]
 async fn cannot_lock_ecu_with_existing_functional_log() -> Result<(), TestingError> {
     let (runtime, _lock) = setup_integration_test(true).await?;
@@ -187,7 +188,7 @@ async fn ownership() -> Result<(), TestingError> {
     let auth_owner = auth_header(&runtime.config, None).await?;
     let auth_other = auth_header(&runtime.config, Some("ownership-test")).await?;
 
-    for endpoint in [FUNCTIONAL_GROUP_ENDPOINT, VEHICLE_ENDPOINT, &ecu_endpoint()] {
+    for endpoint in endpoints() {
         let lock_id: String = response_to_json_to_field(
             &create_lock(
                 default_timeout(),
@@ -278,6 +279,7 @@ async fn ownership() -> Result<(), TestingError> {
     Ok(())
 }
 
+#[cfg(feature = "functional-locks-tests")]
 #[tokio::test]
 async fn test_vehicle_locking_blocked_by_other() -> Result<(), TestingError> {
     let (runtime, _lock) = setup_integration_test(true).await?;
@@ -340,21 +342,26 @@ async fn test_vehicle_lock_delete_hierarchy() -> Result<(), TestingError> {
             "id",
         )?;
 
-        let func_lock_id: String = response_to_json_to_field(
-            &create_lock(
-                default_timeout(),
-                FUNCTIONAL_GROUP_ENDPOINT,
-                StatusCode::CREATED,
-                &runtime.config,
-                user,
-            )
-            .await,
-            "id",
-        )?;
+        let func_lock_id: String = if cfg!(feature = "functional-locks-tests") {
+            response_to_json_to_field(
+                &create_lock(
+                    default_timeout(),
+                    FUNCTIONAL_GROUP_ENDPOINT,
+                    StatusCode::CREATED,
+                    &runtime.config,
+                    user,
+                )
+                .await,
+                "id",
+            )?
+        } else {
+            "empty".to_owned()
+        };
 
         Ok((ecu_lock_id, func_lock_id))
     }
 
+    #[allow(unused_variables)] // with functional group tests disabled func_lock_id is unused
     async fn assert_ecu_and_func_locks_deleted(
         ecu_lock_id: &str,
         func_lock_id: &str,
@@ -371,6 +378,7 @@ async fn test_vehicle_lock_delete_hierarchy() -> Result<(), TestingError> {
         )
         .await;
 
+        #[cfg(feature = "functional-locks-tests")]
         lock_operation(
             FUNCTIONAL_GROUP_ENDPOINT,
             Some(func_lock_id),
@@ -500,6 +508,21 @@ pub(crate) fn ecu_endpoint() -> String {
     format!("{}/locks", sovd::ECU_FLXC1000_ENDPOINT)
 }
 pub(crate) const VEHICLE_ENDPOINT: &str = "locks";
+
+#[cfg(feature = "functional-locks-tests")]
+pub(crate) fn endpoints() -> [&'static str; 3] {
+    // leak ecu_endpoint into static str - this is fine for integration test but should
+    // never be done in the regular application
+    let ecu_endpoint: &'static str = Box::leak(ecu_endpoint().into_boxed_str());
+    [FUNCTIONAL_GROUP_ENDPOINT, VEHICLE_ENDPOINT, ecu_endpoint]
+}
+#[cfg(not(feature = "functional-locks-tests"))]
+pub(crate) fn endpoints() -> [&'static str; 2] {
+    // leak ecu_endpoint into static str - this is fine for integration test but should
+    // never be done in the regular application
+    let ecu_endpoint: &'static str = Box::leak(ecu_endpoint().into_boxed_str());
+    [VEHICLE_ENDPOINT, ecu_endpoint]
+}
 
 pub(crate) async fn lock_operation(
     endpoint: &str,
