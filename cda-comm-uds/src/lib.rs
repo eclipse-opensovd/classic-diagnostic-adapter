@@ -19,9 +19,9 @@ use std::{
 
 use async_trait::async_trait;
 use cda_interfaces::{
-    DiagComm, DiagCommType, DiagServiceError, DynamicPlugin, EcuGateway, EcuManager, EcuVariant,
-    FlashTransferStartParams, FunctionalDescriptionConfig, HashMap, HashMapExtensions, HashSet,
-    HashSetExtensions, SchemaDescription, SchemaProvider, SecurityAccess, ServicePayload,
+    DiagComm, DiagCommType, DiagServiceError, DynamicPlugin, EcuGateway, EcuManager, EcuState,
+    EcuVariant, FlashTransferStartParams, FunctionalDescriptionConfig, HashMap, HashMapExtensions,
+    HashSet, HashSetExtensions, SchemaDescription, SchemaProvider, SecurityAccess, ServicePayload,
     TesterPresentControlMessage, TesterPresentMode, TesterPresentType, TransmissionParameters,
     UdsEcu, UdsResponse,
     datatypes::{
@@ -953,6 +953,9 @@ impl<S: EcuGateway, R: DiagServiceResponse, T: EcuManager<Response = R>> UdsMana
             {
                 continue; // skip ECUs not in the functional group
             }
+            if !ecu_guard.is_physical_ecu() {
+                continue; // skip functional description database
+            }
             ecu_names.push(name.clone());
         }
         ecu_names
@@ -1047,7 +1050,11 @@ impl<S: EcuGateway, R: DiagServiceResponse, T: EcuManager<Response = R>> UdsEcu
     type Response = R;
 
     async fn get_ecus(&self) -> Vec<String> {
-        self.ecus.keys().cloned().collect()
+        self.ecus
+            .keys()
+            .filter(|ecu| **ecu != self.functional_description_database)
+            .cloned()
+            .collect()
     }
 
     #[tracing::instrument(skip_all,
@@ -1071,6 +1078,9 @@ impl<S: EcuGateway, R: DiagServiceResponse, T: EcuManager<Response = R>> UdsEcu
 
         for ecu in self.ecus.values() {
             let ecu = ecu.read().await;
+            if !ecu.is_physical_ecu() {
+                continue; // skip functional descriptions
+            }
             let ecu_name = ecu.ecu_name();
 
             let variant = ecu.variant();
@@ -2031,6 +2041,9 @@ impl<S: EcuGateway, R: DiagServiceResponse, T: EcuManager<Response = R>> UdsEcu
             }
         };
 
+        let result_map: Arc<RwLock<HashMap<String, Result<R, DiagServiceError>>>> =
+            Arc::new(RwLock::new(HashMap::new()));
+
         // Group ECUs by their gateway address
         let mut ecus_by_gateway: HashMap<u16, PerGatewayInfo> = HashMap::new();
         let mut ecu_infos_by_gateway = HashMap::<u16, HashMap<u16, String>>::new();
@@ -2040,6 +2053,16 @@ impl<S: EcuGateway, R: DiagServiceResponse, T: EcuManager<Response = R>> UdsEcu
                 let ecu_lock = ecu.read().await;
                 if !ecu_lock.is_physical_ecu() {
                     // skip functional description ecu for this
+                    continue;
+                }
+
+                let ecu_state = ecu_lock.variant().state;
+                if ecu_state != EcuState::Online {
+                    tracing::debug!(
+                        ecu = %ecu_name,
+                        ecu_state = %ecu_state,
+                        "Skipping ECU that is not online"
+                    );
                     continue;
                 }
                 let tester_addr = ecu_lock.tester_address();
@@ -2059,14 +2082,20 @@ impl<S: EcuGateway, R: DiagServiceResponse, T: EcuManager<Response = R>> UdsEcu
                             ecus: HashMap::from_iter([(logical_addr, ecu_name.clone())]),
                         },
                     ) {
-                        tracing::warn!(
+                        tracing::error!(
+                            ecu_name = %ecu_name,
                             functional_group = %functional_group,
                             gateway_addr = %gateway_addr,
-                            "Multiple Gateway ecus detected for functional group request."
+                            "Multiple Online Gateway ecus detected for functional group request. \
+                            Only using the first one."
                         );
-                        // todo: how do we resolve this properly?
-                        // check which one is online?
-                        // can we assume they have the same transmission params?
+                        result_map.write().await.insert(
+                            ecu_name.clone(),
+                            Err(DiagServiceError::ResourceError(format!(
+                                "ECU {ecu_name} is online, but another ECU with the same logical \
+                                 address exists and is online."
+                            ))),
+                        );
                     }
                 } else {
                     ecu_infos_by_gateway
@@ -2095,8 +2124,6 @@ impl<S: EcuGateway, R: DiagServiceResponse, T: EcuManager<Response = R>> UdsEcu
             total_ecus = ecu_list.len(),
             "Sending functional request to gateways"
         );
-
-        let result_map = Arc::new(RwLock::new(HashMap::new()));
 
         let mut futures = Vec::new();
         for gw_infos in ecus_by_gateway.into_values() {
