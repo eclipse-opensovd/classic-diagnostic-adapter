@@ -51,6 +51,7 @@ pub struct Ecu {
     #[serde(rename = "x-single-ecu-jobs")]
     pub single_ecu_jobs: String,
     pub faults: String,
+    pub modes: String,
     #[schemars(skip)]
     #[serde(skip_serializing_if = "Option::is_none")]
     pub schema: Option<schemars::Schema>,

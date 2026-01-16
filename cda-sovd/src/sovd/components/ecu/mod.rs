@@ -108,6 +108,7 @@ pub(crate) async fn get<R: DiagServiceResponse, T: UdsEcu + Clone, U: FileManage
             sdgs,
             single_ecu_jobs: format!("{base_path}/x-single-ecu-jobs"),
             faults: format!("{base_path}/faults"),
+            modes: format!("{base_path}/modes"),
             schema,
         }),
     )
@@ -138,6 +139,7 @@ pub(crate) fn docs_get(op: TransformOperation) -> TransformOperation {
                     "http://localhost:20002/vehicle/v15/components/my_ecu/x-single-ecu-jobs"
                         .to_string(),
                 faults: "http://localhost:20002/vehicle/v15/components/my_ecu/faults".to_string(),
+                modes: "http://localhost:20002/vehicle/v15/components/my_ecu/modes".to_string(),
                 schema: None,
             })
             .description("Response with ECU information (i.e. detected variant) and service URLs")
