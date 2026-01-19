@@ -391,7 +391,7 @@ impl<S: SecurityPlugin> cda_interfaces::EcuManager for EcuManager<S> {
         Ok(mapped)
     }
 
-     fn check_genericservice(
+    fn check_genericservice(
         &self,
         security_plugin: &DynamicPlugin,
         rawdata: Vec<u8>,
@@ -3165,7 +3165,6 @@ impl<S: SecurityPlugin> EcuManager<S> {
                 )))
             })?;
 
-
         service.try_into()
     }
 
@@ -3250,7 +3249,6 @@ impl<S: SecurityPlugin> EcuManager<S> {
         } else {
             Ok(services)
         }
-
     }
 
     fn find_dtc_dop_in_params<'a>(

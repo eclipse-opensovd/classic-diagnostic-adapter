@@ -1438,7 +1438,6 @@ impl<S: EcuGateway, R: DiagServiceResponse, T: EcuManager<Response = R>> UdsEcu
         Ok(())
     }
 
-
     async fn ecu_flash_transfer_status(
         &self,
         ecu_name: &str,
@@ -1455,7 +1454,7 @@ impl<S: EcuGateway, R: DiagServiceResponse, T: EcuManager<Response = R>> UdsEcu
                 )))
             })?;
 
-        Ok(vec![meta_data])
+        Ok(vec![meta_data.clone()])
     }
 
     async fn ecu_flash_transfer_status_id(
