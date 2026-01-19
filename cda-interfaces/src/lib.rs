@@ -150,7 +150,7 @@ pub enum TesterPresentMode {
     Stop,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq)]
 pub enum TesterPresentType {
     Functional(String),
     Ecu(String),

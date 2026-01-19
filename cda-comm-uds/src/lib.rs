@@ -936,31 +936,6 @@ impl<S: EcuGateway, R: DiagServiceResponse, T: EcuManager<Response = R>> UdsMana
         ))
     }
 
-    async fn ecus_for_functional_group(
-        &self,
-        functional_group: &str,
-        gateway_only: bool,
-    ) -> Vec<String> {
-        let mut ecu_names = Vec::new();
-        for (name, ecu) in self.ecus.iter() {
-            let ecu_guard = ecu.read().await;
-            if gateway_only && ecu_guard.logical_address() != ecu_guard.logical_gateway_address() {
-                continue; // skip non gateway ECUs
-            }
-            if !ecu_guard
-                .functional_groups()
-                .contains(&functional_group.to_owned())
-            {
-                continue; // skip ECUs not in the functional group
-            }
-            if !ecu_guard.is_physical_ecu() {
-                continue; // skip functional description database
-            }
-            ecu_names.push(name.clone());
-        }
-        ecu_names
-    }
-
     /// Send a functional request to a single gateway and collect responses from all expected ECUs
     async fn send_functional_to_gateway(
         &self,
@@ -1278,7 +1253,7 @@ impl<S: EcuGateway, R: DiagServiceResponse, T: EcuManager<Response = R>> UdsEcu
         ecu_name: &str,
         session: &str,
         security_plugin: &DynamicPlugin,
-        expiration: Duration,
+        expiration: Option<Duration>,
     ) -> Result<Self::Response, DiagServiceError> {
         tracing::info!(ecu_name = %ecu_name, session = %session, "Setting session");
         let ecu_diag_service = self.ecu_manager(ecu_name)?;
@@ -1298,6 +1273,79 @@ impl<S: EcuGateway, R: DiagServiceResponse, T: EcuManager<Response = R>> UdsEcu
         }
     }
 
+    async fn reset_ecu_session(
+        &self,
+        ecu_name: &str,
+        security_plugin: &DynamicPlugin,
+    ) -> Result<(), DiagServiceError> {
+        let ecu_diag_service = self.ecu_manager(ecu_name)?;
+        let default_session = ecu_diag_service.read().await.default_session()?;
+        let current_session = ecu_diag_service.read().await.session()?;
+
+        if current_session == default_session {
+            // Already in default session, nothing to do
+            return Ok(());
+        }
+
+        let response = self
+            .set_ecu_session(ecu_name, &default_session, security_plugin, None)
+            .await?;
+
+        match response.response_type() {
+            DiagServiceResponseType::Positive => {
+                tracing::info!(
+                    ecu_name = %ecu_name,
+                    session = %default_session,
+                    "ECU session reset to default"
+                );
+                Ok(())
+            }
+            DiagServiceResponseType::Negative => Err(DiagServiceError::UnexpectedResponse(Some(
+                "Session reset negative response".to_owned(),
+            ))),
+        }
+    }
+
+    async fn reset_ecu_security_access(
+        &self,
+        ecu_name: &str,
+        security_plugin: &DynamicPlugin,
+    ) -> Result<(), DiagServiceError> {
+        let ecu_diag_service = self.ecu_manager(ecu_name)?;
+        let default_security_access = ecu_diag_service.read().await.default_security_access()?;
+        let current_security_access = ecu_diag_service.read().await.security_access()?;
+
+        if current_security_access == default_security_access {
+            // Already at default security access, nothing to do
+            return Ok(());
+        }
+
+        let (_, response) = self
+            .set_ecu_security_access(
+                ecu_name,
+                &default_security_access,
+                None,
+                None,
+                security_plugin,
+                None,
+            )
+            .await?;
+
+        match response.response_type() {
+            DiagServiceResponseType::Positive => {
+                tracing::info!(
+                    ecu_name = %ecu_name,
+                    security_access = %default_security_access,
+                    "ECU security access reset to default"
+                );
+                Ok(())
+            }
+            DiagServiceResponseType::Negative => Err(DiagServiceError::UnexpectedResponse(Some(
+                "Security access reset negative response".to_owned(),
+            ))),
+        }
+    }
+
     async fn set_ecu_security_access(
         &self,
         ecu_name: &str,
@@ -1305,7 +1353,7 @@ impl<S: EcuGateway, R: DiagServiceResponse, T: EcuManager<Response = R>> UdsEcu
         seed_service: Option<&String>,
         authentication_data: Option<UdsPayloadData>,
         security_plugin: &DynamicPlugin,
-        expiration: Duration,
+        expiration: Option<Duration>,
     ) -> Result<(SecurityAccess, R), DiagServiceError> {
         let ecu_diag_service = self.ecu_manager(ecu_name)?;
         let security_access = ecu_diag_service
@@ -1992,6 +2040,31 @@ impl<S: EcuGateway, R: DiagServiceResponse, T: EcuManager<Response = R>> UdsEcu
             .await
             .functional_groups();
         Ok(groups)
+    }
+
+    async fn ecus_for_functional_group(
+        &self,
+        functional_group: &str,
+        gateway_only: bool,
+    ) -> Vec<String> {
+        let mut ecu_names = Vec::new();
+        for (name, ecu) in self.ecus.iter() {
+            let ecu_guard = ecu.read().await;
+            if gateway_only && ecu_guard.logical_address() != ecu_guard.logical_gateway_address() {
+                continue; // skip non gateway ECUs
+            }
+            if !ecu_guard
+                .functional_groups()
+                .contains(&functional_group.to_owned())
+            {
+                continue; // skip ECUs not in the functional group
+            }
+            if !ecu_guard.is_physical_ecu() {
+                continue; // skip functional description database
+            }
+            ecu_names.push(name.clone());
+        }
+        ecu_names
     }
 
     #[tracing::instrument(skip(self, security_plugin, payload),

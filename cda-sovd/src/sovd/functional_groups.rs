@@ -253,14 +253,14 @@ pub(crate) mod locks {
     }
 
     pub(crate) async fn post<T: UdsEcu + Clone>(
-        UseApi(sec_plugin, _): UseApi<Secured, ()>,
+        UseApi(Secured(sec_plugin), _): UseApi<Secured, ()>,
         State(state): State<WebserverFgState<T>>,
         WithRejection(Json(body), _): WithRejection<
             Json<sovd_interfaces::locking::Request>,
             ApiError,
         >,
     ) -> Response {
-        let claims = sec_plugin.as_auth_plugin().claims();
+        let claims = sec_plugin.as_ref().as_auth_plugin().claims();
         let vehicle_ro_lock = vehicle_read_lock(&state.locks, &claims).await;
         if let Err(e) = vehicle_ro_lock {
             return ErrorWrapper {
@@ -326,10 +326,10 @@ pub(crate) mod locks {
                 all_locks: &state.locks,
                 rw_lock: None,
             },
-            &claims,
             Some(&state.functional_group_name),
             body,
             false,
+            sec_plugin,
         )
         .await
     }
