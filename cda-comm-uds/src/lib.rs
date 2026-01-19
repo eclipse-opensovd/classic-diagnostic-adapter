@@ -2045,8 +2045,8 @@ impl<S: EcuGateway, R: DiagServiceResponse, T: EcuManager<Response = R>> UdsEcu
             }
         };
 
-        let result_map: Arc<RwLock<HashMap<String, Result<R, DiagServiceError>>>> =
-            Arc::new(RwLock::new(HashMap::new()));
+        let result_map: Arc<Mutex<HashMap<String, Result<R, DiagServiceError>>>> =
+            Arc::new(Mutex::new(HashMap::new()));
 
         // Group ECUs by their gateway address
         let mut ecus_by_gateway: HashMap<u16, PerGatewayInfo> = HashMap::new();
@@ -2093,7 +2093,7 @@ impl<S: EcuGateway, R: DiagServiceResponse, T: EcuManager<Response = R>> UdsEcu
                             "Multiple Online Gateway ecus detected for functional group request. \
                             Only using the first one."
                         );
-                        result_map.write().await.insert(
+                        result_map.lock().await.insert(
                             ecu_name.clone(),
                             Err(DiagServiceError::ResourceError(format!(
                                 "ECU {ecu_name} is online, but another ECU with the same logical \
@@ -2149,14 +2149,14 @@ impl<S: EcuGateway, R: DiagServiceResponse, T: EcuManager<Response = R>> UdsEcu
                     )
                     .await;
 
-                result_map.write().await.extend(gateway_results);
+                result_map.lock().await.extend(gateway_results);
             };
             futures.push(fut);
         }
 
         futures::future::join_all(futures).await;
 
-        let lock = result_map.read().await;
+        let lock = result_map.lock().await;
         let result_map = lock.clone();
         drop(lock);
         result_map

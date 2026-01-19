@@ -168,7 +168,7 @@ pub async fn route<
     mut file_manager: HashMap<String, U>,
     locks: Arc<Locks>,
 ) -> Router {
-    let mut ecu_names = uds.get_ecus().await;
+    let mut ecu_names = uds.get_physical_ecus().await;
 
     let flash_data = Arc::new(RwLock::new(sovd_interfaces::sovd2uds::FileList {
         files: Vec::new(),
@@ -231,10 +231,6 @@ pub async fn route<
     );
 
     for ecu_name in ecu_names.drain(0..) {
-        // todo: use is_physical_ecu to skip functional description databases
-        if ecu_name == functional_group_config.description_database {
-            continue; // do not create a component for the functional description
-        }
         match ecu_route::<R, T, U>(&ecu_name, uds, &state, &flash_data, &mut file_manager) {
             Ok((ecu_path, nested)) => {
                 router = router.nest_api_service(&ecu_path, nested);

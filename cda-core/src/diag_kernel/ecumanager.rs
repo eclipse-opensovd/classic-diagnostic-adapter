@@ -25,9 +25,7 @@ use cda_interfaces::{
         single_ecu,
     },
     diagservices::{DiagServiceResponse, DiagServiceResponseType, FieldParseError, UdsPayloadData},
-    dlt_ctx, service_ids,
-    service_ids::NEGATIVE_RESPONSE,
-    spawn_named,
+    dlt_ctx, service_ids, spawn_named,
     util::{self, starts_with_ignore_ascii_case},
 };
 use cda_plugin_security::SecurityPlugin;
@@ -626,7 +624,7 @@ impl<S: SecurityPlugin> cda_interfaces::EcuManager for EcuManager<S> {
                 service: diag_service.clone(),
                 data: payload.data.clone(),
                 mapped_data: None,
-                response_type: if *response_first_byte == NEGATIVE_RESPONSE {
+                response_type: if *response_first_byte == service_ids::NEGATIVE_RESPONSE {
                     DiagServiceResponseType::Negative
                 } else {
                     DiagServiceResponseType::Positive

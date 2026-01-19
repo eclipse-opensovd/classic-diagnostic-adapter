@@ -40,7 +40,7 @@ pub trait UdsEcu: Send + Sync + 'static {
     /// They are not necessarily online, but have been loaded from the database.
     async fn get_ecus(&self) -> Vec<String>;
     /// Returns a list of loaded ECUs, filtering out the functional description.
-    /// The same constraints as [get_ecus](UdsEcu::get_ecus)
+    /// The same constraints as [get_ecus](UdsEcu::get_ecus) apply.
     async fn get_physical_ecus(&self) -> Vec<String>;
     /// Fetches the network structure of the ECUs, including their connections and addresses.
     async fn get_network_structure(&self) -> NetworkStructure;
