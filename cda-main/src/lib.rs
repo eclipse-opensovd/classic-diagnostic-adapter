@@ -148,8 +148,20 @@ impl From<TracingSetupError> for AppError {
     }
 }
 
+impl From<cda_plugin_google_oauth::OAuthPluginError> for AppError {
+    fn from(value: cda_plugin_google_oauth::OAuthPluginError) -> Self {
+        match value {
+            cda_plugin_google_oauth::OAuthPluginError::MissingConfiguration(msg) => {
+                Self::ConfigurationError(msg)
+            }
+            cda_plugin_google_oauth::OAuthPluginError::InitializationFailed(msg) => {
+                Self::InitializationFailed(msg)
+            }
+        }
+    }
+}
+
 /// Loads vehicle databases and sets up SOVD routes in the webserver.
-/// # Errors
 /// Returns `DoipGatewaySetupError` if we failed to create the diagnostic gateway
 pub async fn load_vehicle_data<
     F: Future<Output = ()> + Clone + Send + 'static,

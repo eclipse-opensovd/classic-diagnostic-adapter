@@ -10,11 +10,11 @@
 # SPDX-License-Identifier: Apache-2.0
 
 [package]
-name = "cda-plugin-security"
+name = "cda-plugin-google-oauth"
 version = "0.1.0"
 edition.workspace = true
 publish = false
-description = "Security Plugin APIs used in CDA"
+description = "Google OAuth Plugin Integration for CDA"
 homepage.workspace = true
 license.workspace = true
 
@@ -28,8 +28,9 @@ path = "src/lib.rs"
 # internal dependencies
 cda-database = { workspace = true }
 cda-interfaces = { workspace = true }
+cda-plugin-security = { workspace = true }
+cda-sovd = { workspace = true }
 sovd-interfaces = { workspace = true }
-
 
 aide = { workspace = true, features = ["axum"] }
 async-trait = { workspace = true }
@@ -44,9 +45,8 @@ thiserror = { workspace = true }
 
 tracing = { workspace = true }
 
-mockall = { workspace = true, optional = true }
-
-[features]
-default = []
-auth = []
-test-utils = ["dep:mockall"]
+# Google OAuth dependencies
+reqwest = { workspace = true, features = ["json"] }
+rand = { workspace = true }
+hex = { workspace = true }
+urlencoding = { workspace = true }

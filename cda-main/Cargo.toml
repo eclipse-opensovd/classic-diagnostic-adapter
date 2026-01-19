@@ -38,6 +38,7 @@ cda-interfaces = { workspace = true }
 cda-sovd = { workspace = true }
 cda-tracing = { workspace = true }
 cda-plugin-security = { workspace = true }
+cda-plugin-google-oauth = { workspace = true }
 # args
 clap = { workspace = true, features = ["derive"] }
 # config

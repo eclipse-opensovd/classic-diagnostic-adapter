@@ -13,3 +13,5 @@ docs/images/*.svg
 
 # Docker environment settings
 .env
+
+access_token.txt

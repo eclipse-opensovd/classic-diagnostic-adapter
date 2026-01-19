@@ -13,7 +13,7 @@
 
 use cda_core::DiagServiceResponseStruct;
 use cda_interfaces::dlt_ctx;
-use cda_plugin_security::{DefaultSecurityPlugin, DefaultSecurityPluginData};
+use cda_plugin_google_oauth::{GoogleOAuthSecurityPlugin, GoogleOAuthSecurityPluginData};
 use clap::Parser;
 use futures::future::FutureExt;
 use opensovd_cda_lib::{
@@ -94,13 +94,18 @@ async fn main() -> Result<(), AppError> {
 
     tracing::debug!("Webserver is running. Loading sovd routes...");
 
-    let vehicle_data = opensovd_cda_lib::load_vehicle_data::<_, DefaultSecurityPluginData>(
+    // Initialize Google OAuth plugin and register OAuth callback route
+    cda_plugin_google_oauth::init_google_oauth_plugin(&dynamic_router)
+        .await
+        .map_err(AppError::from)?;
+
+    let vehicle_data = opensovd_cda_lib::load_vehicle_data::<_, GoogleOAuthSecurityPluginData>(
         &config,
         clonable_shutdown_signal.clone(),
     )
     .await?;
 
-    cda_sovd::add_vehicle_routes::<DiagServiceResponseStruct, _, _, DefaultSecurityPlugin>(
+    cda_sovd::add_vehicle_routes::<DiagServiceResponseStruct, _, _, GoogleOAuthSecurityPlugin>(
         &dynamic_router,
         vehicle_data.uds_manager,
         config.flash_files_path.clone(),
