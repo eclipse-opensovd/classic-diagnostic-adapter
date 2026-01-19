@@ -239,3 +239,17 @@ where
             ),
     )
 }
+
+#[cfg(test)]
+pub(crate) mod test_utils {
+    use serde::de::DeserializeOwned;
+
+    pub(crate) async fn axum_response_into<T: DeserializeOwned>(
+        response: axum::response::Response,
+    ) -> Result<T, serde_json::Error> {
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        serde_json::from_slice::<T>(body.as_ref())
+    }
+}

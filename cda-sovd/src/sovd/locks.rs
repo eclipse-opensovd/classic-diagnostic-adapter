@@ -21,10 +21,10 @@ use axum::{
 };
 use axum_extra::extract::WithRejection;
 use cda_interfaces::{
-    HashMap, HashMapExtensions, TesterPresentType, UdsEcu, diagservices::DiagServiceResponse,
-    file_manager::FileManager,
+    DynamicPlugin, HashMap, HashMapExtensions, TesterPresentType, UdsEcu,
+    diagservices::DiagServiceResponse, file_manager::FileManager,
 };
-use cda_plugin_security::Claims;
+use cda_plugin_security::{Claims, SecurityPlugin};
 use chrono::{DateTime, SecondsFormat, Utc};
 use tokio::{
     sync::{RwLock, RwLockReadGuard, RwLockWriteGuard},
@@ -207,19 +207,21 @@ impl WriteLock<'_> {
                 let entity_name = entity_name.ok_or_else(|| {
                     ApiError::BadRequest("cannot delete, no entity name provided".to_owned())
                 })?;
+
+                // As this is in the implementation of WriteLock, it is safe, to remove
+                // the entry from the collection first, then call the cleanup function
+                // as no one else can modify the collection and possibly take over the session
                 match l.remove(entity_name) {
                     Some(e) => {
                         if let Some(e) = e {
                             e.cleanup_fn.call().await;
                         }
+                        Ok(())
                     }
-                    None => {
-                        return Err(ApiError::NotFound(Some(format!(
-                            "cannot delete, no entity {entity_name} is not locked",
-                        ))));
-                    }
+                    None => Err(ApiError::NotFound(Some(format!(
+                        "cannot delete, no entity {entity_name} is not locked",
+                    )))),
                 }
-                Ok(())
             }
             WriteLock::OptionLock(l) => {
                 if let Some(e) = l.take() {
@@ -336,7 +338,7 @@ pub(crate) mod ecu {
     }
 
     pub(crate) async fn post<R: DiagServiceResponse, T: UdsEcu + Clone, U: FileManager>(
-        UseApi(sec_plugin, _): UseApi<Secured, ()>,
+        UseApi(Secured(sec_plugin), _): UseApi<Secured, ()>,
         State(WebserverEcuState {
             ecu_name,
             locks,
@@ -375,10 +377,10 @@ pub(crate) mod ecu {
                 all_locks: &locks,
                 rw_lock: None,
             },
-            &claims,
             Some(&ecu_name),
             body,
             false,
+            sec_plugin,
         )
         .await
     }
@@ -511,7 +513,7 @@ pub(crate) mod vehicle {
     }
 
     pub(crate) async fn post<T: UdsEcu + Clone>(
-        UseApi(sec_plugin, _): UseApi<Secured, ()>,
+        UseApi(Secured(sec_plugin), _): UseApi<Secured, ()>,
         State(state): State<WebserverState<T>>,
         WithRejection(Json(body), _): WithRejection<
             Json<sovd_interfaces::locking::Request>,
@@ -564,10 +566,10 @@ pub(crate) mod vehicle {
                 all_locks: &state.locks,
                 rw_lock: Some(vehicle_rw_lock),
             },
-            &claims,
             None,
             body,
             false,
+            sec_plugin,
         )
         .await
     }
@@ -607,13 +609,37 @@ pub(crate) mod vehicle {
     }
 }
 
+async fn reset_ecu_session_and_security<T: UdsEcu>(
+    uds: &T,
+    ecu_name: &str,
+    context: &str,
+    security_plugin: &DynamicPlugin,
+) {
+    if let Err(e) = uds.reset_ecu_session(ecu_name, security_plugin).await {
+        tracing::error!("Failed to reset ECU session for ECU {ecu_name} during {context}: {e}");
+    } else {
+        tracing::info!("ECU session reset for ECU {ecu_name} during {context}");
+    }
+
+    if let Err(e) = uds
+        .reset_ecu_security_access(ecu_name, security_plugin)
+        .await
+    {
+        tracing::error!(
+            "Failed to reset ECU security access for ECU {ecu_name} during {context}: {e}"
+        );
+    } else {
+        tracing::info!("ECU security access reset for ECU {ecu_name} during {context}");
+    }
+}
+
 async fn create_lock<T: UdsEcu + Clone>(
     uds: &T,
-    claims: &impl Claims,
     expiration: sovd_interfaces::locking::Request,
     lock_type: &LockType,
     locks: &Arc<Locks>,
     entity_name: Option<&String>,
+    security_plugin: Box<dyn SecurityPlugin>,
 ) -> Result<Lock, ApiError> {
     let utc_expiration: DateTime<Utc> = expiration.into();
     if utc_expiration < Utc::now() {
@@ -630,13 +656,15 @@ async fn create_lock<T: UdsEcu + Clone>(
         utc_expiration,
     )?;
 
+    let claim_subs = security_plugin.as_auth_plugin().claims().sub().to_owned();
+
     let cleanup_fn = {
         match lock_type {
             LockType::Ecu(_) => {
                 let ecu_name = entity_name
                     .ok_or_else(|| ApiError::BadRequest("No ECU name provided".to_owned()))?
                     .to_lowercase();
-                let tp_type = TesterPresentType::Ecu(ecu_name);
+                let tp_type = TesterPresentType::Ecu(ecu_name.clone());
                 if !uds.check_tester_present_active(&tp_type).await {
                     uds.start_tester_present(tp_type.clone())
                         .await
@@ -650,6 +678,14 @@ async fn create_lock<T: UdsEcu + Clone>(
                     } else {
                         tracing::info!("Tester present stopped for ECU lock cleanup");
                     }
+
+                    reset_ecu_session_and_security(
+                        &uds,
+                        &ecu_name,
+                        "ECU lock cleanup",
+                        &(security_plugin as DynamicPlugin),
+                    )
+                    .await;
                 })
             }
             LockType::FunctionalGroup(_) => {
@@ -658,7 +694,7 @@ async fn create_lock<T: UdsEcu + Clone>(
                         ApiError::BadRequest("No functional group name provided".to_owned())
                     })?
                     .to_lowercase();
-                let tp_type = TesterPresentType::Functional(functional_group_name);
+                let tp_type = TesterPresentType::Functional(functional_group_name.clone());
                 uds.start_tester_present(tp_type.clone())
                     .await
                     .map_err(ApiError::from)?;
@@ -668,12 +704,33 @@ async fn create_lock<T: UdsEcu + Clone>(
                         tracing::error!("Failed to stop tester present for lock cleanup: {e}");
                     }
                     tracing::info!("Tester present stopped for functional group lock cleanup");
+
+                    let sec = &(security_plugin as DynamicPlugin);
+                    for ecu in uds
+                        .ecus_for_functional_group(&functional_group_name, false)
+                        .await
+                    {
+                        reset_ecu_session_and_security(
+                            &uds,
+                            &ecu,
+                            "functional group lock cleanup",
+                            sec,
+                        )
+                        .await;
+                    }
                 })
             }
 
             LockType::Vehicle(_) => {
                 let locks = Arc::clone(locks);
+                let uds = (*uds).clone();
                 LockCleanupFnHelper::new(async move || {
+                    let sec = &(security_plugin as DynamicPlugin);
+                    for ecu in uds.get_ecus().await {
+                        reset_ecu_session_and_security(&uds, &ecu, "vehicle lock cleanup", sec)
+                            .await;
+                    }
+
                     for lock in [&locks.ecu, &locks.functional_group] {
                         loop {
                             let mut rw_lock = lock.lock_rw().await;
@@ -698,19 +755,12 @@ async fn create_lock<T: UdsEcu + Clone>(
                             };
 
                             // If no entity found, we're done
-                            let Some(entity_name) = entity_to_delete else {
+                            if entity_to_delete.is_none() {
                                 break;
-                            };
+                            }
 
-                            if let Err(e) = rw_lock.delete(Some(&entity_name)).await {
-                                tracing::error!(
-                                    "Failed to delete lock for entity {entity_name}: {e}"
-                                );
-                            } else {
-                                tracing::info!(
-                                    "Deleted lock for entity {entity_name} during vehicle lock \
-                                     cleanup"
-                                );
+                            if let Err(e) = rw_lock.delete(entity_to_delete.as_ref()).await {
+                                tracing::error!("Failed to delete lock: {e}");
                             }
                         }
                     }
@@ -724,10 +774,11 @@ async fn create_lock<T: UdsEcu + Clone>(
         id: id.to_string(),
         owned: None,
     };
+
     Ok(Lock::new(
         sovd_lock,
         utc_expiration,
-        claims.sub().to_owned(),
+        claim_subs,
         token_deletion_task,
         cleanup_fn,
     ))
@@ -874,7 +925,7 @@ pub(crate) struct LockContext<'a> {
 }
 
 #[tracing::instrument(
-    skip(uds, claims, context, expiration),
+    skip(uds, context, expiration, security_plugin),
     fields(
         lock_type = %context.lock,
         entity_name = ?entity_name,
@@ -884,10 +935,10 @@ pub(crate) struct LockContext<'a> {
 pub(crate) async fn post_handler<T: UdsEcu + Clone>(
     uds: &T,
     context: LockContext<'_>,
-    claims: &impl Claims,
     entity_name: Option<&String>,
     expiration: sovd_interfaces::locking::Request,
     include_schema: bool,
+    security_plugin: Box<dyn SecurityPlugin>,
 ) -> Response {
     tracing::info!("Attempting to create lock");
 
@@ -912,7 +963,7 @@ pub(crate) async fn post_handler<T: UdsEcu + Clone>(
         match update_lock(
             // needs to be cloned, because we can either borrow lock mutably or non mutably
             &lock_opt_val.sovd.id.clone(),
-            claims,
+            &security_plugin.as_auth_plugin().claims(),
             lock_opt,
             expiration,
             entity_name,
@@ -928,11 +979,11 @@ pub(crate) async fn post_handler<T: UdsEcu + Clone>(
     } else {
         match create_lock(
             uds,
-            claims,
             expiration,
             context.lock,
             context.all_locks,
             entity_name,
+            security_plugin,
         )
         .await
         {
@@ -1105,7 +1156,13 @@ fn schedule_token_deletion(
             Ok(entity_lock) => {
                 if let Some(current_lock) = entity_lock {
                     if current_lock.sovd.id == lock_id {
-                        *entity_lock = None;
+                        if let Err(e) = rw_lock.delete(entity.as_ref()).await {
+                            tracing::error!(
+                                lock_id = %lock_id,
+                                error = %e,
+                                "Failed to delete lock from map"
+                            );
+                        }
                     } else {
                         tracing::warn!(
                             expected_id = %lock_id,
@@ -1156,5 +1213,344 @@ impl Lock {
             id: self.sovd.id.clone(),
             owned: Some(claims.sub() == self.owner),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use cda_interfaces::mock::MockUdsEcu;
+    use cda_plugin_security::{AuthApi, mock::TestSecurityPlugin};
+    use mockall::predicate::*;
+
+    use super::*;
+    use crate::test_utils::axum_response_into;
+
+    #[tokio::test]
+    async fn test_ecu_lock_cleanup_calls_reset() {
+        let (mock_uds, ecu_name, locks) = setup_ecu_lock_test();
+        let lock_id = create_ecu_lock(&mock_uds, &locks, &ecu_name, Duration::from_secs(60)).await;
+
+        let delete_response = delete_handler(
+            &locks.ecu,
+            &lock_id,
+            &TestSecurityPlugin.claims(),
+            Some(&ecu_name),
+            false,
+        )
+        .await;
+
+        assert_eq!(delete_response.status(), StatusCode::NO_CONTENT);
+    }
+
+    #[tokio::test]
+    async fn test_ecu_lock_cleanup_timeout_cleans() {
+        let (mock_uds, ecu_name, locks) = setup_ecu_lock_test();
+        create_ecu_lock(&mock_uds, &locks, &ecu_name, Duration::from_secs(1)).await;
+
+        assert!(locks.ecu.lock_ro().await.is_any_locked());
+        tokio::time::sleep(Duration::from_secs(2)).await;
+        assert!(!locks.ecu.lock_ro().await.is_any_locked());
+    }
+
+    #[tokio::test]
+    async fn test_functional_group_lock_cleanup_calls_reset_for_all_ecus() {
+        let (mock_uds, fg_name, locks) = setup_functional_group_lock_test();
+        let lock_id =
+            create_functional_group_lock(&mock_uds, &locks, &fg_name, Duration::from_secs(1)).await;
+
+        let delete_response = delete_handler(
+            &locks.functional_group,
+            &lock_id,
+            &TestSecurityPlugin.claims(),
+            Some(&fg_name),
+            false,
+        )
+        .await;
+
+        assert_eq!(delete_response.status(), StatusCode::NO_CONTENT);
+    }
+
+    #[tokio::test]
+    async fn test_functional_group_lock_cleanup_timeout_cleans() {
+        let (mock_uds, fg_name, locks) = setup_functional_group_lock_test();
+        create_functional_group_lock(&mock_uds, &locks, &fg_name, Duration::from_secs(1)).await;
+
+        assert!(locks.functional_group.lock_ro().await.is_any_locked());
+        tokio::time::sleep(Duration::from_secs(2)).await;
+        assert!(!locks.functional_group.lock_ro().await.is_any_locked());
+    }
+
+    #[tokio::test]
+    async fn test_vehicle_lock_cleanup_calls_reset_for_all_ecus() {
+        let (mock_uds, locks) = setup_vehicle_lock_test();
+        let lock_id = create_vehicle_lock(&mock_uds, &locks, Duration::from_secs(60)).await;
+
+        let delete_response = delete_handler(
+            &locks.vehicle,
+            &lock_id,
+            &TestSecurityPlugin.claims(),
+            None,
+            false,
+        )
+        .await;
+
+        assert_eq!(delete_response.status(), StatusCode::NO_CONTENT);
+    }
+
+    #[tokio::test]
+    async fn test_vehicle_lock_cleanup_timeout_cleans() {
+        let (mock_uds, locks) = setup_vehicle_lock_test();
+        create_vehicle_lock(&mock_uds, &locks, Duration::from_secs(1)).await;
+
+        assert!(locks.vehicle.lock_ro().await.is_any_locked());
+        tokio::time::sleep(Duration::from_secs(2)).await;
+        assert!(!locks.vehicle.lock_ro().await.is_any_locked());
+    }
+
+    fn init_locks() -> Arc<Locks> {
+        Arc::new(Locks {
+            vehicle: LockType::Vehicle(Arc::new(RwLock::new(None))),
+            ecu: LockType::Ecu(Arc::new(RwLock::new(LockHashMap::new()))),
+            functional_group: LockType::FunctionalGroup(Arc::new(RwLock::new(LockHashMap::new()))),
+        })
+    }
+
+    fn expect_ecu_lock_cleanup_multiple(uds_ecu: &mut MockUdsEcu, ecus: &Vec<String>) {
+        // Expect reset methods to be called for each ECU during cleanup
+        for ecu in ecus {
+            uds_ecu
+                .expect_reset_ecu_session()
+                .with(eq(ecu.clone()), always())
+                .times(1)
+                .returning(|_, _| Ok(()));
+
+            uds_ecu
+                .expect_reset_ecu_security_access()
+                .with(eq(ecu.clone()), always())
+                .times(1)
+                .returning(|_, _| Ok(()));
+        }
+    }
+
+    fn setup_ecu_lock_test() -> (MockUdsEcu, String, Arc<Locks>) {
+        let mut mock_uds = MockUdsEcu::default();
+        let ecu_name = "test_ecu".to_string();
+        let tp_type = TesterPresentType::Ecu(ecu_name.clone());
+
+        // Expect tester present to be checked and started
+        mock_uds
+            .expect_check_tester_present_active()
+            .with(eq(tp_type.clone()))
+            .times(1)
+            .returning(|_| false);
+
+        mock_uds
+            .expect_start_tester_present()
+            .with(eq(tp_type.clone()))
+            .times(1)
+            .returning(|_| Ok(()));
+
+        // Setup clone expectation - the cloned instance will be used by the cleanup function
+        let ecu_name_clone = ecu_name.clone();
+        mock_uds.expect_clone().times(1).returning(move || {
+            let mut cloned = MockUdsEcu::default();
+
+            // Expect stop_tester_present to be called during cleanup
+            cloned
+                .expect_stop_tester_present()
+                .with(eq(tp_type.clone()))
+                .times(1)
+                .returning(|_| Ok(()));
+
+            // Expect reset methods to be called during cleanup
+            cloned
+                .expect_reset_ecu_session()
+                .with(eq(ecu_name_clone.clone()), always())
+                .times(1)
+                .returning(|_, _| Ok(()));
+
+            cloned
+                .expect_reset_ecu_security_access()
+                .with(eq(ecu_name_clone.clone()), always())
+                .times(1)
+                .returning(|_, _| Ok(()));
+
+            cloned
+        });
+
+        let locks = init_locks();
+        (mock_uds, ecu_name, locks)
+    }
+
+    async fn create_ecu_lock(
+        mock_uds: &MockUdsEcu,
+        locks: &Arc<Locks>,
+        ecu_name: &String,
+        expiration: Duration,
+    ) -> String {
+        let expiration = sovd_interfaces::locking::Request {
+            lock_expiration: expiration.as_secs(),
+        };
+
+        let security_plugin = Box::new(TestSecurityPlugin);
+        let response = post_handler(
+            mock_uds,
+            LockContext {
+                lock: &locks.ecu,
+                all_locks: locks,
+                rw_lock: None,
+            },
+            Some(ecu_name),
+            expiration,
+            false,
+            security_plugin,
+        )
+        .await;
+
+        assert_eq!(response.status(), StatusCode::CREATED);
+        let lock_response: sovd_interfaces::locking::post_put::Response =
+            axum_response_into(response)
+                .await
+                .expect("failed to extract response");
+        lock_response.id
+    }
+
+    fn setup_functional_group_lock_test() -> (MockUdsEcu, String, Arc<Locks>) {
+        let mut mock_uds = MockUdsEcu::default();
+        let fg_name = "test_fg".to_string();
+        let tp_type = TesterPresentType::Functional(fg_name.clone());
+
+        // Expect tester present to be started
+        mock_uds
+            .expect_start_tester_present()
+            .with(eq(tp_type.clone()))
+            .times(1)
+            .returning(|_| Ok(()));
+
+        // Setup clone expectation - the cloned instance will be used by the cleanup function
+        let fg_name_clone = fg_name.clone();
+        mock_uds.expect_clone().times(1).returning(move || {
+            let mut cloned = MockUdsEcu::default();
+
+            // Expect stop_tester_present to be called during cleanup
+            cloned
+                .expect_stop_tester_present()
+                .with(eq(tp_type.clone()))
+                .times(1)
+                .returning(|_| Ok(()));
+
+            let ecus = vec!["ecu1".to_owned(), "ecu2".to_owned()];
+            let ecu_clone = ecus.clone();
+
+            // Expect to get ECUs for functional group during cleanup
+            cloned
+                .expect_ecus_for_functional_group()
+                .with(eq(fg_name_clone.clone()), eq(false))
+                .times(1)
+                .returning(move |_, _| ecu_clone.clone());
+
+            // Expect reset methods to be called for each ECU during cleanup
+            expect_ecu_lock_cleanup_multiple(&mut cloned, &ecus);
+
+            cloned
+        });
+
+        let locks = init_locks();
+        (mock_uds, fg_name, locks)
+    }
+
+    async fn create_functional_group_lock(
+        mock_uds: &MockUdsEcu,
+        locks: &Arc<Locks>,
+        fg_name: &String,
+        expiration: Duration,
+    ) -> String {
+        let expiration = sovd_interfaces::locking::Request {
+            lock_expiration: expiration.as_secs(),
+        };
+
+        let security_plugin = Box::new(TestSecurityPlugin);
+        let response = post_handler(
+            mock_uds,
+            LockContext {
+                lock: &locks.functional_group,
+                all_locks: locks,
+                rw_lock: None,
+            },
+            Some(fg_name),
+            expiration,
+            false,
+            security_plugin,
+        )
+        .await;
+
+        assert_eq!(response.status(), StatusCode::CREATED);
+        let lock_response: sovd_interfaces::locking::post_put::Response =
+            axum_response_into(response)
+                .await
+                .expect("failed to extract response");
+        lock_response.id
+    }
+
+    fn setup_vehicle_lock_test() -> (MockUdsEcu, Arc<Locks>) {
+        let mut mock_uds = MockUdsEcu::default();
+
+        // Setup clone expectation - the cloned instance will be used by the cleanup function
+        mock_uds
+            .expect_clone()
+            .times(1)
+            .returning(expect_vehicle_lock_cleanup);
+
+        let locks = init_locks();
+        (mock_uds, locks)
+    }
+
+    async fn create_vehicle_lock(
+        mock_uds: &MockUdsEcu,
+        locks: &Arc<Locks>,
+        expiration: Duration,
+    ) -> String {
+        let expiration = sovd_interfaces::locking::Request {
+            lock_expiration: expiration.as_secs(),
+        };
+
+        let security_plugin = Box::new(TestSecurityPlugin);
+        let response = post_handler(
+            mock_uds,
+            LockContext {
+                lock: &locks.vehicle,
+                all_locks: locks,
+                rw_lock: None,
+            },
+            None,
+            expiration,
+            false,
+            security_plugin,
+        )
+        .await;
+
+        assert_eq!(response.status(), StatusCode::CREATED);
+        let lock_response: sovd_interfaces::locking::post_put::Response =
+            axum_response_into(response)
+                .await
+                .expect("failed to extract response");
+        lock_response.id
+    }
+
+    fn expect_vehicle_lock_cleanup() -> MockUdsEcu {
+        let mut cloned = MockUdsEcu::default();
+
+        let ecus = vec!["ecu1".to_owned(), "ecu2".to_owned()];
+        let ecu_clone = ecus.clone();
+
+        // Expect to get all ECUs during cleanup
+        cloned
+            .expect_get_ecus()
+            .times(1)
+            .returning(move || ecu_clone.clone());
+
+        expect_ecu_lock_cleanup_multiple(&mut cloned, &ecus);
+
+        cloned
     }
 }
