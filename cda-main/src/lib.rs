@@ -19,7 +19,8 @@ use cda_core::{DiagServiceResponseStruct, EcuManager};
 use cda_database::{FileManager, ProtoLoadConfig};
 use cda_interfaces::{
     DiagServiceError, DoipGatewaySetupError, EcuAddressProvider, EcuManager as EcuManagerTrait,
-    HashMap, HashMapEntry, HashMapExtensions, HashSet, Protocol, UdsEcu,
+    EcuManagerType, FunctionalDescriptionConfig, HashMap, HashMapEntry, HashMapExtensions, HashSet,
+    Protocol, UdsEcu,
     datatypes::{ComParams, DatabaseNamingConvention, FlatbBufConfig},
     dlt_ctx,
     file_manager::{Chunk, ChunkType},
@@ -172,6 +173,7 @@ pub async fn load_vehicle_data<
         config.com_params.clone(),
         config.database_naming_convention.clone(),
         config.flat_buf.clone(),
+        config.functional_description.clone(),
     )
     .await;
 
@@ -194,14 +196,19 @@ pub async fn load_vehicle_data<
         }
     };
 
-    let uds = create_uds_manager(diagnostic_gateway, databases, variant_detection_rx);
+    let uds = create_uds_manager(
+        diagnostic_gateway,
+        databases,
+        variant_detection_rx,
+        &config.functional_description,
+    );
     tracing::debug!("Starting variant detection");
     let vdetect = uds.clone();
     cda_interfaces::spawn_named!("startup-variant-detection", async move {
         vdetect.start_variant_detection().await;
     });
 
-    let ecu_names = uds.get_ecus().await;
+    let ecu_names = uds.get_physical_ecus().await;
     Ok(VehicleData {
         uds_manager: uds,
         file_managers,
@@ -216,6 +223,7 @@ pub async fn load_databases<S: SecurityPlugin>(
     com_params: ComParams,
     database_naming_convention: DatabaseNamingConvention,
     flat_buf_settings: FlatbBufConfig,
+    func_description_cfg: FunctionalDescriptionConfig,
 ) -> (DatabaseMap<S>, FileManagerMap) {
     let databases: Arc<RwLock<LoadedEcuMap<S>>> = Arc::new(RwLock::new(HashMap::new()));
 
@@ -265,6 +273,7 @@ pub async fn load_databases<S: SecurityPlugin>(
             let com_params = Arc::clone(&com_params);
             let database_naming_convention = database_naming_convention.clone();
             let flat_buf_settings = flat_buf_settings.clone();
+            let func_description_cfg = func_description_cfg.clone();
 
             database_load_futures.push(cda_interfaces::spawn_named!(
                 &format!("load-database-{i}"),
@@ -277,6 +286,7 @@ pub async fn load_databases<S: SecurityPlugin>(
                         com_params,
                         database_naming_convention,
                         flat_buf_settings,
+                        func_description_cfg,
                     )
                     .await;
                 }
@@ -383,6 +393,7 @@ async fn load_database<S: SecurityPlugin>(
     com_params: Arc<ComParams>,
     database_naming_convention: DatabaseNamingConvention,
     flat_buf_settings: FlatbBufConfig,
+    func_description_cfg: FunctionalDescriptionConfig,
 ) {
     for (mddfile, _) in paths {
         let Some(mdd_path) = mddfile.to_str().map(ToOwned::to_owned) else {
@@ -422,6 +433,11 @@ async fn load_database<S: SecurityPlugin>(
                         "No diagnostic description found in MDD file");
                     continue;
                 };
+                let ecu_type = if func_description_cfg.description_database == ecu_name {
+                    EcuManagerType::FunctionalDescription
+                } else {
+                    EcuManagerType::Ecu
+                };
 
                 let ecu_payload: Vec<u8> =
                     if let Some(payload) = ecu_data.into_iter().next().and_then(|c| c.payload) {
@@ -451,6 +467,7 @@ async fn load_database<S: SecurityPlugin>(
                     protocol,
                     &com_params,
                     database_naming_convention.clone(),
+                    ecu_type,
                 )
                 .map_err(|e| format!("Failed to create DiagServiceManager: {e:?}"))
                 {
@@ -577,8 +594,14 @@ pub fn create_uds_manager<S: SecurityPlugin>(
     gateway: DoipDiagGateway<EcuManager<S>>,
     databases: Arc<HashMap<String, RwLock<EcuManager<S>>>>,
     variant_detection_receiver: mpsc::Receiver<Vec<String>>,
+    functional_description_config: &FunctionalDescriptionConfig,
 ) -> UdsManagerType<S> {
-    UdsManager::new(gateway, databases, variant_detection_receiver)
+    UdsManager::new(
+        gateway,
+        databases,
+        variant_detection_receiver,
+        functional_description_config,
+    )
 }
 
 /// Creates a new diagnostic gateway for the webserver.

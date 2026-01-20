@@ -39,6 +39,9 @@ pub trait UdsEcu: Send + Sync + 'static {
     /// Returns a list of loaded ECUs.
     /// They are not necessarily online, but have been loaded from the database.
     async fn get_ecus(&self) -> Vec<String>;
+    /// Returns a list of loaded ECUs, filtering out the functional description.
+    /// The same constraints as [get_ecus](UdsEcu::get_ecus) apply.
+    async fn get_physical_ecus(&self) -> Vec<String>;
     /// Fetches the network structure of the ECUs, including their connections and addresses.
     async fn get_network_structure(&self) -> NetworkStructure;
     /// Retrieve the Special Data Groups (SDGs) for the given ECU.
@@ -299,6 +302,31 @@ pub trait UdsEcu: Send + Sync + 'static {
     /// # Errors
     /// Returns `DiagServiceError::NotFound` if the ECU is not found.
     async fn ecu_functional_groups(&self, ecu_name: &str) -> Result<Vec<String>, DiagServiceError>;
+
+    /// Send a functional group request using functional communication.
+    /// This method groups ECUs by their gateway and sends one request per gateway using
+    /// the functional address. It then waits for responses from all ECUs in the group.
+    ///
+    /// # Arguments
+    /// * `functional_group` - Name of the functional group
+    /// * `service` - The diagnostic service to execute
+    /// * `security_plugin` - Security plugin to validate the request against
+    /// * `payload` - Optional payload data for the service
+    /// * `map_to_json` - Whether to map the response to JSON format
+    ///
+    /// # Returns
+    /// A map of ECU names to their responses (or errors if the request failed)
+    ///
+    /// # Errors
+    /// Returns error if the functional group doesn't exist or if all ECUs fail to respond
+    async fn send_functional_group(
+        &self,
+        functional_group: &str,
+        service: DiagComm,
+        security_plugin: &DynamicPlugin,
+        payload: Option<UdsPayloadData>,
+        map_to_json: bool,
+    ) -> HashMap<String, Result<Self::Response, DiagServiceError>>;
 }
 
 #[cfg(feature = "test-utils")]
@@ -333,6 +361,7 @@ pub mod mock {
             type Response = crate::diagservices::mock::MockDiagServiceResponse;
 
             async fn get_ecus(&self) -> Vec<String>;
+            async fn get_physical_ecus(&self) -> Vec<String>;
             async fn get_network_structure(&self) -> NetworkStructure;
             #[mockall::concretize]
             async fn get_sdgs(
@@ -497,6 +526,14 @@ pub mod mock {
                 &self,
                 ecu_name: &str,
             ) -> Result<Vec<String>, DiagServiceError>;
+            async fn send_functional_group(
+                &self,
+                functional_group: &str,
+                service: DiagComm,
+                security_plugin: &DynamicPlugin,
+                payload: Option<UdsPayloadData>,
+                map_to_json: bool,
+            ) -> HashMap<String, Result<<MockUdsEcu as UdsEcu>::Response, DiagServiceError>>;
         }
     }
 }

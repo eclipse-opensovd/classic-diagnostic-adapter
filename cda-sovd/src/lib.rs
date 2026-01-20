@@ -23,8 +23,8 @@ use axum::{
     http::{self, Request},
 };
 use cda_interfaces::{
-    DoipGatewaySetupError, HashMap, SchemaProvider, UdsEcu, diagservices::DiagServiceResponse,
-    dlt_ctx, file_manager::FileManager,
+    DoipGatewaySetupError, FunctionalDescriptionConfig, HashMap, SchemaProvider, UdsEcu,
+    diagservices::DiagServiceResponse, dlt_ctx, file_manager::FileManager,
 };
 use cda_plugin_security::SecurityPluginLoader;
 use dynamic_router::DynamicRouter;
@@ -119,6 +119,7 @@ pub async fn add_vehicle_routes<R, T, M, S>(
     flash_files_path: String,
     file_manager: HashMap<String, M>,
     locks: Arc<Locks>,
+    functional_group_config: FunctionalDescriptionConfig,
 ) -> Result<(), DoipGatewaySetupError>
 where
     R: DiagServiceResponse,
@@ -136,20 +137,24 @@ where
     });
     aide::generate::extract_schemas(true);
     let mut api = OpenApi::default();
-    let vehicle_router = sovd::route::<R, T, M, S>(&ecu_uds, flash_files_path, file_manager, locks)
-        .await
-        .route(
-            SWAGGER_UI_ROUTE,
-            Swagger::new(OPENAPI_JSON_ROUTE).axum_route(),
-        )
-        .route(
-            OPENAPI_JSON_ROUTE,
-            routing::get(
-                |Extension(api): Extension<Arc<OpenApi>>| async move { Json((*api).clone()) },
-            ),
-        )
-        .finish_api_with(&mut api, openapi::api_docs)
-        .layer(Extension(Arc::new(api)));
+    let vehicle_router = sovd::route::<R, T, M, S>(
+        functional_group_config,
+        &ecu_uds,
+        flash_files_path,
+        file_manager,
+        locks,
+    )
+    .await
+    .route(
+        SWAGGER_UI_ROUTE,
+        Swagger::new(OPENAPI_JSON_ROUTE).axum_route(),
+    )
+    .route(
+        OPENAPI_JSON_ROUTE,
+        routing::get(|Extension(api): Extension<Arc<OpenApi>>| async move { Json((*api).clone()) }),
+    )
+    .finish_api_with(&mut api, openapi::api_docs)
+    .layer(Extension(Arc::new(api)));
 
     // Update the router with the new routes,
     // merge with existing router to preserve existing routes

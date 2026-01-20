@@ -68,10 +68,13 @@ futures = { workspace = true }
 # libc
 libc = { workspace = true }
 
+# compile time format
+const_format = { workspace = true }
 
 [features]
 default = []
 integration-tests = []
+functional-locks-tests = []
 
 # Integration tests are only compiled when the feature is enabled.
 [[test]]

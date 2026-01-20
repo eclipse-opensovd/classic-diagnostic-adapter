@@ -35,7 +35,7 @@ async fn lock_unlock() -> Result<(), TestingError> {
     let (runtime, _lock) = setup_integration_test(true).await?;
     let auth = auth_header(&runtime.config, None).await?;
 
-    for endpoint in [FUNCTIONAL_GROUP_ENDPOINT, VEHICLE_ENDPOINT, &ecu_endpoint()] {
+    for endpoint in ENDPOINTS {
         // Check if the lock is created successfully and deleted after the timeout
         {
             let expiration_timeout = Duration::from_secs(2);
@@ -133,6 +133,7 @@ async fn lock_unlock() -> Result<(), TestingError> {
     Ok(())
 }
 
+#[cfg(feature = "functional-locks-tests")]
 #[tokio::test]
 async fn cannot_lock_ecu_with_existing_functional_log() -> Result<(), TestingError> {
     let (runtime, _lock) = setup_integration_test(true).await?;
@@ -150,7 +151,7 @@ async fn cannot_lock_ecu_with_existing_functional_log() -> Result<(), TestingErr
 
     create_lock(
         default_timeout(),
-        &ecu_endpoint(),
+        ECU_ENDPOINT,
         StatusCode::CONFLICT,
         &runtime.config,
         &auth,
@@ -187,7 +188,7 @@ async fn ownership() -> Result<(), TestingError> {
     let auth_owner = auth_header(&runtime.config, None).await?;
     let auth_other = auth_header(&runtime.config, Some("ownership-test")).await?;
 
-    for endpoint in [FUNCTIONAL_GROUP_ENDPOINT, VEHICLE_ENDPOINT, &ecu_endpoint()] {
+    for endpoint in ENDPOINTS {
         let lock_id: String = response_to_json_to_field(
             &create_lock(
                 default_timeout(),
@@ -278,6 +279,7 @@ async fn ownership() -> Result<(), TestingError> {
     Ok(())
 }
 
+#[cfg(feature = "functional-locks-tests")]
 #[tokio::test]
 async fn test_vehicle_locking_blocked_by_other() -> Result<(), TestingError> {
     let (runtime, _lock) = setup_integration_test(true).await?;
@@ -331,7 +333,7 @@ async fn test_vehicle_lock_delete_hierarchy() -> Result<(), TestingError> {
         let ecu_lock_id: String = response_to_json_to_field(
             &create_lock(
                 default_timeout(),
-                &ecu_endpoint(),
+                ECU_ENDPOINT,
                 StatusCode::CREATED,
                 &runtime.config,
                 user,
@@ -340,21 +342,26 @@ async fn test_vehicle_lock_delete_hierarchy() -> Result<(), TestingError> {
             "id",
         )?;
 
-        let func_lock_id: String = response_to_json_to_field(
-            &create_lock(
-                default_timeout(),
-                FUNCTIONAL_GROUP_ENDPOINT,
-                StatusCode::CREATED,
-                &runtime.config,
-                user,
-            )
-            .await,
-            "id",
-        )?;
+        let func_lock_id: String = if cfg!(feature = "functional-locks-tests") {
+            response_to_json_to_field(
+                &create_lock(
+                    default_timeout(),
+                    FUNCTIONAL_GROUP_ENDPOINT,
+                    StatusCode::CREATED,
+                    &runtime.config,
+                    user,
+                )
+                .await,
+                "id",
+            )?
+        } else {
+            "empty".to_owned()
+        };
 
         Ok((ecu_lock_id, func_lock_id))
     }
 
+    #[allow(unused_variables)] // with functional group tests disabled func_lock_id is unused
     async fn assert_ecu_and_func_locks_deleted(
         ecu_lock_id: &str,
         func_lock_id: &str,
@@ -362,7 +369,7 @@ async fn test_vehicle_lock_delete_hierarchy() -> Result<(), TestingError> {
         runtime: &TestRuntime,
     ) {
         lock_operation(
-            &ecu_endpoint(),
+            ECU_ENDPOINT,
             Some(ecu_lock_id),
             &runtime.config,
             user,
@@ -371,6 +378,7 @@ async fn test_vehicle_lock_delete_hierarchy() -> Result<(), TestingError> {
         )
         .await;
 
+        #[cfg(feature = "functional-locks-tests")]
         lock_operation(
             FUNCTIONAL_GROUP_ENDPOINT,
             Some(func_lock_id),
@@ -496,10 +504,16 @@ async fn test_vehicle_lock_cannot_be_deleted_by_non_owner() -> Result<(), Testin
 pub(crate) const FUNCTIONAL_GROUP_ENDPOINT: &str =
     "functions/functionalgroups/fgl_uds_ethernet_doip_dobt/locks";
 
-pub(crate) fn ecu_endpoint() -> String {
-    format!("{}/locks", sovd::ECU_FLXC1000_ENDPOINT)
-}
+pub(crate) const ECU_ENDPOINT: &str =
+    const_format::formatcp!("{}/locks", sovd::ECU_FLXC1000_ENDPOINT);
+
 pub(crate) const VEHICLE_ENDPOINT: &str = "locks";
+
+#[cfg(feature = "functional-locks-tests")]
+pub(crate) const ENDPOINTS: [&str; 3] = [FUNCTIONAL_GROUP_ENDPOINT, VEHICLE_ENDPOINT, ECU_ENDPOINT];
+
+#[cfg(not(feature = "functional-locks-tests"))]
+pub(crate) const ENDPOINTS: [&str; 2] = [VEHICLE_ENDPOINT, ECU_ENDPOINT];
 
 pub(crate) async fn lock_operation(
     endpoint: &str,

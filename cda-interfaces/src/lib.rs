@@ -16,6 +16,7 @@ use std::{
     time::Duration,
 };
 
+use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 mod com_param_handling;
@@ -240,6 +241,12 @@ impl DiagCommType {
             DiagCommType::Operations => &OPERATIONS_PREFIXES,
         }
     }
+}
+
+#[derive(Deserialize, Serialize, Clone, Debug)]
+pub struct FunctionalDescriptionConfig {
+    pub description_database: String,
+    pub enabled_functional_groups: Option<HashSet<String>>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Error)]

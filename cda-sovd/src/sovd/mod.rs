@@ -14,7 +14,7 @@
 use std::{path::PathBuf, sync::Arc};
 
 use aide::{
-    axum::{ApiRouter as Router, ApiRouter, routing},
+    axum::{ApiRouter as Router, routing},
     transform::TransformOperation,
 };
 use axum::{
@@ -27,7 +27,7 @@ use axum::{
 };
 use axum_extra::extract::WithRejection;
 use cda_interfaces::{
-    HashMap, SchemaProvider, UdsEcu,
+    FunctionalDescriptionConfig, HashMap, SchemaProvider, UdsEcu,
     diagservices::{DiagServiceResponse, UdsPayloadData},
     file_manager::FileManager,
 };
@@ -49,6 +49,7 @@ use crate::sovd::components::ecu::{
 pub(crate) mod apps;
 pub(crate) mod components;
 pub(crate) mod error;
+pub(crate) mod functional_groups;
 pub(crate) mod locks;
 
 trait IntoSovd {
@@ -90,7 +91,7 @@ impl IntoSovd for cda_interfaces::EcuState {
 }
 
 #[derive(Debug, thiserror::Error)]
-enum SovdError {
+pub(crate) enum SovdError {
     #[error("Failed to create route: {0}")]
     RouteError(String),
 }
@@ -122,23 +123,11 @@ impl<R: DiagServiceResponse, T: UdsEcu + Clone, U: FileManager> Clone
     }
 }
 
+#[derive(Clone)]
 pub(crate) struct WebserverState<T: UdsEcu + Clone> {
     uds: T,
     locks: Arc<Locks>,
     flash_data: Arc<RwLock<sovd_interfaces::sovd2uds::FileList>>,
-}
-
-/// Clone implementation that does not clone the `auth_state`
-/// `auth_state` is only set by the middleware and should not
-/// be cloned for each request
-impl<T: UdsEcu + Clone> Clone for WebserverState<T> {
-    fn clone(&self) -> Self {
-        Self {
-            uds: self.uds.clone(),
-            locks: Arc::clone(&self.locks),
-            flash_data: Arc::clone(&self.flash_data),
-        }
-    }
 }
 
 pub(crate) fn resource_response(
@@ -173,12 +162,13 @@ pub async fn route<
     U: FileManager,
     S: SecurityPluginLoader,
 >(
+    functional_group_config: FunctionalDescriptionConfig,
     uds: &T,
     flash_files_path: String,
     mut file_manager: HashMap<String, U>,
     locks: Arc<Locks>,
 ) -> Router {
-    let mut ecu_names = uds.get_ecus().await;
+    let mut ecu_names = uds.get_physical_ecus().await;
 
     let flash_data = Arc::new(RwLock::new(sovd_interfaces::sovd2uds::FileList {
         files: Vec::new(),
@@ -251,15 +241,22 @@ pub async fn route<
         }
     }
 
-    vehicle_route::<T, S>(state, router)
+    vehicle_route::<T, S>(state, router, functional_group_config)
+        .await
         .layer(middleware::from_fn(security_plugin_middleware::<S>))
         .with_state(uds.clone())
 }
 
-fn vehicle_route<T: UdsEcu + SchemaProvider + Clone, S: SecurityPluginLoader>(
+async fn vehicle_route<T: UdsEcu + SchemaProvider + Clone, S: SecurityPluginLoader>(
     state: WebserverState<T>,
-    router: ApiRouter<WebserverState<T>>,
-) -> ApiRouter<T> {
+    router: Router<WebserverState<T>>,
+    functional_group_config: FunctionalDescriptionConfig,
+) -> Router<T> {
+    let router = router.nest_api_service(
+        "/vehicle/v15/functions/functionalgroups",
+        functional_groups::create_functional_group_routes(state.clone(), functional_group_config)
+            .await,
+    );
     router
         .api_route(
             "/vehicle/v15/locks",
@@ -274,32 +271,6 @@ fn vehicle_route<T: UdsEcu + SchemaProvider + Clone, S: SecurityPluginLoader>(
                     locks::vehicle::lock::delete,
                     locks::vehicle::lock::docs_delete,
                 ),
-        )
-        .api_route(
-            "/vehicle/v15/functions/functionalgroups/{group}/locks",
-            routing::post_with(
-                locks::functional_group::post,
-                locks::functional_group::docs_post,
-            )
-            .get_with(
-                locks::functional_group::get,
-                locks::functional_group::docs_get,
-            ),
-        )
-        .api_route(
-            "/vehicle/v15/functions/functionalgroups/{group}/locks/{lock}",
-            routing::get_with(
-                locks::functional_group::lock::get,
-                locks::functional_group::lock::docs_get,
-            )
-            .put_with(
-                locks::functional_group::lock::put,
-                locks::functional_group::lock::docs_put,
-            )
-            .delete_with(
-                locks::functional_group::lock::delete,
-                locks::functional_group::lock::docs_delete,
-            ),
         )
         .route("/vehicle/v15/apps", routing::get(apps::get))
         .route(

@@ -14,6 +14,7 @@
 use serde::Deserialize;
 
 pub mod ecu;
+pub mod functional_groups;
 
 pub mod get {
     pub type Response = crate::ResourceResponse;
