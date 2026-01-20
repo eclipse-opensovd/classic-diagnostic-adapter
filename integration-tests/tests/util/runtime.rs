@@ -132,6 +132,8 @@ async fn initialize_runtime() -> Result<TestRuntime, TestingError> {
         functional_description: FunctionalDescriptionConfig {
             description_database: "functional_groups".to_owned(),
             enabled_functional_groups: None,
+            protocol_position: cda_interfaces::datatypes::DiagnosticServiceAffixPosition::Suffix,
+            protocol_case_sensitive: false,
         },
     };
     config.validate_sanity().map_err(|e| {

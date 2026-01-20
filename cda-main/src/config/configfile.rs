@@ -72,6 +72,9 @@ impl Default for Configuration {
             functional_description: FunctionalDescriptionConfig {
                 description_database: "functional_groups".to_owned(),
                 enabled_functional_groups: None,
+                protocol_position:
+                    cda_interfaces::datatypes::DiagnosticServiceAffixPosition::Suffix,
+                protocol_case_sensitive: false,
             },
         }
     }

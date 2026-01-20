@@ -468,6 +468,7 @@ async fn load_database<S: SecurityPlugin>(
                     &com_params,
                     database_naming_convention.clone(),
                     ecu_type,
+                    &func_description_cfg,
                 )
                 .map_err(|e| format!("Failed to create DiagServiceManager: {e:?}"))
                 {
