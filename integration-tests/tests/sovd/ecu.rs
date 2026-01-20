@@ -53,7 +53,7 @@ async fn test_ecu_session_switching() {
     let expiration_timeout = Duration::from_secs(60);
     let ecu_lock = create_lock(
         expiration_timeout,
-        &locks::ecu_endpoint(),
+        locks::ECU_ENDPOINT,
         StatusCode::CREATED,
         &runtime.config,
         &auth,
@@ -64,7 +64,7 @@ async fn test_ecu_session_switching() {
 
     // Lock the ECU
     lock_operation(
-        &locks::ecu_endpoint(),
+        locks::ECU_ENDPOINT,
         Some(&lock_id),
         &runtime.config,
         &auth,
@@ -192,7 +192,7 @@ async fn test_ecu_session_switching() {
 
     // Delete the ECU lock
     lock_operation(
-        &locks::ecu_endpoint(),
+        locks::ECU_ENDPOINT,
         Some(&lock_id),
         &runtime.config,
         &auth,

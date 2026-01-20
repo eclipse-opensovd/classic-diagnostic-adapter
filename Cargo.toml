@@ -80,7 +80,7 @@ libc = "0.2.177"
 foldhash = "0.2.0"
 mockall = "0.14.0"
 
-# ---- tracing & logging crates----
+# ---- tracing & logging crates ----
 tracing = "0.1.41"
 tracing-core = "0.1.34"
 tracing-appender = "0.2.3"
@@ -92,23 +92,26 @@ nu-ansi-term = "0.50"
 console-subscriber = "0.5.0"
 percent-encoding = "2.3.2"
 
-# ---- opentelemetry crates----
+# ---- opentelemetry crates ----
 opentelemetry = { version = "0.31.0", default-features = false }
 opentelemetry_sdk = { version = "0.31.0", default-features = false }
 opentelemetry-otlp = "0.31.0"
 opentelemetry-semantic-conventions = "0.31.0"
 
-# ---- networking crates----
+# ---- networking crates ----
 openssl = "0.10"
 socket2 = "0.6.1"
 tokio-openssl = { version = "0.6.5" }
 tower = { version = "0.5", default-features = false }
 tower-http = "0.6"
 
-# ---- web/api crates----
+# ---- web/api crates ----
 axum = { version = "0.8", default-features = false }
 axum-extra = { version = "0.12.2" }
 serde_qs = "1.0.0-rc.3"
+
+# ---- utility crates ----
+const_format = "0.2.35" # compile time string formatting
 
 [workspace.lints.clippy]
 # enable pedantic
