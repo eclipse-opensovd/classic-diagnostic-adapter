@@ -21,6 +21,9 @@ use crate::error::DataError;
 pub mod data {
     use super::{DataError, Deserialize, HashMap, Serialize};
 
+    /// Request for a functional group write request
+    /// The field `data` is a JSON object expected to contain
+    /// the neccessary parameters for the given request.
     #[derive(Deserialize, schemars::JsonSchema)]
     pub struct DataRequestPayload {
         data: HashMap<String, serde_json::Value>,
