@@ -141,7 +141,7 @@ pub trait UdsEcu: Send + Sync + 'static {
         security_plugin: &DynamicPlugin,
         expiration: Option<Duration>,
     ) -> Result<Self::Response, DiagServiceError>;
-    /// Reset the session and security access of the given ECU to default.
+    /// Reset the session of the given ECU to default.
     /// # Errors
     /// * `DiagServiceError::NotFound` if the ECU does not
     ///     exist or the state chart/default session cannot be found.

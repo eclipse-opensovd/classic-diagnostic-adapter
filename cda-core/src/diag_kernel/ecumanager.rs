@@ -907,11 +907,23 @@ impl<S: SecurityPlugin> cda_interfaces::EcuManager for EcuManager<S> {
             .collect()
     }
 
+    #[tracing::instrument(skip_all,
+        fields(
+            dlt_context = dlt_ctx!("CORE"),
+        )
+    )]
     fn set_session(
         &self,
         session: &str,
         expiration: Option<Duration>,
     ) -> Result<(), DiagServiceError> {
+        tracing::debug!(
+                ecu_name = self.ecu_name,
+                session = %session,
+                expiration = ?expiration,
+                "Setting session"
+        );
+
         self.access_control.lock().session = Some(session.to_owned());
         if let Some(expiration) = expiration
             && expiration > Duration::ZERO
@@ -933,16 +945,23 @@ impl<S: SecurityPlugin> cda_interfaces::EcuManager for EcuManager<S> {
         expiration: Option<Duration>,
     ) -> Result<(), DiagServiceError> {
         tracing::debug!(
-        ecu_name = self.ecu_name,
-            security_access = %security_access,
-            "Setting security access"
+                ecu_name = self.ecu_name,
+                security_access = %security_access,
+                expiration = ?expiration,
+                "Setting security access"
         );
+
         self.access_control.lock().security = Some(security_access.to_owned());
         if let Some(expiration) = expiration
             && expiration > Duration::ZERO
         {
             self.start_security_reset_task(expiration)
         } else {
+            tracing::debug!(
+                ecu_name = self.ecu_name,
+                session = %security_access,
+                "Setting security access without expiration"
+            );
             Ok(())
         }
     }
@@ -3292,14 +3311,14 @@ impl<S: SecurityPlugin> EcuManager<S> {
     }
 
     fn start_security_reset_task(&self, expiration: Duration) -> Result<(), DiagServiceError> {
-        let session_control = Arc::clone(&self.access_control);
+        let access_control = Arc::clone(&self.access_control);
         let default_security = self.default_state(semantics::SECURITY)?;
 
         self.access_control.lock().security_reset_task = Some(spawn_named!(
             &format!("security-reset-{}", self.ecu_name),
             async move {
                 tokio::time::sleep(expiration).await;
-                let mut access = session_control.lock();
+                let mut access = access_control.lock();
                 access.security = Some(default_security);
                 access.security_reset_task = None;
             }
