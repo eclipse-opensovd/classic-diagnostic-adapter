@@ -270,6 +270,15 @@ pub fn starts_with_ignore_ascii_case(text: &str, prefix: &str) -> bool {
     text.len() >= prefix.len() && text[..prefix.len()].eq_ignore_ascii_case(prefix)
 }
 
+/// Fast ASCII-only case-insensitive suffix check without allocations.
+/// Returns true if `text` ends with `suffix`.
+#[inline]
+#[must_use]
+pub fn ends_with_ignore_ascii_case(text: &str, suffix: &str) -> bool {
+    text.len() >= suffix.len()
+        && text[text.len().saturating_sub(suffix.len())..].eq_ignore_ascii_case(suffix)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

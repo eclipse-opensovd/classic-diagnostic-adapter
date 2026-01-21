@@ -1296,16 +1296,14 @@ impl<S: SecurityPlugin> cda_interfaces::EcuManager for EcuManager<S> {
                                 if self.fg_protocol_case_sensitive {
                                     name.starts_with(protocol_value)
                                 } else {
-                                    name.to_lowercase()
-                                        .starts_with(&protocol_value.to_lowercase())
+                                    util::starts_with_ignore_ascii_case(name, protocol_value)
                                 }
                             }
                             DiagnosticServiceAffixPosition::Suffix => {
                                 if self.fg_protocol_case_sensitive {
                                     name.ends_with(protocol_value)
                                 } else {
-                                    name.to_lowercase()
-                                        .ends_with(&protocol_value.to_lowercase())
+                                    util::ends_with_ignore_ascii_case(name, protocol_value)
                                 }
                             }
                         };
