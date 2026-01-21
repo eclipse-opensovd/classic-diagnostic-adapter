@@ -1283,7 +1283,7 @@ impl<S: EcuGateway, R: DiagServiceResponse, T: EcuManager<Response = R>> UdsEcu
         let current_session = ecu_diag_service.read().await.session()?;
 
         if current_session == default_session {
-            // Already in default session, nothing to do
+            tracing::debug!("Already in default session, nothing to do");
             return Ok(());
         }
 
@@ -1316,7 +1316,7 @@ impl<S: EcuGateway, R: DiagServiceResponse, T: EcuManager<Response = R>> UdsEcu
         let current_security_access = ecu_diag_service.read().await.security_access()?;
 
         if current_security_access == default_security_access {
-            // Already at default security access, nothing to do
+            tracing::debug!("Already at default security access, nothing to do");
             return Ok(());
         }
 
@@ -2053,14 +2053,14 @@ impl<S: EcuGateway, R: DiagServiceResponse, T: EcuManager<Response = R>> UdsEcu
             if gateway_only && ecu_guard.logical_address() != ecu_guard.logical_gateway_address() {
                 continue; // skip non gateway ECUs
             }
+            if !ecu_guard.is_physical_ecu() {
+                continue; // skip functional description database
+            }
             if !ecu_guard
                 .functional_groups()
                 .contains(&functional_group.to_owned())
             {
                 continue; // skip ECUs not in the functional group
-            }
-            if !ecu_guard.is_physical_ecu() {
-                continue; // skip functional description database
             }
             ecu_names.push(name.clone());
         }
