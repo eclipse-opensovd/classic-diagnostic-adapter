@@ -70,6 +70,10 @@ jobs:
         uses: Swatinem/rust-cache@v2
       - name: Install Protoc
         uses: arduino/setup-protoc@v3
+        with:
+          # The action queries the GitHub API to fetch releases data,
+          # to avoid rate limiting, passing the default token.
+          repo-token: ${{ secrets.GITHUB_TOKEN }}
       - name: Setup DLT
         uses: eclipse-opensovd/dlt-tracing-lib/.github/actions/setup-dlt@main
       - name: Clippy
