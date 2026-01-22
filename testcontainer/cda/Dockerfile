@@ -10,6 +10,8 @@
 # SPDX-License-Identifier: Apache-2.0
 
 ARG RUST_VERSION=1.88
+ARG SOURCE_DATE_EPOCH
+ARG SOURCE_GIT_SHA
 
 # --- Stage 1: Install cargo-chef and sccache ---
 FROM rust:${RUST_VERSION}-slim-trixie AS chef
@@ -62,6 +64,9 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry,sharing=locked \
 
 # --- Stage 4: Build the application ---
 FROM chef AS builder
+ARG SOURCE_DATE_EPOCH
+ARG SOURCE_GIT_SHA
+
 WORKDIR /app
 # Copy pre-built dependencies from the cacher stage
 COPY --from=cacher /app/target target
@@ -87,6 +92,8 @@ ENV RUSTC_WRAPPER=sccache \
 RUN --mount=type=cache,target=/usr/local/cargo/registry,sharing=locked \
     --mount=type=cache,target=/usr/local/cargo/git,sharing=locked \
     --mount=type=cache,target=$SCCACHE_DIR,sharing=locked \
+    export SOURCE_DATE_EPOCH=${SOURCE_DATE_EPOCH} && \
+    export SOURCE_GIT_SHA=${SOURCE_GIT_SHA} && \
     cargo build --release --bin opensovd-cda && \
     cp target/release/opensovd-cda /tmp/opensovd-cda
 

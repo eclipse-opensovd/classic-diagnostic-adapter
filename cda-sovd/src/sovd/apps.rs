@@ -294,6 +294,82 @@ pub(crate) mod sovd2uds {
     }
 }
 
+pub(crate) mod data {
+    pub(crate) mod version {
+        use aide::{
+            axum::{ApiRouter, routing},
+            transform::TransformOperation,
+        };
+        use axum::{
+            Json,
+            extract::{Query, State},
+            response::{IntoResponse, Response},
+        };
+        use http::StatusCode;
+
+        use crate::{create_schema, dynamic_router::DynamicRouter, sovd::error::ApiError};
+
+        /// Add a version endpoint to the dynamic router, providing the route
+        /// `/vehicle/v15/apps/sovd2uds/data/version`.
+        /// # Arguments
+        /// * `dynamic_router` - The dynamic router to add the endpoint to.
+        /// * `data` - The version data to return.
+        ///   There is no processing of this, it will be returned as is in the response.
+        pub async fn add_version_endpoint(
+            dynamic_router: &DynamicRouter,
+            data: serde_json::Map<String, serde_json::Value>,
+        ) {
+            let data_docs = data.clone();
+            let router = ApiRouter::new()
+                .api_route(
+                    "/vehicle/v15/apps/sovd2uds/data/version",
+                    routing::get_with(get, move |transformation| {
+                        docs_get(transformation, data_docs.clone())
+                    }),
+                )
+                .with_state(data);
+            dynamic_router
+                .update_router(move |old_router| old_router.merge(router))
+                .await;
+        }
+
+        pub(crate) async fn get(
+            State(state): State<serde_json::Map<String, serde_json::Value>>,
+            Query(query): Query<sovd_interfaces::IncludeSchemaQuery>,
+        ) -> Response {
+            let mut response_map = state.clone();
+            if query.include_schema {
+                let schema = match serde_json::to_value(
+                    create_schema!(serde_json::Map<String, serde_json::Value>),
+                ) {
+                    Ok(s) => s,
+                    Err(e) => {
+                        return ApiError::InternalServerError(Some(format!(
+                            "Failed to build version data with schema: {e}"
+                        )))
+                        .into_response();
+                    }
+                };
+
+                response_map.insert("schema".to_string(), schema);
+            }
+            (StatusCode::OK, Json(response_map)).into_response()
+        }
+
+        pub(crate) fn docs_get(
+            op: TransformOperation,
+            data: serde_json::Map<String, serde_json::Value>,
+        ) -> TransformOperation {
+            op.description("Get version information")
+                .response_with::<200, Json<serde_json::Map<String, serde_json::Value>>, _>(|res| {
+                    let mut example = data;
+                    example.insert("schema".to_string(), serde_json::Value::Null);
+                    res.description("Successful response").example(example)
+                })
+        }
+    }
+}
+
 impl IntoSovd for cda_interfaces::datatypes::NetworkStructure {
     type SovdType = sovd_interfaces::apps::sovd2uds::data::network_structure::NetworkStructure;
 

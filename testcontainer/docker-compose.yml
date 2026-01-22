@@ -36,6 +36,9 @@ services:
     build:
       context: ..
       dockerfile: testcontainer/cda/Dockerfile
+      args:
+        - SOURCE_DATE_EPOCH
+        - SOURCE_GIT_SHA
     ports:
       - "${CDA_PORT:-20002}:20002"
     volumes:
