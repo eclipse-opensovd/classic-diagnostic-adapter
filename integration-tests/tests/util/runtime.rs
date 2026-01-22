@@ -297,6 +297,14 @@ fn start_docker_compose(
     let status = std::process::Command::new("docker")
         .arg("compose")
         .arg("build")
+        // For actual reproducible builds, this should be stamped with something related
+        // to the source, but does not matter for the integration tests.
+        // If it is not set the build you try to fetch it via git, which is not available either.
+        // Same is true to the git sha. Needed to build, but exact content does not matter.
+        .arg("--build-arg")
+        .arg("SOURCE_DATE_EPOCH=0")
+        .arg("--build-arg")
+        .arg("SOURCE_GIT_SHA=unknown")
         .current_dir(&test_container_dir)
         .status()
         .map_err(|e| TestingError::ProcessFailed(format!("Failed to build docker compose: {e}")))?;

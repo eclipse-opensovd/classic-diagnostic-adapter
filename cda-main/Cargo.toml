@@ -47,6 +47,7 @@ futures = { workspace = true }
 # allocator
 mimalloc = { git = "https://github.com/theswiftfox/mimalloc.git", rev = "afbaaa5" }
 serde = { workspace = true, features = ["derive"] }
+serde_json = { workspace = true }
 tokio = { workspace = true, features = [
   "rt-multi-thread",
   "macros",
@@ -72,7 +73,9 @@ chrono = { workspace = true }
 http = { workspace = true }
 mime = { workspace = true }
 reqwest = { workspace = true }
-serde_json = { workspace = true }
+
+[build-dependencies]
+chrono = { workspace = true }
 
 [features]
 default = ["health"]
@@ -82,4 +85,6 @@ openssl-vendored = [
   "cda-comm-uds/openssl-vendored",
 ]
 dlt-tracing = ["cda-tracing/dlt-tracing"]
+integration-tests = []
+
 health = []

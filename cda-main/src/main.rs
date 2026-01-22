@@ -152,6 +152,20 @@ async fn main() -> Result<(), AppError> {
         config.functional_description,
     )
     .await?;
+
+    if let serde_json::Value::Object(version_info) = serde_json::json!(
+    {
+        "server_version": cda_version(),
+        "server_type": "Eclipse OpenSOVD Classic Diagnostics Adapter",
+        "commit": env!("GIT_COMMIT_HASH").to_owned(),
+        "build_date": env!("BUILD_DATE").to_owned(),
+    }
+    ) {
+        cda_sovd::add_version_endpoint(&dynamic_router, version_info).await;
+    } else {
+        tracing::error!("Failed to build version information");
+    }
+
     cda_sovd::add_openapi_routes(&dynamic_router, &webserver_config).await;
 
     tracing::info!("CDA fully initialized and ready to serve requests");
