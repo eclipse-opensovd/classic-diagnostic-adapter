@@ -125,6 +125,8 @@ async fn test_custom_demo_endpoint() {
         &cda_interfaces::FunctionalDescriptionConfig {
             description_database: "functional_groups".to_owned(),
             enabled_functional_groups: None,
+            protocol_position: cda_interfaces::datatypes::DiagnosticServiceAffixPosition::Suffix,
+            protocol_case_sensitive: false,
         },
     );
     let server_handle = tokio::spawn({
@@ -150,6 +152,9 @@ async fn test_custom_demo_endpoint() {
                 FunctionalDescriptionConfig {
                     description_database: "functional_groups".to_owned(),
                     enabled_functional_groups: None,
+                    protocol_position:
+                        cda_interfaces::datatypes::DiagnosticServiceAffixPosition::Suffix,
+                    protocol_case_sensitive: false,
                 },
             )
             .await

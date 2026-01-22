@@ -247,6 +247,8 @@ impl DiagCommType {
 pub struct FunctionalDescriptionConfig {
     pub description_database: String,
     pub enabled_functional_groups: Option<HashSet<String>>,
+    pub protocol_position: datatypes::DiagnosticServiceAffixPosition,
+    pub protocol_case_sensitive: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Error)]

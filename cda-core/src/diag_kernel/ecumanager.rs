@@ -20,9 +20,9 @@ use cda_interfaces::{
     SecurityAccess, ServicePayload, StringId,
     datatypes::{
         AddressingMode, ComParams, ComplexComParamValue, ComponentConfigurationsInfo,
-        ComponentDataInfo, DTC_CODE_BIT_LEN, DatabaseNamingConvention, DtcLookup,
-        DtcReadInformationFunction, RetryPolicy, SdSdg, TesterPresentSendType, semantics,
-        single_ecu,
+        ComponentDataInfo, DTC_CODE_BIT_LEN, DatabaseNamingConvention,
+        DiagnosticServiceAffixPosition, DtcLookup, DtcReadInformationFunction, RetryPolicy, SdSdg,
+        TesterPresentSendType, semantics, single_ecu,
     },
     diagservices::{DiagServiceResponse, DiagServiceResponseType, FieldParseError, UdsPayloadData},
     dlt_ctx, service_ids, spawn_named,
@@ -73,6 +73,10 @@ pub struct EcuManager<S: SecurityPlugin> {
     duplicating_ecu_names: Option<HashSet<String>>,
 
     protocol: Protocol,
+    // functional group: protocol prefixed or postfixed
+    fg_protocol_position: DiagnosticServiceAffixPosition,
+    // functional group: is protocol case sensitive
+    fg_protocol_case_sensitive: bool,
     access_control: Arc<Mutex<SessionControl>>,
 
     tester_present_retry_policy: bool,
@@ -1330,7 +1334,24 @@ impl<S: SecurityPlugin> cda_interfaces::EcuManager for EcuManager<S> {
                     .diag_layer()
                     .and_then(|dl| dl.short_name())
                     .and_then(|name| {
-                        if name.ends_with(self.protocol.value()) {
+                        let protocol_value = self.protocol.value();
+                        let matches = match self.fg_protocol_position {
+                            DiagnosticServiceAffixPosition::Prefix => {
+                                if self.fg_protocol_case_sensitive {
+                                    name.starts_with(protocol_value)
+                                } else {
+                                    util::starts_with_ignore_ascii_case(name, protocol_value)
+                                }
+                            }
+                            DiagnosticServiceAffixPosition::Suffix => {
+                                if self.fg_protocol_case_sensitive {
+                                    name.ends_with(protocol_value)
+                                } else {
+                                    util::ends_with_ignore_ascii_case(name, protocol_value)
+                                }
+                            }
+                        };
+                        if matches {
                             Some(name.to_lowercase())
                         } else {
                             None
@@ -1482,6 +1503,7 @@ impl<S: SecurityPlugin> EcuManager<S> {
         com_params: &ComParams,
         database_naming_convention: DatabaseNamingConvention,
         type_: EcuManagerType,
+        func_description_config: &cda_interfaces::FunctionalDescriptionConfig,
     ) -> Result<Self, DiagServiceError> {
         match type_ {
             EcuManagerType::Ecu => Self::new_ecu_description(
@@ -1490,6 +1512,7 @@ impl<S: SecurityPlugin> EcuManager<S> {
                 com_params,
                 database_naming_convention,
                 type_,
+                func_description_config,
             ),
             EcuManagerType::FunctionalDescription => Self::new_functional_description(
                 database,
@@ -1497,6 +1520,7 @@ impl<S: SecurityPlugin> EcuManager<S> {
                 com_params,
                 database_naming_convention,
                 type_,
+                func_description_config,
             ),
         }
     }
@@ -1509,6 +1533,7 @@ impl<S: SecurityPlugin> EcuManager<S> {
         com_params: &ComParams,
         database_naming_convention: DatabaseNamingConvention,
         type_: EcuManagerType,
+        func_description_config: &cda_interfaces::FunctionalDescriptionConfig,
     ) -> Result<Self, DiagServiceError> {
         let variant_detection = variant_detection::prepare_variant_detection(&database)?;
 
@@ -1605,6 +1630,8 @@ impl<S: SecurityPlugin> EcuManager<S> {
             },
             duplicating_ecu_names: None,
             protocol,
+            fg_protocol_position: func_description_config.protocol_position.clone(),
+            fg_protocol_case_sensitive: func_description_config.protocol_case_sensitive,
             access_control: Arc::new(Mutex::new(SessionControl::default())),
             tester_present_retry_policy: database
                 .find_com_param(&data_protocol, &com_params.uds.tester_present_retry_policy)
@@ -1659,6 +1686,7 @@ impl<S: SecurityPlugin> EcuManager<S> {
         com_params: &ComParams,
         database_naming_convention: DatabaseNamingConvention,
         type_: EcuManagerType,
+        func_description_config: &cda_interfaces::FunctionalDescriptionConfig,
     ) -> Result<Self, DiagServiceError> {
         // Functional group description: use defaults for all com params
         let logical_ecu_address = com_params.doip.logical_ecu_address.default;
@@ -1709,6 +1737,8 @@ impl<S: SecurityPlugin> EcuManager<S> {
             },
             duplicating_ecu_names: None,
             protocol,
+            fg_protocol_position: func_description_config.protocol_position.clone(),
+            fg_protocol_case_sensitive: func_description_config.protocol_case_sensitive,
             access_control: Arc::new(Mutex::new(SessionControl::default())),
             tester_present_retry_policy: com_params
                 .uds
@@ -3729,6 +3759,13 @@ mod tests {
             &ComParams::default(),
             DatabaseNamingConvention::default(),
             EcuManagerType::Ecu,
+            &cda_interfaces::FunctionalDescriptionConfig {
+                description_database: "functional_groups".to_owned(),
+                enabled_functional_groups: None,
+                protocol_position:
+                    cda_interfaces::datatypes::DiagnosticServiceAffixPosition::Suffix,
+                protocol_case_sensitive: false,
+            },
         )
         .unwrap();
 
@@ -3922,6 +3959,13 @@ mod tests {
             &ComParams::default(),
             DatabaseNamingConvention::default(),
             EcuManagerType::Ecu,
+            &cda_interfaces::FunctionalDescriptionConfig {
+                description_database: "functional_groups".to_owned(),
+                enabled_functional_groups: None,
+                protocol_position:
+                    cda_interfaces::datatypes::DiagnosticServiceAffixPosition::Suffix,
+                protocol_case_sensitive: false,
+            },
         )
         .unwrap();
 
@@ -4276,6 +4320,13 @@ mod tests {
             &ComParams::default(),
             DatabaseNamingConvention::default(),
             EcuManagerType::Ecu,
+            &cda_interfaces::FunctionalDescriptionConfig {
+                description_database: "functional_groups".to_owned(),
+                enabled_functional_groups: None,
+                protocol_position:
+                    cda_interfaces::datatypes::DiagnosticServiceAffixPosition::Suffix,
+                protocol_case_sensitive: false,
+            },
         )
         .unwrap();
 
@@ -4502,6 +4553,13 @@ mod tests {
             &ComParams::default(),
             DatabaseNamingConvention::default(),
             EcuManagerType::Ecu,
+            &cda_interfaces::FunctionalDescriptionConfig {
+                description_database: "functional_groups".to_owned(),
+                enabled_functional_groups: None,
+                protocol_position:
+                    cda_interfaces::datatypes::DiagnosticServiceAffixPosition::Suffix,
+                protocol_case_sensitive: false,
+            },
         )
         .unwrap();
 
@@ -4624,6 +4682,13 @@ mod tests {
             &ComParams::default(),
             DatabaseNamingConvention::default(),
             EcuManagerType::Ecu,
+            &cda_interfaces::FunctionalDescriptionConfig {
+                description_database: "functional_groups".to_owned(),
+                enabled_functional_groups: None,
+                protocol_position:
+                    cda_interfaces::datatypes::DiagnosticServiceAffixPosition::Suffix,
+                protocol_case_sensitive: false,
+            },
         )
         .unwrap();
 
@@ -4854,6 +4919,13 @@ mod tests {
             &ComParams::default(),
             DatabaseNamingConvention::default(),
             EcuManagerType::Ecu,
+            &cda_interfaces::FunctionalDescriptionConfig {
+                description_database: "functional_groups".to_owned(),
+                enabled_functional_groups: None,
+                protocol_position:
+                    cda_interfaces::datatypes::DiagnosticServiceAffixPosition::Suffix,
+                protocol_case_sensitive: false,
+            },
         )
         .unwrap()
     }
