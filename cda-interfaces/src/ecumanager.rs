@@ -267,6 +267,14 @@ pub trait EcuManager:
     /// # Errors
     /// Will return `Err` if either the variant or base variant cannot be resolved.
     fn lookup_service_names_by_sid(&self, service_id: u8) -> Result<Vec<String>, DiagServiceError>;
+    /// Lookup a service by its service id and name for the current ECU variant.
+    /// # Errors
+    /// Will return `Err` if the lookup failed
+    fn lookup_service_by_sid_and_name(
+        &self,
+        service_id: u8,
+        name: &str,
+    ) -> Result<DiagComm, DiagServiceError>;
     /// Retrieve all `read` services for the current ECU variant.
     fn get_components_data_info(&self) -> Vec<ComponentDataInfo>;
     /// Retrieve all configuration type services for the current ECU variant.

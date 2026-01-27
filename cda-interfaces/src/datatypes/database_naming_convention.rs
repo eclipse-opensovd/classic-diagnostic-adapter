@@ -116,6 +116,8 @@ impl Default for DatabaseNamingConvention {
                 "read_dump_func".to_owned(),
                 "write_dump_func".to_owned(),
                 "dump_func".to_owned(),
+                "_control_func".to_owned(),
+                "_control".to_owned(),
             ],
             long_name_affixes: vec![
                 " read".to_owned(),
@@ -128,6 +130,8 @@ impl Default for DatabaseNamingConvention {
                 " read dump func".to_owned(),
                 " write dump func".to_owned(),
                 " dump func".to_owned(),
+                " control func".to_owned(),
+                " control".to_owned(),
             ],
         }
     }

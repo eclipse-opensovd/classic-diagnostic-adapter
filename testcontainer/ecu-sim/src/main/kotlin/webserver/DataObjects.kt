@@ -16,6 +16,7 @@
 package webserver
 
 import ecu.Authentication
+import ecu.CommunicationControlType
 import ecu.DataBlock
 import ecu.DataBlockType
 import ecu.DataTransferDownload
@@ -42,6 +43,8 @@ data class EcuStateDto(
     val hardResetForSeconds: Int? = null,
     val maxNumberOfBlockLength: Int? = null,
     val blocks: List<DataBlockDto>? = null,
+    val communicationControlType: CommunicationControlType? = null,
+    val temporalEraId: Int? = null,
 )
 
 fun EcuState.updateWith(dto: EcuStateDto) {
@@ -63,6 +66,8 @@ fun EcuState.toDto() =
         hardResetForSeconds = this.hardResetForSeconds,
         maxNumberOfBlockLength = this.maxNumberOfBlockLength,
         blocks = this.blocks.map { it.toDto() },
+        communicationControlType = this.communicationControlType,
+        temporalEraId = this.temporalEraId,
     )
 
 @Serializable
