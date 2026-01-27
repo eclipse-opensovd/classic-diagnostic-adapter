@@ -38,7 +38,7 @@ pub mod data {
 
     /// Request for a functional group write request
     /// The field `data` is a JSON object expected to contain
-    /// the neccessary parameters for the given request.
+    /// the necessary parameters for the given request.
     #[derive(Deserialize, schemars::JsonSchema)]
     pub struct DataRequestPayload {
         data: HashMap<String, serde_json::Value>,
@@ -54,15 +54,11 @@ pub mod data {
         use super::{DataError, Deserialize, HashMap, Serialize};
 
         /// Query parameters for GET/PUT data service requests
-        #[derive(Deserialize, schemars::JsonSchema)]
-        pub struct Query {
-            #[serde(rename = "include-schema", default)]
-            pub include_schema: bool,
-        }
+        pub type Query = crate::IncludeSchemaQuery;
 
         /// Response for functional group data GET/PUT operations
         /// Returns data keyed by ECU name at the top level
-        #[derive(Serialize, schemars::JsonSchema)]
+        #[derive(Serialize, Deserialize, schemars::JsonSchema)]
         pub struct Response<T> {
             /// Data results per ECU - key is ECU name, value is the data result
             pub data: HashMap<String, serde_json::Map<String, serde_json::Value>>,
@@ -90,11 +86,7 @@ pub mod operations {
         use super::{DataError, Deserialize, HashMap, Serialize};
 
         /// Query parameters for POST operation service requests
-        #[derive(Deserialize, schemars::JsonSchema)]
-        pub struct Query {
-            #[serde(rename = "include-schema", default)]
-            pub include_schema: bool,
-        }
+        pub type Query = crate::IncludeSchemaQuery;
 
         /// Request payload for functional group operations
         #[derive(Deserialize, schemars::JsonSchema)]
@@ -126,5 +118,39 @@ pub mod operations {
 
     pub mod get {
         pub type Query = crate::IncludeSchemaQuery;
+    }
+}
+
+pub mod modes {
+    pub type Query = crate::IncludeSchemaQuery;
+    pub mod get {
+        pub type Response = crate::common::modes::get::Response;
+        pub type ResponseItem = crate::common::modes::get::ModeCollectionItem;
+    }
+
+    pub mod commctrl {
+
+        pub mod put {
+            use cda_interfaces::HashMap;
+            use serde::{Deserialize, Serialize};
+
+            use crate::error::ApiErrorResponse;
+
+            pub type Request = crate::common::modes::commctrl::put::Request;
+            pub type ResponseElement = crate::common::modes::put::Response<String>;
+
+            /// Returns data keyed by ECU name at the top level
+            #[derive(Serialize, Deserialize, schemars::JsonSchema)]
+            pub struct Response<T> {
+                /// Data results per ECU - key is ECU name, value is the data result
+                pub modes: HashMap<String, ResponseElement>,
+                /// Errors that occurred during the operation
+                #[serde(skip_serializing_if = "Vec::is_empty")]
+                pub errors: Vec<ApiErrorResponse<T>>,
+                #[schemars(skip)]
+                #[serde(skip_serializing_if = "Option::is_none")]
+                pub schema: Option<schemars::Schema>,
+            }
+        }
     }
 }

@@ -2234,6 +2234,53 @@ impl<S: EcuGateway, R: DiagServiceResponse, T: EcuManager<Response = R>> UdsEcu
         drop(lock);
         result_map
     }
+
+    async fn set_ecu_comm_ctrl(
+        &self,
+        ecu_name: &str,
+        security_plugin: &DynamicPlugin,
+        mode: &str,
+        params: Option<HashMap<String, serde_json::Value>>,
+    ) -> Result<Self::Response, DiagServiceError> {
+        let ecu = self.ecu_manager(ecu_name)?;
+        let service = ecu
+            .read()
+            .await
+            .lookup_service_by_sid_and_name(service_ids::COMMUNICATION_CONTROL, mode)?;
+
+        self.send(
+            ecu_name,
+            service,
+            security_plugin,
+            params.map(UdsPayloadData::ParameterMap),
+            false,
+        )
+        .await
+    }
+
+    async fn set_functional_comm_ctrl(
+        &self,
+        group_name: &str,
+        security_plugin: &DynamicPlugin,
+        mode: &str,
+        params: Option<HashMap<String, serde_json::Value>>,
+    ) -> Result<HashMap<String, Result<Self::Response, DiagServiceError>>, DiagServiceError> {
+        let globals_ecu = self.ecu_manager(&self.functional_description_database)?;
+        let service = globals_ecu
+            .read()
+            .await
+            .lookup_service_by_sid_and_name(service_ids::COMMUNICATION_CONTROL, mode)?;
+
+        Ok(self
+            .send_functional_group(
+                group_name,
+                service,
+                security_plugin,
+                params.map(UdsPayloadData::ParameterMap),
+                false,
+            )
+            .await)
+    }
 }
 
 fn status_value_to_bool(val: &serde_json::Value) -> Result<bool, DiagServiceError> {

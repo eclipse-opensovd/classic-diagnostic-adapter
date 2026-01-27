@@ -67,6 +67,7 @@ fun RequestsData.addAllFunctionality() {
     addSessionRequests()
     addResetRequests()
     addSecurityAccessRequests()
+    addCommunicationControlRequests()
     addAuthenticationRequests()
     addDiagnosticRequests()
     addFlashRequests()

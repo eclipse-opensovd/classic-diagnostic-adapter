@@ -368,6 +368,50 @@ pub trait UdsEcu: Send + Sync + 'static {
         payload: Option<UdsPayloadData>,
         map_to_json: bool,
     ) -> HashMap<String, Result<Self::Response, DiagServiceError>>;
+
+    /// Set the communication control mode for the given ECU.
+    /// This function has no corresponding setter, as the UDS standard
+    /// does not define any service to read the current communication control mode back from the
+    /// ECU. Therefore, to ensure the correct mode is set.
+    /// # Arguments
+    /// * `ecu_name` - Name of the ECU
+    /// * `security_plugin` - Security plugin to validate the request against
+    /// * `mode` - Communication control mode to set
+    /// * `params` - Optional parameters, for the service
+    /// # Returns
+    /// Result containing the response
+    /// # Errors
+    /// Error if the operation fails (i.e. ECU not found)
+    //  Negative response are not treated as errors, but returned in the response.
+    async fn set_ecu_comm_ctrl(
+        &self,
+        ecu_name: &str,
+        security_plugin: &DynamicPlugin,
+        mode: &str,
+        params: Option<HashMap<String, serde_json::Value>>,
+    ) -> Result<Self::Response, DiagServiceError>;
+
+    /// Set the communication control mode for the given functional group.
+    /// This function has no corresponding setter, as the UDS standard
+    /// does not define any service to read the current communication control mode back from the
+    /// ECU. Therefore, to ensure the correct mode is set.
+    /// # Arguments
+    /// * `group_name` - Name of the group
+    /// * `security_plugin` - Security plugin to validate the request against
+    /// * `mode` - Communication control mode to set
+    /// * `params` - Optional parameters, for the service
+    /// # Returns
+    /// Result containing the response
+    /// # Errors
+    /// Error if the operation fails (i.e. functional group or service not found)
+    //  Negative response are not treated as errors, but returned in the response.
+    async fn set_functional_comm_ctrl(
+        &self,
+        group_name: &str,
+        security_plugin: &DynamicPlugin,
+        mode: &str,
+        params: Option<HashMap<String, serde_json::Value>>,
+    ) -> Result<HashMap<String, Result<Self::Response, DiagServiceError>>, DiagServiceError>;
 }
 
 #[cfg(feature = "test-utils")]
@@ -590,6 +634,21 @@ pub mod mock {
                 payload: Option<UdsPayloadData>,
                 map_to_json: bool,
             ) -> HashMap<String, Result<<MockUdsEcu as UdsEcu>::Response, DiagServiceError>>;
+            async fn set_ecu_comm_ctrl(
+                &self,
+                ecu_name: &str,
+                security_plugin: &DynamicPlugin,
+                mode: &str,
+                params: Option<HashMap<String, serde_json::Value>>,
+            ) -> Result<<MockUdsEcu as UdsEcu>::Response, DiagServiceError>;
+             async fn set_functional_comm_ctrl(
+                &self,
+                group_name: &str,
+                security_plugin: &DynamicPlugin,
+                mode: &str,
+                params: Option<HashMap<String, serde_json::Value>>,
+            ) -> Result<HashMap<String, Result<<MockUdsEcu as UdsEcu>::Response,
+                    DiagServiceError>>, DiagServiceError>;
         }
     }
 }

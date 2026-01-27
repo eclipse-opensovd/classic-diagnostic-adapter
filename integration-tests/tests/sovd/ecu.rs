@@ -106,7 +106,7 @@ async fn test_ecu_session_switching() {
     assert_eq!(switch_session_result.value, "extended");
     let session_result = session(&runtime.config, &auth, ecu_endpoint).await.unwrap();
     assert_eq!(session_result.value, Some("extended".to_owned()));
-    assert_eq!(session_result.name, Some("session".to_owned()));
+    assert_eq!(session_result.name, Some("Diagnostic session".to_owned()));
 
     // switch ECU sim state to BOOT
     ecusim::switch_variant(&runtime.ecu_sim, "FLXC1000", "BOOT")
@@ -188,7 +188,7 @@ async fn test_ecu_session_switching() {
         .await
         .unwrap();
     assert_eq!(security_result.value, Some("Level_5".to_owned()));
-    assert_eq!(security_result.name, Some("security".to_owned()));
+    assert_eq!(security_result.name, Some("Security access".to_owned()));
 
     // Delete the ECU lock
     lock_operation(
@@ -334,6 +334,178 @@ async fn test_variant_detection_duplicates() {
     .await;
 }
 
+#[tokio::test]
+#[allow(clippy::too_many_lines)] // Keep the test together
+async fn test_communication_control() {
+    let (runtime, _lock) = setup_integration_test(true).await.unwrap();
+    let auth = auth_header(&runtime.config, None).await.unwrap();
+    let ecu_endpoint = sovd::ECU_FLXC1000_ENDPOINT;
+
+    // Without lock, the CDA should reject the request
+    set_comm_control(
+        "EnableRxAndEnableTx",
+        None,
+        &runtime.config,
+        &auth,
+        ecu_endpoint,
+        StatusCode::FORBIDDEN,
+    )
+    .await
+    .unwrap();
+
+    // Create and acquire lock
+    let expiration_timeout = Duration::from_secs(60);
+    let ecu_lock = create_lock(
+        expiration_timeout,
+        locks::ECU_ENDPOINT,
+        StatusCode::CREATED,
+        &runtime.config,
+        &auth,
+    )
+    .await;
+    let lock_id =
+        extract_field_from_json::<String>(&response_to_json(&ecu_lock).unwrap(), "id").unwrap();
+
+    let result = set_comm_control(
+        "EnableRxAndEnableTx",
+        None,
+        &runtime.config,
+        &auth,
+        ecu_endpoint,
+        StatusCode::OK,
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    assert_eq!(result.value, "EnableRxAndEnableTx");
+
+    let result = set_comm_control(
+        "EnableRxAndDisableTx",
+        None,
+        &runtime.config,
+        &auth,
+        ecu_endpoint,
+        StatusCode::OK,
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    assert_eq!(result.value, "EnableRxAndDisableTx");
+
+    let result = set_comm_control(
+        "DisableRxAndEnableTx",
+        None,
+        &runtime.config,
+        &auth,
+        ecu_endpoint,
+        StatusCode::OK,
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    assert_eq!(result.value, "DisableRxAndEnableTx");
+
+    let result = set_comm_control(
+        "DisableRxAndDisableTx",
+        None,
+        &runtime.config,
+        &auth,
+        ecu_endpoint,
+        StatusCode::OK,
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    assert_eq!(result.value, "DisableRxAndDisableTx");
+
+    let result = set_comm_control(
+        "EnableRxAndDisableTxWithEnhancedAddressInformation",
+        None,
+        &runtime.config,
+        &auth,
+        ecu_endpoint,
+        StatusCode::OK,
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    assert_eq!(
+        result.value,
+        "EnableRxAndDisableTxWithEnhancedAddressInformation"
+    );
+
+    let result = set_comm_control(
+        "EnableRxAndTxWithEnhancedAddressInformation",
+        None,
+        &runtime.config,
+        &auth,
+        ecu_endpoint,
+        StatusCode::OK,
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    assert_eq!(result.value, "EnableRxAndTxWithEnhancedAddressInformation");
+
+    // VendorSpecific (custom TemporalSync 0x88)
+    let temporal_era_id: i32 = -1_373_112_000;
+    let mut parameters = cda_interfaces::HashMap::default();
+    parameters.insert(
+        "temporalEraId".to_string(),
+        serde_json::json!(temporal_era_id),
+    );
+
+    let result = set_comm_control(
+        "TemporalSync",
+        Some(parameters),
+        &runtime.config,
+        &auth,
+        ecu_endpoint,
+        StatusCode::OK,
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    assert_eq!(result.value, "TemporalSync");
+
+    // Validate that ECU sim received and stored the temporalEraId
+    let ecu_state = ecusim::get_ecu_state(&runtime.ecu_sim, "flxc1000")
+        .await
+        .expect("Failed to get ECU sim state");
+    assert_eq!(
+        ecu_state.temporal_era_id,
+        Some(temporal_era_id),
+        "ECU sim did not store the correct temporalEraId"
+    );
+    assert_eq!(
+        ecu_state.communication_control_type,
+        Some(ecusim::CommunicationControlType::TemporalSync)
+    );
+
+    // Delete the ECU lock
+    lock_operation(
+        locks::ECU_ENDPOINT,
+        Some(&lock_id),
+        &runtime.config,
+        &auth,
+        StatusCode::NO_CONTENT,
+        Method::DELETE,
+    )
+    .await;
+
+    // After deleting lock, we should not be able to set comm control
+    set_comm_control(
+        "EnableRxAndEnableTx",
+        None,
+        &runtime.config,
+        &auth,
+        ecu_endpoint,
+        StatusCode::FORBIDDEN,
+    )
+    .await
+    .unwrap();
+}
+
 async fn validate_ecu_state(
     runtime: &TestRuntime,
     auth: &HeaderMap,
@@ -353,7 +525,10 @@ async fn session(
     config: &Configuration,
     headers: &HeaderMap,
     ecu_endpoint: &str,
-) -> Result<sovd_interfaces::components::ecu::modes::Mode<String>, TestingError> {
+) -> Result<
+    sovd_interfaces::components::ecu::modes::security_and_session::get::Response,
+    TestingError,
+> {
     get_mode(config, headers, ecu_endpoint, "session").await
 }
 
@@ -361,7 +536,10 @@ async fn security(
     config: &Configuration,
     headers: &HeaderMap,
     ecu_endpoint: &str,
-) -> Result<sovd_interfaces::components::ecu::modes::Mode<String>, TestingError> {
+) -> Result<
+    sovd_interfaces::components::ecu::modes::security_and_session::get::Response,
+    TestingError,
+> {
     get_mode(config, headers, ecu_endpoint, "security").await
 }
 
@@ -371,13 +549,16 @@ async fn switch_session(
     headers: &HeaderMap,
     ecu_endpoint: &str,
     expected_status: StatusCode,
-) -> Result<Option<sovd_interfaces::components::ecu::modes::put::Response<String>>, TestingError> {
+) -> Result<
+    Option<sovd_interfaces::components::ecu::modes::security_and_session::put::Response<String>>,
+    TestingError,
+> {
     put_mode(
         config,
         headers,
         ecu_endpoint,
         "session",
-        sovd_interfaces::components::ecu::modes::put::Request {
+        sovd_interfaces::components::ecu::modes::security_and_session::put::Request {
             value: name.to_owned(),
             mode_expiration: None,
             key: None,
@@ -392,14 +573,16 @@ async fn request_seed(
     config: &Configuration,
     headers: &HeaderMap,
     ecu_endpoint: &str,
-) -> Result<Option<sovd_interfaces::components::ecu::modes::put::RequestSeedResponse>, TestingError>
-{
+) -> Result<
+    Option<sovd_interfaces::components::ecu::modes::security_and_session::put::RequestSeedResponse>,
+    TestingError,
+> {
     put_mode(
         config,
         headers,
         ecu_endpoint,
         "security",
-        sovd_interfaces::components::ecu::modes::put::Request {
+        sovd_interfaces::components::ecu::modes::security_and_session::put::Request {
             value: name,
             mode_expiration: None,
             key: None,
@@ -416,16 +599,23 @@ async fn send_key(
     headers: &HeaderMap,
     ecu_endpoint: &str,
     excepted_status: StatusCode,
-) -> Result<Option<sovd_interfaces::components::ecu::modes::put::Response<String>>, TestingError> {
+) -> Result<
+    Option<sovd_interfaces::components::ecu::modes::security_and_session::put::Response<String>>,
+    TestingError,
+> {
     put_mode(
         config,
         headers,
         ecu_endpoint,
         "security",
-        sovd_interfaces::components::ecu::modes::put::Request {
+        sovd_interfaces::components::ecu::modes::security_and_session::put::Request {
             value: name,
             mode_expiration: None,
-            key: Some(sovd_interfaces::components::ecu::modes::put::ModeKey { send_key: key }),
+            key: Some(
+                sovd_interfaces::components::ecu::modes::security_and_session::put::ModeKey {
+                    send_key: key,
+                },
+            ),
         },
         excepted_status,
     )
@@ -508,4 +698,27 @@ async fn force_variant_detection(
     )
     .await?;
     Ok(())
+}
+
+async fn set_comm_control(
+    value: &str,
+    parameters: Option<cda_interfaces::HashMap<String, serde_json::Value>>,
+    config: &Configuration,
+    headers: &HeaderMap,
+    ecu_endpoint: &str,
+    expected_status: StatusCode,
+) -> Result<Option<sovd_interfaces::components::ecu::modes::commctrl::put::Response>, TestingError>
+{
+    put_mode(
+        config,
+        headers,
+        ecu_endpoint,
+        "commctrl",
+        sovd_interfaces::components::ecu::modes::commctrl::put::Request {
+            value: value.to_owned(),
+            parameters,
+        },
+        expected_status,
+    )
+    .await
 }

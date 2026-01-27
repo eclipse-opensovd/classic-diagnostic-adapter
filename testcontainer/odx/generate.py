@@ -24,6 +24,7 @@ from odxtools.odxlink import OdxLinkId, DocType, OdxDocFragment
 from odxtools.parentref import ParentRef
 
 from authentication import add_authentication_services
+from communication_control import add_communication_control_services
 from comparams import generate_comparam_refs
 from helper import ref
 from metadata import (
@@ -124,10 +125,12 @@ def add_base_variant(
     add_common_diag_comms(base_variant)
     # 11
     add_reset_services(base_variant)
-    # 34, 36, 37
-    add_transfer_services(base_variant)
+    # 28
+    add_communication_control_services(base_variant)
     # 29
     add_authentication_services(base_variant)
+    # 34, 36, 37
+    add_transfer_services(base_variant)
 
     dlc.base_variants.append(BaseVariant(diag_layer_raw=base_variant))
 
