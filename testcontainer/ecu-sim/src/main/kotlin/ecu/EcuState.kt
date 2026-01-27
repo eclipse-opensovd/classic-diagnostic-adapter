@@ -29,6 +29,8 @@ data class EcuState(
     var sessionState: SessionState = SessionState.DEFAULT,
     var securityAccess: SecurityAccess = SecurityAccess.LOCKED,
     var authentication: Authentication = Authentication.UNAUTHENTICATED,
+    var communicationControlType: CommunicationControlType = CommunicationControlType.ENABLE_RX_AND_TX,
+    var temporalEraId: Int? = null,
     val blocks: List<DataBlock> =
         listOf(
             DataBlock(

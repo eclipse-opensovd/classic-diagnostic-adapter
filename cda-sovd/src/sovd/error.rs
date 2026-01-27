@@ -46,6 +46,21 @@ pub enum ApiError {
     Conflict(String),
 }
 
+impl ApiError {
+    #[must_use]
+    pub fn error_and_vendor_code(&self) -> (ErrorCode, Option<VendorErrorCode>) {
+        match &self {
+            ApiError::NotFound(_) => (ErrorCode::NotResponding, None),
+            ApiError::BadRequest(_) => (
+                ErrorCode::InvalidResponseContent,
+                Some(VendorErrorCode::BadRequest),
+            ),
+            ApiError::Forbidden(_) => (ErrorCode::InsufficientAccessRights, None),
+            _ => (ErrorCode::SovdServerFailure, None),
+        }
+    }
+}
+
 impl From<DiagServiceError> for ApiError {
     fn from(value: DiagServiceError) -> Self {
         match &value {

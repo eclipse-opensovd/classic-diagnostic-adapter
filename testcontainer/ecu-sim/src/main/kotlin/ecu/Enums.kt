@@ -63,3 +63,21 @@ enum class DataBlockType {
     CODE,
     DATA,
 }
+
+@Serializable
+enum class CommunicationControlType(
+    val value: Byte,
+) {
+    ENABLE_RX_AND_TX(0x00),
+    ENABLE_RX_AND_DISABLE_TX(0x01),
+    DISABLE_RX_AND_ENABLE_TX(0x02),
+    DISABLE_RX_AND_TX(0x03),
+    ENABLE_RX_AND_DISABLE_TX_WITH_ENHANCED_ADDRESS_INFORMATION(0x04),
+    ENABLE_RX_AND_TX_WITH_ENHANCED_ADDRESS_INFORMATION(0x05),
+    TEMPORAL_SYNC(0x88.toByte()), // Non standard value, used for testing.
+    ;
+
+    companion object {
+        fun parse(value: Byte) = entries.firstOrNull { it.value == value }
+    }
+}

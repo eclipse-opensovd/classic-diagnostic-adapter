@@ -165,11 +165,15 @@ impl DiagService<'_> {
     }
 
     #[must_use]
+    /// Get the request sub-function ID if defined
+    /// Returns a tuple of (`value`, `bit_length`) if found
     pub fn request_sub_function_id(&self) -> Option<(u16, u32)> {
         self.find_request_sid_or_sub_func_param(1, 0)
     }
 
     #[must_use]
+    /// Find the request SID or sub-function parameter based on byte and bit position
+    /// Returns a tuple of (`value`, `bit_length`) if found
     fn find_request_sid_or_sub_func_param(
         &self,
         byte_pos: u32,

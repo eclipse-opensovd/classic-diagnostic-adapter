@@ -15,9 +15,9 @@ use std::{sync::Arc, time::Duration};
 
 use cda_database::datatypes;
 use cda_interfaces::{
-    DiagCommAction, DiagCommType, DiagServiceError, DynamicPlugin, EcuManagerType, EcuState,
-    EcuVariant, HashMap, HashMapExtensions, HashSet, HashSetExtensions, Protocol, STRINGS,
-    SecurityAccess, ServicePayload, StringId,
+    DiagComm, DiagCommAction, DiagCommType, DiagServiceError, DynamicPlugin, EcuManagerType,
+    EcuState, EcuVariant, HashMap, HashMapExtensions, HashSet, HashSetExtensions, Protocol,
+    STRINGS, SecurityAccess, ServicePayload, StringId,
     datatypes::{
         AddressingMode, ComParams, ComplexComParamValue, ComponentConfigurationsInfo,
         ComponentDataInfo, DTC_CODE_BIT_LEN, DatabaseNamingConvention,
@@ -26,7 +26,7 @@ use cda_interfaces::{
     },
     diagservices::{DiagServiceResponse, DiagServiceResponseType, FieldParseError, UdsPayloadData},
     dlt_ctx, service_ids, spawn_named,
-    util::{self, starts_with_ignore_ascii_case},
+    util::{self, ends_with_ignore_ascii_case, starts_with_ignore_ascii_case},
 };
 use cda_plugin_security::SecurityPlugin;
 use parking_lot::Mutex;
@@ -859,6 +859,38 @@ impl<S: SecurityPlugin> cda_interfaces::EcuManager for EcuManager<S> {
             .collect::<Vec<_>>();
 
         Ok(services)
+    }
+    fn lookup_service_by_sid_and_name(
+        &self,
+        service_id: u8,
+        name: &str,
+    ) -> Result<DiagComm, DiagServiceError> {
+        self.lookup_services_by_sid(service_id)?
+            .into_iter()
+            .find_map(|service| {
+                let diag_comm = service.diag_comm()?;
+                let short_name = diag_comm.short_name()?;
+
+                let matches = match self.database_naming_convention.short_name_affix_position {
+                    DiagnosticServiceAffixPosition::Suffix => {
+                        starts_with_ignore_ascii_case(short_name, name)
+                    }
+                    DiagnosticServiceAffixPosition::Prefix => {
+                        ends_with_ignore_ascii_case(short_name, name)
+                    }
+                };
+
+                if !matches {
+                    return None;
+                }
+
+                Some(DiagComm {
+                    name: short_name.to_owned(),
+                    type_: DiagCommType::try_from(service_id).ok()?,
+                    lookup_name: Some(short_name.to_owned()),
+                })
+            })
+            .ok_or_else(|| DiagServiceError::NotFound(Some(name.to_owned())))
     }
 
     fn get_components_data_info(&self) -> Vec<ComponentDataInfo> {
@@ -1978,29 +2010,54 @@ impl<S: SecurityPlugin> EcuManager<S> {
         fn find_ecu_shared_services_recursive<'a>(
             parent_refs: impl Iterator<Item = impl Into<datatypes::ParentRef<'a>>>,
         ) -> Option<Vec<datatypes::DiagService<'a>>> {
-            parent_refs.into_iter().find_map(|parent_ref| {
-                let parent_ref = parent_ref.into();
+            let all_services: Vec<datatypes::DiagService<'a>> = parent_refs
+                .into_iter()
+                .filter_map(|parent_ref| {
+                    let parent_ref = parent_ref.into();
 
-                match parent_ref.ref_type().try_into() {
-                    Ok(datatypes::ParentRefType::EcuSharedData) => Some(
-                        parent_ref
-                            .ref__as_ecu_shared_data()
-                            .and_then(|ecu_shared| ecu_shared.diag_layer())
-                            .and_then(|dl| dl.diag_services())
-                            .into_iter()
-                            .flatten()
-                            .map(datatypes::DiagService)
-                            .collect(),
-                    ),
-                    Ok(datatypes::ParentRefType::FunctionalGroup) => parent_ref
-                        .ref__as_functional_group()
-                        .and_then(|fg| fg.parent_refs())
-                        .and_then(|nested_refs| {
-                            find_ecu_shared_services_recursive(nested_refs.iter())
-                        }),
-                    _ => None,
-                }
-            })
+                    match parent_ref.ref_type().try_into() {
+                        Ok(datatypes::ParentRefType::EcuSharedData) => Some(
+                            parent_ref
+                                .ref__as_ecu_shared_data()?
+                                .diag_layer()?
+                                .diag_services()?
+                                .iter()
+                                .map(datatypes::DiagService)
+                                .collect::<Vec<_>>(),
+                        ),
+                        Ok(datatypes::ParentRefType::FunctionalGroup) => parent_ref
+                            .ref__as_functional_group()
+                            .and_then(|fg| fg.parent_refs())
+                            .and_then(|nested_refs| {
+                                find_ecu_shared_services_recursive(
+                                    nested_refs.iter().map(datatypes::ParentRef),
+                                )
+                            }),
+                        Ok(datatypes::ParentRefType::Protocol) => Some(
+                            parent_ref
+                                .ref__as_protocol()?
+                                .diag_layer()?
+                                .diag_services()?
+                                .iter()
+                                .map(datatypes::DiagService)
+                                .collect::<Vec<_>>(),
+                        ),
+                        _ => {
+                            tracing::error!(
+                                "Unsupported ParentRefType in ECU shared service lookup."
+                            );
+                            None
+                        }
+                    }
+                })
+                .flatten()
+                .collect();
+
+            if all_services.is_empty() {
+                None
+            } else {
+                Some(all_services)
+            }
         }
 
         self.diag_database
@@ -3361,15 +3418,16 @@ impl<S: SecurityPlugin> EcuManager<S> {
         &self,
         service_id: u8,
     ) -> Result<Vec<datatypes::DiagService<'_>>, DiagServiceError> {
-        let base_variant = self.diag_database.base_variant()?;
         let services = self
             .variant()
             .and_then(|v| v.diag_layer().and_then(|dl| dl.diag_services()))
             .into_iter()
             .flatten()
             .chain(
-                base_variant
-                    .diag_layer()
+                self.diag_database
+                    .base_variant()
+                    .ok()
+                    .and_then(|base| base.diag_layer())
                     .and_then(|dl| dl.diag_services())
                     .into_iter()
                     .flatten(),
