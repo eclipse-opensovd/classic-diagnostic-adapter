@@ -11,18 +11,4 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-use serde::Deserialize;
-
-pub mod ecu;
-
-pub mod get {
-    pub type Response = crate::ResourceResponse;
-}
-
-#[derive(Deserialize, schemars::JsonSchema)]
-pub struct ComponentQuery {
-    #[serde(rename = "x-include-sdgs", default)]
-    pub include_sdgs: bool,
-    #[serde(rename = "include-schema", default)]
-    pub include_schema: bool,
-}
+pub mod functional_groups;

@@ -253,7 +253,7 @@ async fn vehicle_route<T: UdsEcu + SchemaProvider + Clone, S: SecurityPluginLoad
     functional_group_config: FunctionalDescriptionConfig,
 ) -> Router<T> {
     let router = router.nest_api_service(
-        "/vehicle/v15/functions/functionalgroups",
+        "/vehicle/v15/functions",
         functional_groups::create_functional_group_routes(state.clone(), functional_group_config)
             .await,
     );

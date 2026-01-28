@@ -16,6 +16,21 @@ use serde::{Deserialize, Serialize};
 
 use crate::error::DataError;
 
+#[derive(Debug, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct FunctionalGroup {
+    pub id: String,
+    pub locks: String,
+    pub operations: String,
+    pub data: String,
+    #[schemars(skip)]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub schema: Option<schemars::Schema>,
+}
+
+pub mod get {
+    pub type Response = super::FunctionalGroup;
+}
+
 /// Response structure for functional group data operations
 /// Returns data for multiple ECUs with ECU names as top-level keys
 pub mod data {
