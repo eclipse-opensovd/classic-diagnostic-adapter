@@ -13,22 +13,29 @@
 
 use std::sync::Arc;
 
-use aide::axum::{ApiRouter as Router, routing};
+use aide::{
+    axum::{ApiRouter as Router, routing},
+    transform::TransformOperation,
+};
 use axum::{
     Json,
-    extract::{Path, State},
+    extract::{Path, Query, State},
     response::{IntoResponse, Response},
 };
 use axum_extra::extract::WithRejection;
 use cda_interfaces::{
     FunctionalDescriptionConfig, HashMap, UdsEcu, diagservices::DiagServiceResponse,
 };
+use http::StatusCode;
 use sovd_interfaces::error::ErrorCode;
 
-use crate::sovd::{
-    WebserverState,
-    error::{ApiError, ErrorWrapper, VendorErrorCode},
-    locks::Locks,
+use crate::{
+    create_schema,
+    sovd::{
+        WebserverState,
+        error::{ApiError, ErrorWrapper, VendorErrorCode},
+        locks::Locks,
+    },
 };
 
 #[derive(Clone)]
@@ -42,6 +49,11 @@ pub(crate) async fn create_functional_group_routes<T: UdsEcu + Clone>(
     state: WebserverState<T>,
     functional_group_config: FunctionalDescriptionConfig,
 ) -> Router {
+    let functions_router = Router::new().api_route(
+        "/",
+        routing::get_with(functions_description, docs_functions),
+    );
+
     if !state
         .uds
         .get_ecus()
@@ -49,10 +61,13 @@ pub(crate) async fn create_functional_group_routes<T: UdsEcu + Clone>(
         .iter()
         .any(|ecu| ecu.eq_ignore_ascii_case(&functional_group_config.description_database))
     {
-        return create_error_fallback_route(format!(
-            "Functional Description Database '{}' is missing from loaded databases.",
-            functional_group_config.description_database
-        ));
+        return create_error_fallback_route(
+            functions_router,
+            format!(
+                "Functional Description Database '{}' is missing from loaded databases.",
+                functional_group_config.description_database
+            ),
+        );
     }
 
     let groups = match state
@@ -62,9 +77,12 @@ pub(crate) async fn create_functional_group_routes<T: UdsEcu + Clone>(
     {
         Ok(groups) => groups,
         Err(e) => {
-            return create_error_fallback_route(format!(
-                "Failed to get functional groups from functional description database: {e}"
-            ));
+            return create_error_fallback_route(
+                functions_router,
+                format!(
+                    "Failed to get functional groups from functional description database: {e}"
+                ),
+            );
         }
     };
 
@@ -81,33 +99,53 @@ pub(crate) async fn create_functional_group_routes<T: UdsEcu + Clone>(
 
     if filtered_groups.is_empty() {
         if let Some(filter) = functional_group_config.enabled_functional_groups {
-            return create_error_fallback_route(format!(
-                "No functional groups found in functional description database with given filter: \
-                 [{filter:?}]",
-            ));
+            return create_error_fallback_route(
+                functions_router,
+                format!(
+                    "No functional groups found in functional description database with given \
+                     filter: [{filter:?}]",
+                ),
+            );
         }
         return create_error_fallback_route(
+            functions_router,
             "No functional groups found in the functional description database".to_owned(),
         );
     }
 
-    let mut router: Router = Router::new();
+    let groups_resource = filtered_groups.clone();
+    let mut functional_groups_router: Router = functions_router.api_route(
+        "/functionalgroups",
+        routing::get_with(
+            |WithRejection(Query(query), _): WithRejection<
+                Query<sovd_interfaces::IncludeSchemaQuery>,
+                ApiError,
+            >| async move {
+                functional_groups_description(query.include_schema, groups_resource)
+            },
+            docs_functionalgroups,
+        ),
+    );
     for group in filtered_groups {
         let fg_state = WebserverFgState {
             uds: state.uds.clone(),
             locks: Arc::clone(&state.locks),
             functional_group_name: group.clone(),
         };
-        router = router.nest_api_service(
-            &format!("/{group}"),
+        functional_groups_router = functional_groups_router.nest_api_service(
+            &format!("/functionalgroups/{group}"),
             create_functional_group_route(fg_state),
         );
     }
-    router
+    functional_groups_router
 }
 
 fn create_functional_group_route<T: UdsEcu + Clone>(fg_state: WebserverFgState<T>) -> Router {
     Router::new()
+        .api_route(
+            "/",
+            routing::get_with(functional_group_description, docs_functional_group),
+        )
         .api_route(
             "/locks",
             routing::post_with(locks::post, locks::docs_post).get_with(locks::get, locks::docs_get),
@@ -133,9 +171,9 @@ fn create_functional_group_route<T: UdsEcu + Clone>(fg_state: WebserverFgState<T
         .with_state(fg_state)
 }
 
-fn create_error_fallback_route(reason: String) -> Router {
-    Router::new().api_route(
-        "/{*subpath}",
+fn create_error_fallback_route(router: Router, reason: String) -> Router {
+    router.api_route(
+        "/functionalgroups/{*subpath}",
         routing::get(|| async move {
             let error = ApiError::InternalServerError(Some(reason));
             ErrorWrapper {
@@ -145,6 +183,137 @@ fn create_error_fallback_route(reason: String) -> Router {
             .into_response()
         }),
     )
+}
+
+async fn functions_description(
+    WithRejection(Query(query), _): WithRejection<
+        Query<sovd_interfaces::IncludeSchemaQuery>,
+        ApiError,
+    >,
+) -> Response {
+    let schema = if query.include_schema {
+        Some(crate::sovd::create_schema!(
+            sovd_interfaces::ResourceResponse
+        ))
+    } else {
+        None
+    };
+    (
+        StatusCode::OK,
+        Json(sovd_interfaces::ResourceResponse {
+            items: vec![sovd_interfaces::Resource {
+                href: "http://localhost:20002/vehicle/v15/functions/functionalgroups".to_owned(),
+                id: None,
+                name: "functionalgroups".to_owned(),
+            }],
+            schema,
+        }),
+    )
+        .into_response()
+}
+
+fn docs_functions(op: TransformOperation) -> TransformOperation {
+    op.description("Get a list of available subresources in the functions collection")
+}
+
+fn functional_groups_description(include_schema: bool, functional_groups: Vec<String>) -> Response {
+    let schema = if include_schema {
+        Some(crate::sovd::create_schema!(
+            sovd_interfaces::ResourceResponse
+        ))
+    } else {
+        None
+    };
+    (
+        StatusCode::OK,
+        Json(sovd_interfaces::ResourceResponse {
+            items: functional_groups
+                .into_iter()
+                .map(|group| sovd_interfaces::Resource {
+                    href: format!(
+                        "http://localhost:20002/vehicle/v15/functions/functionalgroups/{group}"
+                    ),
+                    id: Some(group.to_lowercase()),
+                    name: group,
+                })
+                .collect::<Vec<_>>(),
+            schema,
+        }),
+    )
+        .into_response()
+}
+
+fn docs_functionalgroups(op: TransformOperation) -> TransformOperation {
+    op.description("Get a list of available functional groups with their paths")
+        .response_with::<200, Json<sovd_interfaces::ResourceResponse>, _>(|res| {
+            res.example(sovd_interfaces::ResourceResponse {
+                items: vec![sovd_interfaces::Resource {
+                    href: "http://localhost:20002/vehicle/v15/functions/functionalgroups/group_a"
+                        .into(),
+                    id: Some("group_a".into()),
+                    name: "Group_A".into(),
+                }],
+                schema: None,
+            })
+        })
+}
+
+async fn functional_group_description<T: UdsEcu + Clone>(
+    State(WebserverFgState {
+        functional_group_name,
+        ..
+    }): State<WebserverFgState<T>>,
+    WithRejection(Query(query), _): WithRejection<
+        Query<sovd_interfaces::IncludeSchemaQuery>,
+        ApiError,
+    >,
+) -> Response {
+    let base_path = format!(
+        "http://localhost:20002/vehicle/v15/functions/functionalgroups/{functional_group_name}"
+    );
+    let schema = if query.include_schema {
+        Some(create_schema!(
+            sovd_interfaces::functions::functional_groups::get::Response
+        ))
+    } else {
+        None
+    };
+
+    (
+        StatusCode::OK,
+        Json(
+            sovd_interfaces::functions::functional_groups::get::Response {
+                id: functional_group_name.to_lowercase(),
+                locks: format!("{base_path}/locks"),
+                operations: format!("{base_path}/operations"),
+                data: format!("{base_path}/data"),
+                schema,
+            },
+        ),
+    )
+        .into_response()
+}
+
+fn docs_functional_group(op: TransformOperation) -> TransformOperation {
+    op.description("Get functional group details")
+        .response_with::<
+            200,
+            Json<sovd_interfaces::functions::functional_groups::FunctionalGroup
+        >, _>(|res| {
+            res.example(sovd_interfaces::functions::functional_groups::FunctionalGroup {
+                id: "group_a".into(),
+                locks:
+                    "http://localhost:20002/vehicle/v15/functions/functionalgroups/group_a/locks"
+                        .into(),
+                operations:
+                    "http://localhost:20002/vehicle/v15/functions/\
+                        functionalgroups/group_a/operations".into(),
+                data:
+                    "http://localhost:20002/vehicle/v15/functions/functionalgroups/group_a/data"
+                        .into(),
+                schema: None,
+            })
+        })
 }
 
 pub(crate) mod locks {
@@ -484,7 +653,7 @@ pub(crate) mod data {
             UseApi(Secured(security_plugin), _): UseApi<Secured, ()>,
             Path(DiagServicePathParam { diag_service }): Path<DiagServicePathParam>,
             WithRejection(Query(query), _): WithRejection<
-                Query<sovd_interfaces::components::functional_groups::data::service::Query>,
+                Query<sovd_interfaces::functions::functional_groups::data::service::Query>,
                 ApiError,
             >,
             State(WebserverFgState {
@@ -523,7 +692,7 @@ pub(crate) mod data {
                 "Get data from a functional group service - returns data for all ECUs in the group",
             )
             .response_with::<200, Json<
-                sovd_interfaces::components::functional_groups::data::service::Response<
+                sovd_interfaces::functions::functional_groups::data::service::Response<
                     VendorErrorCode,
                 >,
             >, _>(|res| {
@@ -531,7 +700,7 @@ pub(crate) mod data {
                     "Response with data from all ECUs in the functional group, keyed by ECU name",
                 )
                 .example(
-                    sovd_interfaces::components::functional_groups::data::service::Response {
+                    sovd_interfaces::functions::functional_groups::data::service::Response {
                         data: {
                             let mut map = HashMap::default();
                             let mut ecu1_data = serde_json::Map::new();
@@ -558,7 +727,7 @@ pub(crate) mod data {
                 diag_service: service,
             }): Path<DiagServicePathParam>,
             WithRejection(Query(query), _): WithRejection<
-                Query<sovd_interfaces::components::functional_groups::data::service::Query>,
+                Query<sovd_interfaces::functions::functional_groups::data::service::Query>,
                 ApiError,
             >,
             State(WebserverFgState {
@@ -595,13 +764,13 @@ pub(crate) mod data {
 
         pub(crate) fn docs_put(op: TransformOperation) -> TransformOperation {
             openapi::request_json_and_octet::<
-                sovd_interfaces::components::functional_groups::data::DataRequestPayload,
+                sovd_interfaces::functions::functional_groups::data::DataRequestPayload,
             >(op)
             .description(
                 "Update data for a functional group service - sends to all ECUs in the group",
             )
             .response_with::<200, Json<
-                sovd_interfaces::components::functional_groups::data::service::Response<
+                sovd_interfaces::functions::functional_groups::data::service::Response<
                     VendorErrorCode,
                 >,
             >, _>(|res| {
@@ -636,7 +805,7 @@ pub(crate) mod data {
 
             let data = if let Some(body) = body {
                 match get_payload_data::<
-                    sovd_interfaces::components::functional_groups::data::DataRequestPayload,
+                    sovd_interfaces::functions::functional_groups::data::DataRequestPayload,
                 >(content_type.as_ref(), &headers, &body)
                 {
                     Ok(value) => value,
@@ -689,7 +858,7 @@ pub(crate) mod data {
 
             let schema = if include_schema {
                 Some(crate::sovd::create_schema!(
-                    sovd_interfaces::components::functional_groups::data::service::Response<
+                    sovd_interfaces::functions::functional_groups::data::service::Response<
                         VendorErrorCode,
                     >
                 ))
@@ -700,7 +869,7 @@ pub(crate) mod data {
             (
                 StatusCode::OK,
                 Json(
-                    sovd_interfaces::components::functional_groups::data::service::Response {
+                    sovd_interfaces::functions::functional_groups::data::service::Response {
                         data: response_data,
                         errors,
                         schema,
@@ -744,7 +913,7 @@ pub(crate) mod operations {
                 diag_service: operation,
             }): Path<DiagServicePathParam>,
             WithRejection(Query(query), _): WithRejection<
-                Query<sovd_interfaces::components::functional_groups::operations::service::Query>,
+                Query<sovd_interfaces::functions::functional_groups::operations::service::Query>,
                 ApiError,
             >,
             State(WebserverFgState {
@@ -781,13 +950,13 @@ pub(crate) mod operations {
 
         pub(crate) fn docs_post(op: TransformOperation) -> TransformOperation {
             openapi::request_json_and_octet::<
-                sovd_interfaces::components::functional_groups::operations::service::Request,
+                sovd_interfaces::functions::functional_groups::operations::service::Request,
             >(op)
             .description(
                 "Execute an operation on a functional group - sends to all ECUs in the group",
             )
             .response_with::<200, Json<
-                sovd_interfaces::components::functional_groups::operations::service::Response<
+                sovd_interfaces::functions::functional_groups::operations::service::Response<
                     VendorErrorCode,
                 >,
             >, _>(|res| {
@@ -796,7 +965,7 @@ pub(crate) mod operations {
                      name",
                 )
                 .example(
-                    sovd_interfaces::components::functional_groups::operations::service::Response {
+                    sovd_interfaces::functions::functional_groups::operations::service::Response {
                         parameters: {
                             let mut map = HashMap::default();
                             let mut ecu1_params = serde_json::Map::new();
@@ -837,7 +1006,7 @@ pub(crate) mod operations {
             };
 
             let data = match get_payload_data::<
-                sovd_interfaces::components::functional_groups::operations::service::Request,
+                sovd_interfaces::functions::functional_groups::operations::service::Request,
             >(content_type.as_ref(), &headers, &body)
             {
                 Ok(value) => value,
@@ -883,7 +1052,7 @@ pub(crate) mod operations {
 
             let schema = if include_schema {
                 Some(crate::sovd::create_schema!(
-                    sovd_interfaces::components::functional_groups::operations::service::Response<
+                    sovd_interfaces::functions::functional_groups::operations::service::Response<
                         VendorErrorCode,
                     >
                 ))
@@ -894,7 +1063,7 @@ pub(crate) mod operations {
             (
                 StatusCode::OK,
                 Json(
-                    sovd_interfaces::components::functional_groups::operations::service::Response {
+                    sovd_interfaces::functions::functional_groups::operations::service::Response {
                         parameters: response_data,
                         errors,
                         schema,

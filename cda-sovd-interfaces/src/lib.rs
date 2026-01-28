@@ -19,6 +19,7 @@ use crate::error::DataError;
 pub mod apps;
 pub mod components;
 pub mod error;
+pub mod functions;
 pub mod locking;
 
 fn default_true() -> bool {
