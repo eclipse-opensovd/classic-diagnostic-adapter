@@ -50,7 +50,7 @@ where
 
     let mut gateways = Vec::new();
 
-    let vam_timeout = Duration::from_millis(1000); // not the actual timeout from the spec ...
+    let vam_timeout = Duration::from_secs(1); // not the actual timeout from the spec ...
     loop {
         tokio::select! {
             () = shutdown_signal.clone() => {

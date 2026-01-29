@@ -287,7 +287,7 @@ pub async fn load_databases<S: SecurityPlugin>(
             })
             .collect::<Vec<_>>();
 
-        files.sort_by(|a, b| b.1.cmp(&a.1));
+        files.sort_by_key(|b| std::cmp::Reverse(b.1));
 
         let chunk_size = files
             .len()

@@ -33,7 +33,7 @@ mod connections;
 mod ecu_connection;
 mod vir_vam;
 
-const SLEEP_INTERVAL: Duration = Duration::from_millis(30000);
+const SLEEP_INTERVAL: Duration = Duration::from_secs(30);
 
 const NRC_BUSY_REPEAT_REQUEST: u8 = 0x21;
 const NRC_RESPONSE_PENDING: u8 = 0x78;
