@@ -49,7 +49,7 @@ use crate::sovd::components::ecu::{
 pub(crate) mod apps;
 pub(crate) mod components;
 pub(crate) mod error;
-pub(crate) mod functional_groups;
+pub(crate) mod functions;
 pub(crate) mod locks;
 
 trait IntoSovd {
@@ -254,8 +254,11 @@ async fn vehicle_route<T: UdsEcu + SchemaProvider + Clone, S: SecurityPluginLoad
 ) -> Router<T> {
     let router = router.nest_api_service(
         "/vehicle/v15/functions",
-        functional_groups::create_functional_group_routes(state.clone(), functional_group_config)
-            .await,
+        functions::functional_groups::create_functional_group_routes(
+            state.clone(),
+            functional_group_config,
+        )
+        .await,
     );
     router
         .api_route(
