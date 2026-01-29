@@ -81,3 +81,17 @@ enum class CommunicationControlType(
         fun parse(value: Byte) = entries.firstOrNull { it.value == value }
     }
 }
+
+@Serializable
+enum class DtcSettingType(
+    val value: Byte,
+) {
+    ON(0x01),
+    OFF(0x02),
+    TIME_TRAVEL_DTCS_ON(0x42),
+    ;
+
+    companion object {
+        fun parse(value: Byte) = entries.firstOrNull { it.value == value }
+    }
+}

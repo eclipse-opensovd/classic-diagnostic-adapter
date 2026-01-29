@@ -20,6 +20,7 @@ import ecu.CommunicationControlType
 import ecu.DataBlock
 import ecu.DataBlockType
 import ecu.DataTransferDownload
+import ecu.DtcSettingType
 import ecu.EcuState
 import ecu.MajorMinorPatch
 import ecu.SecurityAccess
@@ -45,6 +46,7 @@ data class EcuStateDto(
     val blocks: List<DataBlockDto>? = null,
     val communicationControlType: CommunicationControlType? = null,
     val temporalEraId: Int? = null,
+    val dtcSettingType: DtcSettingType? = null,
 )
 
 fun EcuState.updateWith(dto: EcuStateDto) {
@@ -54,6 +56,7 @@ fun EcuState.updateWith(dto: EcuStateDto) {
     this.authentication = dto.authentication ?: this.authentication
     this.vin = dto.vin ?: this.vin
     this.maxNumberOfBlockLength = dto.maxNumberOfBlockLength ?: this.maxNumberOfBlockLength
+    this.dtcSettingType = dto.dtcSettingType ?: this.dtcSettingType
 }
 
 fun EcuState.toDto() =
@@ -68,6 +71,7 @@ fun EcuState.toDto() =
         blocks = this.blocks.map { it.toDto() },
         communicationControlType = this.communicationControlType,
         temporalEraId = this.temporalEraId,
+        dtcSettingType = this.dtcSettingType,
     )
 
 @Serializable

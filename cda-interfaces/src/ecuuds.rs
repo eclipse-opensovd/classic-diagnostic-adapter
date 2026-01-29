@@ -369,48 +369,54 @@ pub trait UdsEcu: Send + Sync + 'static {
         map_to_json: bool,
     ) -> HashMap<String, Result<Self::Response, DiagServiceError>>;
 
-    /// Set the communication control mode for the given ECU.
-    /// This function has no corresponding setter, as the UDS standard
-    /// does not define any service to read the current communication control mode back from the
-    /// ECU. Therefore, to ensure the correct mode is set.
+    /// Call a service and fetch the responses for a ECU.
+    /// Does not modify internal states.
     /// # Arguments
     /// * `ecu_name` - Name of the ECU
     /// * `security_plugin` - Security plugin to validate the request against
-    /// * `mode` - Communication control mode to set
+    /// * `sid` - Service ID
+    /// * `subfunction_id` - Optional subfunction ID
+    /// * `service_name` - Name of the service
     /// * `params` - Optional parameters, for the service
+    /// * `map_to_json` - Whether to map the response to JSON format
     /// # Returns
     /// Result containing the response
     /// # Errors
     /// Error if the operation fails (i.e. ECU not found)
     //  Negative response are not treated as errors, but returned in the response.
-    async fn set_ecu_comm_ctrl(
+    async fn call_ecu_service_by_sid_and_name(
         &self,
         ecu_name: &str,
         security_plugin: &DynamicPlugin,
-        mode: &str,
+        sid: u8,
+        service_name: &str,
         params: Option<HashMap<String, serde_json::Value>>,
+        map_to_json: bool,
     ) -> Result<Self::Response, DiagServiceError>;
 
-    /// Set the communication control mode for the given functional group.
-    /// This function has no corresponding setter, as the UDS standard
-    /// does not define any service to read the current communication control mode back from the
-    /// ECU. Therefore, to ensure the correct mode is set.
+    /// Call a service and fetch the responses for each ECU in the functional group.
+    /// Does not modify internal states.
     /// # Arguments
     /// * `group_name` - Name of the group
     /// * `security_plugin` - Security plugin to validate the request against
-    /// * `mode` - Communication control mode to set
+    /// * `sid` - Service ID
+    /// * `subfunction_id` - Optional subfunction ID
+    /// * `service_name` - Name of the service
     /// * `params` - Optional parameters, for the service
+    /// * `map_to_json` - Whether to map the response to JSON format
     /// # Returns
     /// Result containing the response
     /// # Errors
     /// Error if the operation fails (i.e. functional group or service not found)
     //  Negative response are not treated as errors, but returned in the response.
-    async fn set_functional_comm_ctrl(
+    async fn call_functional_service_by_sid_and_name(
         &self,
         group_name: &str,
         security_plugin: &DynamicPlugin,
-        mode: &str,
+        sid: u8,
+        service_name: &str,
         params: Option<HashMap<String, serde_json::Value>>,
+        map_to_json: bool,
     ) -> Result<HashMap<String, Result<Self::Response, DiagServiceError>>, DiagServiceError>;
 }
 
@@ -634,19 +640,23 @@ pub mod mock {
                 payload: Option<UdsPayloadData>,
                 map_to_json: bool,
             ) -> HashMap<String, Result<<MockUdsEcu as UdsEcu>::Response, DiagServiceError>>;
-            async fn set_ecu_comm_ctrl(
+            async fn call_ecu_service_by_sid_and_name(
                 &self,
                 ecu_name: &str,
                 security_plugin: &DynamicPlugin,
-                mode: &str,
+                sid: u8,
+                service_name: &str,
                 params: Option<HashMap<String, serde_json::Value>>,
+                map_to_json: bool,
             ) -> Result<<MockUdsEcu as UdsEcu>::Response, DiagServiceError>;
-             async fn set_functional_comm_ctrl(
+             async fn call_functional_service_by_sid_and_name(
                 &self,
                 group_name: &str,
                 security_plugin: &DynamicPlugin,
-                mode: &str,
+                sid: u8,
+                service_name: &str,
                 params: Option<HashMap<String, serde_json::Value>>,
+                map_to_json: bool,
             ) -> Result<HashMap<String, Result<<MockUdsEcu as UdsEcu>::Response,
                     DiagServiceError>>, DiagServiceError>;
         }

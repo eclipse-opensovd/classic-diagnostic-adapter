@@ -16,6 +16,7 @@ use http::{HeaderMap, Method, StatusCode};
 use opensovd_cda_lib::config::configfile::Configuration;
 use serde::{Serialize, de::DeserializeOwned};
 use sovd_interfaces::components::ecu::modes;
+use sovd_interfaces::components::ecu::modes::dtcsetting;
 
 use crate::{
     sovd,
@@ -480,7 +481,8 @@ async fn test_communication_control() {
     assert_eq!(
         ecu_state.temporal_era_id,
         Some(temporal_era_id),
-        "ECU sim did not store the correct temporalEraId"
+        "ECU sim did not store the correct temporalEraId, state={:#?}",
+        ecu_state
     );
     assert_eq!(
         ecu_state.communication_control_type,
@@ -502,6 +504,118 @@ async fn test_communication_control() {
     set_comm_control(
         "EnableRxAndEnableTx",
         None,
+        &runtime.config,
+        &auth,
+        ecu_endpoint,
+        StatusCode::FORBIDDEN,
+    )
+    .await
+    .unwrap();
+}
+
+#[tokio::test]
+async fn test_dtc_setting() {
+    let (runtime, _lock) = setup_integration_test(true).await.unwrap();
+    let auth = auth_header(&runtime.config, None).await.unwrap();
+    let ecu_endpoint = sovd::ECU_FLXC1000_ENDPOINT;
+
+    // Without lock, the CDA should reject the request
+    set_dtc_setting(
+        "On",
+        &runtime.config,
+        &auth,
+        ecu_endpoint,
+        StatusCode::FORBIDDEN,
+    )
+    .await
+    .unwrap();
+
+    // Create and acquire lock
+    // Duration::from_mins is only available in rust >= 1.91.0, we want to support 1.88.0
+    #[allow(unknown_lints, clippy::duration_suboptimal_units)]
+    let expiration_timeout = Duration::from_secs(60);
+    let ecu_lock = create_lock(
+        expiration_timeout,
+        locks::ECU_ENDPOINT,
+        StatusCode::CREATED,
+        &runtime.config,
+        &auth,
+    )
+    .await;
+    let lock_id =
+        extract_field_from_json::<String>(&response_to_json(&ecu_lock).unwrap(), "id").unwrap();
+
+    // Test DTC Setting On
+    let result = set_dtc_setting("On", &runtime.config, &auth, ecu_endpoint, StatusCode::OK)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(result.value, "On");
+
+    // Validate that ECU sim received and stored the DTC setting
+    let ecu_state = ecusim::get_ecu_state(&runtime.ecu_sim, "flxc1000")
+        .await
+        .expect("Failed to get ECU sim state");
+    assert_eq!(
+        ecu_state.dtc_setting_type,
+        Some(ecusim::DtcSettingType::On),
+        "ECU sim did not store the correct DTC setting type"
+    );
+
+    // Test DTC Setting Off
+    let result = set_dtc_setting("Off", &runtime.config, &auth, ecu_endpoint, StatusCode::OK)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(result.value, "Off");
+
+    // Validate that ECU sim received and stored the DTC setting
+    let ecu_state = ecusim::get_ecu_state(&runtime.ecu_sim, "flxc1000")
+        .await
+        .expect("Failed to get ECU sim state");
+    assert_eq!(
+        ecu_state.dtc_setting_type,
+        Some(ecusim::DtcSettingType::Off),
+        "ECU sim did not store the correct DTC setting type"
+    );
+
+    // Test DTC Setting TimeTravelDTCsOn (custom vendor-specific)
+    let result = set_dtc_setting(
+        "TimeTravelDTCsOn",
+        &runtime.config,
+        &auth,
+        ecu_endpoint,
+        StatusCode::OK,
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    assert_eq!(result.value, "TimeTravelDTCsOn");
+
+    // Validate that ECU sim received and stored the DTC setting
+    let ecu_state = ecusim::get_ecu_state(&runtime.ecu_sim, "flxc1000")
+        .await
+        .expect("Failed to get ECU sim state");
+    assert_eq!(
+        ecu_state.dtc_setting_type,
+        Some(ecusim::DtcSettingType::TimeTravelDtcsOn),
+        "ECU sim did not store the correct DTC setting type"
+    );
+
+    // Delete the ECU lock
+    lock_operation(
+        locks::ECU_ENDPOINT,
+        Some(&lock_id),
+        &runtime.config,
+        &auth,
+        StatusCode::NO_CONTENT,
+        Method::DELETE,
+    )
+    .await;
+
+    // After deleting lock, we should not be able to set DTC setting
+    set_dtc_setting(
+        "On",
         &runtime.config,
         &auth,
         ecu_endpoint,
@@ -802,6 +916,27 @@ async fn set_comm_control(
         sovd_interfaces::components::ecu::modes::commctrl::put::Request {
             value: value.to_owned(),
             parameters,
+        },
+        expected_status,
+    )
+    .await
+}
+
+async fn set_dtc_setting(
+    value: &str,
+    config: &Configuration,
+    headers: &HeaderMap,
+    ecu_endpoint: &str,
+    expected_status: StatusCode,
+) -> Result<Option<dtcsetting::put::Response>, TestingError> {
+    put_mode(
+        config,
+        headers,
+        ecu_endpoint,
+        "dtcsetting",
+        dtcsetting::put::Request {
+            value: value.to_owned(),
+            parameters: None,
         },
         expected_status,
     )

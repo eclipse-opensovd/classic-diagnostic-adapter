@@ -31,6 +31,7 @@ data class EcuState(
     var authentication: Authentication = Authentication.UNAUTHENTICATED,
     var communicationControlType: CommunicationControlType = CommunicationControlType.ENABLE_RX_AND_TX,
     var temporalEraId: Int? = null,
+    var dtcSettingType: DtcSettingType = DtcSettingType.ON,
     val blocks: List<DataBlock> =
         listOf(
             DataBlock(

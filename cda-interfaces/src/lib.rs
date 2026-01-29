@@ -307,6 +307,14 @@ pub enum DiagServiceError {
     /// Returned in case the provided value for security plugin cannot be used as `SecurityApi`
     #[error("Invalid security plugin provided")]
     InvalidSecurityPlugin,
+    #[error(
+        "Unable to find a unique value with the given parameters: name='{name}', \
+         candidates='{candidates:?}'"
+    )]
+    AmbiguousParameters {
+        name: String,
+        candidates: Vec<String>,
+    },
 }
 
 #[derive(Error, Debug)]

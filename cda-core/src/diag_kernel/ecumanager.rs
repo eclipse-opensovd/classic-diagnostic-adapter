@@ -30,7 +30,7 @@ use cda_interfaces::{
 };
 use cda_plugin_security::SecurityPlugin;
 use parking_lot::Mutex;
-use tokio::sync::RwLock;
+use tokio::{sync::RwLock, task::JoinHandle};
 
 use crate::{
     DiagDataContainerDtc, MappedResponseData,
@@ -856,6 +856,7 @@ impl<S: SecurityPlugin> cda_interfaces::EcuManager for EcuManager<S> {
 
         Ok(services)
     }
+
     fn lookup_service_by_sid_and_name(
         &self,
         service_id: u8,
@@ -867,16 +868,19 @@ impl<S: SecurityPlugin> cda_interfaces::EcuManager for EcuManager<S> {
                 let diag_comm = service.diag_comm()?;
                 let short_name = diag_comm.short_name()?;
 
-                let matches = match self.database_naming_convention.short_name_affix_position {
+                let short_name_no_affix = self
+                    .database_naming_convention
+                    .trim_service_name_affixes(service_id, short_name.to_owned());
+                let exact_match = match self.database_naming_convention.short_name_affix_position {
                     DiagnosticServiceAffixPosition::Suffix => {
-                        starts_with_ignore_ascii_case(short_name, name)
+                        starts_with_ignore_ascii_case(&short_name_no_affix, name)
                     }
                     DiagnosticServiceAffixPosition::Prefix => {
-                        ends_with_ignore_ascii_case(short_name, name)
+                        ends_with_ignore_ascii_case(&short_name_no_affix, name)
                     }
                 };
 
-                if !matches {
+                if !exact_match {
                     return None;
                 }
 

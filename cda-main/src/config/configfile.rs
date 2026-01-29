@@ -106,46 +106,47 @@ impl ConfigSanity for DatabaseNamingConvention {
     fn validate_sanity(&self) -> Result<(), AppError> {
         const SHORT_NAME_AFFIX_KEY: &str = "database_naming_convention.short_name_affixes";
         const LONG_NAME_AFFIX_KEY: &str = "database_naming_convention.long_name_affixes";
+        const SERVICE_NAME_AFFIX_KEY: &str = "database_naming_convention.service_name_affixes";
 
-        // Check short name affixes
-        for affix in &self.short_name_affixes {
-            match self.short_name_affix_position {
+        fn validate_affix(
+            affix: &str,
+            pos: &DiagnosticServiceAffixPosition,
+            key: &str,
+        ) -> Result<(), AppError> {
+            match pos {
                 DiagnosticServiceAffixPosition::Prefix => {
                     if affix.starts_with(' ') {
                         return Err(AppError::ConfigurationError(format!(
-                            "{SHORT_NAME_AFFIX_KEY}: '{affix}' has leading whitespace"
+                            "{key}: '{affix}' has leading whitespace"
                         )));
                     }
                 }
                 DiagnosticServiceAffixPosition::Suffix => {
                     if affix.ends_with(' ') {
                         return Err(AppError::ConfigurationError(format!(
-                            "{SHORT_NAME_AFFIX_KEY}: '{affix}' has trailing whitespace"
+                            "{key}: '{affix}' has trailing whitespace"
                         )));
                     }
                 }
             }
+            Ok(())
+        }
+
+        // Check short name affixes
+        for affix in &self.short_name_affixes {
+            validate_affix(affix, &self.short_name_affix_position, SHORT_NAME_AFFIX_KEY)?;
         }
 
         // Check long name affixes
         for affix in &self.long_name_affixes {
-            match self.long_name_affix_position {
-                DiagnosticServiceAffixPosition::Prefix => {
-                    if affix.starts_with(' ') {
-                        return Err(AppError::ConfigurationError(format!(
-                            "{LONG_NAME_AFFIX_KEY}: '{affix}' has leading whitespace"
-                        )));
-                    }
-                }
-                DiagnosticServiceAffixPosition::Suffix => {
-                    if affix.ends_with(' ') {
-                        return Err(AppError::ConfigurationError(format!(
-                            "{LONG_NAME_AFFIX_KEY}: '{affix}' has trailing whitespace"
-                        )));
-                    }
-                }
-            }
+            validate_affix(affix, &self.long_name_affix_position, LONG_NAME_AFFIX_KEY)?;
         }
+
+        // Validate services affixes
+        for (pos, affix) in self.service_affixes.values() {
+            validate_affix(affix, pos, SERVICE_NAME_AFFIX_KEY)?;
+        }
+
         Ok(())
     }
 }
@@ -175,6 +176,9 @@ long_name_affix_position = "Prefix"
 configuration_service_parameter_semantic_id = "ID"
 short_name_affixes = [ "Read_", "Write_" ]
 long_name_affixes = [ "Read ", "Write " ]
+
+[database.naming_convention.service_affixes]
+0x10 = ["Prefix", "Control_"]
 
 [logging.tokio_tracing]
 server = "0.0.0.0:6669"
@@ -239,6 +243,17 @@ description_database = "teapot"
         assert_eq!(
             config.functional_description.description_database,
             "teapot".to_owned()
+        );
+        assert_eq!(
+            config
+                .database
+                .naming_convention
+                .service_affixes
+                .get(&0x10.to_string()),
+            Some(&(
+                DiagnosticServiceAffixPosition::Prefix,
+                "Control_".to_string()
+            ))
         );
         Ok(())
     }

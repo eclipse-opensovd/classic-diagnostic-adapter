@@ -75,6 +75,14 @@ pub(crate) enum CommunicationControlType {
     TemporalSync,
 }
 
+#[derive(Debug, Deserialize, PartialEq)]
+#[serde(rename_all = "SCREAMING_SNAKE_CASE")]
+pub(crate) enum DtcSettingType {
+    On,
+    Off,
+    TimeTravelDtcsOn,
+}
+
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 #[allow(dead_code)]
@@ -101,6 +109,7 @@ pub(crate) struct EcuState {
     pub(crate) blocks: Option<Vec<DataBlockDto>>,
     pub(crate) communication_control_type: Option<CommunicationControlType>,
     pub(crate) temporal_era_id: Option<i32>,
+    pub(crate) dtc_setting_type: Option<DtcSettingType>,
 }
 
 pub(crate) async fn switch_variant(
