@@ -120,6 +120,7 @@ impl From<DiagServiceError> for AppError {
             DiagServiceError::DataError(_)
             | DiagServiceError::InvalidDatabase(_)
             | DiagServiceError::DatabaseEntryNotFound(_)
+            | DiagServiceError::AmbiguousParameters { .. }
             | DiagServiceError::NotEnoughData { .. } => Self::DataError(value.to_string()),
         }
     }

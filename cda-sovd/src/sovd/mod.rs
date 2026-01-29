@@ -409,18 +409,22 @@ fn ecu_route<
         )
         .api_route("/modes", routing::get_with(modes::get, modes::docs_get))
         .api_route(
-            &format!("/modes/{}", modes::SESSION_ID),
+            &format!("/modes/{}", sovd_interfaces::common::modes::SESSION_ID),
             routing::get_with(modes::session::get, modes::session::docs_get)
                 .put_with(modes::session::put, modes::session::docs_put),
         )
         .api_route(
-            &format!("/modes/{}", modes::SECURITY_ID),
+            &format!("/modes/{}", sovd_interfaces::common::modes::SECURITY_ID),
             routing::get_with(modes::security::get, modes::security::docs_get)
                 .put_with(modes::security::put, modes::security::docs_put),
         )
         .api_route(
-            &format!("/modes/{}", modes::COMM_CONTROL_ID),
+            &format!("/modes/{}", sovd_interfaces::common::modes::COMM_CONTROL_ID),
             routing::put_with(modes::commctrl::put, modes::commctrl::docs_put),
+        )
+        .api_route(
+            &format!("/modes/{}", sovd_interfaces::common::modes::DTC_SETTING_ID),
+            routing::put_with(modes::dtcsetting::put, modes::dtcsetting::docs_put),
         )
         .api_route(
             "/x-single-ecu-jobs",

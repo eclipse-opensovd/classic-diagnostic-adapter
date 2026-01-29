@@ -88,6 +88,7 @@ impl From<DiagServiceError> for ApiError {
             | DiagServiceError::RequestNotSupported(_)
             | DiagServiceError::Timeout
             | DiagServiceError::DataError(_)
+            | DiagServiceError::AmbiguousParameters { .. }
             | DiagServiceError::AccessDenied(_) => ApiError::BadRequest(value.to_string()),
 
             DiagServiceError::InvalidSecurityPlugin => {

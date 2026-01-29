@@ -82,6 +82,7 @@ def add_functional_classes(dlr: DiagLayerRaw):
         "StandardDataTransfer",
         "SecurityAccess",
         "Authentication",
+        "DtcSetting",
     ]
     dlr.functional_classes = NamedItemList(
         [
