@@ -2337,41 +2337,45 @@ impl<S: EcuGateway, R: DiagServiceResponse, T: EcuManager<Response = R>> UdsEcu
         result_map
     }
 
-    async fn set_ecu_comm_ctrl(
+    async fn call_ecu_service_by_sid_and_name(
         &self,
         ecu_name: &str,
         security_plugin: &DynamicPlugin,
-        mode: &str,
+        sid: u8,
+        service_name: &str,
         params: Option<HashMap<String, serde_json::Value>>,
+        map_to_json: bool,
     ) -> Result<Self::Response, DiagServiceError> {
         let ecu = self.ecu_manager(ecu_name)?;
         let service = ecu
             .read()
             .await
-            .lookup_service_by_sid_and_name(service_ids::COMMUNICATION_CONTROL, mode)?;
+            .lookup_service_by_sid_and_name(sid, service_name)?;
 
         self.send(
             ecu_name,
             service,
             security_plugin,
             params.map(UdsPayloadData::ParameterMap),
-            false,
+            map_to_json,
         )
         .await
     }
 
-    async fn set_functional_comm_ctrl(
+    async fn call_functional_service_by_sid_and_name(
         &self,
         group_name: &str,
         security_plugin: &DynamicPlugin,
-        mode: &str,
+        sid: u8,
+        service_name: &str,
         params: Option<HashMap<String, serde_json::Value>>,
+        map_to_json: bool,
     ) -> Result<HashMap<String, Result<Self::Response, DiagServiceError>>, DiagServiceError> {
         let globals_ecu = self.ecu_manager(&self.functional_description_database)?;
         let service = globals_ecu
             .read()
             .await
-            .lookup_service_by_sid_and_name(service_ids::COMMUNICATION_CONTROL, mode)?;
+            .lookup_service_by_sid_and_name(sid, service_name)?;
 
         Ok(self
             .send_functional_group(
@@ -2379,7 +2383,7 @@ impl<S: EcuGateway, R: DiagServiceResponse, T: EcuManager<Response = R>> UdsEcu
                 service,
                 security_plugin,
                 params.map(UdsPayloadData::ParameterMap),
-                false,
+                map_to_json,
             )
             .await)
     }

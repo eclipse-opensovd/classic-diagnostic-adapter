@@ -74,6 +74,84 @@ pub mod dlt_ext {
     }
 }
 
+pub mod serde_ext {
+
+    /// Deserializes a `HashMap<String, V, S>` from a map with string keys that may
+    /// be decimal (`"16"`) or hexadecimal (`"0x10"`, `"0X10"`). All keys are validated
+    /// as valid `u8` values (0–255) and normalized to their decimal string representation.
+    /// This can be used i.e. for configuration where figment / toml parse do not
+    /// natively support integer keys.
+    ///
+    /// # Example
+    ///
+    /// Both `"0x10"` and `"16"` in the input will be stored under the key `"16"`.
+    ///
+    /// # Errors
+    ///
+    /// Returns a deserialization error if a key is not a valid `u8` in either format.
+    pub mod normalized_u8_key_map {
+        use std::{collections::HashMap, fmt, hash::BuildHasher};
+
+        use serde::de::{self, Deserialize, Deserializer, MapAccess, Visitor};
+
+        /// Parses a string as a `u8` in decimal or hexadecimal (`0x`/`0X` prefix) format
+        /// and returns its decimal string representation.
+        ///
+        /// # Errors
+        /// Returns an error if the string is not a valid `u8` in either format.
+        pub fn deserialize<'de, D, V, S>(deserializer: D) -> Result<HashMap<String, V, S>, D::Error>
+        where
+            D: Deserializer<'de>,
+            V: Deserialize<'de>,
+            S: BuildHasher + Default,
+        {
+            struct NormalizedVisitor<V, S>(std::marker::PhantomData<(V, S)>);
+
+            impl<'de, V, S> Visitor<'de> for NormalizedVisitor<V, S>
+            where
+                V: Deserialize<'de>,
+                S: BuildHasher + Default,
+            {
+                type Value = HashMap<String, V, S>;
+
+                fn expecting(&self, formatter: &mut fmt::Formatter) -> fmt::Result {
+                    formatter.write_str("a map with u8 keys (decimal or 0x hex)")
+                }
+
+                fn visit_map<M>(self, mut access: M) -> Result<Self::Value, M::Error>
+                where
+                    M: MapAccess<'de>,
+                {
+                    let mut map = HashMap::with_capacity_and_hasher(
+                        access.size_hint().unwrap_or(0),
+                        S::default(),
+                    );
+
+                    while let Some((key, value)) = access.next_entry::<String, V>()? {
+                        let normalized = normalize_key(&key).map_err(de::Error::custom)?;
+                        map.insert(normalized, value);
+                    }
+
+                    Ok(map)
+                }
+            }
+
+            deserializer.deserialize_map(NormalizedVisitor(std::marker::PhantomData))
+        }
+
+        fn normalize_key(s: &str) -> Result<String, String> {
+            let s = s.trim();
+            if let Some(hex) = s.to_lowercase().strip_prefix("0x") {
+                u8::from_str_radix(hex, 16)
+            } else {
+                s.parse::<u8>()
+            }
+            .map(|v| v.to_string())
+            .map_err(|e| format!("Invalid hex number: {s}, error={e}"))
+        }
+    }
+}
+
 /// Pad a byte slice to 4 bytes for u32 conversion.
 /// # Errors
 /// Returns `DiagServiceError::ParameterConversionError` if the input slice is longer than 4 bytes.

@@ -115,6 +115,16 @@ pub mod sovd2uds {
 pub mod common {
     pub mod modes {
 
+        pub const SESSION_NAME: &str = "Diagnostic session";
+        pub const SESSION_ID: &str = "session";
+        pub const SECURITY_NAME: &str = "Security access";
+        pub const SECURITY_ID: &str = "security";
+        pub const COMM_CONTROL_NAME: &str = "Communication control";
+        pub const COMM_CONTROL_ID: &str = "commctrl";
+
+        pub const DTC_SETTING_NAME: &str = "DTC setting";
+        pub const DTC_SETTING_ID: &str = "dtcsetting";
+
         pub type Query = crate::IncludeSchemaQuery;
         pub mod get {
             use serde::{Deserialize, Serialize};
@@ -176,6 +186,22 @@ pub mod common {
                 #[schemars(rename = "UpdateCommCtrlModesRequest")]
                 pub struct Request {
                     /// Sub-function to enable/disable Rx/Tx communication
+                    pub value: String,
+                    /// Additional parameters, which will be passed directly to the ECU
+                    pub parameters: Option<HashMap<String, serde_json::Value>>,
+                }
+            }
+        }
+
+        pub mod dtcsetting {
+            pub mod put {
+                use cda_interfaces::HashMap;
+                use serde::{Deserialize, Serialize};
+
+                #[derive(Debug, Deserialize, Serialize, schemars::JsonSchema)]
+                #[schemars(rename = "UpdateDtcSettingsModesRequest")]
+                pub struct Request {
+                    /// Enable/Disable DTCs
                     pub value: String,
                     /// Additional parameters, which will be passed directly to the ECU
                     pub parameters: Option<HashMap<String, serde_json::Value>>,

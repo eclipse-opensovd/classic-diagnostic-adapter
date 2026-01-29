@@ -10,8 +10,7 @@
  *
  * SPDX-License-Identifier: Apache-2.0
  */
-
-use std::time::Duration;
+use std::{sync::Arc, time::Duration};
 
 use aide::transform::TransformOperation;
 use axum::{
@@ -26,20 +25,22 @@ use cda_interfaces::{
     diagservices::{DiagServiceResponse, DiagServiceResponseType},
     file_manager::FileManager,
 };
-use sovd_interfaces::components::ecu::modes::{self as sovd_modes};
-
-use crate::sovd::{
-    WebserverEcuState, create_schema,
-    error::{ApiError, api_error_from_diag_response},
-    locks::validate_lock,
+use sovd_interfaces::{
+    common::modes::{
+        COMM_CONTROL_ID, COMM_CONTROL_NAME, DTC_SETTING_ID, DTC_SETTING_NAME, SECURITY_ID,
+        SECURITY_NAME, SESSION_ID, SESSION_NAME,
+    },
+    components::ecu::modes::{self as sovd_modes},
 };
 
-const SESSION_NAME: &str = "Diagnostic session";
-pub(crate) const SESSION_ID: &str = "session";
-const SECURITY_NAME: &str = "Security access";
-pub(crate) const SECURITY_ID: &str = "security";
-const COMM_CONTROL_NAME: &str = "Communication control";
-pub(crate) const COMM_CONTROL_ID: &str = "commctrl";
+use crate::{
+    Locks,
+    sovd::{
+        WebserverEcuState, create_schema,
+        error::{ApiError, ErrorWrapper, api_error_from_diag_response},
+        locks::validate_lock,
+    },
+};
 
 pub(crate) async fn get(
     WithRejection(Query(query), _): WithRejection<Query<sovd_modes::Query>, ApiError>,
@@ -66,6 +67,11 @@ pub(crate) async fn get(
                 sovd_modes::get::ResponseItem {
                     id: COMM_CONTROL_ID.to_owned(),
                     name: Some(COMM_CONTROL_NAME.to_owned()),
+                    translation_id: None,
+                },
+                sovd_modes::get::ResponseItem {
+                    id: DTC_SETTING_ID.to_owned(),
+                    name: Some(DTC_SETTING_NAME.to_owned()),
                     translation_id: None,
                 },
             ],
@@ -100,6 +106,65 @@ pub(crate) fn docs_get(op: TransformOperation) -> TransformOperation {
                     schema: None,
                 })
         })
+}
+
+// there is not much benefit in passing a structure here,
+#[allow(clippy::too_many_arguments)]
+async fn handle_mode_change<T: UdsEcu + Clone>(
+    uds: &T,
+    ecu_name: &str,
+    security_plugin: Box<dyn cda_plugin_security::SecurityPlugin>,
+    locks: &Arc<Locks>,
+    service_id: u8,
+    value: &str,
+    parameters: Option<HashMap<String, serde_json::Value>>,
+    mode_id: &str,
+    include_schema: bool,
+) -> Response {
+    let claims = security_plugin.as_auth_plugin().claims();
+    if let Some(response) =
+        validate_lock(&claims, &ecu_name.to_string(), locks, include_schema).await
+    {
+        return response;
+    }
+    match uds
+        .call_ecu_service_by_sid_and_name(
+            ecu_name,
+            &(security_plugin as cda_interfaces::DynamicPlugin),
+            service_id,
+            value,
+            parameters,
+            false,
+        )
+        .await
+    {
+        Ok(response) => match response.response_type() {
+            DiagServiceResponseType::Positive => {
+                let schema = if include_schema {
+                    Some(create_schema!(sovd_modes::commctrl::put::Response))
+                } else {
+                    None
+                };
+                (
+                    StatusCode::OK,
+                    Json(sovd_modes::commctrl::put::Response {
+                        id: mode_id.to_owned(),
+                        value: value.to_owned(),
+                        schema,
+                    }),
+                )
+                    .into_response()
+            }
+            DiagServiceResponseType::Negative => {
+                api_error_from_diag_response(&response, include_schema)
+            }
+        },
+        Err(e) => ErrorWrapper {
+            error: ApiError::from(e),
+            include_schema,
+        }
+        .into_response(),
+    }
 }
 
 pub(crate) mod session {
@@ -507,11 +572,26 @@ pub(crate) mod security {
 }
 
 pub(crate) mod commctrl {
-    use aide::UseApi;
+    use aide::{UseApi, transform::TransformOperation};
+    use axum::{
+        Json,
+        extract::{Query, State},
+        response::Response,
+    };
+    use axum_extra::extract::WithRejection;
+    use cda_interfaces::{
+        UdsEcu, diagservices::DiagServiceResponse, file_manager::FileManager, service_ids,
+    };
     use cda_plugin_security::Secured;
+    use sovd_interfaces::{
+        common::modes::COMM_CONTROL_ID,
+        components::ecu::modes::{self as sovd_modes},
+    };
 
-    use super::*;
-    use crate::{openapi, sovd::error::ErrorWrapper};
+    use crate::{
+        openapi,
+        sovd::{WebserverEcuState, components::ecu::modes::handle_mode_change, error::ApiError},
+    };
 
     pub(crate) async fn put<R: DiagServiceResponse, T: UdsEcu + Clone, U: FileManager>(
         UseApi(Secured(security_plugin), _): UseApi<Secured, ()>,
@@ -527,48 +607,18 @@ pub(crate) mod commctrl {
             ApiError,
         >,
     ) -> Response {
-        let claims = security_plugin.as_auth_plugin().claims();
-        let include_schema = query.include_schema;
-        if let Some(response) = validate_lock(&claims, &ecu_name, &locks, include_schema).await {
-            return response;
-        }
-
-        match uds
-            .set_ecu_comm_ctrl(
-                &ecu_name,
-                &(security_plugin as cda_interfaces::DynamicPlugin),
-                &request_body.value,
-                request_body.parameters,
-            )
-            .await
-        {
-            Ok(response) => match response.response_type() {
-                DiagServiceResponseType::Positive => {
-                    let schema = if query.include_schema {
-                        Some(create_schema!(sovd_modes::commctrl::put::Response))
-                    } else {
-                        None
-                    };
-                    (
-                        StatusCode::OK,
-                        Json(sovd_modes::commctrl::put::Response {
-                            id: COMM_CONTROL_ID.to_owned(),
-                            value: request_body.value,
-                            schema,
-                        }),
-                    )
-                        .into_response()
-                }
-                DiagServiceResponseType::Negative => {
-                    api_error_from_diag_response(&response, include_schema)
-                }
-            },
-            Err(e) => ErrorWrapper {
-                error: ApiError::from(e),
-                include_schema,
-            }
-            .into_response(),
-        }
+        handle_mode_change::<T>(
+            &uds,
+            &ecu_name,
+            security_plugin,
+            &locks,
+            service_ids::COMMUNICATION_CONTROL,
+            &request_body.value,
+            request_body.parameters,
+            COMM_CONTROL_ID,
+            query.include_schema,
+        )
+        .await
     }
 
     pub(crate) fn docs_put(op: TransformOperation) -> TransformOperation {
@@ -579,6 +629,76 @@ pub(crate) mod commctrl {
                     sovd_modes::commctrl::put::Response {
                         id: COMM_CONTROL_ID.to_owned(),
                         value: "DisableRxAndDisableTx".to_owned(),
+                        schema: None,
+                    },
+                )
+            })
+            .with(openapi::error_not_found)
+            .with(openapi::error_forbidden)
+            .with(openapi::error_bad_request)
+            .with(openapi::error_internal_server)
+            .with(openapi::error_bad_gateway)
+    }
+}
+
+pub(crate) mod dtcsetting {
+    use aide::{UseApi, transform::TransformOperation};
+    use axum::{
+        Json,
+        extract::{Query, State},
+        response::Response,
+    };
+    use axum_extra::extract::WithRejection;
+    use cda_interfaces::{
+        UdsEcu, diagservices::DiagServiceResponse, file_manager::FileManager, service_ids,
+    };
+    use cda_plugin_security::Secured;
+    use sovd_interfaces::{
+        common::modes::DTC_SETTING_ID,
+        components::ecu::modes::{self as sovd_modes},
+    };
+
+    use crate::{
+        openapi,
+        sovd::{WebserverEcuState, components::ecu::modes::handle_mode_change, error::ApiError},
+    };
+
+    pub(crate) async fn put<R: DiagServiceResponse, T: UdsEcu + Clone, U: FileManager>(
+        UseApi(Secured(security_plugin), _): UseApi<Secured, ()>,
+        WithRejection(Query(query), _): WithRejection<Query<sovd_modes::Query>, ApiError>,
+        State(WebserverEcuState {
+            ecu_name,
+            uds,
+            locks,
+            ..
+        }): State<WebserverEcuState<R, T, U>>,
+        WithRejection(Json(request_body), _): WithRejection<
+            Json<sovd_modes::dtcsetting::put::Request>,
+            ApiError,
+        >,
+    ) -> Response {
+        handle_mode_change::<T>(
+            &uds,
+            &ecu_name,
+            security_plugin,
+            &locks,
+            service_ids::CONTROL_DTC_SETTING,
+            &request_body.value,
+            request_body.parameters,
+            DTC_SETTING_ID,
+            query.include_schema,
+        )
+        .await
+    }
+
+    pub(crate) fn docs_put(op: TransformOperation) -> TransformOperation {
+        op.description("Change the dtc setting mode.")
+            .input::<Json<sovd_modes::commctrl::put::Request>>()
+            .response_with::<200, Json<sovd_modes::commctrl::put::Response>, _>(|res| {
+                res.description("Dtc setting mode updated").example(
+                    sovd_modes::commctrl::put::Response {
+                        id: DTC_SETTING_ID.to_owned(),
+                        value: "true".to_owned(),
                         schema: None,
                     },
                 )

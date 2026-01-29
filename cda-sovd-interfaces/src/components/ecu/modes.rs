@@ -77,3 +77,10 @@ pub mod commctrl {
         pub type Response = crate::common::modes::put::Response<String>;
     }
 }
+
+pub mod dtcsetting {
+    pub mod put {
+        pub type Request = crate::common::modes::dtcsetting::put::Request;
+        pub type Response = crate::common::modes::put::Response<String>;
+    }
+}

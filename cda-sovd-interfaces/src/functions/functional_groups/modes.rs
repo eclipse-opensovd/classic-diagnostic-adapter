@@ -18,7 +18,6 @@ pub mod get {
 }
 
 pub mod commctrl {
-
     pub mod put {
         use cda_interfaces::HashMap;
         use serde::{Deserialize, Serialize};
@@ -26,6 +25,31 @@ pub mod commctrl {
         use crate::error::ApiErrorResponse;
 
         pub type Request = crate::common::modes::commctrl::put::Request;
+        pub type ResponseElement = crate::common::modes::put::Response<String>;
+
+        /// Returns data keyed by ECU name at the top level
+        #[derive(Serialize, Deserialize, schemars::JsonSchema)]
+        pub struct Response<T> {
+            /// Data results per ECU - key is ECU name, value is the data result
+            pub modes: HashMap<String, ResponseElement>,
+            /// Errors that occurred during the operation
+            #[serde(skip_serializing_if = "Vec::is_empty")]
+            pub errors: Vec<ApiErrorResponse<T>>,
+            #[schemars(skip)]
+            #[serde(skip_serializing_if = "Option::is_none")]
+            pub schema: Option<schemars::Schema>,
+        }
+    }
+}
+
+pub mod dtcsetting {
+    pub mod put {
+        use cda_interfaces::HashMap;
+        use serde::{Deserialize, Serialize};
+
+        use crate::error::ApiErrorResponse;
+
+        pub type Request = crate::common::modes::dtcsetting::put::Request;
         pub type ResponseElement = crate::common::modes::put::Response<String>;
 
         /// Returns data keyed by ECU name at the top level
