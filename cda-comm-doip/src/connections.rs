@@ -699,7 +699,7 @@ async fn send_alive_request(conn: &EcuConnectionTarget) -> Result<(), ()> {
                 return;
             };
             let reader = reader_mtx.get_reader();
-            match try_read(Duration::from_millis(1000), reader).await {
+            match try_read(Duration::from_secs(1), reader).await {
                 Some(Ok(DiagnosticResponse::AliveCheckResponse)) => {
                     tracing::debug!("Alive check OK");
                 }

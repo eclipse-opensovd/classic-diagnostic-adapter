@@ -431,9 +431,7 @@ pub(crate) async fn restart_cda(config: &Configuration) -> Result<(), TestingErr
 }
 
 fn use_docker() -> bool {
-    std::env::var(CDA_INTEGRATION_TEST_USE_DOCKER)
-        .map(|s| s == "true")
-        .unwrap_or(true)
+    std::env::var(CDA_INTEGRATION_TEST_USE_DOCKER).map_or(true, |s| s == "true")
 }
 
 async fn wait_for_http_ready(
@@ -538,9 +536,8 @@ fn test_container_dir() -> Result<std::path::PathBuf, TestingError> {
 
 fn register_cleanup() {
     extern "C" fn cleanup_handler() {
-        let use_docker = std::env::var(CDA_INTEGRATION_TEST_USE_DOCKER)
-            .map(|s| s == "true")
-            .unwrap_or(true);
+        let use_docker =
+            std::env::var(CDA_INTEGRATION_TEST_USE_DOCKER).map_or(true, |s| s == "true");
 
         if use_docker {
             if let Err(e) = docker_compose_down(None) {

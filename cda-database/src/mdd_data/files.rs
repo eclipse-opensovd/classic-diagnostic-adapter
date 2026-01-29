@@ -44,6 +44,8 @@ impl FileManager {
     #[must_use]
     pub fn new(mdd_path: String, files: Vec<Chunk>) -> Self {
         let mdd_name = mdd_path.split('/').next_back().unwrap_or("mdd").to_string();
+        // Duration::from_mins is only available in rust >= 1.91.0, we want to support 1.88.0
+        #[allow(unknown_lints, clippy::duration_suboptimal_units)]
         let cache_lifetime = Duration::from_secs(60 * 5);
 
         let files = Arc::new(RwLock::new(
