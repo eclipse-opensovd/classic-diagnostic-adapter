@@ -11,8 +11,6 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-use std::time::Duration;
-
 use serde::Serialize;
 
 use crate::{
@@ -184,27 +182,14 @@ pub trait EcuManager:
     /// Update the internally tracked ecu session.
     /// Has to be called after changing the session, to make sure the transition lookup keep working
     /// # Errors
-    /// This is also (re)starting the reset task that is
-    /// setting the session and security access back to the default value.
-    /// To do this the defaults have to looked up which might fail.
-    /// In that case the error is forwarded
-    fn set_session(
-        &self,
-        session: &str,
-        expiration: Option<Duration>,
-    ) -> Result<(), DiagServiceError>;
+    /// `DiagServiceError` when lookups failed
+    fn set_session(&self, session: &str) -> Result<(), DiagServiceError>;
     /// Update the internally tracked ecu security access.
-    /// Has to be called after changing the session, to make sure the transition lookup keep working
+    /// Has to be called after changing the security access,
+    /// to make sure the transition lookup keep working
     /// # Errors
-    /// This is also (re)starting the reset task that is setting the session and security
-    /// access back to the default value.
-    /// To do this the defaults have to looked up which might fail.
-    /// In that case the error is forwarded
-    fn set_security_access(
-        &self,
-        security_access: &str,
-        expiration: Option<Duration>,
-    ) -> Result<(), DiagServiceError>;
+    /// `DiagServiceError` when lookups failed
+    fn set_security_access(&self, security_access: &str) -> Result<(), DiagServiceError>;
     /// Lookup the transition between the active session and the requested one.
     /// # Errors
     /// * `DiagServiceError::AccessDenied` if no transition exists

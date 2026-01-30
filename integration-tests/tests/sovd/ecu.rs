@@ -15,6 +15,7 @@ use std::time::Duration;
 use http::{HeaderMap, Method, StatusCode};
 use opensovd_cda_lib::config::configfile::Configuration;
 use serde::{Serialize, de::DeserializeOwned};
+use sovd_interfaces::components::ecu::modes;
 
 use crate::{
     sovd,
@@ -508,6 +509,86 @@ async fn test_communication_control() {
     )
     .await
     .unwrap();
+}
+
+#[tokio::test]
+async fn test_ecu_session_reset_on_lock_reacquire() {
+    let (runtime, _lock) = setup_integration_test(true).await.unwrap();
+    let auth = auth_header(&runtime.config, None).await.unwrap();
+    let ecu_endpoint = sovd::ECU_FLXC1000_ENDPOINT;
+
+    // Create and acquire lock with 60s timeout
+    let lock_expiration_timeout = Duration::from_secs(60);
+    let ecu_lock = create_lock(
+        lock_expiration_timeout,
+        locks::ECU_ENDPOINT,
+        StatusCode::CREATED,
+        &runtime.config,
+        &auth,
+    )
+    .await;
+    let lock_id =
+        extract_field_from_json::<String>(&response_to_json(&ecu_lock).unwrap(), "id").unwrap();
+
+    // Set session with 3s expiry
+    let session_expiration = 3u64;
+    let switch_session_result: modes::security_and_session::put::Response<String> = put_mode(
+        &runtime.config,
+        &auth,
+        ecu_endpoint,
+        "session",
+        modes::security_and_session::put::Request {
+            value: "extended".to_owned(),
+            mode_expiration: Some(session_expiration),
+            key: None,
+        },
+        StatusCode::OK,
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    assert_eq!(switch_session_result.value, "extended");
+
+    // Verify ECU sim is in extended session
+    let ecu_state = ecusim::get_ecu_state(&runtime.ecu_sim, "flxc1000")
+        .await
+        .expect("Failed to get ECU sim state");
+    assert_eq!(
+        ecu_state.session_state,
+        Some(ecusim::SessionState::Extended),
+        "ECU sim should be in Extended session"
+    );
+
+    // Wait for the session to expire
+    tokio::time::sleep(Duration::from_secs(session_expiration + 1)).await;
+
+    // Check if the sim is back to default
+    let ecu_state_after_expiry = ecusim::get_ecu_state(&runtime.ecu_sim, "flxc1000")
+        .await
+        .expect("Failed to get ECU sim state after session expiry");
+    assert_eq!(
+        ecu_state_after_expiry.session_state,
+        Some(ecusim::SessionState::Default),
+        "ECU sim should be back to Default session after session expiry"
+    );
+
+    // Also verify through CDA API
+    let session_result_after = session(&runtime.config, &auth, ecu_endpoint).await.unwrap();
+    assert_eq!(
+        session_result_after.value.map(|s| s.to_lowercase()),
+        Some("default".to_owned())
+    );
+
+    // Delete the lock
+    lock_operation(
+        locks::ECU_ENDPOINT,
+        Some(&lock_id),
+        &runtime.config,
+        &auth,
+        StatusCode::NO_CONTENT,
+        Method::DELETE,
+    )
+    .await;
 }
 
 async fn validate_ecu_state(
