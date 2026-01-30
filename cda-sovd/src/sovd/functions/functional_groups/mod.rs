@@ -175,11 +175,13 @@ fn create_functional_group_route<T: UdsEcu + Clone>(fg_state: WebserverFgState<T
         .api_route("/modes", routing::get_with(modes::get, modes::docs_get))
         .api_route(
             &format!("/modes/{}", sovd_interfaces::common::modes::COMM_CONTROL_ID),
-            routing::put_with(modes::commctrl::put, modes::commctrl::docs_put),
+            routing::get_with(modes::commctrl::get, modes::commctrl::docs_get)
+                .put_with(modes::commctrl::put, modes::commctrl::docs_put),
         )
         .api_route(
             &format!("/modes/{}", sovd_interfaces::common::modes::DTC_SETTING_ID),
-            routing::put_with(modes::dtcsetting::put, modes::dtcsetting::docs_put),
+            routing::get_with(modes::dtcsetting::get, modes::dtcsetting::docs_get)
+                .put_with(modes::dtcsetting::put, modes::dtcsetting::docs_put),
         )
         .with_state(fg_state)
 }

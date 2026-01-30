@@ -814,7 +814,7 @@ fn update_lock(
 pub(crate) fn get_locks(
     claims: &impl Claims,
     locks: &ReadLock,
-    entity_name: Option<&String>,
+    entity_name: Option<&str>,
 ) -> sovd_interfaces::locking::get::Response {
     match locks {
         ReadLock::HashMapLock(l) => sovd_interfaces::locking::get::Response {
@@ -838,7 +838,7 @@ pub(crate) fn get_locks(
 
 pub(crate) async fn validate_lock(
     claims: &impl Claims,
-    ecu_name: &String,
+    ecu_name: &str,
     locks: &Locks,
     include_schema: bool,
 ) -> Option<Response> {
@@ -852,7 +852,7 @@ pub(crate) async fn validate_lock(
     if ecu_locks.items.is_empty() && vehicle_locks.items.is_empty() {
         return Some(
             ErrorWrapper {
-                error: ApiError::Forbidden(Some("Required ECU lock is missing".to_string())),
+                error: ApiError::Forbidden(Some("Required ECU lock is missing".to_owned())),
                 include_schema,
             }
             .into_response(),
@@ -1052,7 +1052,7 @@ pub(crate) async fn put_handler(
 pub(crate) async fn get_handler(
     lock: &LockType,
     claims: &impl Claims,
-    entity_name: Option<&String>,
+    entity_name: Option<&str>,
 ) -> Response {
     tracing::info!("Getting locks");
     let ro_lock = lock.lock_ro().await;

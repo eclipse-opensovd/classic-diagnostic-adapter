@@ -201,10 +201,22 @@ pub trait UdsEcu: Send + Sync + 'static {
     /// Retrieve service to reset the ECU.
     async fn get_ecu_reset_services(&self, ecu_name: &str)
     -> Result<Vec<String>, DiagServiceError>;
-    /// Get the current session of the ECU.
-    async fn ecu_session(&self, ecu_name: &str) -> Result<String, DiagServiceError>;
-    /// Get the current security access level of the ECU.
-    async fn ecu_security_access(&self, ecu_name: &str) -> Result<String, DiagServiceError>;
+    /// Get the stored value for a service state from a given ECU.
+    ///
+    /// # Arguments
+    /// * `ecu_name` - The name of the ECU to query
+    /// * `service` - The service identifier (UDS service ID)
+    ///
+    /// # Returns
+    /// The stored service state value as a string.
+    ///
+    /// # Errors
+    /// Returns an error if the ECU or service state is not found.
+    async fn get_ecu_service_state(
+        &self,
+        ecu_name: &str,
+        service: u8,
+    ) -> Result<String, DiagServiceError>;
     /// Lookup the service id on the ECU and restrict the result to the function class.
     /// After the successful lookup, the found service will be executed with the given payload.
     /// # Errors
@@ -369,22 +381,27 @@ pub trait UdsEcu: Send + Sync + 'static {
         map_to_json: bool,
     ) -> HashMap<String, Result<Self::Response, DiagServiceError>>;
 
-    /// Call a service and fetch the responses for a ECU.
-    /// Does not modify internal states.
+    /// Sets the state of a single ECU by sending a diagnostic service request.
+    ///
+    /// This method sends a diagnostic service with the specified parameters to change
+    /// the state of an ECU (e.g., changing diagnostic sessions, resetting the ECU, etc.).
+    /// On positive response the internally tracked state for the ECU is updated.
+    ///
     /// # Arguments
-    /// * `ecu_name` - Name of the ECU
+    /// * `ecu_name` - Name of the target ECU
     /// * `security_plugin` - Security plugin to validate the request against
-    /// * `sid` - Service ID
-    /// * `subfunction_id` - Optional subfunction ID
-    /// * `service_name` - Name of the service
-    /// * `params` - Optional parameters, for the service
+    /// * `sid` - Service identifier (SID) for the diagnostic service
+    /// * `service_name` - Human-readable name of the service
+    /// * `params` - Optional parameters for the service as key-value pairs
     /// * `map_to_json` - Whether to map the response to JSON format
+    ///
     /// # Returns
-    /// Result containing the response
+    /// The response from the ECU
+    ///
     /// # Errors
-    /// Error if the operation fails (i.e. ECU not found)
-    //  Negative response are not treated as errors, but returned in the response.
-    async fn call_ecu_service_by_sid_and_name(
+    /// Returns error if the ECU doesn't exist, the service is not supported,
+    /// or the request fails
+    async fn set_ecu_state(
         &self,
         ecu_name: &str,
         security_plugin: &DynamicPlugin,
@@ -394,22 +411,29 @@ pub trait UdsEcu: Send + Sync + 'static {
         map_to_json: bool,
     ) -> Result<Self::Response, DiagServiceError>;
 
-    /// Call a service and fetch the responses for each ECU in the functional group.
-    /// Does not modify internal states.
+    /// Sets the state of multiple ECUs in a functional group
+    /// by sending a diagnostic service request to each ECU.
+    ///
+    /// This method sends a diagnostic service with the specified parameters to change
+    /// the state of all ECUs in a functional group simultaneously (e.g., changing diagnostic
+    /// sessions, resetting multiple ECUs, etc.).
+    ///
+    /// On positive response from an ECU, the internally tracked state for that ECU is updated.
+    ///
     /// # Arguments
-    /// * `group_name` - Name of the group
+    /// * `group_name` - Name of the functional group containing target ECUs
     /// * `security_plugin` - Security plugin to validate the request against
-    /// * `sid` - Service ID
-    /// * `subfunction_id` - Optional subfunction ID
-    /// * `service_name` - Name of the service
-    /// * `params` - Optional parameters, for the service
+    /// * `sid` - Service identifier (SID) for the diagnostic service
+    /// * `service_name` - Human-readable name of the service
+    /// * `params` - Optional parameters for the service as key-value pairs
     /// * `map_to_json` - Whether to map the response to JSON format
+    ///
     /// # Returns
-    /// Result containing the response
+    /// A map of ECU names to their responses (or errors if the request failed for that ECU)
+    ///
     /// # Errors
-    /// Error if the operation fails (i.e. functional group or service not found)
-    //  Negative response are not treated as errors, but returned in the response.
-    async fn call_functional_service_by_sid_and_name(
+    /// Returns error if the functional group doesn't exist or if the request cannot be sent
+    async fn set_functional_state(
         &self,
         group_name: &str,
         security_plugin: &DynamicPlugin,
@@ -541,13 +565,10 @@ pub mod mock {
                 &self,
                 ecu_name: &str,
             ) -> Result<Vec<String>, DiagServiceError>;
-            async fn ecu_session(
+            async fn get_ecu_service_state(
                 &self,
                 ecu_name: &str,
-            ) -> Result<String, DiagServiceError>;
-            async fn ecu_security_access(
-                &self,
-                ecu_name: &str,
+                service: u8,
             ) -> Result<String, DiagServiceError>;
             async fn ecu_exec_service_from_function_class(
                 &self,
@@ -640,7 +661,7 @@ pub mod mock {
                 payload: Option<UdsPayloadData>,
                 map_to_json: bool,
             ) -> HashMap<String, Result<<MockUdsEcu as UdsEcu>::Response, DiagServiceError>>;
-            async fn call_ecu_service_by_sid_and_name(
+            async fn set_ecu_state(
                 &self,
                 ecu_name: &str,
                 security_plugin: &DynamicPlugin,
@@ -649,7 +670,7 @@ pub mod mock {
                 params: Option<HashMap<String, serde_json::Value>>,
                 map_to_json: bool,
             ) -> Result<<MockUdsEcu as UdsEcu>::Response, DiagServiceError>;
-             async fn call_functional_service_by_sid_and_name(
+             async fn set_functional_state(
                 &self,
                 group_name: &str,
                 security_plugin: &DynamicPlugin,
@@ -666,6 +687,7 @@ pub mod mock {
 #[cfg(all(test, feature = "test-utils"))]
 mod tests {
     use super::{UdsEcu, mock::MockUdsEcu};
+    use crate::service_ids;
 
     #[tokio::test]
     async fn test_get_ecus() {
@@ -680,15 +702,21 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_ecu_session() {
+    async fn test_get_ecu_service_state() {
         let mut mock = MockUdsEcu::new();
 
-        mock.expect_ecu_session()
-            .with(mockall::predicate::eq("ECU1"))
+        mock.expect_get_ecu_service_state()
+            .with(
+                mockall::predicate::eq("ECU1"),
+                mockall::predicate::eq(service_ids::SESSION_CONTROL),
+            )
             .times(1)
-            .returning(|_| Ok("DefaultSession".to_string()));
+            .returning(|_, _| Ok("DefaultSession".to_string()));
 
-        let session = mock.ecu_session("ECU1").await.unwrap();
-        assert_eq!(session, "DefaultSession");
+        let state = mock
+            .get_ecu_service_state("ECU1", service_ids::SESSION_CONTROL)
+            .await
+            .unwrap();
+        assert_eq!(state, "DefaultSession");
     }
 }
