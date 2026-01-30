@@ -15,8 +15,7 @@ use std::time::Duration;
 use http::{HeaderMap, Method, StatusCode};
 use opensovd_cda_lib::config::configfile::Configuration;
 use serde::{Serialize, de::DeserializeOwned};
-use sovd_interfaces::components::ecu::modes;
-use sovd_interfaces::components::ecu::modes::dtcsetting;
+use sovd_interfaces::components::ecu::{modes, modes::dtcsetting};
 
 use crate::{
     sovd,
@@ -372,6 +371,7 @@ async fn test_communication_control() {
     let lock_id =
         extract_field_from_json::<String>(&response_to_json(&ecu_lock).unwrap(), "id").unwrap();
 
+    let enable_rx_and_enable_tx = "enablerxandenabletx";
     let result = set_comm_control(
         "EnableRxAndEnableTx",
         None,
@@ -385,6 +385,15 @@ async fn test_communication_control() {
     .unwrap();
     assert_eq!(result.value, "EnableRxAndEnableTx");
 
+    let current_state = get_comm_control(&runtime.config, &auth, ecu_endpoint)
+        .await
+        .unwrap();
+    assert_eq!(
+        current_state.value.as_ref().map(|s| s.to_lowercase()),
+        Some(enable_rx_and_enable_tx.to_owned())
+    );
+
+    let enable_rx_and_disable_tx = "enablerxanddisabletx";
     let result = set_comm_control(
         "EnableRxAndDisableTx",
         None,
@@ -398,6 +407,15 @@ async fn test_communication_control() {
     .unwrap();
     assert_eq!(result.value, "EnableRxAndDisableTx");
 
+    let current_state = get_comm_control(&runtime.config, &auth, ecu_endpoint)
+        .await
+        .unwrap();
+    assert_eq!(
+        current_state.value.as_ref().map(|s| s.to_lowercase()),
+        Some(enable_rx_and_disable_tx.to_owned())
+    );
+
+    let disable_rx_and_enable_tx = "disablerxandenabletx";
     let result = set_comm_control(
         "DisableRxAndEnableTx",
         None,
@@ -411,6 +429,15 @@ async fn test_communication_control() {
     .unwrap();
     assert_eq!(result.value, "DisableRxAndEnableTx");
 
+    let current_state = get_comm_control(&runtime.config, &auth, ecu_endpoint)
+        .await
+        .unwrap();
+    assert_eq!(
+        current_state.value.as_ref().map(|s| s.to_lowercase()),
+        Some(disable_rx_and_enable_tx.to_owned())
+    );
+
+    let disable_rx_and_disable_tx = "disablerxanddisabletx";
     let result = set_comm_control(
         "DisableRxAndDisableTx",
         None,
@@ -424,6 +451,16 @@ async fn test_communication_control() {
     .unwrap();
     assert_eq!(result.value, "DisableRxAndDisableTx");
 
+    let current_state = get_comm_control(&runtime.config, &auth, ecu_endpoint)
+        .await
+        .unwrap();
+    assert_eq!(
+        current_state.value.as_ref().map(|s| s.to_lowercase()),
+        Some(disable_rx_and_disable_tx.to_owned())
+    );
+
+    let enable_rx_and_disable_tx_with_enhanced =
+        "enablerxanddisabletxwithenhancedaddressinformation";
     let result = set_comm_control(
         "EnableRxAndDisableTxWithEnhancedAddressInformation",
         None,
@@ -440,6 +477,15 @@ async fn test_communication_control() {
         "EnableRxAndDisableTxWithEnhancedAddressInformation"
     );
 
+    let current_state = get_comm_control(&runtime.config, &auth, ecu_endpoint)
+        .await
+        .unwrap();
+    assert_eq!(
+        current_state.value.as_ref().map(|s| s.to_lowercase()),
+        Some(enable_rx_and_disable_tx_with_enhanced.to_owned())
+    );
+
+    let enable_rx_and_tx_with_enhanced = "enablerxandtxwithenhancedaddressinformation";
     let result = set_comm_control(
         "EnableRxAndTxWithEnhancedAddressInformation",
         None,
@@ -453,6 +499,14 @@ async fn test_communication_control() {
     .unwrap();
     assert_eq!(result.value, "EnableRxAndTxWithEnhancedAddressInformation");
 
+    let current_state = get_comm_control(&runtime.config, &auth, ecu_endpoint)
+        .await
+        .unwrap();
+    assert_eq!(
+        current_state.value.as_ref().map(|s| s.to_lowercase()),
+        Some(enable_rx_and_tx_with_enhanced.to_owned())
+    );
+
     // VendorSpecific (custom TemporalSync 0x88)
     let temporal_era_id: i32 = -1_373_112_000;
     let mut parameters = cda_interfaces::HashMap::default();
@@ -461,6 +515,7 @@ async fn test_communication_control() {
         serde_json::json!(temporal_era_id),
     );
 
+    let temporal_sync = "temporalsync";
     let result = set_comm_control(
         "TemporalSync",
         Some(parameters),
@@ -473,6 +528,14 @@ async fn test_communication_control() {
     .unwrap()
     .unwrap();
     assert_eq!(result.value, "TemporalSync");
+
+    let current_state = get_comm_control(&runtime.config, &auth, ecu_endpoint)
+        .await
+        .unwrap();
+    assert_eq!(
+        current_state.value.as_ref().map(|s| s.to_lowercase()),
+        Some(temporal_sync.to_owned())
+    );
 
     // Validate that ECU sim received and stored the temporalEraId
     let ecu_state = ecusim::get_ecu_state(&runtime.ecu_sim, "flxc1000")
@@ -546,11 +609,20 @@ async fn test_dtc_setting() {
         extract_field_from_json::<String>(&response_to_json(&ecu_lock).unwrap(), "id").unwrap();
 
     // Test DTC Setting On
+    let on = "on";
     let result = set_dtc_setting("On", &runtime.config, &auth, ecu_endpoint, StatusCode::OK)
         .await
         .unwrap()
         .unwrap();
     assert_eq!(result.value, "On");
+
+    let current_setting = get_dtc_setting(&runtime.config, &auth, ecu_endpoint)
+        .await
+        .unwrap();
+    assert_eq!(
+        current_setting.value.as_ref().map(|s| s.to_lowercase()),
+        Some(on.to_owned())
+    );
 
     // Validate that ECU sim received and stored the DTC setting
     let ecu_state = ecusim::get_ecu_state(&runtime.ecu_sim, "flxc1000")
@@ -563,11 +635,20 @@ async fn test_dtc_setting() {
     );
 
     // Test DTC Setting Off
+    let off = "off";
     let result = set_dtc_setting("Off", &runtime.config, &auth, ecu_endpoint, StatusCode::OK)
         .await
         .unwrap()
         .unwrap();
     assert_eq!(result.value, "Off");
+
+    let current_setting = get_dtc_setting(&runtime.config, &auth, ecu_endpoint)
+        .await
+        .unwrap();
+    assert_eq!(
+        current_setting.value.as_ref().map(|s| s.to_lowercase()),
+        Some(off.to_owned())
+    );
 
     // Validate that ECU sim received and stored the DTC setting
     let ecu_state = ecusim::get_ecu_state(&runtime.ecu_sim, "flxc1000")
@@ -580,6 +661,7 @@ async fn test_dtc_setting() {
     );
 
     // Test DTC Setting TimeTravelDTCsOn (custom vendor-specific)
+    let time_travel_dtcs_on = "timetraveldtcson";
     let result = set_dtc_setting(
         "TimeTravelDTCsOn",
         &runtime.config,
@@ -591,6 +673,14 @@ async fn test_dtc_setting() {
     .unwrap()
     .unwrap();
     assert_eq!(result.value, "TimeTravelDTCsOn");
+
+    let current_setting = get_dtc_setting(&runtime.config, &auth, ecu_endpoint)
+        .await
+        .unwrap();
+    assert_eq!(
+        current_setting.value.as_ref().map(|s| s.to_lowercase()),
+        Some(time_travel_dtcs_on.to_owned())
+    );
 
     // Validate that ECU sim received and stored the DTC setting
     let ecu_state = ecusim::get_ecu_state(&runtime.ecu_sim, "flxc1000")
@@ -899,6 +989,14 @@ async fn force_variant_detection(
     Ok(())
 }
 
+async fn get_comm_control(
+    config: &Configuration,
+    headers: &HeaderMap,
+    ecu_endpoint: &str,
+) -> Result<modes::commctrl::get::Response, TestingError> {
+    get_mode(config, headers, ecu_endpoint, "commctrl").await
+}
+
 async fn set_comm_control(
     value: &str,
     parameters: Option<cda_interfaces::HashMap<String, serde_json::Value>>,
@@ -913,13 +1011,21 @@ async fn set_comm_control(
         headers,
         ecu_endpoint,
         "commctrl",
-        sovd_interfaces::components::ecu::modes::commctrl::put::Request {
+        modes::commctrl::put::Request {
             value: value.to_owned(),
             parameters,
         },
         expected_status,
     )
     .await
+}
+
+async fn get_dtc_setting(
+    config: &Configuration,
+    headers: &HeaderMap,
+    ecu_endpoint: &str,
+) -> Result<dtcsetting::get::Response, TestingError> {
+    get_mode(config, headers, ecu_endpoint, "dtcsetting").await
 }
 
 async fn set_dtc_setting(

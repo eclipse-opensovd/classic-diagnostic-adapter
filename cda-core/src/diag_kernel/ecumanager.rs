@@ -29,8 +29,7 @@ use cda_interfaces::{
     util::{self, ends_with_ignore_ascii_case, starts_with_ignore_ascii_case},
 };
 use cda_plugin_security::SecurityPlugin;
-use parking_lot::Mutex;
-use tokio::{sync::RwLock, task::JoinHandle};
+use tokio::sync::RwLock;
 
 use crate::{
     DiagDataContainerDtc, MappedResponseData,
@@ -77,7 +76,7 @@ pub struct EcuManager<S: SecurityPlugin> {
     fg_protocol_position: DiagnosticServiceAffixPosition,
     // functional group: is protocol case sensitive
     fg_protocol_case_sensitive: bool,
-    access_control: Arc<Mutex<SessionControl>>,
+    ecu_service_states: Arc<RwLock<HashMap<u8, String>>>,
 
     tester_present_retry_policy: bool,
     tester_present_addr_mode: AddressingMode,
@@ -100,12 +99,6 @@ pub struct EcuManager<S: SecurityPlugin> {
     timeout_default: Duration,
 
     security_plugin_phantom: std::marker::PhantomData<S>,
-}
-
-#[derive(Default)]
-struct SessionControl {
-    session: Option<String>,
-    security: Option<String>,
 }
 
 #[derive(Default)]
@@ -264,9 +257,20 @@ impl<S: SecurityPlugin> cda_interfaces::EcuManager for EcuManager<S> {
                 };
 
                 // todo read this from the variant detection instead of assuming default, see #110
-                let mut access = self.access_control.lock();
-                access.security = Some(self.default_state(semantics::SECURITY)?);
-                access.session = Some(self.default_state(semantics::SESSION)?);
+                let mut states = self.ecu_service_states.write().await;
+                states.insert(
+                    service_ids::SESSION_CONTROL,
+                    self.default_state(semantics::SESSION)?,
+                );
+                states.insert(
+                    service_ids::SECURITY_ACCESS,
+                    self.default_state(semantics::SECURITY)?,
+                );
+                states.insert(service_ids::CONTROL_DTC_SETTING, "on".to_owned());
+                states.insert(
+                    service_ids::COMMUNICATION_CONTROL,
+                    "enablerxandenabletx".to_owned(),
+                );
 
                 Ok(())
             }
@@ -397,7 +401,7 @@ impl<S: SecurityPlugin> cda_interfaces::EcuManager for EcuManager<S> {
         Ok(mapped)
     }
 
-    fn check_genericservice(
+    async fn check_genericservice(
         &self,
         security_plugin: &DynamicPlugin,
         rawdata: Vec<u8>,
@@ -450,8 +454,9 @@ impl<S: SecurityPlugin> cda_interfaces::EcuManager for EcuManager<S> {
 
         Self::check_security_plugin(security_plugin, &mapped_service)?;
 
-        let (new_session, new_security) =
-            self.lookup_state_transition_by_diagcomm_for_active(&mapped_dc);
+        let (new_session, new_security) = self
+            .lookup_state_transition_by_diagcomm_for_active(&mapped_dc)
+            .await;
 
         Ok(ServicePayload {
             data: rawdata,
@@ -541,14 +546,17 @@ impl<S: SecurityPlugin> cda_interfaces::EcuManager for EcuManager<S> {
             let response_type = response.response_type().try_into()?;
             // in case of a positive response update potential session or security access changes
             if response_type == datatypes::ResponseType::Positive {
-                let (new_session, new_security) =
-                    self.lookup_state_transition_by_diagcomm_for_active(&mapped_diag_comm);
+                let (new_session, new_security) = self
+                    .lookup_state_transition_by_diagcomm_for_active(&mapped_diag_comm)
+                    .await;
 
                 if let Some(new_session) = new_session {
-                    self.set_session(&new_session)?;
+                    self.set_service_state(service_ids::SESSION_CONTROL, new_session)
+                        .await;
                 }
                 if let Some(new_security_access) = new_security {
-                    self.set_security_access(&new_security_access)?;
+                    self.set_service_state(service_ids::SECURITY_ACCESS, new_security_access)
+                        .await;
                 }
             }
 
@@ -756,8 +764,9 @@ impl<S: SecurityPlugin> cda_interfaces::EcuManager for EcuManager<S> {
             }
         }
 
-        let (new_session, new_security) =
-            self.lookup_state_transition_by_diagcomm_for_active(&(mapped_dc.into()));
+        let (new_session, new_security) = self
+            .lookup_state_transition_by_diagcomm_for_active(&(mapped_dc.into()))
+            .await;
         tracing::Span::current().record("output", util::tracing::print_hex(&uds, 10));
         Ok(ServicePayload {
             data: uds,
@@ -948,15 +957,9 @@ impl<S: SecurityPlugin> cda_interfaces::EcuManager for EcuManager<S> {
             dlt_context = dlt_ctx!("CORE"),
         )
     )]
-    fn set_session(&self, session: &str) -> Result<(), DiagServiceError> {
-        tracing::debug!(
-                ecu_name = self.ecu_name,
-                session = %session,
-                "Setting session"
-        );
-
-        self.access_control.lock().session = Some(session.to_owned());
-        Ok(())
+    async fn set_service_state(&self, sid: u8, value: String) {
+        tracing::debug!("Setting service state: SID: {sid}, Value: {value}");
+        self.ecu_service_states.write().await.insert(sid, value);
     }
 
     #[tracing::instrument(skip_all,
@@ -964,29 +967,23 @@ impl<S: SecurityPlugin> cda_interfaces::EcuManager for EcuManager<S> {
             dlt_context = dlt_ctx!("CORE"),
         )
     )]
-    fn set_security_access(&self, security_access: &str) -> Result<(), DiagServiceError> {
-        tracing::debug!(
-                ecu_name = self.ecu_name,
-                security_access = %security_access,
-                "Setting security access"
-        );
-
-        self.access_control.lock().security = Some(security_access.to_owned());
-        Ok(())
+    async fn get_service_state(&self, sid: u8) -> Option<String> {
+        self.ecu_service_states.read().await.get(&sid).cloned()
     }
 
-    fn lookup_session_change(
+    async fn lookup_session_change(
         &self,
         target_session_name: &str,
     ) -> Result<cda_interfaces::DiagComm, DiagServiceError> {
-        let current_session_name =
-            self.access_control
-                .lock()
-                .session
-                .clone()
-                .ok_or(DiagServiceError::InvalidSession(
-                    "ECU session is none".to_string(),
-                ))?;
+        let current_session_name = self
+            .ecu_service_states
+            .read()
+            .await
+            .get(&service_ids::SESSION_CONTROL)
+            .cloned()
+            .ok_or(DiagServiceError::InvalidSession(
+                "ECU session is none".to_string(),
+            ))?;
 
         self.lookup_state_transition_for_active(
             semantics::SESSION,
@@ -995,13 +992,13 @@ impl<S: SecurityPlugin> cda_interfaces::EcuManager for EcuManager<S> {
         )
     }
 
-    fn lookup_security_access_change(
+    async fn lookup_security_access_change(
         &self,
         level: &str,
         seed_service: Option<&String>,
         has_key: bool,
     ) -> Result<SecurityAccess, DiagServiceError> {
-        let current_security_name = self.security_access()?;
+        let current_security_name = self.security_access().await?;
 
         if has_key {
             let security_service = self.lookup_state_transition_for_active(
@@ -1081,11 +1078,12 @@ impl<S: SecurityPlugin> cda_interfaces::EcuManager for EcuManager<S> {
             ))
     }
 
-    fn session(&self) -> Result<String, DiagServiceError> {
-        self.access_control
-            .lock()
-            .session
-            .clone()
+    async fn session(&self) -> Result<String, DiagServiceError> {
+        self.ecu_service_states
+            .read()
+            .await
+            .get(&service_ids::SESSION_CONTROL)
+            .cloned()
             .ok_or(DiagServiceError::InvalidSession(
                 "ECU session is none".to_string(),
             ))
@@ -1095,11 +1093,12 @@ impl<S: SecurityPlugin> cda_interfaces::EcuManager for EcuManager<S> {
         self.default_state(semantics::SESSION)
     }
 
-    fn security_access(&self) -> Result<String, DiagServiceError> {
-        self.access_control
-            .lock()
-            .security
-            .clone()
+    async fn security_access(&self) -> Result<String, DiagServiceError> {
+        self.ecu_service_states
+            .read()
+            .await
+            .get(&service_ids::SECURITY_ACCESS)
+            .cloned()
             .ok_or(DiagServiceError::InvalidSession(
                 "ECU security is none".to_string(),
             ))
@@ -1637,7 +1636,7 @@ impl<S: SecurityPlugin> EcuManager<S> {
             protocol,
             fg_protocol_position: func_description_config.protocol_position.clone(),
             fg_protocol_case_sensitive: func_description_config.protocol_case_sensitive,
-            access_control: Arc::new(Mutex::new(SessionControl::default())),
+            ecu_service_states: Arc::new(RwLock::default()),
             tester_present_retry_policy: database
                 .find_com_param(&data_protocol, &com_params.uds.tester_present_retry_policy)
                 .into(),
@@ -1744,7 +1743,7 @@ impl<S: SecurityPlugin> EcuManager<S> {
             protocol,
             fg_protocol_position: func_description_config.protocol_position.clone(),
             fg_protocol_case_sensitive: func_description_config.protocol_case_sensitive,
-            access_control: Arc::new(Mutex::new(SessionControl::default())),
+            ecu_service_states: Arc::new(RwLock::default()),
             tester_present_retry_policy: com_params
                 .uds
                 .tester_present_retry_policy
@@ -3227,9 +3226,9 @@ impl<S: SecurityPlugin> EcuManager<S> {
             })
     }
 
-    fn lookup_state_transition_by_diagcomm_for_active(
+    async fn lookup_state_transition_by_diagcomm_for_active(
         &self,
-        diag_comm: &datatypes::DiagComm,
+        diag_comm: &datatypes::DiagComm<'_>,
     ) -> (Option<String>, Option<String>) {
         // not using lookup_state_chart, so we spare one lookup of the state charts
         let Ok(base_variant) = self.diag_database.base_variant() else {
@@ -3250,15 +3249,22 @@ impl<S: SecurityPlugin> EcuManager<S> {
             })
         });
 
-        let access_ctrl = self.access_control.lock();
-        let new_session = access_ctrl.session.as_ref().and_then(|session| {
-            state_chart_session
-                .and_then(|sc| Self::lookup_state_transition(diag_comm, &(sc.into()), session))
-        });
-        let new_security = access_ctrl.security.as_ref().and_then(|session| {
-            state_chart_security
-                .and_then(|sc| Self::lookup_state_transition(diag_comm, &(sc.into()), session))
-        });
+        let states = self.ecu_service_states.write().await;
+        let new_session = states
+            .get(&service_ids::SESSION_CONTROL)
+            .as_ref()
+            .and_then(|session| {
+                state_chart_session
+                    .and_then(|sc| Self::lookup_state_transition(diag_comm, &(sc.into()), session))
+            });
+        let new_security = states
+            .get(&service_ids::SECURITY_ACCESS)
+            .as_ref()
+            .and_then(|session| {
+                state_chart_security
+                    .and_then(|sc| Self::lookup_state_transition(diag_comm, &(sc.into()), session))
+            });
+        drop(states);
 
         (new_session, new_security)
     }

@@ -71,6 +71,10 @@ pub mod security_and_session {
 }
 
 pub mod commctrl {
+    pub mod get {
+        pub type Response = crate::common::modes::get::Mode<String>;
+    }
+
     pub mod put {
 
         pub type Request = crate::common::modes::commctrl::put::Request;
@@ -79,6 +83,10 @@ pub mod commctrl {
 }
 
 pub mod dtcsetting {
+    pub mod get {
+        pub type Response = crate::common::modes::get::Mode<String>;
+    }
+
     pub mod put {
         pub type Request = crate::common::modes::dtcsetting::put::Request;
         pub type Response = crate::common::modes::put::Response<String>;

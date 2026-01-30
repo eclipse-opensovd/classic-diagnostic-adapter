@@ -10,7 +10,6 @@
  *
  * SPDX-License-Identifier: Apache-2.0
  */
-
 use serde::Serialize;
 
 use crate::{
@@ -161,7 +160,7 @@ pub trait EcuManager:
         &self,
         security_plugin: &DynamicPlugin,
         rawdata: Vec<u8>,
-    ) -> Result<ServicePayload, DiagServiceError>;
+    ) -> impl Future<Output = Result<ServicePayload, DiagServiceError>> + Send;
     /// Converts given `UdsPayloadData` into a UDS request payload for the given `DiagService`.
     ///
     /// # Errors
@@ -179,22 +178,41 @@ pub trait EcuManager:
     /// Will return `Err` if the job cannot be found in the database
     /// Unlikely other case is that neither a lookup in the current nor the base variant succeeded.
     fn lookup_single_ecu_job(&self, job_name: &str) -> Result<single_ecu::Job, DiagServiceError>;
-    /// Update the internally tracked ecu session.
-    /// Has to be called after changing the session, to make sure the transition lookup keep working
-    /// # Errors
-    /// `DiagServiceError` when lookups failed
-    fn set_session(&self, session: &str) -> Result<(), DiagServiceError>;
-    /// Update the internally tracked ecu security access.
-    /// Has to be called after changing the security access,
-    /// to make sure the transition lookup keep working
-    /// # Errors
-    /// `DiagServiceError` when lookups failed
-    fn set_security_access(&self, security_access: &str) -> Result<(), DiagServiceError>;
+
+    /// Sets the service state for a given service identifier.
+    ///
+    /// This method stores the current state associated with a diagnostic service,
+    /// identified by its service ID (SID). The state value is typically used to
+    /// track the value of `/modes` after executing a service.
+    ///
+    /// # Parameters
+    /// * `sid` - The service identifier (SID) as a byte value
+    /// * `value` - The state value to associate with this service
+    ///   (e.g., session name, security level)
+    fn set_service_state(&self, sid: u8, value: String) -> impl Future<Output = ()> + Send;
+
+    /// Retrieves the current service state for a given service identifier.
+    ///
+    /// This method returns the previously stored state for a diagnostic service,
+    /// identified by its service ID (SID). Returns `None` if no state has been
+    /// set for the given service identifier.
+    ///
+    /// # Parameters
+    /// * `sid` - The service identifier (SID) as a byte value
+    ///
+    /// # Returns
+    /// * `Some(String)` - The stored state value if it exists
+    /// * `None` - If no state has been set for this service identifier
+    fn get_service_state(&self, sid: u8) -> impl Future<Output = Option<String>> + Send;
+
     /// Lookup the transition between the active session and the requested one.
     /// # Errors
     /// * `DiagServiceError::AccessDenied` if no transition exists
     /// * `DiagServiceError::NotFound` on various lookup errors.
-    fn lookup_session_change(&self, session: &str) -> Result<DiagComm, DiagServiceError>;
+    fn lookup_session_change(
+        &self,
+        session: &str,
+    ) -> impl Future<Output = Result<DiagComm, DiagServiceError>> + Send;
     /// Lookup the transition from the current security state to the given one.
     /// As switching to a new security state might need authentication.
     /// * `RequestSeed(DiagComm)`: A seeds needs to be requested via the provided diag comm.
@@ -210,7 +228,7 @@ pub trait EcuManager:
         level: &str,
         seed_service: Option<&String>,
         has_key: bool,
-    ) -> Result<SecurityAccess, DiagServiceError>;
+    ) -> impl Future<Output = Result<SecurityAccess, DiagServiceError>> + Send;
     /// Retrieves the name of the parameter used to send the key for security access.
     /// # Errors
     /// Will return `DiagServiceError` if the parameter cannot be found in the database
@@ -223,7 +241,7 @@ pub trait EcuManager:
     /// # Errors
     /// Will return `DiagServiceError` if the session cannot be found in the database
     /// or no session is currently set or no variant is loaded.
-    fn session(&self) -> Result<String, DiagServiceError>;
+    fn session(&self) -> impl Future<Output = Result<String, DiagServiceError>> + Send;
     /// Retrieves the name of the default ecu session
     /// # Errors
     /// Will return `DiagServiceError` if no default session is found in the database
@@ -234,7 +252,7 @@ pub trait EcuManager:
     /// # Errors
     /// Will return `DiagServiceError` if the security access cannot be found in the database
     /// or no security access is currently set or no variant is loaded.
-    fn security_access(&self) -> Result<String, DiagServiceError>;
+    fn security_access(&self) -> impl Future<Output = Result<String, DiagServiceError>> + Send;
     /// Retrieves the name of the default ecu security level,
     /// # Errors
     /// Will return `DiagServiceError` if no default session is found in the database

@@ -10,6 +10,10 @@
  *
  * SPDX-License-Identifier: Apache-2.0
 */
+use cda_interfaces::HashMap;
+use serde::{Deserialize, Serialize};
+
+use crate::error::ApiErrorResponse;
 
 pub type Query = crate::IncludeSchemaQuery;
 pub mod get {
@@ -17,52 +21,50 @@ pub mod get {
     pub type ResponseItem = crate::common::modes::get::ModeCollectionItem;
 }
 
-pub mod commctrl {
-    pub mod put {
-        use cda_interfaces::HashMap;
-        use serde::{Deserialize, Serialize};
+/// Returns data keyed by ECU name at the top level
+#[derive(Serialize, Deserialize, schemars::JsonSchema)]
+pub struct DataResponse<T, R> {
+    /// Data results per ECU - key is ECU name, value is the data result
+    pub modes: HashMap<String, R>,
+    /// Errors that occurred during the operation
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub errors: Vec<ApiErrorResponse<T>>,
+    #[schemars(skip)]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub schema: Option<schemars::Schema>,
+}
 
-        use crate::error::ApiErrorResponse;
+pub mod commctrl {
+    pub mod get {
+        use crate::functions::functional_groups::modes::DataResponse;
+
+        pub type ResponseElement = crate::common::modes::get::Mode<String>;
+        pub type Response<T> = DataResponse<T, ResponseElement>;
+    }
+
+    pub mod put {
+        use crate::functions::functional_groups::modes::DataResponse;
 
         pub type Request = crate::common::modes::commctrl::put::Request;
         pub type ResponseElement = crate::common::modes::put::Response<String>;
-
-        /// Returns data keyed by ECU name at the top level
-        #[derive(Serialize, Deserialize, schemars::JsonSchema)]
-        pub struct Response<T> {
-            /// Data results per ECU - key is ECU name, value is the data result
-            pub modes: HashMap<String, ResponseElement>,
-            /// Errors that occurred during the operation
-            #[serde(skip_serializing_if = "Vec::is_empty")]
-            pub errors: Vec<ApiErrorResponse<T>>,
-            #[schemars(skip)]
-            #[serde(skip_serializing_if = "Option::is_none")]
-            pub schema: Option<schemars::Schema>,
-        }
+        pub type Response<T> = DataResponse<T, ResponseElement>;
     }
 }
 
 pub mod dtcsetting {
-    pub mod put {
-        use cda_interfaces::HashMap;
-        use serde::{Deserialize, Serialize};
+    pub mod get {
+        use crate::functions::functional_groups::modes::DataResponse;
 
-        use crate::error::ApiErrorResponse;
+        pub type ResponseElement = crate::common::modes::get::Mode<String>;
+        pub type Response<T> = DataResponse<T, ResponseElement>;
+    }
+
+    pub mod put {
+        use crate::functions::functional_groups::modes::DataResponse;
 
         pub type Request = crate::common::modes::dtcsetting::put::Request;
         pub type ResponseElement = crate::common::modes::put::Response<String>;
 
-        /// Returns data keyed by ECU name at the top level
-        #[derive(Serialize, Deserialize, schemars::JsonSchema)]
-        pub struct Response<T> {
-            /// Data results per ECU - key is ECU name, value is the data result
-            pub modes: HashMap<String, ResponseElement>,
-            /// Errors that occurred during the operation
-            #[serde(skip_serializing_if = "Vec::is_empty")]
-            pub errors: Vec<ApiErrorResponse<T>>,
-            #[schemars(skip)]
-            #[serde(skip_serializing_if = "Option::is_none")]
-            pub schema: Option<schemars::Schema>,
-        }
+        pub type Response<T> = DataResponse<T, ResponseElement>;
     }
 }

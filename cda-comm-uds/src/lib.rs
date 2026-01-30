@@ -1213,7 +1213,8 @@ impl<S: EcuGateway, R: DiagServiceResponse, T: EcuManager<Response = R>> UdsEcu
             .ecu_manager(ecu_name)?
             .read()
             .await
-            .check_genericservice(security_plugin, payload)?;
+            .check_genericservice(security_plugin, payload)
+            .await?;
 
         match self
             .send_with_raw_payload(ecu_name, payload, timeout, true)
@@ -1342,13 +1343,15 @@ impl<S: EcuGateway, R: DiagServiceResponse, T: EcuManager<Response = R>> UdsEcu
         let dc = ecu_diag_service
             .read()
             .await
-            .lookup_session_change(session)?;
+            .lookup_session_change(session)
+            .await?;
         let result = self.send(ecu_name, dc, security_plugin, None, true).await?;
         match result.response_type() {
             DiagServiceResponseType::Positive => {
                 // update ecu DiagServiceManagers internal state.
                 let ecu = ecu_diag_service.read().await;
-                ecu.set_session(session)?;
+                ecu.set_service_state(service_ids::SESSION_CONTROL, session.to_owned())
+                    .await;
                 drop(ecu);
 
                 self.start_reset_task(ecu_name, expiration, ResetType::Session)
@@ -1372,7 +1375,7 @@ impl<S: EcuGateway, R: DiagServiceResponse, T: EcuManager<Response = R>> UdsEcu
 
         let ecu_diag_service = self.ecu_manager(ecu_name)?;
         let default_session = ecu_diag_service.read().await.default_session()?;
-        let current_session = ecu_diag_service.read().await.session()?;
+        let current_session = ecu_diag_service.read().await.session().await?;
 
         if current_session == default_session {
             tracing::debug!("Already in default session, nothing to do");
@@ -1410,7 +1413,7 @@ impl<S: EcuGateway, R: DiagServiceResponse, T: EcuManager<Response = R>> UdsEcu
 
         let ecu_diag_service = self.ecu_manager(ecu_name)?;
         let default_security_access = ecu_diag_service.read().await.default_security_access()?;
-        let current_security_access = ecu_diag_service.read().await.security_access()?;
+        let current_security_access = ecu_diag_service.read().await.security_access().await?;
 
         if current_security_access == default_security_access {
             tracing::debug!("Already at default security access, nothing to do");
@@ -1456,7 +1459,8 @@ impl<S: EcuGateway, R: DiagServiceResponse, T: EcuManager<Response = R>> UdsEcu
         let security_access = ecu_diag_service
             .read()
             .await
-            .lookup_security_access_change(level, seed_service, authentication_data.is_some())?;
+            .lookup_security_access_change(level, seed_service, authentication_data.is_some())
+            .await?;
         match &security_access {
             SecurityAccess::RequestSeed(dc) => Ok((
                 security_access.clone(),
@@ -1477,7 +1481,8 @@ impl<S: EcuGateway, R: DiagServiceResponse, T: EcuManager<Response = R>> UdsEcu
                     DiagServiceResponseType::Positive => {
                         // update ecu DiagServiceManagers internal state.
                         let ecu = ecu_diag_service.read().await;
-                        ecu.set_security_access(level)?;
+                        ecu.set_service_state(service_ids::SECURITY_ACCESS, level.to_owned())
+                            .await;
                         drop(ecu);
 
                         self.start_reset_task(ecu_name, expiration, ResetType::SecurityAccess)
@@ -1503,7 +1508,8 @@ impl<S: EcuGateway, R: DiagServiceResponse, T: EcuManager<Response = R>> UdsEcu
         let security_access = ecu_diag_service
             .read()
             .await
-            .lookup_security_access_change(level, None, true)?;
+            .lookup_security_access_change(level, None, true)
+            .await?;
         match &security_access {
             SecurityAccess::RequestSeed(_) => {
                 unreachable!("Not reached, because has key is set to true above")
@@ -1526,16 +1532,19 @@ impl<S: EcuGateway, R: DiagServiceResponse, T: EcuManager<Response = R>> UdsEcu
         Ok(reset_services)
     }
 
-    async fn ecu_session(&self, ecu_name: &str) -> Result<String, DiagServiceError> {
-        let ecu_diag_service = self.ecu_manager(ecu_name)?;
-        let ecu = ecu_diag_service.read().await;
-        ecu.session()
-    }
-
-    async fn ecu_security_access(&self, ecu_name: &str) -> Result<String, DiagServiceError> {
-        let ecu_diag_service = self.ecu_manager(ecu_name)?;
-        let ecu = ecu_diag_service.read().await;
-        ecu.security_access()
+    async fn get_ecu_service_state(
+        &self,
+        ecu_name: &str,
+        service: u8,
+    ) -> Result<String, DiagServiceError> {
+        let diag_manager = self.ecu_manager(ecu_name)?.read().await;
+        diag_manager
+            .get_service_state(service)
+            .await
+            .ok_or(DiagServiceError::NotFound(
+                format!("Service state for service ID {service:02X} not found in ECU {ecu_name}",)
+                    .into(),
+            ))
     }
 
     async fn ecu_exec_service_from_function_class(
@@ -2337,7 +2346,7 @@ impl<S: EcuGateway, R: DiagServiceResponse, T: EcuManager<Response = R>> UdsEcu
         result_map
     }
 
-    async fn call_ecu_service_by_sid_and_name(
+    async fn set_ecu_state(
         &self,
         ecu_name: &str,
         security_plugin: &DynamicPlugin,
@@ -2352,17 +2361,29 @@ impl<S: EcuGateway, R: DiagServiceResponse, T: EcuManager<Response = R>> UdsEcu
             .await
             .lookup_service_by_sid_and_name(sid, service_name)?;
 
-        self.send(
-            ecu_name,
-            service,
-            security_plugin,
-            params.map(UdsPayloadData::ParameterMap),
-            map_to_json,
-        )
-        .await
+        let response = self
+            .send(
+                ecu_name,
+                service.clone(),
+                security_plugin,
+                params.map(UdsPayloadData::ParameterMap),
+                map_to_json,
+            )
+            .await;
+
+        if let Ok(response) = response.as_ref()
+            && response.response_type() == DiagServiceResponseType::Positive
+        {
+            ecu.write()
+                .await
+                .set_service_state(sid, service_name.to_owned())
+                .await;
+        }
+
+        response
     }
 
-    async fn call_functional_service_by_sid_and_name(
+    async fn set_functional_state(
         &self,
         group_name: &str,
         security_plugin: &DynamicPlugin,
@@ -2371,21 +2392,36 @@ impl<S: EcuGateway, R: DiagServiceResponse, T: EcuManager<Response = R>> UdsEcu
         params: Option<HashMap<String, serde_json::Value>>,
         map_to_json: bool,
     ) -> Result<HashMap<String, Result<Self::Response, DiagServiceError>>, DiagServiceError> {
-        let globals_ecu = self.ecu_manager(&self.functional_description_database)?;
-        let service = globals_ecu
+        let func_group = self.ecu_manager(group_name)?;
+        let service = func_group
             .read()
             .await
             .lookup_service_by_sid_and_name(sid, service_name)?;
 
-        Ok(self
+        let response = self
             .send_functional_group(
                 group_name,
-                service,
+                service.clone(),
                 security_plugin,
                 params.map(UdsPayloadData::ParameterMap),
                 map_to_json,
             )
-            .await)
+            .await;
+
+        for (ecu, response) in &response {
+            if let Ok(response) = response
+                && response.response_type() == DiagServiceResponseType::Positive
+                && let Some(ecu_manager) = self.ecus.get(ecu)
+            {
+                ecu_manager
+                    .write()
+                    .await
+                    .set_service_state(sid, service_name.to_owned())
+                    .await;
+            }
+        }
+
+        Ok(response)
     }
 }
 
