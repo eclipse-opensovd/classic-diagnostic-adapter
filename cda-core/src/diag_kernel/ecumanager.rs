@@ -25,12 +25,12 @@ use cda_interfaces::{
         TesterPresentSendType, semantics, single_ecu,
     },
     diagservices::{DiagServiceResponse, DiagServiceResponseType, FieldParseError, UdsPayloadData},
-    dlt_ctx, service_ids, spawn_named,
+    dlt_ctx, service_ids,
     util::{self, ends_with_ignore_ascii_case, starts_with_ignore_ascii_case},
 };
 use cda_plugin_security::SecurityPlugin;
 use parking_lot::Mutex;
-use tokio::{sync::RwLock, task::JoinHandle};
+use tokio::sync::RwLock;
 
 use crate::{
     DiagDataContainerDtc, MappedResponseData,
@@ -106,10 +106,6 @@ pub struct EcuManager<S: SecurityPlugin> {
 struct SessionControl {
     session: Option<String>,
     security: Option<String>,
-    /// resets session back to the default after a given time
-    session_reset_task: Option<JoinHandle<()>>,
-    /// resets security access back to the default after a given time
-    security_reset_task: Option<JoinHandle<()>>,
 }
 
 #[derive(Default)]
@@ -549,10 +545,10 @@ impl<S: SecurityPlugin> cda_interfaces::EcuManager for EcuManager<S> {
                     self.lookup_state_transition_by_diagcomm_for_active(&mapped_diag_comm);
 
                 if let Some(new_session) = new_session {
-                    self.set_session(&new_session, None)?;
+                    self.set_session(&new_session)?;
                 }
                 if let Some(new_security_access) = new_security {
-                    self.set_security_access(&new_security_access, None)?;
+                    self.set_security_access(&new_security_access)?;
                 }
             }
 
@@ -948,26 +944,15 @@ impl<S: SecurityPlugin> cda_interfaces::EcuManager for EcuManager<S> {
             dlt_context = dlt_ctx!("CORE"),
         )
     )]
-    fn set_session(
-        &self,
-        session: &str,
-        expiration: Option<Duration>,
-    ) -> Result<(), DiagServiceError> {
+    fn set_session(&self, session: &str) -> Result<(), DiagServiceError> {
         tracing::debug!(
                 ecu_name = self.ecu_name,
                 session = %session,
-                expiration = ?expiration,
                 "Setting session"
         );
 
         self.access_control.lock().session = Some(session.to_owned());
-        if let Some(expiration) = expiration
-            && expiration > Duration::ZERO
-        {
-            self.start_session_reset_task(expiration)
-        } else {
-            Ok(())
-        }
+        Ok(())
     }
 
     #[tracing::instrument(skip_all,
@@ -975,31 +960,15 @@ impl<S: SecurityPlugin> cda_interfaces::EcuManager for EcuManager<S> {
             dlt_context = dlt_ctx!("CORE"),
         )
     )]
-    fn set_security_access(
-        &self,
-        security_access: &str,
-        expiration: Option<Duration>,
-    ) -> Result<(), DiagServiceError> {
+    fn set_security_access(&self, security_access: &str) -> Result<(), DiagServiceError> {
         tracing::debug!(
                 ecu_name = self.ecu_name,
                 security_access = %security_access,
-                expiration = ?expiration,
                 "Setting security access"
         );
 
         self.access_control.lock().security = Some(security_access.to_owned());
-        if let Some(expiration) = expiration
-            && expiration > Duration::ZERO
-        {
-            self.start_security_reset_task(expiration)
-        } else {
-            tracing::debug!(
-                ecu_name = self.ecu_name,
-                session = %security_access,
-                "Setting security access without expiration"
-            );
-            Ok(())
-        }
+        Ok(())
     }
 
     fn lookup_session_change(
@@ -3378,40 +3347,6 @@ impl<S: SecurityPlugin> EcuManager<S> {
             .ok_or(DiagServiceError::InvalidDatabase(
                 "No start state defined in state chart".to_owned(),
             ))
-    }
-
-    fn start_session_reset_task(&self, expiration: Duration) -> Result<(), DiagServiceError> {
-        let session_control = Arc::clone(&self.access_control);
-        let default_session = self.default_state(semantics::SESSION)?;
-
-        self.access_control.lock().session_reset_task = Some(spawn_named!(
-            &format!("session-reset-{}", self.ecu_name),
-            async move {
-                tokio::time::sleep(expiration).await;
-                let mut access = session_control.lock();
-                access.session = Some(default_session);
-                access.session_reset_task = None;
-            }
-        ));
-
-        Ok(())
-    }
-
-    fn start_security_reset_task(&self, expiration: Duration) -> Result<(), DiagServiceError> {
-        let access_control = Arc::clone(&self.access_control);
-        let default_security = self.default_state(semantics::SECURITY)?;
-
-        self.access_control.lock().security_reset_task = Some(spawn_named!(
-            &format!("security-reset-{}", self.ecu_name),
-            async move {
-                tokio::time::sleep(expiration).await;
-                let mut access = access_control.lock();
-                access.security = Some(default_security);
-                access.security_reset_task = None;
-            }
-        ));
-
-        Ok(())
     }
 
     fn lookup_services_by_sid(
@@ -6030,245 +5965,5 @@ mod tests {
         let mut ecu_manager = create_ecu_manager_variant_detection();
         ecu_manager.variant.state = EcuState::Offline;
         detect_variant(0, true, "BaseVariant".to_owned(), EcuState::Online, None).await;
-    }
-
-    #[tokio::test]
-    async fn test_set_session_with_no_expiration() {
-        let ecu_manager = create_ecu_manager_variant_detection();
-
-        // Set session without expiration
-        let result = ecu_manager.set_session("DefaultSession", None);
-        assert!(result.is_ok());
-
-        // Verify session was set
-        let session = ecu_manager.session().unwrap();
-        assert_eq!(session, "DefaultSession");
-
-        // Verify no reset task was created
-        assert!(
-            ecu_manager
-                .access_control
-                .lock()
-                .session_reset_task
-                .is_none()
-        );
-    }
-
-    #[tokio::test]
-    async fn test_set_session_with_zero_expiration() {
-        let ecu_manager = create_ecu_manager_variant_detection();
-
-        // Set session with zero expiration
-        let result = ecu_manager.set_session("DefaultSession", Some(Duration::ZERO));
-        assert!(result.is_ok());
-
-        // Verify session was set
-        let session = ecu_manager.session().unwrap();
-        assert_eq!(session, "DefaultSession");
-
-        // Verify no reset task was created for zero duration
-        assert!(
-            ecu_manager
-                .access_control
-                .lock()
-                .session_reset_task
-                .is_none()
-        );
-    }
-
-    #[tokio::test]
-    async fn test_set_session_with_expiration() {
-        let ecu_manager = create_ecu_manager_variant_detection();
-
-        // Set session with expiration
-        let expiration = Duration::from_millis(100);
-        let result = ecu_manager.set_session("Test", Some(expiration));
-        assert!(result.is_ok());
-
-        // Verify session was set
-        let session = ecu_manager.session().unwrap();
-        assert_eq!(session, "Test");
-
-        // Verify reset task was created
-        assert!(
-            ecu_manager
-                .access_control
-                .lock()
-                .session_reset_task
-                .is_some()
-        );
-
-        // Wait for expiration and a bit more
-        tokio::time::sleep(expiration + Duration::from_millis(50)).await;
-
-        // Verify session was reset to default
-        let session_after = ecu_manager.session().unwrap();
-        assert_eq!(session_after, "DefaultSession");
-
-        // Verify reset task is cleared
-        assert!(
-            ecu_manager
-                .access_control
-                .lock()
-                .session_reset_task
-                .is_none()
-        );
-    }
-
-    #[tokio::test]
-    async fn test_set_security_access_with_no_expiration() {
-        let ecu_manager = create_ecu_manager_variant_detection();
-
-        // Set security access without expiration
-        let result = ecu_manager.set_security_access("Locked", None);
-        assert!(result.is_ok());
-
-        // Verify security access was set
-        let security = ecu_manager.security_access().unwrap();
-        assert_eq!(security, "Locked");
-
-        // Verify no reset task was created
-        assert!(
-            ecu_manager
-                .access_control
-                .lock()
-                .security_reset_task
-                .is_none()
-        );
-    }
-
-    #[tokio::test]
-    async fn test_set_security_access_with_zero_expiration() {
-        let ecu_manager = create_ecu_manager_variant_detection();
-
-        // Set security access with zero expiration
-        let result = ecu_manager.set_security_access("Locked", Some(Duration::ZERO));
-        assert!(result.is_ok());
-
-        // Verify security access was set
-        let security = ecu_manager.security_access().unwrap();
-        assert_eq!(security, "Locked");
-
-        // Verify no reset task was created for zero duration
-        assert!(
-            ecu_manager
-                .access_control
-                .lock()
-                .security_reset_task
-                .is_none()
-        );
-    }
-
-    #[tokio::test]
-    async fn test_set_security_access_with_expiration() {
-        let ecu_manager = create_ecu_manager_variant_detection();
-
-        // Set security access with expiration
-        let expiration = Duration::from_millis(100);
-        let result = ecu_manager.set_security_access("Test", Some(expiration));
-        assert!(result.is_ok());
-
-        // Verify security access was set
-        let security = ecu_manager.security_access().unwrap();
-        assert_eq!(security, "Test");
-
-        // Verify reset task was created
-        assert!(
-            ecu_manager
-                .access_control
-                .lock()
-                .security_reset_task
-                .is_some()
-        );
-
-        // Wait for expiration and a bit more
-        tokio::time::sleep(expiration + Duration::from_millis(50)).await;
-
-        // Verify security access was reset to default
-        let security_after = ecu_manager.security_access().unwrap();
-        assert_eq!(security_after, "Locked");
-
-        // Verify reset task is cleared
-        assert!(
-            ecu_manager
-                .access_control
-                .lock()
-                .security_reset_task
-                .is_none()
-        );
-    }
-
-    #[tokio::test]
-    async fn test_session_reset_replaces_previous_task() {
-        let ecu_manager = create_ecu_manager_variant_detection();
-
-        // Set session with long expiration
-        ecu_manager
-            .set_session("DefaultSession", Some(Duration::from_secs(10)))
-            .unwrap();
-
-        // Verify task exists
-        assert!(
-            ecu_manager
-                .access_control
-                .lock()
-                .session_reset_task
-                .is_some()
-        );
-
-        // Set session again with short expiration (should replace the task)
-        let short_expiration = Duration::from_millis(100);
-        ecu_manager
-            .set_session("DefaultSession", Some(short_expiration))
-            .unwrap();
-
-        // Wait for the short expiration
-        tokio::time::sleep(short_expiration + Duration::from_millis(50)).await;
-
-        // Session should be reset and task should be cleared
-        assert!(
-            ecu_manager
-                .access_control
-                .lock()
-                .session_reset_task
-                .is_none()
-        );
-    }
-
-    #[tokio::test]
-    async fn test_security_reset_replaces_previous_task() {
-        let ecu_manager = create_ecu_manager_variant_detection();
-
-        // Set security with long expiration
-        ecu_manager
-            .set_security_access("Locked", Some(Duration::from_secs(10)))
-            .unwrap();
-
-        // Verify task exists
-        assert!(
-            ecu_manager
-                .access_control
-                .lock()
-                .security_reset_task
-                .is_some()
-        );
-
-        // Set security again with short expiration (should replace the task)
-        let short_expiration = Duration::from_millis(100);
-        ecu_manager
-            .set_security_access("Locked", Some(short_expiration))
-            .unwrap();
-
-        // Wait for the short expiration
-        tokio::time::sleep(short_expiration + Duration::from_millis(50)).await;
-
-        // Security should be reset and task should be cleared
-        assert!(
-            ecu_manager
-                .access_control
-                .lock()
-                .security_reset_task
-                .is_none()
-        );
     }
 }

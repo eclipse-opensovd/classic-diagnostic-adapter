@@ -24,7 +24,7 @@ pub(crate) enum Variant {
     Application3,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, PartialEq)]
 #[serde(rename_all = "SCREAMING_SNAKE_CASE")]
 pub(crate) enum SessionState {
     Default,

@@ -33,7 +33,7 @@ use cda_interfaces::{
     diagservices::{DiagServiceResponse, DiagServiceResponseType, UdsPayloadData},
     dlt_ctx, service_ids,
 };
-use strum::IntoEnumIterator;
+use strum::{Display, IntoEnumIterator};
 use tokio::{
     fs::File,
     io::{AsyncReadExt, AsyncSeekExt, BufReader},
@@ -44,6 +44,12 @@ use tokio::{
 type EcuIdentifier = String;
 
 const UDS_RESPONSE_OFFSET: u8 = 0x40;
+
+#[derive(Copy, Clone, Display)]
+enum ResetType {
+    Session,
+    SecurityAccess,
+}
 
 struct UdsParameters {
     timeout_default: Duration,
@@ -83,6 +89,8 @@ pub struct UdsManager<S: EcuGateway, R: DiagServiceResponse, T: EcuManager<Respo
     data_transfers: Arc<Mutex<HashMap<EcuIdentifier, EcuDataTransfer>>>,
     ecu_semaphores: Arc<Mutex<HashMap<u16, Arc<Semaphore>>>>,
     tester_present_tasks: Arc<RwLock<HashMap<EcuIdentifier, TesterPresentTask>>>,
+    session_reset_tasks: Arc<RwLock<HashMap<EcuIdentifier, JoinHandle<()>>>>,
+    security_reset_tasks: Arc<RwLock<HashMap<EcuIdentifier, JoinHandle<()>>>>,
     functional_description_database: String,
     _phantom: std::marker::PhantomData<R>,
 }
@@ -100,6 +108,8 @@ impl<S: EcuGateway, R: DiagServiceResponse, T: EcuManager<Response = R>> UdsMana
             data_transfers: Arc::new(Mutex::new(HashMap::new())),
             ecu_semaphores: Arc::new(Mutex::new(HashMap::new())),
             tester_present_tasks: Arc::new(RwLock::new(HashMap::new())),
+            session_reset_tasks: Arc::new(RwLock::new(HashMap::new())),
+            security_reset_tasks: Arc::new(RwLock::new(HashMap::new())),
             functional_description_database: functional_description_config
                 .description_database
                 .clone(),
@@ -139,6 +149,76 @@ impl<S: EcuGateway, R: DiagServiceResponse, T: EcuManager<Response = R>> UdsMana
             .ok_or(DiagServiceError::NotFound(Some(format!(
                 "ECU {ecu_name} not found"
             ))))
+    }
+
+    async fn start_reset_task(
+        &self,
+        ecu_name: &str,
+        expiration: Option<Duration>,
+        reset_type: ResetType,
+    ) {
+        let expiration = if let Some(expiration) = expiration
+            && expiration > Duration::ZERO
+        {
+            expiration
+        } else {
+            return;
+        };
+
+        let ecu_name = ecu_name.to_owned();
+        let uds_clone = self.clone();
+
+        let reset_task = match reset_type {
+            ResetType::Session => Arc::clone(&self.session_reset_tasks),
+            ResetType::SecurityAccess => Arc::clone(&self.security_reset_tasks),
+        };
+
+        // Cancel any existing reset task for this ECU
+        if let Some(old_task) = reset_task.write().await.remove(&ecu_name) {
+            old_task.abort();
+        }
+
+        let ecu_name_clone = ecu_name.clone();
+        let reset_task_clone = Arc::clone(&reset_task);
+        let task =
+            cda_interfaces::spawn_named!(&format!("{ecu_name}-reset-{reset_type}"), async move {
+                tokio::time::sleep(expiration).await;
+
+                // Remove the task from the map before calling reset to prevent self-abort
+                reset_task_clone.write().await.remove(&ecu_name_clone);
+
+                // Use empty security plugin for reset
+                let security_plugin: DynamicPlugin = Box::new(());
+                tracing::info!(
+                    ecu_name = %ecu_name_clone,
+                    access_type = %reset_type,
+                    "Resetting ECU access, as timeout expired"
+                );
+
+                let result = match reset_type {
+                    ResetType::Session => {
+                        uds_clone
+                            .reset_ecu_session(&ecu_name_clone, &security_plugin)
+                            .await
+                    }
+                    ResetType::SecurityAccess => {
+                        uds_clone
+                            .reset_ecu_security_access(&ecu_name_clone, &security_plugin)
+                            .await
+                    }
+                };
+
+                if let Err(e) = result {
+                    tracing::error!(
+                        ecu_name = %ecu_name_clone,
+                        error = %e,
+                        access_type = %reset_type,
+                        "Failed to reset ECU access after timeout"
+                    );
+                }
+            });
+
+        reset_task.write().await.insert(ecu_name, task);
     }
 
     #[tracing::instrument(
@@ -1012,6 +1092,8 @@ impl<S: EcuGateway, R: DiagServiceResponse, T: EcuManager<Response = R>> Clone
             data_transfers: Arc::clone(&self.data_transfers),
             ecu_semaphores: Arc::clone(&self.ecu_semaphores),
             tester_present_tasks: Arc::clone(&self.tester_present_tasks),
+            session_reset_tasks: Arc::clone(&self.session_reset_tasks),
+            security_reset_tasks: Arc::clone(&self.security_reset_tasks),
             functional_description_database: self.functional_description_database.clone(),
             _phantom: self._phantom,
         }
@@ -1266,7 +1348,12 @@ impl<S: EcuGateway, R: DiagServiceResponse, T: EcuManager<Response = R>> UdsEcu
             DiagServiceResponseType::Positive => {
                 // update ecu DiagServiceManagers internal state.
                 let ecu = ecu_diag_service.read().await;
-                ecu.set_session(session, expiration)?;
+                ecu.set_session(session)?;
+                drop(ecu);
+
+                self.start_reset_task(ecu_name, expiration, ResetType::Session)
+                    .await;
+
                 Ok(result)
             }
             DiagServiceResponseType::Negative => Ok(result),
@@ -1278,6 +1365,11 @@ impl<S: EcuGateway, R: DiagServiceResponse, T: EcuManager<Response = R>> UdsEcu
         ecu_name: &str,
         security_plugin: &DynamicPlugin,
     ) -> Result<(), DiagServiceError> {
+        // Cancel any existing session reset task to prevent double resetting
+        if let Some(old_task) = self.session_reset_tasks.write().await.remove(ecu_name) {
+            old_task.abort();
+        }
+
         let ecu_diag_service = self.ecu_manager(ecu_name)?;
         let default_session = ecu_diag_service.read().await.default_session()?;
         let current_session = ecu_diag_service.read().await.session()?;
@@ -1311,6 +1403,11 @@ impl<S: EcuGateway, R: DiagServiceResponse, T: EcuManager<Response = R>> UdsEcu
         ecu_name: &str,
         security_plugin: &DynamicPlugin,
     ) -> Result<(), DiagServiceError> {
+        // Cancel any existing security access reset task to prevent double resetting
+        if let Some(old_task) = self.security_reset_tasks.write().await.remove(ecu_name) {
+            old_task.abort();
+        }
+
         let ecu_diag_service = self.ecu_manager(ecu_name)?;
         let default_security_access = ecu_diag_service.read().await.default_security_access()?;
         let current_security_access = ecu_diag_service.read().await.security_access()?;
@@ -1380,7 +1477,12 @@ impl<S: EcuGateway, R: DiagServiceResponse, T: EcuManager<Response = R>> UdsEcu
                     DiagServiceResponseType::Positive => {
                         // update ecu DiagServiceManagers internal state.
                         let ecu = ecu_diag_service.read().await;
-                        ecu.set_security_access(level, expiration)?;
+                        ecu.set_security_access(level)?;
+                        drop(ecu);
+
+                        self.start_reset_task(ecu_name, expiration, ResetType::SecurityAccess)
+                            .await;
+
                         Ok((security_access, result))
                     }
                     DiagServiceResponseType::Negative => Ok((security_access, result)),
