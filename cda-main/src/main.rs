@@ -153,14 +153,21 @@ async fn main() -> Result<(), AppError> {
     )
     .await?;
 
-    if let serde_json::Value::Object(version_info) = serde_json::json!(
-    {
-        "server_version": cda_version(),
-        "server_type": "Eclipse OpenSOVD Classic Diagnostics Adapter",
-        "commit": env!("GIT_COMMIT_HASH").to_owned(),
-        "build_date": env!("BUILD_DATE").to_owned(),
-    }
-    ) {
+    if let serde_json::Value::Object(version_info) = serde_json::json!({
+        "id": "version",
+        "data": {
+            "name": "Eclipse OpenSOVD Classic Diagnostics Adapter",
+            "api": {
+                // 1.1 to match the sovd standard version
+                "version": "1.1"
+            },
+            "implementation": {
+                "version": cda_version(),
+                "commit": env!("GIT_COMMIT_HASH").to_owned(),
+                "build_date": env!("BUILD_DATE").to_owned(),
+            }
+        }
+    }) {
         cda_sovd::add_version_endpoint(&dynamic_router, version_info).await;
     } else {
         tracing::error!("Failed to build version information");
