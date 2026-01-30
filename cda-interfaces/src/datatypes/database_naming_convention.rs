@@ -106,11 +106,12 @@ impl DatabaseNamingConvention {
         };
 
         match affix {
-            DiagnosticServiceAffixPosition::Prefix => short_name[value.len()..].to_string(),
+            DiagnosticServiceAffixPosition::Prefix => &short_name[value.len()..],
             DiagnosticServiceAffixPosition::Suffix => {
-                short_name[..short_name.len().saturating_sub(value.len())].to_string()
+                &short_name[..short_name.len().saturating_sub(value.len())]
             }
         }
+        .into()
     }
 }
 

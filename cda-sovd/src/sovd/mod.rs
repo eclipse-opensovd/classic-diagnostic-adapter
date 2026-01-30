@@ -420,11 +420,13 @@ fn ecu_route<
         )
         .api_route(
             &format!("/modes/{}", sovd_interfaces::common::modes::COMM_CONTROL_ID),
-            routing::put_with(modes::commctrl::put, modes::commctrl::docs_put),
+            routing::get_with(modes::commctrl::get, modes::commctrl::docs_get)
+                .put_with(modes::commctrl::put, modes::commctrl::docs_put),
         )
         .api_route(
             &format!("/modes/{}", sovd_interfaces::common::modes::DTC_SETTING_ID),
-            routing::put_with(modes::dtcsetting::put, modes::dtcsetting::docs_put),
+            routing::get_with(modes::dtcsetting::get, modes::dtcsetting::docs_get)
+                .put_with(modes::dtcsetting::put, modes::dtcsetting::docs_put),
         )
         .api_route(
             "/x-single-ecu-jobs",
@@ -650,6 +652,10 @@ pub(crate) use create_response_schema;
 #[macro_export]
 macro_rules! create_schema {
     ($type_:ty) => {{
+        // allowed because for some invocations
+        // of the macro the import might be in scope
+        // already, but this is the rarer case.
+        #[allow(unused_imports)]
         use schemars::JsonSchema as _;
 
         let mut generator = schemars::SchemaGenerator::new(
