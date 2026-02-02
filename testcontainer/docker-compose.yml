@@ -50,7 +50,7 @@ services:
       ecu-sim:
         condition: service_healthy
     environment:
-      - RUST_LOG=info
+      - RUST_LOG=debug
     command: ["-d", "/app/odx"]
     restart: unless-stopped
 

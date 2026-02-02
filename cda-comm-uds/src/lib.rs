@@ -1378,7 +1378,7 @@ impl<S: EcuGateway, R: DiagServiceResponse, T: EcuManager<Response = R>> UdsEcu
         let current_session = ecu_diag_service.read().await.session().await?;
 
         if current_session == default_session {
-            tracing::debug!("Already in default session, nothing to do");
+            tracing::info!("Already in default session, nothing to do");
             return Ok(());
         }
 
