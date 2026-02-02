@@ -1410,6 +1410,233 @@ impl<S: SecurityPlugin> cda_interfaces::EcuManager for EcuManager<S> {
             response_type,
         })
     }
+    fn get_service_parameter_metadata(
+        &self,
+        service_name: &str,
+    ) -> Result<Vec<cda_interfaces::ServiceParameterMetadata>, DiagServiceError> {
+        use cda_interfaces::ServiceParameterMetadata;
+        fn extract_param_type_metadata(
+            param: &datatypes::Parameter<'_>,
+            service_name: &str,
+            name: &str,
+        ) -> Result<cda_interfaces::ParameterTypeMetadata, DiagServiceError> {
+            use cda_interfaces::ParameterTypeMetadata;
+
+            let param_type = match param.param_type()? {
+                datatypes::ParamType::CodedConst => param
+                    .specific_data_as_coded_const()
+                    .and_then(|cc| cc.coded_value())
+                    .map_or(ParameterTypeMetadata::Value, |v| {
+                        ParameterTypeMetadata::CodedConst {
+                            coded_value: v.to_owned(),
+                        }
+                    }),
+                datatypes::ParamType::PhysConst => param
+                    .specific_data_as_phys_const()
+                    .and_then(|pc| pc.phys_constant_value())
+                    .map_or_else(
+                        || {
+                            tracing::warn!(
+                                "Service '{}' param '{}' PHYS-CONST has no value",
+                                service_name,
+                                name
+                            );
+                            ParameterTypeMetadata::Value
+                        },
+                        |v| ParameterTypeMetadata::PhysConst {
+                            phys_constant_value: v.to_owned(),
+                        },
+                    ),
+                _ => ParameterTypeMetadata::Value,
+            };
+
+            Ok(param_type)
+        }
+
+        let service = self.get_meta_data_service(service_name)?;
+        let Some(request) = service.request() else {
+            tracing::warn!("Service '{}' has no request definition", service_name);
+            return Ok(Vec::new());
+        };
+
+        let Some(params) = request.params() else {
+            return Ok(Vec::new());
+        };
+
+        tracing::debug!(
+            "Service '{}' has {} request parameters",
+            service_name,
+            params.len()
+        );
+
+        let metadata = params
+            .into_iter()
+            .map(datatypes::Parameter)
+            .filter_map(|param| {
+                let name = param.short_name().map(ToOwned::to_owned).or_else(|| {
+                    tracing::warn!(
+                        "Service '{}' has a parameter with no short name, skipping",
+                        service_name
+                    );
+                    None
+                })?;
+
+                let semantic = param.semantic().map(ToOwned::to_owned);
+                let param_type = extract_param_type_metadata(&param, service_name, &name).ok()?;
+
+                Some(ServiceParameterMetadata {
+                    name,
+                    semantic,
+                    param_type,
+                })
+            })
+            .collect();
+
+        Ok(metadata)
+    }
+
+    fn get_mux_cases_for_service(
+        &self,
+        service_name: &str,
+    ) -> Result<Vec<cda_interfaces::MuxCaseInfo>, DiagServiceError> {
+        use cda_interfaces::MuxCaseInfo;
+
+        let service = self.get_meta_data_service(service_name)?;
+        let Some(pos_responses) = service.pos_responses() else {
+            return Ok(Vec::new());
+        };
+
+        tracing::debug!(
+            "Service '{}' has {} positive responses",
+            service_name,
+            pos_responses.len()
+        );
+
+        let mux_cases: Vec<_> = pos_responses
+            .into_iter()
+            .filter_map(|pr| pr.params())
+            .flatten()
+            .filter_map(|param| param.specific_data_as_value()?.dop())
+            .map(datatypes::DataOperation)
+            .flat_map(|dop| -> Vec<MuxCaseInfo> {
+                let Ok(datatypes::DataOperationVariant::Mux(mux_dop)) = dop.variant() else {
+                    return Vec::new();
+                };
+                let Some(cases) = mux_dop.cases() else {
+                    return Vec::new();
+                };
+                cases
+                    .into_iter()
+                    .map(|case| MuxCaseInfo {
+                        short_name: case.short_name().unwrap_or_default().to_owned(),
+                        long_name: case
+                            .long_name()
+                            .and_then(|ln| ln.value())
+                            .map(ToOwned::to_owned),
+                        lower_limit: case
+                            .lower_limit()
+                            .and_then(|ll| ll.value())
+                            .map(ToOwned::to_owned),
+                        upper_limit: case
+                            .upper_limit()
+                            .and_then(|ul| ul.value())
+                            .map(ToOwned::to_owned),
+                    })
+                    .collect()
+            })
+            .collect();
+
+        tracing::debug!(
+            "Service '{}' has {} MUX cases",
+            service_name,
+            mux_cases.len()
+        );
+        Ok(mux_cases)
+    }
+
+    #[tracing::instrument(
+        target = "convert_request_from_uds",
+        skip(self, diag_service, payload),
+        fields(
+            ecu_name = self.ecu_name,
+            service = diag_service.name,
+            input = util::tracing::print_hex(&payload.data, 10),
+            output = tracing::field::Empty,
+            dlt_context = dlt_ctx!("CORE"),
+        ),
+        err
+    )]
+    async fn convert_request_from_uds(
+        &self,
+        diag_service: &cda_interfaces::DiagComm,
+        payload: &ServicePayload,
+        map_to_json: bool,
+    ) -> Result<DiagServiceResponseStruct, DiagServiceError> {
+        let mapped_service = self.lookup_diag_service(diag_service).await?;
+        let request = mapped_service
+            .request()
+            .ok_or(DiagServiceError::RequestNotSupported(format!(
+                "Service '{}' is not supported",
+                diag_service.name
+            )))?;
+
+        let mut uds_payload = Payload::new(&payload.data);
+        let mut data = HashMap::new();
+        let mut mapping_errors = Vec::new();
+
+        let params: Vec<datatypes::Parameter> = request
+            .params()
+            .map(|params| params.iter().map(datatypes::Parameter).collect())
+            .unwrap_or_default();
+
+        for param in params {
+            let short_name = param.short_name().ok_or_else(|| {
+                DiagServiceError::InvalidDatabase(
+                    "Unable to find short name for request param".to_owned(),
+                )
+            })?;
+
+            uds_payload.set_last_read_byte_pos(param.byte_position() as usize);
+            match self.map_param_from_uds(
+                &mapped_service,
+                &param,
+                short_name,
+                &mut uds_payload,
+                &mut data,
+            ) {
+                Ok(()) => {}
+                Err(DiagServiceError::DataError(error)) => {
+                    mapping_errors.push(FieldParseError {
+                        path: format!("/{short_name}"),
+                        error,
+                    });
+                }
+                Err(e) => return Err(e),
+            }
+        }
+
+        let raw_uds_payload = payload.data.clone();
+
+        if !map_to_json {
+            return Ok(DiagServiceResponseStruct {
+                service: diag_service.clone(),
+                data: raw_uds_payload,
+                mapped_data: None,
+                response_type: DiagServiceResponseType::Positive,
+            });
+        }
+
+        let resp = create_diag_service_response(
+            diag_service,
+            data,
+            datatypes::ResponseType::Positive,
+            raw_uds_payload,
+            mapping_errors,
+        );
+
+        tracing::Span::current().record("output", "RequestMapped");
+        Ok(resp)
+    }
 }
 
 impl<S: SecurityPlugin> cda_interfaces::UdsComParamProvider for EcuManager<S> {
@@ -3520,6 +3747,27 @@ impl<S: SecurityPlugin> EcuManager<S> {
             .map(SecurityPlugin::as_security_plugin)?;
 
         security_plugin.validate_service(service)
+    }
+
+    fn get_meta_data_service(
+        &self,
+        service_name: &str,
+    ) -> Result<datatypes::DiagService<'_>, DiagServiceError> {
+        cda_interfaces::SERVICE_IDS_PARAMETER_META_DATA
+            .into_iter()
+            .find_map(|sid| {
+                self.lookup_services_by_sid(sid)
+                    .ok()?
+                    .into_iter()
+                    .find(|s| {
+                        s.diag_comm()
+                            .and_then(|dc| dc.short_name())
+                            .is_some_and(|n| n == service_name)
+                    })
+            })
+            .ok_or_else(|| {
+                DiagServiceError::NotFound(Some(format!("Service '{service_name}' not found")))
+            })
     }
 
     async fn check_service_preconditions(
@@ -6113,5 +6361,361 @@ mod tests {
         let mut ecu_manager = create_ecu_manager_variant_detection();
         ecu_manager.variant.state = EcuState::Offline;
         detect_variant(0, true, "BaseVariant".to_owned(), EcuState::Online, None).await;
+    }
+
+    /// Helper function to create an ECU manager with services that have parameter metadata
+    fn create_ecu_manager_with_parameter_metadata() -> super::EcuManager<DefaultSecurityPluginData>
+    {
+        let mut db_builder = EcuDataBuilder::new();
+        let protocol = db_builder.create_protocol(Protocol::DoIp.value(), None, None, None);
+        let cp_ref = db_builder.create_com_param_ref(None, None, None, Some(protocol), None);
+        let compu_identical =
+            db_builder.create_compu_method(datatypes::CompuCategory::Identical, None, None);
+        let u16_diag_type = db_builder.create_diag_coded_type_standard_length(16, DataType::UInt32);
+
+        // Create a service with CODED-CONST parameters
+        let sid = 0x22u8; // ReadDataByIdentifier
+        let dc_name = "RDBI_TestService";
+
+        // Create DOP for VALUE parameter
+        let value_dop = {
+            let value_specific_data = db_builder
+                .create_normal_specific_dop_data(
+                    Some(compu_identical),
+                    Some(u16_diag_type),
+                    None,
+                    None,
+                    None,
+                    None,
+                )
+                .value_offset();
+            db_builder.create_dop(
+                *DopType::REGULAR,
+                Some("value_dop"),
+                None,
+                *SpecificDOPData::NormalDOP,
+                Some(value_specific_data),
+            )
+        };
+
+        let diag_comm = db_builder.create_diag_comm(DiagCommParams {
+            short_name: dc_name,
+            long_name: None,
+            semantic: None,
+            funct_class: None,
+            sdgs: None,
+            diag_class_type: DiagClassType::START_COMM,
+            pre_condition_state_refs: None,
+            state_transition_refs: None,
+            protocols: Some(vec![protocol]),
+            audience: None,
+            is_mandatory: false,
+            is_executable: true,
+            is_final: true,
+        });
+
+        // Create request with CODED-CONST and VALUE parameters
+        let request = {
+            let sid_param = db_builder.create_coded_const_param(
+                "sid",
+                &sid.to_string(),
+                0,
+                0,
+                8,
+                DataType::UInt32,
+            );
+
+            // CODED-CONST parameter for DID
+            let did_param = db_builder.create_coded_const_param(
+                "RDBI_DID",
+                "0xF190",
+                1,
+                0,
+                16,
+                DataType::UInt32,
+            );
+
+            // VALUE parameter
+            let value_param = db_builder.create_value_param("data", value_dop, 3, 0);
+
+            db_builder.create_request(Some(vec![sid_param, did_param, value_param]), None)
+        };
+
+        let pos_response = {
+            let sid_param = db_builder.create_coded_const_param(
+                "pos_sid",
+                &((sid + 0x40).to_string()),
+                0,
+                0,
+                8,
+                DataType::UInt32,
+            );
+            db_builder.create_response(ResponseType::Positive, Some(vec![sid_param]), None)
+        };
+
+        let diag_service = db_builder.create_diag_service(DiagServiceParams {
+            diag_comm: Some(diag_comm),
+            request: Some(request),
+            pos_responses: vec![pos_response],
+            neg_responses: vec![],
+            is_cyclic: false,
+            is_multiple: false,
+            addressing: *Addressing::FUNCTIONAL_OR_PHYSICAL,
+            transmission_mode: *TransmissionMode::SEND_AND_RECEIVE,
+            com_param_refs: None,
+        });
+
+        let diag_layer = db_builder.create_diag_layer(DiagLayerParams {
+            short_name: "TestVariantDiagLayer",
+            long_name: None,
+            funct_classes: None,
+            com_param_refs: Some(vec![cp_ref]),
+            diag_services: Some(vec![diag_service]),
+            ..Default::default()
+        });
+
+        let variant = db_builder.create_variant(diag_layer, true, None, None);
+        let ecu_data = db_builder.create_ecu_data_and_finish(EcuDataParams {
+            revision: "revision_1",
+            version: "1.0.0",
+            variants: Some(vec![variant]),
+            ..Default::default()
+        });
+
+        let db = datatypes::DiagnosticDatabase::new(
+            String::default(),
+            ecu_data,
+            FlatbBufConfig::default(),
+        )
+        .unwrap();
+
+        super::EcuManager::new(
+            db,
+            Protocol::DoIp,
+            &ComParams::default(),
+            DatabaseNamingConvention::default(),
+            EcuManagerType::Ecu,
+            &cda_interfaces::FunctionalDescriptionConfig {
+                description_database: "functional_groups".to_owned(),
+                enabled_functional_groups: None,
+                protocol_position:
+                    cda_interfaces::datatypes::DiagnosticServiceAffixPosition::Suffix,
+                protocol_case_sensitive: false,
+            },
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn test_get_service_parameter_metadata_success() {
+        use cda_interfaces::ParameterTypeMetadata;
+
+        let ecu_manager = create_ecu_manager_with_parameter_metadata();
+
+        // Get parameter metadata for the test service
+        let result = ecu_manager.get_service_parameter_metadata("RDBI_TestService");
+        assert!(result.is_ok());
+
+        let metadata = result.unwrap();
+        assert_eq!(metadata.len(), 3); // sid, RDBI_DID, data
+
+        // Verify sid parameter (CODED-CONST)
+        let sid_param = metadata.iter().find(|m| m.name == "sid").unwrap();
+        assert!(matches!(
+            sid_param.param_type,
+            ParameterTypeMetadata::CodedConst { .. }
+        ));
+        if let ParameterTypeMetadata::CodedConst { coded_value } = &sid_param.param_type {
+            assert_eq!(coded_value, "34");
+        }
+
+        // Verify RDBI_DID parameter (CODED-CONST)
+        let did_param = metadata.iter().find(|m| m.name == "RDBI_DID").unwrap();
+        if let ParameterTypeMetadata::CodedConst { coded_value } = &did_param.param_type {
+            assert_eq!(coded_value, "0xF190");
+        } else {
+            panic!("Expected CODED-CONST parameter type for RDBI_DID");
+        }
+
+        // Verify data parameter (VALUE)
+        let data_param = metadata.iter().find(|m| m.name == "data").unwrap();
+        assert!(matches!(
+            data_param.param_type,
+            ParameterTypeMetadata::Value
+        ));
+    }
+
+    #[test]
+    fn test_get_service_parameter_metadata_service_not_found() {
+        let ecu_manager = create_ecu_manager_with_parameter_metadata();
+
+        // Try to get metadata for a non-existent service
+        let result = ecu_manager.get_service_parameter_metadata("NonExistentService");
+        assert!(result.is_err());
+
+        // Should return NotFound error for non-existent service
+        assert!(matches!(result, Err(DiagServiceError::NotFound(_))));
+    }
+
+    #[test]
+    fn test_get_mux_cases_for_service_success() {
+        let (ecu_manager, _, _) = create_ecu_manager_with_mux_service(None, None, None);
+
+        // Get MUX cases for the test service
+        let result = ecu_manager.get_mux_cases_for_service("TestMuxService");
+        assert!(result.is_ok());
+
+        let mux_cases = result.unwrap();
+        assert_eq!(mux_cases.len(), 3); // mux_1_case_1, mux_1_case_2, mux_1_case_3
+
+        // Verify case names
+        assert!(mux_cases.iter().any(|c| c.short_name == "mux_1_case_1"));
+        assert!(mux_cases.iter().any(|c| c.short_name == "mux_1_case_2"));
+        assert!(mux_cases.iter().any(|c| c.short_name == "mux_1_case_3"));
+
+        // Verify lower_limit values exist for numeric cases
+        let case_1 = mux_cases
+            .iter()
+            .find(|c| c.short_name == "mux_1_case_1")
+            .unwrap();
+        assert!(case_1.lower_limit.is_some());
+
+        let case_2 = mux_cases
+            .iter()
+            .find(|c| c.short_name == "mux_1_case_2")
+            .unwrap();
+        assert!(case_2.lower_limit.is_some());
+    }
+
+    #[test]
+    fn test_get_mux_cases_for_service_not_found() {
+        let (ecu_manager, _, _) = create_ecu_manager_with_mux_service(None, None, None);
+
+        // Try to get MUX cases for a non-existent service
+        let result = ecu_manager.get_mux_cases_for_service("NonExistentService");
+        assert!(result.is_err());
+
+        // Should return NotFound error for non-existent service
+        assert!(matches!(result, Err(DiagServiceError::NotFound(_))));
+    }
+
+    #[test]
+    fn test_get_mux_cases_for_service_no_mux_cases() {
+        // Use a service without MUX cases
+        let ecu_manager = create_ecu_manager_with_parameter_metadata();
+
+        // Get MUX cases for a service that doesn't have MUX responses
+        let result = ecu_manager.get_mux_cases_for_service("RDBI_TestService");
+        assert!(result.is_ok());
+
+        let mux_cases = result.unwrap();
+        // Should return empty vector if no MUX cases found
+        assert_eq!(mux_cases.len(), 0);
+    }
+
+    #[test]
+    fn test_get_service_parameter_metadata_extracts_coded_const_did_value() {
+        use cda_interfaces::ParameterTypeMetadata;
+
+        let ecu_manager = create_ecu_manager_with_parameter_metadata();
+
+        // Get parameter metadata
+        let result = ecu_manager.get_service_parameter_metadata("RDBI_TestService");
+        assert!(result.is_ok());
+
+        let metadata = result.unwrap();
+
+        // Find the DID parameter and extract its value
+        let did_param = metadata.iter().find(|m| m.name == "RDBI_DID").unwrap();
+
+        if let ParameterTypeMetadata::CodedConst { coded_value } = &did_param.param_type {
+            // Verify the coded value can be parsed as a DID
+            // "0xF190" should parse to 61840
+            let did_value = if coded_value.starts_with("0x") || coded_value.starts_with("0X") {
+                u16::from_str_radix(&coded_value[2..], 16).ok()
+            } else {
+                coded_value.parse::<u16>().ok()
+            };
+
+            assert!(
+                did_value.is_some(),
+                "CODED-CONST value '{coded_value}' should be parseable as DID"
+            );
+            assert_eq!(did_value.unwrap(), 0xF190);
+        } else {
+            panic!("Expected CODED-CONST parameter type");
+        }
+    }
+
+    #[tokio::test]
+    async fn test_convert_request_from_uds_success() {
+        let (ecu_manager, dc, sid, _struct_byte_len) = create_ecu_manager_with_struct_service(1);
+
+        // Create a valid UDS request payload: SID + struct data
+        // SID (1 byte) + param1 (2 bytes) + param2 (4 bytes) + param3 (4 bytes)
+        let request_payload = vec![
+            sid, // SID
+            0x12, 0x34, // param1 (u16)
+            0x40, 0x49, 0x0F, 0xDB, // param2 (f32 = 3.14159)
+            b'T', b'e', b's', b't', // param3 (ascii string)
+        ];
+
+        let payload = create_payload(request_payload.clone());
+
+        // Convert request from UDS
+        let result = ecu_manager
+            .convert_request_from_uds(&dc, &payload, true)
+            .await;
+
+        assert!(result.is_ok());
+        let response = result.unwrap();
+
+        // Verify response type is positive (successful parsing)
+        assert_eq!(response.response_type, DiagServiceResponseType::Positive);
+
+        // Verify raw data matches input
+        assert_eq!(response.data, request_payload);
+
+        // Verify mapped data exists
+        assert!(response.mapped_data.is_some());
+
+        let mapped = response.mapped_data.unwrap();
+
+        // Verify no mapping errors
+        assert_eq!(mapped.errors.len(), 0);
+
+        // Verify all parameters were parsed (flattened from structure)
+        assert!(mapped.data.contains_key("sid"));
+        assert!(mapped.data.contains_key("param1"));
+        assert!(mapped.data.contains_key("param2"));
+        assert!(mapped.data.contains_key("param3"));
+    }
+
+    #[tokio::test]
+    async fn test_convert_request_from_uds_with_map_to_json_false() {
+        let (ecu_manager, dc, sid, _struct_byte_len) = create_ecu_manager_with_struct_service(1);
+
+        // Create a complete valid UDS request payload
+        let request_payload = vec![
+            sid, // SID
+            0x12, 0x34, // param1 (u16)
+            0x40, 0x49, 0x0F, 0xDB, // param2 (f32)
+            b'T', b'e', b's', b't', // param3 (ascii string)
+        ];
+
+        let payload = create_payload(request_payload.clone());
+
+        // Convert with map_to_json = false
+        let result = ecu_manager
+            .convert_request_from_uds(&dc, &payload, false)
+            .await;
+
+        assert!(result.is_ok());
+        let response = result.unwrap();
+
+        // Should have raw data but no mapped data (map_to_json=false)
+        assert_eq!(response.data, request_payload);
+        assert!(response.mapped_data.is_none());
+        assert_eq!(response.response_type, DiagServiceResponseType::Positive);
     }
 }
