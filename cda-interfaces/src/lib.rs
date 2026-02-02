@@ -211,6 +211,12 @@ const OPERATIONS_PREFIXES: [u8; 5] = [
     service_ids::REQUEST_TRANSFER_EXIT,
 ];
 
+pub const SERVICE_IDS_PARAMETER_META_DATA: [u8; 3] = [
+    service_ids::READ_DATA_BY_IDENTIFIER,
+    service_ids::WRITE_DATA_BY_IDENTIFIER,
+    service_ids::ROUTINE_CONTROL,
+];
+
 impl TesterPresentType {
     #[must_use]
     pub fn is_functional(&self) -> bool {

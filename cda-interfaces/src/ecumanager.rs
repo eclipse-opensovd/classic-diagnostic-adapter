@@ -22,6 +22,41 @@ use crate::{
     diagservices::{DiagServiceResponse, UdsPayloadData},
 };
 
+/// Metadata for a service parameter, including constant values for discovery
+#[derive(Debug, Clone, Serialize)]
+pub struct ServiceParameterMetadata {
+    /// Parameter short name (e.g., "`RDBI_DID`", "SESSION")
+    pub name: String,
+    /// Parameter semantic (e.g., "DATA-IDENTIFIER", "SESSION")
+    pub semantic: Option<String>,
+    /// Parameter type and constant value if applicable
+    pub param_type: ParameterTypeMetadata,
+}
+
+/// Parameter type with constant value metadata
+#[derive(Debug, Clone, Serialize)]
+pub enum ParameterTypeMetadata {
+    /// CODED-CONST parameter with fixed value from MDD
+    CodedConst { coded_value: String },
+    /// PHYS-CONST parameter with constant value from MDD
+    PhysConst { phys_constant_value: String },
+    /// VALUE or other dynamic parameter types
+    Value,
+}
+
+/// MUX case information for service response routing
+#[derive(Debug, Clone, Serialize)]
+pub struct MuxCaseInfo {
+    /// Case short name (e.g., "`RDBI_DID_VIN`", "`RDBI_DID_FTP`")
+    pub short_name: String,
+    /// Case long name (e.g., "VIN", "flashTimingParameter")
+    pub long_name: Option<String>,
+    /// Lower limit value for this case (DID value for `ReadDataByIdentifier`)
+    pub lower_limit: Option<String>,
+    /// Upper limit value for this case
+    pub upper_limit: Option<String>,
+}
+
 #[derive(Clone, Copy, Debug, Serialize, PartialEq)]
 pub enum EcuState {
     Online,
@@ -173,6 +208,27 @@ pub trait EcuManager:
         security_plugin: &DynamicPlugin,
         data: Option<UdsPayloadData>,
     ) -> impl Future<Output = Result<ServicePayload, DiagServiceError>> + Send;
+    /// Convert a UDS REQUEST payload into a `DiagServiceResponse` using the
+    /// REQUEST definition in MDD. This function parses incoming REQUEST payloads
+    /// (not responses) for bidirectional UDS-to-SOVD conversion scenarios.
+    ///
+    /// # Errors
+    /// Returns `Err` in the following cases:
+    /// - **Service not supported**: The service has no REQUEST definition in the database
+    ///   (returns `RequestNotSupported`). This indicates the MDD database doesn't define
+    ///   how to parse request payloads for this service.
+    /// - **Invalid database**: Required parameter metadata (short names) is missing from
+    ///   the database structure (returns `InvalidDatabase`). This is a database integrity issue.
+    /// - **Data mapping errors**: Individual parameters cannot be decoded from the raw UDS bytes
+    ///   due to type mismatches, invalid values, or insufficient payload length
+    ///   (returns `DataError`).
+    ///   These errors are collected and included in the response structure for debugging.
+    fn convert_request_from_uds(
+        &self,
+        diag_service: &DiagComm,
+        payload: &ServicePayload,
+        map_to_json: bool,
+    ) -> impl Future<Output = Result<Self::Response, DiagServiceError>> + Send;
     /// Looks up a single ECU job by name for the current ECU variant.
     /// # Errors
     /// Will return `Err` if the job cannot be found in the database
@@ -278,6 +334,26 @@ pub trait EcuManager:
         service_id: u8,
         name: &str,
     ) -> Result<DiagComm, DiagServiceError>;
+
+    /// Get parameter metadata for a specific service, including constant values for PHYS-CONST and
+    /// CODED-CONST parameters.
+    /// This is useful for discovering which DIDs are handled by which services.
+    /// # Errors
+    /// Will return `Err` if the service cannot be found or parameter metadata cannot be extracted.
+    fn get_service_parameter_metadata(
+        &self,
+        service_name: &str,
+    ) -> Result<Vec<ServiceParameterMetadata>, DiagServiceError>;
+    /// Get MUX case information for services using multiplexed responses
+    /// (e.g., `ReadDataByIdentifier` with different DIDs).
+    /// The MUX cases contain the actual DID values in their `lower_limit/upper_limit` fields.
+    /// # Errors
+    /// Will return `Err` if MUX case information cannot be retrieved.
+    fn get_mux_cases_for_service(
+        &self,
+        service_name: &str,
+    ) -> Result<Vec<MuxCaseInfo>, DiagServiceError>;
+
     /// Retrieve all `read` services for the current ECU variant.
     fn get_components_data_info(&self) -> Vec<ComponentDataInfo>;
     /// Retrieve all configuration type services for the current ECU variant.
