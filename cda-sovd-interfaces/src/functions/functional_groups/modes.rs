@@ -68,3 +68,41 @@ pub mod dtcsetting {
         pub type Response<T> = DataResponse<T, ResponseElement>;
     }
 }
+
+pub mod session {
+    pub mod get {
+        use crate::functions::functional_groups::modes::DataResponse;
+
+        pub type ResponseElement = crate::common::modes::get::Mode<String>;
+        pub type Response<T> = DataResponse<T, ResponseElement>;
+    }
+    pub mod put {
+        use cda_interfaces::HashMap;
+        use serde::{Deserialize, Serialize};
+
+        use crate::error::ApiErrorResponse;
+
+        #[derive(Debug, Deserialize, Serialize, schemars::JsonSchema)]
+        #[schemars(rename = "FunctionalModesSessionRequest")]
+        #[rustfmt::skip] // skip formatting due to the reference to the other module
+        pub struct Request {
+            pub value: String,
+            /// Defines the expiration in seconds for the given mode
+            /// see [`components::ecu::modes::security_and_session::put::Request`](crate::components::ecu::modes::security_and_session::put::Request)
+            pub mode_expiration: Option<u64>,
+        }
+
+        pub type ResponseElement = crate::common::modes::put::Response<String>;
+
+        #[derive(Debug, Deserialize, Serialize, schemars::JsonSchema)]
+        pub struct Response<T> {
+            pub modes: HashMap<String, ResponseElement>,
+            /// Errors that occurred during the operation
+            #[serde(skip_serializing_if = "Vec::is_empty")]
+            pub errors: Vec<ApiErrorResponse<T>>,
+            #[schemars(skip)]
+            #[serde(skip_serializing_if = "Option::is_none")]
+            pub schema: Option<schemars::Schema>,
+        }
+    }
+}

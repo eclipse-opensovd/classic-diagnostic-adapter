@@ -11,6 +11,8 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+use std::time::Duration;
+
 use aide::transform::TransformOperation;
 use axum::{
     Json,
@@ -22,7 +24,10 @@ use cda_interfaces::{DiagServiceError, HashMap, UdsEcu, diagservices::DiagServic
 use http::StatusCode;
 use serde::Serialize;
 use sovd_interfaces::{
-    common::modes::{COMM_CONTROL_ID, COMM_CONTROL_NAME, DTC_SETTING_ID, DTC_SETTING_NAME},
+    common::modes::{
+        COMM_CONTROL_ID, COMM_CONTROL_NAME, DTC_SETTING_ID, DTC_SETTING_NAME, SESSION_ID,
+        SESSION_NAME,
+    },
     error::ErrorCode,
 };
 
@@ -57,6 +62,11 @@ pub(crate) async fn get(
                     name: Some(DTC_SETTING_NAME.to_owned()),
                     translation_id: None,
                 },
+                ResponseItem {
+                    id: SESSION_ID.to_owned(),
+                    name: Some(SESSION_NAME.to_owned()),
+                    translation_id: None,
+                },
             ],
             schema,
         }),
@@ -80,6 +90,8 @@ pub(crate) fn docs_get(op: TransformOperation) -> TransformOperation {
         })
 }
 
+// there is not much benefit in passing a structure here,
+#[allow(clippy::too_many_arguments)]
 async fn handle_mode_change<T: UdsEcu + Clone>(
     state: &crate::sovd::functions::functional_groups::WebserverFgState<T>,
     security_plugin: Box<dyn cda_plugin_security::SecurityPlugin>,
@@ -87,6 +99,7 @@ async fn handle_mode_change<T: UdsEcu + Clone>(
     id: &str,
     value: &str,
     parameters: Option<HashMap<String, serde_json::Value>>,
+    expiration: Option<Duration>,
     include_schema: bool,
 ) -> Response {
     let claims = security_plugin.as_auth_plugin().claims();
@@ -109,6 +122,7 @@ async fn handle_mode_change<T: UdsEcu + Clone>(
             service_id,
             value,
             parameters,
+            expiration,
             false,
         )
         .await
@@ -335,6 +349,7 @@ pub(crate) mod commctrl {
             COMM_CONTROL_ID,
             &request_body.value,
             request_body.parameters,
+            None,
             query.include_schema,
         )
         .await
@@ -427,6 +442,7 @@ pub(crate) mod dtcsetting {
             DTC_SETTING_ID,
             &request_body.value,
             request_body.parameters,
+            None,
             query.include_schema,
         )
         .await
@@ -449,5 +465,88 @@ pub(crate) mod dtcsetting {
         .with(openapi::error_internal_server)
         .with(openapi::error_bad_request)
         .with(openapi::error_bad_gateway)
+    }
+}
+
+pub(crate) mod session {
+    use std::time::Duration;
+
+    use aide::UseApi;
+    use axum::extract::State;
+    use cda_interfaces::service_ids;
+    use cda_plugin_security::Secured;
+    use sovd_interfaces::functions::functional_groups::{self, modes as sovd_modes};
+
+    use super::{
+        ApiError, Json, Query, Response, SESSION_ID, SESSION_NAME, TransformOperation, UdsEcu,
+        WithRejection, handle_mode_change, handle_mode_get,
+    };
+    use crate::{
+        openapi,
+        sovd::{error::VendorErrorCode, functions::functional_groups::WebserverFgState},
+    };
+
+    pub(crate) async fn get<T: UdsEcu + Clone>(
+        UseApi(Secured(_security_plugin), _): UseApi<Secured, ()>,
+        WithRejection(Query(query), _): WithRejection<Query<sovd_modes::Query>, ApiError>,
+        State(state): State<WebserverFgState<T>>,
+    ) -> Response {
+        handle_mode_get(
+            &state,
+            service_ids::SESSION_CONTROL,
+            query.include_schema,
+            |value| sovd_modes::session::get::ResponseElement {
+                name: Some(SESSION_NAME.to_owned()),
+                translation_id: None,
+                value: Some(value),
+                schema: None,
+            },
+        )
+        .await
+    }
+
+    pub(crate) fn docs_get(op: TransformOperation) -> TransformOperation {
+        op.description("Retrieve the active session mode for all ECUs in the functional group")
+            .response_with::<200, Json<sovd_modes::session::get::ResponseElement>, _>(|res| {
+                res.description("Current session value for all ECUs in the functional group")
+            })
+            .with(openapi::error_not_found)
+    }
+
+    pub(crate) async fn put<T: UdsEcu + Clone>(
+        UseApi(Secured(security_plugin), _): UseApi<Secured, ()>,
+        WithRejection(Query(query), _): WithRejection<Query<sovd_modes::Query>, ApiError>,
+        State(state): State<WebserverFgState<T>>,
+        WithRejection(Json(request_body), _): WithRejection<
+            Json<sovd_modes::session::put::Request>,
+            ApiError,
+        >,
+    ) -> Response {
+        handle_mode_change(
+            &state,
+            security_plugin,
+            service_ids::SESSION_CONTROL,
+            SESSION_ID,
+            &request_body.value,
+            None,
+            request_body.mode_expiration.map(Duration::from_secs),
+            query.include_schema,
+        )
+        .await
+    }
+
+    pub(crate) fn docs_put(op: TransformOperation) -> TransformOperation {
+        openapi::request_json_and_octet::<functional_groups::data::DataRequestPayload>(op)
+            .description("Set the Session mode - sends to all ECUs in the group")
+            .response_with::<200, Json<sovd_modes::session::put::Response<VendorErrorCode>>, _>(
+                |res| {
+                    res.description("Response with results from all ECUs in the functional group")
+                },
+            )
+            .with(openapi::error_forbidden)
+            .with(openapi::error_not_found)
+            .with(openapi::error_internal_server)
+            .with(openapi::error_bad_request)
+            .with(openapi::error_bad_gateway)
     }
 }
