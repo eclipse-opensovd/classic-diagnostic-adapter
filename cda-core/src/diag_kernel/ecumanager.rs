@@ -257,20 +257,28 @@ impl<S: SecurityPlugin> cda_interfaces::EcuManager for EcuManager<S> {
                 };
 
                 // todo read this from the variant detection instead of assuming default, see #110
+                // Only set default state if not already set - otherwise we'd override
+                // the actual session/security state during re-detection.
+                // This prevents an issue if the variant detection is running _after_
+                // the session has been changed.
+                // For example when switching to 'extended' immediately after the service
+                // signals 'ready'
                 let mut states = self.ecu_service_states.write().await;
-                states.insert(
-                    service_ids::SESSION_CONTROL,
-                    self.default_state(semantics::SESSION)?,
-                );
-                states.insert(
-                    service_ids::SECURITY_ACCESS,
-                    self.default_state(semantics::SECURITY)?,
-                );
-                states.insert(service_ids::CONTROL_DTC_SETTING, "on".to_owned());
-                states.insert(
-                    service_ids::COMMUNICATION_CONTROL,
-                    "enablerxandenabletx".to_owned(),
-                );
+                states
+                    .entry(service_ids::SESSION_CONTROL)
+                    .or_insert(self.default_state(semantics::SESSION)?);
+
+                states
+                    .entry(service_ids::SECURITY_ACCESS)
+                    .or_insert(self.default_state(semantics::SECURITY)?);
+
+                states
+                    .entry(service_ids::CONTROL_DTC_SETTING)
+                    .or_insert_with(|| "on".to_owned());
+
+                states
+                    .entry(service_ids::COMMUNICATION_CONTROL)
+                    .or_insert_with(|| "enablerxandenabletx".to_owned());
 
                 Ok(())
             }
@@ -3214,15 +3222,24 @@ impl<S: SecurityPlugin> EcuManager<S> {
             .iter()
             .find_map(|st_ref| {
                 let state_transition = st_ref.state_transition()?;
-                state_chart
-                    .state_transitions()?
-                    .iter()
-                    .find(|chart_st| chart_st.source_short_name_ref() == Some(current_state))
-                    .and_then(|_| {
-                        state_transition
-                            .target_short_name_ref()
-                            .map(ToOwned::to_owned)
-                    })
+                // Only return a target if the service's state transition
+                // matches one in this state chart.
+                // We match by source and target to ensure a SecurityAccess service
+                // (which references SECURITY state chart transitions) won't accidentally
+                // match transitions in the SESSION state chart.
+                let transition_source = state_transition.source_short_name_ref()?;
+                let transition_target = state_transition.target_short_name_ref()?;
+
+                // Check if this transition exists in the state chart and starts from current state
+                if state_chart.state_transitions()?.iter().any(|chart_st| {
+                    chart_st.source_short_name_ref() == Some(transition_source)
+                        && chart_st.target_short_name_ref() == Some(transition_target)
+                        && transition_source == current_state
+                }) {
+                    Some(transition_target.to_owned())
+                } else {
+                    None
+                }
             })
     }
 

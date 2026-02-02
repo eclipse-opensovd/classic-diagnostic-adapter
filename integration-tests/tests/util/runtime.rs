@@ -153,6 +153,7 @@ async fn initialize_runtime() -> Result<TestRuntime, TestingError> {
     };
 
     register_cleanup();
+    register_panic_hook();
     if use_docker() {
         start_docker_compose(cda_port, gateway_port, sim_control_port)?;
     } else {
@@ -343,6 +344,74 @@ fn docker_compose_down(container: Option<String>) -> Result<(), TestingError> {
         .status()
         .map_err(|e| TestingError::ProcessFailed(format!("Failed to stop docker compose: {e}")))?;
     check_command_success(status, "docker compose down failed")
+}
+
+fn dump_docker_logs() {
+    if !use_docker() {
+        tracing::debug!("Skipping docker logs dump - not using docker");
+        return;
+    }
+
+    let test_container_dir = match test_container_dir() {
+        Ok(dir) => dir,
+        Err(e) => {
+            tracing::error!("Failed to get test container dir for logs: {e}");
+            return;
+        }
+    };
+
+    tracing::error!("========== Docker Compose Logs ==========");
+
+    let output = std::process::Command::new("docker")
+        .arg("compose")
+        .arg("logs")
+        .arg("--no-color")
+        .current_dir(&test_container_dir)
+        .output();
+
+    match output {
+        Ok(output) => {
+            if !output.stdout.is_empty() {
+                let log_text = strip_ansi_codes(&String::from_utf8_lossy(&output.stdout));
+                tracing::error!("{log_text}");
+            }
+            if !output.stderr.is_empty() {
+                let log_text = strip_ansi_codes(&String::from_utf8_lossy(&output.stderr));
+                tracing::error!("{log_text}");
+            }
+        }
+        Err(e) => {
+            tracing::error!("Failed to fetch docker compose logs: {e}");
+        }
+    }
+
+    tracing::error!("========== End Docker Compose Logs ==========");
+}
+
+/// Strips ANSI escape codes from a string (e.g., color codes like \x1b[0m)
+fn strip_ansi_codes(s: &str) -> String {
+    let mut result = String::with_capacity(s.len());
+    let mut chars = s.chars().peekable();
+
+    while let Some(c) = chars.next() {
+        if c == '\x1b' {
+            // Skip the escape sequence
+            if chars.peek() == Some(&'[') {
+                chars.next(); // consume '['
+                // Consume until we hit a letter (the terminator)
+                while let Some(&next) = chars.peek() {
+                    chars.next();
+                    if next.is_ascii_alphabetic() {
+                        break;
+                    }
+                }
+            }
+        } else {
+            result.push(c);
+        }
+    }
+
+    result
 }
 
 fn write_docker_env_file(
@@ -550,6 +619,23 @@ fn register_cleanup() {
     unsafe {
         libc::atexit(cleanup_handler);
     }
+}
+
+/// Registers a custom panic hook that dumps docker logs before the default panic handler runs.
+/// This ensures container logs are captured on any test failure (assert, unwrap, etc.)
+fn register_panic_hook() {
+    use std::sync::Once;
+    static HOOK_REGISTERED: Once = Once::new();
+
+    HOOK_REGISTERED.call_once(|| {
+        let default_hook = std::panic::take_hook();
+        std::panic::set_hook(Box::new(move |panic_info| {
+            // Dump docker logs before the default panic output
+            dump_docker_logs();
+            // Call the default panic handler to print the panic message and backtrace
+            default_hook(panic_info);
+        }));
+    });
 }
 
 fn check_command_success(

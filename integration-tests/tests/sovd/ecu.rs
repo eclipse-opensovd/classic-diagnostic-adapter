@@ -733,8 +733,8 @@ async fn test_ecu_session_reset_on_lock_reacquire() {
     let lock_id =
         extract_field_from_json::<String>(&response_to_json(&ecu_lock).unwrap(), "id").unwrap();
 
-    // Set session with 3s expiry
-    let session_expiration = 3u64;
+    // Set session with 2s expiry
+    let session_expiration = 2u64;
     let switch_session_result: modes::security_and_session::put::Response<String> = put_mode(
         &runtime.config,
         &auth,
@@ -769,6 +769,7 @@ async fn test_ecu_session_reset_on_lock_reacquire() {
     let ecu_state_after_expiry = ecusim::get_ecu_state(&runtime.ecu_sim, "flxc1000")
         .await
         .expect("Failed to get ECU sim state after session expiry");
+
     assert_eq!(
         ecu_state_after_expiry.session_state,
         Some(ecusim::SessionState::Default),
