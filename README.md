@@ -54,6 +54,11 @@ cargo build --release
 
 ## developing
 
+### pre commit
+```shell
+uv run https://raw.githubusercontent.com/eclipse-opensovd/cicd-workflows/init/run_checks.py
+```
+
 ### codestyle
 
 see [codestyle](CODESTYLE.md)
