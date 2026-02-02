@@ -433,6 +433,7 @@ pub trait UdsEcu: Send + Sync + 'static {
     ///
     /// # Errors
     /// Returns error if the functional group doesn't exist or if the request cannot be sent
+    #[allow(clippy::too_many_arguments)] // there is not much benefit in passing a structure here
     async fn set_functional_state(
         &self,
         group_name: &str,
@@ -440,6 +441,7 @@ pub trait UdsEcu: Send + Sync + 'static {
         sid: u8,
         service_name: &str,
         params: Option<HashMap<String, serde_json::Value>>,
+        mode_expiration: Option<Duration>,
         map_to_json: bool,
     ) -> Result<HashMap<String, Result<Self::Response, DiagServiceError>>, DiagServiceError>;
 }
@@ -677,6 +679,7 @@ pub mod mock {
                 sid: u8,
                 service_name: &str,
                 params: Option<HashMap<String, serde_json::Value>>,
+                mode_expiration: Option<Duration>,
                 map_to_json: bool,
             ) -> Result<HashMap<String, Result<<MockUdsEcu as UdsEcu>::Response,
                     DiagServiceError>>, DiagServiceError>;
