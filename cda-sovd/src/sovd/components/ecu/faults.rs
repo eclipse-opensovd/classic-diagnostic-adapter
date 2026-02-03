@@ -20,20 +20,25 @@ use axum::{
 };
 use axum_extra::extract::WithRejection;
 use cda_interfaces::{
-    DynamicPlugin, UdsEcu, datatypes::DtcRecordAndStatus, diagservices::DiagServiceResponse,
+    DynamicPlugin, UdsEcu,
+    datatypes::DtcRecordAndStatus,
+    diagservices::{DiagServiceResponse, DiagServiceResponseType},
     file_manager::FileManager,
 };
 use cda_plugin_security::Secured;
 use serde_qs::axum::QsQuery;
 use sovd_interfaces::components::ecu::{
     faults,
-    faults::{Fault, get::FaultQuery},
+    faults::{Fault, delete::FaultQuery as DeleteFaultQuery, get::FaultQuery as GetFaultQuery},
 };
 
 use crate::{
     openapi,
     sovd::{
-        IntoSovd, WebserverEcuState, create_schema, error::ApiError, faults::faults::FaultStatus,
+        IntoSovd, WebserverEcuState, create_schema,
+        error::{ApiError, ErrorWrapper, api_error_from_diag_response},
+        faults::faults::FaultStatus,
+        locks::validate_lock,
         remove_descriptions_recursive,
     },
 };
@@ -76,7 +81,7 @@ pub(crate) async fn get<
 >(
     UseApi(Secured(security_plugin), _): UseApi<Secured, ()>,
     State(WebserverEcuState { ecu_name, uds, .. }): State<WebserverEcuState<R, T, U>>,
-    WithRejection(QsQuery(query), _): WithRejection<QsQuery<FaultQuery>, ApiError>,
+    WithRejection(QsQuery(query), _): WithRejection<QsQuery<GetFaultQuery>, ApiError>,
 ) -> Response {
     let dtcs = match uds
         .ecu_dtc_by_mask(
@@ -129,6 +134,55 @@ pub(crate) fn docs_get(op: TransformOperation) -> TransformOperation {
         .with(openapi::error_forbidden)
         .with(openapi::error_not_found)
         .id("ecu_faults_get")
+}
+
+pub(crate) async fn delete<
+    R: DiagServiceResponse + Send + Sync,
+    T: UdsEcu + Send + Sync + Clone,
+    U: FileManager + Send + Sync + Clone,
+>(
+    UseApi(Secured(security_plugin), _): UseApi<Secured, ()>,
+    State(WebserverEcuState {
+        ecu_name,
+        uds,
+        locks,
+        ..
+    }): State<WebserverEcuState<R, T, U>>,
+    WithRejection(QsQuery(_query), _): WithRejection<QsQuery<DeleteFaultQuery>, ApiError>,
+) -> Response {
+    let claims = security_plugin.claims();
+    if let Some(validation_failure) = validate_lock(&claims, &ecu_name, &locks, false).await {
+        return validation_failure;
+    }
+    // todo: query.scope to specify which group should be cleared not yet implemented!
+    match uds
+        .delete_dtcs(&ecu_name, &(security_plugin as DynamicPlugin), None)
+        .await
+    {
+        Ok(res) => match res.response_type() {
+            DiagServiceResponseType::Positive => StatusCode::NO_CONTENT.into_response(),
+            DiagServiceResponseType::Negative => api_error_from_diag_response(&res, false),
+        },
+        Err(e) => ErrorWrapper {
+            error: e.into(),
+            include_schema: false,
+        }
+        .into_response(),
+    }
+}
+
+pub(crate) fn docs_delete(op: TransformOperation) -> TransformOperation {
+    op.description(
+        "This endpoint removes all DTCs for the specified component. If a scope is set via query \
+         parameter, only that group of DTCs will be cleared.",
+    )
+    .response_with::<204, (), _>(|res| {
+        res.description("On successfull call a 204 without content will be returned.")
+    })
+    .with(openapi::error_bad_request)
+    .with(openapi::error_forbidden)
+    .with(openapi::error_not_found)
+    .id("ecu_faults_delete")
 }
 
 pub(crate) mod id {
@@ -314,6 +368,51 @@ pub(crate) mod id {
             .with(openapi::error_not_found)
             .id("ecu_faults_get")
     }
+
+    pub(crate) async fn delete<
+        R: DiagServiceResponse + Send + Sync,
+        T: UdsEcu + Send + Sync + Clone,
+        U: FileManager + Send + Sync + Clone,
+    >(
+        UseApi(Secured(security_plugin), _): UseApi<Secured, ()>,
+        Path(IdPathParam { id }): Path<IdPathParam>,
+        State(WebserverEcuState {
+            ecu_name,
+            uds,
+            locks,
+            ..
+        }): State<WebserverEcuState<R, T, U>>,
+    ) -> Response {
+        let claims = security_plugin.claims();
+        if let Some(validation_failure) = validate_lock(&claims, &ecu_name, &locks, false).await {
+            return validation_failure;
+        }
+        match uds
+            .delete_dtcs(&ecu_name, &(security_plugin as DynamicPlugin), Some(id))
+            .await
+        {
+            Ok(res) => match res.response_type() {
+                DiagServiceResponseType::Positive => StatusCode::NO_CONTENT.into_response(),
+                DiagServiceResponseType::Negative => api_error_from_diag_response(&res, false),
+            },
+            Err(e) => ErrorWrapper {
+                error: e.into(),
+                include_schema: false,
+            }
+            .into_response(),
+        }
+    }
+
+    pub(crate) fn docs_delete(op: TransformOperation) -> TransformOperation {
+        op.description("Clear the given DTC from the specified component.")
+            .response_with::<204, (), _>(|res| {
+                res.description("Returns 204 without content if DTC could successfully be deleted.")
+            })
+            .with(openapi::error_bad_request)
+            .with(openapi::error_forbidden)
+            .with(openapi::error_not_found)
+            .id("ecu_faults_delete_by_id")
+    }
 }
 
 #[cfg(test)]
@@ -380,7 +479,7 @@ mod tests {
             MockFileManager,
         >(ecu_name, mock_uds, mock_file_manager);
 
-        let query = FaultQuery {
+        let query = GetFaultQuery {
             status: None,
             severity: None,
             scope: None,

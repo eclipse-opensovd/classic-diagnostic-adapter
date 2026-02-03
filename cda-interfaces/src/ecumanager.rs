@@ -303,6 +303,18 @@ pub trait EcuManager:
     /// Retrieve the revision of the ECU variant if available,
     /// otherwise return 0.0.0
     fn revision(&self) -> String;
+
+    /// Convert a response to service 0x14 according to
+    /// ISO-14229-1 12.2.3 and 12.2.4
+    /// # Errors
+    /// - `DiagServiceError::UnexpectedResponse` if the SID for the positive response doesn't
+    ///   match 0x54
+    /// - `DiagServiceError::BadPayload` if the SID is missing
+    fn convert_service_14_response(
+        &self,
+        diag_comm: DiagComm,
+        response: ServicePayload,
+    ) -> Result<Self::Response, DiagServiceError>;
 }
 
 #[derive(PartialEq, Eq, Debug, Clone, Copy)]

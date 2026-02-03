@@ -9,6 +9,7 @@
 #
 # SPDX-License-Identifier: Apache-2.0
 
+from collections.abc import Iterable
 from odxtools.compumethods.compucategory import CompuCategory
 from odxtools.compumethods.compuconst import CompuConst
 from odxtools.compumethods.compuinternaltophys import CompuInternalToPhys
@@ -95,6 +96,27 @@ def find_dop_by_shortname(
                 return res
 
     raise ValueError(f"Could not find {shortname} in dops")
+
+
+def find_dtc_dop(
+    container: DiagLayerRaw | DiagLayerContainer, shortname: str
+) -> DataObjectProperty:
+    if isinstance(container, DiagLayerRaw):
+        for item in container.diag_data_dictionary_spec.dtc_dops:
+            if item.short_name == shortname:
+                return item
+
+    if isinstance(container, DiagLayerContainer):
+        for base_variant in container.base_variants.values():
+            res = find_dtc_dop(base_variant.base_variant_raw, shortname)
+            if res is not None:
+                return res
+        for ecu_variant in container.ecu_variants.values():
+            res = find_dtc_dop(ecu_variant.ecu_variant_raw, shortname)
+            if res is not None:
+                return res
+
+    raise ValueError(f"Could not find DTC {shortname} in dops")
 
 
 def coded_const_int_parameter(
@@ -330,3 +352,12 @@ def negative_response(
         ),
         response_type=ResponseType.NEGATIVE,
     )
+
+
+def named_item_list_from_parts(
+    parts: Iterable[NamedItemList],
+) -> NamedItemList:
+    result = NamedItemList()
+    for part in parts:
+        result.extend(part)
+    return result

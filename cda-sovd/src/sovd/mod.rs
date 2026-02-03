@@ -500,10 +500,15 @@ fn ecu_route<
                 x_sovd2uds_bulk_data::mdd_embedded_files::id::docs_get,
             ),
         )
-        .api_route("/faults", routing::get_with(faults::get, faults::docs_get))
+        .api_route(
+            "/faults",
+            routing::get_with(faults::get, faults::docs_get)
+                .delete_with(faults::delete, faults::docs_delete),
+        )
         .api_route(
             "/faults/{id}",
-            routing::get_with(faults::id::get, faults::id::docs_get),
+            routing::get_with(faults::id::get, faults::id::docs_get)
+                .delete_with(faults::id::delete, faults::id::docs_delete),
         )
         .with_state(ecu_state)
         .with_path_items(|op| op.tag(ecu_name));

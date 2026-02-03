@@ -19,8 +19,8 @@ use cda_interfaces::{
     EcuState, EcuVariant, HashMap, HashMapExtensions, HashSet, HashSetExtensions, Protocol,
     STRINGS, SecurityAccess, ServicePayload, StringId,
     datatypes::{
-        AddressingMode, ComParams, ComplexComParamValue, ComponentConfigurationsInfo,
-        ComponentDataInfo, DTC_CODE_BIT_LEN, DatabaseNamingConvention,
+        AddressingMode, CLEAR_FAULT_MEM_POS_RESPONSE_SID, ComParams, ComplexComParamValue,
+        ComponentConfigurationsInfo, ComponentDataInfo, DTC_CODE_BIT_LEN, DatabaseNamingConvention,
         DiagnosticServiceAffixPosition, DtcLookup, DtcReadInformationFunction, RetryPolicy, SdSdg,
         TesterPresentSendType, semantics, single_ecu,
     },
@@ -505,20 +505,7 @@ impl<S: SecurityPlugin> cda_interfaces::EcuManager for EcuManager<S> {
             .map(datatypes::DiagComm)
             .ok_or_else(|| DiagServiceError::InvalidDatabase("No DiagComm found".to_owned()))?;
 
-        let sid = match payload.data.as_slice() {
-            [service_ids::NEGATIVE_RESPONSE, sid_nrq, ..] => *sid_nrq,
-            [service_ids::NEGATIVE_RESPONSE] => {
-                return Err(DiagServiceError::BadPayload(
-                    "NRC without accompanying SID_RQ received".to_owned(),
-                ));
-            }
-            [sid, ..] => *sid,
-            [] => {
-                return Err(DiagServiceError::BadPayload(
-                    "Missing service id".to_owned(),
-                ));
-            }
-        };
+        let sid = util::try_extract_sid_from_payload(payload.data.as_slice())?;
 
         let mut uds_payload = Payload::new(&payload.data);
         let response_first_byte = uds_payload.first().ok_or_else(|| {
@@ -1396,6 +1383,29 @@ impl<S: SecurityPlugin> cda_interfaces::EcuManager for EcuManager<S> {
             .ok()
             .and_then(|s| s.revision())
             .map_or_else(|| "0.0.0".to_owned(), ToOwned::to_owned)
+    }
+
+    fn convert_service_14_response(
+        &self,
+        diag_comm: DiagComm,
+        response: ServicePayload,
+    ) -> Result<DiagServiceResponseStruct, DiagServiceError> {
+        let sid = util::try_extract_sid_from_payload(response.data.as_slice())?;
+        let response_type = match sid {
+            CLEAR_FAULT_MEM_POS_RESPONSE_SID => DiagServiceResponseType::Positive,
+            service_ids::NEGATIVE_RESPONSE => DiagServiceResponseType::Negative,
+            unknown => {
+                return Err(DiagServiceError::UnexpectedResponse(Some(format!(
+                    "received unexpected response with SID {unknown:04x}"
+                ))));
+            }
+        };
+        Ok(DiagServiceResponseStruct {
+            service: diag_comm,
+            data: response.data,
+            mapped_data: None,
+            response_type,
+        })
     }
 }
 

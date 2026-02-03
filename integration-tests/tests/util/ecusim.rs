@@ -11,7 +11,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 use http::StatusCode;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 
 use crate::util::{TestingError, runtime::EcuSim};
 
@@ -112,6 +112,22 @@ pub(crate) struct EcuState {
     pub(crate) dtc_setting_type: Option<DtcSettingType>,
 }
 
+#[derive(Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+#[allow(dead_code)]
+pub(crate) struct DtcMinimal {
+    pub(crate) id: String,
+    pub(crate) status_mask: String,
+    pub(crate) emissions_related: bool,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", transparent)]
+#[allow(dead_code)]
+pub(crate) struct DtcState {
+    pub(crate) dtcs: Vec<DtcMinimal>,
+}
+
 pub(crate) async fn switch_variant(
     sim: &EcuSim,
     ecu: &str,
@@ -150,4 +166,68 @@ pub(crate) async fn get_ecu_state(sim: &EcuSim, ecu: &str) -> Result<EcuState, T
 fn sim_endpoint(sim: &EcuSim) -> Result<reqwest::Url, TestingError> {
     let url = reqwest::Url::parse(&format!("http://{}:{}", sim.host, sim.control_port))?;
     Ok(url)
+}
+
+/// Add a DTC to the ECU simulator
+pub(crate) async fn add_dtc(
+    sim: &EcuSim,
+    ecu: &str,
+    fault_memory: &str,
+    dtc: &DtcMinimal,
+) -> Result<(), TestingError> {
+    let mut url = sim_endpoint(sim)?;
+    url.path_segments_mut()
+        .map_err(|()| TestingError::InvalidUrl("cannot modify URL path".to_owned()))?
+        .push(ecu)
+        .push("dtc")
+        .push(fault_memory);
+
+    let body = serde_json::to_string(dtc)
+        .map_err(|_| TestingError::InvalidData("cannot serialize object to JSON".to_owned()))?;
+
+    crate::util::http::send_request(
+        StatusCode::CREATED,
+        http::Method::PUT,
+        Some(&body),
+        None,
+        url,
+    )
+    .await?;
+    Ok(())
+}
+
+/// Get all DTCs from the ECU simulator
+pub(crate) async fn get_dtcs(
+    sim: &EcuSim,
+    ecu: &str,
+    fault_memory: &str,
+) -> Result<DtcState, TestingError> {
+    let mut url = sim_endpoint(sim)?;
+    url.path_segments_mut()
+        .map_err(|()| TestingError::InvalidUrl("cannot modify URL path".to_owned()))?
+        .push(ecu)
+        .push("dtc")
+        .push(fault_memory);
+
+    let response =
+        crate::util::http::send_request(StatusCode::OK, http::Method::GET, None, None, url).await?;
+
+    crate::util::http::response_to_t(&response)
+}
+
+/// Delete all DTCs from the ECU simulator
+pub(crate) async fn clear_all_dtcs(
+    sim: &EcuSim,
+    ecu: &str,
+    fault_memory: &str,
+) -> Result<(), TestingError> {
+    let mut url = sim_endpoint(sim)?;
+    url.path_segments_mut()
+        .map_err(|()| TestingError::InvalidUrl("cannot modify URL path".to_owned()))?
+        .push(ecu)
+        .push("dtc")
+        .push(fault_memory);
+
+    crate::util::http::send_request(StatusCode::OK, http::Method::DELETE, None, None, url).await?;
+    Ok(())
 }

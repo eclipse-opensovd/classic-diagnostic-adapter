@@ -10,7 +10,7 @@
  *
  * SPDX-License-Identifier: Apache-2.0
  */
-use crate::DiagServiceError;
+use crate::{DiagServiceError, service_ids};
 
 pub mod tracing {
     #[must_use]
@@ -357,6 +357,28 @@ pub fn ends_with_ignore_ascii_case(text: &str, suffix: &str) -> bool {
         && text[text.len().saturating_sub(suffix.len())..].eq_ignore_ascii_case(suffix)
 }
 
+/// Tries to extract the SID from positive and negative responses
+/// # Errors
+/// - `DiagServiceError` in case the SID is missing
+#[inline]
+pub fn try_extract_sid_from_payload(payload: &[u8]) -> Result<u8, DiagServiceError> {
+    let sid = match payload {
+        [service_ids::NEGATIVE_RESPONSE, sid_nrq, ..] => *sid_nrq,
+        [service_ids::NEGATIVE_RESPONSE] => {
+            return Err(DiagServiceError::BadPayload(
+                "NRC without accompanying SID_RQ received".to_owned(),
+            ));
+        }
+        [sid, ..] => *sid,
+        [] => {
+            return Err(DiagServiceError::BadPayload(
+                "Missing service id".to_owned(),
+            ));
+        }
+    };
+    Ok(sid)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -429,5 +451,26 @@ mod tests {
         assert_eq!(result, vec![0xA3, 0x0F]);
         let result = decode_hex("0A3F").unwrap();
         assert_eq!(result, vec![0x0A, 0x3F]);
+    }
+
+    #[test]
+    fn test_try_extract_sid() {
+        let src_ok = [0x20, 0x10];
+        let res = try_extract_sid_from_payload(&src_ok);
+        assert!(res.is_ok());
+        assert_eq!(res.unwrap(), 0x20);
+
+        let nrc_ok = [service_ids::NEGATIVE_RESPONSE, 0x15];
+        let res = try_extract_sid_from_payload(&nrc_ok);
+        assert!(res.is_ok());
+        assert_eq!(res.unwrap(), 0x15);
+
+        // empty should error
+        let res = try_extract_sid_from_payload(&[]);
+        assert!(res.is_err());
+
+        // nrc without sid should error
+        let res = try_extract_sid_from_payload(&[service_ids::NEGATIVE_RESPONSE]);
+        assert!(res.is_err());
     }
 }

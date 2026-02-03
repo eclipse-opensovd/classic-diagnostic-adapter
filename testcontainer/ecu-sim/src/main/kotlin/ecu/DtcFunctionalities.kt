@@ -47,16 +47,25 @@ fun RequestsData.addDtcRequests() {
             } else {
                 null
             }
+        // ISO-14229-1, D.1
+        // 0xFFFFFF means delete all groups
+        val cleanupAll = dtcCode == 0xFFFFFF
         FaultMemory.entries
             .filter { memory == null || it.memory == memory }
             .forEach { entry ->
                 val dtcFaults = ecu.dtcFaults(entry)
-                if (dtcFaults.remove(dtcCode) != null) {
-                    ecu.logger.info("DTC ${dtcCode.toString(16)} removed")
+                if (cleanupAll) {
+                    dtcFaults.clear()
+                    ecu.logger.info("Removed all DTCs for memory ${entry.memory}")
                 } else {
-                    ecu.logger.info("DTC ${dtcCode.toString(16)} couldn't be removed (not present)")
+                    if (dtcFaults.remove(dtcCode) != null) {
+                        ecu.logger.info("DTC ${dtcCode.toString(16)} removed")
+                    } else {
+                        ecu.logger.info("DTC ${dtcCode.toString(16)} couldn't be removed (not present)")
+                    }
                 }
             }
+        ack()
     }
 
     request("19 01 []", "ReadDTCInformation_NumberByStatusMask") {
