@@ -2390,6 +2390,7 @@ impl<S: EcuGateway, R: DiagServiceResponse, T: EcuManager<Response = R>> UdsEcu
         sid: u8,
         service_name: &str,
         params: Option<HashMap<String, serde_json::Value>>,
+        mode_expiration: Option<Duration>,
         map_to_json: bool,
     ) -> Result<HashMap<String, Result<Self::Response, DiagServiceError>>, DiagServiceError> {
         let func_group = self.ecu_manager(&self.functional_description_database)?;
@@ -2418,6 +2419,10 @@ impl<S: EcuGateway, R: DiagServiceResponse, T: EcuManager<Response = R>> UdsEcu
                     .await
                     .set_service_state(sid, service_name.to_owned())
                     .await;
+                if let Some(ref expiration) = mode_expiration {
+                    self.start_reset_task(ecu, Some(*expiration), ResetType::Session)
+                        .await;
+                }
             }
         }
 

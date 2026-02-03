@@ -183,6 +183,11 @@ fn create_functional_group_route<T: UdsEcu + Clone>(fg_state: WebserverFgState<T
             routing::get_with(modes::dtcsetting::get, modes::dtcsetting::docs_get)
                 .put_with(modes::dtcsetting::put, modes::dtcsetting::docs_put),
         )
+        .api_route(
+            &format!("/modes/{}", sovd_interfaces::common::modes::SESSION_ID),
+            routing::get_with(modes::session::get, modes::session::docs_get)
+                .put_with(modes::session::put, modes::session::docs_put),
+        )
         .with_state(fg_state)
 }
 
@@ -302,6 +307,7 @@ async fn functional_group_description<T: UdsEcu + Clone>(
                 locks: format!("{base_path}/locks"),
                 operations: format!("{base_path}/operations"),
                 data: format!("{base_path}/data"),
+                modes: format!("{base_path}/modes"),
                 schema,
             },
         ),
@@ -325,6 +331,9 @@ fn docs_functional_group(op: TransformOperation) -> TransformOperation {
                         functionalgroups/group_a/operations".into(),
                 data:
                 "http://localhost:20002/vehicle/v15/functions/functionalgroups/group_a/data"
+                    .into(),
+                modes:
+                "http://localhost:20002/vehicle/v15/functions/functionalgroups/group_a/modes"
                     .into(),
                 schema: None,
             })

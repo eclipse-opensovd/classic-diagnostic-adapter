@@ -32,6 +32,7 @@ pub struct FunctionalGroup {
     pub locks: String,
     pub operations: String,
     pub data: String,
+    pub modes: String,
     #[schemars(skip)]
     #[serde(skip_serializing_if = "Option::is_none")]
     pub schema: Option<schemars::Schema>,
