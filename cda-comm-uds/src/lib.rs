@@ -31,7 +31,7 @@ use cda_interfaces::{
         ExtendedSnapshots, Gateway, NetworkStructure, RetryPolicy,
     },
     diagservices::{DiagServiceResponse, DiagServiceResponseType, UdsPayloadData},
-    dlt_ctx, service_ids,
+    dlt_ctx, service_ids, util,
 };
 use strum::{Display, IntoEnumIterator};
 use tokio::{
@@ -2012,7 +2012,7 @@ impl<S: EcuGateway, R: DiagServiceResponse, T: EcuManager<Response = R>> UdsEcu
         include_snapshot: bool,
         include_schema: bool,
     ) -> Result<DtcExtendedInfo, DiagServiceError> {
-        let dtc_code = sae_to_dtc_code(sae_dtc)?;
+        let dtc_code = decode_dtc_from_str(sae_dtc)?;
 
         let (snapshots, snapshot_schema) = if include_snapshot {
             self.map_snapshots(ecu_name, security_plugin, dtc_code, include_schema)
@@ -2046,6 +2046,69 @@ impl<S: EcuGateway, R: DiagServiceResponse, T: EcuManager<Response = R>> UdsEcu
             snapshots,
             snapshots_schema: snapshot_schema,
         })
+    }
+
+    async fn delete_dtcs(
+        &self,
+        ecu_name: &str,
+        security_plugin: &DynamicPlugin,
+        fault_code: Option<String>,
+    ) -> Result<R, DiagServiceError> {
+        let ecu = self.ecu_manager(ecu_name)?;
+        // check if service 0x14 exists for the given ecu
+        let delete_dtc_service = ecu.read().await.lookup_service_through_func_class(
+            "faultmem",
+            service_ids::CLEAR_DIAGNOSTIC_INFORMATION,
+        )?;
+        // validate that the service can be called via security plugin
+        ecu.read()
+            .await
+            .is_service_allowed(&delete_dtc_service, security_plugin)
+            .await?;
+
+        // for now only all or single DTC clear is supported
+        // this means we can simply build the payload according to ISO spec
+        // here.
+        // once we support clear by group we will need to lookup things
+        // from the db
+        let mut payload = vec![service_ids::CLEAR_DIAGNOSTIC_INFORMATION];
+        match fault_code {
+            Some(ref dtc_code) => {
+                let dtc = decode_dtc_from_str(dtc_code)?;
+                payload.extend(dtc.to_be_bytes()[1..].to_vec());
+            }
+            None => {
+                // according to ISO-14229-1, D.1
+                // sending FFFFFF clears all groups (all DTC)
+                payload.extend(vec![0xFFu8, 0xFF, 0xFF]);
+            }
+        }
+        let (source_address, target_address) = {
+            let read_lock = ecu.read().await;
+            (read_lock.tester_address(), read_lock.logical_address())
+        };
+        let service_payload = ServicePayload {
+            data: payload,
+            source_address,
+            target_address,
+            new_security: None,
+            new_session: None,
+        };
+
+        match self
+            .send_with_raw_payload(ecu_name, service_payload, None, true)
+            .await?
+        {
+            None => {
+                return Err(DiagServiceError::NoResponse(
+                    "ECU did not respond to DTC clear".to_owned(),
+                ));
+            }
+            Some(resp) => ecu
+                .read()
+                .await
+                .convert_service_14_response(delete_dtc_service, resp),
+        }
     }
 
     #[tracing::instrument(skip_all,
@@ -2624,4 +2687,31 @@ fn sae_to_dtc_code(sae_dtc: &str) -> Result<DtcCode, DiagServiceError> {
     })?;
 
     Ok((system << 22) | (group << 20) | code)
+}
+
+fn decode_dtc_from_str(dtc_code: &str) -> Result<u32, DiagServiceError> {
+    let code = match dtc_code.len() {
+        6 | 8 => {
+            // read as raw dtc bytes
+            let mut dtc_bytes = vec![0u8];
+            if dtc_code.len() == 6 {
+                dtc_bytes.append(&mut util::decode_hex(dtc_code)?);
+            } else {
+                dtc_bytes.append(&mut util::decode_hex(dtc_code.trim_start_matches("0x"))?);
+            }
+            u32::from_be_bytes(dtc_bytes.try_into().map_err(|e| {
+                DiagServiceError::InvalidRequest(format!(
+                    "Failed to decode DTC code: {dtc_code}. Error: {e:?}"
+                ))
+            })?)
+        }
+        7 => sae_to_dtc_code(dtc_code)?,
+        _ => {
+            return Err(DiagServiceError::InvalidRequest(format!(
+                "Invalid DTC format: {dtc_code}. Should be either SAE format or raw DTC code with \
+                 optional 0x prefix."
+            )));
+        }
+    };
+    Ok(code)
 }

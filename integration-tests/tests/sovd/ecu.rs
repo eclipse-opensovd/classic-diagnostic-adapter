@@ -15,17 +15,20 @@ use std::time::Duration;
 use http::{HeaderMap, Method, StatusCode};
 use opensovd_cda_lib::config::configfile::Configuration;
 use serde::de::DeserializeOwned;
-use sovd_interfaces::components::ecu::{modes, modes::dtcsetting};
+use sovd_interfaces::components::ecu::{
+    faults::Fault,
+    modes::{self, dtcsetting},
+};
 
 use crate::{
-    sovd,
     sovd::{
-        locks,
-        locks::{create_lock, lock_operation},
+        self,
+        locks::{self, create_lock, lock_operation},
         put_mode, set_dtc_setting,
     },
     util::{
-        TestingError, ecusim,
+        TestingError,
+        ecusim::{self, DtcMinimal},
         http::{
             auth_header, extract_field_from_json, response_to_json, response_to_t, send_cda_request,
         },
@@ -716,6 +719,201 @@ async fn test_dtc_setting() {
 }
 
 #[tokio::test]
+#[allow(clippy::too_many_lines)] // its easier to understand the test if its kept together
+async fn test_dtc_deletion() {
+    let (runtime, _lock) = setup_integration_test(true).await.unwrap();
+    let auth = auth_header(&runtime.config, None).await.unwrap();
+    let ecu_endpoint = sovd::ECU_FLXC1000_ENDPOINT;
+    let ecu_name = "flxc1000";
+    let fault_memory = "Standard";
+
+    // Create and acquire lock
+    let expiration_timeout = Duration::from_secs(30);
+    let ecu_lock = create_lock(
+        expiration_timeout,
+        locks::ECU_ENDPOINT,
+        StatusCode::CREATED,
+        &runtime.config,
+        &auth,
+    )
+    .await;
+    let lock_id =
+        extract_field_from_json::<String>(&response_to_json(&ecu_lock).unwrap(), "id").unwrap();
+
+    // Clear any existing DTCs from the simulator
+    ecusim::clear_all_dtcs(&runtime.ecu_sim, ecu_name, fault_memory)
+        .await
+        .expect("Failed to clear DTCs in simulator");
+
+    // Add test DTCs to the simulator
+    // DTC 1: 0x1E240 with status mask 0x29
+    // (testFailed=true, confirmedDtc=true, testFailedSinceLastClear=true)
+    ecusim::add_dtc(
+        &runtime.ecu_sim,
+        ecu_name,
+        fault_memory,
+        &DtcMinimal {
+            id: "01E240".into(),
+            status_mask: "29".into(),
+            emissions_related: false,
+        },
+    )
+    .await
+    .expect("Failed to add DTC 0x01E240");
+
+    // DTC 2: 0x39447 with status mask 0x0C (pendingDtc=true, confirmedDtc=true)
+    ecusim::add_dtc(
+        &runtime.ecu_sim,
+        ecu_name,
+        fault_memory,
+        &DtcMinimal {
+            id: "039447".into(),
+            status_mask: "0C".into(),
+            emissions_related: false,
+        },
+    )
+    .await
+    .expect("Failed to add DTC 0x039447");
+
+    // Verify DTCs were added
+    let dtcs_in_sim = ecusim::get_dtcs(&runtime.ecu_sim, ecu_name, fault_memory)
+        .await
+        .expect("Failed to get DTCs from simulator");
+    assert_eq!(
+        dtcs_in_sim.dtcs.len(),
+        2,
+        "Expected 2 DTCs in simulator, got {}",
+        dtcs_in_sim.dtcs.len()
+    );
+
+    // Get DTCs via SOVD API
+    let faults = get_faults(&runtime.config, &auth, ecu_endpoint)
+        .await
+        .expect("Failed to get faults via SOVD");
+    assert_eq!(
+        faults.len(),
+        2,
+        "Expected 2 faults via SOVD, got {}",
+        faults.len()
+    );
+
+    // Test deletion of a single DTC
+    delete_fault(
+        &runtime.config,
+        &auth,
+        ecu_endpoint,
+        "01E240",
+        StatusCode::NO_CONTENT,
+    )
+    .await
+    .expect("Failed to delete fault 0x01E240");
+
+    // Verify the DTC was deleted via ecu simulator
+    let dtcs_in_sim_after_delete = ecusim::get_dtcs(&runtime.ecu_sim, ecu_name, fault_memory)
+        .await
+        .expect("Failed to get DTCs from simulator after deletion");
+
+    assert_eq!(
+        dtcs_in_sim_after_delete.dtcs.len(),
+        1,
+        "Expected 1 fault after deleting one, got {}",
+        dtcs_in_sim_after_delete.dtcs.len()
+    );
+
+    // Verify the correct DTC was deleted
+    let deleted_dtc_still_exists = dtcs_in_sim_after_delete
+        .dtcs
+        .iter()
+        .any(|f| f.id == "1E240");
+    assert!(
+        !deleted_dtc_still_exists,
+        "DTC 0x01E240 should have been deleted"
+    );
+
+    // Verify the other DTCs still exist
+    let second_dtc_still_exists = dtcs_in_sim_after_delete
+        .dtcs
+        .iter()
+        .any(|f| f.id == "39447");
+    assert!(second_dtc_still_exists, "DTC 0x039447 should still exist");
+
+    // Verify that the DTCs are not set to failed in the SOVD API
+    let fault_1 = get_fault(&runtime.config, &auth, ecu_endpoint, "01E240")
+        .await
+        .expect("Failed to get SOVD status for fault 0x01E240");
+
+    let fault_1_failed = fault_1.status.and_then(|status| status.test_failed);
+    assert_eq!(
+        fault_1_failed,
+        Some(false),
+        "Expected 0x01E240 to have status test_failed 'false' after deletion, but got \
+         {fault_1_failed:?}"
+    );
+
+    // Test deletion of all DTCs
+    delete_all_faults(&runtime.config, &auth, ecu_endpoint, StatusCode::NO_CONTENT)
+        .await
+        .expect("Failed to delete all faults");
+
+    // Verify all DTCs were deleted via SOVD API
+    let dtcs_after_delete_all = ecusim::get_dtcs(&runtime.ecu_sim, ecu_name, fault_memory)
+        .await
+        .expect("Failed to get DTCs from simulator after delete all");
+    assert_eq!(
+        dtcs_after_delete_all.dtcs.len(),
+        0,
+        "Expected 0 DTCs after deleting all, got {}",
+        dtcs_after_delete_all.dtcs.len()
+    );
+
+    // Test deletion without lock (should fail)
+    lock_operation(
+        locks::ECU_ENDPOINT,
+        Some(&lock_id),
+        &runtime.config,
+        &auth,
+        StatusCode::NO_CONTENT,
+        Method::DELETE,
+    )
+    .await;
+
+    // Add a DTC for testing deletion without lock
+    ecusim::add_dtc(
+        &runtime.ecu_sim,
+        ecu_name,
+        fault_memory,
+        &DtcMinimal {
+            id: "999999".into(),
+            status_mask: "01".into(),
+            emissions_related: false,
+        },
+    )
+    .await
+    .expect("Failed to add DTC for lock test");
+
+    // Attempt to delete without lock - should fail
+    delete_fault(
+        &runtime.config,
+        &auth,
+        ecu_endpoint,
+        "999999",
+        StatusCode::FORBIDDEN,
+    )
+    .await
+    .expect("Request should be forbidden");
+
+    // Verify the DTC was NOT deleted
+    let dtcs_after_forbidden = ecusim::get_dtcs(&runtime.ecu_sim, ecu_name, fault_memory)
+        .await
+        .expect("Failed to get DTCs from simulator after forbidden deletion");
+    assert_eq!(
+        dtcs_after_forbidden.dtcs.len(),
+        1,
+        "Expected 1 fault to remain after forbidden deletion"
+    );
+}
+
+#[tokio::test]
 async fn test_ecu_session_reset_on_lock_reacquire() {
     let (runtime, _lock) = setup_integration_test(true).await.unwrap();
     let auth = auth_header(&runtime.config, None).await.unwrap();
@@ -856,6 +1054,90 @@ async fn switch_session(
         expected_status,
     )
     .await
+}
+
+async fn get_faults(
+    config: &Configuration,
+    headers: &HeaderMap,
+    ecu_endpoint: &str,
+) -> Result<Vec<Fault>, TestingError> {
+    let path = format!("{ecu_endpoint}/faults",);
+
+    let response = send_cda_request(
+        config,
+        &path,
+        StatusCode::OK,
+        Method::GET,
+        None,
+        Some(headers),
+    )
+    .await
+    .expect("Failed to get faults");
+
+    let json = response_to_json(&response)?;
+    extract_field_from_json::<Vec<Fault>>(&json, "items")
+}
+
+async fn get_fault(
+    config: &Configuration,
+    headers: &HeaderMap,
+    ecu_endpoint: &str,
+    fault_code: &str,
+) -> Result<Fault, TestingError> {
+    let path = format!("{ecu_endpoint}/faults/{fault_code}",);
+
+    let response = send_cda_request(
+        config,
+        &path,
+        StatusCode::OK,
+        Method::GET,
+        None,
+        Some(headers),
+    )
+    .await
+    .expect("Failed to get faults");
+
+    let json = response_to_json(&response)?;
+    extract_field_from_json::<Fault>(&json, "item")
+}
+
+async fn delete_fault(
+    config: &Configuration,
+    headers: &HeaderMap,
+    ecu_endpoint: &str,
+    fault_code: &str,
+    expected_status: StatusCode,
+) -> Result<(), TestingError> {
+    let path = format!("{ecu_endpoint}/faults/{fault_code}");
+    send_cda_request(
+        config,
+        &path,
+        expected_status,
+        Method::DELETE,
+        None,
+        Some(headers),
+    )
+    .await?;
+    Ok(())
+}
+
+async fn delete_all_faults(
+    config: &Configuration,
+    headers: &HeaderMap,
+    ecu_endpoint: &str,
+    expected_status: StatusCode,
+) -> Result<(), TestingError> {
+    let path = format!("{ecu_endpoint}/faults",);
+    send_cda_request(
+        config,
+        &path,
+        expected_status,
+        Method::DELETE,
+        None,
+        Some(headers),
+    )
+    .await?;
+    Ok(())
 }
 
 async fn request_seed(

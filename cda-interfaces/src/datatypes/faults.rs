@@ -19,6 +19,9 @@ pub type DtcCode = u32;
 
 pub const DTC_CODE_BIT_LEN: u32 = 24;
 
+/// Defined in ISO-14229-1 Table 298
+pub const CLEAR_FAULT_MEM_POS_RESPONSE_SID: u8 = 0x54;
+
 /// Provides the supported Types of DTC functions
 /// Essentially the byte values
 /// are sub functions for service 0x19 (Read DTC information)
