@@ -460,7 +460,8 @@ impl<S: SecurityPlugin> cda_interfaces::EcuManager for EcuManager<S> {
             DiagServiceError::InvalidDatabase("Service is missing DiagComm".to_owned()),
         )?;
 
-        Self::check_security_plugin(security_plugin, &mapped_service)?;
+        self.check_service_access(security_plugin, &mapped_service)
+            .await?;
 
         let (new_session, new_security) = self
             .lookup_state_transition_by_diagcomm_for_active(&mapped_dc)
@@ -669,7 +670,8 @@ impl<S: SecurityPlugin> cda_interfaces::EcuManager for EcuManager<S> {
                 diag_service.name
             )))?;
 
-        Self::check_security_plugin(security_plugin, &mapped_service)?;
+        self.check_service_access(security_plugin, &mapped_service)
+            .await?;
 
         let mut mapped_params = request
             .params()
@@ -976,7 +978,7 @@ impl<S: SecurityPlugin> cda_interfaces::EcuManager for EcuManager<S> {
             .await
             .get(&service_ids::SESSION_CONTROL)
             .cloned()
-            .ok_or(DiagServiceError::InvalidSession(
+            .ok_or(DiagServiceError::InvalidState(
                 "ECU session is none".to_string(),
             ))?;
 
@@ -1079,7 +1081,7 @@ impl<S: SecurityPlugin> cda_interfaces::EcuManager for EcuManager<S> {
             .await
             .get(&service_ids::SESSION_CONTROL)
             .cloned()
-            .ok_or(DiagServiceError::InvalidSession(
+            .ok_or(DiagServiceError::InvalidState(
                 "ECU session is none".to_string(),
             ))
     }
@@ -1094,7 +1096,7 @@ impl<S: SecurityPlugin> cda_interfaces::EcuManager for EcuManager<S> {
             .await
             .get(&service_ids::SECURITY_ACCESS)
             .cloned()
-            .ok_or(DiagServiceError::InvalidSession(
+            .ok_or(DiagServiceError::InvalidState(
                 "ECU security is none".to_string(),
             ))
     }
@@ -1319,7 +1321,8 @@ impl<S: SecurityPlugin> cda_interfaces::EcuManager for EcuManager<S> {
         security_plugin: &DynamicPlugin,
     ) -> Result<(), DiagServiceError> {
         let mapped_service = self.lookup_diag_service(service).await?;
-        Self::check_security_plugin(security_plugin, &mapped_service)
+        self.check_service_access(security_plugin, &mapped_service)
+            .await
     }
 
     fn functional_groups(&self) -> Vec<String> {
@@ -3480,6 +3483,29 @@ impl<S: SecurityPlugin> EcuManager<S> {
             dlt_context = dlt_ctx!("CORE"),
         )
     )]
+    async fn check_service_access(
+        &self,
+        security_plugin: &DynamicPlugin,
+        service: &datatypes::DiagService<'_>,
+    ) -> Result<(), DiagServiceError> {
+        let diag_comm = service
+            .diag_comm()
+            .ok_or(DiagServiceError::InvalidDatabase(
+                "Service has no DiagComm".to_owned(),
+            ))?;
+        self.check_service_preconditions(&diag_comm.into()).await?;
+        Self::check_security_plugin(security_plugin, service)
+    }
+
+    /// Validate security access via plugin
+    /// allows passing a `Box::new(())` to skip security checks
+    /// this is used internally, when we don't want to have this run the check again
+    #[tracing::instrument(
+        skip_all,
+        fields(
+            dlt_context = dlt_ctx!("CORE"),
+        )
+    )]
     fn check_security_plugin(
         security_plugin: &DynamicPlugin,
         service: &datatypes::DiagService,
@@ -3494,6 +3520,91 @@ impl<S: SecurityPlugin> EcuManager<S> {
             .map(SecurityPlugin::as_security_plugin)?;
 
         security_plugin.validate_service(service)
+    }
+
+    async fn check_service_preconditions(
+        &self,
+        diag_comm: &datatypes::DiagComm<'_>,
+    ) -> Result<(), DiagServiceError> {
+        let Some(pre_condition_state_ref) = diag_comm
+            .pre_condition_state_refs()
+            .filter(|refs| !refs.is_empty())
+        else {
+            return Ok(());
+        };
+
+        // Get current ECU states
+        let (ecu_session, ecu_security_level) = {
+            let ecu_states = self.ecu_service_states.read().await;
+
+            let session = ecu_states
+                .get(&service_ids::SESSION_CONTROL)
+                .cloned()
+                .ok_or(DiagServiceError::InvalidState(
+                    "ECU session is none".to_string(),
+                ))?
+                .to_ascii_lowercase();
+
+            let security = ecu_states
+                .get(&service_ids::SECURITY_ACCESS)
+                .cloned()
+                .ok_or(DiagServiceError::InvalidState(
+                    "ECU security level is none".to_string(),
+                ))?
+                .to_ascii_lowercase();
+
+            (session, security)
+        };
+
+        let get_state_names = |semantic| {
+            Ok(self
+                .lookup_state_chart(semantic)?
+                .states()
+                .into_iter()
+                .flatten()
+                .filter_map(|s| s.short_name())
+                .map(str::to_ascii_lowercase)
+                .collect::<HashSet<_>>())
+        };
+
+        let session_states = get_state_names(semantics::SESSION)?;
+        let security_states = get_state_names(semantics::SECURITY)?;
+
+        let precondition_states: Vec<_> = pre_condition_state_ref
+            .iter()
+            .filter_map(|state_ref| state_ref.state())
+            .filter_map(|state| state.short_name())
+            .map(str::to_ascii_lowercase)
+            .collect();
+
+        let (allowed_security, allowed_session): (HashSet<_>, HashSet<_>) =
+            precondition_states.into_iter().fold(
+                (HashSet::new(), HashSet::new()),
+                |(mut security, mut session), state_name| {
+                    if security_states.contains(&state_name) {
+                        security.insert(state_name);
+                    } else if session_states.contains(&state_name) {
+                        session.insert(state_name);
+                    }
+                    (security, session)
+                },
+            );
+
+        let validate_state = |required: &HashSet<String>,
+                              current: &str,
+                              state_type: &str|
+         -> Result<(), DiagServiceError> {
+            if required.is_empty() || required.contains(current) {
+                Ok(())
+            } else {
+                Err(DiagServiceError::InvalidState(format!(
+                    "{state_type} mismatch. Required one of: {required:?}, Current: {current}",
+                )))
+            }
+        };
+
+        validate_state(&allowed_security, &ecu_security_level, "Security level")?;
+        validate_state(&allowed_session, &ecu_session, "Session")
     }
 }
 

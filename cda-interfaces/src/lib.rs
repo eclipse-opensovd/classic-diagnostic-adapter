@@ -280,7 +280,7 @@ pub enum DiagServiceError {
     #[error("Variant detection error: {0}")]
     VariantDetectionError(String),
     #[error("{0}")]
-    InvalidSession(String),
+    InvalidState(String),
     #[error("{0}")]
     InvalidAddress(String),
     #[error("Sending message failed {0}")]
