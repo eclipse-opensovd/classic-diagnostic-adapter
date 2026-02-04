@@ -27,7 +27,18 @@ concurrency:
 
 jobs:
   format_and_clippy_nightly_toolchain:
+    concurrency:
+      group: format_and_clippy_nightly_toolchain-${{ github.ref }}
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: true
+      matrix:
+        include:
+          - toolchain: nightly-2025-07-14
+            allow-failure: false
+          - toolchain: nightly
+            allow-failure: true
+    continue-on-error: false
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
@@ -36,10 +47,12 @@ jobs:
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@nightly
         with:
-          toolchain: nightly-2025-07-14
+          toolchain: ${{ matrix.toolchain }}
           components: clippy, rustfmt
       - name: Cache Rust dependencies
         uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: ${{ matrix.toolchain }}
       - name: Formating - check for long lines
         run: cargo fmt -- --check --config error_on_unformatted=true,error_on_line_overflow=true,format_strings=true
       - name: Formatting - check import order
@@ -48,8 +61,14 @@ jobs:
         run: cargo fmt -- --check --config imports_granularity=Crate
       - name: Formatting - check hex literals
         run: cargo fmt -- --check --config hex_literal_case=Upper
-      - name: run clippy nightly
-        run: cargo clippy --locked --all-targets -- -D warnings
+      - name: Clippy
+        uses: giraffate/clippy-action@v1
+        with:
+          reporter: 'github-check'
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+          clippy_flags: --locked --all-targets --features integration-tests ${{ matrix.allow-failure == false && '-- -D warnings' || '' }}
+          filter_mode: 'nofilter'
+          fail_on_error: ${{ !matrix.allow-failure }}
 
   features:
     runs-on: ubuntu-latest
