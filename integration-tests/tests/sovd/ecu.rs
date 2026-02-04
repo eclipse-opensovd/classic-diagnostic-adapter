@@ -14,7 +14,7 @@ use std::time::Duration;
 
 use http::{HeaderMap, Method, StatusCode};
 use opensovd_cda_lib::config::configfile::Configuration;
-use serde::{Serialize, de::DeserializeOwned};
+use serde::de::DeserializeOwned;
 use sovd_interfaces::components::ecu::{modes, modes::dtcsetting};
 
 use crate::{
@@ -22,6 +22,7 @@ use crate::{
     sovd::{
         locks,
         locks::{create_lock, lock_operation},
+        put_mode, set_dtc_setting,
     },
     util::{
         TestingError, ecusim,
@@ -720,8 +721,8 @@ async fn test_ecu_session_reset_on_lock_reacquire() {
     let auth = auth_header(&runtime.config, None).await.unwrap();
     let ecu_endpoint = sovd::ECU_FLXC1000_ENDPOINT;
 
-    // Create and acquire lock with 60s timeout
-    let lock_expiration_timeout = Duration::from_secs(60);
+    // Create and acquire lock with 30s timeout
+    let lock_expiration_timeout = Duration::from_secs(30);
     let ecu_lock = create_lock(
         lock_expiration_timeout,
         locks::ECU_ENDPOINT,
@@ -911,32 +912,6 @@ async fn send_key(
     .await
 }
 
-async fn put_mode<T: DeserializeOwned, S: Serialize>(
-    config: &Configuration,
-    headers: &HeaderMap,
-    ecu_endpoint: &str,
-    sub_path: &str,
-    request: S,
-    excepted_status: StatusCode,
-) -> Result<Option<T>, TestingError> {
-    let request_body = serde_json::to_string(&request)
-        .map_err(|e| TestingError::InvalidData(format!("Failed to serialize request body: {e}")))?;
-    let http_response = send_cda_request(
-        config,
-        &format!("{ecu_endpoint}/modes/{sub_path}"),
-        excepted_status,
-        Method::PUT,
-        Some(&request_body),
-        Some(headers),
-    )
-    .await?;
-    if excepted_status == StatusCode::OK {
-        Ok(Some(response_to_t(&http_response)?))
-    } else {
-        Ok(None)
-    }
-}
-
 async fn get_mode<T: DeserializeOwned>(
     config: &Configuration,
     headers: &HeaderMap,
@@ -1026,25 +1001,4 @@ async fn get_dtc_setting(
     ecu_endpoint: &str,
 ) -> Result<dtcsetting::get::Response, TestingError> {
     get_mode(config, headers, ecu_endpoint, "dtcsetting").await
-}
-
-async fn set_dtc_setting(
-    value: &str,
-    config: &Configuration,
-    headers: &HeaderMap,
-    ecu_endpoint: &str,
-    expected_status: StatusCode,
-) -> Result<Option<dtcsetting::put::Response>, TestingError> {
-    put_mode(
-        config,
-        headers,
-        ecu_endpoint,
-        "dtcsetting",
-        dtcsetting::put::Request {
-            value: value.to_owned(),
-            parameters: None,
-        },
-        expected_status,
-    )
-    .await
 }

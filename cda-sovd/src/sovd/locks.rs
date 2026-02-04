@@ -847,12 +847,33 @@ pub(crate) async fn validate_lock(
 
     let vehicle_lock = locks.vehicle.lock_ro().await;
     let vehicle_locks = get_locks(claims, &vehicle_lock, None);
-    // todo once functional locks are _actually_ locking the ecu, checking the vehicle lock is
-    // not needed anymore
+
     if ecu_locks.items.is_empty() && vehicle_locks.items.is_empty() {
         return Some(
             ErrorWrapper {
                 error: ApiError::Forbidden(Some("Required ECU lock is missing".to_owned())),
+                include_schema,
+            }
+            .into_response(),
+        );
+    }
+
+    // Validate Vehicle lock is owned
+    if let Err(e) = all_locks_owned(&vehicle_lock, claims) {
+        return Some(
+            ErrorWrapper {
+                error: e,
+                include_schema,
+            }
+            .into_response(),
+        );
+    }
+
+    // Validate ECU lock is owned
+    if let Err(e) = all_locks_owned(&ecu_lock, claims) {
+        return Some(
+            ErrorWrapper {
+                error: e,
                 include_schema,
             }
             .into_response(),
