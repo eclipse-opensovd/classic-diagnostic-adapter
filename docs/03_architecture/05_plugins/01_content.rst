@@ -1,0 +1,105 @@
+.. Copyright (c) 2025 The Contributors to Eclipse OpenSOVD (see CONTRIBUTORS)
+..
+.. See the NOTICE file(s) distributed with this work for additional
+.. information regarding copyright ownership.
+..
+.. This program and the accompanying materials are made available under the
+.. terms of the Apache License Version 2.0 which is available at
+.. https://www.apache.org/licenses/LICENSE-2.0
+..
+.. SPDX-License-Identifier: Apache-2.0
+
+Overview
+--------
+
+The plugin system in the Classic Diagnostic Adapter (CDA) provides extensibility for vendor-specific functionality that cannot be standardized across all implementations. Plugins enable customization of security mechanisms, authentication flows, and other domain-specific requirements while maintaining the core diagnostic functionality.
+
+The plugin architecture is designed around trait-based interfaces that allow runtime polymorphism and flexible configuration. This approach ensures that the CDA can adapt to different deployment environments and vendor requirements without requiring modifications to the core codebase.
+
+Security Plugin Architecture
+----------------------------
+
+The security plugin system is the primary plugin implementation within the CDA, responsible for authentication, authorization, and access control for REST calls.
+
+**Core Traits**
+
+The security plugin system is built around several key traits that define the plugin interface:
+
+**SecurityPlugin**
+
+The main trait that combines authentication and authorization capabilities:
+
+.. code:: rust
+
+   pub trait SecurityPlugin: Any + SecurityApi + AuthApi {
+       fn as_auth_plugin(&self) -> &dyn AuthApi;
+       fn as_security_plugin(&self) -> &dyn SecurityApi;
+   }
+
+**AuthApi**
+
+Provides access to user claims:
+
+.. code:: rust
+
+   pub trait AuthApi: Send + Sync + 'static {
+       fn claims(&self) -> Box<&dyn Claims>;
+   }
+
+**SecurityApi**
+
+Validates diagnostic service requests based on security policies:
+
+.. code:: rust
+
+   pub trait SecurityApi: Send + Sync + 'static {
+       fn validate_service(&self, service: &DiagnosticService) -> Result<(), DiagServiceError>;
+   }
+
+
+**SecurityPluginLoader**
+
+Combines initialization and authorization request handling capabilities:
+
+.. code:: rust
+
+   pub trait SecurityPluginLoader:
+       SecurityPluginInitializer + AuthorizationRequestHandler + Default + 'static
+   {
+   }
+
+
+Plugin Lifecycle
+----------------
+
+The security plugin follows a specific lifecycle during request processing:
+
+1. Middleware Registration: The security plugin middleware is registered during router setup
+2. Request Interception: Each incoming request passes through the security middleware
+3. Plugin Initialization: The plugin extracts authentication information from request headers and creates the plugin instance
+4. Request Processing: The initialized plugin instance is made available to route handlers
+5. Service Validation: Diagnostic services are validated against security policies before execution
+
+Future Extensions
+-----------------
+
+The plugin architecture is designed to support additional plugin types:
+
+Logging Plugins
+^^^^^^^^^^^^^^^
+
+- Custom log formatting and destinations
+- Integration with external logging systems
+- Performance metrics collection
+
+Safety Plugins
+^^^^^^^^^^^^^^
+- Functional safety compliance validation
+- Diagnostic session safety checks
+- Emergency shutdown procedures
+
+Custom Endpoint Plugins
+^^^^^^^^^^^^^^^^^^^^^^^
+- Vendor-specific API extensions
+- Additional data formats and protocols
+- Integration with external systems

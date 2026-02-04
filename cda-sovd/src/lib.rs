@@ -47,6 +47,8 @@ pub struct WebServerConfig {
     pub port: u16,
 }
 
+/// [[ dimpl~sovd-api-http-server, Starts HTTP Server ]]
+///
 /// Launches the http(s) webserver with deferred initialization
 ///
 /// The server starts immediately with static endpoints. SOVD routes and other functionality
@@ -55,6 +57,7 @@ pub struct WebServerConfig {
 /// # Errors
 /// Will return `Err` in case that the webserver couldn't be launched.
 /// This can be caused due to invalid config, ports or addresses already being in use.
+///
 #[tracing::instrument(
     skip(config, shutdown_signal),
     fields(
