@@ -1,5 +1,10 @@
 build
+_build
+__pycache__
 /target
+
+# created by plantuml?
+?
 
 *.pcap*
 .idea

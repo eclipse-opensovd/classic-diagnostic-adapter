@@ -1,0 +1,45 @@
+# Copyright (c) 2025 The Contributors to Eclipse OpenSOVD (see CONTRIBUTORS)
+#
+# See the NOTICE file(s) distributed with this work for additional
+# information regarding copyright ownership.
+#
+# This program and the accompanying materials are made available under the
+# terms of the Apache License Version 2.0 which is available at
+# https://www.apache.org/licenses/LICENSE-2.0
+#
+# SPDX-License-Identifier: Apache-2.0
+
+[codelinks]
+# Configuration for source tracing
+set_local_url = true            # Set to true to enable local code html and URL generation
+local_url_field = "local-url"   # Need's field name for local URL
+set_remote_url = true           # Set to true to enable remote url to be generated
+remote_url_field = "remote-url" # Need's field name for remote URL
+
+# Configuration for source tracing project "dcdc"
+[codelinks.projects.cda]
+remote_url_pattern = "https://github.com/eclipse-opensovd/classic-diagnostic-adapter/blob/{commit}/{path}#L{line}" # URL pattern for remote source code
+
+[codelinks.projects.cda.source_discover]
+src_dir = "../project"
+include = ["**/*.rs"]
+comment_type = "rust"
+gitignore = true
+
+[codelinks.projects.cda.analyse]
+get_need_id_refs = false
+get_oneline_needs = true
+
+[codelinks.projects.cda.analyse.oneline_comment_style]
+# Configuration for oneline comment style
+start_sequence = "[["  # Start sequence for oneline comments
+end_sequence = "]]"    # End sequence for the online comments; default is newline character
+field_split_char = "," # Character to split fields in the comment
+# Fields that are defined in the oneline comment style
+needs_fields = [
+  { "name" = "id", "type" = "str" },
+  { "name" = "title", "type" = "str" },
+  { "name" = "type", "type" = "str", "default" = "dimpl" },
+  { "name" = "links", "type" = "list[str]", "default" = [
+  ] },
+]
