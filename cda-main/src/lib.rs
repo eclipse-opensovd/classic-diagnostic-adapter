@@ -105,7 +105,7 @@ impl From<DiagServiceError> for AppError {
             | DiagServiceError::UdsLookupError(_)
             | DiagServiceError::VariantDetectionError(_)
             | DiagServiceError::AccessDenied(_)
-            | DiagServiceError::InvalidSession(_)
+            | DiagServiceError::InvalidState(_)
             | DiagServiceError::Nack(_) => Self::RuntimeError(value.to_string()),
 
             DiagServiceError::InvalidSecurityPlugin => Self::ConfigurationError(value.to_string()),

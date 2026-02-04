@@ -82,7 +82,7 @@ impl From<DiagServiceError> for ApiError {
             | DiagServiceError::NotEnoughData { .. }
             | DiagServiceError::NoResponse(_)
             | DiagServiceError::Nack(_)
-            | DiagServiceError::InvalidSession(_)
+            | DiagServiceError::InvalidState(_)
             | DiagServiceError::UnknownOperation
             | DiagServiceError::UnexpectedResponse(_)
             | DiagServiceError::RequestNotSupported(_)

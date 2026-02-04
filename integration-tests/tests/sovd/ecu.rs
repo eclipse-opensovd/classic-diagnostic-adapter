@@ -580,14 +580,16 @@ async fn test_communication_control() {
 }
 
 #[tokio::test]
+#[allow(clippy::too_many_lines)] // keep test together.
 async fn test_dtc_setting() {
     let (runtime, _lock) = setup_integration_test(true).await.unwrap();
     let auth = auth_header(&runtime.config, None).await.unwrap();
     let ecu_endpoint = sovd::ECU_FLXC1000_ENDPOINT;
 
     // Without lock, the CDA should reject the request
+    let dtcs_on = "on";
     set_dtc_setting(
-        "On",
+        dtcs_on,
         &runtime.config,
         &auth,
         ecu_endpoint,
@@ -611,20 +613,47 @@ async fn test_dtc_setting() {
     let lock_id =
         extract_field_from_json::<String>(&response_to_json(&ecu_lock).unwrap(), "id").unwrap();
 
-    // Test DTC Setting On
-    let on = "on";
-    let result = set_dtc_setting("On", &runtime.config, &auth, ecu_endpoint, StatusCode::OK)
-        .await
-        .unwrap()
-        .unwrap();
-    assert_eq!(result.value, "On");
+    // Test DTC Setting On - without setting session first, this should be not possible
+    // as the service has a state precondition for Session == "Extended"
+    let _ = set_dtc_setting(
+        dtcs_on,
+        &runtime.config,
+        &auth,
+        ecu_endpoint,
+        StatusCode::BAD_REQUEST,
+    )
+    .await;
+
+    switch_session(
+        "extended",
+        &runtime.config,
+        &auth,
+        ecu_endpoint,
+        StatusCode::OK,
+    )
+    .await
+    .unwrap();
+
+    // Test DTC Setting On, after switching to extended session, should work now.
+    // Test remaining services without switching sessions.
+    let result = set_dtc_setting(
+        dtcs_on,
+        &runtime.config,
+        &auth,
+        ecu_endpoint,
+        StatusCode::OK,
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    assert_eq!(result.value.to_ascii_lowercase(), dtcs_on);
 
     let current_setting = get_dtc_setting(&runtime.config, &auth, ecu_endpoint)
         .await
         .unwrap();
     assert_eq!(
         current_setting.value.as_ref().map(|s| s.to_lowercase()),
-        Some(on.to_owned())
+        Some(dtcs_on.to_owned())
     );
 
     // Validate that ECU sim received and stored the DTC setting
@@ -638,19 +667,25 @@ async fn test_dtc_setting() {
     );
 
     // Test DTC Setting Off
-    let off = "off";
-    let result = set_dtc_setting("Off", &runtime.config, &auth, ecu_endpoint, StatusCode::OK)
-        .await
-        .unwrap()
-        .unwrap();
-    assert_eq!(result.value, "Off");
+    let dtcs_off = "off";
+    let result = set_dtc_setting(
+        dtcs_off,
+        &runtime.config,
+        &auth,
+        ecu_endpoint,
+        StatusCode::OK,
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    assert_eq!(result.value.to_ascii_lowercase(), dtcs_off);
 
     let current_setting = get_dtc_setting(&runtime.config, &auth, ecu_endpoint)
         .await
         .unwrap();
     assert_eq!(
         current_setting.value.as_ref().map(|s| s.to_lowercase()),
-        Some(off.to_owned())
+        Some(dtcs_off.to_owned())
     );
 
     // Validate that ECU sim received and stored the DTC setting
@@ -664,9 +699,9 @@ async fn test_dtc_setting() {
     );
 
     // Test DTC Setting TimeTravelDTCsOn (custom vendor-specific)
-    let time_travel_dtcs_on = "timetraveldtcson";
+    let dtcs_time_travel = "timetraveldtcson";
     let result = set_dtc_setting(
-        "TimeTravelDTCsOn",
+        dtcs_time_travel,
         &runtime.config,
         &auth,
         ecu_endpoint,
@@ -675,14 +710,14 @@ async fn test_dtc_setting() {
     .await
     .unwrap()
     .unwrap();
-    assert_eq!(result.value, "TimeTravelDTCsOn");
+    assert_eq!(result.value.to_ascii_lowercase(), dtcs_time_travel);
 
     let current_setting = get_dtc_setting(&runtime.config, &auth, ecu_endpoint)
         .await
         .unwrap();
     assert_eq!(
         current_setting.value.as_ref().map(|s| s.to_lowercase()),
-        Some(time_travel_dtcs_on.to_owned())
+        Some(dtcs_time_travel.to_owned())
     );
 
     // Validate that ECU sim received and stored the DTC setting
@@ -708,7 +743,7 @@ async fn test_dtc_setting() {
 
     // After deleting lock, we should not be able to set DTC setting
     set_dtc_setting(
-        "On",
+        dtcs_on,
         &runtime.config,
         &auth,
         ecu_endpoint,
