@@ -20,6 +20,7 @@ use serde::{self, Deserialize};
 
 use crate::{
     sovd,
+    sovd::set_dtc_setting,
     util::{
         TestingError,
         http::{
@@ -29,6 +30,21 @@ use crate::{
         runtime::{TestRuntime, setup_integration_test},
     },
 };
+
+const NON_OWNER_BEARER_TOKEN: &str = "eyJ0eXAiOiJKV1QiLCJhbGciOiJIUzI1NiJ9.\
+                                      eyJzdWIiOiJvd25lcnNoaXAtdGVzdCIsImV4cCI6MjAwMDAwMDAwMH0.\
+                                      _qb-vSkPnV_Lff2wNH4VXugc-DcvGdzJxwTmb4J48Xs";
+
+fn bearer_token_header(token: &str) -> HeaderMap {
+    let mut headers = HeaderMap::new();
+    headers.insert(
+        reqwest::header::AUTHORIZATION,
+        format!("Bearer {token}")
+            .parse()
+            .expect("invalid header value"),
+    );
+    headers
+}
 
 #[tokio::test]
 async fn lock_unlock() -> Result<(), TestingError> {
@@ -491,6 +507,51 @@ async fn test_vehicle_lock_cannot_be_deleted_by_non_owner() -> Result<(), Testin
     lock_operation(
         VEHICLE_ENDPOINT,
         Some(&vehicle_lock_id),
+        &runtime.config,
+        &auth_owner,
+        StatusCode::NO_CONTENT,
+        Method::DELETE,
+    )
+    .await;
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn test_component_ownership_protection_with_vehicle_lock_only() -> Result<(), TestingError> {
+    let (runtime, _lock) = setup_integration_test(true).await?;
+    let auth_owner = auth_header(&runtime.config, None).await?;
+
+    // Lock the vehicle as 'owner'
+    let expiration_timeout = Duration::from_secs(30);
+    let ecu_lock = create_lock(
+        expiration_timeout,
+        VEHICLE_ENDPOINT,
+        StatusCode::CREATED,
+        &runtime.config,
+        &auth_owner,
+    )
+    .await;
+    let lock_id = extract_field_from_json::<String>(&response_to_json(&ecu_lock)?, "id")?;
+
+    // Create headers for non_owner using the specific bearer token
+    let auth_non_owner = bearer_token_header(NON_OWNER_BEARER_TOKEN);
+
+    // Non-owner tries to set dtcsetting - should fail because lock owners differ
+    // Without lock, the CDA should reject the request
+    set_dtc_setting(
+        "On",
+        &runtime.config,
+        &auth_non_owner,
+        sovd::ECU_FLXC1000_ENDPOINT,
+        StatusCode::FORBIDDEN,
+    )
+    .await?;
+
+    // Cleanup: delete the lock as owner
+    lock_operation(
+        VEHICLE_ENDPOINT,
+        Some(&lock_id),
         &runtime.config,
         &auth_owner,
         StatusCode::NO_CONTENT,
