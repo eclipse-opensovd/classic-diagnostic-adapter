@@ -666,6 +666,85 @@ macro_rules! create_schema {
 }
 pub use create_schema;
 
+pub(crate) mod static_data {
+    use aide::{
+        axum::{ApiRouter, routing},
+        transform::TransformOperation,
+    };
+    use axum::{
+        Json,
+        extract::{Query, State},
+        response::{IntoResponse, Response},
+    };
+    use http::StatusCode;
+
+    use crate::{dynamic_router::DynamicRouter, sovd::error::ApiError};
+
+    /// Add an endpoint serving static data.
+    /// For example it can be used, to serve version information.
+    /// The standard defines these routes for version data:
+    /// * `/vehicle/v15/apps/sovd2uds/data/version`.
+    /// * `/vehicle/v15/data/version`
+    /// # Arguments
+    /// * `dynamic_router` - The dynamic router to add the endpoint to.
+    /// * `data` - The version data to return.
+    /// * `path` - The path to serve the data from.
+    ///   There is no processing of this, it will be returned as is in the response.
+    pub async fn add_static_data_endpoint(
+        dynamic_router: &DynamicRouter,
+        data: serde_json::Map<String, serde_json::Value>,
+        path: &str,
+    ) {
+        let data_docs = data.clone();
+        let router = ApiRouter::new()
+            .api_route(
+                path,
+                routing::get_with(get, move |transformation| {
+                    docs_get(transformation, data_docs.clone())
+                }),
+            )
+            .with_state(data);
+        dynamic_router
+            .update_router(move |old_router| old_router.merge(router))
+            .await;
+    }
+
+    pub(crate) async fn get(
+        State(state): State<serde_json::Map<String, serde_json::Value>>,
+        Query(query): Query<sovd_interfaces::IncludeSchemaQuery>,
+    ) -> Response {
+        let mut response_map = state.clone();
+        if query.include_schema {
+            let schema = match serde_json::to_value(
+                create_schema!(serde_json::Map<String, serde_json::Value>),
+            ) {
+                Ok(s) => s,
+                Err(e) => {
+                    return ApiError::InternalServerError(Some(format!(
+                        "Failed to build static data with schema: {e}"
+                    )))
+                    .into_response();
+                }
+            };
+
+            response_map.insert("schema".to_string(), schema);
+        }
+        (StatusCode::OK, Json(response_map)).into_response()
+    }
+
+    pub(crate) fn docs_get(
+        op: TransformOperation,
+        data: serde_json::Map<String, serde_json::Value>,
+    ) -> TransformOperation {
+        op.description("Get static information")
+            .response_with::<200, Json<serde_json::Map<String, serde_json::Value>>, _>(|res| {
+                let mut example = data;
+                example.insert("schema".to_string(), serde_json::Value::Null);
+                res.description("Successful response").example(example)
+            })
+    }
+}
+
 #[cfg(test)]
 pub(crate) mod tests {
 

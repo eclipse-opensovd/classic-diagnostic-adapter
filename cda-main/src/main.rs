@@ -156,7 +156,7 @@ async fn main() -> Result<(), AppError> {
     if let serde_json::Value::Object(version_info) = serde_json::json!({
         "id": "version",
         "data": {
-            "name": "Eclipse OpenSOVD Classic Diagnostics Adapter",
+            "name": "Eclipse OpenSOVD Classic Diagnostic Adapter",
             "api": {
                 // 1.1 to match the sovd standard version
                 "version": "1.1"
@@ -168,7 +168,14 @@ async fn main() -> Result<(), AppError> {
             }
         }
     }) {
-        cda_sovd::add_version_endpoint(&dynamic_router, version_info).await;
+        cda_sovd::add_static_data_endpoint(
+            &dynamic_router,
+            version_info.clone(),
+            "/vehicle/v15/apps/sovd2uds/data/version",
+        )
+        .await;
+        // For now, both version endpoints serve the same data. This might change in the future.
+        cda_sovd::add_static_data_endpoint(&dynamic_router, version_info, "/data/version").await;
     } else {
         tracing::error!("Failed to build version information");
     }
