@@ -880,6 +880,10 @@ impl<S: EcuGateway, R: DiagServiceResponse, T: EcuManager<Response = R>> UdsMana
             None
         };
 
+        if extended_data_response.response_type() == DiagServiceResponseType::Negative {
+            return Ok((None, schema));
+        }
+
         let extended_data_json = extended_data_response.into_json()?;
         let extended_data: Option<HashMap<_, _>> =
             extended_data_json.data.as_object().and_then(|obj| {
@@ -968,6 +972,10 @@ impl<S: EcuGateway, R: DiagServiceResponse, T: EcuManager<Response = R>> UdsMana
         } else {
             None
         };
+
+        if snapshot_data_response.response_type() == DiagServiceResponseType::Negative {
+            return Ok((None, schema));
+        }
 
         let snapshot_json = snapshot_data_response.into_json()?;
         let snapshot_data: Option<HashMap<_, _>> = snapshot_json
@@ -1957,6 +1965,7 @@ impl<S: EcuGateway, R: DiagServiceResponse, T: EcuManager<Response = R>> UdsEcu
                     true,
                 )
                 .await?;
+
             let raw = response.get_raw();
             let active_dtcs = response.get_dtcs()?;
 
