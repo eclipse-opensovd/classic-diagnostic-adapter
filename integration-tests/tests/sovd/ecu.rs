@@ -97,6 +97,27 @@ async fn test_ecu_session_switching() {
     .await
     .unwrap();
 
+    // Get the active diagnostic session using the Configuration GET method.
+    let get_config_result = get_configurations(
+        &runtime.config,
+        &auth,
+        ecu_endpoint,
+        "activediagnosticsessiondataidentifier",
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(
+        get_config_result.id,
+        "activediagnosticsessiondataidentifier"
+    );
+    let session_type = get_config_result
+        .data
+        .get("EcuSessionType")
+        .and_then(|v| v.as_str())
+        .expect("Missing or invalid EcuSessionType");
+    assert_eq!(session_type, "Default");
+
     let switch_session_result = switch_session(
         "extended",
         &runtime.config,
@@ -111,6 +132,27 @@ async fn test_ecu_session_switching() {
     let session_result = session(&runtime.config, &auth, ecu_endpoint).await.unwrap();
     assert_eq!(session_result.value, Some("extended".to_owned()));
     assert_eq!(session_result.name, Some("Diagnostic session".to_owned()));
+
+    // After switching to extended session, fetch again using configuraion GET and verify.
+    let get_config_result = get_configurations(
+        &runtime.config,
+        &auth,
+        ecu_endpoint,
+        "activediagnosticsessiondataidentifier",
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(
+        get_config_result.id,
+        "activediagnosticsessiondataidentifier"
+    );
+    let session_type = get_config_result
+        .data
+        .get("EcuSessionType")
+        .and_then(|v| v.as_str())
+        .expect("Missing or invalid EcuSessionType");
+    assert_eq!(session_type, "Extended");
 
     // switch ECU sim state to BOOT
     ecusim::switch_variant(&runtime.ecu_sim, "FLXC1000", "BOOT")
@@ -1001,4 +1043,22 @@ async fn get_dtc_setting(
     ecu_endpoint: &str,
 ) -> Result<dtcsetting::get::Response, TestingError> {
     get_mode(config, headers, ecu_endpoint, "dtcsetting").await
+}
+
+async fn get_configurations(
+    config: &Configuration,
+    headers: &HeaderMap,
+    ecu_endpoint: &str,
+    service: &str,
+) -> Result<sovd_interfaces::components::ecu::configurations::ServiceResponse, TestingError> {
+    let http_response = send_cda_request(
+        config,
+        &format!("{ecu_endpoint}/configurations/{service}"),
+        StatusCode::OK,
+        Method::GET,
+        None,
+        Some(headers),
+    )
+    .await?;
+    response_to_t(&http_response)
 }
