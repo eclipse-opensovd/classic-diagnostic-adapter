@@ -357,7 +357,8 @@ fn ecu_route<
             routing::put_with(
                 configurations::diag_service::put,
                 configurations::diag_service::docs_put,
-            ),
+            )
+            .get_with(data::diag_service::get, data::diag_service::docs_get),
         )
         .api_route("/data", routing::get_with(data::get, data::docs_get))
         .api_route(
