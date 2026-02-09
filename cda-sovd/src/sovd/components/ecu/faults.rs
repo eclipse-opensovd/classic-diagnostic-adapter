@@ -48,7 +48,7 @@ impl IntoSovd for DtcRecordAndStatus {
 
     fn into_sovd(self) -> Self::SovdType {
         Self::SovdType {
-            code: format!("{:X}", self.record.code),
+            code: format!("{:06X}", self.record.code),
             scope: Some(self.scope),
             display_code: self.record.display_code,
             fault_name: self.record.fault_name,
@@ -512,7 +512,7 @@ mod tests {
             .items
             .first()
             .expect("Fault item should be present");
-        assert_eq!(fault.code, format!("{:X}", test_dtc.record.code));
+        assert_eq!(fault.code, format!("{:06X}", test_dtc.record.code));
         assert_eq!(fault.display_code, test_dtc.record.display_code);
         assert_eq!(fault.fault_name, test_dtc.record.fault_name);
         assert_eq!(fault.severity, Some(test_dtc.record.severity));
