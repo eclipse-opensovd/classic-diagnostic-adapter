@@ -15,7 +15,8 @@ pub use cda_comm_doip::config::DoipConfig;
 use cda_interfaces::{
     FunctionalDescriptionConfig,
     datatypes::{
-        ComParams, DatabaseNamingConvention, DiagnosticServiceAffixPosition, FlatbBufConfig,
+        ComParams, ComponentsConfig, DatabaseNamingConvention, DiagnosticServiceAffixPosition,
+        FlatbBufConfig, SdBoolMappings, SdMappingsTruthyValue,
     },
 };
 use serde::{Deserialize, Serialize};
@@ -33,6 +34,7 @@ pub struct Configuration {
     pub com_params: ComParams,
     pub flat_buf: FlatbBufConfig,
     pub functional_description: FunctionalDescriptionConfig,
+    pub components: ComponentsConfig,
     #[cfg(feature = "health")]
     pub health: cda_health::config::HealthConfig,
 }
@@ -89,6 +91,22 @@ impl Default for Configuration {
                 protocol_position:
                     cda_interfaces::datatypes::DiagnosticServiceAffixPosition::Suffix,
                 protocol_case_sensitive: false,
+            },
+            components: ComponentsConfig {
+                rootlocked_ecus_sds: SdBoolMappings::from_iter([(
+                    "Vehicle_Security_Master".to_owned(),
+                    ["Yes", "yes", "true", "True"]
+                        .into_iter()
+                        .map(ToOwned::to_owned)
+                        .collect::<SdMappingsTruthyValue>(),
+                )]),
+                lin_ecus_sds: SdBoolMappings::from_iter([(
+                    "LIN".to_owned(),
+                    ["Master", "Yes", "yes", "True", "true"]
+                        .into_iter()
+                        .map(ToOwned::to_owned)
+                        .collect::<SdMappingsTruthyValue>(),
+                )]),
             },
         }
     }

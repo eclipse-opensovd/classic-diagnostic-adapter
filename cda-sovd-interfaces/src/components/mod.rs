@@ -26,3 +26,15 @@ pub struct ComponentQuery {
     #[serde(rename = "include-schema", default)]
     pub include_schema: bool,
 }
+
+#[derive(Serialize, schemars::JsonSchema)]
+pub struct ComponentsResponse<T> {
+    pub items: Vec<T>,
+    #[serde(rename = "x-sovd2uds-rootlocked-ecus")]
+    pub rootlocked_ecus: Vec<T>,
+    #[serde(rename = "x-sovd2uds-lin-ecus")]
+    pub lin_ecus: Vec<T>,
+    #[schemars(skip)]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub schema: Option<schemars::Schema>,
+}

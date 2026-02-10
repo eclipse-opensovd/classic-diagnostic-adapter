@@ -11,6 +11,10 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+use serde::{Deserialize, Serialize};
+
+use crate::datatypes::SdBoolMappings;
+
 pub struct ComponentDataInfo {
     pub category: String,
     pub id: String,
@@ -22,4 +26,10 @@ pub struct ComponentConfigurationsInfo {
     pub name: String,
     pub configurations_type: String,
     pub service_abstract: Vec<Vec<u8>>,
+}
+
+#[derive(Deserialize, Serialize, Clone, Debug)]
+pub struct ComponentsConfig {
+    pub rootlocked_ecus_sds: SdBoolMappings,
+    pub lin_ecus_sds: SdBoolMappings,
 }

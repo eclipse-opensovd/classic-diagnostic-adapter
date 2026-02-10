@@ -13,6 +13,8 @@
 
 use serde::Serialize;
 
+use crate::{HashMap, HashSet};
+
 #[derive(Debug, Serialize)]
 #[serde(untagged)]
 pub enum SdSdg {
@@ -45,3 +47,10 @@ pub enum SdSdg {
         sdgs: Vec<SdSdg>,
     },
 }
+
+/// A config value to specify which Strings are to be interpreted
+/// as truthy and which as falsey
+pub type SdMappingsTruthyValue = HashSet<String>;
+
+/// A mapping of an SD.si to their truthy values
+pub type SdBoolMappings = HashMap<String, SdMappingsTruthyValue>;
