@@ -19,55 +19,51 @@ on:
 
 permissions:
   contents: read
+  pull-requests: write # Grants permission to post review comments
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref_name }}-${{ github.event.pull_request.number || github.sha }}
   cancel-in-progress: true
 
 jobs:
-  format_and_clippy_nightly_toolchain:
+  format_and_clippy_nightly_toolchain_pinned:
     concurrency:
-      group: format_and_clippy_nightly_toolchain-${{ github.ref }}
+      group: format_and_clippy_nightly_toolchain_pinned-${{ github.ref }}
     runs-on: ubuntu-latest
-    strategy:
-      fail-fast: true
-      matrix:
-        include:
-          - toolchain: nightly-2025-07-14
-            allow-failure: false
-          - toolchain: nightly
-            allow-failure: true
     continue-on-error: false
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
         with:
           submodules: false
-      - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@nightly
+      - name: Format and Clippy
+        uses: eclipse-opensovd/cicd-workflows/rust-lint-and-format-action@3c3da34839e9692d5ca4db226c28926809d9ad6e
         with:
-          toolchain: ${{ matrix.toolchain }}
-          components: clippy, rustfmt
-      - name: Cache Rust dependencies
-        uses: Swatinem/rust-cache@v2
+          toolchain: nightly-2025-07-14
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          fail-on-format-error: 'true'
+          fail-on-clippy-error: 'true'
+          clippy-deny-warnings: 'true'
+
+  format_and_clippy_nightly_toolchain_latest:
+    needs: format_and_clippy_nightly_toolchain_pinned
+    concurrency:
+      group: format_and_clippy_nightly_toolchain_latest-${{ github.ref }}
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
         with:
-          shared-key: ${{ matrix.toolchain }}
-      - name: Formating - check for long lines
-        run: cargo fmt -- --check --config error_on_unformatted=true,error_on_line_overflow=true,format_strings=true
-      - name: Formatting - check import order
-        run: cargo fmt -- --check --config group_imports=StdExternalCrate
-      - name: Formatting - check imports granularity
-        run: cargo fmt -- --check --config imports_granularity=Crate
-      - name: Formatting - check hex literals
-        run: cargo fmt -- --check --config hex_literal_case=Upper
-      - name: Clippy
-        uses: giraffate/clippy-action@v1
+          submodules: false
+      - name: Format and Clippy
+        uses: eclipse-opensovd/cicd-workflows/rust-lint-and-format-action@3c3da34839e9692d5ca4db226c28926809d9ad6e
         with:
-          reporter: 'github-check'
-          github_token: ${{ secrets.GITHUB_TOKEN }}
-          clippy_flags: --locked --all-targets --features integration-tests ${{ matrix.allow-failure == false && '-- -D warnings' || '' }}
-          filter_mode: 'nofilter'
-          fail_on_error: ${{ !matrix.allow-failure }}
+          toolchain: nightly
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          fail-on-format-error: 'false'
+          fail-on-clippy-error: 'false'
+          clippy-deny-warnings: 'false'
 
   features:
     runs-on: ubuntu-latest
