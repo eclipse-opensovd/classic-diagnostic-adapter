@@ -382,7 +382,7 @@ def add_dtc_read_services(dlr: DiagLayerRaw):
             DiagnosticTroubleCode(
                 odx_id=derived_id(dlr, "DTC.Code1"),
                 short_name="Code1",
-                trouble_code="123456",  # 0x1E240
+                trouble_code="123456",  # 0x01E240
                 text=Text(
                     text="DTC Code 1",
                 ),
@@ -390,9 +390,41 @@ def add_dtc_read_services(dlr: DiagLayerRaw):
             DiagnosticTroubleCode(
                 odx_id=derived_id(dlr, "DTC.Code2"),
                 short_name="Code2",
-                trouble_code="234567",  # 0x39457
+                trouble_code="234567",  # 0x039447
                 text=Text(
                     text="DTC Code 2",
+                ),
+            ),
+            DiagnosticTroubleCode(
+                odx_id=derived_id(dlr, "DTC.Code3"),
+                short_name="Code3",
+                trouble_code="123457",  # 0x01E241
+                text=Text(
+                    text="DTC Code 3",
+                ),
+            ),
+            DiagnosticTroubleCode(
+                odx_id=derived_id(dlr, "DTC.Code4"),
+                short_name="Code4",
+                trouble_code="123458",  # 0x01E242
+                text=Text(
+                    text="DTC Code 4",
+                ),
+            ),
+            DiagnosticTroubleCode(
+                odx_id=derived_id(dlr, "DTC.Code5"),
+                short_name="Code5",
+                trouble_code="123459",  # 0x01E243
+                text=Text(
+                    text="DTC Code 5",
+                ),
+            ),
+            DiagnosticTroubleCode(
+                odx_id=derived_id(dlr, "DTC.Code6"),
+                short_name="Code6",
+                trouble_code="123460",  # 0x01E244
+                text=Text(
+                    text="DTC Code 6",
                 ),
             ),
         ],
