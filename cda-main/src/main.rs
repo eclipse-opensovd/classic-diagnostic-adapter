@@ -67,6 +67,9 @@ struct AppArgs {
 
     #[arg(long)]
     exit_no_database_loaded: Option<bool>,
+
+    #[arg(long)]
+    fallback_to_base_variant: Option<bool>,
 }
 
 #[tokio::main]
@@ -217,6 +220,9 @@ impl AppArgs {
         }
         if let Some(exit_no_database_loaded) = self.exit_no_database_loaded {
             config.database.exit_no_database_loaded = exit_no_database_loaded;
+        }
+        if let Some(fallback_to_base_variant) = self.fallback_to_base_variant {
+            config.database.fallback_to_base_variant = fallback_to_base_variant;
         }
         if let Some(flash_files_path) = self.flash_files_path {
             config.flash_files_path = flash_files_path;

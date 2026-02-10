@@ -1735,6 +1735,14 @@ impl<S: EcuGateway, R: DiagServiceResponse, T: EcuManager<Response = R>> UdsEcu
         )
     )]
     async fn detect_variant(&self, ecu_name: &str) -> Result<(), DiagServiceError> {
+        #[derive(Debug)]
+        enum VariantDetectionResult<'a> {
+            ExactMatch(&'a str),
+            AllFallbacks,
+            NoOnlineEcu,
+            NoDetection,
+        }
+
         let ecu = self.ecu_manager(ecu_name)?;
 
         let requests = ecu
@@ -1811,44 +1819,82 @@ impl<S: EcuGateway, R: DiagServiceResponse, T: EcuManager<Response = R>> UdsEcu
                 });
         };
 
-        // Try to detect variant for all duplicated ECUs
+        // Detect variants for all duplicated ECUs
         duplicated_ecus.insert(ecu_name.to_owned());
-        let mut ecu_with_variant_name = None;
-        for ecu_name in &duplicated_ecus {
-            if let Ok(ecu) = self
-                .ecus
-                .get(ecu_name)
-                .ok_or_else(|| format!("Unknown ECU: {ecu_name}"))
-            {
-                let detection_result = ecu
+
+        let detection_result = {
+            // First ECU that is online and fell back to base variant (no specific match).
+            let mut first_fallback = None;
+            let mut any_online = false;
+
+            let mut result = None;
+            for ecu_name in &duplicated_ecus {
+                let Some(ecu) = self.ecus.get(ecu_name) else {
+                    continue;
+                };
+
+                if let Err(e) = ecu
                     .write()
                     .await
                     .detect_variant(service_responses.clone())
-                    .await;
-
-                if detection_result.is_ok()
-                    && ecu.read().await.variant().state == cda_interfaces::EcuState::Online
+                    .await
                 {
-                    ecu_with_variant_name = Some(ecu_name);
-                    break;
-                }
-            }
-        }
-
-        tracing::debug!("ECU with detected variant: {ecu_with_variant_name:?}");
-
-        // If one ECU was able to detect the variant, mark all others as duplicate.
-        // The duplicate status is shown in the ECU info and network structure.
-        // The database of duplicates is unloaded.
-        if let Some(ecu_with_variant_name) = ecu_with_variant_name {
-            for ecu_name in &duplicated_ecus {
-                if ecu_name == ecu_with_variant_name {
+                    tracing::warn!(
+                        "Variant detection failed for ECU {ecu_name}: {e:?}, marking as undetected"
+                    );
                     continue;
                 }
 
-                if let Some(ecu) = self.ecus.get(ecu_name) {
-                    ecu.write().await.mark_as_duplicate();
+                let variant = ecu.read().await.variant();
+                if variant.state != cda_interfaces::EcuState::Online {
+                    continue;
                 }
+
+                any_online = true;
+
+                if variant.is_fallback {
+                    first_fallback.get_or_insert(ecu_name);
+                } else {
+                    result = Some(VariantDetectionResult::ExactMatch(ecu_name));
+                    break;
+                }
+            }
+
+            let result_fallback_mapper =
+                |first_fallback, any_online| match (first_fallback, any_online) {
+                    (Some(_), true) => VariantDetectionResult::AllFallbacks,
+                    (_, true) => VariantDetectionResult::NoDetection,
+                    _ => VariantDetectionResult::NoOnlineEcu,
+                };
+
+            result.unwrap_or(result_fallback_mapper(first_fallback, any_online))
+        };
+
+        tracing::debug!(?detection_result, "ECU variant detection result");
+
+        match &detection_result {
+            VariantDetectionResult::ExactMatch(the_chosen_one) => {
+                // Mark all other duplicates, the chosen one keeps its detected variant.
+                for ecu_name in &duplicated_ecus {
+                    if ecu_name == *the_chosen_one {
+                        continue;
+                    }
+                    if let Some(ecu) = self.ecus.get(ecu_name) {
+                        ecu.write().await.mark_as_duplicate();
+                    }
+                }
+            }
+            VariantDetectionResult::AllFallbacks => {
+                // No specific variant found despite online ECUs — mark all as undetected.
+                // Falling back to base variant is only allowed when there are no duplicates.
+                for ecu_name in &duplicated_ecus {
+                    if let Some(ecu) = self.ecus.get(ecu_name) {
+                        ecu.write().await.mark_as_no_variant_detected();
+                    }
+                }
+            }
+            VariantDetectionResult::NoOnlineEcu | VariantDetectionResult::NoDetection => {
+                // Nothing to do
             }
         }
 
