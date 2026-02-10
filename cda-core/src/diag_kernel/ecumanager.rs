@@ -12,7 +12,7 @@
 
 use std::{sync::Arc, time::Duration};
 
-use cda_database::datatypes;
+use cda_database::{datatypes, datatypes::Variant};
 use cda_interfaces::{
     DiagComm, DiagCommAction, DiagCommType, DiagServiceError, DynamicPlugin, EcuManagerType,
     EcuState, EcuVariant, HashMap, HashMapExtensions, HashSet, HashSetExtensions, Protocol,
@@ -45,6 +45,33 @@ use crate::{
     },
 };
 
+// Helper struct to extract variant data without lifetime dependencies
+// Necessary to de-couple set_variant lifetimes and prevent borrow issues,
+// we would have when using Variant<'_> from database.
+// Not using EcuVariant instead because contains additional fields we're looking up in
+// set_variant
+struct VariantData {
+    name: String,
+    is_base_variant: bool,
+    is_fallback: bool,
+}
+
+impl VariantData {
+    fn from_variant_and_fallback(v: &Variant<'_>, is_fallback: bool) -> Self {
+        Self {
+            name: (*v)
+                .diag_layer()
+                .and_then(|d| d.short_name())
+                .unwrap_or_default()
+                .to_owned(),
+            is_base_variant: v.is_base_variant(),
+            is_fallback,
+        }
+    }
+}
+
+// Allowed because this holds a bunch of config values.
+#[allow(clippy::struct_excessive_bools)]
 pub struct EcuManager<S: SecurityPlugin> {
     pub(crate) diag_database: datatypes::DiagnosticDatabase,
     db_cache: DbCache,
@@ -68,6 +95,7 @@ pub struct EcuManager<S: SecurityPlugin> {
     variant_detection: variant_detection::VariantDetection,
     variant_index: Option<usize>,
     variant: EcuVariant,
+    fallback_to_base_variant: bool,
     duplicating_ecu_names: Option<HashSet<String>>,
 
     protocol: Protocol,
@@ -211,6 +239,7 @@ impl<S: SecurityPlugin> cda_interfaces::EcuManager for EcuManager<S> {
             self.variant = EcuVariant {
                 name: None,
                 is_base_variant: false,
+                is_fallback: false,
                 state,
                 logical_address: self.logical_address,
             };
@@ -218,79 +247,45 @@ impl<S: SecurityPlugin> cda_interfaces::EcuManager for EcuManager<S> {
         }
         match variant_detection::evaluate_variant(service_responses, &self.diag_database) {
             Ok(v) => {
-                let variant_name = (*v)
-                    .diag_layer()
-                    .and_then(|d| d.short_name())
-                    .unwrap_or_default();
-
-                let variant_index = self.diag_database.ecu_data().ok().and_then(|ecu_data| {
-                    ecu_data.variants().and_then(|variants| {
-                        variants.iter().position(|variant| {
-                            variant
-                                .diag_layer()
-                                .and_then(|dl| dl.short_name())
-                                .is_some_and(|name| name == variant_name)
-                        })
-                    })
-                });
-
-                if self.variant_index != variant_index {
-                    self.variant_index = variant_index;
-                    // reset cache, because services may have the same lookup names
-                    // but differ in parameters etc. between variants
-                    self.db_cache.reset().await;
-                }
-
-                let state = if variant_index.is_none() {
-                    tracing::warn!("Variant '{variant_name}' not found in database variants");
-                    EcuState::NoVariantDetected
-                } else {
-                    EcuState::Online
-                };
-
-                self.variant = EcuVariant {
-                    name: Some(variant_name.to_owned()),
-                    is_base_variant: v.is_base_variant(),
-                    state,
-                    logical_address: self.logical_address,
-                };
-
-                // todo read this from the variant detection instead of assuming default, see #110
-                // Only set default state if not already set - otherwise we'd override
-                // the actual session/security state during re-detection.
-                // This prevents an issue if the variant detection is running _after_
-                // the session has been changed.
-                // For example when switching to 'extended' immediately after the service
-                // signals 'ready'
-                let mut states = self.ecu_service_states.write().await;
-                states
-                    .entry(service_ids::SESSION_CONTROL)
-                    .or_insert(self.default_state(semantics::SESSION)?);
-
-                states
-                    .entry(service_ids::SECURITY_ACCESS)
-                    .or_insert(self.default_state(semantics::SECURITY)?);
-
-                states
-                    .entry(service_ids::CONTROL_DTC_SETTING)
-                    .or_insert_with(|| "on".to_owned());
-
-                states
-                    .entry(service_ids::COMMUNICATION_CONTROL)
-                    .or_insert_with(|| "enablerxandenabletx".to_owned());
-
-                Ok(())
+                let variant_data = VariantData::from_variant_and_fallback(&v, false);
+                self.set_variant(variant_data).await
             }
             Err(e) => {
-                self.variant = EcuVariant {
-                    name: None,
-                    is_base_variant: false,
-                    state: EcuState::NoVariantDetected,
-                    logical_address: self.logical_address,
+                if !self.fallback_to_base_variant {
+                    self.variant = EcuVariant {
+                        name: None,
+                        is_base_variant: false,
+                        is_fallback: false,
+                        state: EcuState::NoVariantDetected,
+                        logical_address: self.logical_address,
+                    };
+                    self.diag_database.unload();
+                    tracing::debug!(
+                        "No variant detected, fallback to base variant disabled, unloading DB"
+                    );
+                    return Err(e);
+                }
+
+                let base_variant = match self.diag_database.base_variant() {
+                    Ok(base_variant) => base_variant,
+                    Err(e) => {
+                        self.variant = EcuVariant {
+                            name: None,
+                            is_base_variant: false,
+                            is_fallback: false,
+                            state: EcuState::NoVariantDetected,
+                            logical_address: self.logical_address,
+                        };
+                        self.diag_database.unload();
+                        tracing::debug!(
+                            "No variant detected, and no base variant found in DB, unloading DB"
+                        );
+                        return Err(e);
+                    }
                 };
-                tracing::debug!("No variant detected, unloading DB");
-                self.diag_database.unload();
-                Err(e)
+
+                let variant_data = VariantData::from_variant_and_fallback(&base_variant, true);
+                self.set_variant(variant_data).await
             }
         }
     }
@@ -1375,6 +1370,11 @@ impl<S: SecurityPlugin> cda_interfaces::EcuManager for EcuManager<S> {
         self.diag_database.unload();
     }
 
+    fn mark_as_no_variant_detected(&mut self) {
+        self.variant.state = EcuState::NoVariantDetected;
+        self.diag_database.unload();
+    }
+
     fn revision(&self) -> String {
         // We cannot remove the closure because there is no direct
         // access to the underlying flatbuf type, as it's not exported from the database
@@ -1755,6 +1755,7 @@ impl<S: SecurityPlugin> EcuManager<S> {
         database_naming_convention: DatabaseNamingConvention,
         type_: EcuManagerType,
         func_description_config: &cda_interfaces::FunctionalDescriptionConfig,
+        fallback_to_base_variant: bool,
     ) -> Result<Self, DiagServiceError> {
         match type_ {
             EcuManagerType::Ecu => Self::new_ecu_description(
@@ -1764,6 +1765,7 @@ impl<S: SecurityPlugin> EcuManager<S> {
                 database_naming_convention,
                 type_,
                 func_description_config,
+                fallback_to_base_variant,
             ),
             EcuManagerType::FunctionalDescription => Self::new_functional_description(
                 database,
@@ -1772,6 +1774,7 @@ impl<S: SecurityPlugin> EcuManager<S> {
                 database_naming_convention,
                 type_,
                 func_description_config,
+                fallback_to_base_variant,
             ),
         }
     }
@@ -1785,6 +1788,7 @@ impl<S: SecurityPlugin> EcuManager<S> {
         database_naming_convention: DatabaseNamingConvention,
         type_: EcuManagerType,
         func_description_config: &cda_interfaces::FunctionalDescriptionConfig,
+        fallback_to_base_variant: bool,
     ) -> Result<Self, DiagServiceError> {
         let variant_detection = variant_detection::prepare_variant_detection(&database)?;
 
@@ -1876,9 +1880,11 @@ impl<S: SecurityPlugin> EcuManager<S> {
             variant: EcuVariant {
                 name: None,
                 is_base_variant: false,
+                is_fallback: false,
                 state: EcuState::NotTested,
                 logical_address: logical_ecu_address,
             },
+            fallback_to_base_variant,
             duplicating_ecu_names: None,
             protocol,
             fg_protocol_position: func_description_config.protocol_position.clone(),
@@ -1938,6 +1944,7 @@ impl<S: SecurityPlugin> EcuManager<S> {
         database_naming_convention: DatabaseNamingConvention,
         type_: EcuManagerType,
         func_description_config: &cda_interfaces::FunctionalDescriptionConfig,
+        fallback_to_base_variant: bool,
     ) -> Result<Self, DiagServiceError> {
         // Functional group description: use defaults for all com params
         let logical_ecu_address = com_params.doip.logical_ecu_address.default;
@@ -1983,9 +1990,11 @@ impl<S: SecurityPlugin> EcuManager<S> {
             variant: EcuVariant {
                 name: None,
                 is_base_variant: false,
+                is_fallback: false,
                 state: EcuState::NotTested,
                 logical_address: logical_ecu_address,
             },
+            fallback_to_base_variant,
             duplicating_ecu_names: None,
             protocol,
             fg_protocol_position: func_description_config.protocol_position.clone(),
@@ -2022,6 +2031,33 @@ impl<S: SecurityPlugin> EcuManager<S> {
             timeout_default: com_params.uds.timeout_default.default,
             security_plugin_phantom: std::marker::PhantomData::<S>,
         })
+    }
+
+    /// Set default states for diagnostic services if not already set.
+    /// This prevents overriding the actual session/security state during re-detection.
+    async fn set_default_states(&self) -> Result<(), DiagServiceError> {
+        // todo read this from the variant detection instead of assuming default, see #110
+        // Only set default state if not already set - otherwise we'd override
+        // the actual session/security state during re-detection.
+        // This prevents an issue if the variant detection is running _after_
+        // the session has been changed.
+        // For example when switching to 'extended' immediately after the service
+        // signals 'ready'
+
+        let mut states = self.ecu_service_states.write().await;
+        states
+            .entry(service_ids::SESSION_CONTROL)
+            .or_insert(self.default_state(semantics::SESSION)?);
+        states
+            .entry(service_ids::SECURITY_ACCESS)
+            .or_insert(self.default_state(semantics::SECURITY)?);
+        states
+            .entry(service_ids::CONTROL_DTC_SETTING)
+            .or_insert_with(|| "on".to_owned());
+        states
+            .entry(service_ids::COMMUNICATION_CONTROL)
+            .or_insert_with(|| "enablerxandenabletx".to_owned());
+        Ok(())
     }
 
     fn variant(&self) -> Option<datatypes::Variant<'_>> {
@@ -3995,6 +4031,45 @@ impl<S: SecurityPlugin> EcuManager<S> {
         validate_state(&allowed_security, &ecu_security_level, "Security level")?;
         validate_state(&allowed_session, &ecu_session, "Session")
     }
+
+    async fn set_variant(&mut self, variant: VariantData) -> Result<(), DiagServiceError> {
+        let variant_name = &variant.name;
+        let variant_index = self.diag_database.ecu_data().ok().and_then(|ecu_data| {
+            ecu_data.variants().and_then(|variants| {
+                variants.iter().position(|variant| {
+                    variant
+                        .diag_layer()
+                        .and_then(|dl| dl.short_name())
+                        .is_some_and(|name| name == variant_name)
+                })
+            })
+        });
+
+        if self.variant_index != variant_index {
+            self.variant_index = variant_index;
+            // reset cache, because services may have the same lookup names
+            // but differ in parameters etc. between variants
+            self.db_cache.reset().await;
+        }
+
+        let state = if variant_index.is_none() {
+            tracing::warn!("Variant '{variant_name}' not found in database variants");
+            EcuState::NoVariantDetected
+        } else {
+            EcuState::Online
+        };
+
+        tracing::debug!("Setting variant to '{variant_name}' with state {state:?}");
+        self.variant = EcuVariant {
+            name: Some(variant.name.clone()),
+            is_base_variant: variant.is_base_variant,
+            is_fallback: variant.is_fallback,
+            state,
+            logical_address: self.logical_address,
+        };
+
+        self.set_default_states().await
+    }
 }
 
 fn mux_case_struct_from_selector_value<'a>(
@@ -4216,6 +4291,28 @@ mod tests {
                     cda_interfaces::datatypes::DiagnosticServiceAffixPosition::Suffix,
                 protocol_case_sensitive: false,
             },
+            true,
+        )
+        .unwrap()
+    }
+
+    fn new_ecu_manager_no_base_fallback(
+        db: datatypes::DiagnosticDatabase,
+    ) -> super::EcuManager<DefaultSecurityPluginData> {
+        super::EcuManager::new(
+            db,
+            Protocol::DoIp,
+            &ComParams::default(),
+            DatabaseNamingConvention::default(),
+            EcuManagerType::Ecu,
+            &cda_interfaces::FunctionalDescriptionConfig {
+                description_database: "functional_groups".to_owned(),
+                enabled_functional_groups: None,
+                protocol_position:
+                    cda_interfaces::datatypes::DiagnosticServiceAffixPosition::Suffix,
+                protocol_case_sensitive: false,
+            },
+            false,
         )
         .unwrap()
     }
@@ -4895,7 +4992,9 @@ mod tests {
     ///     - State charts: Session (`DefaultSession`), Security (Locked)
     /// - **ECU name**: "`VariantDetectionEcu`"
     #[allow(clippy::too_many_lines)] // must be kept together
-    fn create_ecu_manager_variant_detection() -> super::EcuManager<DefaultSecurityPluginData> {
+    fn create_ecu_manager_variant_detection(
+        fallback_to_base: bool,
+    ) -> super::EcuManager<DefaultSecurityPluginData> {
         let mut db_builder = EcuDataBuilder::new();
         let protocol = db_builder.create_protocol(Protocol::DoIp.value(), None, None, None);
         let cp_ref = db_builder.create_com_param_ref(None, None, None, Some(protocol), None);
@@ -5046,7 +5145,11 @@ mod tests {
             ..Default::default()
         });
 
-        new_ecu_manager(db)
+        if fallback_to_base {
+            new_ecu_manager(db)
+        } else {
+            new_ecu_manager_no_base_fallback(db)
+        }
     }
 
     /// Creates an `EcuManager` with a service that uses a `PhysConst` parameter with a Normal DOP.
@@ -6104,7 +6207,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_detect_variant_with_empty_responses_to_disconnected() {
-        let mut ecu_manager = create_ecu_manager_variant_detection();
+        let mut ecu_manager = create_ecu_manager_variant_detection(true);
 
         for state in [
             EcuState::Online,
@@ -6115,7 +6218,10 @@ mod tests {
             ecu_manager.variant.state = state;
 
             let service_responses: HashMap<String, DiagServiceResponseStruct> = HashMap::new();
-            ecu_manager.detect_variant(service_responses).await.unwrap();
+            ecu_manager
+                .detect_variant::<DiagServiceResponseStruct>(service_responses)
+                .await
+                .unwrap();
 
             assert_eq!(ecu_manager.variant.name, None);
             assert!(!ecu_manager.variant.is_base_variant);
@@ -6145,8 +6251,10 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_detect_unknown_variant() {
-        let mut ecu_manager = create_ecu_manager_variant_detection();
+    async fn test_detect_unknown_variant_fallback_disabled() {
+        // Must disable base fallback, otherwise we won't get an error in detect_variant but
+        // just the base variant instead.
+        let mut ecu_manager = create_ecu_manager_variant_detection(false);
         let response = create_variant_response(
             "ReadVariantData",
             [("variant_code".to_owned(), 42)].into_iter().collect(),
@@ -6167,15 +6275,39 @@ mod tests {
         );
 
         assert!(ecu_manager.variant.name.is_none());
+        assert!(!ecu_manager.diag_database.is_loaded());
         assert!(!ecu_manager.variant.is_base_variant);
         assert_eq!(ecu_manager.variant.state, EcuState::NoVariantDetected);
     }
 
     #[tokio::test]
     async fn test_detect_variant_with_response_from_offline_to_online() {
-        let mut ecu_manager = create_ecu_manager_variant_detection();
+        let mut ecu_manager = create_ecu_manager_variant_detection(true);
         ecu_manager.variant.state = EcuState::Offline;
         detect_variant(0, true, "BaseVariant".to_owned(), EcuState::Online, None).await;
+    }
+
+    #[tokio::test]
+    async fn test_detect_unknown_variant_fallback_to_base() {
+        let mut ecu_manager = create_ecu_manager_variant_detection(true);
+        ecu_manager.fallback_to_base_variant = true;
+
+        let response = create_variant_response(
+            "ReadVariantData",
+            [("variant_code".to_owned(), 42)].into_iter().collect(),
+        );
+
+        let mut service_responses = HashMap::new();
+        service_responses.insert("ReadVariantData".to_owned(), response);
+
+        // Should succeed by falling back to base variant
+        ecu_manager.detect_variant(service_responses).await.unwrap();
+
+        assert_eq!(ecu_manager.variant.name, Some("BaseVariant".to_owned()));
+        assert!(ecu_manager.variant.is_base_variant);
+        assert_eq!(ecu_manager.variant.state, EcuState::Online);
+        assert!(ecu_manager.diag_database.is_loaded());
+        assert!(ecu_manager.variant_index.is_some());
     }
 
     fn create_payload(data: Vec<u8>) -> ServicePayload {
@@ -6236,7 +6368,7 @@ mod tests {
         state: EcuState,
         ecu_manger: Option<super::EcuManager<DefaultSecurityPluginData>>,
     ) {
-        let mut ecu_manager = ecu_manger.unwrap_or(create_ecu_manager_variant_detection());
+        let mut ecu_manager = ecu_manger.unwrap_or(create_ecu_manager_variant_detection(true));
 
         let response = create_variant_response(
             "ReadVariantData",

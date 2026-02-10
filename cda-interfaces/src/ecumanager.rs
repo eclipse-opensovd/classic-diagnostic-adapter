@@ -70,6 +70,10 @@ pub enum EcuState {
 pub struct EcuVariant {
     pub name: Option<String>,
     pub is_base_variant: bool,
+    /// Indicates whether this variant was selected as a fallback when no specific variant matched.
+    /// When true, this is a fallback scenario.
+    /// When false, it's an exact match (even if `is_base_variant` is true).
+    pub is_fallback: bool,
     pub state: EcuState,
     pub logical_address: u16,
 }
@@ -148,6 +152,12 @@ pub trait EcuManager:
     /// Sets the state to `EcuState::Duplicate` and unload the database.
     /// Database will be reloaded before next variant detection.
     fn mark_as_duplicate(&mut self);
+
+    /// Mark this ECU as having no variant detected. Call this when variant detection fails
+    /// or when all duplicated ECUs only fall back to base variant without finding a specific match.
+    /// Sets the state to `EcuState::NoVariantDetected` and unload the database.
+    /// Database will be reloaded before next variant detection.
+    fn mark_as_no_variant_detected(&mut self);
 
     /// This allows to (re)load a database after unloading it during runtime, which could happen
     /// if initially the ECU wasn´t responding but later another request
