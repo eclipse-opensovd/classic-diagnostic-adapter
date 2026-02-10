@@ -73,7 +73,9 @@ where
                     Ok(Some(Err(e))) => return Err(DiagServiceError::UnexpectedResponse(Some(
                         format!("Failed to receive VAMs: {e:?}"))
                     )),
-                    Ok(None) => return Err(DiagServiceError::ConnectionClosed),
+                    Ok(None) => return Err(DiagServiceError::ConnectionClosed(
+                        "Incomplete VAM due to connection closure/error".to_owned()
+                    )),
                     Err(_) => {
                         // no VAM received within timeout
                         break;
