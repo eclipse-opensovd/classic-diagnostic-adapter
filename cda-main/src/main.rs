@@ -175,7 +175,12 @@ async fn main() -> Result<(), AppError> {
         )
         .await;
         // For now, both version endpoints serve the same data. This might change in the future.
-        cda_sovd::add_static_data_endpoint(&dynamic_router, version_info, "/data/version").await;
+        cda_sovd::add_static_data_endpoint(
+            &dynamic_router,
+            version_info,
+            "/vehicle/v15/data/version",
+        )
+        .await;
     } else {
         tracing::error!("Failed to build version information");
     }
