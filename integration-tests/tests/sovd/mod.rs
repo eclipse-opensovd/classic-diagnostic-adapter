@@ -13,15 +13,16 @@
 use http::{HeaderMap, Method, StatusCode};
 use opensovd_cda_lib::config::configfile::Configuration;
 use serde::{Serialize, de::DeserializeOwned};
-use sovd_interfaces::components::ecu::modes::dtcsetting;
+use sovd_interfaces::components::ecu::{faults::Fault, modes::dtcsetting};
 
 use crate::util::{
     TestingError,
-    http::{response_to_t, send_cda_request},
+    http::{extract_field_from_json, response_to_json, response_to_t, send_cda_request},
 };
 
 mod custom_routes;
 mod ecu;
+mod faults;
 mod locks;
 
 pub(crate) const ECU_FLXC1000_ENDPOINT: &str = "components/flxc1000";
@@ -72,4 +73,88 @@ pub(crate) async fn set_dtc_setting(
         expected_status,
     )
     .await
+}
+
+pub(crate) async fn get_faults(
+    config: &Configuration,
+    headers: &HeaderMap,
+    ecu_endpoint: &str,
+) -> Result<Vec<Fault>, TestingError> {
+    let path = format!("{ecu_endpoint}/faults",);
+
+    let response = send_cda_request(
+        config,
+        &path,
+        StatusCode::OK,
+        Method::GET,
+        None,
+        Some(headers),
+    )
+    .await
+    .expect("Failed to get faults");
+
+    let json = response_to_json(&response)?;
+    extract_field_from_json::<Vec<Fault>>(&json, "items")
+}
+
+pub(crate) async fn get_fault(
+    config: &Configuration,
+    headers: &HeaderMap,
+    ecu_endpoint: &str,
+    fault_code: &str,
+) -> Result<Fault, TestingError> {
+    let path = format!("{ecu_endpoint}/faults/{fault_code}",);
+
+    let response = send_cda_request(
+        config,
+        &path,
+        StatusCode::OK,
+        Method::GET,
+        None,
+        Some(headers),
+    )
+    .await
+    .expect("Failed to get faults");
+
+    let json = response_to_json(&response)?;
+    extract_field_from_json::<Fault>(&json, "item")
+}
+
+pub(crate) async fn delete_fault(
+    config: &Configuration,
+    headers: &HeaderMap,
+    ecu_endpoint: &str,
+    fault_code: &str,
+    expected_status: StatusCode,
+) -> Result<(), TestingError> {
+    let path = format!("{ecu_endpoint}/faults/{fault_code}");
+    send_cda_request(
+        config,
+        &path,
+        expected_status,
+        Method::DELETE,
+        None,
+        Some(headers),
+    )
+    .await?;
+    Ok(())
+}
+
+pub(crate) async fn delete_all_faults(
+    config: &Configuration,
+    headers: &HeaderMap,
+    ecu_endpoint: &str,
+    expected_status: StatusCode,
+) -> Result<(), TestingError> {
+    let path = format!("{ecu_endpoint}/faults",);
+    send_cda_request(
+        config,
+        &path,
+        expected_status,
+        Method::DELETE,
+        None,
+        Some(headers),
+    )
+    .await?;
+    Ok(())
 }
