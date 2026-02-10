@@ -239,12 +239,26 @@ impl<T: EcuAddressProvider + DoipComParamProvider> DoipDiagGateway<T> {
 
     async fn get_doip_connection(
         &self,
-        conn_idx: usize,
+        logical_address: u16,
     ) -> Result<Arc<DoipConnection>, DiagServiceError> {
+        let conn_idx = *self
+            .logical_address_to_connection
+            .read()
+            .await
+            .get(&logical_address)
+            .ok_or_else(|| {
+                DiagServiceError::EcuOffline(format!(
+                    "Connection not found for logical address {logical_address}"
+                ))
+            })?;
+
         let lock = self.doip_connections.read().await;
         let conn = lock
             .get(conn_idx)
-            .ok_or(DiagServiceError::ConnectionClosed)?;
+            .ok_or(DiagServiceError::ConnectionClosed(format!(
+                "Connection entry for address {logical_address} found, but it was already closed"
+            )))?;
+
         Ok(Arc::clone(conn))
     }
 
@@ -301,18 +315,10 @@ impl<T: EcuAddressProvider + DoipComParamProvider> EcuGateway for DoipDiagGatewa
         expect_uds_reply: bool,
     ) -> Result<(), DiagServiceError> {
         let start = Instant::now();
-        let conn_idx = *self
-            .logical_address_to_connection
-            .read()
-            .await
-            .get(&transmission_params.gateway_address)
-            .ok_or_else(|| DiagServiceError::EcuOffline(transmission_params.ecu_name.clone()))?;
 
-        if conn_idx >= self.doip_connections.read().await.len() {
-            return Err(DiagServiceError::ConnectionClosed);
-        }
-
-        let doip_conn = self.get_doip_connection(conn_idx).await?;
+        let doip_conn = self
+            .get_doip_connection(transmission_params.gateway_address)
+            .await?;
         let ecu_mtx = self
             .get_ecu_mtx(&doip_conn, &message, &transmission_params)
             .await?;
@@ -530,13 +536,10 @@ impl<T: EcuAddressProvider + DoipComParamProvider> EcuGateway for DoipDiagGatewa
         ecu_db: &RwLock<E>,
     ) -> Result<(), DiagServiceError> {
         let ecu_lock = ecu_db.read().await;
-        let conn_idx = *self
-            .logical_address_to_connection
-            .read()
-            .await
-            .get(&ecu_lock.logical_gateway_address())
-            .ok_or_else(|| DiagServiceError::EcuOffline(ecu_name.to_owned()))?;
-        let doip_conn = self.get_doip_connection(conn_idx).await?;
+
+        let doip_conn = self
+            .get_doip_connection(ecu_lock.logical_gateway_address())
+            .await?;
         doip_conn
             .ecus
             .get(&ecu_lock.logical_address())
@@ -551,18 +554,9 @@ impl<T: EcuAddressProvider + DoipComParamProvider> EcuGateway for DoipDiagGatewa
         expected_ecu_logical_addrs: HashMap<u16, String>,
         timeout: Duration,
     ) -> Result<HashMap<String, Result<UdsResponse, DiagServiceError>>, DiagServiceError> {
-        let conn_idx = *self
-            .logical_address_to_connection
-            .read()
-            .await
-            .get(&transmission_params.gateway_address)
-            .ok_or_else(|| DiagServiceError::EcuOffline("Gateway not found".to_string()))?;
-
-        if conn_idx >= self.doip_connections.read().await.len() {
-            return Err(DiagServiceError::ConnectionClosed);
-        }
-
-        let doip_conn = self.get_doip_connection(conn_idx).await?;
+        let doip_conn = self
+            .get_doip_connection(transmission_params.gateway_address)
+            .await?;
 
         // Get the gateway ECU for sending the functional request
         let gateway_ecu = doip_conn

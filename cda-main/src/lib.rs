@@ -91,7 +91,7 @@ impl From<DiagServiceError> for AppError {
         match value {
             DiagServiceError::RequestNotSupported(_)
             | DiagServiceError::BadPayload(_)
-            | DiagServiceError::ConnectionClosed
+            | DiagServiceError::ConnectionClosed(_)
             | DiagServiceError::UnexpectedResponse(_)
             | DiagServiceError::EcuOffline(_)
             | DiagServiceError::NoResponse(_)

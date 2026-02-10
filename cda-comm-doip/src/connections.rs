@@ -69,10 +69,16 @@ impl From<EcuError> for DiagServiceError {
                 }
                 ConnectionError::Timeout(_) => DiagServiceError::Timeout,
                 // map arbitrary connection errors to connection closed
-                ConnectionError::ConnectionFailed(_)
-                | ConnectionError::RoutingError(_)
-                | ConnectionError::SendFailed(_)
-                | ConnectionError::Closed => DiagServiceError::ConnectionClosed,
+                ConnectionError::ConnectionFailed(msg) => {
+                    DiagServiceError::ConnectionClosed(format!("ConnectionFailed {msg}"))
+                }
+                ConnectionError::RoutingError(msg) => {
+                    DiagServiceError::ConnectionClosed(format!("RoutingError {msg}"))
+                }
+                ConnectionError::SendFailed(msg) => {
+                    DiagServiceError::ConnectionClosed(format!("SendFailed {msg}"))
+                }
+                ConnectionError::Closed => DiagServiceError::ConnectionClosed(String::new()),
             },
         }
     }

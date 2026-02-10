@@ -297,8 +297,8 @@ pub enum DiagServiceError {
     UnexpectedResponse(Option<String>),
     #[error("No response {0}")]
     NoResponse(String),
-    #[error("Connection closed")]
-    ConnectionClosed,
+    #[error("Connection closed {0}")]
+    ConnectionClosed(String),
     #[error("Ecu {0} offline")]
     EcuOffline(String),
     #[error("Timeout")]

@@ -73,7 +73,7 @@ impl From<DiagServiceError> for ApiError {
             | DiagServiceError::VariantDetectionError(_)
             | DiagServiceError::EcuOffline(_)
             | DiagServiceError::ResourceError(_)
-            | DiagServiceError::ConnectionClosed
+            | DiagServiceError::ConnectionClosed(_)
             | DiagServiceError::InvalidRequest(_)
             | DiagServiceError::SendFailed(_)
             | DiagServiceError::InvalidAddress(_)

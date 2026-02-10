@@ -482,7 +482,9 @@ async fn try_read_routing_activation_response(
         Ok(Some(Err(e))) => Err(DiagServiceError::UnexpectedResponse(Some(format!(
             "Error reading from gateway: {e:?}"
         )))),
-        Ok(None) => Err(DiagServiceError::ConnectionClosed),
+        Ok(None) => Err(DiagServiceError::ConnectionClosed(
+            "Incomplete routing activation response due to connection closure or error".to_owned(),
+        )),
         Err(_) => Err(DiagServiceError::Timeout),
     }
 }
