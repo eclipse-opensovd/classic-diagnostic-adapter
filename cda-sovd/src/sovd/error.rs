@@ -43,13 +43,16 @@ pub enum ApiError {
     InternalServerError(Option<String>),
     #[error("Conflict: {0}")]
     Conflict(String),
+    #[error("Not Responding: {0}")]
+    NotResponding(String),
 }
 
 impl ApiError {
     #[must_use]
     pub fn error_and_vendor_code(&self) -> (ErrorCode, Option<VendorErrorCode>) {
         match &self {
-            ApiError::NotFound(_) => (ErrorCode::NotResponding, None),
+            ApiError::NotResponding(_) => (ErrorCode::NotResponding, None),
+            ApiError::NotFound(_) => (ErrorCode::VendorSpecific, Some(VendorErrorCode::NotFound)),
             ApiError::BadRequest(_) => (
                 ErrorCode::InvalidResponseContent,
                 Some(VendorErrorCode::BadRequest),
@@ -243,6 +246,19 @@ impl IntoResponse for ErrorWrapper {
                         message,
                         error_code: ErrorCode::VendorSpecific,
                         vendor_code: Some(VendorErrorCode::BadRequest),
+                        parameters: None,
+                        error_source: None,
+                        schema,
+                    },
+                ),
+            ),
+            ApiError::NotResponding(message) => (
+                StatusCode::GATEWAY_TIMEOUT,
+                Json(
+                    sovd_interfaces::error::ApiErrorResponse::<VendorErrorCode> {
+                        message,
+                        error_code: ErrorCode::NotResponding,
+                        vendor_code: None,
                         parameters: None,
                         error_source: None,
                         schema,
