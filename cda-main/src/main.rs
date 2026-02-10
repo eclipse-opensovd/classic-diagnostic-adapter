@@ -152,6 +152,7 @@ async fn main() -> Result<(), AppError> {
         vehicle_data.file_managers,
         vehicle_data.locks,
         config.functional_description,
+        config.components,
     )
     .await?;
 

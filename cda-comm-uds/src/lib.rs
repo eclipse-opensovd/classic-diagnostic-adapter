@@ -27,7 +27,7 @@ use cda_interfaces::{
         self, ComponentConfigurationsInfo, DTC_CODE_BIT_LEN, DataTransferError,
         DataTransferMetaData, DataTransferStatus, DtcCode, DtcExtendedInfo, DtcMask,
         DtcReadInformationFunction, DtcRecordAndStatus, DtcSnapshot, Ecu, ExtendedDataRecords,
-        ExtendedSnapshots, Gateway, NetworkStructure, RetryPolicy,
+        ExtendedSnapshots, Gateway, NetworkStructure, RetryPolicy, SdBoolMappings, SdSdg,
     },
     diagservices::{DiagServiceResponse, DiagServiceResponseType, UdsPayloadData},
     dlt_ctx, service_ids, util,
@@ -1123,6 +1123,36 @@ impl<S: EcuGateway, R: DiagServiceResponse, T: EcuManager<Response = R>> UdsEcu
             .filter(|ecu| **ecu != self.functional_description_database)
             .cloned()
             .collect()
+    }
+
+    async fn get_ecus_with_sds(
+        &self,
+        physical_only: bool,
+        expected_sd: &SdBoolMappings,
+    ) -> Vec<String> {
+        let mut base_list = if physical_only {
+            self.get_physical_ecus().await
+        } else {
+            self.get_ecus().await
+        };
+        let mut filtered = Vec::new();
+        for ecu in base_list.drain(0..) {
+            let sdgs = match self.get_sdgs(&ecu, None).await {
+                Ok(sdgs) => sdgs,
+                Err(e) => {
+                    tracing::warn!("Unable to fetch Sdgs for {ecu}: {e}");
+                    continue;
+                }
+            };
+            if sdgs
+                .iter()
+                .any(|sdsdg| check_sd_sdg_recursive(expected_sd, sdsdg))
+            {
+                filtered.push(ecu);
+            }
+        }
+
+        filtered
     }
 
     #[tracing::instrument(skip_all,
@@ -2768,4 +2798,18 @@ fn decode_dtc_from_str(dtc_code: &str) -> Result<u32, DiagServiceError> {
         }
     };
     Ok(code)
+}
+
+fn check_sd_sdg_recursive(expected: &SdBoolMappings, sd_sdg: &SdSdg) -> bool {
+    match sd_sdg {
+        SdSdg::Sd { value, si, .. } => {
+            let Some(sd) = si.as_ref().and_then(|v| expected.get(v)) else {
+                return false;
+            };
+            value.as_ref().is_some_and(|v| sd.contains(v))
+        }
+        SdSdg::Sdg { sdgs, .. } => sdgs
+            .iter()
+            .any(|sdsdg| check_sd_sdg_recursive(expected, sdsdg)),
+    }
 }

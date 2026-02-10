@@ -12,9 +12,10 @@
 
 pub use cda_comm_doip::config::DoipConfig;
 use cda_interfaces::{
-    FunctionalDescriptionConfig,
+    FunctionalDescriptionConfig, HashMap,
     datatypes::{
-        ComParams, DatabaseNamingConvention, DiagnosticServiceAffixPosition, FlatbBufConfig,
+        ComParams, ComponentsConfig, DatabaseNamingConvention, DiagnosticServiceAffixPosition,
+        FlatbBufConfig, SdBoolMappings, SdMappingsTruthyValue,
     },
 };
 use serde::{Deserialize, Serialize};
@@ -32,6 +33,7 @@ pub struct Configuration {
     pub com_params: ComParams,
     pub flat_buf: FlatbBufConfig,
     pub functional_description: FunctionalDescriptionConfig,
+    pub components: ComponentsConfig,
     #[cfg(feature = "health")]
     pub health: cda_health::config::HealthConfig,
 }
@@ -90,6 +92,30 @@ impl Default for Configuration {
                 protocol_position:
                     cda_interfaces::datatypes::DiagnosticServiceAffixPosition::Suffix,
                 protocol_case_sensitive: false,
+            },
+            components: ComponentsConfig {
+                additional_fields: HashMap::from_iter([
+                    (
+                        "x-sovd2uds-can-ecus".into(),
+                        SdBoolMappings::from_iter([(
+                            "CAN".to_owned(),
+                            SdMappingsTruthyValue::new(
+                                ["yes"].into_iter().map(ToOwned::to_owned).collect::<_>(),
+                                true,
+                            ),
+                        )]),
+                    ),
+                    (
+                        "x-sovd2uds-lin-ecus".into(),
+                        SdBoolMappings::from_iter([(
+                            "LIN".to_owned(),
+                            SdMappingsTruthyValue::new(
+                                ["yes"].into_iter().map(ToOwned::to_owned).collect::<_>(),
+                                true,
+                            ),
+                        )]),
+                    ),
+                ]),
             },
         }
     }

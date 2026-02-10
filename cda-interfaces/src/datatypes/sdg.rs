@@ -10,7 +10,9 @@
  * https://www.apache.org/licenses/LICENSE-2.0
  */
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
+
+use crate::{HashMap, HashSet};
 
 #[derive(Debug, Serialize)]
 #[serde(untagged)]
@@ -44,3 +46,42 @@ pub enum SdSdg {
         sdgs: Vec<SdSdg>,
     },
 }
+
+/// A config value to specify which Strings are to be interpreted
+/// as truthy and which as falsey
+/// `ignore_case` can be set to compare the SD values case-insensitively
+#[derive(Deserialize, Serialize, Clone, Debug)]
+pub struct SdMappingsTruthyValue {
+    values: HashSet<String>,
+    ignore_case: bool,
+}
+
+impl SdMappingsTruthyValue {
+    #[must_use]
+    pub fn new(values: HashSet<String>, ignore_case: bool) -> Self {
+        // ensure all values are lowercase if we use ignore_case
+        let values = if ignore_case {
+            values
+                .into_iter()
+                .map(|v| v.to_ascii_lowercase())
+                .collect::<HashSet<_>>()
+        } else {
+            values
+        };
+        Self {
+            values,
+            ignore_case,
+        }
+    }
+    #[must_use]
+    pub fn contains(&self, other: &str) -> bool {
+        if self.ignore_case {
+            self.values.contains(&other.to_ascii_lowercase())
+        } else {
+            self.values.contains(other)
+        }
+    }
+}
+
+/// A mapping of an SD.si to their truthy values
+pub type SdBoolMappings = HashMap<String, SdMappingsTruthyValue>;
