@@ -17,6 +17,7 @@ use cda_comm_doip::{DoipDiagGateway, config::DoipConfig};
 use cda_comm_uds::UdsManager;
 use cda_core::{DiagServiceResponseStruct, EcuManager};
 use cda_database::{FileManager, ProtoLoadConfig};
+use cda_health::{HealthState, StatusHealthProvider};
 use cda_interfaces::{
     DiagServiceError, DoipGatewaySetupError, EcuAddressProvider, EcuManager as EcuManagerTrait,
     EcuManagerType, FunctionalDescriptionConfig, HashMap, HashMapEntry, HashMapExtensions, HashSet,
@@ -166,23 +167,7 @@ pub async fn load_vehicle_data<
     health: Option<&cda_health::HealthState>,
 ) -> Result<VehicleData<S>, AppError> {
     // Load databases in the background
-    let database_path = config.database.path.clone();
-    let protocol = if config.onboard_tester {
-        cda_interfaces::Protocol::DoIpDobt
-    } else {
-        cda_interfaces::Protocol::DoIp
-    };
-
-    let (databases, file_managers) = load_databases::<S>(
-        &database_path,
-        protocol,
-        config.com_params.clone(),
-        config.database.naming_convention.clone(),
-        config.flat_buf.clone(),
-        config.functional_description.clone(),
-        health,
-    )
-    .await;
+    let (databases, file_managers) = load_databases::<S>(config, health).await;
 
     let (variant_detection_tx, variant_detection_rx) = mpsc::channel(50);
     let databases = Arc::new(databases);
@@ -224,35 +209,27 @@ pub async fn load_vehicle_data<
 }
 
 #[tracing::instrument(
-    skip(com_params, database_naming_convention, health),
-    fields(databases_path)
+    skip(config, health),
+    fields(databases_path = %config.database.path)
 )]
 pub async fn load_databases<S: SecurityPlugin>(
-    databases_path: &str,
-    protocol: Protocol,
-    com_params: ComParams,
-    database_naming_convention: DatabaseNamingConvention,
-    flat_buf_settings: FlatbBufConfig,
-    func_description_cfg: FunctionalDescriptionConfig,
+    config: &Configuration,
     health: Option<&cda_health::HealthState>,
 ) -> (DatabaseMap<S>, FileManagerMap) {
-    let db_health_provider = if let Some(health_state) = health {
-        let provider = Arc::new(cda_health::StatusHealthProvider::new(
-            cda_health::Status::Starting,
-        ));
-        if let Err(e) = health_state
-            .register_provider(
-                DB_HEALTH_COMPONENT_KEY,
-                Arc::clone(&provider) as Arc<dyn cda_health::HealthProvider>,
-            )
-            .await
-        {
-            tracing::warn!(error = %e, "Failed to register database health provider");
-        }
-        Some(provider)
+    // Extract fields from config
+    let database_path = &config.database.path;
+    let flat_buf_settings = config.flat_buf.clone();
+    let database_naming_convention = config.database.naming_convention.clone();
+    let func_description_cfg = config.functional_description.clone();
+    let fallback_to_base_variant = config.database.fallback_to_base_variant;
+    let protocol = if config.onboard_tester {
+        cda_interfaces::Protocol::DoIpDobt
     } else {
-        None
+        cda_interfaces::Protocol::DoIp
     };
+    let com_params = config.com_params.clone();
+
+    let db_health_provider = setup_db_health_provider(health).await;
 
     let databases: Arc<RwLock<LoadedEcuMap<S>>> = Arc::new(RwLock::new(HashMap::new()));
 
@@ -264,7 +241,7 @@ pub async fn load_databases<S: SecurityPlugin>(
     let mut database_load_futures = Vec::new();
     let start = std::time::Instant::now();
     'load_database: {
-        let files = match std::fs::read_dir(databases_path) {
+        let files = match std::fs::read_dir(database_path) {
             Ok(files) => files,
             Err(e) => {
                 tracing::error!(error = %e, "Failed to read directory");
@@ -319,6 +296,7 @@ pub async fn load_databases<S: SecurityPlugin>(
                         database_naming_convention,
                         flat_buf_settings,
                         func_description_cfg,
+                        fallback_to_base_variant,
                     )
                     .await;
                 }
@@ -373,6 +351,28 @@ pub async fn load_databases<S: SecurityPlugin>(
         provider.update_status(status).await;
     }
     (databases, file_managers)
+}
+
+async fn setup_db_health_provider(
+    health: Option<&HealthState>,
+) -> Option<Arc<StatusHealthProvider>> {
+    if let Some(health_state) = health {
+        let provider = Arc::new(cda_health::StatusHealthProvider::new(
+            cda_health::Status::Starting,
+        ));
+        if let Err(e) = health_state
+            .register_provider(
+                DB_HEALTH_COMPONENT_KEY,
+                Arc::clone(&provider) as Arc<dyn cda_health::HealthProvider>,
+            )
+            .await
+        {
+            tracing::warn!(error = %e, "Failed to register database health provider");
+        }
+        Some(provider)
+    } else {
+        None
+    }
 }
 
 async fn mark_duplicate_ecus_by_address<S: SecurityPlugin>(
@@ -431,6 +431,7 @@ async fn load_database<S: SecurityPlugin>(
     database_naming_convention: DatabaseNamingConvention,
     flat_buf_settings: FlatbBufConfig,
     func_description_cfg: FunctionalDescriptionConfig,
+    fallback_to_base_variant: bool,
 ) {
     for (mddfile, _) in paths {
         let Some(mdd_path) = mddfile.to_str().map(ToOwned::to_owned) else {
@@ -508,6 +509,7 @@ async fn load_database<S: SecurityPlugin>(
                     database_naming_convention.clone(),
                     ecu_type,
                     &func_description_cfg,
+                    fallback_to_base_variant,
                 ) {
                     Ok(manager) => manager,
                     Err(e) => {
