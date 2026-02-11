@@ -679,6 +679,38 @@ impl<'a> EcuDataBuilder<'a> {
             specific_data,
         })
     }
+    pub fn create_phys_const_param(
+        &mut self,
+        name: &'a str,
+        phys_constant_value: Option<&str>,
+        dop: WIPOffset<dataformat::DOP<'a>>,
+        byte_pos: u32,
+        bit_pos: u32,
+    ) -> WIPOffset<dataformat::Param<'a>> {
+        let phys_value = phys_constant_value.map(|v| self.fbb.create_string(v));
+        let specific_data = Some(
+            dataformat::ParamSpecificData::tag_as_phys_const(dataformat::PhysConst::create(
+                &mut self.fbb,
+                &dataformat::PhysConstArgs {
+                    phys_constant_value: phys_value,
+                    dop: Some(dop),
+                },
+            ))
+            .value_offset(),
+        );
+
+        self.create_param(&ParameterParams {
+            param_type: dataformat::ParamType::PHYS_CONST,
+            short_name: Some(name),
+            semantic: None,
+            sdgs: None,
+            physical_default_value: None,
+            byte_position: Some(byte_pos),
+            bit_position: Some(bit_pos),
+            specific_data_type: dataformat::ParamSpecificData::PhysConst,
+            specific_data,
+        })
+    }
 
     pub fn create_structure(
         &mut self,
