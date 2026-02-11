@@ -2337,7 +2337,13 @@ impl<S: SecurityPlugin> EcuManager<S> {
                 tracing::error!("NrcConst ParamType not implemented.");
             }
             datatypes::ParamType::PhysConst => {
-                tracing::error!("PhysConst ParamType not implemented.");
+                self.map_param_phys_const_from_uds(
+                    mapped_service,
+                    param,
+                    param_name,
+                    uds_payload,
+                    data,
+                )?;
             }
             datatypes::ParamType::System => {
                 tracing::error!("System ParamType not implemented.");
@@ -2556,6 +2562,130 @@ impl<S: SecurityPlugin> EcuManager<S> {
         Ok(())
     }
 
+    fn map_param_phys_const_from_uds(
+        &self,
+        mapped_service: &datatypes::DiagService,
+        param: &datatypes::Parameter,
+        param_name: &str,
+        uds_payload: &mut Payload,
+        data: &mut MappedDiagServiceResponsePayload,
+    ) -> Result<(), DiagServiceError> {
+        let p = param
+            .specific_data_as_phys_const()
+            .ok_or(DiagServiceError::InvalidDatabase(
+                "Expected PhysConst specific data".to_owned(),
+            ))?;
+
+        let dop =
+            p.dop()
+                .map(datatypes::DataOperation)
+                .ok_or(DiagServiceError::InvalidDatabase(
+                    "PhysConst has no DOP".to_owned(),
+                ))?;
+
+        // Handle different DOP variants - PhysConst can have Normal or Structure DOPs
+        match dop.variant()? {
+            datatypes::DataOperationVariant::Normal(normal_dop) => {
+                let diag_type = normal_dop.diag_coded_type()?;
+                let value =
+                    operations::extract_diag_data_container(param, uds_payload, &diag_type, None)?;
+
+                let value = match value {
+                    DiagDataTypeContainer::RawContainer(raw) => raw,
+                    DiagDataTypeContainer::Struct(_) => {
+                        return Err(DiagServiceError::ParameterConversionError(
+                            "Struct not supported for Normal DOP PhysConst".to_owned(),
+                        ));
+                    }
+                    DiagDataTypeContainer::RepeatingStruct(_) => {
+                        return Err(DiagServiceError::ParameterConversionError(
+                            "RepeatingStruct not supported for Normal DOP PhysConst".to_owned(),
+                        ));
+                    }
+                    DiagDataTypeContainer::DtcStruct(_) => {
+                        return Err(DiagServiceError::ParameterConversionError(
+                            "DtcStruct not supported for Normal DOP PhysConst".to_owned(),
+                        ));
+                    }
+                };
+
+                data.insert(
+                    param_name.to_owned(),
+                    DiagDataTypeContainer::RawContainer(value),
+                );
+            }
+            // Structure DOP - delegate to the full DOP handler which handles nested params
+            datatypes::DataOperationVariant::Structure(_)
+            | datatypes::DataOperationVariant::EndOfPdu(_)
+            | datatypes::DataOperationVariant::StaticField(_)
+            | datatypes::DataOperationVariant::Mux(_)
+            | datatypes::DataOperationVariant::DynamicLengthField(_) => {
+                self.map_dop_from_uds(mapped_service, &dop, param, uds_payload, data)?;
+            }
+            _ => {
+                return Err(DiagServiceError::InvalidDatabase(format!(
+                    "PhysConst has unsupported DOP variant: {:?}",
+                    dop.specific_data_type().variant_name().unwrap_or("Unknown")
+                )));
+            }
+        }
+
+        Ok(())
+    }
+
+    fn map_phys_const_param_to_uds(
+        &self,
+        param: &datatypes::Parameter,
+        uds_payload_data: &mut Vec<u8>,
+        param_data: &serde_json::Value,
+    ) -> Result<(), DiagServiceError> {
+        let p = param
+            .specific_data_as_phys_const()
+            .ok_or(DiagServiceError::InvalidDatabase(
+                "Expected PhysConst specific data".to_owned(),
+            ))?;
+
+        let dop =
+            p.dop()
+                .map(datatypes::DataOperation)
+                .ok_or(DiagServiceError::InvalidDatabase(
+                    "PhysConst has no DOP".to_owned(),
+                ))?;
+
+        // Handle different DOP variants - PhysConst can have Normal or Structure DOPs
+        match dop.variant()? {
+            datatypes::DataOperationVariant::Normal(normal_dop) => {
+                let diag_type = normal_dop.diag_coded_type()?;
+                let uds_data = json_value_to_uds_data(&diag_type, None, param_data)?;
+                diag_type.encode(
+                    uds_data,
+                    uds_payload_data,
+                    param.byte_position() as usize,
+                    param.bit_position() as usize,
+                )?;
+            }
+            datatypes::DataOperationVariant::Structure(structure_dop) => {
+                self.map_struct_to_uds(
+                    &structure_dop,
+                    param.byte_position() as usize,
+                    param_data,
+                    uds_payload_data,
+                )?;
+            }
+            datatypes::DataOperationVariant::Mux(mux_dop) => {
+                self.map_mux_to_uds(&mux_dop, param_data, uds_payload_data)?;
+            }
+            _ => {
+                return Err(DiagServiceError::InvalidDatabase(format!(
+                    "PhysConst has unsupported DOP variant: {:?}",
+                    dop.specific_data_type().variant_name().unwrap_or("Unknown")
+                )));
+            }
+        }
+
+        Ok(())
+    }
+
     fn map_mux_to_uds(
         &self,
         mux_dop: &datatypes::MuxDop,
@@ -2723,9 +2853,9 @@ impl<S: SecurityPlugin> EcuManager<S> {
             datatypes::ParamType::NrcConst => Err(DiagServiceError::ParameterConversionError(
                 "Mapping NrcConst DoP to UDS payload not implemented".to_owned(),
             )),
-            datatypes::ParamType::PhysConst => Err(DiagServiceError::ParameterConversionError(
-                "Mapping PhysConst DoP to UDS payload not implemented".to_owned(),
-            )),
+            datatypes::ParamType::PhysConst => {
+                self.map_phys_const_param_to_uds(param, payload, value)
+            }
             datatypes::ParamType::System => Err(DiagServiceError::ParameterConversionError(
                 "Mapping System DoP to UDS payload not implemented".to_owned(),
             )),
@@ -3227,17 +3357,14 @@ impl<S: SecurityPlugin> EcuManager<S> {
         short_name: &str,
         structure_dop: &datatypes::StructureDop,
     ) -> Result<(), DiagServiceError> {
-        let byte_size = structure_dop
-            .byte_size()
-            .ok_or(DiagServiceError::InvalidDatabase(
-                "Structure has no byte size".to_owned(),
-            ))? as usize;
-
-        if uds_payload.len() < byte_size {
-            return Err(DiagServiceError::NotEnoughData {
-                expected: byte_size,
-                actual: uds_payload.len(),
-            });
+        if let Some(byte_size) = structure_dop.byte_size() {
+            let byte_size = byte_size as usize;
+            if uds_payload.len() < byte_size {
+                return Err(DiagServiceError::NotEnoughData {
+                    expected: byte_size,
+                    actual: uds_payload.len(),
+                });
+            }
         }
 
         if let Some(params) = structure_dop.params() {
