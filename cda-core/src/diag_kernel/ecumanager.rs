@@ -2336,7 +2336,13 @@ impl<S: SecurityPlugin> EcuManager<S> {
                 tracing::error!("NrcConst ParamType not implemented.");
             }
             datatypes::ParamType::PhysConst => {
-                tracing::error!("PhysConst ParamType not implemented.");
+                self.map_param_phys_const_from_uds(
+                    mapped_service,
+                    param,
+                    param_name,
+                    uds_payload,
+                    data,
+                )?;
             }
             datatypes::ParamType::System => {
                 tracing::error!("System ParamType not implemented.");
@@ -2562,6 +2568,136 @@ impl<S: SecurityPlugin> EcuManager<S> {
         Ok(())
     }
 
+    fn map_param_phys_const_from_uds(
+        &self,
+        mapped_service: &datatypes::DiagService,
+        param: &datatypes::Parameter,
+        param_name: &str,
+        uds_payload: &mut Payload,
+        data: &mut MappedDiagServiceResponsePayload,
+    ) -> Result<(), DiagServiceError> {
+        let p = param
+            .specific_data_as_phys_const()
+            .ok_or(DiagServiceError::InvalidDatabase(
+                "Expected PhysConst specific data".to_owned(),
+            ))?;
+
+        let dop =
+            p.dop()
+                .map(datatypes::DataOperation)
+                .ok_or(DiagServiceError::InvalidDatabase(
+                    "PhysConst has no DOP".to_owned(),
+                ))?;
+
+        // Handle different DOP variants - PhysConst can have Normal or Structure DOPs
+        match dop.variant()? {
+            datatypes::DataOperationVariant::Normal(normal_dop) => {
+                let diag_type = normal_dop.diag_coded_type()?;
+                let value = operations::extract_diag_data_container(
+                    param.short_name(),
+                    param.byte_position() as usize,
+                    param.bit_position() as usize,
+                    uds_payload,
+                    &diag_type,
+                    None,
+                )?;
+
+                let value = match value {
+                    DiagDataTypeContainer::RawContainer(raw) => raw,
+                    DiagDataTypeContainer::Struct(_) => {
+                        return Err(DiagServiceError::ParameterConversionError(
+                            "Struct not supported for Normal DOP PhysConst".to_owned(),
+                        ));
+                    }
+                    DiagDataTypeContainer::RepeatingStruct(_) => {
+                        return Err(DiagServiceError::ParameterConversionError(
+                            "RepeatingStruct not supported for Normal DOP PhysConst".to_owned(),
+                        ));
+                    }
+                    DiagDataTypeContainer::DtcStruct(_) => {
+                        return Err(DiagServiceError::ParameterConversionError(
+                            "DtcStruct not supported for Normal DOP PhysConst".to_owned(),
+                        ));
+                    }
+                };
+
+                data.insert(
+                    param_name.to_owned(),
+                    DiagDataTypeContainer::RawContainer(value),
+                );
+            }
+            // Structure DOP - delegate to the full DOP handler which handles nested params
+            datatypes::DataOperationVariant::Structure(_)
+            | datatypes::DataOperationVariant::EndOfPdu(_)
+            | datatypes::DataOperationVariant::StaticField(_)
+            | datatypes::DataOperationVariant::Mux(_)
+            | datatypes::DataOperationVariant::DynamicLengthField(_) => {
+                self.map_dop_from_uds(mapped_service, &dop, param, uds_payload, data)?;
+            }
+            _ => {
+                return Err(DiagServiceError::InvalidDatabase(format!(
+                    "PhysConst has unsupported DOP variant: {:?}",
+                    dop.specific_data_type().variant_name().unwrap_or("Unknown")
+                )));
+            }
+        }
+
+        Ok(())
+    }
+
+    fn map_phys_const_param_to_uds(
+        &self,
+        param: &datatypes::Parameter,
+        uds_payload_data: &mut Vec<u8>,
+        param_data: &serde_json::Value,
+    ) -> Result<(), DiagServiceError> {
+        let p = param
+            .specific_data_as_phys_const()
+            .ok_or(DiagServiceError::InvalidDatabase(
+                "Expected PhysConst specific data".to_owned(),
+            ))?;
+
+        let dop =
+            p.dop()
+                .map(datatypes::DataOperation)
+                .ok_or(DiagServiceError::InvalidDatabase(
+                    "PhysConst has no DOP".to_owned(),
+                ))?;
+
+        // Handle different DOP variants - PhysConst can have Normal or Structure DOPs
+        match dop.variant()? {
+            datatypes::DataOperationVariant::Normal(normal_dop) => {
+                let diag_type = normal_dop.diag_coded_type()?;
+                let uds_data = json_value_to_uds_data(&diag_type, None, param_data)?;
+                diag_type.encode(
+                    uds_data,
+                    uds_payload_data,
+                    param.byte_position() as usize,
+                    param.bit_position() as usize,
+                )?;
+            }
+            datatypes::DataOperationVariant::Structure(structure_dop) => {
+                self.map_struct_to_uds(
+                    &structure_dop,
+                    param.byte_position() as usize,
+                    param_data,
+                    uds_payload_data,
+                )?;
+            }
+            datatypes::DataOperationVariant::Mux(mux_dop) => {
+                self.map_mux_to_uds(&mux_dop, param_data, uds_payload_data)?;
+            }
+            _ => {
+                return Err(DiagServiceError::InvalidDatabase(format!(
+                    "PhysConst has unsupported DOP variant: {:?}",
+                    dop.specific_data_type().variant_name().unwrap_or("Unknown")
+                )));
+            }
+        }
+
+        Ok(())
+    }
+
     fn map_mux_to_uds(
         &self,
         mux_dop: &datatypes::MuxDop,
@@ -2729,9 +2865,9 @@ impl<S: SecurityPlugin> EcuManager<S> {
             datatypes::ParamType::NrcConst => Err(DiagServiceError::ParameterConversionError(
                 "Mapping NrcConst DoP to UDS payload not implemented".to_owned(),
             )),
-            datatypes::ParamType::PhysConst => Err(DiagServiceError::ParameterConversionError(
-                "Mapping PhysConst DoP to UDS payload not implemented".to_owned(),
-            )),
+            datatypes::ParamType::PhysConst => {
+                self.map_phys_const_param_to_uds(param, payload, value)
+            }
             datatypes::ParamType::System => Err(DiagServiceError::ParameterConversionError(
                 "Mapping System DoP to UDS payload not implemented".to_owned(),
             )),
@@ -3233,17 +3369,14 @@ impl<S: SecurityPlugin> EcuManager<S> {
         short_name: &str,
         structure_dop: &datatypes::StructureDop,
     ) -> Result<(), DiagServiceError> {
-        let byte_size = structure_dop
-            .byte_size()
-            .ok_or(DiagServiceError::InvalidDatabase(
-                "Structure has no byte size".to_owned(),
-            ))? as usize;
-
-        if uds_payload.len() < byte_size {
-            return Err(DiagServiceError::NotEnoughData {
-                expected: byte_size,
-                actual: uds_payload.len(),
-            });
+        if let Some(byte_size) = structure_dop.byte_size() {
+            let byte_size = byte_size as usize;
+            if uds_payload.len() < byte_size {
+                return Err(DiagServiceError::NotEnoughData {
+                    expected: byte_size,
+                    actual: uds_payload.len(),
+                });
+            }
         }
 
         if let Some(params) = structure_dop.params() {
@@ -4916,6 +5049,248 @@ mod tests {
         new_ecu_manager(db)
     }
 
+    /// Creates an `EcuManager` with a service that uses a `PhysConst` parameter with a Normal DOP.
+    ///
+    /// Service layout (response):
+    ///   byte 0: SID (CODED-CONST)
+    ///   byte 1-2: DID (PHYS-CONST, Normal DOP, u16)
+    ///   byte 3: `data_param` (VALUE, u8)
+    #[allow(clippy::too_many_lines)]
+    fn create_ecu_manager_with_phys_const_normal_dop_service() -> (
+        super::EcuManager<DefaultSecurityPluginData>,
+        cda_interfaces::DiagComm,
+        u8,
+    ) {
+        let mut db_builder = EcuDataBuilder::new();
+        let u8_diag_type = db_builder.create_diag_coded_type_standard_length(8, DataType::UInt32);
+        let u16_diag_type = db_builder.create_diag_coded_type_standard_length(16, DataType::UInt32);
+        let compu_identical =
+            db_builder.create_compu_method(datatypes::CompuCategory::Identical, None, None);
+
+        // Create Normal DOP for the PhysConst DID parameter
+        let did_dop = {
+            let did_dop_specific_data = db_builder
+                .create_normal_specific_dop_data(
+                    Some(compu_identical),
+                    Some(u16_diag_type),
+                    None,
+                    None,
+                    None,
+                    None,
+                )
+                .value_offset();
+            db_builder.create_dop(
+                *DopType::REGULAR,
+                Some("did_dop"),
+                None,
+                *SpecificDOPData::NormalDOP,
+                Some(did_dop_specific_data),
+            )
+        };
+
+        // Create Normal DOP for the VALUE data parameter
+        let data_dop = {
+            let data_dop_specific_data = db_builder
+                .create_normal_specific_dop_data(
+                    Some(compu_identical),
+                    Some(u8_diag_type),
+                    None,
+                    None,
+                    None,
+                    None,
+                )
+                .value_offset();
+            db_builder.create_dop(
+                *DopType::REGULAR,
+                Some("data_dop"),
+                None,
+                *SpecificDOPData::NormalDOP,
+                Some(data_dop_specific_data),
+            )
+        };
+
+        let sid = service_ids::READ_DATA_BY_IDENTIFIER + cda_interfaces::UDS_ID_RESPONSE_BITMASK;
+        let dc_name = "TestPhysConstNormalService";
+        let protocol = db_builder.create_protocol(Protocol::DoIp.value(), None, None, None);
+        let diag_comm = new_diag_comm!(db_builder, dc_name, protocol);
+
+        // Request: SID (coded const) + DID (phys const)
+        let request = {
+            let sid_param =
+                create_sid_param!(db_builder, "sid", service_ids::READ_DATA_BY_IDENTIFIER);
+            let did_param = db_builder.create_phys_const_param("DID", Some("61840"), did_dop, 1, 0);
+            db_builder.create_request(Some(vec![sid_param, did_param]), None)
+        };
+
+        // Positive response: SID + DID (phys const) + data (value)
+        let pos_response = {
+            let sid_param = create_sid_param!(db_builder, "sid", sid);
+            let did_param = db_builder.create_phys_const_param("DID", Some("61840"), did_dop, 1, 0);
+            let data_param = db_builder.create_value_param("data_param", data_dop, 3, 0);
+            db_builder.create_response(
+                ResponseType::Positive,
+                Some(vec![sid_param, did_param, data_param]),
+                None,
+            )
+        };
+
+        let diag_service =
+            new_diag_service!(db_builder, diag_comm, request, vec![pos_response], vec![]);
+
+        let db = finish_db!(db_builder, protocol, vec![diag_service]);
+
+        let ecu_manager = new_ecu_manager(db);
+
+        let dc = cda_interfaces::DiagComm {
+            name: dc_name.to_owned(),
+            type_: DiagCommType::Data,
+            lookup_name: Some(dc_name.to_owned()),
+        };
+
+        (ecu_manager, dc, sid)
+    }
+
+    /// Creates an `EcuManager` with a service that uses a `PhysConst` parameter
+    /// with a Structure DOP.
+    ///
+    /// Service layout (request):
+    ///   byte 0: SID (CODED-CONST)
+    ///   byte 1-2: DID (PHYS-CONST, Normal DOP, u16)
+    ///   byte 3+: DREC (PHYS-CONST, Structure DOP with sub-params)
+    ///     sub-param1: u16 at byte 0
+    ///     sub-param2: u8 at byte 2
+    #[allow(clippy::too_many_lines)]
+    fn create_ecu_manager_with_phys_const_structure_dop_service() -> (
+        super::EcuManager<DefaultSecurityPluginData>,
+        cda_interfaces::DiagComm,
+        u8,
+    ) {
+        let mut db_builder = EcuDataBuilder::new();
+        let u8_diag_type = db_builder.create_diag_coded_type_standard_length(8, DataType::UInt32);
+        let u16_diag_type = db_builder.create_diag_coded_type_standard_length(16, DataType::UInt32);
+        let compu_identical =
+            db_builder.create_compu_method(datatypes::CompuCategory::Identical, None, None);
+
+        // Create Normal DOP for the PhysConst DID parameter
+        let did_dop = {
+            let did_dop_specific_data = db_builder
+                .create_normal_specific_dop_data(
+                    Some(compu_identical),
+                    Some(u16_diag_type),
+                    None,
+                    None,
+                    None,
+                    None,
+                )
+                .value_offset();
+            db_builder.create_dop(
+                *DopType::REGULAR,
+                Some("did_dop"),
+                None,
+                *SpecificDOPData::NormalDOP,
+                Some(did_dop_specific_data),
+            )
+        };
+
+        // Create Structure DOP for the PhysConst DREC parameter
+        let structure_dop = {
+            // Sub-param DOPs
+            let sub_param1_dop = {
+                let specific_data = db_builder
+                    .create_normal_specific_dop_data(
+                        Some(compu_identical),
+                        Some(u16_diag_type),
+                        None,
+                        None,
+                        None,
+                        None,
+                    )
+                    .value_offset();
+                db_builder.create_dop(
+                    *DopType::REGULAR,
+                    Some("sub_param1_dop"),
+                    None,
+                    *SpecificDOPData::NormalDOP,
+                    Some(specific_data),
+                )
+            };
+
+            let sub_param2_dop = {
+                let specific_data = db_builder
+                    .create_normal_specific_dop_data(
+                        Some(compu_identical),
+                        Some(u8_diag_type),
+                        None,
+                        None,
+                        None,
+                        None,
+                    )
+                    .value_offset();
+                db_builder.create_dop(
+                    *DopType::REGULAR,
+                    Some("sub_param2_dop"),
+                    None,
+                    *SpecificDOPData::NormalDOP,
+                    Some(specific_data),
+                )
+            };
+
+            // Create structure params
+            let sub_param1 = db_builder.create_value_param("sub_param1", sub_param1_dop, 0, 0);
+            let sub_param2 = db_builder.create_value_param("sub_param2", sub_param2_dop, 2, 0);
+
+            let structure = db_builder.create_structure(
+                Some(vec![sub_param1, sub_param2]),
+                Some(3), // byte_size: 2 bytes (u16) + 1 byte (u8) = 3 bytes
+                true,
+            );
+
+            db_builder.create_structure_dop("structure_dop", structure)
+        };
+
+        let protocol = db_builder.create_protocol(Protocol::DoIp.value(), None, None, None);
+        let sid_request = service_ids::WRITE_DATA_BY_IDENTIFIER;
+        let sid_response =
+            service_ids::WRITE_DATA_BY_IDENTIFIER + cda_interfaces::UDS_ID_RESPONSE_BITMASK;
+        let dc_name = "TestPhysConstStructureService";
+        let diag_comm = new_diag_comm!(db_builder, dc_name, protocol);
+
+        // Request: SID (coded const) + DID (phys const, normal) + DREC (phys const, structure)
+        let request = {
+            let sid_param = create_sid_param!(db_builder, "sid", sid_request);
+            let did_param = db_builder.create_phys_const_param("DID", Some("61840"), did_dop, 1, 0);
+            let drec_param = db_builder.create_phys_const_param("DREC", None, structure_dop, 3, 0);
+            db_builder.create_request(Some(vec![sid_param, did_param, drec_param]), None)
+        };
+
+        // Positive response: SID + DID (phys const) + DREC (phys const, structure)
+        let pos_response = {
+            let sid_param = create_sid_param!(db_builder, "sid", sid_response);
+            let did_param = db_builder.create_phys_const_param("DID", Some("61840"), did_dop, 1, 0);
+            let drec_param = db_builder.create_phys_const_param("DREC", None, structure_dop, 3, 0);
+            db_builder.create_response(
+                ResponseType::Positive,
+                Some(vec![sid_param, did_param, drec_param]),
+                None,
+            )
+        };
+
+        let diag_service =
+            new_diag_service!(db_builder, diag_comm, request, vec![pos_response], vec![]);
+
+        let db = finish_db!(db_builder, protocol, vec![diag_service]);
+
+        let ecu_manager = new_ecu_manager(db);
+
+        let dc = cda_interfaces::DiagComm {
+            name: dc_name.to_owned(),
+            type_: DiagCommType::Configurations,
+            lookup_name: Some(dc_name.to_owned()),
+        };
+
+        (ecu_manager, dc, sid_response)
+    }
+
     #[tokio::test]
     async fn test_mux_from_uds_invalid_case_no_default() {
         let (ecu_manager, service, sid) = create_ecu_manager_with_mux_service(None, None, None);
@@ -6090,5 +6465,205 @@ mod tests {
         assert_eq!(response.data, request_payload);
         assert!(response.mapped_data.is_none());
         assert_eq!(response.response_type, DiagServiceResponseType::Positive);
+    }
+
+    #[tokio::test]
+    async fn test_phys_const_normal_dop_from_uds() {
+        let (ecu_manager, dc, sid) = create_ecu_manager_with_phys_const_normal_dop_service();
+
+        // UDS response: SID(0x62) + DID(0xF190 = 61840) + data(0x42)
+        let response_data: Vec<u8> = vec![sid, 0xF1, 0x90, 0x42];
+
+        let payload = create_payload(response_data.clone());
+
+        let result = ecu_manager.convert_from_uds(&dc, &payload, true).await;
+
+        assert!(result.is_ok());
+        let mapped = result.unwrap();
+        assert_eq!(mapped.data, response_data);
+        assert!(mapped.mapped_data.is_some());
+
+        let mapped_data = mapped.mapped_data.unwrap();
+
+        // Should have entries for DID and data_param (sid is CODED-CONST, not in mapped output)
+        assert!(
+            mapped_data.data.contains_key("DID"),
+            "Expected 'DID' key in mapped data"
+        );
+        assert!(
+            mapped_data.data.contains_key("data_param"),
+            "Expected 'data_param' key in mapped data"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_phys_const_structure_dop_from_uds() {
+        let (ecu_manager, dc, sid) = create_ecu_manager_with_phys_const_structure_dop_service();
+
+        // UDS response: SID(0x6E) + DID(0xF190) + sub_param1(0x000A, u16) + sub_param2(0xFF, u8)
+        let response_data: Vec<u8> = vec![sid, 0xF1, 0x90, 0x00, 0x0A, 0xFF];
+
+        let payload = create_payload(response_data.clone());
+
+        let result = ecu_manager.convert_from_uds(&dc, &payload, true).await;
+
+        assert!(result.is_ok());
+        let mapped = result.unwrap();
+        assert_eq!(mapped.data, response_data);
+        assert!(mapped.mapped_data.is_some());
+
+        let mapped_data = mapped.mapped_data.unwrap();
+
+        // DID should be present (Normal DOP PhysConst)
+        assert!(
+            mapped_data.data.contains_key("DID"),
+            "Expected 'DID' key in mapped data"
+        );
+
+        // Structure sub-params should be FLATTENED into parent map
+        assert!(
+            mapped_data.data.contains_key("sub_param1"),
+            "Expected 'sub_param1' key (flattened from Structure DOP)"
+        );
+        assert!(
+            mapped_data.data.contains_key("sub_param2"),
+            "Expected 'sub_param2' key (flattened from Structure DOP)"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_phys_const_normal_dop_to_uds() {
+        let (ecu_manager, dc, _sid) = create_ecu_manager_with_phys_const_normal_dop_service();
+
+        // JSON payload: DID = 61840 (0xF190)
+        let json_payload = json!({
+            "DID": 61840
+        });
+
+        let payload_data =
+            UdsPayloadData::ParameterMap(serde_json::from_value(json_payload).unwrap());
+
+        let result = ecu_manager
+            .create_uds_payload(&dc, &skip_sec_plugin!(), Some(payload_data))
+            .await;
+
+        assert!(result.is_ok());
+        let service_payload = result.unwrap();
+        let uds_bytes = &service_payload.data;
+
+        // Expected: SID(0x22) + DID(0xF1, 0x90)
+        assert_eq!(
+            uds_bytes.first().copied().unwrap(),
+            0x22,
+            "First byte should be RDBI SID 0x22"
+        );
+        assert_eq!(
+            uds_bytes.get(1).copied().unwrap(),
+            0xF1,
+            "DID high byte should be 0xF1"
+        );
+        assert_eq!(
+            uds_bytes.get(2).copied().unwrap(),
+            0x90,
+            "DID low byte should be 0x90"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_phys_const_structure_dop_to_uds() {
+        let (ecu_manager, dc, _sid) = create_ecu_manager_with_phys_const_structure_dop_service();
+
+        // JSON payload: DID + DREC with sub-params
+        let json_payload = json!({
+            "DID": 61840,
+            "DREC": {
+                "sub_param1": 0x1234,
+                "sub_param2": 0xAB
+            }
+        });
+
+        let payload_data =
+            UdsPayloadData::ParameterMap(serde_json::from_value(json_payload).unwrap());
+
+        let result = ecu_manager
+            .create_uds_payload(&dc, &skip_sec_plugin!(), Some(payload_data))
+            .await;
+
+        assert!(result.is_ok());
+        let service_payload = result.unwrap();
+        let uds_bytes = &service_payload.data;
+
+        // Expected: SID(0x2E) + DID(0xF1, 0x90) + sub_param1(0x12, 0x34) + sub_param2(0xAB)
+        assert_eq!(
+            uds_bytes.first().copied().unwrap(),
+            0x2E,
+            "First byte should be WDBI SID 0x2E"
+        );
+        assert_eq!(uds_bytes.get(1).copied().unwrap(), 0xF1, "DID high byte");
+        assert_eq!(uds_bytes.get(2).copied().unwrap(), 0x90, "DID low byte");
+        assert_eq!(
+            uds_bytes.get(3).copied().unwrap(),
+            0x12,
+            "sub_param1 high byte"
+        );
+        assert_eq!(
+            uds_bytes.get(4).copied().unwrap(),
+            0x34,
+            "sub_param1 low byte"
+        );
+        assert_eq!(uds_bytes.get(5).copied().unwrap(), 0xAB, "sub_param2 byte");
+    }
+
+    #[tokio::test]
+    async fn test_phys_const_structure_dop_roundtrip() {
+        let (ecu_manager, dc, sid) = create_ecu_manager_with_phys_const_structure_dop_service();
+
+        // Step 1: Encode JSON → UDS
+        let json_payload = json!({
+            "DID": 61840,
+            "DREC": {
+                "sub_param1": 10,
+                "sub_param2": 255
+            }
+        });
+
+        let payload_data =
+            UdsPayloadData::ParameterMap(serde_json::from_value(json_payload).unwrap());
+
+        let encode_result = ecu_manager
+            .create_uds_payload(&dc, &skip_sec_plugin!(), Some(payload_data))
+            .await;
+        assert!(encode_result.is_ok());
+        let mut service_payload = encode_result.unwrap();
+
+        // Step 2: Change SID from request (0x2E) to positive response (0x6E)
+        if let Some(byte) = service_payload.data.get_mut(0) {
+            *byte = sid;
+        }
+
+        // Step 3: Decode UDS → mapped data
+        let decode_result = ecu_manager
+            .convert_from_uds(&dc, &service_payload, true)
+            .await;
+
+        assert!(decode_result.is_ok());
+        let mapped = decode_result.unwrap();
+
+        assert!(mapped.mapped_data.is_some());
+        let mapped_data = mapped.mapped_data.unwrap();
+
+        // Verify roundtrip preserved all params
+        assert!(
+            mapped_data.data.contains_key("DID"),
+            "DID should survive roundtrip"
+        );
+        assert!(
+            mapped_data.data.contains_key("sub_param1"),
+            "sub_param1 should survive roundtrip"
+        );
+        assert!(
+            mapped_data.data.contains_key("sub_param2"),
+            "sub_param2 should survive roundtrip"
+        );
     }
 }
