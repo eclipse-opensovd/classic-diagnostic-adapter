@@ -17,7 +17,8 @@ use cda_interfaces::{
     HashMapExtensions, dlt_ctx, service_ids,
 };
 use doip_definitions::payload::{
-    ActivationType, AliveCheckRequest, DiagnosticMessage, DoipPayload, RoutingActivationRequest,
+    ActivationType, AliveCheckRequest, DiagnosticAckCode, DiagnosticMessageAck, DoipPayload,
+    RoutingActivationRequest,
 };
 use thiserror::Error;
 use tokio::sync::{Mutex, RwLock, broadcast, mpsc, watch};
@@ -186,7 +187,7 @@ where
 )]
 fn create_ecu_receiver_map(
     ecus: Vec<u16>,
-    sender: &mpsc::Sender<DiagnosticMessage>, // sender is shared between all ecus of a gateway
+    sender: &mpsc::Sender<DoipPayload>, // sender is shared between all ecus of a gateway
     receiver: &HashMap<u16, broadcast::Receiver<Result<DiagnosticResponse, EcuError>>>,
 ) -> HashMap<u16, Arc<Mutex<DoipEcu>>> {
     let mut doip_ecus: HashMap<u16, Arc<Mutex<DoipEcu>>> = HashMap::new();
@@ -230,13 +231,13 @@ async fn connection_handler(
     connection_settings: ConnectionSettings,
 ) -> Result<
     (
-        mpsc::Sender<DiagnosticMessage>,
+        mpsc::Sender<DoipPayload>,
         HashMap<u16, broadcast::Receiver<Result<DiagnosticResponse, EcuError>>>,
     ),
     EcuError,
 > {
     // channel to send messages to the gateway / ecus
-    let (intx, inrx) = mpsc::channel::<DiagnosticMessage>(50);
+    let (intx, inrx) = mpsc::channel::<DoipPayload>(50);
 
     // channel to receive messages from the gateway / ecus
     let mut outrx: HashMap<u16, broadcast::Receiver<Result<DiagnosticResponse, EcuError>>> =
@@ -286,7 +287,6 @@ async fn connection_handler(
     // communication between send / receiver task to unlock the connection in the receiver task
     // when sender task wants to send something
     let (send_pending_tx, send_pending_rx) = watch::channel::<bool>(false);
-    let send_mtx = Arc::new(Mutex::new(()));
     spawn_gateway_sender_task(
         &gateway_ip,
         inrx,
@@ -294,7 +294,6 @@ async fn connection_handler(
         connection_settings.send_timeout,
         conn_reset_tx.clone(),
         send_pending_tx.clone(),
-        Arc::clone(&send_mtx),
     );
     spawn_gateway_receiver_task(
         gateway_ip.clone(),
@@ -303,6 +302,7 @@ async fn connection_handler(
         Arc::<EcuConnectionTarget>::clone(&gateway_conn),
         send_pending_rx,
         conn_reset_tx,
+        intx.clone(),
     );
 
     // no need to wait until the connection is alive, we will reconnect automatically anyway
@@ -396,12 +396,11 @@ fn spawn_connection_reset_task(
 )]
 fn spawn_gateway_sender_task(
     gateway_ip: &str,
-    mut inrx: mpsc::Receiver<DiagnosticMessage>,
+    mut inrx: mpsc::Receiver<DoipPayload>,
     gateway_conn: Arc<EcuConnectionTarget>,
     send_timeout: Duration,
     reset_tx: mpsc::Sender<ConnectionResetReason>,
     send_pending_tx: watch::Sender<bool>,
-    send_mtx: Arc<Mutex<()>>,
 ) {
     cda_interfaces::spawn_named!(&format!("doip-gateway-sender-{gateway_ip}"), async move {
         fn send_pending_status(
@@ -413,6 +412,7 @@ fn spawn_gateway_sender_task(
             })
         }
 
+        let send_mtx = Arc::new(Mutex::new(()));
         loop {
             tokio::select! {
                 Some(msg) = inrx.recv() => {
@@ -429,7 +429,7 @@ fn spawn_gateway_sender_task(
                             let lock_after = start.elapsed();
 
                             match tokio::time::timeout(send_timeout, conn
-                                .send(DoipPayload::DiagnosticMessage(msg))
+                                .send(msg)
                             )
                                 .await
                             {
@@ -527,6 +527,7 @@ fn spawn_gateway_receiver_task(
     gateway_conn: Arc<EcuConnectionTarget>,
     mut send_pending_rx: watch::Receiver<bool>,
     reset_tx: mpsc::Sender<ConnectionResetReason>,
+    send_tx: mpsc::Sender<DoipPayload>,
 ) {
     // note: the handlers are defined here, as rustfmt cannot format the correctly inside the
     // tokio::select! macro block
@@ -585,6 +586,7 @@ fn spawn_gateway_receiver_task(
         gateway_ip: &str,
         outtx: &HashMap<u16, broadcast::Sender<Result<DiagnosticResponse, EcuError>>>,
         reset_tx: &mpsc::Sender<ConnectionResetReason>,
+        ack_tx: &mpsc::Sender<DoipPayload>,
         response: Option<Result<DiagnosticResponse, ConnectionError>>,
     ) {
         match response {
@@ -610,6 +612,26 @@ fn spawn_gateway_receiver_task(
                     }
                     DiagnosticResponse::Msg(msg) => {
                         let addr = u16::from_be_bytes(msg.source_address);
+                        let target_addr = u16::from_be_bytes(msg.target_address);
+                        // send DoIP DiagnosticMessageAck before returning the message to the caller
+                        let _ = ack_tx
+                            .send(DoipPayload::DiagnosticMessageAck(DiagnosticMessageAck {
+                                source_address: msg.target_address,
+                                target_address: msg.source_address,
+                                ack_code: DiagnosticAckCode::Acknowledged,
+                                previous_message: Vec::new(), // skip optional previous payload
+                            }))
+                            .await
+                            .inspect_err(|e| {
+                                tracing::error!(
+                                    error = ?e,
+                                    gateway_name = %gateway_name,
+                                    gateway_ip = %gateway_ip,
+                                    source_address = %addr,
+                                    target_address = %target_addr,
+                                    "Failed to send DiagnosticMessageAck"
+                                );
+                            });
                         tracing::debug!("DOIP OK - Returning response from ECU {:04x}", addr);
                         outtx
                             .get(&addr)
@@ -698,6 +720,7 @@ fn spawn_gateway_receiver_task(
                             &gateway_ip,
                             &outtx,
                             &reset_tx,
+                            &send_tx,
                             response
                         ).await;
                     }
