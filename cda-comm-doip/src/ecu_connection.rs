@@ -11,14 +11,16 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-use std::time::Duration;
+use std::{pin::Pin, time::Duration};
 
 use cda_interfaces::{DiagServiceError, dlt_ctx};
 use doip_definitions::{
     message::DoipMessage,
     payload::{ActivationCode, DoipPayload, RoutingActivationRequest, RoutingActivationResponse},
 };
-use tokio::sync::Mutex;
+use openssl::ssl::{Ssl, SslContextBuilder, SslMethod, SslOptions, SslVerifyMode, SslVersion};
+use tokio::{net::TcpSocket, sync::Mutex};
+use tokio_openssl::SslStream;
 
 use crate::ConnectionError;
 const ENABLED_SSL_CIPHERS: [&str; 4] = [
@@ -186,6 +188,34 @@ impl ECUConnectionRead for EcuConnectionReadVariant {
     }
 }
 
+async fn connect_to_gateway(
+    tester_ip: &str,
+    gateway_ip: &str,
+    port: u16,
+) -> Result<tokio::net::TcpStream, ConnectionError> {
+    tracing::debug!("Connecting to gateway at {gateway_ip}:{port} from tester IP {tester_ip}");
+    let target = format!("{gateway_ip}:{port}");
+    // todo: the source port should be configurable
+    let source_ip = format!("{tester_ip}:0");
+    let local_addr = source_ip.parse().map_err(|e| {
+        ConnectionError::ConnectionFailed(format!("Failed to parse source IP address: {e:?}"))
+    })?;
+    let socket = TcpSocket::new_v4().map_err(|e| {
+        ConnectionError::ConnectionFailed(format!("Failed to create TCP socket: {e:?}"))
+    })?;
+    socket.bind(local_addr).map_err(|e| {
+        ConnectionError::ConnectionFailed(format!("Failed to bind TCP socket: {e:?}"))
+    })?;
+    let target_addr = target.parse().map_err(|e| {
+        ConnectionError::ConnectionFailed(format!("Failed to parse target IP address: {e:?}"))
+    })?;
+    let stream = socket.connect(target_addr).await.map_err(|e| {
+        ConnectionError::ConnectionFailed(format!("Failed to connect to target: {e:?}"))
+    })?;
+    tracing::debug!("Successfully created Socket & tokio stream to gateway at {gateway_ip}:{port}");
+    Ok(stream)
+}
+
 #[tracing::instrument(
     skip(routing_activation_request),
     fields(
@@ -197,6 +227,7 @@ impl ECUConnectionRead for EcuConnectionReadVariant {
     )
 )]
 pub(crate) async fn establish_ecu_connection(
+    tester_ip: &str,
     gateway_ip: &str,
     gateway_name: &str,
     routing_activation_request: RoutingActivationRequest,
@@ -205,12 +236,12 @@ pub(crate) async fn establish_ecu_connection(
 ) -> Result<EcuConnectionTarget, ConnectionError> {
     let mut gateway_conn = match tokio::time::timeout(
         connect_timeout,
-        doip_sockets::tcp::TcpStream::connect(format!("{}:{}", gateway_ip, 13400)), // unencrypted
+        connect_to_gateway(tester_ip, gateway_ip, 13400),
     )
     .await
     {
-        Ok(Ok(stream)) => EcuConnectionVariant::Plain(stream),
-        Ok(Err(e)) => return Err(ConnectionError::ConnectionFailed(e.to_string())),
+        Ok(Ok(stream)) => EcuConnectionVariant::Plain(doip_sockets::tcp::TcpStream::new(stream)),
+        Ok(Err(e)) => return Err(e),
         Err(_) => {
             return Err(ConnectionError::Timeout(
                 "Connect timed out after 10 seconds".to_owned(),
@@ -259,6 +290,7 @@ pub(crate) async fn establish_ecu_connection(
                     };
 
                     establish_tls_ecu_connection(
+                        tester_ip,
                         gateway_ip,
                         &tls_gateway_name,
                         routing_activation_request,
@@ -290,6 +322,7 @@ pub(crate) async fn establish_ecu_connection(
     )
 )]
 pub(crate) async fn establish_tls_ecu_connection(
+    tester_ip: &str,
     gateway_ip: &str,
     gateway_name: &str,
     routing_activation_request: RoutingActivationRequest,
@@ -298,15 +331,69 @@ pub(crate) async fn establish_tls_ecu_connection(
 ) -> Result<EcuConnectionTarget, ConnectionError> {
     let mut gateway_conn = match tokio::time::timeout(
         connnect_timeout,
-        doip_sockets::tcp::DoIpSslStream::connect_with_ciphers(
-            format!("{}:{}", gateway_ip, 3496),
-            &ENABLED_SSL_CIPHERS,
-            Some(&ELIPTIC_CURVE_GROUPS),
-        ), // ssl
+        connect_to_gateway(tester_ip, gateway_ip, 3496),
     )
     .await
     {
-        Ok(Ok(stream)) => EcuConnectionVariant::Tls(stream),
+        Ok(Ok(stream)) => {
+            // allow unsafe ciphers
+            let mut builder = SslContextBuilder::new(SslMethod::tls_client()).map_err(|e| {
+                ConnectionError::ConnectionFailed(format!(
+                    "Failed to create SSL context builder: {e:?}"
+                ))
+            })?;
+
+            builder
+                .set_cipher_list(&ENABLED_SSL_CIPHERS.join(":"))
+                .map_err(|e| {
+                    ConnectionError::ConnectionFailed(format!("Failed to set cipher list: {e:?}"))
+                })?;
+            builder.set_verify(SslVerifyMode::NONE);
+            // necessary for NULL encryption
+            builder.set_security_level(0);
+            builder
+                .set_min_proto_version(Some(SslVersion::TLS1_2))
+                .map_err(|e| {
+                    ConnectionError::ConnectionFailed(format!(
+                        "Failed to set minimum TLS version: {e:?}"
+                    ))
+                })?;
+            builder
+                .set_max_proto_version(Some(SslVersion::TLS1_3))
+                .map_err(|e| {
+                    ConnectionError::ConnectionFailed(format!(
+                        "Failed to set maximum TLS version: {e:?}"
+                    ))
+                })?;
+
+            builder
+                .set_groups_list(&ELIPTIC_CURVE_GROUPS.join(":"))
+                .map_err(|e| {
+                    ConnectionError::ConnectionFailed(format!(
+                        "Failed to set elliptic curve groups: {e:?}"
+                    ))
+                })?;
+
+            let preset_options = builder.options();
+            // this is the flag legacy_renegotiation in openssl client
+            builder
+                .set_options(preset_options.union(SslOptions::ALLOW_UNSAFE_LEGACY_RENEGOTIATION));
+
+            let ctx = builder.build();
+            let ssl = Ssl::new(&ctx).map_err(|e| {
+                ConnectionError::ConnectionFailed(format!("Failed to create SSL context: {e:?}"))
+            })?;
+
+            let mut stream = SslStream::new(ssl, stream).map_err(|e| {
+                ConnectionError::ConnectionFailed(format!("Failed to create SSL stream: {e:?}"))
+            })?;
+            // wait for the actual connection .
+            Pin::new(&mut stream).connect().await.map_err(|e| {
+                ConnectionError::ConnectionFailed(format!("Unable to Pin SSL connection: {e}"))
+            })?;
+
+            EcuConnectionVariant::Tls(doip_sockets::tcp::DoIpSslStream::new(stream))
+        }
         Ok(Err(e)) => {
             return Err(ConnectionError::ConnectionFailed(format!(
                 "Connect failed: {e:?}"

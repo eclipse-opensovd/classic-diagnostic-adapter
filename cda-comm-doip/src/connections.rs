@@ -88,6 +88,7 @@ impl From<EcuError> for DiagServiceError {
     )
 )]
 pub(crate) async fn handle_gateway_connection<T>(
+    tester_ip: &str,
     gateway: DoipTarget,
     doip_connections: &Arc<RwLock<Vec<Arc<DoipConnection>>>>,
     ecus: &Arc<HashMap<String, RwLock<T>>>,
@@ -132,6 +133,7 @@ where
     let connection_retry_attempts = gateway_ecu.connection_retry_attempts();
 
     let (sender, receiver) = match connection_handler(
+        tester_ip.to_owned(),
         gateway.ip.clone(),
         gateway.ecu.clone(),
         routing_activation_request,
@@ -215,6 +217,7 @@ fn create_ecu_receiver_map(
     )
 )]
 async fn connection_handler(
+    tester_ip: String,
     gateway_ip: String,
     gateway_name: String,
     routing_activation_request: RoutingActivationRequest,
@@ -249,13 +252,17 @@ async fn connection_handler(
     // setting up initial gateway connection
     let gateway_conn = Arc::new(
         ecu_connection::establish_ecu_connection(
+            &tester_ip,
             &gateway_ip,
             &gateway_name,
             routing_activation_request,
             connection_settings.connect_timeout,
             connection_settings.routing_activation,
         )
-        .await?,
+        .await
+        .inspect_err(|e| {
+            tracing::error!("Failed to connect to gateway at {gateway_ip}: {e:?}");
+        })?,
     );
 
     // used by receiver / sender task to reset the connection
@@ -263,6 +270,7 @@ async fn connection_handler(
     // task to handle connection resets and reconnects
     let conn_reset = Arc::<EcuConnectionTarget>::clone(&gateway_conn);
     spawn_connection_reset_task(
+        tester_ip.clone(),
         gateway_ip.clone(),
         routing_activation_request,
         conn_reset_rx,
@@ -303,6 +311,7 @@ async fn connection_handler(
     )
 )]
 fn spawn_connection_reset_task(
+    tester_ip: String,
     gateway_ip: String,
     routing_activation_request: RoutingActivationRequest,
     mut conn_reset_rx: mpsc::Receiver<ConnectionResetReason>,
@@ -320,6 +329,7 @@ fn spawn_connection_reset_task(
 
                     'reconnect: loop {
                         let new_connection = ecu_connection::establish_ecu_connection(
+                            &tester_ip,
                             &gateway_ip,
                             &conn_reset.gateway_name,
                             routing_activation_request,

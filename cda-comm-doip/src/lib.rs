@@ -199,6 +199,7 @@ impl<T: EcuAddressProvider + DoipComParamProvider> DoipDiagGateway<T> {
 
             for gateway in gateways {
                 if let Ok(logical_address) = connections::handle_gateway_connection::<T>(
+                    &doip_config.tester_address,
                     gateway,
                     &doip_connections,
                     &ecus,
