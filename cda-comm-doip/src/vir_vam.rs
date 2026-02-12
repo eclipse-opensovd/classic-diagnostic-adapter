@@ -111,6 +111,7 @@ pub(crate) async fn listen_for_vams<T, F>(
         )
     )]
     async fn handle_doip_response<T: EcuAddressProvider + DoipComParamProvider>(
+        tester_ip: &str,
         gateway: &DoipDiagGateway<T>,
         send_timeout: Duration,
         doip_msg_ctx: DoipMessageContext,
@@ -149,6 +150,7 @@ pub(crate) async fn listen_for_vams<T, F>(
                     tracing::info!(ecu_name = %doip_target.ecu, "New Gateway ECU detected");
 
                     match handle_gateway_connection::<T>(
+                        tester_ip,
                         doip_target,
                         &gateway.doip_connections,
                         &gateway.ecus,
@@ -262,6 +264,7 @@ pub(crate) async fn listen_for_vams<T, F>(
                     Some(Ok((doip_msg, source_addr))) = socket.recv() => {
                         if let DoipPayload::VehicleAnnouncementMessage(_) = &doip_msg.payload {
                             handle_doip_response(
+                                &tester_ip,
                                 &gateway,
                                 send_timeout,
                                 DoipMessageContext { doip_msg, source_addr, netmask },
