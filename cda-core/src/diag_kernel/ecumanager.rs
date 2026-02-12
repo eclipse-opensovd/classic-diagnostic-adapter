@@ -3958,6 +3958,12 @@ impl<S: SecurityPlugin> EcuManager<S> {
             return Ok(());
         };
 
+        // Only take state transitions into account if present.
+        let state_transition_refs = diag_comm
+            .state_transition_refs()
+            .filter(|refs| !refs.is_empty())
+            .unwrap_or_default();
+
         // Get current ECU states
         let (ecu_session, ecu_security_level) = {
             let ecu_states = self.ecu_service_states.read().await;
@@ -4002,7 +4008,7 @@ impl<S: SecurityPlugin> EcuManager<S> {
             .map(str::to_ascii_lowercase)
             .collect();
 
-        let (allowed_security, allowed_session): (HashSet<_>, HashSet<_>) =
+        let (mut allowed_security, allowed_session): (HashSet<_>, HashSet<_>) =
             precondition_states.into_iter().fold(
                 (HashSet::new(), HashSet::new()),
                 |(mut security, mut session), state_name| {
@@ -4015,6 +4021,19 @@ impl<S: SecurityPlugin> EcuManager<S> {
                 },
             );
 
+        // add state transition sources to allowed security states
+        state_transition_refs
+            .iter()
+            .filter_map(|st_ref| {
+                st_ref
+                    .state_transition()
+                    .and_then(|st| st.source_short_name_ref())
+            })
+            .map(str::to_ascii_lowercase)
+            .for_each(|state| {
+                allowed_security.insert(state);
+            });
+
         let validate_state = |required: &HashSet<String>,
                               current: &str,
                               state_type: &str|
@@ -4023,7 +4042,9 @@ impl<S: SecurityPlugin> EcuManager<S> {
                 Ok(())
             } else {
                 Err(DiagServiceError::InvalidState(format!(
-                    "{state_type} mismatch. Required one of: {required:?}, Current: {current}",
+                    "{service} - {state_type} mismatch. Required one of: {required:?}, Current: \
+                     {current}",
+                    service = diag_comm.short_name().unwrap_or("None"),
                 )))
             }
         };
@@ -5392,6 +5413,104 @@ mod tests {
         };
 
         (ecu_manager, dc, sid_response)
+    }
+
+    /// Helper function to create an ECU manager with services that have state transition refs
+    fn create_ecu_manager_with_state_transitions() -> (
+        super::EcuManager<DefaultSecurityPluginData>,
+        cda_interfaces::DiagComm,
+    ) {
+        let mut db_builder = EcuDataBuilder::new();
+        let protocol = db_builder.create_protocol(Protocol::DoIp.value(), None, None, None);
+        let cp_ref = db_builder.create_com_param_ref(None, None, None, Some(protocol), None);
+
+        // Create security states
+        let locked_state = db_builder.create_state("LockedSecurity", None);
+        let extended_state = db_builder.create_state("ExtendedSecurity", None);
+        let programming_state = db_builder.create_state("ProgrammingSecurity", None);
+
+        // Create session states
+        let default_session_state = db_builder.create_state("DefaultSession", None);
+        let programming_session_state = db_builder.create_state("ProgrammingSession", None);
+
+        // Create state transitions for security
+        let locked_to_extended_transition = db_builder.create_state_transition(
+            "LockedToExtended",
+            Some("LockedSecurity"),
+            Some("ExtendedSecurity"),
+        );
+
+        let extended_to_programming_transition = db_builder.create_state_transition(
+            "ExtendedToProgramming",
+            Some("ExtendedSecurity"),
+            Some("ProgrammingSecurity"),
+        );
+
+        // Create state chart for security
+        let security_state_chart = db_builder.create_state_chart(
+            "SecurityAccess",
+            Some(semantics::SECURITY),
+            Some(vec![
+                locked_to_extended_transition,
+                extended_to_programming_transition,
+            ]),
+            Some("LockedSecurity"),
+            Some(vec![locked_state, extended_state, programming_state]),
+        );
+
+        // Create state chart for session (simple, no transitions needed for this test)
+        let session_state_chart = db_builder.create_state_chart(
+            "Session",
+            Some(semantics::SESSION),
+            None,
+            Some("DefaultSession"),
+            Some(vec![default_session_state, programming_session_state]),
+        );
+
+        // Create state transition refs for the service
+        let state_transition_ref =
+            db_builder.create_state_transition_ref(locked_to_extended_transition);
+
+        // Create precondition state ref - service requires Programming
+        let precondition_ref = db_builder.create_pre_condition_state_ref(programming_state);
+
+        // Create a service with state transition refs
+        let sid = service_ids::WRITE_DATA_BY_IDENTIFIER;
+        let dc_name = "TestServiceWithStateTransitions";
+
+        let diag_comm = db_builder.create_diag_comm(DiagCommParams {
+            short_name: dc_name,
+            pre_condition_state_refs: Some(vec![precondition_ref]),
+            state_transition_refs: Some(vec![state_transition_ref]),
+            protocols: Some(vec![protocol]),
+            ..Default::default()
+        });
+
+        let request = create_sid_only_request!(db_builder, sid);
+        let diag_service = new_diag_service!(db_builder, diag_comm, request, vec![], vec![]);
+
+        let diag_layer = db_builder.create_diag_layer(DiagLayerParams {
+            short_name: "TestVariantDiagLayer",
+            com_param_refs: Some(vec![cp_ref]),
+            diag_services: Some(vec![diag_service]),
+            state_charts: Some(vec![session_state_chart, security_state_chart]),
+            ..Default::default()
+        });
+
+        let variant = db_builder.create_variant(diag_layer, true, None, None);
+        let db = db_builder.finish(EcuDataParams {
+            revision: "revision_1",
+            version: "1.0.0",
+            variants: Some(vec![variant]),
+            ..Default::default()
+        });
+
+        let dc = cda_interfaces::DiagComm {
+            name: dc_name.to_owned(),
+            type_: DiagCommType::Configurations,
+            lookup_name: Some(dc_name.to_owned()),
+        };
+        (new_ecu_manager(db), dc)
     }
 
     #[tokio::test]
@@ -6796,6 +6915,90 @@ mod tests {
         assert!(
             mapped_data.data.contains_key("sub_param2"),
             "sub_param2 should survive roundtrip"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_state_transition_source_allowed_as_valid_security_state() {
+        // State transition source states are added to allowed_security states
+        let (ecu_manager, dc) = create_ecu_manager_with_state_transitions();
+
+        // Set ECU to "Locked" state which is the SOURCE of the state transition
+        // The service precondition requires "Programming"
+        // But the service has a state_transition_ref from "Locked" to "Extended"
+        // So "Locked" should be added to allowed security states
+        {
+            let mut ecu_states = ecu_manager.ecu_service_states.write().await;
+            ecu_states.insert(service_ids::SESSION_CONTROL, "DefaultSession".to_string());
+            ecu_states.insert(service_ids::SECURITY_ACCESS, "LockedSecurity".to_string());
+        }
+
+        let payload_data = UdsPayloadData::Raw(vec![service_ids::WRITE_DATA_BY_IDENTIFIER]);
+
+        let result = ecu_manager
+            .create_uds_payload(&dc, &skip_sec_plugin!(), Some(payload_data))
+            .await;
+
+        assert!(
+            result.is_ok(),
+            "Service should be allowed from source state of state transition. Error: {:?}",
+            result.err()
+        );
+    }
+
+    #[tokio::test]
+    async fn test_state_precondition() {
+        let (ecu_manager, dc) = create_ecu_manager_with_state_transitions();
+
+        // Set ECU to "Programming" which is in the precondition states
+        {
+            let mut ecu_states = ecu_manager.ecu_service_states.write().await;
+            ecu_states.insert(service_ids::SESSION_CONTROL, "DefaultSession".to_string());
+            ecu_states.insert(
+                service_ids::SECURITY_ACCESS,
+                "ProgrammingSecurity".to_string(),
+            );
+        }
+
+        let payload_data = UdsPayloadData::Raw(vec![service_ids::WRITE_DATA_BY_IDENTIFIER]);
+
+        // This should succeed because the ECU is in a precondition state
+        let result = ecu_manager
+            .create_uds_payload(&dc, &skip_sec_plugin!(), Some(payload_data))
+            .await;
+
+        assert!(
+            result.is_ok(),
+            "Service should be allowed when in precondition state"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_invalid_security_state_rejected() {
+        // This test verifies that states that are
+        // neither in preconditions nor state transition sources are properly rejected
+        let (ecu_manager, dc) = create_ecu_manager_with_state_transitions();
+
+        // Set ECU to "Extended" which is:
+        // - NOT in the precondition states (only Programming is)
+        // - NOT the source of the state transition (Locked is the source)
+        // - It's the TARGET of the transition, but targets are not added to allowed states
+        {
+            let mut ecu_states = ecu_manager.ecu_service_states.write().await;
+            ecu_states.insert(service_ids::SESSION_CONTROL, "DefaultSession".to_string());
+            ecu_states.insert(service_ids::SECURITY_ACCESS, "ExtendedSecurity".to_string());
+        }
+
+        let payload_data = UdsPayloadData::Raw(vec![service_ids::WRITE_DATA_BY_IDENTIFIER]);
+
+        // This should fail because Extended is neither in preconditions nor a transition source
+        let result = ecu_manager
+            .create_uds_payload(&dc, &skip_sec_plugin!(), Some(payload_data))
+            .await;
+
+        assert!(
+            result.is_err(),
+            "Service should NOT be allowed from invalid security state"
         );
     }
 }
