@@ -1219,4 +1219,49 @@ impl<'a> EcuDataBuilder<'a> {
             Some(dataformat::SpecificDOPData::tag_as_dtcdop(dtc_dop_specific_data).value_offset()),
         )
     }
+
+    pub fn create_state_transition(
+        &mut self,
+        short_name: &str,
+        source_short_name_ref: Option<&str>,
+        target_short_name_ref: Option<&str>,
+    ) -> WIPOffset<dataformat::StateTransition<'a>> {
+        let short_name_offset = self.fbb.create_string(short_name);
+        let source_offset = source_short_name_ref.map(|s| self.fbb.create_string(s));
+        let target_offset = target_short_name_ref.map(|s| self.fbb.create_string(s));
+
+        let args = dataformat::StateTransitionArgs {
+            short_name: Some(short_name_offset),
+            source_short_name_ref: source_offset,
+            target_short_name_ref: target_offset,
+        };
+
+        dataformat::StateTransition::create(&mut self.fbb, &args)
+    }
+
+    pub fn create_state_transition_ref(
+        &mut self,
+        state_transition: WIPOffset<dataformat::StateTransition<'a>>,
+    ) -> WIPOffset<dataformat::StateTransitionRef<'a>> {
+        let args = dataformat::StateTransitionRefArgs {
+            value: None,
+            state_transition: Some(state_transition),
+        };
+
+        dataformat::StateTransitionRef::create(&mut self.fbb, &args)
+    }
+
+    pub fn create_pre_condition_state_ref(
+        &mut self,
+        state: WIPOffset<dataformat::State<'a>>,
+    ) -> WIPOffset<dataformat::PreConditionStateRef<'a>> {
+        let args = dataformat::PreConditionStateRefArgs {
+            value: None,
+            in_param_if_short_name: None,
+            in_param_path_short_name: None,
+            state: Some(state),
+        };
+
+        dataformat::PreConditionStateRef::create(&mut self.fbb, &args)
+    }
 }
