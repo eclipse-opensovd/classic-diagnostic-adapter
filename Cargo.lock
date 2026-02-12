@@ -315,8 +315,8 @@ name = "cda-comm-doip"
 version = "0.1.0"
 dependencies = [
  "cda-interfaces",
+ "doip-codec",
  "doip-definitions",
- "doip-sockets",
  "futures",
  "openssl",
  "serde",
@@ -324,6 +324,7 @@ dependencies = [
  "thiserror 2.0.17",
  "tokio",
  "tokio-openssl",
+ "tokio-util",
  "tracing",
 ]
 
@@ -852,21 +853,6 @@ version = "3.0.13"
 source = "git+https://github.com/theswiftfox/doip-definitions.git?rev=bdeab8c#bdeab8cbacea1e131b7b134f636bd34e585b4d98"
 dependencies = [
  "derive_more",
-]
-
-[[package]]
-name = "doip-sockets"
-version = "0.2.4"
-source = "git+https://github.com/theswiftfox/doip-sockets.git?rev=0771453#0771453590218129a45436ab0f24632e24c2bc4f"
-dependencies = [
- "doip-codec",
- "doip-definitions",
- "futures",
- "openssl",
- "thiserror 2.0.17",
- "tokio",
- "tokio-openssl",
- "tokio-util",
 ]
 
 [[package]]

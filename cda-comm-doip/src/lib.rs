@@ -25,11 +25,12 @@ use doip_definitions::payload::{DiagnosticMessage, DiagnosticMessageNack, Generi
 use thiserror::Error;
 use tokio::sync::{Mutex, RwLock, broadcast, mpsc};
 
-use crate::{config::DoipConfig, connections::EcuError};
+use crate::{config::DoipConfig, connections::EcuError, socket::DoIPUdpSocket};
 
 pub mod config;
 mod connections;
 mod ecu_connection;
+mod socket;
 mod vir_vam;
 
 const SLEEP_INTERVAL: Duration = Duration::from_secs(30);
@@ -55,7 +56,7 @@ pub struct DoipDiagGateway<T: EcuAddressProvider + DoipComParamProvider> {
     doip_connections: Arc<RwLock<Vec<Arc<DoipConnection>>>>,
     logical_address_to_connection: Arc<RwLock<HashMap<u16, usize>>>,
     ecus: Arc<HashMap<String, RwLock<T>>>,
-    socket: Arc<Mutex<doip_sockets::udp::UdpSocket>>,
+    socket: Arc<Mutex<DoIPUdpSocket>>,
 }
 
 #[derive(Debug)]
@@ -725,7 +726,7 @@ fn create_netmask(tester_ip: &str, tester_subnet: &str) -> Result<u32, DoipGatew
 fn create_socket(
     tester_ip: &str,
     gateway_port: u16,
-) -> Result<doip_sockets::udp::UdpSocket, DoipGatewaySetupError> {
+) -> Result<DoIPUdpSocket, DoipGatewaySetupError> {
     let tester_ip = match tester_ip {
         "127.0.0.1" => "0.0.0.0",
         _ => tester_ip,
@@ -777,7 +778,7 @@ fn create_socket(
     })?;
 
     let std_sock: std::net::UdpSocket = socket.into();
-    doip_sockets::udp::UdpSocket::from_std(std_sock).map_err(|e| {
+    DoIPUdpSocket::new(std_sock).map_err(|e| {
         DoipGatewaySetupError::SocketCreationFailed(format!(
             "DoipGateway: Failed to create DoIP socket from std socket: {e:?}"
         ))

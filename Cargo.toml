@@ -51,6 +51,7 @@ parking_lot = "0.12.5"
 serde = "1.0"
 serde_json = "1.0"
 tokio = { version = "1.48.0", default-features = false }
+tokio-util = { version = "0.7.3", default-features = false }
 futures = "0.3"
 regex = "1.12.2"
 uuid = "1.18.1"
@@ -72,8 +73,8 @@ clap = "4.5"
 figment = "0.10.19"
 schemars = "1.1.0"
 aide = "0.16.0-alpha.1"
+doip-codec = "2.0.8"
 doip-definitions = "3.0.13"
-doip-sockets = "0.2.4"
 ouroboros = "0.18.5"
 toml = "0.9.8"
 cargo_toml = "0.22.3"
@@ -137,6 +138,6 @@ debug = true
 [patch.crates-io]
 # Necessary because upstream is still using an older version of serde_qs (0.14 instead of 1.0.0-rc.3)
 aide = { git = "https://github.com/alexmohr/aide.git", rev = "56355cb" }
+doip-codec = { git = "https://github.com/theswiftfox/doip-codec.git", rev = "0dba319" }
 doip-definitions = { git = "https://github.com/theswiftfox/doip-definitions.git", rev = "bdeab8c" }
-doip-sockets = { git = "https://github.com/theswiftfox/doip-sockets.git", rev = "0771453" }
 flatbuffers = { git = "https://github.com/alexmohr/flatbuffers.git", rev = "0ba3307d" }
