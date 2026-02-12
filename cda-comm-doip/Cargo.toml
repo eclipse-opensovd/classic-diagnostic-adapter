@@ -30,7 +30,7 @@ cda-interfaces = { workspace = true }
 thiserror = { workspace = true }
 # DoIP
 doip-definitions = { workspace = true }
-doip-sockets = { workspace = true, features = ["ssl"] }
+doip-codec = { workspace = true }
 # tls
 openssl = { workspace = true }
 tokio-openssl = { workspace = true }
@@ -39,6 +39,7 @@ serde = { workspace = true, features = ["derive"] }
 socket2 = { workspace = true, features = ["all"] }
 #tokio
 tokio = { workspace = true, features = ["time", "fs", "sync"] }
+tokio-util = { workspace = true, features = ["codec", "net"] }
 # futures
 futures = { workspace = true }
 # logging & tracing

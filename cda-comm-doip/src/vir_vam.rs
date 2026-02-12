@@ -19,12 +19,13 @@ use doip_definitions::{
     header::PayloadType,
     payload::{DoipPayload, VehicleIdentificationRequest},
 };
-use doip_sockets::udp::UdpSocket;
 use tokio::sync::{Mutex, RwLock, mpsc};
 
-use crate::{DoipDiagGateway, DoipTarget, connections::handle_gateway_connection};
+use crate::{
+    DoipDiagGateway, DoipTarget, connections::handle_gateway_connection, socket::DoIPUdpSocket,
+};
 pub(crate) async fn get_vehicle_identification<T, F>(
-    socket: &mut UdpSocket,
+    socket: &mut DoIPUdpSocket,
     netmask: u32,
     gateway_port: u16,
     ecus: &Arc<HashMap<String, RwLock<T>>>,
