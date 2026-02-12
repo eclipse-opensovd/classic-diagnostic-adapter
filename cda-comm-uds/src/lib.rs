@@ -23,7 +23,7 @@ use cda_interfaces::{
     EcuVariant, FlashTransferStartParams, FunctionalDescriptionConfig, HashMap, HashMapExtensions,
     HashSet, HashSetExtensions, SchemaDescription, SchemaProvider, SecurityAccess, ServicePayload,
     TesterPresentControlMessage, TesterPresentMode, TesterPresentType, TransmissionParameters,
-    UdsEcu, UdsResponse,
+    UDS_ID_RESPONSE_BITMASK, UdsEcu, UdsResponse,
     datatypes::{
         self, ComponentConfigurationsInfo, DTC_CODE_BIT_LEN, DataTransferError,
         DataTransferMetaData, DataTransferStatus, DtcCode, DtcExtendedInfo, DtcMask,
@@ -42,8 +42,6 @@ use tokio::{
 };
 
 type EcuIdentifier = String;
-
-const UDS_RESPONSE_OFFSET: u8 = 0x40;
 
 #[derive(Copy, Clone, Display)]
 enum ResetType {
@@ -379,7 +377,9 @@ impl<S: EcuGateway, R: DiagServiceResponse, T: EcuManager<Response = R>> UdsMana
                                         && msg.data.get(1) == sent_sid)
                                         || (msg.data.first()
                                             == sent_sid
-                                                .map(|sid| sid.saturating_add(UDS_RESPONSE_OFFSET))
+                                                .map(|sid| {
+                                                    sid.saturating_add(UDS_ID_RESPONSE_BITMASK)
+                                                })
                                                 .as_ref()))
                                 {
                                     tracing::debug!("Received expected UDS message: {:?}", msg);

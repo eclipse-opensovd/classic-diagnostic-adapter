@@ -79,6 +79,26 @@ pub struct DiagCommParams<'a> {
     pub is_final: bool,
 }
 
+impl Default for DiagCommParams<'_> {
+    fn default() -> Self {
+        Self {
+            short_name: "",
+            long_name: None,
+            semantic: None,
+            funct_class: None,
+            sdgs: None,
+            diag_class_type: DiagClassType::START_COMM,
+            pre_condition_state_refs: None,
+            state_transition_refs: None,
+            protocols: None,
+            audience: None,
+            is_mandatory: false,
+            is_executable: true,
+            is_final: true,
+        }
+    }
+}
+
 #[derive(Default)]
 pub struct EcuDataParams<'a> {
     pub ecu_name: &'a str,
@@ -187,7 +207,18 @@ impl<'a> EcuDataBuilder<'a> {
         })
     }
 
-    pub fn create_ecu_data_and_finish(&mut self, params: EcuDataParams<'a>) -> Vec<u8> {
+    /// Serialize the given [`EcuDataParams`] into a flatbuffer, wrap the result
+    /// in a [`DiagnosticDatabase`] and return it.  Consumes the builder.
+    ///
+    /// [`DiagnosticDatabase`]: super::DiagnosticDatabase
+    ///
+    /// # Panics
+    /// Panics if the database cannot be created from the built ECU data.
+    ///
+    /// Using panic here, because the database builder is not intended for production use
+    /// and only is a helper to build databases for tests.
+    #[must_use]
+    pub fn finish(mut self, params: EcuDataParams<'a>) -> super::DiagnosticDatabase {
         let ecu_name_offset = self.fbb.create_string(params.ecu_name);
         let revision_offset = self.fbb.create_string(params.revision);
         let version_offset = self.fbb.create_string(params.version);
@@ -208,7 +239,54 @@ impl<'a> EcuDataBuilder<'a> {
 
         let ecu_data = dataformat::EcuData::create(&mut self.fbb, &ecu_data_args);
         self.fbb.finish(ecu_data, None);
-        self.fbb.finished_data().to_vec()
+        let blob = self.fbb.finished_data().to_vec();
+
+        super::DiagnosticDatabase::new(
+            String::default(),
+            blob,
+            cda_interfaces::datatypes::FlatbBufConfig::default(),
+        )
+        .expect("Failed to create DiagnosticDatabase from built ECU data")
+    }
+
+    /// Finishes the builder into a [`DiagnosticDatabase`]
+    /// containing a single base variant with one `DiagLayer`.
+    ///
+    /// Creates all intermediate objects (com-param ref, diag layer, variant, ecu data)
+    /// and returns a ready-to-use database.
+    ///
+    /// # Panics
+    /// Panics if the database cannot be created from the built ECU data.
+    ///
+    /// [`DiagnosticDatabase`]: super::DiagnosticDatabase
+    ///
+    /// Using panic here, because the database builder is not intended for production use
+    /// and only is a helper to build databases for tests.
+    #[must_use]
+    pub fn finish_with_single_variant(
+        mut self,
+        protocol: WIPOffset<dataformat::Protocol<'a>>,
+        diag_services: Vec<WIPOffset<dataformat::DiagService<'a>>>,
+        layer_name: &'a str,
+        ecu_name: &'a str,
+        revision: &'a str,
+        version: &'a str,
+    ) -> super::DiagnosticDatabase {
+        let cp_ref = self.create_com_param_ref(None, None, None, Some(protocol), None);
+        let diag_layer = self.create_diag_layer(DiagLayerParams {
+            short_name: layer_name,
+            com_param_refs: Some(vec![cp_ref]),
+            diag_services: Some(diag_services),
+            ..Default::default()
+        });
+        let variant = self.create_variant(diag_layer, true, None, None);
+        self.finish(EcuDataParams {
+            ecu_name,
+            revision,
+            version,
+            variants: Some(vec![variant]),
+            ..Default::default()
+        })
     }
 
     pub fn create_diag_layer(
@@ -694,6 +772,35 @@ impl<'a> EcuDataBuilder<'a> {
         };
         let normal_dop = dataformat::NormalDOP::create(&mut self.fbb, &normal_dop_args);
         dataformat::SpecificDOPData::tag_as_normal_dop(normal_dop)
+    }
+
+    /// Shorthand for creating a regular `NormalDOP` with only a compu method and diag coded type.
+    ///
+    /// Equivalent to calling [`create_normal_specific_dop_data`] (with all optional fields `None`)
+    /// followed by [`create_dop`] with `DopType::REGULAR` and `SpecificDOPData::NormalDOP`.
+    pub fn create_regular_normal_dop(
+        &mut self,
+        name: &str,
+        diag_coded_type: WIPOffset<dataformat::DiagCodedType<'a>>,
+        compu_method: WIPOffset<dataformat::CompuMethod<'a>>,
+    ) -> WIPOffset<dataformat::DOP<'a>> {
+        let specific_data = self
+            .create_normal_specific_dop_data(
+                Some(compu_method),
+                Some(diag_coded_type),
+                None,
+                None,
+                None,
+                None,
+            )
+            .value_offset();
+        self.create_dop(
+            *DopType::REGULAR,
+            Some(name),
+            None,
+            *SpecificDOPData::NormalDOP,
+            Some(specific_data),
+        )
     }
 
     pub fn create_dynamic_length_specific_dop_data(

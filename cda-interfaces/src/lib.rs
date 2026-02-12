@@ -75,6 +75,16 @@ pub struct DiagComm {
 
 impl DiagComm {
     #[must_use]
+    pub fn new(name: impl Into<String>, type_: DiagCommType) -> Self {
+        let name = name.into();
+        Self {
+            lookup_name: Some(name.clone()),
+            name,
+            type_,
+        }
+    }
+
+    #[must_use]
     pub fn action(&self) -> DiagCommAction {
         self.type_.clone().into()
     }
@@ -184,6 +194,8 @@ pub mod service_ids {
     pub const CONTROL_DTC_SETTING: u8 = 0x85;
     pub const NEGATIVE_RESPONSE: u8 = 0x7F;
 }
+
+pub const UDS_ID_RESPONSE_BITMASK: u8 = 0x40;
 
 const CONFIGURATIONS_PREFIXES: [u8; 1] = [service_ids::WRITE_DATA_BY_IDENTIFIER];
 
