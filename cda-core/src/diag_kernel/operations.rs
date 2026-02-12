@@ -11,7 +11,9 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-use cda_database::datatypes::{self, BitLength, CompuMethod, CompuScale, DataType};
+use cda_database::datatypes::{
+    self, BitLength, CompuMethod, CompuScale, DataType, DiagCodedTypeVariant, MinMaxLengthType,
+};
 use cda_interfaces::{
     DataParseError, DiagServiceError,
     util::{decode_hex, tracing::print_hex},
@@ -563,9 +565,18 @@ pub(in crate::diag_kernel) fn extract_diag_data_container(
     let byte_pos = param.byte_position() as usize;
     let uds_payload = payload.data()?;
     let (data, bit_len) = diag_type.decode(uds_payload, byte_pos, param.bit_position() as usize)?;
-    if data.is_empty() {
+    let is_optional = match diag_type.type_() {
+        DiagCodedTypeVariant::MinMaxLength(MinMaxLengthType { min_length, .. }) => *min_length == 0,
+        _ => false,
+    };
+    if data.is_empty() && !is_optional {
         // at least 1 byte expected, we are using NotEnoughData error here, because
         // this might happen when parsing end of pdu and leftover bytes can be ignored
+        tracing::debug!(
+            "Not enough Data for parameter {:?} in extract_diag_data_container, expected at least \
+             1 byte",
+            param.short_name()
+        );
         return Err(DiagServiceError::NotEnoughData {
             expected: 1,
             actual: 0,
