@@ -21,7 +21,9 @@ use cda_interfaces::{
     HashMap, HashMapExtensions, ServicePayload, TransmissionParameters, UdsResponse, dlt_ctx,
     util::{self, tokio_ext},
 };
-use doip_definitions::payload::{DiagnosticMessage, DiagnosticMessageNack, GenericNack};
+use doip_definitions::payload::{
+    DiagnosticMessage, DiagnosticMessageNack, DoipPayload, GenericNack,
+};
 use thiserror::Error;
 use tokio::sync::{Mutex, RwLock, broadcast, mpsc};
 
@@ -67,7 +69,7 @@ struct DoipTarget {
 }
 
 struct DoipEcu {
-    sender: mpsc::Sender<DiagnosticMessage>,
+    sender: mpsc::Sender<DoipPayload>,
     receiver: broadcast::Receiver<Result<DiagnosticResponse, EcuError>>,
 }
 
@@ -798,11 +800,14 @@ impl<T: EcuAddressProvider + DoipComParamProvider> Clone for DoipDiagGateway<T> 
 
 async fn send_with_retries(
     msg: &DiagnosticMessage,
-    sender: &mpsc::Sender<DiagnosticMessage>,
+    sender: &mpsc::Sender<DoipPayload>,
     resend_counter: &mut u32,
     max_retries: u32,
 ) -> Result<(), DiagServiceError> {
-    while let Err(e) = sender.send(msg.clone()).await {
+    while let Err(e) = sender
+        .send(DoipPayload::DiagnosticMessage(msg.clone()))
+        .await
+    {
         *resend_counter = resend_counter.saturating_add(1);
         if *resend_counter > max_retries {
             return Err(DiagServiceError::SendFailed(format!(
