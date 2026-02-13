@@ -23,7 +23,9 @@ use doip_definitions::{
 use tokio::sync::{Mutex, RwLock, mpsc};
 
 use crate::{
-    DoipDiagGateway, DoipTarget, connections::handle_gateway_connection, socket::DoIPUdpSocket,
+    DoipDiagGateway, DoipTarget,
+    connections::handle_gateway_connection,
+    socket::{DoIPConnectionConfig, DoIPUdpSocket},
 };
 pub(crate) async fn get_vehicle_identification<T, F>(
     socket: &mut DoIPUdpSocket,
@@ -88,10 +90,14 @@ where
     Ok(gateways)
 }
 
-#[allow(clippy::too_many_lines)] // allowed due to nested functions
+// allowed due to nested functions
+#[allow(clippy::too_many_lines)]
+// allowed as it does not improve readability here to put args in a struct
+#[allow(clippy::too_many_arguments)]
 pub(crate) async fn listen_for_vams<T, F>(
     tester_ip: String,
     gateway_port: u16,
+    doip_connection_config: DoIPConnectionConfig,
     netmask: u32,
     gateway: DoipDiagGateway<T>,
     variant_detection: mpsc::Sender<Vec<String>>,
@@ -106,6 +112,7 @@ pub(crate) async fn listen_for_vams<T, F>(
         doip_msg: doip_definitions::message::DoipMessage,
         source_addr: std::net::SocketAddr,
         netmask: u32,
+        doip_connection_config: DoIPConnectionConfig,
     }
 
     #[tracing::instrument(skip(gateway, gateway_ecu_map, gateway_ecu_name_map, variant_detection),
@@ -126,6 +133,7 @@ pub(crate) async fn listen_for_vams<T, F>(
             doip_msg,
             source_addr,
             netmask,
+            doip_connection_config,
         } = doip_msg_ctx;
         match handle_vam::<T>(&gateway.ecus, doip_msg, source_addr, netmask).await {
             Ok(Some(doip_target)) => {
@@ -155,6 +163,7 @@ pub(crate) async fn listen_for_vams<T, F>(
                     match handle_gateway_connection::<T>(
                         tester_ip,
                         doip_target,
+                        doip_connection_config,
                         &gateway.doip_connections,
                         &gateway.ecus,
                         gateway_ecu_map,
@@ -270,7 +279,12 @@ pub(crate) async fn listen_for_vams<T, F>(
                                 &tester_ip,
                                 &gateway,
                                 send_timeout,
-                                DoipMessageContext { doip_msg, source_addr, netmask },
+                                DoipMessageContext {
+                                    doip_msg,
+                                    source_addr,
+                                    netmask,
+                                    doip_connection_config
+                                },
                                 &gateway_ecu_map,
                                 &gateway_ecu_name_map,
                                 variant_detection.clone(),

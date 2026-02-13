@@ -27,7 +27,9 @@ use tokio_openssl::SslStream;
 
 use crate::{
     ConnectionError,
-    socket::{DoIPConnection, DoIPConnectionReadHalf, DoIPConnectionWriteHalf},
+    socket::{
+        DoIPConnection, DoIPConnectionConfig, DoIPConnectionReadHalf, DoIPConnectionWriteHalf,
+    },
 };
 const ENABLED_SSL_CIPHERS: [&str; 4] = [
     "ECDHE-RSA-AES128-GCM-SHA256",
@@ -236,6 +238,7 @@ pub(crate) async fn establish_ecu_connection(
     tester_ip: &str,
     gateway_ip: &str,
     gateway_name: &str,
+    doip_connection_config: DoIPConnectionConfig,
     routing_activation_request: RoutingActivationRequest,
     connect_timeout: Duration,
     routing_activation_timeout: Duration,
@@ -246,7 +249,9 @@ pub(crate) async fn establish_ecu_connection(
     )
     .await
     {
-        Ok(Ok(stream)) => EcuConnectionVariant::Plain(DoIPConnection::new(stream)),
+        Ok(Ok(stream)) => {
+            EcuConnectionVariant::Plain(DoIPConnection::new(stream, doip_connection_config))
+        }
         Ok(Err(e)) => return Err(e),
         Err(_) => {
             return Err(ConnectionError::Timeout(
@@ -299,6 +304,7 @@ pub(crate) async fn establish_ecu_connection(
                         tester_ip,
                         gateway_ip,
                         &tls_gateway_name,
+                        doip_connection_config,
                         routing_activation_request,
                         connect_timeout,
                         routing_activation_timeout,
@@ -331,6 +337,7 @@ pub(crate) async fn establish_tls_ecu_connection(
     tester_ip: &str,
     gateway_ip: &str,
     gateway_name: &str,
+    doip_connection_config: DoIPConnectionConfig,
     routing_activation_request: RoutingActivationRequest,
     connnect_timeout: Duration,
     routing_activation_timeout: Duration,
@@ -398,7 +405,7 @@ pub(crate) async fn establish_tls_ecu_connection(
                 ConnectionError::ConnectionFailed(format!("Unable to Pin SSL connection: {e}"))
             })?;
 
-            EcuConnectionVariant::Tls(DoIPConnection::new(stream))
+            EcuConnectionVariant::Tls(DoIPConnection::new(stream, doip_connection_config))
         }
         Ok(Err(e)) => {
             return Err(ConnectionError::ConnectionFailed(format!(
