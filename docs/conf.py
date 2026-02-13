@@ -39,6 +39,9 @@ html_theme = "bizstyle"
 
 plantuml = "java -jar /usr/local/bin/plantuml.jar"
 
+# a needs json should be generated
+needs_build_json = True
+
 # dots are not allowed, because they cause linking issues with sphinx-needs due to normalization,
 # underscores require the use of backticks when used in rust comments, and are therefore also not allowed
 needs_id_regex = r"^(req|arch|dsgn|impl|dimpl|test|itest)~[a-zA-Z0-9\-]+$"

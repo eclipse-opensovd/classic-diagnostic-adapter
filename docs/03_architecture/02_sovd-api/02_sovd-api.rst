@@ -34,7 +34,7 @@ Data Types
          -
        * - A_BYTEFIELD
          - string (byte | hex)
-         - see ../../requirements/04_sovd.adoc#_requirements_bytefield_as_hex (Requirements: Bytefield as hex)
+         - see :ref:`requirements_sovd_api_bytefield_as_hex`
        * - A_FLOAT32
          - number (float)
          -

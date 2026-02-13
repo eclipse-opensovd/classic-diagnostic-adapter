@@ -11,7 +11,7 @@
 
 FROM sphinxdoc/sphinx:8.2.3
 
-RUN apt update && apt-get install -y git curl openjdk-17-jre && apt-get autoremove -y && apt-get -y clean
+RUN apt-get -y update && apt-get install -y git curl openjdk-17-jre && apt-get autoremove -y && apt-get -y clean
 ADD requirements.txt /tmp
 RUN python3 -m pip install -r /tmp/requirements.txt
 RUN curl -L -o /usr/local/bin/plantuml.jar https://github.com/plantuml/plantuml/releases/download/v1.2026.1/plantuml-1.2026.1.jar
