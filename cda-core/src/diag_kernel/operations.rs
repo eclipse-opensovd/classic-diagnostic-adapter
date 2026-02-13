@@ -11,7 +11,9 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-use cda_database::datatypes::{self, BitLength, CompuMethod, CompuScale, DataType};
+use cda_database::datatypes::{
+    self, BitLength, CompuMethod, CompuScale, DataType, DiagCodedTypeVariant, MinMaxLengthType,
+};
 use cda_interfaces::{
     DataParseError, DiagServiceError,
     util::{decode_hex, tracing::print_hex},
@@ -555,17 +557,27 @@ fn compu_convert_text_table(
 }
 
 pub(in crate::diag_kernel) fn extract_diag_data_container(
-    param: &datatypes::Parameter,
+    param_short_name: Option<&str>,
+    param_byte_pos: usize,
+    param_bit_pos: usize,
     payload: &mut Payload,
     diag_type: &datatypes::DiagCodedType,
     compu_method: Option<datatypes::CompuMethod>,
 ) -> Result<DiagDataTypeContainer, DiagServiceError> {
-    let byte_pos = param.byte_position() as usize;
     let uds_payload = payload.data()?;
-    let (data, bit_len) = diag_type.decode(uds_payload, byte_pos, param.bit_position() as usize)?;
-    if data.is_empty() {
+    let (data, bit_len) = diag_type.decode(uds_payload, param_byte_pos, param_bit_pos)?;
+    let is_optional = match diag_type.type_() {
+        DiagCodedTypeVariant::MinMaxLength(MinMaxLengthType { min_length, .. }) => *min_length == 0,
+        _ => false,
+    };
+    if data.is_empty() && !is_optional {
         // at least 1 byte expected, we are using NotEnoughData error here, because
         // this might happen when parsing end of pdu and leftover bytes can be ignored
+        tracing::debug!(
+            "Not enough Data for parameter {:?} in extract_diag_data_container, expected at least \
+             1 byte",
+            param_short_name
+        );
         return Err(DiagServiceError::NotEnoughData {
             expected: 1,
             actual: 0,
@@ -573,7 +585,7 @@ pub(in crate::diag_kernel) fn extract_diag_data_container(
     }
 
     let data_type = diag_type.base_datatype();
-    payload.set_last_read_byte_pos(byte_pos.saturating_add(data.len()));
+    payload.set_last_read_byte_pos(param_byte_pos.saturating_add(data.len()));
 
     Ok(DiagDataTypeContainer::RawContainer(
         DiagDataTypeContainerRaw {
@@ -911,11 +923,11 @@ mod tests {
     use cda_database::datatypes::{
         BitLength, CompuCategory, CompuFunction, CompuMethod, CompuRationalCoefficients,
         CompuScale, CompuValues, DataType, DiagCodedType, DiagCodedTypeVariant, IntervalType,
-        Limit, StandardLengthType,
+        Limit, MinMaxLengthType, StandardLengthType, Termination,
     };
 
-    /// Helper function to create a `DiagCodedType` for testing
-    fn create_diag_coded_type(
+    /// Helper function to create a `DiagCodedType` as `StandardLength` Type for testing
+    fn create_diag_coded_type_stl(
         data_type: DataType,
         bit_length_override: Option<BitLength>,
     ) -> DiagCodedType {
@@ -939,12 +951,32 @@ mod tests {
         .unwrap()
     }
 
-    use crate::diag_kernel::pad_msb_to_len;
+    fn create_diag_coded_type_minmax(
+        data_type: DataType,
+        min_length: u32,
+        max_length: Option<u32>,
+        termination: Termination,
+    ) -> DiagCodedType {
+        DiagCodedType::new(
+            data_type,
+            DiagCodedTypeVariant::MinMaxLength(MinMaxLengthType {
+                min_length,
+                max_length,
+                termination,
+            }),
+            true,
+        )
+        .unwrap()
+    }
+
+    use crate::diag_kernel::{
+        operations::extract_diag_data_container, pad_msb_to_len, payload::Payload,
+    };
 
     #[test]
     fn test_hex_values() {
         let json_value = serde_json::json!("0x11223344");
-        let diag_type = create_diag_coded_type(DataType::ByteField, None);
+        let diag_type = create_diag_coded_type_stl(DataType::ByteField, None);
         let result = super::json_value_to_uds_data(&diag_type, None, &json_value);
         assert_eq!(result, Ok(vec![0x11, 0x22, 0x33, 0x44]));
     }
@@ -952,8 +984,8 @@ mod tests {
     #[test]
     fn test_integer_out_of_range() {
         let json_value = serde_json::json!(i64::MAX);
-        let int32_type = create_diag_coded_type(DataType::Int32, None);
-        let uint32_type = create_diag_coded_type(DataType::UInt32, None);
+        let int32_type = create_diag_coded_type_stl(DataType::Int32, None);
+        let uint32_type = create_diag_coded_type_stl(DataType::UInt32, None);
         assert!(super::json_value_to_uds_data(&int32_type, None, &json_value).is_err());
         assert!(super::json_value_to_uds_data(&uint32_type, None, &json_value).is_err());
     }
@@ -962,11 +994,11 @@ mod tests {
     fn test_hex_values_odd() {
         let json_value = serde_json::json!("0x1 0x2");
 
-        let bytefield_type = create_diag_coded_type(DataType::ByteField, None);
-        let float64_type = create_diag_coded_type(DataType::Float64, None);
-        let float32_type = create_diag_coded_type(DataType::Float32, None);
-        let int32_type = create_diag_coded_type(DataType::Int32, None);
-        let uint32_type = create_diag_coded_type(DataType::UInt32, None);
+        let bytefield_type = create_diag_coded_type_stl(DataType::ByteField, None);
+        let float64_type = create_diag_coded_type_stl(DataType::Float64, None);
+        let float32_type = create_diag_coded_type_stl(DataType::Float32, None);
+        let int32_type = create_diag_coded_type_stl(DataType::Int32, None);
+        let uint32_type = create_diag_coded_type_stl(DataType::UInt32, None);
 
         let expected = Ok(vec![0x1, 0x2]);
         assert_eq!(
@@ -995,11 +1027,11 @@ mod tests {
     fn test_space_separated_hex_values() {
         let json_value = serde_json::json!("0x00 0x01 0x80 0x00");
 
-        let bytefield_type = create_diag_coded_type(DataType::ByteField, None);
-        let float64_type = create_diag_coded_type(DataType::Float64, None);
-        let float32_type = create_diag_coded_type(DataType::Float32, None);
-        let int32_type = create_diag_coded_type(DataType::Int32, None);
-        let uint32_type = create_diag_coded_type(DataType::UInt32, None);
+        let bytefield_type = create_diag_coded_type_stl(DataType::ByteField, None);
+        let float64_type = create_diag_coded_type_stl(DataType::Float64, None);
+        let float32_type = create_diag_coded_type_stl(DataType::Float32, None);
+        let int32_type = create_diag_coded_type_stl(DataType::Int32, None);
+        let uint32_type = create_diag_coded_type_stl(DataType::UInt32, None);
 
         let expected = Ok(vec![0x00, 0x01, 0x80, 0x00]);
         assert_eq!(
@@ -1027,7 +1059,7 @@ mod tests {
     #[test]
     fn test_mixed_values() {
         let json_value = serde_json::json!("ff 0a 128 deadbeef ca7");
-        let diag_type = create_diag_coded_type(DataType::ByteField, None);
+        let diag_type = create_diag_coded_type_stl(DataType::ByteField, None);
         let result = super::json_value_to_uds_data(&diag_type, None, &json_value);
         assert_eq!(
             result,
@@ -1038,7 +1070,7 @@ mod tests {
     #[test]
     fn test_hex_long() {
         let json_value = serde_json::json!("c0ffeca7");
-        let diag_type = create_diag_coded_type(DataType::ByteField, None);
+        let diag_type = create_diag_coded_type_stl(DataType::ByteField, None);
         let result = super::json_value_to_uds_data(&diag_type, None, &json_value);
         assert_eq!(result, Ok(vec![0xC0, 0xFF, 0xEC, 0xA7]));
     }
@@ -1046,7 +1078,7 @@ mod tests {
     #[test]
     fn test_invalid_hex_value() {
         let json_value = serde_json::json!("0xZZ");
-        let diag_type = create_diag_coded_type(DataType::ByteField, None);
+        let diag_type = create_diag_coded_type_stl(DataType::ByteField, None);
         let result = super::json_value_to_uds_data(&diag_type, None, &json_value);
         assert!(result.is_err());
     }
@@ -1054,7 +1086,7 @@ mod tests {
     #[test]
     fn test_long_byte_value() {
         let json_value = serde_json::json!("256");
-        let diag_type = create_diag_coded_type(DataType::ByteField, Some(9));
+        let diag_type = create_diag_coded_type_stl(DataType::ByteField, Some(9));
         let result = super::json_value_to_uds_data(&diag_type, None, &json_value);
         assert_eq!(result, Ok(vec![0x01, 0x00]));
     }
@@ -1063,11 +1095,11 @@ mod tests {
     fn test_float_string() {
         let json_value = serde_json::json!("10.42");
 
-        let int32_type = create_diag_coded_type(DataType::Int32, None);
-        let uint32_type = create_diag_coded_type(DataType::UInt32, None);
-        let bytefield_type = create_diag_coded_type(DataType::ByteField, None);
-        let float32_type = create_diag_coded_type(DataType::Float32, None);
-        let float64_type = create_diag_coded_type(DataType::Float64, None);
+        let int32_type = create_diag_coded_type_stl(DataType::Int32, None);
+        let uint32_type = create_diag_coded_type_stl(DataType::UInt32, None);
+        let bytefield_type = create_diag_coded_type_stl(DataType::ByteField, None);
+        let float32_type = create_diag_coded_type_stl(DataType::Float32, None);
+        let float64_type = create_diag_coded_type_stl(DataType::Float64, None);
 
         let int_result = Ok(vec![0x00, 0x00, 0x00, 0x0A]);
         assert_eq!(
@@ -1097,11 +1129,11 @@ mod tests {
     fn test_float() {
         let json_value = serde_json::json!(10.42);
 
-        let int32_type = create_diag_coded_type(DataType::Int32, None);
-        let uint32_type = create_diag_coded_type(DataType::UInt32, None);
-        let bytefield_type = create_diag_coded_type(DataType::ByteField, None);
-        let float32_type = create_diag_coded_type(DataType::Float32, None);
-        let float64_type = create_diag_coded_type(DataType::Float64, None);
+        let int32_type = create_diag_coded_type_stl(DataType::Int32, None);
+        let uint32_type = create_diag_coded_type_stl(DataType::UInt32, None);
+        let bytefield_type = create_diag_coded_type_stl(DataType::ByteField, None);
+        let float32_type = create_diag_coded_type_stl(DataType::Float32, None);
+        let float64_type = create_diag_coded_type_stl(DataType::Float64, None);
 
         assert!(super::json_value_to_uds_data(&int32_type, None, &json_value).is_err());
         assert!(super::json_value_to_uds_data(&uint32_type, None, &json_value).is_err());
@@ -1142,31 +1174,31 @@ mod tests {
         };
 
         let value = serde_json::json!("42");
-        let int32_type = create_diag_coded_type(DataType::Int32, None);
+        let int32_type = create_diag_coded_type_stl(DataType::Int32, None);
         let result =
             super::compu_convert(&int32_type, &compu_method, CompuCategory::Linear, &value);
         assert_eq!(result.unwrap(), 42i32.to_be_bytes().to_vec());
 
         let value = serde_json::json!("42.42");
-        let float32_type = create_diag_coded_type(DataType::Float32, None);
+        let float32_type = create_diag_coded_type_stl(DataType::Float32, None);
         let result =
             super::compu_convert(&float32_type, &compu_method, CompuCategory::Linear, &value);
         assert_eq!(result.unwrap(), 42.42f32.to_be_bytes().to_vec());
 
         let value = serde_json::json!("42.4242");
-        let float64_type = create_diag_coded_type(DataType::Float64, None);
+        let float64_type = create_diag_coded_type_stl(DataType::Float64, None);
         let result =
             super::compu_convert(&float64_type, &compu_method, CompuCategory::Linear, &value);
         assert_eq!(result.unwrap(), 42.4242f64.to_be_bytes().to_vec());
 
         let value = serde_json::json!(42);
-        let float64_type = create_diag_coded_type(DataType::Float64, None);
+        let float64_type = create_diag_coded_type_stl(DataType::Float64, None);
         let result =
             super::compu_convert(&float64_type, &compu_method, CompuCategory::Linear, &value);
         assert_eq!(result.unwrap(), 42f64.to_be_bytes().to_vec());
 
         let value = serde_json::json!(42);
-        let int32_type = create_diag_coded_type(DataType::Int32, None);
+        let int32_type = create_diag_coded_type_stl(DataType::Int32, None);
         let result =
             super::compu_convert(&int32_type, &compu_method, CompuCategory::Linear, &value);
         assert_eq!(result.unwrap(), 42i32.to_be_bytes().to_vec());
@@ -1204,13 +1236,13 @@ mod tests {
         // physical->internal: given physical 170, internal = (0.5*170 - 1.23)/2 = 41.885
         // there is rounding but values are truncated when converting to integer types
         let value = serde_json::json!(170);
-        let int32_type = create_diag_coded_type(DataType::Int32, None);
+        let int32_type = create_diag_coded_type_stl(DataType::Int32, None);
         let result =
             super::compu_convert(&int32_type, &compu_method, CompuCategory::Linear, &value);
         assert_eq!(result.unwrap(), 41i32.to_be_bytes().to_vec());
 
         let value = serde_json::json!(170.46);
-        let float32_type = create_diag_coded_type(DataType::Float32, None);
+        let float32_type = create_diag_coded_type_stl(DataType::Float32, None);
         let result =
             super::compu_convert(&float32_type, &compu_method, CompuCategory::Linear, &value);
         assert_eq!(result.unwrap(), 42.0f32.to_be_bytes().to_vec());
@@ -1244,13 +1276,13 @@ mod tests {
         };
 
         let value = serde_json::json!("TestValue");
-        let int32_type = create_diag_coded_type(DataType::Int32, None);
+        let int32_type = create_diag_coded_type_stl(DataType::Int32, None);
         let result =
             super::compu_convert(&int32_type, &compu_method, CompuCategory::TextTable, &value);
         assert_eq!(result.unwrap(), 42i32.to_be_bytes().to_vec());
 
         let value = serde_json::json!("NotFound");
-        let int32_type = create_diag_coded_type(DataType::Int32, None);
+        let int32_type = create_diag_coded_type_stl(DataType::Int32, None);
         let result =
             super::compu_convert(&int32_type, &compu_method, CompuCategory::TextTable, &value);
         assert!(result.is_err());
@@ -1504,7 +1536,7 @@ mod tests {
 
         // Inverse: y=1 -> x=0
         let value = serde_json::json!(1.0);
-        let float64_type = create_diag_coded_type(DataType::Float64, None);
+        let float64_type = create_diag_coded_type_stl(DataType::Float64, None);
         let result = super::compu_convert(
             &float64_type,
             &compu_method,
@@ -1524,7 +1556,7 @@ mod tests {
 
         // Inverse: y=3 -> x=1
         let value = serde_json::json!(3.0);
-        let float64_type = create_diag_coded_type(DataType::Float64, None);
+        let float64_type = create_diag_coded_type_stl(DataType::Float64, None);
         let result = super::compu_convert(
             &float64_type,
             &compu_method,
@@ -1544,7 +1576,7 @@ mod tests {
 
         // Inverse: y=4 -> x=1.5
         let value = serde_json::json!(4.0);
-        let float64_type = create_diag_coded_type(DataType::Float64, None);
+        let float64_type = create_diag_coded_type_stl(DataType::Float64, None);
         let result = super::compu_convert(
             &float64_type,
             &compu_method,
@@ -1565,7 +1597,7 @@ mod tests {
 
         // Inverse: y=5 -> x=2
         let value = serde_json::json!(5.0);
-        let float64_type = create_diag_coded_type(DataType::Float64, None);
+        let float64_type = create_diag_coded_type_stl(DataType::Float64, None);
         let result = super::compu_convert(
             &float64_type,
             &compu_method,
@@ -1585,7 +1617,7 @@ mod tests {
 
         // Inverse: y=6 -> x=3
         let value = serde_json::json!(6.0);
-        let float64_type = create_diag_coded_type(DataType::Float64, None);
+        let float64_type = create_diag_coded_type_stl(DataType::Float64, None);
         let result = super::compu_convert(
             &float64_type,
             &compu_method,
@@ -1605,7 +1637,7 @@ mod tests {
 
         // Inverse: y=7 -> x=4
         let value = serde_json::json!(7.0);
-        let float64_type = create_diag_coded_type(DataType::Float64, None);
+        let float64_type = create_diag_coded_type_stl(DataType::Float64, None);
         let result = super::compu_convert(
             &float64_type,
             &compu_method,
@@ -1642,7 +1674,7 @@ mod tests {
 
         // Inverse: y=8 should fail (constant function with V1=0 cannot be inverted)
         let value = serde_json::json!(8.0);
-        let float64_type = create_diag_coded_type(DataType::Float64, None);
+        let float64_type = create_diag_coded_type_stl(DataType::Float64, None);
         let result = super::compu_convert(
             &float64_type,
             &compu_method,
@@ -1790,7 +1822,7 @@ mod tests {
 
         // Test inverse conversion: physical 100.0 -> internal 5.0 (using inverse_values)
         let value = serde_json::json!(100.0);
-        let float64_type = create_diag_coded_type(DataType::Float64, None);
+        let float64_type = create_diag_coded_type_stl(DataType::Float64, None);
         let result = super::compu_convert(
             &float64_type,
             &compu_method,
@@ -1842,7 +1874,7 @@ mod tests {
             (DataType::Float32, f64::from(f32_val)),
             (DataType::Float64, f64_val),
         ] {
-            let diag_coded_type = create_diag_coded_type(data_type, None);
+            let diag_coded_type = create_diag_coded_type_stl(data_type, None);
             for test_case in [
                 &hex_bytes_no_space,
                 &hex_bytes_space_in_hex,
@@ -1870,7 +1902,7 @@ mod tests {
             DataType::Float32,
             DataType::Float64,
         ] {
-            let diag_coded_type = create_diag_coded_type(data_type, None);
+            let diag_coded_type = create_diag_coded_type_stl(data_type, None);
             for test_case in [
                 &str_decimal_int,
                 &str_decimal_float,
@@ -1884,5 +1916,29 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn test_min_max_is_optional() {
+        let dct =
+            create_diag_coded_type_minmax(DataType::ByteField, 0, Some(1), Termination::EndOfPdu);
+
+        let data: [u8; 0] = [];
+        let mut payload = Payload::new(&data);
+        let res = extract_diag_data_container(Some("test_param"), 0, 0, &mut payload, &dct, None);
+        assert!(
+            res.is_ok(),
+            "MinMaxLengthType with min_length 0 should be no error"
+        );
+
+        let dct_min1 =
+            create_diag_coded_type_minmax(DataType::ByteField, 1, Some(1), Termination::EndOfPdu);
+        let mut payload = Payload::new(&data);
+        let res: Result<crate::DiagDataTypeContainer, cda_interfaces::DiagServiceError> =
+            extract_diag_data_container(Some("test_param"), 0, 0, &mut payload, &dct_min1, None);
+        assert!(
+            res.is_err(),
+            "MinMaxLengthType with min_length 1 should be error when payload is empty"
+        );
     }
 }
