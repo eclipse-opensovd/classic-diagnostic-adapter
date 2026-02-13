@@ -2503,7 +2503,14 @@ impl<S: SecurityPlugin> EcuManager<S> {
                 "Expected DiagCodedType in CodedConst specific data".to_owned(),
             ))?;
 
-        let value = operations::extract_diag_data_container(param, uds_payload, &diag_type, None)?;
+        let value = operations::extract_diag_data_container(
+            param.short_name(),
+            param.byte_position() as usize,
+            param.bit_position() as usize,
+            uds_payload,
+            &diag_type,
+            None,
+        )?;
 
         let value = match value {
             DiagDataTypeContainer::RawContainer(diag_data_type_container_raw) => {
@@ -3336,7 +3343,9 @@ impl<S: SecurityPlugin> EcuManager<S> {
         data.insert(
             short_name,
             operations::extract_diag_data_container(
-                param,
+                param.short_name(),
+                param.byte_position() as usize,
+                param.bit_position() as usize,
                 uds_payload,
                 &diag_coded_type,
                 Some(compu_method),
