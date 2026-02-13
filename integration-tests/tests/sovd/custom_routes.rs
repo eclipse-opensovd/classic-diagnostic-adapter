@@ -108,9 +108,9 @@ async fn test_custom_demo_endpoint() {
     let (variant_tx, variant_rx) = tokio::sync::mpsc::channel(1);
     let doip_config = DoipConfig {
         tester_address: host.clone(),
-        tester_subnet: "255.255.255.0".to_owned(),
         gateway_port,
         send_timeout_ms: 5000,
+        ..Default::default()
     };
 
     let (dynamic_router, webserver_join_handle) =
