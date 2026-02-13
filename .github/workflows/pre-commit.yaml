@@ -31,6 +31,7 @@ concurrency:
 
 jobs:
   checks:
-    uses: eclipse-opensovd/cicd-workflows/.github/workflows/checks.yml@main
+    # GitHub is not executing the action, when a short SHA is used.
+    uses: eclipse-opensovd/cicd-workflows/.github/workflows/checks.yml@70053360006eacf5c8bf5a0e8d0dfadd6e384e88
     with:
-      license-config-path: ".licenserc.yaml" # Optional, uses action's default config if not specified
+      license-config-path: ".licenserc.yaml"
