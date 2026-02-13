@@ -79,9 +79,7 @@ impl Default for Configuration {
             health: cda_health::config::HealthConfig::default(),
             doip: DoipConfig {
                 tester_address: "10.2.1.240".to_owned(),
-                tester_subnet: "255.255.0.0".to_owned(),
-                gateway_port: 13400,
-                send_timeout_ms: 1000,
+                ..Default::default()
             },
             logging: cda_tracing::LoggingConfig::default(),
             com_params: ComParams::default(),

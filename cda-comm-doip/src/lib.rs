@@ -21,13 +21,18 @@ use cda_interfaces::{
     HashMap, HashMapExtensions, ServicePayload, TransmissionParameters, UdsResponse, dlt_ctx,
     util::{self, tokio_ext},
 };
-use doip_definitions::payload::{
-    DiagnosticMessage, DiagnosticMessageNack, DoipPayload, GenericNack,
+use doip_definitions::{
+    header::ProtocolVersion,
+    payload::{DiagnosticMessage, DiagnosticMessageNack, DoipPayload, GenericNack},
 };
 use thiserror::Error;
 use tokio::sync::{Mutex, RwLock, broadcast, mpsc};
 
-use crate::{config::DoipConfig, connections::EcuError, socket::DoIPUdpSocket};
+use crate::{
+    config::DoipConfig,
+    connections::EcuError,
+    socket::{DoIPConnectionConfig, DoIPUdpSocket},
+};
 
 pub mod config;
 mod connections;
@@ -149,12 +154,22 @@ impl<T: EcuAddressProvider + DoipComParamProvider> DoipDiagGateway<T> {
         F: Future<Output = ()> + Clone + Send + 'static,
     {
         let DoipConfig {
+            protocol_version,
             tester_address: tester_ip,
             tester_subnet,
             gateway_port,
             send_timeout_ms,
+            send_diagnostic_message_ack,
         } = doip_config;
         let gateway_port = *gateway_port;
+        let doip_connection_config = DoIPConnectionConfig {
+            protocol_version: ProtocolVersion::try_from(protocol_version).map_err(|err| {
+                DoipGatewaySetupError::InvalidConfiguration(format!(
+                    "Invalid DoIP protocol version: {err}"
+                ))
+            })?,
+            send_diagnostic_message_ack: *send_diagnostic_message_ack,
+        };
         let send_timeout = Duration::from_millis(*send_timeout_ms);
 
         tracing::info!("Initializing DoipDiagGateway");
@@ -203,6 +218,7 @@ impl<T: EcuAddressProvider + DoipComParamProvider> DoipDiagGateway<T> {
                 if let Ok(logical_address) = connections::handle_gateway_connection::<T>(
                     &doip_config.tester_address,
                     gateway,
+                    doip_connection_config,
                     &doip_connections,
                     &ecus,
                     &gateway_ecu_map,
@@ -228,6 +244,7 @@ impl<T: EcuAddressProvider + DoipComParamProvider> DoipDiagGateway<T> {
         vir_vam::listen_for_vams(
             tester_ip.to_owned(),
             gateway_port,
+            doip_connection_config,
             mask,
             gateway.clone(),
             variant_detection,

@@ -121,9 +121,8 @@ async fn initialize_runtime() -> Result<TestRuntime, TestingError> {
         },
         doip: opensovd_cda_lib::config::configfile::DoipConfig {
             tester_address: host.clone(),
-            tester_subnet: "255.255.0.0".to_owned(),
             gateway_port,
-            send_timeout_ms: 1000,
+            ..Default::default()
         },
         database: DatabaseConfig {
             path: mdd_file_path()?,

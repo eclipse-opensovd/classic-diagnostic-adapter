@@ -28,6 +28,7 @@ use crate::{
     NRC_BUSY_REPEAT_REQUEST, NRC_RESPONSE_PENDING, NRC_TEMPORARILY_NOT_AVAILABLE, SLEEP_INTERVAL,
     connections::EcuError::EcuConnectionError,
     ecu_connection::{self, ECUConnectionRead, ECUConnectionSend as _, EcuConnectionTarget},
+    socket::DoIPConnectionConfig,
 };
 
 type ConnectionResetReason = String;
@@ -96,6 +97,7 @@ impl From<EcuError> for DiagServiceError {
 pub(crate) async fn handle_gateway_connection<T>(
     tester_ip: &str,
     gateway: DoipTarget,
+    doip_connection_config: DoIPConnectionConfig,
     doip_connections: &Arc<RwLock<Vec<Arc<DoipConnection>>>>,
     ecus: &Arc<HashMap<String, RwLock<T>>>,
     gateway_ecu_map: &HashMap<u16, Vec<u16>>,
@@ -142,6 +144,7 @@ where
         tester_ip.to_owned(),
         gateway.ip.clone(),
         gateway.ecu.clone(),
+        doip_connection_config,
         routing_activation_request,
         ecu_ids.clone(),
         ConnectionSettings {
@@ -226,6 +229,7 @@ async fn connection_handler(
     tester_ip: String,
     gateway_ip: String,
     gateway_name: String,
+    doip_connection_config: DoIPConnectionConfig,
     routing_activation_request: RoutingActivationRequest,
     ecus: Vec<u16>,
     connection_settings: ConnectionSettings,
@@ -261,6 +265,7 @@ async fn connection_handler(
             &tester_ip,
             &gateway_ip,
             &gateway_name,
+            doip_connection_config,
             routing_activation_request,
             connection_settings.connect_timeout,
             connection_settings.routing_activation,
@@ -278,6 +283,7 @@ async fn connection_handler(
     spawn_connection_reset_task(
         tester_ip.clone(),
         gateway_ip.clone(),
+        doip_connection_config,
         routing_activation_request,
         conn_reset_rx,
         conn_reset,
@@ -318,6 +324,7 @@ async fn connection_handler(
 fn spawn_connection_reset_task(
     tester_ip: String,
     gateway_ip: String,
+    doip_connection_config: DoIPConnectionConfig,
     routing_activation_request: RoutingActivationRequest,
     mut conn_reset_rx: mpsc::Receiver<ConnectionResetReason>,
     conn_reset: Arc<EcuConnectionTarget>,
@@ -337,6 +344,7 @@ fn spawn_connection_reset_task(
                             &tester_ip,
                             &gateway_ip,
                             &conn_reset.gateway_name,
+                            doip_connection_config,
                             routing_activation_request,
                             connection_timeouts.connect_timeout,
                             connection_timeouts.routing_activation,

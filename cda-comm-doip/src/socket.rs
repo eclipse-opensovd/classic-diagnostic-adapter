@@ -28,24 +28,31 @@ use tokio_util::{
 
 use crate::ConnectionError;
 
+#[derive(Copy, Clone, Debug)]
+pub(crate) struct DoIPConnectionConfig {
+    pub protocol_version: ProtocolVersion,
+    pub send_diagnostic_message_ack: bool,
+}
+
 pub(crate) struct DoIPConnection<T: AsyncRead + AsyncWrite + Unpin> {
     io: Framed<T, DoipCodec>,
-    protocol: doip_definitions::header::ProtocolVersion,
+    config: DoIPConnectionConfig,
 }
 
 impl<T: AsyncRead + AsyncWrite + Unpin> DoIPConnection<T> {
-    pub fn new(io: T) -> Self {
+    pub fn new(io: T, config: DoIPConnectionConfig) -> Self {
         Self {
             io: Framed::new(io, DoipCodec {}),
-            protocol: ProtocolVersion::Iso13400_2012,
+            config,
         }
     }
     pub async fn send(&mut self, msg: DoipPayload) -> Result<(), ConnectionError> {
-        send_doip(&mut self.io, self.protocol, msg).await
+        send_doip(&mut self.io, self.config.protocol_version, msg).await
     }
     pub async fn read(&mut self) -> Option<Result<DoipMessage, ConnectionError>> {
         let res = read_doip(&mut self.io).await;
-        if let Some(Ok(ref msg)) = res
+        if self.config.send_diagnostic_message_ack
+            && let Some(Ok(ref msg)) = res
             && let DoipPayload::DiagnosticMessage(ref diag_msg) = msg.payload
             && let Err(e) = self
                 .send(DoipPayload::DiagnosticMessageAck(DiagnosticMessageAck {
@@ -69,7 +76,7 @@ impl<T: AsyncRead + AsyncWrite + Unpin> DoIPConnection<T> {
         let (read, write) = tokio::io::split(stream);
         (
             DoIPConnectionReadHalf::new(read),
-            DoIPConnectionWriteHalf::new(write, self.protocol),
+            DoIPConnectionWriteHalf::new(write, self.config.protocol_version),
         )
     }
 }
@@ -78,19 +85,19 @@ pub(crate) struct DoIPConnectionReadHalf<T: AsyncRead + Unpin> {
 }
 pub(crate) struct DoIPConnectionWriteHalf<T: AsyncWrite + Unpin> {
     io: FramedWrite<WriteHalf<T>, DoipCodec>,
-    protocol: ProtocolVersion,
+    protocol_version: ProtocolVersion,
 }
 
 impl<T: AsyncWrite + Unpin> DoIPConnectionWriteHalf<T> {
-    pub fn new(io: WriteHalf<T>, protocol: ProtocolVersion) -> Self {
+    pub fn new(io: WriteHalf<T>, protocol_version: ProtocolVersion) -> Self {
         Self {
             io: FramedWrite::new(io, DoipCodec {}),
-            protocol,
+            protocol_version,
         }
     }
 
     pub async fn send(&mut self, msg: DoipPayload) -> Result<(), ConnectionError> {
-        send_doip(&mut self.io, self.protocol, msg).await
+        send_doip(&mut self.io, self.protocol_version, msg).await
     }
 }
 impl<T: AsyncRead + Unpin> DoIPConnectionReadHalf<T> {
