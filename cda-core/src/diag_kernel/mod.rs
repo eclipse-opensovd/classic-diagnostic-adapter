@@ -22,7 +22,7 @@ use serde::{Serialize, Serializer};
 
 pub(crate) mod diagservices;
 pub(crate) mod ecumanager;
-mod iso_14229_nrc;
+pub(crate) mod iso_14229_nrc;
 mod operations;
 mod payload;
 mod schema;
