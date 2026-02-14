@@ -1,0 +1,89 @@
+# Copyright (c) 2025 The Contributors to Eclipse OpenSOVD (see CONTRIBUTORS)
+#
+# See the NOTICE file(s) distributed with this work for additional
+# information regarding copyright ownership.
+#
+# This program and the accompanying materials are made available under the
+# terms of the Apache License Version 2.0 which is available at
+# https://www.apache.org/licenses/LICENSE-2.0
+#
+# SPDX-License-Identifier: Apache-2.0
+
+name: 'Format and Clippy'
+description: 'Run rustfmt and clippy checks with reviewdog'
+
+inputs:
+  toolchain:
+    description: 'Rust toolchain version to use'
+    required: true
+  github-token:
+    description: 'GitHub token for reviewdog'
+    required: true
+  fail-on-format-error:
+    description: 'Whether to fail the job on formatting errors'
+    required: false
+    default: 'true'
+  fail-on-clippy-error:
+    description: 'Whether to fail the job on clippy errors'
+    required: false
+    default: 'true'
+  clippy-deny-warnings:
+    description: 'Whether to deny warnings in clippy (add -D warnings flag)'
+    required: false
+    default: 'true'
+
+runs:
+  using: 'composite'
+  steps:
+    - name: Install Rust toolchain
+      uses: dtolnay/rust-toolchain@nightly
+      with:
+        toolchain: ${{ inputs.toolchain }}
+        components: clippy, rustfmt
+
+    - name: Cache Rust dependencies
+      uses: Swatinem/rust-cache@v2
+      with:
+        shared-key: ${{ inputs.toolchain }}
+
+    - name: Install reviewdog
+      uses: reviewdog/action-setup@v1
+      with:
+        reviewdog_version: latest
+
+    - name: Formatting (rustfmt via reviewdog)
+      continue-on-error: ${{ inputs.fail-on-format-error == 'false' }}
+      shell: bash
+      env:
+        REVIEWDOG_GITHUB_API_TOKEN: ${{ inputs.github-token }}
+        FAIL_ON_FORMAT: ${{ inputs.fail-on-format-error }}
+      run: |
+        if [ "$FAIL_ON_FORMAT" = "true" ]; then
+          SEVERITY_TRANSFORM="sed 's/severity=\"warning\"/severity=\"error\"/g'"
+          FAIL_LEVEL="any"
+        else
+          SEVERITY_TRANSFORM="cat"
+          FAIL_LEVEL="none"
+        fi
+
+        cargo fmt -- \
+          --emit=checkstyle \
+          --config error_on_unformatted=true,error_on_line_overflow=true,format_strings=true \
+          --config group_imports=StdExternalCrate \
+          --config imports_granularity=Crate \
+          --config hex_literal_case=Upper \
+          2>&1 | eval "$SEVERITY_TRANSFORM" | reviewdog \
+            -f=checkstyle \
+            -reporter=github-pr-review \
+            -filter-mode=nofilter \
+            -fail-level="$FAIL_LEVEL" \
+            -level=error
+
+    - name: Clippy
+      uses: giraffate/clippy-action@v1
+      with:
+        reporter: 'github-pr-review'
+        github_token: ${{ inputs.github-token }}
+        clippy_flags: --locked --all-targets --features integration-tests ${{ inputs.clippy-deny-warnings == 'true' && '-- -D warnings' || '' }}
+        filter_mode: 'nofilter'
+        fail_on_error: ${{ inputs.fail-on-clippy-error }}
