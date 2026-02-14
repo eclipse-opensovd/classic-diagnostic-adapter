@@ -29,8 +29,8 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  checks:
-    # GitHub is not executing the action, when a short SHA is used.
-    uses: eclipse-opensovd/cicd-workflows/.github/workflows/checks.yml@70053360006eacf5c8bf5a0e8d0dfadd6e384e88
-    with:
-      license-config-path: ".licenserc.yaml"
+  pre-commit:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Run checks
+        uses: eclipse-opensovd/cicd-workflows/pre-commit-action@067e07bfa2d3b157242896f36853d608991afbcb
