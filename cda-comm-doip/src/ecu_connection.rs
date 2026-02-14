@@ -19,10 +19,18 @@ use doip_definitions::{
     payload::{ActivationCode, DoipPayload, RoutingActivationRequest, RoutingActivationResponse},
 };
 use openssl::ssl::{Ssl, SslContextBuilder, SslMethod, SslOptions, SslVerifyMode, SslVersion};
-use tokio::{net::TcpSocket, sync::Mutex};
+use tokio::{
+    net::{TcpSocket, TcpStream},
+    sync::Mutex,
+};
 use tokio_openssl::SslStream;
 
-use crate::ConnectionError;
+use crate::{
+    ConnectionError,
+    socket::{
+        DoIPConnection, DoIPConnectionConfig, DoIPConnectionReadHalf, DoIPConnectionWriteHalf,
+    },
+};
 const ENABLED_SSL_CIPHERS: [&str; 4] = [
     "ECDHE-RSA-AES128-GCM-SHA256",
     "ECDHE-ECDSA-AES128-SHA256",
@@ -42,7 +50,7 @@ const ELIPTIC_CURVE_GROUPS: [&str; 8] = [
 ];
 
 pub(crate) trait ECUConnectionRead {
-    async fn read(&mut self) -> Option<Result<DoipMessage, doip_sockets::Error>>
+    async fn read(&mut self) -> Option<Result<DoipMessage, ConnectionError>>
     where
         Self: std::borrow::Borrow<Self>;
 }
@@ -54,8 +62,8 @@ pub(crate) trait ECUConnectionSend {
 }
 
 enum EcuConnectionVariant {
-    Tls(doip_sockets::tcp::DoIpSslStream),
-    Plain(doip_sockets::tcp::TcpStream),
+    Tls(DoIPConnection<tokio_openssl::SslStream<TcpStream>>),
+    Plain(DoIPConnection<TcpStream>),
 }
 
 impl EcuConnectionVariant {
@@ -66,7 +74,7 @@ impl EcuConnectionVariant {
         }
         .map_err(|e| ConnectionError::SendFailed(format!("Failed to send message: {e:?}")))
     }
-    async fn read(&mut self) -> Option<Result<DoipMessage, doip_sockets::Error>> {
+    async fn read(&mut self) -> Option<Result<DoipMessage, ConnectionError>> {
         match self {
             EcuConnectionVariant::Tls(conn) => conn.read().await,
             EcuConnectionVariant::Plain(conn) => conn.read().await,
@@ -93,12 +101,12 @@ impl EcuConnectionVariant {
 }
 
 pub(crate) enum EcuConnectionReadVariant {
-    Tls(doip_sockets::tcp::TcpStreamReadHalf<tokio_openssl::SslStream<tokio::net::TcpStream>>),
-    Plain(doip_sockets::tcp::TcpStreamReadHalf<tokio::net::TcpStream>),
+    Tls(DoIPConnectionReadHalf<tokio_openssl::SslStream<tokio::net::TcpStream>>),
+    Plain(DoIPConnectionReadHalf<tokio::net::TcpStream>),
 }
 pub(crate) enum EcuConnectionSendVariant {
-    Tls(doip_sockets::tcp::TcpStreamWriteHalf<tokio_openssl::SslStream<tokio::net::TcpStream>>),
-    Plain(doip_sockets::tcp::TcpStreamWriteHalf<tokio::net::TcpStream>),
+    Tls(DoIPConnectionWriteHalf<tokio_openssl::SslStream<tokio::net::TcpStream>>),
+    Plain(DoIPConnectionWriteHalf<tokio::net::TcpStream>),
 }
 
 pub(crate) struct EcuConnectionTarget {
@@ -180,7 +188,7 @@ impl ECUConnectionSend for EcuConnectionSendVariant {
 }
 
 impl ECUConnectionRead for EcuConnectionReadVariant {
-    async fn read(&mut self) -> Option<Result<DoipMessage, doip_sockets::Error>> {
+    async fn read(&mut self) -> Option<Result<DoipMessage, ConnectionError>> {
         match self {
             EcuConnectionReadVariant::Tls(conn) => conn.read().await,
             EcuConnectionReadVariant::Plain(conn) => conn.read().await,
@@ -230,6 +238,7 @@ pub(crate) async fn establish_ecu_connection(
     tester_ip: &str,
     gateway_ip: &str,
     gateway_name: &str,
+    doip_connection_config: DoIPConnectionConfig,
     routing_activation_request: RoutingActivationRequest,
     connect_timeout: Duration,
     routing_activation_timeout: Duration,
@@ -240,7 +249,9 @@ pub(crate) async fn establish_ecu_connection(
     )
     .await
     {
-        Ok(Ok(stream)) => EcuConnectionVariant::Plain(doip_sockets::tcp::TcpStream::new(stream)),
+        Ok(Ok(stream)) => {
+            EcuConnectionVariant::Plain(DoIPConnection::new(stream, doip_connection_config))
+        }
         Ok(Err(e)) => return Err(e),
         Err(_) => {
             return Err(ConnectionError::Timeout(
@@ -293,6 +304,7 @@ pub(crate) async fn establish_ecu_connection(
                         tester_ip,
                         gateway_ip,
                         &tls_gateway_name,
+                        doip_connection_config,
                         routing_activation_request,
                         connect_timeout,
                         routing_activation_timeout,
@@ -325,6 +337,7 @@ pub(crate) async fn establish_tls_ecu_connection(
     tester_ip: &str,
     gateway_ip: &str,
     gateway_name: &str,
+    doip_connection_config: DoIPConnectionConfig,
     routing_activation_request: RoutingActivationRequest,
     connnect_timeout: Duration,
     routing_activation_timeout: Duration,
@@ -392,7 +405,7 @@ pub(crate) async fn establish_tls_ecu_connection(
                 ConnectionError::ConnectionFailed(format!("Unable to Pin SSL connection: {e}"))
             })?;
 
-            EcuConnectionVariant::Tls(doip_sockets::tcp::DoIpSslStream::new(stream))
+            EcuConnectionVariant::Tls(DoIPConnection::new(stream, doip_connection_config))
         }
         Ok(Err(e)) => {
             return Err(ConnectionError::ConnectionFailed(format!(

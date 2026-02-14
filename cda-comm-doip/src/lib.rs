@@ -22,15 +22,23 @@ use cda_interfaces::{
     HashMap, HashMapExtensions, ServicePayload, TransmissionParameters, UdsResponse, dlt_ctx,
     util::{self, tokio_ext},
 };
-use doip_definitions::payload::{DiagnosticMessage, DiagnosticMessageNack, GenericNack};
+use doip_definitions::{
+    header::ProtocolVersion,
+    payload::{DiagnosticMessage, DiagnosticMessageNack, DoipPayload, GenericNack},
+};
 use thiserror::Error;
 use tokio::sync::{Mutex, RwLock, broadcast, mpsc};
 
-use crate::{config::DoipConfig, connections::EcuError};
+use crate::{
+    config::DoipConfig,
+    connections::EcuError,
+    socket::{DoIPConnectionConfig, DoIPUdpSocket},
+};
 
 pub mod config;
 mod connections;
 mod ecu_connection;
+mod socket;
 mod vir_vam;
 
 const SLEEP_INTERVAL: Duration = Duration::from_secs(30);
@@ -56,7 +64,7 @@ pub struct DoipDiagGateway<T: EcuAddressProvider + DoipComParamProvider> {
     doip_connections: Arc<RwLock<Vec<Arc<DoipConnection>>>>,
     logical_address_to_connection: Arc<RwLock<HashMap<u16, usize>>>,
     ecus: Arc<HashMap<String, RwLock<T>>>,
-    socket: Arc<Mutex<doip_sockets::udp::UdpSocket>>,
+    socket: Arc<Mutex<DoIPUdpSocket>>,
 }
 
 #[derive(Debug)]
@@ -67,7 +75,7 @@ struct DoipTarget {
 }
 
 struct DoipEcu {
-    sender: mpsc::Sender<DiagnosticMessage>,
+    sender: mpsc::Sender<DoipPayload>,
     receiver: broadcast::Receiver<Result<DiagnosticResponse, EcuError>>,
 }
 
@@ -147,12 +155,22 @@ impl<T: EcuAddressProvider + DoipComParamProvider> DoipDiagGateway<T> {
         F: Future<Output = ()> + Clone + Send + 'static,
     {
         let DoipConfig {
+            protocol_version,
             tester_address: tester_ip,
             tester_subnet,
             gateway_port,
             send_timeout_ms,
+            send_diagnostic_message_ack,
         } = doip_config;
         let gateway_port = *gateway_port;
+        let doip_connection_config = DoIPConnectionConfig {
+            protocol_version: ProtocolVersion::try_from(protocol_version).map_err(|err| {
+                DoipGatewaySetupError::InvalidConfiguration(format!(
+                    "Invalid DoIP protocol version: {err}"
+                ))
+            })?,
+            send_diagnostic_message_ack: *send_diagnostic_message_ack,
+        };
         let send_timeout = Duration::from_millis(*send_timeout_ms);
 
         tracing::info!("Initializing DoipDiagGateway");
@@ -201,6 +219,7 @@ impl<T: EcuAddressProvider + DoipComParamProvider> DoipDiagGateway<T> {
                 if let Ok(logical_address) = connections::handle_gateway_connection::<T>(
                     &doip_config.tester_address,
                     gateway,
+                    doip_connection_config,
                     &doip_connections,
                     &ecus,
                     &gateway_ecu_map,
@@ -226,6 +245,7 @@ impl<T: EcuAddressProvider + DoipComParamProvider> DoipDiagGateway<T> {
         vir_vam::listen_for_vams(
             tester_ip.to_owned(),
             gateway_port,
+            doip_connection_config,
             mask,
             gateway.clone(),
             variant_detection,
@@ -726,7 +746,7 @@ fn create_netmask(tester_ip: &str, tester_subnet: &str) -> Result<u32, DoipGatew
 fn create_socket(
     tester_ip: &str,
     gateway_port: u16,
-) -> Result<doip_sockets::udp::UdpSocket, DoipGatewaySetupError> {
+) -> Result<DoIPUdpSocket, DoipGatewaySetupError> {
     let tester_ip = match tester_ip {
         "127.0.0.1" => "0.0.0.0",
         _ => tester_ip,
@@ -778,7 +798,7 @@ fn create_socket(
     })?;
 
     let std_sock: std::net::UdpSocket = socket.into();
-    doip_sockets::udp::UdpSocket::from_std(std_sock).map_err(|e| {
+    DoIPUdpSocket::new(std_sock).map_err(|e| {
         DoipGatewaySetupError::SocketCreationFailed(format!(
             "DoipGateway: Failed to create DoIP socket from std socket: {e:?}"
         ))
@@ -798,11 +818,14 @@ impl<T: EcuAddressProvider + DoipComParamProvider> Clone for DoipDiagGateway<T> 
 
 async fn send_with_retries(
     msg: &DiagnosticMessage,
-    sender: &mpsc::Sender<DiagnosticMessage>,
+    sender: &mpsc::Sender<DoipPayload>,
     resend_counter: &mut u32,
     max_retries: u32,
 ) -> Result<(), DiagServiceError> {
-    while let Err(e) = sender.send(msg.clone()).await {
+    while let Err(e) = sender
+        .send(DoipPayload::DiagnosticMessage(msg.clone()))
+        .await
+    {
         *resend_counter = resend_counter.saturating_add(1);
         if *resend_counter > max_retries {
             return Err(DiagServiceError::SendFailed(format!(
