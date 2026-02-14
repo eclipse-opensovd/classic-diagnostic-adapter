@@ -130,6 +130,7 @@ async fn initialize_runtime() -> Result<TestRuntime, TestingError> {
             path: mdd_file_path()?,
             naming_convention: DatabaseNamingConvention::default(),
             exit_no_database_loaded: true,
+            fallback_to_base_variant: true,
         },
         logging: LoggingConfig::default(),
         onboard_tester: true,

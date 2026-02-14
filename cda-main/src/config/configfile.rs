@@ -49,6 +49,9 @@ pub struct DatabaseConfig {
     pub naming_convention: DatabaseNamingConvention,
     /// If true, the application will exit if no database could be loaded.
     pub exit_no_database_loaded: bool,
+    /// If true, when variant detection fails to find a matching variant,
+    /// the ECU will fall back to the base variant instead of reporting an error.
+    pub fallback_to_base_variant: bool,
 }
 
 pub trait ConfigSanity {
@@ -66,6 +69,7 @@ impl Default for Configuration {
                 path: ".".to_owned(),
                 naming_convention: DatabaseNamingConvention::default(),
                 exit_no_database_loaded: false,
+                fallback_to_base_variant: true,
             },
             flash_files_path: ".".to_owned(),
             server: ServerConfig {
