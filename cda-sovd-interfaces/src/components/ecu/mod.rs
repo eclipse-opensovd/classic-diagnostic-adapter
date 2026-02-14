@@ -141,9 +141,25 @@ pub mod configurations {
 
     pub type ConfigurationsQuery = crate::IncludeSchemaQuery;
 
+    /// Response returned when querying a service configuration.
+    #[derive(Deserialize, Serialize, Debug, schemars::JsonSchema)]
+    pub struct ServiceResponse {
+        /// Identifier of the service.
+        pub id: String,
+        /// Configuration data for the service.
+        pub data: serde_json::Value,
+    }
+
     pub mod get {
         use super::Components;
         pub type Response = Components;
+    }
+
+    /// Module for the `GET /configurations/{service}` endpoint.
+    pub mod get_service {
+        use super::ServiceResponse;
+        /// Response type returned by this endpoint.
+        pub type Response = ServiceResponse;
     }
 }
 
