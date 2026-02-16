@@ -10,7 +10,7 @@
  * https://www.apache.org/licenses/LICENSE-2.0
  */
 
-use aide::transform::TransformOperation;
+use aide::{UseApi, transform::TransformOperation};
 use axum::{
     Json,
     extract::{Query, State},
@@ -18,9 +18,10 @@ use axum::{
 };
 use axum_extra::extract::WithRejection;
 use cda_interfaces::{
-    UdsEcu, datatypes::ComponentConfigurationsInfo, diagservices::DiagServiceResponse,
-    file_manager::FileManager,
+    DynamicPlugin, UdsEcu, datatypes::ComponentConfigurationsInfo,
+    diagservices::DiagServiceResponse, file_manager::FileManager,
 };
+use cda_plugin_security::Secured;
 use http::StatusCode;
 use sovd_interfaces::components::ecu::configurations as sovd_configurations;
 
@@ -30,6 +31,7 @@ use crate::sovd::{
 };
 
 pub(crate) async fn get<R: DiagServiceResponse, T: UdsEcu + Clone, U: FileManager>(
+    UseApi(Secured(security_plugin), _): UseApi<Secured, ()>,
     State(WebserverEcuState { ecu_name, uds, .. }): State<WebserverEcuState<R, T, U>>,
     WithRejection(Query(query), _): WithRejection<
         Query<sovd_configurations::ConfigurationsQuery>,
@@ -41,7 +43,10 @@ pub(crate) async fn get<R: DiagServiceResponse, T: UdsEcu + Clone, U: FileManage
     } else {
         None
     };
-    match uds.get_components_configuration_info(&ecu_name).await {
+    match uds
+        .get_components_configuration_info(&ecu_name, &(security_plugin as DynamicPlugin))
+        .await
+    {
         Ok(mut items) => {
             let sovd_component_configuration = sovd_configurations::get::Response {
                 items: items
