@@ -354,12 +354,15 @@ pub trait EcuManager:
     ) -> Result<Vec<MuxCaseInfo>, DiagServiceError>;
 
     /// Retrieve all `read` services for the current ECU variant.
-    fn get_components_data_info(&self) -> Vec<ComponentDataInfo>;
+    /// Services are filtered through the security plugin.
+    fn get_components_data_info(&self, security_plugin: &DynamicPlugin) -> Vec<ComponentDataInfo>;
     /// Retrieve all configuration type services for the current ECU variant.
+    /// Services are filtered through the security plugin.
     /// # Errors
     /// Returns `DiagServiceError` if the lookup failed.
     fn get_components_configurations_info(
         &self,
+        security_plugin: &DynamicPlugin,
     ) -> Result<Vec<ComponentConfigurationsInfo>, DiagServiceError>;
     /// Retrieve all 'single ecu' jobs for the current ECU variant.
     fn get_components_single_ecu_jobs_info(&self) -> Vec<ComponentDataInfo>;
