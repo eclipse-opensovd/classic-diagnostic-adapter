@@ -14,11 +14,11 @@ SCRIPT_DIR=$(cd "$(dirname "$0")" && pwd)
 
 rm -rf "${SCRIPT_DIR}/_build"
 
-UID=$(id -u)
-GID=$(id -g)
+SCRIPT_UID=$(id -u)
+SCRIPT_GID=$(id -g)
 
 docker build -f Dockerfile . -t sovdsphinx:latest
-docker run --rm --user "${UID}:${GID}" \
+docker run --rm --user "${SCRIPT_UID}:${SCRIPT_GID}" \
 		-e _JAVA_OPTIONS="-Djava.io.tmpdir=/tmp -Duser.home=/tmp" \
 		-v "${SCRIPT_DIR}:/docs" \
 		-v "${SCRIPT_DIR}/..:/project" \
