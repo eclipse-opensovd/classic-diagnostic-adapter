@@ -10,15 +10,19 @@
  * https://www.apache.org/licenses/LICENSE-2.0
  */
 
+use aide::UseApi;
+use cda_plugin_security::Secured;
 use sovd_interfaces::error::ApiErrorResponse;
 
 use super::{
-    ApiError, DiagServiceResponse, ErrorWrapper, FileManager, IntoResponse, Json, Query, Response,
-    State, StatusCode, TransformOperation, UdsEcu, WebserverEcuState, WithRejection,
+    ApiError, DiagServiceResponse, DynamicPlugin, ErrorWrapper, FileManager, IntoResponse, Json,
+    Query, Response, State, StatusCode, TransformOperation, UdsEcu, WebserverEcuState,
+    WithRejection,
 };
 use crate::sovd::{self, create_schema};
 
 pub(crate) async fn get<R: DiagServiceResponse, T: UdsEcu + Clone, U: FileManager>(
+    UseApi(Secured(security_plugin), _): UseApi<Secured, ()>,
     WithRejection(Query(query), _): WithRejection<
         Query<sovd_interfaces::components::ecu::data::get::Query>,
         ApiError,
@@ -32,7 +36,10 @@ pub(crate) async fn get<R: DiagServiceResponse, T: UdsEcu + Clone, U: FileManage
     } else {
         None
     };
-    match uds.get_components_data_info(&ecu_name).await {
+    match uds
+        .get_components_data_info(&ecu_name, &(security_plugin as DynamicPlugin))
+        .await
+    {
         Ok(mut items) => {
             let sovd_component_data = sovd_interfaces::components::ecu::data::get::Response {
                 items: items
