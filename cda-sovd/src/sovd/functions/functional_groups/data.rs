@@ -10,14 +10,15 @@
  * https://www.apache.org/licenses/LICENSE-2.0
  */
 
-use aide::transform::TransformOperation;
+use aide::{UseApi, transform::TransformOperation};
 use axum::{
     Json,
     extract::{Query, State},
     response::{IntoResponse, Response},
 };
 use axum_extra::extract::WithRejection;
-use cda_interfaces::UdsEcu;
+use cda_interfaces::{DynamicPlugin, UdsEcu};
+use cda_plugin_security::Secured;
 use http::StatusCode;
 
 use super::WebserverFgState;
@@ -27,6 +28,7 @@ use crate::sovd::{
 };
 
 pub(crate) async fn get<T: UdsEcu + Clone>(
+    UseApi(Secured(security_plugin), _): UseApi<Secured, ()>,
     WithRejection(Query(query), _): WithRejection<
         Query<sovd_interfaces::functions::functional_groups::data::get::Query>,
         ApiError,
@@ -45,7 +47,7 @@ pub(crate) async fn get<T: UdsEcu + Clone>(
         None
     };
     match uds
-        .get_functional_group_data_info(&functional_group_name)
+        .get_functional_group_data_info(&(security_plugin as DynamicPlugin), &functional_group_name)
         .await
     {
         Ok(mut items) => {

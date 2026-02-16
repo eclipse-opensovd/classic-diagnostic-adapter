@@ -787,13 +787,14 @@ impl<S: SecurityPlugin> cda_interfaces::EcuManager for EcuManager<S> {
             .ok_or_else(|| DiagServiceError::NotFound(Some(name.to_owned())))
     }
 
-    fn get_components_data_info(&self) -> Vec<ComponentDataInfo> {
+    fn get_components_data_info(&self, security_plugin: &DynamicPlugin) -> Vec<ComponentDataInfo> {
         self.get_services_from_variant_and_parent_refs(|service| {
             service
                 .request_id()
                 .is_some_and(|id| id == service_ids::READ_DATA_BY_IDENTIFIER)
         })
         .into_iter()
+        .filter(|service| Self::is_service_visible(security_plugin, service))
         .filter_map(|service| {
             let diag_comm = service.diag_comm()?;
             Some(self.diag_comm_to_component_data_info(&(diag_comm.into())))
@@ -803,6 +804,7 @@ impl<S: SecurityPlugin> cda_interfaces::EcuManager for EcuManager<S> {
 
     fn get_functional_group_data_info(
         &self,
+        security_plugin: &DynamicPlugin,
         functional_group_name: &str,
     ) -> Result<Vec<ComponentDataInfo>, DiagServiceError> {
         Ok(self
@@ -812,6 +814,7 @@ impl<S: SecurityPlugin> cda_interfaces::EcuManager for EcuManager<S> {
                     .is_some_and(|id| id == service_ids::READ_DATA_BY_IDENTIFIER)
             })?
             .into_iter()
+            .filter(|service| Self::is_service_visible(security_plugin, service))
             .filter_map(|service| {
                 let diag_comm = service.diag_comm()?;
                 Some(self.diag_comm_to_component_data_info(&(diag_comm.into())))
@@ -1002,6 +1005,7 @@ impl<S: SecurityPlugin> cda_interfaces::EcuManager for EcuManager<S> {
     /// that are in the functional group varcoding.
     fn get_components_configurations_info(
         &self,
+        security_plugin: &DynamicPlugin,
     ) -> Result<Vec<ComponentConfigurationsInfo>, DiagServiceError> {
         let diag_layers = self.get_diag_layers_from_variant_and_parent_refs();
         let var_coding_func_class_short_name = diag_layers
@@ -1035,6 +1039,7 @@ impl<S: SecurityPlugin> cda_interfaces::EcuManager for EcuManager<S> {
             .filter_map(|dl| dl.diag_services())
             .flat_map(|services| services.iter())
             .map(datatypes::DiagService)
+            .filter(|service| Self::is_service_visible(security_plugin, service))
             .filter(|service| {
                 service
                     .request_id()
@@ -4160,6 +4165,16 @@ impl<S: SecurityPlugin> EcuManager<S> {
             .map(SecurityPlugin::as_security_plugin)?;
 
         security_plugin.validate_service(service)
+    }
+
+    /// Returns true if the security plugin allows the user to see this service.
+    /// Reuses [`Self::check_security_plugin`] which handles void plugins (always allowed)
+    /// and real plugins (delegates to [`SecurityApi::validate_service`]).
+    fn is_service_visible(
+        security_plugin: &DynamicPlugin,
+        service: &datatypes::DiagService<'_>,
+    ) -> bool {
+        Self::check_security_plugin(security_plugin, service).is_ok()
     }
 
     fn get_meta_data_service(
@@ -7434,7 +7449,7 @@ mod tests {
         let ecu_manager = create_ecu_manager_with_mixed_functional_group();
 
         let result = ecu_manager
-            .get_functional_group_data_info("MixedGroup")
+            .get_functional_group_data_info(&skip_sec_plugin!(), "MixedGroup")
             .expect("should return Ok");
 
         assert_eq!(result.len(), 1, "only read services should be returned");
@@ -7453,7 +7468,7 @@ mod tests {
         let db = finish_db!(db_builder, protocol, vec![]);
         let ecu_manager = new_ecu_manager(db);
 
-        let result = ecu_manager.get_functional_group_data_info("AnyGroup");
+        let result = ecu_manager.get_functional_group_data_info(&skip_sec_plugin!(), "AnyGroup");
 
         assert!(
             result.is_err(),
