@@ -26,9 +26,7 @@ use tokio_openssl::SslStream;
 
 use crate::{
     ConnectionError,
-    socket::{
-        DoIPConnection, DoIPConnectionConfig, DoIPConnectionReadHalf, DoIPConnectionWriteHalf,
-    },
+    socket::{DoIPConfig, DoIPConnection, DoIPConnectionReadHalf, DoIPConnectionWriteHalf},
 };
 const ENABLED_SSL_CIPHERS: [&str; 4] = [
     "ECDHE-RSA-AES128-GCM-SHA256",
@@ -47,6 +45,13 @@ const ELIPTIC_CURVE_GROUPS: [&str; 8] = [
     "brainpoolP384r1",
     "brainpoolP512r1",
 ];
+
+#[derive(Clone)]
+pub(crate) struct ConnectionConfig {
+    pub source_ip: String,
+    pub port: u16,
+    pub tls_port: u16,
+}
 
 pub(crate) trait ECUConnectionRead {
     async fn read(&mut self) -> Option<Result<DoipMessage, ConnectionError>>
@@ -224,8 +229,10 @@ async fn connect_to_gateway(
 }
 
 #[tracing::instrument(
-    skip(routing_activation_request),
+    skip(routing_activation_request, connection_config),
     fields(
+        source_ip = connection_config.source_ip.clone(),
+        port = connection_config.port,
         gateway_ip,
         gateway_name,
         connect_timeout_ms = connect_timeout.as_millis(),
@@ -234,17 +241,21 @@ async fn connect_to_gateway(
     )
 )]
 pub(crate) async fn establish_ecu_connection(
-    tester_ip: &str,
+    connection_config: &ConnectionConfig,
     gateway_ip: &str,
     gateway_name: &str,
-    doip_connection_config: DoIPConnectionConfig,
+    doip_connection_config: DoIPConfig,
     routing_activation_request: RoutingActivationRequest,
     connect_timeout: Duration,
     routing_activation_timeout: Duration,
 ) -> Result<EcuConnectionTarget, ConnectionError> {
     let mut gateway_conn = match tokio::time::timeout(
         connect_timeout,
-        connect_to_gateway(tester_ip, gateway_ip, 13400),
+        connect_to_gateway(
+            &connection_config.source_ip,
+            gateway_ip,
+            connection_config.port,
+        ),
     )
     .await
     {
@@ -300,7 +311,7 @@ pub(crate) async fn establish_ecu_connection(
                     };
 
                     establish_tls_ecu_connection(
-                        tester_ip,
+                        connection_config,
                         gateway_ip,
                         &tls_gateway_name,
                         doip_connection_config,
@@ -323,8 +334,10 @@ pub(crate) async fn establish_ecu_connection(
 }
 
 #[tracing::instrument(
-    skip(routing_activation_request),
+    skip(routing_activation_request, connection_config),
     fields(
+        source_ip = connection_config.source_ip.clone(),
+        port = connection_config.tls_port,
         gateway_ip,
         gateway_name,
         connect_timeout_ms = connnect_timeout.as_millis(),
@@ -333,17 +346,21 @@ pub(crate) async fn establish_ecu_connection(
     )
 )]
 pub(crate) async fn establish_tls_ecu_connection(
-    tester_ip: &str,
+    connection_config: &ConnectionConfig,
     gateway_ip: &str,
     gateway_name: &str,
-    doip_connection_config: DoIPConnectionConfig,
+    doip_connection_config: DoIPConfig,
     routing_activation_request: RoutingActivationRequest,
     connnect_timeout: Duration,
     routing_activation_timeout: Duration,
 ) -> Result<EcuConnectionTarget, ConnectionError> {
     let mut gateway_conn = match tokio::time::timeout(
         connnect_timeout,
-        connect_to_gateway(tester_ip, gateway_ip, 3496),
+        connect_to_gateway(
+            &connection_config.source_ip,
+            gateway_ip,
+            connection_config.tls_port,
+        ),
     )
     .await
     {

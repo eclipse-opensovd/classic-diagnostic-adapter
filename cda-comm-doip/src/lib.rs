@@ -31,7 +31,8 @@ use tokio::sync::{Mutex, RwLock, broadcast, mpsc};
 use crate::{
     config::DoipConfig,
     connections::EcuError,
-    socket::{DoIPConnectionConfig, DoIPUdpSocket},
+    ecu_connection::ConnectionConfig,
+    socket::{DoIPConfig, DoIPUdpSocket},
 };
 
 pub mod config;
@@ -158,11 +159,17 @@ impl<T: EcuAddressProvider + DoipComParamProvider> DoipDiagGateway<T> {
             tester_address: tester_ip,
             tester_subnet,
             gateway_port,
+            tls_port,
             send_timeout_ms,
             send_diagnostic_message_ack,
         } = doip_config;
         let gateway_port = *gateway_port;
-        let doip_connection_config = DoIPConnectionConfig {
+        let connection_config = ConnectionConfig {
+            source_ip: tester_ip.to_owned(),
+            port: gateway_port,
+            tls_port: *tls_port,
+        };
+        let doip_connection_config = DoIPConfig {
             protocol_version: ProtocolVersion::try_from(protocol_version).map_err(|err| {
                 DoipGatewaySetupError::InvalidConfiguration(format!(
                     "Invalid DoIP protocol version: {err}"
@@ -216,7 +223,7 @@ impl<T: EcuAddressProvider + DoipComParamProvider> DoipDiagGateway<T> {
 
             for gateway in gateways {
                 if let Ok(logical_address) = connections::handle_gateway_connection::<T>(
-                    &doip_config.tester_address,
+                    &connection_config,
                     gateway,
                     doip_connection_config,
                     &doip_connections,
@@ -242,7 +249,7 @@ impl<T: EcuAddressProvider + DoipComParamProvider> DoipDiagGateway<T> {
         };
 
         vir_vam::listen_for_vams(
-            tester_ip.to_owned(),
+            connection_config,
             gateway_port,
             doip_connection_config,
             mask,
