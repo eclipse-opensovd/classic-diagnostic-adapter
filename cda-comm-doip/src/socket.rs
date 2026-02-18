@@ -29,18 +29,18 @@ use tokio_util::{
 use crate::ConnectionError;
 
 #[derive(Copy, Clone, Debug)]
-pub(crate) struct DoIPConnectionConfig {
+pub(crate) struct DoIPConfig {
     pub protocol_version: ProtocolVersion,
     pub send_diagnostic_message_ack: bool,
 }
 
 pub(crate) struct DoIPConnection<T: AsyncRead + AsyncWrite + Unpin> {
     io: Framed<T, DoipCodec>,
-    config: DoIPConnectionConfig,
+    config: DoIPConfig,
 }
 
 impl<T: AsyncRead + AsyncWrite + Unpin> DoIPConnection<T> {
-    pub fn new(io: T, config: DoIPConnectionConfig) -> Self {
+    pub fn new(io: T, config: DoIPConfig) -> Self {
         Self {
             io: Framed::new(io, DoipCodec {}),
             config,
