@@ -272,11 +272,7 @@ impl<T: EcuAddressProvider + DoipComParamProvider> DoipDiagGateway<T> {
             .read()
             .await
             .get(&logical_address)
-            .ok_or_else(|| {
-                DiagServiceError::EcuOffline(format!(
-                    "Connection not found for logical address {logical_address}"
-                ))
-            })?;
+            .ok_or_else(|| DiagServiceError::EcuOffline(format!("[{logical_address}]")))?;
 
         let lock = self.doip_connections.read().await;
         let conn = lock

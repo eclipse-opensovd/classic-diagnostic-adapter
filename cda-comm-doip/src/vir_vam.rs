@@ -54,39 +54,44 @@ where
     let mut gateways = Vec::new();
 
     let vam_timeout = Duration::from_secs(1); // not the actual timeout from the spec ...
-    loop {
-        tokio::select! {
-            () = shutdown_signal.clone() => {
-                break
-            },
-            res = tokio::time::timeout(vam_timeout, socket.recv()) => {
-                match res {
-                    Ok(Some(Ok((doip_msg, source_addr)))) => {
-                        if let PayloadType::VehicleIdentificationRequest =
-                            doip_msg.header.payload_type {
-                            // skip our own VIR
-                            continue;
+
+    tokio::select! {
+        () = shutdown_signal.clone() => {
+            tracing::info!("Shutdown signal received");
+        },
+        () = tokio::time::sleep(vam_timeout) => {
+            tracing::info!("Finished waiting for VIRs");
+        },
+        () = async { // loop until timeout is exceeded or shutdown signal is received
+                loop {
+                    tracing::info!("Started loop");
+                    match socket.recv().await {
+                        Some(Ok((doip_msg, source_addr))) => {
+                            if let PayloadType::VehicleIdentificationRequest =
+                                doip_msg.header.payload_type {
+                                // skip our own VIR
+                                tracing::info!("Skipping own VIR");
+                                continue;
+                            }
+                            match handle_vam::<T>(ecus, doip_msg, source_addr, netmask).await {
+                                Ok(Some(gateway)) => gateways.push(gateway),
+                                Ok(None) => { /* ignore non-matching VAMs */ }
+                                Err(e) => tracing::error!(error = ?e, "Failed to handle VAM"),
+                            }
                         }
-                        match handle_vam::<T>(ecus, doip_msg, source_addr, netmask).await {
-                            Ok(Some(gateway)) => gateways.push(gateway),
-                            Ok(None) => { /* ignore non-matching VAMs */ }
-                            Err(e) => tracing::error!(error = ?e, "Failed to handle VAM"),
+                        Some(Err(e)) => {
+                            tracing::warn!("Failed to receive VAMs: {e:?}");
+                            break;
+                        },
+                        None => {
+                            tracing::warn!("Incomplete VAM due to connection closure/error");
+                            break;
                         }
-                    }
-                    Ok(Some(Err(e))) => return Err(DiagServiceError::UnexpectedResponse(Some(
-                        format!("Failed to receive VAMs: {e:?}"))
-                    )),
-                    Ok(None) => return Err(DiagServiceError::ConnectionClosed(
-                        "Incomplete VAM due to connection closure/error".to_owned()
-                    )),
-                    Err(_) => {
-                        // no VAM received within timeout
-                        break;
                     }
                 }
-            }
-        }
+            } => { /* nothing else to do once finished */ }
     }
+
     Ok(gateways)
 }
 
