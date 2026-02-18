@@ -10,6 +10,7 @@
  * https://www.apache.org/licenses/LICENSE-2.0
  */
 
+use cda_interfaces::HashMap;
 use serde::{Deserialize, Serialize};
 
 pub mod ecu;
@@ -24,4 +25,21 @@ pub struct ComponentQuery {
     pub include_sdgs: bool,
     #[serde(rename = "include-schema", default)]
     pub include_schema: bool,
+}
+
+/// Response Structure for /components
+///
+/// It contains a list of all components that are loaded by the CDA.<br>
+/// `additional_fields` allows to extend the component response with adidtional fields.<br>
+/// See [`ComponentsConfig`](cda_interfaces::datatypes::ComponentsConfig) for
+/// additional details.
+#[derive(Serialize, schemars::JsonSchema)]
+pub struct ComponentsResponse<T> {
+    pub items: Vec<T>,
+    #[serde(flatten)]
+    #[schemars(skip)]
+    pub additional_fields: HashMap<String, Vec<T>>,
+    #[schemars(skip)]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub schema: Option<schemars::Schema>,
 }

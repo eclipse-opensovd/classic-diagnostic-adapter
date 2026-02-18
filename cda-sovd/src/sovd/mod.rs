@@ -13,20 +13,24 @@
 use std::{path::PathBuf, sync::Arc};
 
 use aide::{
-    axum::{ApiRouter as Router, routing},
+    axum::{
+        ApiRouter as Router,
+        routing::{self, get_with},
+    },
     transform::TransformOperation,
 };
 use axum::{
     Json,
     body::Bytes,
-    extract::Query,
+    extract::{Query, State},
     http::{HeaderMap, StatusCode},
     middleware,
     response::{IntoResponse, Response},
 };
 use axum_extra::extract::WithRejection;
 use cda_interfaces::{
-    FunctionalDescriptionConfig, HashMap, SchemaProvider, UdsEcu,
+    FunctionalDescriptionConfig, HashMap, HashMapExtensions as _, SchemaProvider, UdsEcu,
+    datatypes::ComponentsConfig,
     diagservices::{DiagServiceResponse, UdsPayloadData},
     file_manager::FileManager,
 };
@@ -36,7 +40,10 @@ use http::{Uri, header};
 use indexmap::IndexMap;
 pub use locks::Locks;
 use schemars::Schema;
-use sovd_interfaces::{components::ecu as sovd_ecu, sovd2uds::FileList};
+use sovd_interfaces::{
+    IncludeSchemaQuery, Resource,
+    components::{ComponentsResponse, ecu as sovd_ecu},
+};
 use tokio::sync::RwLock;
 use uuid::Uuid;
 
@@ -127,6 +134,7 @@ pub(crate) struct WebserverState<T: UdsEcu + Clone> {
     uds: T,
     locks: Arc<Locks>,
     flash_data: Arc<RwLock<sovd_interfaces::sovd2uds::FileList>>,
+    components_config: Arc<RwLock<ComponentsConfig>>,
 }
 
 pub(crate) fn resource_response(
@@ -162,13 +170,12 @@ pub async fn route<
     S: SecurityPluginLoader,
 >(
     functional_group_config: FunctionalDescriptionConfig,
+    components_config: ComponentsConfig,
     uds: &T,
     flash_files_path: String,
     mut file_manager: HashMap<String, U>,
     locks: Arc<Locks>,
 ) -> Router {
-    let mut ecu_names = uds.get_physical_ecus().await;
-
     let flash_data = Arc::new(RwLock::new(sovd_interfaces::sovd2uds::FileList {
         files: Vec::new(),
         path: Some(PathBuf::from(flash_files_path)),
@@ -178,67 +185,10 @@ pub async fn route<
         uds: uds.clone(),
         locks,
         flash_data: Arc::clone(&flash_data),
+        components_config: Arc::new(RwLock::new(components_config)),
     };
 
-    let ecus = ecu_names.clone();
-    let mut router = Router::new().api_route(
-        "/vehicle/v15/components",
-        routing::get_with(
-            |WithRejection(Query(query), _): WithRejection<
-                Query<sovd_interfaces::IncludeSchemaQuery>,
-                ApiError,
-            >| async move {
-                let schema = if query.include_schema {
-                    Some(crate::sovd::create_schema!(
-                        sovd_interfaces::ResourceResponse
-                    ))
-                } else {
-                    None
-                };
-                (
-                    StatusCode::OK,
-                    Json(sovd_interfaces::ResourceResponse {
-                        items: ecus
-                            .iter()
-                            .map(|ecu| sovd_interfaces::Resource {
-                                href: format!(
-                                    "http://localhost:20002/Vehicle/v15/components/{ecu}"
-                                ),
-                                id: Some(ecu.to_lowercase()),
-                                name: ecu.clone(),
-                            })
-                            .collect::<Vec<sovd_interfaces::Resource>>(),
-                        schema,
-                    }),
-                )
-                    .into_response()
-            },
-            |op: TransformOperation| {
-                op.description("Get a list of the available components with their paths")
-                    .response_with::<200, Json<sovd_interfaces::ResourceResponse>, _>(|res| {
-                        res.example(sovd_interfaces::ResourceResponse {
-                            items: vec![sovd_interfaces::Resource {
-                                href: "http://localhost:20002/Vehicle/v15/components/my_ecu".into(),
-                                id: Some("my_ecu".into()),
-                                name: "My ECU".into(),
-                            }],
-                            schema: None,
-                        })
-                    })
-            },
-        ),
-    );
-
-    for ecu_name in ecu_names.drain(0..) {
-        match ecu_route::<R, T, U>(&ecu_name, uds, &state, &flash_data, &mut file_manager) {
-            Ok((ecu_path, nested)) => {
-                router = router.nest_api_service(&ecu_path, nested);
-            }
-            Err(e) => {
-                tracing::error!(error = %e, "Failed to create route for ECU '{ecu_name}'");
-            }
-        }
-    }
+    let router = components_route::<R, T, U>(state.clone(), &mut file_manager).await;
 
     vehicle_route::<T, S>(state, router, functional_group_config)
         .await
@@ -301,6 +251,97 @@ async fn vehicle_route<T: UdsEcu + SchemaProvider + Clone, S: SecurityPluginLoad
         )
 }
 
+async fn get_components<T: UdsEcu + SchemaProvider + Clone>(
+    State(state): State<WebserverState<T>>,
+    WithRejection(Query(query), _): WithRejection<Query<IncludeSchemaQuery>, ApiError>,
+) -> Response {
+    fn ecu_to_resource(ecu: String) -> Resource {
+        Resource {
+            href: format!("http://localhost:20002/Vehicle/v15/components/{ecu}"),
+            id: Some(ecu.to_lowercase()),
+            name: ecu,
+        }
+    }
+    let ecus = state.uds.get_physical_ecus().await;
+    let components_config = state.components_config.read().await;
+    let mut additional_fields: HashMap<String, Vec<Resource>> = HashMap::new();
+    for (key, conditions) in &components_config.additional_fields {
+        let items = state
+            .uds
+            .get_ecus_with_sds(true, conditions)
+            .await
+            .into_iter()
+            .map(ecu_to_resource)
+            .collect::<Vec<_>>();
+        additional_fields.insert(key.to_owned(), items);
+    }
+
+    let mut schema = if query.include_schema {
+        Some(create_schema!(ComponentsResponse<Resource>))
+    } else {
+        None
+    };
+    if !additional_fields.is_empty()
+        && let Some(ref mut schema) = schema
+    {
+        let subschema = create_schema!(Resource);
+        for entry in additional_fields.keys() {
+            if let Some(properties) = schema.get_mut("properties").and_then(|v| v.as_object_mut()) {
+                properties.insert(entry.to_owned(), subschema.clone().to_value());
+            }
+        }
+    }
+    (
+        StatusCode::OK,
+        Json(ComponentsResponse::<Resource> {
+            items: ecus.into_iter().map(ecu_to_resource).collect::<Vec<_>>(),
+            additional_fields,
+            schema,
+        }),
+    )
+        .into_response()
+}
+
+fn docs_components(op: TransformOperation) -> TransformOperation {
+    op.description("Get a list of the available components with their paths")
+        .response_with::<200, Json<sovd_interfaces::ResourceResponse>, _>(|res| {
+            res.example(sovd_interfaces::ResourceResponse {
+                items: vec![sovd_interfaces::Resource {
+                    href: "http://localhost:20002/Vehicle/v15/components/my_ecu".into(),
+                    id: Some("my_ecu".into()),
+                    name: "My ECU".into(),
+                }],
+                schema: None,
+            })
+        })
+}
+
+async fn components_route<
+    R: DiagServiceResponse,
+    T: UdsEcu + SchemaProvider + Clone,
+    U: FileManager + 'static,
+>(
+    state: WebserverState<T>,
+    file_manager: &mut HashMap<String, U>,
+) -> Router<WebserverState<T>> {
+    let mut router = Router::new().api_route(
+        "/vehicle/v15/components",
+        get_with(get_components, docs_components),
+    );
+    let mut ecus = state.uds.get_physical_ecus().await;
+    for ecu_name in ecus.drain(0..) {
+        match ecu_route::<R, T, U>(&ecu_name, &state, file_manager) {
+            Ok((ecu_path, nested)) => {
+                router = router.nest_api_service(&ecu_path, nested);
+            }
+            Err(e) => {
+                tracing::error!(error = %e, "Failed to create route for ECU '{ecu_name}'");
+            }
+        }
+    }
+    router.with_state(state)
+}
+
 // Disabled as for now it makes sense to keep the route creation together
 #[allow(clippy::too_many_lines)]
 fn ecu_route<
@@ -309,18 +350,16 @@ fn ecu_route<
     U: FileManager + 'static,
 >(
     ecu_name: &str,
-    uds: &T,
     state: &WebserverState<T>,
-    flash_data: &Arc<RwLock<FileList>>,
     file_manager: &mut HashMap<String, U>,
 ) -> Result<(String, Router), SovdError> {
     let ecu_lower = ecu_name.to_lowercase();
     let ecu_state = WebserverEcuState {
         ecu_name: ecu_lower.clone(),
-        uds: uds.clone(),
+        uds: state.uds.clone(),
         locks: Arc::<Locks>::clone(&state.locks),
         comparam_executions: Arc::new(RwLock::new(IndexMap::new())),
-        flash_data: Arc::clone(flash_data),
+        flash_data: Arc::clone(&state.flash_data),
         mdd_embedded_files: Arc::new(file_manager.remove(&ecu_lower).ok_or_else(|| {
             SovdError::RouteError(format!(
                 "FileManager for ECU '{ecu_name}' not found in provided FileManager map"
@@ -754,6 +793,7 @@ pub(crate) mod static_data {
 pub(crate) mod tests {
 
     use cda_interfaces::{UdsEcu, diagservices::DiagServiceResponse, file_manager::FileManager};
+    use sovd_interfaces::sovd2uds::FileList;
 
     use super::*;
     use crate::sovd::locks::LockType;

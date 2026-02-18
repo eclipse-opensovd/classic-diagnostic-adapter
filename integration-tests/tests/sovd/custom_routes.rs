@@ -15,7 +15,9 @@ use std::sync::Arc;
 use aide::axum::{ApiRouter, routing};
 use axum::{Json, http::StatusCode};
 use cda_comm_doip::config::DoipConfig;
-use cda_interfaces::{FunctionalDescriptionConfig, UdsEcu};
+use cda_interfaces::{
+    FunctionalDescriptionConfig, HashMap, HashMapExtensions, UdsEcu, datatypes::ComponentsConfig,
+};
 use cda_sovd::{Locks, dynamic_router::DynamicRouter};
 use futures::FutureExt;
 use opensovd_cda_lib::{
@@ -173,6 +175,9 @@ async fn test_custom_demo_endpoint() {
             enabled_functional_groups: None,
             protocol_position: cda_interfaces::datatypes::DiagnosticServiceAffixPosition::Suffix,
             protocol_case_sensitive: false,
+        },
+        ComponentsConfig {
+            additional_fields: HashMap::new(),
         },
     )
     .await

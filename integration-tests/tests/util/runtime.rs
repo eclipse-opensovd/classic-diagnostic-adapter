@@ -18,8 +18,8 @@ use std::{
 use cda_core::DiagServiceResponseStruct;
 use cda_health::config::HealthConfig;
 use cda_interfaces::{
-    FunctionalDescriptionConfig,
-    datatypes::{ComParams, DatabaseNamingConvention, FlatbBufConfig},
+    FunctionalDescriptionConfig, HashMap, HashMapExtensions,
+    datatypes::{ComParams, ComponentsConfig, DatabaseNamingConvention, FlatbBufConfig},
 };
 use cda_plugin_security::{DefaultSecurityPlugin, DefaultSecurityPluginData};
 use cda_tracing::LoggingConfig;
@@ -142,6 +142,9 @@ async fn initialize_runtime() -> Result<TestRuntime, TestingError> {
             protocol_case_sensitive: false,
         },
         health: HealthConfig::default(),
+        components: ComponentsConfig {
+            additional_fields: HashMap::new(),
+        },
     };
     config.validate_sanity().map_err(|e| {
         TestingError::SetupError(format!("Configuration sanity check failed: {e:?}"))
@@ -244,6 +247,7 @@ fn start_cda(config: Configuration) {
             vehicle_data.file_managers,
             vehicle_data.locks,
             config.functional_description,
+            config.components,
         )
         .await
         .map_err(|e| {

@@ -10,6 +10,10 @@
  * https://www.apache.org/licenses/LICENSE-2.0
  */
 
+use serde::{Deserialize, Serialize};
+
+use crate::{HashMap, datatypes::SdBoolMappings};
+
 pub struct ComponentDataInfo {
     pub category: String,
     pub id: String,
@@ -21,4 +25,13 @@ pub struct ComponentConfigurationsInfo {
     pub name: String,
     pub configurations_type: String,
     pub service_abstract: Vec<Vec<u8>>,
+}
+
+#[derive(Deserialize, Serialize, Clone, Debug)]
+pub struct ComponentsConfig {
+    /// Allows to specify additional fields to be added to the component response.
+    /// The key corresponds to the name of the field in the response.
+    /// `SdBoolMappings` defines the conditions that a component must satisfy to be
+    /// included in the additional field.
+    pub additional_fields: HashMap<String, SdBoolMappings>,
 }

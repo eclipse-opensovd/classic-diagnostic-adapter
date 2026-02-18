@@ -23,7 +23,8 @@ use axum::{
 };
 use cda_interfaces::{
     DoipGatewaySetupError, FunctionalDescriptionConfig, HashMap, SchemaProvider, UdsEcu,
-    diagservices::DiagServiceResponse, dlt_ctx, file_manager::FileManager,
+    datatypes::ComponentsConfig, diagservices::DiagServiceResponse, dlt_ctx,
+    file_manager::FileManager,
 };
 use cda_plugin_security::SecurityPluginLoader;
 use dynamic_router::DynamicRouter;
@@ -122,6 +123,7 @@ pub async fn add_vehicle_routes<R, T, M, S>(
     file_manager: HashMap<String, M>,
     locks: Arc<Locks>,
     functional_group_config: FunctionalDescriptionConfig,
+    components_config: ComponentsConfig,
 ) -> Result<(), DoipGatewaySetupError>
 where
     R: DiagServiceResponse,
@@ -131,6 +133,7 @@ where
 {
     let vehicle_router = sovd::route::<R, T, M, S>(
         functional_group_config,
+        components_config,
         &ecu_uds,
         flash_files_path,
         file_manager,
