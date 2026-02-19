@@ -780,7 +780,6 @@ impl<S: SecurityPlugin> cda_interfaces::EcuManager for EcuManager<S> {
     )]
     fn lookup_single_ecu_job(&self, job_name: &str) -> Result<single_ecu::Job, DiagServiceError> {
         tracing::debug!("Looking up single ECU job");
-
         self.variant()
             .and_then(|variant| {
                 variant.diag_layer().and_then(|diag_layer| {
@@ -892,12 +891,13 @@ impl<S: SecurityPlugin> cda_interfaces::EcuManager for EcuManager<S> {
             .ok_or_else(|| DiagServiceError::NotFound(Some(name.to_owned())))
     }
 
-    fn get_components_data_info(&self) -> Vec<ComponentDataInfo> {
+    fn get_components_data_info(&self, security_plugin: &DynamicPlugin) -> Vec<ComponentDataInfo> {
         self.get_diag_layer_all_variants()
             .iter()
             .filter_map(|dl| dl.diag_services())
             .flat_map(|svcs| svcs.iter())
             .map(datatypes::DiagService)
+            .filter(|service| Self::is_service_visible(security_plugin, service))
             .filter_map(|service| {
                 let diag_comm = service.diag_comm()?;
                 let short_name = diag_comm.short_name()?;
@@ -1103,6 +1103,7 @@ impl<S: SecurityPlugin> cda_interfaces::EcuManager for EcuManager<S> {
     /// that are in the functional group varcoding.
     fn get_components_configurations_info(
         &self,
+        security_plugin: &DynamicPlugin,
     ) -> Result<Vec<ComponentConfigurationsInfo>, DiagServiceError> {
         let diag_layers = [
             self.variant().and_then(|v| v.diag_layer()),
@@ -1147,6 +1148,7 @@ impl<S: SecurityPlugin> cda_interfaces::EcuManager for EcuManager<S> {
             .filter_map(|dl| dl.diag_services())
             .flat_map(|services| services.iter())
             .map(datatypes::DiagService)
+            .filter(|service| Self::is_service_visible(security_plugin, service))
             .filter(|service| {
                 service
                     .request_id()
@@ -3924,6 +3926,16 @@ impl<S: SecurityPlugin> EcuManager<S> {
             .map(SecurityPlugin::as_security_plugin)?;
 
         security_plugin.validate_service(service)
+    }
+
+    /// Returns true if the security plugin allows the user to see this service.
+    /// Reuses [`Self::check_security_plugin`] which handles void plugins (always allowed)
+    /// and real plugins (delegates to [`SecurityApi::validate_service`]).
+    fn is_service_visible(
+        security_plugin: &DynamicPlugin,
+        service: &datatypes::DiagService<'_>,
+    ) -> bool {
+        Self::check_security_plugin(security_plugin, service).is_ok()
     }
 
     fn get_meta_data_service(

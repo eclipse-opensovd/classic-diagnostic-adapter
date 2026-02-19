@@ -68,18 +68,22 @@ pub trait UdsEcu: Send + Sync + 'static {
     /// Will return `Err` if the ECU does not exist.
     async fn get_comparams(&self, ecu: &str) -> Result<ComplexComParamValue, DiagServiceError>;
     /// Retrieve all `read` services for the given ECU on the detected variant.
+    /// Services are filtered through the security plugin.
     /// # Errors
     /// Will return `Err` if the ECU does not exist.
     async fn get_components_data_info(
         &self,
         ecu: &str,
+        security_plugin: &DynamicPlugin,
     ) -> Result<Vec<ComponentDataInfo>, DiagServiceError>;
     /// Retrieve all configuration type services for the given ECU on the detected variant.
+    /// Services are filtered through the security plugin.
     /// # Errors
     /// Will return `Err` if the ECU does not exist
     async fn get_components_configuration_info(
         &self,
         ecu: &str,
+        security_plugin: &DynamicPlugin,
     ) -> Result<Vec<ComponentConfigurationsInfo>, DiagServiceError>;
     /// Retrieve all single ecu jobs for the given ECU on the detected variant.
     /// # Errors
@@ -515,10 +519,12 @@ pub mod mock {
             async fn get_components_data_info(
                 &self,
                 ecu: &str,
+                security_plugin: &DynamicPlugin,
             ) -> Result<Vec<ComponentDataInfo>, DiagServiceError>;
             async fn get_components_configuration_info(
                 &self,
                 ecu: &str,
+                security_plugin: &DynamicPlugin,
             ) -> Result<Vec<ComponentConfigurationsInfo>, DiagServiceError>;
             async fn get_components_single_ecu_jobs_info(
                 &self,
