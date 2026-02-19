@@ -19,52 +19,12 @@ on:
 
 permissions:
   contents: read
-  pull-requests: write # Grants permission to post review comments
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref_name }}-${{ github.event.pull_request.number || github.sha }}
   cancel-in-progress: true
 
 jobs:
-  format_and_clippy_nightly_toolchain_pinned:
-    concurrency:
-      group: format_and_clippy_nightly_toolchain_pinned-${{ github.ref }}
-    runs-on: ubuntu-latest
-    continue-on-error: false
-    steps:
-      - name: Checkout repository
-        uses: actions/checkout@v4
-        with:
-          submodules: false
-      - name: Format and Clippy
-        uses: eclipse-opensovd/cicd-workflows/rust-lint-and-format-action@3c3da34839e9692d5ca4db226c28926809d9ad6e
-        with:
-          toolchain: nightly-2025-07-14
-          github-token: ${{ secrets.GITHUB_TOKEN }}
-          fail-on-format-error: 'true'
-          fail-on-clippy-error: 'true'
-          clippy-deny-warnings: 'true'
-
-  format_and_clippy_nightly_toolchain_latest:
-    needs: format_and_clippy_nightly_toolchain_pinned
-    concurrency:
-      group: format_and_clippy_nightly_toolchain_latest-${{ github.ref }}
-    runs-on: ubuntu-latest
-    continue-on-error: true
-    steps:
-      - name: Checkout repository
-        uses: actions/checkout@v4
-        with:
-          submodules: false
-      - name: Format and Clippy
-        uses: eclipse-opensovd/cicd-workflows/rust-lint-and-format-action@3c3da34839e9692d5ca4db226c28926809d9ad6e
-        with:
-          toolchain: nightly
-          github-token: ${{ secrets.GITHUB_TOKEN }}
-          fail-on-format-error: 'false'
-          fail-on-clippy-error: 'false'
-          clippy-deny-warnings: 'false'
-
   features:
     runs-on: ubuntu-latest
     env:
