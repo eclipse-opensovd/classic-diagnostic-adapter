@@ -11,7 +11,6 @@
  */
 
 use std::{sync::Arc, time::Duration};
-
 use cda_database::{datatypes, datatypes::Variant};
 use cda_interfaces::{
     DiagComm, DiagCommAction, DiagCommType, DiagServiceError, DynamicPlugin, EcuManagerType,
@@ -31,7 +30,7 @@ use cda_plugin_security::SecurityPlugin;
 use tokio::sync::RwLock;
 
 use crate::{
-    DiagDataContainerDtc, MappedResponseData,
+    DiagDataContainerDtc, MappedResponsnumeric_type_str_to_byte_veceData,
     diag_kernel::{
         DiagDataValue,
         diagservices::{
@@ -141,8 +140,7 @@ impl DbCache {
 
 enum CacheLocation {
     Variant(usize),
-    BaseVariant(usize),
-    EcuShared(usize),
+    ParentRef(usize),
 }
 
 impl<S: SecurityPlugin> cda_interfaces::EcuAddressProvider for EcuManager<S> {
@@ -303,6 +301,7 @@ impl<S: SecurityPlugin> cda_interfaces::EcuManager for EcuManager<S> {
     fn comparams(&self) -> Result<ComplexComParamValue, DiagServiceError> {
         // ensure base variant is handled first
         // and maybe be overwritten by variant specific comparams
+        // todo alexmohr: use parent refs instead
         let variants = [Some(self.diag_database.base_variant()?), self.variant()];
 
         Ok(variants
@@ -366,6 +365,7 @@ impl<S: SecurityPlugin> cda_interfaces::EcuManager for EcuManager<S> {
                 .and_then(|sdg| sdg.sdgs())
                 .map(datatypes::Sdgs)
         } else {
+            // todo alexmohr use parent refs instead
             self.variant()
                 .as_ref()
                 .and_then(|v| v.diag_layer().and_then(|dl| dl.sdgs()))
@@ -420,6 +420,7 @@ impl<S: SecurityPlugin> cda_interfaces::EcuManager for EcuManager<S> {
             ));
         };
 
+        // todo alexmohr -> use parent refs instead
         let base_variant = self.diag_database.base_variant()?;
 
         // iterate through the services and for each service, resolve the parameters
@@ -793,7 +794,7 @@ impl<S: SecurityPlugin> cda_interfaces::EcuManager for EcuManager<S> {
                         })
                     })
                 })
-            })
+            }) // todo alexmohr -> lookup via parent refs instead.
             .or_else(|| {
                 self.diag_database
                     .base_variant()
@@ -822,7 +823,7 @@ impl<S: SecurityPlugin> cda_interfaces::EcuManager for EcuManager<S> {
         func_class_name: &str,
         service_id: u8,
     ) -> Result<cda_interfaces::DiagComm, DiagServiceError> {
-        self.search_diag_services(|service| {
+        self.find_diag_services(|service| {
             service
                 .diag_comm()
                 .and_then(|dc| {
@@ -892,32 +893,50 @@ impl<S: SecurityPlugin> cda_interfaces::EcuManager for EcuManager<S> {
             .ok_or_else(|| DiagServiceError::NotFound(Some(name.to_owned())))
     }
 
-    fn get_components_data_info(&self) -> Vec<ComponentDataInfo> {
-        self.get_diag_layer_all_variants()
-            .iter()
-            .filter_map(|dl| dl.diag_services())
-            .flat_map(|svcs| svcs.iter())
+    fn get_components_data_info(&self) -> Result<Vec<ComponentDataInfo>, DiagServiceError> {
+        let Some(variant) = self.variant() else {
+            return Err(DiagServiceError::VariantDetectionError(
+                "No variant selected".to_owned(),
+            ));
+        };
+
+        Ok(variant
+            .diag_layer()
+            .and_then(|dl| dl.diag_services())
+            .into_iter()
+            .flatten()
             .map(datatypes::DiagService)
-            .filter_map(|service| {
-                let diag_comm = service.diag_comm()?;
-                let short_name = diag_comm.short_name()?;
-                if !short_name.ends_with("_Read") {
-                    return None;
-                }
-                Some(ComponentDataInfo {
-                    category: diag_comm.semantic().unwrap_or_default().to_owned(),
-                    id: diag_comm
-                        .short_name()
-                        .map(|s| s.replace("_Read", "").to_lowercase())
-                        .unwrap_or_default(),
-                    name: diag_comm
-                        .long_name()
-                        .and_then(|ln| ln.value().map(|v| v.to_owned().replace(" Read", "")))
-                        .unwrap_or_default(),
+            .chain(
+                variant
+                    .parent_refs()
+                    .and_then(|pr| self.get_parent_ref_services_recursive(pr.iter()))
+                    .into_iter()
+                    .flatten()
+            )
+            .filter(|service| {
+                service.request_id().is_some_and(|id| {
+                    id == service_ids::READ_DATA_BY_IDENTIFIER
                 })
             })
-            .collect()
+            .filter_map(|service| {
+                let diag_comm = service.diag_comm()?;
+                Some(self.diag_comm_to_component_data_info(diag_comm.into()))
+            })
+            .collect())
     }
+
+    fn get_functional_group_data_info(
+        &self,
+        functional_group_name: &str,
+    ) -> Result<Vec<ComponentDataInfo>, DiagServiceError> {
+        Ok(self.get_services_from_func_group_and_parent_refs(functional_group_name, |service| service.request_id().is_some_and(|id| id == service_ids::READ_DATA_BY_IDENTIFIER))?
+            .into_iter()
+            .filter_map(|service| {
+                let diag_comm = service.diag_comm()?;
+                Some(self.diag_comm_to_component_data_info(diag_comm.into()))
+            }).collect())
+    }
+
 
     fn get_components_single_ecu_jobs_info(&self) -> Vec<ComponentDataInfo> {
         self.get_diag_layer_all_variants()
@@ -1104,6 +1123,7 @@ impl<S: SecurityPlugin> cda_interfaces::EcuManager for EcuManager<S> {
     fn get_components_configurations_info(
         &self,
     ) -> Result<Vec<ComponentConfigurationsInfo>, DiagServiceError> {
+        // todo alexmohr: use parent refs instead of looking up in both variant and base variant
         let diag_layers = [
             self.variant().and_then(|v| v.diag_layer()),
             self.diag_database
@@ -2066,6 +2086,26 @@ impl<S: SecurityPlugin> EcuManager<S> {
         Some(variants.get(idx).into())
     }
 
+    /// Helper method to convert a DiagComm to ComponentDataInfo
+    /// This avoids code duplication across multiple methods
+    fn diag_comm_to_component_data_info(
+        &self,
+        diag_comm: datatypes::DiagComm<'_>,
+    ) -> ComponentDataInfo {
+        ComponentDataInfo {
+            category: diag_comm.semantic().unwrap_or_default().to_owned(),
+            id: diag_comm
+                .short_name()
+                .map(|s| self.database_naming_convention.trim_short_name_affixes(s))
+                .unwrap_or_default(),
+            name: diag_comm
+                .long_name()
+                .and_then(|ln| ln.value())
+                .map(|v| self.database_naming_convention.trim_long_name_affixes(v))
+                .unwrap_or_default(),
+        }
+    }
+
     #[tracing::instrument(skip_all,
         fields(
             dlt_context = dlt_ctx!("CORE"),
@@ -2164,34 +2204,107 @@ impl<S: SecurityPlugin> EcuManager<S> {
             return Some((service, CacheLocation::Variant(idx)));
         }
 
-        // Search in base variant
-        if let Some((idx, service)) = self
-            .diag_database
-            .base_variant()
-            .ok()
-            .and_then(|v| v.diag_layer())
-            .and_then(|dl| dl.diag_services())
-            .and_then(|services| {
-                services.iter().enumerate().find_map(|(idx, s)| {
-                    let service = datatypes::DiagService(s);
-                    predicate(&service).then_some((idx, service))
-                })
-            })
-        {
-            return Some((service, CacheLocation::BaseVariant(idx)));
-        }
-
-        // Search in ECU shared
-        if let Some((idx, service)) = self.find_ecu_shared_services().and_then(|services| {
+        // Search in Parent Refs
+        if let Some((idx, service)) = self.get_variant_parent_ref_services().and_then(|services| {
             services
                 .iter()
                 .enumerate()
                 .find_map(|(idx, s)| predicate(s).then_some((idx, s.clone())))
         }) {
-            return Some((service, CacheLocation::EcuShared(idx)));
+            return Some((service, CacheLocation::ParentRef(idx)));
         }
 
         None
+    }
+
+    fn get_variant_parent_ref_services<'a>(&self) -> Option<Vec<datatypes::DiagService<'_>>> {
+        self
+            .variant()
+            .and_then(|v| v.parent_refs())
+            .and_then(|parent_refs| {
+                self.get_parent_ref_services_recursive(
+                    parent_refs.iter().map(|p| datatypes::ParentRef(p)),
+                )
+            })
+    }
+
+    fn get_services_from_diag_layer_and_parent_refs<'a, F>(
+        &'a self,
+        diag_layer: datatypes::DiagLayer<'a>,
+        parent_refs: impl Iterator<Item = impl Into<datatypes::ParentRef<'a>>>,
+        service_filter: F,
+    ) -> Vec<datatypes::DiagService<'a>>
+    where
+        F: Fn(&datatypes::DiagService) -> bool,
+    {
+        diag_layer.diag_services()
+            .into_iter()
+            .flatten()
+            .map(datatypes::DiagService)
+            .chain(
+                self.get_parent_ref_services_recursive(parent_refs)
+                    .into_iter()
+                    .flatten()
+            )
+            .filter(service_filter)
+            .collect()
+    }
+
+    fn get_services_from_variant_and_parent_refs<F>(
+        &self,
+        service_filter: F,
+     ) -> Vec<datatypes::DiagService<'_>>
+     where
+         F: Fn(&datatypes::DiagService) -> bool,
+     {
+         self.variant()
+             .and_then(|v| v.diag_layer().zip(v.parent_refs()))
+             .map(|(diag_layer, parent_refs)| {
+                 self.get_services_from_diag_layer_and_parent_refs(
+                     diag_layer.into(),
+                     parent_refs.iter().map(datatypes::ParentRef),
+                     service_filter,
+                 )
+             })
+             .unwrap_or_default()
+     }
+
+    fn get_services_from_func_group_and_parent_refs<F>(
+        &self,
+        func_group_name: &str,
+        service_filter: F,
+    ) -> Result<Vec<datatypes::DiagService<'_>>, DiagServiceError>
+    where
+        F: Fn(&datatypes::DiagService) -> bool,
+    {
+        let fg = self
+            .diag_database
+            .ecu_data()?
+            .functional_groups()
+            .ok_or_else(|| DiagServiceError::InvalidDatabase("Functional groups not found".to_owned()))?
+            .iter()
+            .find(|fg| {
+                fg.diag_layer().is_some_and(|dl| {
+                    dl.short_name()
+                        .is_some_and(|n| n.eq_ignore_ascii_case(func_group_name))
+                })
+            })
+            .ok_or_else(|| {
+                DiagServiceError::NotFound(Some(format!(
+                    "Functional group '{func_group_name}' not found"
+                )))
+            })?;
+
+        Ok(fg.diag_layer()
+            .zip(fg.parent_refs())
+            .map(|(diag_layer, parent_refs)| {
+                self.get_services_from_diag_layer_and_parent_refs(
+                    diag_layer.into(),
+                    parent_refs.iter().map(datatypes::ParentRef),
+                    service_filter,
+                )
+            })
+            .unwrap_or_default())
     }
 
     fn get_service_by_location(
@@ -2205,98 +2318,86 @@ impl<S: SecurityPlugin> EcuManager<S> {
                 .and_then(|dl| dl.diag_services())
                 .map(|s| s.get(*idx))
                 .map(datatypes::DiagService),
-            CacheLocation::BaseVariant(idx) => self
-                .diag_database
-                .base_variant()
-                .ok()
-                .and_then(|v| v.diag_layer())
-                .and_then(|dl| dl.diag_services())
-                .map(|s| s.get(*idx))
-                .map(datatypes::DiagService),
-            CacheLocation::EcuShared(idx) => self
-                .find_ecu_shared_services()
+            CacheLocation::ParentRef(idx) => self
+                .get_variant_parent_ref_services()
                 .and_then(|services| services.get(*idx).cloned()),
         }
     }
 
-    fn search_diag_services<F>(&self, mut predicate: F) -> Option<datatypes::DiagService<'_>>
+    /// Finds the first diagnostic service matching the given predicate, searching in the current variant and its parent refs.
+    fn find_diag_services<F>(&self, predicate: F) -> Option<datatypes::DiagService<'_>>
     where
-        F: for<'a> FnMut(&datatypes::DiagService<'a>) -> bool,
+        F: Fn(&datatypes::DiagService) -> bool,
     {
-        // Search in current variant
-        if let Some(service) = self
-            .variant()
-            .and_then(|v| v.diag_layer())
-            .and_then(|dl| dl.diag_services())
-            .and_then(|services| {
-                services.into_iter().find_map(|service| {
-                    let service = datatypes::DiagService(service);
-                    predicate(&service).then_some(service)
-                })
-            })
-        {
-            return Some(service);
-        }
-
-        // Search in base variant
-        if let Some(service) = self
-            .diag_database
-            .base_variant()
-            .ok()
-            .and_then(|v| v.diag_layer())
-            .and_then(|dl| dl.diag_services())
-            .and_then(|services| {
-                services.into_iter().find_map(|service| {
-                    let service = datatypes::DiagService(service);
-                    predicate(&service).then_some(service)
-                })
-            })
-        {
-            return Some(service);
-        }
-
-        // Search in ECU shared services
-        self.find_ecu_shared_services()?
+        self.get_services_from_variant_and_parent_refs(predicate)
             .into_iter()
-            .find(|service| predicate(service))
+            .next()
     }
 
-    fn find_ecu_shared_services(&self) -> Option<Vec<datatypes::DiagService<'_>>> {
-        fn find_ecu_shared_services_recursive<'a>(
+    fn get_parent_ref_services_recursive<'a>(&'a self, parent_refs: impl Iterator<Item = impl Into<datatypes::ParentRef<'a>>>) -> Option<Vec<datatypes::DiagService<'a>>> {
+        fn find_parent_ref_services<'a>(
             parent_refs: impl Iterator<Item = impl Into<datatypes::ParentRef<'a>>>,
         ) -> Option<Vec<datatypes::DiagService<'a>>> {
+            fn filter_not_inherited_services<'a>(
+                diag_services: impl Iterator<Item = impl Into<datatypes::DiagService<'a>>>,
+                not_inherited_names: &[&str],
+            ) -> Vec<datatypes::DiagService<'a>> {
+                diag_services
+                    .into_iter()
+                    .map(|s| s.into())
+                    .filter(|service| {
+                        service
+                            .diag_comm()
+                            .and_then(|dc| dc.short_name())
+                            .map_or(true, |name| !not_inherited_names.contains(&name))
+                    })
+                    .collect()
+            }
+
             let all_services: Vec<datatypes::DiagService<'a>> = parent_refs
                 .into_iter()
                 .filter_map(|parent_ref| {
                     let parent_ref = parent_ref.into();
 
+                    // Get the list of short names that should not be inherited
+                    let not_inherited_names: Vec<&str> = parent_ref
+                        .not_inherited_diag_comm_short_names()
+                        .map(|names| names.iter().collect())
+                        .unwrap_or_default();
+
                     match parent_ref.ref_type().try_into() {
-                        Ok(datatypes::ParentRefType::EcuSharedData) => Some(
-                            parent_ref
+                        Ok(datatypes::ParentRefType::EcuSharedData) => {
+                            let services = parent_ref
                                 .ref__as_ecu_shared_data()?
                                 .diag_layer()?
                                 .diag_services()?
-                                .iter()
-                                .map(datatypes::DiagService)
-                                .collect::<Vec<_>>(),
-                        ),
+                                .iter();
+                            Some(filter_not_inherited_services(services, &not_inherited_names))
+                        },
                         Ok(datatypes::ParentRefType::FunctionalGroup) => parent_ref
                             .ref__as_functional_group()
                             .and_then(|fg| fg.parent_refs())
                             .and_then(|nested_refs| {
-                                find_ecu_shared_services_recursive(
+                                find_parent_ref_services(
                                     nested_refs.iter().map(datatypes::ParentRef),
                                 )
                             }),
-                        Ok(datatypes::ParentRefType::Protocol) => Some(
-                            parent_ref
+                        Ok(datatypes::ParentRefType::Protocol) => {
+                            let services = parent_ref
                                 .ref__as_protocol()?
                                 .diag_layer()?
                                 .diag_services()?
-                                .iter()
-                                .map(datatypes::DiagService)
-                                .collect::<Vec<_>>(),
-                        ),
+                                .iter();
+                            Some(filter_not_inherited_services(services, &not_inherited_names))
+                        },
+                        Ok(datatypes::ParentRefType::Variant) => {
+                            let services = parent_ref
+                                .ref__as_variant()?
+                                .diag_layer()?
+                                .diag_services()?
+                                .iter();
+                            Some(filter_not_inherited_services(services, &not_inherited_names))
+                        },
                         _ => {
                             tracing::error!(
                                 "Unsupported ParentRefType in ECU shared service lookup."
@@ -2314,17 +2415,7 @@ impl<S: SecurityPlugin> EcuManager<S> {
                 Some(all_services)
             }
         }
-
-        self.diag_database
-            .ecu_data()
-            .ok()?
-            .functional_groups()?
-            .iter()
-            .find_map(|fg| {
-                fg.parent_refs().and_then(|parent_refs| {
-                    find_ecu_shared_services_recursive(parent_refs.iter().map(datatypes::ParentRef))
-                })
-            })
+        find_parent_ref_services(parent_refs.map(Into::into))
     }
 
     #[tracing::instrument(skip_all,
@@ -3665,6 +3756,7 @@ impl<S: SecurityPlugin> EcuManager<S> {
         diag_comm: &datatypes::DiagComm<'_>,
     ) -> (Option<String>, Option<String>) {
         // not using lookup_state_chart, so we spare one lookup of the state charts
+        // todo alexmohr use parent refs instead
         let Ok(base_variant) = self.diag_database.base_variant() else {
             return (None, None);
         };
@@ -3714,6 +3806,7 @@ impl<S: SecurityPlugin> EcuManager<S> {
         current_state: &str,
         target_state: &str,
     ) -> Result<cda_interfaces::DiagComm, DiagServiceError> {
+        // tood alexmohr use parent refs instead
         let base_variant = self.diag_database.base_variant()?;
         let semantic_transitions = base_variant
             .diag_layer()
@@ -3739,7 +3832,7 @@ impl<S: SecurityPlugin> EcuManager<S> {
             })?;
 
         let service = self
-            .search_diag_services(|s| {
+            .find_diag_services(|s| {
                 s.diag_comm()
                     .and_then(|dc| dc.state_transition_refs())
                     .is_some_and(|st_refs| {
@@ -3772,6 +3865,7 @@ impl<S: SecurityPlugin> EcuManager<S> {
         &self,
         semantic: &str,
     ) -> Result<datatypes::StateChart<'_>, DiagServiceError> {
+        // todo alexmohr use parent refs instead
         self.diag_database
             .base_variant()?
             .diag_layer()
@@ -3797,27 +3891,9 @@ impl<S: SecurityPlugin> EcuManager<S> {
         &self,
         service_id: u8,
     ) -> Result<Vec<datatypes::DiagService<'_>>, DiagServiceError> {
-        let services = self
-            .variant()
-            .and_then(|v| v.diag_layer().and_then(|dl| dl.diag_services()))
-            .into_iter()
-            .flatten()
-            .chain(
-                self.diag_database
-                    .base_variant()
-                    .ok()
-                    .and_then(|base| base.diag_layer())
-                    .and_then(|dl| dl.diag_services())
-                    .into_iter()
-                    .flatten(),
-            )
-            .map(datatypes::DiagService)
-            .chain(
-                // Search in ECU shared services referenced by base variant
-                self.find_ecu_shared_services().into_iter().flatten(),
-            )
-            .filter(|s| s.request_id().is_some_and(|req_id| req_id == service_id))
-            .collect::<Vec<_>>();
+        let services = self.get_services_from_variant_and_parent_refs(|service | {
+            service.request_id().is_some_and(|req_id| req_id == service_id)
+        });
 
         if services.is_empty() {
             Err(DiagServiceError::NotFound(None))
@@ -4296,10 +4372,10 @@ mod tests {
         LeadingLengthDop,
     }
 
-    fn new_ecu_manager(
+   async fn new_ecu_manager(
         db: datatypes::DiagnosticDatabase,
     ) -> super::EcuManager<DefaultSecurityPluginData> {
-        super::EcuManager::new(
+       let mut manager =  super::EcuManager::new(
             db,
             Protocol::DoIp,
             &ComParams::default(),
@@ -4314,7 +4390,13 @@ mod tests {
             },
             true,
         )
-        .unwrap()
+           .expect("Failed to create EcuManager");
+        manager.set_variant(VariantData {
+            name: "TestVariant".to_owned(),
+            is_base_variant: true,
+            is_fallback: false,
+        }).await.expect("Failed to set default variant");
+        manager
     }
 
     fn new_ecu_manager_no_base_fallback(
@@ -4349,7 +4431,7 @@ mod tests {
     /// - **DOPs**: `NormalDOP` for `num_items`, `DynamicLengthField` DOP for response
     // allowed because creation of test data should keep together
     #[allow(clippy::too_many_lines)]
-    fn create_ecu_manager_with_dynamic_length_field_service() -> (
+    async fn create_ecu_manager_with_dynamic_length_field_service() -> (
         super::EcuManager<DefaultSecurityPluginData>,
         cda_interfaces::DiagComm,
         u8,
@@ -4453,7 +4535,7 @@ mod tests {
 
         let db = finish_db!(db_builder, protocol, vec![diag_service]);
         (
-            new_ecu_manager(db),
+            new_ecu_manager(db).await,
             cda_interfaces::DiagComm::new(dc_name, DiagCommType::Configurations),
             sid,
         )
@@ -4472,7 +4554,7 @@ mod tests {
     ///
     /// This helper is used to test parameter metadata extraction, including
     /// distinguishing between CODED-CONST and VALUE parameter types.
-    fn create_ecu_manager_with_parameter_metadata() -> super::EcuManager<DefaultSecurityPluginData>
+    async fn create_ecu_manager_with_parameter_metadata() -> super::EcuManager<DefaultSecurityPluginData>
     {
         let mut db_builder = EcuDataBuilder::new();
         let protocol = db_builder.create_protocol(Protocol::DoIp.value(), None, None, None);
@@ -4515,7 +4597,7 @@ mod tests {
             new_diag_service!(db_builder, diag_comm, request, vec![pos_response], vec![]);
 
         let db = finish_db!(db_builder, protocol, vec![diag_service]);
-        new_ecu_manager(db)
+        new_ecu_manager(db).await
     }
 
     /// Creates an ECU manager with a diagnostic service containing a Structure DOP.
@@ -4532,7 +4614,7 @@ mod tests {
     /// # Parameters:
     /// - `struct_byte_pos`: The byte position where the structure starts in the payload
     // allowed because creation of test data should kept together
-    fn create_ecu_manager_with_struct_service(
+    async fn create_ecu_manager_with_struct_service(
         struct_byte_pos: u32,
     ) -> (
         super::EcuManager<DefaultSecurityPluginData>,
@@ -4599,7 +4681,7 @@ mod tests {
 
         let db = finish_db!(db_builder, protocol, vec![diag_service]);
         (
-            new_ecu_manager(db),
+            new_ecu_manager(db).await,
             cda_interfaces::DiagComm::new(dc_name, DiagCommType::Configurations),
             sid,
             structure_byte_len,
@@ -4617,7 +4699,7 @@ mod tests {
     ///   - **Case 3** (string "test"): No structure
     ///   - **Default case**: Contains `default_structure_param_1` (u8)
     /// - **Request and Response**: Both contain the MUX parameter
-    fn create_ecu_manager_with_mux_service_and_default_case() -> (
+    async fn create_ecu_manager_with_mux_service_and_default_case() -> (
         super::EcuManager<DefaultSecurityPluginData>,
         cda_interfaces::DiagComm,
         u8,
@@ -4647,7 +4729,7 @@ mod tests {
             db_builder.create_structure(Some(vec![default_structure_param_1]), Some(1), true);
         let default_case = db_builder.create_default_case("default_case", Some(default_structure));
 
-        create_ecu_manager_with_mux_service(Some(db_builder), None, Some(default_case))
+        create_ecu_manager_with_mux_service(Some(db_builder), None, Some(default_case)).await
     }
 
     /// Creates an ECU manager with a MUX (multiplexer) service.
@@ -4671,10 +4753,10 @@ mod tests {
     /// - `switch_key`: Optional custom switch key (creates default u16 if None)
     /// - `default_case`: Optional default case for unmatched switch values
     // allowed because creation of test data should kept together
-    fn create_ecu_manager_with_mux_service(
-        db_builder: Option<EcuDataBuilder>,
-        switch_key: Option<WIPOffset<datatypes::database_builder::SwitchKey>>,
-        default_case: Option<WIPOffset<datatypes::database_builder::DefaultCase>>,
+   async fn create_ecu_manager_with_mux_service(
+        db_builder: Option<EcuDataBuilder<'_>>,
+        switch_key: Option<WIPOffset<datatypes::database_builder::SwitchKey<'_>>>,
+        default_case: Option<WIPOffset<datatypes::database_builder::DefaultCase<'_>>>,
     ) -> (
         super::EcuManager<DefaultSecurityPluginData>,
         cda_interfaces::DiagComm,
@@ -4821,7 +4903,7 @@ mod tests {
 
         let db = finish_db!(db_builder, protocol, vec![diag_service]);
         (
-            new_ecu_manager(db),
+            new_ecu_manager(db).await,
             cda_interfaces::DiagComm::new(dc_name, DiagCommType::Data),
             sid,
         )
@@ -4849,7 +4931,7 @@ mod tests {
     /// - `max_items`: Optional maximum number of structures
     /// - `structure_type`: Whether structures are fixed-size or have leading length
     // allowed because creation of test data should kept together
-    fn create_ecu_manager_with_end_pdu_service(
+    async fn create_ecu_manager_with_end_pdu_service(
         min_items: u32,
         max_items: Option<u32>,
         structure_type: EndOfPduStructureType,
@@ -4936,7 +5018,7 @@ mod tests {
 
         let db = finish_db!(db_builder, protocol, vec![diag_service]);
         (
-            new_ecu_manager(db),
+            new_ecu_manager(db).await,
             cda_interfaces::DiagComm::new(dc_name, DiagCommType::Data),
             sid,
         )
@@ -4954,7 +5036,7 @@ mod tests {
     ///   - **Fault name**: "`TestFault`"
     ///   - **Severity**: 2
     /// - **DOP**: DTC DOP with 32-bit coded type
-    fn create_ecu_manager_with_dtc() -> (
+    async fn create_ecu_manager_with_dtc() -> (
         super::EcuManager<DefaultSecurityPluginData>,
         cda_interfaces::DiagComm,
         u8,
@@ -4988,7 +5070,7 @@ mod tests {
 
         let db = finish_db!(db_builder, protocol, vec![diag_service]);
         (
-            new_ecu_manager(db),
+            new_ecu_manager(db).await,
             cda_interfaces::DiagComm::new(dc_name, DiagCommType::Faults),
             sid,
             dtc_code,
@@ -5013,7 +5095,7 @@ mod tests {
     ///     - State charts: Session (`DefaultSession`), Security (Locked)
     /// - **ECU name**: "`VariantDetectionEcu`"
     #[allow(clippy::too_many_lines)] // must be kept together
-    fn create_ecu_manager_variant_detection(
+    async fn create_ecu_manager_variant_detection(
         fallback_to_base: bool,
     ) -> super::EcuManager<DefaultSecurityPluginData> {
         let mut db_builder = EcuDataBuilder::new();
@@ -5167,7 +5249,7 @@ mod tests {
         });
 
         if fallback_to_base {
-            new_ecu_manager(db)
+            new_ecu_manager(db).await
         } else {
             new_ecu_manager_no_base_fallback(db)
         }
@@ -5180,7 +5262,7 @@ mod tests {
     ///   byte 1-2: DID (PHYS-CONST, Normal DOP, u16)
     ///   byte 3: `data_param` (VALUE, u8)
     #[allow(clippy::too_many_lines)]
-    fn create_ecu_manager_with_phys_const_normal_dop_service() -> (
+    async fn create_ecu_manager_with_phys_const_normal_dop_service() -> (
         super::EcuManager<DefaultSecurityPluginData>,
         cda_interfaces::DiagComm,
         u8,
@@ -5263,7 +5345,7 @@ mod tests {
 
         let db = finish_db!(db_builder, protocol, vec![diag_service]);
 
-        let ecu_manager = new_ecu_manager(db);
+        let ecu_manager = new_ecu_manager(db).await;
 
         let dc = cda_interfaces::DiagComm {
             name: dc_name.to_owned(),
@@ -5284,7 +5366,7 @@ mod tests {
     ///     sub-param1: u16 at byte 0
     ///     sub-param2: u8 at byte 2
     #[allow(clippy::too_many_lines)]
-    fn create_ecu_manager_with_phys_const_structure_dop_service() -> (
+    async fn create_ecu_manager_with_phys_const_structure_dop_service() -> (
         super::EcuManager<DefaultSecurityPluginData>,
         cda_interfaces::DiagComm,
         u8,
@@ -5404,7 +5486,7 @@ mod tests {
 
         let db = finish_db!(db_builder, protocol, vec![diag_service]);
 
-        let ecu_manager = new_ecu_manager(db);
+        let ecu_manager = new_ecu_manager(db).await;
 
         let dc = cda_interfaces::DiagComm {
             name: dc_name.to_owned(),
@@ -5416,7 +5498,7 @@ mod tests {
     }
 
     /// Helper function to create an ECU manager with services that have state transition refs
-    fn create_ecu_manager_with_state_transitions() -> (
+    async fn create_ecu_manager_with_state_transitions() -> (
         super::EcuManager<DefaultSecurityPluginData>,
         cda_interfaces::DiagComm,
     ) {
@@ -5510,12 +5592,12 @@ mod tests {
             type_: DiagCommType::Configurations,
             lookup_name: Some(dc_name.to_owned()),
         };
-        (new_ecu_manager(db), dc)
+        (new_ecu_manager(db).await, dc)
     }
 
     #[tokio::test]
     async fn test_mux_from_uds_invalid_case_no_default() {
-        let (ecu_manager, service, sid) = create_ecu_manager_with_mux_service(None, None, None);
+        let (ecu_manager, service, sid) = create_ecu_manager_with_mux_service(None, None, None).await;
         assert_uds_conversion_fails(
             &ecu_manager,
             &service,
@@ -5534,7 +5616,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_mux_from_uds_invalid_case_with_default() {
-        let (ecu_manager, service, sid) = create_ecu_manager_with_mux_service_and_default_case();
+        let (ecu_manager, service, sid) = create_ecu_manager_with_mux_service_and_default_case().await;
         assert_uds_converts_to_json(
             &ecu_manager,
             &service,
@@ -5564,7 +5646,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_mux_from_uds_invalid_payload() {
-        let (ecu_manager, service, sid) = create_ecu_manager_with_mux_service(None, None, None);
+        let (ecu_manager, service, sid) = create_ecu_manager_with_mux_service(None, None, None).await;
         assert_uds_conversion_fails(
             &ecu_manager,
             &service,
@@ -5582,7 +5664,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_mux_from_uds_empty_structure() {
-        let (ecu_manager, service, sid) = create_ecu_manager_with_mux_service(None, None, None);
+        let (ecu_manager, service, sid) = create_ecu_manager_with_mux_service(None, None, None).await;
         let err = assert_uds_conversion_fails(
             &ecu_manager,
             &service,
@@ -5608,7 +5690,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_mux_from_and_to_uds_case_1() {
-        let (ecu_manager, service, sid) = create_ecu_manager_with_mux_service(None, None, None);
+        let (ecu_manager, service, sid) = create_ecu_manager_with_mux_service(None, None, None).await;
         // skip formatting, to keep the comments on the bytes they belong to.
         let param_1_value: f32 = 13.37;
         let param_1_bytes = param_1_value.to_be_bytes();
@@ -5644,7 +5726,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_mux_from_and_to_uds_case_2() {
-        let (ecu_manager, service, sid) = create_ecu_manager_with_mux_service(None, None, None);
+        let (ecu_manager, service, sid) = create_ecu_manager_with_mux_service(None, None, None).await;
         // skip formatting, to keep the comments on the bytes they belong to.
         #[rustfmt::skip]
         let data = [
@@ -5700,7 +5782,7 @@ mod tests {
         };
 
         let (ecu_manager, service, sid) =
-            create_ecu_manager_with_mux_service(Some(db_builder), Some(switch_key), None);
+            create_ecu_manager_with_mux_service(Some(db_builder), Some(switch_key), None).await;
         // skip formatting, to keep the comments on the bytes they belong to.
         #[rustfmt::skip]
         let data = [
@@ -5777,7 +5859,7 @@ mod tests {
 
     async fn validate_struct_payload(struct_byte_pos: u32) {
         let (ecu_manager, service, sid, struct_byte_len) =
-            create_ecu_manager_with_struct_service(struct_byte_pos);
+            create_ecu_manager_with_struct_service(struct_byte_pos).await;
 
         // Test data for the structure
         let test_value = json!({
@@ -5839,7 +5921,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_map_struct_to_uds_missing_parameter() {
-        let (ecu_manager, service, _, _) = create_ecu_manager_with_struct_service(1);
+        let (ecu_manager, service, _, _) = create_ecu_manager_with_struct_service(1).await;
 
         // Test data missing param2
         let test_value = json!({
@@ -5869,7 +5951,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_map_struct_to_uds_invalid_json_type() {
-        let (ecu_manager, service, _, _) = create_ecu_manager_with_struct_service(1);
+        let (ecu_manager, service, _, _) = create_ecu_manager_with_struct_service(1).await;
 
         // Test data with wrong type (array instead of object)
         let test_value = json!([1, 2, 3]);
@@ -5895,7 +5977,7 @@ mod tests {
     async fn test_convert_to_uds_value_exceeds_bit_len() {
         let struct_byte_pos = 1;
         let (ecu_manager, service, _sid, _struct_byte_len) =
-            create_ecu_manager_with_struct_service(struct_byte_pos);
+            create_ecu_manager_with_struct_service(struct_byte_pos).await;
 
         // Test data for the structure
         let test_value = json!({
@@ -5957,7 +6039,7 @@ mod tests {
             assert_eq!(service_payload.data.get(4).copied(), Some(0x42));
         }
 
-        let (ecu_manager, service, sid) = create_ecu_manager_with_mux_service_and_default_case();
+        let (ecu_manager, service, sid) = create_ecu_manager_with_mux_service_and_default_case().await;
         let with_selector = json!({
             "mux_1_param": {
                 "Selector": 0xffff,
@@ -5983,7 +6065,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_map_mux_to_uds_invalid_json_type() {
-        let (ecu_manager, service, _) = create_ecu_manager_with_mux_service(None, None, None);
+        let (ecu_manager, service, _) = create_ecu_manager_with_mux_service(None, None, None).await;
 
         // Test data with wrong type (array instead of object)
         let test_value = json!([1, 2, 3]);
@@ -6011,7 +6093,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_map_mux_to_uds_missing_case_data() {
-        let (ecu_manager, service, _) = create_ecu_manager_with_mux_service(None, None, None);
+        let (ecu_manager, service, _) = create_ecu_manager_with_mux_service(None, None, None).await;
 
         // Test data with valid selector but missing case data
         let test_value = json!({
@@ -6039,7 +6121,7 @@ mod tests {
     #[tokio::test]
     async fn test_map_struct_from_uds_end_pdu_min_items_not_reached() {
         let (ecu_manager, service, sid) =
-            create_ecu_manager_with_end_pdu_service(3, Some(2), EndOfPduStructureType::FixedSize);
+            create_ecu_manager_with_end_pdu_service(3, Some(2), EndOfPduStructureType::FixedSize).await;
         // Each item is 3 bytes: 1 byte for param1 + 2 bytes for param2
         assert_uds_converts_to_json(
             &ecu_manager,
@@ -6067,7 +6149,7 @@ mod tests {
     #[tokio::test]
     async fn test_map_struct_from_uds_end_pdu_exact_max_items() {
         let (ecu_manager, service, sid) =
-            create_ecu_manager_with_end_pdu_service(1, Some(2), EndOfPduStructureType::FixedSize);
+            create_ecu_manager_with_end_pdu_service(1, Some(2), EndOfPduStructureType::FixedSize).await;
         // Create payload with exactly 2 items (the max_items limit)
         // Each item is 3 bytes: 1 byte for param1 + 2 bytes for param2
         assert_uds_converts_to_json(
@@ -6096,7 +6178,7 @@ mod tests {
     #[tokio::test]
     async fn test_map_struct_from_uds_end_pdu_exceeds_max_items() {
         let (ecu_manager, service, sid) =
-            create_ecu_manager_with_end_pdu_service(1, Some(2), EndOfPduStructureType::FixedSize);
+            create_ecu_manager_with_end_pdu_service(1, Some(2), EndOfPduStructureType::FixedSize).await;
         // Create payload with 3 items (exceeds max_items = 2)
         // extra data at the end is ignored.
         assert_uds_converts_to_json(
@@ -6123,7 +6205,7 @@ mod tests {
     #[tokio::test]
     async fn test_map_struct_from_uds_end_pdu_no_max_no_min_no_data() {
         let (ecu_manager, service, sid) =
-            create_ecu_manager_with_end_pdu_service(0, None, EndOfPduStructureType::FixedSize);
+            create_ecu_manager_with_end_pdu_service(0, None, EndOfPduStructureType::FixedSize).await;
         // Valid payload, as min_items = 0 and no max_items
         // Only the SID is present, no items follow
         assert_uds_converts_to_json(
@@ -6141,7 +6223,7 @@ mod tests {
     #[tokio::test]
     async fn test_map_struct_from_uds_end_pdu_no_maximum() {
         let (ecu_manager, service, sid) =
-            create_ecu_manager_with_end_pdu_service(1, None, EndOfPduStructureType::FixedSize);
+            create_ecu_manager_with_end_pdu_service(1, None, EndOfPduStructureType::FixedSize).await;
         // Create payload with 3 items, extra data at the end will be ignored
         assert_uds_converts_to_json(
             &ecu_manager,
@@ -6173,7 +6255,7 @@ mod tests {
             0,
             None,
             EndOfPduStructureType::LeadingLengthDop,
-        );
+        ).await;
 
         let mut data = vec![sid]; // Service ID
         // First complete structure: 1 byte length + 8 bytes data = 9 bytes total
@@ -6205,7 +6287,7 @@ mod tests {
             0,
             None,
             EndOfPduStructureType::LeadingLengthDop,
-        );
+        ).await;
 
         let mut data = vec![sid]; // Service ID
         // First complete structure: 1 byte length + 8 bytes data = 33 bytes total
@@ -6231,7 +6313,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_map_dtc_from_uds() {
-        let (ecu_manager, service, sid, dtc_code) = create_ecu_manager_with_dtc();
+        let (ecu_manager, service, sid, dtc_code) = create_ecu_manager_with_dtc().await;
 
         let mut payload = vec![sid];
         payload.extend_from_slice(&dtc_code.to_be_bytes());
@@ -6255,7 +6337,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_map_dynamic_length_field_from_uds() {
-        let (ecu_manager, service, sid) = create_ecu_manager_with_dynamic_length_field_service();
+        let (ecu_manager, service, sid) = create_ecu_manager_with_dynamic_length_field_service().await;
         assert_uds_converts_to_json(
             &ecu_manager,
             &service,
@@ -6278,7 +6360,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_map_dynamic_length_field_from_uds_not_enough_data() {
-        let (ecu_manager, service, sid) = create_ecu_manager_with_dynamic_length_field_service();
+        let (ecu_manager, service, sid) = create_ecu_manager_with_dynamic_length_field_service().await;
         let err = assert_uds_conversion_fails(
             &ecu_manager,
             &service,
@@ -6301,7 +6383,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_negative_response() {
-        let (ecu_manager, service, sid) = create_ecu_manager_with_dynamic_length_field_service();
+        let (ecu_manager, service, sid) = create_ecu_manager_with_dynamic_length_field_service().await;
         let payload = vec![0x7F, sid];
 
         let response = ecu_manager
@@ -6314,7 +6396,7 @@ mod tests {
     #[tokio::test]
     async fn test_negative_response_with_invalid_data_where_no_neg_response_is_defined() {
         let (ecu_manager, service, sid) =
-            create_ecu_manager_with_end_pdu_service(1, None, EndOfPduStructureType::FixedSize);
+            create_ecu_manager_with_end_pdu_service(1, None, EndOfPduStructureType::FixedSize).await;
         let data = vec![0x7F, sid, 0x33];
 
         let response = ecu_manager
@@ -6326,7 +6408,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_detect_variant_with_empty_responses_to_disconnected() {
-        let mut ecu_manager = create_ecu_manager_variant_detection(true);
+        let mut ecu_manager = create_ecu_manager_variant_detection(true).await;
 
         for state in [
             EcuState::Online,
@@ -6373,7 +6455,7 @@ mod tests {
     async fn test_detect_unknown_variant_fallback_disabled() {
         // Must disable base fallback, otherwise we won't get an error in detect_variant but
         // just the base variant instead.
-        let mut ecu_manager = create_ecu_manager_variant_detection(false);
+        let mut ecu_manager = create_ecu_manager_variant_detection(false).await;
         let response = create_variant_response(
             "ReadVariantData",
             [("variant_code".to_owned(), 42)].into_iter().collect(),
@@ -6401,14 +6483,14 @@ mod tests {
 
     #[tokio::test]
     async fn test_detect_variant_with_response_from_offline_to_online() {
-        let mut ecu_manager = create_ecu_manager_variant_detection(true);
+        let mut ecu_manager = create_ecu_manager_variant_detection(true).await;
         ecu_manager.variant.state = EcuState::Offline;
         detect_variant(0, true, "BaseVariant".to_owned(), EcuState::Online, None).await;
     }
 
     #[tokio::test]
     async fn test_detect_unknown_variant_fallback_to_base() {
-        let mut ecu_manager = create_ecu_manager_variant_detection(true);
+        let mut ecu_manager = create_ecu_manager_variant_detection(true).await;
         ecu_manager.fallback_to_base_variant = true;
 
         let response = create_variant_response(
@@ -6487,7 +6569,7 @@ mod tests {
         state: EcuState,
         ecu_manger: Option<super::EcuManager<DefaultSecurityPluginData>>,
     ) {
-        let mut ecu_manager = ecu_manger.unwrap_or(create_ecu_manager_variant_detection(true));
+        let mut ecu_manager = ecu_manger.unwrap_or(create_ecu_manager_variant_detection(true).await);
 
         let response = create_variant_response(
             "ReadVariantData",
@@ -6505,11 +6587,11 @@ mod tests {
         assert_eq!(ecu_manager.variant.state, state);
     }
 
-    #[test]
-    fn test_get_service_parameter_metadata_success() {
+    #[tokio::test]
+    async fn test_get_service_parameter_metadata_success() {
         use cda_interfaces::ParameterTypeMetadata;
 
-        let ecu_manager = create_ecu_manager_with_parameter_metadata();
+        let ecu_manager = create_ecu_manager_with_parameter_metadata().await;
 
         // Get parameter metadata for the test service
         let result = ecu_manager.get_service_parameter_metadata("RDBI_TestService");
@@ -6544,9 +6626,9 @@ mod tests {
         ));
     }
 
-    #[test]
-    fn test_get_service_parameter_metadata_service_not_found() {
-        let ecu_manager = create_ecu_manager_with_parameter_metadata();
+    #[tokio::test]
+    async fn test_get_service_parameter_metadata_service_not_found() {
+        let ecu_manager = create_ecu_manager_with_parameter_metadata().await;
 
         // Try to get metadata for a non-existent service
         let result = ecu_manager.get_service_parameter_metadata("NonExistentService");
@@ -6556,9 +6638,9 @@ mod tests {
         assert!(matches!(result, Err(DiagServiceError::NotFound(_))));
     }
 
-    #[test]
-    fn test_get_mux_cases_for_service_success() {
-        let (ecu_manager, _, _) = create_ecu_manager_with_mux_service(None, None, None);
+    #[tokio::test]
+    async fn test_get_mux_cases_for_service_success() {
+        let (ecu_manager, _, _) = create_ecu_manager_with_mux_service(None, None, None).await;
 
         // Get MUX cases for the test service
         let result = ecu_manager.get_mux_cases_for_service("TestMuxService");
@@ -6586,9 +6668,9 @@ mod tests {
         assert!(case_2.lower_limit.is_some());
     }
 
-    #[test]
-    fn test_get_mux_cases_for_service_not_found() {
-        let (ecu_manager, _, _) = create_ecu_manager_with_mux_service(None, None, None);
+    #[tokio::test]
+    async fn test_get_mux_cases_for_service_not_found() {
+        let (ecu_manager, _, _) = create_ecu_manager_with_mux_service(None, None, None).await;
 
         // Try to get MUX cases for a non-existent service
         let result = ecu_manager.get_mux_cases_for_service("NonExistentService");
@@ -6598,10 +6680,10 @@ mod tests {
         assert!(matches!(result, Err(DiagServiceError::NotFound(_))));
     }
 
-    #[test]
-    fn test_get_mux_cases_for_service_no_mux_cases() {
+    #[tokio::test]
+   async fn test_get_mux_cases_for_service_no_mux_cases() {
         // Use a service without MUX cases
-        let ecu_manager = create_ecu_manager_with_parameter_metadata();
+        let ecu_manager = create_ecu_manager_with_parameter_metadata().await;
 
         // Get MUX cases for a service that doesn't have MUX responses
         let result = ecu_manager.get_mux_cases_for_service("RDBI_TestService");
@@ -6612,11 +6694,11 @@ mod tests {
         assert_eq!(mux_cases.len(), 0);
     }
 
-    #[test]
-    fn test_get_service_parameter_metadata_extracts_coded_const_did_value() {
+    #[tokio::test]
+    async fn test_get_service_parameter_metadata_extracts_coded_const_did_value() {
         use cda_interfaces::ParameterTypeMetadata;
 
-        let ecu_manager = create_ecu_manager_with_parameter_metadata();
+        let ecu_manager = create_ecu_manager_with_parameter_metadata().await;
 
         // Get parameter metadata
         let result = ecu_manager.get_service_parameter_metadata("RDBI_TestService");
@@ -6666,7 +6748,6 @@ mod tests {
             .convert_request_from_uds(&dc, &payload, true)
             .await;
 
-        assert!(result.is_ok());
         let response = result.unwrap();
 
         // Verify response type is positive (successful parsing)
@@ -6784,7 +6865,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_phys_const_normal_dop_to_uds() {
-        let (ecu_manager, dc, _sid) = create_ecu_manager_with_phys_const_normal_dop_service();
+        let (mut ecu_manager, dc, _sid) = create_ecu_manager_with_phys_const_normal_dop_service().await;
 
         // JSON payload: DID = 61840 (0xF190)
         let json_payload = json!({
@@ -6867,7 +6948,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_phys_const_structure_dop_roundtrip() {
-        let (ecu_manager, dc, sid) = create_ecu_manager_with_phys_const_structure_dop_service();
+        let (ecu_manager, dc, sid) = create_ecu_manager_with_phys_const_structure_dop_service().await;
 
         // Step 1: Encode JSON → UDS
         let json_payload = json!({
@@ -6921,7 +7002,7 @@ mod tests {
     #[tokio::test]
     async fn test_state_transition_source_allowed_as_valid_security_state() {
         // State transition source states are added to allowed_security states
-        let (ecu_manager, dc) = create_ecu_manager_with_state_transitions();
+        let (ecu_manager, dc) = create_ecu_manager_with_state_transitions().await;
 
         // Set ECU to "Locked" state which is the SOURCE of the state transition
         // The service precondition requires "Programming"
@@ -6948,7 +7029,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_state_precondition() {
-        let (ecu_manager, dc) = create_ecu_manager_with_state_transitions();
+        let (ecu_manager, dc) = create_ecu_manager_with_state_transitions().await;
 
         // Set ECU to "Programming" which is in the precondition states
         {
@@ -6977,7 +7058,7 @@ mod tests {
     async fn test_invalid_security_state_rejected() {
         // This test verifies that states that are
         // neither in preconditions nor state transition sources are properly rejected
-        let (ecu_manager, dc) = create_ecu_manager_with_state_transitions();
+        let (ecu_manager, dc) = create_ecu_manager_with_state_transitions().await;
 
         // Set ECU to "Extended" which is:
         // - NOT in the precondition states (only Programming is)

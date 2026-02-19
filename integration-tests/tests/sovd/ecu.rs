@@ -618,6 +618,132 @@ async fn test_communication_control() {
 }
 
 #[tokio::test]
+async fn test_boot_variant_service_inheritance() {
+    let (runtime, _lock) = setup_integration_test(true).await.unwrap();
+    let auth = auth_header(&runtime.config, None).await.unwrap();
+    let ecu_endpoint = sovd::ECU_FLXC1000_ENDPOINT;
+
+    // Switch ECU sim to BOOT variant
+    ecusim::switch_variant(&runtime.ecu_sim, "FLXC1000", "BOOT")
+        .await
+        .unwrap();
+    force_variant_detection(&runtime.config, &auth, ecu_endpoint)
+        .await
+        .unwrap();
+
+    let ecu = ecu_status(&runtime.config, &auth, ecu_endpoint)
+        .await
+        .unwrap();
+    assert_eq!(ecu.variant.name, "FLXC1000_Boot_Variant".to_string());
+
+    // Query data services (ReadDataByIdentifier services)
+    // These should be inherited from the base variant
+    let data_services = get_data_services(&runtime.config, &auth, ecu_endpoint)
+        .await
+        .unwrap();
+
+    // Verify that inherited services from base variant are present
+    let service_ids: Vec<&str> = data_services
+        .items
+        .iter()
+        .map(|item| item.id.as_str())
+        .collect();
+
+    // These services are defined in the base variant and should be inherited by boot
+    assert!(
+        service_ids.contains(&"vindataidentifier"),
+        "VIN service should be inherited from base variant"
+    );
+    assert!(
+        service_ids.contains(&"identification"),
+        "Identification service should be inherited from base variant"
+    );
+    assert!(
+        service_ids.contains(&"activediagnosticsessiondataidentifier"),
+        "ActiveDiagnosticSession service should be inherited from base variant"
+    );
+
+    // Query single-ecu-jobs which includes services not in the data endpoint
+    // Security access services are specific to boot variant
+    let single_ecu_jobs = get_single_ecu_jobs(&runtime.config, &auth, ecu_endpoint)
+        .await
+        .unwrap();
+
+    let job_ids: Vec<&str> = single_ecu_jobs
+        .items
+        .iter()
+        .map(|item| item.id.as_str())
+        .collect();
+
+    // Verify that security access services specific to boot variant are present
+    assert!(
+        job_ids.contains(&"level_3_requestseed"),
+        "Level 3 RequestSeed should be present in boot variant"
+    );
+    assert!(
+        job_ids.contains(&"level_3_sendkey"),
+        "Level 3 SendKey should be present in boot variant"
+    );
+    assert!(
+        job_ids.contains(&"level_5_requestseed"),
+        "Level 5 RequestSeed should be present in boot variant"
+    );
+    assert!(
+        job_ids.contains(&"level_5_sendkey"),
+        "Level 5 SendKey should be present in boot variant"
+    );
+
+    // Switch to APPLICATION variant to verify security access is not present
+    ecusim::switch_variant(&runtime.ecu_sim, "FLXC1000", "APPLICATION")
+        .await
+        .unwrap();
+    force_variant_detection(&runtime.config, &auth, ecu_endpoint)
+        .await
+        .unwrap();
+
+    let ecu = ecu_status(&runtime.config, &auth, ecu_endpoint)
+        .await
+        .unwrap();
+    assert_eq!(ecu.variant.name, "FLXC1000_App_0101".to_string());
+
+    // Data services should still be inherited in application variant
+    let data_services = get_data_services(&runtime.config, &auth, ecu_endpoint)
+        .await
+        .unwrap();
+
+    let service_ids: Vec<&str> = data_services
+        .items
+        .iter()
+        .map(|item| item.id.as_str())
+        .collect();
+
+    assert!(
+        service_ids.contains(&"vindataidentifier"),
+        "VIN service should be inherited in application variant"
+    );
+
+    // Security access services should NOT be present in application variant
+    let single_ecu_jobs = get_single_ecu_jobs(&runtime.config, &auth, ecu_endpoint)
+        .await
+        .unwrap();
+
+    let job_ids: Vec<&str> = single_ecu_jobs
+        .items
+        .iter()
+        .map(|item| item.id.as_str())
+        .collect();
+
+    assert!(
+        !job_ids.contains(&"level_3_requestseed"),
+        "Security access services should NOT be in application variant"
+    );
+    assert!(
+        !job_ids.contains(&"level_5_requestseed"),
+        "Security access services should NOT be in application variant"
+    );
+}
+
+#[tokio::test]
 async fn test_ecu_session_reset_on_lock_reacquire() {
     let (runtime, _lock) = setup_integration_test(true).await.unwrap();
     let auth = auth_header(&runtime.config, None).await.unwrap();
@@ -914,6 +1040,40 @@ async fn get_configurations(
     let http_response = send_cda_request(
         config,
         &format!("{ecu_endpoint}/configurations/{service}"),
+        StatusCode::OK,
+        Method::GET,
+        None,
+        Some(headers),
+    )
+    .await?;
+    response_to_t(&http_response)
+}
+
+async fn get_data_services(
+    config: &Configuration,
+    headers: &HeaderMap,
+    ecu_endpoint: &str,
+) -> Result<sovd_interfaces::components::ecu::data::get::Response, TestingError> {
+    let http_response = send_cda_request(
+        config,
+        &format!("{ecu_endpoint}/data"),
+        StatusCode::OK,
+        Method::GET,
+        None,
+        Some(headers),
+    )
+    .await?;
+    response_to_t(&http_response)
+}
+
+async fn get_single_ecu_jobs(
+    config: &Configuration,
+    headers: &HeaderMap,
+    ecu_endpoint: &str,
+) -> Result<sovd_interfaces::components::ecu::ComponentData, TestingError> {
+    let http_response = send_cda_request(
+        config,
+        &format!("{ecu_endpoint}/x-single-ecu-jobs"),
         StatusCode::OK,
         Method::GET,
         None,

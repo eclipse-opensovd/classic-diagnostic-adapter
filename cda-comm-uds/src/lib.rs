@@ -1251,13 +1251,22 @@ impl<S: EcuGateway, R: DiagServiceResponse, T: EcuManager<Response = R>> UdsEcu
         &self,
         ecu: &str,
     ) -> Result<Vec<cda_interfaces::datatypes::ComponentDataInfo>, DiagServiceError> {
-        let items = self
+        self
             .ecu_manager(ecu)?
             .read()
             .await
-            .get_components_data_info();
+            .get_components_data_info()
+    }
 
-        Ok(items)
+    async fn get_functional_group_data_info(
+        &self,
+        functional_group_name: &str,
+    ) -> Result<Vec<cda_interfaces::datatypes::ComponentDataInfo>, DiagServiceError> {
+        self
+            .ecu_manager(&self.functional_description_database)?
+            .read()
+            .await
+            .get_functional_group_data_info(functional_group_name)
     }
 
     async fn get_components_configuration_info(
@@ -1874,7 +1883,7 @@ impl<S: EcuGateway, R: DiagServiceResponse, T: EcuManager<Response = R>> UdsEcu
         match &detection_result {
             VariantDetectionResult::ExactMatch(the_chosen_one) => {
                 // Mark all other duplicates, the chosen one keeps its detected variant.
-                for ecu_name in &duplicated_ecus {
+                for ecu_name§ in &duplicated_ecus {
                     if ecu_name == *the_chosen_one {
                         continue;
                     }
