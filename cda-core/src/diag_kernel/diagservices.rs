@@ -20,7 +20,7 @@ use cda_interfaces::{
     },
 };
 
-use crate::diag_kernel::{DiagDataValue, operations};
+use crate::diag_kernel::{DiagDataValue, iso_14229_nrc, operations};
 
 #[derive(Debug, Clone)]
 pub struct DiagServiceResponseStruct {
@@ -84,57 +84,58 @@ impl DiagServiceResponse for DiagServiceResponseStruct {
     }
 
     fn as_nrc(&self) -> Result<MappedNRC, DiagServiceError> {
-        let Some(MappedResponseData {
+        // If we have mapped data from the database, use it
+        if let Some(MappedResponseData {
             data: mapped_data,
             errors: _,
         }) = &self.mapped_data
-        else {
-            return Err(DiagServiceError::UnexpectedResponse(Some(
-                "Unexpected negative response from ECU".to_owned(),
-            )));
-        };
-        let nrc_code = mapped_data
-            .get("NRC")
-            .and_then(|container| match container {
-                DiagDataTypeContainer::RawContainer(nrc) => {
-                    let raw = u8::from_be(*nrc.data.first()?);
-                    let message = match operations::uds_data_to_serializable(
-                        nrc.data_type,
-                        nrc.compu_method.as_ref(),
-                        true,
-                        &nrc.data,
-                    )
-                    .unwrap_or_else(|_| DiagDataValue::String("Unknown".to_owned()))
-                    {
-                        DiagDataValue::String(v) => v,
-                        _ => "N/A".to_owned(),
-                    };
-                    Some((raw, message))
-                }
-                _ => None,
-            });
-        let sid = mapped_data
-            .get("SIDRQ_NR")
-            .and_then(|container| match container {
-                DiagDataTypeContainer::RawContainer(sid) => {
-                    sid.data.first().map(|&b| u8::from_be(b))
-                }
-                _ => None,
-            });
+        {
+            let nrc_code = mapped_data
+                .get("NRC")
+                .and_then(|container| match container {
+                    DiagDataTypeContainer::RawContainer(nrc) => {
+                        let raw = u8::from_be(*nrc.data.first()?);
+                        let message = match operations::uds_data_to_serializable(
+                            nrc.data_type,
+                            nrc.compu_method.as_ref(),
+                            true,
+                            &nrc.data,
+                        )
+                        .unwrap_or_else(|_| DiagDataValue::String("Unknown".to_owned()))
+                        {
+                            DiagDataValue::String(v) => v,
+                            _ => "N/A".to_owned(),
+                        };
+                        Some((raw, message))
+                    }
+                    _ => None,
+                });
+            let sid = mapped_data
+                .get("SIDRQ_NR")
+                .and_then(|container| match container {
+                    DiagDataTypeContainer::RawContainer(sid) => {
+                        sid.data.first().map(|&b| u8::from_be(b))
+                    }
+                    _ => None,
+                });
 
-        if let Some((code, description)) = nrc_code {
-            Ok(MappedNRC {
-                code: Some(code),
-                description: Some(description),
-                sid,
-            })
-        } else {
-            Ok(MappedNRC {
+            if let Some((code, description)) = nrc_code {
+                return Ok(MappedNRC {
+                    code: Some(code),
+                    description: Some(description),
+                    sid,
+                });
+            }
+            return Ok(MappedNRC {
                 code: None,
                 description: None,
                 sid,
-            })
+            });
         }
+
+        // No mapped data available - use default NRC handler for standardized NRCs
+        // UDS Negative Response format: [0x7F, SID, NRC]
+        extract_nrc_from_raw_data(&self.data)
     }
 
     fn is_empty(&self) -> bool {
@@ -369,5 +370,133 @@ impl DiagServiceResponseStruct {
             }
             DiagDataTypeContainer::DtcStruct(dtc) => Ok(create_dtc(dtc)),
         }
+    }
+}
+
+/// Extracts NRC information from raw UDS negative response data.
+/// UDS Negative Response format: [0x7F, SID, NRC]
+/// This function provides a default handler for standardized NRCs when no
+/// database-specific mapping is available.
+fn extract_nrc_from_raw_data(data: &[u8]) -> Result<MappedNRC, DiagServiceError> {
+    // Minimum length for a negative response is 3 bytes: 0x7F + SID + NRC
+    if data.len() < 3 {
+        return Err(DiagServiceError::UnexpectedResponse(Some(
+            "Negative response data too short".to_owned(),
+        )));
+    }
+
+    // Verify this is a negative response (first byte should be 0x7F)
+    if data.first() != Some(&0x7F) {
+        return Err(DiagServiceError::UnexpectedResponse(Some(
+            "Expected negative response (0x7F) but got different SID".to_owned(),
+        )));
+    }
+
+    let sid = data.get(1).copied();
+    let nrc = data.get(2).copied();
+
+    match nrc {
+        Some(nrc_code) => {
+            let description = iso_14229_nrc::get_nrc_code(nrc_code).to_owned();
+            Ok(MappedNRC {
+                code: Some(nrc_code),
+                description: Some(description),
+                sid,
+            })
+        }
+        None => Err(DiagServiceError::UnexpectedResponse(Some(
+            "Missing NRC code in negative response".to_owned(),
+        ))),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_extract_nrc_from_raw_data_valid() {
+        // Test with a valid negative response: 0x7F (neg response), 0x22 (SID), 0x33 (NRC: Security Access Denied)
+        let data = vec![0x7F, 0x22, 0x33];
+        let result = extract_nrc_from_raw_data(&data).unwrap();
+
+        assert_eq!(result.code, Some(0x33));
+        assert_eq!(result.sid, Some(0x22));
+        assert_eq!(result.description, Some("Security Access Denied".to_owned()));
+    }
+
+    #[test]
+    fn test_extract_nrc_from_raw_data_general_reject() {
+        // Test with NRC 0x10 (General Reject)
+        let data = vec![0x7F, 0x19, 0x10];
+        let result = extract_nrc_from_raw_data(&data).unwrap();
+
+        assert_eq!(result.code, Some(0x10));
+        assert_eq!(result.sid, Some(0x19));
+        assert_eq!(result.description, Some("General Reject".to_owned()));
+    }
+
+    #[test]
+    fn test_extract_nrc_from_raw_data_response_pending() {
+        // Test with NRC 0x78 (Response Pending)
+        let data = vec![0x7F, 0x31, 0x78];
+        let result = extract_nrc_from_raw_data(&data).unwrap();
+
+        assert_eq!(result.code, Some(0x78));
+        assert_eq!(result.sid, Some(0x31));
+        assert_eq!(
+            result.description,
+            Some("Request Correctly Received-Response Pending".to_owned())
+        );
+    }
+
+    #[test]
+    fn test_extract_nrc_from_raw_data_reserved_nrc() {
+        // Test with a reserved NRC value (e.g., 0x15)
+        let data = vec![0x7F, 0x22, 0x15];
+        let result = extract_nrc_from_raw_data(&data).unwrap();
+
+        assert_eq!(result.code, Some(0x15));
+        assert_eq!(result.sid, Some(0x22));
+        assert_eq!(result.description, Some("ISO SAE Reserved".to_owned()));
+    }
+
+    #[test]
+    fn test_extract_nrc_from_raw_data_too_short() {
+        // Test with data that's too short
+        let data = vec![0x7F, 0x22]; // Missing NRC byte
+        let result = extract_nrc_from_raw_data(&data);
+
+        assert!(result.is_err());
+        if let Err(DiagServiceError::UnexpectedResponse(Some(msg))) = result {
+            assert!(msg.contains("too short"));
+        } else {
+            panic!("Expected UnexpectedResponse error");
+        }
+    }
+
+    #[test]
+    fn test_extract_nrc_from_raw_data_not_negative_response() {
+        // Test with data that doesn't start with 0x7F
+        let data = vec![0x62, 0x22, 0x33]; // Positive response
+        let result = extract_nrc_from_raw_data(&data);
+
+        assert!(result.is_err());
+        if let Err(DiagServiceError::UnexpectedResponse(Some(msg))) = result {
+            assert!(msg.contains("Expected negative response"));
+        } else {
+            panic!("Expected UnexpectedResponse error");
+        }
+    }
+
+    #[test]
+    fn test_extract_nrc_from_raw_data_with_extra_bytes() {
+        // Test with extra bytes after the NRC (should still work)
+        let data = vec![0x7F, 0x22, 0x33, 0x44, 0x55];
+        let result = extract_nrc_from_raw_data(&data).unwrap();
+
+        assert_eq!(result.code, Some(0x33));
+        assert_eq!(result.sid, Some(0x22));
+        assert_eq!(result.description, Some("Security Access Denied".to_owned()));
     }
 }
