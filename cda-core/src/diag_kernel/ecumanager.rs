@@ -720,36 +720,37 @@ impl<S: SecurityPlugin> cda_interfaces::EcuManager for EcuManager<S> {
                 )?;
             }
         }
-        if let Some(data) = data {
-            match data {
-                UdsPayloadData::Raw(bytes) => uds.extend(bytes),
-                UdsPayloadData::ParameterMap(json_values) => {
-                    // todo: check if json_values is empty...
-                    for param in mapped_params.iter().skip(num_consts) {
-                        if uds.len() < param.byte_position() as usize {
-                            uds.extend(vec![
-                                0x0;
-                                (param.byte_position() as usize)
-                                    .saturating_sub(uds.len())
-                            ]);
-                        }
-                        let short_name = param.short_name().ok_or_else(|| {
-                            DiagServiceError::InvalidDatabase(format!(
-                                "Unable to find short name for param: {}",
-                                param.short_name().unwrap_or_default()
-                            ))
-                        })?;
 
-                        if let Some(value) = json_values.get(short_name) {
-                            // Setting parent byte position
-                            // to 0 because this is the uppermost level.
-                            self.map_param_to_uds(param, value, &mut uds, 0)?;
-                        } else {
-                            return Err(DiagServiceError::BadPayload(format!(
-                                "Missing parameter: {short_name}"
-                            )));
-                        }
+        // If no input data was provided, fall back to an empty parameter map
+        // this allows for a streamlined handling where some values might
+        // have defaults that can be used when no data is provided, while returning
+        // errors if the request expects input data but it is not provided.
+        let data = match data {
+            Some(d) => d,
+            None => UdsPayloadData::ParameterMap(HashMap::new()),
+        };
+        match data {
+            UdsPayloadData::Raw(bytes) => uds.extend(bytes),
+            UdsPayloadData::ParameterMap(json_values) => {
+                // todo: check if json_values is empty...
+                for param in mapped_params.iter().skip(num_consts) {
+                    if uds.len() < param.byte_position() as usize {
+                        uds.extend(vec![
+                            0x0;
+                            (param.byte_position() as usize)
+                                .saturating_sub(uds.len())
+                        ]);
                     }
+                    let short_name = param.short_name().ok_or_else(|| {
+                        DiagServiceError::InvalidDatabase(format!(
+                            "Unable to find short name for param: {}",
+                            param.short_name().unwrap_or_default()
+                        ))
+                    })?;
+
+                    // Setting parent byte position
+                    // to 0 because this is the uppermost level.
+                    self.map_param_to_uds(param, json_values.get(short_name), &mut uds, 0)?;
                 }
             }
         }
@@ -2685,13 +2686,21 @@ impl<S: SecurityPlugin> EcuManager<S> {
         &self,
         param: &datatypes::Parameter,
         uds_payload_data: &mut Vec<u8>,
-        param_data: &serde_json::Value,
+        param_data: Option<&serde_json::Value>,
     ) -> Result<(), DiagServiceError> {
         let p = param
             .specific_data_as_phys_const()
             .ok_or(DiagServiceError::InvalidDatabase(
                 "Expected PhysConst specific data".to_owned(),
             ))?;
+
+        let param_data = if let Some(param_data) = param_data {
+            param_data.clone()
+        } else {
+            p.phys_constant_value().map(serde_json::Value::from).ok_or(
+                DiagServiceError::InvalidDatabase("PhysConst has no constant value".to_owned()),
+            )?
+        };
 
         let dop =
             p.dop()
@@ -2704,7 +2713,11 @@ impl<S: SecurityPlugin> EcuManager<S> {
         match dop.variant()? {
             datatypes::DataOperationVariant::Normal(normal_dop) => {
                 let diag_type = normal_dop.diag_coded_type()?;
-                let uds_data = json_value_to_uds_data(&diag_type, None, param_data)?;
+                let uds_data = json_value_to_uds_data(
+                    &diag_type,
+                    normal_dop.compu_method().map(Into::into),
+                    &param_data,
+                )?;
                 diag_type.encode(
                     uds_data,
                     uds_payload_data,
@@ -2716,12 +2729,12 @@ impl<S: SecurityPlugin> EcuManager<S> {
                 self.map_struct_to_uds(
                     &structure_dop,
                     param.byte_position() as usize,
-                    param_data,
+                    &param_data,
                     uds_payload_data,
                 )?;
             }
             datatypes::DataOperationVariant::Mux(mux_dop) => {
-                self.map_mux_to_uds(&mux_dop, param_data, uds_payload_data)?;
+                self.map_mux_to_uds(&mux_dop, &param_data, uds_payload_data)?;
             }
             _ => {
                 return Err(DiagServiceError::InvalidDatabase(format!(
@@ -2861,20 +2874,14 @@ impl<S: SecurityPlugin> EcuManager<S> {
                     )
                 })?;
 
-                let param_value = value
-                    .get(short_name)
-                    .ok_or(DiagServiceError::InvalidRequest(format!(
-                        "Parameter '{short_name}' not part of the request body"
-                    )))?;
-
-                self.map_param_to_uds(&param, param_value, payload, struct_byte_pos)
+                self.map_param_to_uds(&param, value.get(short_name), payload, struct_byte_pos)
             })
     }
 
     fn map_param_to_uds(
         &self,
         param: &datatypes::Parameter,
-        value: &serde_json::Value,
+        value: Option<&serde_json::Value>,
         payload: &mut Vec<u8>,
         parent_byte_pos: usize,
     ) -> Result<(), DiagServiceError> {
@@ -2886,6 +2893,12 @@ impl<S: SecurityPlugin> EcuManager<S> {
                 "MatchingRequestParam only supported for responses".to_owned(),
             )),
             datatypes::ParamType::Value => {
+                // todo: handle values with a default correctly
+                let Some(value) = value else {
+                    return Err(DiagServiceError::InvalidRequest(
+                        "Value parameter missing in request body".to_owned(),
+                    ));
+                };
                 self.map_param_value_to_uds(param, value, payload, parent_byte_pos)
             }
             datatypes::ParamType::Reserved => Self::map_reserved_param_to_uds(param, payload),
