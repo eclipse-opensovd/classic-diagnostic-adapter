@@ -4008,7 +4008,7 @@ impl<S: SecurityPlugin> EcuManager<S> {
             .map(str::to_ascii_lowercase)
             .collect();
 
-        let (mut allowed_security, allowed_session): (HashSet<_>, HashSet<_>) =
+        let (mut allowed_security, mut allowed_session): (HashSet<_>, HashSet<_>) =
             precondition_states.into_iter().fold(
                 (HashSet::new(), HashSet::new()),
                 |(mut security, mut session), state_name| {
@@ -4031,7 +4031,8 @@ impl<S: SecurityPlugin> EcuManager<S> {
             })
             .map(str::to_ascii_lowercase)
             .for_each(|state| {
-                allowed_security.insert(state);
+                allowed_security.insert(state.clone());
+                allowed_session.insert(state);
             });
 
         let validate_state = |required: &HashSet<String>,
