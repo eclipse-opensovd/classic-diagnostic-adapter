@@ -243,7 +243,6 @@ impl<S: SecurityPlugin> cda_interfaces::EcuManager for EcuManager<S> {
                 state,
                 logical_address: self.logical_address,
             };
-            return Ok(());
         }
         match variant_detection::evaluate_variant(service_responses, &self.diag_database) {
             Ok(v) => {
