@@ -38,7 +38,7 @@ use tokio::{
     io::{AsyncReadExt, AsyncSeekExt, BufReader},
     sync::{Mutex, RwLock, Semaphore, mpsc, watch},
     task::JoinHandle,
-    time::Instant as TokioInstant,
+    time::{MissedTickBehavior, interval as tokio_interval},
 };
 
 type EcuIdentifier = String;
@@ -732,40 +732,33 @@ impl<S: EcuGateway, R: DiagServiceResponse, T: EcuManager<Response = R>> UdsMana
                         }
                     ),
                     async move {
+                        // To ensure accurate timing for tester present messages, use
+                        // tokio::time::Interval which internally tracks the elapsed
+                        // time since the last tick, thus ensuring that the task is always
+                        // executed with the same schedule.
+                        let mut schedule = tokio_interval(interval);
+                        // change the missed tick behavior from burst to delay, as for
+                        // TesterPresent it does not make sense to 'catch up' if a delay
+                        // occured, but rather try to keep the timing consistent again.
+                        schedule.set_missed_tick_behavior(MissedTickBehavior::Delay);
                         loop {
-                            // To ensure accurate timing for tester present messages, calculate
-                            // the `Instant` on which the next message should be sent and use
-                            // tokio's `sleep_until` to wait until the deadline.
-                            // This ensures a more consistent timing as it is invariant to
-                            // the duration `send_tester_present` takes.
-                            let start = TokioInstant::now();
-                            let next_send = start.checked_add(interval);
-                            if let Err(e) = uds.send_tester_present(&control_msg).await {
-                                tracing::error!(error = %e, "Failed to send tester present");
-                            }
-                            if let Some(next_send) = next_send {
-                                tokio::time::sleep_until(next_send).await;
+                            let _ = schedule.tick().await;
+                            // abort sending if it takes longer than `interval` and log an
+                            // error, but try to continue sending tester present afterwards.
+                            if let Ok(r) = tokio::time::timeout(
+                                interval,
+                                uds.send_tester_present(&control_msg),
+                            )
+                            .await
+                            {
+                                if let Err(e) = r {
+                                    tracing::error!(error = %e, "Failed to send tester present");
+                                }
                             } else {
                                 tracing::error!(
-                                    "TesterPresent next send time overflowed, falling back to \
-                                     sleep"
+                                    "tester present send took longer than scheduled interval of {}",
+                                    interval.as_millis()
                                 );
-                                // In case that the checked_add overflowed we try to fall back to
-                                // caluculating the remaining duration manually after sending.
-                                // The case that `checked_duration_since` returns None means that
-                                // the clock went backwards. This is not recoverable as it will
-                                // cause timings to be completely off, so we stop the tester
-                                // present task in this case.
-                                let after_send = TokioInstant::now();
-                                let Some(remaining) = after_send.checked_duration_since(start)
-                                else {
-                                    tracing::error!(
-                                        "Clock went backwards, stopping tester present task for {}",
-                                        control_msg.ecu
-                                    );
-                                    break;
-                                };
-                                tokio::time::sleep(remaining).await;
                             }
                         }
                     }
