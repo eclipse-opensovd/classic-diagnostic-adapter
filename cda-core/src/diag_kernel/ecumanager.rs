@@ -141,8 +141,7 @@ impl DbCache {
 
 enum CacheLocation {
     Variant(usize),
-    BaseVariant(usize),
-    EcuShared(usize),
+    ParentRef(usize),
 }
 
 impl<S: SecurityPlugin> cda_interfaces::EcuAddressProvider for EcuManager<S> {
@@ -301,14 +300,9 @@ impl<S: SecurityPlugin> cda_interfaces::EcuManager for EcuManager<S> {
         )
     )]
     fn comparams(&self) -> Result<ComplexComParamValue, DiagServiceError> {
-        // ensure base variant is handled first
-        // and maybe be overwritten by variant specific comparams
-        let variants = [Some(self.diag_database.base_variant()?), self.variant()];
-
-        Ok(variants
-            .iter()
-            .filter_map(|v| v.as_ref())
-            .filter_map(|v| v.diag_layer())
+        Ok(self
+            .get_diag_layers_from_variant_and_parent_refs()
+            .into_iter()
             .filter_map(|dl| dl.com_param_refs())
             .flat_map(|cp_ref_vec| cp_ref_vec.iter())
             .filter(|cp_ref| {
@@ -366,16 +360,9 @@ impl<S: SecurityPlugin> cda_interfaces::EcuManager for EcuManager<S> {
                 .and_then(|sdg| sdg.sdgs())
                 .map(datatypes::Sdgs)
         } else {
-            self.variant()
-                .as_ref()
-                .and_then(|v| v.diag_layer().and_then(|dl| dl.sdgs()))
-                .or_else(|| {
-                    self.diag_database
-                        .base_variant()
-                        .ok()?
-                        .diag_layer()
-                        .and_then(|dl| dl.sdgs())
-                })
+            self.get_diag_layers_from_variant_and_parent_refs()
+                .into_iter()
+                .find_map(|dl| dl.sdgs())
                 .map(datatypes::Sdgs)
         }
         .ok_or_else(|| DiagServiceError::InvalidDatabase("No SDG found in DB".to_owned()))?;
@@ -408,19 +395,9 @@ impl<S: SecurityPlugin> cda_interfaces::EcuManager for EcuManager<S> {
         security_plugin: &DynamicPlugin,
         rawdata: Vec<u8>,
     ) -> Result<ServicePayload, DiagServiceError> {
-        if rawdata.is_empty() {
-            return Err(DiagServiceError::BadPayload(
-                "Expected at least 1 byte".to_owned(),
-            ));
-        }
-
-        let Some(variant) = self.variant() else {
-            return Err(DiagServiceError::InvalidDatabase(
-                "No variant selected".to_owned(),
-            ));
-        };
-
-        let base_variant = self.diag_database.base_variant()?;
+        let raw_data_sid = rawdata.first().copied().ok_or_else(|| {
+            DiagServiceError::BadPayload("Expected at least 1 byte to read SID".to_owned())
+        })?;
 
         // iterate through the services and for each service, resolve the parameters
         // sort the parameters by byte_pos & bit_pos, and take the first parameter
@@ -428,33 +405,19 @@ impl<S: SecurityPlugin> cda_interfaces::EcuManager for EcuManager<S> {
         // bytes for the service id, and if yes, return this service.
         // If no service with a matching SIDRQ can be found, DiagServiceError::NotFound
         // is returned to the caller.
-        let mapped_service = variant
-            .diag_layer()
-            .and_then(|dl| dl.diag_services())
-            .into_iter()
-            .flatten()
-            .chain(
-                base_variant
-                    .diag_layer()
-                    .and_then(|dl| dl.diag_services())
-                    .into_iter()
-                    .flatten(),
-            )
-            .map(datatypes::DiagService)
-            .find_map(|service| {
-                let service_id = service.request_id()?;
-                if rawdata.first()? == &service_id {
-                    Some(service)
-                } else {
-                    None
-                }
-            })
+        let matched_services = self.get_services_from_variant_and_parent_refs(|service| {
+            service
+                .request_id()
+                .is_some_and(|service_id| raw_data_sid == service_id)
+        });
+        let mapped_service = matched_services
+            .first()
             .ok_or(DiagServiceError::NotFound(None))?;
         let mapped_dc = mapped_service.diag_comm().map(datatypes::DiagComm).ok_or(
             DiagServiceError::InvalidDatabase("Service is missing DiagComm".to_owned()),
         )?;
 
-        self.check_service_access(security_plugin, &mapped_service)
+        self.check_service_access(security_plugin, mapped_service)
             .await?;
 
         let (new_session, new_security) = self
@@ -725,38 +688,18 @@ impl<S: SecurityPlugin> cda_interfaces::EcuManager for EcuManager<S> {
     )]
     fn lookup_single_ecu_job(&self, job_name: &str) -> Result<single_ecu::Job, DiagServiceError> {
         tracing::debug!("Looking up single ECU job");
-
-        self.variant()
-            .and_then(|variant| {
-                variant.diag_layer().and_then(|diag_layer| {
-                    diag_layer.single_ecu_jobs().and_then(|jobs| {
-                        jobs.iter().find(|j| {
-                            j.diag_comm().is_some_and(|dc| {
-                                dc.short_name()
-                                    .is_some_and(|n| n.eq_ignore_ascii_case(job_name))
-                            })
-                        })
-                    })
-                })
+        self.get_single_ecu_jobs_from_variant_and_parent_refs(|job| {
+            job.diag_comm().is_some_and(|dc| {
+                dc.short_name()
+                    .is_some_and(|n| n.eq_ignore_ascii_case(job_name))
             })
-            .or_else(|| {
-                self.diag_database
-                    .base_variant()
-                    .ok()?
-                    .diag_layer()
-                    .and_then(|diag_layer| {
-                        diag_layer.single_ecu_jobs().and_then(|jobs| {
-                            jobs.iter().find(|j| {
-                                j.diag_comm().is_some_and(|dc| {
-                                    dc.short_name()
-                                        .is_some_and(|n| n.eq_ignore_ascii_case(job_name))
-                                })
-                            })
-                        })
-                    })
-            })
-            .map(Into::into)
-            .ok_or(DiagServiceError::NotFound(None))
+        })
+        .into_iter()
+        .next()
+        .map(|job| (*job).into())
+        .ok_or(DiagServiceError::NotFound(Some(format!(
+            "Single ECU job with name '{job_name}' not found"
+        ))))
     }
 
     /// Lookup a service by a given function class name and service id.
@@ -767,7 +710,7 @@ impl<S: SecurityPlugin> cda_interfaces::EcuManager for EcuManager<S> {
         func_class_name: &str,
         service_id: u8,
     ) -> Result<cda_interfaces::DiagComm, DiagServiceError> {
-        self.search_diag_services(|service| {
+        self.get_services_from_variant_and_parent_refs(|service| {
             service
                 .diag_comm()
                 .and_then(|dc| {
@@ -781,6 +724,8 @@ impl<S: SecurityPlugin> cda_interfaces::EcuManager for EcuManager<S> {
                 .filter(|_| service.request_id().is_some_and(|id| id == service_id))
                 .is_some()
         })
+        .into_iter()
+        .next()
         .and_then(|service| service.try_into().ok())
         .ok_or_else(|| {
             DiagServiceError::NotFound(Some(format!(
@@ -843,46 +788,32 @@ impl<S: SecurityPlugin> cda_interfaces::EcuManager for EcuManager<S> {
     }
 
     fn get_components_data_info(&self) -> Vec<ComponentDataInfo> {
-        self.get_diag_layer_all_variants()
-            .iter()
-            .filter_map(|dl| dl.diag_services())
-            .flat_map(|svcs| svcs.iter())
-            .map(datatypes::DiagService)
-            .filter_map(|service| {
-                let diag_comm = service.diag_comm()?;
-                let short_name = diag_comm.short_name()?;
-                if !short_name.ends_with("_Read") {
-                    return None;
-                }
-                Some(ComponentDataInfo {
-                    category: diag_comm.semantic().unwrap_or_default().to_owned(),
-                    id: diag_comm
-                        .short_name()
-                        .map(|s| s.replace("_Read", "").to_lowercase())
-                        .unwrap_or_default(),
-                    name: diag_comm
-                        .long_name()
-                        .and_then(|ln| ln.value().map(|v| v.to_owned().replace(" Read", "")))
-                        .unwrap_or_default(),
-                })
-            })
-            .collect()
+        self.get_services_from_variant_and_parent_refs(|service| {
+            service
+                .request_id()
+                .is_some_and(|id| id == service_ids::READ_DATA_BY_IDENTIFIER)
+        })
+        .into_iter()
+        .filter_map(|service| {
+            let diag_comm = service.diag_comm()?;
+            Some(self.diag_comm_to_component_data_info(&(diag_comm.into())))
+        })
+        .collect()
     }
 
     fn get_components_single_ecu_jobs_info(&self) -> Vec<ComponentDataInfo> {
-        self.get_diag_layer_all_variants()
-            .iter()
-            .filter_map(|dl| dl.single_ecu_jobs())
-            .flat_map(|jobs| jobs.iter())
-            .filter_map(|job| {
+        self.get_single_ecu_jobs_from_variant_and_parent_refs(|_| true)
+            .into_iter()
+            .filter_map(|job: datatypes::SingleEcuJob<'_>| {
                 let diag_comm = job.diag_comm()?;
                 let semantic = diag_comm.semantic()?;
                 Some(ComponentDataInfo {
                     category: semantic.to_lowercase(),
-                    id: diag_comm
-                        .short_name()
-                        .map(|n| n.strip_suffix("_Read").unwrap_or(n).to_lowercase())
-                        .unwrap_or_default(),
+                    id: diag_comm.short_name().map_or(<_>::default(), |n| {
+                        self.database_naming_convention
+                            .trim_short_name_affixes(n)
+                            .to_lowercase()
+                    }),
                     name: diag_comm
                         .long_name()
                         .and_then(|ln| ln.value().map(ToOwned::to_owned))
@@ -1054,18 +985,7 @@ impl<S: SecurityPlugin> cda_interfaces::EcuManager for EcuManager<S> {
     fn get_components_configurations_info(
         &self,
     ) -> Result<Vec<ComponentConfigurationsInfo>, DiagServiceError> {
-        let diag_layers = [
-            self.variant().and_then(|v| v.diag_layer()),
-            self.diag_database
-                .base_variant()
-                .ok()
-                .and_then(|v| v.diag_layer()),
-        ]
-        .into_iter()
-        .flatten()
-        .map(Into::into)
-        .collect::<Vec<datatypes::DiagLayer>>();
-
+        let diag_layers = self.get_diag_layers_from_variant_and_parent_refs();
         let var_coding_func_class_short_name = diag_layers
             .iter()
             .filter_map(|dl| dl.funct_classes())
@@ -2016,27 +1936,22 @@ impl<S: SecurityPlugin> EcuManager<S> {
         Some(variants.get(idx).into())
     }
 
-    #[tracing::instrument(skip_all,
-        fields(
-            dlt_context = dlt_ctx!("CORE"),
-        )
-    )]
-    fn get_diag_layer_all_variants(&self) -> Vec<datatypes::DiagLayer<'_>> {
-        let ecu_data = match self.diag_database.ecu_data() {
-            Ok(d) => d,
-            Err(e) => {
-                tracing::warn!(error = ?e, "Failed to get ECU data");
-                return Vec::new();
-            }
-        };
-
-        ecu_data
-            .variants()
-            .into_iter()
-            .flat_map(|vars| vars.iter())
-            .filter_map(|variant| variant.diag_layer())
-            .map(datatypes::DiagLayer)
-            .collect::<Vec<_>>()
+    fn diag_comm_to_component_data_info(
+        &self,
+        diag_comm: &datatypes::DiagComm<'_>,
+    ) -> ComponentDataInfo {
+        ComponentDataInfo {
+            category: diag_comm.semantic().unwrap_or_default().to_owned(),
+            id: diag_comm.short_name().map_or(<_>::default(), |s| {
+                self.database_naming_convention.trim_short_name_affixes(s)
+            }),
+            name: diag_comm
+                .long_name()
+                .and_then(|ln| ln.value())
+                .map_or(<_>::default(), |v| {
+                    self.database_naming_convention.trim_long_name_affixes(v)
+                }),
+        }
     }
 
     /// Lookup a diagnostic service by its diag comm definition.
@@ -2105,6 +2020,9 @@ impl<S: SecurityPlugin> EcuManager<S> {
         // Search in variant
         if let Some((idx, service)) = self
             .variant()
+            // This is necessary, so we are able to lookup services
+            // _before_ a variant has been found i.e. for variant detection.
+            .or_else(|| self.diag_database.base_variant().ok())
             .and_then(|v| v.diag_layer())
             .and_then(|dl| dl.diag_services())
             .and_then(|services| {
@@ -2117,34 +2035,137 @@ impl<S: SecurityPlugin> EcuManager<S> {
             return Some((service, CacheLocation::Variant(idx)));
         }
 
-        // Search in base variant
-        if let Some((idx, service)) = self
-            .diag_database
-            .base_variant()
-            .ok()
-            .and_then(|v| v.diag_layer())
-            .and_then(|dl| dl.diag_services())
-            .and_then(|services| {
-                services.iter().enumerate().find_map(|(idx, s)| {
-                    let service = datatypes::DiagService(s);
-                    predicate(&service).then_some((idx, service))
-                })
-            })
-        {
-            return Some((service, CacheLocation::BaseVariant(idx)));
-        }
-
-        // Search in ECU shared
-        if let Some((idx, service)) = self.find_ecu_shared_services().and_then(|services| {
+        // Search in Parent Refs
+        if let Some((idx, service)) = self.get_variant_parent_ref_services().and_then(|services| {
             services
                 .iter()
                 .enumerate()
                 .find_map(|(idx, s)| predicate(s).then_some((idx, s.clone())))
         }) {
-            return Some((service, CacheLocation::EcuShared(idx)));
+            return Some((service, CacheLocation::ParentRef(idx)));
         }
 
         None
+    }
+
+    fn get_services_from_diag_layer_and_parent_refs<'a, F>(
+        diag_layer: &datatypes::DiagLayer<'a>,
+        parent_refs: impl Iterator<Item = impl Into<datatypes::ParentRef<'a>>>,
+        service_filter: F,
+    ) -> Vec<datatypes::DiagService<'a>>
+    where
+        F: Fn(&datatypes::DiagService) -> bool,
+    {
+        diag_layer
+            .diag_services()
+            .into_iter()
+            .flatten()
+            .map(datatypes::DiagService)
+            .chain(
+                Self::get_parent_ref_services_recursive(parent_refs)
+                    .into_iter()
+                    .flatten(),
+            )
+            .filter(service_filter)
+            .collect()
+    }
+
+    /// Retrieves single ECU jobs from a given `DiagLayer` and its parent references,
+    /// filtered by the provided predicate. Jobs from the `DiagLayer` are returned first,
+    /// followed by jobs resolved recursively from parent references.
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// let jobs = EcuManager::get_single_ecu_jobs_from_diag_layer_and_parent_refs(
+    ///     &diag_layer,
+    ///     parent_refs.into_iter().map(datatypes::ParentRef),
+    ///     |job| job.diag_comm().and_then(|dc| dc.short_name()) == Some("MyJob"),
+    /// );
+    /// ```
+    fn get_single_ecu_jobs_from_diag_layer_and_parent_refs<'a, F>(
+        diag_layer: &datatypes::DiagLayer<'a>,
+        parent_refs: impl Iterator<Item = impl Into<datatypes::ParentRef<'a>>>,
+        service_filter: F,
+    ) -> Vec<datatypes::SingleEcuJob<'a>>
+    where
+        F: Fn(&datatypes::SingleEcuJob) -> bool,
+    {
+        diag_layer
+            .single_ecu_jobs()
+            .into_iter()
+            .flatten()
+            .map(datatypes::SingleEcuJob)
+            .chain(
+                Self::get_parent_ref_jobs_recursive(parent_refs)
+                    .into_iter()
+                    .flatten(),
+            )
+            .filter(service_filter)
+            .collect()
+    }
+
+    /// Retrieves diagnostic services from the current variants `DiagLayer` and its parent
+    /// references, filtered by the provided predicate. Returns an empty vector if no variant
+    /// is set.
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// let read_services = ecu_manager.get_services_from_variant_and_parent_refs(|service| {
+    ///     service
+    ///         .request_id()
+    ///         .is_some_and(|id| id == service_ids::READ_DATA_BY_IDENTIFIER)
+    /// });
+    /// for service in &read_services {
+    ///     println!("{:?}", service.diag_comm().and_then(|dc| dc.short_name()));
+    /// }
+    /// ```
+    fn get_services_from_variant_and_parent_refs<F>(
+        &self,
+        service_filter: F,
+    ) -> Vec<datatypes::DiagService<'_>>
+    where
+        F: Fn(&datatypes::DiagService) -> bool,
+    {
+        self.variant()
+            .and_then(|v| v.diag_layer().map(|dl| (dl, v.parent_refs())))
+            .map_or(<_>::default(), |(diag_layer, parent_refs)| {
+                Self::get_services_from_diag_layer_and_parent_refs(
+                    &(diag_layer.into()),
+                    parent_refs.into_iter().flatten().map(datatypes::ParentRef),
+                    service_filter,
+                )
+            })
+    }
+
+    /// Retrieves single ECU jobs from the current variants `DiagLayer` and its parent
+    /// references, filtered by the provided predicate. Returns an empty vector if no variant
+    /// is set.
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// let jobs = ecu_manager.get_single_ecu_jobs_from_variant_and_parent_refs(
+    ///     |job| job.diag_comm().and_then(|dc| dc.short_name()) == Some("ReadSerialNumber"),
+    /// );
+    /// ```
+    fn get_single_ecu_jobs_from_variant_and_parent_refs<F>(
+        &self,
+        service_filter: F,
+    ) -> Vec<datatypes::SingleEcuJob<'_>>
+    where
+        F: Fn(&datatypes::SingleEcuJob) -> bool,
+    {
+        self.variant()
+            .and_then(|v| v.diag_layer().map(|dl| (dl, v.parent_refs())))
+            .map_or(<_>::default(), |(diag_layer, parent_refs)| {
+                Self::get_single_ecu_jobs_from_diag_layer_and_parent_refs(
+                    &(diag_layer.into()),
+                    parent_refs.into_iter().flatten().map(datatypes::ParentRef),
+                    service_filter,
+                )
+            })
     }
 
     fn get_service_by_location(
@@ -2154,130 +2175,255 @@ impl<S: SecurityPlugin> EcuManager<S> {
         match location {
             CacheLocation::Variant(idx) => self
                 .variant()
+                // This is necessary, so we are able to lookup services
+                // _before_ a variant has been found i.e. for variant detection.
+                .or_else(|| self.diag_database.base_variant().ok())
                 .and_then(|v| v.diag_layer())
                 .and_then(|dl| dl.diag_services())
                 .map(|s| s.get(*idx))
                 .map(datatypes::DiagService),
-            CacheLocation::BaseVariant(idx) => self
-                .diag_database
-                .base_variant()
-                .ok()
-                .and_then(|v| v.diag_layer())
-                .and_then(|dl| dl.diag_services())
-                .map(|s| s.get(*idx))
-                .map(datatypes::DiagService),
-            CacheLocation::EcuShared(idx) => self
-                .find_ecu_shared_services()
+            CacheLocation::ParentRef(idx) => self
+                .get_variant_parent_ref_services()
                 .and_then(|services| services.get(*idx).cloned()),
         }
     }
 
-    fn search_diag_services<F>(&self, mut predicate: F) -> Option<datatypes::DiagService<'_>>
-    where
-        F: for<'a> FnMut(&datatypes::DiagService<'a>) -> bool,
-    {
-        // Search in current variant
-        if let Some(service) = self
-            .variant()
-            .and_then(|v| v.diag_layer())
-            .and_then(|dl| dl.diag_services())
-            .and_then(|services| {
-                services.into_iter().find_map(|service| {
-                    let service = datatypes::DiagService(service);
-                    predicate(&service).then_some(service)
-                })
-            })
-        {
-            return Some(service);
-        }
-
-        // Search in base variant
-        if let Some(service) = self
-            .diag_database
-            .base_variant()
-            .ok()
-            .and_then(|v| v.diag_layer())
-            .and_then(|dl| dl.diag_services())
-            .and_then(|services| {
-                services.into_iter().find_map(|service| {
-                    let service = datatypes::DiagService(service);
-                    predicate(&service).then_some(service)
-                })
-            })
-        {
-            return Some(service);
-        }
-
-        // Search in ECU shared services
-        self.find_ecu_shared_services()?
+    /// Recursively resolves parent references and collects their associated `DiagComm` entries.
+    /// Traverses the parent reference hierarchy to gather `DiagComms` from
+    /// inherited `DiagLayers`. Items whose short name appears in a parent references
+    /// `not_inherited_diag_comm_short_names` list are excluded.
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// let services = EcuManager::get_parent_ref_diag_comms_recursive(
+    ///     parent_refs.into_iter().map(datatypes::ParentRef),
+    ///     |dl| dl.diag_services().map(|s| s.iter().map(datatypes::DiagService).collect()),
+    ///     |service| service.diag_comm().and_then(|dc| dc.short_name()),
+    /// );
+    /// ```
+    fn get_parent_ref_diag_comms_recursive<'a, T>(
+        parent_refs: impl Iterator<Item = impl Into<datatypes::ParentRef<'a>>>,
+        extract: impl Fn(&datatypes::DiagLayer<'a>) -> Option<Vec<T>>,
+        get_name: impl Fn(&T) -> Option<&str>,
+    ) -> Option<Vec<T>> {
+        let all_items: Vec<T> = Self::get_parent_ref_diag_layers_with_refs_recursive(parent_refs)
             .into_iter()
-            .find(|service| predicate(service))
+            .filter_map(|(parent_ref, diag_layer)| {
+                let not_inherited_names: Vec<&str> = parent_ref
+                    .not_inherited_diag_comm_short_names()
+                    .map_or(<_>::default(), |names| names.iter().collect());
+
+                extract(&diag_layer).map(|items| {
+                    items
+                        .into_iter()
+                        .filter(|item| {
+                            get_name(item).is_none_or(|name| !not_inherited_names.contains(&name))
+                        })
+                        .collect::<Vec<_>>()
+                })
+            })
+            .flatten()
+            .collect();
+
+        if all_items.is_empty() {
+            None
+        } else {
+            Some(all_items)
+        }
     }
 
-    fn find_ecu_shared_services(&self) -> Option<Vec<datatypes::DiagService<'_>>> {
-        fn find_ecu_shared_services_recursive<'a>(
-            parent_refs: impl Iterator<Item = impl Into<datatypes::ParentRef<'a>>>,
-        ) -> Option<Vec<datatypes::DiagService<'a>>> {
-            let all_services: Vec<datatypes::DiagService<'a>> = parent_refs
-                .into_iter()
-                .filter_map(|parent_ref| {
-                    let parent_ref = parent_ref.into();
+    /// Recursively resolves parent references and collects their single ECU jobs.
+    /// Traverses the parent reference hierarchy to gather jobs from inherited `DiagLayers`.
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// let jobs = EcuManager::get_parent_ref_jobs_recursive(
+    ///     parent_refs.into_iter().map(datatypes::ParentRef),
+    /// );
+    /// // jobs: Option<Vec<datatypes::SingleEcuJob>>
+    /// ```
+    fn get_parent_ref_jobs_recursive<'a>(
+        parent_refs: impl Iterator<Item = impl Into<datatypes::ParentRef<'a>>>,
+    ) -> Option<Vec<datatypes::SingleEcuJob<'a>>> {
+        Self::get_parent_ref_diag_comms_recursive(
+            parent_refs,
+            |dl| {
+                dl.single_ecu_jobs()
+                    .map(|jobs| jobs.iter().map(datatypes::SingleEcuJob).collect())
+            },
+            |job| job.diag_comm().and_then(|dc| dc.short_name()),
+        )
+    }
 
-                    match parent_ref.ref_type().try_into() {
-                        Ok(datatypes::ParentRefType::EcuSharedData) => Some(
-                            parent_ref
-                                .ref__as_ecu_shared_data()?
-                                .diag_layer()?
-                                .diag_services()?
-                                .iter()
-                                .map(datatypes::DiagService)
-                                .collect::<Vec<_>>(),
-                        ),
-                        Ok(datatypes::ParentRefType::FunctionalGroup) => parent_ref
-                            .ref__as_functional_group()
-                            .and_then(|fg| fg.parent_refs())
-                            .and_then(|nested_refs| {
-                                find_ecu_shared_services_recursive(
-                                    nested_refs.iter().map(datatypes::ParentRef),
-                                )
-                            }),
-                        Ok(datatypes::ParentRefType::Protocol) => Some(
-                            parent_ref
-                                .ref__as_protocol()?
-                                .diag_layer()?
-                                .diag_services()?
-                                .iter()
-                                .map(datatypes::DiagService)
-                                .collect::<Vec<_>>(),
-                        ),
-                        _ => {
-                            tracing::error!(
-                                "Unsupported ParentRefType in ECU shared service lookup."
-                            );
-                            None
-                        }
+    /// Recursively resolves parent references and collects their diagnostic services.
+    /// Traverses the parent reference hierarchy to gather services
+    /// from inherited `DiagLayers`.
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// let services = EcuManager::get_parent_ref_services_recursive(
+    ///     parent_refs.into_iter().map(datatypes::ParentRef),
+    /// );
+    /// // services: Option<Vec<datatypes::DiagService>>
+    /// ```
+    fn get_parent_ref_services_recursive<'a>(
+        parent_refs: impl Iterator<Item = impl Into<datatypes::ParentRef<'a>>>,
+    ) -> Option<Vec<datatypes::DiagService<'a>>> {
+        Self::get_parent_ref_diag_comms_recursive(
+            parent_refs,
+            |dl| {
+                dl.diag_services()
+                    .map(|s| s.iter().map(datatypes::DiagService).collect())
+            },
+            |service| service.diag_comm().and_then(|dc| dc.short_name()),
+        )
+    }
+
+    /// Retrieves `DiagServices` inherited from the current variants parent references.
+    /// Falls back to the base variant if no variant has been identified yet, which allows
+    /// service lookups during variant detection.
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// let inherited_services: Option<Vec<datatypes::DiagService>> =
+    ///     ecu_manager.get_variant_parent_ref_services();
+    /// if let Some(services) = inherited_services {
+    ///     for service in &services {
+    ///         println!("{:?}", service.diag_comm().and_then(|dc| dc.short_name()));
+    ///     }
+    /// }
+    /// ```
+    fn get_variant_parent_ref_services(&self) -> Option<Vec<datatypes::DiagService<'_>>> {
+        self.variant()
+            // This is necessary, so we are able to lookup services
+            // _before_ a variant has been found i.e. for variant detection.
+            .or_else(|| self.diag_database.base_variant().ok())
+            .and_then(|v| v.parent_refs())
+            .and_then(|parent_refs| {
+                Self::get_parent_ref_services_recursive(
+                    parent_refs.iter().map(datatypes::ParentRef::from),
+                )
+            })
+    }
+
+    /// Collects all `DiagLayers` from the current variant and its parent references.
+    /// The variants own `DiagLayer` is placed first to give it higher priority in
+    /// subsequent operations, followed by layers resolved recursively from parent references.
+    /// Returns an empty vector if no variant is set.
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// let diag_layers: Vec<datatypes::DiagLayer> =
+    ///     ecu_manager.get_diag_layers_from_variant_and_parent_refs();
+    /// // The first element (if present) is the variants own diagnostic layer.
+    /// for layer in &diag_layers {
+    ///     println!("{:?}", layer.short_name());
+    /// }
+    /// ```
+    fn get_diag_layers_from_variant_and_parent_refs(&self) -> Vec<datatypes::DiagLayer<'_>> {
+        let Some(variant) = self.variant() else {
+            return Vec::new();
+        };
+
+        // Start with the diag layer of the current variant, to give it a higher
+        // prio in later operations
+        variant
+            .diag_layer()
+            .map(datatypes::DiagLayer)
+            .into_iter()
+            .chain(
+                variant
+                    .parent_refs()
+                    .map(|refs| Self::get_parent_ref_diag_layers_recursive(refs.iter()))
+                    .unwrap_or_default(),
+            )
+            .collect()
+    }
+
+    /// Recursively resolves parent references and collects their `DiagLayers`.
+    /// This is a convenience wrapper around [`get_parent_ref_diag_layers_with_refs_recursive`]
+    /// that discards the associated `ParentRef` and returns only the `DiagLayer` values.
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// let layers: Vec<datatypes::DiagLayer> = EcuManager::get_parent_ref_diag_layers_recursive(
+    ///     parent_refs.iter().map(datatypes::ParentRef),
+    /// );
+    /// ```
+    fn get_parent_ref_diag_layers_recursive<'a>(
+        parent_refs: impl Iterator<Item = impl Into<datatypes::ParentRef<'a>>>,
+    ) -> Vec<datatypes::DiagLayer<'a>> {
+        Self::get_parent_ref_diag_layers_with_refs_recursive(parent_refs)
+            .into_iter()
+            .map(|(_, diag_layer)| diag_layer)
+            .collect()
+    }
+
+    /// Recursively resolves parent references and returns `(ParentRef, DiagLayer)` pairs.
+    /// Uses a stack-based traversal to handle the parent reference hierarchy:
+    /// - **`FunctionalGroup`**: pushes its nested parent refs onto the stack for further traversal.
+    /// - **`EcuSharedData`**, **Protocol**, **Variant**: extracts the `DiagLayer` and pairs it
+    ///   with the originating parent reference.
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// let pairs: Vec<(datatypes::ParentRef, datatypes::DiagLayer)> =
+    ///     EcuManager::get_parent_ref_diag_layers_with_refs_recursive(
+    ///         parent_refs.iter().map(datatypes::ParentRef),
+    ///     );
+    /// for (parent_ref, diag_layer) in &pairs {
+    ///     println!("ref type: {:?}, layer: {:?}", parent_ref.ref_type(), diag_layer.short_name());
+    /// }
+    /// ```
+    fn get_parent_ref_diag_layers_with_refs_recursive<'a>(
+        parent_refs: impl Iterator<Item = impl Into<datatypes::ParentRef<'a>>>,
+    ) -> Vec<(datatypes::ParentRef<'a>, datatypes::DiagLayer<'a>)> {
+        let mut result = Vec::new();
+        let mut stack: Vec<datatypes::ParentRef<'a>> =
+            parent_refs.into_iter().map(Into::into).collect();
+
+        while let Some(parent_ref) = stack.pop() {
+            match parent_ref.ref_type().try_into() {
+                Ok(datatypes::ParentRefType::FunctionalGroup) => {
+                    if let Some(nested_refs) = parent_ref
+                        .ref__as_functional_group()
+                        .and_then(|fg| fg.parent_refs())
+                    {
+                        stack.extend(nested_refs.iter().map(datatypes::ParentRef));
                     }
-                })
-                .flatten()
-                .collect();
-
-            if all_services.is_empty() {
-                None
-            } else {
-                Some(all_services)
+                }
+                Ok(datatypes::ParentRefType::EcuSharedData) => {
+                    if let Some(dl) = parent_ref
+                        .ref__as_ecu_shared_data()
+                        .and_then(|esd| esd.diag_layer())
+                    {
+                        result.push((parent_ref, datatypes::DiagLayer(dl)));
+                    }
+                }
+                Ok(datatypes::ParentRefType::Protocol) => {
+                    if let Some(dl) = parent_ref.ref__as_protocol().and_then(|p| p.diag_layer()) {
+                        result.push((parent_ref, datatypes::DiagLayer(dl)));
+                    }
+                }
+                Ok(datatypes::ParentRefType::Variant) => {
+                    if let Some(dl) = parent_ref.ref__as_variant().and_then(|v| v.diag_layer()) {
+                        result.push((parent_ref, datatypes::DiagLayer(dl)));
+                    }
+                }
+                _ => {
+                    tracing::error!("Unsupported ParentRefType in ECU shared service lookup.");
+                }
             }
         }
 
-        self.diag_database
-            .ecu_data()
-            .ok()?
-            .functional_groups()?
-            .iter()
-            .find_map(|fg| {
-                fg.parent_refs().and_then(|parent_refs| {
-                    find_ecu_shared_services_recursive(parent_refs.iter().map(datatypes::ParentRef))
-                })
-            })
+        result
     }
 
     #[tracing::instrument(skip_all,
@@ -3692,22 +3838,22 @@ impl<S: SecurityPlugin> EcuManager<S> {
         &self,
         diag_comm: &datatypes::DiagComm<'_>,
     ) -> (Option<String>, Option<String>) {
-        // not using lookup_state_chart, so we spare one lookup of the state charts
-        let Ok(base_variant) = self.diag_database.base_variant() else {
-            return (None, None);
-        };
+        let diag_layers = self.get_diag_layers_from_variant_and_parent_refs();
 
-        let state_charts = base_variant.diag_layer().and_then(|dl| dl.state_charts());
-        let state_chart_session = state_charts.as_ref().and_then(|charts| {
-            charts.iter().find(|c| {
-                c.semantic()
-                    .is_some_and(|n| n.eq_ignore_ascii_case(semantics::SESSION))
+        let state_chart_session = diag_layers.iter().find_map(|dl| {
+            dl.state_charts().and_then(|charts| {
+                charts.iter().find(|c| {
+                    c.semantic()
+                        .is_some_and(|n| n.eq_ignore_ascii_case(semantics::SESSION))
+                })
             })
         });
-        let state_chart_security = state_charts.as_ref().and_then(|charts| {
-            charts.iter().find(|c| {
-                c.semantic()
-                    .is_some_and(|n| n.eq_ignore_ascii_case(semantics::SECURITY))
+        let state_chart_security = diag_layers.iter().find_map(|dl| {
+            dl.state_charts().and_then(|charts| {
+                charts.iter().find(|c| {
+                    c.semantic()
+                        .is_some_and(|n| n.eq_ignore_ascii_case(semantics::SECURITY))
+                })
             })
         });
 
@@ -3742,20 +3888,19 @@ impl<S: SecurityPlugin> EcuManager<S> {
         current_state: &str,
         target_state: &str,
     ) -> Result<cda_interfaces::DiagComm, DiagServiceError> {
-        let base_variant = self.diag_database.base_variant()?;
-        let semantic_transitions = base_variant
-            .diag_layer()
-            .and_then(|dl| dl.state_charts())
-            .and_then(|charts| {
-                charts.iter().find_map(|c| {
-                    if c.semantic()
-                        .is_some_and(|n| n.eq_ignore_ascii_case(semantic))
-                    {
-                        c.state_transitions()
-                    } else {
-                        None
-                    }
-                })
+        let semantic_transitions = self
+            .get_diag_layers_from_variant_and_parent_refs()
+            .iter()
+            .filter_map(|dl| dl.state_charts())
+            .flat_map(|charts| charts.iter())
+            .find_map(|c| {
+                if c.semantic()
+                    .is_some_and(|n| n.eq_ignore_ascii_case(semantic))
+                {
+                    c.state_transitions()
+                } else {
+                    None
+                }
             })
             .ok_or_else(|| {
                 tracing::error!(
@@ -3767,7 +3912,7 @@ impl<S: SecurityPlugin> EcuManager<S> {
             })?;
 
         let service = self
-            .search_diag_services(|s| {
+            .get_services_from_variant_and_parent_refs(|s| {
                 s.diag_comm()
                     .and_then(|dc| dc.state_transition_refs())
                     .is_some_and(|st_refs| {
@@ -3783,6 +3928,8 @@ impl<S: SecurityPlugin> EcuManager<S> {
                         })
                     })
             })
+            .into_iter()
+            .next()
             .ok_or_else(|| {
                 tracing::error!(
                     current_state,
@@ -3800,14 +3947,11 @@ impl<S: SecurityPlugin> EcuManager<S> {
         &self,
         semantic: &str,
     ) -> Result<datatypes::StateChart<'_>, DiagServiceError> {
-        self.diag_database
-            .base_variant()?
-            .diag_layer()
-            .and_then(|dl| dl.state_charts())
-            .and_then(|sc| {
-                sc.iter()
-                    .find(|sc| sc.semantic().is_some_and(|sem| sem == semantic))
-            })
+        self.get_diag_layers_from_variant_and_parent_refs()
+            .into_iter()
+            .filter_map(|dl| dl.state_charts())
+            .flat_map(|sc| sc.iter())
+            .find(|sc| sc.semantic().is_some_and(|sem| sem == semantic))
             .map(datatypes::StateChart)
             .ok_or(DiagServiceError::NotFound(None))
     }
@@ -3825,27 +3969,11 @@ impl<S: SecurityPlugin> EcuManager<S> {
         &self,
         service_id: u8,
     ) -> Result<Vec<datatypes::DiagService<'_>>, DiagServiceError> {
-        let services = self
-            .variant()
-            .and_then(|v| v.diag_layer().and_then(|dl| dl.diag_services()))
-            .into_iter()
-            .flatten()
-            .chain(
-                self.diag_database
-                    .base_variant()
-                    .ok()
-                    .and_then(|base| base.diag_layer())
-                    .and_then(|dl| dl.diag_services())
-                    .into_iter()
-                    .flatten(),
-            )
-            .map(datatypes::DiagService)
-            .chain(
-                // Search in ECU shared services referenced by base variant
-                self.find_ecu_shared_services().into_iter().flatten(),
-            )
-            .filter(|s| s.request_id().is_some_and(|req_id| req_id == service_id))
-            .collect::<Vec<_>>();
+        let services = self.get_services_from_variant_and_parent_refs(|service| {
+            service
+                .request_id()
+                .is_some_and(|req_id| req_id == service_id)
+        });
 
         if services.is_empty() {
             Err(DiagServiceError::NotFound(None))
@@ -4287,6 +4415,8 @@ mod tests {
 
     const SID_PARM_NAME: &str = "sid";
 
+    const TEST_DIAG_LAYER: &str = "TestLayer";
+
     macro_rules! skip_sec_plugin {
         () => {{
             let skip_sec_plugin: DynamicPlugin = Box::new(());
@@ -4304,7 +4434,7 @@ mod tests {
             $builder.finish_with_single_variant(
                 $protocol,
                 $diag_services,
-                "TestLayer",
+                TEST_DIAG_LAYER,
                 "TestEcu",
                 "1",
                 "1.0.0",
@@ -4408,7 +4538,7 @@ mod tests {
     fn new_ecu_manager(
         db: datatypes::DiagnosticDatabase,
     ) -> super::EcuManager<DefaultSecurityPluginData> {
-        super::EcuManager::new(
+        let mut manager = super::EcuManager::new(
             db,
             Protocol::DoIp,
             &ComParams::default(),
@@ -4423,7 +4553,19 @@ mod tests {
             },
             true,
         )
-        .unwrap()
+        .expect("Failed to create EcuManager");
+
+        // not using set_variant here, because that would require us to build state charts etc.
+        manager.variant = EcuVariant {
+            name: Some(TEST_DIAG_LAYER.to_owned()),
+            is_base_variant: true,
+            is_fallback: false,
+            state: EcuState::Online,
+            logical_address: 0,
+        };
+        manager.variant_index = Some(0);
+
+        manager
     }
 
     fn new_ecu_manager_no_base_fallback(

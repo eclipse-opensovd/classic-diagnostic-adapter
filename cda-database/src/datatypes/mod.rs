@@ -112,6 +112,7 @@ dataformat_wrapper!(StateChart<'a>, dataformat::StateChart<'a>);
 
 // Requests, Responses...
 dataformat_wrapper!(DiagService<'a>, dataformat::DiagService<'a>);
+dataformat_wrapper!(SingleEcuJob<'a>, dataformat::SingleEcuJob<'a>);
 dataformat_wrapper!(DiagComm<'a>, dataformat::DiagComm<'a>);
 dataformat_wrapper!(DiagLayer<'a>, dataformat::DiagLayer<'a>);
 dataformat_wrapper!(Parameter<'a>, dataformat::Param<'a>);

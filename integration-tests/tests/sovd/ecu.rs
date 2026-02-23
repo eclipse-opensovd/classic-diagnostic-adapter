@@ -618,6 +618,51 @@ async fn test_communication_control() {
 }
 
 #[tokio::test]
+async fn test_boot_variant_service_inheritance() {
+    let (runtime, _lock) = setup_integration_test(true).await.unwrap();
+    let auth = auth_header(&runtime.config, None).await.unwrap();
+    let ecu_endpoint = sovd::ECU_FLXC1000_ENDPOINT;
+
+    // Switch ECU sim to BOOT variant
+    ecusim::switch_variant(&runtime.ecu_sim, "FLXC1000", "BOOT")
+        .await
+        .unwrap();
+    force_variant_detection(&runtime.config, &auth, ecu_endpoint)
+        .await
+        .unwrap();
+
+    let ecu = ecu_status(&runtime.config, &auth, ecu_endpoint)
+        .await
+        .unwrap();
+    assert_eq!(ecu.variant.name, "FLXC1000_Boot_Variant".to_string());
+
+    let data_services = get_data_services(&runtime.config, &auth, ecu_endpoint)
+        .await
+        .unwrap();
+    let service_ids: Vec<_> = data_services
+        .items
+        .iter()
+        .map(|item| item.id.to_lowercase())
+        .collect();
+
+    // Vindataidentifier is inherited and should be present in boot.
+    assert!(
+        service_ids.contains(&"vindataidentifier".to_owned()),
+        "VIN service should be inherited from base variant, service ids {}",
+        service_ids.join(", ")
+    );
+
+    // reset ecu-sim variant
+    ecusim::switch_variant(&runtime.ecu_sim, "FLXC1000", "APPLICATION")
+        .await
+        .unwrap();
+
+    // As long as test_ecu_session_switching also works we know that services
+    // specific to the boot variant are still looked up correct, otherwise we cannot find
+    // RequestSeed and SendKey services, no need to test this again here.
+}
+
+#[tokio::test]
 async fn test_ecu_session_reset_on_lock_reacquire() {
     let (runtime, _lock) = setup_integration_test(true).await.unwrap();
     let auth = auth_header(&runtime.config, None).await.unwrap();
@@ -914,6 +959,23 @@ async fn get_configurations(
     let http_response = send_cda_request(
         config,
         &format!("{ecu_endpoint}/configurations/{service}"),
+        StatusCode::OK,
+        Method::GET,
+        None,
+        Some(headers),
+    )
+    .await?;
+    response_to_t(&http_response)
+}
+
+async fn get_data_services(
+    config: &Configuration,
+    headers: &HeaderMap,
+    ecu_endpoint: &str,
+) -> Result<sovd_interfaces::components::ecu::data::get::Response, TestingError> {
+    let http_response = send_cda_request(
+        config,
+        &format!("{ecu_endpoint}/data"),
         StatusCode::OK,
         Method::GET,
         None,
