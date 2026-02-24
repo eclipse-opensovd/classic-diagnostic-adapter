@@ -11,9 +11,8 @@
 Overview
 ========
 
-.. image:: images/overview.png
-   :alt: Architecture overview
-   :align: center
+.. uml:: images/overview.puml
+
 
 SOVD
 ----
