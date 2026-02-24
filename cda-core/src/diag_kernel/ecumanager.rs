@@ -5432,7 +5432,20 @@ mod tests {
 
         // Create session states
         let default_session_state = db_builder.create_state("DefaultSession", None);
+        let extended_session_state = db_builder.create_state("ExtendedSession", None);
         let programming_session_state = db_builder.create_state("ProgrammingSession", None);
+
+        // Create state transitions for session
+        let default_to_extended_session = db_builder.create_state_transition(
+            "DefaultToExtended",
+            Some("DefaultSession"),
+            Some("ExtendedSession"),
+        );
+        let extended_to_programming_session = db_builder.create_state_transition(
+            "ExtendedToProgramming",
+            Some("ExtendedSession"),
+            Some("ProgrammingSession"),
+        );
 
         // Create state transitions for security
         let locked_to_extended_transition = db_builder.create_state_transition(
@@ -5463,14 +5476,23 @@ mod tests {
         let session_state_chart = db_builder.create_state_chart(
             "Session",
             Some(semantics::SESSION),
-            None,
+            Some(vec![
+                default_to_extended_session,
+                extended_to_programming_session,
+            ]),
             Some("DefaultSession"),
-            Some(vec![default_session_state, programming_session_state]),
+            Some(vec![
+                default_session_state,
+                extended_session_state,
+                programming_session_state,
+            ]),
         );
 
         // Create state transition refs for the service
         let state_transition_ref =
             db_builder.create_state_transition_ref(locked_to_extended_transition);
+        let session_transition_ref =
+            db_builder.create_state_transition_ref(default_to_extended_session);
 
         // Create precondition state ref - service requires Programming
         let precondition_ref = db_builder.create_pre_condition_state_ref(programming_state);
@@ -5482,7 +5504,7 @@ mod tests {
         let diag_comm = db_builder.create_diag_comm(DiagCommParams {
             short_name: dc_name,
             pre_condition_state_refs: Some(vec![precondition_ref]),
-            state_transition_refs: Some(vec![state_transition_ref]),
+            state_transition_refs: Some(vec![session_transition_ref, state_transition_ref]),
             protocols: Some(vec![protocol]),
             ..Default::default()
         });
