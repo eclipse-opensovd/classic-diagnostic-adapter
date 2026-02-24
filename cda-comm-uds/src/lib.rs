@@ -38,6 +38,7 @@ use tokio::{
     io::{AsyncReadExt, AsyncSeekExt, BufReader},
     sync::{Mutex, RwLock, Semaphore, mpsc, watch},
     task::JoinHandle,
+    time::{MissedTickBehavior, interval as tokio_interval},
 };
 
 type EcuIdentifier = String;
@@ -712,6 +713,11 @@ impl<S: EcuGateway, R: DiagServiceResponse, T: EcuManager<Response = R>> UdsMana
                         .await
                         .tester_present_time()
                 };
+                tracing::debug!(
+                    "Starting tester present on for {} with interval {:?}",
+                    control_msg.ecu,
+                    interval
+                );
 
                 let mut uds = self.clone();
                 let msg_clone = control_msg.clone();
@@ -726,11 +732,34 @@ impl<S: EcuGateway, R: DiagServiceResponse, T: EcuManager<Response = R>> UdsMana
                         }
                     ),
                     async move {
+                        // To ensure accurate timing for tester present messages, use
+                        // tokio::time::Interval which internally tracks the elapsed
+                        // time since the last tick, thus ensuring that the task is always
+                        // executed with the same schedule.
+                        let mut schedule = tokio_interval(interval);
+                        // change the missed tick behavior from burst to delay, as for
+                        // TesterPresent it does not make sense to 'catch up' if a delay
+                        // occured, but rather try to keep the timing consistent again.
+                        schedule.set_missed_tick_behavior(MissedTickBehavior::Delay);
                         loop {
-                            if let Err(e) = uds.send_tester_present(&control_msg).await {
-                                tracing::error!(error = %e, "Failed to send tester present");
+                            let _ = schedule.tick().await;
+                            // abort sending if it takes longer than `interval` and log an
+                            // error, but try to continue sending tester present afterwards.
+                            if let Ok(r) = tokio::time::timeout(
+                                interval,
+                                uds.send_tester_present(&control_msg),
+                            )
+                            .await
+                            {
+                                if let Err(e) = r {
+                                    tracing::error!(error = %e, "Failed to send tester present");
+                                }
+                            } else {
+                                tracing::error!(
+                                    "tester present send took longer than scheduled interval of {}",
+                                    interval.as_millis()
+                                );
                             }
-                            tokio::time::sleep(interval).await;
                         }
                     }
                 );
