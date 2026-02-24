@@ -49,6 +49,10 @@ Diagnostic Database Update Plugin
          - Adds files to the next update of the diagnostic database, using multipart form data. The files provided through this endpoint are added to the pending update.
 
        * - DELETE
+         - ``/apps/sovd2uds/bulk-data/runtimefiles-nextupdate``
+         - Removes all pending changes to the next update of the diagnostic database, to reset the state of the next update to the currently active database.
+
+       * - DELETE
          - ``/apps/sovd2uds/bulk-data/runtimefiles-nextupdate/{id}``
          - Deletes the file from the pending update - in case of a file that was previously part of the current database, it'll be deleted in the current database upon applying the next update.
 
@@ -56,9 +60,13 @@ Diagnostic Database Update Plugin
          - ``/apps/sovd2uds/bulk-data/runtimefiles-backup``
          - Returns a list of items of the previously used diagnostic database, which can be used to roll back the diagnostic database in case of issues.
 
+       * - DELETE
+         - ``/apps/sovd2uds/bulk-data/runtimefiles-backup``
+         - Deletes the backup of the previously used diagnostic database, to free up storage space. This also means that rolling back to the previous state isn't possible anymore after deleting the backup.
+
     .. note:: The following query parameters must be supported for the GET endpoints:
 
-       - ``x-sovd2uds-include-hash`` (string, default: sha256 -- currently also the only supported one) - to include file hashes of the files
+       - ``x-sovd2uds-include-hash`` (string, default: not present -- supported is only sha256) - to include file hashes of the files
        - ``x-sovd2uds-include-file-size`` (boolean, default: false) - to include file sizes of the files
        - ``x-sovd2uds-include-revision`` (boolean, default: false) - to include the revision inside the files
 
@@ -89,7 +97,7 @@ Diagnostic Database Update Plugin
     **Application of the update**
 
     To delete all pending updates from ``runtimefiles-nextupdate``, or to delete the backup in ``runtimefiles-backup``
-    ``DELETE``` on the respective bulk-data endpoint must be supported.
+    ``DELETE`` on the respective bulk-data endpoint must be supported.
 
     To apply all the pending updates to the current diagnostic database, an additional endpoint is required:
 
