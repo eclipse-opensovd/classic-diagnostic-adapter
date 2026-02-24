@@ -27,8 +27,10 @@ use crate::{
     ConnectionError, DiagnosticResponse, DoipConnection, DoipEcu, DoipTarget,
     NRC_BUSY_REPEAT_REQUEST, NRC_RESPONSE_PENDING, NRC_TEMPORARILY_NOT_AVAILABLE, SLEEP_INTERVAL,
     connections::EcuError::EcuConnectionError,
-    ecu_connection::{self, ECUConnectionRead, ECUConnectionSend as _, EcuConnectionTarget},
-    socket::DoIPConnectionConfig,
+    ecu_connection::{
+        self, ConnectionConfig, ECUConnectionRead, ECUConnectionSend as _, EcuConnectionTarget,
+    },
+    socket::DoIPConfig,
 };
 
 type ConnectionResetReason = String;
@@ -86,8 +88,11 @@ impl From<EcuError> for DiagServiceError {
 }
 
 #[tracing::instrument(
-    skip(doip_connections, ecus, gateway_ecu_map),
+    skip(doip_connections, ecus, gateway_ecu_map, connection_config),
     fields(
+        tester_ip = connection_config.source_ip.clone(),
+        port = connection_config.port,
+        tls_port = connection_config.tls_port,
         gateway_ecu = %gateway.ecu,
         gateway_ip = %gateway.ip,
         logical_address = %format!("{:#06x}", gateway.logical_address),
@@ -95,9 +100,9 @@ impl From<EcuError> for DiagServiceError {
     )
 )]
 pub(crate) async fn handle_gateway_connection<T>(
-    tester_ip: &str,
+    connection_config: &ConnectionConfig,
     gateway: DoipTarget,
-    doip_connection_config: DoIPConnectionConfig,
+    doip_connection_config: DoIPConfig,
     doip_connections: &Arc<RwLock<Vec<Arc<DoipConnection>>>>,
     ecus: &Arc<HashMap<String, RwLock<T>>>,
     gateway_ecu_map: &HashMap<u16, Vec<u16>>,
@@ -141,7 +146,7 @@ where
     let connection_retry_attempts = gateway_ecu.connection_retry_attempts();
 
     let (sender, receiver) = match connection_handler(
-        tester_ip.to_owned(),
+        connection_config.clone(),
         gateway.ip.clone(),
         gateway.ecu.clone(),
         doip_connection_config,
@@ -217,8 +222,11 @@ fn create_ecu_receiver_map(
 
 #[allow(clippy::type_complexity)]
 #[tracing::instrument(
-    skip(routing_activation_request, connection_settings),
+    skip(routing_activation_request, connection_settings, connection_config),
     fields(
+        tester_ip = connection_config.source_ip.clone(),
+        port = connection_config.port,
+        tls_port = connection_config.tls_port,
         gateway_ip = %gateway_ip,
         gateway_name = %gateway_name,
         ecu_count = ecus.len(),
@@ -226,10 +234,10 @@ fn create_ecu_receiver_map(
     )
 )]
 async fn connection_handler(
-    tester_ip: String,
+    connection_config: ConnectionConfig,
     gateway_ip: String,
     gateway_name: String,
-    doip_connection_config: DoIPConnectionConfig,
+    doip_connection_config: DoIPConfig,
     routing_activation_request: RoutingActivationRequest,
     ecus: Vec<u16>,
     connection_settings: ConnectionSettings,
@@ -262,7 +270,7 @@ async fn connection_handler(
     // setting up initial gateway connection
     let gateway_conn = Arc::new(
         ecu_connection::establish_ecu_connection(
-            &tester_ip,
+            &connection_config,
             &gateway_ip,
             &gateway_name,
             doip_connection_config,
@@ -281,7 +289,7 @@ async fn connection_handler(
     // task to handle connection resets and reconnects
     let conn_reset = Arc::<EcuConnectionTarget>::clone(&gateway_conn);
     spawn_connection_reset_task(
-        tester_ip.clone(),
+        connection_config.clone(),
         gateway_ip.clone(),
         doip_connection_config,
         routing_activation_request,
@@ -322,9 +330,9 @@ async fn connection_handler(
     )
 )]
 fn spawn_connection_reset_task(
-    tester_ip: String,
+    connection_config: ConnectionConfig,
     gateway_ip: String,
-    doip_connection_config: DoIPConnectionConfig,
+    doip_connection_config: DoIPConfig,
     routing_activation_request: RoutingActivationRequest,
     mut conn_reset_rx: mpsc::Receiver<ConnectionResetReason>,
     conn_reset: Arc<EcuConnectionTarget>,
@@ -341,7 +349,7 @@ fn spawn_connection_reset_task(
 
                     'reconnect: loop {
                         let new_connection = ecu_connection::establish_ecu_connection(
-                            &tester_ip,
+                            &connection_config,
                             &gateway_ip,
                             &conn_reset.gateway_name,
                             doip_connection_config,
