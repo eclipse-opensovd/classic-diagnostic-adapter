@@ -258,6 +258,7 @@ fn compu_lookup_text_table(scale: &CompuScale) -> Result<DiagDataValue, DiagServ
 fn decode_numeric_val_from_str(
     value: &str,
     physical_type: PhysicalType,
+    diag_type: &datatypes::DiagCodedType,
 ) -> Result<Vec<u8>, DiagServiceError> {
     match physical_type.base_type {
         DataType::Int32 => value
@@ -267,17 +268,25 @@ fn decode_numeric_val_from_str(
                     "Invalid value for Int32: {value}"
                 ))
             })
+            .and_then(|v| {
+                validate_bit_len_signed(v, diag_type.bit_len().unwrap_or(32))?;
+                Ok(v)
+            })
             .map(|v| v.to_be_bytes().to_vec()),
         DataType::UInt32 => {
             // according to ISO 22901-1 only UInt32 can have display radix
             match physical_type.display_radix {
                 Some(datatypes::Radix::Hex) => {
                     let decoded = decode_hex_with_optional_prefix(value)?;
-                    if decoded.len() < size_of::<u32>() {
-                        Ok(pad_msb_to_len(&decoded, size_of::<u32>()))
+                    let decoded = if decoded.len() < size_of::<u32>() {
+                        pad_msb_to_len(&decoded, size_of::<u32>())
                     } else {
-                        Ok(decoded)
-                    }
+                        decoded
+                    };
+                    let u32_val =
+                        u32::from_be_bytes(decoded.try_into().expect("padded to u32 length"));
+                    validate_bit_len_unsigned(u32_val, diag_type.bit_len().unwrap_or(32))?;
+                    Ok(u32_val.to_be_bytes().to_vec())
                 }
                 Some(datatypes::Radix::Octal) => decode_u32_octal_with_optional_prefix(value),
                 Some(datatypes::Radix::Binary) => decode_u32_binary_with_optional_prefix(value),
@@ -287,6 +296,10 @@ fn decode_numeric_val_from_str(
                         DiagServiceError::ParameterConversionError(format!(
                             "Invalid value for UInt32: {value}"
                         ))
+                    })
+                    .and_then(|v| {
+                        validate_bit_len_unsigned(v, diag_type.bit_len().unwrap_or(32))?;
+                        Ok(v)
                     })
                     .map(|v| v.to_be_bytes().to_vec()),
             }
@@ -339,7 +352,7 @@ fn parse_json_to_f64(
     if let Some(s) = value.as_str()
         && let Some(phys_type) = physical_type
     {
-        let base_bytes = decode_numeric_val_from_str(s, phys_type)?;
+        let base_bytes = decode_numeric_val_from_str(s, phys_type, diag_type)?;
         let val = match diag_type.base_datatype() {
             DataType::Int32 => {
                 if base_bytes.len() > size_of::<i32>() {
@@ -757,8 +770,8 @@ fn decode_u32_binary_with_optional_prefix(value: &str) -> Result<Vec<u8>, DiagSe
 fn process_numeric_json_value(
     json_value: &serde_json::Value,
     data_type: &datatypes::DiagCodedType,
-    base_type: DataType,
 ) -> Result<Vec<u8>, DiagServiceError> {
+    let base_type = data_type.base_datatype();
     match base_type {
         DataType::Int32 => {
             let value = json_value
@@ -812,14 +825,15 @@ fn process_numeric_json_value(
 fn process_physical_type_value(
     json_value: &serde_json::Value,
     physical_type: PhysicalType,
-    base_type: DataType,
+    data_type: &datatypes::DiagCodedType,
 ) -> Result<Vec<u8>, DiagServiceError> {
     let value = json_value
         .as_str()
         .ok_or(DiagServiceError::ParameterConversionError(format!(
             "Non-numeric JSON value {json_value} could not be converted to string"
         )))?;
-    let data = decode_numeric_val_from_str(value, physical_type)?;
+    let data = decode_numeric_val_from_str(value, physical_type, data_type)?;
+    let base_type = data_type.base_datatype();
     if physical_type.base_type == base_type {
         Ok(data)
     } else {
@@ -899,21 +913,20 @@ fn numeric_json_value_to_byte_vector(
     data_type: &datatypes::DiagCodedType,
     physical_type: Option<PhysicalType>,
 ) -> Result<Vec<u8>, DiagServiceError> {
-    let base_type = data_type.base_datatype();
-
     let data = if json_value.is_number() {
-        process_numeric_json_value(json_value, data_type, base_type)
+        process_numeric_json_value(json_value, data_type)
     } else if let Some(physical_type) = physical_type {
-        process_physical_type_value(json_value, physical_type, base_type)
+        process_physical_type_value(json_value, physical_type, data_type)
     } else {
         Err(DiagServiceError::ParameterConversionError(format!(
-            "Cannot decode non-numeric JSON value {json_value:?} to {base_type:?} without \
-             physical type information",
+            "Cannot decode non-numeric JSON value {json_value:?} to {:?} without physical type \
+             information",
+            data_type.base_datatype()
         )))
     };
 
     if let Ok(ref data) = data {
-        validate_data_length(data, base_type, json_value)?;
+        validate_data_length(data, data_type.base_datatype(), json_value)?;
     }
     data
 }
@@ -1500,38 +1513,42 @@ mod tests {
     #[test]
     fn test_decode_numeric_value_from_str() {
         // test decode float
+        let base_type = create_diag_coded_type_stl(DataType::Float32, None);
         let phys_type = PhysicalType {
             precision: None,
             base_type: DataType::Float32,
             display_radix: None,
         };
         let value = "10.42";
-        let result = super::decode_numeric_val_from_str(value, phys_type).unwrap();
+        let result = super::decode_numeric_val_from_str(value, phys_type, &base_type).unwrap();
         assert_eq!(result, 10.42f32.to_be_bytes().to_vec());
 
         // test decode int
+        let base_type = create_diag_coded_type_stl(DataType::Int32, None);
         let phys_type = PhysicalType {
             precision: None,
             base_type: DataType::Int32,
             display_radix: None,
         };
         let value = "42";
-        let result = super::decode_numeric_val_from_str(value, phys_type).unwrap();
+        let result = super::decode_numeric_val_from_str(value, phys_type, &base_type).unwrap();
         assert_eq!(result, 42i32.to_be_bytes().to_vec());
 
         // test decode int as hex is err
         let value = "0x2A";
-        let result = super::decode_numeric_val_from_str(value, phys_type);
+        let result = super::decode_numeric_val_from_str(value, phys_type, &base_type);
         assert!(result.is_err());
 
         // test decode uint as decimal
+        let base_type = create_diag_coded_type_stl(DataType::UInt32, None);
+
         let phys_type = PhysicalType {
             precision: None,
             base_type: DataType::UInt32,
             display_radix: None,
         };
         let value = "42";
-        let result = super::decode_numeric_val_from_str(value, phys_type).unwrap();
+        let result = super::decode_numeric_val_from_str(value, phys_type, &base_type).unwrap();
         assert_eq!(result, 42u32.to_be_bytes().to_vec());
 
         // test decode uint as hex
@@ -1541,7 +1558,7 @@ mod tests {
             display_radix: Some(Radix::Hex),
         };
         let value = "0x2A";
-        let result = super::decode_numeric_val_from_str(value, phys_type).unwrap();
+        let result = super::decode_numeric_val_from_str(value, phys_type, &base_type).unwrap();
         assert_eq!(result, 42u32.to_be_bytes().to_vec());
 
         // test decode uint as octal
@@ -1551,12 +1568,12 @@ mod tests {
             display_radix: Some(Radix::Octal),
         };
         let value = "0o52";
-        let result = super::decode_numeric_val_from_str(value, phys_type).unwrap();
+        let result = super::decode_numeric_val_from_str(value, phys_type, &base_type).unwrap();
         assert_eq!(result, 42u32.to_be_bytes().to_vec());
 
         // test decode uint as octal without prefix
         let value = "52";
-        let result = super::decode_numeric_val_from_str(value, phys_type).unwrap();
+        let result = super::decode_numeric_val_from_str(value, phys_type, &base_type).unwrap();
         assert_eq!(result, 42u32.to_be_bytes().to_vec());
 
         // test decode uint as binary
@@ -1566,12 +1583,12 @@ mod tests {
             display_radix: Some(Radix::Binary),
         };
         let value = "0b101010";
-        let result = super::decode_numeric_val_from_str(value, phys_type).unwrap();
+        let result = super::decode_numeric_val_from_str(value, phys_type, &base_type).unwrap();
         assert_eq!(result, 42u32.to_be_bytes().to_vec());
 
         // test decode uint as binary without prefix
         let value = "101010";
-        let result = super::decode_numeric_val_from_str(value, phys_type).unwrap();
+        let result = super::decode_numeric_val_from_str(value, phys_type, &base_type).unwrap();
         assert_eq!(result, 42u32.to_be_bytes().to_vec());
     }
 
@@ -2153,6 +2170,35 @@ mod tests {
         assert!(
             res.is_err(),
             "MinMaxLengthType with min_length 1 should be error when payload is empty"
+        );
+    }
+
+    #[test]
+    fn test_string_value_exceeds_bit_length_with_matching_physical_type() {
+        // 8-bit UInt32: only values 0–255 should be valid
+        let uint32_8bit = create_diag_coded_type_stl(DataType::UInt32, Some(8));
+        let u32_physical_type = Some(PhysicalType {
+            precision: None,
+            base_type: DataType::UInt32,
+            display_radix: None,
+        });
+
+        // Numeric JSON value 99999 is correctly rejected (bit-length check fires)
+        let json_numeric = serde_json::json!(99999);
+        assert!(
+            super::json_value_to_uds_data(&uint32_8bit, None, None, &json_numeric).is_err(),
+            "Numeric 99999 should be rejected for 8-bit UInt32"
+        );
+
+        // String "99999" with matching physical type should also be rejected,
+        // but currently is not because process_physical_type_value returns early
+        // without bit-length validation.
+        let json_string = serde_json::json!("99999");
+        assert!(
+            super::json_value_to_uds_data(&uint32_8bit, None, u32_physical_type, &json_string)
+                .is_err(),
+            "String '99999' should be rejected for 8-bit UInt32, but bit-length validation is \
+             skipped"
         );
     }
 }
