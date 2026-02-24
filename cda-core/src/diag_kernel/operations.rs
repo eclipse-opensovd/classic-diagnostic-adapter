@@ -10,8 +10,11 @@
  * https://www.apache.org/licenses/LICENSE-2.0
  */
 
+use std::fmt::Display;
+
 use cda_database::datatypes::{
     self, BitLength, CompuMethod, CompuScale, DataType, DiagCodedTypeVariant, MinMaxLengthType,
+    PhysicalType,
 };
 use cda_interfaces::{
     DataParseError, DiagServiceError,
@@ -252,9 +255,87 @@ fn compu_lookup_text_table(scale: &CompuScale) -> Result<DiagDataValue, DiagServ
     Ok(DiagDataValue::String(mapped_value))
 }
 
+fn decode_numeric_val_from_str(
+    value: &str,
+    physical_type: PhysicalType,
+    diag_type: &datatypes::DiagCodedType,
+) -> Result<Vec<u8>, DiagServiceError> {
+    match physical_type.base_type {
+        DataType::Int32 => value
+            .parse::<i32>()
+            .map_err(|_| {
+                DiagServiceError::ParameterConversionError(format!(
+                    "Invalid value for Int32: {value}"
+                ))
+            })
+            .and_then(|v| {
+                validate_bit_len_signed(v, diag_type.bit_len().unwrap_or(32))?;
+                Ok(v)
+            })
+            .map(|v| v.to_be_bytes().to_vec()),
+        DataType::UInt32 => {
+            // according to ISO 22901-1 only UInt32 can have display radix
+            match physical_type.display_radix {
+                Some(datatypes::Radix::Hex) => {
+                    let decoded = decode_hex_with_optional_prefix(value)?;
+                    let decoded = if decoded.len() < size_of::<u32>() {
+                        pad_msb_to_len(&decoded, size_of::<u32>())
+                    } else {
+                        decoded
+                    };
+                    let u32_val =
+                        u32::from_be_bytes(decoded.try_into().expect("padded to u32 length"));
+                    validate_bit_len_unsigned(u32_val, diag_type.bit_len().unwrap_or(32))?;
+                    Ok(u32_val.to_be_bytes().to_vec())
+                }
+                Some(datatypes::Radix::Octal) => decode_u32_octal_with_optional_prefix(value),
+                Some(datatypes::Radix::Binary) => decode_u32_binary_with_optional_prefix(value),
+                Some(datatypes::Radix::Decimal) | None => value
+                    .parse::<u32>()
+                    .map_err(|_| {
+                        DiagServiceError::ParameterConversionError(format!(
+                            "Invalid value for UInt32: {value}"
+                        ))
+                    })
+                    .and_then(|v| {
+                        validate_bit_len_unsigned(v, diag_type.bit_len().unwrap_or(32))?;
+                        Ok(v)
+                    })
+                    .map(|v| v.to_be_bytes().to_vec()),
+            }
+        }
+        // when parsing str -> float we can ignore the precision
+        // as that only specifies how many decimal places are displayed
+        DataType::Float32 => value
+            .parse::<f32>()
+            .map_err(|_| {
+                DiagServiceError::ParameterConversionError(format!(
+                    "Invalid value for Float: {value}"
+                ))
+            })
+            .map(|v| v.to_be_bytes().to_vec()),
+        DataType::Float64 => value
+            .parse::<f64>()
+            .map_err(|_| {
+                DiagServiceError::ParameterConversionError(format!(
+                    "Invalid value for Float: {value}"
+                ))
+            })
+            .map(|v| v.to_be_bytes().to_vec()),
+        DataType::AsciiString
+        | DataType::Utf8String
+        | DataType::Unicode2String
+        | DataType::ByteField => Err(DiagServiceError::ParameterConversionError(format!(
+            "Cannot parse string value for non-numeric physical type: {:?}",
+            physical_type.base_type
+        ))),
+    }
+}
+
 fn parse_json_to_f64(
     value: &serde_json::Value,
     diag_type: &datatypes::DiagCodedType,
+    physical_type: Option<PhysicalType>,
 ) -> Result<f64, DiagServiceError> {
     // numeric JSON values are used directly
     if let Some(num) = value.as_f64() {
@@ -268,61 +349,64 @@ fn parse_json_to_f64(
         return Ok(num as f64);
     }
 
-    // string values are convert to bytes then interpreted
-    if let Some(s) = value.as_str() {
-        let bytes = numeric_type_str_to_byte_vec(diag_type, s)?;
-        match diag_type.base_datatype() {
+    if let Some(s) = value.as_str()
+        && let Some(phys_type) = physical_type
+    {
+        let base_bytes = decode_numeric_val_from_str(s, phys_type, diag_type)?;
+        let val = match diag_type.base_datatype() {
             DataType::Int32 => {
-                let padded = pad_msb_to_len(&bytes, 4);
-                let array: [u8; 4] = padded.try_into().map_err(|_| {
-                    DiagServiceError::ParameterConversionError(
-                        "Invalid byte length for i32".to_owned(),
-                    )
-                })?;
-                Ok(f64::from(i32::from_be_bytes(array)))
+                if base_bytes.len() > size_of::<i32>() {
+                    return Err(DiagServiceError::ParameterConversionError(format!(
+                        "Input value {base_bytes:?} is too large for Int32"
+                    )));
+                }
+                let padded = pad_msb_to_len(&base_bytes, size_of::<i32>());
+                f64::from(i32::from_be_bytes(
+                    padded.try_into().expect("input bytes padded to i32 size"),
+                ))
             }
             DataType::UInt32 => {
-                let padded = pad_msb_to_len(&bytes, 4);
-                let array: [u8; 4] = padded.try_into().map_err(|_| {
-                    DiagServiceError::ParameterConversionError(
-                        "Invalid byte length for u32".to_owned(),
-                    )
-                })?;
-                Ok(f64::from(u32::from_be_bytes(array)))
+                if base_bytes.len() > size_of::<u32>() {
+                    return Err(DiagServiceError::ParameterConversionError(format!(
+                        "Input value {s} is too large for UInt32"
+                    )));
+                }
+                let padded = pad_msb_to_len(&base_bytes, size_of::<u32>());
+                f64::from(u32::from_be_bytes(
+                    padded.try_into().expect("input bytes padded to u32 size"),
+                ))
             }
             DataType::Float32 => {
-                let padded = pad_msb_to_len(&bytes, 4);
-                let array: [u8; 4] = padded.try_into().map_err(|_| {
-                    DiagServiceError::ParameterConversionError(
-                        "Invalid byte length for f32".to_owned(),
-                    )
-                })?;
-                Ok(f64::from(f32::from_be_bytes(array)))
+                if base_bytes.len() > size_of::<f32>() {
+                    return Err(DiagServiceError::ParameterConversionError(format!(
+                        "Input value {s} is too large for Float32"
+                    )));
+                }
+                let padded = pad_msb_to_len(&base_bytes, size_of::<f32>());
+                f64::from(f32::from_be_bytes(
+                    padded.try_into().expect("input bytes padded to f32 size"),
+                ))
             }
             DataType::Float64 => {
-                let padded = pad_msb_to_len(&bytes, 8);
-                let array: [u8; 8] = padded.try_into().map_err(|_| {
-                    DiagServiceError::ParameterConversionError(
-                        "Invalid byte length for f64".to_owned(),
-                    )
-                })?;
-                Ok(f64::from_be_bytes(array))
+                if base_bytes.len() > size_of::<f64>() {
+                    return Err(DiagServiceError::ParameterConversionError(format!(
+                        "Input value {s} is too large for Float64"
+                    )));
+                }
+                let padded = pad_msb_to_len(&base_bytes, size_of::<f64>());
+                f64::from_be_bytes(padded.try_into().expect("input bytes padded to f64 size"))
             }
-            DataType::ByteField => {
-                let padded = pad_msb_to_len(&bytes, 8);
-                let array: [u8; 8] = padded.try_into().map_err(|_| {
-                    DiagServiceError::ParameterConversionError(
-                        "Invalid byte length for u32".to_owned(),
-                    )
-                })?;
-                // allowed because byte field for compu convert is an edge case anyway.
-                #[allow(clippy::cast_precision_loss)]
-                Ok(u64::from_be_bytes(array) as f64)
+            DataType::AsciiString
+            | DataType::Utf8String
+            | DataType::Unicode2String
+            | DataType::ByteField => {
+                return Err(DiagServiceError::ParameterConversionError(format!(
+                    "Cannot parse string value for non-numeric physical type: {:?}",
+                    phys_type.base_type
+                )));
             }
-            _ => Err(DiagServiceError::ParameterConversionError(format!(
-                "Unsupported data type for numeric conversion: {diag_type:?}"
-            ))),
-        }
+        } as f64;
+        Ok(val)
     } else {
         Err(DiagServiceError::ParameterConversionError(
             "Invalid JSON value for numeric conversion".to_owned(),
@@ -354,6 +438,7 @@ fn linear_scaled_value_to_bytes(
 fn compu_convert(
     diag_type: &datatypes::DiagCodedType,
     compu_method: &datatypes::CompuMethod,
+    phys_type: Option<PhysicalType>,
     category: datatypes::CompuCategory,
     value: &serde_json::Value,
 ) -> Result<Vec<u8>, DiagServiceError> {
@@ -361,9 +446,11 @@ fn compu_convert(
         datatypes::CompuCategory::Identical => Err(DiagServiceError::RequestNotSupported(
             "compu_convert for Identical is not implemented".to_owned(),
         )),
-        datatypes::CompuCategory::Linear => compu_convert_linear(diag_type, compu_method, value),
+        datatypes::CompuCategory::Linear => {
+            compu_convert_linear(diag_type, compu_method, phys_type, value)
+        }
         datatypes::CompuCategory::ScaleLinear => {
-            compu_convert_scale_linear(diag_type, compu_method, value)
+            compu_convert_scale_linear(diag_type, compu_method, phys_type, value)
         }
         datatypes::CompuCategory::TextTable => {
             compu_convert_text_table(diag_type.base_datatype(), compu_method, value)
@@ -386,6 +473,7 @@ fn compu_convert(
 fn compu_convert_linear(
     diag_type: &datatypes::DiagCodedType,
     compu_method: &CompuMethod,
+    phys_type: Option<PhysicalType>,
     value: &serde_json::Value,
 ) -> Result<Vec<u8>, DiagServiceError> {
     // Per ODX Figure 79: LINEAR category must have exactly one COMPU-SCALE
@@ -404,7 +492,7 @@ fn compu_convert_linear(
             DiagServiceError::UdsLookupError("Failed to find scales for linear scaling".to_owned())
         })?;
 
-    let physical_value = parse_json_to_f64(value, diag_type)?;
+    let physical_value = parse_json_to_f64(value, diag_type, phys_type)?;
     let coeffs = scale.rational_coefficients.as_ref().ok_or_else(|| {
         DiagServiceError::UdsLookupError("LINEAR: Missing rational coefficients".to_owned())
     })?;
@@ -420,11 +508,12 @@ fn compu_convert_linear(
 fn compu_convert_scale_linear(
     diag_type: &datatypes::DiagCodedType,
     compu_method: &CompuMethod,
+    phys_type: Option<PhysicalType>,
     value: &serde_json::Value,
 ) -> Result<Vec<u8>, DiagServiceError> {
     // ScaleLinear allows multiple scales with different ranges
     // We need to find the matching scale based on the input values limits
-    let physical_value = parse_json_to_f64(value, diag_type)?;
+    let physical_value = parse_json_to_f64(value, diag_type, phys_type)?;
 
     // Find the appropriate scale for the physical value
     // For phys to internal, we need to compute the physical range from internal limits
@@ -599,6 +688,7 @@ pub(in crate::diag_kernel) fn extract_diag_data_container(
 pub(in crate::diag_kernel) fn json_value_to_uds_data(
     diag_type: &datatypes::DiagCodedType,
     compu_method: Option<datatypes::CompuMethod>,
+    phys_type: Option<PhysicalType>,
     json_value: &serde_json::Value,
 ) -> Result<Vec<u8>, DiagServiceError> {
     'compu: {
@@ -606,18 +696,25 @@ pub(in crate::diag_kernel) fn json_value_to_uds_data(
             match compu_method.category {
                 datatypes::CompuCategory::Identical => break 'compu,
                 category => {
-                    return compu_convert(diag_type, &compu_method, category, json_value);
+                    return compu_convert(
+                        diag_type,
+                        &compu_method,
+                        phys_type,
+                        category,
+                        json_value,
+                    );
                 }
             }
         }
     }
 
     match diag_type.base_datatype() {
-        DataType::Int32
-        | DataType::UInt32
-        | DataType::Float32
-        | DataType::Float64
-        | DataType::ByteField => json_value_to_byte_vector(json_value, diag_type),
+        DataType::Int32 | DataType::UInt32 | DataType::Float32 | DataType::Float64 => {
+            numeric_json_value_to_byte_vector(json_value, diag_type, phys_type)
+        }
+        DataType::ByteField => decode_hex_with_optional_prefix(json_value.as_str().ok_or(
+            DiagServiceError::ParameterConversionError("Invalid value for ByteField".to_owned()),
+        )?),
         DataType::AsciiString | DataType::Unicode2String | DataType::Utf8String => json_value
             .as_str()
             .ok_or(DiagServiceError::ParameterConversionError(
@@ -627,216 +724,249 @@ pub(in crate::diag_kernel) fn json_value_to_uds_data(
     }
 }
 
-// truncating values and sign loss is expected when converting float values into a vec<u8>
-#[allow(clippy::cast_possible_truncation)]
-#[allow(clippy::cast_sign_loss)]
-fn numeric_type_str_to_byte_vec(
-    data_type: &datatypes::DiagCodedType,
-    value: &str,
-) -> Result<Vec<u8>, DiagServiceError> {
-    let base_type = data_type.base_datatype();
-    let bit_len = data_type.bit_len();
-    // static assertation for hard type lengths are already made when DataType
-    // `data_type` is constructed. This entails float and ascii length assertions,
-    // therefore there is no need to check them again here.
-    // Bit length validations are only done for types with actual variable bit lengths
-    // (basically all integer types)
+fn decode_hex_with_optional_prefix(value: &str) -> Result<Vec<u8>, DiagServiceError> {
     value
         .split([' ', ','])
-        .filter(|v| !v.is_empty())
+        .filter(|v: &&str| !v.is_empty())
         .map(|value| {
-            if value.chars().all(char::is_numeric) {
-                match base_type {
-                    DataType::ByteField => value
-                        .parse::<u64>()
-                        .map_err(|_| {
-                            DiagServiceError::ParameterConversionError(format!(
-                                "Invalid value for ByteField: '{value}'"
-                            ))
-                        })
-                        .and_then(|v| {
-                            if let Some(bit_len) = bit_len {
-                                validate_bit_len_unsigned(v, bit_len)?;
-                            }
-
-                            let bytes = v.to_be_bytes();
-                            // Find the first non-zero byte, or keep at least one byte
-                            let start = bytes
-                                .iter()
-                                .position(|&b| b != 0)
-                                .unwrap_or(bytes.len().saturating_sub(1));
-                            bytes
-                                .get(start..)
-                                .ok_or(DiagServiceError::ParameterConversionError(
-                                    "Byte slice out of bounds".to_owned(),
-                                ))
-                                .map(<[u8]>::to_vec)
-                        }),
-                    DataType::Int32 => value
-                        .parse::<i32>()
-                        .map_err(|_| {
-                            DiagServiceError::ParameterConversionError(
-                                "Invalid value type for i32".to_owned(),
-                            )
-                        })
-                        .and_then(|v| {
-                            if let Some(bit_len) = bit_len {
-                                validate_bit_len_signed(v, bit_len)?;
-                            }
-                            Ok(v.to_be_bytes().to_vec())
-                        }),
-                    DataType::UInt32 => value
-                        .parse::<u32>()
-                        .map_err(|_| {
-                            DiagServiceError::ParameterConversionError(
-                                "Invalid value type for u32".to_owned(),
-                            )
-                        })
-                        .and_then(|v| {
-                            if let Some(bit_len) = bit_len {
-                                validate_bit_len_unsigned(v, bit_len)?;
-                            }
-                            Ok(v.to_be_bytes().to_vec())
-                        }),
-                    DataType::Float32 => value
-                        .parse::<f32>()
-                        .map(|v| v.to_be_bytes().to_vec())
-                        .map_err(|_| {
-                            DiagServiceError::ParameterConversionError(
-                                "Invalid value type for f32".to_owned(),
-                            )
-                        }),
-                    DataType::Float64 => value
-                        .parse::<f64>()
-                        .map(|v| v.to_be_bytes().to_vec())
-                        .map_err(|_| {
-                            DiagServiceError::ParameterConversionError(
-                                "Invalid value type for f64".to_owned(),
-                            )
-                        }),
-                    _ => Err(DiagServiceError::ParameterConversionError(
-                        "Invalid data type for value extraction".to_owned(),
-                    )),
-                }
-            } else if value.contains('.') {
-                let float_value = value.parse::<f64>().map_err(|e| {
-                    DiagServiceError::ParameterConversionError(format!(
-                        "Invalid value for float, error={e}"
-                    ))
-                })?;
-
-                match base_type {
-                    DataType::ByteField => Ok((float_value as u8).to_be_bytes().to_vec()),
-                    DataType::Int32 => Ok((float_value as i32).to_be_bytes().to_vec()),
-                    DataType::UInt32 => Ok((float_value as u32).to_be_bytes().to_vec()),
-                    DataType::Float32 => Ok((float_value as f32).to_be_bytes().to_vec()),
-                    DataType::Float64 => Ok(float_value.to_be_bytes().to_vec()),
-                    _ => Err(DiagServiceError::ParameterConversionError(
-                        "Invalid data type for float".to_owned(),
-                    )),
-                }
-            } else if let Some(stripped) = value.to_lowercase().strip_prefix("0x") {
+            if let Some(stripped) = value.to_lowercase().strip_prefix("0x") {
                 decode_hex(stripped)
             } else {
                 decode_hex(value)
             }
         })
-        .collect::<Result<Vec<_>, DiagServiceError>>()
+        .collect::<Result<Vec<_>, _>>()
         .map(|vecs| vecs.into_iter().flatten().collect())
 }
 
-fn json_value_to_byte_vector(
+fn decode_u32_octal_with_optional_prefix(value: &str) -> Result<Vec<u8>, DiagServiceError> {
+    let stripped = value.strip_prefix("0o").unwrap_or(value);
+    if !stripped.chars().all(|c| ('0'..='7').contains(&c)) {
+        return Err(DiagServiceError::ParameterConversionError(
+            "Non-octal character found".to_owned(),
+        ));
+    }
+    u32::from_str_radix(stripped, 8)
+        .map_err(|_| {
+            DiagServiceError::ParameterConversionError(format!("Invalid octal value: {value}"))
+        })
+        .map(|v| v.to_be_bytes().to_vec())
+}
+
+fn decode_u32_binary_with_optional_prefix(value: &str) -> Result<Vec<u8>, DiagServiceError> {
+    let stripped = value.strip_prefix("0b").unwrap_or(value);
+    if !stripped.chars().all(|c| c == '0' || c == '1') {
+        return Err(DiagServiceError::ParameterConversionError(
+            "Non-binary character found".to_owned(),
+        ));
+    }
+    u32::from_str_radix(stripped, 2)
+        .map_err(|_| {
+            DiagServiceError::ParameterConversionError(format!("Invalid binary value: {value}"))
+        })
+        .map(|v| v.to_be_bytes().to_vec())
+}
+
+fn process_numeric_json_value(
     json_value: &serde_json::Value,
     data_type: &datatypes::DiagCodedType,
 ) -> Result<Vec<u8>, DiagServiceError> {
     let base_type = data_type.base_datatype();
-    let data: Result<Vec<u8>, DiagServiceError> = if json_value.is_string() {
-        let s = json_value
-            .as_str()
-            .ok_or(DiagServiceError::ParameterConversionError(
-                "Invalid numeric value".to_owned(),
-            ))?;
-
-        numeric_type_str_to_byte_vec(data_type, s)
-    } else if json_value.is_number() {
-        match base_type {
-            DataType::Int32 => {
-                let value =
-                    json_value
-                        .as_i64()
-                        .ok_or(DiagServiceError::ParameterConversionError(format!(
-                            "Invalid value for {data_type:?}"
-                        )))?;
-                validate_bit_len_signed(value, data_type.bit_len().unwrap_or(32))?;
-                let int_val: i32 = value.try_into().map_err(|_| {
-                    DiagServiceError::ParameterConversionError(format!(
-                        "Failed to convert {value} to Int32"
-                    ))
-                })?;
-                Ok(int_val.to_be_bytes().to_vec())
-            }
-            DataType::UInt32 => {
-                let value =
-                    json_value
-                        .as_u64()
-                        .ok_or(DiagServiceError::ParameterConversionError(format!(
-                            "Invalid value for {data_type:?}"
-                        )))?;
-                validate_bit_len_unsigned(value, data_type.bit_len().unwrap_or(32))?;
-                let int_val: u32 = value.try_into().map_err(|_| {
-                    DiagServiceError::ParameterConversionError(format!(
-                        "Failed to convert {value} to UInt32"
-                    ))
-                })?;
-                Ok(int_val.to_be_bytes().to_vec())
-            }
-            DataType::Float32 => {
-                #[allow(clippy::cast_possible_truncation)] // truncating f64 to f32 is intended here
-                json_value
-                    .as_f64()
-                    .ok_or(DiagServiceError::ParameterConversionError(
-                        "Invalid value for Float32".to_owned(),
-                    ))
-                    .map(|v| (v as f32).to_be_bytes().to_vec())
-            }
-            DataType::Float64 => json_value
+    match base_type {
+        DataType::Int32 => {
+            let value = json_value
+                .as_i64()
+                .ok_or(DiagServiceError::ParameterConversionError(format!(
+                    "Invalid value for {data_type:?}"
+                )))?;
+            validate_bit_len_signed(value, data_type.bit_len().unwrap_or(32))?;
+            let int_val: i32 = value.try_into().map_err(|_| {
+                DiagServiceError::ParameterConversionError(format!(
+                    "Failed to convert {value} to Int32"
+                ))
+            })?;
+            Ok(int_val.to_be_bytes().to_vec())
+        }
+        DataType::UInt32 => {
+            let value = json_value
+                .as_u64()
+                .ok_or(DiagServiceError::ParameterConversionError(format!(
+                    "Invalid value for {data_type:?}"
+                )))?;
+            validate_bit_len_unsigned(value, data_type.bit_len().unwrap_or(32))?;
+            let int_val: u32 = value.try_into().map_err(|_| {
+                DiagServiceError::ParameterConversionError(format!(
+                    "Failed to convert {value} to UInt32"
+                ))
+            })?;
+            Ok(int_val.to_be_bytes().to_vec())
+        }
+        DataType::Float32 => {
+            #[allow(clippy::cast_possible_truncation)] // truncating f64 to f32 is intended here
+            json_value
                 .as_f64()
                 .ok_or(DiagServiceError::ParameterConversionError(
-                    "Invalid value for Float64".to_owned(),
+                    "Invalid value for Float32".to_owned(),
                 ))
-                .map(|v| v.to_be_bytes().to_vec()),
-            _ => Err(DiagServiceError::ParameterConversionError(format!(
-                "Not support data type {data_type:?} for value conversion"
+                .map(|v| (v as f32).to_be_bytes().to_vec())
+        }
+        DataType::Float64 => json_value
+            .as_f64()
+            .ok_or(DiagServiceError::ParameterConversionError(
+                "Invalid value for Float64".to_owned(),
+            ))
+            .map(|v| v.to_be_bytes().to_vec()),
+        _ => Err(DiagServiceError::ParameterConversionError(format!(
+            "Not support data type {data_type:?} for value conversion"
+        ))),
+    }
+}
+
+fn process_physical_type_value(
+    json_value: &serde_json::Value,
+    physical_type: PhysicalType,
+    data_type: &datatypes::DiagCodedType,
+) -> Result<Vec<u8>, DiagServiceError> {
+    let value = json_value
+        .as_str()
+        .ok_or(DiagServiceError::ParameterConversionError(format!(
+            "Non-numeric JSON value {json_value} could not be converted to string"
+        )))?;
+    let data = decode_numeric_val_from_str(value, physical_type, data_type)?;
+    let base_type = data_type.base_datatype();
+    if physical_type.base_type == base_type {
+        Ok(data)
+    } else {
+        match physical_type.base_type {
+            DataType::Int32 => {
+                let val = i32::from_be_bytes(
+                    pad_msb_to_len(&data, size_of::<i32>())
+                        .try_into()
+                        .expect("input bytes padded to i32 size"),
+                );
+                to_numeric_base_type(val, base_type)
+            }
+            DataType::UInt32 => {
+                let val = u32::from_be_bytes(
+                    pad_msb_to_len(&data, size_of::<u32>())
+                        .try_into()
+                        .expect("input bytes padded to u32 size"),
+                );
+                to_numeric_base_type(val, base_type)
+            }
+            DataType::Float32 => {
+                let val = f32::from_be_bytes(
+                    pad_msb_to_len(&data, size_of::<f32>())
+                        .try_into()
+                        .expect("input bytes padded to f32 size"),
+                );
+                to_numeric_base_type(val, base_type)
+            }
+            DataType::Float64 => {
+                let val = f64::from_be_bytes(
+                    pad_msb_to_len(&data, size_of::<f64>())
+                        .try_into()
+                        .expect("input bytes padded to f64 size"),
+                );
+                to_numeric_base_type(val, base_type)
+            }
+            DataType::AsciiString
+            | DataType::Utf8String
+            | DataType::Unicode2String
+            | DataType::ByteField => Err(DiagServiceError::ParameterConversionError(format!(
+                "Cannot convert from non-numeric physical type {:?} to numeric base type {:?}",
+                physical_type.base_type, base_type
             ))),
         }
+    }
+}
+
+fn validate_data_length(
+    data: &[u8],
+    base_type: DataType,
+    json_value: &serde_json::Value,
+) -> Result<(), DiagServiceError> {
+    match base_type {
+        DataType::Int32 | DataType::UInt32 | DataType::Float32 => {
+            if data.len() > 4 {
+                return Err(DiagServiceError::ParameterConversionError(format!(
+                    "Invalid data length {} for {base_type:?} value {json_value}",
+                    data.len()
+                )));
+            }
+        }
+        DataType::Float64 => {
+            if data.len() > 8 {
+                return Err(DiagServiceError::ParameterConversionError(format!(
+                    "Invalid data length for {base_type:?}: {}, value {json_value}",
+                    data.len()
+                )));
+            }
+        }
+        _ => {}
+    }
+    Ok(())
+}
+
+fn numeric_json_value_to_byte_vector(
+    json_value: &serde_json::Value,
+    data_type: &datatypes::DiagCodedType,
+    physical_type: Option<PhysicalType>,
+) -> Result<Vec<u8>, DiagServiceError> {
+    let data = if json_value.is_number() {
+        process_numeric_json_value(json_value, data_type)
+    } else if let Some(physical_type) = physical_type {
+        process_physical_type_value(json_value, physical_type, data_type)
     } else {
         Err(DiagServiceError::ParameterConversionError(format!(
-            "Invalid JSON value {json_value:?} for data type {data_type:?}"
+            "Cannot decode non-numeric JSON value {json_value:?} to {:?} without physical type \
+             information",
+            data_type.base_datatype()
         )))
     };
 
-    if let Ok(data) = data.as_ref() {
-        match base_type {
-            DataType::Int32 | DataType::UInt32 | DataType::Float32 => {
-                if data.len() > 4 {
-                    return Err(DiagServiceError::ParameterConversionError(format!(
-                        "Invalid data length {} for {base_type:?} value {json_value}",
-                        data.len()
-                    )));
-                }
-            }
-            DataType::Float64 => {
-                if data.len() > 8 {
-                    return Err(DiagServiceError::ParameterConversionError(format!(
-                        "Invalid data length for {base_type:?}: {}, value {json_value}",
-                        data.len()
-                    )));
-                }
-            }
-            _ => {}
-        }
+    if let Ok(ref data) = data {
+        validate_data_length(data, data_type.base_datatype(), json_value)?;
     }
     data
+}
+
+fn to_numeric_base_type<T: num_traits::ToPrimitive + Display + Copy>(
+    val: T,
+    base_type: DataType,
+) -> Result<Vec<u8>, DiagServiceError> {
+    match base_type {
+        DataType::Int32 => val
+            .to_i32()
+            .ok_or(DiagServiceError::ParameterConversionError(format!(
+                "Failed to convert {val} to Int32"
+            )))
+            .map(|v| v.to_be_bytes().to_vec()),
+        DataType::UInt32 => val
+            .to_u32()
+            .ok_or(DiagServiceError::ParameterConversionError(format!(
+                "Failed to convert {val} to UInt32"
+            )))
+            .map(|v| v.to_be_bytes().to_vec()),
+        DataType::Float32 => val
+            .to_f32()
+            .ok_or(DiagServiceError::ParameterConversionError(format!(
+                "Failed to convert {val} to Float32"
+            )))
+            .map(|v| v.to_be_bytes().to_vec()),
+        DataType::Float64 => val
+            .to_f64()
+            .ok_or(DiagServiceError::ParameterConversionError(format!(
+                "Failed to convert {val} to Float64"
+            )))
+            .map(|v| v.to_be_bytes().to_vec()),
+        DataType::AsciiString
+        | DataType::Utf8String
+        | DataType::Unicode2String
+        | DataType::ByteField => Err(DiagServiceError::ParameterConversionError(format!(
+            "Cannot convert numeric value {val} to non-numeric base type {base_type:?}"
+        ))),
+    }
 }
 
 fn validate_bit_len_signed<T>(value: T, bit_len: BitLength) -> Result<(), DiagServiceError>
@@ -922,7 +1052,7 @@ mod tests {
     use cda_database::datatypes::{
         BitLength, CompuCategory, CompuFunction, CompuMethod, CompuRationalCoefficients,
         CompuScale, CompuValues, DataType, DiagCodedType, DiagCodedTypeVariant, IntervalType,
-        Limit, MinMaxLengthType, StandardLengthType, Termination,
+        Limit, MinMaxLengthType, PhysicalType, Radix, StandardLengthType, Termination,
     };
 
     /// Helper function to create a `DiagCodedType` as `StandardLength` Type for testing
@@ -968,15 +1098,13 @@ mod tests {
         .unwrap()
     }
 
-    use crate::diag_kernel::{
-        operations::extract_diag_data_container, pad_msb_to_len, payload::Payload,
-    };
+    use crate::diag_kernel::{operations::extract_diag_data_container, payload::Payload};
 
     #[test]
     fn test_hex_values() {
         let json_value = serde_json::json!("0x11223344");
         let diag_type = create_diag_coded_type_stl(DataType::ByteField, None);
-        let result = super::json_value_to_uds_data(&diag_type, None, &json_value);
+        let result = super::json_value_to_uds_data(&diag_type, None, None, &json_value);
         assert_eq!(result, Ok(vec![0x11, 0x22, 0x33, 0x44]));
     }
 
@@ -985,8 +1113,8 @@ mod tests {
         let json_value = serde_json::json!(i64::MAX);
         let int32_type = create_diag_coded_type_stl(DataType::Int32, None);
         let uint32_type = create_diag_coded_type_stl(DataType::UInt32, None);
-        assert!(super::json_value_to_uds_data(&int32_type, None, &json_value).is_err());
-        assert!(super::json_value_to_uds_data(&uint32_type, None, &json_value).is_err());
+        assert!(super::json_value_to_uds_data(&int32_type, None, None, &json_value).is_err());
+        assert!(super::json_value_to_uds_data(&uint32_type, None, None, &json_value).is_err());
     }
 
     #[test]
@@ -994,31 +1122,25 @@ mod tests {
         let json_value = serde_json::json!("0x1 0x2");
 
         let bytefield_type = create_diag_coded_type_stl(DataType::ByteField, None);
-        let float64_type = create_diag_coded_type_stl(DataType::Float64, None);
-        let float32_type = create_diag_coded_type_stl(DataType::Float32, None);
-        let int32_type = create_diag_coded_type_stl(DataType::Int32, None);
         let uint32_type = create_diag_coded_type_stl(DataType::UInt32, None);
+        let uint32_physical_type = PhysicalType {
+            precision: None,
+            base_type: DataType::UInt32,
+            display_radix: Some(Radix::Hex),
+        };
 
-        let expected = Ok(vec![0x1, 0x2]);
         assert_eq!(
-            super::json_value_to_uds_data(&bytefield_type, None, &json_value),
-            expected
+            super::json_value_to_uds_data(&bytefield_type, None, None, &json_value),
+            Ok(vec![0x1, 0x2])
         );
         assert_eq!(
-            super::json_value_to_uds_data(&float64_type, None, &json_value),
-            expected
-        );
-        assert_eq!(
-            super::json_value_to_uds_data(&float32_type, None, &json_value),
-            expected
-        );
-        assert_eq!(
-            super::json_value_to_uds_data(&int32_type, None, &json_value),
-            expected
-        );
-        assert_eq!(
-            super::json_value_to_uds_data(&uint32_type, None, &json_value),
-            expected
+            super::json_value_to_uds_data(
+                &uint32_type,
+                None,
+                Some(uint32_physical_type),
+                &json_value
+            ),
+            Ok(vec![0, 0, 1, 2])
         );
     }
 
@@ -1027,42 +1149,53 @@ mod tests {
         let json_value = serde_json::json!("0x00 0x01 0x80 0x00");
 
         let bytefield_type = create_diag_coded_type_stl(DataType::ByteField, None);
-        let float64_type = create_diag_coded_type_stl(DataType::Float64, None);
-        let float32_type = create_diag_coded_type_stl(DataType::Float32, None);
-        let int32_type = create_diag_coded_type_stl(DataType::Int32, None);
         let uint32_type = create_diag_coded_type_stl(DataType::UInt32, None);
+        let uint32_hex_physical_type = PhysicalType {
+            precision: None,
+            base_type: DataType::UInt32,
+            display_radix: Some(Radix::Hex),
+        };
+        let uint32_dec_physical_type = PhysicalType {
+            precision: None,
+            base_type: DataType::UInt32,
+            display_radix: None, // default is decimal
+        };
 
         let expected = Ok(vec![0x00, 0x01, 0x80, 0x00]);
         assert_eq!(
-            super::json_value_to_uds_data(&bytefield_type, None, &json_value),
+            super::json_value_to_uds_data(&bytefield_type, None, None, &json_value),
             expected
         );
+        // only u32 is supported in hex notation according to ISO 22901-1
         assert_eq!(
-            super::json_value_to_uds_data(&float64_type, None, &json_value),
+            super::json_value_to_uds_data(
+                &uint32_type,
+                None,
+                Some(uint32_hex_physical_type),
+                &json_value
+            ),
             expected
         );
-        assert_eq!(
-            super::json_value_to_uds_data(&float32_type, None, &json_value),
-            expected
-        );
-        assert_eq!(
-            super::json_value_to_uds_data(&int32_type, None, &json_value),
-            expected
-        );
-        assert_eq!(
-            super::json_value_to_uds_data(&uint32_type, None, &json_value),
-            expected
+
+        assert!(
+            super::json_value_to_uds_data(
+                &uint32_type,
+                None,
+                Some(uint32_dec_physical_type),
+                &json_value
+            )
+            .is_err()
         );
     }
 
     #[test]
     fn test_mixed_values() {
-        let json_value = serde_json::json!("ff 0a 128 deadbeef ca7");
+        let json_value = serde_json::json!("ff 0a 12 deadbeef ca7");
         let diag_type = create_diag_coded_type_stl(DataType::ByteField, None);
-        let result = super::json_value_to_uds_data(&diag_type, None, &json_value);
+        let result = super::json_value_to_uds_data(&diag_type, None, None, &json_value);
         assert_eq!(
             result,
-            Ok(vec![255, 10, 128, 0xDE, 0xAD, 0xBE, 0xEF, 0xCA, 0x07])
+            Ok(vec![255, 10, 18, 0xDE, 0xAD, 0xBE, 0xEF, 0xCA, 0x07])
         );
     }
 
@@ -1070,7 +1203,7 @@ mod tests {
     fn test_hex_long() {
         let json_value = serde_json::json!("c0ffeca7");
         let diag_type = create_diag_coded_type_stl(DataType::ByteField, None);
-        let result = super::json_value_to_uds_data(&diag_type, None, &json_value);
+        let result = super::json_value_to_uds_data(&diag_type, None, None, &json_value);
         assert_eq!(result, Ok(vec![0xC0, 0xFF, 0xEC, 0xA7]));
     }
 
@@ -1078,15 +1211,15 @@ mod tests {
     fn test_invalid_hex_value() {
         let json_value = serde_json::json!("0xZZ");
         let diag_type = create_diag_coded_type_stl(DataType::ByteField, None);
-        let result = super::json_value_to_uds_data(&diag_type, None, &json_value);
+        let result = super::json_value_to_uds_data(&diag_type, None, None, &json_value);
         assert!(result.is_err());
     }
 
     #[test]
     fn test_long_byte_value() {
-        let json_value = serde_json::json!("256");
+        let json_value = serde_json::json!("0100");
         let diag_type = create_diag_coded_type_stl(DataType::ByteField, Some(9));
-        let result = super::json_value_to_uds_data(&diag_type, None, &json_value);
+        let result = super::json_value_to_uds_data(&diag_type, None, None, &json_value);
         assert_eq!(result, Ok(vec![0x01, 0x00]));
     }
 
@@ -1095,32 +1228,42 @@ mod tests {
         let json_value = serde_json::json!("10.42");
 
         let int32_type = create_diag_coded_type_stl(DataType::Int32, None);
+        let f32_physical_type = PhysicalType {
+            precision: None,
+            base_type: DataType::Float32,
+            display_radix: None,
+        };
         let uint32_type = create_diag_coded_type_stl(DataType::UInt32, None);
-        let bytefield_type = create_diag_coded_type_stl(DataType::ByteField, None);
         let float32_type = create_diag_coded_type_stl(DataType::Float32, None);
         let float64_type = create_diag_coded_type_stl(DataType::Float64, None);
 
         let int_result = Ok(vec![0x00, 0x00, 0x00, 0x0A]);
         assert_eq!(
-            super::json_value_to_uds_data(&int32_type, None, &json_value),
+            super::json_value_to_uds_data(&int32_type, None, Some(f32_physical_type), &json_value),
             int_result
         );
         assert_eq!(
-            super::json_value_to_uds_data(&uint32_type, None, &json_value),
+            super::json_value_to_uds_data(&uint32_type, None, Some(f32_physical_type), &json_value),
             int_result
-        );
-        assert_eq!(
-            super::json_value_to_uds_data(&bytefield_type, None, &json_value),
-            Ok(vec![0x0A])
         );
 
         assert_eq!(
-            super::json_value_to_uds_data(&float32_type, None, &json_value),
+            super::json_value_to_uds_data(
+                &float32_type,
+                None,
+                Some(f32_physical_type),
+                &json_value
+            ),
             Ok(vec![65, 38, 184, 82])
         );
         assert_eq!(
-            super::json_value_to_uds_data(&float64_type, None, &json_value),
-            Ok(vec![64, 36, 215, 10, 61, 112, 163, 215])
+            super::json_value_to_uds_data(
+                &float64_type,
+                None,
+                Some(f32_physical_type),
+                &json_value
+            ),
+            Ok(f64::from(10.42f32).to_be_bytes().to_vec())
         );
     }
 
@@ -1134,16 +1277,16 @@ mod tests {
         let float32_type = create_diag_coded_type_stl(DataType::Float32, None);
         let float64_type = create_diag_coded_type_stl(DataType::Float64, None);
 
-        assert!(super::json_value_to_uds_data(&int32_type, None, &json_value).is_err());
-        assert!(super::json_value_to_uds_data(&uint32_type, None, &json_value).is_err());
-        assert!(super::json_value_to_uds_data(&bytefield_type, None, &json_value).is_err());
+        assert!(super::json_value_to_uds_data(&int32_type, None, None, &json_value).is_err());
+        assert!(super::json_value_to_uds_data(&uint32_type, None, None, &json_value).is_err());
+        assert!(super::json_value_to_uds_data(&bytefield_type, None, None, &json_value).is_err());
 
         assert_eq!(
-            super::json_value_to_uds_data(&float32_type, None, &json_value),
+            super::json_value_to_uds_data(&float32_type, None, None, &json_value),
             Ok(vec![65, 38, 184, 82])
         );
         assert_eq!(
-            super::json_value_to_uds_data(&float64_type, None, &json_value),
+            super::json_value_to_uds_data(&float64_type, None, None, &json_value),
             Ok(vec![64, 36, 215, 10, 61, 112, 163, 215])
         );
     }
@@ -1174,32 +1317,77 @@ mod tests {
 
         let value = serde_json::json!("42");
         let int32_type = create_diag_coded_type_stl(DataType::Int32, None);
-        let result =
-            super::compu_convert(&int32_type, &compu_method, CompuCategory::Linear, &value);
+        let int32_phys_type = Some(PhysicalType {
+            precision: None,
+            base_type: DataType::Int32,
+            display_radix: None,
+        });
+        let result = super::compu_convert(
+            &int32_type,
+            &compu_method,
+            int32_phys_type,
+            CompuCategory::Linear,
+            &value,
+        );
         assert_eq!(result.unwrap(), 42i32.to_be_bytes().to_vec());
 
         let value = serde_json::json!("42.42");
         let float32_type = create_diag_coded_type_stl(DataType::Float32, None);
-        let result =
-            super::compu_convert(&float32_type, &compu_method, CompuCategory::Linear, &value);
+        let float32_phys_type = Some(PhysicalType {
+            precision: None,
+            base_type: DataType::Float32,
+            display_radix: None,
+        });
+        let result = super::compu_convert(
+            &float32_type,
+            &compu_method,
+            float32_phys_type,
+            CompuCategory::Linear,
+            &value,
+        );
         assert_eq!(result.unwrap(), 42.42f32.to_be_bytes().to_vec());
 
         let value = serde_json::json!("42.4242");
         let float64_type = create_diag_coded_type_stl(DataType::Float64, None);
-        let result =
-            super::compu_convert(&float64_type, &compu_method, CompuCategory::Linear, &value);
+        let float64_phys_type = Some(PhysicalType {
+            precision: None,
+            base_type: DataType::Float64,
+            display_radix: None,
+        });
+        let result = super::compu_convert(
+            &float64_type,
+            &compu_method,
+            float64_phys_type,
+            CompuCategory::Linear,
+            &value,
+        );
         assert_eq!(result.unwrap(), 42.4242f64.to_be_bytes().to_vec());
 
         let value = serde_json::json!(42);
         let float64_type = create_diag_coded_type_stl(DataType::Float64, None);
-        let result =
-            super::compu_convert(&float64_type, &compu_method, CompuCategory::Linear, &value);
+        let float64_phys_type = Some(PhysicalType {
+            precision: None,
+            base_type: DataType::Float64,
+            display_radix: None,
+        });
+        let result = super::compu_convert(
+            &float64_type,
+            &compu_method,
+            float64_phys_type,
+            CompuCategory::Linear,
+            &value,
+        );
         assert_eq!(result.unwrap(), 42f64.to_be_bytes().to_vec());
 
         let value = serde_json::json!(42);
         let int32_type = create_diag_coded_type_stl(DataType::Int32, None);
-        let result =
-            super::compu_convert(&int32_type, &compu_method, CompuCategory::Linear, &value);
+        let result = super::compu_convert(
+            &int32_type,
+            &compu_method,
+            int32_phys_type,
+            CompuCategory::Linear,
+            &value,
+        );
         assert_eq!(result.unwrap(), 42i32.to_be_bytes().to_vec());
     }
 
@@ -1236,14 +1424,34 @@ mod tests {
         // there is rounding but values are truncated when converting to integer types
         let value = serde_json::json!(170);
         let int32_type = create_diag_coded_type_stl(DataType::Int32, None);
-        let result =
-            super::compu_convert(&int32_type, &compu_method, CompuCategory::Linear, &value);
+        let int32_phys_type = Some(PhysicalType {
+            precision: None,
+            base_type: DataType::Int32,
+            display_radix: None,
+        });
+        let result = super::compu_convert(
+            &int32_type,
+            &compu_method,
+            int32_phys_type,
+            CompuCategory::Linear,
+            &value,
+        );
         assert_eq!(result.unwrap(), 41i32.to_be_bytes().to_vec());
 
         let value = serde_json::json!(170.46);
         let float32_type = create_diag_coded_type_stl(DataType::Float32, None);
-        let result =
-            super::compu_convert(&float32_type, &compu_method, CompuCategory::Linear, &value);
+        let float32_phys_type = Some(PhysicalType {
+            precision: None,
+            base_type: DataType::Float32,
+            display_radix: None,
+        });
+        let result = super::compu_convert(
+            &float32_type,
+            &compu_method,
+            float32_phys_type,
+            CompuCategory::Linear,
+            &value,
+        );
         assert_eq!(result.unwrap(), 42.0f32.to_be_bytes().to_vec());
     }
 
@@ -1276,58 +1484,112 @@ mod tests {
 
         let value = serde_json::json!("TestValue");
         let int32_type = create_diag_coded_type_stl(DataType::Int32, None);
-        let result =
-            super::compu_convert(&int32_type, &compu_method, CompuCategory::TextTable, &value);
+        let int32_phys_type = Some(PhysicalType {
+            precision: None,
+            base_type: DataType::Int32,
+            display_radix: None,
+        });
+        let result = super::compu_convert(
+            &int32_type,
+            &compu_method,
+            int32_phys_type,
+            CompuCategory::TextTable,
+            &value,
+        );
         assert_eq!(result.unwrap(), 42i32.to_be_bytes().to_vec());
 
         let value = serde_json::json!("NotFound");
         let int32_type = create_diag_coded_type_stl(DataType::Int32, None);
-        let result =
-            super::compu_convert(&int32_type, &compu_method, CompuCategory::TextTable, &value);
+        let result = super::compu_convert(
+            &int32_type,
+            &compu_method,
+            int32_phys_type,
+            CompuCategory::TextTable,
+            &value,
+        );
         assert!(result.is_err());
     }
 
     #[test]
-    fn test_numeric_type_str_to_byte_vec_invalid_bit_values() {
-        // Test ByteField with 8-bit length - value 256 exceeds 8 bits
-        let bytefield_8bit = DiagCodedType::new(
-            DataType::ByteField,
-            DiagCodedTypeVariant::StandardLength(StandardLengthType {
-                bit_length: 8,
-                bit_mask: None,
-                condensed: false,
-            }),
-            true,
-        )
-        .unwrap();
-        super::numeric_type_str_to_byte_vec(&bytefield_8bit, "256").unwrap_err();
+    fn test_decode_numeric_value_from_str() {
+        // test decode float
+        let base_type = create_diag_coded_type_stl(DataType::Float32, None);
+        let phys_type = PhysicalType {
+            precision: None,
+            base_type: DataType::Float32,
+            display_radix: None,
+        };
+        let value = "10.42";
+        let result = super::decode_numeric_val_from_str(value, phys_type, &base_type).unwrap();
+        assert_eq!(result, 10.42f32.to_be_bytes().to_vec());
 
-        // Test UInt32 with 16-bit length - value 65536 exceeds 16 bits
-        let uint32_16bit = DiagCodedType::new(
-            DataType::UInt32,
-            DiagCodedTypeVariant::StandardLength(StandardLengthType {
-                bit_length: 16,
-                bit_mask: None,
-                condensed: false,
-            }),
-            true,
-        )
-        .unwrap();
-        super::numeric_type_str_to_byte_vec(&uint32_16bit, "65536").unwrap_err();
+        // test decode int
+        let base_type = create_diag_coded_type_stl(DataType::Int32, None);
+        let phys_type = PhysicalType {
+            precision: None,
+            base_type: DataType::Int32,
+            display_radix: None,
+        };
+        let value = "42";
+        let result = super::decode_numeric_val_from_str(value, phys_type, &base_type).unwrap();
+        assert_eq!(result, 42i32.to_be_bytes().to_vec());
 
-        // Test Int32 with 8-bit length - value 128 exceeds signed 8-bit range (-128 to 127)
-        let int32_8bit = DiagCodedType::new(
-            DataType::Int32,
-            DiagCodedTypeVariant::StandardLength(StandardLengthType {
-                bit_length: 8,
-                bit_mask: None,
-                condensed: false,
-            }),
-            true,
-        )
-        .unwrap();
-        super::numeric_type_str_to_byte_vec(&int32_8bit, "128").unwrap_err();
-        super::numeric_type_str_to_byte_vec(&int32_8bit, "-129").unwrap_err();
+        // test decode int as hex is err
+        let value = "0x2A";
+        let result = super::decode_numeric_val_from_str(value, phys_type, &base_type);
+        assert!(result.is_err());
+
+        // test decode uint as decimal
+        let base_type = create_diag_coded_type_stl(DataType::UInt32, None);
+
+        let phys_type = PhysicalType {
+            precision: None,
+            base_type: DataType::UInt32,
+            display_radix: None,
+        };
+        let value = "42";
+        let result = super::decode_numeric_val_from_str(value, phys_type, &base_type).unwrap();
+        assert_eq!(result, 42u32.to_be_bytes().to_vec());
+
+        // test decode uint as hex
+        let phys_type = PhysicalType {
+            precision: None,
+            base_type: DataType::UInt32,
+            display_radix: Some(Radix::Hex),
+        };
+        let value = "0x2A";
+        let result = super::decode_numeric_val_from_str(value, phys_type, &base_type).unwrap();
+        assert_eq!(result, 42u32.to_be_bytes().to_vec());
+
+        // test decode uint as octal
+        let phys_type = PhysicalType {
+            precision: None,
+            base_type: DataType::UInt32,
+            display_radix: Some(Radix::Octal),
+        };
+        let value = "0o52";
+        let result = super::decode_numeric_val_from_str(value, phys_type, &base_type).unwrap();
+        assert_eq!(result, 42u32.to_be_bytes().to_vec());
+
+        // test decode uint as octal without prefix
+        let value = "52";
+        let result = super::decode_numeric_val_from_str(value, phys_type, &base_type).unwrap();
+        assert_eq!(result, 42u32.to_be_bytes().to_vec());
+
+        // test decode uint as binary
+        let phys_type = PhysicalType {
+            precision: None,
+            base_type: DataType::UInt32,
+            display_radix: Some(Radix::Binary),
+        };
+        let value = "0b101010";
+        let result = super::decode_numeric_val_from_str(value, phys_type, &base_type).unwrap();
+        assert_eq!(result, 42u32.to_be_bytes().to_vec());
+
+        // test decode uint as binary without prefix
+        let value = "101010";
+        let result = super::decode_numeric_val_from_str(value, phys_type, &base_type).unwrap();
+        assert_eq!(result, 42u32.to_be_bytes().to_vec());
     }
 
     #[test]
@@ -1536,9 +1798,15 @@ mod tests {
         // Inverse: y=1 -> x=0
         let value = serde_json::json!(1.0);
         let float64_type = create_diag_coded_type_stl(DataType::Float64, None);
+        let float64_phys_type = Some(PhysicalType {
+            precision: None,
+            base_type: DataType::Float64,
+            display_radix: None,
+        });
         let result = super::compu_convert(
             &float64_type,
             &compu_method,
+            float64_phys_type,
             CompuCategory::ScaleLinear,
             &value,
         );
@@ -1559,6 +1827,7 @@ mod tests {
         let result = super::compu_convert(
             &float64_type,
             &compu_method,
+            float64_phys_type,
             CompuCategory::ScaleLinear,
             &value,
         );
@@ -1579,6 +1848,7 @@ mod tests {
         let result = super::compu_convert(
             &float64_type,
             &compu_method,
+            float64_phys_type,
             CompuCategory::ScaleLinear,
             &value,
         );
@@ -1600,6 +1870,7 @@ mod tests {
         let result = super::compu_convert(
             &float64_type,
             &compu_method,
+            float64_phys_type,
             CompuCategory::ScaleLinear,
             &value,
         );
@@ -1620,6 +1891,7 @@ mod tests {
         let result = super::compu_convert(
             &float64_type,
             &compu_method,
+            float64_phys_type,
             CompuCategory::ScaleLinear,
             &value,
         );
@@ -1640,6 +1912,7 @@ mod tests {
         let result = super::compu_convert(
             &float64_type,
             &compu_method,
+            float64_phys_type,
             CompuCategory::ScaleLinear,
             &value,
         );
@@ -1677,6 +1950,7 @@ mod tests {
         let result = super::compu_convert(
             &float64_type,
             &compu_method,
+            float64_phys_type,
             CompuCategory::ScaleLinear,
             &value,
         );
@@ -1822,9 +2096,15 @@ mod tests {
         // Test inverse conversion: physical 100.0 -> internal 5.0 (using inverse_values)
         let value = serde_json::json!(100.0);
         let float64_type = create_diag_coded_type_stl(DataType::Float64, None);
+        let float64_phys_type = Some(PhysicalType {
+            precision: None,
+            base_type: DataType::Float64,
+            display_radix: None,
+        });
         let result = super::compu_convert(
             &float64_type,
             &compu_method,
+            float64_phys_type,
             CompuCategory::ScaleLinear,
             &value,
         );
@@ -1836,85 +2116,37 @@ mod tests {
     // the given data in the tests allows and requires exact float comparisons
     #[allow(clippy::float_cmp)]
     fn test_parse_json_to_f64() {
-        let f32_val = 1.0f32;
-        let bytes = f32_val.to_be_bytes();
-        let f64_val = f64::from_be_bytes(pad_msb_to_len(&bytes, 8).try_into().unwrap());
-        let i32_val = f64::from(i32::from_be_bytes(bytes));
-
-        // test hex representations
-        let hex_bytes_no_space = serde_json::json!(format!(
-            "0x{:02X}{:02X}{:02X}{:02X}",
-            bytes[0], bytes[1], bytes[2], bytes[3]
-        ));
-        let hex_bytes_space_in_hex = serde_json::json!(format!(
-            "0x{:02X} 0x{:02X} 0x{:02X} 0x{:02X}",
-            bytes[0], bytes[1], bytes[2], bytes[3]
-        ));
-        let hex_bytes_space_separated = serde_json::json!(format!(
-            "0x{:02X} 0x{:02X} 0x{:02X} 0x{:02X}",
-            bytes[0], bytes[1], bytes[2], bytes[3]
-        ));
-        let hex_bytes_comma_separated = serde_json::json!(format!(
-            "0x{:02X},0x{:02X},0x{:02X},0x{:02X}",
-            bytes[0], bytes[1], bytes[2], bytes[3]
-        ));
-        let hex_bytes_comma_space_separated = serde_json::json!(format!(
-            "0x{:02X}, 0x{:02X}, 0x{:02X}, 0x{:02X}",
-            bytes[0], bytes[1], bytes[2], bytes[3]
-        ));
-        let _hex_bytes_mixed = serde_json::json!(format!(
-            "0x{:02X} , 0x{:02X} 0x{:02X},0x{:02X}",
-            bytes[0], bytes[1], bytes[2], bytes[3]
-        ));
-        for (data_type, expected) in [
-            (DataType::ByteField, i32_val),
-            (DataType::Int32, i32_val),
-            (DataType::UInt32, i32_val),
-            (DataType::Float32, f64::from(f32_val)),
-            (DataType::Float64, f64_val),
-        ] {
-            let diag_coded_type = create_diag_coded_type_stl(data_type, None);
-            for test_case in [
-                &hex_bytes_no_space,
-                &hex_bytes_space_in_hex,
-                &hex_bytes_space_separated,
-                &hex_bytes_comma_separated,
-                &hex_bytes_comma_space_separated,
-            ] {
-                let result = super::parse_json_to_f64(test_case, &diag_coded_type).unwrap();
-                assert_eq!(
-                    result, expected,
-                    "Failed for data type {data_type:?} with input {test_case:?}"
-                );
-            }
-        }
-
         // test decimal representations
         let str_decimal_int = serde_json::json!("1");
+        let u32_phys_type = Some(PhysicalType {
+            precision: None,
+            base_type: DataType::UInt32,
+            display_radix: None,
+        });
         let str_decimal_float = serde_json::json!("1.0");
+        let f32_phys_type = Some(PhysicalType {
+            precision: None,
+            base_type: DataType::Float32,
+            display_radix: None,
+        });
         let decimal_int = serde_json::json!(1);
         let decimal_float = serde_json::json!(1.0);
-        for data_type in [
-            DataType::ByteField,
-            DataType::Int32,
-            DataType::UInt32,
-            DataType::Float32,
-            DataType::Float64,
+
+        for (input, base_type, phys_type) in [
+            (&str_decimal_int, DataType::Int32, u32_phys_type),
+            (&str_decimal_float, DataType::Float32, f32_phys_type),
+            (&decimal_int, DataType::UInt32, u32_phys_type),
+            (&decimal_float, DataType::Float32, f32_phys_type),
         ] {
-            let diag_coded_type = create_diag_coded_type_stl(data_type, None);
-            for test_case in [
-                &str_decimal_int,
-                &str_decimal_float,
-                &decimal_int,
-                &decimal_float,
-            ] {
-                let result = super::parse_json_to_f64(test_case, &diag_coded_type).unwrap();
-                assert_eq!(
-                    result, 1.0,
-                    "Failed for data type {data_type:?} with input {test_case:?}"
-                );
-            }
+            let diag_coded_type = create_diag_coded_type_stl(base_type, None);
+
+            let result = super::parse_json_to_f64(input, &diag_coded_type, phys_type).unwrap();
+            assert_eq!(
+                result, 1.0,
+                "Failed for data type {base_type:?} with input {input:?}"
+            );
         }
+        // }
     }
 
     #[test]
@@ -1938,6 +2170,35 @@ mod tests {
         assert!(
             res.is_err(),
             "MinMaxLengthType with min_length 1 should be error when payload is empty"
+        );
+    }
+
+    #[test]
+    fn test_string_value_exceeds_bit_length_with_matching_physical_type() {
+        // 8-bit UInt32: only values 0–255 should be valid
+        let uint32_8bit = create_diag_coded_type_stl(DataType::UInt32, Some(8));
+        let u32_physical_type = Some(PhysicalType {
+            precision: None,
+            base_type: DataType::UInt32,
+            display_radix: None,
+        });
+
+        // Numeric JSON value 99999 is correctly rejected (bit-length check fires)
+        let json_numeric = serde_json::json!(99999);
+        assert!(
+            super::json_value_to_uds_data(&uint32_8bit, None, None, &json_numeric).is_err(),
+            "Numeric 99999 should be rejected for 8-bit UInt32"
+        );
+
+        // String "99999" with matching physical type should also be rejected,
+        // but currently is not because process_physical_type_value returns early
+        // without bit-length validation.
+        let json_string = serde_json::json!("99999");
+        assert!(
+            super::json_value_to_uds_data(&uint32_8bit, None, u32_physical_type, &json_string)
+                .is_err(),
+            "String '99999' should be rejected for 8-bit UInt32, but bit-length validation is \
+             skipped"
         );
     }
 }

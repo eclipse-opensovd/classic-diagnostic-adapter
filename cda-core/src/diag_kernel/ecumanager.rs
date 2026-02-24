@@ -12,7 +12,7 @@
 
 use std::{sync::Arc, time::Duration};
 
-use cda_database::{datatypes, datatypes::Variant};
+use cda_database::datatypes;
 use cda_interfaces::{
     DiagComm, DiagCommAction, DiagCommType, DiagServiceError, DynamicPlugin, EcuManagerType,
     EcuState, EcuVariant, HashMap, HashMapExtensions, HashSet, HashSetExtensions, Protocol,
@@ -57,7 +57,7 @@ struct VariantData {
 }
 
 impl VariantData {
-    fn from_variant_and_fallback(v: &Variant<'_>, is_fallback: bool) -> Self {
+    fn from_variant_and_fallback(v: &datatypes::Variant<'_>, is_fallback: bool) -> Self {
         Self {
             name: (*v)
                 .diag_layer()
@@ -682,74 +682,13 @@ impl<S: SecurityPlugin> cda_interfaces::EcuManager for EcuManager<S> {
                 .then(a.bit_position().cmp(&b.bit_position()))
         });
 
-        let mut uds: Vec<u8> = Vec::new();
+        let (mut uds, num_consts) = process_coded_constants(&mapped_params)?;
 
-        let mut num_consts = 0usize;
-        for param in &mapped_params {
-            if let Some(coded_const) = param.specific_data_as_coded_const() {
-                num_consts = num_consts.saturating_add(1);
-                let diag_type: datatypes::DiagCodedType = coded_const
-                    .diag_coded_type()
-                    .and_then(|t| {
-                        let type_: Option<datatypes::DiagCodedType> = t.try_into().ok();
-                        type_
-                    })
-                    .ok_or(DiagServiceError::InvalidDatabase(format!(
-                        "Param '{}' is missing DiagCodedType",
-                        param.short_name().unwrap_or_default()
-                    )))?;
-                let coded_const_value =
-                    coded_const
-                        .coded_value()
-                        .ok_or(DiagServiceError::InvalidDatabase(format!(
-                            "Param '{}' is missing coded value",
-                            param.short_name().unwrap_or_default()
-                        )))?;
-
-                let uds_val = json_value_to_uds_data(
-                    &diag_type,
-                    None,
-                    &serde_json::Value::from(coded_const_value),
-                )?;
-
-                diag_type.encode(
-                    uds_val,
-                    &mut uds,
-                    param.byte_position() as usize,
-                    param.bit_position() as usize,
-                )?;
-            }
-        }
         if let Some(data) = data {
             match data {
                 UdsPayloadData::Raw(bytes) => uds.extend(bytes),
                 UdsPayloadData::ParameterMap(json_values) => {
-                    // todo: check if json_values is empty...
-                    for param in mapped_params.iter().skip(num_consts) {
-                        if uds.len() < param.byte_position() as usize {
-                            uds.extend(vec![
-                                0x0;
-                                (param.byte_position() as usize)
-                                    .saturating_sub(uds.len())
-                            ]);
-                        }
-                        let short_name = param.short_name().ok_or_else(|| {
-                            DiagServiceError::InvalidDatabase(format!(
-                                "Unable to find short name for param: {}",
-                                param.short_name().unwrap_or_default()
-                            ))
-                        })?;
-
-                        if let Some(value) = json_values.get(short_name) {
-                            // Setting parent byte position
-                            // to 0 because this is the uppermost level.
-                            self.map_param_to_uds(param, value, &mut uds, 0)?;
-                        } else {
-                            return Err(DiagServiceError::BadPayload(format!(
-                                "Missing parameter: {short_name}"
-                            )));
-                        }
-                    }
+                    self.process_parameter_map(&mapped_params, num_consts, &json_values, &mut uds)?;
                 }
             }
         }
@@ -837,7 +776,12 @@ impl<S: SecurityPlugin> cda_interfaces::EcuManager for EcuManager<S> {
                 .is_some()
         })
         .and_then(|service| service.try_into().ok())
-        .ok_or(DiagServiceError::NotFound(None))
+        .ok_or_else(|| {
+            DiagServiceError::NotFound(Some(format!(
+                "Service with functional class '{func_class_name}' and SID 0x{service_id:02X} not \
+                 found"
+            )))
+        })
     }
 
     /// Lookup a service by its service id for the current ECU variant.
@@ -2139,7 +2083,10 @@ impl<S: SecurityPlugin> EcuManager<S> {
             .write()
             .await
             .insert(lookup_id, None);
-        Err(DiagServiceError::NotFound(None))
+
+        Err(DiagServiceError::NotFound(Some(format!(
+            "Diagnostic service '{lookup_name}' not found in variant or parent refs"
+        ))))
     }
 
     fn search_with_location<F>(
@@ -2576,13 +2523,18 @@ impl<S: SecurityPlugin> EcuManager<S> {
         let const_value = c.coded_value().ok_or(DiagServiceError::InvalidDatabase(
             "CodedConst has no coded value".to_owned(),
         ))?;
-        let expected = operations::json_value_to_uds_data(
-            &diag_type,
-            None,
-            &serde_json::Value::from(const_value),
-        )?
-        .into_iter()
-        .collect::<Vec<_>>();
+        let const_json_value = coded_const_to_json_value(const_value, diag_type.base_datatype())?;
+        let expected =
+            operations::json_value_to_uds_data(&diag_type, None, None, &const_json_value)
+                .inspect_err(|e| {
+                    tracing::error!(
+                        error = ?e,
+                        "Failed to convert CodedConst coded value to UDS data for parameter '{}'",
+                        param.short_name().unwrap_or_default()
+                    );
+                })?
+                .into_iter()
+                .collect::<Vec<_>>();
         let expected = expected
             .get(expected.len().saturating_sub(value.data.len())..)
             .ok_or(DiagServiceError::BadPayload(
@@ -2704,7 +2656,12 @@ impl<S: SecurityPlugin> EcuManager<S> {
         match dop.variant()? {
             datatypes::DataOperationVariant::Normal(normal_dop) => {
                 let diag_type = normal_dop.diag_coded_type()?;
-                let uds_data = json_value_to_uds_data(&diag_type, None, param_data)?;
+                let uds_data = json_value_to_uds_data(
+                    &diag_type,
+                    normal_dop.compu_method().map(Into::into),
+                    normal_dop.physical_type().map(Into::into),
+                    param_data,
+                )?;
                 diag_type.encode(
                     uds_data,
                     uds_payload_data,
@@ -2763,11 +2720,12 @@ impl<S: SecurityPlugin> EcuManager<S> {
                 // Process selector and encode switch key if present
                 let selected_case = value
                     .get("Selector")
-                    .or(Some(&serde_json::Value::String("0".to_owned())))
+                    .or(Some(&serde_json::Value::from(serde_json::Number::from(0))))
                     .map(|selector| -> Result<_, DiagServiceError> {
                         let switch_key_value = json_value_to_uds_data(
                             &switch_key_diag_type,
                             normal_dop.compu_method().map(Into::into),
+                            normal_dop.physical_type().map(Into::into),
                             selector,
                         )?;
 
@@ -2871,6 +2829,41 @@ impl<S: SecurityPlugin> EcuManager<S> {
             })
     }
 
+    fn process_parameter_map(
+        &self,
+        mapped_params: &[datatypes::Parameter],
+        num_consts: usize,
+        json_values: &HashMap<String, serde_json::Value>,
+        uds: &mut Vec<u8>,
+    ) -> Result<(), DiagServiceError> {
+        for param in mapped_params.iter().skip(num_consts) {
+            if uds.len() < param.byte_position() as usize {
+                uds.extend(vec![
+                    0x0;
+                    (param.byte_position() as usize)
+                        .saturating_sub(uds.len())
+                ]);
+            }
+            let short_name = param.short_name().ok_or_else(|| {
+                DiagServiceError::InvalidDatabase(format!(
+                    "Unable to find short name for param: {}",
+                    param.short_name().unwrap_or_default()
+                ))
+            })?;
+
+            if let Some(value) = json_values.get(short_name) {
+                // Setting parent byte position
+                // to 0 because this is the uppermost level.
+                self.map_param_to_uds(param, value, uds, 0)?;
+            } else {
+                return Err(DiagServiceError::BadPayload(format!(
+                    "Missing parameter: {short_name}"
+                )));
+            }
+        }
+        Ok(())
+    }
+
     fn map_param_to_uds(
         &self,
         param: &datatypes::Parameter,
@@ -2970,6 +2963,7 @@ impl<S: SecurityPlugin> EcuManager<S> {
                 let uds_data = json_value_to_uds_data(
                     &diag_type,
                     normal_dop.compu_method().map(Into::into),
+                    normal_dop.physical_type().map(Into::into),
                     value,
                 )?;
                 diag_type.encode(
@@ -4156,6 +4150,87 @@ fn create_diag_service_response(
             response_type: DiagServiceResponseType::Positive,
         },
     }
+}
+
+fn coded_const_to_json_value(
+    const_value: &str,
+    data_type: datatypes::DataType,
+) -> Result<serde_json::Value, DiagServiceError> {
+    let value = match data_type {
+        datatypes::DataType::Int32 => {
+            let i32val = const_value.parse::<i32>().map_err(|e| {
+                DiagServiceError::InvalidDatabase(format!("CodedConst value conversion error: {e}"))
+            })?;
+            serde_json::Number::from(i32val).into()
+        }
+        datatypes::DataType::UInt32 => {
+            let u32val = const_value.parse::<u32>().map_err(|e| {
+                DiagServiceError::InvalidDatabase(format!("CodedConst value conversion error: {e}"))
+            })?;
+            serde_json::Number::from(u32val).into()
+        }
+        datatypes::DataType::Float32 | datatypes::DataType::Float64 => {
+            let f64val = const_value.parse::<f64>().map_err(|e| {
+                DiagServiceError::InvalidDatabase(format!("CodedConst value conversion error: {e}"))
+            })?;
+            serde_json::Number::from_f64(f64val).into()
+        }
+        datatypes::DataType::AsciiString
+        | datatypes::DataType::Utf8String
+        | datatypes::DataType::Unicode2String
+        | datatypes::DataType::ByteField => serde_json::Value::from(const_value),
+    };
+    Ok(value)
+}
+
+fn process_coded_constants(
+    mapped_params: &[datatypes::Parameter],
+) -> Result<(Vec<u8>, usize), DiagServiceError> {
+    let mut uds: Vec<u8> = Vec::new();
+    let mut num_consts = 0usize;
+
+    for param in mapped_params {
+        if let Some(coded_const) = param.specific_data_as_coded_const() {
+            num_consts = num_consts.saturating_add(1);
+            let diag_type: datatypes::DiagCodedType = coded_const
+                .diag_coded_type()
+                .and_then(|t| {
+                    let type_: Option<datatypes::DiagCodedType> = t.try_into().ok();
+                    type_
+                })
+                .ok_or(DiagServiceError::InvalidDatabase(format!(
+                    "Param '{}' is missing DiagCodedType",
+                    param.short_name().unwrap_or_default()
+                )))?;
+            let coded_const_value =
+                coded_const
+                    .coded_value()
+                    .ok_or(DiagServiceError::InvalidDatabase(format!(
+                        "Param '{}' is missing coded value",
+                        param.short_name().unwrap_or_default()
+                    )))?;
+            let const_json_value =
+                coded_const_to_json_value(coded_const_value, diag_type.base_datatype())?;
+
+            let uds_val = json_value_to_uds_data(&diag_type, None, None, &const_json_value)
+                .inspect_err(|e| {
+                    tracing::error!(
+                        error = ?e,
+                        "Failed to convert CodedConst coded value to UDS data for parameter '{}'",
+                        param.short_name().unwrap_or_default()
+                    );
+                })?;
+
+            diag_type.encode(
+                uds_val,
+                &mut uds,
+                param.byte_position() as usize,
+                param.bit_position() as usize,
+            )?;
+        }
+    }
+
+    Ok((uds, num_consts))
 }
 
 #[cfg(test)]

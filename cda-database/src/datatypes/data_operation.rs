@@ -13,7 +13,10 @@
 //
 use cda_interfaces::{DiagServiceError, dlt_ctx, util::decode_hex};
 
-use crate::{datatypes, flatbuf::diagnostic_description::dataformat};
+use crate::{
+    datatypes::{self, DataType},
+    flatbuf::diagnostic_description::dataformat,
+};
 
 pub enum DataOperationVariant<'a> {
     Normal(datatypes::NormalDop<'a>),
@@ -352,6 +355,68 @@ impl datatypes::DataOperation<'_> {
             _ => Err(DiagServiceError::ParameterConversionError(
                 "Unknown DataOperation specific data type".to_owned(),
             )),
+        }
+    }
+}
+
+#[derive(Copy, Clone, Debug)]
+pub enum Radix {
+    Hex,
+    Decimal,
+    Binary,
+    Octal,
+}
+
+#[derive(Copy, Clone, Debug)]
+pub struct PhysicalType {
+    pub precision: Option<u32>,
+    pub base_type: DataType,
+    pub display_radix: Option<Radix>,
+}
+
+impl From<&dataformat::Radix> for Radix {
+    fn from(value: &dataformat::Radix) -> Self {
+        match *value {
+            dataformat::Radix::HEX => Radix::Hex,
+            dataformat::Radix::DEC => Radix::Decimal,
+            dataformat::Radix::BIN => Radix::Binary,
+            dataformat::Radix::OCT => Radix::Octal,
+            _ => {
+                tracing::error!("Radix {:?} not recognized, defaulting to Decimal", value);
+                Radix::Decimal
+            }
+        }
+    }
+}
+
+impl From<dataformat::PhysicalType<'_>> for PhysicalType {
+    fn from(value: dataformat::PhysicalType) -> Self {
+        PhysicalType {
+            precision: value.precision(),
+            base_type: match value.base_data_type() {
+                dataformat::PhysicalTypeDataType::A_ASCIISTRING => DataType::AsciiString,
+                dataformat::PhysicalTypeDataType::A_UNICODE_2_STRING => DataType::Unicode2String,
+                dataformat::PhysicalTypeDataType::A_UTF_8_STRING => DataType::Utf8String,
+                dataformat::PhysicalTypeDataType::A_BYTEFIELD => DataType::ByteField,
+                dataformat::PhysicalTypeDataType::A_FLOAT_32 => DataType::Float32,
+                dataformat::PhysicalTypeDataType::A_FLOAT_64 => DataType::Float64,
+                dataformat::PhysicalTypeDataType::A_UINT_32 => DataType::UInt32,
+                dataformat::PhysicalTypeDataType::A_INT_32 => DataType::Int32,
+                _ => {
+                    tracing::error!(
+                        "Base data type {:?} not recognized, defaulting to ByteField",
+                        value.base_data_type()
+                    );
+                    DataType::ByteField
+                }
+            },
+            display_radix: match value.display_radix() {
+                dataformat::Radix::HEX => Some(Radix::Hex),
+                dataformat::Radix::DEC => Some(Radix::Decimal),
+                dataformat::Radix::BIN => Some(Radix::Binary),
+                dataformat::Radix::OCT => Some(Radix::Octal),
+                _ => None,
+            },
         }
     }
 }
