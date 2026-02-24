@@ -1,0 +1,51 @@
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: 2026 The Contributors to Eclipse OpenSOVD (see CONTRIBUTORS)
+#
+# See the NOTICE file(s) distributed with this work for additional
+# information regarding copyright ownership.
+#
+# This program and the accompanying materials are made available under the
+# terms of the Apache License Version 2.0 which is available at
+# https://www.apache.org/licenses/LICENSE-2.0
+
+name: PR Lint and Format Checks
+
+on:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pull-requests: write # Grants permission to post review comments
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref_name }}-${{ github.event.pull_request.number || github.sha }}
+  cancel-in-progress: true
+
+jobs:
+  format_and_clippy_for_pr:
+    runs-on: ubuntu-latest
+    name: "PR Lint and Format"
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          submodules: false
+      - name: Format and Clippy - Nightly toolchain pinned
+        uses: eclipse-opensovd/cicd-workflows/rust-lint-and-format-action@f829f9a9b93129170b25ae6769985ddff14fd252
+        with:
+          toolchain: nightly-2025-07-14
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          fail-on-format-error: "true"
+          fail-on-clippy-error: "true"
+          clippy-deny-warnings: "true"
+          clippy-features: "integration-tests"
+      - name: Format and Clippy - Nightly toolchain latest
+        uses: eclipse-opensovd/cicd-workflows/rust-lint-and-format-action@f829f9a9b93129170b25ae6769985ddff14fd252
+        with:
+          toolchain: nightly
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          fail-on-format-error: "false"
+          fail-on-clippy-error: "false"
+          clippy-deny-warnings: "false"
+          clippy-features: "integration-tests"
