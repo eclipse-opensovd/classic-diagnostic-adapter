@@ -1319,6 +1319,16 @@ impl<S: EcuGateway, R: DiagServiceResponse, T: EcuManager<Response = R>> UdsEcu
         Ok(items)
     }
 
+    async fn get_functional_group_data_info(
+        &self,
+        functional_group_name: &str,
+    ) -> Result<Vec<cda_interfaces::datatypes::ComponentDataInfo>, DiagServiceError> {
+        self.ecu_manager(&self.functional_description_database)?
+            .read()
+            .await
+            .get_functional_group_data_info(functional_group_name)
+    }
+
     async fn get_components_configuration_info(
         &self,
         ecu: &str,
