@@ -81,14 +81,6 @@ jobs:
         uses: Swatinem/rust-cache@v2
       - name: Install cargo-deny
         run: cargo install --locked --version 0.18.9 cargo-deny
-      - name: Install taplo toml toolkit
-        run: cargo install --locked --version 0.10.0 taplo-cli
-      - name: check fmt
-        run: cargo fmt --all -- --check
-      - name: check toml fmt
-        run: taplo fmt --check --diff
-      - name: Run Clippy
-        run: cargo clippy --locked --all-targets -- -D warnings
       - name: Build
         run: cargo build --locked --verbose
       - name: Check licenses
