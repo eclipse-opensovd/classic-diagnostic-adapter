@@ -3123,12 +3123,13 @@ impl<S: SecurityPlugin> EcuManager<S> {
             }
 
             datatypes::DataOperationVariant::Structure(structure_dop) => {
-                self.map_strucutre_dop_from_uds(
+                self.map_structure_dop_from_uds(
                     mapped_service,
                     uds_payload,
                     data,
                     &short_name,
                     &structure_dop,
+                    Some(param.byte_position() as usize),
                 )?;
             }
             datatypes::DataOperationVariant::Dtc(dtc_dop) => {
@@ -3391,28 +3392,36 @@ impl<S: SecurityPlugin> EcuManager<S> {
         Ok(())
     }
 
-    fn map_strucutre_dop_from_uds(
+    fn map_structure_dop_from_uds(
         &self,
         mapped_service: &datatypes::DiagService,
         uds_payload: &mut Payload,
         data: &mut MappedDiagServiceResponsePayload,
         short_name: &str,
         structure_dop: &datatypes::StructureDop,
+        structure_param_byte_pos: Option<usize>,
     ) -> Result<(), DiagServiceError> {
+        let offset = structure_param_byte_pos.unwrap_or(0);
         if let Some(byte_size) = structure_dop.byte_size() {
             let byte_size = byte_size as usize;
-            if uds_payload.len() < byte_size {
+            if uds_payload.len() < offset + byte_size {
                 return Err(DiagServiceError::NotEnoughData {
-                    expected: byte_size,
+                    expected: offset + byte_size,
                     actual: uds_payload.len(),
                 });
             }
+            /* Slice the payload for the structure*/
+            uds_payload.push_slice(offset, offset + byte_size)?;
         }
 
         if let Some(params) = structure_dop.params() {
             for param in params.iter().map(datatypes::Parameter) {
                 self.map_param_from_uds(mapped_service, &param, short_name, uds_payload, data)?;
             }
+        }
+        /* Pop the slice after processing*/
+        if structure_dop.byte_size().is_some() {
+            uds_payload.pop_slice()?;
         }
         Ok(())
     }
