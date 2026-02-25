@@ -205,7 +205,7 @@ impl DiagServiceResponseStruct {
     /// internally has an error when calling serialize on the elements.
     #[tracing::instrument(skip(self), fields(service_name = %self.service.name))]
     pub fn serialize_to_json(self) -> Result<DiagServiceJsonResponse, DiagServiceError> {
-        let MappedResponseData { mut data, mut errors } = self.get_mapped_payload()?;
+        let MappedResponseData {data, mut errors } = self.get_mapped_payload()?;
         if data.is_empty() {
             return Ok(DiagServiceJsonResponse {
                 data: serde_json::Value::Null,
