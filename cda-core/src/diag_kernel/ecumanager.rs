@@ -822,6 +822,24 @@ impl<S: SecurityPlugin> cda_interfaces::EcuManager for EcuManager<S> {
         .collect()
     }
 
+    fn get_functional_group_data_info(
+        &self,
+        functional_group_name: &str,
+    ) -> Result<Vec<ComponentDataInfo>, DiagServiceError> {
+        Ok(self
+            .get_services_from_functional_group_and_parent_refs(functional_group_name, |service| {
+                service
+                    .request_id()
+                    .is_some_and(|id| id == service_ids::READ_DATA_BY_IDENTIFIER)
+            })?
+            .into_iter()
+            .filter_map(|service| {
+                let diag_comm = service.diag_comm()?;
+                Some(self.diag_comm_to_component_data_info(&(diag_comm.into())))
+            })
+            .collect())
+    }
+
     fn get_components_single_ecu_jobs_info(&self) -> Vec<ComponentDataInfo> {
         self.get_single_ecu_jobs_from_variant_and_parent_refs(|_| true)
             .into_iter()
@@ -2161,6 +2179,68 @@ impl<S: SecurityPlugin> EcuManager<S> {
             })
     }
 
+    /// Retrieves diagnostic services from a given functional group and its parent
+    /// references, filtered by the provided predicate.
+    ///
+    /// # Errors
+    /// Will return `Err` if the database has no functional groups or the specified
+    /// group is not found.
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// let read_services = ecu_manager.get_services_from_functional_group_and_parent_refs(
+    ///     "FunctionalGroupName",
+    ///     |service| {
+    ///         service
+    ///             .request_id()
+    ///             .is_some_and(|id| id == service_ids::READ_DATA_BY_IDENTIFIER)
+    ///     },
+    /// )?;
+    /// for service in &read_services {
+    ///     println!("{:?}", service.diag_comm().and_then(|dc| dc.short_name()));
+    /// }
+    /// ```
+    fn get_services_from_functional_group_and_parent_refs<F>(
+        &self,
+        group_name: &str,
+        service_filter: F,
+    ) -> Result<Vec<datatypes::DiagService<'_>>, DiagServiceError>
+    where
+        F: Fn(&datatypes::DiagService) -> bool,
+    {
+        let Ok(groups) = self.diag_database.functional_groups() else {
+            return Err(DiagServiceError::InvalidDatabase(
+                "Database has no functional groups".to_owned(),
+            ));
+        };
+
+        let matching_group = groups
+            .into_iter()
+            .find(|group| {
+                group
+                    .diag_layer()
+                    .and_then(|dl| dl.short_name())
+                    .is_some_and(|name| name.eq_ignore_ascii_case(group_name))
+            })
+            .ok_or_else(|| {
+                DiagServiceError::NotFound(Some(format!(
+                    "Functional group '{group_name}' not found"
+                )))
+            })?;
+
+        Ok(matching_group
+            .diag_layer()
+            .map(|dl| (dl, matching_group.parent_refs()))
+            .map_or(<_>::default(), |(diag_layer, parent_refs)| {
+                Self::get_services_from_diag_layer_and_parent_refs(
+                    &(diag_layer.into()),
+                    parent_refs.into_iter().flatten().map(datatypes::ParentRef),
+                    service_filter,
+                )
+            }))
+    }
+
     /// Retrieves single ECU jobs from the current variants `DiagLayer` and its parent
     /// references, filtered by the provided predicate. Returns an empty vector if no variant
     /// is set.
@@ -3350,11 +3430,12 @@ impl<S: SecurityPlugin> EcuManager<S> {
             }
 
             datatypes::DataOperationVariant::Structure(structure_dop) => {
-                self.map_strucutre_dop_from_uds(
+                self.map_structure_dop_from_uds(
                     mapped_service,
                     uds_payload,
                     data,
                     &short_name,
+                    param,
                     &structure_dop,
                 )?;
             }
@@ -3618,28 +3699,39 @@ impl<S: SecurityPlugin> EcuManager<S> {
         Ok(())
     }
 
-    fn map_strucutre_dop_from_uds(
+    fn map_structure_dop_from_uds(
         &self,
         mapped_service: &datatypes::DiagService,
         uds_payload: &mut Payload,
         data: &mut MappedDiagServiceResponsePayload,
         short_name: &str,
+        structure_param: &datatypes::Parameter,
         structure_dop: &datatypes::StructureDop,
     ) -> Result<(), DiagServiceError> {
+        // Slice the payload for the structure
         if let Some(byte_size) = structure_dop.byte_size() {
             let byte_size = byte_size as usize;
-            if uds_payload.len() < byte_size {
+            let start = structure_param.byte_position() as usize;
+            let end = start.checked_add(byte_size).ok_or_else(|| {
+                DiagServiceError::BadPayload("Overflow in end calculation".to_owned())
+            })?;
+            if uds_payload.len() < end {
                 return Err(DiagServiceError::NotEnoughData {
-                    expected: byte_size,
+                    expected: end,
                     actual: uds_payload.len(),
                 });
             }
+            uds_payload.push_slice(start, end)?;
         }
 
         if let Some(params) = structure_dop.params() {
             for param in params.iter().map(datatypes::Parameter) {
                 self.map_param_from_uds(mapped_service, &param, short_name, uds_payload, data)?;
             }
+        }
+        // Pop the slice after processing
+        if structure_dop.byte_size().is_some() {
+            uds_payload.pop_slice()?;
         }
         Ok(())
     }
@@ -4490,6 +4582,35 @@ mod tests {
         };
     }
 
+    /// Helper: build a database with a single variant and functional groups.
+    macro_rules! finish_db_with_functional_groups {
+        ($builder:expr, $protocol:expr, $variant_services:expr, $functional_groups:expr) => {{
+            let cp_ref = $builder.create_com_param_ref(None, None, None, Some($protocol), None);
+            let diag_layer = $builder.create_diag_layer(DiagLayerParams {
+                short_name: TEST_DIAG_LAYER,
+                com_param_refs: Some(vec![cp_ref]),
+                diag_services: {
+                    let services: Vec<_> = $variant_services;
+                    if services.is_empty() {
+                        None
+                    } else {
+                        Some(services)
+                    }
+                },
+                ..Default::default()
+            });
+            let variant = $builder.create_variant(diag_layer, true, None, None);
+            $builder.finish(EcuDataParams {
+                ecu_name: "TestEcu",
+                revision: "1",
+                version: "1.0.0",
+                variants: Some(vec![variant]),
+                functional_groups: Some($functional_groups),
+                ..Default::default()
+            })
+        }};
+    }
+
     /// Helper: build a `DiagComm` flatbuffer node with test-default fields.
     macro_rules! new_diag_comm {
         ($builder:expr, $name:expr, $protocol:expr) => {
@@ -4635,6 +4756,51 @@ mod tests {
             false,
         )
         .unwrap()
+    }
+
+    /// Creates an ECU manager whose database contains a functional group named `"MixedGroup"`
+    /// with one `ReadDataByIdentifier` service (`"ReadService"`) and one
+    /// `WriteDataByIdentifier` service (`"WriteService"`).
+    fn create_ecu_manager_with_mixed_functional_group()
+    -> super::EcuManager<DefaultSecurityPluginData> {
+        let mut db_builder = EcuDataBuilder::new();
+        let protocol = db_builder.create_protocol(Protocol::DoIp.value(), None, None, None);
+
+        // Create a READ_DATA_BY_IDENTIFIER service
+        let read_diag_comm = db_builder.create_diag_comm(DiagCommParams {
+            short_name: "ReadService",
+            long_name: Some("Read Service"),
+            semantic: Some("DATA"),
+            protocols: Some(vec![protocol]),
+            ..Default::default()
+        });
+        let read_request =
+            create_sid_only_request!(db_builder, service_ids::READ_DATA_BY_IDENTIFIER);
+        let read_service =
+            new_diag_service!(db_builder, read_diag_comm, read_request, vec![], vec![]);
+
+        // Create a WRITE_DATA_BY_IDENTIFIER service
+        let write_diag_comm = db_builder.create_diag_comm(DiagCommParams {
+            short_name: "WriteService",
+            long_name: Some("Write Service"),
+            semantic: Some("DATA"),
+            protocols: Some(vec![protocol]),
+            ..Default::default()
+        });
+        let write_request =
+            create_sid_only_request!(db_builder, service_ids::WRITE_DATA_BY_IDENTIFIER);
+        let write_service =
+            new_diag_service!(db_builder, write_diag_comm, write_request, vec![], vec![]);
+
+        let fg_diag_layer = db_builder.create_diag_layer(DiagLayerParams {
+            short_name: "MixedGroup",
+            diag_services: Some(vec![read_service, write_service]),
+            ..Default::default()
+        });
+        let fg = db_builder.create_functional_group(fg_diag_layer, None);
+
+        let db = finish_db_with_functional_groups!(db_builder, protocol, vec![], vec![fg]);
+        new_ecu_manager(db)
     }
 
     /// Creates an ECU manager with a diagnostic service containing a `DynamicLengthField` DOP.
@@ -7240,6 +7406,103 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_convert_request_from_uds_and_check_structure() {
+        let (ecu_manager, dc, sid, _struct_byte_len) = create_ecu_manager_with_struct_service(3);
+
+        // Create a valid UDS request payload: SID + struct data
+        // SID (1 byte) + 2 bytes DID + param1 (2 bytes) + param2 (4 bytes) + param3 (4 bytes)
+        let request_payload = vec![
+            sid, // SID
+            0xF1, 0x00, // DID 0xF100
+            0x12, 0x34, // param1 (u16)
+            0x40, 0x49, 0x0F, 0xDB, // param2 (u32),
+            0x40, 0x49, 0x0F, 0xDB, // param3 (u32)
+        ];
+
+        let payload = create_payload(request_payload.clone());
+
+        // Convert request from UDS
+        let result = ecu_manager
+            .convert_request_from_uds(&dc, &payload, true)
+            .await;
+
+        assert!(result.is_ok());
+        let response = result.expect("Expected successful conversion from UDS");
+
+        // Verify response type is positive (successful parsing)
+        assert_eq!(response.response_type, DiagServiceResponseType::Positive);
+
+        // Verify raw data matches input
+        assert_eq!(response.data, request_payload);
+
+        // Verify mapped data exists
+        assert!(
+            response.mapped_data.is_some(),
+            "mapped_data.is_some() was: {}",
+            response.mapped_data.is_some()
+        );
+
+        let mapped = response.mapped_data.unwrap();
+
+        // Verify no mapping errors
+        assert_eq!(
+            mapped.errors.len(),
+            0,
+            "Expected no mapping errors, but got: {:?}",
+            mapped.errors
+        );
+
+        // Verify all parameters were parsed (flattened from structure)
+        assert!(
+            mapped.data.contains_key(SID_PARM_NAME),
+            "Expected SID parameter to be present"
+        );
+
+        // Check exact byte positions for param1 and param2
+        // param1: bytes 3 and 4 (after SID and DID)
+        let param1_bytes = request_payload.get(3..5).expect("param1 bytes missing");
+        let param1_val = match mapped.data.get("param1") {
+            Some(crate::diag_kernel::diagservices::DiagDataTypeContainer::RawContainer(raw)) => {
+                raw.data.clone()
+            }
+            _ => panic!("param1 is not RawContainer"),
+        };
+        assert_eq!(
+            param1_bytes,
+            &param1_val[..],
+            "param1 bytes do not match expected position"
+        );
+
+        // param2: bytes 5..9
+        let param2_bytes = request_payload.get(5..9).expect("param2 bytes missing");
+        let param2_val = match mapped.data.get("param2") {
+            Some(crate::diag_kernel::diagservices::DiagDataTypeContainer::RawContainer(raw)) => {
+                raw.data.clone()
+            }
+            _ => panic!("param2 is not RawContainer"),
+        };
+        assert_eq!(
+            param2_bytes,
+            &param2_val[..],
+            "param2 bytes do not match expected position"
+        );
+
+        // param3: bytes 9..13
+        let param3_bytes = request_payload.get(9..13).expect("param3 bytes missing");
+        let param3_val = match mapped.data.get("param3") {
+            Some(crate::diag_kernel::diagservices::DiagDataTypeContainer::RawContainer(raw)) => {
+                raw.data.clone()
+            }
+            _ => panic!("param3 is not RawContainer"),
+        };
+        assert_eq!(
+            param3_bytes,
+            &param3_val[..],
+            "param3 bytes do not match expected position"
+        );
+    }
+
+    #[tokio::test]
     async fn test_state_transition_source_allowed_as_valid_security_state() {
         // State transition source states are added to allowed_security states
         let (ecu_manager, dc) = create_ecu_manager_with_state_transitions();
@@ -7320,6 +7583,42 @@ mod tests {
         assert!(
             result.is_err(),
             "Service should NOT be allowed from invalid security state"
+        );
+    }
+
+    #[test]
+    fn test_get_functional_group_data_info_filters_non_read_services() {
+        let ecu_manager = create_ecu_manager_with_mixed_functional_group();
+
+        let result = ecu_manager
+            .get_functional_group_data_info("MixedGroup")
+            .expect("should return Ok");
+
+        assert_eq!(result.len(), 1, "only read services should be returned");
+        assert_eq!(
+            result.first().expect("Expected element at index 0").id,
+            "ReadService"
+        );
+    }
+
+    #[test]
+    fn test_get_functional_group_data_info_no_functional_groups() {
+        let mut db_builder = EcuDataBuilder::new();
+        let protocol = db_builder.create_protocol(Protocol::DoIp.value(), None, None, None);
+
+        // Build a database with no functional groups
+        let db = finish_db!(db_builder, protocol, vec![]);
+        let ecu_manager = new_ecu_manager(db);
+
+        let result = ecu_manager.get_functional_group_data_info("AnyGroup");
+
+        assert!(
+            result.is_err(),
+            "should fail when database has no functional groups"
+        );
+        assert!(
+            matches!(result, Err(DiagServiceError::InvalidDatabase(_))),
+            "expected InvalidDatabase error"
         );
     }
 

@@ -159,6 +159,7 @@ fn create_functional_group_route<T: UdsEcu + Clone>(fg_state: WebserverFgState<T
                 .put_with(locks::lock::put, locks::lock::docs_put)
                 .delete_with(locks::lock::delete, locks::lock::docs_delete),
         )
+        .api_route("/data", routing::get_with(data::get, data::docs_get))
         .api_route(
             "/data/{diag_service}",
             routing::get_with(data::diag_service::get, data::diag_service::docs_get)
