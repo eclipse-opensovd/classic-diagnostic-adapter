@@ -8,7 +8,8 @@
 # terms of the Apache License Version 2.0 which is available at
 # https://www.apache.org/licenses/LICENSE-2.0
 
-databases_path = "."
+[database]
+path = "."
 
 [doip]
 tester_address = "127.0.0.1"
