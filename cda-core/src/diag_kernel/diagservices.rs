@@ -206,8 +206,6 @@ impl DiagServiceResponseStruct {
     #[tracing::instrument(skip(self), fields(service_name = %self.service.name))]
     pub fn serialize_to_json(self) -> Result<DiagServiceJsonResponse, DiagServiceError> {
         let MappedResponseData { mut data, mut errors } = self.get_mapped_payload()?;
-        /* Remove Response_Service_Id if present */
-        data.remove("Response_Service_Id");
         if data.is_empty() {
             return Ok(DiagServiceJsonResponse {
                 data: serde_json::Value::Null,
