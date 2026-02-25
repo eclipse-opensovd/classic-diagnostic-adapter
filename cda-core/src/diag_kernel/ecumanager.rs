@@ -2529,7 +2529,7 @@ impl<S: SecurityPlugin> EcuManager<S> {
         let const_value = c.coded_value().ok_or(DiagServiceError::InvalidDatabase(
             "CodedConst has no coded value".to_owned(),
         ))?;
-        let const_json_value = coded_const_to_json_value(const_value, diag_type.base_datatype())?;
+        let const_json_value = str_to_json_value(const_value, diag_type.base_datatype())?;
         let expected =
             operations::json_value_to_uds_data(&diag_type, None, None, &const_json_value)
                 .inspect_err(|e| {
@@ -2651,20 +2651,31 @@ impl<S: SecurityPlugin> EcuManager<S> {
                 "Expected PhysConst specific data".to_owned(),
             ))?;
 
-        let param_data = if let Some(param_data) = param_data {
-            param_data
-        } else {
-            &p.phys_constant_value().map(serde_json::Value::from).ok_or(
-                DiagServiceError::InvalidDatabase("PhysConst has no constant value".to_owned()),
-            )?
-        };
-
         let dop =
             p.dop()
                 .map(datatypes::DataOperation)
                 .ok_or(DiagServiceError::InvalidDatabase(
                     "PhysConst has no DOP".to_owned(),
                 ))?;
+
+        let dop_variant = dop.variant()?;
+
+        let value = if let Some(value) = param_data {
+            value
+        } else if let datatypes::DataOperationVariant::Normal(normal_dop) = dop_variant {
+            let diag_type = normal_dop.diag_coded_type()?;
+            &p.phys_constant_value()
+                .ok_or(DiagServiceError::InvalidRequest(format!(
+                    "Required parameter '{}' missing",
+                    param.short_name().unwrap_or_default()
+                )))
+                .and_then(|value| str_to_json_value(value, diag_type.base_datatype()))?
+        } else {
+            return Err(DiagServiceError::InvalidRequest(format!(
+                "Required parameter '{}' missing",
+                param.short_name().unwrap_or_default()
+            )));
+        };
 
         // Handle different DOP variants - PhysConst can have Normal or Structure DOPs
         match dop.variant()? {
@@ -2674,7 +2685,7 @@ impl<S: SecurityPlugin> EcuManager<S> {
                     &diag_type,
                     normal_dop.compu_method().map(Into::into),
                     normal_dop.physical_type().map(Into::into),
-                    param_data,
+                    value,
                 )?;
                 diag_type.encode(
                     uds_data,
@@ -2687,12 +2698,12 @@ impl<S: SecurityPlugin> EcuManager<S> {
                 self.map_struct_to_uds(
                     &structure_dop,
                     param.byte_position() as usize,
-                    param_data,
+                    value,
                     uds_payload_data,
                 )?;
             }
             datatypes::DataOperationVariant::Mux(mux_dop) => {
-                self.map_mux_to_uds(&mux_dop, param_data, uds_payload_data)?;
+                self.map_mux_to_uds(&mux_dop, value, uds_payload_data)?;
             }
             _ => {
                 return Err(DiagServiceError::InvalidDatabase(format!(
@@ -2960,16 +2971,24 @@ impl<S: SecurityPlugin> EcuManager<S> {
             ));
         };
 
+        let dop_variant = dop.variant()?;
+
         let value = if let Some(value) = value {
             value
-        } else {
+        } else if let datatypes::DataOperationVariant::Normal(normal_dop) = dop_variant {
+            let diag_type = normal_dop.diag_coded_type()?;
             &value_data
                 .physical_default_value()
-                .map(serde_json::Value::from)
                 .ok_or(DiagServiceError::InvalidRequest(format!(
                     "Required parameter '{}' missing",
                     param.short_name().unwrap_or_default()
-                )))?
+                )))
+                .and_then(|value| str_to_json_value(value, diag_type.base_datatype()))?
+        } else {
+            return Err(DiagServiceError::InvalidRequest(format!(
+                "Required parameter '{}' missing",
+                param.short_name().unwrap_or_default()
+            )));
         };
 
         match dop.variant()? {
@@ -4168,25 +4187,25 @@ fn create_diag_service_response(
     }
 }
 
-fn coded_const_to_json_value(
-    const_value: &str,
+fn str_to_json_value(
+    value: &str,
     data_type: datatypes::DataType,
 ) -> Result<serde_json::Value, DiagServiceError> {
-    let value = match data_type {
+    let json_value = match data_type {
         datatypes::DataType::Int32 => {
-            let i32val = const_value.parse::<i32>().map_err(|e| {
+            let i32val = value.parse::<i32>().map_err(|e| {
                 DiagServiceError::InvalidDatabase(format!("CodedConst value conversion error: {e}"))
             })?;
             serde_json::Number::from(i32val).into()
         }
         datatypes::DataType::UInt32 => {
-            let u32val = const_value.parse::<u32>().map_err(|e| {
+            let u32val = value.parse::<u32>().map_err(|e| {
                 DiagServiceError::InvalidDatabase(format!("CodedConst value conversion error: {e}"))
             })?;
             serde_json::Number::from(u32val).into()
         }
         datatypes::DataType::Float32 | datatypes::DataType::Float64 => {
-            let f64val = const_value.parse::<f64>().map_err(|e| {
+            let f64val = value.parse::<f64>().map_err(|e| {
                 DiagServiceError::InvalidDatabase(format!("CodedConst value conversion error: {e}"))
             })?;
             serde_json::Number::from_f64(f64val).into()
@@ -4194,9 +4213,9 @@ fn coded_const_to_json_value(
         datatypes::DataType::AsciiString
         | datatypes::DataType::Utf8String
         | datatypes::DataType::Unicode2String
-        | datatypes::DataType::ByteField => serde_json::Value::from(const_value),
+        | datatypes::DataType::ByteField => serde_json::Value::from(value),
     };
-    Ok(value)
+    Ok(json_value)
 }
 
 fn process_coded_constants(
@@ -4225,8 +4244,7 @@ fn process_coded_constants(
                         "Param '{}' is missing coded value",
                         param.short_name().unwrap_or_default()
                     )))?;
-            let const_json_value =
-                coded_const_to_json_value(coded_const_value, diag_type.base_datatype())?;
+            let const_json_value = str_to_json_value(coded_const_value, diag_type.base_datatype())?;
 
             let uds_val = json_value_to_uds_data(&diag_type, None, None, &const_json_value)
                 .inspect_err(|e| {
