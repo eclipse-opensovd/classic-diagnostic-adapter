@@ -3350,11 +3350,12 @@ impl<S: SecurityPlugin> EcuManager<S> {
             }
 
             datatypes::DataOperationVariant::Structure(structure_dop) => {
-                self.map_strucutre_dop_from_uds(
+                self.map_structure_dop_from_uds(
                     mapped_service,
                     uds_payload,
                     data,
                     &short_name,
+                    param,
                     &structure_dop,
                 )?;
             }
@@ -3618,28 +3619,39 @@ impl<S: SecurityPlugin> EcuManager<S> {
         Ok(())
     }
 
-    fn map_strucutre_dop_from_uds(
+    fn map_structure_dop_from_uds(
         &self,
         mapped_service: &datatypes::DiagService,
         uds_payload: &mut Payload,
         data: &mut MappedDiagServiceResponsePayload,
         short_name: &str,
+        structure_param: &datatypes::Parameter,
         structure_dop: &datatypes::StructureDop,
     ) -> Result<(), DiagServiceError> {
+        // Slice the payload for the structure
         if let Some(byte_size) = structure_dop.byte_size() {
             let byte_size = byte_size as usize;
-            if uds_payload.len() < byte_size {
+            let start = structure_param.byte_position() as usize;
+            let end = start.checked_add(byte_size).ok_or_else(|| {
+                DiagServiceError::BadPayload("Overflow in end calculation".to_owned())
+            })?;
+            if uds_payload.len() < end {
                 return Err(DiagServiceError::NotEnoughData {
-                    expected: byte_size,
+                    expected: end,
                     actual: uds_payload.len(),
                 });
             }
+            uds_payload.push_slice(start, end)?;
         }
 
         if let Some(params) = structure_dop.params() {
             for param in params.iter().map(datatypes::Parameter) {
                 self.map_param_from_uds(mapped_service, &param, short_name, uds_payload, data)?;
             }
+        }
+        // Pop the slice after processing
+        if structure_dop.byte_size().is_some() {
+            uds_payload.pop_slice()?;
         }
         Ok(())
     }
@@ -7236,6 +7248,103 @@ mod tests {
         assert!(
             mapped_data.data.contains_key("sub_param2"),
             "sub_param2 should survive roundtrip"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_convert_request_from_uds_and_check_structure() {
+        let (ecu_manager, dc, sid, _struct_byte_len) = create_ecu_manager_with_struct_service(3);
+
+        // Create a valid UDS request payload: SID + struct data
+        // SID (1 byte) + 2 bytes DID + param1 (2 bytes) + param2 (4 bytes) + param3 (4 bytes)
+        let request_payload = vec![
+            sid, // SID
+            0xF1, 0x00, // DID 0xF100
+            0x12, 0x34, // param1 (u16)
+            0x40, 0x49, 0x0F, 0xDB, // param2 (u32),
+            0x40, 0x49, 0x0F, 0xDB, // param3 (u32)
+        ];
+
+        let payload = create_payload(request_payload.clone());
+
+        // Convert request from UDS
+        let result = ecu_manager
+            .convert_request_from_uds(&dc, &payload, true)
+            .await;
+
+        assert!(result.is_ok());
+        let response = result.expect("Expected successful conversion from UDS");
+
+        // Verify response type is positive (successful parsing)
+        assert_eq!(response.response_type, DiagServiceResponseType::Positive);
+
+        // Verify raw data matches input
+        assert_eq!(response.data, request_payload);
+
+        // Verify mapped data exists
+        assert!(
+            response.mapped_data.is_some(),
+            "mapped_data.is_some() was: {}",
+            response.mapped_data.is_some()
+        );
+
+        let mapped = response.mapped_data.unwrap();
+
+        // Verify no mapping errors
+        assert_eq!(
+            mapped.errors.len(),
+            0,
+            "Expected no mapping errors, but got: {:?}",
+            mapped.errors
+        );
+
+        // Verify all parameters were parsed (flattened from structure)
+        assert!(
+            mapped.data.contains_key(SID_PARM_NAME),
+            "Expected SID parameter to be present"
+        );
+
+        // Check exact byte positions for param1 and param2
+        // param1: bytes 3 and 4 (after SID and DID)
+        let param1_bytes = request_payload.get(3..5).expect("param1 bytes missing");
+        let param1_val = match mapped.data.get("param1") {
+            Some(crate::diag_kernel::diagservices::DiagDataTypeContainer::RawContainer(raw)) => {
+                raw.data.clone()
+            }
+            _ => panic!("param1 is not RawContainer"),
+        };
+        assert_eq!(
+            param1_bytes,
+            &param1_val[..],
+            "param1 bytes do not match expected position"
+        );
+
+        // param2: bytes 5..9
+        let param2_bytes = request_payload.get(5..9).expect("param2 bytes missing");
+        let param2_val = match mapped.data.get("param2") {
+            Some(crate::diag_kernel::diagservices::DiagDataTypeContainer::RawContainer(raw)) => {
+                raw.data.clone()
+            }
+            _ => panic!("param2 is not RawContainer"),
+        };
+        assert_eq!(
+            param2_bytes,
+            &param2_val[..],
+            "param2 bytes do not match expected position"
+        );
+
+        // param3: bytes 9..13
+        let param3_bytes = request_payload.get(9..13).expect("param3 bytes missing");
+        let param3_val = match mapped.data.get("param3") {
+            Some(crate::diag_kernel::diagservices::DiagDataTypeContainer::RawContainer(raw)) => {
+                raw.data.clone()
+            }
+            _ => panic!("param3 is not RawContainer"),
+        };
+        assert_eq!(
+            param3_bytes,
+            &param3_val[..],
+            "param3 bytes do not match expected position"
         );
     }
 
