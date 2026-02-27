@@ -1251,6 +1251,19 @@ impl<'a> EcuDataBuilder<'a> {
         dataformat::StateTransitionRef::create(&mut self.fbb, &args)
     }
 
+    pub fn create_functional_group(
+        &mut self,
+        diag_layer: WIPOffset<dataformat::DiagLayer<'a>>,
+        parent_refs: Option<Vec<WIPOffset<dataformat::ParentRef<'a>>>>,
+    ) -> WIPOffset<dataformat::FunctionalGroup<'a>> {
+        let functional_group_args = dataformat::FunctionalGroupArgs {
+            diag_layer: Some(diag_layer),
+            parent_refs: parent_refs.map(|v| self.fbb.create_vector(&v)),
+        };
+
+        dataformat::FunctionalGroup::create(&mut self.fbb, &functional_group_args)
+    }
+
     pub fn create_pre_condition_state_ref(
         &mut self,
         state: WIPOffset<dataformat::State<'a>>,

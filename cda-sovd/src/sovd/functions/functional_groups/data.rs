@@ -10,6 +10,79 @@
  * https://www.apache.org/licenses/LICENSE-2.0
  */
 
+use aide::transform::TransformOperation;
+use axum::{
+    Json,
+    extract::{Query, State},
+    response::{IntoResponse, Response},
+};
+use axum_extra::extract::WithRejection;
+use cda_interfaces::UdsEcu;
+use http::StatusCode;
+
+use super::WebserverFgState;
+use crate::sovd::{
+    IntoSovd, create_schema,
+    error::{ApiError, ErrorWrapper},
+};
+
+pub(crate) async fn get<T: UdsEcu + Clone>(
+    WithRejection(Query(query), _): WithRejection<
+        Query<sovd_interfaces::functions::functional_groups::data::get::Query>,
+        ApiError,
+    >,
+    State(WebserverFgState {
+        uds,
+        functional_group_name,
+        ..
+    }): State<WebserverFgState<T>>,
+) -> Response {
+    let schema = if query.include_schema {
+        Some(create_schema!(
+            sovd_interfaces::functions::functional_groups::data::get::Response
+        ))
+    } else {
+        None
+    };
+    match uds
+        .get_functional_group_data_info(&functional_group_name)
+        .await
+    {
+        Ok(mut items) => {
+            let data = sovd_interfaces::functions::functional_groups::data::get::Response {
+                items: items.drain(0..).map(IntoSovd::into_sovd).collect(),
+                schema,
+            };
+            (StatusCode::OK, Json(data)).into_response()
+        }
+        Err(e) => ErrorWrapper {
+            error: e.into(),
+            include_schema: query.include_schema,
+        }
+        .into_response(),
+    }
+}
+
+pub(crate) fn docs_get(op: TransformOperation) -> TransformOperation {
+    op.description("Get all available data services for the functional group.")
+        .response_with::<
+            200,
+            Json<sovd_interfaces::functions::functional_groups::data::get::Response>,
+            _,
+        >(|res| {
+            res.description("Response with all available data services.").example(
+                sovd_interfaces::functions::functional_groups::data::get::Response {
+                    items: vec![sovd_interfaces::components::ecu::ComponentDataInfo {
+                        category: "example_category".to_string(),
+                        id: "example_id".to_string(),
+                        name: "example_name".to_string(),
+                    }],
+                    schema: None,
+                },
+            )
+        })
+}
+
 pub(crate) mod diag_service {
     use aide::{UseApi, transform::TransformOperation};
     use axum::{

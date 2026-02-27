@@ -887,21 +887,17 @@ fn validate_data_length(
     json_value: &serde_json::Value,
 ) -> Result<(), DiagServiceError> {
     match base_type {
-        DataType::Int32 | DataType::UInt32 | DataType::Float32 => {
-            if data.len() > 4 {
-                return Err(DiagServiceError::ParameterConversionError(format!(
-                    "Invalid data length {} for {base_type:?} value {json_value}",
-                    data.len()
-                )));
-            }
+        DataType::Int32 | DataType::UInt32 | DataType::Float32 if data.len() > 4 => {
+            return Err(DiagServiceError::ParameterConversionError(format!(
+                "Invalid data length {} for {base_type:?} value {json_value}",
+                data.len()
+            )));
         }
-        DataType::Float64 => {
-            if data.len() > 8 {
-                return Err(DiagServiceError::ParameterConversionError(format!(
-                    "Invalid data length for {base_type:?}: {}, value {json_value}",
-                    data.len()
-                )));
-            }
+        DataType::Float64 if data.len() > 8 => {
+            return Err(DiagServiceError::ParameterConversionError(format!(
+                "Invalid data length for {base_type:?}: {}, value {json_value}",
+                data.len()
+            )));
         }
         _ => {}
     }
