@@ -1608,7 +1608,7 @@ impl<S: EcuGateway, R: DiagServiceResponse, T: EcuManager<Response = R>> UdsEcu
             .get_service_state(service)
             .await
             .ok_or(DiagServiceError::NotFound(
-                format!("Service state for service ID {service:02X} not found in ECU {ecu_name}",)
+                format!("Service state for service ID {service:02X} not found in ECU {ecu_name}")
                     .into(),
             ))
     }
@@ -1662,7 +1662,7 @@ impl<S: EcuGateway, R: DiagServiceResponse, T: EcuManager<Response = R>> UdsEcu
         }
 
         let file = File::open(file_path).await.map_err(|e| {
-            DiagServiceError::InvalidRequest(format!("Failed to open file '{file_path}': {e:?}",))
+            DiagServiceError::InvalidRequest(format!("Failed to open file '{file_path}': {e:?}"))
         })?;
 
         let flash_file_meta_data = file.metadata().await.map_err(|e| {

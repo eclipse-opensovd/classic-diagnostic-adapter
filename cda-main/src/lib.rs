@@ -546,11 +546,7 @@ async fn load_database<S: SecurityPlugin>(
 
                 let files: Vec<Chunk> = filtered_chunks
                     .into_iter()
-                    .chain(
-                        proto_data
-                            .into_iter()
-                            .flat_map(|(_, chunks)| chunks.into_iter()),
-                    )
+                    .chain(proto_data.into_values().flat_map(IntoIterator::into_iter))
                     .collect();
 
                 file_managers
