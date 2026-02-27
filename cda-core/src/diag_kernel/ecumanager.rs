@@ -721,8 +721,8 @@ impl<S: SecurityPlugin> cda_interfaces::EcuManager for EcuManager<S> {
                         })
                     })
                 })
-                .filter(|_| service.request_id().is_some_and(|id| id == service_id))
-                .is_some()
+                .as_ref()
+                .is_some_and(|_| service.request_id().is_some_and(|id| id == service_id))
         })
         .into_iter()
         .next()
@@ -787,18 +787,39 @@ impl<S: SecurityPlugin> cda_interfaces::EcuManager for EcuManager<S> {
             .ok_or_else(|| DiagServiceError::NotFound(Some(name.to_owned())))
     }
 
-    fn get_components_data_info(&self) -> Vec<ComponentDataInfo> {
+    fn get_components_data_info(&self, security_plugin: &DynamicPlugin) -> Vec<ComponentDataInfo> {
         self.get_services_from_variant_and_parent_refs(|service| {
             service
                 .request_id()
                 .is_some_and(|id| id == service_ids::READ_DATA_BY_IDENTIFIER)
         })
         .into_iter()
+        .filter(|service| Self::is_service_visible(security_plugin, service))
         .filter_map(|service| {
             let diag_comm = service.diag_comm()?;
             Some(self.diag_comm_to_component_data_info(&(diag_comm.into())))
         })
         .collect()
+    }
+
+    fn get_functional_group_data_info(
+        &self,
+        security_plugin: &DynamicPlugin,
+        functional_group_name: &str,
+    ) -> Result<Vec<ComponentDataInfo>, DiagServiceError> {
+        Ok(self
+            .get_services_from_functional_group_and_parent_refs(functional_group_name, |service| {
+                service
+                    .request_id()
+                    .is_some_and(|id| id == service_ids::READ_DATA_BY_IDENTIFIER)
+            })?
+            .into_iter()
+            .filter(|service| Self::is_service_visible(security_plugin, service))
+            .filter_map(|service| {
+                let diag_comm = service.diag_comm()?;
+                Some(self.diag_comm_to_component_data_info(&(diag_comm.into())))
+            })
+            .collect())
     }
 
     fn get_components_single_ecu_jobs_info(&self) -> Vec<ComponentDataInfo> {
@@ -984,6 +1005,7 @@ impl<S: SecurityPlugin> cda_interfaces::EcuManager for EcuManager<S> {
     /// that are in the functional group varcoding.
     fn get_components_configurations_info(
         &self,
+        security_plugin: &DynamicPlugin,
     ) -> Result<Vec<ComponentConfigurationsInfo>, DiagServiceError> {
         let diag_layers = self.get_diag_layers_from_variant_and_parent_refs();
         let var_coding_func_class_short_name = diag_layers
@@ -1017,6 +1039,7 @@ impl<S: SecurityPlugin> cda_interfaces::EcuManager for EcuManager<S> {
             .filter_map(|dl| dl.diag_services())
             .flat_map(|services| services.iter())
             .map(datatypes::DiagService)
+            .filter(|service| Self::is_service_visible(security_plugin, service))
             .filter(|service| {
                 service
                     .request_id()
@@ -2137,6 +2160,68 @@ impl<S: SecurityPlugin> EcuManager<S> {
                     service_filter,
                 )
             })
+    }
+
+    /// Retrieves diagnostic services from a given functional group and its parent
+    /// references, filtered by the provided predicate.
+    ///
+    /// # Errors
+    /// Will return `Err` if the database has no functional groups or the specified
+    /// group is not found.
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// let read_services = ecu_manager.get_services_from_functional_group_and_parent_refs(
+    ///     "FunctionalGroupName",
+    ///     |service| {
+    ///         service
+    ///             .request_id()
+    ///             .is_some_and(|id| id == service_ids::READ_DATA_BY_IDENTIFIER)
+    ///     },
+    /// )?;
+    /// for service in &read_services {
+    ///     println!("{:?}", service.diag_comm().and_then(|dc| dc.short_name()));
+    /// }
+    /// ```
+    fn get_services_from_functional_group_and_parent_refs<F>(
+        &self,
+        group_name: &str,
+        service_filter: F,
+    ) -> Result<Vec<datatypes::DiagService<'_>>, DiagServiceError>
+    where
+        F: Fn(&datatypes::DiagService) -> bool,
+    {
+        let Ok(groups) = self.diag_database.functional_groups() else {
+            return Err(DiagServiceError::InvalidDatabase(
+                "Database has no functional groups".to_owned(),
+            ));
+        };
+
+        let matching_group = groups
+            .into_iter()
+            .find(|group| {
+                group
+                    .diag_layer()
+                    .and_then(|dl| dl.short_name())
+                    .is_some_and(|name| name.eq_ignore_ascii_case(group_name))
+            })
+            .ok_or_else(|| {
+                DiagServiceError::NotFound(Some(format!(
+                    "Functional group '{group_name}' not found"
+                )))
+            })?;
+
+        Ok(matching_group
+            .diag_layer()
+            .map(|dl| (dl, matching_group.parent_refs()))
+            .map_or(<_>::default(), |(diag_layer, parent_refs)| {
+                Self::get_services_from_diag_layer_and_parent_refs(
+                    &(diag_layer.into()),
+                    parent_refs.into_iter().flatten().map(datatypes::ParentRef),
+                    service_filter,
+                )
+            }))
     }
 
     /// Retrieves single ECU jobs from the current variants `DiagLayer` and its parent
@@ -4082,6 +4167,16 @@ impl<S: SecurityPlugin> EcuManager<S> {
         security_plugin.validate_service(service)
     }
 
+    /// Returns true if the security plugin allows the user to see this service.
+    /// Reuses [`Self::check_security_plugin`] which handles void plugins (always allowed)
+    /// and real plugins (delegates to [`SecurityApi::validate_service`]).
+    fn is_service_visible(
+        security_plugin: &DynamicPlugin,
+        service: &datatypes::DiagService<'_>,
+    ) -> bool {
+        Self::check_security_plugin(security_plugin, service).is_ok()
+    }
+
     fn get_meta_data_service(
         &self,
         service_name: &str,
@@ -4442,6 +4537,35 @@ mod tests {
         };
     }
 
+    /// Helper: build a database with a single variant and functional groups.
+    macro_rules! finish_db_with_functional_groups {
+        ($builder:expr, $protocol:expr, $variant_services:expr, $functional_groups:expr) => {{
+            let cp_ref = $builder.create_com_param_ref(None, None, None, Some($protocol), None);
+            let diag_layer = $builder.create_diag_layer(DiagLayerParams {
+                short_name: TEST_DIAG_LAYER,
+                com_param_refs: Some(vec![cp_ref]),
+                diag_services: {
+                    let services: Vec<_> = $variant_services;
+                    if services.is_empty() {
+                        None
+                    } else {
+                        Some(services)
+                    }
+                },
+                ..Default::default()
+            });
+            let variant = $builder.create_variant(diag_layer, true, None, None);
+            $builder.finish(EcuDataParams {
+                ecu_name: "TestEcu",
+                revision: "1",
+                version: "1.0.0",
+                variants: Some(vec![variant]),
+                functional_groups: Some($functional_groups),
+                ..Default::default()
+            })
+        }};
+    }
+
     /// Helper: build a `DiagComm` flatbuffer node with test-default fields.
     macro_rules! new_diag_comm {
         ($builder:expr, $name:expr, $protocol:expr) => {
@@ -4587,6 +4711,51 @@ mod tests {
             false,
         )
         .unwrap()
+    }
+
+    /// Creates an ECU manager whose database contains a functional group named `"MixedGroup"`
+    /// with one `ReadDataByIdentifier` service (`"ReadService"`) and one
+    /// `WriteDataByIdentifier` service (`"WriteService"`).
+    fn create_ecu_manager_with_mixed_functional_group()
+    -> super::EcuManager<DefaultSecurityPluginData> {
+        let mut db_builder = EcuDataBuilder::new();
+        let protocol = db_builder.create_protocol(Protocol::DoIp.value(), None, None, None);
+
+        // Create a READ_DATA_BY_IDENTIFIER service
+        let read_diag_comm = db_builder.create_diag_comm(DiagCommParams {
+            short_name: "ReadService",
+            long_name: Some("Read Service"),
+            semantic: Some("DATA"),
+            protocols: Some(vec![protocol]),
+            ..Default::default()
+        });
+        let read_request =
+            create_sid_only_request!(db_builder, service_ids::READ_DATA_BY_IDENTIFIER);
+        let read_service =
+            new_diag_service!(db_builder, read_diag_comm, read_request, vec![], vec![]);
+
+        // Create a WRITE_DATA_BY_IDENTIFIER service
+        let write_diag_comm = db_builder.create_diag_comm(DiagCommParams {
+            short_name: "WriteService",
+            long_name: Some("Write Service"),
+            semantic: Some("DATA"),
+            protocols: Some(vec![protocol]),
+            ..Default::default()
+        });
+        let write_request =
+            create_sid_only_request!(db_builder, service_ids::WRITE_DATA_BY_IDENTIFIER);
+        let write_service =
+            new_diag_service!(db_builder, write_diag_comm, write_request, vec![], vec![]);
+
+        let fg_diag_layer = db_builder.create_diag_layer(DiagLayerParams {
+            short_name: "MixedGroup",
+            diag_services: Some(vec![read_service, write_service]),
+            ..Default::default()
+        });
+        let fg = db_builder.create_functional_group(fg_diag_layer, None);
+
+        let db = finish_db_with_functional_groups!(db_builder, protocol, vec![], vec![fg]);
+        new_ecu_manager(db)
     }
 
     /// Creates an ECU manager with a diagnostic service containing a `DynamicLengthField` DOP.
@@ -7272,6 +7441,42 @@ mod tests {
         assert!(
             result.is_err(),
             "Service should NOT be allowed from invalid security state"
+        );
+    }
+
+    #[test]
+    fn test_get_functional_group_data_info_filters_non_read_services() {
+        let ecu_manager = create_ecu_manager_with_mixed_functional_group();
+
+        let result = ecu_manager
+            .get_functional_group_data_info(&skip_sec_plugin!(), "MixedGroup")
+            .expect("should return Ok");
+
+        assert_eq!(result.len(), 1, "only read services should be returned");
+        assert_eq!(
+            result.first().expect("Expected element at index 0").id,
+            "ReadService"
+        );
+    }
+
+    #[test]
+    fn test_get_functional_group_data_info_no_functional_groups() {
+        let mut db_builder = EcuDataBuilder::new();
+        let protocol = db_builder.create_protocol(Protocol::DoIp.value(), None, None, None);
+
+        // Build a database with no functional groups
+        let db = finish_db!(db_builder, protocol, vec![]);
+        let ecu_manager = new_ecu_manager(db);
+
+        let result = ecu_manager.get_functional_group_data_info(&skip_sec_plugin!(), "AnyGroup");
+
+        assert!(
+            result.is_err(),
+            "should fail when database has no functional groups"
+        );
+        assert!(
+            matches!(result, Err(DiagServiceError::InvalidDatabase(_))),
+            "expected InvalidDatabase error"
         );
     }
 }
