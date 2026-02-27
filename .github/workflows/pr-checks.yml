@@ -16,6 +16,7 @@ on:
 
 permissions:
   contents: read
+  checks: write # Required for reviewdog/clippy-action to post check annotations
   pull-requests: write # Grants permission to post review comments
 
 concurrency:
@@ -26,13 +27,17 @@ jobs:
   format_and_clippy_for_pr:
     runs-on: ubuntu-latest
     name: "PR Lint and Format"
+    env:
+      # Fork PRs have restricted permissions (no checks:write or pull-requests:write),
+      # so we fall back to annotation-based reporters that only need contents:read.
+      IS_FORK: ${{ github.event.pull_request.head.repo.fork == true }}
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
         with:
           submodules: false
       - name: Format and Clippy - Nightly toolchain pinned
-        uses: eclipse-opensovd/cicd-workflows/rust-lint-and-format-action@f829f9a9b93129170b25ae6769985ddff14fd252
+        uses: eclipse-opensovd/cicd-workflows/rust-lint-and-format-action@df90db67156aab8e78efed589d5ce0548fa0dc8c
         with:
           toolchain: nightly-2025-07-14
           github-token: ${{ secrets.GITHUB_TOKEN }}
@@ -40,8 +45,11 @@ jobs:
           fail-on-clippy-error: "true"
           clippy-deny-warnings: "true"
           clippy-features: "integration-tests"
+          reporter: ${{ env.IS_FORK == 'true' && 'github-pr-annotations' || 'github-pr-review' }}
       - name: Format and Clippy - Nightly toolchain latest
-        uses: eclipse-opensovd/cicd-workflows/rust-lint-and-format-action@f829f9a9b93129170b25ae6769985ddff14fd252
+        id: nightly-clippy
+        continue-on-error: true
+        uses: eclipse-opensovd/cicd-workflows/rust-lint-and-format-action@df90db67156aab8e78efed589d5ce0548fa0dc8c
         with:
           toolchain: nightly
           github-token: ${{ secrets.GITHUB_TOKEN }}
@@ -49,3 +57,6 @@ jobs:
           fail-on-clippy-error: "false"
           clippy-deny-warnings: "false"
           clippy-features: "integration-tests"
+          # For nightly, we also want to see files not touched by
+          # the PR, to detect if there are any new warnings introduced by the latest nightly toolchain.
+          reporter: ${{ env.IS_FORK == 'true' && 'github-annotations' || 'github-pr-check' }}
