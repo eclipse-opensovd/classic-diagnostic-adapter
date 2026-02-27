@@ -145,7 +145,7 @@ pub(crate) async fn delete_all_faults(
     ecu_endpoint: &str,
     expected_status: StatusCode,
 ) -> Result<(), TestingError> {
-    let path = format!("{ecu_endpoint}/faults",);
+    let path = format!("{ecu_endpoint}/faults");
     send_cda_request(
         config,
         &path,
