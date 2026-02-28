@@ -194,7 +194,7 @@ pub(crate) async fn send_request(
         .timeout(Duration::from_secs(10))
         .send()
         .await
-        .map_err(|_| TestingError::Timeout(format!("Fetching {url} timed out",)))?;
+        .map_err(|_| TestingError::Timeout(format!("Fetching {url} timed out")))?;
     let header_map = req_response.headers().clone();
     let status = req_response.status();
     let body = if status == StatusCode::NO_CONTENT {
