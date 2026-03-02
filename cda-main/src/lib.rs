@@ -39,6 +39,12 @@ use crate::config::configfile::Configuration;
 
 pub mod config;
 
+
+#[cfg(feature = "system-alloc")]
+#[global_allocator]
+static GLOBAL: std::alloc::System = std::alloc::System;
+
+#[cfg(not(feature = "system-alloc"))]
 #[global_allocator]
 static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
 
