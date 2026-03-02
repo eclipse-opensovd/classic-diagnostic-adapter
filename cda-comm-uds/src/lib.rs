@@ -27,7 +27,8 @@ use cda_interfaces::{
         self, ComponentConfigurationsInfo, DTC_CODE_BIT_LEN, DataTransferError,
         DataTransferMetaData, DataTransferStatus, DtcCode, DtcExtendedInfo, DtcMask,
         DtcReadInformationFunction, DtcRecordAndStatus, DtcSnapshot, Ecu, ExtendedDataRecords,
-        ExtendedSnapshots, Gateway, NetworkStructure, RetryPolicy, SdBoolMappings, SdSdg,
+        ExtendedSnapshots, FunctionalGroup, Gateway, NetworkStructure, RetryPolicy, SdBoolMappings,
+        SdSdg,
     },
     diagservices::{DiagServiceResponse, DiagServiceResponseType, UdsPayloadData},
     dlt_ctx, service_ids, util,
@@ -1188,6 +1189,24 @@ impl<S: EcuGateway, R: DiagServiceResponse, T: EcuManager<Response = R>> UdsEcu
         fields(dlt_context = dlt_ctx!("UDS"))
     )]
     async fn get_network_structure(&self) -> NetworkStructure {
+        fn ecu_to_network_ecu(ecu: &impl EcuManager) -> Ecu {
+            let logical_address_string =
+                ecu.logical_address()
+                    .to_be_bytes()
+                    .iter()
+                    .fold("0x".to_owned(), |mut out, b| {
+                        let _ = write!(out, "{b:02x}");
+                        out
+                    });
+            let ecu_name = ecu.ecu_name();
+            Ecu {
+                qualifier: ecu_name.clone(),
+                variant: ecu.variant(),
+                logical_address: logical_address_string,
+                logical_link: format!("{}_on_{}", ecu_name, ecu.protocol().value()),
+            }
+        }
+
         // it seems that an &u16 doesn't implement into for u16
         // this caused an issue with uds.entry_ref(...).or_insert(...)
         // where rust complained that it cannot convert the key from &u16 to u16
@@ -1210,16 +1229,7 @@ impl<S: EcuGateway, R: DiagServiceResponse, T: EcuManager<Response = R>> UdsEcu
             }
             let ecu_name = ecu.ecu_name();
 
-            let variant = ecu.variant();
-
-            let logical_address_string =
-                ecu.logical_address()
-                    .to_be_bytes()
-                    .iter()
-                    .fold("0x".to_owned(), |mut out, b| {
-                        let _ = write!(out, "{b:02x}");
-                        out
-                    });
+            let network_ecu = ecu_to_network_ecu(&*ecu);
 
             let gateway_addr = ecu.logical_gateway_address();
             let gateway = gateways
@@ -1234,7 +1244,9 @@ impl<S: EcuGateway, R: DiagServiceResponse, T: EcuManager<Response = R>> UdsEcu
             if gateway_addr == ecu.logical_address() {
                 // this is the gateway itself
                 gateway.name.clone_from(&ecu_name);
-                gateway.logical_address.clone_from(&logical_address_string);
+                gateway
+                    .logical_address
+                    .clone_from(&network_ecu.logical_address);
                 if let Some(gateway_network_address) =
                     self.gateway.get_gateway_network_address(gateway_addr).await
                 {
@@ -1242,22 +1254,39 @@ impl<S: EcuGateway, R: DiagServiceResponse, T: EcuManager<Response = R>> UdsEcu
                 } else {
                     tracing::warn!(
                         gateway_name = %ecu_name,
-                        logical_address = %logical_address_string,
+                        logical_address = %network_ecu.logical_address,
                         "No IP address found for gateway"
                     );
                 }
             }
 
-            gateway.ecus.push(Ecu {
-                qualifier: ecu_name.clone(),
-                variant,
-                logical_address: logical_address_string,
-                logical_link: format!("{}_on_{}", ecu_name, ecu.protocol().value()),
+            gateway.ecus.push(network_ecu);
+        }
+
+        // Build functional groups from the functional description database
+        let group_names = match self.ecus.get(&self.functional_description_database) {
+            Some(func_desc_ecu) => func_desc_ecu.read().await.functional_groups(),
+            None => Vec::new(),
+        };
+
+        let mut functional_groups = Vec::new();
+        for group_name in group_names {
+            let ecu_names = self.ecus_for_functional_group(&group_name, false).await;
+            let mut group_ecus = Vec::new();
+            for ecu_name in &ecu_names {
+                if let Some(ecu_lock) = self.ecus.get(ecu_name) {
+                    let ecu = ecu_lock.read().await;
+                    group_ecus.push(ecu_to_network_ecu(&*ecu));
+                }
+            }
+            functional_groups.push(FunctionalGroup {
+                qualifier: group_name,
+                ecus: group_ecus,
             });
         }
 
         NetworkStructure {
-            functional_groups: vec![],
+            functional_groups,
             gateways: gateways.into_values().collect(),
         }
     }
