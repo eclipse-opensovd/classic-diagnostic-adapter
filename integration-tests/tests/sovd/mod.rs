@@ -79,7 +79,7 @@ pub(crate) async fn get_faults(
     headers: &HeaderMap,
     ecu_endpoint: &str,
 ) -> Result<Vec<Fault>, TestingError> {
-    let path = format!("{ecu_endpoint}/faults",);
+    let path = format!("{ecu_endpoint}/faults");
 
     let response = send_cda_request(
         config,
@@ -102,7 +102,7 @@ pub(crate) async fn get_fault(
     ecu_endpoint: &str,
     fault_code: &str,
 ) -> Result<Fault, TestingError> {
-    let path = format!("{ecu_endpoint}/faults/{fault_code}",);
+    let path = format!("{ecu_endpoint}/faults/{fault_code}");
 
     let response = send_cda_request(
         config,
@@ -145,7 +145,7 @@ pub(crate) async fn delete_all_faults(
     ecu_endpoint: &str,
     expected_status: StatusCode,
 ) -> Result<(), TestingError> {
-    let path = format!("{ecu_endpoint}/faults",);
+    let path = format!("{ecu_endpoint}/faults");
     send_cda_request(
         config,
         &path,

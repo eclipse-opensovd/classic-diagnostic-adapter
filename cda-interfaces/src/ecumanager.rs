@@ -364,12 +364,21 @@ pub trait EcuManager:
     ) -> Result<Vec<MuxCaseInfo>, DiagServiceError>;
 
     /// Retrieve all `read` services for the current ECU variant.
-    fn get_components_data_info(&self) -> Vec<ComponentDataInfo>;
+    fn get_components_data_info(&self, security_plugin: &DynamicPlugin) -> Vec<ComponentDataInfo>;
+    /// Retrieve all `read` services for a specific functional group's diag layer.
+    /// # Errors
+    /// Will return `Err` if the functional group cannot be found.
+    fn get_functional_group_data_info(
+        &self,
+        security_plugin: &DynamicPlugin,
+        functional_group_name: &str,
+    ) -> Result<Vec<ComponentDataInfo>, DiagServiceError>;
     /// Retrieve all configuration type services for the current ECU variant.
     /// # Errors
     /// Returns `DiagServiceError` if the lookup failed.
     fn get_components_configurations_info(
         &self,
+        security_plugin: &DynamicPlugin,
     ) -> Result<Vec<ComponentConfigurationsInfo>, DiagServiceError>;
     /// Retrieve all 'single ecu' jobs for the current ECU variant.
     fn get_components_single_ecu_jobs_info(&self) -> Vec<ComponentDataInfo>;
