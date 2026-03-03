@@ -12,7 +12,7 @@
 use std::time::Duration;
 
 use http::{Method, StatusCode};
-use sovd_interfaces::components::ecu::faults::Fault;
+use sovd_interfaces::components::ecu::{faults::Fault, modes::dtcsetting};
 
 use crate::{
     sovd::{
@@ -78,6 +78,21 @@ async fn test_dtc_setting() {
         &auth,
         ecu_endpoint,
         StatusCode::OK,
+    )
+    .await
+    .unwrap();
+
+    // Sending an invalid value should return BAD_REQUEST with possible values
+    sovd::validate_invalid_parameter_error(
+        &runtime.config,
+        &auth,
+        ecu_endpoint,
+        "dtcsetting",
+        dtcsetting::put::Request {
+            value: "invalid-value".to_owned(),
+            parameters: None,
+        },
+        &["on", "off", "timetraveldtcson"],
     )
     .await
     .unwrap();

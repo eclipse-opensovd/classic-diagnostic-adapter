@@ -332,6 +332,8 @@ pub enum DiagServiceError {
         name: String,
         candidates: Vec<String>,
     },
+    #[error("No value found with the given parameters. Possible values are: {possible_values:?}")]
+    InvalidParameter { possible_values: HashSet<String> },
 }
 
 #[derive(Error, Debug)]
