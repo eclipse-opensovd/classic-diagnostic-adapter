@@ -413,6 +413,29 @@ async fn test_communication_control() {
     let lock_id =
         extract_field_from_json::<String>(&response_to_json(&ecu_lock).unwrap(), "id").unwrap();
 
+    // Sending an invalid value should return BAD_REQUEST with possible values
+    sovd::validate_invalid_parameter_error(
+        &runtime.config,
+        &auth,
+        ecu_endpoint,
+        "commctrl",
+        modes::commctrl::put::Request {
+            value: "invalid-value".to_owned(),
+            parameters: None,
+        },
+        &[
+            "enablerxandenabletx",
+            "enablerxanddisabletx",
+            "disablerxandenabletx",
+            "disablerxanddisabletx",
+            "enablerxanddisabletxwithenhancedaddressinformation",
+            "enablerxandtxwithenhancedaddressinformation",
+            "temporalsync",
+        ],
+    )
+    .await
+    .unwrap();
+
     let enable_rx_and_enable_tx = "enablerxandenabletx";
     let result = set_comm_control(
         "EnableRxAndEnableTx",

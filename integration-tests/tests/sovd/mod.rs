@@ -9,10 +9,16 @@
  * terms of the Apache License Version 2.0 which is available at
  * https://www.apache.org/licenses/LICENSE-2.0
  */
+use std::collections::HashSet;
+
+use cda_sovd::VendorErrorCode;
 use http::{HeaderMap, Method, StatusCode};
 use opensovd_cda_lib::config::configfile::Configuration;
-use serde::{Serialize, de::DeserializeOwned};
-use sovd_interfaces::components::ecu::{faults::Fault, modes::dtcsetting};
+use serde::{Deserialize, Serialize, de::DeserializeOwned};
+use sovd_interfaces::{
+    components::ecu::{faults::Fault, modes::dtcsetting},
+    error::{ApiErrorResponse, ErrorCode},
+};
 
 use crate::util::{
     TestingError,
@@ -46,11 +52,86 @@ pub(crate) async fn put_mode<T: DeserializeOwned, S: Serialize>(
         Some(headers),
     )
     .await?;
-    if excepted_status == StatusCode::OK {
-        Ok(Some(response_to_t(&http_response)?))
-    } else {
-        Ok(None)
+    match response_to_t(&http_response) {
+        Ok(v) => Ok(Some(v)),
+        Err(_) if excepted_status != StatusCode::OK => Ok(None),
+        Err(e) => Err(e),
     }
+}
+
+/// Sends a mode PUT request with the given body and validates that the response
+/// is a `400 Bad Request` with an `invalid-parameter` vendor code and that
+/// the `possiblevalues` field contains exactly the expected values.
+pub(crate) async fn validate_invalid_parameter_error<S: Serialize>(
+    config: &Configuration,
+    headers: &HeaderMap,
+    ecu_endpoint: &str,
+    sub_path: &str,
+    request: S,
+    expected_possible_values: &[&str],
+) -> Result<(), TestingError> {
+    #[derive(Deserialize)]
+    struct InvalidParameterDetails {
+        details: String,
+        possiblevalues: Vec<String>,
+    }
+
+    let error_response: ApiErrorResponse<VendorErrorCode> = put_mode(
+        config,
+        headers,
+        ecu_endpoint,
+        sub_path,
+        request,
+        StatusCode::BAD_REQUEST,
+    )
+    .await?
+    .expect("Expected error response body for BAD_REQUEST");
+
+    assert_eq!(
+        error_response.message, "The parameter value is not valid",
+        "Unexpected error message: {}",
+        error_response.message
+    );
+    assert_eq!(
+        error_response.error_code,
+        ErrorCode::VendorSpecific,
+        "Unexpected error_code: {:?}",
+        error_response.error_code
+    );
+    assert_eq!(
+        error_response.vendor_code,
+        Some(VendorErrorCode::InvalidParameter),
+        "Unexpected vendor_code: {:?}",
+        error_response.vendor_code
+    );
+
+    let params: InvalidParameterDetails = serde_json::from_value(
+        serde_json::to_value(
+            error_response
+                .parameters
+                .expect("Expected 'parameters' in error response"),
+        )
+        .expect("Invalid parameters structure"),
+    )
+    .expect("Failed to parse InvalidParameterDetails from parameters");
+
+    assert_eq!(params.details, "value", "Unexpected details value");
+
+    let actual_values: HashSet<String> = params
+        .possiblevalues
+        .iter()
+        .map(|s| s.to_lowercase())
+        .collect();
+    let expected_values: HashSet<String> = expected_possible_values
+        .iter()
+        .map(|s| s.to_lowercase())
+        .collect();
+    assert_eq!(
+        actual_values, expected_values,
+        "Possible values mismatch, Expected: {expected_values:?}, Actual: {actual_values:?}"
+    );
+
+    Ok(())
 }
 
 pub(crate) async fn set_dtc_setting(

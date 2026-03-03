@@ -756,35 +756,56 @@ impl<S: SecurityPlugin> cda_interfaces::EcuManager for EcuManager<S> {
         service_id: u8,
         name: &str,
     ) -> Result<DiagComm, DiagServiceError> {
-        self.lookup_services_by_sid(service_id)?
-            .into_iter()
-            .find_map(|service| {
-                let diag_comm = service.diag_comm()?;
-                let short_name = diag_comm.short_name()?;
+        let services = self.lookup_services_by_sid(service_id)?;
+        let result = services.iter().find_map(|service| {
+            let diag_comm = service.diag_comm()?;
+            let short_name = diag_comm.short_name()?;
 
-                let short_name_no_affix = self
-                    .database_naming_convention
-                    .trim_service_name_affixes(service_id, short_name.to_owned());
-                let matches = match self.database_naming_convention.short_name_affix_position {
-                    DiagnosticServiceAffixPosition::Suffix => {
-                        starts_with_ignore_ascii_case(&short_name_no_affix, name)
-                    }
-                    DiagnosticServiceAffixPosition::Prefix => {
-                        ends_with_ignore_ascii_case(&short_name_no_affix, name)
-                    }
-                };
-
-                if !matches {
-                    return None;
+            let short_name_no_affix = self
+                .database_naming_convention
+                .trim_service_name_affixes(service_id, short_name.to_owned());
+            let matches = match self.database_naming_convention.short_name_affix_position {
+                DiagnosticServiceAffixPosition::Suffix => {
+                    starts_with_ignore_ascii_case(&short_name_no_affix, name)
                 }
+                DiagnosticServiceAffixPosition::Prefix => {
+                    ends_with_ignore_ascii_case(&short_name_no_affix, name)
+                }
+            };
 
-                Some(DiagComm {
-                    name: short_name.to_owned(),
-                    type_: DiagCommType::try_from(service_id).ok()?,
-                    lookup_name: Some(short_name.to_owned()),
-                })
+            if !matches {
+                return None;
+            }
+
+            Some(DiagComm {
+                name: short_name.to_owned(),
+                type_: DiagCommType::try_from(service_id).ok()?,
+                lookup_name: Some(short_name.to_owned()),
             })
-            .ok_or_else(|| DiagServiceError::NotFound(Some(name.to_owned())))
+        });
+
+        if let Some(diag_comm) = result {
+            Ok(diag_comm)
+        } else {
+            let alternatives: HashSet<String> = services
+                .iter()
+                .filter_map(|service| {
+                    let diag_comm = service.diag_comm()?;
+                    let short_name = diag_comm.short_name()?;
+                    let short_name_no_affix =
+                        self.database_naming_convention.trim_short_name_affixes(
+                            &self
+                                .database_naming_convention
+                                .trim_service_name_affixes(service_id, short_name.to_owned()),
+                        );
+                    Some(short_name_no_affix)
+                })
+                .collect();
+
+            Err(DiagServiceError::InvalidParameter {
+                possible_values: alternatives,
+            })
+        }
     }
 
     fn get_components_data_info(&self) -> Vec<ComponentDataInfo> {

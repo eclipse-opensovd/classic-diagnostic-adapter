@@ -23,7 +23,7 @@ use axum::{
     response::{IntoResponse, Response},
 };
 use cda_interfaces::{
-    DiagServiceError, HashMap, HashMapExtensions, diagservices::DiagServiceResponse,
+    DiagServiceError, HashMap, HashMapExtensions, HashSet, diagservices::DiagServiceResponse,
     file_manager::MddError,
 };
 use serde::{Deserialize, Serialize};
@@ -45,6 +45,8 @@ pub enum ApiError {
     Conflict(String),
     #[error("Not Responding: {0}")]
     NotResponding(String),
+    #[error("The value of the parameter is not of the allowed values")]
+    InvalidParameter { possible_values: HashSet<String> },
 }
 
 impl ApiError {
@@ -58,6 +60,10 @@ impl ApiError {
                 Some(VendorErrorCode::BadRequest),
             ),
             ApiError::Forbidden(_) => (ErrorCode::InsufficientAccessRights, None),
+            ApiError::InvalidParameter { .. } => (
+                ErrorCode::VendorSpecific,
+                Some(VendorErrorCode::InvalidParameter),
+            ),
             _ => (ErrorCode::SovdServerFailure, None),
         }
     }
@@ -65,11 +71,13 @@ impl ApiError {
 
 impl From<DiagServiceError> for ApiError {
     fn from(value: DiagServiceError) -> Self {
-        match &value {
+        match value {
             DiagServiceError::UdsLookupError(_) | DiagServiceError::NotFound(_) => {
                 ApiError::NotFound(Some(value.to_string()))
             }
-
+            DiagServiceError::InvalidParameter { possible_values } => {
+                ApiError::InvalidParameter { possible_values }
+            }
             DiagServiceError::InvalidDatabase(_)
             | DiagServiceError::DatabaseEntryNotFound(_)
             | DiagServiceError::VariantDetectionError(_)
@@ -151,7 +159,7 @@ pub struct ErrorWrapper {
     pub include_schema: bool,
 }
 
-#[derive(Serialize, schemars::JsonSchema)]
+#[derive(Debug, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(rename_all = "kebab-case")]
 pub enum VendorErrorCode {
     /// The requested resource was not found.
@@ -167,6 +175,8 @@ pub enum VendorErrorCode {
     ///
     /// eg. A Value received by the ECU was outside of the expected range
     ErrorInterpretingMessage,
+    /// The given parameter is not valid.
+    InvalidParameter,
 }
 
 impl OperationOutput for ErrorWrapper {
@@ -252,6 +262,35 @@ impl IntoResponse for ErrorWrapper {
                     },
                 ),
             ),
+            ApiError::InvalidParameter { possible_values } => {
+                let mut parameters = HashMap::new();
+                parameters.insert(
+                    "details".to_owned(),
+                    serde_json::Value::String("value".to_owned()),
+                );
+                parameters.insert(
+                    "possiblevalues".to_owned(),
+                    serde_json::Value::Array(
+                        possible_values
+                            .into_iter()
+                            .map(|v| serde_json::Value::String(v.to_lowercase()))
+                            .collect(),
+                    ),
+                );
+                (
+                    StatusCode::BAD_REQUEST,
+                    Json(
+                        sovd_interfaces::error::ApiErrorResponse::<VendorErrorCode> {
+                            message: "The parameter value is not valid".to_owned(),
+                            error_code: ErrorCode::VendorSpecific,
+                            vendor_code: Some(VendorErrorCode::InvalidParameter),
+                            parameters: Some(parameters),
+                            error_source: None,
+                            schema,
+                        },
+                    ),
+                )
+            }
             ApiError::NotResponding(message) => (
                 StatusCode::GATEWAY_TIMEOUT,
                 Json(

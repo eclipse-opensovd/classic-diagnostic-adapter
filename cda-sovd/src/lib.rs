@@ -32,7 +32,9 @@ use tokio::net::TcpListener;
 use tower::{Layer, ServiceExt as TowerServiceExt};
 use tower_http::{normalize_path::NormalizePathLayer, trace::TraceLayer};
 
-pub use crate::sovd::{locks::Locks, static_data::add_static_data_endpoint};
+pub use crate::sovd::{
+    error::VendorErrorCode, locks::Locks, static_data::add_static_data_endpoint,
+};
 
 pub mod dynamic_router;
 mod openapi;
