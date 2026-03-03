@@ -289,7 +289,7 @@ impl<S: SecurityPlugin> cda_interfaces::EcuManager for EcuManager<S> {
         }
     }
 
-    fn get_variant_detection_requests(&self) -> &HashSet<String> {
+    fn get_variant_detection_requests(&self) -> &HashMap<String, DiagComm> {
         &self.variant_detection.diag_service_requests
     }
 
@@ -1660,7 +1660,8 @@ impl<S: SecurityPlugin> EcuManager<S> {
         func_description_config: &cda_interfaces::FunctionalDescriptionConfig,
         fallback_to_base_variant: bool,
     ) -> Result<Self, DiagServiceError> {
-        let variant_detection = variant_detection::prepare_variant_detection(&database)?;
+        let variant_detection =
+            variant_detection::prepare_variant_detection(&database, &database_naming_convention)?;
 
         let data_protocol = into_db_protocol(&database, protocol)?;
 
@@ -1854,7 +1855,7 @@ impl<S: SecurityPlugin> EcuManager<S> {
             connection_retry_delay: com_params.doip.connection_retry_delay.default,
             connection_retry_attempts: com_params.doip.connection_retry_attempts.default,
             variant_detection: VariantDetection {
-                diag_service_requests: HashSet::new(),
+                diag_service_requests: HashMap::new(),
             },
             variant_index: None,
             variant: EcuVariant {

@@ -18,9 +18,9 @@ use std::{
 
 use async_trait::async_trait;
 use cda_interfaces::{
-    DiagComm, DiagCommType, DiagServiceError, DynamicPlugin, EcuGateway, EcuManager, EcuState,
-    EcuVariant, FlashTransferStartParams, FunctionalDescriptionConfig, HashMap, HashMapExtensions,
-    HashSet, HashSetExtensions, SchemaDescription, SchemaProvider, SecurityAccess, ServicePayload,
+    DiagComm, DiagServiceError, DynamicPlugin, EcuGateway, EcuManager, EcuState, EcuVariant,
+    FlashTransferStartParams, FunctionalDescriptionConfig, HashMap, HashMapExtensions, HashSet,
+    HashSetExtensions, SchemaDescription, SchemaProvider, SecurityAccess, ServicePayload,
     TesterPresentControlMessage, TesterPresentMode, TesterPresentType, TransmissionParameters,
     UDS_ID_RESPONSE_BITMASK, UdsEcu, UdsResponse,
     datatypes::{
@@ -1808,19 +1808,7 @@ impl<S: EcuGateway, R: DiagServiceResponse, T: EcuManager<Response = R>> UdsEcu
             .await
             .get_variant_detection_requests()
             .iter()
-            .map(|req| {
-                let name = req
-                    .split_once('_')
-                    .map_or(req.as_str(), |(name, _)| name)
-                    .to_owned();
-
-                let service = DiagComm {
-                    name: name.clone(),
-                    type_: DiagCommType::Data,
-                    lookup_name: None,
-                };
-                Ok((req.to_owned(), service))
-            })
+            .map(|(name, service)| Ok((name.to_owned(), service.clone())))
             .collect::<Result<Vec<(String, DiagComm)>, DiagServiceError>>()?;
 
         if !ecu.read().await.is_loaded() {
