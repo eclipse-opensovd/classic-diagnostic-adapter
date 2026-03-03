@@ -2388,9 +2388,14 @@ impl<S: SecurityPlugin> EcuManager<S> {
 
     /// Recursively resolves parent references and returns `(ParentRef, DiagLayer)` pairs.
     /// Uses a stack-based traversal to handle the parent reference hierarchy:
-    /// - **`FunctionalGroup`**: pushes its nested parent refs onto the stack for further traversal.
-    /// - **`EcuSharedData`**, **Protocol**, **Variant**: extracts the `DiagLayer` and pairs it
-    ///   with the originating parent reference.
+    /// - **`FunctionalGroup`**: extracts the `DiagLayer` and pushes its nested `ParentRef`s
+    ///   onto the stack for further traversal.
+    /// - **`Variant`**: extracts the `DiagLayer` and pushes its nested `ParentRef`s
+    ///   onto the stack for further traversal.
+    /// - **`Protocol`**: extracts the `DiagLayer` and iterates its nested `Protocol`
+    ///   parent refs (which are `Protocol` items, not `ParentRef`) to collect their
+    ///   `DiagLayer`s as well.
+    /// - **`EcuSharedData`**: extracts the `DiagLayer` (leaf node, no `parent_refs`).
     ///
     /// # Example
     ///
@@ -2413,11 +2418,13 @@ impl<S: SecurityPlugin> EcuManager<S> {
         while let Some(parent_ref) = stack.pop() {
             match parent_ref.ref_type().try_into() {
                 Ok(datatypes::ParentRefType::FunctionalGroup) => {
-                    if let Some(nested_refs) = parent_ref
-                        .ref__as_functional_group()
-                        .and_then(|fg| fg.parent_refs())
-                    {
-                        stack.extend(nested_refs.iter().map(datatypes::ParentRef));
+                    if let Some(fg) = parent_ref.ref__as_functional_group() {
+                        if let Some(nested_refs) = fg.parent_refs() {
+                            stack.extend(nested_refs.iter().map(datatypes::ParentRef));
+                        }
+                        if let Some(dl) = fg.diag_layer() {
+                            result.push((parent_ref, datatypes::DiagLayer(dl)));
+                        }
                     }
                 }
                 Ok(datatypes::ParentRefType::EcuSharedData) => {
@@ -2429,13 +2436,31 @@ impl<S: SecurityPlugin> EcuManager<S> {
                     }
                 }
                 Ok(datatypes::ParentRefType::Protocol) => {
-                    if let Some(dl) = parent_ref.ref__as_protocol().and_then(|p| p.diag_layer()) {
-                        result.push((parent_ref, datatypes::DiagLayer(dl)));
+                    if let Some(p) = parent_ref.ref__as_protocol() {
+                        if let Some(dl) = p.diag_layer() {
+                            result.push((parent_ref.clone(), datatypes::DiagLayer(dl)));
+                        }
+                        // Protocol.parent_refs() yields Protocol items, not ParentRef,
+                        // so we traverse them with a dedicated local stack.
+                        let mut protocol_stack: Vec<_> =
+                            p.parent_refs().into_iter().flatten().collect();
+
+                        while let Some(pp) = protocol_stack.pop() {
+                            if let Some(dl) = pp.diag_layer() {
+                                result.push((parent_ref.clone(), datatypes::DiagLayer(dl)));
+                            }
+                            protocol_stack.extend(pp.parent_refs().into_iter().flatten());
+                        }
                     }
                 }
                 Ok(datatypes::ParentRefType::Variant) => {
-                    if let Some(dl) = parent_ref.ref__as_variant().and_then(|v| v.diag_layer()) {
-                        result.push((parent_ref, datatypes::DiagLayer(dl)));
+                    if let Some(v) = parent_ref.ref__as_variant() {
+                        if let Some(nested_refs) = v.parent_refs() {
+                            stack.extend(nested_refs.iter().map(datatypes::ParentRef));
+                        }
+                        if let Some(dl) = v.diag_layer() {
+                            result.push((parent_ref, datatypes::DiagLayer(dl)));
+                        }
                     }
                 }
                 _ => {
@@ -4423,8 +4448,9 @@ mod tests {
     use cda_database::datatypes::{
         DataType, DiagCodedTypeVariant, Limit, ResponseType,
         database_builder::{
-            Addressing, DiagClassType, DiagCommParams, DiagLayerParams, DiagServiceParams, DopType,
-            EcuDataBuilder, EcuDataParams, SpecificDOPData, TransmissionMode,
+            Addressing, DataFormatParentRefType, DiagClassType, DiagCommParams, DiagLayerParams,
+            DiagServiceParams, DopType, EcuDataBuilder, EcuDataParams, SpecificDOPData,
+            TransmissionMode,
         },
     };
     use cda_interfaces::{EcuManager, Protocol, UDS_ID_RESPONSE_BITMASK};
@@ -7294,5 +7320,124 @@ mod tests {
             result.is_err(),
             "Service should NOT be allowed from invalid security state"
         );
+    }
+
+    /// Builds a deep, mixed-type hierarchy and asserts that every level is
+    /// resolved.
+    ///
+    /// ```text
+    /// Variant("RootVariant")
+    /// ├── Variant("InnerVariant")
+    /// │   └── FunctionalGroup("FgLayer")
+    /// │       └── EcuSharedData("SharedInFg")
+    /// ├── Protocol("Proto")
+    /// │   └── Protocol("ParentProto")
+    /// └── EcuSharedData("TopShared")
+    /// ```
+    ///
+    /// Expected collected layers (order is stack-based, not guaranteed):
+    ///   `TopShared`, Proto, `ParentProto`, `InnerVariant`, `FgLayer`, `SharedInFg`
+    #[test]
+    fn test_parent_ref_recursive_mixed_hierarchy() {
+        let mut b = EcuDataBuilder::new();
+
+        // ── leaf: EcuSharedData inside a FunctionalGroup ──
+        let shared_in_fg_dl = b.create_diag_layer(DiagLayerParams {
+            short_name: "SharedInFg",
+            ..Default::default()
+        });
+        let esd_in_fg = b.create_ecu_shared_data(shared_in_fg_dl);
+        let esd_in_fg_pr = b.create_parent_ref(
+            DataFormatParentRefType::EcuSharedData,
+            Some(DataFormatParentRefType::tag_as_ecu_shared_data(esd_in_fg)),
+        );
+
+        // ── FunctionalGroup with the EcuSharedData child ──
+        let fg_dl = b.create_diag_layer(DiagLayerParams {
+            short_name: "FgLayer",
+            ..Default::default()
+        });
+        let fg = b.create_functional_group(fg_dl, Some(vec![esd_in_fg_pr]));
+        let fg_pr = b.create_parent_ref(
+            DataFormatParentRefType::FunctionalGroup,
+            Some(DataFormatParentRefType::tag_as_functional_group(fg)),
+        );
+
+        // ── inner Variant whose parent-ref is the FunctionalGroup ──
+        let inner_variant_dl = b.create_diag_layer(DiagLayerParams {
+            short_name: "InnerVariant",
+            ..Default::default()
+        });
+        let inner_variant = b.create_variant(inner_variant_dl, false, None, Some(vec![fg_pr]));
+        let variant_pr = b.create_parent_ref(
+            DataFormatParentRefType::Variant,
+            Some(DataFormatParentRefType::tag_as_variant(inner_variant)),
+        );
+
+        // ── Protocol with a parent protocol ──
+        let parent_proto = b.create_protocol("ParentProto", None, None, None);
+        let proto = b.create_protocol("Proto", None, None, Some(vec![parent_proto]));
+        let proto_pr = b.create_parent_ref(
+            DataFormatParentRefType::Protocol,
+            Some(DataFormatParentRefType::tag_as_protocol(proto)),
+        );
+
+        // ── top-level EcuSharedData sibling ──
+        let top_shared_dl = b.create_diag_layer(DiagLayerParams {
+            short_name: "TopShared",
+            ..Default::default()
+        });
+        let top_esd = b.create_ecu_shared_data(top_shared_dl);
+        let top_esd_pr = b.create_parent_ref(
+            DataFormatParentRefType::EcuSharedData,
+            Some(DataFormatParentRefType::tag_as_ecu_shared_data(top_esd)),
+        );
+
+        // ── root variant carrying all three sibling parent-refs ──
+        let root_dl = b.create_diag_layer(DiagLayerParams {
+            short_name: "RootVariant",
+            ..Default::default()
+        });
+        let root = b.create_variant(
+            root_dl,
+            true,
+            None,
+            Some(vec![variant_pr, proto_pr, top_esd_pr]),
+        );
+        let db = b.finish(EcuDataParams {
+            ecu_name: "TestEcu",
+            revision: "1",
+            version: "1.0.0",
+            variants: Some(vec![root]),
+            ..Default::default()
+        });
+
+        let ecu_data = db.ecu_data().unwrap();
+        let variant = ecu_data.variants().unwrap().get(0);
+        let parent_refs = variant.parent_refs().unwrap();
+
+        let names: Vec<_> = super::EcuManager::<DefaultSecurityPluginData>
+            ::get_parent_ref_diag_layers_with_refs_recursive(
+            parent_refs.iter().map(datatypes::ParentRef),
+        )
+            .into_iter()
+            .filter_map(|(_, dl)| dl.short_name().map(str::to_owned))
+            .collect();
+
+        // every layer from every level must be present
+        for expected in [
+            "TopShared",
+            "Proto",
+            "ParentProto",
+            "InnerVariant",
+            "FgLayer",
+            "SharedInFg",
+        ] {
+            assert!(
+                names.contains(&expected.to_owned()),
+                "Missing expected layer {expected:?}, got {names:?}"
+            );
+        }
+        assert_eq!(names.len(), 6, "Unexpected extra layers: {names:?}");
     }
 }

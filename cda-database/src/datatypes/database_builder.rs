@@ -14,7 +14,7 @@
 // within a WipOffset<T> where we cannot provide a conversion for.
 // This is only the case for types where we have to be able to name the type, i.e.
 // for function parameters and return types.
-pub use dataformat::{DefaultCase, SwitchKey};
+pub use dataformat::{DefaultCase, ParentRefType as DataFormatParentRefType, SwitchKey};
 use flatbuffers::UnionWIPOffset;
 pub use flatbuffers::WIPOffset;
 
@@ -353,6 +353,48 @@ impl<'a> EcuDataBuilder<'a> {
             parent_refs: parent_refs.map(|v| self.fbb.create_vector(&v)),
         };
         dataformat::Protocol::create(&mut self.fbb, &protocol_args)
+    }
+
+    pub fn create_parent_ref(
+        &mut self,
+        ref_type: dataformat::ParentRefType,
+        ref_: Option<UnionWIPOffset<dataformat::ParentRefTypeUnionValue>>,
+    ) -> WIPOffset<dataformat::ParentRef<'a>> {
+        dataformat::ParentRef::create(
+            &mut self.fbb,
+            &dataformat::ParentRefArgs {
+                ref_type,
+                ref_: ref_.map(|u| u.value_offset()),
+                ..Default::default()
+            },
+        )
+    }
+
+    pub fn create_functional_group(
+        &mut self,
+        diag_layer: WIPOffset<dataformat::DiagLayer<'a>>,
+        parent_refs: Option<Vec<WIPOffset<dataformat::ParentRef<'a>>>>,
+    ) -> WIPOffset<dataformat::FunctionalGroup<'a>> {
+        let parent_refs = parent_refs.map(|v| self.fbb.create_vector(&v));
+        dataformat::FunctionalGroup::create(
+            &mut self.fbb,
+            &dataformat::FunctionalGroupArgs {
+                diag_layer: Some(diag_layer),
+                parent_refs,
+            },
+        )
+    }
+
+    pub fn create_ecu_shared_data(
+        &mut self,
+        diag_layer: WIPOffset<dataformat::DiagLayer<'a>>,
+    ) -> WIPOffset<dataformat::EcuSharedData<'a>> {
+        dataformat::EcuSharedData::create(
+            &mut self.fbb,
+            &dataformat::EcuSharedDataArgs {
+                diag_layer: Some(diag_layer),
+            },
+        )
     }
 
     pub fn create_diag_comm(
