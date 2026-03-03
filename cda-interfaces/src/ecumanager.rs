@@ -171,7 +171,7 @@ pub trait EcuManager:
         &mut self,
         service_responses: HashMap<String, T>,
     ) -> impl Future<Output = Result<(), DiagServiceError>> + Send;
-    fn get_variant_detection_requests(&self) -> &HashSet<String>;
+    fn get_variant_detection_requests(&self) -> &HashMap<String, DiagComm>;
     /// Communication parameters for the ECU.
     /// # Errors
     /// Will return `DiagServiceError` if the communication
