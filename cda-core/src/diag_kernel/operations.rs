@@ -274,23 +274,25 @@ fn decode_numeric_val_from_str(
             })
             .map(|v| v.to_be_bytes().to_vec()),
         DataType::UInt32 => {
-            // according to ISO 22901-1 only UInt32 can have display radix
-            match physical_type.display_radix {
-                Some(datatypes::Radix::Hex) => {
-                    let decoded = decode_hex_with_optional_prefix(value)?;
-                    let decoded = if decoded.len() < size_of::<u32>() {
-                        pad_msb_to_len(&decoded, size_of::<u32>())
-                    } else {
-                        decoded
-                    };
-                    let u32_val =
-                        u32::from_be_bytes(decoded.try_into().expect("padded to u32 length"));
-                    validate_bit_len_unsigned(u32_val, diag_type.bit_len().unwrap_or(32))?;
-                    Ok(u32_val.to_be_bytes().to_vec())
-                }
-                Some(datatypes::Radix::Octal) => decode_u32_octal_with_optional_prefix(value),
-                Some(datatypes::Radix::Binary) => decode_u32_binary_with_optional_prefix(value),
-                Some(datatypes::Radix::Decimal) | None => value
+            // Radix is determined by the value's prefix: 0x→hex, 0o→octal, 0b→binary, else→decimal.
+            // display_radix from the physical type is ignored.
+            let lowercase = value.to_lowercase();
+            if lowercase.starts_with("0x") {
+                let decoded = decode_hex_with_optional_prefix(value)?;
+                let decoded = if decoded.len() < size_of::<u32>() {
+                    pad_msb_to_len(&decoded, size_of::<u32>())
+                } else {
+                    decoded
+                };
+                let u32_val = u32::from_be_bytes(decoded.try_into().expect("padded to u32 length"));
+                validate_bit_len_unsigned(u32_val, diag_type.bit_len().unwrap_or(32))?;
+                Ok(u32_val.to_be_bytes().to_vec())
+            } else if lowercase.starts_with("0o") {
+                decode_u32_octal_with_optional_prefix(value)
+            } else if lowercase.starts_with("0b") {
+                decode_u32_binary_with_optional_prefix(value)
+            } else {
+                value
                     .parse::<u32>()
                     .map_err(|_| {
                         DiagServiceError::ParameterConversionError(format!(
@@ -301,7 +303,7 @@ fn decode_numeric_val_from_str(
                         validate_bit_len_unsigned(v, diag_type.bit_len().unwrap_or(32))?;
                         Ok(v)
                     })
-                    .map(|v| v.to_be_bytes().to_vec()),
+                    .map(|v| v.to_be_bytes().to_vec())
             }
         }
         // when parsing str -> float we can ignore the precision
@@ -1146,15 +1148,11 @@ mod tests {
 
         let bytefield_type = create_diag_coded_type_stl(DataType::ByteField, None);
         let uint32_type = create_diag_coded_type_stl(DataType::UInt32, None);
+        let int32_type = create_diag_coded_type_stl(DataType::Int32, None);
         let uint32_hex_physical_type = PhysicalType {
             precision: None,
             base_type: DataType::UInt32,
             display_radix: Some(Radix::Hex),
-        };
-        let uint32_dec_physical_type = PhysicalType {
-            precision: None,
-            base_type: DataType::UInt32,
-            display_radix: None, // default is decimal
         };
 
         let expected = Ok(vec![0x00, 0x01, 0x80, 0x00]);
@@ -1172,16 +1170,7 @@ mod tests {
             ),
             expected
         );
-
-        assert!(
-            super::json_value_to_uds_data(
-                &uint32_type,
-                None,
-                Some(uint32_dec_physical_type),
-                &json_value
-            )
-            .is_err()
-        );
+        assert!(super::json_value_to_uds_data(&int32_type, None, None, &json_value).is_err());
     }
 
     #[test]
@@ -1547,45 +1536,54 @@ mod tests {
         let result = super::decode_numeric_val_from_str(value, phys_type, &base_type).unwrap();
         assert_eq!(result, 42u32.to_be_bytes().to_vec());
 
-        // test decode uint as hex
+        // test decode uint as hex with 0x prefix (display_radix ignored)
         let phys_type = PhysicalType {
             precision: None,
             base_type: DataType::UInt32,
-            display_radix: Some(Radix::Hex),
+            display_radix: None,
         };
         let value = "0x2A";
         let result = super::decode_numeric_val_from_str(value, phys_type, &base_type).unwrap();
         assert_eq!(result, 42u32.to_be_bytes().to_vec());
 
-        // test decode uint as octal
-        let phys_type = PhysicalType {
+        // test decode uint as hex with 0x prefix and explicit Hex radix
+        let phys_type_hex = PhysicalType {
             precision: None,
             base_type: DataType::UInt32,
-            display_radix: Some(Radix::Octal),
+            display_radix: Some(Radix::Hex),
         };
+        let value = "0xCB";
+        let result = super::decode_numeric_val_from_str(value, phys_type_hex, &base_type).unwrap();
+        assert_eq!(result, 203u32.to_be_bytes().to_vec());
+
+        // test decode uint as hex with 0x prefix and Decimal radix (prefix wins)
+        let phys_type_dec = PhysicalType {
+            precision: None,
+            base_type: DataType::UInt32,
+            display_radix: Some(Radix::Decimal),
+        };
+        let result = super::decode_numeric_val_from_str(value, phys_type_dec, &base_type).unwrap();
+        assert_eq!(result, 203u32.to_be_bytes().to_vec());
+
+        // test decode uint as octal with 0o prefix (display_radix ignored)
         let value = "0o52";
         let result = super::decode_numeric_val_from_str(value, phys_type, &base_type).unwrap();
         assert_eq!(result, 42u32.to_be_bytes().to_vec());
 
-        // test decode uint as octal without prefix
+        // test decode uint without prefix falls back to decimal
         let value = "52";
         let result = super::decode_numeric_val_from_str(value, phys_type, &base_type).unwrap();
-        assert_eq!(result, 42u32.to_be_bytes().to_vec());
+        assert_eq!(result, 52u32.to_be_bytes().to_vec());
 
-        // test decode uint as binary
-        let phys_type = PhysicalType {
-            precision: None,
-            base_type: DataType::UInt32,
-            display_radix: Some(Radix::Binary),
-        };
+        // test decode uint as binary with 0b prefix (display_radix ignored)
         let value = "0b101010";
         let result = super::decode_numeric_val_from_str(value, phys_type, &base_type).unwrap();
         assert_eq!(result, 42u32.to_be_bytes().to_vec());
 
-        // test decode uint as binary without prefix
+        // test decode uint without prefix falls back to decimal even if it looks like binary
         let value = "101010";
         let result = super::decode_numeric_val_from_str(value, phys_type, &base_type).unwrap();
-        assert_eq!(result, 42u32.to_be_bytes().to_vec());
+        assert_eq!(result, 101_010u32.to_be_bytes().to_vec());
     }
 
     #[test]
