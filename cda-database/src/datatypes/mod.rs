@@ -198,7 +198,11 @@ impl DiagService<'_> {
             let standard_length_type = diag_coded_type.specific_data_as_standard_length_type()?;
 
             // SIDRQ validation
-            if standard_length_type.condensed() || standard_length_type.bit_mask().is_some() {
+            if standard_length_type.condensed()
+                || standard_length_type
+                    .bit_mask()
+                    .is_some_and(|mask| !mask.is_empty())
+            {
                 return None;
             }
 
