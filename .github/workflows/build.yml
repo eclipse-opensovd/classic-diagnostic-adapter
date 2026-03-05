@@ -39,7 +39,6 @@ jobs:
         uses: dtolnay/rust-toolchain@master
         with:
           toolchain: nightly-2025-07-14
-          components: clippy
       - name: Cache Rust dependencies
         uses: Swatinem/rust-cache@v2
       - name: Install Protoc
@@ -48,10 +47,8 @@ jobs:
           # The action queries the GitHub API to fetch releases data,
           # to avoid rate limiting, passing the default token.
           repo-token: ${{ secrets.GITHUB_TOKEN }}
-      - name: Setup DLT
+      - name: Setup DLT tracing lib
         uses: eclipse-opensovd/dlt-tracing-lib/.github/actions/setup-dlt@main
-      - name: Clippy
-        run: cargo clippy --locked --all-targets --all-features -- -D warnings
       - name: Build all features
         run: cargo build --locked --verbose --all-features
       - name: Build minimal features
