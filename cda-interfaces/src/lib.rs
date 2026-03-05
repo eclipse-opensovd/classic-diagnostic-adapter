@@ -332,6 +332,8 @@ pub enum DiagServiceError {
     },
     #[error("No value found with the given parameters. Possible values are: {possible_values:?}")]
     InvalidParameter { possible_values: HashSet<String> },
+    #[error("Invalid configuration: {0}")]
+    InvalidConfiguration(String),
 }
 
 #[derive(Error, Debug)]

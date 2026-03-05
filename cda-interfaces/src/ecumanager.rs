@@ -330,11 +330,29 @@ pub trait EcuManager:
         func_class_name: &str,
         service_id: u8,
     ) -> Result<DiagComm, DiagServiceError>;
-    /// Lookup a service by its service id for the current ECU variant.
-    /// This will first look up the service in the current variant, then in the base variant
+    /// Lookup services by matching a service request prefix.
+    ///
+    /// Finds diagnostic services where the request parameters match a sequence of bytes.
+    /// This is useful for finding services based on their complete service identifier,
+    /// including service ID, subfunction, and additional coded constant parameters.
+    /// Partial parameters won't match and that the prefix must be aligned to parameter boundaries.
+    ///
+    /// # Parameters
+    /// * `service_bytes` - A byte slice containing the service identifier and parameters.
+    ///   The first byte is the service ID (SID), followed by any coded constant parameters
+    ///   in their sequential byte positions (e.g., `[0x31, 0x01, 0x02, 0x46]`
+    ///
+    /// # Returns
+    /// A vector of service short names that match the criteria
+    ///
     /// # Errors
-    /// Will return `Err` if either the variant or base variant cannot be resolved.
-    fn lookup_service_names_by_sid(&self, service_id: u8) -> Result<Vec<String>, DiagServiceError>;
+    /// Returns `DiagServiceError::NotFound` if no services match the given request prefix,
+    /// or `DiagServiceError::InvalidParameter` if the `service_bytes` slice is empty.
+    fn lookup_diagcomms_by_request_prefix(
+        &self,
+        service_bytes: &[u8],
+    ) -> Result<Vec<DiagComm>, DiagServiceError>;
+
     /// Lookup a service by its service id and name for the current ECU variant.
     /// # Errors
     /// Will return `Err` if the lookup failed

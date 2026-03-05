@@ -153,11 +153,30 @@ impl DefaultCase<'_> {
     }
 }
 
+/// Represents a coded constant parameter extracted from a diagnostic service.
+/// Used for matching services against UDS payload prefixes when looking up services.
+/// This is only for positional and value information and does not contain any information
+/// to parse this as 'value'
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RawCodedConstParam {
+    pub byte_position: u32,
+    pub value: u32,
+    pub bit_length: u32,
+}
+
+impl RawCodedConstParam {
+    /// Calculate how many bytes this parameter occupies
+    #[must_use]
+    pub fn byte_count(&self) -> usize {
+        self.bit_length.div_ceil(8) as usize
+    }
+}
+
 impl DiagService<'_> {
     #[must_use]
     pub fn request_id(&self) -> Option<u8> {
         // allow the truncation, so we can re-use the same conversion function
-        // for the sub-function id which is u16
+        // for the sub-function id which is u32
         // per ISO 14229-1 the SID is 1 byte
         #[allow(clippy::cast_possible_truncation)]
         self.find_request_sid_or_sub_func_param(0, 0)
@@ -167,7 +186,7 @@ impl DiagService<'_> {
     #[must_use]
     /// Get the request sub-function ID if defined
     /// Returns a tuple of (`value`, `bit_length`) if found
-    pub fn request_sub_function_id(&self) -> Option<(u16, u32)> {
+    pub fn request_sub_function_id(&self) -> Option<(u32, u32)> {
         self.find_request_sid_or_sub_func_param(1, 0)
     }
 
@@ -178,7 +197,7 @@ impl DiagService<'_> {
         &self,
         byte_pos: u32,
         bit_pos: u32,
-    ) -> Option<(u16, u32)> {
+    ) -> Option<(u32, u32)> {
         let request = self.0.request()?;
         let params = request.params()?;
 
@@ -207,9 +226,43 @@ impl DiagService<'_> {
             }
 
             // Parse value
-            let value = coded_const.coded_value()?.parse::<u16>().ok()?;
+            let value = coded_const.coded_value()?.parse::<u32>().ok()?;
             Some((value, standard_length_type.bit_length()))
         })
+    }
+
+    #[must_use]
+    /// Extract all sequential coded constant parameters starting from byte position 0.
+    /// Returns a vector of coded constant parameters.
+    /// This is useful for matching services against a payload prefix.
+    ///
+    /// For example, a service with parameters at bytes 0, 1, 2-3 would return:
+    /// ```
+    ///  use cda_database::datatypes::RawCodedConstParam;
+    /// vec![
+    ///     RawCodedConstParam { byte_position: 0, value: 0x31, bit_length: 8 },
+    ///     RawCodedConstParam { byte_position: 1, value: 0x01, bit_length: 8 },
+    ///     RawCodedConstParam { byte_position: 2, value: 0x0246, bit_length: 16 },
+    /// ];
+    /// ```
+    pub fn extract_sequential_coded_consts(&self) -> Vec<RawCodedConstParam> {
+        let mut result = Vec::new();
+        let mut current_byte_pos = 0u32;
+
+        // Keep extracting coded constants as long as we find them sequentially
+        while let Some((value, bit_length)) =
+            self.find_request_sid_or_sub_func_param(current_byte_pos, 0)
+        {
+            result.push(RawCodedConstParam {
+                byte_position: current_byte_pos,
+                value,
+                bit_length,
+            });
+            // Move to next byte position based on bit length
+            current_byte_pos = current_byte_pos.saturating_add(bit_length.div_ceil(8));
+        }
+
+        result
     }
 }
 

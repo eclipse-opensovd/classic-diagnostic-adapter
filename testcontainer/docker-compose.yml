@@ -42,6 +42,7 @@ services:
       - "${CDA_PORT:-20002}:20002"
     volumes:
       - ./odx:/app/odx:ro
+      - ./cda-test-config.toml:/app/cda-test-config.toml:ro
     hostname: cda
     networks:
       - testcontainer-net
@@ -50,6 +51,7 @@ services:
         condition: service_healthy
     environment:
       - RUST_LOG=debug
+      - CDA_CONFIG_FILE=/app/cda-test-config.toml
     command: ["-d", "/app/odx"]
     restart: unless-stopped
 
