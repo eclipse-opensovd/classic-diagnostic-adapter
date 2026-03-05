@@ -147,3 +147,30 @@ pub struct DtcExtendedInfo {
     pub snapshots: Option<ExtendedSnapshots>,
     pub snapshots_schema: Option<serde_json::Value>,
 }
+
+#[derive(Deserialize, Serialize, Clone, Debug)]
+pub struct FaultConfig {
+    /// Service definition used to clear all user-defined DTCs.
+    /// Specified as a byte array representing the full UDS service identifier.
+    ///
+    /// Example: `[0x31, 0x01, 0x02, 0x46]`
+    /// The first byte is the service ID, followed by any coded constant parameters
+    /// (subfunction, routine ID, etc.) as they appear sequentially in the UDS request.
+    ///
+    /// If not set, clearing user-defined DTCs is not supported.
+    pub user_defined_dtc_clear_service: Option<Vec<u8>>,
+    /// Name of the scope to pass to the DTC functions to read from the user defined DTC memory.
+    /// Matching will be case-insensitive.
+    pub user_memory_scope: String,
+    pub default_scope: String,
+}
+
+impl Default for FaultConfig {
+    fn default() -> Self {
+        Self {
+            user_defined_dtc_clear_service: None,
+            user_memory_scope: "DevelopmentFaultMemory".to_string(),
+            default_scope: "FaultMem".to_string(),
+        }
+    }
+}

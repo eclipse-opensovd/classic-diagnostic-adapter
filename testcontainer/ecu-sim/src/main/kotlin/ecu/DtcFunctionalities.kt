@@ -131,6 +131,13 @@ fun RequestsData.addDtcRequests() {
             ack(response.asByteArray)
         }
     }
+
+    request("31 01 42 00", "Clear_Diagnostic_User_Memory") {
+        val devFaults = ecu.dtcFaults(FaultMemory.Development)
+        devFaults.clear()
+        ecu.logger.info("Cleared all Development DTCs via Clear_Diagnostic_User_Memory routine")
+        ack()
+    }
 }
 
 class ReadDtcDTCByStatusMaskResponse(

@@ -16,7 +16,8 @@ use aide::axum::{ApiRouter, routing};
 use axum::{Json, http::StatusCode};
 use cda_comm_doip::config::DoipConfig;
 use cda_interfaces::{
-    FunctionalDescriptionConfig, HashMap, HashMapExtensions, UdsEcu, datatypes::ComponentsConfig,
+    FunctionalDescriptionConfig, HashMap, HashMapExtensions, UdsEcu,
+    datatypes::{ComponentsConfig, FaultConfig},
 };
 use cda_sovd::{Locks, dynamic_router::DynamicRouter};
 use futures::FutureExt;
@@ -156,6 +157,7 @@ async fn test_custom_demo_endpoint() {
             protocol_position: cda_interfaces::datatypes::DiagnosticServiceAffixPosition::Suffix,
             protocol_case_sensitive: false,
         },
+        FaultConfig::default(),
     );
     add_custom_routes(&dynamic_router).await;
     let ecu_names = uds_manager.get_ecus().await;

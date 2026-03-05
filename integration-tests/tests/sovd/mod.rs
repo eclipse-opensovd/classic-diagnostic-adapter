@@ -238,3 +238,44 @@ pub(crate) async fn delete_all_faults(
     .await?;
     Ok(())
 }
+
+pub(crate) async fn delete_all_faults_with_scope(
+    config: &Configuration,
+    headers: &HeaderMap,
+    ecu_endpoint: &str,
+    scope: &str,
+    expected_status: StatusCode,
+) -> Result<(), TestingError> {
+    let path = format!("{ecu_endpoint}/faults?scope={scope}");
+    send_cda_request(
+        config,
+        &path,
+        expected_status,
+        Method::DELETE,
+        None,
+        Some(headers),
+    )
+    .await?;
+    Ok(())
+}
+
+pub(crate) async fn delete_fault_with_scope(
+    config: &Configuration,
+    headers: &HeaderMap,
+    ecu_endpoint: &str,
+    fault_code: &str,
+    scope: &str,
+    expected_status: StatusCode,
+) -> Result<(), TestingError> {
+    let path = format!("{ecu_endpoint}/faults/{fault_code}?scope={scope}");
+    send_cda_request(
+        config,
+        &path,
+        expected_status,
+        Method::DELETE,
+        None,
+        Some(headers),
+    )
+    .await?;
+    Ok(())
+}

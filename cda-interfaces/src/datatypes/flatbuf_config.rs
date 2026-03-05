@@ -27,7 +27,15 @@ impl Default for FlatbBufConfig {
             verify: false,
             max_depth: 64,
             max_tables: 100_000_000,
-            max_apparent_size: usize::MAX,
+            // Internally the toml parsing is using i64, as intermediate
+            // representation, so we need to set the max_apparent_size to i64::MAX
+            // to prevent out-of-range value for usize type
+            // Truncation must be accepted, as the toml file doesn't support
+            // larger values anyway. If this turns out to be a problem,
+            // we can consider using a custom deserializer for this field
+            // or remove it from the config.
+            #[allow(clippy::cast_possible_truncation)]
+            max_apparent_size: i64::MAX as usize,
             ignore_missing_null_terminator: false,
         }
     }
