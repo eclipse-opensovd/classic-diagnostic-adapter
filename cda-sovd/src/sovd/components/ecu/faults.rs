@@ -148,17 +148,20 @@ pub(crate) async fn delete<
         locks,
         ..
     }): State<WebserverEcuState<R, T, U>>,
-    WithRejection(QsQuery(_query), _): WithRejection<QsQuery<DeleteFaultQuery>, ApiError>,
+    WithRejection(QsQuery(query), _): WithRejection<QsQuery<DeleteFaultQuery>, ApiError>,
 ) -> Response {
     let claims = security_plugin.claims();
     if let Some(validation_failure) = validate_lock(&claims, &ecu_name, &locks, false).await {
         return validation_failure;
     }
-    // todo: query.scope to specify which group should be cleared not yet implemented!
-    match uds
-        .delete_dtcs(&ecu_name, &(security_plugin as DynamicPlugin), None)
-        .await
-    {
+
+    match if let Some(ref scope) = query.scope {
+        uds.delete_dtcs_scoped(&ecu_name, &(security_plugin as DynamicPlugin), scope)
+            .await
+    } else {
+        uds.delete_dtcs(&ecu_name, &(security_plugin as DynamicPlugin), None)
+            .await
+    } {
         Ok(res) => match res.response_type() {
             DiagServiceResponseType::Positive => StatusCode::NO_CONTENT.into_response(),
             DiagServiceResponseType::Negative => api_error_from_diag_response(&res, false),
@@ -383,11 +386,22 @@ pub(crate) mod id {
             locks,
             ..
         }): State<WebserverEcuState<R, T, U>>,
+        WithRejection(QsQuery(query), _): WithRejection<QsQuery<DeleteFaultQuery>, ApiError>,
     ) -> Response {
         let claims = security_plugin.claims();
         if let Some(validation_failure) = validate_lock(&claims, &ecu_name, &locks, false).await {
             return validation_failure;
         }
+
+        if query.scope.is_some() {
+            return ApiError::BadRequest(
+                "This endpoint does not support clearing user defined scopes. Only the general \
+                 delete endpoint can be used for this."
+                    .to_string(),
+            )
+            .into_response();
+        }
+
         match uds
             .delete_dtcs(&ecu_name, &(security_plugin as DynamicPlugin), Some(id))
             .await

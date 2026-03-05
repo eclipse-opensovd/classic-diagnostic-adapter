@@ -19,7 +19,9 @@ use cda_core::DiagServiceResponseStruct;
 use cda_health::config::HealthConfig;
 use cda_interfaces::{
     FunctionalDescriptionConfig, HashMap, HashMapExtensions,
-    datatypes::{ComParams, ComponentsConfig, DatabaseNamingConvention, FlatbBufConfig},
+    datatypes::{
+        ComParams, ComponentsConfig, DatabaseNamingConvention, FaultConfig, FlatbBufConfig,
+    },
 };
 use cda_plugin_security::{DefaultSecurityPlugin, DefaultSecurityPluginData};
 use cda_tracing::LoggingConfig;
@@ -145,6 +147,11 @@ async fn initialize_runtime() -> Result<TestRuntime, TestingError> {
         components: ComponentsConfig {
             additional_fields: HashMap::new(),
         },
+        faults: FaultConfig {
+            user_defined_dtc_clear_service: Some(vec![0x31, 0x01, 0x42, 0x00]),
+            user_memory_scope: "Development".to_owned(),
+            ..Default::default()
+        },
     };
     config.validate_sanity().map_err(|e| {
         TestingError::SetupError(format!("Configuration sanity check failed: {e:?}"))
@@ -157,13 +164,17 @@ async fn initialize_runtime() -> Result<TestRuntime, TestingError> {
     register_cleanup();
     register_panic_hook();
     if use_docker() {
+        write_config_toml(&test_container_dir()?, config.clone())?;
         start_docker_compose(cda_port, gateway_port, sim_control_port)?;
     } else {
         start_ecu_sim(&ecu_sim).await?;
         start_cda(config.clone());
     }
 
-    wait_for_cda_online(&config.server).await?;
+    if let Err(e) = wait_for_cda_online(&config.server).await {
+        dump_docker_logs();
+        return Err(e);
+    }
 
     Ok(TestRuntime { config, ecu_sim })
 }
@@ -415,6 +426,37 @@ fn strip_ansi_codes(s: &str) -> String {
     }
 
     result
+}
+
+/// Serializes the test [`Configuration`] to a TOML file in the testcontainer directory.
+/// The Docker container mounts this file and loads it via `CDA_CONFIG_FILE`.
+///
+/// The config is adjusted for the Docker environment: network ports and paths are set to
+/// container-internal values (e.g. port 20002, gateway 13400, database `/app/odx`),
+/// while non-network settings like `faults` are preserved from the test config.
+/// The tester address is overridden by the entrypoint script via CLI args.
+fn write_config_toml(
+    test_container_dir: &std::path::Path,
+    mut config: Configuration,
+) -> Result<(), TestingError> {
+    // Overwrite some values back to the default, so they match
+    // with the docker file.
+    // The values in the config are the externally mapped ports and paths.
+    config.server.port = 20002;
+    config.doip.gateway_port = 13400;
+
+    "0.0.0.0".clone_into(&mut config.server.address);
+    "/app/odx".clone_into(&mut config.database.path);
+
+    let config_path = test_container_dir.join("cda-test-config.toml");
+    let toml_content = toml::to_string_pretty(&config).map_err(|e| {
+        TestingError::SetupError(format!("Failed to serialize config to TOML: {e}"))
+    })?;
+    std::fs::write(&config_path, toml_content).map_err(|e| {
+        TestingError::ProcessFailed(format!("Failed to write config TOML file: {e}"))
+    })?;
+    tracing::debug!("Wrote CDA test config to {:?}", config_path);
+    Ok(())
 }
 
 fn write_docker_env_file(

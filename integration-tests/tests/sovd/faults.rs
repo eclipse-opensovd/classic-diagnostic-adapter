@@ -16,7 +16,8 @@ use sovd_interfaces::components::ecu::{faults::Fault, modes::dtcsetting};
 
 use crate::{
     sovd::{
-        self, delete_all_faults, delete_fault,
+        self, delete_all_faults, delete_all_faults_with_scope, delete_fault,
+        delete_fault_with_scope,
         ecu::{get_dtc_setting, switch_session},
         get_fault, get_faults, locks, set_dtc_setting,
     },
@@ -834,4 +835,234 @@ fn filter_failed_faults(faults: Vec<Fault>) -> Vec<Fault> {
         .into_iter()
         .filter(|fault| fault.status.as_ref().and_then(|s| s.test_failed) == Some(true))
         .collect::<Vec<_>>()
+}
+
+/// Test that clearing faults with a user-defined scope works correctly.
+///
+/// This test verifies:
+/// 1. Deleting a single DTC with a scope is rejected (`BadRequest`).
+/// 2. Clearing all faults with a scope calls the configured service (31 01 42 00)
+///    and clears only the Development faults in the ECU sim.
+/// 3. Standard fault memory faults are not affected by the scoped clear.
+#[tokio::test]
+#[allow(clippy::too_many_lines)]
+async fn test_dtc_deletion_user_memory() {
+    let (runtime, _lock) = setup_integration_test(true).await.unwrap();
+    let auth = auth_header(&runtime.config, None).await.unwrap();
+    let ecu_endpoint = sovd::ECU_FLXC1000_ENDPOINT;
+    let ecu_name = "flxc1000";
+    let fault_memory = "Standard";
+    let dev_memory = "Development";
+    let scope = &runtime.config.faults.user_memory_scope;
+
+    // Create and acquire lock
+    let expiration_timeout = Duration::from_secs(30);
+    let ecu_lock = locks::create_lock(
+        expiration_timeout,
+        locks::ECU_ENDPOINT,
+        StatusCode::CREATED,
+        &runtime.config,
+        &auth,
+    )
+    .await;
+    let lock_id =
+        extract_field_from_json::<String>(&response_to_json(&ecu_lock).unwrap(), "id").unwrap();
+
+    // Clear any existing DTCs from both Standard and Development memories
+    ecusim::clear_all_dtcs(&runtime.ecu_sim, ecu_name, fault_memory)
+        .await
+        .expect("Failed to clear Standard DTCs in simulator");
+    ecusim::clear_all_dtcs(&runtime.ecu_sim, ecu_name, dev_memory)
+        .await
+        .expect("Failed to clear Development DTCs in simulator");
+
+    // Add Standard DTCs
+    ecusim::add_dtc(
+        &runtime.ecu_sim,
+        ecu_name,
+        fault_memory,
+        &DtcMinimal {
+            id: "01E240".into(),
+            status_mask: "29".into(),
+            emissions_related: false,
+        },
+    )
+    .await
+    .expect("Failed to add Standard DTC 0x01E240");
+
+    ecusim::add_dtc(
+        &runtime.ecu_sim,
+        ecu_name,
+        fault_memory,
+        &DtcMinimal {
+            id: "039447".into(),
+            status_mask: "0C".into(),
+            emissions_related: false,
+        },
+    )
+    .await
+    .expect("Failed to add Standard DTC 0x039447");
+
+    // Add Development DTCs
+    ecusim::add_dtc(
+        &runtime.ecu_sim,
+        ecu_name,
+        dev_memory,
+        &DtcMinimal {
+            id: "0AA000".into(),
+            status_mask: "29".into(),
+            emissions_related: false,
+        },
+    )
+    .await
+    .expect("Failed to add Development DTC 0x0AA000");
+
+    ecusim::add_dtc(
+        &runtime.ecu_sim,
+        ecu_name,
+        dev_memory,
+        &DtcMinimal {
+            id: "0BB111".into(),
+            status_mask: "0C".into(),
+            emissions_related: false,
+        },
+    )
+    .await
+    .expect("Failed to add Development DTC 0x0BB111");
+
+    // Verify DTCs were added to both memories
+    let standard_dtcs = ecusim::get_dtcs(&runtime.ecu_sim, ecu_name, fault_memory)
+        .await
+        .expect("Failed to get Standard DTCs");
+    assert_eq!(
+        standard_dtcs.dtcs.len(),
+        2,
+        "Expected 2 Standard DTCs, got {}",
+        standard_dtcs.dtcs.len()
+    );
+
+    let dev_dtcs = ecusim::get_dtcs(&runtime.ecu_sim, ecu_name, dev_memory)
+        .await
+        .expect("Failed to get Development DTCs");
+    assert_eq!(
+        dev_dtcs.dtcs.len(),
+        2,
+        "Expected 2 Development DTCs, got {}",
+        dev_dtcs.dtcs.len()
+    );
+
+    // Deleting all faults with an invalid scope should be rejected (BadRequest)
+    delete_all_faults_with_scope(
+        &runtime.config,
+        &auth,
+        ecu_endpoint,
+        "InvalidScope",
+        StatusCode::BAD_REQUEST,
+    )
+    .await
+    .expect("Expected delete with invalid scope to be rejected");
+
+    // Deleting a single DTC with a scope should be rejected (BadRequest)
+    delete_fault_with_scope(
+        &runtime.config,
+        &auth,
+        ecu_endpoint,
+        "0AA000",
+        scope,
+        StatusCode::BAD_REQUEST,
+    )
+    .await
+    .expect("Expected single DTC deletion with scope to be rejected");
+
+    // Verify nothing was deleted after the rejected request
+    let dev_dtcs_after_reject = ecusim::get_dtcs(&runtime.ecu_sim, ecu_name, dev_memory)
+        .await
+        .expect("Failed to get Development DTCs after rejected delete");
+    assert_eq!(
+        dev_dtcs_after_reject.dtcs.len(),
+        2,
+        "Expected 2 Development DTCs after rejected single delete, got {}",
+        dev_dtcs_after_reject.dtcs.len()
+    );
+
+    // Clearing all faults with scope should clear Development faults only
+    delete_all_faults_with_scope(
+        &runtime.config,
+        &auth,
+        ecu_endpoint,
+        scope,
+        StatusCode::NO_CONTENT,
+    )
+    .await
+    .expect("Failed to delete all faults with scope");
+
+    // Verify Development faults were cleared
+    let dev_dtcs_after_clear = ecusim::get_dtcs(&runtime.ecu_sim, ecu_name, dev_memory)
+        .await
+        .expect("Failed to get Development DTCs after scoped clear");
+    assert_eq!(
+        dev_dtcs_after_clear.dtcs.len(),
+        0,
+        "Expected 0 Development DTCs after scoped clear, got {}",
+        dev_dtcs_after_clear.dtcs.len()
+    );
+
+    // Standard fault memory should NOT be affected
+    let standard_dtcs_after_clear = ecusim::get_dtcs(&runtime.ecu_sim, ecu_name, fault_memory)
+        .await
+        .expect("Failed to get Standard DTCs after scoped clear");
+    assert_eq!(
+        standard_dtcs_after_clear.dtcs.len(),
+        2,
+        "Expected 2 Standard DTCs to remain after scoped clear, got {}",
+        standard_dtcs_after_clear.dtcs.len()
+    );
+
+    // Verify the standard DTCs still exist
+    let has_01e240 = standard_dtcs_after_clear
+        .dtcs
+        .iter()
+        .any(|f| f.id == "1e240");
+    assert!(has_01e240, "Standard DTC 0x01E240 should still exist");
+
+    let has_039447 = standard_dtcs_after_clear
+        .dtcs
+        .iter()
+        .any(|f| f.id == "39447");
+    assert!(has_039447, "Standard DTC 0x039447 should still exist");
+
+    // Now clear the standard fault memory by using the default scope
+    let default_scope = &runtime.config.faults.default_scope;
+    delete_all_faults_with_scope(
+        &runtime.config,
+        &auth,
+        ecu_endpoint,
+        default_scope,
+        StatusCode::NO_CONTENT,
+    )
+    .await
+    .expect("Failed to delete all faults with default scope");
+
+    // Verify standard DTCs were cleared
+    let standard_dtcs_after_default_scope_clear =
+        ecusim::get_dtcs(&runtime.ecu_sim, ecu_name, fault_memory)
+            .await
+            .expect("Failed to get Standard DTCs after default scope clear");
+    assert_eq!(
+        standard_dtcs_after_default_scope_clear.dtcs.len(),
+        0,
+        "Expected 0 Standard DTCs after default scope clear, got {}",
+        standard_dtcs_after_default_scope_clear.dtcs.len()
+    );
+
+    // Clean up - delete the ECU lock
+    locks::lock_operation(
+        locks::ECU_ENDPOINT,
+        Some(&lock_id),
+        &runtime.config,
+        &auth,
+        StatusCode::NO_CONTENT,
+        Method::DELETE,
+    )
+    .await;
 }

@@ -90,6 +90,7 @@ impl From<DiagServiceError> for ApiError {
             | DiagServiceError::NotEnoughData { .. }
             | DiagServiceError::UnexpectedResponse(_)
             | DiagServiceError::DataError(_)
+            | DiagServiceError::InvalidConfiguration(_)
             | DiagServiceError::InvalidSecurityPlugin => {
                 ApiError::InternalServerError(Some(value.to_string()))
             }

@@ -496,7 +496,7 @@ pub mod faults {
         pub struct FaultQuery {
             /// Defines the scope for which fault entries are deleted
             /// must be a valid scope for the given component
-            scope: Option<String>,
+            pub scope: Option<String>,
         }
     }
 

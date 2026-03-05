@@ -747,20 +747,93 @@ impl<S: SecurityPlugin> cda_interfaces::EcuManager for EcuManager<S> {
         })
     }
 
-    /// Lookup a service by its service id for the current ECU variant.
-    /// This will first look up the service in the current variant, then in the base variant
+    /// Lookup services by matching a service request prefix.
+    ///
+    /// Finds diagnostic services where the request parameters match a sequence of bytes.
+    /// This is useful for finding services based on their complete service identifier,
+    /// including service ID, subfunction, and additional coded constant parameters.
+    /// Partial parameters won't match and that the prefix must be aligned to parameter boundaries.
+    ///
+    /// # Parameters
+    /// * `service_bytes` - A byte slice containing the service identifier and parameters.
+    ///   The first byte is the service ID (SID), followed by any coded constant parameters
+    ///   in their sequential byte positions (e.g., `[0x31, 0x01, 0x02, 0x46]`
+    ///   Only `uint32_t` coded consts are supported here.
+    ///
+    /// # Returns
+    /// A vector of service short names that match the criteria
+    ///
     /// # Errors
-    /// Will return `Err` if either the variant or base variant cannot be resolved.
-    fn lookup_service_names_by_sid(&self, service_id: u8) -> Result<Vec<String>, DiagServiceError> {
-        let services = self
+    /// Returns `DiagServiceError::NotFound` if no services match the given request prefix,
+    /// or `DiagServiceError::InvalidParameter` if the `service_bytes` slice is empty.
+    fn lookup_diagcomms_by_request_prefix(
+        &self,
+        request_bytes: &[u8],
+    ) -> Result<Vec<DiagComm>, DiagServiceError> {
+        let service_id = *request_bytes
+            .first()
+            .ok_or(DiagServiceError::NotFound(Some(
+                "cannot lookup service by empty prefix".to_owned(),
+            )))?;
+        let services: Vec<_> = self
             .lookup_services_by_sid(service_id)?
             .iter()
-            .filter_map(|service| service.diag_comm())
-            .filter_map(|dc| dc.short_name())
-            .map(ToOwned::to_owned)
-            .collect::<Vec<_>>();
+            .filter(|service| {
+                service
+                    .extract_sequential_coded_consts()
+                    .iter()
+                    .try_fold(0usize, |byte_idx, param| {
+                        let param_byte_count = param.byte_count();
 
-        Ok(services)
+                        // Check if we have enough bytes
+                        let end_idx = byte_idx.checked_add(param_byte_count)?;
+                        if end_idx > request_bytes.len() {
+                            return None;
+                        }
+
+                        if param_byte_count > 4 {
+                            return None;
+                        }
+
+                        // extract subslice from `request_bytes`, matching the current parameter
+                        let param_slice =
+                            request_bytes.get(byte_idx..byte_idx.checked_add(param_byte_count)?)?;
+                        let mut buf = [0u8; 4];
+                        // calculate where in the 4-byte buffer to place the parameter bytes.
+                        // i.e. a 2 byte param goes into buf[2..4],
+                        // leaving buf[0..2] as zero-padding,
+                        // copy this into the buffer and convert into u32 big endian.
+                        let start = 4usize.checked_sub(param_byte_count)?;
+                        buf.get_mut(start..)?.copy_from_slice(param_slice);
+                        let expected_value = u32::from_be_bytes(buf);
+
+                        // check if the parameter from the db matches the input
+                        (param.value == expected_value).then_some(end_idx)
+                    })
+                    .is_some()
+            })
+            .filter_map(|service| service.diag_comm())
+            .filter_map(|dc| {
+                let short_name = dc.short_name()?;
+                let type_ = DiagCommType::try_from(service_id).ok()?;
+
+                Some(DiagComm {
+                    name: self
+                        .database_naming_convention
+                        .trim_short_name_affixes(short_name),
+                    type_,
+                    lookup_name: Some(short_name.to_owned()),
+                })
+            })
+            .collect();
+
+        if services.is_empty() {
+            Err(DiagServiceError::NotFound(Some(format!(
+                "No service found matching request prefix: {request_bytes:02X?}"
+            ))))
+        } else {
+            Ok(services)
+        }
     }
 
     fn lookup_service_by_sid_and_name(
@@ -1169,7 +1242,7 @@ impl<S: SecurityPlugin> cda_interfaces::EcuManager for EcuManager<S> {
                 let (sub_function_id, _) = service.request_sub_function_id()?;
                 service_types
                     .iter()
-                    .find(|st| (**st as u16) == sub_function_id)
+                    .find(|st| (**st as u32) == sub_function_id)
                     .map(|st| (service, st))
             })
             .map(|(service, dtc_service_type)| {
@@ -8304,5 +8377,120 @@ mod tests {
             );
         }
         assert_eq!(names.len(), 6, "Unexpected extra layers: {names:?}");
+    }
+
+    /// Test `lookup_service_by_request_prefix` with a routine control service.
+    ///
+    /// Creates a diagnostic service with the following structure:
+    /// - SID: 0x31 (Routine Control)
+    /// - Sub-function: 0x03 (8-bit, at byte position 1)
+    /// - Routine ID: 0x0A5C (16-bit, at byte positions 2-3)
+    #[test]
+    fn test_lookup_service_by_request_prefix_routine_control() {
+        // Service configuration values (different from user's example)
+        const SERVICE_ID: u8 = 0x31;
+        const SUBFUNCTION: u8 = 0x03;
+        const ROUTINE_ID: u16 = 0x0A5C;
+        const SERVICE_NAME: &str = "Test";
+
+        let mut db_builder = EcuDataBuilder::new();
+        let protocol = db_builder.create_protocol(Protocol::DoIp.value(), None, None, None);
+
+        // Create the SID parameter
+        let sid_param = db_builder.create_coded_const_param(
+            "SID_RQ",
+            &SERVICE_ID.to_string(),
+            0,
+            0,
+            8,
+            DataType::UInt32,
+        );
+
+        // Create the subfunction parameter
+        let subfunction_param = db_builder.create_coded_const_param(
+            "RoutineControlType",
+            &SUBFUNCTION.to_string(),
+            1,
+            0,
+            8,
+            DataType::UInt32,
+        );
+
+        // Create the routine ID parameter
+        let routine_id_param = db_builder.create_coded_const_param(
+            "RoutineIdentifier",
+            &ROUTINE_ID.to_string(),
+            2,
+            0,
+            16,
+            DataType::UInt32,
+        );
+
+        // Create the request with all three parameters
+        let request = db_builder.create_request(
+            Some(vec![sid_param, subfunction_param, routine_id_param]),
+            None,
+        );
+
+        // Create the DiagComm
+        let diag_comm = db_builder.create_diag_comm(DiagCommParams {
+            short_name: SERVICE_NAME,
+            diag_class_type: DiagClassType::START_COMM,
+            protocols: Some(vec![protocol]),
+            ..Default::default()
+        });
+
+        // Create the DiagService
+        let diag_service = new_diag_service!(db_builder, diag_comm, request, vec![], vec![]);
+
+        let db = finish_db!(db_builder, protocol, vec![diag_service]);
+        let ecu_manager = new_ecu_manager(db);
+
+        // Lookup with complete prefix (all 4 bytes)
+        let full_prefix = vec![SERVICE_ID, SUBFUNCTION, 0x0A, 0x5C];
+        let result = ecu_manager.lookup_diagcomms_by_request_prefix(&full_prefix);
+        assert!(
+            result.is_ok(),
+            "Expected successful lookup with full request prefix"
+        );
+        let services = result.unwrap();
+        assert_eq!(services.len(), 1, "Expected exactly one matching service");
+        assert_eq!(
+            services
+                .first()
+                .expect("Expected at least one service")
+                .lookup_name
+                .as_ref()
+                .expect("Expected lookup name in DiagComm to be set"),
+            SERVICE_NAME,
+            "Expected service name to match"
+        );
+
+        // Lookup with partial request
+        // (first 3 bytes - SID + subfunction + first byte of routine ID)
+        let partial_prefix = vec![SERVICE_ID, SUBFUNCTION, 0x0A];
+        let result = ecu_manager.lookup_diagcomms_by_request_prefix(&partial_prefix);
+        assert!(
+            result.is_err(),
+            "Expected lookup to fail with incomplete 16-bit parameter"
+        );
+
+        // Lookup with wrong subfunction
+        let wrong_subfunction = vec![SERVICE_ID, 0x02, 0x0A, 0x5C];
+        let result = ecu_manager.lookup_diagcomms_by_request_prefix(&wrong_subfunction);
+        assert!(
+            result.is_err(),
+            "Expected lookup to fail with wrong subfunction"
+        );
+
+        // Lookup with empty prefix
+        let result = ecu_manager.lookup_diagcomms_by_request_prefix(&[]);
+        assert!(result.is_err(), "Expected lookup to fail with empty prefix");
+        match result.unwrap_err() {
+            DiagServiceError::NotFound { .. } => {
+                // Expected error type
+            }
+            other => panic!("Expected NotFound error, got: {other:?}"),
+        }
     }
 }

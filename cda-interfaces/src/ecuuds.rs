@@ -366,6 +366,14 @@ pub trait UdsEcu: Send + Sync + 'static {
         fault_code: Option<String>,
     ) -> Result<Self::Response, DiagServiceError>;
 
+    /// Clear DTCs using a user-defined scope
+    async fn delete_dtcs_scoped(
+        &self,
+        ecu_name: &str,
+        security_plugin: &DynamicPlugin,
+        scope: &str,
+    ) -> Result<Self::Response, DiagServiceError>;
+
     /// Retrieve all `read` services for a specific functional group.
     /// # Errors
     /// Will return `Err` if the description database ECU does not exist.
@@ -695,6 +703,12 @@ pub mod mock {
                 ecu_name: &str,
                 security_plugin: &DynamicPlugin,
                 fault_code: Option<String>,
+            ) -> Result<<MockUdsEcu as UdsEcu>::Response, DiagServiceError>;
+            async fn delete_dtcs_scoped(
+                &self,
+                ecu_name: &str,
+                security_plugin: &DynamicPlugin,
+                scope: &str,
             ) -> Result<<MockUdsEcu as UdsEcu>::Response, DiagServiceError>;
             async fn get_functional_group_data_info(
                 &self,

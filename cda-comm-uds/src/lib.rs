@@ -27,8 +27,8 @@ use cda_interfaces::{
         self, ComponentConfigurationsInfo, DTC_CODE_BIT_LEN, DataTransferError,
         DataTransferMetaData, DataTransferStatus, DtcCode, DtcExtendedInfo, DtcMask,
         DtcReadInformationFunction, DtcRecordAndStatus, DtcSnapshot, Ecu, ExtendedDataRecords,
-        ExtendedSnapshots, FunctionalGroup, Gateway, NetworkStructure, RetryPolicy, SdBoolMappings,
-        SdSdg,
+        ExtendedSnapshots, FaultConfig, FunctionalGroup, Gateway, NetworkStructure, RetryPolicy,
+        SdBoolMappings, SdSdg,
     },
     diagservices::{DiagServiceResponse, DiagServiceResponseType, UdsPayloadData},
     dlt_ctx, service_ids, util,
@@ -91,6 +91,7 @@ pub struct UdsManager<S: EcuGateway, R: DiagServiceResponse, T: EcuManager<Respo
     session_reset_tasks: Arc<RwLock<HashMap<EcuIdentifier, JoinHandle<()>>>>,
     security_reset_tasks: Arc<RwLock<HashMap<EcuIdentifier, JoinHandle<()>>>>,
     functional_description_database: String,
+    fault_config: FaultConfig,
     _phantom: std::marker::PhantomData<R>,
 }
 
@@ -100,6 +101,7 @@ impl<S: EcuGateway, R: DiagServiceResponse, T: EcuManager<Response = R>> UdsMana
         ecus: Arc<HashMap<String, RwLock<T>>>,
         mut variant_detection_receiver: mpsc::Receiver<Vec<String>>,
         functional_description_config: &FunctionalDescriptionConfig,
+        fault_config: FaultConfig,
     ) -> Self {
         let manager = Self {
             ecus,
@@ -112,6 +114,7 @@ impl<S: EcuGateway, R: DiagServiceResponse, T: EcuManager<Response = R>> UdsMana
             functional_description_database: functional_description_config
                 .description_database
                 .clone(),
+            fault_config,
             _phantom: std::marker::PhantomData,
         };
 
@@ -1142,6 +1145,7 @@ impl<S: EcuGateway, R: DiagServiceResponse, T: EcuManager<Response = R>> Clone
             session_reset_tasks: Arc::clone(&self.session_reset_tasks),
             security_reset_tasks: Arc::clone(&self.security_reset_tasks),
             functional_description_database: self.functional_description_database.clone(),
+            fault_config: self.fault_config.clone(),
             _phantom: self._phantom,
         }
     }
@@ -1645,7 +1649,12 @@ impl<S: EcuGateway, R: DiagServiceResponse, T: EcuManager<Response = R>> UdsEcu
     ) -> Result<Vec<String>, DiagServiceError> {
         let diag_manager = self.ecu_manager(ecu_name)?.read().await;
 
-        let reset_services = diag_manager.lookup_service_names_by_sid(service_ids::ECU_RESET)?;
+        let reset_services = diag_manager
+            .lookup_diagcomms_by_request_prefix(&[service_ids::ECU_RESET])?
+            .iter()
+            .filter_map(|dc| dc.lookup_name.clone())
+            .collect();
+
         drop(diag_manager);
         Ok(reset_services)
     }
@@ -2277,16 +2286,74 @@ impl<S: EcuGateway, R: DiagServiceResponse, T: EcuManager<Response = R>> UdsEcu
             .send_with_raw_payload(ecu_name, service_payload, None, true)
             .await?
         {
-            None => {
-                return Err(DiagServiceError::NoResponse(
-                    "ECU did not respond to DTC clear".to_owned(),
-                ));
-            }
+            None => Err(DiagServiceError::NoResponse(
+                "ECU did not respond to DTC clear".to_owned(),
+            )),
             Some(resp) => ecu
                 .read()
                 .await
                 .convert_service_14_response(delete_dtc_service, resp),
         }
+    }
+
+    async fn delete_dtcs_scoped(
+        &self,
+        ecu_name: &str,
+        security_plugin: &DynamicPlugin,
+        scope: &str,
+    ) -> Result<R, DiagServiceError> {
+        let ecu = self.ecu_manager(ecu_name)?;
+
+        // If the requested scope is the default scope, delegate to the standard delete_dtcs path.
+        if scope.eq_ignore_ascii_case(&self.fault_config.default_scope) {
+            return self.delete_dtcs(ecu_name, security_plugin, None).await;
+        }
+
+        // When a user-defined scope is provided, use the configured custom
+        // clear service (e.g. RoutineControl 31 01 42 00) via `self.send`
+        // which does not require any additional parameters, per definition.
+        if !scope.eq_ignore_ascii_case(&self.fault_config.user_memory_scope) {
+            return Err(DiagServiceError::InvalidParameter {
+                possible_values: HashSet::from_iter([
+                    self.fault_config.default_scope.clone(),
+                    self.fault_config.user_memory_scope.clone(),
+                ]),
+            });
+        }
+
+        let user_defined_dtc_clear_service = self
+            .fault_config
+            .user_defined_dtc_clear_service
+            .as_ref()
+            .ok_or_else(|| {
+                DiagServiceError::InvalidConfiguration(
+                    "User defined DTC scope name is not set in the configuration, but custom \
+                     scope clear is requested"
+                        .to_owned(),
+                )
+            })?;
+
+        let delete_dtc_service = ecu
+            .read()
+            .await
+            .lookup_diagcomms_by_request_prefix(user_defined_dtc_clear_service)?
+            .into_iter()
+            .next()
+            .ok_or_else(|| {
+                DiagServiceError::InvalidConfiguration(format!(
+                    "Unable to find service matching payload: \
+                     {user_defined_dtc_clear_service:02X?}"
+                ))
+            })?;
+
+        // validate that the service can be called via security plugin
+        ecu.read()
+            .await
+            .is_service_allowed(&delete_dtc_service, security_plugin)
+            .await?;
+
+        self.send(ecu_name, delete_dtc_service, security_plugin, None, false)
+            .await
     }
 
     #[tracing::instrument(skip_all,

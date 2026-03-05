@@ -21,7 +21,7 @@ use cda_interfaces::{
     DiagServiceError, DoipGatewaySetupError, EcuAddressProvider, EcuManager as EcuManagerTrait,
     EcuManagerType, FunctionalDescriptionConfig, HashMap, HashMapEntry, HashMapExtensions, HashSet,
     Protocol, UdsEcu,
-    datatypes::{ComParams, DatabaseNamingConvention, FlatbBufConfig},
+    datatypes::{ComParams, DatabaseNamingConvention, FaultConfig, FlatbBufConfig},
     dlt_ctx,
     file_manager::{Chunk, ChunkType},
 };
@@ -108,7 +108,9 @@ impl From<DiagServiceError> for AppError {
             | DiagServiceError::InvalidState(_)
             | DiagServiceError::Nack(_) => Self::RuntimeError(value.to_string()),
 
-            DiagServiceError::InvalidSecurityPlugin => Self::ConfigurationError(value.to_string()),
+            DiagServiceError::InvalidConfiguration(_) | DiagServiceError::InvalidSecurityPlugin => {
+                Self::ConfigurationError(value.to_string())
+            }
 
             DiagServiceError::ResourceError(_) => Self::ResourceError(value.to_string()),
 
@@ -191,6 +193,7 @@ pub async fn load_vehicle_data<
         Arc::clone(&databases),
         variant_detection_rx,
         &config.functional_description,
+        config.faults.clone(),
     );
     tracing::debug!("Starting variant detection");
     let vdetect = uds.clone();
@@ -631,12 +634,14 @@ pub fn create_uds_manager<S: SecurityPlugin>(
     databases: Arc<HashMap<String, RwLock<EcuManager<S>>>>,
     variant_detection_receiver: mpsc::Receiver<Vec<String>>,
     functional_description_config: &FunctionalDescriptionConfig,
+    fault_config: FaultConfig,
 ) -> UdsManagerType<S> {
     UdsManager::new(
         gateway,
         databases,
         variant_detection_receiver,
         functional_description_config,
+        fault_config,
     )
 }
 
