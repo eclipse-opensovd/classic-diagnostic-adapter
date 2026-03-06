@@ -61,6 +61,8 @@ tracing-subscriber = { workspace = true, features = [
 ] }
 # error
 thiserror = { workspace = true }
+# toml serialization
+toml = { workspace = true }
 # time
 chrono = { workspace = true }
 # future

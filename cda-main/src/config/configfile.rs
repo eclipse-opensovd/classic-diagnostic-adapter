@@ -15,7 +15,7 @@ use cda_interfaces::{
     FunctionalDescriptionConfig, HashMap,
     datatypes::{
         ComParams, ComponentsConfig, DatabaseNamingConvention, DiagnosticServiceAffixPosition,
-        FlatbBufConfig, SdBoolMappings, SdMappingsTruthyValue,
+        FaultConfig, FlatbBufConfig, SdBoolMappings, SdMappingsTruthyValue,
     },
 };
 use serde::{Deserialize, Serialize};
@@ -36,6 +36,7 @@ pub struct Configuration {
     pub components: ComponentsConfig,
     #[cfg(feature = "health")]
     pub health: cda_health::config::HealthConfig,
+    pub faults: FaultConfig,
 }
 
 #[derive(Deserialize, Serialize, Clone, Debug)]
@@ -117,6 +118,7 @@ impl Default for Configuration {
                     ),
                 ]),
             },
+            faults: FaultConfig::default(),
         }
     }
 }

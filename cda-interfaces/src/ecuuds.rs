@@ -357,6 +357,14 @@ pub trait UdsEcu: Send + Sync + 'static {
         fault_code: Option<String>,
     ) -> Result<Self::Response, DiagServiceError>;
 
+    /// Clear DTCs using a user-defined scope
+    async fn delete_dtcs_scoped(
+        &self,
+        ecu_name: &str,
+        security_plugin: &DynamicPlugin,
+        scope: &str,
+    ) -> Result<Self::Response, DiagServiceError>;
+
     /// Get the functional groups an ECU belongs to.
     /// # Errors
     /// Returns `DiagServiceError::NotFound` if the ECU is not found.
@@ -673,6 +681,12 @@ pub mod mock {
                 ecu_name: &str,
                 security_plugin: &DynamicPlugin,
                 fault_code: Option<String>,
+            ) -> Result<<MockUdsEcu as UdsEcu>::Response, DiagServiceError>;
+            async fn delete_dtcs_scoped(
+                &self,
+                ecu_name: &str,
+                security_plugin: &DynamicPlugin,
+                scope: &str,
             ) -> Result<<MockUdsEcu as UdsEcu>::Response, DiagServiceError>;
             async fn ecu_functional_groups(
                 &self,

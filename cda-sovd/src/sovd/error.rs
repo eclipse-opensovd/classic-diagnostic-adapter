@@ -101,7 +101,7 @@ impl From<DiagServiceError> for ApiError {
             | DiagServiceError::AmbiguousParameters { .. }
             | DiagServiceError::AccessDenied(_) => ApiError::BadRequest(value.to_string()),
 
-            DiagServiceError::InvalidSecurityPlugin => {
+            DiagServiceError::InvalidConfiguration(_) | DiagServiceError::InvalidSecurityPlugin => {
                 ApiError::InternalServerError(Some(value.to_string()))
             }
         }
