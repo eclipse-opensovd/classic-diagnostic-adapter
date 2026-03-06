@@ -85,5 +85,8 @@ openssl-vendored = [
 ]
 dlt-tracing = ["cda-tracing/dlt-tracing"]
 integration-tests = []
-
 health = []
+
+
+# ~65% less virtual memory usage but ~30% slower
+system-alloc = []
