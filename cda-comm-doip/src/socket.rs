@@ -22,6 +22,7 @@ use doip_definitions::{
 use futures::{SinkExt, StreamExt};
 use tokio::io::{AsyncRead, AsyncWrite, ReadHalf, WriteHalf};
 use tokio_util::{
+    bytes::Buf,
     codec::{Framed, FramedRead, FramedWrite},
     udp::UdpFramed,
 };
@@ -142,7 +143,14 @@ impl DoIPUdpSocket {
 
     pub async fn recv(&mut self) -> Option<Result<(DoipMessage, SocketAddr), ConnectionError>> {
         self.io.next().await.map(|opt| {
-            opt.map_err(|e| ConnectionError::Decoding(format!("Failed to read message: {e:?}")))
+            opt.map_err(|e| {
+                // In case of error (remaining bytes, corrupted DoIP message, etc...),
+                // the current UDP frame needs to be disposed of to be able to receive new frames
+                let remaining_bytes = self.io.read_buffer().len();
+                self.io.read_buffer_mut().advance(remaining_bytes);
+
+                ConnectionError::Decoding(format!("Failed to read message: {e:?}"))
+            })
         })
     }
 }

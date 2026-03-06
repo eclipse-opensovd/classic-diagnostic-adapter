@@ -64,7 +64,7 @@ where
         },
         () = async { // loop until timeout is exceeded or shutdown signal is received
                 loop {
-                    tracing::info!("Started loop");
+                    tracing::info!("Waiting for VIRs...");
                     match socket.recv().await {
                         Some(Ok((doip_msg, source_addr))) => {
                             if let PayloadType::VehicleIdentificationRequest =
@@ -81,7 +81,7 @@ where
                         }
                         Some(Err(e)) => {
                             tracing::warn!("Failed to receive VAMs: {e:?}");
-                            break;
+                            continue;
                         },
                         None => {
                             tracing::warn!("Incomplete VAM due to connection closure/error");
