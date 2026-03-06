@@ -72,35 +72,39 @@ impl ApiError {
 impl From<DiagServiceError> for ApiError {
     fn from(value: DiagServiceError) -> Self {
         match value {
-            DiagServiceError::UdsLookupError(_) | DiagServiceError::NotFound(_) => {
+            DiagServiceError::UdsLookupError(_)
+            | DiagServiceError::NotFound(_)
+            | DiagServiceError::DatabaseEntryNotFound(_) => {
                 ApiError::NotFound(Some(value.to_string()))
             }
             DiagServiceError::InvalidParameter { possible_values } => {
                 ApiError::InvalidParameter { possible_values }
             }
+            DiagServiceError::EcuOffline(_)
+            | DiagServiceError::Timeout
+            | DiagServiceError::NoResponse(_) => ApiError::NotResponding(value.to_string()),
             DiagServiceError::InvalidDatabase(_)
-            | DiagServiceError::DatabaseEntryNotFound(_)
             | DiagServiceError::VariantDetectionError(_)
-            | DiagServiceError::EcuOffline(_)
             | DiagServiceError::ResourceError(_)
             | DiagServiceError::ConnectionClosed(_)
-            | DiagServiceError::InvalidRequest(_)
             | DiagServiceError::SendFailed(_)
             | DiagServiceError::InvalidAddress(_)
+            | DiagServiceError::NotEnoughData { .. }
+            | DiagServiceError::UnexpectedResponse(_)
+            | DiagServiceError::DataError(_) => {
+                ApiError::InternalServerError(Some(value.to_string()))
+            }
+            DiagServiceError::InvalidRequest(_)
+            | DiagServiceError::Nack(_)
             | DiagServiceError::ParameterConversionError(_)
             | DiagServiceError::BadPayload(_)
-            | DiagServiceError::NotEnoughData { .. }
-            | DiagServiceError::NoResponse(_)
-            | DiagServiceError::Nack(_)
             | DiagServiceError::InvalidState(_)
             | DiagServiceError::UnknownOperation
-            | DiagServiceError::UnexpectedResponse(_)
             | DiagServiceError::RequestNotSupported(_)
-            | DiagServiceError::Timeout
-            | DiagServiceError::DataError(_)
-            | DiagServiceError::AmbiguousParameters { .. }
-            | DiagServiceError::AccessDenied(_) => ApiError::BadRequest(value.to_string()),
-
+            | DiagServiceError::AmbiguousParameters { .. } => {
+                ApiError::BadRequest(value.to_string())
+            }
+            DiagServiceError::AccessDenied(_) => ApiError::Forbidden(Some(value.to_string())),
             DiagServiceError::InvalidSecurityPlugin => {
                 ApiError::InternalServerError(Some(value.to_string()))
             }
