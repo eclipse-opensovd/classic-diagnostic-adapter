@@ -13,6 +13,7 @@ Diagnostic Database Update Plugin
 
 .. arch:: Diagnostic Database Update Plugin
     :id: arch~plugin-diagnostic-database-update
+    :status: draft
 
     **Endpoints and Security**
 
@@ -105,8 +106,8 @@ Diagnostic Database Update Plugin
     ``mode``, with the following possible values (all case-insensitive):
 
     - ``Apply`` - to apply the pending updates.
-    - ``Rollback`` -  to roll back to the backup state of the diagnostic database (also clears pending nextupdate)
-    - ``Cleanup`` - (case-insensitive) to reset all pending updates, as well as deleting the backup
+    - ``Rollback`` - to roll back to the backup state of the diagnostic database (also clears pending nextupdate)
+    - ``Cleanup`` - to reset all pending updates, as well as deleting the backup
 
     The same endpoint must also be made available as ``/apps/sovd2uds/operations/diagnostic-database-update``
     to allow triggering the actions through a standard compliant operation.

@@ -32,7 +32,7 @@ get_oneline_needs = true
 [codelinks.projects.cda.analyse.oneline_comment_style]
 # Configuration for oneline comment style
 start_sequence = "[["  # Start sequence for oneline comments
-end_sequence = "]]"    # End sequence for the online comments; default is newline character
+end_sequence = "]]"    # End sequence for the oneline comments; default is newline character
 field_split_char = "," # Character to split fields in the comment
 # Fields that are defined in the oneline comment style
 needs_fields = [

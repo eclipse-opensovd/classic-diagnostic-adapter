@@ -16,6 +16,7 @@ Communication Parameters (ComParams)
 .. arch:: Communication Parameters API
     :id: arch~sovd-api-comparams
     :links: arch~sovd-api-comparams-without-lock
+    :status: draft
 
     .. note::
        Communication parameter handling is exposed through a ``comparam`` endpoint in ``operations``.
@@ -49,6 +50,7 @@ Communication Parameters (ComParams)
 
 .. arch:: Retrieve Communication Parameters without Lock
     :id: arch~sovd-api-comparams-without-lock
+    :status: draft
 
     .. note::
        This is a small extension to the ISO standard
@@ -56,7 +58,7 @@ Communication Parameters (ComParams)
     To allow retrieving the communication parameters without a lock, a GET on ``/operations/comparam?todo`` must
     also return the current parameters.
 
-    .. todo:: this conflicts with the SOVD standard standard of returning a list of items below that path - define additional query parameter for data?
+    .. todo:: this conflicts with the SOVD standard of returning a list of items below that path - define additional query parameter for data?
 
     **Rationale**
 
