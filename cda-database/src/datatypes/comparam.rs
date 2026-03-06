@@ -42,9 +42,9 @@ pub(super) fn lookup(
                         .is_some_and(|n| n == param_name)
             })
         })
-        .ok_or(DiagServiceError::DatabaseEntryNotFound(format!(
+        .ok_or(DiagServiceError::NotFound(Some(format!(
             "No ComParamRef found for {param_name} in protocol {protocol_name}"
-        )))?;
+        ))))?;
 
     let cp = cp_ref.com_param().ok_or(DiagServiceError::InvalidDatabase(
         "ComParamRef has no ComParam".to_owned(),

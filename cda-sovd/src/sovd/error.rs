@@ -72,9 +72,7 @@ impl ApiError {
 impl From<DiagServiceError> for ApiError {
     fn from(value: DiagServiceError) -> Self {
         match value {
-            DiagServiceError::UdsLookupError(_)
-            | DiagServiceError::NotFound(_)
-            | DiagServiceError::DatabaseEntryNotFound(_) => {
+            DiagServiceError::UdsLookupError(_) | DiagServiceError::NotFound(_) => {
                 ApiError::NotFound(Some(value.to_string()))
             }
             DiagServiceError::InvalidParameter { possible_values } => {
