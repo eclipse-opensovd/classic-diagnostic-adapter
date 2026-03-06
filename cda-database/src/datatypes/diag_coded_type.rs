@@ -553,10 +553,15 @@ impl DiagCodedType {
             }
             DiagCodedTypeVariant::StandardLength(slt) => {
                 self.base_datatype.validate_bit_len(slt.bit_length)?;
-                let mask = slt.bit_mask.as_ref().map(|m| Mask {
-                    data: m.clone(),
-                    condensed: slt.condensed,
-                });
+                // Treat an empty bit_mask as no mask (None)
+                let mask = slt
+                    .bit_mask
+                    .as_ref()
+                    .filter(|m| !m.is_empty())
+                    .map(|m| Mask {
+                        data: m.clone(),
+                        condensed: slt.condensed,
+                    });
 
                 let (packed, len) =
                     pack_data(slt.bit_length as usize, 0, mask.as_ref(), &input_data)?;
