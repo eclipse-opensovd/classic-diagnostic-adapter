@@ -473,7 +473,7 @@ impl DiagnosticDatabase {
     /// Find the logical address of the given type in
     /// the diagnostic database for the given protocol.
     /// # Errors
-    /// * `DiagServiceError::DatabaseEntryNotFound` if the com param is not found or is invalid.
+    /// * `DiagServiceError::NotFound` if the com param is not found or is invalid.
     /// * `DiagServiceError::ParameterConversionError` if the com param value cannot be converted
     pub fn find_logical_address(
         &self,
@@ -618,7 +618,7 @@ impl DiagnosticDatabase {
                 com_param.default.clone()
             }
             Err(e) => {
-                if let DiagServiceError::DatabaseEntryNotFound(e) = &e {
+                if let DiagServiceError::NotFound(Some(e)) = &e {
                     tracing::debug!(
                         param_name = %com_param.name,
                         error = %e,
