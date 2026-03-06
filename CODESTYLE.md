@@ -78,5 +78,6 @@ Additionally the import granularity is set to `crate` to group all imports from 
 
 - Document all public items with `///` doc comments.
 - Use clear, concise language and provide context for complex logic.
+- Inline comments should ues `//` and never `/* */`, they should explain why, not what.
 
 ---
