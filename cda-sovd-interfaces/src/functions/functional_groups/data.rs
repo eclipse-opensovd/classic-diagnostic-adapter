@@ -54,4 +54,5 @@ pub mod service {
 
 pub mod get {
     pub type Query = crate::IncludeSchemaQuery;
+    pub type Response = crate::Items<crate::components::ecu::ComponentDataInfo>;
 }
