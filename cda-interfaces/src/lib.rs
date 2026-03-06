@@ -277,8 +277,6 @@ pub enum DiagServiceError {
     RequestNotSupported(String),
     #[error("Invalid database: {0}")]
     InvalidDatabase(String),
-    #[error("Database entry not found: {0}")]
-    DatabaseEntryNotFound(String),
     #[error("Invalid request: {0}")]
     InvalidRequest(String),
     #[error("Parameter conversion error: {0}")]
