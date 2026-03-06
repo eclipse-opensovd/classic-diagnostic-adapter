@@ -106,5 +106,22 @@ needs_extra_options = [
         "schema": {
             "type": "string",
         },
-    }
+    },
+    {
+        "name": "reqtype",
+        "description": "Requirement type classification (functional, non-functional, interface, constraint)",
+        "title": "Requirement Type",
+        "schema": {
+            "type": "string",
+            "enum": ["functional", "non-functional", "interface", "constraint"],
+        },
+    },
+]
+
+needs_statuses = [
+    {"name": "draft", "description": "Item is being written or is incomplete", "color": "#FFCC00"},
+    {"name": "valid", "description": "Item has been reviewed and is correct", "color": "#44BB44"},
+    {"name": "approved", "description": "Item has been formally approved", "color": "#2266DD"},
+    {"name": "rejected", "description": "Item has been rejected and needs rework", "color": "#CC4444"},
+    {"name": "obsolete", "description": "Item is no longer applicable", "color": "#999999"},
 ]

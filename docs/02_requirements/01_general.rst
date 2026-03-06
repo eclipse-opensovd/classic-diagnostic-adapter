@@ -46,7 +46,7 @@ CPU & Memory
 
 CPU and memory consumption need to be minimal to allow other tasks on that HPC to perform well.
 
-Parallelity
+Parallelism
 ^^^^^^^^^^^
 
 The CDA must be able to communicate at least with 50 DoIP entities, and up to 200 ECUs behind those entities.
@@ -63,7 +63,7 @@ Logging
 ^^^^^^^
 
 The CDA must provide logging capabilities, which allow tracing of events, errors, and debug information.
-The logging system must be configurable in terms of log levels and outputs, to adapt to different deployment scenarios.
+The logging system must be an configurable in terms of log levels and outputs, to adapt to different deployment scenarios.
 
 System
 ------
@@ -74,6 +74,7 @@ Storage Access
 .. req:: Storage Access Abstraction
     :id: req~system-storage-access-abstraction
     :links: arch~system-storage-access-abstraction
+    :status: draft
 
     The CDA must provide an abstraction layer for storage access, which allows it to interact with different types of
     storage systems (e.g., local file system, databases) without being tightly coupled to a specific implementation.
@@ -85,6 +86,7 @@ Storage Access
 
 .. req:: Local File System Storage Access Implementation
     :id: req~system-default-local-file-system-storage-access
+    :status: draft
 
     A default implementation for local file system access, utilizing the Storage Access Abstraction must be provided.
 

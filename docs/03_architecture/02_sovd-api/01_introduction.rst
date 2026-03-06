@@ -21,5 +21,6 @@ HTTP
 .. arch:: SOVD-API over HTTP
     :id: arch~sovd-api-http-server
     :links: dimpl~sovd-api-http-server
+    :status: draft
 
     The SOVD-API is based on HTTP/1.1 as transport protocol, and available through an configurable TCP port.

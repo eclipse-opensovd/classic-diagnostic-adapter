@@ -70,7 +70,7 @@ paths:
         schema:
           type: string
     get:
-      summary: "Retrieves list of single ecu jobs"
+      summary: "Retrieves mdd embedded file with the given id"
       tags:
         - mdd-embedded-files
       responses:

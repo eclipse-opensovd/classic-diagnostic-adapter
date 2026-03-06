@@ -27,6 +27,7 @@ API
 
 .. arch:: Management of flash files
     :id: arch~sovd-api-flash-file-management
+    :status: draft
 
     **Motivation**
 
@@ -49,6 +50,7 @@ API
 
 .. arch:: Flash data transfer
     :id: arch~sovd-api-flash-data-transfer
+    :status: draft
 
     **Motivation**
 
@@ -95,6 +97,7 @@ Configuration
 
 .. arch:: Flash folder configuration
     :id: arch~sovd-api-flash-folder-configuration
+    :status: draft
 
     **Motivation**
 

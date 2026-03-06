@@ -16,6 +16,7 @@ Data Types
 
 .. arch:: ODX to JSON data type mapping
     :id: arch~sovd-api-data-types-mapping-iso17978
+    :status: draft
 
     Data types must be mapped as follows:
 
@@ -97,6 +98,7 @@ Bulk Data
 
 .. arch:: Bulk-Data Endpoints
     :id: arch~sovd-api-bulk-data
+    :status: draft
 
     Bulk-data endpoints allow the management of bulk data, like files that are to be used for flashing.
 
@@ -132,6 +134,7 @@ Entities
 
 .. arch:: Standardized Resource Collection Mapping
     :id: arch~sovd-api-standardized-resource-collection-mapping
+    :status: draft
 
     Every ECU with a ``mdd`` file is an entity within the ``/components`` entity collection.
 
@@ -142,6 +145,7 @@ ECU resource collection
 
 .. arch:: ECU Resource Collection
     :id: arch~sovd-api-ecu-resource-collection
+    :status: draft
 
     Each ECU entity must provide a standardized resource collection as defined in ISO 17978-3, chapter 5.4.2.
 
@@ -154,6 +158,7 @@ Data Resources -- SID 22\ :sub:`16` & 2E\ :sub:`16`
 
 .. arch:: Data Resources
     :id: arch~sovd-api-data-resources
+    :status: draft
 
     Data resources for ECUs are available in the standardized resource collection within the path ``/components/{ecu-name}/data``.
 
@@ -182,6 +187,7 @@ Categories
 
 .. arch:: Data Identifier Categories
     :id: arch~sovd-api-data-identifier-categories
+    :status: draft
 
     The category of a data identifier must be mappable with configuration, in which the functional class name is mapped to a category name.
 
@@ -211,6 +217,7 @@ Configurations -- SID 22\ :sub:`16` & 2E\ :sub:`16`
 
 .. arch:: Configuration Resources
     :id: arch~sovd-api-configuration-resources
+    :status: draft
 
     Names for data resources are determined by taking all diag-services defined for 22\ :sub:`16` and 2E\ :sub:`16`, and filtering
     them for a configurable functional class name. Their short name is taken as a base and processed by removing
@@ -248,6 +255,7 @@ Operations
 
 .. arch:: Synchronous and Asynchronous Operations
     :id: arch~sovd-api-operations-handling
+    :status: draft
 
     Operations in the CDA are Routines (31\ :sub:`16`), Reset (11\ :sub:`16`), and an extension to configure
     communication parameters (:ref:`architecture-sovd-api-comparams`).
@@ -336,6 +344,7 @@ Session -- SID 10\ :sub:`16`
 
 .. arch:: Session Endpoints
     :id: arch~sovd-api-session-management
+    :status: draft
 
     The endpoint ``/modes/session`` can be used to determine the current ECU session,
     as well as trying to switch into a different session.
@@ -376,6 +385,7 @@ Security -- SID 27\ :sub:`16`
 
 .. arch:: Security Access Endpoints
     :id: arch~sovd-api-security-access-modes
+    :status: draft
 
     The endpoints are available under the path ``/modes/security``.
 
@@ -388,6 +398,7 @@ Authentication -- SID 29\ :sub:`16`
 
 .. arch:: Authentication Endpoints
     :id: arch~sovd-api-authentication-modes
+    :status: draft
 
     .. note::
        This is technically a deviation from Table 343 in the ISO API. The table in the ISO is misleading, since 8.3.2 and 8.3.3 describe them separately.
@@ -404,6 +415,7 @@ Communication Control -- SID 28\ :sub:`16`
 
 .. arch:: Communication Control Endpoints
     :id: arch~sovd-api-communication-control-modes
+    :status: draft
 
     To control the communication parameters of an ECU, the path ``/modes/commctrl`` is offered, which can be called
     similarly to Session (without expiration).
@@ -427,6 +439,7 @@ DTC Setting -- SID 85\ :sub:`16`
 
 .. arch:: DTC Setting Endpoints
     :id: arch~sovd-api-dtc-setting-modes
+    :status: draft
 
     To control the DTC settings of an ECU, the path ``/modes/dtcsetting`` is offered, which can be called
     similarly to Session (without expiration).
@@ -445,6 +458,7 @@ Faults -- SID 14\ :sub:`16` & 19\ :sub:`16`
 
 .. arch:: Faults endpoint
     :id: arch~sovd-api-faults-endpoint
+    :status: draft
 
     The following operations must be implemented:
 
