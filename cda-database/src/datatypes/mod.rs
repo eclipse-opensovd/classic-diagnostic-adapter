@@ -377,17 +377,47 @@ impl From<dataformat::LongName<'_>> for LongName {
     }
 }
 
+/// Backing storage for ECU data blobs.
+/// Supports heap-allocated buffers, direct file mmaps, and tempfile-backed mmaps.
+/// When using an mmap variant, `FlatBuffers` performs zero-copy deserialization
+/// directly from the mapped region; the OS pages data in and out automatically,
+/// keeping resident memory proportional to the working set rather than total size.
+pub(crate) enum EcuDataStorage {
+    /// Decompressed data loaded into a heap-allocated buffer.
+    /// Used for blobs smaller than `FlatbBufConfig::mmap_threshold`.
+    Vec(Vec<u8>),
+    /// Memory-mapped file providing zero-copy access to `FlatBuffers` data.
+    /// Used when the `FlatBuffers` file exists uncompressed on disk.
+    Mmap(memmap2::Mmap),
+    /// Decompressed data offloaded to an anonymous temporary file and memory-mapped.
+    /// The `File` keeps the temp file alive; the OS can freely page out
+    /// any region that isn't currently accessed.
+    /// Used for blobs exceeding `FlatbBufConfig::mmap_threshold`.
+    TempMmap {
+        /// Kept alive so the anonymous temp file isn't deleted while mapped.
+        _file: std::fs::File,
+        mmap: memmap2::Mmap,
+    },
+}
+
+impl AsRef<[u8]> for EcuDataStorage {
+    fn as_ref(&self) -> &[u8] {
+        match self {
+            EcuDataStorage::Vec(v) => v.as_ref(),
+            EcuDataStorage::Mmap(m) | EcuDataStorage::TempMmap { mmap: m, .. } => m.as_ref(),
+        }
+    }
+}
+
 #[self_referencing]
-#[derive(Debug)]
 struct EcuData {
-    blob: Vec<u8>,
+    blob: EcuDataStorage,
 
     #[borrows(blob)]
     #[covariant]
     pub data: dataformat::EcuData<'this>,
 }
 
-#[derive(Debug)]
 pub struct DiagnosticDatabase {
     ecu_database_path: String,
     ecu_data: Option<EcuData>,
@@ -417,6 +447,11 @@ pub struct LongName {
 
 impl DiagnosticDatabase {
     /// Create a new `DiagnosticDatabase` from the given ECU database path and ECU data blob.
+    ///
+    /// If the blob exceeds `flatbuf_config.mmap_threshold`, it is automatically
+    /// offloaded to an anonymous temporary file and memory-mapped so the OS can
+    /// page out unused regions. Smaller blobs are kept on the heap.
+    ///
     /// # Errors
     /// Returns an error if the ECU data blob cannot be read.
     /// # Panics
@@ -426,10 +461,125 @@ impl DiagnosticDatabase {
         ecu_data_blob: Vec<u8>,
         flatbuf_config: FlatbBufConfig,
     ) -> Result<Self, DiagServiceError> {
+        let storage = if ecu_data_blob.len() >= flatbuf_config.mmap_threshold {
+            Self::offload_to_tempfile_mmap(ecu_data_blob, flatbuf_config.mmap_tmpdir.as_deref())?
+        } else {
+            EcuDataStorage::Vec(ecu_data_blob)
+        };
+        Self::new_from_storage(ecu_database_path, storage, flatbuf_config)
+    }
+
+    /// Create a new `DiagnosticDatabase` by memory-mapping a `FlatBuffers` file directly.
+    ///
+    /// This provides zero-copy access to the `FlatBuffers` data: the OS pages data
+    /// in and out of memory on demand, so only the actually accessed fields are
+    /// loaded into physical RAM.
+    ///
+    /// # Errors
+    /// Returns an error if the file cannot be opened or memory-mapped, or if the
+    /// `FlatBuffers` data is invalid (when verification is enabled).
+    ///
+    /// # Safety considerations
+    /// The underlying file must not be modified or truncated while this database is alive.
+    pub fn new_from_mmap(
+        flatbuf_file_path: String,
+        flatbuf_config: FlatbBufConfig,
+    ) -> Result<Self, DiagServiceError> {
+        let file = std::fs::File::open(&flatbuf_file_path).map_err(|e| {
+            DiagServiceError::InvalidDatabase(format!(
+                "Failed to open FlatBuffers file for mmap: {e}"
+            ))
+        })?;
+        // SAFETY: The file is opened read-only and we only hold a shared, immutable mapping.
+        // The caller must ensure the file is not modified or truncated while mapped.
+        let mmap = unsafe { memmap2::Mmap::map(&file) }.map_err(|e| {
+            DiagServiceError::InvalidDatabase(format!("Failed to memory-map FlatBuffers file: {e}"))
+        })?;
+        Self::apply_madvise_random(&mmap);
+        Self::new_from_storage(
+            flatbuf_file_path,
+            EcuDataStorage::Mmap(mmap),
+            flatbuf_config,
+        )
+    }
+
+    /// Offload a decompressed blob to an anonymous temporary file and memory-map it.
+    ///
+    /// The anonymous temp file is automatically deleted when the `File` handle is
+    /// dropped (on Unix) or when the last handle is closed (on Windows).
+    /// The returned mmap has `MADV_RANDOM` applied to prevent aggressive read-ahead
+    /// since `FlatBuffers` access patterns are typically sparse.
+    ///
+    /// `tmpdir` selects the directory for the temp file. See
+    /// [`FlatbBufConfig::mmap_tmpdir`] for guidance on choosing a disk-backed path.
+    fn offload_to_tempfile_mmap(
+        data: Vec<u8>,
+        tmpdir: Option<&str>,
+    ) -> Result<EcuDataStorage, DiagServiceError> {
+        use std::io::Write;
+
+        let mut file = match tmpdir {
+            Some(dir) => {
+                std::fs::create_dir_all(dir).map_err(|e| {
+                    DiagServiceError::InvalidDatabase(format!(
+                        "Failed to create mmap offload directory '{dir}': {e}"
+                    ))
+                })?;
+                tempfile::tempfile_in(dir)
+            }
+            None => tempfile::tempfile(),
+        }
+        .map_err(|e| {
+            DiagServiceError::InvalidDatabase(format!(
+                "Failed to create temporary file for mmap offload: {e}"
+            ))
+        })?;
+        file.write_all(&data).map_err(|e| {
+            DiagServiceError::InvalidDatabase(format!(
+                "Failed to write decompressed data to temporary file: {e}"
+            ))
+        })?;
+        // Explicitly drop the Vec to free heap memory before creating the mmap.
+        drop(data);
+
+        // SAFETY: We just wrote the file and hold the only handle. The file is
+        // anonymous (tempfile) so no external process can modify it.
+        let mmap = unsafe { memmap2::Mmap::map(&file) }.map_err(|e| {
+            DiagServiceError::InvalidDatabase(format!("Failed to memory-map temporary file: {e}"))
+        })?;
+        Self::apply_madvise_random(&mmap);
+
+        tracing::info!(
+            size_bytes = mmap.len(),
+            "Offloaded decompressed FlatBuffers data to tempfile-backed mmap"
+        );
+
+        Ok(EcuDataStorage::TempMmap { _file: file, mmap })
+    }
+
+    /// Apply `MADV_RANDOM` to an mmap to prevent aggressive OS read-ahead.
+    /// `FlatBuffers` access patterns are typically sparse/random, so sequential
+    /// prefetching wastes memory. This hint tells the OS to only fault in
+    /// the pages actually accessed.
+    fn apply_madvise_random(mmap: &memmap2::Mmap) {
+        #[cfg(unix)]
+        if let Err(e) = mmap.advise(memmap2::Advice::Random) {
+            tracing::warn!(error = %e,
+                "Failed to set MADV_RANDOM on mmap; continuing without hint");
+        }
+    }
+
+    /// Internal constructor that builds the self-referencing `EcuData` from any
+    /// [`EcuDataStorage`] variant (heap buffer, file mmap, or tempfile mmap).
+    fn new_from_storage(
+        ecu_database_path: String,
+        storage: EcuDataStorage,
+        flatbuf_config: FlatbBufConfig,
+    ) -> Result<Self, DiagServiceError> {
         let ecu_data = EcuDataTryBuilder {
-            blob: ecu_data_blob,
-            data_builder: |ecu_data_blob| {
-                read_ecudata(ecu_data_blob, &flatbuf_config).map_err(|e| {
+            blob: storage,
+            data_builder: |blob: &EcuDataStorage| {
+                read_ecudata(blob.as_ref(), &flatbuf_config).map_err(|e| {
                     DiagServiceError::InvalidDatabase(format!(
                         "Failed to read ECU data from blob: {e}"
                     ))

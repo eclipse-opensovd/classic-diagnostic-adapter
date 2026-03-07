@@ -176,25 +176,34 @@ pub fn load_proto_data(
 ) -> Result<(String, HashMap<ChunkType, Vec<Chunk>>), MddError> {
     tracing::trace!("Loading ECU data from file");
     let start = Instant::now();
-    let mut filein = std::fs::File::open(mdd_file)
+    let filein = std::fs::File::open(mdd_file)
         .map_err(|e| MddError::Io(format!("Failed to open mdd file: {e}")))?;
-    let magic = file_magic_bytes();
-    for b in magic {
-        let mut buf = [0; 1];
-        filein.read_exact(&mut buf).map_err(|e| {
-            MddError::Parsing(format!("Failed to read magic byte from mdd file: {e}"))
-        })?;
-        if buf[0] != b {
-            return Err(MddError::Parsing(
-                "Invalid file format: Magic Byte mismatch".to_owned(),
-            ));
-        }
+
+    // SAFETY: The file is opened read-only and we only hold a shared reference to the mapping.
+    // The caller must ensure the file is not modified or truncated while mapped.
+    let mmap = unsafe { memmap2::Mmap::map(&filein) }
+        .map_err(|e| MddError::Io(format!("Failed to memory-map mdd file: {e}")))?;
+
+    // Hint to the OS: MDD file access is sequential (read once front-to-back for
+    // protobuf decoding), so enable aggressive read-ahead.
+    #[cfg(unix)]
+    if let Err(e) = mmap.advise(memmap2::Advice::Sequential) {
+        tracing::warn!(error = %e, "Failed to set MADV_SEQUENTIAL on MDD mmap");
     }
-    let mut filebuf = Vec::new();
-    filein
-        .read_to_end(&mut filebuf)
-        .map_err(|e| MddError::Io(format!("Failed to read file: {e}")))?;
-    let proto_file = fileformat::MddFile::decode(&mut std::io::Cursor::new(filebuf))
+
+    let magic = file_magic_bytes();
+    let magic_slice = mmap
+        .get(..FILE_MAGIC_BYTES_LEN)
+        .ok_or_else(|| MddError::Parsing("Invalid file format: file too small".to_owned()))?;
+    if *magic_slice != magic {
+        return Err(MddError::Parsing(
+            "Invalid file format: Magic Byte mismatch".to_owned(),
+        ));
+    }
+    let payload = mmap
+        .get(FILE_MAGIC_BYTES_LEN..)
+        .ok_or_else(|| MddError::Parsing("Invalid file format: no data after magic".to_owned()))?;
+    let proto_file = fileformat::MddFile::decode(payload)
         .map_err(|e| MddError::Parsing(format!("Failed to parse MDD file: {e}")))?;
 
     let proto_data: HashMap<ChunkType, Vec<Chunk>> = load_info

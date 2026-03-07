@@ -69,6 +69,10 @@ struct AppArgs {
 
     #[arg(long)]
     fallback_to_base_variant: Option<bool>,
+
+    /// Directory for mmap offload files (must be on a disk-backed filesystem, not tmpfs/ramfs).
+    #[arg(long)]
+    mmap_tmpdir: Option<String>,
 }
 
 #[tokio::main]
@@ -250,6 +254,9 @@ impl AppArgs {
         }
         if let Some(log_file_name) = self.log_file_name {
             config.logging.log_file_config.name = log_file_name;
+        }
+        if let Some(mmap_tmpdir) = self.mmap_tmpdir {
+            config.flat_buf.mmap_tmpdir = Some(mmap_tmpdir);
         }
     }
 }
