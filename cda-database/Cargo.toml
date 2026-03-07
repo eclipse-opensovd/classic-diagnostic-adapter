@@ -27,13 +27,16 @@ path = "src/lib.rs"
 # internal dependencies
 cda-interfaces = { workspace = true }
 # external
+bytes = { workspace = true }
 prost = { workspace = true }
 flatbuffers = { workspace = true }
+memmap2 = { workspace = true }
 ouroboros = { workspace = true }
 # tokio
 tokio = { workspace = true, features = ["rt", "sync", "io-util", "time"] }
 # v4 - Version 4 UUIDs with random data.
 uuid = { workspace = true, features = ["v4"] }
+sha2 = { workspace = true }
 xz2 = { workspace = true, features = ["static"] }
 
 # logging

@@ -240,7 +240,7 @@ impl<'a> EcuDataBuilder<'a> {
         self.fbb.finish(ecu_data, None);
         let blob = self.fbb.finished_data().to_vec();
 
-        super::DiagnosticDatabase::new(
+        super::DiagnosticDatabase::new_from_vec(
             String::default(),
             blob,
             cda_interfaces::datatypes::FlatbBufConfig::default(),

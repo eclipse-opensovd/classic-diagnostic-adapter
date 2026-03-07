@@ -400,15 +400,18 @@ dependencies = [
 name = "cda-database"
 version = "0.1.0"
 dependencies = [
+ "bytes",
  "cargo_toml",
  "cda-build",
  "cda-interfaces",
  "flatbuffers",
+ "memmap2",
  "ouroboros",
  "prost",
  "prost-build",
  "serde",
  "serde_json",
+ "sha2",
  "tokio",
  "toml 0.9.8",
  "tracing",
@@ -438,6 +441,7 @@ name = "cda-interfaces"
 version = "0.1.0"
 dependencies = [
  "async-trait",
+ "bytes",
  "foldhash",
  "hex",
  "mockall",
@@ -1971,6 +1975,15 @@ name = "memchr"
 version = "2.7.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f52b00d39961fc5b2736ea853c9cc86238e165017a493d1d5c8eac6bdc4cc273"
+
+[[package]]
+name = "memmap2"
+version = "0.9.10"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "714098028fe011992e1c3962653c96b2d578c4b4bce9036e15ff220319b1e0e3"
+dependencies = [
+ "libc",
+]
 
 [[package]]
 name = "mimalloc"

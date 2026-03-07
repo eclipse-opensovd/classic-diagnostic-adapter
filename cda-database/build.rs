@@ -39,7 +39,12 @@ fn prepend_copyright(file_path: &str) -> std::io::Result<()> {
 /// so they can be checked into the repository.
 #[cfg(feature = "gen-protos")]
 fn generate_protos() -> std::io::Result<()> {
-    prost_build::compile_protos(&["proto/file_format.proto"], &["proto/"])?;
+    let mut config = prost_build::Config::new();
+    // Emit `bytes::Bytes` instead of `Vec<u8>` for the chunk data field so that
+    // protobuf decoding from an mmap-backed `Bytes` buffer produces zero-copy
+    // sub-slices rather than heap-allocated copies.
+    config.bytes([".fileformat.Chunk.data"]);
+    config.compile_protos(&["proto/file_format.proto"], &["proto/"])?;
 
     let out_dir = out_dir()?;
 

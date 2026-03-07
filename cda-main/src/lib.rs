@@ -15,7 +15,7 @@ use std::{future::Future, path::PathBuf, sync::Arc};
 use cda_comm_doip::{DoipDiagGateway, config::DoipConfig};
 use cda_comm_uds::UdsManager;
 use cda_core::{DiagServiceResponseStruct, EcuManager};
-use cda_database::{FileManager, ProtoLoadConfig};
+use cda_database::{FileManager, ProtoLoadConfig, update_mdd_uncompressed};
 use cda_health::{HealthState, StatusHealthProvider};
 use cda_interfaces::{
     DiagServiceError, DoipGatewaySetupError, EcuAddressProvider, EcuManager as EcuManagerTrait,
@@ -155,6 +155,29 @@ impl From<TracingSetupError> for AppError {
         }
     }
 }
+
+pub const PROTO_LOAD_CONFIG: &[ProtoLoadConfig; 4] = &[
+    ProtoLoadConfig {
+        type_: ChunkType::DiagnosticDescription,
+        load_data: true,
+        name: None,
+    },
+    ProtoLoadConfig {
+        type_: ChunkType::CodeFile,
+        load_data: false,
+        name: None,
+    },
+    ProtoLoadConfig {
+        type_: ChunkType::CodeFilePartial,
+        load_data: false,
+        name: None,
+    },
+    ProtoLoadConfig {
+        type_: ChunkType::EmbeddedFile,
+        load_data: false,
+        name: None,
+    },
+];
 
 /// Loads vehicle databases and sets up SOVD routes in the webserver.
 /// # Errors
@@ -443,66 +466,55 @@ async fn load_database<S: SecurityPlugin>(
             continue;
         };
 
-        match cda_database::load_proto_data(
-            &mdd_path,
-            &[
-                ProtoLoadConfig {
-                    type_: ChunkType::DiagnosticDescription,
-                    load_data: true,
-                    name: None,
-                },
-                ProtoLoadConfig {
-                    type_: ChunkType::CodeFile,
-                    load_data: false,
-                    name: None,
-                },
-                ProtoLoadConfig {
-                    type_: ChunkType::CodeFilePartial,
-                    load_data: false,
-                    name: None,
-                },
-                ProtoLoadConfig {
-                    type_: ChunkType::EmbeddedFile,
-                    load_data: false,
-                    name: None,
-                },
-            ],
-        ) {
+        // Ensure the MDD file contains uncompressed data (rewrite on first
+        // use), so that subsequent loads skip LZMA decompression.
+        if flat_buf_settings.mdd_decompress
+            && let Err(e) = update_mdd_uncompressed(&mdd_path)
+        {
+            tracing::error!(
+                mdd_file = %mddfile.display(),
+                error = %e,
+                "Failed to update MDD file with uncompressed data");
+        }
+
+        match cda_database::load_proto_data(&mdd_path, PROTO_LOAD_CONFIG) {
             Ok((ecu_name, mut proto_data)) => {
-                let Some(ecu_data) = proto_data.remove(&ChunkType::DiagnosticDescription) else {
-                    tracing::error!(
-                        mdd_file = %mddfile.display(),
-                        "No diagnostic description found in MDD file");
-                    continue;
+                let database_payload = proto_data
+                    .remove(&ChunkType::DiagnosticDescription)
+                    .and_then(|mut chunks| chunks.pop())
+                    .and_then(|c| c.payload);
+
+                // Build DiagnosticDatabase from the diagnostic database payload.
+                let diag_data_base = {
+                    let Some(payload) = database_payload else {
+                        tracing::error!(
+                            mdd_file = %mddfile.display(),
+                            ecu_name = %ecu_name,
+                            "No payload found in diagnostic description for ECU");
+                        continue;
+                    };
+
+                    match cda_database::datatypes::DiagnosticDatabase::new_from_bytes(
+                        mdd_path.clone(),
+                        payload,
+                        flat_buf_settings.clone(),
+                    ) {
+                        Ok(db) => db,
+                        Err(e) => {
+                            tracing::error!(
+                                mdd_file = %mddfile.display(),
+                                ecu_name = %ecu_name,
+                                error = %e,
+                                "Failed to create database from MDD payload");
+                            continue;
+                        }
+                    }
                 };
+
                 let ecu_type = if func_description_cfg.description_database == ecu_name {
                     EcuManagerType::FunctionalDescription
                 } else {
                     EcuManagerType::Ecu
-                };
-
-                let ecu_payload: Vec<u8> =
-                    if let Some(payload) = ecu_data.into_iter().next().and_then(|c| c.payload) {
-                        payload
-                    } else {
-                        tracing::error!(
-                        ecu_name = %ecu_name,
-                        "No payload found in diagnostic description for ECU");
-                        continue;
-                    };
-
-                let diag_data_base = match cda_database::datatypes::DiagnosticDatabase::new(
-                    mdd_path.clone(),
-                    ecu_payload,
-                    flat_buf_settings.clone(),
-                ) {
-                    Ok(db) => db,
-                    Err(e) => {
-                        tracing::error!(
-                            mdd_file = %mddfile.display(),
-                            error = %e, "Failed to create database from MDD file");
-                        continue;
-                    }
                 };
                 let diag_service_manager = match EcuManager::new(
                     diag_data_base,
