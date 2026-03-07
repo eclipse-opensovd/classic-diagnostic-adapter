@@ -129,7 +129,7 @@ impl cda_interfaces::file_manager::FileManager for FileManager {
                 cache.last_accessed = Some(Instant::now());
                 Ok((
                     cache.chunk.meta_data.clone(),
-                    load_chunk(&mut cache.chunk, &self.mdd_path).cloned()?,
+                    load_chunk(&mut cache.chunk, &self.mdd_path)?.to_vec(),
                 ))
             },
         )

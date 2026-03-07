@@ -17,4 +17,5 @@ pub(crate) mod proto;
 
 pub use mdd_data::{
     ProtoLoadConfig, files::FileManager, load_chunk, load_ecudata, load_proto_data,
+    update_mdd_uncompressed,
 };

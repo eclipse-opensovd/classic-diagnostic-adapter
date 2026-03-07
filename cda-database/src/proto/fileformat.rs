@@ -53,8 +53,8 @@ pub struct Chunk {
     #[prost(string, optional, tag = "9")]
     pub mime_type: ::core::option::Option<::prost::alloc::string::String>,
     /// chunk data - optional in case the metadata is the actual data for this chunk
-    #[prost(bytes = "vec", optional, tag = "8")]
-    pub data: ::core::option::Option<::prost::alloc::vec::Vec<u8>>,
+    #[prost(bytes = "bytes", optional, tag = "8")]
+    pub data: ::core::option::Option<::prost::bytes::Bytes>,
 }
 /// Nested message and enum types in `Chunk`.
 pub mod chunk {

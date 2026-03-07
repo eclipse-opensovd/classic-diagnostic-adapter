@@ -19,6 +19,7 @@ pub struct FlatbBufConfig {
     pub max_tables: usize,
     pub max_apparent_size: usize,
     pub ignore_missing_null_terminator: bool,
+    pub mdd_decompress: bool,
 }
 
 impl Default for FlatbBufConfig {
@@ -37,6 +38,7 @@ impl Default for FlatbBufConfig {
             #[allow(clippy::cast_possible_truncation)]
             max_apparent_size: i64::MAX as usize,
             ignore_missing_null_terminator: false,
+            mdd_decompress: false,
         }
     }
 }

@@ -27,7 +27,7 @@ pub use service::*;
 use crate::{
     datatypes,
     flatbuf::diagnostic_description::dataformat,
-    mdd_data::{load_ecudata, read_ecudata},
+    mdd_data::{self, read_ecudata},
 };
 
 #[cfg(feature = "database-builder")]
@@ -439,16 +439,14 @@ impl From<dataformat::LongName<'_>> for LongName {
 }
 
 #[self_referencing]
-#[derive(Debug)]
 struct EcuData {
-    blob: Vec<u8>,
+    blob: bytes::Bytes,
 
     #[borrows(blob)]
     #[covariant]
     pub data: dataformat::EcuData<'this>,
 }
 
-#[derive(Debug)]
 pub struct DiagnosticDatabase {
     ecu_database_path: String,
     ecu_data: Option<EcuData>,
@@ -477,20 +475,42 @@ pub struct LongName {
 }
 
 impl DiagnosticDatabase {
-    /// Create a new `DiagnosticDatabase` from the given ECU database path and ECU data blob.
+    /// Create a new `DiagnosticDatabase` from a `FlatBuffers` blob in memory.
+    ///
+    /// Converts the `Vec<u8>` into `bytes::Bytes` (zero-copy move) and
+    /// delegates to [`Self::new_from_bytes`].
+    ///
     /// # Errors
-    /// Returns an error if the ECU data blob cannot be read.
-    /// # Panics
-    /// When `FlatBufConfig::verify` is disabled and an invalid ECU data blob is provided.
-    pub fn new(
+    /// Returns an error if the blob cannot be parsed as valid `FlatBuffers` data.
+    pub fn new_from_vec(
         ecu_database_path: String,
         ecu_data_blob: Vec<u8>,
         flatbuf_config: FlatbBufConfig,
     ) -> Result<Self, DiagServiceError> {
+        Self::new_from_bytes(
+            ecu_database_path,
+            bytes::Bytes::from(ecu_data_blob),
+            flatbuf_config,
+        )
+    }
+
+    /// Create a new `DiagnosticDatabase` from a `Bytes` buffer.
+    ///
+    /// This is usually a zero-copy sub-slice of a mmap-backed protobuf decode,
+    /// so the underlying memory is file-backed
+    /// and can be evicted by the kernel under memory pressure.
+    ///
+    /// # Errors
+    /// Returns an error if the blob cannot be parsed as valid `FlatBuffers` data.
+    pub fn new_from_bytes(
+        ecu_database_path: String,
+        ecu_data_blob: bytes::Bytes,
+        flatbuf_config: FlatbBufConfig,
+    ) -> Result<Self, DiagServiceError> {
         let ecu_data = EcuDataTryBuilder {
             blob: ecu_data_blob,
-            data_builder: |ecu_data_blob| {
-                read_ecudata(ecu_data_blob, &flatbuf_config).map_err(|e| {
+            data_builder: |blob| {
+                read_ecudata(blob.as_ref(), &flatbuf_config).map_err(|e| {
                     DiagServiceError::InvalidDatabase(format!(
                         "Failed to read ECU data from blob: {e}"
                     ))
@@ -521,11 +541,13 @@ impl DiagnosticDatabase {
     /// # Panics
     /// If the ECU data is invalid and `FlatbBufConfig::verify` is disabled.
     pub fn load(&mut self) -> Result<(), DiagServiceError> {
-        let ecu_data = load_ecudata(&self.ecu_database_path)
+        // If the decompress feature is enabled, decompression already happened
+        // before 'new' of DiagnosticDatabase, so we can just load the data from the path.
+        let (_ecu_name, blob) = mdd_data::load_ecudata(&self.ecu_database_path)
             .map_err(|e| DiagServiceError::InvalidDatabase(e.to_string()))?;
-        *self = DiagnosticDatabase::new(
+        *self = DiagnosticDatabase::new_from_bytes(
             self.ecu_database_path.clone(),
-            ecu_data.1,
+            blob,
             self.flatbuf_config.clone(),
         )?;
         Ok(())

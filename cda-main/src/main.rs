@@ -69,6 +69,13 @@ struct AppArgs {
 
     #[arg(long)]
     fallback_to_base_variant: Option<bool>,
+
+    /// Set to true, to rewrite mdd files without compression, which
+    /// reduces memory usage due to mmap significantly.
+    // Could use Action::SetFalse here, as the default is false but then we would have
+    // two different ways to set booleans (with and without `true`)
+    #[arg(long)]
+    mdd_decompress: Option<bool>,
 }
 
 #[tokio::main]
@@ -250,6 +257,9 @@ impl AppArgs {
         }
         if let Some(log_file_name) = self.log_file_name {
             config.logging.log_file_config.name = log_file_name;
+        }
+        if let Some(mdd_decompress) = self.mdd_decompress {
+            config.flat_buf.mdd_decompress = mdd_decompress;
         }
     }
 }
