@@ -36,6 +36,7 @@ tokio = { workspace = true, features = ["rt", "sync", "io-util", "time"] }
 # v4 - Version 4 UUIDs with random data.
 uuid = { workspace = true, features = ["v4"] }
 xz2 = { workspace = true, features = ["static"] }
+sha2 = { workspace = true }
 
 # logging
 tracing = { workspace = true }

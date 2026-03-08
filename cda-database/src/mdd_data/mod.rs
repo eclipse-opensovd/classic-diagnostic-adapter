@@ -11,6 +11,7 @@
  */
 
 use std::{
+    fmt::Write,
     io::Read,
     path::{Path, PathBuf},
     time::Instant,
@@ -24,6 +25,7 @@ use cda_interfaces::{
 };
 use flatbuffers::VerifierOptions;
 use prost::Message;
+use sha2::{Digest, Sha512};
 
 use crate::{
     flatbuf::diagnostic_description::dataformat,
@@ -310,6 +312,109 @@ pub(crate) fn read_ecudata<'a>(
     ecu_data
 }
 
+/// Read the per-chunk signatures for the `DiagnosticDescription` chunk from
+/// an MDD file **without** decompressing any chunk data.
+///
+/// Returns `(ecu_name, signatures)` where `signatures` is the list of
+/// [`fileformat::Signature`] entries attached to the first DD chunk.
+///
+/// # Errors
+/// Returns an error if the MDD file cannot be opened, read, or
+/// decoded as a valid protobuf `MDDFile`.
+pub fn read_mdd_signatures(
+    mdd_path: &str,
+) -> Result<(String, Vec<fileformat::Signature>), MddError> {
+    let data = std::fs::read(mdd_path)
+        .map_err(|e| MddError::Io(format!("Failed to read mdd file: {e}")))?;
+
+    let magic = file_magic_bytes();
+    let magic_slice = data
+        .get(..FILE_MAGIC_BYTES_LEN)
+        .ok_or_else(|| MddError::Parsing("Invalid file format: file too small".to_owned()))?;
+    if *magic_slice != magic {
+        return Err(MddError::Parsing(
+            "Invalid file format: Magic Byte mismatch".to_owned(),
+        ));
+    }
+    let payload = data
+        .get(FILE_MAGIC_BYTES_LEN..)
+        .ok_or_else(|| MddError::Parsing("Invalid file format: no data after magic".to_owned()))?;
+    let proto_file = fileformat::MddFile::decode(payload)
+        .map_err(|e| MddError::Parsing(format!("Failed to parse MDD file: {e}")))?;
+
+    let signatures = proto_file
+        .chunks
+        .iter()
+        .find(|c| ChunkDataType::try_from(c.r#type) == Ok(ChunkDataType::DiagnosticDescription))
+        .map(|c| c.signatures.clone())
+        .unwrap_or_default();
+
+    Ok((proto_file.ecu_name.clone(), signatures))
+}
+
+/// Validate an existing sidecar file against the MDD chunk signatures.
+///
+/// Computes a SHA-512 digest of the sidecar file content and compares it
+/// against the first signature whose algorithm is `sha512_uncompressed`.
+///
+/// Returns `Ok(true)` when the sidecar matches, `Ok(false)` when it does not
+/// (or no usable signature is available), and `Err` on I/O failures.
+///
+/// # Errors
+/// Returns an error if the sidecar file cannot be read.
+pub fn validate_sidecar(
+    sidecar: &Path,
+    signatures: &[fileformat::Signature],
+) -> Result<bool, MddError> {
+    if signatures.is_empty() {
+        tracing::warn!(
+            sidecar = %sidecar.display(),
+            "No signatures on DD chunk; cannot validate sidecar"
+        );
+        return Ok(false);
+    }
+
+    let expected = signatures
+        .iter()
+        .find(|s| s.algorithm.eq_ignore_ascii_case("sha512_uncompressed"));
+    let Some(expected) = expected else {
+        let algos: Vec<&str> = signatures.iter().map(|s| s.algorithm.as_str()).collect();
+        tracing::warn!(
+            sidecar = %sidecar.display(),
+            algorithms = ?algos,
+            "No sha512_uncompressed signature found on DD chunk; cannot validate sidecar"
+        );
+        return Ok(false);
+    };
+
+    let content = std::fs::read(sidecar).map_err(|e| {
+        MddError::Io(format!(
+            "Failed to read sidecar file '{}' for validation: {e}",
+            sidecar.display()
+        ))
+    })?;
+
+    let computed = Sha512::digest(&content);
+
+    if computed[..] == expected.signature[..] {
+        tracing::debug!(
+            sidecar = %sidecar.display(),
+            "Sidecar SHA-512 matches MDD signature"
+        );
+        Ok(true)
+    } else {
+        tracing::info!(
+            sidecar = %sidecar.display(),
+            expected = expected.signature.iter()
+                .fold(String::new(), |mut s, b| { let _ = write!(s, "{b:02x}"); s }),
+            computed = computed.iter()
+                .fold(String::new(), |mut s, b| {let _ = write!(s, "{b:02x}"); s }),
+            "Sidecar SHA-512 mismatch; sidecar will be re-created"
+        );
+        Ok(false)
+    }
+}
+
 /// Compute the sidecar `FlatBuffers` file path for a given MDD file.
 ///
 /// The sidecar file has the same stem as the `.mdd` file with a `.fb` extension.
@@ -326,11 +431,13 @@ pub fn sidecar_path(mdd_path: &str, sidecar_dir: Option<&str>) -> PathBuf {
     dir.join(format!("{}.fb", stem.to_string_lossy()))
 }
 
-/// Ensure a sidecar `FlatBuffers` file exists for the given MDD file.
+/// Ensure a sidecar `FlatBuffers` file exists **and is valid** for the given
+/// MDD file.
 ///
-/// If the sidecar file already exists it is left as-is.
-/// Otherwise the `DiagnosticDescription` chunk is decompressed from the MDD
-/// file and written atomically (write-to-tmp + rename) to the sidecar path.
+/// When the sidecar already exists the `DiagnosticDescription` chunk's SHA-256
+/// signature (from the MDD proto) is compared against a hash of the sidecar
+/// contents. If the signature is missing or does not match, the sidecar is
+/// re-created from decompressed MDD data.
 ///
 /// Returns `(ecu_name, sidecar_path)`.
 ///
@@ -344,23 +451,33 @@ pub fn ensure_sidecar(
     let sidecar = sidecar_path(mdd_path, sidecar_dir);
 
     if sidecar.exists() {
-        tracing::debug!(
-            sidecar = %sidecar.display(),
-            "Sidecar FlatBuffers file already exists, skipping decompression"
-        );
-        // We still need the ECU name — load proto header only, no decompression.
-        let (ecu_name, _) = load_proto_data(
-            mdd_path,
-            &[ProtoLoadConfig {
-                type_: ChunkType::DiagnosticDescription,
-                load_data: false,
-                name: None,
-            }],
-        )?;
-        return Ok((ecu_name, sidecar));
+        let (ecu_name, signatures) = read_mdd_signatures(mdd_path)?;
+
+        match validate_sidecar(&sidecar, &signatures) {
+            Ok(true) => {
+                tracing::debug!(
+                    sidecar = %sidecar.display(),
+                    "Sidecar validated against MDD signature, skipping decompression"
+                );
+                return Ok((ecu_name, sidecar));
+            }
+            Ok(false) => {
+                tracing::info!(
+                    sidecar = %sidecar.display(),
+                    "Sidecar signature mismatch or missing; re-creating from MDD"
+                );
+            }
+            Err(e) => {
+                tracing::warn!(
+                    sidecar = %sidecar.display(),
+                    error = %e,
+                    "Failed to validate sidecar; re-creating from MDD"
+                );
+            }
+        }
     }
 
-    // Sidecar does not exist — decompress and create it.
+    // Sidecar does not exist or is stale — decompress and create it.
     let (ecu_name, ecu_data) = load_ecudata(mdd_path)?;
     write_sidecar(&sidecar, &ecu_data)?;
     Ok((ecu_name, sidecar))

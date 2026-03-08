@@ -82,6 +82,7 @@ libc = "0.2.177"
 foldhash = "0.2.0"
 memmap2 = "0.9"
 mockall = "0.14.0"
+sha2 = "0.10"
 tempfile = "3"
 
 # ---- tracing & logging crates ----

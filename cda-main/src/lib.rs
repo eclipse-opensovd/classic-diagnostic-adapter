@@ -15,7 +15,10 @@ use std::{future::Future, path::PathBuf, sync::Arc};
 use cda_comm_doip::{DoipDiagGateway, config::DoipConfig};
 use cda_comm_uds::UdsManager;
 use cda_core::{DiagServiceResponseStruct, EcuManager};
-use cda_database::{FileManager, ProtoLoadConfig, sidecar_path, write_sidecar};
+use cda_database::{
+    FileManager, ProtoLoadConfig, read_mdd_signatures, sidecar_path, validate_sidecar,
+    write_sidecar,
+};
 use cda_health::{HealthState, StatusHealthProvider};
 use cda_interfaces::{
     DiagServiceError, DoipGatewaySetupError, EcuAddressProvider, EcuManager as EcuManagerTrait,
@@ -442,7 +445,24 @@ async fn load_database<S: SecurityPlugin>(
         };
 
         let sidecar = sidecar_path(&mdd_path, flat_buf_settings.sidecar_dir.as_deref());
-        let need_dd_data = !sidecar.exists();
+
+        // Determine whether the sidecar needs (re-)creating by checking
+        // its SHA-256 against the MDD chunk signature.
+        let need_mdd_data = if sidecar.exists() {
+            match read_mdd_signatures(&mdd_path) {
+                Ok((_, ref sigs)) => !validate_sidecar(&sidecar, sigs).unwrap_or(false),
+                Err(e) => {
+                    tracing::warn!(
+                        mdd_file = %mddfile.display(),
+                        error = %e,
+                        "Failed to read signatures for sidecar validation; \
+                         re-creating sidecar");
+                    true
+                }
+            }
+        } else {
+            true
+        };
 
         // Single MDD parse: decompress DD only when the sidecar needs creating.
         match cda_database::load_proto_data(
@@ -450,7 +470,7 @@ async fn load_database<S: SecurityPlugin>(
             &[
                 ProtoLoadConfig {
                     type_: ChunkType::DiagnosticDescription,
-                    load_data: need_dd_data,
+                    load_data: need_mdd_data,
                     name: None,
                 },
                 ProtoLoadConfig {
@@ -477,7 +497,7 @@ async fn load_database<S: SecurityPlugin>(
                     .and_then(|mut chunks| chunks.pop())
                     .and_then(|c| c.payload);
 
-                if need_dd_data {
+                if need_mdd_data {
                     let Some(payload) = dd_payload else {
                         tracing::error!(
                             mdd_file = %mddfile.display(),
