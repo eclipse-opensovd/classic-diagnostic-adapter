@@ -134,7 +134,10 @@ async fn initialize_runtime() -> Result<TestRuntime, TestingError> {
         onboard_tester: true,
         flash_files_path: String::default(),
         com_params: ComParams::default(),
-        flat_buf: FlatbBufConfig::default(),
+        flat_buf: FlatbBufConfig {
+            sidecar_dir: Some("/tmp".to_owned()),
+            ..Default::default()
+        },
         functional_description: FunctionalDescriptionConfig {
             description_database: "functional_groups".to_owned(),
             enabled_functional_groups: None,

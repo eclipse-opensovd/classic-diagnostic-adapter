@@ -10,7 +10,11 @@
  * https://www.apache.org/licenses/LICENSE-2.0
  */
 
-use std::{io::Read, time::Instant};
+use std::{
+    io::Read,
+    path::{Path, PathBuf},
+    time::Instant,
+};
 
 use cda_interfaces::{
     HashMap,
@@ -304,4 +308,99 @@ pub(crate) fn read_ecudata<'a>(
         "Parsed flatbuff data"
     );
     ecu_data
+}
+
+/// Compute the sidecar `FlatBuffers` file path for a given MDD file.
+///
+/// The sidecar file has the same stem as the `.mdd` file with a `.fb` extension.
+/// When `sidecar_dir` is `Some`, the file is placed in that directory;
+/// otherwise it is placed next to the `.mdd` file.
+#[must_use]
+pub fn sidecar_path(mdd_path: &str, sidecar_dir: Option<&str>) -> PathBuf {
+    let mdd = Path::new(mdd_path);
+    let stem = mdd.file_stem().unwrap_or_default();
+    let dir = match sidecar_dir {
+        Some(dir) => PathBuf::from(dir),
+        None => mdd.parent().unwrap_or(Path::new(".")).to_path_buf(),
+    };
+    dir.join(format!("{}.fb", stem.to_string_lossy()))
+}
+
+/// Ensure a sidecar `FlatBuffers` file exists for the given MDD file.
+///
+/// If the sidecar file already exists it is left as-is.
+/// Otherwise the `DiagnosticDescription` chunk is decompressed from the MDD
+/// file and written atomically (write-to-tmp + rename) to the sidecar path.
+///
+/// Returns `(ecu_name, sidecar_path)`.
+///
+/// # Errors
+/// Returns an error if the MDD file cannot be read, decompressed, or the
+/// sidecar file cannot be written.
+pub fn ensure_sidecar(
+    mdd_path: &str,
+    sidecar_dir: Option<&str>,
+) -> Result<(String, PathBuf), MddError> {
+    let sidecar = sidecar_path(mdd_path, sidecar_dir);
+
+    if sidecar.exists() {
+        tracing::debug!(
+            sidecar = %sidecar.display(),
+            "Sidecar FlatBuffers file already exists, skipping decompression"
+        );
+        // We still need the ECU name — load proto header only, no decompression.
+        let (ecu_name, _) = load_proto_data(
+            mdd_path,
+            &[ProtoLoadConfig {
+                type_: ChunkType::DiagnosticDescription,
+                load_data: false,
+                name: None,
+            }],
+        )?;
+        return Ok((ecu_name, sidecar));
+    }
+
+    // Sidecar does not exist — decompress and create it.
+    let (ecu_name, ecu_data) = load_ecudata(mdd_path)?;
+    write_sidecar(&sidecar, &ecu_data)?;
+    Ok((ecu_name, sidecar))
+}
+
+/// Write a sidecar `FlatBuffers` file atomically (write-to-tmp + rename).
+///
+/// Creates parent directories if they do not exist.
+///
+/// # Errors
+/// Returns an error if the directory cannot be created or the file cannot be written.
+pub fn write_sidecar(sidecar: &Path, data: &[u8]) -> Result<(), MddError> {
+    if let Some(parent) = sidecar.parent() {
+        std::fs::create_dir_all(parent).map_err(|e| {
+            MddError::Io(format!(
+                "Failed to create sidecar directory '{}': {e}",
+                parent.display()
+            ))
+        })?;
+    }
+
+    // Write atomically: temp file + rename to avoid partial/corrupt sidecars.
+    let tmp_path = sidecar.with_extension("fb.tmp");
+    std::fs::write(&tmp_path, data).map_err(|e| {
+        MddError::Io(format!(
+            "Failed to write sidecar temp file '{}': {e}",
+            tmp_path.display()
+        ))
+    })?;
+    std::fs::rename(&tmp_path, sidecar).map_err(|e| {
+        MddError::Io(format!(
+            "Failed to rename sidecar temp file to '{}': {e}",
+            sidecar.display()
+        ))
+    })?;
+
+    tracing::info!(
+        sidecar = %sidecar.display(),
+        size_bytes = data.len(),
+        "Created sidecar FlatBuffers file from MDD"
+    );
+    Ok(())
 }

@@ -15,7 +15,7 @@ use std::{future::Future, path::PathBuf, sync::Arc};
 use cda_comm_doip::{DoipDiagGateway, config::DoipConfig};
 use cda_comm_uds::UdsManager;
 use cda_core::{DiagServiceResponseStruct, EcuManager};
-use cda_database::{FileManager, ProtoLoadConfig};
+use cda_database::{FileManager, ProtoLoadConfig, sidecar_path, write_sidecar};
 use cda_health::{HealthState, StatusHealthProvider};
 use cda_interfaces::{
     DiagServiceError, DoipGatewaySetupError, EcuAddressProvider, EcuManager as EcuManagerTrait,
@@ -414,6 +414,7 @@ async fn mark_duplicate_ecus_by_address<S: SecurityPlugin>(
 }
 
 #[allow(clippy::too_many_arguments)]
+#[allow(clippy::too_many_lines)]
 #[tracing::instrument(
     skip_all,
     fields(
@@ -440,12 +441,16 @@ async fn load_database<S: SecurityPlugin>(
             continue;
         };
 
+        let sidecar = sidecar_path(&mdd_path, flat_buf_settings.sidecar_dir.as_deref());
+        let need_dd_data = !sidecar.exists();
+
+        // Single MDD parse: decompress DD only when the sidecar needs creating.
         match cda_database::load_proto_data(
             &mdd_path,
             &[
                 ProtoLoadConfig {
                     type_: ChunkType::DiagnosticDescription,
-                    load_data: true,
+                    load_data: need_dd_data,
                     name: None,
                 },
                 ProtoLoadConfig {
@@ -466,38 +471,45 @@ async fn load_database<S: SecurityPlugin>(
             ],
         ) {
             Ok((ecu_name, mut proto_data)) => {
-                let Some(ecu_data) = proto_data.remove(&ChunkType::DiagnosticDescription) else {
-                    tracing::error!(
-                        mdd_file = %mddfile.display(),
-                        "No diagnostic description found in MDD file");
-                    continue;
-                };
+                // Write sidecar from decompressed DD payload if it didn't exist.
+                let dd_payload = proto_data
+                    .remove(&ChunkType::DiagnosticDescription)
+                    .and_then(|mut chunks| chunks.pop())
+                    .and_then(|c| c.payload);
+
+                if need_dd_data {
+                    let Some(payload) = dd_payload else {
+                        tracing::error!(
+                            mdd_file = %mddfile.display(),
+                            "No diagnostic description payload in MDD file");
+                        continue;
+                    };
+                    if let Err(e) = write_sidecar(&sidecar, &payload) {
+                        tracing::error!(
+                            mdd_file = %mddfile.display(),
+                            error = %e,
+                            "Failed to write sidecar FlatBuffers file");
+                        continue;
+                    }
+                }
+
                 let ecu_type = if func_description_cfg.description_database == ecu_name {
                     EcuManagerType::FunctionalDescription
                 } else {
                     EcuManagerType::Ecu
                 };
 
-                let ecu_payload: Vec<u8> =
-                    if let Some(payload) = ecu_data.into_iter().next().and_then(|c| c.payload) {
-                        payload
-                    } else {
-                        tracing::error!(
-                        ecu_name = %ecu_name,
-                        "No payload found in diagnostic description for ECU");
-                        continue;
-                    };
-
+                // Create DiagnosticDatabase by memory-mapping the sidecar file.
                 let diag_data_base = match cda_database::datatypes::DiagnosticDatabase::new(
                     mdd_path.clone(),
-                    ecu_payload,
+                    &sidecar,
                     flat_buf_settings.clone(),
                 ) {
                     Ok(db) => db,
                     Err(e) => {
                         tracing::error!(
                             mdd_file = %mddfile.display(),
-                            error = %e, "Failed to create database from MDD file");
+                            error = %e, "Failed to create database from sidecar file");
                         continue;
                     }
                 };
@@ -534,6 +546,7 @@ async fn load_database<S: SecurityPlugin>(
                 )
                 .await;
 
+                // Build FileManager from remaining non-DD chunk metadata.
                 let filtered_chunks: Vec<Chunk> = [
                     ChunkType::JarFile,
                     ChunkType::JarFilePartial,

@@ -373,7 +373,6 @@ dependencies = [
  "prost-build",
  "serde",
  "serde_json",
- "tempfile",
  "tokio",
  "toml 0.9.8",
  "tracing",

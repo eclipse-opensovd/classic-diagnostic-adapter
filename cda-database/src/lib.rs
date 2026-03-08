@@ -16,5 +16,6 @@ pub(crate) mod mdd_data;
 pub(crate) mod proto;
 
 pub use mdd_data::{
-    ProtoLoadConfig, files::FileManager, load_chunk, load_ecudata, load_proto_data,
+    ProtoLoadConfig, ensure_sidecar, files::FileManager, load_chunk, load_ecudata, load_proto_data,
+    sidecar_path, write_sidecar,
 };
