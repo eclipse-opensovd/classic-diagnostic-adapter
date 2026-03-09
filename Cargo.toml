@@ -29,6 +29,8 @@ members = [
   "cda-health",
   "integration-tests",
   "cda-build",
+  "comm-mbedtls/mbedtls-sys",
+  "comm-mbedtls/mbedtls-rs",
 ]
 
 [workspace.dependencies]
@@ -44,6 +46,8 @@ cda-tracing = { path = "cda-tracing" }
 cda-health = { path = "cda-health" }
 sovd-interfaces = { path = "cda-sovd-interfaces" }
 cda-build = { path = "cda-build" }
+mbedtls-sys = { path = "comm-mbedtls/mbedtls-sys" }
+mbedtls-rs = { path = "comm-mbedtls/mbedtls-rs" }
 
 # ---- common crates ----
 async-trait = "0.1.89"

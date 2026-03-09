@@ -1,0 +1,41 @@
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: 2026 The Contributors to Eclipse OpenSOVD (see CONTRIBUTORS)
+#
+# See the NOTICE file(s) distributed with this work for additional
+# information regarding copyright ownership.
+#
+# This program and the accompanying materials are made available under the
+# terms of the Apache License Version 2.0 which is available at
+# https://www.apache.org/licenses/LICENSE-2.0
+
+[package]
+name = "mbedtls-rs"
+version = "0.1.0"
+edition = "2024"
+description = "Safe Rust wrapper for mbedtls 4.0.0 with async (Tokio) support"
+license = "Apache-2.0"
+
+[lib]
+path = "src/lib.rs"
+doctest = false
+
+[lints]
+workspace = true
+
+[features]
+default = ["tokio"]
+tokio = ["dep:tokio"]
+
+[dependencies]
+ed25519-dalek = "2"
+mbedtls-sys = { workspace = true }
+tokio = { version = "1", features = [
+  "io-util",
+  "net",
+  "rt",
+  "macros",
+], optional = true }
+tracing = { version = "0.1.41" }
+
+[dev-dependencies]
+hex = "0.4"

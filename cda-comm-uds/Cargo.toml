@@ -29,9 +29,6 @@ cda-interfaces = { workspace = true }
 
 async-trait = { workspace = true }
 
-# tls
-openssl = { workspace = true }
-
 socket2 = { workspace = true, features = ["all"] }
 #tokio
 tokio = { workspace = true, features = ["sync", "fs", "time", "rt", "io-util"] }
@@ -46,5 +43,4 @@ strum = { workspace = true }
 
 [features]
 default = []
-openssl-vendored = ["openssl/vendored"]
 dlt-tracing = ["cda-interfaces/dlt-tracing"]

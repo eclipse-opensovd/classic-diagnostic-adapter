@@ -1,0 +1,82 @@
+diff --color -ruN a/mbedtls-4.0.0/library/ssl_client.c b/mbedtls-4.0.0/library/ssl_client.c
+--- a/mbedtls-4.0.0/library/ssl_client.c	2025-10-14 18:14:11
++++ b/mbedtls-4.0.0/library/ssl_client.c	2026-02-26 21:18:02
+@@ -660,6 +660,15 @@
+             return ret;
+         }
+         p += output_len;
++
++#if defined(MBEDTLS_SSL_RECORD_SIZE_LIMIT)
++        /* RFC 8449 record_size_limit extension for TLS 1.2 */
++        MBEDTLS_SSL_CHK_BUF_PTR(p, end, 6);
++        MBEDTLS_PUT_UINT16_BE(MBEDTLS_TLS_EXT_RECORD_SIZE_LIMIT, p, 0);
++        MBEDTLS_PUT_UINT16_BE(2, p, 2);
++        MBEDTLS_PUT_UINT16_BE(MBEDTLS_SSL_IN_CONTENT_LEN, p, 4);
++        p += 6;
++#endif /* MBEDTLS_SSL_RECORD_SIZE_LIMIT */
+     }
+ #endif /* MBEDTLS_SSL_PROTO_TLS1_2 */
+ 
+diff --color -ruN  a/mbedtls-4.0.0/library/ssl_tls13_generic.c b/mbedtls-4.0.0/library/ssl_tls13_generic.c
+--- a/mbedtls-4.0.0/library/ssl_tls13_generic.c	2025-10-14 18:14:11
++++ b/mbedtls-4.0.0/library/ssl_tls13_generic.c	2026-03-12 09:26:19
+@@ -1642,6 +1642,9 @@
+     return MBEDTLS_ERR_SSL_UNSUPPORTED_EXTENSION;
+ }
+ 
++#endif /* MBEDTLS_SSL_TLS_C && MBEDTLS_SSL_PROTO_TLS1_3 */
++
++#if defined(MBEDTLS_SSL_TLS_C)
+ #if defined(MBEDTLS_SSL_RECORD_SIZE_LIMIT)
+ 
+ /* RFC 8449, section 4:
+@@ -1729,4 +1732,4 @@
+ 
+ #endif /* MBEDTLS_SSL_RECORD_SIZE_LIMIT */
+ 
+-#endif /* MBEDTLS_SSL_TLS_C && MBEDTLS_SSL_PROTO_TLS1_3 */
++#endif /* MBEDTLS_SSL_TLS_C */
+diff --color -ruN a/mbedtls-4.0.0/library/ssl_tls12_client.c b/mbedtls-4.0.0/library/ssl_tls12_client.c
+--- a/mbedtls-4.0.0/library/ssl_tls12_client.c	2025-10-14 18:14:11
++++ b/mbedtls-4.0.0/library/ssl_tls12_client.c	2026-02-26 21:30:29
+@@ -1542,6 +1542,18 @@
+ 
+                 break;
+ #endif /* MBEDTLS_SSL_DTLS_SRTP */
++
++#if defined(MBEDTLS_SSL_RECORD_SIZE_LIMIT)
++            case MBEDTLS_TLS_EXT_RECORD_SIZE_LIMIT:
++                MBEDTLS_SSL_DEBUG_MSG(3, ("found record_size_limit extension"));
++
++                if ((ret = mbedtls_ssl_tls13_parse_record_size_limit_ext(
++                         ssl, ext + 4, ext + 4 + ext_size)) != 0) {
++                    return ret;
++                }
++
++                break;
++#endif /* MBEDTLS_SSL_RECORD_SIZE_LIMIT */
+ 
+             default:
+                 MBEDTLS_SSL_DEBUG_MSG(3,
+@@ -1557,6 +1569,21 @@
+         }
+     }
+ 
++#if defined(MBEDTLS_SSL_RECORD_SIZE_LIMIT) && defined(MBEDTLS_SSL_MAX_FRAGMENT_LENGTH)
++    /* RFC 8449, section 5: record_size_limit and max_fragment_length MUST NOT
++     * both appear in a ServerHello. */
++    if (ssl->session_negotiate->record_size_limit != 0 &&
++        ssl->session_negotiate->mfl_code != MBEDTLS_SSL_MAX_FRAG_LEN_NONE) {
++        MBEDTLS_SSL_DEBUG_MSG(1,
++                              ("record_size_limit and max_fragment_length "
++                               "are mutually exclusive"));
++        mbedtls_ssl_send_alert_message(
++            ssl, MBEDTLS_SSL_ALERT_LEVEL_FATAL,
++            MBEDTLS_SSL_ALERT_MSG_ILLEGAL_PARAMETER);
++        return MBEDTLS_ERR_SSL_ILLEGAL_PARAMETER;
++    }
++#endif /* MBEDTLS_SSL_RECORD_SIZE_LIMIT && MBEDTLS_SSL_MAX_FRAGMENT_LENGTH */
++
+     /*
+      * mbedtls_ssl_derive_keys() has to be called after the parsing of the
+      * extensions. It sets the transform data for the resumed session which in
