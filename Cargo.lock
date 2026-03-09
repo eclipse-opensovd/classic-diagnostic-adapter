@@ -364,9 +364,11 @@ dependencies = [
 name = "cda-database"
 version = "0.1.0"
 dependencies = [
+ "bytes",
  "cargo_toml",
  "cda-interfaces",
  "flatbuffers",
+ "libc",
  "memmap2",
  "ouroboros",
  "prost",
@@ -403,6 +405,7 @@ name = "cda-interfaces"
 version = "0.1.0"
 dependencies = [
  "async-trait",
+ "bytes",
  "foldhash",
  "hex",
  "mockall",

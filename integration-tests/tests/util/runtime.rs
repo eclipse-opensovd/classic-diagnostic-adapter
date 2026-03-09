@@ -114,6 +114,10 @@ async fn initialize_runtime() -> Result<TestRuntime, TestingError> {
         (20002, 13400, 8181) // default ports for local usage
     };
 
+    if use_docker() {
+        prepare_database_dir();
+    }
+
     let config = Configuration {
         server: opensovd_cda_lib::config::configfile::ServerConfig {
             address: host.clone(),
@@ -134,10 +138,7 @@ async fn initialize_runtime() -> Result<TestRuntime, TestingError> {
         onboard_tester: true,
         flash_files_path: String::default(),
         com_params: ComParams::default(),
-        flat_buf: FlatbBufConfig {
-            sidecar_dir: Some("/tmp".to_owned()),
-            ..Default::default()
-        },
+        flat_buf: FlatbBufConfig::default(),
         functional_description: FunctionalDescriptionConfig {
             description_database: "functional_groups".to_owned(),
             enabled_functional_groups: None,
@@ -555,6 +556,61 @@ fn ecu_sim_dir() -> Result<std::path::PathBuf, TestingError> {
     })
 }
 
+/// Copy MDD files from testcontainer/odx to target/databases for docker mode.
+/// This allows the optimization to run without modifying git-tracked files.
+fn prepare_database_dir() {
+    let target_db_dir = target_database_dir().expect("Failed to get database dir");
+    let source_odx_dir = test_container_dir()
+        .expect("Failed to get test container dir")
+        .join("odx");
+
+    std::fs::create_dir_all(&target_db_dir)
+        .unwrap_or_else(|_| panic!("Failed to create directory {}", target_db_dir.display()));
+
+    if let Ok(entries) = std::fs::read_dir(&target_db_dir) {
+        for entry in entries.filter_map(Result::ok) {
+            let path = entry.path();
+            if path.extension().and_then(|ext| ext.to_str()) == Some("mdd") {
+                std::fs::remove_file(&path)
+                    .unwrap_or_else(|_| panic!("Failed to delete MDD file {}", path.display()));
+            }
+        }
+    }
+
+    // Copy MDD files from source to target
+    let entries = std::fs::read_dir(&source_odx_dir)
+        .unwrap_or_else(|_| panic!("Failed to read odx directory {}", source_odx_dir.display()));
+
+    for entry in entries.filter_map(Result::ok) {
+        let path = entry.path();
+        if path.extension().and_then(|ext| ext.to_str()) == Some("mdd") {
+            let file_name = path
+                .file_name()
+                .unwrap_or_else(|| panic!("Invalid file name: {}", path.display()));
+            let dest_path = target_db_dir.join(file_name);
+            std::fs::copy(&path, &dest_path).unwrap_or_else(|_| {
+                panic!(
+                    "Failed to copy {} to {}",
+                    path.display(),
+                    dest_path.display()
+                )
+            });
+        }
+    }
+}
+
+fn target_database_dir() -> Result<std::path::PathBuf, TestingError> {
+    std::env::var("CARGO_MANIFEST_DIR")
+        .map(|dir| {
+            let mut path = std::path::PathBuf::from(dir);
+            path.pop();
+            path.push("target");
+            path.push("databases");
+            path
+        })
+        .map_err(|_| TestingError::PathNotFound("CARGO_MANIFEST_DIR not set".to_owned()))
+}
+
 fn mdd_file_path() -> Result<String, TestingError> {
     fn mdd_files_exist(path: &std::path::Path) -> bool {
         std::fs::read_dir(path)
@@ -567,15 +623,22 @@ fn mdd_file_path() -> Result<String, TestingError> {
             .is_some()
     }
 
-    let odx_path = test_container_dir()?.join("odx");
-    if !odx_path.exists() {
+    // When using docker, point to target/databases (writable copy)
+    // When running locally, use testcontainer/odx directly
+    let db_path = if use_docker() {
+        target_database_dir()?
+    } else {
+        test_container_dir()?.join("odx")
+    };
+
+    if !db_path.exists() {
         return Err(TestingError::PathNotFound(format!(
-            "odx directory not found at {}",
-            odx_path.display()
+            "database directory not found at {}",
+            db_path.display()
         )));
     }
 
-    if !mdd_files_exist(&odx_path) {
+    if !mdd_files_exist(&db_path) {
         return Err(TestingError::PathNotFound(
             "MDD files not found. Please generate MDD files manually using odx-converter. See \
              README for instructions."
@@ -583,7 +646,7 @@ fn mdd_file_path() -> Result<String, TestingError> {
         ));
     }
 
-    Ok(odx_path.to_string_lossy().to_string())
+    Ok(db_path.to_string_lossy().to_string())
 }
 
 pub(crate) fn find_available_tcp_port(listen_address: &str) -> Result<u16, TestingError> {

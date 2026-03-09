@@ -41,7 +41,7 @@ services:
     ports:
       - "${CDA_PORT:-20002}:20002"
     volumes:
-      - ./odx:/app/odx:ro
+      - ../target/databases:/app/odx
     hostname: cda
     networks:
       - testcontainer-net
@@ -50,7 +50,7 @@ services:
         condition: service_healthy
     environment:
       - RUST_LOG=debug
-    command: ["-d", "/app/odx", "--sidecar-dir", "/tmp"]
+    command: ["-d", "/app/odx"]
     restart: unless-stopped
 
 networks:

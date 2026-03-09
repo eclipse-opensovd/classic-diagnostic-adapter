@@ -30,7 +30,7 @@ pub struct ChunkMetaData {
 }
 
 pub struct Chunk {
-    pub payload: Option<Vec<u8>>,
+    pub payload: Option<bytes::Bytes>,
     pub meta_data: ChunkMetaData,
 }
 

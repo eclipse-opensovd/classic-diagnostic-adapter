@@ -10,7 +10,7 @@
  * https://www.apache.org/licenses/LICENSE-2.0
  */
 
-use std::{fmt::Debug, path::Path};
+use std::fmt::Debug;
 
 use cda_interfaces::{
     DiagServiceError,
@@ -378,25 +378,14 @@ impl From<dataformat::LongName<'_>> for LongName {
 }
 
 /// Backing storage for ECU data blobs.
-pub(crate) enum EcuDataStorage {
-    /// Heap-allocated buffer. Only used in tests via the `database-builder` feature.
-    #[cfg(feature = "database-builder")]
-    Vec(Vec<u8>),
-    /// Memory-mapped sidecar `FlatBuffers` file providing zero-copy access.
-    /// The OS pages data in and out automatically, keeping resident memory
-    /// proportional to the working set rather than total database size.
-    Mmap(memmap2::Mmap),
-}
-
-impl AsRef<[u8]> for EcuDataStorage {
-    fn as_ref(&self) -> &[u8] {
-        match self {
-            #[cfg(feature = "database-builder")]
-            EcuDataStorage::Vec(v) => v.as_ref(),
-            EcuDataStorage::Mmap(m) => m.as_ref(),
-        }
-    }
-}
+///
+/// In production this is a zero-copy `Bytes` sub-slice of an mmap-backed
+/// protobuf decode — the kernel can evict the underlying pages under memory
+/// pressure and fault them back from the file.
+///
+/// `Bytes::from(Vec<u8>)` takes ownership without copying, so heap-allocated
+/// blobs (e.g. from the database-builder tests) work just as well.
+type EcuDataStorage = bytes::Bytes;
 
 #[self_referencing]
 struct EcuData {
@@ -435,88 +424,42 @@ pub struct LongName {
 }
 
 impl DiagnosticDatabase {
-    /// Create a new `DiagnosticDatabase` by memory-mapping a sidecar `FlatBuffers` file.
+    /// Create a new `DiagnosticDatabase` from a `FlatBuffers` blob in memory.
     ///
-    /// This provides zero-copy access to the `FlatBuffers` data: the OS pages data
-    /// in and out of memory on demand, so only the actually accessed fields are
-    /// loaded into physical RAM.
-    ///
-    /// # Errors
-    /// Returns an error if the file cannot be opened or memory-mapped, or if the
-    /// `FlatBuffers` data is invalid (when verification is enabled).
-    ///
-    /// # Safety considerations
-    /// The underlying file must not be modified or truncated while this database is alive.
-    pub fn new(
-        ecu_database_path: String,
-        sidecar_file: &Path,
-        flatbuf_config: FlatbBufConfig,
-    ) -> Result<Self, DiagServiceError> {
-        let file = std::fs::File::open(sidecar_file).map_err(|e| {
-            DiagServiceError::InvalidDatabase(format!(
-                "Failed to open sidecar FlatBuffers file '{}': {e}",
-                sidecar_file.display()
-            ))
-        })?;
-        // SAFETY: The file is opened read-only and we only hold a shared, immutable mapping.
-        // The caller must ensure the file is not modified or truncated while mapped.
-        let mmap = unsafe { memmap2::Mmap::map(&file) }.map_err(|e| {
-            DiagServiceError::InvalidDatabase(format!(
-                "Failed to memory-map sidecar FlatBuffers file '{}': {e}",
-                sidecar_file.display()
-            ))
-        })?;
-        Self::apply_madvise_random(&mmap);
-        Self::new_from_storage(
-            ecu_database_path,
-            EcuDataStorage::Mmap(mmap),
-            flatbuf_config,
-        )
-    }
-
-    /// Create a `DiagnosticDatabase` directly from a `FlatBuffers` byte buffer.
-    ///
-    /// This is only intended for tests via the `database-builder` feature where
-    /// the database is constructed at runtime rather than read from disk.
-    /// In production, use [`Self::new`] which memory-maps a sidecar file.
+    /// Converts the `Vec<u8>` into `bytes::Bytes` (zero-copy move) and
+    /// delegates to [`Self::new_from_bytes`].  Kept for the
+    /// `database-builder` tests.
     ///
     /// # Errors
     /// Returns an error if the blob cannot be parsed as valid `FlatBuffers` data.
-    #[cfg(feature = "database-builder")]
     pub fn new_from_vec(
         ecu_database_path: String,
         ecu_data_blob: Vec<u8>,
         flatbuf_config: FlatbBufConfig,
     ) -> Result<Self, DiagServiceError> {
-        Self::new_from_storage(
+        Self::new_from_bytes(
             ecu_database_path,
-            EcuDataStorage::Vec(ecu_data_blob),
+            bytes::Bytes::from(ecu_data_blob),
             flatbuf_config,
         )
     }
 
-    /// Apply `MADV_RANDOM` to an mmap to prevent aggressive OS read-ahead.
-    /// `FlatBuffers` access patterns are typically sparse/random, so sequential
-    /// prefetching wastes memory. This hint tells the OS to only fault in
-    /// the pages actually accessed.
-    fn apply_madvise_random(mmap: &memmap2::Mmap) {
-        #[cfg(unix)]
-        if let Err(e) = mmap.advise(memmap2::Advice::Random) {
-            tracing::warn!(error = %e,
-                "Failed to set MADV_RANDOM on mmap; continuing without hint");
-        }
-    }
-
-    /// Internal constructor that builds the self-referencing `EcuData` from
-    /// [`EcuDataStorage`] (memory-mapped sidecar file).
-    fn new_from_storage(
+    /// Create a new `DiagnosticDatabase` from a `Bytes` buffer.
+    ///
+    /// In production this is typically a zero-copy sub-slice of an
+    /// mmap-backed protobuf decode, so the underlying memory is file-backed
+    /// and can be evicted by the kernel under memory pressure.
+    ///
+    /// # Errors
+    /// Returns an error if the blob cannot be parsed as valid `FlatBuffers` data.
+    pub fn new_from_bytes(
         ecu_database_path: String,
-        storage: EcuDataStorage,
+        ecu_data_blob: bytes::Bytes,
         flatbuf_config: FlatbBufConfig,
     ) -> Result<Self, DiagServiceError> {
         let ecu_data = EcuDataTryBuilder {
-            blob: storage,
-            data_builder: |blob: &EcuDataStorage| {
+            blob: ecu_data_blob,
+            data_builder: |blob: &bytes::Bytes| {
                 read_ecudata(blob.as_ref(), &flatbuf_config).map_err(|e| {
                     DiagServiceError::InvalidDatabase(format!(
                         "Failed to read ECU data from blob: {e}"
@@ -542,21 +485,23 @@ impl DiagnosticDatabase {
         self.ecu_data = None;
     }
 
-    /// Load the ECU data by ensuring the sidecar `FlatBuffers` file exists
-    /// and memory-mapping it.
+    /// Load the ECU data from the MDD file.
+    ///
+    /// Ensures the MDD file contains uncompressed data (rewrites on first
+    /// use), then parses the DD payload from it.
+    ///
     /// # Errors
     /// Returns an error if the ECU data cannot be loaded.
     /// # Panics
     /// If the ECU data is invalid and `FlatbBufConfig::verify` is disabled.
     pub fn load(&mut self) -> Result<(), DiagServiceError> {
-        let (_ecu_name, sidecar) = mdd_data::ensure_sidecar(
-            &self.ecu_database_path,
-            self.flatbuf_config.sidecar_dir.as_deref(),
-        )
-        .map_err(|e| DiagServiceError::InvalidDatabase(e.to_string()))?;
-        *self = DiagnosticDatabase::new(
+        mdd_data::update_mdd_uncompressed(&self.ecu_database_path)
+            .map_err(|e| DiagServiceError::InvalidDatabase(e.to_string()))?;
+        let (_ecu_name, blob) = mdd_data::load_ecudata(&self.ecu_database_path)
+            .map_err(|e| DiagServiceError::InvalidDatabase(e.to_string()))?;
+        *self = DiagnosticDatabase::new_from_bytes(
             self.ecu_database_path.clone(),
-            &sidecar,
+            blob,
             self.flatbuf_config.clone(),
         )?;
         Ok(())

@@ -15,10 +15,7 @@ use std::{future::Future, path::PathBuf, sync::Arc};
 use cda_comm_doip::{DoipDiagGateway, config::DoipConfig};
 use cda_comm_uds::UdsManager;
 use cda_core::{DiagServiceResponseStruct, EcuManager};
-use cda_database::{
-    FileManager, ProtoLoadConfig, read_mdd_signatures, sidecar_path, validate_sidecar,
-    write_sidecar,
-};
+use cda_database::{FileManager, ProtoLoadConfig, update_mdd_uncompressed};
 use cda_health::{HealthState, StatusHealthProvider};
 use cda_interfaces::{
     DiagServiceError, DoipGatewaySetupError, EcuAddressProvider, EcuManager as EcuManagerTrait,
@@ -444,33 +441,22 @@ async fn load_database<S: SecurityPlugin>(
             continue;
         };
 
-        let sidecar = sidecar_path(&mdd_path, flat_buf_settings.sidecar_dir.as_deref());
+        // Ensure the MDD file contains uncompressed data (rewrite on first
+        // use), so that subsequent loads skip LZMA decompression.
+        if let Err(e) = update_mdd_uncompressed(&mdd_path) {
+            tracing::error!(
+                mdd_file = %mddfile.display(),
+                error = %e,
+                "Failed to update MDD file with uncompressed data");
+            continue;
+        }
 
-        // Determine whether the sidecar needs (re-)creating by checking
-        // its SHA-256 against the MDD chunk signature.
-        let need_mdd_data = if sidecar.exists() {
-            match read_mdd_signatures(&mdd_path) {
-                Ok((_, ref sigs)) => !validate_sidecar(&sidecar, sigs).unwrap_or(false),
-                Err(e) => {
-                    tracing::warn!(
-                        mdd_file = %mddfile.display(),
-                        error = %e,
-                        "Failed to read signatures for sidecar validation; \
-                         re-creating sidecar");
-                    true
-                }
-            }
-        } else {
-            true
-        };
-
-        // Single MDD parse: decompress DD only when the sidecar needs creating.
         match cda_database::load_proto_data(
             &mdd_path,
             &[
                 ProtoLoadConfig {
                     type_: ChunkType::DiagnosticDescription,
-                    load_data: need_mdd_data,
+                    load_data: true,
                     name: None,
                 },
                 ProtoLoadConfig {
@@ -491,47 +477,40 @@ async fn load_database<S: SecurityPlugin>(
             ],
         ) {
             Ok((ecu_name, mut proto_data)) => {
-                // Write sidecar from decompressed DD payload if it didn't exist.
                 let dd_payload = proto_data
                     .remove(&ChunkType::DiagnosticDescription)
                     .and_then(|mut chunks| chunks.pop())
                     .and_then(|c| c.payload);
 
-                if need_mdd_data {
+                // Build DiagnosticDatabase from the DD payload.
+                let diag_data_base = {
                     let Some(payload) = dd_payload else {
                         tracing::error!(
                             mdd_file = %mddfile.display(),
                             "No diagnostic description payload in MDD file");
                         continue;
                     };
-                    if let Err(e) = write_sidecar(&sidecar, &payload) {
-                        tracing::error!(
-                            mdd_file = %mddfile.display(),
-                            error = %e,
-                            "Failed to write sidecar FlatBuffers file");
-                        continue;
+
+                    match cda_database::datatypes::DiagnosticDatabase::new_from_bytes(
+                        mdd_path.clone(),
+                        payload,
+                        flat_buf_settings.clone(),
+                    ) {
+                        Ok(db) => db,
+                        Err(e) => {
+                            tracing::error!(
+                                mdd_file = %mddfile.display(),
+                                error = %e,
+                                "Failed to create database from MDD payload");
+                            continue;
+                        }
                     }
-                }
+                };
 
                 let ecu_type = if func_description_cfg.description_database == ecu_name {
                     EcuManagerType::FunctionalDescription
                 } else {
                     EcuManagerType::Ecu
-                };
-
-                // Create DiagnosticDatabase by memory-mapping the sidecar file.
-                let diag_data_base = match cda_database::datatypes::DiagnosticDatabase::new(
-                    mdd_path.clone(),
-                    &sidecar,
-                    flat_buf_settings.clone(),
-                ) {
-                    Ok(db) => db,
-                    Err(e) => {
-                        tracing::error!(
-                            mdd_file = %mddfile.display(),
-                            error = %e, "Failed to create database from sidecar file");
-                        continue;
-                    }
                 };
                 let diag_service_manager = match EcuManager::new(
                     diag_data_base,

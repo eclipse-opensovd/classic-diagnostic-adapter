@@ -12,6 +12,15 @@
 
 use serde::{Deserialize, Serialize};
 
+/// Configuration for `FlatBuffers` ECU data verification and loading.
+///
+/// On first start (when the MDD file still contains LZMA-compressed chunks)
+/// the chunk data is decompressed and written back into the MDD file in place
+/// (`compression_algorithm` set to `None`).  Subsequent starts detect that
+/// the data is already uncompressed and skip decompression entirely.
+///
+/// The decompressed data is then read from the MDD via protobuf decoding and
+/// kept in memory for zero-copy `FlatBuffers` access.
 #[derive(Deserialize, Serialize, Clone, Debug)]
 pub struct FlatbBufConfig {
     pub verify: bool,
@@ -19,16 +28,6 @@ pub struct FlatbBufConfig {
     pub max_tables: usize,
     pub max_apparent_size: usize,
     pub ignore_missing_null_terminator: bool,
-    /// Directory where sidecar `FlatBuffers` files are stored.
-    ///
-    /// Each `.mdd` file gets a corresponding `.fb` sidecar file containing the
-    /// decompressed `FlatBuffers` data. The sidecar is created on first load and
-    /// memory-mapped for subsequent accesses, keeping resident memory proportional
-    /// to the working set rather than total database size.
-    ///
-    /// When `None`, the sidecar files are stored in the same directory as the
-    /// `.mdd` files. Set to a custom path to store them elsewhere.
-    pub sidecar_dir: Option<String>,
 }
 
 impl Default for FlatbBufConfig {
@@ -39,7 +38,6 @@ impl Default for FlatbBufConfig {
             max_tables: 100_000_000,
             max_apparent_size: usize::MAX,
             ignore_missing_null_terminator: false,
-            sidecar_dir: None,
         }
     }
 }

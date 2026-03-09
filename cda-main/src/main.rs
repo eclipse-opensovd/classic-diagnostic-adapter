@@ -69,10 +69,6 @@ struct AppArgs {
 
     #[arg(long)]
     fallback_to_base_variant: Option<bool>,
-
-    /// Directory where sidecar `FlatBuffers` files are stored alongside MDD files.
-    #[arg(long)]
-    sidecar_dir: Option<String>,
 }
 
 #[tokio::main]
@@ -254,9 +250,6 @@ impl AppArgs {
         }
         if let Some(log_file_name) = self.log_file_name {
             config.logging.log_file_config.name = log_file_name;
-        }
-        if let Some(sidecar_dir) = self.sidecar_dir {
-            config.flat_buf.sidecar_dir = Some(sidecar_dir);
         }
     }
 }

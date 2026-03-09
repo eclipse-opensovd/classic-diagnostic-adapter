@@ -10,13 +10,9 @@
  * https://www.apache.org/licenses/LICENSE-2.0
  */
 
-use std::{
-    fmt::Write,
-    io::Read,
-    path::{Path, PathBuf},
-    time::Instant,
-};
+use std::{io::Read, time::Instant};
 
+use bytes::Bytes;
 use cda_interfaces::{
     HashMap,
     datatypes::FlatbBufConfig,
@@ -25,7 +21,7 @@ use cda_interfaces::{
 };
 use flatbuffers::VerifierOptions;
 use prost::Message;
-use sha2::{Digest, Sha512};
+use sha2::Digest;
 
 use crate::{
     flatbuf::diagnostic_description::dataformat,
@@ -94,7 +90,7 @@ impl From<&ChunkType> for ChunkDataType {
         dlt_context = dlt_ctx!("DB"),
     )
 )]
-pub fn load_chunk<'a>(chunk: &'a mut Chunk, mdd_file: &str) -> Result<&'a Vec<u8>, MddError> {
+pub fn load_chunk<'a>(chunk: &'a mut Chunk, mdd_file: &str) -> Result<&'a Bytes, MddError> {
     if chunk.payload.is_none() {
         tracing::debug!("Loading data from file");
         let chunk_data = load_chunk_data(mdd_file, chunk)?;
@@ -109,7 +105,7 @@ pub fn load_chunk<'a>(chunk: &'a mut Chunk, mdd_file: &str) -> Result<&'a Vec<u8
 /// Load the ECU data from the given MDD file.
 /// # Errors
 /// See `load_proto_data` for details on possible errors.
-pub fn load_ecudata(mdd_file: &str) -> Result<(String, Vec<u8>), MddError> {
+pub fn load_ecudata(mdd_file: &str) -> Result<(String, Bytes), MddError> {
     load_proto_data(
         mdd_file,
         &[ProtoLoadConfig {
@@ -141,7 +137,7 @@ pub fn load_ecudata(mdd_file: &str) -> Result<(String, Vec<u8>), MddError> {
 /// Load the data for a chunk from the mdd file.
 /// # Errors
 /// See `load_proto_data` for details on possible errors.
-fn load_chunk_data(mdd_file: &str, chunk: &Chunk) -> Result<Vec<u8>, MddError> {
+fn load_chunk_data(mdd_file: &str, chunk: &Chunk) -> Result<Bytes, MddError> {
     load_proto_data(
         mdd_file,
         &[ProtoLoadConfig {
@@ -190,12 +186,14 @@ pub fn load_proto_data(
     let mmap = unsafe { memmap2::Mmap::map(&filein) }
         .map_err(|e| MddError::Io(format!("Failed to memory-map mdd file: {e}")))?;
 
-    // Hint to the OS: MDD file access is sequential (read once front-to-back for
-    // protobuf decoding), so enable aggressive read-ahead.
-    #[cfg(unix)]
+    // Hint: file will be read sequentially for protobuf decode, enables aggressive read-ahead.
     if let Err(e) = mmap.advise(memmap2::Advice::Sequential) {
-        tracing::warn!(error = %e, "Failed to set MADV_SEQUENTIAL on MDD mmap");
+        tracing::debug!(error = %e, "Failed to set mmap advice");
     }
+
+    // Capture pointer and length before consuming the mmap.
+    let mmap_ptr = mmap.as_ptr();
+    let mmap_len = mmap.len();
 
     let magic = file_magic_bytes();
     let magic_slice = mmap
@@ -206,11 +204,21 @@ pub fn load_proto_data(
             "Invalid file format: Magic Byte mismatch".to_owned(),
         ));
     }
-    let payload = mmap
-        .get(FILE_MAGIC_BYTES_LEN..)
-        .ok_or_else(|| MddError::Parsing("Invalid file format: no data after magic".to_owned()))?;
+
+    // Wrap the mmap as `Bytes` so that prost decoding produces zero-copy
+    // sub-slices for `bytes` fields instead of heap-allocated `Vec<u8>`.
+    // The resulting `Bytes` sub-slices keep the mmap alive via refcount.
+    let mmap_bytes = Bytes::from_owner(mmap);
+    let payload = mmap_bytes.slice(FILE_MAGIC_BYTES_LEN..);
     let proto_file = fileformat::MddFile::decode(payload)
         .map_err(|e| MddError::Parsing(format!("Failed to parse MDD file: {e}")))?;
+
+    // After protobuf decode: future access will be sparse/random (FlatBuffers vtable lookups).
+    // Change madvise hint to MADV_RANDOM to disable wasteful read-ahead.
+    #[cfg(unix)]
+    unsafe {
+        let _ = libc::madvise(mmap_ptr as *mut libc::c_void, mmap_len, libc::MADV_RANDOM);
+    }
 
     let proto_data: HashMap<ChunkType, Vec<Chunk>> = load_info
         .iter()
@@ -229,17 +237,24 @@ pub fn load_proto_data(
                             let Some(proto_chunk_data) = &proto_chunk.data else {
                                 return None;
                             };
-                            let decompressor =
-                                xz2::stream::Stream::new_lzma_decoder(u64::MAX).ok()?;
-                            let mut decoder = xz2::bufread::XzDecoder::new_stream(
-                                std::io::BufReader::new(proto_chunk_data.as_slice()),
-                                decompressor,
-                            );
 
-                            let mut decoded = Vec::new();
-                            decoder.read_to_end(&mut decoded).ok()?;
+                            if proto_chunk.compression_algorithm.is_some() {
+                                // Compressed chunk: LZMA decompress.
+                                let decompressor =
+                                    xz2::stream::Stream::new_lzma_decoder(u64::MAX).ok()?;
+                                let mut decoder = xz2::bufread::XzDecoder::new_stream(
+                                    std::io::BufReader::new(proto_chunk_data.as_ref()),
+                                    decompressor,
+                                );
 
-                            Some(decoded)
+                                let mut decoded = Vec::new();
+                                decoder.read_to_end(&mut decoded).ok()?;
+                                Some(Bytes::from(decoded))
+                            } else {
+                                // Already uncompressed: cheap refcount clone
+                                // (zero-copy sub-slice of the mmap).
+                                Some(proto_chunk_data.clone())
+                            }
                         } else {
                             None
                         };
@@ -312,20 +327,21 @@ pub(crate) fn read_ecudata<'a>(
     ecu_data
 }
 
-/// Read the per-chunk signatures for the `DiagnosticDescription` chunk from
-/// an MDD file **without** decompressing any chunk data.
+/// Rewrite the MDD file with the `DiagnosticDescription` chunk data stored
+/// **uncompressed** (`compression_algorithm = None`).
 ///
-/// Returns `(ecu_name, signatures)` where `signatures` is the list of
-/// [`fileformat::Signature`] entries attached to the first DD chunk.
+/// If the DD chunk is already uncompressed this is a no-op and returns
+/// `Ok(false)`.  Otherwise the chunk is LZMA-decompressed, written back into
+/// the protobuf, and the file is replaced atomically (write-to-tmp + rename).
+///
+/// Returns `Ok(true)` when the file was rewritten.
 ///
 /// # Errors
-/// Returns an error if the MDD file cannot be opened, read, or
-/// decoded as a valid protobuf `MDDFile`.
-pub fn read_mdd_signatures(
-    mdd_path: &str,
-) -> Result<(String, Vec<fileformat::Signature>), MddError> {
+/// Returns an error if the file cannot be read, parsed, decompressed, or
+/// written back.
+pub fn update_mdd_uncompressed(mdd_path: &str) -> Result<bool, MddError> {
     let data = std::fs::read(mdd_path)
-        .map_err(|e| MddError::Io(format!("Failed to read mdd file: {e}")))?;
+        .map_err(|e| MddError::Io(format!("Failed to read MDD file '{mdd_path}': {e}")))?;
 
     let magic = file_magic_bytes();
     let magic_slice = data
@@ -339,185 +355,123 @@ pub fn read_mdd_signatures(
     let payload = data
         .get(FILE_MAGIC_BYTES_LEN..)
         .ok_or_else(|| MddError::Parsing("Invalid file format: no data after magic".to_owned()))?;
-    let proto_file = fileformat::MddFile::decode(payload)
+    let mut proto_file = fileformat::MddFile::decode(payload)
         .map_err(|e| MddError::Parsing(format!("Failed to parse MDD file: {e}")))?;
 
-    let signatures = proto_file
-        .chunks
-        .iter()
-        .find(|c| ChunkDataType::try_from(c.r#type) == Ok(ChunkDataType::DiagnosticDescription))
-        .map(|c| c.signatures.clone())
-        .unwrap_or_default();
+    let mut modified = false;
+    for chunk in &mut proto_file.chunks {
+        if chunk.compression_algorithm.is_none() {
+            continue;
+        }
+        let Some(compressed_data) = chunk.data.take() else {
+            continue;
+        };
 
-    Ok((proto_file.ecu_name.clone(), signatures))
-}
-
-/// Validate an existing sidecar file against the MDD chunk signatures.
-///
-/// Computes a SHA-512 digest of the sidecar file content and compares it
-/// against the first signature whose algorithm is `sha512_uncompressed`.
-///
-/// Returns `Ok(true)` when the sidecar matches, `Ok(false)` when it does not
-/// (or no usable signature is available), and `Err` on I/O failures.
-///
-/// # Errors
-/// Returns an error if the sidecar file cannot be read.
-pub fn validate_sidecar(
-    sidecar: &Path,
-    signatures: &[fileformat::Signature],
-) -> Result<bool, MddError> {
-    if signatures.is_empty() {
-        tracing::warn!(
-            sidecar = %sidecar.display(),
-            "No signatures on DD chunk; cannot validate sidecar"
+        let decompressor = xz2::stream::Stream::new_lzma_decoder(u64::MAX)
+            .map_err(|e| MddError::Io(format!("Failed to create LZMA decoder: {e}")))?;
+        let mut decoder = xz2::bufread::XzDecoder::new_stream(
+            std::io::BufReader::new(compressed_data.as_ref()),
+            decompressor,
         );
-        return Ok(false);
+        let mut decoded = Vec::new();
+        decoder
+            .read_to_end(&mut decoded)
+            .map_err(|e| MddError::Io(format!("Failed to decompress chunk data: {e}")))?;
+
+        chunk.data = Some(Bytes::from(decoded));
+        chunk.compression_algorithm = None;
+        chunk.uncompressed_size = None;
+        modified = true;
     }
 
-    let expected = signatures
-        .iter()
-        .find(|s| s.algorithm.eq_ignore_ascii_case("sha512_uncompressed"));
-    let Some(expected) = expected else {
-        let algos: Vec<&str> = signatures.iter().map(|s| s.algorithm.as_str()).collect();
-        tracing::warn!(
-            sidecar = %sidecar.display(),
-            algorithms = ?algos,
-            "No sha512_uncompressed signature found on DD chunk; cannot validate sidecar"
-        );
-        return Ok(false);
-    };
+    if modified {
+        // Compute expected SHA-256 digests of the decompressed chunk data
+        // *before* encoding so we can verify the written file.
+        let expected_hashes: Vec<Option<[u8; 32]>> = proto_file
+            .chunks
+            .iter()
+            .map(|c| c.data.as_ref().map(|d| sha2::Sha256::digest(d).into()))
+            .collect();
 
-    let content = std::fs::read(sidecar).map_err(|e| {
+        let mut out =
+            Vec::with_capacity(FILE_MAGIC_BYTES_LEN.saturating_add(proto_file.encoded_len()));
+        out.extend_from_slice(&magic);
+        proto_file
+            .encode(&mut out)
+            .map_err(|e| MddError::Io(format!("Failed to encode updated MDD: {e}")))?;
+
+        // Atomic write: temp file + rename.
+        let tmp_path = format!("{mdd_path}.tmp");
+        std::fs::write(&tmp_path, &out).map_err(|e| {
+            MddError::Io(format!(
+                "Failed to write temporary MDD file '{tmp_path}': {e}"
+            ))
+        })?;
+
+        // Verify the written file: re-parse and check SHA-256 of each chunk.
+        verify_written_mdd(&tmp_path, &expected_hashes)?;
+
+        std::fs::rename(&tmp_path, mdd_path).map_err(|e| {
+            // Clean up the temp file on rename failure.
+            let _ = std::fs::remove_file(&tmp_path);
+            MddError::Io(format!(
+                "Failed to rename temporary MDD file to '{mdd_path}': {e}"
+            ))
+        })?;
+
+        tracing::info!(
+            mdd_file = %mdd_path,
+            "Rewrote MDD file with uncompressed chunk data"
+        );
+    }
+
+    Ok(modified)
+}
+
+/// Read back a written MDD temp file, re-parse the protobuf and compare the
+/// SHA-256 digest of every chunk's `data` field against the `expected_hashes`.
+///
+/// On mismatch the temp file is deleted and an error is returned.
+fn verify_written_mdd(
+    tmp_path: &str,
+    expected_hashes: &[Option<[u8; 32]>],
+) -> Result<(), MddError> {
+    let written = std::fs::read(tmp_path).map_err(|e| {
         MddError::Io(format!(
-            "Failed to read sidecar file '{}' for validation: {e}",
-            sidecar.display()
+            "Failed to re-read temporary MDD file '{tmp_path}' for verification: {e}"
         ))
     })?;
 
-    let computed = Sha512::digest(&content);
+    let payload = written.get(FILE_MAGIC_BYTES_LEN..).ok_or_else(|| {
+        let _ = std::fs::remove_file(tmp_path);
+        MddError::Parsing("Verification failed: temp file too small".to_owned())
+    })?;
 
-    if computed[..] == expected.signature[..] {
-        tracing::debug!(
-            sidecar = %sidecar.display(),
-            "Sidecar SHA-512 matches MDD signature"
-        );
-        Ok(true)
-    } else {
-        tracing::info!(
-            sidecar = %sidecar.display(),
-            expected = expected.signature.iter()
-                .fold(String::new(), |mut s, b| { let _ = write!(s, "{b:02x}"); s }),
-            computed = computed.iter()
-                .fold(String::new(), |mut s, b| {let _ = write!(s, "{b:02x}"); s }),
-            "Sidecar SHA-512 mismatch; sidecar will be re-created"
-        );
-        Ok(false)
+    let parsed = fileformat::MddFile::decode(payload).map_err(|e| {
+        let _ = std::fs::remove_file(tmp_path);
+        MddError::Parsing(format!(
+            "Verification failed: could not re-parse temp MDD file: {e}"
+        ))
+    })?;
+
+    if parsed.chunks.len() != expected_hashes.len() {
+        let _ = std::fs::remove_file(tmp_path);
+        return Err(MddError::Parsing(format!(
+            "Verification failed: chunk count mismatch (expected {}, got {})",
+            expected_hashes.len(),
+            parsed.chunks.len()
+        )));
     }
-}
 
-/// Compute the sidecar `FlatBuffers` file path for a given MDD file.
-///
-/// The sidecar file has the same stem as the `.mdd` file with a `.fb` extension.
-/// When `sidecar_dir` is `Some`, the file is placed in that directory;
-/// otherwise it is placed next to the `.mdd` file.
-#[must_use]
-pub fn sidecar_path(mdd_path: &str, sidecar_dir: Option<&str>) -> PathBuf {
-    let mdd = Path::new(mdd_path);
-    let stem = mdd.file_stem().unwrap_or_default();
-    let dir = match sidecar_dir {
-        Some(dir) => PathBuf::from(dir),
-        None => mdd.parent().unwrap_or(Path::new(".")).to_path_buf(),
-    };
-    dir.join(format!("{}.fb", stem.to_string_lossy()))
-}
-
-/// Ensure a sidecar `FlatBuffers` file exists **and is valid** for the given
-/// MDD file.
-///
-/// When the sidecar already exists the `DiagnosticDescription` chunk's SHA-256
-/// signature (from the MDD proto) is compared against a hash of the sidecar
-/// contents. If the signature is missing or does not match, the sidecar is
-/// re-created from decompressed MDD data.
-///
-/// Returns `(ecu_name, sidecar_path)`.
-///
-/// # Errors
-/// Returns an error if the MDD file cannot be read, decompressed, or the
-/// sidecar file cannot be written.
-pub fn ensure_sidecar(
-    mdd_path: &str,
-    sidecar_dir: Option<&str>,
-) -> Result<(String, PathBuf), MddError> {
-    let sidecar = sidecar_path(mdd_path, sidecar_dir);
-
-    if sidecar.exists() {
-        let (ecu_name, signatures) = read_mdd_signatures(mdd_path)?;
-
-        match validate_sidecar(&sidecar, &signatures) {
-            Ok(true) => {
-                tracing::debug!(
-                    sidecar = %sidecar.display(),
-                    "Sidecar validated against MDD signature, skipping decompression"
-                );
-                return Ok((ecu_name, sidecar));
-            }
-            Ok(false) => {
-                tracing::info!(
-                    sidecar = %sidecar.display(),
-                    "Sidecar signature mismatch or missing; re-creating from MDD"
-                );
-            }
-            Err(e) => {
-                tracing::warn!(
-                    sidecar = %sidecar.display(),
-                    error = %e,
-                    "Failed to validate sidecar; re-creating from MDD"
-                );
-            }
+    for (i, (chunk, expected)) in parsed.chunks.iter().zip(expected_hashes).enumerate() {
+        let actual: Option<[u8; 32]> = chunk.data.as_ref().map(|d| sha2::Sha256::digest(d).into());
+        if actual != *expected {
+            let _ = std::fs::remove_file(tmp_path);
+            return Err(MddError::Parsing(format!(
+                "Verification failed: SHA-256 mismatch for chunk {i} in '{tmp_path}'"
+            )));
         }
     }
 
-    // Sidecar does not exist or is stale — decompress and create it.
-    let (ecu_name, ecu_data) = load_ecudata(mdd_path)?;
-    write_sidecar(&sidecar, &ecu_data)?;
-    Ok((ecu_name, sidecar))
-}
-
-/// Write a sidecar `FlatBuffers` file atomically (write-to-tmp + rename).
-///
-/// Creates parent directories if they do not exist.
-///
-/// # Errors
-/// Returns an error if the directory cannot be created or the file cannot be written.
-pub fn write_sidecar(sidecar: &Path, data: &[u8]) -> Result<(), MddError> {
-    if let Some(parent) = sidecar.parent() {
-        std::fs::create_dir_all(parent).map_err(|e| {
-            MddError::Io(format!(
-                "Failed to create sidecar directory '{}': {e}",
-                parent.display()
-            ))
-        })?;
-    }
-
-    // Write atomically: temp file + rename to avoid partial/corrupt sidecars.
-    let tmp_path = sidecar.with_extension("fb.tmp");
-    std::fs::write(&tmp_path, data).map_err(|e| {
-        MddError::Io(format!(
-            "Failed to write sidecar temp file '{}': {e}",
-            tmp_path.display()
-        ))
-    })?;
-    std::fs::rename(&tmp_path, sidecar).map_err(|e| {
-        MddError::Io(format!(
-            "Failed to rename sidecar temp file to '{}': {e}",
-            sidecar.display()
-        ))
-    })?;
-
-    tracing::info!(
-        sidecar = %sidecar.display(),
-        size_bytes = data.len(),
-        "Created sidecar FlatBuffers file from MDD"
-    );
     Ok(())
 }
