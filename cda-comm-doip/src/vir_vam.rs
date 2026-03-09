@@ -81,7 +81,6 @@ where
                         }
                         Some(Err(e)) => {
                             tracing::warn!("Failed to receive VAMs: {e:?}");
-                            continue;
                         },
                         None => {
                             tracing::warn!("Incomplete VAM due to connection closure/error");
