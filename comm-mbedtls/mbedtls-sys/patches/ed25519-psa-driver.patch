@@ -1,0 +1,434 @@
+diff --color -ruN a/mbedtls-4.0.0/library/ssl_misc.h b/mbedtls-4.0.0/library/ssl_misc.h
+--- a/mbedtls-4.0.0/library/ssl_misc.h	2025-10-14 18:14:11
++++ b/mbedtls-4.0.0/library/ssl_misc.h	2026-02-26 21:13:09
+@@ -2371,6 +2371,12 @@
+             break;
+ #endif /* PSA_WANT_ALG_SHA_512 */
+ #endif /* PSA_WANT_ALG_RSA_PSS */
++
++#if defined(PSA_WANT_ECC_TWISTED_EDWARDS_255)
++        case MBEDTLS_TLS1_3_SIG_ED25519:
++            break;
++#endif /* PSA_WANT_ECC_TWISTED_EDWARDS_255 */
++
+         default:
+             return 0;
+     }
+@@ -2456,6 +2462,14 @@
+             break;
+ #endif /* PSA_WANT_ALG_SHA_512 */
+ #endif /* PSA_WANT_ALG_RSA_PSS */
++
++#if defined(PSA_WANT_ECC_TWISTED_EDWARDS_255)
++        case MBEDTLS_TLS1_3_SIG_ED25519:   /* 0x0807 */
++            *md_alg = MBEDTLS_MD_NONE;       /* PureEdDSA: no separate hash */
++            *pk_type = MBEDTLS_PK_ECKEY;
++            break;
++#endif /* PSA_WANT_ECC_TWISTED_EDWARDS_255 */
++
+         default:
+             return MBEDTLS_ERR_SSL_FEATURE_UNAVAILABLE;
+     }
+@@ -2466,6 +2480,15 @@
+ static inline int mbedtls_ssl_tls12_sig_alg_is_supported(
+     const uint16_t sig_alg)
+ {
++#if defined(PSA_WANT_ECC_TWISTED_EDWARDS_255)
++    /* EdDSA signature schemes (RFC 8422 §5.1.3) bypass the
++     * traditional hash+sig decomposition used by TLS 1.2. */
++    if (sig_alg == MBEDTLS_TLS1_3_SIG_ED25519 ||
++        sig_alg == MBEDTLS_TLS1_3_SIG_ED448) {
++        return 1;
++    }
++#endif /* PSA_WANT_ECC_TWISTED_EDWARDS_255 */
++
+     /* High byte is hash */
+     unsigned char hash = MBEDTLS_BYTE_1(sig_alg);
+     unsigned char sig = MBEDTLS_BYTE_0(sig_alg);
+diff --color -ruN a/mbedtls-4.0.0/library/ssl_tls12_client.c b/mbedtls-4.0.0/library/ssl_tls12_client.c
+--- a/mbedtls-4.0.0/library/ssl_tls12_client.c	2025-10-14 18:14:11
++++ b/mbedtls-4.0.0/library/ssl_tls12_client.c	2026-02-26 21:30:29
+@@ -43,6 +43,10 @@
+ #include "mbedtls/platform_util.h"
+ #endif
+ 
++#if defined(PSA_WANT_ECC_TWISTED_EDWARDS_255)
++#include "ed25519_extract.h"
++#endif
++
+ #if defined(MBEDTLS_SSL_RENEGOTIATION)
+ MBEDTLS_CHECK_RETURN_CRITICAL
+ static int ssl_write_renegotiation_ext(mbedtls_ssl_context *ssl,
+@@ -1995,7 +1995,72 @@
+             if (ret != 0) {
+                 return ret;
+             }
+-        } else {
++        }
++#if defined(PSA_WANT_ECC_TWISTED_EDWARDS_255)
++        else if (sig_alg == MBEDTLS_TLS1_3_SIG_ED25519) {
++            /* PureEdDSA: sign the raw ServerKeyExchange params
++             * (no pre-hashing). Build the message that was signed:
++             *   client_random || server_random || params */
++            if (params_len > MBEDTLS_SSL_IN_CONTENT_LEN) {
++                MBEDTLS_SSL_DEBUG_MSG(1, ("Ed25519: params exceed max content length %u",
++                    (unsigned) params_len));
++                return MBEDTLS_ERR_SSL_HANDSHAKE_FAILURE;
++            }
++
++            const size_t ed_msg_len = 32 + 32 + params_len;
++            unsigned char *ed_msg = mbedtls_calloc(1, ed_msg_len);
++            if (ed_msg == NULL) {
++                MBEDTLS_SSL_DEBUG_MSG(1, ("Ed25519: failed to allocate buffer for ed_msg."));
++                return MBEDTLS_ERR_SSL_ALLOC_FAILED;
++            }
++            memcpy(ed_msg, ssl->handshake->randbytes, 64);
++            memcpy(ed_msg + 64, params, params_len);
++
++            /* Retrieve the raw 32-byte public key from peer cert */
++            unsigned char pubkey_raw[ED25519_RAW_PUBKEY_LEN];
++            mbedtls_pk_context *ppk = peer_pk;
++            ret = ed25519_extract_raw_pubkey(
++                peer_pk->pub_raw, peer_pk->pub_raw_len, pubkey_raw);
++
++            if (ret != 0) {
++                MBEDTLS_SSL_DEBUG_MSG(1, ("Ed25519: pubkey extraction failed"));
++                mbedtls_free(ed_msg);
++                return MBEDTLS_ERR_SSL_HANDSHAKE_FAILURE;
++            }
++
++            /* Import key temporarily so psa_verify_message can find it */
++            psa_key_attributes_t attr = PSA_KEY_ATTRIBUTES_INIT;
++            psa_set_key_type(&attr,
++                PSA_KEY_TYPE_ECC_PUBLIC_KEY(PSA_ECC_FAMILY_TWISTED_EDWARDS));
++            psa_set_key_bits(&attr, 255);
++            psa_set_key_algorithm(&attr, PSA_ALG_PURE_EDDSA);
++            psa_set_key_usage_flags(&attr, PSA_KEY_USAGE_VERIFY_MESSAGE);
++
++            psa_key_id_t tmp_key = PSA_KEY_ID_NULL;
++            psa_status_t psa_ret;
++            psa_ret = psa_import_key(&attr, pubkey_raw, ED25519_RAW_PUBKEY_LEN,
++                                     &tmp_key);
++            if (psa_ret != PSA_SUCCESS) {
++                MBEDTLS_SSL_DEBUG_MSG(1, ("Ed25519: psa_import_key failed: %d",
++                    (int) psa_ret));
++                return MBEDTLS_ERR_SSL_HANDSHAKE_FAILURE;
++            }
++            psa_ret = psa_verify_message(tmp_key, PSA_ALG_PURE_EDDSA,
++                                         ed_msg, ed_msg_len, p, sig_len);
++            psa_destroy_key(tmp_key);
++            mbedtls_free(ed_msg);
++
++            if (psa_ret != PSA_SUCCESS) {
++                MBEDTLS_SSL_DEBUG_MSG(1, ("Ed25519 verify failed: %d",
++                    (int) psa_ret));
++                ret = MBEDTLS_ERR_SSL_HANDSHAKE_FAILURE;
++            } else {
++                ret = 0;
++            }
++            goto ske_ed25519_done;
++        }
++#endif /* PSA_WANT_ECC_TWISTED_EDWARDS_255 */
++        else {
+             MBEDTLS_SSL_DEBUG_MSG(1, ("should never happen"));
+             return MBEDTLS_ERR_SSL_INTERNAL_ERROR;
+         }
+@@ -2030,6 +2088,10 @@
+         ret = mbedtls_pk_verify_restartable(peer_pk,
+                                             md_alg, hash, hashlen, p, sig_len, rs_ctx);
+ 
++#if defined(PSA_WANT_ECC_TWISTED_EDWARDS_255)
++        ske_ed25519_done:
++#endif
++
+         if (ret != 0) {
+             int send_alert_msg = 1;
+ #if defined(MBEDTLS_SSL_ECP_RESTARTABLE_ENABLED)
+diff --color -ruN a/mbedtls-4.0.0/library/x509_crt.c b/mbedtls-4.0.0/library/x509_crt.c
+--- a/mbedtls-4.0.0/library/x509_crt.c	2025-10-14 18:14:11
++++ b/mbedtls-4.0.0/library/x509_crt.c	2026-02-26 21:13:09
+@@ -70,6 +70,10 @@
+ #endif /* !_WIN32 || EFIX64 || EFI32 */
+ #endif
+ 
++#if defined(PSA_WANT_ECC_TWISTED_EDWARDS_255)
++#include "ed25519_extract.h"
++#endif
++
+ /*
+  * Item in a verification chain: cert and flags for it
+  */
+@@ -2110,6 +2114,38 @@
+     psa_algorithm_t hash_alg = mbedtls_md_psa_alg_from_type(child->sig_md);
+     psa_status_t status = PSA_ERROR_CORRUPTION_DETECTED;
+ 
++#if defined(PSA_WANT_ECC_TWISTED_EDWARDS_255)
++    /* PureEdDSA (Ed25519): signature covers the raw TBS data,
++     * no pre-hashing. Use psa_verify_message directly. */
++    if (child->sig_pk == MBEDTLS_PK_SIGALG_EDDSA) {
++        unsigned char pubkey_raw[ED25519_RAW_PUBKEY_LEN];
++        int pk_ret = ed25519_extract_raw_pubkey(
++            parent->pk.pub_raw, parent->pk.pub_raw_len, pubkey_raw);
++        if (pk_ret != 0) {
++            return MBEDTLS_ERR_PK_FEATURE_UNAVAILABLE;
++        }
++
++        psa_key_attributes_t attr = PSA_KEY_ATTRIBUTES_INIT;
++        psa_set_key_type(&attr,
++            PSA_KEY_TYPE_ECC_PUBLIC_KEY(PSA_ECC_FAMILY_TWISTED_EDWARDS));
++        psa_set_key_bits(&attr, 255);
++        psa_set_key_algorithm(&attr, PSA_ALG_PURE_EDDSA);
++        psa_set_key_usage_flags(&attr, PSA_KEY_USAGE_VERIFY_MESSAGE);
++
++        psa_key_id_t tmp_key = PSA_KEY_ID_NULL;
++        status = psa_import_key(&attr, pubkey_raw, ED25519_RAW_PUBKEY_LEN,
++            &tmp_key);
++        if (status != PSA_SUCCESS) {
++            return MBEDTLS_ERR_PK_FEATURE_UNAVAILABLE;
++        }
++        status = psa_verify_message(tmp_key, PSA_ALG_PURE_EDDSA,
++                                    child->tbs.p, child->tbs.len,
++                                    child->sig.p, child->sig.len);
++        psa_destroy_key(tmp_key);
++        return (status == PSA_SUCCESS) ? 0 : MBEDTLS_ERR_X509_CERT_VERIFY_FAILED;
++    }
++#endif /* PSA_WANT_ECC_TWISTED_EDWARDS_255 */
++
+     status = psa_hash_compute(hash_alg,
+                               child->tbs.p,
+                               child->tbs.len,
+diff --color -ruN a/mbedtls-4.0.0/include/mbedtls/oid.h b/mbedtls-4.0.0/include/mbedtls/oid.h
+--- a/mbedtls-4.0.0/include/mbedtls/oid.h	2025-10-14 18:14:11.795374200 +0200
++++ b/mbedtls-4.0.0/include/mbedtls/oid.h	2026-03-17 09:15:19.332939221 +0100
+@@ -265,6 +265,11 @@
+  *   ecdsa-with-SHA2(3) 4 } */
+ #define MBEDTLS_OID_ECDSA_SHA512            MBEDTLS_OID_ANSI_X9_62_SIG_SHA2 "\x04"
+ 
++/* ed25519 OBJECT IDENTIFIER ::= {
++ *   iso(1) identified-organization(3) thawte(101) 112
++ * } */
++#define MBEDTLS_OID_ED25519                 MBEDTLS_OID_THAWTE "\0x70"
++
+ #if defined(MBEDTLS_X509_USE_C)
+ /**
+  * \brief           Translate an ASN.1 OID into its numeric representation
+diff --color -ruN a/mbedtls-4.0.0/library/x509_oid.c b/mbedtls-4.0.0/library/x509_oid.c
+--- a/mbedtls-4.0.0/library/x509_oid.c	2025-10-14 18:14:11
++++ b/mbedtls-4.0.0/library/x509_oid.c	2026-02-26 21:13:09
+@@ -472,6 +472,12 @@
+         MBEDTLS_MD_NONE,     MBEDTLS_PK_SIGALG_RSA_PSS,
+     },
+ #endif /* MBEDTLS_RSA_C */
++#if defined(PSA_WANT_ECC_TWISTED_EDWARDS_255)
++    {
++        OID_DESCRIPTOR(MBEDTLS_OID_ED25519, "Ed25519", "Ed25519"),
++        MBEDTLS_MD_NONE,     MBEDTLS_PK_SIGALG_EDDSA,
++    },
++#endif /* PSA_WANT_ECC_TWISTED_EDWARDS_255 */
+     {
+         NULL_OID_DESCRIPTOR,
+         MBEDTLS_MD_NONE, MBEDTLS_PK_SIGALG_NONE,
+diff --color -ruN a/mbedtls-4.0.0/tf-psa-crypto/core/psa_crypto.c b/mbedtls-4.0.0/tf-psa-crypto/core/psa_crypto.c
+--- a/mbedtls-4.0.0/tf-psa-crypto/core/psa_crypto.c	2025-10-11 22:43:44
++++ b/mbedtls-4.0.0/tf-psa-crypto/core/psa_crypto.c	2026-02-26 21:13:09
+@@ -2899,7 +2899,11 @@
+      * supported at the moment. */
+ 
+     if (hash_alg == 0 && input_is_message) {
+-        return PSA_ERROR_INVALID_ARGUMENT;
++        /* PureEdDSA (e.g. Ed25519) signs the raw message without
++         * pre-hashing, so hash_alg==0 is expected for sign-message. */
++        if (alg != PSA_ALG_PURE_EDDSA) {
++            return PSA_ERROR_INVALID_ARGUMENT;
++        }
+     }
+     if (hash_alg == PSA_ALG_ANY_HASH) {
+         return PSA_ERROR_INVALID_ARGUMENT;
+diff --color -ruN a/mbedtls-4.0.0/tf-psa-crypto/core/psa_crypto_driver_wrappers.h b/mbedtls-4.0.0/tf-psa-crypto/core/psa_crypto_driver_wrappers.h
+--- a/mbedtls-4.0.0/tf-psa-crypto/core/psa_crypto_driver_wrappers.h	2025-10-15 11:10:22
++++ b/mbedtls-4.0.0/tf-psa-crypto/core/psa_crypto_driver_wrappers.h	2026-02-26 21:32:41
+@@ -196,6 +196,22 @@
+                 return( status );
+ #endif /* PSA_CRYPTO_DRIVER_TEST */
+ #endif /* PSA_CRYPTO_ACCELERATOR_DRIVER_PRESENT */
++
++#if defined(MBEDTLS_ED25519_PSA_DRIVER)
++            /* Ed25519 transparent driver for verify_message */
++            {
++                extern psa_status_t ed25519_psa_verify_message(
++                    const psa_key_attributes_t *, const uint8_t *, size_t,
++                    psa_algorithm_t, const uint8_t *, size_t,
++                    const uint8_t *, size_t);
++                status = ed25519_psa_verify_message(
++                            attributes, key_buffer, key_buffer_size,
++                            alg, input, input_length,
++                            signature, signature_length);
++                if (status != PSA_ERROR_NOT_SUPPORTED)
++                    return status;
++            }
++#endif /* MBEDTLS_ED25519_PSA_DRIVER */
+             break;
+ 
+         /* Add cases for opaque driver here */
+@@ -216,6 +232,7 @@
+             break;
+ #endif /* PSA_CRYPTO_DRIVER_TEST */
+ #endif /* PSA_CRYPTO_ACCELERATOR_DRIVER_PRESENT */
++
+         default:
+             /* Key is declared with a lifetime not known to us */
+             (void)status;
+@@ -802,6 +819,21 @@
+ 
+ 
+ #endif /* PSA_CRYPTO_ACCELERATOR_DRIVER_PRESENT */
++
++#if defined(MBEDTLS_ED25519_PSA_DRIVER)
++            /* Ed25519 transparent driver for import */
++            {
++                extern psa_status_t ed25519_psa_import_key(
++                    const psa_key_attributes_t *, const uint8_t *, size_t,
++                    uint8_t *, size_t, size_t *, size_t *);
++                status = ed25519_psa_import_key(
++                    attributes, data, data_length,
++                    key_buffer, key_buffer_size,
++                    key_buffer_length, bits);
++                if (status != PSA_ERROR_NOT_SUPPORTED)
++                    return status;
++            }
++#endif /* MBEDTLS_ED25519_PSA_DRIVER */
+ 
+             /* Fell through, meaning no accelerator supports this operation */
+             return( psa_import_key_into_slot( attributes,
+diff --color -ruN a/mbedtls-4.0.0/tf-psa-crypto/drivers/builtin/include/mbedtls/private/ecp.h b/mbedtls-4.0.0/tf-psa-crypto/drivers/builtin/include/mbedtls/private/ecp.h
+--- a/mbedtls-4.0.0/tf-psa-crypto/drivers/builtin/include/mbedtls/private/ecp.h	2025-10-01 17:29:27
++++ b/mbedtls-4.0.0/tf-psa-crypto/drivers/builtin/include/mbedtls/private/ecp.h	2026-02-26 21:13:09
+@@ -110,6 +110,7 @@
+     MBEDTLS_ECP_DP_SECP192K1,      /*!< Domain parameters for 192-bit "Koblitz" curve. */
+     MBEDTLS_ECP_DP_SECP256K1,      /*!< Domain parameters for 256-bit "Koblitz" curve. */
+     MBEDTLS_ECP_DP_CURVE448,       /*!< Domain parameters for Curve448. */
++    MBEDTLS_ECP_DP_ED25519,        /*!< Domain parameters for Ed25519. */
+ } mbedtls_ecp_group_id;
+ 
+ #if defined(MBEDTLS_DECLARE_PRIVATE_IDENTIFIERS)
+diff --color -ruN a/mbedtls-4.0.0/tf-psa-crypto/drivers/builtin/src/oid.c b/mbedtls-4.0.0/tf-psa-crypto/drivers/builtin/src/oid.c
+--- a/mbedtls-4.0.0/tf-psa-crypto/drivers/builtin/src/oid.c	2025-10-01 17:29:27
++++ b/mbedtls-4.0.0/tf-psa-crypto/drivers/builtin/src/oid.c	2026-02-26 21:13:09
+@@ -248,6 +248,12 @@
+         MBEDTLS_ECP_DP_CURVE448,
+     },
+ #endif /* PSA_WANT_ECC_MONTGOMERY_448 */
++#if defined(PSA_WANT_ECC_TWISTED_EDWARDS_255)
++    {
++        OID_DESCRIPTOR(MBEDTLS_OID_ED25519, "Ed25519", "Ed25519"),
++        MBEDTLS_ECP_DP_ED25519,
++    },
++#endif /* PSA_WANT_ECC_TWISTED_EDWARDS_255 */
+     {
+         NULL_OID_DESCRIPTOR,
+         MBEDTLS_ECP_DP_NONE,
+diff --color -ruN a/mbedtls-4.0.0/tf-psa-crypto/drivers/builtin/src/pk_ecc.c b/mbedtls-4.0.0/tf-psa-crypto/drivers/builtin/src/pk_ecc.c
+--- a/mbedtls-4.0.0/tf-psa-crypto/drivers/builtin/src/pk_ecc.c	2025-10-01 17:21:30
++++ b/mbedtls-4.0.0/tf-psa-crypto/drivers/builtin/src/pk_ecc.c	2026-02-26 21:28:35
+@@ -45,9 +45,13 @@
+     if (pk->ec_family == PSA_ECC_FAMILY_MONTGOMERY) {
+         /* Do not set algorithm here because Montgomery keys cannot do ECDSA and
+          * the PK module cannot do ECDH. When the key will be used in TLS for
+          * ECDH, it will be exported and then re-imported with proper flags
+          * and algorithm. */
+         flags = PSA_KEY_USAGE_EXPORT;
++    } else if (pk->ec_family == PSA_ECC_FAMILY_TWISTED_EDWARDS) {
++        psa_set_key_algorithm(&attributes, PSA_ALG_PURE_EDDSA);
++        flags = PSA_KEY_USAGE_SIGN_MESSAGE | PSA_KEY_USAGE_VERIFY_MESSAGE |
++                PSA_KEY_USAGE_EXPORT;
+     } else {
+         psa_set_key_algorithm(&attributes,
+                               MBEDTLS_PK_ALG_ECDSA(PSA_ALG_ANY_HASH));
+diff --color -ruN a/mbedtls-4.0.0/tf-psa-crypto/drivers/builtin/src/pk_internal.h b/mbedtls-4.0.0/tf-psa-crypto/drivers/builtin/src/pk_internal.h
+--- a/mbedtls-4.0.0/tf-psa-crypto/drivers/builtin/src/pk_internal.h	2025-10-01 17:21:30
++++ b/mbedtls-4.0.0/tf-psa-crypto/drivers/builtin/src/pk_internal.h	2026-02-26 21:13:09
+@@ -78,7 +78,8 @@
+ #endif /* PSA_WANT_ECC_MONTGOMERY_255 || PSA_WANT_ECC_MONTGOMERY_448 */
+ 
+ #define MBEDTLS_PK_IS_RFC8410_GROUP_ID(id)  \
+-    ((id == MBEDTLS_ECP_DP_CURVE25519) || (id == MBEDTLS_ECP_DP_CURVE448))
++    ((id == MBEDTLS_ECP_DP_CURVE25519) || (id == MBEDTLS_ECP_DP_CURVE448) || \
++     (id == MBEDTLS_ECP_DP_ED25519))
+ 
+ static inline int mbedtls_pk_is_rfc8410(const mbedtls_pk_context *pk)
+ {
+diff --color -ruN a/mbedtls-4.0.0/tf-psa-crypto/drivers/builtin/src/psa_crypto_ecp.c b/mbedtls-4.0.0/tf-psa-crypto/drivers/builtin/src/psa_crypto_ecp.c
+--- a/mbedtls-4.0.0/tf-psa-crypto/drivers/builtin/src/psa_crypto_ecp.c	2025-10-01 17:21:30
++++ b/mbedtls-4.0.0/tf-psa-crypto/drivers/builtin/src/psa_crypto_ecp.c	2026-02-26 21:30:17
+@@ -74,6 +74,16 @@
+             }
+             break;
+ 
++        case PSA_ECC_FAMILY_TWISTED_EDWARDS:
++            switch (*bits) {
++                case 255:
++                    return PSA_SUCCESS;
++                case 256:
++                    *bits = 255;
++                    return PSA_SUCCESS;
++            }
++            break;
++
+         case PSA_ECC_FAMILY_SECP_K1:
+             switch (*bits) {
+                 case 192:
+diff --color -ruN a/mbedtls-4.0.0/tf-psa-crypto/drivers/builtin/src/psa_util.c b/mbedtls-4.0.0/tf-psa-crypto/drivers/builtin/src/psa_util.c
+--- a/mbedtls-4.0.0/tf-psa-crypto/drivers/builtin/src/psa_util.c	2025-10-01 17:21:30
++++ b/mbedtls-4.0.0/tf-psa-crypto/drivers/builtin/src/psa_util.c	2026-02-26 21:33:17
+@@ -228,6 +228,11 @@
+             *bits = 448;
+             return PSA_ECC_FAMILY_MONTGOMERY;
+ #endif
++#if defined(PSA_WANT_ECC_TWISTED_EDWARDS_255)
++        case MBEDTLS_ECP_DP_ED25519:
++            *bits = 255;
++            return PSA_ECC_FAMILY_TWISTED_EDWARDS;
++#endif
+         default:
+             *bits = 0;
+             return 0;
+@@ -285,6 +290,15 @@
+ #if defined(PSA_WANT_ECC_MONTGOMERY_448)
+                 case 448:
+                     return MBEDTLS_ECP_DP_CURVE448;
++#endif
++            }
++            break;
++
++        case PSA_ECC_FAMILY_TWISTED_EDWARDS:
++            switch (bits) {
++#if defined(PSA_WANT_ECC_TWISTED_EDWARDS_255)
++                case 255:
++                    return MBEDTLS_ECP_DP_ED25519;
+ #endif
+             }
+             break;
+diff --color -ruN a/mbedtls-4.0.0/tf-psa-crypto/include/mbedtls/pk.h b/mbedtls-4.0.0/tf-psa-crypto/include/mbedtls/pk.h
+--- a/mbedtls-4.0.0/tf-psa-crypto/include/mbedtls/pk.h	2025-10-01 17:29:27
++++ b/mbedtls-4.0.0/tf-psa-crypto/include/mbedtls/pk.h	2026-02-26 21:13:09
+@@ -55,6 +55,7 @@
+     MBEDTLS_PK_SIGALG_RSA_PKCS1V15, // PSA_ALG_RSA_PKCS1V15_SIGN
+     MBEDTLS_PK_SIGALG_RSA_PSS,      // PSA_ALG_RSA_PSS_ANY_SALT
+     MBEDTLS_PK_SIGALG_ECDSA,        // MBEDTLS_PK_ALG_ECDSA
++    MBEDTLS_PK_SIGALG_EDDSA,        // PureEdDSA (Ed25519 / Ed448)
+ } mbedtls_pk_sigalg_t;
+ 
+ /**
+diff --color -ruN a/mbedtls-4.0.0/tf-psa-crypto/include/psa/crypto_config.h b/mbedtls-4.0.0/tf-psa-crypto/include/psa/crypto_config.h
+--- a/mbedtls-4.0.0/tf-psa-crypto/include/psa/crypto_config.h	2025-10-01 17:29:27
++++ b/mbedtls-4.0.0/tf-psa-crypto/include/psa/crypto_config.h	2026-02-26 21:13:09
+@@ -98,6 +98,9 @@
+ #define PSA_WANT_ECC_SECP_R1_256                1
+ #define PSA_WANT_ECC_SECP_R1_384                1
+ #define PSA_WANT_ECC_SECP_R1_521                1
++
++#define PSA_WANT_ECC_TWISTED_EDWARDS_255        1
++#define PSA_WANT_ALG_PURE_EDDSA                 1
+ /* These 2 curves are not part of the public API. They are kept temporarily for
+  * internal testing only and will removed in a future minor version. */
+ //#define PSA_WANT_ECC_SECP_K1_192                1

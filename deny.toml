@@ -39,7 +39,16 @@ ignore = [
 allow = ["Apache-2.0", "BSD-3-Clause", "ISC", "MIT", "Unicode-3.0", "Zlib"]
 
 confidence-threshold = 0.8
-exceptions = []
+
+[[licenses.exceptions]]
+allow = ["CDLA-Permissive-2.0"]
+name = "webpki-roots"
+version = "1.0"
+
+[[licenses.exceptions]]
+allow = ["bzip2-1.0.6"]
+name = "libbz2-rs-sys"
+version = "0.2"
 
 [licenses.private]
 ignore = true

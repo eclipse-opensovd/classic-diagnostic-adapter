@@ -32,8 +32,8 @@ thiserror = { workspace = true }
 doip-definitions = { workspace = true }
 doip-codec = { workspace = true }
 # tls
-openssl = { workspace = true }
-tokio-openssl = { workspace = true }
+openssl = { workspace = true, optional = true }
+tokio-openssl = { workspace = true, optional = true }
 
 serde = { workspace = true, features = ["derive"] }
 socket2 = { workspace = true, features = ["all"] }
@@ -45,7 +45,13 @@ futures = { workspace = true }
 # logging & tracing
 tracing = { workspace = true }
 
+mbedtls-rs = { workspace = true, optional = true }
+
 [features]
 default = []
-openssl-vendored = ["openssl/vendored"]
+# enable mbedtls TLS - cannot be combined with openssl feature
+mbedtls = ["dep:mbedtls-rs"]
+# enable openssl TLS - if enabled together with mbedtls openssl will be prefered!
+openssl = ["dep:openssl", "dep:tokio-openssl"]
+openssl-vendored = ["openssl", "openssl/vendored"]
 dlt-tracing = ["cda-interfaces/dlt-tracing"]

@@ -30,3 +30,5 @@ docs/images/*.svg
 .env
 
 cda-test-config.toml
+# mbedtls source directory
+mbedtls-4*

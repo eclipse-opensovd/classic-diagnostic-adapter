@@ -51,6 +51,10 @@ jobs:
         uses: eclipse-opensovd/dlt-tracing-lib/.github/actions/setup-dlt@main
       - name: Build all features
         run: cargo build --locked --verbose --all-features
+      # note: if openssl and mbedtls are enabled falls back to openssl
+      # therefore we build mbedtls separately as well
+      - name: Build mbedtls features
+        run: cargo build --locked --verbose -p opensovd-cda --no-default-features --features mbedtls
       - name: Build minimal features
         run: cargo build --locked --verbose --no-default-features
       - name: Build minimal CDA only
