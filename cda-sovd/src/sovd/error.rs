@@ -89,7 +89,8 @@ impl From<DiagServiceError> for ApiError {
             | DiagServiceError::InvalidAddress(_)
             | DiagServiceError::NotEnoughData { .. }
             | DiagServiceError::UnexpectedResponse(_)
-            | DiagServiceError::DataError(_) => {
+            | DiagServiceError::DataError(_)
+            | DiagServiceError::InvalidSecurityPlugin => {
                 ApiError::InternalServerError(Some(value.to_string()))
             }
             DiagServiceError::InvalidRequest(_)
@@ -103,9 +104,6 @@ impl From<DiagServiceError> for ApiError {
                 ApiError::BadRequest(value.to_string())
             }
             DiagServiceError::AccessDenied(_) => ApiError::Forbidden(Some(value.to_string())),
-            DiagServiceError::InvalidSecurityPlugin => {
-                ApiError::InternalServerError(Some(value.to_string()))
-            }
         }
     }
 }
