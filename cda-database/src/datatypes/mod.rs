@@ -432,7 +432,7 @@ impl DiagnosticDatabase {
     ///
     /// # Errors
     /// Returns an error if the blob cannot be parsed as valid `FlatBuffers` data.
-    pub fn new_from_vec(
+    pub fn new(
         ecu_database_path: String,
         ecu_data_blob: Vec<u8>,
         flatbuf_config: FlatbBufConfig,

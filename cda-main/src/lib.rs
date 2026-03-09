@@ -154,6 +154,29 @@ impl From<TracingSetupError> for AppError {
     }
 }
 
+pub const PROTO_LOAD_CONFIG: &[ProtoLoadConfig; 4] = &[
+    ProtoLoadConfig {
+        type_: ChunkType::DiagnosticDescription,
+        load_data: true,
+        name: None,
+    },
+    ProtoLoadConfig {
+        type_: ChunkType::JarFile,
+        load_data: false,
+        name: None,
+    },
+    ProtoLoadConfig {
+        type_: ChunkType::JarFilePartial,
+        load_data: false,
+        name: None,
+    },
+    ProtoLoadConfig {
+        type_: ChunkType::EmbeddedFile,
+        load_data: false,
+        name: None,
+    },
+];
+
 /// Loads vehicle databases and sets up SOVD routes in the webserver.
 /// # Errors
 /// Returns `DoipGatewaySetupError` if we failed to create the diagnostic gateway
@@ -414,7 +437,6 @@ async fn mark_duplicate_ecus_by_address<S: SecurityPlugin>(
 }
 
 #[allow(clippy::too_many_arguments)]
-#[allow(clippy::too_many_lines)]
 #[tracing::instrument(
     skip_all,
     fields(
@@ -443,48 +465,25 @@ async fn load_database<S: SecurityPlugin>(
 
         // Ensure the MDD file contains uncompressed data (rewrite on first
         // use), so that subsequent loads skip LZMA decompression.
-        if let Err(e) = update_mdd_uncompressed(&mdd_path) {
+        if flat_buf_settings.decompress_mdd
+            && let Err(e) = update_mdd_uncompressed(&mdd_path)
+        {
             tracing::error!(
                 mdd_file = %mddfile.display(),
                 error = %e,
                 "Failed to update MDD file with uncompressed data");
-            continue;
         }
 
-        match cda_database::load_proto_data(
-            &mdd_path,
-            &[
-                ProtoLoadConfig {
-                    type_: ChunkType::DiagnosticDescription,
-                    load_data: true,
-                    name: None,
-                },
-                ProtoLoadConfig {
-                    type_: ChunkType::JarFile,
-                    load_data: false,
-                    name: None,
-                },
-                ProtoLoadConfig {
-                    type_: ChunkType::JarFilePartial,
-                    load_data: false,
-                    name: None,
-                },
-                ProtoLoadConfig {
-                    type_: ChunkType::EmbeddedFile,
-                    load_data: false,
-                    name: None,
-                },
-            ],
-        ) {
+        match cda_database::load_proto_data(&mdd_path, PROTO_LOAD_CONFIG) {
             Ok((ecu_name, mut proto_data)) => {
-                let dd_payload = proto_data
+                let database_payload = proto_data
                     .remove(&ChunkType::DiagnosticDescription)
                     .and_then(|mut chunks| chunks.pop())
                     .and_then(|c| c.payload);
 
-                // Build DiagnosticDatabase from the DD payload.
+                // Build DiagnosticDatabase from the diagnostic database payload.
                 let diag_data_base = {
-                    let Some(payload) = dd_payload else {
+                    let Some(payload) = database_payload else {
                         tracing::error!(
                             mdd_file = %mddfile.display(),
                             "No diagnostic description payload in MDD file");
@@ -545,7 +544,6 @@ async fn load_database<S: SecurityPlugin>(
                 )
                 .await;
 
-                // Build FileManager from remaining non-DD chunk metadata.
                 let filtered_chunks: Vec<Chunk> = [
                     ChunkType::JarFile,
                     ChunkType::JarFilePartial,

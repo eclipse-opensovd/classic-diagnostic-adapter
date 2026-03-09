@@ -187,6 +187,7 @@ pub fn load_proto_data(
         .map_err(|e| MddError::Io(format!("Failed to memory-map mdd file: {e}")))?;
 
     // Hint: file will be read sequentially for protobuf decode, enables aggressive read-ahead.
+    #[cfg(unix)]
     if let Err(e) = mmap.advise(memmap2::Advice::Sequential) {
         tracing::debug!(error = %e, "Failed to set mmap advice");
     }

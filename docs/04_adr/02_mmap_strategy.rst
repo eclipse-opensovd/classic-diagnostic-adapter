@@ -81,6 +81,11 @@ pages.
      - 420,432
      - —
      - None
+   * - Mmap without rewrite
+     - 422,288
+     - 407,456
+     - —
+     - None
    * - MmapSidecar
      - 191,680
      - 70,672
@@ -91,6 +96,13 @@ pages.
      - **35,264**
      - **35,520**
      - **+189 MB**
+
+.. note::
+   The "Mmap without rewrite" row (``--no-rewrite-mdd``) confirms that
+   memory-mapping alone does not help when the MDD chunks are still
+   LZMA-compressed — the FlatBuffers payload must be decompressed onto the
+   heap, resulting in RSS comparable to the Heap baseline.  The in-place
+   rewrite step is therefore the key enabler for the RSS reduction.
 
 .. note::
    The MmapMdd implementation includes ``madvise(2)`` hints to optimize kernel
