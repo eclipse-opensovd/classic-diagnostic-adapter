@@ -25,8 +25,12 @@ pub mod tracing {
 }
 
 pub mod tokio_ext {
+    // allow the check for unexpected cfg for tokio_unstable here, as this is a `tokio`` specific
+    // cfg flag that is required to have the `tokio::task::Builder` available.
+    #![allow(unexpected_cfgs)]
+
     #[macro_export]
-    #[cfg(feature = "tokio-tracing")]
+    #[cfg(all(tokio_unstable, feature = "tokio-tracing"))]
     macro_rules! spawn_named {
         ($name:expr, $future:expr) => {
             // see: https://docs.rs/tokio/latest/src/tokio/task/builder.rs.html#87-98
@@ -38,7 +42,7 @@ pub mod tokio_ext {
         };
     }
     #[macro_export]
-    #[cfg(not(feature = "tokio-tracing"))]
+    #[cfg(not(all(tokio_unstable, feature = "tokio-tracing")))]
     macro_rules! spawn_named {
         ($name:expr, $future:expr) => {{
             let _ = &$name; // ignore the name in non-tracing builds
