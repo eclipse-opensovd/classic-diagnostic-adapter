@@ -311,6 +311,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "cda-build"
+version = "0.1.0"
+dependencies = [
+ "rustversion",
+]
+
+[[package]]
 name = "cda-comm-doip"
 version = "0.1.0"
 dependencies = [
@@ -470,6 +477,7 @@ dependencies = [
 name = "cda-tracing"
 version = "0.1.0"
 dependencies = [
+ "cda-build",
  "console-subscriber",
  "nu-ansi-term",
  "opentelemetry",

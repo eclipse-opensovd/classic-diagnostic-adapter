@@ -55,6 +55,9 @@ opentelemetry-semantic-conventions = { workspace = true, features = [
 # tokio console
 console-subscriber = { workspace = true, optional = true }
 
+[build-dependencies]
+cda-build = { workspace = true }
+
 [features]
 default = []
 tokio-tracing = ["dep:console-subscriber", "tokio/tracing"]
