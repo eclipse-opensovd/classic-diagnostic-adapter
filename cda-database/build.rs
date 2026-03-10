@@ -171,8 +171,11 @@ fn out_dir() -> Result<String, std::io::Error> {
     Ok(out_dir)
 }
 
-#[cfg(any(feature = "gen-protos", feature = "gen-flatbuffers"))]
+// allow using result as it is used when features are enabled
+#[allow(clippy::unnecessary_wraps)]
 fn main() -> std::io::Result<()> {
+    cda_build::set_nightly_flag();
+
     #[cfg(feature = "gen-protos")]
     generate_protos()?;
 
@@ -181,6 +184,3 @@ fn main() -> std::io::Result<()> {
 
     Ok(())
 }
-
-#[cfg(not(any(feature = "gen-protos", feature = "gen-flatbuffers")))]
-fn main() {}

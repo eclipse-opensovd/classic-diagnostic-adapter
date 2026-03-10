@@ -372,6 +372,7 @@ name = "cda-database"
 version = "0.1.0"
 dependencies = [
  "cargo_toml",
+ "cda-build",
  "cda-interfaces",
  "flatbuffers",
  "ouroboros",
@@ -450,6 +451,7 @@ dependencies = [
  "aide",
  "axum",
  "axum-extra",
+ "cda-build",
  "cda-interfaces",
  "cda-plugin-security",
  "cda-tracing",
@@ -1633,6 +1635,7 @@ version = "0.1.0"
 dependencies = [
  "aide",
  "axum",
+ "cda-build",
  "cda-comm-doip",
  "cda-core",
  "cda-database",

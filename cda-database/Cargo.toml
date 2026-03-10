@@ -44,6 +44,7 @@ serde = { workspace = true, features = ["derive"] }
 serde_json = { workspace = true }
 
 [build-dependencies]
+cda-build = { workspace = true }
 prost-build = { workspace = true }
 cargo_toml = { workspace = true }
 toml = { workspace = true }
