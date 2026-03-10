@@ -721,6 +721,41 @@ impl<'a> EcuDataBuilder<'a> {
             specific_data,
         })
     }
+
+    /// Creates a VALUE param whose BYTE-POSITION is omitted (`None`).
+    ///
+    /// Per ISO 22901-1 §7.4.8 a parameter that follows a
+    /// PARAM-LENGTH-INFO field has no statically known position, so
+    /// BYTE-POSITION is not defined in the ODX instance.
+    pub fn create_value_param_no_byte_pos(
+        &mut self,
+        name: &'a str,
+        dop: WIPOffset<dataformat::DOP<'a>>,
+    ) -> WIPOffset<dataformat::Param<'a>> {
+        let specific_data = Some(
+            dataformat::ParamSpecificData::tag_as_value(dataformat::Value::create(
+                &mut self.fbb,
+                &dataformat::ValueArgs {
+                    physical_default_value: None,
+                    dop: Some(dop),
+                },
+            ))
+            .value_offset(),
+        );
+
+        self.create_param(&ParameterParams {
+            param_type: dataformat::ParamType::VALUE,
+            short_name: Some(name),
+            semantic: None,
+            sdgs: None,
+            physical_default_value: None,
+            byte_position: None,
+            bit_position: None,
+            specific_data_type: dataformat::ParamSpecificData::Value,
+            specific_data,
+        })
+    }
+
     pub fn create_phys_const_param(
         &mut self,
         name: &'a str,
@@ -750,6 +785,34 @@ impl<'a> EcuDataBuilder<'a> {
             byte_position: Some(byte_pos),
             bit_position: Some(bit_pos),
             specific_data_type: dataformat::ParamSpecificData::PhysConst,
+            specific_data,
+        })
+    }
+
+    pub fn create_length_key_param(
+        &mut self,
+        name: &'a str,
+        dop: WIPOffset<dataformat::DOP<'a>>,
+        byte_pos: u32,
+        bit_pos: u32,
+    ) -> WIPOffset<dataformat::Param<'a>> {
+        let specific_data = Some(
+            dataformat::ParamSpecificData::tag_as_length_key_ref(dataformat::LengthKeyRef::create(
+                &mut self.fbb,
+                &dataformat::LengthKeyRefArgs { dop: Some(dop) },
+            ))
+            .value_offset(),
+        );
+
+        self.create_param(&ParameterParams {
+            param_type: dataformat::ParamType::LENGTH_KEY,
+            short_name: Some(name),
+            semantic: None,
+            sdgs: None,
+            physical_default_value: None,
+            byte_position: Some(byte_pos),
+            bit_position: Some(bit_pos),
+            specific_data_type: dataformat::ParamSpecificData::LengthKeyRef,
             specific_data,
         })
     }
@@ -984,6 +1047,9 @@ impl<'a> EcuDataBuilder<'a> {
             DiagCodedTypeVariant::StandardLength(_) => {
                 dataformat::DiagCodedTypeName::STANDARD_LENGTH_TYPE
             }
+            DiagCodedTypeVariant::ParamLengthInfo(_) => {
+                dataformat::DiagCodedTypeName::PARAM_LENGTH_INFO_TYPE
+            }
         };
 
         let (specific_data_type, specific_data) = match specific_data_type {
@@ -1032,6 +1098,18 @@ impl<'a> EcuDataBuilder<'a> {
                     dataformat::SpecificDataType::tag_as_standard_length_type(standard_length),
                 )
             }
+            // ParamLengthInfo is variable-length at runtime; this generic helper creates
+            // a minimal entry without wiring a concrete LENGTH-KEY param reference.
+            DiagCodedTypeVariant::ParamLengthInfo(_) => {
+                let pli = dataformat::ParamLengthInfoType::create(
+                    &mut self.fbb,
+                    &dataformat::ParamLengthInfoTypeArgs { length_key: None },
+                );
+                (
+                    dataformat::SpecificDataType::ParamLengthInfoType,
+                    dataformat::SpecificDataType::tag_as_param_length_info_type(pli),
+                )
+            }
         };
 
         let diag_coded_type_args = dataformat::DiagCodedTypeArgs {
@@ -1060,6 +1138,39 @@ impl<'a> EcuDataBuilder<'a> {
                 bit_mask: None,
                 condensed: false,
             }),
+        )
+    }
+
+    pub fn create_diag_coded_type_param_length_info(
+        &mut self,
+        length_key_param_name: &'a str,
+        data_type: DataType,
+    ) -> WIPOffset<dataformat::DiagCodedType<'a>> {
+        let short_name_offset = self.fbb.create_string(length_key_param_name);
+        let length_key_param = dataformat::Param::create(
+            &mut self.fbb,
+            &dataformat::ParamArgs {
+                short_name: Some(short_name_offset),
+                ..Default::default()
+            },
+        );
+        let pli = dataformat::ParamLengthInfoType::create(
+            &mut self.fbb,
+            &dataformat::ParamLengthInfoTypeArgs {
+                length_key: Some(length_key_param),
+            },
+        );
+        let specific_data = dataformat::SpecificDataType::tag_as_param_length_info_type(pli);
+        dataformat::DiagCodedType::create(
+            &mut self.fbb,
+            &dataformat::DiagCodedTypeArgs {
+                type_: dataformat::DiagCodedTypeName::PARAM_LENGTH_INFO_TYPE,
+                base_type_encoding: None,
+                base_data_type: data_type.into(),
+                is_high_low_byte_order: true,
+                specific_data_type: dataformat::SpecificDataType::ParamLengthInfoType,
+                specific_data: Some(specific_data.value_offset()),
+            },
         )
     }
 

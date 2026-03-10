@@ -168,7 +168,8 @@ impl DiagCodedType {
                     )));
                 }
             }
-            DiagCodedTypeVariant::StandardLength(_) => {}
+            // StandardLength and ParamLengthInfo are valid for any base datatype
+            DiagCodedTypeVariant::StandardLength(_) | DiagCodedTypeVariant::ParamLengthInfo(_) => {}
         }
         Ok(Self {
             base_datatype,
@@ -190,7 +191,44 @@ impl DiagCodedType {
             DiagCodedTypeVariant::StandardLength(standard_length) => {
                 Some(standard_length.bit_length)
             }
+            DiagCodedTypeVariant::ParamLengthInfo(_) => None,
         }
+    }
+
+    #[must_use]
+    pub fn length_key_name(&self) -> Option<&str> {
+        match &self.type_ {
+            DiagCodedTypeVariant::ParamLengthInfo(name) => Some(name),
+            _ => None,
+        }
+    }
+
+    /// Extracts `byte_count` bytes at `byte_pos` from `uds_payload` for a PARAM-LENGTH-INFO field.
+    ///
+    /// # Errors
+    /// Returns `DiagServiceError::NotEnoughData` if the payload is too short.
+    pub fn decode_with_runtime_byte_length(
+        &self,
+        uds_payload: &[u8],
+        byte_pos: usize,
+        byte_count: usize,
+    ) -> Result<(Vec<u8>, usize), DiagServiceError> {
+        if byte_count == 0 {
+            return Ok((Vec::new(), 0));
+        }
+        let end_pos = byte_pos.saturating_add(byte_count);
+        if uds_payload.len() < end_pos {
+            return Err(DiagServiceError::NotEnoughData {
+                expected: end_pos,
+                actual: uds_payload.len(),
+            });
+        }
+        // bounds already verified above
+        let data = uds_payload
+            .get(byte_pos..end_pos)
+            .unwrap_or_default()
+            .to_vec();
+        Ok((data, byte_count.saturating_mul(8)))
     }
 
     #[must_use]
@@ -235,6 +273,13 @@ impl DiagCodedType {
 
             DiagCodedTypeVariant::StandardLength(ref slt) => {
                 self.pos_info_standard_len(byte_pos, slt)
+            }
+
+            DiagCodedTypeVariant::ParamLengthInfo(ref key_name) => {
+                Err(DiagServiceError::InvalidDatabase(format!(
+                    "ParamLengthInfo '{key_name}' requires a runtime-resolved byte length; call \
+                     decode_with_runtime_byte_length instead"
+                )))
             }
         }?;
 
@@ -573,6 +618,14 @@ impl DiagCodedType {
                     )));
                 }
                 (packed, len, mask)
+            }
+            DiagCodedTypeVariant::ParamLengthInfo(_) => {
+                let bit_len = input_data.len().saturating_mul(8);
+                if bit_len == 0 {
+                    return Ok(());
+                }
+                let (packed, len) = pack_data(bit_len, 0, None, &input_data)?;
+                (packed, len, None)
             }
         };
 
@@ -1012,6 +1065,9 @@ pub enum DiagCodedTypeVariant {
     LeadingLengthInfo(BitLength),
     MinMaxLength(MinMaxLengthType),
     StandardLength(StandardLengthType),
+    /// Variable-length field whose byte count is determined at runtime from a previously decoded
+    /// `LENGTH-KEY` parameter. The `String` holds the `SHORT-NAME` of that parameter.
+    ParamLengthInfo(String),
 }
 
 impl TryFrom<dataformat::DiagCodedType<'_>> for DiagCodedTypeVariant {
@@ -1059,9 +1115,24 @@ impl TryFrom<dataformat::DiagCodedType<'_>> for DiagCodedTypeVariant {
                         .map(DiagCodedTypeVariant::MinMaxLength)
                 }),
             dataformat::SpecificDataType::ParamLengthInfoType => {
-                Err(DiagServiceError::InvalidDatabase(
-                    "DiagCodedType SpecificData ParamLengthInfoType not supported".to_owned(),
-                ))
+                let pli = value
+                    .specific_data_as_param_length_info_type()
+                    .ok_or_else(|| {
+                        DiagServiceError::InvalidDatabase(
+                            "DiagCodedType SpecificData ParamLengthInfoType not found".to_owned(),
+                        )
+                    })?;
+                let length_key_param = pli.length_key().ok_or_else(|| {
+                    DiagServiceError::InvalidDatabase(
+                        "ParamLengthInfoType has no length_key param reference".to_owned(),
+                    )
+                })?;
+                let key_name = length_key_param.short_name().ok_or_else(|| {
+                    DiagServiceError::InvalidDatabase(
+                        "ParamLengthInfoType length_key param has no short_name".to_owned(),
+                    )
+                })?;
+                Ok(DiagCodedTypeVariant::ParamLengthInfo(key_name.to_owned()))
             }
             _ => Err(DiagServiceError::InvalidDatabase(format!(
                 "DiagCodedType SpecificData type {:?} not supported",
@@ -1164,6 +1235,67 @@ impl TryFrom<dataformat::Termination> for Termination {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_param_length_info_helpers() {
+        let diag_type = DiagCodedType::new_high_low_byte_order(
+            DataType::ByteField,
+            DiagCodedTypeVariant::ParamLengthInfo("LEN_KEY".to_owned()),
+        )
+        .unwrap();
+
+        assert_eq!(diag_type.bit_len(), None);
+        assert_eq!(diag_type.length_key_name(), Some("LEN_KEY"));
+    }
+
+    #[test]
+    fn test_param_length_info_decode_requires_runtime_length() {
+        let diag_type = DiagCodedType::new_high_low_byte_order(
+            DataType::ByteField,
+            DiagCodedTypeVariant::ParamLengthInfo("LK".to_owned()),
+        )
+        .unwrap();
+
+        let err = diag_type.decode(&[0xAA, 0xBB], 0, 0).unwrap_err();
+        let msg = format!("{err}");
+        assert!(msg.contains("decode_with_runtime_byte_length"));
+    }
+
+    #[test]
+    fn test_param_length_info_runtime_decode_and_encode() {
+        let diag_type = DiagCodedType::new_high_low_byte_order(
+            DataType::ByteField,
+            DiagCodedTypeVariant::ParamLengthInfo("LK".to_owned()),
+        )
+        .unwrap();
+
+        let (bytes, bit_len) = diag_type
+            .decode_with_runtime_byte_length(&[0x10, 0x20, 0x30, 0x40], 1, 2)
+            .unwrap();
+        assert_eq!(bytes, vec![0x20, 0x30]);
+        assert_eq!(bit_len, 16);
+
+        let (empty, empty_len) = diag_type
+            .decode_with_runtime_byte_length(&[0x10, 0x20], 1, 0)
+            .unwrap();
+        assert!(empty.is_empty());
+        assert_eq!(empty_len, 0);
+
+        let mut uds_payload = Vec::new();
+        diag_type
+            .encode(vec![0xDE, 0xAD, 0xBE, 0xEF], &mut uds_payload, 0, 0)
+            .unwrap();
+        assert_eq!(uds_payload, vec![0xDE, 0xAD, 0xBE, 0xEF]);
+
+        // Encoding zero bytes must be a no-op (payload must remain unchanged).
+        let mut empty_payload = vec![0xFFu8; 2];
+        diag_type.encode(vec![], &mut empty_payload, 0, 0).unwrap();
+        assert_eq!(
+            empty_payload,
+            vec![0xFF, 0xFF],
+            "zero-length encode must not modify payload"
+        );
+    }
 
     #[test]
     fn test_unpack_data_masked() {
