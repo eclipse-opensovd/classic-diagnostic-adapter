@@ -2393,9 +2393,8 @@ impl<S: SecurityPlugin> EcuManager<S> {
     ///   onto the stack for further traversal.
     /// - **`Variant`**: extracts the `DiagLayer` and pushes its nested `ParentRef`s
     ///   onto the stack for further traversal.
-    /// - **`Protocol`**: extracts the `DiagLayer` and iterates its nested `Protocol`
-    ///   parent refs (which are `Protocol` items, not `ParentRef`) to collect their
-    ///   `DiagLayer`s as well.
+    /// - **`Protocol`**: extracts the `DiagLayer` and pushes its nested `ParentRef`
+    ///   items onto the stack for further traversal.
     /// - **`EcuSharedData`**: extracts the `DiagLayer` (leaf node, no `parent_refs`).
     ///
     /// # Example
@@ -2438,19 +2437,11 @@ impl<S: SecurityPlugin> EcuManager<S> {
                 }
                 Ok(datatypes::ParentRefType::Protocol) => {
                     if let Some(p) = parent_ref.ref__as_protocol() {
-                        if let Some(dl) = p.diag_layer() {
-                            result.push((parent_ref.clone(), datatypes::DiagLayer(dl)));
+                        if let Some(nested_refs) = p.parent_refs() {
+                            stack.extend(nested_refs.iter().map(datatypes::ParentRef));
                         }
-                        // Protocol.parent_refs() yields Protocol items, not ParentRef,
-                        // so we traverse them with a dedicated local stack.
-                        let mut protocol_stack: Vec<_> =
-                            p.parent_refs().into_iter().flatten().collect();
-
-                        while let Some(pp) = protocol_stack.pop() {
-                            if let Some(dl) = pp.diag_layer() {
-                                result.push((parent_ref.clone(), datatypes::DiagLayer(dl)));
-                            }
-                            protocol_stack.extend(pp.parent_refs().into_iter().flatten());
+                        if let Some(dl) = p.diag_layer() {
+                            result.push((parent_ref, datatypes::DiagLayer(dl)));
                         }
                     }
                 }
@@ -7486,7 +7477,11 @@ mod tests {
 
         // ── Protocol with a parent protocol ──
         let parent_proto = b.create_protocol("ParentProto", None, None, None);
-        let proto = b.create_protocol("Proto", None, None, Some(vec![parent_proto]));
+        let parent_proto_pr = b.create_parent_ref(
+            DataFormatParentRefType::Protocol,
+            Some(DataFormatParentRefType::tag_as_protocol(parent_proto)),
+        );
+        let proto = b.create_protocol("Proto", None, None, Some(vec![parent_proto_pr]));
         let proto_pr = b.create_parent_ref(
             DataFormatParentRefType::Protocol,
             Some(DataFormatParentRefType::tag_as_protocol(proto)),
