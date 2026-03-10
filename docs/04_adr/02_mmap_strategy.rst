@@ -16,7 +16,7 @@ Status
 
 **Accepted**
 
-Date: 2026-03-09
+Date: 2026-03-10
 
 Context
 -------
@@ -27,7 +27,7 @@ data compressed with LZMA.  At startup every MDD file must be read, the
 protobuf parsed, the FlatBuffers payload decompressed, and the resulting data
 kept available for the lifetime of the process.
 
-The target platform is **Linux** (embedded automotive ECUs), where RAM is
+The main target platform is **Linux** (onboard automotive ECUs), where RAM is
 limited and the system may reclaim memory aggressively under pressure via the
 kernel page cache.
 
@@ -36,7 +36,7 @@ Three strategies were evaluated:
 1. **Heap** — decompress into heap-allocated ``Vec<u8>`` buffers.
 2. **MmapSidecar** — decompress into separate ``.fb`` sidecar files next to the
    MDD files, then memory-map those sidecar files.
-3. **MmapMdd (in-place)** — decompress the MDD files themselves once (during a
+3. **MmapMdd (in-place)** — decompress the MDD files themselves once (i.e. during a
    software update), rewriting them with uncompressed chunk data, then
    memory-map the MDD files directly with zero-copy protobuf decoding.
 
@@ -44,14 +44,14 @@ Decision
 --------
 
 We will use the **MmapMdd (in-place)** strategy: MDD files are decompressed
-once during a software update and are subsequently used **read-only** via
+once and are subsequently used **read-only** via
 ``mmap``.  The protobuf layer uses prost's ``Bytes`` support
 (``Bytes::from_owner(mmap)``) so that chunk data fields are zero-copy slices
 into the memory-mapped file — no heap allocation is required for the
 FlatBuffers payload.
 
 Before the atomic rename of a rewritten MDD file, the written data is verified
-by re-parsing the temporary file and comparing SHA-256 checksums of every chunk
+by re-parsing the temporary file and comparing SHA-512 checksums of every chunk
 against the expected values.
 
 Rationale
@@ -60,98 +60,58 @@ Rationale
 Performance Comparison
 ^^^^^^^^^^^^^^^^^^^^^^
 
-Benchmarking was conducted on macOS / Apple Silicon (arm64) with 36 GB RAM
-using 68 MDD files (53 MB compressed, 242 MB uncompressed), ``--release``
-profile, 3-minute warm-up, and ``sudo memory_pressure -S -l critical -s 30``
-applied twice.  Linux behaviour is expected to be comparable or better, since
-the Linux kernel page cache uses a similar eviction strategy for file-backed
-pages.
+Benchmarking was conducted on **Linux 6.18.2-arch2-1** (x86_64, i5-7200U CPU)
+with 32 GB RAM using 68 MDD files (~47 MB compressed, 242 MB uncompressed),
+Rust 1.92.0, ``--release`` profile, ~3 minutes idle warm-up, and swap disabled.
 
 .. list-table:: RSS Comparison (KB)
    :header-rows: 1
-   :widths: 25 18 18 18 15
+   :widths: 30 20 20 20
 
    * - Strategy
      - Idle
-     - Pressure
-     - Recovery (3 min)
-     - Extra disk
-   * - Heap
-     - 440,128
-     - 420,432
-     - —
-     - None
-   * - Mmap without rewrite
-     - 422,288
-     - 407,456
-     - —
-     - None
+     - Under Pressure
+     - Disk Usage
+   * - Heap (baseline)
+     - 486,900
+     - 469,320
+     - 47 MB
    * - MmapSidecar
-     - 191,680
-     - 70,672
-     - —
-     - ~236 MB
+     - 307,552
+     - 171,904
+     - ~282 MB
    * - **MmapMdd (in-place)**
-     - **35,264**
-     - **35,264**
-     - **35,520**
-     - **+189 MB**
+     - **152,780**
+     - **118,988**
+     - **242 MB**
 
 .. note::
-   The "Mmap without rewrite" row (``--no-rewrite-mdd``) confirms that
-   memory-mapping alone does not help when the MDD chunks are still
-   LZMA-compressed — the FlatBuffers payload must be decompressed onto the
-   heap, resulting in RSS comparable to the Heap baseline.  The in-place
-   rewrite step is therefore the key enabler for the RSS reduction.
-
-.. note::
-   The MmapMdd implementation includes ``madvise(2)`` hints to optimize kernel
-   page cache behavior:
-
-   - ``MADV_SEQUENTIAL`` after ``mmap()`` enables aggressive read-ahead during
-     protobuf decode.
-   - ``MADV_RANDOM`` after protobuf decode disables read-ahead for the
-     subsequent sparse FlatBuffers vtable lookups.
-
-   These hints reduced idle RSS from 194,064 KB (baseline mmap without hints) to
-   **35,264 KB** (−81.8 %), with stable behavior under memory pressure.
-   This introduces a libc dependency for the optimal performance case, but the code is
-   isolated to a small unsafe block and falls back gracefully if the hints cannot be set.
+   The MmapMdd implementation uses ``memmap2::Advice::Random``
+   (``MADV_RANDOM``) immediately after ``mmap()`` to disable read-ahead for
+   the sparse FlatBuffers vtable lookups that dominate runtime access.  This
+   avoids a ``libc`` dependency — the hint is set directly via ``memmap2``
+   before ownership is transferred to ``Bytes::from_owner()``.
 
 MmapMdd Advantages over Heap
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 
-1. **RSS under pressure: −92 %** (35 MB vs 420 MB)
+1. **RSS under pressure: −75 %** (119 MB vs 469 MB)
 
    All FlatBuffers data is backed by the MDD file on disk.  Under memory
    pressure the kernel cleanly drops those pages and re-reads them on demand —
    no swap I/O required.  On the heap strategy, anonymous pages can only be
    compressed or swapped, incurring significant I/O overhead with a modest
-   −4.5 % reduction.
+   −3.7 % reduction.
 
-   With ``madvise(2)`` hints (``MADV_SEQUENTIAL`` during decode,
-   ``MADV_RANDOM`` thereafter), RSS remains stable at ~35 MB even under
-   pressure, as the kernel avoids wasteful read-ahead for sparse FlatBuffers
-   lookups.
-
-2. **Idle RSS: −92 %** (35 MB vs 440 MB)
+2. **Idle RSS: −69 %** (153 MB vs 487 MB)
 
    The zero-copy protobuf decode (``Bytes::from_owner(mmap)``) avoids copying
    every ``bytes`` field to the heap.  Chunk data fields are slices into the
    mmap, so there is no second copy of the decompressed data in memory.
 
-   The ``MADV_SEQUENTIAL`` hint enables efficient read-ahead during the
-   initial protobuf decode, then ``MADV_RANDOM`` prevents the kernel from
-   prefetching adjacent pages during subsequent random-access FlatBuffers
-   queries, reducing idle RSS by an additional 159 MB (−81.8 %) compared to
-   mmap without hints.
-
-3. **Recovery stability**
-
-   Three minutes after pressure ended, RSS remained at ~35 MB — pages are only
-   faulted back in on actual access and do not eagerly repopulate.  This is
-   ideal for long-running processes that may experience intermittent
-   memory contention.
+   Setting ``MADV_RANDOM`` via ``memmap2`` prevents the kernel from
+   prefetching adjacent pages during random-access FlatBuffers queries,
+   keeping idle RSS well below the heap baseline.
 
 MmapMdd Advantages over MmapSidecar
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
@@ -162,22 +122,19 @@ MmapMdd Advantages over MmapSidecar
    files are the single source of truth.  This eliminates an entire class of
    consistency bugs (stale sidecar, missing sidecar, partial write).
 
-2. **Lower RSS under pressure** (35 MB vs 71 MB)
+2. **Lower RSS under pressure** (119 MB vs 172 MB)
 
    The in-place strategy benefits from zero-copy protobuf decoding
    (``Bytes::from_owner``) which the sidecar approach did not use.  All data —
    protobuf metadata and FlatBuffers payloads — lives in the single mmap,
    giving the kernel a unified region to evict.
 
-   Additionally, the use of ``madvise(2)`` hints (``MADV_SEQUENTIAL`` →
-   ``MADV_RANDOM``) optimizes the kernel's page cache eviction strategy for
-   the two-phase access pattern (sequential decode, then sparse lookups),
-   reducing RSS by 50 % compared to the sidecar approach.
-   (``Bytes::from_owner``) which the sidecar approach did not use.  All data —
-   protobuf metadata and FlatBuffers payloads — lives in the single mmap,
-   giving the kernel a unified region to evict.
+3. **Lower idle RSS** (153 MB vs 308 MB)
 
-3. **Less extra disk space** (+189 MB vs +236 MB)
+   Zero-copy decoding avoids duplicating chunk data on the heap, resulting in
+   50 % lower idle RSS than the sidecar approach.
+
+4. **Less extra disk space** (+195 MB vs +235 MB)
 
    Sidecar files duplicated the FlatBuffers payload alongside the original
    compressed MDD.  In-place rewriting replaces the compressed data, so the
@@ -186,7 +143,7 @@ MmapMdd Advantages over MmapSidecar
 Trade-offs
 ^^^^^^^^^^
 
-- **Disk usage increases**: MDD files grow from 53 MB to 242 MB (x4.6).  This
+- **Disk usage increases**: MDD files grow from ~47 MB to 242 MB (~5.1×).  This
   is a one-time cost during the software update and is acceptable on the target
   platform where storage is less constrained than RAM.
 
@@ -194,7 +151,8 @@ Trade-offs
   with uncompressed versions.  This is acceptable because:
 
   - Decompression happens once during a controlled update step, not at runtime.
-  - SHA-256 verification ensures data integrity before the atomic rename.
+    - This will be implemented at a later point in time in the update plugin, for now the CDA does this at runtime.
+  - SHA-512 verification ensures data integrity before the atomic rename.
 
 
 Consequences
@@ -203,65 +161,31 @@ Consequences
 Positive
 ^^^^^^^^
 
-- **92 % RSS reduction under memory pressure** compared to the heap baseline
-  (35 MB vs 420 MB), critical for embedded Linux targets with limited RAM.
-- **Stable RSS across idle and pressure phases** (~35 MB) due to optimized
-  ``madvise(2)`` hints that align with the two-phase access pattern
-  (sequential protobuf decode → sparse FlatBuffers lookups).
+- **75 % RSS reduction under memory pressure** compared to the heap baseline
+  (119 MB vs 469 MB), critical for embedded Linux targets with limited RAM.
+- **69 % lower idle RSS** (153 MB vs 487 MB) due to zero-copy protobuf
+  decoding and ``MADV_RANDOM`` via ``memmap2`` to suppress wasteful
+  read-ahead during sparse FlatBuffers lookups.
 - **Zero-copy data path**: mmap → ``Bytes`` → FlatBuffers — no intermediate
   heap allocations for the diagnostic payload.
 - **Single file, single source of truth**: no sidecar files to manage,
   eliminating consistency and cleanup issues.
-- **Atomic, verified writes**: SHA-256 checksums and temp-file + rename ensure
+- **Atomic, verified writes**: SHA-512 checksums and temp-file + rename ensure
   data integrity even if the update is interrupted.
 - **Read-only at runtime**: after the initial update, MDD files are opened
   read-only, compatible with read-only filesystems or integrity-checked
   partitions.
+- **No libc dependency**: ``MADV_RANDOM`` is set via ``memmap2`` before
+  ownership transfer, avoiding the need for direct ``libc::madvise()`` calls.
 
 Negative
 ^^^^^^^^
 
-- **4.6× disk usage increase** for the MDD database directory.
-- **One-time decompression cost** during software update (not at runtime).
+- **5.1× disk usage increase** for the MDD database directory.
+- **One-time decompression cost** i.e. during software update or first startup
 - **Platform dependency**: relies on OS-level mmap, page cache behaviour, and
-  ``madvise(2)`` support (POSIX systems).
-- **libc dependency for optimal performance**: the two-phase ``madvise(2)``
-  hint strategy (``MADV_SEQUENTIAL`` → ``MADV_RANDOM``) requires calling
-  ``libc::madvise()`` after the ``Mmap`` object is consumed by
-  ``Bytes::from_owner()``. Using only ``memmap2::Advice::Random`` from the
-  start results in ~103 MB idle RSS (3× worse) due to suboptimal read-ahead
-  during the sequential protobuf decode phase.
-
-Implementation Details
-^^^^^^^^^^^^^^^^^^^^^^
-
-Two-Phase madvise(2) Strategy
-""""""""""""""""""""""""""""""
-
-The MDD loading process has two distinct access patterns:
-
-1. **Sequential protobuf decode** (~1 second): The file is read linearly from
-   start to end. ``MADV_SEQUENTIAL`` enables aggressive kernel read-ahead,
-   minimizing page faults during this phase.
-
-2. **Random FlatBuffers queries** (runtime): FlatBuffers structures are
-   accessed via vtable pointer-chasing, resulting in sparse, unpredictable page
-   access. ``MADV_RANDOM`` disables wasteful read-ahead that would load
-   neighboring pages that are unlikely to be accessed soon.
-
-Because the ``Mmap`` object must be consumed by ``Bytes::from_owner()`` to
-enable zero-copy protobuf decoding, we cannot use ``mmap.advise()`` after the
-decode completes. Instead:
-
-1. After ``mmap()``: call ``mmap.advise(Sequential)``
-2. Capture ``mmap_ptr`` and ``mmap_len`` before ownership transfer
-3. Call ``Bytes::from_owner(mmap)`` to enable zero-copy prost decode
-4. After ``MddFile::decode()``: call ``libc::madvise(mmap_ptr, ..., MADV_RANDOM)``
-
-This two-phase approach achieved **35 MB idle RSS** compared to:
-
-- **194 MB** with mmap but no hints (baseline)
-- **103 MB** with ``MADV_RANDOM`` only (suboptimal for sequential decode)
+  ``madvise(2)`` support (POSIX systems), although the latter is guarded by a cfg flag, so the CDA still
+  works on platforms without ``MADV_RANDOM`` support (e.g. Windows) possibly with higher idle RSS.
 
 Alternatives Considered
 -----------------------
@@ -270,7 +194,7 @@ Heap (Baseline)
 ^^^^^^^^^^^^^^^
 
 Decompress FlatBuffers data into heap-allocated ``Vec<u8>`` buffers.  Simplest
-implementation but RSS remains high (~440 MB idle, ~420 MB under pressure).
+implementation but RSS remains high (~487 MB idle, ~469 MB under pressure).
 Anonymous heap pages cannot be cleanly evicted by the kernel — they must be
 compressed or swapped, incurring I/O overhead.  Unsuitable for
 memory-constrained targets.
@@ -279,9 +203,9 @@ Separate Flatbuffer file (Sidecar)
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 
 Decompress into separate ``.fb`` files and memory-map those.  Achieves good
-pressure behaviour (~71 MB) but introduces additional file management
+pressure behaviour (~172 MB) but introduces additional file management
 complexity: sidecar files must be created, kept in sync with MDD files, and
-cleaned up on updates.  Uses more disk space (+236 MB) because both compressed
+cleaned up on updates.  Uses more disk space (+235 MB) because both compressed
 MDD and uncompressed sidecar exist side by side.  The sidecar approach was
 prototyped and benchmarked but rejected in favour of the simpler in-place
 strategy.

@@ -368,7 +368,6 @@ dependencies = [
  "cargo_toml",
  "cda-interfaces",
  "flatbuffers",
- "libc",
  "memmap2",
  "ouroboros",
  "prost",

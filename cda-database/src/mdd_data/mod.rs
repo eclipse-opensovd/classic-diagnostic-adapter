@@ -57,6 +57,79 @@ const fn file_magic_bytes() -> [u8; FILE_MAGIC_BYTES_LEN] {
     bytes
 }
 
+/// Decompress chunk data based on the compression algorithm.
+///
+/// # Errors
+/// Returns an error if the compression algorithm is unsupported or if
+/// LZMA decompression fails.
+fn decompress_chunk_data(
+    data: Bytes,
+    compression_algorithm: Option<&str>,
+    chunk_name: &str,
+) -> Result<Bytes, MddError> {
+    match compression_algorithm.map(|s| s.to_lowercase()).as_deref() {
+        Some("lzma") => {
+            let decompressor = xz2::stream::Stream::new_lzma_decoder(u64::MAX)
+                .map_err(|e| MddError::Io(format!("Failed to create LZMA decoder: {e}")))?;
+            let mut decoder = xz2::bufread::XzDecoder::new_stream(
+                std::io::BufReader::new(data.as_ref()),
+                decompressor,
+            );
+            let mut decoded = Vec::new();
+            decoder
+                .read_to_end(&mut decoded)
+                .map_err(|e| MddError::Io(format!("Failed to decompress chunk data: {e}")))?;
+            Ok(Bytes::from(decoded))
+        }
+        None => Ok(data),
+        Some(algorithm) => Err(MddError::Parsing(format!(
+            "Unsupported compression algorithm '{algorithm}' for chunk '{chunk_name}'"
+        ))),
+    }
+}
+
+/// Memory-map an MDD file, validate its magic bytes, and decode the protobuf.
+///
+/// Returns the decoded `MddFile` backed by zero-copy `Bytes` sub-slices of
+/// the memory-mapped region.
+///
+/// # Errors
+/// Returns an error if the file cannot be opened, memory-mapped, has invalid
+/// magic bytes, or cannot be parsed as a protobuf.
+fn mmap_and_decode_mdd(mdd_path: &str) -> Result<fileformat::MddFile, MddError> {
+    let mdd_file = std::fs::File::open(mdd_path)
+        .map_err(|e| MddError::Io(format!("Failed to open MDD file '{mdd_path}': {e}")))?;
+
+    // SAFETY: The file is opened read-only, and we only hold a shared reference to the mapping.
+    // The caller must ensure the file is not modified or truncated while mapped.
+    let mmap = unsafe { memmap2::Mmap::map(&mdd_file) }
+        .map_err(|e| MddError::Io(format!("Failed to mmap MDD file '{mdd_path}': {e}")))?;
+
+    #[cfg(unix)]
+    // Access to the ECU database is random, the 'decode' function will read sequentially,
+    // but for the rest of the life-time reads will random.
+    if let Err(e) = mmap.advise(memmap2::Advice::Random) {
+        tracing::warn!(error = %e, "Failed to set mmap advice");
+    }
+
+    let magic_slice = mmap
+        .get(..FILE_MAGIC_BYTES_LEN)
+        .ok_or_else(|| MddError::Parsing("Invalid file format: file too small".to_owned()))?;
+    if *magic_slice != file_magic_bytes() {
+        return Err(MddError::Parsing(
+            "Invalid file format: Magic Byte mismatch".to_owned(),
+        ));
+    }
+
+    // Wrap the mmap as `Bytes` so that prost decoding produces zero-copy
+    // sub-slices for `bytes` fields instead of heap-allocated `Vec<u8>`.
+    // The resulting `Bytes` sub-slices keep the mmap alive via refcount.
+    let mmap_bytes = Bytes::from_owner(mmap);
+    let payload = mmap_bytes.slice(FILE_MAGIC_BYTES_LEN..);
+    fileformat::MddFile::decode(payload)
+        .map_err(|e| MddError::Parsing(format!("Failed to parse MDD file: {e}")))
+}
+
 #[derive(Debug)]
 pub struct ProtoLoadConfig {
     pub load_data: bool,
@@ -173,125 +246,69 @@ fn load_chunk_data(mdd_file: &str, chunk: &Chunk) -> Result<Bytes, MddError> {
     )
 )]
 pub fn load_proto_data(
-    mdd_file: &str,
+    mdd_file_path: &str,
     load_info: &[ProtoLoadConfig],
 ) -> Result<(String, HashMap<ChunkType, Vec<Chunk>>), MddError> {
     tracing::trace!("Loading ECU data from file");
     let start = Instant::now();
-    let filein = std::fs::File::open(mdd_file)
-        .map_err(|e| MddError::Io(format!("Failed to open mdd file: {e}")))?;
-
-    // SAFETY: The file is opened read-only and we only hold a shared reference to the mapping.
-    // The caller must ensure the file is not modified or truncated while mapped.
-    let mmap = unsafe { memmap2::Mmap::map(&filein) }
-        .map_err(|e| MddError::Io(format!("Failed to memory-map mdd file: {e}")))?;
-
-    // Hint: file will be read sequentially for protobuf decode, enables aggressive read-ahead.
-    #[cfg(unix)]
-    if let Err(e) = mmap.advise(memmap2::Advice::Sequential) {
-        tracing::debug!(error = %e, "Failed to set mmap advice");
-    }
-
-    // Capture pointer and length before consuming the mmap.
-    let mmap_ptr = mmap.as_ptr();
-    let mmap_len = mmap.len();
-
-    let magic = file_magic_bytes();
-    let magic_slice = mmap
-        .get(..FILE_MAGIC_BYTES_LEN)
-        .ok_or_else(|| MddError::Parsing("Invalid file format: file too small".to_owned()))?;
-    if *magic_slice != magic {
-        return Err(MddError::Parsing(
-            "Invalid file format: Magic Byte mismatch".to_owned(),
-        ));
-    }
-
-    // Wrap the mmap as `Bytes` so that prost decoding produces zero-copy
-    // sub-slices for `bytes` fields instead of heap-allocated `Vec<u8>`.
-    // The resulting `Bytes` sub-slices keep the mmap alive via refcount.
-    let mmap_bytes = Bytes::from_owner(mmap);
-    let payload = mmap_bytes.slice(FILE_MAGIC_BYTES_LEN..);
-    let proto_file = fileformat::MddFile::decode(payload)
-        .map_err(|e| MddError::Parsing(format!("Failed to parse MDD file: {e}")))?;
-
-    // After protobuf decode: future access will be sparse/random (FlatBuffers vtable lookups).
-    // Change madvise hint to MADV_RANDOM to disable wasteful read-ahead.
-    #[cfg(unix)]
-    unsafe {
-        let _ = libc::madvise(mmap_ptr as *mut libc::c_void, mmap_len, libc::MADV_RANDOM);
-    }
+    let mdd_file = mmap_and_decode_mdd(mdd_file_path)?;
 
     let proto_data: HashMap<ChunkType, Vec<Chunk>> = load_info
         .iter()
         .map(|chunk_info| {
-            let chunks: Vec<Chunk> = proto_file
+            let chunks: Vec<Chunk> = mdd_file
                 .chunks
                 .iter()
-                .filter_map(|proto_chunk| {
-                    if ChunkDataType::try_from(proto_chunk.r#type) == Ok((&chunk_info.type_).into())
+                .filter(|proto_chunk| {
+                    ChunkDataType::try_from(proto_chunk.r#type) == Ok((&chunk_info.type_).into())
                         && chunk_info
                             .name
                             .as_ref()
                             .is_none_or(|name| Some(name) == proto_chunk.name.as_ref())
-                    {
-                        let data = if chunk_info.load_data {
-                            let Some(proto_chunk_data) = &proto_chunk.data else {
-                                return None;
-                            };
-
-                            if proto_chunk.compression_algorithm.is_some() {
-                                // Compressed chunk: LZMA decompress.
-                                let decompressor =
-                                    xz2::stream::Stream::new_lzma_decoder(u64::MAX).ok()?;
-                                let mut decoder = xz2::bufread::XzDecoder::new_stream(
-                                    std::io::BufReader::new(proto_chunk_data.as_ref()),
-                                    decompressor,
-                                );
-
-                                let mut decoded = Vec::new();
-                                decoder.read_to_end(&mut decoded).ok()?;
-                                Some(Bytes::from(decoded))
-                            } else {
-                                // Already uncompressed: cheap refcount clone
-                                // (zero-copy sub-slice of the mmap).
-                                Some(proto_chunk_data.clone())
-                            }
-                        } else {
-                            None
+                })
+                .map(|proto_chunk| {
+                    let data = if chunk_info.load_data {
+                        let Some(proto_chunk_data) = &proto_chunk.data else {
+                            return Ok(None);
                         };
 
-                        Some(Chunk {
-                            payload: data,
-                            meta_data: ChunkMetaData {
-                                type_: chunk_info.type_.clone(),
-                                name: proto_chunk
-                                    .name
-                                    .as_ref()
-                                    .map_or(String::new(), std::clone::Clone::clone),
-                                uncompressed_size: proto_chunk
-                                    .uncompressed_size
-                                    .unwrap_or_default(),
-                                content_type: proto_chunk.mime_type.clone(),
-                            },
-                        })
+                        Some(decompress_chunk_data(
+                            proto_chunk_data.clone(),
+                            proto_chunk.compression_algorithm.as_deref(),
+                            proto_chunk.name.as_deref().unwrap_or("unknown"),
+                        )?)
                     } else {
                         None
-                    }
+                    };
+
+                    Ok(Some(Chunk {
+                        payload: data,
+                        meta_data: ChunkMetaData {
+                            type_: chunk_info.type_.clone(),
+                            name: proto_chunk
+                                .name
+                                .as_ref()
+                                .map_or(String::new(), std::clone::Clone::clone),
+                            uncompressed_size: proto_chunk.uncompressed_size.unwrap_or_default(),
+                            content_type: proto_chunk.mime_type.clone(),
+                        },
+                    }))
                 })
-                .collect();
-            (chunk_info.type_.clone(), chunks)
+                .filter_map(Result::transpose)
+                .collect::<Result<Vec<_>, MddError>>()?;
+            Ok((chunk_info.type_.clone(), chunks))
         })
-        .collect();
+        .collect::<Result<HashMap<_, _>, MddError>>()?;
 
     let end = Instant::now();
 
     tracing::trace!(
-        ecu_name = %proto_file.ecu_name,
+        ecu_name = %mdd_file.ecu_name,
         duration = ?end.saturating_duration_since(start),
         chunks_loaded = proto_data.len(),
         "Loaded ECU data"
     );
-    Ok((proto_file.ecu_name.clone(), proto_data))
+    Ok((mdd_file.ecu_name.clone(), proto_data))
 }
 
 pub(crate) fn read_ecudata<'a>(
@@ -328,11 +345,10 @@ pub(crate) fn read_ecudata<'a>(
     ecu_data
 }
 
-/// Rewrite the MDD file with the `DiagnosticDescription` chunk data stored
-/// **uncompressed** (`compression_algorithm = None`).
-///
-/// If the DD chunk is already uncompressed this is a no-op and returns
-/// `Ok(false)`.  Otherwise the chunk is LZMA-decompressed, written back into
+/// Rewrite the MDD file with the `DiagnosticDescription` chunk with uncompressed data,
+/// if it is not already uncompressed.
+/// If the chunk is already uncompressed this is a no-op and returns
+/// `Ok(false)`. Otherwise, the chunk is decompressed, written back into
 /// the protobuf, and the file is replaced atomically (write-to-tmp + rename).
 ///
 /// Returns `Ok(true)` when the file was rewritten.
@@ -341,135 +357,115 @@ pub(crate) fn read_ecudata<'a>(
 /// Returns an error if the file cannot be read, parsed, decompressed, or
 /// written back.
 pub fn update_mdd_uncompressed(mdd_path: &str) -> Result<bool, MddError> {
+    // Use mmap + zero-copy decode to check whether any chunks are
+    // compressed.  This avoids heap-allocating the file contents on the
+    // common path (already decompressed) the mmap is dropped and the kernel
+    // reclaims the pages with zero RSS residue.
+    let needs_decompression = {
+        let proto_file = mmap_and_decode_mdd(mdd_path)?;
+        proto_file
+            .chunks
+            .iter()
+            .any(|c| c.compression_algorithm.is_some())
+    };
+
+    if !needs_decompression {
+        return Ok(false);
+    }
+
+    // At least one chunk is compressed — read into heap, decompress,
+    // and rewrite. This path only runs once per MDD file.
     let data = std::fs::read(mdd_path)
         .map_err(|e| MddError::Io(format!("Failed to read MDD file '{mdd_path}': {e}")))?;
 
-    let magic = file_magic_bytes();
-    let magic_slice = data
-        .get(..FILE_MAGIC_BYTES_LEN)
-        .ok_or_else(|| MddError::Parsing("Invalid file format: file too small".to_owned()))?;
-    if *magic_slice != magic {
-        return Err(MddError::Parsing(
-            "Invalid file format: Magic Byte mismatch".to_owned(),
-        ));
-    }
     let payload = data
         .get(FILE_MAGIC_BYTES_LEN..)
         .ok_or_else(|| MddError::Parsing("Invalid file format: no data after magic".to_owned()))?;
     let mut proto_file = fileformat::MddFile::decode(payload)
         .map_err(|e| MddError::Parsing(format!("Failed to parse MDD file: {e}")))?;
 
-    let mut modified = false;
     for chunk in &mut proto_file.chunks {
-        if chunk.compression_algorithm.is_none() {
-            continue;
-        }
-        let Some(compressed_data) = chunk.data.take() else {
+        let Some(chunk_data) = chunk.data.take() else {
             continue;
         };
 
-        let decompressor = xz2::stream::Stream::new_lzma_decoder(u64::MAX)
-            .map_err(|e| MddError::Io(format!("Failed to create LZMA decoder: {e}")))?;
-        let mut decoder = xz2::bufread::XzDecoder::new_stream(
-            std::io::BufReader::new(compressed_data.as_ref()),
-            decompressor,
-        );
-        let mut decoded = Vec::new();
-        decoder
-            .read_to_end(&mut decoded)
-            .map_err(|e| MddError::Io(format!("Failed to decompress chunk data: {e}")))?;
-
-        chunk.data = Some(Bytes::from(decoded));
+        let chunk_name = chunk.name.as_deref().unwrap_or("unknown");
+        let decompressed = decompress_chunk_data(
+            chunk_data,
+            chunk.compression_algorithm.as_deref(),
+            chunk_name,
+        )?;
+        chunk.data = Some(decompressed);
         chunk.compression_algorithm = None;
         chunk.uncompressed_size = None;
-        modified = true;
     }
 
-    if modified {
-        // Compute expected SHA-256 digests of the decompressed chunk data
-        // *before* encoding so we can verify the written file.
-        let expected_hashes: Vec<Option<[u8; 32]>> = proto_file
-            .chunks
-            .iter()
-            .map(|c| c.data.as_ref().map(|d| sha2::Sha256::digest(d).into()))
-            .collect();
+    // Compute expected SHA-512 digests of the decompressed chunk data
+    // *before* encoding so we can verify the written file.
+    let expected_hashes: Vec<Option<[u8; 64]>> = proto_file
+        .chunks
+        .iter()
+        .map(|c| c.data.as_ref().map(|d| sha2::Sha512::digest(d).into()))
+        .collect();
 
-        let mut out =
-            Vec::with_capacity(FILE_MAGIC_BYTES_LEN.saturating_add(proto_file.encoded_len()));
-        out.extend_from_slice(&magic);
-        proto_file
-            .encode(&mut out)
-            .map_err(|e| MddError::Io(format!("Failed to encode updated MDD: {e}")))?;
+    let mut out = Vec::with_capacity(FILE_MAGIC_BYTES_LEN.saturating_add(proto_file.encoded_len()));
+    out.extend_from_slice(&file_magic_bytes());
+    proto_file
+        .encode(&mut out)
+        .map_err(|e| MddError::Io(format!("Failed to encode updated MDD: {e}")))?;
 
-        // Atomic write: temp file + rename.
-        let tmp_path = format!("{mdd_path}.tmp");
-        std::fs::write(&tmp_path, &out).map_err(|e| {
-            MddError::Io(format!(
-                "Failed to write temporary MDD file '{tmp_path}': {e}"
-            ))
-        })?;
+    // Atomic write: temp file + rename.
+    let tmp_path = format!("{mdd_path}.tmp");
+    std::fs::write(&tmp_path, &out).map_err(|e| {
+        MddError::Io(format!(
+            "Failed to write temporary MDD file '{tmp_path}': {e}"
+        ))
+    })?;
 
-        // Verify the written file: re-parse and check SHA-256 of each chunk.
-        verify_written_mdd(&tmp_path, &expected_hashes)?;
+    verify_mdd_chunk_checksums(&tmp_path, &expected_hashes).map_err(|e| {
+        let _ = std::fs::remove_file(&tmp_path);
+        e
+    })?;
 
-        std::fs::rename(&tmp_path, mdd_path).map_err(|e| {
-            // Clean up the temp file on rename failure.
-            let _ = std::fs::remove_file(&tmp_path);
-            MddError::Io(format!(
-                "Failed to rename temporary MDD file to '{mdd_path}': {e}"
-            ))
-        })?;
+    std::fs::rename(&tmp_path, mdd_path).map_err(|e| {
+        // Clean up the temp file on rename failure.
+        let _ = std::fs::remove_file(&tmp_path);
+        MddError::Io(format!(
+            "Failed to rename temporary MDD file to '{mdd_path}': {e}"
+        ))
+    })?;
 
-        tracing::info!(
-            mdd_file = %mdd_path,
-            "Rewrote MDD file with uncompressed chunk data"
-        );
-    }
+    tracing::info!(
+        mdd_file = %mdd_path,
+        "Rewrote MDD file with uncompressed chunk data"
+    );
 
-    Ok(modified)
+    Ok(true)
 }
 
 /// Read back a written MDD temp file, re-parse the protobuf and compare the
-/// SHA-256 digest of every chunk's `data` field against the `expected_hashes`.
+/// SHA-512 digest of every chunk's `data` field against the `expected_hashes`.
 ///
-/// On mismatch the temp file is deleted and an error is returned.
-fn verify_written_mdd(
-    tmp_path: &str,
-    expected_hashes: &[Option<[u8; 32]>],
+/// On mismatch an error is returned. The caller is responsible for cleaning up
+/// the temp file.
+fn verify_mdd_chunk_checksums(
+    mdd_file_path: &str,
+    expected_hashes: &[Option<[u8; 64]>],
 ) -> Result<(), MddError> {
-    let written = std::fs::read(tmp_path).map_err(|e| {
-        MddError::Io(format!(
-            "Failed to re-read temporary MDD file '{tmp_path}' for verification: {e}"
-        ))
-    })?;
-
-    let payload = written.get(FILE_MAGIC_BYTES_LEN..).ok_or_else(|| {
-        let _ = std::fs::remove_file(tmp_path);
-        MddError::Parsing("Verification failed: temp file too small".to_owned())
-    })?;
-
-    let parsed = fileformat::MddFile::decode(payload).map_err(|e| {
-        let _ = std::fs::remove_file(tmp_path);
-        MddError::Parsing(format!(
-            "Verification failed: could not re-parse temp MDD file: {e}"
-        ))
-    })?;
-
-    if parsed.chunks.len() != expected_hashes.len() {
-        let _ = std::fs::remove_file(tmp_path);
+    let mdd_file = mmap_and_decode_mdd(mdd_file_path)?;
+    if mdd_file.chunks.len() != expected_hashes.len() {
         return Err(MddError::Parsing(format!(
             "Verification failed: chunk count mismatch (expected {}, got {})",
             expected_hashes.len(),
-            parsed.chunks.len()
+            mdd_file.chunks.len()
         )));
     }
 
-    for (i, (chunk, expected)) in parsed.chunks.iter().zip(expected_hashes).enumerate() {
-        let actual: Option<[u8; 32]> = chunk.data.as_ref().map(|d| sha2::Sha256::digest(d).into());
+    for (i, (chunk, expected)) in mdd_file.chunks.iter().zip(expected_hashes).enumerate() {
+        let actual: Option<[u8; 64]> = chunk.data.as_ref().map(|d| sha2::Sha512::digest(d).into());
         if actual != *expected {
-            let _ = std::fs::remove_file(tmp_path);
             return Err(MddError::Parsing(format!(
-                "Verification failed: SHA-256 mismatch for chunk {i} in '{tmp_path}'"
+                "Verification failed: SHA-512 mismatch for chunk {i} in '{mdd_file_path}'"
             )));
         }
     }

@@ -465,7 +465,7 @@ async fn load_database<S: SecurityPlugin>(
 
         // Ensure the MDD file contains uncompressed data (rewrite on first
         // use), so that subsequent loads skip LZMA decompression.
-        if flat_buf_settings.decompress_mdd
+        if flat_buf_settings.mdd_decompress
             && let Err(e) = update_mdd_uncompressed(&mdd_path)
         {
             tracing::error!(
@@ -486,7 +486,8 @@ async fn load_database<S: SecurityPlugin>(
                     let Some(payload) = database_payload else {
                         tracing::error!(
                             mdd_file = %mddfile.display(),
-                            "No diagnostic description payload in MDD file");
+                            ecu_name = %ecu_name,
+                            "No payload found in diagnostic description for ECU");
                         continue;
                     };
 
@@ -499,6 +500,7 @@ async fn load_database<S: SecurityPlugin>(
                         Err(e) => {
                             tracing::error!(
                                 mdd_file = %mddfile.display(),
+                                ecu_name = %ecu_name,
                                 error = %e,
                                 "Failed to create database from MDD payload");
                             continue;

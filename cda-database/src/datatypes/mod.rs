@@ -377,19 +377,9 @@ impl From<dataformat::LongName<'_>> for LongName {
     }
 }
 
-/// Backing storage for ECU data blobs.
-///
-/// In production this is a zero-copy `Bytes` sub-slice of an mmap-backed
-/// protobuf decode — the kernel can evict the underlying pages under memory
-/// pressure and fault them back from the file.
-///
-/// `Bytes::from(Vec<u8>)` takes ownership without copying, so heap-allocated
-/// blobs (e.g. from the database-builder tests) work just as well.
-type EcuDataStorage = bytes::Bytes;
-
 #[self_referencing]
 struct EcuData {
-    blob: EcuDataStorage,
+    blob: bytes::Bytes,
 
     #[borrows(blob)]
     #[covariant]
@@ -427,12 +417,11 @@ impl DiagnosticDatabase {
     /// Create a new `DiagnosticDatabase` from a `FlatBuffers` blob in memory.
     ///
     /// Converts the `Vec<u8>` into `bytes::Bytes` (zero-copy move) and
-    /// delegates to [`Self::new_from_bytes`].  Kept for the
-    /// `database-builder` tests.
+    /// delegates to [`Self::new_from_bytes`].
     ///
     /// # Errors
     /// Returns an error if the blob cannot be parsed as valid `FlatBuffers` data.
-    pub fn new(
+    pub fn new_from_vec(
         ecu_database_path: String,
         ecu_data_blob: Vec<u8>,
         flatbuf_config: FlatbBufConfig,
@@ -485,18 +474,14 @@ impl DiagnosticDatabase {
         self.ecu_data = None;
     }
 
-    /// Load the ECU data from the MDD file.
-    ///
-    /// Ensures the MDD file contains uncompressed data (rewrites on first
-    /// use), then parses the DD payload from it.
-    ///
+    /// Load the ECU data from the ECU database path.
     /// # Errors
     /// Returns an error if the ECU data cannot be loaded.
     /// # Panics
     /// If the ECU data is invalid and `FlatbBufConfig::verify` is disabled.
     pub fn load(&mut self) -> Result<(), DiagServiceError> {
-        mdd_data::update_mdd_uncompressed(&self.ecu_database_path)
-            .map_err(|e| DiagServiceError::InvalidDatabase(e.to_string()))?;
+        // If the decompress feature is enabled, decompression already happened
+        // before 'new' of DiagnosticDatabase, so we can just load the data from the path.
         let (_ecu_name, blob) = mdd_data::load_ecudata(&self.ecu_database_path)
             .map_err(|e| DiagServiceError::InvalidDatabase(e.to_string()))?;
         *self = DiagnosticDatabase::new_from_bytes(

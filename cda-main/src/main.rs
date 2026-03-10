@@ -70,9 +70,10 @@ struct AppArgs {
     #[arg(long)]
     fallback_to_base_variant: Option<bool>,
 
-    /// Disable rewriting MDD files with uncompressed data on first load.
+    /// Set to true, to rewrite mdd files without compression, which
+    /// reduces memory usage due to mmap significantly, at the cost of disk usage.
     #[arg(long)]
-    skip_mdd_decompress: bool,
+    mdd_decompress: bool,
 }
 
 #[tokio::main]
@@ -255,8 +256,8 @@ impl AppArgs {
         if let Some(log_file_name) = self.log_file_name {
             config.logging.log_file_config.name = log_file_name;
         }
-        if self.skip_mdd_decompress {
-            config.flat_buf.decompress_mdd = false;
+        if self.mdd_decompress {
+            config.flat_buf.mdd_decompress = false;
         }
     }
 }

@@ -30,7 +30,6 @@ cda-interfaces = { workspace = true }
 bytes = { workspace = true }
 prost = { workspace = true }
 flatbuffers = { workspace = true }
-libc = { workspace = true }
 memmap2 = { workspace = true }
 ouroboros = { workspace = true }
 # tokio

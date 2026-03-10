@@ -19,7 +19,7 @@ pub struct FlatbBufConfig {
     pub max_tables: usize,
     pub max_apparent_size: usize,
     pub ignore_missing_null_terminator: bool,
-    pub decompress_mdd: bool,
+    pub mdd_decompress: bool,
 }
 
 impl Default for FlatbBufConfig {
@@ -30,7 +30,7 @@ impl Default for FlatbBufConfig {
             max_tables: 100_000_000,
             max_apparent_size: usize::MAX,
             ignore_missing_null_terminator: false,
-            decompress_mdd: true,
+            mdd_decompress: false,
         }
     }
 }
