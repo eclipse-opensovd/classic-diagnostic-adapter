@@ -15,8 +15,8 @@ use crate::HashMap;
 #[derive(PartialEq, Eq, Hash, Clone, Debug)]
 pub enum ChunkType {
     DiagnosticDescription,
-    JarFile,
-    JarFilePartial,
+    CodeFile,
+    CodeFilePartial,
     EmbeddedFile,
     VendorSpecific,
 }

@@ -452,12 +452,12 @@ async fn load_database<S: SecurityPlugin>(
                     name: None,
                 },
                 ProtoLoadConfig {
-                    type_: ChunkType::JarFile,
+                    type_: ChunkType::CodeFile,
                     load_data: false,
                     name: None,
                 },
                 ProtoLoadConfig {
-                    type_: ChunkType::JarFilePartial,
+                    type_: ChunkType::CodeFilePartial,
                     load_data: false,
                     name: None,
                 },
@@ -538,8 +538,8 @@ async fn load_database<S: SecurityPlugin>(
                 .await;
 
                 let filtered_chunks: Vec<Chunk> = [
-                    ChunkType::JarFile,
-                    ChunkType::JarFilePartial,
+                    ChunkType::CodeFile,
+                    ChunkType::CodeFilePartial,
                     ChunkType::EmbeddedFile,
                 ]
                 .iter()

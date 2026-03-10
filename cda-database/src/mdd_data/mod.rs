@@ -67,8 +67,8 @@ impl From<&ChunkType> for ChunkDataType {
     fn from(chunk_type: &ChunkType) -> Self {
         match chunk_type {
             ChunkType::DiagnosticDescription => ChunkDataType::DiagnosticDescription,
-            ChunkType::JarFile => ChunkDataType::JarFile,
-            ChunkType::JarFilePartial => ChunkDataType::JarFilePartial,
+            ChunkType::CodeFile => ChunkDataType::CodeFile,
+            ChunkType::CodeFilePartial => ChunkDataType::CodeFilePartial,
             ChunkType::EmbeddedFile => ChunkDataType::EmbeddedFile,
             ChunkType::VendorSpecific => ChunkDataType::VendorSpecific,
         }

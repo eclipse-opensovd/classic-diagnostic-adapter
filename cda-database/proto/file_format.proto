@@ -19,8 +19,12 @@ option java_outer_classname = "FileFormatProto";
 package fileformat;
 
 message Encryption {
+  // algorithm that is required for decrypt operation
   string encryption_algorithm = 1;
+  // to identify the key that needs to be used
   optional bytes key_identifier = 2;
+  // list of certificates that could be required to retrieve key & decrypt data
+  repeated bytes certificates = 3;
 }
 
 message Chunk {
@@ -48,15 +52,17 @@ message Chunk {
   optional bytes data = 8;
 
   enum DataType {
+    // diagnostic description of the ECU
     DIAGNOSTIC_DESCRIPTION = 0;
-    // A JAR file associated with the diagnostic description, may be referenced by single ecu jobs, and data from them might be needed in the CDA
-    JAR_FILE = 1;
-    // Files included in a jar-file. name of chunk is: "<jar-file>::<path-in-jar>"
-    JAR_FILE_PARTIAL = 2;
+    // A code file associated with the diagnostic description, may be referenced by single ecu jobs, and data from them might be needed in the CDA
+    CODE_FILE = 1;
+    // Files included in a code-file. name of chunk is: "<code-file>::<path-in-file>"
+    CODE_FILE_PARTIAL = 2;
     // file that gets embedded, could be an embedded odx-f, or a binary flashware, when the format is used for flashing
     EMBEDDED_FILE = 3;
-
-    // ids until 1024 are reserved for future usages
+    // [4 to 1024) are reserved for future extensions in the file format
+    reserved 4 to 1023;
+    // 1024 and further may be used by vendors for custom extensions.
     VENDOR_SPECIFIC = 1024;
   }
 }
@@ -70,13 +76,15 @@ message Signature {
   map<string, string> metadata = 3;
   // actual signature data
   bytes signature = 4;
+  // optional certificates, to establish chain of trust
+  repeated bytes certificates = 5;
 }
 
 message MDDFile {
   string version = 1;
   repeated FeatureFlag feature_flags = 2;
   string ecu_name = 3;
-  string revision = 4;
+  optional string revision = 4;
   map<string, string> metadata = 5;
   repeated Chunk chunks = 6;
   // Instead of individually signing each chunk, you sign all of them together
