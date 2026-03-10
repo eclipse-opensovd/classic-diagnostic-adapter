@@ -333,7 +333,7 @@ impl<'a> EcuDataBuilder<'a> {
         short_name: &'a str,
         com_param_spec: Option<WIPOffset<dataformat::ComParamSpec<'a>>>,
         prot_stack: Option<WIPOffset<dataformat::ProtStack<'a>>>,
-        parent_refs: Option<Vec<WIPOffset<dataformat::Protocol<'a>>>>,
+        parent_refs: Option<Vec<WIPOffset<dataformat::ParentRef<'a>>>>,
     ) -> WIPOffset<dataformat::Protocol<'a>> {
         let diag_layer = self.create_diag_layer(DiagLayerParams {
             short_name,

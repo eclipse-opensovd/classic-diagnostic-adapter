@@ -721,7 +721,7 @@ table Protocol {
     diag_layer: DiagLayer;
     com_param_spec: ComParamSpec;
     prot_stack: ProtStack;
-    parent_refs: [Protocol];
+    parent_refs: [ParentRef];
 }
 
 table ComParamRef {
