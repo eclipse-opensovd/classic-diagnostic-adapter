@@ -355,6 +355,14 @@ impl Parameter<'_> {
     pub fn byte_position(&self) -> u32 {
         self.0.byte_position().unwrap_or(0)
     }
+    /// Returns `true` when the parameter has an explicit BYTE-POSITION in
+    /// the database.  Per ISO 22901-1 §7.4.8 a parameter that follows a
+    /// PARAM-LENGTH-INFO field may omit BYTE-POSITION because its position
+    /// is unknown until runtime.
+    #[must_use]
+    pub fn has_byte_position(&self) -> bool {
+        self.0.byte_position().is_some()
+    }
     #[must_use]
     pub fn bit_position(&self) -> u32 {
         self.0.bit_position().unwrap_or(0)

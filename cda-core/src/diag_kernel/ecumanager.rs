@@ -547,7 +547,9 @@ impl<S: SecurityPlugin> cda_interfaces::EcuManager for EcuManager<S> {
                     )
                 })?;
 
-                uds_payload.set_last_read_byte_pos(param.byte_position() as usize);
+                if param.has_byte_position() {
+                    uds_payload.set_last_read_byte_pos(param.byte_position() as usize);
+                }
                 match self.map_param_from_uds(
                     &mapped_service,
                     &param,
@@ -640,12 +642,22 @@ impl<S: SecurityPlugin> cda_interfaces::EcuManager for EcuManager<S> {
             .unwrap_or_default();
 
         mapped_params.sort_by(|a, b| {
-            a.byte_position()
-                .cmp(&b.byte_position())
-                .then(a.bit_position().cmp(&b.bit_position()))
+            match (a.has_byte_position(), b.has_byte_position()) {
+                // Both have a position → normal comparison
+                (true, true) => a
+                    .byte_position()
+                    .cmp(&b.byte_position())
+                    .then(a.bit_position().cmp(&b.bit_position())),
+                // Only a has no position → a goes after b
+                (false, true) => std::cmp::Ordering::Greater,
+                // Only b has no position → b goes after a
+                (true, false) => std::cmp::Ordering::Less,
+                // Neither has a position → preserve order
+                (false, false) => std::cmp::Ordering::Equal,
+            }
         });
 
-        let (mut uds, num_consts) = process_coded_constants(&mapped_params)?;
+        let mut uds = process_coded_constants(&mapped_params)?;
 
         // If no input data was provided, fall back to an empty parameter map
         // this allows for a streamlined handling where some values might
@@ -658,7 +670,7 @@ impl<S: SecurityPlugin> cda_interfaces::EcuManager for EcuManager<S> {
         match data {
             UdsPayloadData::Raw(bytes) => uds.extend(bytes),
             UdsPayloadData::ParameterMap(json_values) => {
-                self.process_parameter_map(&mapped_params, num_consts, &json_values, &mut uds)?;
+                self.process_parameter_map(&mapped_params, &json_values, &mut uds)?;
             }
         }
 
@@ -1486,7 +1498,11 @@ impl<S: SecurityPlugin> cda_interfaces::EcuManager for EcuManager<S> {
                 )
             })?;
 
-            uds_payload.set_last_read_byte_pos(param.byte_position() as usize);
+            uds_payload.set_last_read_byte_pos(if param.has_byte_position() {
+                param.byte_position() as usize
+            } else {
+                uds_payload.last_read_byte_pos()
+            });
             match self.map_param_from_uds(
                 &mapped_service,
                 &param,
@@ -2512,7 +2528,7 @@ impl<S: SecurityPlugin> EcuManager<S> {
                 tracing::error!("Dynamic ParamType not implemented.");
             }
             datatypes::ParamType::LengthKey => {
-                tracing::error!("LengthKey ParamType not implemented.");
+                self.map_param_length_key_from_uds(mapped_service, param, uds_payload, data)?;
             }
             datatypes::ParamType::NrcConst => {
                 tracing::error!("NrcConst ParamType not implemented.");
@@ -2599,6 +2615,27 @@ impl<S: SecurityPlugin> EcuManager<S> {
                 ))?;
         self.map_dop_from_uds(mapped_service, &dop, param, uds_payload, data)?;
         Ok(())
+    }
+
+    fn map_param_length_key_from_uds(
+        &self,
+        mapped_service: &datatypes::DiagService,
+        param: &datatypes::Parameter,
+        uds_payload: &mut Payload,
+        data: &mut MappedDiagServiceResponsePayload,
+    ) -> Result<(), DiagServiceError> {
+        let length_key =
+            param
+                .specific_data_as_length_key_ref()
+                .ok_or(DiagServiceError::InvalidDatabase(
+                    "Expected LengthKeyRef specific data".to_owned(),
+                ))?;
+
+        let dop = length_key.dop().map(datatypes::DataOperation).ok_or(
+            DiagServiceError::InvalidDatabase("LengthKey DoP is None".to_owned()),
+        )?;
+
+        self.map_dop_from_uds(mapped_service, &dop, param, uds_payload, data)
     }
 
     fn map_param_matching_request_from_uds(
@@ -3044,17 +3081,21 @@ impl<S: SecurityPlugin> EcuManager<S> {
     fn process_parameter_map(
         &self,
         mapped_params: &[datatypes::Parameter],
-        num_consts: usize,
         json_values: &HashMap<String, serde_json::Value>,
         uds: &mut Vec<u8>,
     ) -> Result<(), DiagServiceError> {
-        for param in mapped_params.iter().skip(num_consts) {
-            if uds.len() < param.byte_position() as usize {
-                uds.extend(vec![
-                    0x0;
-                    (param.byte_position() as usize)
-                        .saturating_sub(uds.len())
-                ]);
+        for param in mapped_params {
+            // When BYTE-POSITION is omitted (ISO 22901-1 §7.4.8) the
+            // parameter follows a variable-length PARAM-LENGTH-INFO field
+            // and must be appended at the current end of the payload.
+            let effective_byte_pos = if param.has_byte_position() {
+                param.byte_position() as usize
+            } else {
+                uds.len()
+            };
+
+            if uds.len() < effective_byte_pos {
+                uds.extend(vec![0x0; effective_byte_pos.saturating_sub(uds.len())]);
             }
             let short_name = param.short_name().ok_or_else(|| {
                 DiagServiceError::InvalidDatabase(format!(
@@ -3063,9 +3104,15 @@ impl<S: SecurityPlugin> EcuManager<S> {
                 ))
             })?;
 
-            // Setting parent byte position
-            // to 0 because this is the uppermost level.
-            self.map_param_to_uds(param, json_values.get(short_name), uds, 0)?;
+            // When BYTE-POSITION is absent, pass effective_byte_pos as
+            // parent_byte_pos so that the inner encode writes at the
+            // correct absolute position (param.byte_position() returns 0).
+            let parent_byte_pos = if param.has_byte_position() {
+                0
+            } else {
+                effective_byte_pos
+            };
+            self.map_param_to_uds(param, json_values.get(short_name), uds, parent_byte_pos)?;
         }
         Ok(())
     }
@@ -3094,9 +3141,9 @@ impl<S: SecurityPlugin> EcuManager<S> {
             datatypes::ParamType::Dynamic => Err(DiagServiceError::ParameterConversionError(
                 "Mapping Dynamic DoP to UDS payload not implemented".to_owned(),
             )),
-            datatypes::ParamType::LengthKey => Err(DiagServiceError::ParameterConversionError(
-                "Mapping LengthKey DoP to UDS payload not implemented".to_owned(),
-            )),
+            datatypes::ParamType::LengthKey => {
+                Self::map_param_length_key_to_uds(param, value, payload, parent_byte_pos)
+            }
             datatypes::ParamType::NrcConst => Err(DiagServiceError::ParameterConversionError(
                 "Mapping NrcConst DoP to UDS payload not implemented".to_owned(),
             )),
@@ -3112,6 +3159,54 @@ impl<S: SecurityPlugin> EcuManager<S> {
             datatypes::ParamType::TableKey => Err(DiagServiceError::ParameterConversionError(
                 "Mapping TableKey DoP to UDS payload not implemented".to_owned(),
             )),
+        }
+    }
+
+    fn map_param_length_key_to_uds(
+        param: &datatypes::Parameter,
+        value: Option<&serde_json::Value>,
+        payload: &mut Vec<u8>,
+        parent_byte_pos: usize,
+    ) -> Result<(), DiagServiceError> {
+        let length_key =
+            param
+                .specific_data_as_length_key_ref()
+                .ok_or(DiagServiceError::InvalidDatabase(
+                    "Expected LengthKeyRef specific data".to_owned(),
+                ))?;
+
+        let dop = length_key.dop().map(datatypes::DataOperation).ok_or(
+            DiagServiceError::InvalidDatabase("LengthKey DoP is None".to_owned()),
+        )?;
+
+        let value = value.ok_or_else(|| {
+            DiagServiceError::InvalidRequest(format!(
+                "Required LengthKey parameter '{}' missing",
+                param.short_name().unwrap_or_default()
+            ))
+        })?;
+
+        match dop.variant()? {
+            datatypes::DataOperationVariant::Normal(normal_dop) => {
+                let diag_type = normal_dop.diag_coded_type()?;
+                let uds_data = json_value_to_uds_data(
+                    &diag_type,
+                    normal_dop.compu_method().map(Into::into),
+                    normal_dop.physical_type().map(Into::into),
+                    value,
+                )?;
+                diag_type.encode(
+                    uds_data,
+                    payload,
+                    parent_byte_pos.saturating_add(param.byte_position() as usize),
+                    param.bit_position() as usize,
+                )?;
+                Ok(())
+            }
+            _ => Err(DiagServiceError::ParameterConversionError(format!(
+                "Unsupported DOP variant for LengthKey parameter '{}'",
+                param.short_name().unwrap_or_default()
+            ))),
         }
     }
 
@@ -3337,7 +3432,25 @@ impl<S: SecurityPlugin> EcuManager<S> {
 
         match dop.variant()? {
             datatypes::DataOperationVariant::Normal(normal_dop) => {
-                Self::map_normal_dop_from_uds(param, uds_payload, data, short_name, &normal_dop)?;
+                let diag_coded_type = normal_dop.diag_coded_type()?;
+                if let Some(length_key_name) = diag_coded_type.length_key_name() {
+                    Self::map_param_length_info_dop_from_uds(
+                        param,
+                        uds_payload,
+                        data,
+                        short_name,
+                        &normal_dop,
+                        length_key_name,
+                    )?;
+                } else {
+                    Self::map_normal_dop_from_uds(
+                        param,
+                        uds_payload,
+                        data,
+                        short_name,
+                        &normal_dop,
+                    )?;
+                }
             }
             datatypes::DataOperationVariant::EndOfPdu(end_of_pdu_dop) => {
                 self.map_end_of_pdu_dop_from_uds(
@@ -3399,6 +3512,93 @@ impl<S: SecurityPlugin> EcuManager<S> {
             ),
         }
 
+        Ok(())
+    }
+
+    fn map_param_length_info_dop_from_uds(
+        param: &datatypes::Parameter,
+        uds_payload: &mut Payload,
+        data: &mut MappedDiagServiceResponsePayload,
+        short_name: String,
+        normal_dop: &datatypes::NormalDop,
+        length_key_name: &str,
+    ) -> Result<(), DiagServiceError> {
+        let byte_count = match data.get(length_key_name) {
+            Some(DiagDataTypeContainer::RawContainer(raw)) => {
+                let phys_val = operations::uds_data_to_serializable(
+                    raw.data_type,
+                    raw.compu_method.as_ref(),
+                    false,
+                    &raw.data,
+                )?;
+                match phys_val {
+                    DiagDataValue::UInt32(n) => n as usize,
+                    DiagDataValue::Int32(n) => usize::try_from(n).unwrap_or_else(|_| {
+                        tracing::warn!("LENGTH-KEY resolved to negative value {n}, treating as 0");
+                        0
+                    }),
+                    _ => {
+                        return Err(DiagServiceError::ParameterConversionError(format!(
+                            "LENGTH-KEY '{length_key_name}' resolved to unsupported type: \
+                             {phys_val:?}"
+                        )));
+                    }
+                }
+            }
+            None => {
+                return Err(DiagServiceError::InvalidDatabase(format!(
+                    "LENGTH-KEY '{length_key_name}' not yet decoded when processing '{short_name}'"
+                )));
+            }
+            _ => {
+                return Err(DiagServiceError::InvalidDatabase(format!(
+                    "LENGTH-KEY '{length_key_name}' has unexpected container type"
+                )));
+            }
+        };
+
+        let diag_coded_type = normal_dop.diag_coded_type()?;
+        let compu_method: Option<datatypes::CompuMethod> =
+            normal_dop.compu_method().map(Into::into);
+        let data_type = diag_coded_type.base_datatype();
+
+        if byte_count == 0 {
+            tracing::debug!(
+                "PARAM-LENGTH-INFO-TYPE resolved byte_count=0; inserting empty value (possible \
+                 database anomaly)"
+            );
+            data.insert(
+                short_name,
+                DiagDataTypeContainer::RawContainer(DiagDataTypeContainerRaw {
+                    data: vec![],
+                    bit_len: 0,
+                    data_type,
+                    compu_method,
+                }),
+            );
+            return Ok(());
+        }
+
+        let byte_pos = if param.has_byte_position() {
+            param.byte_position() as usize
+        } else {
+            uds_payload.last_read_byte_pos()
+        };
+        let uds_bytes = uds_payload.data()?;
+        let (decoded_bytes, bit_len) =
+            diag_coded_type.decode_with_runtime_byte_length(uds_bytes, byte_pos, byte_count)?;
+
+        uds_payload.set_last_read_byte_pos(byte_pos.saturating_add(byte_count));
+
+        data.insert(
+            short_name,
+            DiagDataTypeContainer::RawContainer(DiagDataTypeContainerRaw {
+                data: decoded_bytes,
+                bit_len,
+                data_type,
+                compu_method,
+            }),
+        );
         Ok(())
     }
 
@@ -3741,11 +3941,17 @@ impl<S: SecurityPlugin> EcuManager<S> {
                     "param {short_name} has no compu method"
                 )))?;
 
+        let byte_pos = if param.has_byte_position() {
+            param.byte_position() as usize
+        } else {
+            uds_payload.last_read_byte_pos()
+        };
+
         data.insert(
             short_name,
             operations::extract_diag_data_container(
                 param.short_name(),
-                param.byte_position() as usize,
+                byte_pos,
                 param.bit_position() as usize,
                 uds_payload,
                 &diag_coded_type,
@@ -4407,13 +4613,11 @@ fn str_to_json_value(
 
 fn process_coded_constants(
     mapped_params: &[datatypes::Parameter],
-) -> Result<(Vec<u8>, usize), DiagServiceError> {
+) -> Result<Vec<u8>, DiagServiceError> {
     let mut uds: Vec<u8> = Vec::new();
-    let mut num_consts = 0usize;
 
     for param in mapped_params {
         if let Some(coded_const) = param.specific_data_as_coded_const() {
-            num_consts = num_consts.saturating_add(1);
             let diag_type: datatypes::DiagCodedType = coded_const
                 .diag_coded_type()
                 .and_then(|t| {
@@ -4451,7 +4655,7 @@ fn process_coded_constants(
         }
     }
 
-    Ok((uds, num_consts))
+    Ok(uds)
 }
 
 #[cfg(test)]
@@ -4459,7 +4663,7 @@ mod tests {
     use std::vec;
 
     use cda_database::datatypes::{
-        DataType, DiagCodedTypeVariant, Limit, ResponseType,
+        CompuCategory, DataType, DiagCodedTypeVariant, Limit, ResponseType,
         database_builder::{
             Addressing, DataFormatParentRefType, DiagClassType, DiagCommParams, DiagLayerParams,
             DiagServiceParams, DopType, EcuDataBuilder, EcuDataParams, SpecificDOPData,
@@ -5844,6 +6048,183 @@ mod tests {
             lookup_name: Some(dc_name.to_owned()),
         };
         (new_ecu_manager(db), dc)
+    }
+
+    fn create_ecu_manager_with_length_key_request_service()
+    -> (super::EcuManager<DefaultSecurityPluginData>, DiagComm, u8) {
+        let mut db_builder = EcuDataBuilder::new();
+        let protocol = db_builder.create_protocol(Protocol::DoIp.value(), None, None, None);
+        let compu_identical = db_builder.create_compu_method(CompuCategory::Identical, None, None);
+
+        let u8_diag_type = db_builder.create_diag_coded_type_standard_length(8, DataType::UInt32);
+        let u16_diag_type = db_builder.create_diag_coded_type_standard_length(16, DataType::UInt32);
+
+        let length_key_dop =
+            db_builder.create_regular_normal_dop("lk_dop", u8_diag_type, compu_identical);
+        let value_dop =
+            db_builder.create_regular_normal_dop("val_dop", u16_diag_type, compu_identical);
+
+        let sid = service_ids::WRITE_DATA_BY_IDENTIFIER;
+        let dc_name = "TestLengthKeyReqService";
+        let diag_comm = new_diag_comm!(db_builder, dc_name, protocol);
+
+        let request = {
+            let sid_param = create_sid_param!(db_builder, sid);
+            let lk_param =
+                db_builder.create_length_key_param("length_indicator", length_key_dop, 1, 0);
+            let val_param = db_builder.create_value_param("value_param", value_dop, 2, 0);
+            db_builder.create_request(Some(vec![sid_param, lk_param, val_param]), None)
+        };
+
+        let pos_response = {
+            let sid_param = create_sid_param!(
+                db_builder,
+                "pos_sid",
+                sid.saturating_add(UDS_ID_RESPONSE_BITMASK)
+            );
+            db_builder.create_response(ResponseType::Positive, Some(vec![sid_param]), None)
+        };
+
+        let diag_service =
+            new_diag_service!(db_builder, diag_comm, request, vec![pos_response], vec![]);
+        let db = finish_db!(db_builder, protocol, vec![diag_service]);
+        (
+            new_ecu_manager(db),
+            DiagComm::new(dc_name, DiagCommType::Configurations),
+            sid,
+        )
+    }
+
+    fn create_ecu_manager_with_param_length_info_service()
+    -> (super::EcuManager<DefaultSecurityPluginData>, DiagComm, u8) {
+        const LEN_KEY: &str = "len_key";
+        const VAR_DATA: &str = "var_data";
+
+        let mut db_builder = EcuDataBuilder::new();
+        let protocol = db_builder.create_protocol(Protocol::DoIp.value(), None, None, None);
+        let compu_identical = db_builder.create_compu_method(CompuCategory::Identical, None, None);
+
+        let len_key_diag_type =
+            db_builder.create_diag_coded_type_standard_length(8, DataType::UInt32);
+        let var_data_diag_type =
+            db_builder.create_diag_coded_type_param_length_info(LEN_KEY, DataType::ByteField);
+
+        let len_key_dop =
+            db_builder.create_regular_normal_dop("len_key_dop", len_key_diag_type, compu_identical);
+        let var_data_dop = db_builder.create_regular_normal_dop(
+            "var_data_dop",
+            var_data_diag_type,
+            compu_identical,
+        );
+
+        let sid = service_ids::WRITE_DATA_BY_IDENTIFIER;
+        let dc_name = "TestParamLengthInfoService";
+        let diag_comm = new_diag_comm!(db_builder, dc_name, protocol);
+
+        let request = {
+            let sid_param = create_sid_param!(db_builder, sid);
+            let len_key_param = db_builder.create_length_key_param(LEN_KEY, len_key_dop, 1, 0);
+            let var_data_param = db_builder.create_value_param(VAR_DATA, var_data_dop, 2, 0);
+            db_builder.create_request(Some(vec![sid_param, len_key_param, var_data_param]), None)
+        };
+
+        let pos_response = {
+            let pos_sid_param = create_sid_param!(
+                db_builder,
+                "pos_sid",
+                sid.saturating_add(UDS_ID_RESPONSE_BITMASK)
+            );
+            let len_key_param = db_builder.create_length_key_param(LEN_KEY, len_key_dop, 1, 0);
+            let var_data_param = db_builder.create_value_param(VAR_DATA, var_data_dop, 2, 0);
+            db_builder.create_response(
+                ResponseType::Positive,
+                Some(vec![pos_sid_param, len_key_param, var_data_param]),
+                None,
+            )
+        };
+
+        let diag_service =
+            new_diag_service!(db_builder, diag_comm, request, vec![pos_response], vec![]);
+        let db = finish_db!(db_builder, protocol, vec![diag_service]);
+        (
+            new_ecu_manager(db),
+            DiagComm::new(dc_name, DiagCommType::Configurations),
+            sid,
+        )
+    }
+
+    // Models the pattern from ISO 22901-1 §7.4.8 (readMemoryByAddress):
+    // one parameter determines the length of the next, and the parameter
+    // that comes *after* the variable-length data has no BYTE-POSITION in
+    // the ODX because its position is unknown until runtime.
+    //
+    // Layout (request & positive response):
+    //   byte 0     : SID       (coded const, 8 bit)
+    //   byte 1     : len_key   (LENGTH-KEY param, u8)
+    //   byte 2     : var_data  (PARAM-LENGTH-INFO, `len_key` bytes)
+    //   byte 2 + N : suffix    (value param, u16 — BYTE-POSITION omitted)
+    fn create_ecu_manager_with_trailing_param_after_param_length_info_service()
+    -> (super::EcuManager<DefaultSecurityPluginData>, DiagComm, u8) {
+        const LEN_KEY: &str = "len_key";
+        const VAR_DATA: &str = "var_data";
+
+        let mut db_builder = EcuDataBuilder::new();
+        let protocol = db_builder.create_protocol(Protocol::DoIp.value(), None, None, None);
+        let compu_identical = db_builder.create_compu_method(CompuCategory::Identical, None, None);
+
+        // diag coded types
+        let u8_dct = db_builder.create_diag_coded_type_standard_length(8, DataType::UInt32);
+        let u16_dct = db_builder.create_diag_coded_type_standard_length(16, DataType::UInt32);
+        let var_dct =
+            db_builder.create_diag_coded_type_param_length_info(LEN_KEY, DataType::ByteField);
+
+        // DOPs
+        let len_key_dop =
+            db_builder.create_regular_normal_dop("len_key_dop", u8_dct, compu_identical);
+        let var_data_dop =
+            db_builder.create_regular_normal_dop("var_data_dop", var_dct, compu_identical);
+        let suffix_dop =
+            db_builder.create_regular_normal_dop("suffix_dop", u16_dct, compu_identical);
+
+        let sid = service_ids::WRITE_DATA_BY_IDENTIFIER;
+        let dc_name = "TestTrailingParamAfterPLI";
+        let diag_comm = new_diag_comm!(db_builder, dc_name, protocol);
+
+        let request = {
+            let sid_param = create_sid_param!(db_builder, sid);
+            let lk_param = db_builder.create_length_key_param(LEN_KEY, len_key_dop, 1, 0);
+            let var_param = db_builder.create_value_param(VAR_DATA, var_data_dop, 2, 0);
+            // Per spec: BYTE-POSITION omitted — position depends on runtime length of var_data
+            let suffix_param = db_builder.create_value_param_no_byte_pos("suffix", suffix_dop);
+            db_builder.create_request(
+                Some(vec![sid_param, lk_param, var_param, suffix_param]),
+                None,
+            )
+        };
+        let pos_response = {
+            let pos_sid_param = create_sid_param!(
+                db_builder,
+                "pos_sid",
+                sid.saturating_add(UDS_ID_RESPONSE_BITMASK)
+            );
+            let lk_param = db_builder.create_length_key_param(LEN_KEY, len_key_dop, 1, 0);
+            let var_param = db_builder.create_value_param(VAR_DATA, var_data_dop, 2, 0);
+            let suffix_param = db_builder.create_value_param_no_byte_pos("suffix", suffix_dop);
+            db_builder.create_response(
+                ResponseType::Positive,
+                Some(vec![pos_sid_param, lk_param, var_param, suffix_param]),
+                None,
+            )
+        };
+
+        let diag_service =
+            new_diag_service!(db_builder, diag_comm, request, vec![pos_response], vec![]);
+        let db = finish_db!(db_builder, protocol, vec![diag_service]);
+        (
+            new_ecu_manager(db),
+            DiagComm::new(dc_name, DiagCommType::Configurations),
+            sid,
+        )
     }
 
     #[tokio::test]
@@ -7429,6 +7810,175 @@ mod tests {
         assert!(
             result.is_err(),
             "Service should NOT be allowed from invalid security state"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_length_key_request_to_uds() {
+        let (ecu_manager, dc, sid) = create_ecu_manager_with_length_key_request_service();
+
+        let payload_data = UdsPayloadData::ParameterMap(
+            serde_json::from_value(json!({
+                "length_indicator": 4,
+                "value_param": 500
+            }))
+            .unwrap(),
+        );
+
+        let result = ecu_manager
+            .create_uds_payload(&dc, &skip_sec_plugin!(), Some(payload_data))
+            .await
+            .unwrap();
+
+        assert_eq!(result.data, vec![sid, 0x04, 0x01, 0xF4]);
+    }
+
+    #[tokio::test]
+    async fn test_length_key_request_missing_value_fails() {
+        let (ecu_manager, dc, _sid) = create_ecu_manager_with_length_key_request_service();
+
+        let payload_data = UdsPayloadData::ParameterMap(
+            serde_json::from_value(json!({"value_param": 500})).unwrap(),
+        );
+
+        let result = ecu_manager
+            .create_uds_payload(&dc, &skip_sec_plugin!(), Some(payload_data))
+            .await;
+
+        assert!(result.is_err(), "Missing LENGTH-KEY input must fail");
+    }
+
+    #[tokio::test]
+    async fn test_length_key_param_encode_zero_length() {
+        let (ecu_manager, dc, sid) = create_ecu_manager_with_param_length_info_service();
+
+        let payload_data = UdsPayloadData::ParameterMap(
+            serde_json::from_value(json!({"len_key": 0, "var_data": ""})).unwrap(),
+        );
+
+        let result = ecu_manager
+            .create_uds_payload(&dc, &skip_sec_plugin!(), Some(payload_data))
+            .await
+            .unwrap();
+
+        assert_eq!(result.data, vec![sid, 0x00]);
+    }
+
+    #[tokio::test]
+    async fn test_length_key_param_encode_nonzero_length() {
+        let (ecu_manager, dc, sid) = create_ecu_manager_with_param_length_info_service();
+
+        let payload_data = UdsPayloadData::ParameterMap(
+            serde_json::from_value(json!({"len_key": 3, "var_data": "0xAA 0xBB 0xCC"})).unwrap(),
+        );
+
+        let result = ecu_manager
+            .create_uds_payload(&dc, &skip_sec_plugin!(), Some(payload_data))
+            .await
+            .unwrap();
+
+        assert_eq!(result.data, vec![sid, 0x03, 0xAA, 0xBB, 0xCC]);
+    }
+
+    #[tokio::test]
+    async fn test_length_key_param_decode_zero_length() {
+        let sid = service_ids::WRITE_DATA_BY_IDENTIFIER;
+        let pos_sid = sid.saturating_add(UDS_ID_RESPONSE_BITMASK);
+        let (ecu_manager, dc, _sid) = create_ecu_manager_with_param_length_info_service();
+
+        assert_uds_converts_to_json(
+            &ecu_manager,
+            &dc,
+            vec![pos_sid, 0x00],
+            json!({"pos_sid": u32::from(pos_sid), "len_key": 0, "var_data": ""}),
+        )
+        .await;
+    }
+
+    #[tokio::test]
+    async fn test_length_key_param_decode_nonzero_length() {
+        let sid = service_ids::WRITE_DATA_BY_IDENTIFIER;
+        let pos_sid = sid.saturating_add(UDS_ID_RESPONSE_BITMASK);
+        let (ecu_manager, dc, _sid) = create_ecu_manager_with_param_length_info_service();
+
+        assert_uds_converts_to_json(
+            &ecu_manager,
+            &dc,
+            vec![pos_sid, 0x03, 0xAA, 0xBB, 0xCC],
+            json!({"pos_sid": u32::from(pos_sid), "len_key": 3, "var_data": "0xAA 0xBB 0xCC"}),
+        )
+        .await;
+    }
+
+    #[tokio::test]
+    async fn test_length_key_param_roundtrip() {
+        let (ecu_manager, dc, sid) = create_ecu_manager_with_param_length_info_service();
+        let pos_sid = sid.saturating_add(UDS_ID_RESPONSE_BITMASK);
+
+        let payload_data = UdsPayloadData::ParameterMap(
+            serde_json::from_value(json!({"len_key": 3, "var_data": "0xAA 0xBB 0xCC"})).unwrap(),
+        );
+        let encoded = ecu_manager
+            .create_uds_payload(&dc, &skip_sec_plugin!(), Some(payload_data))
+            .await
+            .unwrap();
+
+        assert_eq!(encoded.data, vec![sid, 0x03, 0xAA, 0xBB, 0xCC]);
+
+        let response_bytes = vec![pos_sid, 0x03, 0xAA, 0xBB, 0xCC];
+        let decoded = ecu_manager
+            .convert_from_uds(&dc, &create_payload(response_bytes), true)
+            .await
+            .unwrap();
+
+        let json_out = decoded.serialize_to_json().unwrap().data;
+        assert_eq!(json_out.get("var_data"), Some(&json!("0xAA 0xBB 0xCC")));
+        assert_eq!(json_out.get("len_key"), Some(&json!(3)));
+    }
+
+    /// Encodes then decodes a service where a PARAM-LENGTH-INFO field
+    /// with non-zero data precedes a trailing fixed-size parameter whose
+    /// BYTE-POSITION is omitted (as required by ISO 22901-1 §7.4.8).
+    #[tokio::test]
+    async fn test_trailing_param_after_param_length_info_roundtrip() {
+        let (ecu_manager, dc, sid) =
+            create_ecu_manager_with_trailing_param_after_param_length_info_service();
+        let pos_sid = sid.saturating_add(UDS_ID_RESPONSE_BITMASK);
+
+        let payload_data = UdsPayloadData::ParameterMap(
+            serde_json::from_value(json!({
+                "len_key": 3,
+                "var_data": "0xAA 0xBB 0xCC",
+                "suffix": 500,
+            }))
+            .unwrap(),
+        );
+
+        let encoded = ecu_manager
+            .create_uds_payload(&dc, &skip_sec_plugin!(), Some(payload_data))
+            .await
+            .unwrap();
+
+        assert_eq!(
+            encoded.data,
+            vec![sid, 0x03, 0xAA, 0xBB, 0xCC, 0x01, 0xF4],
+            "suffix must be placed after the variable-length data, not at byte 0"
+        );
+
+        let response_bytes = vec![pos_sid, 0x03, 0xAA, 0xBB, 0xCC, 0x01, 0xF4];
+        let decoded = ecu_manager
+            .convert_from_uds(&dc, &create_payload(response_bytes), true)
+            .await
+            .unwrap();
+
+        let json_out = decoded.serialize_to_json().unwrap().data;
+        assert_eq!(json_out.get("len_key"), Some(&json!(3)));
+        assert_eq!(json_out.get("var_data"), Some(&json!("0xAA 0xBB 0xCC")));
+        assert_eq!(
+            json_out.get("suffix"),
+            Some(&json!(500)),
+            "suffix must be decoded from bytes after var_data, not from the (absent) static byte \
+             position"
         );
     }
 
