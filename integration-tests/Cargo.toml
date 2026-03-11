@@ -71,6 +71,9 @@ libc = { workspace = true }
 # compile time format
 const_format = { workspace = true }
 
+[build-dependencies]
+cda-build = { workspace = true }
+
 [features]
 # We need the health endpoint to check if the CDA is online
 default = ["opensovd_cda_lib/health"]

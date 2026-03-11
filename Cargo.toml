@@ -28,6 +28,7 @@ members = [
   "cda-plugin-security",
   "cda-health",
   "integration-tests",
+  "cda-build",
 ]
 
 [workspace.dependencies]
@@ -42,6 +43,7 @@ cda-sovd = { path = "cda-sovd" }
 cda-tracing = { path = "cda-tracing" }
 cda-health = { path = "cda-health" }
 sovd-interfaces = { path = "cda-sovd-interfaces" }
+cda-build = { path = "cda-build" }
 
 # ---- common crates ----
 async-trait = "0.1.89"
@@ -114,6 +116,7 @@ serde_qs = "1.0.0-rc.3"
 
 # ---- utility crates ----
 const_format = "0.2.35" # compile time string formatting
+rustversion = "1.0.22"  # macros for conditional compilation
 
 [workspace.lints.clippy]
 # enable pedantic
@@ -127,6 +130,9 @@ indexing_slicing = "deny"
 unwrap_used = "deny"
 arithmetic_side_effects = "deny"
 separated_literal_suffix = "deny"
+
+[workspace.lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(nightly)'] }
 
 [profile.release.package."*"]
 opt-level = 3

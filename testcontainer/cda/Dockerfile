@@ -43,6 +43,7 @@ COPY cda-tracing/Cargo.toml ./cda-tracing/Cargo.toml
 COPY cda-sovd-interfaces/Cargo.toml ./cda-sovd-interfaces/Cargo.toml
 COPY cda-health/Cargo.toml ./cda-health/Cargo.toml
 COPY integration-tests/Cargo.toml ./integration-tests/Cargo.toml
+COPY cda-build/Cargo.toml ./cda-build/Cargo.toml
 
 # Generate the recipe.json which describes dependencies
 RUN cargo chef prepare --recipe-path recipe.json
@@ -84,6 +85,7 @@ COPY cda-tracing ./cda-tracing
 COPY cda-sovd-interfaces ./cda-sovd-interfaces
 COPY cda-health ./cda-health/
 COPY integration-tests ./integration-tests
+COPY cda-build ./cda-build
 
 ENV RUSTC_WRAPPER=sccache \
     SCCACHE_DIR=/sccache
