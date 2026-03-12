@@ -827,10 +827,11 @@ impl<S: EcuGateway, R: DiagServiceResponse, T: EcuManager<Response = R>> UdsMana
         security_plugin: &DynamicPlugin,
         dtc_code: DtcCode,
         service_types: Vec<DtcReadInformationFunction>,
+        memory_selection: Option<u8>,
         include_schema: bool,
     ) -> Result<(R, String, Option<SchemaDescription>), DiagServiceError> {
         let ecu = self.ecu_manager(ecu_name)?;
-        let (_, extended_data_lookup) = ecu
+        let (read_func, extended_data_lookup) = ecu
             .read()
             .await
             .lookup_dtc_services(service_types)?
@@ -846,6 +847,11 @@ impl<S: EcuGateway, R: DiagServiceResponse, T: EcuManager<Response = R>> UdsMana
             &dtc_code.to_be_bytes(),
         )?;
         raw_payload.push(0xFF); // record number, 0xFF means all records or all memory
+
+        if read_func.is_user_scope() {
+            raw_payload.push(memory_selection.unwrap_or(0x00));
+        }
+
         let uds_payload = UdsPayloadData::Raw(raw_payload);
 
         let schema = if include_schema {
@@ -876,6 +882,7 @@ impl<S: EcuGateway, R: DiagServiceResponse, T: EcuManager<Response = R>> UdsMana
         security_plugin: &DynamicPlugin,
         dtc_code: DtcCode,
         include_schema: bool,
+        memory_selection: Option<u8>,
     ) -> Result<(Option<ExtendedDataRecords>, Option<serde_json::Value>), DiagServiceError> {
         fn extract_schema_properties(schema_desc: &SchemaDescription) -> Option<serde_json::Value> {
             // todo after solving #54: we are missing the 'Selector' and the case name here
@@ -897,6 +904,7 @@ impl<S: EcuGateway, R: DiagServiceResponse, T: EcuManager<Response = R>> UdsMana
                     DtcReadInformationFunction::FaultMemoryExtDataRecordByDtcNumber,
                     DtcReadInformationFunction::UserMemoryDtcExtDataRecordByDtcNumber,
                 ],
+                memory_selection,
                 include_schema,
             )
             .await?;
@@ -962,6 +970,7 @@ impl<S: EcuGateway, R: DiagServiceResponse, T: EcuManager<Response = R>> UdsMana
         security_plugin: &DynamicPlugin,
         dtc_code: DtcCode,
         include_schema: bool,
+        memory_selection: Option<u8>,
     ) -> Result<(Option<ExtendedSnapshots>, Option<serde_json::Value>), DiagServiceError> {
         fn extract_schema_properties(schema_desc: &SchemaDescription) -> Option<serde_json::Value> {
             let param_properties = schema_desc.get_param_properties()?;
@@ -990,6 +999,7 @@ impl<S: EcuGateway, R: DiagServiceResponse, T: EcuManager<Response = R>> UdsMana
                     DtcReadInformationFunction::FaultMemorySnapshotRecordByDtcNumber,
                     DtcReadInformationFunction::UserMemoryDtcSnapshotRecordByDtcNumber,
                 ],
+                memory_selection,
                 include_schema,
             )
             .await?;
@@ -2029,6 +2039,7 @@ impl<S: EcuGateway, R: DiagServiceResponse, T: EcuManager<Response = R>> UdsEcu
         status: Option<HashMap<String, serde_json::Value>>,
         severity: Option<u32>,
         scope: Option<String>,
+        memory_selection: Option<u8>,
     ) -> Result<HashMap<DtcCode, DtcRecordAndStatus>, DiagServiceError> {
         let ecu = self.ecu_manager(ecu_name)?;
         let mut all_dtcs = HashMap::new();
@@ -2075,8 +2086,12 @@ impl<S: EcuGateway, R: DiagServiceResponse, T: EcuManager<Response = R>> UdsEcu
             u8::MAX
         };
 
-        for (_, lookup) in scoped_services {
-            let payload = UdsPayloadData::Raw(vec![mask]);
+        for (read_info, lookup) in scoped_services {
+            let mut payload = vec![mask];
+            if read_info.is_user_scope() {
+                payload.push(memory_selection.unwrap_or(0));
+            }
+            let payload = UdsPayloadData::Raw(payload);
             let response = self
                 .send(
                     ecu_name,
@@ -2141,25 +2156,45 @@ impl<S: EcuGateway, R: DiagServiceResponse, T: EcuManager<Response = R>> UdsEcu
         include_extended_data: bool,
         include_snapshot: bool,
         include_schema: bool,
+        memory_selection: Option<u8>,
     ) -> Result<DtcExtendedInfo, DiagServiceError> {
         let dtc_code = decode_dtc_from_str(sae_dtc)?;
 
         let (snapshots, snapshot_schema) = if include_snapshot {
-            self.map_snapshots(ecu_name, security_plugin, dtc_code, include_schema)
-                .await?
+            self.map_snapshots(
+                ecu_name,
+                security_plugin,
+                dtc_code,
+                include_schema,
+                memory_selection,
+            )
+            .await?
         } else {
             (None, None)
         };
 
         let (extended_records, extended_schema) = if include_extended_data {
-            self.map_extended_data(ecu_name, security_plugin, dtc_code, include_schema)
-                .await?
+            self.map_extended_data(
+                ecu_name,
+                security_plugin,
+                dtc_code,
+                include_schema,
+                memory_selection,
+            )
+            .await?
         } else {
             (None, None)
         };
 
         let mut dtc_by_mask = self
-            .ecu_dtc_by_mask(ecu_name, security_plugin, None, None, None)
+            .ecu_dtc_by_mask(
+                ecu_name,
+                security_plugin,
+                None,
+                None,
+                None,
+                memory_selection,
+            )
             .await?;
 
         let record_and_status =

@@ -89,6 +89,7 @@ pub(crate) async fn get<
             query.status,
             query.severity,
             query.scope,
+            query.memory_selection,
         )
         .await
     {
@@ -340,6 +341,7 @@ pub(crate) mod id {
                 query.include_extended_data,
                 query.include_snapshot_data,
                 query.include_schema,
+                query.memory_selection,
             )
             .await
         {
@@ -462,11 +464,15 @@ mod tests {
         // Setup mock expectations
         mock_uds
             .expect_ecu_dtc_by_mask()
-            .withf(|name, _, status, severity, scope| {
-                name == "TestECU" && status.is_none() && severity.is_none() && scope.is_none()
+            .withf(|name, _, status, severity, scope, memory_selection| {
+                name == "TestECU"
+                    && status.is_none()
+                    && severity.is_none()
+                    && scope.is_none()
+                    && memory_selection.is_none()
             })
             .times(1)
-            .returning(move |_, _, _, _, _| {
+            .returning(move |_, _, _, _, _, _| {
                 let dtcs = expected_dtcs.clone();
                 Ok(dtcs)
             });
@@ -483,6 +489,7 @@ mod tests {
             severity: None,
             scope: None,
             include_schema: false,
+            memory_selection: None,
         };
 
         // Create security plugin using test utility
