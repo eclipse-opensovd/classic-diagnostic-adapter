@@ -357,6 +357,14 @@ pub trait UdsEcu: Send + Sync + 'static {
         fault_code: Option<String>,
     ) -> Result<Self::Response, DiagServiceError>;
 
+    /// Retrieve all `read` services for a specific functional group.
+    /// # Errors
+    /// Will return `Err` if the description database ECU does not exist.
+    async fn get_functional_group_data_info(
+        &self,
+        functional_group_name: &str,
+    ) -> Result<Vec<ComponentDataInfo>, DiagServiceError>;
+
     /// Get the functional groups an ECU belongs to.
     /// # Errors
     /// Returns `DiagServiceError::NotFound` if the ECU is not found.
@@ -674,6 +682,10 @@ pub mod mock {
                 security_plugin: &DynamicPlugin,
                 fault_code: Option<String>,
             ) -> Result<<MockUdsEcu as UdsEcu>::Response, DiagServiceError>;
+            async fn get_functional_group_data_info(
+                &self,
+                functional_group_name: &str,
+            ) -> Result<Vec<ComponentDataInfo>, DiagServiceError>;
             async fn ecu_functional_groups(
                 &self,
                 ecu_name: &str,
