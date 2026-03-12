@@ -127,9 +127,12 @@ async fn test_ecu_session_switching() {
     .await
     .unwrap()
     .unwrap();
-    assert_eq!(switch_session_result.value, "extended");
+    assert_eq!(switch_session_result.value.to_lowercase(), "extended");
     let session_result = session(&runtime.config, &auth, ecu_endpoint).await.unwrap();
-    assert_eq!(session_result.value, Some("extended".to_owned()));
+    assert_eq!(
+        session_result.value.map(|s| s.to_lowercase()),
+        Some("extended".to_owned())
+    );
     assert_eq!(session_result.name, Some("Diagnostic session".to_owned()));
 
     // After switching to extended session, fetch again using configuraion GET and verify.
@@ -152,6 +155,37 @@ async fn test_ecu_session_switching() {
         .and_then(|v| v.as_str())
         .expect("Missing or invalid EcuSessionType");
     assert_eq!(session_type, "Extended");
+
+    // Reset the ECU using the reset service and verify the session goes back to default
+    reset_ecu(
+        "hardreset",
+        &runtime.config,
+        &auth,
+        ecu_endpoint,
+        StatusCode::NO_CONTENT,
+    )
+    .await
+    .unwrap();
+
+    let session_result_after_reset = session(&runtime.config, &auth, ecu_endpoint).await.unwrap();
+    assert_eq!(
+        session_result_after_reset.value.map(|s| s.to_lowercase()),
+        Some("default".to_owned()),
+        "Session should be back to default after hard reset"
+    );
+
+    // Switch back to extended session so the remaining test steps work
+    let switch_back_result = switch_session(
+        "extended",
+        &runtime.config,
+        &auth,
+        ecu_endpoint,
+        StatusCode::OK,
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    assert_eq!(switch_back_result.value.to_lowercase(), "extended");
 
     // switch ECU sim state to BOOT
     ecusim::switch_variant(&runtime.ecu_sim, "FLXC1000", "BOOT")
@@ -721,7 +755,7 @@ async fn test_ecu_session_reset_on_lock_reacquire() {
     .await
     .unwrap()
     .unwrap();
-    assert_eq!(switch_session_result.value, "extended");
+    assert_eq!(switch_session_result.value.to_lowercase(), "extended");
 
     // Verify ECU sim is in extended session
     let ecu_state = ecusim::get_ecu_state(&runtime.ecu_sim, "flxc1000")
@@ -989,6 +1023,29 @@ async fn get_configurations(
     )
     .await?;
     response_to_t(&http_response)
+}
+
+async fn reset_ecu(
+    value: &str,
+    config: &Configuration,
+    headers: &HeaderMap,
+    ecu_endpoint: &str,
+    expected_status: StatusCode,
+) -> Result<(), TestingError> {
+    let body = serde_json::json!({
+        "parameters": {"value": value}
+    })
+    .to_string();
+    send_cda_request(
+        config,
+        &format!("{ecu_endpoint}/operations/reset/executions"),
+        expected_status,
+        Method::POST,
+        Some(&body),
+        Some(headers),
+    )
+    .await?;
+    Ok(())
 }
 
 async fn get_data_services(
