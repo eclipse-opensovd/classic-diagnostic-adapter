@@ -55,6 +55,16 @@ impl DtcReadInformationFunction {
     pub fn all() -> Vec<Self> {
         Self::iter().collect()
     }
+
+    #[must_use]
+    pub fn is_user_scope(&self) -> bool {
+        matches!(
+            self,
+            Self::UserMemoryDtcByStatusMask
+                | Self::UserMemoryDtcSnapshotRecordByDtcNumber
+                | Self::UserMemoryDtcExtDataRecordByDtcNumber
+        )
+    }
 }
 
 #[repr(u8)]

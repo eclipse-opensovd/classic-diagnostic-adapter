@@ -335,8 +335,12 @@ pub trait UdsEcu: Send + Sync + 'static {
         status: Option<HashMap<String, serde_json::Value>>,
         severity: Option<u32>,
         scope: Option<String>,
+        memory_selection: Option<u8>,
     ) -> Result<HashMap<DtcCode, DtcRecordAndStatus>, DiagServiceError>;
 
+    // alternative of passing a struct DtcOptions containing
+    // the include_ and memory_selection parameters isn't better for readability.
+    #[allow(clippy::too_many_arguments)]
     async fn ecu_dtc_extended(
         &self,
         ecu_name: &str,
@@ -345,6 +349,7 @@ pub trait UdsEcu: Send + Sync + 'static {
         include_extended_data: bool,
         include_snapshot: bool,
         include_schema: bool,
+        memory_selection: Option<u8>,
     ) -> Result<DtcExtendedInfo, DiagServiceError>;
 
     /// Clear the faults for the given ECU
@@ -666,6 +671,7 @@ pub mod mock {
                 status: Option<HashMap<String, serde_json::Value>>,
                 severity: Option<u32>,
                 scope: Option<String>,
+                memory_selection: Option<u8>,
             ) -> Result<HashMap<DtcCode, DtcRecordAndStatus>, DiagServiceError>;
             async fn ecu_dtc_extended(
                 &self,
@@ -675,6 +681,7 @@ pub mod mock {
                 include_extended_data: bool,
                 include_snapshot: bool,
                 include_schema: bool,
+                memory_selection: Option<u8>,
             ) -> Result<DtcExtendedInfo, DiagServiceError>;
             async fn delete_dtcs(
                 &self,

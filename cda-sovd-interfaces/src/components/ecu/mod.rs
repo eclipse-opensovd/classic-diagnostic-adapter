@@ -474,6 +474,10 @@ pub mod faults {
             pub scope: Option<String>,
             #[serde(rename = "include-schema", default)]
             pub include_schema: bool,
+            /// Value for the memory selection in user defined memory.
+            /// Only used for user defined memory, defaults to 0
+            #[serde(default)]
+            pub memory_selection: Option<u8>,
         }
 
         #[derive(Serialize, Deserialize, schemars::JsonSchema)]
@@ -513,6 +517,10 @@ pub mod faults {
                 pub include_snapshot_data: bool,
                 #[serde(default)]
                 pub include_schema: bool,
+                /// Value for the memory selection in user defined memory.
+                /// Only used for user defined memory, defaults to 0
+                #[serde(default)]
+                pub memory_selection: Option<u8>,
             }
 
             #[derive(Serialize, schemars::JsonSchema)]
