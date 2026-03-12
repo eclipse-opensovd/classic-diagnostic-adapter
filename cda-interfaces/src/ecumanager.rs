@@ -13,12 +13,13 @@ use serde::Serialize;
 
 use crate::{
     DiagComm, DiagServiceError, DoipComParamProvider, DynamicPlugin, EcuSchemaProvider, HashMap,
-    HashSet, SecurityAccess, UdsComParamProvider,
+    HashSet, SecurityAccess, UDS_ID_RESPONSE_BITMASK, UdsComParamProvider,
     datatypes::{
         ComplexComParamValue, ComponentConfigurationsInfo, ComponentDataInfo, DtcLookup,
         DtcReadInformationFunction, SdSdg, single_ecu,
     },
     diagservices::{DiagServiceResponse, UdsPayloadData},
+    service_ids,
 };
 
 /// Metadata for a service parameter, including constant values for discovery
@@ -92,6 +93,24 @@ pub struct ServicePayload {
     pub target_address: u16,
     pub new_session: Option<String>,
     pub new_security: Option<String>,
+}
+
+impl ServicePayload {
+    #[must_use]
+    pub fn is_positive_response_for_sid(&self, sent_sid: u8) -> bool {
+        self.data.first() == Some(&sent_sid.saturating_add(UDS_ID_RESPONSE_BITMASK))
+    }
+
+    #[must_use]
+    pub fn is_negative_response_for_sid(&self, sent_sid: u8) -> bool {
+        self.data.first() == Some(&service_ids::NEGATIVE_RESPONSE)
+            && self.data.get(1) == Some(&sent_sid)
+    }
+
+    #[must_use]
+    pub fn is_response_for_sid(&self, sent_sid: u8) -> bool {
+        self.is_negative_response_for_sid(sent_sid) || self.is_positive_response_for_sid(sent_sid)
+    }
 }
 
 /// Trait to provide communication parameters for an ECU.

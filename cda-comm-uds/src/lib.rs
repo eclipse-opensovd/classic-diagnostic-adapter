@@ -22,7 +22,7 @@ use cda_interfaces::{
     FlashTransferStartParams, FunctionalDescriptionConfig, HashMap, HashMapExtensions, HashSet,
     HashSetExtensions, SchemaDescription, SchemaProvider, SecurityAccess, ServicePayload,
     TesterPresentControlMessage, TesterPresentMode, TesterPresentType, TransmissionParameters,
-    UDS_ID_RESPONSE_BITMASK, UdsEcu, UdsResponse,
+    UdsEcu, UdsResponse,
     datatypes::{
         self, ComponentConfigurationsInfo, DTC_CODE_BIT_LEN, DataTransferError,
         DataTransferMetaData, DataTransferStatus, DtcCode, DtcExtendedInfo, DtcMask,
@@ -314,6 +314,9 @@ impl<S: EcuGateway, R: DiagServiceResponse, T: EcuManager<Response = R>> UdsMana
         let ecu = self.ecu_manager(ecu_name)?;
         let (uds_params, transmission_params) = Self::ecu_send_params(ecu).await;
         let ecu_logical_address = ecu.read().await.logical_address();
+        let sent_sid = *payload.data.first().ok_or(DiagServiceError::BadPayload(
+            "Cannot sent message without SID".to_owned(),
+        ))?;
 
         // todo: what timeout should we use to wait till the ecu is 'free'?
         let semaphore = {
@@ -338,8 +341,6 @@ impl<S: EcuGateway, R: DiagServiceResponse, T: EcuManager<Response = R>> UdsMana
 
         let rx_timeout = timeout.unwrap_or(uds_params.timeout_default);
         let mut rx_timeout_next = None;
-
-        let sent_sid = payload.data.first();
 
         // outer loop to retry sending frames, resend frames must deal with (N)ACK again
         let (response_tx, mut response_rx) = mpsc::channel(2);
@@ -375,17 +376,7 @@ impl<S: EcuGateway, R: DiagServiceResponse, T: EcuManager<Response = R>> UdsMana
                             Ok(Some(UdsResponse::Message(msg))) => {
                                 // if we received a response matching our sent SID, return it
                                 // other responses are logged as warnings and ignored.
-                                // todo: this should be handled by a struct
-                                if !msg.data.is_empty()
-                                    && ((msg.data.first() == Some(&service_ids::NEGATIVE_RESPONSE)
-                                        && msg.data.get(1) == sent_sid)
-                                        || (msg.data.first()
-                                            == sent_sid
-                                                .map(|sid| {
-                                                    sid.saturating_add(UDS_ID_RESPONSE_BITMASK)
-                                                })
-                                                .as_ref()))
-                                {
+                                if !msg.data.is_empty() && msg.is_response_for_sid(sent_sid) {
                                     tracing::debug!("Received expected UDS message: {:?}", msg);
                                     break 'read_uds_messages Ok(msg);
                                 }
@@ -486,6 +477,25 @@ impl<S: EcuGateway, R: DiagServiceResponse, T: EcuManager<Response = R>> UdsMana
         };
         drop(response_rx);
         drop(ecu_sem);
+
+        if let Ok(ref msg) = response
+            && msg.is_positive_response_for_sid(sent_sid)
+        {
+            let ecu_mgr = self
+                .ecu_manager(ecu_name)
+                .expect("ECU name has been already checked");
+            let ecu_read = ecu_mgr.read().await;
+            if let Some(new_session) = payload.new_session {
+                ecu_read
+                    .set_service_state(service_ids::SESSION_CONTROL, new_session)
+                    .await;
+            }
+            if let Some(new_security) = payload.new_security {
+                ecu_read
+                    .set_service_state(service_ids::SECURITY_ACCESS, new_security)
+                    .await;
+            }
+        }
 
         let finish = start.elapsed().saturating_sub(sent_after);
         tracing::debug!(
@@ -1470,12 +1480,6 @@ impl<S: EcuGateway, R: DiagServiceResponse, T: EcuManager<Response = R>> UdsEcu
         let result = self.send(ecu_name, dc, security_plugin, None, true).await?;
         match result.response_type() {
             DiagServiceResponseType::Positive => {
-                // update ecu DiagServiceManagers internal state.
-                let ecu = ecu_diag_service.read().await;
-                ecu.set_service_state(service_ids::SESSION_CONTROL, session.to_owned())
-                    .await;
-                drop(ecu);
-
                 self.start_reset_task(ecu_name, expiration, ResetType::Session)
                     .await;
 
@@ -1601,12 +1605,6 @@ impl<S: EcuGateway, R: DiagServiceResponse, T: EcuManager<Response = R>> UdsEcu
                     .await?;
                 match result.response_type() {
                     DiagServiceResponseType::Positive => {
-                        // update ecu DiagServiceManagers internal state.
-                        let ecu = ecu_diag_service.read().await;
-                        ecu.set_service_state(service_ids::SECURITY_ACCESS, level.to_owned())
-                            .await;
-                        drop(ecu);
-
                         self.start_reset_task(ecu_name, expiration, ResetType::SecurityAccess)
                             .await;
 
