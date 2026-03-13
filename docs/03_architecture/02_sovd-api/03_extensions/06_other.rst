@@ -13,6 +13,7 @@ ECU Variant Detection
 
 .. arch:: ECU Variant Detection via SOVD-API
     :id: arch~sovd-api-ecu-variant-detection
+    :status: draft
 
     **Motivation**
 

@@ -13,6 +13,7 @@ MDD Embedded Files API
 
 .. arch:: MDD Embedded Files API
     :id: arch~sovd-api-mdd-embedded-files
+    :status: draft
 
     .. note::
        This is a SOVD-API extension.

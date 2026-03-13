@@ -29,6 +29,7 @@ Communication parameters
 
 .. req:: The CDA must support configuration of DoIP communication parameters as defined in the following table.
     :id: req~doip-communication-parameters
+    :status: draft
 
     .. list-table:: DoIP Communication parameters
        :header-rows: 1
@@ -126,11 +127,6 @@ In case a connection was to be established as part of a diagnostic request, and 
 Communication
 ^^^^^^^^^^^^^
 
-.. note::
-
-   .. TODO
-
-
 UDS Communication (DoIP)
 ------------------------
 
@@ -141,6 +137,7 @@ Communication parameters
 
 .. req:: The CDA must support configuration of UDS communication as defined in the following table.
     :id: req~uds-communication-parameters
+    :status: draft
 
     .. list-table:: UDS Communication parameters (DoIP)
        :header-rows: 1

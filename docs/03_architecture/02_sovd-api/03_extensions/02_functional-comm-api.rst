@@ -15,6 +15,7 @@ Functional communication
 
 .. arch:: Diagnostic description & Configuration
     :id: arch~functional-communication-dd-configuration
+    :status: draft
 
     Information about the available functional groups, the available services in those groups, and their communication parameters must be provided in a separate diagnostic description.
 
@@ -34,6 +35,7 @@ API
 .. arch:: Functional Communication API
     :id: arch~functional-communication-api
     :links: arch~functional-communication-locks, arch~functional-communication-data, arch~functional-communication-operations, arch~functional-communication-modes
+    :status: draft
 
     Functional group functionality - if available - must be available in the ``/functions/functionalgroups/{group-name}`` path.
 
@@ -42,6 +44,7 @@ API
 
 .. arch:: Functional Communication ECU-Lock behavior
     :id: arch~functional-communication-locks
+    :status: draft
 
     Locking a functional group will start sending functional Tester Presents to the functional DoIP addresses of all DoIP Entities, and stop sending non-functional Tester Presents.
 
@@ -52,6 +55,7 @@ API
 
 .. arch:: Functional Communication - Data
     :id: arch~functional-communication-data
+    :status: draft
 
     **Data**
 
@@ -65,6 +69,7 @@ API
 
 .. arch:: Functional Communication - Operations
     :id: arch~functional-communication-operations
+    :status: draft
 
     Same principle as with data, except that the top-level element name is ``parameters``.
 
@@ -74,6 +79,7 @@ API
 
 .. arch:: Functional Communication - Modes
     :id: arch~functional-communication-modes
+    :status: draft
 
     The following modes must be supported for functional groups when the underlying diagnostic description contains them:
 
