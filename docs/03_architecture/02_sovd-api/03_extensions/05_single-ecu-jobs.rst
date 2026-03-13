@@ -13,6 +13,7 @@ Single ECU Jobs
 
 .. arch:: Single ECU Jobs Extension
     :id: arch~sovd-api-single-ecu-jobs
+    :status: draft
 
     **Motivation**
 

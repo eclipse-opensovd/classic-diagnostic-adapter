@@ -66,6 +66,7 @@ Diagnostic Database Update Plugin
 .. req:: Diagnostic Database Update Plugin
     :id: req~plugin-diagnostic-database-update
     :links: arch~plugin-diagnostic-database-update
+    :status: draft
 
     A diagnostic database update plugin must be available. It must provide an SOVD-API allowing clients to
     update the diagnostic database of the CDA atomically, meaning all provided files for the update are updated at
@@ -78,6 +79,7 @@ Diagnostic Database Update Plugin
 .. req:: Diagnostic Database Update Plugin - Authentication
     :id: req~plugin-diagnostic-database-update-authentication
     :links: arch~plugin-diagnostic-database-update
+    :status: draft
 
     The diagnostic database update plugin must ensure that only authorized clients can update the diagnostic database.
 
@@ -87,6 +89,7 @@ Diagnostic Database Update Plugin
 .. req:: Diagnostic Database Update Plugin - Verification
     :id: req~plugin-diagnostic-database-update-verification
     :links: arch~plugin-diagnostic-database-update
+    :status: draft
 
     The diagnostic database update plugin must be able to verify the integrity of the mdd files before they are
     being used by the CDA.
@@ -97,6 +100,7 @@ Diagnostic Database Update Plugin
 .. req:: Diagnostic Database Update Plugin - Downgrade Protection
     :id: req~plugin-diagnostic-database-update-downgrade-protection
     :links: arch~plugin-diagnostic-database-update
+    :status: draft
 
     The diagnostic database update plugin must have the option to prevent downgrades of the diagnostic database,
     meaning that it can prevent applying an update which would lead to an older version of the diagnostic database
@@ -108,6 +112,7 @@ Diagnostic Database Update Plugin
 .. req:: Diagnostic Database Update Plugin - Safety
     :id: req~plugin-diagnostic-database-update-safety
     :links: arch~plugin-diagnostic-database-update
+    :status: draft
 
     Updates to the diagnostic database must be safe, it must be ensured that the CDA can recover from
     power-cycles or crashes at any time during the update process, and that the CDA is not left in an unusable state.

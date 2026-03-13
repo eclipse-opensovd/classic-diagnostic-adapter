@@ -24,6 +24,7 @@ HTTP(S)
 .. req:: HTTP-Server
     :id: req~sovd-api-http-server
     :links: arch~sovd-api-http-server
+    :status: draft
 
     The CDA must provide an HTTP- or HTTPS-server.
 
@@ -36,12 +37,14 @@ HTTP(S)
 
 .. req:: HTTP-Server-Port
     :id: req~sovd-api-http-server-port
+    :status: draft
 
     The HTTP- or HTTPS-Server port must be configurable.
 
 
 .. req:: HTTPS-Server configuration
     :id: req~sovd-api-https-server-configuration
+    :status: draft
 
     In case of HTTPS, the certificate/key must be providable through the configuration, or a plugin.
 
@@ -61,6 +64,7 @@ Entities
 .. req:: Entity Data Types
     :id: req~sovd-api-data-types-mapping-iso17978
     :links: arch~sovd-api-data-types-mapping-iso17978
+    :status: draft
 
     Data types must be mapped as specified by ISO 17978-3.
 
@@ -72,6 +76,7 @@ Paths
 .. req:: Standardized Resource Collection Mapping
     :id: req~sovd-api-standardized-resource-collection-mapping
     :links: arch~sovd-api-standardized-resource-collection-mapping
+    :status: draft
 
     The standardized resource collection for ``/components/{ecu-name}`` must be mapped as follows:
 
@@ -130,6 +135,7 @@ Paths
 .. req:: Explicit ECU Variant Detection
     :id: req~sovd-api-ecu-variant-detection
     :links: arch~sovd-api-ecu-variant-detection
+    :status: draft
 
     The CDA must support ECU variant detection through a ``POST`` on the ``/components/{ecu-name}`` endpoint.
     An additional endpoint under operations may be provided to trigger the detection.
@@ -147,6 +153,7 @@ Operations
 .. req:: Operations Handling
     :id: req~sovd-api-operations-handling
     :links: arch~sovd-api-operations-handling
+    :status: draft
 
     Operations (Routines SID 31\ :sub:`16`) can be synchronous or asynchronous. Asynchronous routines are routines, for which the ``RequestResults`` and/or ``Stop`` subfunctions are defined.
 
@@ -200,6 +207,7 @@ Faults
 .. req:: Faults Endpoint
     :id: req~sovd-api-faults-endpoint
     :links: arch~sovd-api-faults-endpoint
+    :status: draft
 
     The CDA must provide a ``/faults`` endpoint to retrieve DTCs in accordance with ISO 17978-3.
 
@@ -214,6 +222,7 @@ Data Type A_BYTEFIELD as Hex
 
 .. req:: Data Type A_BYTEFIELD as Hex
     :id: req~sovd-api-bytefield-as-hex
+    :status: draft
 
     For the data type ``A_BYTEFIELD`` the json output type ``string`` with the format ``hex`` must be supported
     through an optional query-parameter. Using ``hex`` means, that the binary data must be base16-encoded,
@@ -232,6 +241,7 @@ Support for mimetype application/octet-stream
 
 .. req:: Support for mimetype application/octet-stream
     :id: req~sovd-api-octet-stream-support
+    :status: draft
 
     The ``/data/{data-identifier}`` and ``/operations/{routine-identifier}`` endpoints must support the additional mimetype octet-stream where applicable, to allow clients to send and receive payloads as binary data.
 
@@ -246,9 +256,45 @@ Version endpoint
 
 .. req:: Version Endpoint
     :id: req~sovd-api-version-endpoint
+    :status: draft
 
     The CDA must provide a standardized version endpoint ``/apps/sovd2uds/data/version`` which returns the current
     version of the CDA in use, its SOVD api version, and implementation name.
+
+
+Health Endpoint
+^^^^^^^^^^^^^^^
+
+.. req:: Health Monitoring Endpoint
+    :id: req~sovd-api-health-endpoint
+    :links: arch~dt-health-monitoring
+    :status: draft
+
+    The CDA MAY provide a health monitoring endpoint as an optional build-time feature.
+
+    When the health monitoring feature is enabled:
+
+    - The CDA must expose a health endpoint on the HTTP server that reports the aggregate health status
+      of the application and its components
+    - Each major component (main application, database loader, DoIP gateway) must register a health
+      provider with granular status reporting
+    - Health status must reflect the current initialization and operational state of monitored components
+    - The health endpoint must be available immediately after the HTTP server starts, before
+      SOVD API routes are registered
+
+    When the health monitoring feature is disabled:
+
+    - The CDA must not expose any health endpoints
+    - The CDA may still use the health monitoring framework internally for logging or diagnostics, and for custom
+       plugins to use, but it must not be accessible externally through the CDA itself
+    - The absence of health monitoring must not affect any other CDA functionality
+
+    **Rationale**
+
+    Health monitoring enables external systems (e.g., container orchestrators, load balancers, or
+    monitoring systems) to observe CDA startup progress and operational status. Making this an optional
+    build-time feature allows deployments that do not require health monitoring to reduce the
+    application footprint and avoid unnecessary overhead.
 
 
 .. _requirements_sovd_api_operation_order:
@@ -258,6 +304,7 @@ Support for non-standard operation order
 
 .. req:: Support for non-standard operation order
     :id: req~sovd-api-routine-operation-out-of-order
+    :status: draft
 
     To support the use-case of calling ``RequestResults`` and ``Stop``, without having to call ``Start``,
     the following boolean query parameters must be supported:
@@ -294,6 +341,7 @@ mdd-files, or to prepare for operations which affect the whole vehicle (e.g. dis
 
 .. req:: Vehicle Level Operations
     :id: req~sovd-api-vehicle-level-operations
+    :status: draft
 
     Vehicle level operations must be supported in the CDA.
     This requires a standardized resource collection in the exposed root path ``/``.
@@ -320,6 +368,7 @@ Functional communication
 .. req:: Functional Communication
     :id: req~sovd-api-functional-communication
     :links: arch~functional-communication-dd-configuration
+    :status: draft
 
     Functional communications needs to be possible. A standardized resource collection must be made available within the
     ``/functions/functionalgroups/{groupName}`` resource.
@@ -355,6 +404,7 @@ Flash API
 .. req:: Flash API
     :id: req~sovd-api-flashing
     :links: arch~sovd-api-flash-file-management, arch~sovd-api-flash-data-transfer
+    :status: draft
 
     A Flash-API is required to support flashing of ECUs, utilizing SIDs 34\ :sub:`16`, 36\ :sub:`16` & 37\ :sub:`16`. It needs to enable efficient transfer of the data, without sending the individual data transfers via REST.
 
@@ -366,6 +416,7 @@ Flash API
 
 .. req:: Flash API - Data Source Restriction
     :id: req~sovd-api-flashing-security
+    :status: draft
 
     The source of the data to be sent for flashing, must be restrictable to a path and its subdirectories via configuration.
 
@@ -379,6 +430,7 @@ Communication Parameters API
 .. req:: Communication Parameters API
     :id: req~sovd-api-comparams
     :links: arch~sovd-api-comparams
+    :status: draft
 
     An API to retrieve and modify communication parameters must be provided
 
@@ -392,12 +444,13 @@ MDD Embedded files
 .. req:: MDD Embedded files
     :id: req~sovd-api-mdd-embedded-files
     :links: arch~sovd-api-mdd-embedded-files
+    :status: draft
 
     The CDA must support reading embedded files from the mdd file, and provide them via the ``/components/{ecu-name}/files/{file-name}`` endpoint.
 
     **Rationale**
 
-    Some data required for communication with ECUs might be embedded in the mdd file. To allow clients to retrieve this data, it must be made available via the API.
+    Some data required for communication with ECUs might be embedded in the mdd file. To allow clients to retrieve this data, it must be made available through the API.
 
 
 OpenAPI-Documentation
@@ -405,6 +458,7 @@ OpenAPI-Documentation
 
 .. req:: OpenAPI Documentation
     :id: req~sovd-api-openapi-documentation
+    :status: draft
 
     An OpenAPI documentation of the provided API must be available for every endpoint of the CDA when ``/docs`` is appended.
 
@@ -415,9 +469,10 @@ OpenAPI-Documentation
 
 .. req:: OpenAPI Schema
     :id: req~sovd-api-openapi-schema
+    :status: draft
 
-    An OpenAPI schema description of retrieved data must be available when the query parameter ``include-schema=true``
-    is appended to any endpoint with returned data.
+    An OpenAPI schema description of the retrieved data must be included in the response when the query
+    parameter ``include-schema=true`` is appended to any endpoint with returned data.
 
     **Rationale**
 

@@ -16,6 +16,7 @@ Storage Access
 
 .. arch:: Storage Access API
     :id: arch~system-storage-access-abstraction
+    :status: draft
 
     The Storage Access API provides an abstraction layer for storage access, allowing the CDA to interact with different types of storage systems (e.g., local file system, databases) without being tightly coupled to a specific implementation.
 
