@@ -85,11 +85,11 @@ Data Types
          - json-pointer
          - Pointer to a specific value within the JSON according to RFC 6901 (https://www.rfc-editor.org/rfc/rfc6901)
 
-    .. note:: More string formats required?
+    .. note:: TODO More string formats required?
 
     **Mapping of complex data types**
 
-    .. todo:: Mapping of complex data types
+    .. note:: TODO Mapping of complex data types
 
 .. _architecture_bulk_data:
 
