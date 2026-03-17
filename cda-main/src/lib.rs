@@ -25,7 +25,7 @@ use cda_interfaces::{
     dlt_ctx,
     file_manager::{Chunk, ChunkType},
 };
-use cda_plugin_security::SecurityPlugin;
+use cda_plugin_security::{SecurityPlugin, SecurityPluginLoader};
 use cda_sovd::Locks;
 use cda_tracing::{OtelGuard, TracingSetupError, TracingWorkerGuard};
 use tokio::{
@@ -35,9 +35,12 @@ use tokio::{
 use tracing::Instrument;
 use tracing_subscriber::layer::SubscriberExt;
 
-use crate::config::configfile::Configuration;
+use crate::config::configfile::{ConfigSanity, Configuration};
 
 pub mod config;
+
+#[cfg(feature = "health")]
+const MAIN_HEALTH_COMPONENT_KEY: &str = "main";
 
 #[global_allocator]
 static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
@@ -775,4 +778,154 @@ pub fn setup_tracing(config: &Configuration) -> Result<TracingGuards, TracingSet
 #[must_use]
 pub fn cda_version() -> &'static str {
     env!("CARGO_PKG_VERSION")
+}
+
+/// Starts the CDA server using a pre-built security plugin instance.
+///
+/// This is the primary entry point for integrating a custom security plugin.
+/// The plugin is created once before calling this function; all requests share
+/// the same instance, so expensive initialisation (key loading, policy engine
+/// setup, connection pooling, etc.) only happens once.
+///
+/// Tracing must be set up by the caller before invoking this function.
+///
+/// # Errors
+/// Returns `AppError` if the server cannot start or encounters a fatal error.
+pub async fn run_server<F, S>(
+    config: &Configuration,
+    security_plugin: Arc<S>,
+    shutdown_signal: F,
+) -> Result<(), AppError>
+where
+    F: Future<Output = ()> + Clone + Send + 'static,
+    S: SecurityPluginLoader,
+{
+    let webserver_config = cda_sovd::WebServerConfig {
+        host: config.server.address.clone(),
+        port: config.server.port,
+    };
+
+    let (dynamic_router, webserver_task) =
+        cda_sovd::launch_webserver(webserver_config.clone(), shutdown_signal.clone()).await?;
+
+    #[cfg(feature = "health")]
+    let (health_state, main_health_provider) = if config.health.enabled {
+        let health_state =
+            cda_health::add_health_routes(&dynamic_router, cda_version().to_owned()).await;
+        let main_health_provider = Arc::new(cda_health::StatusHealthProvider::new(
+            cda_health::Status::Starting,
+        ));
+        if let Err(e) = health_state
+            .register_provider(
+                MAIN_HEALTH_COMPONENT_KEY,
+                Arc::clone(&main_health_provider) as Arc<dyn cda_health::HealthProvider>,
+            )
+            .await
+        {
+            tracing::warn!(error = %e, "Failed to register main health provider");
+        }
+        (Some(health_state), Some(main_health_provider))
+    } else {
+        (None, None)
+    };
+
+    #[cfg(not(feature = "health"))]
+    let (health_state, main_health_provider): (
+        Option<cda_health::HealthState>,
+        Option<Arc<cda_health::StatusHealthProvider>>,
+    ) = (None, None);
+
+    tracing::debug!("Webserver is running. Loading sovd routes...");
+
+    let vehicle_data = load_vehicle_data::<_, S::PluginData>(
+        config,
+        shutdown_signal.clone(),
+        health_state.as_ref(),
+    )
+    .await?;
+
+    if vehicle_data.databases.is_empty() && config.database.exit_no_database_loaded {
+        return Err(AppError::ResourceError(
+            "No database loaded, exiting as configured".to_string(),
+        ));
+    }
+
+    cda_sovd::add_vehicle_routes::<DiagServiceResponseStruct, _, _, S>(
+        &dynamic_router,
+        vehicle_data.uds_manager,
+        config.flash_files_path.clone(),
+        vehicle_data.file_managers,
+        vehicle_data.locks,
+        config.functional_description.clone(),
+        config.components.clone(),
+        Arc::clone(&security_plugin),
+    )
+    .await?;
+
+    if let serde_json::Value::Object(version_info) = serde_json::json!({
+        "id": "version",
+        "data": {
+            "name": "Eclipse OpenSOVD Classic Diagnostic Adapter",
+            "api": {
+                // 1.1 to match the sovd standard version
+                "version": "1.1"
+            },
+            "implementation": {
+                "version": cda_version(),
+                "commit": env!("GIT_COMMIT_HASH").to_owned(),
+                "build_date": env!("BUILD_DATE").to_owned(),
+            }
+        }
+    }) {
+        cda_sovd::add_static_data_endpoint(
+            &dynamic_router,
+            version_info.clone(),
+            "/vehicle/v15/apps/sovd2uds/data/version",
+        )
+        .await;
+        cda_sovd::add_static_data_endpoint(
+            &dynamic_router,
+            version_info,
+            "/vehicle/v15/data/version",
+        )
+        .await;
+    } else {
+        tracing::error!("Failed to build version information");
+    }
+
+    cda_sovd::add_openapi_routes(&dynamic_router, &webserver_config).await;
+
+    tracing::info!("CDA fully initialized and ready to serve requests");
+    if let Some(provider) = main_health_provider {
+        provider.update_status(cda_health::Status::Up).await;
+    }
+
+    shutdown_signal.await;
+    tracing::info!("Shutting down...");
+    webserver_task
+        .await
+        .map_err(|e| AppError::RuntimeError(format!("Webserver task join error: {e}")))?;
+
+    Ok(())
+}
+
+/// Minimal entry point: loads configuration, sets up tracing, then starts the server.
+///
+/// This is the simplest way to run the CDA with a custom security plugin. CLI argument
+/// overrides are not applied; use [`run_server`] directly if you need those.
+///
+/// # Errors
+/// Returns `AppError` if configuration, tracing setup, or the server itself fails.
+pub async fn start_cda<S: SecurityPluginLoader>(security_plugin: Arc<S>) -> Result<(), AppError> {
+    let config = config::load_config().unwrap_or_else(|e| {
+        println!("Failed to load configuration: {e}");
+        println!("Using default values");
+        config::default_config()
+    });
+    config.validate_sanity()?;
+    let _tracing_guards = setup_tracing(&config)?;
+    tracing::info!("Starting CDA - version {}", cda_version());
+    use futures::FutureExt as _;
+    let shutdown = shutdown_signal().shared();
+    run_server(&config, security_plugin, shutdown).await
 }
