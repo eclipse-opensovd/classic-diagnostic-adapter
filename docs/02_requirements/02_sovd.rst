@@ -163,7 +163,7 @@ Operations
     2. ``GET /executions/{id}`` for *RequestResults* (subfunction 03)
     3. ``DELETE /executions/{id}`` for *Stop* (subfunction 02).
 
-    Synchronous routines:
+    **Synchronous routines**
 
     The `POST` to executions will directly return the result - either a 200 with the data, or an error.
 
@@ -178,7 +178,7 @@ Operations
         }
 
 
-    Asynchronous routines:
+    **Asynchronous routines**
 
     Since the response of the ``Start`` subfunction, as well as an id for polling the ``RequestResults``
     subfunction are required, both must be returned.
