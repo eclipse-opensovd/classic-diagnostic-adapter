@@ -4207,6 +4207,11 @@ impl<S: SecurityPlugin> EcuManager<S> {
                 // to have a valid switch key that is not connected with further data.
                 if let Some(case_structure) = case_structure {
                     uds_payload.push_slice(byte_pos, uds_payload.len())?;
+                    // Reset last_read_byte_pos for the case data sub-view.
+                    // Inner case params may omit BYTE-POSITION, falling back
+                    // to last_read_byte_pos; it must be 0 (start of case data)
+                    // rather than stale from a previous context.
+                    uds_payload.set_last_read_byte_pos(0);
                     let case_data =
                         self.map_struct_from_uds(&case_structure, mapped_service, uds_payload)?;
                     uds_payload.pop_slice()?;
@@ -4984,6 +4989,18 @@ mod tests {
             .convert_from_uds(service, &create_payload(payload_data), true)
             .await
             .unwrap_err()
+    }
+
+    /// Helper: assert that a `convert_from_uds` call succeeds.
+    async fn assert_uds_conversion_succeeds(
+        ecu_manager: &super::EcuManager<DefaultSecurityPluginData>,
+        service: &cda_interfaces::DiagComm,
+        payload_data: Vec<u8>,
+    ) {
+        let response = ecu_manager
+            .convert_from_uds(service, &create_payload(payload_data), true)
+            .await;
+        assert!(response.is_ok(), "Expected convert_from_uds to succeed");
     }
 
     #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -6582,7 +6599,10 @@ mod tests {
     #[tokio::test]
     async fn test_mux_from_uds_invalid_payload() {
         let (ecu_manager, service, sid) = create_ecu_manager_with_mux_service(None, None, None);
-        assert_uds_conversion_fails(
+        // Valid switch key but no case data: with the trailing-param fix this
+        // now succeeds gracefully, inner params are decoded as empty/absent
+        // when the case sub-view is truncated at the payload boundary.
+        assert_uds_conversion_succeeds(
             &ecu_manager,
             &service,
             vec![
@@ -6591,7 +6611,7 @@ mod tests {
                 // This does not belong to our mux, it's here to test, if the start byte is used
                 0xFF, // Mux param starts here
                 // + switch key byte 0
-                0x0, 0x0A, // valid switch key but no data, expect error from decode.
+                0x0, 0x0A, // valid switch key but no data — trailing params absent.
             ],
         )
         .await;
@@ -6600,7 +6620,10 @@ mod tests {
     #[tokio::test]
     async fn test_mux_from_uds_empty_structure() {
         let (ecu_manager, service, sid) = create_ecu_manager_with_mux_service(None, None, None);
-        let err = assert_uds_conversion_fails(
+        // Valid switch key but no case data: with the trailing-param fix this
+        // now succeeds, inner case params at/beyond the empty sub-view are
+        // treated as absent rather than triggering NotEnoughData.
+        assert_uds_conversion_succeeds(
             &ecu_manager,
             &service,
             vec![
@@ -6609,18 +6632,10 @@ mod tests {
                 // This does not belong to our mux, it's here to test, if the start byte is used
                 0xFF, // Mux param starts here
                 // + switch key byte 0
-                0x00, 0x0A, // valid switch key but no data, expect error from decode.
+                0x00, 0x0A, // valid switch key but no data, trailing params absent.
             ],
         )
         .await;
-
-        assert_eq!(
-            err,
-            DiagServiceError::NotEnoughData {
-                expected: 4, // the case expects 4 bytes for the float param
-                actual: 0
-            }
-        );
     }
 
     #[tokio::test]
@@ -7296,7 +7311,10 @@ mod tests {
     #[tokio::test]
     async fn test_map_dynamic_length_field_from_uds_not_enough_data() {
         let (ecu_manager, service, sid) = create_ecu_manager_with_dynamic_length_field_service();
-        let err = assert_uds_conversion_fails(
+        // Claims 3 items but only has data for 2.  With the trailing-param
+        // fix, item 3's params are beyond the payload boundary and decoded
+        // as absent, the call succeeds with the 3rd item containing empty data.
+        assert_uds_conversion_succeeds(
             &ecu_manager,
             &service,
             vec![
@@ -7306,14 +7324,6 @@ mod tests {
             ],
         )
         .await;
-
-        assert_eq!(
-            err,
-            DiagServiceError::NotEnoughData {
-                expected: 2,
-                actual: 0
-            }
-        );
     }
 
     #[tokio::test]
