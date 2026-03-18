@@ -6599,9 +6599,8 @@ mod tests {
     #[tokio::test]
     async fn test_mux_from_uds_invalid_payload() {
         let (ecu_manager, service, sid) = create_ecu_manager_with_mux_service(None, None, None);
-        // Valid switch key but no case data: with the trailing-param fix this
-        // now succeeds gracefully, inner params are decoded as empty/absent
-        // when the case sub-view is truncated at the payload boundary.
+        // inner params are decoded as empty/absent when the case sub-view
+        // is truncated at the payload boundary.
         assert_uds_conversion_succeeds(
             &ecu_manager,
             &service,
@@ -6611,7 +6610,7 @@ mod tests {
                 // This does not belong to our mux, it's here to test, if the start byte is used
                 0xFF, // Mux param starts here
                 // + switch key byte 0
-                0x0, 0x0A, // valid switch key but no data — trailing params absent.
+                0x0, 0x0A, // valid switch key but no data, trailing params absent.
             ],
         )
         .await;
@@ -6620,9 +6619,8 @@ mod tests {
     #[tokio::test]
     async fn test_mux_from_uds_empty_structure() {
         let (ecu_manager, service, sid) = create_ecu_manager_with_mux_service(None, None, None);
-        // Valid switch key but no case data: with the trailing-param fix this
-        // now succeeds, inner case params at/beyond the empty sub-view are
-        // treated as absent rather than triggering NotEnoughData.
+        // inner case params at/beyond the empty sub-view are treated as absent
+        // rather than triggering NotEnoughData.
         assert_uds_conversion_succeeds(
             &ecu_manager,
             &service,
@@ -7311,9 +7309,8 @@ mod tests {
     #[tokio::test]
     async fn test_map_dynamic_length_field_from_uds_not_enough_data() {
         let (ecu_manager, service, sid) = create_ecu_manager_with_dynamic_length_field_service();
-        // Claims 3 items but only has data for 2.  With the trailing-param
-        // fix, item 3's params are beyond the payload boundary and decoded
-        // as absent, the call succeeds with the 3rd item containing empty data.
+        // Claims 3 items but only has data for 2. Item 3 starts at the payload
+        // boundary, so decoding treats it as absent and conversion still succeeds.
         assert_uds_conversion_succeeds(
             &ecu_manager,
             &service,

@@ -2170,9 +2170,8 @@ mod tests {
         let mut payload = Payload::new(&data);
         let res: Result<crate::DiagDataTypeContainer, cda_interfaces::DiagServiceError> =
             extract_diag_data_container(Some("test_param"), 0, 0, &mut payload, &dct_min1, None);
-        // With the trailing-param fix, param_byte_pos(0) >= payload.len()(0)
-        // means the param is absent (beyond payload boundary), treated as
-        // optional regardless of min_length.
+        // the param is at or beyond the payload boundary, so it is treated as absent and optional
+        // regardless of min_length.
         assert!(
             res.is_ok(),
             "MinMaxLengthType at boundary position should be treated as absent"
@@ -2183,7 +2182,6 @@ mod tests {
         let mut payload = Payload::new(&short_data);
         let res =
             extract_diag_data_container(Some("test_param"), 0, 0, &mut payload, &dct_min1, None);
-        // param_byte_pos=0 >= len=0 → absent → Ok (boundary case)
         assert!(res.is_ok(), "Boundary param is absent, not an error");
     }
 
