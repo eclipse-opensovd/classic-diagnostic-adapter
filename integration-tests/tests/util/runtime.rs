@@ -320,6 +320,7 @@ fn start_docker_compose(
         .arg("SOURCE_DATE_EPOCH=0")
         .arg("--build-arg")
         .arg("SOURCE_GIT_SHA=unknown")
+        .env("DOCKER_BUILDKIT", "1")
         .current_dir(&test_container_dir)
         .status()
         .map_err(|e| TestingError::ProcessFailed(format!("Failed to build docker compose: {e}")))?;
@@ -331,7 +332,7 @@ fn start_docker_compose(
 fn docker_compose_up(container: Option<String>) -> Result<(), TestingError> {
     let test_container_dir = test_container_dir()?;
     let mut cmd = std::process::Command::new("docker");
-    cmd.arg("compose").arg("up").arg("-d");
+    cmd.arg("compose").arg("up").arg("-d").env("DOCKER_BUILDKIT", "1");
     if let Some(container_name) = container {
         cmd.arg(container_name);
     }
@@ -348,6 +349,7 @@ fn docker_compose_down(container: Option<String>) -> Result<(), TestingError> {
     cmd.arg("compose")
         .arg("down")
         .arg("--remove-orphans")
+        .env("DOCKER_BUILDKIT", "1")
         .current_dir(&test_container_dir);
 
     if let Some(container_name) = container {
@@ -453,7 +455,7 @@ fn write_config_toml(
         TestingError::SetupError(format!("Failed to serialize config to TOML: {e}"))
     })?;
     std::fs::write(&config_path, toml_content).map_err(|e| {
-        TestingError::ProcessFailed(format!("Failed to write config TOML file: {e}"))
+        TestingError::ProcessFailed(format!("Failed to write config TOML file '{}': {e}", config_path.display()))
     })?;
     tracing::debug!("Wrote CDA test config to {:?}", config_path);
     Ok(())
