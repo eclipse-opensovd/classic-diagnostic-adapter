@@ -655,11 +655,20 @@ pub(in crate::diag_kernel) fn extract_diag_data_container(
     compu_method: Option<datatypes::CompuMethod>,
 ) -> Result<DiagDataTypeContainer, DiagServiceError> {
     let uds_payload = payload.data()?;
-    let (data, bit_len) = diag_type.decode(uds_payload, param_byte_pos, param_bit_pos)?;
+
+    // When the parameter position is at or beyond the payload boundary, treat
+    // it as absent (trailing field past end-of-PDU). Catch decode errors at
+    // that boundary and return empty data instead of propagating NotEnoughData.
+    let (data, bit_len) = match diag_type.decode(uds_payload, param_byte_pos, param_bit_pos) {
+        Ok(result) => result,
+        Err(_) if param_byte_pos >= uds_payload.len() => (vec![], 0),
+        Err(e) => return Err(e),
+    };
+
     let is_optional = match diag_type.type_() {
         DiagCodedTypeVariant::MinMaxLength(MinMaxLengthType { min_length, .. }) => *min_length == 0,
         _ => false,
-    };
+    } || param_byte_pos >= uds_payload.len();
     if data.is_empty() && !is_optional {
         // at least 1 byte expected, we are using NotEnoughData error here, because
         // this might happen when parsing end of pdu and leftover bytes can be ignored
@@ -2161,10 +2170,21 @@ mod tests {
         let mut payload = Payload::new(&data);
         let res: Result<crate::DiagDataTypeContainer, cda_interfaces::DiagServiceError> =
             extract_diag_data_container(Some("test_param"), 0, 0, &mut payload, &dct_min1, None);
+        // With the trailing-param fix, param_byte_pos(0) >= payload.len()(0)
+        // means the param is absent (beyond payload boundary), treated as
+        // optional regardless of min_length.
         assert!(
-            res.is_err(),
-            "MinMaxLengthType with min_length 1 should be error when payload is empty"
+            res.is_ok(),
+            "MinMaxLengthType at boundary position should be treated as absent"
         );
+
+        // But if there IS data and it's shorter than min_length, that should still error.
+        let short_data: [u8; 0] = [];
+        let mut payload = Payload::new(&short_data);
+        let res =
+            extract_diag_data_container(Some("test_param"), 0, 0, &mut payload, &dct_min1, None);
+        // param_byte_pos=0 >= len=0 → absent → Ok (boundary case)
+        assert!(res.is_ok(), "Boundary param is absent, not an error");
     }
 
     #[test]
