@@ -793,6 +793,7 @@ async fn test_get_nonexistent_fault() {
         Method::GET,
         None,
         Some(&auth),
+        None,
     )
     .await;
 

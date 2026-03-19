@@ -48,6 +48,7 @@ http = { workspace = true }
 mime = { workspace = true }
 schemars = { workspace = true }
 url = { workspace = true }
+urlencoding = { workspace = true }
 # logging
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true, features = [

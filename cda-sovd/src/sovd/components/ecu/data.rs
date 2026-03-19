@@ -219,7 +219,7 @@ pub(crate) mod diag_service {
 
     pub(crate) fn docs_get(op: TransformOperation) -> TransformOperation {
         op.description("Get a specific diagnostic service.")
-            .parameter("x-include-sdgs", |op: TransformParameter<bool>| {
+            .parameter("x-sovd2uds-includesdgs", |op: TransformParameter<bool>| {
                 op.description("Set to true to include sdgs.")
             })
             .with(openapi::ecu_service_response)

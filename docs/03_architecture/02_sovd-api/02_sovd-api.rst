@@ -132,6 +132,51 @@ Bulk Data
 Entities
 ^^^^^^^^
 
+.. arch:: Components Entity Collection
+    :id: arch~sovd-api-components-entity-collection
+    :status: draft
+
+    The ``/components`` endpoint serves as the entry point for discovering available ECU entities.
+
+    **GET /components**
+
+    Returns a list of all ECU entities that have been loaded from diagnostic descriptions (MDD files). Each item in
+    the list contains the ECU name, a lowercase identifier, and a URI reference to the individual component resource.
+
+    The response may include additional fields beyond the standard ``items`` list. These additional fields group
+    ECUs based on configurable conditions evaluated against the diagnostic description metadata. The names and
+    filter criteria for these additional fields are defined in the application configuration.
+
+    **GET /components/{ecu-name}**
+
+    Returns detailed information about a specific ECU entity, including:
+
+    - The ECU identifier and name
+    - Variant information (name, base variant flag, connectivity state, and logical address)
+    - URI references to the standardized resource collection endpoints: data, operations, configurations, faults, modes, locks, and extension endpoints
+
+    The connectivity state of an ECU reflects its current diagnostic reachability and variant detection status:
+
+    .. list-table:: ECU connectivity states
+       :header-rows: 1
+
+       * - State
+         - Description
+       * - Online
+         - The ECU is reachable and has a detected variant
+       * - Offline
+         - The ECU has not been contacted since startup
+       * - NotTested
+         - Variant detection has not yet been performed
+       * - Duplicate
+         - Multiple variants match the ECU response, superseded by a more specific match
+       * - Disconnected
+         - The ECU was previously reachable but is no longer responding
+       * - NoVariantDetected
+         - The ECU responded but no matching variant was found
+
+    Optionally, diagnostic description metadata (SDGs) for the ECU can be included in the response through a query parameter.
+
 .. arch:: Standardized Resource Collection Mapping
     :id: arch~sovd-api-standardized-resource-collection-mapping
     :status: draft
@@ -150,6 +195,83 @@ ECU resource collection
     Each ECU entity must provide a standardized resource collection as defined in ISO 17978-3, chapter 5.4.2.
 
     The resource collection for ECUs is defined in an OpenAPI Specification: :download:`ECU Resource Collection Specification <02_sovd-api/openapi/ecu_resource_collection.yaml>`
+
+
+SDG/SD Metadata
+^^^^^^^^^^^^^^^
+
+.. arch:: Component SDG/SDs
+    :id: arch~sovd-api-component-sdgsd
+    :status: draft
+
+    Special Data Groups (SDGs) and Special Data (SDs) from the diagnostic description can be retrieved through an
+    opt-in query parameter ``x-sovd2uds-includesdgs`` (with alias ``x-include-sdgs``). When set to ``true``, the
+    response includes the SDG/SD metadata instead of or in addition to the normal response data.
+
+    **ECU-level SDGs**
+
+    On the ``GET /components/{ecu-name}`` endpoint, including SDGs adds an ``sdgs`` property to the ECU response
+    object. The SDGs returned are those associated with the ECU entity in the diagnostic description (retrieved
+    without a specific service context).
+
+    **Service-level SDGs**
+
+    On the ``GET /components/{ecu-name}/data/{data-identifier}`` endpoint, when SDGs are requested, the endpoint
+    returns the SDGs associated with the diagnostic service instead of the normal data response. The response
+    contains an ``items`` map keyed by a combination of the service name and its action type, where each entry
+    holds the list of SDGs for that service action.
+
+    **Operation-level SDGs**
+
+    On the ``GET /components/{ecu-name}/operations/{operation-identifier}`` endpoint, when SDGs are requested, the endpoint
+    returns the SDGs associated with the diagnostic service instead of the normal data response. The response
+    contains an ``items`` map keyed by a combination of the service name and its action type, where each entry
+    holds the list of SDGs for that service action.
+
+    .. note::
+
+        TODO We need to define handling for asynchronous operations, since they consist of multiple services
+        with (possibly conflicting) SDGs/SDs - current idea would be add dummy SDGs at the top, with the si set
+        to the "original" type of the operation
+
+    **Data format**
+
+    The SDG/SD structure is recursive. Each entry in the list is one of two types:
+
+    .. list-table:: SD entry fields
+       :header-rows: 1
+
+       * - Field
+         - Type
+         - Description
+       * - ``value``
+         - string (optional)
+         - The value of the SD
+       * - ``si``
+         - string (optional)
+         - Semantic information -- a descriptor or key for the entry
+       * - ``ti``
+         - string (optional)
+         - Text information -- the textual content of the entry
+
+    .. list-table:: SDG entry fields
+       :header-rows: 1
+
+       * - Field
+         - Type
+         - Description
+       * - ``caption``
+         - string (optional)
+         - The name of the group
+       * - ``si``
+         - string (optional)
+         - Semantic information -- a descriptor or key for the group
+       * - ``sdgs``
+         - list (optional)
+         - A nested list of SD and SDG entries, allowing arbitrary nesting depth
+
+    SD and SDG entries are distinguished by their structure -- an entry with a ``sdgs`` or ``caption`` field is
+    an SDG, while an entry with ``value`` or ``ti`` fields is an SD.
 
 
 Data Resources -- SID 22\ :sub:`16` & 2E\ :sub:`16`
