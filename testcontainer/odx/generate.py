@@ -21,6 +21,9 @@ from odxtools.ecuvariantpattern import EcuVariantPattern
 from odxtools.matchingparameter import MatchingParameter
 from odxtools.odxlink import OdxLinkId, DocType, OdxDocFragment
 from odxtools.parentref import ParentRef
+from odxtools.specialdata import SpecialData
+from odxtools.specialdatagroup import SpecialDataGroup
+from odxtools.specialdatagroupcaption import SpecialDataGroupCaption
 
 from authentication import add_authentication_services
 from communication_control import add_communication_control_services
@@ -72,12 +75,40 @@ def add_variant(dlc: DiagLayerContainer, name: str, identification_pattern: int)
     dlc.ecu_variants.append(EcuVariant(diag_layer_raw=variant))
 
 
+def get_default_sdgs(dlc: DiagLayerContainer, ecu_name: str) -> list[SpecialDataGroup]:
+    doc_frags = dlc.odx_id.doc_fragments
+
+    if ecu_name == "FLXC1000":
+        return [
+            SpecialDataGroup(
+                sdg_caption=SpecialDataGroupCaption(
+                    odx_id=OdxLinkId(
+                        local_id=f"EV.{ecu_name}.SDG.DefaultSDG",
+                        doc_fragments=doc_frags,
+                    ),
+                    short_name="default_sdg",
+                    long_name="Default SDG",
+                ),
+                semantic_info="default",
+                values=[
+                    SpecialData(
+                        semantic_info="power_requirement_max",
+                        value="1.21GW",
+                    )
+                ],
+            )
+        ]
+
+    return []
+
+
 def add_base_variant(
     dlc: DiagLayerContainer,
     logical_address: int,
     gateway_address: int,
     functional_address: int,
     database: Database,
+    sdgs: list[SpecialDataGroup] = None,
 ):
     ecu_name = dlc.short_name
     doc_frags = dlc.odx_id.doc_fragments
@@ -120,6 +151,7 @@ def add_base_variant(
             ),
         ],
         diag_data_dictionary_spec=DiagDataDictionarySpec(),
+        sdgs=sdgs or get_default_sdgs(dlc, ecu_name),
     )
 
     add_functional_classes(base_variant)

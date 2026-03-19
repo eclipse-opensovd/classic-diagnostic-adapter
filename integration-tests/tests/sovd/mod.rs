@@ -22,7 +22,9 @@ use sovd_interfaces::{
 
 use crate::util::{
     TestingError,
-    http::{extract_field_from_json, response_to_json, response_to_t, send_cda_request},
+    http::{
+        QueryParams, extract_field_from_json, response_to_json, response_to_t, send_cda_request,
+    },
 };
 
 mod custom_routes;
@@ -50,6 +52,7 @@ pub(crate) async fn put_mode<T: DeserializeOwned, S: Serialize>(
         Method::PUT,
         Some(&request_body),
         Some(headers),
+        None,
     )
     .await?;
     match response_to_t(&http_response) {
@@ -169,6 +172,7 @@ pub(crate) async fn get_faults(
         Method::GET,
         None,
         Some(headers),
+        None,
     )
     .await
     .expect("Failed to get faults");
@@ -192,6 +196,7 @@ pub(crate) async fn get_fault(
         Method::GET,
         None,
         Some(headers),
+        None,
     )
     .await
     .expect("Failed to get faults");
@@ -215,6 +220,7 @@ pub(crate) async fn delete_fault(
         Method::DELETE,
         None,
         Some(headers),
+        None,
     )
     .await?;
     Ok(())
@@ -234,6 +240,7 @@ pub(crate) async fn delete_all_faults(
         Method::DELETE,
         None,
         Some(headers),
+        None,
     )
     .await?;
     Ok(())
@@ -254,6 +261,7 @@ pub(crate) async fn delete_all_faults_with_scope(
         Method::DELETE,
         None,
         Some(headers),
+        None,
     )
     .await?;
     Ok(())
@@ -275,7 +283,31 @@ pub(crate) async fn delete_fault_with_scope(
         Method::DELETE,
         None,
         Some(headers),
+        None,
     )
     .await?;
     Ok(())
+}
+
+pub(crate) async fn get_ecu_component(
+    config: &Configuration,
+    ecu_endpoint: &str,
+    expected_status: StatusCode,
+    query_params: Option<&QueryParams>,
+) -> Result<serde_json::Value, TestingError> {
+    let response = send_cda_request(
+        config,
+        ecu_endpoint,
+        expected_status,
+        Method::GET,
+        None,
+        None,
+        query_params,
+    )
+    .await
+    .expect("Failed to get ecu component");
+
+    // Returns the json instead of Ecu, because the deserialization for SdSdg deserializes
+    // everything as Sd, we also fail on silent changes in the interface, which is desirable
+    response_to_json(&response)
 }

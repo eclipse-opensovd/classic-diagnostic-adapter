@@ -332,7 +332,10 @@ fn start_docker_compose(
 fn docker_compose_up(container: Option<String>) -> Result<(), TestingError> {
     let test_container_dir = test_container_dir()?;
     let mut cmd = std::process::Command::new("docker");
-    cmd.arg("compose").arg("up").arg("-d").env("DOCKER_BUILDKIT", "1");
+    cmd.arg("compose")
+        .arg("up")
+        .arg("-d")
+        .env("DOCKER_BUILDKIT", "1");
     if let Some(container_name) = container {
         cmd.arg(container_name);
     }
@@ -455,7 +458,10 @@ fn write_config_toml(
         TestingError::SetupError(format!("Failed to serialize config to TOML: {e}"))
     })?;
     std::fs::write(&config_path, toml_content).map_err(|e| {
-        TestingError::ProcessFailed(format!("Failed to write config TOML file '{}': {e}", config_path.display()))
+        TestingError::ProcessFailed(format!(
+            "Failed to write config TOML file '{}': {e}",
+            config_path.display()
+        ))
     })?;
     tracing::debug!("Wrote CDA test config to {:?}", config_path);
     Ok(())

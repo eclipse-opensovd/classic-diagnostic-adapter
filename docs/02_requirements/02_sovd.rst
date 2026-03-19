@@ -73,6 +73,25 @@ Entities
 Paths
 ^^^^^
 
+.. req:: Components Entity Collection
+    :id: req~sovd-api-components-entity-collection
+    :links: arch~sovd-api-components-entity-collection
+    :status: draft
+
+    The CDA must provide a ``/components`` endpoint that exposes the available ECUs as an entity collection.
+
+    Each ECU with a loaded diagnostic description (MDD file) must be represented as an entity in the collection.
+
+    - A ``GET`` on ``/components`` must return a list of all available ECU entities, with each ECU having the following properties:
+      - ``id`` - Identifier of the ECU (as used in path, typically lower-case ecu name)
+      - ``name`` - Name of the ECU as in the diagnostic description
+      - ``href`` - uri-reference to the ECUs standardized resource collection
+
+    **Rationale**
+
+    The ``/components`` endpoint provides the entry point for clients to discover the available ECUs and their capabilities. This is the primary mechanism for a client to enumerate the diagnostic targets accessible through the CDA.
+
+
 .. req:: Standardized Resource Collection Mapping
     :id: req~sovd-api-standardized-resource-collection-mapping
     :links: arch~sovd-api-standardized-resource-collection-mapping
@@ -130,6 +149,47 @@ Paths
          -
 
     NOTE: The mapping in ISO standard is inconsistent w.r.t. ``/modes/security`` and ``/modes/authentication``
+
+    **Query Parameters**
+
+    The CDA must support the optional query parameter ``x-sovd2uds-includesdgs`` (alias ``x-include-sdgs``) to be able to
+    include a list of SDG/SD properties of the ECU - see :need:`req~sovd-api-component-sdgsd`.
+
+.. req:: Component SDG/SDs
+    :id: req~sovd-api-component-sdgsd
+    :links: arch~sovd-api-component-sdgsd
+    :status: draft
+
+    The CDA must return the Special Data Groups (SDGs) and Special Data (SDs) from the diagnostic description when the
+    optional query parameter ``x-sovd2uds-includesdgs`` (alias ``x-include-sdgs``) is set to ``true``.
+
+    This query parameter must be supported on:
+
+    - ``GET /components/{ecu-name}`` -- returns the ECU-level SDGs in an ``sdgs`` property on the component response.
+    - ``GET /components/{ecu-name}/data/{data-identifier}`` -- returns the service-level SDGs instead of the normal data response.
+    - ``GET /components/{ecu-name}/operations/{operation-identifier}`` -- returns the service-level SDGs instead of the normal data response.
+
+    The ``sdgs`` property must contain a list of SDG/SD entries. Each entry is either:
+
+    - An **SD** (Special Data) with the following optional fields:
+
+      - ``value`` -- the value of the SD
+      - ``si`` -- semantic information (description)
+      - ``ti`` -- text information
+
+    - An **SDG** (Special Data Group) with the following optional fields:
+
+      - ``caption`` -- the name of the SDG
+      - ``si`` -- semantic information (description)
+      - ``sdgs`` -- a nested list of SD and SDG entries (recursive structure)
+
+    When no SDGs are available for the requested resource, the ``sdgs`` property must be an empty list or omitted.
+
+    **Rationale**
+
+    SDGs carry vendor-specific metadata from the diagnostic description (e.g. bus interface type, AUTOSAR version) that
+    clients may need for display or decision-making purposes. Making them opt-in through a query parameter avoids
+    unnecessary overhead in the default response.
 
 
 .. req:: Explicit ECU Variant Detection
@@ -452,6 +512,27 @@ MDD Embedded files
 
     Some data required for communication with ECUs might be embedded in the mdd file. To allow clients to retrieve this data, it must be made available through the API.
 
+Security
+^^^^^^^^
+
+Since vendors have different requirements and systems regarding security, security related functionality has to be
+implemented in a plugin, see :ref:`requirements-plugins-security`.
+
+Token validation
+""""""""""""""""
+
+.. todo:: define delegated responsibility to security plugin for checking the token and extracting/using the data
+
+Audiences
+"""""""""
+
+.. todo:: define audiences, delegated responsibility to security plugin
+
+Session States
+""""""""""""""
+
+.. todo:: define transitions, preconditions, and how they work/are checked
+
 
 OpenAPI-Documentation
 ---------------------
@@ -477,16 +558,3 @@ OpenAPI-Documentation
     **Rationale**
 
     Required by the standard.
-
-
-Security
-^^^^^^^^
-
-Since vendors have different requirements and systems regarding security, security related functionality has to be
-implemented in a plugin, see :ref:`requirements-plugins-security`.
-
-Token validation
-""""""""""""""""
-
-Audiences
-"""""""""
