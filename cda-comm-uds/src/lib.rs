@@ -148,9 +148,7 @@ impl<S: EcuGateway, R: DiagServiceResponse, T: EcuManager<Response = R>> UdsMana
     fn ecu_manager(&self, ecu_name: &str) -> Result<&RwLock<T>, DiagServiceError> {
         self.ecus
             .get(ecu_name)
-            .ok_or(DiagServiceError::NotFound(Some(format!(
-                "ECU {ecu_name} not found"
-            ))))
+            .ok_or_else(|| DiagServiceError::NotFound(format!("ECU {ecu_name} not found")))
     }
 
     async fn start_reset_task(
@@ -1400,9 +1398,7 @@ impl<S: EcuGateway, R: DiagServiceResponse, T: EcuManager<Response = R>> UdsEcu
         ecu: &str,
     ) -> Result<Vec<cda_interfaces::datatypes::ComponentDataInfo>, DiagServiceError> {
         let items = self
-            .ecus
-            .get(ecu)
-            .ok_or_else(|| DiagServiceError::NotFound(Some(format!("Unknown ECU: {ecu}"))))?
+            .ecu_manager(ecu)?
             .read()
             .await
             .get_components_single_ecu_jobs_info();
@@ -1621,10 +1617,7 @@ impl<S: EcuGateway, R: DiagServiceResponse, T: EcuManager<Response = R>> UdsEcu
         ecu_name: &str,
         level: &str,
     ) -> Result<String, DiagServiceError> {
-        let ecu_diag_service = self
-            .ecus
-            .get(ecu_name)
-            .ok_or(DiagServiceError::NotFound(None))?;
+        let ecu_diag_service = self.ecu_manager(ecu_name)?;
         let security_access = ecu_diag_service
             .read()
             .await
@@ -1787,24 +1780,36 @@ impl<S: EcuGateway, R: DiagServiceResponse, T: EcuManager<Response = R>> UdsEcu
         id: &str,
     ) -> Result<(), DiagServiceError> {
         let mut lock = self.data_transfers.lock().await;
-        let transfer = lock.get(ecu_name).ok_or(DiagServiceError::NotFound(None))?;
-        if transfer.meta_data.id != id {
-            return Err(DiagServiceError::NotFound(None));
-        }
 
-        if !matches!(
-            transfer.meta_data.status,
-            DataTransferStatus::Aborted | DataTransferStatus::Finished
-        ) {
-            return Err(DiagServiceError::InvalidRequest(format!(
-                "Data transfer with id {id} is currently in status {:?}, cannot exit",
+        // First validate existence and state while only holding an immutable reference
+        {
+            let transfer = lock.get(ecu_name).ok_or_else(|| {
+                DiagServiceError::NotFound(format!("Data transfer for ECU {ecu_name} not found"))
+            })?;
+
+            if transfer.meta_data.id != id {
+                return Err(DiagServiceError::NotFound(format!(
+                    "Data transfer with id {id} not found for ECU {ecu_name}"
+                )));
+            }
+
+            if !matches!(
                 transfer.meta_data.status,
-            )));
+                DataTransferStatus::Aborted | DataTransferStatus::Finished
+            ) {
+                return Err(DiagServiceError::InvalidRequest(format!(
+                    "Data transfer with id {id} is currently in status {:?}, cannot exit",
+                    transfer.meta_data.status,
+                )));
+            }
         }
 
-        let mut transfer = lock
-            .remove(ecu_name)
-            .ok_or(DiagServiceError::NotFound(None))?;
+        // Now it is safe to remove the transfer from the map
+        let mut transfer = lock.remove(ecu_name).ok_or_else(|| {
+            DiagServiceError::NotFound(format!(
+                "Data transfer for ECU {ecu_name} not found during exit"
+            ))
+        })?;
 
         if let Err(e) = transfer.status_receiver.changed().await {
             return Err(DiagServiceError::InvalidRequest(format!(
@@ -1829,7 +1834,9 @@ impl<S: EcuGateway, R: DiagServiceResponse, T: EcuManager<Response = R>> UdsEcu
             .await
             .get(ecu_name)
             .map(|transfer| transfer.meta_data.clone())
-            .ok_or(DiagServiceError::NotFound(None))?;
+            .ok_or_else(|| {
+                DiagServiceError::NotFound(format!("No data transfer running for ECU {ecu_name}"))
+            })?;
 
         Ok(vec![meta_data.clone()])
     }
@@ -1843,7 +1850,11 @@ impl<S: EcuGateway, R: DiagServiceResponse, T: EcuManager<Response = R>> UdsEcu
             .await?
             .into_iter()
             .find(|transfer| transfer.id == id)
-            .ok_or(DiagServiceError::NotFound(None))
+            .ok_or_else(|| {
+                DiagServiceError::NotFound(format!(
+                    "Data transfer with id {id} not found for ECU {ecu_name}"
+                ))
+            })
     }
 
     #[tracing::instrument(skip(self), err,
@@ -2449,13 +2460,7 @@ impl<S: EcuGateway, R: DiagServiceResponse, T: EcuManager<Response = R>> UdsEcu
     }
 
     async fn ecu_functional_groups(&self, ecu_name: &str) -> Result<Vec<String>, DiagServiceError> {
-        let groups = self
-            .ecus
-            .get(ecu_name)
-            .ok_or(DiagServiceError::NotFound(None))?
-            .read()
-            .await
-            .functional_groups();
+        let groups = self.ecu_manager(ecu_name)?.read().await.functional_groups();
         Ok(groups)
     }
 
