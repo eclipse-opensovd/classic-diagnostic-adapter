@@ -1,5 +1,6 @@
 /*
- * Copyright (c) 2025 The Contributors to Eclipse OpenSOVD (see CONTRIBUTORS)
+ * SPDX-License-Identifier: Apache-2.0
+ * SPDX-FileCopyrightText: 2025 The Contributors to Eclipse OpenSOVD (see CONTRIBUTORS)
  *
  * See the NOTICE file(s) distributed with this work for additional
  * information regarding copyright ownership.
@@ -7,15 +8,13 @@
  * This program and the accompanying materials are made available under the
  * terms of the Apache License Version 2.0 which is available at
  * https://www.apache.org/licenses/LICENSE-2.0
- *
- * SPDX-License-Identifier: Apache-2.0
  */
 
 // The public re-exports are necessary for these types because they are used
 // within a WipOffset<T> where we cannot provide a conversion for.
 // This is only the case for types where we have to be able to name the type, i.e.
 // for function parameters and return types.
-pub use dataformat::{DefaultCase, SwitchKey};
+pub use dataformat::{DefaultCase, ParentRefType as DataFormatParentRefType, SwitchKey};
 use flatbuffers::UnionWIPOffset;
 pub use flatbuffers::WIPOffset;
 
@@ -77,6 +76,26 @@ pub struct DiagCommParams<'a> {
     pub is_mandatory: bool,
     pub is_executable: bool,
     pub is_final: bool,
+}
+
+impl Default for DiagCommParams<'_> {
+    fn default() -> Self {
+        Self {
+            short_name: "",
+            long_name: None,
+            semantic: None,
+            funct_class: None,
+            sdgs: None,
+            diag_class_type: DiagClassType::START_COMM,
+            pre_condition_state_refs: None,
+            state_transition_refs: None,
+            protocols: None,
+            audience: None,
+            is_mandatory: false,
+            is_executable: true,
+            is_final: true,
+        }
+    }
 }
 
 #[derive(Default)]
@@ -187,7 +206,18 @@ impl<'a> EcuDataBuilder<'a> {
         })
     }
 
-    pub fn create_ecu_data_and_finish(&mut self, params: EcuDataParams<'a>) -> Vec<u8> {
+    /// Serialize the given [`EcuDataParams`] into a flatbuffer, wrap the result
+    /// in a [`DiagnosticDatabase`] and return it.  Consumes the builder.
+    ///
+    /// [`DiagnosticDatabase`]: super::DiagnosticDatabase
+    ///
+    /// # Panics
+    /// Panics if the database cannot be created from the built ECU data.
+    ///
+    /// Using panic here, because the database builder is not intended for production use
+    /// and only is a helper to build databases for tests.
+    #[must_use]
+    pub fn finish(mut self, params: EcuDataParams<'a>) -> super::DiagnosticDatabase {
         let ecu_name_offset = self.fbb.create_string(params.ecu_name);
         let revision_offset = self.fbb.create_string(params.revision);
         let version_offset = self.fbb.create_string(params.version);
@@ -208,7 +238,54 @@ impl<'a> EcuDataBuilder<'a> {
 
         let ecu_data = dataformat::EcuData::create(&mut self.fbb, &ecu_data_args);
         self.fbb.finish(ecu_data, None);
-        self.fbb.finished_data().to_vec()
+        let blob = self.fbb.finished_data().to_vec();
+
+        super::DiagnosticDatabase::new(
+            String::default(),
+            blob,
+            cda_interfaces::datatypes::FlatbBufConfig::default(),
+        )
+        .expect("Failed to create DiagnosticDatabase from built ECU data")
+    }
+
+    /// Finishes the builder into a [`DiagnosticDatabase`]
+    /// containing a single base variant with one `DiagLayer`.
+    ///
+    /// Creates all intermediate objects (com-param ref, diag layer, variant, ecu data)
+    /// and returns a ready-to-use database.
+    ///
+    /// # Panics
+    /// Panics if the database cannot be created from the built ECU data.
+    ///
+    /// [`DiagnosticDatabase`]: super::DiagnosticDatabase
+    ///
+    /// Using panic here, because the database builder is not intended for production use
+    /// and only is a helper to build databases for tests.
+    #[must_use]
+    pub fn finish_with_single_variant(
+        mut self,
+        protocol: WIPOffset<dataformat::Protocol<'a>>,
+        diag_services: Vec<WIPOffset<dataformat::DiagService<'a>>>,
+        layer_name: &'a str,
+        ecu_name: &'a str,
+        revision: &'a str,
+        version: &'a str,
+    ) -> super::DiagnosticDatabase {
+        let cp_ref = self.create_com_param_ref(None, None, None, Some(protocol), None);
+        let diag_layer = self.create_diag_layer(DiagLayerParams {
+            short_name: layer_name,
+            com_param_refs: Some(vec![cp_ref]),
+            diag_services: Some(diag_services),
+            ..Default::default()
+        });
+        let variant = self.create_variant(diag_layer, true, None, None);
+        self.finish(EcuDataParams {
+            ecu_name,
+            revision,
+            version,
+            variants: Some(vec![variant]),
+            ..Default::default()
+        })
     }
 
     pub fn create_diag_layer(
@@ -256,7 +333,7 @@ impl<'a> EcuDataBuilder<'a> {
         short_name: &'a str,
         com_param_spec: Option<WIPOffset<dataformat::ComParamSpec<'a>>>,
         prot_stack: Option<WIPOffset<dataformat::ProtStack<'a>>>,
-        parent_refs: Option<Vec<WIPOffset<dataformat::Protocol<'a>>>>,
+        parent_refs: Option<Vec<WIPOffset<dataformat::ParentRef<'a>>>>,
     ) -> WIPOffset<dataformat::Protocol<'a>> {
         let diag_layer = self.create_diag_layer(DiagLayerParams {
             short_name,
@@ -276,6 +353,48 @@ impl<'a> EcuDataBuilder<'a> {
             parent_refs: parent_refs.map(|v| self.fbb.create_vector(&v)),
         };
         dataformat::Protocol::create(&mut self.fbb, &protocol_args)
+    }
+
+    pub fn create_parent_ref(
+        &mut self,
+        ref_type: dataformat::ParentRefType,
+        ref_: Option<UnionWIPOffset<dataformat::ParentRefTypeUnionValue>>,
+    ) -> WIPOffset<dataformat::ParentRef<'a>> {
+        dataformat::ParentRef::create(
+            &mut self.fbb,
+            &dataformat::ParentRefArgs {
+                ref_type,
+                ref_: ref_.map(|u| u.value_offset()),
+                ..Default::default()
+            },
+        )
+    }
+
+    pub fn create_functional_group(
+        &mut self,
+        diag_layer: WIPOffset<dataformat::DiagLayer<'a>>,
+        parent_refs: Option<Vec<WIPOffset<dataformat::ParentRef<'a>>>>,
+    ) -> WIPOffset<dataformat::FunctionalGroup<'a>> {
+        let parent_refs = parent_refs.map(|v| self.fbb.create_vector(&v));
+        dataformat::FunctionalGroup::create(
+            &mut self.fbb,
+            &dataformat::FunctionalGroupArgs {
+                diag_layer: Some(diag_layer),
+                parent_refs,
+            },
+        )
+    }
+
+    pub fn create_ecu_shared_data(
+        &mut self,
+        diag_layer: WIPOffset<dataformat::DiagLayer<'a>>,
+    ) -> WIPOffset<dataformat::EcuSharedData<'a>> {
+        dataformat::EcuSharedData::create(
+            &mut self.fbb,
+            &dataformat::EcuSharedDataArgs {
+                diag_layer: Some(diag_layer),
+            },
+        )
     }
 
     pub fn create_diag_comm(
@@ -603,6 +722,101 @@ impl<'a> EcuDataBuilder<'a> {
         })
     }
 
+    /// Creates a VALUE param whose BYTE-POSITION is omitted (`None`).
+    ///
+    /// Per ISO 22901-1 §7.4.8 a parameter that follows a
+    /// PARAM-LENGTH-INFO field has no statically known position, so
+    /// BYTE-POSITION is not defined in the ODX instance.
+    pub fn create_value_param_no_byte_pos(
+        &mut self,
+        name: &'a str,
+        dop: WIPOffset<dataformat::DOP<'a>>,
+    ) -> WIPOffset<dataformat::Param<'a>> {
+        let specific_data = Some(
+            dataformat::ParamSpecificData::tag_as_value(dataformat::Value::create(
+                &mut self.fbb,
+                &dataformat::ValueArgs {
+                    physical_default_value: None,
+                    dop: Some(dop),
+                },
+            ))
+            .value_offset(),
+        );
+
+        self.create_param(&ParameterParams {
+            param_type: dataformat::ParamType::VALUE,
+            short_name: Some(name),
+            semantic: None,
+            sdgs: None,
+            physical_default_value: None,
+            byte_position: None,
+            bit_position: None,
+            specific_data_type: dataformat::ParamSpecificData::Value,
+            specific_data,
+        })
+    }
+
+    pub fn create_phys_const_param(
+        &mut self,
+        name: &'a str,
+        phys_constant_value: Option<&str>,
+        dop: WIPOffset<dataformat::DOP<'a>>,
+        byte_pos: u32,
+        bit_pos: u32,
+    ) -> WIPOffset<dataformat::Param<'a>> {
+        let phys_value = phys_constant_value.map(|v| self.fbb.create_string(v));
+        let specific_data = Some(
+            dataformat::ParamSpecificData::tag_as_phys_const(dataformat::PhysConst::create(
+                &mut self.fbb,
+                &dataformat::PhysConstArgs {
+                    phys_constant_value: phys_value,
+                    dop: Some(dop),
+                },
+            ))
+            .value_offset(),
+        );
+
+        self.create_param(&ParameterParams {
+            param_type: dataformat::ParamType::PHYS_CONST,
+            short_name: Some(name),
+            semantic: None,
+            sdgs: None,
+            physical_default_value: None,
+            byte_position: Some(byte_pos),
+            bit_position: Some(bit_pos),
+            specific_data_type: dataformat::ParamSpecificData::PhysConst,
+            specific_data,
+        })
+    }
+
+    pub fn create_length_key_param(
+        &mut self,
+        name: &'a str,
+        dop: WIPOffset<dataformat::DOP<'a>>,
+        byte_pos: u32,
+        bit_pos: u32,
+    ) -> WIPOffset<dataformat::Param<'a>> {
+        let specific_data = Some(
+            dataformat::ParamSpecificData::tag_as_length_key_ref(dataformat::LengthKeyRef::create(
+                &mut self.fbb,
+                &dataformat::LengthKeyRefArgs { dop: Some(dop) },
+            ))
+            .value_offset(),
+        );
+
+        self.create_param(&ParameterParams {
+            param_type: dataformat::ParamType::LENGTH_KEY,
+            short_name: Some(name),
+            semantic: None,
+            sdgs: None,
+            physical_default_value: None,
+            byte_position: Some(byte_pos),
+            bit_position: Some(bit_pos),
+            specific_data_type: dataformat::ParamSpecificData::LengthKeyRef,
+            specific_data,
+        })
+    }
+
     pub fn create_structure(
         &mut self,
         params: Option<Vec<WIPOffset<dataformat::Param<'a>>>>,
@@ -694,6 +908,35 @@ impl<'a> EcuDataBuilder<'a> {
         };
         let normal_dop = dataformat::NormalDOP::create(&mut self.fbb, &normal_dop_args);
         dataformat::SpecificDOPData::tag_as_normal_dop(normal_dop)
+    }
+
+    /// Shorthand for creating a regular `NormalDOP` with only a compu method and diag coded type.
+    ///
+    /// Equivalent to calling [`create_normal_specific_dop_data`] (with all optional fields `None`)
+    /// followed by [`create_dop`] with `DopType::REGULAR` and `SpecificDOPData::NormalDOP`.
+    pub fn create_regular_normal_dop(
+        &mut self,
+        name: &str,
+        diag_coded_type: WIPOffset<dataformat::DiagCodedType<'a>>,
+        compu_method: WIPOffset<dataformat::CompuMethod<'a>>,
+    ) -> WIPOffset<dataformat::DOP<'a>> {
+        let specific_data = self
+            .create_normal_specific_dop_data(
+                Some(compu_method),
+                Some(diag_coded_type),
+                None,
+                None,
+                None,
+                None,
+            )
+            .value_offset();
+        self.create_dop(
+            *DopType::REGULAR,
+            Some(name),
+            None,
+            *SpecificDOPData::NormalDOP,
+            Some(specific_data),
+        )
     }
 
     pub fn create_dynamic_length_specific_dop_data(
@@ -804,6 +1047,9 @@ impl<'a> EcuDataBuilder<'a> {
             DiagCodedTypeVariant::StandardLength(_) => {
                 dataformat::DiagCodedTypeName::STANDARD_LENGTH_TYPE
             }
+            DiagCodedTypeVariant::ParamLengthInfo(_) => {
+                dataformat::DiagCodedTypeName::PARAM_LENGTH_INFO_TYPE
+            }
         };
 
         let (specific_data_type, specific_data) = match specific_data_type {
@@ -852,6 +1098,18 @@ impl<'a> EcuDataBuilder<'a> {
                     dataformat::SpecificDataType::tag_as_standard_length_type(standard_length),
                 )
             }
+            // ParamLengthInfo is variable-length at runtime; this generic helper creates
+            // a minimal entry without wiring a concrete LENGTH-KEY param reference.
+            DiagCodedTypeVariant::ParamLengthInfo(_) => {
+                let pli = dataformat::ParamLengthInfoType::create(
+                    &mut self.fbb,
+                    &dataformat::ParamLengthInfoTypeArgs { length_key: None },
+                );
+                (
+                    dataformat::SpecificDataType::ParamLengthInfoType,
+                    dataformat::SpecificDataType::tag_as_param_length_info_type(pli),
+                )
+            }
         };
 
         let diag_coded_type_args = dataformat::DiagCodedTypeArgs {
@@ -880,6 +1138,39 @@ impl<'a> EcuDataBuilder<'a> {
                 bit_mask: None,
                 condensed: false,
             }),
+        )
+    }
+
+    pub fn create_diag_coded_type_param_length_info(
+        &mut self,
+        length_key_param_name: &'a str,
+        data_type: DataType,
+    ) -> WIPOffset<dataformat::DiagCodedType<'a>> {
+        let short_name_offset = self.fbb.create_string(length_key_param_name);
+        let length_key_param = dataformat::Param::create(
+            &mut self.fbb,
+            &dataformat::ParamArgs {
+                short_name: Some(short_name_offset),
+                ..Default::default()
+            },
+        );
+        let pli = dataformat::ParamLengthInfoType::create(
+            &mut self.fbb,
+            &dataformat::ParamLengthInfoTypeArgs {
+                length_key: Some(length_key_param),
+            },
+        );
+        let specific_data = dataformat::SpecificDataType::tag_as_param_length_info_type(pli);
+        dataformat::DiagCodedType::create(
+            &mut self.fbb,
+            &dataformat::DiagCodedTypeArgs {
+                type_: dataformat::DiagCodedTypeName::PARAM_LENGTH_INFO_TYPE,
+                base_type_encoding: None,
+                base_data_type: data_type.into(),
+                is_high_low_byte_order: true,
+                specific_data_type: dataformat::SpecificDataType::ParamLengthInfoType,
+                specific_data: Some(specific_data.value_offset()),
+            },
         )
     }
 
@@ -1080,5 +1371,50 @@ impl<'a> EcuDataBuilder<'a> {
             *SpecificDOPData::DTCDOP,
             Some(dataformat::SpecificDOPData::tag_as_dtcdop(dtc_dop_specific_data).value_offset()),
         )
+    }
+
+    pub fn create_state_transition(
+        &mut self,
+        short_name: &str,
+        source_short_name_ref: Option<&str>,
+        target_short_name_ref: Option<&str>,
+    ) -> WIPOffset<dataformat::StateTransition<'a>> {
+        let short_name_offset = self.fbb.create_string(short_name);
+        let source_offset = source_short_name_ref.map(|s| self.fbb.create_string(s));
+        let target_offset = target_short_name_ref.map(|s| self.fbb.create_string(s));
+
+        let args = dataformat::StateTransitionArgs {
+            short_name: Some(short_name_offset),
+            source_short_name_ref: source_offset,
+            target_short_name_ref: target_offset,
+        };
+
+        dataformat::StateTransition::create(&mut self.fbb, &args)
+    }
+
+    pub fn create_state_transition_ref(
+        &mut self,
+        state_transition: WIPOffset<dataformat::StateTransition<'a>>,
+    ) -> WIPOffset<dataformat::StateTransitionRef<'a>> {
+        let args = dataformat::StateTransitionRefArgs {
+            value: None,
+            state_transition: Some(state_transition),
+        };
+
+        dataformat::StateTransitionRef::create(&mut self.fbb, &args)
+    }
+
+    pub fn create_pre_condition_state_ref(
+        &mut self,
+        state: WIPOffset<dataformat::State<'a>>,
+    ) -> WIPOffset<dataformat::PreConditionStateRef<'a>> {
+        let args = dataformat::PreConditionStateRefArgs {
+            value: None,
+            in_param_if_short_name: None,
+            in_param_path_short_name: None,
+            state: Some(state),
+        };
+
+        dataformat::PreConditionStateRef::create(&mut self.fbb, &args)
     }
 }

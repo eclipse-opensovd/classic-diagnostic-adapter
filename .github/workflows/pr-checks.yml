@@ -1,0 +1,80 @@
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: 2026 The Contributors to Eclipse OpenSOVD (see CONTRIBUTORS)
+#
+# See the NOTICE file(s) distributed with this work for additional
+# information regarding copyright ownership.
+#
+# This program and the accompanying materials are made available under the
+# terms of the Apache License Version 2.0 which is available at
+# https://www.apache.org/licenses/LICENSE-2.0
+
+name: PR Lint and Format Checks
+
+on:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  checks: write # Required for reviewdog/clippy-action to post check annotations
+  pull-requests: write # Grants permission to post review comments
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref_name }}-${{ github.event.pull_request.number || github.sha }}
+  cancel-in-progress: true
+
+jobs:
+  format_and_clippy_for_pr:
+    runs-on: ubuntu-latest
+    name: "PR Lint and Format"
+    env:
+      # Fork PRs have restricted permissions (no checks:write or pull-requests:write),
+      # so we fall back to annotation-based reporters that only need contents:read.
+      IS_FORK: ${{ github.event.pull_request.head.repo.fork == true }}
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          submodules: false
+      - name: Setup DLT tracing lib
+        uses: eclipse-opensovd/dlt-tracing-lib/.github/actions/setup-dlt@main
+      - name: Install Protoc
+        uses: arduino/setup-protoc@v3
+        with:
+          # The action queries the GitHub API to fetch releases data,
+          # to avoid rate limiting, passing the default token.
+          repo-token: ${{ secrets.GITHUB_TOKEN }}
+      - name: Format and Clippy - Stable toolchain
+        uses: eclipse-opensovd/cicd-workflows/rust-lint-and-format-action@827ea66a026b34057468a3cc9486c165ce5e7dcb
+        with:
+          toolchain: 1.88.0
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          fail-on-format-error: "true"
+          fail-on-clippy-error: "true"
+          clippy-deny-warnings: "true"
+          clippy-features: "all-features"
+          rustfmt-enable-reviewdog: "false"
+      - name: Format and Clippy - Nightly toolchain pinned
+        uses: eclipse-opensovd/cicd-workflows/rust-lint-and-format-action@827ea66a026b34057468a3cc9486c165ce5e7dcb
+        with:
+          toolchain: nightly-2025-07-14
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          fail-on-format-error: "false"
+          fail-on-clippy-error: "false"
+          clippy-deny-warnings: "false"
+          clippy-features: "all-features"
+          reporter: ${{ env.IS_FORK == 'true' && 'github-pr-annotations' || 'github-pr-review' }}
+      - name: Format and Clippy - Nightly toolchain latest
+        id: nightly-clippy
+        continue-on-error: true
+        uses: eclipse-opensovd/cicd-workflows/rust-lint-and-format-action@827ea66a026b34057468a3cc9486c165ce5e7dcb
+        with:
+          toolchain: nightly
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          fail-on-format-error: "false"
+          fail-on-clippy-error: "false"
+          clippy-deny-warnings: "false"
+          clippy-features: "all-features"
+          # For nightly, we also want to see files not touched by
+          # the PR, to detect if there are any new warnings introduced by the latest nightly toolchain.
+          reporter: ${{ env.IS_FORK == 'true' && 'github-annotations' || 'github-pr-check' }}

@@ -1,5 +1,6 @@
 /*
- * Copyright (c) 2025 The Contributors to Eclipse OpenSOVD (see CONTRIBUTORS)
+ * SPDX-License-Identifier: Apache-2.0
+ * SPDX-FileCopyrightText: 2025 The Contributors to Eclipse OpenSOVD (see CONTRIBUTORS)
  *
  * See the NOTICE file(s) distributed with this work for additional
  * information regarding copyright ownership.
@@ -7,24 +8,24 @@
  * This program and the accompanying materials are made available under the
  * terms of the Apache License Version 2.0 which is available at
  * https://www.apache.org/licenses/LICENSE-2.0
- *
- * SPDX-License-Identifier: Apache-2.0
  */
 
 use cda_database::datatypes;
 use cda_interfaces::{
-    DiagServiceError, HashMap, HashSet, diagservices::DiagServiceResponse, dlt_ctx,
+    DiagComm, DiagCommType, DiagServiceError, HashMap, datatypes::DatabaseNamingConvention,
+    diagservices::DiagServiceResponse, dlt_ctx,
 };
 pub(super) type DiagServiceId = String;
 
 pub(super) struct VariantDetection {
-    pub(crate) diag_service_requests: HashSet<DiagServiceId>,
+    pub(crate) diag_service_requests: HashMap<DiagServiceId, DiagComm>,
 }
 
 pub(super) fn prepare_variant_detection(
     diagnostic_database: &datatypes::DiagnosticDatabase,
+    db_naming_convention: &DatabaseNamingConvention,
 ) -> Result<VariantDetection, DiagServiceError> {
-    let diag_service_requests: HashSet<_> = diagnostic_database
+    let diag_service_requests: HashMap<_, _> = diagnostic_database
         .ecu_data()?
         .variants()
         .map(|variants| {
@@ -39,7 +40,17 @@ pub(super) fn prepare_variant_detection(
                                     mp.diag_service()
                                         .and_then(|ds| ds.diag_comm())
                                         .and_then(|dc| dc.short_name())
-                                        .map(ToOwned::to_owned)
+                                        .map(|sn| {
+                                            (
+                                                sn.to_owned(),
+                                                DiagComm {
+                                                    name: db_naming_convention
+                                                        .trim_short_name_affixes(sn),
+                                                    type_: DiagCommType::Data,
+                                                    lookup_name: Some(sn.to_owned()),
+                                                },
+                                            )
+                                        })
                                 })
                             })
                         })

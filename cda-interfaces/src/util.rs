@@ -1,5 +1,6 @@
 /*
- * Copyright (c) 2025 The Contributors to Eclipse OpenSOVD (see CONTRIBUTORS)
+ * SPDX-License-Identifier: Apache-2.0
+ * SPDX-FileCopyrightText: 2025 The Contributors to Eclipse OpenSOVD (see CONTRIBUTORS)
  *
  * See the NOTICE file(s) distributed with this work for additional
  * information regarding copyright ownership.
@@ -7,10 +8,8 @@
  * This program and the accompanying materials are made available under the
  * terms of the Apache License Version 2.0 which is available at
  * https://www.apache.org/licenses/LICENSE-2.0
- *
- * SPDX-License-Identifier: Apache-2.0
  */
-use crate::DiagServiceError;
+use crate::{DiagServiceError, service_ids};
 
 pub mod tracing {
     #[must_use]
@@ -26,8 +25,12 @@ pub mod tracing {
 }
 
 pub mod tokio_ext {
+    // allow the check for unexpected cfg for tokio_unstable here, as this is a `tokio`` specific
+    // cfg flag that is required to have the `tokio::task::Builder` available.
+    #![allow(unexpected_cfgs)]
+
     #[macro_export]
-    #[cfg(feature = "tokio-tracing")]
+    #[cfg(all(tokio_unstable, feature = "tokio-tracing"))]
     macro_rules! spawn_named {
         ($name:expr, $future:expr) => {
             // see: https://docs.rs/tokio/latest/src/tokio/task/builder.rs.html#87-98
@@ -39,12 +42,16 @@ pub mod tokio_ext {
         };
     }
     #[macro_export]
-    #[cfg(not(feature = "tokio-tracing"))]
+    #[cfg(not(all(tokio_unstable, feature = "tokio-tracing")))]
     macro_rules! spawn_named {
         ($name:expr, $future:expr) => {{
             let _ = &$name; // ignore the name in non-tracing builds
             tokio::task::spawn($future)
         }};
+    }
+
+    pub fn clear_pending_messages<M: Clone>(receiver: &mut tokio::sync::broadcast::Receiver<M>) {
+        while receiver.try_recv().is_ok() {}
     }
 }
 
@@ -67,6 +74,84 @@ pub mod dlt_ext {
             // dlt_context span completely
             None::<&str>
         };
+    }
+}
+
+pub mod serde_ext {
+
+    /// Deserializes a `HashMap<String, V, S>` from a map with string keys that may
+    /// be decimal (`"16"`) or hexadecimal (`"0x10"`, `"0X10"`). All keys are validated
+    /// as valid `u8` values (0–255) and normalized to their decimal string representation.
+    /// This can be used i.e. for configuration where figment / toml parse do not
+    /// natively support integer keys.
+    ///
+    /// # Example
+    ///
+    /// Both `"0x10"` and `"16"` in the input will be stored under the key `"16"`.
+    ///
+    /// # Errors
+    ///
+    /// Returns a deserialization error if a key is not a valid `u8` in either format.
+    pub mod normalized_u8_key_map {
+        use std::{collections::HashMap, fmt, hash::BuildHasher};
+
+        use serde::de::{self, Deserialize, Deserializer, MapAccess, Visitor};
+
+        /// Parses a string as a `u8` in decimal or hexadecimal (`0x`/`0X` prefix) format
+        /// and returns its decimal string representation.
+        ///
+        /// # Errors
+        /// Returns an error if the string is not a valid `u8` in either format.
+        pub fn deserialize<'de, D, V, S>(deserializer: D) -> Result<HashMap<String, V, S>, D::Error>
+        where
+            D: Deserializer<'de>,
+            V: Deserialize<'de>,
+            S: BuildHasher + Default,
+        {
+            struct NormalizedVisitor<V, S>(std::marker::PhantomData<(V, S)>);
+
+            impl<'de, V, S> Visitor<'de> for NormalizedVisitor<V, S>
+            where
+                V: Deserialize<'de>,
+                S: BuildHasher + Default,
+            {
+                type Value = HashMap<String, V, S>;
+
+                fn expecting(&self, formatter: &mut fmt::Formatter) -> fmt::Result {
+                    formatter.write_str("a map with u8 keys (decimal or 0x hex)")
+                }
+
+                fn visit_map<M>(self, mut access: M) -> Result<Self::Value, M::Error>
+                where
+                    M: MapAccess<'de>,
+                {
+                    let mut map = HashMap::with_capacity_and_hasher(
+                        access.size_hint().unwrap_or(0),
+                        S::default(),
+                    );
+
+                    while let Some((key, value)) = access.next_entry::<String, V>()? {
+                        let normalized = normalize_key(&key).map_err(de::Error::custom)?;
+                        map.insert(normalized, value);
+                    }
+
+                    Ok(map)
+                }
+            }
+
+            deserializer.deserialize_map(NormalizedVisitor(std::marker::PhantomData))
+        }
+
+        fn normalize_key(s: &str) -> Result<String, String> {
+            let s = s.trim();
+            if let Some(hex) = s.to_lowercase().strip_prefix("0x") {
+                u8::from_str_radix(hex, 16)
+            } else {
+                s.parse::<u8>()
+            }
+            .map(|v| v.to_string())
+            .map_err(|e| format!("Invalid hex number: {s}, error={e}"))
+        }
     }
 }
 
@@ -266,6 +351,37 @@ pub fn starts_with_ignore_ascii_case(text: &str, prefix: &str) -> bool {
     text.len() >= prefix.len() && text[..prefix.len()].eq_ignore_ascii_case(prefix)
 }
 
+/// Fast ASCII-only case-insensitive suffix check without allocations.
+/// Returns true if `text` ends with `suffix`.
+#[inline]
+#[must_use]
+pub fn ends_with_ignore_ascii_case(text: &str, suffix: &str) -> bool {
+    text.len() >= suffix.len()
+        && text[text.len().saturating_sub(suffix.len())..].eq_ignore_ascii_case(suffix)
+}
+
+/// Tries to extract the SID from positive and negative responses
+/// # Errors
+/// - `DiagServiceError` in case the SID is missing
+#[inline]
+pub fn try_extract_sid_from_payload(payload: &[u8]) -> Result<u8, DiagServiceError> {
+    let sid = match payload {
+        [service_ids::NEGATIVE_RESPONSE, sid_nrq, ..] => *sid_nrq,
+        [service_ids::NEGATIVE_RESPONSE] => {
+            return Err(DiagServiceError::BadPayload(
+                "NRC without accompanying SID_RQ received".to_owned(),
+            ));
+        }
+        [sid, ..] => *sid,
+        [] => {
+            return Err(DiagServiceError::BadPayload(
+                "Missing service id".to_owned(),
+            ));
+        }
+    };
+    Ok(sid)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -277,18 +393,18 @@ mod tests {
         let result = extract_bits(8, 0, &[0b_1010_1000]).unwrap();
         assert_eq!(result, vec![0b_1010_1000]);
 
-        let result = extract_bits(8, 0, &[0xff, 0x00]).unwrap();
+        let result = extract_bits(8, 0, &[0xFF, 0x00]).unwrap();
         assert_eq!(result, vec![0]);
 
         // Test standard length with byte alignment
         // 16 bits from 2 bytes, no offset
         // Should extract bytes as is since we're starting at bit 0
-        let result = extract_bits(16, 0, &[0xab, 0xcd]).unwrap();
-        assert_eq!(result, vec![0xab, 0xcd]);
+        let result = extract_bits(16, 0, &[0xAB, 0xCD]).unwrap();
+        assert_eq!(result, vec![0xAB, 0xCD]);
 
         // bits are read LSB first, therefore 18 bits 1, which means 6 most significant bits = 0
-        let result = extract_bits(18, 0, &[0xff, 0xff, 0xff]).unwrap();
-        assert_eq!(result, vec![0b_11, 0xff, 0xff]);
+        let result = extract_bits(18, 0, &[0xFF, 0xFF, 0xFF]).unwrap();
+        assert_eq!(result, vec![0b_11, 0xFF, 0xFF]);
 
         // Extracting 13 bits starting from bit position 5
         // 101010111100110101000010 -- input
@@ -302,7 +418,7 @@ mod tests {
         // Byte 0: 0xab = 10101011
         //
         // Byte 0: -----101  --> take bits 5-7 from first byte  (total bits 3)
-        let result = extract_bits(3, 5, &[0xab]).unwrap();
+        let result = extract_bits(3, 5, &[0xAB]).unwrap();
         assert_eq!(result, vec![0b_101]);
 
         // Extracting 4 bits starting from bit position 6
@@ -316,13 +432,13 @@ mod tests {
     #[test]
     fn test_extract_bits_error_cases() {
         // Test insufficient data
-        assert!(extract_bits(16, 0, &[0xab]).is_err());
+        assert!(extract_bits(16, 0, &[0xAB]).is_err());
 
         // Test invalid bit position
-        assert!(extract_bits(8, 8, &[0xff]).is_err());
+        assert!(extract_bits(8, 8, &[0xFF]).is_err());
 
         // Test zero bits
-        assert!(extract_bits(0, 0, &[0xff]).is_err());
+        assert!(extract_bits(0, 0, &[0xFF]).is_err());
     }
 
     #[test]
@@ -338,5 +454,26 @@ mod tests {
         assert_eq!(result, vec![0xA3, 0x0F]);
         let result = decode_hex("0A3F").unwrap();
         assert_eq!(result, vec![0x0A, 0x3F]);
+    }
+
+    #[test]
+    fn test_try_extract_sid() {
+        let src_ok = [0x20, 0x10];
+        let res = try_extract_sid_from_payload(&src_ok);
+        assert!(res.is_ok());
+        assert_eq!(res.unwrap(), 0x20);
+
+        let nrc_ok = [service_ids::NEGATIVE_RESPONSE, 0x15];
+        let res = try_extract_sid_from_payload(&nrc_ok);
+        assert!(res.is_ok());
+        assert_eq!(res.unwrap(), 0x15);
+
+        // empty should error
+        let res = try_extract_sid_from_payload(&[]);
+        assert!(res.is_err());
+
+        // nrc without sid should error
+        let res = try_extract_sid_from_payload(&[service_ids::NEGATIVE_RESPONSE]);
+        assert!(res.is_err());
     }
 }

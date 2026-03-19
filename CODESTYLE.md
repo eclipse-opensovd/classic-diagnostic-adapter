@@ -1,3 +1,15 @@
+<!--
+SPDX-License-Identifier: Apache-2.0
+SPDX-FileCopyrightText: 2026 The Contributors to Eclipse OpenSOVD (see CONTRIBUTORS)
+
+See the NOTICE file(s) distributed with this work for additional
+information regarding copyright ownership.
+
+This program and the accompanying materials are made available under the
+terms of the Apache License Version 2.0 which is available at
+https://www.apache.org/licenses/LICENSE-2.0
+-->
+
 # Code Style Guide
 
 ## Linting & Clippy
@@ -55,9 +67,6 @@ Additionally the import granularity is set to `crate` to group all imports from 
 - Use tracing macros, like `tracing::info!`, as appropriate to record relevant information.
 - Annotate functions with `tracing::instrument` when they are important for creating new tracing spans.
 - Error messages should start with a capital letter.
-- Literal suffixes (i.e. `u8` vs `_u8`) are preferably written without seperator.
-  Separting the suffix is allowed, to improve readability, for example for long base 2 literals (i.e. `0b_0000_0111_u8`).
-  This rule is not enforced by clippy to allow edge cases like the one mentioned above.
 
 ## Licensing & Dependencies
 
@@ -69,5 +78,6 @@ Additionally the import granularity is set to `crate` to group all imports from 
 
 - Document all public items with `///` doc comments.
 - Use clear, concise language and provide context for complex logic.
+- Inline comments should ues `//` and never `/* */`, they should explain why, not what.
 
 ---

@@ -1,5 +1,6 @@
 /*
- * Copyright (c) 2025 The Contributors to Eclipse OpenSOVD (see CONTRIBUTORS)
+ * SPDX-License-Identifier: Apache-2.0
+ * SPDX-FileCopyrightText: 2025 The Contributors to Eclipse OpenSOVD (see CONTRIBUTORS)
  *
  * See the NOTICE file(s) distributed with this work for additional
  * information regarding copyright ownership.
@@ -7,8 +8,6 @@
  * This program and the accompanying materials are made available under the
  * terms of the Apache License Version 2.0 which is available at
  * https://www.apache.org/licenses/LICENSE-2.0
- *
- * SPDX-License-Identifier: Apache-2.0
  */
 
 use std::{
@@ -16,7 +15,7 @@ use std::{
     time::Duration,
 };
 
-use cda_tracing::TracingSetupError;
+use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 mod com_param_handling;
@@ -74,6 +73,16 @@ pub struct DiagComm {
 }
 
 impl DiagComm {
+    #[must_use]
+    pub fn new(name: impl Into<String>, type_: DiagCommType) -> Self {
+        let name = name.into();
+        Self {
+            lookup_name: Some(name.clone()),
+            name,
+            type_,
+        }
+    }
+
     #[must_use]
     pub fn action(&self) -> DiagCommAction {
         self.type_.clone().into()
@@ -150,7 +159,7 @@ pub enum TesterPresentMode {
     Stop,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq)]
 pub enum TesterPresentType {
     Functional(String),
     Ecu(String),
@@ -185,6 +194,8 @@ pub mod service_ids {
     pub const NEGATIVE_RESPONSE: u8 = 0x7F;
 }
 
+pub const UDS_ID_RESPONSE_BITMASK: u8 = 0x40;
+
 const CONFIGURATIONS_PREFIXES: [u8; 1] = [service_ids::WRITE_DATA_BY_IDENTIFIER];
 
 const DATA_PREFIXES: [u8; 1] = [service_ids::READ_DATA_BY_IDENTIFIER];
@@ -209,6 +220,12 @@ const OPERATIONS_PREFIXES: [u8; 5] = [
     service_ids::REQUEST_DOWNLOAD,
     service_ids::TRANSFER_DATA,
     service_ids::REQUEST_TRANSFER_EXIT,
+];
+
+pub const SERVICE_IDS_PARAMETER_META_DATA: [u8; 3] = [
+    service_ids::READ_DATA_BY_IDENTIFIER,
+    service_ids::WRITE_DATA_BY_IDENTIFIER,
+    service_ids::ROUTINE_CONTROL,
 ];
 
 impl TesterPresentType {
@@ -243,56 +260,80 @@ impl DiagCommType {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Deserialize, Serialize, Clone, Debug)]
+pub struct FunctionalDescriptionConfig {
+    pub description_database: String,
+    pub enabled_functional_groups: Option<HashSet<String>>,
+    pub protocol_position: datatypes::DiagnosticServiceAffixPosition,
+    pub protocol_case_sensitive: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Error)]
 pub enum DiagServiceError {
     /// Returned in case a resource can not be found
+    #[error("Not found: {0:?}")]
     NotFound(String),
+    #[error("Request not supported: {0}")]
     RequestNotSupported(String),
+    #[error("Invalid database: {0}")]
     InvalidDatabase(String),
-    DatabaseEntryNotFound(String),
+    #[error("Invalid request: {0}")]
     InvalidRequest(String),
+    #[error("Parameter conversion error: {0}")]
     ParameterConversionError(String),
+    #[error("Unknown operation")]
     UnknownOperation,
+    #[error("UDS lookup error: {0}")]
     UdsLookupError(String),
+    #[error("Bad payload: {0}")]
     BadPayload(String),
     /// Similar to `BadPayload` but indicates that the data received is insufficient to
     /// process the request.
     /// Used to abort reading data gracefully when the data is incomplete or end of pdu is reached.
-    NotEnoughData {
-        expected: usize,
-        actual: usize,
-    },
+    #[error("Payload too short, expected at least {expected} bytes, got {actual} bytes")]
+    NotEnoughData { expected: usize, actual: usize },
+    #[error("Variant detection error: {0}")]
     VariantDetectionError(String),
-    InvalidSession(String),
+    #[error("{0}")]
+    InvalidState(String),
+    #[error("{0}")]
     InvalidAddress(String),
+    #[error("Sending message failed {0}")]
     SendFailed(String),
+    #[error("Received Nack, code={0:?}")]
     Nack(u8),
+    #[error("Unexpected response. {0:?}")]
     UnexpectedResponse(Option<String>),
+    #[error("No response {0}")]
     NoResponse(String),
-    ConnectionClosed,
+    #[error("Connection closed {0}")]
+    ConnectionClosed(String),
+    #[error("Ecu {0} offline")]
     EcuOffline(String),
+    #[error("Timeout")]
     Timeout,
+    #[error("Access denied: {0}")]
     AccessDenied(String),
-    ConfigurationError(String),
     /// Returned in case a resource can be found but returns an error
+    #[error("Resource error: {0}")]
     ResourceError(String),
+    #[error("Data parse error: value='{}', details='{}'", .0.value, .0.details)]
     DataError(DataParseError),
-    SetupError(String),
     /// Returned in case the provided value for security plugin cannot be used as `SecurityApi`
+    #[error("Invalid security plugin provided")]
     InvalidSecurityPlugin,
-}
-
-impl From<TracingSetupError> for DiagServiceError {
-    fn from(value: TracingSetupError) -> Self {
-        match &value {
-            TracingSetupError::ResourceCreationFailed(_) => {
-                DiagServiceError::ResourceError(value.to_string())
-            }
-            TracingSetupError::SubscriberInitializationFailed(_) => {
-                DiagServiceError::SetupError(value.to_string())
-            }
-        }
-    }
+    #[error(
+        "Unable to find a unique value with the given parameters: name='{name}', \
+         candidates='{candidates:?}'"
+    )]
+    AmbiguousParameters {
+        name: String,
+        candidates: Vec<String>,
+    },
+    #[error("No value found with the given parameters. Possible values are: {possible_values:?}")]
+    InvalidParameter { possible_values: HashSet<String> },
+    #[error("Invalid configuration: {0}")]
+    InvalidConfiguration(String),
 }
 
 #[derive(Error, Debug)]
@@ -311,82 +352,10 @@ pub enum DoipGatewaySetupError {
     ServerError(String),
 }
 
-impl From<DoipGatewaySetupError> for DiagServiceError {
-    fn from(value: DoipGatewaySetupError) -> Self {
-        match value {
-            DoipGatewaySetupError::InvalidAddress(_) => {
-                DiagServiceError::InvalidAddress(value.to_string())
-            }
-            DoipGatewaySetupError::SocketCreationFailed(_)
-            | DoipGatewaySetupError::PortBindFailed(_) => {
-                DiagServiceError::SetupError(value.to_string())
-            }
-            DoipGatewaySetupError::InvalidConfiguration(_) => {
-                DiagServiceError::ConfigurationError(value.to_string())
-            }
-            DoipGatewaySetupError::ResourceError(_) | DoipGatewaySetupError::ServerError(_) => {
-                DiagServiceError::ResourceError(value.to_string())
-            }
-        }
-    }
-}
-
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DataParseError {
     pub value: String,
     pub details: String,
-}
-
-impl Display for DiagServiceError {
-    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
-        match self {
-            DiagServiceError::NotFound(msg) => write!(f, "Not found: {msg}"),
-            DiagServiceError::RequestNotSupported(msg) => write!(f, "Request not supported: {msg}"),
-            DiagServiceError::InvalidDatabase(msg) => write!(f, "Invalid database: {msg}"),
-            DiagServiceError::DatabaseEntryNotFound(msg) => {
-                write!(f, "Database entry not found: {msg}")
-            }
-            DiagServiceError::InvalidRequest(msg) => write!(f, "Invalid request: {msg}"),
-            DiagServiceError::ParameterConversionError(msg) => {
-                write!(f, "Parameter conversion error: {msg}")
-            }
-            DiagServiceError::UnknownOperation => write!(f, "Unknown operation"),
-            DiagServiceError::UdsLookupError(msg) => write!(f, "UDS lookup error: {msg}"),
-            DiagServiceError::BadPayload(msg) => write!(f, "Bad payload: {msg}"),
-            DiagServiceError::NotEnoughData { expected, actual } => write!(
-                f,
-                "Payload too short, expected at least {expected} bytes, got {actual} bytes"
-            ),
-            DiagServiceError::VariantDetectionError(msg) => {
-                write!(f, "Variant detection error: {msg}")
-            }
-            DiagServiceError::InvalidSession(msg) | DiagServiceError::InvalidAddress(msg) => {
-                write!(f, "{msg}")
-            }
-            DiagServiceError::SendFailed(msg) => {
-                write!(f, "Sending message failed {msg}")
-            }
-            DiagServiceError::Nack(code) => write!(f, "Received Nack, code={code:?}"),
-            DiagServiceError::UnexpectedResponse(Some(msg)) => {
-                write!(f, "Unexpected response. {msg}")
-            }
-            DiagServiceError::UnexpectedResponse(None) => write!(f, "Unexpected response."),
-            DiagServiceError::NoResponse(msg) => write!(f, "No response {msg}"),
-            DiagServiceError::ConnectionClosed => write!(f, "Connection closed"),
-            DiagServiceError::EcuOffline(ecu) => write!(f, "Ecu {ecu} offline"),
-            DiagServiceError::Timeout => write!(f, "Timeout"),
-            DiagServiceError::AccessDenied(msg) => write!(f, "Access denied: {msg}"),
-            DiagServiceError::ConfigurationError(msg) => write!(f, "Configuration error: {msg}"),
-            DiagServiceError::ResourceError(msg) => write!(f, "Resource error: {msg}"),
-            DiagServiceError::SetupError(msg) => write!(f, "Setup error: {msg}"),
-            DiagServiceError::DataError(DataParseError { value, details }) => {
-                write!(f, "Data parse error: value='{value}', details='{details}'")
-            }
-            DiagServiceError::InvalidSecurityPlugin => {
-                write!(f, "Invalid security plugin provided")
-            }
-        }
-    }
 }
 
 impl std::fmt::Display for DiagComm {

@@ -1,5 +1,6 @@
 /*
- * Copyright (c) 2025 The Contributors to Eclipse OpenSOVD (see CONTRIBUTORS)
+ * SPDX-License-Identifier: Apache-2.0
+ * SPDX-FileCopyrightText: 2025 The Contributors to Eclipse OpenSOVD (see CONTRIBUTORS)
  *
  * See the NOTICE file(s) distributed with this work for additional
  * information regarding copyright ownership.
@@ -7,8 +8,6 @@
  * This program and the accompanying materials are made available under the
  * terms of the Apache License Version 2.0 which is available at
  * https://www.apache.org/licenses/LICENSE-2.0
- *
- * SPDX-License-Identifier: Apache-2.0
  */
 
 use std::time::Duration;
@@ -20,22 +19,38 @@ use serde::{self, Deserialize};
 
 use crate::{
     sovd,
+    sovd::set_dtc_setting,
     util::{
         TestingError,
         http::{
             Response, auth_header, extract_field_from_json, response_to_json,
             response_to_json_to_field, send_cda_json_request, send_cda_request,
         },
-        runtime::setup_integration_test,
+        runtime::{TestRuntime, setup_integration_test},
     },
 };
+
+const NON_OWNER_BEARER_TOKEN: &str = "eyJ0eXAiOiJKV1QiLCJhbGciOiJIUzI1NiJ9.\
+                                      eyJzdWIiOiJvd25lcnNoaXAtdGVzdCIsImV4cCI6MjAwMDAwMDAwMH0.\
+                                      _qb-vSkPnV_Lff2wNH4VXugc-DcvGdzJxwTmb4J48Xs";
+
+fn bearer_token_header(token: &str) -> HeaderMap {
+    let mut headers = HeaderMap::new();
+    headers.insert(
+        reqwest::header::AUTHORIZATION,
+        format!("Bearer {token}")
+            .parse()
+            .expect("invalid header value"),
+    );
+    headers
+}
 
 #[tokio::test]
 async fn lock_unlock() -> Result<(), TestingError> {
     let (runtime, _lock) = setup_integration_test(true).await?;
     let auth = auth_header(&runtime.config, None).await?;
 
-    for endpoint in [FUNCTIONAL_GROUP_ENDPOINT, VEHICLE_ENDPOINT, &ecu_endpoint()] {
+    for endpoint in ENDPOINTS {
         // Check if the lock is created successfully and deleted after the timeout
         {
             let expiration_timeout = Duration::from_secs(2);
@@ -133,6 +148,7 @@ async fn lock_unlock() -> Result<(), TestingError> {
     Ok(())
 }
 
+#[cfg(feature = "functional-locks-tests")]
 #[tokio::test]
 async fn cannot_lock_ecu_with_existing_functional_log() -> Result<(), TestingError> {
     let (runtime, _lock) = setup_integration_test(true).await?;
@@ -150,7 +166,7 @@ async fn cannot_lock_ecu_with_existing_functional_log() -> Result<(), TestingErr
 
     create_lock(
         default_timeout(),
-        &ecu_endpoint(),
+        ECU_ENDPOINT,
         StatusCode::CONFLICT,
         &runtime.config,
         &auth,
@@ -187,7 +203,7 @@ async fn ownership() -> Result<(), TestingError> {
     let auth_owner = auth_header(&runtime.config, None).await?;
     let auth_other = auth_header(&runtime.config, Some("ownership-test")).await?;
 
-    for endpoint in [FUNCTIONAL_GROUP_ENDPOINT, VEHICLE_ENDPOINT, &ecu_endpoint()] {
+    for endpoint in ENDPOINTS {
         let lock_id: String = response_to_json_to_field(
             &create_lock(
                 default_timeout(),
@@ -278,13 +294,286 @@ async fn ownership() -> Result<(), TestingError> {
     Ok(())
 }
 
+#[cfg(feature = "functional-locks-tests")]
+#[tokio::test]
+async fn test_vehicle_locking_blocked_by_other() -> Result<(), TestingError> {
+    let (runtime, _lock) = setup_integration_test(true).await?;
+    let auth_user1 = auth_header(&runtime.config, None).await?;
+    let auth_user2 = auth_header(&runtime.config, Some("user2")).await?;
+
+    // User1 creates a functional lock
+    let func_lock_id: String = response_to_json_to_field(
+        &create_lock(
+            default_timeout(),
+            FUNCTIONAL_GROUP_ENDPOINT,
+            StatusCode::CREATED,
+            &runtime.config,
+            &auth_user1,
+        )
+        .await,
+        "id",
+    )?;
+
+    // User2 cannot create a vehicle lock because user1 holds a lock
+    create_lock(
+        default_timeout(),
+        VEHICLE_ENDPOINT,
+        StatusCode::FORBIDDEN,
+        &runtime.config,
+        &auth_user2,
+    )
+    .await;
+
+    // Cleanup
+    lock_operation(
+        FUNCTIONAL_GROUP_ENDPOINT,
+        Some(&func_lock_id),
+        &runtime.config,
+        &auth_user1,
+        StatusCode::NO_CONTENT,
+        Method::DELETE,
+    )
+    .await;
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn test_vehicle_lock_delete_hierarchy() -> Result<(), TestingError> {
+    async fn create_ecu_and_func_lock(
+        user: &HeaderMap,
+        runtime: &TestRuntime,
+    ) -> Result<(String, String), TestingError> {
+        // Create locks in correct hierarchy: ECU (lowest) -> Functional -> Vehicle (highest)
+        let ecu_lock_id: String = response_to_json_to_field(
+            &create_lock(
+                default_timeout(),
+                ECU_ENDPOINT,
+                StatusCode::CREATED,
+                &runtime.config,
+                user,
+            )
+            .await,
+            "id",
+        )?;
+
+        let func_lock_id: String = if cfg!(feature = "functional-locks-tests") {
+            response_to_json_to_field(
+                &create_lock(
+                    default_timeout(),
+                    FUNCTIONAL_GROUP_ENDPOINT,
+                    StatusCode::CREATED,
+                    &runtime.config,
+                    user,
+                )
+                .await,
+                "id",
+            )?
+        } else {
+            "empty".to_owned()
+        };
+
+        Ok((ecu_lock_id, func_lock_id))
+    }
+
+    #[allow(unused_variables)] // with functional group tests disabled func_lock_id is unused
+    async fn assert_ecu_and_func_locks_deleted(
+        ecu_lock_id: &str,
+        func_lock_id: &str,
+        user: &HeaderMap,
+        runtime: &TestRuntime,
+    ) {
+        lock_operation(
+            ECU_ENDPOINT,
+            Some(ecu_lock_id),
+            &runtime.config,
+            user,
+            StatusCode::NOT_FOUND,
+            Method::GET,
+        )
+        .await;
+
+        #[cfg(feature = "functional-locks-tests")]
+        lock_operation(
+            FUNCTIONAL_GROUP_ENDPOINT,
+            Some(func_lock_id),
+            &runtime.config,
+            user,
+            StatusCode::NOT_FOUND,
+            Method::GET,
+        )
+        .await;
+    }
+
+    async fn create_vehicle_lock(
+        runtime: &TestRuntime,
+        user: &HeaderMap,
+    ) -> Result<String, TestingError> {
+        response_to_json_to_field(
+            &create_lock(
+                default_timeout(),
+                VEHICLE_ENDPOINT,
+                StatusCode::CREATED,
+                &runtime.config,
+                user,
+            )
+            .await,
+            "id",
+        )
+    }
+
+    async fn delete_lock(runtime: &TestRuntime, user: &HeaderMap, lock_id: &str) {
+        lock_operation(
+            VEHICLE_ENDPOINT,
+            Some(lock_id),
+            &runtime.config,
+            user,
+            StatusCode::NO_CONTENT,
+            Method::DELETE,
+        )
+        .await;
+    }
+
+    let (runtime, _lock) = setup_integration_test(true).await?;
+    let auth_user1 = auth_header(&runtime.config, None).await?;
+    let auth_user2 = auth_header(&runtime.config, Some("user2")).await?;
+
+    // tests are done with two users to ensure locks are properly deleted
+    // test with locks created before vehicle lock
+    {
+        for user in [&auth_user1, &auth_user2] {
+            let (ecu_lock_id, func_lock_id) = create_ecu_and_func_lock(user, runtime).await?;
+            let vehicle_lock = create_vehicle_lock(runtime, user).await?;
+            delete_lock(runtime, user, &vehicle_lock).await;
+            assert_ecu_and_func_locks_deleted(&ecu_lock_id, &func_lock_id, user, runtime).await;
+        }
+    }
+
+    // test with locks created after vehicle lock
+    {
+        for user in [&auth_user1, &auth_user2] {
+            let vehicle_lock = create_vehicle_lock(runtime, user).await?;
+            let (ecu_lock_id, func_lock_id) = create_ecu_and_func_lock(user, runtime).await?;
+            delete_lock(runtime, user, &vehicle_lock).await;
+            assert_ecu_and_func_locks_deleted(&ecu_lock_id, &func_lock_id, user, runtime).await;
+        }
+    }
+    Ok(())
+}
+
+#[tokio::test]
+async fn test_vehicle_lock_cannot_be_deleted_by_non_owner() -> Result<(), TestingError> {
+    let (runtime, _lock) = setup_integration_test(true).await?;
+    let auth_owner = auth_header(&runtime.config, None).await?;
+    let auth_other = auth_header(&runtime.config, Some("other-user")).await?;
+
+    // Owner creates vehicle lock
+    let vehicle_lock_id: String = response_to_json_to_field(
+        &create_lock(
+            default_timeout(),
+            VEHICLE_ENDPOINT,
+            StatusCode::CREATED,
+            &runtime.config,
+            &auth_owner,
+        )
+        .await,
+        "id",
+    )?;
+
+    // Other user cannot delete the vehicle lock
+    lock_operation(
+        VEHICLE_ENDPOINT,
+        Some(&vehicle_lock_id),
+        &runtime.config,
+        &auth_other,
+        StatusCode::FORBIDDEN,
+        Method::DELETE,
+    )
+    .await;
+
+    // Verify lock still exists
+    lock_operation(
+        VEHICLE_ENDPOINT,
+        Some(&vehicle_lock_id),
+        &runtime.config,
+        &auth_owner,
+        StatusCode::OK,
+        Method::GET,
+    )
+    .await;
+
+    // Owner can delete their own lock
+    lock_operation(
+        VEHICLE_ENDPOINT,
+        Some(&vehicle_lock_id),
+        &runtime.config,
+        &auth_owner,
+        StatusCode::NO_CONTENT,
+        Method::DELETE,
+    )
+    .await;
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn test_component_ownership_protection_with_vehicle_lock_only() -> Result<(), TestingError> {
+    let (runtime, _lock) = setup_integration_test(true).await?;
+    let auth_owner = auth_header(&runtime.config, None).await?;
+
+    // Lock the vehicle as 'owner'
+    let expiration_timeout = Duration::from_secs(30);
+    let ecu_lock = create_lock(
+        expiration_timeout,
+        VEHICLE_ENDPOINT,
+        StatusCode::CREATED,
+        &runtime.config,
+        &auth_owner,
+    )
+    .await;
+    let lock_id = extract_field_from_json::<String>(&response_to_json(&ecu_lock)?, "id")?;
+
+    // Create headers for non_owner using the specific bearer token
+    let auth_non_owner = bearer_token_header(NON_OWNER_BEARER_TOKEN);
+
+    // Non-owner tries to set dtcsetting - should fail because lock owners differ
+    // Without lock, the CDA should reject the request
+    set_dtc_setting(
+        "On",
+        &runtime.config,
+        &auth_non_owner,
+        sovd::ECU_FLXC1000_ENDPOINT,
+        StatusCode::FORBIDDEN,
+    )
+    .await?;
+
+    // Cleanup: delete the lock as owner
+    lock_operation(
+        VEHICLE_ENDPOINT,
+        Some(&lock_id),
+        &runtime.config,
+        &auth_owner,
+        StatusCode::NO_CONTENT,
+        Method::DELETE,
+    )
+    .await;
+
+    Ok(())
+}
+
 pub(crate) const FUNCTIONAL_GROUP_ENDPOINT: &str =
     "functions/functionalgroups/fgl_uds_ethernet_doip_dobt/locks";
 
-pub(crate) fn ecu_endpoint() -> String {
-    format!("{}/locks", sovd::ECU_FLXC1000_ENDPOINT)
-}
+pub(crate) const ECU_ENDPOINT: &str =
+    const_format::formatcp!("{}/locks", sovd::ECU_FLXC1000_ENDPOINT);
+
 pub(crate) const VEHICLE_ENDPOINT: &str = "locks";
+
+#[cfg(feature = "functional-locks-tests")]
+pub(crate) const ENDPOINTS: [&str; 3] = [FUNCTIONAL_GROUP_ENDPOINT, VEHICLE_ENDPOINT, ECU_ENDPOINT];
+
+#[cfg(not(feature = "functional-locks-tests"))]
+pub(crate) const ENDPOINTS: [&str; 2] = [VEHICLE_ENDPOINT, ECU_ENDPOINT];
 
 pub(crate) async fn lock_operation(
     endpoint: &str,
@@ -327,6 +616,8 @@ pub(crate) async fn create_lock(
 }
 
 fn default_timeout() -> Duration {
+    // Duration::from_hours is only available in rust >= 1.91.0, we want to support 1.88.0
+    #[cfg_attr(nightly, allow(unknown_lints, clippy::duration_suboptimal_units))]
     Duration::from_secs(3600)
 }
 

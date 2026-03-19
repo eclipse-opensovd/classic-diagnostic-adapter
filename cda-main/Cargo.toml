@@ -1,4 +1,5 @@
-# Copyright (c) 2025 The Contributors to Eclipse OpenSOVD (see CONTRIBUTORS)
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: 2025 The Contributors to Eclipse OpenSOVD (see CONTRIBUTORS)
 #
 # See the NOTICE file(s) distributed with this work for additional
 # information regarding copyright ownership.
@@ -6,8 +7,6 @@
 # This program and the accompanying materials are made available under the
 # terms of the Apache License Version 2.0 which is available at
 # https://www.apache.org/licenses/LICENSE-2.0
-#
-# SPDX-License-Identifier: Apache-2.0
 
 [package]
 name = "opensovd-cda"
@@ -38,6 +37,7 @@ cda-interfaces = { workspace = true }
 cda-sovd = { workspace = true }
 cda-tracing = { workspace = true }
 cda-plugin-security = { workspace = true }
+cda-health = { workspace = true }
 # args
 clap = { workspace = true, features = ["derive"] }
 # config
@@ -46,6 +46,7 @@ futures = { workspace = true }
 # allocator
 mimalloc = { git = "https://github.com/theswiftfox/mimalloc.git", rev = "afbaaa5" }
 serde = { workspace = true, features = ["derive"] }
+serde_json = { workspace = true }
 tokio = { workspace = true, features = [
   "rt-multi-thread",
   "macros",
@@ -56,8 +57,6 @@ tokio = { workspace = true, features = [
 # logging & tracing
 thiserror = { workspace = true }
 tracing = { workspace = true }
-tracing-core = { workspace = true }
-tracing-appender = { workspace = true }
 tracing-subscriber = { workspace = true, features = [
   "ansi",
   "chrono",
@@ -67,21 +66,24 @@ tracing-subscriber = { workspace = true, features = [
   "parking_lot",
   "std",
 ] }
-strip-ansi-escapes = { workspace = true } # Strip ANSI escape codes from strings, used for file logging
-nu-ansi-term = { workspace = true } # ANSI terminal support for terminal log output
 
 [dev-dependencies]
 chrono = { workspace = true }
 http = { workspace = true }
 mime = { workspace = true }
 reqwest = { workspace = true }
-serde_json = { workspace = true }
+
+[build-dependencies]
+chrono = { workspace = true }
 
 [features]
-default = []
+default = ["health"]
 tokio-tracing = ["cda-interfaces/tokio-tracing", "cda-tracing/tokio-tracing"]
 openssl-vendored = [
   "cda-comm-doip/openssl-vendored",
   "cda-comm-uds/openssl-vendored",
 ]
 dlt-tracing = ["cda-tracing/dlt-tracing"]
+integration-tests = []
+
+health = []

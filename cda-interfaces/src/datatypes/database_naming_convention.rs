@@ -1,5 +1,6 @@
 /*
- * Copyright (c) 2025 The Contributors to Eclipse OpenSOVD (see CONTRIBUTORS)
+ * SPDX-License-Identifier: Apache-2.0
+ * SPDX-FileCopyrightText: 2025 The Contributors to Eclipse OpenSOVD (see CONTRIBUTORS)
  *
  * See the NOTICE file(s) distributed with this work for additional
  * information regarding copyright ownership.
@@ -7,11 +8,10 @@
  * This program and the accompanying materials are made available under the
  * terms of the Apache License Version 2.0 which is available at
  * https://www.apache.org/licenses/LICENSE-2.0
- *
- * SPDX-License-Identifier: Apache-2.0
  */
-
 use serde::{Deserialize, Serialize};
+
+use crate::{HashMap, service_ids, util::serde_ext};
 
 /// Holds configuration for diagnostic service naming conventions.
 ///
@@ -31,11 +31,14 @@ use serde::{Deserialize, Serialize};
 ///   (i.e., be a prefix if `Prefix`, or a suffix if `Suffix`).**
 ///   Order matters: compound affixes (e.g. ` read dump`) must come before general ones
 ///   (e.g. `dump`).
+///  - `service_affixes`: List of affixes that apply only to the given service.
+///    This can be used to remove additional things from a service name during lookup.
+///    Example: The service is named `DTC_Settings_Mode_Off`, but "off" is passed via SOVD.
+///    To match the service configure, `[0x85, (Prefix, "Dtc_Settings_Mode")]`
 ///
 /// Common affixes (e.g. `read`, `write`) should be placed first for performance, but compound
 /// affixes must precede their base forms for correct matching.
 ///
-
 #[derive(Deserialize, Serialize, Clone, Debug)]
 pub struct DatabaseNamingConvention {
     pub short_name_affix_position: DiagnosticServiceAffixPosition,
@@ -44,6 +47,10 @@ pub struct DatabaseNamingConvention {
     pub functional_class_varcoding: String,
     pub short_name_affixes: Vec<String>,
     pub long_name_affixes: Vec<String>,
+    // technically key should be u8, but it's not supported for toml parse / figment.
+    // it will be validated in the validate sanity function
+    #[serde(deserialize_with = "serde_ext::normalized_u8_key_map::deserialize")]
+    pub service_affixes: HashMap<String, (DiagnosticServiceAffixPosition, String)>,
 }
 
 impl DatabaseNamingConvention {
@@ -90,6 +97,21 @@ impl DatabaseNamingConvention {
         }
         short_name.to_string()
     }
+
+    #[must_use]
+    pub fn trim_service_name_affixes(&self, service_id: u8, short_name: String) -> String {
+        let Some((affix, value)) = self.service_affixes.get(&service_id.to_string()) else {
+            return short_name;
+        };
+
+        match affix {
+            DiagnosticServiceAffixPosition::Prefix => &short_name[value.len()..],
+            DiagnosticServiceAffixPosition::Suffix => {
+                &short_name[..short_name.len().saturating_sub(value.len())]
+            }
+        }
+        .into()
+    }
 }
 
 impl Default for DatabaseNamingConvention {
@@ -111,6 +133,13 @@ impl Default for DatabaseNamingConvention {
                 "_read_dump".to_owned(),
                 "_write_dump".to_owned(),
                 "_dump".to_owned(),
+                "_read_func".to_owned(),
+                "_write_func".to_owned(),
+                "_read_dump_func".to_owned(),
+                "_write_dump_func".to_owned(),
+                "_dump_func".to_owned(),
+                "_control_func".to_owned(),
+                "_control".to_owned(),
             ],
             long_name_affixes: vec![
                 " read".to_owned(),
@@ -118,7 +147,21 @@ impl Default for DatabaseNamingConvention {
                 " read dump".to_owned(),
                 " write dump".to_owned(),
                 " dump".to_owned(),
+                " read func".to_owned(),
+                " write func".to_owned(),
+                " read dump func".to_owned(),
+                " write dump func".to_owned(),
+                " dump func".to_owned(),
+                " control func".to_owned(),
+                " control".to_owned(),
             ],
+            service_affixes: HashMap::from_iter([(
+                service_ids::CONTROL_DTC_SETTING.to_string(),
+                (
+                    DiagnosticServiceAffixPosition::Prefix,
+                    "DTC_Setting_Mode_".to_owned(),
+                ),
+            )]),
         }
     }
 }
@@ -157,6 +200,7 @@ mod tests {
             } else {
                 vec![" post".to_owned(), " l".to_owned()]
             },
+            service_affixes: HashMap::default(),
         }
     }
 
@@ -247,6 +291,7 @@ mod tests {
             long_name_affixes: vec![" post".to_owned()],
             configuration_service_parameter_semantic_id: "ID".to_owned(),
             functional_class_varcoding: "varcoding".to_owned(),
+            service_affixes: HashMap::default(),
         };
         assert_eq!(conv.trim_short_name_affixes("PRE_data"), "data");
         assert_eq!(conv.trim_long_name_affixes("Data POST"), "Data");

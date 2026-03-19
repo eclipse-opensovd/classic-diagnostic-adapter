@@ -1,5 +1,6 @@
 /*
- * Copyright (c) 2025 The Contributors to Eclipse OpenSOVD (see CONTRIBUTORS)
+ * SPDX-License-Identifier: Apache-2.0
+ * SPDX-FileCopyrightText: 2025 The Contributors to Eclipse OpenSOVD (see CONTRIBUTORS)
  *
  * See the NOTICE file(s) distributed with this work for additional
  * information regarding copyright ownership.
@@ -7,27 +8,29 @@
  * This program and the accompanying materials are made available under the
  * terms of the Apache License Version 2.0 which is available at
  * https://www.apache.org/licenses/LICENSE-2.0
- *
- * SPDX-License-Identifier: Apache-2.0
  */
 
 use std::{path::PathBuf, sync::Arc};
 
 use aide::{
-    axum::{ApiRouter as Router, ApiRouter, routing},
+    axum::{
+        ApiRouter as Router,
+        routing::{self, get_with},
+    },
     transform::TransformOperation,
 };
 use axum::{
     Json,
     body::Bytes,
-    extract::Query,
+    extract::{Query, State},
     http::{HeaderMap, StatusCode},
     middleware,
     response::{IntoResponse, Response},
 };
 use axum_extra::extract::WithRejection;
 use cda_interfaces::{
-    HashMap, HashMapExtensions, SchemaProvider, UdsEcu,
+    FunctionalDescriptionConfig, HashMap, HashMapExtensions as _, SchemaProvider, UdsEcu,
+    datatypes::ComponentsConfig,
     diagservices::{DiagServiceResponse, UdsPayloadData},
     file_manager::FileManager,
 };
@@ -35,22 +38,24 @@ use cda_plugin_security::{SecurityPluginLoader, security_plugin_middleware};
 use error::{ApiError, api_error_from_diag_response};
 use http::{Uri, header};
 use indexmap::IndexMap;
+pub use locks::Locks;
 use schemars::Schema;
-use sovd_interfaces::{components::ecu as sovd_ecu, sovd2uds::FileList};
+use sovd_interfaces::{
+    IncludeSchemaQuery, Resource,
+    components::{ComponentsResponse, ecu as sovd_ecu},
+};
 use tokio::sync::RwLock;
 use uuid::Uuid;
 
-use crate::sovd::{
-    components::ecu::{
-        configurations, data, faults, genericservice, modes, operations, x_single_ecu_jobs,
-        x_sovd2uds_bulk_data, x_sovd2uds_download,
-    },
-    locks::{LockType, Locks},
+use crate::sovd::components::ecu::{
+    configurations, data, faults, genericservice, modes, operations, x_single_ecu_jobs,
+    x_sovd2uds_bulk_data, x_sovd2uds_download,
 };
 
 pub(crate) mod apps;
 pub(crate) mod components;
 pub(crate) mod error;
+pub(crate) mod functions;
 pub(crate) mod locks;
 
 trait IntoSovd {
@@ -92,7 +97,7 @@ impl IntoSovd for cda_interfaces::EcuState {
 }
 
 #[derive(Debug, thiserror::Error)]
-enum SovdError {
+pub(crate) enum SovdError {
     #[error("Failed to create route: {0}")]
     RouteError(String),
 }
@@ -124,23 +129,12 @@ impl<R: DiagServiceResponse, T: UdsEcu + Clone, U: FileManager> Clone
     }
 }
 
+#[derive(Clone)]
 pub(crate) struct WebserverState<T: UdsEcu + Clone> {
     uds: T,
     locks: Arc<Locks>,
     flash_data: Arc<RwLock<sovd_interfaces::sovd2uds::FileList>>,
-}
-
-/// Clone implementation that does not clone the `auth_state`
-/// `auth_state` is only set by the middleware and should not
-/// be cloned for each request
-impl<T: UdsEcu + Clone> Clone for WebserverState<T> {
-    fn clone(&self) -> Self {
-        Self {
-            uds: self.uds.clone(),
-            locks: Arc::clone(&self.locks),
-            flash_data: Arc::clone(&self.flash_data),
-        }
-    }
+    components_config: Arc<RwLock<ComponentsConfig>>,
 }
 
 pub(crate) fn resource_response(
@@ -175,12 +169,13 @@ pub async fn route<
     U: FileManager,
     S: SecurityPluginLoader,
 >(
+    functional_group_config: FunctionalDescriptionConfig,
+    components_config: ComponentsConfig,
     uds: &T,
     flash_files_path: String,
     mut file_manager: HashMap<String, U>,
+    locks: Arc<Locks>,
 ) -> Router {
-    let mut ecu_names = uds.get_ecus().await;
-
     let flash_data = Arc::new(RwLock::new(sovd_interfaces::sovd2uds::FileList {
         files: Vec::new(),
         path: Some(PathBuf::from(flash_files_path)),
@@ -188,85 +183,32 @@ pub async fn route<
     }));
     let state = WebserverState {
         uds: uds.clone(),
-        locks: Arc::new(Locks {
-            vehicle: LockType::Vehicle(Arc::new(RwLock::new(None))),
-            ecu: LockType::Ecu(Arc::new(RwLock::new(
-                ecu_names.iter().map(|ecu| (ecu.clone(), None)).collect(),
-            ))),
-            functional_group: LockType::FunctionalGroup(Arc::new(RwLock::new(HashMap::new()))),
-        }),
+        locks,
         flash_data: Arc::clone(&flash_data),
+        components_config: Arc::new(RwLock::new(components_config)),
     };
 
-    let ecus = ecu_names.clone();
-    let mut router = Router::new().api_route(
-        "/vehicle/v15/components",
-        routing::get_with(
-            |WithRejection(Query(query), _): WithRejection<
-                Query<sovd_interfaces::IncludeSchemaQuery>,
-                ApiError,
-            >| async move {
-                let schema = if query.include_schema {
-                    Some(crate::sovd::create_schema!(
-                        sovd_interfaces::ResourceResponse
-                    ))
-                } else {
-                    None
-                };
-                (
-                    StatusCode::OK,
-                    Json(sovd_interfaces::ResourceResponse {
-                        items: ecus
-                            .iter()
-                            .map(|ecu| sovd_interfaces::Resource {
-                                href: format!(
-                                    "http://localhost:20002/Vehicle/v15/components/{ecu}"
-                                ),
-                                id: Some(ecu.to_lowercase()),
-                                name: ecu.clone(),
-                            })
-                            .collect::<Vec<sovd_interfaces::Resource>>(),
-                        schema,
-                    }),
-                )
-                    .into_response()
-            },
-            |op: TransformOperation| {
-                op.description("Get a list of the available components with their paths")
-                    .response_with::<200, Json<sovd_interfaces::ResourceResponse>, _>(|res| {
-                        res.example(sovd_interfaces::ResourceResponse {
-                            items: vec![sovd_interfaces::Resource {
-                                href: "http://localhost:20002/Vehicle/v15/components/my_ecu".into(),
-                                id: Some("my_ecu".into()),
-                                name: "My ECU".into(),
-                            }],
-                            schema: None,
-                        })
-                    })
-            },
-        ),
-    );
+    let router = components_route::<R, T, U>(state.clone(), &mut file_manager).await;
 
-    for ecu_name in ecu_names.drain(0..) {
-        match ecu_route::<R, T, U>(&ecu_name, uds, &state, &flash_data, &mut file_manager) {
-            Ok((ecu_path, nested)) => {
-                router = router.nest_api_service(&ecu_path, nested);
-            }
-            Err(e) => {
-                tracing::error!(error = %e, "Failed to create route for ECU '{ecu_name}'");
-            }
-        }
-    }
-
-    vehicle_route::<T, S>(state, router)
+    vehicle_route::<T, S>(state, router, functional_group_config)
+        .await
         .layer(middleware::from_fn(security_plugin_middleware::<S>))
         .with_state(uds.clone())
 }
 
-fn vehicle_route<T: UdsEcu + SchemaProvider + Clone, S: SecurityPluginLoader>(
+async fn vehicle_route<T: UdsEcu + SchemaProvider + Clone, S: SecurityPluginLoader>(
     state: WebserverState<T>,
-    router: ApiRouter<WebserverState<T>>,
-) -> ApiRouter<T> {
+    router: Router<WebserverState<T>>,
+    functional_group_config: FunctionalDescriptionConfig,
+) -> Router<T> {
+    let router = router.nest_api_service(
+        "/vehicle/v15/functions",
+        functions::functional_groups::create_functional_group_routes(
+            state.clone(),
+            functional_group_config,
+        )
+        .await,
+    );
     router
         .api_route(
             "/vehicle/v15/locks",
@@ -281,32 +223,6 @@ fn vehicle_route<T: UdsEcu + SchemaProvider + Clone, S: SecurityPluginLoader>(
                     locks::vehicle::lock::delete,
                     locks::vehicle::lock::docs_delete,
                 ),
-        )
-        .api_route(
-            "/vehicle/v15/functions/functionalgroups/{group}/locks",
-            routing::post_with(
-                locks::functional_group::post,
-                locks::functional_group::docs_post,
-            )
-            .get_with(
-                locks::functional_group::get,
-                locks::functional_group::docs_get,
-            ),
-        )
-        .api_route(
-            "/vehicle/v15/functions/functionalgroups/{group}/locks/{lock}",
-            routing::get_with(
-                locks::functional_group::lock::get,
-                locks::functional_group::lock::docs_get,
-            )
-            .put_with(
-                locks::functional_group::lock::put,
-                locks::functional_group::lock::docs_put,
-            )
-            .delete_with(
-                locks::functional_group::lock::delete,
-                locks::functional_group::lock::docs_delete,
-            ),
         )
         .route("/vehicle/v15/apps", routing::get(apps::get))
         .route(
@@ -335,6 +251,97 @@ fn vehicle_route<T: UdsEcu + SchemaProvider + Clone, S: SecurityPluginLoader>(
         )
 }
 
+async fn get_components<T: UdsEcu + SchemaProvider + Clone>(
+    State(state): State<WebserverState<T>>,
+    WithRejection(Query(query), _): WithRejection<Query<IncludeSchemaQuery>, ApiError>,
+) -> Response {
+    fn ecu_to_resource(ecu: String) -> Resource {
+        Resource {
+            href: format!("http://localhost:20002/Vehicle/v15/components/{ecu}"),
+            id: Some(ecu.to_lowercase()),
+            name: ecu,
+        }
+    }
+    let ecus = state.uds.get_physical_ecus().await;
+    let components_config = state.components_config.read().await;
+    let mut additional_fields: HashMap<String, Vec<Resource>> = HashMap::new();
+    for (key, conditions) in &components_config.additional_fields {
+        let items = state
+            .uds
+            .get_ecus_with_sds(true, conditions)
+            .await
+            .into_iter()
+            .map(ecu_to_resource)
+            .collect::<Vec<_>>();
+        additional_fields.insert(key.to_owned(), items);
+    }
+
+    let mut schema = if query.include_schema {
+        Some(create_schema!(ComponentsResponse<Resource>))
+    } else {
+        None
+    };
+    if !additional_fields.is_empty()
+        && let Some(ref mut schema) = schema
+    {
+        let subschema = create_schema!(Resource);
+        for entry in additional_fields.keys() {
+            if let Some(properties) = schema.get_mut("properties").and_then(|v| v.as_object_mut()) {
+                properties.insert(entry.to_owned(), subschema.clone().to_value());
+            }
+        }
+    }
+    (
+        StatusCode::OK,
+        Json(ComponentsResponse::<Resource> {
+            items: ecus.into_iter().map(ecu_to_resource).collect::<Vec<_>>(),
+            additional_fields,
+            schema,
+        }),
+    )
+        .into_response()
+}
+
+fn docs_components(op: TransformOperation) -> TransformOperation {
+    op.description("Get a list of the available components with their paths")
+        .response_with::<200, Json<sovd_interfaces::ResourceResponse>, _>(|res| {
+            res.example(sovd_interfaces::ResourceResponse {
+                items: vec![sovd_interfaces::Resource {
+                    href: "http://localhost:20002/Vehicle/v15/components/my_ecu".into(),
+                    id: Some("my_ecu".into()),
+                    name: "My ECU".into(),
+                }],
+                schema: None,
+            })
+        })
+}
+
+async fn components_route<
+    R: DiagServiceResponse,
+    T: UdsEcu + SchemaProvider + Clone,
+    U: FileManager + 'static,
+>(
+    state: WebserverState<T>,
+    file_manager: &mut HashMap<String, U>,
+) -> Router<WebserverState<T>> {
+    let mut router = Router::new().api_route(
+        "/vehicle/v15/components",
+        get_with(get_components, docs_components),
+    );
+    let mut ecus = state.uds.get_physical_ecus().await;
+    for ecu_name in ecus.drain(0..) {
+        match ecu_route::<R, T, U>(&ecu_name, &state, file_manager) {
+            Ok((ecu_path, nested)) => {
+                router = router.nest_api_service(&ecu_path, nested);
+            }
+            Err(e) => {
+                tracing::error!(error = %e, "Failed to create route for ECU '{ecu_name}'");
+            }
+        }
+    }
+    router.with_state(state)
+}
+
 // Disabled as for now it makes sense to keep the route creation together
 #[allow(clippy::too_many_lines)]
 fn ecu_route<
@@ -343,18 +350,16 @@ fn ecu_route<
     U: FileManager + 'static,
 >(
     ecu_name: &str,
-    uds: &T,
     state: &WebserverState<T>,
-    flash_data: &Arc<RwLock<FileList>>,
     file_manager: &mut HashMap<String, U>,
 ) -> Result<(String, Router), SovdError> {
     let ecu_lower = ecu_name.to_lowercase();
     let ecu_state = WebserverEcuState {
         ecu_name: ecu_lower.clone(),
-        uds: uds.clone(),
+        uds: state.uds.clone(),
         locks: Arc::<Locks>::clone(&state.locks),
         comparam_executions: Arc::new(RwLock::new(IndexMap::new())),
-        flash_data: Arc::clone(flash_data),
+        flash_data: Arc::clone(&state.flash_data),
         mdd_embedded_files: Arc::new(file_manager.remove(&ecu_lower).ok_or_else(|| {
             SovdError::RouteError(format!(
                 "FileManager for ECU '{ecu_name}' not found in provided FileManager map"
@@ -391,7 +396,8 @@ fn ecu_route<
             routing::put_with(
                 configurations::diag_service::put,
                 configurations::diag_service::docs_put,
-            ),
+            )
+            .get_with(data::diag_service::get, data::diag_service::docs_get),
         )
         .api_route("/data", routing::get_with(data::get, data::docs_get))
         .api_route(
@@ -442,9 +448,24 @@ fn ecu_route<
         )
         .api_route("/modes", routing::get_with(modes::get, modes::docs_get))
         .api_route(
-            "/modes/{mode-id}",
-            routing::get_with(modes::id::get, modes::id::docs_get)
-                .put_with(modes::id::put, modes::id::docs_put),
+            &format!("/modes/{}", sovd_interfaces::common::modes::SESSION_ID),
+            routing::get_with(modes::session::get, modes::session::docs_get)
+                .put_with(modes::session::put, modes::session::docs_put),
+        )
+        .api_route(
+            &format!("/modes/{}", sovd_interfaces::common::modes::SECURITY_ID),
+            routing::get_with(modes::security::get, modes::security::docs_get)
+                .put_with(modes::security::put, modes::security::docs_put),
+        )
+        .api_route(
+            &format!("/modes/{}", sovd_interfaces::common::modes::COMM_CONTROL_ID),
+            routing::get_with(modes::commctrl::get, modes::commctrl::docs_get)
+                .put_with(modes::commctrl::put, modes::commctrl::docs_put),
+        )
+        .api_route(
+            &format!("/modes/{}", sovd_interfaces::common::modes::DTC_SETTING_ID),
+            routing::get_with(modes::dtcsetting::get, modes::dtcsetting::docs_get)
+                .put_with(modes::dtcsetting::put, modes::dtcsetting::docs_put),
         )
         .api_route(
             "/x-single-ecu-jobs",
@@ -518,10 +539,15 @@ fn ecu_route<
                 x_sovd2uds_bulk_data::mdd_embedded_files::id::docs_get,
             ),
         )
-        .api_route("/faults", routing::get_with(faults::get, faults::docs_get))
+        .api_route(
+            "/faults",
+            routing::get_with(faults::get, faults::docs_get)
+                .delete_with(faults::delete, faults::docs_delete),
+        )
         .api_route(
             "/faults/{id}",
-            routing::get_with(faults::id::get, faults::id::docs_get),
+            routing::get_with(faults::id::get, faults::id::docs_get)
+                .delete_with(faults::id::delete, faults::id::docs_delete),
         )
         .with_state(ecu_state)
         .with_path_items(|op| op.tag(ecu_name));
@@ -670,6 +696,10 @@ pub(crate) use create_response_schema;
 #[macro_export]
 macro_rules! create_schema {
     ($type_:ty) => {{
+        // allowed because for some invocations
+        // of the macro the import might be in scope
+        // already, but this is the rarer case.
+        #[allow(unused_imports)]
         use schemars::JsonSchema as _;
 
         let mut generator = schemars::SchemaGenerator::new(
@@ -679,3 +709,124 @@ macro_rules! create_schema {
     }};
 }
 pub use create_schema;
+
+pub(crate) mod static_data {
+    use aide::{
+        axum::{ApiRouter, routing},
+        transform::TransformOperation,
+    };
+    use axum::{
+        Json,
+        extract::{Query, State},
+        response::{IntoResponse, Response},
+    };
+    use http::StatusCode;
+
+    use crate::{dynamic_router::DynamicRouter, sovd::error::ApiError};
+
+    /// Add an endpoint serving static data.
+    /// For example it can be used, to serve version information.
+    /// The standard defines these routes for version data:
+    /// * `/vehicle/v15/apps/sovd2uds/data/version`.
+    /// * `/vehicle/v15/data/version`
+    /// # Arguments
+    /// * `dynamic_router` - The dynamic router to add the endpoint to.
+    /// * `data` - The version data to return.
+    /// * `path` - The path to serve the data from.
+    ///   There is no processing of this, it will be returned as is in the response.
+    pub async fn add_static_data_endpoint(
+        dynamic_router: &DynamicRouter,
+        data: serde_json::Map<String, serde_json::Value>,
+        path: &str,
+    ) {
+        let data_docs = data.clone();
+        let router = ApiRouter::new()
+            .api_route(
+                path,
+                routing::get_with(get, move |transformation| {
+                    docs_get(transformation, data_docs.clone())
+                }),
+            )
+            .with_state(data);
+        dynamic_router
+            .update_router(move |old_router| old_router.merge(router))
+            .await;
+    }
+
+    pub(crate) async fn get(
+        State(state): State<serde_json::Map<String, serde_json::Value>>,
+        Query(query): Query<sovd_interfaces::IncludeSchemaQuery>,
+    ) -> Response {
+        let mut response_map = state.clone();
+        if query.include_schema {
+            let schema = match serde_json::to_value(
+                create_schema!(serde_json::Map<String, serde_json::Value>),
+            ) {
+                Ok(s) => s,
+                Err(e) => {
+                    return ApiError::InternalServerError(Some(format!(
+                        "Failed to build static data with schema: {e}"
+                    )))
+                    .into_response();
+                }
+            };
+
+            response_map.insert("schema".to_string(), schema);
+        }
+        (StatusCode::OK, Json(response_map)).into_response()
+    }
+
+    pub(crate) fn docs_get(
+        op: TransformOperation,
+        data: serde_json::Map<String, serde_json::Value>,
+    ) -> TransformOperation {
+        op.description("Get static information")
+            .response_with::<200, Json<serde_json::Map<String, serde_json::Value>>, _>(|res| {
+                let mut example = data;
+                example.insert("schema".to_string(), serde_json::Value::Null);
+                res.description("Successful response").example(example)
+            })
+    }
+}
+
+#[cfg(test)]
+pub(crate) mod tests {
+
+    use cda_interfaces::{UdsEcu, diagservices::DiagServiceResponse, file_manager::FileManager};
+    use sovd_interfaces::sovd2uds::FileList;
+
+    use super::*;
+    use crate::sovd::locks::LockType;
+
+    pub fn create_test_webserver_state<
+        R: DiagServiceResponse,
+        T: UdsEcu + Clone,
+        U: FileManager,
+    >(
+        ecu_name: String,
+        uds: T,
+        file_manager: U,
+    ) -> WebserverEcuState<R, T, U> {
+        WebserverEcuState {
+            ecu_name: ecu_name.clone(),
+            uds,
+            locks: Arc::new(Locks {
+                vehicle: LockType::Vehicle(Arc::new(RwLock::new(None))),
+                ecu: LockType::Ecu(Arc::new(RwLock::new(
+                    [(ecu_name, None)].into_iter().collect(),
+                ))),
+                functional_group: LockType::FunctionalGroup(Arc::new(RwLock::new(
+                    HashMap::default(),
+                ))),
+            }),
+            comparam_executions: Arc::new(RwLock::new(IndexMap::new())),
+            flash_data: Arc::new(RwLock::new(FileList {
+                files: Vec::new(),
+                path: Some(PathBuf::new()),
+                schema: None,
+            })),
+            mdd_embedded_files: Arc::new(file_manager),
+            _phantom: std::marker::PhantomData::<R>,
+        }
+    }
+}

@@ -1,5 +1,6 @@
 /*
- * Copyright (c) 2025 The Contributors to Eclipse OpenSOVD (see CONTRIBUTORS)
+ * SPDX-License-Identifier: Apache-2.0
+ * SPDX-FileCopyrightText: 2025 The Contributors to Eclipse OpenSOVD (see CONTRIBUTORS)
  *
  * See the NOTICE file(s) distributed with this work for additional
  * information regarding copyright ownership.
@@ -7,8 +8,6 @@
  * This program and the accompanying materials are made available under the
  * terms of the Apache License Version 2.0 which is available at
  * https://www.apache.org/licenses/LICENSE-2.0
- *
- * SPDX-License-Identifier: Apache-2.0
  */
 
 pub(crate) mod comparams {
@@ -512,7 +511,7 @@ pub(crate) mod service {
                     res.inner().content.insert(
                         "application/octet-stream".to_owned(),
                         aide::openapi::MediaType {
-                            example: Some(serde_json::json!([0xabu8, 0xcd, 0xef, 0x00])),
+                            example: Some(serde_json::json!([0xABu8, 0xCD, 0xEF, 0x00])),
                             ..Default::default()
                         },
                     );

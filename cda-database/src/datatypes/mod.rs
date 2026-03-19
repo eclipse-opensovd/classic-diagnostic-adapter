@@ -1,5 +1,6 @@
 /*
- * Copyright (c) 2025 The Contributors to Eclipse OpenSOVD (see CONTRIBUTORS)
+ * SPDX-License-Identifier: Apache-2.0
+ * SPDX-FileCopyrightText: 2025 The Contributors to Eclipse OpenSOVD (see CONTRIBUTORS)
  *
  * See the NOTICE file(s) distributed with this work for additional
  * information regarding copyright ownership.
@@ -7,8 +8,6 @@
  * This program and the accompanying materials are made available under the
  * terms of the Apache License Version 2.0 which is available at
  * https://www.apache.org/licenses/LICENSE-2.0
- *
- * SPDX-License-Identifier: Apache-2.0
  */
 
 use std::fmt::Debug;
@@ -113,6 +112,7 @@ dataformat_wrapper!(StateChart<'a>, dataformat::StateChart<'a>);
 
 // Requests, Responses...
 dataformat_wrapper!(DiagService<'a>, dataformat::DiagService<'a>);
+dataformat_wrapper!(SingleEcuJob<'a>, dataformat::SingleEcuJob<'a>);
 dataformat_wrapper!(DiagComm<'a>, dataformat::DiagComm<'a>);
 dataformat_wrapper!(DiagLayer<'a>, dataformat::DiagLayer<'a>);
 dataformat_wrapper!(Parameter<'a>, dataformat::Param<'a>);
@@ -153,11 +153,30 @@ impl DefaultCase<'_> {
     }
 }
 
+/// Represents a coded constant parameter extracted from a diagnostic service.
+/// Used for matching services against UDS payload prefixes when looking up services.
+/// This is only for positional and value information and does not contain any information
+/// to parse this as 'value'
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RawCodedConstParam {
+    pub byte_position: u32,
+    pub value: u32,
+    pub bit_length: u32,
+}
+
+impl RawCodedConstParam {
+    /// Calculate how many bytes this parameter occupies
+    #[must_use]
+    pub fn byte_count(&self) -> usize {
+        self.bit_length.div_ceil(8) as usize
+    }
+}
+
 impl DiagService<'_> {
     #[must_use]
     pub fn request_id(&self) -> Option<u8> {
         // allow the truncation, so we can re-use the same conversion function
-        // for the sub-function id which is u16
+        // for the sub-function id which is u32
         // per ISO 14229-1 the SID is 1 byte
         #[allow(clippy::cast_possible_truncation)]
         self.find_request_sid_or_sub_func_param(0, 0)
@@ -165,16 +184,20 @@ impl DiagService<'_> {
     }
 
     #[must_use]
-    pub fn request_sub_function_id(&self) -> Option<(u16, u32)> {
+    /// Get the request sub-function ID if defined
+    /// Returns a tuple of (`value`, `bit_length`) if found
+    pub fn request_sub_function_id(&self) -> Option<(u32, u32)> {
         self.find_request_sid_or_sub_func_param(1, 0)
     }
 
     #[must_use]
+    /// Find the request SID or sub-function parameter based on byte and bit position
+    /// Returns a tuple of (`value`, `bit_length`) if found
     fn find_request_sid_or_sub_func_param(
         &self,
         byte_pos: u32,
         bit_pos: u32,
-    ) -> Option<(u16, u32)> {
+    ) -> Option<(u32, u32)> {
         let request = self.0.request()?;
         let params = request.params()?;
 
@@ -194,14 +217,52 @@ impl DiagService<'_> {
             let standard_length_type = diag_coded_type.specific_data_as_standard_length_type()?;
 
             // SIDRQ validation
-            if standard_length_type.condensed() || standard_length_type.bit_mask().is_some() {
+            if standard_length_type.condensed()
+                || standard_length_type
+                    .bit_mask()
+                    .is_some_and(|mask| !mask.is_empty())
+            {
                 return None;
             }
 
             // Parse value
-            let value = coded_const.coded_value()?.parse::<u16>().ok()?;
+            let value = coded_const.coded_value()?.parse::<u32>().ok()?;
             Some((value, standard_length_type.bit_length()))
         })
+    }
+
+    #[must_use]
+    /// Extract all sequential coded constant parameters starting from byte position 0.
+    /// Returns a vector of coded constant parameters.
+    /// This is useful for matching services against a payload prefix.
+    ///
+    /// For example, a service with parameters at bytes 0, 1, 2-3 would return:
+    /// ```
+    ///  use cda_database::datatypes::RawCodedConstParam;
+    /// vec![
+    ///     RawCodedConstParam { byte_position: 0, value: 0x31, bit_length: 8 },
+    ///     RawCodedConstParam { byte_position: 1, value: 0x01, bit_length: 8 },
+    ///     RawCodedConstParam { byte_position: 2, value: 0x0246, bit_length: 16 },
+    /// ];
+    /// ```
+    pub fn extract_sequential_coded_consts(&self) -> Vec<RawCodedConstParam> {
+        let mut result = Vec::new();
+        let mut current_byte_pos = 0u32;
+
+        // Keep extracting coded constants as long as we find them sequentially
+        while let Some((value, bit_length)) =
+            self.find_request_sid_or_sub_func_param(current_byte_pos, 0)
+        {
+            result.push(RawCodedConstParam {
+                byte_position: current_byte_pos,
+                value,
+                bit_length,
+            });
+            // Move to next byte position based on bit length
+            current_byte_pos = current_byte_pos.saturating_add(bit_length.div_ceil(8));
+        }
+
+        result
     }
 }
 
@@ -347,6 +408,14 @@ impl Parameter<'_> {
     pub fn byte_position(&self) -> u32 {
         self.0.byte_position().unwrap_or(0)
     }
+    /// Returns `true` when the parameter has an explicit BYTE-POSITION in
+    /// the database.  Per ISO 22901-1 §7.4.8 a parameter that follows a
+    /// PARAM-LENGTH-INFO field may omit BYTE-POSITION because its position
+    /// is unknown until runtime.
+    #[must_use]
+    pub fn has_byte_position(&self) -> bool {
+        self.0.byte_position().is_some()
+    }
     #[must_use]
     pub fn bit_position(&self) -> u32 {
         self.0.bit_position().unwrap_or(0)
@@ -465,7 +534,7 @@ impl DiagnosticDatabase {
     /// Find the logical address of the given type in
     /// the diagnostic database for the given protocol.
     /// # Errors
-    /// * `DiagServiceError::DatabaseEntryNotFound` if the com param is not found or is invalid.
+    /// * `DiagServiceError::NotFound` if the com param is not found or is invalid.
     /// * `DiagServiceError::ParameterConversionError` if the com param value cannot be converted
     pub fn find_logical_address(
         &self,
@@ -536,14 +605,28 @@ impl DiagnosticDatabase {
     /// # Errors
     /// `DiagServiceError::InvalidDatabase` if ECU data is not loaded
     pub fn diag_layers(&self) -> Result<Vec<datatypes::DiagLayer<'_>>, DiagServiceError> {
-        Ok(self
-            .ecu_data()?
-            .variants()
-            .into_iter()
-            .flat_map(|vars| vars.iter())
-            .filter_map(|variant| variant.diag_layer())
-            .map(datatypes::DiagLayer)
-            .collect::<Vec<_>>())
+        let ecu_data = self.ecu_data()?;
+        if let Some(variants) = ecu_data.variants()
+            && !variants.is_empty()
+        {
+            Ok(variants
+                .iter()
+                .filter_map(|variant| variant.diag_layer())
+                .map(datatypes::DiagLayer)
+                .collect::<Vec<_>>())
+        } else if let Some(functional_groups) = ecu_data.functional_groups()
+            && !functional_groups.is_empty()
+        {
+            Ok(functional_groups
+                .iter()
+                .filter_map(|fg| fg.diag_layer())
+                .map(datatypes::DiagLayer)
+                .collect::<Vec<_>>())
+        } else {
+            Err(DiagServiceError::InvalidDatabase(
+                "No variants or functional groups found in ECU data.".to_owned(),
+            ))
+        }
     }
 
     /// Get the base variant from the ECU data
@@ -596,7 +679,7 @@ impl DiagnosticDatabase {
                 com_param.default.clone()
             }
             Err(e) => {
-                if let DiagServiceError::DatabaseEntryNotFound(e) = &e {
+                if let DiagServiceError::NotFound(Some(e)) = &e {
                     tracing::debug!(
                         param_name = %com_param.name,
                         error = %e,

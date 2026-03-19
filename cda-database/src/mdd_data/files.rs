@@ -1,5 +1,6 @@
 /*
- * Copyright (c) 2025 The Contributors to Eclipse OpenSOVD (see CONTRIBUTORS)
+ * SPDX-License-Identifier: Apache-2.0
+ * SPDX-FileCopyrightText: 2025 The Contributors to Eclipse OpenSOVD (see CONTRIBUTORS)
  *
  * See the NOTICE file(s) distributed with this work for additional
  * information regarding copyright ownership.
@@ -7,8 +8,6 @@
  * This program and the accompanying materials are made available under the
  * terms of the Apache License Version 2.0 which is available at
  * https://www.apache.org/licenses/LICENSE-2.0
- *
- * SPDX-License-Identifier: Apache-2.0
  */
 
 use std::{
@@ -44,6 +43,8 @@ impl FileManager {
     #[must_use]
     pub fn new(mdd_path: String, files: Vec<Chunk>) -> Self {
         let mdd_name = mdd_path.split('/').next_back().unwrap_or("mdd").to_string();
+        // Duration::from_mins is only available in rust >= 1.91.0, we want to support 1.88.0
+        #[cfg_attr(nightly, allow(unknown_lints, clippy::duration_suboptimal_units))]
         let cache_lifetime = Duration::from_secs(60 * 5);
 
         let files = Arc::new(RwLock::new(

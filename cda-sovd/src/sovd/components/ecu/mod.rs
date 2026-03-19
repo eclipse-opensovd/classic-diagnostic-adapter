@@ -1,5 +1,6 @@
 /*
- * Copyright (c) 2025 The Contributors to Eclipse OpenSOVD (see CONTRIBUTORS)
+ * SPDX-License-Identifier: Apache-2.0
+ * SPDX-FileCopyrightText: 2025 The Contributors to Eclipse OpenSOVD (see CONTRIBUTORS)
  *
  * See the NOTICE file(s) distributed with this work for additional
  * information regarding copyright ownership.
@@ -7,8 +8,6 @@
  * This program and the accompanying materials are made available under the
  * terms of the Apache License Version 2.0 which is available at
  * https://www.apache.org/licenses/LICENSE-2.0
- *
- * SPDX-License-Identifier: Apache-2.0
  */
 
 use aide::{axum::IntoApiResponse, transform::TransformOperation};
@@ -108,6 +107,7 @@ pub(crate) async fn get<R: DiagServiceResponse, T: UdsEcu + Clone, U: FileManage
             sdgs,
             single_ecu_jobs: format!("{base_path}/x-single-ecu-jobs"),
             faults: format!("{base_path}/faults"),
+            modes: format!("{base_path}/modes"),
             schema,
         }),
     )
@@ -138,6 +138,7 @@ pub(crate) fn docs_get(op: TransformOperation) -> TransformOperation {
                     "http://localhost:20002/vehicle/v15/components/my_ecu/x-single-ecu-jobs"
                         .to_string(),
                 faults: "http://localhost:20002/vehicle/v15/components/my_ecu/faults".to_string(),
+                modes: "http://localhost:20002/vehicle/v15/components/my_ecu/modes".to_string(),
                 schema: None,
             })
             .description("Response with ECU information (i.e. detected variant) and service URLs")

@@ -1,4 +1,5 @@
-# Copyright (c) 2025 The Contributors to Eclipse OpenSOVD (see CONTRIBUTORS)
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: 2025 The Contributors to Eclipse OpenSOVD (see CONTRIBUTORS)
 #
 # See the NOTICE file(s) distributed with this work for additional
 # information regarding copyright ownership.
@@ -6,8 +7,6 @@
 # This program and the accompanying materials are made available under the
 # terms of the Apache License Version 2.0 which is available at
 # https://www.apache.org/licenses/LICENSE-2.0
-#
-# SPDX-License-Identifier: Apache-2.0
 
 [package]
 name = "integration-tests"
@@ -31,7 +30,8 @@ sovd-interfaces = { workspace = true }
 cda-tracing = { workspace = true }
 cda-plugin-security = { workspace = true }
 cda-comm-doip = { workspace = true }
-opensovd_cda_lib = { workspace = true }
+cda-health = { workspace = true }
+opensovd_cda_lib = { workspace = true, features = ["integration-tests"] }
 
 # External dependencies
 # tokio
@@ -61,6 +61,8 @@ tracing-subscriber = { workspace = true, features = [
 ] }
 # error
 thiserror = { workspace = true }
+# toml serialization
+toml = { workspace = true }
 # time
 chrono = { workspace = true }
 # future
@@ -68,10 +70,17 @@ futures = { workspace = true }
 # libc
 libc = { workspace = true }
 
+# compile time format
+const_format = { workspace = true }
+
+[build-dependencies]
+cda-build = { workspace = true }
 
 [features]
-default = []
+# We need the health endpoint to check if the CDA is online
+default = ["opensovd_cda_lib/health"]
 integration-tests = []
+functional-locks-tests = []
 
 # Integration tests are only compiled when the feature is enabled.
 [[test]]

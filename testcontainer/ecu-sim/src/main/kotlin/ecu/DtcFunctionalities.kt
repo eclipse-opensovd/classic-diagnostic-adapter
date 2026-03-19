@@ -1,5 +1,6 @@
 /*
- * Copyright (c) 2025 The Contributors to Eclipse OpenSOVD (see CONTRIBUTORS)
+ * SPDX-License-Identifier: Apache-2.0
+ * SPDX-FileCopyrightText: 2025 The Contributors to Eclipse OpenSOVD (see CONTRIBUTORS)
  *
  * See the NOTICE file(s) distributed with this work for additional
  * information regarding copyright ownership.
@@ -7,8 +8,6 @@
  * This program and the accompanying materials are made available under the
  * terms of the Apache License Version 2.0 which is available at
  * https://www.apache.org/licenses/LICENSE-2.0
- *
- * SPDX-License-Identifier: Apache-2.0
  */
 
 import ecu.DTCAndStatusRecord
@@ -47,16 +46,25 @@ fun RequestsData.addDtcRequests() {
             } else {
                 null
             }
+        // ISO-14229-1, D.1
+        // 0xFFFFFF means delete all groups
+        val cleanupAll = dtcCode == 0xFFFFFF
         FaultMemory.entries
             .filter { memory == null || it.memory == memory }
             .forEach { entry ->
                 val dtcFaults = ecu.dtcFaults(entry)
-                if (dtcFaults.remove(dtcCode) != null) {
-                    ecu.logger.info("DTC ${dtcCode.toString(16)} removed")
+                if (cleanupAll) {
+                    dtcFaults.clear()
+                    ecu.logger.info("Removed all DTCs for memory ${entry.memory}")
                 } else {
-                    ecu.logger.info("DTC ${dtcCode.toString(16)} couldn't be removed (not present)")
+                    if (dtcFaults.remove(dtcCode) != null) {
+                        ecu.logger.info("DTC ${dtcCode.toString(16)} removed")
+                    } else {
+                        ecu.logger.info("DTC ${dtcCode.toString(16)} couldn't be removed (not present)")
+                    }
                 }
             }
+        ack()
     }
 
     request("19 01 []", "ReadDTCInformation_NumberByStatusMask") {
@@ -122,6 +130,13 @@ fun RequestsData.addDtcRequests() {
                 )
             ack(response.asByteArray)
         }
+    }
+
+    request("31 01 42 00", "Clear_Diagnostic_User_Memory") {
+        val devFaults = ecu.dtcFaults(FaultMemory.Development)
+        devFaults.clear()
+        ecu.logger.info("Cleared all Development DTCs via Clear_Diagnostic_User_Memory routine")
+        ack()
     }
 }
 

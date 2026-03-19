@@ -1,5 +1,6 @@
 /*
- * Copyright (c) 2025 The Contributors to Eclipse OpenSOVD (see CONTRIBUTORS)
+ * SPDX-License-Identifier: Apache-2.0
+ * SPDX-FileCopyrightText: 2025 The Contributors to Eclipse OpenSOVD (see CONTRIBUTORS)
  *
  * See the NOTICE file(s) distributed with this work for additional
  * information regarding copyright ownership.
@@ -7,8 +8,6 @@
  * This program and the accompanying materials are made available under the
  * terms of the Apache License Version 2.0 which is available at
  * https://www.apache.org/licenses/LICENSE-2.0
- *
- * SPDX-License-Identifier: Apache-2.0
  */
 use serde::{Deserialize, Serialize};
 use strum::IntoEnumIterator;
@@ -18,6 +17,9 @@ use crate::{DiagComm, HashMap, diagservices::FieldParseError};
 pub type DtcCode = u32;
 
 pub const DTC_CODE_BIT_LEN: u32 = 24;
+
+/// Defined in ISO-14229-1 Table 298
+pub const CLEAR_FAULT_MEM_POS_RESPONSE_SID: u8 = 0x54;
 
 /// Provides the supported Types of DTC functions
 /// Essentially the byte values
@@ -53,6 +55,16 @@ impl DtcReadInformationFunction {
     pub fn all() -> Vec<Self> {
         Self::iter().collect()
     }
+
+    #[must_use]
+    pub fn is_user_scope(&self) -> bool {
+        matches!(
+            self,
+            Self::UserMemoryDtcByStatusMask
+                | Self::UserMemoryDtcSnapshotRecordByDtcNumber
+                | Self::UserMemoryDtcExtDataRecordByDtcNumber
+        )
+    }
 }
 
 #[repr(u8)]
@@ -83,7 +95,7 @@ pub struct DtcLookup {
     pub dtcs: Vec<DtcRecord>,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct DtcRecord {
     pub code: DtcCode,
     pub display_code: Option<String>,
@@ -93,14 +105,14 @@ pub struct DtcRecord {
 
 /// Used to describe the position of a DTC field in the UDS payload.
 /// Necessary to parse DTCs from the raw UDS response.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct DtcField {
     pub bit_pos: u32,
     pub bit_len: u32,
     pub byte_pos: u32,
 }
 
-#[derive(Serialize, Deserialize, Debug, Default)]
+#[derive(Serialize, Deserialize, Debug, Default, Clone)]
 // The warning is allowed because the bools represent the status bits of a DTC.
 #[allow(clippy::struct_excessive_bools)]
 pub struct DtcStatus {
@@ -115,14 +127,14 @@ pub struct DtcStatus {
     pub mask: u8,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct DtcRecordAndStatus {
     pub record: DtcRecord,
     pub scope: String,
     pub status: DtcStatus,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct DtcSnapshot {
     pub number_of_identifiers: u64,
     pub record: Vec<serde_json::Value>,
@@ -144,4 +156,31 @@ pub struct DtcExtendedInfo {
     pub extended_data_records_schema: Option<serde_json::Value>,
     pub snapshots: Option<ExtendedSnapshots>,
     pub snapshots_schema: Option<serde_json::Value>,
+}
+
+#[derive(Deserialize, Serialize, Clone, Debug)]
+pub struct FaultConfig {
+    /// Service definition used to clear all user-defined DTCs.
+    /// Specified as a byte array representing the full UDS service identifier.
+    ///
+    /// Example: `[0x31, 0x01, 0x02, 0x46]`
+    /// The first byte is the service ID, followed by any coded constant parameters
+    /// (subfunction, routine ID, etc.) as they appear sequentially in the UDS request.
+    ///
+    /// If not set, clearing user-defined DTCs is not supported.
+    pub user_defined_dtc_clear_service: Option<Vec<u8>>,
+    /// Name of the scope to pass to the DTC functions to read from the user defined DTC memory.
+    /// Matching will be case-insensitive.
+    pub user_memory_scope: String,
+    pub default_scope: String,
+}
+
+impl Default for FaultConfig {
+    fn default() -> Self {
+        Self {
+            user_defined_dtc_clear_service: None,
+            user_memory_scope: "DevelopmentFaultMemory".to_string(),
+            default_scope: "FaultMem".to_string(),
+        }
+    }
 }

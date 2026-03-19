@@ -1,5 +1,6 @@
 /*
- * Copyright (c) 2025 The Contributors to Eclipse OpenSOVD (see CONTRIBUTORS)
+ * SPDX-License-Identifier: Apache-2.0
+ * SPDX-FileCopyrightText: 2025 The Contributors to Eclipse OpenSOVD (see CONTRIBUTORS)
  *
  * See the NOTICE file(s) distributed with this work for additional
  * information regarding copyright ownership.
@@ -7,14 +8,12 @@
  * This program and the accompanying materials are made available under the
  * terms of the Apache License Version 2.0 which is available at
  * https://www.apache.org/licenses/LICENSE-2.0
- *
- * SPDX-License-Identifier: Apache-2.0
  */
 
 use cda_interfaces::HashMap;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
-#[derive(Serialize, Debug)]
+#[derive(Serialize, Deserialize, Debug)]
 #[serde(rename_all = "kebab-case")]
 // allowed, so we can pre-fill this with all sovd error codes
 // even though not all are used yet.
@@ -85,7 +84,7 @@ pub enum ErrorCode {
     UpdateExecutionInProgress,
 }
 
-#[derive(Serialize, Debug, schemars::JsonSchema)]
+#[derive(Serialize, Deserialize, Debug, schemars::JsonSchema)]
 pub struct ApiErrorResponse<T> {
     pub message: String,
     pub error_code: ErrorCode,
@@ -100,7 +99,7 @@ pub struct ApiErrorResponse<T> {
     pub schema: Option<schemars::Schema>,
 }
 
-#[derive(Serialize, Debug, schemars::JsonSchema)]
+#[derive(Serialize, Deserialize, Debug, schemars::JsonSchema)]
 pub struct DataError<T> {
     pub path: String,
     pub error: ApiErrorResponse<T>,

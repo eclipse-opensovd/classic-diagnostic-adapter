@@ -1,5 +1,6 @@
 /*
- * Copyright (c) 2025 The Contributors to Eclipse OpenSOVD (see CONTRIBUTORS)
+ * SPDX-License-Identifier: Apache-2.0
+ * SPDX-FileCopyrightText: 2025 The Contributors to Eclipse OpenSOVD (see CONTRIBUTORS)
  *
  * See the NOTICE file(s) distributed with this work for additional
  * information regarding copyright ownership.
@@ -7,8 +8,6 @@
  * This program and the accompanying materials are made available under the
  * terms of the Apache License Version 2.0 which is available at
  * https://www.apache.org/licenses/LICENSE-2.0
- *
- * SPDX-License-Identifier: Apache-2.0
  */
 
 use crate::{
@@ -94,5 +93,30 @@ impl DiagServiceJsonResponse {
     #[must_use]
     pub fn is_empty(&self) -> bool {
         self.data.is_null() && self.errors.is_empty()
+    }
+}
+
+#[cfg(feature = "test-utils")]
+pub mod mock {
+    use crate::{DiagServiceError, datatypes, diagservices};
+
+    mockall::mock! {
+        pub DiagServiceResponse {}
+
+        impl diagservices::DiagServiceResponse for DiagServiceResponse {
+            fn is_empty(&self) -> bool;
+            fn service_name(&self) -> String;
+            fn get_raw(&self) -> &[u8];
+            fn into_json(self) -> Result<diagservices::DiagServiceJsonResponse, DiagServiceError>;
+            fn as_nrc(&self) -> Result<diagservices::MappedNRC, DiagServiceError>;
+            fn get_dtcs(&self) -> Result<
+                Vec<(datatypes::DtcField, datatypes::DtcRecord)>,
+                DiagServiceError>;
+            fn response_type(&self) -> diagservices::DiagServiceResponseType;
+        }
+
+        impl Clone for DiagServiceResponse {
+            fn clone(&self) -> Self;
+        }
     }
 }

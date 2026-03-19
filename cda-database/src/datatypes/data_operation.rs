@@ -1,5 +1,6 @@
 /*
- * Copyright (c) 2025 The Contributors to Eclipse OpenSOVD (see CONTRIBUTORS)
+ * SPDX-License-Identifier: Apache-2.0
+ * SPDX-FileCopyrightText: 2025 The Contributors to Eclipse OpenSOVD (see CONTRIBUTORS)
  *
  * See the NOTICE file(s) distributed with this work for additional
  * information regarding copyright ownership.
@@ -7,14 +8,15 @@
  * This program and the accompanying materials are made available under the
  * terms of the Apache License Version 2.0 which is available at
  * https://www.apache.org/licenses/LICENSE-2.0
- *
- * SPDX-License-Identifier: Apache-2.0
  */
 
 //
 use cda_interfaces::{DiagServiceError, dlt_ctx, util::decode_hex};
 
-use crate::{datatypes, flatbuf::diagnostic_description::dataformat};
+use crate::{
+    datatypes::{self, DataType},
+    flatbuf::diagnostic_description::dataformat,
+};
 
 pub enum DataOperationVariant<'a> {
     Normal(datatypes::NormalDop<'a>),
@@ -56,6 +58,7 @@ pub struct CompuScale {
     pub upper_limit: Option<Limit>,
     pub rational_coefficients: Option<CompuRationalCoefficients>,
     pub consts: Option<CompuValues>,
+    pub inverse_values: Option<CompuValues>,
 }
 #[derive(Clone, Debug)]
 pub struct CompuValues {
@@ -90,6 +93,16 @@ impl From<dataformat::CompuCategory> for CompuCategory {
                 tracing::error!("Compu Category {:?} not recognized", value);
                 CompuCategory::Identical
             }
+        }
+    }
+}
+
+impl From<dataformat::CompuValues<'_>> for CompuValues {
+    fn from(value: dataformat::CompuValues) -> Self {
+        CompuValues {
+            v: value.v().unwrap_or(0.0),
+            vt: value.vt().map(ToOwned::to_owned),
+            vt_ti: value.vt_ti().map(ToOwned::to_owned),
         }
     }
 }
@@ -138,11 +151,8 @@ impl<'a> From<dataformat::CompuScale<'a>> for CompuScale {
                         .map(|dens| dens.iter().collect())
                         .unwrap_or_default(),
                 }),
-            consts: value.consts().map(|c| CompuValues {
-                v: c.v().unwrap_or_default(),
-                vt: c.vt().map(ToOwned::to_owned),
-                vt_ti: c.vt_ti().map(ToOwned::to_owned),
-            }),
+            consts: value.consts().map(Into::into),
+            inverse_values: value.inverse_values().map(Into::into),
         }
     }
 }
@@ -345,6 +355,68 @@ impl datatypes::DataOperation<'_> {
             _ => Err(DiagServiceError::ParameterConversionError(
                 "Unknown DataOperation specific data type".to_owned(),
             )),
+        }
+    }
+}
+
+#[derive(Copy, Clone, Debug)]
+pub enum Radix {
+    Hex,
+    Decimal,
+    Binary,
+    Octal,
+}
+
+#[derive(Copy, Clone, Debug)]
+pub struct PhysicalType {
+    pub precision: Option<u32>,
+    pub base_type: DataType,
+    pub display_radix: Option<Radix>,
+}
+
+impl From<&dataformat::Radix> for Radix {
+    fn from(value: &dataformat::Radix) -> Self {
+        match *value {
+            dataformat::Radix::HEX => Radix::Hex,
+            dataformat::Radix::DEC => Radix::Decimal,
+            dataformat::Radix::BIN => Radix::Binary,
+            dataformat::Radix::OCT => Radix::Octal,
+            _ => {
+                tracing::error!("Radix {:?} not recognized, defaulting to Decimal", value);
+                Radix::Decimal
+            }
+        }
+    }
+}
+
+impl From<dataformat::PhysicalType<'_>> for PhysicalType {
+    fn from(value: dataformat::PhysicalType) -> Self {
+        PhysicalType {
+            precision: value.precision(),
+            base_type: match value.base_data_type() {
+                dataformat::PhysicalTypeDataType::A_ASCIISTRING => DataType::AsciiString,
+                dataformat::PhysicalTypeDataType::A_UNICODE_2_STRING => DataType::Unicode2String,
+                dataformat::PhysicalTypeDataType::A_UTF_8_STRING => DataType::Utf8String,
+                dataformat::PhysicalTypeDataType::A_BYTEFIELD => DataType::ByteField,
+                dataformat::PhysicalTypeDataType::A_FLOAT_32 => DataType::Float32,
+                dataformat::PhysicalTypeDataType::A_FLOAT_64 => DataType::Float64,
+                dataformat::PhysicalTypeDataType::A_UINT_32 => DataType::UInt32,
+                dataformat::PhysicalTypeDataType::A_INT_32 => DataType::Int32,
+                _ => {
+                    tracing::error!(
+                        "Base data type {:?} not recognized, defaulting to ByteField",
+                        value.base_data_type()
+                    );
+                    DataType::ByteField
+                }
+            },
+            display_radix: match value.display_radix() {
+                dataformat::Radix::HEX => Some(Radix::Hex),
+                dataformat::Radix::DEC => Some(Radix::Decimal),
+                dataformat::Radix::BIN => Some(Radix::Binary),
+                dataformat::Radix::OCT => Some(Radix::Octal),
+                _ => None,
+            },
         }
     }
 }

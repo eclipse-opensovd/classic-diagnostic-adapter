@@ -1,5 +1,6 @@
 /*
- * Copyright (c) 2025 The Contributors to Eclipse OpenSOVD (see CONTRIBUTORS)
+ * SPDX-License-Identifier: Apache-2.0
+ * SPDX-FileCopyrightText: 2025 The Contributors to Eclipse OpenSOVD (see CONTRIBUTORS)
  *
  * See the NOTICE file(s) distributed with this work for additional
  * information regarding copyright ownership.
@@ -7,8 +8,6 @@
  * This program and the accompanying materials are made available under the
  * terms of the Apache License Version 2.0 which is available at
  * https://www.apache.org/licenses/LICENSE-2.0
- *
- * SPDX-License-Identifier: Apache-2.0
  */
 
 use cda_interfaces::HashMap;
@@ -51,6 +50,7 @@ pub struct Ecu {
     #[serde(rename = "x-single-ecu-jobs")]
     pub single_ecu_jobs: String,
     pub faults: String,
+    pub modes: String,
     #[schemars(skip)]
     #[serde(skip_serializing_if = "Option::is_none")]
     pub schema: Option<schemars::Schema>,
@@ -140,9 +140,25 @@ pub mod configurations {
 
     pub type ConfigurationsQuery = crate::IncludeSchemaQuery;
 
+    /// Response returned when querying a service configuration.
+    #[derive(Deserialize, Serialize, Debug, schemars::JsonSchema)]
+    pub struct ServiceResponse {
+        /// Identifier of the service.
+        pub id: String,
+        /// Configuration data for the service.
+        pub data: serde_json::Value,
+    }
+
     pub mod get {
         use super::Components;
         pub type Response = Components;
+    }
+
+    /// Module for the `GET /configurations/{service}` endpoint.
+    pub mod get_service {
+        use super::ServiceResponse;
+        /// Response type returned by this endpoint.
+        pub type Response = ServiceResponse;
     }
 }
 
@@ -382,7 +398,7 @@ pub mod faults {
     /// * Translation IDs
     ///
     /// This is still compliant with the `OpenSOVD` specification, as these fields are optional.
-    #[derive(Serialize, schemars::JsonSchema)]
+    #[derive(Debug, Serialize, Deserialize, schemars::JsonSchema)]
     pub struct Fault {
         ///Fault code in the native representation of the entity.
         pub code: String,
@@ -403,7 +419,7 @@ pub mod faults {
         pub status: Option<FaultStatus>,
     }
 
-    #[derive(Serialize, Debug, schemars::JsonSchema)]
+    #[derive(Serialize, Deserialize, Debug, schemars::JsonSchema)]
     pub struct FaultStatus {
         #[serde(skip_serializing_if = "Option::is_none")]
         pub test_failed: Option<bool>,
@@ -458,14 +474,29 @@ pub mod faults {
             pub scope: Option<String>,
             #[serde(rename = "include-schema", default)]
             pub include_schema: bool,
+            /// Value for the memory selection in user defined memory.
+            /// Only used for user defined memory, defaults to 0
+            #[serde(default)]
+            pub memory_selection: Option<u8>,
         }
 
-        #[derive(Serialize, schemars::JsonSchema)]
+        #[derive(Serialize, Deserialize, schemars::JsonSchema)]
         pub struct Response {
             pub items: Vec<Fault>,
             #[schemars(skip)]
             #[serde(skip_serializing_if = "Option::is_none")]
             pub schema: Option<schemars::Schema>,
+        }
+    }
+
+    pub mod delete {
+        use serde::{Deserialize, Serialize};
+
+        #[derive(Deserialize, Serialize, schemars::JsonSchema)]
+        pub struct FaultQuery {
+            /// Defines the scope for which fault entries are deleted
+            /// must be a valid scope for the given component
+            pub scope: Option<String>,
         }
     }
 
@@ -486,6 +517,10 @@ pub mod faults {
                 pub include_snapshot_data: bool,
                 #[serde(default)]
                 pub include_schema: bool,
+                /// Value for the memory selection in user defined memory.
+                /// Only used for user defined memory, defaults to 0
+                #[serde(default)]
+                pub memory_selection: Option<u8>,
             }
 
             #[derive(Serialize, schemars::JsonSchema)]

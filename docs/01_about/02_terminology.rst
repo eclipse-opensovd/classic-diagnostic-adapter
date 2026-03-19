@@ -1,0 +1,16 @@
+.. SPDX-License-Identifier: Apache-2.0
+.. SPDX-FileCopyrightText: 2026 The Contributors to Eclipse OpenSOVD (see CONTRIBUTORS)
+..
+.. See the NOTICE file(s) distributed with this work for additional
+.. information regarding copyright ownership.
+..
+.. This program and the accompanying materials are made available under the
+.. terms of the Apache License Version 2.0 which is available at
+.. https://www.apache.org/licenses/LICENSE-2.0
+
+Terminology
+===========
+
+The key words "MUST", "MUST NOT", "REQUIRED", "SHALL", "SHALL NOT", "SHOULD", "SHOULD NOT", "RECOMMENDED", "MAY", and "OPTIONAL" in this document are to be interpreted as described in `RFC 2119`_.
+
+.. _RFC 2119: https://datatracker.ietf.org/doc/html/rfc2119

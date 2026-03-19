@@ -1,5 +1,6 @@
 /*
- * Copyright (c) 2025 The Contributors to Eclipse OpenSOVD (see CONTRIBUTORS)
+ * SPDX-License-Identifier: Apache-2.0
+ * SPDX-FileCopyrightText: 2025 The Contributors to Eclipse OpenSOVD (see CONTRIBUTORS)
  *
  * See the NOTICE file(s) distributed with this work for additional
  * information regarding copyright ownership.
@@ -7,8 +8,6 @@
  * This program and the accompanying materials are made available under the
  * terms of the Apache License Version 2.0 which is available at
  * https://www.apache.org/licenses/LICENSE-2.0
- *
- * SPDX-License-Identifier: Apache-2.0
  */
 
 use std::fmt::Debug;
@@ -119,12 +118,6 @@ impl DiagDataValue {
             upper_ok && lower_ok
         }
 
-        fn pad_bytes_to_max_len(bytes: &[u8], target_len: usize) -> Vec<u8> {
-            let mut padded = vec![0u8; target_len.saturating_sub(bytes.len())];
-            padded.extend_from_slice(bytes);
-            padded
-        }
-
         match self {
             DiagDataValue::Int32(v) => check_numeric_limits(v, upper, lower),
             DiagDataValue::UInt32(v) => check_numeric_limits(v, upper, lower),
@@ -146,17 +139,17 @@ impl DiagDataValue {
                 .max()
                 .unwrap_or(0);
 
-                let padded_v = pad_bytes_to_max_len(v, max_len);
+                let padded_v = pad_msb_to_len(v, max_len);
 
                 // Check upper limit
                 let upper_ok = upper_bytes.is_none_or(|u| {
-                    let padded_u = pad_bytes_to_max_len(&u, max_len);
+                    let padded_u = pad_msb_to_len(&u, max_len);
                     padded_v <= padded_u
                 });
 
                 // Check lower limit
                 let lower_ok = lower_bytes.is_none_or(|l| {
-                    let padded_l = pad_bytes_to_max_len(&l, max_len);
+                    let padded_l = pad_msb_to_len(&l, max_len);
                     padded_v >= padded_l
                 });
 
@@ -172,6 +165,12 @@ impl DiagDataValue {
             _ => false,
         }
     }
+}
+
+pub(crate) fn pad_msb_to_len(bytes: &[u8], target_len: usize) -> Vec<u8> {
+    let mut padded = vec![0u8; target_len.saturating_sub(bytes.len())];
+    padded.extend_from_slice(bytes);
+    padded
 }
 
 impl TryInto<f64> for DiagDataValue {

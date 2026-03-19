@@ -1,5 +1,6 @@
 /*
- * Copyright (c) 2025 The Contributors to Eclipse OpenSOVD (see CONTRIBUTORS)
+ * SPDX-License-Identifier: Apache-2.0
+ * SPDX-FileCopyrightText: 2025 The Contributors to Eclipse OpenSOVD (see CONTRIBUTORS)
  *
  * See the NOTICE file(s) distributed with this work for additional
  * information regarding copyright ownership.
@@ -7,8 +8,6 @@
  * This program and the accompanying materials are made available under the
  * terms of the Apache License Version 2.0 which is available at
  * https://www.apache.org/licenses/LICENSE-2.0
- *
- * SPDX-License-Identifier: Apache-2.0
  */
 
 @file:OptIn(ExperimentalUuidApi::class)
@@ -16,9 +15,11 @@
 package webserver
 
 import ecu.Authentication
+import ecu.CommunicationControlType
 import ecu.DataBlock
 import ecu.DataBlockType
 import ecu.DataTransferDownload
+import ecu.DtcSettingType
 import ecu.EcuState
 import ecu.MajorMinorPatch
 import ecu.SecurityAccess
@@ -42,6 +43,9 @@ data class EcuStateDto(
     val hardResetForSeconds: Int? = null,
     val maxNumberOfBlockLength: Int? = null,
     val blocks: List<DataBlockDto>? = null,
+    val communicationControlType: CommunicationControlType? = null,
+    val temporalEraId: Int? = null,
+    val dtcSettingType: DtcSettingType? = null,
 )
 
 fun EcuState.updateWith(dto: EcuStateDto) {
@@ -51,6 +55,7 @@ fun EcuState.updateWith(dto: EcuStateDto) {
     this.authentication = dto.authentication ?: this.authentication
     this.vin = dto.vin ?: this.vin
     this.maxNumberOfBlockLength = dto.maxNumberOfBlockLength ?: this.maxNumberOfBlockLength
+    this.dtcSettingType = dto.dtcSettingType ?: this.dtcSettingType
 }
 
 fun EcuState.toDto() =
@@ -63,6 +68,9 @@ fun EcuState.toDto() =
         hardResetForSeconds = this.hardResetForSeconds,
         maxNumberOfBlockLength = this.maxNumberOfBlockLength,
         blocks = this.blocks.map { it.toDto() },
+        communicationControlType = this.communicationControlType,
+        temporalEraId = this.temporalEraId,
+        dtcSettingType = this.dtcSettingType,
     )
 
 @Serializable
