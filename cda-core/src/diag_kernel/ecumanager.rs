@@ -410,11 +410,11 @@ impl<S: SecurityPlugin> cda_interfaces::EcuManager for EcuManager<S> {
                 .request_id()
                 .is_some_and(|service_id| raw_data_sid == service_id)
         });
-        let mapped_service = matched_services
-            .first()
-            .ok_or_else(|| DiagServiceError::NotFound(
-                format!("No matching generic service found for SID 0x{raw_data_sid:02X}")
-        ))?;
+        let mapped_service = matched_services.first().ok_or_else(|| {
+            DiagServiceError::NotFound(format!(
+                "No matching generic service found for SID 0x{raw_data_sid:02X}"
+            ))
+        })?;
         let mapped_dc = mapped_service.diag_comm().map(datatypes::DiagComm).ok_or(
             DiagServiceError::InvalidDatabase("Service is missing DiagComm".to_owned()),
         )?;
@@ -772,11 +772,9 @@ impl<S: SecurityPlugin> cda_interfaces::EcuManager for EcuManager<S> {
         &self,
         request_bytes: &[u8],
     ) -> Result<Vec<DiagComm>, DiagServiceError> {
-        let service_id = *request_bytes
-            .first()
-            .ok_or(DiagServiceError::NotFound(
-                "cannot lookup service by empty prefix".to_owned(),
-            ))?;
+        let service_id = *request_bytes.first().ok_or(DiagServiceError::NotFound(
+            "cannot lookup service by empty prefix".to_owned(),
+        ))?;
         let services: Vec<_> = self
             .lookup_services_by_sid(service_id)?
             .iter()
@@ -2341,9 +2339,7 @@ impl<S: SecurityPlugin> EcuManager<S> {
                     .is_some_and(|name| name.eq_ignore_ascii_case(group_name))
             })
             .ok_or_else(|| {
-                DiagServiceError::NotFound(format!(
-                    "Functional group '{group_name}' not found"
-                ))
+                DiagServiceError::NotFound(format!("Functional group '{group_name}' not found"))
             })?;
 
         Ok(matching_group

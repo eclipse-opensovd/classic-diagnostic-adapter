@@ -1783,8 +1783,8 @@ impl<S: EcuGateway, R: DiagServiceResponse, T: EcuManager<Response = R>> UdsEcu
     ) -> Result<(), DiagServiceError> {
         let mut lock = self.data_transfers.lock().await;
         let transfer = lock.get(ecu_name).ok_or_else(|| {
-                DiagServiceError::NotFound(format!("Data transfer for ECU {ecu_name} not found"))
-            })?;
+            DiagServiceError::NotFound(format!("Data transfer for ECU {ecu_name} not found"))
+        })?;
 
         if transfer.meta_data.id != id {
             return Err(DiagServiceError::NotFound(format!(
