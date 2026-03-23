@@ -565,7 +565,13 @@ impl DiagCodedType {
                 }
 
                 data.append(&mut input_data);
-                let (packed, len) = pack_data(data.len().saturating_mul(8), 0, None, &data)?;
+                let (packed, len) = pack_data(
+                    data.len().saturating_mul(8),
+                    0,
+                    None,
+                    &data,
+                    DataAlignment::Left,
+                )?;
                 (packed, len, None)
             }
             DiagCodedTypeVariant::MinMaxLength(mmlt) => {
@@ -574,7 +580,13 @@ impl DiagCodedType {
                 let (packed, len) = match mmlt.termination {
                     Termination::EndOfPdu => {
                         // No special termination, just pack the data as is
-                        pack_data(input_data.len().saturating_mul(8), 0, None, &input_data)
+                        pack_data(
+                            input_data.len().saturating_mul(8),
+                            0,
+                            None,
+                            &input_data,
+                            DataAlignment::Left,
+                        )
                     }
                     Termination::Zero => {
                         if self.base_datatype == DataType::Unicode2String {
@@ -582,7 +594,13 @@ impl DiagCodedType {
                         } else {
                             input_data.push(0u8);
                         }
-                        pack_data(input_data.len().saturating_mul(8), 0, None, &input_data)
+                        pack_data(
+                            input_data.len().saturating_mul(8),
+                            0,
+                            None,
+                            &input_data,
+                            DataAlignment::Left,
+                        )
                     }
                     Termination::HexFF => {
                         if self.base_datatype == DataType::Unicode2String {
@@ -590,7 +608,13 @@ impl DiagCodedType {
                         } else {
                             input_data.push(0xFFu8);
                         }
-                        pack_data(input_data.len().saturating_mul(8), 0, None, &input_data)
+                        pack_data(
+                            input_data.len().saturating_mul(8),
+                            0,
+                            None,
+                            &input_data,
+                            DataAlignment::Left,
+                        )
                     }
                 }?;
 
@@ -608,8 +632,25 @@ impl DiagCodedType {
                         condensed: slt.condensed,
                     });
 
-                let (packed, len) =
-                    pack_data(slt.bit_length as usize, 0, mask.as_ref(), &input_data)?;
+                // Byte-sequential types (ByteField, strings) are left-aligned:
+                // data occupies the leading bytes, trailing bytes are zero-padded.
+                // Numeric types are right-aligned: data occupies the trailing bytes,
+                // leading bytes are zero-padded (standard big-endian numeric padding).
+                let alignment = match self.base_datatype {
+                    DataType::ByteField
+                    | DataType::AsciiString
+                    | DataType::Utf8String
+                    | DataType::Unicode2String => DataAlignment::Left,
+                    _ => DataAlignment::Right,
+                };
+
+                let (packed, len) = pack_data(
+                    slt.bit_length as usize,
+                    0,
+                    mask.as_ref(),
+                    &input_data,
+                    alignment,
+                )?;
                 if len > slt.bit_length as usize {
                     return Err(DiagServiceError::BadPayload(format!(
                         "StandardLengthType input data length {len} bits exceeds allowed length \
@@ -624,7 +665,7 @@ impl DiagCodedType {
                 if bit_len == 0 {
                     return Ok(());
                 }
-                let (packed, len) = pack_data(bit_len, 0, None, &input_data)?;
+                let (packed, len) = pack_data(bit_len, 0, None, &input_data, DataAlignment::Left)?;
                 (packed, len, None)
             }
         };
@@ -954,6 +995,18 @@ fn unpack_data(
     Ok((bit_data, bit_len))
 }
 
+/// Controls how data shorter than the target buffer is aligned within the buffer.
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum DataAlignment {
+    /// Right-align data in the buffer, zero-padding the most significant (leading) bytes.
+    /// Appropriate for numeric types (`Int32`, `UInt32`, `Float32`, `Float64`).
+    Right,
+    /// Left-align data in the buffer, zero-padding the least significant (trailing) bytes.
+    /// Appropriate for byte-sequential types (`ByteField`, `AsciiString`, `Utf8String`,
+    /// `Unicode2String`).
+    Left,
+}
+
 /// Packs data into a byte slice, applying mask if needed.
 /// Data is packed, condensed and truncated if necessary.
 ///
@@ -963,6 +1016,9 @@ fn unpack_data(
 ///   Valid range is 0..=7, counting starts at least significant bit.
 /// * `mask` - Optional mask.
 /// * `data` - Source data slice.
+/// * `alignment` - Controls how data shorter than the target buffer is aligned.
+///   [`DataAlignment::Right`] zero-pads the leading bytes (for numeric types),
+///   [`DataAlignment::Left`] zero-pads the trailing bytes (for byte-sequential types).
 ///
 /// In contrast to `unpack_data` normalization is not applied here in accordance with the
 /// standard. This will be done when the data is put into the UDS payload.
@@ -972,6 +1028,7 @@ fn pack_data(
     bit_pos: usize,
     mask: Option<&Mask>,
     data: &[u8],
+    alignment: DataAlignment,
 ) -> Result<(Vec<u8>, usize), DiagServiceError> {
     #[inline]
     fn clear_bits_above_bit_len(bit_length: usize, result: &mut [u8]) {
@@ -987,22 +1044,32 @@ fn pack_data(
         }
     }
 
+    /// Copies `copy_bytes` from `data` into `result` at the given `start_idx`.
+    /// When right-aligned, copies the last `copy_bytes` of `data`.
+    /// When left-aligned, copies the first `copy_bytes` of `data`.
     #[inline]
-    fn checked_copy_from_data_start_idx_to_slice(
+    fn checked_copy_aligned(
         data: &[u8],
         result: &mut [u8],
         copy_bytes: usize,
         start_idx: usize,
+        alignment: DataAlignment,
     ) -> Result<(), DiagServiceError> {
-        result
-            .get_mut(start_idx..)
-            .ok_or_else(|| DiagServiceError::BadPayload("Result slice out of bounds".to_owned()))?
-            .copy_from_slice(
+        let dst = result
+            .get_mut(start_idx..start_idx.saturating_add(copy_bytes))
+            .ok_or_else(|| DiagServiceError::BadPayload("Result slice out of bounds".to_owned()))?;
+        let src = match alignment {
+            DataAlignment::Right => {
+                // Take the last copy_bytes from data (right-align: zero-pad leading bytes)
                 data.get(data.len().saturating_sub(copy_bytes)..)
-                    .ok_or_else(|| {
-                        DiagServiceError::BadPayload("Data slice out of bounds".to_owned())
-                    })?,
-            );
+            }
+            DataAlignment::Left => {
+                // Take the first copy_bytes from data (left-align: zero-pad trailing bytes)
+                data.get(..copy_bytes)
+            }
+        }
+        .ok_or_else(|| DiagServiceError::BadPayload("Data slice out of bounds".to_owned()))?;
+        dst.copy_from_slice(src);
         Ok(())
     }
 
@@ -1018,9 +1085,12 @@ fn pack_data(
             let mut result = vec![0u8; result_byte_len];
 
             let copy_bytes = data.len().min(result_byte_len);
-            let start_idx = result_byte_len.saturating_sub(copy_bytes);
+            let start_idx = match alignment {
+                DataAlignment::Right => result_byte_len.saturating_sub(copy_bytes),
+                DataAlignment::Left => 0,
+            };
 
-            checked_copy_from_data_start_idx_to_slice(data, &mut result, copy_bytes, start_idx)?;
+            checked_copy_aligned(data, &mut result, copy_bytes, start_idx, alignment)?;
             clear_bits_above_bit_len(bit_len, &mut result);
             apply_bit_mask(&mut result, &mask.data, bit_len, bit_pos)?;
 
@@ -1032,9 +1102,12 @@ fn pack_data(
         let mut result = vec![0u8; result_byte_len];
 
         let copy_bytes = data.len().min(result_byte_len);
-        let start_idx = result_byte_len.saturating_sub(copy_bytes);
+        let start_idx = match alignment {
+            DataAlignment::Right => result_byte_len.saturating_sub(copy_bytes),
+            DataAlignment::Left => 0,
+        };
 
-        checked_copy_from_data_start_idx_to_slice(data, &mut result, copy_bytes, start_idx)?;
+        checked_copy_aligned(data, &mut result, copy_bytes, start_idx, alignment)?;
         clear_bits_above_bit_len(bit_len, &mut result);
 
         Ok((result, bit_len))
@@ -1444,7 +1517,7 @@ mod tests {
     fn test_data_packing() {
         // simple case, no mask, no truncation
         let source_value = vec![0, 0, 0, 4];
-        let (result, len) = pack_data(4, 0, None, &source_value).unwrap();
+        let (result, len) = pack_data(4, 0, None, &source_value, DataAlignment::Right).unwrap();
         assert_eq!(result, vec![4]);
         assert_eq!(len, 4);
 
@@ -1455,7 +1528,8 @@ mod tests {
         };
         let source_value = vec![0b_0101_0000];
         // bit_length = 8, so no truncation, mask applied
-        let (result, len) = pack_data(8, 0, Some(&mask), &source_value).unwrap();
+        let (result, len) =
+            pack_data(8, 0, Some(&mask), &source_value, DataAlignment::Right).unwrap();
         assert_eq!(result, vec![0b_0101_0000]);
         assert_eq!(len, 8);
 
@@ -1469,7 +1543,8 @@ mod tests {
         // 0000_1100 -- source value
         // 0101_0000 -- init output with mask, then copy bits from source value
         // where mask is 1
-        let (result, len) = pack_data(8, 0, Some(&mask), &source_value).unwrap();
+        let (result, len) =
+            pack_data(8, 0, Some(&mask), &source_value, DataAlignment::Right).unwrap();
         assert_eq!(result, vec![0b_0101_0000]);
         assert_eq!(len, 8);
 
@@ -1479,7 +1554,8 @@ mod tests {
             condensed: false,
         };
         let source_value = vec![0b_1111_1111, 0b_1111_1111];
-        let (result, len) = pack_data(8, 0, Some(&mask), &source_value).unwrap();
+        let (result, len) =
+            pack_data(8, 0, Some(&mask), &source_value, DataAlignment::Right).unwrap();
         // Only first 8 bits should remain, second byte truncated
         assert_eq!(result, vec![0b_1111_1111]);
         assert_eq!(len, 8);
@@ -1500,7 +1576,8 @@ mod tests {
         // 1 | 0 | 2
         // 0 | 0 | -
         // 1 | 0 | 3
-        let (result, len) = pack_data(8, 0, Some(&mask), &source_value).unwrap();
+        let (result, len) =
+            pack_data(8, 0, Some(&mask), &source_value, DataAlignment::Right).unwrap();
         assert_eq!(result, vec![0]);
         assert_eq!(len, 8);
 
@@ -1513,7 +1590,8 @@ mod tests {
         // 1010_1010 -- value
         // 1111_1111 -- mask
         // 1010_1010 -- bits of source where mask = 1
-        let (result, len) = pack_data(8, 0, Some(&mask), &source_value).unwrap();
+        let (result, len) =
+            pack_data(8, 0, Some(&mask), &source_value, DataAlignment::Right).unwrap();
         assert_eq!(result, vec![0b_1010_1010]);
         assert_eq!(len, 8);
 
@@ -1526,26 +1604,27 @@ mod tests {
 
         // 1000_0001 -- mask
         // 0000_0011 -- value
-        let (result, len) = pack_data(8, 0, Some(&mask), &source_value).unwrap();
+        let (result, len) =
+            pack_data(8, 0, Some(&mask), &source_value, DataAlignment::Right).unwrap();
         assert_eq!(result, vec![0b_1000_0001]);
         assert_eq!(len, 8);
 
         // No mask, truncate above bit_length
         let source_value = vec![0b_1111_1111, 0b_1111_1111];
-        let (result, len) = pack_data(8, 0, None, &source_value).unwrap();
+        let (result, len) = pack_data(8, 0, None, &source_value, DataAlignment::Right).unwrap();
         assert_eq!(result, vec![0b_1111_1111]);
         assert_eq!(len, 8);
 
         // Truncate to 5 bits, no mask
         let source_value = vec![0b_1111_1111];
-        let (result, len) = pack_data(5, 0, None, &source_value).unwrap();
+        let (result, len) = pack_data(5, 0, None, &source_value, DataAlignment::Right).unwrap();
         // Only first 5 bits remain: 11111 (0b_0001_1111 = 31)
         assert_eq!(result, vec![0b_0001_1111]);
         assert_eq!(len, 5);
 
         // Truncate to 12 bits, no mask
         let source_value = vec![0b_1111_1111, 0b_1111_1111];
-        let (result, len) = pack_data(12, 0, None, &source_value).unwrap();
+        let (result, len) = pack_data(12, 0, None, &source_value, DataAlignment::Right).unwrap();
         // Only first 12 bits remain: 0b_1111_1111_1111 (0xFFF)
         assert_eq!(result, vec![0b_1111_1111, 0b_0000_1111]);
         assert_eq!(len, 12);
@@ -1556,7 +1635,8 @@ mod tests {
             condensed: false,
         };
         let source_value = vec![0b_1111_1111];
-        let (result, len) = pack_data(5, 0, Some(&mask), &source_value).unwrap();
+        let (result, len) =
+            pack_data(5, 0, Some(&mask), &source_value, DataAlignment::Right).unwrap();
         // Only first 5 bits, mask applied: 11111 & 11111 = 11111
         assert_eq!(result, vec![0b_0001_1111]);
         assert_eq!(len, 5);
@@ -1567,7 +1647,8 @@ mod tests {
             condensed: false,
         };
         let source_value = vec![0b_1111_1111, 0b_1111_1111];
-        let (result, len) = pack_data(10, 0, Some(&mask), &source_value).unwrap();
+        let (result, len) =
+            pack_data(10, 0, Some(&mask), &source_value, DataAlignment::Right).unwrap();
         // Only first 10 bits, mask applied: 11111111_11 & 11111111_11 = 11111111_11
         assert_eq!(result, vec![0b_1111_1111, 0b_0000_0011]);
         assert_eq!(len, 10);
@@ -1578,7 +1659,8 @@ mod tests {
             condensed: true,
         };
         let source_value = vec![0b_1111_1111];
-        let (result, len) = pack_data(5, 0, Some(&mask), &source_value).unwrap();
+        let (result, len) =
+            pack_data(5, 0, Some(&mask), &source_value, DataAlignment::Right).unwrap();
         assert_eq!(result, vec![0b_0001_1111]);
         assert_eq!(len, 8);
 
@@ -1590,16 +1672,66 @@ mod tests {
         let source_value = vec![0b_1111_1111, 0b11];
         // 1111_1111 0000_0011 -- input
         // 1111_1111 0000_0011 -- mask
-        let (result, len) = pack_data(10, 0, Some(&mask), &source_value).unwrap();
+        let (result, len) =
+            pack_data(10, 0, Some(&mask), &source_value, DataAlignment::Right).unwrap();
         assert_eq!(result, vec![0b_1100_0000, 0b_0000_0011]);
         assert_eq!(len, 16);
 
         // Test with bit_pos != 0
         let source_value = vec![0b_1010_1010];
         // Pack 5 bits starting at bit_pos 3
-        let (result, len) = pack_data(5, 3, None, &source_value).unwrap();
+        let (result, len) = pack_data(5, 3, None, &source_value, DataAlignment::Right).unwrap();
         assert_eq!(result, vec![0b_01010]);
         assert_eq!(len, 5);
+    }
+
+    #[test]
+    fn test_data_packing_left_alignment() {
+        // Left-aligned: data occupies leading bytes, trailing bytes are zero-padded.
+        // 3 bytes of data into a 4-byte (32-bit) buffer.
+        let source = vec![0xAA, 0xBB, 0xCC];
+        let (result, len) = pack_data(32, 0, None, &source, DataAlignment::Left).unwrap();
+        assert_eq!(result, vec![0xAA, 0xBB, 0xCC, 0x00]);
+        assert_eq!(len, 32);
+
+        // Right-aligned (same input): data occupies trailing bytes.
+        let (result, len) = pack_data(32, 0, None, &source, DataAlignment::Right).unwrap();
+        assert_eq!(result, vec![0x00, 0xAA, 0xBB, 0xCC]);
+        assert_eq!(len, 32);
+
+        // When data exactly matches buffer size, alignment doesn't matter.
+        let source = vec![0xAA, 0xBB, 0xCC, 0xDD];
+        let (result_left, _) = pack_data(32, 0, None, &source, DataAlignment::Left).unwrap();
+        let (result_right, _) = pack_data(32, 0, None, &source, DataAlignment::Right).unwrap();
+        assert_eq!(result_left, result_right);
+        assert_eq!(result_left, vec![0xAA, 0xBB, 0xCC, 0xDD]);
+
+        // When data is larger than buffer, left takes leading bytes, right takes trailing bytes.
+        let source = vec![0xAA, 0xBB, 0xCC, 0xDD, 0xEE];
+        let (result_left, _) = pack_data(32, 0, None, &source, DataAlignment::Left).unwrap();
+        let (result_right, _) = pack_data(32, 0, None, &source, DataAlignment::Right).unwrap();
+        assert_eq!(result_left, vec![0xAA, 0xBB, 0xCC, 0xDD]);
+        assert_eq!(result_right, vec![0xBB, 0xCC, 0xDD, 0xEE]);
+
+        // Left-aligned with mask (non-condensed).
+        let mask = Mask {
+            data: vec![0xFF, 0xFF, 0x0F, 0x00],
+            condensed: false,
+        };
+        let source = vec![0xAA, 0xBB, 0xCC];
+        let (result, len) = pack_data(32, 0, Some(&mask), &source, DataAlignment::Left).unwrap();
+        // Left-aligned: [0xAA, 0xBB, 0xCC, 0x00], then masked with [0xFF, 0xFF, 0x0F, 0x00]
+        assert_eq!(result, vec![0xAA, 0xBB, 0x0C, 0x00]);
+        assert_eq!(len, 32);
+
+        // 63 bytes into a 64-byte (512-bit) buffer, left-aligned.
+        let source: Vec<u8> = (0x30..=0x6E).collect(); // 63 bytes: 0x30..0x6E
+        assert_eq!(source.len(), 63);
+        let (result, len) = pack_data(512, 0, None, &source, DataAlignment::Left).unwrap();
+        assert_eq!(len, 512);
+        assert_eq!(result.len(), 64);
+        assert_eq!(&result[..63], &source[..]);
+        assert_eq!(result[63], 0x00);
     }
 
     fn test_min_max_length(
@@ -2129,6 +2261,54 @@ mod tests {
         let expected = input;
         test_encode_standard_length(16, None, false, &input, &expected, DataType::ByteField)
             .unwrap();
+    }
+
+    #[test]
+    fn test_encode_standard_length_bytefield_left_aligned() {
+        // 63 bytes of data into a 512-bit (64-byte) ByteField.
+        // Data should be left-aligned: first 63 bytes are data, last byte is 0x00.
+        let input: Vec<u8> = (0x30..=0x6E).collect(); // 63 bytes
+        assert_eq!(input.len(), 63);
+        let mut expected = input.clone();
+        expected.push(0x00); // trailing zero-pad
+        test_encode_standard_length(512, None, false, &input, &expected, DataType::ByteField)
+            .unwrap();
+    }
+
+    #[test]
+    fn test_encode_standard_length_bytefield_exact_length() {
+        // 64 bytes into 512-bit (64-byte) ByteField -- exact fit, no padding needed.
+        let input: Vec<u8> = (0x30..=0x6F).collect(); // 64 bytes
+        assert_eq!(input.len(), 64);
+        let expected = input.clone();
+        test_encode_standard_length(512, None, false, &input, &expected, DataType::ByteField)
+            .unwrap();
+    }
+
+    #[test]
+    fn test_encode_standard_length_bytefield_user_hex_input() {
+        // 126-char hex string decoded to 63 bytes encoded into a 512-bit StandardLength ByteField.
+        let hex_input = concat!(
+            "102030405060708090A0B0C0D0E0F00010203040",
+            "102030405060708090A0B0C0D0E0F00010203040",
+            "102030405060708090A0B0C0D0E0F00010203040",
+            "102030",
+        );
+        let input = cda_interfaces::util::decode_hex(hex_input).unwrap();
+        assert_eq!(input.len(), 63);
+        let mut expected = input.clone();
+        expected.push(0x00); // trailing zero-pad, NOT leading
+        test_encode_standard_length(512, None, false, &input, &expected, DataType::ByteField)
+            .unwrap();
+    }
+
+    #[test]
+    fn test_encode_standard_length_uint32_right_aligned() {
+        // Numeric types should remain right-aligned (leading zero-pad).
+        // 2 bytes of data into a 32-bit (4-byte) UInt32.
+        let input = [0x12, 0x34];
+        let expected = [0x00, 0x00, 0x12, 0x34]; // leading zero-pad for numeric
+        test_encode_standard_length(32, None, false, &input, &expected, DataType::UInt32).unwrap();
     }
 
     #[test]
