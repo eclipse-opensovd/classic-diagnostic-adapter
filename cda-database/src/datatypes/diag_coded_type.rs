@@ -576,48 +576,32 @@ impl DiagCodedType {
             }
             DiagCodedTypeVariant::MinMaxLength(mmlt) => {
                 // Note: Unicode2String is always 2 bytes per character,
-                // therefore all Termination expect EndOfPdu will add 2 termination bytes.
-                let (packed, len) = match mmlt.termination {
-                    Termination::EndOfPdu => {
-                        // No special termination, just pack the data as is
-                        pack_data(
-                            input_data.len().saturating_mul(8),
-                            0,
-                            None,
-                            &input_data,
-                            DataAlignment::Left,
-                        )
-                    }
+                // therefore all Termination except EndOfPdu will add 2 termination bytes.
+                let is_unicode = self.base_datatype == DataType::Unicode2String;
+                match mmlt.termination {
+                    Termination::EndOfPdu => {}
                     Termination::Zero => {
-                        if self.base_datatype == DataType::Unicode2String {
+                        if is_unicode {
                             input_data.append(&mut vec![0u8, 0u8]);
                         } else {
                             input_data.push(0u8);
                         }
-                        pack_data(
-                            input_data.len().saturating_mul(8),
-                            0,
-                            None,
-                            &input_data,
-                            DataAlignment::Left,
-                        )
                     }
                     Termination::HexFF => {
-                        if self.base_datatype == DataType::Unicode2String {
+                        if is_unicode {
                             input_data.append(&mut vec![0xFFu8, 0xFFu8]);
                         } else {
                             input_data.push(0xFFu8);
                         }
-                        pack_data(
-                            input_data.len().saturating_mul(8),
-                            0,
-                            None,
-                            &input_data,
-                            DataAlignment::Left,
-                        )
                     }
-                }?;
-
+                }
+                let (packed, len) = pack_data(
+                    input_data.len().saturating_mul(8),
+                    0,
+                    None,
+                    &input_data,
+                    DataAlignment::Left,
+                )?;
                 (packed, len, None)
             }
             DiagCodedTypeVariant::StandardLength(slt) => {
@@ -1730,8 +1714,8 @@ mod tests {
         let (result, len) = pack_data(512, 0, None, &source, DataAlignment::Left).unwrap();
         assert_eq!(len, 512);
         assert_eq!(result.len(), 64);
-        assert_eq!(&result[..63], &source[..]);
-        assert_eq!(result[63], 0x00);
+        assert_eq!(result.get(..63).unwrap(), &source[..]);
+        assert_eq!(*result.get(63).unwrap(), 0x00);
     }
 
     fn test_min_max_length(
