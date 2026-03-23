@@ -13,3 +13,5 @@ Architecture Decision Records
 *****************************
 
 .. include:: 01_mimalloc.rst
+
+.. include:: 02_mbedtls_tls_backend.rst

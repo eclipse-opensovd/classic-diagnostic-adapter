@@ -49,9 +49,13 @@ mbedtls-rs = { workspace = true, optional = true }
 
 [features]
 default = []
-# enable mbedtls TLS - cannot be combined with openssl feature
+# EXPERIMENTAL
+# This feature enable experimental support for mbedtls TLS.
+# The mbedtls crate used is NOT security reviewed - use at your own discretion.
+# mbedtls cannot be combined with openssl feature
 mbedtls = ["dep:mbedtls-rs"]
 # enable openssl TLS - if enabled together with mbedtls openssl will be prefered!
+# This allows to still use `--all-features` when running clippy for example.
 openssl = ["dep:openssl", "dep:tokio-openssl"]
 openssl-vendored = ["openssl", "openssl/vendored"]
 dlt-tracing = ["cda-interfaces/dlt-tracing"]
