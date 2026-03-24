@@ -181,6 +181,7 @@ async fn test_custom_demo_endpoint() {
         ComponentsConfig {
             additional_fields: HashMap::new(),
         },
+        Arc::new(cda_plugin_security::DefaultSecurityPlugin::default()),
     )
     .await
     .expect("Failed to add vehicle routes");

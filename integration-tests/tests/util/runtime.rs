@@ -259,6 +259,7 @@ fn start_cda(config: Configuration) {
             vehicle_data.locks,
             config.functional_description,
             config.components,
+            Arc::new(DefaultSecurityPlugin::default()),
         )
         .await
         .map_err(|e| {

@@ -18,36 +18,14 @@
 //!
 //! ## Middleware Integration
 //!
-//! The security plugin integrates with the Axum web framework through middleware.
-//! The [`security_plugin_middleware`] function:
-//! - Creates a plugin initializer instance
-//! - Injects it into the request extensions
-//! - Passes control to the next middleware/handler
-//! - Ensures plugin availability throughout the request lifecycle
-//!
-//! The middleware is applied to protected routes in the SOVD module:
-//!
-//! ```rust,ignore
-//! .layer(middleware::from_fn(security_plugin_middleware::<S>))
-//! ```
+//! Security plugins are registered with the Axum web framework as _mmiddleware_ components
+//! by means of the [`security_plugin_middleware`] function as part of configuring Axum's
+//! request handling pipeline.
 //!
 //! ## Authorization Endpoint
 //!
 //! The plugin system allows for providing a standardized authorization endpoint
 //! at `/vehicle/v15/authorize` through the [`AuthorizationRequestHandler`] trait.
-//!
-//! ## Configuration
-//!
-//! ### Runtime Integration
-//! Security plugins are integrated into the main application through a type parameter:
-//!
-//! ```rust,ignore
-//! pub async fn launch_webserver<F, R, T, M, S>(
-//!     // ... other parameters
-//! ) -> Result<(), String>
-//! where
-//!     S: SecurityPluginLoader,
-//! ```
 //!
 //! ## Default Implementation
 //!
@@ -106,12 +84,11 @@
 
 use std::{any::Any, ops::Deref, sync::Arc};
 
-use aide::axum::IntoApiResponse;
 use async_trait::async_trait;
 use axum::{
     Json,
     body::Bytes,
-    extract::{FromRequestParts, Request},
+    extract::{FromRequestParts, Request, State},
     middleware::Next,
     response::{IntoResponse, Response},
 };
@@ -291,7 +268,7 @@ pub trait AuthorizationRequestHandler: Send + Sync {
     /// An HTTP response containing either:
     /// - Success: An access token or other authentication data of some form
     /// - Error: SOVD-compliant error response with appropriate status code
-    async fn authorize(headers: HeaderMap, body_bytes: Bytes) -> impl IntoApiResponse;
+    async fn authorize(&self, headers: HeaderMap, body_bytes: Bytes) -> Response;
 }
 
 /// Complete security plugin loader that combines initialization and authorization capabilities.
@@ -300,9 +277,15 @@ pub trait AuthorizationRequestHandler: Send + Sync {
 /// initialize plugin instances from requests and handle authorization requests.
 /// It is used as the main interface for integrating security plugins into the
 /// web server framework.
+///
+/// The associated type `PluginData` ties the loader to the per-request data struct
+/// it produces, so callers only need a single type parameter.
 pub trait SecurityPluginLoader:
-    SecurityPluginInitializer + AuthorizationRequestHandler + Default + 'static
+    SecurityPluginInitializer + AuthorizationRequestHandler + 'static
 {
+    /// The per-request security context produced by
+    /// [`SecurityPluginInitializer::initialize_from_request_parts`].
+    type PluginData: SecurityPlugin;
 }
 
 type SecurityPluginInitializerType = Arc<dyn SecurityPluginInitializer>;
@@ -313,37 +296,33 @@ type SecurityPluginInitializerType = Arc<dyn SecurityPluginInitializer>;
 /// and handles the plugin lifecycle during request processing. It is applied to
 /// protected routes to ensure authentication and authorization are enforced.
 ///
-/// ## Middleware Behavior
-///
-/// The middleware:
-/// - Creates a plugin initializer instance
-/// - Injects it into the request extensions
-/// - Passes control to the next middleware/handler
-/// - Ensures plugin availability throughout the request lifecycle
+/// The pre-created plugin instance is forwarded via Axum state, so it is instantiated
+/// exactly once at startup and shared across all requests.
 ///
 /// ## Usage
 ///
-/// Apply this middleware to protected routes:
+/// Apply this middleware to protected routes using Axum's `from_fn_with_state`:
 ///
 /// ```rust,ignore
-/// .layer(middleware::from_fn(security_plugin_middleware::<S>))
+/// .layer(middleware::from_fn_with_state(
+///     Arc::clone(&plugin) as Arc<dyn SecurityPluginInitializer>,
+///     security_plugin_middleware,
+/// ))
 /// ```
 ///
-/// # Type Parameters
-/// * `A` - The security plugin loader type that implements [`SecurityPluginLoader`]
-///
 /// # Arguments
+/// * `initializer` - The shared, startup-initialized plugin instance
 /// * `req` - The incoming HTTP request
 /// * `next` - The next middleware or handler in the chain
 ///
 /// # Returns
 /// The HTTP response from the downstream middleware/handler
-pub async fn security_plugin_middleware<A: SecurityPluginLoader>(
+pub async fn security_plugin_middleware(
+    State(initializer): State<SecurityPluginInitializerType>,
     mut req: Request,
     next: Next,
 ) -> Response {
-    let security_plugin = Arc::new(A::default()) as SecurityPluginInitializerType;
-    req.extensions_mut().insert(security_plugin);
+    req.extensions_mut().insert(initializer);
     next.run(req).await
 }
 
@@ -454,9 +433,13 @@ impl IntoResponse for AuthError {
 
 #[cfg(feature = "test-utils")]
 pub mod mock {
-    use aide::axum::IntoApiResponse;
     use async_trait::async_trait;
-    use axum::{Json, body::Bytes, http::StatusCode};
+    use axum::{
+        Json,
+        body::Bytes,
+        http::StatusCode,
+        response::{IntoResponse, Response},
+    };
     use cda_interfaces::DiagServiceError;
     use http::{HeaderMap, request::Parts};
 
@@ -575,7 +558,7 @@ pub mod mock {
 
     #[async_trait]
     impl AuthorizationRequestHandler for TestSecurityPlugin {
-        async fn authorize(_headers: HeaderMap, _body_bytes: Bytes) -> impl IntoApiResponse {
+        async fn authorize(&self, _headers: HeaderMap, _body_bytes: Bytes) -> Response {
             (
                 StatusCode::OK,
                 Json(serde_json::json!({
@@ -584,8 +567,11 @@ pub mod mock {
                     "expires_in": 3600
                 })),
             )
+                .into_response()
         }
     }
 
-    impl SecurityPluginLoader for TestSecurityPlugin {}
+    impl SecurityPluginLoader for TestSecurityPlugin {
+        type PluginData = TestSecurityPlugin;
+    }
 }

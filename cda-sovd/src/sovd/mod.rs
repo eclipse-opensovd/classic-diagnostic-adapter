@@ -34,7 +34,9 @@ use cda_interfaces::{
     diagservices::{DiagServiceResponse, UdsPayloadData},
     file_manager::FileManager,
 };
-use cda_plugin_security::{SecurityPluginLoader, security_plugin_middleware};
+use cda_plugin_security::{
+    SecurityPluginInitializer, SecurityPluginLoader, security_plugin_middleware,
+};
 use error::{ApiError, api_error_from_diag_response};
 use http::{Uri, header};
 use indexmap::IndexMap;
@@ -175,6 +177,7 @@ pub async fn route<
     flash_files_path: String,
     mut file_manager: HashMap<String, U>,
     locks: Arc<Locks>,
+    security_plugin: Arc<S>,
 ) -> Router {
     let flash_data = Arc::new(RwLock::new(sovd_interfaces::sovd2uds::FileList {
         files: Vec::new(),
@@ -190,16 +193,25 @@ pub async fn route<
 
     let router = components_route::<R, T, U>(state.clone(), &mut file_manager).await;
 
-    vehicle_route::<T, S>(state, router, functional_group_config)
-        .await
-        .layer(middleware::from_fn(security_plugin_middleware::<S>))
-        .with_state(uds.clone())
+    vehicle_route::<T, S>(
+        state,
+        router,
+        functional_group_config,
+        Arc::clone(&security_plugin),
+    )
+    .await
+    .layer(middleware::from_fn_with_state(
+        Arc::clone(&security_plugin) as Arc<dyn SecurityPluginInitializer>,
+        security_plugin_middleware,
+    ))
+    .with_state(uds.clone())
 }
 
 async fn vehicle_route<T: UdsEcu + SchemaProvider + Clone, S: SecurityPluginLoader>(
     state: WebserverState<T>,
     router: Router<WebserverState<T>>,
     functional_group_config: FunctionalDescriptionConfig,
+    security_plugin: Arc<S>,
 ) -> Router<T> {
     let router = router.nest_api_service(
         "/vehicle/v15/functions",
@@ -240,7 +252,16 @@ async fn vehicle_route<T: UdsEcu + SchemaProvider + Clone, S: SecurityPluginLoad
                 apps::sovd2uds::bulk_data::flash_files::docs_get,
             ),
         )
-        .route("/vehicle/v15/authorize", routing::post(S::authorize))
+        .route(
+            "/vehicle/v15/authorize",
+            routing::post({
+                let security_plugin = Arc::clone(&security_plugin);
+                move |headers: HeaderMap, body_bytes: Bytes| {
+                    let security_plugin = Arc::clone(&security_plugin);
+                    async move { security_plugin.authorize(headers, body_bytes).await }
+                }
+            }),
+        )
         .with_state(state)
         .api_route(
             "/vehicle/v15/apps/sovd2uds/data/networkstructure",
