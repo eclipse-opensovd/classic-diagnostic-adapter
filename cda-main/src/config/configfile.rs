@@ -314,4 +314,61 @@ long_name_affixes = [ "Read ", "Write_ " ]
         assert!(config.validate_sanity().is_err());
         Ok(())
     }
+
+    #[tokio::test]
+    async fn load_config_toml_additional_fields_ignore_case_lowercases_values()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let config_str = r#"
+[components.additional_fields.x-sovd2uds-time-travel-ecus.FluxCapacitor]
+values = ["Flux Capacitor Mark II", "Flux Capacitor Mark III", "yes"]
+ignore_case = true
+
+[components.additional_fields.x-sovd2uds-power-source-ecus.PowerSource]
+values = ["Plutonium", "Mr. Fusion"]
+ignore_case = true
+"#;
+        let figment = Figment::from(Serialized::defaults(Configuration::default()))
+            .merge(Toml::string(config_str));
+        let config: Configuration = figment.extract()?;
+
+        // Verify the FluxCapacitor additional field was loaded and values match case-insensitively
+        let flux_field = config
+            .components
+            .additional_fields
+            .get("x-sovd2uds-time-travel-ecus")
+            .expect("x-sovd2uds-time-travel-ecus should exist");
+        let flux_mapping = flux_field
+            .get("FluxCapacitor")
+            .expect("FluxCapacitor mapping should exist");
+        assert!(
+            flux_mapping.contains("flux capacitor mark ii"),
+            "Should match lowercase"
+        );
+        assert!(
+            flux_mapping.contains("Flux Capacitor Mark II"),
+            "Should match original case"
+        );
+        assert!(
+            flux_mapping.contains("FLUX CAPACITOR MARK II"),
+            "Should match uppercase"
+        );
+        assert!(flux_mapping.contains("yes"), "Should match lowercase 'yes'");
+        assert!(flux_mapping.contains("YES"), "Should match uppercase 'YES'");
+
+        // Verify the PowerSource additional field
+        let power_field = config
+            .components
+            .additional_fields
+            .get("x-sovd2uds-power-source-ecus")
+            .expect("x-sovd2uds-power-source-ecus should exist");
+        let power_mapping = power_field
+            .get("PowerSource")
+            .expect("PowerSource mapping should exist");
+        assert!(power_mapping.contains("Plutonium"));
+        assert!(power_mapping.contains("plutonium"));
+        assert!(power_mapping.contains("Mr. Fusion"));
+        assert!(power_mapping.contains("mr. fusion"));
+
+        Ok(())
+    }
 }

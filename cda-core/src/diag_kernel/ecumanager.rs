@@ -363,6 +363,15 @@ impl<S: SecurityPlugin> cda_interfaces::EcuManager for EcuManager<S> {
             self.get_diag_layers_from_variant_and_parent_refs()
                 .into_iter()
                 .find_map(|dl| dl.sdgs())
+                .or_else(|| {
+                    // Fall back to the base variant's DiagLayer SDGs when no
+                    // variant has been detected yet (e.g. ECU is offline).
+                    self.diag_database
+                        .base_variant()
+                        .ok()
+                        .and_then(|v| v.diag_layer())
+                        .and_then(|dl| dl.sdgs())
+                })
                 .map(datatypes::Sdgs)
         }
         .ok_or_else(|| DiagServiceError::InvalidDatabase("No SDG found in DB".to_owned()))?;
