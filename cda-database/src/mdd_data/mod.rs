@@ -421,12 +421,24 @@ pub fn update_mdd_uncompressed(mdd_path: &str) -> Result<bool, MddError> {
     })?;
 
     verify_mdd_chunk_checksums(&tmp_path, &expected_hashes).inspect_err(|_| {
-        let _ = std::fs::remove_file(&tmp_path);
+        if let Err(e) = std::fs::remove_file(&tmp_path) {
+            tracing::error!(
+                error = %e,
+                filename = %tmp_path,
+                "Failed to remove temporary MDD file after checksum verification failure"
+            );
+        }
     })?;
 
     std::fs::rename(&tmp_path, mdd_path).map_err(|e| {
         // Clean up the temp file on rename failure.
-        let _ = std::fs::remove_file(&tmp_path);
+        if let Err(e) = std::fs::remove_file(&tmp_path) {
+            tracing::error!(
+                error = %e,
+                filename = %tmp_path,
+                "Failed to remove temporary MDD file after rename failure"
+            );
+        }
         MddError::Io(format!(
             "Failed to rename temporary MDD file to '{mdd_path}': {e}"
         ))
