@@ -12,8 +12,8 @@
 
 use cda_database::datatypes;
 use cda_interfaces::{
-    DiagComm, DiagCommType, DiagServiceError, HashMap, datatypes::DatabaseNamingConvention,
-    diagservices::DiagServiceResponse, dlt_ctx,
+    datatypes::DatabaseNamingConvention, diagservices::DiagServiceResponse, dlt_ctx, DiagComm,
+    DiagCommType, DiagServiceError, HashMap,
 };
 pub(super) type DiagServiceId = String;
 
@@ -65,6 +65,7 @@ pub(super) fn prepare_variant_detection(
     })
 }
 
+/// [[ dimpl~dt-variant-detection, Variant Detection ]]
 #[tracing::instrument(
     skip(service_responses, diagnostic_database),
     fields(

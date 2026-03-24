@@ -10,6 +10,7 @@
  * https://www.apache.org/licenses/LICENSE-2.0
  */
 
+/// [[ dimpl~sovd-api-comparams, Communication Parameters ]]
 pub(crate) mod comparams {
 
     pub(crate) mod executions {
@@ -37,6 +38,7 @@ pub(crate) mod comparams {
             error::{ApiError, ErrorWrapper},
         };
 
+        /// [[ dimpl~sovd-api-comparams-without-lock, Communication Parameters Without Lock ]]
         pub(crate) async fn get<R: DiagServiceResponse, T: UdsEcu + Clone, U: FileManager>(
             WithRejection(Query(query), _): WithRejection<
                 Query<sovd_comparams::executions::get::Query>,
@@ -468,6 +470,7 @@ pub(crate) mod service {
                 })
         }
 
+        /// [[ dimpl~sovd-api-operations-handling, Operations Handling ]]
         pub(crate) async fn post<
             R: DiagServiceResponse,
             T: UdsEcu + SchemaProvider + Clone,

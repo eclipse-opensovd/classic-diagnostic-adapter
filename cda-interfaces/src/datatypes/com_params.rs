@@ -12,9 +12,9 @@
 
 use std::{fmt::Debug, time::Duration};
 
-use serde::{Deserialize, Deserializer, Serialize, Serializer, de::DeserializeOwned};
+use serde::{de::DeserializeOwned, Deserialize, Deserializer, Serialize, Serializer};
 
-use crate::{HashMap, datatypes::Unit};
+use crate::{datatypes::Unit, HashMap};
 
 #[derive(Deserialize, Serialize, Clone, Debug, Default)]
 pub struct ComParams {
@@ -116,6 +116,7 @@ impl From<ComParamBool> for bool {
     }
 }
 
+/// [[ dimpl~uds-communication-parameters, UDS Communication Parameters ]]
 /// Defines the default values for the Communication
 /// parameters which are used in the UDS communication
 #[derive(Deserialize, Serialize, Clone, Debug)]

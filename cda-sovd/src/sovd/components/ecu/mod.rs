@@ -47,6 +47,7 @@ pub(crate) mod x_single_ecu_jobs;
 pub(crate) mod x_sovd2uds_bulk_data;
 pub(crate) mod x_sovd2uds_download;
 
+/// [[ dimpl~sovd-api-ecu-resource-collection, ECU Resource Collection ]]
 pub(crate) async fn get<R: DiagServiceResponse, T: UdsEcu + Clone, U: FileManager>(
     State(WebserverEcuState { ecu_name, uds, .. }): State<WebserverEcuState<R, T, U>>,
     WithRejection(Query(query), _): WithRejection<
@@ -145,6 +146,7 @@ pub(crate) fn docs_get(op: TransformOperation) -> TransformOperation {
         })
 }
 
+/// [[ dimpl~sovd-api-ecu-variant-detection, ECU Variant Detection ]]
 pub(crate) async fn post<R: DiagServiceResponse, T: UdsEcu + Clone, U: FileManager>(
     State(WebserverEcuState { ecu_name, uds, .. }): State<WebserverEcuState<R, T, U>>,
 ) -> Response {

@@ -289,6 +289,8 @@ impl<S: EcuGateway, R: DiagServiceResponse, T: EcuManager<Response = R>> UdsMana
         response
     }
 
+    /// [[ dimpl~uds-request-response, UDS Request Response ]]
+    /// [[ dimpl~uds-nrc-handling, UDS NRC Handling ]]
     // allowed for clarity, to make it clearer which of the loops is being continued
     #[allow(clippy::needless_continue)]
     // allow too many lines, as it is better to keep this together for now
@@ -695,6 +697,7 @@ impl<S: EcuGateway, R: DiagServiceResponse, T: EcuManager<Response = R>> UdsMana
         }
     }
 
+    /// [[ dimpl~uds-tester-present, UDS Tester Present ]]
     async fn control_tester_present(
         &self,
         control_msg: TesterPresentControlMessage,
@@ -2014,6 +2017,7 @@ impl<S: EcuGateway, R: DiagServiceResponse, T: EcuManager<Response = R>> UdsEcu
         Ok(variant)
     }
 
+    /// [[ dimpl~dt-ecu-discovery, ECU Discovery ]]
     #[tracing::instrument(skip_all,
         fields(dlt_context = dlt_ctx!("UDS"))
     )]
@@ -2486,6 +2490,7 @@ impl<S: EcuGateway, R: DiagServiceResponse, T: EcuManager<Response = R>> UdsEcu
         ecu_names
     }
 
+    /// [[ dimpl~uds-functional-communication, UDS Functional Communication ]]
     #[tracing::instrument(skip(self, security_plugin, payload),
         fields(dlt_context = dlt_ctx!("UDS"))
     )]

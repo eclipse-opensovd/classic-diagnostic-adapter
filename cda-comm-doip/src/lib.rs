@@ -84,6 +84,7 @@ struct DoipConnection {
     ip: String,
 }
 
+/// [[ dimpl~doip-error-handling, DoIP Error Handling ]]
 #[derive(Error, Debug, Clone)]
 pub enum ConnectionError {
     #[error("Connection closed.")]
@@ -325,6 +326,7 @@ impl<T: EcuAddressProvider + DoipComParamProvider> EcuGateway for DoipDiagGatewa
 
     // most of this function is handling different error cases and timeouts.
     // it is easier to comprehend when kept together.
+    /// [[ dimpl~doip-diagnostic-message, DoIP Diagnostic Message ]]
     #[tracing::instrument(skip_all,
         fields(dlt_context = dlt_ctx!("DOIP"))
     )]

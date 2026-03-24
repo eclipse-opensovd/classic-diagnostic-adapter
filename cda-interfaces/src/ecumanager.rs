@@ -12,13 +12,13 @@
 use serde::Serialize;
 
 use crate::{
-    DiagComm, DiagServiceError, DoipComParamProvider, DynamicPlugin, EcuSchemaProvider, HashMap,
-    HashSet, SecurityAccess, UdsComParamProvider,
     datatypes::{
-        ComplexComParamValue, ComponentConfigurationsInfo, ComponentDataInfo, DtcLookup,
-        DtcReadInformationFunction, SdSdg, single_ecu,
+        single_ecu, ComplexComParamValue, ComponentConfigurationsInfo, ComponentDataInfo,
+        DtcLookup, DtcReadInformationFunction, SdSdg,
     },
     diagservices::{DiagServiceResponse, UdsPayloadData},
+    DiagComm, DiagServiceError, DoipComParamProvider, DynamicPlugin, EcuSchemaProvider, HashMap,
+    HashSet, SecurityAccess, UdsComParamProvider,
 };
 
 /// Metadata for a service parameter, including constant values for discovery
@@ -56,6 +56,7 @@ pub struct MuxCaseInfo {
     pub upper_limit: Option<String>,
 }
 
+/// [[ dimpl~dt-ecu-states, ECU States ]]
 #[derive(Clone, Copy, Debug, Serialize, PartialEq)]
 pub enum EcuState {
     Online,

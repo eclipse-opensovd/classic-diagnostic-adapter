@@ -12,6 +12,7 @@
 
 use serde::{Deserialize, Serialize};
 
+/// [[ dimpl~doip-protocol-versions, DoIP Protocol Versions ]]
 #[derive(Deserialize, Serialize, Clone, Debug)]
 pub struct DoipConfig {
     pub protocol_version: u8,

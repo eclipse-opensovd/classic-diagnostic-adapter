@@ -13,8 +13,8 @@
 use std::time::Duration;
 
 use crate::{
-    HashMap,
     datatypes::{AddressingMode, RetryPolicy, TesterPresentSendType},
+    HashMap,
 };
 
 pub trait UdsComParamProvider: Send + Sync + 'static {
@@ -58,6 +58,7 @@ pub trait UdsComParamProvider: Send + Sync + 'static {
     fn timeout_default(&self) -> Duration;
 }
 
+/// [[ dimpl~doip-communication-parameters, DoIP Communication Parameters ]]
 pub trait DoipComParamProvider: Send + Sync + 'static {
     #[must_use]
     fn nack_number_of_retries(&self) -> &HashMap<u8, u32>;

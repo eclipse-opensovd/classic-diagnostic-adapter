@@ -22,6 +22,8 @@ use serde::{Deserialize, Serialize};
 
 use crate::AppError;
 
+/// [[ dimpl~sovd-api-flash-folder-configuration, Flash Folder Configuration ]]
+/// [[ dimpl~functional-communication-dd-configuration, Functional Communication DD Configuration ]]
 #[derive(Deserialize, Serialize, Clone, Debug)]
 pub struct Configuration {
     pub server: ServerConfig,

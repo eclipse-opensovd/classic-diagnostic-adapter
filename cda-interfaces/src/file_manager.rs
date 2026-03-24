@@ -54,6 +54,7 @@ impl std::fmt::Display for MddError {
     }
 }
 
+/// [[ dimpl~system-storage-access-abstraction, System Storage Access Abstraction ]]
 pub trait FileManager: Clone + Send + Sync + 'static {
     fn list(&self) -> impl Future<Output = HashMap<String, ChunkMetaData>> + Send;
 

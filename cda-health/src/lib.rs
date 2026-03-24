@@ -73,6 +73,7 @@ impl HealthProvider for StatusHealthProvider {
     }
 }
 
+/// [[ dimpl~dt-health-monitoring, Health Monitoring ]]
 #[derive(Clone)]
 pub struct HealthState {
     providers: Arc<RwLock<HashMap<String, Arc<dyn HealthProvider>>>>,

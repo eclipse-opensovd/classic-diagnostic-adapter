@@ -71,6 +71,8 @@ struct AppArgs {
     fallback_to_base_variant: Option<bool>,
 }
 
+/// [[ dimpl~dt-startup-sequence, Startup Sequence ]]
+/// [[ dimpl~dt-deferred-initialization, Deferred Initialization ]]
 #[tokio::main]
 #[tracing::instrument(
     fields(

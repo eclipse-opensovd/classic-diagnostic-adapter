@@ -30,6 +30,7 @@ use crate::sovd::{
     error::{ApiError, ErrorWrapper},
 };
 
+/// [[ dimpl~sovd-api-configuration-resources, Configuration Resources ]]
 pub(crate) async fn get<R: DiagServiceResponse, T: UdsEcu + Clone, U: FileManager>(
     UseApi(Secured(security_plugin), _): UseApi<Secured, ()>,
     State(WebserverEcuState { ecu_name, uds, .. }): State<WebserverEcuState<R, T, U>>,
