@@ -9,7 +9,7 @@
  * terms of the Apache License Version 2.0 which is available at
  * https://www.apache.org/licenses/LICENSE-2.0
  */
-use crate::{DiagServiceError, service_ids};
+use crate::{service_ids, DiagServiceError};
 
 pub mod tracing {
     #[must_use]
@@ -56,6 +56,7 @@ pub mod tokio_ext {
 }
 
 pub mod dlt_ext {
+    /// [[ dimpl~plugin-dlt-logging-context-annotation, DLT Context Annotation Macro ]]
     #[macro_export]
     #[cfg(feature = "dlt-tracing")]
     macro_rules! dlt_ctx {
