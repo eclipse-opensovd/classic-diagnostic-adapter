@@ -50,10 +50,30 @@ pub enum SdSdg {
 /// A config value to specify which Strings are to be interpreted
 /// as truthy and which as falsey
 /// `ignore_case` can be set to compare the SD values case-insensitively
-#[derive(Deserialize, Serialize, Clone, Debug)]
+#[derive(Serialize, Clone, Debug)]
 pub struct SdMappingsTruthyValue {
     values: HashSet<String>,
     ignore_case: bool,
+}
+
+/// Custom `Deserialize` impl that routes through `Self::new()` so that
+/// `ignore_case = true` lowercases the stored values at parse time.
+/// A derived `Deserialize` would set fields directly, bypassing `new()`,
+/// and `contains()` (which lowercases the lookup) would never match the
+/// un-lowercased stored values.
+impl<'de> Deserialize<'de> for SdMappingsTruthyValue {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        struct Raw {
+            values: HashSet<String>,
+            ignore_case: bool,
+        }
+        let raw = Raw::deserialize(deserializer)?;
+        Ok(Self::new(raw.values, raw.ignore_case))
+    }
 }
 
 impl SdMappingsTruthyValue {
@@ -85,3 +105,50 @@ impl SdMappingsTruthyValue {
 
 /// A mapping of an SD.si to their truthy values
 pub type SdBoolMappings = HashMap<String, SdMappingsTruthyValue>;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn deserialized_ignore_case_lowercases_values() {
+        let json = r#"{"values": ["Flux Capacitor Mark II", "Enabled"], "ignore_case": true}"#;
+        let mapping: SdMappingsTruthyValue = serde_json::from_str(json).unwrap();
+        // Values should have been lowercased during deserialization
+        assert!(mapping.values.contains("flux capacitor mark ii"));
+        assert!(mapping.values.contains("enabled"));
+        assert!(!mapping.values.contains("Flux Capacitor Mark II"));
+        assert!(!mapping.values.contains("Enabled"));
+    }
+
+    #[test]
+    fn deserialized_case_sensitive_preserves_values() {
+        let json = r#"{"values": ["Flux Capacitor Mark II", "Enabled"], "ignore_case": false}"#;
+        let mapping: SdMappingsTruthyValue = serde_json::from_str(json).unwrap();
+        assert!(mapping.values.contains("Flux Capacitor Mark II"));
+        assert!(mapping.values.contains("Enabled"));
+    }
+
+    #[test]
+    fn contains_matches_case_insensitive_after_deserialization() {
+        let json = r#"{"values": ["Flux Capacitor Mark II", "Plutonium"], "ignore_case": true}"#;
+        let mapping: SdMappingsTruthyValue = serde_json::from_str(json).unwrap();
+        // Should match regardless of input case
+        assert!(mapping.contains("flux capacitor mark ii"));
+        assert!(mapping.contains("Flux Capacitor Mark II"));
+        assert!(mapping.contains("FLUX CAPACITOR MARK II"));
+        assert!(mapping.contains("plutonium"));
+        assert!(mapping.contains("Plutonium"));
+        assert!(!mapping.contains("Mr. Fusion"));
+    }
+
+    #[test]
+    fn contains_matches_case_sensitive_after_deserialization() {
+        let json = r#"{"values": ["Plutonium", "Mr. Fusion"], "ignore_case": false}"#;
+        let mapping: SdMappingsTruthyValue = serde_json::from_str(json).unwrap();
+        assert!(mapping.contains("Plutonium"));
+        assert!(!mapping.contains("plutonium"));
+        assert!(mapping.contains("Mr. Fusion"));
+        assert!(!mapping.contains("mr. fusion"));
+    }
+}
