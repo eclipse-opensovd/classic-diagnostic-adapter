@@ -11,6 +11,7 @@
  */
 use std::time::Duration;
 
+use cda_interfaces::HashMap;
 use http::HeaderMap;
 use opensovd_cda_lib::config::configfile::Configuration;
 use reqwest::{Method, StatusCode};
@@ -25,6 +26,9 @@ pub(crate) struct Response {
     #[allow(dead_code)]
     header_map: HeaderMap,
 }
+
+#[derive(Default)]
+pub(crate) struct QueryParams(pub HashMap<String, String>);
 
 pub(crate) async fn auth_header(
     config: &Configuration,
@@ -45,15 +49,20 @@ async fn authorize(
     config: &Configuration,
     client_id: Option<&str>,
 ) -> Result<String, TestingError> {
+    let body = &serde_json::json!(
+    {
+        "client_id": client_id.unwrap_or("test_client"),
+        "client_secret": "test_secret",
+    });
     let response = send_cda_json_request(
         config,
         "authorize",
         StatusCode::OK,
         Method::POST,
-        &serde_json::json!({"client_id": client_id.unwrap_or("test_client"), "client_secret": "test_secret"}),
+        body,
         None,
     )
-        .await?;
+    .await?;
     extract_field_from_json::<String>(&response_to_json(&response)?, "access_token")
 }
 
@@ -142,6 +151,7 @@ pub(crate) async fn send_cda_json_request(
         method,
         Some(&data.to_string()),
         Some(&headers),
+        None,
     )
     .await
 }
@@ -153,9 +163,13 @@ pub(crate) async fn send_cda_request(
     method: Method,
     data: Option<&str>,
     headers: Option<&HeaderMap>,
+    query_params: Option<&QueryParams>,
 ) -> Result<Response, TestingError> {
     let base_url = format!("http://{}:{}", &config.server.address, config.server.port);
-    let endpoint_path = format!("/vehicle/v15/{endpoint}");
+    let url_params = query_params
+        .unwrap_or(&QueryParams::default())
+        .to_query_string();
+    let endpoint_path = format!("/vehicle/v15/{endpoint}{url_params}");
 
     let url = reqwest::Url::parse(&base_url)
         .expect("Invalid base URL")
@@ -229,4 +243,20 @@ pub(crate) async fn send_request(
         body: body.clone(),
         header_map,
     })
+}
+
+impl QueryParams {
+    pub fn to_query_string(&self) -> String {
+        if self.0.is_empty() {
+            String::new()
+        } else {
+            let params = self
+                .0
+                .iter()
+                .map(|(k, v)| format!("{}={}", urlencoding::encode(k), urlencoding::encode(v)))
+                .collect::<Vec<_>>()
+                .join("&");
+            format!("?{params}")
+        }
+    }
 }

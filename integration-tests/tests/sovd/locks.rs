@@ -587,9 +587,17 @@ pub(crate) async fn lock_operation(
         "{endpoint}{}",
         lock_id.map_or(String::new(), |id| format!("/{id}"))
     );
-    send_cda_request(config, &lock_endpoint, status, method, None, Some(headers))
-        .await
-        .expect("lock operation failed")
+    send_cda_request(
+        config,
+        &lock_endpoint,
+        status,
+        method,
+        None,
+        Some(headers),
+        None,
+    )
+    .await
+    .expect("lock operation failed")
 }
 
 pub(crate) async fn create_lock(

@@ -11,6 +11,7 @@
  */
 use std::time::Duration;
 
+use cda_interfaces::HashMap;
 use http::{HeaderMap, Method, StatusCode};
 use opensovd_cda_lib::config::configfile::Configuration;
 use serde::de::DeserializeOwned;
@@ -18,7 +19,7 @@ use sovd_interfaces::components::ecu::modes::{self, dtcsetting};
 
 use crate::{
     sovd::{
-        self,
+        self, get_ecu_component,
         locks::{self, create_lock, lock_operation},
         put_mode,
     },
@@ -26,7 +27,8 @@ use crate::{
         TestingError,
         ecusim::{self},
         http::{
-            auth_header, extract_field_from_json, response_to_json, response_to_t, send_cda_request,
+            QueryParams, auth_header, extract_field_from_json, response_to_json, response_to_t,
+            send_cda_request,
         },
         runtime::{TestRuntime, restart_cda, setup_integration_test, start_ecu_sim, stop_ecu_sim},
     },
@@ -800,6 +802,146 @@ async fn test_ecu_session_reset_on_lock_reacquire() {
     .await;
 }
 
+#[tokio::test]
+async fn test_ecu_sdg_retrieval() {
+    let (runtime, _lock) = setup_integration_test(true).await.unwrap();
+    let ecu_endpoint = sovd::ECU_FLXC1000_ENDPOINT;
+
+    // Retrieve sdgs and verify contents
+    let params = QueryParams(HashMap::from_iter([(
+        "x-sovd2uds-includesdgs".to_string(),
+        "true".to_string(),
+    )]));
+    let data = get_ecu_component(&runtime.config, ecu_endpoint, StatusCode::OK, Some(&params))
+        .await
+        .unwrap();
+
+    let d = data
+        .get("data")
+        .unwrap()
+        .as_str()
+        .expect("should contain data");
+    assert_eq!(
+        d,
+        "http://localhost:20002/vehicle/v15/components/flxc1000/data"
+    );
+
+    let operations = data
+        .get("operations")
+        .unwrap()
+        .as_str()
+        .expect("should contain operations");
+    assert_eq!(
+        operations,
+        "http://localhost:20002/vehicle/v15/components/flxc1000/operations"
+    );
+
+    let configurations = data
+        .get("configurations")
+        .unwrap()
+        .as_str()
+        .expect("should contain configurations");
+    assert_eq!(
+        configurations,
+        "http://localhost:20002/vehicle/v15/components/flxc1000/configurations"
+    );
+
+    let modes = data
+        .get("modes")
+        .unwrap()
+        .as_str()
+        .expect("should contain modes");
+    assert_eq!(
+        modes,
+        "http://localhost:20002/vehicle/v15/components/flxc1000/modes"
+    );
+
+    let locks = data
+        .get("locks")
+        .unwrap()
+        .as_str()
+        .expect("should contain locks");
+    assert_eq!(
+        locks,
+        "http://localhost:20002/vehicle/v15/components/flxc1000/locks"
+    );
+
+    let faults = data
+        .get("faults")
+        .unwrap()
+        .as_str()
+        .expect("should contain faults");
+    assert_eq!(
+        faults,
+        "http://localhost:20002/vehicle/v15/components/flxc1000/faults"
+    );
+
+    let sdgs = data
+        .get("sdgs")
+        .unwrap()
+        .as_array()
+        .expect("sdgs should be an array");
+    assert_eq!(sdgs.len(), 1);
+
+    let sdg = &sdgs.first().unwrap();
+    assert_eq!(sdg.get("caption").unwrap().as_str(), Some("default_sdg"));
+    assert_eq!(sdg.get("si").unwrap().as_str(), Some("default"));
+
+    let inner = sdg
+        .get("sdgs")
+        .unwrap()
+        .as_array()
+        .expect("nested sdgs should be an array");
+    assert_eq!(inner.len(), 1);
+
+    let sd = &inner.first().unwrap();
+    assert_eq!(
+        sd.get("si").unwrap().as_str(),
+        Some("power_requirement_max")
+    );
+    assert_eq!(sd.get("value").unwrap().as_str(), Some("1.21GW"));
+}
+
+#[tokio::test]
+async fn test_ecu_sdg_retrieval_alias() {
+    let (runtime, _lock) = setup_integration_test(true).await.unwrap();
+    let ecu_endpoint = sovd::ECU_FLXC1000_ENDPOINT;
+
+    // Retrieve sdgs and verify contents
+    let params = QueryParams(HashMap::from_iter([(
+        "x-include-sdgs".to_string(),
+        "true".to_string(),
+    )]));
+    let data = get_ecu_component(&runtime.config, ecu_endpoint, StatusCode::OK, Some(&params))
+        .await
+        .unwrap();
+
+    let sdgs = data
+        .get("sdgs")
+        .unwrap()
+        .as_array()
+        .expect("sdgs should be an array");
+    assert_eq!(sdgs.len(), 1);
+
+    let sdg = &sdgs.first().unwrap();
+    assert_eq!(sdg.get("caption").unwrap().as_str(), Some("default_sdg"));
+    assert_eq!(sdg.get("si").unwrap().as_str(), Some("default"));
+
+    let inner = sdg
+        .get("sdgs")
+        .unwrap()
+        .as_array()
+        .expect("nested sdgs should be an array");
+    assert_eq!(inner.len(), 1);
+
+    let sd = &inner.first().unwrap();
+    assert_eq!(
+        sd.get("si").unwrap().as_str(),
+        Some("power_requirement_max")
+    );
+    assert_eq!(sd.get("value").unwrap().as_str(), Some("1.21GW"));
+}
+
 async fn validate_ecu_state(
     runtime: &TestRuntime,
     auth: &HeaderMap,
@@ -929,6 +1071,7 @@ async fn get_mode<T: DeserializeOwned>(
         Method::GET,
         None,
         Some(headers),
+        None,
     )
     .await?;
     response_to_t(&http_response)
@@ -946,6 +1089,7 @@ async fn ecu_status(
         Method::GET,
         None,
         Some(headers),
+        None,
     )
     .await?;
     response_to_t(&http_response)
@@ -963,6 +1107,7 @@ async fn force_variant_detection(
         Method::PUT,
         None,
         Some(headers),
+        None,
     )
     .await?;
     Ok(())
@@ -1020,6 +1165,7 @@ async fn get_configurations(
         Method::GET,
         None,
         Some(headers),
+        None,
     )
     .await?;
     response_to_t(&http_response)
@@ -1043,6 +1189,7 @@ async fn reset_ecu(
         Method::POST,
         Some(&body),
         Some(headers),
+        None,
     )
     .await?;
     Ok(())
@@ -1060,6 +1207,7 @@ async fn get_data_services(
         Method::GET,
         None,
         Some(headers),
+        None,
     )
     .await?;
     response_to_t(&http_response)
