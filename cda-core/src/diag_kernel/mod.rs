@@ -23,6 +23,7 @@ pub(crate) mod diagservices;
 pub(crate) mod ecumanager;
 mod iso_14229_nrc;
 mod operations;
+pub(crate) mod param_metadata;
 mod payload;
 mod schema;
 mod variant_detection;
