@@ -1427,6 +1427,69 @@ impl<S: SecurityPlugin> cda_interfaces::EcuManager for EcuManager<S> {
         service_name: &str,
     ) -> Result<Vec<cda_interfaces::ServiceParameterMetadata>, DiagServiceError> {
         use cda_interfaces::ServiceParameterMetadata;
+
+        /// Resolve a PHYS-CONST text value to its coded integer via the
+        /// parameter's DOP → `NormalDOP` → `CompuMethod` chain.
+        ///
+        /// Supported compu-method categories:
+        /// - **`TextTable`**: scans `internal_to_phys` scales for a `CompuValues`
+        ///   entry whose `vt` or `vt_ti` matches `phys_value`, then returns the
+        ///   scale's `lower_limit` value.  Only `CLOSED` lower bounds are accepted;
+        ///   `OPEN` or `INFINITE` bounds indicate a genuine range rather than an
+        ///   exact point value, and are skipped.
+        /// - **`Identical`**: the physical text IS the coded value; the string is
+        ///   parsed directly as a `u64`.
+        ///
+        /// Returns `None` for unsupported categories (`Linear`, `ScaleLinear`, …) or
+        /// when no matching scale entry is found.
+        #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+        fn resolve_phys_const_coded_value(
+            param: &datatypes::Parameter<'_>,
+            phys_value: &str,
+        ) -> Option<u64> {
+            let pc = param.specific_data_as_phys_const()?;
+            let dop = pc.dop()?;
+            let normal_dop = dop.specific_data_as_normal_dop()?;
+            let cm = normal_dop.compu_method()?;
+            let category: datatypes::CompuCategory = cm.category().into();
+
+            match category {
+                datatypes::CompuCategory::TextTable => {
+                    let scales = cm.internal_to_phys()?.compu_scales()?;
+                    for scale in scales {
+                        let text_match = scale.consts().is_some_and(|cv| {
+                            cv.vt().is_some_and(|vt| vt == phys_value)
+                                || cv.vt_ti().is_some_and(|ti| ti == phys_value)
+                        });
+                        if !text_match {
+                            continue;
+                        }
+                        let limit = scale.lower_limit()?;
+                        // Only accept a closed lower bound — open or infinite limits
+                        // mean the scale covers a range rather than a single value.
+                        let interval: datatypes::IntervalType = limit.interval_type().into();
+                        if !matches!(interval, datatypes::IntervalType::Closed) {
+                            continue;
+                        }
+                        return limit.value().and_then(|v| {
+                            v.parse::<u64>()
+                                .ok()
+                                .or_else(|| v.parse::<f64>().ok().map(|f| f as u64))
+                        });
+                    }
+                    None
+                }
+                datatypes::CompuCategory::Identical => {
+                    // For IDENTICAL the physical string is also the coded value.
+                    phys_value
+                        .parse::<u64>()
+                        .ok()
+                        .or_else(|| phys_value.parse::<f64>().ok().map(|f| f as u64))
+                }
+                _ => None,
+            }
+        }
+
         fn extract_param_type_metadata(
             param: &datatypes::Parameter<'_>,
             service_name: &str,
@@ -1443,22 +1506,35 @@ impl<S: SecurityPlugin> cda_interfaces::EcuManager for EcuManager<S> {
                             coded_value: v.to_owned(),
                         }
                     }),
-                datatypes::ParamType::PhysConst => param
-                    .specific_data_as_phys_const()
-                    .and_then(|pc| pc.phys_constant_value())
-                    .map_or_else(
-                        || {
-                            tracing::warn!(
-                                "Service '{}' param '{}' PHYS-CONST has no value",
+                datatypes::ParamType::PhysConst => {
+                    let phys_value = param
+                        .specific_data_as_phys_const()
+                        .and_then(|pc| pc.phys_constant_value());
+
+                    if let Some(pv) = phys_value {
+                        let coded = resolve_phys_const_coded_value(param, pv);
+                        if coded.is_none() {
+                            tracing::debug!(
+                                "Service '{}' param '{}' PHYS-CONST '{}' coded value unresolved \
+                                 (unsupported DOP category or no matching scale)",
                                 service_name,
-                                name
+                                name,
+                                pv,
                             );
-                            ParameterTypeMetadata::Value
-                        },
-                        |v| ParameterTypeMetadata::PhysConst {
-                            phys_constant_value: v.to_owned(),
-                        },
-                    ),
+                        }
+                        ParameterTypeMetadata::PhysConst {
+                            phys_constant_value: pv.to_owned(),
+                            coded_value: coded,
+                        }
+                    } else {
+                        tracing::warn!(
+                            "Service '{}' param '{}' PHYS-CONST has no value",
+                            service_name,
+                            name
+                        );
+                        ParameterTypeMetadata::Value
+                    }
+                }
                 _ => ParameterTypeMetadata::Value,
             };
 
@@ -1504,6 +1580,272 @@ impl<S: SecurityPlugin> cda_interfaces::EcuManager for EcuManager<S> {
             })
             .collect();
 
+        Ok(metadata)
+    }
+
+    /// Get parameter metadata for the POS-RESPONSE of a service.
+    ///
+    /// Returns one [`ResponseParameterInfo`] per parameter in the first positive
+    /// response definition, including byte layout (position, size) and type
+    /// information. This is the response-side counterpart of
+    /// [`get_service_parameter_metadata`] (which returns request parameters).
+    ///
+    /// For MUX DOP parameters, the MUX cases are expanded: each case's inner
+    /// structure parameters are returned with their names prefixed by the case
+    /// short name
+    #[allow(clippy::too_many_lines)]
+    fn get_response_parameter_metadata(
+        &self,
+        service_name: &str,
+    ) -> Result<Vec<cda_interfaces::ResponseParameterInfo>, DiagServiceError> {
+        use cda_interfaces::ResponseParameterInfo;
+
+        fn byte_size_from_diag_coded_type(
+            dct: Result<datatypes::DiagCodedType, DiagServiceError>,
+        ) -> Option<u32> {
+            dct.ok()
+                .and_then(|dt| dt.bit_len())
+                .map(|bits| bits.div_ceil(8))
+        }
+
+        fn byte_size_from_value_param(param: &datatypes::Parameter<'_>) -> (Option<u32>, bool) {
+            let Some(dop) = param.0.specific_data_as_value().and_then(|v| v.dop()) else {
+                return (None, false);
+            };
+            let data_op = datatypes::DataOperation(dop);
+            match data_op.variant() {
+                Ok(datatypes::DataOperationVariant::Normal(n)) => {
+                    (byte_size_from_diag_coded_type(n.diag_coded_type()), false)
+                }
+                Ok(datatypes::DataOperationVariant::Mux(_)) => (None, true),
+                _ => (None, false),
+            }
+        }
+
+        fn byte_size_from_coded_const(param: &datatypes::Parameter<'_>) -> Option<u32> {
+            let cc = param.0.specific_data_as_coded_const()?;
+            let dct = cc.diag_coded_type()?;
+            let dct: Result<datatypes::DiagCodedType, _> = dct.try_into();
+            byte_size_from_diag_coded_type(dct)
+        }
+
+        fn extract_param_type(
+            param: &datatypes::Parameter<'_>,
+        ) -> cda_interfaces::ParameterTypeMetadata {
+            use cda_interfaces::ParameterTypeMetadata;
+
+            let Ok(pt) = param.param_type() else {
+                return ParameterTypeMetadata::Value;
+            };
+
+            match pt {
+                datatypes::ParamType::CodedConst => param
+                    .0
+                    .specific_data_as_coded_const()
+                    .and_then(|cc| cc.coded_value())
+                    .map_or(ParameterTypeMetadata::Value, |v| {
+                        ParameterTypeMetadata::CodedConst {
+                            coded_value: v.to_owned(),
+                        }
+                    }),
+                datatypes::ParamType::MatchingRequestParam => {
+                    let byte_length = param
+                        .0
+                        .specific_data_as_matching_request_param()
+                        .map_or(0, |m| m.byte_length());
+                    ParameterTypeMetadata::MatchingRequestParam { byte_length }
+                }
+                datatypes::ParamType::PhysConst => {
+                    let phys_value = param
+                        .0
+                        .specific_data_as_phys_const()
+                        .and_then(|p| p.phys_constant_value().map(ToOwned::to_owned));
+                    match phys_value {
+                        Some(v) => ParameterTypeMetadata::PhysConst {
+                            phys_constant_value: v,
+                            coded_value: None,
+                        },
+                        None => ParameterTypeMetadata::Value,
+                    }
+                }
+                _ => ParameterTypeMetadata::Value,
+            }
+        }
+
+        fn expand_mux_cases(
+            param: &datatypes::Parameter<'_>,
+            mux_byte_position: u32,
+        ) -> Vec<ResponseParameterInfo> {
+            let Some(value_data) = param.0.specific_data_as_value() else {
+                return Vec::new();
+            };
+            let Some(dop) = value_data.dop() else {
+                return Vec::new();
+            };
+            let data_op = datatypes::DataOperation(dop);
+            let Ok(datatypes::DataOperationVariant::Mux(mux_dop)) = data_op.variant() else {
+                return Vec::new();
+            };
+
+            let switch_key_size = mux_dop
+                .0
+                .switch_key()
+                .and_then(|sk| sk.dop())
+                .and_then(|dop| {
+                    let data_op = datatypes::DataOperation(dop);
+                    if let Ok(datatypes::DataOperationVariant::Normal(n)) = data_op.variant() {
+                        byte_size_from_diag_coded_type(n.diag_coded_type())
+                    } else {
+                        None
+                    }
+                })
+                .unwrap_or(0);
+
+            let Some(cases) = mux_dop.cases() else {
+                return Vec::new();
+            };
+
+            let mut result = Vec::new();
+            for case in cases {
+                let case_name = case.short_name().unwrap_or_default();
+                let lower_limit = case
+                    .lower_limit()
+                    .and_then(|ll| ll.value())
+                    .map(ToOwned::to_owned);
+
+                let Some(case_dop) = case.structure() else {
+                    continue;
+                };
+                let Some(structure) = case_dop.specific_data_as_structure() else {
+                    continue;
+                };
+                let Some(inner_params) = structure.params() else {
+                    continue;
+                };
+
+                for inner_param in inner_params {
+                    let inner = datatypes::Parameter(inner_param);
+                    let Some(inner_name) = inner.short_name() else {
+                        continue;
+                    };
+                    let inner_type = extract_param_type(&inner);
+                    let (inner_byte_size, _) = match &inner_type {
+                        cda_interfaces::ParameterTypeMetadata::CodedConst { .. } => {
+                            (byte_size_from_coded_const(&inner), false)
+                        }
+                        cda_interfaces::ParameterTypeMetadata::Value => {
+                            byte_size_from_value_param(&inner)
+                        }
+                        _ => (None, false),
+                    };
+
+                    let byte_position = mux_byte_position
+                        .checked_add(switch_key_size)
+                        .and_then(|v| v.checked_add(inner.byte_position()))
+                        .unwrap_or(mux_byte_position);
+
+                    result.push(ResponseParameterInfo {
+                        name: format!("{case_name}/{inner_name}"),
+                        semantic: inner.semantic().map(ToOwned::to_owned),
+                        param_type: inner_type,
+                        byte_position,
+                        bit_position: inner.bit_position(),
+                        byte_size: inner_byte_size,
+                    });
+                }
+
+                let marker_position = mux_byte_position
+                    .checked_add(switch_key_size)
+                    .unwrap_or(mux_byte_position);
+
+                result.push(ResponseParameterInfo {
+                    name: format!("__mux_case__/{case_name}"),
+                    semantic: Some("MUX-CASE".to_owned()),
+                    param_type: cda_interfaces::ParameterTypeMetadata::CodedConst {
+                        coded_value: lower_limit.unwrap_or_default(),
+                    },
+                    byte_position: marker_position,
+                    bit_position: 0,
+                    byte_size: structure.byte_size(),
+                });
+            }
+
+            result
+        }
+
+        let service = self.get_meta_data_service(service_name)?;
+        let pos_responses = match service.pos_responses() {
+            Some(r) if !r.is_empty() => r,
+            _ => return Ok(Vec::new()),
+        };
+
+        let Some(params) = pos_responses.iter().next().and_then(|r| r.params()) else {
+            return Ok(Vec::new());
+        };
+
+        let mut metadata: Vec<ResponseParameterInfo> = Vec::new();
+        for raw_param in params {
+            let param = datatypes::Parameter(raw_param);
+            let Some(name) = param.short_name().map(ToOwned::to_owned) else {
+                continue;
+            };
+            let semantic = param.semantic().map(ToOwned::to_owned);
+            let param_type = extract_param_type(&param);
+
+            match param_type.clone() {
+                cda_interfaces::ParameterTypeMetadata::CodedConst { .. } => {
+                    metadata.push(ResponseParameterInfo {
+                        name,
+                        semantic,
+                        param_type,
+                        byte_position: param.byte_position(),
+                        bit_position: param.bit_position(),
+                        byte_size: byte_size_from_coded_const(&param),
+                    });
+                }
+                cda_interfaces::ParameterTypeMetadata::MatchingRequestParam { byte_length } => {
+                    metadata.push(ResponseParameterInfo {
+                        name,
+                        semantic,
+                        param_type,
+                        byte_position: param.byte_position(),
+                        bit_position: param.bit_position(),
+                        byte_size: Some(byte_length),
+                    });
+                }
+                cda_interfaces::ParameterTypeMetadata::Value => {
+                    let (byte_size, is_mux) = byte_size_from_value_param(&param);
+                    if is_mux {
+                        metadata.extend(expand_mux_cases(&param, param.byte_position()));
+                    } else {
+                        metadata.push(ResponseParameterInfo {
+                            name,
+                            semantic,
+                            param_type,
+                            byte_position: param.byte_position(),
+                            bit_position: param.bit_position(),
+                            byte_size,
+                        });
+                    }
+                }
+                cda_interfaces::ParameterTypeMetadata::PhysConst { .. } => {
+                    metadata.push(ResponseParameterInfo {
+                        name,
+                        semantic,
+                        param_type,
+                        byte_position: param.byte_position(),
+                        bit_position: param.bit_position(),
+                        byte_size: None,
+                    });
+                }
+            }
+        }
+
+        tracing::debug!(
+            "Service '{}' has {} positive-response parameters (MUX-expanded)",
+            service_name,
+            metadata.len()
+        );
         Ok(metadata)
     }
 
@@ -7677,6 +8019,240 @@ mod tests {
         } else {
             panic!("Expected CODED-CONST parameter type");
         }
+    }
+
+    /// Verifies that `get_service_parameter_metadata` resolves `coded_value` for a
+    /// PHYS-CONST parameter backed by a `NormalDOP` with an Identical `CompuMethod`.
+    #[test]
+    fn test_get_service_parameter_metadata_phys_const_coded_value_resolved() {
+        use cda_interfaces::ParameterTypeMetadata;
+
+        let (ecu_manager, _dc, _sid) = create_ecu_manager_with_phys_const_normal_dop_service();
+
+        let result = ecu_manager.get_service_parameter_metadata("TestPhysConstNormalService");
+        assert!(result.is_ok());
+
+        let metadata = result.unwrap();
+
+        let did_param = metadata
+            .iter()
+            .find(|m| m.name == "DID")
+            .expect("DID parameter should be present");
+
+        if let ParameterTypeMetadata::PhysConst {
+            phys_constant_value,
+            coded_value,
+        } = &did_param.param_type
+        {
+            assert_eq!(phys_constant_value, "61840");
+            // Identical CompuMethod: phys string parses directly to coded integer
+            assert_eq!(
+                *coded_value,
+                Some(61840u64),
+                "PHYS-CONST with Identical CompuMethod must resolve coded_value"
+            );
+        } else {
+            panic!(
+                "Expected PhysConst parameter type for DID, got {:?}",
+                did_param.param_type
+            );
+        }
+    }
+
+    #[test]
+    fn test_get_response_parameter_metadata_service_not_found() {
+        let (ecu_manager, _dc, _sid) = create_ecu_manager_with_phys_const_normal_dop_service();
+
+        let result = ecu_manager.get_response_parameter_metadata("NonExistentService");
+        assert!(result.is_err());
+        assert!(matches!(result, Err(DiagServiceError::NotFound(_))));
+    }
+
+    #[test]
+    fn test_get_response_parameter_metadata_empty_for_no_pos_response() {
+        let (ecu_manager, _dc, _sid, _) = create_ecu_manager_with_struct_service(1);
+
+        // TestStructService has no positive-response definition
+        let result = ecu_manager.get_response_parameter_metadata("TestStructService");
+        assert!(result.is_ok());
+        assert!(result.unwrap().is_empty());
+    }
+
+    /// Covers `CodedConst` (SID), `PhysConst` (DID), and `Value` (data) response parameters.
+    ///
+    /// Fixture layout (`pos_response` of `TestPhysConstNormalService`):
+    ///   byte 0: `sid`       – CODED-CONST (1 byte)
+    ///   byte 1: `DID`       – PHYS-CONST  (u16, `coded_value` = None in response metadata)
+    ///   byte 3: `data_param`– VALUE        (u8, 1 byte)
+    #[test]
+    fn test_get_response_parameter_metadata_phys_const_and_value_params() {
+        use cda_interfaces::ParameterTypeMetadata;
+
+        let (ecu_manager, _dc, _sid) = create_ecu_manager_with_phys_const_normal_dop_service();
+
+        let result = ecu_manager.get_response_parameter_metadata("TestPhysConstNormalService");
+        assert!(result.is_ok());
+
+        let metadata = result.unwrap();
+        assert_eq!(metadata.len(), 3, "Expected sid, DID, data_param");
+
+        // SID: CODED-CONST at byte 0
+        let sid_param = metadata
+            .iter()
+            .find(|m| m.name == "sid")
+            .expect("sid param should be present");
+        assert!(matches!(
+            sid_param.param_type,
+            ParameterTypeMetadata::CodedConst { .. }
+        ));
+        assert_eq!(sid_param.byte_position, 0);
+        assert_eq!(sid_param.byte_size, Some(1)); // 8 bits
+
+        // DID: PHYS-CONST at byte 1; response metadata does not resolve coded_value
+        let did_param = metadata
+            .iter()
+            .find(|m| m.name == "DID")
+            .expect("DID param should be present");
+        if let ParameterTypeMetadata::PhysConst {
+            phys_constant_value,
+            coded_value,
+        } = &did_param.param_type
+        {
+            assert_eq!(phys_constant_value, "61840");
+            assert!(
+                coded_value.is_none(),
+                "get_response_parameter_metadata does not resolve PhysConst coded_value"
+            );
+        } else {
+            panic!(
+                "Expected PhysConst type for DID, got {:?}",
+                did_param.param_type
+            );
+        }
+        assert_eq!(did_param.byte_position, 1);
+        assert!(did_param.byte_size.is_none());
+
+        // data_param: VALUE at byte 3, u8 = 1 byte
+        let data_param = metadata
+            .iter()
+            .find(|m| m.name == "data_param")
+            .expect("data_param should be present");
+        assert!(matches!(
+            data_param.param_type,
+            ParameterTypeMetadata::Value
+        ));
+        assert_eq!(data_param.byte_position, 3);
+        assert_eq!(data_param.byte_size, Some(1)); // u8 = 8 bits
+    }
+
+    /// Verifies MUX expansion: each case's inner parameters appear as
+    /// `"case_name/param_name"` entries, and each case produces a
+    /// `"__mux_case__/case_name"` marker.
+    ///
+    /// Fixture layout (`pos_response` of `TestMuxService`):
+    ///   byte 0: `test_service_pos_sid` – CODED-CONST (1 byte, SID = 0x22)
+    ///   byte 2: `mux_1_param`          – MUX DOP (expanded into case entries)
+    ///     switch key: u16 at offset 0 within mux (size = 2 bytes)
+    ///     case 1 abs pos = mux(2) + key(2) + `inner_offset`
+    ///       `mux_1_case_1_param_1`: f32 → byte 4, size 4
+    ///       `mux_1_case_1_param_2`: u8  → byte 8, size 1
+    ///       marker __`mux_case`__/`mux_1_case_1`: byte 4, size = structure (7)
+    ///     case 2 abs pos = 2 + 2 + `inner_offset`
+    ///       `mux_1_case_2_param_1`: i16  → byte 5, size 2
+    ///       `mux_1_case_2_param_2`: ascii 32 bits → byte 8, size 4
+    ///       marker __`mux_case`__/`mux_1_case_2`: byte 4, size = structure (7)
+    ///     case 3: no structure → produces no entries
+    #[test]
+    fn test_get_response_parameter_metadata_mux_expansion() {
+        use cda_interfaces::ParameterTypeMetadata;
+
+        let (ecu_manager, _, _) = create_ecu_manager_with_mux_service(None, None, None);
+
+        let result = ecu_manager.get_response_parameter_metadata("TestMuxService");
+        assert!(result.is_ok());
+
+        let metadata = result.unwrap();
+        // SID (1) + case-1 (2 inner + 1 marker) + case-2 (2 inner + 1 marker) = 7
+        assert_eq!(
+            metadata.len(),
+            7,
+            "Expected SID + case-1 entries (2+marker) + case-2 entries (2+marker)"
+        );
+
+        // SID coded-const is preserved unchanged
+        let sid_param = metadata
+            .iter()
+            .find(|m| m.name == "test_service_pos_sid")
+            .expect("test_service_pos_sid should be present");
+        assert!(matches!(
+            sid_param.param_type,
+            ParameterTypeMetadata::CodedConst { .. }
+        ));
+        assert_eq!(sid_param.byte_position, 0);
+
+        // Case 1 inner params (mux byte_pos=2, switch_key_size=2)
+        let c1p1 = metadata
+            .iter()
+            .find(|m| m.name == "mux_1_case_1/mux_1_case_1_param_1")
+            .expect("mux_1_case_1/mux_1_case_1_param_1 should be present");
+        assert!(matches!(c1p1.param_type, ParameterTypeMetadata::Value));
+        assert_eq!(c1p1.byte_position, 4); // 2 + 2 + 0
+        assert_eq!(c1p1.byte_size, Some(4)); // f32 = 32 bits / 8
+
+        let c1p2 = metadata
+            .iter()
+            .find(|m| m.name == "mux_1_case_1/mux_1_case_1_param_2")
+            .expect("mux_1_case_1/mux_1_case_1_param_2 should be present");
+        assert!(matches!(c1p2.param_type, ParameterTypeMetadata::Value));
+        assert_eq!(c1p2.byte_position, 8); // 2 + 2 + 4
+        assert_eq!(c1p2.byte_size, Some(1)); // u8 = 8 bits / 8
+
+        let marker_1 = metadata
+            .iter()
+            .find(|m| m.name == "__mux_case__/mux_1_case_1")
+            .expect("__mux_case__/mux_1_case_1 marker should be present");
+        assert!(matches!(
+            marker_1.param_type,
+            ParameterTypeMetadata::CodedConst { .. }
+        ));
+        assert_eq!(marker_1.byte_position, 4); // 2 + 2
+        assert_eq!(marker_1.byte_size, Some(7)); // structure byte_size
+
+        // Case 2 inner params
+        let c2p1 = metadata
+            .iter()
+            .find(|m| m.name == "mux_1_case_2/mux_1_case_2_param_1")
+            .expect("mux_1_case_2/mux_1_case_2_param_1 should be present");
+        assert!(matches!(c2p1.param_type, ParameterTypeMetadata::Value));
+        assert_eq!(c2p1.byte_position, 5); // 2 + 2 + 1
+        assert_eq!(c2p1.byte_size, Some(2)); // i16 = 16 bits / 8
+
+        let c2p2 = metadata
+            .iter()
+            .find(|m| m.name == "mux_1_case_2/mux_1_case_2_param_2")
+            .expect("mux_1_case_2/mux_1_case_2_param_2 should be present");
+        assert!(matches!(c2p2.param_type, ParameterTypeMetadata::Value));
+        assert_eq!(c2p2.byte_position, 8); // 2 + 2 + 4
+        assert_eq!(c2p2.byte_size, Some(4)); // ascii 32 bits / 8
+
+        let marker_2 = metadata
+            .iter()
+            .find(|m| m.name == "__mux_case__/mux_1_case_2")
+            .expect("__mux_case__/mux_1_case_2 marker should be present");
+        assert!(matches!(
+            marker_2.param_type,
+            ParameterTypeMetadata::CodedConst { .. }
+        ));
+        assert_eq!(marker_2.byte_position, 4); // 2 + 2
+        assert_eq!(marker_2.byte_size, Some(7)); // structure byte_size
+
+        // Case 3 has no structure — must produce no entries at all
+        assert!(
+            metadata
+                .iter()
+                .all(|m| !m.name.starts_with("mux_1_case_3/")),
+            "mux_1_case_3 has no structure and must not produce entries"
+        );
     }
 
     #[tokio::test]
