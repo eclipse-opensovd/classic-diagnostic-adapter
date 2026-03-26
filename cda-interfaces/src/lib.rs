@@ -272,7 +272,7 @@ pub struct FunctionalDescriptionConfig {
 pub enum DiagServiceError {
     /// Returned in case a resource can not be found
     #[error("Not found: {0:?}")]
-    NotFound(Option<String>),
+    NotFound(String),
     #[error("Request not supported: {0}")]
     RequestNotSupported(String),
     #[error("Invalid database: {0}")]

@@ -701,7 +701,7 @@ impl DiagnosticDatabase {
                 com_param.default.clone()
             }
             Err(e) => {
-                if let DiagServiceError::NotFound(Some(e)) = &e {
+                if let DiagServiceError::NotFound(e) = &e {
                     tracing::debug!(
                         param_name = %com_param.name,
                         error = %e,
