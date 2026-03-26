@@ -2161,7 +2161,8 @@ impl<S: SecurityPlugin> EcuManager<S> {
             .insert(lookup_id, None);
 
         Err(DiagServiceError::NotFound(format!(
-            "Diagnostic service '{lookup_name}' not found in variant, base variant, or ECU shared data"
+            "Diagnostic service '{lookup_name}' not found in variant, base variant, or ECU \
+            shared data"
         )))
     }
 
