@@ -1422,6 +1422,7 @@ impl<S: SecurityPlugin> cda_interfaces::EcuManager for EcuManager<S> {
             response_type,
         })
     }
+    #[allow(clippy::too_many_lines)]
     fn get_service_parameter_metadata(
         &self,
         service_name: &str,
@@ -1490,6 +1491,88 @@ impl<S: SecurityPlugin> cda_interfaces::EcuManager for EcuManager<S> {
             }
         }
 
+        /// Extract `CompuScaleInfo` entries from a Value param's DOP `CompuMethod`.
+        #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+        fn extract_value_dop_info(
+            param: &datatypes::Parameter<'_>,
+        ) -> (
+            Option<String>,
+            Option<u64>,
+            Vec<cda_interfaces::CompuScaleInfo>,
+        ) {
+            let Some(value_data) = param.0.specific_data_as_value() else {
+                return (None, None, Vec::new());
+            };
+
+            let physical_default = value_data.physical_default_value().map(ToOwned::to_owned);
+
+            let Some(dop) = value_data.dop() else {
+                return (physical_default, None, Vec::new());
+            };
+            let Some(normal_dop) = dop.specific_data_as_normal_dop() else {
+                return (physical_default, None, Vec::new());
+            };
+            let Some(cm) = normal_dop.compu_method() else {
+                return (physical_default, None, Vec::new());
+            };
+
+            let category: datatypes::CompuCategory = cm.category().into();
+            let mut scales = Vec::new();
+
+            if matches!(category, datatypes::CompuCategory::TextTable)
+                && let Some(itp) = cm.internal_to_phys()
+                && let Some(compu_scales) = itp.compu_scales()
+            {
+                for scale in compu_scales {
+                    let short_label = scale
+                        .short_label()
+                        .and_then(|t| t.value())
+                        .map(ToOwned::to_owned);
+                    let compu_const_vt = scale
+                        .consts()
+                        .and_then(|cv| cv.vt().or_else(|| cv.vt_ti()).map(ToOwned::to_owned));
+                    let lower = scale.lower_limit().and_then(|l| {
+                        l.value().and_then(|v| {
+                            v.parse::<u64>()
+                                .ok()
+                                .or_else(|| v.parse::<f64>().ok().map(|f| f as u64))
+                        })
+                    });
+                    let upper = scale.upper_limit().and_then(|l| {
+                        l.value().and_then(|v| {
+                            v.parse::<u64>()
+                                .ok()
+                                .or_else(|| v.parse::<f64>().ok().map(|f| f as u64))
+                        })
+                    });
+                    scales.push(cda_interfaces::CompuScaleInfo {
+                        short_label,
+                        lower_limit: lower,
+                        upper_limit: upper.or(lower),
+                        compu_const_vt,
+                    });
+                }
+            }
+
+            // Resolve coded default from physical default via the CompuMethod
+            let coded_default = physical_default.as_deref().and_then(|pd| match category {
+                datatypes::CompuCategory::TextTable => scales.iter().find_map(|s| {
+                    if s.compu_const_vt.as_deref() == Some(pd) {
+                        s.lower_limit
+                    } else {
+                        None
+                    }
+                }),
+                datatypes::CompuCategory::Identical => pd
+                    .parse::<u64>()
+                    .ok()
+                    .or_else(|| pd.parse::<f64>().ok().map(|f| f as u64)),
+                _ => None,
+            });
+
+            (physical_default, coded_default, scales)
+        }
+
         fn extract_param_type_metadata(
             param: &datatypes::Parameter<'_>,
             service_name: &str,
@@ -1501,11 +1584,16 @@ impl<S: SecurityPlugin> cda_interfaces::EcuManager for EcuManager<S> {
                 datatypes::ParamType::CodedConst => param
                     .specific_data_as_coded_const()
                     .and_then(|cc| cc.coded_value())
-                    .map_or(ParameterTypeMetadata::Value, |v| {
-                        ParameterTypeMetadata::CodedConst {
+                    .map_or(
+                        ParameterTypeMetadata::Value {
+                            physical_default_value: None,
+                            coded_default_value: None,
+                            compu_scales: Vec::new(),
+                        },
+                        |v| ParameterTypeMetadata::CodedConst {
                             coded_value: v.to_owned(),
-                        }
-                    }),
+                        },
+                    ),
                 datatypes::ParamType::PhysConst => {
                     let phys_value = param
                         .specific_data_as_phys_const()
@@ -1532,10 +1620,21 @@ impl<S: SecurityPlugin> cda_interfaces::EcuManager for EcuManager<S> {
                             service_name,
                             name
                         );
-                        ParameterTypeMetadata::Value
+                        ParameterTypeMetadata::Value {
+                            physical_default_value: None,
+                            coded_default_value: None,
+                            compu_scales: Vec::new(),
+                        }
                     }
                 }
-                _ => ParameterTypeMetadata::Value,
+                _ => {
+                    let (phys_default, coded_default, compu_scales) = extract_value_dop_info(param);
+                    ParameterTypeMetadata::Value {
+                        physical_default_value: phys_default,
+                        coded_default_value: coded_default,
+                        compu_scales,
+                    }
+                }
             };
 
             Ok(param_type)
@@ -1629,13 +1728,91 @@ impl<S: SecurityPlugin> cda_interfaces::EcuManager for EcuManager<S> {
             byte_size_from_diag_coded_type(dct)
         }
 
+        #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+        fn extract_value_dop_info_resp(
+            param: &datatypes::Parameter<'_>,
+        ) -> (
+            Option<String>,
+            Option<u64>,
+            Vec<cda_interfaces::CompuScaleInfo>,
+        ) {
+            let Some(value_data) = param.0.specific_data_as_value() else {
+                return (None, None, Vec::new());
+            };
+            let physical_default = value_data.physical_default_value().map(ToOwned::to_owned);
+            let Some(dop) = value_data.dop() else {
+                return (physical_default, None, Vec::new());
+            };
+            let Some(normal_dop) = dop.specific_data_as_normal_dop() else {
+                return (physical_default, None, Vec::new());
+            };
+            let Some(cm) = normal_dop.compu_method() else {
+                return (physical_default, None, Vec::new());
+            };
+            let category: datatypes::CompuCategory = cm.category().into();
+            let mut scales = Vec::new();
+            if matches!(category, datatypes::CompuCategory::TextTable)
+                && let Some(itp) = cm.internal_to_phys()
+                && let Some(compu_scales) = itp.compu_scales()
+            {
+                for scale in compu_scales {
+                    let short_label = scale
+                        .short_label()
+                        .and_then(|t| t.value())
+                        .map(ToOwned::to_owned);
+                    let compu_const_vt = scale
+                        .consts()
+                        .and_then(|cv| cv.vt().or_else(|| cv.vt_ti()).map(ToOwned::to_owned));
+                    let lower = scale.lower_limit().and_then(|l| {
+                        l.value().and_then(|v| {
+                            v.parse::<u64>()
+                                .ok()
+                                .or_else(|| v.parse::<f64>().ok().map(|f| f as u64))
+                        })
+                    });
+                    let upper = scale.upper_limit().and_then(|l| {
+                        l.value().and_then(|v| {
+                            v.parse::<u64>()
+                                .ok()
+                                .or_else(|| v.parse::<f64>().ok().map(|f| f as u64))
+                        })
+                    });
+                    scales.push(cda_interfaces::CompuScaleInfo {
+                        short_label,
+                        lower_limit: lower,
+                        upper_limit: upper.or(lower),
+                        compu_const_vt,
+                    });
+                }
+            }
+            let coded_default = physical_default.as_deref().and_then(|pd| match category {
+                datatypes::CompuCategory::TextTable => scales.iter().find_map(|s| {
+                    if s.compu_const_vt.as_deref() == Some(pd) {
+                        s.lower_limit
+                    } else {
+                        None
+                    }
+                }),
+                datatypes::CompuCategory::Identical => pd
+                    .parse::<u64>()
+                    .ok()
+                    .or_else(|| pd.parse::<f64>().ok().map(|f| f as u64)),
+                _ => None,
+            });
+            (physical_default, coded_default, scales)
+        }
+
         fn extract_param_type(
             param: &datatypes::Parameter<'_>,
         ) -> cda_interfaces::ParameterTypeMetadata {
             use cda_interfaces::ParameterTypeMetadata;
 
             let Ok(pt) = param.param_type() else {
-                return ParameterTypeMetadata::Value;
+                return ParameterTypeMetadata::Value {
+                    physical_default_value: None,
+                    coded_default_value: None,
+                    compu_scales: Vec::new(),
+                };
             };
 
             match pt {
@@ -1643,11 +1820,16 @@ impl<S: SecurityPlugin> cda_interfaces::EcuManager for EcuManager<S> {
                     .0
                     .specific_data_as_coded_const()
                     .and_then(|cc| cc.coded_value())
-                    .map_or(ParameterTypeMetadata::Value, |v| {
-                        ParameterTypeMetadata::CodedConst {
+                    .map_or(
+                        ParameterTypeMetadata::Value {
+                            physical_default_value: None,
+                            coded_default_value: None,
+                            compu_scales: Vec::new(),
+                        },
+                        |v| ParameterTypeMetadata::CodedConst {
                             coded_value: v.to_owned(),
-                        }
-                    }),
+                        },
+                    ),
                 datatypes::ParamType::MatchingRequestParam => {
                     let byte_length = param
                         .0
@@ -1665,10 +1847,22 @@ impl<S: SecurityPlugin> cda_interfaces::EcuManager for EcuManager<S> {
                             phys_constant_value: v,
                             coded_value: None,
                         },
-                        None => ParameterTypeMetadata::Value,
+                        None => ParameterTypeMetadata::Value {
+                            physical_default_value: None,
+                            coded_default_value: None,
+                            compu_scales: Vec::new(),
+                        },
                     }
                 }
-                _ => ParameterTypeMetadata::Value,
+                _ => {
+                    let (phys_default, coded_default, compu_scales) =
+                        extract_value_dop_info_resp(param);
+                    ParameterTypeMetadata::Value {
+                        physical_default_value: phys_default,
+                        coded_default_value: coded_default,
+                        compu_scales,
+                    }
+                }
             }
         }
 
@@ -1733,7 +1927,7 @@ impl<S: SecurityPlugin> cda_interfaces::EcuManager for EcuManager<S> {
                         cda_interfaces::ParameterTypeMetadata::CodedConst { .. } => {
                             (byte_size_from_coded_const(&inner), false)
                         }
-                        cda_interfaces::ParameterTypeMetadata::Value => {
+                        cda_interfaces::ParameterTypeMetadata::Value { .. } => {
                             byte_size_from_value_param(&inner)
                         }
                         _ => (None, false),
@@ -1813,7 +2007,7 @@ impl<S: SecurityPlugin> cda_interfaces::EcuManager for EcuManager<S> {
                         byte_size: Some(byte_length),
                     });
                 }
-                cda_interfaces::ParameterTypeMetadata::Value => {
+                cda_interfaces::ParameterTypeMetadata::Value { .. } => {
                     let (byte_size, is_mux) = byte_size_from_value_param(&param);
                     if is_mux {
                         metadata.extend(expand_mux_cases(&param, param.byte_position()));
@@ -7915,7 +8109,7 @@ mod tests {
         let data_param = metadata.iter().find(|m| m.name == "data").unwrap();
         assert!(matches!(
             data_param.param_type,
-            ParameterTypeMetadata::Value
+            ParameterTypeMetadata::Value { .. }
         ));
     }
 
@@ -8139,7 +8333,7 @@ mod tests {
             .expect("data_param should be present");
         assert!(matches!(
             data_param.param_type,
-            ParameterTypeMetadata::Value
+            ParameterTypeMetadata::Value { .. }
         ));
         assert_eq!(data_param.byte_position, 3);
         assert_eq!(data_param.byte_size, Some(1)); // u8 = 8 bits
@@ -8195,7 +8389,10 @@ mod tests {
             .iter()
             .find(|m| m.name == "mux_1_case_1/mux_1_case_1_param_1")
             .expect("mux_1_case_1/mux_1_case_1_param_1 should be present");
-        assert!(matches!(c1p1.param_type, ParameterTypeMetadata::Value));
+        assert!(matches!(
+            c1p1.param_type,
+            ParameterTypeMetadata::Value { .. }
+        ));
         assert_eq!(c1p1.byte_position, 4); // 2 + 2 + 0
         assert_eq!(c1p1.byte_size, Some(4)); // f32 = 32 bits / 8
 
@@ -8203,7 +8400,10 @@ mod tests {
             .iter()
             .find(|m| m.name == "mux_1_case_1/mux_1_case_1_param_2")
             .expect("mux_1_case_1/mux_1_case_1_param_2 should be present");
-        assert!(matches!(c1p2.param_type, ParameterTypeMetadata::Value));
+        assert!(matches!(
+            c1p2.param_type,
+            ParameterTypeMetadata::Value { .. }
+        ));
         assert_eq!(c1p2.byte_position, 8); // 2 + 2 + 4
         assert_eq!(c1p2.byte_size, Some(1)); // u8 = 8 bits / 8
 
@@ -8223,7 +8423,10 @@ mod tests {
             .iter()
             .find(|m| m.name == "mux_1_case_2/mux_1_case_2_param_1")
             .expect("mux_1_case_2/mux_1_case_2_param_1 should be present");
-        assert!(matches!(c2p1.param_type, ParameterTypeMetadata::Value));
+        assert!(matches!(
+            c2p1.param_type,
+            ParameterTypeMetadata::Value { .. }
+        ));
         assert_eq!(c2p1.byte_position, 5); // 2 + 2 + 1
         assert_eq!(c2p1.byte_size, Some(2)); // i16 = 16 bits / 8
 
@@ -8231,7 +8434,10 @@ mod tests {
             .iter()
             .find(|m| m.name == "mux_1_case_2/mux_1_case_2_param_2")
             .expect("mux_1_case_2/mux_1_case_2_param_2 should be present");
-        assert!(matches!(c2p2.param_type, ParameterTypeMetadata::Value));
+        assert!(matches!(
+            c2p2.param_type,
+            ParameterTypeMetadata::Value { .. }
+        ));
         assert_eq!(c2p2.byte_position, 8); // 2 + 2 + 4
         assert_eq!(c2p2.byte_size, Some(4)); // ascii 32 bits / 8
 

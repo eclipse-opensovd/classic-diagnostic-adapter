@@ -51,6 +51,22 @@ pub struct ResponseParameterInfo {
     pub byte_size: Option<u32>,
 }
 
+/// Information about a single scale in a DOP `CompuMethod`.
+///
+/// For TEXTTABLE DOPs the lower/upper limits define the coded (internal)
+/// value range that maps to the label in `compu_const_vt`.
+#[derive(Debug, Clone, Serialize)]
+pub struct CompuScaleInfo {
+    /// Short label for this scale
+    pub short_label: Option<String>,
+    /// Lower coded limit (closed bound)
+    pub lower_limit: Option<u64>,
+    /// Upper coded limit (closed bound); equals `lower_limit` for single-value scales.
+    pub upper_limit: Option<u64>,
+    /// COMPU-CONST textual value (VT or VT-TI)
+    pub compu_const_vt: Option<String>,
+}
+
 /// Parameter type with constant value metadata
 #[derive(Debug, Clone, Serialize)]
 pub enum ParameterTypeMetadata {
@@ -66,8 +82,20 @@ pub enum ParameterTypeMetadata {
     /// MATCHING-REQUEST-PARAM: value copied from the corresponding request parameter.
     /// `byte_length` is the number of bytes to copy from the request.
     MatchingRequestParam { byte_length: u32 },
-    /// VALUE or other dynamic parameter types
-    Value,
+    /// VALUE or other dynamic parameter types.
+    ///
+    /// When the DOP is available, `physical_default_value` carries the ODX
+    /// default, `coded_default_value` is its resolved coded equivalent, and
+    /// `compu_scales` lists the TEXTTABLE / LINEAR scales from the DOP
+    /// `CompuMethod` (empty for IDENTICAL DOPs).
+    Value {
+        /// ODX `PHYSICAL-DEFAULT-VALUE` (textual)
+        physical_default_value: Option<String>,
+        /// Coded (internal) form of the default value, resolved via the DOP
+        coded_default_value: Option<u64>,
+        /// Scales from the DOP `CompuMethod` (TEXTTABLE entries with limits)
+        compu_scales: Vec<CompuScaleInfo>,
+    },
 }
 
 /// MUX case information for service response routing
