@@ -18,9 +18,10 @@ use cda_interfaces::{
         DiagServiceJsonResponse, DiagServiceResponse, DiagServiceResponseType, FieldParseError,
         MappedNRC,
     },
+    service_ids::NEGATIVE_RESPONSE,
 };
 
-use crate::diag_kernel::{DiagDataValue, operations};
+use crate::diag_kernel::{DiagDataValue, iso_14229_nrc, operations};
 
 #[derive(Debug, Clone)]
 pub struct DiagServiceResponseStruct {
@@ -89,9 +90,7 @@ impl DiagServiceResponse for DiagServiceResponseStruct {
             errors: _,
         }) = &self.mapped_data
         else {
-            return Err(DiagServiceError::UnexpectedResponse(Some(
-                "Unexpected negative response from ECU".to_owned(),
-            )));
+            return extract_nrc_from_raw_data(&self.data);
         };
         let nrc_code = mapped_data
             .get("NRC")
@@ -369,5 +368,79 @@ impl DiagServiceResponseStruct {
             }
             DiagDataTypeContainer::DtcStruct(dtc) => Ok(create_dtc(dtc)),
         }
+    }
+}
+
+fn extract_nrc_from_raw_data(data: &[u8]) -> Result<MappedNRC, DiagServiceError> {
+    let (Some(&first_byte), Some(&sid_byte), Some(&nrc_byte)) =
+        (data.first(), data.get(1), data.get(2))
+    else {
+        return Err(DiagServiceError::UnexpectedResponse(Some(format!(
+            "Negative response data is too short: expected 3 bytes, got {} bytes",
+            data.len()
+        ))));
+    };
+    if first_byte != NEGATIVE_RESPONSE {
+        return Err(DiagServiceError::UnexpectedResponse(Some(
+            format_args!(
+                "First byte is not NEGATIVE_RESPONSE: expected 0x7F, got {first_byte:#04X}",
+            )
+            .to_string(),
+        )));
+    }
+    if data.len() > 3 {
+        return Err(DiagServiceError::UnexpectedResponse(Some(
+            "Negative response data has extra bytes".to_string(),
+        )));
+    }
+    Ok(MappedNRC {
+        code: Some(nrc_byte),
+        description: Some(iso_14229_nrc::get_nrc_code(nrc_byte).to_string()),
+        sid: Some(sid_byte),
+    })
+}
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_extract_nrc_from_raw_data_valid() {
+        let data = vec![0x7F, 0x22, 0x33];
+        let result = extract_nrc_from_raw_data(&data).unwrap();
+        assert_eq!(result.code, Some(0x33));
+        assert_eq!(result.sid, Some(0x22));
+        assert_eq!(
+            result.description,
+            Some("Security Access Denied".to_string())
+        );
+    }
+    #[test]
+    fn test_extract_nrc_from_raw_data_too_short() {
+        // Test with data that's too short
+        let data = vec![0x7F, 0x22];
+        assert!(matches!(
+            extract_nrc_from_raw_data(&data),
+            Err(DiagServiceError::UnexpectedResponse(Some(msg))) if msg.contains("too short")));
+
+        assert!(matches!(
+            extract_nrc_from_raw_data(&[]),
+            Err(DiagServiceError::UnexpectedResponse(Some(msg))) if msg.contains("too short")));
+    }
+
+    #[test]
+    fn test_extract_nrc_from_raw_data_not_negative_response() {
+        // Test with data that doesn't start with 0x7F
+        let data = vec![0x62, 0x22, 0x33];
+        assert!(matches!(
+            extract_nrc_from_raw_data(&data),
+            Err(DiagServiceError::UnexpectedResponse(Some(msg))) if msg.contains("not NEGATIVE_RESPONSE")));
+    }
+    #[test]
+    fn test_extract_nrc_from_raw_data_with_extra_bytes() {
+        // Test with extra bytes after the NRC (should NOT work now)
+        let data = vec![0x7F, 0x22, 0x33, 0x44, 0x55];
+        assert!(matches!(
+            extract_nrc_from_raw_data(&data),
+            Err(DiagServiceError::UnexpectedResponse(Some(msg))) if msg.contains("extra bytes")));
     }
 }
