@@ -102,9 +102,15 @@ pub trait EcuGateway: Clone + Send + Sync + 'static {
     /// * `expected_ecu_logical_addrs` - Map of ECU logical addresses to their names
     ///   that are expected to respond
     /// * `timeout` - Maximum time to wait for responses
+    /// * `expect_positive_response` - When `false`, the outgoing message has
+    ///   `suppressPosRspMsgIndicationBit` set and ECUs are not expected to send a
+    ///   positive response.  ECUs that give no response at all are **omitted** from the result
+    ///   map instead of being recorded as `DiagServiceError::Timeout`.
+    ///   Negative responses are still captured regardless of this flag.
     ///
     /// # Returns
-    /// A map of ECU names to their responses (or timeout errors for non-responding ECUs)
+    /// A map of ECU names to their responses (or timeout errors for non-responding ECUs when
+    /// `expect_positive_response` is `true`)
     ///
     /// # Errors
     /// * `DiagServiceError::EcuOffline` if the gateway cannot be reached
@@ -115,6 +121,7 @@ pub trait EcuGateway: Clone + Send + Sync + 'static {
         message: ServicePayload,
         expected_ecu_logical_addrs: HashMap<u16, String>,
         timeout: Duration,
+        expect_positive_response: bool,
     ) -> impl Future<
         Output = Result<HashMap<String, Result<UdsResponse, DiagServiceError>>, DiagServiceError>,
     > + Send;

@@ -66,9 +66,9 @@ fun RequestsData.addCommunicationControlRequests() {
         ack()
     }
 
-    // 28 88 01 [temporalEraId] - Temporal Sync (custom vendor-specific)
+    // 28 42 01 [temporalEraId] - Temporal Sync (custom vendor-specific)
     // Expects 4 additional bytes for the 32-bit signed integer temporalEraId
-    request("28 88 01 []", name = "CommunicationControl_TemporalSync") {
+    request("28 42 01 []", name = "CommunicationControl_TemporalSync") {
         val ecuState = ecu.ecuState()
 
         // Verify we have the temporalEraId parameter (8 bytes after the 3-byte header)

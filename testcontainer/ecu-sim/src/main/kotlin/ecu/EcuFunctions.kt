@@ -65,6 +65,7 @@ fun DoipEntityData.addCanEcu(
 fun RequestsData.addAllFunctionality() {
     addSessionRequests()
     addResetRequests()
+    addRoutineRequests()
     addSecurityAccessRequests()
     addCommunicationControlRequests()
     addDtcSettingRequests()

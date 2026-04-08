@@ -291,6 +291,7 @@ impl TryInto<cda_interfaces::DiagComm> for DiagService<'_> {
                 .diag_comm()
                 .and_then(|dc| dc.short_name())
                 .map(ToOwned::to_owned),
+            subfunction_id: None,
         })
     }
 }

@@ -12,7 +12,7 @@
 use cda_interfaces::HashMap;
 use serde::{Deserialize, Serialize};
 
-use crate::error::ApiErrorResponse;
+use crate::error::DataError;
 
 pub type Query = crate::IncludeSchemaQuery;
 pub mod get {
@@ -27,7 +27,7 @@ pub struct DataResponse<T, R> {
     pub modes: HashMap<String, R>,
     /// Errors that occurred during the operation
     #[serde(skip_serializing_if = "Vec::is_empty")]
-    pub errors: Vec<ApiErrorResponse<T>>,
+    pub errors: Vec<DataError<T>>,
     #[schemars(skip)]
     #[serde(skip_serializing_if = "Option::is_none")]
     pub schema: Option<schemars::Schema>,

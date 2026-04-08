@@ -109,6 +109,7 @@ pub(crate) struct EcuState {
     pub(crate) communication_control_type: Option<CommunicationControlType>,
     pub(crate) temporal_era_id: Option<i32>,
     pub(crate) dtc_setting_type: Option<DtcSettingType>,
+    pub(crate) running_calibration: bool,
 }
 
 #[derive(Debug, Deserialize, Serialize)]
@@ -240,4 +241,41 @@ pub(crate) async fn reset_sim(sim: &EcuSim) -> Result<(), TestingError> {
     crate::util::http::send_request(StatusCode::NO_CONTENT, http::Method::POST, None, None, url)
         .await?;
     Ok(())
+}
+
+/// Start recording inbound UDS frames on the ECU simulator.
+///
+/// Each received frame is appended as a lowercase hex string with no separator
+/// (e.g. `"31011001"`). Call [`get_recordings`] or [`stop_and_clear_recording`]
+/// to retrieve the accumulated frames.
+pub(crate) async fn start_recording(sim: &EcuSim, ecu: &str) -> Result<(), TestingError> {
+    let mut url = sim_endpoint(sim)?;
+    url.path_segments_mut()
+        .map_err(|()| TestingError::InvalidUrl("cannot modify URL path".to_owned()))?
+        .push(ecu)
+        .push("record");
+
+    crate::util::http::send_request(StatusCode::NO_CONTENT, http::Method::POST, None, None, url)
+        .await?;
+    Ok(())
+}
+
+/// Stop the recorder and return all frames recorded since [`start_recording`].
+///
+/// The recorder is removed from the ECU simulator after this call; subsequent
+/// frames are no longer captured until [`start_recording`] is called again.
+pub(crate) async fn stop_and_clear_recording(
+    sim: &EcuSim,
+    ecu: &str,
+) -> Result<Vec<String>, TestingError> {
+    let mut url = sim_endpoint(sim)?;
+    url.path_segments_mut()
+        .map_err(|()| TestingError::InvalidUrl("cannot modify URL path".to_owned()))?
+        .push(ecu)
+        .push("record");
+
+    let response =
+        crate::util::http::send_request(StatusCode::OK, http::Method::DELETE, None, None, url)
+            .await?;
+    crate::util::http::response_to_t(&response)
 }

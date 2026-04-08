@@ -31,7 +31,7 @@ use axum_extra::extract::WithRejection;
 use cda_interfaces::{
     FunctionalDescriptionConfig, HashMap, HashMapExtensions as _, SchemaProvider, UdsEcu,
     datatypes::ComponentsConfig,
-    diagservices::{DiagServiceResponse, UdsPayloadData},
+    diagservices::{DiagServiceResponse, FieldParseError, UdsPayloadData},
     file_manager::FileManager,
 };
 use cda_plugin_security::{SecurityPluginLoader, security_plugin_middleware};
@@ -43,13 +43,17 @@ use schemars::Schema;
 use sovd_interfaces::{
     IncludeSchemaQuery, Resource,
     components::{ComponentsResponse, ecu as sovd_ecu},
+    error::DataError,
 };
 use tokio::sync::RwLock;
 use uuid::Uuid;
 
-use crate::sovd::components::ecu::{
-    configurations, data, faults, genericservice, modes, operations, x_single_ecu_jobs,
-    x_sovd2uds_bulk_data, x_sovd2uds_download,
+use crate::{
+    VendorErrorCode,
+    sovd::components::ecu::{
+        configurations, data, faults, genericservice, modes, operations, x_single_ecu_jobs,
+        x_sovd2uds_bulk_data, x_sovd2uds_download,
+    },
 };
 
 pub(crate) mod apps;
@@ -108,9 +112,207 @@ pub(crate) struct WebserverEcuState<R: DiagServiceResponse, T: UdsEcu + Clone, U
     locks: Arc<Locks>,
     // Map of Execution Id -> ComParamMap
     comparam_executions: Arc<RwLock<IndexMap<Uuid, sovd_ecu::operations::comparams::Execution>>>,
+    // Map of Service Name -> (Execution Id -> ServiceExecution) for ECU routine operations
+    pub(crate) service_executions: Arc<RwLock<HashMap<String, IndexMap<Uuid, ServiceExecution>>>>,
     flash_data: Arc<RwLock<sovd_interfaces::sovd2uds::FileList>>,
     mdd_embedded_files: Arc<U>,
     _phantom: std::marker::PhantomData<R>,
+}
+
+/// Shared behaviour for execution-state types (`ServiceExecution` for single-ECU
+/// operations, `FgServiceExecution` for functional-group operations).
+pub(crate) trait ExecutionStatus {
+    fn execution_status(&self) -> &sovd_ecu::operations::ExecutionStatus;
+    /// Returns `true` if a request for this execution is currently being processed.
+    /// Used to avoid sending multiple UDS requests simultaneously for the same execution.
+    fn is_in_flight(&self) -> bool;
+    fn set_in_flight(&mut self, in_flight: bool);
+    /// Should return `false` if an execution was created as a placeholder,
+    /// but not finalized.
+    fn is_created(&self) -> bool;
+    fn set_created(&mut self, created: bool);
+    /// Creates a placeholder entry used to reserve a slot in the executions map
+    /// before the UDS command is sent.
+    fn placeholder() -> Self
+    where
+        Self: Sized;
+}
+
+/// Stored state for a single ECU routine execution (async lifecycle).
+#[derive(Clone, Debug)]
+pub(crate) struct ServiceExecution {
+    pub parameters: serde_json::Map<String, serde_json::Value>,
+    pub status: sovd_ecu::operations::ExecutionStatus,
+    pub in_flight: bool,
+    pub is_created: bool,
+}
+
+impl ExecutionStatus for ServiceExecution {
+    fn execution_status(&self) -> &sovd_ecu::operations::ExecutionStatus {
+        &self.status
+    }
+    fn is_in_flight(&self) -> bool {
+        self.in_flight
+    }
+    fn set_in_flight(&mut self, in_flight: bool) {
+        self.in_flight = in_flight;
+    }
+    fn is_created(&self) -> bool {
+        self.is_created
+    }
+    fn set_created(&mut self, created: bool) {
+        self.is_created = created;
+    }
+    fn placeholder() -> Self {
+        ServiceExecution {
+            parameters: serde_json::Map::new(),
+            status: sovd_ecu::operations::ExecutionStatus::Running,
+            in_flight: false,
+            is_created: false,
+        }
+    }
+}
+
+/// Stored state for a functional-group routine execution (async lifecycle).
+/// Unlike `ServiceExecution`, parameters are keyed by ECU name so that
+/// per-ECU identity is preserved across the execution lifecycle.
+#[derive(Clone, Debug)]
+pub(crate) struct FgServiceExecution {
+    pub parameters: HashMap<String, serde_json::Map<String, serde_json::Value>>,
+    pub status: sovd_ecu::operations::ExecutionStatus,
+    pub in_flight: bool,
+    pub is_created: bool,
+}
+
+impl ExecutionStatus for FgServiceExecution {
+    fn execution_status(&self) -> &sovd_ecu::operations::ExecutionStatus {
+        &self.status
+    }
+    fn is_in_flight(&self) -> bool {
+        self.in_flight
+    }
+    fn set_in_flight(&mut self, in_flight: bool) {
+        self.in_flight = in_flight;
+    }
+    fn is_created(&self) -> bool {
+        self.is_created
+    }
+    fn set_created(&mut self, created: bool) {
+        self.is_created = created;
+    }
+    fn placeholder() -> Self {
+        FgServiceExecution {
+            parameters: HashMap::new(),
+            status: sovd_ecu::operations::ExecutionStatus::Running,
+            in_flight: false,
+            is_created: false,
+        }
+    }
+}
+
+/// Acquires a write lock on `executions`, looks up `exec_id` under the given
+/// `service` key, marks it `in_flight = true`, and returns a clone of the
+/// execution.  Returns `Err(ErrorWrapper)` (with the lock released) on
+/// not-found or in-flight conflict.
+pub(crate) async fn guard_execution<T: ExecutionStatus + Clone>(
+    executions: &RwLock<HashMap<String, IndexMap<Uuid, T>>>,
+    service: &str,
+    exec_id: Uuid,
+    include_schema: bool,
+    conflict_msg: &str,
+) -> Result<T, error::ErrorWrapper> {
+    let mut guard = executions.write().await;
+    let op_map = guard
+        .get_mut(service)
+        .and_then(|m| m.get_mut(&exec_id))
+        // Treat placeholders (is_created == false) as non-existent.
+        .filter(|e| e.is_created());
+    match op_map {
+        None => Err(error::ErrorWrapper {
+            error: error::ApiError::NotFound(Some(format!(
+                "Execution with id {exec_id} not found"
+            ))),
+            include_schema,
+        }),
+        Some(exec) if exec.is_in_flight() => Err(error::ErrorWrapper {
+            error: error::ApiError::Conflict(conflict_msg.to_owned()),
+            include_schema,
+        }),
+        Some(exec) => {
+            exec.set_in_flight(true);
+            Ok(exec.clone())
+        }
+    }
+}
+
+/// Checks for a running-execution conflict and, if none exists,
+/// inserts a placeholder entry so that a second concurrent POST for the same
+/// operation will see a `409 Conflict`.
+///
+/// On success the returned [`Uuid`] identifies the reserved execution slot.
+/// The caller **must** later call either [`finalize_execution`] (async
+/// success) or [`remove_reserved_execution`] (sync success / any error).
+pub(crate) async fn reserve_execution<E: ExecutionStatus>(
+    executions: &RwLock<HashMap<String, IndexMap<Uuid, E>>>,
+    service: &str,
+    display_name: &str,
+    include_schema: bool,
+) -> Result<Uuid, error::ErrorWrapper> {
+    let mut guard = executions.write().await;
+    let has_running = guard.get(service).is_some_and(|m| {
+        m.values()
+            .any(|e| *e.execution_status() == sovd_ecu::operations::ExecutionStatus::Running)
+    });
+    if has_running {
+        return Err(error::ErrorWrapper {
+            error: error::ApiError::Conflict(format!(
+                "An execution for operation '{display_name}' is already in progress"
+            )),
+            include_schema,
+        });
+    }
+    let id = Uuid::new_v4();
+    let mut entry = E::placeholder();
+    entry.set_in_flight(true);
+    guard
+        .entry(service.to_owned())
+        .or_default()
+        .insert(id, entry);
+    Ok(id)
+}
+
+/// Updates a previously reserved execution with the received parameters,
+/// sets `is_created(true)`, and clears the `in_flight` flag.
+/// After this step GET/DELETE requests can be called for this execution.
+pub(crate) async fn finalize_execution<E: ExecutionStatus>(
+    executions: &RwLock<HashMap<String, IndexMap<Uuid, E>>>,
+    service: &str,
+    exec_id: &Uuid,
+    update_fn: impl FnOnce(&mut E),
+) {
+    let mut guard = executions.write().await;
+    if let Some(exec) = guard.get_mut(service).and_then(|m| m.get_mut(exec_id)) {
+        update_fn(exec);
+        exec.set_created(true);
+        exec.set_in_flight(false);
+    }
+}
+
+/// Removes a previously reserved execution slot.  Called on error or after
+/// a synchronous operation completes (sync operations do not persist
+/// execution state).
+pub(crate) async fn remove_reserved_execution<E: ExecutionStatus>(
+    executions: &RwLock<HashMap<String, IndexMap<Uuid, E>>>,
+    service: &str,
+    exec_id: &Uuid,
+) {
+    let mut guard = executions.write().await;
+    if let Some(map) = guard.get_mut(service) {
+        map.shift_remove(exec_id);
+        if map.is_empty() {
+            guard.remove(service);
+        }
+    }
 }
 
 impl<R: DiagServiceResponse, T: UdsEcu + Clone, U: FileManager> Clone
@@ -122,6 +324,7 @@ impl<R: DiagServiceResponse, T: UdsEcu + Clone, U: FileManager> Clone
             uds: self.uds.clone(),
             locks: Arc::clone(&self.locks),
             comparam_executions: Arc::clone(&self.comparam_executions),
+            service_executions: Arc::clone(&self.service_executions),
             flash_data: Arc::clone(&self.flash_data),
             mdd_embedded_files: Arc::clone(&self.mdd_embedded_files),
             _phantom: std::marker::PhantomData::<R>,
@@ -359,6 +562,7 @@ fn ecu_route<
         uds: state.uds.clone(),
         locks: Arc::<Locks>::clone(&state.locks),
         comparam_executions: Arc::new(RwLock::new(IndexMap::new())),
+        service_executions: Arc::new(RwLock::new(HashMap::default())),
         flash_data: Arc::clone(&state.flash_data),
         mdd_embedded_files: Arc::new(file_manager.remove(&ecu_lower).ok_or_else(|| {
             SovdError::RouteError(format!(
@@ -392,7 +596,7 @@ fn ecu_route<
             routing::get_with(configurations::get, configurations::docs_get),
         )
         .api_route(
-            "/configurations/{diag_service}",
+            "/configurations/{service}",
             routing::put_with(
                 configurations::diag_service::put,
                 configurations::diag_service::docs_put,
@@ -401,13 +605,17 @@ fn ecu_route<
         )
         .api_route("/data", routing::get_with(data::get, data::docs_get))
         .api_route(
-            "/data/{diag_service}",
+            "/data/{service}",
             routing::get_with(data::diag_service::get, data::diag_service::docs_get)
                 .put_with(data::diag_service::put, data::diag_service::docs_put),
         )
         .api_route(
             "/genericservice",
             routing::put_with(genericservice::put, genericservice::docs_put),
+        )
+        .api_route(
+            "/operations",
+            routing::get_with(operations::get, operations::docs_get),
         )
         .api_route(
             "/operations/comparam/executions",
@@ -444,6 +652,17 @@ fn ecu_route<
             .post_with(
                 operations::service::executions::post,
                 operations::service::executions::docs_post,
+            ),
+        )
+        .api_route(
+            "/operations/{service}/executions/{id}",
+            routing::get_with(
+                operations::service::executions::id::get,
+                operations::service::executions::id::docs_get,
+            )
+            .delete_with(
+                operations::service::executions::id::delete,
+                operations::service::executions::id::docs_delete,
             ),
         )
         .api_route("/modes", routing::get_with(modes::get, modes::docs_get))
@@ -789,6 +1008,56 @@ pub(crate) mod static_data {
     }
 }
 
+/// Wrapper Struct around [`FieldParseError`] to allow implementing
+/// [From] for [`DataError`<VendorErrorCode>]
+struct FieldParseErrorWrapper(FieldParseError);
+impl From<FieldParseErrorWrapper> for DataError<VendorErrorCode> {
+    fn from(value: FieldParseErrorWrapper) -> Self {
+        let value: FieldParseError = value.0;
+        Self {
+            path: value.path,
+            error: sovd_interfaces::error::ApiErrorResponse {
+                message: "Failed to parse parameter".to_owned(),
+                error_code: sovd_interfaces::error::ErrorCode::VendorSpecific,
+                vendor_code: Some(VendorErrorCode::ErrorInterpretingMessage),
+                parameters: Some(
+                    [
+                        ("details", value.error.details),
+                        ("value", value.error.value),
+                    ]
+                    .into_iter()
+                    .map(|(k, v)| (k.to_string(), serde_json::Value::String(v)))
+                    .collect(),
+                ),
+                error_source: None,
+                schema: None,
+            },
+        }
+    }
+}
+
+fn field_parse_errors_to_json(
+    errors: impl IntoIterator<Item = FieldParseError>,
+    data_field_ref: &str,
+) -> Vec<DataError<VendorErrorCode>> {
+    errors
+        .into_iter()
+        .map(|v| {
+            let mut data_error = DataError::from(FieldParseErrorWrapper(v));
+            data_error.path = format!("/{data_field_ref}{}", data_error.path);
+            data_error
+        })
+        .collect()
+}
+
+impl IntoSovd for FieldParseError {
+    type SovdType = DataError<VendorErrorCode>;
+
+    fn into_sovd(self) -> Self::SovdType {
+        FieldParseErrorWrapper(self).into()
+    }
+}
+
 #[cfg(test)]
 pub(crate) mod tests {
 
@@ -820,6 +1089,7 @@ pub(crate) mod tests {
                 ))),
             }),
             comparam_executions: Arc::new(RwLock::new(IndexMap::new())),
+            service_executions: Arc::new(RwLock::new(HashMap::default())),
             flash_data: Arc::new(RwLock::new(FileList {
                 files: Vec::new(),
                 path: Some(PathBuf::new()),
