@@ -65,6 +65,7 @@ pub(super) fn prepare_variant_detection(
     })
 }
 
+/// [[ dimpl~dt-variant-detection, Variant Detection ]]
 #[tracing::instrument(
     skip(service_responses, diagnostic_database),
     fields(

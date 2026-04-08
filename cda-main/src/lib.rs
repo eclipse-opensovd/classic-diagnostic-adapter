@@ -66,6 +66,7 @@ pub struct VehicleData<S: SecurityPlugin> {
     pub databases: Arc<DatabaseMap<S>>,
 }
 
+/// [[ dimpl~dt-error-handling, Error Handling ]]
 #[derive(thiserror::Error, Debug)]
 pub enum AppError {
     #[error("Initialization failed `{0}`")]
@@ -233,6 +234,7 @@ pub async fn load_vehicle_data<
     })
 }
 
+/// [[ dimpl~dt-database-loading, Database Loading ]]
 #[tracing::instrument(
     skip(config, health),
     fields(databases_path = %config.database.path)
@@ -657,6 +659,7 @@ pub fn create_uds_manager<S: SecurityPlugin>(
     )
 }
 
+/// [[ dimpl~dt-doip-gateway-init, `DoIP` Gateway Initialization ]]
 /// Creates a new diagnostic gateway for the webserver.
 /// # Errors
 /// Returns a string error if the gateway cannot be initialized.

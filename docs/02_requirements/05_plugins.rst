@@ -116,3 +116,75 @@ Diagnostic Database Update Plugin
 
     Updates to the diagnostic database must be safe, it must be ensured that the CDA can recover from
     power-cycles or crashes at any time during the update process, and that the CDA is not left in an unusable state.
+
+
+DLT Logging Plugin
+------------------
+
+.. req:: DLT Logging
+    :id: req~plugin-dlt-logging
+    :links: arch~plugin-dlt-logging
+    :status: draft
+
+    The CDA must support logging to the AUTOSAR Diagnostic Log and Trace (DLT) system. When enabled, application
+    tracing events must be forwarded to the DLT daemon running on the target system, allowing log capture and
+    analysis with standard automotive DLT tooling.
+
+    **Rationale**
+
+    DLT is the standard logging mechanism used in automotive ECUs and HPCs. Supporting DLT output allows the CDA to
+    integrate into existing vehicle logging infrastructure and enables field diagnostics with standard tools such as
+    ``dlt-viewer``.
+
+
+.. req:: DLT Logging - Compile-Time Feature Gate
+    :id: req~plugin-dlt-logging-feature-gate
+    :links: arch~plugin-dlt-logging
+    :status: draft
+
+    DLT logging support must be an optional compile-time feature. When the feature is not enabled, the DLT
+    dependency must not be compiled, and DLT-related code must have zero runtime overhead.
+
+    **Rationale**
+
+    The DLT system library (``libdlt``) is not available on all target platforms. Compile-time gating ensures
+    the CDA can be built and deployed on systems without DLT support, without any performance penalty.
+
+
+.. req:: DLT Logging - Runtime Configuration
+    :id: req~plugin-dlt-logging-runtime-configuration
+    :links: arch~plugin-dlt-logging-configuration
+    :status: draft
+
+    When DLT logging support is compiled in, it must be possible to enable or disable DLT output at runtime
+    through the application configuration. The following parameters must be configurable:
+
+    * **Application ID** -- A short identifier (up to 4 characters) registered with the DLT daemon to identify this
+      application.
+    * **Application Description** -- A human-readable description of the application registered with the DLT daemon.
+    * **Enabled** -- A toggle to enable or disable DLT output at startup.
+
+
+.. req:: DLT Logging - Context Identification
+    :id: req~plugin-dlt-logging-context-identification
+    :links: arch~plugin-dlt-logging-context-annotation
+    :status: draft
+
+    Each subsystem of the CDA must be identifiable in the DLT output through a unique context identifier.
+    The context identifiers must conform to the DLT protocol constraints (up to 4 ASCII characters) and allow
+    DLT tooling to filter log messages by subsystem.
+
+    **Rationale**
+
+    DLT context IDs enable operators to filter and analyze logs for specific subsystems (e.g. communication,
+    database loading, SOVD API) without having to parse log message content, which is a standard workflow in
+    automotive log analysis.
+
+
+.. req:: DLT Logging - Log Level Mapping
+    :id: req~plugin-dlt-logging-log-level-mapping
+    :links: arch~plugin-dlt-logging
+    :status: draft
+
+    Application log levels must be mapped to their corresponding DLT log levels, so that DLT-side filtering by
+    severity works correctly.

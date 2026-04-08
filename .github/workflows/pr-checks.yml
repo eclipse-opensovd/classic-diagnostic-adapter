@@ -45,7 +45,7 @@ jobs:
           # to avoid rate limiting, passing the default token.
           repo-token: ${{ secrets.GITHUB_TOKEN }}
       - name: Format and Clippy - Stable toolchain
-        uses: eclipse-opensovd/cicd-workflows/rust-lint-and-format-action@827ea66a026b34057468a3cc9486c165ce5e7dcb
+        uses: eclipse-opensovd/cicd-workflows/rust-lint-and-format-action@2bc7ec3e2f363f0adfef20910f5a86b63c90e45b
         with:
           toolchain: 1.88.0
           github-token: ${{ secrets.GITHUB_TOKEN }}
@@ -54,8 +54,9 @@ jobs:
           clippy-deny-warnings: "true"
           clippy-features: "all-features"
           rustfmt-enable-reviewdog: "false"
+          error-on-unformatted: "false"
       - name: Format and Clippy - Nightly toolchain pinned
-        uses: eclipse-opensovd/cicd-workflows/rust-lint-and-format-action@827ea66a026b34057468a3cc9486c165ce5e7dcb
+        uses: eclipse-opensovd/cicd-workflows/rust-lint-and-format-action@2bc7ec3e2f363f0adfef20910f5a86b63c90e45b
         with:
           toolchain: nightly-2025-07-14
           github-token: ${{ secrets.GITHUB_TOKEN }}
@@ -63,11 +64,12 @@ jobs:
           fail-on-clippy-error: "false"
           clippy-deny-warnings: "false"
           clippy-features: "all-features"
+          error-on-unformatted: "false"
           reporter: ${{ env.IS_FORK == 'true' && 'github-pr-annotations' || 'github-pr-review' }}
       - name: Format and Clippy - Nightly toolchain latest
         id: nightly-clippy
         continue-on-error: true
-        uses: eclipse-opensovd/cicd-workflows/rust-lint-and-format-action@827ea66a026b34057468a3cc9486c165ce5e7dcb
+        uses: eclipse-opensovd/cicd-workflows/rust-lint-and-format-action@2bc7ec3e2f363f0adfef20910f5a86b63c90e45b
         with:
           toolchain: nightly
           github-token: ${{ secrets.GITHUB_TOKEN }}
@@ -75,6 +77,7 @@ jobs:
           fail-on-clippy-error: "false"
           clippy-deny-warnings: "false"
           clippy-features: "all-features"
+          error-on-unformatted: "false"
           # For nightly, we also want to see files not touched by
           # the PR, to detect if there are any new warnings introduced by the latest nightly toolchain.
           reporter: ${{ env.IS_FORK == 'true' && 'github-annotations' || 'github-pr-check' }}

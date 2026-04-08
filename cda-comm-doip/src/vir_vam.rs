@@ -27,6 +27,7 @@ use crate::{
     ecu_connection::ConnectionConfig,
     socket::{DoIPConfig, DoIPUdpSocket},
 };
+/// [[ dimpl~doip-vehicle-identification, `DoIP` Vehicle Identification ]]
 pub(crate) async fn get_vehicle_identification<T, F>(
     socket: &mut DoIPUdpSocket,
     netmask: u32,

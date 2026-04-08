@@ -296,6 +296,8 @@ async fn connect_to_gateway(
     Ok(stream)
 }
 
+/// [[ dimpl~doip-connection-establishment, `DoIP` Connection Establishment ]]
+/// [[ dimpl~doip-routing-activation, `DoIP` Routing Activation ]]
 #[tracing::instrument(
     skip(routing_activation_request, connection_config),
     fields(
@@ -401,6 +403,7 @@ pub(crate) async fn establish_ecu_connection(
     }
 }
 
+/// [[ dimpl~doip-tls, `DoIP` TLS ]]
 #[tracing::instrument(
     skip(routing_activation_request, connection_config),
     fields(

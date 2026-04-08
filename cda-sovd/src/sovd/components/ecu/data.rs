@@ -21,6 +21,8 @@ use super::{
 };
 use crate::sovd::{self, create_schema};
 
+/// [[ dimpl~sovd-api-data-resources, Data Resources ]]
+/// [[ dimpl~sovd-api-data-identifier-categories, Data Identifier Categories ]]
 pub(crate) async fn get<R: DiagServiceResponse, T: UdsEcu + Clone, U: FileManager>(
     UseApi(Secured(security_plugin), _): UseApi<Secured, ()>,
     WithRejection(Query(query), _): WithRejection<

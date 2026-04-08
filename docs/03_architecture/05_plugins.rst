@@ -14,3 +14,5 @@ Plugins
 .. include:: /03_architecture/05_plugins/01_content.rst
 
 .. include:: /03_architecture/05_plugins/02_diagnostic_database_update.rst
+
+.. include:: /03_architecture/05_plugins/03_dlt_logging.rst

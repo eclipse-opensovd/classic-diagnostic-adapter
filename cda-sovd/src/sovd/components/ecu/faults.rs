@@ -73,6 +73,7 @@ impl IntoSovd for DtcRecordAndStatus {
     }
 }
 
+/// [[ dimpl~sovd-api-faults-endpoint, Faults Endpoint ]]
 pub(crate) async fn get<
     R: DiagServiceResponse + Send + Sync,
     T: UdsEcu + Send + Sync + Clone,
