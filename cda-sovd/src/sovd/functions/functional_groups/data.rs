@@ -111,7 +111,9 @@ pub(crate) mod diag_service {
     pub(crate) async fn get<T: UdsEcu + Clone>(
         headers: HeaderMap,
         UseApi(Secured(security_plugin), _): UseApi<Secured, ()>,
-        Path(DiagServicePathParam { diag_service }): Path<DiagServicePathParam>,
+        Path(DiagServicePathParam {
+            service: diag_service,
+        }): Path<DiagServicePathParam>,
         WithRejection(Query(query), _): WithRejection<
             Query<sovd_interfaces::functions::functional_groups::data::service::Query>,
             ApiError,
@@ -136,6 +138,7 @@ pub(crate) mod diag_service {
                 name: diag_service,
                 type_: DiagCommType::Data,
                 lookup_name: None,
+                subfunction_id: None,
             },
             &functional_group_name,
             &uds,
@@ -181,9 +184,7 @@ pub(crate) mod diag_service {
     pub(crate) async fn put<T: UdsEcu + Clone>(
         headers: HeaderMap,
         UseApi(Secured(security_plugin), _): UseApi<Secured, ()>,
-        Path(DiagServicePathParam {
-            diag_service: service,
-        }): Path<DiagServicePathParam>,
+        Path(DiagServicePathParam { service }): Path<DiagServicePathParam>,
         WithRejection(Query(query), _): WithRejection<
             Query<sovd_interfaces::functions::functional_groups::data::service::Query>,
             ApiError,
@@ -209,6 +210,7 @@ pub(crate) mod diag_service {
                 name: service,
                 type_: DiagCommType::Configurations,
                 lookup_name: None,
+                subfunction_id: None,
             },
             &functional_group_name,
             &uds,

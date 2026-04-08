@@ -274,7 +274,8 @@ fn decode_numeric_val_from_str(
             })
             .map(|v| v.to_be_bytes().to_vec()),
         DataType::UInt32 => {
-            // Radix is determined by the value's prefix: 0x→hex, 0o→octal, 0b→binary, else→decimal.
+            // Radix is determined by the value's prefix:
+            // 0x -> hex, 0o -> octal, 0b -> binary, else -> decimal.
             // display_radix from the physical type is ignored.
             let lowercase = value.to_lowercase();
             if lowercase.starts_with("0x") {
