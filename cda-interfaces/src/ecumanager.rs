@@ -15,8 +15,9 @@ use crate::{
     DiagComm, DiagServiceError, DoipComParamProvider, DynamicPlugin, EcuSchemaProvider, HashMap,
     HashSet, SecurityAccess, UDS_ID_RESPONSE_BITMASK, UdsComParamProvider,
     datatypes::{
-        ComplexComParamValue, ComponentConfigurationsInfo, ComponentDataInfo, DtcLookup,
-        DtcReadInformationFunction, SdSdg, single_ecu,
+        ComplexComParamValue, ComponentConfigurationsInfo, ComponentDataInfo,
+        ComponentOperationsInfo, DtcLookup, DtcReadInformationFunction, RoutineSubfunctions, SdSdg,
+        single_ecu,
     },
     diagservices::{DiagServiceResponse, UdsPayloadData},
     service_ids,
@@ -417,6 +418,50 @@ pub trait EcuManager:
         &self,
         security_plugin: &DynamicPlugin,
     ) -> Result<Vec<ComponentConfigurationsInfo>, DiagServiceError>;
+    /// Retrieve all `RoutineControl` (SID 0x31) operations for the current ECU variant,
+    /// with flags indicating available subfunctions (Stop/RequestResults).
+    fn get_components_operations_info(
+        &self,
+        security_plugin: &DynamicPlugin,
+    ) -> Vec<ComponentOperationsInfo>;
+    /// Check which `RoutineControl` subfunctions (Stop 0x02, `RequestResults` 0x03) are defined
+    /// for the given routine service name.
+    ///
+    /// Returns `Ok(RoutineSubfunctions)` if the Start (0x01) service exists.
+    /// `has_stop` and `has_request_results` indicate whether those subfunctions are also defined.
+    ///
+    /// # Errors
+    /// Returns `Err(DiagServiceError::NotFound)` if the Start service for the given name is not
+    /// found in the ECU description.
+    fn get_routine_subfunctions(
+        &self,
+        service_name: &str,
+    ) -> Result<RoutineSubfunctions, DiagServiceError>;
+    /// Retrieve all `RoutineControl` (SID 0x31) operations for a specific functional group,
+    /// with flags indicating available subfunctions (Stop/RequestResults).
+    /// # Errors
+    /// Returns `DiagServiceError` if the functional group cannot be found.
+    fn get_functional_group_operations_info(
+        &self,
+        security_plugin: &DynamicPlugin,
+        functional_group_name: &str,
+    ) -> Result<Vec<ComponentOperationsInfo>, DiagServiceError>;
+    /// Check which `RoutineControl` subfunctions (Stop 0x02, `RequestResults` 0x03) are defined
+    /// for a specific routine within a functional group.
+    ///
+    /// Returns `Ok(RoutineSubfunctions)` if the Start (0x01) subfunction for the given service
+    /// name is found within the functional group.
+    /// `has_stop` and `has_request_results` indicate whether those subfunctions are also defined.
+    ///
+    /// # Errors
+    /// Returns `Err(DiagServiceError::NotFound)` if the functional group does not exist or if the
+    /// Start service for the given name is not found within it.
+    fn get_functional_group_routine_subfunctions(
+        &self,
+        security_plugin: &DynamicPlugin,
+        functional_group_name: &str,
+        service_name: &str,
+    ) -> Result<RoutineSubfunctions, DiagServiceError>;
     /// Retrieve all 'single ecu' jobs for the current ECU variant.
     fn get_components_single_ecu_jobs_info(&self) -> Vec<ComponentDataInfo>;
     /// Lookup DTC services for the given service types in the current ECU variant.

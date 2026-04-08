@@ -108,9 +108,19 @@ pub(crate) struct WebserverEcuState<R: DiagServiceResponse, T: UdsEcu + Clone, U
     locks: Arc<Locks>,
     // Map of Execution Id -> ComParamMap
     comparam_executions: Arc<RwLock<IndexMap<Uuid, sovd_ecu::operations::comparams::Execution>>>,
+    // Map of Execution Id -> ServiceExecution (for ECU routine operations)
+    pub(crate) service_executions: Arc<RwLock<IndexMap<Uuid, ServiceExecution>>>,
     flash_data: Arc<RwLock<sovd_interfaces::sovd2uds::FileList>>,
     mdd_embedded_files: Arc<U>,
     _phantom: std::marker::PhantomData<R>,
+}
+
+/// Stored state for a single ECU routine execution (async lifecycle).
+#[derive(Clone)]
+pub(crate) struct ServiceExecution {
+    pub parameters: serde_json::Map<String, serde_json::Value>,
+    pub status: sovd_ecu::operations::ExecutionStatus,
+    pub in_flight: bool,
 }
 
 impl<R: DiagServiceResponse, T: UdsEcu + Clone, U: FileManager> Clone
@@ -122,6 +132,7 @@ impl<R: DiagServiceResponse, T: UdsEcu + Clone, U: FileManager> Clone
             uds: self.uds.clone(),
             locks: Arc::clone(&self.locks),
             comparam_executions: Arc::clone(&self.comparam_executions),
+            service_executions: Arc::clone(&self.service_executions),
             flash_data: Arc::clone(&self.flash_data),
             mdd_embedded_files: Arc::clone(&self.mdd_embedded_files),
             _phantom: std::marker::PhantomData::<R>,
@@ -359,6 +370,7 @@ fn ecu_route<
         uds: state.uds.clone(),
         locks: Arc::<Locks>::clone(&state.locks),
         comparam_executions: Arc::new(RwLock::new(IndexMap::new())),
+        service_executions: Arc::new(RwLock::new(IndexMap::new())),
         flash_data: Arc::clone(&state.flash_data),
         mdd_embedded_files: Arc::new(file_manager.remove(&ecu_lower).ok_or_else(|| {
             SovdError::RouteError(format!(
@@ -410,6 +422,10 @@ fn ecu_route<
             routing::put_with(genericservice::put, genericservice::docs_put),
         )
         .api_route(
+            "/operations",
+            routing::get_with(operations::get, operations::docs_get),
+        )
+        .api_route(
             "/operations/comparam/executions",
             routing::get_with(
                 operations::comparams::executions::get,
@@ -444,6 +460,17 @@ fn ecu_route<
             .post_with(
                 operations::service::executions::post,
                 operations::service::executions::docs_post,
+            ),
+        )
+        .api_route(
+            "/operations/{service}/executions/{id}",
+            routing::get_with(
+                operations::service::executions::id::get,
+                operations::service::executions::id::docs_get,
+            )
+            .delete_with(
+                operations::service::executions::id::delete,
+                operations::service::executions::id::docs_delete,
             ),
         )
         .api_route("/modes", routing::get_with(modes::get, modes::docs_get))
@@ -820,6 +847,7 @@ pub(crate) mod tests {
                 ))),
             }),
             comparam_executions: Arc::new(RwLock::new(IndexMap::new())),
+            service_executions: Arc::new(RwLock::new(IndexMap::new())),
             flash_data: Arc::new(RwLock::new(FileList {
                 files: Vec::new(),
                 path: Some(PathBuf::new()),

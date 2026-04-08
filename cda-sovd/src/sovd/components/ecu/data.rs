@@ -127,16 +127,19 @@ pub(crate) mod diag_service {
                 name: service.clone(),
                 type_: DiagCommType::Data,
                 lookup_name: None,
+                subfunction_id: None,
             },
             DiagComm {
                 name: service.clone(),
                 type_: DiagCommType::Data,
                 lookup_name: None,
+                subfunction_id: None,
             },
             DiagComm {
                 name: service,
                 type_: DiagCommType::Data,
                 lookup_name: None,
+                subfunction_id: None,
             },
         ];
         let schema = if include_schema {
@@ -205,6 +208,7 @@ pub(crate) mod diag_service {
                     name: diag_service,
                     type_: DiagCommType::Data,
                     lookup_name: None,
+                    subfunction_id: None,
                 },
                 &ecu_name,
                 &uds,
@@ -261,6 +265,7 @@ pub(crate) mod diag_service {
                 name: service.clone(),
                 type_: DiagCommType::Configurations,
                 lookup_name: None,
+                subfunction_id: None,
             },
             &ecu_name,
             &uds,

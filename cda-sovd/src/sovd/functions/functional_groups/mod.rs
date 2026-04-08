@@ -26,11 +26,14 @@ use cda_interfaces::{
     FunctionalDescriptionConfig, HashMap, UdsEcu, diagservices::DiagServiceResponse,
 };
 use http::StatusCode;
+use indexmap::IndexMap;
+use tokio::sync::RwLock;
+use uuid::Uuid;
 
 use crate::{
     create_schema,
     sovd::{
-        WebserverState,
+        ServiceExecution, WebserverState,
         error::{ApiError, ErrorWrapper, VendorErrorCode},
         locks::Locks,
     },
@@ -46,6 +49,7 @@ pub(crate) struct WebserverFgState<T: UdsEcu + Clone> {
     uds: T,
     locks: Arc<Locks>,
     functional_group_name: String,
+    pub(crate) fg_executions: Arc<RwLock<IndexMap<Uuid, ServiceExecution>>>,
 }
 
 pub(crate) async fn create_functional_group_routes<T: UdsEcu + Clone>(
@@ -134,6 +138,7 @@ pub(crate) async fn create_functional_group_routes<T: UdsEcu + Clone>(
             uds: state.uds.clone(),
             locks: Arc::clone(&state.locks),
             functional_group_name: group.clone(),
+            fg_executions: Arc::new(RwLock::new(IndexMap::new())),
         };
         functional_groups_router = functional_groups_router.nest_api_service(
             &format!("/functionalgroups/{group}"),
@@ -166,10 +171,21 @@ fn create_functional_group_route<T: UdsEcu + Clone>(fg_state: WebserverFgState<T
                 .put_with(data::diag_service::put, data::diag_service::docs_put),
         )
         .api_route(
+            "/operations",
+            routing::get_with(operations::get, operations::docs_get),
+        )
+        .api_route(
             "/operations/{operation}",
             routing::post_with(
                 operations::diag_service::post,
                 operations::diag_service::docs_post,
+            ),
+        )
+        .api_route(
+            "/operations/{operation}/executions/{id}",
+            routing::delete_with(
+                operations::diag_service::delete,
+                operations::diag_service::docs_delete,
             ),
         )
         .api_route("/modes", routing::get_with(modes::get, modes::docs_get))
@@ -411,4 +427,37 @@ fn map_to_json(include_schema: bool, accept: &mime::Mime) -> Result<bool, ErrorW
             });
         }
     })
+}
+
+#[cfg(test)]
+pub(crate) mod tests {
+    use std::sync::Arc;
+
+    use cda_interfaces::UdsEcu;
+    use indexmap::IndexMap;
+    use tokio::sync::RwLock;
+
+    use super::WebserverFgState;
+    use crate::sovd::{
+        HashMap,
+        locks::{LockType, Locks},
+    };
+
+    pub fn create_test_fg_state<T: UdsEcu + Clone>(
+        uds: T,
+        functional_group_name: String,
+    ) -> WebserverFgState<T> {
+        WebserverFgState {
+            uds,
+            locks: Arc::new(Locks {
+                vehicle: LockType::Vehicle(Arc::new(RwLock::new(None))),
+                ecu: LockType::Ecu(Arc::new(RwLock::new(HashMap::default()))),
+                functional_group: LockType::FunctionalGroup(Arc::new(RwLock::new(
+                    HashMap::default(),
+                ))),
+            }),
+            functional_group_name,
+            fg_executions: Arc::new(RwLock::new(IndexMap::new())),
+        }
+    }
 }

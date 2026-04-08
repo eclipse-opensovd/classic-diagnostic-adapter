@@ -173,9 +173,10 @@ pub mod service {
 
         #[derive(Serialize, schemars::JsonSchema)]
         pub struct Response<T> {
-            pub parameters: serde_json::Map<String, serde_json::Value>,
-            #[serde(skip_serializing_if = "Vec::is_empty")]
-            pub errors: Vec<DataError<T>>,
+            #[serde(skip_serializing_if = "Option::is_none")]
+            pub parameters: Option<serde_json::Map<String, serde_json::Value>>,
+            #[serde(skip_serializing_if = "Option::is_none")]
+            pub error: Option<DataError<T>>,
             #[schemars(skip)]
             #[serde(skip_serializing_if = "Option::is_none")]
             pub schema: Option<schemars::Schema>,
@@ -199,4 +200,105 @@ pub mod service {
 
         pub type Query = crate::IncludeSchemaQuery;
     }
+}
+
+/// Query parameters for `POST /operations/{service}/executions`.
+/// `x-sovd2uds-suppressService=true` skips sending the UDS Start request to the ECU.
+/// The service must still be defined in the diagnostic database.
+#[derive(Debug, Default, Deserialize, schemars::JsonSchema)]
+pub struct OperationPostQuery {
+    #[serde(rename = "include-schema", default)]
+    pub include_schema: bool,
+    /// When `true`, skip sending the UDS Start (0x01) request to the ECU.
+    /// The service definition must still be present in the database.
+    #[serde(rename = "x-sovd2uds-suppressService", default)]
+    pub suppress_service: bool,
+}
+
+/// Query parameters for `GET /operations/{service}/executions/{id}`.
+#[derive(Debug, Default, Deserialize, schemars::JsonSchema)]
+pub struct OperationGetByIdQuery {
+    #[serde(rename = "include-schema", default)]
+    pub include_schema: bool,
+    /// When `true`, skip sending the UDS `RequestResults` (0x03) request to the ECU.
+    /// The service definition must still be present in the database.
+    #[serde(rename = "x-sovd2uds-suppressService", default)]
+    pub suppress_service: bool,
+}
+
+/// Query parameters for `DELETE /operations/{service}/executions/{id}`.
+#[derive(Debug, Default, Deserialize, schemars::JsonSchema)]
+pub struct OperationDeleteQuery {
+    #[serde(rename = "include-schema", default)]
+    pub include_schema: bool,
+    /// When `true`, skip sending the UDS Stop (0x02) request to the ECU.
+    /// The service definition must still be present in the database.
+    #[serde(rename = "x-sovd2uds-suppressService", default)]
+    pub suppress_service: bool,
+    /// When `true`, remove the execution entry even if the ECU Stop request failed.
+    #[serde(rename = "x-sovd2uds-force", default)]
+    pub force: bool,
+}
+
+/// Status of a service execution.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(rename_all = "lowercase")]
+pub enum ExecutionStatus {
+    Running,
+    Completed,
+    Failed,
+    Stopped,
+}
+
+/// Response body for a successful async `POST /operations/{service}/executions`.
+#[derive(Serialize, schemars::JsonSchema)]
+pub struct AsyncPostResponse {
+    /// Unique id for this execution, used in subsequent GET / DELETE calls.
+    pub id: String,
+    /// Status of the executed operation immediately after a POST.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub status: Option<ExecutionStatus>,
+}
+
+/// Response body for `GET /operations/{service}/executions/{id}` (`RequestResults`).
+#[derive(Serialize, Deserialize, schemars::JsonSchema)]
+pub struct AsyncGetByIdResponse<T> {
+    /// Status of the executed operation.
+    pub status: ExecutionStatus,
+    /// Capability executed at the moment (always `execute` for CDA routines).
+    pub capability: GetByIdCapability,
+    /// Response parameters of the operation, if any.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub parameters: Option<serde_json::Map<String, serde_json::Value>>,
+    /// Progress in percent, if available.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub progress: Option<u8>,
+    /// Array of errors that occurred during execution.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub error: Vec<crate::error::DataError<T>>,
+    #[schemars(skip)]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub schema: Option<schemars::Schema>,
+}
+
+/// The capability reported in `GET /operations/{operation-id}/executions/{id}` responses.
+#[derive(Serialize, Deserialize, Clone, schemars::JsonSchema)]
+#[serde(rename_all = "lowercase")]
+pub enum GetByIdCapability {
+    Execute,
+}
+
+/// A single item in the `GET /operations` collection.
+/// Spec Table 169 (`OperationDescription`).
+#[derive(Serialize, Deserialize, schemars::JsonSchema)]
+pub struct OperationCollectionItem {
+    /// Trimmed short-name used as the service identifier.
+    pub id: String,
+    /// Human-readable name from the database long-name.
+    pub name: String,
+    /// If `true`, the execution of the operation requires proof of co-location.
+    /// Always `false` for classic UDS routines.
+    pub proximity_proof_required: bool,
+    /// If `true`, the execution of the operation is asynchronous (has Stop or `RequestResults`).
+    pub asynchronous_execution: bool,
 }

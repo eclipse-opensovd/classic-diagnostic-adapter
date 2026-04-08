@@ -18,8 +18,9 @@ use crate::{
     DiagComm, DiagServiceError, DynamicPlugin, EcuVariant, HashMap, SecurityAccess,
     TesterPresentType,
     datatypes::{
-        ComplexComParamValue, ComponentConfigurationsInfo, ComponentDataInfo, DataTransferMetaData,
-        DtcCode, DtcExtendedInfo, DtcRecordAndStatus, NetworkStructure, SdBoolMappings, SdSdg,
+        ComplexComParamValue, ComponentConfigurationsInfo, ComponentDataInfo,
+        ComponentOperationsInfo, DataTransferMetaData, DtcCode, DtcExtendedInfo,
+        DtcRecordAndStatus, NetworkStructure, RoutineSubfunctions, SdBoolMappings, SdSdg,
         single_ecu,
     },
     diagservices::{DiagServiceResponse, UdsPayloadData},
@@ -85,6 +86,28 @@ pub trait UdsEcu: Send + Sync + 'static {
         ecu: &str,
         security_plugin: &DynamicPlugin,
     ) -> Result<Vec<ComponentConfigurationsInfo>, DiagServiceError>;
+    /// Retrieve all operation-type (routine, SID 0x31) services for the given ECU.
+    /// Each entry carries flags indicating whether Stop (0x02) and/or
+    /// `RequestResults` (0x03) subfunctions are defined.
+    /// # Errors
+    /// Will return `Err` if the ECU does not exist.
+    async fn get_components_operations_info(
+        &self,
+        ecu: &str,
+        security_plugin: &DynamicPlugin,
+    ) -> Result<Vec<ComponentOperationsInfo>, DiagServiceError>;
+    /// Check which `RoutineControl` subfunctions (Stop 0x02, `RequestResults` 0x03) are
+    /// defined for a specific routine on the given ECU.
+    /// Returns `Ok({ false, false })` if the Start service exists but defines no
+    /// Stop or `RequestResults` subfunctions.
+    /// # Errors
+    /// Returns `Err(DiagServiceError::NotFound)` if the ECU does not exist or if the
+    /// Start (0x01) subfunction for the given service name is not found in the ECU description.
+    async fn get_routine_subfunctions(
+        &self,
+        ecu_name: &str,
+        service_name: &str,
+    ) -> Result<RoutineSubfunctions, DiagServiceError>;
     /// Retrieve all single ecu jobs for the given ECU on the detected variant.
     /// # Errors
     /// Will return `Err` if the ECU does not exist.
@@ -383,6 +406,33 @@ pub trait UdsEcu: Send + Sync + 'static {
         functional_group_name: &str,
     ) -> Result<Vec<ComponentDataInfo>, DiagServiceError>;
 
+    /// Retrieve all `RoutineControl` (SID 0x31) operations for a functional group,
+    /// with flags indicating available subfunctions.
+    /// # Errors
+    /// Returns `DiagServiceError` if the functional group cannot be found.
+    async fn get_functional_group_operations_info(
+        &self,
+        security_plugin: &DynamicPlugin,
+        functional_group_name: &str,
+    ) -> Result<Vec<ComponentOperationsInfo>, DiagServiceError>;
+
+    /// Check which `RoutineControl` subfunctions (Stop 0x02, `RequestResults` 0x03) are defined
+    /// for a specific routine within a functional group.
+    ///
+    /// Returns `Ok(RoutineSubfunctions)` if the Start (0x01) subfunction for the given service
+    /// name is found within the functional group.
+    /// `has_stop` and `has_request_results` indicate whether those subfunctions are also defined.
+    ///
+    /// # Errors
+    /// Returns `Err(DiagServiceError::NotFound)` if the functional group does not exist or if the
+    /// Start service for the given name is not found within it.
+    async fn get_functional_group_routine_subfunctions(
+        &self,
+        security_plugin: &DynamicPlugin,
+        functional_group_name: &str,
+        service_name: &str,
+    ) -> Result<RoutineSubfunctions, DiagServiceError>;
+
     /// Get the functional groups an ECU belongs to.
     /// # Errors
     /// Returns `DiagServiceError::NotFound` if the ECU is not found.
@@ -502,8 +552,9 @@ pub mod mock {
         TesterPresentType, UdsEcu,
         datatypes::{
             ComplexComParamValue, ComponentConfigurationsInfo, ComponentDataInfo,
-            DataTransferMetaData, DtcCode, DtcExtendedInfo, DtcRecordAndStatus, NetworkStructure,
-            SdBoolMappings, SdSdg, single_ecu,
+            ComponentOperationsInfo, DataTransferMetaData, DtcCode, DtcExtendedInfo,
+            DtcRecordAndStatus, NetworkStructure, RoutineSubfunctions, SdBoolMappings, SdSdg,
+            single_ecu,
         },
         diagservices::UdsPayloadData,
     };
@@ -548,6 +599,16 @@ pub mod mock {
                 ecu: &str,
                 security_plugin: &DynamicPlugin,
             ) -> Result<Vec<ComponentConfigurationsInfo>, DiagServiceError>;
+            async fn get_components_operations_info(
+                &self,
+                ecu: &str,
+                security_plugin: &DynamicPlugin,
+            ) -> Result<Vec<ComponentOperationsInfo>, DiagServiceError>;
+            async fn get_routine_subfunctions(
+                &self,
+                ecu_name: &str,
+                service_name: &str,
+            ) -> Result<RoutineSubfunctions, DiagServiceError>;
             async fn get_components_single_ecu_jobs_info(
                 &self,
                 ecu: &str,
@@ -715,6 +776,17 @@ pub mod mock {
                 security_plugin: &DynamicPlugin,
                 functional_group_name: &str,
             ) -> Result<Vec<ComponentDataInfo>, DiagServiceError>;
+            async fn get_functional_group_operations_info(
+                &self,
+                security_plugin: &DynamicPlugin,
+                functional_group_name: &str,
+            ) -> Result<Vec<ComponentOperationsInfo>, DiagServiceError>;
+            async fn get_functional_group_routine_subfunctions(
+                &self,
+                security_plugin: &DynamicPlugin,
+                functional_group_name: &str,
+                service_name: &str,
+            ) -> Result<RoutineSubfunctions, DiagServiceError>;
             async fn ecu_functional_groups(
                 &self,
                 ecu_name: &str,
@@ -752,6 +824,26 @@ pub mod mock {
                 map_to_json: bool,
             ) -> Result<HashMap<String, Result<<MockUdsEcu as UdsEcu>::Response,
                     DiagServiceError>>, DiagServiceError>;
+        }
+    }
+
+    use crate::schema::{SchemaDescription, SchemaProvider};
+
+    impl SchemaProvider for MockUdsEcu {
+        async fn schema_for_request(
+            &self,
+            _ecu: &str,
+            _service: &crate::DiagComm,
+        ) -> Result<SchemaDescription, DiagServiceError> {
+            Err(DiagServiceError::NotFound(String::new()))
+        }
+
+        async fn schema_for_responses(
+            &self,
+            _ecu: &str,
+            _service: &crate::DiagComm,
+        ) -> Result<SchemaDescription, DiagServiceError> {
+            Err(DiagServiceError::NotFound(String::new()))
         }
     }
 }

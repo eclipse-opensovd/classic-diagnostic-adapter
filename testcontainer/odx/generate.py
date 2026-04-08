@@ -36,6 +36,7 @@ from metadata import (
     add_additional_audiences,
 )
 from reset import add_reset_services
+from routine_control import add_routine_control_services
 from security_access import add_security_access_services
 from shared import (
     add_common_datatypes,
@@ -181,8 +182,10 @@ def add_base_variant(
     add_dtc_read_services(base_variant)
     # 14
     add_dtc_clear_services(base_variant)
-    # 31 01 42 00 - Clear User-Defined DTC Memory
+    # 31 - Clear User-Defined DTC Memory
     add_dtc_clear_user_memory_service(base_variant)
+    # 31 - Operations (SelfTest, CalibrateSensors)
+    add_routine_control_services(base_variant)
 
     # FLXC1000-specific services
     if ecu_name == "FLXC1000":

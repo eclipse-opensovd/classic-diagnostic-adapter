@@ -162,6 +162,7 @@ pub(crate) mod diag_service {
                 name: service.clone(),
                 type_: DiagCommType::Configurations,
                 lookup_name: None,
+                subfunction_id: None,
             },
             &ecu_name,
             &uds,

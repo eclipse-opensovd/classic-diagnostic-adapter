@@ -15,8 +15,18 @@ use super::{DataError, Deserialize, HashMap, Serialize};
 pub mod service {
     use super::{DataError, Deserialize, HashMap, Serialize};
 
-    /// Query parameters for POST operation service requests
-    pub type Query = crate::IncludeSchemaQuery;
+    /// Query parameters for `POST /operations/{operation}`.
+    /// `x-sovd2uds-suppressService=true` skips sending the UDS Start request to all ECUs.
+    /// The operation must still be defined in the diagnostic database.
+    #[derive(Debug, Default, Deserialize, schemars::JsonSchema)]
+    pub struct Query {
+        #[serde(rename = "include-schema", default)]
+        pub include_schema: bool,
+        /// When `true`, skip sending the UDS Start (0x01) request to all ECUs.
+        /// The operation definition must still be present in the database.
+        #[serde(rename = "x-sovd2uds-suppressService", default)]
+        pub suppress_service: bool,
+    }
 
     /// Request payload for functional group operations
     #[derive(Deserialize, schemars::JsonSchema)]
@@ -48,4 +58,19 @@ pub mod service {
 
 pub mod get {
     pub type Query = crate::IncludeSchemaQuery;
+}
+
+/// A single item in the `GET /functions/functionalgroups/{group}/operations` collection.
+/// Spec Table 169 (`OperationDescription`).
+#[derive(Serialize, Deserialize, schemars::JsonSchema)]
+pub struct FgOperationCollectionItem {
+    /// Trimmed short-name used as the service identifier.
+    pub id: String,
+    /// Human-readable name.
+    pub name: String,
+    /// If `true`, the execution of the operation requires proof of co-location.
+    /// Always `false` for classic UDS routines.
+    pub proximity_proof_required: bool,
+    /// If `true`, the execution of the operation is asynchronous (has Stop or `RequestResults`).
+    pub asynchronous_execution: bool,
 }

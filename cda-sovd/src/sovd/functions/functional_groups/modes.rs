@@ -102,7 +102,7 @@ async fn handle_mode_change<T: UdsEcu + Clone>(
     include_schema: bool,
 ) -> Response {
     let claims = security_plugin.as_auth_plugin().claims();
-    if let Some(response) = crate::sovd::locks::validate_lock(
+    if let Some(response) = crate::sovd::locks::validate_fg_lock(
         &claims,
         &state.functional_group_name,
         &state.locks,

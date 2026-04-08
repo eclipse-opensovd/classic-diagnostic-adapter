@@ -24,11 +24,11 @@ use cda_interfaces::{
     TesterPresentControlMessage, TesterPresentMode, TesterPresentType, TransmissionParameters,
     UdsEcu, UdsResponse,
     datatypes::{
-        self, ComponentConfigurationsInfo, DTC_CODE_BIT_LEN, DataTransferError,
-        DataTransferMetaData, DataTransferStatus, DtcCode, DtcExtendedInfo, DtcMask,
-        DtcReadInformationFunction, DtcRecordAndStatus, DtcSnapshot, Ecu, ExtendedDataRecords,
-        ExtendedSnapshots, FaultConfig, FunctionalGroup, Gateway, NetworkStructure, RetryPolicy,
-        SdBoolMappings, SdSdg,
+        self, ComponentConfigurationsInfo, ComponentOperationsInfo, DTC_CODE_BIT_LEN,
+        DataTransferError, DataTransferMetaData, DataTransferStatus, DtcCode, DtcExtendedInfo,
+        DtcMask, DtcReadInformationFunction, DtcRecordAndStatus, DtcSnapshot, Ecu,
+        ExtendedDataRecords, ExtendedSnapshots, FaultConfig, FunctionalGroup, Gateway,
+        NetworkStructure, RetryPolicy, RoutineSubfunctions, SdBoolMappings, SdSdg,
     },
     diagservices::{DiagServiceResponse, DiagServiceResponseType, UdsPayloadData},
     dlt_ctx, service_ids, util,
@@ -1395,6 +1395,33 @@ impl<S: EcuGateway, R: DiagServiceResponse, T: EcuManager<Response = R>> UdsEcu
             .get_functional_group_data_info(security_plugin, functional_group_name)
     }
 
+    async fn get_functional_group_operations_info(
+        &self,
+        security_plugin: &DynamicPlugin,
+        functional_group_name: &str,
+    ) -> Result<Vec<ComponentOperationsInfo>, DiagServiceError> {
+        self.ecu_manager(&self.functional_description_database)?
+            .read()
+            .await
+            .get_functional_group_operations_info(security_plugin, functional_group_name)
+    }
+
+    async fn get_functional_group_routine_subfunctions(
+        &self,
+        security_plugin: &DynamicPlugin,
+        functional_group_name: &str,
+        service_name: &str,
+    ) -> Result<RoutineSubfunctions, DiagServiceError> {
+        self.ecu_manager(&self.functional_description_database)?
+            .read()
+            .await
+            .get_functional_group_routine_subfunctions(
+                security_plugin,
+                functional_group_name,
+                service_name,
+            )
+    }
+
     async fn get_components_configuration_info(
         &self,
         ecu: &str,
@@ -1404,6 +1431,30 @@ impl<S: EcuGateway, R: DiagServiceResponse, T: EcuManager<Response = R>> UdsEcu
             .read()
             .await
             .get_components_configurations_info(security_plugin)
+    }
+
+    async fn get_components_operations_info(
+        &self,
+        ecu: &str,
+        security_plugin: &DynamicPlugin,
+    ) -> Result<Vec<ComponentOperationsInfo>, DiagServiceError> {
+        let items = self
+            .ecu_manager(ecu)?
+            .read()
+            .await
+            .get_components_operations_info(security_plugin);
+        Ok(items)
+    }
+
+    async fn get_routine_subfunctions(
+        &self,
+        ecu_name: &str,
+        service_name: &str,
+    ) -> Result<RoutineSubfunctions, DiagServiceError> {
+        self.ecu_manager(ecu_name)?
+            .read()
+            .await
+            .get_routine_subfunctions(service_name)
     }
 
     async fn get_components_single_ecu_jobs_info(

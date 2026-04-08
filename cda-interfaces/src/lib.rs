@@ -63,6 +63,8 @@ pub enum DiagCommAction {
     Read,
     Write,
     Start,
+    RequestResults,
+    Stop,
 }
 
 #[derive(Debug, Clone)]
@@ -70,6 +72,7 @@ pub struct DiagComm {
     pub name: String,
     pub type_: DiagCommType,
     pub lookup_name: Option<String>,
+    pub subfunction_id: Option<u8>,
 }
 
 impl DiagComm {
@@ -80,6 +83,7 @@ impl DiagComm {
             lookup_name: Some(name.clone()),
             name,
             type_,
+            subfunction_id: None,
         }
     }
 
@@ -102,7 +106,7 @@ impl From<DiagCommType> for DiagCommAction {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 /// Enum representing diagnostic communication types according to ASAM SOVD.
 ///
 /// Can be mapped to UDS service prefixes with [`DiagCommType::service_prefixes`]
@@ -172,6 +176,14 @@ pub struct TesterPresentControlMessage {
     pub ecu: String,
     /// If set to `None`, the ECU specific interval will be used.
     pub interval: Option<Duration>,
+}
+
+pub mod subfunction_ids {
+    pub mod routine {
+        pub const START: u8 = 0x01;
+        pub const STOP: u8 = 0x02;
+        pub const REQUEST_RESULTS: u8 = 0x03;
+    }
 }
 
 pub mod service_ids {
@@ -375,6 +387,8 @@ impl Display for DiagCommAction {
             DiagCommAction::Read => write!(f, "Read"),
             DiagCommAction::Write => write!(f, "Write"),
             DiagCommAction::Start => write!(f, "Start"),
+            DiagCommAction::RequestResults => write!(f, "RequestResults"),
+            DiagCommAction::Stop => write!(f, "Stop"),
         }
     }
 }

@@ -33,8 +33,9 @@ use crate::{HashMap, service_ids, util::serde_ext};
 ///   (e.g. `dump`).
 ///  - `service_affixes`: List of affixes that apply only to the given service.
 ///    This can be used to remove additional things from a service name during lookup.
+///    All affixes share the same position (prefix or suffix).
 ///    Example: The service is named `DTC_Settings_Mode_Off`, but "off" is passed via SOVD.
-///    To match the service configure, `[0x85, (Prefix, "Dtc_Settings_Mode")]`
+///    To match the service configure, `[0x85, (Prefix, ["Dtc_Settings_Mode_"])]`
 ///
 /// Common affixes (e.g. `read`, `write`) should be placed first for performance, but compound
 /// affixes must precede their base forms for correct matching.
@@ -50,7 +51,7 @@ pub struct DatabaseNamingConvention {
     // technically key should be u8, but it's not supported for toml parse / figment.
     // it will be validated in the validate sanity function
     #[serde(deserialize_with = "serde_ext::normalized_u8_key_map::deserialize")]
-    pub service_affixes: HashMap<String, (DiagnosticServiceAffixPosition, String)>,
+    pub service_affixes: HashMap<String, (DiagnosticServiceAffixPosition, Vec<String>)>,
 }
 
 impl DatabaseNamingConvention {
@@ -100,17 +101,24 @@ impl DatabaseNamingConvention {
 
     #[must_use]
     pub fn trim_service_name_affixes(&self, service_id: u8, short_name: String) -> String {
-        let Some((affix, value)) = self.service_affixes.get(&service_id.to_string()) else {
+        let Some((position, affixes)) = self.service_affixes.get(&service_id.to_string()) else {
             return short_name;
         };
-
-        match affix {
-            DiagnosticServiceAffixPosition::Prefix => &short_name[value.len()..],
-            DiagnosticServiceAffixPosition::Suffix => {
-                &short_name[..short_name.len().saturating_sub(value.len())]
+        let short_name_lowercase = short_name.to_lowercase();
+        for affix in affixes {
+            let affix_lowercase = affix.to_lowercase();
+            if *position == DiagnosticServiceAffixPosition::Prefix
+                && short_name_lowercase.starts_with(affix_lowercase.as_str())
+            {
+                return short_name[affix.len()..].to_string();
+            }
+            if *position == DiagnosticServiceAffixPosition::Suffix
+                && short_name_lowercase.ends_with(affix_lowercase.as_str())
+            {
+                return short_name[..short_name.len().saturating_sub(affix.len())].to_string();
             }
         }
-        .into()
+        short_name
     }
 }
 
@@ -155,13 +163,26 @@ impl Default for DatabaseNamingConvention {
                 " control func".to_owned(),
                 " control".to_owned(),
             ],
-            service_affixes: HashMap::from_iter([(
-                service_ids::CONTROL_DTC_SETTING.to_string(),
+            service_affixes: HashMap::from_iter([
                 (
-                    DiagnosticServiceAffixPosition::Prefix,
-                    "DTC_Setting_Mode_".to_owned(),
+                    service_ids::CONTROL_DTC_SETTING.to_string(),
+                    (
+                        DiagnosticServiceAffixPosition::Prefix,
+                        vec!["DTC_Setting_Mode_".to_owned()],
+                    ),
                 ),
-            )]),
+                (
+                    service_ids::ROUTINE_CONTROL.to_string(),
+                    (
+                        DiagnosticServiceAffixPosition::Suffix,
+                        vec![
+                            "_start".to_owned(),
+                            "_stop".to_owned(),
+                            "_requestresults".to_owned(),
+                        ],
+                    ),
+                ),
+            ]),
         }
     }
 }

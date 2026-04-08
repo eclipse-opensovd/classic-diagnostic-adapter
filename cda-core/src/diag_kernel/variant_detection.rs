@@ -48,6 +48,7 @@ pub(super) fn prepare_variant_detection(
                                                         .trim_short_name_affixes(sn),
                                                     type_: DiagCommType::Data,
                                                     lookup_name: Some(sn.to_owned()),
+                                                    subfunction_id: None,
                                                 },
                                             )
                                         })
