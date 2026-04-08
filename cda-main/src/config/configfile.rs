@@ -172,8 +172,10 @@ impl ConfigSanity for DatabaseNamingConvention {
         }
 
         // Validate services affixes
-        for (pos, affix) in self.service_affixes.values() {
-            validate_affix(affix, pos, SERVICE_NAME_AFFIX_KEY)?;
+        for (pos, affixes) in self.service_affixes.values() {
+            for affix in affixes {
+                validate_affix(affix, pos, SERVICE_NAME_AFFIX_KEY)?;
+            }
         }
 
         Ok(())
@@ -207,7 +209,7 @@ short_name_affixes = [ "Read_", "Write_" ]
 long_name_affixes = [ "Read ", "Write " ]
 
 [database.naming_convention.service_affixes]
-0x10 = ["Prefix", "Control_"]
+0x10 = ["Prefix", ["Control_"]]
 
 [logging.tokio_tracing]
 server = "0.0.0.0:6669"
@@ -281,7 +283,7 @@ description_database = "teapot"
                 .get(&0x10.to_string()),
             Some(&(
                 DiagnosticServiceAffixPosition::Prefix,
-                "Control_".to_string()
+                vec!["Control_".to_string()]
             ))
         );
         Ok(())

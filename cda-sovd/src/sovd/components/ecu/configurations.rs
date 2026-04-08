@@ -139,9 +139,7 @@ pub(crate) mod diag_service {
     >(
         headers: HeaderMap,
         UseApi(Secured(security_plugin), _): UseApi<Secured, ()>,
-        Path(DiagServicePathParam {
-            diag_service: service,
-        }): Path<DiagServicePathParam>,
+        Path(DiagServicePathParam { service }): Path<DiagServicePathParam>,
         WithRejection(Query(query), _): WithRejection<
             Query<sovd_configurations::ConfigurationsQuery>,
             ApiError,
@@ -162,6 +160,7 @@ pub(crate) mod diag_service {
                 name: service.clone(),
                 type_: DiagCommType::Configurations,
                 lookup_name: None,
+                subfunction_id: None,
             },
             &ecu_name,
             &uds,

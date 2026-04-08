@@ -23,12 +23,13 @@ use axum::{
     response::{IntoResponse, Response},
 };
 use cda_interfaces::{
-    DiagServiceError, HashMap, HashMapExtensions, HashSet, diagservices::DiagServiceResponse,
+    DiagServiceError, HashMap, HashMapExtensions, HashSet,
+    diagservices::{DiagServiceResponse, MappedNRC},
     file_manager::MddError,
 };
 use serde::{Deserialize, Serialize};
 use serde_qs::axum::QsQueryRejection;
-use sovd_interfaces::error::ErrorCode;
+use sovd_interfaces::error::{ApiErrorResponse, ErrorCode};
 
 #[allow(dead_code)]
 #[derive(Debug, Deserialize, Serialize, schemars::JsonSchema, thiserror::Error)]
@@ -310,23 +311,10 @@ impl IntoResponse for ErrorWrapper {
     }
 }
 
-pub(crate) fn api_error_from_diag_response(
-    response: &impl DiagServiceResponse,
+pub(crate) fn nrc_to_api_error_response(
+    nrc: MappedNRC,
     include_schema: bool,
-) -> Response {
-    let nrc = match response.as_nrc() {
-        Ok(nrc) => nrc,
-        Err(e) => {
-            return ErrorWrapper {
-                error: ApiError::InternalServerError(Some(format!(
-                    "Failed to convert response to NRC: {e}"
-                ))),
-                include_schema,
-            }
-            .into_response();
-        }
-    };
-
+) -> ApiErrorResponse<VendorErrorCode> {
     let mut parameters = HashMap::new();
     let mut message = String::new();
     if let Some((raw_code, ecu_msg)) = nrc.code.zip(nrc.description) {
@@ -347,7 +335,7 @@ pub(crate) fn api_error_from_diag_response(
         None
     };
 
-    let error_response = sovd_interfaces::error::ApiErrorResponse::<VendorErrorCode> {
+    sovd_interfaces::error::ApiErrorResponse::<VendorErrorCode> {
         error_code: ErrorCode::ErrorResponse,
         message,
         parameters: if parameters.is_empty() {
@@ -358,7 +346,27 @@ pub(crate) fn api_error_from_diag_response(
         error_source: Some("ECU".to_owned()),
         vendor_code: None,
         schema,
+    }
+}
+
+pub(crate) fn api_error_from_diag_response(
+    response: &impl DiagServiceResponse,
+    include_schema: bool,
+) -> Response {
+    let nrc = match response.as_nrc() {
+        Ok(nrc) => nrc,
+        Err(e) => {
+            return ErrorWrapper {
+                error: ApiError::InternalServerError(Some(format!(
+                    "Failed to convert response to NRC: {e}"
+                ))),
+                include_schema,
+            }
+            .into_response();
+        }
     };
+
+    let error_response = nrc_to_api_error_response(nrc, include_schema);
     (StatusCode::BAD_GATEWAY, Json(error_response)).into_response()
 }
 

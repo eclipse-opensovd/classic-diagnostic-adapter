@@ -30,10 +30,10 @@ use crate::{
     openapi,
     sovd::{
         IntoSovd, WebserverEcuState,
-        components::{field_parse_errors_to_json, get_content_type_and_accept},
+        components::get_content_type_and_accept,
         create_response_schema, create_schema,
         error::{ApiError, ErrorWrapper, api_error_from_diag_response},
-        get_payload_data,
+        field_parse_errors_to_json, get_payload_data,
     },
 };
 
@@ -210,7 +210,7 @@ impl IntoSovd for cda_interfaces::datatypes::ComParamSimpleValue {
     }
 }
 
-openapi::aide_helper::gen_path_param!(DiagServicePathParam diag_service String);
+openapi::aide_helper::gen_path_param!(DiagServicePathParam service String);
 #[allow(clippy::too_many_lines)] // splitting is not worth it here
 async fn data_request<T: UdsEcu + SchemaProvider + Clone>(
     service: DiagComm,

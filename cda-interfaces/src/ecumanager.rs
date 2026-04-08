@@ -15,8 +15,9 @@ use crate::{
     DiagComm, DiagServiceError, DoipComParamProvider, DynamicPlugin, EcuSchemaProvider, HashMap,
     HashSet, SecurityAccess, UDS_ID_RESPONSE_BITMASK, UdsComParamProvider,
     datatypes::{
-        ComplexComParamValue, ComponentConfigurationsInfo, ComponentDataInfo, DtcLookup,
-        DtcReadInformationFunction, SdSdg, single_ecu,
+        ComplexComParamValue, ComponentConfigurationsInfo, ComponentDataInfo,
+        ComponentOperationsInfo, DtcLookup, DtcReadInformationFunction, RoutineSubfunctions, SdSdg,
+        single_ecu,
     },
     diagservices::{DiagServiceResponse, UdsPayloadData},
     service_ids,
@@ -175,10 +176,19 @@ impl ServicePayload {
     pub fn is_response_for_sid(&self, sent_sid: u8) -> bool {
         self.is_negative_response_for_sid(sent_sid) || self.is_positive_response_for_sid(sent_sid)
     }
+
+    /// Returns `true` if the UDS subfunction byte (byte index 1) has bit 7 set,
+    /// indicating the `suppressPosRspMsgIndicationBit` (SPRMIB) is active.
+    /// When this bit is set, the ECU is not expected to send a positive response, so callers
+    /// should not treat the absence of a positive response as an error.
+    #[must_use]
+    pub fn is_suppress_positive_response(&self) -> bool {
+        self.data.get(1).is_some_and(|&b| b & 0x80 != 0)
+    }
 }
 
 /// Trait to provide communication parameters for an ECU.
-/// It might be the case, that no all functions are needed for
+/// It might be the case, that not all functions are needed for
 /// every protocol. (I.e. gateway address for CAN).
 pub trait EcuAddressProvider: Send + Sync + 'static {
     #[must_use]
@@ -266,6 +276,9 @@ pub trait EcuManager:
     ) -> impl Future<Output = Result<Vec<SdSdg>, DiagServiceError>> + Send;
     /// Convert a UDS payload given as `u8` slice into a `DiagServiceResponse`.
     ///
+    /// When `functional_group_name` is `Some`, the service is looked up in the
+    /// named functional group instead of the ECU variant.
+    ///
     /// # Errors
     /// Will return `Err` in cases where the payload doesn´t match the expected UDS response, or if
     /// elements of the response cannot be correctly mapped from the raw data.
@@ -274,6 +287,7 @@ pub trait EcuManager:
         diag_service: &DiagComm,
         payload: &ServicePayload,
         map_to_json: bool,
+        functional_group_name: Option<&str>,
     ) -> impl Future<Output = Result<Self::Response, DiagServiceError>> + Send;
 
     /// Creates a `ServicePayload` and processes transitions based on raw UDS data,
@@ -290,6 +304,9 @@ pub trait EcuManager:
     ) -> impl Future<Output = Result<ServicePayload, DiagServiceError>> + Send;
     /// Converts given `UdsPayloadData` into a UDS request payload for the given `DiagService`.
     ///
+    /// When `functional_group_name` is `Some`, the service is looked up in the
+    /// named functional group instead of the ECU variant.
+    ///
     /// # Errors
     /// Will return `Err` in cases where the `UdsPayloadData` doesn´t provide required parameters
     /// for the `DiagService` request or if elements of the `UdsPayloadData` cannot be mapped to
@@ -299,6 +316,7 @@ pub trait EcuManager:
         diag_service: &DiagComm,
         security_plugin: &DynamicPlugin,
         data: Option<UdsPayloadData>,
+        functional_group_name: Option<&str>,
     ) -> impl Future<Output = Result<ServicePayload, DiagServiceError>> + Send;
     /// Convert a UDS REQUEST payload into a `DiagServiceResponse` using the
     /// REQUEST definition in MDD. This function parses incoming REQUEST payloads
@@ -436,13 +454,17 @@ pub trait EcuManager:
         service_bytes: &[u8],
     ) -> Result<Vec<DiagComm>, DiagServiceError>;
 
-    /// Lookup a service by its service id and name for the current ECU variant.
+    /// Lookup a service by its service id and name.
+    ///
+    /// When `functional_group_name` is `Some`, the search is scoped to the
+    /// given functional group (and its parent refs) instead of the ECU variant.
     /// # Errors
     /// Will return `Err` if the lookup failed
     fn lookup_service_by_sid_and_name(
         &self,
         service_id: u8,
         name: &str,
+        functional_group_name: Option<&str>,
     ) -> Result<DiagComm, DiagServiceError>;
 
     /// Get parameter metadata for a specific service, including constant values for PHYS-CONST and
@@ -489,6 +511,51 @@ pub trait EcuManager:
         &self,
         security_plugin: &DynamicPlugin,
     ) -> Result<Vec<ComponentConfigurationsInfo>, DiagServiceError>;
+    /// Retrieve all `RoutineControl` (SID 0x31) operations for the current ECU variant,
+    /// with flags indicating available subfunctions (Stop/RequestResults).
+    fn get_components_operations_info(
+        &self,
+        security_plugin: &DynamicPlugin,
+    ) -> Vec<ComponentOperationsInfo>;
+    /// Check which `RoutineControl` subfunctions (Stop 0x02, `RequestResults` 0x03) are defined
+    /// for the given routine service name.
+    ///
+    /// Returns `Ok(RoutineSubfunctions)` if the Start (0x01) service exists.
+    /// `has_stop` and `has_request_results` indicate whether those subfunctions are also defined.
+    ///
+    /// # Errors
+    /// Returns `Err(DiagServiceError::NotFound)` if the Start service for the given name is not
+    /// found in the ECU description.
+    fn get_routine_subfunctions(
+        &self,
+        service_name: &str,
+        security_plugin: &DynamicPlugin,
+    ) -> Result<RoutineSubfunctions, DiagServiceError>;
+    /// Retrieve all `RoutineControl` (SID 0x31) operations for a specific functional group,
+    /// with flags indicating available subfunctions (Stop/RequestResults).
+    /// # Errors
+    /// Returns `DiagServiceError` if the functional group cannot be found.
+    fn get_functional_group_operations_info(
+        &self,
+        security_plugin: &DynamicPlugin,
+        functional_group_name: &str,
+    ) -> Result<Vec<ComponentOperationsInfo>, DiagServiceError>;
+    /// Check which `RoutineControl` subfunctions (Stop 0x02, `RequestResults` 0x03) are defined
+    /// for a specific routine within a functional group.
+    ///
+    /// Returns `Ok(RoutineSubfunctions)` if the Start (0x01) subfunction for the given service
+    /// name is found within the functional group.
+    /// `has_stop` and `has_request_results` indicate whether those subfunctions are also defined.
+    ///
+    /// # Errors
+    /// Returns `Err(DiagServiceError::NotFound)` if the functional group does not exist or if the
+    /// Start service for the given name is not found within it.
+    fn get_functional_group_routine_subfunctions(
+        &self,
+        security_plugin: &DynamicPlugin,
+        functional_group_name: &str,
+        service_name: &str,
+    ) -> Result<RoutineSubfunctions, DiagServiceError>;
     /// Retrieve all 'single ecu' jobs for the current ECU variant.
     fn get_components_single_ecu_jobs_info(&self) -> Vec<ComponentDataInfo>;
     /// Lookup DTC services for the given service types in the current ECU variant.

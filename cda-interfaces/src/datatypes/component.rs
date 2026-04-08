@@ -27,6 +27,27 @@ pub struct ComponentConfigurationsInfo {
     pub service_abstract: Vec<Vec<u8>>,
 }
 
+/// Metadata about a single operation (routine SID 0x31) available on an ECU.
+pub struct ComponentOperationsInfo {
+    /// Routine identifier used as path element (short name after prefix/suffix stripping)
+    pub id: String,
+    /// Long name of the routine
+    pub name: String,
+    /// Whether the routine has a Stop subfunction (0x02)
+    pub has_stop: bool,
+    /// Whether the routine has a `RequestResults` subfunction (0x03)
+    pub has_request_results: bool,
+}
+
+/// Describes which `RoutineControl` subfunctions a routine supports beyond Start (0x01).
+#[derive(Debug, Clone, Default)]
+pub struct RoutineSubfunctions {
+    /// Routine supports the Stop subfunction (0x02)
+    pub has_stop: bool,
+    /// Routine supports the `RequestResults` subfunction (0x03)
+    pub has_request_results: bool,
+}
+
 #[derive(Deserialize, Serialize, Clone, Debug)]
 pub struct ComponentsConfig {
     /// Allows to specify additional fields to be added to the component response.

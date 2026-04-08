@@ -173,9 +173,10 @@ pub mod service {
 
         #[derive(Serialize, schemars::JsonSchema)]
         pub struct Response<T> {
-            pub parameters: serde_json::Map<String, serde_json::Value>,
-            #[serde(skip_serializing_if = "Vec::is_empty")]
-            pub errors: Vec<DataError<T>>,
+            #[serde(skip_serializing_if = "Option::is_none")]
+            pub parameters: Option<serde_json::Map<String, serde_json::Value>>,
+            #[serde(skip_serializing_if = "Option::is_none")]
+            pub error: Option<DataError<T>>,
             #[schemars(skip)]
             #[serde(skip_serializing_if = "Option::is_none")]
             pub schema: Option<schemars::Schema>,
@@ -200,3 +201,58 @@ pub mod service {
         pub type Query = crate::IncludeSchemaQuery;
     }
 }
+
+pub use crate::common::operations::{OperationDeleteQuery, OperationQuery};
+
+/// Status of a service execution.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(rename_all = "lowercase")]
+pub enum ExecutionStatus {
+    Running,
+    Completed,
+    Failed,
+    Stopped,
+}
+
+/// Response body for a successful async `POST /operations/{service}/executions`.
+#[derive(Serialize, schemars::JsonSchema)]
+pub struct AsyncPostResponse {
+    /// Unique id for this execution, used in subsequent GET / DELETE calls.
+    pub id: String,
+    /// Status of the executed operation immediately after a POST.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub status: Option<ExecutionStatus>,
+    #[schemars(skip)]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub schema: Option<schemars::Schema>,
+}
+
+/// Response body for `GET /operations/{service}/executions/{id}` (`RequestResults`).
+#[derive(Serialize, Deserialize, schemars::JsonSchema)]
+pub struct AsyncGetByIdResponse<T> {
+    /// Status of the executed operation.
+    pub status: ExecutionStatus,
+    /// Capability executed at the moment (always `execute` for CDA routines).
+    pub capability: GetByIdCapability,
+    /// Response parameters of the operation, if any.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub parameters: Option<serde_json::Map<String, serde_json::Value>>,
+    /// Progress in percent, if available.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub progress: Option<u8>,
+    /// Array of errors that occurred during execution.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub error: Vec<crate::error::DataError<T>>,
+    #[schemars(skip)]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub schema: Option<schemars::Schema>,
+}
+
+/// The capability reported in `GET /operations/{operation-id}/executions/{id}` responses.
+#[derive(Serialize, Deserialize, Clone, schemars::JsonSchema)]
+#[serde(rename_all = "lowercase")]
+pub enum GetByIdCapability {
+    Execute,
+}
+
+pub use crate::common::operations::OperationCollectionItem;
