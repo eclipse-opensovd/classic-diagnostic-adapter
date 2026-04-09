@@ -656,19 +656,32 @@ pub(in crate::diag_kernel) fn extract_diag_data_container(
 ) -> Result<DiagDataTypeContainer, DiagServiceError> {
     let uds_payload = payload.data()?;
 
+    // Parameter byte positions from ODX are absolute within the full PDU.
+    // For consumed top-level views (current_index > 0, no explicit slice),
+    // convert to a position relative to the current view before decoding.
+    // For pushed slices, byte positions are already relative to that view.
+    let payload_view_start = payload.pos();
+    let effective_param_byte_pos =
+        if !payload.has_active_slice() && param_byte_pos >= payload_view_start {
+            param_byte_pos.saturating_sub(payload_view_start)
+        } else {
+            param_byte_pos
+        };
+
     // When the parameter position is at or beyond the payload boundary, treat
     // it as absent (trailing field past end-of-PDU). Catch decode errors at
     // that boundary and return empty data instead of propagating NotEnoughData.
-    let (data, bit_len) = match diag_type.decode(uds_payload, param_byte_pos, param_bit_pos) {
-        Ok(result) => result,
-        Err(_) if param_byte_pos >= uds_payload.len() => (vec![], 0),
-        Err(e) => return Err(e),
-    };
+    let (data, bit_len) =
+        match diag_type.decode(uds_payload, effective_param_byte_pos, param_bit_pos) {
+            Ok(result) => result,
+            Err(_) if effective_param_byte_pos >= uds_payload.len() => (vec![], 0),
+            Err(e) => return Err(e),
+        };
 
     let is_optional = match diag_type.type_() {
         DiagCodedTypeVariant::MinMaxLength(MinMaxLengthType { min_length, .. }) => *min_length == 0,
         _ => false,
-    } || param_byte_pos >= uds_payload.len();
+    } || effective_param_byte_pos >= uds_payload.len();
     if data.is_empty() && !is_optional {
         // at least 1 byte expected, we are using NotEnoughData error here, because
         // this might happen when parsing end of pdu and leftover bytes can be ignored
@@ -684,7 +697,7 @@ pub(in crate::diag_kernel) fn extract_diag_data_container(
     }
 
     let data_type = diag_type.base_datatype();
-    payload.set_last_read_byte_pos(param_byte_pos.saturating_add(data.len()));
+    payload.set_last_read_byte_pos(effective_param_byte_pos.saturating_add(data.len()));
 
     Ok(DiagDataTypeContainer::RawContainer(
         DiagDataTypeContainerRaw {
@@ -1105,7 +1118,10 @@ mod tests {
         .unwrap()
     }
 
-    use crate::diag_kernel::{operations::extract_diag_data_container, payload::Payload};
+    use crate::{
+        DiagDataTypeContainer,
+        diag_kernel::{operations::extract_diag_data_container, payload::Payload},
+    };
 
     #[test]
     fn test_hex_values() {
@@ -2212,5 +2228,30 @@ mod tests {
             "String '99999' should be rejected for 8-bit UInt32, but bit-length validation is \
              skipped"
         );
+    }
+
+    #[test]
+    fn test_extract_diag_data_container_with_shifted_payload_and_absolute_byte_position() {
+        let diag_type = create_diag_coded_type_stl(DataType::UInt32, Some(8));
+        let data = [0x62, 0xF1, 0x90, 0x20];
+        let mut payload = Payload::new(&data);
+
+        // Simulate a shifted payload view that starts at byte 3.
+        payload.set_last_read_byte_pos(3);
+        assert_eq!(payload.consume(), 3);
+
+        // ODX byte position stays absolute (3). Extraction must still decode
+        // from the current view and return 0x20, not empty data.
+        let result =
+            extract_diag_data_container(Some("DID_Number"), 3, 0, &mut payload, &diag_type, None)
+                .expect("Expected successful decode from shifted payload view");
+
+        match result {
+            DiagDataTypeContainer::RawContainer(raw) => {
+                assert_eq!(raw.data, vec![0x20]);
+                assert_eq!(raw.bit_len, 8);
+            }
+            other => panic!("Unexpected container type: {other:?}"),
+        }
     }
 }

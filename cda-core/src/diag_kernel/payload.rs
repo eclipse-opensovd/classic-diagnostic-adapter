@@ -71,6 +71,10 @@ impl<'a> Payload<'a> {
         }
     }
 
+    pub(in crate::diag_kernel) fn has_active_slice(&self) -> bool {
+        self.slices.back().is_some()
+    }
+
     pub(in crate::diag_kernel) fn consume(&mut self) -> usize {
         let advance_len = self.last_read_byte_pos.saturating_add(self.bytes_to_skip);
         if self.pos().saturating_add(advance_len) > self.data.len() {

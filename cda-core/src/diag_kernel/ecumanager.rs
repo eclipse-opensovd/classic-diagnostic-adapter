@@ -3743,7 +3743,13 @@ impl<S: SecurityPlugin> EcuManager<S> {
         }
 
         let byte_pos = if param.has_byte_position() {
-            param.byte_position() as usize
+            let absolute_byte_pos = param.byte_position() as usize;
+            let payload_view_start = uds_payload.pos();
+            if !uds_payload.has_active_slice() && absolute_byte_pos >= payload_view_start {
+                absolute_byte_pos.saturating_sub(payload_view_start)
+            } else {
+                absolute_byte_pos
+            }
         } else {
             uds_payload.last_read_byte_pos()
         };
@@ -7767,17 +7773,23 @@ mod tests {
         assert_eq!(mapped.data, response_data);
         assert!(mapped.mapped_data.is_some());
 
-        let mapped_data = mapped.mapped_data.unwrap();
+        let json_data = mapped
+            .serialize_to_json()
+            .expect("expected valid JSON mapping")
+            .data;
 
-        // Should have entries for DID and data_param (sid is CODED-CONST, not in mapped output)
+        // SID is a coded-const and not part of mapped output; DID and data_param must be parsed.
         assert!(
-            mapped_data.data.contains_key("DID"),
-            "Expected 'DID' key in mapped data"
+            json_data.get("DID").is_some(),
+            "Expected 'DID' in mapped JSON"
         );
         assert!(
-            mapped_data.data.contains_key("data_param"),
-            "Expected 'data_param' key in mapped data"
+            json_data.get("data_param").is_some(),
+            "Expected 'data_param' in mapped JSON"
         );
+
+        assert_eq!(json_data.get("DID"), Some(&json!(61840)));
+        assert_eq!(json_data.get("data_param"), Some(&json!(66)));
     }
 
     #[tokio::test]
