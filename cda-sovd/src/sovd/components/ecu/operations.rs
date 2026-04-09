@@ -499,7 +499,7 @@ pub(crate) mod service {
         use cda_plugin_security::{Secured, SecurityPlugin};
         use sovd_interfaces::components::ecu::operations::{
             AsyncGetByIdResponse, AsyncPostResponse, ExecutionStatus, OperationDeleteQuery,
-            OperationGetByIdQuery, OperationPostQuery, service::executions as sovd_executions,
+            OperationQuery, service::executions as sovd_executions,
         };
         use uuid::Uuid;
 
@@ -575,7 +575,7 @@ pub(crate) mod service {
         >(
             UseApi(Secured(security_plugin), _): UseApi<Secured, ()>,
             Path(OperationServicePathParam { service }): Path<OperationServicePathParam>,
-            WithRejection(Query(query), _): WithRejection<Query<OperationPostQuery>, ApiError>,
+            WithRejection(Query(query), _): WithRejection<Query<OperationQuery>, ApiError>,
             State(WebserverEcuState {
                 ecu_name,
                 uds,
@@ -1305,10 +1305,7 @@ pub(crate) mod service {
             >(
                 UseApi(Secured(security_plugin), _): UseApi<Secured, ()>,
                 Path(ServiceAndIdPathParam { service, id }): Path<ServiceAndIdPathParam>,
-                WithRejection(Query(query), _): WithRejection<
-                    Query<OperationGetByIdQuery>,
-                    ApiError,
-                >,
+                WithRejection(Query(query), _): WithRejection<Query<OperationQuery>, ApiError>,
                 State(WebserverEcuState {
                     ecu_name,
                     uds,
@@ -1947,7 +1944,7 @@ mod tests {
                     }),
                     WithRejection(
                         Query(
-                            sovd_interfaces::components::ecu::operations::OperationGetByIdQuery {
+                            sovd_interfaces::components::ecu::operations::OperationQuery {
                                 include_schema: false,
                                 suppress_service: false,
                             },
@@ -2014,7 +2011,7 @@ mod tests {
                     }),
                     WithRejection(
                         Query(
-                            sovd_interfaces::components::ecu::operations::OperationGetByIdQuery {
+                            sovd_interfaces::components::ecu::operations::OperationQuery {
                                 include_schema: false,
                                 suppress_service: false,
                             },
@@ -2090,7 +2087,7 @@ mod tests {
                     }),
                     WithRejection(
                         Query(
-                            sovd_interfaces::components::ecu::operations::OperationGetByIdQuery {
+                            sovd_interfaces::components::ecu::operations::OperationQuery {
                                 include_schema: false,
                                 suppress_service: true,
                             },
@@ -2161,7 +2158,7 @@ mod tests {
                     }),
                     WithRejection(
                         Query(
-                            sovd_interfaces::components::ecu::operations::OperationGetByIdQuery {
+                            sovd_interfaces::components::ecu::operations::OperationQuery {
                                 include_schema: false,
                                 suppress_service: false,
                             },
@@ -2948,7 +2945,7 @@ mod tests {
                     }),
                     WithRejection(
                         Query(
-                            sovd_interfaces::components::ecu::operations::OperationGetByIdQuery {
+                            sovd_interfaces::components::ecu::operations::OperationQuery {
                                 include_schema: false,
                                 suppress_service: false,
                             },
@@ -3398,7 +3395,7 @@ mod tests {
                     }),
                     WithRejection(
                         Query(
-                            sovd_interfaces::components::ecu::operations::OperationGetByIdQuery {
+                            sovd_interfaces::components::ecu::operations::OperationQuery {
                                 include_schema: false,
                                 suppress_service: false,
                             },

@@ -202,38 +202,7 @@ pub mod service {
     }
 }
 
-/// Query parameters for `POST /operations/{service}/executions`.
-#[derive(Debug, Default, Deserialize, schemars::JsonSchema)]
-pub struct OperationPostQuery {
-    #[serde(rename = "include-schema", default)]
-    pub include_schema: bool,
-    /// When `true`, skip sending the UDS Start (0x01) request to the ECU.
-    #[serde(rename = "x-sovd2uds-suppressService", default)]
-    pub suppress_service: bool,
-}
-
-/// Query parameters for `GET /operations/{service}/executions/{id}`.
-#[derive(Debug, Default, Deserialize, schemars::JsonSchema)]
-pub struct OperationGetByIdQuery {
-    #[serde(rename = "include-schema", default)]
-    pub include_schema: bool,
-    /// When `true`, skip sending the UDS `RequestResults` (0x03) request to the ECU.
-    #[serde(rename = "x-sovd2uds-suppressService", default)]
-    pub suppress_service: bool,
-}
-
-/// Query parameters for `DELETE /operations/{service}/executions/{id}`.
-#[derive(Debug, Default, Deserialize, schemars::JsonSchema)]
-pub struct OperationDeleteQuery {
-    #[serde(rename = "include-schema", default)]
-    pub include_schema: bool,
-    /// When `true`, skip sending the UDS Stop (0x02) request to the ECU.
-    #[serde(rename = "x-sovd2uds-suppressService", default)]
-    pub suppress_service: bool,
-    /// When `true`, remove the execution entry even if the ECU Stop request failed.
-    #[serde(rename = "x-sovd2uds-force", default)]
-    pub force: bool,
-}
+pub use crate::common::operations::{OperationDeleteQuery, OperationQuery};
 
 /// Status of a service execution.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, schemars::JsonSchema)]
@@ -283,17 +252,4 @@ pub enum GetByIdCapability {
     Execute,
 }
 
-/// A single item in the `GET /operations` collection.
-/// Spec Table 169 (`OperationDescription`).
-#[derive(Serialize, Deserialize, schemars::JsonSchema)]
-pub struct OperationCollectionItem {
-    /// Trimmed short-name used as the service identifier.
-    pub id: String,
-    /// Human-readable name from the database long-name.
-    pub name: String,
-    /// If `true`, the execution of the operation requires proof of co-location.
-    /// Always `false` for classic UDS routines.
-    pub proximity_proof_required: bool,
-    /// If `true`, the execution of the operation is asynchronous (has Stop or `RequestResults`).
-    pub asynchronous_execution: bool,
-}
+pub use crate::common::operations::OperationCollectionItem;

@@ -112,6 +112,51 @@ pub mod sovd2uds {
 }
 
 pub mod common {
+    pub mod operations {
+        use serde::{Deserialize, Serialize};
+
+        /// A single item in an operations collection.
+        /// Spec Table 169 (`OperationDescription`).
+        #[derive(Serialize, Deserialize, schemars::JsonSchema)]
+        pub struct OperationCollectionItem {
+            /// Trimmed short-name used as the service identifier.
+            pub id: String,
+            /// Human-readable name from the database long-name.
+            pub name: String,
+            /// If `true`, the execution of the operation requires proof of co-location.
+            /// Always `false` for classic UDS routines.
+            pub proximity_proof_required: bool,
+            /// If `true`, the execution of the operation is asynchronous
+            /// (has Stop or `RequestResults`).
+            pub asynchronous_execution: bool,
+        }
+
+        /// Query parameters for
+        /// - `POST .../operations/{service}/executions`.
+        /// - `GET .../operations/{service}/executions/{id}`.
+        #[derive(Debug, Default, Deserialize, schemars::JsonSchema)]
+        pub struct OperationQuery {
+            #[serde(rename = "include-schema", default)]
+            pub include_schema: bool,
+            /// When `true`, skip sending the UDS request to the ECU(s).
+            #[serde(rename = "x-sovd2uds-suppressService", default)]
+            pub suppress_service: bool,
+        }
+
+        /// Query parameters for `DELETE .../operations/{service}/executions/{id}`.
+        #[derive(Debug, Default, Deserialize, schemars::JsonSchema)]
+        pub struct OperationDeleteQuery {
+            #[serde(rename = "include-schema", default)]
+            pub include_schema: bool,
+            /// When `true`, skip sending the UDS Stop (0x02) request to the ECU(s).
+            #[serde(rename = "x-sovd2uds-suppressService", default)]
+            pub suppress_service: bool,
+            /// When `true`, remove the execution entry even if the ECU Stop request failed.
+            #[serde(rename = "x-sovd2uds-force", default)]
+            pub force: bool,
+        }
+    }
+
     pub mod modes {
 
         pub const SESSION_NAME: &str = "Diagnostic session";

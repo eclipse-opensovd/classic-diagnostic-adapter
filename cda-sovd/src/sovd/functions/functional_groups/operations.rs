@@ -20,7 +20,7 @@ use axum_extra::extract::WithRejection;
 use cda_interfaces::{DynamicPlugin, UdsEcu};
 use cda_plugin_security::Secured;
 use http::StatusCode;
-use sovd_interfaces::functions::functional_groups::operations::FgOperationCollectionItem;
+use sovd_interfaces::functions::functional_groups::operations::OperationCollectionItem;
 
 use super::WebserverFgState;
 use crate::sovd::{
@@ -48,7 +48,7 @@ pub(crate) async fn get<T: UdsEcu + Clone>(
         Ok(items) => {
             let schema = if query.include_schema {
                 Some(create_schema!(
-                    sovd_interfaces::Items<FgOperationCollectionItem>
+                    sovd_interfaces::Items<OperationCollectionItem>
                 ))
             } else {
                 None
@@ -58,7 +58,7 @@ pub(crate) async fn get<T: UdsEcu + Clone>(
                 Json(sovd_interfaces::Items {
                     items: items
                         .into_iter()
-                        .map(|info| FgOperationCollectionItem {
+                        .map(|info| OperationCollectionItem {
                             id: info.id,
                             name: info.name,
                             proximity_proof_required: false,
@@ -80,7 +80,7 @@ pub(crate) async fn get<T: UdsEcu + Clone>(
 
 pub(crate) fn docs_get(op: TransformOperation) -> TransformOperation {
     op.description("Get all available operations for this functional group")
-        .response_with::<200, Json<sovd_interfaces::Items<FgOperationCollectionItem>>, _>(|res| {
+        .response_with::<200, Json<sovd_interfaces::Items<OperationCollectionItem>>, _>(|res| {
             res.description("List of operations available in this functional group.")
         })
 }
@@ -1159,7 +1159,7 @@ mod tests {
     use axum_extra::extract::WithRejection;
     use cda_interfaces::{datatypes::ComponentOperationsInfo, mock::MockUdsEcu};
     use cda_plugin_security::{Secured, mock::TestSecurityPlugin};
-    use sovd_interfaces::functions::functional_groups::operations::FgOperationCollectionItem;
+    use sovd_interfaces::functions::functional_groups::operations::OperationCollectionItem;
 
     use super::*;
     use crate::sovd::functions::functional_groups::tests::create_test_fg_state;
@@ -1197,7 +1197,7 @@ mod tests {
         let body = axum::body::to_bytes(response.into_body(), usize::MAX)
             .await
             .unwrap();
-        let result: sovd_interfaces::Items<FgOperationCollectionItem> =
+        let result: sovd_interfaces::Items<OperationCollectionItem> =
             serde_json::from_slice(&body).unwrap();
         assert!(result.items.is_empty());
         assert!(result.schema.is_none());
@@ -1250,7 +1250,7 @@ mod tests {
         let body = axum::body::to_bytes(response.into_body(), usize::MAX)
             .await
             .unwrap();
-        let result: sovd_interfaces::Items<FgOperationCollectionItem> =
+        let result: sovd_interfaces::Items<OperationCollectionItem> =
             serde_json::from_slice(&body).unwrap();
         assert_eq!(result.items.len(), 2);
         assert_eq!(
@@ -1299,7 +1299,7 @@ mod tests {
         let body = axum::body::to_bytes(response.into_body(), usize::MAX)
             .await
             .unwrap();
-        let result: sovd_interfaces::Items<FgOperationCollectionItem> =
+        let result: sovd_interfaces::Items<OperationCollectionItem> =
             serde_json::from_slice(&body).unwrap();
         assert!(
             result.schema.is_some(),
