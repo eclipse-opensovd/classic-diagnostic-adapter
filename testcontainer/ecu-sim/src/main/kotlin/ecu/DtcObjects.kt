@@ -112,13 +112,13 @@ class DTCSnapshotParameter(
         get() {
             return byteArrayOf(recordNumber) +
                 byteArrayOf(records.size.toUByte().toByte()) +
-                records.map { it.asByteArray }.concat()
+                records.map { byteArrayOf((it.did.toInt() ushr 8).toByte(), it.did.toByte()) + it.data }.concat()
         }
 }
 
 interface DTCSnapshotRecord {
-    // must return 2 byte dataIdentifier, followed by snapshotData
-    val asByteArray: ByteArray
+    val did: UShort
+    val data: ByteArray
 }
 
 interface DTCExtendedDataRecord {
