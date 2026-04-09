@@ -154,36 +154,41 @@ pub(crate) mod diag_service {
             .into_response();
         }
 
-        // Determine whether this operation is async (has_stop) and validate it exists.
-        let subfunctions = match uds
-            .get_functional_group_routine_subfunctions(
-                &security_plugin,
-                &functional_group_name,
-                &operation,
-            )
-            .await
-        {
-            Ok(sf) => sf,
-            Err(cda_interfaces::DiagServiceError::NotFound(_)) => {
-                return ErrorWrapper {
-                    error: ApiError::NotFound(Some(format!(
-                        "Operation '{operation}' not found in functional group \
-                         '{functional_group_name}'"
-                    ))),
-                    include_schema,
+        let is_async = if suppress_service {
+            // suppress service is always treated as async
+            true
+        } else {
+            // Determine whether this operation is async (has_stop) and validate it exists.
+            let subfunctions = match uds
+                .get_functional_group_routine_subfunctions(
+                    &security_plugin,
+                    &functional_group_name,
+                    &operation,
+                )
+                .await
+            {
+                Ok(sf) => sf,
+                Err(cda_interfaces::DiagServiceError::NotFound(_)) => {
+                    return ErrorWrapper {
+                        error: ApiError::NotFound(Some(format!(
+                            "Operation '{operation}' not found in functional group \
+                             '{functional_group_name}'"
+                        ))),
+                        include_schema,
+                    }
+                    .into_response();
                 }
-                .into_response();
-            }
-            Err(e) => {
-                return ErrorWrapper {
-                    error: e.into(),
-                    include_schema,
+                Err(e) => {
+                    return ErrorWrapper {
+                        error: e.into(),
+                        include_schema,
+                    }
+                    .into_response();
                 }
-                .into_response();
-            }
-        };
+            };
 
-        let is_async = subfunctions.has_stop;
+            subfunctions.has_stop
+        };
 
         let (content_type, accept) = match get_content_type_and_accept(&headers) {
             Ok(v) => v,
@@ -690,14 +695,7 @@ pub(crate) mod diag_service {
 
             mock_uds
                 .expect_get_functional_group_routine_subfunctions()
-                .times(1)
-                .returning(|_, _, _| {
-                    Ok(RoutineSubfunctions {
-                        has_stop: true,
-                        has_request_results: false,
-                    })
-                });
-
+                .times(0);
             // send_functional_group must NOT be called when suppress_service=true
             mock_uds.expect_send_functional_group().times(0);
 

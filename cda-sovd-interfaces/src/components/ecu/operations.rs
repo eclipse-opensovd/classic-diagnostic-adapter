@@ -203,14 +203,11 @@ pub mod service {
 }
 
 /// Query parameters for `POST /operations/{service}/executions`.
-/// `x-sovd2uds-suppressService=true` skips sending the UDS Start request to the ECU.
-/// The service must still be defined in the diagnostic database.
 #[derive(Debug, Default, Deserialize, schemars::JsonSchema)]
 pub struct OperationPostQuery {
     #[serde(rename = "include-schema", default)]
     pub include_schema: bool,
     /// When `true`, skip sending the UDS Start (0x01) request to the ECU.
-    /// The service definition must still be present in the database.
     #[serde(rename = "x-sovd2uds-suppressService", default)]
     pub suppress_service: bool,
 }
@@ -221,7 +218,6 @@ pub struct OperationGetByIdQuery {
     #[serde(rename = "include-schema", default)]
     pub include_schema: bool,
     /// When `true`, skip sending the UDS `RequestResults` (0x03) request to the ECU.
-    /// The service definition must still be present in the database.
     #[serde(rename = "x-sovd2uds-suppressService", default)]
     pub suppress_service: bool,
 }
@@ -232,7 +228,6 @@ pub struct OperationDeleteQuery {
     #[serde(rename = "include-schema", default)]
     pub include_schema: bool,
     /// When `true`, skip sending the UDS Stop (0x02) request to the ECU.
-    /// The service definition must still be present in the database.
     #[serde(rename = "x-sovd2uds-suppressService", default)]
     pub suppress_service: bool,
     /// When `true`, remove the execution entry even if the ECU Stop request failed.

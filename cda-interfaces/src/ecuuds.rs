@@ -107,6 +107,7 @@ pub trait UdsEcu: Send + Sync + 'static {
         &self,
         ecu_name: &str,
         service_name: &str,
+        security_plugin: &DynamicPlugin,
     ) -> Result<RoutineSubfunctions, DiagServiceError>;
     /// Retrieve all single ecu jobs for the given ECU on the detected variant.
     /// # Errors
@@ -608,6 +609,7 @@ pub mod mock {
                 &self,
                 ecu_name: &str,
                 service_name: &str,
+                security_plugin: &DynamicPlugin,
             ) -> Result<RoutineSubfunctions, DiagServiceError>;
             async fn get_components_single_ecu_jobs_info(
                 &self,

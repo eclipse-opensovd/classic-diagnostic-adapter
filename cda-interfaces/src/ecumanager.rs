@@ -436,6 +436,7 @@ pub trait EcuManager:
     fn get_routine_subfunctions(
         &self,
         service_name: &str,
+        security_plugin: &DynamicPlugin,
     ) -> Result<RoutineSubfunctions, DiagServiceError>;
     /// Retrieve all `RoutineControl` (SID 0x31) operations for a specific functional group,
     /// with flags indicating available subfunctions (Stop/RequestResults).

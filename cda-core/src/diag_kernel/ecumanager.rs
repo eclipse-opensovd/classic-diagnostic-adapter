@@ -997,15 +997,10 @@ impl<S: SecurityPlugin> cda_interfaces::EcuManager for EcuManager<S> {
             },
         )?;
 
-        let start_exists = all_rc_services.iter().any(|service| {
-            service
-                .request_sub_function_id()
-                .is_some_and(|(sf, _)| sf == u32::from(subfunction_ids::routine::START))
-        });
-
-        if !start_exists {
+        if all_rc_services.is_empty() {
             return Err(DiagServiceError::NotFound(format!(
-                "Routine '{service_name}' not found in functional group '{functional_group_name}'"
+                "No RoutineControl service with name '{service_name}' found in functional group \
+                 '{functional_group_name}'"
             )));
         }
 
@@ -1357,11 +1352,13 @@ impl<S: SecurityPlugin> cda_interfaces::EcuManager for EcuManager<S> {
     fn get_routine_subfunctions(
         &self,
         service_name: &str,
+        security_plugin: &DynamicPlugin,
     ) -> Result<RoutineSubfunctions, DiagServiceError> {
         let all_rc_services = self.get_services_from_variant_and_parent_refs(|service| {
             service
                 .request_id()
                 .is_some_and(|id| id == service_ids::ROUTINE_CONTROL)
+                && Self::is_service_visible(security_plugin, service)
                 && service.diag_comm().is_some_and(|dc| {
                     dc.short_name().is_some_and(|name| {
                         self.trim_routine_name(name)
@@ -1370,15 +1367,9 @@ impl<S: SecurityPlugin> cda_interfaces::EcuManager for EcuManager<S> {
                 })
         });
 
-        let start_exists = all_rc_services.iter().any(|service| {
-            service
-                .request_sub_function_id()
-                .is_some_and(|(sf, _)| sf == u32::from(subfunction_ids::routine::START))
-        });
-
-        if !start_exists {
+        if all_rc_services.is_empty() {
             return Err(DiagServiceError::NotFound(format!(
-                "Routine '{service_name}' not found in ECU description"
+                "No RoutineControl service found for routine '{service_name}'"
             )));
         }
 
@@ -5001,16 +4992,7 @@ impl<S: SecurityPlugin> EcuManager<S> {
             .filter_map(|(id, services)| {
                 // filter out entries that have an empty list of services (shouldn't happen)
                 let first_service = services.first()?;
-                // check if at least the START service is present, if not
-                // filter out as this operation cannot be executed.
-                if !services.iter().any(|service| {
-                    service
-                        .request_sub_function_id()
-                        .is_some_and(|(sf, _)| sf == u32::from(subfunction_ids::routine::START))
-                }) {
-                    return None;
-                }
-                // finally map to a struct of `ComponentOperationsInfo`
+                // map to a struct of `ComponentOperationsInfo`
                 let name = first_service
                     .diag_comm()
                     .expect(
@@ -9155,7 +9137,7 @@ mod tests {
         );
 
         let subs = ecu_manager
-            .get_routine_subfunctions("Routine1")
+            .get_routine_subfunctions("Routine1", &skip_sec_plugin!())
             .expect("Expected Ok for known routine");
         assert!(subs.has_stop, "Expected has_stop = true");
         assert!(
@@ -9173,7 +9155,7 @@ mod tests {
         );
 
         let subs = ecu_manager
-            .get_routine_subfunctions("Routine1")
+            .get_routine_subfunctions("Routine1", &skip_sec_plugin!())
             .expect("Expected Ok for known routine");
         assert!(!subs.has_stop, "Expected has_stop = false");
         assert!(
@@ -9194,7 +9176,7 @@ mod tests {
         );
 
         let subs = ecu_manager
-            .get_routine_subfunctions("myroutine")
+            .get_routine_subfunctions("myroutine", &skip_sec_plugin!())
             .expect("Expected Ok (case-insensitive match)");
         assert!(
             subs.has_stop,
@@ -9210,7 +9192,8 @@ mod tests {
             &[subfunction_ids::routine::START],
         );
 
-        let result = ecu_manager.get_routine_subfunctions("NonExistentRoutine");
+        let result =
+            ecu_manager.get_routine_subfunctions("NonExistentRoutine", &skip_sec_plugin!());
         assert!(
             matches!(result, Err(DiagServiceError::NotFound(_))),
             "Expected NotFound for unknown service, got: {result:?}"

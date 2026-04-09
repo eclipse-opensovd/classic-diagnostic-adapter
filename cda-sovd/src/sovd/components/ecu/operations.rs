@@ -527,7 +527,7 @@ pub(crate) mod service {
         pub(crate) struct WriteHandlerRequest {
             pub service: String,
             pub headers: HeaderMap,
-            pub body: Option<Bytes>,
+            pub body: Bytes,
         }
 
         pub(crate) async fn get<
@@ -598,7 +598,7 @@ pub(crate) mod service {
                 WriteHandlerRequest {
                     service,
                     headers,
-                    body: Some(body),
+                    body,
                 },
                 &ecu_name,
                 &uds,
@@ -669,13 +669,6 @@ pub(crate) mod service {
                 suppress_service,
                 base_path,
             } = opts;
-            let Some(body) = body else {
-                return ErrorWrapper {
-                    error: ApiError::BadRequest("Missing request body".to_owned()),
-                    include_schema,
-                }
-                .into_response();
-            };
             if service == "reset" {
                 return ecu_reset_handler::<T>(
                     service,
@@ -688,18 +681,27 @@ pub(crate) mod service {
                 .await;
             }
 
-            // Determine whether this routine has async sub-functions
-            let subfunctions = match uds.get_routine_subfunctions(ecu_name, &service).await {
-                Ok(sf) => sf,
-                Err(e) => {
-                    return ErrorWrapper {
-                        error: e.into(),
-                        include_schema,
+            let security_plugin: DynamicPlugin = security_plugin;
+            let is_async = if suppress_service {
+                // suppress service is always treated as async
+                true
+            } else {
+                // Determine whether this routine has async sub-functions
+                let subfunctions = match uds
+                    .get_routine_subfunctions(ecu_name, &service, &security_plugin)
+                    .await
+                {
+                    Ok(sf) => sf,
+                    Err(e) => {
+                        return ErrorWrapper {
+                            error: e.into(),
+                            include_schema,
+                        }
+                        .into_response();
                     }
-                    .into_response();
-                }
+                };
+                subfunctions.has_stop || subfunctions.has_request_results
             };
-            let is_async = subfunctions.has_stop || subfunctions.has_request_results;
 
             let content_type_and_accept = match get_content_type_and_accept(&headers) {
                 Ok(v) => v,
@@ -751,7 +753,6 @@ pub(crate) mod service {
             }
 
             let map_to_json = accept == mime::APPLICATION_JSON;
-
             let response = if suppress_service {
                 None
             } else {
@@ -759,7 +760,7 @@ pub(crate) mod service {
                     uds,
                     ecu_name,
                     diag_service.clone(),
-                    security_plugin,
+                    &security_plugin,
                     data,
                     map_to_json,
                     include_schema,
@@ -799,19 +800,13 @@ pub(crate) mod service {
             uds: &T,
             ecu_name: &str,
             diag_service: DiagComm,
-            security_plugin: Box<dyn SecurityPlugin>,
+            security_plugin: &DynamicPlugin,
             data: Option<cda_interfaces::diagservices::UdsPayloadData>,
             map_to_json: bool,
             include_schema: bool,
         ) -> Result<Option<T::Response>, Response> {
             let response = match uds
-                .send(
-                    ecu_name,
-                    diag_service,
-                    &(security_plugin as DynamicPlugin),
-                    data,
-                    map_to_json,
-                )
+                .send(ecu_name, diag_service, security_plugin, data, map_to_json)
                 .await
             {
                 Ok(v) => v,
@@ -3039,9 +3034,9 @@ mod tests {
 
             mock_uds
                 .expect_get_routine_subfunctions()
-                .withf(|ecu, svc| ecu == "TestECU" && svc == "CalibrateSensor")
+                .withf(|ecu, svc, _p| ecu == "TestECU" && svc == "CalibrateSensor")
                 .times(1)
-                .returning(|_, _| {
+                .returning(|_, _, _| {
                     Err(DiagServiceError::NotFound(
                         "Routine 'CalibrateSensor' not found in ECU description".to_string(),
                     ))
@@ -3057,7 +3052,7 @@ mod tests {
                 handlers::WriteHandlerRequest {
                     service: "CalibrateSensor".to_string(),
                     headers: make_post_headers(),
-                    body: Some(axum::body::Bytes::from_static(b"{\"parameters\":{}}")),
+                    body: axum::body::Bytes::from_static(b"{\"parameters\":{}}"),
                 },
                 &ecu_name,
                 &state.uds,
@@ -3083,7 +3078,7 @@ mod tests {
             mock_uds
                 .expect_get_routine_subfunctions()
                 .times(1)
-                .returning(|_, _| {
+                .returning(|_, _, _| {
                     Ok(cda_interfaces::datatypes::RoutineSubfunctions {
                         has_stop: false,
                         has_request_results: false,
@@ -3104,7 +3099,7 @@ mod tests {
                 handlers::WriteHandlerRequest {
                     service: "CalibrateSensor".to_string(),
                     headers: make_post_headers(),
-                    body: Some(axum::body::Bytes::from_static(b"{\"parameters\":{}}")),
+                    body: axum::body::Bytes::from_static(b"{\"parameters\":{}}"),
                 },
                 &ecu_name,
                 &state.uds,
@@ -3130,7 +3125,7 @@ mod tests {
             mock_uds
                 .expect_get_routine_subfunctions()
                 .times(1)
-                .returning(|_, _| {
+                .returning(|_, _, _| {
                     Ok(cda_interfaces::datatypes::RoutineSubfunctions {
                         has_stop: true,
                         has_request_results: true,
@@ -3153,7 +3148,7 @@ mod tests {
                 handlers::WriteHandlerRequest {
                     service: "CalibrateSensor".to_string(),
                     headers: make_post_headers(),
-                    body: Some(axum::body::Bytes::from_static(b"{\"parameters\":{}}")),
+                    body: axum::body::Bytes::from_static(b"{\"parameters\":{}}"),
                 },
                 &ecu_name,
                 &state.uds,
@@ -3172,65 +3167,12 @@ mod tests {
         }
 
         #[tokio::test]
-        async fn test_post_operation_suppress_service_sync_skips_send_returns_200() {
-            let ecu_name = "TestECU".to_string();
-            let mut mock_uds = MockUdsEcu::new();
-            let mock_file_manager = MockFileManager::new();
-
-            mock_uds
-                .expect_get_routine_subfunctions()
-                .times(1)
-                .returning(|_, _| {
-                    Ok(cda_interfaces::datatypes::RoutineSubfunctions {
-                        has_stop: false,
-                        has_request_results: false,
-                    })
-                });
-            // send must NOT be called when suppress_service=true
-            mock_uds.expect_send().times(0);
-
-            let state = create_test_webserver_state::<
-                MockDiagServiceResponse,
-                MockUdsEcu,
-                MockFileManager,
-            >(ecu_name.clone(), mock_uds, mock_file_manager);
-
-            let response = handlers::ecu_operation_write_handler::<MockUdsEcu>(
-                handlers::WriteHandlerRequest {
-                    service: "CalibrateSensor".to_string(),
-                    headers: make_post_headers(),
-                    body: Some(axum::body::Bytes::from_static(b"{\"parameters\":{}}")),
-                },
-                &ecu_name,
-                &state.uds,
-                Arc::clone(&state.service_executions),
-                Box::new(cda_plugin_security::mock::TestSecurityPlugin),
-                handlers::WriteHandlerOptions {
-                    include_schema: false,
-                    suppress_service: true,
-                    base_path: "http://localhost/operations/CalibrateSensor/executions".to_string(),
-                },
-            )
-            .await;
-
-            assert_eq!(response.status(), StatusCode::OK);
-        }
-
-        #[tokio::test]
         async fn test_post_operation_suppress_service_async_skips_send_returns_202_and_tracks() {
             let ecu_name = "TestECU".to_string();
             let mut mock_uds = MockUdsEcu::new();
             let mock_file_manager = MockFileManager::new();
 
-            mock_uds
-                .expect_get_routine_subfunctions()
-                .times(1)
-                .returning(|_, _| {
-                    Ok(cda_interfaces::datatypes::RoutineSubfunctions {
-                        has_stop: true,
-                        has_request_results: true,
-                    })
-                });
+            mock_uds.expect_get_routine_subfunctions().times(0);
             // send must NOT be called when suppress_service=true
             mock_uds.expect_send().times(0);
 
@@ -3246,7 +3188,7 @@ mod tests {
                 handlers::WriteHandlerRequest {
                     service: "CalibrateSensor".to_string(),
                     headers: make_post_headers(),
-                    body: Some(axum::body::Bytes::from_static(b"{\"parameters\":{}}")),
+                    body: axum::body::Bytes::from_static(b"{\"parameters\":{}}"),
                 },
                 &ecu_name,
                 &state.uds,
@@ -3274,7 +3216,7 @@ mod tests {
             mock_uds
                 .expect_get_routine_subfunctions()
                 .times(1)
-                .returning(|_, _| {
+                .returning(|_, _, _| {
                     Ok(cda_interfaces::datatypes::RoutineSubfunctions {
                         has_stop: true,
                         has_request_results: true,
@@ -3306,7 +3248,7 @@ mod tests {
                 handlers::WriteHandlerRequest {
                     service: "CalibrateSensor".to_string(),
                     headers: make_post_headers(),
-                    body: Some(axum::body::Bytes::from_static(b"{\"parameters\":{}}")),
+                    body: axum::body::Bytes::from_static(b"{\"parameters\":{}}"),
                 },
                 &ecu_name,
                 &state.uds,
@@ -3346,7 +3288,7 @@ mod tests {
             mock_uds
                 .expect_get_routine_subfunctions()
                 .times(1)
-                .returning(|_, _| {
+                .returning(|_, _, _| {
                     Ok(cda_interfaces::datatypes::RoutineSubfunctions {
                         has_stop: true,
                         has_request_results: true,
@@ -3379,7 +3321,7 @@ mod tests {
                 handlers::WriteHandlerRequest {
                     service: "CalibrateSensor".to_string(),
                     headers: make_post_headers(),
-                    body: Some(axum::body::Bytes::from_static(b"{\"parameters\":{}}")),
+                    body: axum::body::Bytes::from_static(b"{\"parameters\":{}}"),
                 },
                 &ecu_name,
                 &state.uds,

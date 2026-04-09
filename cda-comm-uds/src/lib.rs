@@ -1450,11 +1450,12 @@ impl<S: EcuGateway, R: DiagServiceResponse, T: EcuManager<Response = R>> UdsEcu
         &self,
         ecu_name: &str,
         service_name: &str,
+        security_plugin: &DynamicPlugin,
     ) -> Result<RoutineSubfunctions, DiagServiceError> {
         self.ecu_manager(ecu_name)?
             .read()
             .await
-            .get_routine_subfunctions(service_name)
+            .get_routine_subfunctions(service_name, security_plugin)
     }
 
     async fn get_components_single_ecu_jobs_info(

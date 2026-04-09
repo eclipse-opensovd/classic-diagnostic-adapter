@@ -16,14 +16,11 @@ pub mod service {
     use super::{DataError, Deserialize, HashMap, Serialize};
 
     /// Query parameters for `POST /operations/{operation}`.
-    /// `x-sovd2uds-suppressService=true` skips sending the UDS Start request to all ECUs.
-    /// The operation must still be defined in the diagnostic database.
     #[derive(Debug, Default, Deserialize, schemars::JsonSchema)]
     pub struct Query {
         #[serde(rename = "include-schema", default)]
         pub include_schema: bool,
         /// When `true`, skip sending the UDS Start (0x01) request to all ECUs.
-        /// The operation definition must still be present in the database.
         #[serde(rename = "x-sovd2uds-suppressService", default)]
         pub suppress_service: bool,
     }
