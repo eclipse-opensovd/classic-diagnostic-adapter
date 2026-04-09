@@ -416,31 +416,61 @@ Operations
 
     **Synchronous -- Start only**
 
-    When a routine only defines the ``Start`` subfunction, it is considered synchronous. This means
+    When a routine only defines the ``Start`` (0x01) subfunction, it is considered synchronous. This means
     that the return for ``asynchronous_execution`` in the list will be ``false``, and that a call to
     execute the routine with ``POST /operations/{routine-name}/executions`` is executed synchronously
-    and will directly return the response from the ECU.
+    and will directly return the response from the ECU with HTTP status ``200 OK``.
 
-    **Asynchronous -- Start, Stop & RequestResults**
+    .. note::
+       Operations without a ``Start`` subfunction can exist in the operations list but will fail
+       execution with an error unless the ``x-sovd2uds-suppressService`` query parameter is set to ``true``.
 
-    When a routine has subfunctions other than ``Start``, it is considered asynchronous. This means
-    that the return for ``asynchronous_execution`` in the list will be ``true``, and that a call to
-    execute the routine with ``POST /operations/{routine-name}/executions`` is executed on the ECU
-    and will return the response from the ECU, as well as an ``id`` and the other asynchronous
-    properties required by the standard for calling the RequestResults subfunction with
+    **Asynchronous -- Stop and/or RequestResults**
+
+    When a routine has ``Stop`` (0x02) and/or ``RequestResults`` (0x03) subfunctions defined, it is
+    considered asynchronous. This means that the return for ``asynchronous_execution`` in the list will
+    be ``true``, and that a call to execute the routine with ``POST /operations/{routine-name}/executions``
+    is executed on the ECU and will return the response from the ECU, as well as an ``id`` and the other
+    asynchronous properties required by the standard for calling the RequestResults subfunction with
     ``GET /operations/{routine-name}/executions/{id}``.
+
+    The POST request returns HTTP status ``202 ACCEPTED`` with an execution identifier.
 
     Additionally, by calling ``DELETE /operations/{routine-name}/executions/{id}``, it's possible to
     call the Stop subfunction of the routine.
 
-    If any of the subfunctions are not available, the call will result in an error, unless the
-    ``x-sovd2uds-suppressService`` query parameter is set to true.
+    **Subfunction Requirements**
+
+    If any of the required subfunctions are not available in the diagnostic database, the call will
+    result in an error:
+
+    - ``POST`` requires the ``Start`` (0x01) subfunction to be defined
+    - ``GET`` requires the ``RequestResults`` (0x03) subfunction to be defined
+    - ``DELETE`` requires the ``Stop`` (0x02) subfunction to be defined
+
+    These requirements can be bypassed using the ``x-sovd2uds-suppressService`` query parameter.
+    Since an entry in the list is still required, as well as the operation being asynchronous,
+    the definition of either ``RequestResults`` or ``Stop`` is a prerequisite.
+
+    **Force Parameter**
 
     If DELETE is called and an ECU error is encountered, the ``id`` will not be deleted unless the
     query parameter ``x-sovd2uds-force`` is set to true. This allows the client to handle
     returned errors and to call the Stop subfunction again.
 
-    **Rationale**
+    When ``x-sovd2uds-force=true``, the execution is removed from tracking even if the Stop
+    request fails or returns a negative response.
+
+    **Stop Response Data**
+
+    When a Stop subfunction returns non-empty response data, the DELETE endpoint returns HTTP status
+    ``200 OK`` with the response data in the body, instead of the standard ``204 NO CONTENT``.
+    This allows clients to access any data returned by the Stop operation.
+
+    .. note::
+       This is an extension to the standard to support Stop operations that return response data.
+
+    **Rationale for POST Response Data**
 
     When executing an asynchronous function, there's no good way to return the response of the
     routine with the GET to the id-endpoint, since that endpoint should only return the status of
