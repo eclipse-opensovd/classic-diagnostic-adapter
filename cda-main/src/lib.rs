@@ -114,11 +114,8 @@ impl From<DiagServiceError> for AppError {
 
             DiagServiceError::ResourceError(_) => Self::ResourceError(value.to_string()),
 
-            DiagServiceError::NotFound(Some(_)) => Self::NotFound(value.to_string()),
+            DiagServiceError::NotFound(_) => Self::NotFound(value.to_string()),
 
-            DiagServiceError::NotFound(None) => {
-                Self::NotFound("Resource could not be found.".to_owned())
-            }
             DiagServiceError::DataError(_)
             | DiagServiceError::InvalidDatabase(_)
             | DiagServiceError::AmbiguousParameters { .. }
