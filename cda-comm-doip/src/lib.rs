@@ -43,6 +43,16 @@ mod vir_vam;
 
 const SLEEP_INTERVAL: Duration = Duration::from_secs(30);
 
+/// Timeout when suppressPosRspMsgIndicationBit is set.
+/// ECUs that reject a request usually respond quickly with an NRC and
+/// this timeout window should be able to capture those while
+/// not blocking for the full diagnostic timeout.
+///
+/// This constant is intentionally separate from `timeout_default` so it can be promoted to a
+/// configuration entry, or a `ComParam` in a future iteration without changing the
+/// surrounding logic.
+const SUPPRESS_POSITIVE_RESPONSE_TIMEOUT: Duration = Duration::from_millis(500);
+
 const NRC_BUSY_REPEAT_REQUEST: u8 = 0x21;
 const NRC_RESPONSE_PENDING: u8 = 0x78;
 const NRC_TEMPORARILY_NOT_AVAILABLE: u8 = 0x94;
@@ -575,6 +585,7 @@ impl<T: EcuAddressProvider + DoipComParamProvider> EcuGateway for DoipDiagGatewa
         message: ServicePayload,
         expected_ecu_logical_addrs: HashMap<u16, String>,
         timeout: Duration,
+        expect_positive_response: bool,
     ) -> Result<HashMap<String, Result<UdsResponse, DiagServiceError>>, DiagServiceError> {
         let doip_conn = self
             .get_doip_connection(transmission_params.gateway_address)
@@ -636,6 +647,15 @@ impl<T: EcuAddressProvider + DoipComParamProvider> EcuGateway for DoipDiagGatewa
             transmission_params.ecu_name.to_lowercase(),
             Arc::clone(gateway_ecu),
         ));
+
+        // Use a short window to capture any negative responses instead of the full timeout,
+        // as NRCs are usually sent immediately by the ECUs.
+        let response_timeout = if expect_positive_response {
+            timeout
+        } else {
+            SUPPRESS_POSITIVE_RESPONSE_TIMEOUT
+        };
+
         let received_responses: Arc<Mutex<HashMap<String, Result<DiagnosticMessage, EcuError>>>> =
             Arc::new(Mutex::new(HashMap::new()));
         let mut futures = Vec::new();
@@ -643,7 +663,7 @@ impl<T: EcuAddressProvider + DoipComParamProvider> EcuGateway for DoipDiagGatewa
             let received_responses = Arc::clone(&received_responses);
             let fut = async move {
                 let mut lock = ecu.lock().await;
-                if let Some(response) = wait_for_ecu_response(&mut lock, timeout).await {
+                if let Some(response) = wait_for_ecu_response(&mut lock, response_timeout).await {
                     received_responses.lock().await.insert(name, response);
                 }
             };
@@ -685,9 +705,11 @@ impl<T: EcuAddressProvider + DoipComParamProvider> EcuGateway for DoipDiagGatewa
             }
         }
 
-        // Mark ECUs that didn't respond as timeout errors
+        // For ECUs that did not respond:
+        // Insert a TimeoutError for ECUs that did not response, if
+        // a positive response is expected. (suppress bit is not set)
         for (logical_addr, ecu_name) in &expected_ecu_logical_addrs {
-            if !result_map.contains_key(ecu_name) {
+            if !result_map.contains_key(ecu_name) && expect_positive_response {
                 result_map.insert(ecu_name.clone(), Err(DiagServiceError::Timeout));
                 tracing::debug!(
                     ecu_name = %ecu_name,

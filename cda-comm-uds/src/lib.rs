@@ -1097,10 +1097,20 @@ impl<S: EcuGateway, R: DiagServiceResponse, T: EcuManager<Response = R>> UdsMana
         map_to_json: bool,
         timeout: Duration,
     ) -> HashMap<String, Result<R, DiagServiceError>> {
-        // Send functional request and wait for responses
+        // Inspect the subfunction byte for suppressPosRspMsgIndicationBit (bit 7).
+        // When set, ECUs are not expected to send a positive response.
+        let expect_positive_response = !payload.is_suppress_positive_response();
+
+        // Send functional request via gateway
         match self
             .gateway
-            .send_functional(transmission_params, payload, expected_ecus.clone(), timeout)
+            .send_functional(
+                transmission_params,
+                payload,
+                expected_ecus.clone(),
+                timeout,
+                expect_positive_response,
+            )
             .await
         {
             Ok(uds_responses) => {

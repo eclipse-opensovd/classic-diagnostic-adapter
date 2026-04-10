@@ -112,10 +112,19 @@ impl ServicePayload {
     pub fn is_response_for_sid(&self, sent_sid: u8) -> bool {
         self.is_negative_response_for_sid(sent_sid) || self.is_positive_response_for_sid(sent_sid)
     }
+
+    /// Returns `true` if the UDS subfunction byte (byte index 1) has bit 7 set,
+    /// indicating the `suppressPosRspMsgIndicationBit` (SPRMIB) is active.
+    /// When this bit is set, the ECU is not expected to send a positive response, so callers
+    /// should not treat the absence of a positive response as an error.
+    #[must_use]
+    pub fn is_suppress_positive_response(&self) -> bool {
+        self.data.get(1).is_some_and(|&b| b & 0x80 != 0)
+    }
 }
 
 /// Trait to provide communication parameters for an ECU.
-/// It might be the case, that no all functions are needed for
+/// It might be the case, that not all functions are needed for
 /// every protocol. (I.e. gateway address for CAN).
 pub trait EcuAddressProvider: Send + Sync + 'static {
     #[must_use]

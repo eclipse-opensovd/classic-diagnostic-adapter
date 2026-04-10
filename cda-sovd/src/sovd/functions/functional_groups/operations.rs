@@ -120,6 +120,37 @@ pub(crate) mod diag_service {
         pub id: String,
     }
 
+    /// Builds a `200 OK` response containing per-ECU Stop results and errors.
+    ///
+    /// Used by DELETE when Stop encounters errors: either to surface them while keeping
+    /// the execution alive (`force=false`) or after forcibly removing it (`force=true`).
+    fn stop_error_response(
+        response_data: HashMap<String, serde_json::Map<String, serde_json::Value>>,
+        errors: Vec<sovd_interfaces::error::DataError<VendorErrorCode>>,
+        include_schema: bool,
+    ) -> axum::response::Response {
+        let schema = if include_schema {
+            Some(crate::sovd::create_schema!(
+                sovd_interfaces::functions::functional_groups::operations::service::Response<
+                    VendorErrorCode,
+                >
+            ))
+        } else {
+            None
+        };
+        (
+            StatusCode::OK,
+            Json(
+                sovd_interfaces::functions::functional_groups::operations::service::Response {
+                    parameters: response_data,
+                    errors,
+                    schema,
+                },
+            ),
+        )
+            .into_response()
+    }
+
     #[allow(clippy::too_many_arguments)]
     #[allow(clippy::too_many_lines)]
     pub(crate) async fn post<T: UdsEcu + Clone>(
@@ -187,7 +218,7 @@ pub(crate) mod diag_service {
                 }
             };
 
-            subfunctions.has_stop
+            subfunctions.has_stop || subfunctions.has_request_results
         };
 
         let (content_type, accept) = match get_content_type_and_accept(&headers) {
@@ -431,10 +462,7 @@ pub(crate) mod diag_service {
             )
             .await;
 
-        // Always remove the execution from tracking.
-        fg_executions.write().await.shift_remove(&exec_id);
-
-        // Collect per-ECU results.
+        // Collect per-ECU results before deciding whether to remove the execution.
         let mut response_data: HashMap<String, serde_json::Map<String, serde_json::Value>> =
             HashMap::default();
         let mut errors: Vec<sovd_interfaces::error::DataError<VendorErrorCode>> = Vec::new();
@@ -449,36 +477,29 @@ pub(crate) mod diag_service {
         }
 
         if errors.is_empty() {
+            // All ECUs succeeded — remove execution and return 204.
+            fg_executions.write().await.shift_remove(&exec_id);
             StatusCode::NO_CONTENT.into_response()
+        } else if query.force {
+            // force=true — remove execution even though Stop had errors, return 200 with errors.
+            fg_executions.write().await.shift_remove(&exec_id);
+            stop_error_response(response_data, errors, include_schema)
         } else {
-            let schema = if include_schema {
-                Some(crate::sovd::create_schema!(
-                    sovd_interfaces::functions::functional_groups::operations::service::Response<
-                        VendorErrorCode,
-                    >
-                ))
-            } else {
-                None
-            };
-            (
-                StatusCode::OK,
-                Json(
-                    sovd_interfaces::functions::functional_groups::operations::service::Response {
-                        parameters: response_data,
-                        errors,
-                        schema,
-                    },
-                ),
-            )
-                .into_response()
+            // force=false and Stop had errors — reset in_flight, keep execution alive for retry.
+            if let Some(exec) = fg_executions.write().await.get_mut(&exec_id) {
+                exec.in_flight = false;
+            }
+            stop_error_response(response_data, errors, include_schema)
         }
     }
 
     pub(crate) fn docs_delete(op: TransformOperation) -> TransformOperation {
         op.description(
             "Stop an async functional group operation execution (Stop subfunction). Sends Stop to \
-             all ECUs; always removes the tracked execution. Returns 204 if all ECUs succeeded, \
-             200 with per-ECU results on partial failure.",
+             all ECUs. Returns 204 if all ECUs succeeded. On partial failure: if \
+             x-sovd2uds-force=true, removes the execution and returns 200 with errors; if \
+             x-sovd2uds-force=false (default), keeps the execution alive for retry and returns \
+             200 with errors.",
         )
         .response_with::<204, (), _>(|res| {
             res.description("Execution stopped and removed on all ECUs.")
@@ -1058,7 +1079,8 @@ pub(crate) mod diag_service {
         }
 
         #[tokio::test]
-        async fn test_fg_delete_partial_failure_returns_200_with_errors_execution_removed() {
+        async fn test_fg_delete_partial_failure_force_true_removes_and_returns_200() {
+            // force=true: even with partial failure the execution is removed and 200 returned
             let mut mock_uds = MockUdsEcu::new();
 
             mock_uds
@@ -1089,14 +1111,14 @@ pub(crate) mod diag_service {
                     id: exec_id.to_string(),
                 }),
                 WithRejection(
-                    axum::extract::Query(make_delete_query(false)),
+                    axum::extract::Query(make_delete_query_with_force(false, true)),
                     std::marker::PhantomData,
                 ),
                 State(state),
             )
             .await;
 
-            // Partial failure → 200 with body, execution still removed
+            // force=true + partial failure → 200 with errors, execution removed
             assert_eq!(response.status(), StatusCode::OK);
             let body = axum::body::to_bytes(response.into_body(), usize::MAX)
                 .await
@@ -1147,6 +1169,209 @@ pub(crate) mod diag_service {
             assert!(
                 fg_executions_ref.read().await.is_empty(),
                 "execution should be removed"
+            );
+        }
+
+        #[tokio::test]
+        async fn test_fg_post_async_via_request_results_only_returns_202() {
+            // has_stop=false, has_request_results=true → must be treated as async (202)
+            let mut mock_uds = MockUdsEcu::new();
+
+            mock_uds
+                .expect_get_functional_group_routine_subfunctions()
+                .times(1)
+                .returning(|_, _, _| {
+                    Ok(RoutineSubfunctions {
+                        has_stop: false,
+                        has_request_results: true,
+                    })
+                });
+
+            mock_uds
+                .expect_send_functional_group()
+                .times(1)
+                .returning(|_, _, _, _, _| {
+                    let mut results = cda_interfaces::HashMap::default();
+                    results.insert("ECU1".to_string(), Ok(make_empty_json_response()));
+                    results
+                });
+
+            let state = create_test_fg_state(mock_uds, "AllECUs".to_string());
+            let fg_executions_ref = Arc::clone(&state.fg_executions);
+
+            let response = post::<MockUdsEcu>(
+                make_post_headers(),
+                UseApi(
+                    Secured(Box::new(TestSecurityPlugin)),
+                    std::marker::PhantomData,
+                ),
+                UseApi(
+                    axum_extra::extract::Host("localhost".to_string()),
+                    std::marker::PhantomData,
+                ),
+                axum::extract::OriginalUri(
+                    "/functions/functionalgroups/AllECUs/operations/SomeDiag"
+                        .parse()
+                        .unwrap(),
+                ),
+                axum::extract::Path(crate::sovd::components::ecu::DiagServicePathParam {
+                    diag_service: "SomeDiag".to_string(),
+                }),
+                WithRejection(
+                    axum::extract::Query(make_query(false, false)),
+                    std::marker::PhantomData,
+                ),
+                State(state),
+                Bytes::from_static(b"{\"parameters\":{}}"),
+            )
+            .await;
+
+            assert_eq!(response.status(), StatusCode::ACCEPTED);
+            assert_eq!(
+                fg_executions_ref.read().await.len(),
+                1,
+                "execution should be tracked"
+            );
+        }
+
+        // ── DELETE: force semantics ───────────────────────────────────────────
+
+        fn make_delete_query_with_force(
+            suppress_service: bool,
+            force: bool,
+        ) -> sovd_interfaces::components::ecu::operations::OperationDeleteQuery {
+            sovd_interfaces::components::ecu::operations::OperationDeleteQuery {
+                include_schema: false,
+                suppress_service,
+                force,
+            }
+        }
+
+        #[tokio::test]
+        async fn test_fg_delete_partial_failure_force_false_keeps_execution() {
+            // force=false and Stop fails on one ECU → execution NOT removed, 200 with errors
+            let mut mock_uds = MockUdsEcu::new();
+
+            mock_uds
+                .expect_send_functional_group()
+                .times(1)
+                .returning(|_, _, _, _, _| {
+                    let mut results = cda_interfaces::HashMap::default();
+                    results.insert("ECU1".to_string(), Ok(make_empty_json_response()));
+                    results.insert(
+                        "ECU2".to_string(),
+                        Err(DiagServiceError::SendFailed("timeout".to_string())),
+                    );
+                    results
+                });
+
+            let state = create_test_fg_state(mock_uds, "AllECUs".to_string());
+            insert_test_fg_lock(&state.locks, "AllECUs").await;
+            let exec_id = seed_execution_async(&state.fg_executions).await;
+            let fg_executions_ref = Arc::clone(&state.fg_executions);
+
+            let response = delete::<MockUdsEcu>(
+                UseApi(
+                    Secured(Box::new(TestSecurityPlugin)),
+                    std::marker::PhantomData,
+                ),
+                axum::extract::Path(OperationAndIdPathParam {
+                    operation: "BrakeSelfTest".to_string(),
+                    id: exec_id.to_string(),
+                }),
+                WithRejection(
+                    axum::extract::Query(make_delete_query_with_force(false, false)),
+                    std::marker::PhantomData,
+                ),
+                State(state),
+            )
+            .await;
+
+            // force=false → execution must survive for retry
+            assert_eq!(response.status(), StatusCode::OK);
+            let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+                .await
+                .unwrap();
+            let result: serde_json::Value = serde_json::from_slice(&body).unwrap();
+            assert!(
+                result
+                    .get("errors")
+                    .and_then(serde_json::Value::as_array)
+                    .is_some_and(|e| !e.is_empty()),
+                "Expected errors in response"
+            );
+            assert!(
+                !fg_executions_ref.read().await.is_empty(),
+                "execution must NOT be removed when force=false and Stop fails"
+            );
+            // in_flight must be reset so the execution can be retried
+            assert!(
+                !fg_executions_ref
+                    .read()
+                    .await
+                    .get(&exec_id)
+                    .unwrap()
+                    .in_flight,
+                "in_flight must be reset to false"
+            );
+        }
+
+        #[tokio::test]
+        async fn test_fg_delete_partial_failure_force_true_removes_execution() {
+            // force=true and Stop fails on one ECU → execution IS removed, 200 with errors
+            let mut mock_uds = MockUdsEcu::new();
+
+            mock_uds
+                .expect_send_functional_group()
+                .times(1)
+                .returning(|_, _, _, _, _| {
+                    let mut results = cda_interfaces::HashMap::default();
+                    results.insert("ECU1".to_string(), Ok(make_empty_json_response()));
+                    results.insert(
+                        "ECU2".to_string(),
+                        Err(DiagServiceError::SendFailed("timeout".to_string())),
+                    );
+                    results
+                });
+
+            let state = create_test_fg_state(mock_uds, "AllECUs".to_string());
+            insert_test_fg_lock(&state.locks, "AllECUs").await;
+            let exec_id = seed_execution_async(&state.fg_executions).await;
+            let fg_executions_ref = Arc::clone(&state.fg_executions);
+
+            let response = delete::<MockUdsEcu>(
+                UseApi(
+                    Secured(Box::new(TestSecurityPlugin)),
+                    std::marker::PhantomData,
+                ),
+                axum::extract::Path(OperationAndIdPathParam {
+                    operation: "BrakeSelfTest".to_string(),
+                    id: exec_id.to_string(),
+                }),
+                WithRejection(
+                    axum::extract::Query(make_delete_query_with_force(false, true)),
+                    std::marker::PhantomData,
+                ),
+                State(state),
+            )
+            .await;
+
+            // force=true → execution removed, errors still surfaced
+            assert_eq!(response.status(), StatusCode::OK);
+            let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+                .await
+                .unwrap();
+            let result: serde_json::Value = serde_json::from_slice(&body).unwrap();
+            assert!(
+                result
+                    .get("errors")
+                    .and_then(serde_json::Value::as_array)
+                    .is_some_and(|e| !e.is_empty()),
+                "Expected errors in response"
+            );
+            assert!(
+                fg_executions_ref.read().await.is_empty(),
+                "execution must be removed when force=true"
             );
         }
     }
