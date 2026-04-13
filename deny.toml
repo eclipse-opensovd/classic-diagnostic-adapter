@@ -27,6 +27,7 @@ feature-depth = 1
 [advisories]
 ignore = [
   { id = "RUSTSEC-2023-0071", reason = "Marvin side-channel impacts RSA CRT decryption; crate used only for signing/verification (RS256). No key gen/decryption paths executed." },
+  { id = "RUSTSEC-2026-0097", reason = "Impact should be low as we do not call the affected code path; Updated locked dependency to unaffected version as far as possible; remaining affected version is transitive from jsonwebtoken and we need to wait until they provide an updated version." },
 ]
 
 # This section is considered when running `cargo deny check licenses`
