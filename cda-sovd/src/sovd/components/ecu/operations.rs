@@ -1467,10 +1467,6 @@ pub(crate) mod service {
                     )
                     .await;
 
-                if let Some(exec) = service_executions.write().await.get_mut(&exec_id) {
-                    exec.in_flight = false;
-                }
-
                 match uds_result {
                     Ok(r) if matches!(r.response_type(), DiagServiceResponseType::Positive) => {
                         service_executions.write().await.shift_remove(&exec_id);
@@ -1516,7 +1512,13 @@ pub(crate) mod service {
                         if query.force {
                             service_executions.write().await.shift_remove(&exec_id);
                             return StatusCode::NO_CONTENT.into_response();
+                        } else if let Some(exec) =
+                            service_executions.write().await.get_mut(&exec_id)
+                        {
+                            // reset in_flight flag of the execution
+                            exec.in_flight = false;
                         }
+
                         match result {
                             Err(e) => ErrorWrapper {
                                 error: e.into(),
