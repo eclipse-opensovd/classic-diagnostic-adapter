@@ -82,7 +82,7 @@ fn main() {
         }
     }
 
-    // Link order matters: mbedtls → mbedx509 → tfpsacrypto (≈ mbedcrypto).
+    // Link order matters: mbedtls -> mbedx509 -> tfpsacrypto (≈ mbedcrypto).
     println!("cargo:rustc-link-lib=static=mbedtls");
     println!("cargo:rustc-link-lib=static=mbedx509");
     println!("cargo:rustc-link-lib=static=tfpsacrypto");

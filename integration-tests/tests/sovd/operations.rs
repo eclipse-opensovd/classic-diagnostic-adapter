@@ -149,7 +149,7 @@ async fn test_async_operation_delete_no_lock() {
         "x-sovd2uds-force".to_string(),
         "true".to_string(),
     )]));
-    // CalibrateSensors Stop echoes RoutineId (semantic="DATA") → 200 with stopped body
+    // CalibrateSensors Stop echoes RoutineId (semantic="DATA") -> 200 with stopped body
     send_cda_request(
         &runtime.config,
         &format!("{ecu_endpoint}/operations/calibratesensors/executions/{execution_id}"),
@@ -304,7 +304,7 @@ async fn test_async_operation_get_results_after_stop() {
     let post_body: AsyncPostBody = response_to_t(&post_response).unwrap();
     let execution_id = post_body.id.clone();
 
-    // Stop it — CalibrateSensors Stop echoes RoutineId (semantic="DATA") → 200 with stopped body
+    // Stop it — CalibrateSensors Stop echoes RoutineId (semantic="DATA") -> 200 with stopped body
     send_cda_request(
         &runtime.config,
         &format!("{ecu_endpoint}/operations/calibratesensors/executions/{execution_id}"),

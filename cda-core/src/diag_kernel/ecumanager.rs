@@ -655,16 +655,16 @@ impl<S: SecurityPlugin> cda_interfaces::EcuManager for EcuManager<S> {
 
         mapped_params.sort_by(|a, b| {
             match (a.has_byte_position(), b.has_byte_position()) {
-                // Both have a position → normal comparison
+                // Both have a position -> normal comparison
                 (true, true) => a
                     .byte_position()
                     .cmp(&b.byte_position())
                     .then(a.bit_position().cmp(&b.bit_position())),
-                // Only a has no position → a goes after b
+                // Only a has no position -> a goes after b
                 (false, true) => std::cmp::Ordering::Greater,
-                // Only b has no position → b goes after a
+                // Only b has no position -> b goes after a
                 (true, false) => std::cmp::Ordering::Less,
-                // Neither has a position → preserve order
+                // Neither has a position -> preserve order
                 (false, false) => std::cmp::Ordering::Equal,
             }
         });
@@ -8254,7 +8254,7 @@ mod tests {
     async fn test_phys_const_structure_dop_roundtrip() {
         let (ecu_manager, dc, sid) = create_ecu_manager_with_phys_const_structure_dop_service();
 
-        // Step 1: Encode JSON → UDS
+        // Step 1: Encode JSON -> UDS
         let json_payload = json!({
             "DID": 61840,
             "DREC": {
@@ -8277,7 +8277,7 @@ mod tests {
             *byte = sid;
         }
 
-        // Step 3: Decode UDS → mapped data
+        // Step 3: Decode UDS -> mapped data
         let decode_result = ecu_manager
             .convert_from_uds(&dc, &service_payload, true)
             .await;

@@ -49,7 +49,7 @@ pub(crate) struct WebserverFgState<T: UdsEcu + Clone> {
     uds: T,
     locks: Arc<Locks>,
     functional_group_name: String,
-    pub(crate) fg_executions: Arc<RwLock<IndexMap<Uuid, ServiceExecution>>>,
+    fg_executions: Arc<RwLock<IndexMap<Uuid, ServiceExecution>>>,
 }
 
 pub(crate) async fn create_functional_group_routes<T: UdsEcu + Clone>(

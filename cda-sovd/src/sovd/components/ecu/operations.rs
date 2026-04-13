@@ -842,9 +842,9 @@ pub(crate) mod service {
 
         /// Parses a positive, non-empty UDS response into `(parameters, errors)`.
         ///
-        /// - `Object` → parameters map + any field-parse errors
-        /// - `Null`   → empty parameters, no errors (ECU signalled no output)
-        /// - anything else, or a parse failure → empty parameters, one soft `DataError`
+        /// - `Object` -> parameters map + any field-parse errors
+        /// - `Null`  -> empty parameters, no errors (ECU signalled no output)
+        /// - anything else, or a parse failure -> empty parameters, one soft `DataError`
         fn parse_json_response_params<R: DiagServiceResponse>(
             response: R,
             context: &str,
@@ -954,7 +954,7 @@ pub(crate) mod service {
         async fn handle_async_post<T: UdsEcu>(
             response: Option<T::Response>,
             map_to_json: bool,
-            _include_schema: bool,
+            include_schema: bool,
             base_path: String,
             service_executions: std::sync::Arc<
                 tokio::sync::RwLock<indexmap::IndexMap<Uuid, ServiceExecution>>,
@@ -979,12 +979,18 @@ pub(crate) mod service {
                     in_flight: false,
                 },
             );
+            let schema = if include_schema {
+                Some(create_schema!(AsyncPostResponse))
+            } else {
+                None
+            };
             (
                 StatusCode::ACCEPTED,
                 [(header::LOCATION, format!("{base_path}/{id}"))],
                 Json(AsyncPostResponse {
                     id: id.to_string(),
                     status: Some(ExecutionStatus::Running),
+                    schema,
                 }),
             )
                 .into_response()
@@ -2098,7 +2104,7 @@ mod tests {
                 )
                 .await;
 
-            // suppress_service=true → should return 200 with stored params, no UDS send
+            // suppress_service=true -> should return 200 with stored params, no UDS send
             assert_eq!(response.status(), StatusCode::OK);
             let body = axum::body::to_bytes(response.into_body(), usize::MAX)
                 .await
@@ -2169,7 +2175,7 @@ mod tests {
                 )
                 .await;
 
-            // suppress_service=false → NotFound from UDS should propagate as error
+            // suppress_service=false -> NotFound from UDS should propagate as error
             assert!(response.status().is_client_error() || response.status().is_server_error());
         }
 
@@ -2348,7 +2354,7 @@ mod tests {
                 )
                 .await;
 
-            // ECU returned data → 200 with status=stopped and the parameters
+            // ECU returned data -> 200 with status=stopped and the parameters
             assert_eq!(response.status(), StatusCode::OK);
             let body = axum::body::to_bytes(response.into_body(), usize::MAX)
                 .await
@@ -2372,7 +2378,7 @@ mod tests {
 
         #[tokio::test]
         async fn test_delete_execution_stop_with_null_json_returns_200_empty_parameters() {
-            // Stop maps to JSON Null → 200 with empty parameters (user-requested extension)
+            // Stop maps to JSON Null -> 200 with empty parameters (user-requested extension)
             let ecu_name = "TestECU".to_string();
             let mut mock_uds = MockUdsEcu::new();
             let mock_file_manager = MockFileManager::new();
@@ -2440,7 +2446,7 @@ mod tests {
                 result.get("status").expect("missing status"),
                 &serde_json::json!("stopped")
             );
-            // parameters: None when empty → field is omitted from JSON
+            // parameters: None when empty -> field is omitted from JSON
             assert!(
                 result.get("parameters").is_none(),
                 "parameters should be absent when Stop returns Null"
@@ -2450,7 +2456,7 @@ mod tests {
 
         #[tokio::test]
         async fn test_delete_execution_stop_non_object_json_returns_200_stopped_with_error() {
-            // Stop maps to a non-object JSON value (e.g. a string) → 200 stopped, error surfaced
+            // Stop maps to a non-object JSON value (e.g. a string) -> 200 stopped, error surfaced
             let ecu_name = "TestECU".to_string();
             let mut mock_uds = MockUdsEcu::new();
             let mock_file_manager = MockFileManager::new();
@@ -2528,7 +2534,7 @@ mod tests {
 
         #[tokio::test]
         async fn test_delete_execution_stop_into_json_error_returns_200_stopped_with_error() {
-            // Stop response cannot be parsed (into_json fails) → 200 stopped, error surfaced
+            // Stop response cannot be parsed (into_json fails) -> 200 stopped, error surfaced
             let ecu_name = "TestECU".to_string();
             let mut mock_uds = MockUdsEcu::new();
             let mock_file_manager = MockFileManager::new();
@@ -2667,7 +2673,7 @@ mod tests {
                 )
                 .await;
 
-            // force=true → removes execution even on error
+            // force=true -> removes execution even on error
             assert_eq!(response.status(), StatusCode::NO_CONTENT);
             assert!(service_executions_ref.read().await.is_empty());
         }
@@ -2726,7 +2732,7 @@ mod tests {
                 )
                 .await;
 
-            // force=true → removes execution even on negative ECU response
+            // force=true -> removes execution even on negative ECU response
             assert_eq!(response.status(), StatusCode::NO_CONTENT);
             assert!(service_executions_ref.read().await.is_empty());
         }
@@ -2785,7 +2791,7 @@ mod tests {
                 )
                 .await;
 
-            // force=false → error should be returned, execution should remain
+            // force=false -> error should be returned, execution should remain
             assert!(response.status().is_client_error() || response.status().is_server_error());
             assert_eq!(service_executions_ref.read().await.len(), 1);
         }
@@ -2844,7 +2850,7 @@ mod tests {
                 )
                 .await;
 
-            // Negative ECU response without force → error returned, in_flight reset
+            // Negative ECU response without force -> error returned, in_flight reset
             assert!(response.status().is_client_error() || response.status().is_server_error());
             let guard = service_executions_ref.read().await;
             let exec = guard.get(&exec_id).expect("execution should still exist");
@@ -2907,7 +2913,7 @@ mod tests {
                 )
                 .await;
 
-            // suppress_service=true on NotFound → removes execution, returns 204
+            // suppress_service=true on NotFound -> removes execution, returns 204
             assert_eq!(response.status(), StatusCode::NO_CONTENT);
             assert!(service_executions_ref.read().await.is_empty());
         }

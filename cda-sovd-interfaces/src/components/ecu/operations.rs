@@ -222,6 +222,9 @@ pub struct AsyncPostResponse {
     /// Status of the executed operation immediately after a POST.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub status: Option<ExecutionStatus>,
+    #[schemars(skip)]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub schema: Option<schemars::Schema>,
 }
 
 /// Response body for `GET /operations/{service}/executions/{id}` (`RequestResults`).

@@ -91,18 +91,20 @@ pub(crate) mod diag_service {
         Json,
         body::Bytes,
         extract::{OriginalUri, Path, Query, State},
-        http::{HeaderMap, StatusCode, header},
+        http::{HeaderMap, StatusCode, Uri, header},
         response::{IntoResponse, Response},
     };
     use axum_extra::extract::{Host, WithRejection};
     use cda_interfaces::{DiagComm, DiagCommType, DynamicPlugin, HashMap, UdsEcu, subfunction_ids};
     use cda_plugin_security::Secured;
+    use indexmap::IndexMap;
     use sovd_interfaces::components::ecu::operations::{AsyncPostResponse, ExecutionStatus};
+    use tokio::sync::RwLock;
     use uuid::Uuid;
 
     use super::super::WebserverFgState;
     use crate::{
-        openapi,
+        create_schema, openapi,
         sovd::{
             ServiceExecution,
             components::{ecu::DiagServicePathParam, get_content_type_and_accept},
@@ -120,11 +122,12 @@ pub(crate) mod diag_service {
         pub id: String,
     }
 
-    /// Builds a `200 OK` response containing per-ECU Stop results and errors.
+    /// Builds a `200 OK` response containing per-ECU operation results and errors.
     ///
-    /// Used by DELETE when Stop encounters errors: either to surface them while keeping
-    /// the execution alive (`force=false`) or after forcibly removing it (`force=true`).
-    fn stop_error_response(
+    /// Used by POST (sync execution) and by DELETE when Stop encounters errors: either to
+    /// surface them while keeping the execution alive (`force=false`) or after forcibly
+    /// removing it (`force=true`).
+    fn build_operation_response(
         response_data: HashMap<String, serde_json::Map<String, serde_json::Value>>,
         errors: Vec<sovd_interfaces::error::DataError<VendorErrorCode>>,
         include_schema: bool,
@@ -151,8 +154,48 @@ pub(crate) mod diag_service {
             .into_response()
     }
 
+    /// Registers an async execution entry and builds the `202 Accepted` response.
+    async fn build_async_response(
+        fg_executions: &RwLock<IndexMap<Uuid, ServiceExecution>>,
+        response_data: HashMap<String, serde_json::Map<String, serde_json::Value>>,
+        host: &str,
+        uri: &Uri,
+        include_schema: bool,
+    ) -> Response {
+        // Flatten all per-ECU START parameters into a single map for storage.
+        let stored_params: serde_json::Map<String, serde_json::Value> =
+            response_data.into_values().flatten().collect();
+
+        let id = Uuid::new_v4();
+        fg_executions.write().await.insert(
+            id,
+            ServiceExecution {
+                parameters: stored_params,
+                status: ExecutionStatus::Running,
+                in_flight: false,
+            },
+        );
+
+        let exec_url = format!("http://{host}{uri}/executions/{id}");
+        let schema = if include_schema {
+            Some(create_schema!(AsyncPostResponse))
+        } else {
+            None
+        };
+        (
+            StatusCode::ACCEPTED,
+            [(header::LOCATION, exec_url)],
+            Json(AsyncPostResponse {
+                id: id.to_string(),
+                status: Some(ExecutionStatus::Running),
+                schema,
+            }),
+        )
+            .into_response()
+    }
+
+    // cannot easily combine the axum extractors without creating a new custom extractor.
     #[allow(clippy::too_many_arguments)]
-    #[allow(clippy::too_many_lines)]
     pub(crate) async fn post<T: UdsEcu + Clone>(
         headers: HeaderMap,
         UseApi(Secured(security_plugin), _): UseApi<Secured, ()>,
@@ -167,6 +210,7 @@ pub(crate) mod diag_service {
         >,
         State(WebserverFgState {
             uds,
+            locks,
             functional_group_name,
             fg_executions,
             ..
@@ -175,6 +219,17 @@ pub(crate) mod diag_service {
     ) -> Response {
         let include_schema = query.include_schema;
         let suppress_service = query.suppress_service;
+        if let Some(err_response) = validate_fg_lock(
+            &security_plugin.claims(),
+            &functional_group_name,
+            &locks,
+            include_schema,
+        )
+        .await
+        {
+            return err_response;
+        }
+
         let security_plugin: DynamicPlugin = security_plugin;
 
         if operation.contains('/') {
@@ -189,36 +244,18 @@ pub(crate) mod diag_service {
             // suppress service is always treated as async
             true
         } else {
-            // Determine whether this operation is async (has_stop) and validate it exists.
-            let subfunctions = match uds
-                .get_functional_group_routine_subfunctions(
-                    &security_plugin,
-                    &functional_group_name,
-                    &operation,
-                )
-                .await
+            match check_if_async(
+                &uds,
+                &security_plugin,
+                &functional_group_name,
+                &operation,
+                include_schema,
+            )
+            .await
             {
-                Ok(sf) => sf,
-                Err(cda_interfaces::DiagServiceError::NotFound(_)) => {
-                    return ErrorWrapper {
-                        error: ApiError::NotFound(Some(format!(
-                            "Operation '{operation}' not found in functional group \
-                             '{functional_group_name}'"
-                        ))),
-                        include_schema,
-                    }
-                    .into_response();
-                }
-                Err(e) => {
-                    return ErrorWrapper {
-                        error: e.into(),
-                        include_schema,
-                    }
-                    .into_response();
-                }
-            };
-
-            subfunctions.has_stop || subfunctions.has_request_results
+                Ok(is_async) => is_async,
+                Err(e) => return e.into_response(),
+            }
         };
 
         let (content_type, accept) = match get_content_type_and_accept(&headers) {
@@ -286,51 +323,9 @@ pub(crate) mod diag_service {
         }
 
         if is_async {
-            // Flatten all per-ECU START parameters into a single map for storage.
-            let stored_params: serde_json::Map<String, serde_json::Value> =
-                response_data.into_values().flatten().collect();
-
-            let id = Uuid::new_v4();
-            fg_executions.write().await.insert(
-                id,
-                ServiceExecution {
-                    parameters: stored_params,
-                    status: ExecutionStatus::Running,
-                    in_flight: false,
-                },
-            );
-
-            let exec_url = format!("http://{host}{uri}/executions/{id}");
-            (
-                StatusCode::ACCEPTED,
-                [(header::LOCATION, exec_url)],
-                Json(AsyncPostResponse {
-                    id: id.to_string(),
-                    status: Some(ExecutionStatus::Running),
-                }),
-            )
-                .into_response()
+            build_async_response(&fg_executions, response_data, &host, &uri, include_schema).await
         } else {
-            let schema = if include_schema {
-                Some(crate::sovd::create_schema!(
-                    sovd_interfaces::functions::functional_groups::operations::service::Response<
-                        VendorErrorCode,
-                    >
-                ))
-            } else {
-                None
-            };
-            (
-                StatusCode::OK,
-                Json(
-                    sovd_interfaces::functions::functional_groups::operations::service::Response {
-                        parameters: response_data,
-                        errors,
-                        schema,
-                    },
-                ),
-            )
-                .into_response()
+            build_operation_response(response_data, errors, include_schema)
         }
     }
 
@@ -483,13 +478,13 @@ pub(crate) mod diag_service {
         } else if query.force {
             // force=true — remove execution even though Stop had errors, return 200 with errors.
             fg_executions.write().await.shift_remove(&exec_id);
-            stop_error_response(response_data, errors, include_schema)
+            build_operation_response(response_data, errors, include_schema)
         } else {
             // force=false and Stop had errors — reset in_flight, keep execution alive for retry.
             if let Some(exec) = fg_executions.write().await.get_mut(&exec_id) {
                 exec.in_flight = false;
             }
-            stop_error_response(response_data, errors, include_schema)
+            build_operation_response(response_data, errors, include_schema)
         }
     }
 
@@ -515,6 +510,43 @@ pub(crate) mod diag_service {
         .with(openapi::error_bad_request)
         .with(openapi::error_forbidden)
         .with(openapi::error_conflict)
+    }
+
+    async fn check_if_async<T: UdsEcu>(
+        uds: &T,
+        security_plugin: &DynamicPlugin,
+        functional_group_name: &str,
+        service_name: &str,
+        include_schema: bool,
+    ) -> Result<bool, ErrorWrapper> {
+        // Determine whether this operation is async (has_stop) and validate it exists.
+        let subfunctions = match uds
+            .get_functional_group_routine_subfunctions(
+                security_plugin,
+                functional_group_name,
+                service_name,
+            )
+            .await
+        {
+            Ok(sf) => sf,
+            Err(cda_interfaces::DiagServiceError::NotFound(_)) => {
+                return Err(ErrorWrapper {
+                    error: ApiError::NotFound(Some(format!(
+                        "Operation '{service_name}' not found in functional group \
+                         '{functional_group_name}'"
+                    ))),
+                    include_schema,
+                });
+            }
+            Err(e) => {
+                return Err(ErrorWrapper {
+                    error: e.into(),
+                    include_schema,
+                });
+            }
+        };
+
+        Ok(subfunctions.has_stop || subfunctions.has_request_results)
     }
 
     #[cfg(test)]
@@ -584,8 +616,6 @@ pub(crate) mod diag_service {
             }
         }
 
-        // ── POST: sync operations ─────────────────────────────────────────────
-
         #[tokio::test]
         async fn test_fg_post_sync_operation_uses_start_and_returns_200() {
             let mut mock_uds = MockUdsEcu::new();
@@ -616,6 +646,7 @@ pub(crate) mod diag_service {
                 });
 
             let state = create_test_fg_state(mock_uds, "AllECUs".to_string());
+            insert_test_fg_lock(&state.locks, "AllECUs").await;
 
             let response = post::<MockUdsEcu>(
                 make_post_headers(),
@@ -672,6 +703,7 @@ pub(crate) mod diag_service {
 
             let state = create_test_fg_state(mock_uds, "AllECUs".to_string());
             let fg_executions_ref = Arc::clone(&state.fg_executions);
+            insert_test_fg_lock(&state.locks, "AllECUs").await;
 
             let response = post::<MockUdsEcu>(
                 make_post_headers(),
@@ -722,6 +754,7 @@ pub(crate) mod diag_service {
 
             let state = create_test_fg_state(mock_uds, "AllECUs".to_string());
             let fg_executions_ref = Arc::clone(&state.fg_executions);
+            insert_test_fg_lock(&state.locks, "AllECUs").await;
 
             let response = post::<MockUdsEcu>(
                 make_post_headers(),
@@ -771,6 +804,7 @@ pub(crate) mod diag_service {
             mock_uds.expect_send_functional_group().times(0);
 
             let state = create_test_fg_state(mock_uds, "AllECUs".to_string());
+            insert_test_fg_lock(&state.locks, "AllECUs").await;
 
             let response = post::<MockUdsEcu>(
                 make_post_headers(),
@@ -835,6 +869,7 @@ pub(crate) mod diag_service {
                 });
 
             let state = create_test_fg_state(mock_uds, "Safety".to_string());
+            insert_test_fg_lock(&state.locks, "Safety").await;
 
             let response = post::<MockUdsEcu>(
                 make_post_headers(),
@@ -911,6 +946,7 @@ pub(crate) mod diag_service {
                 });
 
             let state = create_test_fg_state(mock_uds, "AllECUs".to_string());
+            insert_test_fg_lock(&state.locks, "AllECUs").await;
 
             let response = post::<MockUdsEcu>(
                 make_post_headers(),
@@ -1118,7 +1154,7 @@ pub(crate) mod diag_service {
             )
             .await;
 
-            // force=true + partial failure → 200 with errors, execution removed
+            // force=true + partial failure -> 200 with errors, execution removed
             assert_eq!(response.status(), StatusCode::OK);
             let body = axum::body::to_bytes(response.into_body(), usize::MAX)
                 .await
@@ -1174,7 +1210,7 @@ pub(crate) mod diag_service {
 
         #[tokio::test]
         async fn test_fg_post_async_via_request_results_only_returns_202() {
-            // has_stop=false, has_request_results=true → must be treated as async (202)
+            // has_stop=false, has_request_results=true -> must be treated as async (202)
             let mut mock_uds = MockUdsEcu::new();
 
             mock_uds
@@ -1198,6 +1234,7 @@ pub(crate) mod diag_service {
 
             let state = create_test_fg_state(mock_uds, "AllECUs".to_string());
             let fg_executions_ref = Arc::clone(&state.fg_executions);
+            insert_test_fg_lock(&state.locks, "AllECUs").await;
 
             let response = post::<MockUdsEcu>(
                 make_post_headers(),
@@ -1234,8 +1271,6 @@ pub(crate) mod diag_service {
             );
         }
 
-        // ── DELETE: force semantics ───────────────────────────────────────────
-
         fn make_delete_query_with_force(
             suppress_service: bool,
             force: bool,
@@ -1249,7 +1284,7 @@ pub(crate) mod diag_service {
 
         #[tokio::test]
         async fn test_fg_delete_partial_failure_force_false_keeps_execution() {
-            // force=false and Stop fails on one ECU → execution NOT removed, 200 with errors
+            // force=false and Stop fails on one ECU -> execution NOT removed, 200 with errors
             let mut mock_uds = MockUdsEcu::new();
 
             mock_uds
@@ -1287,7 +1322,7 @@ pub(crate) mod diag_service {
             )
             .await;
 
-            // force=false → execution must survive for retry
+            // force=false -> execution must survive for retry
             assert_eq!(response.status(), StatusCode::OK);
             let body = axum::body::to_bytes(response.into_body(), usize::MAX)
                 .await
@@ -1318,7 +1353,7 @@ pub(crate) mod diag_service {
 
         #[tokio::test]
         async fn test_fg_delete_partial_failure_force_true_removes_execution() {
-            // force=true and Stop fails on one ECU → execution IS removed, 200 with errors
+            // force=true and Stop fails on one ECU -> execution IS removed, 200 with errors
             let mut mock_uds = MockUdsEcu::new();
 
             mock_uds
@@ -1356,7 +1391,7 @@ pub(crate) mod diag_service {
             )
             .await;
 
-            // force=true → execution removed, errors still surfaced
+            // force=true -> execution removed, errors still surfaced
             assert_eq!(response.status(), StatusCode::OK);
             let body = axum::body::to_bytes(response.into_body(), usize::MAX)
                 .await
