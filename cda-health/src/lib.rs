@@ -102,7 +102,7 @@ impl HealthState {
     }
 
     /// Query all registered health providers and return their current status.
-    async fn query_all_providers(&self) -> HashMap<String, Status> {
+    pub async fn query_all_providers(&self) -> HashMap<String, Status> {
         let providers = self.providers.read().await;
 
         let futures = providers.iter().map(|(name, provider)| async move {
