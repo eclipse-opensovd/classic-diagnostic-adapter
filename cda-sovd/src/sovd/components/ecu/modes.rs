@@ -421,17 +421,15 @@ pub(crate) mod security {
         >,
     ) -> Response {
         fn split_at_last_underscore(input: &str) -> (String, Option<String>) {
-            let parts: Vec<&str> = input.split('_').collect();
-
-            if parts.len() > 2 {
-                let last_part = parts.last().map(|s| (*s).to_string());
-                let remaining = parts
-                    .get(..parts.len().saturating_sub(1))
-                    .map_or_else(|| input.to_string(), |slice| slice.join("_"));
-                (remaining, last_part)
-            } else {
-                (input.to_string(), None)
+            if let Some((level, suffix)) = input.rsplit_once('_') {
+                return match suffix {
+                    "RequestSeed" => (level.to_string(), Some(suffix.to_string())),
+                    "SendKey" => (level.to_string(), None),
+                    _ => (input.to_string(), None),
+                };
             }
+
+            (input.to_string(), None)
         }
 
         let claims = security_plugin.as_auth_plugin().claims();
