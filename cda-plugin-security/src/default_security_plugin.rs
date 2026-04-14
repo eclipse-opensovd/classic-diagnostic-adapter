@@ -47,9 +47,13 @@
 
 use std::sync::LazyLock;
 
-use aide::axum::IntoApiResponse;
 use async_trait::async_trait;
-use axum::{Json, RequestPartsExt, body::Bytes, http::StatusCode, response::IntoResponse};
+use axum::{
+    Json, RequestPartsExt,
+    body::Bytes,
+    http::StatusCode,
+    response::{IntoResponse, Response},
+};
 use axum_extra::{
     TypedHeader,
     headers::{Authorization, authorization::Bearer},
@@ -166,11 +170,13 @@ pub struct DefaultSecurityPluginData {
 ///
 #[derive(Default)]
 pub struct DefaultSecurityPlugin;
-impl SecurityPluginLoader for DefaultSecurityPlugin {}
+impl SecurityPluginLoader for DefaultSecurityPlugin {
+    type PluginData = DefaultSecurityPluginData;
+}
 
 #[async_trait]
 impl AuthorizationRequestHandler for DefaultSecurityPlugin {
-    async fn authorize(_headers: HeaderMap, body_bytes: Bytes) -> impl IntoApiResponse {
+    async fn authorize(&self, _headers: HeaderMap, body_bytes: Bytes) -> Response {
         let payload = match axum::extract::Json::<AuthPayload>::from_bytes(&body_bytes) {
             Ok(payload) => payload.0,
             Err(e) => {
