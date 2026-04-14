@@ -48,6 +48,7 @@ pub(crate) struct WebserverFgState<T: UdsEcu + Clone> {
     functional_group_name: String,
 }
 
+/// [[ dimpl~functional-communication-api, Functional Communication API ]]
 pub(crate) async fn create_functional_group_routes<T: UdsEcu + Clone>(
     state: WebserverState<T>,
     functional_group_config: FunctionalDescriptionConfig,

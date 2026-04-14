@@ -65,6 +65,7 @@ pub struct TokioTracingConfig {
     pub recording_path: Option<String>,
 }
 
+/// [[ dimpl~plugin-dlt-logging-configuration, DLT Tracing Configuration ]]
 #[cfg(feature = "dlt-tracing")]
 #[derive(Deserialize, Serialize, Clone, Debug)]
 pub struct DltTracingConfig {
@@ -227,6 +228,7 @@ pub fn new_tokio_tracing<S: tracing_core::Subscriber + for<'a> LookupSpan<'a>>(
     Ok(builder.spawn().boxed())
 }
 
+/// [[ dimpl~plugin-dlt-logging, DLT Tracing Subscriber Layer ]]
 /// Creates a new DLT Tracing subscriber layer.
 /// # Errors
 /// Returns an error if the DLT layer cannot be created, for example due to an invalid app ID.

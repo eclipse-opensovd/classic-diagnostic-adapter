@@ -35,6 +35,7 @@ pub(crate) async fn get(
     )
 }
 
+/// [[ dimpl~sovd-api-mdd-embedded-files, MDD Embedded Files ]]
 pub(crate) mod mdd_embedded_files {
     use aide::transform::TransformOperation;
     use axum::{

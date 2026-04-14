@@ -15,7 +15,7 @@ local_url_field = "local-url"   # Need's field name for local URL
 set_remote_url = true           # Set to true to enable remote url to be generated
 remote_url_field = "remote-url" # Need's field name for remote URL
 
-# Configuration for source tracing project "dcdc"
+# Configuration for source tracing project "cda"
 [codelinks.projects.cda]
 remote_url_pattern = "https://github.com/eclipse-opensovd/classic-diagnostic-adapter/blob/{commit}/{path}#L{line}" # URL pattern for remote source code
 

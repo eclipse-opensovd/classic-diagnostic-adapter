@@ -200,6 +200,7 @@ async fn handle_mode_get<T: UdsEcu + Clone, R: schemars::JsonSchema + Serialize>
     }
 }
 
+/// [[ dimpl~sovd-api-session-management, Session Management ]]
 pub(crate) mod session {
     use aide::UseApi;
     use cda_interfaces::{DynamicPlugin, SchemaProvider, service_ids};
@@ -348,6 +349,7 @@ pub(crate) mod session {
     }
 }
 
+/// [[ dimpl~sovd-api-security-access-modes, Security Access Modes ]]
 pub(crate) mod security {
     use aide::UseApi;
     use cda_interfaces::{
@@ -580,6 +582,7 @@ pub(crate) mod security {
     }
 }
 
+/// [[ dimpl~sovd-api-communication-control-modes, Communication Control Modes ]]
 pub(crate) mod commctrl {
     use aide::{UseApi, transform::TransformOperation};
     use axum::{
@@ -694,6 +697,7 @@ pub(crate) mod commctrl {
     }
 }
 
+/// [[ dimpl~sovd-api-dtc-setting-modes, DTC Setting Modes ]]
 pub(crate) mod dtcsetting {
     use aide::{UseApi, transform::TransformOperation};
     use axum::{

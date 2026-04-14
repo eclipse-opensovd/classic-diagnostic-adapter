@@ -251,6 +251,7 @@ async fn vehicle_route<T: UdsEcu + SchemaProvider + Clone, S: SecurityPluginLoad
         )
 }
 
+/// [[ dimpl~sovd-api-standardized-resource-collection-mapping, Standardized Resource Collection Mapping ]]
 async fn get_components<T: UdsEcu + SchemaProvider + Clone>(
     State(state): State<WebserverState<T>>,
     WithRejection(Query(query), _): WithRejection<Query<IncludeSchemaQuery>, ApiError>,

@@ -10,6 +10,7 @@
  * https://www.apache.org/licenses/LICENSE-2.0
  */
 
+/// [[ dimpl~sovd-api-single-ecu-jobs, Single ECU Jobs ]]
 pub(crate) mod single_ecu {
     use aide::transform::TransformOperation;
     use axum::{
