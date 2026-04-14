@@ -1051,7 +1051,7 @@ impl<S: SecurityPlugin> cda_interfaces::EcuManager for EcuManager<S> {
                         && matches!(sub_func, 1 | 3..=5 | 7..=41)
                         && service
                             .request()
-                            .is_some_and(|r| r.params().is_some_and(|p| p.len() == 2))
+                            .is_some_and(|r| r.params().is_some_and(|p| p.len() >= 2))
                         && name_matches
                 })
                 .ok_or_else(|| {
