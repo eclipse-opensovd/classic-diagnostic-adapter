@@ -755,6 +755,19 @@ impl<S: EcuGateway, R: DiagServiceResponse, T: EcuManager<Response = R>> UdsMana
                         schedule.set_missed_tick_behavior(MissedTickBehavior::Delay);
                         loop {
                             let _ = schedule.tick().await;
+                            // Skip sending if the ECU is not online; the loop will
+                            // naturally resume once the ECU is detected online again.
+                            if let Ok(ecu) = uds.ecu_manager(&control_msg.ecu) {
+                                let ecu_state = ecu.read().await.variant().state;
+                                if ecu_state != EcuState::Online {
+                                    tracing::debug!(
+                                        ecu = %control_msg.ecu,
+                                        ecu_state = %ecu_state,
+                                        "Skipping tester present for ECU that is not online"
+                                    );
+                                    continue;
+                                }
+                            }
                             // abort sending if it takes longer than `interval` and log an
                             // error, but try to continue sending tester present afterwards.
                             if let Ok(r) = tokio::time::timeout(
