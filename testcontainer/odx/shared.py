@@ -35,6 +35,7 @@ from helper import (
     did_parameter_rq,
     texttable_int_str_dop,
     find_dop_by_shortname,
+    find_unit_by_shortname,
 )
 from security_access import add_state_chart_security_access
 from sessions import add_default_session_services, add_state_chart_session
@@ -116,6 +117,40 @@ def add_common_datatypes(dlr: DiagLayerRaw):
     )
 
     dlr.diag_data_dictionary_spec.data_object_props.append(
+        DataObjectProperty(
+            odx_id=derived_id(dlr, "DOP.Watts"),
+            short_name="Watts",
+            compu_method=IdenticalCompuMethod(
+                category=CompuCategory.IDENTICAL,
+                physical_type=DataType.A_INT32,
+                internal_type=DataType.A_INT32,
+            ),
+            physical_type=PhysicalType(base_data_type=DataType.A_INT32),
+            diag_coded_type=StandardLengthType(
+                base_data_type=DataType.A_INT32, bit_length=32
+            ),
+            unit_ref=ref(find_unit_by_shortname(dlr, "Watt")),
+        )
+    )
+
+    dlr.diag_data_dictionary_spec.data_object_props.append(
+        DataObjectProperty(
+            odx_id=derived_id(dlr, "DOP.GigaWatts"),
+            short_name="GigaWatts",
+            compu_method=IdenticalCompuMethod(
+                category=CompuCategory.IDENTICAL,
+                physical_type=DataType.A_FLOAT32,
+                internal_type=DataType.A_FLOAT32,
+            ),
+            physical_type=PhysicalType(base_data_type=DataType.A_FLOAT32),
+            diag_coded_type=StandardLengthType(
+                base_data_type=DataType.A_FLOAT32, bit_length=32
+            ),
+            unit_ref=ref(find_unit_by_shortname(dlr, "GigaWatt")),
+        )
+    )
+
+    dlr.diag_data_dictionary_spec.data_object_props.append(
         texttable_int_str_dop(
             dlr,
             "EcuSessionType",
@@ -138,6 +173,7 @@ def add_service_did(
     add_write: bool = False,
     funct_class: str = "Ident",
     long_name: str | None = None,
+    semantic: str | None = None,
 ):
     if not dop:
         raise Exception("dop property is required")
@@ -180,6 +216,7 @@ def add_service_did(
             functional_class_refs=[functional_class_ref(dlr, funct_class)],
             request_ref=ref(request),
             pos_response_refs=[ref(response)],
+            semantic=semantic,
         )
     )
 
@@ -225,6 +262,7 @@ def add_service_did(
             functional_class_refs=[functional_class_ref(dlr, funct_class)],
             request_ref=ref(request_write),
             pos_response_refs=[ref(response_write)],
+            semantic=semantic,
         )
     )
 
@@ -247,13 +285,14 @@ def add_vin_service(dlr: DiagLayerRaw):
     )
     dlr.diag_data_dictionary_spec.data_object_props.append(vin_dop)
     add_service_did(
-        dlr,
-        "VINDataIdentifier",
-        "VIN",
-        0xF190,
-        vin_dop,
+        dlr=dlr,
+        service_name="VINDataIdentifier",
+        property_name="VIN",
+        did=0xF190,
+        dop=vin_dop,
         add_write=True,
         long_name="Vehicle Identification Number",
+        semantic="STOREDDATA",
     )
 
 
@@ -279,12 +318,26 @@ def add_ident_service(dlr: DiagLayerRaw):
 
 def add_session_type_service(dlr: DiagLayerRaw):
     add_service_did(
-        dlr,
-        "ActiveDiagnosticSessionDataIdentifier",
-        "EcuSessionType",
-        0xF186,
-        find_dop_by_shortname(dlr, "EcuSessionType"),
+        dlr=dlr,
+        service_name="ActiveDiagnosticSessionDataIdentifier",
+        property_name="EcuSessionType",
+        did=0xF186,
+        dop=find_dop_by_shortname(dlr, "EcuSessionType"),
         add_write=False,
+        semantic="IDENTIFICATION",
+    )
+
+
+def add_power_consumption_service(dlr: DiagLayerRaw):
+    add_service_did(
+        dlr=dlr,
+        service_name="FluxCapacitorPowerConsumption",
+        property_name="PowerConsumption",
+        did=0xF200,
+        dop=find_dop_by_shortname(dlr, "Watts"),
+        add_write=False,
+        long_name="Flux Capacitor Power Consumption",
+        semantic="CURRENTDATA",
     )
 
 
