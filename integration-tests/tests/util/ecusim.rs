@@ -230,3 +230,14 @@ pub(crate) async fn clear_all_dtcs(
     crate::util::http::send_request(StatusCode::OK, http::Method::DELETE, None, None, url).await?;
     Ok(())
 }
+
+pub(crate) async fn reset_sim(sim: &EcuSim) -> Result<(), TestingError> {
+    let mut url = sim_endpoint(sim)?;
+    url.path_segments_mut()
+        .map_err(|()| TestingError::InvalidUrl("cannot modify URL path".to_owned()))?
+        .push("reset");
+
+    crate::util::http::send_request(StatusCode::NO_CONTENT, http::Method::POST, None, None, url)
+        .await?;
+    Ok(())
+}
