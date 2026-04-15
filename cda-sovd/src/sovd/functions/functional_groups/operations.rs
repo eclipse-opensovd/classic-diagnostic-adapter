@@ -110,7 +110,7 @@ pub(crate) mod diag_service {
             components::{ecu::DiagServicePathParam, get_content_type_and_accept},
             error::{ApiError, ErrorWrapper, VendorErrorCode},
             functions::functional_groups::{handle_ecu_response, map_to_json},
-            get_payload_data,
+            get_payload_data, guard_execution,
             locks::validate_fg_lock,
         },
     };
@@ -405,29 +405,15 @@ pub(crate) mod diag_service {
             }
         };
 
+        if let Err(e) = guard_execution(
+            &fg_executions,
+            exec_id,
+            include_schema,
+            &format!("Execution {exec_id} is already in flight"),
+        )
+        .await
         {
-            let mut guard = fg_executions.write().await;
-            match guard.get_mut(&exec_id) {
-                None => {
-                    return ErrorWrapper {
-                        error: ApiError::NotFound(Some(format!(
-                            "Execution with id {exec_id} not found"
-                        ))),
-                        include_schema,
-                    }
-                    .into_response();
-                }
-                Some(exec) if exec.in_flight => {
-                    return ErrorWrapper {
-                        error: ApiError::Conflict(format!(
-                            "Execution {exec_id} is already in flight"
-                        )),
-                        include_schema,
-                    }
-                    .into_response();
-                }
-                Some(exec) => exec.in_flight = true,
-            }
+            return e.into_response();
         }
 
         // If suppress_service, skip sending STOP to ECUs — just remove and return 204.
@@ -994,8 +980,6 @@ pub(crate) mod diag_service {
                     .is_none_or(serde_json::Map::is_empty)
             );
         }
-
-        // ── DELETE: Stop ──────────────────────────────────────────────────────
 
         async fn seed_execution_async(
             fg_executions: &Arc<RwLock<IndexMap<Uuid, ServiceExecution>>>,

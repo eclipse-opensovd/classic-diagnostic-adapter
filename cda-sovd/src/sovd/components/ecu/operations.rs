@@ -510,6 +510,7 @@ pub(crate) mod service {
                 components::{field_parse_errors_to_json, get_content_type_and_accept},
                 create_response_schema, create_schema,
                 error::{ApiError, ErrorWrapper, VendorErrorCode},
+                guard_execution,
                 locks::validate_lock,
             },
         };
@@ -882,36 +883,6 @@ pub(crate) mod service {
                 error: ApiError::BadRequest(format!("{e:?}")),
                 include_schema,
             })
-        }
-
-        /// Acquires a write lock on `service_executions`, looks up `exec_id`, marks it
-        /// `in_flight = true`, and returns a clone of the execution.  Returns
-        /// `Err(Response)` (with the lock released) on not-found or in-flight conflict.
-        async fn guard_execution(
-            service_executions: &tokio::sync::RwLock<indexmap::IndexMap<Uuid, ServiceExecution>>,
-            exec_id: Uuid,
-            include_schema: bool,
-            conflict_msg: &str,
-        ) -> Result<ServiceExecution, Response> {
-            let mut guard = service_executions.write().await;
-            match guard.get_mut(&exec_id) {
-                None => Err(ErrorWrapper {
-                    error: ApiError::NotFound(Some(format!(
-                        "Execution with id {exec_id} not found"
-                    ))),
-                    include_schema,
-                }
-                .into_response()),
-                Some(exec) if exec.in_flight => Err(ErrorWrapper {
-                    error: ApiError::Conflict(conflict_msg.to_owned()),
-                    include_schema,
-                }
-                .into_response()),
-                Some(exec) => {
-                    exec.in_flight = true;
-                    Ok(exec.clone())
-                }
-            }
         }
 
         /// Builds the `200 OK` `AsyncGetByIdResponse` body used by both the
@@ -1334,7 +1305,7 @@ pub(crate) mod service {
                 .await
                 {
                     Ok(v) => v,
-                    Err(e) => return e,
+                    Err(e) => return e.into_response(),
                 };
 
                 // suppress_service: skip the UDS send, return stored state directly
@@ -1448,7 +1419,7 @@ pub(crate) mod service {
                 )
                 .await
                 {
-                    return e;
+                    return e.into_response();
                 }
 
                 let diag_service = DiagComm {
@@ -1926,8 +1897,6 @@ mod tests {
             );
         }
 
-        // ── GET /operations/{service}/executions/{id} – RequestResults ────────
-
         #[tokio::test]
         async fn test_get_execution_by_id_not_found() {
             let ecu_name = "TestECU".to_string();
@@ -2180,8 +2149,6 @@ mod tests {
             // suppress_service=false -> NotFound from UDS should propagate as error
             assert!(response.status().is_client_error() || response.status().is_server_error());
         }
-
-        // ── DELETE /operations/{service}/executions/{id} – Stop ───────────────
 
         #[tokio::test]
         async fn test_delete_execution_not_found() {
@@ -3015,8 +2982,6 @@ mod tests {
 
             assert_eq!(response.status(), StatusCode::CONFLICT);
         }
-
-        // ── POST /operations/{service}/executions – Start ─────────────────────
 
         fn make_post_headers() -> axum::http::HeaderMap {
             let mut headers = axum::http::HeaderMap::new();

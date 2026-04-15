@@ -123,6 +123,34 @@ pub(crate) struct ServiceExecution {
     pub in_flight: bool,
 }
 
+/// Acquires a write lock on `executions`, looks up `exec_id`, marks it
+/// `in_flight = true`, and returns a clone of the execution.  Returns
+/// `Err(ErrorWrapper)` (with the lock released) on not-found or in-flight conflict.
+pub(crate) async fn guard_execution(
+    executions: &RwLock<IndexMap<Uuid, ServiceExecution>>,
+    exec_id: Uuid,
+    include_schema: bool,
+    conflict_msg: &str,
+) -> Result<ServiceExecution, error::ErrorWrapper> {
+    let mut guard = executions.write().await;
+    match guard.get_mut(&exec_id) {
+        None => Err(error::ErrorWrapper {
+            error: error::ApiError::NotFound(Some(format!(
+                "Execution with id {exec_id} not found"
+            ))),
+            include_schema,
+        }),
+        Some(exec) if exec.in_flight => Err(error::ErrorWrapper {
+            error: error::ApiError::Conflict(conflict_msg.to_owned()),
+            include_schema,
+        }),
+        Some(exec) => {
+            exec.in_flight = true;
+            Ok(exec.clone())
+        }
+    }
+}
+
 impl<R: DiagServiceResponse, T: UdsEcu + Clone, U: FileManager> Clone
     for WebserverEcuState<R, T, U>
 {
