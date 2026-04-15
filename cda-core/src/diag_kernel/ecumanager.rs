@@ -567,6 +567,7 @@ impl<S: SecurityPlugin> cda_interfaces::EcuManager for EcuManager<S> {
                     short_name,
                     &mut uds_payload,
                     &mut data,
+                    0,
                 ) {
                     Ok(()) => {}
                     Err(DiagServiceError::DataError(error)) => {
@@ -1633,6 +1634,7 @@ impl<S: SecurityPlugin> cda_interfaces::EcuManager for EcuManager<S> {
                 short_name,
                 &mut uds_payload,
                 &mut data,
+                0,
             ) {
                 Ok(()) => {}
                 Err(DiagServiceError::DataError(error)) => {
@@ -2679,10 +2681,17 @@ impl<S: SecurityPlugin> EcuManager<S> {
         param_name: &str,
         uds_payload: &mut Payload,
         data: &mut MappedDiagServiceResponsePayload,
+        base_offset: usize,
     ) -> Result<(), DiagServiceError> {
         match param.param_type()? {
             datatypes::ParamType::CodedConst => {
-                Self::map_param_coded_const_from_uds(param, param_name, uds_payload, data)?;
+                Self::map_param_coded_const_from_uds(
+                    param,
+                    param_name,
+                    uds_payload,
+                    data,
+                    base_offset,
+                )?;
             }
             datatypes::ParamType::MatchingRequestParam => {
                 self.map_param_matching_request_from_uds(
@@ -2691,13 +2700,26 @@ impl<S: SecurityPlugin> EcuManager<S> {
                     param_name,
                     uds_payload,
                     data,
+                    base_offset,
                 )?;
             }
             datatypes::ParamType::Value => {
-                self.map_param_value_from_uds(mapped_service, param, uds_payload, data)?;
+                self.map_param_value_from_uds(
+                    mapped_service,
+                    param,
+                    uds_payload,
+                    data,
+                    base_offset,
+                )?;
             }
             datatypes::ParamType::Reserved => {
-                Self::map_param_reserved_from_uds(param, param_name, uds_payload, data)?;
+                Self::map_param_reserved_from_uds(
+                    param,
+                    param_name,
+                    uds_payload,
+                    data,
+                    base_offset,
+                )?;
             }
             datatypes::ParamType::TableEntry => {
                 tracing::error!("TableStructParam not implemented.");
@@ -2706,7 +2728,13 @@ impl<S: SecurityPlugin> EcuManager<S> {
                 tracing::error!("Dynamic ParamType not implemented.");
             }
             datatypes::ParamType::LengthKey => {
-                self.map_param_length_key_from_uds(mapped_service, param, uds_payload, data)?;
+                self.map_param_length_key_from_uds(
+                    mapped_service,
+                    param,
+                    uds_payload,
+                    data,
+                    base_offset,
+                )?;
             }
             datatypes::ParamType::NrcConst => {
                 tracing::error!("NrcConst ParamType not implemented.");
@@ -2718,6 +2746,7 @@ impl<S: SecurityPlugin> EcuManager<S> {
                     param_name,
                     uds_payload,
                     data,
+                    base_offset,
                 )?;
             }
             datatypes::ParamType::System => {
@@ -2738,6 +2767,7 @@ impl<S: SecurityPlugin> EcuManager<S> {
         param_name: &str,
         uds_payload: &mut Payload,
         data: &mut MappedDiagServiceResponsePayload,
+        base_offset: usize,
     ) -> Result<(), DiagServiceError> {
         let r = param
             .specific_data_as_reserved()
@@ -2756,7 +2786,7 @@ impl<S: SecurityPlugin> EcuManager<S> {
 
         let (param_data, bit_len) = coded_type.decode(
             uds_payload.data()?,
-            param.byte_position() as usize,
+            base_offset.saturating_add(param.byte_position() as usize),
             param.bit_position() as usize,
         )?;
 
@@ -2778,6 +2808,7 @@ impl<S: SecurityPlugin> EcuManager<S> {
         param: &datatypes::Parameter,
         uds_payload: &mut Payload,
         data: &mut MappedDiagServiceResponsePayload,
+        base_offset: usize,
     ) -> Result<(), DiagServiceError> {
         let v = param
             .specific_data_as_value()
@@ -2791,7 +2822,7 @@ impl<S: SecurityPlugin> EcuManager<S> {
                 .ok_or(DiagServiceError::InvalidDatabase(
                     "Value DoP is None".to_owned(),
                 ))?;
-        self.map_dop_from_uds(mapped_service, &dop, param, uds_payload, data)?;
+        self.map_dop_from_uds(mapped_service, &dop, param, uds_payload, data, base_offset)?;
         Ok(())
     }
 
@@ -2801,6 +2832,7 @@ impl<S: SecurityPlugin> EcuManager<S> {
         param: &datatypes::Parameter,
         uds_payload: &mut Payload,
         data: &mut MappedDiagServiceResponsePayload,
+        base_offset: usize,
     ) -> Result<(), DiagServiceError> {
         let length_key =
             param
@@ -2813,7 +2845,7 @@ impl<S: SecurityPlugin> EcuManager<S> {
             DiagServiceError::InvalidDatabase("LengthKey DoP is None".to_owned()),
         )?;
 
-        self.map_dop_from_uds(mapped_service, &dop, param, uds_payload, data)
+        self.map_dop_from_uds(mapped_service, &dop, param, uds_payload, data, base_offset)
     }
 
     fn map_param_matching_request_from_uds(
@@ -2823,6 +2855,7 @@ impl<S: SecurityPlugin> EcuManager<S> {
         param_name: &str,
         uds_payload: &mut Payload,
         data: &mut MappedDiagServiceResponsePayload,
+        base_offset: usize,
     ) -> Result<(), DiagServiceError> {
         let matching_req_param = param.specific_data_as_matching_request_param().ok_or(
             DiagServiceError::InvalidDatabase(
@@ -2877,6 +2910,7 @@ impl<S: SecurityPlugin> EcuManager<S> {
             param_name,
             uds_payload,
             data,
+            base_offset,
         )?;
 
         if pop {
@@ -2890,6 +2924,7 @@ impl<S: SecurityPlugin> EcuManager<S> {
         param_name: &str,
         uds_payload: &mut Payload,
         data: &mut MappedDiagServiceResponsePayload,
+        base_offset: usize,
     ) -> Result<(), DiagServiceError> {
         let c = param
             .specific_data_as_coded_const()
@@ -2907,7 +2942,7 @@ impl<S: SecurityPlugin> EcuManager<S> {
 
         let value = operations::extract_diag_data_container(
             param.short_name(),
-            param.byte_position() as usize,
+            base_offset.saturating_add(param.byte_position() as usize),
             param.bit_position() as usize,
             uds_payload,
             &diag_type,
@@ -2977,6 +3012,7 @@ impl<S: SecurityPlugin> EcuManager<S> {
         param_name: &str,
         uds_payload: &mut Payload,
         data: &mut MappedDiagServiceResponsePayload,
+        base_offset: usize,
     ) -> Result<(), DiagServiceError> {
         let p = param
             .specific_data_as_phys_const()
@@ -2997,7 +3033,7 @@ impl<S: SecurityPlugin> EcuManager<S> {
                 let diag_type = normal_dop.diag_coded_type()?;
                 let value = operations::extract_diag_data_container(
                     param.short_name(),
-                    param.byte_position() as usize,
+                    base_offset.saturating_add(param.byte_position() as usize),
                     param.bit_position() as usize,
                     uds_payload,
                     &diag_type,
@@ -3034,7 +3070,7 @@ impl<S: SecurityPlugin> EcuManager<S> {
             | datatypes::DataOperationVariant::StaticField(_)
             | datatypes::DataOperationVariant::Mux(_)
             | datatypes::DataOperationVariant::DynamicLengthField(_) => {
-                self.map_dop_from_uds(mapped_service, &dop, param, uds_payload, data)?;
+                self.map_dop_from_uds(mapped_service, &dop, param, uds_payload, data, base_offset)?;
             }
             _ => {
                 return Err(DiagServiceError::InvalidDatabase(format!(
@@ -3570,6 +3606,7 @@ impl<S: SecurityPlugin> EcuManager<S> {
                 short_name,
                 uds_payload,
                 &mut data,
+                0,
             )?;
         }
         Ok(data)
@@ -3598,6 +3635,7 @@ impl<S: SecurityPlugin> EcuManager<S> {
         param: &datatypes::Parameter,
         uds_payload: &mut Payload,
         data: &mut MappedDiagServiceResponsePayload,
+        base_offset: usize,
     ) -> Result<(), DiagServiceError> {
         let short_name = param
             .short_name()
@@ -3619,6 +3657,7 @@ impl<S: SecurityPlugin> EcuManager<S> {
                         short_name,
                         &normal_dop,
                         length_key_name,
+                        base_offset,
                     )?;
                 } else {
                     Self::map_normal_dop_from_uds(
@@ -3627,6 +3666,7 @@ impl<S: SecurityPlugin> EcuManager<S> {
                         data,
                         short_name,
                         &normal_dop,
+                        base_offset,
                     )?;
                 }
             }
@@ -3648,10 +3688,11 @@ impl<S: SecurityPlugin> EcuManager<S> {
                     &short_name,
                     param,
                     &structure_dop,
+                    base_offset,
                 )?;
             }
             datatypes::DataOperationVariant::Dtc(dtc_dop) => {
-                Self::map_dtc_dop_from_uds(param, uds_payload, data, &dtc_dop)?;
+                Self::map_dtc_dop_from_uds(param, uds_payload, data, &dtc_dop, base_offset)?;
             }
             datatypes::DataOperationVariant::StaticField(static_field_dop) => {
                 self.map_static_field_dop_from_uds(
@@ -3661,6 +3702,7 @@ impl<S: SecurityPlugin> EcuManager<S> {
                     data,
                     short_name,
                     &static_field_dop,
+                    base_offset,
                 )?;
             }
             datatypes::DataOperationVariant::Mux(mux_dop) => {
@@ -3671,6 +3713,7 @@ impl<S: SecurityPlugin> EcuManager<S> {
                     data,
                     short_name,
                     &mux_dop,
+                    base_offset,
                 )?;
             }
             datatypes::DataOperationVariant::DynamicLengthField(dynamic_length_field_dop) => {
@@ -3681,6 +3724,7 @@ impl<S: SecurityPlugin> EcuManager<S> {
                     data,
                     short_name,
                     &dynamic_length_field_dop,
+                    base_offset,
                 )?;
             }
 
@@ -3700,6 +3744,7 @@ impl<S: SecurityPlugin> EcuManager<S> {
         short_name: String,
         normal_dop: &datatypes::NormalDop,
         length_key_name: &str,
+        base_offset: usize,
     ) -> Result<(), DiagServiceError> {
         let byte_count = match data.get(length_key_name) {
             Some(DiagDataTypeContainer::RawContainer(raw)) => {
@@ -3758,7 +3803,7 @@ impl<S: SecurityPlugin> EcuManager<S> {
         }
 
         let byte_pos = if param.has_byte_position() {
-            param.byte_position() as usize
+            base_offset.saturating_add(param.byte_position() as usize)
         } else {
             uds_payload.last_read_byte_pos()
         };
@@ -3780,6 +3825,7 @@ impl<S: SecurityPlugin> EcuManager<S> {
         Ok(())
     }
 
+    #[allow(clippy::too_many_arguments)]
     #[tracing::instrument(skip_all,
         fields(
             dlt_context = dlt_ctx!("CORE"),
@@ -3793,6 +3839,7 @@ impl<S: SecurityPlugin> EcuManager<S> {
         data: &mut MappedDiagServiceResponsePayload,
         short_name: String,
         dynamic_length_field_dop: &datatypes::DynamicLengthDop,
+        base_offset: usize,
     ) -> Result<(), DiagServiceError> {
         let determine_num_items = dynamic_length_field_dop.determine_number_of_items().ok_or(
             DiagServiceError::InvalidDatabase(
@@ -3816,10 +3863,11 @@ impl<S: SecurityPlugin> EcuManager<S> {
 
         let num_items_diag_type: datatypes::DiagCodedType = num_items_dop.diag_coded_type()?;
 
+        let param_abs_byte_pos = base_offset.saturating_add(param.byte_position() as usize);
         let (num_items_data, _bit_len) = num_items_diag_type.decode(
             uds_payload
                 .data()?
-                .get(param.byte_position() as usize..)
+                .get(param_abs_byte_pos..)
                 .ok_or(DiagServiceError::BadPayload(
                     "Not enough bytes to get DynamicLengthField item count".to_owned(),
                 ))?,
@@ -3891,6 +3939,7 @@ impl<S: SecurityPlugin> EcuManager<S> {
         Ok(())
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn map_mux_dop_from_uds(
         &self,
         mapped_service: &datatypes::DiagService,
@@ -3899,14 +3948,16 @@ impl<S: SecurityPlugin> EcuManager<S> {
         data: &mut MappedDiagServiceResponsePayload,
         short_name: String,
         mux_dop: &datatypes::MuxDop,
+        base_offset: usize,
     ) -> Result<(), DiagServiceError> {
-        let param_byte_pos = param.byte_position();
-        uds_payload.push_slice(param_byte_pos as usize, uds_payload.len())?;
+        let param_byte_pos = base_offset.saturating_add(param.byte_position() as usize);
+        uds_payload.push_slice(param_byte_pos, uds_payload.len())?;
         self.map_mux_from_uds(mapped_service, uds_payload, data, short_name, mux_dop)?;
         uds_payload.pop_slice()?;
         Ok(())
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn map_static_field_dop_from_uds(
         &self,
         mapped_service: &datatypes::DiagService,
@@ -3915,6 +3966,7 @@ impl<S: SecurityPlugin> EcuManager<S> {
         data: &mut MappedDiagServiceResponsePayload,
         short_name: String,
         static_field_dop: &datatypes::StaticFieldDop,
+        base_offset: usize,
     ) -> Result<(), DiagServiceError> {
         let static_field_size = static_field_dop
             .item_byte_size()
@@ -3932,10 +3984,9 @@ impl<S: SecurityPlugin> EcuManager<S> {
         let mut nested_structs = Vec::new();
 
         for i in 0..static_field_dop.fixed_number_of_items() {
-            let param_byte_pos = param.byte_position();
+            let param_byte_pos = base_offset.saturating_add(param.byte_position() as usize);
             let start = param_byte_pos
-                .saturating_add(i.saturating_mul(static_field_dop.item_byte_size()))
-                as usize;
+                .saturating_add(i.saturating_mul(static_field_dop.item_byte_size()) as usize);
             let end = start.saturating_add(static_field_dop.item_byte_size() as usize);
             uds_payload.push_slice(start, end)?;
 
@@ -3961,12 +4012,13 @@ impl<S: SecurityPlugin> EcuManager<S> {
         uds_payload: &mut Payload,
         data: &mut MappedDiagServiceResponsePayload,
         dtc_dop: &datatypes::DtcDop,
+        base_offset: usize,
     ) -> Result<(), DiagServiceError> {
         let coded_type: datatypes::DiagCodedType = dtc_dop.diag_coded_type()?;
 
         let (dtc_value, _size) = coded_type.decode(
             uds_payload.data()?,
-            param.byte_position() as usize,
+            base_offset.saturating_add(param.byte_position() as usize),
             param.bit_position() as usize,
         )?;
 
@@ -3997,6 +4049,7 @@ impl<S: SecurityPlugin> EcuManager<S> {
         Ok(())
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn map_structure_dop_from_uds(
         &self,
         mapped_service: &datatypes::DiagService,
@@ -4005,31 +4058,36 @@ impl<S: SecurityPlugin> EcuManager<S> {
         short_name: &str,
         structure_param: &datatypes::Parameter,
         structure_dop: &datatypes::StructureDop,
+        base_offset: usize,
     ) -> Result<(), DiagServiceError> {
         // Slice the payload for the structure
+        let structure_start = base_offset.saturating_add(structure_param.byte_position() as usize);
+
         if let Some(byte_size) = structure_dop.byte_size() {
-            let byte_size = byte_size as usize;
-            let start = structure_param.byte_position() as usize;
-            let end = start.checked_add(byte_size).ok_or_else(|| {
-                DiagServiceError::BadPayload("Overflow in end calculation".to_owned())
-            })?;
+            let end = structure_start
+                .checked_add(byte_size as usize)
+                .ok_or_else(|| {
+                    DiagServiceError::BadPayload("Overflow in end calculation".to_owned())
+                })?;
             if uds_payload.len() < end {
                 return Err(DiagServiceError::NotEnoughData {
                     expected: end,
                     actual: uds_payload.len(),
                 });
             }
-            uds_payload.push_slice(start, end)?;
         }
 
         if let Some(params) = structure_dop.params() {
             for param in params.iter().map(datatypes::Parameter) {
-                self.map_param_from_uds(mapped_service, &param, short_name, uds_payload, data)?;
+                self.map_param_from_uds(
+                    mapped_service,
+                    &param,
+                    short_name,
+                    uds_payload,
+                    data,
+                    structure_start,
+                )?;
             }
-        }
-        // Pop the slice after processing
-        if structure_dop.byte_size().is_some() {
-            uds_payload.pop_slice()?;
         }
         Ok(())
     }
@@ -4109,6 +4167,7 @@ impl<S: SecurityPlugin> EcuManager<S> {
         data: &mut MappedDiagServiceResponsePayload,
         short_name: String,
         normal_dop: &datatypes::NormalDop,
+        base_offset: usize,
     ) -> Result<(), DiagServiceError> {
         let diag_coded_type = normal_dop.diag_coded_type()?;
         let compu_method =
@@ -4120,7 +4179,7 @@ impl<S: SecurityPlugin> EcuManager<S> {
                 )))?;
 
         let byte_pos = if param.has_byte_position() {
-            param.byte_position() as usize
+            base_offset.saturating_add(param.byte_position() as usize)
         } else {
             uds_payload.last_read_byte_pos()
         };
