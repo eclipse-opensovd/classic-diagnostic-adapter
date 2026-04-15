@@ -43,6 +43,7 @@ services:
     volumes:
       - ./odx:/app/odx:ro
       - ./cda-test-config.toml:/app/cda-test-config.toml:ro
+      - ./flash_files:/app/flash:ro
     hostname: cda
     networks:
       - testcontainer-net

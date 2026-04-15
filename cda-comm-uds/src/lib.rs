@@ -1718,6 +1718,13 @@ impl<S: EcuGateway, R: DiagServiceResponse, T: EcuManager<Response = R>> UdsEcu
             length,
             transfer_meta_data,
         } = parameters;
+
+        if length == 0 {
+            return Err(DiagServiceError::InvalidRequest(
+                "Transfer length must be greater than 0".to_owned(),
+            ));
+        }
+
         // even if the data transfer job is done,
         // data_transfer_exit must be called before starting a new one
         if let Some(transfer) = self.data_transfers.lock().await.get(ecu_name) {

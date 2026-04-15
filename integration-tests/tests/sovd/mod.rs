@@ -30,6 +30,7 @@ use crate::util::{
 mod custom_routes;
 mod ecu;
 mod faults;
+mod flash_download;
 mod locks;
 
 pub(crate) const ECU_FLXC1000_ENDPOINT: &str = "components/flxc1000";
@@ -287,6 +288,24 @@ pub(crate) async fn delete_fault_with_scope(
     )
     .await?;
     Ok(())
+}
+
+/// Computes the security access key from a seed response.
+///
+/// The CDA returns the raw UDS response in the seed, including service ID and
+/// prefix bytes which must be skipped. The ECU simulator expects each seed byte
+/// to be incremented by 13 (wrapping), matching its Kotlin implementation.
+#[allow(clippy::cast_sign_loss)]
+#[allow(clippy::cast_possible_wrap)]
+pub(crate) fn compute_security_key(seed_response: &str) -> String {
+    seed_response
+        .split_whitespace()
+        .skip(3)
+        .filter_map(|s| u8::from_str_radix(s.trim_start_matches("0x"), 16).ok())
+        .map(|byte| byte.wrapping_add(13) as i8)
+        .map(|byte| format!("0x{:02x}", byte as u8))
+        .collect::<Vec<_>>()
+        .join(" ")
 }
 
 pub(crate) async fn get_ecu_component(
