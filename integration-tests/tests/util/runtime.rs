@@ -33,7 +33,7 @@ use opensovd_cda_lib::{
 use tokio::sync::{Mutex, MutexGuard, OnceCell};
 use tracing_subscriber::layer::SubscriberExt;
 
-use crate::util::TestingError;
+use crate::util::{TestingError, ecusim};
 
 static TEST_RUNTIME: OnceCell<TestRuntime> = OnceCell::const_new();
 
@@ -134,7 +134,7 @@ async fn initialize_runtime() -> Result<TestRuntime, TestingError> {
         },
         logging: LoggingConfig::default(),
         onboard_tester: true,
-        flash_files_path: String::default(),
+        flash_files_path: flash_files_path()?,
         com_params: ComParams::default(),
         flat_buf: FlatbBufConfig::default(),
         functional_description: FunctionalDescriptionConfig {
@@ -631,6 +631,31 @@ fn mdd_file_path() -> Result<String, TestingError> {
     }
 
     Ok(odx_path.to_string_lossy().to_string())
+}
+
+/// Returns the flash files path and ensures a test flash file exists for integration tests.
+/// In Docker mode the path points to the container mount (`/app/flash`),
+/// otherwise to `testcontainer/flash_files/` on the host.
+fn flash_files_path() -> Result<String, TestingError> {
+    let flash_dir = test_container_dir()?.join("flash_files");
+
+    let flash_file = flash_dir.join("test_flash.bin");
+    if !flash_file.exists() {
+        // Create a small test binary file (256 bytes of patterned data)
+        let data: Vec<u8> = (0..256).map(|i| (i & 0xFF) as u8).collect();
+        std::fs::write(&flash_file, &data).map_err(|e| {
+            TestingError::SetupError(format!(
+                "Failed to write flash test file '{}': {e}",
+                flash_file.display()
+            ))
+        })?;
+    }
+
+    if use_docker() {
+        Ok("/app/flash".to_owned())
+    } else {
+        Ok(flash_dir.to_string_lossy().to_string())
+    }
 }
 
 pub(crate) fn find_available_tcp_port(listen_address: &str) -> Result<u16, TestingError> {

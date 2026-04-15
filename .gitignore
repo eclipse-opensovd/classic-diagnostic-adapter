@@ -32,3 +32,6 @@ docs/images/*.svg
 cda-test-config.toml
 # mbedtls source directory
 mbedtls-4*
+
+# binary files (used in integration tests)
+*.bin

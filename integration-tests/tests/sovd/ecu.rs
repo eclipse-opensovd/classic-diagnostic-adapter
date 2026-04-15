@@ -19,7 +19,7 @@ use sovd_interfaces::components::ecu::modes::{self, dtcsetting};
 
 use crate::{
     sovd::{
-        self, get_ecu_component,
+        self, compute_security_key, get_ecu_component,
         locks::{self, create_lock, lock_operation},
         put_mode,
     },
@@ -234,26 +234,7 @@ async fn test_ecu_session_switching() {
     .await
     .unwrap();
 
-    // The CDA return the RAW response in the seed. this is the _complete_ uds frame
-    // including service id and prefix. Which has to be skipped for the key calculation.
-    // In the ecu sim it's hard coded that we have to add 13 to each byte of the seed.
-    // So we do that here to generate the correct key.
-    // The allowed clippy warnings are because we are intentionally doing wrapping arithmetic
-    // to match the kotlin implementation in the ecu sim.
-    #[allow(clippy::cast_sign_loss)]
-    #[allow(clippy::cast_possible_wrap)]
-    let key = seed_response
-        .seed
-        .request_seed
-        .split_whitespace()
-        // skip 3 because after prefix, sid, there is 1 byte which repeats the requested level
-        // this is not part of the seed
-        .skip(3)
-        .filter_map(|s| u8::from_str_radix(s.trim_start_matches("0x"), 16).ok())
-        .map(|byte| byte.wrapping_add(13) as i8)
-        .map(|byte| format!("0x{:02x}", byte as u8))
-        .collect::<Vec<_>>()
-        .join(" ");
+    let key = compute_security_key(&seed_response.seed.request_seed);
 
     send_key(
         "Level_5".to_owned(),

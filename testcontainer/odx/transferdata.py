@@ -134,7 +134,7 @@ def add_requestdownload_service(
         odx_id=derived_id(dlr, "DC.RequestDownload"),
         short_name="RequestDownload",
         semantic="DATA",
-        functional_class_refs=[functional_class_ref(dlr, "StandardDataTransfer")],
+        functional_class_refs=[functional_class_ref(dlr, "flash_download_upload")],
         request_ref=ref(requestdownload_request),
         pos_response_refs=[ref(requestdownload_response)],
     )
@@ -210,7 +210,7 @@ def add_transferdata_service(dlr: DiagLayerRaw):
     transferdata_service = DiagService(
         odx_id=derived_id(dlr, "DC.TransferData"),
         short_name="TransferData",
-        functional_class_refs=[functional_class_ref(dlr, "StandardDataTransfer")],
+        functional_class_refs=[functional_class_ref(dlr, "flash_download_upload")],
         request_ref=ref(transferdata_request),
         pos_response_refs=[ref(transferdata_response)],
     )
@@ -244,7 +244,7 @@ def add_transferexit(dlr: DiagLayerRaw):
     transferexit_service = DiagService(
         odx_id=derived_id(dlr, "DC.TransferExit"),
         short_name="TransferExit",
-        functional_class_refs=[functional_class_ref(dlr, "StandardDataTransfer")],
+        functional_class_refs=[functional_class_ref(dlr, "flash_download_upload")],
         request_ref=ref(transferexit_request),
         pos_response_refs=[ref(transferexit_response)],
     )

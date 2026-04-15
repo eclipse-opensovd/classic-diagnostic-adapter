@@ -78,7 +78,7 @@ def add_functional_classes(dlr: DiagLayerRaw):
         "EcuReset",
         "CommCtrl",
         "Ident",
-        "StandardDataTransfer",
+        "flash_download_upload",
         "SecurityAccess",
         "Authentication",
         "DtcSetting",
