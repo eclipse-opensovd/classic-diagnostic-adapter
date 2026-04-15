@@ -4361,15 +4361,15 @@ impl<S: SecurityPlugin> EcuManager<S> {
                 ))
             })?;
 
-        let service = self
-            .get_services_from_variant_and_parent_refs(|s| {
+        let find_service_for_state = |source_state: &str| {
+            self.get_services_from_variant_and_parent_refs(|s| {
                 s.diag_comm()
                     .and_then(|dc| dc.state_transition_refs())
                     .is_some_and(|st_refs| {
                         st_refs.iter().any(|st_ref| {
                             st_ref.state_transition().is_some_and(|st| {
                                 st.source_short_name_ref()
-                                    .is_some_and(|n| n.eq_ignore_ascii_case(current_state))
+                                    .is_some_and(|n| n.eq_ignore_ascii_case(source_state))
                                     && st
                                         .target_short_name_ref()
                                         .is_some_and(|n| n.eq_ignore_ascii_case(target_state))
@@ -4380,6 +4380,26 @@ impl<S: SecurityPlugin> EcuManager<S> {
             })
             .into_iter()
             .next()
+        };
+
+        // Try the current state first. If no matching service is found, fall back
+        // to the default state so that services reachable from the default are
+        // always available regardless of the actual ECU state.
+        let service = find_service_for_state(current_state)
+            .or_else(|| {
+                let default_state = self.default_state(semantic).ok()?;
+                if default_state.eq_ignore_ascii_case(current_state) {
+                    return None; // already tried this state
+                }
+                tracing::debug!(
+                    current_state,
+                    default_state = %default_state,
+                    target_state,
+                    semantic,
+                    "No service found for current state, falling back to default state"
+                );
+                find_service_for_state(&default_state)
+            })
             .ok_or_else(|| {
                 tracing::error!(
                     current_state,
@@ -4661,11 +4681,21 @@ impl<S: SecurityPlugin> EcuManager<S> {
                 allowed_session.insert(state);
             });
 
+        // Resolve the default states from the MDD state charts. When checking
+        // preconditions we also accept the default state as a valid "current" state,
+        // so that services whose preconditions include the default are always reachable
+        // regardless of the actual ECU state.
+        let default_session = self.default_state(semantics::SESSION)?.to_ascii_lowercase();
+        let default_security = self
+            .default_state(semantics::SECURITY)?
+            .to_ascii_lowercase();
+
         let validate_state = |required: &HashSet<String>,
                               current: &str,
+                              default: &str,
                               state_type: &str|
          -> Result<(), DiagServiceError> {
-            if required.is_empty() || required.contains(current) {
+            if required.is_empty() || required.contains(current) || required.contains(default) {
                 Ok(())
             } else {
                 Err(DiagServiceError::InvalidState(format!(
@@ -4676,8 +4706,13 @@ impl<S: SecurityPlugin> EcuManager<S> {
             }
         };
 
-        validate_state(&allowed_security, &ecu_security_level, "Security level")?;
-        validate_state(&allowed_session, &ecu_session, "Session")
+        validate_state(
+            &allowed_security,
+            &ecu_security_level,
+            &default_security,
+            "Security level",
+        )?;
+        validate_state(&allowed_session, &ecu_session, &default_session, "Session")
     }
 
     async fn set_variant(&mut self, variant: VariantData) -> Result<(), DiagServiceError> {
@@ -6221,8 +6256,28 @@ mod tests {
         (ecu_manager, dc, sid_response)
     }
 
-    /// Helper function to create an ECU manager with services that have state transition refs
-    fn create_ecu_manager_with_state_transitions() -> (
+    /// Whether the service's security `state_transition_ref` should use the
+    /// `Locked -> Extended` or `Extended -> Programming` transition.
+    #[derive(Copy, Clone)]
+    enum ServiceSecurityTransition {
+        /// Service references `LockedSecurity -> ExtendedSecurity`.
+        /// The default state (`LockedSecurity`) is also the transition source,
+        /// so it is always implicitly allowed.
+        LockedToExtended,
+        /// Service references `ExtendedSecurity -> ProgrammingSecurity`.
+        /// The default state (`LockedSecurity`) is NOT a transition source,
+        /// which means it can be rejected.
+        ExtendedToProgramming,
+    }
+
+    /// Helper function to create an ECU manager with services that have state transition refs.
+    ///
+    /// `security_transition` controls which security transition the service
+    /// references, which affects whether the default state ends up in the
+    /// allowed set.
+    fn create_ecu_manager_with_state_transitions(
+        security_transition: ServiceSecurityTransition,
+    ) -> (
         super::EcuManager<DefaultSecurityPluginData>,
         cda_interfaces::DiagComm,
     ) {
@@ -6277,7 +6332,7 @@ mod tests {
             Some(vec![locked_state, extended_state, programming_state]),
         );
 
-        // Create state chart for session (simple, no transitions needed for this test)
+        // Create state chart for session
         let session_state_chart = db_builder.create_state_chart(
             "Session",
             Some(semantics::SESSION),
@@ -6293,9 +6348,15 @@ mod tests {
             ]),
         );
 
+        // Choose which security transition the service references
+        let service_security_transition = match security_transition {
+            ServiceSecurityTransition::LockedToExtended => locked_to_extended_transition,
+            ServiceSecurityTransition::ExtendedToProgramming => extended_to_programming_transition,
+        };
+
         // Create state transition refs for the service
         let state_transition_ref =
-            db_builder.create_state_transition_ref(locked_to_extended_transition);
+            db_builder.create_state_transition_ref(service_security_transition);
         let session_transition_ref =
             db_builder.create_state_transition_ref(default_to_extended_session);
 
@@ -8078,7 +8139,8 @@ mod tests {
     #[tokio::test]
     async fn test_state_transition_source_allowed_as_valid_security_state() {
         // State transition source states are added to allowed_security states
-        let (ecu_manager, dc) = create_ecu_manager_with_state_transitions();
+        let (ecu_manager, dc) =
+            create_ecu_manager_with_state_transitions(ServiceSecurityTransition::LockedToExtended);
 
         // Set ECU to "Locked" state which is the SOURCE of the state transition
         // The service precondition requires "Programming"
@@ -8105,7 +8167,8 @@ mod tests {
 
     #[tokio::test]
     async fn test_state_precondition() {
-        let (ecu_manager, dc) = create_ecu_manager_with_state_transitions();
+        let (ecu_manager, dc) =
+            create_ecu_manager_with_state_transitions(ServiceSecurityTransition::LockedToExtended);
 
         // Set ECU to "Programming" which is in the precondition states
         {
@@ -8132,30 +8195,36 @@ mod tests {
 
     #[tokio::test]
     async fn test_invalid_security_state_rejected() {
-        // This test verifies that states that are
-        // neither in preconditions nor state transition sources are properly rejected
-        let (ecu_manager, dc) = create_ecu_manager_with_state_transitions();
+        // Use the shared fixture with ExtendedToProgramming so that the
+        // default state (LockedSecurity) is NOT a transition source and
+        // therefore not in the allowed set.
+        //
+        // Allowed security set = {ProgrammingSecurity, ExtendedSecurity}
+        //   (precondition + transition source)
+        // Default security = LockedSecurity  (NOT in the allowed set)
+        let (ecu_manager, dc) = create_ecu_manager_with_state_transitions(
+            ServiceSecurityTransition::ExtendedToProgramming,
+        );
 
-        // Set ECU to "Extended" which is:
-        // - NOT in the precondition states (only Programming is)
-        // - NOT the source of the state transition (Locked is the source)
-        // - It's the TARGET of the transition, but targets are not added to allowed states
+        // Set ECU security to "LockedSecurity" (the default) – the default is
+        // NOT in the allowed set, so neither the actual state nor the default
+        // check can pass and the service must be rejected.
         {
             let mut ecu_states = ecu_manager.ecu_service_states.write().await;
             ecu_states.insert(service_ids::SESSION_CONTROL, "DefaultSession".to_string());
-            ecu_states.insert(service_ids::SECURITY_ACCESS, "ExtendedSecurity".to_string());
+            ecu_states.insert(service_ids::SECURITY_ACCESS, "LockedSecurity".to_string());
         }
 
         let payload_data = UdsPayloadData::Raw(vec![service_ids::WRITE_DATA_BY_IDENTIFIER]);
 
-        // This should fail because Extended is neither in preconditions nor a transition source
         let result = ecu_manager
             .create_uds_payload(&dc, &skip_sec_plugin!(), Some(payload_data))
             .await;
 
         assert!(
             result.is_err(),
-            "Service should NOT be allowed from invalid security state"
+            "Service should NOT be allowed when neither current nor default security state is in \
+             the allowed set"
         );
     }
 

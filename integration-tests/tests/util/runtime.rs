@@ -82,6 +82,9 @@ pub(crate) async fn setup_integration_test<'a>(
         }
     };
 
+    // Make sure we have a clean state at the beginning of the test
+    ecusim::reset_sim(&runtime.ecu_sim).await?;
+
     if exclusive {
         // If exclusive access is requested, lock the dedicated mutex
         // and return the guard. The test must hold onto this guard.
@@ -642,7 +645,7 @@ fn flash_files_path() -> Result<String, TestingError> {
     let flash_file = flash_dir.join("test_flash.bin");
     if !flash_file.exists() {
         // Create a small test binary file (256 bytes of patterned data)
-        let data: Vec<u8> = (0..256).map(|i| (i & 0xFF) as u8).collect();
+        let data: Vec<u8> = (0u8..=255).collect();
         std::fs::write(&flash_file, &data).map_err(|e| {
             TestingError::SetupError(format!(
                 "Failed to write flash test file '{}': {e}",

@@ -34,12 +34,12 @@ use crate::{
 };
 
 /// Integration test for the full flash download sequence:
-/// RequestDownload (0x34) -> TransferData (0x36) -> TransferExit (0x37)
+/// `RequestDownload` (0x34) -> `TransferData` (0x36) -> `TransferExit` (0x37)
 ///
 /// Prerequisites enforced by the ECU simulator:
 /// - Variant must be BOOT
 /// - Session must be PROGRAMMING
-/// - SecurityAccess must be LEVEL_07
+/// - `SecurityAccess` must be `LEVEL_07`
 #[tokio::test]
 #[allow(clippy::too_many_lines)]
 async fn test_flash_download_transfer_sequence() {
@@ -201,7 +201,7 @@ async fn test_flash_download_transfer_sequence() {
         .to_owned();
     let file_size = flash_file
         .get("size")
-        .and_then(|v| v.as_u64())
+        .and_then(serde_json::Value::as_u64)
         .expect("Expected 'size' in flash file");
     assert!(
         file_size > 0,
@@ -304,7 +304,7 @@ async fn test_flash_download_transfer_sequence() {
             transfer_finished = true;
             let acknowledged = status_json
                 .get("acknowledgedBytes")
-                .and_then(|v| v.as_u64())
+                .and_then(serde_json::Value::as_u64)
                 .unwrap_or(0);
             assert!(
                 acknowledged > 0,
@@ -392,6 +392,7 @@ async fn test_flash_download_transfer_sequence() {
 /// Verify that attempting a flash transfer with length=0 is rejected with a bad request error.
 /// This guards against a zero-length transfer silently staying in "running" status forever.
 #[tokio::test]
+#[allow(clippy::too_many_lines)]
 async fn test_flash_transfer_zero_length_rejected() {
     let (runtime, _lock) = setup_integration_test(true).await.unwrap();
     let auth = auth_header(&runtime.config, None).await.unwrap();
