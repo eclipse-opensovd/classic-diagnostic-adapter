@@ -8,7 +8,6 @@
 # terms of the Apache License Version 2.0 which is available at
 # https://www.apache.org/licenses/LICENSE-2.0
 
-from collections.abc import Iterable
 from odxtools.compumethods.compucategory import CompuCategory
 from odxtools.compumethods.compuconst import CompuConst
 from odxtools.compumethods.compuinternaltophys import CompuInternalToPhys
@@ -31,6 +30,30 @@ from odxtools.response import Response, ResponseType
 from odxtools.nameditemlist import NamedItemList
 from odxtools.parameters.valueparameter import ValueParameter
 from odxtools.compumethods.compumethod import CompuMethod
+from odxtools.unit import Unit
+
+
+def find_unit_by_shortname(
+    container: DiagLayerRaw | DiagLayerContainer, shortname: str
+) -> Unit:
+    if isinstance(container, DiagLayerRaw):
+        unit_spec = container.diag_data_dictionary_spec.unit_spec
+        if unit_spec is not None:
+            for unit in unit_spec.units:
+                if unit.short_name == shortname:
+                    return unit
+
+    if isinstance(container, DiagLayerContainer):
+        for base_variant in container.base_variants.values():
+            res = find_unit_by_shortname(base_variant.base_variant_raw, shortname)
+            if res is not None:
+                return res
+        for ecu_variant in container.ecu_variants.values():
+            res = find_unit_by_shortname(ecu_variant.ecu_variant_raw, shortname)
+            if res is not None:
+                return res
+
+    raise ValueError(f"Could not find unit {shortname}")
 
 
 def find_state_transition(
@@ -351,12 +374,3 @@ def negative_response(
         ),
         response_type=ResponseType.NEGATIVE,
     )
-
-
-def named_item_list_from_parts(
-    parts: Iterable[NamedItemList],
-) -> NamedItemList:
-    result = NamedItemList()
-    for part in parts:
-        result.extend(part)
-    return result

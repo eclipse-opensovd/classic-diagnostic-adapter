@@ -31,7 +31,6 @@ from helper import (
     find_dop_by_shortname,
     find_dtc_dop,
     matching_request_parameter,
-    named_item_list_from_parts,
     sid_parameter_rq,
     sid_parameter_pr,
     derived_id,
@@ -131,64 +130,66 @@ def add_dtc_setting_services(dlr: DiagLayerRaw):
 
 
 def dtc_status_parameters(dlr: DiagLayerRaw, byte_position: int) -> NamedItemList:
-    return [
-        ValueParameter(
-            short_name="testFailed",
-            semantic="DATA",
-            byte_position=byte_position,
-            bit_position=0,
-            dop_ref=ref(find_dop_by_shortname(dlr, "TrueFalseDop")),
-        ),
-        ValueParameter(
-            short_name="testFailedThisOperationCycle",
-            semantic="DATA",
-            byte_position=byte_position,
-            bit_position=1,
-            dop_ref=ref(find_dop_by_shortname(dlr, "TrueFalseDop")),
-        ),
-        ValueParameter(
-            short_name="pendingDTC",
-            semantic="DATA",
-            byte_position=byte_position,
-            bit_position=2,
-            dop_ref=ref(find_dop_by_shortname(dlr, "TrueFalseDop")),
-        ),
-        ValueParameter(
-            short_name="confirmedDTC",
-            semantic="DATA",
-            byte_position=byte_position,
-            bit_position=3,
-            dop_ref=ref(find_dop_by_shortname(dlr, "TrueFalseDop")),
-        ),
-        ValueParameter(
-            short_name="testNotCompletedSinceLastClear",
-            semantic="DATA",
-            byte_position=byte_position,
-            bit_position=4,
-            dop_ref=ref(find_dop_by_shortname(dlr, "TrueFalseDop")),
-        ),
-        ValueParameter(
-            short_name="testFailedSinceLastClear",
-            semantic="DATA",
-            byte_position=byte_position,
-            bit_position=5,
-            dop_ref=ref(find_dop_by_shortname(dlr, "TrueFalseDop")),
-        ),
-        ValueParameter(
-            short_name="testNotCompletedThisOperationCycle",
-            semantic="DATA",
-            byte_position=byte_position,
-            bit_position=6,
-            dop_ref=ref(find_dop_by_shortname(dlr, "TrueFalseDop")),
-        ),
-        ValueParameter(
-            short_name="warningIndicatorRequested",
-            semantic="DATA",
-            byte_position=byte_position,
-            bit_position=7,
-            dop_ref=ref(find_dop_by_shortname(dlr, "TrueFalseDop")),
-        ),
-    ]
+    return NamedItemList(
+        [
+            ValueParameter(
+                short_name="testFailed",
+                semantic="DATA",
+                byte_position=byte_position,
+                bit_position=0,
+                dop_ref=ref(find_dop_by_shortname(dlr, "TrueFalseDop")),
+            ),
+            ValueParameter(
+                short_name="testFailedThisOperationCycle",
+                semantic="DATA",
+                byte_position=byte_position,
+                bit_position=1,
+                dop_ref=ref(find_dop_by_shortname(dlr, "TrueFalseDop")),
+            ),
+            ValueParameter(
+                short_name="pendingDTC",
+                semantic="DATA",
+                byte_position=byte_position,
+                bit_position=2,
+                dop_ref=ref(find_dop_by_shortname(dlr, "TrueFalseDop")),
+            ),
+            ValueParameter(
+                short_name="confirmedDTC",
+                semantic="DATA",
+                byte_position=byte_position,
+                bit_position=3,
+                dop_ref=ref(find_dop_by_shortname(dlr, "TrueFalseDop")),
+            ),
+            ValueParameter(
+                short_name="testNotCompletedSinceLastClear",
+                semantic="DATA",
+                byte_position=byte_position,
+                bit_position=4,
+                dop_ref=ref(find_dop_by_shortname(dlr, "TrueFalseDop")),
+            ),
+            ValueParameter(
+                short_name="testFailedSinceLastClear",
+                semantic="DATA",
+                byte_position=byte_position,
+                bit_position=5,
+                dop_ref=ref(find_dop_by_shortname(dlr, "TrueFalseDop")),
+            ),
+            ValueParameter(
+                short_name="testNotCompletedThisOperationCycle",
+                semantic="DATA",
+                byte_position=byte_position,
+                bit_position=6,
+                dop_ref=ref(find_dop_by_shortname(dlr, "TrueFalseDop")),
+            ),
+            ValueParameter(
+                short_name="warningIndicatorRequested",
+                semantic="DATA",
+                byte_position=byte_position,
+                bit_position=7,
+                dop_ref=ref(find_dop_by_shortname(dlr, "TrueFalseDop")),
+            ),
+        ]
+    )
 
 
 def add_dtc_read_by_mask_service(
@@ -211,14 +212,12 @@ def add_dtc_read_by_mask_service(
     request = Request(
         odx_id=derived_id(dlr, f"RQ.RQ_{name}"),
         short_name=f"RQ_{name}",
-        parameters=named_item_list_from_parts(
+        parameters=NamedItemList(
             [
-                [
-                    sid_parameter_rq(0x19),
-                    subfunction_rq(subfunction, "SubFunction"),
-                ],
-                dtc_status_parameters(dlr, 2),
+                sid_parameter_rq(0x19),
+                subfunction_rq(subfunction, "SubFunction"),
             ]
+            + dtc_status_parameters(dlr, 2),
         ),
     )
     dlr.requests.append(request)
@@ -227,21 +226,19 @@ def add_dtc_read_by_mask_service(
         response_type=ResponseType.POSITIVE,
         odx_id=derived_id(dlr, f"PR.PR_{name}"),
         short_name=f"PR_{name}",
-        parameters=named_item_list_from_parts(
+        parameters=NamedItemList(
             [
-                [
-                    sid_parameter_pr(0x19 + 0x40),
-                    matching_request_parameter_subfunction("SubFunction"),
-                ],
-                dtc_status_parameters(dlr, 2),
-                [
-                    ValueParameter(
-                        short_name="DTCAndStatusRecord",
-                        semantic="DATA",
-                        byte_position=3,
-                        dop_ref=dtc_record_dop,
-                    )
-                ],
+                sid_parameter_pr(0x19 + 0x40),
+                matching_request_parameter_subfunction("SubFunction"),
+            ]
+            + dtc_status_parameters(dlr, 2)
+            + [
+                ValueParameter(
+                    short_name="DTCAndStatusRecord",
+                    semantic="DATA",
+                    byte_position=3,
+                    dop_ref=dtc_record_dop,
+                )
             ]
         ),
     )
@@ -383,7 +380,7 @@ def add_dtc_read_services(dlr: DiagLayerRaw):
             DiagnosticTroubleCode(
                 odx_id=derived_id(dlr, "DTC.Code1"),
                 short_name="Code1",
-                trouble_code="123456",  # 0x01E240
+                trouble_code=0x01E240,  # 123456
                 text=Text(
                     text="DTC Code 1",
                 ),
@@ -391,7 +388,7 @@ def add_dtc_read_services(dlr: DiagLayerRaw):
             DiagnosticTroubleCode(
                 odx_id=derived_id(dlr, "DTC.Code2"),
                 short_name="Code2",
-                trouble_code="234567",  # 0x039447
+                trouble_code=0x039447,  # 234567
                 text=Text(
                     text="DTC Code 2",
                 ),
@@ -399,7 +396,7 @@ def add_dtc_read_services(dlr: DiagLayerRaw):
             DiagnosticTroubleCode(
                 odx_id=derived_id(dlr, "DTC.Code3"),
                 short_name="Code3",
-                trouble_code="123457",  # 0x01E241
+                trouble_code=0x01E241,  # 123457
                 text=Text(
                     text="DTC Code 3",
                 ),
@@ -407,7 +404,7 @@ def add_dtc_read_services(dlr: DiagLayerRaw):
             DiagnosticTroubleCode(
                 odx_id=derived_id(dlr, "DTC.Code4"),
                 short_name="Code4",
-                trouble_code="123458",  # 0x01E242
+                trouble_code=0x01E242,  # 123458
                 text=Text(
                     text="DTC Code 4",
                 ),
@@ -415,7 +412,7 @@ def add_dtc_read_services(dlr: DiagLayerRaw):
             DiagnosticTroubleCode(
                 odx_id=derived_id(dlr, "DTC.Code5"),
                 short_name="Code5",
-                trouble_code="123459",  # 0x01E243
+                trouble_code=0x01E243,  # 123459
                 text=Text(
                     text="DTC Code 5",
                 ),
@@ -423,7 +420,7 @@ def add_dtc_read_services(dlr: DiagLayerRaw):
             DiagnosticTroubleCode(
                 odx_id=derived_id(dlr, "DTC.Code6"),
                 short_name="Code6",
-                trouble_code="123460",  # 0x01E244
+                trouble_code=0x01E244,  # 123460
                 text=Text(
                     text="DTC Code 6",
                 ),
@@ -436,18 +433,16 @@ def add_dtc_read_services(dlr: DiagLayerRaw):
     dtc_record_structure = Structure(
         odx_id=derived_id(dlr, "STRUCT.DTCRecord"),
         short_name="DTCRecord",
-        parameters=named_item_list_from_parts(
+        parameters=NamedItemList(
             [
-                [
-                    ValueParameter(
-                        short_name="DTCRecord",
-                        semantic="DATA",
-                        byte_position=0,
-                        dop_ref=ref(dtc_dop.odx_id),
-                    ),
-                ],
-                dtc_status_parameters(dlr, 3),
+                ValueParameter(
+                    short_name="DTCRecord",
+                    semantic="DATA",
+                    byte_position=0,
+                    dop_ref=ref(dtc_dop.odx_id),
+                ),
             ]
+            + dtc_status_parameters(dlr, 3),
         ),
     )
     dlr.diag_data_dictionary_spec.structures.append(dtc_record_structure)
@@ -525,12 +520,10 @@ def add_dtc_clear_services(dlr: DiagLayerRaw):
         response_type=ResponseType.POSITIVE,
         odx_id=derived_id(dlr, f"PR.PR_{name}"),
         short_name=f"PR_{name}",
-        parameters=named_item_list_from_parts(
+        parameters=NamedItemList(
             [
-                [
-                    sid_parameter_pr(0x14 + 0x40),
-                ],
-            ]
+                sid_parameter_pr(0x14 + 0x40),
+            ],
         ),
     )
     dlr.positive_responses.append(response)

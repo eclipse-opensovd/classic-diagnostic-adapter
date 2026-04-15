@@ -37,13 +37,19 @@ from metadata import (
 )
 from reset import add_reset_services
 from security_access import add_security_access_services
-from shared import add_common_datatypes, add_state_charts, add_common_diag_comms
+from shared import (
+    add_common_datatypes,
+    add_state_charts,
+    add_common_diag_comms,
+    add_power_consumption_service,
+)
 from dtc_services import (
     add_dtc_clear_services,
     add_dtc_clear_user_memory_service,
     add_dtc_read_services,
     add_dtc_setting_services,
 )
+from shared_units import add_common_units
 from transferdata import add_transfer_services
 from typing import List, Tuple
 
@@ -155,6 +161,7 @@ def add_base_variant(
     )
 
     add_functional_classes(base_variant)
+    add_common_units(base_variant)
     add_common_datatypes(base_variant)
     add_state_charts(base_variant)
 
@@ -176,6 +183,10 @@ def add_base_variant(
     add_dtc_clear_services(base_variant)
     # 31 01 42 00 - Clear User-Defined DTC Memory
     add_dtc_clear_user_memory_service(base_variant)
+
+    # FLXC1000-specific services
+    if ecu_name == "FLXC1000":
+        add_power_consumption_service(base_variant)
 
     dlc.base_variants.append(BaseVariant(diag_layer_raw=base_variant))
 

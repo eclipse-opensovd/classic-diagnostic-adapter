@@ -14,6 +14,7 @@ package ecu
 
 import RequestsData
 import library.decodeHex
+import library.toByteArray
 import utils.combine
 import java.text.SimpleDateFormat
 import java.time.ZoneOffset
@@ -196,6 +197,10 @@ fun RequestsData.addDiagnosticRequests() {
 
     request("22 F1 9F", name = "EntityDataIdentifier_Read") {
         nrc(NrcError.RequestOutOfRange)
+    }
+
+    request("22 F2 00", name = "FluxCapacitorPowerConsumption_Read") {
+        ack(10.toByteArray())
     }
 
     request("22 FF 00", name = "UDSVersionDataIdentifier_Read") {
