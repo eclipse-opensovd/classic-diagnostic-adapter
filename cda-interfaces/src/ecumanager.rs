@@ -33,15 +33,69 @@ pub struct ServiceParameterMetadata {
     pub param_type: ParameterTypeMetadata,
 }
 
+/// Metadata for a POS-RESPONSE parameter, including byte layout information
+/// needed for encoding response payloads.
+#[derive(Debug, Clone, Serialize)]
+pub struct ResponseParameterInfo {
+    /// Parameter short name
+    pub name: String,
+    /// Parameter semantic (e.g., "DATA", "SERVICEIDRQ", "DATA-IDENTIFIER")
+    pub semantic: Option<String>,
+    /// Parameter type and constant value
+    pub param_type: ParameterTypeMetadata,
+    /// Byte offset in the response payload (0-based)
+    pub byte_position: u32,
+    /// Bit offset within the byte (0-based)
+    pub bit_position: u32,
+    /// Fixed byte size for `StandardLength` parameters, `None` for variable-length
+    pub byte_size: Option<u32>,
+}
+
+/// Information about a single scale in a DOP `CompuMethod`.
+///
+/// For TEXTTABLE DOPs the lower/upper limits define the coded (internal)
+/// value range that maps to the label in `compu_const_vt`.
+#[derive(Debug, Clone, Serialize)]
+pub struct CompuScaleInfo {
+    /// Short label for this scale
+    pub short_label: Option<String>,
+    /// Lower coded limit (closed bound)
+    pub lower_limit: Option<u64>,
+    /// Upper coded limit (closed bound); equals `lower_limit` for single-value scales.
+    pub upper_limit: Option<u64>,
+    /// COMPU-CONST textual value (VT or VT-TI)
+    pub compu_const_vt: Option<String>,
+}
+
 /// Parameter type with constant value metadata
 #[derive(Debug, Clone, Serialize)]
 pub enum ParameterTypeMetadata {
     /// CODED-CONST parameter with fixed value from MDD
     CodedConst { coded_value: String },
-    /// PHYS-CONST parameter with constant value from MDD
-    PhysConst { phys_constant_value: String },
-    /// VALUE or other dynamic parameter types
-    Value,
+    /// PHYS-CONST parameter with constant value from MDD.
+    /// If the DOP uses a TEXTTABLE `CompuMethod`, `coded_value` contains
+    /// the numeric (internal/coded) value resolved from the text table.
+    PhysConst {
+        phys_constant_value: String,
+        coded_value: Option<u64>,
+    },
+    /// MATCHING-REQUEST-PARAM: value copied from the corresponding request parameter.
+    /// `byte_length` is the number of bytes to copy from the request.
+    MatchingRequestParam { byte_length: u32 },
+    /// VALUE or other dynamic parameter types.
+    ///
+    /// When the DOP is available, `physical_default_value` carries the ODX
+    /// default, `coded_default_value` is its resolved coded equivalent, and
+    /// `compu_scales` lists the TEXTTABLE / LINEAR scales from the DOP
+    /// `CompuMethod` (empty for IDENTICAL DOPs).
+    Value {
+        /// ODX `PHYSICAL-DEFAULT-VALUE` (textual)
+        physical_default_value: Option<String>,
+        /// Coded (internal) form of the default value, resolved via the DOP
+        coded_default_value: Option<u64>,
+        /// Scales from the DOP `CompuMethod` (TEXTTABLE entries with limits)
+        compu_scales: Vec<CompuScaleInfo>,
+    },
 }
 
 /// MUX case information for service response routing
@@ -386,10 +440,18 @@ pub trait EcuManager:
     /// This is useful for discovering which DIDs are handled by which services.
     /// # Errors
     /// Will return `Err` if the service cannot be found or parameter metadata cannot be extracted.
-    fn get_service_parameter_metadata(
+    fn get_request_parameter_metadata(
         &self,
         service_name: &str,
     ) -> Result<Vec<ServiceParameterMetadata>, DiagServiceError>;
+    /// Get parameter metadata for the POS-RESPONSE of a service.
+    /// Includes byte layout and type information for response payload construction.
+    /// # Errors
+    /// Will return `Err` if the service cannot be found or metadata cannot be extracted.
+    fn get_response_parameter_metadata(
+        &self,
+        service_name: &str,
+    ) -> Result<Vec<ResponseParameterInfo>, DiagServiceError>;
     /// Get MUX case information for services using multiplexed responses
     /// (e.g., `ReadDataByIdentifier` with different DIDs).
     /// The MUX cases contain the actual DID values in their `lower_limit/upper_limit` fields.

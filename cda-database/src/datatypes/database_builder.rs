@@ -722,6 +722,44 @@ impl<'a> EcuDataBuilder<'a> {
         })
     }
 
+    /// Like [`create_value_param`] but populates `PHYSICAL-DEFAULT-VALUE`.
+    ///
+    /// `PHYSICAL-DEFAULT-VALUE` is a free-text string in the physical
+    /// domain, e.g. `"service_XX_HO"` for a testerServiceIdentifier parameter
+    /// (PARAM xsi:type="VALUE").
+    pub fn create_value_param_with_default(
+        &mut self,
+        name: &'a str,
+        dop: WIPOffset<dataformat::DOP>,
+        byte_pos: u32,
+        bit_pos: u32,
+        physical_default_value: Option<&'a str>,
+    ) -> WIPOffset<dataformat::Param<'a>> {
+        let pdv_offset = physical_default_value.map(|v| self.fbb.create_string(v));
+        let specific_data = Some(
+            dataformat::ParamSpecificData::tag_as_value(dataformat::Value::create(
+                &mut self.fbb,
+                &dataformat::ValueArgs {
+                    physical_default_value: pdv_offset,
+                    dop: Some(dop),
+                },
+            ))
+            .value_offset(),
+        );
+
+        self.create_param(&ParameterParams {
+            param_type: dataformat::ParamType::VALUE,
+            short_name: Some(name),
+            semantic: None,
+            sdgs: None,
+            physical_default_value: None,
+            byte_position: Some(byte_pos),
+            bit_position: Some(bit_pos),
+            specific_data_type: dataformat::ParamSpecificData::Value,
+            specific_data,
+        })
+    }
+
     /// Creates a VALUE param whose BYTE-POSITION is omitted (`None`).
     ///
     /// Per ISO 22901-1 §7.4.8 a parameter that follows a
@@ -1187,6 +1225,79 @@ impl<'a> EcuDataBuilder<'a> {
         };
 
         dataformat::CompuMethod::create(&mut self.fbb, &compu_method_args)
+    }
+
+    /// Build a `TEXTTABLE` `CompuMethod` from a slice of scale entries.
+    ///
+    /// Each entry is `(vt, coded_value, lower_interval, upper_interval)` where:
+    /// - `vt` - the physical text label (`COMPU-CONST/VT` in ODX)
+    /// - `coded_value` - the integer coded value stored in both `LOWER-LIMIT`
+    ///   and `UPPER-LIMIT` (point-value scale)
+    /// - `lower_interval` / `upper_interval` - interval type for the respective
+    ///   limit; use `Closed`/`Closed` for an exact point, `Open` to represent a
+    ///   genuine range so that `resolve_phys_const_coded_value` will skip it
+    ///
+    /// The resulting `CompuMethod` mirrors the ODX `CATEGORY="TEXTTABLE"` structure
+    /// used for enumeration-style DOPs (e.g. state parameters, mode identifiers).
+    pub fn create_text_table_compu_method(
+        &mut self,
+        entries: &[(&str, u64, IntervalType, IntervalType)],
+    ) -> WIPOffset<dataformat::CompuMethod<'a>> {
+        let scales: Vec<_> = entries
+            .iter()
+            .map(|(vt, coded, lower_interval, upper_interval)| {
+                let vt_str = self.fbb.create_string(vt);
+                let consts = dataformat::CompuValues::create(
+                    &mut self.fbb,
+                    &dataformat::CompuValuesArgs {
+                        vt: Some(vt_str),
+                        ..Default::default()
+                    },
+                );
+                let coded_str = self.fbb.create_string(&coded.to_string());
+                let lower = dataformat::Limit::create(
+                    &mut self.fbb,
+                    &dataformat::LimitArgs {
+                        value: Some(coded_str),
+                        interval_type: match lower_interval {
+                            IntervalType::Open => dataformat::IntervalType::OPEN,
+                            IntervalType::Closed => dataformat::IntervalType::CLOSED,
+                            IntervalType::Infinite => dataformat::IntervalType::INFINITE,
+                        },
+                    },
+                );
+                let coded_str2 = self.fbb.create_string(&coded.to_string());
+                let upper = dataformat::Limit::create(
+                    &mut self.fbb,
+                    &dataformat::LimitArgs {
+                        value: Some(coded_str2),
+                        interval_type: match upper_interval {
+                            IntervalType::Open => dataformat::IntervalType::OPEN,
+                            IntervalType::Closed => dataformat::IntervalType::CLOSED,
+                            IntervalType::Infinite => dataformat::IntervalType::INFINITE,
+                        },
+                    },
+                );
+                dataformat::CompuScale::create(
+                    &mut self.fbb,
+                    &dataformat::CompuScaleArgs {
+                        consts: Some(consts),
+                        lower_limit: Some(lower),
+                        upper_limit: Some(upper),
+                        ..Default::default()
+                    },
+                )
+            })
+            .collect();
+        let scales_vec = self.fbb.create_vector(&scales);
+        let itp = dataformat::CompuInternalToPhys::create(
+            &mut self.fbb,
+            &dataformat::CompuInternalToPhysArgs {
+                compu_scales: Some(scales_vec),
+                ..Default::default()
+            },
+        );
+        self.create_compu_method(CompuCategory::TextTable, Some(itp), None)
     }
 
     pub fn create_case(
