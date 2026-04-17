@@ -10,13 +10,13 @@
  * https://www.apache.org/licenses/LICENSE-2.0
  */
 
-use super::{DataError, Deserialize, HashMap, Serialize};
+use super::{DataError, HashMap, Serialize};
 
 pub mod service {
-    use super::{DataError, Deserialize, HashMap, Serialize};
+    use serde::Deserialize;
 
-    /// Query parameters for POST operation service requests
-    pub type Query = crate::IncludeSchemaQuery;
+    use super::{DataError, HashMap, Serialize};
+    pub use crate::common::operations::OperationQuery as Query;
 
     /// Request payload for functional group operations
     #[derive(Deserialize, schemars::JsonSchema)]
@@ -49,3 +49,5 @@ pub mod service {
 pub mod get {
     pub type Query = crate::IncludeSchemaQuery;
 }
+
+pub use crate::common::operations::OperationCollectionItem;

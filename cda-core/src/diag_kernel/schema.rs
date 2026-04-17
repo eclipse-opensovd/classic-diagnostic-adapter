@@ -22,7 +22,7 @@ impl<S: SecurityPlugin> EcuSchemaProvider for EcuManager<S> {
         &self,
         service: &cda_interfaces::DiagComm,
     ) -> Result<SchemaDescription, DiagServiceError> {
-        let mapped_service = self.lookup_diag_service(service).await?;
+        let mapped_service = self.lookup_diag_service(service, None, None).await?;
         let ctx = service_context(service, &mapped_service);
 
         let request = mapped_service.request().map(datatypes::Request).ok_or(
@@ -41,7 +41,7 @@ impl<S: SecurityPlugin> EcuSchemaProvider for EcuManager<S> {
         &self,
         service: &cda_interfaces::DiagComm,
     ) -> Result<SchemaDescription, DiagServiceError> {
-        let mapped_service = self.lookup_diag_service(service).await?;
+        let mapped_service = self.lookup_diag_service(service, None, None).await?;
         let request = mapped_service
             .request()
             .ok_or(DiagServiceError::InvalidDatabase(format!(

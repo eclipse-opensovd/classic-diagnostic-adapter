@@ -55,6 +55,7 @@ data class EcuState(
     var vin: String = System.getenv("OVERRIDE_VIN") ?: "SCEDT26T8BD005261",
     var hardResetForSeconds: Int = 0,
     var maxNumberOfBlockLength: Int = 65535,
+    var runningCalibration: Boolean = false,
 )
 
 @Serializable

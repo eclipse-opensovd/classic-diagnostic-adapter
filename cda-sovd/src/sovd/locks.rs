@@ -891,6 +891,60 @@ pub(crate) async fn validate_lock(
     None
 }
 
+/// Validate that the caller holds a lock on the given **functional group** (or the vehicle lock).
+///
+/// This is the FG-specific counterpart to [`validate_lock`] which checks `locks.ecu`.
+/// It inspects `locks.functional_group` for a lock keyed by `functional_group_name`, and
+/// also accepts a vehicle-level lock owned by the same caller.
+pub(crate) async fn validate_fg_lock(
+    claims: &impl Claims,
+    functional_group_name: &str,
+    locks: &Locks,
+    include_schema: bool,
+) -> Option<Response> {
+    let fg_lock = locks.functional_group.lock_ro().await;
+    let fg_locks = get_locks(claims, &fg_lock, Some(functional_group_name));
+
+    let vehicle_lock = locks.vehicle.lock_ro().await;
+    let vehicle_locks = get_locks(claims, &vehicle_lock, None);
+
+    if fg_locks.items.is_empty() && vehicle_locks.items.is_empty() {
+        return Some(
+            ErrorWrapper {
+                error: ApiError::Forbidden(Some(
+                    "Required functional group lock is missing".to_owned(),
+                )),
+                include_schema,
+            }
+            .into_response(),
+        );
+    }
+
+    // Validate vehicle lock is owned by the caller (if one exists)
+    if let Err(e) = all_locks_owned(&vehicle_lock, claims) {
+        return Some(
+            ErrorWrapper {
+                error: e,
+                include_schema,
+            }
+            .into_response(),
+        );
+    }
+
+    // Validate functional group lock is owned by the caller
+    if let Err(e) = all_locks_owned(&fg_lock, claims) {
+        return Some(
+            ErrorWrapper {
+                error: e,
+                include_schema,
+            }
+            .into_response(),
+        );
+    }
+
+    None
+}
+
 pub(crate) async fn delete_lock(
     lock: &LockType,
     lock_id: &str,
@@ -1232,6 +1286,65 @@ impl Lock {
             id: self.sovd.id.clone(),
             owned: Some(claims.sub() == self.owner),
         }
+    }
+}
+
+/// Test helper: insert a pre-populated ECU lock owned by the test user into `locks`.
+///
+/// This avoids the need to mock `TesterPresent` calls when unit-testing handlers that
+/// require a valid lock (e.g. the `delete` operations handler).
+#[cfg(test)]
+pub(crate) async fn insert_test_ecu_lock(locks: &Locks, ecu_name: &str) {
+    use chrono::TimeDelta;
+
+    let deletion_task = tokio::spawn(async {});
+    let lock = Lock::new(
+        sovd_interfaces::locking::Lock {
+            id: "test-lock-id".to_string(),
+            owned: None,
+        },
+        chrono::Utc::now()
+            .checked_add_signed(TimeDelta::seconds(3600))
+            .unwrap(),
+        "test_user".to_string(),
+        deletion_task,
+        LockCleanupFnHelper::new(|| async {}),
+    );
+    match &locks.ecu {
+        LockType::Ecu(map) => {
+            map.write().await.insert(ecu_name.to_string(), Some(lock));
+        }
+        _ => panic!("insert_test_ecu_lock: expected LockType::Ecu"),
+    }
+}
+
+/// Test helper: insert a pre-populated functional group lock owned by the test user into `locks`.
+///
+/// Mirrors [`insert_test_ecu_lock`] but targets `locks.functional_group`.
+#[cfg(test)]
+pub(crate) async fn insert_test_fg_lock(locks: &Locks, functional_group_name: &str) {
+    use chrono::TimeDelta;
+
+    let deletion_task = tokio::spawn(async {});
+    let lock = Lock::new(
+        sovd_interfaces::locking::Lock {
+            id: "test-fg-lock-id".to_string(),
+            owned: None,
+        },
+        chrono::Utc::now()
+            .checked_add_signed(TimeDelta::seconds(3600))
+            .unwrap(),
+        "test_user".to_string(),
+        deletion_task,
+        LockCleanupFnHelper::new(|| async {}),
+    );
+    match &locks.functional_group {
+        LockType::FunctionalGroup(map) => {
+            map.write()
+                .await
+                .insert(functional_group_name.to_string(), Some(lock));
+        }
+        _ => panic!("insert_test_fg_lock: expected LockType::FunctionalGroup"),
     }
 }
 

@@ -32,6 +32,7 @@ mod ecu;
 mod faults;
 mod flash_download;
 mod locks;
+mod operations;
 
 pub(crate) const ECU_FLXC1000_ENDPOINT: &str = "components/flxc1000";
 pub(crate) const ECU_FLXCNG1000_ENDPOINT: &str = "components/flxcng1000";

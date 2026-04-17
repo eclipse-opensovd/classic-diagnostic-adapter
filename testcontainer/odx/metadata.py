@@ -83,6 +83,7 @@ def add_functional_classes(dlr: DiagLayerRaw):
         "Authentication",
         "DtcSetting",
         "FaultMem",
+        "Operations",
     ]
     dlr.functional_classes = NamedItemList(
         [

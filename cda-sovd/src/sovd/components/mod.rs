@@ -10,67 +10,11 @@
  * https://www.apache.org/licenses/LICENSE-2.0
  */
 
-use cda_interfaces::diagservices::FieldParseError;
-use sovd_interfaces::error::DataError;
-
-use crate::sovd::{
-    IntoSovd,
-    error::{ApiError, VendorErrorCode},
-};
+use crate::sovd::error::ApiError;
 
 pub(crate) mod ecu;
 
 crate::openapi::aide_helper::gen_path_param!(IdPathParam id String);
-
-/// Wrapper Struct around [`FieldParseError`] to allow implementing
-/// [From] for [`DataError`<VendorErrorCode>]
-struct FieldParseErrorWrapper(FieldParseError);
-impl From<FieldParseErrorWrapper> for DataError<VendorErrorCode> {
-    fn from(value: FieldParseErrorWrapper) -> Self {
-        let value: FieldParseError = value.0;
-        Self {
-            path: value.path,
-            error: sovd_interfaces::error::ApiErrorResponse {
-                message: "Failed to parse parameter".to_owned(),
-                error_code: sovd_interfaces::error::ErrorCode::VendorSpecific,
-                vendor_code: Some(VendorErrorCode::ErrorInterpretingMessage),
-                parameters: Some(
-                    [
-                        ("details", value.error.details),
-                        ("value", value.error.value),
-                    ]
-                    .into_iter()
-                    .map(|(k, v)| (k.to_string(), serde_json::Value::String(v)))
-                    .collect(),
-                ),
-                error_source: None,
-                schema: None,
-            },
-        }
-    }
-}
-
-fn field_parse_errors_to_json(
-    errors: impl IntoIterator<Item = FieldParseError>,
-    data_field_ref: &str,
-) -> Vec<DataError<VendorErrorCode>> {
-    errors
-        .into_iter()
-        .map(|v| {
-            let mut data_error = DataError::from(FieldParseErrorWrapper(v));
-            data_error.path = format!("/{data_field_ref}{}", data_error.path);
-            data_error
-        })
-        .collect()
-}
-
-impl IntoSovd for FieldParseError {
-    type SovdType = DataError<VendorErrorCode>;
-
-    fn into_sovd(self) -> Self::SovdType {
-        FieldParseErrorWrapper(self).into()
-    }
-}
 
 pub(crate) fn get_content_type_and_accept(
     headers: &http::HeaderMap,
