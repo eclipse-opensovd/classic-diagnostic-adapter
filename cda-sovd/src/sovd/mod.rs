@@ -40,6 +40,7 @@ use http::{Uri, header};
 use indexmap::IndexMap;
 pub use locks::Locks;
 use schemars::Schema;
+use sovd_ecu::operations::ExecutionStatus;
 use sovd_interfaces::{
     IncludeSchemaQuery, Resource,
     components::{ComponentsResponse, ecu as sovd_ecu},
@@ -112,8 +113,8 @@ pub(crate) struct WebserverEcuState<R: DiagServiceResponse, T: UdsEcu + Clone, U
     locks: Arc<Locks>,
     // Map of Execution Id -> ComParamMap
     comparam_executions: Arc<RwLock<IndexMap<Uuid, sovd_ecu::operations::comparams::Execution>>>,
-    // Map of Execution Id -> ServiceExecution (for ECU routine operations)
-    pub(crate) service_executions: Arc<RwLock<IndexMap<Uuid, ServiceExecution>>>,
+    // Map of Service Name -> (Execution Id -> ServiceExecution) for ECU routine operations
+    pub(crate) service_executions: Arc<RwLock<HashMap<String, IndexMap<Uuid, ServiceExecution>>>>,
     flash_data: Arc<RwLock<sovd_interfaces::sovd2uds::FileList>>,
     mdd_embedded_files: Arc<U>,
     _phantom: std::marker::PhantomData<R>,
@@ -127,17 +128,20 @@ pub(crate) struct ServiceExecution {
     pub in_flight: bool,
 }
 
-/// Acquires a write lock on `executions`, looks up `exec_id`, marks it
-/// `in_flight = true`, and returns a clone of the execution.  Returns
-/// `Err(ErrorWrapper)` (with the lock released) on not-found or in-flight conflict.
+/// Acquires a write lock on `executions`, looks up `exec_id` under the given
+/// `service` key, marks it `in_flight = true`, and returns a clone of the
+/// execution.  Returns `Err(ErrorWrapper)` (with the lock released) on
+/// not-found or in-flight conflict.
 pub(crate) async fn guard_execution(
-    executions: &RwLock<IndexMap<Uuid, ServiceExecution>>,
+    executions: &RwLock<HashMap<String, IndexMap<Uuid, ServiceExecution>>>,
+    service: &str,
     exec_id: Uuid,
     include_schema: bool,
     conflict_msg: &str,
 ) -> Result<ServiceExecution, error::ErrorWrapper> {
     let mut guard = executions.write().await;
-    match guard.get_mut(&exec_id) {
+    let op_map = guard.get_mut(service).and_then(|m| m.get_mut(&exec_id));
+    match op_map {
         None => Err(error::ErrorWrapper {
             error: error::ApiError::NotFound(Some(format!(
                 "Execution with id {exec_id} not found"
@@ -153,6 +157,26 @@ pub(crate) async fn guard_execution(
             Ok(exec.clone())
         }
     }
+}
+
+/// Returns `Some(ErrorWrapper)` if there is already a **running** execution
+/// for `service` in the given executions map, `None` otherwise.
+pub(crate) async fn check_running_execution_conflict(
+    executions: &RwLock<HashMap<String, IndexMap<Uuid, ServiceExecution>>>,
+    service: &str,
+    display_name: &str,
+    include_schema: bool,
+) -> Option<error::ErrorWrapper> {
+    let guard = executions.read().await;
+    let has_running = guard
+        .get(service)
+        .is_some_and(|m| m.values().any(|e| e.status == ExecutionStatus::Running));
+    has_running.then(|| error::ErrorWrapper {
+        error: error::ApiError::Conflict(format!(
+            "An execution for operation '{display_name}' is already in progress"
+        )),
+        include_schema,
+    })
 }
 
 impl<R: DiagServiceResponse, T: UdsEcu + Clone, U: FileManager> Clone
@@ -402,7 +426,7 @@ fn ecu_route<
         uds: state.uds.clone(),
         locks: Arc::<Locks>::clone(&state.locks),
         comparam_executions: Arc::new(RwLock::new(IndexMap::new())),
-        service_executions: Arc::new(RwLock::new(IndexMap::new())),
+        service_executions: Arc::new(RwLock::new(HashMap::default())),
         flash_data: Arc::clone(&state.flash_data),
         mdd_embedded_files: Arc::new(file_manager.remove(&ecu_lower).ok_or_else(|| {
             SovdError::RouteError(format!(
@@ -929,7 +953,7 @@ pub(crate) mod tests {
                 ))),
             }),
             comparam_executions: Arc::new(RwLock::new(IndexMap::new())),
-            service_executions: Arc::new(RwLock::new(IndexMap::new())),
+            service_executions: Arc::new(RwLock::new(HashMap::default())),
             flash_data: Arc::new(RwLock::new(FileList {
                 files: Vec::new(),
                 path: Some(PathBuf::new()),

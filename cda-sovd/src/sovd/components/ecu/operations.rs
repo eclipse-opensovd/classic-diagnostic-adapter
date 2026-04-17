@@ -507,6 +507,7 @@ pub(crate) mod service {
             openapi,
             sovd::{
                 self, ServiceExecution, WebserverEcuState, api_error_from_diag_response,
+                check_running_execution_conflict,
                 components::get_content_type_and_accept,
                 create_response_schema, create_schema,
                 error::{ApiError, ErrorWrapper, VendorErrorCode},
@@ -537,6 +538,7 @@ pub(crate) mod service {
             U: FileManager,
         >(
             UseApi(Secured(_security_plugin), _): UseApi<Secured, ()>,
+            Path(OperationServicePathParam { service }): Path<OperationServicePathParam>,
             WithRejection(Query(query), _): WithRejection<Query<sovd_executions::Query>, ApiError>,
             State(WebserverEcuState {
                 service_executions, ..
@@ -550,9 +552,9 @@ pub(crate) mod service {
             let ids: Vec<String> = service_executions
                 .read()
                 .await
-                .keys()
-                .map(ToString::to_string)
-                .collect();
+                .get(&service)
+                .map(|op_map| op_map.keys().map(ToString::to_string).collect())
+                .unwrap_or_default();
             (
                 StatusCode::OK,
                 Json(sovd_interfaces::Items { items: ids, schema }),
@@ -646,6 +648,7 @@ pub(crate) mod service {
                 .with(openapi::error_bad_request)
                 .with(openapi::error_not_found)
                 .with(openapi::error_forbidden)
+                .with(openapi::error_conflict)
                 .with(openapi::error_internal_server)
                 .with(openapi::error_bad_gateway)
         }
@@ -655,7 +658,9 @@ pub(crate) mod service {
             ecu_name: &str,
             uds: &T,
             service_executions: std::sync::Arc<
-                tokio::sync::RwLock<indexmap::IndexMap<Uuid, ServiceExecution>>,
+                tokio::sync::RwLock<
+                    cda_interfaces::HashMap<String, indexmap::IndexMap<Uuid, ServiceExecution>>,
+                >,
             >,
             security_plugin: Box<dyn SecurityPlugin>,
             opts: WriteHandlerOptions,
@@ -670,6 +675,13 @@ pub(crate) mod service {
                 suppress_service,
                 base_path,
             } = opts;
+            let err_response = |error: ApiError| -> Response {
+                ErrorWrapper {
+                    error,
+                    include_schema,
+                }
+                .into_response()
+            };
             if service == "reset" {
                 return ecu_reset_handler::<T>(
                     service,
@@ -680,6 +692,18 @@ pub(crate) mod service {
                     include_schema,
                 )
                 .await;
+            }
+
+            // Reject if there is already a running execution for this operation.
+            if let Some(err) = check_running_execution_conflict(
+                &service_executions,
+                &service,
+                &service,
+                include_schema,
+            )
+            .await
+            {
+                return err.into_response();
             }
 
             let security_plugin: DynamicPlugin = security_plugin;
@@ -693,34 +717,18 @@ pub(crate) mod service {
                     .await
                 {
                     Ok(sf) => sf,
-                    Err(e) => {
-                        return ErrorWrapper {
-                            error: e.into(),
-                            include_schema,
-                        }
-                        .into_response();
-                    }
+                    Err(e) => return err_response(e.into()),
                 };
                 subfunctions.has_stop || subfunctions.has_request_results
             };
 
             let content_type_and_accept = match get_content_type_and_accept(&headers) {
                 Ok(v) => v,
-                Err(e) => {
-                    return ErrorWrapper {
-                        error: e,
-                        include_schema,
-                    }
-                    .into_response();
-                }
+                Err(e) => return err_response(e),
             };
 
             let (Some(content_type), accept) = content_type_and_accept else {
-                return ErrorWrapper {
-                    error: ApiError::BadRequest("Missing Content-Type".to_owned()),
-                    include_schema,
-                }
-                .into_response();
+                return err_response(ApiError::BadRequest("Missing Content-Type".to_owned()));
             };
 
             let diag_service = DiagComm {
@@ -736,21 +744,13 @@ pub(crate) mod service {
                 &body,
             ) {
                 Ok(v) => v,
-                Err(e) => {
-                    return ErrorWrapper {
-                        error: e,
-                        include_schema,
-                    }
-                    .into_response();
-                }
+                Err(e) => return err_response(e),
             };
 
             if accept != mime::APPLICATION_OCTET_STREAM && accept != mime::APPLICATION_JSON {
-                return ErrorWrapper {
-                    error: ApiError::BadRequest(format!("Unsupported Accept header: {accept:?}")),
-                    include_schema,
-                }
-                .into_response();
+                return err_response(ApiError::BadRequest(format!(
+                    "Unsupported Accept header: {accept:?}"
+                )));
             }
 
             let map_to_json = accept == mime::APPLICATION_JSON;
@@ -779,6 +779,7 @@ pub(crate) mod service {
                     map_to_json,
                     include_schema,
                     base_path,
+                    service,
                     service_executions,
                 )
                 .await
@@ -927,8 +928,11 @@ pub(crate) mod service {
             map_to_json: bool,
             include_schema: bool,
             base_path: String,
+            service: String,
             service_executions: std::sync::Arc<
-                tokio::sync::RwLock<indexmap::IndexMap<Uuid, ServiceExecution>>,
+                tokio::sync::RwLock<
+                    cda_interfaces::HashMap<String, indexmap::IndexMap<Uuid, ServiceExecution>>,
+                >,
             >,
         ) -> Response {
             let parameters = match response {
@@ -942,14 +946,19 @@ pub(crate) mod service {
                 _ => serde_json::Map::new(),
             };
             let id = Uuid::new_v4();
-            service_executions.write().await.insert(
-                id,
-                ServiceExecution {
-                    parameters,
-                    status: ExecutionStatus::Running,
-                    in_flight: false,
-                },
-            );
+            service_executions
+                .write()
+                .await
+                .entry(service)
+                .or_default()
+                .insert(
+                    id,
+                    ServiceExecution {
+                        parameters,
+                        status: ExecutionStatus::Running,
+                        in_flight: false,
+                    },
+                );
             let schema = if include_schema {
                 Some(create_schema!(AsyncPostResponse))
             } else {
@@ -1243,9 +1252,10 @@ pub(crate) mod service {
             /// execution state, and return the `200 OK` response body.
             async fn get_operations_response<T: UdsEcu>(
                 response: T::Response,
+                service: &str,
                 exec_id: Uuid,
                 service_executions: &tokio::sync::RwLock<
-                    indexmap::IndexMap<Uuid, ServiceExecution>,
+                    cda_interfaces::HashMap<String, indexmap::IndexMap<Uuid, ServiceExecution>>,
                 >,
                 include_schema: bool,
             ) -> Response {
@@ -1263,7 +1273,12 @@ pub(crate) mod service {
                     parse_json_response_params::<T::Response>(response, "RequestResults")
                 };
 
-                if let Some(stored_mut) = service_executions.write().await.get_mut(&exec_id) {
+                if let Some(stored_mut) = service_executions
+                    .write()
+                    .await
+                    .get_mut(service)
+                    .and_then(|m| m.get_mut(&exec_id))
+                {
                     stored_mut.parameters.clone_from(&parameters);
                 }
 
@@ -1298,6 +1313,7 @@ pub(crate) mod service {
 
                 let stored = match guard_execution(
                     &service_executions,
+                    &service,
                     exec_id,
                     include_schema,
                     &format!("Execution {exec_id} is already in progress"),
@@ -1310,7 +1326,12 @@ pub(crate) mod service {
 
                 // suppress_service: skip the UDS send, return stored state directly
                 if query.suppress_service {
-                    if let Some(exec) = service_executions.write().await.get_mut(&exec_id) {
+                    if let Some(exec) = service_executions
+                        .write()
+                        .await
+                        .get_mut(&service)
+                        .and_then(|m| m.get_mut(&exec_id))
+                    {
                         exec.in_flight = false;
                     }
                     return get_by_id_response(
@@ -1338,7 +1359,12 @@ pub(crate) mod service {
                     )
                     .await;
 
-                if let Some(exec) = service_executions.write().await.get_mut(&exec_id) {
+                if let Some(exec) = service_executions
+                    .write()
+                    .await
+                    .get_mut(&service)
+                    .and_then(|m| m.get_mut(&exec_id))
+                {
                     exec.in_flight = false;
                 }
 
@@ -1359,6 +1385,7 @@ pub(crate) mod service {
                     Ok(response) => {
                         get_operations_response::<T>(
                             response,
+                            &service,
                             exec_id,
                             &service_executions,
                             include_schema,
@@ -1413,6 +1440,7 @@ pub(crate) mod service {
 
                 if let Err(e) = guard_execution(
                     &service_executions,
+                    &service,
                     exec_id,
                     include_schema,
                     &format!("Execution {exec_id} is already being stopped"),
@@ -1440,7 +1468,9 @@ pub(crate) mod service {
 
                 match uds_result {
                     Ok(r) if matches!(r.response_type(), DiagServiceResponseType::Positive) => {
-                        service_executions.write().await.shift_remove(&exec_id);
+                        if let Some(op_map) = service_executions.write().await.get_mut(&service) {
+                            op_map.shift_remove(&exec_id);
+                        }
                         if r.is_empty() {
                             StatusCode::NO_CONTENT.into_response()
                         } else {
@@ -1462,7 +1492,9 @@ pub(crate) mod service {
                             exec_id = %exec_id,
                             "Stop service not found (suppress_service=true), removing execution"
                         );
-                        service_executions.write().await.shift_remove(&exec_id);
+                        if let Some(op_map) = service_executions.write().await.get_mut(&service) {
+                            op_map.shift_remove(&exec_id);
+                        }
                         StatusCode::NO_CONTENT.into_response()
                     }
                     result => {
@@ -1481,10 +1513,16 @@ pub(crate) mod service {
                             );
                         }
                         if query.force {
-                            service_executions.write().await.shift_remove(&exec_id);
+                            if let Some(op_map) = service_executions.write().await.get_mut(&service)
+                            {
+                                op_map.shift_remove(&exec_id);
+                            }
                             return StatusCode::NO_CONTENT.into_response();
-                        } else if let Some(exec) =
-                            service_executions.write().await.get_mut(&exec_id)
+                        } else if let Some(exec) = service_executions
+                            .write()
+                            .await
+                            .get_mut(&service)
+                            .and_then(|m| m.get_mut(&exec_id))
                         {
                             // reset in_flight flag of the execution
                             exec.in_flight = false;
@@ -1766,6 +1804,7 @@ mod tests {
             mock::MockUdsEcu,
         };
         use cda_plugin_security::{Secured, mock::TestSecurityPlugin};
+        use indexmap::IndexMap;
         use sovd_interfaces::components::ecu::operations::ExecutionStatus;
 
         use super::super::service::{executions as handlers, executions::id as id_handlers};
@@ -1826,6 +1865,9 @@ mod tests {
                     Secured(Box::new(TestSecurityPlugin)),
                     std::marker::PhantomData,
                 ),
+                Path(handlers::OperationServicePathParam {
+                    service: "CalibrateSensor".to_string(),
+                }),
                 WithRejection(
                     Query(
                         sovd_interfaces::components::ecu::operations::service::executions::Query {
@@ -1859,20 +1901,29 @@ mod tests {
 
             // Pre-populate an execution
             let exec_id = uuid::Uuid::new_v4();
-            state.service_executions.write().await.insert(
-                exec_id,
-                ServiceExecution {
-                    parameters: serde_json::Map::new(),
-                    status: ExecutionStatus::Running,
-                    in_flight: false,
-                },
-            );
+            state
+                .service_executions
+                .write()
+                .await
+                .entry("CalibrateSensor".to_string())
+                .or_default()
+                .insert(
+                    exec_id,
+                    ServiceExecution {
+                        parameters: serde_json::Map::new(),
+                        status: ExecutionStatus::Running,
+                        in_flight: false,
+                    },
+                );
 
             let response = handlers::get::<MockDiagServiceResponse, MockUdsEcu, MockFileManager>(
                 UseApi(
                     Secured(Box::new(TestSecurityPlugin)),
                     std::marker::PhantomData,
                 ),
+                Path(handlers::OperationServicePathParam {
+                    service: "CalibrateSensor".to_string(),
+                }),
                 WithRejection(
                     Query(
                         sovd_interfaces::components::ecu::operations::service::executions::Query {
@@ -1967,14 +2018,20 @@ mod tests {
             >(ecu_name, mock_uds, mock_file_manager);
 
             let exec_id = uuid::Uuid::new_v4();
-            state.service_executions.write().await.insert(
-                exec_id,
-                ServiceExecution {
-                    parameters: serde_json::Map::new(),
-                    status: ExecutionStatus::Running,
-                    in_flight: false,
-                },
-            );
+            state
+                .service_executions
+                .write()
+                .await
+                .entry("CalibrateSensor".to_string())
+                .or_default()
+                .insert(
+                    exec_id,
+                    ServiceExecution {
+                        parameters: serde_json::Map::new(),
+                        status: ExecutionStatus::Running,
+                        in_flight: false,
+                    },
+                );
 
             let response =
                 id_handlers::get::<MockDiagServiceResponse, MockUdsEcu, MockFileManager>(
@@ -2043,14 +2100,20 @@ mod tests {
                 m.insert("stored".to_string(), serde_json::json!("value"));
                 m
             };
-            state.service_executions.write().await.insert(
-                exec_id,
-                ServiceExecution {
-                    parameters: stored_params,
-                    status: ExecutionStatus::Running,
-                    in_flight: false,
-                },
-            );
+            state
+                .service_executions
+                .write()
+                .await
+                .entry("CalibrateSensor".to_string())
+                .or_default()
+                .insert(
+                    exec_id,
+                    ServiceExecution {
+                        parameters: stored_params,
+                        status: ExecutionStatus::Running,
+                        in_flight: false,
+                    },
+                );
 
             let response =
                 id_handlers::get::<MockDiagServiceResponse, MockUdsEcu, MockFileManager>(
@@ -2114,14 +2177,20 @@ mod tests {
             >(ecu_name, mock_uds, mock_file_manager);
 
             let exec_id = uuid::Uuid::new_v4();
-            state.service_executions.write().await.insert(
-                exec_id,
-                ServiceExecution {
-                    parameters: serde_json::Map::new(),
-                    status: ExecutionStatus::Running,
-                    in_flight: false,
-                },
-            );
+            state
+                .service_executions
+                .write()
+                .await
+                .entry("CalibrateSensor".to_string())
+                .or_default()
+                .insert(
+                    exec_id,
+                    ServiceExecution {
+                        parameters: serde_json::Map::new(),
+                        status: ExecutionStatus::Running,
+                        in_flight: false,
+                    },
+                );
 
             let response =
                 id_handlers::get::<MockDiagServiceResponse, MockUdsEcu, MockFileManager>(
@@ -2217,14 +2286,20 @@ mod tests {
             insert_test_ecu_lock(&state.locks, "TestECU").await;
 
             let exec_id = uuid::Uuid::new_v4();
-            state.service_executions.write().await.insert(
-                exec_id,
-                ServiceExecution {
-                    parameters: serde_json::Map::new(),
-                    status: ExecutionStatus::Running,
-                    in_flight: false,
-                },
-            );
+            state
+                .service_executions
+                .write()
+                .await
+                .entry("CalibrateSensor".to_string())
+                .or_default()
+                .insert(
+                    exec_id,
+                    ServiceExecution {
+                        parameters: serde_json::Map::new(),
+                        status: ExecutionStatus::Running,
+                        in_flight: false,
+                    },
+                );
 
             // Keep a reference to service_executions so we can verify after consuming state
             let service_executions_ref = Arc::clone(&state.service_executions);
@@ -2255,7 +2330,13 @@ mod tests {
 
             assert_eq!(response.status(), StatusCode::NO_CONTENT);
             // Verify execution was removed
-            assert!(service_executions_ref.read().await.is_empty());
+            assert!(
+                service_executions_ref
+                    .read()
+                    .await
+                    .values()
+                    .all(IndexMap::is_empty)
+            );
         }
 
         #[tokio::test]
@@ -2288,14 +2369,20 @@ mod tests {
             insert_test_ecu_lock(&state.locks, "TestECU").await;
 
             let exec_id = uuid::Uuid::new_v4();
-            state.service_executions.write().await.insert(
-                exec_id,
-                ServiceExecution {
-                    parameters: serde_json::Map::new(),
-                    status: ExecutionStatus::Running,
-                    in_flight: false,
-                },
-            );
+            state
+                .service_executions
+                .write()
+                .await
+                .entry("CalibrateSensor".to_string())
+                .or_default()
+                .insert(
+                    exec_id,
+                    ServiceExecution {
+                        parameters: serde_json::Map::new(),
+                        status: ExecutionStatus::Running,
+                        in_flight: false,
+                    },
+                );
 
             let service_executions_ref = Arc::clone(&state.service_executions);
 
@@ -2342,7 +2429,13 @@ mod tests {
                 &serde_json::json!("ok")
             );
             // Execution must be removed regardless
-            assert!(service_executions_ref.read().await.is_empty());
+            assert!(
+                service_executions_ref
+                    .read()
+                    .await
+                    .values()
+                    .all(IndexMap::is_empty)
+            );
         }
 
         #[tokio::test]
@@ -2371,14 +2464,20 @@ mod tests {
             insert_test_ecu_lock(&state.locks, "TestECU").await;
 
             let exec_id = uuid::Uuid::new_v4();
-            state.service_executions.write().await.insert(
-                exec_id,
-                ServiceExecution {
-                    parameters: serde_json::Map::new(),
-                    status: ExecutionStatus::Running,
-                    in_flight: false,
-                },
-            );
+            state
+                .service_executions
+                .write()
+                .await
+                .entry("CalibrateSensor".to_string())
+                .or_default()
+                .insert(
+                    exec_id,
+                    ServiceExecution {
+                        parameters: serde_json::Map::new(),
+                        status: ExecutionStatus::Running,
+                        in_flight: false,
+                    },
+                );
 
             let service_executions_ref = Arc::clone(&state.service_executions);
 
@@ -2420,7 +2519,13 @@ mod tests {
                 result.get("parameters").is_none(),
                 "parameters should be absent when Stop returns Null"
             );
-            assert!(service_executions_ref.read().await.is_empty());
+            assert!(
+                service_executions_ref
+                    .read()
+                    .await
+                    .values()
+                    .all(IndexMap::is_empty)
+            );
         }
 
         #[tokio::test]
@@ -2451,14 +2556,20 @@ mod tests {
             insert_test_ecu_lock(&state.locks, "TestECU").await;
 
             let exec_id = uuid::Uuid::new_v4();
-            state.service_executions.write().await.insert(
-                exec_id,
-                ServiceExecution {
-                    parameters: serde_json::Map::new(),
-                    status: ExecutionStatus::Running,
-                    in_flight: false,
-                },
-            );
+            state
+                .service_executions
+                .write()
+                .await
+                .entry("CalibrateSensor".to_string())
+                .or_default()
+                .insert(
+                    exec_id,
+                    ServiceExecution {
+                        parameters: serde_json::Map::new(),
+                        status: ExecutionStatus::Running,
+                        in_flight: false,
+                    },
+                );
 
             let service_executions_ref = Arc::clone(&state.service_executions);
 
@@ -2498,7 +2609,13 @@ mod tests {
             // error list (field name "error" per AsyncGetByIdResponse) must be non-empty
             let errors = result.get("error").expect("missing error field");
             assert!(errors.is_array() && !errors.as_array().unwrap().is_empty());
-            assert!(service_executions_ref.read().await.is_empty());
+            assert!(
+                service_executions_ref
+                    .read()
+                    .await
+                    .values()
+                    .all(IndexMap::is_empty)
+            );
         }
 
         #[tokio::test]
@@ -2538,14 +2655,20 @@ mod tests {
             insert_test_ecu_lock(&state.locks, "TestECU").await;
 
             let exec_id = uuid::Uuid::new_v4();
-            state.service_executions.write().await.insert(
-                exec_id,
-                ServiceExecution {
-                    parameters: serde_json::Map::new(),
-                    status: ExecutionStatus::Running,
-                    in_flight: false,
-                },
-            );
+            state
+                .service_executions
+                .write()
+                .await
+                .entry("CalibrateSensor".to_string())
+                .or_default()
+                .insert(
+                    exec_id,
+                    ServiceExecution {
+                        parameters: serde_json::Map::new(),
+                        status: ExecutionStatus::Running,
+                        in_flight: false,
+                    },
+                );
 
             let service_executions_ref = Arc::clone(&state.service_executions);
 
@@ -2584,7 +2707,13 @@ mod tests {
             );
             let errors = result.get("error").expect("missing error field");
             assert!(errors.is_array() && !errors.as_array().unwrap().is_empty());
-            assert!(service_executions_ref.read().await.is_empty());
+            assert!(
+                service_executions_ref
+                    .read()
+                    .await
+                    .values()
+                    .all(IndexMap::is_empty)
+            );
         }
 
         #[tokio::test]
@@ -2606,14 +2735,20 @@ mod tests {
             insert_test_ecu_lock(&state.locks, "TestECU").await;
 
             let exec_id = uuid::Uuid::new_v4();
-            state.service_executions.write().await.insert(
-                exec_id,
-                ServiceExecution {
-                    parameters: serde_json::Map::new(),
-                    status: ExecutionStatus::Running,
-                    in_flight: false,
-                },
-            );
+            state
+                .service_executions
+                .write()
+                .await
+                .entry("CalibrateSensor".to_string())
+                .or_default()
+                .insert(
+                    exec_id,
+                    ServiceExecution {
+                        parameters: serde_json::Map::new(),
+                        status: ExecutionStatus::Running,
+                        in_flight: false,
+                    },
+                );
 
             // Keep a reference to service_executions so we can verify after consuming state
             let service_executions_ref = Arc::clone(&state.service_executions);
@@ -2644,7 +2779,13 @@ mod tests {
 
             // force=true -> removes execution even on error
             assert_eq!(response.status(), StatusCode::NO_CONTENT);
-            assert!(service_executions_ref.read().await.is_empty());
+            assert!(
+                service_executions_ref
+                    .read()
+                    .await
+                    .values()
+                    .all(IndexMap::is_empty)
+            );
         }
 
         #[tokio::test]
@@ -2666,14 +2807,20 @@ mod tests {
             insert_test_ecu_lock(&state.locks, "TestECU").await;
 
             let exec_id = uuid::Uuid::new_v4();
-            state.service_executions.write().await.insert(
-                exec_id,
-                ServiceExecution {
-                    parameters: serde_json::Map::new(),
-                    status: ExecutionStatus::Running,
-                    in_flight: false,
-                },
-            );
+            state
+                .service_executions
+                .write()
+                .await
+                .entry("CalibrateSensor".to_string())
+                .or_default()
+                .insert(
+                    exec_id,
+                    ServiceExecution {
+                        parameters: serde_json::Map::new(),
+                        status: ExecutionStatus::Running,
+                        in_flight: false,
+                    },
+                );
 
             let service_executions_ref = Arc::clone(&state.service_executions);
 
@@ -2703,7 +2850,13 @@ mod tests {
 
             // force=true -> removes execution even on negative ECU response
             assert_eq!(response.status(), StatusCode::NO_CONTENT);
-            assert!(service_executions_ref.read().await.is_empty());
+            assert!(
+                service_executions_ref
+                    .read()
+                    .await
+                    .values()
+                    .all(IndexMap::is_empty)
+            );
         }
 
         #[tokio::test]
@@ -2724,14 +2877,20 @@ mod tests {
             insert_test_ecu_lock(&state.locks, "TestECU").await;
 
             let exec_id = uuid::Uuid::new_v4();
-            state.service_executions.write().await.insert(
-                exec_id,
-                ServiceExecution {
-                    parameters: serde_json::Map::new(),
-                    status: ExecutionStatus::Running,
-                    in_flight: false,
-                },
-            );
+            state
+                .service_executions
+                .write()
+                .await
+                .entry("CalibrateSensor".to_string())
+                .or_default()
+                .insert(
+                    exec_id,
+                    ServiceExecution {
+                        parameters: serde_json::Map::new(),
+                        status: ExecutionStatus::Running,
+                        in_flight: false,
+                    },
+                );
 
             // Keep a reference to service_executions so we can verify after consuming state
             let service_executions_ref = Arc::clone(&state.service_executions);
@@ -2784,14 +2943,20 @@ mod tests {
             insert_test_ecu_lock(&state.locks, "TestECU").await;
 
             let exec_id = uuid::Uuid::new_v4();
-            state.service_executions.write().await.insert(
-                exec_id,
-                ServiceExecution {
-                    parameters: serde_json::Map::new(),
-                    status: ExecutionStatus::Running,
-                    in_flight: false,
-                },
-            );
+            state
+                .service_executions
+                .write()
+                .await
+                .entry("CalibrateSensor".to_string())
+                .or_default()
+                .insert(
+                    exec_id,
+                    ServiceExecution {
+                        parameters: serde_json::Map::new(),
+                        status: ExecutionStatus::Running,
+                        in_flight: false,
+                    },
+                );
 
             let service_executions_ref = Arc::clone(&state.service_executions);
 
@@ -2822,7 +2987,10 @@ mod tests {
             // Negative ECU response without force -> error returned, in_flight reset
             assert!(response.status().is_client_error() || response.status().is_server_error());
             let guard = service_executions_ref.read().await;
-            let exec = guard.get(&exec_id).expect("execution should still exist");
+            let exec = guard
+                .get("CalibrateSensor")
+                .and_then(|m| m.get(&exec_id))
+                .expect("execution should still exist");
             assert!(!exec.in_flight, "in_flight should be reset to false");
         }
 
@@ -2846,14 +3014,20 @@ mod tests {
             insert_test_ecu_lock(&state.locks, "TestECU").await;
 
             let exec_id = uuid::Uuid::new_v4();
-            state.service_executions.write().await.insert(
-                exec_id,
-                ServiceExecution {
-                    parameters: serde_json::Map::new(),
-                    status: ExecutionStatus::Running,
-                    in_flight: false,
-                },
-            );
+            state
+                .service_executions
+                .write()
+                .await
+                .entry("CalibrateSensor".to_string())
+                .or_default()
+                .insert(
+                    exec_id,
+                    ServiceExecution {
+                        parameters: serde_json::Map::new(),
+                        status: ExecutionStatus::Running,
+                        in_flight: false,
+                    },
+                );
 
             // Keep a reference to service_executions so we can verify after consuming state
             let service_executions_ref = Arc::clone(&state.service_executions);
@@ -2884,7 +3058,13 @@ mod tests {
 
             // suppress_service=true on NotFound -> removes execution, returns 204
             assert_eq!(response.status(), StatusCode::NO_CONTENT);
-            assert!(service_executions_ref.read().await.is_empty());
+            assert!(
+                service_executions_ref
+                    .read()
+                    .await
+                    .values()
+                    .all(IndexMap::is_empty)
+            );
         }
 
         #[tokio::test]
@@ -2899,14 +3079,20 @@ mod tests {
             >(ecu_name, mock_uds, mock_file_manager);
 
             let exec_id = uuid::Uuid::new_v4();
-            state.service_executions.write().await.insert(
-                exec_id,
-                ServiceExecution {
-                    parameters: serde_json::Map::new(),
-                    status: ExecutionStatus::Running,
-                    in_flight: true,
-                },
-            );
+            state
+                .service_executions
+                .write()
+                .await
+                .entry("CalibrateSensor".to_string())
+                .or_default()
+                .insert(
+                    exec_id,
+                    ServiceExecution {
+                        parameters: serde_json::Map::new(),
+                        status: ExecutionStatus::Running,
+                        in_flight: true,
+                    },
+                );
 
             let response =
                 id_handlers::get::<MockDiagServiceResponse, MockUdsEcu, MockFileManager>(
@@ -2947,14 +3133,20 @@ mod tests {
             insert_test_ecu_lock(&state.locks, &ecu_name).await;
 
             let exec_id = uuid::Uuid::new_v4();
-            state.service_executions.write().await.insert(
-                exec_id,
-                ServiceExecution {
-                    parameters: serde_json::Map::new(),
-                    status: ExecutionStatus::Running,
-                    in_flight: true,
-                },
-            );
+            state
+                .service_executions
+                .write()
+                .await
+                .entry("CalibrateSensor".to_string())
+                .or_default()
+                .insert(
+                    exec_id,
+                    ServiceExecution {
+                        parameters: serde_json::Map::new(),
+                        status: ExecutionStatus::Running,
+                        in_flight: true,
+                    },
+                );
 
             let response =
                 id_handlers::delete::<MockDiagServiceResponse, MockUdsEcu, MockFileManager>(
@@ -2994,6 +3186,120 @@ mod tests {
                 axum::http::HeaderValue::from_static("application/json"),
             );
             headers
+        }
+
+        #[tokio::test]
+        async fn test_post_operation_conflict_when_running_execution_exists() {
+            let ecu_name = "TestECU".to_string();
+            let mock_uds = MockUdsEcu::new();
+            let mock_file_manager = MockFileManager::new();
+
+            let state = create_test_webserver_state::<
+                MockDiagServiceResponse,
+                MockUdsEcu,
+                MockFileManager,
+            >(ecu_name.clone(), mock_uds, mock_file_manager);
+
+            // Pre-populate a running execution for CalibrateSensor
+            state
+                .service_executions
+                .write()
+                .await
+                .entry("CalibrateSensor".to_string())
+                .or_default()
+                .insert(
+                    uuid::Uuid::new_v4(),
+                    ServiceExecution {
+                        parameters: serde_json::Map::new(),
+                        status: ExecutionStatus::Running,
+                        in_flight: false,
+                    },
+                );
+
+            let response = handlers::ecu_operation_write_handler::<MockUdsEcu>(
+                handlers::WriteHandlerRequest {
+                    service: "CalibrateSensor".to_string(),
+                    headers: make_post_headers(),
+                    body: axum::body::Bytes::from_static(b"{\"parameters\":{}}"),
+                },
+                &ecu_name,
+                &state.uds,
+                Arc::clone(&state.service_executions),
+                Box::new(cda_plugin_security::mock::TestSecurityPlugin),
+                handlers::WriteHandlerOptions {
+                    include_schema: false,
+                    suppress_service: false,
+                    base_path: "http://localhost/operations/CalibrateSensor/executions".to_string(),
+                },
+            )
+            .await;
+
+            assert_eq!(response.status(), StatusCode::CONFLICT);
+        }
+
+        #[tokio::test]
+        async fn test_post_operation_no_conflict_for_different_service() {
+            // An execution running for ServiceA must NOT block ServiceB
+            let ecu_name = "TestECU".to_string();
+            let mut mock_uds = MockUdsEcu::new();
+            let mock_file_manager = MockFileManager::new();
+
+            mock_uds
+                .expect_get_routine_subfunctions()
+                .times(1)
+                .returning(|_, _, _| {
+                    Ok(cda_interfaces::datatypes::RoutineSubfunctions {
+                        has_stop: false,
+                        has_request_results: false,
+                    })
+                });
+            mock_uds
+                .expect_send()
+                .times(1)
+                .returning(|_, _, _, _, _| Ok(make_empty_positive_response()));
+
+            let state = create_test_webserver_state::<
+                MockDiagServiceResponse,
+                MockUdsEcu,
+                MockFileManager,
+            >(ecu_name.clone(), mock_uds, mock_file_manager);
+
+            // Pre-populate a running execution for a DIFFERENT service
+            state
+                .service_executions
+                .write()
+                .await
+                .entry("OtherService".to_string())
+                .or_default()
+                .insert(
+                    uuid::Uuid::new_v4(),
+                    ServiceExecution {
+                        parameters: serde_json::Map::new(),
+                        status: ExecutionStatus::Running,
+                        in_flight: false,
+                    },
+                );
+
+            let response = handlers::ecu_operation_write_handler::<MockUdsEcu>(
+                handlers::WriteHandlerRequest {
+                    service: "CalibrateSensor".to_string(),
+                    headers: make_post_headers(),
+                    body: axum::body::Bytes::from_static(b"{\"parameters\":{}}"),
+                },
+                &ecu_name,
+                &state.uds,
+                Arc::clone(&state.service_executions),
+                Box::new(cda_plugin_security::mock::TestSecurityPlugin),
+                handlers::WriteHandlerOptions {
+                    include_schema: false,
+                    suppress_service: false,
+                    base_path: "http://localhost/operations/CalibrateSensor/executions".to_string(),
+                },
+            )
+            .await;
+
+            // Different service -> no conflict, should pass through to 200
+            assert_eq!(response.status(), StatusCode::OK);
         }
 
         #[tokio::test]
@@ -3347,14 +3653,20 @@ mod tests {
             >(ecu_name, mock_uds, mock_file_manager);
 
             let exec_id = uuid::Uuid::new_v4();
-            state.service_executions.write().await.insert(
-                exec_id,
-                ServiceExecution {
-                    parameters: serde_json::Map::new(),
-                    status: ExecutionStatus::Running,
-                    in_flight: false,
-                },
-            );
+            state
+                .service_executions
+                .write()
+                .await
+                .entry("CalibrateSensor".to_string())
+                .or_default()
+                .insert(
+                    exec_id,
+                    ServiceExecution {
+                        parameters: serde_json::Map::new(),
+                        status: ExecutionStatus::Running,
+                        in_flight: false,
+                    },
+                );
 
             let response =
                 id_handlers::get::<MockDiagServiceResponse, MockUdsEcu, MockFileManager>(

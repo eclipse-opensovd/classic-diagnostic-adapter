@@ -106,7 +106,7 @@ pub(crate) mod diag_service {
     use crate::{
         create_schema, openapi,
         sovd::{
-            ServiceExecution,
+            ServiceExecution, check_running_execution_conflict,
             components::{ecu::DiagServicePathParam, get_content_type_and_accept},
             error::{ApiError, ErrorWrapper, VendorErrorCode},
             functions::functional_groups::{handle_ecu_response, map_to_json},
@@ -304,6 +304,18 @@ pub(crate) mod diag_service {
             .into_response();
         }
 
+        // Reject if there is already a running execution for this operation.
+        if let Some(err) = check_running_execution_conflict(
+            &fg_executions,
+            &operation.to_lowercase(),
+            &operation,
+            include_schema,
+        )
+        .await
+        {
+            return err.into_response();
+        }
+
         let is_async = if suppress_service {
             // suppress service is always treated as async
             true
@@ -441,6 +453,7 @@ pub(crate) mod diag_service {
         })
         .with(openapi::error_forbidden)
         .with(openapi::error_not_found)
+        .with(openapi::error_conflict)
         .with(openapi::error_internal_server)
         .with(openapi::error_bad_request)
         .with(openapi::error_bad_gateway)
@@ -576,10 +589,10 @@ pub(crate) mod diag_service {
             build_operation_response(response_data, errors, include_schema)
         } else {
             // force=false and Stop had errors — reset in_flight, keep execution alive for retry.
-            if let Some(op_map) = fg_executions.write().await.get_mut(&operation) {
-                if let Some(exec) = op_map.get_mut(&exec_id) {
-                    exec.in_flight = false;
-                }
+            if let Some(op_map) = fg_executions.write().await.get_mut(&operation)
+                && let Some(exec) = op_map.get_mut(&exec_id)
+            {
+                exec.in_flight = false;
             }
             build_operation_response(response_data, errors, include_schema)
         }
@@ -684,6 +697,8 @@ pub(crate) mod diag_service {
 
         fn make_empty_json_response() -> MockDiagServiceResponse {
             let mut mock = MockDiagServiceResponse::new();
+            mock.expect_response_type()
+                .returning(|| cda_interfaces::diagservices::DiagServiceResponseType::Positive);
             mock.expect_into_json().returning(|| {
                 Ok(DiagServiceJsonResponse {
                     data: serde_json::Value::Object(serde_json::Map::new()),
@@ -840,7 +855,7 @@ pub(crate) mod diag_service {
                 fg_executions_ref
                     .read()
                     .await
-                    .get("BrakeSelfTest")
+                    .get("brakeselftest")
                     .map_or(0, IndexMap::len),
                 1
             );
@@ -892,7 +907,7 @@ pub(crate) mod diag_service {
                 fg_executions_ref
                     .read()
                     .await
-                    .get("BrakeSelfTest")
+                    .get("brakeselftest")
                     .map_or(0, IndexMap::len),
                 1
             );
@@ -968,6 +983,9 @@ pub(crate) mod diag_service {
                     let mut params = serde_json::Map::new();
                     params.insert("status".to_string(), serde_json::json!("ok"));
                     let mut mock = MockDiagServiceResponse::new();
+                    mock.expect_response_type().returning(|| {
+                        cda_interfaces::diagservices::DiagServiceResponseType::Positive
+                    });
                     mock.expect_into_json().returning(move || {
                         Ok(DiagServiceJsonResponse {
                             data: serde_json::Value::Object(params.clone()),
@@ -1397,11 +1415,123 @@ pub(crate) mod diag_service {
                 fg_executions_ref
                     .read()
                     .await
-                    .get("SomeDiag")
+                    .get("somediag")
                     .map_or(0, IndexMap::len),
                 1,
                 "execution should be tracked"
             );
+        }
+
+        #[tokio::test]
+        async fn test_fg_post_conflict_when_running_execution_exists() {
+            let mock_uds = MockUdsEcu::new();
+            // No UDS expectations needed — conflict is checked before any UDS call.
+
+            let state = create_test_fg_state(mock_uds, "AllECUs".to_string());
+            insert_test_fg_lock(&state.locks, "AllECUs").await;
+
+            // Pre-populate a running execution for BrakeSelfTest
+            seed_execution_async(&state.fg_executions, "brakeselftest").await;
+
+            let response = post::<MockUdsEcu>(
+                make_post_headers(),
+                UseApi(
+                    Secured(Box::new(TestSecurityPlugin)),
+                    std::marker::PhantomData,
+                ),
+                UseApi(
+                    axum_extra::extract::Host("localhost".to_string()),
+                    std::marker::PhantomData,
+                ),
+                axum::extract::OriginalUri(
+                    "/functions/functionalgroups/AllECUs/operations/BrakeSelfTest"
+                        .parse()
+                        .unwrap(),
+                ),
+                axum::extract::Path(crate::sovd::components::ecu::DiagServicePathParam {
+                    service: "BrakeSelfTest".to_string(),
+                }),
+                WithRejection(
+                    axum::extract::Query(make_query(false, false)),
+                    std::marker::PhantomData,
+                ),
+                State(state),
+                Bytes::from_static(b"{\"parameters\":{}}"),
+            )
+            .await;
+
+            assert_eq!(response.status(), StatusCode::CONFLICT);
+        }
+
+        #[tokio::test]
+        async fn test_fg_post_no_conflict_for_different_operation() {
+            // A running execution for OperationA must NOT block OperationB
+            let mut mock_uds = MockUdsEcu::new();
+
+            mock_uds
+                .expect_get_functional_group_routine_subfunctions()
+                .times(1)
+                .returning(|_, _, _| {
+                    Ok(RoutineSubfunctions {
+                        has_stop: false,
+                        has_request_results: false,
+                    })
+                });
+
+            mock_uds
+                .expect_send_functional_group()
+                .times(1)
+                .returning(|_, _, _, _, _| {
+                    let mut results = cda_interfaces::HashMap::default();
+                    let mut mock = MockDiagServiceResponse::new();
+                    mock.expect_response_type().returning(|| {
+                        cda_interfaces::diagservices::DiagServiceResponseType::Positive
+                    });
+                    mock.expect_into_json().returning(|| {
+                        Ok(DiagServiceJsonResponse {
+                            data: serde_json::Value::Object(serde_json::Map::new()),
+                            errors: vec![],
+                        })
+                    });
+                    results.insert("ECU1".to_string(), Ok(mock));
+                    results
+                });
+
+            let state = create_test_fg_state(mock_uds, "AllECUs".to_string());
+            insert_test_fg_lock(&state.locks, "AllECUs").await;
+
+            // Pre-populate a running execution for a DIFFERENT operation
+            seed_execution_async(&state.fg_executions, "otherservice").await;
+
+            let response = post::<MockUdsEcu>(
+                make_post_headers(),
+                UseApi(
+                    Secured(Box::new(TestSecurityPlugin)),
+                    std::marker::PhantomData,
+                ),
+                UseApi(
+                    axum_extra::extract::Host("localhost".to_string()),
+                    std::marker::PhantomData,
+                ),
+                axum::extract::OriginalUri(
+                    "/functions/functionalgroups/AllECUs/operations/BrakeSelfTest"
+                        .parse()
+                        .unwrap(),
+                ),
+                axum::extract::Path(crate::sovd::components::ecu::DiagServicePathParam {
+                    service: "BrakeSelfTest".to_string(),
+                }),
+                WithRejection(
+                    axum::extract::Query(make_query(false, false)),
+                    std::marker::PhantomData,
+                ),
+                State(state),
+                Bytes::from_static(b"{\"parameters\":{}}"),
+            )
+            .await;
+
+            // Different operation -> no conflict, should succeed
+            assert_eq!(response.status(), StatusCode::OK);
         }
 
         fn make_delete_query_with_force(
