@@ -207,7 +207,7 @@ diff --color -ruN a/mbedtls-4.0.0/include/mbedtls/oid.h b/mbedtls-4.0.0/include/
 +/* ed25519 OBJECT IDENTIFIER ::= {
 + *   iso(1) identified-organization(3) thawte(101) 112
 + * } */
-+#define MBEDTLS_OID_ED25519                 MBEDTLS_OID_THAWTE "\0x70"
++#define MBEDTLS_OID_ED25519                 MBEDTLS_OID_THAWTE "\x70"
 +
  #if defined(MBEDTLS_X509_USE_C)
  /**
