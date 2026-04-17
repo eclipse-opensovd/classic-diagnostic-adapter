@@ -208,6 +208,11 @@ pub mod service_ids {
 
 pub const UDS_ID_RESPONSE_BITMASK: u8 = 0x40;
 
+/// Default bitmask applied to subfunction IDs during service lookups.
+/// Masks out the suppress-positive-response bit (bit 7, `0x80`),
+/// so that for example `0x01` and `0x81` both match the subfunction ID `0x01`.
+pub const DEFAULT_SUBFUNCTION_MASK: u8 = 0x7F;
+
 const CONFIGURATIONS_PREFIXES: [u8; 1] = [service_ids::WRITE_DATA_BY_IDENTIFIER];
 
 const DATA_PREFIXES: [u8; 1] = [service_ids::READ_DATA_BY_IDENTIFIER];

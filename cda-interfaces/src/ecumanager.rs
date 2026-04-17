@@ -212,6 +212,9 @@ pub trait EcuManager:
     ) -> impl Future<Output = Result<Vec<SdSdg>, DiagServiceError>> + Send;
     /// Convert a UDS payload given as `u8` slice into a `DiagServiceResponse`.
     ///
+    /// When `functional_group_name` is `Some`, the service is looked up in the
+    /// named functional group instead of the ECU variant.
+    ///
     /// # Errors
     /// Will return `Err` in cases where the payload doesn´t match the expected UDS response, or if
     /// elements of the response cannot be correctly mapped from the raw data.
@@ -220,6 +223,7 @@ pub trait EcuManager:
         diag_service: &DiagComm,
         payload: &ServicePayload,
         map_to_json: bool,
+        functional_group_name: Option<&str>,
     ) -> impl Future<Output = Result<Self::Response, DiagServiceError>> + Send;
 
     /// Creates a `ServicePayload` and processes transitions based on raw UDS data,
@@ -236,6 +240,9 @@ pub trait EcuManager:
     ) -> impl Future<Output = Result<ServicePayload, DiagServiceError>> + Send;
     /// Converts given `UdsPayloadData` into a UDS request payload for the given `DiagService`.
     ///
+    /// When `functional_group_name` is `Some`, the service is looked up in the
+    /// named functional group instead of the ECU variant.
+    ///
     /// # Errors
     /// Will return `Err` in cases where the `UdsPayloadData` doesn´t provide required parameters
     /// for the `DiagService` request or if elements of the `UdsPayloadData` cannot be mapped to
@@ -245,6 +252,7 @@ pub trait EcuManager:
         diag_service: &DiagComm,
         security_plugin: &DynamicPlugin,
         data: Option<UdsPayloadData>,
+        functional_group_name: Option<&str>,
     ) -> impl Future<Output = Result<ServicePayload, DiagServiceError>> + Send;
     /// Convert a UDS REQUEST payload into a `DiagServiceResponse` using the
     /// REQUEST definition in MDD. This function parses incoming REQUEST payloads
@@ -382,13 +390,17 @@ pub trait EcuManager:
         service_bytes: &[u8],
     ) -> Result<Vec<DiagComm>, DiagServiceError>;
 
-    /// Lookup a service by its service id and name for the current ECU variant.
+    /// Lookup a service by its service id and name.
+    ///
+    /// When `functional_group_name` is `Some`, the search is scoped to the
+    /// given functional group (and its parent refs) instead of the ECU variant.
     /// # Errors
     /// Will return `Err` if the lookup failed
     fn lookup_service_by_sid_and_name(
         &self,
         service_id: u8,
         name: &str,
+        functional_group_name: Option<&str>,
     ) -> Result<DiagComm, DiagServiceError>;
 
     /// Get parameter metadata for a specific service, including constant values for PHYS-CONST and
