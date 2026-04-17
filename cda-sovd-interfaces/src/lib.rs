@@ -115,6 +115,12 @@ pub mod common {
     pub mod operations {
         use serde::{Deserialize, Serialize};
 
+        /// A single item in an operation IDs collection.
+        #[derive(Serialize, Deserialize, schemars::JsonSchema)]
+        pub struct OperationIdItem {
+            pub id: String,
+        }
+
         /// A single item in an operations collection.
         /// Spec Table 169 (`OperationDescription`).
         #[derive(Serialize, Deserialize, schemars::JsonSchema)]

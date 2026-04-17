@@ -31,7 +31,7 @@ use axum_extra::extract::WithRejection;
 use cda_interfaces::{
     FunctionalDescriptionConfig, HashMap, HashMapExtensions as _, SchemaProvider, UdsEcu,
     datatypes::ComponentsConfig,
-    diagservices::{DiagServiceResponse, UdsPayloadData},
+    diagservices::{DiagServiceResponse, FieldParseError, UdsPayloadData},
     file_manager::FileManager,
 };
 use cda_plugin_security::{SecurityPluginLoader, security_plugin_middleware};
@@ -43,13 +43,17 @@ use schemars::Schema;
 use sovd_interfaces::{
     IncludeSchemaQuery, Resource,
     components::{ComponentsResponse, ecu as sovd_ecu},
+    error::DataError,
 };
 use tokio::sync::RwLock;
 use uuid::Uuid;
 
-use crate::sovd::components::ecu::{
-    configurations, data, faults, genericservice, modes, operations, x_single_ecu_jobs,
-    x_sovd2uds_bulk_data, x_sovd2uds_download,
+use crate::{
+    VendorErrorCode,
+    sovd::components::ecu::{
+        configurations, data, faults, genericservice, modes, operations, x_single_ecu_jobs,
+        x_sovd2uds_bulk_data, x_sovd2uds_download,
+    },
 };
 
 pub(crate) mod apps;
@@ -116,7 +120,7 @@ pub(crate) struct WebserverEcuState<R: DiagServiceResponse, T: UdsEcu + Clone, U
 }
 
 /// Stored state for a single ECU routine execution (async lifecycle).
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub(crate) struct ServiceExecution {
     pub parameters: serde_json::Map<String, serde_json::Value>,
     pub status: sovd_ecu::operations::ExecutionStatus,
@@ -432,7 +436,7 @@ fn ecu_route<
             routing::get_with(configurations::get, configurations::docs_get),
         )
         .api_route(
-            "/configurations/{diag_service}",
+            "/configurations/{service}",
             routing::put_with(
                 configurations::diag_service::put,
                 configurations::diag_service::docs_put,
@@ -441,7 +445,7 @@ fn ecu_route<
         )
         .api_route("/data", routing::get_with(data::get, data::docs_get))
         .api_route(
-            "/data/{diag_service}",
+            "/data/{service}",
             routing::get_with(data::diag_service::get, data::diag_service::docs_get)
                 .put_with(data::diag_service::put, data::diag_service::docs_put),
         )
@@ -841,6 +845,56 @@ pub(crate) mod static_data {
                 example.insert("schema".to_string(), serde_json::Value::Null);
                 res.description("Successful response").example(example)
             })
+    }
+}
+
+/// Wrapper Struct around [`FieldParseError`] to allow implementing
+/// [From] for [`DataError`<VendorErrorCode>]
+struct FieldParseErrorWrapper(FieldParseError);
+impl From<FieldParseErrorWrapper> for DataError<VendorErrorCode> {
+    fn from(value: FieldParseErrorWrapper) -> Self {
+        let value: FieldParseError = value.0;
+        Self {
+            path: value.path,
+            error: sovd_interfaces::error::ApiErrorResponse {
+                message: "Failed to parse parameter".to_owned(),
+                error_code: sovd_interfaces::error::ErrorCode::VendorSpecific,
+                vendor_code: Some(VendorErrorCode::ErrorInterpretingMessage),
+                parameters: Some(
+                    [
+                        ("details", value.error.details),
+                        ("value", value.error.value),
+                    ]
+                    .into_iter()
+                    .map(|(k, v)| (k.to_string(), serde_json::Value::String(v)))
+                    .collect(),
+                ),
+                error_source: None,
+                schema: None,
+            },
+        }
+    }
+}
+
+fn field_parse_errors_to_json(
+    errors: impl IntoIterator<Item = FieldParseError>,
+    data_field_ref: &str,
+) -> Vec<DataError<VendorErrorCode>> {
+    errors
+        .into_iter()
+        .map(|v| {
+            let mut data_error = DataError::from(FieldParseErrorWrapper(v));
+            data_error.path = format!("/{data_field_ref}{}", data_error.path);
+            data_error
+        })
+        .collect()
+}
+
+impl IntoSovd for FieldParseError {
+    type SovdType = DataError<VendorErrorCode>;
+
+    fn into_sovd(self) -> Self::SovdType {
+        FieldParseErrorWrapper(self).into()
     }
 }
 

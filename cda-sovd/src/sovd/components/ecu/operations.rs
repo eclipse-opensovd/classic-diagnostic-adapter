@@ -507,10 +507,10 @@ pub(crate) mod service {
             openapi,
             sovd::{
                 self, ServiceExecution, WebserverEcuState, api_error_from_diag_response,
-                components::{field_parse_errors_to_json, get_content_type_and_accept},
+                components::get_content_type_and_accept,
                 create_response_schema, create_schema,
                 error::{ApiError, ErrorWrapper, VendorErrorCode},
-                guard_execution,
+                field_parse_errors_to_json, guard_execution,
                 locks::validate_lock,
             },
         };

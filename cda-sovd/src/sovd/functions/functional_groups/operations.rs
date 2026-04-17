@@ -110,7 +110,7 @@ pub(crate) mod diag_service {
             components::{ecu::DiagServicePathParam, get_content_type_and_accept},
             error::{ApiError, ErrorWrapper, VendorErrorCode},
             functions::functional_groups::{handle_ecu_response, map_to_json},
-            get_payload_data, guard_execution,
+            get_payload_data,
             locks::validate_fg_lock,
         },
     };
@@ -156,7 +156,8 @@ pub(crate) mod diag_service {
 
     /// Registers an async execution entry and builds the `202 Accepted` response.
     async fn build_async_response(
-        fg_executions: &RwLock<IndexMap<Uuid, ServiceExecution>>,
+        fg_executions: &RwLock<HashMap<String, IndexMap<Uuid, ServiceExecution>>>,
+        operation: &str,
         response_data: HashMap<String, serde_json::Map<String, serde_json::Value>>,
         host: &str,
         uri: &Uri,
@@ -167,14 +168,20 @@ pub(crate) mod diag_service {
             response_data.into_values().flatten().collect();
 
         let id = Uuid::new_v4();
-        fg_executions.write().await.insert(
-            id,
-            ServiceExecution {
-                parameters: stored_params,
-                status: ExecutionStatus::Running,
-                in_flight: false,
-            },
-        );
+        let operation = operation.to_lowercase();
+        fg_executions
+            .write()
+            .await
+            .entry(operation)
+            .or_default()
+            .insert(
+                id,
+                ServiceExecution {
+                    parameters: stored_params,
+                    status: ExecutionStatus::Running,
+                    in_flight: false,
+                },
+            );
 
         let exec_url = format!("http://{host}{uri}/executions/{id}");
         let schema = if include_schema {
@@ -194,6 +201,65 @@ pub(crate) mod diag_service {
             .into_response()
     }
 
+    pub(crate) mod executions {
+        use aide::{UseApi, transform::TransformOperation};
+        use axum::{
+            Json,
+            extract::{Path, Query, State},
+            response::{IntoResponse, Response},
+        };
+        use axum_extra::extract::WithRejection;
+        use cda_interfaces::UdsEcu;
+        use cda_plugin_security::Secured;
+        use http::StatusCode;
+        use sovd_interfaces::common::operations::OperationIdItem;
+
+        use super::super::super::WebserverFgState;
+        use crate::sovd::{components::ecu::DiagServicePathParam, create_schema, error::ApiError};
+
+        pub(crate) async fn get<T: UdsEcu + Clone>(
+            UseApi(Secured(_security_plugin), _): UseApi<Secured, ()>,
+            WithRejection(Query(query), _): WithRejection<
+                Query<sovd_interfaces::IncludeSchemaQuery>,
+                ApiError,
+            >,
+            Path(DiagServicePathParam { service: operation }): Path<DiagServicePathParam>,
+            State(WebserverFgState { fg_executions, .. }): State<WebserverFgState<T>>,
+        ) -> Response {
+            let operation = operation.to_lowercase();
+            let schema = if query.include_schema {
+                Some(create_schema!(sovd_interfaces::Items<String>))
+            } else {
+                None
+            };
+            let executions = fg_executions.read().await;
+
+            let ids: Vec<_> = executions
+                .get(&operation)
+                .map(|op_map| {
+                    op_map
+                        .keys()
+                        .map(|key| OperationIdItem {
+                            id: key.to_string(),
+                        })
+                        .collect()
+                })
+                .unwrap_or_default();
+            (
+                StatusCode::OK,
+                Json(sovd_interfaces::Items { items: ids, schema }),
+            )
+                .into_response()
+        }
+
+        pub(crate) fn docs_get(op: TransformOperation) -> TransformOperation {
+            op.description("List all active executions for this functional group operation")
+                .response_with::<200, Json<sovd_interfaces::Items<String>>, _>(|res| {
+                    res.description("List of active execution ids.")
+                })
+        }
+    }
+
     // cannot easily combine the axum extractors without creating a new custom extractor.
     #[allow(clippy::too_many_arguments)]
     pub(crate) async fn post<T: UdsEcu + Clone>(
@@ -201,9 +267,7 @@ pub(crate) mod diag_service {
         UseApi(Secured(security_plugin), _): UseApi<Secured, ()>,
         UseApi(Host(host), _): UseApi<Host, String>,
         OriginalUri(uri): OriginalUri,
-        Path(DiagServicePathParam {
-            diag_service: operation,
-        }): Path<DiagServicePathParam>,
+        Path(DiagServicePathParam { service: operation }): Path<DiagServicePathParam>,
         WithRejection(Query(query), _): WithRejection<
             Query<sovd_interfaces::functions::functional_groups::operations::service::Query>,
             ApiError,
@@ -258,7 +322,7 @@ pub(crate) mod diag_service {
             }
         };
 
-        let (content_type, accept) = match get_content_type_and_accept(&headers) {
+        let (content_type, _) = match get_content_type_and_accept(&headers) {
             Ok(v) => v,
             Err(e) => {
                 return ErrorWrapper {
@@ -268,18 +332,23 @@ pub(crate) mod diag_service {
                 .into_response();
             }
         };
+        let accept = mime::APPLICATION_JSON;
 
-        let data = match get_payload_data::<
-            sovd_interfaces::functions::functional_groups::operations::service::Request,
-        >(content_type.as_ref(), &headers, &body)
-        {
-            Ok(value) => value,
-            Err(e) => {
-                return ErrorWrapper {
-                    error: e,
-                    include_schema,
+        let data = if suppress_service {
+            None
+        } else {
+            match get_payload_data::<
+                sovd_interfaces::functions::functional_groups::operations::service::Request,
+            >(content_type.as_ref(), &headers, &body)
+            {
+                Ok(value) => value,
+                Err(e) => {
+                    return ErrorWrapper {
+                        error: e,
+                        include_schema,
+                    }
+                    .into_response();
                 }
-                .into_response();
             }
         };
 
@@ -323,7 +392,15 @@ pub(crate) mod diag_service {
         }
 
         if is_async {
-            build_async_response(&fg_executions, response_data, &host, &uri, include_schema).await
+            build_async_response(
+                &fg_executions,
+                &operation,
+                response_data,
+                &host,
+                &uri,
+                include_schema,
+            )
+            .await
         } else {
             build_operation_response(response_data, errors, include_schema)
         }
@@ -405,15 +482,41 @@ pub(crate) mod diag_service {
             }
         };
 
-        if let Err(e) = guard_execution(
-            &fg_executions,
-            exec_id,
-            include_schema,
-            &format!("Execution {exec_id} is already in flight"),
-        )
-        .await
+        // Guard: mark execution in_flight (replaces shared guard_execution for nested map).
         {
-            return e.into_response();
+            let mut guard = fg_executions.write().await;
+            let Some(op_map) = guard.get_mut(&operation) else {
+                return ErrorWrapper {
+                    error: ApiError::NotFound(Some(format!(
+                        "Execution with id {exec_id} not found"
+                    ))),
+                    include_schema,
+                }
+                .into_response();
+            };
+            match op_map.get_mut(&exec_id) {
+                None => {
+                    return ErrorWrapper {
+                        error: ApiError::NotFound(Some(format!(
+                            "Execution with id {exec_id} not found"
+                        ))),
+                        include_schema,
+                    }
+                    .into_response();
+                }
+                Some(exec) if exec.in_flight => {
+                    return ErrorWrapper {
+                        error: ApiError::Conflict(format!(
+                            "Execution {exec_id} is already in flight"
+                        )),
+                        include_schema,
+                    }
+                    .into_response();
+                }
+                Some(exec) => {
+                    exec.in_flight = true;
+                }
+            }
         }
 
         // If suppress_service, skip sending STOP to ECUs — just remove and return 204.
@@ -423,7 +526,9 @@ pub(crate) mod diag_service {
                 exec_id = %exec_id,
                 "Stop skipped (suppress_service=true), removing execution"
             );
-            fg_executions.write().await.shift_remove(&exec_id);
+            if let Some(op_map) = fg_executions.write().await.get_mut(&operation) {
+                op_map.shift_remove(&exec_id);
+            }
             return StatusCode::NO_CONTENT.into_response();
         }
 
@@ -459,16 +564,22 @@ pub(crate) mod diag_service {
 
         if errors.is_empty() {
             // All ECUs succeeded — remove execution and return 204.
-            fg_executions.write().await.shift_remove(&exec_id);
+            if let Some(op_map) = fg_executions.write().await.get_mut(&operation) {
+                op_map.shift_remove(&exec_id);
+            }
             StatusCode::NO_CONTENT.into_response()
         } else if query.force {
             // force=true — remove execution even though Stop had errors, return 200 with errors.
-            fg_executions.write().await.shift_remove(&exec_id);
+            if let Some(op_map) = fg_executions.write().await.get_mut(&operation) {
+                op_map.shift_remove(&exec_id);
+            }
             build_operation_response(response_data, errors, include_schema)
         } else {
             // force=false and Stop had errors — reset in_flight, keep execution alive for retry.
-            if let Some(exec) = fg_executions.write().await.get_mut(&exec_id) {
-                exec.in_flight = false;
+            if let Some(op_map) = fg_executions.write().await.get_mut(&operation) {
+                if let Some(exec) = op_map.get_mut(&exec_id) {
+                    exec.in_flight = false;
+                }
             }
             build_operation_response(response_data, errors, include_schema)
         }
@@ -650,7 +761,7 @@ pub(crate) mod diag_service {
                         .unwrap(),
                 ),
                 axum::extract::Path(crate::sovd::components::ecu::DiagServicePathParam {
-                    diag_service: "BrakeSelfTest".to_string(),
+                    service: "BrakeSelfTest".to_string(),
                 }),
                 WithRejection(
                     axum::extract::Query(make_query(false, false)),
@@ -707,7 +818,7 @@ pub(crate) mod diag_service {
                         .unwrap(),
                 ),
                 axum::extract::Path(crate::sovd::components::ecu::DiagServicePathParam {
-                    diag_service: "BrakeSelfTest".to_string(),
+                    service: "BrakeSelfTest".to_string(),
                 }),
                 WithRejection(
                     axum::extract::Query(make_query(false, false)),
@@ -725,7 +836,14 @@ pub(crate) mod diag_service {
             let result: serde_json::Value = serde_json::from_slice(&body).unwrap();
             assert!(result.get("id").is_some(), "202 body must have id");
             assert_eq!(result.get("status"), Some(&serde_json::json!("running")));
-            assert_eq!(fg_executions_ref.read().await.len(), 1);
+            assert_eq!(
+                fg_executions_ref
+                    .read()
+                    .await
+                    .get("BrakeSelfTest")
+                    .map_or(0, IndexMap::len),
+                1
+            );
         }
 
         #[tokio::test]
@@ -758,7 +876,7 @@ pub(crate) mod diag_service {
                         .unwrap(),
                 ),
                 axum::extract::Path(crate::sovd::components::ecu::DiagServicePathParam {
-                    diag_service: "BrakeSelfTest".to_string(),
+                    service: "BrakeSelfTest".to_string(),
                 }),
                 WithRejection(
                     axum::extract::Query(make_query(false, true)),
@@ -770,7 +888,14 @@ pub(crate) mod diag_service {
             .await;
 
             assert_eq!(response.status(), StatusCode::ACCEPTED);
-            assert_eq!(fg_executions_ref.read().await.len(), 1);
+            assert_eq!(
+                fg_executions_ref
+                    .read()
+                    .await
+                    .get("BrakeSelfTest")
+                    .map_or(0, IndexMap::len),
+                1
+            );
         }
 
         #[tokio::test]
@@ -808,7 +933,7 @@ pub(crate) mod diag_service {
                         .unwrap(),
                 ),
                 axum::extract::Path(crate::sovd::components::ecu::DiagServicePathParam {
-                    diag_service: "Unknown".to_string(),
+                    service: "Unknown".to_string(),
                 }),
                 WithRejection(
                     axum::extract::Query(make_query(false, false)),
@@ -873,7 +998,7 @@ pub(crate) mod diag_service {
                         .unwrap(),
                 ),
                 axum::extract::Path(crate::sovd::components::ecu::DiagServicePathParam {
-                    diag_service: "BrakeSelfTest".to_string(),
+                    service: "BrakeSelfTest".to_string(),
                 }),
                 WithRejection(
                     axum::extract::Query(make_query(false, false)),
@@ -950,7 +1075,7 @@ pub(crate) mod diag_service {
                         .unwrap(),
                 ),
                 axum::extract::Path(crate::sovd::components::ecu::DiagServicePathParam {
-                    diag_service: "BrakeSelfTest".to_string(),
+                    service: "BrakeSelfTest".to_string(),
                 }),
                 WithRejection(
                     axum::extract::Query(make_query(false, false)),
@@ -982,17 +1107,25 @@ pub(crate) mod diag_service {
         }
 
         async fn seed_execution_async(
-            fg_executions: &Arc<RwLock<IndexMap<Uuid, ServiceExecution>>>,
+            fg_executions: &Arc<
+                RwLock<cda_interfaces::HashMap<String, IndexMap<Uuid, ServiceExecution>>>,
+            >,
+            operation: &str,
         ) -> Uuid {
             let id = Uuid::new_v4();
-            fg_executions.write().await.insert(
-                id,
-                ServiceExecution {
-                    parameters: serde_json::Map::new(),
-                    status: ExecutionStatus::Running,
-                    in_flight: false,
-                },
-            );
+            fg_executions
+                .write()
+                .await
+                .entry(operation.to_owned())
+                .or_default()
+                .insert(
+                    id,
+                    ServiceExecution {
+                        parameters: serde_json::Map::new(),
+                        status: ExecutionStatus::Running,
+                        in_flight: false,
+                    },
+                );
             id
         }
 
@@ -1001,7 +1134,7 @@ pub(crate) mod diag_service {
             let mock_uds = MockUdsEcu::new();
             // state has no lock set up
             let state = create_test_fg_state(mock_uds, "AllECUs".to_string());
-            let exec_id = seed_execution_async(&state.fg_executions).await;
+            let exec_id = seed_execution_async(&state.fg_executions, "BrakeSelfTest").await;
 
             let response = delete::<MockUdsEcu>(
                 UseApi(
@@ -1071,7 +1204,7 @@ pub(crate) mod diag_service {
 
             let state = create_test_fg_state(mock_uds, "AllECUs".to_string());
             insert_test_fg_lock(&state.locks, "AllECUs").await;
-            let exec_id = seed_execution_async(&state.fg_executions).await;
+            let exec_id = seed_execution_async(&state.fg_executions, "BrakeSelfTest").await;
             let fg_executions_ref = Arc::clone(&state.fg_executions);
 
             let response = delete::<MockUdsEcu>(
@@ -1093,7 +1226,11 @@ pub(crate) mod diag_service {
 
             assert_eq!(response.status(), StatusCode::NO_CONTENT);
             assert!(
-                fg_executions_ref.read().await.is_empty(),
+                fg_executions_ref
+                    .read()
+                    .await
+                    .get("BrakeSelfTest")
+                    .is_none_or(IndexMap::is_empty),
                 "execution should be removed"
             );
         }
@@ -1118,7 +1255,7 @@ pub(crate) mod diag_service {
 
             let state = create_test_fg_state(mock_uds, "AllECUs".to_string());
             insert_test_fg_lock(&state.locks, "AllECUs").await;
-            let exec_id = seed_execution_async(&state.fg_executions).await;
+            let exec_id = seed_execution_async(&state.fg_executions, "BrakeSelfTest").await;
             let fg_executions_ref = Arc::clone(&state.fg_executions);
 
             let response = delete::<MockUdsEcu>(
@@ -1152,7 +1289,11 @@ pub(crate) mod diag_service {
                 "Expected errors in partial failure response"
             );
             assert!(
-                fg_executions_ref.read().await.is_empty(),
+                fg_executions_ref
+                    .read()
+                    .await
+                    .get("BrakeSelfTest")
+                    .is_none_or(IndexMap::is_empty),
                 "execution should be removed"
             );
         }
@@ -1165,7 +1306,7 @@ pub(crate) mod diag_service {
 
             let state = create_test_fg_state(mock_uds, "AllECUs".to_string());
             insert_test_fg_lock(&state.locks, "AllECUs").await;
-            let exec_id = seed_execution_async(&state.fg_executions).await;
+            let exec_id = seed_execution_async(&state.fg_executions, "BrakeSelfTest").await;
             let fg_executions_ref = Arc::clone(&state.fg_executions);
 
             let response = delete::<MockUdsEcu>(
@@ -1187,7 +1328,11 @@ pub(crate) mod diag_service {
 
             assert_eq!(response.status(), StatusCode::NO_CONTENT);
             assert!(
-                fg_executions_ref.read().await.is_empty(),
+                fg_executions_ref
+                    .read()
+                    .await
+                    .get("BrakeSelfTest")
+                    .is_none_or(IndexMap::is_empty),
                 "execution should be removed"
             );
         }
@@ -1236,7 +1381,7 @@ pub(crate) mod diag_service {
                         .unwrap(),
                 ),
                 axum::extract::Path(crate::sovd::components::ecu::DiagServicePathParam {
-                    diag_service: "SomeDiag".to_string(),
+                    service: "SomeDiag".to_string(),
                 }),
                 WithRejection(
                     axum::extract::Query(make_query(false, false)),
@@ -1249,7 +1394,11 @@ pub(crate) mod diag_service {
 
             assert_eq!(response.status(), StatusCode::ACCEPTED);
             assert_eq!(
-                fg_executions_ref.read().await.len(),
+                fg_executions_ref
+                    .read()
+                    .await
+                    .get("SomeDiag")
+                    .map_or(0, IndexMap::len),
                 1,
                 "execution should be tracked"
             );
@@ -1286,7 +1435,7 @@ pub(crate) mod diag_service {
 
             let state = create_test_fg_state(mock_uds, "AllECUs".to_string());
             insert_test_fg_lock(&state.locks, "AllECUs").await;
-            let exec_id = seed_execution_async(&state.fg_executions).await;
+            let exec_id = seed_execution_async(&state.fg_executions, "BrakeSelfTest").await;
             let fg_executions_ref = Arc::clone(&state.fg_executions);
 
             let response = delete::<MockUdsEcu>(
@@ -1319,18 +1468,17 @@ pub(crate) mod diag_service {
                     .is_some_and(|e| !e.is_empty()),
                 "Expected errors in response"
             );
+            let guard = fg_executions_ref.read().await;
+            let op_map = guard
+                .get("BrakeSelfTest")
+                .expect("operation map must exist");
             assert!(
-                !fg_executions_ref.read().await.is_empty(),
+                !op_map.is_empty(),
                 "execution must NOT be removed when force=false and Stop fails"
             );
             // in_flight must be reset so the execution can be retried
             assert!(
-                !fg_executions_ref
-                    .read()
-                    .await
-                    .get(&exec_id)
-                    .unwrap()
-                    .in_flight,
+                !op_map.get(&exec_id).unwrap().in_flight,
                 "in_flight must be reset to false"
             );
         }
@@ -1355,7 +1503,7 @@ pub(crate) mod diag_service {
 
             let state = create_test_fg_state(mock_uds, "AllECUs".to_string());
             insert_test_fg_lock(&state.locks, "AllECUs").await;
-            let exec_id = seed_execution_async(&state.fg_executions).await;
+            let exec_id = seed_execution_async(&state.fg_executions, "BrakeSelfTest").await;
             let fg_executions_ref = Arc::clone(&state.fg_executions);
 
             let response = delete::<MockUdsEcu>(
@@ -1389,7 +1537,11 @@ pub(crate) mod diag_service {
                 "Expected errors in response"
             );
             assert!(
-                fg_executions_ref.read().await.is_empty(),
+                fg_executions_ref
+                    .read()
+                    .await
+                    .get("BrakeSelfTest")
+                    .is_none_or(IndexMap::is_empty),
                 "execution must be removed when force=true"
             );
         }

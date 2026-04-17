@@ -23,7 +23,8 @@ use axum::{
 };
 use axum_extra::extract::WithRejection;
 use cda_interfaces::{
-    FunctionalDescriptionConfig, HashMap, UdsEcu, diagservices::DiagServiceResponse,
+    FunctionalDescriptionConfig, HashMap, UdsEcu,
+    diagservices::{DiagServiceResponse, DiagServiceResponseType},
 };
 use http::StatusCode;
 use indexmap::IndexMap;
@@ -34,7 +35,8 @@ use crate::{
     create_schema,
     sovd::{
         ServiceExecution, WebserverState,
-        error::{ApiError, ErrorWrapper, VendorErrorCode},
+        error::{ApiError, ErrorWrapper, VendorErrorCode, nrc_to_api_error_response},
+        field_parse_errors_to_json,
         locks::Locks,
     },
 };
@@ -49,7 +51,7 @@ pub(crate) struct WebserverFgState<T: UdsEcu + Clone> {
     uds: T,
     locks: Arc<Locks>,
     functional_group_name: String,
-    fg_executions: Arc<RwLock<IndexMap<Uuid, ServiceExecution>>>,
+    fg_executions: Arc<RwLock<HashMap<String, IndexMap<Uuid, ServiceExecution>>>>,
 }
 
 pub(crate) async fn create_functional_group_routes<T: UdsEcu + Clone>(
@@ -138,7 +140,7 @@ pub(crate) async fn create_functional_group_routes<T: UdsEcu + Clone>(
             uds: state.uds.clone(),
             locks: Arc::clone(&state.locks),
             functional_group_name: group.clone(),
-            fg_executions: Arc::new(RwLock::new(IndexMap::new())),
+            fg_executions: Arc::new(RwLock::new(HashMap::default())),
         };
         functional_groups_router = functional_groups_router.nest_api_service(
             &format!("/functionalgroups/{group}"),
@@ -166,7 +168,7 @@ fn create_functional_group_route<T: UdsEcu + Clone>(fg_state: WebserverFgState<T
         )
         .api_route("/data", routing::get_with(data::get, data::docs_get))
         .api_route(
-            "/data/{diag_service}",
+            "/data/{service}",
             routing::get_with(data::diag_service::get, data::diag_service::docs_get)
                 .put_with(data::diag_service::put, data::diag_service::docs_put),
         )
@@ -175,8 +177,12 @@ fn create_functional_group_route<T: UdsEcu + Clone>(fg_state: WebserverFgState<T
             routing::get_with(operations::get, operations::docs_get),
         )
         .api_route(
-            "/operations/{operation}",
-            routing::post_with(
+            "/operations/{service}/executions",
+            routing::get_with(
+                operations::diag_service::executions::get,
+                operations::diag_service::executions::docs_get,
+            )
+            .post_with(
                 operations::diag_service::post,
                 operations::diag_service::docs_post,
             ),
@@ -365,27 +371,45 @@ fn handle_ecu_response<R: DiagServiceResponse>(
 ) {
     match result {
         Ok(response) => {
-            // Extract data from the response into JSON format
-            match response.into_json() {
-                Ok(json_response) => {
-                    if let serde_json::Value::Object(data_map) = json_response.data {
-                        response_data.insert(ecu_name, data_map);
+            if response.response_type() == DiagServiceResponseType::Positive {
+                // Extract data from the response into JSON format
+                match response.into_json() {
+                    Ok(json_response) => {
+                        if let serde_json::Value::Object(data_map) = json_response.data {
+                            response_data.insert(ecu_name, data_map);
+                        }
+                        if !json_response.errors.is_empty() {
+                            let mut parse_errors =
+                                field_parse_errors_to_json(json_response.errors, data_tag);
+                            errors.append(&mut parse_errors);
+                        }
+                    }
+                    Err(e) => {
+                        // Add error for JSON conversion failure
+                        errors.push(sovd_interfaces::error::DataError {
+                            path: format!("/{data_tag}/{ecu_name}"),
+                            error: sovd_interfaces::error::ApiErrorResponse {
+                                message: format!("Failed to convert response to JSON: {e}"),
+                                error_code: sovd_interfaces::error::ErrorCode::VendorSpecific,
+                                vendor_code: Some(VendorErrorCode::ErrorInterpretingMessage),
+                                parameters: None,
+                                // todo: x-ecu-name: Some(ecu_name)
+                                error_source: Some("ecu".to_owned()),
+                                schema: None,
+                            },
+                        });
                     }
                 }
-                Err(e) => {
-                    // Add error for JSON conversion failure
-                    errors.push(sovd_interfaces::error::DataError {
-                        path: format!("/{data_tag}/{ecu_name}"),
-                        error: sovd_interfaces::error::ApiErrorResponse {
-                            message: format!("Failed to convert response to JSON: {e}"),
-                            error_code: sovd_interfaces::error::ErrorCode::VendorSpecific,
-                            vendor_code: Some(VendorErrorCode::ErrorInterpretingMessage),
-                            parameters: None,
-                            // todo: x-ecu-name: Some(ecu_name)
-                            error_source: Some("ecu".to_owned()),
-                            schema: None,
-                        },
-                    });
+            } else {
+                // Map negative response to API error and add to errors list
+                match response.as_nrc() {
+                    Ok(nrc) => {
+                        errors.push(sovd_interfaces::error::DataError {
+                            path: format!("/{data_tag}/{ecu_name}"),
+                            error: nrc_to_api_error_response(nrc, false),
+                        });
+                    }
+                    Err(_) => todo!(),
                 }
             }
         }
@@ -394,7 +418,7 @@ fn handle_ecu_response<R: DiagServiceResponse>(
             let api_error: ApiError = e.into();
             let (error_code, vendor_code) = api_error.error_and_vendor_code();
             errors.push(sovd_interfaces::error::DataError {
-                path: format!("/data/{ecu_name}"),
+                path: format!("/{data_tag}/{ecu_name}"),
                 error: sovd_interfaces::error::ApiErrorResponse {
                     message: api_error.to_string(),
                     error_code,
@@ -434,7 +458,6 @@ pub(crate) mod tests {
     use std::sync::Arc;
 
     use cda_interfaces::UdsEcu;
-    use indexmap::IndexMap;
     use tokio::sync::RwLock;
 
     use super::WebserverFgState;
@@ -457,7 +480,7 @@ pub(crate) mod tests {
                 ))),
             }),
             functional_group_name,
-            fg_executions: Arc::new(RwLock::new(IndexMap::new())),
+            fg_executions: Arc::new(RwLock::new(HashMap::default())),
         }
     }
 }
