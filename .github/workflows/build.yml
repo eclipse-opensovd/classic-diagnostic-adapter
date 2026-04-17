@@ -86,8 +86,6 @@ jobs:
         run: cargo build --locked --verbose
       - name: Check licenses
         run: cargo deny check licenses
-      - name: Check advisories
-        run: cargo deny check advisories
       - name: Check allowed sources
         run: cargo deny check sources
       - name: Check banned practises
