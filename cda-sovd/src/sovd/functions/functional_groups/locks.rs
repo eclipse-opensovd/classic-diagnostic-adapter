@@ -113,6 +113,7 @@ pub(crate) mod lock {
     }
 }
 
+/// [[ dimpl~functional-communication-locks, Functional Communication Locks ]]
 pub(crate) async fn post<T: UdsEcu + Clone>(
     UseApi(Secured(sec_plugin), _): UseApi<Secured, ()>,
     State(state): State<WebserverFgState<T>>,

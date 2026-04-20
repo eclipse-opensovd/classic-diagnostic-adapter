@@ -323,6 +323,7 @@ async fn connection_handler(
     Ok((intx, outrx))
 }
 
+/// [[ dimpl~doip-connection-management, `DoIP` Connection Management ]]
 #[tracing::instrument(
     skip_all
     fields(
@@ -746,6 +747,7 @@ fn spawn_gateway_receiver_task(
     });
 }
 
+/// [[ dimpl~doip-alive-check, `DoIP` Alive Check ]]
 async fn send_alive_request(conn: &EcuConnectionTarget) -> Result<(), ()> {
     async fn handle_alive_request_response(conn: &EcuConnectionTarget) {
         if tokio::time::timeout(Duration::from_secs(1), async {

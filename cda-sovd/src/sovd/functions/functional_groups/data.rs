@@ -27,6 +27,7 @@ use crate::sovd::{
     error::{ApiError, ErrorWrapper},
 };
 
+/// [[ dimpl~functional-communication-data, Functional Communication Data ]]
 pub(crate) async fn get<T: UdsEcu + Clone>(
     UseApi(Secured(security_plugin), _): UseApi<Secured, ()>,
     WithRejection(Query(query), _): WithRejection<

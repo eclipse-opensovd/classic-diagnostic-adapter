@@ -94,6 +94,7 @@ pub(crate) async fn get(
     )
 }
 
+/// [[ dimpl~sovd-api-flash-data-transfer, Flash Data Transfer ]]
 pub(crate) mod request_download {
     use aide::{UseApi, transform::TransformOperation};
     use axum::{
