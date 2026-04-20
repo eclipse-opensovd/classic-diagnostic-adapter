@@ -13,6 +13,7 @@ DLT Logging Plugin
 
 .. arch:: DLT Logging
     :id: arch~plugin-dlt-logging
+    :links: dimpl~plugin-dlt-logging
     :status: draft
 
     The DLT logging integration adds an optional tracing output that forwards application log and trace events
@@ -74,6 +75,7 @@ DLT Logging Plugin
 
 .. arch:: DLT Logging - Configuration
     :id: arch~plugin-dlt-logging-configuration
+    :links: dimpl~plugin-dlt-logging-configuration
     :status: draft
 
     The DLT logging configuration is part of the application-wide logging configuration and is deserialized from
@@ -108,6 +110,7 @@ DLT Logging Plugin
 
 .. arch:: DLT Logging - Context Annotation
     :id: arch~plugin-dlt-logging-context-annotation
+    :links: dimpl~plugin-dlt-logging-context-annotation
     :status: draft
 
     Each subsystem of the CDA annotates its tracing spans with a DLT context identifier. The DLT subscriber
