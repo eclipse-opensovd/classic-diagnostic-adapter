@@ -35,6 +35,7 @@ use crate::{
     sovd::error::{ApiError, VendorErrorCode},
 };
 
+/// [[ dimpl~functional-communication-modes, Functional Communication Modes ]]
 pub(crate) async fn get(
     WithRejection(Query(query), _): WithRejection<
         Query<sovd_interfaces::functions::functional_groups::modes::Query>,

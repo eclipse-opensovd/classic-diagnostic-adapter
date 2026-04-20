@@ -34,6 +34,7 @@ pub(crate) mod diag_service {
         },
     };
 
+    /// [[ dimpl~functional-communication-operations, Functional Communication Operations ]]
     pub(crate) async fn post<T: UdsEcu + Clone>(
         headers: HeaderMap,
         UseApi(Secured(security_plugin), _): UseApi<Secured, ()>,
