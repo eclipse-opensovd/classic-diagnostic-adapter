@@ -107,7 +107,7 @@ impl<'a> Payload<'a> {
         &mut self,
         start: usize,
     ) -> Result<(), DiagServiceError> {
-        self.push_slice(start, self.data.len())
+        self.push_slice(start, self.len())
     }
 
     pub(in crate::diag_kernel) fn push_slice(
