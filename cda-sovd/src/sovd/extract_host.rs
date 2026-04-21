@@ -1,8 +1,19 @@
-#![allow(deprecated)]
+/*
+ * SPDX-License-Identifier: Apache-2.0
+ * SPDX-FileCopyrightText: 2025 The Contributors to Eclipse OpenSOVD (see CONTRIBUTORS)
+ *
+ * See the NOTICE file(s) distributed with this work for additional
+ * information regarding copyright ownership.
+ *
+ * This program and the accompanying materials are made available under the
+ * terms of the Apache License Version 2.0 which is available at
+ * https://www.apache.org/licenses/LICENSE-2.0
+ */
 
-use super::rejection::{FailedToResolveHost, HostRejection};
-use axum_core::{
+use aide::OperationInput;
+use axum::{
     extract::{FromRequestParts, OptionalFromRequestParts},
+    response::{IntoResponse, Response},
     RequestPartsExt,
 };
 use http::{
@@ -27,27 +38,28 @@ const X_FORWARDED_HOST_HEADER_KEY: &str = "X-Forwarded-Host";
 ///
 /// Note that user agents can set `X-Forwarded-Host` and `Host` headers to arbitrary values so make
 /// sure to validate them to avoid security issues.
-#[deprecated = "will be removed in the next version; see https://github.com/tokio-rs/axum/issues/3442"]
 #[derive(Debug, Clone)]
-pub struct Host(pub String);
+pub(crate) struct ExtractHost(pub(crate) String);
 
-impl<S> FromRequestParts<S> for Host
+impl OperationInput for ExtractHost {}
+
+impl<S> FromRequestParts<S> for ExtractHost
 where
     S: Send + Sync,
 {
-    type Rejection = HostRejection;
+    type Rejection = ExtractHostRejection;
 
     async fn from_request_parts(parts: &mut Parts, _state: &S) -> Result<Self, Self::Rejection> {
         parts
-            .extract::<Option<Host>>()
+            .extract::<Option<ExtractHost>>()
             .await
             .ok()
             .flatten()
-            .ok_or(HostRejection::FailedToResolveHost(FailedToResolveHost))
+            .ok_or(ExtractHostRejection::FailedToResolveHost(FailedToResolveHost))
     }
 }
 
-impl<S> OptionalFromRequestParts<S> for Host
+impl<S> OptionalFromRequestParts<S> for ExtractHost
 where
     S: Send + Sync,
 {
@@ -58,7 +70,7 @@ where
         _state: &S,
     ) -> Result<Option<Self>, Self::Rejection> {
         if let Some(host) = parse_forwarded(&parts.headers) {
-            return Ok(Some(Host(host.to_owned())));
+            return Ok(Some(ExtractHost(host.to_owned())));
         }
 
         if let Some(host) = parts
@@ -66,7 +78,7 @@ where
             .get(X_FORWARDED_HOST_HEADER_KEY)
             .and_then(|host| host.to_str().ok())
         {
-            return Ok(Some(Host(host.to_owned())));
+            return Ok(Some(ExtractHost(host.to_owned())));
         }
 
         if let Some(host) = parts
@@ -74,14 +86,36 @@ where
             .get(http::header::HOST)
             .and_then(|host| host.to_str().ok())
         {
-            return Ok(Some(Host(host.to_owned())));
+            return Ok(Some(ExtractHost(host.to_owned())));
         }
 
         if let Some(authority) = parts.uri.authority() {
-            return Ok(Some(Host(parse_authority(authority).to_owned())));
+            return Ok(Some(ExtractHost(parse_authority(authority).to_owned())));
         }
 
         Ok(None)
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct FailedToResolveHost;
+
+impl IntoResponse for FailedToResolveHost {
+    fn into_response(self) -> Response {
+        (http::StatusCode::BAD_REQUEST, "No host found in request").into_response()
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+pub(crate) enum ExtractHostRejection {
+    FailedToResolveHost(FailedToResolveHost),
+}
+
+impl IntoResponse for ExtractHostRejection {
+    fn into_response(self) -> Response {
+        match self {
+            Self::FailedToResolveHost(rejection) => rejection.into_response(),
+        }
     }
 }
 
