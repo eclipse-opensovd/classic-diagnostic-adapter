@@ -15,7 +15,7 @@ use axum::{
     extract::{OriginalUri, Query},
     response::{IntoResponse, Response},
 };
-use axum_extra::extract::{Host, WithRejection};
+use axum_extra::extract::WithRejection;
 use cda_interfaces::{
     DynamicPlugin, HashMap, UdsEcu,
     diagservices::{
@@ -26,6 +26,7 @@ use cda_plugin_security::SecurityPlugin;
 
 use crate::sovd::{
     error::{ApiError, ErrorWrapper, api_error_from_diag_response},
+    extract_host::ExtractHost,
     resource_response,
 };
 
@@ -83,7 +84,7 @@ pub(crate) async fn get(
         Query<sovd_interfaces::IncludeSchemaQuery>,
         ApiError,
     >,
-    UseApi(Host(host), _): UseApi<Host, String>,
+    UseApi(ExtractHost(host), _): UseApi<ExtractHost, String>,
     OriginalUri(uri): OriginalUri,
 ) -> Response {
     resource_response(

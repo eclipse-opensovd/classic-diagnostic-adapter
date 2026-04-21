@@ -55,6 +55,7 @@ use crate::sovd::components::ecu::{
 pub(crate) mod apps;
 pub(crate) mod components;
 pub(crate) mod error;
+pub(crate) mod extract_host;
 pub(crate) mod functions;
 pub(crate) mod locks;
 

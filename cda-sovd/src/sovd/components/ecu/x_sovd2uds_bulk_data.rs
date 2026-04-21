@@ -15,16 +15,16 @@ use axum::{
     extract::{OriginalUri, Query},
     response::Response,
 };
-use axum_extra::extract::{Host, WithRejection};
+use axum_extra::extract::WithRejection;
 
-use crate::sovd::{error::ApiError, resource_response};
+use crate::sovd::{error::ApiError, extract_host::ExtractHost, resource_response};
 
 pub(crate) async fn get(
     WithRejection(Query(query), _): WithRejection<
         Query<sovd_interfaces::IncludeSchemaQuery>,
         ApiError,
     >,
-    UseApi(Host(host), _): UseApi<Host, String>,
+    UseApi(ExtractHost(host), _): UseApi<ExtractHost, String>,
     OriginalUri(uri): OriginalUri,
 ) -> Response {
     resource_response(
