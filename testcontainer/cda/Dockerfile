@@ -105,6 +105,8 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry,sharing=locked \
 FROM debian:trixie-slim AS runtime-base
 RUN apt-get update && apt-get install -y --no-install-recommends \
     iproute2 \
+    curl \
+    jq \
     libssl-dev \
     && rm -rf /var/lib/apt/lists/*
 

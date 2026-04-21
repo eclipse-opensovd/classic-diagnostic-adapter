@@ -28,6 +28,7 @@ from odxtools.specialdatagroupcaption import SpecialDataGroupCaption
 from authentication import add_authentication_services
 from communication_control import add_communication_control_services
 from comparams import generate_comparam_refs
+from functional_groups import generate_functional_groups
 from helper import ref
 from metadata import (
     add_functional_classes,
@@ -264,3 +265,13 @@ generate_for_ecu(
     functional_address=0xFFFF,
     variants=[("App_1010", 0x001010)],
 )
+
+generate_for_ecu(
+    ecu_name="FSNR2000",
+    logical_address=0x2000,
+    gateway_address=0x2000,
+    functional_address=0xFFFF,
+    variants=[("Boot_Variant", 0xFF0000), ("App_0101", 0x000101)],
+)
+
+generate_functional_groups("functional_groups.pdx")
