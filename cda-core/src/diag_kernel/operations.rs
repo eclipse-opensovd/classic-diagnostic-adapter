@@ -17,7 +17,7 @@ use cda_database::datatypes::{
     PhysicalType,
 };
 use cda_interfaces::{
-    DataParseError, DiagServiceError,
+    DiagServiceError,
     util::{decode_hex, tracing::print_hex},
 };
 
@@ -135,6 +135,13 @@ fn compu_lookup(
     is_negative_response: bool,
     data: &[u8],
 ) -> Result<DiagDataValue, DiagServiceError> {
+    if matches!(category, datatypes::CompuCategory::Linear)
+        && compu_method.internal_to_phys.scales.is_empty()
+    {
+        return Err(DiagServiceError::InvalidDatabase(
+            "LINEAR COMPU-METHOD must have exactly one COMPU-SCALE".to_owned(),
+        ));
+    }
     let lookup = DiagDataValue::new(diag_type, data)?;
     match compu_method.internal_to_phys.scales.iter().find(|scale| {
         let lower = scale.lower_limit.as_ref();
@@ -165,7 +172,6 @@ fn compu_lookup(
             )),
         },
         None => {
-            // lookup NRCs from iso for negative responses
             if is_negative_response {
                 let lookup: u32 = lookup.try_into()?;
                 if lookup <= 0xFF {
@@ -180,10 +186,13 @@ fn compu_lookup(
                     ))
                 }
             } else {
-                Err(DiagServiceError::DataError(DataParseError {
-                    value: print_hex(data, 20),
-                    details: "Value outside of expected range".to_owned(),
-                }))
+                // Value has no matching compu-method scale; fall back to raw numeric representation
+                // so parsing can continue rather than aborting the whole response.
+                tracing::debug!(
+                    value = print_hex(data, 20),
+                    "compu_lookup: value outside defined scales, using raw value"
+                );
+                DiagDataValue::new(diag_type, data)
             }
         }
     }
@@ -2030,7 +2039,7 @@ mod tests {
 
     #[test]
     fn test_compu_lookup_scale_linear_value_outside_intervals() {
-        // Value outside all intervals should return error
+        // Value outside all intervals falls back to raw value so parsing can continue
         let compu_method = CompuMethod {
             category: CompuCategory::ScaleLinear,
             internal_to_phys: CompuFunction {
@@ -2053,17 +2062,19 @@ mod tests {
             },
         };
 
-        // x=5 is outside [10, 20] -> lower limit
+        // x=5 is outside [10, 20] -> falls back to raw value (parsing continues)
         let data = 5u32.to_be_bytes();
         let result =
             super::uds_data_to_serializable(DataType::UInt32, Some(&compu_method), false, &data);
-        assert!(result.is_err());
+        let raw: u32 = result.unwrap().try_into().unwrap();
+        assert_eq!(raw, 5);
 
-        // x=25 is outside [10, 20] -> upper limit
+        // x=25 is outside [10, 20] -> falls back to raw value (parsing continues)
         let data = 25u32.to_be_bytes();
         let result =
             super::uds_data_to_serializable(DataType::UInt32, Some(&compu_method), false, &data);
-        assert!(result.is_err());
+        let raw: u32 = result.unwrap().try_into().unwrap();
+        assert_eq!(raw, 25);
     }
 
     #[test]

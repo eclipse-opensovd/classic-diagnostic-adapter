@@ -912,6 +912,7 @@ impl<S: EcuGateway, R: DiagServiceResponse, T: EcuManager<Response = R>> UdsMana
         dtc_code: DtcCode,
         include_schema: bool,
         memory_selection: Option<u8>,
+        scope: &str,
     ) -> Result<(Option<ExtendedDataRecords>, Option<serde_json::Value>), DiagServiceError> {
         fn extract_schema_properties(schema_desc: &SchemaDescription) -> Option<serde_json::Value> {
             // todo after solving #54: we are missing the 'Selector' and the case name here
@@ -924,15 +925,20 @@ impl<S: EcuGateway, R: DiagServiceResponse, T: EcuManager<Response = R>> UdsMana
             schema.map(|schema| serde_json::Value::Object(schema.clone()))
         }
 
+        let ext_data_service_type = if DtcReadInformationFunction::UserMemoryDtcByStatusMask
+            .default_scope()
+            .eq_ignore_ascii_case(scope)
+        {
+            DtcReadInformationFunction::UserMemoryDtcExtDataRecordByDtcNumber
+        } else {
+            DtcReadInformationFunction::FaultMemoryExtDataRecordByDtcNumber
+        };
         let (extended_data_response, _scope, schema_desc) = self
             .request_extended_data(
                 ecu_name,
                 security_plugin,
                 dtc_code,
-                vec![
-                    DtcReadInformationFunction::FaultMemoryExtDataRecordByDtcNumber,
-                    DtcReadInformationFunction::UserMemoryDtcExtDataRecordByDtcNumber,
-                ],
+                vec![ext_data_service_type],
                 memory_selection,
                 include_schema,
             )
@@ -1000,6 +1006,7 @@ impl<S: EcuGateway, R: DiagServiceResponse, T: EcuManager<Response = R>> UdsMana
         dtc_code: DtcCode,
         include_schema: bool,
         memory_selection: Option<u8>,
+        scope: &str,
     ) -> Result<(Option<ExtendedSnapshots>, Option<serde_json::Value>), DiagServiceError> {
         fn extract_schema_properties(schema_desc: &SchemaDescription) -> Option<serde_json::Value> {
             let param_properties = schema_desc.get_param_properties()?;
@@ -1018,16 +1025,20 @@ impl<S: EcuGateway, R: DiagServiceResponse, T: EcuManager<Response = R>> UdsMana
                 Some(serde_json::Value::Object(schema))
             }
         }
-
+        let snapshot_service_type = if DtcReadInformationFunction::UserMemoryDtcByStatusMask
+            .default_scope()
+            .eq_ignore_ascii_case(scope)
+        {
+            DtcReadInformationFunction::UserMemoryDtcSnapshotRecordByDtcNumber
+        } else {
+            DtcReadInformationFunction::FaultMemorySnapshotRecordByDtcNumber
+        };
         let (snapshot_data_response, _scope, schema_desc) = self
             .request_extended_data(
                 ecu_name,
                 security_plugin,
                 dtc_code,
-                vec![
-                    DtcReadInformationFunction::FaultMemorySnapshotRecordByDtcNumber,
-                    DtcReadInformationFunction::UserMemoryDtcSnapshotRecordByDtcNumber,
-                ],
+                vec![snapshot_service_type],
                 memory_selection,
                 include_schema,
             )
@@ -2278,33 +2289,7 @@ impl<S: EcuGateway, R: DiagServiceResponse, T: EcuManager<Response = R>> UdsEcu
     ) -> Result<DtcExtendedInfo, DiagServiceError> {
         let dtc_code = decode_dtc_from_str(sae_dtc)?;
 
-        let (snapshots, snapshot_schema) = if include_snapshot {
-            self.map_snapshots(
-                ecu_name,
-                security_plugin,
-                dtc_code,
-                include_schema,
-                memory_selection,
-            )
-            .await?
-        } else {
-            (None, None)
-        };
-
-        let (extended_records, extended_schema) = if include_extended_data {
-            self.map_extended_data(
-                ecu_name,
-                security_plugin,
-                dtc_code,
-                include_schema,
-                memory_selection,
-            )
-            .await?
-        } else {
-            (None, None)
-        };
-
-        let mut dtc_by_mask = self
+        let mut dtc_by_mask: HashMap<DtcCode, DtcRecordAndStatus> = self
             .ecu_dtc_by_mask(
                 ecu_name,
                 security_plugin,
@@ -2321,6 +2306,35 @@ impl<S: EcuGateway, R: DiagServiceResponse, T: EcuManager<Response = R>> UdsEcu
                 .ok_or(DiagServiceError::InvalidRequest(format!(
                     "DTC {sae_dtc} not found in ECU {ecu_name}"
                 )))?;
+
+        let scope = &record_and_status.scope.clone();
+        let (snapshots, snapshot_schema) = if include_snapshot {
+            self.map_snapshots(
+                ecu_name,
+                security_plugin,
+                dtc_code,
+                include_schema,
+                memory_selection,
+                scope,
+            )
+            .await?
+        } else {
+            (None, None)
+        };
+
+        let (extended_records, extended_schema) = if include_extended_data {
+            self.map_extended_data(
+                ecu_name,
+                security_plugin,
+                dtc_code,
+                include_schema,
+                memory_selection,
+                scope,
+            )
+            .await?
+        } else {
+            (None, None)
+        };
 
         Ok(DtcExtendedInfo {
             record_and_status,

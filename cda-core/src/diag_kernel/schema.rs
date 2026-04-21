@@ -255,6 +255,7 @@ fn params_to_schema(
     })
 }
 
+#[allow(clippy::too_many_lines)]
 fn dop_variant_to_schema(
     ctx: &str,
     ecu_db: &DiagnosticDatabase,
@@ -338,11 +339,25 @@ fn dop_variant_to_schema(
                 schema.insert(name, static_field_schema.into());
             }
         }
-        datatypes::DataOperationVariant::EnvDataDesc(_env_data_desc_dop) => {
-            // todo: implement env data desc dop
-            return Err(DiagServiceError::ParameterConversionError(format!(
-                "Mapping {ctx}: EnvDataDesc DOPs are not yet supported in JSON Schema."
-            )));
+        datatypes::DataOperationVariant::EnvDataDesc(env_data_desc_dop) => {
+            let variants: Vec<serde_json::Value> = env_data_desc_dop
+                .env_datas()
+                .into_iter()
+                .flat_map(|v| v.iter())
+                .filter_map(|dop| {
+                    let env_data = dop.specific_data_as_env_data()?;
+                    let params: Vec<datatypes::Parameter> = env_data
+                        .params()
+                        .into_iter()
+                        .flat_map(|p| p.iter())
+                        .map(datatypes::Parameter)
+                        .collect();
+                    params_to_schema(&params, ctx, ecu_db, request).map(Into::into)
+                })
+                .collect();
+            if !variants.is_empty() {
+                schema.insert(name, schemars::json_schema!({ "any-of": variants }).into());
+            }
         }
         datatypes::DataOperationVariant::EnvData(_env_data_dop) => {
             return Err(DiagServiceError::ParameterConversionError(format!(
@@ -372,13 +387,33 @@ fn dop_variant_to_schema(
                 {
                     schema.insert(name, serde_json::Value::Array(vec![struct_schema.into()]));
                 }
-            } else if let Some(_env_data_desc) =
-                dynamic_length_field.field().and_then(|f| f.env_data_desc())
+            } else if let Some(env_data_desc) = dynamic_length_field
+                .field()
+                .and_then(|f| f.env_data_desc())
+                .and_then(|dop| dop.specific_data_as_env_data_desc())
             {
-                return Err(DiagServiceError::ParameterConversionError(format!(
-                    "Mapping {ctx}: DynamicLengthField DopField is an EnvDataDesc which is not \
-                     yet supported in JSON Schema."
-                )));
+                let variants: Vec<serde_json::Value> = env_data_desc
+                    .env_datas()
+                    .into_iter()
+                    .flat_map(|v| v.iter())
+                    .filter_map(|dop| {
+                        let env_data = dop.specific_data_as_env_data()?;
+                        let params: Vec<datatypes::Parameter> = env_data
+                            .params()
+                            .into_iter()
+                            .flat_map(|p| p.iter())
+                            .map(datatypes::Parameter)
+                            .collect();
+                        params_to_schema(&params, ctx, ecu_db, request).map(Into::into)
+                    })
+                    .collect();
+                if !variants.is_empty() {
+                    schema.insert(
+                        name,
+                        schemars::json_schema!({ "type": "array", "items": { "any-of": variants } })
+                            .into(),
+                    );
+                }
             } else {
                 return Err(DiagServiceError::ParameterConversionError(format!(
                     "Mapping {ctx}: DynamicLengthField DopField value is neither BasicStruct nor \
@@ -424,11 +459,30 @@ fn map_dop_field_to_schema(
         .and_then(|s| s.specific_data_as_structure().map(datatypes::StructureDop))
     {
         map_struct_to_schema(&basic_struct, ctx, ecu_db, request)
-    } else if let Some(_env_data_desc) = dop_field.env_data_desc() {
-        tracing::trace!(
-            "Mapping {ctx}: EnvDataDesc DopFields are not yet supported in JSON Schema. skipping"
-        );
-        None
+    } else if let Some(env_data_desc) = dop_field
+        .env_data_desc()
+        .and_then(|dop| dop.specific_data_as_env_data_desc())
+    {
+        let variants: Vec<serde_json::Value> = env_data_desc
+            .env_datas()
+            .into_iter()
+            .flat_map(|v| v.iter())
+            .filter_map(|dop| {
+                let env_data = dop.specific_data_as_env_data()?;
+                let params: Vec<datatypes::Parameter> = env_data
+                    .params()
+                    .into_iter()
+                    .flat_map(|p| p.iter())
+                    .map(datatypes::Parameter)
+                    .collect();
+                params_to_schema(&params, ctx, ecu_db, request).map(Into::into)
+            })
+            .collect();
+        if variants.is_empty() {
+            None
+        } else {
+            Some(schemars::json_schema!({ "any-of": variants }))
+        }
     } else {
         tracing::trace!(
             "Mapping {ctx}: DopField value is neither BasicStruct nor EnvDataDesc. skipping"
