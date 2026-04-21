@@ -23,6 +23,29 @@ use cda_interfaces::{
     CompuScaleInfo, DiagServiceError, ParameterTypeMetadata, ResponseParameterInfo,
 };
 
+/// Parse a limit value string as a `u64`.
+///
+/// Tries integer parsing first; falls back to `f64` parsing with
+/// truncation for values like `"3.0"` that ODX databases occasionally use.
+// f64->u64 cast is intentional: ODX limit values are expected to fit
+// within u64; fractional parts are truncated by design.
+#[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+fn parse_limit_as_u64(value: &str) -> Option<u64> {
+    value
+        .parse::<u64>()
+        .ok()
+        .or_else(|| value.parse::<f64>().ok().map(|f| f as u64))
+}
+
+/// Shorthand for the empty/fallback `ParameterTypeMetadata::Value` variant.
+fn default_value_metadata() -> ParameterTypeMetadata {
+    ParameterTypeMetadata::Value {
+        physical_default_value: None,
+        coded_default_value: None,
+        compu_scales: Vec::new(),
+    }
+}
+
 /// Resolve a PHYS-CONST text value to its coded integer via the
 /// parameter's DOP -> `NormalDOP` -> `CompuMethod` chain.
 ///
@@ -37,9 +60,6 @@ use cda_interfaces::{
 ///
 /// Returns `None` for unsupported categories (`Linear`, `ScaleLinear`, …) or
 /// when no matching scale entry is found.
-// f64->u64 cast is intentional: ODX values are expected to fit
-// within u64; fractional parts are truncated by design.
-#[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
 pub(crate) fn resolve_phys_const_coded_value(
     param: &datatypes::Parameter<'_>,
     phys_value: &str,
@@ -77,20 +97,13 @@ pub(crate) fn resolve_phys_const_coded_value(
                 if !matches!(upper_interval, datatypes::IntervalType::Closed) {
                     continue;
                 }
-                return limit.value().and_then(|v| {
-                    v.parse::<u64>()
-                        .ok()
-                        .or_else(|| v.parse::<f64>().ok().map(|f| f as u64))
-                });
+                return limit.value().and_then(parse_limit_as_u64);
             }
             None
         }
         datatypes::CompuCategory::Identical => {
             // For IDENTICAL the physical string is also the coded value.
-            phys_value
-                .parse::<u64>()
-                .ok()
-                .or_else(|| phys_value.parse::<f64>().ok().map(|f| f as u64))
+            parse_limit_as_u64(phys_value)
         }
         _ => None,
     }
@@ -100,13 +113,10 @@ pub(crate) fn resolve_phys_const_coded_value(
 ///
 /// Returns `(physical_default_value, coded_default_value, compu_scales)`.
 /// Used by both request-side and response-side metadata extraction.
-// f64->u64 cast is intentional: ODX values are expected to fit
-// within u64; fractional parts are truncated by design.
-#[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
 pub(crate) fn extract_value_dop_info(
     param: &datatypes::Parameter<'_>,
 ) -> (Option<String>, Option<u64>, Vec<CompuScaleInfo>) {
-    let Some(value_data) = param.0.specific_data_as_value() else {
+    let Some(value_data) = param.specific_data_as_value() else {
         return (None, None, Vec::new());
     };
 
@@ -137,20 +147,12 @@ pub(crate) fn extract_value_dop_info(
             let compu_const_vt = scale
                 .consts()
                 .and_then(|cv| cv.vt().or_else(|| cv.vt_ti()).map(ToOwned::to_owned));
-            let lower = scale.lower_limit().and_then(|l| {
-                l.value().and_then(|v| {
-                    v.parse::<u64>()
-                        .ok()
-                        .or_else(|| v.parse::<f64>().ok().map(|f| f as u64))
-                })
-            });
-            let upper = scale.upper_limit().and_then(|l| {
-                l.value().and_then(|v| {
-                    v.parse::<u64>()
-                        .ok()
-                        .or_else(|| v.parse::<f64>().ok().map(|f| f as u64))
-                })
-            });
+            let lower = scale
+                .lower_limit()
+                .and_then(|l| l.value().and_then(parse_limit_as_u64));
+            let upper = scale
+                .upper_limit()
+                .and_then(|l| l.value().and_then(parse_limit_as_u64));
             scales.push(CompuScaleInfo {
                 short_label,
                 lower_limit: lower,
@@ -169,14 +171,24 @@ pub(crate) fn extract_value_dop_info(
                 None
             }
         }),
-        datatypes::CompuCategory::Identical => pd
-            .parse::<u64>()
-            .ok()
-            .or_else(|| pd.parse::<f64>().ok().map(|f| f as u64)),
+        datatypes::CompuCategory::Identical => parse_limit_as_u64(pd),
         _ => None,
     });
 
     (physical_default, coded_default, scales)
+}
+
+/// Extract `CodedConst` metadata from a parameter, falling back to the
+/// default `Value` variant when no coded value is present.
+fn extract_coded_const_metadata(param: &datatypes::Parameter<'_>) -> ParameterTypeMetadata {
+    param
+        .specific_data_as_coded_const()
+        .and_then(|cc| cc.coded_value())
+        .map_or(default_value_metadata(), |v| {
+            ParameterTypeMetadata::CodedConst {
+                coded_value: v.to_owned(),
+            }
+        })
 }
 
 /// Extract [`ParameterTypeMetadata`] for a request-side parameter.
@@ -189,19 +201,7 @@ pub(crate) fn extract_request_param_type(
     name: &str,
 ) -> Result<ParameterTypeMetadata, DiagServiceError> {
     let param_type = match param.param_type()? {
-        datatypes::ParamType::CodedConst => param
-            .specific_data_as_coded_const()
-            .and_then(|cc| cc.coded_value())
-            .map_or(
-                ParameterTypeMetadata::Value {
-                    physical_default_value: None,
-                    coded_default_value: None,
-                    compu_scales: Vec::new(),
-                },
-                |v| ParameterTypeMetadata::CodedConst {
-                    coded_value: v.to_owned(),
-                },
-            ),
+        datatypes::ParamType::CodedConst => extract_coded_const_metadata(param),
         datatypes::ParamType::PhysConst => {
             let phys_value = param
                 .specific_data_as_phys_const()
@@ -228,11 +228,7 @@ pub(crate) fn extract_request_param_type(
                     service_name,
                     name
                 );
-                ParameterTypeMetadata::Value {
-                    physical_default_value: None,
-                    coded_default_value: None,
-                    compu_scales: Vec::new(),
-                }
+                default_value_metadata()
             }
         }
         _ => {
@@ -257,38 +253,19 @@ pub(crate) fn extract_response_param_type(
     param: &datatypes::Parameter<'_>,
 ) -> ParameterTypeMetadata {
     let Ok(pt) = param.param_type() else {
-        return ParameterTypeMetadata::Value {
-            physical_default_value: None,
-            coded_default_value: None,
-            compu_scales: Vec::new(),
-        };
+        return default_value_metadata();
     };
 
     match pt {
-        datatypes::ParamType::CodedConst => param
-            .0
-            .specific_data_as_coded_const()
-            .and_then(|cc| cc.coded_value())
-            .map_or(
-                ParameterTypeMetadata::Value {
-                    physical_default_value: None,
-                    coded_default_value: None,
-                    compu_scales: Vec::new(),
-                },
-                |v| ParameterTypeMetadata::CodedConst {
-                    coded_value: v.to_owned(),
-                },
-            ),
+        datatypes::ParamType::CodedConst => extract_coded_const_metadata(param),
         datatypes::ParamType::MatchingRequestParam => {
             let byte_length = param
-                .0
                 .specific_data_as_matching_request_param()
                 .map_or(0, |m| m.byte_length());
             ParameterTypeMetadata::MatchingRequestParam { byte_length }
         }
         datatypes::ParamType::PhysConst => {
             let phys_value = param
-                .0
                 .specific_data_as_phys_const()
                 .and_then(|p| p.phys_constant_value().map(ToOwned::to_owned));
             match phys_value {
@@ -296,11 +273,7 @@ pub(crate) fn extract_response_param_type(
                     phys_constant_value: v,
                     coded_value: None,
                 },
-                None => ParameterTypeMetadata::Value {
-                    physical_default_value: None,
-                    coded_default_value: None,
-                    compu_scales: Vec::new(),
-                },
+                None => default_value_metadata(),
             }
         }
         _ => {
@@ -323,7 +296,7 @@ pub(crate) fn byte_size_from_diag_coded_type(
 }
 
 pub(crate) fn byte_size_from_value_param(param: &datatypes::Parameter<'_>) -> (Option<u32>, bool) {
-    let Some(dop) = param.0.specific_data_as_value().and_then(|v| v.dop()) else {
+    let Some(dop) = param.specific_data_as_value().and_then(|v| v.dop()) else {
         return (None, false);
     };
     let data_op = datatypes::DataOperation(dop);
@@ -337,7 +310,7 @@ pub(crate) fn byte_size_from_value_param(param: &datatypes::Parameter<'_>) -> (O
 }
 
 pub(crate) fn byte_size_from_coded_const(param: &datatypes::Parameter<'_>) -> Option<u32> {
-    let cc = param.0.specific_data_as_coded_const()?;
+    let cc = param.specific_data_as_coded_const()?;
     let dct = cc.diag_coded_type()?;
     let dct: Result<datatypes::DiagCodedType, _> = dct.try_into();
     byte_size_from_diag_coded_type(dct)
@@ -351,7 +324,7 @@ pub(crate) fn expand_mux_cases(
     param: &datatypes::Parameter<'_>,
     mux_byte_position: u32,
 ) -> Vec<ResponseParameterInfo> {
-    let Some(value_data) = param.0.specific_data_as_value() else {
+    let Some(value_data) = param.specific_data_as_value() else {
         return Vec::new();
     };
     let Some(dop) = value_data.dop() else {
@@ -363,7 +336,6 @@ pub(crate) fn expand_mux_cases(
     };
 
     let switch_key_size = mux_dop
-        .0
         .switch_key()
         .and_then(|sk| sk.dop())
         .and_then(|dop| {
@@ -374,7 +346,10 @@ pub(crate) fn expand_mux_cases(
                 None
             }
         })
-        .unwrap_or(0);
+        .unwrap_or_else(|| {
+            tracing::warn!("MUX DOP switch-key size could not be determined; assuming 0");
+            0
+        });
 
     let Some(cases) = mux_dop.cases() else {
         return Vec::new();

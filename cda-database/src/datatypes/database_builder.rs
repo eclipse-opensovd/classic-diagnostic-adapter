@@ -698,28 +698,7 @@ impl<'a> EcuDataBuilder<'a> {
         byte_pos: u32,
         bit_pos: u32,
     ) -> WIPOffset<dataformat::Param<'a>> {
-        let specific_data = Some(
-            dataformat::ParamSpecificData::tag_as_value(dataformat::Value::create(
-                &mut self.fbb,
-                &dataformat::ValueArgs {
-                    physical_default_value: None,
-                    dop: Some(dop),
-                },
-            ))
-            .value_offset(),
-        );
-
-        self.create_param(&ParameterParams {
-            param_type: dataformat::ParamType::VALUE,
-            short_name: Some(name),
-            semantic: None,
-            sdgs: None,
-            physical_default_value: None,
-            byte_position: Some(byte_pos),
-            bit_position: Some(bit_pos),
-            specific_data_type: dataformat::ParamSpecificData::Value,
-            specific_data,
-        })
+        self.create_value_param_with_default(name, dop, byte_pos, bit_pos, None)
     }
 
     /// Like [`create_value_param`] but populates `PHYSICAL-DEFAULT-VALUE`.
