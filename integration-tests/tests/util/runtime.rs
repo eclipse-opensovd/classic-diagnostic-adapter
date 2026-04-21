@@ -452,6 +452,7 @@ fn write_config_toml(
     // The values in the config are the externally mapped ports and paths.
     config.server.port = 20002;
     config.doip.gateway_port = 13400;
+    config.functional_description.description_database = "functional_groups".into();
 
     "0.0.0.0".clone_into(&mut config.server.address);
     "/app/odx".clone_into(&mut config.database.path);

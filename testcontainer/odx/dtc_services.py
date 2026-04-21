@@ -7,7 +7,7 @@
 # This program and the accompanying materials are made available under the
 # terms of the Apache License Version 2.0 which is available at
 # https://www.apache.org/licenses/LICENSE-2.0
-
+from odxtools.addressing import Addressing
 from odxtools.compumethods.compucategory import CompuCategory
 from odxtools.compumethods.compumethod import CompuMethod
 from odxtools.diaglayers.diaglayerraw import DiagLayerRaw
@@ -25,12 +25,11 @@ from odxtools.response import Response, ResponseType
 from odxtools.standardlengthtype import StandardLengthType
 from odxtools.structure import Structure
 from odxtools.text import Text
+from odxtools.transmode import TransMode
 
 from helper import (
-    coded_const_int_parameter,
     find_dop_by_shortname,
     find_dtc_dop,
-    matching_request_parameter,
     sid_parameter_rq,
     sid_parameter_pr,
     derived_id,
@@ -47,6 +46,7 @@ def add_dtc_setting_service(
     name: str,
     setting_type: int,
     description: str,
+    is_functional: bool = False,
 ):
     """
     Add a DTC Setting service (0x85).
@@ -56,9 +56,17 @@ def add_dtc_setting_service(
         name: Service name (e.g., "DTC_Setting_On")
         setting_type: The setting type subfunction value
         description: Description of the setting type
+        is_functional: If the communication control service shall be added as a functional request
     """
+
+    name_suffix = ""
+
+    if is_functional:
+        setting_type = setting_type | 0x80  # set suppress response bit
+        name_suffix = "_Func"
+
     request = Request(
-        odx_id=derived_id(dlr, f"RQ.RQ_{name}"),
+        odx_id=derived_id(dlr, f"RQ.RQ_{name}{name_suffix}"),
         short_name=f"RQ_{name}",
         parameters=NamedItemList(
             [
@@ -69,32 +77,40 @@ def add_dtc_setting_service(
     )
     dlr.requests.append(request)
 
-    response = Response(
-        response_type=ResponseType.POSITIVE,
-        odx_id=derived_id(dlr, f"PR.PR_{name}"),
-        short_name=f"PR_{name}",
-        parameters=NamedItemList(
-            [
-                sid_parameter_pr(0x85 + 0x40),
-                matching_request_parameter_subfunction("SettingType"),
-            ]
-        ),
-    )
-    dlr.positive_responses.append(response)
+    pos_response_refs = []
+    if not is_functional:
+        response = Response(
+            response_type=ResponseType.POSITIVE,
+            odx_id=derived_id(dlr, f"PR.PR_{name}{name_suffix}"),
+            short_name=f"PR_{name}",
+            parameters=NamedItemList(
+                [
+                    sid_parameter_pr(0x85 + 0x40),
+                    matching_request_parameter_subfunction("SettingType"),
+                ]
+            ),
+        )
+        dlr.positive_responses.append(response)
+        pos_response_refs.append(ref(response))
 
     dlr.diag_comms_raw.append(
         DiagService(
-            odx_id=derived_id(dlr, f"DC.{name}"),
-            short_name=name,
+            odx_id=derived_id(dlr, f"DC.{name}{name_suffix}"),
+            short_name=name + name_suffix,
             long_name=description,
             functional_class_refs=[functional_class_ref(dlr, "DtcSetting")],
             request_ref=ref(request),
-            pos_response_refs=[ref(response)],
+            pos_response_refs=pos_response_refs,
+            addressing_raw=None if not is_functional else Addressing.FUNCTIONAL,
+            transmission_mode_raw=None if not is_functional else TransMode.SEND_ONLY,
         )
     )
 
 
-def add_dtc_setting_services(dlr: DiagLayerRaw):
+def add_dtc_setting_services(
+    dlr: DiagLayerRaw,
+    is_functional: bool = False,
+):
     """
     Add DTC Setting (0x85) services to the diagnostic layer.
 
@@ -110,6 +126,7 @@ def add_dtc_setting_services(dlr: DiagLayerRaw):
         "DTC_Setting_Mode_On",
         0x01,
         "DTC Setting On",
+        is_functional,
     )
 
     # 85 02 - DTC Setting Mode Off
@@ -118,6 +135,7 @@ def add_dtc_setting_services(dlr: DiagLayerRaw):
         "DTC_Setting_Mode_Off",
         0x02,
         "DTC Setting Off",
+        is_functional,
     )
 
     # 85 42 -  DTC Setting Mode TimeTravelDTCsOn (custom vendor-specific)
@@ -126,6 +144,7 @@ def add_dtc_setting_services(dlr: DiagLayerRaw):
         "DTC_Setting_Mode_TimeTravelDTCsOn",
         0x42,
         "DTC Setting Time Travel DTCs On",
+        is_functional,
     )
 
 
@@ -552,55 +571,13 @@ def add_dtc_clear_user_memory_service(dlr: DiagLayerRaw):
     - Request:  31 01 42 00  (RoutineControl / startRoutine / routineId 0x4200)
     - Response: 71 01 42 00  (positive response)
     """
-    name = "Clear_Diagnostic_User_Memory"
-    description = "Clear User-Defined DTC Memory"
+    from routines import add_routine
 
-    request = Request(
-        odx_id=derived_id(dlr, f"RQ.RQ_{name}"),
-        short_name=f"RQ_{name}",
-        parameters=NamedItemList(
-            [
-                sid_parameter_rq(0x31),
-                subfunction_rq(0x01, "RoutineControlType"),
-                coded_const_int_parameter(
-                    short_name="RoutineId",
-                    semantic="DATA",
-                    byte_position=2,
-                    coded_value_raw=str(0x4200),
-                    bit_length=16,
-                ),
-            ]
-        ),
-    )
-    dlr.requests.append(request)
-
-    response = Response(
-        response_type=ResponseType.POSITIVE,
-        odx_id=derived_id(dlr, f"PR.PR_{name}"),
-        short_name=f"PR_{name}",
-        parameters=NamedItemList(
-            [
-                sid_parameter_pr(0x31 + 0x40),
-                matching_request_parameter_subfunction("RoutineControlType"),
-                matching_request_parameter(
-                    short_name="RoutineId",
-                    semantic="DATA",
-                    byte_length=2,
-                    byte_position=2,
-                    request_byte_position=2,
-                ),
-            ]
-        ),
-    )
-    dlr.positive_responses.append(response)
-
-    dlr.diag_comms_raw.append(
-        DiagService(
-            odx_id=derived_id(dlr, f"DC.{name}"),
-            short_name=name,
-            long_name=description,
-            functional_class_refs=[functional_class_ref(dlr, "FaultMem")],
-            request_ref=ref(request),
-            pos_response_refs=[ref(response)],
-        )
+    add_routine(
+        dlr,
+        name="Clear_Diagnostic_User_Memory",
+        routine_id=0x4200,
+        routine_type="Start",
+        functional_class="FaultMem",
+        description="Clear User-Defined DTC Memory",
     )

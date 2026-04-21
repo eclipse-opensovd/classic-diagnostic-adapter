@@ -8,6 +8,7 @@
 # terms of the Apache License Version 2.0 which is available at
 # https://www.apache.org/licenses/LICENSE-2.0
 
+from odxtools.addressing import Addressing
 from odxtools.diaglayers.diaglayerraw import DiagLayerRaw
 from odxtools.diagservice import DiagService
 from odxtools.nameditemlist import NamedItemList
@@ -17,6 +18,7 @@ from odxtools.state import State
 from odxtools.statechart import StateChart
 from odxtools.statetransition import StateTransition
 from odxtools.statetransitionref import StateTransitionRef
+from odxtools.transmode import TransMode
 
 from helper import (
     sid_parameter_rq,
@@ -29,9 +31,7 @@ from helper import (
 )
 
 
-##
 # adds state charts, states and session switching services (10 xx) for them
-##
 
 
 def add_session_service(
@@ -39,27 +39,41 @@ def add_session_service(
     target_state_session: str,
     session: int,
     from_state_transitions_session: list[str],
+    suppress_positive_response: bool = False,
+    addressing: Addressing = None,
+    transmission_mode: TransMode = None,
+    suffix: str = "",
 ):
+    subfunction_byte = session
+    if suppress_positive_response:
+        subfunction_byte = subfunction_byte | 0x80
+
+    service_name = f"{target_state_session}_Start{suffix}"
+
     request = Request(
-        odx_id=derived_id(dlr, f"RQ..RQ_{target_state_session}_Start"),
-        short_name=f"RQ_{target_state_session}_Start",
+        odx_id=derived_id(dlr, f"RQ.RQ_{service_name}"),
+        short_name=f"RQ_{service_name}",
         parameters=NamedItemList(
-            [sid_parameter_rq(0x10), subfunction_rq(session, "SessionType")]
+            [sid_parameter_rq(0x10), subfunction_rq(subfunction_byte, "SessionType")]
         ),
     )
     dlr.requests.append(request)
-    response = Response(
-        response_type=ResponseType.POSITIVE,
-        odx_id=derived_id(dlr, f"PR.PR_{target_state_session}_Start"),
-        short_name=f"PR_{target_state_session}_Start",
-        parameters=NamedItemList(
-            [
-                sid_parameter_pr(0x10 + 0x40),
-                matching_request_parameter_subfunction("SessionType"),
-            ]
-        ),
-    )
-    dlr.positive_responses.append(response)
+
+    pos_response_refs = []
+    if not suppress_positive_response:
+        response = Response(
+            response_type=ResponseType.POSITIVE,
+            odx_id=derived_id(dlr, f"PR.PR_{service_name}"),
+            short_name=f"PR_{service_name}",
+            parameters=NamedItemList(
+                [
+                    sid_parameter_pr(0x10 + 0x40),
+                    matching_request_parameter_subfunction("SessionType"),
+                ]
+            ),
+        )
+        dlr.positive_responses.append(response)
+        pos_response_refs = [ref(response)]
 
     state_transition_refs_session = []
     session_transitions_session = NamedItemList(
@@ -78,12 +92,15 @@ def add_session_service(
 
     dlr.diag_comms_raw.append(
         DiagService(
-            odx_id=derived_id(dlr, f"DC.{target_state_session}_Start"),
-            short_name=f"{target_state_session}_Start",
+            odx_id=derived_id(dlr, f"DC.{service_name}"),
+            short_name=service_name,
+            semantic="SESSION",
             functional_class_refs=[functional_class_ref(dlr, "Session")],
             request_ref=ref(request),
-            pos_response_refs=[ref(response)],
+            pos_response_refs=pos_response_refs,
             state_transition_refs=state_transition_refs_session,
+            addressing_raw=addressing,
+            transmission_mode_raw=transmission_mode,
         )
     )
 
