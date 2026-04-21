@@ -97,6 +97,7 @@ where
     }
 }
 
+/// Rejection type used if the `ExtractHost` extractor is unable to resolve a host.
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct FailedToResolveHost;
 
@@ -106,6 +107,7 @@ impl IntoResponse for FailedToResolveHost {
     }
 }
 
+/// Rejection used for `ExtractHost`.
 #[derive(Debug, Clone, Copy)]
 pub(crate) enum ExtractHostRejection {
     FailedToResolveHost(FailedToResolveHost),
@@ -146,100 +148,101 @@ fn parse_authority(auth: &Authority) -> &str {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::test_helpers::TestClient;
-    use axum::{routing::get, Router};
-    use http::{header::HeaderName, Request};
+    use axum::http::{Request, header::HeaderName};
 
-    fn test_client() -> TestClient {
-        async fn host_as_body(Host(host): Host) -> String {
-            host
-        }
-
-        TestClient::new(Router::new().route("/", get(host_as_body)))
-    }
-
-    #[crate::test]
+    #[tokio::test]
     async fn host_header() {
         let original_host = "some-domain:123";
-        let host = test_client()
-            .get("/")
-            .header(http::header::HOST, original_host)
-            .await
-            .text()
-            .await;
-        assert_eq!(host, original_host);
+        let mut parts = Request::new(()).into_parts().0;
+        parts
+            .headers
+            .insert(http::header::HOST, original_host.parse().unwrap());
+
+        let host = parts.extract::<ExtractHost>().await.unwrap();
+        assert_eq!(host.0, original_host);
     }
 
-    #[crate::test]
+    #[tokio::test]
     async fn x_forwarded_host_header() {
         let original_host = "some-domain:456";
-        let host = test_client()
-            .get("/")
-            .header(X_FORWARDED_HOST_HEADER_KEY, original_host)
-            .await
-            .text()
-            .await;
-        assert_eq!(host, original_host);
+        let mut parts = Request::new(()).into_parts().0;
+        parts.headers.insert(
+            HeaderName::from_static("x-forwarded-host"),
+            original_host.parse().unwrap(),
+        );
+
+        let host = parts.extract::<ExtractHost>().await.unwrap();
+        assert_eq!(host.0, original_host);
     }
 
-    #[crate::test]
+    #[tokio::test]
     async fn x_forwarded_host_precedence_over_host_header() {
         let x_forwarded_host_header = "some-domain:456";
         let host_header = "some-domain:123";
-        let host = test_client()
-            .get("/")
-            .header(X_FORWARDED_HOST_HEADER_KEY, x_forwarded_host_header)
-            .header(http::header::HOST, host_header)
-            .await
-            .text()
-            .await;
-        assert_eq!(host, x_forwarded_host_header);
+        let mut parts = Request::new(()).into_parts().0;
+        parts.headers.insert(
+            HeaderName::from_static("x-forwarded-host"),
+            x_forwarded_host_header.parse().unwrap(),
+        );
+        parts
+            .headers
+            .insert(http::header::HOST, host_header.parse().unwrap());
+
+        let host = parts.extract::<ExtractHost>().await.unwrap();
+        assert_eq!(host.0, x_forwarded_host_header);
     }
 
-    #[crate::test]
-    async fn uri_host() {
-        let client = test_client();
-        let port = client.server_port();
-        let host = client.get("/").await.text().await;
-        assert_eq!(host, format!("127.0.0.1:{port}"));
-    }
-
-    #[crate::test]
+    #[tokio::test]
     async fn ip4_uri_host() {
         let mut parts = Request::new(()).into_parts().0;
         parts.uri = "https://127.0.0.1:1234/image.jpg".parse().unwrap();
-        let host = parts.extract::<Host>().await.unwrap();
+        let host = parts.extract::<ExtractHost>().await.unwrap();
         assert_eq!(host.0, "127.0.0.1:1234");
     }
 
-    #[crate::test]
+    #[tokio::test]
     async fn ip6_uri_host() {
         let mut parts = Request::new(()).into_parts().0;
         parts.uri = "http://cool:user@[::1]:456/file.txt".parse().unwrap();
-        let host = parts.extract::<Host>().await.unwrap();
+        let host = parts.extract::<ExtractHost>().await.unwrap();
         assert_eq!(host.0, "[::1]:456");
     }
 
-    #[crate::test]
+    #[tokio::test]
     async fn missing_host() {
         let mut parts = Request::new(()).into_parts().0;
-        let host = parts.extract::<Host>().await.unwrap_err();
-        assert!(matches!(host, HostRejection::FailedToResolveHost(_)));
+        let host = parts.extract::<ExtractHost>().await.unwrap_err();
+        assert!(matches!(host, ExtractHostRejection::FailedToResolveHost(_)));
     }
 
-    #[crate::test]
+    #[tokio::test]
     async fn optional_extractor() {
         let mut parts = Request::new(()).into_parts().0;
         parts.uri = "https://127.0.0.1:1234/image.jpg".parse().unwrap();
-        let host = parts.extract::<Option<Host>>().await.unwrap();
+        let host = parts.extract::<Option<ExtractHost>>().await.unwrap();
         assert!(host.is_some());
     }
 
-    #[crate::test]
+    #[tokio::test]
     async fn optional_extractor_none() {
         let mut parts = Request::new(()).into_parts().0;
-        let host = parts.extract::<Option<Host>>().await.unwrap();
+        let host = parts.extract::<Option<ExtractHost>>().await.unwrap();
         assert!(host.is_none());
+    }
+
+    #[tokio::test]
+    async fn prefers_forwarded_host() {
+        let mut parts = Request::new(()).into_parts().0;
+        parts.headers.insert(
+            FORWARDED,
+            "host=forwarded.example;proto=https".parse().unwrap(),
+        );
+        parts
+            .headers
+            .insert(http::header::HOST, "host.example".parse().unwrap());
+
+        let host = parts.extract::<ExtractHost>().await.unwrap();
+        assert_eq!(host.0, "forwarded.example");
     }
 
     #[test]
