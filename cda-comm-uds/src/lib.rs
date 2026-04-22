@@ -2927,6 +2927,18 @@ impl<S: EcuGateway, R: DiagServiceResponse, T: EcuManager<Response = R>> SchemaP
             .schema_for_responses(service)
             .await
     }
+
+    async fn schema_for_fg_request(
+        &self,
+        service: &DiagComm,
+        functional_group_name: &str,
+    ) -> Result<cda_interfaces::SchemaDescription, DiagServiceError> {
+        self.ecu_manager(&self.functional_description_database)?
+            .read()
+            .await
+            .schema_for_fg_request(service, functional_group_name)
+            .await
+    }
 }
 
 #[tracing::instrument(skip_all,

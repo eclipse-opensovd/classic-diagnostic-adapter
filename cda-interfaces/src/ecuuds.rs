@@ -847,6 +847,14 @@ pub mod mock {
         ) -> Result<SchemaDescription, DiagServiceError> {
             Err(DiagServiceError::NotFound(String::new()))
         }
+
+        async fn schema_for_fg_request(
+            &self,
+            _service: &crate::DiagComm,
+            _functional_group_name: &str,
+        ) -> Result<SchemaDescription, DiagServiceError> {
+            Err(DiagServiceError::NotFound(String::new()))
+        }
     }
 }
 
