@@ -113,7 +113,7 @@ where
 // type alias does not allow specifying hasher, we set the hasher globally.
 #[allow(clippy::implicit_hasher)]
 #[tracing::instrument(
-    skip(dynamic_router, ecu_uds, file_manager, locks),
+    skip(dynamic_router, ecu_uds, file_manager, locks, security_plugin),
     fields(
         flash_files_path = %flash_files_path
     )
@@ -126,6 +126,7 @@ pub async fn add_vehicle_routes<R, T, M, S>(
     locks: Arc<Locks>,
     functional_group_config: FunctionalDescriptionConfig,
     components_config: ComponentsConfig,
+    security_plugin: std::sync::Arc<S>,
 ) -> Result<(), DoipGatewaySetupError>
 where
     R: DiagServiceResponse,
@@ -140,6 +141,7 @@ where
         flash_files_path,
         file_manager,
         locks,
+        security_plugin,
     )
     .await;
 
