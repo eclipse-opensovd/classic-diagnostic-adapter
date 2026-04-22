@@ -23,7 +23,7 @@ use axum::{
 };
 use axum_extra::extract::WithRejection;
 use cda_interfaces::{
-    FunctionalDescriptionConfig, HashMap, UdsEcu,
+    FunctionalDescriptionConfig, HashMap, SchemaProvider, UdsEcu,
     diagservices::{DiagServiceResponse, DiagServiceResponseType},
 };
 use http::StatusCode;
@@ -54,7 +54,7 @@ pub(crate) struct WebserverFgState<T: UdsEcu + Clone> {
     fg_executions: Arc<RwLock<HashMap<String, IndexMap<Uuid, FgServiceExecution>>>>,
 }
 
-pub(crate) async fn create_functional_group_routes<T: UdsEcu + Clone>(
+pub(crate) async fn create_functional_group_routes<T: UdsEcu + SchemaProvider + Clone>(
     state: WebserverState<T>,
     functional_group_config: FunctionalDescriptionConfig,
 ) -> Router {
@@ -150,7 +150,9 @@ pub(crate) async fn create_functional_group_routes<T: UdsEcu + Clone>(
     functional_groups_router
 }
 
-fn create_functional_group_route<T: UdsEcu + Clone>(fg_state: WebserverFgState<T>) -> Router {
+fn create_functional_group_route<T: UdsEcu + SchemaProvider + Clone>(
+    fg_state: WebserverFgState<T>,
+) -> Router {
     Router::new()
         .api_route(
             "/",
@@ -175,6 +177,10 @@ fn create_functional_group_route<T: UdsEcu + Clone>(fg_state: WebserverFgState<T
         .api_route(
             "/operations",
             routing::get_with(operations::get, operations::docs_get),
+        )
+        .api_route(
+            "/operations/{service}",
+            routing::get_with(operations::get_by_name::get, operations::get_by_name::docs),
         )
         .api_route(
             "/operations/{service}/executions",

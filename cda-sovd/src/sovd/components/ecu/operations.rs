@@ -480,6 +480,101 @@ pub(crate) mod comparams {
 }
 
 pub(crate) mod service {
+    use aide::{UseApi, transform::TransformOperation};
+    use axum::{
+        Json,
+        extract::{Path, Query, State},
+        http::StatusCode,
+        response::{IntoResponse as _, Response},
+    };
+    use axum_extra::extract::WithRejection;
+    use cda_interfaces::{
+        DiagComm, DiagCommType, SchemaProvider, UdsEcu, diagservices::DiagServiceResponse,
+        file_manager::FileManager, subfunction_ids,
+    };
+    use cda_plugin_security::Secured;
+    use sovd_interfaces::common::operations::OperationDetailResponse;
+
+    use crate::{
+        openapi,
+        sovd::{
+            WebserverEcuState, create_schema,
+            error::{ApiError, ErrorWrapper},
+        },
+    };
+
+    openapi::aide_helper::gen_path_param!(OperationNamePathParam service String);
+
+    /// `GET /operations/{service}` -- return the parameter schema for a specific operation.
+    pub(crate) async fn get_by_name<
+        R: DiagServiceResponse,
+        T: UdsEcu + SchemaProvider + Clone,
+        U: FileManager,
+    >(
+        UseApi(Secured(_security_plugin), _): UseApi<Secured, ()>,
+        Path(OperationNamePathParam { service }): Path<OperationNamePathParam>,
+        WithRejection(Query(query), _): WithRejection<
+            Query<sovd_interfaces::IncludeSchemaQuery>,
+            ApiError,
+        >,
+        State(WebserverEcuState { ecu_name, uds, .. }): State<WebserverEcuState<R, T, U>>,
+    ) -> Response {
+        let include_schema = query.include_schema;
+
+        let diag_service = DiagComm {
+            name: service.clone(),
+            type_: DiagCommType::Operations,
+            lookup_name: None,
+            subfunction_id: Some(subfunction_ids::routine::START),
+        };
+
+        let schema_desc = match uds.schema_for_request(&ecu_name, &diag_service).await {
+            Ok(desc) => desc,
+            Err(e) => {
+                return ErrorWrapper {
+                    error: e.into(),
+                    include_schema,
+                }
+                .into_response();
+            }
+        };
+
+        let parameters = schema_desc
+            .into_schema()
+            .and_then(|s| {
+                let obj = serde_json::Value::from(s);
+                obj.as_object()
+                    .and_then(|o| o.get("properties"))
+                    .and_then(|p| p.as_object())
+                    .cloned()
+            })
+            .unwrap_or_default();
+
+        let schema = if include_schema {
+            Some(create_schema!(OperationDetailResponse))
+        } else {
+            None
+        };
+
+        (
+            StatusCode::OK,
+            Json(OperationDetailResponse {
+                id: service,
+                parameters,
+                schema,
+            }),
+        )
+            .into_response()
+    }
+
+    pub(crate) fn docs_get_by_name(op: TransformOperation) -> TransformOperation {
+        op.description("Get the parameter schema for a specific operation on this ECU component")
+            .response_with::<200, Json<OperationDetailResponse>, _>(|res| {
+                res.description("Parameter definitions for the operation's START request.")
+            })
+            .with(openapi::error_not_found)
+    }
+
     pub(crate) mod executions {
         use aide::{UseApi, transform::TransformOperation};
         use axum::{

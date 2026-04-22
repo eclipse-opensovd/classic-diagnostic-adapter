@@ -161,6 +161,22 @@ pub mod common {
             #[serde(rename = "x-sovd2uds-force", default)]
             pub force: bool,
         }
+
+        /// Response body for `GET .../operations/{operation_name}`.
+        ///
+        /// Returns the parameter schema for a specific operation, allowing clients
+        /// to discover what parameters an operation accepts before executing it.
+        #[derive(Serialize, schemars::JsonSchema)]
+        pub struct OperationDetailResponse {
+            /// The operation identifier (trimmed short-name).
+            pub id: String,
+            /// Parameter definitions for the operation's START request.
+            /// Each key is a parameter name; the value describes its type and default.
+            pub parameters: serde_json::Map<String, serde_json::Value>,
+            #[schemars(skip)]
+            #[serde(skip_serializing_if = "Option::is_none")]
+            pub schema: Option<schemars::Schema>,
+        }
     }
 
     pub mod modes {

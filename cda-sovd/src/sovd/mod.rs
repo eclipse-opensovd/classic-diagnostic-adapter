@@ -513,6 +513,13 @@ fn ecu_route<
             routing::get_with(operations::get, operations::docs_get),
         )
         .api_route(
+            "/operations/{service}",
+            routing::get_with(
+                operations::service::get_by_name,
+                operations::service::docs_get_by_name,
+            ),
+        )
+        .api_route(
             "/operations/comparam/executions",
             routing::get_with(
                 operations::comparams::executions::get,
