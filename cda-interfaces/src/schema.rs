@@ -90,6 +90,16 @@ pub trait EcuSchemaProvider {
         &self,
         service: &DiagComm,
     ) -> impl Future<Output = Result<SchemaDescription, DiagServiceError>> + Send;
+
+    /// Get the request schema for a service defined in a functional group's diag layer.
+    ///
+    /// This is equivalent to [`schema_for_request`](EcuSchemaProvider::schema_for_request)
+    /// but looks up the service in the given functional group instead of the variant.
+    fn schema_for_fg_request(
+        &self,
+        service: &DiagComm,
+        functional_group_name: &str,
+    ) -> impl Future<Output = Result<SchemaDescription, DiagServiceError>> + Send;
 }
 
 pub trait SchemaProvider {
@@ -103,5 +113,15 @@ pub trait SchemaProvider {
         &self,
         ecu: &str,
         service: &DiagComm,
+    ) -> impl Future<Output = Result<SchemaDescription, DiagServiceError>> + Send;
+
+    /// Get the request schema for an operation defined in a functional group.
+    ///
+    /// The implementation resolves the functional description database internally;
+    /// the caller only needs to provide the functional group name and service.
+    fn schema_for_fg_request(
+        &self,
+        service: &DiagComm,
+        functional_group_name: &str,
     ) -> impl Future<Output = Result<SchemaDescription, DiagServiceError>> + Send;
 }

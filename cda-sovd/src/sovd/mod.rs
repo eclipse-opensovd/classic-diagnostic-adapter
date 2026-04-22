@@ -58,6 +58,7 @@ use crate::{
 
 pub(crate) mod apps;
 pub(crate) mod components;
+pub(crate) mod docs;
 pub(crate) mod error;
 pub(crate) mod functions;
 pub(crate) mod locks;
@@ -616,6 +617,13 @@ fn ecu_route<
         .api_route(
             "/operations",
             routing::get_with(operations::get, operations::docs_get),
+        )
+        .api_route(
+            "/operations/{service}/docs",
+            routing::get_with(
+                operations::service::docs_endpoint::get,
+                operations::service::docs_endpoint::docs_transform,
+            ),
         )
         .api_route(
             "/operations/comparam/executions",
