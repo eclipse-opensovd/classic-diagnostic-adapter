@@ -23,43 +23,7 @@ and for some there are open issues to make them work.
 
 ### Setup
 
-1. **Build and Start testcontainer**
-
-   ```sh
-   # Build and start all services
-   docker compose build
-   docker compose up -d
-   ```
-
-2. **Check service status:**
-   ```sh
-   docker compose ps
-   docker compose logs -f
-   ```
-
-3. **Access the services:**
-   - ECU Simulator Control API: http://localhost:8181
-   - CDA SOVD API: http://localhost:20002
-
-### Managing Services
-
-```sh
-# Stop all services
-docker compose down
-
-# Restart services
-docker compose restart
-
-# View logs
-docker compose logs -f cda
-docker compose logs -f ecu-sim
-
-# Rebuild after code changes
-docker compose build cda
-docker compose up -d cda
-```
-
----
+see [first_steps](first_steps.md)
 
 ## Examples
 
@@ -95,8 +59,9 @@ curl -s -X PUT -H "Content-Type: application/json" -H "Authorization: Bearer $AC
 ## Managing MDD files
 
 The repository contains MDDs file which have been generated via `odxtools` and the python scripts located in `testcontainer/odx/`.
-To update them manually run the following commands. This require the odxconverter as described in the repository readme.
+To update them manually run the following commands. This requires the odx-converter as described in the repository readme.
 This step is only necessary when changes to the ECU database have been made.
+
 For normal operation / testing this is not needed.
 
 ```
@@ -110,3 +75,6 @@ cd odx
 java -jar <path-to-odx-converter>/converter/build/libs/converter-all.jar FLXC1000.pdx
 cd ..
 ```
+
+Unfortunately for legal reasons, we can't provide a binary release at the moment. We're trying to get permissions
+from the involved parties, but it's a slow process.
