@@ -39,7 +39,7 @@ const X_FORWARDED_HOST_HEADER_KEY: &str = "X-Forwarded-Host";
 /// Note that user agents can set `X-Forwarded-Host` and `Host` headers to arbitrary values so make
 /// sure to validate them to avoid security issues.
 #[derive(Debug, Clone)]
-pub(crate) struct ExtractHost(pub(crate) String);
+pub struct ExtractHost(pub String);
 
 impl OperationInput for ExtractHost {}
 
@@ -99,7 +99,7 @@ where
 
 /// Rejection type used if the `ExtractHost` extractor is unable to resolve a host.
 #[derive(Debug, Clone, Copy)]
-pub(crate) struct FailedToResolveHost;
+pub struct FailedToResolveHost;
 
 impl IntoResponse for FailedToResolveHost {
     fn into_response(self) -> Response {
@@ -109,7 +109,7 @@ impl IntoResponse for FailedToResolveHost {
 
 /// Rejection used for `ExtractHost`.
 #[derive(Debug, Clone, Copy)]
-pub(crate) enum ExtractHostRejection {
+pub enum ExtractHostRejection {
     FailedToResolveHost(FailedToResolveHost),
 }
 
