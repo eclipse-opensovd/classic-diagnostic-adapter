@@ -16,8 +16,9 @@ use axum::{
     response::Response,
 };
 use axum_extra::extract::WithRejection;
+use opensovd_axum_extra::ExtractHost;
 
-use crate::sovd::{error::ApiError, extract_host::ExtractHost, resource_response};
+use crate::sovd::{error::ApiError, resource_response};
 
 pub(crate) async fn get(
     WithRejection(Query(query), _): WithRejection<

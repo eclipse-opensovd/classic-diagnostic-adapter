@@ -28,6 +28,7 @@ pub(crate) mod comparams {
             file_manager::FileManager,
         };
         use indexmap::IndexMap;
+        use opensovd_axum_extra::ExtractHost;
         use sovd_interfaces::components::ecu::operations::comparams as sovd_comparams;
         use tokio::sync::RwLock;
         use uuid::Uuid;
@@ -35,7 +36,6 @@ pub(crate) mod comparams {
         use crate::sovd::{
             IntoSovd, WebserverEcuState, create_schema,
             error::{ApiError, ErrorWrapper},
-            extract_host::ExtractHost,
         };
 
         pub(crate) async fn get<R: DiagServiceResponse, T: UdsEcu + Clone, U: FileManager>(

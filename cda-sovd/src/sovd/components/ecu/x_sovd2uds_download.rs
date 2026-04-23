@@ -23,10 +23,10 @@ use cda_interfaces::{
     },
 };
 use cda_plugin_security::SecurityPlugin;
+use opensovd_axum_extra::ExtractHost;
 
 use crate::sovd::{
     error::{ApiError, ErrorWrapper, api_error_from_diag_response},
-    extract_host::ExtractHost,
     resource_response,
 };
 
