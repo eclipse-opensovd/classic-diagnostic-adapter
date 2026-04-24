@@ -22,17 +22,13 @@ use axum_extra::extract::WithRejection;
 use cda_interfaces::{DiagServiceError, HashMap, UdsEcu, diagservices::DiagServiceResponse};
 use http::StatusCode;
 use serde::Serialize;
-use sovd_interfaces::{
-    common::modes::{
-        COMM_CONTROL_ID, COMM_CONTROL_NAME, DTC_SETTING_ID, DTC_SETTING_NAME, SESSION_ID,
-        SESSION_NAME,
-    },
-    error::ErrorCode,
+use sovd_interfaces::common::modes::{
+    COMM_CONTROL_ID, COMM_CONTROL_NAME, DTC_SETTING_ID, DTC_SETTING_NAME, SESSION_ID, SESSION_NAME,
 };
 
 use crate::{
     create_schema,
-    sovd::error::{ApiError, VendorErrorCode},
+    sovd::error::{ApiError, VendorErrorCode, nrc_to_api_error_response},
 };
 
 pub(crate) async fn get(
@@ -102,7 +98,7 @@ async fn handle_mode_change<T: UdsEcu + Clone>(
     include_schema: bool,
 ) -> Response {
     let claims = security_plugin.as_auth_plugin().claims();
-    if let Some(response) = crate::sovd::locks::validate_lock(
+    if let Some(response) = crate::sovd::locks::validate_fg_lock(
         &claims,
         &state.functional_group_name,
         &state.locks,
@@ -166,11 +162,11 @@ fn build_mode_response<T: UdsEcu>(
     results: HashMap<String, Result<T::Response, DiagServiceError>>,
 ) -> (
     HashMap<String, sovd_interfaces::common::modes::put::Response<String>>,
-    Vec<sovd_interfaces::error::ApiErrorResponse<VendorErrorCode>>,
+    Vec<sovd_interfaces::error::DataError<VendorErrorCode>>,
 ) {
     // Build response with per-ECU data and errors
     let mut response_data: HashMap<_, _> = HashMap::default();
-    let mut errors: Vec<sovd_interfaces::error::ApiErrorResponse<VendorErrorCode>> = Vec::new();
+    let mut errors: Vec<sovd_interfaces::error::DataError<VendorErrorCode>> = Vec::new();
     for (ecu_name, result) in results {
         match result {
             Ok(response) => {
@@ -187,26 +183,42 @@ fn build_mode_response<T: UdsEcu>(
                         },
                     );
                 } else {
-                    errors.push(sovd_interfaces::error::ApiErrorResponse {
-                        message: "Received negative result from ecu".to_owned(),
-                        error_code: ErrorCode::ErrorResponse,
-                        vendor_code: None,
-                        parameters: None,
-                        error_source: Some("ecu".to_owned()),
-                        schema: None,
-                    });
+                    match response.as_nrc() {
+                        Ok(nrc) => {
+                            errors.push(sovd_interfaces::error::DataError {
+                                path: format!("/parameters/{ecu_name}"),
+                                error: nrc_to_api_error_response(nrc, false),
+                            });
+                        }
+                        Err(_) => {
+                            errors.push(sovd_interfaces::error::DataError {
+                                path: format!("/parameters/{ecu_name}"),
+                                error: sovd_interfaces::error::ApiErrorResponse {
+                                    message: "Failed to interpret negative response".to_owned(),
+                                    error_code: sovd_interfaces::error::ErrorCode::VendorSpecific,
+                                    vendor_code: Some(VendorErrorCode::ErrorInterpretingMessage),
+                                    parameters: None,
+                                    error_source: Some("ecu".to_owned()),
+                                    schema: None,
+                                },
+                            });
+                        }
+                    }
                 }
             }
             Err(e) => {
                 let api_error: ApiError = e.into();
                 let (error_code, vendor_code) = api_error.error_and_vendor_code();
-                errors.push(sovd_interfaces::error::ApiErrorResponse {
-                    message: api_error.to_string(),
-                    error_code,
-                    vendor_code,
-                    parameters: None,
-                    error_source: Some("ecu".to_owned()),
-                    schema: None,
+                errors.push(sovd_interfaces::error::DataError {
+                    path: format!("/parameters/{ecu_name}"),
+                    error: sovd_interfaces::error::ApiErrorResponse {
+                        message: api_error.to_string(),
+                        error_code,
+                        vendor_code,
+                        parameters: None,
+                        error_source: Some("ecu".to_owned()),
+                        schema: None,
+                    },
                 });
             }
         }
@@ -230,7 +242,7 @@ async fn handle_mode_get<
 
     // Query each ECU for its service state
     let mut response_data: HashMap<String, ResponseElementType> = HashMap::default();
-    let mut errors: Vec<sovd_interfaces::error::ApiErrorResponse<VendorErrorCode>> = Vec::new();
+    let mut errors: Vec<sovd_interfaces::error::DataError<VendorErrorCode>> = Vec::new();
 
     for ecu_name in ecu_names {
         match state.uds.get_ecu_service_state(&ecu_name, service_id).await {
@@ -240,13 +252,16 @@ async fn handle_mode_get<
             Err(e) => {
                 let api_error: ApiError = e.into();
                 let (error_code, vendor_code) = api_error.error_and_vendor_code();
-                errors.push(sovd_interfaces::error::ApiErrorResponse {
-                    message: api_error.to_string(),
-                    error_code,
-                    vendor_code,
-                    parameters: None,
-                    error_source: Some(ecu_name),
-                    schema: None,
+                errors.push(sovd_interfaces::error::DataError {
+                    path: format!("/parameters/{ecu_name}"),
+                    error: sovd_interfaces::error::ApiErrorResponse {
+                        message: api_error.to_string(),
+                        error_code,
+                        vendor_code,
+                        parameters: None,
+                        error_source: Some(ecu_name),
+                        schema: None,
+                    },
                 });
             }
         }

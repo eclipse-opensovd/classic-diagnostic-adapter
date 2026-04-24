@@ -127,16 +127,19 @@ pub(crate) mod diag_service {
                 name: service.clone(),
                 type_: DiagCommType::Data,
                 lookup_name: None,
+                subfunction_id: None,
             },
             DiagComm {
                 name: service.clone(),
                 type_: DiagCommType::Data,
                 lookup_name: None,
+                subfunction_id: None,
             },
             DiagComm {
                 name: service,
                 type_: DiagCommType::Data,
                 lookup_name: None,
+                subfunction_id: None,
             },
         ];
         let schema = if include_schema {
@@ -182,7 +185,9 @@ pub(crate) mod diag_service {
     >(
         headers: HeaderMap,
         UseApi(Secured(security_plugin), _): UseApi<Secured, ()>,
-        Path(DiagServicePathParam { diag_service }): Path<DiagServicePathParam>,
+        Path(DiagServicePathParam {
+            service: diag_service,
+        }): Path<DiagServicePathParam>,
         WithRejection(Query(query), _): WithRejection<
             Query<sovd_interfaces::components::ComponentQuery>,
             ApiError,
@@ -205,6 +210,7 @@ pub(crate) mod diag_service {
                     name: diag_service,
                     type_: DiagCommType::Data,
                     lookup_name: None,
+                    subfunction_id: None,
                 },
                 &ecu_name,
                 &uds,
@@ -238,9 +244,7 @@ pub(crate) mod diag_service {
     >(
         headers: HeaderMap,
         UseApi(Secured(security_plugin), _): UseApi<Secured, ()>,
-        Path(DiagServicePathParam {
-            diag_service: service,
-        }): Path<DiagServicePathParam>,
+        Path(DiagServicePathParam { service }): Path<DiagServicePathParam>,
         WithRejection(Query(query), _): WithRejection<
             Query<sovd_interfaces::components::ecu::data::service::put::Query>,
             ApiError,
@@ -261,6 +265,7 @@ pub(crate) mod diag_service {
                 name: service.clone(),
                 type_: DiagCommType::Configurations,
                 lookup_name: None,
+                subfunction_id: None,
             },
             &ecu_name,
             &uds,
