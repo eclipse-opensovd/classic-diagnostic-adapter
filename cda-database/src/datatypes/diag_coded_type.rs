@@ -449,7 +449,7 @@ impl DiagCodedType {
             bit_pos,
             None,
             uds_payload
-                .get(byte_pos..bits.div_ceil(8) as usize)
+                .get(byte_pos..byte_pos.saturating_add(bits.div_ceil(8) as usize))
                 .ok_or_else(|| {
                     DiagServiceError::BadPayload(
                         "Payload slice for leading length out of bounds".to_owned(),
@@ -2749,6 +2749,42 @@ mod tests {
         let (data, bit_len) = diag_type.decode(&payload, 0, 0).unwrap();
         assert_eq!(data, vec![0x01, 0x02, 0x03]);
         assert_eq!(bit_len, 24);
+    }
+
+    #[test]
+    fn test_decode_leading_length_with_non_zero_byte_pos() {
+        // Validates that leading length extraction correctly uses byte_pos
+        // Payload structure: [0xFF, 0xFF, 0x03, 0xAA, 0xBB, 0xCC]
+        //                     ^padding^    ^len^ ^---data---^
+        // The leading length (0x03 = 3 bytes) is at byte_pos=2
+        let payload = vec![0xFF, 0xFF, 0x03, 0xAA, 0xBB, 0xCC];
+        let diag_type = DiagCodedType::new_high_low_byte_order(
+            DataType::ByteField,
+            DiagCodedTypeVariant::LeadingLengthInfo(8),
+        )
+        .unwrap();
+
+        // Decode starting at byte position 2
+        let (data, bit_len) = diag_type.decode(&payload, 2, 0).unwrap();
+        assert_eq!(data, vec![0xAA, 0xBB, 0xCC]);
+        assert_eq!(bit_len, 24);
+    }
+
+    #[test]
+    fn test_decode_leading_length_16bit_with_non_zero_byte_pos() {
+        // Test with 16-bit leading length at non-zero byte position
+        // Payload: [0x99, 0x00, 0x02, 0xDE, 0xAD]
+        //           ^pad^ ^--len--^ ^-data-^
+        let payload = vec![0x99, 0x00, 0x02, 0xDE, 0xAD];
+        let diag_type = DiagCodedType::new_high_low_byte_order(
+            DataType::ByteField,
+            DiagCodedTypeVariant::LeadingLengthInfo(16),
+        )
+        .unwrap();
+
+        let (data, bit_len) = diag_type.decode(&payload, 1, 0).unwrap();
+        assert_eq!(data, vec![0xDE, 0xAD]);
+        assert_eq!(bit_len, 16);
     }
 
     #[test]
