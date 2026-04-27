@@ -35,7 +35,7 @@ members = [
 ]
 
 [workspace.dependencies]
-opensovd-axum-extra = { path = "opensovd-axum-extra" }
+opensovd-axum-extra = { path = "opensovd-axum-extra", default-features = false }
 opensovd_cda_lib = { path = "cda-main", package = "opensovd-cda" }
 cda-interfaces = { path = "cda-interfaces" }
 cda-core = { path = "cda-core" }
