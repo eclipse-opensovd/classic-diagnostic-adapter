@@ -67,6 +67,7 @@ pub(crate) mod sovd2uds {
             )
         }
 
+        /// [[ dimpl~sovd-api-bulk-data, Bulk Data ]]
         pub(crate) mod flash_files {
             use std::{path::PathBuf, sync::LazyLock};
 
@@ -154,6 +155,7 @@ pub(crate) mod sovd2uds {
                     })
             }
 
+            /// [[ dimpl~sovd-api-flash-file-management, Flash File Management ]]
             pub(crate) async fn get<T: UdsEcu + Clone>(
                 WithRejection(Query(query), _): WithRejection<
                     Query<sovd_interfaces::IncludeSchemaQuery>,

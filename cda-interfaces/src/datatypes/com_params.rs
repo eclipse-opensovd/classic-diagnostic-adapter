@@ -116,6 +116,7 @@ impl From<ComParamBool> for bool {
     }
 }
 
+/// [[ dimpl~uds-communication-parameters, UDS Communication Parameters ]]
 /// Defines the default values for the Communication
 /// parameters which are used in the UDS communication
 #[derive(Deserialize, Serialize, Clone, Debug)]

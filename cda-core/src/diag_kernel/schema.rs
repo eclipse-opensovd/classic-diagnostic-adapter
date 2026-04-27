@@ -473,6 +473,7 @@ fn map_mux_to_schema(
     })
 }
 
+/// [[ dimpl~sovd-api-data-types-mapping-iso17978, Data Types Mapping ISO 17978 ]]
 fn ecu_datatype_to_jsontype(type_: datatypes::DataType) -> String {
     match type_ {
         datatypes::DataType::Int32 | datatypes::DataType::UInt32 => "integer".to_owned(),

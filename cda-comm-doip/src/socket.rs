@@ -35,6 +35,7 @@ pub(crate) struct DoIPConfig {
     pub send_diagnostic_message_ack: bool,
 }
 
+/// [[ dimpl~doip-message-framing, `DoIP` Message Framing ]]
 pub(crate) struct DoIPConnection<T: AsyncRead + AsyncWrite + Unpin> {
     io: Framed<T, DoipCodec>,
     config: DoIPConfig,

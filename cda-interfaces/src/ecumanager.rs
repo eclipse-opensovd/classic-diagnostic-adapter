@@ -57,6 +57,7 @@ pub struct MuxCaseInfo {
     pub upper_limit: Option<String>,
 }
 
+/// [[ dimpl~dt-ecu-states, ECU States ]]
 #[derive(Clone, Copy, Debug, Serialize, PartialEq)]
 pub enum EcuState {
     Online,
