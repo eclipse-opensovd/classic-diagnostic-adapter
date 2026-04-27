@@ -139,12 +139,20 @@ async fn main() -> Result<(), AppError> {
 
     tracing::debug!("Webserver is running. Loading sovd routes...");
 
-    let vehicle_data = opensovd_cda_lib::load_vehicle_data::<_, DefaultSecurityPluginData>(
+    let vehicle_data = match opensovd_cda_lib::load_vehicle_data::<_, DefaultSecurityPluginData>(
         &config,
         clonable_shutdown_signal.clone(),
         health_state.as_ref(),
     )
-    .await?;
+    .await
+    {
+        Ok(data) => data,
+        Err(AppError::ShutdownRequested) => {
+            tracing::info!("Shutdown requested during database load, exiting cleanly");
+            return Ok(());
+        }
+        Err(e) => return Err(e),
+    };
 
     if vehicle_data.databases.is_empty() && config.database.exit_no_database_loaded {
         return Err(AppError::ResourceError(

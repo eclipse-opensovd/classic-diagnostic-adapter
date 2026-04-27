@@ -84,6 +84,8 @@ pub enum AppError {
     NotFound(String),
     #[error("Server error: `{0}`")]
     ServerError(String),
+    #[error("Shutdown requested")]
+    ShutdownRequested,
 }
 
 impl From<DiagServiceError> for AppError {
@@ -188,7 +190,7 @@ pub async fn load_vehicle_data<
     health: Option<&cda_health::HealthState>,
 ) -> Result<VehicleData<S>, AppError> {
     // Load databases in the background
-    let (databases, file_managers) = load_databases::<S>(config, health).await;
+    let (databases, file_managers) = load_databases::<S>(config, health).await?;
 
     let (variant_detection_tx, variant_detection_rx) = mpsc::channel(50);
     let databases = Arc::new(databases);
@@ -237,7 +239,7 @@ pub async fn load_vehicle_data<
 pub async fn load_databases<S: SecurityPlugin>(
     config: &Configuration,
     health: Option<&cda_health::HealthState>,
-) -> (DatabaseMap<S>, FileManagerMap) {
+) -> Result<(DatabaseMap<S>, FileManagerMap), AppError> {
     // Extract fields from config
     let database_path = &config.database.path;
     let flat_buf_settings = config.flat_buf.clone();
@@ -331,7 +333,7 @@ pub async fn load_databases<S: SecurityPlugin>(
         tokio::select! {
             () = shutdown_signal() => {
                 tracing::info!("Shutdown triggered. Aborting DB load...");
-                std::process::exit(0);
+                return Err(AppError::ShutdownRequested);
             },
             res = f =>{
                 if let Err(e) = res {
@@ -372,7 +374,7 @@ pub async fn load_databases<S: SecurityPlugin>(
     if let Some(provider) = db_health_provider {
         provider.update_status(status).await;
     }
-    (databases, file_managers)
+    Ok((databases, file_managers))
 }
 
 async fn setup_db_health_provider(
