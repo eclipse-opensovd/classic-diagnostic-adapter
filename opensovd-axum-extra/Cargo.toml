@@ -19,6 +19,13 @@ license.workspace = true
 [lints]
 workspace = true
 
+[features]
+default = ["forwarded", "x-forwarded-host", "host-header", "uri-authority"]
+forwarded = []
+x-forwarded-host = []
+host-header = []
+uri-authority = []
+
 [dependencies]
 aide = { workspace = true }
 axum = { workspace = true }

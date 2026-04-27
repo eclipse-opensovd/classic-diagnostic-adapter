@@ -19,10 +19,13 @@ use axum::{
 use http::{
     header::{HeaderMap, FORWARDED},
     request::Parts,
-    uri::Authority,
 };
+#[cfg(feature = "uri-authority")]
+use http::uri::Authority;
+
 use std::convert::Infallible;
 
+#[cfg(feature = "x-forwarded-host")]
 const X_FORWARDED_HOST_HEADER_KEY: &str = "X-Forwarded-Host";
 
 /// Extractor that resolves the host of the request.
@@ -66,13 +69,23 @@ where
     type Rejection = Infallible;
 
     async fn from_request_parts(
-        parts: &mut Parts,
+        _parts: &mut Parts,
         _state: &S,
     ) -> Result<Option<Self>, Self::Rejection> {
+        #[cfg(any(
+            feature = "forwarded",
+            feature = "x-forwarded-host",
+            feature = "host-header",
+            feature = "uri-authority"
+        ))]
+        let parts = _parts;
+
+        #[cfg(feature = "forwarded")]
         if let Some(host) = parse_forwarded(&parts.headers) {
             return Ok(Some(ExtractHost(host.to_owned())));
         }
 
+        #[cfg(feature = "x-forwarded-host")]
         if let Some(host) = parts
             .headers
             .get(X_FORWARDED_HOST_HEADER_KEY)
@@ -81,6 +94,7 @@ where
             return Ok(Some(ExtractHost(host.to_owned())));
         }
 
+        #[cfg(feature = "host-header")]
         if let Some(host) = parts
             .headers
             .get(http::header::HOST)
@@ -89,6 +103,7 @@ where
             return Ok(Some(ExtractHost(host.to_owned())));
         }
 
+        #[cfg(feature = "uri-authority")]
         if let Some(authority) = parts.uri.authority() {
             return Ok(Some(ExtractHost(parse_authority(authority).to_owned())));
         }
@@ -138,6 +153,7 @@ fn parse_forwarded(headers: &HeaderMap) -> Option<&str> {
     })
 }
 
+#[cfg(feature = "uri-authority")]
 fn parse_authority(auth: &Authority) -> &str {
     auth.as_str()
         .rsplit('@')
@@ -148,9 +164,12 @@ fn parse_authority(auth: &Authority) -> &str {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use axum::http::{Request, header::HeaderName};
+    use axum::http::Request;
+    #[cfg(any(feature = "forwarded", feature = "x-forwarded-host"))]
+    use axum::http::header::HeaderName;
 
     #[tokio::test]
+    #[cfg(feature = "host-header")]
     async fn host_header() {
         let original_host = "some-domain:123";
         let mut parts = Request::new(()).into_parts().0;
@@ -163,6 +182,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[cfg(feature = "x-forwarded-host")]
     async fn x_forwarded_host_header() {
         let original_host = "some-domain:456";
         let mut parts = Request::new(()).into_parts().0;
@@ -176,6 +196,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[cfg(all(feature = "x-forwarded-host", feature = "host-header"))]
     async fn x_forwarded_host_precedence_over_host_header() {
         let x_forwarded_host_header = "some-domain:456";
         let host_header = "some-domain:123";
@@ -193,6 +214,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[cfg(feature = "uri-authority")]
     async fn ip4_uri_host() {
         let mut parts = Request::new(()).into_parts().0;
         parts.uri = "https://127.0.0.1:1234/image.jpg".parse().unwrap();
@@ -201,6 +223,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[cfg(feature = "uri-authority")]
     async fn ip6_uri_host() {
         let mut parts = Request::new(()).into_parts().0;
         parts.uri = "http://cool:user@[::1]:456/file.txt".parse().unwrap();
@@ -220,7 +243,22 @@ mod tests {
         let mut parts = Request::new(()).into_parts().0;
         parts.uri = "https://127.0.0.1:1234/image.jpg".parse().unwrap();
         let host = parts.extract::<Option<ExtractHost>>().await.unwrap();
+
+        #[cfg(any(
+            feature = "forwarded",
+            feature = "x-forwarded-host",
+            feature = "host-header",
+            feature = "uri-authority"
+        ))]
         assert!(host.is_some());
+
+        #[cfg(not(any(
+            feature = "forwarded",
+            feature = "x-forwarded-host",
+            feature = "host-header",
+            feature = "uri-authority"
+        )))]
+        assert!(host.is_none());
     }
 
     #[tokio::test]
@@ -231,6 +269,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[cfg(all(feature = "forwarded", feature = "host-header"))]
     async fn prefers_forwarded_host() {
         let mut parts = Request::new(()).into_parts().0;
         parts.headers.insert(
@@ -246,6 +285,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(feature = "forwarded")]
     fn forwarded_parsing() {
         // the basic case
         let headers = header_map(&[(FORWARDED, "host=192.0.2.60;proto=http;by=203.0.113.43")]);
@@ -276,6 +316,7 @@ mod tests {
         assert_eq!(value, "192.0.2.60");
     }
 
+    #[cfg(feature = "forwarded")]
     fn header_map(values: &[(HeaderName, &str)]) -> HeaderMap {
         let mut headers = HeaderMap::new();
         for (key, value) in values {
