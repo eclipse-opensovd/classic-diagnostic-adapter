@@ -21,7 +21,7 @@ use cda_interfaces::{
     DiagServiceError, DoipGatewaySetupError, EcuAddressProvider, EcuManager as EcuManagerTrait,
     EcuManagerType, FunctionalDescriptionConfig, HashMap, HashMapEntry, HashMapExtensions, HashSet,
     Protocol, UdsEcu,
-    datatypes::{ComParams, DatabaseNamingConvention, FaultConfig, FlatbBufConfig},
+    datatypes::{ComParams, DatabaseNamingConvention, EcuConfig, FaultConfig, FlatbBufConfig},
     dlt_ctx,
     file_manager::{Chunk, ChunkType},
 };
@@ -250,6 +250,8 @@ pub async fn load_databases<S: SecurityPlugin>(
         cda_interfaces::Protocol::DoIp
     };
     let com_params = config.com_params.clone();
+    let communication_config = config.communication.clone();
+    let ecu_configs = config.ecu.clone();
 
     let db_health_provider = setup_db_health_provider(health).await;
 
@@ -259,6 +261,8 @@ pub async fn load_databases<S: SecurityPlugin>(
         Arc::new(RwLock::new(HashMap::new()));
 
     let com_params = Arc::new(com_params);
+    let communication_config = Arc::new(communication_config);
+    let ecu_configs = Arc::new(ecu_configs);
 
     let mut database_load_futures = Vec::new();
     let start = std::time::Instant::now();
@@ -302,6 +306,8 @@ pub async fn load_databases<S: SecurityPlugin>(
             let file_managers = Arc::clone(&file_managers);
             let paths = mddfiles.to_vec();
             let com_params = Arc::clone(&com_params);
+            let communication_config = Arc::clone(&communication_config);
+            let ecu_configs = Arc::clone(&ecu_configs);
             let database_naming_convention = database_naming_convention.clone();
             let flat_buf_settings = flat_buf_settings.clone();
             let func_description_cfg = func_description_cfg.clone();
@@ -315,6 +321,8 @@ pub async fn load_databases<S: SecurityPlugin>(
                         file_managers,
                         paths,
                         com_params,
+                        communication_config,
+                        ecu_configs,
                         database_naming_convention,
                         flat_buf_settings,
                         func_description_cfg,
@@ -450,6 +458,8 @@ async fn load_database<S: SecurityPlugin>(
     file_managers: Arc<RwLock<HashMap<String, FileManager>>>,
     paths: Vec<(PathBuf, u64)>,
     com_params: Arc<ComParams>,
+    communication_config: Arc<cda_interfaces::datatypes::CommunicationConfig>,
+    ecu_configs: Arc<HashMap<String, EcuConfig>>,
     database_naming_convention: DatabaseNamingConvention,
     flat_buf_settings: FlatbBufConfig,
     func_description_cfg: FunctionalDescriptionConfig,
@@ -513,10 +523,15 @@ async fn load_database<S: SecurityPlugin>(
                 } else {
                     EcuManagerType::Ecu
                 };
+                let resolved_com_params = match ecu_configs.get(&ecu_name) {
+                    Some(ecu_cfg) => com_params.with_ecu_config(ecu_cfg),
+                    None => (*com_params).clone(),
+                };
                 let diag_service_manager = match EcuManager::new(
                     diag_data_base,
                     protocol,
-                    &com_params,
+                    &resolved_com_params,
+                    &communication_config,
                     database_naming_convention.clone(),
                     ecu_type,
                     &func_description_cfg,

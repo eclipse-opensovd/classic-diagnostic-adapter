@@ -229,6 +229,10 @@ pub trait EcuManager:
     #[must_use]
     fn protocol(&self) -> Protocol;
 
+    /// Returns the configured protocol name for this ECU manager.
+    #[must_use]
+    fn protocol_name(&self) -> &str;
+
     #[must_use]
     fn is_loaded(&self) -> bool;
 
@@ -599,6 +603,18 @@ impl Protocol {
         match self {
             Protocol::DoIp => "UDS_Ethernet_DoIP",
             Protocol::DoIpDobt => "UDS_Ethernet_DoIP_DOBT",
+        }
+    }
+
+    /// Returns the protocol name resolved from the given communication config.
+    #[must_use]
+    pub fn configured_name<'a>(
+        &self,
+        config: &'a crate::datatypes::CommunicationConfig,
+    ) -> &'a str {
+        match self {
+            Protocol::DoIp => &config.doip_protocol_name,
+            Protocol::DoIpDobt => &config.doip_dobt_protocol_name,
         }
     }
 }

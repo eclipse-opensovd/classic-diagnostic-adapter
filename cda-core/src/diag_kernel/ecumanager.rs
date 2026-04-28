@@ -18,9 +18,10 @@ use cda_interfaces::{
     EcuState, EcuVariant, HashMap, HashMapExtensions, HashSet, HashSetExtensions, Protocol,
     STRINGS, SecurityAccess, ServicePayload, StringId,
     datatypes::{
-        AddressingMode, CLEAR_FAULT_MEM_POS_RESPONSE_SID, ComParams, ComplexComParamValue,
-        ComponentConfigurationsInfo, ComponentDataInfo, ComponentOperationsInfo, DTC_CODE_BIT_LEN,
-        DatabaseNamingConvention, DiagnosticServiceAffixPosition, DtcLookup,
+        AddressingMode, CLEAR_FAULT_MEM_POS_RESPONSE_SID, ComParams, CommunicationConfig,
+        ComplexComParamValue, ComponentConfigurationsInfo, ComponentDataInfo,
+        ComponentOperationsInfo, DTC_CODE_BIT_LEN, DatabaseNamingConvention,
+        DeserializableCompParam, DiagnosticServiceAffixPosition, DtcLookup,
         DtcReadInformationFunction, RetryPolicy, RoutineSubfunctions, SdSdg, TesterPresentSendType,
         semantics, single_ecu,
     },
@@ -51,6 +52,23 @@ use crate::{
 // we would have when using Variant<'_> from database.
 // Not using EcuVariant instead because contains additional fields we're looking up in
 // set_variant
+
+/// Looks up a com parameter from the database if a protocol is available,
+/// otherwise returns the configured default.
+fn find_com_param_optional<T>(
+    database: &datatypes::DiagnosticDatabase,
+    data_protocol: Option<&datatypes::Protocol<'_>>,
+    config: &cda_interfaces::datatypes::ComParamConfig<T>,
+) -> T
+where
+    T: DeserializableCompParam + Clone + serde::Serialize + std::fmt::Debug,
+{
+    data_protocol.map_or_else(
+        || config.default.clone(),
+        |dp| database.find_com_param(dp, config),
+    )
+}
+
 struct VariantData {
     name: String,
     is_base_variant: bool,
@@ -100,6 +118,7 @@ pub struct EcuManager<S: SecurityPlugin> {
     duplicating_ecu_names: Option<HashSet<String>>,
 
     protocol: Protocol,
+    protocol_name: String,
     // functional group: protocol prefixed or postfixed
     fg_protocol_position: DiagnosticServiceAffixPosition,
     // functional group: is protocol case sensitive
@@ -189,6 +208,10 @@ impl<S: SecurityPlugin> cda_interfaces::EcuManager for EcuManager<S> {
 
     fn protocol(&self) -> Protocol {
         self.protocol
+    }
+
+    fn protocol_name(&self) -> &str {
+        &self.protocol_name
     }
 
     fn is_loaded(&self) -> bool {
@@ -310,7 +333,7 @@ impl<S: SecurityPlugin> cda_interfaces::EcuManager for EcuManager<S> {
                 cp_ref.protocol().is_some_and(|p| {
                     p.diag_layer().is_some_and(|dl| {
                         dl.short_name()
-                            .is_some_and(|name| name == self.protocol.value())
+                            .is_some_and(|name| name == self.protocol_name)
                     })
                 })
             })
@@ -1493,7 +1516,7 @@ impl<S: SecurityPlugin> cda_interfaces::EcuManager for EcuManager<S> {
                     .diag_layer()
                     .and_then(|dl| dl.short_name())
                     .and_then(|name| {
-                        let protocol_value = self.protocol.value();
+                        let protocol_value = &self.protocol_name;
                         let matches = match self.fg_protocol_position {
                             DiagnosticServiceAffixPosition::Prefix => {
                                 if self.fg_protocol_case_sensitive {
@@ -1987,6 +2010,7 @@ impl<S: SecurityPlugin> EcuManager<S> {
     ///
     /// Will return `Err` if the ECU database cannot be loaded correctly due to different reasons,
     /// like the format being incompatible or required information missing from the database.
+    #[allow(clippy::too_many_arguments)]
     #[tracing::instrument(skip_all,
         fields(
             dlt_context = dlt_ctx!("CORE"),
@@ -1996,6 +2020,7 @@ impl<S: SecurityPlugin> EcuManager<S> {
         database: datatypes::DiagnosticDatabase,
         protocol: Protocol,
         com_params: &ComParams,
+        communication_config: &CommunicationConfig,
         database_naming_convention: DatabaseNamingConvention,
         type_: EcuManagerType,
         func_description_config: &cda_interfaces::FunctionalDescriptionConfig,
@@ -2006,6 +2031,7 @@ impl<S: SecurityPlugin> EcuManager<S> {
                 database,
                 protocol,
                 com_params,
+                communication_config,
                 database_naming_convention,
                 type_,
                 func_description_config,
@@ -2015,6 +2041,7 @@ impl<S: SecurityPlugin> EcuManager<S> {
                 database,
                 protocol,
                 com_params,
+                communication_config,
                 database_naming_convention,
                 type_,
                 func_description_config,
@@ -2024,11 +2051,12 @@ impl<S: SecurityPlugin> EcuManager<S> {
     }
 
     // allow keeping the function together as it makes sense structurally
-    #[allow(clippy::too_many_lines)]
+    #[allow(clippy::too_many_lines, clippy::too_many_arguments)]
     fn new_ecu_description(
         database: datatypes::DiagnosticDatabase,
         protocol: Protocol,
         com_params: &ComParams,
+        communication_config: &CommunicationConfig,
         database_naming_convention: DatabaseNamingConvention,
         type_: EcuManagerType,
         func_description_config: &cda_interfaces::FunctionalDescriptionConfig,
@@ -2037,53 +2065,100 @@ impl<S: SecurityPlugin> EcuManager<S> {
         let variant_detection =
             variant_detection::prepare_variant_detection(&database, &database_naming_convention)?;
 
-        let data_protocol = into_db_protocol(&database, protocol)?;
-
-        let logical_gateway_address = match database.find_logical_address(
-            datatypes::LogicalAddressType::Gateway(
-                com_params.doip.logical_gateway_address.name.clone(),
-            ),
-            &database,
-            &data_protocol,
-        ) {
-            Ok(address) => address,
+        let protocol_name = protocol.configured_name(communication_config).to_owned();
+        let data_protocol = match into_db_protocol(&database, &protocol_name) {
+            Ok(dp) => Some(dp),
             Err(e) => {
-                tracing::error!("Failed to find logical gateway address: {e}");
-                com_params.doip.logical_gateway_address.default
+                tracing::warn!(
+                    protocol_name = %protocol_name,
+                    error = %e,
+                    "Protocol not found in database, using default communication parameters"
+                );
+                None
             }
         };
 
-        let logical_ecu_address = match database.find_logical_address(
-            datatypes::LogicalAddressType::Ecu(
-                com_params.doip.logical_response_id_table_name.clone(),
-                com_params.doip.logical_ecu_address.name.clone(),
-            ),
-            &database,
-            &data_protocol,
-        ) {
-            Ok(address) => address,
-            Err(e) => {
-                tracing::error!("Failed to find logical ECU address: {e}");
-                com_params.doip.logical_ecu_address.default
-            }
-        };
+        let logical_gateway_address = data_protocol
+            .as_ref()
+            .and_then(|dp| {
+                database
+                    .find_logical_address(
+                        datatypes::LogicalAddressType::Gateway(
+                            com_params.doip.logical_gateway_address.name.clone(),
+                        ),
+                        &database,
+                        dp,
+                    )
+                    .map_err(|e| {
+                        tracing::error!("Failed to find logical gateway address: {e}");
+                    })
+                    .ok()
+            })
+            .unwrap_or_else(|| {
+                com_params
+                    .doip
+                    .logical_gateway_address
+                    .resolve_fallback(&[])
+            });
 
-        let logical_functional_address = match database.find_logical_address(
-            datatypes::LogicalAddressType::Functional(
-                com_params.doip.logical_functional_address.name.clone(),
-            ),
-            &database,
-            &data_protocol,
-        ) {
-            Ok(address) => address,
-            Err(e) => {
-                tracing::error!("Failed to find logical functional address: {e}");
-                com_params.doip.logical_functional_address.default
-            }
-        };
+        let mut resolved_addresses: Vec<(&str, u16)> =
+            vec![("logical_gateway_address", logical_gateway_address)];
 
-        let nack_number_of_retries = database
-            .find_com_param(&data_protocol, &com_params.doip.nack_number_of_retries)
+        let logical_ecu_address = data_protocol
+            .as_ref()
+            .and_then(|dp| {
+                database
+                    .find_logical_address(
+                        datatypes::LogicalAddressType::Ecu(
+                            com_params.doip.logical_response_id_table_name.clone(),
+                            com_params.doip.logical_ecu_address.name.clone(),
+                        ),
+                        &database,
+                        dp,
+                    )
+                    .map_err(|e| {
+                        tracing::error!("Failed to find logical ECU address: {e}");
+                    })
+                    .ok()
+            })
+            .unwrap_or_else(|| {
+                com_params
+                    .doip
+                    .logical_ecu_address
+                    .resolve_fallback(&resolved_addresses)
+            });
+        resolved_addresses.push(("logical_ecu_address", logical_ecu_address));
+
+        let logical_functional_address = data_protocol
+            .as_ref()
+            .and_then(|dp| {
+                database
+                    .find_logical_address(
+                        datatypes::LogicalAddressType::Functional(
+                            com_params.doip.logical_functional_address.name.clone(),
+                        ),
+                        &database,
+                        dp,
+                    )
+                    .map_err(|e| {
+                        tracing::error!("Failed to find logical functional address: {e}");
+                    })
+                    .ok()
+            })
+            .unwrap_or_else(|| {
+                com_params
+                    .doip
+                    .logical_functional_address
+                    .resolve_fallback(&resolved_addresses)
+            });
+        resolved_addresses.push(("logical_functional_address", logical_functional_address));
+
+        let nack_number_of_retries = data_protocol
+            .as_ref()
+            .map_or_else(
+                || com_params.doip.nack_number_of_retries.default.clone(),
+                |dp| database.find_com_param(dp, &com_params.doip.nack_number_of_retries),
+            )
             .iter()
             .map(datatypes::map_nack_number_of_retries)
             .collect::<Result<HashMap<u8, u32>, DiagServiceError>>()?;
@@ -2099,27 +2174,59 @@ impl<S: SecurityPlugin> EcuManager<S> {
             ecu_name,
             description_type: type_,
             database_naming_convention,
-            tester_address: database
-                .find_com_param(&data_protocol, &com_params.doip.logical_tester_address),
+            tester_address: data_protocol.as_ref().map_or_else(
+                || {
+                    com_params
+                        .doip
+                        .logical_tester_address
+                        .resolve_fallback(&resolved_addresses)
+                },
+                |dp| {
+                    database.find_com_param(
+                        dp,
+                        &com_params.doip.logical_tester_address.as_com_param_config(),
+                    )
+                },
+            ),
             logical_address: logical_ecu_address,
             logical_gateway_address,
             logical_functional_address,
             nack_number_of_retries,
-            diagnostic_ack_timeout: database
-                .find_com_param(&data_protocol, &com_params.doip.diagnostic_ack_timeout),
-            retry_period: database.find_com_param(&data_protocol, &com_params.doip.retry_period),
-            routing_activation_timeout: database
-                .find_com_param(&data_protocol, &com_params.doip.routing_activation_timeout),
-            repeat_request_count_transmission: database.find_com_param(
-                &data_protocol,
+            diagnostic_ack_timeout: find_com_param_optional(
+                &database,
+                data_protocol.as_ref(),
+                &com_params.doip.diagnostic_ack_timeout,
+            ),
+            retry_period: find_com_param_optional(
+                &database,
+                data_protocol.as_ref(),
+                &com_params.doip.retry_period,
+            ),
+            routing_activation_timeout: find_com_param_optional(
+                &database,
+                data_protocol.as_ref(),
+                &com_params.doip.routing_activation_timeout,
+            ),
+            repeat_request_count_transmission: find_com_param_optional(
+                &database,
+                data_protocol.as_ref(),
                 &com_params.doip.repeat_request_count_transmission,
             ),
-            connection_timeout: database
-                .find_com_param(&data_protocol, &com_params.doip.connection_timeout),
-            connection_retry_delay: database
-                .find_com_param(&data_protocol, &com_params.doip.connection_retry_delay),
-            connection_retry_attempts: database
-                .find_com_param(&data_protocol, &com_params.doip.connection_retry_attempts),
+            connection_timeout: find_com_param_optional(
+                &database,
+                data_protocol.as_ref(),
+                &com_params.doip.connection_timeout,
+            ),
+            connection_retry_delay: find_com_param_optional(
+                &database,
+                data_protocol.as_ref(),
+                &com_params.doip.connection_retry_delay,
+            ),
+            connection_retry_attempts: find_com_param_optional(
+                &database,
+                data_protocol.as_ref(),
+                &com_params.doip.connection_retry_attempts,
+            ),
             variant_detection,
             variant_index: None,
             variant: EcuVariant {
@@ -2132,65 +2239,124 @@ impl<S: SecurityPlugin> EcuManager<S> {
             fallback_to_base_variant,
             duplicating_ecu_names: None,
             protocol,
+            protocol_name,
             fg_protocol_position: func_description_config.protocol_position.clone(),
             fg_protocol_case_sensitive: func_description_config.protocol_case_sensitive,
             ecu_service_states: Arc::new(RwLock::default()),
-            tester_present_retry_policy: database
-                .find_com_param(&data_protocol, &com_params.uds.tester_present_retry_policy)
-                .into(),
-            tester_present_addr_mode: database
-                .find_com_param(&data_protocol, &com_params.uds.tester_present_addr_mode),
-            tester_present_response_expected: database
-                .find_com_param(
-                    &data_protocol,
-                    &com_params.uds.tester_present_response_expected,
-                )
-                .into(),
-            tester_present_send_type: database
-                .find_com_param(&data_protocol, &com_params.uds.tester_present_send_type),
-            tester_present_message: database
-                .find_com_param(&data_protocol, &com_params.uds.tester_present_message),
-            tester_present_exp_pos_resp: database
-                .find_com_param(&data_protocol, &com_params.uds.tester_present_exp_pos_resp),
-            tester_present_exp_neg_resp: database
-                .find_com_param(&data_protocol, &com_params.uds.tester_present_exp_neg_resp),
-            tester_present_time: database
-                .find_com_param(&data_protocol, &com_params.uds.tester_present_time),
-            repeat_req_count_app: database
-                .find_com_param(&data_protocol, &com_params.uds.repeat_req_count_app),
-            rc_21_retry_policy: database
-                .find_com_param(&data_protocol, &com_params.uds.rc_21_retry_policy),
-            rc_21_completion_timeout: database
-                .find_com_param(&data_protocol, &com_params.uds.rc_21_completion_timeout),
-            rc_21_repeat_request_time: database
-                .find_com_param(&data_protocol, &com_params.uds.rc_21_repeat_request_time),
-            rc_78_retry_policy: database
-                .find_com_param(&data_protocol, &com_params.uds.rc_78_retry_policy),
-            rc_78_completion_timeout: database
-                .find_com_param(&data_protocol, &com_params.uds.rc_78_completion_timeout),
-            rc_78_timeout: database.find_com_param(&data_protocol, &com_params.uds.rc_78_timeout),
-            rc_94_retry_policy: database
-                .find_com_param(&data_protocol, &com_params.uds.rc_94_retry_policy),
-            rc_94_completion_timeout: database
-                .find_com_param(&data_protocol, &com_params.uds.rc_94_completion_timeout),
-            rc_94_repeat_request_time: database
-                .find_com_param(&data_protocol, &com_params.uds.rc_94_repeat_request_time),
-            timeout_default: database
-                .find_com_param(&data_protocol, &com_params.uds.timeout_default),
+            tester_present_retry_policy: find_com_param_optional(
+                &database,
+                data_protocol.as_ref(),
+                &com_params.uds.tester_present_retry_policy,
+            )
+            .into(),
+            tester_present_addr_mode: find_com_param_optional(
+                &database,
+                data_protocol.as_ref(),
+                &com_params.uds.tester_present_addr_mode,
+            ),
+            tester_present_response_expected: find_com_param_optional(
+                &database,
+                data_protocol.as_ref(),
+                &com_params.uds.tester_present_response_expected,
+            )
+            .into(),
+            tester_present_send_type: find_com_param_optional(
+                &database,
+                data_protocol.as_ref(),
+                &com_params.uds.tester_present_send_type,
+            ),
+            tester_present_message: find_com_param_optional(
+                &database,
+                data_protocol.as_ref(),
+                &com_params.uds.tester_present_message,
+            ),
+            tester_present_exp_pos_resp: find_com_param_optional(
+                &database,
+                data_protocol.as_ref(),
+                &com_params.uds.tester_present_exp_pos_resp,
+            ),
+            tester_present_exp_neg_resp: find_com_param_optional(
+                &database,
+                data_protocol.as_ref(),
+                &com_params.uds.tester_present_exp_neg_resp,
+            ),
+            tester_present_time: find_com_param_optional(
+                &database,
+                data_protocol.as_ref(),
+                &com_params.uds.tester_present_time,
+            ),
+            repeat_req_count_app: find_com_param_optional(
+                &database,
+                data_protocol.as_ref(),
+                &com_params.uds.repeat_req_count_app,
+            ),
+            rc_21_retry_policy: find_com_param_optional(
+                &database,
+                data_protocol.as_ref(),
+                &com_params.uds.rc_21_retry_policy,
+            ),
+            rc_21_completion_timeout: find_com_param_optional(
+                &database,
+                data_protocol.as_ref(),
+                &com_params.uds.rc_21_completion_timeout,
+            ),
+            rc_21_repeat_request_time: find_com_param_optional(
+                &database,
+                data_protocol.as_ref(),
+                &com_params.uds.rc_21_repeat_request_time,
+            ),
+            rc_78_retry_policy: find_com_param_optional(
+                &database,
+                data_protocol.as_ref(),
+                &com_params.uds.rc_78_retry_policy,
+            ),
+            rc_78_completion_timeout: find_com_param_optional(
+                &database,
+                data_protocol.as_ref(),
+                &com_params.uds.rc_78_completion_timeout,
+            ),
+            rc_78_timeout: find_com_param_optional(
+                &database,
+                data_protocol.as_ref(),
+                &com_params.uds.rc_78_timeout,
+            ),
+            rc_94_retry_policy: find_com_param_optional(
+                &database,
+                data_protocol.as_ref(),
+                &com_params.uds.rc_94_retry_policy,
+            ),
+            rc_94_completion_timeout: find_com_param_optional(
+                &database,
+                data_protocol.as_ref(),
+                &com_params.uds.rc_94_completion_timeout,
+            ),
+            rc_94_repeat_request_time: find_com_param_optional(
+                &database,
+                data_protocol.as_ref(),
+                &com_params.uds.rc_94_repeat_request_time,
+            ),
+            timeout_default: find_com_param_optional(
+                &database,
+                data_protocol.as_ref(),
+                &com_params.uds.timeout_default,
+            ),
             security_plugin_phantom: std::marker::PhantomData::<S>,
             diag_database: database, // note: initialize this field last as it moves database
         })
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn new_functional_description(
         database: datatypes::DiagnosticDatabase,
         protocol: Protocol,
         com_params: &ComParams,
+        communication_config: &CommunicationConfig,
         database_naming_convention: DatabaseNamingConvention,
         type_: EcuManagerType,
         func_description_config: &cda_interfaces::FunctionalDescriptionConfig,
         fallback_to_base_variant: bool,
     ) -> Result<Self, DiagServiceError> {
+        let protocol_name = protocol.configured_name(communication_config).to_owned();
         // Functional group description: use defaults for all com params
         let logical_ecu_address = com_params.doip.logical_ecu_address.default;
         let nack_number_of_retries = com_params
@@ -2242,6 +2408,7 @@ impl<S: SecurityPlugin> EcuManager<S> {
             fallback_to_base_variant,
             duplicating_ecu_names: None,
             protocol,
+            protocol_name,
             fg_protocol_position: func_description_config.protocol_position.clone(),
             fg_protocol_case_sensitive: func_description_config.protocol_case_sensitive,
             ecu_service_states: Arc::new(RwLock::default()),
@@ -5452,6 +5619,7 @@ mod tests {
             db,
             Protocol::DoIp,
             &ComParams::default(),
+            &CommunicationConfig::default(),
             DatabaseNamingConvention::default(),
             EcuManagerType::Ecu,
             &cda_interfaces::FunctionalDescriptionConfig {
@@ -5485,6 +5653,7 @@ mod tests {
             db,
             Protocol::DoIp,
             &ComParams::default(),
+            &CommunicationConfig::default(),
             DatabaseNamingConvention::default(),
             EcuManagerType::Ecu,
             &cda_interfaces::FunctionalDescriptionConfig {

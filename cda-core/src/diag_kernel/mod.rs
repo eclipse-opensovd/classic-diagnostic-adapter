@@ -230,10 +230,10 @@ impl TryInto<u32> for DiagDataValue {
     }
 }
 
-pub fn into_db_protocol(
-    database: &datatypes::DiagnosticDatabase,
-    protocol: cda_interfaces::Protocol,
-) -> Result<datatypes::Protocol<'_>, DiagServiceError> {
+pub fn into_db_protocol<'a>(
+    database: &'a datatypes::DiagnosticDatabase,
+    protocol_name: &str,
+) -> Result<datatypes::Protocol<'a>, DiagServiceError> {
     let protocol = database
         .diag_layers()?
         .iter()
@@ -242,13 +242,12 @@ pub fn into_db_protocol(
         .find(|p| {
             p.diag_layer()
                 .and_then(|dl| dl.short_name())
-                .is_some_and(|sn| sn == protocol.value())
+                .is_some_and(|sn| sn == protocol_name)
         })
         .map(datatypes::Protocol)
         .ok_or_else(|| {
             DiagServiceError::InvalidDatabase(format!(
-                "Protocol {} not found in database",
-                protocol.value()
+                "Protocol {protocol_name} not found in database",
             ))
         })?;
 

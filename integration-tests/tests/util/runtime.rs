@@ -20,7 +20,8 @@ use cda_health::config::HealthConfig;
 use cda_interfaces::{
     FunctionalDescriptionConfig, HashMap, HashMapExtensions,
     datatypes::{
-        ComParams, ComponentsConfig, DatabaseNamingConvention, FaultConfig, FlatbBufConfig,
+        ComParams, CommunicationConfig, ComponentsConfig, DatabaseNamingConvention, FaultConfig,
+        FlatbBufConfig,
     },
 };
 use cda_plugin_security::{DefaultSecurityPlugin, DefaultSecurityPluginData};
@@ -138,7 +139,9 @@ async fn initialize_runtime() -> Result<TestRuntime, TestingError> {
         logging: LoggingConfig::default(),
         onboard_tester: true,
         flash_files_path: flash_files_path()?,
+        communication: CommunicationConfig::default(),
         com_params: ComParams::default(),
+        ecu: HashMap::default(),
         flat_buf: FlatbBufConfig::default(),
         functional_description: FunctionalDescriptionConfig {
             description_database: "functional_groups".to_owned(),

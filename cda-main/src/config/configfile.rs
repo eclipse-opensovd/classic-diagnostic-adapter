@@ -14,8 +14,9 @@ pub use cda_comm_doip::config::DoipConfig;
 use cda_interfaces::{
     FunctionalDescriptionConfig, HashMap,
     datatypes::{
-        ComParams, ComponentsConfig, DatabaseNamingConvention, DiagnosticServiceAffixPosition,
-        FaultConfig, FlatbBufConfig, SdBoolMappings, SdMappingsTruthyValue,
+        ComParams, CommunicationConfig, ComponentsConfig, DatabaseNamingConvention,
+        DiagnosticServiceAffixPosition, EcuConfig, FaultConfig, FlatbBufConfig, SdBoolMappings,
+        SdMappingsTruthyValue,
     },
 };
 use serde::{Deserialize, Serialize};
@@ -30,7 +31,12 @@ pub struct Configuration {
     pub logging: cda_tracing::LoggingConfig,
     pub onboard_tester: bool,
     pub flash_files_path: String,
+    pub communication: CommunicationConfig,
     pub com_params: ComParams,
+    /// Per-ECU configuration. Keys are ECU names.
+    /// Values specified here override the corresponding global defaults.
+    #[serde(default)]
+    pub ecu: HashMap<String, EcuConfig>,
     pub flat_buf: FlatbBufConfig,
     pub functional_description: FunctionalDescriptionConfig,
     pub components: ComponentsConfig,
@@ -85,7 +91,9 @@ impl Default for Configuration {
                 ..Default::default()
             },
             logging: cda_tracing::LoggingConfig::default(),
+            communication: CommunicationConfig::default(),
             com_params: ComParams::default(),
+            ecu: HashMap::default(),
             flat_buf: FlatbBufConfig::default(),
             functional_description: FunctionalDescriptionConfig {
                 description_database: "functional_groups".to_owned(),

@@ -1,0 +1,118 @@
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: 2025 The Contributors to Eclipse OpenSOVD (see CONTRIBUTORS)
+#
+# See the NOTICE file(s) distributed with this work for additional
+# information regarding copyright ownership.
+#
+# This program and the accompanying materials are made available under the
+# terms of the Apache License Version 2.0 which is available at
+# https://www.apache.org/licenses/LICENSE-2.0
+
+# =============================================================================
+# Demo configuration showing communication parameters, per-ECU overrides,
+# and address fallback references.
+#
+# Only the relevant sections are shown.  Values not listed here use their
+# built-in defaults (see ComParams / DoipComParams / UdsComParams impls).
+# =============================================================================
+
+
+# ---------------------------------------------------------------------------
+# Protocol names  – matched against database protocol layer names
+# ---------------------------------------------------------------------------
+[communication]
+doip_protocol_name = "UDS_Ethernet_DoIP"
+doip_dobt_protocol_name = "UDS_Ethernet_DoIP_DOBT"
+
+
+# ---------------------------------------------------------------------------
+# Global communication parameters  – apply to all ECUs unless overridden
+# ---------------------------------------------------------------------------
+
+# --- DoIP addresses --------------------------------------------------------
+# Each address field has:
+#   name     – comparam name used for the database lookup
+#   default  – value used when the comparam is not found in the database
+#   fallback – (optional) name of another address field whose *resolved* value
+#              is used instead of `default` when the database lookup fails.
+#              Valid values: logical_gateway_address, logical_ecu_address,
+#              logical_functional_address, logical_tester_address
+
+[com_params.doip.logical_gateway_address]
+name = "CP_DoIPLogicalGatewayAddress"
+default = 0
+
+[com_params.doip.logical_ecu_address]
+name = "CP_DoIPLogicalEcuAddress"
+default = 0
+
+[com_params.doip.logical_functional_address]
+name = "CP_DoIPLogicalFunctionalAddress"
+default = 0
+# If not found in the database, fall back to the resolved gateway address:
+fallback = "logical_gateway_address"
+
+[com_params.doip.logical_tester_address]
+name = "CP_DoIPLogicalTesterAddress"
+default = 0
+
+# --- DoIP timing / retry ---------------------------------------------------
+[com_params.doip.routing_activation_timeout]
+name = "CP_DoIPRoutingActivationTimeout"
+default = { secs = 30, nanos = 0 }
+
+[com_params.doip.connection_timeout]
+name = "CP_DoIPConnectionTimeout"
+default = { secs = 30, nanos = 0 }
+
+[com_params.doip.connection_retry_delay]
+name = "CP_DoIPConnectionRetryDelay"
+default = { secs = 5, nanos = 0 }
+
+[com_params.doip.connection_retry_attempts]
+name = "CP_DoIPConnectionRetryAttempts"
+default = 100
+
+# --- UDS timing / retry ----------------------------------------------------
+[com_params.uds.timeout_default]
+name = "CP_P6Max"
+default = { secs = 1, nanos = 0 }
+
+[com_params.uds.tester_present_time]
+name = "CP_TesterPresentTime"
+default = { secs = 2, nanos = 0 }
+
+
+# ---------------------------------------------------------------------------
+# Per-ECU configuration – values here override the global defaults above
+# ---------------------------------------------------------------------------
+
+# ECU "MyEcu": override the tester address with a literal value
+# and increase the default timeout.
+[ecu.MyEcu.com_params.doip]
+logical_tester_address = 42
+
+[ecu.MyEcu.com_params.uds]
+timeout_default = { secs = 5, nanos = 0 }
+
+
+# ECU "SlowEcu": longer timeouts
+[ecu.SlowEcu.com_params.uds]
+timeout_default = { secs = 10, nanos = 0 }
+rc_78_completion_timeout = { secs = 60, nanos = 0 }
+tester_present_time = { secs = 4, nanos = 0 }
+
+[ecu.SlowEcu.com_params.doip]
+connection_timeout = { secs = 60, nanos = 0 }
+connection_retry_attempts = 200
+
+
+# ECU "GatewayEcu": if functional address is not in the database,
+# reuse the gateway address.  This uses the structured override form.
+[ecu.GatewayEcu.com_params.doip.logical_functional_address]
+fallback = "logical_gateway_address"
+
+# ECU "SpecialEcu": set both a new default and a fallback reference
+[ecu.SpecialEcu.com_params.doip.logical_ecu_address]
+default = 100
+fallback = "logical_gateway_address"
