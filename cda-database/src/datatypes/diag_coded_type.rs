@@ -2334,7 +2334,7 @@ mod tests {
 
     #[test]
     fn test_encode_standard_length_ascii_string() {
-        let input = [b'A', b'B'];
+        let input = *b"AB";
         let expected = input;
         test_encode_standard_length(16, None, false, &input, &expected, DataType::AsciiString)
             .unwrap();

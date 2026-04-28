@@ -232,6 +232,12 @@ pub async fn load_vehicle_data<
     })
 }
 
+/// Loads all MDD databases and file managers from the configured database path.
+///
+/// # Errors
+///
+/// Returns [`AppError::ShutdownRequested`] if a shutdown signal is received while
+/// databases are still being loaded.
 #[tracing::instrument(
     skip(config, health),
     fields(databases_path = %config.database.path)
