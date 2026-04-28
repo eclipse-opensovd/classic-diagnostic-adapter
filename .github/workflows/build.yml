@@ -44,6 +44,7 @@ jobs:
       - name: Install Protoc
         uses: arduino/setup-protoc@v3
         with:
+          version: "34.1"
           # The action queries the GitHub API to fetch releases data,
           # to avoid rate limiting, passing the default token.
           repo-token: ${{ secrets.GITHUB_TOKEN }}
