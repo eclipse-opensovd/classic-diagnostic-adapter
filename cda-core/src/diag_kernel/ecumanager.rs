@@ -4295,6 +4295,9 @@ impl<S: SecurityPlugin> EcuManager<S> {
         for _ in 0..num_items {
             let bytes_to_skip_before = uds_payload.bytes_to_skip();
             uds_payload.push_slice(start, uds_payload.len())?;
+            // Inner item params may omit BYTE-POSITION, falling back to last_read_byte_pos.
+            // Reset it to 0 so stale state from count decode doesn't corrupt item decoding.
+            uds_payload.set_last_read_byte_pos(0);
             let basic_struct_type = repeated_dop
                 .basic_structure()
                 .map(|d| d.specific_data_type());
