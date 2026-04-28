@@ -12,16 +12,16 @@
 
 use aide::OperationInput;
 use axum::{
+    RequestPartsExt,
     extract::{FromRequestParts, OptionalFromRequestParts},
     response::{IntoResponse, Response},
-    RequestPartsExt,
-};
-use http::{
-    header::{HeaderMap, FORWARDED},
-    request::Parts,
 };
 #[cfg(feature = "uri-authority")]
 use http::uri::Authority;
+use http::{
+    header::{FORWARDED, HeaderMap},
+    request::Parts,
+};
 
 use std::convert::Infallible;
 
@@ -58,7 +58,9 @@ where
             .await
             .ok()
             .flatten()
-            .ok_or(ExtractHostRejection::FailedToResolveHost(FailedToResolveHost))
+            .ok_or(ExtractHostRejection::FailedToResolveHost(
+                FailedToResolveHost,
+            ))
     }
 }
 
