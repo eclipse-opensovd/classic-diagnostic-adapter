@@ -494,6 +494,7 @@ impl<S: SecurityPlugin> cda_interfaces::EcuManager for EcuManager<S> {
         ),
         err
     )]
+    // allow keeping the function together as it makes sense structurally
     #[allow(clippy::too_many_lines)]
     async fn convert_from_uds(
         &self,
@@ -583,21 +584,7 @@ impl<S: SecurityPlugin> cda_interfaces::EcuManager for EcuManager<S> {
             }
             let mut mapping_errors = Vec::new();
             let mut sorted_params = params;
-            sorted_params.sort_by(|a, b| {
-                match (a.has_byte_position(), b.has_byte_position()) {
-                    // Both have a position → normal comparison
-                    (true, true) => a
-                        .byte_position()
-                        .cmp(&b.byte_position())
-                        .then(a.bit_position().cmp(&b.bit_position())),
-                    // Only a has no position → a goes after b
-                    (false, true) => std::cmp::Ordering::Greater,
-                    // Only b has no position → b goes after a
-                    (true, false) => std::cmp::Ordering::Less,
-                    // Neither has a position → preserve order
-                    (false, false) => std::cmp::Ordering::Equal,
-                }
-            });
+            sorted_params.sort_by(param_position_order);
             for param in sorted_params {
                 let semantic = param.semantic();
                 if semantic.is_some_and(|semantic| {
@@ -2505,31 +2492,6 @@ impl<S: SecurityPlugin> EcuManager<S> {
 
         let lookup_id = STRINGS.get_or_insert(&lookup_name);
 
-        let prefixes = diag_comm.type_.service_prefixes();
-        let predicate = |service: &datatypes::DiagService<'_>| {
-            service.diag_comm().is_some_and(|dc| {
-                dc.short_name()
-                    .is_some_and(|name| name.eq_ignore_ascii_case(&lookup_name))
-            }) && service
-                .request_id()
-                .is_some_and(|sid| prefixes.contains(&sid))
-        };
-
-        if let Some(fg_name) = functional_group_name {
-            return self
-                .get_services_from_functional_group_and_parent_refs(fg_name, predicate)?
-                .into_iter()
-                .next()
-                .ok_or_else(|| {
-                    DiagServiceError::NotFound(format!(
-                        "Diagnostic service '{lookup_name}' not found in functional group \
-                         '{fg_name}'"
-                    ))
-                });
-        }
-
-        let lookup_id = STRINGS.get_or_insert(&lookup_name);
-
         if let Some(Some(location)) = self.db_cache.diag_services.read().await.get(&lookup_id) {
             return match self.get_service_by_location(location) {
                 Some(service) => Ok(service),
@@ -4197,6 +4159,7 @@ impl<S: SecurityPlugin> EcuManager<S> {
             dlt_context = dlt_ctx!("CORE"),
         )
     )]
+    // allow keeping the function together as it makes sense structurally
     #[allow(clippy::too_many_lines)]
     fn map_dynamic_length_field_from_uds(
         &self,
@@ -4234,7 +4197,7 @@ impl<S: SecurityPlugin> EcuManager<S> {
         } else {
             param_ctx.base_offset
         };
-        let (num_items_data, count_field_bit_len) = num_items_diag_type.decode(
+        let (num_items_data, _count_field_bit_len) = num_items_diag_type.decode(
             uds_payload
                 .data()?
                 .get(param_abs_byte_pos..)
@@ -4244,18 +4207,6 @@ impl<S: SecurityPlugin> EcuManager<S> {
             determine_num_items.byte_position() as usize,
             determine_num_items.bit_position() as usize,
         )?;
-
-        tracing::debug!(
-            has_byte_position = param_ctx.parameter.has_byte_position(),
-            param_byte_position = param_ctx.parameter.byte_position(),
-            base_offset = param_ctx.base_offset,
-            param_abs_byte_pos,
-            last_read_byte_pos = uds_payload.last_read_byte_pos(),
-            determine_number_of_items_byte_position = determine_num_items.byte_position(),
-            dynamic_length_field_dop_offset = dynamic_length_field_dop.offset(),
-            count_diag_coded_type_bit_len = count_field_bit_len,
-            "DynamicLengthField count decode metadata"
-        );
 
         let num_items_diag_val = operations::uds_data_to_serializable(
             datatypes::DataType::UInt32, // Using hard coded UInt32 as per ISO 22901-1:2008
@@ -5438,6 +5389,22 @@ fn extract_struct_dop_from_field(
         .ok_or(DiagServiceError::InvalidDatabase(
             "Field none or does not contain a struct".to_owned(),
         ))
+}
+
+fn param_position_order(a: &datatypes::Parameter, b: &datatypes::Parameter) -> std::cmp::Ordering {
+    match (a.has_byte_position(), b.has_byte_position()) {
+        // Both have a position → normal comparison
+        (true, true) => a
+            .byte_position()
+            .cmp(&b.byte_position())
+            .then(a.bit_position().cmp(&b.bit_position())),
+        // Only a has no position → a goes after b
+        (false, true) => std::cmp::Ordering::Greater,
+        // Only b has no position → b goes after a
+        (true, false) => std::cmp::Ordering::Less,
+        // Neither has a position → preserve order
+        (false, false) => std::cmp::Ordering::Equal,
+    }
 }
 
 fn create_diag_service_response(
