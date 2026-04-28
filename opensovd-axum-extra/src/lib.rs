@@ -10,6 +10,8 @@
  * https://www.apache.org/licenses/LICENSE-2.0
  */
 
+use std::convert::Infallible;
+
 use aide::OperationInput;
 use axum::{
     RequestPartsExt,
@@ -22,8 +24,6 @@ use http::{
     header::{FORWARDED, HeaderMap},
     request::Parts,
 };
-
-use std::convert::Infallible;
 
 #[cfg(feature = "x-forwarded-host")]
 const X_FORWARDED_HOST_HEADER_KEY: &str = "X-Forwarded-Host";
@@ -71,18 +71,23 @@ where
     type Rejection = Infallible;
 
     async fn from_request_parts(
-        _parts: &mut Parts,
+        parts: &mut Parts,
         _state: &S,
     ) -> Result<Option<Self>, Self::Rejection> {
+        #[cfg(not(any(
+            feature = "forwarded",
+            feature = "x-forwarded-host",
+            feature = "host-header",
+            feature = "uri-authority"
+        )))]
+        let _ = parts;
+
         #[cfg(any(
             feature = "forwarded",
             feature = "x-forwarded-host",
             feature = "host-header",
             feature = "uri-authority"
         ))]
-        let parts = _parts;
-
-        #[cfg(feature = "forwarded")]
         if let Some(host) = parse_forwarded(&parts.headers) {
             return Ok(Some(ExtractHost(host.to_owned())));
         }
@@ -165,10 +170,11 @@ fn parse_authority(auth: &Authority) -> &str {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use axum::http::Request;
     #[cfg(any(feature = "forwarded", feature = "x-forwarded-host"))]
     use axum::http::header::HeaderName;
+
+    use super::*;
 
     #[tokio::test]
     #[cfg(feature = "host-header")]

@@ -19,6 +19,9 @@ license.workspace = true
 [lints]
 workspace = true
 
+[lib]
+path = "src/lib.rs"
+
 [features]
 default = ["forwarded", "x-forwarded-host", "host-header", "uri-authority"]
 forwarded = []
