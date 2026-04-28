@@ -255,7 +255,6 @@ fn params_to_schema(
     })
 }
 
-#[allow(clippy::too_many_lines)]
 fn dop_variant_to_schema(
     ctx: &str,
     ecu_db: &DiagnosticDatabase,
@@ -340,21 +339,7 @@ fn dop_variant_to_schema(
             }
         }
         datatypes::DataOperationVariant::EnvDataDesc(env_data_desc_dop) => {
-            let variants: Vec<serde_json::Value> = env_data_desc_dop
-                .env_datas()
-                .into_iter()
-                .flat_map(|v| v.iter())
-                .filter_map(|dop| {
-                    let env_data = dop.specific_data_as_env_data()?;
-                    let params: Vec<datatypes::Parameter> = env_data
-                        .params()
-                        .into_iter()
-                        .flat_map(|p| p.iter())
-                        .map(datatypes::Parameter)
-                        .collect();
-                    params_to_schema(&params, ctx, ecu_db, request).map(Into::into)
-                })
-                .collect();
+            let variants = env_data_desc_to_variants(&env_data_desc_dop, ctx, ecu_db, request);
             if !variants.is_empty() {
                 schema.insert(name, schemars::json_schema!({ "any-of": variants }).into());
             }
@@ -377,48 +362,10 @@ fn dop_variant_to_schema(
             );
         }
         datatypes::DataOperationVariant::DynamicLengthField(dynamic_length_field) => {
-            if let Some(structure_dop) = dynamic_length_field
-                .field()
-                .and_then(|f| f.basic_structure())
-                .and_then(|s| s.specific_data_as_structure())
+            if let Some(v) =
+                map_dynamic_length_field_to_schema(&dynamic_length_field, ctx, ecu_db, request)?
             {
-                if let Some(struct_schema) =
-                    map_struct_to_schema(&(structure_dop.into()), ctx, ecu_db, request)
-                {
-                    schema.insert(name, serde_json::Value::Array(vec![struct_schema.into()]));
-                }
-            } else if let Some(env_data_desc) = dynamic_length_field
-                .field()
-                .and_then(|f| f.env_data_desc())
-                .and_then(|dop| dop.specific_data_as_env_data_desc())
-            {
-                let variants: Vec<serde_json::Value> = env_data_desc
-                    .env_datas()
-                    .into_iter()
-                    .flat_map(|v| v.iter())
-                    .filter_map(|dop| {
-                        let env_data = dop.specific_data_as_env_data()?;
-                        let params: Vec<datatypes::Parameter> = env_data
-                            .params()
-                            .into_iter()
-                            .flat_map(|p| p.iter())
-                            .map(datatypes::Parameter)
-                            .collect();
-                        params_to_schema(&params, ctx, ecu_db, request).map(Into::into)
-                    })
-                    .collect();
-                if !variants.is_empty() {
-                    schema.insert(
-                        name,
-                        schemars::json_schema!({ "type": "array", "items": { "any-of": variants } })
-                            .into(),
-                    );
-                }
-            } else {
-                return Err(DiagServiceError::ParameterConversionError(format!(
-                    "Mapping {ctx}: DynamicLengthField DopField value is neither BasicStruct nor \
-                     EnvDataDesc."
-                )));
+                schema.insert(name, v);
             }
         }
     }
@@ -436,6 +383,65 @@ fn map_struct_to_schema(
         .map(|params| params.iter().map(datatypes::Parameter).collect::<Vec<_>>())
         .unwrap_or_default();
     params_to_schema(&params, ctx, ecu_db, request)
+}
+
+fn env_data_desc_to_variants(
+    env_data_desc: &datatypes::EnvDataDescDop<'_>,
+    ctx: &str,
+    ecu_db: &DiagnosticDatabase,
+    request: Option<&datatypes::Request<'_>>,
+) -> Vec<serde_json::Value> {
+    env_data_desc
+        .env_datas()
+        .into_iter()
+        .flat_map(|v| v.iter())
+        .filter_map(|dop| {
+            let env_data = dop.specific_data_as_env_data()?;
+            let params: Vec<datatypes::Parameter> = env_data
+                .params()
+                .into_iter()
+                .flat_map(|p| p.iter())
+                .map(datatypes::Parameter)
+                .collect();
+            params_to_schema(&params, ctx, ecu_db, request).map(Into::into)
+        })
+        .collect()
+}
+
+fn map_dynamic_length_field_to_schema(
+    dynamic_length_field: &datatypes::DynamicLengthDop<'_>,
+    ctx: &str,
+    ecu_db: &DiagnosticDatabase,
+    request: Option<&datatypes::Request<'_>>,
+) -> Result<Option<serde_json::Value>, DiagServiceError> {
+    if let Some(structure_dop) = dynamic_length_field
+        .field()
+        .and_then(|f| f.basic_structure())
+        .and_then(|s| s.specific_data_as_structure())
+        .map(datatypes::StructureDop)
+    {
+        Ok(map_struct_to_schema(&structure_dop, ctx, ecu_db, request)
+            .map(|s| serde_json::Value::Array(vec![s.into()])))
+    } else if let Some(env_data_desc) = dynamic_length_field
+        .field()
+        .and_then(|f| f.env_data_desc())
+        .and_then(|dop| dop.specific_data_as_env_data_desc())
+        .map(datatypes::EnvDataDescDop)
+    {
+        let variants = env_data_desc_to_variants(&env_data_desc, ctx, ecu_db, request);
+        if variants.is_empty() {
+            Ok(None)
+        } else {
+            Ok(Some(
+                schemars::json_schema!({ "type": "array", "items": { "any-of": variants } }).into(),
+            ))
+        }
+    } else {
+        Err(DiagServiceError::ParameterConversionError(format!(
+            "Mapping {ctx}: DynamicLengthField DopField value is neither BasicStruct nor \
+             EnvDataDesc."
+        )))
+    }
 }
 
 #[tracing::instrument(skip_all,
@@ -462,22 +468,9 @@ fn map_dop_field_to_schema(
     } else if let Some(env_data_desc) = dop_field
         .env_data_desc()
         .and_then(|dop| dop.specific_data_as_env_data_desc())
+        .map(datatypes::EnvDataDescDop)
     {
-        let variants: Vec<serde_json::Value> = env_data_desc
-            .env_datas()
-            .into_iter()
-            .flat_map(|v| v.iter())
-            .filter_map(|dop| {
-                let env_data = dop.specific_data_as_env_data()?;
-                let params: Vec<datatypes::Parameter> = env_data
-                    .params()
-                    .into_iter()
-                    .flat_map(|p| p.iter())
-                    .map(datatypes::Parameter)
-                    .collect();
-                params_to_schema(&params, ctx, ecu_db, request).map(Into::into)
-            })
-            .collect();
+        let variants = env_data_desc_to_variants(&env_data_desc, ctx, ecu_db, request);
         if variants.is_empty() {
             None
         } else {
