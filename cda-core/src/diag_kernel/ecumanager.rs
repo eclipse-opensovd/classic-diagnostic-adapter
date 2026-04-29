@@ -18,7 +18,7 @@ use cda_interfaces::{
     EcuState, EcuVariant, HashMap, HashMapExtensions, HashSet, HashSetExtensions, Protocol,
     STRINGS, SecurityAccess, ServicePayload, StringId,
     datatypes::{
-        AddressingMode, CLEAR_FAULT_MEM_POS_RESPONSE_SID, ComParams, CommunicationConfig,
+        AddressingMode, CLEAR_FAULT_MEM_POS_RESPONSE_SID,
         ComplexComParamValue, ComponentConfigurationsInfo, ComponentDataInfo,
         ComponentOperationsInfo, DTC_CODE_BIT_LEN, DatabaseNamingConvention,
         DeserializableCompParam, DiagnosticServiceAffixPosition, DtcLookup,
@@ -84,6 +84,7 @@ fn find_address_with_fallback<L>(
     address_type: datatypes::LogicalAddressType,
     config: &cda_interfaces::datatypes::AddressComParamConfig,
     resolved: &L,
+    ignore_protocol_in_lookup: bool,
 ) -> u16
 where
     L: cda_interfaces::datatypes::FallbackLookup<u16> + ?Sized,
@@ -91,7 +92,7 @@ where
     data_protocol
         .and_then(|dp| {
             database
-                .find_logical_address(address_type, database, dp)
+                .find_logical_address(address_type, database, dp, ignore_protocol_in_lookup)
                 .map_err(|e| {
                     tracing::error!("Failed to find logical address '{}': {e}", config.name);
                 })
@@ -2089,6 +2090,8 @@ impl<S: SecurityPlugin> EcuManager<S> {
             }
         };
 
+        let ignore_protocol_in_lookup = com_params.doip.comparam_ignore_protocol_in_lookup;
+
         let logical_gateway_address = find_address_with_fallback(
             &database,
             data_protocol.as_ref(),
@@ -2097,6 +2100,7 @@ impl<S: SecurityPlugin> EcuManager<S> {
             ),
             &com_params.doip.logical_gateway_address,
             &ResolvedAddresses::default(),
+            ignore_protocol_in_lookup,
         );
 
         let mut resolved_addresses = ResolvedAddresses {
@@ -2113,6 +2117,7 @@ impl<S: SecurityPlugin> EcuManager<S> {
             ),
             &com_params.doip.logical_ecu_address,
             &resolved_addresses,
+            ignore_protocol_in_lookup,
         );
         resolved_addresses.logical_ecu_address = Some(logical_ecu_address);
 
@@ -2124,6 +2129,7 @@ impl<S: SecurityPlugin> EcuManager<S> {
             ),
             &com_params.doip.logical_functional_address,
             &resolved_addresses,
+            ignore_protocol_in_lookup,
         );
         resolved_addresses.logical_functional_address = Some(logical_functional_address);
 
@@ -5612,6 +5618,7 @@ mod tests {
         },
     };
     use cda_interfaces::{EcuManager, Protocol, UDS_ID_RESPONSE_BITMASK};
+    use cda_interfaces::datatypes::{ComParams, CommunicationConfig};
     use cda_plugin_security::DefaultSecurityPluginData;
     use flatbuffers::WIPOffset;
     use serde_json::json;

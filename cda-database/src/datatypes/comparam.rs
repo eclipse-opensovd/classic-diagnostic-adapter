@@ -26,25 +26,52 @@ pub(super) fn lookup(
         DiagServiceError::InvalidDatabase("Protocol has no short name".to_owned()),
     )?;
 
+    lookup_inner(ecu_data, Some(protocol_name), param_name)
+}
+
+/// Like [`lookup`], but matches only by param name — ignoring the protocol
+/// on the `ComParamRef`.  This is useful for com params (e.g.
+/// `CP_UniqueRespIdTable`) that exist in the database without a protocol
+/// reference.
+pub(super) fn lookup_any_protocol(
+    ecu_data: &crate::datatypes::DiagnosticDatabase,
+    param_name: &str,
+) -> Result<ComParamValue, DiagServiceError> {
+    lookup_inner(ecu_data, None, param_name)
+}
+
+fn lookup_inner(
+    ecu_data: &crate::datatypes::DiagnosticDatabase,
+    protocol_name: Option<&str>,
+    param_name: &str,
+) -> Result<ComParamValue, DiagServiceError> {
     let cp_ref = ecu_data
         .base_variant()?
         .diag_layer()
         .and_then(|dl| dl.com_param_refs())
         .and_then(|refs| {
             refs.iter().find(|cp_ref| {
-                cp_ref
-                    .protocol()
-                    .and_then(|p| p.diag_layer().and_then(|dl| dl.short_name()))
-                    .is_some_and(|sn| sn == protocol_name)
-                    && cp_ref
-                        .com_param()
-                        .and_then(|cp| cp.short_name())
-                        .is_some_and(|n| n == param_name)
+                let name_matches = cp_ref
+                    .com_param()
+                    .and_then(|cp| cp.short_name())
+                    .is_some_and(|n| n == param_name);
+
+                let protocol_matches = match protocol_name {
+                    Some(expected) => cp_ref
+                        .protocol()
+                        .and_then(|p| p.diag_layer().and_then(|dl| dl.short_name()))
+                        .is_some_and(|sn| sn == expected),
+                    None => true,
+                };
+
+                name_matches && protocol_matches
             })
         })
-        .ok_or(DiagServiceError::NotFound(format!(
-            "No ComParamRef found for {param_name} in protocol {protocol_name}"
-        )))?;
+        .ok_or_else(|| {
+            let scope = protocol_name
+                .map_or_else(|| "(any protocol)".to_owned(), |p| format!("in protocol {p}"));
+            DiagServiceError::NotFound(format!("No ComParamRef found for {param_name} {scope}"))
+        })?;
 
     let cp = cp_ref.com_param().ok_or(DiagServiceError::InvalidDatabase(
         "ComParamRef has no ComParam".to_owned(),

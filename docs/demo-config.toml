@@ -28,6 +28,12 @@ doip_dobt_protocol_name = "UDS_Ethernet_DoIP_DOBT"
 #              addresses.  The referenced field must appear earlier in the
 #              resolution order within the same type group.
 
+[com_params.doip]
+# When true, com param lookups that fail under the configured protocol are
+# retried without a protocol filter.  Useful for databases where some com
+# params (e.g. CP_UniqueRespIdTable) have no protocol reference.
+comparam_ignore_protocol_in_lookup = true
+
 [com_params.doip.logical_gateway_address]
 name = "CP_DoIPLogicalGatewayAddress"
 default = 0

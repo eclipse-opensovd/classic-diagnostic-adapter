@@ -564,6 +564,7 @@ impl DiagnosticDatabase {
         type_: LogicalAddressType,
         diag_database: &DiagnosticDatabase,
         protocol: &dataformat::Protocol,
+        ignore_protocol_in_lookup: bool,
     ) -> Result<u16, DiagServiceError> {
         let (param_name, additional_param_name) = match type_ {
             LogicalAddressType::Ecu(response_id_table, ecu_address) => {
@@ -572,7 +573,18 @@ impl DiagnosticDatabase {
             LogicalAddressType::Gateway(p) | LogicalAddressType::Functional(p) => (p, None),
         };
 
-        match comparam::lookup(diag_database, protocol, &param_name)? {
+        // Try protocol-scoped lookup first.  When `ignore_protocol_in_lookup`
+        // is enabled, retry without a protocol filter — this handles com params
+        // (e.g. CP_UniqueRespIdTable) that exist in the database without a
+        // protocol reference.
+        let com_param_value = if ignore_protocol_in_lookup {
+            comparam::lookup(diag_database, protocol, &param_name)
+                .or_else(|_| comparam::lookup_any_protocol(diag_database, &param_name))?
+        } else {
+            comparam::lookup(diag_database, protocol, &param_name)?
+        };
+
+        match com_param_value {
             ComParamValue::Simple(simple_value) => {
                 let val_as_u16 = simple_value.value.parse::<u16>().map_err(|e| {
                     DiagServiceError::ParameterConversionError(format!("Invalid address: {e}"))

@@ -131,6 +131,7 @@ pub struct EcuUdsComParams {
 pub struct EcuDoipComParams {
     pub logical_gateway_address: Option<AddressOverride>,
     pub logical_response_id_table_name: Option<String>,
+    pub comparam_ignore_protocol_in_lookup: Option<bool>,
     pub logical_ecu_address: Option<AddressOverride>,
     pub logical_functional_address: Option<AddressOverride>,
     pub logical_tester_address: Option<AddressOverride>,
@@ -600,6 +601,13 @@ pub struct DoipComParams {
     /// Only the ID of this com param is needed right now
     pub logical_response_id_table_name: String,
 
+    /// When `true`, com param lookups that fail under the configured protocol
+    /// are retried without a protocol filter.  This is useful for com params
+    /// (e.g. `CP_UniqueRespIdTable`) that exist in the database without a
+    /// protocol reference.  Defaults to `false`.
+    #[serde(default)]
+    pub comparam_ignore_protocol_in_lookup: bool,
+
     /// Logical/Physical address of the ECU
     pub logical_ecu_address: AddressComParamConfig,
 
@@ -784,6 +792,7 @@ impl Default for DoipComParams {
         Self {
             logical_gateway_address: AddressComParamConfig::new("CP_DoIPLogicalGatewayAddress", 0),
             logical_response_id_table_name: "CP_UniqueRespIdTable".to_owned(),
+            comparam_ignore_protocol_in_lookup: false,
             logical_ecu_address: AddressComParamConfig::new("CP_DoIPLogicalEcuAddress", 0),
             logical_functional_address: AddressComParamConfig::new(
                 "CP_DoIPLogicalFunctionalAddress",
@@ -953,6 +962,9 @@ impl DoipComParams {
                 .logical_response_id_table_name
                 .clone()
                 .unwrap_or_else(|| self.logical_response_id_table_name.clone()),
+            comparam_ignore_protocol_in_lookup: o
+                .comparam_ignore_protocol_in_lookup
+                .unwrap_or(self.comparam_ignore_protocol_in_lookup),
             logical_ecu_address: apply_address_override(
                 &self.logical_ecu_address,
                 o.logical_ecu_address.as_ref(),
