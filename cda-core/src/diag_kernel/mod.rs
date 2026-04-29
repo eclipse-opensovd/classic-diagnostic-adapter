@@ -230,29 +230,38 @@ impl TryInto<u32> for DiagDataValue {
     }
 }
 
-pub fn into_db_protocol(
-    database: &datatypes::DiagnosticDatabase,
-    protocol: cda_interfaces::Protocol,
-) -> Result<datatypes::Protocol<'_>, DiagServiceError> {
-    let protocol = database
-        .diag_layers()?
-        .iter()
-        .flat_map(|dl| dl.com_param_refs().into_iter().flatten())
-        .filter_map(|cp_ref| cp_ref.protocol())
-        .find(|p| {
-            p.diag_layer()
-                .and_then(|dl| dl.short_name())
-                .is_some_and(|sn| sn == protocol.value())
-        })
-        .map(datatypes::Protocol)
-        .ok_or_else(|| {
-            DiagServiceError::InvalidDatabase(format!(
-                "Protocol {} not found in database",
-                protocol.value()
-            ))
-        })?;
+pub fn into_db_protocol<'db>(
+    database: &'db datatypes::DiagnosticDatabase,
+    protocol: &cda_interfaces::Protocol,
+) -> Result<datatypes::Protocol<'db>, DiagServiceError> {
+    let protocol_name = protocol.to_string();
+    let all_protocols = database.protocols()?;
 
-    Ok(protocol)
+    // Try exact match first.
+    if let Some(p) = all_protocols.iter().find(|p| {
+        p.diag_layer()
+            .and_then(|dl| dl.short_name())
+            .is_some_and(|sn| sn.eq_ignore_ascii_case(&protocol_name))
+    }) {
+        return Ok(datatypes::Protocol(*p));
+    }
+
+    // Fallback: when ignore_protocol is enabled and only one distinct protocol
+    // exists in the database, use it regardless of name.
+    if database.config().ignore_protocol {
+        // Safe: ignore_protocol validity is checked at database construction time,
+        // guaranteeing at most one distinct protocol in the database.
+        return all_protocols
+            .first()
+            .map(|p| datatypes::Protocol(*p))
+            .ok_or_else(|| {
+                DiagServiceError::InvalidDatabase("No protocols found in database".to_owned())
+            });
+    }
+
+    Err(DiagServiceError::InvalidDatabase(format!(
+        "Protocol {protocol_name} not found in database",
+    )))
 }
 
 impl Serialize for DiagDataValue {

@@ -244,10 +244,11 @@ pub async fn load_databases<S: SecurityPlugin>(
     let database_naming_convention = config.database.naming_convention.clone();
     let func_description_cfg = config.functional_description.clone();
     let fallback_to_base_variant = config.database.fallback_to_base_variant;
+    let database_config = config.database.clone();
     let protocol = if config.onboard_tester {
-        cda_interfaces::Protocol::DoIpDobt
+        cda_interfaces::Protocol::DoIpDobt(config.doip.doip_dobt_protocol_name.clone())
     } else {
-        cda_interfaces::Protocol::DoIp
+        cda_interfaces::Protocol::DoIp(config.doip.doip_protocol_name.clone())
     };
     let com_params = config.com_params.clone();
 
@@ -305,6 +306,8 @@ pub async fn load_databases<S: SecurityPlugin>(
             let database_naming_convention = database_naming_convention.clone();
             let flat_buf_settings = flat_buf_settings.clone();
             let func_description_cfg = func_description_cfg.clone();
+            let protocol = protocol.clone();
+            let database_config = database_config.clone();
 
             database_load_futures.push(cda_interfaces::spawn_named!(
                 &format!("load-database-{i}"),
@@ -319,6 +322,7 @@ pub async fn load_databases<S: SecurityPlugin>(
                         flat_buf_settings,
                         func_description_cfg,
                         fallback_to_base_variant,
+                        database_config,
                     )
                     .await;
                 }
@@ -454,6 +458,7 @@ async fn load_database<S: SecurityPlugin>(
     flat_buf_settings: FlatbBufConfig,
     func_description_cfg: FunctionalDescriptionConfig,
     fallback_to_base_variant: bool,
+    database_config: cda_database::DatabaseConfig,
 ) {
     for (mddfile, _) in paths {
         let Some(mdd_path) = mddfile.to_str().map(ToOwned::to_owned) else {
@@ -495,6 +500,7 @@ async fn load_database<S: SecurityPlugin>(
                         mdd_path.clone(),
                         payload,
                         flat_buf_settings.clone(),
+                        database_config.clone(),
                     ) {
                         Ok(db) => db,
                         Err(e) => {
@@ -515,7 +521,7 @@ async fn load_database<S: SecurityPlugin>(
                 };
                 let diag_service_manager = match EcuManager::new(
                     diag_data_base,
-                    protocol,
+                    protocol.clone(),
                     &com_params,
                     database_naming_convention.clone(),
                     ecu_type,

@@ -134,6 +134,7 @@ async fn initialize_runtime() -> Result<TestRuntime, TestingError> {
             naming_convention: DatabaseNamingConvention::default(),
             exit_no_database_loaded: true,
             fallback_to_base_variant: true,
+            ignore_protocol: false,
         },
         logging: LoggingConfig::default(),
         onboard_tester: true,
@@ -144,7 +145,6 @@ async fn initialize_runtime() -> Result<TestRuntime, TestingError> {
             description_database: "functional_groups".to_owned(),
             enabled_functional_groups: None,
             protocol_position: cda_interfaces::datatypes::DiagnosticServiceAffixPosition::Suffix,
-            protocol_case_sensitive: false,
         },
         health: HealthConfig::default(),
         components: ComponentsConfig {
