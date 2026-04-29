@@ -720,6 +720,62 @@ impl DiagnosticDatabase {
         }
     }
 
+    /// Attempts to find a com parameter in the database.
+    /// Returns `Some(value)` if found and successfully parsed, `None` otherwise.
+    #[tracing::instrument(
+        skip(self, protocol, com_param),
+        fields(
+            protocol = ?protocol,
+            param_name = %com_param.name,
+            dlt_context = dlt_ctx!("DB"),
+        )
+    )]
+    pub fn try_find_com_param<T: DeserializableCompParam + Serialize + Debug + Clone>(
+        &self,
+        protocol: &dataformat::Protocol,
+        com_param: &ComParamConfig<T>,
+    ) -> Option<T> {
+        let lookup_result = comparam::lookup(self, protocol, &com_param.name);
+        match lookup_result {
+            Ok(ComParamValue::Simple(simple)) => {
+                if let Ok(value) = T::parse_from_db(&simple.value, simple.unit.as_ref()) {
+                    Some(value)
+                } else {
+                    tracing::warn!(
+                        param_name = %com_param.name,
+                        param_value = %simple.value,
+                        unit = ?simple.unit,
+                        "Failed to deserialize Simple Value for com param"
+                    );
+                    None
+                }
+            }
+            Ok(ComParamValue::Complex(_)) => {
+                tracing::warn!(
+                    param_name = %com_param.name,
+                    "Unexpected Complex value type for com param"
+                );
+                None
+            }
+            Err(e) => {
+                if let DiagServiceError::NotFound(e) = &e {
+                    tracing::debug!(
+                        param_name = %com_param.name,
+                        error = %e,
+                        "Database entry not found for com param"
+                    );
+                } else {
+                    tracing::warn!(
+                        param_name = %com_param.name,
+                        error = %e,
+                        "Lookup error for com param"
+                    );
+                }
+                None
+            }
+        }
+    }
+
     /// Get all functional groups from the ECU data
     /// # Errors
     /// `DiagServiceError::InvalidDatabase` if ECU data is not loaded or no functional groups found

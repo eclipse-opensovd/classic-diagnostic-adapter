@@ -527,15 +527,18 @@ async fn load_database<S: SecurityPlugin>(
                     Some(ecu_cfg) => com_params.with_ecu_config(ecu_cfg),
                     None => (*com_params).clone(),
                 };
+                let ecu_manager_config = cda_interfaces::EcuManagerConfig {
+                    com_params: resolved_com_params,
+                    communication: (*communication_config).clone(),
+                    naming_convention: database_naming_convention.clone(),
+                    functional_description: func_description_cfg.clone(),
+                    fallback_to_base_variant,
+                };
                 let diag_service_manager = match EcuManager::new(
                     diag_data_base,
                     protocol,
-                    &resolved_com_params,
-                    &communication_config,
-                    database_naming_convention.clone(),
                     ecu_type,
-                    &func_description_cfg,
-                    fallback_to_base_variant,
+                    &ecu_manager_config,
                 ) {
                     Ok(manager) => manager,
                     Err(e) => {

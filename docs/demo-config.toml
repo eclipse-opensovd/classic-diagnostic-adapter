@@ -8,35 +8,25 @@
 # terms of the Apache License Version 2.0 which is available at
 # https://www.apache.org/licenses/LICENSE-2.0
 
-# =============================================================================
 # Demo configuration showing communication parameters, per-ECU overrides,
 # and address fallback references.
 #
 # Only the relevant sections are shown.  Values not listed here use their
 # built-in defaults (see ComParams / DoipComParams / UdsComParams impls).
-# =============================================================================
-
-
-# ---------------------------------------------------------------------------
-# Protocol names  – matched against database protocol layer names
-# ---------------------------------------------------------------------------
 [communication]
 doip_protocol_name = "UDS_Ethernet_DoIP"
 doip_dobt_protocol_name = "UDS_Ethernet_DoIP_DOBT"
 
 
-# ---------------------------------------------------------------------------
-# Global communication parameters  – apply to all ECUs unless overridden
-# ---------------------------------------------------------------------------
-
-# --- DoIP addresses --------------------------------------------------------
-# Each address field has:
+# Global communication parameters – apply to all ECUs unless overridden
+# Each field has:
 #   name     – comparam name used for the database lookup
 #   default  – value used when the comparam is not found in the database
-#   fallback – (optional) name of another address field whose *resolved* value
-#              is used instead of `default` when the database lookup fails.
-#              Valid values: logical_gateway_address, logical_ecu_address,
-#              logical_functional_address, logical_tester_address
+#   fallback – (optional) name of another field (of the same type) whose
+#              *resolved* value is used instead of `default` when the database
+#              lookup fails.  Works for all communication parameters, not just
+#              addresses.  The referenced field must appear earlier in the
+#              resolution order within the same type group.
 
 [com_params.doip.logical_gateway_address]
 name = "CP_DoIPLogicalGatewayAddress"
@@ -56,7 +46,6 @@ fallback = "logical_gateway_address"
 name = "CP_DoIPLogicalTesterAddress"
 default = 0
 
-# --- DoIP timing / retry ---------------------------------------------------
 [com_params.doip.routing_activation_timeout]
 name = "CP_DoIPRoutingActivationTimeout"
 default = { secs = 30, nanos = 0 }
@@ -73,19 +62,19 @@ default = { secs = 5, nanos = 0 }
 name = "CP_DoIPConnectionRetryAttempts"
 default = 100
 
-# --- UDS timing / retry ----------------------------------------------------
+# If timeout_default is not found in the database, use the resolved value
+# of rc_78_timeout instead.
 [com_params.uds.timeout_default]
 name = "CP_P6Max"
 default = { secs = 1, nanos = 0 }
+fallback = "rc_78_timeout"
 
 [com_params.uds.tester_present_time]
 name = "CP_TesterPresentTime"
 default = { secs = 2, nanos = 0 }
 
 
-# ---------------------------------------------------------------------------
 # Per-ECU configuration – values here override the global defaults above
-# ---------------------------------------------------------------------------
 
 # ECU "MyEcu": override the tester address with a literal value
 # and increase the default timeout.

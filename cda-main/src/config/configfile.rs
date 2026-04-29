@@ -381,4 +381,90 @@ ignore_case = true
 
         Ok(())
     }
+
+    /// DMCL3000 (DeLorean) scenario: the database is missing two mandatory
+    /// com parameters (tester address and functional address).  The config
+    /// supplies them via (1) a fallback reference, (2) a global default, and
+    /// (3) a per-ECU override.
+    #[tokio::test]
+    async fn load_delorean_config_with_ecu_overrides() -> Result<(), Box<dyn std::error::Error>> {
+        let config_str = r#"
+[communication]
+doip_protocol_name = "UDS_Ethernet_DoIP"
+doip_dobt_protocol_name = "UDS_Ethernet_DoIP_DOBT"
+
+# (1) Functional address falls back to the resolved gateway address
+[com_params.doip.logical_functional_address]
+name = "CP_DoIPLogicalFunctionalAddress"
+default = 0
+fallback = "logical_gateway_address"
+
+# (2) Global tester address default
+[com_params.doip.logical_tester_address]
+name = "CP_DoIPLogicalTesterAddress"
+default = 64768
+
+# (3) Per-ECU override: DMCL3000 sets tester address to 88
+[ecu.DMCL3000.com_params.doip]
+logical_tester_address = 88
+"#;
+
+        let figment = Figment::from(Serialized::defaults(Configuration::default()))
+            .merge(Toml::string(config_str));
+        let config: Configuration = figment.extract()?;
+
+        assert_eq!(
+            config.com_params.doip.logical_tester_address.default, 64768,
+            "global tester address should be 0xFD00"
+        );
+        assert_eq!(
+            config
+                .com_params
+                .doip
+                .logical_functional_address
+                .fallback
+                .as_deref(),
+            Some("logical_gateway_address"),
+            "functional address should fall back to gateway"
+        );
+
+        let ecu_cfg = config
+            .ecu
+            .get("DMCL3000")
+            .expect("DMCL3000 config should exist");
+
+        let resolved = config.com_params.with_ecu_config(ecu_cfg);
+
+        // (3) ECU override replaces global default 0xFD00 with 88
+        assert_eq!(
+            resolved.doip.logical_tester_address.default, 88,
+            "DMCL3000 should override tester address to 88"
+        );
+
+        // (1) Functional fallback still references the gateway address
+        assert_eq!(
+            resolved.doip.logical_functional_address.fallback.as_deref(),
+            Some("logical_gateway_address"),
+        );
+
+        // Simulate the fallback resolution (database miss → use gateway 0x3000)
+        let resolved_addrs = vec![("logical_gateway_address", 0x3000u16)];
+        assert_eq!(
+            resolved
+                .doip
+                .logical_functional_address
+                .resolve_fallback(&resolved_addrs),
+            0x3000,
+            "functional address should resolve to gateway (0x3000) via fallback"
+        );
+
+        // (2) For an ECU *without* a per-ECU section, the global default applies
+        let unrelated = config.com_params.clone();
+        assert_eq!(
+            unrelated.doip.logical_tester_address.default, 64768,
+            "ECUs without overrides keep the global tester address"
+        );
+
+        Ok(())
+    }
 }

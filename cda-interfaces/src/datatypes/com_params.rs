@@ -16,6 +16,33 @@ use serde::{Deserialize, Deserializer, Serialize, Serializer, de::DeserializeOwn
 
 use crate::{HashMap, datatypes::Unit};
 
+/// Trait for looking up a previously resolved com param value by its fallback name.
+///
+/// Structs that accumulate resolved parameter values implement this trait so that
+/// [`ComParamConfig::resolve_fallback`] and [`AddressComParamConfig::resolve_fallback`]
+/// can find the value of a named sibling field.
+pub trait FallbackLookup<T> {
+    fn lookup(&self, name: &str) -> Option<T>;
+}
+
+/// Backward-compatible implementation: look up in a slice of `(&str, T)` pairs.
+impl<T: Clone> FallbackLookup<T> for [(&str, T)] {
+    fn lookup(&self, name: &str) -> Option<T> {
+        self.iter()
+            .find(|(k, _)| *k == name)
+            .map(|(_, v)| v.clone())
+    }
+}
+
+/// Backward-compatible implementation: look up in a `Vec` of `(&str, T)` pairs.
+impl<T: Clone> FallbackLookup<T> for Vec<(&str, T)> {
+    fn lookup(&self, name: &str) -> Option<T> {
+        self.iter()
+            .find(|(k, _)| *k == name)
+            .map(|(_, v)| v.clone())
+    }
+}
+
 /// Configuration for communication protocol settings.
 /// Protocol names are used to match against database protocol layer names.
 #[derive(Deserialize, Serialize, Clone, Debug)]
@@ -76,25 +103,25 @@ pub struct EcuComParams {
 /// `ComParamConfig`.
 #[derive(Deserialize, Serialize, Clone, Debug, Default)]
 pub struct EcuUdsComParams {
-    pub tester_present_retry_policy: Option<ComParamBool>,
-    pub tester_present_addr_mode: Option<AddressingMode>,
-    pub tester_present_response_expected: Option<ComParamBool>,
-    pub tester_present_send_type: Option<TesterPresentSendType>,
-    pub tester_present_message: Option<Vec<u8>>,
-    pub tester_present_exp_pos_resp: Option<Vec<u8>>,
-    pub tester_present_exp_neg_resp: Option<Vec<u8>>,
-    pub tester_present_time: Option<Duration>,
-    pub repeat_req_count_app: Option<u32>,
-    pub rc_21_retry_policy: Option<RetryPolicy>,
-    pub rc_21_completion_timeout: Option<Duration>,
-    pub rc_21_repeat_request_time: Option<Duration>,
-    pub rc_78_retry_policy: Option<RetryPolicy>,
-    pub rc_78_completion_timeout: Option<Duration>,
-    pub rc_78_timeout: Option<Duration>,
-    pub rc_94_retry_policy: Option<RetryPolicy>,
-    pub rc_94_completion_timeout: Option<Duration>,
-    pub rc_94_repeat_request_time: Option<Duration>,
-    pub timeout_default: Option<Duration>,
+    pub tester_present_retry_policy: Option<ComParamOverride<ComParamBool>>,
+    pub tester_present_addr_mode: Option<ComParamOverride<AddressingMode>>,
+    pub tester_present_response_expected: Option<ComParamOverride<ComParamBool>>,
+    pub tester_present_send_type: Option<ComParamOverride<TesterPresentSendType>>,
+    pub tester_present_message: Option<ComParamOverride<Vec<u8>>>,
+    pub tester_present_exp_pos_resp: Option<ComParamOverride<Vec<u8>>>,
+    pub tester_present_exp_neg_resp: Option<ComParamOverride<Vec<u8>>>,
+    pub tester_present_time: Option<ComParamOverride<Duration>>,
+    pub repeat_req_count_app: Option<ComParamOverride<u32>>,
+    pub rc_21_retry_policy: Option<ComParamOverride<RetryPolicy>>,
+    pub rc_21_completion_timeout: Option<ComParamOverride<Duration>>,
+    pub rc_21_repeat_request_time: Option<ComParamOverride<Duration>>,
+    pub rc_78_retry_policy: Option<ComParamOverride<RetryPolicy>>,
+    pub rc_78_completion_timeout: Option<ComParamOverride<Duration>>,
+    pub rc_78_timeout: Option<ComParamOverride<Duration>>,
+    pub rc_94_retry_policy: Option<ComParamOverride<RetryPolicy>>,
+    pub rc_94_completion_timeout: Option<ComParamOverride<Duration>>,
+    pub rc_94_repeat_request_time: Option<ComParamOverride<Duration>>,
+    pub timeout_default: Option<ComParamOverride<Duration>>,
 }
 
 /// Per-ECU overrides for `DoIP` communication parameters.
@@ -107,14 +134,14 @@ pub struct EcuDoipComParams {
     pub logical_ecu_address: Option<AddressOverride>,
     pub logical_functional_address: Option<AddressOverride>,
     pub logical_tester_address: Option<AddressOverride>,
-    pub nack_number_of_retries: Option<HashMap<String, u32>>,
-    pub diagnostic_ack_timeout: Option<Duration>,
-    pub retry_period: Option<Duration>,
-    pub routing_activation_timeout: Option<Duration>,
-    pub repeat_request_count_transmission: Option<u32>,
-    pub connection_timeout: Option<Duration>,
-    pub connection_retry_delay: Option<Duration>,
-    pub connection_retry_attempts: Option<u32>,
+    pub nack_number_of_retries: Option<ComParamOverride<HashMap<String, u32>>>,
+    pub diagnostic_ack_timeout: Option<ComParamOverride<Duration>>,
+    pub retry_period: Option<ComParamOverride<Duration>>,
+    pub routing_activation_timeout: Option<ComParamOverride<Duration>>,
+    pub repeat_request_count_transmission: Option<ComParamOverride<u32>>,
+    pub connection_timeout: Option<ComParamOverride<Duration>>,
+    pub connection_retry_delay: Option<ComParamOverride<Duration>>,
+    pub connection_retry_attempts: Option<ComParamOverride<u32>>,
 }
 
 pub type ComParamName = String;
@@ -123,15 +150,30 @@ pub type ComParamName = String;
 pub struct ComParamConfig<T: Serialize + Debug> {
     pub name: ComParamName,
     pub default: T,
+    /// If the value is not found in the database, use the resolved value of
+    /// another field (of the same type) instead of `default`.
+    #[serde(default)]
+    pub fallback: Option<String>,
 }
 
-impl<T: Serialize + Debug> ComParamConfig<T> {
+impl<T: Serialize + Debug + Clone> ComParamConfig<T> {
     /// Creates a new `ComParamConfig` with the given name and default.
     pub fn new(name: impl Into<String>, default: T) -> Self {
         Self {
             name: name.into(),
             default,
+            fallback: None,
         }
+    }
+
+    /// Resolves the fallback value: if `fallback` names a previously resolved
+    /// sibling field, return that; otherwise return `default`.
+    #[must_use]
+    pub fn resolve_fallback<L: FallbackLookup<T> + ?Sized>(&self, resolved: &L) -> T {
+        self.fallback
+            .as_deref()
+            .and_then(|key| resolved.lookup(key))
+            .unwrap_or_else(|| self.default.clone())
     }
 }
 
@@ -171,11 +213,167 @@ impl AddressComParamConfig {
     /// Resolves the fallback value: if `fallback` names a previously resolved
     /// address, return that; otherwise return `default`.
     #[must_use]
-    pub fn resolve_fallback(&self, resolved: &[(&str, u16)]) -> u16 {
+    pub fn resolve_fallback<L: FallbackLookup<u16> + ?Sized>(&self, resolved: &L) -> u16 {
         self.fallback
             .as_deref()
-            .and_then(|key| resolved.iter().find(|(k, _)| *k == key).map(|(_, v)| *v))
+            .and_then(|key| resolved.lookup(key))
             .unwrap_or(self.default)
+    }
+}
+
+/// Previously resolved `DoIP` address values, used for fallback resolution
+/// in [`AddressComParamConfig::resolve_fallback`].
+#[derive(Default)]
+pub struct ResolvedAddresses {
+    pub logical_gateway_address: Option<u16>,
+    pub logical_ecu_address: Option<u16>,
+    pub logical_functional_address: Option<u16>,
+}
+
+impl FallbackLookup<u16> for ResolvedAddresses {
+    fn lookup(&self, name: &str) -> Option<u16> {
+        match name {
+            "logical_gateway_address" => self.logical_gateway_address,
+            "logical_ecu_address" => self.logical_ecu_address,
+            "logical_functional_address" => self.logical_functional_address,
+            _ => None,
+        }
+    }
+}
+
+/// Previously resolved `DoIP` communication parameter values, used for
+/// fallback resolution in [`ComParamConfig::resolve_fallback`].
+#[derive(Default)]
+pub struct ResolvedDoipParams {
+    pub diagnostic_ack_timeout: Option<Duration>,
+    pub retry_period: Option<Duration>,
+    pub routing_activation_timeout: Option<Duration>,
+    pub connection_timeout: Option<Duration>,
+    pub connection_retry_delay: Option<Duration>,
+    pub repeat_request_count_transmission: Option<u32>,
+    pub connection_retry_attempts: Option<u32>,
+}
+
+impl FallbackLookup<Duration> for ResolvedDoipParams {
+    fn lookup(&self, name: &str) -> Option<Duration> {
+        match name {
+            "diagnostic_ack_timeout" => self.diagnostic_ack_timeout,
+            "retry_period" => self.retry_period,
+            "routing_activation_timeout" => self.routing_activation_timeout,
+            "connection_timeout" => self.connection_timeout,
+            "connection_retry_delay" => self.connection_retry_delay,
+            _ => None,
+        }
+    }
+}
+
+impl FallbackLookup<u32> for ResolvedDoipParams {
+    fn lookup(&self, name: &str) -> Option<u32> {
+        match name {
+            "repeat_request_count_transmission" => self.repeat_request_count_transmission,
+            "connection_retry_attempts" => self.connection_retry_attempts,
+            _ => None,
+        }
+    }
+}
+
+/// Previously resolved UDS communication parameter values, used for
+/// fallback resolution in [`ComParamConfig::resolve_fallback`].
+#[derive(Default)]
+pub struct ResolvedUdsParams {
+    pub tester_present_time: Option<Duration>,
+    pub rc_21_completion_timeout: Option<Duration>,
+    pub rc_21_repeat_request_time: Option<Duration>,
+    pub rc_78_completion_timeout: Option<Duration>,
+    pub rc_78_timeout: Option<Duration>,
+    pub rc_94_completion_timeout: Option<Duration>,
+    pub rc_94_repeat_request_time: Option<Duration>,
+    pub timeout_default: Option<Duration>,
+    pub repeat_req_count_app: Option<u32>,
+    pub tester_present_retry_policy: Option<ComParamBool>,
+    pub tester_present_response_expected: Option<ComParamBool>,
+    pub rc_21_retry_policy: Option<RetryPolicy>,
+    pub rc_78_retry_policy: Option<RetryPolicy>,
+    pub rc_94_retry_policy: Option<RetryPolicy>,
+    pub tester_present_addr_mode: Option<AddressingMode>,
+    pub tester_present_send_type: Option<TesterPresentSendType>,
+    pub tester_present_message: Option<Vec<u8>>,
+    pub tester_present_exp_pos_resp: Option<Vec<u8>>,
+    pub tester_present_exp_neg_resp: Option<Vec<u8>>,
+}
+
+impl FallbackLookup<Duration> for ResolvedUdsParams {
+    fn lookup(&self, name: &str) -> Option<Duration> {
+        match name {
+            "tester_present_time" => self.tester_present_time,
+            "rc_21_completion_timeout" => self.rc_21_completion_timeout,
+            "rc_21_repeat_request_time" => self.rc_21_repeat_request_time,
+            "rc_78_completion_timeout" => self.rc_78_completion_timeout,
+            "rc_78_timeout" => self.rc_78_timeout,
+            "rc_94_completion_timeout" => self.rc_94_completion_timeout,
+            "rc_94_repeat_request_time" => self.rc_94_repeat_request_time,
+            "timeout_default" => self.timeout_default,
+            _ => None,
+        }
+    }
+}
+
+impl FallbackLookup<u32> for ResolvedUdsParams {
+    fn lookup(&self, name: &str) -> Option<u32> {
+        match name {
+            "repeat_req_count_app" => self.repeat_req_count_app,
+            _ => None,
+        }
+    }
+}
+
+impl FallbackLookup<ComParamBool> for ResolvedUdsParams {
+    fn lookup(&self, name: &str) -> Option<ComParamBool> {
+        match name {
+            "tester_present_retry_policy" => self.tester_present_retry_policy.clone(),
+            "tester_present_response_expected" => self.tester_present_response_expected.clone(),
+            _ => None,
+        }
+    }
+}
+
+impl FallbackLookup<RetryPolicy> for ResolvedUdsParams {
+    fn lookup(&self, name: &str) -> Option<RetryPolicy> {
+        match name {
+            "rc_21_retry_policy" => self.rc_21_retry_policy.clone(),
+            "rc_78_retry_policy" => self.rc_78_retry_policy.clone(),
+            "rc_94_retry_policy" => self.rc_94_retry_policy.clone(),
+            _ => None,
+        }
+    }
+}
+
+impl FallbackLookup<AddressingMode> for ResolvedUdsParams {
+    fn lookup(&self, name: &str) -> Option<AddressingMode> {
+        match name {
+            "tester_present_addr_mode" => self.tester_present_addr_mode.clone(),
+            _ => None,
+        }
+    }
+}
+
+impl FallbackLookup<TesterPresentSendType> for ResolvedUdsParams {
+    fn lookup(&self, name: &str) -> Option<TesterPresentSendType> {
+        match name {
+            "tester_present_send_type" => self.tester_present_send_type.clone(),
+            _ => None,
+        }
+    }
+}
+
+impl FallbackLookup<Vec<u8>> for ResolvedUdsParams {
+    fn lookup(&self, name: &str) -> Option<Vec<u8>> {
+        match name {
+            "tester_present_message" => self.tester_present_message.clone(),
+            "tester_present_exp_pos_resp" => self.tester_present_exp_pos_resp.clone(),
+            "tester_present_exp_neg_resp" => self.tester_present_exp_neg_resp.clone(),
+            _ => None,
+        }
     }
 }
 
@@ -198,6 +396,29 @@ pub enum AddressOverride {
         #[serde(default)]
         default: Option<u16>,
         #[serde(default)]
+        fallback: Option<String>,
+    },
+}
+
+/// Per-ECU override for a communication parameter field.
+///
+/// In TOML this is either a plain value (`timeout_default = { secs = 5, nanos = 0 }`)
+/// or a table with optional `default` and/or `fallback`:
+///
+/// ```toml
+/// [ecu.MyEcu.com_params.uds.timeout_default]
+/// default = { secs = 5, nanos = 0 }
+/// fallback = "rc_78_timeout"
+/// ```
+#[derive(Deserialize, Serialize, Clone, Debug)]
+#[serde(untagged)]
+#[serde(bound(deserialize = "T: serde::de::DeserializeOwned"))]
+pub enum ComParamOverride<T> {
+    /// A literal value.
+    Value(T),
+    /// A structured override with optional default and/or fallback reference.
+    Config {
+        default: Option<T>,
         fallback: Option<String>,
     },
 }
@@ -600,17 +821,23 @@ impl Default for DoipComParams {
     }
 }
 
-/// Helper: if `override_val` is `Some`, clone the config and replace its default.
+/// Helper: apply a `ComParamOverride<T>` to a `ComParamConfig<T>`.
 fn apply_override<T: Serialize + Debug + Clone>(
     base: &ComParamConfig<T>,
-    override_val: Option<&T>,
+    override_val: Option<&ComParamOverride<T>>,
 ) -> ComParamConfig<T> {
     match override_val {
-        Some(v) => ComParamConfig {
+        None => base.clone(),
+        Some(ComParamOverride::Value(v)) => ComParamConfig {
             name: base.name.clone(),
             default: v.clone(),
+            fallback: base.fallback.clone(),
         },
-        None => base.clone(),
+        Some(ComParamOverride::Config { default, fallback }) => ComParamConfig {
+            name: base.name.clone(),
+            default: default.clone().unwrap_or_else(|| base.default.clone()),
+            fallback: fallback.clone().or_else(|| base.fallback.clone()),
+        },
     }
 }
 
@@ -868,5 +1095,147 @@ mod tests {
         let value = "Disabled";
         let result: ComParamBool = value.try_into().unwrap();
         assert_eq!(result, ComParamBool::False);
+    }
+
+    #[test]
+    fn address_fallback_resolves_to_named_address() {
+        let config = AddressComParamConfig {
+            name: "CP_DoIPLogicalFunctionalAddress".into(),
+            default: 0,
+            fallback: Some("logical_gateway_address".into()),
+        };
+        let resolved = vec![("logical_gateway_address", 0x3000u16)];
+        assert_eq!(config.resolve_fallback(&resolved), 0x3000);
+    }
+
+    #[test]
+    fn address_fallback_returns_default_when_no_match() {
+        let config = AddressComParamConfig {
+            name: "CP_DoIPLogicalFunctionalAddress".into(),
+            default: 42,
+            fallback: Some("nonexistent_address".into()),
+        };
+        assert_eq!(config.resolve_fallback(&ResolvedAddresses::default()), 42);
+    }
+
+    #[test]
+    fn address_fallback_returns_default_when_none() {
+        let config = AddressComParamConfig::new("CP_DoIPLogicalTesterAddress", 0xFD00);
+        assert_eq!(
+            config.resolve_fallback(&ResolvedAddresses::default()),
+            0xFD00
+        );
+    }
+
+    #[test]
+    fn ecu_override_replaces_tester_address_with_literal() {
+        let global = DoipComParams::default();
+        let ecu_overrides = EcuDoipComParams {
+            logical_tester_address: Some(AddressOverride::Value(88)),
+            ..Default::default()
+        };
+        let merged = global.with_overrides(&ecu_overrides);
+        assert_eq!(merged.logical_tester_address.default, 88);
+    }
+
+    #[test]
+    fn ecu_override_preserves_global_when_none() {
+        let global = DoipComParams {
+            logical_tester_address: AddressComParamConfig::new(
+                "CP_DoIPLogicalTesterAddress",
+                0xFD00,
+            ),
+            ..Default::default()
+        };
+        let ecu_overrides = EcuDoipComParams::default(); // all None
+        let merged = global.with_overrides(&ecu_overrides);
+        assert_eq!(merged.logical_tester_address.default, 0xFD00);
+    }
+
+    #[test]
+    fn ecu_override_structured_sets_default_and_fallback() {
+        let global = DoipComParams::default();
+        let ecu_overrides = EcuDoipComParams {
+            logical_functional_address: Some(AddressOverride::Config {
+                default: Some(0x1234),
+                fallback: Some("logical_gateway_address".into()),
+            }),
+            ..Default::default()
+        };
+        let merged = global.with_overrides(&ecu_overrides);
+        assert_eq!(merged.logical_functional_address.default, 0x1234);
+        assert_eq!(
+            merged.logical_functional_address.fallback.as_deref(),
+            Some("logical_gateway_address")
+        );
+    }
+
+    #[test]
+    fn ecu_override_uds_timeout() {
+        let global = UdsComParams::default();
+        let ecu_overrides = EcuUdsComParams {
+            timeout_default: Some(ComParamOverride::Value(Duration::from_secs(5))),
+            ..Default::default()
+        };
+        let merged = global.with_overrides(&ecu_overrides);
+        assert_eq!(merged.timeout_default.default, Duration::from_secs(5));
+        // other fields unchanged
+        assert_eq!(
+            merged.tester_present_time.default,
+            global.tester_present_time.default
+        );
+    }
+
+    /// Simulates the DMCL3000 scenario: database has no tester or functional address,
+    /// global config provides a tester default, functional falls back to gateway,
+    /// and the ECU overrides the tester address.
+    #[test]
+    fn delorean_scenario_full_override_chain() {
+        let global = ComParams {
+            doip: DoipComParams {
+                logical_tester_address: AddressComParamConfig::new(
+                    "CP_DoIPLogicalTesterAddress",
+                    0xFD00,
+                ),
+                logical_functional_address: AddressComParamConfig {
+                    name: "CP_DoIPLogicalFunctionalAddress".into(),
+                    default: 0,
+                    fallback: Some("logical_gateway_address".into()),
+                },
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+
+        // ECU override: DMCL3000 sets tester address to 88
+        let ecu_config = EcuConfig {
+            com_params: EcuComParams {
+                doip: EcuDoipComParams {
+                    logical_tester_address: Some(AddressOverride::Value(88)),
+                    ..Default::default()
+                },
+                ..Default::default()
+            },
+        };
+
+        let resolved = global.with_ecu_config(&ecu_config);
+
+        // (1) Functional address still has fallback to gateway
+        assert_eq!(
+            resolved.doip.logical_functional_address.fallback.as_deref(),
+            Some("logical_gateway_address")
+        );
+        // Simulate database miss: functional resolves to gateway value
+        let resolved_addrs = vec![("logical_gateway_address", 0x3000u16)];
+        assert_eq!(
+            resolved
+                .doip
+                .logical_functional_address
+                .resolve_fallback(&resolved_addrs),
+            0x3000
+        );
+
+        // (2) Global default was 0xFD00, but (3) ECU override replaced it with 88
+        assert_eq!(resolved.doip.logical_tester_address.default, 88);
     }
 }

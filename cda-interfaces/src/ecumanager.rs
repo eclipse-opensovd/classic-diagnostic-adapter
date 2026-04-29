@@ -12,16 +12,30 @@
 use serde::Serialize;
 
 use crate::{
-    DiagComm, DiagServiceError, DoipComParamProvider, DynamicPlugin, EcuSchemaProvider, HashMap,
-    HashSet, SecurityAccess, UDS_ID_RESPONSE_BITMASK, UdsComParamProvider,
+    DiagComm, DiagServiceError, DoipComParamProvider, DynamicPlugin, EcuSchemaProvider,
+    FunctionalDescriptionConfig, HashMap, HashSet, SecurityAccess, UDS_ID_RESPONSE_BITMASK,
+    UdsComParamProvider,
     datatypes::{
-        ComplexComParamValue, ComponentConfigurationsInfo, ComponentDataInfo,
-        ComponentOperationsInfo, DtcLookup, DtcReadInformationFunction, RoutineSubfunctions, SdSdg,
-        single_ecu,
+        ComParams, CommunicationConfig, ComplexComParamValue, ComponentConfigurationsInfo,
+        ComponentDataInfo, ComponentOperationsInfo, DatabaseNamingConvention, DtcLookup,
+        DtcReadInformationFunction, RoutineSubfunctions, SdSdg, single_ecu,
     },
     diagservices::{DiagServiceResponse, UdsPayloadData},
     service_ids,
 };
+
+/// Configuration bundle for creating an [`EcuManager`].
+///
+/// Groups the config-level parameters so callers don't need to pass them
+/// individually.
+#[derive(Clone, Debug)]
+pub struct EcuManagerConfig {
+    pub com_params: ComParams,
+    pub communication: CommunicationConfig,
+    pub naming_convention: DatabaseNamingConvention,
+    pub functional_description: FunctionalDescriptionConfig,
+    pub fallback_to_base_variant: bool,
+}
 
 /// Metadata for a service parameter, including constant values for discovery
 #[derive(Debug, Clone, Serialize)]
