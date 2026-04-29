@@ -1,0 +1,13 @@
+[com_params.doip]
+doip_protocol_name = "BMW_UDS_on_DoIP"
+
+[com_params.doip.ecu_logical_address]
+name = "CP_DoIPLogicalGatewayAddress"
+value = 4660 # 0x1234 – used directly, no DB lookup
+default = 0
+
+
+[com_params.doip.logical_gateway_address]
+name = "CP_DoIPLogicalGatewayAddress"
+value = 4660 # 0x1234 – used directly, no DB lookup
+default = 0

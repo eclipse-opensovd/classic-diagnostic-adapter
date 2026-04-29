@@ -2108,12 +2108,6 @@ impl<S: SecurityPlugin> EcuManager<S> {
             &ResolvedAddresses::default(),
             ignore_protocol_in_lookup,
         );
-
-        let mut resolved_addresses = ResolvedAddresses {
-            logical_gateway_address: Some(logical_gateway_address),
-            ..Default::default()
-        };
-
         let logical_ecu_address = find_address_with_fallback(
             &database,
             data_protocol.as_ref(),
@@ -2122,11 +2116,12 @@ impl<S: SecurityPlugin> EcuManager<S> {
                 com_params.doip.logical_ecu_address.name.clone(),
             ),
             &com_params.doip.logical_ecu_address,
-            &resolved_addresses,
+            &ResolvedAddresses {
+                logical_gateway_address: Some(logical_gateway_address),
+                ..Default::default()
+            },
             ignore_protocol_in_lookup,
         );
-        resolved_addresses.logical_ecu_address = Some(logical_ecu_address);
-
         let logical_functional_address = find_address_with_fallback(
             &database,
             data_protocol.as_ref(),
@@ -2134,10 +2129,20 @@ impl<S: SecurityPlugin> EcuManager<S> {
                 com_params.doip.logical_functional_address.name.clone(),
             ),
             &com_params.doip.logical_functional_address,
-            &resolved_addresses,
+            &ResolvedAddresses {
+                logical_gateway_address: Some(logical_gateway_address),
+                logical_ecu_address: Some(logical_ecu_address),
+                ..Default::default()
+            },
             ignore_protocol_in_lookup,
         );
-        resolved_addresses.logical_functional_address = Some(logical_functional_address);
+        let resolved_addresses = ResolvedAddresses {
+            logical_gateway_address: Some(logical_gateway_address),
+            logical_ecu_address: Some(logical_ecu_address),
+            logical_functional_address: Some(logical_functional_address),
+        };
+
+        tracing::debug!("Resovled addresses: {:?}", resolved_addresses);
 
         let nack_number_of_retries = data_protocol
             .as_ref()

@@ -240,7 +240,7 @@ impl AddressComParamConfig {
 
 /// Previously resolved `DoIP` address values, used for fallback resolution
 /// in [`AddressComParamConfig::resolve_fallback`].
-#[derive(Default)]
+#[derive(Default, Debug)]
 pub struct ResolvedAddresses {
     pub logical_gateway_address: Option<u16>,
     pub logical_ecu_address: Option<u16>,
