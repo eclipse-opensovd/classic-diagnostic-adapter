@@ -3501,11 +3501,11 @@ impl<S: SecurityPlugin> EcuManager<S> {
                 let (case_name, struct_) = selected_case
                     .or_else(|| {
                         mux_dop.default_case().and_then(|default_case| {
-                            default_case.short_name().zip(default_case
-                                    .structure()
-                                    .and_then(|s| {
-                                        s.specific_data_as_structure().map(|s| Some(s.into()))
-                                    }))
+                            default_case
+                                .short_name()
+                                .zip(default_case.structure().and_then(|s| {
+                                    s.specific_data_as_structure().map(|s| Some(s.into()))
+                                }))
                         })
                     })
                     .ok_or_else(|| {
