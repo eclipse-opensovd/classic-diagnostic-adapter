@@ -148,6 +148,7 @@ pub struct EcuDoipComParams {
 pub type ComParamName = String;
 
 #[derive(Deserialize, Serialize, Clone, Debug)]
+#[serde(bound(deserialize = "T: DeserializeOwned"))]
 pub struct ComParamConfig<T: Serialize + Debug> {
     pub name: ComParamName,
     pub default: T,
@@ -155,6 +156,10 @@ pub struct ComParamConfig<T: Serialize + Debug> {
     /// another field (of the same type) instead of `default`.
     #[serde(default)]
     pub fallback: Option<String>,
+    /// When set, this value is used directly and the database lookup is skipped
+    /// entirely.  Useful when the MDD does not contain a matching `ComParamRef`.
+    #[serde(default)]
+    pub value: Option<T>,
 }
 
 impl<T: Serialize + Debug + Clone> ComParamConfig<T> {
@@ -164,6 +169,7 @@ impl<T: Serialize + Debug + Clone> ComParamConfig<T> {
             name: name.into(),
             default,
             fallback: None,
+            value: None,
         }
     }
 
@@ -192,6 +198,10 @@ pub struct AddressComParamConfig {
     /// `logical_functional_address`, `logical_tester_address`.
     #[serde(default)]
     pub fallback: Option<String>,
+    /// When set, this value is used directly and the database lookup is skipped
+    /// entirely.  Useful when the MDD does not contain a matching `ComParamRef`.
+    #[serde(default)]
+    pub value: Option<u16>,
 }
 
 impl AddressComParamConfig {
@@ -201,6 +211,7 @@ impl AddressComParamConfig {
             name: name.into(),
             default,
             fallback: None,
+            value: None,
         }
     }
 
@@ -208,7 +219,12 @@ impl AddressComParamConfig {
     /// `find_com_param`.
     #[must_use]
     pub fn as_com_param_config(&self) -> ComParamConfig<u16> {
-        ComParamConfig::new(self.name.clone(), self.default)
+        ComParamConfig {
+            name: self.name.clone(),
+            default: self.default,
+            fallback: None,
+            value: self.value,
+        }
     }
 
     /// Resolves the fallback value: if `fallback` names a previously resolved
@@ -392,12 +408,16 @@ impl FallbackLookup<Vec<u8>> for ResolvedUdsParams {
 pub enum AddressOverride {
     /// A literal address value.
     Value(u16),
-    /// A structured override with optional default and/or fallback reference.
+    /// A structured override with optional default, fallback, and/or value.
     Config {
         #[serde(default)]
         default: Option<u16>,
         #[serde(default)]
         fallback: Option<String>,
+        /// When set, this value is used directly and the database lookup is
+        /// skipped entirely.
+        #[serde(default)]
+        value: Option<u16>,
     },
 }
 
@@ -417,10 +437,13 @@ pub enum AddressOverride {
 pub enum ComParamOverride<T> {
     /// A literal value.
     Value(T),
-    /// A structured override with optional default and/or fallback reference.
+    /// A structured override with optional default, fallback, and/or value.
     Config {
         default: Option<T>,
         fallback: Option<String>,
+        /// When set, this value is used directly and the database lookup is
+        /// skipped entirely.
+        value: Option<T>,
     },
 }
 
@@ -841,11 +864,17 @@ fn apply_override<T: Serialize + Debug + Clone>(
             name: base.name.clone(),
             default: v.clone(),
             fallback: base.fallback.clone(),
+            value: base.value.clone(),
         },
-        Some(ComParamOverride::Config { default, fallback }) => ComParamConfig {
+        Some(ComParamOverride::Config {
+            default,
+            fallback,
+            value,
+        }) => ComParamConfig {
             name: base.name.clone(),
             default: default.clone().unwrap_or_else(|| base.default.clone()),
             fallback: fallback.clone().or_else(|| base.fallback.clone()),
+            value: value.clone().or_else(|| base.value.clone()),
         },
     }
 }
@@ -861,11 +890,17 @@ fn apply_address_override(
             name: base.name.clone(),
             default: *v,
             fallback: base.fallback.clone(),
+            value: base.value,
         },
-        Some(AddressOverride::Config { default, fallback }) => AddressComParamConfig {
+        Some(AddressOverride::Config {
+            default,
+            fallback,
+            value,
+        }) => AddressComParamConfig {
             name: base.name.clone(),
             default: default.unwrap_or(base.default),
             fallback: fallback.clone().or_else(|| base.fallback.clone()),
+            value: value.or(base.value),
         },
     }
 }
@@ -1115,6 +1150,7 @@ mod tests {
             name: "CP_DoIPLogicalFunctionalAddress".into(),
             default: 0,
             fallback: Some("logical_gateway_address".into()),
+            value: None,
         };
         let resolved = vec![("logical_gateway_address", 0x3000u16)];
         assert_eq!(config.resolve_fallback(&resolved), 0x3000);
@@ -1126,6 +1162,7 @@ mod tests {
             name: "CP_DoIPLogicalFunctionalAddress".into(),
             default: 42,
             fallback: Some("nonexistent_address".into()),
+            value: None,
         };
         assert_eq!(config.resolve_fallback(&ResolvedAddresses::default()), 42);
     }
@@ -1171,6 +1208,7 @@ mod tests {
             logical_functional_address: Some(AddressOverride::Config {
                 default: Some(0x1234),
                 fallback: Some("logical_gateway_address".into()),
+                value: None,
             }),
             ..Default::default()
         };
@@ -1213,6 +1251,7 @@ mod tests {
                     name: "CP_DoIPLogicalFunctionalAddress".into(),
                     default: 0,
                     fallback: Some("logical_gateway_address".into()),
+                    value: None,
                 },
                 ..Default::default()
             },

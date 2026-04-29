@@ -66,6 +66,9 @@ where
     T: DeserializableCompParam + Clone + serde::Serialize + std::fmt::Debug,
     L: cda_interfaces::datatypes::FallbackLookup<T> + ?Sized,
 {
+    if let Some(value) = &config.value {
+        return value.clone();
+    }
     data_protocol.map_or_else(
         || config.resolve_fallback(resolved),
         |dp| {
@@ -89,6 +92,9 @@ fn find_address_with_fallback<L>(
 where
     L: cda_interfaces::datatypes::FallbackLookup<u16> + ?Sized,
 {
+    if let Some(value) = config.value {
+        return value;
+    }
     data_protocol
         .and_then(|dp| {
             database
@@ -2365,20 +2371,29 @@ impl<S: SecurityPlugin> EcuManager<S> {
             ecu_name,
             description_type: type_,
             database_naming_convention,
-            tester_address: data_protocol.as_ref().map_or_else(
-                || {
-                    com_params
-                        .doip
-                        .logical_tester_address
-                        .resolve_fallback(&resolved_addresses)
-                },
-                |dp| {
-                    database.find_com_param(
-                        dp,
-                        &com_params.doip.logical_tester_address.as_com_param_config(),
+            tester_address: com_params
+                .doip
+                .logical_tester_address
+                .value
+                .unwrap_or_else(|| {
+                    data_protocol.as_ref().map_or_else(
+                        || {
+                            com_params
+                                .doip
+                                .logical_tester_address
+                                .resolve_fallback(&resolved_addresses)
+                        },
+                        |dp| {
+                            database.find_com_param(
+                                dp,
+                                &com_params
+                                    .doip
+                                    .logical_tester_address
+                                    .as_com_param_config(),
+                            )
+                        },
                     )
-                },
-            ),
+                }),
             logical_address: logical_ecu_address,
             logical_gateway_address,
             logical_functional_address,

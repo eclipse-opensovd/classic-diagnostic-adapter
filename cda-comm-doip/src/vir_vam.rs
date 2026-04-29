@@ -341,7 +341,15 @@ where
             tracing::debug!("VAM received, parsing ...");
             let mut matched_ecu = None;
             for (name, ecu) in ecus.iter() {
-                if ecu.read().await.logical_address().to_be_bytes() == vam.logical_address {
+                let ecu_r =  ecu.read().await;
+                tracing::debug!(
+                    ecu_name = %name,
+                    ecu_logical_address = %format!("{:#06x}", ecu_r.logical_address()),
+                    ecu_logical_gateway_address = %format!("{:#06x}", ecu_r.logical_gateway_address()),
+                    vam_logical_address = %format!("{:#06x}", u16::from_be_bytes(vam.logical_address)),
+                    "Checking ECU against VAM"
+                );
+                if ecu_r.logical_address().to_be_bytes() == vam.logical_address {
                     matched_ecu = Some(name.to_owned());
                     break;
                 }

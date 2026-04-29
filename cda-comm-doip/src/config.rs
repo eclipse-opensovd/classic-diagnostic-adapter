@@ -26,7 +26,7 @@ pub struct DoipConfig {
 impl Default for DoipConfig {
     fn default() -> Self {
         Self {
-            protocol_version: 0x02,
+            protocol_version: 0x03,
             tester_address: "127.0.0.1".to_owned(),
             tester_subnet: "255.255.0.0".to_owned(),
             gateway_port: 13400,

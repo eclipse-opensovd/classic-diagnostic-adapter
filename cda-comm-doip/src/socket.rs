@@ -122,7 +122,7 @@ impl DoIPUdpSocket {
         let tokio_socket = tokio::net::UdpSocket::from_std(socket)?;
         Ok(Self {
             io: UdpFramed::new(tokio_socket, DoipCodec {}),
-            protocol_version: ProtocolVersion::Iso13400_2012,
+            protocol_version: ProtocolVersion::Iso13400_2019,
         })
     }
 

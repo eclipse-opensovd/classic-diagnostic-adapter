@@ -27,6 +27,9 @@ doip_dobt_protocol_name = "UDS_Ethernet_DoIP_DOBT"
 #              lookup fails.  Works for all communication parameters, not just
 #              addresses.  The referenced field must appear earlier in the
 #              resolution order within the same type group.
+#   value    – (optional) when set, this value is used directly and the
+#              database lookup is skipped entirely.  Useful when the MDD does
+#              not contain a matching ComParamRef.
 
 [com_params.doip]
 # When true, com param lookups that fail under the configured protocol are
@@ -37,6 +40,9 @@ comparam_ignore_protocol_in_lookup = true
 [com_params.doip.logical_gateway_address]
 name = "CP_DoIPLogicalGatewayAddress"
 default = 0
+# Set `value` to use this address directly without a database lookup.
+# Useful when the MDD does not contain a ComParamRef for this param.
+# value = 4660
 
 [com_params.doip.logical_ecu_address]
 name = "CP_DoIPLogicalEcuAddress"
