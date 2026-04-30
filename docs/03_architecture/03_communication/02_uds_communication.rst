@@ -494,7 +494,7 @@ Tester Present
     tester present task evaluates them as follows:
 
     - ``CP_TesterPresentTime`` -- The sending interval in microseconds (default:
-      2,000,000 µS = 2 s). The periodic loop waits this duration between sends.
+      2,000,000 uS = 2 s). The periodic loop waits this duration between sends.
     - ``CP_TesterPresentHandling`` -- Controls whether tester present messages are
       generated. When set to "Disabled" (0), no tester present task shall be started for
       the ECU even when a lock is held. When set to "Enabled" (1, default), tester present
@@ -534,7 +534,7 @@ Tester Present
         when a lock is held.
 
     .. uml::
-        :caption: Tester Present — Component Lock
+        :caption: Tester Present -- Component Lock
 
         @startuml
         skinparam backgroundColor #FFFFFF
@@ -567,7 +567,7 @@ Tester Present
         @enduml
 
     .. uml::
-        :caption: Tester Present — Functional Group Lock
+        :caption: Tester Present -- Functional Group Lock
 
         @startuml
         skinparam backgroundColor #FFFFFF

@@ -410,7 +410,7 @@ impl Parameter<'_> {
         self.0.byte_position().unwrap_or(0)
     }
     /// Returns `true` when the parameter has an explicit BYTE-POSITION in
-    /// the database.  Per ISO 22901-1 §7.4.8 a parameter that follows a
+    /// the database.  Per ISO 22901-1 section 7.4.8 a parameter that follows a
     /// PARAM-LENGTH-INFO field may omit BYTE-POSITION because its position
     /// is unknown until runtime.
     #[must_use]

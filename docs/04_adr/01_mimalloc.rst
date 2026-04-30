@@ -70,15 +70,15 @@ Comprehensive profiling revealed the following metrics:
    * - Allocation Count
      - 7,896
      - 2,273,227
-     - mimalloc (287× fewer)
+     - mimalloc (287x fewer)
    * - Persistent Allocs
      - 1,084
      - 202,138
-     - mimalloc (186× fewer)
+     - mimalloc (186x fewer)
    * - Dirty Memory
      - 60.73 MiB
      - 60.01 MiB
-     - ≈ Tie
+     - ~ Tie
    * - Thread Count
      - 15
      - 15
@@ -99,8 +99,8 @@ mimalloc Advantages
 2. **Reduced System Calls**: Drastically fewer allocation syscalls (~8K vs ~2.3M)
 
    - Batches allocations into large arenas, reducing kernel interaction
-   - Approximately 287× fewer allocations significantly reduces context switching overhead
-   - 186× fewer persistent allocations simplify memory management
+   - Approximately 287x fewer allocations significantly reduces context switching overhead
+   - 186x fewer persistent allocations simplify memory management
 
 System Allocator Advantages
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
@@ -136,7 +136,7 @@ Positive
 ^^^^^^^^
 
 - **Improved Response Times**: 29% faster execution directly improves diagnostic operation latency
-- **Reduced System Overhead**: 287× fewer allocation calls minimize kernel involvement and context switching
+- **Reduced System Overhead**: 287x fewer allocation calls minimize kernel involvement and context switching
 - **Better Throughput**: Arena-based pooling enables handling of concurrent diagnostic sessions more efficiently
 - **Predictable Performance**: Pre-allocated arenas provide more consistent allocation times
 
@@ -160,7 +160,7 @@ Alternatives Considered
 System Allocator
 ^^^^^^^^^^^^^^^^
 
-The native platform allocator was evaluated as the primary alternative. While it offers superior memory efficiency (17-65% less memory usage), the performance penalty (~29% slower execution and 287× more allocation syscalls) makes it unsuitable as the default choice.
+The native platform allocator was evaluated as the primary alternative. While it offers superior memory efficiency (17-65% less memory usage), the performance penalty (~29% slower execution and 287x more allocation syscalls) makes it unsuitable as the default choice.
 
 The system allocator remains a viable option for:
 

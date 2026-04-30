@@ -81,7 +81,7 @@ pub mod serde_ext {
 
     /// Deserializes a `HashMap<String, V, S>` from a map with string keys that may
     /// be decimal (`"16"`) or hexadecimal (`"0x10"`, `"0X10"`). All keys are validated
-    /// as valid `u8` values (0–255) and normalized to their decimal string representation.
+    /// as valid `u8` values (0-255) and normalized to their decimal string representation.
     /// This can be used i.e. for configuration where figment / toml parse do not
     /// natively support integer keys.
     ///

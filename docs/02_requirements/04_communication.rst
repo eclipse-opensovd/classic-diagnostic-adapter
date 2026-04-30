@@ -505,7 +505,7 @@ Communication parameters
          - 7F3E
          - A tester present error should be reported in the log, tester present sending should be continued
        * - CP_TesterPresentTime
-         - Timing interval for tester present messages in µs
+         - Timing interval for tester present messages in us
          - 2000000
          -
        * - CP_RepeatReqCountApp
@@ -519,11 +519,11 @@ Communication parameters
            - 1 = Continue handling negative responses until CP_RC21CompletionTimeout
            - 2 = Continue handling unlimited
        * - CP_RC21CompletionTimeout
-         - Time period the tester accepts for repeated NRC 0x21 and retries, while waiting for a positive response in µS
+         - Time period the tester accepts for repeated NRC 0x21 and retries, while waiting for a positive response in uS
          - 25000000
          -
        * - CP_RC21RequestTime
-         - Time between a NRC 0x21 and the retransmission of the same request (in µS)
+         - Time between a NRC 0x21 and the retransmission of the same request (in uS)
          - 200000
          -
        * - CP_RC78Handling
@@ -533,7 +533,7 @@ Communication parameters
            - 1 = Continue handling negative responses until CP_RC78CompletionTimeout
            - 2 = Continue handling unlimited
        * - CP_RC78CompletionTimeout
-         - Time period the tester accepts for repeated NRC 0x78, and waits for a positive response (in µS)
+         - Time period the tester accepts for repeated NRC 0x78, and waits for a positive response (in uS)
          - 25000000
          -
        * - CP_RC94Handling
@@ -543,19 +543,19 @@ Communication parameters
            - 1 = Continue handling negative responses until CP_RC94CompletionTimeout
            - 2 = Continue handling unlimited
        * - CP_RC94CompletionTimeout
-         - Time period the tester accepts for repeated NRC 0x94, and waits for a positive response (in µS)
+         - Time period the tester accepts for repeated NRC 0x94, and waits for a positive response (in uS)
          - 25000000
          -
        * - CP_RC94RequestTime
-         - Time between a NRC 0x94 and the retransmission of the same request (in µS)
+         - Time between a NRC 0x94 and the retransmission of the same request (in uS)
          - 200000
          -
        * - CP_P6Max
-         - Timeout after sending a successful request, for the complete reception of the response message (in µS)
+         - Timeout after sending a successful request, for the complete reception of the response message (in uS)
          - 1000000
          - In case of a timeout, CP_RepeatReqCountApp has to be used to retry until exhausted, or a completion timeout is reached
        * - CP_P6Star
-         - Enhanced timeout after receiving a NRC 0x78 to wait for the complete reception of the response message (in µS)
+         - Enhanced timeout after receiving a NRC 0x78 to wait for the complete reception of the response message (in uS)
          - 1000000
          -
 
@@ -788,7 +788,7 @@ Tester Present
       subsequent intervals.
 
     .. uml::
-        :caption: Tester Present — Component Lock
+        :caption: Tester Present -- Component Lock
 
         @startuml
         skinparam backgroundColor #FFFFFF
@@ -819,7 +819,7 @@ Tester Present
         @enduml
 
     .. uml::
-        :caption: Tester Present — Functional Group Lock
+        :caption: Tester Present -- Functional Group Lock
 
         @startuml
         skinparam backgroundColor #FFFFFF
