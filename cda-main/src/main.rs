@@ -29,6 +29,9 @@ const MAIN_HEALTH_COMPONENT_KEY: &str = "main";
 #[derive(Parser, Debug)]
 #[command(version, about, long_about = None)]
 struct AppArgs {
+    #[arg(short, long, env = "CDA_CONFIG_FILE")]
+    config: Option<String>,
+
     #[arg(short, long)]
     databases_path: Option<String>,
 
@@ -86,11 +89,12 @@ struct AppArgs {
 )]
 async fn main() -> Result<(), AppError> {
     let args = AppArgs::parse();
-    let mut config = opensovd_cda_lib::config::load_config().unwrap_or_else(|e| {
-        println!("Failed to load configuration: {e}");
-        println!("Using default values");
-        opensovd_cda_lib::config::default_config()
-    });
+    let mut config =
+        opensovd_cda_lib::config::load_config(args.config.as_deref()).unwrap_or_else(|e| {
+            println!("Failed to load configuration: {e}");
+            println!("Using default values");
+            opensovd_cda_lib::config::default_config()
+        });
     config.validate_sanity()?;
 
     args.update_config(&mut config);
