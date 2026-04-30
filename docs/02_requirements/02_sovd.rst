@@ -319,7 +319,8 @@ Version endpoint
     :status: draft
 
     The CDA must provide a standardized version endpoint ``/apps/sovd2uds/data/version`` which returns the current
-    version of the CDA in use, its SOVD api version, and implementation name.
+    version of the CDA in use, its SOVD api version, and implementation name. The same data shall also be available
+    under ``/data/version``.
 
 
 Health Endpoint
