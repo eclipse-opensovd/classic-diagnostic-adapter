@@ -80,6 +80,27 @@ impl<S: SecurityPlugin> EcuSchemaProvider for EcuManager<S> {
             main_schema,
         ))
     }
+
+    async fn schema_for_fg_request(
+        &self,
+        service: &cda_interfaces::DiagComm,
+        functional_group_name: &str,
+    ) -> Result<SchemaDescription, DiagServiceError> {
+        let mapped_service = self
+            .lookup_diag_service(service, Some(functional_group_name), None)
+            .await?;
+        let ctx = service_context(service, &mapped_service);
+
+        let request = mapped_service.request().map(datatypes::Request).ok_or(
+            DiagServiceError::InvalidDatabase(format!(
+                "Missing request for service {} in functional group {}.",
+                service.name, functional_group_name
+            )),
+        )?;
+        let schema = request.json_schema(&ctx, &self.diag_database);
+
+        Ok(schema)
+    }
 }
 
 fn service_context(service: &cda_interfaces::DiagComm, mapped_service: &DiagService) -> String {
@@ -255,6 +276,133 @@ fn params_to_schema(
     })
 }
 
+/// Collect accepted text values from a `TextTable` compu method's scales.
+///
+/// Each scale entry maps a coded/internal value to a human-readable text value.
+/// Returns the text values (`vt`, with `vt_ti` as fallback) that the user can
+/// supply when executing this service.
+fn text_table_enum_values<'a>(normal_dop: &'a datatypes::NormalDop<'a>) -> Vec<&'a str> {
+    normal_dop
+        .compu_method()
+        .and_then(|cm| cm.internal_to_phys())
+        .and_then(|itp| itp.compu_scales())
+        .map(|scales| {
+            scales
+                .iter()
+                .filter_map(|scale| scale.consts().and_then(|c| c.vt().or(c.vt_ti())))
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// If the `NormalDop` carries a physical constraint (`phys_constr`) with
+/// parseable numeric limits, add the corresponding JSON Schema range keywords
+/// (`minimum` / `maximum` / `exclusiveMinimum` / `exclusiveMaximum`) to `schema`.
+///
+/// Limits with `IntervalType::Infinite` or non-numeric values are silently
+/// skipped so that this helper never fails.
+fn add_phys_constr_range(normal_dop: &datatypes::NormalDop, schema: &mut schemars::Schema) {
+    let Some(constr) = normal_dop.phys_constr() else {
+        return;
+    };
+    let Some(props) = schema.as_object_mut() else {
+        return;
+    };
+
+    if let Some(lower) = constr.lower_limit() {
+        let interval: datatypes::IntervalType = lower.interval_type().into();
+        if interval != datatypes::IntervalType::Infinite
+            && let Some(value) = lower.value().and_then(|v| v.parse::<f64>().ok()) {
+                let key = if interval == datatypes::IntervalType::Open {
+                    "exclusiveMinimum"
+                } else {
+                    "minimum"
+                };
+                props.insert(key.to_owned(), serde_json::json!(value));
+            }
+    }
+
+    if let Some(upper) = constr.upper_limit() {
+        let interval: datatypes::IntervalType = upper.interval_type().into();
+        if interval != datatypes::IntervalType::Infinite
+            && let Some(value) = upper.value().and_then(|v| v.parse::<f64>().ok()) {
+                let key = if interval == datatypes::IntervalType::Open {
+                    "exclusiveMaximum"
+                } else {
+                    "maximum"
+                };
+                props.insert(key.to_owned(), serde_json::json!(value));
+            }
+    }
+}
+
+fn normal_dop_to_schema(
+    ctx: &str,
+    normal_dop: &datatypes::NormalDop,
+    name: String,
+    default_value: &str,
+    schema: &mut schemars::Schema,
+) -> Result<(), DiagServiceError> {
+    let Some(category) = normal_dop
+        .compu_method()
+        .map(|cm| cm.category())
+        .map(Into::into)
+    else {
+        return Err(DiagServiceError::ParameterConversionError(format!(
+            "Mapping {ctx}: Compu Method or Category not found in ECU database"
+        )));
+    };
+
+    match category {
+        datatypes::CompuCategory::TextTable => {
+            let enum_values = text_table_enum_values(normal_dop);
+
+            if enum_values.is_empty() {
+                schema.insert(
+                    name,
+                    schemars::json_schema!({
+                        "default": default_value,
+                        "type": "string"
+                    })
+                    .into(),
+                );
+            } else {
+                schema.insert(
+                    name,
+                    schemars::json_schema!({
+                        "default": default_value,
+                        "type": "string",
+                        "enum": enum_values
+                    })
+                    .into(),
+                );
+            }
+        }
+        datatypes::CompuCategory::Identical
+        | datatypes::CompuCategory::Linear
+        | datatypes::CompuCategory::ScaleLinear
+        | datatypes::CompuCategory::TabIntp
+        | datatypes::CompuCategory::RatFunc
+        | datatypes::CompuCategory::ScaleRatFunc
+        | datatypes::CompuCategory::CompuCode => {
+            let Some(datatype) = normal_dop.diag_coded_type().ok() else {
+                return Err(DiagServiceError::ParameterConversionError(format!(
+                    "Mapping {ctx}: Diag Coded Type not found in ECU database"
+                )));
+            };
+            let type_ = ecu_datatype_to_jsontype(datatype.base_datatype());
+
+            let mut param_schema = schemars::json_schema!({
+                "default": default_value,
+                "type": type_
+            });
+            add_phys_constr_range(normal_dop, &mut param_schema);
+            schema.insert(name, param_schema.into());
+        }
+    }
+    Ok(())
+}
+
 fn dop_variant_to_schema(
     ctx: &str,
     ecu_db: &DiagnosticDatabase,
@@ -266,44 +414,7 @@ fn dop_variant_to_schema(
 ) -> Result<(), DiagServiceError> {
     match variant {
         datatypes::DataOperationVariant::Normal(normal_dop) => {
-            // todo: schould we add a description or something
-            // regarding how the DOPs work? (scales, ...)
-            let Some(category) = normal_dop
-                .compu_method()
-                .map(|cm| cm.category())
-                .map(Into::into)
-            else {
-                return Err(DiagServiceError::ParameterConversionError(format!(
-                    "Mapping {ctx}: Compu Method or Category not found in ECU database"
-                )));
-            };
-
-            let type_ = match category {
-                datatypes::CompuCategory::TextTable => "string".to_owned(),
-                datatypes::CompuCategory::Identical
-                | datatypes::CompuCategory::Linear
-                | datatypes::CompuCategory::ScaleLinear
-                | datatypes::CompuCategory::TabIntp
-                | datatypes::CompuCategory::RatFunc
-                | datatypes::CompuCategory::ScaleRatFunc
-                | datatypes::CompuCategory::CompuCode => {
-                    let Some(datatype) = normal_dop.diag_coded_type().ok() else {
-                        return Err(DiagServiceError::ParameterConversionError(format!(
-                            "Mapping {ctx}: Diag Coded Type not found in ECU database"
-                        )));
-                    };
-                    ecu_datatype_to_jsontype(datatype.base_datatype())
-                }
-            };
-
-            schema.insert(
-                name,
-                schemars::json_schema!({
-                    "default": default_value,
-                    "type": type_
-                })
-                .into(),
-            );
+            normal_dop_to_schema(ctx, &normal_dop, name, default_value, schema)?;
         }
         datatypes::DataOperationVariant::EndOfPdu(end_of_pdu_dop) => {
             if let Some(end_of_pdu_schema) = map_dop_field_to_schema(

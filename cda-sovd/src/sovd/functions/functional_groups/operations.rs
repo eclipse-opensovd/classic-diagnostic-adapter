@@ -85,6 +85,104 @@ pub(crate) fn docs_get(op: TransformOperation) -> TransformOperation {
         })
 }
 
+/// `GET /operations/{service}/docs` - online capability description for a
+/// functional-group operation.
+pub(crate) mod docs_endpoint {
+    use aide::{UseApi, openapi::OpenApi, transform::TransformOperation};
+    use axum::{
+        Json,
+        extract::{Path, State},
+        response::{IntoResponse, Response},
+    };
+    use cda_interfaces::{
+        DiagComm, DiagCommType, DynamicPlugin, SchemaProvider, UdsEcu, subfunction_ids,
+    };
+    use cda_plugin_security::Secured;
+    use http::StatusCode;
+
+    use super::super::WebserverFgState;
+    use crate::{
+        openapi,
+        sovd::{
+            docs::{self, operations::OperationDocsMeta},
+            error::ApiError,
+        },
+    };
+
+    openapi::aide_helper::gen_path_param!(FgOperationDocsPathParam service String);
+
+    pub(crate) async fn get<T: UdsEcu + SchemaProvider + Clone>(
+        UseApi(Secured(security_plugin), _): UseApi<Secured, ()>,
+        Path(FgOperationDocsPathParam { service }): Path<FgOperationDocsPathParam>,
+        State(WebserverFgState {
+            uds,
+            functional_group_name,
+            ..
+        }): State<WebserverFgState<T>>,
+    ) -> Response {
+        let security_plugin: DynamicPlugin = security_plugin;
+        let ops_info = match uds
+            .get_functional_group_operations_info(&security_plugin, &functional_group_name)
+            .await
+        {
+            Ok(info) => info,
+            Err(e) => return ApiError::from(e).into_response(),
+        };
+
+        let Some(op_info) = ops_info
+            .iter()
+            .find(|o| o.id.eq_ignore_ascii_case(&service))
+        else {
+            return ApiError::NotFound(Some(format!("Operation '{service}' not found")))
+                .into_response();
+        };
+
+        let is_async = op_info.has_stop || op_info.has_request_results;
+
+        let diag_service = DiagComm {
+            name: service.clone(),
+            type_: DiagCommType::Operations,
+            lookup_name: None,
+            subfunction_id: Some(subfunction_ids::routine::START),
+        };
+
+        let request_params_schema = uds
+            .schema_for_fg_request(&diag_service, &functional_group_name)
+            .await
+            .ok()
+            .and_then(cda_interfaces::SchemaDescription::into_schema);
+
+        // Note: schema_for_fg_responses is not yet available; response schema
+        // is omitted for now and can be added once the trait method exists.
+        let response_params_schema = None;
+
+        let meta = OperationDocsMeta {
+            name: service.clone(),
+            is_async,
+            request_params_schema,
+            response_params_schema,
+        };
+
+        let base_path =
+            format!("/functions/functionalgroups/{functional_group_name}/operations/{service}");
+        let path_items = docs::operations::build_path_items(&base_path, &meta);
+        let doc = docs::build_openapi_doc(&format!("Operation: {service}"), path_items);
+
+        (StatusCode::OK, Json(doc)).into_response()
+    }
+
+    pub(crate) fn docs_transform(op: TransformOperation) -> TransformOperation {
+        op.description(
+            "Online capability description for a specific functional-group operation (ISO 17978-3 \
+             Section 7.5). Returns a self-contained OpenAPI specification.",
+        )
+        .response_with::<200, Json<OpenApi>, _>(|res| {
+            res.description("Self-contained OpenAPI 3.1 specification for this operation.")
+        })
+        .with(openapi::error_not_found)
+    }
+}
+
 pub(crate) mod diag_service {
     use aide::{UseApi, transform::TransformOperation};
     use axum::{
