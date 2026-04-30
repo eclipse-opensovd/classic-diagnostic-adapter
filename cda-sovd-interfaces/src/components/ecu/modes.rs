@@ -54,7 +54,7 @@ pub mod security_and_session {
             pub value: String,
             /// Defines after how many seconds the
             /// mode expires and should therefore
-            /// be automatically reset to the mode’s
+            /// be automatically reset to the mode's
             // default value
             // It's optional although strictly speaking it should be required
             // when following the sovd standard.

@@ -29,7 +29,7 @@
 //!     // 1. Build a shared TLS config (reuse across connections)
 //!     let config = SslConfigBuilder::new_client()
 //!         .expect("config init failed")
-//!         .verify_mode(SslVerifyMode::None) // see §4 for proper CA verification
+//!         .verify_mode(SslVerifyMode::None) // see section 4 for proper CA verification
 //!         .build();
 //!
 //!     // 2. Connect TCP, then upgrade to TLS
@@ -111,7 +111,7 @@
 //!
 //!     loop {
 //!         let (tcp, _addr) = listener.accept().await?;
-//!         let config = config.clone(); // Arc::clone — cheap
+//!         let config = config.clone(); // Arc::clone -- cheap
 //!
 //!         tokio::spawn(async move {
 //!             let mut tls = TlsStream::accept(config, tcp).await.unwrap();

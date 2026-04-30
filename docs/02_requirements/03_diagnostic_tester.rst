@@ -268,19 +268,19 @@ ECU States
 
     State transitions must occur as follows:
 
-    - Registration → NotTested
-    - NotTested → Online (successful variant detection)
-    - NotTested → NoVariantDetected (detection failed, fallback enabled)
-    - NotTested → Duplicate (another ECU with same logical address detected as correct variant)
-    - NotTested → Offline (variant detection attempted but ECU unreachable)
-    - Offline → NotTested (reconnection attempt or explicit re-detection requested)
-    - Online → Disconnected (connection lost)
-    - Online → NotTested (explicit re-detection requested)
-    - NoVariantDetected → Online (successful re-detection)
-    - NoVariantDetected → Duplicate (another ECU with same logical address detected as correct variant)
-    - NoVariantDetected → Disconnected (connection lost)
-    - Duplicate → NotTested (explicit re-detection requested)
-    - Disconnected → NotTested (reconnection attempt)
+    - Registration --> NotTested
+    - NotTested --> Online (successful variant detection)
+    - NotTested --> NoVariantDetected (detection failed, fallback enabled)
+    - NotTested --> Duplicate (another ECU with same logical address detected as correct variant)
+    - NotTested --> Offline (variant detection attempted but ECU unreachable)
+    - Offline --> NotTested (reconnection attempt or explicit re-detection requested)
+    - Online --> Disconnected (connection lost)
+    - Online --> NotTested (explicit re-detection requested)
+    - NoVariantDetected --> Online (successful re-detection)
+    - NoVariantDetected --> Duplicate (another ECU with same logical address detected as correct variant)
+    - NoVariantDetected --> Disconnected (connection lost)
+    - Duplicate --> NotTested (explicit re-detection requested)
+    - Disconnected --> NotTested (reconnection attempt)
 
     The current ECU state must be queryable via the SOVD API.
 

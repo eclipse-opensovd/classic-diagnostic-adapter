@@ -196,7 +196,7 @@ impl<S: SecurityPlugin> cda_interfaces::EcuManager for EcuManager<S> {
     }
 
     /// This allows to (re)load a database after unloading it during runtime, which could happen
-    /// if initially the ECU wasn´t responding but later another request
+    /// if initially the ECU wasn't responding but later another request
     /// for reprobing the ECU happens.
     ///
     /// # Errors
@@ -448,7 +448,7 @@ impl<S: SecurityPlugin> cda_interfaces::EcuManager for EcuManager<S> {
     /// Convert a UDS payload given as `u8` slice into a `DiagServiceResponse`.
     ///
     /// # Errors
-    /// Will return `Err` in cases where the payload doesn´t match the expected UDS response, or if
+    /// Will return `Err` in cases where the payload doesn't match the expected UDS response, or if
     /// elements of the response cannot be correctly mapped from the raw data.
     #[tracing::instrument(
         target = "convert_from_uds",
@@ -3572,7 +3572,7 @@ impl<S: SecurityPlugin> EcuManager<S> {
         uds: &mut Vec<u8>,
     ) -> Result<(), DiagServiceError> {
         for param in mapped_params {
-            // When BYTE-POSITION is omitted (ISO 22901-1 §7.4.8) the
+            // When BYTE-POSITION is omitted (ISO 22901-1 section 7.4.8) the
             // parameter follows a variable-length PARAM-LENGTH-INFO field
             // and must be appended at the current end of the payload.
             let effective_byte_pos = if param.has_byte_position() {
@@ -6995,7 +6995,7 @@ mod tests {
         )
     }
 
-    // Models the pattern from ISO 22901-1 §7.4.8 (readMemoryByAddress):
+    // Models the pattern from ISO 22901-1 section 7.4.8 (readMemoryByAddress):
     // one parameter determines the length of the next, and the parameter
     // that comes *after* the variable-length data has no BYTE-POSITION in
     // the ODX because its position is unknown until runtime.
@@ -7004,7 +7004,7 @@ mod tests {
     //   byte 0     : SID       (coded const, 8 bit)
     //   byte 1     : len_key   (LENGTH-KEY param, u8)
     //   byte 2     : var_data  (PARAM-LENGTH-INFO, `len_key` bytes)
-    //   byte 2 + N : suffix    (value param, u16 — BYTE-POSITION omitted)
+    //   byte 2 + N : suffix    (value param, u16 -- BYTE-POSITION omitted)
     fn create_ecu_manager_with_trailing_param_after_param_length_info_service()
     -> (super::EcuManager<DefaultSecurityPluginData>, DiagComm, u8) {
         const LEN_KEY: &str = "len_key";
@@ -7036,7 +7036,7 @@ mod tests {
             let sid_param = create_sid_param!(db_builder, sid);
             let lk_param = db_builder.create_length_key_param(LEN_KEY, len_key_dop, 1, 0);
             let var_param = db_builder.create_value_param(VAR_DATA, var_data_dop, 2, 0);
-            // Per spec: BYTE-POSITION omitted — position depends on runtime length of var_data
+            // Per spec: BYTE-POSITION omitted -- position depends on runtime length of var_data
             let suffix_param = db_builder.create_value_param_no_byte_pos("suffix", suffix_dop);
             db_builder.create_request(
                 Some(vec![sid_param, lk_param, var_param, suffix_param]),
@@ -8316,9 +8316,9 @@ mod tests {
     /// Covers `CodedConst` (SID), `PhysConst` (DID), and `Value` (data) response parameters.
     ///
     /// Fixture layout (`pos_response` of `TestPhysConstNormalService`):
-    ///   byte 0: `sid`       – CODED-CONST (1 byte)
-    ///   byte 1: `DID`       – PHYS-CONST  (u16, `coded_value` = None in response metadata)
-    ///   byte 3: `data_param`– VALUE        (u8, 1 byte)
+    ///   byte 0: `sid`       - CODED-CONST (1 byte)
+    ///   byte 1: `DID`       - PHYS-CONST  (u16, `coded_value` = None in response metadata)
+    ///   byte 3: `data_param`- VALUE        (u8, 1 byte)
     #[test]
     fn test_get_response_parameter_metadata_phys_const_and_value_params() {
         use cda_interfaces::ParameterTypeMetadata;
@@ -8385,18 +8385,18 @@ mod tests {
     /// `"__mux_case__/case_name"` marker.
     ///
     /// Fixture layout (`pos_response` of `TestMuxService`):
-    ///   byte 0: `test_service_pos_sid` – CODED-CONST (1 byte, SID = 0x22)
-    ///   byte 2: `mux_1_param`          – MUX DOP (expanded into case entries)
+    ///   byte 0: `test_service_pos_sid` - CODED-CONST (1 byte, SID = 0x22)
+    ///   byte 2: `mux_1_param`          - MUX DOP (expanded into case entries)
     ///     switch key: u16 at offset 0 within mux (size = 2 bytes)
     ///     case 1 abs pos = mux(2) + key(2) + `inner_offset`
-    ///       `mux_1_case_1_param_1`: f32 → byte 4, size 4
-    ///       `mux_1_case_1_param_2`: u8  → byte 8, size 1
+    ///       `mux_1_case_1_param_1`: f32 -> byte 4, size 4
+    ///       `mux_1_case_1_param_2`: u8  -> byte 8, size 1
     ///       marker __`mux_case`__/`mux_1_case_1`: byte 4, size = structure (7)
     ///     case 2 abs pos = 2 + 2 + `inner_offset`
-    ///       `mux_1_case_2_param_1`: i16  → byte 5, size 2
-    ///       `mux_1_case_2_param_2`: ascii 32 bits → byte 8, size 4
+    ///       `mux_1_case_2_param_1`: i16  -> byte 5, size 2
+    ///       `mux_1_case_2_param_2`: ascii 32 bits -> byte 8, size 4
     ///       marker __`mux_case`__/`mux_1_case_2`: byte 4, size = structure (7)
-    ///     case 3: no structure → produces no entries
+    ///     case 3: no structure -> produces no entries
     #[test]
     fn test_get_response_parameter_metadata_mux_expansion() {
         use cda_interfaces::ParameterTypeMetadata;
@@ -8497,7 +8497,7 @@ mod tests {
         assert_eq!(marker_2.byte_position, 4); // mux_byte_pos(2) + switch_key_size(2)
         assert_eq!(marker_2.byte_size, Some(7)); // structure byte_size
 
-        // Case 3 has no structure — must produce no entries at all
+        // Case 3 has no structure -- must produce no entries at all
         assert!(
             metadata
                 .iter()
@@ -8949,7 +8949,7 @@ mod tests {
             ServiceSecurityTransition::ExtendedToProgramming,
         );
 
-        // Set ECU security to "LockedSecurity" (the default) – the default is
+        // Set ECU security to "LockedSecurity" (the default) - the default is
         // NOT in the allowed set, so neither the actual state nor the default
         // check can pass and the service must be rejected.
         {
@@ -9137,7 +9137,7 @@ mod tests {
 
     /// Encodes then decodes a service where a PARAM-LENGTH-INFO field
     /// with non-zero data precedes a trailing fixed-size parameter whose
-    /// BYTE-POSITION is omitted (as required by ISO 22901-1 §7.4.8).
+    /// BYTE-POSITION is omitted (as required by ISO 22901-1 section 7.4.8).
     #[tokio::test]
     async fn test_trailing_param_after_param_length_info_roundtrip() {
         let (ecu_manager, dc, sid) =
@@ -9222,12 +9222,12 @@ mod tests {
     ///
     /// ```text
     /// Variant("RootVariant")
-    /// ├── Variant("InnerVariant")
-    /// │   └── FunctionalGroup("FgLayer")
-    /// │       └── EcuSharedData("SharedInFg")
-    /// ├── Protocol("Proto")
-    /// │   └── Protocol("ParentProto")
-    /// └── EcuSharedData("TopShared")
+    /// +-- Variant("InnerVariant")
+    /// |   \-- FunctionalGroup("FgLayer")
+    /// |       \-- EcuSharedData("SharedInFg")
+    /// +-- Protocol("Proto")
+    /// |   \-- Protocol("ParentProto")
+    /// \-- EcuSharedData("TopShared")
     /// ```
     ///
     /// Expected collected layers (order is stack-based, not guaranteed):
@@ -9236,7 +9236,7 @@ mod tests {
     fn test_parent_ref_recursive_mixed_hierarchy() {
         let mut b = EcuDataBuilder::new();
 
-        // ── leaf: EcuSharedData inside a FunctionalGroup ──
+        // -- leaf: EcuSharedData inside a FunctionalGroup --
         let shared_in_fg_dl = b.create_diag_layer(DiagLayerParams {
             short_name: "SharedInFg",
             ..Default::default()
@@ -9247,7 +9247,7 @@ mod tests {
             Some(DataFormatParentRefType::tag_as_ecu_shared_data(esd_in_fg)),
         );
 
-        // ── FunctionalGroup with the EcuSharedData child ──
+        // -- FunctionalGroup with the EcuSharedData child --
         let fg_dl = b.create_diag_layer(DiagLayerParams {
             short_name: "FgLayer",
             ..Default::default()
@@ -9258,7 +9258,7 @@ mod tests {
             Some(DataFormatParentRefType::tag_as_functional_group(fg)),
         );
 
-        // ── inner Variant whose parent-ref is the FunctionalGroup ──
+        // -- inner Variant whose parent-ref is the FunctionalGroup --
         let inner_variant_dl = b.create_diag_layer(DiagLayerParams {
             short_name: "InnerVariant",
             ..Default::default()
@@ -9269,7 +9269,7 @@ mod tests {
             Some(DataFormatParentRefType::tag_as_variant(inner_variant)),
         );
 
-        // ── Protocol with a parent protocol ──
+        // -- Protocol with a parent protocol --
         let parent_proto = b.create_protocol("ParentProto", None, None, None);
         let parent_proto_pr = b.create_parent_ref(
             DataFormatParentRefType::Protocol,
@@ -9281,7 +9281,7 @@ mod tests {
             Some(DataFormatParentRefType::tag_as_protocol(proto)),
         );
 
-        // ── top-level EcuSharedData sibling ──
+        // -- top-level EcuSharedData sibling --
         let top_shared_dl = b.create_diag_layer(DiagLayerParams {
             short_name: "TopShared",
             ..Default::default()
@@ -9292,7 +9292,7 @@ mod tests {
             Some(DataFormatParentRefType::tag_as_ecu_shared_data(top_esd)),
         );
 
-        // ── root variant carrying all three sibling parent-refs ──
+        // -- root variant carrying all three sibling parent-refs --
         let root_dl = b.create_diag_layer(DiagLayerParams {
             short_name: "RootVariant",
             ..Default::default()

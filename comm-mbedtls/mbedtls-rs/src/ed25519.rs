@@ -32,8 +32,8 @@ const VERIFY_SUCCESS: i32 = 0;
 ///
 /// # Returns
 ///
-/// * `0` — signature is valid
-/// * `-1` — verification failed or invalid input
+/// * `0` -- signature is valid
+/// * `-1` -- verification failed or invalid input
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn rust_ed25519_verify(
     pub_key: *const u8,
@@ -89,7 +89,7 @@ mod tests {
 
     #[test]
     fn test_ed25519_verify_rfc8032_vector() {
-        // RFC 8032 §7.1 TEST 1
+        // RFC 8032 section 7.1 TEST 1
         let pub_key_hex = "d75a980182b10ab7d54bfed3c964073a0ee172f3daa62325af021a68f707511a";
         let msg: &[u8] = b""; // empty message
         let sig_hex = "e5564300c360ac729086e2cc806e828a84877f1eb8e5d974d873e065224901555fb8821590a\

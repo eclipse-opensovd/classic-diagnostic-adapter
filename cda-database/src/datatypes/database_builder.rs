@@ -741,7 +741,7 @@ impl<'a> EcuDataBuilder<'a> {
 
     /// Creates a VALUE param whose BYTE-POSITION is omitted (`None`).
     ///
-    /// Per ISO 22901-1 §7.4.8 a parameter that follows a
+    /// Per ISO 22901-1 section 7.4.8 a parameter that follows a
     /// PARAM-LENGTH-INFO field has no statically known position, so
     /// BYTE-POSITION is not defined in the ODX instance.
     pub fn create_value_param_no_byte_pos(

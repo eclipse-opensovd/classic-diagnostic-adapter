@@ -152,7 +152,7 @@ pub struct UdsComParams {
     /// ending should be continued
     pub tester_present_exp_neg_resp: ComParamConfig<Vec<u8>>,
 
-    /// Timing interval for tester present messages in µs
+    /// Timing interval for tester present messages in us
     pub tester_present_time: ComParamConfig<Duration>,
 
     /// Repetition of last request in case of timeout, transmission or receive error
@@ -163,7 +163,7 @@ pub struct UdsComParams {
     pub rc_21_retry_policy: ComParamConfig<RetryPolicy>,
 
     /// Time period the tester accepts for repeated NRC 0x21 (busy repeat request) and retries,
-    /// while waiting for a positive response in µS
+    /// while waiting for a positive response in uS
     pub rc_21_completion_timeout: ComParamConfig<Duration>,
 
     /// Time between a NRC 0x21 (busy repeat request) and the retransmission of the same request

@@ -33,10 +33,10 @@ kernel page cache.
 
 Three strategies were evaluated:
 
-1. **Heap** — decompress into heap-allocated ``Vec<u8>`` buffers.
-2. **MmapSidecar** — decompress into separate ``.fb`` sidecar files next to the
+1. **Heap** -- decompress into heap-allocated ``Vec<u8>`` buffers.
+2. **MmapSidecar** -- decompress into separate ``.fb`` sidecar files next to the
    MDD files, then memory-map those sidecar files.
-3. **MmapMdd (in-place)** — decompress the MDD files themselves once (i.e. during a
+3. **MmapMdd (in-place)** -- decompress the MDD files themselves once (i.e. during a
    software update), rewriting them with uncompressed chunk data, then
    memory-map the MDD files directly with zero-copy protobuf decoding.
 
@@ -47,7 +47,7 @@ We will use the **MmapMdd (in-place)** strategy: MDD files are decompressed
 once and are subsequently used **read-only** via
 ``mmap``.  The protobuf layer uses prost's ``Bytes`` support
 (``Bytes::from_owner(mmap)``) so that chunk data fields are zero-copy slices
-into the memory-mapped file — no heap allocation is required for the
+into the memory-mapped file -- no heap allocation is required for the
 FlatBuffers payload.
 
 Before the atomic rename of a rewritten MDD file, the written data is verified
@@ -89,21 +89,21 @@ Rust 1.92.0, ``--release`` profile, ~3 minutes idle warm-up, and swap disabled.
    The MmapMdd implementation uses ``memmap2::Advice::Random``
    (``MADV_RANDOM``) immediately after ``mmap()`` to disable read-ahead for
    the sparse FlatBuffers vtable lookups that dominate runtime access.  This
-   avoids a ``libc`` dependency — the hint is set directly via ``memmap2``
+   avoids a ``libc`` dependency -- the hint is set directly via ``memmap2``
    before ownership is transferred to ``Bytes::from_owner()``.
 
 MmapMdd Advantages over Heap
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 
-1. **RSS under pressure: −75 %** (119 MB vs 469 MB)
+1. **RSS under pressure: -75 %** (119 MB vs 469 MB)
 
    All FlatBuffers data is backed by the MDD file on disk.  Under memory
-   pressure the kernel cleanly drops those pages and re-reads them on demand —
+   pressure the kernel cleanly drops those pages and re-reads them on demand --
    no swap I/O required.  On the heap strategy, anonymous pages can only be
    compressed or swapped, incurring significant I/O overhead with a modest
-   −3.7 % reduction.
+   -3.7 % reduction.
 
-2. **Idle RSS: −69 %** (153 MB vs 487 MB)
+2. **Idle RSS: -69 %** (153 MB vs 487 MB)
 
    The zero-copy protobuf decode (``Bytes::from_owner(mmap)``) avoids copying
    every ``bytes`` field to the heap.  Chunk data fields are slices into the
@@ -125,8 +125,8 @@ MmapMdd Advantages over MmapSidecar
 2. **Lower RSS under pressure** (119 MB vs 172 MB)
 
    The in-place strategy benefits from zero-copy protobuf decoding
-   (``Bytes::from_owner``) which the sidecar approach did not use.  All data —
-   protobuf metadata and FlatBuffers payloads — lives in the single mmap,
+   (``Bytes::from_owner``) which the sidecar approach did not use.  All data --
+   protobuf metadata and FlatBuffers payloads -- lives in the single mmap,
    giving the kernel a unified region to evict.
 
 3. **Lower idle RSS** (153 MB vs 308 MB)
@@ -158,22 +158,22 @@ a realistic end-to-end workload on the target Linux system to compare the
   events: ``cycles``, ``instructions``, ``faults``, ``cache-references``,
   ``cache-misses``.
 
-.. list-table:: ``perf stat`` Results — Main vs MmapMdd (under load)
+.. list-table:: ``perf stat`` Results -- Main vs MmapMdd (under load)
    :header-rows: 1
    :widths: 32 22 22 24
 
    * - Metric
      - Main (compressed)
      - MmapMdd (decompressed)
-     - Δ
+     - Delta
    * - cycles
      - 448,473,942
      - 437,102,422
-     - **−2.5 %**
+     - **-2.5 %**
    * - instructions
      - 194,934,031
      - 194,316,925
-     - −0.3 %
+     - -0.3 %
    * - IPC (insn/cycle)
      - 0.43
      - 0.44
@@ -189,7 +189,7 @@ a realistic end-to-end workload on the target Linux system to compare the
    * - cache-misses
      - 18,142,040 (70.21 %)
      - 18,478,329 (70.98 %)
-     - −0.77 pp
+     - -0.77 pp
    * - wall time
      - 42.19 s
      - 42.19 s
@@ -207,7 +207,7 @@ Under realistic ECU-flash load with concurrent memory pressure both
 implementations are effectively equivalent in CPU efficiency (within 2.5 %
 of each other) and identical in wall time.  The workload is dominated by
 network I/O (DoIP) rather than database access, so the expected RSS savings
-of MmapMdd (−75 % under pressure) are realized without any runtime CPU
+of MmapMdd (-75 % under pressure) are realized without any runtime CPU
 regression.
 
 ``perf report`` call-graph analysis confirmed that the top hotspots
@@ -219,7 +219,7 @@ that no new hot paths were introduced by the MmapMdd implementation.
 Trade-offs
 ^^^^^^^^^^
 
-- **Disk usage increases**: MDD files grow from ~47 MB to 242 MB (~5.1×).  This
+- **Disk usage increases**: MDD files grow from ~47 MB to 242 MB (~5.1x).  This
   is a one-time cost during the software update and is acceptable on the target
   platform where storage is less constrained than RAM.
 
@@ -242,7 +242,7 @@ Positive
 - **69 % lower idle RSS** (153 MB vs 487 MB) due to zero-copy protobuf
   decoding and ``MADV_RANDOM`` via ``memmap2`` to suppress wasteful
   read-ahead during sparse FlatBuffers lookups.
-- **Zero-copy data path**: mmap → ``Bytes`` → FlatBuffers — no intermediate
+- **Zero-copy data path**: mmap --> ``Bytes`` --> FlatBuffers -- no intermediate
   heap allocations for the diagnostic payload.
 - **Single file, single source of truth**: no sidecar files to manage,
   eliminating consistency and cleanup issues.
@@ -257,7 +257,7 @@ Positive
 Negative
 ^^^^^^^^
 
-- **5.1× disk usage increase** for the MDD database directory.
+- **5.1x disk usage increase** for the MDD database directory.
 - **One-time decompression cost** i.e. during software update or first startup
 - **Platform dependency**: relies on OS-level mmap, page cache behaviour, and
   ``madvise(2)`` support (POSIX systems), although the latter is guarded by a cfg flag, so the CDA still
@@ -271,7 +271,7 @@ Heap (Baseline)
 
 Decompress FlatBuffers data into heap-allocated ``Vec<u8>`` buffers.  Simplest
 implementation but RSS remains high (~487 MB idle, ~469 MB under pressure).
-Anonymous heap pages cannot be cleanly evicted by the kernel — they must be
+Anonymous heap pages cannot be cleanly evicted by the kernel -- they must be
 compressed or swapped, incurring I/O overhead.  Unsuitable for
 memory-constrained targets.
 
@@ -290,5 +290,5 @@ References
 ----------
 
 - `memmap2 crate <https://crates.io/crates/memmap2>`_
-- `bytes crate — Bytes::from_owner <https://docs.rs/bytes/latest/bytes/struct.Bytes.html#method.from_owner>`_
+- `bytes crate -- Bytes::from_owner <https://docs.rs/bytes/latest/bytes/struct.Bytes.html#method.from_owner>`_
 - `prost Bytes support <https://docs.rs/prost-build/latest/prost_build/struct.Config.html#method.bytes>`_

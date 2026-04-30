@@ -30,8 +30,8 @@ pub enum ErrorCode {
     /// The Component receiving the request has answered with an
     /// error.
     /// For UDS, the message should include the service identifier
-    /// (Key: ‘service’ and Value of type number) and the negative
-    /// response code (Key: ‘nrc’ and Value of type number).
+    /// (Key: 'service' and Value of type number) and the negative
+    /// response code (Key: 'nrc' and Value of type number).
     ErrorResponse,
 
     /// The signature of the data in the payload is invalid.
