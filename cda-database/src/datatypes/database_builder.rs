@@ -1403,6 +1403,47 @@ impl<'a> EcuDataBuilder<'a> {
         )
     }
 
+    pub fn create_static_field_dop(
+        &mut self,
+        fixed_number_of_items: u32,
+        item_byte_size: u32,
+        structure: WIPOffset<dataformat::Structure<'a>>,
+    ) -> WIPOffset<dataformat::DOP<'a>> {
+        let structure_dop = self.create_dop(
+            *DopType::STRUCTURE,
+            None,
+            None,
+            *SpecificDOPData::Structure,
+            Some(dataformat::SpecificDOPData::tag_as_structure(structure).value_offset()),
+        );
+
+        let field = dataformat::Field::create(
+            &mut self.fbb,
+            &dataformat::FieldArgs {
+                basic_structure: Some(structure_dop),
+                env_data_desc: None,
+                is_visible: true,
+            },
+        );
+
+        let static_field = dataformat::StaticField::create(
+            &mut self.fbb,
+            &dataformat::StaticFieldArgs {
+                fixed_number_of_items,
+                item_byte_size,
+                field: Some(field),
+            },
+        );
+
+        self.create_dop(
+            *DopType::STATIC_FIELD,
+            None,
+            None,
+            *SpecificDOPData::StaticField,
+            Some(dataformat::SpecificDOPData::tag_as_static_field(static_field).value_offset()),
+        )
+    }
+
     pub fn create_dtc(
         &mut self,
         trouble_code: u32,
@@ -1460,6 +1501,63 @@ impl<'a> EcuDataBuilder<'a> {
             None,
             *SpecificDOPData::DTCDOP,
             Some(dataformat::SpecificDOPData::tag_as_dtcdop(dtc_dop_specific_data).value_offset()),
+        )
+    }
+
+    /// Creates an `ENV-DATA` DOP with the given DTC codes and parameters.
+    /// `dtc_values` specifies which DTC codes this env data applies to.
+    /// `params` are the parameters that carry the snapshot/environment data.
+    pub fn create_env_data_dop(
+        &mut self,
+        dtc_values: &[u32],
+        params: &[WIPOffset<dataformat::Param<'a>>],
+    ) -> WIPOffset<dataformat::DOP<'a>> {
+        let dtc_values_vec = self.fbb.create_vector(dtc_values);
+        let params_vec = self.fbb.create_vector(params);
+
+        let env_data = dataformat::EnvData::create(
+            &mut self.fbb,
+            &dataformat::EnvDataArgs {
+                dtc_values: Some(dtc_values_vec),
+                params: Some(params_vec),
+            },
+        );
+
+        self.create_dop(
+            *DopType::ENV_DATA,
+            None,
+            None,
+            *SpecificDOPData::EnvData,
+            Some(dataformat::SpecificDOPData::tag_as_env_data(env_data).value_offset()),
+        )
+    }
+
+    /// Creates an `ENV-DATA-DESC` DOP that selects one of `env_datas` based on the value
+    /// of the parameter named `selector_param_short_name` in the decoded response.
+    pub fn create_env_data_desc_dop(
+        &mut self,
+        name: &str,
+        selector_param_short_name: &str,
+        env_datas: &[WIPOffset<dataformat::DOP<'a>>],
+    ) -> WIPOffset<dataformat::DOP<'a>> {
+        let param_short_name = self.fbb.create_string(selector_param_short_name);
+        let env_datas_vec = self.fbb.create_vector(env_datas);
+
+        let env_data_desc = dataformat::EnvDataDesc::create(
+            &mut self.fbb,
+            &dataformat::EnvDataDescArgs {
+                param_short_name: Some(param_short_name),
+                param_path_short_name: None,
+                env_datas: Some(env_datas_vec),
+            },
+        );
+
+        self.create_dop(
+            *DopType::ENV_DATA_DESC,
+            Some(name),
+            None,
+            *SpecificDOPData::EnvDataDesc,
+            Some(dataformat::SpecificDOPData::tag_as_env_data_desc(env_data_desc).value_offset()),
         )
     }
 
