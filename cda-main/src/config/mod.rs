@@ -17,21 +17,21 @@ use figment::{
 
 pub mod configfile;
 
-/// Loads the configuration from a file specified by the `CDA_CONFIG_FILE` environment variable.
-/// If the variable is not set, it defaults to `opensovd-cda.toml`.
-/// The configuration is merged with default values and environment variables prefixed with `CDA`.
-/// # Returns
-/// A `Result` containing the loaded configuration or an error message if the loading fails
+/// Loads the configuration, merged with defaults and `CDA`-prefixed env vars.
+///
+/// Config file resolved in priority order:
+/// * `config_file` arg (includes `CDA_CONFIG_FILE` env via clap)
+/// * `<CDA_NAME>.toml`
 /// # Errors
 /// Returns an error message if the configuration file cannot be read or parsed.
-pub fn load_config() -> Result<configfile::Configuration, String> {
+pub fn load_config(config_file_path: Option<&str>) -> Result<configfile::Configuration, String> {
     let cda_name = std::option_env!("CDA_NAME").unwrap_or("opensovd-cda");
-    let config_file =
-        std::env::var("CDA_CONFIG_FILE").unwrap_or_else(|_| format!("{cda_name}.toml"));
+    let default_path = format!("{cda_name}.toml");
+    let config_file = config_file_path.unwrap_or(&default_path);
     println!("Loading configuration from {config_file}");
 
     Figment::from(Serialized::defaults(default_config()))
-        .merge(Toml::file(&config_file))
+        .merge(Toml::file(config_file))
         .merge(Env::prefixed("CDA").ignore(&["CDA_CONFIG_FILE"]))
         .extract()
         .map_err(|e| format!("Failed to build configuration: {e}"))
