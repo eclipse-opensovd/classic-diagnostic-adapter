@@ -17,17 +17,20 @@ use figment::{
 
 pub mod configfile;
 
-/// Loads the configuration from a file specified by the `CDA_CONFIG_FILE` environment variable.
-/// If the variable is not set, it defaults to `opensovd-cda.toml`.
-/// The configuration is merged with default values and environment variables prefixed with `CDA`.
-/// # Returns
-/// A `Result` containing the loaded configuration or an error message if the loading fails
+/// Loads the configuration, merged with defaults and `CDA`-prefixed env vars.
+///
+/// Config file resolved in priority order:
+/// * `config_file` arg
+/// * `CDA_CONFIG_FILE` env
+/// * `<CDA_NAME>.toml`
 /// # Errors
 /// Returns an error message if the configuration file cannot be read or parsed.
-pub fn load_config() -> Result<configfile::Configuration, String> {
+pub fn load_config(config_file: Option<&str>) -> Result<configfile::Configuration, String> {
     let cda_name = std::option_env!("CDA_NAME").unwrap_or("opensovd-cda");
-    let config_file =
-        std::env::var("CDA_CONFIG_FILE").unwrap_or_else(|_| format!("{cda_name}.toml"));
+    let config_file = config_file
+        .map(ToOwned::to_owned)
+        .or_else(|| std::env::var("CDA_CONFIG_FILE").ok())
+        .unwrap_or_else(|| format!("{cda_name}.toml"));
     println!("Loading configuration from {config_file}");
 
     Figment::from(Serialized::defaults(default_config()))
