@@ -28,6 +28,12 @@ workspace = true
 cda-interfaces = { workspace = true }
 cda-plugin-security = { workspace = true }
 cda-tracing = { workspace = true }
+opensovd-axum-extra = { workspace = true, features = [
+  "forwarded",
+  "x-forwarded-host",
+  "host-header",
+  "uri-authority",
+] }
 sovd-interfaces = { workspace = true }
 
 # external

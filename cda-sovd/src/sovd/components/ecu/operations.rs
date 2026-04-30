@@ -99,12 +99,13 @@ pub(crate) mod comparams {
             http::{StatusCode, header},
             response::{IntoResponse as _, Response},
         };
-        use axum_extra::extract::{Host, WithRejection};
+        use axum_extra::extract::WithRejection;
         use cda_interfaces::{
             HashMap, HashMapExtensions, UdsEcu, diagservices::DiagServiceResponse,
             file_manager::FileManager,
         };
         use indexmap::IndexMap;
+        use opensovd_axum_extra::ExtractHost;
         use sovd_interfaces::components::ecu::operations::comparams as sovd_comparams;
         use tokio::sync::RwLock;
         use uuid::Uuid;
@@ -156,7 +157,7 @@ pub(crate) mod comparams {
                 comparam_executions,
                 ..
             }): State<WebserverEcuState<R, T, U>>,
-            UseApi(Host(host), _): UseApi<Host, String>,
+            UseApi(ExtractHost(host), _): UseApi<ExtractHost, String>,
             OriginalUri(uri): OriginalUri,
             request_body: Option<Json<sovd_comparams::executions::update::Request>>,
         ) -> Response {
@@ -401,7 +402,7 @@ pub(crate) mod comparams {
                     comparam_executions,
                     ..
                 }): State<WebserverEcuState<R, T, U>>,
-                UseApi(Host(host), _): UseApi<Host, String>,
+                UseApi(ExtractHost(host), _): UseApi<ExtractHost, String>,
                 OriginalUri(uri): OriginalUri,
                 WithRejection(Json(request), _): WithRejection<
                     Json<sovd_comparams::executions::update::Request>,
