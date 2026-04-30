@@ -254,6 +254,33 @@ fn start_cda(config: Configuration) {
         })
         .unwrap();
 
+        // Register version endpoints
+        if let serde_json::Value::Object(version_info) = serde_json::json!({
+            "id": "version",
+            "data": {
+                "name": "Eclipse OpenSOVD Classic Diagnostic Adapter",
+                "api": {
+                    "version": "1.1"
+                },
+                "implementation": {
+                    "version": cda_version(),
+                }
+            }
+        }) {
+            cda_sovd::add_static_data_endpoint(
+                &dynamic_router,
+                version_info.clone(),
+                "/vehicle/v15/apps/sovd2uds/data/version",
+            )
+            .await;
+            cda_sovd::add_static_data_endpoint(
+                &dynamic_router,
+                version_info,
+                "/vehicle/v15/data/version",
+            )
+            .await;
+        }
+
         cda_sovd::add_vehicle_routes::<DiagServiceResponseStruct, _, _, DefaultSecurityPlugin>(
             &dynamic_router,
             vehicle_data.uds_manager,

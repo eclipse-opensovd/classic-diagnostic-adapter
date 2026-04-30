@@ -163,6 +163,7 @@ async fn main() -> Result<(), AppError> {
     )
     .await?;
 
+    // [[ dimpl~sovd-api-version-endpoint, Register Version Endpoint ]]
     if let serde_json::Value::Object(version_info) = serde_json::json!({
         "id": "version",
         "data": {
