@@ -277,10 +277,15 @@ impl DiagCommType {
     }
 }
 
-#[derive(Deserialize, Serialize, Clone, Debug)]
+/// Functional group description and lookup configuration.
+#[derive(Deserialize, Serialize, Clone, Debug, schemars::JsonSchema)]
 pub struct FunctionalDescriptionConfig {
+    /// Name of the database containing functional group definitions.
     pub description_database: String,
+    /// Optional set of functional group names to enable.
+    /// When absent, all functional groups are enabled.
     pub enabled_functional_groups: Option<HashSet<String>>,
+    /// Position of the protocol identifier in service names.
     pub protocol_position: datatypes::DiagnosticServiceAffixPosition,
 }
 

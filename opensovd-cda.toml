@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
-# SPDX-FileCopyrightText: 2025 The Contributors to Eclipse OpenSOVD (see CONTRIBUTORS)
+# SPDX-FileCopyrightText: 2026 The Contributors to Eclipse OpenSOVD (see CONTRIBUTORS)
 #
 # See the NOTICE file(s) distributed with this work for additional
 # information regarding copyright ownership.
@@ -8,15 +8,539 @@
 # terms of the Apache License Version 2.0 which is available at
 # https://www.apache.org/licenses/LICENSE-2.0
 
+# Path to the directory containing flash files.
+# flash_files_path = "."
+
+# DoIP-specific communication parameters.
+[com_params.doip]
+# Only the ID of this com param is needed right now
+# logical_response_id_table_name = "CP_UniqueRespIdTable"
+
+# Attempts to retry connection before giving up
+[com_params.doip.connection_retry_attempts]
+# Default value used when the database does not provide one.
+# default = 100
+# Communication parameter identifier (`CP_xxx` name from the database).
+# name = "CP_DoIPConnectionRetryAttempts"
+
+# Delay before attempting to reconnect
+[com_params.doip.connection_retry_delay]
+# Communication parameter identifier (`CP_xxx` name from the database).
+# name = "CP_DoIPConnectionRetryDelay"
+
+# Default value used when the database does not provide one.
+[com_params.doip.connection_retry_delay.default]
+# nanos = 0
+# secs = 5
+
+# Timeout after which a connection attempt should've been successful
+[com_params.doip.connection_timeout]
+# Communication parameter identifier (`CP_xxx` name from the database).
+# name = "CP_DoIPConnectionTimeout"
+
+# Default value used when the database does not provide one.
+[com_params.doip.connection_timeout.default]
+# nanos = 0
+# secs = 30
+
+# Maximum time the tester waits for an ACK or NACK of the `DoIP` entity
+[com_params.doip.diagnostic_ack_timeout]
+# Communication parameter identifier (`CP_xxx` name from the database).
+# name = "CP_DoIPDiagnosticAckTimeout"
+
+# Default value used when the database does not provide one.
+[com_params.doip.diagnostic_ack_timeout.default]
+# nanos = 0
+# secs = 1
+
+# Logical/Physical address of the ECU
+[com_params.doip.logical_ecu_address]
+# Default value used when the database does not provide one.
+# default = 0
+# Communication parameter identifier (`CP_xxx` name from the database).
+# name = "CP_DoIPLogicalEcuAddress"
+
+# Functional address of the ECU
+[com_params.doip.logical_functional_address]
+# Default value used when the database does not provide one.
+# default = 0
+# Communication parameter identifier (`CP_xxx` name from the database).
+# name = "CP_DoIPLogicalFunctionalAddress"
+
+# Logical address of a `DoIP` entity.
+# In case of directly reachable `DoIP` entity it's equal to the
+# `LogicalEcuAddress`, otherwise data will be sent via this address to the `LogicalEcuAddress`
+[com_params.doip.logical_gateway_address]
+# Default value used when the database does not provide one.
+# default = 0
+# Communication parameter identifier (`CP_xxx` name from the database).
+# name = "CP_DoIPLogicalGatewayAddress"
+
+# Logical address of the tester
+[com_params.doip.logical_tester_address]
+# Default value used when the database does not provide one.
+# default = 0
+# Communication parameter identifier (`CP_xxx` name from the database).
+# name = "CP_DoIPLogicalTesterAddress"
+
+# Number of retries for specific NACKs
+# The key must be a string, because parsing from toml requires keys to be strings,
+# no other types are supported.
+[com_params.doip.nack_number_of_retries]
+# Communication parameter identifier (`CP_xxx` name from the database).
+# name = "CP_DoIPNumberOfRetries"
+
+# Default value used when the database does not provide one.
+[com_params.doip.nack_number_of_retries.default]
+# 0x03 = 3
+
+# Number of retries in case a transmission error,
+# a reception error, or transport layer timeout is encountered
+[com_params.doip.repeat_request_count_transmission]
+# Default value used when the database does not provide one.
+# default = 3
+# Communication parameter identifier (`CP_xxx` name from the database).
+# name = "CP_RepeatReqCountTrans"
+
+# Period between retries, after specific NACK conditions are encountered
+[com_params.doip.retry_period]
+# Communication parameter identifier (`CP_xxx` name from the database).
+# name = "CP_DoIPRetryPeriod"
+
+# Default value used when the database does not provide one.
+[com_params.doip.retry_period.default]
+# nanos = 200000000
+# secs = 0
+
+# Maximum time allowed for the ECUs routing activation
+[com_params.doip.routing_activation_timeout]
+# Communication parameter identifier (`CP_xxx` name from the database).
+# name = "CP_DoIPRoutingActivationTimeout"
+
+# Default value used when the database does not provide one.
+[com_params.doip.routing_activation_timeout.default]
+# nanos = 0
+# secs = 30
+
+# Time period the tester accepts for repeated NRC 0x21 (busy repeat request) and retries,
+# while waiting for a positive response in uS
+[com_params.uds.rc_21_completion_timeout]
+# Communication parameter identifier (`CP_xxx` name from the database).
+# name = "CP_RC21CompletionTimeout"
+
+# Default value used when the database does not provide one.
+[com_params.uds.rc_21_completion_timeout.default]
+# nanos = 0
+# secs = 25
+
+# Time between a NRC 0x21 (busy repeat request) and the retransmission of the same request
+[com_params.uds.rc_21_repeat_request_time]
+# Communication parameter identifier (`CP_xxx` name from the database).
+# name = "CP_RC21RequestTime"
+
+# Default value used when the database does not provide one.
+[com_params.uds.rc_21_repeat_request_time.default]
+# nanos = 200000000
+# secs = 0
+
+# `RetryPolicy` in case of NRC 0x21 (busy repeat request)
+[com_params.uds.rc_21_retry_policy]
+# Default value used when the database does not provide one.
+# default = "ContinueUntilTimeout"
+# Communication parameter identifier (`CP_xxx` name from the database).
+# name = "CP_RC21Handling"
+
+# Time period the tester accepts for repeated NRC 0x78 (response pending),
+# and waits for a positive response
+[com_params.uds.rc_78_completion_timeout]
+# Communication parameter identifier (`CP_xxx` name from the database).
+# name = "CP_RC78CompletionTimeout"
+
+# Default value used when the database does not provide one.
+[com_params.uds.rc_78_completion_timeout.default]
+# nanos = 0
+# secs = 25
+
+# `RetryPolicy` in case of NRC 0x78 (response pending)
+[com_params.uds.rc_78_retry_policy]
+# Default value used when the database does not provide one.
+# default = "ContinueUntilTimeout"
+# Communication parameter identifier (`CP_xxx` name from the database).
+# name = "CP_RC78Handling"
+
+# Enhanced timeout after receiving a NRC 0x78 (response pending) to wait for the
+# complete reception of the response message
+[com_params.uds.rc_78_timeout]
+# Communication parameter identifier (`CP_xxx` name from the database).
+# name = "CP_P6Star"
+
+# Default value used when the database does not provide one.
+[com_params.uds.rc_78_timeout.default]
+# nanos = 0
+# secs = 1
+
+# Time period the tester accepts for repeated NRC 0x94 (temporarily not available),
+# and waits for a positive response
+[com_params.uds.rc_94_completion_timeout]
+# Communication parameter identifier (`CP_xxx` name from the database).
+# name = "CP_RC94CompletionTimeout"
+
+# Default value used when the database does not provide one.
+[com_params.uds.rc_94_completion_timeout.default]
+# nanos = 0
+# secs = 25
+
+# Time between a NRC 0x94 (temporarily not available)
+# and the retransmission of the same request
+[com_params.uds.rc_94_repeat_request_time]
+# Communication parameter identifier (`CP_xxx` name from the database).
+# name = "CP_RC94RequestTime"
+
+# Default value used when the database does not provide one.
+[com_params.uds.rc_94_repeat_request_time.default]
+# nanos = 200000000
+# secs = 0
+
+# `RetryPolicy` in case of NRC 0x94 (temporarily not available)
+[com_params.uds.rc_94_retry_policy]
+# Default value used when the database does not provide one.
+# default = "ContinueUntilTimeout"
+# Communication parameter identifier (`CP_xxx` name from the database).
+# name = "CP_RC94Handling"
+
+# Repetition of last request in case of timeout, transmission or receive error
+# Only applies to application layer messages
+[com_params.uds.repeat_req_count_app]
+# Default value used when the database does not provide one.
+# default = 2
+# Communication parameter identifier (`CP_xxx` name from the database).
+# name = "CP_RepeatReqCountApp"
+
+# Addressing mode for sending Tester Present
+# Only relevant in case no function messages are sent
+[com_params.uds.tester_present_addr_mode]
+# Default value used when the database does not provide one.
+# default = "Physical"
+# Communication parameter identifier (`CP_xxx` name from the database).
+# name = "CP_TesterPresentAddrMode"
+
+# Expected negative response (if required)
+# A tester present error should be reported in the log, tester present s
+# ending should be continued
+[com_params.uds.tester_present_exp_neg_resp]
+# Default value used when the database does not provide one.
+# default = [
+#     127,
+#     62,
+# ]
+# Communication parameter identifier (`CP_xxx` name from the database).
+# name = "CP_TesterPresentExpNegResp"
+
+# Expected positive response (if required)
+[com_params.uds.tester_present_exp_pos_resp]
+# Default value used when the database does not provide one.
+# default = [
+#     126,
+#     0,
+# ]
+# Communication parameter identifier (`CP_xxx` name from the database).
+# name = "CP_TesterPresentExpPosResp"
+
+# Message to be sent for tester present
+[com_params.uds.tester_present_message]
+# Default value used when the database does not provide one.
+# default = [
+#     62,
+#     0,
+# ]
+# Communication parameter identifier (`CP_xxx` name from the database).
+# name = "CP_TesterPresentMessage"
+
+# Define expectation for Tester Present responses
+[com_params.uds.tester_present_response_expected]
+# Default value used when the database does not provide one.
+# default = "true"
+# Communication parameter identifier (`CP_xxx` name from the database).
+# name = "CP_TesterPresentReqResp"
+
+# Define Tester Present generation
+[com_params.uds.tester_present_retry_policy]
+# Default value used when the database does not provide one.
+# default = "true"
+# Communication parameter identifier (`CP_xxx` name from the database).
+# name = "CP_TesterPresentHandling"
+
+# Define condition for sending tester present
+# When bus has been idle (Interval defined by `TesterPresentTime`)
+[com_params.uds.tester_present_send_type]
+# Default value used when the database does not provide one.
+# default = "OnIdle"
+# Communication parameter identifier (`CP_xxx` name from the database).
+# name = "CP_TesterPresentSendType"
+
+# Timing interval for tester present messages in us
+[com_params.uds.tester_present_time]
+# Communication parameter identifier (`CP_xxx` name from the database).
+# name = "CP_TesterPresentTime"
+
+# Default value used when the database does not provide one.
+[com_params.uds.tester_present_time.default]
+# nanos = 0
+# secs = 2
+
+# Timeout after sending a successful request, for
+# the complete reception of the response message
+[com_params.uds.timeout_default]
+# Communication parameter identifier (`CP_xxx` name from the database).
+# name = "CP_P6Max"
+
+# Default value used when the database does not provide one.
+[com_params.uds.timeout_default.default]
+# nanos = 0
+# secs = 1
+
+[components.additional_fields.x-sovd2uds-can-ecus.CAN]
+# ignore_case = true
+# values = ["yes"]
+
+[components.additional_fields.x-sovd2uds-lin-ecus.LIN]
+# ignore_case = true
+# values = ["yes"]
+
+# Diagnostic database loading and naming settings.
 [database]
-path = "."
+# If true, the application will exit if no database could be loaded.
+# exit_no_database_loaded = false
+# If true, when variant detection fails to find a matching variant,
+# the ECU will fall back to the base variant instead of reporting an error.
+# fallback_to_base_variant = true
+# When `true`, com-param and protocol lookups ignore the protocol filter
+# and match by parameter name alone.
+#
+# This is useful for databases that contain only a single protocol but
+# where the protocol short-name recorded in the database does not match
+# the one used at runtime. Enabling this flag allows the lookup to succeed
+# by falling back to a protocol-agnostic match.
+#
+# Only valid when the database contains exactly one distinct protocol;
+# attempting a lookup with this flag set against a multi-protocol database
+# returns `DiagServiceError::InvalidDatabase`.
+# ignore_protocol = false
+# Path to load the databases from, this must be a directory.
+# path = "."
 
+# Holds configuration for diagnostic service naming conventions.
+#
+# # Fields
+# - `short_name_affix_position`: Position of affixes in short names (prefix or suffix).
+# - `long_name_affix_position`: Position of affixes in long names (prefix or suffix).
+# - `configuration_service_parameter_semantic_id`: Parameter semantic used to distinguish
+#   between different services in configurations
+# - `functional_class_varcoding`: Functional class name for filtering varcoding services.
+# - `short_name_affixes`: List of lowercase affixes for short names.
+#   **Each affix must match the specified `short_name_affix_position`
+#   (i.e., be a prefix if `Prefix`, or a suffix if `Suffix`).**
+#   Order matters: compound affixes (e.g. `_read_dump`) must come before general ones
+#   (e.g. `_dump`).
+# - `long_name_affixes`: List of lowercase affixes for long names.
+#   **Each affix must match the specified `long_name_affix_position`
+#   (i.e., be a prefix if `Prefix`, or a suffix if `Suffix`).**
+#   Order matters: compound affixes (e.g. ` read dump`) must come before general ones
+#   (e.g. `dump`).
+#  - `service_affixes`: List of affixes that apply only to the given service.
+#    This can be used to remove additional things from a service name during lookup.
+#    All affixes share the same position (prefix or suffix).
+#    Example: The service is named `DTC_Settings_Mode_Off`, but "off" is passed via SOVD.
+#    To match the service configure, `[0x85, (Prefix, ["Dtc_Settings_Mode_"])]`
+#
+# Common affixes (e.g. `read`, `write`) should be placed first for performance, but compound
+# affixes must precede their base forms for correct matching.
+[database.naming_convention]
+# Semantic ID used to identify the distinguishing parameter of a service.
+# configuration_service_parameter_semantic_id = "ID"
+# Functional class name used to filter varcoding services.
+# functional_class_varcoding = "varcoding"
+# Position of affixes in diagnostic service long names.
+# long_name_affix_position = "Suffix"
+# Ordered list of lowercase affixes to strip from long names during service lookup.
+#
+# Compound affixes (e.g. ` read dump`) must come before general ones (e.g. `dump`).
+# long_name_affixes = [
+#     " read",
+#     " write",
+#     " read dump",
+#     " write dump",
+#     " dump",
+#     " read func",
+#     " write func",
+#     " read dump func",
+#     " write dump func",
+#     " dump func",
+#     " control func",
+#     " control",
+# ]
+# Position of affixes in diagnostic service short names.
+# short_name_affix_position = "Suffix"
+# Ordered list of lowercase affixes to strip from short names during service lookup.
+#
+# Compound affixes (e.g. `_read_dump`) must come before general ones (e.g. `_dump`).
+# short_name_affixes = [
+#     "_read",
+#     "_write",
+#     "_read_dump",
+#     "_write_dump",
+#     "_dump",
+#     "_read_func",
+#     "_write_func",
+#     "_read_dump_func",
+#     "_write_dump_func",
+#     "_dump_func",
+#     "_control_func",
+#     "_control",
+# ]
+
+# Per-service-ID affixes for additional name stripping during lookup.
+#
+# The key is the UDS service ID as a string (e.g. "133" for 0x85).
+# Each entry specifies the affix position and a list of affixes.
+[database.naming_convention.service_affixes]
+# 133 = [
+#     "Prefix",
+#     ["DTC_Setting_Mode_"],
+# ]
+# 49 = [
+#     "Suffix",
+#     [
+#     "_start",
+#     "_stop",
+#     "_requestresults",
+#     "_start_func",
+#     "_stop_func",
+#     "_requestresults_func",
+# ],
+# ]
+
+# `DoIP` (Diagnostics over IP) transport layer settings.
 [doip]
-tester_address = "127.0.0.1"
-tester_subnet = "255.255.0.0"
-# Protocol name used for com-param lookups in the diagnostic database (matched case-insensitively).
-# Examples: "UDS_Ethernet_DoIP", "UDS_Ethernet_DoIP_DOBT"
-protocol_name = "UDS_Ethernet_DoIP_DOBT"
+# UDP/TCP port for `DoIP` gateway discovery and communication.
+# gateway_port = 13400
+# The name of the protocol to use.
+# Matched case-insensitive against the database.
+# protocol_name = "UDS_Ethernet_DoIP_DOBT"
+# `DoIP` protocol version byte (e.g. 0x02 for ISO 13400-2:2012).
+# protocol_version = 2
+# Whether to request a diagnostic message positive acknowledgement.
+# send_diagnostic_message_ack = true
+# Timeout in milliseconds for sending `DoIP` messages.
+# send_timeout_ms = 1000
+# IP address of the diagnostic tester interface.
+# tester_address = "10.2.1.240"
+# Subnet mask for the tester network.
+# tester_subnet = "255.255.0.0"
+# TLS port for secure `DoIP` communication.
+# tls_port = 3496
 
+# DTC (Diagnostic Trouble Code) fault memory settings.
+[faults]
+# Default scope name for standard fault memory operations.
+# default_scope = "FaultMem"
+# Service definition used to clear all user-defined DTCs.
+# Specified as a byte array representing the full UDS service identifier.
+#
+# Example: `[0x31, 0x01, 0x02, 0x46]`
+# The first byte is the service ID, followed by any coded constant parameters
+# (subfunction, routine ID, etc.) as they appear sequentially in the UDS request.
+#
+# If not set, clearing user-defined DTCs is not supported.
+# user_defined_dtc_clear_service = [
+#     49,
+#     1,
+#     2,
+#     70,
+# ]
+# Name of the scope to pass to the DTC functions to read from the user defined DTC memory.
+# Matching will be case-insensitive.
+# user_memory_scope = "DevelopmentFaultMemory"
+
+# `FlatBuffers` verification settings for MDD database parsing.
+[flat_buf]
+# Skip null terminator validation in `FlatBuffers` strings.
+# ignore_missing_null_terminator = false
+# Maximum apparent buffer size in bytes for `FlatBuffers` verification.
+# max_apparent_size = 9223372036854775807
+# Maximum nesting depth allowed during `FlatBuffers` verification.
+# max_depth = 64
+# Maximum number of tables allowed during `FlatBuffers` verification.
+# max_tables = 100000000
+# Enable decompression of MDD database files.
+# mdd_decompress = false
+# Enable `FlatBuffers` verification on loaded MDD data.
+# verify = false
+
+# Functional group description and lookup settings.
+[functional_description]
+# Name of the database containing functional group definitions.
+# description_database = "functional_groups"
+# Optional set of functional group names to enable.
+# When absent, all functional groups are enabled.
+# enabled_functional_groups = ["example_group"]
+# Position of the protocol identifier in service names.
+# protocol_position = "Suffix"
+
+# Health check endpoint settings.
+[health]
+# Whether the health check endpoint is active.
+# enabled = true
+
+# Logging, file output, and tracing backend settings.
+[logging]
+# strftime-compatible format string for log timestamps.
+# timestamp_format = "%T%.3f"
+
+# AUTOSAR DLT (Diagnostic Log and Trace) output configuration.
+[logging.dlt_tracing]
+# DLT application description string.
+# app_description = "Bridges SOVD to UDS for ECU communication."
+# DLT application ID, max 4 characters
+# app_id = "CDA"
+# Whether DLT tracing output is enabled.
+# enabled = true
+
+# File-based logging configuration.
+[logging.log_file_config]
+# Whether to append to existing log files instead of rotating.
+# append_enabled = false
+# strftime-compatible date format used in log file entries.
+# date_format = "%F %T%.3f"
+# Whether file logging is enabled.
+# enabled = false
+# Log file name.
+# name = "opensovd-cda.log"
+# Directory path for log files.
+# path = "/var/log/opensovd-cda"
+
+# OpenTelemetry tracing and metrics export configuration.
 [logging.otel]
-enabled = false
+# Whether OpenTelemetry tracing and metrics export is enabled.
+# enabled = false
+# OTLP collector endpoint URL (e.g. `http://localhost:4317`).
+# endpoint = "http://localhost:4317"
+
+# tokio-console runtime tracing configuration.
+[logging.tokio_tracing]
+# Optional file path to record trace data to disk.
+# recording_path = "/tmp/tokio-recording"
+# Socket address for the tokio-console gRPC server (e.g. "127.0.0.1:6669").
+# server = "127.0.0.1:6669"
+
+# How long to retain runtime tracing data.
+[logging.tokio_tracing.retention]
+# nanos = 0
+# secs = 3600
+
+# SOVD HTTP server bind settings.
+[server]
+# IP address the server listens on.
+# address = "0.0.0.0"
+# TCP port the server listens on.
+# port = 20002

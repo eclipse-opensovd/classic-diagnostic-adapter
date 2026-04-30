@@ -16,6 +16,7 @@ use figment::{
 };
 
 pub mod configfile;
+pub mod generate;
 
 /// Loads the configuration, merged with defaults and `CDA`-prefixed env vars.
 ///

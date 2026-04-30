@@ -50,9 +50,11 @@ pub enum SdSdg {
 /// A config value to specify which Strings are to be interpreted
 /// as truthy and which as falsey
 /// `ignore_case` can be set to compare the SD values case-insensitively
-#[derive(Serialize, Clone, Debug)]
+#[derive(Serialize, Clone, Debug, schemars::JsonSchema)]
 pub struct SdMappingsTruthyValue {
+    /// Set of string values considered truthy for this mapping.
     values: HashSet<String>,
+    /// Whether to compare values case-insensitively.
     ignore_case: bool,
 }
 

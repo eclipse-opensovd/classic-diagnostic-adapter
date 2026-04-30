@@ -25,9 +25,12 @@ use serde::{Deserialize, Serialize};
 
 use crate::TracingSetupError;
 
-#[derive(Deserialize, Serialize, Clone, Debug)]
+/// OpenTelemetry exporter configuration.
+#[derive(Deserialize, Serialize, Clone, Debug, schemars::JsonSchema)]
 pub struct OtelConfig {
+    /// Whether OpenTelemetry tracing and metrics export is enabled.
     pub enabled: bool,
+    /// OTLP collector endpoint URL (e.g. `http://localhost:4317`).
     pub endpoint: String,
 }
 

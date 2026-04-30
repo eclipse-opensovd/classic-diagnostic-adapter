@@ -23,25 +23,40 @@ use serde::{Deserialize, Serialize};
 
 use crate::AppError;
 
-#[derive(Deserialize, Serialize, Clone, Debug)]
+/// Top-level application configuration.
+#[derive(Deserialize, Serialize, Clone, Debug, schemars::JsonSchema)]
 pub struct Configuration {
+    /// SOVD HTTP server bind settings.
     pub server: ServerConfig,
+    /// `DoIP` (Diagnostics over IP) transport layer settings.
     pub doip: DoipConfig,
+    /// Diagnostic database loading and naming settings.
     pub database: DatabaseConfig,
+    /// Logging, file output, and tracing backend settings.
     pub logging: cda_tracing::LoggingConfig,
+    /// Path to the directory containing flash files.
     pub flash_files_path: String,
+    /// Default communication parameters for UDS and `DoIP` protocols.
     pub com_params: ComParams,
+    /// `FlatBuffers` verification settings for MDD database parsing.
     pub flat_buf: FlatbBufConfig,
+    /// Functional group description and lookup settings.
     pub functional_description: FunctionalDescriptionConfig,
+    /// Component response customization.
     pub components: ComponentsConfig,
+    /// Health check endpoint settings.
     #[cfg(feature = "health")]
     pub health: cda_health::config::HealthConfig,
+    /// DTC (Diagnostic Trouble Code) fault memory settings.
     pub faults: FaultConfig,
 }
 
-#[derive(Deserialize, Serialize, Clone, Debug)]
+/// SOVD HTTP server bind configuration.
+#[derive(Deserialize, Serialize, Clone, Debug, schemars::JsonSchema)]
 pub struct ServerConfig {
+    /// IP address the server listens on.
     pub address: String,
+    /// TCP port the server listens on.
     pub port: u16,
 }
 
@@ -359,5 +374,21 @@ ignore_case = true
         assert!(power_mapping.contains("mr. fusion"));
 
         Ok(())
+    }
+
+    #[test]
+    fn schemars_captures_doc_comments() {
+        let schema = schemars::schema_for!(DatabaseConfig);
+        let schema_json = serde_json::to_value(&schema).unwrap();
+        let desc = schema_json
+            .get("properties")
+            .and_then(|v| v.get("exit_no_database_loaded"))
+            .and_then(|v| v.get("description"))
+            .and_then(|v| v.as_str())
+            .expect("description should be present");
+        assert!(
+            desc.contains("the application will exit if no database could be loaded"),
+            "Expected doc comment in description, got: {desc}"
+        );
     }
 }

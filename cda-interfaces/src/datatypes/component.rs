@@ -48,7 +48,8 @@ pub struct RoutineSubfunctions {
     pub has_request_results: bool,
 }
 
-#[derive(Deserialize, Serialize, Clone, Debug)]
+/// Configuration for component response customization.
+#[derive(Deserialize, Serialize, Clone, Debug, schemars::JsonSchema)]
 pub struct ComponentsConfig {
     /// Allows to specify additional fields to be added to the component response.
     /// The key corresponds to the name of the field in the response.

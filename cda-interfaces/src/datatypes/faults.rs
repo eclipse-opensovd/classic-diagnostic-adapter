@@ -171,7 +171,8 @@ pub struct DtcExtendedInfo {
     pub snapshots_schema: Option<serde_json::Value>,
 }
 
-#[derive(Deserialize, Serialize, Clone, Debug)]
+/// DTC (Diagnostic Trouble Code) fault memory configuration.
+#[derive(Deserialize, Serialize, Clone, Debug, schemars::JsonSchema)]
 pub struct FaultConfig {
     /// Service definition used to clear all user-defined DTCs.
     /// Specified as a byte array representing the full UDS service identifier.
@@ -185,6 +186,7 @@ pub struct FaultConfig {
     /// Name of the scope to pass to the DTC functions to read from the user defined DTC memory.
     /// Matching will be case-insensitive.
     pub user_memory_scope: String,
+    /// Default scope name for standard fault memory operations.
     pub default_scope: String,
 }
 

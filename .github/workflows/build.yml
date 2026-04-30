@@ -50,6 +50,16 @@ jobs:
         uses: eclipse-opensovd/dlt-tracing-lib/.github/actions/setup-dlt@main
       - name: Build all features
         run: cargo build --locked --verbose --all-features
+      - name: Verify reference config is up to date
+        run: |
+          cargo run --locked --all-features -- generate-config --output /tmp/opensovd-cda.toml
+          if ! diff -u opensovd-cda.toml /tmp/opensovd-cda.toml; then
+            echo ""
+            echo "::error::opensovd-cda.toml is out of date."
+            echo "Regenerate with: cargo run --all-features -- generate-config --output opensovd-cda.toml"
+            exit 1
+          fi
+          echo "opensovd-cda.toml is up to date."
       # note: if openssl and mbedtls are enabled falls back to openssl
       # therefore we build mbedtls separately as well
       - name: Build mbedtls features

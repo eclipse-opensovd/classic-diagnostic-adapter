@@ -16,17 +16,52 @@ use serde::{Deserialize, Deserializer, Serialize, Serializer, de::DeserializeOwn
 
 use crate::{HashMap, datatypes::Unit};
 
-#[derive(Deserialize, Serialize, Clone, Debug, Default)]
+/// Default communication parameters for diagnostic protocols.
+#[derive(Deserialize, Serialize, Clone, Debug, Default, schemars::JsonSchema)]
 pub struct ComParams {
+    /// UDS (Unified Diagnostic Services) communication parameters.
     pub uds: UdsComParams,
+    /// DoIP-specific communication parameters.
     pub doip: DoipComParams,
 }
 
 pub type ComParamName = String;
 
-#[derive(Deserialize, Serialize, Clone, Debug)]
+/// Schema helper for `ComParamConfig<Duration>` fields.
+/// Duration does not implement `JsonSchema`, so we provide a manual schema
+/// that matches the serialized shape of `ComParamConfig<Duration>`.
+fn duration_param_schema(_gen: &mut schemars::SchemaGenerator) -> schemars::Schema {
+    schemars::json_schema!({
+        "type": "object",
+        "properties": {
+            "name": {
+                "type": "string",
+                "description":
+                    "Communication parameter identifier (`CP_xxx` name from the database)."
+            },
+            "default": {
+                "type": "object",
+                "description": "Default value used when the database does not provide one.",
+                "properties": {
+                    "secs": { "type": "integer", "minimum": 0 },
+                    "nanos": { "type": "integer", "minimum": 0, "maximum": 999_999_999 }
+                },
+                "required": ["secs", "nanos"]
+            }
+        },
+        "required": ["name", "default"]
+    })
+}
+
+/// A named communication parameter with a configurable default value.
+///
+/// The database may override these defaults on a per-ECU basis.
+#[derive(Deserialize, Serialize, Clone, Debug, schemars::JsonSchema)]
+#[schemars(bound = "T: schemars::JsonSchema")]
 pub struct ComParamConfig<T: Serialize + Debug> {
+    /// Communication parameter identifier (`CP_xxx` name from the database).
     pub name: ComParamName,
+    /// Default value used when the database does not provide one.
     pub default: T,
 }
 
@@ -116,9 +151,26 @@ impl From<ComParamBool> for bool {
     }
 }
 
+impl schemars::JsonSchema for ComParamBool {
+    fn schema_name() -> std::borrow::Cow<'static, str> {
+        "ComParamBool".into()
+    }
+
+    fn json_schema(_generator: &mut schemars::SchemaGenerator) -> schemars::Schema {
+        serde_json::Map::from_iter([
+            ("type".to_owned(), "string".into()),
+            (
+                "enum".to_owned(),
+                serde_json::Value::Array(vec!["true".into(), "false".into()]),
+            ),
+        ])
+        .into()
+    }
+}
+
 /// Defines the default values for the Communication
 /// parameters which are used in the UDS communication
-#[derive(Deserialize, Serialize, Clone, Debug)]
+#[derive(Deserialize, Serialize, Clone, Debug, schemars::JsonSchema)]
 pub struct UdsComParams {
     // todo use this in #53
     /// Define Tester Present generation
@@ -152,7 +204,8 @@ pub struct UdsComParams {
     /// ending should be continued
     pub tester_present_exp_neg_resp: ComParamConfig<Vec<u8>>,
 
-    /// Timing interval for tester present messages in µs
+    /// Timing interval for tester present messages in us
+    #[schemars(schema_with = "duration_param_schema")]
     pub tester_present_time: ComParamConfig<Duration>,
 
     /// Repetition of last request in case of timeout, transmission or receive error
@@ -163,10 +216,12 @@ pub struct UdsComParams {
     pub rc_21_retry_policy: ComParamConfig<RetryPolicy>,
 
     /// Time period the tester accepts for repeated NRC 0x21 (busy repeat request) and retries,
-    /// while waiting for a positive response in µS
+    /// while waiting for a positive response in uS
+    #[schemars(schema_with = "duration_param_schema")]
     pub rc_21_completion_timeout: ComParamConfig<Duration>,
 
     /// Time between a NRC 0x21 (busy repeat request) and the retransmission of the same request
+    #[schemars(schema_with = "duration_param_schema")]
     pub rc_21_repeat_request_time: ComParamConfig<Duration>,
 
     /// `RetryPolicy` in case of NRC 0x78 (response pending)
@@ -174,10 +229,12 @@ pub struct UdsComParams {
 
     /// Time period the tester accepts for repeated NRC 0x78 (response pending),
     /// and waits for a positive response
+    #[schemars(schema_with = "duration_param_schema")]
     pub rc_78_completion_timeout: ComParamConfig<Duration>,
 
     /// Enhanced timeout after receiving a NRC 0x78 (response pending) to wait for the
     /// complete reception of the response message
+    #[schemars(schema_with = "duration_param_schema")]
     pub rc_78_timeout: ComParamConfig<Duration>,
 
     /// `RetryPolicy` in case of NRC 0x94 (temporarily not available)
@@ -185,19 +242,22 @@ pub struct UdsComParams {
 
     /// Time period the tester accepts for repeated NRC 0x94 (temporarily not available),
     /// and waits for a positive response
+    #[schemars(schema_with = "duration_param_schema")]
     pub rc_94_completion_timeout: ComParamConfig<Duration>,
 
     /// Time between a NRC 0x94 (temporarily not available)
     /// and the retransmission of the same request
+    #[schemars(schema_with = "duration_param_schema")]
     pub rc_94_repeat_request_time: ComParamConfig<Duration>,
 
     /// Timeout after sending a successful request, for
     /// the complete reception of the response message
+    #[schemars(schema_with = "duration_param_schema")]
     pub timeout_default: ComParamConfig<Duration>,
 }
 
 /// Defines the Communication parameters which are used in the `DoIP` communication
-#[derive(Deserialize, Serialize, Clone, Debug)]
+#[derive(Deserialize, Serialize, Clone, Debug, schemars::JsonSchema)]
 pub struct DoipComParams {
     /// Logical address of a `DoIP` entity.
     /// In case of directly reachable `DoIP` entity it's equal to the
@@ -224,13 +284,16 @@ pub struct DoipComParams {
 
     // todo use this n #22
     /// Maximum time the tester waits for an ACK or NACK of the `DoIP` entity
+    #[schemars(schema_with = "duration_param_schema")]
     pub diagnostic_ack_timeout: ComParamConfig<Duration>,
 
     // todo use this n #22
     /// Period between retries, after specific NACK conditions are encountered
+    #[schemars(schema_with = "duration_param_schema")]
     pub retry_period: ComParamConfig<Duration>,
 
     /// Maximum time allowed for the ECUs routing activation
+    #[schemars(schema_with = "duration_param_schema")]
     pub routing_activation_timeout: ComParamConfig<Duration>,
 
     /// Number of retries in case a transmission error,
@@ -238,31 +301,43 @@ pub struct DoipComParams {
     pub repeat_request_count_transmission: ComParamConfig<u32>,
 
     /// Timeout after which a connection attempt should've been successful
+    #[schemars(schema_with = "duration_param_schema")]
     pub connection_timeout: ComParamConfig<Duration>,
 
     /// Delay before attempting to reconnect
+    #[schemars(schema_with = "duration_param_schema")]
     pub connection_retry_delay: ComParamConfig<Duration>,
 
     /// Attempts to retry connection before giving up
     pub connection_retry_attempts: ComParamConfig<u32>,
 }
 
-#[derive(Deserialize, Serialize, Clone, Debug)]
+/// Strategy for retrying after specific negative response codes.
+#[derive(Deserialize, Serialize, Clone, Debug, schemars::JsonSchema)]
 pub enum RetryPolicy {
+    /// No retries; fail immediately on negative response.
     Disabled,
+    /// Retry until the completion timeout expires.
     ContinueUntilTimeout,
+    /// Retry indefinitely until a positive response is received.
     ContinueUnlimited,
 }
 
-#[derive(Deserialize, Serialize, Clone, Debug)]
+/// UDS message addressing mode.
+#[derive(Deserialize, Serialize, Clone, Debug, schemars::JsonSchema)]
 pub enum AddressingMode {
+    /// Physical (point-to-point) addressing targets a single ECU.
     Physical,
+    /// Functional (broadcast) addressing targets all ECUs on the bus.
     Functional,
 }
 
-#[derive(Deserialize, Serialize, Clone, Debug)]
+/// Trigger condition for sending tester present messages.
+#[derive(Deserialize, Serialize, Clone, Debug, schemars::JsonSchema)]
 pub enum TesterPresentSendType {
+    /// Send tester present at fixed periodic intervals.
     FixedPeriod,
+    /// Send tester present only when the bus has been idle.
     OnIdle,
 }
 
@@ -552,5 +627,66 @@ mod tests {
         let value = "Disabled";
         let result: ComParamBool = value.try_into().unwrap();
         assert_eq!(result, ComParamBool::False);
+    }
+
+    /// Regression guard: catches silent serialization drift of `ComParamConfig<Duration>`
+    /// against `duration_param_schema` (e.g. dependency update, new toolchain).
+    #[test]
+    fn comparamconfig_duration_matches_schema() {
+        let cfg = ComParamConfig {
+            name: "CP_P2Max".to_owned(),
+            default: Duration::from_millis(1500),
+        };
+
+        let serialized = serde_json::to_value(&cfg).expect("serialization must not fail");
+
+        let mut schema_gen = schemars::SchemaGenerator::default();
+        let schema = serde_json::to_value(duration_param_schema(&mut schema_gen))
+            .expect("schema must serialize");
+
+        let required = schema
+            .get("required")
+            .and_then(|v| v.as_array())
+            .expect("schema defines required");
+        for field in required {
+            let key = field.as_str().unwrap();
+            assert!(
+                serialized.get(key).is_some(),
+                "required field '{key}' missing from serialized output"
+            );
+        }
+
+        let name_value = serialized.get("name").expect("'name' field must exist");
+        assert!(
+            name_value.is_string(),
+            "expected 'name' to serialize as string, got: {name_value}",
+        );
+
+        let default_obj = serialized
+            .get("default")
+            .and_then(|v| v.as_object())
+            .expect("expected 'default' to serialize as object");
+
+        let default_schema = schema
+            .get("properties")
+            .and_then(|v| v.get("default"))
+            .expect("schema defines properties.default");
+        let default_required = default_schema
+            .get("required")
+            .and_then(|v| v.as_array())
+            .expect("schema defines required fields for default");
+        for field in default_required {
+            let key = field.as_str().unwrap();
+            assert!(
+                default_obj.contains_key(key),
+                "required field 'default.{key}' missing from serialized output"
+            );
+        }
+
+        let secs = default_obj["secs"].as_u64().expect("secs must be a u64");
+        let nanos = default_obj["nanos"].as_u64().expect("nanos must be a u64");
+        assert_eq!(secs, 1, "1500ms = 1s remainder");
+        assert_eq!(nanos, 500_000_000, "1500ms remainder = 500_000_000ns");
+        assert!(nanos <= 999_999_999, "nanos exceeds schema maximum");
     }
 }

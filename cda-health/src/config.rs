@@ -12,8 +12,10 @@
 
 use serde::{Deserialize, Serialize};
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
+/// Health check endpoint configuration.
+#[derive(Clone, Debug, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct HealthConfig {
+    /// Whether the health check endpoint is active.
     pub enabled: bool,
 }
 

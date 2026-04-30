@@ -45,6 +45,7 @@ tracing = { workspace = true }
 # serde
 serde = { workspace = true, features = ["derive"] }
 serde_json = { workspace = true }
+schemars = { workspace = true }
 
 [build-dependencies]
 cda-build = { workspace = true }

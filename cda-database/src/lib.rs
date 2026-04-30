@@ -22,8 +22,9 @@ pub use mdd_data::{
 };
 use serde::{Deserialize, Serialize};
 
-#[derive(Deserialize, Serialize, Clone, Debug, Default)]
+#[derive(Deserialize, Serialize, Clone, Debug, Default, schemars::JsonSchema)]
 pub struct DatabaseConfig {
+    /// Path to load the databases from, this must be a directory.
     pub path: String,
     pub naming_convention: DatabaseNamingConvention,
     /// If true, the application will exit if no database could be loaded.
