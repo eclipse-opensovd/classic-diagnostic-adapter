@@ -35,6 +35,17 @@ It handles the communication to the ECUs, by using the communication parameters 
 
 ### usage
 
+1. Obtain one or more `.mdd` files (see prerequisites below).
+2. Start the CDA, pointing it at your databases directory and DoIP interface:
+   ```shell
+   cargo run --release -- --databases-path ./databases --tester-address <YOUR_IP>
+   ```
+3. Wait a few seconds for DoIP discovery, then confirm the CDA found your ECUs:
+   ```shell
+   curl http://localhost:20002/vehicle/v15/components | jq
+   ```
+4. Browse the full API interactively at **http://localhost:20002/swagger-ui**.
+
 ### prerequisites
 
 To run the CDA you will need at least one `MDD` file. Check out [eclipse-opensovd/odx-converter](https://github.com/eclipse-opensovd/odx-converter) on how to get started with creating `MDD`(s) from ODX.
@@ -50,6 +61,20 @@ Ensure that the config (`opensovd-cda.toml`) fits your setup:
 Run the cda via `cargo run --release` or after building from the target directory `./opensovd-cda`
 
 To see the available command line options run `./opensovd-cda -h`
+
+#### protocol selection
+
+Use `--protocol-name` to select the DoIP protocol variant used for com-param lookups in the diagnostic database (matched case-insensitively):
+
+| Flag | Protocol | When to use |
+|------|----------|-------------|
+| `--protocol-name UDS_Ethernet_DoIP_DOBT` *(default)* | DoIP-DOBT | CDA runs inside the vehicle (e.g. on a gateway ECU) |
+| `--protocol-name UDS_Ethernet_DoIP` | DoIP | CDA runs outside the vehicle (laptop, test bench) |
+
+```shell
+# Offboard
+cargo run --release -- --databases-path ./databases --tester-address <YOUR_IP> --protocol-name UDS_Ethernet_DoIP
+```
 
 ## building
 
