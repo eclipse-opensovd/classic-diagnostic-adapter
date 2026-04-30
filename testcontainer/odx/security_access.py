@@ -112,7 +112,7 @@ def add_request_seed_service(
         short_name=f"PR_RequestSeed_Level_{level}",
         parameters=NamedItemList(
             [
-                sid_parameter_rq(0x27 + 0x40),
+                sid_parameter_pr(0x27 + 0x40),
                 matching_request_parameter_subfunction("SecurityAccessType"),
                 ValueParameter(
                     short_name="SecuritySeed",

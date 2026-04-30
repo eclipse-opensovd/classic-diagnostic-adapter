@@ -343,8 +343,8 @@ def negative_response(
     short_name: str,
 ) -> Response:
     nrc_dop = DataObjectProperty(
-        odx_id=derived_id(dlr, "DOP.NRC_{short_name}"),
-        short_name="NRC_{short_name}",
+        odx_id=derived_id(dlr, f"DOP.NRC_{short_name}"),
+        short_name=f"NRC_{short_name}",
         compu_method=CompuMethod(
             category=CompuCategory.IDENTICAL,
             physical_type=DataType.A_BYTEFIELD,

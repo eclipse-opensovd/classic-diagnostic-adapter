@@ -135,7 +135,8 @@ paths:
     parameters:
       - $ref: "common.yaml#/components/parameters/EcuName"
       - name: id
-        in: query
+        in: path
+        required: true
         schema:
           type: string
     get:

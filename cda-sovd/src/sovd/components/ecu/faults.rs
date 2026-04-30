@@ -314,9 +314,9 @@ pub(crate) mod id {
                             .collect::<serde_json::Map<_, _>>(),
                     );
                     remove_descriptions_recursive(&mut schema);
-                    match crate::sovd::value_to_schema(schema) {
-                        Ok(s) => Some(s),
-                        Err(e) => return Err(e),
+                    {
+                        let s = crate::sovd::value_to_schema(schema)?;
+                        Some(s)
                     }
                 } else {
                     None

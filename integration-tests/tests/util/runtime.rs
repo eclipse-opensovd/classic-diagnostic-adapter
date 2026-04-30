@@ -681,7 +681,7 @@ fn test_container_dir() -> Result<std::path::PathBuf, TestingError> {
             path
         })
         .ok()
-        .and_then(|path| if path.exists() { Some(path) } else { None })
+        .filter(|path| path.exists())
         .ok_or_else(|| TestingError::PathNotFound("testcontainer directory not found".to_owned()))
 }
 

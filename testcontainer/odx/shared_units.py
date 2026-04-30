@@ -786,7 +786,7 @@ def add_common_units(dlr: DiagLayerRaw):
                 odx_id=derived_id(dlr, "UNIT.MilliLiter"),
                 short_name="MilliLiter",
                 display_name="ml",
-                factor_si_to_unit=1000000,
+                factor_si_to_unit=1e-6,
                 offset_si_to_unit=0,
                 physical_dimension_ref=pdim_ref(pdim_volume),
             ),

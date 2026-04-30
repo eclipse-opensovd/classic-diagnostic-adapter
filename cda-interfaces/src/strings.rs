@@ -95,6 +95,9 @@ impl Strings {
             return *id;
         }
         let mut strings = self.strings.write();
+        if let Some(id) = self.lookup.read().get(value) {
+            return *id;
+        }
         strings.push(value.to_owned());
         let id = strings.len().saturating_sub(1);
         let str_id: StringId = id.into();

@@ -70,7 +70,7 @@ fn get_flatbuffers_info() -> std::io::Result<(String, String)> {
             path
         })
         .ok()
-        .and_then(|path| if path.exists() { Some(path) } else { None })
+        .filter(|path| path.exists())
         .ok_or_else(|| {
             std::io::Error::new(
                 std::io::ErrorKind::NotFound,
