@@ -12,13 +12,20 @@
 
 use serde::{Deserialize, Serialize};
 
-#[derive(Deserialize, Serialize, Clone, Debug)]
+/// `FlatBuffers` verification settings for MDD database parsing.
+#[derive(Deserialize, Serialize, Clone, Debug, schemars::JsonSchema)]
 pub struct FlatbBufConfig {
+    /// Enable `FlatBuffers` verification on loaded MDD data.
     pub verify: bool,
+    /// Maximum nesting depth allowed during `FlatBuffers` verification.
     pub max_depth: usize,
+    /// Maximum number of tables allowed during `FlatBuffers` verification.
     pub max_tables: usize,
+    /// Maximum apparent buffer size in bytes for `FlatBuffers` verification.
     pub max_apparent_size: usize,
+    /// Skip null terminator validation in `FlatBuffers` strings.
     pub ignore_missing_null_terminator: bool,
+    /// Enable decompression of MDD database files.
     pub mdd_decompress: bool,
 }
 

@@ -37,40 +37,59 @@ pub enum TracingSetupError {
     SubscriberInitializationFailed(String),
 }
 
-#[derive(Deserialize, Serialize, Clone, Debug)]
+/// Top-level logging and tracing configuration.
+#[derive(Deserialize, Serialize, Clone, Debug, schemars::JsonSchema)]
 pub struct LoggingConfig {
+    /// strftime-compatible format string for log timestamps.
     pub timestamp_format: String,
+    /// File-based logging configuration.
     pub log_file_config: LogFileConfig,
+    /// OpenTelemetry tracing and metrics export configuration.
     pub otel: OtelConfig,
+    /// tokio-console runtime tracing configuration.
     #[cfg(feature = "tokio-tracing")]
     pub tokio_tracing: TokioTracingConfig,
+    /// AUTOSAR DLT (Diagnostic Log and Trace) output configuration.
     #[cfg(feature = "dlt-tracing")]
     pub dlt_tracing: DltTracingConfig,
 }
 
-#[derive(Deserialize, Serialize, Clone, Debug)]
+/// Configuration for file-based log output.
+#[derive(Deserialize, Serialize, Clone, Debug, schemars::JsonSchema)]
 pub struct LogFileConfig {
+    /// Whether file logging is enabled.
     pub enabled: bool,
+    /// Log file name.
     pub name: String,
+    /// Directory path for log files.
     pub path: String,
+    /// strftime-compatible date format used in log file entries.
     pub date_format: String,
+    /// Whether to append to existing log files instead of rotating.
     pub append_enabled: bool,
 }
 
+/// tokio-console runtime debugging configuration.
 #[cfg(feature = "tokio-tracing")]
-#[derive(Deserialize, Serialize, Clone, Debug)]
+#[derive(Deserialize, Serialize, Clone, Debug, schemars::JsonSchema)]
 pub struct TokioTracingConfig {
+    /// How long to retain runtime tracing data.
     pub retention: std::time::Duration,
+    /// Socket address for the tokio-console gRPC server (e.g. "127.0.0.1:6669").
     pub server: String,
+    /// Optional file path to record trace data to disk.
     pub recording_path: Option<String>,
 }
 
+/// AUTOSAR DLT (Diagnostic Log and Trace) output configuration.
 #[cfg(feature = "dlt-tracing")]
-#[derive(Deserialize, Serialize, Clone, Debug)]
+#[derive(Deserialize, Serialize, Clone, Debug, schemars::JsonSchema)]
 pub struct DltTracingConfig {
     /// DLT application ID, max 4 characters
     pub app_id: String,
+    /// DLT application description string.
     pub app_description: String,
+    /// Whether DLT tracing output is enabled.
     pub enabled: bool,
 }
 

@@ -40,14 +40,28 @@ use crate::{HashMap, service_ids, util::serde_ext};
 /// Common affixes (e.g. `read`, `write`) should be placed first for performance, but compound
 /// affixes must precede their base forms for correct matching.
 ///
-#[derive(Deserialize, Serialize, Clone, Debug)]
+#[derive(Deserialize, Serialize, Clone, Debug, schemars::JsonSchema)]
 pub struct DatabaseNamingConvention {
+    /// Position of affixes in diagnostic service short names.
     pub short_name_affix_position: DiagnosticServiceAffixPosition,
+    /// Position of affixes in diagnostic service long names.
     pub long_name_affix_position: DiagnosticServiceAffixPosition,
+    /// Semantic ID used to identify the distinguishing parameter of a service.
     pub configuration_service_parameter_semantic_id: String,
+    /// Functional class name used to filter varcoding services.
     pub functional_class_varcoding: String,
+    /// Ordered list of lowercase affixes to strip from short names during service lookup.
+    ///
+    /// Compound affixes (e.g. `_read_dump`) must come before general ones (e.g. `_dump`).
     pub short_name_affixes: Vec<String>,
+    /// Ordered list of lowercase affixes to strip from long names during service lookup.
+    ///
+    /// Compound affixes (e.g. ` read dump`) must come before general ones (e.g. `dump`).
     pub long_name_affixes: Vec<String>,
+    /// Per-service-ID affixes for additional name stripping during lookup.
+    ///
+    /// The key is the UDS service ID as a string (e.g. "133" for 0x85).
+    /// Each entry specifies the affix position and a list of affixes.
     // technically key should be u8, but it's not supported for toml parse / figment.
     // it will be validated in the validate sanity function
     #[serde(deserialize_with = "serde_ext::normalized_u8_key_map::deserialize")]
@@ -190,9 +204,12 @@ impl Default for DatabaseNamingConvention {
     }
 }
 
-#[derive(Deserialize, Serialize, PartialEq, Clone, Debug)]
+/// Position of a naming affix relative to the diagnostic service name.
+#[derive(Deserialize, Serialize, PartialEq, Clone, Debug, schemars::JsonSchema)]
 pub enum DiagnosticServiceAffixPosition {
+    /// Affix appears before the service name.
     Prefix,
+    /// Affix appears after the service name.
     Suffix,
 }
 

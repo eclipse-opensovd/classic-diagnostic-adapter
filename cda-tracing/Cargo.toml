@@ -24,6 +24,7 @@ workspace = true
 path = "src/lib.rs"
 
 [dependencies]
+schemars = { workspace = true }
 serde = { workspace = true, features = ["derive"] }
 tokio = { workspace = true }
 thiserror = { workspace = true }
