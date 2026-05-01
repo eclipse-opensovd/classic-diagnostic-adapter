@@ -137,7 +137,6 @@ async fn initialize_runtime() -> Result<TestRuntime, TestingError> {
             ignore_protocol: false,
         },
         logging: LoggingConfig::default(),
-        onboard_tester: true,
         flash_files_path: flash_files_path()?,
         com_params: ComParams::default(),
         flat_buf: FlatbBufConfig::default(),

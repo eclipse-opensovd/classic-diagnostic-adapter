@@ -145,30 +145,24 @@ pub struct EcuVariant {
 }
 
 #[derive(Debug, Clone)]
-pub enum Protocol {
-    DoIp(String),
-    DoIpDobt(String),
-    // todo: other protocols
-}
+pub struct Protocol(String);
 
 impl Protocol {
     #[must_use]
-    pub fn default_doip() -> Self {
-        Self::DoIp("UDS_Ethernet_DoIP".to_owned())
+    pub fn new(name: impl Into<String>) -> Self {
+        Self(name.into())
     }
+}
 
-    #[must_use]
-    pub fn default_doip_dobt() -> Self {
-        Self::DoIpDobt("UDS_Ethernet_DoIP_DOBT".to_owned())
+impl Default for Protocol {
+    fn default() -> Self {
+        Self("UDS_Ethernet_DoIP_DOBT".to_owned())
     }
 }
 
 impl std::fmt::Display for Protocol {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        let value = match self {
-            Self::DoIp(name) | Self::DoIpDobt(name) => name,
-        };
-        f.write_str(value)
+        f.write_str(&self.0)
     }
 }
 

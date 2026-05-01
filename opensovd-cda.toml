@@ -14,10 +14,9 @@ path = "."
 [doip]
 tester_address = "127.0.0.1"
 tester_subnet = "255.255.0.0"
-# Protocol name used for DoIP com-param lookups in the diagnostic database (matched case-insensitively).
-doip_protocol_name = "UDS_Ethernet_DoIP"
-# Protocol name used for DoIP-DOBT com-param lookups in the diagnostic database (matched case-insensitively).
-doip_dobt_protocol_name = "UDS_Ethernet_DoIP_DOBT"
+# Protocol name used for com-param lookups in the diagnostic database (matched case-insensitively).
+# Examples: "UDS_Ethernet_DoIP", "UDS_Ethernet_DoIP_DOBT"
+protocol_name = "UDS_Ethernet_DoIP_DOBT"
 
 [logging.otel]
 enabled = false

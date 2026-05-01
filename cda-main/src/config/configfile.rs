@@ -29,7 +29,6 @@ pub struct Configuration {
     pub doip: DoipConfig,
     pub database: DatabaseConfig,
     pub logging: cda_tracing::LoggingConfig,
-    pub onboard_tester: bool,
     pub flash_files_path: String,
     pub com_params: ComParams,
     pub flat_buf: FlatbBufConfig,
@@ -56,7 +55,6 @@ pub trait ConfigSanity {
 impl Default for Configuration {
     fn default() -> Self {
         Configuration {
-            onboard_tester: true,
             database: DatabaseConfig {
                 path: ".".to_owned(),
                 naming_convention: DatabaseNamingConvention::default(),
@@ -186,7 +184,6 @@ mod tests {
     async fn load_config_toml() -> Result<(), Box<dyn std::error::Error>> {
         let config_str = r#"
 flash_files_path = "/app/flash"
-onboard_tester = true
 
 [database]
 path = "/app/database"

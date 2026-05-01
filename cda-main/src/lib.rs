@@ -245,11 +245,7 @@ pub async fn load_databases<S: SecurityPlugin>(
     let func_description_cfg = config.functional_description.clone();
     let fallback_to_base_variant = config.database.fallback_to_base_variant;
     let database_config = config.database.clone();
-    let protocol = if config.onboard_tester {
-        cda_interfaces::Protocol::DoIpDobt(config.doip.doip_dobt_protocol_name.clone())
-    } else {
-        cda_interfaces::Protocol::DoIp(config.doip.doip_protocol_name.clone())
-    };
+    let protocol = cda_interfaces::Protocol::new(config.doip.protocol_name.clone());
     let com_params = config.com_params.clone();
 
     let db_health_provider = setup_db_health_provider(health).await;

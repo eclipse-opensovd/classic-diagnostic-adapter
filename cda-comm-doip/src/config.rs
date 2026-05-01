@@ -22,8 +22,7 @@ pub struct DoipConfig {
     pub tls_port: u16,
     pub send_timeout_ms: u64,
     pub send_diagnostic_message_ack: bool,
-    pub doip_protocol_name: String,
-    pub doip_dobt_protocol_name: String,
+    pub protocol_name: String,
 }
 
 impl Default for DoipConfig {
@@ -36,8 +35,7 @@ impl Default for DoipConfig {
             tls_port: 3496,
             send_timeout_ms: 1000,
             send_diagnostic_message_ack: true,
-            doip_protocol_name: Protocol::default_doip().to_string(),
-            doip_dobt_protocol_name: Protocol::default_doip_dobt().to_string(),
+            protocol_name: Protocol::default().to_string(),
         }
     }
 }
