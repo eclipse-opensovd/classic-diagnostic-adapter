@@ -191,7 +191,11 @@ impl<T: EcuAddressProvider + DoipComParamProvider> DoipDiagGateway<T> {
 
         tracing::info!("Initializing DoipDiagGateway");
 
-        let mut socket = create_socket(tester_ip, gateway_port)?;
+        let mut socket = create_socket(
+            tester_ip,
+            gateway_port,
+            doip_connection_config.protocol_version,
+        )?;
         let mask = create_netmask(tester_ip, tester_subnet)?;
 
         let gateways = vir_vam::get_vehicle_identification::<T, F>(
@@ -770,6 +774,7 @@ fn create_netmask(tester_ip: &str, tester_subnet: &str) -> Result<u32, DoipGatew
 fn create_socket(
     tester_ip: &str,
     gateway_port: u16,
+    protocol_version: ProtocolVersion,
 ) -> Result<DoIPUdpSocket, DoipGatewaySetupError> {
     let tester_ip = match tester_ip {
         "127.0.0.1" => "0.0.0.0",
@@ -822,7 +827,7 @@ fn create_socket(
     })?;
 
     let std_sock: std::net::UdpSocket = socket.into();
-    DoIPUdpSocket::new(std_sock).map_err(|e| {
+    DoIPUdpSocket::new(std_sock, protocol_version).map_err(|e| {
         DoipGatewaySetupError::SocketCreationFailed(format!(
             "DoipGateway: Failed to create DoIP socket from std socket: {e:?}"
         ))

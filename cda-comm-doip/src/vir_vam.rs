@@ -261,7 +261,11 @@ pub(crate) async fn listen_for_vams<T, F>(
             let broadcast_socket = if connection_config.source_ip == broadcast_ip {
                 Arc::clone(&gateway.socket)
             } else {
-                match crate::create_socket(broadcast_ip, gateway_port) {
+                match crate::create_socket(
+                    broadcast_ip,
+                    gateway_port,
+                    doip_connection_config.protocol_version,
+                ) {
                     Ok(sock) => Arc::new(Mutex::new(sock)),
                     Err(e) => {
                         tracing::warn!(
