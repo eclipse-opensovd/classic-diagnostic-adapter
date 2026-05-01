@@ -172,6 +172,7 @@ impl<T: EcuAddressProvider + DoipComParamProvider> DoipDiagGateway<T> {
             tls_port,
             send_timeout_ms,
             send_diagnostic_message_ack,
+            ..
         } = doip_config;
         let gateway_port = *gateway_port;
         let connection_config = ConnectionConfig {

@@ -102,8 +102,6 @@ pub struct EcuManager<S: SecurityPlugin> {
     protocol: Protocol,
     // functional group: protocol prefixed or postfixed
     fg_protocol_position: DiagnosticServiceAffixPosition,
-    // functional group: is protocol case sensitive
-    fg_protocol_case_sensitive: bool,
     ecu_service_states: Arc<RwLock<HashMap<u8, String>>>,
 
     tester_present_retry_policy: bool,
@@ -188,7 +186,7 @@ impl<S: SecurityPlugin> cda_interfaces::EcuManager for EcuManager<S> {
     }
 
     fn protocol(&self) -> Protocol {
-        self.protocol
+        self.protocol.clone()
     }
 
     fn is_loaded(&self) -> bool {
@@ -309,8 +307,9 @@ impl<S: SecurityPlugin> cda_interfaces::EcuManager for EcuManager<S> {
             .filter(|cp_ref| {
                 cp_ref.protocol().is_some_and(|p| {
                     p.diag_layer().is_some_and(|dl| {
-                        dl.short_name()
-                            .is_some_and(|name| name == self.protocol.value())
+                        dl.short_name().is_some_and(|name| {
+                            name.eq_ignore_ascii_case(&self.protocol.to_string())
+                        })
                     })
                 })
             })
@@ -1493,21 +1492,13 @@ impl<S: SecurityPlugin> cda_interfaces::EcuManager for EcuManager<S> {
                     .diag_layer()
                     .and_then(|dl| dl.short_name())
                     .and_then(|name| {
-                        let protocol_value = self.protocol.value();
+                        let protocol_value = &self.protocol.to_string();
                         let matches = match self.fg_protocol_position {
                             DiagnosticServiceAffixPosition::Prefix => {
-                                if self.fg_protocol_case_sensitive {
-                                    name.starts_with(protocol_value)
-                                } else {
-                                    util::starts_with_ignore_ascii_case(name, protocol_value)
-                                }
+                                util::starts_with_ignore_ascii_case(name, protocol_value)
                             }
                             DiagnosticServiceAffixPosition::Suffix => {
-                                if self.fg_protocol_case_sensitive {
-                                    name.ends_with(protocol_value)
-                                } else {
-                                    util::ends_with_ignore_ascii_case(name, protocol_value)
-                                }
+                                util::ends_with_ignore_ascii_case(name, protocol_value)
                             }
                         };
                         if matches {
@@ -2037,7 +2028,7 @@ impl<S: SecurityPlugin> EcuManager<S> {
         let variant_detection =
             variant_detection::prepare_variant_detection(&database, &database_naming_convention)?;
 
-        let data_protocol = into_db_protocol(&database, protocol)?;
+        let data_protocol = into_db_protocol(&database, &protocol)?;
 
         let logical_gateway_address = match database.find_logical_address(
             datatypes::LogicalAddressType::Gateway(
@@ -2133,7 +2124,6 @@ impl<S: SecurityPlugin> EcuManager<S> {
             duplicating_ecu_names: None,
             protocol,
             fg_protocol_position: func_description_config.protocol_position.clone(),
-            fg_protocol_case_sensitive: func_description_config.protocol_case_sensitive,
             ecu_service_states: Arc::new(RwLock::default()),
             tester_present_retry_policy: database
                 .find_com_param(&data_protocol, &com_params.uds.tester_present_retry_policy)
@@ -2243,7 +2233,6 @@ impl<S: SecurityPlugin> EcuManager<S> {
             duplicating_ecu_names: None,
             protocol,
             fg_protocol_position: func_description_config.protocol_position.clone(),
-            fg_protocol_case_sensitive: func_description_config.protocol_case_sensitive,
             ecu_service_states: Arc::new(RwLock::default()),
             tester_present_retry_policy: com_params
                 .uds
@@ -5447,7 +5436,7 @@ mod tests {
     ) -> super::EcuManager<DefaultSecurityPluginData> {
         let mut manager = super::EcuManager::new(
             db,
-            Protocol::DoIp,
+            Protocol::default_doip(),
             &ComParams::default(),
             DatabaseNamingConvention::default(),
             EcuManagerType::Ecu,
@@ -5456,7 +5445,6 @@ mod tests {
                 enabled_functional_groups: None,
                 protocol_position:
                     cda_interfaces::datatypes::DiagnosticServiceAffixPosition::Suffix,
-                protocol_case_sensitive: false,
             },
             true,
         )
@@ -5480,7 +5468,7 @@ mod tests {
     ) -> super::EcuManager<DefaultSecurityPluginData> {
         super::EcuManager::new(
             db,
-            Protocol::DoIp,
+            Protocol::default_doip(),
             &ComParams::default(),
             DatabaseNamingConvention::default(),
             EcuManagerType::Ecu,
@@ -5489,7 +5477,6 @@ mod tests {
                 enabled_functional_groups: None,
                 protocol_position:
                     cda_interfaces::datatypes::DiagnosticServiceAffixPosition::Suffix,
-                protocol_case_sensitive: false,
             },
             false,
         )
@@ -5502,7 +5489,8 @@ mod tests {
     fn create_ecu_manager_with_mixed_functional_group()
     -> super::EcuManager<DefaultSecurityPluginData> {
         let mut db_builder = EcuDataBuilder::new();
-        let protocol = db_builder.create_protocol(Protocol::DoIp.value(), None, None, None);
+        let protocol_name = Protocol::default_doip().to_string();
+        let protocol = db_builder.create_protocol(&protocol_name, None, None, None);
 
         // Create a READ_DATA_BY_IDENTIFIER service
         let read_diag_comm = db_builder.create_diag_comm(DiagCommParams {
@@ -5560,7 +5548,8 @@ mod tests {
         let mut db_builder = EcuDataBuilder::new();
         let u8_diag_type = db_builder.create_diag_coded_type_standard_length(8, DataType::UInt32);
         let u16_diag_type = db_builder.create_diag_coded_type_standard_length(16, DataType::UInt32);
-        let protocol = db_builder.create_protocol(Protocol::DoIp.value(), None, None, None);
+        let protocol_name = Protocol::default_doip().to_string();
+        let protocol = db_builder.create_protocol(&protocol_name, None, None, None);
         let compu_identical =
             db_builder.create_compu_method(datatypes::CompuCategory::Identical, None, None);
 
@@ -5678,7 +5667,8 @@ mod tests {
     fn create_ecu_manager_with_parameter_metadata() -> super::EcuManager<DefaultSecurityPluginData>
     {
         let mut db_builder = EcuDataBuilder::new();
-        let protocol = db_builder.create_protocol(Protocol::DoIp.value(), None, None, None);
+        let protocol_name = Protocol::default_doip().to_string();
+        let protocol = db_builder.create_protocol(&protocol_name, None, None, None);
         let compu_identical =
             db_builder.create_compu_method(datatypes::CompuCategory::Identical, None, None);
         let u16_diag_type = db_builder.create_diag_coded_type_standard_length(16, DataType::UInt32);
@@ -5744,7 +5734,8 @@ mod tests {
         u32,
     ) {
         let mut db_builder = EcuDataBuilder::new();
-        let protocol = db_builder.create_protocol(Protocol::DoIp.value(), None, None, None);
+        let protocol_name = Protocol::default_doip().to_string();
+        let protocol = db_builder.create_protocol(&protocol_name, None, None, None);
         let compu_identical =
             db_builder.create_compu_method(datatypes::CompuCategory::Identical, None, None);
 
@@ -5892,7 +5883,8 @@ mod tests {
             db_builder.create_diag_coded_type_standard_length(32, DataType::Float32);
         let ascii_diag_type =
             db_builder.create_diag_coded_type_standard_length(32, DataType::AsciiString);
-        let protocol = db_builder.create_protocol(Protocol::DoIp.value(), None, None, None);
+        let protocol_name = Protocol::default_doip().to_string();
+        let protocol = db_builder.create_protocol(&protocol_name, None, None, None);
         let compu_identical =
             db_builder.create_compu_method(datatypes::CompuCategory::Identical, None, None);
 
@@ -6064,7 +6056,8 @@ mod tests {
         let mut db_builder = EcuDataBuilder::new();
         let u8_diag_type = db_builder.create_diag_coded_type_standard_length(8, DataType::UInt32);
         let u16_diag_type = db_builder.create_diag_coded_type_standard_length(16, DataType::UInt32);
-        let protocol = db_builder.create_protocol(Protocol::DoIp.value(), None, None, None);
+        let protocol_name = Protocol::default_doip().to_string();
+        let protocol = db_builder.create_protocol(&protocol_name, None, None, None);
         let compu_identical =
             db_builder.create_compu_method(datatypes::CompuCategory::Identical, None, None);
 
@@ -6165,7 +6158,8 @@ mod tests {
     ) {
         let mut db_builder = EcuDataBuilder::new();
         let u32_diag_type = db_builder.create_diag_coded_type_standard_length(32, DataType::UInt32);
-        let protocol = db_builder.create_protocol(Protocol::DoIp.value(), None, None, None);
+        let protocol_name = Protocol::default_doip().to_string();
+        let protocol = db_builder.create_protocol(&protocol_name, None, None, None);
         let compu_identical =
             db_builder.create_compu_method(datatypes::CompuCategory::Identical, None, None);
 
@@ -6220,7 +6214,8 @@ mod tests {
         fallback_to_base: bool,
     ) -> super::EcuManager<DefaultSecurityPluginData> {
         let mut db_builder = EcuDataBuilder::new();
-        let protocol = db_builder.create_protocol(Protocol::DoIp.value(), None, None, None);
+        let protocol_name = Protocol::default_doip().to_string();
+        let protocol = db_builder.create_protocol(&protocol_name, None, None, None);
         let cp_ref = db_builder.create_com_param_ref(None, None, None, Some(protocol), None);
 
         let u8_diag_type = db_builder.create_diag_coded_type_standard_length(8, DataType::UInt32);
@@ -6438,7 +6433,8 @@ mod tests {
 
         let sid = service_ids::READ_DATA_BY_IDENTIFIER + cda_interfaces::UDS_ID_RESPONSE_BITMASK;
         let dc_name = "TestPhysConstNormalService";
-        let protocol = db_builder.create_protocol(Protocol::DoIp.value(), None, None, None);
+        let protocol_name = Protocol::default_doip().to_string();
+        let protocol = db_builder.create_protocol(&protocol_name, None, None, None);
         let diag_comm = new_diag_comm!(db_builder, dc_name, protocol);
 
         // Request: SID (coded const) + DID (phys const)
@@ -6576,7 +6572,8 @@ mod tests {
             db_builder.create_structure_dop("structure_dop", structure)
         };
 
-        let protocol = db_builder.create_protocol(Protocol::DoIp.value(), None, None, None);
+        let protocol_name = Protocol::default_doip().to_string();
+        let protocol = db_builder.create_protocol(&protocol_name, None, None, None);
         let sid_request = service_ids::WRITE_DATA_BY_IDENTIFIER;
         let sid_response =
             service_ids::WRITE_DATA_BY_IDENTIFIER + cda_interfaces::UDS_ID_RESPONSE_BITMASK;
@@ -6646,7 +6643,8 @@ mod tests {
         cda_interfaces::DiagComm,
     ) {
         let mut db_builder = EcuDataBuilder::new();
-        let protocol = db_builder.create_protocol(Protocol::DoIp.value(), None, None, None);
+        let protocol_name = Protocol::default_doip().to_string();
+        let protocol = db_builder.create_protocol(&protocol_name, None, None, None);
         let cp_ref = db_builder.create_com_param_ref(None, None, None, Some(protocol), None);
 
         // Create security states
@@ -6776,7 +6774,8 @@ mod tests {
         u8,
     ) {
         let mut db_builder = EcuDataBuilder::new();
-        let protocol = db_builder.create_protocol(Protocol::DoIp.value(), None, None, None);
+        let protocol_name = Protocol::default_doip().to_string();
+        let protocol = db_builder.create_protocol(&protocol_name, None, None, None);
         let cp_ref = db_builder.create_com_param_ref(None, None, None, Some(protocol), None);
 
         let locked_state = db_builder.create_state("LockedSecurity", None);
@@ -6895,7 +6894,8 @@ mod tests {
     fn create_ecu_manager_with_length_key_request_service()
     -> (super::EcuManager<DefaultSecurityPluginData>, DiagComm, u8) {
         let mut db_builder = EcuDataBuilder::new();
-        let protocol = db_builder.create_protocol(Protocol::DoIp.value(), None, None, None);
+        let protocol_name = Protocol::default_doip().to_string();
+        let protocol = db_builder.create_protocol(&protocol_name, None, None, None);
         let compu_identical = db_builder.create_compu_method(CompuCategory::Identical, None, None);
 
         let u8_diag_type = db_builder.create_diag_coded_type_standard_length(8, DataType::UInt32);
@@ -6943,7 +6943,8 @@ mod tests {
         const VAR_DATA: &str = "var_data";
 
         let mut db_builder = EcuDataBuilder::new();
-        let protocol = db_builder.create_protocol(Protocol::DoIp.value(), None, None, None);
+        let protocol_name = Protocol::default_doip().to_string();
+        let protocol = db_builder.create_protocol(&protocol_name, None, None, None);
         let compu_identical = db_builder.create_compu_method(CompuCategory::Identical, None, None);
 
         let len_key_diag_type =
@@ -7011,7 +7012,8 @@ mod tests {
         const VAR_DATA: &str = "var_data";
 
         let mut db_builder = EcuDataBuilder::new();
-        let protocol = db_builder.create_protocol(Protocol::DoIp.value(), None, None, None);
+        let protocol_name = Protocol::default_doip().to_string();
+        let protocol = db_builder.create_protocol(&protocol_name, None, None, None);
         let compu_identical = db_builder.create_compu_method(CompuCategory::Identical, None, None);
 
         // diag coded types
@@ -7081,7 +7083,8 @@ mod tests {
         const SERVICE_NAME: &str = "Test";
 
         let mut db_builder = EcuDataBuilder::new();
-        let protocol = db_builder.create_protocol(Protocol::DoIp.value(), None, None, None);
+        let protocol_name = Protocol::default_doip().to_string();
+        let protocol = db_builder.create_protocol(&protocol_name, None, None, None);
 
         // Create the SID parameter
         let sid_param = db_builder.create_coded_const_param(
@@ -9199,7 +9202,8 @@ mod tests {
     #[test]
     fn test_get_functional_group_data_info_no_functional_groups() {
         let mut db_builder = EcuDataBuilder::new();
-        let protocol = db_builder.create_protocol(Protocol::DoIp.value(), None, None, None);
+        let protocol_name = Protocol::default_doip().to_string();
+        let protocol = db_builder.create_protocol(&protocol_name, None, None, None);
 
         // Build a database with no functional groups
         let db = finish_db!(db_builder, protocol, vec![]);
@@ -9407,7 +9411,8 @@ mod tests {
         subfunctions: &[u8],
     ) -> super::EcuManager<DefaultSecurityPluginData> {
         let mut db_builder = EcuDataBuilder::new();
-        let protocol = db_builder.create_protocol(Protocol::DoIp.value(), None, None, None);
+        let protocol_name = Protocol::default_doip().to_string();
+        let protocol = db_builder.create_protocol(&protocol_name, None, None, None);
 
         let mut services = vec![];
         for &sf in subfunctions {
@@ -9455,7 +9460,8 @@ mod tests {
         subfunctions: &[u8],
     ) -> super::EcuManager<DefaultSecurityPluginData> {
         let mut db_builder = EcuDataBuilder::new();
-        let protocol = db_builder.create_protocol(Protocol::DoIp.value(), None, None, None);
+        let protocol_name = Protocol::default_doip().to_string();
+        let protocol = db_builder.create_protocol(&protocol_name, None, None, None);
 
         let mut services = vec![];
         for &sf in subfunctions {
@@ -9558,7 +9564,8 @@ mod tests {
     #[test]
     fn test_get_components_operations_info_multiple_routines() {
         let mut db_builder = EcuDataBuilder::new();
-        let protocol = db_builder.create_protocol(Protocol::DoIp.value(), None, None, None);
+        let protocol_name = Protocol::default_doip().to_string();
+        let protocol = db_builder.create_protocol(&protocol_name, None, None, None);
 
         // Build services for RoutineA (Start + Stop) and RoutineB (Start only).
         let mut services = vec![];
@@ -9629,7 +9636,8 @@ mod tests {
     #[test]
     fn test_get_components_operations_info_empty_when_no_routine_control() {
         let mut db_builder = EcuDataBuilder::new();
-        let protocol = db_builder.create_protocol(Protocol::DoIp.value(), None, None, None);
+        let protocol_name = Protocol::default_doip().to_string();
+        let protocol = db_builder.create_protocol(&protocol_name, None, None, None);
         let read_request =
             create_sid_only_request!(db_builder, service_ids::READ_DATA_BY_IDENTIFIER);
         let read_diag_comm = new_diag_comm!(db_builder, "SomeData", protocol);
@@ -9750,7 +9758,8 @@ mod tests {
     #[test]
     fn test_get_functional_group_operations_info_with_stop_and_request_results() {
         let mut db_builder = EcuDataBuilder::new();
-        let protocol = db_builder.create_protocol(Protocol::DoIp.value(), None, None, None);
+        let protocol_name = Protocol::default_doip().to_string();
+        let protocol = db_builder.create_protocol(&protocol_name, None, None, None);
 
         // Build Start, Stop, and RequestResults all in the FG.
         let mut fg_services = vec![];

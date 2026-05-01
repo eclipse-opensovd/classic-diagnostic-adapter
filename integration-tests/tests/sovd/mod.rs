@@ -37,6 +37,7 @@ mod version_endpoint;
 
 pub(crate) const ECU_FLXC1000_ENDPOINT: &str = "components/flxc1000";
 pub(crate) const ECU_FLXCNG1000_ENDPOINT: &str = "components/flxcng1000";
+pub(crate) const ECU_TMCC3000_ENDPOINT: &str = "components/tmcc3000";
 
 pub(crate) async fn put_mode<T: DeserializeOwned, S: Serialize>(
     config: &Configuration,

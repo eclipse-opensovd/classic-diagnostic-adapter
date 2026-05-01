@@ -28,6 +28,10 @@ use cda_interfaces::{
 use cda_plugin_security::SecurityPlugin;
 use cda_sovd::Locks;
 use cda_tracing::{OtelGuard, TracingSetupError, TracingWorkerGuard};
+use figment::{
+    Figment,
+    providers::{Format, Serialized, Toml},
+};
 use tokio::{
     signal,
     sync::{RwLock, mpsc},
@@ -42,7 +46,6 @@ pub mod config;
 #[global_allocator]
 static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
 
-// todo scope after poc: make this configurable
 const DB_PARALLEL_LOAD_TASKS: usize = 2;
 
 const DB_HEALTH_COMPONENT_KEY: &str = "database";
@@ -234,6 +237,7 @@ pub async fn load_vehicle_data<
     skip(config, health),
     fields(databases_path = %config.database.path)
 )]
+#[allow(clippy::too_many_lines)]
 pub async fn load_databases<S: SecurityPlugin>(
     config: &Configuration,
     health: Option<&cda_health::HealthState>,
@@ -244,12 +248,21 @@ pub async fn load_databases<S: SecurityPlugin>(
     let database_naming_convention = config.database.naming_convention.clone();
     let func_description_cfg = config.functional_description.clone();
     let fallback_to_base_variant = config.database.fallback_to_base_variant;
+    let database_config = config.database.clone();
     let protocol = if config.onboard_tester {
-        cda_interfaces::Protocol::DoIpDobt
+        cda_interfaces::Protocol::DoIpDobt(config.doip.doip_dobt_protocol_name.clone())
     } else {
-        cda_interfaces::Protocol::DoIp
+        cda_interfaces::Protocol::DoIp(config.doip.doip_protocol_name.clone())
     };
     let com_params = config.com_params.clone();
+
+    // Build a normalised (lowercase keys) copy of the per-ECU config map so
+    // that lookups are always case-insensitive, consistent with DatabaseMap.
+    let ecu_config_map: HashMap<String, crate::config::configfile::EcuConfig> = config
+        .ecu
+        .iter()
+        .map(|(k, v)| (k.to_lowercase(), v.clone()))
+        .collect();
 
     let db_health_provider = setup_db_health_provider(health).await;
 
@@ -259,6 +272,7 @@ pub async fn load_databases<S: SecurityPlugin>(
         Arc::new(RwLock::new(HashMap::new()));
 
     let com_params = Arc::new(com_params);
+    let ecu_config_map = Arc::new(ecu_config_map);
 
     let mut database_load_futures = Vec::new();
     let start = std::time::Instant::now();
@@ -302,9 +316,12 @@ pub async fn load_databases<S: SecurityPlugin>(
             let file_managers = Arc::clone(&file_managers);
             let paths = mddfiles.to_vec();
             let com_params = Arc::clone(&com_params);
+            let ecu_config_map = Arc::clone(&ecu_config_map);
             let database_naming_convention = database_naming_convention.clone();
             let flat_buf_settings = flat_buf_settings.clone();
             let func_description_cfg = func_description_cfg.clone();
+            let protocol = protocol.clone();
+            let database_config = database_config.clone();
 
             database_load_futures.push(cda_interfaces::spawn_named!(
                 &format!("load-database-{i}"),
@@ -315,10 +332,12 @@ pub async fn load_databases<S: SecurityPlugin>(
                         file_managers,
                         paths,
                         com_params,
+                        ecu_config_map,
                         database_naming_convention,
                         flat_buf_settings,
                         func_description_cfg,
                         fallback_to_base_variant,
+                        database_config,
                     )
                     .await;
                 }
@@ -354,8 +373,11 @@ pub async fn load_databases<S: SecurityPlugin>(
         .write()
         .await
         .drain()
-        .map(|(k, v)| (k.to_lowercase().clone(), v))
+        .map(|(k, v)| (k.to_lowercase(), v))
         .collect::<HashMap<String, FileManager>>();
+
+    // Warn for any per-ECU config keys that did not match a loaded database.
+    warn_unmatched_ecu_config_keys(&ecu_config_map, &databases);
 
     let end = std::time::Instant::now();
 
@@ -394,6 +416,20 @@ async fn setup_db_health_provider(
         Some(provider)
     } else {
         None
+    }
+}
+
+fn warn_unmatched_ecu_config_keys<S: SecurityPlugin>(
+    ecu_config_map: &HashMap<String, crate::config::configfile::EcuConfig>,
+    databases: &HashMap<String, RwLock<EcuManager<S>>>,
+) {
+    for ecu_key in ecu_config_map.keys() {
+        if !databases.contains_key(ecu_key) {
+            tracing::warn!(
+                ecu_name = %ecu_key,
+                "Per-ECU config entry does not match any loaded MDD database — ignored"
+            );
+        }
     }
 }
 
@@ -436,6 +472,69 @@ async fn mark_duplicate_ecus_by_address<S: SecurityPlugin>(
     }
 }
 
+/// Compute the effective [`ComParams`] for a single ECU.
+///
+/// Starts from the global `global` config, merges any per-ECU TOML overrides
+/// present in `ecu_table`, then restores the `#[serde(skip)]` runtime fields
+/// (`protocol_name_uds` / `protocol_name_uds_dobt`) that the figment
+/// round-trip would otherwise silently drop.
+///
+/// Returns `None` (and emits a `tracing::error!`) if the TOML table cannot be
+/// serialised or if figment extraction fails — the caller should `continue` to
+/// the next ECU.
+fn resolve_com_params(
+    ecu_name: &str,
+    global: &ComParams,
+    ecu_table: Option<&toml::Table>,
+) -> Option<ComParams> {
+    let mut params: ComParams = match ecu_table {
+        None => global.clone(),
+        Some(table) => {
+            let toml_str = match toml::to_string(table) {
+                Ok(s) => s,
+                Err(e) => {
+                    tracing::error!(
+                        ecu_name = %ecu_name,
+                        error = %e,
+                        "Failed to serialize per-ECU com_params TOML table; skipping ECU"
+                    );
+                    return None;
+                }
+            };
+            match Figment::from(Serialized::defaults(global))
+                .merge(Toml::string(&toml_str))
+                .extract::<ComParams>()
+            {
+                Ok(p) => p,
+                Err(e) => {
+                    tracing::error!(
+                        ecu_name = %ecu_name,
+                        error = %e,
+                        "Failed to merge per-ECU com_params overrides; skipping ECU"
+                    );
+                    return None;
+                }
+            }
+        }
+    };
+
+    // Restore #[serde(skip)] runtime fields dropped by the figment round-trip.
+    params
+        .doip
+        .protocol_name_uds
+        .clone_from(&global.doip.protocol_name_uds);
+    params
+        .doip
+        .protocol_name_uds_dobt
+        .clone_from(&global.doip.protocol_name_uds_dobt);
+
+    Some(params)
+}
+
+// Each argument is an independently `Arc`-cloned value dispatched per task;
+// grouping them into a context struct would require shared ownership of the
+// arc-cloned fields without providing additional type safety. Tracked for
+// future refactoring.
 #[allow(clippy::too_many_arguments)]
 #[tracing::instrument(
     skip_all,
@@ -450,10 +549,12 @@ async fn load_database<S: SecurityPlugin>(
     file_managers: Arc<RwLock<HashMap<String, FileManager>>>,
     paths: Vec<(PathBuf, u64)>,
     com_params: Arc<ComParams>,
+    ecu_config_map: Arc<HashMap<String, crate::config::configfile::EcuConfig>>,
     database_naming_convention: DatabaseNamingConvention,
     flat_buf_settings: FlatbBufConfig,
     func_description_cfg: FunctionalDescriptionConfig,
     fallback_to_base_variant: bool,
+    database_config: cda_database::DatabaseConfig,
 ) {
     for (mddfile, _) in paths {
         let Some(mdd_path) = mddfile.to_str().map(ToOwned::to_owned) else {
@@ -495,6 +596,7 @@ async fn load_database<S: SecurityPlugin>(
                         mdd_path.clone(),
                         payload,
                         flat_buf_settings.clone(),
+                        database_config.clone(),
                     ) {
                         Ok(db) => db,
                         Err(e) => {
@@ -508,6 +610,31 @@ async fn load_database<S: SecurityPlugin>(
                     }
                 };
 
+                // Build effective ComParams by merging per-ECU overrides (if any)
+                // on top of the global config using figment.  Only fields the user
+                // explicitly writes in the per-ECU TOML table are overridden; all
+                // other fields retain their global values.
+                let per_ecu_cfg = ecu_config_map.get(&ecu_name.to_lowercase());
+                let Some(mut effective_com_params) = resolve_com_params(
+                    &ecu_name,
+                    &com_params,
+                    per_ecu_cfg.and_then(|c| c.com_params.as_ref()),
+                ) else {
+                    continue;
+                };
+
+                // Apply per-ECU protocol name overrides (runtime-only fields, not in TOML).
+                if let Some(proto_cfg) = per_ecu_cfg.and_then(|cfg| cfg.protocol.as_ref()) {
+                    effective_com_params
+                        .doip
+                        .protocol_name_uds
+                        .clone_from(&proto_cfg.uds);
+                    effective_com_params
+                        .doip
+                        .protocol_name_uds_dobt
+                        .clone_from(&proto_cfg.uds_dobt);
+                }
+
                 let ecu_type = if func_description_cfg.description_database == ecu_name {
                     EcuManagerType::FunctionalDescription
                 } else {
@@ -515,7 +642,7 @@ async fn load_database<S: SecurityPlugin>(
                 };
                 let diag_service_manager = match EcuManager::new(
                     diag_data_base,
-                    protocol,
+                    protocol.clone(),
                     &com_params,
                     database_naming_convention.clone(),
                     ecu_type,
@@ -784,4 +911,63 @@ pub fn setup_tracing(config: &Configuration) -> Result<TracingGuards, TracingSet
 #[must_use]
 pub fn cda_version() -> &'static str {
     env!("CARGO_PKG_VERSION")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn global_with_runtime_fields() -> ComParams {
+        let mut p = ComParams::default();
+        p.doip.protocol_name_uds = Some("UDS_Ethernet_DoIP".to_owned());
+        p.doip.protocol_name_uds_dobt = Some("UDS_Ethernet_DoIP_DOBT".to_owned());
+        p
+    }
+
+    #[test]
+    fn resolve_com_params_no_override_returns_global_clone() {
+        let global = global_with_runtime_fields();
+        let result = resolve_com_params("ECU1", &global, None).expect("should return Some");
+        assert_eq!(result.doip.protocol_name_uds, global.doip.protocol_name_uds);
+        assert_eq!(
+            result.doip.protocol_name_uds_dobt,
+            global.doip.protocol_name_uds_dobt
+        );
+    }
+
+    #[test]
+    fn resolve_com_params_restores_serde_skip_fields_after_figment_merge() {
+        let global = global_with_runtime_fields();
+        // An empty override table: figment merge produces a default ComParams
+        // where #[serde(skip)] fields would be None without the fix.
+        let table = toml::Table::new();
+        let result = resolve_com_params("ECU1", &global, Some(&table)).expect("should return Some");
+        assert_eq!(
+            result.doip.protocol_name_uds.as_deref(),
+            Some("UDS_Ethernet_DoIP"),
+            "protocol_name_uds must be restored from global after figment merge"
+        );
+        assert_eq!(
+            result.doip.protocol_name_uds_dobt.as_deref(),
+            Some("UDS_Ethernet_DoIP_DOBT"),
+            "protocol_name_uds_dobt must be restored from global after figment merge"
+        );
+    }
+
+    #[test]
+    fn resolve_com_params_returns_none_on_figment_extraction_failure() {
+        let global = ComParams::default();
+        // Put a string where figment expects a table (the `uds` key should map
+        // to a struct, not a scalar); this reliably triggers an extraction error.
+        let mut table = toml::Table::new();
+        table.insert(
+            "uds".to_owned(),
+            toml::Value::String("not_a_struct".to_owned()),
+        );
+        let result = resolve_com_params("BAD_ECU", &global, Some(&table));
+        assert!(
+            result.is_none(),
+            "resolve_com_params must return None when figment extraction fails"
+        );
+    }
 }

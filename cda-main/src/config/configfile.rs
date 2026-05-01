@@ -11,6 +11,7 @@
  */
 
 pub use cda_comm_doip::config::DoipConfig;
+pub use cda_database::DatabaseConfig;
 use cda_interfaces::{
     FunctionalDescriptionConfig, HashMap,
     datatypes::{
@@ -19,8 +20,38 @@ use cda_interfaces::{
     },
 };
 use serde::{Deserialize, Serialize};
+use toml::Table;
 
 use crate::AppError;
+
+/// Per-ECU protocol short-name overrides.
+///
+/// When an ECU's MDD uses non-standard protocol short names (e.g. `"DMC_DoIP"`
+/// instead of `"UDS_Ethernet_DoIP"`), set them here so that the CDA resolves
+/// com-params and services from the correct protocol layer.
+#[derive(Deserialize, Serialize, Clone, Debug, Default)]
+pub struct EcuProtocolConfig {
+    /// Protocol short name used for UDS / `DoIP` lookups.
+    /// Defaults to `"UDS_Ethernet_DoIP"` when absent.
+    pub uds: Option<String>,
+    /// Protocol short name used for UDS / `DoIP` DOBT lookups.
+    /// Defaults to `"UDS_Ethernet_DoIP_DOBT"` when absent.
+    pub uds_dobt: Option<String>,
+}
+
+/// Per-ECU configuration block.  Keeps room for future per-ECU settings
+/// beyond `com_params`.
+#[derive(Deserialize, Serialize, Clone, Debug, Default)]
+pub struct EcuConfig {
+    /// Raw partial TOML for per-ECU `com_params` overrides.  Only fields the user
+    /// explicitly writes are present.  Merged over the global `ComParams` at
+    /// `load_database` time using the same key hierarchy as `[com_params]`.
+    #[serde(default)]
+    pub com_params: Option<Table>,
+    /// Optional per-ECU protocol short-name overrides.
+    #[serde(default)]
+    pub protocol: Option<EcuProtocolConfig>,
+}
 
 #[derive(Deserialize, Serialize, Clone, Debug)]
 pub struct Configuration {
@@ -37,23 +68,16 @@ pub struct Configuration {
     #[cfg(feature = "health")]
     pub health: cda_health::config::HealthConfig,
     pub faults: FaultConfig,
+    /// Per-ECU configuration blocks keyed by ECU short name (case-insensitive
+    /// match against the MDD short name returned by `load_proto_data`).
+    #[serde(default)]
+    pub ecu: HashMap<String, EcuConfig>,
 }
 
 #[derive(Deserialize, Serialize, Clone, Debug)]
 pub struct ServerConfig {
     pub address: String,
     pub port: u16,
-}
-
-#[derive(Deserialize, Serialize, Clone, Debug)]
-pub struct DatabaseConfig {
-    pub path: String,
-    pub naming_convention: DatabaseNamingConvention,
-    /// If true, the application will exit if no database could be loaded.
-    pub exit_no_database_loaded: bool,
-    /// If true, when variant detection fails to find a matching variant,
-    /// the ECU will fall back to the base variant instead of reporting an error.
-    pub fallback_to_base_variant: bool,
 }
 
 pub trait ConfigSanity {
@@ -72,6 +96,7 @@ impl Default for Configuration {
                 naming_convention: DatabaseNamingConvention::default(),
                 exit_no_database_loaded: false,
                 fallback_to_base_variant: true,
+                ignore_protocol: false,
             },
             flash_files_path: ".".to_owned(),
             server: ServerConfig {
@@ -92,7 +117,6 @@ impl Default for Configuration {
                 enabled_functional_groups: None,
                 protocol_position:
                     cda_interfaces::datatypes::DiagnosticServiceAffixPosition::Suffix,
-                protocol_case_sensitive: false,
             },
             components: ComponentsConfig {
                 additional_fields: HashMap::from_iter([
@@ -119,6 +143,7 @@ impl Default for Configuration {
                 ]),
             },
             faults: FaultConfig::default(),
+            ecu: HashMap::default(),
         }
     }
 }
@@ -371,6 +396,107 @@ ignore_case = true
         assert!(power_mapping.contains("Mr. Fusion"));
         assert!(power_mapping.contains("mr. fusion"));
 
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn load_config_toml_per_ecu_com_params() -> Result<(), Box<dyn std::error::Error>> {
+        let config_str = r"
+[ecu.TMCC3000.com_params.doip.logical_gateway_address]
+default = 12288
+
+[ecu.TMCC3000.com_params.doip.logical_functional_address]
+default = 65535
+";
+        let figment = Figment::from(Serialized::defaults(Configuration::default()))
+            .merge(Toml::string(config_str));
+        let config: Configuration = figment.extract()?;
+
+        let tmcc = config
+            .ecu
+            .get("TMCC3000")
+            .expect("TMCC3000 ecu config should be present");
+        let table = tmcc.com_params.as_ref().expect("com_params should be Some");
+        assert!(
+            table
+                .get("doip")
+                .and_then(|d| d.as_table())
+                .and_then(|d| d.get("logical_gateway_address"))
+                .and_then(|g| g.as_table())
+                .and_then(|g| g.get("default"))
+                .and_then(toml::Value::as_integer)
+                == Some(12288),
+            "logical_gateway_address.default should be 12288"
+        );
+        assert!(
+            table
+                .get("doip")
+                .and_then(|d| d.as_table())
+                .and_then(|d| d.get("logical_functional_address"))
+                .and_then(|g| g.as_table())
+                .and_then(|g| g.get("default"))
+                .and_then(toml::Value::as_integer)
+                == Some(65535),
+            "logical_functional_address.default should be 65535"
+        );
+        Ok(())
+    }
+
+    /// A per-ECU field that IS set in the TOML overrides the global value.
+    #[tokio::test]
+    async fn ecu_com_params_override_replaces_global_field()
+    -> Result<(), Box<dyn std::error::Error>> {
+        // Global has logical_gateway_address.default = 0 (Rust default).
+        // Per-ECU table sets it to 12288.
+        let ecu_toml = r"
+[doip.logical_gateway_address]
+default = 12288
+";
+        let ecu_table: toml::Table = toml::from_str(ecu_toml)?;
+        let global = ComParams::default();
+        let effective: ComParams =
+            figment::Figment::from(figment::providers::Serialized::defaults(&global))
+                .merge(figment::providers::Toml::string(&toml::to_string(
+                    &ecu_table,
+                )?))
+                .extract()?;
+
+        assert_eq!(
+            effective.doip.logical_gateway_address.default, 12288u16,
+            "per-ECU override should replace global logical_gateway_address.default"
+        );
+        Ok(())
+    }
+
+    /// A per-ECU field that is NOT set in the TOML retains the global value.
+    #[tokio::test]
+    async fn ecu_com_params_unset_field_retains_global_value()
+    -> Result<(), Box<dyn std::error::Error>> {
+        // Global has logical_gateway_address.default = 0x1234.
+        // Per-ECU table only sets logical_functional_address.
+        let ecu_toml = r"
+[doip.logical_functional_address]
+default = 9999
+";
+        let ecu_table: toml::Table = toml::from_str(ecu_toml)?;
+        let mut global = ComParams::default();
+        global.doip.logical_gateway_address.default = 0x1234u16;
+
+        let effective: ComParams =
+            figment::Figment::from(figment::providers::Serialized::defaults(&global))
+                .merge(figment::providers::Toml::string(&toml::to_string(
+                    &ecu_table,
+                )?))
+                .extract()?;
+
+        assert_eq!(
+            effective.doip.logical_gateway_address.default, 0x1234u16,
+            "unset per-ECU field should retain global value"
+        );
+        assert_eq!(
+            effective.doip.logical_functional_address.default, 9999u16,
+            "set per-ECU field should override global"
+        );
         Ok(())
     }
 }

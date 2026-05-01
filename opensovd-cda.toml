@@ -14,6 +14,37 @@ path = "."
 [doip]
 tester_address = "127.0.0.1"
 tester_subnet = "255.255.0.0"
+# Protocol name used for DoIP com-param lookups in the diagnostic database (matched case-insensitively).
+doip_protocol_name = "UDS_Ethernet_DoIP"
+# Protocol name used for DoIP-DOBT com-param lookups in the diagnostic database (matched case-insensitively).
+doip_dobt_protocol_name = "UDS_Ethernet_DoIP_DOBT"
 
 [logging.otel]
 enabled = false
+
+# Per-ECU ComParam overrides
+#
+# Priority (highest → lowest):
+#   1. Value found in the MDD database
+#   2. ECU-specific override from [ecu.<name>.com_params] below
+#   3. Global `[com_params]` default
+#   4. Hard-coded Rust default
+#
+# Use the same key hierarchy as [com_params].  Only the fields you write are
+# overridden; all other fields retain their global values.  Individual sub-fields
+# (e.g. only `default`) can be set independently.
+#
+# Example: override gateway and functional addresses for an ECU whose MDD
+# only contains CP_UniqueRespIdTable (no gateway/functional CPs in the MDD).
+#
+# [ecu.TMCC3000.com_params.doip.logical_gateway_address]
+# default = 12288   # 0x3000
+#
+# [ecu.TMCC3000.com_params.doip.logical_functional_address]
+# default = 65535   # 0xFFFF
+#
+# Per-ECU protocol short-name overrides (for ECUs that use non-standard names):
+#
+# [ecu.TMCC3000.protocol]
+# uds = "DMC_DoIP"
+# uds_dobt = "DMC_DoIP_DOBT"

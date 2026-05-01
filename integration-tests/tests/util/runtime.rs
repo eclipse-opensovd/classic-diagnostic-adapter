@@ -28,7 +28,9 @@ use cda_tracing::LoggingConfig;
 use futures::FutureExt as _;
 use opensovd_cda_lib::{
     cda_version,
-    config::configfile::{ConfigSanity, Configuration, DatabaseConfig, ServerConfig},
+    config::configfile::{
+        ConfigSanity, Configuration, DatabaseConfig, EcuConfig, EcuProtocolConfig, ServerConfig,
+    },
 };
 use tokio::sync::{Mutex, MutexGuard, OnceCell};
 use tracing_subscriber::layer::SubscriberExt;
@@ -134,17 +136,25 @@ async fn initialize_runtime() -> Result<TestRuntime, TestingError> {
             naming_convention: DatabaseNamingConvention::default(),
             exit_no_database_loaded: true,
             fallback_to_base_variant: true,
+            ignore_protocol: false,
         },
         logging: LoggingConfig::default(),
         onboard_tester: true,
         flash_files_path: flash_files_path()?,
-        com_params: ComParams::default(),
+        com_params: {
+            // logical_functional_address is set globally so that ECUs whose MDD omits
+            // this comparam (e.g. TMCC3000) receive it via the global fallback path.
+            // ECUs that carry the value in their MDD (FLXC1000, FLXCNG1000, FSNR2000)
+            // are unaffected because the DB value takes precedence.
+            let mut p = ComParams::default();
+            p.doip.logical_functional_address.default = 0xFFFF;
+            p
+        },
         flat_buf: FlatbBufConfig::default(),
         functional_description: FunctionalDescriptionConfig {
             description_database: "functional_groups".to_owned(),
             enabled_functional_groups: None,
             protocol_position: cda_interfaces::datatypes::DiagnosticServiceAffixPosition::Suffix,
-            protocol_case_sensitive: false,
         },
         health: HealthConfig::default(),
         components: ComponentsConfig {
@@ -155,7 +165,26 @@ async fn initialize_runtime() -> Result<TestRuntime, TestingError> {
             user_memory_scope: "Development".to_owned(),
             ..Default::default()
         },
+        ecu: {
+            let mut map = HashMap::new();
+            let ecu_com_params_table = toml::toml! {
+                [doip.logical_gateway_address]
+                default = 0x3000
+            };
+            map.insert(
+                "TMCC3000".to_owned(),
+                EcuConfig {
+                    com_params: Some(ecu_com_params_table),
+                    protocol: Some(EcuProtocolConfig {
+                        uds: Some("DMC_DoIP".to_owned()),
+                        uds_dobt: Some("DMC_DoIP_DOBT".to_owned()),
+                    }),
+                },
+            );
+            map
+        },
     };
+
     config.validate_sanity().map_err(|e| {
         TestingError::SetupError(format!("Configuration sanity check failed: {e:?}"))
     })?;

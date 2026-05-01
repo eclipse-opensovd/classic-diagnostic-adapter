@@ -1,0 +1,35 @@
+<?xml version="1.0" encoding="UTF-8" ?>
+
+<!--
+SPDX-License-Identifier: Apache-2.0
+SPDX-FileCopyrightText: 2025 The Contributors to Eclipse OpenSOVD (see CONTRIBUTORS)
+
+See the NOTICE file(s) distributed with this work for additional
+information regarding copyright ownership.
+
+This program and the accompanying materials are made available under the
+terms of the Apache License Version 2.0 which is available at
+https://www.apache.org/licenses/LICENSE-2.0
+-->
+
+<ODX MODEL-VERSION="2.2.0" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+     xsi:noNamespaceSchemaLocation="odx_2_2_0.xsd">
+    <DIAG-LAYER-CONTAINER ID="DLC.DMC_DoIP_DOBT">
+        <SHORT-NAME>DMC_DoIP_DOBT</SHORT-NAME>
+        <PROTOCOLS>
+            <PROTOCOL ID="PROTO.DMC_DoIP_DOBT">
+                <SHORT-NAME>DMC_DoIP_DOBT</SHORT-NAME>
+                <COMPARAM-REFS>
+                    <COMPARAM-REF ID-REF="ISO_13400_2.CP_DoIPLogicalTesterAddress"
+                                  DOCREF="ISO_13400_2" DOCTYPE="COMPARAM-SUBSET">
+                        <SIMPLE-VALUE>65024</SIMPLE-VALUE>
+                        <PROTOCOL-SNREF SHORT-NAME="DMC_DoIP_DOBT"/>
+                    </COMPARAM-REF>
+                </COMPARAM-REFS>
+                <COMPARAM-SPEC-REF ID-REF="ISO_14229_5_on_ISO_13400_2" DOCREF="ISO_14229_5_on_ISO_13400_2"
+                                   DOCTYPE="COMPARAM-SPEC"/>
+                <PROT-STACK-SNREF SHORT-NAME="ISO_14229_5_on_ISO_13400_2"/>
+            </PROTOCOL>
+        </PROTOCOLS>
+    </DIAG-LAYER-CONTAINER>
+</ODX>

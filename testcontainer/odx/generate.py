@@ -27,7 +27,7 @@ from odxtools.specialdatagroupcaption import SpecialDataGroupCaption
 
 from authentication import add_authentication_services
 from communication_control import add_communication_control_services
-from comparams import generate_comparam_refs
+from comparams import generate_comparam_refs, generate_minimal_comparam_refs
 from functional_groups import generate_functional_groups
 from helper import ref
 from metadata import (
@@ -249,6 +249,113 @@ def generate_for_ecu(
     odxtools.write_pdx_file(f"{ecu_name}.pdx", database)
 
 
+def generate_for_ecu_minimal_comparams(
+    ecu_name: str,
+    logical_address: int,
+    variants: List[Tuple[str, int]],
+):
+    """Generate an ECU database with only CP_UniqueRespIdTable as comparam.
+
+    Gateway and functional addresses are intentionally absent from the MDD so
+    that they can be supplied via the CDA's per-ECU config overrides.
+    """
+    print(f"Generating (minimal comparams) for {ecu_name}")
+    database = Database()
+    database.short_name = ecu_name
+
+    for odx_filename in (
+        "base/ISO_13400_2.odx-cs",
+        "base/ISO_14229_5.odx-cs",
+        "base/ISO_14229_5_on_ISO_13400_2.odx-c",
+        "base/DMC_DoIP.odx-d",
+    ):
+        database.add_odx_file(odx_filename)
+
+    database.refresh()
+
+    doc_frags = (OdxDocFragment(ecu_name, DocType.CONTAINER),)
+
+    dlc = DiagLayerContainer(
+        odx_id=OdxLinkId(f"DLC.{ecu_name}", doc_fragments=doc_frags),
+        short_name=ecu_name,
+    )
+    add_admin_data(dlc)
+    add_company_datas(dlc)
+    add_additional_audiences(dlc)
+
+    # Use minimal comparam refs — only CP_UniqueRespIdTable
+    _add_base_variant_minimal_comparams(
+        dlc=dlc,
+        logical_address=logical_address,
+        database=database,
+    )
+
+    for variant_name, identification_pattern in variants:
+        add_variant(
+            dlc=dlc,
+            name=f"{ecu_name}_{variant_name}",
+            identification_pattern=identification_pattern,
+        )
+
+    database.diag_layer_containers.append(dlc)
+    database.refresh()
+    odxtools.write_pdx_file(f"{ecu_name}.pdx", database)
+
+
+def _add_base_variant_minimal_comparams(
+    dlc: DiagLayerContainer,
+    logical_address: int,
+    database: Database,
+):
+    """Like add_base_variant but uses generate_minimal_comparam_refs."""
+    ecu_name = dlc.short_name
+    doc_frags = dlc.odx_id.doc_fragments
+    base_variant = BaseVariantRaw(
+        odx_id=OdxLinkId(local_id=f"BV.{ecu_name}", doc_fragments=doc_frags),
+        short_name=ecu_name,
+        comparam_refs=generate_minimal_comparam_refs(
+            ecu_name=ecu_name,
+            logical_address=logical_address,
+            database=database,
+        ),
+        variant_type=DiagLayerType.BASE_VARIANT,
+        parent_refs=[
+            ParentRef(
+                layer_ref=ref(
+                    OdxLinkId(
+                        local_id="PROTO.DMC_DoIP",
+                        doc_fragments=(
+                            OdxDocFragment(
+                                doc_name="DMC_DoIP", doc_type=DocType.CONTAINER
+                            ),
+                        ),
+                    )
+                )
+            ),
+        ],
+        diag_data_dictionary_spec=DiagDataDictionarySpec(),
+        sdgs=get_default_sdgs(dlc, ecu_name),
+    )
+
+    add_functional_classes(base_variant)
+    add_common_units(base_variant)
+    add_common_datatypes(base_variant)
+    add_state_charts(base_variant)
+
+    add_common_diag_comms(base_variant)
+    add_reset_services(base_variant)
+    add_communication_control_services(base_variant)
+    add_authentication_services(base_variant)
+    add_transfer_services(base_variant)
+    add_dtc_setting_services(base_variant)
+    add_dtc_read_services(base_variant)
+    add_dtc_clear_services(base_variant)
+    add_dtc_clear_user_memory_service(base_variant)
+    add_routine_control_services(base_variant)
+
+    dlc.base_variants.append(BaseVariant(diag_layer_raw=base_variant))
+
+
 generate_for_ecu(
     ecu_name="FLXC1000",
     logical_address=0x1000,
@@ -275,6 +382,16 @@ generate_for_ecu(
     gateway_address=0x2000,
     functional_address=0xFFFF,
     variants=[("Boot_Variant", 0xFF0000), ("App_0101", 0x000101)],
+)
+
+# TMCC3000 — Time Circuits Controller.
+# Only CP_UniqueRespIdTable is present in the MDD; gateway and functional
+# addresses are supplied via the CDA per-ECU config override so that operators
+# can configure them without regenerating the MDD.
+generate_for_ecu_minimal_comparams(
+    ecu_name="TMCC3000",
+    logical_address=0x3000,
+    variants=[("App_0101", 0x000301)],
 )
 
 generate_functional_groups("functional_groups.pdx")

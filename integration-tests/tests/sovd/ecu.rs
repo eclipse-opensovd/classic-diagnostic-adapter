@@ -34,6 +34,32 @@ use crate::{
     },
 };
 
+/// This ECU is missing comm parameters and thus must be configured via the configuration file.
+/// The test verifies that the ECU is reachable and reports the correct name and state.
+#[tokio::test]
+async fn test_tmcc3000_ecu_online() {
+    let (runtime, _lock) = setup_integration_test(false).await.unwrap();
+
+    let json = get_ecu_component(
+        &runtime.config,
+        sovd::ECU_TMCC3000_ENDPOINT,
+        StatusCode::OK,
+        None,
+    )
+    .await
+    .expect("TMCC3000 component should be reachable via SOVD API");
+
+    let name = json
+        .get("name")
+        .and_then(|v| v.as_str())
+        .expect("Response should contain 'name' field");
+    assert_eq!(
+        name.to_lowercase(),
+        "tmcc3000",
+        "Component name should be tmcc3000"
+    );
+}
+
 #[allow(clippy::too_many_lines)] // makes sense to keep test together
 #[tokio::test]
 async fn test_ecu_session_switching() {

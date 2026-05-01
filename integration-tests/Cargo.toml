@@ -64,6 +64,8 @@ tracing-subscriber = { workspace = true, features = [
 thiserror = { workspace = true }
 # toml serialization
 toml = { workspace = true }
+# config merging
+figment = { workspace = true, features = ["toml"] }
 # time
 chrono = { workspace = true }
 # future
