@@ -36,3 +36,23 @@ impl Default for DoipConfig {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use doip_definitions::header::ProtocolVersion;
+
+    #[test]
+    fn protocol_version_from_u8() {
+        let v2: u8 = 0x02;
+        let v3: u8 = 0x03;
+
+        assert_eq!(
+            ProtocolVersion::try_from(&v2).unwrap(),
+            ProtocolVersion::Iso13400_2012
+        );
+        assert_eq!(
+            ProtocolVersion::try_from(&v3).unwrap(),
+            ProtocolVersion::Iso13400_2019
+        );
+    }
+}

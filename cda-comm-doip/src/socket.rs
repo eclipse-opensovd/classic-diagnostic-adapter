@@ -118,11 +118,14 @@ pub(crate) struct DoIPUdpSocket {
 }
 
 impl DoIPUdpSocket {
-    pub fn new(socket: std::net::UdpSocket) -> Result<Self, std::io::Error> {
+    pub fn new(
+        socket: std::net::UdpSocket,
+        protocol_version: ProtocolVersion,
+    ) -> Result<Self, std::io::Error> {
         let tokio_socket = tokio::net::UdpSocket::from_std(socket)?;
         Ok(Self {
             io: UdpFramed::new(tokio_socket, DoipCodec {}),
-            protocol_version: ProtocolVersion::Iso13400_2012,
+            protocol_version,
         })
     }
 
