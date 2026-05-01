@@ -16,6 +16,7 @@ use figment::{
 };
 
 pub mod configfile;
+pub mod generate;
 
 /// Loads the configuration from a file specified by the `CDA_CONFIG_FILE` environment variable.
 /// If the variable is not set, it defaults to `opensovd-cda.toml`.

@@ -10,12 +10,12 @@
  * https://www.apache.org/licenses/LICENSE-2.0
  */
 
-use std::sync::Arc;
+use std::{path::PathBuf, sync::Arc};
 
 use cda_core::DiagServiceResponseStruct;
 use cda_interfaces::dlt_ctx;
 use cda_plugin_security::{DefaultSecurityPlugin, DefaultSecurityPluginData};
-use clap::Parser;
+use clap::{Parser, Subcommand};
 use futures::future::FutureExt;
 use opensovd_cda_lib::{
     AppError, cda_version,
@@ -26,9 +26,22 @@ use opensovd_cda_lib::{
 #[cfg(feature = "health")]
 const MAIN_HEALTH_COMPONENT_KEY: &str = "main";
 
+#[derive(Subcommand, Debug)]
+enum Command {
+    /// Generate a reference TOML configuration file with all fields commented out
+    GenerateConfig {
+        /// Output file path (defaults to opensovd-cda.toml). Use "-" for stdout.
+        #[arg(short, long)]
+        output: Option<PathBuf>,
+    },
+}
+
 #[derive(Parser, Debug)]
 #[command(version, about, long_about = None)]
 struct AppArgs {
+    #[command(subcommand)]
+    command: Option<Command>,
+
     #[arg(short, long)]
     databases_path: Option<String>,
 
@@ -86,6 +99,30 @@ struct AppArgs {
 )]
 async fn main() -> Result<(), AppError> {
     let args = AppArgs::parse();
+
+    if let Some(Command::GenerateConfig { ref output }) = args.command {
+        let content = opensovd_cda_lib::config::generate::generate_reference_config()
+            .map_err(|e| AppError::RuntimeError(format!("Failed to generate config: {e}")))?;
+
+        match output.as_deref().map(std::path::Path::as_os_str) {
+            Some(p) if p == "-" => {
+                use std::io::Write;
+                std::io::stdout()
+                    .write_all(content.as_bytes())
+                    .map_err(|e| AppError::RuntimeError(format!("Failed to write stdout: {e}")))?;
+            }
+            Some(path) => {
+                std::fs::write(path, &content)
+                    .map_err(|e| AppError::RuntimeError(format!("Failed to write config: {e}")))?;
+            }
+            None => {
+                std::fs::write("opensovd-cda.toml", &content)
+                    .map_err(|e| AppError::RuntimeError(format!("Failed to write config: {e}")))?;
+            }
+        }
+        return Ok(());
+    }
+
     let mut config = opensovd_cda_lib::config::load_config().unwrap_or_else(|e| {
         println!("Failed to load configuration: {e}");
         println!("Using default values");

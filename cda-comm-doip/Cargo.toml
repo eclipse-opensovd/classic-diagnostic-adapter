@@ -35,6 +35,7 @@ doip-codec = { workspace = true }
 openssl = { workspace = true, optional = true }
 tokio-openssl = { workspace = true, optional = true }
 
+schemars = { workspace = true }
 serde = { workspace = true, features = ["derive"] }
 socket2 = { workspace = true, features = ["all"] }
 #tokio
