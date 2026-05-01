@@ -86,11 +86,28 @@ struct AppArgs {
 )]
 async fn main() -> Result<(), AppError> {
     let args = AppArgs::parse();
+    #[cfg(feature = "allow-no-config")]
     let mut config = opensovd_cda_lib::config::load_config().unwrap_or_else(|e| {
         println!("Failed to load configuration: {e}");
         println!("Using default values");
         opensovd_cda_lib::config::default_config()
     });
+
+    #[cfg(not(feature = "allow-no-config"))]
+    let mut config = {
+        let config_path = opensovd_cda_lib::config::config_file_path();
+        if !std::path::Path::new(&config_path).exists() {
+            println!("Configuration file '{config_path}' not found.");
+            println!(
+                "Provide a configuration file or build with the 'allow-no-config' feature."
+            );
+            return Err(AppError::ConfigurationError(format!(
+                "Configuration file '{config_path}' not found"
+            )));
+        }
+        opensovd_cda_lib::config::load_config()
+            .map_err(AppError::ConfigurationError)?
+    };
     config.validate_sanity()?;
 
     args.update_config(&mut config);

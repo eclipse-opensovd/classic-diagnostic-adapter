@@ -48,3 +48,60 @@ pub fn load_config() -> Result<configfile::Configuration, String> {
 pub fn default_config() -> configfile::Configuration {
     configfile::Configuration::default()
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn config_file_path_default() {
+        // When CDA_CONFIG_FILE is not set, returns "{CDA_NAME}.toml"
+        // CDA_NAME is a compile-time env var defaulting to "opensovd-cda"
+        unsafe { std::env::remove_var("CDA_CONFIG_FILE") };
+        let path = config_file_path();
+        assert!(
+            path.ends_with(".toml"),
+            "Expected .toml extension, got: {path}"
+        );
+    }
+
+    #[test]
+    fn config_file_path_env_override() {
+        unsafe { std::env::set_var("CDA_CONFIG_FILE", "/tmp/my-test-config.toml") };
+        let path = config_file_path();
+        assert_eq!(path, "/tmp/my-test-config.toml");
+        unsafe { std::env::remove_var("CDA_CONFIG_FILE") };
+    }
+
+    #[test]
+    fn config_file_path_empty_env_is_empty_string() {
+        unsafe { std::env::set_var("CDA_CONFIG_FILE", "") };
+        let path = config_file_path();
+        assert_eq!(path, "");
+        unsafe { std::env::remove_var("CDA_CONFIG_FILE") };
+    }
+
+    #[test]
+    fn default_config_server_address() {
+        let config = default_config();
+        assert_eq!(config.server.address, "0.0.0.0");
+    }
+
+    #[test]
+    fn default_config_server_port() {
+        let config = default_config();
+        assert_eq!(config.server.port, 20002);
+    }
+
+    #[test]
+    fn default_config_database_path() {
+        let config = default_config();
+        assert_eq!(config.database.path, ".");
+    }
+
+    #[test]
+    fn default_config_onboard_tester() {
+        let config = default_config();
+        assert!(config.onboard_tester);
+    }
+}
