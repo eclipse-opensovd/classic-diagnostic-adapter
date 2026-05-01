@@ -24,7 +24,7 @@ pub struct ComParams {
 
 pub type ComParamName = String;
 
-#[derive(Deserialize, Serialize, Clone, Debug)]
+#[derive(Deserialize, Serialize, Clone, Debug, PartialEq)]
 pub struct ComParamConfig<T: Serialize + Debug> {
     pub name: ComParamName,
     pub default: T,
@@ -245,22 +245,36 @@ pub struct DoipComParams {
 
     /// Attempts to retry connection before giving up
     pub connection_retry_attempts: ComParamConfig<u32>,
+
+    /// Runtime-only: overrides the `DoIP` protocol short name used when resolving
+    /// com-param refs in the MDD (normally `"UDS_Ethernet_DoIP"`).
+    /// Set from `[ecu.NAME.protocol].uds` in the CDA config.
+    /// Not serialised to / deserialised from TOML.
+    #[serde(skip)]
+    pub protocol_name_uds: Option<String>,
+
+    /// Runtime-only: overrides the `DoIP` DOBT protocol short name used when
+    /// resolving com-param refs in the MDD (normally `"UDS_Ethernet_DoIP_DOBT"`).
+    /// Set from `[ecu.NAME.protocol].uds_dobt` in the CDA config.
+    /// Not serialised to / deserialised from TOML.
+    #[serde(skip)]
+    pub protocol_name_uds_dobt: Option<String>,
 }
 
-#[derive(Deserialize, Serialize, Clone, Debug)]
+#[derive(Deserialize, Serialize, Clone, Debug, PartialEq)]
 pub enum RetryPolicy {
     Disabled,
     ContinueUntilTimeout,
     ContinueUnlimited,
 }
 
-#[derive(Deserialize, Serialize, Clone, Debug)]
+#[derive(Deserialize, Serialize, Clone, Debug, PartialEq)]
 pub enum AddressingMode {
     Physical,
     Functional,
 }
 
-#[derive(Deserialize, Serialize, Clone, Debug)]
+#[derive(Deserialize, Serialize, Clone, Debug, PartialEq)]
 pub enum TesterPresentSendType {
     FixedPeriod,
     OnIdle,
@@ -451,6 +465,8 @@ impl Default for DoipComParams {
                 name: "CP_DoIPConnectionRetryAttempts".to_owned(),
                 default: 100,
             },
+            protocol_name_uds: None,
+            protocol_name_uds_dobt: None,
         }
     }
 }

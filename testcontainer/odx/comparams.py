@@ -84,3 +84,30 @@ def generate_comparam_refs(
     refs.append(cp_resp_dobt)
 
     return refs
+
+
+def generate_minimal_comparam_refs(
+    ecu_name: str,
+    logical_address: int,
+    database: Database,
+) -> list[ComparamInstance]:
+    """Generate only CP_UniqueRespIdTable comparam refs for a single protocol.
+
+    Used for ECUs whose gateway/functional addresses are supplied via the CDA
+    config rather than the MDD (e.g. TMCC3000).  Only CP_UniqueRespIdTable is
+    emitted so that the CDA resolves the ECU logical address from the MDD while
+    taking gateway/functional addresses from the per-ECU config overrides.
+    """
+    refs = []
+
+    resp_id = database.comparam_subsets.get("ISO_13400_2").complex_comparams[
+        "CP_UniqueRespIdTable"
+    ]
+    refs.append(
+        ComparamInstance(
+            value=[str(logical_address), str(0), ecu_name],
+            spec_ref=ref(resp_id),
+        )
+    )
+
+    return refs

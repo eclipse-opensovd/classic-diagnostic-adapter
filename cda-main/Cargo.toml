@@ -42,6 +42,7 @@ cda-health = { workspace = true }
 clap = { workspace = true, features = ["derive"] }
 # config
 figment = { workspace = true, features = ["env", "toml"] }
+toml = { workspace = true }
 futures = { workspace = true }
 # allocator
 mimalloc = { git = "https://github.com/theswiftfox/mimalloc.git", rev = "afbaaa5" }

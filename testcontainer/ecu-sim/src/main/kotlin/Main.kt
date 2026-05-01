@@ -48,6 +48,13 @@ fun main() {
             functionalAddress = functionalAddress,
         ) {
         }
+
+        addDoipEntity(
+            name = "TMCC3000",
+            logicalAddress = 0x3000,
+            functionalAddress = functionalAddress,
+        ) {
+        }
     }
     start()
     startEmbeddedWebserver(port = portRest)
