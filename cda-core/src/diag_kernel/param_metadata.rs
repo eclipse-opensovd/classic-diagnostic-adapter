@@ -484,7 +484,8 @@ mod tests {
         identical: bool,
     ) -> TestDb {
         let mut db = EcuDataBuilder::new();
-        let protocol = db.create_protocol(Protocol::DoIp.value(), None, None, None);
+        let protocol_name = Protocol::default().to_string();
+        let protocol = db.create_protocol(&protocol_name, None, None, None);
         let diag_type = db.create_diag_coded_type_standard_length(bit_len, DataType::UInt32);
         let compu_method = if identical {
             db.create_compu_method(CompuCategory::Identical, None, None)
@@ -505,7 +506,8 @@ mod tests {
         physical_default_value: Option<&str>,
     ) -> TestDb {
         let mut db = EcuDataBuilder::new();
-        let protocol = db.create_protocol(Protocol::DoIp.value(), None, None, None);
+        let protocol_name = Protocol::default().to_string();
+        let protocol = db.create_protocol(&protocol_name, None, None, None);
         let diag_type = db.create_diag_coded_type_standard_length(bit_len, DataType::UInt32);
         let compu_method = if identical {
             db.create_compu_method(CompuCategory::Identical, None, None)
@@ -522,7 +524,8 @@ mod tests {
     /// Build a database with a CODED-CONST parameter.
     fn build_coded_const_db(coded_value: &str, bit_len: u32) -> TestDb {
         let mut db = EcuDataBuilder::new();
-        let protocol = db.create_protocol(Protocol::DoIp.value(), None, None, None);
+        let protocol_name = Protocol::default().to_string();
+        let protocol = db.create_protocol(&protocol_name, None, None, None);
         let param =
             db.create_coded_const_param("test_param", coded_value, 0, 0, bit_len, DataType::UInt32);
         let request = db.create_request(Some(vec![param]), None);
@@ -532,7 +535,8 @@ mod tests {
     /// Build a database with a response containing multiple parameter types.
     fn build_response_db() -> TestDb {
         let mut db = EcuDataBuilder::new();
-        let protocol = db.create_protocol(Protocol::DoIp.value(), None, None, None);
+        let protocol_name = Protocol::default().to_string();
+        let protocol = db.create_protocol(&protocol_name, None, None, None);
         let diag_type = db.create_diag_coded_type_standard_length(16, DataType::UInt32);
         let compu = db.create_compu_method(CompuCategory::Identical, None, None);
         let dop = db.create_regular_normal_dop("resp_dop", diag_type, compu);
@@ -553,7 +557,8 @@ mod tests {
     /// Build a database with a MUX parameter in the response.
     fn build_mux_response_db() -> TestDb {
         let mut db = EcuDataBuilder::new();
-        let protocol = db.create_protocol(Protocol::DoIp.value(), None, None, None);
+        let protocol_name = Protocol::default().to_string();
+        let protocol = db.create_protocol(&protocol_name, None, None, None);
         let u8_diag = db.create_diag_coded_type_standard_length(8, DataType::UInt32);
         let u16_diag = db.create_diag_coded_type_standard_length(16, DataType::UInt32);
         let compu = db.create_compu_method(CompuCategory::Identical, None, None);
