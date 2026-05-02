@@ -74,7 +74,7 @@ async fn lock_unlock() -> Result<(), TestingError> {
                 Method::GET,
             )
             .await;
-            tokio::time::sleep(expiration_timeout).await;
+            cda_interfaces::util::tokio_ext::sleep_for(expiration_timeout).await;
             lock_operation(
                 endpoint,
                 Some(&lock_id),
@@ -114,7 +114,7 @@ async fn lock_unlock() -> Result<(), TestingError> {
             let expiration_first =
                 lock_expiration(&runtime.config, &auth, endpoint, &lock_id).await?;
 
-            tokio::time::sleep(Duration::from_secs(2)).await;
+            cda_interfaces::util::tokio_ext::sleep_for(Duration::from_secs(2)).await;
 
             let create_second = create_lock(
                 default_timeout(),

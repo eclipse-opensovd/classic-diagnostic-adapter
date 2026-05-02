@@ -59,7 +59,7 @@ where
         () = shutdown_signal.clone() => {
             tracing::info!("Shutdown signal received");
         },
-        () = tokio::time::sleep(vam_timeout) => {
+        () = cda_interfaces::util::tokio_ext::sleep_for(vam_timeout) => {
             tracing::info!("Finished waiting for VIRs");
         },
         () = async { // loop until timeout is exceeded or shutdown signal is received

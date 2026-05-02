@@ -607,7 +607,7 @@ async fn wait_for_http_ready(
                     return Ok(());
                 }
             }
-            _ => tokio::time::sleep(Duration::from_millis(250)).await,
+            _ => cda_interfaces::util::tokio_ext::sleep_for(Duration::from_millis(250)).await,
         }
     }
 
