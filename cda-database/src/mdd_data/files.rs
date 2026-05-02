@@ -96,7 +96,7 @@ impl FileManager {
                 } else {
                     cache_lifetime
                 };
-                tokio::time::sleep(sleep_time).await;
+                cda_interfaces::util::tokio_ext::sleep_for(sleep_time).await;
             }
         });
 

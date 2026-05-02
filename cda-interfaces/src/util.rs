@@ -53,6 +53,19 @@ pub mod tokio_ext {
     pub fn clear_pending_messages<M: Clone>(receiver: &mut tokio::sync::broadcast::Receiver<M>) {
         while receiver.try_recv().is_ok() {}
     }
+
+    /// Sleeps for the given `duration`.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `duration` is so large that adding it to the current
+    /// `tokio::time::Instant` would overflow.
+    pub async fn sleep_for(duration: std::time::Duration) {
+        let deadline = tokio::time::Instant::now()
+            .checked_add(duration)
+            .expect("sleep_for: duration must not overflow tokio::time::Instant");
+        tokio::time::sleep_until(deadline).await;
+    }
 }
 
 pub mod dlt_ext {
