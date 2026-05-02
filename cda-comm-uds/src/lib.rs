@@ -182,7 +182,7 @@ impl<S: EcuGateway, R: DiagServiceResponse, T: EcuManager<Response = R>> UdsMana
         let reset_task_clone = Arc::clone(&reset_task);
         let task =
             cda_interfaces::spawn_named!(&format!("{ecu_name}-reset-{reset_type}"), async move {
-                tokio::time::sleep(expiration).await;
+                cda_interfaces::util::tokio_ext::sleep_for(expiration).await;
 
                 // Remove the task from the map before calling reset to prevent self-abort
                 reset_task_clone.write().await.remove(&ecu_name_clone);
@@ -400,7 +400,7 @@ impl<S: EcuGateway, R: DiagServiceResponse, T: EcuManager<Response = R>> UdsMana
                                     sleep_time = ?sleep_time,
                                     "BusyRepeatRequest received, resending after delay"
                                 );
-                                tokio::time::sleep(sleep_time).await;
+                                cda_interfaces::util::tokio_ext::sleep_for(sleep_time).await;
                                 continue 'send; // continue 'send, will resend the message
                             }
                             Ok(Some(UdsResponse::TemporarilyNotAvailable(_))) => {
@@ -418,7 +418,7 @@ impl<S: EcuGateway, R: DiagServiceResponse, T: EcuManager<Response = R>> UdsMana
                                     sleep_time = ?sleep_time,
                                     "TemporarilyNotAvailable received, resending after delay"
                                 );
-                                tokio::time::sleep(sleep_time).await;
+                                cda_interfaces::util::tokio_ext::sleep_for(sleep_time).await;
                                 continue 'send; // continue 'send, will resend the message
                             }
                             Ok(Some(UdsResponse::ResponsePending(_))) => {

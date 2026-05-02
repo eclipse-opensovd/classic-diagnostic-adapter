@@ -384,7 +384,7 @@ async fn test_variant_detection_duplicates() {
             attempt < 5,
             "ECU did not come online in time, status {status:?}"
         );
-        tokio::time::sleep(Duration::from_secs(1)).await;
+        cda_interfaces::util::tokio_ext::sleep_for(Duration::from_secs(1)).await;
     }
 
     validate_ecu_state(
@@ -751,7 +751,7 @@ async fn test_ecu_session_reset_on_lock_reacquire() {
     );
 
     // Wait for the session to expire
-    tokio::time::sleep(Duration::from_secs(session_expiration + 1)).await;
+    cda_interfaces::util::tokio_ext::sleep_for(Duration::from_secs(session_expiration + 1)).await;
 
     // Check if the sim is back to default
     let ecu_state_after_expiry = ecusim::get_ecu_state(&runtime.ecu_sim, "flxc1000")

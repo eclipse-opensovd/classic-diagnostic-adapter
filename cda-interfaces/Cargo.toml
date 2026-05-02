@@ -35,7 +35,7 @@ serde_json = { workspace = true }
 thiserror = { workspace = true }
 async-trait = { workspace = true }
 #tokio
-tokio = { workspace = true, features = ["sync"] }
+tokio = { workspace = true, features = ["sync", "time"] }
 # runtime size info
 hex = { workspace = true }
 strum = { workspace = true }

@@ -382,7 +382,10 @@ fn spawn_connection_reset_task(
                                     retry_delay = ?connection_timeouts.retry_delay,
                                     "Failed to reset connection, retrying"
                                 );
-                                tokio::time::sleep(connection_timeouts.retry_delay).await;
+                                cda_interfaces::util::tokio_ext::sleep_for(
+                                    connection_timeouts.retry_delay,
+                                )
+                                .await;
                                 reconnect_attempts = reconnect_attempts.saturating_add(1);
                                 if reconnect_attempts >= connection_timeouts.max_retry_attempts {
                                     tracing::error!(
@@ -429,6 +432,13 @@ fn spawn_gateway_sender_task(
         }
 
         let send_mtx = Arc::new(Mutex::new(()));
+        let mut alive_interval = tokio::time::interval_at(
+            tokio::time::Instant::now()
+                .checked_add(SLEEP_INTERVAL)
+                .expect("interval start overflow"),
+            SLEEP_INTERVAL,
+        );
+        alive_interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
         loop {
             tokio::select! {
                 Some(msg) = inrx.recv() => {
@@ -477,7 +487,7 @@ fn spawn_gateway_sender_task(
                     }
                     drop(lock);
                 },
-                () = tokio::time::sleep(SLEEP_INTERVAL) => {
+                _ = alive_interval.tick() => {
                     let lock = send_mtx.lock().await;
                     if send_pending_status(&send_pending_tx, true).is_err() {
                         break;

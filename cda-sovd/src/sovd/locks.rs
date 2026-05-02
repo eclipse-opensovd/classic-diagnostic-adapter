@@ -1382,7 +1382,7 @@ mod tests {
         create_ecu_lock(&mock_uds, &locks, &ecu_name, Duration::from_secs(1)).await;
 
         assert!(locks.ecu.lock_ro().await.is_any_locked());
-        tokio::time::sleep(Duration::from_secs(2)).await;
+        cda_interfaces::util::tokio_ext::sleep_for(Duration::from_secs(2)).await;
         assert!(!locks.ecu.lock_ro().await.is_any_locked());
     }
 
@@ -1410,7 +1410,7 @@ mod tests {
         create_functional_group_lock(&mock_uds, &locks, &fg_name, Duration::from_secs(1)).await;
 
         assert!(locks.functional_group.lock_ro().await.is_any_locked());
-        tokio::time::sleep(Duration::from_secs(2)).await;
+        cda_interfaces::util::tokio_ext::sleep_for(Duration::from_secs(2)).await;
         assert!(!locks.functional_group.lock_ro().await.is_any_locked());
     }
 
@@ -1439,7 +1439,7 @@ mod tests {
         create_vehicle_lock(&mock_uds, &locks, Duration::from_secs(1)).await;
 
         assert!(locks.vehicle.lock_ro().await.is_any_locked());
-        tokio::time::sleep(Duration::from_secs(2)).await;
+        cda_interfaces::util::tokio_ext::sleep_for(Duration::from_secs(2)).await;
         assert!(!locks.vehicle.lock_ro().await.is_any_locked());
     }
 

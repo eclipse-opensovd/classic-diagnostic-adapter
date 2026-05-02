@@ -280,7 +280,7 @@ async fn test_flash_download_transfer_sequence() {
     // Poll transfer status until finished
     let mut transfer_finished = false;
     for attempt in 0..20 {
-        tokio::time::sleep(Duration::from_millis(500)).await;
+        cda_interfaces::util::tokio_ext::sleep_for(Duration::from_millis(500)).await;
 
         let status_response = send_cda_request(
             &runtime.config,
