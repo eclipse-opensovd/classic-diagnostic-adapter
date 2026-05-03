@@ -403,6 +403,7 @@ dependencies = [
  "bytes",
  "cargo_toml",
  "cda-build",
+ "cda-database",
  "cda-interfaces",
  "flatbuffers",
  "memmap2",

@@ -13,7 +13,7 @@
 use std::fmt::Debug;
 
 use cda_interfaces::{
-    DiagServiceError,
+    DiagServiceError, HashSet,
     datatypes::{ComParamConfig, ComParamValue, DeserializableCompParam, FlatbBufConfig},
     dlt_ctx,
 };
@@ -25,7 +25,7 @@ use serde::Serialize;
 pub use service::*;
 
 use crate::{
-    datatypes,
+    DatabaseConfig, datatypes,
     flatbuf::diagnostic_description::dataformat,
     mdd_data::{self, read_ecudata},
 };
@@ -452,6 +452,7 @@ pub struct DiagnosticDatabase {
     ecu_database_path: String,
     ecu_data: Option<EcuData>,
     flatbuf_config: FlatbBufConfig,
+    config: DatabaseConfig,
 }
 
 #[derive(Clone)]
@@ -487,11 +488,13 @@ impl DiagnosticDatabase {
         ecu_database_path: String,
         ecu_data_blob: Vec<u8>,
         flatbuf_config: FlatbBufConfig,
+        settings: DatabaseConfig,
     ) -> Result<Self, DiagServiceError> {
         Self::new_from_bytes(
             ecu_database_path,
             bytes::Bytes::from(ecu_data_blob),
             flatbuf_config,
+            settings,
         )
     }
 
@@ -507,6 +510,7 @@ impl DiagnosticDatabase {
         ecu_database_path: String,
         ecu_data_blob: bytes::Bytes,
         flatbuf_config: FlatbBufConfig,
+        config: DatabaseConfig,
     ) -> Result<Self, DiagServiceError> {
         let ecu_data = EcuDataTryBuilder {
             blob: ecu_data_blob,
@@ -520,16 +524,28 @@ impl DiagnosticDatabase {
         }
         .try_build()?;
 
-        Ok(DiagnosticDatabase {
+        let db = DiagnosticDatabase {
             ecu_database_path,
             ecu_data: Some(ecu_data),
             flatbuf_config,
-        })
+            config,
+        };
+
+        if db.config.ignore_protocol {
+            db.ensure_ignore_protocol_allowed()?;
+        }
+
+        Ok(db)
     }
 
     #[must_use]
     pub fn is_loaded(&self) -> bool {
         self.ecu_data.is_some()
+    }
+
+    #[must_use]
+    pub fn config(&self) -> &DatabaseConfig {
+        &self.config
     }
 
     pub fn unload(&mut self) {
@@ -550,6 +566,7 @@ impl DiagnosticDatabase {
             self.ecu_database_path.clone(),
             blob,
             self.flatbuf_config.clone(),
+            self.config.clone(),
         )?;
         Ok(())
     }
@@ -650,6 +667,87 @@ impl DiagnosticDatabase {
                 "No variants or functional groups found in ECU data.".to_owned(),
             ))
         }
+    }
+
+    /// Collect all protocols referenced in this database.
+    ///
+    /// Sources (in order):
+    /// 1. `parent_refs` from variants and functional groups.
+    /// 2. `com_param_refs` from diag layers (variants and functional groups).
+    ///
+    /// # Errors
+    /// `DiagServiceError::InvalidDatabase` if ECU data is not loaded
+    pub fn protocols(&self) -> Result<Vec<dataformat::Protocol<'_>>, DiagServiceError> {
+        let ecu_data = self.ecu_data()?;
+
+        let from_variants = ecu_data
+            .variants()
+            .into_iter()
+            .flat_map(|v| v.iter())
+            .flat_map(|v| v.parent_refs().into_iter().flatten())
+            .filter_map(|pr| pr.ref__as_protocol());
+
+        let from_fgs = ecu_data
+            .functional_groups()
+            .into_iter()
+            .flat_map(|fgs| fgs.iter())
+            .flat_map(|fg| fg.parent_refs().into_iter().flatten())
+            .filter_map(|pr| pr.ref__as_protocol());
+
+        let variant_diag_layers = ecu_data
+            .variants()
+            .into_iter()
+            .flat_map(|v| v.iter())
+            .filter_map(|v| v.diag_layer());
+
+        let fg_diag_layers = ecu_data
+            .functional_groups()
+            .into_iter()
+            .flat_map(|fgs| fgs.iter())
+            .filter_map(|fg| fg.diag_layer());
+
+        let from_com_param_refs = variant_diag_layers
+            .chain(fg_diag_layers)
+            .flat_map(|dl| dl.com_param_refs().into_iter().flatten())
+            .filter_map(|cp_ref| cp_ref.protocol());
+
+        Ok(from_variants
+            .chain(from_fgs)
+            .chain(from_com_param_refs)
+            .collect())
+    }
+
+    /// Validates that `ignore_protocol` mode is safe to use with this database.
+    ///
+    /// When ignoring protocol lookup, only one distinct protocol
+    /// may exist in the database. This ensures unambiguous parameter resolution.
+    ///
+    /// # Errors
+    /// `DiagServiceError::InvalidDatabase` if more than one distinct protocol exists.
+    pub fn ensure_ignore_protocol_allowed(&self) -> Result<(), DiagServiceError> {
+        let count = self.unique_protocol_count()?;
+        if count > 1 {
+            return Err(DiagServiceError::InvalidDatabase(format!(
+                "ignore_protocol is not valid when multiple protocols exist in the database \
+                 ({count} distinct protocols found)"
+            )));
+        }
+        Ok(())
+    }
+
+    /// Count the number of distinct protocol short names in this database.
+    ///
+    /// Uses a set-based approach to deduplicate by short name. Protocols without a
+    /// diag layer or short name are ignored.
+    /// # Errors
+    /// `DiagServiceError::InvalidDatabase` if ECU data is not loaded
+    pub fn unique_protocol_count(&self) -> Result<usize, DiagServiceError> {
+        let protocols = self.protocols()?;
+        let seen: HashSet<&str> = protocols
+            .iter()
+            .filter_map(|p| p.diag_layer().and_then(|dl| dl.short_name()))
+            .collect();
+        Ok(seen.len())
     }
 
     /// Get the base variant from the ECU data

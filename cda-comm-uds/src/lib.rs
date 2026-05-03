@@ -1278,7 +1278,7 @@ impl<S: EcuGateway, R: DiagServiceResponse, T: EcuManager<Response = R>> UdsEcu
                 qualifier: ecu_name.clone(),
                 variant: ecu.variant(),
                 logical_address: logical_address_string,
-                logical_link: format!("{}_on_{}", ecu_name, ecu.protocol().value()),
+                logical_link: format!("{}_on_{}", ecu_name, ecu.protocol()),
             }
         }
 

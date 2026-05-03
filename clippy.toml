@@ -16,5 +16,5 @@ allow-unwrap-in-tests = true
 
 disallowed-methods = [
   { path = "std::thread::sleep", reason = "Blocks the async runtime thread; use tokio_ext::sleep_for instead." },
-  { path = "tokio::time::sleep", reason = "Deadline drifts on each call; use tokio_ext::sleep_for with a fixed Instant instead." },
+  { path = "tokio::time::sleep", reason = "Deadline drifts on each call; use tokio_ext::sleep_for with a fixed Instant instead.", allow-invalid = true },
 ]

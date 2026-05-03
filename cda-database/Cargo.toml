@@ -52,6 +52,9 @@ prost-build = { workspace = true }
 cargo_toml = { workspace = true }
 toml = { workspace = true }
 
+[dev-dependencies]
+cda-database = { workspace = true, features = ["database-builder"] }
+
 [features]
 default = []
 gen-protos = []

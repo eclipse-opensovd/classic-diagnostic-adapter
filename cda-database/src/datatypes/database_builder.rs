@@ -26,7 +26,7 @@ use crate::{
     },
     flatbuf::diagnostic_description::{
         dataformat,
-        dataformat::{CompuInternalToPhys, CompuPhysToInternal},
+        dataformat::{CompuInternalToPhys, CompuPhysToInternal, EcuDataArgs},
     },
 };
 
@@ -206,6 +206,28 @@ impl<'a> EcuDataBuilder<'a> {
         })
     }
 
+    fn ecu_data_args(
+        &mut self,
+        params: EcuDataParams<'a>,
+        ecu_name_offset: WIPOffset<&'a str>,
+        revision_offset: WIPOffset<&'a str>,
+        version_offset: WIPOffset<&'a str>,
+    ) -> EcuDataArgs<'a> {
+        dataformat::EcuDataArgs {
+            ecu_name: Some(ecu_name_offset),
+            revision: Some(revision_offset),
+            version: Some(version_offset),
+            variants: params.variants.map(|v| self.fbb.create_vector(&v)),
+            metadata: params.metadata.map(|v| self.fbb.create_vector(&v)),
+            feature_flags: params
+                .feature_flags
+                .as_ref()
+                .map(|flags| self.fbb.create_vector(flags)),
+            functional_groups: params.functional_groups.map(|v| self.fbb.create_vector(&v)),
+            dtcs: params.dtcs.map(|v| self.fbb.create_vector(&v)),
+        }
+    }
+
     /// Serialize the given [`EcuDataParams`] into a flatbuffer, wrap the result
     /// in a [`DiagnosticDatabase`] and return it.  Consumes the builder.
     ///
@@ -222,19 +244,8 @@ impl<'a> EcuDataBuilder<'a> {
         let revision_offset = self.fbb.create_string(params.revision);
         let version_offset = self.fbb.create_string(params.version);
 
-        let ecu_data_args = dataformat::EcuDataArgs {
-            ecu_name: Some(ecu_name_offset),
-            revision: Some(revision_offset),
-            version: Some(version_offset),
-            variants: params.variants.map(|v| self.fbb.create_vector(&v)),
-            metadata: params.metadata.map(|v| self.fbb.create_vector(&v)),
-            feature_flags: params
-                .feature_flags
-                .as_ref()
-                .map(|flags| self.fbb.create_vector(flags)),
-            functional_groups: params.functional_groups.map(|v| self.fbb.create_vector(&v)),
-            dtcs: params.dtcs.map(|v| self.fbb.create_vector(&v)),
-        };
+        let ecu_data_args =
+            self.ecu_data_args(params, ecu_name_offset, revision_offset, version_offset);
 
         let ecu_data = dataformat::EcuData::create(&mut self.fbb, &ecu_data_args);
         self.fbb.finish(ecu_data, None);
@@ -244,8 +255,39 @@ impl<'a> EcuDataBuilder<'a> {
             String::default(),
             blob,
             cda_interfaces::datatypes::FlatbBufConfig::default(),
+            super::DatabaseConfig::default(),
         )
         .expect("Failed to create DiagnosticDatabase from built ECU data")
+    }
+
+    /// Finishes building and returns the
+    /// [`DiagnosticDatabase`](super::DiagnosticDatabase) with the given config.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`DiagServiceError`](cda_interfaces::DiagServiceError) if the
+    /// database cannot be constructed from the built ECU data.
+    pub fn finish_with_config(
+        mut self,
+        params: EcuDataParams<'a>,
+        config: super::DatabaseConfig,
+    ) -> Result<super::DiagnosticDatabase, cda_interfaces::DiagServiceError> {
+        let ecu_name_offset = self.fbb.create_string(params.ecu_name);
+        let revision_offset = self.fbb.create_string(params.revision);
+        let version_offset = self.fbb.create_string(params.version);
+        let ecu_data_args =
+            self.ecu_data_args(params, ecu_name_offset, revision_offset, version_offset);
+
+        let ecu_data = dataformat::EcuData::create(&mut self.fbb, &ecu_data_args);
+        self.fbb.finish(ecu_data, None);
+        let blob = self.fbb.finished_data().to_vec();
+
+        super::DiagnosticDatabase::new_from_vec(
+            String::default(),
+            blob,
+            cda_interfaces::datatypes::FlatbBufConfig::default(),
+            config,
+        )
     }
 
     /// Finishes the builder into a [`DiagnosticDatabase`]
@@ -337,14 +379,7 @@ impl<'a> EcuDataBuilder<'a> {
     ) -> WIPOffset<dataformat::Protocol<'a>> {
         let diag_layer = self.create_diag_layer(DiagLayerParams {
             short_name,
-            long_name: None,
-            funct_classes: None,
-            com_param_refs: None,
-            diag_services: None,
-            single_ecu_jobs: None,
-            state_charts: None,
-            additional_audiences: None,
-            sdgs: None,
+            ..Default::default()
         });
         let protocol_args = dataformat::ProtocolArgs {
             diag_layer: Some(diag_layer),
@@ -500,6 +535,73 @@ impl<'a> EcuDataBuilder<'a> {
             short_name: Some(short_name_offset),
         };
         dataformat::FunctClass::create(&mut self.fbb, &funct_class_args)
+    }
+
+    /// Create a [`dataformat::SimpleValue`] holding a string value.
+    #[must_use]
+    pub fn create_simple_value(&mut self, value: &str) -> WIPOffset<dataformat::SimpleValue<'a>> {
+        let value_offset = self.fbb.create_string(value);
+        dataformat::SimpleValue::create(
+            &mut self.fbb,
+            &dataformat::SimpleValueArgs {
+                value: Some(value_offset),
+            },
+        )
+    }
+
+    /// Create a `REGULAR`-typed [`dataformat::ComParam`] with a minimal
+    /// [`dataformat::NormalDOP`] as its DOP.
+    ///
+    /// The DOP contains no typed information; it is sufficient for callers (such
+    /// as tests) that only need the `short_name` and `simple_value` of the param
+    /// and do not inspect DOP details.
+    #[must_use]
+    pub fn create_com_param(&mut self, short_name: &str) -> WIPOffset<dataformat::ComParam<'a>> {
+        let normal_dop =
+            dataformat::NormalDOP::create(&mut self.fbb, &dataformat::NormalDOPArgs::default());
+        let specific_dop_data = dataformat::SpecificDOPData::tag_as_normal_dop(normal_dop);
+        let dop = dataformat::DOP::create(
+            &mut self.fbb,
+            &dataformat::DOPArgs {
+                specific_data_type: dataformat::SpecificDOPData::NormalDOP,
+                specific_data: Some(specific_dop_data.value_offset()),
+                ..Default::default()
+            },
+        );
+        let regular_cp = dataformat::RegularComParam::create(
+            &mut self.fbb,
+            &dataformat::RegularComParamArgs {
+                dop: Some(dop),
+                ..Default::default()
+            },
+        );
+        let specific_data = dataformat::ComParamSpecificData::tag_as_regular_com_param(regular_cp);
+        let short_name_offset = self.fbb.create_string(short_name);
+        dataformat::ComParam::create(
+            &mut self.fbb,
+            &dataformat::ComParamArgs {
+                com_param_type: dataformat::ComParamType::REGULAR,
+                short_name: Some(short_name_offset),
+                specific_data_type: dataformat::ComParamSpecificData::RegularComParam,
+                specific_data: Some(specific_data.value_offset()),
+                ..Default::default()
+            },
+        )
+    }
+
+    /// Finish the builder by serialising a standalone [`dataformat::Protocol`] root
+    /// (rather than the usual [`dataformat::EcuData`] root) and return the raw bytes.
+    ///
+    /// This is the counterpart of [`Self::create_protocol`] for cases where a
+    /// `Protocol` must be the flatbuffer root rather than embedded inside an
+    /// `EcuData` object — for example when only a `Protocol` reference is needed
+    /// during a lookup and no full database is required.
+    ///
+    /// Consumes the builder.
+    #[must_use]
+    pub fn finish_protocol(mut self, protocol: WIPOffset<dataformat::Protocol<'a>>) -> Vec<u8> {
+        self.fbb.finish(protocol, None);
+        self.fbb.finished_data().to_vec()
     }
 
     pub fn create_com_param_ref(

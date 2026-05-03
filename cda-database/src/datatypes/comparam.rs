@@ -26,25 +26,36 @@ pub(super) fn lookup(
         DiagServiceError::InvalidDatabase("Protocol has no short name".to_owned()),
     )?;
 
-    let cp_ref = ecu_data
+    let ignore_protocol = ecu_data.config().ignore_protocol;
+
+    let com_param_refs = ecu_data
         .base_variant()?
         .diag_layer()
-        .and_then(|dl| dl.com_param_refs())
+        .and_then(|dl| dl.com_param_refs());
+
+    // When ignore_protocol is true, the protocol filter is bypassed and parameters
+    // are matched by name alone. This is safe because ignore_protocol validity
+    // (single protocol in DB) is enforced at database construction time.
+    let cp_ref = com_param_refs
+        .as_ref()
         .and_then(|refs| {
             refs.iter().find(|cp_ref| {
-                cp_ref
-                    .protocol()
-                    .and_then(|p| p.diag_layer().and_then(|dl| dl.short_name()))
-                    .is_some_and(|sn| sn == protocol_name)
-                    && cp_ref
-                        .com_param()
-                        .and_then(|cp| cp.short_name())
-                        .is_some_and(|n| n == param_name)
+                let name_matches = cp_ref
+                    .com_param()
+                    .and_then(|cp| cp.short_name())
+                    .is_some_and(|n| n == param_name);
+
+                name_matches
+                    && (ignore_protocol
+                        || cp_ref
+                            .protocol()
+                            .and_then(|p| p.diag_layer().and_then(|dl| dl.short_name()))
+                            .is_some_and(|sn| sn.eq_ignore_ascii_case(protocol_name)))
             })
         })
-        .ok_or(DiagServiceError::NotFound(format!(
-            "No ComParamRef found for {param_name} in protocol {protocol_name}"
-        )))?;
+        .ok_or_else(|| {
+            DiagServiceError::NotFound(format!("No ComParamRef found for {param_name}"))
+        })?;
 
     let cp = cp_ref.com_param().ok_or(DiagServiceError::InvalidDatabase(
         "ComParamRef has no ComParam".to_owned(),
@@ -245,4 +256,202 @@ pub fn map_nack_number_of_retries<K: AsRef<str>>(
     });
 
     key_result.map(|key| (key, *value))
+}
+
+#[cfg(test)]
+mod tests {
+    use cda_interfaces::{HashSet, HashSetExtensions};
+
+    use super::*;
+    use crate::datatypes::{
+        DatabaseConfig,
+        database_builder::{DiagLayerParams, EcuDataBuilder, EcuDataParams},
+    };
+
+    struct ComParamRefSpec<'a> {
+        protocol: &'a str,
+        name: &'a str,
+        value: &'a str,
+    }
+
+    fn do_lookup(
+        param_refs: &[ComParamRefSpec<'_>],
+        param_name: &str,
+        ignore_protocol: bool,
+    ) -> Result<ComParamValue, DiagServiceError> {
+        let db = build_db(param_refs, ignore_protocol)?;
+        let mut builder = EcuDataBuilder::new();
+        let protocol = builder.create_protocol("MY_PROTO", None, None, None);
+        let proto_bytes = builder.finish_protocol(protocol);
+        lookup(
+            &db,
+            &flatbuffers::root::<dataformat::Protocol<'_>>(&proto_bytes)
+                .expect("valid Protocol flatbuffer"),
+            param_name,
+        )
+    }
+
+    /// Build a `DiagnosticDatabase` that contains one base variant.
+    ///
+    /// Each element of `param_refs` describes one `ComParamRef` to attach:
+    ///   `(protocol_short_name, param_short_name, simple_value_str)`
+    ///
+    /// When `protocol` is `""` the ref is created without a protocol.
+    fn build_db(
+        param_refs: &[ComParamRefSpec<'_>],
+        ignore_protocol: bool,
+    ) -> Result<crate::datatypes::DiagnosticDatabase, DiagServiceError> {
+        let mut builder = EcuDataBuilder::new();
+
+        // Collect unique protocol names to create parent_refs for the variant.
+        let mut seen_protocols: HashSet<&str> = HashSet::new();
+        let cp_refs: Vec<_> = param_refs
+            .iter()
+            .map(|r| {
+                let com_param = builder.create_com_param(r.name);
+                let simple_value = builder.create_simple_value(r.value);
+
+                let protocol = if r.protocol.is_empty() {
+                    None
+                } else {
+                    seen_protocols.insert(r.protocol);
+                    Some(builder.create_protocol(r.protocol, None, None, None))
+                };
+
+                builder.create_com_param_ref(
+                    Some(simple_value),
+                    None,
+                    Some(com_param),
+                    protocol,
+                    None,
+                )
+            })
+            .collect();
+
+        // Create parent_refs pointing to the distinct protocols.
+        let parent_refs: Vec<_> = seen_protocols
+            .iter()
+            .map(|name| {
+                let proto = builder.create_protocol(name, None, None, None);
+                builder.create_parent_ref(
+                    dataformat::ParentRefType::Protocol,
+                    Some(dataformat::ParentRefType::tag_as_protocol(proto)),
+                )
+            })
+            .collect();
+
+        let diag_layer = builder.create_diag_layer(DiagLayerParams {
+            short_name: "TestLayer",
+            com_param_refs: Some(cp_refs),
+            ..Default::default()
+        });
+        let variant = builder.create_variant(
+            diag_layer,
+            true,
+            None,
+            if parent_refs.is_empty() {
+                None
+            } else {
+                Some(parent_refs)
+            },
+        );
+
+        builder.finish_with_config(
+            EcuDataParams {
+                ecu_name: "TestEcu",
+                revision: "1",
+                version: "1.0",
+                variants: Some(vec![variant]),
+                ..Default::default()
+            },
+            DatabaseConfig {
+                ignore_protocol,
+                ..Default::default()
+            },
+        )
+    }
+
+    #[test]
+    fn test_lookup_protocol_not_found_no_fallback() {
+        // DB has a ComParamRef for protocol "OTHER", but we look up "MY_PROTO".
+        let result = do_lookup(
+            &[ComParamRefSpec {
+                protocol: "OTHER",
+                name: "CP_MyParam",
+                value: "42",
+            }],
+            "CP_MyParam",
+            false,
+        );
+
+        assert!(
+            matches!(result, Err(DiagServiceError::NotFound(_))),
+            "expected NotFound, got an unexpected variant"
+        );
+    }
+
+    #[test]
+    fn test_lookup_fallback_single_protocol_match_found() {
+        // DB has one ComParamRef for protocol "DB_PROTO".
+        // We look up with a different protocol ("MY_PROTO"), but ignore_protocol=true.
+        let result = do_lookup(
+            &[ComParamRefSpec {
+                protocol: "DB_PROTO",
+                name: "CP_MyParam",
+                value: "99",
+            }],
+            "CP_MyParam",
+            true,
+        );
+
+        match result {
+            Ok(ComParamValue::Simple(s)) => assert_eq!(s.value, "99"),
+            Ok(ComParamValue::Complex(_)) => panic!("expected Simple, got Complex"),
+            Err(e) => panic!("expected Ok(Simple(\"99\")), got Err({e:?})"),
+        }
+    }
+
+    #[test]
+    fn test_lookup_fallback_single_protocol_no_match() {
+        let result = do_lookup(
+            &[ComParamRefSpec {
+                protocol: "DB_PROTO",
+                name: "CP_OtherParam",
+                value: "5",
+            }],
+            "CP_Missing",
+            true,
+        );
+
+        assert!(
+            matches!(result, Err(DiagServiceError::NotFound(_))),
+            "expected NotFound, got an unexpected variant"
+        );
+    }
+
+    #[test]
+    fn test_lookup_fallback_multiple_protocols_error() {
+        // DB has ComParamRefs for two distinct protocols.
+        let result = do_lookup(
+            &[
+                ComParamRefSpec {
+                    protocol: "PROTO_A",
+                    name: "CP_MyParam",
+                    value: "1",
+                },
+                ComParamRefSpec {
+                    protocol: "PROTO_B",
+                    name: "CP_MyParam",
+                    value: "2",
+                },
+            ],
+            "CP_MyParam",
+            true,
+        );
+
+        assert!(
+            matches!(result, Err(DiagServiceError::InvalidDatabase(_))),
+            "expected InvalidDatabase, got an unexpected variant"
+        );
+    }
 }

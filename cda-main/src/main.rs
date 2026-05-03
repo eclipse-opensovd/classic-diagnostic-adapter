@@ -41,10 +41,11 @@ struct AppArgs {
     #[arg(long)]
     gateway_port: Option<u16>,
 
-    // cannot use Action::SetTrue as it will treat
-    // absent arg same as `= false`
-    #[arg(short, long)]
-    onboard_tester: Option<bool>,
+    /// Protocol name used for com-param lookups
+    /// in the diagnostic database (matched case-insensitively).
+    /// Examples: `UDS_Ethernet_DoIP`, `UDS_Ethernet_DoIP_DOBT`
+    #[arg(long)]
+    protocol_name: Option<String>,
 
     #[arg(long)]
     listen_address: Option<String>,
@@ -232,9 +233,6 @@ impl AppArgs {
         )
     )]
     fn update_config(self, config: &mut Configuration) {
-        if let Some(onboard_tester) = self.onboard_tester {
-            config.onboard_tester = onboard_tester;
-        }
         if let Some(databases_path) = self.databases_path {
             config.database.path = databases_path;
         }
@@ -255,6 +253,9 @@ impl AppArgs {
         }
         if let Some(gateway_port) = self.gateway_port {
             config.doip.gateway_port = gateway_port;
+        }
+        if let Some(protocol_name) = self.protocol_name {
+            config.doip.protocol_name = protocol_name;
         }
         if let Some(listen_address) = self.listen_address {
             config.server.address = listen_address;

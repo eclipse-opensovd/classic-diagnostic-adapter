@@ -11,6 +11,7 @@
  */
 
 pub use cda_comm_doip::config::DoipConfig;
+pub use cda_database::DatabaseConfig;
 use cda_interfaces::{
     FunctionalDescriptionConfig, HashMap,
     datatypes::{
@@ -28,7 +29,6 @@ pub struct Configuration {
     pub doip: DoipConfig,
     pub database: DatabaseConfig,
     pub logging: cda_tracing::LoggingConfig,
-    pub onboard_tester: bool,
     pub flash_files_path: String,
     pub com_params: ComParams,
     pub flat_buf: FlatbBufConfig,
@@ -45,17 +45,6 @@ pub struct ServerConfig {
     pub port: u16,
 }
 
-#[derive(Deserialize, Serialize, Clone, Debug)]
-pub struct DatabaseConfig {
-    pub path: String,
-    pub naming_convention: DatabaseNamingConvention,
-    /// If true, the application will exit if no database could be loaded.
-    pub exit_no_database_loaded: bool,
-    /// If true, when variant detection fails to find a matching variant,
-    /// the ECU will fall back to the base variant instead of reporting an error.
-    pub fallback_to_base_variant: bool,
-}
-
 pub trait ConfigSanity {
     /// Checks the configuration for common mistakes and returns an error message if found.
     /// # Errors
@@ -66,12 +55,12 @@ pub trait ConfigSanity {
 impl Default for Configuration {
     fn default() -> Self {
         Configuration {
-            onboard_tester: true,
             database: DatabaseConfig {
                 path: ".".to_owned(),
                 naming_convention: DatabaseNamingConvention::default(),
                 exit_no_database_loaded: false,
                 fallback_to_base_variant: true,
+                ignore_protocol: false,
             },
             flash_files_path: ".".to_owned(),
             server: ServerConfig {
@@ -92,7 +81,6 @@ impl Default for Configuration {
                 enabled_functional_groups: None,
                 protocol_position:
                     cda_interfaces::datatypes::DiagnosticServiceAffixPosition::Suffix,
-                protocol_case_sensitive: false,
             },
             components: ComponentsConfig {
                 additional_fields: HashMap::from_iter([
@@ -196,7 +184,6 @@ mod tests {
     async fn load_config_toml() -> Result<(), Box<dyn std::error::Error>> {
         let config_str = r#"
 flash_files_path = "/app/flash"
-onboard_tester = true
 
 [database]
 path = "/app/database"

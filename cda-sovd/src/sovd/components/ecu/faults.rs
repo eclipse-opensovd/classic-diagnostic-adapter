@@ -314,10 +314,7 @@ pub(crate) mod id {
                             .collect::<serde_json::Map<_, _>>(),
                     );
                     remove_descriptions_recursive(&mut schema);
-                    {
-                        let s = crate::sovd::value_to_schema(schema)?;
-                        Some(s)
-                    }
+                    Some(crate::sovd::value_to_schema(schema)?)
                 } else {
                     None
                 },

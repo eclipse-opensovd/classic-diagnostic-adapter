@@ -144,11 +144,31 @@ pub struct EcuVariant {
     pub logical_address: u16,
 }
 
-#[derive(Debug, Clone, Copy)]
-pub enum Protocol {
-    DoIp,
-    DoIpDobt,
-    // todo: other protocols
+#[derive(Debug, Clone)]
+pub struct Protocol(String);
+
+impl Protocol {
+    #[must_use]
+    pub fn new(name: impl Into<String>) -> Self {
+        Self(name.into())
+    }
+
+    #[must_use]
+    pub fn str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl Default for Protocol {
+    fn default() -> Self {
+        Self("UDS_Ethernet_DoIP_DOBT".to_owned())
+    }
+}
+
+impl std::fmt::Display for Protocol {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -305,7 +325,7 @@ pub trait EcuManager:
     fn state(&self) -> EcuState;
 
     #[must_use]
-    fn protocol(&self) -> Protocol;
+    fn protocol(&self) -> &Protocol;
 
     #[must_use]
     fn is_loaded(&self) -> bool;
@@ -669,16 +689,6 @@ pub trait EcuManager:
 pub enum EcuManagerType {
     Ecu,
     FunctionalDescription,
-}
-
-impl Protocol {
-    #[must_use]
-    pub const fn value(&self) -> &'static str {
-        match self {
-            Protocol::DoIp => "UDS_Ethernet_DoIP",
-            Protocol::DoIpDobt => "UDS_Ethernet_DoIP_DOBT",
-        }
-    }
 }
 
 impl std::fmt::Display for EcuState {
