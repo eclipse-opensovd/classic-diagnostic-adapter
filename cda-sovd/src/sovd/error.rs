@@ -18,7 +18,7 @@ use axum::{
         Request,
         rejection::{JsonRejection, QueryRejection},
     },
-    http::{StatusCode, Uri},
+    http::{HeaderMap, StatusCode, Uri, header},
     middleware::Next,
     response::{IntoResponse, Response},
 };
@@ -409,7 +409,10 @@ pub(crate) async fn sovd_method_not_allowed_handler(
     }
 }
 
-pub(crate) async fn sovd_not_found_handler(uri: Uri) -> impl IntoResponse {
+pub(crate) async fn sovd_not_found_handler(headers: HeaderMap, uri: Uri) -> impl IntoResponse {
+    if !headers.contains_key(header::AUTHORIZATION) {
+        return StatusCode::UNAUTHORIZED.into_response();
+    }
     (
         StatusCode::NOT_FOUND,
         Json(
@@ -423,4 +426,5 @@ pub(crate) async fn sovd_not_found_handler(uri: Uri) -> impl IntoResponse {
             },
         ),
     )
+        .into_response()
 }
