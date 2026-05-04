@@ -148,7 +148,6 @@ async fn lock_unlock() -> Result<(), TestingError> {
     Ok(())
 }
 
-#[cfg(feature = "functional-locks-tests")]
 #[tokio::test]
 async fn cannot_lock_ecu_with_existing_functional_log() -> Result<(), TestingError> {
     let (runtime, _lock) = setup_integration_test(true).await?;
@@ -294,7 +293,6 @@ async fn ownership() -> Result<(), TestingError> {
     Ok(())
 }
 
-#[cfg(feature = "functional-locks-tests")]
 #[tokio::test]
 async fn test_vehicle_locking_blocked_by_other() -> Result<(), TestingError> {
     let (runtime, _lock) = setup_integration_test(true).await?;
@@ -357,21 +355,17 @@ async fn test_vehicle_lock_delete_hierarchy() -> Result<(), TestingError> {
             "id",
         )?;
 
-        let func_lock_id: String = if cfg!(feature = "functional-locks-tests") {
-            response_to_json_to_field(
-                &create_lock(
-                    default_timeout(),
-                    FUNCTIONAL_GROUP_ENDPOINT,
-                    StatusCode::CREATED,
-                    &runtime.config,
-                    user,
-                )
-                .await,
-                "id",
-            )?
-        } else {
-            "empty".to_owned()
-        };
+        let func_lock_id: String = response_to_json_to_field(
+            &create_lock(
+                default_timeout(),
+                FUNCTIONAL_GROUP_ENDPOINT,
+                StatusCode::CREATED,
+                &runtime.config,
+                user,
+            )
+            .await,
+            "id",
+        )?;
 
         Ok((ecu_lock_id, func_lock_id))
     }
@@ -393,7 +387,6 @@ async fn test_vehicle_lock_delete_hierarchy() -> Result<(), TestingError> {
         )
         .await;
 
-        #[cfg(feature = "functional-locks-tests")]
         lock_operation(
             FUNCTIONAL_GROUP_ENDPOINT,
             Some(func_lock_id),
@@ -569,11 +562,7 @@ pub(crate) const ECU_ENDPOINT: &str =
 
 pub(crate) const VEHICLE_ENDPOINT: &str = "locks";
 
-#[cfg(feature = "functional-locks-tests")]
 pub(crate) const ENDPOINTS: [&str; 3] = [FUNCTIONAL_GROUP_ENDPOINT, VEHICLE_ENDPOINT, ECU_ENDPOINT];
-
-#[cfg(not(feature = "functional-locks-tests"))]
-pub(crate) const ENDPOINTS: [&str; 2] = [VEHICLE_ENDPOINT, ECU_ENDPOINT];
 
 pub(crate) async fn lock_operation(
     endpoint: &str,
