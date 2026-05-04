@@ -27,6 +27,7 @@ members = [
   "cda-tracing",
   "cda-plugin-security",
   "cda-health",
+  "cda-extra",
   "integration-tests",
   "cda-build",
   "comm-mbedtls/mbedtls-sys",
@@ -44,6 +45,7 @@ cda-plugin-security = { path = "cda-plugin-security" }
 cda-sovd = { path = "cda-sovd" }
 cda-tracing = { path = "cda-tracing" }
 cda-health = { path = "cda-health" }
+cda-extra = { path = "cda-extra" }
 sovd-interfaces = { path = "cda-sovd-interfaces" }
 cda-build = { path = "cda-build" }
 mbedtls-sys = { path = "comm-mbedtls/mbedtls-sys" }
@@ -59,6 +61,7 @@ serde_json = "1.0"
 tokio = { version = "1.48.0", default-features = false }
 tokio-util = { version = "0.7.3", default-features = false }
 futures = "0.3"
+sd-notify = "0.5.0"
 regex = "1.12.2"
 uuid = "1.18.1"
 bytes = "1"

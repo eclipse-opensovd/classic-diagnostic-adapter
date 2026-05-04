@@ -38,6 +38,7 @@ cda-sovd = { workspace = true }
 cda-tracing = { workspace = true }
 cda-plugin-security = { workspace = true }
 cda-health = { workspace = true }
+cda-extra = { workspace = true, optional = true }
 # args
 clap = { workspace = true, features = ["derive"] }
 # config
@@ -86,3 +87,4 @@ dlt-tracing = ["cda-tracing/dlt-tracing"]
 integration-tests = []
 
 health = []
+systemd-notify = ["dep:cda-extra", "cda-extra/systemd-notify"]

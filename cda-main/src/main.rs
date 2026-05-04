@@ -137,6 +137,10 @@ async fn main() -> Result<(), AppError> {
         Option<Arc<cda_health::StatusHealthProvider>>,
     ) = (None, None);
 
+    #[cfg(feature = "systemd-notify")]
+    let _sd_notify_task =
+        cda_extra::create_sd_notify_task(health_state.clone(), clonable_shutdown_signal.clone());
+
     tracing::debug!("Webserver is running. Loading sovd routes...");
 
     let vehicle_data = opensovd_cda_lib::load_vehicle_data::<_, DefaultSecurityPluginData>(
