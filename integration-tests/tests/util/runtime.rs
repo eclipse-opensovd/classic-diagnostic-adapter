@@ -680,9 +680,17 @@ async fn wait_for_http_ready(
     service_name: &str,
     result: Option<http::StatusCode>,
 ) -> Result<(), TestingError> {
+    wait_for_http_ready_with_timeout(url, service_name, result, Duration::from_secs(10)).await
+}
+
+async fn wait_for_http_ready_with_timeout(
+    url: String,
+    service_name: &str,
+    result: Option<http::StatusCode>,
+    timeout: Duration,
+) -> Result<(), TestingError> {
     let client = reqwest::Client::new();
     let start_time = Instant::now();
-    let timeout = Duration::from_secs(10);
 
     while start_time.elapsed() < timeout {
         match client.get(&url).send().await {
@@ -706,7 +714,13 @@ async fn wait_for_http_ready(
 
 async fn wait_for_ecu_sim_ready(host: &str, sim_control_port: u16) -> Result<(), TestingError> {
     let url = format!("http://{host}:{sim_control_port}");
-    wait_for_http_ready(url, "ECU sim", None).await
+    // Allow extra time for Gradle to download its distribution on a cold cache.
+    let timeout = if use_docker() {
+        Duration::from_secs(10)
+    } else {
+        Duration::from_secs(300)
+    };
+    wait_for_http_ready_with_timeout(url, "ECU sim", None, timeout).await
 }
 
 pub(crate) async fn wait_for_cda_online(cfg: &ServerConfig) -> Result<(), TestingError> {
