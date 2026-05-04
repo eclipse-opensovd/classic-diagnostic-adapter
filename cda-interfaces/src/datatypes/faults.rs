@@ -25,7 +25,10 @@ pub const CLEAR_FAULT_MEM_POS_RESPONSE_SID: u8 = 0x54;
 /// Essentially the byte values
 /// are sub functions for service 0x19 (Read DTC information)
 #[repr(u8)]
-#[derive(Clone, Copy, PartialEq, Eq, Hash, strum_macros::EnumIter)]
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, Hash, strum_macros::EnumIter, strum_macros::EnumString,
+)]
+#[strum(ascii_case_insensitive)]
 pub enum DtcReadInformationFunction {
     FaultMemoryByStatusMask = 0x02,
     FaultMemorySnapshotRecordByDtcNumber = 0x04,
@@ -56,6 +59,16 @@ impl DtcReadInformationFunction {
         Self::iter().collect()
     }
 
+    /// Parses a DTC read information function from its string representation.
+    ///
+    /// # Errors
+    /// Returns `DiagServiceError::InvalidParameter` if `s` does not match any known
+    /// `DtcReadInformationFunction` variant.
+    pub fn try_from_str(s: &str) -> Result<Self, crate::DiagServiceError> {
+        std::str::FromStr::from_str(s).map_err(|_| crate::DiagServiceError::InvalidParameter {
+            possible_values: Self::iter().map(|v| format!("{v:?}")).collect(),
+        })
+    }
     #[must_use]
     pub fn is_user_scope(&self) -> bool {
         matches!(
@@ -90,7 +103,7 @@ impl DtcMask {
 }
 
 pub struct DtcLookup {
-    pub scope: String,
+    pub scope: DtcReadInformationFunction,
     pub service: DiagComm,
     pub dtcs: Vec<DtcRecord>,
 }
@@ -130,7 +143,7 @@ pub struct DtcStatus {
 #[derive(Debug, Clone)]
 pub struct DtcRecordAndStatus {
     pub record: DtcRecord,
-    pub scope: String,
+    pub scope: DtcReadInformationFunction,
     pub status: DtcStatus,
 }
 

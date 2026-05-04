@@ -858,7 +858,7 @@ impl<S: EcuGateway, R: DiagServiceResponse, T: EcuManager<Response = R>> UdsMana
         service_types: Vec<DtcReadInformationFunction>,
         memory_selection: Option<u8>,
         include_schema: bool,
-    ) -> Result<(R, String, Option<SchemaDescription>), DiagServiceError> {
+    ) -> Result<(R, DtcReadInformationFunction, Option<SchemaDescription>), DiagServiceError> {
         let ecu = self.ecu_manager(ecu_name)?;
         let (read_func, extended_data_lookup) = ecu
             .read()
@@ -912,7 +912,7 @@ impl<S: EcuGateway, R: DiagServiceResponse, T: EcuManager<Response = R>> UdsMana
         dtc_code: DtcCode,
         include_schema: bool,
         memory_selection: Option<u8>,
-        scope: &str,
+        scope: DtcReadInformationFunction,
     ) -> Result<(Option<ExtendedDataRecords>, Option<serde_json::Value>), DiagServiceError> {
         fn extract_schema_properties(schema_desc: &SchemaDescription) -> Option<serde_json::Value> {
             // todo after solving #54: we are missing the 'Selector' and the case name here
@@ -925,10 +925,7 @@ impl<S: EcuGateway, R: DiagServiceResponse, T: EcuManager<Response = R>> UdsMana
             schema.map(|schema| serde_json::Value::Object(schema.clone()))
         }
 
-        let ext_data_service_type = if DtcReadInformationFunction::UserMemoryDtcByStatusMask
-            .default_scope()
-            .eq_ignore_ascii_case(scope)
-        {
+        let ext_data_service_type = if scope.is_user_scope() {
             DtcReadInformationFunction::UserMemoryDtcExtDataRecordByDtcNumber
         } else {
             DtcReadInformationFunction::FaultMemoryExtDataRecordByDtcNumber
@@ -1006,7 +1003,7 @@ impl<S: EcuGateway, R: DiagServiceResponse, T: EcuManager<Response = R>> UdsMana
         dtc_code: DtcCode,
         include_schema: bool,
         memory_selection: Option<u8>,
-        scope: &str,
+        scope: DtcReadInformationFunction,
     ) -> Result<(Option<ExtendedSnapshots>, Option<serde_json::Value>), DiagServiceError> {
         fn extract_schema_properties(schema_desc: &SchemaDescription) -> Option<serde_json::Value> {
             let param_properties = schema_desc.get_param_properties()?;
@@ -1025,10 +1022,7 @@ impl<S: EcuGateway, R: DiagServiceResponse, T: EcuManager<Response = R>> UdsMana
                 Some(serde_json::Value::Object(schema))
             }
         }
-        let snapshot_service_type = if DtcReadInformationFunction::UserMemoryDtcByStatusMask
-            .default_scope()
-            .eq_ignore_ascii_case(scope)
-        {
+        let snapshot_service_type = if scope.is_user_scope() {
             DtcReadInformationFunction::UserMemoryDtcSnapshotRecordByDtcNumber
         } else {
             DtcReadInformationFunction::FaultMemorySnapshotRecordByDtcNumber
@@ -2183,7 +2177,7 @@ impl<S: EcuGateway, R: DiagServiceResponse, T: EcuManager<Response = R>> UdsEcu
             .filter(|(_, lookup)| {
                 scope
                     .as_ref()
-                    .is_none_or(|scope| scope.to_lowercase() == lookup.scope.to_lowercase())
+                    .is_none_or(|scope| scope.eq_ignore_ascii_case(lookup.scope.default_scope()))
             })
             .collect();
         if scoped_services.is_empty() {
@@ -2254,7 +2248,7 @@ impl<S: EcuGateway, R: DiagServiceResponse, T: EcuManager<Response = R>> UdsEcu
                     record.code,
                     DtcRecordAndStatus {
                         record,
-                        scope: lookup.scope.clone(),
+                        scope: lookup.scope,
                         status: get_dtc_status_for_mask(status_byte),
                     },
                 );
@@ -2264,7 +2258,7 @@ impl<S: EcuGateway, R: DiagServiceResponse, T: EcuManager<Response = R>> UdsEcu
                 for record in lookup.dtcs {
                     all_dtcs.entry(record.code).or_insert(DtcRecordAndStatus {
                         record,
-                        scope: lookup.scope.clone(),
+                        scope: lookup.scope,
                         status: get_dtc_status_for_mask(0),
                     });
                 }
@@ -2307,7 +2301,7 @@ impl<S: EcuGateway, R: DiagServiceResponse, T: EcuManager<Response = R>> UdsEcu
                     "DTC {sae_dtc} not found in ECU {ecu_name}"
                 )))?;
 
-        let scope = &record_and_status.scope.clone();
+        let scope = record_and_status.scope;
         let (snapshots, snapshot_schema) = if include_snapshot {
             self.map_snapshots(
                 ecu_name,

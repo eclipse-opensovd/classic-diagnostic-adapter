@@ -48,7 +48,7 @@ impl IntoSovd for DtcRecordAndStatus {
     fn into_sovd(self) -> Self::SovdType {
         Self::SovdType {
             code: format!("{:06X}", self.record.code),
-            scope: Some(self.scope),
+            scope: Some(self.scope.default_scope().to_string()),
             display_code: self.record.display_code,
             fault_name: self.record.fault_name,
             severity: Some(self.record.severity),
@@ -434,7 +434,7 @@ pub(crate) mod id {
 mod tests {
     use cda_interfaces::{
         HashMap,
-        datatypes::{DtcRecord, DtcStatus},
+        datatypes::{DtcReadInformationFunction, DtcRecord, DtcStatus},
         diagservices::mock::MockDiagServiceResponse,
         file_manager::mock::MockFileManager,
         mock::MockUdsEcu,
@@ -459,7 +459,7 @@ mod tests {
                 fault_name: "Test Fault".to_string(),
                 severity: 2,
             },
-            scope: "FaultMem".to_string(),
+            scope: DtcReadInformationFunction::FaultMemoryByStatusMask,
             status: DtcStatus {
                 test_failed: true,
                 test_failed_this_operation_cycle: false,
@@ -536,7 +536,10 @@ mod tests {
         assert_eq!(fault.display_code, test_dtc.record.display_code);
         assert_eq!(fault.fault_name, test_dtc.record.fault_name);
         assert_eq!(fault.severity, Some(test_dtc.record.severity));
-        assert_eq!(fault.scope, Some(test_dtc.scope.clone()));
+        assert_eq!(
+            fault.scope,
+            Some(test_dtc.scope.default_scope().to_string())
+        );
 
         // Verify fault status using values from test_dtc
         let status = fault.status.as_ref().expect("Status should be present");

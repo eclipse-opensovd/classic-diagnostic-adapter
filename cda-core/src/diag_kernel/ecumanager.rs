@@ -1445,14 +1445,7 @@ impl<S: SecurityPlugin> cda_interfaces::EcuManager for EcuManager<S> {
                     .map(|st| (service, st))
             })
             .map(|(service, dtc_service_type)| {
-                let scope = service
-                    .diag_comm()
-                    .and_then(|dc| dc.funct_class())
-                    // using first fc for lack of better option
-                    .and_then(|fc| fc.iter().next())
-                    .and_then(|fc| fc.short_name())
-                    .map(|s| s.replace('_', ""))
-                    .unwrap_or(dtc_service_type.default_scope().to_owned());
+                let scope = *dtc_service_type;
 
                 let service_short_name = service
                     .diag_comm()
@@ -2471,7 +2464,7 @@ impl<S: SecurityPlugin> EcuManager<S> {
         let predicate = |service: &datatypes::DiagService<'_>| {
             service.diag_comm().is_some_and(|dc| {
                 dc.short_name()
-                    .is_some_and(|name| name.eq_ignore_ascii_case(&lookup_name))
+                    .is_some_and(|name| starts_with_ignore_ascii_case(name, &lookup_name))
             }) && service
                 .request_id()
                 .is_some_and(|sid| prefixes.contains(&sid))
@@ -4159,8 +4152,6 @@ impl<S: SecurityPlugin> EcuManager<S> {
             dlt_context = dlt_ctx!("CORE"),
         )
     )]
-    // allow keeping the function together as it makes sense structurally
-    #[allow(clippy::too_many_lines)]
     fn map_dynamic_length_field_from_uds(
         &self,
         mapped_service: &datatypes::DiagService,
@@ -4215,13 +4206,9 @@ impl<S: SecurityPlugin> EcuManager<S> {
             &num_items_data,
         )?;
 
-        let repeated_dop =
-            dynamic_length_field_dop
-                .field()
-                .ok_or(DiagServiceError::InvalidDatabase(
-                    "DynamicLengthField field is None".to_owned(),
-                ))?;
-
+        let repeated_dop = datatypes::DopField(dynamic_length_field_dop.field().ok_or(
+            DiagServiceError::InvalidDatabase("DynamicLengthField field is None".to_owned()),
+        )?);
         let num_items: u32 = num_items_diag_val.try_into()?;
         let num_items_byte_pos = determine_num_items.byte_position() as usize;
         uds_payload.set_last_read_byte_pos(num_items_byte_pos.saturating_add(num_items_data.len()));
@@ -4244,74 +4231,29 @@ impl<S: SecurityPlugin> EcuManager<S> {
         let mut start = 0usize;
 
         for _ in 0..num_items {
-            let bytes_to_skip_before = uds_payload.bytes_to_skip();
-            uds_payload.push_slice(start, uds_payload.len())?;
-            // Inner item params may omit BYTE-POSITION, falling back to last_read_byte_pos.
-            // Reset it to 0 so stale state from count decode doesn't corrupt item decoding.
-            uds_payload.set_last_read_byte_pos(0);
-            let basic_struct_type = repeated_dop
-                .basic_structure()
-                .map(|d| d.specific_data_type());
+            let (item_data, item_size) = self.decode_dynamic_length_field_item(
+                mapped_service,
+                uds_payload,
+                data,
+                &repeated_dop,
+                start,
+            )?;
             tracing::debug!(
-                has_basic_structure = repeated_dop.basic_structure().is_some(),
-                has_env_data_desc = repeated_dop.env_data_desc().is_some(),
-                basic_struct_specific_data_type = ?basic_struct_type,
-                "DynamicLengthField item decode metadata"
+                item_index = repeated_data.len(),
+                item_size,
+                next_start = start.saturating_add(item_size),
+                keys = ?item_data.keys().collect::<Vec<_>>(),
+                "DynamicLengthField item decoded"
             );
-            if let Some(s) = repeated_dop
-                .basic_structure()
-                .and_then(|d| d.specific_data_as_structure().map(datatypes::StructureDop))
-            {
-                let struct_data =
-                    self.map_struct_from_uds(&s, mapped_service, uds_payload, data)?;
-                repeated_data.push(struct_data);
-                let item_size = s.byte_size().map_or_else(
-                    || {
-                        let delta_bytes_to_skip = uds_payload
-                            .bytes_to_skip()
-                            .saturating_sub(bytes_to_skip_before);
-                        uds_payload
-                            .last_read_byte_pos()
-                            .saturating_add(delta_bytes_to_skip)
-                    },
-                    |s| s as usize,
-                );
-                uds_payload.pop_slice()?;
-                start = start.saturating_add(item_size);
-            } else if let Some(env_data_desc_dop) = repeated_dop.env_data_desc() {
-                if let Some(env_data_desc) = env_data_desc_dop.specific_data_as_env_data_desc() {
-                    let env_data_desc = datatypes::EnvDataDescDop(env_data_desc);
-                    let outer_data = data.clone();
-                    let item_data = self.map_env_data_desc_item_from_uds(
-                        mapped_service,
-                        uds_payload,
-                        &outer_data,
-                        &env_data_desc,
-                        0,
-                    )?;
-                    let delta_bytes_to_skip = uds_payload
-                        .bytes_to_skip()
-                        .saturating_sub(bytes_to_skip_before);
-                    let item_size = uds_payload
-                        .last_read_byte_pos()
-                        .saturating_add(delta_bytes_to_skip);
-                    uds_payload.pop_slice()?;
-                    repeated_data.push(item_data);
-                    start = start.saturating_add(item_size);
-                } else {
-                    uds_payload.pop_slice()?;
-                    return Err(DiagServiceError::InvalidDatabase(
-                        "DynamicLengthField env_data_desc DOP is not EnvDataDesc type".to_owned(),
-                    ));
-                }
-            } else {
-                uds_payload.pop_slice()?;
-                return Err(DiagServiceError::InvalidDatabase(
-                    "DynamicLengthField repeated_dop is neither Structure nor EnvDataDesc"
-                        .to_owned(),
-                ));
-            }
+            repeated_data.push(item_data);
+            start = start.saturating_add(item_size);
         }
+        tracing::debug!(
+            total_items = repeated_data.len(),
+            final_start = start,
+            last_read_byte_pos = items_abs_start.saturating_add(start),
+            "DynamicLengthField decode complete"
+        );
         uds_payload.pop_slice()?;
         uds_payload.set_last_read_byte_pos(items_abs_start.saturating_add(start));
         data.insert(
@@ -4319,6 +4261,77 @@ impl<S: SecurityPlugin> EcuManager<S> {
             DiagDataTypeContainer::RepeatingStruct(repeated_data),
         );
         Ok(())
+    }
+
+    fn decode_dynamic_length_field_item(
+        &self,
+        mapped_service: &datatypes::DiagService,
+        uds_payload: &mut Payload,
+        data: &mut MappedDiagServiceResponsePayload,
+        repeated_dop: &datatypes::DopField,
+        start: usize,
+    ) -> Result<(HashMap<String, DiagDataTypeContainer>, usize), DiagServiceError> {
+        let bytes_to_skip_before = uds_payload.bytes_to_skip();
+        uds_payload.push_slice(start, uds_payload.len())?;
+        // Inner item params may omit BYTE-POSITION, falling back to last_read_byte_pos.
+        // Reset it to 0 so stale state from count decode doesn't corrupt item decoding.
+        uds_payload.set_last_read_byte_pos(0);
+
+        tracing::debug!(
+            has_basic_structure = repeated_dop.basic_structure().is_some(),
+            has_env_data_desc = repeated_dop.env_data_desc().is_some(),
+            basic_struct_specific_data_type = ?repeated_dop
+                .basic_structure()
+                .map(|d| d.specific_data_type()),
+            "DynamicLengthField item decode metadata"
+        );
+
+        if let Some(s) = repeated_dop
+            .basic_structure()
+            .and_then(|d| d.specific_data_as_structure().map(datatypes::StructureDop))
+        {
+            let struct_data = self.map_struct_from_uds(&s, mapped_service, uds_payload, data)?;
+            let item_size = s.byte_size().map_or_else(
+                || {
+                    let delta_bytes_to_skip = uds_payload
+                        .bytes_to_skip()
+                        .saturating_sub(bytes_to_skip_before);
+                    uds_payload
+                        .last_read_byte_pos()
+                        .saturating_add(delta_bytes_to_skip)
+                },
+                |s| s as usize,
+            );
+            uds_payload.pop_slice()?;
+            Ok((struct_data, item_size))
+        } else if let Some(env_data_desc_dop) = repeated_dop.env_data_desc() {
+            let env_data_desc = env_data_desc_dop.specific_data_as_env_data_desc().ok_or(
+                DiagServiceError::InvalidDatabase(
+                    "DynamicLengthField env_data_desc DOP is not EnvDataDesc type".to_owned(),
+                ),
+            )?;
+            let env_data_desc = datatypes::EnvDataDescDop(env_data_desc);
+            let item_data = self.map_env_data_desc_item_from_uds(
+                mapped_service,
+                uds_payload,
+                data,
+                &env_data_desc,
+                0,
+            )?;
+            let delta_bytes_to_skip = uds_payload
+                .bytes_to_skip()
+                .saturating_sub(bytes_to_skip_before);
+            let item_size = uds_payload
+                .last_read_byte_pos()
+                .saturating_add(delta_bytes_to_skip);
+            uds_payload.pop_slice()?;
+            Ok((item_data, item_size))
+        } else {
+            uds_payload.pop_slice()?;
+            Err(DiagServiceError::InvalidDatabase(
+                "DynamicLengthField repeated_dop is neither Structure nor EnvDataDesc".to_owned(),
+            ))
+        }
     }
 
     fn map_mux_dop_from_uds(
@@ -4431,13 +4444,12 @@ impl<S: SecurityPlugin> EcuManager<S> {
 
     /// Extracts the discriminator value from already-decoded outer data by name.
     /// Handles both `DtcStruct` (returns `.code`) and `RawContainer` (converts bytes to u32).
-    /// Falls back to scanning for any `DtcStruct` if the named param is absent.
     fn discriminator_value_from_outer_data(
         outer_data: &MappedDiagServiceResponsePayload,
         param_short_name: &str,
     ) -> Result<u32, DiagServiceError> {
         match outer_data.get(param_short_name) {
-            Some(DiagDataTypeContainer::DtcStruct(dtc)) => return Ok(dtc.code),
+            Some(DiagDataTypeContainer::DtcStruct(dtc)) => Ok(dtc.code),
             Some(DiagDataTypeContainer::RawContainer(raw)) => {
                 let val = operations::uds_data_to_serializable(
                     raw.data_type,
@@ -4445,7 +4457,7 @@ impl<S: SecurityPlugin> EcuManager<S> {
                     false,
                     &raw.data,
                 )?;
-                return match val {
+                match val {
                     DiagDataValue::UInt32(n) => Ok(n),
                     DiagDataValue::Int32(n) => u32::try_from(n).map_err(|_| {
                         DiagServiceError::ParameterConversionError(format!(
@@ -4456,18 +4468,12 @@ impl<S: SecurityPlugin> EcuManager<S> {
                         "EnvDataDesc discriminator '{param_short_name}' resolved to unexpected \
                          type: {val:?}"
                     ))),
-                };
+                }
             }
-            _ => {}
+            _ => Err(DiagServiceError::InvalidDatabase(format!(
+                "EnvDataDesc selector param '{param_short_name}' not found in decoded data"
+            ))),
         }
-        for container in outer_data.values() {
-            if let DiagDataTypeContainer::DtcStruct(dtc) = container {
-                return Ok(dtc.code);
-            }
-        }
-        Err(DiagServiceError::InvalidDatabase(format!(
-            "EnvDataDesc selector param '{param_short_name}' not found in decoded data"
-        )))
     }
 
     /// Looks up the discriminator value from `outer_data`, finds the matching `EnvData` in
@@ -5393,16 +5399,16 @@ fn extract_struct_dop_from_field(
 
 fn param_position_order(a: &datatypes::Parameter, b: &datatypes::Parameter) -> std::cmp::Ordering {
     match (a.has_byte_position(), b.has_byte_position()) {
-        // Both have a position → normal comparison
+        // Both have a position -> normal comparison
         (true, true) => a
             .byte_position()
             .cmp(&b.byte_position())
             .then(a.bit_position().cmp(&b.bit_position())),
-        // Only a has no position → a goes after b
+        // Only a has no position -> a goes after b
         (false, true) => std::cmp::Ordering::Greater,
-        // Only b has no position → b goes after a
+        // Only b has no position -> b goes after a
         (true, false) => std::cmp::Ordering::Less,
-        // Neither has a position → preserve order
+        // Neither has a position -> preserve order
         (false, false) => std::cmp::Ordering::Equal,
     }
 }
