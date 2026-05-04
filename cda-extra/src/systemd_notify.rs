@@ -1,6 +1,6 @@
 /*
  * SPDX-License-Identifier: Apache-2.0
- * SPDX-FileCopyrightText: 2025 The Contributors to Eclipse OpenSOVD (see CONTRIBUTORS)
+ * SPDX-FileCopyrightText: 2026 The Contributors to Eclipse OpenSOVD (see CONTRIBUTORS)
  *
  * See the NOTICE file(s) distributed with this work for additional
  * information regarding copyright ownership.
@@ -12,7 +12,7 @@
 
 use std::time::Duration;
 
-use cda_health::HealthState;
+use cda_health::{HealthState, Status as HealthStatus};
 use cda_interfaces::spawn_named;
 use tokio::task::JoinHandle;
 
@@ -38,51 +38,48 @@ pub fn create_sd_notify_task<F>(
 where
     F: Future<Output = ()> + Clone + Send + 'static,
 {
-    if let Ok(true) = sd_notify::booted()
-        && let Some(interval) = determine_interval()
-    {
-        // init sd notify task
-        let watchdog_future = async move {
-            let mut interval_timer = tokio::time::interval(interval);
-            let mut state = cda_health::Status::Starting;
-            loop {
-                interval_timer.tick().await;
-                state = trigger_watchdog(health_state.as_ref(), state).await;
-            }
-        };
-        let sd_notify_future = spawn_named!("sd_notify", async move {
-            tokio::select! {
-                _ = watchdog_future => {},
-                () = shutdown_signal => {},
-            }
-        });
-        tracing::info!(
-            "Systemd detected and watchdog enabled, initialized sd_notify task with interval of \
-             {:?} seconds",
-            interval.as_secs()
-        );
-        Some(sd_notify_future)
-    } else {
-        tracing::info!(
-            "Systemd not detected or watchdog not enabled, skipping sd_notify initialization"
-        );
-        None
+    // map std_notify::booted Err(_) to false and treat as not systemd booted
+    if !sd_notify::booted().unwrap_or(false) {
+        tracing::info!("Systemd not detected, skipping sd_notify initialization");
+        return None;
     }
+    let Some(interval) = determine_interval() else {
+        tracing::info!("Systemd watchdog not enabled, skipping sd_notify initialization");
+        return None;
+    };
+    // init sd notify task
+    let watchdog_future = async move {
+        let mut interval_timer = tokio::time::interval(interval);
+        let mut state = cda_health::Status::Starting;
+        loop {
+            interval_timer.tick().await;
+            state = trigger_watchdog(health_state.as_ref(), state).await;
+        }
+    };
+    let sd_notify_future = spawn_named!("sd_notify", async move {
+        tokio::select! {
+            _ = watchdog_future => {},
+            () = shutdown_signal => {},
+        }
+    });
+    tracing::info!(
+        "Systemd detected and watchdog enabled, initialized sd_notify task with interval of {:?} \
+         seconds",
+        interval.as_secs()
+    );
+    Some(sd_notify_future)
 }
 
 fn determine_interval() -> Option<Duration> {
-    if let Some(duration) = sd_notify::watchdog_enabled() {
+    sd_notify::watchdog_enabled().map(|duration| {
         // ensure we are sending a bit more often than the watchdog expects,
         // to avoid any timing issues
-        let interval = if let Some(interval) = duration.checked_sub(Duration::from_secs(5)) {
-            interval
+        if let Some(interval) = duration.checked_sub(Duration::from_secs(5)) {
+            interval.min(Duration::from_secs(1))
         } else {
             duration
-        };
-        Some(interval)
-    } else {
-        None
-    }
+        }
+    })
 }
 
 async fn trigger_watchdog(
@@ -112,34 +109,30 @@ async fn trigger_watchdog(
     new_status
 }
 
-fn fold_status(acc: cda_health::Status, status: cda_health::Status) -> cda_health::Status {
+fn fold_status(acc: HealthStatus, status: HealthStatus) -> HealthStatus {
     match (acc, status) {
         (
-            cda_health::Status::Up | cda_health::Status::Starting | cda_health::Status::Pending,
-            cda_health::Status::Failed,
+            HealthStatus::Up | HealthStatus::Starting | HealthStatus::Pending,
+            HealthStatus::Failed,
         )
-        | (cda_health::Status::Failed, _) => cda_health::Status::Failed,
-        (
-            cda_health::Status::Starting | cda_health::Status::Pending,
-            cda_health::Status::Pending,
-        ) => cda_health::Status::Starting,
-        (cda_health::Status::Starting | cda_health::Status::Pending, cda_health::Status::Up) => {
-            cda_health::Status::Up
+        | (HealthStatus::Failed, _) => HealthStatus::Failed,
+        (HealthStatus::Starting | HealthStatus::Pending, HealthStatus::Pending) => {
+            HealthStatus::Starting
         }
+        (HealthStatus::Starting | HealthStatus::Pending, HealthStatus::Up) => HealthStatus::Up,
         (_, status) => status,
     }
 }
 
-async fn fold_health_state(health_state: Option<&HealthState>) -> cda_health::Status {
-    if let Some(health_state) = health_state {
-        health_state
-            .query_all_providers()
-            .await
-            .into_values()
-            .fold(cda_health::Status::Starting, fold_status)
-    } else {
-        cda_health::Status::Up
-    }
+async fn fold_health_state(health_state: Option<&HealthState>) -> HealthStatus {
+    let Some(health_state) = health_state else {
+        return cda_health::Status::Up;
+    };
+    health_state
+        .query_all_providers()
+        .await
+        .into_values()
+        .fold(cda_health::Status::Starting, fold_status)
 }
 
 #[cfg(test)]
