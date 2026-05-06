@@ -1,6 +1,6 @@
 /*
  * SPDX-License-Identifier: Apache-2.0
- * SPDX-FileCopyrightText: 2025 The Contributors to Eclipse OpenSOVD (see CONTRIBUTORS)
+ * SPDX-FileCopyrightText: 2026 The Contributors to Eclipse OpenSOVD (see CONTRIBUTORS)
  *
  * See the NOTICE file(s) distributed with this work for additional
  * information regarding copyright ownership.
@@ -18,15 +18,14 @@ use axum::{
     extract::{FromRequestParts, OptionalFromRequestParts},
     response::{IntoResponse, Response},
 };
+#[cfg(feature = "forwarded")]
+use http::header::{FORWARDED, HeaderMap};
+use http::request::Parts;
 #[cfg(feature = "uri-authority")]
 use http::uri::Authority;
-use http::{
-    header::{FORWARDED, HeaderMap},
-    request::Parts,
-};
 
 #[cfg(feature = "x-forwarded-host")]
-const X_FORWARDED_HOST_HEADER_KEY: &str = "X-Forwarded-Host";
+const X_FORWARDED_HOST_HEADER_KEY: &str = "x-forwarded-host";
 
 /// Extractor that resolves the host of the request.
 ///
@@ -74,6 +73,7 @@ where
         parts: &mut Parts,
         _state: &S,
     ) -> Result<Option<Self>, Self::Rejection> {
+        // suppress unused-parameter warning when all host resolution features are disabled
         #[cfg(not(any(
             feature = "forwarded",
             feature = "x-forwarded-host",
@@ -82,12 +82,7 @@ where
         )))]
         let _ = parts;
 
-        #[cfg(any(
-            feature = "forwarded",
-            feature = "x-forwarded-host",
-            feature = "host-header",
-            feature = "uri-authority"
-        ))]
+        #[cfg(feature = "forwarded")]
         if let Some(host) = parse_forwarded(&parts.headers) {
             return Ok(Some(ExtractHost(host.to_owned())));
         }
@@ -143,13 +138,13 @@ impl IntoResponse for ExtractHostRejection {
     }
 }
 
-#[allow(warnings)]
+#[cfg(feature = "forwarded")]
 fn parse_forwarded(headers: &HeaderMap) -> Option<&str> {
     // if there are multiple `Forwarded` `HeaderMap::get` will return the first one
     let forwarded_values = headers.get(FORWARDED)?.to_str().ok()?;
 
     // get the first set of values
-    let first_value = forwarded_values.split(',').nth(0)?;
+    let first_value = forwarded_values.split(',').next()?;
 
     // find the value of the `host` field
     first_value.split(';').find_map(|pair| {
@@ -247,26 +242,12 @@ mod tests {
     }
 
     #[tokio::test]
+    #[cfg(feature = "uri-authority")]
     async fn optional_extractor() {
         let mut parts = Request::new(()).into_parts().0;
         parts.uri = "https://127.0.0.1:1234/image.jpg".parse().unwrap();
         let host = parts.extract::<Option<ExtractHost>>().await.unwrap();
-
-        #[cfg(any(
-            feature = "forwarded",
-            feature = "x-forwarded-host",
-            feature = "host-header",
-            feature = "uri-authority"
-        ))]
         assert!(host.is_some());
-
-        #[cfg(not(any(
-            feature = "forwarded",
-            feature = "x-forwarded-host",
-            feature = "host-header",
-            feature = "uri-authority"
-        )))]
-        assert!(host.is_none());
     }
 
     #[tokio::test]

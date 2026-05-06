@@ -23,6 +23,9 @@ workspace = true
 path = "src/lib.rs"
 
 [features]
+# Controls which host sources are considered during extraction
+# `default` enables all of host sources to preserve the previous axum-extra Host behavior
+# "forwarded", "x-forwarded-host", "host-header" and "uri-authority" enable parsing of each respective source header independently
 default = ["forwarded", "x-forwarded-host", "host-header", "uri-authority"]
 forwarded = []
 x-forwarded-host = []
