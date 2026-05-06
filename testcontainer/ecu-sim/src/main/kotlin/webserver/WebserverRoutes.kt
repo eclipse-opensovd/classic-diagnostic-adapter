@@ -29,6 +29,8 @@ import io.ktor.server.routing.delete
 import io.ktor.server.routing.get
 import io.ktor.server.routing.post
 import io.ktor.server.routing.put
+import kotlinx.serialization.Serializable
+import library.decodeHex
 import library.toHexString
 import networkInstances
 import org.slf4j.MDC
@@ -178,3 +180,48 @@ private suspend fun SimEcu.dtcFaultsByApplicationCall(call: ApplicationCall) =
         )
         null
     }
+
+/**
+ * DTO for configuring a raw UDS response override.
+ * When installed, any incoming request matching [requestHex] will receive
+ * [responseHex] as a raw UDS response (bytes sent as-is, no auto-prefix).
+ */
+@Serializable
+data class RawResponseOverrideDto(
+    val requestHex: String,
+    val responseHex: String,
+)
+
+/**
+ * Routes to install/remove raw UDS response overrides on ECUs.
+ * This is used in integration tests to simulate malformed ECU responses
+ * (e.g., responses with incorrect DID echo bytes).
+ *
+ * - PUT /{ecu}/override: Install a raw response override
+ * - DELETE /{ecu}/override: Remove the override
+ */
+fun Route.addRawResponseOverrideRoutes() {
+    put("/{ecu}/override") {
+        val ecu = findByEcuName(call) ?: return@put
+        val dto = call.receive<RawResponseOverrideDto>()
+        val requestPattern = dto.requestHex.replace(" ", "").lowercase()
+        val responseBytes = dto.responseHex.replace(" ", "").decodeHex()
+
+        ecu.addOrReplaceEcuInterceptor("RAW_OVERRIDE", alsoCallWhenEcuIsBusy = false) {
+            val incomingHex = this.message.toHexString(separator = "").lowercase()
+            if (incomingHex == requestPattern) {
+                respond(responseBytes)
+                true
+            } else {
+                false
+            }
+        }
+        call.respond(HttpStatusCode.NoContent)
+    }
+
+    delete("/{ecu}/override") {
+        val ecu = findByEcuName(call) ?: return@delete
+        ecu.removeInterceptor("RAW_OVERRIDE")
+        call.respond(HttpStatusCode.NoContent)
+    }
+}

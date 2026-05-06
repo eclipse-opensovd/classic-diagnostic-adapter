@@ -380,6 +380,17 @@ impl<S: EcuGateway, R: DiagServiceResponse, T: EcuManager<Response = R>> UdsMana
                                 // if we received a response matching our sent SID, return it
                                 // other responses are logged as warnings and ignored.
                                 if !msg.data.is_empty() && msg.is_response_for_sid(sent_sid) {
+                                    // Validate that echo bytes (e.g. DID) in the response
+                                    // match those in the request (ISO 14229-1).
+                                    if !msg.has_matching_echo_bytes(&payload.data) {
+                                        tracing::warn!(
+                                            "Response has correct SID but mismatched echo bytes \
+                                             (e.g. DID). Request: {:02X?}, Response: {:02X?}",
+                                            payload.data,
+                                            msg.data
+                                        );
+                                        continue 'read_uds_messages;
+                                    }
                                     tracing::debug!("Received expected UDS message: {:?}", msg);
                                     break 'read_uds_messages Ok(msg);
                                 }

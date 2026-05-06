@@ -185,6 +185,84 @@ impl ServicePayload {
     pub fn is_suppress_positive_response(&self) -> bool {
         self.data.get(1).is_some_and(|&b| b & 0x80 != 0)
     }
+
+    /// Validates that a positive response echoes back the expected identifier bytes
+    /// from the original request, as required by ISO 14229-1.
+    ///
+    /// Per ISO 14229-1, a positive response "parameter is an echo of [the identifier]
+    /// from the request message." Specifically:
+    /// - `ReadDataByIdentifier` (0x22): 2-byte `dataIdentifier` echo (Table 189)
+    /// - `WriteDataByIdentifier` (0x2E): 2-byte `dataIdentifier` echo (Table 280)
+    /// - `InputOutputControlByIdentifier` (0x2F): 2-byte `dataIdentifier` echo (Table 401)
+    /// - `RoutineControl` (0x31): 1-byte `routineControlType` (bits 6-0 of `SubFunction`,
+    ///   suppress-positive-response bit masked out) + 2-byte `routineIdentifier` (Table 428)
+    ///
+    /// Returns `true` if:
+    /// - The service does not require echo validation (no echo bytes defined), or
+    /// - The echoed bytes in the response match those in the request.
+    ///
+    /// Returns `false` if the echoed bytes do not match.
+    #[must_use]
+    pub fn has_matching_echo_bytes(&self, request_data: &[u8]) -> bool {
+        let Some(&sent_sid) = request_data.first() else {
+            return true;
+        };
+
+        // Only validate positive responses; negative responses are handled separately.
+        if !self.is_positive_response_for_sid(sent_sid) {
+            return true;
+        }
+
+        let echo_len = Self::echo_byte_count(sent_sid);
+        if echo_len == 0 {
+            return true;
+        }
+
+        // Check that we have enough bytes in both request and response.
+        // Echo bytes start at index 1 (after SID/response SID byte).
+        let Some(request_echo) = request_data.get(1..1usize.saturating_add(echo_len)) else {
+            return true; // Request too short to have echo bytes; skip validation.
+        };
+        let Some(response_echo) = self.data.get(1..1usize.saturating_add(echo_len)) else {
+            return false; // Response too short to contain expected echo bytes.
+        };
+
+        // For RoutineControl, the subfunction byte (index 1 of the request) may have the
+        // suppress-positive-response bit (0x80) set; the response never includes this bit.
+        // We mask it out for comparison.
+        if sent_sid == service_ids::ROUTINE_CONTROL {
+            let request_subfn =
+                request_echo.first().copied().unwrap_or(0) & crate::DEFAULT_SUBFUNCTION_MASK;
+            let response_subfn = response_echo.first().copied().unwrap_or(0);
+            if request_subfn != response_subfn {
+                return false;
+            }
+            // Compare remaining bytes (routine identifier) directly.
+            return request_echo.get(1..) == response_echo.get(1..);
+        }
+
+        request_echo == response_echo
+    }
+
+    /// Returns the number of echo bytes (after the response SID) that a positive response
+    /// for the given request SID must echo back from the request, per ISO 14229-1.
+    ///
+    /// The echo byte counts are derived from the positive response message definitions in
+    /// ISO 14229-1 (Tables 188, 279, 401, 428). Returns 0 for services where the spec does
+    /// not define echoed identifier bytes.
+    #[must_use]
+    pub const fn echo_byte_count(sent_sid: u8) -> usize {
+        match sent_sid {
+            // ReadDataByIdentifier, WriteDataByIdentifier,
+            // InputOutputControlByIdentifier: 2-byte DID
+            service_ids::READ_DATA_BY_IDENTIFIER
+            | service_ids::WRITE_DATA_BY_IDENTIFIER
+            | service_ids::INPUT_OUTPUT_CONTROL_BY_IDENTIFIER => 2,
+            // RoutineControl: 1-byte subfunction + 2-byte RoutineIdentifier
+            service_ids::ROUTINE_CONTROL => 3,
+            _ => 0,
+        }
+    }
 }
 
 /// Trait to provide communication parameters for an ECU.
@@ -613,5 +691,201 @@ impl std::fmt::Display for EcuState {
             EcuState::Disconnected => write!(f, "Disconnected"),
             EcuState::NoVariantDetected => write!(f, "NoVariantDetected"),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::service_ids;
+
+    fn make_payload(data: Vec<u8>) -> ServicePayload {
+        ServicePayload {
+            data,
+            source_address: 0x1000,
+            target_address: 0x0001,
+            new_session: None,
+            new_security: None,
+        }
+    }
+
+    // echo_byte_count
+
+    #[test]
+    fn echo_byte_count_read_data_by_identifier() {
+        assert_eq!(
+            ServicePayload::echo_byte_count(service_ids::READ_DATA_BY_IDENTIFIER),
+            2
+        );
+    }
+
+    #[test]
+    fn echo_byte_count_write_data_by_identifier() {
+        assert_eq!(
+            ServicePayload::echo_byte_count(service_ids::WRITE_DATA_BY_IDENTIFIER),
+            2
+        );
+    }
+
+    #[test]
+    fn echo_byte_count_io_control_by_identifier() {
+        assert_eq!(
+            ServicePayload::echo_byte_count(service_ids::INPUT_OUTPUT_CONTROL_BY_IDENTIFIER),
+            2
+        );
+    }
+
+    #[test]
+    fn echo_byte_count_routine_control() {
+        assert_eq!(
+            ServicePayload::echo_byte_count(service_ids::ROUTINE_CONTROL),
+            3
+        );
+    }
+
+    #[test]
+    fn echo_byte_count_other_services_returns_zero() {
+        assert_eq!(
+            ServicePayload::echo_byte_count(service_ids::SESSION_CONTROL),
+            0
+        );
+        assert_eq!(ServicePayload::echo_byte_count(service_ids::ECU_RESET), 0);
+        assert_eq!(
+            ServicePayload::echo_byte_count(service_ids::TESTER_PRESENT),
+            0
+        );
+    }
+
+    // has_matching_echo_bytes: ReadDataByIdentifier
+
+    #[test]
+    fn rdbi_matching_did_returns_true() {
+        // Request: ReadDataByIdentifier DID 0xF190
+        let request = vec![0x22, 0xF1, 0x90];
+        // Response: positive (0x62) with matching DID
+        let response = make_payload(vec![0x62, 0xF1, 0x90, 0x01, 0x02, 0x03]);
+        assert!(response.has_matching_echo_bytes(&request));
+    }
+
+    #[test]
+    fn rdbi_mismatched_did_returns_false() {
+        // Request: ReadDataByIdentifier DID 0xF190
+        let request = vec![0x22, 0xF1, 0x90];
+        // Response: positive (0x62) with WRONG DID (0xF200 instead of 0xF190)
+        let response = make_payload(vec![0x62, 0xF2, 0x00, 0x01, 0x02, 0x03]);
+        assert!(!response.has_matching_echo_bytes(&request));
+    }
+
+    #[test]
+    fn rdbi_mismatched_did_single_byte_difference_returns_false() {
+        // Request: ReadDataByIdentifier DID 0xF190
+        let request = vec![0x22, 0xF1, 0x90];
+        // Response: DID 0xF191 (off by one)
+        let response = make_payload(vec![0x62, 0xF1, 0x91, 0xAA]);
+        assert!(!response.has_matching_echo_bytes(&request));
+    }
+
+    #[test]
+    fn rdbi_response_too_short_for_echo_returns_false() {
+        // Request: ReadDataByIdentifier DID 0xF190
+        let request = vec![0x22, 0xF1, 0x90];
+        // Response: only has SID + 1 byte (missing second DID byte)
+        let response = make_payload(vec![0x62, 0xF1]);
+        assert!(!response.has_matching_echo_bytes(&request));
+    }
+
+    // has_matching_echo_bytes: negative response passthrough
+
+    #[test]
+    fn negative_response_always_returns_true() {
+        // Negative responses are validated by is_negative_response_for_sid, not echo bytes.
+        let request = vec![0x22, 0xF1, 0x90];
+        // Negative response: 0x7F, original SID, NRC
+        let response = make_payload(vec![0x7F, 0x22, 0x31]);
+        assert!(response.has_matching_echo_bytes(&request));
+    }
+
+    // has_matching_echo_bytes: services without echo validation
+
+    #[test]
+    fn session_control_no_echo_validation() {
+        let request = vec![0x10, 0x03]; // DiagnosticSessionControl - extendedSession
+        // Response has different subfunction - but no echo validation for this SID
+        let response = make_payload(vec![0x50, 0x01, 0x00, 0x19]);
+        assert!(response.has_matching_echo_bytes(&request));
+    }
+
+    // has_matching_echo_bytes: RoutineControl
+
+    #[test]
+    fn routine_control_matching_returns_true() {
+        // Request: RoutineControl Start (0x01) + RoutineID 0x1001
+        let request = vec![0x31, 0x01, 0x10, 0x01];
+        // Response: positive (0x71) with matching subfunction and RoutineID
+        let response = make_payload(vec![0x71, 0x01, 0x10, 0x01, 0xAA]);
+        assert!(response.has_matching_echo_bytes(&request));
+    }
+
+    #[test]
+    fn routine_control_suppress_positive_response_bit_masked() {
+        // Request: RoutineControl Start with suppressPosRsp (0x81) + RoutineID 0x1001
+        let request = vec![0x31, 0x81, 0x10, 0x01];
+        // Response: positive (0x71) with subfunction 0x01 (bit 7 cleared)
+        let response = make_payload(vec![0x71, 0x01, 0x10, 0x01]);
+        assert!(response.has_matching_echo_bytes(&request));
+    }
+
+    #[test]
+    fn routine_control_wrong_routine_id_returns_false() {
+        // Request: RoutineControl Start + RoutineID 0x1001
+        let request = vec![0x31, 0x01, 0x10, 0x01];
+        // Response: correct subfunction but wrong RoutineID (0x2002)
+        let response = make_payload(vec![0x71, 0x01, 0x20, 0x02]);
+        assert!(!response.has_matching_echo_bytes(&request));
+    }
+
+    #[test]
+    fn routine_control_wrong_subfunction_returns_false() {
+        // Request: RoutineControl Start (0x01) + RoutineID 0x1001
+        let request = vec![0x31, 0x01, 0x10, 0x01];
+        // Response: subfunction 0x02 (Stop) with correct RoutineID
+        let response = make_payload(vec![0x71, 0x02, 0x10, 0x01]);
+        assert!(!response.has_matching_echo_bytes(&request));
+    }
+
+    // has_matching_echo_bytes: edge cases
+
+    #[test]
+    fn empty_request_data_returns_true() {
+        let response = make_payload(vec![0x62, 0xF1, 0x90, 0x01]);
+        assert!(response.has_matching_echo_bytes(&[]));
+    }
+
+    #[test]
+    fn request_too_short_for_echo_returns_true() {
+        // Request has SID but no DID bytes (malformed, but we don't fail)
+        let request = vec![0x22];
+        let response = make_payload(vec![0x62, 0xF1, 0x90, 0x01]);
+        assert!(response.has_matching_echo_bytes(&request));
+    }
+
+    // has_matching_echo_bytes: WriteDataByIdentifier
+
+    #[test]
+    fn wdbi_matching_did_returns_true() {
+        // Request: WriteDataByIdentifier DID 0xF190 + data
+        let request = vec![0x2E, 0xF1, 0x90, 0xAA, 0xBB];
+        // Response: positive (0x6E) with matching DID
+        let response = make_payload(vec![0x6E, 0xF1, 0x90]);
+        assert!(response.has_matching_echo_bytes(&request));
+    }
+
+    #[test]
+    fn wdbi_mismatched_did_returns_false() {
+        // Request: WriteDataByIdentifier DID 0xF190
+        let request = vec![0x2E, 0xF1, 0x90, 0xAA];
+        // Response: positive with wrong DID
+        let response = make_payload(vec![0x6E, 0xF2, 0x00]);
+        assert!(!response.has_matching_echo_bytes(&request));
     }
 }

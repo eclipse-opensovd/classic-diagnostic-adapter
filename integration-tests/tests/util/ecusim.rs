@@ -279,3 +279,59 @@ pub(crate) async fn stop_and_clear_recording(
             .await?;
     crate::util::http::response_to_t(&response)
 }
+
+/// Install a raw UDS response override on the ECU simulator.
+///
+/// When installed, any incoming UDS request whose hex representation matches
+/// `request_hex` will receive `response_hex` as a raw response (no auto-prefix).
+/// This is useful for testing malformed ECU responses (e.g., wrong DID echo bytes).
+pub(crate) async fn set_raw_response_override(
+    sim: &EcuSim,
+    ecu: &str,
+    request_hex: &str,
+    response_hex: &str,
+) -> Result<(), TestingError> {
+    let mut url = sim_endpoint(sim)?;
+    url.path_segments_mut()
+        .map_err(|()| TestingError::InvalidUrl("cannot modify URL path".to_owned()))?
+        .push(ecu)
+        .push("override");
+
+    let body = serde_json::json!({
+        "requestHex": request_hex,
+        "responseHex": response_hex
+    })
+    .to_string();
+
+    crate::util::http::send_request(
+        StatusCode::NO_CONTENT,
+        http::Method::PUT,
+        Some(&body),
+        None,
+        url,
+    )
+    .await?;
+    Ok(())
+}
+
+/// Remove a previously installed raw response override from the ECU simulator.
+pub(crate) async fn clear_raw_response_override(
+    sim: &EcuSim,
+    ecu: &str,
+) -> Result<(), TestingError> {
+    let mut url = sim_endpoint(sim)?;
+    url.path_segments_mut()
+        .map_err(|()| TestingError::InvalidUrl("cannot modify URL path".to_owned()))?
+        .push(ecu)
+        .push("override");
+
+    crate::util::http::send_request(
+        StatusCode::NO_CONTENT,
+        http::Method::DELETE,
+        None,
+        None,
+        url,
+    )
+    .await?;
+    Ok(())
+}

@@ -19,6 +19,7 @@ use serde::de::DeserializeOwned;
 
 use crate::util::TestingError;
 
+#[derive(Debug)]
 pub(crate) struct Response {
     #[allow(dead_code)]
     status: StatusCode,
