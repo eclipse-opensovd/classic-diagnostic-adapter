@@ -534,7 +534,7 @@ Tester Present
         when a lock is held.
 
     .. uml::
-        :caption: Tester Present — Component Lock
+        :caption: Tester Present -- Component Lock
 
         @startuml
         skinparam backgroundColor #FFFFFF
@@ -567,7 +567,7 @@ Tester Present
         @enduml
 
     .. uml::
-        :caption: Tester Present — Functional Group Lock
+        :caption: Tester Present -- Functional Group Lock
 
         @startuml
         skinparam backgroundColor #FFFFFF

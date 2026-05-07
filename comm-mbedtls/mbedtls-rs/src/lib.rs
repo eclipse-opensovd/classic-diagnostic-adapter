@@ -111,7 +111,7 @@
 //!
 //!     loop {
 //!         let (tcp, _addr) = listener.accept().await?;
-//!         let config = config.clone(); // Arc::clone — cheap
+//!         let config = config.clone(); // Arc::clone - cheap
 //!
 //!         tokio::spawn(async move {
 //!             let mut tls = TlsStream::accept(config, tcp).await.unwrap();

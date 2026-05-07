@@ -1361,8 +1361,8 @@ mod tests {
             condensed: false,
         };
         let payload: Vec<u8> = vec![0b_1010_1010];
-        // 10101010 -- payload
-        // 11110000 -- mask
+        // 10101010 - payload
+        // 11110000 - mask
         // ----------
         // 10100000
         let (data, bit_len) = unpack_data(8, 0, Some(&mask), &payload, ByteOrder::Keep).unwrap();
@@ -1376,9 +1376,9 @@ mod tests {
             condensed: true,
         };
         let payload: Vec<u8> = vec![0b_1010_1111];
-        // 10101010 -- payload
-        // 11110000 -- mask
-        // 10100000 -- to condense extract the bits from the payload where the mask has "1"s.
+        // 10101010 - payload
+        // 11110000 - mask
+        // 10100000 - to condense extract the bits from the payload where the mask has "1"s.
         // 1010     --> pad msb
         // 00001010 --> result byte
         let (data, bit_len) = unpack_data(8, 0, Some(&mask), &payload, ByteOrder::Keep).unwrap();
@@ -1393,10 +1393,10 @@ mod tests {
             condensed: true,
         };
 
-        // 11111111 -- payload
-        // 10101010 -- mask
+        // 11111111 - payload
+        // 10101010 - mask
         // ----------> apply mask
-        // 10101010 -- to condense extract the bits from the payload where the mask has "1"s.
+        // 10101010 - to condense extract the bits from the payload where the mask has "1"s.
         // 1-1-1-1-
         let payload: Vec<u8> = vec![0b_1111_1111, 0b_1111_1111];
         let (data, bit_len) = unpack_data(8, 0, Some(&mask), &payload, ByteOrder::Keep).unwrap();
@@ -1523,9 +1523,9 @@ mod tests {
             condensed: true,
         };
         let source_value = vec![0b_0000_1100];
-        // 0101_0101 -- mask
-        // 0000_1100 -- source value
-        // 0101_0000 -- init output with mask, then copy bits from source value
+        // 0101_0101 - mask
+        // 0000_1100 - source value
+        // 0101_0000 - init output with mask, then copy bits from source value
         // where mask is 1
         let (result, len) =
             pack_data(8, 0, Some(&mask), &source_value, DataAlignment::Right).unwrap();
@@ -1549,8 +1549,8 @@ mod tests {
             condensed: true,
         };
         let source_value = vec![0b_1111_0000];
-        // 1010_1010 -- mask
-        // 1111_0000 -- value
+        // 1010_1010 - mask
+        // 1111_0000 - value
         // Mask bits from LSB | output | bit of value
         // 0 | 0 | -
         // 1 | 0 | 0
@@ -1571,9 +1571,9 @@ mod tests {
             condensed: true,
         };
         let source_value = vec![0b_1010_1010];
-        // 1010_1010 -- value
-        // 1111_1111 -- mask
-        // 1010_1010 -- bits of source where mask = 1
+        // 1010_1010 - value
+        // 1111_1111 - mask
+        // 1010_1010 - bits of source where mask = 1
         let (result, len) =
             pack_data(8, 0, Some(&mask), &source_value, DataAlignment::Right).unwrap();
         assert_eq!(result, vec![0b_1010_1010]);
@@ -1586,8 +1586,8 @@ mod tests {
         };
         let source_value = vec![0b_11];
 
-        // 1000_0001 -- mask
-        // 0000_0011 -- value
+        // 1000_0001 - mask
+        // 0000_0011 - value
         let (result, len) =
             pack_data(8, 0, Some(&mask), &source_value, DataAlignment::Right).unwrap();
         assert_eq!(result, vec![0b_1000_0001]);
@@ -1654,8 +1654,8 @@ mod tests {
             condensed: true,
         };
         let source_value = vec![0b_1111_1111, 0b11];
-        // 1111_1111 0000_0011 -- input
-        // 1111_1111 0000_0011 -- mask
+        // 1111_1111 0000_0011 - input
+        // 1111_1111 0000_0011 - mask
         let (result, len) =
             pack_data(10, 0, Some(&mask), &source_value, DataAlignment::Right).unwrap();
         assert_eq!(result, vec![0b_1100_0000, 0b_0000_0011]);
@@ -2261,7 +2261,7 @@ mod tests {
 
     #[test]
     fn test_encode_standard_length_bytefield_exact_length() {
-        // 64 bytes into 512-bit (64-byte) ByteField -- exact fit, no padding needed.
+        // 64 bytes into 512-bit (64-byte) ByteField - exact fit, no padding needed.
         let input: Vec<u8> = (0x30..=0x6F).collect(); // 64 bytes
         assert_eq!(input.len(), 64);
         let expected = input.clone();
@@ -2312,11 +2312,11 @@ mod tests {
 
     #[test]
     fn test_encode_standard_length_condensed() {
-        // 1111_1111 0000_1111 -- mask
-        // 0001_0010 0011_0100 -- input
-        // 0010_0011 0000_0100 -- condensed input
-        // 1111_1111  -- mask
-        // 0001_0010 0011 -- input
+        // 1111_1111 0000_1111 - mask
+        // 0001_0010 0011_0100 - input
+        // 0010_0011 0000_0100 - condensed input
+        // 1111_1111  - mask
+        // 0001_0010 0011 - input
         // 0010 0011
         // 0010_0011
         // 0010_0000
@@ -2466,15 +2466,15 @@ mod tests {
             .encode(input.clone(), &mut uds_payload, 0, 0)
             .unwrap();
 
-        // 1100_1100 0011_0011 -- input
-        // 1000_0001 1000_0001 -- mask
-        // 1000_0000 0000_0001 -- mask & input
+        // 1100_1100 0011_0011 - input
+        // 1000_0001 1000_0001 - mask
+        // 1000_0000 0000_0001 - mask & input
         //
-        // 1010_1010 0101_0101 -- payload
-        // 0111_1110 0111_1110 -- !mask
-        // 0010_1010 0101_0100 -- payload & !mask
-        // 1000_0000 0000_0001 -- mask & payload
-        // 1010_1010 0101_0101 -- (mask & payload) | (input & !mask)
+        // 1010_1010 0101_0101 - payload
+        // 0111_1110 0111_1110 - !mask
+        // 0010_1010 0101_0100 - payload & !mask
+        // 1000_0000 0000_0001 - mask & payload
+        // 1010_1010 0101_0101 - (mask & payload) | (input & !mask)
         assert_eq!(uds_payload, vec![0b_1010_1010, 0b_0101_0101]);
     }
 
@@ -2547,8 +2547,8 @@ mod tests {
             .encode(input.clone(), &mut uds_payload, 3, 6)
             .unwrap();
 
-        // 0000_0000 0000_0000 1100_1100 -- input
-        // 1110_1001 1101_0001 1101_1111 -- mask
+        // 0000_0000 0000_0000 1100_1100 - input
+        // 1110_1001 1101_0001 1101_1111 - mask
         // 1. combine mask and input with condensing rules.
         // 111010011101000111001100
         // 2. prepare cut out
@@ -2935,10 +2935,10 @@ mod tests {
         )
         .unwrap();
 
-        // 0001 0010 0011_0100 -- payload
-        // 1111_1111 0000_1111 -- mask
+        // 0001 0010 0011_0100 - payload
+        // 1111_1111 0000_1111 - mask
         // 0001 0010 ---- 0100
-        // 0000 0001 0010_0100 -- condensed result
+        // 0000 0001 0010_0100 - condensed result
         // 0000_0000 0000_0000
         let (data, bit_len) = diag_type.decode(&payload, 0, 0).unwrap();
         assert_eq!(data, vec![0b_0000_0001, 0b_0010_0100]);

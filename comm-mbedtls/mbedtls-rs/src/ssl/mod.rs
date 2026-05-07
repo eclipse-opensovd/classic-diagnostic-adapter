@@ -10,7 +10,7 @@
  * https://www.apache.org/licenses/LICENSE-2.0
  */
 
-//! SSL/TLS module — safe wrappers around `mbedtls_ssl_config` and `mbedtls_ssl_context`.
+//! SSL/TLS module - safe wrappers around `mbedtls_ssl_config` and `mbedtls_ssl_context`.
 
 mod config;
 mod context;

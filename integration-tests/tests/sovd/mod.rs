@@ -341,7 +341,7 @@ where
 {
     std::panic::set_hook(Box::new(move |_| {
         // Create a new runtime to drive the future to completion.
-        // Don't use Handle::current().block_on() here — it will
+        // Don't use Handle::current().block_on() here - it will
         // deadlock if the panic happens on an async worker thread.
         let rt = tokio::runtime::Builder::new_current_thread()
             .enable_all()

@@ -32,12 +32,12 @@
  * If \p pub_raw_len is 32 the input is taken as-is.  Otherwise it is
  * parsed as a DER-encoded SubjectPublicKeyInfo (RFC 8410 §4):
  *
- *   SEQUENCE {                           -- SubjectPublicKeyInfo
- *     SEQUENCE {                         -- AlgorithmIdentifier
- *       OID 1.3.101.112                  --   id-Ed25519
+ *   SEQUENCE {                           - SubjectPublicKeyInfo
+ *     SEQUENCE {                         - AlgorithmIdentifier
+ *       OID 1.3.101.112                  -   id-Ed25519
  *       -- parameters MUST be absent (RFC 8410 §3)
  *     }
- *     BIT STRING (0 unused bits)         -- 32-byte raw public key
+ *     BIT STRING (0 unused bits)         - 32-byte raw public key
  *   }
  *
  * \param[in]  pub_raw      Raw key or DER-encoded SubjectPublicKeyInfo.
@@ -72,7 +72,7 @@ static inline int ed25519_extract_raw_pubkey(
     int ret;
 
     /*
-     * Step 1 – Outer SEQUENCE (SubjectPublicKeyInfo).
+     * Step 1 - Outer SEQUENCE (SubjectPublicKeyInfo).
      * It must span exactly the entire input; trailing data is rejected.
      */
     ret = mbedtls_asn1_get_tag(&p, end, &len,
@@ -82,7 +82,7 @@ static inline int ed25519_extract_raw_pubkey(
     }
 
     /*
-     * Step 2 – Inner SEQUENCE (AlgorithmIdentifier).
+     * Step 2 - Inner SEQUENCE (AlgorithmIdentifier).
      * Record where the AlgorithmIdentifier content ends so we can
      * verify that no unexpected trailing data (e.g. parameters) follows.
      */
@@ -94,10 +94,10 @@ static inline int ed25519_extract_raw_pubkey(
     unsigned char *alg_end = p + len;
 
     /*
-     * Step 3 – OID inside AlgorithmIdentifier.
+     * Step 3 - OID inside AlgorithmIdentifier.
      * After mbedtls_asn1_get_tag() succeeds, `p` points to the first
      * byte of the OID value and `oid_len` holds its length.
-     * Verify it matches id-Ed25519 (1.3.101.112 → 0x2B 0x65 0x70).
+     * Verify it matches id-Ed25519 (1.3.101.112 --> 0x2B 0x65 0x70).
      */
     size_t oid_len;
     ret = mbedtls_asn1_get_tag(&p, alg_end, &oid_len, MBEDTLS_ASN1_OID);
@@ -111,7 +111,7 @@ static inline int ed25519_extract_raw_pubkey(
     p += oid_len;
 
     /*
-     * Step 4 – RFC 8410 §3: "For all of the OIDs, the parameters
+     * Step 4 - RFC 8410 §3: "For all of the OIDs, the parameters
      * MUST be absent."  Reject if anything follows the OID inside
      * the AlgorithmIdentifier SEQUENCE.
      */
@@ -120,7 +120,7 @@ static inline int ed25519_extract_raw_pubkey(
     }
 
     /*
-     * Step 5 – BIT STRING containing the raw public key.
+     * Step 5 - BIT STRING containing the raw public key.
      * mbedtls_asn1_get_bitstring_null() parses the tag and length,
      * and verifies the "unused bits" octet is 0x00 (required for
      * Ed25519 since the key is an integral number of bytes).
@@ -132,7 +132,7 @@ static inline int ed25519_extract_raw_pubkey(
     }
 
     /*
-     * Step 6 – Verify there is no trailing data after the BIT STRING
+     * Step 6 - Verify there is no trailing data after the BIT STRING
      * content.  (The outer SEQUENCE check in step 1 already bounds the
      * total size, but being explicit here catches internal parse bugs.)
      */

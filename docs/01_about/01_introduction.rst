@@ -103,20 +103,20 @@ forwarding them over the DoIP transport.
 Data-Driven Approach via MDD
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 
-The CDA uses a **data-driven** approach: all knowledge about ECUs — their logical addresses,
+The CDA uses a **data-driven** approach: all knowledge about ECUs -- their logical addresses,
 supported services, data identifiers, routines, communication timing parameters, and session
-configuration — is loaded at runtime from **MDD (Marvelous Diagnostic Description) files**. These files
+configuration -- is loaded at runtime from **MDD (Marvelous Diagnostic Description) files**. These files
 are the diagnostic description database for the vehicle and contain the full definition of what
 each ECU supports.
 
 This means the CDA itself contains no hard-coded ECU knowledge. Instead it reads the MDD files on
 startup and configures all communication parameters (timeouts, retry counts, tester present
 behavior, addressing) per ECU from those files. Adding support for a new ECU or updating its
-diagnostic description requires only a new or updated MDD file — no code changes.
+diagnostic description requires only a new or updated MDD file -- no code changes.
 
 A client (e.g. a diagnostic tool or test script) communicates with the CDA exclusively through the
 SOVD REST API using JSON over HTTP. The CDA uses the MDD data to translate each incoming JSON
-request into the appropriate UDS service call and returns the ECU's response as a JSON reply —
+request into the appropriate UDS service call and returns the ECU's response as a JSON reply --
 the client never deals with raw UDS bytes directly.
 
 .. uml::
@@ -206,8 +206,8 @@ UDS Request-Response Flow
 Every UDS exchange follows the same basic pattern: the CDA sends a request frame (SID + payload),
 the DoIP gateway acknowledges receipt at the transport layer, and the ECU eventually replies with
 either a positive response (``SID + 0x40``) or a negative response (``0x7F`` + SID + NRC).
-Certain Negative Response Codes (NRCs) signal transient conditions — for example, NRC ``0x78``
-(Response Pending) means the ECU needs more time — and the CDA handles these automatically
+Certain Negative Response Codes (NRCs) signal transient conditions -- for example, NRC ``0x78``
+(Response Pending) means the ECU needs more time -- and the CDA handles these automatically
 according to configurable policies sourced from the MDD files.
 
 .. uml::

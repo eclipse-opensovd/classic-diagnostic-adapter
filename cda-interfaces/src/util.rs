@@ -94,7 +94,7 @@ pub mod serde_ext {
 
     /// Deserializes a `HashMap<String, V, S>` from a map with string keys that may
     /// be decimal (`"16"`) or hexadecimal (`"0x10"`, `"0X10"`). All keys are validated
-    /// as valid `u8` values (0–255) and normalized to their decimal string representation.
+    /// as valid `u8` values (0-255) and normalized to their decimal string representation.
     /// This can be used i.e. for configuration where figment / toml parse do not
     /// natively support integer keys.
     ///
@@ -420,10 +420,10 @@ mod tests {
         assert_eq!(result, vec![0b_11, 0xFF, 0xFF]);
 
         // Extracting 13 bits starting from bit position 5
-        // 101010111100110101000010 -- input
-        //      1010101111001101010 -- from bit pos 5
-        //            1111001101010 -- 13 bits
-        //        00011110 01101010 -- 2 result bytes
+        // 101010111100110101000010 - input
+        //      1010101111001101010 - from bit pos 5
+        //            1111001101010 - 13 bits
+        //        00011110 01101010 - 2 result bytes
         let result = extract_bits(13, 5, &[0b_1010_1011, 0b_1100_1101, 0b_0100_0010]).unwrap();
         assert_eq!(result, vec![0b_0001_1110, 0b_0110_1010]);
 
@@ -435,9 +435,9 @@ mod tests {
         assert_eq!(result, vec![0b_101]);
 
         // Extracting 4 bits starting from bit position 6
-        // 1111000000001111 -- input
-        //       1111000000 -- from bit pos 6
-        //          1000000 -- 5 bits
+        // 1111000000001111 - input
+        //       1111000000 - from bit pos 6
+        //          1000000 - 5 bits
         let result = extract_bits(7, 6, &[0b_1111_0000, 0b_0000_1111]).unwrap();
         assert_eq!(result, vec![0b_0100_0000]);
     }

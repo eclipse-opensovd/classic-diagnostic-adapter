@@ -545,7 +545,7 @@ async fn test_flash_transfer_zero_length_rejected() {
         .and_then(|v| v.as_str())
         .expect("Expected 'id' in flash file");
 
-    // Attempt flash transfer with length=0 -- should be rejected
+    // Attempt flash transfer with length=0 - should be rejected
     let zero_length_body = serde_json::json!({
         "blocksequencecounter": 1,
         "blocksize": 128,

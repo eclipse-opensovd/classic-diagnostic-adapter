@@ -105,7 +105,7 @@ impl X509Certificate {
         }
     }
 
-    /// Raw pointer — used internally by `SslConfig`.
+    /// Raw pointer - used internally by `SslConfig`.
     pub(crate) fn as_mut_ptr(&mut self) -> *mut ffi::mbedtls_x509_crt {
         &raw mut self.inner
     }
@@ -199,7 +199,7 @@ impl PrivateKey {
         }
     }
 
-    /// Raw pointer — used internally by `SslConfig`.
+    /// Raw pointer - used internally by `SslConfig`.
     pub(crate) fn as_mut_ptr(&mut self) -> *mut ffi::mbedtls_pk_context {
         &raw mut self.inner
     }

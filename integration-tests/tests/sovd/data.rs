@@ -27,7 +27,7 @@ use crate::{
 /// According to ISO 14229-1, a `ReadDataByIdentifier` positive response must echo
 /// the same DID bytes as the request. If the ECU responds with a different DID,
 /// the response is invalid and CDA should treat it as if no valid response was
-/// received (timeout → HTTP 504 Gateway Timeout).
+/// received (timeout -> HTTP 504 Gateway Timeout).
 ///
 /// This test verifies that the CDA correctly ignores an invalid DID and returns
 /// HTTP 504 if no further correct message is received within the timeout period.

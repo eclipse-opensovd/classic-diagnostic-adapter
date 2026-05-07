@@ -2104,7 +2104,7 @@ impl<S: EcuGateway, R: DiagServiceResponse, T: EcuManager<Response = R>> UdsEcu
                 }
             }
             VariantDetectionResult::AllFallbacks => {
-                // No specific variant found despite online ECUs — mark all as undetected.
+                // No specific variant found despite online ECUs - mark all as undetected.
                 // Falling back to base variant is only allowed when there are no duplicates.
                 for ecu_name in &duplicated_ecus {
                     if let Some(ecu) = self.ecus.get(ecu_name) {
