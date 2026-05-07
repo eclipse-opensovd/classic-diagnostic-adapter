@@ -71,7 +71,6 @@ jobs:
               }
             }
 
-            // Get the latest review state per reviewer
             const { data: reviews } = await github.rest.pulls.listReviews({
               owner: context.repo.owner,
               repo: context.repo.repo,
@@ -89,14 +88,19 @@ jobs:
             const allApproved = states.length > 0
               && states.every(s => s === 'APPROVED' || s === 'DISMISSED');
 
-            // Check draft status and unresolved review threads via GraphQL
             const { repository } = await github.graphql(`
               query($owner: String!, $repo: String!, $pr: Int!) {
                 repository(owner: $owner, name: $repo) {
                   pullRequest(number: $pr) {
                     isDraft
+                    author { login }
                     reviewThreads(first: 100) {
-                      nodes { isResolved }
+                      nodes {
+                        isResolved
+                        comments(first: 100) {
+                          nodes { author { login } }
+                        }
+                      }
                     }
                   }
                 }
@@ -107,13 +111,24 @@ jobs:
               pr: prNumber,
             });
 
-            const isDraft = repository.pullRequest.isDraft;
-            const hasUnresolvedThreads = repository.pullRequest.reviewThreads.nodes
-              .some(thread => !thread.isResolved);
+            const pr = repository.pullRequest;
+            const isDraft = pr.isDraft;
+            const prAuthor = pr.author?.login;
 
-            const needsChanges = hasChangesRequested || hasUnresolvedThreads;
+            const unresolvedThreads = pr.reviewThreads.nodes
+              .filter(thread => !thread.isResolved);
+            const hasUnresolvedThreads = unresolvedThreads.length > 0;
 
-            // Draft PRs never get the 'needs review' label
+            // Threads needing a reply: started by someone other than the PR author
+            const threadsNeedingReply = unresolvedThreads.filter(thread => {
+              const firstComment = thread.comments.nodes[0];
+              return firstComment?.author?.login !== prAuthor;
+            });
+            const authorRepliedToAll = threadsNeedingReply.length === 0
+              || threadsNeedingReply.every(thread =>
+                thread.comments.nodes.some(c => c.author?.login === prAuthor)
+              );
+
             if (isDraft) {
               core.info('PR is a draft, removing review labels.');
               await removeLabel(NEEDS_REVIEW);
@@ -129,7 +144,7 @@ jobs:
               await addLabel(CHANGES_REQUESTED);
               await removeLabel(NEEDS_REVIEW);
 
-            } else if (allApproved && !needsChanges) {
+            } else if (allApproved && !hasUnresolvedThreads) {
               await removeLabel(NEEDS_REVIEW);
               await removeLabel(CHANGES_REQUESTED);
 
@@ -137,7 +152,12 @@ jobs:
               await addLabel(NEEDS_REVIEW);
               await removeLabel(CHANGES_REQUESTED);
 
-            } else if (needsChanges) {
+            } else if (hasUnresolvedThreads && authorRepliedToAll) {
+              // Author replied to every reviewer thread — ready for re-review
+              await addLabel(NEEDS_REVIEW);
+              await removeLabel(CHANGES_REQUESTED);
+
+            } else if (hasUnresolvedThreads) {
               await addLabel(CHANGES_REQUESTED);
               await removeLabel(NEEDS_REVIEW);
 
