@@ -6550,7 +6550,7 @@ mod tests {
         )
     }
 
-    // -- StaticField DOP ------------------------------------------------------
+    // StaticField DOP
 
     fn create_ecu_manager_with_static_field_service() -> (
         super::EcuManager<DefaultSecurityPluginData>,
@@ -6588,7 +6588,7 @@ mod tests {
         )
     }
 
-    // -- EnvDataDesc wildcard fallback ----------------------------------------
+    // EnvDataDesc wildcard fallback
 
     fn create_ecu_manager_with_env_data_desc_wildcard() -> (
         super::EcuManager<DefaultSecurityPluginData>,
@@ -6714,7 +6714,7 @@ mod tests {
         )
     }
 
-    // -- DynamicLengthField: sibling param before DLF with no byte_position --
+    // DynamicLengthField: sibling param before DLF with no byte_position
 
     fn create_ecu_manager_dlf_sibling_no_byte_pos() -> (
         super::EcuManager<DefaultSecurityPluginData>,
@@ -9871,7 +9871,6 @@ mod tests {
             Some(DataFormatParentRefType::tag_as_ecu_shared_data(esd_in_fg)),
         );
 
-        // - FunctionalGroup with the EcuSharedData child -
         let fg_dl = b.create_diag_layer(DiagLayerParams {
             short_name: "FgLayer",
             ..Default::default()

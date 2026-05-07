@@ -8,6 +8,15 @@
 # terms of the Apache License Version 2.0 which is available at
 # https://www.apache.org/licenses/LICENSE-2.0
 
+from helper import (
+    derived_id,
+    find_dop_by_shortname,
+    functional_class_ref,
+    matching_request_parameter,
+    ref,
+    sid_parameter_pr,
+    sid_parameter_rq,
+)
 from odxtools.compumethods.compucategory import CompuCategory
 from odxtools.compumethods.compumethod import CompuMethod
 from odxtools.dataobjectproperty import DataObjectProperty
@@ -23,20 +32,8 @@ from odxtools.response import Response, ResponseType
 from odxtools.standardlengthtype import StandardLengthType
 from odxtools.termination import Termination
 
-from helper import (
-    find_dop_by_shortname,
-    sid_parameter_rq,
-    sid_parameter_pr,
-    derived_id,
-    matching_request_parameter,
-    functional_class_ref,
-    ref,
-)
 
-
-def add_requestdownload_service(
-    dlr: DiagLayerRaw, address_length: int, size_length: int
-):
+def add_requestdownload_service(dlr: DiagLayerRaw, address_length: int, size_length: int):
     # switch to limited dop for format and identifier?
     data_format_identifier_dop = find_dop_by_shortname(dlr, "IDENTICAL_UINT_8")
     memory_address_dop = DataObjectProperty(

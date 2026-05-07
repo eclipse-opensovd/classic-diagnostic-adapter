@@ -9,7 +9,6 @@
 # https://www.apache.org/licenses/LICENSE-2.0
 
 from odxtools.diaglayers.diaglayerraw import DiagLayerRaw
-
 from routines import add_routine
 
 

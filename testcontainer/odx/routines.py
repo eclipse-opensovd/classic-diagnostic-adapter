@@ -8,13 +8,6 @@
 # terms of the Apache License Version 2.0 which is available at
 # https://www.apache.org/licenses/LICENSE-2.0
 
-from odxtools.diaglayers.diaglayerraw import DiagLayerRaw
-from odxtools.diagservice import DiagService
-from odxtools.nameditemlist import NamedItemList
-from odxtools.parameters.parameter import Parameter
-from odxtools.request import Request
-from odxtools.response import Response, ResponseType
-
 from helper import (
     coded_const_int_parameter,
     derived_id,
@@ -27,7 +20,13 @@ from helper import (
     sid_parameter_rq,
     subfunction_rq,
 )
+from odxtools.diaglayers.diaglayerraw import DiagLayerRaw
+from odxtools.diagservice import DiagService
+from odxtools.nameditemlist import NamedItemList
+from odxtools.parameters.parameter import Parameter
 from odxtools.parameters.valueparameter import ValueParameter
+from odxtools.request import Request
+from odxtools.response import Response, ResponseType
 
 _ROUTINE_TYPE_TO_SUBFUNCTION = {
     "Start": 0x01,

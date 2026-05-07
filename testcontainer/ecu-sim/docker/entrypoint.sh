@@ -20,4 +20,6 @@ fi
 
 export SIM_NETWORK_INTERFACE=${SIM_NETWORK_INTERFACE:-eth0}
 
-java -Djava.net.preferIPv4Stack=true $JAVA_OPTS -jar "/app/ecu-sim-all.jar" "$@"
+# shellcheck disable=SC2206
+read -ra java_opts <<< "${JAVA_OPTS:-}"
+java -Djava.net.preferIPv4Stack=true "${java_opts[@]}" -jar "/app/ecu-sim-all.jar" "$@"

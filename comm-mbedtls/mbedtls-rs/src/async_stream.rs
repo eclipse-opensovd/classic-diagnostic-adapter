@@ -54,9 +54,7 @@ use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
 
 use crate::{error::MbedtlsError, ssl::SslConfig};
 
-// ---------------------------------------------------------------------------
 // Internal memory BIO
-// ---------------------------------------------------------------------------
 
 /// A pair of in-memory byte buffers that bridge async I/O <-> mbedtls.
 ///
@@ -118,9 +116,7 @@ impl MemBio {
     }
 }
 
-// ---------------------------------------------------------------------------
 // BIO callbacks for the memory-buffered approach
-// ---------------------------------------------------------------------------
 
 unsafe extern "C" fn membio_send(ctx: *mut c_void, buf: *const c_uchar, len: usize) -> c_int {
     let bio = unsafe { &mut *ctx.cast::<MemBio>() };

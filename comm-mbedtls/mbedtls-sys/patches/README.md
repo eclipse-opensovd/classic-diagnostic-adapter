@@ -10,24 +10,31 @@ terms of the Apache License Version 2.0 which is available at
 https://www.apache.org/licenses/LICENSE-2.0
 -->
 
-## mbedtls-4 patch summary
+# mbedtls-4 patch summary
 
-These patches extends mbedtls 4.0.0 with two features absent from upstream:  
+These patches extends mbedtls 4.0.0 with two features absent from upstream:
+
 - **`record_size_limit` (RFC 8449) for TLS 1.2**
 - **Ed25519 (PureEdDSA) support across the PSA, PK, X.509, and TLS 1.2 layers**
 
 The patch order is `record-size-limit-tls12.patch` first and then `ed25519-psa-driver.patch`
 
-### `record_size_limit` (RFC 8449) for TLS 1.2
+## `record_size_limit` (RFC 8449) for TLS 1.2
+
 RFC 8449 defines `record_size_limit` for all TLS versions including 1.2, but mbedtls 4.0.0 only implements it for TLS 1.3. The parsing/writing functions are gated behind `MBEDTLS_SSL_PROTO_TLS1_3`, making them inaccessible to TLS 1.2 code.
+
 Changes:
+
 - **Compilation guard** (`ssl_tls13_generic.c`): Moves `record_size_limit` functions from `MBEDTLS_SSL_PROTO_TLS1_3` to `MBEDTLS_SSL_TLS_C`, making them available to all TLS versions.
 - **ClientHello** (`ssl_client.c`): Writes the `record_size_limit` extension in TLS 1.2 ClientHello, advertising `MBEDTLS_SSL_IN_CONTENT_LEN`.
 - **ServerHello parsing** (`ssl_tls12_client.c`): Parses `record_size_limit` from the TLS 1.2 ServerHello. Enforces RFC 8449 section 5 mutual exclusion: aborts the handshake with `illegal_parameter` if both `record_size_limit` and `max_fragment_length` are present.
 
-### Ed25519 / PureEdDSA (`ed25519-psa-driver.patch)
+## Ed25519 / PureEdDSA (`ed25519-psa-driver.patch`)
+
 mbedtls 4.0.0 has no Ed25519 signature support in TLS 1.2 or X.509 certificate verification.
+
 Changes:
+
 - **PSA crypto config** (`crypto_config.h`): Enables `PSA_WANT_ECC_TWISTED_EDWARDS_255` and `PSA_WANT_ALG_PURE_EDDSA`.
 - **PSA crypto core** (`psa_crypto.c`): The existing code unconditionally rejects `hash_alg==0` when signing/verifying a message. This doesn't work for PureEdDSA, which operates on the raw message directly without pre-hashing (the hashing is internal to the Ed25519 algorithm per RFC 8032). The patch narrows the rejection to only apply when the algorithm is not `PSA_ALG_PURE_EDDSA`.
 - **PSA driver wrappers** (`psa_crypto_driver_wrappers.h`): Hooks an external Ed25519 PSA driver (gated on `MBEDTLS_ED25519_PSA_DRIVER`) for `verify_message` and `import_key`. This allows plugging in a platform-specific Ed25519 implementation.

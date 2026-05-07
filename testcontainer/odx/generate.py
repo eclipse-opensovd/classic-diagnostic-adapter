@@ -8,7 +8,25 @@
 # terms of the Apache License Version 2.0 which is available at
 # https://www.apache.org/licenses/LICENSE-2.0
 
+
 import odxtools
+from authentication import add_authentication_services
+from communication_control import add_communication_control_services
+from comparams import generate_comparam_refs, generate_minimal_comparam_refs
+from dtc_services import (
+    add_dtc_clear_services,
+    add_dtc_clear_user_memory_service,
+    add_dtc_read_services,
+    add_dtc_setting_services,
+)
+from functional_groups import generate_functional_groups
+from helper import ref
+from metadata import (
+    add_additional_audiences,
+    add_admin_data,
+    add_company_datas,
+    add_functional_classes,
+)
 from odxtools.database import Database
 from odxtools.diagdatadictionaryspec import DiagDataDictionarySpec
 from odxtools.diaglayercontainer import DiagLayerContainer
@@ -19,41 +37,22 @@ from odxtools.diaglayers.ecuvariant import EcuVariant
 from odxtools.diaglayers.ecuvariantraw import EcuVariantRaw
 from odxtools.ecuvariantpattern import EcuVariantPattern
 from odxtools.matchingparameter import MatchingParameter
-from odxtools.odxlink import OdxLinkId, DocType, OdxDocFragment
+from odxtools.odxlink import DocType, OdxDocFragment, OdxLinkId
 from odxtools.parentref import ParentRef
 from odxtools.specialdata import SpecialData
 from odxtools.specialdatagroup import SpecialDataGroup
 from odxtools.specialdatagroupcaption import SpecialDataGroupCaption
-
-from authentication import add_authentication_services
-from communication_control import add_communication_control_services
-from comparams import generate_comparam_refs, generate_minimal_comparam_refs
-from functional_groups import generate_functional_groups
-from helper import ref
-from metadata import (
-    add_functional_classes,
-    add_admin_data,
-    add_company_datas,
-    add_additional_audiences,
-)
 from reset import add_reset_services
 from routine_control import add_routine_control_services
 from security_access import add_security_access_services
 from shared import (
     add_common_datatypes,
-    add_state_charts,
     add_common_diag_comms,
     add_power_consumption_service,
-)
-from dtc_services import (
-    add_dtc_clear_services,
-    add_dtc_clear_user_memory_service,
-    add_dtc_read_services,
-    add_dtc_setting_services,
+    add_state_charts,
 )
 from shared_units import add_common_units
 from transferdata import add_transfer_services
-from typing import List, Tuple
 
 
 def add_variant(dlc: DiagLayerContainer, name: str, identification_pattern: int):
@@ -116,7 +115,7 @@ def add_base_variant(
     gateway_address: int,
     functional_address: int,
     database: Database,
-    sdgs: list[SpecialDataGroup] = None,
+    sdgs: list[SpecialDataGroup] | None = None,
 ):
     ecu_name = dlc.short_name
     doc_frags = dlc.odx_id.doc_fragments
@@ -200,7 +199,7 @@ def generate_for_ecu(
     logical_address: int,
     gateway_address: int,
     functional_address: int,
-    variants: List[Tuple[str, int]],
+    variants: list[tuple[str, int]],
 ):
     print(f"Generating for {ecu_name}")
     database = Database()
@@ -252,8 +251,8 @@ def generate_for_ecu(
 def generate_for_ecu_minimal_comparams(
     ecu_name: str,
     logical_address: int,
-    variants: List[Tuple[str, int]],
-    protocol_snref: str = None,
+    variants: list[tuple[str, int]],
+    protocol_snref: str | None = None,
 ):
     """Generate an ECU database with only CP_UniqueRespIdTable as comparam.
 
@@ -311,7 +310,7 @@ def _add_base_variant_minimal_comparams(
     dlc: DiagLayerContainer,
     logical_address: int,
     database: Database,
-    protocol_snref: str = None,
+    protocol_snref: str | None = None,
 ):
     """Like add_base_variant but uses generate_minimal_comparam_refs."""
     ecu_name = dlc.short_name
@@ -332,9 +331,7 @@ def _add_base_variant_minimal_comparams(
                     OdxLinkId(
                         local_id=f"PROTO.{protocol_snref}",
                         doc_fragments=(
-                            OdxDocFragment(
-                                doc_name=protocol_snref, doc_type=DocType.CONTAINER
-                            ),
+                            OdxDocFragment(doc_name=protocol_snref, doc_type=DocType.CONTAINER),
                         ),
                     )
                 )
@@ -374,7 +371,8 @@ generate_for_ecu(
 )
 
 # mirror a use-case, where for different markets different hardware revisions
-# (for whatever reason) are used, but due to having the same function, the logical address would be the same.
+# (for whatever reason) are used, but due to having the same function,
+# the logical address would be the same.
 # The CDA should be able to differentiate those variants based on the variant response.
 # During variant detection on of the ECUs is selected, whereas the other is marked as duplicate.
 generate_for_ecu(

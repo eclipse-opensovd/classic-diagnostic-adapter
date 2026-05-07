@@ -9,6 +9,10 @@
 # https://www.apache.org/licenses/LICENSE-2.0
 
 import odxtools
+from communication_control import add_communication_control_services
+from dtc_services import add_dtc_setting_services
+from helper import derived_id, find_unit_by_shortname, ref
+from metadata import add_functional_classes
 from odxtools.addressing import Addressing
 from odxtools.compumethods.compucategory import CompuCategory
 from odxtools.compumethods.identicalcompumethod import IdenticalCompuMethod
@@ -17,26 +21,21 @@ from odxtools.dataobjectproperty import DataObjectProperty
 from odxtools.diagdatadictionaryspec import DiagDataDictionarySpec
 from odxtools.diaglayercontainer import DiagLayerContainer
 from odxtools.diaglayers.diaglayerraw import DiagLayerRaw
+from odxtools.diaglayers.diaglayertype import DiagLayerType
 from odxtools.diaglayers.ecushareddata import EcuSharedData
 from odxtools.diaglayers.ecushareddataraw import EcuSharedDataRaw
 from odxtools.diaglayers.functionalgroup import FunctionalGroup
 from odxtools.diaglayers.functionalgroupraw import FunctionalGroupRaw
-from odxtools.diaglayers.diaglayertype import DiagLayerType
 from odxtools.functionalclass import FunctionalClass
 from odxtools.nameditemlist import NamedItemList
-from odxtools.odxlink import OdxLinkId, OdxDocFragment, DocType
+from odxtools.odxlink import DocType, OdxDocFragment, OdxLinkId
 from odxtools.odxtypes import DataType
 from odxtools.parentref import ParentRef
 from odxtools.physicaltype import PhysicalType
 from odxtools.standardlengthtype import StandardLengthType
 from odxtools.transmode import TransMode
-
-from communication_control import add_communication_control_services
-from dtc_services import add_dtc_setting_services
-from helper import ref, derived_id, find_unit_by_shortname
-from metadata import add_functional_classes
 from routines import add_safety_squints_routine
-from sessions import add_state_chart_session, add_session_service
+from sessions import add_session_service, add_state_chart_session
 from shared_units import add_common_units
 
 
@@ -51,9 +50,7 @@ def add_functional_data_types(dlr: DiagLayerRaw):
                 internal_type=DataType.A_FLOAT64,
             ),
             physical_type=PhysicalType(base_data_type=DataType.A_FLOAT64),
-            diag_coded_type=StandardLengthType(
-                base_data_type=DataType.A_FLOAT64, bit_length=64
-            ),
+            diag_coded_type=StandardLengthType(base_data_type=DataType.A_FLOAT64, bit_length=64),
             unit_ref=ref(find_unit_by_shortname(dlr, "MilliMeter")),
         )
     )
@@ -173,22 +170,16 @@ def generate_functional_groups(filename: str):
     database.diag_layer_containers.append(fgl_doip_dlc)
 
     # Functional Group: FGL_UDS_Ethernet_DoIP_DOBT
-    fgl_dobt_doc_frags = (
-        OdxDocFragment("FGL_UDS_Ethernet_DoIP_DOBT", DocType.CONTAINER),
-    )
+    fgl_dobt_doc_frags = (OdxDocFragment("FGL_UDS_Ethernet_DoIP_DOBT", DocType.CONTAINER),)
 
     fgl_dobt_dlc = DiagLayerContainer(
-        odx_id=OdxLinkId(
-            "DLC.FGL_UDS_Ethernet_DoIP_DOBT", doc_fragments=fgl_dobt_doc_frags
-        ),
+        odx_id=OdxLinkId("DLC.FGL_UDS_Ethernet_DoIP_DOBT", doc_fragments=fgl_dobt_doc_frags),
         short_name="FGL_UDS_Ethernet_DoIP_DOBT",
         long_name="FGL UDS Ethernet DoIP (DOBT)",
     )
 
     fgl_dobt_raw = FunctionalGroupRaw(
-        odx_id=OdxLinkId(
-            "FG.FGL_UDS_Ethernet_DoIP_DOBT", doc_fragments=fgl_dobt_doc_frags
-        ),
+        odx_id=OdxLinkId("FG.FGL_UDS_Ethernet_DoIP_DOBT", doc_fragments=fgl_dobt_doc_frags),
         short_name="FGL_UDS_Ethernet_DoIP_DOBT",
         long_name="FGL UDS Ethernet DoIP (DOBT)",
         variant_type=DiagLayerType.FUNCTIONAL_GROUP,

@@ -7,20 +7,14 @@
 # This program and the accompanying materials are made available under the
 # terms of the Apache License Version 2.0 which is available at
 # https://www.apache.org/licenses/LICENSE-2.0
-
-version = 1
-
-# declares copyright and license metadata for files that can't easily contain license headers themselves.
-[[annotations]]
-path = [
-  "LICENSE",
-  "NOTICE",
-  "CONTRIBUTORS",
-  "LICENSES/**.txt",
-  "**/.env.example",
-  "**/.gitkeep",
-  "**/.markdownlintignore",
-  "**/*.fbs",
-]
-SPDX-FileCopyrightText = "The Contributors to Eclipse OpenSOVD (see CONTRIBUTORS)"
-SPDX-License-Identifier = "Apache-2.0"
+default: true
+# Line length - raise limit to avoid wrapping long URLs or code snippets
+MD013:
+  line_length: 1000
+# Multiple headings with the same content - only flag duplicates outside sibling sections
+MD024:
+  siblings_only: true
+# Inline HTML - allow raw HTML in Markdown
+MD033: false
+# Fenced code blocks should have a language - allow code blocks without a language tag
+MD060: false

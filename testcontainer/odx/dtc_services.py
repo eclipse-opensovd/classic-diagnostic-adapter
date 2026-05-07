@@ -7,17 +7,29 @@
 # This program and the accompanying materials are made available under the
 # terms of the Apache License Version 2.0 which is available at
 # https://www.apache.org/licenses/LICENSE-2.0
+from helper import (
+    derived_id,
+    find_dop_by_shortname,
+    find_dtc_dop,
+    functional_class_ref,
+    matching_request_parameter_subfunction,
+    ref,
+    sid_parameter_pr,
+    sid_parameter_rq,
+    subfunction_rq,
+    texttable_int_str_dop,
+)
 from odxtools.addressing import Addressing
 from odxtools.compumethods.compucategory import CompuCategory
 from odxtools.compumethods.compumethod import CompuMethod
 from odxtools.diaglayers.diaglayerraw import DiagLayerRaw
+from odxtools.diagnostictroublecode import DiagnosticTroubleCode
 from odxtools.diagservice import DiagService
 from odxtools.dtcdop import DtcDop
-from odxtools.diagnostictroublecode import DiagnosticTroubleCode
+from odxtools.endofpdufield import EndOfPduField
 from odxtools.nameditemlist import NamedItemList
 from odxtools.odxlink import OdxLinkRef
 from odxtools.odxtypes import DataType
-from odxtools.endofpdufield import EndOfPduField
 from odxtools.parameters.valueparameter import ValueParameter
 from odxtools.physicaltype import PhysicalType
 from odxtools.request import Request
@@ -26,19 +38,6 @@ from odxtools.standardlengthtype import StandardLengthType
 from odxtools.structure import Structure
 from odxtools.text import Text
 from odxtools.transmode import TransMode
-
-from helper import (
-    find_dop_by_shortname,
-    find_dtc_dop,
-    sid_parameter_rq,
-    sid_parameter_pr,
-    derived_id,
-    subfunction_rq,
-    matching_request_parameter_subfunction,
-    functional_class_ref,
-    ref,
-    texttable_int_str_dop,
-)
 
 
 def add_dtc_setting_service(
@@ -235,8 +234,8 @@ def add_dtc_read_by_mask_service(
             [
                 sid_parameter_rq(0x19),
                 subfunction_rq(subfunction, "SubFunction"),
-            ]
-            + dtc_status_parameters(dlr, 2),
+                *dtc_status_parameters(dlr, 2),
+            ],
         ),
     )
     dlr.requests.append(request)
@@ -249,15 +248,13 @@ def add_dtc_read_by_mask_service(
             [
                 sid_parameter_pr(0x19 + 0x40),
                 matching_request_parameter_subfunction("SubFunction"),
-            ]
-            + dtc_status_parameters(dlr, 2)
-            + [
+                *dtc_status_parameters(dlr, 2),
                 ValueParameter(
                     short_name="DTCAndStatusRecord",
                     semantic="DATA",
                     byte_position=3,
                     dop_ref=dtc_record_dop,
-                )
+                ),
             ]
         ),
     )
@@ -460,8 +457,8 @@ def add_dtc_read_services(dlr: DiagLayerRaw):
                     byte_position=0,
                     dop_ref=ref(dtc_dop.odx_id),
                 ),
-            ]
-            + dtc_status_parameters(dlr, 3),
+                *dtc_status_parameters(dlr, 3),
+            ],
         ),
     )
     dlr.diag_data_dictionary_spec.structures.append(dtc_record_structure)
