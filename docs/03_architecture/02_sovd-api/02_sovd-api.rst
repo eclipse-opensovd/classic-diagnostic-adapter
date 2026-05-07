@@ -659,7 +659,75 @@ Faults -- SID 14\ :sub:`16` & 19\ :sub:`16`
     to allow filtering by the complete status byte. Using other keys together with ``mask`` is not supported.
 
 
+Version Endpoint
+----------------
+
+.. arch:: API Version Endpoint Registration Function
+    :id: arch~sovd-api-version-registration-function
+    :links: dimpl~sovd-api-version-endpoint
+    :status: draft
+
+    The CDA provides a version registration function that sets up version-related endpoints during
+    initialization.
+
+    **Registration Function**
+
+    The function accepts the following parameters: ``vendor_name``, ``implementation_version``, ``commit``,
+    ``build_date``.
+
+    It always registers the standard ``/version-info`` endpoint, and optionally registers the default
+    ``/data/version`` and ``/apps/sovd2uds/data/version`` endpoints.
+
+    The fields ``base_uri`` and ``api_version`` are determined by the function.
+
+    **Standard Endpoint: /version-info**
+
+    The ``/version-info`` endpoint (without version prefix) returns a JSON response per ISO 17978-3 §7.4.1:
+
+    .. code-block:: json
+
+        {
+            "sovd_info": [
+                {
+                    "version": "<sovd_api_version>",
+                    "base_uri": "<relative uri-reference to base of sovd_api_version>",
+                    "vendor_info": {
+                        "name": "<vendor_name>",
+                        "version": "<implementation_version>",
+                        "commit": "<commit>",
+                        "build_date": "<build_date>"
+                    }
+                }
+            ]
+        }
+
+    **Optional Vendor-Specific Endpoints: /data/version, /apps/sovd2uds/data/version**
+
+    When enabled, these endpoints are registered as static data endpoints returning:
+
+    .. code-block:: json
+
+        {
+            "id": "version",
+            "data": {
+                "name": "<vendor_name>",
+                "api": {
+                    "version": "<api_version>"
+                },
+                "implementation": {
+                    "version": "<implementation_version>",
+                    "commit": "<commit>",
+                    "build_date": "<build_date>"
+                }
+            }
+        }
+
+    Both endpoint types are available immediately after the HTTP server starts and do not require
+    any ECU communication.
+
+    .. note:: The current implementation only registers ``/data/version`` and ``/apps/sovd2uds/data/version``
+
 Error Codes & Messages
 ----------------------
 
-.. todo:: define
+.. note:: todo define

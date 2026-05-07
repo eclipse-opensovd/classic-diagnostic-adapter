@@ -311,16 +311,106 @@ Support for mimetype application/octet-stream
 
     This requirement simplifies the use of the CDA as a diagnostic tester and in migration scenarios.
 
-Version endpoint
-^^^^^^^^^^^^^^^^
+Version Info Endpoint
+^^^^^^^^^^^^^^^^^^^^^
 
-.. req:: Version Endpoint
-    :id: req~sovd-api-version-endpoint
+.. req:: Version Info Endpoint
+    :id: req~sovd-api-version-info-endpoint
+    :links: arch~sovd-api-version-registration-function
     :status: draft
 
-    The CDA must provide a standardized version endpoint ``/apps/sovd2uds/data/version`` which returns the current
-    version of the CDA in use, its SOVD api version, and implementation name. The same data shall also be available
-    under ``/data/version``.
+    The CDA must provide a ``/version-info`` endpoint (without version prefix) as specified in ISO 17978-3 §7.4.1.
+
+    The endpoint shall return a JSON response containing ``sovd_info``, an array of objects describing each
+    supported SOVD API version. Each entry shall contain:
+
+    .. list-table:: SOVDInfo fields
+       :header-rows: 1
+
+       * - Field
+         - Type
+         - Description
+       * - version
+         - string
+         - The supported SOVD standard version (semantic version string)
+       * - base_uri
+         - string (uri-reference)
+         - The version-specific base URI for interacting with the SOVD server
+       * - vendor_info
+         - object
+         - Vendor-specific information about the SOVD server implementation
+
+    The ``vendor_info`` object shall contain:
+
+    .. list-table:: VendorInfo fields
+       :header-rows: 1
+
+       * - Field
+         - Type
+         - Description
+       * - name
+         - string
+         - The vendor/implementation name of the SOVD server
+       * - version
+         - string
+         - The software version of the implementation
+       * - commit
+         - string
+         - The Git commit hash of the build
+       * - build_date
+         - string
+         - The date the binary was built
+
+    The path to the ``version-info`` resource shall remain the same for all future versions of the SOVD API.
+
+    **Rationale**
+
+    Allows SOVD clients to discover which API versions are supported by the server before
+    attempting to access version-specific resources.
+
+
+.. req:: Version Data Endpoint
+    :id: req~sovd-api-version-endpoint
+    :links: arch~sovd-api-version-registration-function
+    :status: draft
+
+    The CDA may optionally provide vendor-specific version data endpoints at ``/data/version`` and
+    ``/apps/sovd2uds/data/version``. These endpoints return implementation details in the existing
+    static data format (``id`` + ``data`` object containing ``name``, ``api.version``, and
+    ``implementation.version``/``commit``/``build_date``).
+
+    These endpoints are registered by the same registration function that provides the standard
+    ``/version-info`` endpoint.
+
+    **Rationale**
+
+    Provides a convenient vendor-specific endpoint for tooling that expects implementation details
+    in a structured data format without needing to parse the standard version-info response.
+
+
+.. req:: Version Registration Function
+    :id: req~sovd-api-version-registration-function
+    :links: arch~sovd-api-version-registration-function
+    :status: draft
+
+    A single registration function shall accept the following parameters:
+
+    - ``vendor_name``: the implementation/vendor name of the SOVD server
+    - ``api_version``: the supported SOVD API version string
+    - ``implementation_version``: the software version of the implementation
+    - ``commit``: the Git commit hash of the build
+    - ``build_date``: the date the binary was built
+    - ``base_uri``: the version-specific base URI
+
+    The function shall always register the ``/version-info`` endpoint.
+
+    The function shall optionally register the ``/data/version`` and ``/apps/sovd2uds/data/version``
+    endpoints serving vendor-specific implementation data.
+
+    **Rationale**
+
+    Centralizes version endpoint registration into a single callable unit, ensuring consistency
+    between the standard version-info response and optional vendor-specific endpoints.
 
 
 Health Endpoint

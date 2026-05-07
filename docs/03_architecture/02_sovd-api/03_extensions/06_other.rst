@@ -8,51 +8,6 @@
 .. terms of the Apache License Version 2.0 which is available at
 .. https://www.apache.org/licenses/LICENSE-2.0
 
-Version Endpoint
-----------------
-
-.. arch:: API Version Endpoint
-    :id: arch~sovd-api-version-endpoint
-    :links: req~sovd-api-version-endpoint; dimpl~sovd-api-version-endpoint; itest~sovd-api-version-endpoint
-    :status: draft
-
-    The CDA provides a static data endpoint that returns version information about the running instance.
-
-    **Paths**
-
-    The version data is served on two paths:
-
-    - ``/apps/sovd2uds/data/version`` -- application-scoped version endpoint
-    - ``/data/version`` -- global version endpoint
-
-    Both endpoints return the same data and behave identically.
-
-    **Response Structure**
-
-    The response contains the following fields:
-
-    .. list-table:: Version response fields
-       :header-rows: 1
-
-       * - Field
-         - Description
-       * - id
-         - Always ``version``
-       * - data.name
-         - The implementation name of the CDA
-       * - data.api.version
-         - The SOVD API version supported by this instance
-       * - data.implementation.version
-         - The software version of the CDA
-       * - data.implementation.commit
-         - The Git commit hash of the build
-       * - data.implementation.build_date
-         - The date the binary was built
-
-    The endpoint is registered as a static data endpoint during initialization and does not require
-    any ECU communication. It is available immediately after the HTTP server starts.
-
-
 ECU Variant Detection
 ---------------------
 
