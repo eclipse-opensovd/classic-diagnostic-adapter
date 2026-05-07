@@ -8,19 +8,5 @@
 # terms of the Apache License Version 2.0 which is available at
 # https://www.apache.org/licenses/LICENSE-2.0
 
-version = 1
-
-# declares copyright and license metadata for files that can't easily contain license headers themselves.
-[[annotations]]
-path = [
-  "LICENSE",
-  "NOTICE",
-  "CONTRIBUTORS",
-  "LICENSES/**.txt",
-  "**/.env.example",
-  "**/.gitkeep",
-  "**/.markdownlintignore",
-  "**/*.fbs",
-]
-SPDX-FileCopyrightText = "The Contributors to Eclipse OpenSOVD (see CONTRIBUTORS)"
-SPDX-License-Identifier = "Apache-2.0"
+comm-mbedtls/mbedtls-sys/mbedtls-4.0.0/
+comm-mbedtls/mbedtls-sys/tf-psa-crypto/

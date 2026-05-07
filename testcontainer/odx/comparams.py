@@ -8,10 +8,9 @@
 # terms of the Apache License Version 2.0 which is available at
 # https://www.apache.org/licenses/LICENSE-2.0
 
+from helper import ref
 from odxtools.comparaminstance import ComparamInstance
 from odxtools.database import Database
-
-from helper import ref
 
 
 def generate_comparam_refs(
@@ -23,9 +22,7 @@ def generate_comparam_refs(
 ) -> list[ComparamInstance]:
     refs = []
 
-    gw_addr = database.comparam_subsets.get("ISO_13400_2").comparams[
-        "CP_DoIPLogicalGatewayAddress"
-    ]
+    gw_addr = database.comparam_subsets.get("ISO_13400_2").comparams["CP_DoIPLogicalGatewayAddress"]
     cp_gw = ComparamInstance(
         value=str(gateway_address),
         spec_ref=ref(gw_addr),
@@ -43,9 +40,7 @@ def generate_comparam_refs(
     )
     refs.append(cp_fa)
 
-    resp_id = database.comparam_subsets.get("ISO_13400_2").complex_comparams[
-        "CP_UniqueRespIdTable"
-    ]
+    resp_id = database.comparam_subsets.get("ISO_13400_2").complex_comparams["CP_UniqueRespIdTable"]
     cp_resp = ComparamInstance(
         value=[str(logical_address), str(0), ecu_name],
         spec_ref=ref(resp_id),
@@ -90,7 +85,7 @@ def generate_minimal_comparam_refs(
     ecu_name: str,
     logical_address: int,
     database: Database,
-    protocol_snref: str = None,
+    protocol_snref: str | None = None,
 ) -> list[ComparamInstance]:
     """Generate comparam refs with a deliberately wrong gateway address.
 
@@ -105,9 +100,7 @@ def generate_minimal_comparam_refs(
     """
     refs = []
 
-    resp_id = database.comparam_subsets.get("ISO_13400_2").complex_comparams[
-        "CP_UniqueRespIdTable"
-    ]
+    resp_id = database.comparam_subsets.get("ISO_13400_2").complex_comparams["CP_UniqueRespIdTable"]
     refs.append(
         ComparamInstance(
             value=[str(logical_address), str(0), ecu_name],
@@ -116,9 +109,7 @@ def generate_minimal_comparam_refs(
         )
     )
 
-    gw_addr = database.comparam_subsets.get("ISO_13400_2").comparams[
-        "CP_DoIPLogicalGatewayAddress"
-    ]
+    gw_addr = database.comparam_subsets.get("ISO_13400_2").comparams["CP_DoIPLogicalGatewayAddress"]
     refs.append(
         ComparamInstance(
             value=str(0xDEAD),

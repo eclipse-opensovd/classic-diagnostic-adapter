@@ -30,9 +30,7 @@ use mbedtls_sys as ffi;
 
 use crate::{error::MbedtlsError, ssl::SslConfig};
 
-// ---------------------------------------------------------------------------
 // BIO callbacks - bridge mbedtls I/O to Rust Read/Write
-// ---------------------------------------------------------------------------
 
 /// The BIO context we stash behind `p_bio`. It holds a pointer to the Rust
 /// stream plus an optional I/O error to shuttle back to the caller.
@@ -80,9 +78,7 @@ unsafe extern "C" fn bio_recv<S: Read>(ctx: *mut c_void, buf: *mut c_uchar, len:
     }
 }
 
-// ---------------------------------------------------------------------------
 // SslStream
-// ---------------------------------------------------------------------------
 
 /// A TLS-encrypted stream over a transport `S`.
 ///
@@ -337,9 +333,7 @@ impl<S: std::fmt::Debug> std::fmt::Debug for SslStream<S> {
     }
 }
 
-// ---------------------------------------------------------------------------
 // Handshake helpers
-// ---------------------------------------------------------------------------
 
 /// The result of an attempted TLS handshake.
 pub type HandshakeResult<S> = std::result::Result<SslStream<S>, HandshakeError<S>>;

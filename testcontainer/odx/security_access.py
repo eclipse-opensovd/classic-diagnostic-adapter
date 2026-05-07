@@ -8,6 +8,17 @@
 # terms of the Apache License Version 2.0 which is available at
 # https://www.apache.org/licenses/LICENSE-2.0
 
+from helper import (
+    derived_id,
+    find_state_transition,
+    functional_class_ref,
+    matching_request_parameter_subfunction,
+    negative_response,
+    ref,
+    sid_parameter_pr,
+    sid_parameter_rq,
+    subfunction_rq,
+)
 from odxtools.compumethods.compucategory import CompuCategory
 from odxtools.compumethods.compumethod import CompuMethod
 from odxtools.dataobjectproperty import DataObjectProperty
@@ -27,19 +38,6 @@ from odxtools.statechart import StateChart
 from odxtools.statetransition import StateTransition
 from odxtools.statetransitionref import StateTransitionRef
 from odxtools.termination import Termination
-
-from helper import (
-    find_state_transition,
-    sid_parameter_rq,
-    subfunction_rq,
-    sid_parameter_pr,
-    matching_request_parameter_subfunction,
-    derived_id,
-    functional_class_ref,
-    ref,
-    negative_response,
-)
-
 
 ##
 # adds state charts, states and session switching services (27 xx) for them
@@ -71,10 +69,7 @@ def add_state_chart_security_access(dlr: DiagLayerRaw):
             semantic="SECURITY",
             start_state_snref="Locked",
             states=NamedItemList(
-                [
-                    State(odx_id=derived_id(odx_id, f"ST.{name}"), short_name=name)
-                    for name in states
-                ]
+                [State(odx_id=derived_id(odx_id, f"ST.{name}"), short_name=name) for name in states]
             ),
             state_transitions=[
                 StateTransition(
@@ -186,9 +181,7 @@ def add_send_key_service(
         pos_response_refs=[ref(response)],
         neg_response_refs=[ref(neg_response)],
         state_transition_refs=[
-            StateTransitionRef(
-                ref_id=stt.odx_id.local_id, ref_docs=stt.odx_id.doc_fragments
-            )
+            StateTransitionRef(ref_id=stt.odx_id.local_id, ref_docs=stt.odx_id.doc_fragments)
         ],
         functional_class_refs=[functional_class_ref(dlc, "SecurityAccess")],
     )
