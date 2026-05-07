@@ -12,10 +12,13 @@
 
 use http::{Method, StatusCode};
 
-use crate::util::{
-    ecusim,
-    http::{auth_header, send_cda_request},
-    runtime::setup_integration_test,
+use crate::{
+    sovd::hook_cleanup,
+    util::{
+        ecusim,
+        http::{auth_header, send_cda_request},
+        runtime::{EcuSim, setup_integration_test},
+    },
 };
 
 /// Tests that CDA correctly rejects ECU responses where the DID (Data Identifier)
@@ -31,6 +34,13 @@ use crate::util::{
 #[tokio::test]
 async fn test_wrong_did_in_response_returns_504() {
     let (runtime, _lock) = setup_integration_test(true).await.unwrap();
+
+    let cleanup_sim = runtime.ecu_sim.clone();
+    hook_cleanup(move || {
+        let sim = cleanup_sim.clone();
+        async move { cleanup(&sim).await }
+    });
+
     let auth = auth_header(&runtime.config, None).await.unwrap();
 
     // Install a raw response override on FLXC1000:
@@ -62,8 +72,12 @@ async fn test_wrong_did_in_response_returns_504() {
         "Expected 504 Gateway Timeout when ECU responds with wrong DID, got: {result:?}"
     );
 
+    cleanup(&runtime.ecu_sim).await;
+}
+
+async fn cleanup(ecu_sim: &EcuSim) {
     // Clean up: remove the override so other tests are not affected.
-    ecusim::clear_raw_response_override(&runtime.ecu_sim, "FLXC1000")
+    ecusim::clear_raw_response_override(ecu_sim, "FLXC1000")
         .await
         .expect("Failed to clear raw response override");
 }

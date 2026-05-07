@@ -333,3 +333,20 @@ pub(crate) async fn get_ecu_component(
     // everything as Sd, we also fail on silent changes in the interface, which is desirable
     response_to_json(&response)
 }
+
+pub(crate) fn hook_cleanup<F, Fut>(cleanup_fn: F)
+where
+    F: Fn() -> Fut + Send + Sync + 'static,
+    Fut: Future<Output = ()> + 'static,
+{
+    std::panic::set_hook(Box::new(move |_| {
+        // Create a new runtime to drive the future to completion.
+        // Don't use Handle::current().block_on() here — it will
+        // deadlock if the panic happens on an async worker thread.
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("failed to build runtime in panic hook");
+        rt.block_on(cleanup_fn());
+    }));
+}

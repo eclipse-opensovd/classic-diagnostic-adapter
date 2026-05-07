@@ -61,6 +61,7 @@ pub(crate) struct TestRuntime {
     pub(crate) ecu_sim: EcuSim,
 }
 
+#[derive(Clone)]
 pub(crate) struct EcuSim {
     pub(crate) host: String,
     pub(crate) control_port: u16,
