@@ -19,14 +19,22 @@ use crate::flatbuf::diagnostic_description::dataformat;
 
 pub(super) fn lookup(
     ecu_data: &crate::datatypes::DiagnosticDatabase,
-    protocol: &dataformat::Protocol,
+    protocol: Option<&dataformat::Protocol>,
     param_name: &str,
 ) -> Result<ComParamValue, DiagServiceError> {
-    let protocol_name = protocol.diag_layer().and_then(|dl| dl.short_name()).ok_or(
-        DiagServiceError::InvalidDatabase("Protocol has no short name".to_owned()),
-    )?;
-
     let ignore_protocol = ecu_data.config().ignore_protocol;
+
+    let protocol_name: Option<&str> = match protocol {
+        Some(proto) => Some(proto.diag_layer().and_then(|dl| dl.short_name()).ok_or(
+            DiagServiceError::InvalidDatabase("Protocol has no short name".to_owned()),
+        )?),
+        None if ignore_protocol => None,
+        None => {
+            return Err(DiagServiceError::InvalidDatabase(
+                "No protocol available for com-param lookup".to_owned(),
+            ));
+        }
+    };
 
     let com_param_refs = ecu_data
         .base_variant()?
@@ -50,7 +58,9 @@ pub(super) fn lookup(
                         || cp_ref
                             .protocol()
                             .and_then(|p| p.diag_layer().and_then(|dl| dl.short_name()))
-                            .is_some_and(|sn| sn.eq_ignore_ascii_case(protocol_name)))
+                            .is_some_and(|sn| {
+                                protocol_name.is_some_and(|pn| sn.eq_ignore_ascii_case(pn))
+                            }))
             })
         })
         .ok_or_else(|| {
@@ -285,8 +295,10 @@ mod tests {
         let proto_bytes = builder.finish_protocol(protocol);
         lookup(
             &db,
-            &flatbuffers::root::<dataformat::Protocol<'_>>(&proto_bytes)
-                .expect("valid Protocol flatbuffer"),
+            Some(
+                &flatbuffers::root::<dataformat::Protocol<'_>>(&proto_bytes)
+                    .expect("valid Protocol flatbuffer"),
+            ),
             param_name,
         )
     }
@@ -453,5 +465,97 @@ mod tests {
             matches!(result, Err(DiagServiceError::InvalidDatabase(_))),
             "expected InvalidDatabase, got an unexpected variant"
         );
+    }
+
+    #[test]
+    fn test_lookup_no_protocol_with_ignore_protocol() {
+        // DB has a ComParamRef (protocol doesn't matter when ignore_protocol=true).
+        // Lookup with protocol=None should still find the param by name.
+        let db = build_db(
+            &[ComParamRefSpec {
+                protocol: "DB_PROTO",
+                name: "CP_MyParam",
+                value: "77",
+            }],
+            true,
+        )
+        .unwrap();
+
+        let result = lookup(&db, None, "CP_MyParam");
+        match result {
+            Ok(ComParamValue::Simple(s)) => assert_eq!(s.value, "77"),
+            Ok(ComParamValue::Complex(_)) => panic!("expected Simple, got Complex"),
+            Err(e) => panic!("expected Ok(Simple(\"77\")), got Err({e:?})"),
+        }
+    }
+
+    #[test]
+    fn test_lookup_no_protocol_without_ignore_protocol() {
+        // protocol=None with ignore_protocol=false should error.
+        let db = build_db(
+            &[ComParamRefSpec {
+                protocol: "DB_PROTO",
+                name: "CP_MyParam",
+                value: "42",
+            }],
+            false,
+        )
+        .unwrap();
+
+        let result = lookup(&db, None, "CP_MyParam");
+        assert!(
+            matches!(result, Err(DiagServiceError::InvalidDatabase(_))),
+            "expected InvalidDatabase, got an unexpected variant"
+        );
+    }
+
+    #[test]
+    fn test_map_nack_number_of_retries_from_complex_value() {
+        use cda_interfaces::datatypes::{ComplexComParamValue, DeserializableCompParam};
+
+        let mut complex: ComplexComParamValue = HashMap::default();
+        complex.insert(
+            "0x21".to_owned(),
+            ComParamValue::Simple(ComParamSimpleValue {
+                value: "3".to_owned(),
+                unit: None,
+            }),
+        );
+        complex.insert(
+            "0x22".to_owned(),
+            ComParamValue::Simple(ComParamSimpleValue {
+                value: "5".to_owned(),
+                unit: None,
+            }),
+        );
+
+        let parsed = HashMap::<String, u32>::parse_from_complex(&complex).unwrap();
+        let result: HashMap<u8, u32> = parsed
+            .iter()
+            .map(map_nack_number_of_retries)
+            .collect::<Result<HashMap<u8, u32>, DiagServiceError>>()
+            .unwrap();
+
+        assert_eq!(result.len(), 2);
+        assert_eq!(result.get(&0x21), Some(&3));
+        assert_eq!(result.get(&0x22), Some(&5));
+    }
+
+    #[test]
+    fn test_map_nack_number_of_retries_decimal_keys() {
+        let result = map_nack_number_of_retries(("33", &3)).unwrap();
+        assert_eq!(result, (33, 3));
+    }
+
+    #[test]
+    fn test_map_nack_number_of_retries_hex_keys() {
+        let result = map_nack_number_of_retries(("0x21", &3)).unwrap();
+        assert_eq!(result, (0x21, 3));
+    }
+
+    #[test]
+    fn test_map_nack_number_of_retries_invalid_key() {
+        let result = map_nack_number_of_retries(("not_valid", &3));
+        assert!(result.is_err());
     }
 }

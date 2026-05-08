@@ -48,6 +48,27 @@ fun main() {
             functionalAddress = functionalAddress,
         ) {
         }
+
+        addDoipEntity(
+            name = "TMCC3000",
+            logicalAddress = 0x3000,
+            functionalAddress = functionalAddress,
+        ) {
+        }
+
+        addDoipEntity(
+            name = "HOVR4000",
+            logicalAddress = 0x4000,
+            functionalAddress = functionalAddress,
+        ) {
+        }
+
+        addDoipEntity(
+            name = "JGWT5000",
+            logicalAddress = 0x5000,
+            functionalAddress = functionalAddress,
+        ) {
+        }
     }
     start()
     startEmbeddedWebserver(port = portRest)

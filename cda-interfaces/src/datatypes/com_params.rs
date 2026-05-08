@@ -14,7 +14,10 @@ use std::{fmt::Debug, time::Duration};
 
 use serde::{Deserialize, Deserializer, Serialize, Serializer, de::DeserializeOwned};
 
-use crate::{HashMap, datatypes::Unit};
+use crate::{
+    HashMap,
+    datatypes::{ComParamValue, ComplexComParamValue, Unit},
+};
 
 /// Default communication parameters for diagnostic protocols.
 #[derive(Deserialize, Serialize, Clone, Debug, Default, schemars::JsonSchema)]
@@ -39,9 +42,10 @@ fn duration_param_schema(_gen: &mut schemars::SchemaGenerator) -> schemars::Sche
                 "description":
                     "Communication parameter identifier (`CP_xxx` name from the database)."
             },
-            "default": {
+            "value": {
                 "type": "object",
-                "description": "Default value used when the database does not provide one.",
+                "description": "Value used when the database does not provide one, \
+                    or precedence is set to `Config`.",
                 "properties": {
                     "secs": { "type": "integer", "minimum": 0 },
                     "nanos": { "type": "integer", "minimum": 0, "maximum": 999_999_999 }
@@ -49,20 +53,24 @@ fn duration_param_schema(_gen: &mut schemars::SchemaGenerator) -> schemars::Sche
                 "required": ["secs", "nanos"]
             }
         },
-        "required": ["name", "default"]
+        "required": ["name", "value"]
     })
 }
 
 /// A named communication parameter with a configurable default value.
 ///
 /// The database may override these defaults on a per-ECU basis.
-#[derive(Deserialize, Serialize, Clone, Debug, schemars::JsonSchema)]
+#[derive(Deserialize, Serialize, Clone, Debug, schemars::JsonSchema, PartialEq)]
 #[schemars(bound = "T: schemars::JsonSchema")]
 pub struct ComParamConfig<T: Serialize + Debug> {
     /// Communication parameter identifier (`CP_xxx` name from the database).
     pub name: ComParamName,
-    /// Default value used when the database does not provide one.
-    pub default: T,
+    /// Value used when the database does not provide one, or precedence is set to `Config`.
+    pub value: T,
+    // Controls whether a com-parameter value is resolved from the MDD database
+    // or forced from the configuration file.
+    #[serde(default)]
+    pub precedence: ComParamPrecedence,
 }
 
 pub trait DeserializableCompParam: Sized {
@@ -71,6 +79,14 @@ pub trait DeserializableCompParam: Sized {
     /// Returns `String` if parsing fails, this might happen if the database
     /// does not provide the expected type.
     fn parse_from_db(input: &str, unit: Option<&Unit>) -> Result<Self, String>;
+
+    /// Parse from a complex DB value (map of named sub-parameters).
+    /// Default returns `Err` for types that only support simple value parsing.
+    /// # Errors
+    /// Returns `String` if the complex value cannot be parsed into this type.
+    fn parse_from_complex(_complex: &ComplexComParamValue) -> Result<Self, String> {
+        Err("Complex com param parsing not supported for this type".to_string())
+    }
 }
 
 /// Custom boolean type for com parameters, to support (de)serialization from different
@@ -313,7 +329,7 @@ pub struct DoipComParams {
 }
 
 /// Strategy for retrying after specific negative response codes.
-#[derive(Deserialize, Serialize, Clone, Debug, schemars::JsonSchema)]
+#[derive(Deserialize, Serialize, Clone, Debug, schemars::JsonSchema, PartialEq)]
 pub enum RetryPolicy {
     /// No retries; fail immediately on negative response.
     Disabled,
@@ -333,12 +349,23 @@ pub enum AddressingMode {
 }
 
 /// Trigger condition for sending tester present messages.
-#[derive(Deserialize, Serialize, Clone, Debug, schemars::JsonSchema)]
+#[derive(Deserialize, Serialize, Clone, Debug, schemars::JsonSchema, PartialEq)]
 pub enum TesterPresentSendType {
     /// Send tester present at fixed periodic intervals.
     FixedPeriod,
     /// Send tester present only when the bus has been idle.
     OnIdle,
+}
+
+/// Controls whether a com-parameter value is resolved from the MDD database
+/// or forced from the configuration file.
+#[derive(Deserialize, Serialize, Clone, Debug, PartialEq, Default, schemars::JsonSchema)]
+pub enum ComParamPrecedence {
+    /// Default: DB value wins if present, otherwise fall back to config default.
+    #[default]
+    Database,
+    /// Config value is used unconditionally - DB lookup is skipped.
+    Config,
 }
 
 // make this configurable?
@@ -392,79 +419,98 @@ impl Default for UdsComParams {
         Self {
             tester_present_retry_policy: ComParamConfig {
                 name: "CP_TesterPresentHandling".to_owned(),
-                default: true.into(),
+                value: true.into(),
+                precedence: ComParamPrecedence::Database,
             },
             tester_present_addr_mode: ComParamConfig {
                 name: "CP_TesterPresentAddrMode".to_owned(),
-                default: AddressingMode::Physical,
+                value: AddressingMode::Physical,
+                precedence: ComParamPrecedence::Database,
             },
             tester_present_response_expected: ComParamConfig {
                 name: "CP_TesterPresentReqResp".to_owned(),
-                default: true.into(),
+                value: true.into(),
+                precedence: ComParamPrecedence::Database,
             },
             tester_present_send_type: ComParamConfig {
                 name: "CP_TesterPresentSendType".to_owned(),
-                default: TesterPresentSendType::OnIdle,
+                value: TesterPresentSendType::OnIdle,
+                precedence: ComParamPrecedence::Database,
             },
             tester_present_message: ComParamConfig {
                 name: "CP_TesterPresentMessage".to_owned(),
-                default: vec![0x3E, 0x00],
+                value: vec![0x3E, 0x00],
+                precedence: ComParamPrecedence::Database,
             },
             tester_present_exp_pos_resp: ComParamConfig {
                 name: "CP_TesterPresentExpPosResp".to_owned(),
-                default: vec![0x7E, 0x00],
+                value: vec![0x7E, 0x00],
+                precedence: ComParamPrecedence::Database,
             },
             tester_present_exp_neg_resp: ComParamConfig {
                 name: "CP_TesterPresentExpNegResp".to_owned(),
-                default: vec![0x7F, 0x3E],
+                value: vec![0x7F, 0x3E],
+                precedence: ComParamPrecedence::Database,
             },
             tester_present_time: ComParamConfig {
                 name: "CP_TesterPresentTime".to_owned(),
-                default: Duration::from_secs(2),
+                value: Duration::from_secs(2),
+                precedence: ComParamPrecedence::Database,
             },
             repeat_req_count_app: ComParamConfig {
                 name: "CP_RepeatReqCountApp".to_owned(),
-                default: 2,
+                value: 2,
+                precedence: ComParamPrecedence::Database,
             },
             rc_21_retry_policy: ComParamConfig {
                 name: "CP_RC21Handling".to_owned(),
-                default: RetryPolicy::ContinueUntilTimeout,
+                value: RetryPolicy::ContinueUntilTimeout,
+                precedence: ComParamPrecedence::Database,
             },
             rc_21_completion_timeout: ComParamConfig {
                 name: "CP_RC21CompletionTimeout".to_owned(),
-                default: Duration::from_secs(25),
+                value: Duration::from_secs(25),
+                precedence: ComParamPrecedence::Database,
             },
             rc_21_repeat_request_time: ComParamConfig {
                 name: "CP_RC21RequestTime".to_owned(),
-                default: Duration::from_millis(200),
+                value: Duration::from_millis(200),
+                precedence: ComParamPrecedence::Database,
             },
             rc_78_retry_policy: ComParamConfig {
                 name: "CP_RC78Handling".to_owned(),
-                default: RetryPolicy::ContinueUntilTimeout,
+                value: RetryPolicy::ContinueUntilTimeout,
+                precedence: ComParamPrecedence::Database,
             },
             rc_78_completion_timeout: ComParamConfig {
                 name: "CP_RC78CompletionTimeout".to_owned(),
-                default: Duration::from_secs(25),
+                value: Duration::from_secs(25),
+                precedence: ComParamPrecedence::Database,
             },
             rc_78_timeout: ComParamConfig {
                 name: "CP_P6Star".to_owned(),
-                default: Duration::from_secs(1),
+                value: Duration::from_secs(1),
+                precedence: ComParamPrecedence::Database,
             },
             rc_94_retry_policy: ComParamConfig {
                 name: "CP_RC94Handling".to_owned(),
-                default: RetryPolicy::ContinueUntilTimeout,
+                value: RetryPolicy::ContinueUntilTimeout,
+                precedence: ComParamPrecedence::Database,
             },
             rc_94_completion_timeout: ComParamConfig {
                 name: "CP_RC94CompletionTimeout".to_owned(),
-                default: Duration::from_secs(25),
+                value: Duration::from_secs(25),
+                precedence: ComParamPrecedence::Database,
             },
             rc_94_repeat_request_time: ComParamConfig {
                 name: "CP_RC94RequestTime".to_owned(),
-                default: Duration::from_millis(200),
+                value: Duration::from_millis(200),
+                precedence: ComParamPrecedence::Database,
             },
             timeout_default: ComParamConfig {
                 name: "CP_P6Max".to_owned(),
-                default: Duration::from_secs(1),
+                value: Duration::from_secs(1),
+                precedence: ComParamPrecedence::Database,
             },
         }
     }
@@ -475,56 +521,68 @@ impl Default for DoipComParams {
         Self {
             logical_gateway_address: ComParamConfig {
                 name: "CP_DoIPLogicalGatewayAddress".to_owned(),
-                default: 0,
+                value: 0,
+                precedence: ComParamPrecedence::Database,
             },
             logical_response_id_table_name: "CP_UniqueRespIdTable".to_owned(),
             logical_ecu_address: ComParamConfig {
                 name: "CP_DoIPLogicalEcuAddress".to_owned(),
-                default: 0,
+                value: 0,
+                precedence: ComParamPrecedence::Database,
             },
             logical_functional_address: ComParamConfig {
                 name: "CP_DoIPLogicalFunctionalAddress".to_owned(),
-                default: 0,
+                value: 0,
+                precedence: ComParamPrecedence::Database,
             },
             logical_tester_address: ComParamConfig {
                 name: "CP_DoIPLogicalTesterAddress".to_owned(),
-                default: 0,
+                value: 0,
+                precedence: ComParamPrecedence::Database,
             },
             nack_number_of_retries: ComParamConfig {
                 name: "CP_DoIPNumberOfRetries".to_owned(),
-                default: [
+                value: [
                     ("0x03".to_owned(), 3), // Out of memory
                 ]
                 .into_iter()
                 .collect(),
+                precedence: ComParamPrecedence::Database,
             },
             diagnostic_ack_timeout: ComParamConfig {
                 name: "CP_DoIPDiagnosticAckTimeout".to_owned(),
-                default: Duration::from_secs(1),
+                value: Duration::from_secs(1),
+                precedence: ComParamPrecedence::Database,
             },
             retry_period: ComParamConfig {
                 name: "CP_DoIPRetryPeriod".to_owned(),
-                default: Duration::from_millis(200),
+                value: Duration::from_millis(200),
+                precedence: ComParamPrecedence::Database,
             },
             routing_activation_timeout: ComParamConfig {
                 name: "CP_DoIPRoutingActivationTimeout".to_owned(),
-                default: Duration::from_secs(30),
+                value: Duration::from_secs(30),
+                precedence: ComParamPrecedence::Database,
             },
             repeat_request_count_transmission: ComParamConfig {
                 name: "CP_RepeatReqCountTrans".to_owned(),
-                default: 3,
+                value: 3,
+                precedence: ComParamPrecedence::Database,
             },
             connection_timeout: ComParamConfig {
                 name: "CP_DoIPConnectionTimeout".to_owned(),
-                default: Duration::from_secs(30),
+                value: Duration::from_secs(30),
+                precedence: ComParamPrecedence::Database,
             },
             connection_retry_delay: ComParamConfig {
                 name: "CP_DoIPConnectionRetryDelay".to_owned(),
-                default: Duration::from_secs(5),
+                value: Duration::from_secs(5),
+                precedence: ComParamPrecedence::Database,
             },
             connection_retry_attempts: ComParamConfig {
                 name: "CP_DoIPConnectionRetryAttempts".to_owned(),
-                default: 100,
+                value: 100,
+                precedence: ComParamPrecedence::Database,
             },
         }
     }
@@ -553,6 +611,20 @@ impl DeserializableCompParam for u16 {
 impl<T: DeserializeOwned> DeserializableCompParam for HashMap<String, T> {
     fn parse_from_db(input: &str, _unit: Option<&Unit>) -> Result<Self, String> {
         serde_json::from_str(input).map_err(|e| e.to_string())
+    }
+
+    fn parse_from_complex(complex: &ComplexComParamValue) -> Result<Self, String> {
+        complex
+            .iter()
+            .map(|(key, value)| match value {
+                ComParamValue::Simple(simple) => serde_json::from_str::<T>(&simple.value)
+                    .map(|v| (key.clone(), v))
+                    .map_err(|e| format!("Failed to parse value for '{key}': {e}")),
+                ComParamValue::Complex(_) => {
+                    Err(format!("Unexpected nested complex value for key '{key}'"))
+                }
+            })
+            .collect()
     }
 }
 
@@ -617,6 +689,7 @@ impl DeserializableCompParam for Duration {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::datatypes::ComParamSimpleValue;
 
     #[test]
     fn test_multi_value_bool() {
@@ -629,13 +702,44 @@ mod tests {
         assert_eq!(result, ComParamBool::False);
     }
 
+    #[test]
+    fn comparam_precedence_defaults_to_database() {
+        let json = r#"{"name": "CP_Test", "value": 42}"#;
+        let config: ComParamConfig<u32> = serde_json::from_str(json).unwrap();
+        assert_eq!(config.precedence, ComParamPrecedence::Database);
+    }
+
+    #[test]
+    fn comparam_precedence_deserializes_config_variant() {
+        let json = r#"{"name": "CP_Test", "value": 42, "precedence": "Config"}"#;
+        let config: ComParamConfig<u32> = serde_json::from_str(json).unwrap();
+        assert_eq!(config.precedence, ComParamPrecedence::Config);
+    }
+
+    #[test]
+    fn comparam_precedence_serde_roundtrip() {
+        for variant in [ComParamPrecedence::Database, ComParamPrecedence::Config] {
+            let config = ComParamConfig {
+                name: "CP_Test".to_owned(),
+                value: 100u16,
+                precedence: variant.clone(),
+            };
+            let serialized = serde_json::to_string(&config).unwrap();
+            let deserialized: ComParamConfig<u16> = serde_json::from_str(&serialized).unwrap();
+            assert_eq!(deserialized.precedence, variant);
+            assert_eq!(deserialized.name, config.name);
+            assert_eq!(deserialized.value, config.value);
+        }
+    }
+
     /// Regression guard: catches silent serialization drift of `ComParamConfig<Duration>`
     /// against `duration_param_schema` (e.g. dependency update, new toolchain).
     #[test]
     fn comparamconfig_duration_matches_schema() {
         let cfg = ComParamConfig {
             name: "CP_P2Max".to_owned(),
-            default: Duration::from_millis(1500),
+            value: Duration::from_millis(1500),
+            precedence: ComParamPrecedence::Database,
         };
 
         let serialized = serde_json::to_value(&cfg).expect("serialization must not fail");
@@ -662,31 +766,91 @@ mod tests {
             "expected 'name' to serialize as string, got: {name_value}",
         );
 
-        let default_obj = serialized
-            .get("default")
+        let value_obj = serialized
+            .get("value")
             .and_then(|v| v.as_object())
-            .expect("expected 'default' to serialize as object");
+            .expect("expected 'value' to serialize as object");
 
-        let default_schema = schema
+        let value_schema = schema
             .get("properties")
-            .and_then(|v| v.get("default"))
-            .expect("schema defines properties.default");
-        let default_required = default_schema
+            .and_then(|v| v.get("value"))
+            .expect("schema defines properties.value");
+        let value_required = value_schema
             .get("required")
             .and_then(|v| v.as_array())
-            .expect("schema defines required fields for default");
-        for field in default_required {
+            .expect("schema defines required fields for value");
+        for field in value_required {
             let key = field.as_str().unwrap();
             assert!(
-                default_obj.contains_key(key),
-                "required field 'default.{key}' missing from serialized output"
+                value_obj.contains_key(key),
+                "required field 'value.{key}' missing from serialized output"
             );
         }
 
-        let secs = default_obj["secs"].as_u64().expect("secs must be a u64");
-        let nanos = default_obj["nanos"].as_u64().expect("nanos must be a u64");
+        let secs = value_obj["secs"].as_u64().expect("secs must be a u64");
+        let nanos = value_obj["nanos"].as_u64().expect("nanos must be a u64");
         assert_eq!(secs, 1, "1500ms = 1s remainder");
         assert_eq!(nanos, 500_000_000, "1500ms remainder = 500_000_000ns");
         assert!(nanos <= 999_999_999, "nanos exceeds schema maximum");
+    }
+
+    fn construct_simple_comparam_value(value: &str) -> ComParamValue {
+        ComParamValue::Simple(ComParamSimpleValue {
+            value: value.to_owned(),
+            unit: None,
+        })
+    }
+
+    #[test]
+    fn parse_from_complex_hashmap_extracts_simple_values() {
+        let mut complex: ComplexComParamValue = HashMap::default();
+        complex.insert("0x21".to_owned(), construct_simple_comparam_value("3"));
+        complex.insert("0x22".to_owned(), construct_simple_comparam_value("5"));
+
+        let result = HashMap::<String, u32>::parse_from_complex(&complex).unwrap();
+        assert_eq!(result.len(), 2);
+        assert_eq!(result.get("0x21"), Some(&3));
+        assert_eq!(result.get("0x22"), Some(&5));
+    }
+
+    #[test]
+    fn parse_from_complex_hashmap_empty_map() {
+        let complex: ComplexComParamValue = HashMap::default();
+        let result = HashMap::<String, u32>::parse_from_complex(&complex).unwrap();
+        assert!(result.is_empty());
+    }
+
+    #[test]
+    fn parse_from_complex_hashmap_rejects_unparseable_value() {
+        let mut complex: ComplexComParamValue = HashMap::default();
+        complex.insert(
+            "0x21".to_owned(),
+            construct_simple_comparam_value("not_a_number"),
+        );
+
+        let result = HashMap::<String, u32>::parse_from_complex(&complex);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("0x21"));
+    }
+
+    #[test]
+    fn parse_from_complex_hashmap_rejects_nested_complex() {
+        let mut inner: ComplexComParamValue = HashMap::default();
+        inner.insert("nested".to_owned(), construct_simple_comparam_value("1"));
+
+        let mut complex: ComplexComParamValue = HashMap::default();
+        complex.insert("0x21".to_owned(), ComParamValue::Complex(inner));
+
+        let result = HashMap::<String, u32>::parse_from_complex(&complex);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("0x21"));
+    }
+
+    #[test]
+    fn parse_from_complex_unsupported_for_simple_types() {
+        let complex: ComplexComParamValue = HashMap::default();
+        assert!(u32::parse_from_complex(&complex).is_err());
+        assert!(u16::parse_from_complex(&complex).is_err());
+        assert!(Duration::parse_from_complex(&complex).is_err());
     }
 }

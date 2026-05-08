@@ -14,7 +14,7 @@ use std::{collections::BTreeMap, fmt::Write};
 
 use cda_interfaces::{FunctionalDescriptionConfig, datatypes::FaultConfig};
 
-use crate::config::configfile::Configuration;
+use crate::config::configfile::{Configuration, EcuComParams, EcuConfig};
 
 /// Create a Configuration instance with example values for fields that default to `None`.
 /// This ensures they appear in the generated reference config output.
@@ -33,9 +33,54 @@ fn reference_config_instance() -> Configuration {
         ..config.functional_description
     };
 
+    // We're defining a partial toml here, because we want the default config only to contain
+    // a few examples. The full object is build during parsing with figment.
+    // If we started off with `let mut ecu_params = ComParams::default();`
+    // the com params would be fully initialized with all fields, but we only want
+    // the partial overwrite, hence building it from toml.
+    // When the config is parsed `find_unknown_keys` is used to detect keys that don't exist
+    // and parsing the config fails, so it's fairly safe to have this inline toml,
+    // for the sake of a better example config.
+    let ecu_com_params: EcuComParams = toml::from_str(
+        r#"
+[uds.timeout_default]
+name = "CP_P6Max"
+precedence = "Config"
+
+[uds.timeout_default.value]
+secs = 5
+nanos = 0
+
+[doip.routing_activation_timeout]
+name = "CP_DoIPRoutingActivationTimeout"
+precedence = "Config"
+
+[doip.routing_activation_timeout.value]
+secs = 42
+nanos = 0
+"#,
+    )
+    .expect("valid partial com_params TOML");
+
+    config.ecu.insert(
+        "FLXC1000".to_owned(),
+        EcuConfig {
+            com_params: Some(ecu_com_params),
+            ignore_protocol: None,
+            protocol: None,
+        },
+    );
+
     #[cfg(feature = "tokio-tracing")]
     {
         config.logging.tokio_tracing.recording_path = Some("/tmp/tokio-recording".to_owned());
+    }
+
+    #[cfg(feature = "dlt-tracing")]
+    {
+        "CDA".clone_into(&mut config.logging.dlt_tracing.app_id);
+        "OpenSOVD CDA".clone_into(&mut config.logging.dlt_tracing.app_description);
+        config.logging.dlt_tracing.enabled = true;
     }
 
     config
@@ -253,6 +298,10 @@ fn format_toml_line(
 
 #[cfg(test)]
 mod tests {
+    use std::time::Duration;
+
+    use cda_interfaces::datatypes::ComParamPrecedence;
+
     use super::*;
 
     #[test]
@@ -416,7 +465,7 @@ mod tests {
         // that the description for these fields is missing
         // i.e.
         // Add doc comments to the corresponding struct fields:
-        //   - com_params.doip.connection_retry_delay.default.nanos
+        //   - com_params.doip.connection_retry_delay.value.nanos
         let missing: Vec<&str> = schema_paths
             .iter()
             .filter(|path| !desc_map.contains_key(*path))
@@ -553,6 +602,52 @@ mod tests {
              example values for these fields so they appear in the generated reference config:\n  \
              - {}",
             missing.join("\n  - ")
+        );
+    }
+
+    /// Verify that the inline TOML in `reference_config_instance()` actually sets
+    /// the intended `com_param` values. A typo in a TOML key (e.g. `timeout_daefault`
+    /// instead of `timeout_default`) would be silently ignored by Figment merge,
+    /// leaving the field at its global default. This test catches such typos by
+    /// asserting that resolved values differ from the defaults.
+    #[test]
+    fn reference_config_ecu_com_params_resolve_to_expected_values() {
+        let config = reference_config_instance();
+        let ecu_cfg = config
+            .ecu
+            .get("FLXC1000")
+            .expect("FLXC1000 ecu config should be present in reference_config_instance");
+        let ecu_overrides = ecu_cfg
+            .com_params
+            .as_ref()
+            .expect("FLXC1000 should have com_params");
+
+        let resolved =
+            crate::resolve_com_params("FLXC1000", &config.com_params, Some(ecu_overrides))
+                .expect("resolve_com_params should succeed for FLXC1000");
+
+        assert_eq!(
+            resolved.uds.timeout_default.value,
+            Duration::from_secs(5),
+            "uds.timeout_default.value should be 5s as set in inline TOML, not the global default \
+             (1s). Check for typos in the TOML key."
+        );
+        assert_eq!(
+            resolved.uds.timeout_default.precedence,
+            ComParamPrecedence::Config,
+            "uds.timeout_default.precedence should be Config as set in inline TOML"
+        );
+
+        assert_eq!(
+            resolved.doip.routing_activation_timeout.value,
+            Duration::from_secs(42),
+            "doip.routing_activation_timeout.value should be 42s as set in inline TOML, not the \
+             global default (30s). Check for typos in the TOML key."
+        );
+        assert_eq!(
+            resolved.doip.routing_activation_timeout.precedence,
+            ComParamPrecedence::Config,
+            "doip.routing_activation_timeout.precedence should be Config as set in inline TOML"
         );
     }
 }

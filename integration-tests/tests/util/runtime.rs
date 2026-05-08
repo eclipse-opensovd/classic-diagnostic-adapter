@@ -20,7 +20,8 @@ use cda_health::config::HealthConfig;
 use cda_interfaces::{
     FunctionalDescriptionConfig, HashMap, HashMapExtensions,
     datatypes::{
-        ComParams, ComponentsConfig, DatabaseNamingConvention, FaultConfig, FlatbBufConfig,
+        ComParamConfig, ComParamPrecedence, ComParams, ComponentsConfig, DatabaseNamingConvention,
+        DoipComParams, FaultConfig, FlatbBufConfig,
     },
 };
 use cda_plugin_security::{DefaultSecurityPlugin, DefaultSecurityPluginData};
@@ -28,7 +29,9 @@ use cda_tracing::LoggingConfig;
 use futures::FutureExt as _;
 use opensovd_cda_lib::{
     cda_version,
-    config::configfile::{ConfigSanity, Configuration, DatabaseConfig, ServerConfig},
+    config::configfile::{
+        ConfigSanity, Configuration, DatabaseConfig, EcuComParams, EcuConfig, ServerConfig,
+    },
 };
 use tokio::sync::{Mutex, MutexGuard, OnceCell};
 use tracing_subscriber::layer::SubscriberExt;
@@ -120,42 +123,7 @@ async fn initialize_runtime() -> Result<TestRuntime, TestingError> {
         (20002, 13400, 8181) // default ports for local usage
     };
 
-    let config = Configuration {
-        server: opensovd_cda_lib::config::configfile::ServerConfig {
-            address: host.clone(),
-            port: cda_port,
-        },
-        doip: opensovd_cda_lib::config::configfile::DoipConfig {
-            tester_address: host.clone(),
-            gateway_port,
-            ..Default::default()
-        },
-        database: DatabaseConfig {
-            path: mdd_file_path()?,
-            naming_convention: DatabaseNamingConvention::default(),
-            exit_no_database_loaded: true,
-            fallback_to_base_variant: true,
-            ignore_protocol: false,
-        },
-        logging: LoggingConfig::default(),
-        flash_files_path: flash_files_path()?,
-        com_params: ComParams::default(),
-        flat_buf: FlatbBufConfig::default(),
-        functional_description: FunctionalDescriptionConfig {
-            description_database: "functional_groups".to_owned(),
-            enabled_functional_groups: None,
-            protocol_position: cda_interfaces::datatypes::DiagnosticServiceAffixPosition::Suffix,
-        },
-        health: HealthConfig::default(),
-        components: ComponentsConfig {
-            additional_fields: HashMap::new(),
-        },
-        faults: FaultConfig {
-            user_defined_dtc_clear_service: Some(vec![0x31, 0x01, 0x42, 0x00]),
-            user_memory_scope: "Development".to_owned(),
-            ..Default::default()
-        },
-    };
+    let config = cda_test_config(host.clone(), cda_port, gateway_port)?;
     config.validate_sanity().map_err(|e| {
         TestingError::SetupError(format!("Configuration sanity check failed: {e:?}"))
     })?;
@@ -180,6 +148,126 @@ async fn initialize_runtime() -> Result<TestRuntime, TestingError> {
     }
 
     Ok(TestRuntime { config, ecu_sim })
+}
+
+fn cda_test_config(
+    host: String,
+    cda_port: u16,
+    gateway_port: u16,
+) -> Result<Configuration, TestingError> {
+    let config = Configuration {
+        server: opensovd_cda_lib::config::configfile::ServerConfig {
+            address: host.clone(),
+            port: cda_port,
+        },
+        doip: opensovd_cda_lib::config::configfile::DoipConfig {
+            tester_address: host,
+            gateway_port,
+            ..Default::default()
+        },
+        database: DatabaseConfig {
+            path: mdd_file_path()?,
+            naming_convention: DatabaseNamingConvention::default(),
+            exit_no_database_loaded: true,
+            fallback_to_base_variant: true,
+            ignore_protocol: false,
+            strict_ecu_config: false,
+        },
+        logging: LoggingConfig::default(),
+        flash_files_path: flash_files_path()?,
+        com_params: {
+            // logical_functional_address is set globally so that ECUs whose MDD omits
+            // this comparam (e.g. TMCC3000) receive it via the global fallback path.
+            // ECUs that carry the value in their MDD (FLXC1000, FLXCNG1000, FSNR2000)
+            // are unaffected because the DB value takes precedence.
+            let mut p = ComParams::default();
+            p.doip.logical_functional_address.value = 0xFFFF;
+            p
+        },
+        flat_buf: FlatbBufConfig::default(),
+        functional_description: FunctionalDescriptionConfig {
+            description_database: "functional_groups".to_owned(),
+            enabled_functional_groups: None,
+            protocol_position: cda_interfaces::datatypes::DiagnosticServiceAffixPosition::Suffix,
+        },
+        health: HealthConfig::default(),
+        components: ComponentsConfig {
+            additional_fields: HashMap::new(),
+        },
+        faults: FaultConfig {
+            user_defined_dtc_clear_service: Some(vec![0x31, 0x01, 0x42, 0x00]),
+            user_memory_scope: "Development".to_owned(),
+            ..Default::default()
+        },
+        ecu: {
+            let mut map = HashMap::new();
+            map.insert(
+                "TMCC3000".to_owned(),
+                EcuConfig {
+                    ignore_protocol: Some(true),
+                    com_params: Some(
+                        EcuComParams::try_from(ComParams {
+                            doip: DoipComParams {
+                                logical_gateway_address: ComParamConfig {
+                                    name: "logical_gateway_address".to_string(),
+                                    value: 0x3000,
+                                    precedence: ComParamPrecedence::Config,
+                                },
+                                ..Default::default()
+                            },
+                            ..Default::default()
+                        })
+                        .expect("Failed to create EcuConfig for TMCC3000"),
+                    ),
+                    ..Default::default()
+                },
+            );
+            map.insert(
+                "HOVR4000".to_owned(),
+                EcuConfig {
+                    com_params: Some(
+                        EcuComParams::try_from(ComParams {
+                            doip: DoipComParams {
+                                logical_gateway_address: ComParamConfig {
+                                    name: "logical_gateway_address".to_string(),
+                                    value: 0x4000,
+                                    precedence: ComParamPrecedence::Config,
+                                },
+                                ..Default::default()
+                            },
+                            ..Default::default()
+                        })
+                        .expect("Failed to create EcuConfig for HOVR4000"),
+                    ),
+                    protocol: Some("DMC_DoIP".to_owned()),
+                    ignore_protocol: Some(false),
+                },
+            );
+            map.insert(
+                "JGWT5000".to_owned(),
+                EcuConfig {
+                    ignore_protocol: Some(true),
+                    com_params: Some(
+                        EcuComParams::try_from(ComParams {
+                            doip: DoipComParams {
+                                logical_gateway_address: ComParamConfig {
+                                    name: "logical_gateway_address".to_string(),
+                                    value: 0x5000,
+                                    precedence: ComParamPrecedence::Config,
+                                },
+                                ..Default::default()
+                            },
+                            ..Default::default()
+                        })
+                        .expect("Failed to create EcuConfig for JGWT5000"),
+                    ),
+                    ..Default::default()
+                },
+            );
+            map
+        },
+    };
+    Ok(config)
 }
 
 pub(crate) fn host() -> String {

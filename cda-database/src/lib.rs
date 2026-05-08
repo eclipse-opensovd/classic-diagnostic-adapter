@@ -22,6 +22,8 @@ pub use mdd_data::{
 };
 use serde::{Deserialize, Serialize};
 
+// Allowed because it makes sense for a configuration to have more than 3 bools
+#[allow(clippy::struct_excessive_bools)]
 #[derive(Deserialize, Serialize, Clone, Debug, Default, schemars::JsonSchema)]
 pub struct DatabaseConfig {
     /// Path to load the databases from, this must be a directory.
@@ -44,4 +46,10 @@ pub struct DatabaseConfig {
     /// attempting a lookup with this flag set against a multi-protocol database
     /// returns `DiagServiceError::InvalidDatabase`.
     pub ignore_protocol: bool,
+    /// When `true`, the application will exit with an error if any key under
+    /// `[ecu.<name>]` in the configuration does not match a loaded MDD database.
+    ///
+    /// This helps catch typos in ECU names early. When `false` (default),
+    /// unmatched per-ECU config entries only produce a warning.
+    pub strict_ecu_config: bool,
 }
