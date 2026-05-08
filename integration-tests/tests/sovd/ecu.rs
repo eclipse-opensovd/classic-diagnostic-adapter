@@ -34,6 +34,87 @@ use crate::{
     },
 };
 
+/// This ECU is missing comm parameters and thus must be configured via the configuration file.
+/// The test verifies that the ECU is reachable and reports the correct name and state.
+#[tokio::test]
+async fn test_tmcc3000_ecu_online() {
+    let (runtime, _lock) = setup_integration_test(false).await.unwrap();
+
+    let json = get_ecu_component(
+        &runtime.config,
+        sovd::ECU_TMCC3000_ENDPOINT,
+        StatusCode::OK,
+        None,
+    )
+    .await
+    .expect("TMCC3000 component should be reachable via SOVD API");
+
+    let name = json
+        .get("name")
+        .and_then(|v| v.as_str())
+        .expect("Response should contain 'name' field");
+    assert_eq!(
+        name.to_lowercase(),
+        "tmcc3000",
+        "Component name should be tmcc3000"
+    );
+}
+
+/// HOVR4000 uses a non-default protocol (`DMC_DoIP`) in its MDD. The global
+/// protocol is `UDS_Ethernet_DoIP_DOBT`, so without a per-ECU protocol override
+/// the CDA would fail to load this ECU.  The test verifies that the per-ECU
+/// `protocol` config override works correctly.
+#[tokio::test]
+async fn test_hovr4000_per_ecu_protocol_override() {
+    let (runtime, _lock) = setup_integration_test(false).await.unwrap();
+
+    let json = get_ecu_component(
+        &runtime.config,
+        sovd::ECU_HOVR4000_ENDPOINT,
+        StatusCode::OK,
+        None,
+    )
+    .await
+    .expect("HOVR4000 component should be reachable when per-ECU protocol override is set");
+
+    let name = json
+        .get("name")
+        .and_then(|v| v.as_str())
+        .expect("Response should contain 'name' field");
+    assert_eq!(
+        name.to_lowercase(),
+        "hovr4000",
+        "Component name should be hovr4000"
+    );
+}
+
+/// JGWT5000 has a non-default protocol (`DMC_DoIP`) in its MDD but no per-ECU
+/// protocol override.  With `ignore_protocol` enabled, `into_db_protocol` falls
+/// back to the single DB protocol and com-param lookup matches by name alone.
+#[tokio::test]
+async fn test_jgwt5000_ignore_protocol_with_db_protocol() {
+    let (runtime, _lock) = setup_integration_test(false).await.unwrap();
+
+    let json = get_ecu_component(
+        &runtime.config,
+        sovd::ECU_JGWT5000_ENDPOINT,
+        StatusCode::OK,
+        None,
+    )
+    .await
+    .expect("JGWT5000 component should be reachable with ignore_protocol and no protocol override");
+
+    let name = json
+        .get("name")
+        .and_then(|v| v.as_str())
+        .expect("Response should contain 'name' field");
+    assert_eq!(
+        name.to_lowercase(),
+        "jgwt5000",
+        "Component name should be jgwt5000"
+    );
+}
+
 #[allow(clippy::too_many_lines)] // makes sense to keep test together
 #[tokio::test]
 async fn test_ecu_session_switching() {

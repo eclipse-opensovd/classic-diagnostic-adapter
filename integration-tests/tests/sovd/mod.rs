@@ -38,6 +38,9 @@ mod version_endpoint;
 
 pub(crate) const ECU_FLXC1000_ENDPOINT: &str = "components/flxc1000";
 pub(crate) const ECU_FLXCNG1000_ENDPOINT: &str = "components/flxcng1000";
+pub(crate) const ECU_TMCC3000_ENDPOINT: &str = "components/tmcc3000";
+pub(crate) const ECU_HOVR4000_ENDPOINT: &str = "components/hovr4000";
+pub(crate) const ECU_JGWT5000_ENDPOINT: &str = "components/jgwt5000";
 
 pub(crate) async fn put_mode<T: DeserializeOwned, S: Serialize>(
     config: &Configuration,
@@ -339,14 +342,21 @@ where
     F: Fn() -> Fut + Send + Sync + 'static,
     Fut: Future<Output = ()> + 'static,
 {
-    std::panic::set_hook(Box::new(move |_| {
-        // Create a new runtime to drive the future to completion.
-        // Don't use Handle::current().block_on() here - it will
-        // deadlock if the panic happens on an async worker thread.
-        let rt = tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()
-            .expect("failed to build runtime in panic hook");
-        rt.block_on(cleanup_fn());
+    let previous_hook = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |panic_info| {
+        // Run cleanup inside catch_unwind so a failure here never triggers
+        // a double-panic (which the runtime turns into SIGABRT).
+        let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            // Create a new runtime to drive the future to completion.
+            // Don't use Handle::current().block_on() here it will
+            // deadlock if the panic happens on an async worker thread.
+            if let Ok(rt) = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+            {
+                rt.block_on(cleanup_fn());
+            }
+        }));
+        previous_hook(panic_info);
     }));
 }

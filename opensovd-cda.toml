@@ -18,18 +18,22 @@
 
 # Attempts to retry connection before giving up
 [com_params.doip.connection_retry_attempts]
-# Default value used when the database does not provide one.
-# default = 100
 # Communication parameter identifier (`CP_xxx` name from the database).
 # name = "CP_DoIPConnectionRetryAttempts"
+# Controls whether a com-parameter value is resolved from the MDD database
+# or forced from the configuration file.
+# precedence = "Database"
+# Value used when the database does not provide one, or precedence is set to `Config`.
+# value = 100
 
 # Delay before attempting to reconnect
 [com_params.doip.connection_retry_delay]
 # Communication parameter identifier (`CP_xxx` name from the database).
 # name = "CP_DoIPConnectionRetryDelay"
+# precedence = "Database"
 
-# Default value used when the database does not provide one.
-[com_params.doip.connection_retry_delay.default]
+# Value used when the database does not provide one, or precedence is set to `Config`.
+[com_params.doip.connection_retry_delay.value]
 # nanos = 0
 # secs = 5
 
@@ -37,9 +41,10 @@
 [com_params.doip.connection_timeout]
 # Communication parameter identifier (`CP_xxx` name from the database).
 # name = "CP_DoIPConnectionTimeout"
+# precedence = "Database"
 
-# Default value used when the database does not provide one.
-[com_params.doip.connection_timeout.default]
+# Value used when the database does not provide one, or precedence is set to `Config`.
+[com_params.doip.connection_timeout.value]
 # nanos = 0
 # secs = 30
 
@@ -47,41 +52,54 @@
 [com_params.doip.diagnostic_ack_timeout]
 # Communication parameter identifier (`CP_xxx` name from the database).
 # name = "CP_DoIPDiagnosticAckTimeout"
+# precedence = "Database"
 
-# Default value used when the database does not provide one.
-[com_params.doip.diagnostic_ack_timeout.default]
+# Value used when the database does not provide one, or precedence is set to `Config`.
+[com_params.doip.diagnostic_ack_timeout.value]
 # nanos = 0
 # secs = 1
 
 # Logical/Physical address of the ECU
 [com_params.doip.logical_ecu_address]
-# Default value used when the database does not provide one.
-# default = 0
 # Communication parameter identifier (`CP_xxx` name from the database).
 # name = "CP_DoIPLogicalEcuAddress"
+# Controls whether a com-parameter value is resolved from the MDD database
+# or forced from the configuration file.
+# precedence = "Database"
+# Value used when the database does not provide one, or precedence is set to `Config`.
+# value = 0
 
 # Functional address of the ECU
 [com_params.doip.logical_functional_address]
-# Default value used when the database does not provide one.
-# default = 0
 # Communication parameter identifier (`CP_xxx` name from the database).
 # name = "CP_DoIPLogicalFunctionalAddress"
+# Controls whether a com-parameter value is resolved from the MDD database
+# or forced from the configuration file.
+# precedence = "Database"
+# Value used when the database does not provide one, or precedence is set to `Config`.
+# value = 0
 
 # Logical address of a `DoIP` entity.
 # In case of directly reachable `DoIP` entity it's equal to the
 # `LogicalEcuAddress`, otherwise data will be sent via this address to the `LogicalEcuAddress`
 [com_params.doip.logical_gateway_address]
-# Default value used when the database does not provide one.
-# default = 0
 # Communication parameter identifier (`CP_xxx` name from the database).
 # name = "CP_DoIPLogicalGatewayAddress"
+# Controls whether a com-parameter value is resolved from the MDD database
+# or forced from the configuration file.
+# precedence = "Database"
+# Value used when the database does not provide one, or precedence is set to `Config`.
+# value = 0
 
 # Logical address of the tester
 [com_params.doip.logical_tester_address]
-# Default value used when the database does not provide one.
-# default = 0
 # Communication parameter identifier (`CP_xxx` name from the database).
 # name = "CP_DoIPLogicalTesterAddress"
+# Controls whether a com-parameter value is resolved from the MDD database
+# or forced from the configuration file.
+# precedence = "Database"
+# Value used when the database does not provide one, or precedence is set to `Config`.
+# value = 0
 
 # Number of retries for specific NACKs
 # The key must be a string, because parsing from toml requires keys to be strings,
@@ -89,26 +107,33 @@
 [com_params.doip.nack_number_of_retries]
 # Communication parameter identifier (`CP_xxx` name from the database).
 # name = "CP_DoIPNumberOfRetries"
+# Controls whether a com-parameter value is resolved from the MDD database
+# or forced from the configuration file.
+# precedence = "Database"
 
-# Default value used when the database does not provide one.
-[com_params.doip.nack_number_of_retries.default]
+# Value used when the database does not provide one, or precedence is set to `Config`.
+[com_params.doip.nack_number_of_retries.value]
 # 0x03 = 3
 
 # Number of retries in case a transmission error,
 # a reception error, or transport layer timeout is encountered
 [com_params.doip.repeat_request_count_transmission]
-# Default value used when the database does not provide one.
-# default = 3
 # Communication parameter identifier (`CP_xxx` name from the database).
 # name = "CP_RepeatReqCountTrans"
+# Controls whether a com-parameter value is resolved from the MDD database
+# or forced from the configuration file.
+# precedence = "Database"
+# Value used when the database does not provide one, or precedence is set to `Config`.
+# value = 3
 
 # Period between retries, after specific NACK conditions are encountered
 [com_params.doip.retry_period]
 # Communication parameter identifier (`CP_xxx` name from the database).
 # name = "CP_DoIPRetryPeriod"
+# precedence = "Database"
 
-# Default value used when the database does not provide one.
-[com_params.doip.retry_period.default]
+# Value used when the database does not provide one, or precedence is set to `Config`.
+[com_params.doip.retry_period.value]
 # nanos = 200000000
 # secs = 0
 
@@ -116,9 +141,10 @@
 [com_params.doip.routing_activation_timeout]
 # Communication parameter identifier (`CP_xxx` name from the database).
 # name = "CP_DoIPRoutingActivationTimeout"
+# precedence = "Database"
 
-# Default value used when the database does not provide one.
-[com_params.doip.routing_activation_timeout.default]
+# Value used when the database does not provide one, or precedence is set to `Config`.
+[com_params.doip.routing_activation_timeout.value]
 # nanos = 0
 # secs = 30
 
@@ -127,9 +153,10 @@
 [com_params.uds.rc_21_completion_timeout]
 # Communication parameter identifier (`CP_xxx` name from the database).
 # name = "CP_RC21CompletionTimeout"
+# precedence = "Database"
 
-# Default value used when the database does not provide one.
-[com_params.uds.rc_21_completion_timeout.default]
+# Value used when the database does not provide one, or precedence is set to `Config`.
+[com_params.uds.rc_21_completion_timeout.value]
 # nanos = 0
 # secs = 25
 
@@ -137,45 +164,54 @@
 [com_params.uds.rc_21_repeat_request_time]
 # Communication parameter identifier (`CP_xxx` name from the database).
 # name = "CP_RC21RequestTime"
+# precedence = "Database"
 
-# Default value used when the database does not provide one.
-[com_params.uds.rc_21_repeat_request_time.default]
+# Value used when the database does not provide one, or precedence is set to `Config`.
+[com_params.uds.rc_21_repeat_request_time.value]
 # nanos = 200000000
 # secs = 0
 
 # `RetryPolicy` in case of NRC 0x21 (busy repeat request)
 [com_params.uds.rc_21_retry_policy]
-# Default value used when the database does not provide one.
-# default = "ContinueUntilTimeout"
 # Communication parameter identifier (`CP_xxx` name from the database).
 # name = "CP_RC21Handling"
+# Controls whether a com-parameter value is resolved from the MDD database
+# or forced from the configuration file.
+# precedence = "Database"
+# Value used when the database does not provide one, or precedence is set to `Config`.
+# value = "ContinueUntilTimeout"
 
 # Time period the tester accepts for repeated NRC 0x78 (response pending),
 # and waits for a positive response
 [com_params.uds.rc_78_completion_timeout]
 # Communication parameter identifier (`CP_xxx` name from the database).
 # name = "CP_RC78CompletionTimeout"
+# precedence = "Database"
 
-# Default value used when the database does not provide one.
-[com_params.uds.rc_78_completion_timeout.default]
+# Value used when the database does not provide one, or precedence is set to `Config`.
+[com_params.uds.rc_78_completion_timeout.value]
 # nanos = 0
 # secs = 25
 
 # `RetryPolicy` in case of NRC 0x78 (response pending)
 [com_params.uds.rc_78_retry_policy]
-# Default value used when the database does not provide one.
-# default = "ContinueUntilTimeout"
 # Communication parameter identifier (`CP_xxx` name from the database).
 # name = "CP_RC78Handling"
+# Controls whether a com-parameter value is resolved from the MDD database
+# or forced from the configuration file.
+# precedence = "Database"
+# Value used when the database does not provide one, or precedence is set to `Config`.
+# value = "ContinueUntilTimeout"
 
 # Enhanced timeout after receiving a NRC 0x78 (response pending) to wait for the
 # complete reception of the response message
 [com_params.uds.rc_78_timeout]
 # Communication parameter identifier (`CP_xxx` name from the database).
 # name = "CP_P6Star"
+# precedence = "Database"
 
-# Default value used when the database does not provide one.
-[com_params.uds.rc_78_timeout.default]
+# Value used when the database does not provide one, or precedence is set to `Config`.
+[com_params.uds.rc_78_timeout.value]
 # nanos = 0
 # secs = 1
 
@@ -184,9 +220,10 @@
 [com_params.uds.rc_94_completion_timeout]
 # Communication parameter identifier (`CP_xxx` name from the database).
 # name = "CP_RC94CompletionTimeout"
+# precedence = "Database"
 
-# Default value used when the database does not provide one.
-[com_params.uds.rc_94_completion_timeout.default]
+# Value used when the database does not provide one, or precedence is set to `Config`.
+[com_params.uds.rc_94_completion_timeout.value]
 # nanos = 0
 # secs = 25
 
@@ -195,96 +232,125 @@
 [com_params.uds.rc_94_repeat_request_time]
 # Communication parameter identifier (`CP_xxx` name from the database).
 # name = "CP_RC94RequestTime"
+# precedence = "Database"
 
-# Default value used when the database does not provide one.
-[com_params.uds.rc_94_repeat_request_time.default]
+# Value used when the database does not provide one, or precedence is set to `Config`.
+[com_params.uds.rc_94_repeat_request_time.value]
 # nanos = 200000000
 # secs = 0
 
 # `RetryPolicy` in case of NRC 0x94 (temporarily not available)
 [com_params.uds.rc_94_retry_policy]
-# Default value used when the database does not provide one.
-# default = "ContinueUntilTimeout"
 # Communication parameter identifier (`CP_xxx` name from the database).
 # name = "CP_RC94Handling"
+# Controls whether a com-parameter value is resolved from the MDD database
+# or forced from the configuration file.
+# precedence = "Database"
+# Value used when the database does not provide one, or precedence is set to `Config`.
+# value = "ContinueUntilTimeout"
 
 # Repetition of last request in case of timeout, transmission or receive error
 # Only applies to application layer messages
 [com_params.uds.repeat_req_count_app]
-# Default value used when the database does not provide one.
-# default = 2
 # Communication parameter identifier (`CP_xxx` name from the database).
 # name = "CP_RepeatReqCountApp"
+# Controls whether a com-parameter value is resolved from the MDD database
+# or forced from the configuration file.
+# precedence = "Database"
+# Value used when the database does not provide one, or precedence is set to `Config`.
+# value = 2
 
 # Addressing mode for sending Tester Present
 # Only relevant in case no function messages are sent
 [com_params.uds.tester_present_addr_mode]
-# Default value used when the database does not provide one.
-# default = "Physical"
 # Communication parameter identifier (`CP_xxx` name from the database).
 # name = "CP_TesterPresentAddrMode"
+# Controls whether a com-parameter value is resolved from the MDD database
+# or forced from the configuration file.
+# precedence = "Database"
+# Value used when the database does not provide one, or precedence is set to `Config`.
+# value = "Physical"
 
 # Expected negative response (if required)
 # A tester present error should be reported in the log, tester present s
 # ending should be continued
 [com_params.uds.tester_present_exp_neg_resp]
-# Default value used when the database does not provide one.
-# default = [
+# Communication parameter identifier (`CP_xxx` name from the database).
+# name = "CP_TesterPresentExpNegResp"
+# Controls whether a com-parameter value is resolved from the MDD database
+# or forced from the configuration file.
+# precedence = "Database"
+# Value used when the database does not provide one, or precedence is set to `Config`.
+# value = [
 #     127,
 #     62,
 # ]
-# Communication parameter identifier (`CP_xxx` name from the database).
-# name = "CP_TesterPresentExpNegResp"
 
 # Expected positive response (if required)
 [com_params.uds.tester_present_exp_pos_resp]
-# Default value used when the database does not provide one.
-# default = [
+# Communication parameter identifier (`CP_xxx` name from the database).
+# name = "CP_TesterPresentExpPosResp"
+# Controls whether a com-parameter value is resolved from the MDD database
+# or forced from the configuration file.
+# precedence = "Database"
+# Value used when the database does not provide one, or precedence is set to `Config`.
+# value = [
 #     126,
 #     0,
 # ]
-# Communication parameter identifier (`CP_xxx` name from the database).
-# name = "CP_TesterPresentExpPosResp"
 
 # Message to be sent for tester present
 [com_params.uds.tester_present_message]
-# Default value used when the database does not provide one.
-# default = [
+# Communication parameter identifier (`CP_xxx` name from the database).
+# name = "CP_TesterPresentMessage"
+# Controls whether a com-parameter value is resolved from the MDD database
+# or forced from the configuration file.
+# precedence = "Database"
+# Value used when the database does not provide one, or precedence is set to `Config`.
+# value = [
 #     62,
 #     0,
 # ]
-# Communication parameter identifier (`CP_xxx` name from the database).
-# name = "CP_TesterPresentMessage"
 
 # Define expectation for Tester Present responses
 [com_params.uds.tester_present_response_expected]
-# Default value used when the database does not provide one.
-# default = "true"
 # Communication parameter identifier (`CP_xxx` name from the database).
 # name = "CP_TesterPresentReqResp"
+# Controls whether a com-parameter value is resolved from the MDD database
+# or forced from the configuration file.
+# precedence = "Database"
+# Value used when the database does not provide one, or precedence is set to `Config`.
+# value = "true"
 
 # Define Tester Present generation
 [com_params.uds.tester_present_retry_policy]
-# Default value used when the database does not provide one.
-# default = "true"
 # Communication parameter identifier (`CP_xxx` name from the database).
 # name = "CP_TesterPresentHandling"
+# Controls whether a com-parameter value is resolved from the MDD database
+# or forced from the configuration file.
+# precedence = "Database"
+# Value used when the database does not provide one, or precedence is set to `Config`.
+# value = "true"
 
 # Define condition for sending tester present
 # When bus has been idle (Interval defined by `TesterPresentTime`)
 [com_params.uds.tester_present_send_type]
-# Default value used when the database does not provide one.
-# default = "OnIdle"
 # Communication parameter identifier (`CP_xxx` name from the database).
 # name = "CP_TesterPresentSendType"
+# Controls whether a com-parameter value is resolved from the MDD database
+# or forced from the configuration file.
+# precedence = "Database"
+# Value used when the database does not provide one, or precedence is set to `Config`.
+# value = "OnIdle"
 
 # Timing interval for tester present messages in us
 [com_params.uds.tester_present_time]
 # Communication parameter identifier (`CP_xxx` name from the database).
 # name = "CP_TesterPresentTime"
+# precedence = "Database"
 
-# Default value used when the database does not provide one.
-[com_params.uds.tester_present_time.default]
+# Value used when the database does not provide one, or precedence is set to `Config`.
+[com_params.uds.tester_present_time.value]
 # nanos = 0
 # secs = 2
 
@@ -293,9 +359,10 @@
 [com_params.uds.timeout_default]
 # Communication parameter identifier (`CP_xxx` name from the database).
 # name = "CP_P6Max"
+# precedence = "Database"
 
-# Default value used when the database does not provide one.
-[com_params.uds.timeout_default.default]
+# Value used when the database does not provide one, or precedence is set to `Config`.
+[com_params.uds.timeout_default.value]
 # nanos = 0
 # secs = 1
 
@@ -328,6 +395,12 @@
 # ignore_protocol = false
 # Path to load the databases from, this must be a directory.
 # path = "."
+# When `true`, the application will exit with an error if any key under
+# `[ecu.<name>]` in the configuration does not match a loaded MDD database.
+#
+# This helps catch typos in ECU names early. When `false` (default),
+# unmatched per-ECU config entries only produce a warning.
+# strict_ecu_config = false
 
 # Holds configuration for diagnostic service naming conventions.
 #
@@ -440,6 +513,22 @@
 # TLS port for secure `DoIP` communication.
 # tls_port = 3496
 
+[ecu.FLXC1000.com_params.doip.routing_activation_timeout]
+# name = "CP_DoIPRoutingActivationTimeout"
+# precedence = "Config"
+
+[ecu.FLXC1000.com_params.doip.routing_activation_timeout.value]
+# nanos = 0
+# secs = 42
+
+[ecu.FLXC1000.com_params.uds.timeout_default]
+# name = "CP_P6Max"
+# precedence = "Config"
+
+[ecu.FLXC1000.com_params.uds.timeout_default.value]
+# nanos = 0
+# secs = 5
+
 # DTC (Diagnostic Trouble Code) fault memory settings.
 [faults]
 # Default scope name for standard fault memory operations.
@@ -499,8 +588,8 @@
 
 # AUTOSAR DLT (Diagnostic Log and Trace) output configuration.
 [logging.dlt_tracing]
-# DLT application description string.
-# app_description = "Bridges SOVD to UDS for ECU communication."
+# DLT application description string, max 256 characters.
+# app_description = "OpenSOVD CDA"
 # DLT application ID, max 4 characters
 # app_id = "CDA"
 # Whether DLT tracing output is enabled.
