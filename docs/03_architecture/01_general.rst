@@ -101,3 +101,51 @@ Storage Access
 
     The ``get_or_create_collection`` function creates an implicit transaction for the creation of the collection only,
     if it does not exist. If the collection already exists, it simply returns it.
+
+
+Systemd Watchdog Integration
+----------------------------
+
+.. arch:: Systemd Watchdog Integration
+    :id: arch~system-sd-notify-watchdog-integration
+    :links: dimpl~system-sd-notify-watchdog-integration; test~system-sd-notify-watchdog-integration
+    :status: draft
+
+    The systemd watchdog integration is implemented as an optional background task that bridges the CDA health system
+    with the systemd service manager notification protocol.
+
+    **Startup Detection**
+
+    At initialization, the component checks whether the process was launched by systemd and whether the watchdog is
+    enabled. If either condition is not met, no task is spawned and the CDA operates without watchdog integration.
+
+    **Notification Interval**
+
+    The notification interval is derived from the systemd-configured watchdog timeout, reduced by a safety margin to
+    ensure notifications arrive before systemd considers the service unresponsive.
+
+    **Health Aggregation**
+
+    On each tick, the task queries all registered health providers and folds their individual statuses into a single
+    aggregated status. The folding semantics are:
+
+    * A single failed provider causes the aggregate to be failed.
+    * All providers must report healthy for the aggregate to be healthy.
+    * While any provider is still pending or starting, the aggregate remains in the starting state.
+
+    **State Machine**
+
+    The notification sent to systemd is determined by the transition between the previous and current aggregated status:
+
+    .. uml::
+
+        @startuml
+        [*] --> Starting
+        Starting --> Up : all providers healthy\n(notify: Ready)
+        Up --> Up : still healthy\n(notify: Watchdog)
+        Up --> Failed : provider degraded\n(notify: WatchdogTrigger)
+        @enduml
+
+    **Shutdown**
+
+    The task terminates gracefully when the application shutdown signal is received.

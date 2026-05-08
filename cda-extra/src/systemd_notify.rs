@@ -18,6 +18,8 @@ use tokio::task::JoinHandle;
 
 /// Creates a background task that integrates with the systemd watchdog.
 ///
+/// [[ dimpl~system-sd-notify-watchdog-integration, Systemd Watchdog Integration ]]
+///
 /// If the process was booted via systemd and the watchdog is enabled,
 /// this function spawns a task that periodically checks the health state
 /// and sends the appropriate `sd_notify` notification:
@@ -135,6 +137,7 @@ async fn fold_health_state(health_state: Option<&HealthState>) -> HealthStatus {
         .fold(cda_health::Status::Starting, fold_status)
 }
 
+/// [[ test~system-sd-notify-watchdog-integration, Systemd Watchdog Health Aggregation Tests ]]
 #[cfg(test)]
 mod tests {
     use cda_health::Status;

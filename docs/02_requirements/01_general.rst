@@ -92,6 +92,27 @@ Storage Access
 
 
 
+Systemd Watchdog Integration
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+.. req:: Systemd Watchdog Integration
+    :id: req~system-sd-notify-watchdog-integration
+    :links: arch~system-sd-notify-watchdog-integration
+    :status: draft
+
+    When the CDA is running as a systemd service with watchdog enabled, it must periodically aggregate the health status
+    of all registered health providers and send appropriate sd_notify notifications to systemd:
+
+    * **Ready** — when the aggregated health transitions from starting to healthy.
+    * **Watchdog** — while the aggregated health remains healthy.
+    * **WatchdogTrigger** — when the aggregated health degrades to failed, causing systemd to restart the service.
+
+    The notification interval must be derived from the systemd-configured watchdog timeout to ensure timely delivery.
+
+    When systemd is not detected or the watchdog is not enabled, the CDA must operate normally without watchdog
+    integration.
+
+
 Extensibility
 -------------
 
