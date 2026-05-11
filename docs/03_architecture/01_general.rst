@@ -103,6 +103,67 @@ Storage Access
     if it does not exist. If the collection already exists, it simply returns it.
 
 
+Persistence
+-----------
+
+.. arch:: Persistence API
+    :id: arch~system-persistence-api
+    :status: draft
+
+    The Persistence API provides a durable key-value storage abstraction. Data is organized into Buckets, each
+    representing a named, logically separated set of key-value pairs. The API is accessed through an exchangeable
+    provider, enabling different storage backends without affecting consuming code.
+
+    .. uml::
+
+        @startuml
+        package "Persistence API" {
+            +enum PersistenceError {
+                BucketNotFound(String)
+                KeyNotFound(String)
+                IoError(String)
+                Other(String)
+            }
+
+            +interface Persistence {
+                +get(bucket: String, key: String) -> Result<String, PersistenceError>
+                +set(bucket: String, key: String, value: String) -> Result<(), PersistenceError>
+                +delete(bucket: String, key: String) -> Result<(), PersistenceError>
+                +contains(bucket: String, key: String) -> Result<bool, PersistenceError>
+                +list_keys(bucket: String) -> Result<Vec<String>, PersistenceError>
+                +flush() -> Result<(), PersistenceError>
+            }
+
+            Persistence ..> PersistenceError
+        }
+        @enduml
+
+    The ``Persistence`` interface is the single access point for all persistence operations. Callers specify the
+    target Bucket by name alongside the key for each operation. Bucket management (creation, lifecycle) is handled
+    transparently by the provider implementation.
+
+    The ``flush`` operation explicitly persists all buffered data to the underlying storage media. Providers that
+    buffer writes in memory shall guarantee that all data is durable after a successful flush call.
+
+    Providers are exchangeable at compile time, allowing the use of alternative backends (e.g., an in-memory
+    provider for testing purposes) without modifying consuming code.
+
+
+.. arch:: Default redb Persistence Provider
+    :id: arch~system-default-redb-persistence-provider
+    :status: draft
+
+    The default persistence provider uses `redb`_ as its storage backend. It implements the ``Persistence``
+    interface with the following characteristics:
+
+    .. _redb: https://www.redb.org
+
+    * All write operations (set, delete) are performed within ACID transactions, ensuring durability and consistency.
+    * The database file path is configurable.
+    * On unexpected interruption (power-off, crash), redb guarantees that uncommitted transactions are rolled back
+      on the next open, preserving data integrity.
+
+
 Systemd Watchdog Integration
 ----------------------------
 

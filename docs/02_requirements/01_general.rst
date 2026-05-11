@@ -91,6 +91,42 @@ Storage Access
     A default implementation for local file system access, utilizing the Storage Access Abstraction must be provided.
 
 
+Persistence
+^^^^^^^^^^^
+
+.. req:: Persistence API
+    :id: req~system-persistence-api
+    :links: arch~system-persistence-api
+    :reqtype: functional
+    :status: draft
+
+    The CDA shall provide a persistence API for durable key-value storage. Data shall be organized into Buckets, where
+    each Bucket represents a named, logically separated collection of key-value pairs. The API shall support
+    creating and opening Buckets, as well as performing get, set, delete, and contains operations on entries within
+    a Bucket.
+
+    The API shall provide a flush operation that explicitly persists all buffered data to the underlying storage media.
+    This allows callers to guarantee durability at defined points, such as during shutdown or for security-critical
+    data that must not be lost.
+
+    The concrete persistence implementation shall be provided by an exchangeable provider, allowing different storage
+    backends to be used without changing consuming code.
+
+
+.. req:: Default redb Persistence Provider
+    :id: req~system-default-redb-persistence-provider
+    :links: arch~system-default-redb-persistence-provider
+    :reqtype: functional
+    :status: draft
+
+    A default persistence provider implementation using `redb`_ shall be provided. This provider shall implement the
+    persistence API, mapping Buckets to redb tables and storing key-value pairs with ACID transaction guarantees.
+
+    .. _redb: https://www.redb.org
+
+    Writes to the underlying storage media shall be minimized to reduce wear on flash-based storage typically found
+    in embedded devices.
+
 
 Systemd Watchdog Integration
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
