@@ -28,6 +28,7 @@ path = "src/lib.rs"
 bytes = { workspace = true }
 foldhash = { workspace = true }
 
+rkyv = { workspace = true }
 parking_lot = { workspace = true }
 schemars = { workspace = true }
 serde = { workspace = true, features = ["derive"] }

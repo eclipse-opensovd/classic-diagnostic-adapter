@@ -89,6 +89,21 @@ The minimum required version of the toolchain is [Rust 1.88.0](https://blog.rust
 cargo build --release
 ```
 
+### Windows
+
+Prerequisite:
+- Build Toolchain for Windows
+- OpenSSL (if targeting the OpenSSL build)
+   `winget install openssl`
+
+#### Setup Env
+```pwsh
+$env:CMAKE_GENERATOR="Ninja"
+$env:OPENSSL_DIR="C:\Program Files\OpenSSL-Win64"
+$env:OPENSSL_LIB_DIR="C:\Program Files\OpenSSL-Win64\lib\VC\x64\MD"
+$env:OPENSSL_INCLUDE_DIR="C:\Program Files\OpenSSL-Win64\include"
+```
+
 ## developing
 
 ### pre commit
