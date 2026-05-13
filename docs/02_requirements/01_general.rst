@@ -139,9 +139,9 @@ Systemd Watchdog Integration
     When the CDA is running as a systemd service with watchdog enabled, it must periodically aggregate the health status
     of all registered health providers and send appropriate sd_notify notifications to systemd:
 
-    * **Ready** — when the aggregated health transitions from starting to healthy.
-    * **Watchdog** — while the aggregated health remains healthy.
-    * **WatchdogTrigger** — when the aggregated health degrades to failed, causing systemd to restart the service.
+    * **Ready** - when the aggregated health transitions from starting to healthy.
+    * **Watchdog** - while the aggregated health remains healthy.
+    * **WatchdogTrigger** - when the aggregated health degrades to failed, causing systemd to restart the service.
 
     The notification interval must be derived from the systemd-configured watchdog timeout to ensure timely delivery.
 

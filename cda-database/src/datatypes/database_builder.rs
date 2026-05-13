@@ -594,7 +594,7 @@ impl<'a> EcuDataBuilder<'a> {
     ///
     /// This is the counterpart of [`Self::create_protocol`] for cases where a
     /// `Protocol` must be the flatbuffer root rather than embedded inside an
-    /// `EcuData` object — for example when only a `Protocol` reference is needed
+    /// `EcuData` object - for example when only a `Protocol` reference is needed
     /// during a lookup and no full database is required.
     ///
     /// Consumes the builder.
