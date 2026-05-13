@@ -252,6 +252,7 @@ pub async fn load_databases<S: SecurityPlugin>(
     let database_naming_convention = config.database.naming_convention.clone();
     let func_description_cfg = config.functional_description.clone();
     let fallback_to_base_variant = config.database.fallback_to_base_variant;
+    let strict_parameter_validation = config.database.strict_parameter_validation;
     let database_config = config.database.clone();
     let protocol = cda_interfaces::Protocol::new(config.doip.protocol_name.clone());
     let com_params = config.com_params.clone();
@@ -326,6 +327,7 @@ pub async fn load_databases<S: SecurityPlugin>(
                         flat_buf_settings,
                         func_description_cfg,
                         fallback_to_base_variant,
+                        strict_parameter_validation,
                         database_config,
                     )
                     .await;
@@ -462,6 +464,7 @@ async fn load_database<S: SecurityPlugin>(
     flat_buf_settings: FlatbBufConfig,
     func_description_cfg: FunctionalDescriptionConfig,
     fallback_to_base_variant: bool,
+    strict_parameter_validation: bool,
     database_config: cda_database::DatabaseConfig,
 ) {
     for (mddfile, _) in paths {
@@ -531,6 +534,7 @@ async fn load_database<S: SecurityPlugin>(
                     ecu_type,
                     &func_description_cfg,
                     fallback_to_base_variant,
+                    strict_parameter_validation,
                 ) {
                     Ok(manager) => manager,
                     Err(e) => {

@@ -328,6 +328,10 @@
 # ignore_protocol = false
 # Path to load the databases from, this must be a directory.
 # path = "."
+# When `true`, requests that contain parameters not defined in the service
+# are rejected with a 400 Bad Request error listing the unexpected parameter names.
+# When `false` (default), unexpected parameters trigger a warning log but are otherwise ignored.
+# strict_parameter_validation = false
 
 # Holds configuration for diagnostic service naming conventions.
 #

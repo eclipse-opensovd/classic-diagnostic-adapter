@@ -136,6 +136,7 @@ async fn initialize_runtime() -> Result<TestRuntime, TestingError> {
             exit_no_database_loaded: true,
             fallback_to_base_variant: true,
             ignore_protocol: false,
+            strict_parameter_validation: false,
         },
         logging: LoggingConfig::default(),
         flash_files_path: flash_files_path()?,

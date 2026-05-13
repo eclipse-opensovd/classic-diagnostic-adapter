@@ -22,6 +22,8 @@ pub use mdd_data::{
 };
 use serde::{Deserialize, Serialize};
 
+// Allowed because this holds a set of independent configuration flags.
+#[allow(clippy::struct_excessive_bools)]
 #[derive(Deserialize, Serialize, Clone, Debug, Default, schemars::JsonSchema)]
 pub struct DatabaseConfig {
     /// Path to load the databases from, this must be a directory.
@@ -44,4 +46,9 @@ pub struct DatabaseConfig {
     /// attempting a lookup with this flag set against a multi-protocol database
     /// returns `DiagServiceError::InvalidDatabase`.
     pub ignore_protocol: bool,
+    /// When `true`, requests that contain parameters not defined in the service
+    /// are rejected with a `BadPayload` error (400 Bad Request).
+    /// When `false` (default), unexpected parameters trigger a warning log but
+    /// are otherwise ignored.
+    pub strict_parameter_validation: bool,
 }
