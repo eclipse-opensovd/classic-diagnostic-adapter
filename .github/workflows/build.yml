@@ -50,6 +50,16 @@ jobs:
         uses: eclipse-opensovd/dlt-tracing-lib/.github/actions/setup-dlt@main
       - name: Build all features
         run: cargo build --locked --verbose --all-features
+      - name: Verify generated files are up to date
+        run: |
+          if ! git diff --exit-code cda-database/src/flatbuf/diagnostic_description.rs cda-database/src/proto/fileformat.rs; then
+            echo ""
+            echo "::error::Generated files are out of date."
+            echo "Regenerate flatbuffers with: cargo build -p cda-database --features gen-flatbuffers"
+            echo "Regenerate protos with: cargo build -p cda-database --features gen-protos"
+            exit 1
+          fi
+          echo "Generated files are up to date."
       - name: Verify reference config is up to date
         run: |
           cargo run --locked --all-features -- generate-config --output /tmp/opensovd-cda.toml
