@@ -19,6 +19,7 @@
 use aide::openapi::{Operation, PathItem};
 use indexmap::IndexMap;
 use schemars::Schema;
+use sovd_interfaces::docs;
 
 use super::{
     empty_response, error_schema, json_request_body, json_response, operation_with_extensions,
@@ -54,6 +55,7 @@ pub fn build_path_items(base_path: &str, meta: &OperationDocsMeta) -> IndexMap<S
     let executions_path_item = PathItem {
         post: Some(build_post_operation(meta)),
         get: Some(build_list_executions_operation(meta)),
+        extensions: path_item_extensions(meta),
         ..Default::default()
     };
     paths.insert(format!("{base_path}/executions"), executions_path_item);
@@ -73,7 +75,7 @@ fn build_post_operation(meta: &OperationDocsMeta) -> Operation {
     let post_request_schema = build_post_request_schema(meta);
     let mut post_op = operation_with_extensions(
         &format!("Start execution of {}", meta.name),
-        sovd_extensions(meta),
+        operation_extensions(meta),
     );
     post_op.request_body = Some(json_request_body(post_request_schema));
 
@@ -160,6 +162,7 @@ fn build_execution_id_path_item(meta: &OperationDocsMeta) -> PathItem {
         get: Some(build_get_status_operation(meta)),
         put: Some(build_put_capability_operation(meta)),
         delete: Some(build_delete_terminate_operation(meta)),
+        extensions: path_item_extensions(meta),
         ..Default::default()
     }
 }
@@ -302,21 +305,36 @@ fn build_post_request_schema(meta: &OperationDocsMeta) -> Schema {
     })
 }
 
-/// Collect the SOVD-specific extension properties for the Operation object
-/// (ISO 17978-3 Table 24).
-fn sovd_extensions(meta: &OperationDocsMeta) -> IndexMap<String, serde_json::Value> {
+/// Collect the SOVD extension properties for the `PathItem` object
+/// (ISO 17978-3 Table 169).
+///
+/// Currently emits `x-sovd-proximity-proof-required` which applies to all HTTP
+/// methods on the path. For classic UDS routines this is always `false`.
+/// meta is passed but not used, to keep the signature consistent with `operation_extensions`.
+/// As proximity proof is always false for UDS, no access to meta is needed.
+fn path_item_extensions(_meta: &OperationDocsMeta) -> IndexMap<String, serde_json::Value> {
+    let mut ext = IndexMap::new();
+    // proximity_proof_required is always false for classic UDS routines.
+    ext.insert(
+        docs::X_SOVD_PROXIMITY_PROOF_REQUIRED.to_owned(),
+        serde_json::Value::Bool(false),
+    );
+    ext
+}
+
+/// Collect the SOVD extension properties for the Operation object
+/// (ISO 17978-3 Table 169).
+///
+/// Currently emits `x-sovd-asynchronous-execution` on the POST operation when
+/// the operation is asynchronous.
+fn operation_extensions(meta: &OperationDocsMeta) -> IndexMap<String, serde_json::Value> {
     let mut ext = IndexMap::new();
     if meta.is_async {
         ext.insert(
-            "x-sovd-asynchronous-execution".to_owned(),
+            docs::X_SOVD_ASYNCHRONOUS_EXECUTION.to_owned(),
             serde_json::Value::Bool(true),
         );
     }
-    // proximity_proof_required is always false for classic UDS routines.
-    ext.insert(
-        "x-sovd-proximity-proof-required".to_owned(),
-        serde_json::Value::Bool(false),
-    );
     ext
 }
 
