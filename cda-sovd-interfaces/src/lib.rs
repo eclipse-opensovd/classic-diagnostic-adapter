@@ -17,6 +17,7 @@ use crate::error::DataError;
 
 pub mod apps;
 pub mod components;
+pub mod docs;
 pub mod error;
 pub mod functions;
 pub mod locking;
