@@ -23,7 +23,7 @@ use cda_interfaces::storage_api::{
 };
 use tokio::io::AsyncWriteExt;
 
-use crate::{io, wal};
+use crate::{io, paths, wal};
 
 /// A collection backed by a directory on the local filesystem.
 ///
@@ -52,8 +52,14 @@ impl LocalCollection {
     }
 
     /// Return the filesystem path for the given (already normalized) key.
-    fn key_path(&self, key: &str) -> PathBuf {
-        self.dir.join(key)
+    ///
+    /// # Errors
+    ///
+    /// Returns a [`StorageError`] if the key fails path sanitization (when the
+    /// `sanitize-paths` feature is enabled).
+    fn key_path(&self, key: &str) -> Result<PathBuf, StorageError> {
+        paths::sanitize_path_segment(key)?;
+        Ok(self.dir.join(key))
     }
 }
 
@@ -65,7 +71,7 @@ fn normalize_key(key: &str) -> String {
 impl Collection for LocalCollection {
     async fn read(&self, key: &str) -> Result<Arc<impl RandomAccessData + 'static>, StorageError> {
         let key = normalize_key(key);
-        let path = self.key_path(&key);
+        let path = self.key_path(&key)?;
 
         let guard = io::acquire_read_lock(&self.data_lock).await;
 
@@ -85,7 +91,7 @@ impl Collection for LocalCollection {
 
     async fn metadata(&self, key: &str) -> Result<Metadata, StorageError> {
         let key = normalize_key(key);
-        let path = self.key_path(&key);
+        let path = self.key_path(&key)?;
 
         let _guard = io::acquire_read_lock(&self.data_lock).await;
 
@@ -131,6 +137,7 @@ impl Collection for LocalCollection {
         data: &mut impl ReadableStream,
     ) -> Result<(), StorageError> {
         let key = normalize_key(key);
+        paths::sanitize_path_segment(&key)?;
 
         // Stream data to a staging file.
         let staging_file_name = format!("{}.tmp", uuid::Uuid::new_v4());
@@ -164,7 +171,7 @@ impl Collection for LocalCollection {
         let key = normalize_key(key);
 
         // Verify the key exists in committed state.
-        let path = self.key_path(&key);
+        let path = self.key_path(&key)?;
         if !path.exists() {
             return Err(StorageError::KeyNotFound(key));
         }
@@ -199,7 +206,7 @@ impl DirectFileAccess for LocalCollection {
 
     fn file_path(&self, key: &str) -> Result<PathBuf, StorageError> {
         let key = normalize_key(key);
-        let path = self.key_path(&key);
+        let path = self.key_path(&key)?;
         if !path.exists() {
             return Err(StorageError::KeyNotFound(key));
         }

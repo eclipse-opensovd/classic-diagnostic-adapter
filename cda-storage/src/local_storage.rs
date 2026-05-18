@@ -27,6 +27,7 @@ use cda_interfaces::storage_api::{
 
 use crate::{
     local_collection::LocalCollection,
+    paths,
     recovery::{self, BACKUP_EXTENSION},
     wal,
 };
@@ -79,8 +80,14 @@ impl LocalStorage {
     }
 
     /// Return the path to a collection's directory.
-    fn collection_dir(&self, name: &CollectionName) -> PathBuf {
-        self.collections_dir.join(name.as_str())
+    ///
+    /// # Errors
+    ///
+    /// Returns a [`StorageError`] if the collection name fails path sanitization (when the
+    /// `sanitize-paths` feature is enabled).
+    fn collection_dir(&self, name: &CollectionName) -> Result<PathBuf, StorageError> {
+        paths::sanitize_path_segment(name.as_str())?;
+        Ok(self.collections_dir.join(name.as_str()))
     }
 }
 
@@ -89,7 +96,8 @@ impl Storage for LocalStorage {
         &self,
         name: &CollectionName,
     ) -> Result<Arc<impl Collection + 'static>, StorageError> {
-        let dir = self.collection_dir(name);
+        let _guard = self.data_lock.read().await;
+        let dir = self.collection_dir(name)?;
         if !dir.exists() {
             return Err(StorageError::CollectionNotFound(name.to_string()));
         }
@@ -104,12 +112,33 @@ impl Storage for LocalStorage {
         &self,
         name: &CollectionName,
     ) -> Result<Arc<impl Collection + 'static>, StorageError> {
-        let dir = self.collection_dir(name);
+        let dir = self.collection_dir(name)?;
+
+        let read_guard = self.data_lock.read().await;
+        if dir.exists() {
+            return Ok(Arc::new(LocalCollection::new(
+                name.clone(),
+                dir,
+                Arc::clone(&self.data_lock),
+            )));
+        }
+        drop(read_guard);
+
+        // Collection does not exist -- acquire a write lock to create it.
+        // Reject if a transaction is active.
+        if self.tx_active.load(Ordering::Acquire) {
+            return Err(StorageError::TransactionError(
+                "Cannot create collection while a transaction is active".to_string(),
+            ));
+        }
+        let write_guard = self.data_lock.write().await;
+        // Re-check after acquiring write lock
         if !dir.exists() {
-            // Implicit single-operation transaction: just create the directory.
             std::fs::create_dir_all(&dir)?;
             tracing::debug!(collection = %name, "Created collection directory");
         }
+        drop(write_guard);
+
         Ok(Arc::new(LocalCollection::new(
             name.clone(),
             dir,
@@ -159,7 +188,7 @@ impl Storage for LocalStorage {
         tx: &mut Transaction,
         name: &CollectionName,
     ) -> Result<Arc<impl Collection + 'static>, StorageError> {
-        let dir = self.collection_dir(name);
+        let dir = self.collection_dir(name)?;
         if dir.exists() {
             return Err(StorageError::TransactionError(format!(
                 "Collection already exists: {name}"
@@ -183,7 +212,7 @@ impl Storage for LocalStorage {
         tx: &mut Transaction,
         name: &CollectionName,
     ) -> Result<(), StorageError> {
-        let dir = self.collection_dir(name);
+        let dir = self.collection_dir(name)?;
         if !dir.exists() {
             return Err(StorageError::CollectionNotFound(name.to_string()));
         }
@@ -201,7 +230,7 @@ impl Storage for LocalStorage {
         source: &CollectionName,
         dest: &CollectionName,
     ) -> Result<(), StorageError> {
-        let source_dir = self.collection_dir(source);
+        let source_dir = self.collection_dir(source)?;
         if !source_dir.exists() {
             return Err(StorageError::CollectionNotFound(source.to_string()));
         }
@@ -234,42 +263,74 @@ impl TransactionCommitter for LocalStorageCommitter {
         operations: Vec<Operation>,
         journal_path: PathBuf,
     ) -> Result<(), StorageError> {
-        // Step 1: Fsync all staging files and the WAL in one batch.
-        // After this single durability barrier, the transaction is recoverable:
-        // if the process crashes after this point, recovery detects partial application
-        // via .bak files.
-        let staging_dir = journal_path.parent().map(|p| p.join(wal::STAGING_DIR_NAME));
-        if let Some(ref staging) = staging_dir {
-            wal::sync_staging_files(staging)?;
-        }
-        wal::sync_wal(&journal_path)?;
+        async fn apply_inner(
+            committer: &LocalStorageCommitter,
+            operations: Vec<Operation>,
+            journal_path: PathBuf,
+        ) -> Result<(), StorageError> {
+            let staging_dir = journal_path.parent().map(|p| p.join(wal::STAGING_DIR_NAME));
+            let journal_dir = journal_path
+                .parent()
+                .ok_or_else(|| StorageError::Other("WAL path has no parent directory".to_string()))?
+                .to_path_buf();
 
-        // Step 2: Acquire exclusive access. Blocks all reads.
-        let _write_guard = self.data_lock.write().await;
+            // Step 1: Mark the WAL as COMMITTING (in-place pwrite, no fsync yet).
+            wal::mark_committing(&journal_path)?;
 
-        // Step 3: Apply each operation, creating backups for rollback.
-        let result = self.apply_operations(&operations);
-
-        if let Err(e) = &result {
-            tracing::warn!(error = %e, "Commit failed, rolling back partially applied operations");
-            if let Err(rb_err) = rollback_applied_operations(&self.collections_dir) {
-                tracing::warn!(error = %rb_err, "Rollback also encountered an error");
+            // Step 2: Fsync all staging files and the WAL in one batch.
+            // This single durability barrier makes both the COMMITTING status and all operation
+            // entries durable. If the process crashes after this point, recovery will see
+            // COMMITTING and know that operations may have been partially applied.
+            if let Some(ref staging) = staging_dir {
+                wal::sync_staging_files(staging)?;
             }
-        } else {
-            // Step 4: Fsync collection directories to make renames durable.
-            sync_collection_dirs(&self.collections_dir, &operations)?;
+            wal::sync_wal(&journal_path)?;
 
-            // Step 5: Remove all .bak files (point of no return).
-            cleanup_backup_files(&self.collections_dir)?;
-        }
+            // Step 3: Acquire exclusive access. Blocks all reads.
+            let _write_guard = committer.data_lock.write().await;
 
-        // Step 6: Clean up WAL and staging files.
-        if let Some(ref staging) = staging_dir {
-            cleanup_directory_contents(staging)?;
+            // Step 4: Apply each operation, creating backups for rollback.
+            let result = committer.apply_operations(&operations);
+
+            if let Err(e) = &result {
+                tracing::warn!(
+                    error = %e,
+                    "Commit failed, rolling back partially applied operations"
+                );
+                if let Err(rb_err) =
+                    rollback_applied_operations(&committer.collections_dir, &operations)
+                {
+                    tracing::warn!(error = %rb_err, "Rollback also encountered an error");
+                }
+            } else {
+                // Step 5: Fsync collection directories to make renames durable.
+                sync_collection_dirs(&committer.collections_dir, &operations)?;
+            }
+
+            // Step 6: Delete the WAL file and fsync the journal directory.
+            // This is the point of no return. Once the WAL deletion is durable, recovery will
+            // treat any remaining .bak files as orphans from a successfully committed transaction.
+            if journal_path.exists() {
+                std::fs::remove_file(&journal_path)?;
+            }
+            wal::sync_journal_dir(&journal_dir)?;
+
+            // Step 7: Clean up .bak files and staging (non-critical, best-effort after point of
+            // no return).
+            if result.is_ok()
+                && let Err(e) = cleanup_backup_files(&committer.collections_dir)
+            {
+                tracing::warn!(error = %e, "Failed to clean up .bak files after commit");
+            }
+            if let Some(ref staging) = staging_dir
+                && let Err(e) = cleanup_directory_contents(staging)
+            {
+                tracing::warn!(error = %e, "Failed to clean up staging directory after commit");
+            }
+
+            result
         }
-        if journal_path.exists() {
-            std::fs::remove_file(&journal_path)?;
-        }
+        let result = apply_inner(self, operations, journal_path).await;
 
         // Release the transaction flag.
         self.tx_active.store(false, Ordering::Release);
@@ -345,6 +406,15 @@ impl LocalStorageCommitter {
                 Operation::CopyCollection { source, dest } => {
                     let source_dir = self.collections_dir.join(source.as_str());
                     let dest_dir = self.collections_dir.join(dest.as_str());
+
+                    // Back up existing destination for rollback, then create a fresh directory.
+                    // This ensures "replace" semantics: the destination ends up with exactly
+                    // the source's contents, not a merge of old and new files.
+                    if dest_dir.exists() {
+                        let backup = append_extension(&dest_dir, BACKUP_EXTENSION);
+                        std::fs::rename(&dest_dir, &backup)?;
+                    }
+
                     std::fs::create_dir_all(&dest_dir)?;
                     copy_dir_contents(&source_dir, &dest_dir)?;
                 }
@@ -418,9 +488,21 @@ fn cleanup_backup_files(collections_dir: &Path) -> Result<(), StorageError> {
     Ok(())
 }
 
-/// Roll back partially applied operations by restoring `.bak` files.
-fn rollback_applied_operations(collections_dir: &Path) -> Result<(), StorageError> {
-    recovery::rollback_partial_commit(collections_dir)
+/// Roll back partially applied operations during a failed commit.
+///
+/// This removes newly created files and directories (for writes to new keys,
+/// `CreateCollection`, `CopyCollection`) and then restores `.bak` files (for
+/// overwrites/deletes). The order matters: new artifacts must be identified while `.bak` files
+/// are still in place (before restoration changes the filesystem state).
+fn rollback_applied_operations(
+    collections_dir: &Path,
+    operations: &[Operation],
+) -> Result<(), StorageError> {
+    recovery::remove_new_artifacts(collections_dir, operations)?;
+
+    recovery::rollback_partial_commit(collections_dir)?;
+
+    Ok(())
 }
 
 /// Fsync the directories that were modified during commit to ensure renames are durable.

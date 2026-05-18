@@ -293,6 +293,51 @@ async fn copy_collection() {
     assert_eq!(&buf_b, b"beta");
 }
 
+#[tokio::test]
+async fn copy_collection_replaces_existing_dest() {
+    let (storage, _dir) = create_test_storage();
+    let source = CollectionName::DiagnosticDatabase;
+    let dest = CollectionName::DiagnosticDatabaseBackup;
+
+    // Write data to source.
+    let source_col = storage.get_or_create_collection(&source).await.unwrap();
+    let mut tx = storage.begin_transaction().unwrap();
+    let mut d1: &[u8] = b"alpha";
+    source_col.write(&mut tx, "a", &mut d1).await.unwrap();
+    tx.commit().await.unwrap();
+
+    // Write different data to dest (pre-existing content that should be replaced).
+    let dest_col = storage.get_or_create_collection(&dest).await.unwrap();
+    let mut tx = storage.begin_transaction().unwrap();
+    let mut d_old: &[u8] = b"old_stuff";
+    let mut d_extra: &[u8] = b"extra_file";
+    dest_col.write(&mut tx, "a", &mut d_old).await.unwrap();
+    dest_col
+        .write(&mut tx, "extra", &mut d_extra)
+        .await
+        .unwrap();
+    tx.commit().await.unwrap();
+
+    // Copy source -> dest. Dest should be fully replaced.
+    let mut tx = storage.begin_transaction().unwrap();
+    storage
+        .copy_collection(&mut tx, &source, &dest)
+        .await
+        .unwrap();
+    tx.commit().await.unwrap();
+
+    // Verify dest has exactly source's contents (key "a" with "alpha"), not the old data.
+    let dest_col = storage.get_collection(&dest).await.unwrap();
+    let handle_a = dest_col.read("a").await.unwrap();
+    let mut buf = vec![0u8; 5];
+    handle_a.read_at(0, &mut buf).unwrap();
+    assert_eq!(&buf, b"alpha");
+
+    // The "extra" key that was only in dest should be gone (replaced, not merged).
+    let result = dest_col.read("extra").await;
+    assert!(matches!(result, Err(StorageError::KeyNotFound(_))));
+}
+
 // Metadata, list, len
 #[tokio::test]
 async fn metadata_returns_correct_size() {
@@ -367,8 +412,8 @@ async fn random_access_read_at_offset() {
 // Recovery tests
 #[tokio::test]
 async fn recovery_cleans_up_incomplete_transaction() {
-    // Simulate a crash during the recording phase: WAL exists with entries, staging files
-    // present, but no .bak files (commit never started applying).
+    // Simulate a crash during the recording phase: WAL exists with RECORDING status and
+    // entries, staging files present, but nothing was applied to collections.
     let dir = tempfile::tempdir().unwrap();
     let root = dir.path();
     let collections_dir = root.join("collections");
@@ -377,9 +422,9 @@ async fn recovery_cleans_up_incomplete_transaction() {
     std::fs::create_dir_all(&collections_dir).unwrap();
     std::fs::create_dir_all(&staging_dir).unwrap();
 
-    // Create a WAL with a single write operation.
+    // Create a WAL with RECORDING header and a single write operation.
     let wal_path = journal_dir.join("transaction.wal");
-    std::fs::File::create(&wal_path).unwrap();
+    cda_storage::wal::create_wal(&wal_path).unwrap();
 
     let staged = staging_dir.join("some_file.tmp");
     std::fs::write(&staged, b"orphaned data").unwrap();
@@ -415,9 +460,9 @@ async fn recovery_cleans_up_incomplete_transaction() {
 }
 
 #[tokio::test]
-async fn recovery_rolls_back_partial_commit() {
-    // Simulate a crash during the commit phase: .bak files exist (the commit was partially
-    // applied). Recovery should restore the .bak files regardless of WAL state.
+async fn recovery_rolls_back_partial_commit_with_bak_files() {
+    // Simulate a crash during the commit phase: WAL has COMMITTING status and .bak files
+    // exist (an overwrite was partially applied). Recovery should restore the .bak files.
     let dir = tempfile::tempdir().unwrap();
     let root = dir.path();
     let collections_dir = root.join("collections");
@@ -431,11 +476,21 @@ async fn recovery_rolls_back_partial_commit() {
     std::fs::write(db_dir.join("mykey.bak"), b"original data").unwrap();
     std::fs::write(db_dir.join("mykey"), b"new data").unwrap();
 
-    // Create a WAL (its content doesn't matter for rollback. .bak files are the trigger).
+    // Create a WAL with COMMITTING status.
     let wal_path = journal_dir.join("transaction.wal");
-    std::fs::File::create(&wal_path).unwrap();
+    cda_storage::wal::create_wal(&wal_path).unwrap();
+    cda_storage::wal::append_operation(
+        &wal_path,
+        &cda_interfaces::storage_api::Operation::Write {
+            collection: CollectionName::DiagnosticDatabase,
+            key: "mykey".to_string(),
+            staged_path: "/tmp/does_not_matter.tmp".to_string(),
+        },
+    )
+    .unwrap();
+    cda_storage::wal::mark_committing(&wal_path).unwrap();
 
-    // Recovery should detect .bak files and restore them.
+    // Recovery should detect COMMITTING + .bak files and restore them.
     let storage = LocalStorage::new(root).unwrap();
 
     let collection = storage
@@ -450,10 +505,123 @@ async fn recovery_rolls_back_partial_commit() {
 }
 
 #[tokio::test]
+async fn recovery_rolls_back_new_file_writes_without_bak() {
+    // This is the specific bug being fixed: a crash during commit where only NEW files were
+    // created (no overwrites, so no .bak files exist). Recovery must still detect the partial
+    // commit via the COMMITTING WAL status and remove the newly created files.
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    let collections_dir = root.join("collections");
+    let journal_dir = root.join("journal");
+    let staging_dir = journal_dir.join("staging");
+    let db_dir = collections_dir.join("diagnostic_database");
+    std::fs::create_dir_all(&db_dir).unwrap();
+    std::fs::create_dir_all(&staging_dir).unwrap();
+
+    // Simulate: a new file was written into the collection during a partially applied commit.
+    // No .bak file exists because there was nothing to overwrite.
+    std::fs::write(db_dir.join("new_key"), b"partially committed data").unwrap();
+
+    // Create a WAL with COMMITTING status containing the write operation.
+    let wal_path = journal_dir.join("transaction.wal");
+    cda_storage::wal::create_wal(&wal_path).unwrap();
+    cda_storage::wal::append_operation(
+        &wal_path,
+        &cda_interfaces::storage_api::Operation::Write {
+            collection: CollectionName::DiagnosticDatabase,
+            key: "new_key".to_string(),
+            staged_path: "/tmp/does_not_matter.tmp".to_string(),
+        },
+    )
+    .unwrap();
+    cda_storage::wal::mark_committing(&wal_path).unwrap();
+
+    // Recovery should detect COMMITTING, read the WAL, and remove the new file.
+    let storage = LocalStorage::new(root).unwrap();
+
+    let collection = storage
+        .get_collection(&CollectionName::DiagnosticDatabase)
+        .await
+        .unwrap();
+    let result = collection.read("new_key").await;
+    assert!(matches!(result, Err(StorageError::KeyNotFound(_))));
+}
+
+#[tokio::test]
+async fn recovery_rolls_back_new_collection_without_bak() {
+    // Crash during commit that created a new collection. No .bak exists since it was entirely
+    // new. Recovery should remove the empty collection directory.
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    let collections_dir = root.join("collections");
+    let journal_dir = root.join("journal");
+    let staging_dir = journal_dir.join("staging");
+    std::fs::create_dir_all(&collections_dir).unwrap();
+    std::fs::create_dir_all(&staging_dir).unwrap();
+
+    // Simulate: a new empty collection directory was created during partial commit.
+    let new_col_dir = collections_dir.join("brand_new");
+    std::fs::create_dir_all(&new_col_dir).unwrap();
+
+    // Create a WAL with COMMITTING status.
+    let wal_path = journal_dir.join("transaction.wal");
+    cda_storage::wal::create_wal(&wal_path).unwrap();
+    cda_storage::wal::append_operation(
+        &wal_path,
+        &cda_interfaces::storage_api::Operation::CreateCollection {
+            name: CollectionName::Custom("brand_new".to_string()),
+        },
+    )
+    .unwrap();
+    cda_storage::wal::mark_committing(&wal_path).unwrap();
+
+    // Recovery should remove the newly created collection directory.
+    let _storage = LocalStorage::new(root).unwrap();
+
+    assert!(!new_col_dir.exists());
+}
+
+#[tokio::test]
+async fn recovery_handles_no_wal_with_orphaned_bak_files() {
+    // Simulate: commit succeeded (WAL was deleted) but crash interrupted .bak cleanup.
+    // Recovery should just delete the orphaned .bak files.
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    let collections_dir = root.join("collections");
+    let journal_dir = root.join("journal");
+    let staging_dir = journal_dir.join("staging");
+    let db_dir = collections_dir.join("diagnostic_database");
+    std::fs::create_dir_all(&db_dir).unwrap();
+    std::fs::create_dir_all(&staging_dir).unwrap();
+
+    // The new committed data is in place, but old .bak files remain.
+    std::fs::write(db_dir.join("mykey"), b"new committed data").unwrap();
+    std::fs::write(db_dir.join("mykey.bak"), b"old data").unwrap();
+
+    // No WAL file exists (it was successfully deleted as point of no return).
+    let wal_path = journal_dir.join("transaction.wal");
+    assert!(!wal_path.exists());
+
+    // Recovery should delete the orphaned .bak and keep the committed data.
+    let storage = LocalStorage::new(root).unwrap();
+
+    assert!(!db_dir.join("mykey.bak").exists());
+    let collection = storage
+        .get_collection(&CollectionName::DiagnosticDatabase)
+        .await
+        .unwrap();
+    let handle = collection.read("mykey").await.unwrap();
+    let mut buf = vec![0u8; 18];
+    let n = handle.read_at(0, &mut buf).unwrap();
+    assert_eq!(n, 18);
+    assert_eq!(&buf, b"new committed data");
+}
+
+#[tokio::test]
 async fn recovery_discards_wal_with_corrupt_checksum() {
     // Create a WAL with valid entries followed by a corrupt entry. Recovery should still work
     // because the WAL reader stops at the first corrupt entry and the incomplete transaction
-    // is simply discarded.
+    // is simply discarded (RECORDING status means nothing was applied).
     let dir = tempfile::tempdir().unwrap();
     let root = dir.path();
     let collections_dir = root.join("collections");
@@ -463,7 +631,7 @@ async fn recovery_discards_wal_with_corrupt_checksum() {
     std::fs::create_dir_all(&staging_dir).unwrap();
 
     let wal_path = journal_dir.join("transaction.wal");
-    std::fs::File::create(&wal_path).unwrap();
+    cda_storage::wal::create_wal(&wal_path).unwrap();
 
     // Append a valid entry.
     cda_storage::wal::append_operation(
@@ -544,7 +712,8 @@ async fn wal_round_trip_with_checksum_verification() {
         cda_storage::wal::append_operation(&wal_path, op).unwrap();
     }
 
-    let read_ops = cda_storage::wal::read_wal(&wal_path).unwrap();
+    let wal_data = std::fs::read(&wal_path).unwrap();
+    let read_ops = cda_storage::wal::read_wal(&wal_data).unwrap();
     assert_eq!(read_ops.len(), 3);
 
     // Verify the operations match using .get() to satisfy clippy::indexing_slicing.
@@ -596,7 +765,8 @@ async fn wal_stops_at_truncated_entry() {
     let truncated_len = data.len() * 4 / 5;
     std::fs::write(&wal_path, data.get(..truncated_len).unwrap()).unwrap();
 
-    let read_ops = cda_storage::wal::read_wal(&wal_path).unwrap();
+    let wal_data = std::fs::read(&wal_path).unwrap();
+    let read_ops = cda_storage::wal::read_wal(&wal_data).unwrap();
     // Should only have the first valid entry.
     assert_eq!(read_ops.len(), 1);
     let read_op_0 = read_ops.first().expect("Expected 1 operation");

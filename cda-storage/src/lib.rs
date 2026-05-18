@@ -56,6 +56,7 @@
 mod io;
 mod local_collection;
 mod local_storage;
+mod paths;
 pub(crate) mod recovery;
 /// Write-ahead log utilities. Exposed publicly for use in recovery tests.
 pub mod wal;
