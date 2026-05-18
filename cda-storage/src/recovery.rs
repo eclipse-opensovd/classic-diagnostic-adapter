@@ -146,7 +146,7 @@ pub(crate) fn remove_new_artifacts(
     collections_dir: &Path,
     operations: &[Operation],
 ) -> Result<(), StorageError> {
-    for op in operations {
+    for op in operations.iter().rev() {
         match op {
             Operation::Write {
                 collection, key, ..

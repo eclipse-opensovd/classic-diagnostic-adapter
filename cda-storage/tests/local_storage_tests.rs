@@ -776,3 +776,51 @@ async fn wal_stops_at_truncated_entry() {
         if name.as_str() == "first"
     ));
 }
+
+#[tokio::test]
+async fn recovery_create_collection_with_write_removes_orphaned_dir() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    let collections_dir = root.join("collections");
+    let journal_dir = root.join("journal");
+    let staging_dir = journal_dir.join("staging");
+    std::fs::create_dir_all(&collections_dir).unwrap();
+    std::fs::create_dir_all(&staging_dir).unwrap();
+
+    // Simulate partial commit state: the collection directory was created AND a file was
+    // written into it before the crash.
+    let new_col_dir = collections_dir.join("fresh_collection");
+    std::fs::create_dir_all(&new_col_dir).unwrap();
+    std::fs::write(new_col_dir.join("data_file"), b"written during commit").unwrap();
+
+    // WAL with COMMITTING status containing both operations in natural order:
+    // CreateCollection first, then Write to that collection.
+    let wal_path = journal_dir.join("transaction.wal");
+    cda_storage::wal::create_wal(&wal_path).unwrap();
+    cda_storage::wal::append_operation(
+        &wal_path,
+        &cda_interfaces::storage_api::Operation::CreateCollection {
+            name: CollectionName::Custom("fresh_collection".to_string()),
+        },
+    )
+    .unwrap();
+    cda_storage::wal::append_operation(
+        &wal_path,
+        &cda_interfaces::storage_api::Operation::Write {
+            collection: CollectionName::Custom("fresh_collection".to_string()),
+            key: "data_file".to_string(),
+            staged_path: "/tmp/irrelevant.tmp".to_string(),
+        },
+    )
+    .unwrap();
+    cda_storage::wal::mark_committing(&wal_path).unwrap();
+
+    // Recovery should fully roll back - the collection did not exist before this transaction.
+    let _storage = LocalStorage::new(root).unwrap();
+
+    // The collection directory must be completely gone after recovery.
+    assert!(
+        !new_col_dir.exists(),
+        "Orphaned empty collection directory was left behind after recovery"
+    );
+}
