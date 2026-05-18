@@ -42,7 +42,7 @@ components:
           example: ECU112
         variant:
           type: string
-          description: "The detected variant of the ECU -- base variant if no ecu was detected"
+          description: "The detected variant of the ECU - base variant if no ecu was detected"
           example: Variant-1
         status:
           $ref: '#/components/schemas/EcuDetectionStatus'

@@ -153,7 +153,7 @@ jobs:
               await removeLabel(CHANGES_REQUESTED);
 
             } else if (hasUnresolvedThreads && authorRepliedToAll) {
-              // Author replied to every reviewer thread — ready for re-review
+              // Author replied to every reviewer thread - ready for re-review
               await addLabel(NEEDS_REVIEW);
               await removeLabel(CHANGES_REQUESTED);
 

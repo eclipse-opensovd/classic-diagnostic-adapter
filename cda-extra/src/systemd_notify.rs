@@ -269,7 +269,7 @@ mod tests {
 
     #[test]
     fn fold_sequence_empty_providers_yields_starting() {
-        // no providers → fold over empty iterator → initial accumulator = Starting
+        // no providers -> fold over empty iterator -> initial accumulator = Starting
         let result = std::iter::empty::<Status>().fold(Status::Starting, fold_status);
         assert_eq!(result, Status::Starting);
     }

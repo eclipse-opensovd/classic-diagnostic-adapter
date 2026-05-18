@@ -10,7 +10,7 @@
  * https://www.apache.org/licenses/LICENSE-2.0
  */
 
-// Ed25519 (PureEdDSA) PSA Crypto Accelerator Driver — C implementation
+// Ed25519 (PureEdDSA) PSA Crypto Accelerator Driver - C implementation
 //
 // This file bridges the PSA Crypto driver interface with the Rust
 // ed25519-dalek implementation.  It is compiled by cc-rs and linked
@@ -35,7 +35,7 @@ extern int rust_ed25519_verify(const uint8_t *pub_key, size_t pub_key_len,
 #define ED25519_SIG_SIZE 64
 
 /* ---------------------------------------------------------------------------
- * psa_import_key  —  transparent driver entry point
+ * psa_import_key  -  transparent driver entry point
  * ---------------------------------------------------------------------------
  */
 psa_status_t ed25519_psa_import_key(const psa_key_attributes_t *attributes,
@@ -65,7 +65,7 @@ psa_status_t ed25519_psa_import_key(const psa_key_attributes_t *attributes,
 }
 
 /* ---------------------------------------------------------------------------
- * psa_verify_message  —  transparent driver entry point
+ * psa_verify_message  -  transparent driver entry point
  * ---------------------------------------------------------------------------
  */
 psa_status_t ed25519_psa_verify_message(

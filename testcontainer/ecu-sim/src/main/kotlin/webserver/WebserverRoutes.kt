@@ -182,46 +182,72 @@ private suspend fun SimEcu.dtcFaultsByApplicationCall(call: ApplicationCall) =
     }
 
 /**
- * DTO for configuring a raw UDS response override.
- * When installed, any incoming request matching [requestHex] will receive
- * [responseHex] as a raw UDS response (bytes sent as-is, no auto-prefix).
+ * DTO for configuring an inbound interceptor.
+ * [request] is a hex pattern for matching incoming UDS requests (supports `[]` as wildcard for `.*`).
+ * [response] is the hex response to send back (empty string = suppress response / simulate ECU offline).
+ * [removeAfterNRequest] optionally auto-removes the interceptor after N matched requests.
  */
 @Serializable
-data class RawResponseOverrideDto(
-    val requestHex: String,
-    val responseHex: String,
+data class SimpleInterceptorDto(
+    val request: String,
+    val response: String,
+    val removeAfterNRequest: Int? = null,
 )
 
 /**
- * Routes to install/remove raw UDS response overrides on ECUs.
- * This is used in integration tests to simulate malformed ECU responses
- * (e.g., responses with incorrect DID echo bytes).
+ * Routes to install/remove named inbound interceptors on ECUs.
+ * This is used in integration tests to simulate custom ECU responses
+ * (e.g., malformed responses, suppressed responses, or temporary overrides).
  *
- * - PUT /{ecu}/override: Install a raw response override
- * - DELETE /{ecu}/override: Remove the override
+ * - PUT /interceptor/{ecu}/inbound/{interceptorName}: Install or replace a named interceptor
+ * - DELETE /interceptor/{ecu}/inbound/{interceptorName}: Remove a named interceptor
  */
-fun Route.addRawResponseOverrideRoutes() {
-    put("/{ecu}/override") {
+fun Route.addInterceptorRoutes() {
+    put("/interceptor/{ecu}/inbound/{interceptorName}") {
         val ecu = findByEcuName(call) ?: return@put
-        val dto = call.receive<RawResponseOverrideDto>()
-        val requestPattern = dto.requestHex.replace(" ", "").lowercase()
-        val responseBytes = dto.responseHex.replace(" ", "").decodeHex()
+        val interceptorName = call.parameters["interceptorName"].orEmpty()
+        if (interceptorName.isBlank()) {
+            call.respond(HttpStatusCode.BadRequest, "interceptorName must not be blank")
+            return@put
+        }
+        val dto = call.receive<SimpleInterceptorDto>()
+        val regex =
+            Regex(
+                dto.request
+                    .uppercase()
+                    .replace(" ", "")
+                    .replace("[]", ".*"),
+            )
+        val removeAfterNRequest = dto.removeAfterNRequest
+        var matchCount = 0
 
-        ecu.addOrReplaceEcuInterceptor("RAW_OVERRIDE", alsoCallWhenEcuIsBusy = false) {
-            val incomingHex = this.message.toHexString(separator = "").lowercase()
-            if (incomingHex == requestPattern) {
-                respond(responseBytes)
+        ecu.addOrReplaceEcuInterceptor(interceptorName, alsoCallWhenEcuIsBusy = false) {
+            val incomingHex = this.message.toHexString(separator = "").uppercase()
+            if (incomingHex.matches(regex)) {
+                matchCount += 1
+                if (dto.response.isNotBlank()) {
+                    respond(dto.response.replace(" ", "").decodeHex())
+                }
+                // If response is blank, suppress response (ECU offline simulation)
+                if (removeAfterNRequest != null && matchCount >= removeAfterNRequest) {
+                    ecu.removeInterceptor(interceptorName)
+                }
                 true
             } else {
                 false
             }
         }
-        call.respond(HttpStatusCode.NoContent)
+        call.respond(HttpStatusCode.Accepted)
     }
 
-    delete("/{ecu}/override") {
+    delete("/interceptor/{ecu}/inbound/{interceptorName}") {
         val ecu = findByEcuName(call) ?: return@delete
-        ecu.removeInterceptor("RAW_OVERRIDE")
+        val interceptorName = call.parameters["interceptorName"].orEmpty()
+        if (interceptorName.isBlank()) {
+            call.respond(HttpStatusCode.BadRequest, "interceptorName must not be blank")
+            return@delete
+        }
+        ecu.removeInterceptor(interceptorName)
         call.respond(HttpStatusCode.NoContent)
     }
 }

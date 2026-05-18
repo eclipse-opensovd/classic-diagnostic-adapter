@@ -351,7 +351,7 @@ pub trait EcuManager:
     fn mark_as_no_variant_detected(&mut self);
 
     /// This allows to (re)load a database after unloading it during runtime, which could happen
-    /// if initially the ECU wasn´t responding but later another request
+    /// if initially the ECU wasn't responding but later another request
     /// for reprobing the ECU happens.
     ///
     /// # Errors
@@ -378,7 +378,7 @@ pub trait EcuManager:
     /// named functional group instead of the ECU variant.
     ///
     /// # Errors
-    /// Will return `Err` in cases where the payload doesn´t match the expected UDS response, or if
+    /// Will return `Err` in cases where the payload doesn't match the expected UDS response, or if
     /// elements of the response cannot be correctly mapped from the raw data.
     fn convert_from_uds(
         &self,
@@ -406,7 +406,7 @@ pub trait EcuManager:
     /// named functional group instead of the ECU variant.
     ///
     /// # Errors
-    /// Will return `Err` in cases where the `UdsPayloadData` doesn´t provide required parameters
+    /// Will return `Err` in cases where the `UdsPayloadData` doesn't provide required parameters
     /// for the `DiagService` request or if elements of the `UdsPayloadData` cannot be mapped to
     /// the raw UDS bytestream.
     fn create_uds_payload(

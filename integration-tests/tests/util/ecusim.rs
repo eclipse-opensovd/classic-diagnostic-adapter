@@ -280,31 +280,35 @@ pub(crate) async fn stop_and_clear_recording(
     crate::util::http::response_to_t(&response)
 }
 
-/// Install a raw UDS response override on the ECU simulator.
+/// Install a named inbound interceptor on the ECU simulator.
 ///
 /// When installed, any incoming UDS request whose hex representation matches
-/// `request_hex` will receive `response_hex` as a raw response (no auto-prefix).
-/// This is useful for testing malformed ECU responses (e.g., wrong DID echo bytes).
-pub(crate) async fn set_raw_response_override(
+/// the `request` regex pattern will receive `response` as a raw hex response.
+/// If `response` is empty, the ECU will suppress its response (simulating offline).
+/// The `[]` sequence in `request` is treated as a wildcard (`.*`).
+pub(crate) async fn set_interceptor(
     sim: &EcuSim,
     ecu: &str,
-    request_hex: &str,
-    response_hex: &str,
+    name: &str,
+    request: &str,
+    response: &str,
 ) -> Result<(), TestingError> {
     let mut url = sim_endpoint(sim)?;
     url.path_segments_mut()
         .map_err(|()| TestingError::InvalidUrl("cannot modify URL path".to_owned()))?
+        .push("interceptor")
         .push(ecu)
-        .push("override");
+        .push("inbound")
+        .push(name);
 
     let body = serde_json::json!({
-        "requestHex": request_hex,
-        "responseHex": response_hex
+        "request": request,
+        "response": response
     })
     .to_string();
 
     crate::util::http::send_request(
-        StatusCode::NO_CONTENT,
+        StatusCode::ACCEPTED,
         http::Method::PUT,
         Some(&body),
         None,
@@ -314,16 +318,19 @@ pub(crate) async fn set_raw_response_override(
     Ok(())
 }
 
-/// Remove a previously installed raw response override from the ECU simulator.
-pub(crate) async fn clear_raw_response_override(
+/// Remove a previously installed named interceptor from the ECU simulator.
+pub(crate) async fn clear_interceptor(
     sim: &EcuSim,
     ecu: &str,
+    name: &str,
 ) -> Result<(), TestingError> {
     let mut url = sim_endpoint(sim)?;
     url.path_segments_mut()
         .map_err(|()| TestingError::InvalidUrl("cannot modify URL path".to_owned()))?
+        .push("interceptor")
         .push(ecu)
-        .push("override");
+        .push("inbound")
+        .push(name);
 
     crate::util::http::send_request(
         StatusCode::NO_CONTENT,

@@ -116,7 +116,7 @@ The typical status progression for an item is:
 
 .. code-block:: text
 
-    draft → valid → approved
+    draft --> valid --> approved
 
 Items may transition to ``rejected`` from ``draft`` or ``valid`` during review.
 Items may transition to ``obsolete`` from any status when they are superseded or no longer needed.

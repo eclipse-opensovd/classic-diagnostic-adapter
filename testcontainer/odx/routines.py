@@ -156,7 +156,7 @@ def add_safety_squints_routine(dlr: DiagLayerRaw) -> None:
     routine_id = 0x0301
     functional_class = "Routines"
 
-    # Start — with slit width parameter
+    # Start - with slit width parameter
     add_routine(
         dlr,
         name="Engage_Safety_Squints",
@@ -175,7 +175,7 @@ def add_safety_squints_routine(dlr: DiagLayerRaw) -> None:
         is_functional=True,
     )
 
-    # Stop — no additional parameters
+    # Stop - no additional parameters
     add_routine(
         dlr,
         name="Engage_Safety_Squints",

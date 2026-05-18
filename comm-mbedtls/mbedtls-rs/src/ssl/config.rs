@@ -392,7 +392,7 @@ impl TlsVersion {
 }
 
 impl SslConfig {
-    /// Raw const pointer — used by `SslStream` to set up a context.
+    /// Raw const pointer - used by `SslStream` to set up a context.
     pub(crate) fn as_ptr(&self) -> *const ffi::mbedtls_ssl_config {
         &raw const self.inner
     }

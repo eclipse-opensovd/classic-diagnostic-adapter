@@ -49,7 +49,7 @@ fn parse_limit_as_u64(value: &str) -> Option<u64> {
 /// - `Identical`: the physical text IS the coded value; the string is
 ///   parsed directly as a `u64`.
 ///
-/// Returns `None` for unsupported categories (`Linear`, `ScaleLinear`, …) or
+/// Returns `None` for unsupported categories (`Linear`, `ScaleLinear`, ...) or
 /// when no matching scale entry is found.
 pub(crate) fn resolve_phys_const_coded_value(
     param: &datatypes::Parameter<'_>,

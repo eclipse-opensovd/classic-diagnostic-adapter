@@ -58,10 +58,10 @@ use crate::{error::MbedtlsError, ssl::SslConfig};
 // Internal memory BIO
 // ---------------------------------------------------------------------------
 
-/// A pair of in-memory byte buffers that bridge async I/O ⟷ mbedtls.
+/// A pair of in-memory byte buffers that bridge async I/O <-> mbedtls.
 ///
-/// * **`incoming`** — bytes read from the network go here; mbedtls reads from it.
-/// * **`outgoing`** — mbedtls writes ciphertext here; we drain it to the network.
+/// * **`incoming`** - bytes read from the network go here; mbedtls reads from it.
+/// * **`outgoing`** - mbedtls writes ciphertext here; we drain it to the network.
 struct MemBio {
     incoming: Vec<u8>,
     incoming_cursor: usize,
@@ -148,7 +148,7 @@ pub struct TlsStream<S> {
     handshake_completed: bool,
 }
 
-// Safety: S: Send ⇒ TlsStream<S>: Send.
+// Safety: S: Send -> TlsStream<S>: Send.
 unsafe impl<S: Send> Send for TlsStream<S> {}
 
 impl<S> TlsStream<S>
@@ -272,7 +272,7 @@ where
                     #[allow(clippy::indexing_slicing)]
                     self.bio_mut().feed_incoming(&buf[..n]);
                 } else if err.is_want_write() {
-                    // mbedtls wants us to flush — already done above.
+                    // mbedtls wants us to flush - already done above.
                 } else {
                     return Err(err.into());
                 }

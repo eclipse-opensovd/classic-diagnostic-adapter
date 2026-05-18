@@ -32,8 +32,8 @@ const VERIFY_SUCCESS: i32 = 0;
 ///
 /// # Returns
 ///
-/// * `0` — signature is valid
-/// * `-1` — verification failed or invalid input
+/// * `0` - signature is valid
+/// * `-1` - verification failed or invalid input
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn rust_ed25519_verify(
     pub_key: *const u8,

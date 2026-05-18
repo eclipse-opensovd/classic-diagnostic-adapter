@@ -47,7 +47,7 @@ fn main() {
     let mbedtls_src = manifest_dir.join(format!("mbedtls-{MBEDTLS_VERSION}"));
     let out_dir = PathBuf::from(
         env::var("OUT_DIR")
-            .expect("OUT_DIR environment variable not set — build script must be run by Cargo"),
+            .expect("OUT_DIR environment variable not set - build script must be run by Cargo"),
     );
 
     // Only re-run if the mbedtls source or wrapper header change.
@@ -63,7 +63,7 @@ fn main() {
         .define("ENABLE_TESTING", "OFF")
         .define("ENABLE_PROGRAMS", "OFF")
         .define("MBEDTLS_FATAL_WARNINGS", "OFF")
-        // Disable GEN_FILES — the release tarball ships pre-generated files.
+        // Disable GEN_FILES - the release tarball ships pre-generated files.
         .define("GEN_FILES", "OFF")
         // Enable RFC 8449 record_size_limit extension (TLS 1.3).
         .cflag("-DMBEDTLS_SSL_RECORD_SIZE_LIMIT")
@@ -82,7 +82,7 @@ fn main() {
         }
     }
 
-    // Link order matters: mbedtls -> mbedx509 -> tfpsacrypto (≈ mbedcrypto).
+    // Link order matters: mbedtls -> mbedx509 -> tfpsacrypto (~ mbedcrypto).
     println!("cargo:rustc-link-lib=static=mbedtls");
     println!("cargo:rustc-link-lib=static=mbedx509");
     println!("cargo:rustc-link-lib=static=tfpsacrypto");
@@ -272,7 +272,7 @@ fn ensure_mbedtls_source(workspace_dir: &Path) {
     } else {
         let dir = workspace_dir.join(format!("mbedtls-{MBEDTLS_VERSION}"));
         if !dir.join("CMakeLists.txt").exists() {
-            eprintln!("mbedtls source not found — downloading {TARBALL_URL} …");
+            eprintln!("mbedtls source not found - downloading {TARBALL_URL} ...");
 
             let tarball = workspace_dir.join(format!("mbedtls-{MBEDTLS_VERSION}.tar.bz2"));
             download(TARBALL_URL, &tarball);
@@ -303,11 +303,11 @@ fn ensure_mbedtls_source(workspace_dir: &Path) {
         .join("patches")
         .join("record-size-limit-tls12.patch");
     if patch_file.exists() {
-        eprintln!("Applying record-size-limit patch …");
+        eprintln!("Applying record-size-limit patch ...");
         apply_patch(&patch_file, workspace_dir);
     } else {
         eprintln!(
-            "warning: patch file {} not found — skipping",
+            "warning: patch file {} not found - skipping",
             patch_file.display()
         );
     }
@@ -317,11 +317,11 @@ fn ensure_mbedtls_source(workspace_dir: &Path) {
         .join("patches")
         .join("ed25519-psa-driver.patch");
     if patch_file.exists() {
-        eprintln!("Applying Ed25519 patch …");
+        eprintln!("Applying Ed25519 patch ...");
         apply_patch(&patch_file, workspace_dir);
     } else {
         eprintln!(
-            "warning: patch file {} not found — skipping",
+            "warning: patch file {} not found - skipping",
             patch_file.display()
         );
     }

@@ -57,7 +57,7 @@ jobs:
           repo-token: ${{ secrets.GITHUB_TOKEN }}
       - name: Format and Clippy - Nightly toolchain pinned
         continue-on-error: true
-        uses: eclipse-opensovd/cicd-workflows/rust-lint-and-format-action@827ea66a026b34057468a3cc9486c165ce5e7dcb
+        uses: eclipse-opensovd/cicd-workflows/rust-lint-and-format-action@4700b71884074d194723fdb04a6c1a827b6f652b
         with:
           toolchain: nightly-2025-07-14
           github-token: ${{ secrets.GITHUB_TOKEN }}
@@ -68,7 +68,7 @@ jobs:
           reporter: github-check
       - name: Format and Clippy - Nightly toolchain latest
         continue-on-error: true
-        uses: eclipse-opensovd/cicd-workflows/rust-lint-and-format-action@827ea66a026b34057468a3cc9486c165ce5e7dcb
+        uses: eclipse-opensovd/cicd-workflows/rust-lint-and-format-action@4700b71884074d194723fdb04a6c1a827b6f652b
         with:
           toolchain: nightly
           github-token: ${{ secrets.GITHUB_TOKEN }}

@@ -15,7 +15,7 @@
 //! This follows the same pattern as `openssl::ssl::SslStream`:
 //!
 //! 1. Create an `SslStream` from an `SslConfig` + transport.
-//! 2. Perform the TLS handshake (can be non-blocking → `MidHandshakeSslStream`).
+//! 2. Perform the TLS handshake (can be non-blocking -> `MidHandshakeSslStream`).
 //! 3. Read/write cleartext through the `SslStream`.
 
 use std::{
@@ -31,7 +31,7 @@ use mbedtls_sys as ffi;
 use crate::{error::MbedtlsError, ssl::SslConfig};
 
 // ---------------------------------------------------------------------------
-// BIO callbacks — bridge mbedtls I/O to Rust Read/Write
+// BIO callbacks - bridge mbedtls I/O to Rust Read/Write
 // ---------------------------------------------------------------------------
 
 /// The BIO context we stash behind `p_bio`. It holds a pointer to the Rust
@@ -97,7 +97,7 @@ pub struct SslStream<S> {
     _config: Arc<SslConfig>,
 }
 
-// Safety: S: Send ⇒ SslStream<S>: Send. The mbedtls context is not
+// Safety: S: Send => SslStream<S>: Send. The mbedtls context is not
 // accessed from multiple threads simultaneously.
 unsafe impl<S: Send> Send for SslStream<S> {}
 
@@ -273,7 +273,7 @@ impl<S: Read + Write> SslStream<S> {
     /// # Safety
     ///
     /// Do not read from or write to the transport directly while TLS records
-    /// are in flight — this will corrupt the TLS session.
+    /// are in flight - this will corrupt the TLS session.
     pub fn get_mut(&mut self) -> &mut S {
         unsafe { &mut Pin::get_unchecked_mut(self.bio.as_mut()).stream }
     }

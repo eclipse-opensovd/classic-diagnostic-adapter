@@ -371,7 +371,7 @@ pub fn update_mdd_uncompressed(mdd_path: &str) -> Result<bool, MddError> {
         return Ok(false);
     }
 
-    // At least one chunk is compressed — read into heap, decompress,
+    // At least one chunk is compressed - read into heap, decompress,
     // and rewrite. This path only runs once per MDD file.
     let data = std::fs::read(mdd_path)
         .map_err(|e| MddError::Io(format!("Failed to read MDD file '{mdd_path}': {e}")))?;

@@ -2199,7 +2199,7 @@ mod tests {
 
     #[test]
     fn test_string_value_exceeds_bit_length_with_matching_physical_type() {
-        // 8-bit UInt32: only values 0–255 should be valid
+        // 8-bit UInt32: only values 0-255 should be valid
         let uint32_8bit = create_diag_coded_type_stl(DataType::UInt32, Some(8));
         let u32_physical_type = Some(PhysicalType {
             precision: None,
