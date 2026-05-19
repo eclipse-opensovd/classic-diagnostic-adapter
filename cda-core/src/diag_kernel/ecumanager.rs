@@ -3596,9 +3596,7 @@ impl<S: SecurityPlugin> EcuManager<S> {
 
         params.into_iter().try_for_each(|param| {
             let short_name = param.short_name().ok_or_else(|| {
-                DiagServiceError::InvalidDatabase(
-                    "Unable to find short name for param".to_owned(),
-                )
+                DiagServiceError::InvalidDatabase("Unable to find short name for param".to_owned())
             })?;
 
             self.map_param_to_uds(&param, value.get(short_name), payload, struct_byte_pos)
@@ -8157,8 +8155,7 @@ mod tests {
         ecu_manager.strict_parameter_validation = true;
 
         // bogus_nested is inside the struct value, not defined in the struct's sub-params
-        let struct_value =
-            json!({"param1": 0x1234u32, "param2": 1.0f32, "param3": "hello", "bogus_nested": "reject me"});
+        let struct_value = json!({"param1": 0x1234u32, "param2": 1.0f32, "param3": "hello", "bogus_nested": "reject me"});
         let payload_data = UdsPayloadData::ParameterMap(
             [("main_param".to_string(), struct_value)]
                 .into_iter()
