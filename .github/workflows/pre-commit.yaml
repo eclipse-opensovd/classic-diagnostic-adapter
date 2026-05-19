@@ -33,7 +33,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Run checks
-        uses: eclipse-opensovd/cicd-workflows/pre-commit-action@1cae75238b0a8b2554784a564d3b03b23c887b3b
+        uses: eclipse-opensovd/cicd-workflows/pre-commit-action@4116addc88b6c523bc6d729b1b4e198ccb04ce3d
         with:
           no-unicode-extensions: ".rs,.py,.toml,.yml,.yaml,.rst,.c,.h,.kt,.kts,.sh,.proto,.fbs,.puml,.json,.xml,Dockerfile"
           allowed-unicode-chars: "µ,§"
