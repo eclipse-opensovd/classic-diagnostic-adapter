@@ -1,0 +1,33 @@
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: 2025 The Contributors to Eclipse OpenSOVD (see CONTRIBUTORS)
+#
+# See the NOTICE file(s) distributed with this work for additional
+# information regarding copyright ownership.
+#
+# This program and the accompanying materials are made available under the
+# terms of the Apache License Version 2.0 which is available at
+# https://www.apache.org/licenses/LICENSE-2.0
+
+# Update the CRAP baseline after a successful CI run on the main branch.
+
+name: Update CRAP baseline
+
+on:
+  workflow_run:
+    workflows: ["Rust CI"]
+    types: [completed]
+    branches: [main]
+
+jobs:
+  update:
+    if: github.event.workflow_run.conclusion == 'success'
+    # TODO: pin to a specific commit hash once cicd-workflows changes are merged
+    uses: eclipse-opensovd/cicd-workflows/.github/workflows/crap-baseline.yml@9b0f99ecba53f84945541c9cf083595629dae58b
+    with:
+      run-id: ${{ github.event.workflow_run.id }}
+      rust-version: "1.88.0"
+      cargo-crap-git-url: "https://github.com/theswiftfox/cargo-crap.git"
+      cargo-crap-git-rev: "72217fc7953fe85a1eb2999d642ed51048e101d8"
+    permissions:
+      contents: write
+      actions: read

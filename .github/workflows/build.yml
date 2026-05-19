@@ -155,6 +155,21 @@ jobs:
       contents: read
       pull-requests: write
 
+  cargo-crap:
+    name: CRAP (Change Risk Anti-Patterns)
+    if: github.event_name == 'pull_request'
+    needs: [coverage]
+    # TODO: pin to a specific commit hash once cicd-workflows changes are merged
+    uses: eclipse-opensovd/cicd-workflows/.github/workflows/crap.yml@9b0f99ecba53f84945541c9cf083595629dae58b
+    with:
+      rust-version: "1.88.0"
+      cargo-crap-git-url: "https://github.com/theswiftfox/cargo-crap.git"
+      cargo-crap-git-rev: "72217fc7953fe85a1eb2999d642ed51048e101d8"
+      post-pr-comment: true
+    permissions:
+      contents: read
+      pull-requests: write
+
   build_windows:
     runs-on: windows-latest
 
