@@ -19,6 +19,8 @@ on:
 
 permissions:
   contents: read
+  pull-requests: write
+  # pull-requests: write is required by the coverage job to post PR comments.
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref_name }}-${{ github.event.pull_request.number || github.sha }}
@@ -141,6 +143,17 @@ jobs:
         env:
           CACHE_REGISTRY: ghcr.io/${{ github.repository }}
         run: cargo test --locked --features integration-tests -- --show-output
+
+  coverage:
+    name: Coverage
+    uses: eclipse-opensovd/cicd-workflows/.github/workflows/coverage.yml@4116addc88b6c523bc6d729b1b4e198ccb04ce3d
+    with:
+      rust-version: "1.88.0"
+      cargo-extra-args: "--features integration-tests"
+      post-pr-comment: true
+    permissions:
+      contents: read
+      pull-requests: write
 
   build_windows:
     runs-on: windows-latest
