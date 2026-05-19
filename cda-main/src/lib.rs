@@ -14,7 +14,7 @@ use std::{future::Future, path::PathBuf, sync::Arc};
 
 use cda_comm_doip::{DoipDiagGateway, config::DoipConfig};
 use cda_comm_uds::UdsManager;
-use cda_core::{DiagServiceResponseStruct, EcuManager};
+use cda_core::{DiagServiceResponseStruct, EcuManager, EcuManagerConfig};
 use cda_database::{FileManager, ProtoLoadConfig, update_mdd_uncompressed};
 use cda_health::{HealthState, StatusHealthProvider};
 use cda_interfaces::{
@@ -531,10 +531,12 @@ async fn load_database<S: SecurityPlugin>(
                     protocol.clone(),
                     &com_params,
                     database_naming_convention.clone(),
-                    ecu_type,
+                    EcuManagerConfig {
+                        type_: ecu_type,
+                        fallback_to_base_variant,
+                        strict_parameter_validation,
+                    },
                     &func_description_cfg,
-                    fallback_to_base_variant,
-                    strict_parameter_validation,
                 ) {
                     Ok(manager) => manager,
                     Err(e) => {
