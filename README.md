@@ -108,8 +108,9 @@ $env:OPENSSL_INCLUDE_DIR="C:\Program Files\OpenSSL-Win64\include"
 
 ### pre commit
 ```shell
-uv run https://raw.githubusercontent.com/eclipse-opensovd/cicd-workflows/main/run_checks.py
+uv run https://raw.githubusercontent.com/eclipse-opensovd/cicd-workflows/4116addc88b6c523bc6d729b1b4e198ccb04ce3d/run_checks.py
 ```
+Install this command as documented here: https://git-scm.com/book/en/v2/Customizing-Git-Git-Hooks
 
 ### codestyle
 
@@ -255,4 +256,4 @@ In a second terminal window start `tokio-console` and it should automatically co
 
 ### architecture
 
-see [overview](docs/architecture/index.adoc)
+see [overview](https://eclipse-opensovd.github.io/classic-diagnostic-adapter/03_architecture/index.html)
