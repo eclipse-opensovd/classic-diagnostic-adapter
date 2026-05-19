@@ -713,23 +713,27 @@ async fn wal_round_trip_with_checksum_verification() {
     }
 
     let wal_data = std::fs::read(&wal_path).unwrap();
-    let read_ops = cda_storage::wal::read_wal(&wal_data).unwrap();
-    assert_eq!(read_ops.len(), 3);
+    let wal_result = cda_storage::wal::read_wal(&wal_data).unwrap();
+    assert!(!wal_result.truncated);
+    assert_eq!(wal_result.operations.len(), 3);
 
     // Verify the operations match using .get() to satisfy clippy::indexing_slicing.
-    let read_op_0 = read_ops.first().expect("Expected 3 operations");
+    let read_op_0 = wal_result
+        .operations
+        .first()
+        .expect("Expected 3 operations");
     assert!(matches!(
         read_op_0,
         cda_interfaces::storage_api::Operation::CreateCollection { name }
         if name.as_str() == "col_a"
     ));
-    let read_op_1 = read_ops.get(1).expect("Expected 3 operations");
+    let read_op_1 = wal_result.operations.get(1).expect("Expected 3 operations");
     assert!(matches!(
         read_op_1,
         cda_interfaces::storage_api::Operation::Write { key, .. }
         if key == "my_key"
     ));
-    let read_op_2 = read_ops.get(2).expect("Expected 3 operations");
+    let read_op_2 = wal_result.operations.get(2).expect("Expected 3 operations");
     assert!(matches!(
         read_op_2,
         cda_interfaces::storage_api::Operation::Delete { key, .. }
@@ -766,10 +770,11 @@ async fn wal_stops_at_truncated_entry() {
     std::fs::write(&wal_path, data.get(..truncated_len).unwrap()).unwrap();
 
     let wal_data = std::fs::read(&wal_path).unwrap();
-    let read_ops = cda_storage::wal::read_wal(&wal_data).unwrap();
+    let wal_result = cda_storage::wal::read_wal(&wal_data).unwrap();
+    assert!(wal_result.truncated);
     // Should only have the first valid entry.
-    assert_eq!(read_ops.len(), 1);
-    let read_op_0 = read_ops.first().expect("Expected 1 operation");
+    assert_eq!(wal_result.operations.len(), 1);
+    let read_op_0 = wal_result.operations.first().expect("Expected 1 operation");
     assert!(matches!(
         read_op_0,
         cda_interfaces::storage_api::Operation::CreateCollection { name }

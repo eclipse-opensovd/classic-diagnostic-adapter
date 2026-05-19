@@ -230,19 +230,30 @@ pub fn sync_staging_files(staging_dir: &Path) -> Result<(), StorageError> {
     Ok(())
 }
 
+/// Result of reading WAL entries.
+#[derive(Debug)]
+pub struct WalReadResult {
+    /// The operations that were successfully parsed from the WAL.
+    pub operations: Vec<Operation>,
+    /// Whether the WAL was truncated or corrupted (i.e., entries were lost).
+    pub truncated: bool,
+}
+
 /// Read all valid operation entries from the WAL file, skipping the file header.
 ///
 /// Each entry's checksum is verified. If an entry is truncated or its checksum does not match,
-/// that entry and all subsequent data are ignored.
+/// that entry and all subsequent data are ignored and `truncated` is set to `true`.
 ///
-/// Returns the list of valid operations.
+/// Returns a [`WalReadResult`] containing the successfully parsed operations and whether
+/// truncation was detected.
 ///
 /// # Errors
 ///
-/// Returns a [`StorageError`] if the WAL file cannot be read or a valid entry fails to decode.
-pub fn read_wal(data: &[u8]) -> Result<Vec<Operation>, StorageError> {
+/// Returns a [`StorageError`] if a valid entry fails to decode.
+pub fn read_wal(data: &[u8]) -> Result<WalReadResult, StorageError> {
     let mut operations = Vec::new();
-    // skip the fixed-length file header and start reading entries from there
+    let mut truncated = false;
+    // Skip the fixed-length file header and start reading entries from there.
     let mut offset = WAL_FILE_HEADER_SIZE;
 
     while offset < data.len() {
@@ -251,6 +262,7 @@ pub fn read_wal(data: &[u8]) -> Result<Vec<Operation>, StorageError> {
         if remaining < ENTRY_HEADER_SIZE {
             // Truncated header -> incomplete entry, stop here.
             tracing::warn!(offset, "WAL truncated: incomplete entry header, discarding");
+            truncated = true;
             break;
         }
 
@@ -282,6 +294,7 @@ pub fn read_wal(data: &[u8]) -> Result<Vec<Operation>, StorageError> {
                 payload_len,
                 "WAL truncated: incomplete entry payload, discarding"
             );
+            truncated = true;
             break;
         }
 
@@ -298,6 +311,7 @@ pub fn read_wal(data: &[u8]) -> Result<Vec<Operation>, StorageError> {
                 actual_checksum,
                 "WAL checksum mismatch, discarding this and all subsequent entries"
             );
+            truncated = true;
             break;
         }
 
@@ -312,7 +326,10 @@ pub fn read_wal(data: &[u8]) -> Result<Vec<Operation>, StorageError> {
         offset = payload_end;
     }
 
-    Ok(operations)
+    Ok(WalReadResult {
+        operations,
+        truncated,
+    })
 }
 
 /// Create a new WAL file with an initial `RECORDING` header.

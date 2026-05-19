@@ -58,16 +58,39 @@ pub(crate) fn recover(journal_dir: &Path, collections_dir: &Path) -> Result<(), 
             tracing::info!("WAL indicates commit was in progress -- rolling back");
 
             // Read the operations from the WAL so we know what to undo.
-            let operations = wal::read_wal(&wal_data)?;
+            let wal_result = wal::read_wal(&wal_data)?;
 
-            // Remove newly created artifacts first
-            // This must happen before rollback_partial_commit as
-            // restoring .bak files could make previously-overwritten files look like new
-            // artifacts.
-            remove_new_artifacts(collections_dir, &operations)?;
+            if wal_result.truncated {
+                // Check if any operations were actually applied to the filesystem
+                // to determine if it was a crash during recording or a corruption of the fs.
+                let has_backups = has_backup_files(collections_dir);
+                let has_applied_artifacts =
+                    has_new_artifacts(collections_dir, &wal_result.operations);
 
-            // restore .bak files (undoes overwrites and deletes).
-            rollback_partial_commit(collections_dir)?;
+                if has_backups || has_applied_artifacts {
+                    // Operations were partially applied but WAL is corrupted.
+                    // Unable to guarantee a consistent rollback.
+                    return Err(StorageError::Corruption(
+                        "WAL is truncated and operations were partially applied, indicating \
+                         possible filesystem corruption."
+                            .to_string(),
+                    ));
+                }
+                // No evidence of the transaction being actually applied.
+                // -> Safe to discard the WAL.
+                tracing::info!(
+                    "WAL is truncated but no operations were applied. Discarding safely"
+                );
+            } else {
+                // Full WAL available -- perform complete rollback.
+                // Remove newly created artifacts first. This must happen before
+                // rollback_partial_commit as restoring .bak files could make
+                // previously-overwritten files look like new artifacts.
+                remove_new_artifacts(collections_dir, &wal_result.operations)?;
+
+                // Restore .bak files (undoes overwrites and deletes).
+                rollback_partial_commit(collections_dir)?;
+            }
         }
         Some((WalStatus::Recording, _wal_data)) => {
             // Transaction was still recording. Nothing was applied.
@@ -229,6 +252,44 @@ fn has_backup_files(collections_dir: &Path) -> bool {
         }
     }
 
+    false
+}
+
+/// Check whether any operations from the WAL appear to have been applied to the filesystem.
+///
+/// This looks for artifacts that would have been created by the given operations (new files,
+/// new collection directories) that exist on disk without a corresponding `.bak` backup.
+fn has_new_artifacts(collections_dir: &Path, operations: &[Operation]) -> bool {
+    for op in operations {
+        match op {
+            Operation::Write {
+                collection, key, ..
+            } => {
+                let target = collections_dir.join(collection.as_str()).join(key);
+                let backup = append_bak_extension(&target);
+                // A file exists without a .bak -> it was newly created by this operation.
+                if target.exists() && !backup.exists() {
+                    return true;
+                }
+            }
+            Operation::CreateCollection { name } => {
+                let dir = collections_dir.join(name.as_str());
+                if dir.exists() {
+                    return true;
+                }
+            }
+            Operation::CopyCollection { dest, .. } => {
+                let dest_dir = collections_dir.join(dest.as_str());
+                let backup = append_bak_extension(&dest_dir);
+                if dest_dir.exists() && !backup.exists() {
+                    return true;
+                }
+            }
+            Operation::Delete { .. }
+            | Operation::DeleteAll { .. }
+            | Operation::DeleteCollection { .. } => {}
+        }
+    }
     false
 }
 

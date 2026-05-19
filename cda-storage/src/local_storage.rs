@@ -358,6 +358,11 @@ impl TransactionCommitter for LocalStorageCommitter {
 
 impl LocalStorageCommitter {
     /// Apply all operations from the journal.
+    ///
+    /// The Delete* Operations ignore the case that the file or directory was already deleted
+    /// on the fs due to external modifications.
+    /// In these cases, it's better to continue with the commit instead of failing it,
+    /// as the end result is the same (the file/directory is gone).
     fn apply_operations(&self, operations: &[Operation]) -> Result<(), StorageError> {
         for op in operations {
             match op {

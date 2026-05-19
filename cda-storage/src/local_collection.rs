@@ -75,13 +75,7 @@ impl Collection for LocalCollection {
 
         let guard = io::acquire_read_lock(&self.data_lock).await;
 
-        let file = std::fs::File::open(&path).map_err(|e| {
-            if e.kind() == std::io::ErrorKind::NotFound {
-                StorageError::KeyNotFound(key.clone())
-            } else {
-                StorageError::Io(e)
-            }
-        })?;
+        let file = std::fs::File::open(&path).map_err(|e| StorageError::map_io_error(e, &key))?;
 
         let metadata = file.metadata()?;
         let size = metadata.len();
@@ -95,13 +89,9 @@ impl Collection for LocalCollection {
 
         let _guard = io::acquire_read_lock(&self.data_lock).await;
 
-        let fs_meta = tokio::fs::metadata(&path).await.map_err(|e| {
-            if e.kind() == std::io::ErrorKind::NotFound {
-                StorageError::KeyNotFound(key.clone())
-            } else {
-                StorageError::Io(e)
-            }
-        })?;
+        let fs_meta = tokio::fs::metadata(&path)
+            .await
+            .map_err(|e| StorageError::map_io_error(e, &key))?;
 
         Ok(Metadata {
             name: key,

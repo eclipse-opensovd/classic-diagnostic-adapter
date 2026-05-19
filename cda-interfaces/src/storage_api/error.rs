@@ -37,7 +37,25 @@ pub enum StorageError {
     #[error("I/O error: {0}")]
     Io(#[from] std::io::Error),
 
+    /// The storage data is corrupted beyond automatic recovery.
+    ///
+    /// This indicates that the on-disk state cannot be restored to a consistent snapshot.
+    /// The caller should treat the affected storage as unusable and reprovision from scratch.
+    #[error("Storage corruption: {0}")]
+    Corruption(String),
+
     /// Any other error not covered by the variants above.
     #[error("Unknown error: {0}")]
     Other(String),
+}
+
+impl StorageError {
+    #[must_use]
+    pub fn map_io_error(err: std::io::Error, key: &str) -> Self {
+        if err.kind() == std::io::ErrorKind::NotFound {
+            StorageError::KeyNotFound(key.to_string())
+        } else {
+            StorageError::Io(err)
+        }
+    }
 }
