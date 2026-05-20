@@ -1,0 +1,90 @@
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: 2025 The Contributors to Eclipse OpenSOVD (see CONTRIBUTORS)
+#
+# See the NOTICE file(s) distributed with this work for additional
+# information regarding copyright ownership.
+#
+# This program and the accompanying materials are made available under the
+# terms of the Apache License Version 2.0 which is available at
+# https://www.apache.org/licenses/LICENSE-2.0
+
+# Bazel module definition for Classic Diagnostic Adapter (CDA).
+#
+# Build commands:
+#   bazel build //:opensovd-cda                   # default (OpenSSL)
+#   bazel build --config=mbedtls //:opensovd-cda   # mbedtls backend
+
+module(
+    name = "classic-diagnostic-adapter",
+    version = "0.1.0",
+)
+
+# --- Bazel rule dependencies ---
+bazel_dep(name = "rules_rust", version = "0.70.0")
+bazel_dep(name = "rules_cc", version = "0.2.17")
+bazel_dep(name = "rules_foreign_cc", version = "0.15.1")
+bazel_dep(name = "platforms", version = "1.0.0")
+bazel_dep(name = "bazel_skylib", version = "1.8.2")
+
+# --- Rust toolchain ---
+rust = use_extension("@rules_rust//rust:extensions.bzl", "rust")
+rust.toolchain(
+    edition = "2024",
+    versions = ["1.88.0"],
+)
+use_repo(rust, "rust_toolchains")
+
+register_toolchains("@rust_toolchains//:all")
+
+# --- Pre-fetch mbedtls 4.0.0 source (patched by Bazel, built via rules_foreign_cc) ---
+http_archive = use_repo_rule("@bazel_tools//tools/build_defs/repo:http.bzl", "http_archive")
+
+http_archive(
+    name = "mbedtls",
+    build_file = "//third_party/mbedtls:overlay/BUILD.bazel",
+    patch_args = ["-p2"],
+    patches = [
+        "//comm-mbedtls/mbedtls-sys/patches:record-size-limit-tls12.patch",
+        "//comm-mbedtls/mbedtls-sys/patches:ed25519-psa-driver.patch",
+    ],
+    sha256 = "2f3a47f7b3a541ddef450e4867eeecb7ce2ef7776093f3a11d6d43ead6bf2827",
+    strip_prefix = "mbedtls-4.0.0",
+    url = "https://github.com/Mbed-TLS/mbedtls/releases/download/mbedtls-4.0.0/mbedtls-4.0.0.tar.bz2",
+)
+
+# --- crate_universe: auto-generate Bazel targets for external Cargo dependencies ---
+crate = use_extension("@rules_rust//crate_universe:extensions.bzl", "crate")
+
+crate.from_cargo(
+    name = "crate_index",
+    cargo_lockfile = "//:Cargo.lock",
+    manifests = ["//:Cargo.toml"],
+)
+
+# mbedtls-sys: point build.rs at pre-fetched + pre-patched source, skip native build
+crate.annotation(
+    crate = "mbedtls-sys",
+    build_script_data = [
+        "@mbedtls//:all_srcs",
+    ],
+    build_script_env = {
+        "MBEDTLS_DIR": "$(execpath @mbedtls//:CMakeLists.txt)",
+        "MBEDTLS_SKIP_BUILD": "1",
+        "MBEDTLS_SKIP_PATCH": "1",
+    },
+    build_script_data_glob = [
+        "csrc/**",
+        "wrapper.h",
+    ],
+)
+
+# opensovd-cda (cda-main): provide deterministic build metadata for build.rs
+crate.annotation(
+    crate = "opensovd-cda",
+    build_script_env = {
+        "SOURCE_DATE_EPOCH": "0",
+        "SOURCE_GIT_SHA": "bazel",
+    },
+)
+
+use_repo(crate, "crate_index")

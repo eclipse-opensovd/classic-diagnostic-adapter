@@ -1,0 +1,42 @@
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: 2025 The Contributors to Eclipse OpenSOVD (see CONTRIBUTORS)
+#
+# See the NOTICE file(s) distributed with this work for additional
+# information regarding copyright ownership.
+#
+# This program and the accompanying materials are made available under the
+# terms of the Apache License Version 2.0 which is available at
+# https://www.apache.org/licenses/LICENSE-2.0
+
+# Classic Diagnostic Adapter - Bazel Configuration
+#
+# Usage:
+#   bazel build //:opensovd-cda                    # build with OpenSSL (default)
+#   bazel build --config=mbedtls //:opensovd-cda   # build with mbedtls
+
+# --- Common settings ---
+common --enable_bzlmod
+build --incompatible_enable_cc_toolchain_resolution
+
+# --- TLS backend selection ---
+# Default: OpenSSL
+build --//:tls_backend=openssl
+
+# Switch to mbedtls: bazel build --config=mbedtls //...
+build:mbedtls --//:tls_backend=mbedtls
+
+# Explicit openssl config (same as default, for clarity)
+build:openssl --//:tls_backend=openssl
+
+# --- Git metadata for cda-main build.rs ---
+build --workspace_status_command=bazel/workspace_status.sh
+
+# --- Performance ---
+build --jobs=auto
+
+# --- Convenience aliases ---
+# Build everything except integration tests
+build:all --build_tag_filters=-integration
+
+# Test everything except integration tests
+test:all --test_tag_filters=-integration

@@ -1,0 +1,57 @@
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: 2025 The Contributors to Eclipse OpenSOVD (see CONTRIBUTORS)
+#
+# See the NOTICE file(s) distributed with this work for additional
+# information regarding copyright ownership.
+#
+# This program and the accompanying materials are made available under the
+# terms of the Apache License Version 2.0 which is available at
+# https://www.apache.org/licenses/LICENSE-2.0
+
+# cda-sovd: SOVD-compliant HTTP/REST server exposing the diagnostic API.
+
+load("@rules_rust//cargo:defs.bzl", "cargo_build_script")
+load("@rules_rust//rust:defs.bzl", "rust_library")
+
+package(default_visibility = ["//visibility:public"])
+
+cargo_build_script(
+    name = "build_script",
+    srcs = ["build.rs"],
+    deps = [
+        "//cda-build",
+    ],
+)
+
+rust_library(
+    name = "cda-sovd",
+    srcs = glob(["src/**/*.rs"]),
+    crate_name = "cda_sovd",
+    deps = [
+        ":build_script",
+        "//cda-interfaces",
+        "//cda-plugin-security",
+        "//cda-sovd-interfaces:sovd-interfaces",
+        "//cda-tracing",
+        "//opensovd-axum-extra",
+        "@crate_index//:aide",
+        "@crate_index//:axum",
+        "@crate_index//:axum-extra",
+        "@crate_index//:chrono",
+        "@crate_index//:http",
+        "@crate_index//:indexmap",
+        "@crate_index//:mime",
+        "@crate_index//:percent-encoding",
+        "@crate_index//:regex",
+        "@crate_index//:schemars",
+        "@crate_index//:serde",
+        "@crate_index//:serde_json",
+        "@crate_index//:serde_qs",
+        "@crate_index//:thiserror",
+        "@crate_index//:tokio",
+        "@crate_index//:tower",
+        "@crate_index//:tower-http",
+        "@crate_index//:tracing",
+        "@crate_index//:uuid",
+    ],
+)

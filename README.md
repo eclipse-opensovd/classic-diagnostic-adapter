@@ -112,6 +112,20 @@ $env:OPENSSL_LIB_DIR="C:\Program Files\OpenSSL-Win64\lib\VC\x64\MD"
 $env:OPENSSL_INCLUDE_DIR="C:\Program Files\OpenSSL-Win64\include"
 ```
 
+### building with Bazel
+
+As an alternative to Cargo, the project can be built with [Bazel](https://bazel.build/) (via [Bazelisk](https://github.com/bazelbuild/bazelisk)).
+
+```shell
+# Build with OpenSSL (default TLS backend)
+bazel build //:opensovd-cda
+
+# Build with mbedtls TLS backend
+bazel build --config=mbedtls //:opensovd-cda
+```
+
+The resulting binary is located at `bazel-bin/cda-main/opensovd-cda`.
+
 ## developing
 
 ### pre commit
