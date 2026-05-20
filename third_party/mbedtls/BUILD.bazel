@@ -43,7 +43,9 @@ cmake(
     ],
 )
 
-# Custom Ed25519 PSA accelerator driver (compiled from CDA source)
+# Custom Ed25519 PSA accelerator driver (compiled from CDA source).
+# alwayslink ensures symbols are available to libtfpsacrypto regardless of
+# link order (tfpsacrypto references ed25519_psa_import_key etc.).
 cc_library(
     name = "ed25519_psa_driver",
     srcs = ["//comm-mbedtls/mbedtls-sys:csrc/ed25519_psa_driver.c"],
@@ -51,6 +53,7 @@ cc_library(
         "//comm-mbedtls/mbedtls-sys:csrc/ed25519_extract.h",
         "//comm-mbedtls/mbedtls-sys:csrc/ed25519_psa_driver.h",
     ],
+    alwayslink = True,
     copts = ["-DMBEDTLS_ED25519_PSA_DRIVER"],
     deps = [":mbedtls"],
 )
