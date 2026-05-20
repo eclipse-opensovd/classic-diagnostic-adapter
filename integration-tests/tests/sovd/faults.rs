@@ -13,11 +13,17 @@ use std::time::Duration;
 
 use cda_sovd::VendorErrorCode;
 use http::{Method, StatusCode};
-use sovd_interfaces::components::ecu::{faults::Fault, modes::dtcsetting};
+use sovd_interfaces::components::ecu::{
+    faults::{
+        Fault,
+        id::get::{ExtendedDataRecords, ExtendedFault, ExtendedSnapshots},
+    },
+    modes::dtcsetting,
+};
 
 use crate::{
     sovd::{
-        self, ExtendedFault, delete_all_faults, delete_all_faults_with_scope, delete_fault,
+        self, delete_all_faults, delete_all_faults_with_scope, delete_fault,
         delete_fault_with_scope,
         ecu::{get_dtc_setting, switch_session},
         get_extended_fault, get_fault, get_faults, locks, set_dtc_setting,
@@ -772,7 +778,6 @@ async fn test_get_faults_with_different_dtc_masks() {
 }
 
 #[tokio::test]
-#[allow(clippy::too_many_lines)]
 async fn test_get_fault_with_extended_dtc() {
     let (runtime, _lock) = setup_integration_test(true).await.unwrap();
     let auth = auth_header(&runtime.config, None).await.unwrap();
@@ -820,7 +825,7 @@ async fn test_get_fault_with_extended_dtc() {
         data: "20212223".to_owned(),
     };
 
-    let dtc1 = DtcExtended {
+    let ext_dtc = DtcExtended {
         id: "01E240".into(),
         status_mask: "29".into(),
         emissions_related: false,
@@ -828,7 +833,7 @@ async fn test_get_fault_with_extended_dtc() {
         extended_data: vec![ext_data_1],
     };
 
-    ecusim::add_dtc(&runtime.ecu_sim, ecu_name, fault_memory, &dtc1)
+    ecusim::add_dtc(&runtime.ecu_sim, ecu_name, fault_memory, &ext_dtc)
         .await
         .expect("Failed to add DTC 0x01E240");
 
@@ -849,7 +854,7 @@ async fn test_get_fault_with_extended_dtc() {
         .expect("Failed to get fault 0x01E240");
     assert_eq!(fault.item.code, "01E240");
 
-    assert_dtc_extended_data(&dtc1, fault);
+    assert_fault_data(&ext_dtc, fault);
 
     // Clean up - clear all DTCs
     ecusim::clear_all_dtcs(&runtime.ecu_sim, ecu_name, fault_memory)
@@ -869,64 +874,73 @@ async fn test_get_fault_with_extended_dtc() {
     );
 }
 
-// Asserts that extended DTC created in ECU-Sim is received as expected from CDA
-fn assert_dtc_extended_data(sim_dtc: &DtcExtended, result_fault: ExtendedFault<VendorErrorCode>) {
+/// Asserts that a previously created extended DTC in ECU-Sim is received as expected from CDA
+fn assert_fault_data(sim_dtc: &DtcExtended, result_fault: ExtendedFault<VendorErrorCode>) {
     let env_data = result_fault
         .environment_data
         .expect("Expected environment_data field, but it is None");
 
-    // --- Snapshots ---
     let result_snapshots = env_data
         .snapshots
-        .expect("Expected snapshots field, but it is None")
+        .expect("Expected snapshots field, but it is None");
+
+    let result_ext_data = env_data
+        .extended_data_records
+        .expect("Expected extended_data_records field, but it is None");
+
+    assert_dtc_snapshot_data(&sim_dtc.snapshots, result_snapshots);
+    assert_dtc_extended_data(&sim_dtc.extended_data, result_ext_data);
+}
+
+/// Asserts the Snapshot part of an Fault based on expected ECU-SIM Snapshot data
+/// Snapshots section from CDA Fault Response have the following structure:
+///     "`snapshots`": {
+///         "data": {
+///             "01": {
+///                 "DTCSnapshotRecordNumberOfIdentifiers": 2,
+///                 "DTCSnapshotRecord": [
+///                     {
+///                         "DTCSnapshotRecordDid": 6654,
+///                         "DTCSnapshotRecordDidData": 269554195
+///                     },
+///                     {
+///                         "DTCSnapshotRecordDid": 6655,
+///                         "DTCSnapshotRecordDidData": 336926231
+///                     }
+///                 ]
+///             }
+///         }
+///     }
+fn assert_dtc_snapshot_data(
+    sim_snapshots: &Vec<SnapshotRecord>,
+    result_snapshots: ExtendedSnapshots<VendorErrorCode>,
+) {
+    let result_snapshots = result_snapshots
         .data
-        .expect("Expected snapshots data field, but it is None");
+        .expect("Expected snapshots.data field, but it is None");
 
     assert_eq!(
-        sim_dtc.snapshots.len(),
+        sim_snapshots.len(),
         result_snapshots.len(),
         "Expected {} snapshot record(s), got {}",
-        sim_dtc.snapshots.len(),
+        sim_snapshots.len(),
         result_snapshots.len()
     );
 
-    /* Snapshots section from CDA Fault Response look like:
-        "snapshots": {
-            "data": {
-                "01": {
-                    "DTCSnapshotRecordNumberOfIdentifiers": 2,
-                    "DTCSnapshotRecord": [
-                        {
-                            "DTCSnapshotRecordDid": 6654,
-                            "DTCSnapshotRecordDidData": 269554195
-                        },
-                        {
-                            "DTCSnapshotRecordDid": 6655,
-                            "DTCSnapshotRecordDidData": 336926231
-                        }
-                    ]
-                }
-            }
-        }
-    */
+    for sim_snapshot in sim_snapshots {
+        // Alias for easier access
+        let record_key = &sim_snapshot.record_number;
 
-    for sim_snapshot in &sim_dtc.snapshots {
         // Check if Record Key (eg. "FF") is found in the CDA response
         let result_snapshot = result_snapshots
-            .get(&sim_snapshot.record_number)
-            .unwrap_or_else(|| {
-                panic!(
-                    "Expected snapshot record with key 0x{}",
-                    sim_snapshot.record_number
-                )
-            });
+            .get(record_key)
+            .unwrap_or_else(|| panic!("Expected snapshot record with key 0x{record_key}"));
 
         // number_of_identifiers must match the number of DID entries supplied
         assert_eq!(
             sim_snapshot.records.len() as u64,
             result_snapshot.number_of_identifiers,
-            "Snapshot record {}: expected {} identifier(s), got {}",
-            sim_snapshot.record_number,
+            "Snapshot record {record_key}: expected {} identifier(s), got {}",
             sim_snapshot.records.len(),
             result_snapshot.number_of_identifiers
         );
@@ -935,173 +949,140 @@ fn assert_dtc_extended_data(sim_dtc: &DtcExtended, result_fault: ExtendedFault<V
         assert_eq!(
             sim_snapshot.records.len(),
             result_snapshot.record.len(),
-            "Snapshot record {}: expected {} DID entry/entries, got {}",
-            sim_snapshot.record_number,
+            "Snapshot record {record_key}: expected {} DID entry/entries, got {}",
             sim_snapshot.records.len(),
             result_snapshot.record.len()
         );
 
-        // Each SnapshotData.data encodes: 4 hex chars DID (2 bytes) + N hex chars data
-        // e.g. "000110111213" -> DID = 0x0001, data = 0x10111213
         for (idx, (test_record, result_entry)) in sim_snapshot
             .records
             .iter()
             .zip(result_snapshot.record.iter())
             .enumerate()
         {
-            let expected_did = u16::from_str_radix(&test_record.did, 16).unwrap_or_else(|_| {
-                panic!(
-                    "Invalid hex DID in snapshot record {}, entry {idx}",
-                    sim_snapshot.record_number
-                )
-            }) as u64;
+            let expected_did = u64::from_str_radix(&test_record.did, 16).unwrap_or_else(|_| {
+                panic!("Invalid hex DID in snapshot record {record_key}, entry {idx}")
+            });
             let expected_data = u64::from_str_radix(&test_record.data, 16).unwrap_or_else(|_| {
-                panic!(
-                    "Invalid hex data in snapshot record {}, entry {idx}",
-                    sim_snapshot.record_number
-                )
+                panic!("Invalid hex data in snapshot record {record_key}, entry {idx}")
             });
 
             // Extract Snapshot DID (as defined in test ODX)
             let result_did = result_entry
                 .get("DTCSnapshotRecordDid")
-                .and_then(|v| v.as_u64())
+                .and_then(serde_json::Value::as_u64)
                 .unwrap_or_else(|| {
                     panic!(
-                        "Missing DTCSnapshotRecordDid in snapshot record {}, entry {idx}",
-                        sim_snapshot.record_number
+                        "Missing DTCSnapshotRecordDid in snapshot record {record_key}, entry {idx}"
                     )
                 });
             // Extract Snapshot Data (as defined in test ODX)
             let result_did_data = result_entry
                 .get("DTCSnapshotRecordDidData")
-                .and_then(|v| v.as_u64())
+                .and_then(serde_json::Value::as_u64)
                 .unwrap_or_else(|| {
                     panic!(
-                        "Missing DTCSnapshotRecordDidData in snapshot record {}, entry {idx}",
-                        sim_snapshot.record_number
+                        "Missing DTCSnapshotRecordDidData in snapshot record {record_key}, entry \
+                         {idx}"
                     )
                 });
 
             assert_eq!(
                 expected_did, result_did,
-                "Snapshot record {}, entry {idx}: expected DID {expected_did:#06X}, got \
-                 {result_did:#06X}",
-                sim_snapshot.record_number
+                "Snapshot record {record_key}, entry {idx}: expected DID {expected_did:#06X}, got \
+                 {result_did:#06X}"
             );
             assert_eq!(
                 expected_data, result_did_data,
-                "Snapshot record {}, entry {idx}: expected data {expected_data:#010X}, got \
-                 {result_did_data:#010X}",
-                sim_snapshot.record_number
+                "Snapshot record {record_key}, entry {idx}: expected data {expected_data:#010X}, \
+                 got {result_did_data:#010X}"
             );
         }
     }
+}
 
-    // --- Extended data records ---
-    let result_ext_data_opt = env_data.extended_data_records;
-
-    let result_ext_data = result_ext_data_opt
-        .expect("Expected extended_data_records field, but it is None")
+/// Asserts Fault Extended data based on ECU-Sim DTC Extended data
+/// Extended Data section from CDA Fault response have the following structure:
+///     "`extended_data_records`": {
+///         "data": {
+///             "01": {
+///                 "DefaultTestExtDataStruct": {
+///                     "DTCExtDataRecordData": 269554195
+///                 },
+///                 "Selector": 1
+///             },
+///             "02": {
+///                 "DefaultTestExtDataStruct": {
+///                     "DTCExtDataRecordData": 336926231
+///                 },
+///                 "Selector": 2
+///             }
+///         }
+///     }
+fn assert_dtc_extended_data(
+    sim_ext_data: &Vec<ExtDataRecord>,
+    result_extended_data: ExtendedDataRecords<VendorErrorCode>,
+) {
+    let result_ext_data = result_extended_data
         .data
-        .expect("Expected extended_data_records data field, but it is None");
+        .expect("Expected extended_data_records.data field, but it is None");
 
     assert_eq!(
-        sim_dtc.extended_data.len(),
+        sim_ext_data.len(),
         result_ext_data.len(),
         "Expected {} extended data record(s), got {}",
-        sim_dtc.extended_data.len(),
+        sim_ext_data.len(),
         result_ext_data.len()
     );
 
-    for test_ext in &sim_dtc.extended_data {
-        // Record Number for comparison with Selector
-        let expected_record_nr =
-            u8::from_str_radix(&test_ext.record_number, 16).unwrap_or_else(|_| {
-                panic!(
-                    "Invalid hex record number '{}' in test extended data",
-                    test_ext.record_number
-                )
-            });
+    for test_ext in sim_ext_data {
+        // Alias for easier access
+        let record_key = &test_ext.record_number;
 
-        // Convert expected Data into u64 (as defined in ODX by DTCExtDataRecordData)
-        let expected_data = u64::from_str_radix(&test_ext.data, 16).unwrap_or_else(|_| {
-            panic!(
-                "Invalid hex data in extended data record {}",
-                test_ext.record_number
-            )
+        // Record Number for comparison with Selector
+        let expected_record_nr = u64::from_str_radix(record_key, 16).unwrap_or_else(|_| {
+            panic!("Invalid hex record number '{record_key}' in test extended data")
         });
 
-        /* Extended Data section from CDA Fault response looks like the following:
-            "extended_data_records": {
-                "data": {
-                    "01": {
-                        "DefaultTestExtDataStruct": {
-                            "DTCExtDataRecordData": 269554195
-                        },
-                        "Selector": 1
-                    },
-                    "02": {
-                        "DefaultTestExtDataStruct": {
-                            "DTCExtDataRecordData": 336926231
-                        },
-                        "Selector": 2
-                    }
-                }
-            },
-        */
+        // Convert expected Data into integer (as defined in ODX by DTCExtDataRecordData)
+        let expected_data = u64::from_str_radix(&test_ext.data, 16)
+            .unwrap_or_else(|_| panic!("Invalid hex data in extended data record {record_key}"));
 
         // Extract Ext Data entry based on record_number
         let result_entry = result_ext_data
-            .get(&test_ext.record_number)
-            .unwrap_or_else(|| {
-                panic!(
-                    "Expected extended data entry with key '{}'",
-                    test_ext.record_number
-                )
-            });
+            .get(record_key)
+            .unwrap_or_else(|| panic!("Expected extended data entry with key '{record_key}'"));
 
         // Extract Record Data Structure object based on record_number
         let result_ext_data = result_entry
             .get("DefaultTestExtDataStruct")
             .unwrap_or_else(|| {
-                panic!(
-                    "Missing DefaultTestExtDataStruct in Extended Data record {}",
-                    test_ext.record_number
-                )
+                panic!("Missing DefaultTestExtDataStruct in Extended Data record {record_key}")
             })
-            // Extract Record Data as u64 (as defined in ODX)
+            // Extract Record Data into integer (as defined in ODX)
             .get("DTCExtDataRecordData")
-            .and_then(|v| v.as_u64())
+            .and_then(serde_json::Value::as_u64)
             .unwrap_or_else(|| {
-                panic!(
-                    "Missing DTCExtDataRecordData in Extended Data record {}",
-                    test_ext.record_number
-                )
+                panic!("Missing DTCExtDataRecordData in Extended Data record {record_key}")
             });
 
-        // Extract Record Data Number (Selector) as u64 (as defined in ODX)
+        // Extract Record Data Number (Selector) into integer (as defined in ODX)
         let result_ext_nr = result_entry
             .get("Selector")
-            .and_then(|v| v.as_u64())
+            .and_then(serde_json::Value::as_u64)
             .unwrap_or_else(|| {
-                panic!(
-                    "Missing DTCExtDataRecordData in Extended Data record {}",
-                    test_ext.record_number
-                )
+                panic!("Missing DTCExtDataRecordData in Extended Data record {record_key}")
             });
 
         assert_eq!(
-            expected_record_nr as u64, result_ext_nr,
-            "Extended Data record {}: expected Selector number {expected_record_nr}, got \
-             {result_ext_nr}",
-            test_ext.record_number
+            expected_record_nr, result_ext_nr,
+            "Extended Data record {record_key}: expected Selector number {expected_record_nr}, \
+             got {result_ext_nr}"
         );
         assert_eq!(
             expected_data, result_ext_data,
-            "Extended Data record {}: expected data {expected_data:#010X}, got \
-             {result_ext_data:#010X}",
-            test_ext.record_number
+            "Extended Data record {record_key}: expected data {expected_data:#010X}, got \
+             {result_ext_data:#010X}"
         );
     }
 }
