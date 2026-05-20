@@ -24,6 +24,8 @@ const TARBALL_SHA: &str = "2f3a47f7b3a541ddef450e4867eeecb7ce2ef7776093f3a11d6d4
 
 const MBEDTLS_SOURCE_OVERRIDE_VAR: &str = "MBEDTLS_DIR";
 const MBEDTLS_SKIP_PATCH_VAR: &str = "MBEDTLS_SKIP_PATCH";
+const MBEDTLS_SKIP_BUILD_VAR: &str = "MBEDTLS_SKIP_BUILD";
+const MBEDTLS_WRAPPER_H_VAR: &str = "MBEDTLS_WRAPPER_H";
 
 /// The build script takes care of compiling mbedtls and creating up to date binaries.
 /// It additionally applies the patches for supporting record size limit on TLS 1.2 as well as
@@ -35,16 +37,22 @@ const MBEDTLS_SKIP_PATCH_VAR: &str = "MBEDTLS_SKIP_PATCH";
 /// The build can be customized with following environment variables
 /// - `BINDGEN_SYSROOT`: provide the path to a sysroot for bindgen. Required when cross-compiling
 ///   using a SDK.
-/// - `MBEDTLS_DIR`: provide the path to the mbedtls source code. This avoids fetching the tarball
-///   during build.
+/// - `MBEDTLS_DIR`: provide the path to the mbedtls source code directory (or a file within it,
+///   e.g. `CMakeLists.txt`). This avoids fetching the tarball during build.
 /// - `MBEDTLS_SKIP_PATCH`: skip the tls1.2 record-size-limit and ed25519-psa-driver patches
+/// - `MBEDTLS_SKIP_BUILD`: skip the cmake and cc compilation steps. When set to "1", the build
+///   script only generates Rust FFI bindings via bindgen. Native libraries must be provided
+///   externally (e.g., via Bazel `cc_library` / `rules_foreign_cc` targets). Link directives
+///   are NOT emitted -- the external build system is responsible for linking.
+/// - `MBEDTLS_WRAPPER_H`: explicit path to `wrapper.h` for bindgen. Used by Bazel to pass a
+///   sandbox-safe `$(execpath)`. Falls back to `$CARGO_MANIFEST_DIR/wrapper.h` when unset.
 fn main() {
     let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
 
     // Download + patch mbedtls if not already present.
-    ensure_mbedtls_source(&manifest_dir);
+    // Returns the resolved path to the mbedtls source directory.
+    let mbedtls_src = ensure_mbedtls_source(&manifest_dir);
 
-    let mbedtls_src = manifest_dir.join(format!("mbedtls-{MBEDTLS_VERSION}"));
     let out_dir = PathBuf::from(
         env::var("OUT_DIR")
             .expect("OUT_DIR environment variable not set - build script must be run by Cargo"),
@@ -55,9 +63,30 @@ fn main() {
     println!("cargo:rerun-if-changed=patches");
     println!("cargo:rerun-if-changed=csrc");
     println!("cargo:rerun-if-changed=build.rs");
+    println!("cargo:rerun-if-env-changed={MBEDTLS_WRAPPER_H_VAR}");
 
+    let skip_build = env::var(MBEDTLS_SKIP_BUILD_VAR)
+        .map(|v| v == "1")
+        .unwrap_or(false);
+
+    if skip_build {
+        // External build system (e.g., Bazel with rules_foreign_cc) provides the
+        // pre-built native libraries. Only generate Rust FFI bindings via bindgen.
+        // Link directives are handled by the external build system's cc_library deps.
+        eprintln!("Skipping cmake/cc build as requested by {MBEDTLS_SKIP_BUILD_VAR}=1");
+        generate_bindings(&mbedtls_src, &manifest_dir, &out_dir);
+        return;
+    }
+
+    build_mbedtls(&mbedtls_src, &manifest_dir, &out_dir);
+    generate_bindings(&mbedtls_src, &manifest_dir, &out_dir);
+}
+
+/// Compile mbedtls via cmake and the Ed25519 PSA driver via cc, then emit
+/// the necessary `cargo:rustc-link-*` directives.
+fn build_mbedtls(mbedtls_src: &Path, manifest_dir: &Path, out_dir: &Path) {
     // build mbedtls
-    cmake::Config::new(&mbedtls_src)
+    cmake::Config::new(mbedtls_src)
         .define("USE_STATIC_MBEDTLS_LIBRARY", "ON")
         .define("USE_SHARED_MBEDTLS_LIBRARY", "OFF")
         .define("ENABLE_TESTING", "OFF")
@@ -102,8 +131,10 @@ fn main() {
         .include(mbedtls_src.join("include"))
         .warnings(false)
         .compile("ed25519_psa_driver");
+}
 
-    // generate rust bindings for mbedtls
+/// Generate Rust FFI bindings for mbedtls via bindgen.
+fn generate_bindings(mbedtls_src: &Path, manifest_dir: &Path, out_dir: &Path) {
     let include_paths: Vec<PathBuf> = vec![
         mbedtls_src.join("include"),
         mbedtls_src.join("tf-psa-crypto").join("include"),
@@ -121,8 +152,14 @@ fn main() {
             .join("src"),
     ];
 
+    // Resolve wrapper.h: if MBEDTLS_WRAPPER_H_VAR is not set,
+    // fall back to manifest_dir for plain cargo builds.
+    let wrapper_h = env::var(MBEDTLS_WRAPPER_H_VAR)
+        .map(PathBuf::from)
+        .unwrap_or_else(|_| manifest_dir.join("wrapper.h"));
+
     let mut builder = bindgen::Builder::default()
-        .header(manifest_dir.join("wrapper.h").to_string_lossy())
+        .header(wrapper_h.to_string_lossy())
         .allowlist_function("mbedtls_.*")
         .allowlist_function("psa_.*")
         .allowlist_type("mbedtls_.*")
@@ -259,16 +296,27 @@ fn apply_patch(patch_file: &Path, work_dir: &Path) {
     }
 }
 
-/// Ensure `mbedtls-4.0.0/` exists in `workspace_dir`, downloading and
-/// patching it if necessary.
-fn ensure_mbedtls_source(workspace_dir: &Path) {
+/// Ensure the mbedtls source is available, downloading and patching it if necessary.
+///
+/// Returns the path to the root of the mbedtls source directory.
+fn ensure_mbedtls_source(workspace_dir: &Path) -> PathBuf {
     let prefetched_source_var = std::env::var(MBEDTLS_SOURCE_OVERRIDE_VAR).ok();
     let skip_src_patch = std::env::var(MBEDTLS_SKIP_PATCH_VAR)
         .map(|v| v == "1")
         .unwrap_or(false);
 
-    let mbedtls_dir = if let Some(dir) = prefetched_source_var {
-        PathBuf::from(dir)
+    let mbedtls_dir = if let Some(dir_or_file) = prefetched_source_var {
+        let path = PathBuf::from(&dir_or_file);
+        // Support both directory paths and paths to files within the source
+        // tree (e.g., when Bazel passes an execpath to CMakeLists.txt via
+        // MBEDTLS_DIR). In the latter case, derive the parent directory.
+        if path.is_file() {
+            path.parent()
+                .expect("MBEDTLS_DIR points to a file with no parent directory")
+                .to_path_buf()
+        } else {
+            path
+        }
     } else {
         let dir = workspace_dir.join(format!("mbedtls-{MBEDTLS_VERSION}"));
         if !dir.join("CMakeLists.txt").exists() {
@@ -290,12 +338,12 @@ fn ensure_mbedtls_source(workspace_dir: &Path) {
 
     if skip_src_patch {
         eprintln!("Skipping source patches as requested by {MBEDTLS_SKIP_PATCH_VAR}=1");
-        return;
+        return mbedtls_dir;
     }
 
     if mbedtls_dir.join(".patch_marker").exists() {
         eprintln!("Source already patched, skipping patching.");
-        return;
+        return mbedtls_dir;
     }
 
     // Apply record-size-limit patch adding the extension for TLS1.2 aswell
@@ -331,4 +379,5 @@ fn ensure_mbedtls_source(workspace_dir: &Path) {
         .expect("Failed to write patch marker file");
 
     eprintln!("mbedtls {MBEDTLS_VERSION} ready.");
+    mbedtls_dir
 }
