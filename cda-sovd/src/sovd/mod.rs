@@ -19,6 +19,7 @@ use aide::{
     },
     transform::TransformOperation,
 };
+use async_trait::async_trait;
 use axum::{
     Json,
     body::Bytes,
@@ -29,7 +30,8 @@ use axum::{
 };
 use axum_extra::extract::WithRejection;
 use cda_interfaces::{
-    FunctionalDescriptionConfig, HashMap, HashMapExtensions as _, SchemaProvider, UdsEcu,
+    FunctionalDescriptionConfig, HashMap, HashMapExtensions as _, LockStateProvider,
+    SchemaProvider, UdsEcu,
     datatypes::ComponentsConfig,
     diagservices::{DiagServiceResponse, FieldParseError, UdsPayloadData},
     file_manager::FileManager,
@@ -207,6 +209,49 @@ impl ExecutionStatus for FgServiceExecution {
             status: sovd_ecu::operations::ExecutionStatus::Running,
             in_flight: false,
             is_created: false,
+        }
+    }
+}
+
+/// SOVD implementation of [`LockStateProvider`] that reads from the in-memory [`Locks`] state.
+pub struct SovdLockStateProvider {
+    locks: Arc<Locks>,
+}
+
+impl SovdLockStateProvider {
+    #[must_use]
+    pub fn new(locks: Arc<Locks>) -> Self {
+        Self { locks }
+    }
+}
+
+#[async_trait] // todo alexmohr
+impl LockStateProvider for SovdLockStateProvider {
+    async fn vehicle_lock_owner(&self) -> Option<String> {
+        let vehicle_lock = self.locks.vehicle.lock_ro().await;
+        match &vehicle_lock {
+            ReadLock::OptionLock(l) => l.as_ref().map(|l| l.owner().to_owned()),
+            ReadLock::HashMapLock(_) => None,
+        }
+    }
+
+    async fn has_conflicting_ecu_locks(&self, caller_sub: &str) -> bool {
+        let ecu_lock = self.locks.ecu.lock_ro().await;
+        match &ecu_lock {
+            ReadLock::HashMapLock(l) => l
+                .values()
+                .any(|v| v.as_ref().is_some_and(|l| l.owner() != caller_sub)),
+            ReadLock::OptionLock(l) => l.as_ref().is_some_and(|l| l.owner() != caller_sub),
+        }
+    }
+
+    async fn has_conflicting_fg_locks(&self, caller_sub: &str) -> bool {
+        let fg_lock = self.locks.functional_group.lock_ro().await;
+        match &fg_lock {
+            ReadLock::HashMapLock(l) => l
+                .values()
+                .any(|v| v.as_ref().is_some_and(|l| l.owner() != caller_sub)),
+            ReadLock::OptionLock(l) => l.as_ref().is_some_and(|l| l.owner() != caller_sub),
         }
     }
 }
@@ -936,6 +981,8 @@ macro_rules! create_schema {
     }};
 }
 pub use create_schema;
+
+use crate::sovd::locks::ReadLock;
 
 pub(crate) mod static_data {
     use aide::{
