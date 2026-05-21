@@ -30,6 +30,7 @@ exports_files([
 cargo_build_script(
     name = "build_script",
     srcs = ["build.rs"],
+    edition = "2024",
     build_script_env = {
         "MBEDTLS_DIR": "$(execpath @mbedtls//:CMakeLists.txt)",
         "MBEDTLS_SKIP_BUILD": "1",
@@ -59,6 +60,7 @@ rust_library(
     name = "mbedtls-sys",
     srcs = glob(["src/**/*.rs"]),
     crate_name = "mbedtls_sys",
+    edition = "2024",
     deps = [
         ":build_script",
         "//third_party/mbedtls",

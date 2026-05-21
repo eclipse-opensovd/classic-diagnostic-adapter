@@ -18,6 +18,7 @@ rust_library(
     name = "cda-health",
     srcs = glob(["src/**/*.rs"]),
     crate_name = "cda_health",
+    edition = "2024",
     deps = [
         "//cda-interfaces",
         "//cda-sovd",
