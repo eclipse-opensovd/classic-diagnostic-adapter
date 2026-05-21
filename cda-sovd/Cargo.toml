@@ -25,7 +25,9 @@ workspace = true
 
 [dependencies]
 # internal dependencies
+async-trait = { workspace = true }
 cda-interfaces = { workspace = true }
+cda-plugin-runtimefiles-update = { workspace = true }
 cda-plugin-security = { workspace = true }
 cda-tracing = { workspace = true }
 opensovd-axum-extra = { workspace = true, features = [
@@ -64,8 +66,10 @@ axum = { workspace = true, features = [
   "query",
   "matched-path",
   "original-uri",
+  "multipart",
 ] }
 axum-extra = { workspace = true, features = ["typed-header", "with-rejection"] }
+bytes = { workspace = true }
 chrono = { workspace = true }
 http = { workspace = true }
 indexmap = { workspace = true }

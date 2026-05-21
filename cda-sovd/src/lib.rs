@@ -33,6 +33,7 @@ use tower::{Layer, ServiceExt as TowerServiceExt};
 use tower_http::{normalize_path::NormalizePathLayer, trace::TraceLayer};
 
 pub use crate::sovd::{
+    SovdLockStateProvider, apps::sovd2uds::bulk_data::runtimefiles::DbUpdateRouteState,
     error::VendorErrorCode, locks::Locks, static_data::add_static_data_endpoint,
 };
 

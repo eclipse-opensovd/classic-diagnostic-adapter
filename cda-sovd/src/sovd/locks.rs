@@ -72,6 +72,9 @@ impl Lock {
     pub(crate) fn is_owned_by(&self, claim_sub: &str) -> bool {
         self.owner == claim_sub
     }
+    pub(crate) fn owner(&self) -> &str {
+        &self.owner
+    }
     pub(crate) fn id(&self) -> &str {
         &self.sovd.id
     }
