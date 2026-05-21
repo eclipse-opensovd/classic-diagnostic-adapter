@@ -18,6 +18,7 @@ package(default_visibility = ["//visibility:public"])
 cargo_build_script(
     name = "build_script",
     srcs = ["build.rs"],
+    edition = "2024",
     deps = [
         "//cda-build",
         "@crate_index//:cargo_toml",
@@ -30,6 +31,7 @@ rust_library(
     name = "cda-database",
     srcs = glob(["src/**/*.rs"]),
     crate_name = "cda_database",
+    edition = "2024",
     deps = [
         ":build_script",
         "//cda-interfaces",

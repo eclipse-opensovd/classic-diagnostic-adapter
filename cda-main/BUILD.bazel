@@ -20,6 +20,7 @@ package(default_visibility = ["//visibility:public"])
 cargo_build_script(
     name = "build_script",
     srcs = ["build.rs"],
+    edition = "2024",
     build_script_env = {
         # Provide deterministic build metadata.
         # For production builds, override via --action_env or workspace_status_command.
@@ -37,6 +38,7 @@ rust_library(
         ["src/**/*.rs"],
         exclude = ["src/main.rs"],
     ),
+    edition = "2024",
     crate_features = ["health"] + select({
         "//:use_openssl": ["openssl"],
         "//:use_mbedtls": ["mbedtls"],
@@ -71,6 +73,7 @@ rust_library(
 rust_binary(
     name = "opensovd-cda",
     srcs = ["src/main.rs"],
+    edition = "2024",
     crate_features = ["health"] + select({
         "//:use_openssl": ["openssl"],
         "//:use_mbedtls": ["mbedtls"],

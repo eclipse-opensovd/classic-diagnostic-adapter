@@ -17,6 +17,7 @@ package(default_visibility = ["//visibility:public"])
 rust_library(
     name = "mbedtls-rs",
     srcs = glob(["src/**/*.rs"]),
+    edition = "2024",
     crate_features = [
         "default",
         "tokio",

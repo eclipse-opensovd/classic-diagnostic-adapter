@@ -18,6 +18,7 @@ package(default_visibility = ["//visibility:public"])
 rust_library(
     name = "cda-comm-doip",
     srcs = glob(["src/**/*.rs"]),
+    edition = "2024",
     crate_features = select({
         "//:use_openssl": ["openssl"],
         "//:use_mbedtls": ["mbedtls"],
