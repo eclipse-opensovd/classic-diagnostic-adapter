@@ -53,8 +53,9 @@ http_archive(
 )
 
 # --- crate_universe: auto-generate Bazel targets for external Cargo dependencies ---
-crate = use_extension("@rules_rust//crate_universe:extensions.bzl", "crate")
-
+# isolate = True gives CDA its own private crate universe, avoiding name clashes
+# when CDA is consumed as a bazel_dep by other modules (e.g., Eclipse S-CORE).
+crate = use_extension("@rules_rust//crate_universe:extensions.bzl", "crate", isolate = True)
 crate.from_cargo(
     name = "crate_index",
     cargo_lockfile = "//:Cargo.lock",
@@ -63,28 +64,27 @@ crate.from_cargo(
 
 # mbedtls-sys: point build.rs at pre-fetched + pre-patched source, skip native build
 crate.annotation(
-    crate = "mbedtls-sys",
     build_script_data = [
         "@mbedtls//:all_srcs",
+    ],
+    build_script_data_glob = [
+        "csrc/**",
+        "wrapper.h",
     ],
     build_script_env = {
         "MBEDTLS_DIR": "$(execpath @mbedtls//:CMakeLists.txt)",
         "MBEDTLS_SKIP_BUILD": "1",
         "MBEDTLS_SKIP_PATCH": "1",
     },
-    build_script_data_glob = [
-        "csrc/**",
-        "wrapper.h",
-    ],
+    crate = "mbedtls-sys",
 )
 
 # opensovd-cda (cda-main): provide deterministic build metadata for build.rs
 crate.annotation(
-    crate = "opensovd-cda",
     build_script_env = {
         "SOURCE_DATE_EPOCH": "0",
         "SOURCE_GIT_SHA": "bazel",
     },
+    crate = "opensovd-cda",
 )
-
 use_repo(crate, "crate_index")
