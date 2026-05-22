@@ -14,8 +14,7 @@ https://www.apache.org/licenses/LICENSE-2.0
 
 ## Linting & Clippy
 
-- **Clippy**: Always run with `clippy::pedantic` enabled for stricter linting.
-  - Example: `cargo clippy --all-targets --all-features -- -D warnings -W clippy::pedantic`
+- **Clippy**: Run with `cargo lint` alias to use recommended configuration.
 - **Allow/Forbid**: Use `#[allow(...)]` only when necessary, and always document the reason.
   - Example: `#[allow(clippy::ref_option)] // Not compatible with serde derive`
 - **Warnings**: Treat all warnings as errors.
@@ -32,9 +31,9 @@ This repository follows most of the defaults in rustfmt, with some opinionated u
   - Enable formatting of strings.
 
 As we do not want to require nightly rust for the entire repository, these settings are not yet included in `rustfmt.toml` (but will be once stabilized).
-Instead, run this command to apply the correct formatting:
+Instead, run this alias to apply the correct formatting:
 ```sh
-cargo +nightly fmt -- --check --config error_on_unformatted=true,error_on_line_overflow=true,format_strings=true,group_imports=StdExternalCrate,imports_granularity=Crate
+cargo +nightly format
 ```
 
 It is recommended to configure your IDE to use nightly rustfmt with these settings as well.
