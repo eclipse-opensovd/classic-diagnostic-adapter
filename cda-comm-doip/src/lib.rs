@@ -25,6 +25,7 @@ use doip_definitions::{
     header::ProtocolVersion,
     payload::{DiagnosticMessage, DiagnosticMessageNack, DoipPayload, GenericNack},
 };
+use futures::FutureExt;
 use thiserror::Error;
 use tokio::sync::{Mutex, RwLock, broadcast, mpsc};
 
@@ -162,7 +163,7 @@ impl<T: EcuAddressProvider + DoipComParamProvider> DoipDiagGateway<T> {
         shutdown_signal: F,
     ) -> Result<Self, DoipGatewaySetupError>
     where
-        F: Future<Output = ()> + Clone + Send + 'static,
+        F: Future<Output = ()> + Send + 'static,
     {
         let DoipConfig {
             protocol_version,
@@ -199,12 +200,14 @@ impl<T: EcuAddressProvider + DoipComParamProvider> DoipDiagGateway<T> {
         )?;
         let mask = create_netmask(tester_ip, tester_subnet)?;
 
+        let shared_shutdown_signal = shutdown_signal.shared();
+
         let gateways = vir_vam::get_vehicle_identification::<T, F>(
             &mut socket,
             mask,
             gateway_port,
             &ecus,
-            shutdown_signal.clone(),
+            shared_shutdown_signal.clone(),
         )
         .await
         .map_err(|err| {
@@ -271,7 +274,7 @@ impl<T: EcuAddressProvider + DoipComParamProvider> DoipDiagGateway<T> {
             gateway.clone(),
             variant_detection,
             send_timeout,
-            shutdown_signal,
+            shared_shutdown_signal,
         )
         .await;
 
