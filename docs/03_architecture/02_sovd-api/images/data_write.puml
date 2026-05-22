@@ -1,0 +1,59 @@
+' SPDX-License-Identifier: Apache-2.0
+' SPDX-FileCopyrightText: 2026 The Contributors to Eclipse OpenSOVD (see CONTRIBUTORS)
+'
+' See the NOTICE file(s) distributed with this work for additional
+' information regarding copyright ownership.
+'
+' This program and the accompanying materials are made available under the
+' terms of the Apache License Version 2.0 which is available at
+' https://www.apache.org/licenses/LICENSE-2.0
+
+@startuml
+title Data Write -- SID 2E
+
+participant Client
+participant "HTTP Server\n(Axum)" as HTTP
+participant "Security\nMiddleware" as SEC
+participant "Data Handler" as HANDLER
+participant "Diagnostic\nKernel" as DIAG
+participant "UDS / DoIP" as COMM
+participant ECU
+
+Client -> HTTP : PUT /components/{ecu}/data/{id}\n{ "data": { ... } }
+activate HTTP
+
+HTTP -> SEC : authenticate & authorize
+activate SEC
+SEC -> HTTP : OK
+deactivate SEC
+
+HTTP -> HANDLER : route to data handler
+activate HANDLER
+
+HANDLER -> HANDLER : extract named parameters\nfrom JSON request body
+
+HANDLER -> DIAG : write data (service name, parameters)
+activate DIAG
+
+DIAG -> DIAG : resolve service from MDD\n(short name -> SID 2E + DID)
+DIAG -> DIAG : encode named parameters\ninto UDS request payload\n(2E {DID} {encoded data})
+
+DIAG -> COMM : send UDS request
+activate COMM
+COMM -> ECU : DoIP -> UDS WriteDataByIdentifier\n(2E {DID} {data})
+activate ECU
+ECU -> COMM : positive response\n(6E {DID})
+deactivate ECU
+COMM -> DIAG : raw UDS response
+deactivate COMM
+
+DIAG -> HANDLER : write confirmed
+deactivate DIAG
+
+HANDLER -> HTTP : success
+deactivate HANDLER
+
+HTTP -> Client : HTTP 200 OK
+deactivate HTTP
+
+@enduml

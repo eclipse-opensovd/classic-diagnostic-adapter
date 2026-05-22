@@ -304,6 +304,12 @@ Data Resources -- SID 22\ :sub:`16` & 2E\ :sub:`16`
 
     Names for data resources are determined by taking all diag-services defined for 22\ :sub:`16` and 2E\ :sub:`16` -- their short name is taken as a base and processed by removing configurable prefixes/suffixes, to determine the data identifier within the ``/data/{data-identifier}`` path.
 
+    The following diagrams illustrate the message flow for reading and writing data resources:
+
+    .. uml:: 02_sovd-api/images/data_read.puml
+
+    .. uml:: 02_sovd-api/images/data_write.puml
+
 Categories
 ^^^^^^^^^^
 
@@ -421,6 +427,8 @@ Operations
     execute the routine with ``POST /operations/{routine-name}/executions`` is executed synchronously
     and will directly return the response from the ECU with HTTP status ``200 OK``.
 
+    .. uml:: 02_sovd-api/images/operation_sync.puml
+
     .. note::
        Operations without a ``Start`` subfunction can exist in the operations list but will fail
        execution with an error unless the ``x-sovd2uds-suppressService`` query parameter is set to ``true``.
@@ -460,6 +468,8 @@ Operations
 
     When ``x-sovd2uds-force=true``, the execution is removed from tracking even if the Stop
     request fails or returns a negative response.
+
+    .. uml:: 02_sovd-api/images/operation_async.puml
 
     **Stop Response Data**
 
@@ -530,6 +540,8 @@ Session -- SID 10\ :sub:`16`
     In the response body, ``id`` and ``value`` must be included.
 
     See also chapter 7.16 in ISO 17978-3.
+
+    .. uml:: 02_sovd-api/images/session_switch.puml
 
 
 Security -- SID 27\ :sub:`16`
@@ -657,6 +669,30 @@ Faults -- SID 14\ :sub:`16` & 19\ :sub:`16`
 
     Additionally, a special key called ``mask`` is available, which takes a hexadecimal mask as a value
     to allow filtering by the complete status byte. Using other keys together with ``mask`` is not supported.
+
+    .. uml:: 02_sovd-api/images/fault_read.puml
+
+
+Generic Service
+---------------
+
+.. arch:: Generic Service Endpoint
+    :id: arch~sovd-api-generic-service
+    :status: draft
+
+    The ``/genericservice`` endpoint provides raw UDS passthrough functionality, allowing clients to send
+    arbitrary UDS requests to an ECU without relying on diagnostic description (MDD) service resolution
+    or parameter encoding.
+
+    The client sends a hex-encoded UDS request in the JSON body, and receives the raw hex-encoded UDS
+    response from the ECU.
+
+    Permissions for generic service calls can be checked and enforced through the security plugin. Since
+    generic service requests bypass the structured service resolution, the security plugin receives the
+    raw UDS request payload (e.g. ``22 F1 90``) and is responsible for evaluating whether the authenticated
+    client is authorized to send that specific UDS command to the target ECU.
+
+    .. uml:: 02_sovd-api/images/generic_service.puml
 
 
 Version Endpoint
