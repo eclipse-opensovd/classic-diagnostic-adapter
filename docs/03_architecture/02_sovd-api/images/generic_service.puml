@@ -1,0 +1,54 @@
+' SPDX-License-Identifier: Apache-2.0
+' SPDX-FileCopyrightText: 2026 The Contributors to Eclipse OpenSOVD (see CONTRIBUTORS)
+'
+' See the NOTICE file(s) distributed with this work for additional
+' information regarding copyright ownership.
+'
+' This program and the accompanying materials are made available under the
+' terms of the Apache License Version 2.0 which is available at
+' https://www.apache.org/licenses/LICENSE-2.0
+
+@startuml
+title Generic Service -- Raw UDS Passthrough
+
+participant Client
+participant CDA
+participant "Security\nPlugin" as SEC
+participant "Diagnostic\nKernel" as DIAG
+participant "UDS / DoIP" as COMM
+participant ECU
+
+Client -> CDA : POST /components/{ecu}/genericservice\n{ "request": "22F190" }
+activate CDA
+
+CDA -> SEC : check permissions for\nraw UDS request (22 F1 90) on {ecu}
+activate SEC
+SEC -> SEC : evaluate authorization\n(client identity, target ECU,\nUDS SID + payload prefix)
+SEC -> CDA : authorized
+deactivate SEC
+
+CDA -> CDA : parse hex-encoded\nraw UDS request bytes
+
+CDA -> DIAG : send raw UDS (byte array)
+activate DIAG
+
+note over DIAG : no MDD service resolution\nor parameter encoding needed
+
+DIAG -> COMM : send raw UDS request
+activate COMM
+COMM -> ECU : DoIP -> raw UDS\n(22 F1 90)
+activate ECU
+ECU -> COMM : raw UDS response\n(62 F1 90 {data})
+deactivate ECU
+COMM -> DIAG : raw UDS response bytes
+deactivate COMM
+
+DIAG -> CDA : raw response bytes
+deactivate DIAG
+
+CDA -> CDA : hex-encode response
+
+CDA -> Client : HTTP 200 OK\n{ "response": "62F190..." }
+deactivate CDA
+
+@enduml

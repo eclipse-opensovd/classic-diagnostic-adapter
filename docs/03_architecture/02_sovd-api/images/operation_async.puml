@@ -1,0 +1,90 @@
+' SPDX-License-Identifier: Apache-2.0
+' SPDX-FileCopyrightText: 2026 The Contributors to Eclipse OpenSOVD (see CONTRIBUTORS)
+'
+' See the NOTICE file(s) distributed with this work for additional
+' information regarding copyright ownership.
+'
+' This program and the accompanying materials are made available under the
+' terms of the Apache License Version 2.0 which is available at
+' https://www.apache.org/licenses/LICENSE-2.0
+
+@startuml
+title Asynchronous Operation -- SID 31 (Start + RequestResults + Stop)
+
+participant Client
+participant CDA
+participant "Diagnostic\nKernel" as DIAG
+participant "UDS / DoIP" as COMM
+participant ECU
+
+!pragma teoz true
+
+== Start Routine ==
+
+Client -> CDA : POST /components/{ecu}/operations/{routine}/executions\n{ "parameters": { ... } }
+activate CDA
+
+CDA -> DIAG : execute routine (Start)
+activate DIAG
+DIAG -> DIAG : encode parameters\n(31 01 {routine ID} {params})
+DIAG -> COMM : send UDS request
+activate COMM
+COMM -> ECU : RoutineControl Start\n(31 01 {routine ID} {params})
+activate ECU
+ECU -> COMM : positive response\n(71 01 {routine ID} {result})
+deactivate ECU
+COMM -> DIAG : raw UDS response
+deactivate COMM
+DIAG -> CDA : decoded result
+deactivate DIAG
+
+CDA -> CDA : generate execution {id}\ntrack execution state
+CDA -> Client : HTTP 202 Accepted\n{ "id": "{id}", "status": "running",\n  "data": { ... } }
+deactivate CDA
+
+== Poll Results ==
+
+Client -> CDA : GET /components/{ecu}/operations/{routine}/executions/{id}
+activate CDA
+
+CDA -> DIAG : request results (RequestResults)
+activate DIAG
+DIAG -> DIAG : encode request\n(31 03 {routine ID})
+DIAG -> COMM : send UDS request
+activate COMM
+COMM -> ECU : RoutineControl RequestResults\n(31 03 {routine ID})
+activate ECU
+ECU -> COMM : positive response\n(71 03 {routine ID} {result})
+deactivate ECU
+COMM -> DIAG : raw UDS response
+deactivate COMM
+DIAG -> CDA : decoded result
+deactivate DIAG
+
+CDA -> Client : HTTP 200 OK\n{ "id": "{id}", "status": "completed",\n  "data": { ... } }
+deactivate CDA
+
+== Stop Routine (optional) ==
+
+Client -> CDA : DELETE /components/{ecu}/operations/{routine}/executions/{id}
+activate CDA
+
+CDA -> DIAG : stop routine (Stop)
+activate DIAG
+DIAG -> DIAG : encode request\n(31 02 {routine ID})
+DIAG -> COMM : send UDS request
+activate COMM
+COMM -> ECU : RoutineControl Stop\n(31 02 {routine ID})
+activate ECU
+ECU -> COMM : positive response\n(71 02 {routine ID})
+deactivate ECU
+COMM -> DIAG : raw UDS response
+deactivate COMM
+DIAG -> CDA : confirmed
+deactivate DIAG
+
+CDA -> CDA : remove execution {id}\nfrom tracking
+CDA -> Client : HTTP 204 No Content
+deactivate CDA
+
+@enduml

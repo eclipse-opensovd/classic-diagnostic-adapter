@@ -1,0 +1,61 @@
+' SPDX-License-Identifier: Apache-2.0
+' SPDX-FileCopyrightText: 2026 The Contributors to Eclipse OpenSOVD (see CONTRIBUTORS)
+'
+' See the NOTICE file(s) distributed with this work for additional
+' information regarding copyright ownership.
+'
+' This program and the accompanying materials are made available under the
+' terms of the Apache License Version 2.0 which is available at
+' https://www.apache.org/licenses/LICENSE-2.0
+
+@startuml
+title Synchronous Operation -- SID 31 (Start only)
+
+participant Client
+participant "HTTP Server\n(Axum)" as HTTP
+participant "Security\nMiddleware" as SEC
+participant "Operations\nHandler" as HANDLER
+participant "Diagnostic\nKernel" as DIAG
+participant "UDS / DoIP" as COMM
+participant ECU
+
+Client -> HTTP : POST /components/{ecu}/operations/{routine}/executions\n{ "parameters": { ... } }
+activate HTTP
+
+HTTP -> SEC : authenticate & authorize
+activate SEC
+SEC -> HTTP : OK
+deactivate SEC
+
+HTTP -> HANDLER : route to operations handler
+activate HANDLER
+
+HANDLER -> DIAG : execute routine (Start subfunction)
+activate DIAG
+
+DIAG -> DIAG : resolve routine from MDD\n(short name -> SID 31 + routine ID)
+DIAG -> DIAG : encode parameters into UDS payload\n(31 01 {routine ID} {params})
+
+DIAG -> COMM : send UDS request
+activate COMM
+COMM -> ECU : DoIP -> UDS RoutineControl Start\n(31 01 {routine ID} {params})
+activate ECU
+ECU -> ECU : execute routine
+ECU -> COMM : positive response\n(71 01 {routine ID} {result})
+deactivate ECU
+COMM -> DIAG : raw UDS response
+deactivate COMM
+
+DIAG -> DIAG : decode response parameters
+DIAG -> HANDLER : decoded result
+deactivate DIAG
+
+HANDLER -> HANDLER : build SOVD JSON response
+
+HANDLER -> HTTP : JSON body
+deactivate HANDLER
+
+HTTP -> Client : HTTP 200 OK\n{ "data": { ... } }
+deactivate HTTP
+
+@enduml

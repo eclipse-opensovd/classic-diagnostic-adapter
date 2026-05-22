@@ -41,7 +41,7 @@ fn assert_version_response(json: &serde_json::Value) {
     assert_eq!(impl_version, cda_version());
 }
 
-/// [[ itest~sovd-api-version-endpoint, Version Endpoint Integration Test ]]
+/// [[ itest~sovd-api-version-endpoint, Version Endpoint Integration Test, itest ]]
 #[tokio::test]
 async fn test_version_endpoint() {
     let (runtime, _lock) = setup_integration_test(true).await.unwrap();
