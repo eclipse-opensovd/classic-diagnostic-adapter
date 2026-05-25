@@ -19,7 +19,6 @@ use doip_definitions::{
     header::PayloadType,
     payload::{DoipPayload, VehicleIdentificationRequest},
 };
-use futures::FutureExt;
 use tokio::sync::{Mutex, RwLock, mpsc};
 
 use crate::{
@@ -57,7 +56,7 @@ where
     let vam_timeout = Duration::from_secs(1); // not the actual timeout from the spec ...
 
     tokio::select! {
-        _ = &mut shutdown_signal => {
+        () = &mut shutdown_signal => {
             tracing::info!("Shutdown signal received");
         },
         () = cda_interfaces::util::tokio_ext::sleep_for(vam_timeout) => {
