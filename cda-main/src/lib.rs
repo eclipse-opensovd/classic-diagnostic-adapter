@@ -373,8 +373,8 @@ pub async fn run_with_config(config: Configuration) -> Result<(), AppError> {
 
     #[cfg(feature = "health")]
     let (health_state, main_health_provider) = if config.health.enabled {
-        let health_state = cda_health::add_health_routes(&dynamic_router, cda_version().to_owned())
-            .await;
+        let health_state =
+            cda_health::add_health_routes(&dynamic_router, cda_version().to_owned()).await;
         let main_health_provider = Arc::new(cda_health::StatusHealthProvider::new(
             cda_health::Status::Starting,
         ));
