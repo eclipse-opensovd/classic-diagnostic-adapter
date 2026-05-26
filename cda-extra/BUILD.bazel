@@ -1,0 +1,26 @@
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: 2025 The Contributors to Eclipse OpenSOVD (see CONTRIBUTORS)
+#
+# See the NOTICE file(s) distributed with this work for additional
+# information regarding copyright ownership.
+#
+# This program and the accompanying materials are made available under the
+# terms of the Apache License Version 2.0 which is available at
+# https://www.apache.org/licenses/LICENSE-2.0
+
+# cda-extra: Optional platform extras (e.g., systemd notify).
+# By default all deps are optional; the systemd-notify feature enables them.
+
+load("@rules_rust//rust:defs.bzl", "rust_library")
+
+package(default_visibility = ["//visibility:public"])
+
+rust_library(
+    name = "cda-extra",
+    srcs = glob(["src/**/*.rs"]),
+    crate_name = "cda_extra",
+    edition = "2024",
+    # No features enabled by default -- systemd-notify is Linux-only.
+    # Enable via crate_features = ["systemd-notify"] if needed.
+    deps = [],
+)

@@ -1,0 +1,40 @@
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: 2025 The Contributors to Eclipse OpenSOVD (see CONTRIBUTORS)
+#
+# See the NOTICE file(s) distributed with this work for additional
+# information regarding copyright ownership.
+#
+# This program and the accompanying materials are made available under the
+# terms of the Apache License Version 2.0 which is available at
+# https://www.apache.org/licenses/LICENSE-2.0
+
+# cda-interfaces: Shared interfaces and types used across CDA crates.
+
+load("@rules_rust//rust:defs.bzl", "rust_library")
+
+package(default_visibility = ["//visibility:public"])
+
+rust_library(
+    name = "cda-interfaces",
+    srcs = glob(["src/**/*.rs"]),
+    crate_name = "cda_interfaces",
+    edition = "2024",
+    deps = [
+        "@crate_index//:bytes",
+        "@crate_index//:foldhash",
+        "@crate_index//:hex",
+        "@crate_index//:parking_lot",
+        "@crate_index//:rkyv",
+        "@crate_index//:schemars",
+        "@crate_index//:serde",
+        "@crate_index//:serde_json",
+        "@crate_index//:strum",
+        "@crate_index//:thiserror",
+        "@crate_index//:tokio",
+        "@crate_index//:tracing",
+    ],
+    proc_macro_deps = [
+        "@crate_index//:async-trait",
+        "@crate_index//:strum_macros",
+    ],
+)

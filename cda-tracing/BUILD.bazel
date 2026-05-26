@@ -1,0 +1,50 @@
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: 2025 The Contributors to Eclipse OpenSOVD (see CONTRIBUTORS)
+#
+# See the NOTICE file(s) distributed with this work for additional
+# information regarding copyright ownership.
+#
+# This program and the accompanying materials are made available under the
+# terms of the Apache License Version 2.0 which is available at
+# https://www.apache.org/licenses/LICENSE-2.0
+
+# cda-tracing: Logging, tracing, and OpenTelemetry setup.
+
+load("@rules_rust//cargo:defs.bzl", "cargo_build_script")
+load("@rules_rust//rust:defs.bzl", "rust_library")
+
+package(default_visibility = ["//visibility:public"])
+
+cargo_build_script(
+    name = "build_script",
+    srcs = ["build.rs"],
+    edition = "2024",
+    deps = [
+        "//cda-build",
+    ],
+)
+
+rust_library(
+    name = "cda-tracing",
+    srcs = glob(["src/**/*.rs"]),
+    crate_name = "cda_tracing",
+    edition = "2024",
+    deps = [
+        ":build_script",
+        "@crate_index//:nu-ansi-term",
+        "@crate_index//:opentelemetry",
+        "@crate_index//:opentelemetry-otlp",
+        "@crate_index//:opentelemetry-semantic-conventions",
+        "@crate_index//:opentelemetry_sdk",
+        "@crate_index//:schemars",
+        "@crate_index//:serde",
+        "@crate_index//:strip-ansi-escapes",
+        "@crate_index//:thiserror",
+        "@crate_index//:tokio",
+        "@crate_index//:tracing",
+        "@crate_index//:tracing-appender",
+        "@crate_index//:tracing-core",
+        "@crate_index//:tracing-opentelemetry",
+        "@crate_index//:tracing-subscriber",
+    ],
+)

@@ -1,0 +1,52 @@
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: 2025 The Contributors to Eclipse OpenSOVD (see CONTRIBUTORS)
+#
+# See the NOTICE file(s) distributed with this work for additional
+# information regarding copyright ownership.
+#
+# This program and the accompanying materials are made available under the
+# terms of the Apache License Version 2.0 which is available at
+# https://www.apache.org/licenses/LICENSE-2.0
+
+# cda-database: ECU database layer for loading/querying diagnostic data (ODX/PDX).
+
+load("@rules_rust//cargo:defs.bzl", "cargo_build_script")
+load("@rules_rust//rust:defs.bzl", "rust_library")
+
+package(default_visibility = ["//visibility:public"])
+
+cargo_build_script(
+    name = "build_script",
+    srcs = ["build.rs"],
+    edition = "2024",
+    deps = [
+        "//cda-build",
+        "@crate_index//:cargo_toml",
+        "@crate_index//:prost-build",
+        "@crate_index//:toml",
+    ],
+)
+
+rust_library(
+    name = "cda-database",
+    srcs = glob(["src/**/*.rs"]),
+    crate_name = "cda_database",
+    edition = "2024",
+    deps = [
+        ":build_script",
+        "//cda-interfaces",
+        "@crate_index//:bytes",
+        "@crate_index//:flatbuffers",
+        "@crate_index//:memmap2",
+        "@crate_index//:ouroboros",
+        "@crate_index//:prost",
+        "@crate_index//:schemars",
+        "@crate_index//:serde",
+        "@crate_index//:serde_json",
+        "@crate_index//:sha2",
+        "@crate_index//:tokio",
+        "@crate_index//:tracing",
+        "@crate_index//:uuid",
+        "@crate_index//:xz2",
+    ],
+)

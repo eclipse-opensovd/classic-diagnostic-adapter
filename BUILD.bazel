@@ -1,0 +1,44 @@
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: 2025 The Contributors to Eclipse OpenSOVD (see CONTRIBUTORS)
+#
+# See the NOTICE file(s) distributed with this work for additional
+# information regarding copyright ownership.
+#
+# This program and the accompanying materials are made available under the
+# terms of the Apache License Version 2.0 which is available at
+# https://www.apache.org/licenses/LICENSE-2.0
+
+# Root BUILD file for Classic Diagnostic Adapter.
+# Defines TLS backend config settings and a top-level binary alias.
+
+load("@bazel_skylib//rules:common_settings.bzl", "string_flag")
+
+package(default_visibility = ["//visibility:public"])
+
+# --- TLS backend selection ---
+# Controlled via .bazelrc: --//:tls_backend=openssl|mbedtls
+
+string_flag(
+    name = "tls_backend",
+    build_setting_default = "openssl",
+    values = [
+        "openssl",
+        "mbedtls",
+    ],
+)
+
+config_setting(
+    name = "use_openssl",
+    flag_values = {":tls_backend": "openssl"},
+)
+
+config_setting(
+    name = "use_mbedtls",
+    flag_values = {":tls_backend": "mbedtls"},
+)
+
+# --- Top-level alias to the CDA binary ---
+alias(
+    name = "opensovd-cda",
+    actual = "//cda-main:opensovd-cda",
+)

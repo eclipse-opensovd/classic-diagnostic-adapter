@@ -1,0 +1,37 @@
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: 2025 The Contributors to Eclipse OpenSOVD (see CONTRIBUTORS)
+#
+# See the NOTICE file(s) distributed with this work for additional
+# information regarding copyright ownership.
+#
+# This program and the accompanying materials are made available under the
+# terms of the Apache License Version 2.0 which is available at
+# https://www.apache.org/licenses/LICENSE-2.0
+
+# cda-health: Health check interface for monitoring service status.
+
+load("@rules_rust//rust:defs.bzl", "rust_library")
+
+package(default_visibility = ["//visibility:public"])
+
+rust_library(
+    name = "cda-health",
+    srcs = glob(["src/**/*.rs"]),
+    crate_name = "cda_health",
+    edition = "2024",
+    deps = [
+        "//cda-interfaces",
+        "//cda-sovd",
+        "@crate_index//:aide",
+        "@crate_index//:axum",
+        "@crate_index//:chrono",
+        "@crate_index//:futures",
+        "@crate_index//:schemars",
+        "@crate_index//:serde",
+        "@crate_index//:thiserror",
+        "@crate_index//:tokio",
+    ],
+    proc_macro_deps = [
+        "@crate_index//:async-trait",
+    ],
+)
