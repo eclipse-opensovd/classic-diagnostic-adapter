@@ -198,9 +198,9 @@ pub mod x {
         pub mod bulk_data {
             pub mod embedded_files {
                 pub mod get {
-                    use crate::{Items, sovd2uds::File};
+                    use crate::{Items, sovd2uds::BulkDataDescriptor};
 
-                    pub type Response = Items<File>;
+                    pub type Response = Items<BulkDataDescriptor>;
                     pub type Query = crate::IncludeSchemaQuery;
                 }
             }

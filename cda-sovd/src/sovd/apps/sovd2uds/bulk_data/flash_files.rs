@@ -37,11 +37,13 @@ fn file_name_to_id(file_name: &str) -> String {
     RE.replace_all(file_name, "_").to_string()
 }
 
-async fn process_directory(dir: PathBuf) -> Result<Vec<sovd_interfaces::sovd2uds::File>, ApiError> {
+async fn process_directory(
+    dir: PathBuf,
+) -> Result<Vec<sovd_interfaces::sovd2uds::BulkDataDescriptor>, ApiError> {
     fn process(
         dir: &PathBuf,
         relative_sub_dir: Option<&PathBuf>,
-    ) -> Vec<sovd_interfaces::sovd2uds::File> {
+    ) -> Vec<sovd_interfaces::sovd2uds::BulkDataDescriptor> {
         std::fs::read_dir(dir)
             .into_iter()
             .flat_map(|entries| entries.filter_map(Result::ok))
@@ -53,13 +55,14 @@ async fn process_directory(dir: PathBuf) -> Result<Vec<sovd_interfaces::sovd2uds
                         || entry.file_name().to_string_lossy().to_string(),
                         |rel| rel.join(entry.file_name()).to_string_lossy().to_string(),
                     );
-                    Some(vec![sovd_interfaces::sovd2uds::File {
+                    Some(vec![sovd_interfaces::sovd2uds::BulkDataDescriptor {
                         hash: None,
-                        hash_algorithm: Some(sovd_interfaces::sovd2uds::HashAlgorithm::None),
+                        hash_algorithm: None,
                         id: file_name_to_id(&file_name),
                         mimetype: mime::APPLICATION_OCTET_STREAM.essence_str().to_string(),
-                        size: metadata.len(),
-                        origin_path: file_name,
+                        size: Some(metadata.len()),
+                        origin_path: Some(file_name),
+                        revision: None,
                     }])
                 } else if file_type.is_dir() {
                     let path = entry.path();
@@ -136,13 +139,14 @@ pub(crate) fn docs_get(op: TransformOperation) -> TransformOperation {
         .response_with::<200, Json<Response>, _>(|res| {
             res.description("Successful response").example(Response {
                 path: Some("example/path/to/flash/files".into()),
-                files: vec![sovd_interfaces::sovd2uds::File {
+                files: vec![sovd_interfaces::sovd2uds::BulkDataDescriptor {
                     id: "example_file".to_string(),
                     mimetype: "application/octet-stream".to_string(),
-                    size: 1234,
+                    size: Some(1234),
                     hash: None,
-                    hash_algorithm: Some(sovd_interfaces::sovd2uds::HashAlgorithm::None),
-                    origin_path: "example/path/to/file.bin".to_string(),
+                    hash_algorithm: None,
+                    origin_path: Some("example/path/to/file.bin".to_string()),
+                    revision: None,
                 }],
                 schema: None,
             })

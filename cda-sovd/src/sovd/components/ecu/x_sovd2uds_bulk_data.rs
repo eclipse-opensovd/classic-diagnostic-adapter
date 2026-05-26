@@ -75,13 +75,14 @@ pub(crate) mod mdd_embedded_files {
                 .list()
                 .await
                 .iter()
-                .map(|(id, meta)| sovd_interfaces::sovd2uds::File {
+                .map(|(id, meta)| sovd_interfaces::sovd2uds::BulkDataDescriptor {
                     hash: None,
                     hash_algorithm: None,
                     id: id.clone(),
                     mimetype: content_type_from_meta(meta),
-                    size: meta.uncompressed_size,
-                    origin_path: meta.name.clone(),
+                    size: Some(meta.uncompressed_size),
+                    origin_path: Some(meta.name.clone()),
+                    revision: None,
                 })
                 .collect(),
             schema,
@@ -95,13 +96,14 @@ pub(crate) mod mdd_embedded_files {
             .response_with::<200, Json<sovd2uds::bulk_data::embedded_files::get::Response>, _>(
                 |res| {
                     res.example(sovd2uds::bulk_data::embedded_files::get::Response {
-                        items: vec![sovd_interfaces::sovd2uds::File {
+                        items: vec![sovd_interfaces::sovd2uds::BulkDataDescriptor {
                             id: "example_file".to_owned(),
                             mimetype: "application/octet-stream".to_owned(),
-                            size: 1234,
+                            size: Some(1234),
                             hash: None,
                             hash_algorithm: None,
-                            origin_path: "example/path/to/file".to_owned(),
+                            origin_path: Some("example/path/to/file".to_owned()),
+                            revision: None,
                         }],
                         schema: None,
                     })
