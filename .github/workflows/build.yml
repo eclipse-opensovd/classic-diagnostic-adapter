@@ -136,7 +136,7 @@ jobs:
 
   coverage:
     name: Coverage
-    uses: eclipse-opensovd/cicd-workflows/.github/workflows/coverage.yml@4116addc88b6c523bc6d729b1b4e198ccb04ce3d
+    uses: eclipse-opensovd/cicd-workflows/.github/workflows/coverage.yml@0568734739886482474b836b8d19ffebba40ed02
     with:
       rust-version: "1.88.0"
       cargo-extra-args: "--features integration-tests"
