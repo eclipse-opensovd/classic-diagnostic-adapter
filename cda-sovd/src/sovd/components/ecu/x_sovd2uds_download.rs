@@ -298,6 +298,13 @@ pub(crate) mod flash_transfer {
             .find(|file| file.id == body.id)
         {
             Some(file) => {
+                let Some(origin_path) = file.origin_path.as_deref() else {
+                    return ApiError::InternalServerError(Some(
+                        "origin_path not set for flash file".to_string(),
+                    ))
+                    .into_response();
+                };
+
                 let id = Uuid::new_v4().to_string();
                 let transfer = cda_interfaces::datatypes::DataTransferMetaData {
                     acknowledged_bytes: 0,
@@ -321,7 +328,7 @@ pub(crate) mod flash_transfer {
                                 .path
                                 .as_ref()
                                 .unwrap_or(&PathBuf::new())
-                                .join(&file.origin_path)
+                                .join(origin_path)
                                 .to_string_lossy(),
                             offset: body.offset,
                             length: body.length,

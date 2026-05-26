@@ -12,6 +12,21 @@
 
 pub mod sovd2uds {
     pub mod bulk_data {
+        use serde::{Deserialize, Serialize};
+
+        /// Response body for bulk-data list endpoints `BulkDataDescriptor` follows Table 298 shape
+        pub type BulkDataList = crate::Items<crate::sovd2uds::BulkDataDescriptor>;
+
+        /// A single item in a bulk-data creation response (Table 303 shape).
+        #[derive(Debug, Clone, Deserialize, Serialize, schemars::JsonSchema)]
+        pub struct BulkDataCreated {
+            /// Bulk-data identifier created by the SOVD server to identify the bulk-data.
+            pub id: String,
+        }
+
+        /// Response body for bulk-data creation (Table 303 shape).
+        pub type BulkDataCreatedList = crate::Items<BulkDataCreated>;
+
         pub mod flash_files {
             pub mod get {
                 pub type Response = crate::sovd2uds::FileList;
