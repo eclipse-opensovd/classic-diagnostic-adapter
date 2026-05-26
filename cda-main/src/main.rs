@@ -108,12 +108,7 @@ async fn main() -> Result<(), AppError> {
         return generate_config_cmd(output.as_ref());
     }
 
-    let mut config =
-        opensovd_cda_lib::config::load_config(args.config.as_deref()).unwrap_or_else(|e| {
-            println!("Failed to load configuration: {e}");
-            println!("Using default values");
-            opensovd_cda_lib::config::default_config()
-        });
+    let mut config = load_config_or_default(args.config.as_deref())?;
     config.validate_sanity()?;
 
     args.update_config(&mut config);
@@ -246,6 +241,31 @@ async fn main() -> Result<(), AppError> {
         .map_err(|e| AppError::RuntimeError(format!("Webserver task join error: {e}")))?;
 
     Ok(())
+}
+
+#[cfg(feature = "config-optional")]
+#[allow(clippy::unnecessary_wraps)] // signature must match the `not(feature)` variant
+fn load_config_or_default(config_path: Option<&str>) -> Result<Configuration, AppError> {
+    Ok(
+        opensovd_cda_lib::config::load_config(config_path).unwrap_or_else(|e| {
+            println!("Failed to load configuration: {e}");
+            println!("Using default values");
+            opensovd_cda_lib::config::default_config()
+        }),
+    )
+}
+
+/// Without `config-optional`, a missing or invalid configuration is a hard error.
+#[cfg(not(feature = "config-optional"))]
+fn load_config_or_default(config_path: Option<&str>) -> Result<Configuration, AppError> {
+    opensovd_cda_lib::config::load_config(config_path).map_err(|e| {
+        println!("Failed to load configuration: {e}");
+        println!(
+            "Provide a configuration file or build with the 'config-optional' feature to allow \
+             starting without one."
+        );
+        AppError::ConfigurationError(e)
+    })
 }
 
 fn generate_config_cmd(output: Option<&PathBuf>) -> Result<(), AppError> {
