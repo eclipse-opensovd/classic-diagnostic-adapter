@@ -46,6 +46,15 @@ pub struct Items<T> {
     pub schema: Option<schemars::Schema>,
 }
 
+impl<T> Default for Items<T> {
+    fn default() -> Self {
+        Self {
+            items: Vec::new(),
+            schema: None,
+        }
+    }
+}
+
 #[derive(Serialize, schemars::JsonSchema)]
 pub struct ResourceResponse {
     pub items: Vec<Resource>,
@@ -80,12 +89,12 @@ pub struct IncludeSchemaQuery {
 pub mod sovd2uds {
     use std::path::PathBuf;
 
-    use serde::Serialize;
+    use serde::{Deserialize, Serialize};
 
     #[derive(Serialize, schemars::JsonSchema)]
     pub struct FileList {
         #[serde(rename = "items")]
-        pub files: Vec<File>,
+        pub files: Vec<BulkDataDescriptor>,
         #[serde(skip_serializing)]
         pub path: Option<PathBuf>,
         #[schemars(skip)]
@@ -93,22 +102,33 @@ pub mod sovd2uds {
         pub schema: Option<schemars::Schema>,
     }
 
+    /// A bulk-data descriptor as defined by ISO 17978-3, Table 298.
     #[derive(Serialize, Debug, Clone, schemars::JsonSchema)]
-    pub struct File {
+    pub struct BulkDataDescriptor {
+        pub id: String,
+        pub mimetype: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        pub size: Option<u64>,
         #[serde(skip_serializing_if = "Option::is_none")]
         pub hash: Option<String>,
         #[serde(skip_serializing_if = "Option::is_none")]
         pub hash_algorithm: Option<HashAlgorithm>,
-        pub id: String,
-        pub mimetype: String,
-        pub size: u64,
-        #[serde(rename = "x-sovd2uds-OrigPath")]
-        pub origin_path: String,
+        #[serde(
+            rename = "x-sovd2uds-OrigPath",
+            skip_serializing_if = "Option::is_none"
+        )]
+        pub origin_path: Option<String>,
+        #[serde(
+            rename = "x-sovd2uds-revision",
+            skip_serializing_if = "Option::is_none"
+        )]
+        pub revision: Option<String>,
     }
-    #[derive(Serialize, Debug, Clone, schemars::JsonSchema)]
+
+    #[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq, schemars::JsonSchema)]
+    #[serde(rename_all = "lowercase")]
     pub enum HashAlgorithm {
-        None,
-        // todo: support hashing algorithms
+        Sha256,
     }
 }
 
