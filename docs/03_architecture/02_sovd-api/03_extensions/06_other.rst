@@ -24,3 +24,5 @@ ECU Variant Detection
     **Variant Detection Trigger**
 
     A POST on the path ``/components/{ecuName}`` must trigger a variant detection
+
+    .. uml:: /03_architecture/02_sovd-api/03_extensions/images/ecu_variant_detection.puml

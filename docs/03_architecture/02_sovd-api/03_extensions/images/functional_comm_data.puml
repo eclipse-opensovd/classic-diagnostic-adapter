@@ -1,0 +1,58 @@
+' SPDX-License-Identifier: Apache-2.0
+' SPDX-FileCopyrightText: 2026 The Contributors to Eclipse OpenSOVD (see CONTRIBUTORS)
+'
+' See the NOTICE file(s) distributed with this work for additional
+' information regarding copyright ownership.
+'
+' This program and the accompanying materials are made available under the
+' terms of the Apache License Version 2.0 which is available at
+' https://www.apache.org/licenses/LICENSE-2.0
+
+@startuml
+title Functional Communication -- Data Read
+
+participant Client
+participant "HTTP Server\n(Axum)" as HTTP
+participant "Security\nMiddleware" as SEC
+participant "Functional\nComm Handler" as HANDLER
+participant "Diagnostic\nKernel" as DIAG
+participant "UDS / DoIP" as COMM
+participant "ECUs\n(functional)" as ECUS
+
+Client -> HTTP : GET /functions/functionalgroups/{group}/data/{id}
+activate HTTP
+
+HTTP -> SEC : authenticate & authorize
+activate SEC
+SEC -> HTTP : OK
+deactivate SEC
+
+HTTP -> HANDLER : route to functional comm handler
+activate HANDLER
+
+HANDLER -> DIAG : read data (functional, service name)
+activate DIAG
+
+DIAG -> DIAG : resolve service from MDD\n(short name -> SID 22 + DID)
+
+DIAG -> COMM : send functional UDS request
+activate COMM
+COMM -> ECUS : DoIP (functional) -> UDS\nReadDataByIdentifier (22 {DID})
+activate ECUS
+ECUS -> COMM : responses from ECUs\n(62 {DID} {data})
+deactivate ECUS
+COMM -> DIAG : responses from all ECUs
+deactivate COMM
+
+DIAG -> DIAG : decode each ECU response\ninto named parameters
+DIAG -> HANDLER : decoded parameters per ECU
+deactivate DIAG
+
+HANDLER -> HANDLER : map to SOVD JSON response\nwith ECU name as key in "data"
+HANDLER -> HTTP : JSON body
+deactivate HANDLER
+
+HTTP -> Client : HTTP 200 OK\n{ "id": "...", "data": {\n  "ecu1": { ... },\n  "ecu2": { ... }\n}, "errors": [ ... ] }
+deactivate HTTP
+
+@enduml

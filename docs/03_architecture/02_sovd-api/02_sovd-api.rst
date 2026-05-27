@@ -129,6 +129,8 @@ Bulk Data
     .. note::
        IMPORTANT: All calls to the aforementioned endpoints can fail with reasonable HTTP status codes (e.g. 401, 403, 409, 501), depending on the context and state.
 
+    .. uml:: 02_sovd-api/images/bulk_data.puml
+
 Entities
 ^^^^^^^^
 
@@ -367,6 +369,12 @@ Configurations -- SID 22\ :sub:`16` & 2E\ :sub:`16`
        * - x-sovd2uds-serviceAbstract
          - Array of strings containing the SIDs and data identifier as a hexadecimal string (e.g. ["2E1234", "221234"])
 
+    The following diagrams illustrate the message flow for reading and writing configuration resources:
+
+    .. uml:: 02_sovd-api/images/configuration_read.puml
+
+    .. uml:: 02_sovd-api/images/configuration_write.puml
+
     .. note::
        ``x-sovd2uds-serviceAbstract`` is an extension to the standard.
 
@@ -556,6 +564,8 @@ Security -- SID 27\ :sub:`16`
     Works similarly to Session defined in the previous chapter. The names of the security access levels are
     determined through the state charts for the SID 27\ :sub:`16` services.
 
+    .. uml:: 02_sovd-api/images/security_access.puml
+
 
 Authentication -- SID 29\ :sub:`16`
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
@@ -572,6 +582,8 @@ Authentication -- SID 29\ :sub:`16`
 
     Diagnostic data descriptions have to specify the used services including the subfunction individually, so the
     request parameters can be converted into UDS payloads.
+
+    .. uml:: 02_sovd-api/images/authentication.puml
 
 
 Communication Control -- SID 28\ :sub:`16`
@@ -597,6 +609,8 @@ Communication Control -- SID 28\ :sub:`16`
     .. note::
        Other values are not supported.
 
+    .. uml:: 02_sovd-api/images/communication_control.puml
+
 
 DTC Setting -- SID 85\ :sub:`16`
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
@@ -615,6 +629,8 @@ DTC Setting -- SID 85\ :sub:`16`
 
     .. note::
        Other specific extensions to the values are not supported.
+
+    .. uml:: 02_sovd-api/images/dtc_setting.puml
 
 
 Faults -- SID 14\ :sub:`16` & 19\ :sub:`16`
@@ -760,6 +776,8 @@ Version Endpoint
 
     Both endpoint types are available immediately after the HTTP server starts and do not require
     any ECU communication.
+
+    .. uml:: 02_sovd-api/images/version_registration.puml
 
     .. note:: The current implementation only registers ``/data/version`` and ``/apps/sovd2uds/data/version``
 

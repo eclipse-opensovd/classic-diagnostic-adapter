@@ -14,7 +14,7 @@ Functional communication
 ------------------------
 
 .. arch:: Diagnostic description & Configuration
-    :id: arch~functional-communication-dd-configuration
+    :id: arch~sovd-api-functional-communication-dd-configuration
     :status: draft
 
     Information about the available functional groups, the available services in those groups, and their communication parameters must be provided in a separate diagnostic description.
@@ -33,17 +33,19 @@ API
 ^^^
 
 .. arch:: Functional Communication API
-    :id: arch~functional-communication-api
-    :links: arch~functional-communication-locks, arch~functional-communication-data, arch~functional-communication-operations, arch~functional-communication-modes
+    :id: arch~sovd-api-functional-communication-api
+    :links: arch~sovd-api-functional-communication-locks, arch~sovd-api-functional-communication-data, arch~sovd-api-functional-communication-operations, arch~sovd-api-functional-communication-modes
     :status: draft
 
     Functional group functionality - if available - must be available in the ``/functions/functionalgroups/{group-name}`` path.
 
     Within that path, a standardized resource collection (chapter 5.4.2 in ISO/DIS 17978-3) must be available, with the linked semantics.
 
+    .. uml:: /03_architecture/02_sovd-api/03_extensions/images/functional_comm_api.puml
+
 
 .. arch:: Functional Communication ECU-Lock behavior
-    :id: arch~functional-communication-locks
+    :id: arch~sovd-api-functional-communication-locks
     :status: draft
 
     Locking a functional group will start sending functional Tester Presents to the functional DoIP addresses of all DoIP Entities, and stop sending non-functional Tester Presents.
@@ -52,9 +54,11 @@ API
 
     There can be an option to restore the previous ECU locks (and their Tester Presents).
 
+    .. uml:: /03_architecture/02_sovd-api/03_extensions/images/functional_comm_locks.puml
+
 
 .. arch:: Functional Communication - Data
-    :id: arch~functional-communication-data
+    :id: arch~sovd-api-functional-communication-data
     :status: draft
 
     **Data**
@@ -66,9 +70,11 @@ API
     .. note::
        The content-type ``application/octet-stream`` is only supported for requests.
 
+    .. uml:: /03_architecture/02_sovd-api/03_extensions/images/functional_comm_data.puml
+
 
 .. arch:: Functional Communication - Operations
-    :id: arch~functional-communication-operations
+    :id: arch~sovd-api-functional-communication-operations
     :status: draft
 
     Same principle as with data, except that the top-level element name is ``parameters``.
@@ -76,9 +82,11 @@ API
     .. note::
        The content-type ``application/octet-stream`` is only supported for requests.
 
+    .. uml:: /03_architecture/02_sovd-api/03_extensions/images/functional_comm_operations.puml
+
 
 .. arch:: Functional Communication - Modes
-    :id: arch~functional-communication-modes
+    :id: arch~sovd-api-functional-communication-modes
     :status: draft
 
     The following modes must be supported for functional groups when the underlying diagnostic description contains them:
@@ -86,3 +94,5 @@ API
      1. session
      2. dtcsetting
      3. commctrl
+
+    .. uml:: /03_architecture/02_sovd-api/03_extensions/images/functional_comm_modes.puml

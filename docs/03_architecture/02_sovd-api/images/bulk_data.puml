@@ -1,0 +1,96 @@
+' SPDX-License-Identifier: Apache-2.0
+' SPDX-FileCopyrightText: 2026 The Contributors to Eclipse OpenSOVD (see CONTRIBUTORS)
+'
+' See the NOTICE file(s) distributed with this work for additional
+' information regarding copyright ownership.
+'
+' This program and the accompanying materials are made available under the
+' terms of the Apache License Version 2.0 which is available at
+' https://www.apache.org/licenses/LICENSE-2.0
+
+@startuml
+title Bulk-Data Endpoints
+
+participant Client
+participant "HTTP Server\n(Axum)" as HTTP
+participant "Security\nMiddleware" as SEC
+participant "Bulk-Data\nHandler" as HANDLER
+participant "File System /\nStorage" as FS
+
+== List entries ==
+
+Client -> HTTP : GET /bulk-data/{category}
+activate HTTP
+HTTP -> SEC : authenticate & authorize
+activate SEC
+SEC -> HTTP : OK
+deactivate SEC
+HTTP -> HANDLER : route to bulk-data handler
+activate HANDLER
+HANDLER -> FS : list entries in category
+activate FS
+FS -> HANDLER : entries with IDs and metadata
+deactivate FS
+HANDLER -> HTTP : JSON body
+deactivate HANDLER
+HTTP -> Client : HTTP 200 OK\n{ "items": [ { "id": "...", ... }, ... ] }
+deactivate HTTP
+
+== Download entry ==
+
+Client -> HTTP : GET /bulk-data/{category}/{entry-id}
+activate HTTP
+HTTP -> SEC : authenticate & authorize
+activate SEC
+SEC -> HTTP : OK
+deactivate SEC
+HTTP -> HANDLER : route to bulk-data handler
+activate HANDLER
+HANDLER -> FS : read entry data
+activate FS
+FS -> HANDLER : binary data
+deactivate FS
+HANDLER -> HTTP : binary response\n(MIME type determined by content)
+deactivate HANDLER
+HTTP -> Client : HTTP 200 OK\nContent-Type: <mime-type>\n<binary data>
+deactivate HTTP
+
+== Upload entry ==
+
+Client -> HTTP : POST /bulk-data/{category}\nContent-Disposition: form-data\n<binary data>
+activate HTTP
+HTTP -> SEC : authenticate & authorize
+activate SEC
+SEC -> HTTP : OK
+deactivate SEC
+HTTP -> HANDLER : route to bulk-data handler
+activate HANDLER
+HANDLER -> FS : store data with metadata
+activate FS
+FS -> HANDLER : stored (entry-id)
+deactivate FS
+HANDLER -> HTTP : JSON body
+deactivate HANDLER
+HTTP -> Client : HTTP 201 Created\n{ "id": "<entry-id>" }
+deactivate HTTP
+
+== Delete entry ==
+
+Client -> HTTP : DELETE /bulk-data/{category}/{entry-id}
+activate HTTP
+HTTP -> SEC : authenticate & authorize
+activate SEC
+SEC -> HTTP : OK
+deactivate SEC
+HTTP -> HANDLER : route to bulk-data handler
+activate HANDLER
+HANDLER -> FS : delete entry
+activate FS
+FS -> HANDLER : deleted
+deactivate FS
+HANDLER -> HTTP : success
+deactivate HANDLER
+HTTP -> Client : HTTP 204 No Content
+deactivate HTTP
+
+@enduml

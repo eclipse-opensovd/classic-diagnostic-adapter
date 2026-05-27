@@ -1,0 +1,44 @@
+' SPDX-License-Identifier: Apache-2.0
+' SPDX-FileCopyrightText: 2026 The Contributors to Eclipse OpenSOVD (see CONTRIBUTORS)
+'
+' See the NOTICE file(s) distributed with this work for additional
+' information regarding copyright ownership.
+'
+' This program and the accompanying materials are made available under the
+' terms of the Apache License Version 2.0 which is available at
+' https://www.apache.org/licenses/LICENSE-2.0
+
+@startuml
+title Communication Parameters -- Retrieve without Lock
+
+participant Client
+participant "HTTP Server\n(Axum)" as HTTP
+participant "Security\nMiddleware" as SEC
+participant "ComParam\nHandler" as HANDLER
+participant "ComParam\nManager" as CPMGR
+
+Client -> HTTP : GET /components/{ecu}/operations/comparam?todo
+activate HTTP
+
+HTTP -> SEC : authenticate & authorize
+activate SEC
+SEC -> HTTP : OK
+deactivate SEC
+
+HTTP -> HANDLER : route to comparam handler
+activate HANDLER
+
+HANDLER -> HANDLER : no lock required\nfor read-only access
+
+HANDLER -> CPMGR : get current parameters
+activate CPMGR
+CPMGR -> HANDLER : current parameters
+deactivate CPMGR
+
+HANDLER -> HTTP : JSON body
+deactivate HANDLER
+
+HTTP -> Client : HTTP 200 OK\n{ "item": { "id": "comparam", ... },\n"parameters": { "CP_P6Max": { ... }, ... } }
+deactivate HTTP
+
+@enduml
