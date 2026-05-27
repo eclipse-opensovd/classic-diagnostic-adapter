@@ -80,7 +80,7 @@ impl std::fmt::Display for UdsPayloadData {
                 let dbg = format!("{hash_map:?}");
                 write!(f, "ParameterMap: ")?;
                 if dbg.len() > 40 {
-                    write!(f, "{} ...", &dbg[..40])
+                    write!(f, "{} ...", dbg.get(..40).unwrap_or(&dbg))
                 } else {
                     write!(f, "{dbg}")
                 }
