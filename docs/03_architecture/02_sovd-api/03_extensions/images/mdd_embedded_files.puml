@@ -1,0 +1,70 @@
+' SPDX-License-Identifier: Apache-2.0
+' SPDX-FileCopyrightText: 2026 The Contributors to Eclipse OpenSOVD (see CONTRIBUTORS)
+'
+' See the NOTICE file(s) distributed with this work for additional
+' information regarding copyright ownership.
+'
+' This program and the accompanying materials are made available under the
+' terms of the Apache License Version 2.0 which is available at
+' https://www.apache.org/licenses/LICENSE-2.0
+
+@startuml
+title MDD Embedded Files
+
+participant Client
+participant "HTTP Server\n(Axum)" as HTTP
+participant "Security\nMiddleware" as SEC
+participant "Embedded Files\nHandler" as HANDLER
+participant "Diagnostic\nKernel" as DIAG
+
+== List embedded files ==
+
+Client -> HTTP : GET /components/{ecu}/x-sovd2uds-bulk-data/mdd-embedded-files
+activate HTTP
+
+HTTP -> SEC : authenticate & authorize
+activate SEC
+SEC -> HTTP : OK
+deactivate SEC
+
+HTTP -> HANDLER : route to embedded files handler
+activate HANDLER
+
+HANDLER -> DIAG : list embedded files (variant)
+activate DIAG
+DIAG -> DIAG : read file metadata\nfrom MDD
+DIAG -> HANDLER : list of file entries with metadata
+deactivate DIAG
+
+HANDLER -> HTTP : JSON body
+deactivate HANDLER
+
+HTTP -> Client : HTTP 200 OK\n{ "items": [ { "id": "...", ... }, ... ] }
+deactivate HTTP
+
+== Download embedded file ==
+
+Client -> HTTP : GET /components/{ecu}/x-sovd2uds-bulk-data/mdd-embedded-files/{id}
+activate HTTP
+
+HTTP -> SEC : authenticate & authorize
+activate SEC
+SEC -> HTTP : OK
+deactivate SEC
+
+HTTP -> HANDLER : route to embedded files handler
+activate HANDLER
+
+HANDLER -> DIAG : get embedded file data (id, variant)
+activate DIAG
+DIAG -> DIAG : extract file content\nfrom MDD
+DIAG -> HANDLER : binary file data
+deactivate DIAG
+
+HANDLER -> HTTP : binary response
+deactivate HANDLER
+
+HTTP -> Client : HTTP 200 OK\nContent-Type: <mime-type>\n<binary data>
+deactivate HTTP
+
+@enduml

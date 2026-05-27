@@ -518,7 +518,7 @@ Functional communication
 
 .. req:: Functional Communication
     :id: req~sovd-api-functional-communication
-    :links: arch~functional-communication-dd-configuration
+    :links: arch~sovd-api-functional-communication-dd-configuration
     :status: draft
 
     Functional communications needs to be possible. A standardized resource collection must be made available within the

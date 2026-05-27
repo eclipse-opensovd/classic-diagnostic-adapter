@@ -1,0 +1,95 @@
+' SPDX-License-Identifier: Apache-2.0
+' SPDX-FileCopyrightText: 2026 The Contributors to Eclipse OpenSOVD (see CONTRIBUTORS)
+'
+' See the NOTICE file(s) distributed with this work for additional
+' information regarding copyright ownership.
+'
+' This program and the accompanying materials are made available under the
+' terms of the Apache License Version 2.0 which is available at
+' https://www.apache.org/licenses/LICENSE-2.0
+
+@startuml
+title Communication Parameters -- Operations with Lock
+
+participant Client
+participant "HTTP Server\n(Axum)" as HTTP
+participant "Security\nMiddleware" as SEC
+participant "ComParam\nHandler" as HANDLER
+participant "ComParam\nManager" as CPMGR
+
+== Create execution (POST) ==
+
+Client -> HTTP : POST /components/{ecu}/operations/comparam/executions\n{ "parameters": { ... } }
+activate HTTP
+
+HTTP -> SEC : authenticate & authorize
+activate SEC
+SEC -> HTTP : OK
+deactivate SEC
+
+HTTP -> HANDLER : route to comparam handler
+activate HANDLER
+
+HANDLER -> HANDLER : verify lock on entity
+
+HANDLER -> CPMGR : create execution\n(optionally apply parameters)
+activate CPMGR
+CPMGR -> CPMGR : store original parameters\nfor rollback
+CPMGR -> CPMGR : apply new parameters\n(if provided)
+CPMGR -> HANDLER : execution id
+deactivate CPMGR
+
+HANDLER -> HTTP : JSON body
+deactivate HANDLER
+
+HTTP -> Client : HTTP 202 Accepted\n{ "id": "<execution-id>", ... }
+deactivate HTTP
+
+== Retrieve parameters (GET) ==
+
+Client -> HTTP : GET /components/{ecu}/operations/comparam/executions/{id}
+activate HTTP
+HTTP -> HANDLER : route to comparam handler
+activate HANDLER
+HANDLER -> CPMGR : get current parameters
+activate CPMGR
+CPMGR -> HANDLER : current parameters
+deactivate CPMGR
+HANDLER -> HTTP : JSON body
+deactivate HANDLER
+HTTP -> Client : HTTP 200 OK\n{ "parameters": { ... } }
+deactivate HTTP
+
+== Modify parameters (PUT) ==
+
+Client -> HTTP : PUT /components/{ecu}/operations/comparam/executions/{id}\n{ "parameters": { ... } }
+activate HTTP
+HTTP -> HANDLER : route to comparam handler
+activate HANDLER
+HANDLER -> CPMGR : update parameters
+activate CPMGR
+CPMGR -> CPMGR : apply new parameter values
+CPMGR -> HANDLER : confirmed
+deactivate CPMGR
+HANDLER -> HTTP : success
+deactivate HANDLER
+HTTP -> Client : HTTP 200 OK
+deactivate HTTP
+
+== Reset parameters (DELETE) ==
+
+Client -> HTTP : DELETE /components/{ecu}/operations/comparam/executions/{id}
+activate HTTP
+HTTP -> HANDLER : route to comparam handler
+activate HANDLER
+HANDLER -> CPMGR : delete execution
+activate CPMGR
+CPMGR -> CPMGR : restore original parameters
+CPMGR -> HANDLER : reset confirmed
+deactivate CPMGR
+HANDLER -> HTTP : success
+deactivate HANDLER
+HTTP -> Client : HTTP 204 No Content
+deactivate HTTP
+
+@enduml
