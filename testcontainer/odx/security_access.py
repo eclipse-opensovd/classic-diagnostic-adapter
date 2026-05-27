@@ -162,8 +162,8 @@ def add_send_key_service(
     dlr.requests.append(request)
 
     response = Response(
-        odx_id=derived_id(dlr, f"PR.PR_RequestSeed_Level_{level}"),
-        short_name=f"PR_RequestSeed_Level_{level}",
+        odx_id=derived_id(dlr, f"PR.PR_SendKey_Level_{level}"),
+        short_name=f"PR_SendKey_Level_{level}",
         parameters=NamedItemList(
             [
                 sid_parameter_pr(0x27 + 0x40),

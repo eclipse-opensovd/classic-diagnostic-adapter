@@ -306,7 +306,6 @@ pub(crate) async fn delete_fault_with_scope(
 pub(crate) fn compute_security_key(seed_response: &str) -> String {
     seed_response
         .split_whitespace()
-        .skip(3)
         .filter_map(|s| u8::from_str_radix(s.trim_start_matches("0x"), 16).ok())
         .map(|byte| byte.wrapping_add(13) as i8)
         .map(|byte| format!("0x{:02x}", byte as u8))

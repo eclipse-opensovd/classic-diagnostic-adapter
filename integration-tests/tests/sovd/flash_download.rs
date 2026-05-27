@@ -124,6 +124,12 @@ async fn test_flash_download_transfer_sequence() {
     .unwrap()
     .unwrap();
 
+    // Verify that the seed payload is the deterministic sequence 0x00..0x07
+    assert_eq!(
+        seed_response.seed.request_seed, "0x00 0x01 0x02 0x03 0x04 0x05 0x06 0x07",
+        "Expected deterministic seed payload from ECU sim"
+    );
+
     let key = compute_security_key(&seed_response.seed.request_seed);
 
     let key_result: sovd_interfaces::components::ecu::modes::security_and_session::put::Response<
