@@ -238,14 +238,18 @@ pub fn decode_hex(value: &str) -> Result<Vec<u8>, DiagServiceError> {
             "Non-hex character found".to_owned(),
         ));
     }
+
     let value = if value.len().is_multiple_of(2) {
         value
     } else {
-        &format!(
-            "{}0{}",
-            &value[..value.len().saturating_sub(1)],
-            &value[value.len().saturating_sub(1)..]
-        )
+        // Odd length: pad the last character with a leading '0'
+        let first_part = value.get(..value.len().saturating_sub(1)).ok_or_else(|| {
+            DiagServiceError::ParameterConversionError("Invalid hex string length".to_owned())
+        })?;
+        let last_char = value.get(value.len().saturating_sub(1)..).ok_or_else(|| {
+            DiagServiceError::ParameterConversionError("Invalid hex string length".to_owned())
+        })?;
+        &format!("{first_part}0{last_char}")
     };
 
     hex::decode(value).map_err(|e| {
@@ -361,7 +365,10 @@ pub fn set_bit_checked(
 #[inline]
 #[must_use]
 pub fn starts_with_ignore_ascii_case(text: &str, prefix: &str) -> bool {
-    text.len() >= prefix.len() && text[..prefix.len()].eq_ignore_ascii_case(prefix)
+    text.len() >= prefix.len()
+        && text
+            .get(..prefix.len())
+            .is_some_and(|s| s.eq_ignore_ascii_case(prefix))
 }
 
 /// Fast ASCII-only case-insensitive substring check without allocations.
@@ -386,7 +393,9 @@ pub fn contains_ignore_ascii_case(text: &str, needle: &str) -> bool {
 #[must_use]
 pub fn ends_with_ignore_ascii_case(text: &str, suffix: &str) -> bool {
     text.len() >= suffix.len()
-        && text[text.len().saturating_sub(suffix.len())..].eq_ignore_ascii_case(suffix)
+        && text
+            .get(text.len().saturating_sub(suffix.len())..)
+            .is_some_and(|s| s.eq_ignore_ascii_case(suffix))
 }
 
 /// Tries to extract the SID from positive and negative responses
@@ -478,11 +487,54 @@ mod tests {
     }
 
     #[test]
-    fn test_decode_hex() {
-        let result = decode_hex("A3F").unwrap();
-        assert_eq!(result, vec![0xA3, 0x0F]);
+    fn test_decode_hex_even_length() {
         let result = decode_hex("0A3F").unwrap();
         assert_eq!(result, vec![0x0A, 0x3F]);
+
+        let result = decode_hex("ABCD").unwrap();
+        assert_eq!(result, vec![0xAB, 0xCD]);
+    }
+
+    #[test]
+    fn test_decode_hex_odd_length() {
+        // Odd length: last char gets padded with leading '0'
+        // "A3F" -> "A30F" -> [0xA3, 0x0F]
+        let result = decode_hex("A3F").unwrap();
+        assert_eq!(result, vec![0xA3, 0x0F]);
+
+        let result = decode_hex("F").unwrap();
+        assert_eq!(result, vec![0x0F]);
+    }
+
+    #[test]
+    fn test_decode_hex_case_insensitive() {
+        let result = decode_hex("abcd").unwrap();
+        assert_eq!(result, vec![0xAB, 0xCD]);
+
+        let result = decode_hex("AbCd").unwrap();
+        assert_eq!(result, vec![0xAB, 0xCD]);
+    }
+
+    #[test]
+    fn test_decode_hex_empty() {
+        let result = decode_hex("").unwrap();
+        assert_eq!(result, Vec::<u8>::new());
+    }
+
+    #[test]
+    fn test_decode_hex_invalid_chars() {
+        assert!(decode_hex("G123").is_err());
+        assert!(decode_hex("12 34").is_err());
+        assert!(decode_hex("0x10").is_err());
+        assert!(decode_hex("12-34").is_err());
+    }
+
+    #[test]
+    fn test_decode_hex_boundary_values() {
+        let result = decode_hex("00").unwrap();
+        assert_eq!(result, vec![0x00]);
+        let result = decode_hex("FF").unwrap();
+        assert_eq!(result, vec![0xFF]);
     }
 
     #[test]

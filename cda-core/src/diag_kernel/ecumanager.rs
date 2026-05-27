@@ -8857,8 +8857,11 @@ mod tests {
         if let ParameterTypeMetadata::CodedConst { coded_value } = &did_param.param_type {
             // Verify the coded value can be parsed as a DID
             // "0xF190" should parse to 61840
-            let did_value = if coded_value.starts_with("0x") || coded_value.starts_with("0X") {
-                u16::from_str_radix(&coded_value[2..], 16).ok()
+            let did_value = if let Some(hex_part) = coded_value
+                .strip_prefix("0x")
+                .or_else(|| coded_value.strip_prefix("0X"))
+            {
+                u16::from_str_radix(hex_part, 16).ok()
             } else {
                 coded_value.parse::<u16>().ok()
             };

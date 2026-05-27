@@ -3046,7 +3046,11 @@ fn sae_to_dtc_code(sae_dtc: &str) -> Result<DtcCode, DiagServiceError> {
         }
     };
 
-    let hex_part = &sae_dtc[2..];
+    let hex_part = sae_dtc.get(2..).ok_or_else(|| {
+        DiagServiceError::InvalidRequest(format!(
+            "Invalid SAE dtc code '{sae_dtc}', missing hex part"
+        ))
+    })?;
     let code = DtcCode::from_str_radix(hex_part, 16).map_err(|_| {
         DiagServiceError::InvalidRequest(format!(
             "Invalid hex characters in SAE dtc code '{sae_dtc}'"
@@ -3094,5 +3098,106 @@ fn check_sd_sdg_recursive(expected: &SdBoolMappings, sd_sdg: &SdSdg) -> bool {
         SdSdg::Sdg { sdgs, .. } => sdgs
             .iter()
             .any(|sdsdg| check_sd_sdg_recursive(expected, sdsdg)),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    //Tests for SAE/ISO Diagnostic Trouble Code (DTC) conversion. (https://autodtcs.com/codes/#google_vignette)
+    //
+    // System
+    // 00 - Powertrain (P)
+    // 01 - Chassis (C)
+    // 10 - Body (B)
+    // 11 - Network Communications (U)
+    //
+    // Group:
+    // 00 - SAE/ISO Controlled (0)
+    // 01 - Manufacturer Controlled (1)
+    // 10 - For (P) SAE/ISO / Rest Manufacturer Controlled (2)
+    // 11 - SAE/ISO Controlled (3)
+    //
+    // You'll see bitfield shifts in some of the expected values below. That's because
+    // `sae_to_dtc_code` packs its result as `(system << 22) | (group << 20) | code`,
+    // so the system and group bits live at fixed positions in the u32. We rebuild the
+    // expected value the same way to make sure each field lands in the right slot.
+    // This allows us to compare the expected result with the received response
+
+    use super::*;
+
+    #[test]
+    fn test_sae_to_dtc_code_powertrain() {
+        // P0420 - "Catalyst System Efficiency Below Threshold (Bank 1)"
+        // Format: "P000420" -> system=0 (P), group=0, hex=0x00420
+        assert_eq!(sae_to_dtc_code("P000420").unwrap(), 0x00420);
+
+        // P0301 - "Cylinder 1 Misfire Detected"
+        assert_eq!(sae_to_dtc_code("P000301").unwrap(), 0x00301);
+    }
+
+    #[test]
+    fn test_sae_to_dtc_code_chassis() {
+        // C0035 - "Left Front Wheel Speed Sensor Circuit"
+        // Format: "C000035" -> system=1 (C), group=0, hex=0x00035
+        assert_eq!(sae_to_dtc_code("C000035").unwrap(), (1u32 << 22) | 0x00035);
+    }
+
+    #[test]
+    fn test_sae_to_dtc_code_body_generic() {
+        // B0001 - "Driver Frontal Stage 1 Deployment Control"
+        // Extended format: "B000001" -> system=2 (B), group=0, hex=0x00001
+        assert_eq!(sae_to_dtc_code("B000001").unwrap(), (2u32 << 22) | 0x00001);
+    }
+
+    #[test]
+    fn test_sae_to_dtc_code_body_manufacturer() {
+        // B1000 - Manufacturer-specific Body code (e.g., "ECU Defective")
+        // Extended format: "B100000" -> system=2 (B), group=1, hex=0x00000
+        assert_eq!(
+            sae_to_dtc_code("B100000").unwrap(),
+            (2u32 << 22) | (1u32 << 20)
+        );
+    }
+
+    #[test]
+    fn test_sae_to_dtc_code_network() {
+        // U0001 - "High Speed CAN Communication Bus"
+        // Format: "U000001" -> system=3 (U), group=0, hex=0x00001
+        assert_eq!(sae_to_dtc_code("U000001").unwrap(), (3u32 << 22) | 0x00001);
+    }
+
+    #[test]
+    fn test_sae_to_dtc_code_lowercase() {
+        // Function should handle lowercase input (calls .to_lowercase() internally)
+        // P0420 in lowercase
+        assert_eq!(sae_to_dtc_code("p000420").unwrap(), 0x00420);
+    }
+
+    #[test]
+    fn test_sae_to_dtc_code_invalid_length() {
+        // Standard 5-char SAE format is too short for this function
+        assert!(sae_to_dtc_code("P0420").is_err());
+        // Too long
+        assert!(sae_to_dtc_code("P00042000").is_err());
+        // Empty
+        assert!(sae_to_dtc_code("").is_err());
+    }
+
+    #[test]
+    fn test_sae_to_dtc_code_invalid_system() {
+        // 'X' is not a valid system letter (must be P/C/B/U)
+        assert!(sae_to_dtc_code("X000420").is_err());
+    }
+
+    #[test]
+    fn test_sae_to_dtc_code_invalid_group() {
+        // '9' is not a valid group digit (must be 0-3)
+        assert!(sae_to_dtc_code("P900420").is_err());
+    }
+
+    #[test]
+    fn test_sae_to_dtc_code_invalid_hex() {
+        // 'Z' is not a valid hex character
+        assert!(sae_to_dtc_code("P00042Z").is_err());
     }
 }
