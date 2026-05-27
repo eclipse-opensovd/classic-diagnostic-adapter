@@ -45,7 +45,7 @@ jobs:
           # The action queries the GitHub API to fetch releases data,
           # to avoid rate limiting, passing the default token.
           repo-token: ${{ secrets.GITHUB_TOKEN }}
-      - name: Format and Clippy - Stable toolchain
+      - name: Format and Clippy - Stable toolchain #TODO
         uses: eclipse-opensovd/cicd-workflows/rust-lint-and-format-action@0568734739886482474b836b8d19ffebba40ed02
         with:
           toolchain: 1.88.0
