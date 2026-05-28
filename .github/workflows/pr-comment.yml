@@ -22,8 +22,9 @@ on:
 jobs:
   post:
     if: github.event.workflow_run.event == 'pull_request'
-    uses: eclipse-opensovd/cicd-workflows/.github/workflows/post-pr-comments.yml@79d646fae2da95f76eef7463899add4846859a74
+    uses: eclipse-opensovd/cicd-workflows/.github/workflows/post-pr-comments.yml@685151a2a184d4967bf4c75e02b54947938559e3
     with:
       run-id: ${{ github.event.workflow_run.id }}
     permissions:
+      actions: read
       pull-requests: write
