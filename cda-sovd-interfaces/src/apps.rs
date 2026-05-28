@@ -12,24 +12,88 @@
 
 pub mod sovd2uds {
     pub mod bulk_data {
-        use serde::{Deserialize, Serialize};
-
-        /// Response body for bulk-data list endpoints `BulkDataDescriptor` follows Table 298 shape
-        pub type BulkDataList = crate::Items<crate::sovd2uds::BulkDataDescriptor>;
-
-        /// A single item in a bulk-data creation response (Table 303 shape).
-        #[derive(Debug, Clone, Deserialize, Serialize, schemars::JsonSchema)]
-        pub struct BulkDataCreated {
-            /// Bulk-data identifier created by the SOVD server to identify the bulk-data.
-            pub id: String,
-        }
-
-        /// Response body for bulk-data creation (Table 303 shape).
-        pub type BulkDataCreatedList = crate::Items<BulkDataCreated>;
+        pub use cda_interfaces::runtime_update_api::{
+            BulkDataCreated, BulkDataCreatedList, BulkDataList,
+        };
 
         pub mod flash_files {
             pub mod get {
                 pub type Response = crate::sovd2uds::FileList;
+            }
+        }
+
+        pub mod runtimefiles {
+            pub use cda_interfaces::runtime_update_api::{
+                ExecutionMode, ExecutionStatus, RuntimeFilesQuery, UpdateExecution,
+            };
+
+            /// Request body for an execution.
+            #[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+            pub struct ExecutionRequest {
+                /// The operation to perform on the staged runtime files.
+                pub mode: ExecutionMode,
+            }
+
+            /// The discriminant of an execution's status without the inner payload.
+            #[derive(Debug, serde::Serialize, schemars::JsonSchema)]
+            #[serde(rename_all = "lowercase")]
+            pub enum ExecutionStatusKind {
+                Running,
+                Completed,
+                Failed,
+            }
+
+            /// Response body returned by `POST /executions`.
+            #[derive(Debug, serde::Serialize, schemars::JsonSchema)]
+            pub struct ExecutionCreatedResponse {
+                /// Unique execution identifier assigned by the server.
+                pub id: String,
+            }
+
+            /// Response body returned by `GET /executions/{id}`.
+            #[derive(Debug, serde::Serialize, schemars::JsonSchema)]
+            pub struct ExecutionResponse {
+                /// Unique execution identifier.
+                pub id: String,
+                /// The operation that was requested.
+                pub mode: ExecutionMode,
+                /// Current lifecycle state of the execution.
+                pub status: ExecutionStatusKind,
+                /// Human-readable failure description, present only when `status` is `failed`.
+                #[serde(skip_serializing_if = "Option::is_none")]
+                pub reason: Option<String>,
+                #[schemars(skip)]
+                #[serde(skip_serializing_if = "Option::is_none")]
+                pub schema: Option<schemars::Schema>,
+            }
+
+            /// Response body returned by `GET /executions`.
+            #[derive(Debug, serde::Serialize, schemars::JsonSchema)]
+            pub struct ExecutionListResponse {
+                pub items: Vec<ExecutionResponse>,
+                #[schemars(skip)]
+                #[serde(skip_serializing_if = "Option::is_none")]
+                pub schema: Option<schemars::Schema>,
+            }
+
+            /// Query parameters for the executions list endpoint.
+            pub type ExecutionsQuery = crate::IncludeSchemaQuery;
+
+            impl From<UpdateExecution> for ExecutionResponse {
+                fn from(exec: UpdateExecution) -> Self {
+                    let (status, reason) = match exec.status {
+                        ExecutionStatus::Running => (ExecutionStatusKind::Running, None),
+                        ExecutionStatus::Completed => (ExecutionStatusKind::Completed, None),
+                        ExecutionStatus::Failed(msg) => (ExecutionStatusKind::Failed, Some(msg)),
+                    };
+                    Self {
+                        id: exec.id,
+                        mode: exec.mode,
+                        status,
+                        reason,
+                        schema: None,
+                    }
+                }
             }
         }
     }

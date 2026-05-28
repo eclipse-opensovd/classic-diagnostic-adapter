@@ -27,6 +27,7 @@ members = [
   "cda-main",
   "cda-tracing",
   "cda-plugin-security",
+  "cda-plugin-runtime-update",
   "cda-health",
   "cda-extra",
   "cda-storage",
@@ -45,6 +46,7 @@ cda-comm-doip = { path = "cda-comm-doip" }
 cda-comm-uds = { path = "cda-comm-uds" }
 cda-database = { path = "cda-database" }
 cda-plugin-security = { path = "cda-plugin-security" }
+cda-plugin-runtime-update = { path = "cda-plugin-runtime-update" }
 cda-sovd = { path = "cda-sovd" }
 cda-tracing = { path = "cda-tracing" }
 cda-health = { path = "cda-health" }
@@ -97,6 +99,7 @@ crc32fast = "1.4"
 foldhash = "0.2.0"
 memmap2 = "0.9"
 mockall = "0.14.0"
+tempfile = "3"
 sha2 = "0.10"
 rkyv = { version = "0.8.16", default-features = false, features = [
   "std",

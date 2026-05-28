@@ -58,7 +58,9 @@ mod local_collection;
 mod local_storage;
 mod paths;
 pub(crate) mod recovery;
+pub mod storage_seed;
 /// Write-ahead log utilities. Exposed publicly for use in recovery tests.
 pub mod wal;
 
+pub use local_collection::LocalCollection;
 pub use local_storage::LocalStorage;

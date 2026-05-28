@@ -25,9 +25,13 @@ pub enum StorageError {
     #[error("Permission denied: {0}")]
     PermissionDenied(String),
 
-    /// A transaction-related error occurred (e.g., a transaction is already active).
-    #[error("Transaction error: {0}")]
-    TransactionError(String),
+    /// Another transaction is already active (contention).
+    #[error("Transaction busy: another transaction is already active")]
+    TransactionBusy,
+
+    /// A logical conflict within a transaction (e.g., duplicate collection).
+    #[error("Transaction conflict: {0}")]
+    TransactionConflict(String),
 
     /// The storage backend has no space left for the requested operation.
     #[error("No space left: {0}")]

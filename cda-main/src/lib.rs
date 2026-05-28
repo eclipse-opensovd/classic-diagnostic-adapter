@@ -10,20 +10,16 @@
  * https://www.apache.org/licenses/LICENSE-2.0
  */
 
-use std::{fs::ReadDir, future::Future, path::PathBuf, sync::Arc};
+use std::{future::Future, path::PathBuf, sync::Arc};
 
 use cda_comm_doip::{DoipDiagGateway, config::DoipConfig};
 use cda_comm_uds::UdsManager;
-use cda_core::{DiagServiceResponseStruct, EcuManager, EcuManagerConfig};
-use cda_database::{FileManager, ProtoLoadConfig, update_mdd_uncompressed};
-use cda_health::{HealthState, StatusHealthProvider};
+use cda_core::{DiagServiceResponseStruct, EcuManager};
+use cda_database::FileManager;
 use cda_interfaces::{
-    DiagServiceError, DoipGatewaySetupError, EcuAddressProvider, EcuManager as EcuManagerTrait,
-    EcuManagerType, FunctionalDescriptionConfig, HashMap, HashMapEntry, HashMapExtensions, HashSet,
-    Protocol, UdsEcu,
-    datatypes::{ComParams, DatabaseNamingConvention, FaultConfig, FlatbBufConfig},
+    DiagServiceError, DoipGatewaySetupError, FunctionalDescriptionConfig, HashMap, UdsEcu,
+    datatypes::{ComParams, FaultConfig},
     dlt_ctx,
-    file_manager::{Chunk, ChunkType},
 };
 use cda_plugin_security::{DefaultSecurityPlugin, DefaultSecurityPluginData, SecurityPlugin};
 use cda_sovd::Locks;
@@ -34,24 +30,22 @@ use figment::{
     providers::{Format, Serialized, Toml},
 };
 use futures::future::FutureExt;
-use tokio::{
-    signal,
-    sync::{RwLock, mpsc},
-    task::JoinHandle,
-};
-use tracing::Instrument;
+use tokio::sync::{RwLock, mpsc};
 use tracing_subscriber::layer::SubscriberExt;
 
-use crate::config::configfile::{ConfigSanity, Configuration, EcuConfig};
+use crate::{
+    config::configfile::Configuration,
+    mdd::{load_databases, resolve_mdd_paths},
+    update::{RuntimeUpdateContext, security::UpdateSecurityHandler},
+};
 
 pub mod config;
+pub mod mdd;
+pub mod update;
 
 #[global_allocator]
 static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
 
-const DB_PARALLEL_LOAD_TASKS: usize = 2;
-
-const DB_HEALTH_COMPONENT_KEY: &str = "database";
 const DOIP_HEALTH_COMPONENT_KEY: &str = "doip";
 
 #[cfg(feature = "health")]
@@ -129,42 +123,23 @@ pub struct AppArgs {
     pub mdd_decompress: Option<bool>,
 }
 
-#[derive(Debug)]
-struct EcuMetadata {
-    mdd_path: String,
-    valid: bool,
-}
-
-/// Configuration context for loading a single ECU database.
-struct EcuLoadContext<'a> {
-    mdd_path: String,
-    mddfile: &'a PathBuf,
-    ecu_name: String,
-    flat_buf_settings: &'a FlatbBufConfig,
-    database_config: &'a cda_database::DatabaseConfig,
-    ecu_config_map: &'a Arc<HashMap<String, EcuConfig>>,
-    database_naming_convention: DatabaseNamingConvention,
-    func_description_cfg: &'a FunctionalDescriptionConfig,
-    protocol: &'a Protocol,
-    com_params: &'a Arc<ComParams>,
-    fallback_to_base_variant: bool,
-    strict_parameter_validation: bool,
-}
-
-/// Result of building an ECU manager and associated metadata.
-struct EcuLoadResult<S: SecurityPlugin> {
-    manager: EcuManager<S>,
-    metadata: EcuMetadata,
-    files: Vec<Chunk>,
-}
-
-type LoadedEcuMap<S> = HashMap<String, (EcuManager<S>, EcuMetadata)>;
-
 pub struct VehicleData<S: SecurityPlugin> {
     pub file_managers: FileManagerMap,
     pub uds_manager: UdsManagerType<S>,
+    pub diagnostic_gateway: DoipDiagGateway<EcuManager<S>>,
     pub locks: Arc<cda_sovd::Locks>,
+    pub update_guard: cda_sovd::UpdateGuardState,
     pub databases: Arc<DatabaseMap<S>>,
+    pub variant_detection_handle: tokio::task::JoinHandle<()>,
+    pub health_providers: Option<HealthProviders>,
+}
+
+pub struct VehicleComponents<S: SecurityPlugin> {
+    pub uds_manager: UdsManagerType<S>,
+    pub diagnostic_gateway: DoipDiagGateway<EcuManager<S>>,
+    pub databases: Arc<DatabaseMap<S>>,
+    pub file_managers: FileManagerMap,
+    pub variant_detection_handle: tokio::task::JoinHandle<()>,
 }
 
 #[derive(thiserror::Error, Debug)]
@@ -256,29 +231,6 @@ impl From<TracingSetupError> for AppError {
     }
 }
 
-pub const PROTO_LOAD_CONFIG: &[ProtoLoadConfig; 4] = &[
-    ProtoLoadConfig {
-        type_: ChunkType::DiagnosticDescription,
-        load_data: true,
-        name: None,
-    },
-    ProtoLoadConfig {
-        type_: ChunkType::CodeFile,
-        load_data: false,
-        name: None,
-    },
-    ProtoLoadConfig {
-        type_: ChunkType::CodeFilePartial,
-        load_data: false,
-        name: None,
-    },
-    ProtoLoadConfig {
-        type_: ChunkType::EmbeddedFile,
-        load_data: false,
-        name: None,
-    },
-];
-
 impl AppArgs {
     #[tracing::instrument(skip(self, config),
         fields(
@@ -358,35 +310,13 @@ pub fn generate_config_cmd(output: Option<&PathBuf>) -> Result<(), AppError> {
     Ok(())
 }
 
-#[cfg(feature = "config-optional")]
-#[allow(clippy::unnecessary_wraps)] // signature must match the `not(feature)` variant
-fn load_config_or_default(config_path: Option<&str>) -> Result<Configuration, AppError> {
-    Ok(config::load_config(config_path).unwrap_or_else(|e| {
-        println!("Failed to load configuration: {e}");
-        println!("Using default values");
-        config::default_config()
-    }))
-}
-
-/// Without `config-optional`, a missing or invalid configuration is a hard error.
-#[cfg(not(feature = "config-optional"))]
-fn load_config_or_default(config_path: Option<&str>) -> Result<Configuration, AppError> {
-    config::load_config(config_path).map_err(|e| {
-        println!("Failed to load configuration: {e}");
-        println!(
-            "Provide a configuration file or build with the 'config-optional' feature to allow \
-             starting without one."
-        );
-        AppError::ConfigurationError(e)
-    })
-}
-
 /// Parse CLI arguments and start the CDA with the default startup flow.
 ///
 /// # Errors
 /// Returns [`AppError`] if configuration loading, validation, or startup fails.
 pub async fn run_from_cli() -> Result<(), AppError> {
-    run(AppArgs::parse()).await
+    // Box is needed because it's a large future with a size of 16392 bytes
+    Box::pin(run(AppArgs::parse())).await
 }
 
 #[tracing::instrument(
@@ -405,10 +335,30 @@ pub async fn run(args: AppArgs) -> Result<(), AppError> {
         return generate_config_cmd(output.as_ref());
     }
 
-    let mut config = load_config_or_default(args.config.as_deref())?;
-    config.validate_sanity()?;
+    let (mut config, disk_loaded) = config::load_config_with_fallback(args.config.as_deref());
 
+    if disk_loaded && config.runtime_update_config.init_storage_from_config_file {
+        let config_file = config::resolve_config_file_path(args.config.as_deref());
+        config::seed_storage_from_config_file(
+            &config.runtime_update_config.storage_dir,
+            &config_file,
+        )
+        .await;
+    }
+
+    if let Some(storage_config) =
+        config::load_config_with_storage_override(&config.runtime_update_config.storage_dir).await?
+    {
+        config = storage_config;
+    } else if !disk_loaded {
+        config::require_config_source()?;
+    }
+
+    // Command line arguments always take precedence over stored configuration
     args.update_config(&mut config);
+
+    use crate::config::configfile::ConfigSanity;
+    config.validate_sanity()?;
 
     run_with_config(config).await
 }
@@ -464,12 +414,47 @@ pub async fn run_with_config(config: Configuration) -> Result<(), AppError> {
     let _sd_notify_task =
         cda_extra::create_sd_notify_task(health_state.clone(), clonable_shutdown_signal.clone());
 
+    setup_vehicle_and_routes(
+        config,
+        &dynamic_router,
+        &webserver_config,
+        health_state.as_ref(),
+        clonable_shutdown_signal.clone(),
+    )
+    .await?;
+
+    tracing::info!("CDA fully initialized and ready to serve requests");
+    if let Some(provider) = main_health_provider {
+        provider.update_status(cda_health::Status::Up).await;
+    }
+
+    // Wait for shutdown signal
+    clonable_shutdown_signal.await;
+    tracing::info!("Shutting down...");
+    webserver_task
+        .await
+        .map_err(|e| AppError::RuntimeError(format!("Webserver task join error: {e}")))?;
+
+    Ok(())
+}
+
+/// Loads vehicle data, registers all SOVD routes, runtime-update routes, `OpenAPI` routes,
+/// and installs the update guard. Extracted from `run_with_config` to keep it under the line limit.
+async fn setup_vehicle_and_routes(
+    config: Configuration,
+    dynamic_router: &cda_sovd::dynamic_router::DynamicRouter,
+    webserver_config: &cda_sovd::WebServerConfig,
+    health_state: Option<&cda_health::HealthState>,
+    clonable_shutdown_signal: futures::future::Shared<
+        impl std::future::Future<Output = ()> + Send + 'static,
+    >,
+) -> Result<(), AppError> {
     tracing::debug!("Webserver is running. Loading sovd routes...");
 
     let vehicle_data = match load_vehicle_data::<_, DefaultSecurityPluginData>(
         &config,
         clonable_shutdown_signal.clone(),
-        health_state.as_ref(),
+        health_state,
     )
     .await
     {
@@ -487,24 +472,88 @@ pub async fn run_with_config(config: Configuration) -> Result<(), AppError> {
         ));
     }
 
-    cda_sovd::add_vehicle_routes::<DiagServiceResponseStruct, _, _, DefaultSecurityPlugin>(
-        &dynamic_router,
-        vehicle_data.uds_manager,
-        config.flash_files_path.clone(),
-        vehicle_data.file_managers,
-        vehicle_data.locks,
-        config.functional_description,
-        config.components,
-    )
-    .await?;
+    let flash_files_path = config.flash_files_path.clone();
+    let components_config = config.components.clone();
+    let runtime_update_config = config.runtime_update_config.clone();
 
+    let (ecu_execution_registry, vehicle_route_handle) =
+        cda_sovd::add_vehicle_routes::<DiagServiceResponseStruct, _, _, DefaultSecurityPlugin>(
+            dynamic_router,
+            cda_sovd::VehicleConfig {
+                flash_files_path: config.flash_files_path.clone(),
+                functional_group_config: config.functional_description.clone(),
+                components_config: config.components.clone(),
+            },
+            cda_sovd::VehicleResources {
+                ecu_uds: vehicle_data.uds_manager.clone(),
+                file_manager: vehicle_data.file_managers,
+                locks: Arc::clone(&vehicle_data.locks),
+                update_in_progress: vehicle_data.update_guard.busy_handle(),
+            },
+        )
+        .await?;
+
+    register_version_endpoints(dynamic_router).await;
+
+    let lock_provider: Arc<cda_sovd::SovdLockStateProvider> = Arc::new(
+        cda_sovd::SovdLockStateProvider::new(Arc::clone(&vehicle_data.locks)),
+    );
+
+    let flash_transfer_guard = vehicle_data.uds_manager.flash_transfer_guard();
+    let runtime_update_plugin = update::init_default_runtime_update_plugin::<
+        DefaultSecurityPluginData,
+        _,
+        DefaultSecurityPlugin,
+    >(Box::new(RuntimeUpdateContext {
+        dynamic_router: dynamic_router.clone(),
+        vehicle_route_handle,
+        config,
+        flash_files_path,
+        components_config,
+        lock_provider: Arc::clone(&lock_provider),
+        update_guard: vehicle_data.update_guard.clone(),
+        shutdown_signal: clonable_shutdown_signal,
+        runtime_update_config: runtime_update_config.clone(),
+        ecu_execution_registry: ecu_execution_registry.clone(),
+        uds_manager: vehicle_data.uds_manager,
+        doip_gateway: vehicle_data.diagnostic_gateway,
+        health: vehicle_data.health_providers,
+        variant_detection_handle: vehicle_data.variant_detection_handle,
+        security_handler: Arc::new(UpdateSecurityHandler::new(
+            Arc::clone(&lock_provider),
+            vec![
+                Box::new(flash_transfer_guard),
+                Box::new(ecu_execution_registry),
+            ],
+        )),
+    }))
+    .await?;
+    update::add_runtime_update_routes::<DefaultSecurityPlugin, _>(
+        dynamic_router,
+        runtime_update_plugin,
+        lock_provider,
+        &vehicle_data.update_guard,
+        runtime_update_config.upload_body_limit_bytes,
+        runtime_update_config.retry_after_seconds,
+    )
+    .await;
+
+    cda_sovd::add_openapi_routes(dynamic_router, &vehicle_data.update_guard, webserver_config)
+        .await;
+
+    // SAFETY: Must be applied AFTER all routes are registered (layer only covers existing routes).
+    cda_sovd::install_update_guard(dynamic_router, vehicle_data.update_guard.clone()).await;
+
+    Ok(())
+}
+
+async fn register_version_endpoints(dynamic_router: &cda_sovd::dynamic_router::DynamicRouter) {
     // [[ dimpl~sovd-api-version-endpoint, Register Version Endpoint ]]
-    if let serde_json::Value::Object(version_info) = serde_json::json!({
+    let serde_json::Value::Object(version_info) = serde_json::json!({
         "id": "version",
         "data": {
             "name": "Eclipse OpenSOVD Classic Diagnostic Adapter",
             "api": {
-                // 1.1 to match the sovd standard version
                 "version": "1.1"
             },
             "implementation": {
@@ -513,43 +562,24 @@ pub async fn run_with_config(config: Configuration) -> Result<(), AppError> {
                 "build_date": env!("BUILD_DATE").to_owned(),
             }
         }
-    }) {
-        cda_sovd::add_static_data_endpoint(
-            &dynamic_router,
-            version_info.clone(),
-            "/vehicle/v15/apps/sovd2uds/data/version",
-        )
-        .await;
-        // For now, both version endpoints serve the same data. This might change in the future.
-        cda_sovd::add_static_data_endpoint(
-            &dynamic_router,
-            version_info,
-            "/vehicle/v15/data/version",
-        )
-        .await;
-    } else {
+    }) else {
         tracing::error!("Failed to build version information");
-    }
-
-    cda_sovd::add_openapi_routes(&dynamic_router, &webserver_config).await;
-
-    tracing::info!("CDA fully initialized and ready to serve requests");
-    if let Some(provider) = main_health_provider {
-        provider.update_status(cda_health::Status::Up).await;
-    }
-
-    clonable_shutdown_signal.await;
-    tracing::info!("Shutting down...");
-    webserver_task
-        .await
-        .map_err(|e| AppError::RuntimeError(format!("Webserver task join error: {e}")))?;
-
-    Ok(())
+        return;
+    };
+    cda_sovd::add_static_data_endpoint(
+        dynamic_router,
+        version_info.clone(),
+        "/vehicle/v15/apps/sovd2uds/data/version",
+    )
+    .await;
+    cda_sovd::add_static_data_endpoint(dynamic_router, version_info, "/vehicle/v15/data/version")
+        .await;
 }
 
-/// Loads vehicle databases and sets up SOVD routes in the webserver.
+/// Loads vehicle data including MDD databases and vehicle components.
+///
 /// # Errors
-/// Returns `DoipGatewaySetupError` if we failed to create the diagnostic gateway
+/// Returns [`AppError`] if MDD path resolution, database loading, or component creation fails.
 pub async fn load_vehicle_data<
     F: Future<Output = ()> + Clone + Send + 'static,
     S: SecurityPlugin,
@@ -558,648 +588,75 @@ pub async fn load_vehicle_data<
     clonable_shutdown_signal: F,
     health: Option<&cda_health::HealthState>,
 ) -> Result<VehicleData<S>, AppError> {
-    // Load databases in the background
-    let (databases, file_managers) = load_databases::<S>(config, health).await?;
-
-    let (variant_detection_tx, variant_detection_rx) = mpsc::channel(50);
-    let databases = Arc::new(databases);
-    let diagnostic_gateway = match create_diagnostic_gateway(
-        Arc::clone(&databases),
-        &config.doip,
-        variant_detection_tx,
-        clonable_shutdown_signal.clone(),
-        health,
-    )
-    .await
-    {
-        Ok(gateway) => gateway,
-        Err(e) => {
-            tracing::error!(error = %e, "Failed to create diagnostic gateway");
-            return Err(e.into());
-        }
-    };
-
-    let uds = create_uds_manager(
-        diagnostic_gateway,
-        Arc::clone(&databases),
-        variant_detection_rx,
-        &config.functional_description,
-        config.faults.clone(),
-    );
-    tracing::debug!("Starting variant detection");
-    let vdetect = uds.clone();
-    cda_interfaces::spawn_named!("startup-variant-detection", async move {
-        vdetect.start_variant_detection().await;
-    });
-
-    let ecu_names = uds.get_physical_ecus().await;
-    Ok(VehicleData {
-        uds_manager: uds,
-        file_managers,
-        locks: Arc::new(Locks::new(ecu_names)),
-        databases,
-    })
-}
-
-/// Loads all MDD databases and file managers from the configured database path.
-///
-/// # Errors
-///
-/// Returns [`AppError::ShutdownRequested`] if a shutdown signal is received while
-/// databases are still being loaded.
-#[tracing::instrument(
-    skip(config, health),
-    fields(databases_path = %config.database.path)
-)]
-pub async fn load_databases<S: SecurityPlugin>(
-    config: &Configuration,
-    health: Option<&cda_health::HealthState>,
-) -> Result<(DatabaseMap<S>, FileManagerMap), AppError> {
-    // Extract fields from config
-    let database_path = &config.database.path;
-    let flat_buf_settings = config.flat_buf.clone();
-    let database_naming_convention = config.database.naming_convention.clone();
-    let func_description_cfg = config.functional_description.clone();
-    let fallback_to_base_variant = config.database.fallback_to_base_variant;
-    let strict_parameter_validation = config.database.strict_parameter_validation;
-    let database_config = config.database.clone();
-    let strict_ecu_config = database_config.strict_ecu_config;
-    let protocol = cda_interfaces::Protocol::new(config.doip.protocol_name.clone());
-    let com_params = config.com_params.clone();
-
-    // Build a normalised (lowercase keys) copy of the per-ECU config map so
-    // that lookups are always case-insensitive, consistent with DatabaseMap.
-    let ecu_config_map: HashMap<String, EcuConfig> = config
-        .ecu
-        .iter()
-        .map(|(k, v)| (k.to_lowercase(), v.clone()))
-        .collect();
-
-    let db_health_provider = setup_db_health_provider(health).await;
-
-    let databases: Arc<RwLock<LoadedEcuMap<S>>> = Arc::new(RwLock::new(HashMap::new()));
-
-    let file_managers: Arc<RwLock<HashMap<String, FileManager>>> =
-        Arc::new(RwLock::new(HashMap::new()));
-
-    let com_params = Arc::new(com_params);
-    let ecu_config_map = Arc::new(ecu_config_map);
-
-    let mut database_load_futures = Vec::new();
-    let start = std::time::Instant::now();
-    'load_database: {
-        let files = match std::fs::read_dir(database_path) {
-            Ok(files) => files,
-            Err(e) => {
-                tracing::error!(error = %e, "Failed to read directory");
-                if let Some(provider) = &db_health_provider {
-                    provider.update_status(cda_health::Status::Failed).await;
-                }
-                break 'load_database;
-            }
-        };
-
-        let files = get_mdd_files_and_size(files);
-        let chunk_size = files
-            .len()
-            .checked_div(DB_PARALLEL_LOAD_TASKS.saturating_add(1))
-            .unwrap_or(1)
-            .max(1);
-
-        tracing::info!(chunk_size = %chunk_size, "Loading databases");
-
-        for (i, mddfiles) in files.chunks(chunk_size).enumerate() {
-            let database = Arc::clone(&databases);
-            let file_managers = Arc::clone(&file_managers);
-            let paths = mddfiles.to_vec();
-            let com_params = Arc::clone(&com_params);
-            let ecu_config_map = Arc::clone(&ecu_config_map);
-            let database_naming_convention = database_naming_convention.clone();
-            let flat_buf_settings = flat_buf_settings.clone();
-            let func_description_cfg = func_description_cfg.clone();
-            let protocol = protocol.clone();
-            let database_config = database_config.clone();
-
-            database_load_futures.push(cda_interfaces::spawn_named!(
-                &format!("load-database-{i}"),
-                async move {
-                    load_database(
-                        protocol,
-                        database,
-                        file_managers,
-                        paths,
-                        com_params,
-                        ecu_config_map,
-                        database_naming_convention,
-                        flat_buf_settings,
-                        func_description_cfg,
-                        fallback_to_base_variant,
-                        strict_parameter_validation,
-                        database_config,
-                    )
-                    .await;
-                }
-                .instrument(tracing::info_span!("load_database_chunk", chunk_id = i))
+    let mdd_paths: Vec<PathBuf> = {
+        let storage_dir = &config.runtime_update_config.storage_dir;
+        let paths = resolve_mdd_paths(storage_dir, &config.database.path).await;
+        if paths.is_empty() {
+            return Err(AppError::InitializationFailed(
+                "No MDD files found".to_string(),
             ));
         }
-    }
-
-    wait_for_databases_loaded(database_load_futures).await?;
-    let databases = databases
-        .write()
-        .await
-        .drain()
-        .filter(|(_, (_, meta))| meta.valid)
-        .map(|(k, (ecu_manager, _))| (k.to_lowercase(), RwLock::new(ecu_manager)))
-        .collect::<HashMap<String, RwLock<EcuManager<S>>>>();
-    mark_duplicate_ecus_by_address(&databases).await;
-
-    let file_managers = file_managers
-        .write()
-        .await
-        .drain()
-        .map(|(k, v)| (k.to_lowercase(), v))
-        .collect::<HashMap<String, FileManager>>();
-
-    // Warn for any per-ECU config keys that did not match a loaded database.
-    warn_unmatched_ecu_config_keys(&ecu_config_map, &databases, strict_ecu_config)?;
-
-    let end = std::time::Instant::now();
-
-    tracing::info!(
-        database_count = &databases.len(),
-        duration = ?end.saturating_duration_since(start),
-        "Loaded databases");
-    let status = if databases.is_empty() {
-        cda_health::Status::Failed
-    } else {
-        cda_health::Status::Up
+        paths
     };
 
-    if let Some(provider) = db_health_provider {
-        provider.update_status(status).await;
-    }
-    Ok((databases, file_managers))
-}
-
-async fn wait_for_databases_loaded(
-    database_load_futures: Vec<JoinHandle<()>>,
-) -> Result<(), AppError> {
-    for f in database_load_futures {
-        tokio::select! {
-            () = shutdown_signal() => {
-                tracing::info!("Shutdown triggered. Aborting DB load...");
-                return Err(AppError::ShutdownRequested);
-            },
-            res = f =>{
-                if let Err(e) = res {
-                    tracing::error!(error = ?e, "Failed to load ecu data");
-                }
-            }
-        }
-    }
-    Ok(())
-}
-
-fn get_mdd_files_and_size(files: ReadDir) -> Vec<(PathBuf, u64)> {
-    let mut files = files
-        .filter_map(|entry| {
-            entry.ok().and_then(|entry| {
-                let path = entry.path();
-                if path.is_file() && path.extension().is_some_and(|ext| ext == "mdd") {
-                    let filesize = std::fs::metadata(&path).ok().map_or(0u64, |m| m.len());
-                    Some((path, filesize))
-                } else {
-                    None
-                }
-            })
-        })
-        .collect::<Vec<_>>();
-
-    files.sort_by_key(|b| std::cmp::Reverse(b.1));
-    files
-}
-
-async fn setup_db_health_provider(
-    health: Option<&HealthState>,
-) -> Option<Arc<StatusHealthProvider>> {
-    if let Some(health_state) = health {
-        let provider = Arc::new(cda_health::StatusHealthProvider::new(
+    let health_providers = if let Some(health_state) = health {
+        let doip = Arc::new(cda_health::StatusHealthProvider::new(
+            cda_health::Status::Starting,
+        ));
+        let database = Arc::new(cda_health::StatusHealthProvider::new(
             cda_health::Status::Starting,
         ));
         if let Err(e) = health_state
             .register_provider(
-                DB_HEALTH_COMPONENT_KEY,
-                Arc::clone(&provider) as Arc<dyn cda_health::HealthProvider>,
+                DOIP_HEALTH_COMPONENT_KEY,
+                Arc::clone(&doip) as Arc<dyn cda_health::HealthProvider>,
+            )
+            .await
+        {
+            tracing::warn!(error = %e, "Failed to register DoIP health provider");
+        }
+        if let Err(e) = health_state
+            .register_provider(
+                mdd::DB_HEALTH_COMPONENT_KEY,
+                Arc::clone(&database) as Arc<dyn cda_health::HealthProvider>,
             )
             .await
         {
             tracing::warn!(error = %e, "Failed to register database health provider");
         }
-        Some(provider)
+        Some(HealthProviders { doip, database })
     } else {
         None
-    }
-}
-
-fn warn_unmatched_ecu_config_keys<S: SecurityPlugin>(
-    ecu_config_map: &HashMap<String, EcuConfig>,
-    databases: &HashMap<String, RwLock<EcuManager<S>>>,
-    strict: bool,
-) -> Result<(), AppError> {
-    let mut unmatched = Vec::new();
-    for ecu_key in ecu_config_map.keys() {
-        if !databases.contains_key(ecu_key) {
-            tracing::warn!(
-                ecu_name = %ecu_key,
-                "Per-ECU config entry does not match any loaded MDD database - ignored"
-            );
-            unmatched.push(ecu_key.clone());
-        }
-    }
-    if strict && !unmatched.is_empty() {
-        return Err(AppError::ConfigurationError(format!(
-            "strict_ecu_config is enabled and the following per-ECU config entries do not match \
-             any loaded database: {}",
-            unmatched.join(", ")
-        )));
-    }
-    Ok(())
-}
-
-async fn mark_duplicate_ecus_by_address<S: SecurityPlugin>(
-    databases: &HashMap<String, RwLock<EcuManager<S>>>,
-) {
-    let mut ecus_by_address: HashMap<u16, HashMap<u16, Vec<String>>> = HashMap::new();
-    for (name, db_lock) in databases {
-        let db = db_lock.read().await;
-        let logical_address = db.logical_address();
-        let gateway_address = db.logical_gateway_address();
-        ecus_by_address
-            .entry(gateway_address)
-            .or_default()
-            .entry(logical_address)
-            .or_default()
-            .push(name.clone());
-    }
-
-    for logical_map in ecus_by_address.values() {
-        for ecu_names in logical_map.values() {
-            if ecu_names.len() <= 1 {
-                continue;
-            }
-
-            for ecu_name in ecu_names {
-                let Some(db_lock) = databases.get(ecu_name) else {
-                    continue;
-                };
-
-                let mut db = db_lock.write().await;
-                let duplicates: HashSet<String> = ecu_names
-                    .iter()
-                    .filter(|&name| name != ecu_name)
-                    .cloned()
-                    .collect();
-                db.set_duplicating_ecu_names(duplicates);
-            }
-        }
-    }
-}
-
-/// Compute the effective [`ComParams`] for a single ECU.
-///
-/// Starts from the global `global` config and merges any per-ECU TOML overrides
-/// present in `ecu_table`.
-///
-/// Returns `None` (and emits a `tracing::error!`) if the TOML table cannot be
-/// serialised or if figment extraction fails - the caller should `continue` to
-/// the next ECU.
-pub(crate) fn resolve_com_params(
-    ecu_name: &str,
-    global: &ComParams,
-    ecu_overrides: Option<&crate::config::configfile::EcuComParams>,
-) -> Option<ComParams> {
-    let params: ComParams = match ecu_overrides {
-        None => global.clone(),
-        Some(overrides) => {
-            let toml_str = match toml::to_string(overrides) {
-                Ok(s) => s,
-                Err(e) => {
-                    tracing::error!(
-                        ecu_name = %ecu_name,
-                        error = %e,
-                        "Failed to serialize per-ECU com_params TOML table; skipping ECU"
-                    );
-                    return None;
-                }
-            };
-            match Figment::from(Serialized::defaults(global))
-                .merge(Toml::string(&toml_str))
-                .extract::<ComParams>()
-            {
-                Ok(p) => p,
-                Err(e) => {
-                    tracing::error!(
-                        ecu_name = %ecu_name,
-                        error = %e,
-                        "Failed to merge per-ECU com_params overrides; skipping ECU"
-                    );
-                    return None;
-                }
-            }
-        }
     };
 
-    Some(params)
-}
-
-/// Extract and build the diagnostic database from proto data.
-fn build_diagnostic_database(
-    proto_data: &mut HashMap<ChunkType, Vec<Chunk>>,
-    ctx: &EcuLoadContext<'_>,
-) -> Option<cda_database::datatypes::DiagnosticDatabase> {
-    let database_payload = proto_data
-        .remove(&ChunkType::DiagnosticDescription)
-        .and_then(|mut chunks| chunks.pop())
-        .and_then(|c| c.payload);
-
-    let payload = database_payload.or_else(|| {
-        tracing::error!(
-            mdd_file = %ctx.mddfile.display(),
-            ecu_name = %ctx.ecu_name,
-            "No payload found in diagnostic description for ECU"
-        );
-        None
-    })?;
-
-    let mut cfg = ctx.database_config.clone();
-    if let Some(override_value) = ctx
-        .ecu_config_map
-        .get(&ctx.ecu_name.to_lowercase())
-        .and_then(|c| c.ignore_protocol)
-    {
-        cfg.ignore_protocol = override_value;
-    }
-
-    cda_database::datatypes::DiagnosticDatabase::new_from_bytes(
-        ctx.mdd_path.clone(),
-        payload,
-        ctx.flat_buf_settings.clone(),
-        cfg,
+    let update_guard = cda_sovd::UpdateGuardState::new();
+    let components = create_vehicle_components::<F, S>(
+        config,
+        &mdd_paths,
+        clonable_shutdown_signal,
+        health_providers.as_ref(),
+        update_guard.busy_handle(),
     )
-    .map_err(|e| {
-        tracing::error!(
-            mdd_file = %ctx.mddfile.display(),
-            ecu_name = %ctx.ecu_name,
-            error = %e,
-            "Failed to create database from MDD payload"
-        );
-    })
-    .ok()
-}
+    .await?;
 
-/// Create an ECU manager from diagnostic database and configuration.
-fn create_ecu_manager<S: SecurityPlugin>(
-    diag_database: cda_database::datatypes::DiagnosticDatabase,
-    protocol: Protocol,
-    ecu_type: EcuManagerType,
-    effective_com_params: &ComParams,
-    ctx: &EcuLoadContext<'_>,
-) -> Option<EcuManager<S>> {
-    EcuManager::new(
-        diag_database,
-        protocol,
-        effective_com_params,
-        ctx.database_naming_convention.clone(),
-        EcuManagerConfig {
-            type_: ecu_type,
-            fallback_to_base_variant: ctx.fallback_to_base_variant,
-            strict_parameter_validation: ctx.strict_parameter_validation,
-        },
-        ctx.func_description_cfg,
-    )
-    .map_err(|e| {
-        tracing::error!(
-            ecu_name = %ctx.ecu_name,
-            error = ?e,
-            "Failed to create DiagServiceManager"
-        );
-    })
-    .ok()
-}
-
-/// Extract file chunks from proto data.
-fn extract_file_chunks(mut proto_data: HashMap<ChunkType, Vec<Chunk>>) -> Vec<Chunk> {
-    let filtered_chunks: Vec<Chunk> = [
-        ChunkType::CodeFile,
-        ChunkType::CodeFilePartial,
-        ChunkType::EmbeddedFile,
-    ]
-    .iter()
-    .filter_map(|chunk_type| proto_data.remove(chunk_type))
-    .flat_map(std::iter::IntoIterator::into_iter)
-    .collect();
-
-    filtered_chunks
-        .into_iter()
-        .chain(proto_data.into_values().flat_map(IntoIterator::into_iter))
-        .collect()
-}
-
-/// Load and process a single ECU from MDD file.
-fn load_ecu_from_file<S: SecurityPlugin>(
-    proto_data: HashMap<ChunkType, Vec<Chunk>>,
-    ctx: &EcuLoadContext<'_>,
-    per_ecu_cfg: Option<&EcuConfig>,
-) -> Option<EcuLoadResult<S>> {
-    let mut proto_data = proto_data;
-    let diag_database = build_diagnostic_database(&mut proto_data, ctx)?;
-    let effective_com_params = resolve_com_params(
-        &ctx.ecu_name,
-        ctx.com_params,
-        per_ecu_cfg.and_then(|c| c.com_params.as_ref()),
-    )?;
-    let protocol = per_ecu_cfg.and_then(|c| c.protocol.as_deref()).map_or_else(
-        || ctx.protocol.clone(),
-        |name| Protocol::new(name.to_owned()),
-    );
-    let ecu_type = if ctx.func_description_cfg.description_database == ctx.ecu_name {
-        EcuManagerType::FunctionalDescription
-    } else {
-        EcuManagerType::Ecu
-    };
-    let manager = create_ecu_manager(
-        diag_database,
-        protocol,
-        ecu_type,
-        &effective_com_params,
-        ctx,
-    )?;
-    let files = extract_file_chunks(proto_data);
-
-    Some(EcuLoadResult {
-        manager,
-        metadata: EcuMetadata {
-            mdd_path: ctx.mdd_path.clone(),
-            valid: true,
-        },
-        files,
+    let ecu_names = components.uds_manager.get_physical_ecus().await;
+    Ok(VehicleData {
+        uds_manager: components.uds_manager,
+        diagnostic_gateway: components.diagnostic_gateway,
+        file_managers: components.file_managers,
+        locks: Arc::new(Locks::new(ecu_names)),
+        update_guard,
+        databases: components.databases,
+        variant_detection_handle: components.variant_detection_handle,
+        health_providers,
     })
 }
 
-async fn store_ecu_data<S: SecurityPlugin>(
-    database: &RwLock<LoadedEcuMap<S>>,
-    file_managers: &Arc<RwLock<HashMap<String, FileManager>>>,
-    ecu_name: String,
-    result: EcuLoadResult<S>,
-) {
-    let mdd_path = result.metadata.mdd_path.clone();
-    let files = result.files;
-
-    check_duplicate_ecu_names(
-        database,
-        &mdd_path,
-        &ecu_name,
-        result.manager,
-        result.metadata,
-    )
-    .await;
-
-    file_managers
-        .write()
-        .await
-        .insert(ecu_name, FileManager::new(mdd_path, files));
-}
-
-#[allow(clippy::too_many_arguments)]
-#[tracing::instrument(
-    skip_all,
-    fields(
-        paths_count = paths.len(),
-        dlt_context = dlt_ctx!("MAIN"),
-    )
-)]
-async fn load_database<S: SecurityPlugin>(
-    protocol: Protocol,
-    database: Arc<RwLock<LoadedEcuMap<S>>>,
-    file_managers: Arc<RwLock<HashMap<String, FileManager>>>,
-    paths: Vec<(PathBuf, u64)>,
-    com_params: Arc<ComParams>,
-    ecu_config_map: Arc<HashMap<String, EcuConfig>>,
-    database_naming_convention: DatabaseNamingConvention,
-    flat_buf_settings: FlatbBufConfig,
-    func_description_cfg: FunctionalDescriptionConfig,
-    fallback_to_base_variant: bool,
-    strict_parameter_validation: bool,
-    database_config: cda_database::DatabaseConfig,
-) {
-    for (mddfile, _) in paths {
-        let Some(mdd_path) = mddfile.to_str().map(ToOwned::to_owned) else {
-            tracing::error!(
-                mdd_file = %mddfile.display(),
-                "Failed to convert MDD file path to string");
-            continue;
-        };
-
-        // Ensure the MDD file contains uncompressed data (rewrite on first
-        // use), so that subsequent loads skip LZMA decompression.
-        if flat_buf_settings.mdd_decompress
-            && let Err(e) = update_mdd_uncompressed(&mdd_path)
-        {
-            tracing::error!(
-                mdd_file = %mddfile.display(),
-                error = %e,
-                "Failed to update MDD file with uncompressed data");
-        }
-
-        match cda_database::load_proto_data(&mdd_path, PROTO_LOAD_CONFIG) {
-            Ok((ecu_name, proto_data)) => {
-                let per_ecu_cfg = ecu_config_map.get(&ecu_name.to_lowercase());
-
-                let ctx = EcuLoadContext {
-                    mdd_path: mdd_path.clone(),
-                    mddfile: &mddfile,
-                    ecu_name: ecu_name.clone(),
-                    flat_buf_settings: &flat_buf_settings,
-                    database_config: &database_config,
-                    ecu_config_map: &ecu_config_map,
-                    database_naming_convention: database_naming_convention.clone(),
-                    func_description_cfg: &func_description_cfg,
-                    protocol: &protocol,
-                    com_params: &com_params,
-                    fallback_to_base_variant,
-                    strict_parameter_validation,
-                };
-
-                if let Some(result) = load_ecu_from_file(proto_data, &ctx, per_ecu_cfg) {
-                    store_ecu_data(&database, &file_managers, ecu_name, result).await;
-                }
-            }
-            Err(e) => {
-                tracing::error!(
-                    mdd_file = %mddfile.display(),
-                    error = %e,
-                    "Failed to load ecu data from file");
-            }
-        }
-    }
-}
-
-async fn check_duplicate_ecu_names<S: SecurityPlugin>(
-    database: &RwLock<LoadedEcuMap<S>>,
-    mdd_path: &String,
-    ecu_name: &String,
-    diag_service_manager: EcuManager<S>,
-    ecu_metadata: EcuMetadata,
-) {
-    let mut db_write = database.write().await;
-    match db_write.entry(ecu_name.clone()) {
-        HashMapEntry::Occupied(mut entry) => {
-            let (existing_ecu, existing_meta) = entry.get_mut();
-
-            if diag_service_manager.logical_address_eq(existing_ecu) {
-                if diag_service_manager.revision() > existing_ecu.revision() {
-                    tracing::warn!(
-                        ecu_name = %ecu_name,
-                        existing_mdd = %existing_meta.mdd_path,
-                        existing_revision = %existing_ecu.revision(),
-                        new_mdd = %mdd_path,
-                        new_revision = %diag_service_manager.revision(),
-                        "Replacing ECU with newer revision"
-                    );
-                    entry.insert((diag_service_manager, ecu_metadata));
-                } else {
-                    tracing::warn!(
-                        ecu_name = %ecu_name,
-                        existing_mdd = %existing_meta.mdd_path,
-                        existing_revision = %existing_ecu.revision(),
-                        new_mdd = %mdd_path,
-                        new_revision = %diag_service_manager.revision(),
-                        "Keeping existing ECU with newer or equal revision"
-                    );
-                }
-            } else {
-                tracing::error!(
-                    ecu_name = %ecu_name,
-                    "Duplicate ECU with different addresses. Marking as invalid."
-                );
-                existing_meta.valid = false;
-            }
-        }
-        HashMapEntry::Vacant(entry) => {
-            // Mark as invalid and remove later.
-            // Not removing now, because there might be multiple duplicates and
-            // if we would remove now, next duplicate would be added as new.
-            entry.insert((diag_service_manager, ecu_metadata));
-        }
-    }
-}
-
-type UdsManagerType<S> =
+pub type UdsManagerType<S> =
     UdsManager<DoipDiagGateway<EcuManager<S>>, DiagServiceResponseStruct, EcuManager<S>>;
 
 /// Creates a new UDS manager for the webserver.
-// type alias does not allow specifying hasher, we set the hasher globally.
+/// type alias does not allow specifying hasher, we set the hasher globally.
 #[allow(clippy::implicit_hasher)]
 #[tracing::instrument(skip_all,
     fields(
@@ -1213,6 +670,7 @@ pub fn create_uds_manager<S: SecurityPlugin>(
     variant_detection_receiver: mpsc::Receiver<Vec<String>>,
     functional_description_config: &FunctionalDescriptionConfig,
     fault_config: FaultConfig,
+    update_in_progress: Arc<std::sync::atomic::AtomicBool>,
 ) -> UdsManagerType<S> {
     UdsManager::new(
         gateway,
@@ -1220,43 +678,87 @@ pub fn create_uds_manager<S: SecurityPlugin>(
         variant_detection_receiver,
         functional_description_config,
         fault_config,
+        update_in_progress,
     )
 }
 
-/// Creates a new diagnostic gateway for the webserver.
+pub struct HealthProviders {
+    pub doip: Arc<cda_health::StatusHealthProvider>,
+    pub database: Arc<cda_health::StatusHealthProvider>,
+}
+
+/// Creates vehicle components (databases, `DoIP` gateway, UDS manager) from configuration.
+///
 /// # Errors
-/// Returns a string error if the gateway cannot be initialized.
+/// Returns [`AppError`] if database loading or diagnostic gateway creation fails.
+pub async fn create_vehicle_components<
+    F: Future<Output = ()> + Clone + Send + 'static,
+    S: SecurityPlugin,
+>(
+    config: &Configuration,
+    mdd_paths: &[PathBuf],
+    shutdown_signal: F,
+    health_providers: Option<&HealthProviders>,
+    update_in_progress: Arc<std::sync::atomic::AtomicBool>,
+) -> Result<VehicleComponents<S>, AppError> {
+    let db_provider = health_providers.map(|h| &h.database);
+    let doip_provider = health_providers.map(|h| &h.doip);
+
+    let (databases, file_managers) = load_databases::<S>(config, mdd_paths, db_provider).await?;
+
+    let (variant_detection_tx, variant_detection_rx) = mpsc::channel(50);
+    let databases = Arc::new(databases);
+    let diagnostic_gateway = create_diagnostic_gateway(
+        Arc::clone(&databases),
+        &config.doip,
+        variant_detection_tx,
+        shutdown_signal,
+        doip_provider,
+    )
+    .await?;
+
+    let uds_manager = create_uds_manager(
+        diagnostic_gateway.clone(),
+        Arc::clone(&databases),
+        variant_detection_rx,
+        &config.functional_description,
+        config.faults.clone(),
+        update_in_progress,
+    );
+
+    let vd = uds_manager.clone();
+    let variant_detection_handle = cda_interfaces::spawn_named!("variant-detection", async move {
+        vd.start_variant_detection().await;
+    });
+
+    Ok(VehicleComponents {
+        uds_manager,
+        diagnostic_gateway,
+        databases,
+        file_managers,
+        variant_detection_handle,
+    })
+}
+
 #[tracing::instrument(
-    skip(databases, variant_detection, shutdown_signal, health),
+    skip(databases, variant_detection, shutdown_signal, doip_health_provider),
     fields(
         database_count = databases.len(),
         dlt_context = dlt_ctx!("MAIN"),
     )
 )]
+/// # Errors
+/// Returns [`DoipGatewaySetupError`] if `DoIP` gateway initialization fails.
 pub async fn create_diagnostic_gateway<S: SecurityPlugin>(
     databases: Arc<DatabaseMap<S>>,
     doip_config: &DoipConfig,
     variant_detection: mpsc::Sender<Vec<String>>,
     shutdown_signal: impl Future<Output = ()> + Send + 'static,
-    health: Option<&cda_health::HealthState>,
+    doip_health_provider: Option<&Arc<cda_health::StatusHealthProvider>>,
 ) -> Result<DoipDiagGateway<EcuManager<S>>, DoipGatewaySetupError> {
-    let doip_health_provider = if let Some(health_state) = health {
-        let provider = Arc::new(cda_health::StatusHealthProvider::new(
-            cda_health::Status::Starting,
-        ));
-        if let Err(e) = health_state
-            .register_provider(
-                DOIP_HEALTH_COMPONENT_KEY,
-                Arc::clone(&provider) as Arc<dyn cda_health::HealthProvider>,
-            )
-            .await
-        {
-            tracing::warn!(error = %e, "Failed to register DoIP health provider");
-        }
-        Some(provider)
-    } else {
-        None
-    };
+    if let Some(provider) = doip_health_provider {
+        provider.update_status(cda_health::Status::Starting).await;
+    }
 
     let result =
         DoipDiagGateway::new(doip_config, databases, variant_detection, shutdown_signal).await;
@@ -1271,19 +773,18 @@ pub async fn create_diagnostic_gateway<S: SecurityPlugin>(
     result
 }
 
-/// Waits for a shutdown signal, such as Ctrl+C or SIGTERM (on unix).
 /// # Panics
-/// * If subscribing to the signals fails.
+/// Panics if the OS signal handlers cannot be installed.
 pub async fn shutdown_signal() {
     let ctrl_c = async {
-        signal::ctrl_c()
+        tokio::signal::ctrl_c()
             .await
             .expect("failed to install Ctrl+C handler");
     };
 
     #[cfg(unix)]
     let terminate = async {
-        signal::unix::signal(signal::unix::SignalKind::terminate())
+        tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
             .expect("failed to install signal handler")
             .recv()
             .await;
@@ -1303,9 +804,8 @@ pub struct TracingGuards {
     _otel: Option<OtelGuard>,
 }
 
-/// Setup the tracing to provide logs and analytics.
 /// # Errors
-/// Returns a `TracingSetupError` if the tracing setup fails.
+/// Returns [`TracingSetupError`] if subscriber or exporter initialization fails.
 pub fn setup_tracing(config: &Configuration) -> Result<TracingGuards, TracingSetupError> {
     let tracing = cda_tracing::new();
     let mut layers = vec![];
@@ -1349,10 +849,56 @@ pub fn setup_tracing(config: &Configuration) -> Result<TracingGuards, TracingSet
     })
 }
 
-/// Retrieve the version of the opensovd-cda crate.
 #[must_use]
 pub fn cda_version() -> &'static str {
     env!("CARGO_PKG_VERSION")
+}
+
+/// Compute the effective [`ComParams`] for a single ECU.
+///
+/// Starts from the global `global` config and merges any per-ECU TOML overrides
+/// present in `ecu_table`.
+///
+/// Returns `None` (and emits a `tracing::error!`) if the TOML table cannot be
+/// serialised or if figment extraction fails - the caller should `continue` to
+/// the next ECU.
+pub fn resolve_com_params(
+    ecu_name: &str,
+    global: &ComParams,
+    ecu_overrides: Option<&config::configfile::EcuComParams>,
+) -> Option<ComParams> {
+    let params: ComParams = match ecu_overrides {
+        None => global.clone(),
+        Some(overrides) => {
+            let toml_str = match toml::to_string(overrides) {
+                Ok(s) => s,
+                Err(e) => {
+                    tracing::error!(
+                        ecu_name = %ecu_name,
+                        error = %e,
+                        "Failed to serialize per-ECU com_params TOML table; skipping ECU"
+                    );
+                    return None;
+                }
+            };
+            match Figment::from(Serialized::defaults(global))
+                .merge(Toml::string(&toml_str))
+                .extract::<ComParams>()
+            {
+                Ok(p) => p,
+                Err(e) => {
+                    tracing::error!(
+                        ecu_name = %ecu_name,
+                        error = %e,
+                        "Failed to merge per-ECU com_params overrides; skipping ECU"
+                    );
+                    return None;
+                }
+            }
+        }
+    };
+
+    Some(params)
 }
 
 #[cfg(test)]
