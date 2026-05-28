@@ -1,0 +1,685 @@
+/*
+ * SPDX-License-Identifier: Apache-2.0
+ * SPDX-FileCopyrightText: 2026 The Contributors to Eclipse OpenSOVD (see CONTRIBUTORS)
+ *
+ * See the NOTICE file(s) distributed with this work for additional
+ * information regarding copyright ownership.
+ *
+ * This program and the accompanying materials are made available under the
+ * terms of the Apache License Version 2.0 which is available at
+ * https://www.apache.org/licenses/LICENSE-2.0
+ */
+
+use cda_interfaces::{
+    runtime_update_api::{RuntimeFileReloadHandler, RuntimeUpdateError},
+    storage_api::{CollectionName, Storage, Transaction},
+};
+
+use crate::operations::{
+    reload_configuration_if_present, reload_database_if_present, try_get_collection,
+};
+
+async fn swap_collection<S: Storage>(
+    storage: &S,
+    tx: &mut Transaction,
+    current: &CollectionName,
+    backup: &CollectionName,
+    next_update: &CollectionName,
+) -> Result<(), RuntimeUpdateError> {
+    storage.copy_collection(tx, current, backup).await?;
+    storage.copy_collection(tx, next_update, current).await?;
+    Ok(storage.delete_collection(tx, next_update).await?)
+}
+
+/// Atomically applies pending MDD files (and optionally config) from the staging
+/// `NextUpdate` collections into the live `DiagnosticDatabase` (and `Configuration`)
+/// collections, backing up current files first.
+///
+/// The 'apply' performs a **snapshot swap**: the entire `NextUpdate` collection replaces the
+/// current collection. Files absent from `NextUpdate` are removed from current.
+///
+/// # Parameters
+/// - `storage`: The storage backend.
+/// - `reload_handler`: Notified after commit so the runtime can hot-reload databases/config.
+/// - `mdd_decompress`: If true, decompress MDD files in-place after commit.
+///
+/// # Errors
+/// Returns [`RuntimeUpdateError`] if validation, transaction, or reload fails.
+pub async fn execute_apply<S: Storage, R: RuntimeFileReloadHandler>(
+    storage: &S,
+    reload_handler: &R,
+    mdd_decompress: bool,
+) -> Result<(), RuntimeUpdateError> {
+    let mdd_next =
+        try_get_collection(storage, &CollectionName::DiagnosticDatabaseNextUpdate).await?;
+    let cfg_next = try_get_collection(storage, &CollectionName::ConfigurationNextUpdate).await?;
+
+    if mdd_next.is_none() && cfg_next.is_none() {
+        return Err(RuntimeUpdateError::NoPendingUpdate);
+    }
+
+    // get_or_create_collection rejects creation while a transaction is active
+    if mdd_next.is_some() {
+        storage
+            .get_or_create_collection(&CollectionName::DiagnosticDatabase)
+            .await?;
+        storage
+            .get_or_create_collection(&CollectionName::DiagnosticDatabaseBackup)
+            .await?;
+    }
+    if cfg_next.is_some() {
+        storage
+            .get_or_create_collection(&CollectionName::Configuration)
+            .await?;
+        storage
+            .get_or_create_collection(&CollectionName::ConfigurationBackup)
+            .await?;
+    }
+
+    let mut tx = storage.begin_transaction()?;
+
+    if mdd_next.is_some() {
+        swap_collection(
+            storage,
+            &mut tx,
+            &CollectionName::DiagnosticDatabase,
+            &CollectionName::DiagnosticDatabaseBackup,
+            &CollectionName::DiagnosticDatabaseNextUpdate,
+        )
+        .await?;
+    }
+
+    if cfg_next.is_some() {
+        swap_collection(
+            storage,
+            &mut tx,
+            &CollectionName::Configuration,
+            &CollectionName::ConfigurationBackup,
+            &CollectionName::ConfigurationNextUpdate,
+        )
+        .await?;
+    }
+
+    tx.commit().await?;
+
+    if cfg_next.is_some() {
+        reload_configuration_if_present(storage, reload_handler).await?;
+    }
+
+    if mdd_next.is_some() {
+        reload_database_if_present(storage, reload_handler, mdd_decompress).await?;
+    }
+
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::{Arc, Mutex};
+
+    use async_trait::async_trait;
+    use cda_interfaces::{
+        runtime_update_api::RuntimeUpdateError,
+        storage_api::{
+            Collection as _, CollectionName, RandomAccessData as _, Storage as _, StorageError,
+        },
+    };
+
+    use super::execute_apply;
+    use crate::test_utils::{
+        NoopReloadHandler, RecordingReloadHandler, init_collection, make_storage,
+    };
+
+    #[derive(Clone, Default)]
+    struct OrderingReloadHandler {
+        call_order: Arc<Mutex<Vec<&'static str>>>,
+    }
+
+    #[async_trait]
+    impl cda_interfaces::runtime_update_api::RuntimeFileReloadHandler for OrderingReloadHandler {
+        async fn reload_databases(
+            &self,
+            _paths: Vec<std::path::PathBuf>,
+        ) -> Result<(), cda_interfaces::runtime_update_api::ReloadError> {
+            self.call_order.lock().unwrap().push("databases");
+            Ok(())
+        }
+
+        async fn reload_configuration(
+            &self,
+            _path: std::path::PathBuf,
+        ) -> Result<(), cda_interfaces::runtime_update_api::ReloadError> {
+            self.call_order.lock().unwrap().push("configuration");
+            Ok(())
+        }
+    }
+
+    #[tokio::test]
+    async fn apply_updates_current_and_creates_backup() {
+        let (storage, _dir) = make_storage();
+
+        // Seed current database
+        init_collection(
+            &storage,
+            &CollectionName::DiagnosticDatabase,
+            &[("ecu1.mdd", b"old_data")],
+        )
+        .await;
+
+        // Seed nextupdate
+        init_collection(
+            &storage,
+            &CollectionName::DiagnosticDatabaseNextUpdate,
+            &[("ecu1.mdd", b"new_data")],
+        )
+        .await;
+
+        execute_apply(&storage, &NoopReloadHandler, false)
+            .await
+            .unwrap();
+
+        // Current should have new data
+        let db_col = storage
+            .get_or_create_collection(&CollectionName::DiagnosticDatabase)
+            .await
+            .unwrap();
+        let handle = db_col.read("ecu1.mdd").await.unwrap();
+        let size = usize::try_from(handle.data_size().unwrap()).expect("size fits usize");
+        let mut buf = vec![0u8; size];
+        handle.read_at(0, &mut buf).unwrap();
+        assert_eq!(&buf, b"new_data");
+
+        // Backup should have old data
+        let backup_col = storage
+            .get_or_create_collection(&CollectionName::DiagnosticDatabaseBackup)
+            .await
+            .unwrap();
+        let handle = backup_col.read("ecu1.mdd").await.unwrap();
+        let size = usize::try_from(handle.data_size().unwrap()).expect("size fits usize");
+        let mut buf = vec![0u8; size];
+        handle.read_at(0, &mut buf).unwrap();
+        assert_eq!(&buf, b"old_data");
+
+        // Nextupdate should be gone (directory removed)
+        let result = storage
+            .get_collection(&CollectionName::DiagnosticDatabaseNextUpdate)
+            .await;
+        assert!(matches!(result, Err(StorageError::CollectionNotFound(_))));
+    }
+
+    #[tokio::test]
+    async fn apply_empty_nextupdate_returns_no_pending_update() {
+        let (storage, _dir) = make_storage();
+
+        let result = execute_apply(&storage, &NoopReloadHandler, false).await;
+
+        assert!(
+            matches!(result, Err(RuntimeUpdateError::NoPendingUpdate)),
+            "expected NoPendingUpdate, got: {result:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn apply_atomicity_multiple_files() {
+        let (storage, _dir) = make_storage();
+
+        init_collection(
+            &storage,
+            &CollectionName::DiagnosticDatabase,
+            &[("ecu1.mdd", b"old1"), ("ecu2.mdd", b"old2")],
+        )
+        .await;
+
+        init_collection(
+            &storage,
+            &CollectionName::DiagnosticDatabaseNextUpdate,
+            &[
+                ("ecu1.mdd", b"new1"),
+                ("ecu2.mdd", b"new2"),
+                ("ecu3.mdd", b"new3"),
+            ],
+        )
+        .await;
+
+        execute_apply(&storage, &NoopReloadHandler, false)
+            .await
+            .unwrap();
+
+        // Current should have all new files
+        let db_col = storage
+            .get_or_create_collection(&CollectionName::DiagnosticDatabase)
+            .await
+            .unwrap();
+        let keys = db_col.list().await.unwrap();
+        assert_eq!(keys.len(), 3);
+
+        let handle = db_col.read("ecu3.mdd").await.unwrap();
+        let size = usize::try_from(handle.data_size().unwrap()).expect("size fits usize");
+        let mut buf = vec![0u8; size];
+        handle.read_at(0, &mut buf).unwrap();
+        assert_eq!(&buf, b"new3");
+
+        // Backup should have old files
+        let backup_col = storage
+            .get_or_create_collection(&CollectionName::DiagnosticDatabaseBackup)
+            .await
+            .unwrap();
+        let backup_keys = backup_col.list().await.unwrap();
+        assert_eq!(backup_keys.len(), 2);
+
+        // Nextupdate gone
+        let result = storage
+            .get_collection(&CollectionName::DiagnosticDatabaseNextUpdate)
+            .await;
+        assert!(matches!(result, Err(StorageError::CollectionNotFound(_))));
+    }
+
+    #[tokio::test]
+    async fn apply_calls_reload_databases() {
+        let (storage, _dir) = make_storage();
+
+        init_collection(
+            &storage,
+            &CollectionName::DiagnosticDatabaseNextUpdate,
+            &[("ecu1.mdd", b"data")],
+        )
+        .await;
+
+        let handler = RecordingReloadHandler::new();
+        execute_apply(&storage, &handler, false).await.unwrap();
+
+        let calls = handler.reload_calls.lock().unwrap();
+        assert_eq!(calls.len(), 1, "reload_databases should be called once");
+    }
+
+    #[tokio::test]
+    async fn apply_calls_reload_databases_with_paths() {
+        let (storage, dir) = make_storage();
+
+        init_collection(
+            &storage,
+            &CollectionName::DiagnosticDatabaseNextUpdate,
+            &[("ecu1.mdd", b"data")],
+        )
+        .await;
+
+        let handler = RecordingReloadHandler::new();
+        execute_apply(&storage, &handler, false).await.unwrap();
+
+        let expected_path = dir
+            .path()
+            .join("collections")
+            .join("diagnostic_database")
+            .join("ecu1.mdd");
+        let calls = handler.reload_calls.lock().unwrap();
+        assert_eq!(calls.len(), 1);
+        let Some(first_call) = calls.first() else {
+            panic!("expected call")
+        };
+        assert_eq!(first_call.len(), 1);
+        let Some(first_path) = first_call.first() else {
+            panic!("expected path")
+        };
+        assert_eq!(*first_path, expected_path);
+    }
+
+    #[tokio::test]
+    async fn apply_with_config_updates_configuration() {
+        let (storage, _dir) = make_storage();
+
+        init_collection(
+            &storage,
+            &CollectionName::DiagnosticDatabaseNextUpdate,
+            &[("ecu1.mdd", b"mdd_data")],
+        )
+        .await;
+
+        init_collection(
+            &storage,
+            &CollectionName::Configuration,
+            &[("config.toml", b"[old_config]")],
+        )
+        .await;
+
+        init_collection(
+            &storage,
+            &CollectionName::ConfigurationNextUpdate,
+            &[("config.toml", b"[new_config]")],
+        )
+        .await;
+
+        execute_apply(&storage, &NoopReloadHandler, false)
+            .await
+            .unwrap();
+
+        // Configuration should have new config
+        let config_col = storage
+            .get_or_create_collection(&CollectionName::Configuration)
+            .await
+            .unwrap();
+        let handle = config_col.read("config.toml").await.unwrap();
+        let size = usize::try_from(handle.data_size().unwrap()).expect("size fits usize");
+        let mut buf = vec![0u8; size];
+        handle.read_at(0, &mut buf).unwrap();
+        assert_eq!(&buf, b"[new_config]");
+
+        // ConfigurationBackup should have old config
+        let backup_col = storage
+            .get_or_create_collection(&CollectionName::ConfigurationBackup)
+            .await
+            .unwrap();
+        let handle = backup_col.read("config.toml").await.unwrap();
+        let size = usize::try_from(handle.data_size().unwrap()).expect("size fits usize");
+        let mut buf = vec![0u8; size];
+        handle.read_at(0, &mut buf).unwrap();
+        assert_eq!(&buf, b"[old_config]");
+
+        // ConfigurationNextUpdate should be gone
+        let result = storage
+            .get_collection(&CollectionName::ConfigurationNextUpdate)
+            .await;
+        assert!(matches!(result, Err(StorageError::CollectionNotFound(_))));
+    }
+
+    #[tokio::test]
+    async fn apply_mdd_only_leaves_config_untouched() {
+        let (storage, _dir) = make_storage();
+
+        init_collection(
+            &storage,
+            &CollectionName::DiagnosticDatabaseNextUpdate,
+            &[("ecu1.mdd", b"mdd_new")],
+        )
+        .await;
+
+        init_collection(
+            &storage,
+            &CollectionName::Configuration,
+            &[("config.toml", b"[original]")],
+        )
+        .await;
+
+        execute_apply(&storage, &NoopReloadHandler, false)
+            .await
+            .unwrap();
+
+        // Configuration unchanged
+        {
+            let config_col = storage
+                .get_or_create_collection(&CollectionName::Configuration)
+                .await
+                .unwrap();
+            let handle = config_col.read("config.toml").await.unwrap();
+            let size = usize::try_from(handle.data_size().unwrap()).expect("size fits usize");
+            let mut buf = vec![0u8; size];
+            handle.read_at(0, &mut buf).unwrap();
+            assert_eq!(&buf, b"[original]");
+        }
+
+        let backup_col = storage
+            .get_or_create_collection(&CollectionName::ConfigurationBackup)
+            .await
+            .unwrap();
+        assert!(backup_col.is_empty().await.unwrap());
+    }
+
+    #[tokio::test]
+    async fn apply_calls_reload_configuration_when_config_updated() {
+        let (storage, _dir) = make_storage();
+
+        init_collection(
+            &storage,
+            &CollectionName::DiagnosticDatabaseNextUpdate,
+            &[("ecu1.mdd", b"mdd_data")],
+        )
+        .await;
+
+        init_collection(
+            &storage,
+            &CollectionName::ConfigurationNextUpdate,
+            &[("config.toml", b"[new_config]")],
+        )
+        .await;
+
+        let handler = RecordingReloadHandler::new();
+        execute_apply(&storage, &handler, false).await.unwrap();
+
+        let config_calls = handler.config_calls.lock().unwrap();
+        assert_eq!(
+            config_calls.len(),
+            1,
+            "reload_configuration should be called once"
+        );
+        let Some(first_call) = config_calls.first() else {
+            panic!("expected call")
+        };
+        assert!(
+            first_call.ends_with("config.toml"),
+            "reload_configuration should receive the config file path"
+        );
+    }
+
+    #[tokio::test]
+    async fn apply_reloads_configuration_before_databases() {
+        let (storage, _dir) = make_storage();
+
+        init_collection(
+            &storage,
+            &CollectionName::DiagnosticDatabaseNextUpdate,
+            &[("ecu1.mdd", b"mdd_data")],
+        )
+        .await;
+
+        init_collection(
+            &storage,
+            &CollectionName::ConfigurationNextUpdate,
+            &[("config.toml", b"[new_config]")],
+        )
+        .await;
+
+        let handler = OrderingReloadHandler::default();
+        execute_apply(&storage, &handler, false).await.unwrap();
+
+        let call_order = handler.call_order.lock().unwrap();
+        assert_eq!(call_order.as_slice(), ["configuration", "databases"]);
+    }
+
+    #[tokio::test]
+    async fn apply_does_not_call_reload_configuration_without_config() {
+        let (storage, _dir) = make_storage();
+
+        init_collection(
+            &storage,
+            &CollectionName::DiagnosticDatabaseNextUpdate,
+            &[("ecu1.mdd", b"data")],
+        )
+        .await;
+
+        let handler = RecordingReloadHandler::new();
+        execute_apply(&storage, &handler, false).await.unwrap();
+
+        let config_calls = handler.config_calls.lock().unwrap();
+        assert!(
+            config_calls.is_empty(),
+            "reload_configuration should not be called"
+        );
+    }
+
+    #[tokio::test]
+    async fn apply_with_mdd_decompress_false_succeeds() {
+        let (storage, _dir) = make_storage();
+
+        init_collection(
+            &storage,
+            &CollectionName::DiagnosticDatabaseNextUpdate,
+            &[("ecu1.mdd", b"data")],
+        )
+        .await;
+
+        // mdd_decompress=false, should work fine
+        execute_apply(&storage, &NoopReloadHandler, false)
+            .await
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn apply_config_only_without_mdd_succeeds() {
+        let (storage, _dir) = make_storage();
+
+        init_collection(
+            &storage,
+            &CollectionName::Configuration,
+            &[("config.toml", b"[old_config]")],
+        )
+        .await;
+
+        init_collection(
+            &storage,
+            &CollectionName::ConfigurationNextUpdate,
+            &[("config.toml", b"[new_config]")],
+        )
+        .await;
+
+        execute_apply(&storage, &NoopReloadHandler, false)
+            .await
+            .expect("config-only apply should succeed");
+
+        // Configuration should have new config
+        let config_col = storage
+            .get_or_create_collection(&CollectionName::Configuration)
+            .await
+            .unwrap();
+        let handle = config_col.read("config.toml").await.unwrap();
+        let size = usize::try_from(handle.data_size().unwrap()).expect("size fits usize");
+        let mut buf = vec![0u8; size];
+        handle.read_at(0, &mut buf).unwrap();
+        assert_eq!(&buf, b"[new_config]");
+
+        // ConfigurationNextUpdate should be gone
+        let result = storage
+            .get_collection(&CollectionName::ConfigurationNextUpdate)
+            .await;
+        assert!(matches!(result, Err(StorageError::CollectionNotFound(_))));
+
+        // DiagnosticDatabase should be untouched (not even created)
+        let mdd_result = storage
+            .get_collection(&CollectionName::DiagnosticDatabase)
+            .await;
+        assert!(
+            matches!(mdd_result, Err(StorageError::CollectionNotFound(_))),
+            "DiagnosticDatabase should not be touched in a config-only apply"
+        );
+    }
+
+    #[tokio::test]
+    async fn apply_config_only_calls_reload_configuration_but_not_reload_databases() {
+        let (storage, _dir) = make_storage();
+
+        init_collection(
+            &storage,
+            &CollectionName::ConfigurationNextUpdate,
+            &[("config.toml", b"[new_config]")],
+        )
+        .await;
+
+        let handler = RecordingReloadHandler::new();
+        execute_apply(&storage, &handler, false).await.unwrap();
+
+        let config_calls = handler.config_calls.lock().unwrap();
+        assert_eq!(
+            config_calls.len(),
+            1,
+            "reload_configuration should be called once"
+        );
+
+        let reload_calls = handler.reload_calls.lock().unwrap();
+        assert!(
+            reload_calls.is_empty(),
+            "reload_databases should not be called"
+        );
+    }
+
+    #[tokio::test]
+    async fn apply_empty_mdd_nextupdate_clears_diagnostic_database() {
+        let (storage, _dir) = make_storage();
+
+        // Seed current database with files
+        init_collection(
+            &storage,
+            &CollectionName::DiagnosticDatabase,
+            &[("ecu1.mdd", b"data1"), ("ecu2.mdd", b"data2")],
+        )
+        .await;
+
+        // Create DiagnosticDatabaseNextUpdate as initialized-but-empty (no files)
+        storage
+            .get_or_create_collection(&CollectionName::DiagnosticDatabaseNextUpdate)
+            .await
+            .unwrap();
+
+        execute_apply(&storage, &NoopReloadHandler, false)
+            .await
+            .unwrap();
+
+        // DiagnosticDatabase should now be empty (snapshot swap from empty NextUpdate)
+        let db_col = storage
+            .get_or_create_collection(&CollectionName::DiagnosticDatabase)
+            .await
+            .unwrap();
+        let keys = db_col.list().await.unwrap();
+        assert!(
+            keys.is_empty(),
+            "DiagnosticDatabase should be empty after applying empty NextUpdate, got: {keys:?}"
+        );
+
+        // Backup should have the old files
+        let backup_col = storage
+            .get_or_create_collection(&CollectionName::DiagnosticDatabaseBackup)
+            .await
+            .unwrap();
+        let backup_keys = backup_col.list().await.unwrap();
+        assert_eq!(backup_keys.len(), 2);
+
+        // NextUpdate should be gone
+        let result = storage
+            .get_collection(&CollectionName::DiagnosticDatabaseNextUpdate)
+            .await;
+        assert!(matches!(result, Err(StorageError::CollectionNotFound(_))));
+    }
+
+    #[tokio::test]
+    async fn apply_removes_file_absent_from_nextupdate() {
+        let (storage, _dir) = make_storage();
+
+        init_collection(
+            &storage,
+            &CollectionName::DiagnosticDatabase,
+            &[("ecu1.mdd", b"data1"), ("ecu2.mdd", b"data2")],
+        )
+        .await;
+
+        init_collection(
+            &storage,
+            &CollectionName::DiagnosticDatabaseNextUpdate,
+            &[("ecu1.mdd", b"data1_updated")],
+        )
+        .await;
+
+        execute_apply(&storage, &NoopReloadHandler, false)
+            .await
+            .unwrap();
+
+        let db_col = storage
+            .get_or_create_collection(&CollectionName::DiagnosticDatabase)
+            .await
+            .unwrap();
+        let keys = db_col.list().await.unwrap();
+        assert_eq!(keys, vec!["ecu1.mdd"]);
+
+        let handle = db_col.read("ecu1.mdd").await.unwrap();
+        let size = usize::try_from(handle.data_size().unwrap()).expect("size fits usize");
+        let mut buf = vec![0u8; size];
+        handle.read_at(0, &mut buf).unwrap();
+        assert_eq!(&buf, b"data1_updated");
+    }
+}

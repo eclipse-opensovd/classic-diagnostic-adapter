@@ -10,15 +10,14 @@
  * https://www.apache.org/licenses/LICENSE-2.0
  */
 
-use std::{future::Future, sync::Arc};
-
-use aide::{
-    axum::{ApiRouter as Router, routing},
-    openapi::OpenApi,
-    swagger::Swagger,
+use std::{
+    future::Future,
+    sync::{Arc, atomic::AtomicBool},
 };
+
+use aide::{axum::routing, swagger::Swagger};
 use axum::{
-    Extension, Json,
+    Json,
     http::{self, Request},
 };
 use cda_interfaces::{
@@ -28,15 +27,21 @@ use cda_interfaces::{
 };
 use cda_plugin_security::SecurityPluginLoader;
 use dynamic_router::DynamicRouter;
+pub use dynamic_router::{RouteGroupNotFound, RouteHandle};
+pub use http::Method;
 use tokio::net::TcpListener;
 use tower::{Layer, ServiceExt as TowerServiceExt};
 use tower_http::{normalize_path::NormalizePathLayer, trace::TraceLayer};
 
+/// Public API surface re-exported from the crate-internal `sovd` module.
 pub use crate::sovd::{
-    SovdLockStateProvider, apps::sovd2uds::bulk_data::runtimefiles::DbUpdateRouteState,
-    error::VendorErrorCode, locks::Locks, static_data::add_static_data_endpoint,
+    EcuExecutionRegistry, SovdLockStateProvider,
+    apps::sovd2uds::bulk_data::runtimefiles::RuntimeUpdateRouteState,
+    error::VendorErrorCode,
+    locks::Locks,
+    static_data::add_static_data_endpoint,
+    update_guard::{ExemptRoute, UpdateGuardLayer, UpdateGuardState},
 };
-
 pub mod dynamic_router;
 mod openapi;
 pub(crate) mod sovd;
@@ -48,6 +53,21 @@ pub const OPENAPI_JSON_ROUTE: &str = "/openapi.json";
 pub struct WebServerConfig {
     pub host: String,
     pub port: u16,
+}
+
+/// Static configuration for vehicle SOVD routes.
+pub struct VehicleConfig {
+    pub flash_files_path: String,
+    pub functional_group_config: FunctionalDescriptionConfig,
+    pub components_config: ComponentsConfig,
+}
+
+/// Runtime resources (handles, shared state) for vehicle SOVD routes.
+pub struct VehicleResources<T, M> {
+    pub ecu_uds: T,
+    pub file_manager: HashMap<String, M>,
+    pub locks: Arc<Locks>,
+    pub update_in_progress: Arc<AtomicBool>,
 }
 
 /// [[ dimpl~sovd-api-http-server, Starts HTTP Server ]]
@@ -107,79 +127,128 @@ where
 /// Add vehicle routes to the dynamic router
 ///
 /// This function should be called after the database is loaded to add all vehicle routes
-/// to the webserver.
-///
 /// # Errors
 /// Will return `Err` if routes cannot be added to the dynamic router.
-// type alias does not allow specifying hasher, we set the hasher globally.
-#[allow(clippy::implicit_hasher)]
+#[allow(clippy::implicit_hasher, clippy::missing_errors_doc)]
 #[tracing::instrument(
-    skip(dynamic_router, ecu_uds, file_manager, locks),
+    skip(dynamic_router, config, resources),
     fields(
-        flash_files_path = %flash_files_path
+        flash_files_path = %config.flash_files_path
     )
 )]
 pub async fn add_vehicle_routes<R, T, M, S>(
     dynamic_router: &DynamicRouter,
-    ecu_uds: T,
-    flash_files_path: String,
-    file_manager: HashMap<String, M>,
-    locks: Arc<Locks>,
-    functional_group_config: FunctionalDescriptionConfig,
-    components_config: ComponentsConfig,
-) -> Result<(), DoipGatewaySetupError>
+    config: VehicleConfig,
+    resources: VehicleResources<T, M>,
+) -> Result<(EcuExecutionRegistry, RouteHandle), DoipGatewaySetupError>
 where
     R: DiagServiceResponse,
     T: UdsEcu + SchemaProvider + Clone + Send + Sync + 'static,
     M: FileManager + Send + Sync + 'static,
     S: SecurityPluginLoader,
 {
-    let vehicle_router = sovd::route::<R, T, M, S>(
-        functional_group_config,
-        components_config,
-        &ecu_uds,
-        flash_files_path,
-        file_manager,
-        locks,
-    )
-    .await;
+    let (vehicle_router, registry) = build_vehicle_routes::<R, T, M, S>(config, resources).await;
 
-    // Update the router with the new routes,
-    // merge with existing router to preserve existing routes
-    dynamic_router.merge_routes(vehicle_router).await;
+    let handle = dynamic_router.add_routes(vehicle_router).await;
 
     tracing::info!("Vehicle routes added to webserver");
-    Ok(())
+    Ok((registry, handle))
 }
 
-/// Add `OpenAPI` routes to the dynamic router, call this once all routes
-/// that should be documented are added, this will not update on further route additions and
-/// has to be called again.
+#[allow(clippy::implicit_hasher)]
+pub async fn build_vehicle_routes<R, T, M, S>(
+    config: VehicleConfig,
+    resources: VehicleResources<T, M>,
+) -> (aide::axum::ApiRouter, EcuExecutionRegistry)
+where
+    R: DiagServiceResponse,
+    T: UdsEcu + SchemaProvider + Clone + Send + Sync + 'static,
+    M: FileManager + Send + Sync + 'static,
+    S: SecurityPluginLoader,
+{
+    let (router, registry) = sovd::route::<R, T, M, S>(
+        config.functional_group_config,
+        config.components_config,
+        &resources.ecu_uds,
+        config.flash_files_path,
+        resources.file_manager,
+        resources.locks,
+        resources.update_in_progress,
+    )
+    .await;
+    (router, registry)
+}
+
+/// Mounts the runtime-update HTTP routes onto the dynamic router and returns a handle to them.
+///
+/// Adds the runtime-file update endpoints to the router, registers exempt routes on the
+/// [`UpdateGuardState`], and logs when the routes become active.
+pub async fn add_runtime_update_routes<S, P, L>(
+    dynamic_router: &DynamicRouter,
+    plugin: Arc<P>,
+    lock_state: Arc<L>,
+    update_guard: &UpdateGuardState,
+    upload_limit: usize,
+    retry_after_seconds: u64,
+) -> RouteHandle
+where
+    S: SecurityPluginLoader,
+    P: cda_interfaces::runtime_update_api::RuntimeFilesUpdatePlugin,
+    L: cda_interfaces::runtime_update_api::LockStateProvider,
+{
+    update_guard
+        .extend_exempt(sovd::apps::sovd2uds::bulk_data::runtimefiles::update_exempt_routes())
+        .await;
+
+    let route_state = RuntimeUpdateRouteState {
+        plugin,
+        vehicle_lock_states: lock_state,
+        retry_after_seconds,
+    };
+    let router =
+        sovd::apps::sovd2uds::bulk_data::runtimefiles::routes::<S, P, L>(route_state, upload_limit);
+    let handle = dynamic_router.add_routes(router.into()).await;
+    tracing::info!("Runtime update routes added to webserver");
+    handle
+}
+
+/// `OpenAPI` spec regenerates on every recomposition, reflecting current routes.
 pub async fn add_openapi_routes(
     dynamic_router: &DynamicRouter,
+    _update_guard: &UpdateGuardState,
     web_server_config: &WebServerConfig,
 ) {
     let server_url = format!(
         "http://{}:{}",
         web_server_config.host, web_server_config.port
     );
-    let mut api = OpenApi::default();
+    let dr = dynamic_router.clone();
     dynamic_router
-        .update_router(|r| {
-            r.route(
-                SWAGGER_UI_ROUTE,
-                Swagger::new(OPENAPI_JSON_ROUTE).axum_route(),
-            )
-            .route(
-                OPENAPI_JSON_ROUTE,
-                routing::get(|Extension(api): Extension<Arc<OpenApi>>| async move {
-                    Json((*api).clone())
-                }),
-            )
-            .finish_api_with(&mut api, |api| openapi::api_docs(api, server_url))
-            .layer(Extension(Arc::new(api)))
-            .into()
-        })
+        .add_finalizer(Arc::new(move |router: axum::Router| -> axum::Router {
+            let server_url = server_url.clone();
+            let dr = dr.clone();
+            let swagger_route: axum::routing::MethodRouter =
+                Swagger::new(OPENAPI_JSON_ROUTE).axum_route().into();
+            let openapi_route: axum::routing::MethodRouter = routing::get(move || async move {
+                let mut api = (*dr.get_openapi().await).clone();
+                let _ =
+                    openapi::api_docs(aide::transform::TransformOpenApi::new(&mut api), server_url);
+                Json(api)
+            })
+            .into();
+            router
+                .route(SWAGGER_UI_ROUTE, swagger_route)
+                .route(OPENAPI_JSON_ROUTE, openapi_route)
+        }))
+        .await;
+}
+
+pub async fn install_update_guard(dynamic_router: &DynamicRouter, update_guard: UpdateGuardState) {
+    let layer = UpdateGuardLayer::new(update_guard);
+    dynamic_router
+        .add_finalizer(Arc::new(move |router: axum::Router| -> axum::Router {
+            router.layer(layer.clone())
+        }))
         .await;
 }
 
@@ -206,7 +275,7 @@ fn rewrite_request_uri<B>(mut req: Request<B>) -> Request<B> {
     req
 }
 
-fn create_trace_layer<S>(route: Router<S>) -> Router<S>
+fn create_trace_layer<S>(route: axum::Router<S>) -> axum::Router<S>
 where
     S: Clone + Send + Sync + 'static,
 {

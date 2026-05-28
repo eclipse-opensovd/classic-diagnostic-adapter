@@ -37,10 +37,12 @@ mod faults;
 mod flash_download;
 mod locks;
 mod operations;
+mod runtimefiles;
 mod version_endpoint;
 
 pub(crate) const ECU_FLXC1000_ENDPOINT: &str = "components/flxc1000";
 pub(crate) const ECU_FLXCNG1000_ENDPOINT: &str = "components/flxcng1000";
+pub(crate) const ECU_FSNR2000_ENDPOINT: &str = "components/fsnr2000";
 pub(crate) const ECU_TMCC3000_ENDPOINT: &str = "components/tmcc3000";
 pub(crate) const ECU_HOVR4000_ENDPOINT: &str = "components/hovr4000";
 pub(crate) const ECU_JGWT5000_ENDPOINT: &str = "components/jgwt5000";
@@ -378,15 +380,18 @@ where
         // Run cleanup inside catch_unwind so a failure here never triggers
         // a double-panic (which the runtime turns into SIGABRT).
         let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            // Create a new runtime to drive the future to completion.
-            // Don't use Handle::current().block_on() here it will
-            // deadlock if the panic happens on an async worker thread.
-            if let Ok(rt) = tokio::runtime::Builder::new_current_thread()
-                .enable_all()
-                .build()
-            {
-                rt.block_on(cleanup_fn());
-            }
+            // Run on a dedicated thread to avoid nesting a new runtime
+            // inside the existing tokio runtime (which would abort).
+            std::thread::scope(|s| {
+                s.spawn(|| {
+                    if let Ok(rt) = tokio::runtime::Builder::new_current_thread()
+                        .enable_all()
+                        .build()
+                    {
+                        rt.block_on(cleanup_fn());
+                    }
+                });
+            });
         }));
         previous_hook(panic_info);
     }));

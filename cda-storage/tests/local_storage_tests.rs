@@ -170,7 +170,7 @@ async fn single_transaction_enforcement() {
 
     let _tx = storage.begin_transaction().unwrap();
     let result = storage.begin_transaction();
-    assert!(matches!(result, Err(StorageError::TransactionError(_))));
+    assert!(matches!(result, Err(StorageError::TransactionBusy)));
 }
 
 #[tokio::test]

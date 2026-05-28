@@ -369,6 +369,7 @@ pub(crate) mod diag_service {
             locks,
             functional_group_name,
             fg_executions,
+            update_in_progress,
             ..
         }): State<WebserverFgState<T>>,
         body: Bytes,
@@ -400,13 +401,18 @@ pub(crate) mod diag_service {
         // conflict and, if none, inserts a placeholder so that a second
         // concurrent POST for the same operation sees 409 Conflict.
         let operation_lower = operation.to_lowercase();
-        let exec_id =
-            match reserve_execution(&fg_executions, &operation_lower, &operation, include_schema)
-                .await
-            {
-                Ok(id) => id,
-                Err(err) => return err.into_response(),
-            };
+        let exec_id = match reserve_execution(
+            &fg_executions,
+            &operation_lower,
+            &operation,
+            include_schema,
+            &update_in_progress,
+        )
+        .await
+        {
+            Ok(id) => id,
+            Err(err) => return err.into_response(),
+        };
 
         let is_async = if suppress_service {
             // suppress service is always treated as async

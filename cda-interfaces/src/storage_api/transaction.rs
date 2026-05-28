@@ -97,7 +97,7 @@ pub trait TransactionCommitter: Send + Sync {
 ///
 /// Only one `Transaction` may exist at a time per [`Storage`](super::Storage) instance. Attempting
 /// to begin a second transaction while one is active will return
-/// [`StorageError::TransactionError`].
+/// [`StorageError::TransactionBusy`].
 ///
 /// ## Lifecycle
 ///

@@ -19,6 +19,7 @@ use cda_interfaces::{
         FaultConfig, FlatbBufConfig, SdBoolMappings, SdMappingsTruthyValue,
     },
 };
+pub use cda_plugin_runtime_update::config::RuntimeUpdateConfig;
 use serde::{Deserialize, Serialize};
 
 use crate::AppError;
@@ -159,6 +160,8 @@ pub struct Configuration {
     /// match against the MDD short name returned by `load_proto_data`).
     #[serde(default)]
     pub ecu: HashMap<String, EcuConfig>,
+    /// Configuration for update plugin, i.e. storage paths
+    pub runtime_update_config: RuntimeUpdateConfig,
 }
 
 /// Per-ECU configuration block.
@@ -205,6 +208,7 @@ impl Default for Configuration {
                 ignore_protocol: false,
                 strict_parameter_validation: false,
                 strict_ecu_config: false,
+                ignore_invalid_mdd: false,
             },
             flash_files_path: ".".to_owned(),
             server: ServerConfig {
@@ -252,6 +256,7 @@ impl Default for Configuration {
             },
             faults: FaultConfig::default(),
             ecu: HashMap::default(),
+            runtime_update_config: RuntimeUpdateConfig::default(),
         }
     }
 }

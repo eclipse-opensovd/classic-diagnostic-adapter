@@ -30,7 +30,8 @@ use futures::FutureExt as _;
 use opensovd_cda_lib::{
     cda_version,
     config::configfile::{
-        ConfigSanity, Configuration, DatabaseConfig, EcuComParams, EcuConfig, ServerConfig,
+        ConfigSanity, Configuration, DatabaseConfig, EcuComParams, EcuConfig, RuntimeUpdateConfig,
+        ServerConfig,
     },
 };
 use tokio::sync::{Mutex, MutexGuard, OnceCell};
@@ -173,6 +174,7 @@ fn cda_test_config(
             ignore_protocol: false,
             strict_parameter_validation: false,
             strict_ecu_config: false,
+            ignore_invalid_mdd: false,
         },
         logging: LoggingConfig::default(),
         flash_files_path: flash_files_path()?,
@@ -266,6 +268,10 @@ fn cda_test_config(
                 },
             );
             map
+        },
+        runtime_update_config: RuntimeUpdateConfig {
+            init_storage_from_database_path: true,
+            ..RuntimeUpdateConfig::default()
         },
     };
     Ok(config)
@@ -372,12 +378,17 @@ fn start_cda(config: Configuration) {
 
         cda_sovd::add_vehicle_routes::<DiagServiceResponseStruct, _, _, DefaultSecurityPlugin>(
             &dynamic_router,
-            vehicle_data.uds_manager,
-            config.flash_files_path.clone(),
-            vehicle_data.file_managers,
-            vehicle_data.locks,
-            config.functional_description,
-            config.components,
+            cda_sovd::VehicleConfig {
+                flash_files_path: config.flash_files_path.clone(),
+                functional_group_config: config.functional_description,
+                components_config: config.components,
+            },
+            cda_sovd::VehicleResources {
+                ecu_uds: vehicle_data.uds_manager,
+                file_manager: vehicle_data.file_managers,
+                locks: vehicle_data.locks,
+                update_in_progress: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            },
         )
         .await
         .map_err(|e| {
@@ -802,7 +813,7 @@ pub(crate) fn find_available_tcp_port(listen_address: &str) -> Result<u16, Testi
         .port())
 }
 
-fn test_container_dir() -> Result<std::path::PathBuf, TestingError> {
+pub(crate) fn test_container_dir() -> Result<std::path::PathBuf, TestingError> {
     std::env::var("CARGO_MANIFEST_DIR")
         .map(|dir| {
             let mut path = std::path::PathBuf::from(dir);

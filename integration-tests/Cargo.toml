@@ -43,7 +43,7 @@ serde_qs = { workspace = true, features = ["axum"] }
 # http
 aide = { workspace = true, features = ["axum"] }
 axum = { workspace = true }
-reqwest = { workspace = true }
+reqwest = { workspace = true, features = ["multipart"] }
 http = { workspace = true }
 mime = { workspace = true }
 schemars = { workspace = true }
