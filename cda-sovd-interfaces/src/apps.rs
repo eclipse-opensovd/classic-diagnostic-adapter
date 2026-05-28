@@ -32,6 +32,44 @@ pub mod sovd2uds {
                 pub type Response = crate::sovd2uds::FileList;
             }
         }
+
+        pub mod runtimefiles {
+            use serde::Deserialize;
+
+            /// Execution mode for database update operations.
+            #[derive(
+                Debug, Clone, PartialEq, Eq, serde::Serialize, Deserialize, schemars::JsonSchema,
+            )]
+            #[serde(rename_all = "lowercase")]
+            pub enum ExecutionMode {
+                /// Apply staged files as the new current version.
+                Apply,
+                /// Revert to the backup from the previous apply.
+                Rollback,
+                /// Remove staged and backup files without applying.
+                Cleanup,
+            }
+
+            /// Request body for an execution.
+            #[derive(Debug, Deserialize, schemars::JsonSchema)]
+            pub struct ExecutionRequest {
+                /// The operation to perform on the staged runtime files.
+                pub mode: ExecutionMode,
+            }
+
+            /// Query parameters for runtime file list endpoints.
+            #[derive(Debug, Default, Deserialize, schemars::JsonSchema)]
+            pub struct RuntimeFilesQuery {
+                #[serde(rename = "include-schema", default)]
+                pub include_schema: bool,
+                #[serde(rename = "x-sovd2uds-include-hash")]
+                pub include_hash: Option<crate::sovd2uds::HashAlgorithm>,
+                #[serde(rename = "x-sovd2uds-include-file-size", default)]
+                pub include_file_size: bool,
+                #[serde(rename = "x-sovd2uds-include-revision", default)]
+                pub include_revision: bool,
+            }
+        }
     }
 
     pub mod data {

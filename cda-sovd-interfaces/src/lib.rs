@@ -103,7 +103,7 @@ pub mod sovd2uds {
     }
 
     /// A bulk-data descriptor as defined by ISO 17978-3, Table 298.
-    #[derive(Serialize, Debug, Clone, schemars::JsonSchema)]
+    #[derive(Serialize, Deserialize, Debug, Clone, schemars::JsonSchema)]
     pub struct BulkDataDescriptor {
         pub id: String,
         pub mimetype: String,

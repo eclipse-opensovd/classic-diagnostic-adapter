@@ -96,7 +96,7 @@ fn decompress_chunk_data(
 /// # Errors
 /// Returns an error if the file cannot be opened, memory-mapped, has invalid
 /// magic bytes, or cannot be parsed as a protobuf.
-fn mmap_and_decode_mdd(mdd_path: &str) -> Result<fileformat::MddFile, MddError> {
+pub fn mmap_and_decode_mdd(mdd_path: &str) -> Result<fileformat::MddFile, MddError> {
     let mdd_file = std::fs::File::open(mdd_path)
         .map_err(|e| MddError::Io(format!("Failed to open MDD file '{mdd_path}': {e}")))?;
 

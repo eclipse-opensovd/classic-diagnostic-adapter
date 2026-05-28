@@ -381,6 +381,10 @@
 # If true, when variant detection fails to find a matching variant,
 # the ECU will fall back to the base variant instead of reporting an error.
 # fallback_to_base_variant = true
+# When `true`, MDD files that fail to load are skipped and the remaining
+# databases continue loading. When `false` (the default), any MDD load
+# failure aborts the entire load/reload operation.
+# ignore_invalid_mdd = false
 # When `true`, com-param and protocol lookups ignore the protocol filter
 # and match by parameter name alone.
 #
@@ -626,6 +630,16 @@
 [logging.tokio_tracing.retention]
 # nanos = 0
 # secs = 3600
+
+# Configuration for update plugin, i.e. storage paths
+[runtime_update_config]
+# Directory where the updatable configuration and database are stored.
+# storage_dir = "."
+# Maximum upload body size in bytes for multipart file uploads.
+# Default: 50MB. Axum's built-in limit is 2MB which is too low for MDD files.
+# upload_body_limit_bytes = 52428800
+# Retry-After header value (seconds) when service is busy due to an ongoing transaction.
+# retry_after_seconds = 1
 
 # SOVD HTTP server bind settings.
 [server]

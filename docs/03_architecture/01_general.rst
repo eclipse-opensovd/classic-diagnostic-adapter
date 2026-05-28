@@ -35,7 +35,8 @@ Storage Access
                 CollectionNotFound(String)
                 KeyNotFound(String)
                 PermissionDenied(String)
-                TransactionError(String)
+                TransactionBusy
+                TransactionConflict(String)
                 NoSpaceLeft(String)
                 Io(String)
                 Corruption(String)

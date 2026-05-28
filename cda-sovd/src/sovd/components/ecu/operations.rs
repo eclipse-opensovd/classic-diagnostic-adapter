@@ -155,6 +155,7 @@ pub(crate) mod comparams {
             >,
             State(WebserverEcuState {
                 comparam_executions,
+                update_in_progress,
                 ..
             }): State<WebserverEcuState<R, T, U>>,
             UseApi(ExtractHost(host), _): UseApi<ExtractHost, String>,
@@ -167,7 +168,14 @@ pub(crate) mod comparams {
             } else {
                 None
             };
-            handler_write(comparam_executions, path, body, query.include_schema).await
+            handler_write(
+                comparam_executions,
+                path,
+                body,
+                query.include_schema,
+                &update_in_progress,
+            )
+            .await
         }
 
         pub(crate) fn docs_post(op: TransformOperation) -> TransformOperation {
@@ -212,10 +220,20 @@ pub(crate) mod comparams {
             base_path: String,
             request: Option<sovd_comparams::executions::update::Request>,
             include_schema: bool,
+            update_in_progress: &std::sync::atomic::AtomicBool,
         ) -> Response {
             // todo: not in scope for now: request can take body with
             // { timeout: INT, parameters: { ... }, proximity_response: STRING }
             let mut executions = executions.write().await;
+            if update_in_progress.load(std::sync::atomic::Ordering::Acquire) {
+                return ErrorWrapper {
+                    error: ApiError::Conflict(
+                        "Runtime update in progress, operation blocked".to_owned(),
+                    ),
+                    include_schema,
+                }
+                .into_response();
+            }
             let id = Uuid::new_v4();
             let mut comparam_override: HashMap<String, sovd_comparams::ComParamValue> =
                 HashMap::new();
@@ -694,6 +712,7 @@ pub(crate) mod service {
                 uds,
                 locks,
                 service_executions,
+                update_in_progress,
                 ..
             }): State<WebserverEcuState<R, T, U>>,
             UseApi(Host(host), _): UseApi<Host, String>,
@@ -722,6 +741,7 @@ pub(crate) mod service {
                     suppress_service: query.suppress_service,
                     base_path: format!("http://{host}{uri}"),
                 },
+                &update_in_progress,
             )
             .await
         }
@@ -763,6 +783,26 @@ pub(crate) mod service {
                 .with(openapi::error_bad_gateway)
         }
 
+        fn validate_and_parse_write_request(
+            headers: &HeaderMap,
+            body: &Bytes,
+        ) -> Result<(Option<cda_interfaces::diagservices::UdsPayloadData>, bool), ApiError> {
+            let (Some(content_type), accept) = get_content_type_and_accept(headers)? else {
+                return Err(ApiError::BadRequest("Missing Content-Type".to_owned()));
+            };
+            let data = sovd::get_payload_data::<sovd_executions::Request>(
+                Some(&content_type),
+                headers,
+                body,
+            )?;
+            if accept != mime::APPLICATION_OCTET_STREAM && accept != mime::APPLICATION_JSON {
+                return Err(ApiError::BadRequest(format!(
+                    "Unsupported Accept header: {accept:?}"
+                )));
+            }
+            Ok((data, accept == mime::APPLICATION_JSON))
+        }
+
         pub(crate) async fn ecu_operation_write_handler<T: UdsEcu + SchemaProvider + Clone>(
             req: WriteHandlerRequest,
             ecu_name: &str,
@@ -774,6 +814,7 @@ pub(crate) mod service {
             >,
             security_plugin: Box<dyn SecurityPlugin>,
             opts: WriteHandlerOptions,
+            update_in_progress: &std::sync::atomic::AtomicBool,
         ) -> Response {
             let WriteHandlerRequest {
                 service,
@@ -807,13 +848,18 @@ pub(crate) mod service {
             // Reserve an execution slot atomically: checks for a running
             // conflict and, if none, inserts a placeholder so that a second
             // concurrent POST for the same operation sees 409 Conflict.
-            let exec_id =
-                match reserve_execution(&service_executions, &service, &service, include_schema)
-                    .await
-                {
-                    Ok(id) => id,
-                    Err(err) => return err.into_response(),
-                };
+            let exec_id = match reserve_execution(
+                &service_executions,
+                &service,
+                &service,
+                include_schema,
+                update_in_progress,
+            )
+            .await
+            {
+                Ok(id) => id,
+                Err(err) => return err.into_response(),
+            };
 
             let security_plugin: DynamicPlugin = security_plugin;
             let is_async = if suppress_service {
@@ -828,17 +874,12 @@ pub(crate) mod service {
                 }
             };
 
-            let content_type_and_accept = match get_content_type_and_accept(&headers) {
+            let (data, map_to_json) = match validate_and_parse_write_request(&headers, &body) {
                 Ok(v) => v,
                 Err(e) => {
                     remove_reserved_execution(&service_executions, &service, &exec_id).await;
                     return err_response(e);
                 }
-            };
-
-            let (Some(content_type), accept) = content_type_and_accept else {
-                remove_reserved_execution(&service_executions, &service, &exec_id).await;
-                return err_response(ApiError::BadRequest("Missing Content-Type".to_owned()));
             };
 
             let diag_service = DiagComm {
@@ -847,27 +888,6 @@ pub(crate) mod service {
                 lookup_name: None,
                 subfunction_id: Some(subfunction_ids::routine::START),
             };
-
-            let data = match sovd::get_payload_data::<sovd_executions::Request>(
-                Some(&content_type),
-                &headers,
-                &body,
-            ) {
-                Ok(v) => v,
-                Err(e) => {
-                    remove_reserved_execution(&service_executions, &service, &exec_id).await;
-                    return err_response(e);
-                }
-            };
-
-            if accept != mime::APPLICATION_OCTET_STREAM && accept != mime::APPLICATION_JSON {
-                remove_reserved_execution(&service_executions, &service, &exec_id).await;
-                return err_response(ApiError::BadRequest(format!(
-                    "Unsupported Accept header: {accept:?}"
-                )));
-            }
-
-            let map_to_json = accept == mime::APPLICATION_JSON;
             let response = if suppress_service {
                 None
             } else {
@@ -3377,6 +3397,7 @@ mod tests {
                     suppress_service: false,
                     base_path: "http://localhost/operations/CalibrateSensor/executions".to_string(),
                 },
+                &std::sync::atomic::AtomicBool::new(false),
             )
             .await;
 
@@ -3442,6 +3463,7 @@ mod tests {
                     suppress_service: false,
                     base_path: "http://localhost/operations/CalibrateSensor/executions".to_string(),
                 },
+                &std::sync::atomic::AtomicBool::new(false),
             )
             .await;
 
@@ -3486,6 +3508,7 @@ mod tests {
                     suppress_service: false,
                     base_path: "http://localhost/operations/CalibrateSensor/executions".to_string(),
                 },
+                &std::sync::atomic::AtomicBool::new(false),
             )
             .await;
 
@@ -3533,6 +3556,7 @@ mod tests {
                     suppress_service: false,
                     base_path: "http://localhost/operations/CalibrateSensor/executions".to_string(),
                 },
+                &std::sync::atomic::AtomicBool::new(false),
             )
             .await;
 
@@ -3582,6 +3606,7 @@ mod tests {
                     suppress_service: false,
                     base_path: "http://localhost/operations/CalibrateSensor/executions".to_string(),
                 },
+                &std::sync::atomic::AtomicBool::new(false),
             )
             .await;
 
@@ -3622,6 +3647,7 @@ mod tests {
                     suppress_service: true,
                     base_path: "http://localhost/operations/CalibrateSensor/executions".to_string(),
                 },
+                &std::sync::atomic::AtomicBool::new(false),
             )
             .await;
 
@@ -3682,6 +3708,7 @@ mod tests {
                     suppress_service: false,
                     base_path: "http://localhost/operations/CalibrateSensor/executions".to_string(),
                 },
+                &std::sync::atomic::AtomicBool::new(false),
             )
             .await;
 
@@ -3755,6 +3782,7 @@ mod tests {
                     suppress_service: false,
                     base_path: "http://localhost/operations/CalibrateSensor/executions".to_string(),
                 },
+                &std::sync::atomic::AtomicBool::new(false),
             )
             .await;
 

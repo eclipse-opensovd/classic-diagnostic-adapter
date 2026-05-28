@@ -28,6 +28,7 @@ use doip_definitions::{
 use futures::FutureExt;
 use thiserror::Error;
 use tokio::sync::{Mutex, RwLock, broadcast, mpsc};
+use tokio_util::sync::CancellationToken;
 
 use crate::{
     config::DoipConfig,
@@ -76,6 +77,7 @@ pub struct DoipDiagGateway<T: EcuAddressProvider + DoipComParamProvider> {
     logical_address_to_connection: Arc<RwLock<HashMap<u16, usize>>>,
     ecus: Arc<HashMap<String, RwLock<T>>>,
     socket: Arc<Mutex<DoIPUdpSocket>>,
+    cancel_token: CancellationToken,
 }
 
 #[derive(Debug)]
@@ -222,6 +224,7 @@ impl<T: EcuAddressProvider + DoipComParamProvider> DoipDiagGateway<T> {
                 logical_address_to_connection: Arc::new(RwLock::new(HashMap::new())),
                 ecus,
                 socket: Arc::new(Mutex::new(socket)),
+                cancel_token: CancellationToken::new(),
             }
         } else {
             tracing::info!(gateway_count = gateways.len(), "Gateways found");
@@ -263,6 +266,7 @@ impl<T: EcuAddressProvider + DoipComParamProvider> DoipDiagGateway<T> {
                 logical_address_to_connection: Arc::new(RwLock::new(logical_address_to_connection)),
                 ecus,
                 socket: Arc::new(Mutex::new(socket)),
+                cancel_token: CancellationToken::new(),
             }
         };
 
@@ -275,10 +279,15 @@ impl<T: EcuAddressProvider + DoipComParamProvider> DoipDiagGateway<T> {
             variant_detection,
             send_timeout,
             shared_shutdown_signal,
+            gateway.cancel_token.child_token(),
         )
         .await;
 
         Ok(gateway)
+    }
+
+    pub fn shutdown(&self) {
+        self.cancel_token.cancel();
     }
 
     async fn get_doip_connection(
@@ -845,6 +854,7 @@ impl<T: EcuAddressProvider + DoipComParamProvider> Clone for DoipDiagGateway<T> 
             logical_address_to_connection: Arc::clone(&self.logical_address_to_connection),
             ecus: Arc::clone(&self.ecus),
             socket: Arc::clone(&self.socket),
+            cancel_token: self.cancel_token.clone(),
         }
     }
 }

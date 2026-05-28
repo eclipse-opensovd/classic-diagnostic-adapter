@@ -12,7 +12,10 @@
 
 use std::{
     fmt::Write as _,
-    sync::Arc,
+    sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+    },
     time::{Duration, Instant},
 };
 
@@ -92,7 +95,26 @@ pub struct UdsManager<S: EcuGateway, R: DiagServiceResponse, T: EcuManager<Respo
     security_reset_tasks: Arc<RwLock<HashMap<EcuIdentifier, JoinHandle<()>>>>,
     functional_description_database: String,
     fault_config: FaultConfig,
+    update_in_progress: Arc<AtomicBool>,
     _phantom: std::marker::PhantomData<R>,
+}
+
+/// Guard that reports whether any ECU flash data transfers are currently active.
+///
+/// Used by the runtime update plugin to block updates while transfers are in progress.
+/// Implements [`cda_plugin_runtime_update::ActiveOperationsGuard`] with a conservative
+/// locking strategy: if the internal mutex is contended, it reports active operations
+/// to prevent TOCTOU races.
+pub struct FlashTransferObserver {
+    data_transfers: Arc<Mutex<HashMap<EcuIdentifier, EcuDataTransfer>>>,
+}
+
+impl cda_plugin_runtime_update::ActiveOperationsGuard for FlashTransferObserver {
+    fn has_active_operations(&self) -> bool {
+        self.data_transfers
+            .try_lock()
+            .map_or(true, |guard| !guard.is_empty())
+    }
 }
 
 impl<S: EcuGateway, R: DiagServiceResponse, T: EcuManager<Response = R>> UdsManager<S, R, T> {
@@ -102,6 +124,7 @@ impl<S: EcuGateway, R: DiagServiceResponse, T: EcuManager<Response = R>> UdsMana
         mut variant_detection_receiver: mpsc::Receiver<Vec<String>>,
         functional_description_config: &FunctionalDescriptionConfig,
         fault_config: FaultConfig,
+        update_in_progress: Arc<AtomicBool>,
     ) -> Self {
         let manager = Self {
             ecus,
@@ -115,6 +138,7 @@ impl<S: EcuGateway, R: DiagServiceResponse, T: EcuManager<Response = R>> UdsMana
                 .description_database
                 .clone(),
             fault_config,
+            update_in_progress,
             _phantom: std::marker::PhantomData,
         };
 
@@ -143,6 +167,40 @@ impl<S: EcuGateway, R: DiagServiceResponse, T: EcuManager<Response = R>> UdsMana
         });
 
         manager
+    }
+
+    pub fn flash_transfer_guard(&self) -> FlashTransferObserver {
+        FlashTransferObserver {
+            data_transfers: Arc::clone(&self.data_transfers),
+        }
+    }
+
+    /// Abort all background tasks owned by this instance. Idempotent.
+    pub async fn shutdown(&self) {
+        {
+            let mut tasks = self.tester_present_tasks.write().await;
+            for (_, tp_task) in tasks.drain() {
+                tp_task.task.abort();
+            }
+        }
+        {
+            let mut tasks = self.session_reset_tasks.write().await;
+            for (_, handle) in tasks.drain() {
+                handle.abort();
+            }
+        }
+        {
+            let mut tasks = self.security_reset_tasks.write().await;
+            for (_, handle) in tasks.drain() {
+                handle.abort();
+            }
+        }
+        {
+            let mut transfers = self.data_transfers.lock().await;
+            for (_, transfer) in transfers.drain() {
+                transfer.task.abort();
+            }
+        }
     }
 
     fn ecu_manager(&self, ecu_name: &str) -> Result<&RwLock<T>, DiagServiceError> {
@@ -1207,6 +1265,7 @@ impl<S: EcuGateway, R: DiagServiceResponse, T: EcuManager<Response = R>> Clone
             security_reset_tasks: Arc::clone(&self.security_reset_tasks),
             functional_description_database: self.functional_description_database.clone(),
             fault_config: self.fault_config.clone(),
+            update_in_progress: Arc::clone(&self.update_in_progress),
             _phantom: self._phantom,
         }
     }
@@ -1869,6 +1928,11 @@ impl<S: EcuGateway, R: DiagServiceResponse, T: EcuManager<Response = R>> UdsEcu
         // lock the transfers, to make sure the task only accesses the transfers once
         // we are fully initialized
         let mut transfer_lock = self.data_transfers.lock().await;
+        if self.update_in_progress.load(Ordering::Acquire) {
+            return Err(DiagServiceError::InvalidRequest(
+                "Runtime update in progress, flash transfer blocked".to_owned(),
+            ));
+        }
         let uds = self.clone();
         let transfer_task =
             cda_interfaces::spawn_named!(&format!("flashtransfer-{ecu_name}"), async move {

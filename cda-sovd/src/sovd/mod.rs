@@ -30,12 +30,12 @@ use axum::{
 };
 use axum_extra::extract::WithRejection;
 use cda_interfaces::{
-    FunctionalDescriptionConfig, HashMap, HashMapExtensions as _, LockStateProvider,
-    SchemaProvider, UdsEcu,
+    FunctionalDescriptionConfig, HashMap, HashMapExtensions as _, SchemaProvider, UdsEcu,
     datatypes::ComponentsConfig,
     diagservices::{DiagServiceResponse, FieldParseError, UdsPayloadData},
     file_manager::FileManager,
 };
+use cda_plugin_runtime_update::LockStateProvider;
 use cda_plugin_security::{SecurityPluginLoader, security_plugin_middleware};
 use error::{ApiError, api_error_from_diag_response};
 use http::{Uri, header};
@@ -62,8 +62,12 @@ pub(crate) mod apps;
 pub(crate) mod components;
 pub(crate) mod docs;
 pub(crate) mod error;
+pub mod execution_registry;
 pub(crate) mod functions;
 pub(crate) mod locks;
+pub mod update_guard;
+
+pub use execution_registry::EcuExecutionRegistry;
 
 trait IntoSovd {
     type SovdType;
@@ -119,6 +123,7 @@ pub(crate) struct WebserverEcuState<R: DiagServiceResponse, T: UdsEcu + Clone, U
     pub(crate) service_executions: Arc<RwLock<HashMap<String, IndexMap<Uuid, ServiceExecution>>>>,
     flash_data: Arc<RwLock<sovd_interfaces::sovd2uds::FileList>>,
     mdd_embedded_files: Arc<U>,
+    update_in_progress: Arc<std::sync::atomic::AtomicBool>,
     _phantom: std::marker::PhantomData<R>,
 }
 
@@ -213,46 +218,60 @@ impl ExecutionStatus for FgServiceExecution {
     }
 }
 
-/// SOVD implementation of [`LockStateProvider`] that reads from the in-memory [`Locks`] state.
+/// Implementation of [`LockStateProvider`] that reads from the in-memory [`Locks`] state.
 pub struct SovdLockStateProvider {
-    locks: Arc<Locks>,
+    locks: Arc<RwLock<Arc<Locks>>>,
 }
 
 impl SovdLockStateProvider {
+    /// Creates a new provider wrapping the given shared [`Locks`] state.
     #[must_use]
     pub fn new(locks: Arc<Locks>) -> Self {
-        Self { locks }
+        Self {
+            locks: Arc::new(RwLock::new(locks)),
+        }
+    }
+
+    /// Atomically replaces the current locks state with `new_locks`.
+    pub async fn swap_locks(&self, new_locks: Arc<Locks>) {
+        let mut guard = self.locks.write().await;
+        *guard = new_locks;
+    }
+
+    /// Updates the ECU and functional-group entries in the current locks in-place,
+    /// preserving only the vehicle lock.
+    ///
+    /// # Errors
+    /// Returns an error if any ECU or functional-group lock is currently held.
+    pub async fn update_entries(
+        &self,
+        new_ecu_names: Vec<String>,
+    ) -> Result<(), locks::LockUpdateError> {
+        let locks = self.locks.read().await.clone();
+        locks.update_entries(new_ecu_names).await
+    }
+
+    pub async fn current_locks(&self) -> Arc<Locks> {
+        self.locks.read().await.clone()
     }
 }
 
-#[async_trait] // todo alexmohr
+#[async_trait]
 impl LockStateProvider for SovdLockStateProvider {
-    async fn vehicle_lock_owner(&self) -> Option<String> {
-        let vehicle_lock = self.locks.vehicle.lock_ro().await;
+    async fn is_vehicle_lock_owned(&self) -> Option<String> {
+        let locks = self.locks.read().await.clone();
+        let vehicle_lock = locks.vehicle.lock_ro().await;
         match &vehicle_lock {
             ReadLock::OptionLock(l) => l.as_ref().map(|l| l.owner().to_owned()),
             ReadLock::HashMapLock(_) => None,
         }
     }
 
-    async fn has_conflicting_ecu_locks(&self, caller_sub: &str) -> bool {
-        let ecu_lock = self.locks.ecu.lock_ro().await;
-        match &ecu_lock {
-            ReadLock::HashMapLock(l) => l
-                .values()
-                .any(|v| v.as_ref().is_some_and(|l| l.owner() != caller_sub)),
-            ReadLock::OptionLock(l) => l.as_ref().is_some_and(|l| l.owner() != caller_sub),
-        }
-    }
-
-    async fn has_conflicting_fg_locks(&self, caller_sub: &str) -> bool {
-        let fg_lock = self.locks.functional_group.lock_ro().await;
-        match &fg_lock {
-            ReadLock::HashMapLock(l) => l
-                .values()
-                .any(|v| v.as_ref().is_some_and(|l| l.owner() != caller_sub)),
-            ReadLock::OptionLock(l) => l.as_ref().is_some_and(|l| l.owner() != caller_sub),
-        }
+    async fn has_non_vehicle_locks(&self) -> bool {
+        let locks = self.locks.read().await.clone();
+        let ecu_lock = locks.ecu.lock_ro().await;
+        let fg_lock = locks.functional_group.lock_ro().await;
+        ecu_lock.is_any_locked() || fg_lock.is_any_locked()
     }
 }
 
@@ -303,8 +322,15 @@ pub(crate) async fn reserve_execution<E: ExecutionStatus>(
     service: &str,
     display_name: &str,
     include_schema: bool,
+    update_in_progress: &std::sync::atomic::AtomicBool,
 ) -> Result<Uuid, error::ErrorWrapper> {
     let mut guard = executions.write().await;
+    if update_in_progress.load(std::sync::atomic::Ordering::Acquire) {
+        return Err(error::ErrorWrapper {
+            error: ApiError::Conflict("Runtime update in progress, operation blocked".to_owned()),
+            include_schema,
+        });
+    }
     let has_running = guard.get(service).is_some_and(|m| {
         m.values()
             .any(|e| *e.execution_status() == sovd_ecu::operations::ExecutionStatus::Running)
@@ -373,6 +399,7 @@ impl<R: DiagServiceResponse, T: UdsEcu + Clone, U: FileManager> Clone
             service_executions: Arc::clone(&self.service_executions),
             flash_data: Arc::clone(&self.flash_data),
             mdd_embedded_files: Arc::clone(&self.mdd_embedded_files),
+            update_in_progress: Arc::clone(&self.update_in_progress),
             _phantom: std::marker::PhantomData::<R>,
         }
     }
@@ -384,6 +411,7 @@ pub(crate) struct WebserverState<T: UdsEcu + Clone> {
     locks: Arc<Locks>,
     flash_data: Arc<RwLock<sovd_interfaces::sovd2uds::FileList>>,
     components_config: Arc<RwLock<ComponentsConfig>>,
+    update_in_progress: Arc<std::sync::atomic::AtomicBool>,
 }
 
 pub(crate) fn resource_response(
@@ -424,7 +452,8 @@ pub async fn route<
     flash_files_path: String,
     mut file_manager: HashMap<String, U>,
     locks: Arc<Locks>,
-) -> Router {
+    update_in_progress: Arc<std::sync::atomic::AtomicBool>,
+) -> (Router, EcuExecutionRegistry) {
     let flash_data = Arc::new(RwLock::new(sovd_interfaces::sovd2uds::FileList {
         files: Vec::new(),
         path: Some(PathBuf::from(flash_files_path)),
@@ -435,14 +464,17 @@ pub async fn route<
         locks,
         flash_data: Arc::clone(&flash_data),
         components_config: Arc::new(RwLock::new(components_config)),
+        update_in_progress,
     };
 
-    let router = components_route::<R, T, U>(state.clone(), &mut file_manager).await;
+    let mut registry = EcuExecutionRegistry::default();
+    let router = components_route::<R, T, U>(state.clone(), &mut file_manager, &mut registry).await;
 
-    vehicle_route::<T, S>(state, router, functional_group_config)
+    let vehicle_router = vehicle_route::<T, S>(state, router, functional_group_config)
         .await
         .layer(middleware::from_fn(security_plugin_middleware::<S>))
-        .with_state(uds.clone())
+        .with_state(uds.clone());
+    (vehicle_router, registry)
 }
 
 async fn vehicle_route<T: UdsEcu + SchemaProvider + Clone, S: SecurityPluginLoader>(
@@ -572,6 +604,7 @@ async fn components_route<
 >(
     state: WebserverState<T>,
     file_manager: &mut HashMap<String, U>,
+    registry: &mut EcuExecutionRegistry,
 ) -> Router<WebserverState<T>> {
     let mut router = Router::new().api_route(
         "/vehicle/v15/components",
@@ -579,7 +612,7 @@ async fn components_route<
     );
     let mut ecus = state.uds.get_physical_ecus().await;
     for ecu_name in ecus.drain(0..) {
-        match ecu_route::<R, T, U>(&ecu_name, &state, file_manager) {
+        match ecu_route::<R, T, U>(&ecu_name, &state, file_manager, registry).await {
             Ok((ecu_path, nested)) => {
                 router = router.nest_api_service(&ecu_path, nested);
             }
@@ -593,7 +626,7 @@ async fn components_route<
 
 // Disabled as for now it makes sense to keep the route creation together
 #[allow(clippy::too_many_lines)]
-fn ecu_route<
+async fn ecu_route<
     R: DiagServiceResponse,
     T: UdsEcu + SchemaProvider + Clone,
     U: FileManager + 'static,
@@ -601,6 +634,7 @@ fn ecu_route<
     ecu_name: &str,
     state: &WebserverState<T>,
     file_manager: &mut HashMap<String, U>,
+    registry: &mut EcuExecutionRegistry,
 ) -> Result<(String, Router), SovdError> {
     let ecu_lower = ecu_name.to_lowercase();
     let ecu_state = WebserverEcuState {
@@ -615,8 +649,15 @@ fn ecu_route<
                 "FileManager for ECU '{ecu_name}' not found in provided FileManager map"
             ))
         })?),
+        update_in_progress: Arc::clone(&state.update_in_progress),
         _phantom: std::marker::PhantomData::<R>,
     };
+    registry
+        .register(
+            Arc::clone(&ecu_state.comparam_executions),
+            Arc::clone(&ecu_state.service_executions),
+        )
+        .await;
     let ecu_path = format!("/vehicle/v15/components/{ecu_lower}");
 
     let router = Router::new()
@@ -1022,9 +1063,7 @@ pub(crate) mod static_data {
                 }),
             )
             .with_state(data);
-        dynamic_router
-            .update_router(move |old_router| old_router.merge(router))
-            .await;
+        dynamic_router.add_routes(router).await;
     }
 
     pub(crate) async fn get(
@@ -1151,6 +1190,7 @@ pub(crate) mod tests {
                 schema: None,
             })),
             mdd_embedded_files: Arc::new(file_manager),
+            update_in_progress: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             _phantom: std::marker::PhantomData::<R>,
         }
     }

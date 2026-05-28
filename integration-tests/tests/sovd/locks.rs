@@ -30,11 +30,11 @@ use crate::{
     },
 };
 
-const NON_OWNER_BEARER_TOKEN: &str = "eyJ0eXAiOiJKV1QiLCJhbGciOiJIUzI1NiJ9.\
-                                      eyJzdWIiOiJvd25lcnNoaXAtdGVzdCIsImV4cCI6MjAwMDAwMDAwMH0.\
-                                      _qb-vSkPnV_Lff2wNH4VXugc-DcvGdzJxwTmb4J48Xs";
+pub(crate) const NON_OWNER_BEARER_TOKEN: &str =
+    "eyJ0eXAiOiJKV1QiLCJhbGciOiJIUzI1NiJ9.eyJzdWIiOiJvd25lcnNoaXAtdGVzdCIsImV4cCI6MjAwMDAwMDAwMH0.\
+     _qb-vSkPnV_Lff2wNH4VXugc-DcvGdzJxwTmb4J48Xs";
 
-fn bearer_token_header(token: &str) -> HeaderMap {
+pub(crate) fn bearer_token_header(token: &str) -> HeaderMap {
     let mut headers = HeaderMap::new();
     headers.insert(
         reqwest::header::AUTHORIZATION,

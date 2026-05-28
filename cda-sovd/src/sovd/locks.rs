@@ -44,6 +44,14 @@ use crate::{
 pub type LockHashMap = HashMap<String, Option<Lock>>;
 pub type LockOption = Option<Lock>;
 
+#[derive(Debug, thiserror::Error)]
+pub enum LockUpdateError {
+    #[error("Cannot update while ECU locks are held")]
+    EcuLocksHeld,
+    #[error("Cannot update while functional-group locks are held")]
+    FunctionalGroupLocksHeld,
+}
+
 pub struct Lock {
     sovd: sovd_interfaces::locking::Lock,
     expiration: DateTime<Utc>,
@@ -125,6 +133,40 @@ impl Locks {
             functional_group: LockType::FunctionalGroup(Arc::new(RwLock::new(HashMap::new()))),
         }
     }
+
+    /// Rebuilds the ECU lock entries for a new configuration.
+    /// Only the vehicle lock is preserved. Functional-group lock entries are
+    /// dynamic and not modified, but no FG locks may be held.
+    ///
+    /// # Errors
+    /// Returns an error if any ECU or functional-group lock is currently held.
+    pub async fn update_entries(&self, new_ecu_names: Vec<String>) -> Result<(), LockUpdateError> {
+        let LockType::FunctionalGroup(fg_rwlock) = &self.functional_group else {
+            return Ok(());
+        };
+        let fg_map = fg_rwlock.read().await;
+        if fg_map.values().any(Option::is_some) {
+            return Err(LockUpdateError::FunctionalGroupLocksHeld);
+        }
+        drop(fg_map);
+
+        let LockType::Ecu(ecu_rwlock) = &self.ecu else {
+            return Ok(());
+        };
+        let mut ecu_map = ecu_rwlock.write().await;
+        if ecu_map.values().any(Option::is_some) {
+            return Err(LockUpdateError::EcuLocksHeld);
+        }
+
+        let new_ecu_set: std::collections::HashSet<&str> =
+            new_ecu_names.iter().map(String::as_str).collect();
+        ecu_map.retain(|name, _| new_ecu_set.contains(name.as_str()));
+        for name in new_ecu_names {
+            ecu_map.entry(name).or_insert(None);
+        }
+
+        Ok(())
+    }
 }
 
 #[derive(Clone)]
@@ -170,7 +212,7 @@ impl ReadLock<'_> {
         }
     }
 
-    fn is_any_locked(&self) -> bool {
+    pub(crate) fn is_any_locked(&self) -> bool {
         match self {
             ReadLock::HashMapLock(l) => !l.is_empty(),
             ReadLock::OptionLock(l) => !l.is_none(),

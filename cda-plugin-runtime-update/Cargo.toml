@@ -9,45 +9,35 @@
 # https://www.apache.org/licenses/LICENSE-2.0
 
 [package]
-name = "cda-storage"
+name = "cda-plugin-runtime-update"
 version = "0.1.0"
 edition.workspace = true
 publish = false
-description = "Storage access implementation for CDA"
 homepage.workspace = true
 license.workspace = true
 
 [lints]
 workspace = true
 
-[features]
-## Enable runtime validation of collection names and keys used as path segments.
-## Rejects directory traversal attempts (e.g., "..", "/") with an error.
-sanitize-paths = []
-
 [lib]
 path = "src/lib.rs"
 
 [dependencies]
-# internal dependencies
 cda-interfaces = { workspace = true }
-
-# external
+cda-database = { workspace = true }
+sovd-interfaces = { workspace = true }
 async-trait = { workspace = true }
-rkyv = { workspace = true }
-crc32fast = { workspace = true }
-serde = { workspace = true, features = ["derive"] }
+bytes = { workspace = true }
+cda-plugin-security = { workspace = true }
+serde_json = { workspace = true }
+serde = { workspace = true }
+sha2 = { workspace = true }
 thiserror = { workspace = true }
+tokio = { workspace = true, features = ["rt", "sync", "macros", "fs"] }
 tracing = { workspace = true }
 uuid = { workspace = true, features = ["v4"] }
-
-# tokio
-tokio = { workspace = true, features = ["fs", "io-util", "sync", "rt"] }
+schemars = { workspace = true }
 
 [dev-dependencies]
-tokio = { workspace = true, features = [
-  "macros",
-  "rt-multi-thread",
-  "io-util",
-] }
+cda-storage = { workspace = true }
 tempfile = { workspace = true }

@@ -172,6 +172,7 @@ dependencies = [
  "matchit",
  "memchr",
  "mime",
+ "multer",
  "percent-encoding",
  "pin-project-lite",
  "serde_core",
@@ -317,9 +318,9 @@ dependencies = [
 
 [[package]]
 name = "bytemuck"
-version = "1.24.0"
+version = "1.25.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "1fbdf580320f38b612e485521afda1ee26d10cc9884efaaa750d383e13e3c5f4"
+checksum = "c8efb64bd706a16a1bdde310ae86b351e4d21550d98d056f22f8a7f7a2183fec"
 
 [[package]]
 name = "byteorder"
@@ -395,6 +396,7 @@ version = "0.1.0"
 dependencies = [
  "async-trait",
  "cda-interfaces",
+ "cda-plugin-runtime-update",
  "futures",
  "serde_json",
  "socket2",
@@ -495,6 +497,28 @@ dependencies = [
 ]
 
 [[package]]
+name = "cda-plugin-runtime-update"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "bytes",
+ "cda-database",
+ "cda-interfaces",
+ "cda-plugin-security",
+ "cda-storage",
+ "schemars",
+ "serde",
+ "serde_json",
+ "sha2",
+ "sovd-interfaces",
+ "tempfile",
+ "thiserror 2.0.17",
+ "tokio",
+ "tracing",
+ "uuid",
+]
+
+[[package]]
 name = "cda-plugin-security"
 version = "0.1.0"
 dependencies = [
@@ -520,10 +544,13 @@ name = "cda-sovd"
 version = "0.1.0"
 dependencies = [
  "aide",
+ "async-trait",
  "axum",
  "axum-extra",
+ "bytes",
  "cda-build",
  "cda-interfaces",
+ "cda-plugin-runtime-update",
  "cda-plugin-security",
  "cda-tracing",
  "chrono",
@@ -2128,6 +2155,23 @@ dependencies = [
 ]
 
 [[package]]
+name = "multer"
+version = "3.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "83e87776546dc87511aa5ee218730c92b666d7264ab6ed41f9d215af9cd5224b"
+dependencies = [
+ "bytes",
+ "encoding_rs",
+ "futures-util",
+ "http",
+ "httparse",
+ "memchr",
+ "mime",
+ "spin",
+ "version_check",
+]
+
+[[package]]
 name = "multimap"
 version = "0.10.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2277,6 +2321,7 @@ dependencies = [
 name = "opensovd-cda"
 version = "0.1.0"
 dependencies = [
+ "async-trait",
  "cda-comm-doip",
  "cda-comm-uds",
  "cda-core",
@@ -2284,20 +2329,20 @@ dependencies = [
  "cda-extra",
  "cda-health",
  "cda-interfaces",
+ "cda-plugin-runtime-update",
  "cda-plugin-security",
  "cda-sovd",
+ "cda-storage",
  "cda-tracing",
  "chrono",
  "clap",
  "figment",
  "futures",
- "http",
  "mimalloc",
- "mime",
- "reqwest",
  "schemars",
  "serde",
  "serde_json",
+ "tempfile",
  "thiserror 2.0.17",
  "tokio",
  "toml 0.9.8",
@@ -2977,6 +3022,7 @@ dependencies = [
  "js-sys",
  "log",
  "mime",
+ "mime_guess",
  "native-tls",
  "percent-encoding",
  "pin-project-lite",
