@@ -1,0 +1,81 @@
+' SPDX-License-Identifier: Apache-2.0
+' SPDX-FileCopyrightText: 2026 The Contributors to Eclipse OpenSOVD (see CONTRIBUTORS)
+'
+' See the NOTICE file(s) distributed with this work for additional
+' information regarding copyright ownership.
+'
+' This program and the accompanying materials are made available under the
+' terms of the Apache License Version 2.0 which is available at
+' https://www.apache.org/licenses/LICENSE-2.0
+
+@startuml
+title Functional Communication -- ECU-Lock
+
+participant Client
+participant "HTTP Server\n(Axum)" as HTTP
+participant "Security\nMiddleware" as SEC
+participant "Functional\nComm Handler" as HANDLER
+participant "Lock Manager" as LOCK
+participant "UDS / DoIP" as COMM
+participant "ECUs\n(functional)" as ECUS
+
+== Lock functional group ==
+
+Client -> HTTP : PUT /functions/functionalgroups/{group}/lock
+activate HTTP
+
+HTTP -> SEC : authenticate & authorize
+activate SEC
+SEC -> HTTP : OK
+deactivate SEC
+
+HTTP -> HANDLER : route to functional comm handler
+activate HANDLER
+
+HANDLER -> LOCK : lock functional group
+activate LOCK
+
+LOCK -> LOCK : stop non-functional\nTester Presents
+LOCK -> COMM : start functional Tester Presents\nto all DoIP entities
+activate COMM
+COMM -> ECUS : functional TesterPresent (3E)
+deactivate COMM
+
+LOCK -> HANDLER : lock acquired
+deactivate LOCK
+
+HANDLER -> HTTP : success
+deactivate HANDLER
+
+HTTP -> Client : HTTP 200 OK
+deactivate HTTP
+
+== Unlock functional group ==
+
+Client -> HTTP : DELETE /functions/functionalgroups/{group}/lock
+activate HTTP
+
+HTTP -> SEC : authenticate & authorize
+activate SEC
+SEC -> HTTP : OK
+deactivate SEC
+
+HTTP -> HANDLER : route to functional comm handler
+activate HANDLER
+
+HANDLER -> LOCK : unlock functional group
+activate LOCK
+
+LOCK -> LOCK : stop functional Tester Presents
+LOCK -> LOCK : restore previous ECU locks\n(optional)
+
+LOCK -> HANDLER : lock released
+deactivate LOCK
+
+HANDLER -> HTTP : success
+deactivate HANDLER
+
+HTTP -> Client : HTTP 200 OK
+deactivate HTTP
+
+@enduml

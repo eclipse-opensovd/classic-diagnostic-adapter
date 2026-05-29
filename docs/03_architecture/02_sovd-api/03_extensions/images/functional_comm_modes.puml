@@ -1,0 +1,62 @@
+' SPDX-License-Identifier: Apache-2.0
+' SPDX-FileCopyrightText: 2026 The Contributors to Eclipse OpenSOVD (see CONTRIBUTORS)
+'
+' See the NOTICE file(s) distributed with this work for additional
+' information regarding copyright ownership.
+'
+' This program and the accompanying materials are made available under the
+' terms of the Apache License Version 2.0 which is available at
+' https://www.apache.org/licenses/LICENSE-2.0
+
+@startuml
+title Functional Communication -- Modes
+
+participant Client
+participant "HTTP Server\n(Axum)" as HTTP
+participant "Security\nMiddleware" as SEC
+participant "Functional\nComm Handler" as HANDLER
+participant "Diagnostic\nKernel" as DIAG
+participant "UDS / DoIP" as COMM
+participant "ECUs\n(functional)" as ECUS
+
+== Example: Session switch ==
+
+Client -> HTTP : PUT /functions/functionalgroups/{group}/modes/session\n{ "value": "<session name>" }
+activate HTTP
+
+HTTP -> SEC : authenticate & authorize
+activate SEC
+SEC -> HTTP : OK
+deactivate SEC
+
+HTTP -> HANDLER : route to functional comm handler
+activate HANDLER
+
+HANDLER -> DIAG : set mode (functional, session, value)
+activate DIAG
+
+DIAG -> DIAG : resolve service from MDD\n(session name -> SID 10 subfunction)
+
+DIAG -> COMM : send functional UDS request
+activate COMM
+COMM -> ECUS : DoIP (functional) -> UDS\nDiagnosticSessionControl (10 {subfunction})
+activate ECUS
+ECUS -> COMM : positive responses\n(50 {subfunction})
+deactivate ECUS
+COMM -> DIAG : raw UDS responses
+deactivate COMM
+
+DIAG -> HANDLER : mode switch confirmed
+deactivate DIAG
+
+HANDLER -> HTTP : JSON body
+deactivate HANDLER
+
+HTTP -> Client : HTTP 200 OK\n{ "id": "session", "value": "<session name>" }
+deactivate HTTP
+
+note over Client, ECUS
+Supported modes: session, dtcsetting, commctrl
+end note
+
+@enduml

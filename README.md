@@ -89,12 +89,28 @@ The minimum required version of the toolchain is [Rust 1.88.0](https://blog.rust
 cargo build --release
 ```
 
+### Windows
+
+Prerequisite:
+- Build Toolchain for Windows
+- OpenSSL (if targeting the OpenSSL build)
+   `winget install openssl`
+
+#### Setup Env
+```pwsh
+$env:CMAKE_GENERATOR="Ninja"
+$env:OPENSSL_DIR="C:\Program Files\OpenSSL-Win64"
+$env:OPENSSL_LIB_DIR="C:\Program Files\OpenSSL-Win64\lib\VC\x64\MD"
+$env:OPENSSL_INCLUDE_DIR="C:\Program Files\OpenSSL-Win64\include"
+```
+
 ## developing
 
 ### pre commit
 ```shell
-uv run https://raw.githubusercontent.com/eclipse-opensovd/cicd-workflows/main/run_checks.py
+uv run https://raw.githubusercontent.com/eclipse-opensovd/cicd-workflows/4116addc88b6c523bc6d729b1b4e198ccb04ce3d/run_checks.py
 ```
+Install this command as documented here: https://git-scm.com/book/en/v2/Customizing-Git-Git-Hooks
 
 ### codestyle
 
@@ -240,4 +256,4 @@ In a second terminal window start `tokio-console` and it should automatically co
 
 ### architecture
 
-see [overview](docs/architecture/index.adoc)
+see [overview](https://eclipse-opensovd.github.io/classic-diagnostic-adapter/03_architecture/index.html)

@@ -137,7 +137,7 @@ async fn fold_health_state(health_state: Option<&HealthState>) -> HealthStatus {
         .fold(cda_health::Status::Starting, fold_status)
 }
 
-/// [[ test~system-sd-notify-watchdog-integration, Systemd Watchdog Health Aggregation Tests ]]
+/// [[ test~system-sd-notify-watchdog-integration, Systemd Watchdog Health Aggregation Tests, test ]]
 #[cfg(test)]
 mod tests {
     use cda_health::Status;

@@ -27,6 +27,7 @@ API
 
 .. arch:: Management of flash files
     :id: arch~sovd-api-flash-file-management
+    :links: arch~sovd-api-flash-folder-configuration
     :status: draft
 
     **Motivation**
@@ -46,6 +47,8 @@ API
          - /apps/sovd2uds/bulk-data/flashfiles
          - Returns a list of entries that represent files in the configured flash folder and its subfolders.
          - Flash folder needs to be configured
+
+    .. uml:: /03_architecture/02_sovd-api/03_extensions/images/flash_file_management.puml
 
 
 .. arch:: Flash data transfer
@@ -77,8 +80,8 @@ API
          - Transfers data in the file given by ``id`` from an offset for a given length, using configurable
            chunk sizes (block size), and a configurable starting sequence number. It uses repeated calls
            to service 36~16~ to transfer the data.
-         - Returns an object with an ``id`` to be used to retrieve status
-           Plans: The API will be extended to also allow starting the transfer directly with absolute file paths
+         - Returns an object with an ``id`` to be used to retrieve status.
+           Plans: The API will be extended to also allow starting the transfer directly with absolute file paths.
        * - GET
          - /x-sovd2uds-download/flashtransfer
          - Retrieve the ids of the running flash transfers
@@ -91,6 +94,8 @@ API
          - /x-sovd2uds-download/transferexit
          - Calls the RequestTransferExit service 37~16~
          - Returns the response of the RequestTransferExit service
+
+    .. uml:: /03_architecture/02_sovd-api/03_extensions/images/flash_data_transfer.puml
 
 Configuration
 ^^^^^^^^^^^^^

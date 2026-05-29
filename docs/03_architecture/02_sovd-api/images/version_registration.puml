@@ -1,0 +1,52 @@
+' SPDX-License-Identifier: Apache-2.0
+' SPDX-FileCopyrightText: 2026 The Contributors to Eclipse OpenSOVD (see CONTRIBUTORS)
+'
+' See the NOTICE file(s) distributed with this work for additional
+' information regarding copyright ownership.
+'
+' This program and the accompanying materials are made available under the
+' terms of the Apache License Version 2.0 which is available at
+' https://www.apache.org/licenses/LICENSE-2.0
+
+@startuml
+title Version Registration Function
+
+participant "Application\nStartup" as APP
+participant "Version\nRegistration\nFunction" as VREG
+participant "HTTP Server\n(Axum)" as HTTP
+
+APP -> VREG : register_version_endpoints(\nvendor_name, implementation_version,\ncommit, build_date)
+activate VREG
+
+VREG -> VREG : determine base_uri\nand api_version
+
+VREG -> HTTP : register GET /version-info
+activate HTTP
+HTTP -> VREG : registered
+deactivate HTTP
+
+alt optional vendor-specific endpoints enabled
+    VREG -> HTTP : register GET /data/version
+    activate HTTP
+    HTTP -> VREG : registered
+    deactivate HTTP
+
+    VREG -> HTTP : register GET /apps/sovd2uds/data/version
+    activate HTTP
+    HTTP -> VREG : registered
+    deactivate HTTP
+end
+
+VREG -> APP : registration complete
+deactivate VREG
+
+== Runtime: Client requests version info ==
+
+participant Client
+
+Client -> HTTP : GET /version-info
+activate HTTP
+HTTP -> Client : HTTP 200 OK\n{ "sovd_info": [ { "version": "...",\n"base_uri": "...", "vendor_info": { ... } } ] }
+deactivate HTTP
+
+@enduml

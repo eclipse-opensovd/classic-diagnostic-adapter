@@ -14,7 +14,9 @@ use std::fmt::Debug;
 
 use cda_interfaces::{
     DiagServiceError, HashSet,
-    datatypes::{ComParamConfig, ComParamValue, DeserializableCompParam, FlatbBufConfig},
+    datatypes::{
+        ComParamConfig, ComParamPrecedence, ComParamValue, DeserializableCompParam, FlatbBufConfig,
+    },
     dlt_ctx,
 };
 pub use comparam::*;
@@ -580,7 +582,7 @@ impl DiagnosticDatabase {
         &self,
         type_: LogicalAddressType,
         diag_database: &DiagnosticDatabase,
-        protocol: &dataformat::Protocol,
+        protocol: Option<&dataformat::Protocol>,
     ) -> Result<u16, DiagServiceError> {
         let (param_name, additional_param_name) = match type_ {
             LogicalAddressType::Ecu(response_id_table, ecu_address) => {
@@ -764,6 +766,11 @@ impl DiagnosticDatabase {
             .map(Variant)
     }
 
+    /// Look up a communication parameter from the database, falling back to the configured default.
+    ///
+    /// # Errors
+    /// Returns [`DiagServiceError::ParameterConversionError`] if a complex parameter value cannot
+    /// be deserialized into the target type `T`.
     #[tracing::instrument(
         skip(self),
         fields(
@@ -774,14 +781,21 @@ impl DiagnosticDatabase {
     )]
     pub fn find_com_param<T: DeserializableCompParam + Serialize + Debug + Clone>(
         &self,
-        protocol: &dataformat::Protocol,
+        protocol: Option<&datatypes::Protocol>,
         com_param: &ComParamConfig<T>,
-    ) -> T {
-        let lookup_result = comparam::lookup(self, protocol, &com_param.name);
+    ) -> Result<T, DiagServiceError> {
+        if com_param.precedence == ComParamPrecedence::Config {
+            tracing::info!(
+                param_name = %com_param.name,
+                "Using config value (precedence = Config), DB lookup skipped"
+            );
+            return Ok(com_param.value.clone());
+        }
+        let lookup_result = comparam::lookup(self, protocol.map(|v| &**v), &com_param.name);
         match lookup_result {
             Ok(ComParamValue::Simple(simple)) => {
                 if let Ok(value) = T::parse_from_db(&simple.value, simple.unit.as_ref()) {
-                    value
+                    Ok(value)
                 } else {
                     tracing::warn!(
                         param_name = %com_param.name,
@@ -789,16 +803,15 @@ impl DiagnosticDatabase {
                         unit = ?simple.unit,
                         "Failed to deserialize Simple Value for com param, using default"
                     );
-                    com_param.default.clone()
+                    Ok(com_param.value.clone())
                 }
             }
-            Ok(ComParamValue::Complex(_)) => {
-                tracing::warn!(
-                    param_name = %com_param.name,
-                    "Using fallback for complex value - unexpected Complex value type"
-                );
-                com_param.default.clone()
-            }
+            Ok(ComParamValue::Complex(complex)) => T::parse_from_complex(&complex).map_err(|e| {
+                DiagServiceError::ParameterConversionError(format!(
+                    "Failed to deserialize Complex value for com param '{}': {e}",
+                    com_param.name
+                ))
+            }),
             Err(e) => {
                 if let DiagServiceError::NotFound(e) = &e {
                     tracing::debug!(
@@ -813,7 +826,7 @@ impl DiagnosticDatabase {
                         "Using fallback - lookup error"
                     );
                 }
-                com_param.default.clone()
+                Ok(com_param.value.clone())
             }
         }
     }

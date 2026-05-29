@@ -1,0 +1,54 @@
+' SPDX-License-Identifier: Apache-2.0
+' SPDX-FileCopyrightText: 2026 The Contributors to Eclipse OpenSOVD (see CONTRIBUTORS)
+'
+' See the NOTICE file(s) distributed with this work for additional
+' information regarding copyright ownership.
+'
+' This program and the accompanying materials are made available under the
+' terms of the Apache License Version 2.0 which is available at
+' https://www.apache.org/licenses/LICENSE-2.0
+
+@startuml
+title Session Switch -- SID 10
+
+participant Client
+participant CDA
+participant "Diagnostic\nKernel" as DIAG
+participant "UDS / DoIP" as COMM
+participant ECU
+
+== Read Current Session ==
+
+Client -> CDA : GET /components/{ecu}/modes/session
+activate CDA
+CDA -> Client : HTTP 200 OK\n{ "id": "...", "value": "defaultSession" }
+deactivate CDA
+
+== Switch Session ==
+
+Client -> CDA : PUT /components/{ecu}/modes/session\n{ "value": "extendedDiagnosticSession",\n  "mode_expiration": 3600 }
+activate CDA
+
+CDA -> DIAG : switch session (session name)
+activate DIAG
+
+DIAG -> DIAG : resolve session name\nvia MDD state chart\n(name -> SID 10 + subfunction)
+
+DIAG -> COMM : send UDS request
+activate COMM
+COMM -> ECU : DoIP -> UDS DiagnosticSessionControl\n(10 {subfunction})
+activate ECU
+ECU -> COMM : positive response\n(50 {subfunction} {timing params})
+deactivate ECU
+COMM -> DIAG : raw UDS response
+deactivate COMM
+
+DIAG -> CDA : session switched
+deactivate DIAG
+
+CDA -> CDA : start mode expiration\ntimer if configured
+
+CDA -> Client : HTTP 200 OK\n{ "id": "...", "value": "extendedDiagnosticSession" }
+deactivate CDA
+
+@enduml

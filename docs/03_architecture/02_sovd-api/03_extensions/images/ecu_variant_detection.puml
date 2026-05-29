@@ -1,0 +1,58 @@
+' SPDX-License-Identifier: Apache-2.0
+' SPDX-FileCopyrightText: 2026 The Contributors to Eclipse OpenSOVD (see CONTRIBUTORS)
+'
+' See the NOTICE file(s) distributed with this work for additional
+' information regarding copyright ownership.
+'
+' This program and the accompanying materials are made available under the
+' terms of the Apache License Version 2.0 which is available at
+' https://www.apache.org/licenses/LICENSE-2.0
+
+@startuml
+title ECU Variant Detection
+
+participant Client
+participant "HTTP Server\n(Axum)" as HTTP
+participant "Security\nMiddleware" as SEC
+participant "Component\nHandler" as HANDLER
+participant "Diagnostic\nKernel" as DIAG
+participant "UDS / DoIP" as COMM
+participant ECU
+
+Client -> HTTP : POST /components/{ecu}
+activate HTTP
+
+HTTP -> SEC : authenticate & authorize
+activate SEC
+SEC -> HTTP : OK
+deactivate SEC
+
+HTTP -> HANDLER : route to component handler
+activate HANDLER
+
+HANDLER -> DIAG : trigger variant detection
+activate DIAG
+
+DIAG -> DIAG : determine variant detection\nservices from MDD
+
+DIAG -> COMM : send UDS request(s)\nfor variant identification
+activate COMM
+COMM -> ECU : DoIP -> UDS request(s)
+activate ECU
+ECU -> COMM : response(s)
+deactivate ECU
+COMM -> DIAG : raw UDS response(s)
+deactivate COMM
+
+DIAG -> DIAG : evaluate responses against\nvariant patterns in MDD
+DIAG -> DIAG : select matching variant
+DIAG -> HANDLER : detected variant
+deactivate DIAG
+
+HANDLER -> HTTP : JSON body
+deactivate HANDLER
+
+HTTP -> Client : HTTP 200 OK\n{ variant information }
+deactivate HTTP
+
+@enduml

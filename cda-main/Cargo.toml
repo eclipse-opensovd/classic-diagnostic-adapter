@@ -43,13 +43,13 @@ cda-extra = { workspace = true, optional = true }
 clap = { workspace = true, features = ["derive", "env"] }
 # config
 figment = { workspace = true, features = ["env", "toml"] }
+toml = { workspace = true }
 futures = { workspace = true }
 # allocator
 mimalloc = { git = "https://github.com/theswiftfox/mimalloc.git", rev = "afbaaa5" }
 schemars = { workspace = true }
 serde = { workspace = true, features = ["derive"] }
 serde_json = { workspace = true }
-toml = { workspace = true }
 tokio = { workspace = true, features = [
   "rt-multi-thread",
   "macros",
@@ -80,7 +80,7 @@ reqwest = { workspace = true }
 chrono = { workspace = true }
 
 [features]
-default = ["health", "openssl"]
+default = ["health", "openssl", "config-optional"]
 tokio-tracing = ["cda-interfaces/tokio-tracing", "cda-tracing/tokio-tracing"]
 openssl = ["cda-comm-doip/openssl"]
 openssl-vendored = ["openssl", "cda-comm-doip/openssl-vendored"]
@@ -89,4 +89,5 @@ dlt-tracing = ["cda-tracing/dlt-tracing"]
 integration-tests = []
 
 health = []
+config-optional = []
 systemd-notify = ["dep:cda-extra", "cda-extra/systemd-notify"]
