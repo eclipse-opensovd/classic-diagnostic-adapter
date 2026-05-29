@@ -356,12 +356,11 @@ pub fn generate_config_cmd(output: Option<&PathBuf>) -> Result<(), AppError> {
 #[cfg(feature = "config-optional")]
 #[allow(clippy::unnecessary_wraps)] // signature must match the `not(feature)` variant
 fn load_config_or_default(config_path: Option<&str>) -> Result<Configuration, AppError> {
-    Ok(
-        config::load_config(config_path).unwrap_or_else(|e| {
-            println!("Failed to load configuration: {e}");
-            println!("Using default values");
-            config::default_config()
-        }))
+    Ok(config::load_config(config_path).unwrap_or_else(|e| {
+        println!("Failed to load configuration: {e}");
+        println!("Using default values");
+        config::default_config()
+    }))
 }
 
 /// Without `config-optional`, a missing or invalid configuration is a hard error.
