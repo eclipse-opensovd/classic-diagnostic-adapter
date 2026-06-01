@@ -151,6 +151,12 @@ pub(crate) async fn post<R: DiagServiceResponse, T: UdsEcu + Clone, U: FileManag
     update(&ecu_name, uds).await
 }
 
+// [[ dimpl~sovd-api-ecu-variant-detection, PUT endpoint for ECU variant detection ]]
+//
+// Handles PUT requests on /components/{ecuName} to trigger variant detection.
+// Delegates to the UDS layer which sends diagnostic requests to the ECU and
+// evaluates the responses against known variant patterns. Returns 201 on
+// success or an error response if detection fails.
 pub(crate) async fn put<R: DiagServiceResponse, T: UdsEcu + Clone, U: FileManager>(
     State(WebserverEcuState { ecu_name, uds, .. }): State<WebserverEcuState<R, T, U>>,
 ) -> Response {

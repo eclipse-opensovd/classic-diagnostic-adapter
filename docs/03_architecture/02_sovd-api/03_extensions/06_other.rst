@@ -14,6 +14,7 @@ ECU Variant Detection
 .. arch:: ECU Variant Detection via SOVD-API
     :id: arch~sovd-api-ecu-variant-detection
     :status: draft
+    :links: dimpl~sovd-api-ecu-variant-detection
 
     **Motivation**
 
@@ -23,6 +24,6 @@ ECU Variant Detection
 
     **Variant Detection Trigger**
 
-    A POST on the path ``/components/{ecuName}`` must trigger a variant detection
+    A PUT on the path ``/components/{ecuName}`` must trigger a variant detection
 
     .. uml:: /03_architecture/02_sovd-api/03_extensions/images/ecu_variant_detection.puml
