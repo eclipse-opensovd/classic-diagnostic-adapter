@@ -8,6 +8,8 @@
 # terms of the Apache License Version 2.0 which is available at
 # https://www.apache.org/licenses/LICENSE-2.0
 
+import os
+
 extensions = [
     "sphinx_needs",
     "sphinx_codelinks",
@@ -25,6 +27,7 @@ src_trace_config_from_toml = "cda_trace.toml"
 exclude_patterns = [
     "_build",
     "**/_build/**",
+    ".venv",
     "Thumbs.db",
     ".DS_Store",
     "**/0**.rst",
@@ -36,7 +39,7 @@ copyright = "%Y, Eclipse OpenSOVD authors"
 version = "1.0"
 html_theme = "bizstyle"
 
-plantuml = "java -jar /usr/local/bin/plantuml.jar"
+plantuml = os.environ.get("PLANTUML", "java -jar /usr/local/bin/plantuml.jar")
 
 # a needs json should be generated
 needs_build_json = True

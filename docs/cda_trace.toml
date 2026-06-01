@@ -20,8 +20,8 @@ remote_url_field = "remote-url" # Need's field name for remote URL
 remote_url_pattern = "https://github.com/eclipse-opensovd/classic-diagnostic-adapter/blob/{commit}/{path}#L{line}" # URL pattern for remote source code
 
 [codelinks.projects.cda.source_discover]
-src_dir = "../project"
-include = ["**/*.rs"]
+src_dir = ".."
+exclude = ["docs/**"]
 comment_type = "rust"
 gitignore = true
 
