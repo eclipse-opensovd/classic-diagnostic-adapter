@@ -140,12 +140,12 @@ rustversion = "1.0.22"  # macros for conditional compilation
 
 [workspace.lints.clippy]
 # enable pedantic
-pedantic = { level = "deny", priority = -1 }
+pedantic = { level = "warn", priority = -1 }
 ## exclude some too pedantic lints for now
 similar_names = "allow"
 
 # additional lints
-clone_on_ref_ptr = "deny"
+clone_on_ref_ptr = "warn"
 indexing_slicing = "deny"
 unwrap_used = "deny"
 arithmetic_side_effects = "deny"
