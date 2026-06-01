@@ -330,6 +330,10 @@ impl AppArgs {
     }
 }
 
+/// Generate a reference CDA configuration and write it to the requested output.
+///
+/// # Errors
+/// Returns [`AppError`] if generating the reference configuration or writing it fails.
 pub fn generate_config_cmd(output: Option<&PathBuf>) -> Result<(), AppError> {
     let content = config::generate::generate_reference_config()
         .map_err(|e| AppError::RuntimeError(format!("Failed to generate config: {e}")))?;
@@ -376,6 +380,10 @@ fn load_config_or_default(config_path: Option<&str>) -> Result<Configuration, Ap
     })
 }
 
+/// Parse CLI arguments and start the CDA with the default startup flow.
+///
+/// # Errors
+/// Returns [`AppError`] if configuration loading, validation, or startup fails.
 pub async fn run_from_cli() -> Result<(), AppError> {
     run(AppArgs::parse()).await
 }
@@ -386,6 +394,10 @@ pub async fn run_from_cli() -> Result<(), AppError> {
         dlt_context = dlt_ctx!("MAIN"),
     )
 )]
+/// Run the CDA from parsed CLI arguments.
+///
+/// # Errors
+/// Returns [`AppError`] if configuration loading, validation, or startup fails.
 pub async fn run(args: AppArgs) -> Result<(), AppError> {
     if let Some(Command::GenerateConfig { output }) = args.command.as_ref() {
         // Exiting after generating config is on purpose.
@@ -400,6 +412,10 @@ pub async fn run(args: AppArgs) -> Result<(), AppError> {
     run_with_config(config).await
 }
 
+/// Start the CDA runtime from a prepared configuration.
+///
+/// # Errors
+/// Returns [`AppError`] if tracing setup, webserver startup, data loading, or route setup fails.
 pub async fn run_with_config(config: Configuration) -> Result<(), AppError> {
     let _tracing_guards = setup_tracing(&config)?;
     tracing::info!("Starting CDA - version {}", cda_version());
