@@ -238,7 +238,7 @@ Variant Detection
     - Responses must be evaluated against variant patterns defined in the MDD
     - For ECUs with duplicate definitions (same logical address), variant detection must determine which definition applies
     - Fallback to base variant must be configurable when variant detection fails to find a matching pattern
-    - Clients must be able to trigger variant detection explicitly via a POST to the ECU endpoint
+    - Clients must be able to trigger variant detection explicitly via a PUT to the ECU endpoint
     - Variant detection must be retriggerable to handle ECU software changes
 
     **Rationale**

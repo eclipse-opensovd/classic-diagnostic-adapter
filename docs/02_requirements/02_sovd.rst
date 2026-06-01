@@ -197,7 +197,7 @@ Paths
     :links: arch~sovd-api-ecu-variant-detection
     :status: draft
 
-    The CDA must support ECU variant detection through a ``POST`` on the ``/components/{ecu-name}`` endpoint.
+    The CDA must support ECU variant detection through a ``PUT`` on the ``/components/{ecu-name}`` endpoint.
     An additional endpoint under operations may be provided to trigger the detection.
 
     **Rationale**
