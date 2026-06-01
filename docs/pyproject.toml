@@ -8,7 +8,17 @@
 # terms of the Apache License Version 2.0 which is available at
 # https://www.apache.org/licenses/LICENSE-2.0
 
-sphinx-needs==6.3.0
-sphinxcontrib-plantuml==0.31.0
-sphinx-codelinks @ git+https://github.com/useblocks/sphinx-codelinks.git@c440f593f5097c97e953c4a34a284d51f3243c10
-myst-parser==5.0.0
+[project]
+name = "cda-docs"
+version = "1.0.0"
+requires-python = ">=3.13"
+dependencies = [
+  "sphinx>=8.2,<9",
+  "sphinx-needs==6.3.0",
+  "sphinxcontrib-plantuml==0.31.0",
+  "sphinx-codelinks",
+  "myst-parser==5.0.0",
+]
+
+[tool.uv.sources]
+sphinx-codelinks = { git = "https://github.com/useblocks/sphinx-codelinks.git", rev = "c440f593f5097c97e953c4a34a284d51f3243c10" }

@@ -53,11 +53,11 @@ jobs:
         run: |
           docker run --rm \
             -e _JAVA_OPTIONS="-Djava.io.tmpdir=/tmp -Duser.home=/tmp" \
-            -v ${{ github.workspace }}:/project \
-            -v ${{ github.workspace }}/docs:/docs \
+            -v ${{ github.workspace }}:/workspace \
+            -w /workspace/docs \
             -u $(id -u):$(id -g) \
             ghcr.io/${{ github.repository }}/sphinxdoc:latest \
-            bash -c "sphinx-build -W -b html /docs /docs/_build/html"
+            bash -c "sphinx-build -W -b html . _build/html"
       - name: Upload documentation (html)
         uses: actions/upload-artifact@v7
         id: upload-docs-html

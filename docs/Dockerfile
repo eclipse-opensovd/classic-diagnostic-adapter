@@ -10,12 +10,13 @@
 
 FROM sphinxdoc/sphinx:8.2.3
 
-RUN apt-get -y update && apt-get install -y git curl openjdk-17-jre && apt-get autoremove -y && apt-get -y clean
-ADD requirements.txt /tmp
-RUN python3 -m pip install -r /tmp/requirements.txt
-RUN curl -L -o /usr/local/bin/plantuml.jar https://github.com/plantuml/plantuml/releases/download/v1.2026.1/plantuml-1.2026.1.jar
+RUN apt-get -y update && apt-get install -y git curl default-jre-headless && apt-get autoremove -y && apt-get -y clean
+COPY --from=ghcr.io/astral-sh/uv:latest /uv /usr/local/bin/uv
+RUN curl -s -L -o /usr/local/bin/plantuml.jar https://github.com/plantuml/plantuml/releases/download/v1.2026.1/plantuml-1.2026.1.jar
 RUN sha256sum /usr/local/bin/plantuml.jar | grep "89c116168a2a0f7cf5292e11617ba22abd743f891914f1fec5bc9c7d257b3092" > /dev/null
 RUN useradd -ms /bin/bash dockeruser
+ADD pyproject.toml uv.lock /tmp/docs/
+RUN cd /tmp/docs && uv pip install --system -r pyproject.toml
 
 USER dockeruser
 WORKDIR /docs

@@ -38,3 +38,6 @@ mbedtls-4*
 
 # macOS metadata
 .DS_Store
+
+# Python virtual environments
+.venv
