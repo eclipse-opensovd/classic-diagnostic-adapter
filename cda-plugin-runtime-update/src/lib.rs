@@ -8,10 +8,14 @@
 // terms of the Apache License Version 2.0 which is available at
 // https://www.apache.org/licenses/LICENSE-2.0
 
-use std::path::{Path, PathBuf};
+use std::{
+    path::{Path, PathBuf},
+    sync::Arc,
+};
 
 use async_trait::async_trait;
 use bytes::Bytes;
+use cda_interfaces::storage_api::{Collection, DirectFileAccess};
 pub use default_runtime_update_plugin::DefaultRuntimeFilesUpdatePlugin;
 use sovd_interfaces::{
     apps::sovd2uds::bulk_data::{
@@ -59,6 +63,33 @@ pub struct UploadFile {
     pub filename: String,
     /// Raw file contents.
     pub data: Bytes,
+}
+
+/// Collections passed to [`RuntimeFilesUpdateSecurityHandler::check_apply_allowed`].
+///
+/// Provides direct access to the staged (`*NextUpdate`) and currently active collections
+/// so implementations can inspect file lists, read metadata, or verify file content
+/// before permitting an apply operation.
+pub struct UpdateCollections<C: Collection + DirectFileAccess> {
+    /// Staged MDD collection (`DiagnosticDatabaseNextUpdate`), or `None` if no update is pending.
+    pub pending_mdd: Option<Arc<C>>,
+    /// Staged configuration collection (`ConfigurationNextUpdate`), or `None` if not pending.
+    pub pending_config: Option<Arc<C>>,
+    /// Currently active MDD collection (`DiagnosticDatabase`), or `None` if not yet initialized.
+    pub current_mdd: Option<Arc<C>>,
+    /// Currently active configuration collection (`Configuration`), or `None` if uninitialised.
+    pub current_config: Option<Arc<C>>,
+}
+
+impl<C: Collection + DirectFileAccess> Default for UpdateCollections<C> {
+    fn default() -> Self {
+        Self {
+            pending_mdd: None,
+            pending_config: None,
+            current_mdd: None,
+            current_config: None,
+        }
+    }
 }
 
 /// Determines the kind of file being applied in a runtime update.
@@ -112,16 +143,26 @@ pub trait RuntimeFileReloadHandler: Send + Sync + 'static {
 /// Vehicle lock ownership for modifying operations (upload, delete) is enforced at
 /// the HTTP handler layer in cda-sovd, not through this trait.
 #[async_trait]
-pub trait RuntimeFilesUpdateSecurityHandler<L: LockStateProvider>: Send + Sync + 'static {
+pub trait RuntimeFilesUpdateSecurityHandler<
+    L: LockStateProvider,
+    C: Collection + DirectFileAccess + Send + Sync + 'static,
+>: Send + Sync + 'static
+{
     /// Validates that the caller is allowed to start an execution (apply/rollback/cleanup).
     /// Called by the plugin before `start_execution`.
     ///
     /// Implementations should verify caller authorization AND check for conflicting
     /// operations (e.g., active ECU or functional-group locks held by other callers).
+    /// `collections` provides handles to the staged and currently active file collections
+    /// for version compatibility or signature checks.
     ///
     /// # Errors
     /// Return an appropriate [`RuntimeUpdateError`] variant to deny the execution.
-    async fn check_apply_allowed(&self, lock_state_provider: &L) -> Result<(), RuntimeUpdateError>;
+    async fn check_apply_allowed(
+        &self,
+        lock_state_provider: &L,
+        collections: &UpdateCollections<C>,
+    ) -> Result<(), RuntimeUpdateError>;
 
     /// Checks the integrity of all pending files before they are applied.
     ///
@@ -225,7 +266,7 @@ pub(crate) mod test_utils {
     use async_trait::async_trait;
     use bytes::Bytes;
     use cda_interfaces::storage_api::{
-        Collection as _, CollectionName, ReadableStream, Storage, Transaction,
+        Collection, CollectionName, DirectFileAccess, ReadableStream, Storage, Transaction,
     };
     use cda_storage::LocalStorage;
 
@@ -272,10 +313,13 @@ pub(crate) mod test_utils {
     }
 
     #[async_trait]
-    impl<L: LockStateProvider> crate::RuntimeFilesUpdateSecurityHandler<L> for MockSecurityHandler {
+    impl<L: LockStateProvider, C: Collection + DirectFileAccess + Send + Sync + 'static>
+        crate::RuntimeFilesUpdateSecurityHandler<L, C> for MockSecurityHandler
+    {
         async fn check_apply_allowed(
             &self,
             lock_state_provider: &L,
+            _collections: &crate::UpdateCollections<C>,
         ) -> Result<(), RuntimeUpdateError> {
             let owner = lock_state_provider.is_vehicle_lock_owned().await;
             match owner {

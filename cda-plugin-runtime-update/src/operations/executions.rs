@@ -13,12 +13,15 @@ use std::sync::{
     atomic::{AtomicBool, Ordering},
 };
 
-use cda_interfaces::{HashMap, storage_api::Storage};
+use cda_interfaces::{
+    HashMap,
+    storage_api::{CollectionName, Storage},
+};
 use tokio::sync::RwLock;
 
 use crate::{
     ExecutionMode, ExecutionStatus, LockStateProvider, RuntimeFileReloadHandler,
-    RuntimeFilesUpdateSecurityHandler, RuntimeUpdateError, UpdateExecution,
+    RuntimeFilesUpdateSecurityHandler, RuntimeUpdateError, UpdateCollections, UpdateExecution,
 };
 
 pub(crate) struct ExecutionParams<'a, S, R, T, L> {
@@ -38,7 +41,7 @@ pub(crate) async fn start_execution<S, R, T, L>(
 where
     S: Storage + Send + Sync + 'static,
     R: RuntimeFileReloadHandler,
-    T: RuntimeFilesUpdateSecurityHandler<L>,
+    T: RuntimeFilesUpdateSecurityHandler<L, S::CollectionHandle>,
     L: LockStateProvider,
 {
     params
@@ -46,9 +49,32 @@ where
         .compare_exchange(false, true, Ordering::Acquire, Ordering::Relaxed)
         .map_err(|_| RuntimeUpdateError::ExecutionConflict)?;
 
+    let collections = UpdateCollections {
+        pending_mdd: params
+            .storage
+            .get_collection(&CollectionName::DiagnosticDatabaseNextUpdate)
+            .await
+            .ok(),
+        pending_config: params
+            .storage
+            .get_collection(&CollectionName::ConfigurationNextUpdate)
+            .await
+            .ok(),
+        current_mdd: params
+            .storage
+            .get_collection(&CollectionName::DiagnosticDatabase)
+            .await
+            .ok(),
+        current_config: params
+            .storage
+            .get_collection(&CollectionName::Configuration)
+            .await
+            .ok(),
+    };
+
     if let Err(e) = params
         .security_handler
-        .check_apply_allowed(params.lock_state_provider)
+        .check_apply_allowed(params.lock_state_provider, &collections)
         .await
     {
         params.update_in_progress.store(false, Ordering::Release);
@@ -117,17 +143,19 @@ pub(crate) async fn get_execution_status(
     execs.get(execution_id).cloned()
 }
 
-async fn execute_operation<
-    T: RuntimeFilesUpdateSecurityHandler<L>,
-    R: RuntimeFileReloadHandler,
-    L: LockStateProvider,
->(
+async fn execute_operation<S, T, R, L>(
     mode: ExecutionMode,
-    storage: &(impl Storage + 'static),
+    storage: &S,
     security_handler: &T,
     reload_handler: &R,
     mdd_decompress: bool,
-) -> Result<(), RuntimeUpdateError> {
+) -> Result<(), RuntimeUpdateError>
+where
+    S: Storage + Send + Sync + 'static,
+    T: RuntimeFilesUpdateSecurityHandler<L, S::CollectionHandle>,
+    R: RuntimeFileReloadHandler,
+    L: LockStateProvider,
+{
     match mode {
         ExecutionMode::Apply => {
             crate::operations::apply::execute_apply(
@@ -173,8 +201,13 @@ mod tests {
     impl TestFixture {
         fn params(
             &self,
-        ) -> super::ExecutionParams<'_, LocalStorage, NoopReloadHandler, MockSecurityHandler, MockLockProvider>
-        {
+        ) -> super::ExecutionParams<
+            '_,
+            LocalStorage,
+            NoopReloadHandler,
+            MockSecurityHandler,
+            MockLockProvider,
+        > {
             super::ExecutionParams {
                 storage: &self.storage,
                 security_handler: &self.security_handler,

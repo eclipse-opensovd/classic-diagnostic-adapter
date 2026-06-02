@@ -24,7 +24,7 @@ pub mod rollback;
 pub(crate) async fn try_get_collection<S: Storage>(
     storage: &S,
     name: &CollectionName,
-) -> Result<Option<Arc<impl Collection + DirectFileAccess>>, RuntimeUpdateError> {
+) -> Result<Option<Arc<S::CollectionHandle>>, RuntimeUpdateError> {
     match storage.get_collection(name).await {
         Ok(col) => Ok(Some(col)),
         Err(StorageError::CollectionNotFound(_)) => Ok(None),

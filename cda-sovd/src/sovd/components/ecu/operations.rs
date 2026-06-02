@@ -786,7 +786,8 @@ pub(crate) mod service {
         fn validate_and_parse_write_request(
             headers: &HeaderMap,
             body: &Bytes,
-        ) -> Result<(Option<cda_interfaces::diagservices::UdsPayloadData>, bool), ApiError> {
+        ) -> Result<(Option<cda_interfaces::diagservices::UdsPayloadData>, bool), ApiError>
+        {
             let (Some(content_type), accept) = get_content_type_and_accept(headers)? else {
                 return Err(ApiError::BadRequest("Missing Content-Type".to_owned()));
             };

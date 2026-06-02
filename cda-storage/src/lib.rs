@@ -61,4 +61,5 @@ pub(crate) mod recovery;
 /// Write-ahead log utilities. Exposed publicly for use in recovery tests.
 pub mod wal;
 
+pub use local_collection::LocalCollection;
 pub use local_storage::LocalStorage;

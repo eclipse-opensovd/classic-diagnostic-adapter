@@ -24,7 +24,7 @@ use crate::{
 pub struct DefaultRuntimeFilesUpdatePlugin<
     S: Storage,
     R: RuntimeFileReloadHandler,
-    T: RuntimeFilesUpdateSecurityHandler<L>,
+    T: RuntimeFilesUpdateSecurityHandler<L, S::CollectionHandle>,
     L: LockStateProvider,
 > {
     /// Access to the persistent storage layer (all mutations go through this)
@@ -48,7 +48,7 @@ pub struct DefaultRuntimeFilesUpdatePlugin<
 impl<
     S: Storage,
     R: RuntimeFileReloadHandler,
-    T: RuntimeFilesUpdateSecurityHandler<L>,
+    T: RuntimeFilesUpdateSecurityHandler<L, S::CollectionHandle>,
     L: LockStateProvider,
 > DefaultRuntimeFilesUpdatePlugin<S, R, T, L>
 {
@@ -85,7 +85,7 @@ impl<
 impl<
     S: Storage + Send + Sync + 'static,
     R: RuntimeFileReloadHandler,
-    T: RuntimeFilesUpdateSecurityHandler<L>,
+    T: RuntimeFilesUpdateSecurityHandler<L, S::CollectionHandle>,
     L: LockStateProvider,
 > RuntimeFilesUpdatePlugin for DefaultRuntimeFilesUpdatePlugin<S, R, T, L>
 {

@@ -187,7 +187,10 @@ async fn reload_configuration_from_path(
 pub struct RuntimeUpdateContext<
     S: SecurityPlugin,
     F,
-    T: RuntimeFilesUpdateSecurityHandler<cda_sovd::SovdLockStateProvider>,
+    T: RuntimeFilesUpdateSecurityHandler<
+            cda_sovd::SovdLockStateProvider,
+            cda_storage::LocalCollection,
+        >,
 > {
     pub dynamic_router: cda_sovd::dynamic_router::DynamicRouter,
     pub vehicle_route_handle: cda_sovd::RouteHandle,
@@ -218,7 +221,10 @@ pub async fn add_runtime_update_routes<S, F, P>(
     ctx: RuntimeUpdateContext<
         S,
         F,
-        impl RuntimeFilesUpdateSecurityHandler<cda_sovd::SovdLockStateProvider>,
+        impl RuntimeFilesUpdateSecurityHandler<
+            cda_sovd::SovdLockStateProvider,
+            cda_storage::LocalCollection,
+        >,
     >,
 ) -> Result<(), AppError>
 where

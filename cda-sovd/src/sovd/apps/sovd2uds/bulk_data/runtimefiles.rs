@@ -180,14 +180,10 @@ pub(crate) mod current {
         {
             return resp;
         }
-        route_state
-            .plugin
-            .list_current(&query)
-            .await
-            .map_or_else(
-                |e| DbUpdateErrorResponse::new(e, route_state.retry_after_seconds).into_response(),
-                |list| super::bulk_data_list_response(list, query.include_schema),
-            )
+        route_state.plugin.list_current(&query).await.map_or_else(
+            |e| DbUpdateErrorResponse::new(e, route_state.retry_after_seconds).into_response(),
+            |list| super::bulk_data_list_response(list, query.include_schema),
+        )
     }
 }
 
@@ -356,14 +352,10 @@ pub(crate) mod backup {
         {
             return resp;
         }
-        route_state
-            .plugin
-            .list_backup(&query)
-            .await
-            .map_or_else(
-                |e| DbUpdateErrorResponse::new(e, route_state.retry_after_seconds).into_response(),
-                |list| super::bulk_data_list_response(list, query.include_schema),
-            )
+        route_state.plugin.list_backup(&query).await.map_or_else(
+            |e| DbUpdateErrorResponse::new(e, route_state.retry_after_seconds).into_response(),
+            |list| super::bulk_data_list_response(list, query.include_schema),
+        )
     }
 
     pub(crate) async fn delete(

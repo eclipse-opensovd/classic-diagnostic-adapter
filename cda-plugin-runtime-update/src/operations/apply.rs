@@ -37,7 +37,7 @@ async fn swap_collection<S: Storage>(
 /// Returns [`RuntimeUpdateError`] if validation, transaction, or reload fails.
 pub async fn execute_apply<
     S: Storage,
-    T: RuntimeFilesUpdateSecurityHandler<L>,
+    T: RuntimeFilesUpdateSecurityHandler<L, S::CollectionHandle>,
     R: RuntimeFileReloadHandler,
     L: LockStateProvider,
 >(
@@ -158,10 +158,18 @@ mod tests {
     struct AcceptAllVerifier;
 
     #[async_trait]
-    impl RuntimeFilesUpdateSecurityHandler<MockLockProvider> for AcceptAllVerifier {
+    impl<
+        C: cda_interfaces::storage_api::Collection
+            + cda_interfaces::storage_api::DirectFileAccess
+            + Send
+            + Sync
+            + 'static,
+    > RuntimeFilesUpdateSecurityHandler<MockLockProvider, C> for AcceptAllVerifier
+    {
         async fn check_apply_allowed(
             &self,
             _lock_state_provider: &MockLockProvider,
+            _collections: &crate::UpdateCollections<C>,
         ) -> Result<(), RuntimeUpdateError> {
             Ok(())
         }

@@ -28,6 +28,9 @@ use super::{
 /// During [`Transaction::commit`], reads are blocked until the commit completes to ensure
 /// consistency.
 pub trait Storage: Send + Sync {
+    /// The concrete collection type returned by this storage backend.
+    type CollectionHandle: Collection + DirectFileAccess + Send + Sync + 'static;
+
     /// Get an existing collection by name.
     ///
     /// # Errors
@@ -36,9 +39,7 @@ pub trait Storage: Send + Sync {
     fn get_collection(
         &self,
         name: &CollectionName,
-    ) -> impl Future<
-        Output = Result<Arc<impl Collection + DirectFileAccess + 'static>, StorageError>,
-    > + Send;
+    ) -> impl Future<Output = Result<Arc<Self::CollectionHandle>, StorageError>> + Send;
 
     /// Get a collection by name, creating it if it does not already exist.
     ///

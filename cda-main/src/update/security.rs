@@ -10,13 +10,14 @@
  * https://www.apache.org/licenses/LICENSE-2.0
  */
 
-use std::sync::Arc;
+use std::{collections::HashSet, sync::Arc};
 
 use async_trait::async_trait;
 use cda_database::mmap_and_decode_mdd;
+use cda_interfaces::storage_api::{Collection, DirectFileAccess};
 use cda_plugin_runtime_update::{
     ActiveOperationsGuard, LockStateProvider, RuntimeFilesUpdateSecurityHandler,
-    RuntimeUpdateError, UpdateFileType, VerificationError,
+    RuntimeUpdateError, UpdateCollections, UpdateFileType, VerificationError,
 };
 
 pub struct UpdateSecurityHandler<L: LockStateProvider, G: ActiveOperationsGuard> {
@@ -34,14 +35,21 @@ impl<L: LockStateProvider, G: ActiveOperationsGuard> UpdateSecurityHandler<L, G>
 }
 
 #[async_trait]
-impl<L: LockStateProvider, G: ActiveOperationsGuard> RuntimeFilesUpdateSecurityHandler<L>
-    for UpdateSecurityHandler<L, G>
+impl<
+    L: LockStateProvider,
+    G: ActiveOperationsGuard,
+    C: Collection + DirectFileAccess + Send + Sync + 'static,
+> RuntimeFilesUpdateSecurityHandler<L, C> for UpdateSecurityHandler<L, G>
 {
     /// Validates that the caller is allowed to start an execution (apply/rollback/cleanup).
     ///
     /// Ensures the caller owns the vehicle lock, no ECU or functional-group locks
     /// are held, and no active operations are in progress.
-    async fn check_apply_allowed(&self, lock_state_provider: &L) -> Result<(), RuntimeUpdateError> {
+    async fn check_apply_allowed(
+        &self,
+        lock_state_provider: &L,
+        collections: &UpdateCollections<C>,
+    ) -> Result<(), RuntimeUpdateError> {
         lock_state_provider
             .is_vehicle_lock_owned()
             .await
@@ -51,6 +59,19 @@ impl<L: LockStateProvider, G: ActiveOperationsGuard> RuntimeFilesUpdateSecurityH
         }
         if self.guard.has_active_operations() {
             return Err(RuntimeUpdateError::OperationsInProgress);
+        }
+
+        // Example, validate that no ECUs are added or deleted
+        if let (Some(pending), Some(current)) = (&collections.pending_mdd, &collections.current_mdd)
+        {
+            let pending_ecus = mdd_ecu_names(pending.as_ref()).await?;
+            let current_ecus = mdd_ecu_names(current.as_ref()).await?;
+            if pending_ecus != current_ecus {
+                return Err(RuntimeUpdateError::ValidationFailed(format!(
+                    "Pending MDD ECU names {pending_ecus:?} do not match current MDD ECU names \
+                     {current_ecus:?}"
+                )));
+            }
         }
         Ok(())
     }
@@ -87,14 +108,44 @@ impl<L: LockStateProvider, G: ActiveOperationsGuard> RuntimeFilesUpdateSecurityH
     }
 }
 
+async fn mdd_ecu_names<C: Collection + DirectFileAccess>(
+    col: &C,
+) -> Result<HashSet<String>, RuntimeUpdateError> {
+    let files = col
+        .list()
+        .await
+        .map_err(|e| RuntimeUpdateError::ValidationFailed(e.to_string()))?;
+    files
+        .iter()
+        .map(|key| {
+            let path = col
+                .file_path(key)
+                .map_err(|e| RuntimeUpdateError::ValidationFailed(e.to_string()))?;
+            let path_str = path.to_str().ok_or_else(|| {
+                RuntimeUpdateError::ValidationFailed(format!(
+                    "MDD path is not valid UTF-8: {}",
+                    path.display()
+                ))
+            })?;
+            mmap_and_decode_mdd(path_str)
+                .map(|mdd| mdd.ecu_name)
+                .map_err(|e| {
+                    RuntimeUpdateError::ValidationFailed(format!("Failed to read MDD: {e}"))
+                })
+        })
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use std::path::PathBuf;
 
     use async_trait::async_trait;
+    use cda_interfaces::storage_api::{CollectionName, Storage as _};
     use cda_plugin_runtime_update::{
-        RuntimeFilesUpdateSecurityHandler, RuntimeUpdateError, UpdateFileType,
+        RuntimeFilesUpdateSecurityHandler, RuntimeUpdateError, UpdateCollections, UpdateFileType,
     };
+    use cda_storage::{LocalCollection, LocalStorage};
 
     use super::*;
 
@@ -134,6 +185,66 @@ mod tests {
         }
     }
 
+    async fn check_file_integrity(
+        handler: &UpdateSecurityHandler<MockLockProvider, NoOpGuard>,
+        type_: UpdateFileType,
+        path: &std::path::Path,
+    ) -> Result<(), VerificationError> {
+        <UpdateSecurityHandler<_, _> as RuntimeFilesUpdateSecurityHandler<
+            MockLockProvider,
+            LocalCollection,
+        >>::check_file_integrity(handler, type_, path)
+        .await
+    }
+
+    fn make_mdd_bytes(ecu_name: &str) -> Vec<u8> {
+        let magic: &[u8] = &[
+            0x4d, 0x44, 0x44, 0x20, 0x76, 0x65, 0x72, 0x73, 0x69, 0x6f, 0x6e, 0x20, 0x30, 0x20,
+            0x20, 0x20, 0x20, 0x20, 0x20, 0x00,
+        ];
+        let name_bytes = ecu_name.as_bytes();
+        let mut bytes = magic.to_vec();
+        bytes.push(0x1a);
+        bytes.push(u8::try_from(name_bytes.len()).unwrap());
+        bytes.extend_from_slice(name_bytes);
+        bytes
+    }
+
+    async fn write_mdd_to_collection(
+        storage: &LocalStorage,
+        name: &CollectionName,
+        key: &str,
+        ecu_name: &str,
+    ) {
+        let col = storage.get_or_create_collection(name).await.unwrap();
+        let mut tx = storage.begin_transaction().unwrap();
+        let bytes = make_mdd_bytes(ecu_name);
+        let mut cursor: &[u8] = &bytes;
+        col.write(&mut tx, key, &mut cursor).await.unwrap();
+        tx.commit().await.unwrap();
+    }
+
+    async fn make_collections(storage: &LocalStorage) -> UpdateCollections<LocalCollection> {
+        UpdateCollections {
+            pending_mdd: storage
+                .get_collection(&CollectionName::DiagnosticDatabaseNextUpdate)
+                .await
+                .ok(),
+            pending_config: storage
+                .get_collection(&CollectionName::ConfigurationNextUpdate)
+                .await
+                .ok(),
+            current_mdd: storage
+                .get_collection(&CollectionName::DiagnosticDatabase)
+                .await
+                .ok(),
+            current_config: storage
+                .get_collection(&CollectionName::Configuration)
+                .await
+                .ok(),
+        }
+    }
+
     fn make_handler(
         owner: Option<&str>,
         has_ecu_conflicts: bool,
@@ -157,21 +268,36 @@ mod tests {
     #[tokio::test]
     async fn check_apply_allowed_returns_no_lock_when_no_vehicle_lock_held() {
         let (handler, lock_provider) = make_handler(None, false, false);
-        let result = handler.check_apply_allowed(&lock_provider).await;
+        let result = handler
+            .check_apply_allowed(
+                &lock_provider,
+                &UpdateCollections::<LocalCollection>::default(),
+            )
+            .await;
         assert!(matches!(result, Err(RuntimeUpdateError::NoLock)));
     }
 
     #[tokio::test]
     async fn check_apply_allowed_succeeds_when_vehicle_lock_is_held() {
         let (handler, lock_provider) = make_handler(Some("user-b"), false, false);
-        let result = handler.check_apply_allowed(&lock_provider).await;
+        let result = handler
+            .check_apply_allowed(
+                &lock_provider,
+                &UpdateCollections::<LocalCollection>::default(),
+            )
+            .await;
         assert!(result.is_ok());
     }
 
     #[tokio::test]
     async fn check_apply_allowed_returns_operations_in_progress_on_ecu_conflicts() {
         let (handler, lock_provider) = make_handler(Some("user-a"), true, false);
-        let result = handler.check_apply_allowed(&lock_provider).await;
+        let result = handler
+            .check_apply_allowed(
+                &lock_provider,
+                &UpdateCollections::<LocalCollection>::default(),
+            )
+            .await;
         assert!(matches!(
             result,
             Err(RuntimeUpdateError::OperationsInProgress)
@@ -181,7 +307,12 @@ mod tests {
     #[tokio::test]
     async fn check_apply_allowed_returns_operations_in_progress_on_fg_conflicts() {
         let (handler, lock_provider) = make_handler(Some("user-a"), false, true);
-        let result = handler.check_apply_allowed(&lock_provider).await;
+        let result = handler
+            .check_apply_allowed(
+                &lock_provider,
+                &UpdateCollections::<LocalCollection>::default(),
+            )
+            .await;
         assert!(matches!(
             result,
             Err(RuntimeUpdateError::OperationsInProgress)
@@ -191,16 +322,22 @@ mod tests {
     #[tokio::test]
     async fn check_apply_allowed_succeeds_when_owner_matches_and_no_conflicts() {
         let (handler, lock_provider) = make_handler(Some("user-a"), false, false);
-        assert!(handler.check_apply_allowed(&lock_provider).await.is_ok());
+        assert!(
+            handler
+                .check_apply_allowed(
+                    &lock_provider,
+                    &UpdateCollections::<LocalCollection>::default()
+                )
+                .await
+                .is_ok()
+        );
     }
 
     #[tokio::test]
     async fn check_file_integrity_config_fails_on_nonexistent_file() {
         let (handler, _) = make_handler(Some("user-a"), false, false);
         let path = PathBuf::from("/nonexistent/config.toml");
-        let result = handler
-            .check_file_integrity(UpdateFileType::Config, &path)
-            .await;
+        let result = check_file_integrity(&handler, UpdateFileType::Config, &path).await;
         assert!(result.is_err());
     }
 
@@ -210,9 +347,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("bad.toml");
         std::fs::write(&path, "this is not valid toml {{{").unwrap();
-        let result = handler
-            .check_file_integrity(UpdateFileType::Config, &path)
-            .await;
+        let result = check_file_integrity(&handler, UpdateFileType::Config, &path).await;
         assert!(result.is_err());
     }
 
@@ -224,9 +359,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("valid.toml");
         std::fs::write(&path, &toml_str).unwrap();
-        let result = handler
-            .check_file_integrity(UpdateFileType::Config, &path)
-            .await;
+        let result = check_file_integrity(&handler, UpdateFileType::Config, &path).await;
         assert!(result.is_ok());
     }
 
@@ -234,9 +367,7 @@ mod tests {
     async fn check_file_integrity_mdd_fails_on_nonexistent_file() {
         let (handler, _) = make_handler(Some("user-a"), false, false);
         let path = PathBuf::from("/nonexistent/test.mdd");
-        let result = handler
-            .check_file_integrity(UpdateFileType::Mdd, &path)
-            .await;
+        let result = check_file_integrity(&handler, UpdateFileType::Mdd, &path).await;
         assert!(result.is_err());
     }
 
@@ -246,9 +377,66 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("bad.mdd");
         std::fs::write(&path, b"not a valid mdd file").unwrap();
-        let result = handler
-            .check_file_integrity(UpdateFileType::Mdd, &path)
-            .await;
+        let result = check_file_integrity(&handler, UpdateFileType::Mdd, &path).await;
         assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn check_apply_allowed_succeeds_when_pending_and_current_mdd_ecu_names_match() {
+        let (handler, lock_provider) = make_handler(Some("user"), false, false);
+        let dir = tempfile::tempdir().unwrap();
+        let storage = LocalStorage::new(dir.path()).unwrap();
+
+        write_mdd_to_collection(
+            &storage,
+            &CollectionName::DiagnosticDatabaseNextUpdate,
+            "ecu.mdd",
+            "TestEcu",
+        )
+        .await;
+        write_mdd_to_collection(
+            &storage,
+            &CollectionName::DiagnosticDatabase,
+            "ecu.mdd",
+            "TestEcu",
+        )
+        .await;
+
+        let collections = make_collections(&storage).await;
+        let result = handler
+            .check_apply_allowed(&lock_provider, &collections)
+            .await;
+        assert!(result.is_ok());
+    }
+
+    #[tokio::test]
+    async fn check_apply_allowed_fails_when_pending_mdd_ecu_name_differs_from_current() {
+        let (handler, lock_provider) = make_handler(Some("user"), false, false);
+        let dir = tempfile::tempdir().unwrap();
+        let storage = LocalStorage::new(dir.path()).unwrap();
+
+        write_mdd_to_collection(
+            &storage,
+            &CollectionName::DiagnosticDatabaseNextUpdate,
+            "ecu.mdd",
+            "PendingEcu",
+        )
+        .await;
+        write_mdd_to_collection(
+            &storage,
+            &CollectionName::DiagnosticDatabase,
+            "ecu.mdd",
+            "DifferentEcu",
+        )
+        .await;
+
+        let collections = make_collections(&storage).await;
+        let result = handler
+            .check_apply_allowed(&lock_provider, &collections)
+            .await;
+        assert!(matches!(
+            result,
+            Err(RuntimeUpdateError::ValidationFailed(_))
+        ));
     }
 }

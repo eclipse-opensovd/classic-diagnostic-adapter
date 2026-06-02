@@ -93,10 +93,12 @@ impl LocalStorage {
 }
 
 impl Storage for LocalStorage {
+    type CollectionHandle = LocalCollection;
+
     async fn get_collection(
         &self,
         name: &CollectionName,
-    ) -> Result<Arc<impl Collection + DirectFileAccess + 'static>, StorageError> {
+    ) -> Result<Arc<LocalCollection>, StorageError> {
         let _guard = self.data_lock.read().await;
         let dir = self.collection_dir(name)?;
         if !dir.exists() {
