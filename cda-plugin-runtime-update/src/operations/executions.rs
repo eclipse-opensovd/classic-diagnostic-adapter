@@ -224,10 +224,7 @@ mod tests {
         let (storage, dir) = make_storage();
         TestFixture {
             storage: Arc::new(storage),
-            security_handler: Arc::new(MockSecurityHandler::new(Arc::new(MockLockProvider {
-                owner: Some("test-user".to_owned()),
-                has_conflicts: false,
-            }))),
+            security_handler: Arc::new(MockSecurityHandler::new()),
             reload_handler: Arc::new(NoopReloadHandler),
             lock_provider: MockLockProvider {
                 owner: Some("test-user".to_owned()),

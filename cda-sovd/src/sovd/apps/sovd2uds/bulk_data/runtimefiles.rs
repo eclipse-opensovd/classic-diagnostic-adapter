@@ -17,21 +17,30 @@ use axum::{
     http::{HeaderValue, StatusCode, header::RETRY_AFTER},
     response::{IntoResponse, Response},
 };
-use cda_plugin_runtime_update::{LockStateProvider, RuntimeUpdateError};
-use sovd_interfaces::error::{ApiErrorResponse, ErrorCode};
+use cda_plugin_runtime_update::{LockStateProvider, RuntimeFilesUpdatePlugin, RuntimeUpdateError};
 
 use crate::sovd::update_guard::ExemptRoute;
+use sovd_interfaces::error::{ApiErrorResponse, ErrorCode};
 
 const EXECUTIONS_ROUTE: &str =
     "/vehicle/v15/apps/sovd2uds/bulk-data/runtimefiles-nextupdate/executions";
 const EXECUTIONS_ID_ROUTE: &str =
     "/vehicle/v15/apps/sovd2uds/bulk-data/runtimefiles-nextupdate/executions/{id}";
 
-#[derive(Clone)]
-pub struct RuntimeUpdateRouteState {
-    pub plugin: Arc<dyn cda_plugin_runtime_update::RuntimeFilesUpdatePlugin>,
-    pub lock_state: Arc<dyn LockStateProvider>,
+pub struct RuntimeUpdateRouteState<P, L> {
+    pub plugin: Arc<P>,
+    pub lock_state: Arc<L>,
     pub retry_after_seconds: u64,
+}
+
+impl<P, L> Clone for RuntimeUpdateRouteState<P, L> {
+    fn clone(&self) -> Self {
+        Self {
+            plugin: Arc::clone(&self.plugin),
+            lock_state: Arc::clone(&self.lock_state),
+            retry_after_seconds: self.retry_after_seconds,
+        }
+    }
 }
 
 struct DbUpdateErrorResponse {
@@ -159,12 +168,13 @@ pub(crate) mod current {
         extract::{Query, State},
         response::{IntoResponse, Response},
     };
+    use cda_plugin_runtime_update::{LockStateProvider, RuntimeFilesUpdatePlugin};
     use cda_plugin_security::Secured;
 
     use super::{DbUpdateErrorResponse, RuntimeUpdateRouteState, require_vehicle_lock};
 
-    pub(crate) async fn get(
-        State(route_state): State<RuntimeUpdateRouteState>,
+    pub(crate) async fn get<P: RuntimeFilesUpdatePlugin, L: LockStateProvider>(
+        State(route_state): State<RuntimeUpdateRouteState<P, L>>,
         Secured(sec_plugin): Secured,
         Query(query): Query<
             sovd_interfaces::apps::sovd2uds::bulk_data::runtimefiles::RuntimeFilesQuery,
@@ -194,13 +204,15 @@ pub(crate) mod nextupdate {
         http::StatusCode,
         response::{IntoResponse, Response},
     };
-    use cda_plugin_runtime_update::{RuntimeUpdateError, UploadFile};
+    use cda_plugin_runtime_update::{
+        LockStateProvider, RuntimeFilesUpdatePlugin, RuntimeUpdateError, UploadFile,
+    };
     use cda_plugin_security::Secured;
 
     use super::{DbUpdateErrorResponse, RuntimeUpdateRouteState, require_vehicle_lock};
 
-    pub(crate) async fn get(
-        State(route_state): State<RuntimeUpdateRouteState>,
+    pub(crate) async fn get<P: RuntimeFilesUpdatePlugin, L: LockStateProvider>(
+        State(route_state): State<RuntimeUpdateRouteState<P, L>>,
         Secured(sec_plugin): Secured,
         Query(query): Query<
             sovd_interfaces::apps::sovd2uds::bulk_data::runtimefiles::RuntimeFilesQuery,
@@ -226,8 +238,8 @@ pub(crate) mod nextupdate {
             )
     }
 
-    pub(crate) async fn post(
-        State(route_state): State<RuntimeUpdateRouteState>,
+    pub(crate) async fn post<P: RuntimeFilesUpdatePlugin, L: LockStateProvider>(
+        State(route_state): State<RuntimeUpdateRouteState<P, L>>,
         Secured(sec_plugin): Secured,
         mut multipart: axum::extract::Multipart,
     ) -> impl IntoResponse {
@@ -265,8 +277,8 @@ pub(crate) mod nextupdate {
         )
     }
 
-    pub(crate) async fn delete(
-        State(route_state): State<RuntimeUpdateRouteState>,
+    pub(crate) async fn delete<P: RuntimeFilesUpdatePlugin, L: LockStateProvider>(
+        State(route_state): State<RuntimeUpdateRouteState<P, L>>,
         Secured(sec_plugin): Secured,
     ) -> impl IntoResponse {
         let claims = sec_plugin.as_auth_plugin().claims();
@@ -291,12 +303,13 @@ pub(crate) mod nextupdate {
             http::StatusCode,
             response::IntoResponse,
         };
+        use cda_plugin_runtime_update::{LockStateProvider, RuntimeFilesUpdatePlugin};
         use cda_plugin_security::Secured;
 
         use super::super::{DbUpdateErrorResponse, RuntimeUpdateRouteState, require_vehicle_lock};
 
-        pub(crate) async fn delete(
-            State(route_state): State<RuntimeUpdateRouteState>,
+        pub(crate) async fn delete<P: RuntimeFilesUpdatePlugin, L: LockStateProvider>(
+            State(route_state): State<RuntimeUpdateRouteState<P, L>>,
             Secured(sec_plugin): Secured,
             Path(id): Path<String>,
         ) -> impl IntoResponse {
@@ -331,12 +344,13 @@ pub(crate) mod backup {
         http::StatusCode,
         response::{IntoResponse, Response},
     };
+    use cda_plugin_runtime_update::{LockStateProvider, RuntimeFilesUpdatePlugin};
     use cda_plugin_security::Secured;
 
     use super::{DbUpdateErrorResponse, RuntimeUpdateRouteState, require_vehicle_lock};
 
-    pub(crate) async fn get(
-        State(route_state): State<RuntimeUpdateRouteState>,
+    pub(crate) async fn get<P: RuntimeFilesUpdatePlugin, L: LockStateProvider>(
+        State(route_state): State<RuntimeUpdateRouteState<P, L>>,
         Secured(sec_plugin): Secured,
         Query(query): Query<
             sovd_interfaces::apps::sovd2uds::bulk_data::runtimefiles::RuntimeFilesQuery,
@@ -358,8 +372,8 @@ pub(crate) mod backup {
         )
     }
 
-    pub(crate) async fn delete(
-        State(route_state): State<RuntimeUpdateRouteState>,
+    pub(crate) async fn delete<P: RuntimeFilesUpdatePlugin, L: LockStateProvider>(
+        State(route_state): State<RuntimeUpdateRouteState<P, L>>,
         Secured(sec_plugin): Secured,
     ) -> impl IntoResponse {
         let claims = sec_plugin.as_auth_plugin().claims();
@@ -386,12 +400,13 @@ pub(crate) mod executions {
         http::StatusCode,
         response::IntoResponse,
     };
+    use cda_plugin_runtime_update::{LockStateProvider, RuntimeFilesUpdatePlugin};
     use cda_plugin_security::Secured;
 
     use super::{DbUpdateErrorResponse, RuntimeUpdateRouteState, require_vehicle_lock};
 
-    pub(crate) async fn post(
-        State(route_state): State<RuntimeUpdateRouteState>,
+    pub(crate) async fn post<P: RuntimeFilesUpdatePlugin, L: LockStateProvider>(
+        State(route_state): State<RuntimeUpdateRouteState<P, L>>,
         Secured(sec_plugin): Secured,
         Json(body): Json<
             sovd_interfaces::apps::sovd2uds::bulk_data::runtimefiles::ExecutionRequest,
@@ -417,8 +432,8 @@ pub(crate) mod executions {
             )
     }
 
-    pub(crate) async fn get(
-        State(route_state): State<RuntimeUpdateRouteState>,
+    pub(crate) async fn get<P: RuntimeFilesUpdatePlugin, L: LockStateProvider>(
+        State(route_state): State<RuntimeUpdateRouteState<P, L>>,
         Path(id): Path<String>,
     ) -> impl IntoResponse {
         match route_state.plugin.get_execution_status(&id).await {
@@ -436,35 +451,45 @@ pub(crate) mod executions {
     }
 }
 
-pub fn routes<S: cda_plugin_security::SecurityPluginLoader>(
-    state: RuntimeUpdateRouteState,
+pub fn routes<
+    S: cda_plugin_security::SecurityPluginLoader,
+    P: RuntimeFilesUpdatePlugin,
+    L: LockStateProvider,
+>(
+    state: RuntimeUpdateRouteState<P, L>,
     upload_limit: usize,
 ) -> axum::Router {
     axum::Router::new()
         .route(
             "/vehicle/v15/apps/sovd2uds/bulk-data/runtimefiles-current",
-            axum::routing::get(current::get),
+            axum::routing::get(current::get::<P, L>),
         )
         .route(
             "/vehicle/v15/apps/sovd2uds/bulk-data/runtimefiles-nextupdate",
-            axum::routing::get(nextupdate::get)
-                .post(nextupdate::post)
+            axum::routing::get(nextupdate::get::<P, L>)
+                .post(nextupdate::post::<P, L>)
                 .layer(axum::extract::DefaultBodyLimit::max(upload_limit))
-                .delete(nextupdate::delete),
+                .delete(nextupdate::delete::<P, L>),
         )
         .route(
             "/vehicle/v15/apps/sovd2uds/bulk-data/runtimefiles-nextupdate/{id}",
-            axum::routing::delete(nextupdate::id::delete),
+            axum::routing::delete(nextupdate::id::delete::<P, L>),
         )
         .route(
             "/vehicle/v15/apps/sovd2uds/bulk-data/runtimefiles-backup",
-            axum::routing::get(backup::get).delete(backup::delete),
+            axum::routing::get(backup::get::<P, L>).delete(backup::delete::<P, L>),
         )
-        .route(EXECUTIONS_ROUTE, axum::routing::post(executions::post))
-        .route(EXECUTIONS_ID_ROUTE, axum::routing::get(executions::get))
+        .route(
+            EXECUTIONS_ROUTE,
+            axum::routing::post(executions::post::<P, L>),
+        )
+        .route(
+            EXECUTIONS_ID_ROUTE,
+            axum::routing::get(executions::get::<P, L>),
+        )
         .route(
             "/vehicle/v15/apps/sovd2uds/operations/diagnostic-database-update",
-            axum::routing::post(executions::post),
+            axum::routing::post(executions::post::<P, L>),
         )
         .layer(axum::middleware::from_fn(
             cda_plugin_security::security_plugin_middleware::<S>,

@@ -18,7 +18,7 @@
 
 use std::time::Duration;
 
-use cda_interfaces::HashMap;
+use cda_interfaces::{HashMap, HashMapExtensions};
 use http::{Method, StatusCode};
 use opensovd_cda_lib::config::configfile::Configuration;
 use sovd_interfaces::{

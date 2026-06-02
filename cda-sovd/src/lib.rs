@@ -183,16 +183,18 @@ where
 ///
 /// Adds the runtime-file update endpoints to the router, registers exempt routes on the
 /// [`UpdateGuardState`], and logs when the routes become active.
-pub async fn add_runtime_update_routes<S>(
+pub async fn add_runtime_update_routes<S, P, L>(
     dynamic_router: &DynamicRouter,
-    plugin: Arc<dyn cda_plugin_runtime_update::RuntimeFilesUpdatePlugin>,
-    lock_state: Arc<dyn cda_plugin_runtime_update::LockStateProvider>,
+    plugin: Arc<P>,
+    lock_state: Arc<L>,
     update_guard: &UpdateGuardState,
     upload_limit: usize,
     retry_after_seconds: u64,
 ) -> RouteHandle
 where
     S: SecurityPluginLoader,
+    P: cda_plugin_runtime_update::RuntimeFilesUpdatePlugin,
+    L: cda_plugin_runtime_update::LockStateProvider,
 {
     update_guard
         .extend_exempt(sovd::apps::sovd2uds::bulk_data::runtimefiles::update_exempt_routes())
@@ -204,7 +206,7 @@ where
         retry_after_seconds,
     };
     let router =
-        sovd::apps::sovd2uds::bulk_data::runtimefiles::routes::<S>(route_state, upload_limit);
+        sovd::apps::sovd2uds::bulk_data::runtimefiles::routes::<S, P, L>(route_state, upload_limit);
     let handle = dynamic_router.add_routes(router.into()).await;
     tracing::info!("Runtime update routes added to webserver");
     handle

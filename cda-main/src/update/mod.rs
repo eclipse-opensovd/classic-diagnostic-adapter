@@ -16,7 +16,9 @@ use async_trait::async_trait;
 use cda_comm_doip::DoipDiagGateway;
 use cda_core::{DiagServiceResponseStruct, EcuManager};
 use cda_interfaces::{UdsEcu, datatypes::ComponentsConfig};
-use cda_plugin_runtime_update::{ReloadError, RuntimeFilesUpdateSecurityHandler};
+use cda_plugin_runtime_update::{
+    ReloadError, RuntimeFilesUpdatePlugin, RuntimeFilesUpdateSecurityHandler,
+};
 use cda_plugin_security::{SecurityPlugin, SecurityPluginLoader};
 use tokio::sync::RwLock;
 
@@ -263,10 +265,9 @@ where
         mdd_decompress,
         ctx.update_guard.busy_handle(),
     );
-    let service: Arc<dyn cda_plugin_runtime_update::RuntimeFilesUpdatePlugin> =
-        Arc::new(db_update_state);
+    let service = Arc::new(db_update_state.with_exclusive_access());
     let lock_state = Arc::clone(&ctx.lock_provider);
-    cda_sovd::add_runtime_update_routes::<P>(
+    cda_sovd::add_runtime_update_routes::<P, _, _>(
         &ctx.dynamic_router,
         service,
         lock_state,

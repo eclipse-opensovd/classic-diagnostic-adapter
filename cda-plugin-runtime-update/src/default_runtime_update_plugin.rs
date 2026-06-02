@@ -187,10 +187,7 @@ mod tests {
         DefaultRuntimeFilesUpdatePlugin::new(
             Arc::new(storage),
             Arc::new(NoopReloadHandler),
-            Arc::new(MockSecurityHandler::new(Arc::new(MockLockProvider {
-                owner: owner.map(ToOwned::to_owned),
-                has_conflicts,
-            }))),
+            Arc::new(MockSecurityHandler::new()),
             Arc::new(MockLockProvider {
                 owner: owner.map(ToOwned::to_owned),
                 has_conflicts,
