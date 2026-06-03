@@ -29,6 +29,7 @@ async fn restore_from_backup<S: Storage, C: Collection>(
     Ok(())
 }
 
+/// Roll back the entire update from the backup.
 /// # Errors
 /// Returns [`RuntimeUpdateError`] if restore or reload fails.
 pub async fn execute_rollback<S: Storage, R: RuntimeFileReloadHandler>(

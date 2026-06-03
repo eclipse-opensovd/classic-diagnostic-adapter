@@ -1,10 +1,7 @@
-use cda_interfaces::storage_api::{
-    Collection, CollectionName, DirectFileAccess, Storage, Transaction,
-};
+use cda_interfaces::storage_api::{CollectionName, Storage, Transaction};
 
 use crate::{
-    LockStateProvider, RuntimeFileReloadHandler, RuntimeFilesUpdateSecurityHandler,
-    RuntimeUpdateError, UpdateFileType,
+    RuntimeFileReloadHandler, RuntimeUpdateError,
     operations::{reload_configuration_if_present, reload_database_if_present, try_get_collection},
 };
 
@@ -29,20 +26,13 @@ async fn swap_collection<S: Storage>(
 ///
 /// # Parameters
 /// - `storage`: The storage backend.
-/// - `security_handler`: Validates pending files before committing.
 /// - `reload_handler`: Notified after commit so the runtime can hot-reload databases/config.
 /// - `mdd_decompress`: If true, decompress MDD files in-place after commit.
 ///
 /// # Errors
 /// Returns [`RuntimeUpdateError`] if validation, transaction, or reload fails.
-pub async fn execute_apply<
-    S: Storage,
-    T: RuntimeFilesUpdateSecurityHandler<L, S::CollectionHandle>,
-    R: RuntimeFileReloadHandler,
-    L: LockStateProvider,
->(
+pub async fn execute_apply<S: Storage, R: RuntimeFileReloadHandler>(
     storage: &S,
-    security_handler: &T,
     reload_handler: &R,
     mdd_decompress: bool,
 ) -> Result<(), RuntimeUpdateError> {
@@ -52,33 +42,6 @@ pub async fn execute_apply<
 
     if mdd_next.is_none() && cfg_next.is_none() {
         return Err(RuntimeUpdateError::NoPendingUpdate);
-    }
-
-    if let Some(ref mdd_col) = mdd_next {
-        for mdd in mdd_col.list().await? {
-            let path = mdd_col.file_path(&mdd)?;
-            security_handler
-                .check_file_integrity(UpdateFileType::Mdd, &path)
-                .await
-                .map_err(|e| RuntimeUpdateError::ValidationFailed(e.to_string()))?;
-        }
-    }
-
-    if let Some(ref cfg_col) = cfg_next {
-        let cfg_next_list = cfg_col.list().await?;
-        if cfg_next_list.len() > 1 {
-            return Err(RuntimeUpdateError::ValidationFailed(format!(
-                "Multiple pending config files found: {}",
-                cfg_next_list.len()
-            )));
-        }
-        if let Some(cfg) = cfg_next_list.first() {
-            let path = cfg_col.file_path(cfg)?;
-            security_handler
-                .check_file_integrity(UpdateFileType::Config, &path)
-                .await
-                .map_err(|e| RuntimeUpdateError::ValidationFailed(e.to_string()))?;
-        }
     }
 
     // get_or_create_collection rejects creation while a transaction is active
@@ -148,40 +111,9 @@ mod tests {
 
     use super::execute_apply;
     use crate::{
-        RuntimeFilesUpdateSecurityHandler, RuntimeUpdateError, VerificationError,
-        test_utils::{
-            MockLockProvider, NoopReloadHandler, RecordingReloadHandler, init_collection,
-            make_storage,
-        },
+        RuntimeUpdateError,
+        test_utils::{NoopReloadHandler, RecordingReloadHandler, init_collection, make_storage},
     };
-
-    struct AcceptAllVerifier;
-
-    #[async_trait]
-    impl<
-        C: cda_interfaces::storage_api::Collection
-            + cda_interfaces::storage_api::DirectFileAccess
-            + Send
-            + Sync
-            + 'static,
-    > RuntimeFilesUpdateSecurityHandler<MockLockProvider, C> for AcceptAllVerifier
-    {
-        async fn check_apply_allowed(
-            &self,
-            _lock_state_provider: &MockLockProvider,
-            _collections: &crate::UpdateCollections<C>,
-        ) -> Result<(), RuntimeUpdateError> {
-            Ok(())
-        }
-
-        async fn check_file_integrity(
-            &self,
-            _type: crate::UpdateFileType,
-            _path: &std::path::Path,
-        ) -> Result<(), VerificationError> {
-            Ok(())
-        }
-    }
 
     #[derive(Clone, Default)]
     struct OrderingReloadHandler {
@@ -207,7 +139,6 @@ mod tests {
         }
     }
 
-    /// A reload handler that records all calls for assertions
     #[tokio::test]
     async fn apply_updates_current_and_creates_backup() {
         let (storage, _dir) = make_storage();
@@ -228,7 +159,7 @@ mod tests {
         )
         .await;
 
-        execute_apply(&storage, &AcceptAllVerifier, &NoopReloadHandler, false)
+        execute_apply(&storage, &NoopReloadHandler, false)
             .await
             .unwrap();
 
@@ -266,7 +197,7 @@ mod tests {
     async fn apply_empty_nextupdate_returns_no_pending_update() {
         let (storage, _dir) = make_storage();
 
-        let result = execute_apply(&storage, &AcceptAllVerifier, &NoopReloadHandler, false).await;
+        let result = execute_apply(&storage, &NoopReloadHandler, false).await;
 
         assert!(
             matches!(result, Err(RuntimeUpdateError::NoPendingUpdate)),
@@ -296,7 +227,7 @@ mod tests {
         )
         .await;
 
-        execute_apply(&storage, &AcceptAllVerifier, &NoopReloadHandler, false)
+        execute_apply(&storage, &NoopReloadHandler, false)
             .await
             .unwrap();
 
@@ -342,9 +273,7 @@ mod tests {
         .await;
 
         let handler = RecordingReloadHandler::new();
-        execute_apply(&storage, &AcceptAllVerifier, &handler, false)
-            .await
-            .unwrap();
+        execute_apply(&storage, &handler, false).await.unwrap();
 
         let calls = handler.reload_calls.lock().unwrap();
         assert_eq!(calls.len(), 1, "reload_databases should be called once");
@@ -362,9 +291,7 @@ mod tests {
         .await;
 
         let handler = RecordingReloadHandler::new();
-        execute_apply(&storage, &AcceptAllVerifier, &handler, false)
-            .await
-            .unwrap();
+        execute_apply(&storage, &handler, false).await.unwrap();
 
         let expected_path = dir
             .path()
@@ -408,7 +335,7 @@ mod tests {
         )
         .await;
 
-        execute_apply(&storage, &AcceptAllVerifier, &NoopReloadHandler, false)
+        execute_apply(&storage, &NoopReloadHandler, false)
             .await
             .unwrap();
 
@@ -460,7 +387,7 @@ mod tests {
         )
         .await;
 
-        execute_apply(&storage, &AcceptAllVerifier, &NoopReloadHandler, false)
+        execute_apply(&storage, &NoopReloadHandler, false)
             .await
             .unwrap();
 
@@ -504,9 +431,7 @@ mod tests {
         .await;
 
         let handler = RecordingReloadHandler::new();
-        execute_apply(&storage, &AcceptAllVerifier, &handler, false)
-            .await
-            .unwrap();
+        execute_apply(&storage, &handler, false).await.unwrap();
 
         let config_calls = handler.config_calls.lock().unwrap();
         assert_eq!(
@@ -542,9 +467,7 @@ mod tests {
         .await;
 
         let handler = OrderingReloadHandler::default();
-        execute_apply(&storage, &AcceptAllVerifier, &handler, false)
-            .await
-            .unwrap();
+        execute_apply(&storage, &handler, false).await.unwrap();
 
         let call_order = handler.call_order.lock().unwrap();
         assert_eq!(call_order.as_slice(), ["configuration", "databases"]);
@@ -562,9 +485,7 @@ mod tests {
         .await;
 
         let handler = RecordingReloadHandler::new();
-        execute_apply(&storage, &AcceptAllVerifier, &handler, false)
-            .await
-            .unwrap();
+        execute_apply(&storage, &handler, false).await.unwrap();
 
         let config_calls = handler.config_calls.lock().unwrap();
         assert!(
@@ -585,7 +506,7 @@ mod tests {
         .await;
 
         // mdd_decompress=false, should work fine
-        execute_apply(&storage, &AcceptAllVerifier, &NoopReloadHandler, false)
+        execute_apply(&storage, &NoopReloadHandler, false)
             .await
             .unwrap();
     }
@@ -608,7 +529,7 @@ mod tests {
         )
         .await;
 
-        execute_apply(&storage, &AcceptAllVerifier, &NoopReloadHandler, false)
+        execute_apply(&storage, &NoopReloadHandler, false)
             .await
             .expect("config-only apply should succeed");
 
@@ -653,9 +574,7 @@ mod tests {
         .await;
 
         let handler = RecordingReloadHandler::new();
-        execute_apply(&storage, &AcceptAllVerifier, &handler, false)
-            .await
-            .unwrap();
+        execute_apply(&storage, &handler, false).await.unwrap();
 
         let config_calls = handler.config_calls.lock().unwrap();
         assert_eq!(
@@ -690,7 +609,7 @@ mod tests {
             .await
             .unwrap();
 
-        execute_apply(&storage, &AcceptAllVerifier, &NoopReloadHandler, false)
+        execute_apply(&storage, &NoopReloadHandler, false)
             .await
             .unwrap();
 
@@ -738,7 +657,7 @@ mod tests {
         )
         .await;
 
-        execute_apply(&storage, &AcceptAllVerifier, &NoopReloadHandler, false)
+        execute_apply(&storage, &NoopReloadHandler, false)
             .await
             .unwrap();
 

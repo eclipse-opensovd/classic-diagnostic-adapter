@@ -114,7 +114,7 @@ impl<
         &self,
         files: Vec<UploadFile>,
     ) -> Result<BulkDataCreatedList, RuntimeUpdateError> {
-        crate::storage::upload_files(&*self.storage, files).await
+        crate::storage::upload_files(&*self.storage, &*self.security_handler, files).await
     }
 
     async fn delete_nextupdate(&self) -> Result<(), RuntimeUpdateError> {
@@ -273,7 +273,7 @@ mod tests {
         };
         let result = plugin.list_nextupdate(&query).await.unwrap();
 
-        assert_eq!(result.items.len(), 2);
+        assert_eq!(result.items.len(), 2, "{}", format!("{:#?}", result.items));
         let existing = result
             .items
             .iter()

@@ -22,12 +22,12 @@ pub enum RuntimeUpdateError {
     InvalidFileType(String),
     #[error("Validation failed: {0}")]
     ValidationFailed(String),
-    #[error("No vehicle lock held")]
-    NoLock,
-    #[error("Lock is not owned by the caller")]
-    LockNotOwned,
-    #[error("Operations in progress, cannot apply now")]
-    OperationsInProgress,
+    #[error("No Lock: {0}")]
+    NoLock(String),
+    #[error("Lock Conflict: {0}")]
+    LockConflict(String),
+    #[error("Operations in progress: {0}")]
+    OperationsInProgress(String),
     #[error("No pending update available")]
     NoPendingUpdate,
     #[error("No backup available for rollback")]
@@ -40,6 +40,10 @@ pub enum RuntimeUpdateError {
     ExecutionConflict,
     #[error("File not found: {0}")]
     FileNotFound(String),
+    #[error("Fatal Error: {0}")]
+    FatalError(String),
+    #[error("Severe Error: {0}")]
+    SevereError(String),
 }
 
 impl From<CdaStorageError> for RuntimeUpdateError {

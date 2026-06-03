@@ -202,7 +202,7 @@ where
 
     let route_state = RuntimeUpdateRouteState {
         plugin,
-        lock_state,
+        vehicle_lock_states: lock_state,
         retry_after_seconds,
     };
     let router =

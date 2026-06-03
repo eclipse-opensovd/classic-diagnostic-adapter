@@ -103,7 +103,6 @@ where
     }
 
     let storage = Arc::clone(params.storage);
-    let security_handler = Arc::clone(params.security_handler);
     let reload_handler = Arc::clone(params.reload_handler);
     let executions = Arc::clone(params.executions);
     let exec_id_clone = execution_id.clone();
@@ -112,14 +111,8 @@ where
     let mdd_decompress = params.mdd_decompress;
 
     tokio::spawn(async move {
-        let result = execute_operation(
-            mode_clone,
-            &*storage,
-            &*security_handler,
-            &*reload_handler,
-            mdd_decompress,
-        )
-        .await;
+        let result =
+            execute_operation(mode_clone, &*storage, &*reload_handler, mdd_decompress).await;
 
         let mut map = executions.write().await;
         if let Some(exec) = map.get_mut(&exec_id_clone) {
@@ -143,28 +136,19 @@ pub(crate) async fn get_execution_status(
     execs.get(execution_id).cloned()
 }
 
-async fn execute_operation<S, T, R, L>(
+async fn execute_operation<S, R>(
     mode: ExecutionMode,
     storage: &S,
-    security_handler: &T,
     reload_handler: &R,
     mdd_decompress: bool,
 ) -> Result<(), RuntimeUpdateError>
 where
     S: Storage + Send + Sync + 'static,
-    T: RuntimeFilesUpdateSecurityHandler<L, S::CollectionHandle>,
     R: RuntimeFileReloadHandler,
-    L: LockStateProvider,
 {
     match mode {
         ExecutionMode::Apply => {
-            crate::operations::apply::execute_apply(
-                storage,
-                security_handler,
-                reload_handler,
-                mdd_decompress,
-            )
-            .await
+            crate::operations::apply::execute_apply(storage, reload_handler, mdd_decompress).await
         }
         ExecutionMode::Rollback => {
             crate::operations::rollback::execute_rollback(storage, reload_handler).await

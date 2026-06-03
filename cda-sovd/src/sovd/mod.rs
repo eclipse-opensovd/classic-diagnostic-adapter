@@ -232,12 +232,6 @@ impl SovdLockStateProvider {
         }
     }
 
-    /// Atomically replaces the current locks state with `new_locks`.
-    pub async fn swap_locks(&self, new_locks: Arc<Locks>) {
-        let mut guard = self.locks.write().await;
-        *guard = new_locks;
-    }
-
     /// Updates the ECU and functional-group entries in the current locks in-place,
     /// preserving only the vehicle lock.
     ///

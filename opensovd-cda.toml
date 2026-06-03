@@ -633,13 +633,15 @@
 
 # Configuration for update plugin, i.e. storage paths
 [runtime_update_config]
+# Value of the Retry-After header (in seconds) sent when the service is
+# temporarily unavailable due to a busy transaction.
+# Default: 1 second.
+# retry_after_seconds = 1
 # Directory where the updatable configuration and database are stored.
 # storage_dir = "."
 # Maximum upload body size in bytes for multipart file uploads.
 # Default: 50MB. Axum's built-in limit is 2MB which is too low for MDD files.
 # upload_body_limit_bytes = 52428800
-# Retry-After header value (seconds) when service is busy due to an ongoing transaction.
-# retry_after_seconds = 1
 
 # SOVD HTTP server bind settings.
 [server]

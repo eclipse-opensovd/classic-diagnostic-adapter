@@ -18,9 +18,9 @@ use axum::{
     response::{IntoResponse, Response},
 };
 use cda_plugin_runtime_update::{LockStateProvider, RuntimeFilesUpdatePlugin, RuntimeUpdateError};
-
-use crate::sovd::update_guard::ExemptRoute;
 use sovd_interfaces::error::{ApiErrorResponse, ErrorCode};
+
+use crate::{VendorErrorCode, sovd::update_guard::ExemptRoute};
 
 const EXECUTIONS_ROUTE: &str =
     "/vehicle/v15/apps/sovd2uds/bulk-data/runtimefiles-nextupdate/executions";
@@ -29,7 +29,7 @@ const EXECUTIONS_ID_ROUTE: &str =
 
 pub struct RuntimeUpdateRouteState<P, L> {
     pub plugin: Arc<P>,
-    pub lock_state: Arc<L>,
+    pub vehicle_lock_states: Arc<L>,
     pub retry_after_seconds: u64,
 }
 
@@ -37,7 +37,7 @@ impl<P, L> Clone for RuntimeUpdateRouteState<P, L> {
     fn clone(&self) -> Self {
         Self {
             plugin: Arc::clone(&self.plugin),
-            lock_state: Arc::clone(&self.lock_state),
+            vehicle_lock_states: Arc::clone(&self.vehicle_lock_states),
             retry_after_seconds: self.retry_after_seconds,
         }
     }
@@ -56,79 +56,102 @@ impl DbUpdateErrorResponse {
         }
     }
 }
-
 impl IntoResponse for DbUpdateErrorResponse {
     fn into_response(self) -> Response {
-        let (status, error_code, message) = match &self.error {
-            RuntimeUpdateError::OperationsInProgress => (
-                StatusCode::CONFLICT,
-                ErrorCode::UpdateProcessInProgress,
-                self.error.to_string(),
-            ),
-            RuntimeUpdateError::ExecutionConflict => (
-                StatusCode::CONFLICT,
-                ErrorCode::UpdateExecutionInProgress,
-                self.error.to_string(),
-            ),
-            RuntimeUpdateError::TransactionBusy => {
+        // Helper function to construct the API error response
+        let build_api_error_response =
+            |status_code: StatusCode,
+             error_code: ErrorCode,
+             vendor_code: Option<VendorErrorCode>,
+             retry_after_seconds: Option<u64>| {
                 let mut resp = (
-                    StatusCode::SERVICE_UNAVAILABLE,
-                    Json(ApiErrorResponse::<String> {
+                    status_code,
+                    Json(ApiErrorResponse {
                         message: self.error.to_string(),
-                        error_code: ErrorCode::UpdateProcessInProgress,
-                        vendor_code: None,
+                        error_code,
+                        vendor_code,
                         parameters: None,
                         error_source: None,
                         schema: None,
                     }),
                 )
                     .into_response();
-                resp.headers_mut().insert(
-                    RETRY_AFTER,
-                    HeaderValue::from_str(&self.retry_after_seconds.to_string())
-                        .expect("numeric retry-after is always valid"),
-                );
-                return resp;
-            }
+
+                if let Some(seconds) = retry_after_seconds {
+                    resp.headers_mut().insert(
+                        RETRY_AFTER,
+                        HeaderValue::from_str(&seconds.to_string())
+                            .expect("numeric retry-after is always valid"),
+                    );
+                }
+                resp
+            };
+
+        match &self.error {
+            RuntimeUpdateError::OperationsInProgress(_) | RuntimeUpdateError::LockConflict(_) => build_api_error_response(
+                StatusCode::CONFLICT,
+                ErrorCode::PreconditionsNotFulfilled,
+                None,
+                None,
+            ),
+            RuntimeUpdateError::ExecutionConflict => build_api_error_response(
+                StatusCode::CONFLICT,
+                ErrorCode::UpdateProcessInProgress,
+                None,
+                None,
+            ),
+            RuntimeUpdateError::TransactionBusy => build_api_error_response(
+                StatusCode::CONFLICT,
+                ErrorCode::VendorSpecific,
+                Some(VendorErrorCode::StorageTransactionBusy),
+                Some(self.retry_after_seconds),
+            ),
             RuntimeUpdateError::NoPendingUpdate
             | RuntimeUpdateError::NoBackup
-            | RuntimeUpdateError::FileNotFound(_) => (
+            | RuntimeUpdateError::FileNotFound(_) => build_api_error_response(
                 StatusCode::NOT_FOUND,
                 ErrorCode::VendorSpecific,
-                self.error.to_string(),
+                Some(VendorErrorCode::NotFound),
+                None,
             ),
             RuntimeUpdateError::InvalidMddFile(_)
             | RuntimeUpdateError::InvalidConfig(_)
             | RuntimeUpdateError::InvalidFileType(_)
-            | RuntimeUpdateError::ValidationFailed(_) => (
+            | RuntimeUpdateError::ValidationFailed(_) => build_api_error_response(
                 StatusCode::BAD_REQUEST,
                 ErrorCode::VendorSpecific,
-                self.error.to_string(),
+                Some(VendorErrorCode::InvalidData),
+                None,
             ),
-            RuntimeUpdateError::StorageError(_) | RuntimeUpdateError::ReloadFailed(_) => (
+            RuntimeUpdateError::StorageError(_) | RuntimeUpdateError::ReloadFailed(_) => {
+                build_api_error_response(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    ErrorCode::SovdServerFailure,
+                    None,
+                    None,
+                )
+            }
+            RuntimeUpdateError::NoLock(_) => {
+                build_api_error_response(
+                    StatusCode::FORBIDDEN,
+                    ErrorCode::InsufficientAccessRights,
+                    None,
+                    None,
+                )
+            }
+            RuntimeUpdateError::SevereError(_) => build_api_error_response(
                 StatusCode::INTERNAL_SERVER_ERROR,
-                ErrorCode::SovdServerMisconfigured,
-                self.error.to_string(),
+                ErrorCode::VendorSpecific,
+                Some(VendorErrorCode::SevereError),
+                None,
             ),
-            RuntimeUpdateError::NoLock | RuntimeUpdateError::LockNotOwned => (
-                StatusCode::FORBIDDEN,
-                ErrorCode::InsufficientAccessRights,
-                self.error.to_string(),
+            RuntimeUpdateError::FatalError(_) => build_api_error_response(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                ErrorCode::VendorSpecific,
+                Some(VendorErrorCode::FatalError),
+                None,
             ),
-        };
-
-        (
-            status,
-            Json(ApiErrorResponse::<String> {
-                message,
-                error_code,
-                vendor_code: None,
-                parameters: None,
-                error_source: None,
-                schema: None,
-            }),
-        )
-            .into_response()
+        }
     }
 }
 
@@ -150,12 +173,13 @@ async fn require_vehicle_lock(
     retry_after_seconds: u64,
 ) -> Result<(), Response> {
     match lock_state.is_vehicle_lock_owned().await {
-        None => Err(
-            DbUpdateErrorResponse::new(RuntimeUpdateError::NoLock, retry_after_seconds)
-                .into_response(),
-        ),
+        None => Err(DbUpdateErrorResponse::new(
+            RuntimeUpdateError::NoLock("Vehicle lock is missing".to_owned()),
+            retry_after_seconds,
+        )
+        .into_response()),
         Some(owner) if owner != claims.sub() => Err(DbUpdateErrorResponse::new(
-            RuntimeUpdateError::LockNotOwned,
+            RuntimeUpdateError::LockConflict("Vehicle lock is owned by another user".to_owned()),
             retry_after_seconds,
         )
         .into_response()),
@@ -182,7 +206,7 @@ pub(crate) mod current {
     ) -> Response {
         let claims = sec_plugin.as_auth_plugin().claims();
         if let Err(resp) = require_vehicle_lock(
-            &*route_state.lock_state,
+            &*route_state.vehicle_lock_states,
             *claims,
             route_state.retry_after_seconds,
         )
@@ -220,7 +244,7 @@ pub(crate) mod nextupdate {
     ) -> Response {
         let claims = sec_plugin.as_auth_plugin().claims();
         if let Err(resp) = require_vehicle_lock(
-            &*route_state.lock_state,
+            &*route_state.vehicle_lock_states,
             *claims,
             route_state.retry_after_seconds,
         )
@@ -243,9 +267,10 @@ pub(crate) mod nextupdate {
         Secured(sec_plugin): Secured,
         mut multipart: axum::extract::Multipart,
     ) -> impl IntoResponse {
+        // The plugin takes care about rejecting new uploads during an active apply
         let claims = sec_plugin.as_auth_plugin().claims();
         if let Err(resp) = require_vehicle_lock(
-            &*route_state.lock_state,
+            &*route_state.vehicle_lock_states,
             *claims,
             route_state.retry_after_seconds,
         )
@@ -283,7 +308,7 @@ pub(crate) mod nextupdate {
     ) -> impl IntoResponse {
         let claims = sec_plugin.as_auth_plugin().claims();
         if let Err(resp) = require_vehicle_lock(
-            &*route_state.lock_state,
+            &*route_state.vehicle_lock_states,
             *claims,
             route_state.retry_after_seconds,
         )
@@ -315,7 +340,7 @@ pub(crate) mod nextupdate {
         ) -> impl IntoResponse {
             let claims = sec_plugin.as_auth_plugin().claims();
             if let Err(resp) = require_vehicle_lock(
-                &*route_state.lock_state,
+                &*route_state.vehicle_lock_states,
                 *claims,
                 route_state.retry_after_seconds,
             )
@@ -358,7 +383,7 @@ pub(crate) mod backup {
     ) -> Response {
         let claims = sec_plugin.as_auth_plugin().claims();
         if let Err(resp) = require_vehicle_lock(
-            &*route_state.lock_state,
+            &*route_state.vehicle_lock_states,
             *claims,
             route_state.retry_after_seconds,
         )
@@ -378,7 +403,7 @@ pub(crate) mod backup {
     ) -> impl IntoResponse {
         let claims = sec_plugin.as_auth_plugin().claims();
         if let Err(resp) = require_vehicle_lock(
-            &*route_state.lock_state,
+            &*route_state.vehicle_lock_states,
             *claims,
             route_state.retry_after_seconds,
         )
@@ -414,7 +439,7 @@ pub(crate) mod executions {
     ) -> impl IntoResponse {
         let claims = sec_plugin.as_auth_plugin().claims();
         if let Err(resp) = require_vehicle_lock(
-            &*route_state.lock_state,
+            &*route_state.vehicle_lock_states,
             *claims,
             route_state.retry_after_seconds,
         )
@@ -422,6 +447,7 @@ pub(crate) mod executions {
         {
             return resp.into_response();
         }
+        //
         route_state
             .plugin
             .start_execution(body.mode)

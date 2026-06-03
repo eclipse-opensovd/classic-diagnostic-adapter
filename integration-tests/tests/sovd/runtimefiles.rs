@@ -28,7 +28,10 @@ use sovd_interfaces::{
 };
 
 use crate::{
-    sovd::locks::{self, NON_OWNER_BEARER_TOKEN, bearer_token_header, create_lock},
+    sovd::locks::{
+        self, NON_OWNER_BEARER_TOKEN, bearer_token_header, create_lock, default_timeout,
+        lock_operation,
+    },
     util::{
         TestingError,
         http::{QueryParams, auth_header, response_to_t, send_cda_request},
@@ -284,16 +287,15 @@ async fn runtimefiles_lifecycle() -> Result<(), TestingError> {
     );
 
     // Release the vehicle lock.
-    send_cda_request(
+    lock_operation(
+        locks::VEHICLE_ENDPOINT,
+        Some(&lock_id),
         &runtime.config,
-        &format!("locks/{lock_id}"),
+        &auth,
         StatusCode::NO_CONTENT,
         Method::DELETE,
-        None,
-        Some(&auth),
-        None,
     )
-    .await?;
+    .await;
 
     Ok(())
 }
@@ -935,17 +937,15 @@ async fn runtimefiles_apply_blocked_by_active_operations() -> Result<(), Testing
     )
     .await?;
 
-    // Release functional group lock
-    send_cda_request(
+    lock_operation(
+        locks::FUNCTIONAL_GROUP_ENDPOINT,
+        Some(&fg_lock_id),
         &runtime.config,
-        &format!("locks/{fg_lock_id}"),
+        &auth,
         StatusCode::NO_CONTENT,
         Method::DELETE,
-        None,
-        Some(&auth),
-        None,
     )
-    .await?;
+    .await;
 
     // Now Apply should succeed (202)
     execute_mode(&runtime.config, &auth, ExecutionMode::Apply).await?;
@@ -1619,7 +1619,7 @@ async fn runtimefiles_apply_blocked_by_vehicle_and_ecu_lock() -> Result<(), Test
 
     // All mutating runtimefiles endpoints require a vehicle lock.
     let vehicle_lock_response = create_lock(
-        Duration::from_secs(300),
+        default_timeout(),
         locks::VEHICLE_ENDPOINT,
         StatusCode::CREATED,
         &runtime.config,
@@ -1638,7 +1638,7 @@ async fn runtimefiles_apply_blocked_by_vehicle_and_ecu_lock() -> Result<(), Test
     // Creating an ECU lock while the vehicle lock is already held is allowed,
     // but it must block any subsequent Apply/Rollback/Cleanup execution.
     let ecu_lock_response = create_lock(
-        Duration::from_secs(300),
+        default_timeout(),
         locks::ECU_ENDPOINT,
         StatusCode::CREATED,
         &runtime.config,
@@ -1661,16 +1661,15 @@ async fn runtimefiles_apply_blocked_by_vehicle_and_ecu_lock() -> Result<(), Test
     )
     .await?;
 
-    send_cda_request(
+    lock_operation(
+        locks::ECU_ENDPOINT,
+        Some(&ecu_lock_id),
         &runtime.config,
-        &format!("locks/{ecu_lock_id}"),
+        &auth,
         StatusCode::NO_CONTENT,
         Method::DELETE,
-        None,
-        Some(&auth),
-        None,
     )
-    .await?;
+    .await;
 
     // With only the vehicle lock held, the database swap is safe to proceed.
     execute_mode(&runtime.config, &auth, ExecutionMode::Apply).await?;

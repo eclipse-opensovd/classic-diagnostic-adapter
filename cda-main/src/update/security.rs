@@ -53,12 +53,18 @@ impl<
         lock_state_provider
             .is_vehicle_lock_owned()
             .await
-            .ok_or(RuntimeUpdateError::NoLock)?;
+            .ok_or(RuntimeUpdateError::NoLock(
+                "No vehicle lock owned".to_owned(),
+            ))?;
         if lock_state_provider.has_non_vehicle_locks().await {
-            return Err(RuntimeUpdateError::OperationsInProgress);
+            return Err(RuntimeUpdateError::LockConflict(
+                "Non-vehicle locks are held, cannot apply update".to_owned(),
+            ));
         }
         if self.guard.has_active_operations() {
-            return Err(RuntimeUpdateError::OperationsInProgress);
+            return Err(RuntimeUpdateError::OperationsInProgress(
+                "Another operation operation is running already (i.e. flash transfer)".to_owned(),
+            ));
         }
 
         // Example, validate that no ECUs are added or deleted
@@ -66,7 +72,11 @@ impl<
         {
             let pending_ecus = mdd_ecu_names(pending.as_ref()).await?;
             let current_ecus = mdd_ecu_names(current.as_ref()).await?;
-            if pending_ecus != current_ecus {
+
+            // Only validating if the current ECU list is populated from the
+            // 'current' collection, as this is empty when the mdd files are loaded
+            // from another place on the disk.
+            if !current_ecus.is_empty() && pending_ecus != current_ecus {
                 return Err(RuntimeUpdateError::ValidationFailed(format!(
                     "Pending MDD ECU names {pending_ecus:?} do not match current MDD ECU names \
                      {current_ecus:?}"
@@ -274,7 +284,7 @@ mod tests {
                 &UpdateCollections::<LocalCollection>::default(),
             )
             .await;
-        assert!(matches!(result, Err(RuntimeUpdateError::NoLock)));
+        assert!(matches!(result, Err(RuntimeUpdateError::NoLock(_))));
     }
 
     #[tokio::test]
@@ -300,7 +310,7 @@ mod tests {
             .await;
         assert!(matches!(
             result,
-            Err(RuntimeUpdateError::OperationsInProgress)
+            Err(RuntimeUpdateError::OperationsInProgress(_))
         ));
     }
 
@@ -315,7 +325,7 @@ mod tests {
             .await;
         assert!(matches!(
             result,
-            Err(RuntimeUpdateError::OperationsInProgress)
+            Err(RuntimeUpdateError::OperationsInProgress(_))
         ));
     }
 

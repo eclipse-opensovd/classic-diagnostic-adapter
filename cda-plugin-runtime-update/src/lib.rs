@@ -414,7 +414,9 @@ pub(crate) mod test_utils {
         ) -> Result<(), RuntimeUpdateError> {
             let owner = lock_state_provider.is_vehicle_lock_owned().await;
             match owner {
-                None => Err(RuntimeUpdateError::NoLock),
+                None => Err(RuntimeUpdateError::NoLock(
+                    "No vehicle lock held".to_string(),
+                )),
                 Some(_) => Ok(()),
             }
         }
@@ -543,7 +545,6 @@ mod tests {
 
     use async_trait::async_trait;
     use sovd_interfaces::apps::sovd2uds::bulk_data::{BulkDataCreatedList, BulkDataList};
-
     use tokio::sync::{Barrier, Notify};
 
     use crate::{
@@ -559,6 +560,10 @@ mod tests {
         concurrent_reads: Arc<AtomicUsize>,
         concurrent_writes: Arc<AtomicUsize>,
     }
+
+    type PluginHandle = ExclusiveRuntimePlugin<DelayPlugin>;
+    type Counter = Arc<AtomicUsize>;
+    type Notifier = Arc<Notify>;
 
     #[async_trait]
     impl RuntimeFilesUpdatePlugin for DelayPlugin {
@@ -638,13 +643,7 @@ mod tests {
     fn make_plugin(
         read_count: usize,
         write_count: usize,
-    ) -> (
-        ExclusiveRuntimePlugin<DelayPlugin>,
-        Arc<AtomicUsize>,
-        Arc<AtomicUsize>,
-        Arc<Notify>,
-        Arc<Notify>,
-    ) {
+    ) -> (PluginHandle, Counter, Counter, Notifier, Notifier) {
         let read_notify = Arc::new(Notify::new());
         let write_notify = Arc::new(Notify::new());
         let concurrent_reads = Arc::new(AtomicUsize::new(0));
