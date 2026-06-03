@@ -12,6 +12,11 @@ pub struct RuntimeUpdateConfig {
     /// Default: 1 second.
     #[serde(default = "default_retry_after_seconds")]
     pub retry_after_seconds: u64,
+    /// When `true` and the `DiagnosticDatabase` storage collection is empty,
+    /// seed it from `database.path` on first startup by copying all `.mdd` files.
+    /// Default: `false`.
+    #[serde(default)]
+    pub init_storage_from_database_path: bool,
 }
 
 fn default_retry_after_seconds() -> u64 {
@@ -24,6 +29,7 @@ impl Default for RuntimeUpdateConfig {
             upload_body_limit_bytes: 50 * 1024 * 1024, // 50 MB,
             storage_dir: ".".to_owned(),
             retry_after_seconds: default_retry_after_seconds(),
+            init_storage_from_database_path: false,
         }
     }
 }

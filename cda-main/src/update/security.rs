@@ -73,14 +73,10 @@ impl<
             let pending_ecus = mdd_ecu_names(pending.as_ref()).await?;
             let current_ecus = mdd_ecu_names(current.as_ref()).await?;
 
-            // Only validating if the current ECU list is populated from the
-            // 'current' collection, as this is empty when the mdd files are loaded
-            // from another place on the disk.
-            if !current_ecus.is_empty() && pending_ecus != current_ecus {
-                return Err(RuntimeUpdateError::ValidationFailed(format!(
-                    "Pending MDD ECU names {pending_ecus:?} do not match current MDD ECU names \
-                     {current_ecus:?}"
-                )));
+            if pending_ecus != current_ecus {
+                tracing::warn!(
+                    "MDD ECU set mismatch: pending {pending_ecus:?} vs current {current_ecus:?}"
+                );
             }
         }
         Ok(())

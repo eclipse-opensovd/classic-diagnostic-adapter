@@ -12,7 +12,10 @@ use cda_interfaces::storage_api::{Collection, CollectionName, Storage, Transacti
 
 use crate::{
     RuntimeFileReloadHandler, RuntimeUpdateError,
-    operations::{delete_collection_ignore_missing, reload_configuration_if_present},
+    operations::{
+        delete_collection_ignore_missing, reload_configuration_if_present,
+        reload_database_if_present,
+    },
 };
 
 async fn restore_from_backup<S: Storage, C: Collection>(
@@ -83,10 +86,7 @@ pub async fn execute_rollback<S: Storage, R: RuntimeFileReloadHandler>(
     }
 
     if !mdd_backup_empty {
-        reload_handler
-            .reload_databases(vec![])
-            .await
-            .map_err(|e| RuntimeUpdateError::ReloadFailed(e.to_string()))?;
+        reload_database_if_present(storage, reload_handler, false).await?;
     }
 
     Ok(())

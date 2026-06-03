@@ -27,17 +27,14 @@ use sovd_interfaces::{
     locking::post_put::Response as LockResponse,
 };
 
-use crate::{
-    sovd::locks::{
-        self, NON_OWNER_BEARER_TOKEN, bearer_token_header, create_lock, default_timeout,
-        lock_operation,
-    },
-    util::{
-        TestingError,
-        http::{QueryParams, auth_header, response_to_t, send_cda_request},
-        runtime::{setup_integration_test, test_container_dir},
-    },
-};
+use crate::{sovd, sovd::locks::{
+    self, NON_OWNER_BEARER_TOKEN, bearer_token_header, create_lock, default_timeout,
+    lock_operation,
+}, util::{
+    TestingError,
+    http::{QueryParams, auth_header, response_to_t, send_cda_request},
+    runtime::{setup_integration_test, test_container_dir},
+}};
 
 const RUNTIMEFILES_NEXTUPDATE: &str = "apps/sovd2uds/bulk-data/runtimefiles-nextupdate";
 const RUNTIMEFILES_CURRENT: &str = "apps/sovd2uds/bulk-data/runtimefiles-current";
@@ -996,6 +993,40 @@ async fn upload_mdd(config: &Configuration, auth: &http::HeaderMap) -> reqwest::
         .expect("upload request failed")
 }
 
+/// Helper: uploads an MDD from testcontainer/odx/{name} (e.g. "FSNR2000.mdd").
+async fn upload_mdd_by_name(
+    config: &Configuration,
+    auth: &http::HeaderMap,
+    name: &str,
+) -> reqwest::Response {
+    let mdd_bytes = std::fs::read(
+        test_container_dir()
+            .expect("testcontainer dir")
+            .join(format!("odx/{name}")),
+    )
+    .unwrap_or_else(|_| panic!("MDD fixture {name} not found"));
+    let auth_value = auth
+        .get(reqwest::header::AUTHORIZATION)
+        .expect("Authorization header missing")
+        .clone();
+    let client = reqwest::Client::new();
+    let form = reqwest::multipart::Form::new().part(
+        "files",
+        reqwest::multipart::Part::bytes(mdd_bytes).file_name(name.to_owned()),
+    );
+    let upload_url = format!(
+        "http://{}:{}/vehicle/v15/{RUNTIMEFILES_NEXTUPDATE}",
+        config.server.address, config.server.port
+    );
+    client
+        .post(&upload_url)
+        .header(reqwest::header::AUTHORIZATION, auth_value)
+        .multipart(form)
+        .send()
+        .await
+        .expect("upload request failed")
+}
+
 /// Helper: uploads an MDD fixture with a custom filename.
 async fn upload_mdd_with_filename(
     config: &Configuration,
@@ -1504,8 +1535,12 @@ async fn runtimefiles_only_lock_holder_can_mutate() -> Result<(), TestingError> 
     Ok(())
 }
 
-/// Proves that after an Apply with a reduced MDD set, the missing ECU's route returns 404,
-/// the health endpoint remains 200, and after Rollback the ECU route is restored (200).
+/// Proves that after an Apply with a reduced MDD set (FLXC1000 removed from staging),
+/// the missing ECU's route returns 404, the health endpoint remains 204, and after
+/// Rollback the ECU route is restored (200).
+///
+/// Workflow: upload FSNR2000 to trigger staging init from the seeded current collection,
+/// then explicitly delete flxc1000.mdd from nextupdate, then Apply.
 #[allow(clippy::too_many_lines)]
 #[tokio::test]
 async fn runtimefiles_apply_removes_ecu_routes() -> Result<(), TestingError> {
@@ -1513,10 +1548,10 @@ async fn runtimefiles_apply_removes_ecu_routes() -> Result<(), TestingError> {
     let (runtime, _lock) = setup_integration_test(true).await?;
     let auth = auth_header(&runtime.config, None).await?;
 
-    // Confirm FLXCNG1000 exists before we do anything (proves the baseline is multi-MDD).
+    // Pre-check: FLXC1000 exists at baseline (proves storage was seeded).
     send_cda_request(
         &runtime.config,
-        "components/flxcng1000",
+        sovd::ECU_FLXC1000_ENDPOINT,
         StatusCode::OK,
         Method::GET,
         None,
@@ -1528,25 +1563,51 @@ async fn runtimefiles_apply_removes_ecu_routes() -> Result<(), TestingError> {
     // All mutating runtimefiles endpoints require a vehicle lock.
     let lock_id = setup_with_lock(&runtime.config, &auth).await;
 
-    // After Apply, only FLXC1000's ECU will survive — FLXCNG1000 will be gone.
-    let upload_response = upload_mdd(&runtime.config, &auth).await;
+    // Upload FSNR2000.mdd → triggers init_collection_from_copy_if_missing, copying all
+    // current MDDs into nextupdate, then adds FSNR2000 on top.
+    let upload_response = upload_mdd_by_name(&runtime.config, &auth, "FSNR2000.mdd").await;
     assert_eq!(
         upload_response.status(),
-        StatusCode::OK,
-        "Expected 200 for MDD upload"
+        StatusCode::CREATED,
+        "Expected 200 for FSNR2000.mdd upload"
     );
 
-    // Trigger Apply — the CDA replaces its entire DB with only the uploaded MDD.
+    // Verify FLXC1000 is in nextupdate (copied from current during init).
+    let nextupdate_items = get_file_list(&runtime.config, &auth, RUNTIMEFILES_NEXTUPDATE)
+        .await?
+        .items;
+    let flxc1000_entry = nextupdate_items
+        .iter()
+        .find(|item| item.id.to_lowercase().contains("flxc1000"));
+    assert!(
+        flxc1000_entry.is_some(),
+        "Expected flxc1000.mdd in nextupdate after staging init"
+    );
+    let flxc1000_id = flxc1000_entry.unwrap().id.clone();
+
+    // Explicitly delete FLXC1000 from nextupdate — staging now lacks FLXC1000.
+    send_cda_request(
+        &runtime.config,
+        &format!("{RUNTIMEFILES_NEXTUPDATE}/{flxc1000_id}"),
+        StatusCode::NO_CONTENT,
+        Method::DELETE,
+        None,
+        Some(&auth),
+        None,
+    )
+    .await?;
+
+    // Trigger Apply — the CDA replaces its entire DB with staging (without FLXC1000).
     execute_mode(&runtime.config, &auth, ExecutionMode::Apply).await?;
 
     // The reload_databases path shuts down the old UDS/gateway and rebuilds routes;
     // 5 s is sufficient for the integration-test environment.
     cda_interfaces::util::tokio_ext::sleep_for(Duration::from_secs(5)).await;
 
-    // Only FLXC1000.mdd was applied → FLXCNG1000's route no longer exists.
+    // FLXC1000 was removed from staging → its route no longer exists.
     send_cda_request(
         &runtime.config,
-        "components/flxcng1000",
+        "components/flxc1000",
         StatusCode::NOT_FOUND,
         Method::GET,
         None,
@@ -1555,10 +1616,10 @@ async fn runtimefiles_apply_removes_ecu_routes() -> Result<(), TestingError> {
     )
     .await?;
 
-    // The applied MDD is FLXC1000, so its route must survive the rebuild.
+    // FSNR2000 was in staging, so its route must survive the rebuild.
     send_cda_request(
         &runtime.config,
-        "components/flxc1000",
+        "components/fsnr2000",
         StatusCode::OK,
         Method::GET,
         None,
@@ -1584,15 +1645,15 @@ async fn runtimefiles_apply_removes_ecu_routes() -> Result<(), TestingError> {
         "Expected 204 from /health/ready after Apply"
     );
 
-    // Apply created a backup of the original multi-MDD database; Rollback restores it.
+    // Apply created a backup of the original database; Rollback restores it.
     execute_mode(&runtime.config, &auth, ExecutionMode::Rollback).await?;
 
     cda_interfaces::util::tokio_ext::sleep_for(Duration::from_secs(5)).await;
 
-    // Rollback restores the original multi-MDD database → FLXCNG1000 is back.
+    // Rollback restores the original database → FLXC1000 is back.
     send_cda_request(
         &runtime.config,
-        "components/flxcng1000",
+        "components/flxc1000",
         StatusCode::OK,
         Method::GET,
         None,

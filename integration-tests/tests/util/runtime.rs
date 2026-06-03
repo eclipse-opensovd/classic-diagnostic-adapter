@@ -268,7 +268,10 @@ fn cda_test_config(
             );
             map
         },
-        runtime_update_config: RuntimeUpdateConfig::default(),
+        runtime_update_config: RuntimeUpdateConfig {
+            init_storage_from_database_path: true,
+            ..RuntimeUpdateConfig::default()
+        },
     };
     Ok(config)
 }
