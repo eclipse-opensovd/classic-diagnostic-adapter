@@ -26,7 +26,11 @@ from odxtools.diaglayers.diaglayerraw import DiagLayerRaw
 from odxtools.diagnostictroublecode import DiagnosticTroubleCode
 from odxtools.diagservice import DiagService
 from odxtools.dtcdop import DtcDop
+from odxtools.dynamiclengthfield import DetermineNumberOfItems, DynamicLengthField
 from odxtools.endofpdufield import EndOfPduField
+from odxtools.multiplexer import Multiplexer
+from odxtools.multiplexerdefaultcase import MultiplexerDefaultCase
+from odxtools.multiplexerswitchkey import MultiplexerSwitchKey
 from odxtools.nameditemlist import NamedItemList
 from odxtools.odxlink import OdxLinkRef
 from odxtools.odxtypes import DataType
@@ -38,10 +42,6 @@ from odxtools.standardlengthtype import StandardLengthType
 from odxtools.structure import Structure
 from odxtools.text import Text
 from odxtools.transmode import TransMode
-from odxtools.dynamiclengthfield import DetermineNumberOfItems, DynamicLengthField
-from odxtools.multiplexer import Multiplexer
-from odxtools.multiplexerdefaultcase import MultiplexerDefaultCase
-from odxtools.multiplexerswitchkey import MultiplexerSwitchKey
 
 
 def add_dtc_setting_service(
@@ -313,14 +313,10 @@ def add_dtc_read_snapshots_by_dtc_number_service(
         "DTCSnapshotRecordNumberDop",
         [(i, f"{i:02X}") for i in range(256)],
     )
-    dlr.diag_data_dictionary_spec.data_object_props.append(
-        dtc_snapshot_record_number_dop
-    )
+    dlr.diag_data_dictionary_spec.data_object_props.append(dtc_snapshot_record_number_dop)
 
     # uint8 DOP for the number-of-identifiers field in the snapshot record
-    dtc_snapshot_number_of_identifiers_dop = find_dop_by_shortname(
-        dlr, "IDENTICAL_UINT_8"
-    )
+    dtc_snapshot_number_of_identifiers_dop = find_dop_by_shortname(dlr, "IDENTICAL_UINT_8")
 
     # uint16 DOP for the 2-byte DID within a snapshot record
     dtc_snapshot_did_dop = find_dop_by_shortname(dlr, "IDENTICAL_UINT_16")
@@ -349,9 +345,7 @@ def add_dtc_read_snapshots_by_dtc_number_service(
             ]
         ),
     )
-    dlr.diag_data_dictionary_spec.structures.append(
-        dtc_snapshot_record_did_entry_structure
-    )
+    dlr.diag_data_dictionary_spec.structures.append(dtc_snapshot_record_did_entry_structure)
 
     # Dynamic Field for actual data (Number of DIDs + Variable number of DIDs with their data)
     dtc_snapshot_record_entries = DynamicLengthField(
@@ -365,12 +359,10 @@ def add_dtc_read_snapshots_by_dtc_number_service(
         ),
     )
 
-    dlr.diag_data_dictionary_spec.dynamic_length_fields.append(
-        dtc_snapshot_record_entries
-    )
+    dlr.diag_data_dictionary_spec.dynamic_length_fields.append(dtc_snapshot_record_entries)
 
     # Structure DOP for a complete DTC Snapshot Record (Rec Number + Number of DIDs + Data Entries)
-    # Layout: [RecordNumber(1)] [NumberOfIdentifiers(1)] [DID(2)][DID data(4)] ... [DID[2]][DID data(4)]
+    # Layout: [RecordNumber(1)][NumberOfIdentifiers(1)][DID(2)][DID data(4)]...[DID[2]][DID data(4)]
     dtc_snapshot_record_structure = Structure(
         odx_id=derived_id(dlr, "STRUCT.DTCSnapshotRecord"),
         short_name="DTCSnapshotRecord",
@@ -496,9 +488,7 @@ def add_dtc_read_ext_data_by_dtc_number_service(
             (255, "All Ext Data Records"),
         ],
     )
-    dlr.diag_data_dictionary_spec.data_object_props.append(
-        dtc_req_ext_data_record_number_dop
-    )
+    dlr.diag_data_dictionary_spec.data_object_props.append(dtc_req_ext_data_record_number_dop)
 
     # TEXTTABLE uint8 DOP for the Extended data record number field in the response
     # Maps all possible uint8 values (0-255) to their decimal string representation
@@ -508,14 +498,10 @@ def add_dtc_read_ext_data_by_dtc_number_service(
         "DTCExtDataRecordNumberDop",
         [(i, f"{i:02X}") for i in range(256)],
     )
-    dlr.diag_data_dictionary_spec.data_object_props.append(
-        dtc_ext_data_record_number_dop
-    )
+    dlr.diag_data_dictionary_spec.data_object_props.append(dtc_ext_data_record_number_dop)
 
     # uint8 DOP for Record Number as part of Multiplexer, as Texttable DoP is not accepted
-    dtc_ext_data_record_number_mux_sel_dop = find_dop_by_shortname(
-        dlr, "IDENTICAL_UINT_8"
-    )
+    dtc_ext_data_record_number_mux_sel_dop = find_dop_by_shortname(dlr, "IDENTICAL_UINT_8")
 
     # uint32 DOP for the actual data bytes as example
     dtc_ext_data_record_data_dop = find_dop_by_shortname(dlr, "IDENTICAL_UINT_32")
