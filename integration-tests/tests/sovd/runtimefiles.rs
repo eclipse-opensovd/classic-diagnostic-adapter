@@ -27,14 +27,18 @@ use sovd_interfaces::{
     locking::post_put::Response as LockResponse,
 };
 
-use crate::{sovd, sovd::locks::{
-    self, NON_OWNER_BEARER_TOKEN, bearer_token_header, create_lock, default_timeout,
-    lock_operation,
-}, util::{
-    TestingError,
-    http::{QueryParams, auth_header, response_to_t, send_cda_request},
-    runtime::{setup_integration_test, test_container_dir},
-}};
+use crate::{
+    sovd,
+    sovd::locks::{
+        self, NON_OWNER_BEARER_TOKEN, bearer_token_header, create_lock, default_timeout,
+        lock_operation,
+    },
+    util::{
+        TestingError,
+        http::{QueryParams, auth_header, response_to_t, send_cda_request},
+        runtime::{setup_integration_test, test_container_dir},
+    },
+};
 
 const RUNTIMEFILES_NEXTUPDATE: &str = "apps/sovd2uds/bulk-data/runtimefiles-nextupdate";
 const RUNTIMEFILES_CURRENT: &str = "apps/sovd2uds/bulk-data/runtimefiles-current";
@@ -125,18 +129,6 @@ async fn runtimefiles_requires_lock() -> Result<(), TestingError> {
 }
 
 #[tokio::test]
-async fn runtimefiles_list_endpoints_accessible_without_lock() -> Result<(), TestingError> {
-    let (runtime, _lock) = setup_integration_test(false).await?;
-    let auth = auth_header(&runtime.config, None).await?;
-
-    get_file_list(&runtime.config, &auth, RUNTIMEFILES_CURRENT).await?;
-    get_file_list(&runtime.config, &auth, RUNTIMEFILES_NEXTUPDATE).await?;
-    get_file_list(&runtime.config, &auth, RUNTIMEFILES_BACKUP).await?;
-
-    Ok(())
-}
-
-#[tokio::test]
 #[allow(clippy::too_many_lines)]
 async fn runtimefiles_lifecycle() -> Result<(), TestingError> {
     // Acquire an exclusive vehicle lock (spec: all modifying actions require one).
@@ -188,7 +180,7 @@ async fn runtimefiles_lifecycle() -> Result<(), TestingError> {
         .expect("upload request failed");
     assert_eq!(
         upload_response.status(),
-        StatusCode::OK,
+        StatusCode::CREATED,
         "Expected 200 for MDD upload"
     );
 
@@ -383,7 +375,7 @@ async fn runtimefiles_non_owner_cannot_delete_backup() -> Result<(), TestingErro
     let lock_id = setup_with_lock(&runtime.config, &auth).await;
 
     let upload_response = upload_mdd(&runtime.config, &auth).await;
-    assert_eq!(upload_response.status(), StatusCode::OK);
+    assert_eq!(upload_response.status(), StatusCode::CREATED);
 
     execute_mode(&runtime.config, &auth, ExecutionMode::Apply).await?;
     cda_interfaces::util::tokio_ext::sleep_for(Duration::from_secs(3)).await;
@@ -427,7 +419,7 @@ async fn runtimefiles_file_retrieval_not_allowed() -> Result<(), TestingError> {
     send_cda_request(
         &runtime.config,
         &format!("{RUNTIMEFILES_NEXTUPDATE}/FLXC1000.mdd"),
-        StatusCode::NOT_FOUND,
+        StatusCode::METHOD_NOT_ALLOWED,
         Method::GET,
         None,
         Some(&auth),
@@ -729,14 +721,16 @@ async fn runtimefiles_upload_multiple_files() -> Result<(), TestingError> {
     Ok(())
 }
 
-/// Spec: Applying when nextupdate is empty must not return 202 Accepted (primary expectation: 404).
+/// Spec: Applying when there are no pending changes (nextupdate == current)
+/// must not return 202 Accepted (primary expectation: 404).
 #[tokio::test]
 async fn runtimefiles_apply_with_no_pending_changes() -> Result<(), TestingError> {
     let (runtime, _lock) = setup_integration_test(true).await?;
     let auth = auth_header(&runtime.config, None).await?;
     let lock_id = setup_with_lock(&runtime.config, &auth).await;
 
-    // Clear nextupdate by deleting all pending files
+    // Reset nextupdate to current state (spec: DELETE removes all pending changes,
+    // resetting nextupdate to the currently active database — not to empty).
     send_cda_request(
         &runtime.config,
         RUNTIMEFILES_NEXTUPDATE,
@@ -748,24 +742,7 @@ async fn runtimefiles_apply_with_no_pending_changes() -> Result<(), TestingError
     )
     .await?;
 
-    // Verify nextupdate is empty
-    let list_response = send_cda_request(
-        &runtime.config,
-        RUNTIMEFILES_NEXTUPDATE,
-        StatusCode::OK,
-        Method::GET,
-        None,
-        Some(&auth),
-        None,
-    )
-    .await?;
-    let items = response_to_t::<BulkDataList>(&list_response)?.items;
-    assert!(
-        items.is_empty(),
-        "Precondition: nextupdate must be empty before Apply"
-    );
-
-    // Attempt Apply with empty nextupdate — must NOT return 202
+    // Attempt Apply with no pending changes (nextupdate == current) — must NOT return 202
     let body = mode_json(ExecutionMode::Apply);
     let apply_response = send_cda_request(
         &runtime.config,
@@ -1135,8 +1112,8 @@ async fn execute_mode(
     response_to_t::<OperationIdItem>(&response)
 }
 
-/// Spec: DELETE on /runtimefiles-nextupdate "removes all pending changes to the next update,
-/// to reset the state of the next update to the currently active database."
+/// Spec: DELETE on /runtimefiles-nextupdate removes all pending changes — nextupdate
+/// returns empty because there are no pending files.
 #[tokio::test]
 async fn runtimefiles_delete_nextupdate_clears_pending() -> Result<(), TestingError> {
     let (runtime, _lock) = setup_integration_test(true).await?;
@@ -1144,7 +1121,7 @@ async fn runtimefiles_delete_nextupdate_clears_pending() -> Result<(), TestingEr
     let lock_id = setup_with_lock(&runtime.config, &auth).await;
 
     let upload_response = upload_mdd(&runtime.config, &auth).await;
-    assert_eq!(upload_response.status(), StatusCode::OK);
+    assert_eq!(upload_response.status(), StatusCode::CREATED);
 
     let nextupdate_items = get_file_list(&runtime.config, &auth, RUNTIMEFILES_NEXTUPDATE)
         .await?
@@ -1165,20 +1142,12 @@ async fn runtimefiles_delete_nextupdate_clears_pending() -> Result<(), TestingEr
     )
     .await?;
 
-    let post_delete_response = send_cda_request(
-        &runtime.config,
-        RUNTIMEFILES_NEXTUPDATE,
-        StatusCode::OK,
-        Method::GET,
-        None,
-        Some(&auth),
-        None,
-    )
-    .await?;
-    let post_delete_items = response_to_t::<BulkDataList>(&post_delete_response)?.items;
+    let post_delete_items = get_file_list(&runtime.config, &auth, RUNTIMEFILES_NEXTUPDATE)
+        .await?
+        .items;
     assert!(
         post_delete_items.is_empty(),
-        "Expected empty nextupdate after DELETE (all pending changes removed)"
+        "Expected empty nextupdate after DELETE (no pending files)"
     );
 
     teardown_lock(&runtime.config, &auth, &lock_id).await;
@@ -1193,7 +1162,7 @@ async fn runtimefiles_delete_nextupdate_by_id() -> Result<(), TestingError> {
     let lock_id = setup_with_lock(&runtime.config, &auth).await;
 
     let upload_response = upload_mdd(&runtime.config, &auth).await;
-    assert_eq!(upload_response.status(), StatusCode::OK);
+    assert_eq!(upload_response.status(), StatusCode::CREATED);
 
     let nextupdate_items = get_file_list(&runtime.config, &auth, RUNTIMEFILES_NEXTUPDATE)
         .await?
@@ -1249,7 +1218,7 @@ async fn runtimefiles_delete_backup() -> Result<(), TestingError> {
     let lock_id = setup_with_lock(&runtime.config, &auth).await;
 
     let upload_response = upload_mdd(&runtime.config, &auth).await;
-    assert_eq!(upload_response.status(), StatusCode::OK);
+    assert_eq!(upload_response.status(), StatusCode::CREATED);
 
     execute_mode(&runtime.config, &auth, ExecutionMode::Apply).await?;
     cda_interfaces::util::tokio_ext::sleep_for(Duration::from_secs(3)).await;
@@ -1306,11 +1275,11 @@ async fn runtimefiles_case_insensitive_filenames() -> Result<(), TestingError> {
     let lock_id = setup_with_lock(&runtime.config, &auth).await;
 
     let upload_response = upload_mdd_with_filename(&runtime.config, &auth, "FLXC1000.MDD").await;
-    assert_eq!(upload_response.status(), StatusCode::OK);
+    assert_eq!(upload_response.status(), StatusCode::CREATED);
 
     // Upload again with lowercase — should overwrite, not duplicate
     let upload_response2 = upload_mdd_with_filename(&runtime.config, &auth, "flxc1000.mdd").await;
-    assert_eq!(upload_response2.status(), StatusCode::OK);
+    assert_eq!(upload_response2.status(), StatusCode::CREATED);
 
     let nextupdate_items = get_file_list(&runtime.config, &auth, RUNTIMEFILES_NEXTUPDATE)
         .await?

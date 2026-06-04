@@ -164,11 +164,10 @@ pub(crate) async fn list_backup_files(
 
 /// Remove a file from the next-update snapshot for the relevant collection.
 ///
-/// If the `NextUpdate` collection is not yet initialized, it is initialized from the current
-/// collection via `copy_collection` (in a separate transaction), then the key is deleted.
-/// If the `NextUpdate` collection already exists, the key is deleted directly.
+/// The `NextUpdate` collection must already be initialized (i.e. at least one file has been
+/// uploaded). If it is not initialized, [`RuntimeUpdateError::FileNotFound`] is returned.
 /// Returns [`RuntimeUpdateError::FileNotFound`]
-/// if the key does not exist in the relevant collection.
+/// if the key does not exist in the `NextUpdate` collection.
 pub(crate) async fn delete_nextupdate_file(
     storage: &impl Storage,
     file_id: &str,
@@ -180,66 +179,29 @@ pub(crate) async fn delete_nextupdate_file(
         .and_then(|e| e.to_str())
         .map(str::to_lowercase);
 
-    let (next_collection_name, current_collection_name) = match ext.as_deref() {
-        Some("mdd") => (
-            CollectionName::DiagnosticDatabaseNextUpdate,
-            CollectionName::DiagnosticDatabase,
-        ),
-        Some("toml") => (
-            CollectionName::ConfigurationNextUpdate,
-            CollectionName::Configuration,
-        ),
+    let next_collection_name = match ext.as_deref() {
+        Some("mdd") => CollectionName::DiagnosticDatabaseNextUpdate,
+        Some("toml") => CollectionName::ConfigurationNextUpdate,
         _ => return Err(RuntimeUpdateError::InvalidFileType(file_id.to_string())),
     };
 
-    let already_initialized = storage.get_collection(&next_collection_name).await.is_ok();
+    let next_col = storage
+        .get_collection(&next_collection_name)
+        .await
+        .map_err(|e| match e {
+            StorageError::CollectionNotFound(_) => {
+                RuntimeUpdateError::FileNotFound(file_id.to_string())
+            }
+            other => RuntimeUpdateError::from(other),
+        })?;
 
-    // Ensure both collections exist on disk before transacting.
-    let _ = storage
-        .get_or_create_collection(&next_collection_name)
-        .await?;
-    let _ = storage
-        .get_or_create_collection(&current_collection_name)
-        .await?;
-
-    if already_initialized {
-        let next_col = storage
-            .get_or_create_collection(&next_collection_name)
-            .await?;
-        let next_keys = next_col.list().await?;
-        if !next_keys.iter().any(|k| k == &key) {
-            return Err(RuntimeUpdateError::FileNotFound(file_id.to_string()));
-        }
-        let mut tx = storage.begin_transaction()?;
-        next_col.delete(&mut tx, &key).await?;
-        tx.commit().await?;
-    } else {
-        let current_col = storage
-            .get_or_create_collection(&current_collection_name)
-            .await?;
-        let current_keys = current_col.list().await?;
-        if !current_keys.iter().any(|k| k == &key) {
-            return Err(RuntimeUpdateError::FileNotFound(file_id.to_string()));
-        }
-
-        // Tx1: Initialize NextUpdate from current (copy_collection is WAL-deferred).
-        {
-            let mut tx = storage.begin_transaction()?;
-            storage
-                .copy_collection(&mut tx, &current_collection_name, &next_collection_name)
-                .await?;
-            tx.commit().await?;
-        }
-        // Tx2: Delete the key from NextUpdate (now on disk after Tx1 committed).
-        {
-            let next_col = storage
-                .get_or_create_collection(&next_collection_name)
-                .await?;
-            let mut tx = storage.begin_transaction()?;
-            next_col.delete(&mut tx, &key).await?;
-            tx.commit().await?;
-        }
+    let next_keys = next_col.list().await?;
+    if !next_keys.iter().any(|k| k == &key) {
+        return Err(RuntimeUpdateError::FileNotFound(file_id.to_string()));
     }
+    let mut tx = storage.begin_transaction()?;
+    next_col.delete(&mut tx, &key).await?;
+    tx.commit().await?;
 
     Ok(())
 }
@@ -284,16 +246,16 @@ pub(crate) async fn delete_all_backup(storage: &impl Storage) -> Result<(), Runt
     Ok(())
 }
 
-/// Computes the "next update" target state using per-collection snapshot fallback.
+/// Computes the "next update" state from the pending `NextUpdate` collections.
 ///
 /// For each collection pair (MDD and Configuration), the logic is:
 /// - If the `NextUpdate` collection **exists** (even if empty), its contents represent the target
 ///   state for that category — an empty `NextUpdate` means "delete all" for that category.
-/// - If the `NextUpdate` collection **does not exist** (`CollectionNotFound`), the current
-///   collection is used as the target (i.e., no pending changes for that category).
+/// - If the `NextUpdate` collection **does not exist** (`CollectionNotFound`), an empty list is
+///   returned for that category — no update is pending.
 ///
 /// MDD and Configuration are handled **independently** — one may be initialized while the other
-/// falls back to current.
+/// returns empty.
 ///
 /// This is a **read-only** operation — no writes or transactions are performed.
 ///
@@ -304,28 +266,17 @@ pub async fn compute_nextupdate_state(
     storage: &impl Storage,
     query: &RuntimeFilesQuery,
 ) -> Result<BulkDataList, RuntimeUpdateError> {
-    let compute = async |collection_now: &CollectionName,
-                         collection_next: &CollectionName|
+    let compute = async |collection_next: &CollectionName|
            -> Result<Vec<BulkDataDescriptor>, RuntimeUpdateError> {
         match storage.get_collection(collection_next).await {
             Ok(_) => Ok(get_collection_items(storage, collection_next, query).await?),
-            Err(StorageError::CollectionNotFound(_)) => {
-                Ok(get_collection_items(storage, collection_now, query).await?)
-            }
+            Err(StorageError::CollectionNotFound(_)) => Ok(vec![]),
             Err(e) => Err(RuntimeUpdateError::from(e)),
         }
     };
 
-    let mdd_items = compute(
-        &CollectionName::DiagnosticDatabase,
-        &CollectionName::DiagnosticDatabaseNextUpdate,
-    )
-    .await?;
-    let config_items = compute(
-        &CollectionName::Configuration,
-        &CollectionName::ConfigurationNextUpdate,
-    )
-    .await?;
+    let mdd_items = compute(&CollectionName::DiagnosticDatabaseNextUpdate).await?;
+    let config_items = compute(&CollectionName::ConfigurationNextUpdate).await?;
 
     let mut items = mdd_items;
     items.extend(config_items);
@@ -1000,7 +951,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn two_files_in_current_empty_nextupdate_returns_same_two_files() {
+    async fn two_files_in_current_no_nextupdate_returns_empty() {
         let (storage, _dir) = make_storage();
         let collection = storage
             .get_or_create_collection(&CollectionName::DiagnosticDatabase)
@@ -1013,9 +964,10 @@ mod tests {
         let query = RuntimeFilesQuery::default();
         let result = compute_nextupdate_state(&storage, &query).await.unwrap();
 
-        assert_eq!(result.items.len(), 2);
-        let ids: Vec<&str> = result.items.iter().map(|i| i.id.as_str()).collect();
-        assert_eq!(ids, vec!["alpha.mdd", "beta.mdd"]);
+        assert!(
+            result.items.is_empty(),
+            "no NextUpdate collection = no pending changes = empty"
+        );
     }
 
     #[tokio::test]
@@ -1106,7 +1058,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn compute_nextupdate_includes_config_when_not_initialized() {
+    async fn compute_nextupdate_empty_when_config_not_initialized() {
         let (storage, _dir) = make_storage();
         let cfg = storage
             .get_or_create_collection(&CollectionName::Configuration)
@@ -1116,10 +1068,9 @@ mod tests {
 
         let query = RuntimeFilesQuery::default();
         let result = compute_nextupdate_state(&storage, &query).await.unwrap();
-        let ids: Vec<&str> = result.items.iter().map(|i| i.id.as_str()).collect();
         assert!(
-            ids.contains(&"config.toml"),
-            "should fall back to current config"
+            result.items.is_empty(),
+            "no ConfigurationNextUpdate = no pending changes = empty"
         );
     }
 
@@ -1200,12 +1151,15 @@ mod tests {
         let result = compute_nextupdate_state(&storage, &query).await.unwrap();
         let ids: Vec<&str> = result.items.iter().map(|i| i.id.as_str()).collect();
         assert!(ids.contains(&"ecu1.mdd"), "MDD from NextUpdate");
-        assert!(ids.contains(&"config.toml"), "Config from current fallback");
-        assert_eq!(result.items.len(), 2);
+        assert!(
+            !ids.contains(&"config.toml"),
+            "Config has no NextUpdate = not shown"
+        );
+        assert_eq!(result.items.len(), 1);
     }
 
     #[tokio::test]
-    async fn delete_nextupdate_inits_and_removes_from_empty_nextupdate() {
+    async fn delete_nextupdate_returns_not_found_when_not_initialized() {
         let (storage, _dir) = make_storage();
         let db = storage
             .get_or_create_collection(&CollectionName::DiagnosticDatabase)
@@ -1214,16 +1168,11 @@ mod tests {
         write_test_file_by_name(&storage, &*db, "ecu1.mdd", b"data1").await;
         write_test_file_by_name(&storage, &*db, "ecu2.mdd", b"data2").await;
 
-        super::delete_nextupdate_file(&storage, "ecu1.mdd")
-            .await
-            .unwrap();
-
-        let next = storage
-            .get_collection(&CollectionName::DiagnosticDatabaseNextUpdate)
-            .await
-            .unwrap();
-        let keys = next.list().await.unwrap();
-        assert_eq!(keys, vec!["ecu2.mdd"]);
+        let result = super::delete_nextupdate_file(&storage, "ecu1.mdd").await;
+        assert!(
+            matches!(result, Err(crate::RuntimeUpdateError::FileNotFound(_))),
+            "NextUpdate not initialized = FileNotFound, not init-from-current"
+        );
     }
 
     #[tokio::test]
@@ -1270,7 +1219,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn delete_all_nextupdate_then_compute_falls_back_to_current() {
+    async fn delete_all_nextupdate_then_compute_returns_empty() {
         let (storage, _dir) = make_storage();
         let db = storage
             .get_or_create_collection(&CollectionName::DiagnosticDatabase)
@@ -1297,14 +1246,13 @@ mod tests {
 
         super::delete_all_nextupdate(&storage).await.unwrap();
 
-        // After delete_all_nextupdate, collections should be gone → fallback to current
+        // After delete_all_nextupdate, collections are gone → no pending changes = empty
         let query = RuntimeFilesQuery::default();
         let result = compute_nextupdate_state(&storage, &query).await.unwrap();
-        let ids: Vec<&str> = result.items.iter().map(|i| i.id.as_str()).collect();
-        assert!(ids.contains(&"ecu1.mdd"));
-        assert!(ids.contains(&"app.toml"));
-        assert!(!ids.contains(&"other.mdd"));
-        assert!(!ids.contains(&"other.toml"));
+        assert!(
+            result.items.is_empty(),
+            "no NextUpdate collections = empty nextupdate"
+        );
     }
 
     #[tokio::test]

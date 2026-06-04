@@ -214,9 +214,7 @@ impl ReadLock<'_> {
 
     pub(crate) fn is_any_locked(&self) -> bool {
         match self {
-            ReadLock::HashMapLock(l) => {
-                l.values().any(Option::is_some)
-            },
+            ReadLock::HashMapLock(l) => l.values().any(Option::is_some),
             ReadLock::OptionLock(l) => !l.is_none(),
         }
     }
@@ -1488,7 +1486,6 @@ mod tests {
         assert!(!locks.vehicle.lock_ro().await.is_any_locked());
     }
 
-
     pub fn init_locks() -> Arc<Locks> {
         // Initialize ecu_map with dummy data
         let mut ecu_map = LockHashMap::new();
@@ -1501,7 +1498,9 @@ mod tests {
         Arc::new(Locks {
             vehicle: LockType::Vehicle(Arc::new(RwLock::new(None))),
             ecu: LockType::Ecu(Arc::new(RwLock::new(ecu_map))),
-            functional_group: LockType::FunctionalGroup(Arc::new(RwLock::new(functional_group_map))),
+            functional_group: LockType::FunctionalGroup(Arc::new(RwLock::new(
+                functional_group_map,
+            ))),
         })
     }
 

@@ -88,12 +88,14 @@ impl IntoResponse for DbUpdateErrorResponse {
             };
 
         match &self.error {
-            RuntimeUpdateError::OperationsInProgress(_) | RuntimeUpdateError::LockConflict(_) => build_api_error_response(
-                StatusCode::CONFLICT,
-                ErrorCode::PreconditionsNotFulfilled,
-                None,
-                None,
-            ),
+            RuntimeUpdateError::OperationsInProgress(_) | RuntimeUpdateError::LockConflict(_) => {
+                build_api_error_response(
+                    StatusCode::CONFLICT,
+                    ErrorCode::PreconditionsNotFulfilled,
+                    None,
+                    None,
+                )
+            }
             RuntimeUpdateError::ExecutionConflict => build_api_error_response(
                 StatusCode::CONFLICT,
                 ErrorCode::UpdateProcessInProgress,
@@ -131,14 +133,12 @@ impl IntoResponse for DbUpdateErrorResponse {
                     None,
                 )
             }
-            RuntimeUpdateError::NoLock(_) => {
-                build_api_error_response(
-                    StatusCode::FORBIDDEN,
-                    ErrorCode::InsufficientAccessRights,
-                    None,
-                    None,
-                )
-            }
+            RuntimeUpdateError::NoLock(_) => build_api_error_response(
+                StatusCode::FORBIDDEN,
+                ErrorCode::InsufficientAccessRights,
+                None,
+                None,
+            ),
             RuntimeUpdateError::SevereError(_) => build_api_error_response(
                 StatusCode::INTERNAL_SERVER_ERROR,
                 ErrorCode::VendorSpecific,
@@ -179,7 +179,7 @@ async fn require_vehicle_lock(
         )
         .into_response()),
         Some(owner) if owner != claims.sub() => Err(DbUpdateErrorResponse::new(
-            RuntimeUpdateError::LockConflict("Vehicle lock is owned by another user".to_owned()),
+            RuntimeUpdateError::NoLock("Vehicle lock is owned by another user".to_owned()),
             retry_after_seconds,
         )
         .into_response()),

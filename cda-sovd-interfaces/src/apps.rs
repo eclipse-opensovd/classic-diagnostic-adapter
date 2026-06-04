@@ -34,13 +34,17 @@ pub mod sovd2uds {
         }
 
         pub mod runtimefiles {
-            use serde::Deserialize;
+            use std::str::FromStr;
+
+            use serde::{Deserialize, Deserializer, Serialize};
+            use strum::EnumString;
 
             /// Execution mode for database update operations.
             #[derive(
-                Debug, Clone, PartialEq, Eq, serde::Serialize, Deserialize, schemars::JsonSchema,
+                Debug, Clone, Copy, PartialEq, Eq, Serialize, EnumString, schemars::JsonSchema,
             )]
             #[serde(rename_all = "lowercase")]
+            #[strum(ascii_case_insensitive, serialize_all = "lowercase")]
             pub enum ExecutionMode {
                 /// Apply staged files as the new current version.
                 Apply,
@@ -48,6 +52,16 @@ pub mod sovd2uds {
                 Rollback,
                 /// Remove staged and backup files without applying.
                 Cleanup,
+            }
+
+            impl<'de> Deserialize<'de> for ExecutionMode {
+                fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+                where
+                    D: Deserializer<'de>,
+                {
+                    let s = String::deserialize(deserializer)?;
+                    ExecutionMode::from_str(&s).map_err(serde::de::Error::custom)
+                }
             }
 
             /// Request body for an execution.

@@ -385,7 +385,12 @@ pub async fn seed_storage_from_database_path(storage_dir: &str, database_path: &
         return;
     }
 
-    tracing::info!(count, database_path, storage_dir, "Seeded DiagnosticDatabase collection from database path");
+    tracing::info!(
+        count,
+        database_path,
+        storage_dir,
+        "Seeded DiagnosticDatabase collection from database path"
+    );
 }
 
 pub(crate) fn handle_ecu_config_keys<S: SecurityPlugin>(
@@ -904,10 +909,7 @@ mod tests {
     #[tokio::test]
     async fn resolve_mdd_paths_returns_storage_paths_after_seed() {
         let storage_dir = tempfile::tempdir().expect("storage dir");
-        let db_dir = create_database_dir(&[
-            ("FLXC1000.mdd", b"MDD_A"),
-            ("FSNR2000.mdd", b"MDD_B"),
-        ]);
+        let db_dir = create_database_dir(&[("FLXC1000.mdd", b"MDD_A"), ("FSNR2000.mdd", b"MDD_B")]);
 
         let storage_str = storage_dir.path().to_str().unwrap();
         let db_str = db_dir.path().to_str().unwrap();
