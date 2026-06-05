@@ -16,7 +16,10 @@ use http::{HeaderMap, Method, StatusCode};
 use opensovd_cda_lib::config::configfile::Configuration;
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use sovd_interfaces::{
-    components::ecu::{faults::Fault, modes::dtcsetting},
+    components::ecu::{
+        faults::{Fault, id::get::ExtendedFault},
+        modes::dtcsetting,
+    },
     error::{ApiErrorResponse, ErrorCode},
 };
 
@@ -194,6 +197,36 @@ pub(crate) async fn get_fault(
     ecu_endpoint: &str,
     fault_code: &str,
 ) -> Result<Fault, TestingError> {
+    let json = do_get_fault(config, headers, ecu_endpoint, fault_code).await?;
+    extract_field_from_json::<Fault>(&json, "item")
+}
+
+pub(crate) async fn get_extended_fault(
+    config: &Configuration,
+    headers: &HeaderMap,
+    ecu_endpoint: &str,
+    fault_code: &str,
+) -> Result<ExtendedFault<VendorErrorCode>, TestingError> {
+    let json = do_get_fault(config, headers, ecu_endpoint, fault_code).await?;
+
+    serde_json::from_value(json)
+        .ok()
+        .ok_or_else(|| {
+            format!(
+                "Failed to deserialize response into: {}",
+                std::any::type_name::<ExtendedFault<VendorErrorCode>>()
+            )
+        })
+        .map_err(TestingError::InvalidData)
+}
+
+// Executes the GET method to the ECUSim for the specified DTC
+async fn do_get_fault(
+    config: &Configuration,
+    headers: &HeaderMap,
+    ecu_endpoint: &str,
+    fault_code: &str,
+) -> Result<serde_json::Value, TestingError> {
     let path = format!("{ecu_endpoint}/faults/{fault_code}");
 
     let response = send_cda_request(
@@ -208,8 +241,7 @@ pub(crate) async fn get_fault(
     .await
     .expect("Failed to get faults");
 
-    let json = response_to_json(&response)?;
-    extract_field_from_json::<Fault>(&json, "item")
+    response_to_json(&response)
 }
 
 pub(crate) async fn delete_fault(
