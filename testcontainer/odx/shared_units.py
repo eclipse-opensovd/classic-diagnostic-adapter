@@ -8,13 +8,12 @@
 # terms of the Apache License Version 2.0 which is available at
 # https://www.apache.org/licenses/LICENSE-2.0
 
+from helper import derived_id, ref
 from odxtools.diaglayers.diaglayerraw import DiagLayerRaw
 from odxtools.nameditemlist import NamedItemList
 from odxtools.physicaldimension import PhysicalDimension
 from odxtools.unit import Unit
 from odxtools.unitspec import UnitSpec
-
-from helper import derived_id, ref
 
 
 def add_common_units(dlr: DiagLayerRaw):

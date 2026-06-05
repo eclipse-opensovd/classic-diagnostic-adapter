@@ -10,6 +10,7 @@
 
 import datetime
 
+from helper import derived_id
 from odxtools.additionalaudience import AdditionalAudience
 from odxtools.admindata import AdminData
 from odxtools.companydata import CompanyData
@@ -22,15 +23,11 @@ from odxtools.nameditemlist import NamedItemList
 from odxtools.odxlink import OdxLinkId
 from odxtools.teammember import TeamMember
 
-from helper import derived_id
-
 
 def add_admin_data(dlc: DiagLayerContainer):
     dlc.admin_data = AdminData(
         doc_revisions=[
-            DocRevision(
-                revision_label="00.01.00", date=f"{datetime.datetime.now().isoformat()}"
-            )
+            DocRevision(revision_label="00.01.00", date=f"{datetime.datetime.now().isoformat()}")
         ]
     )
 

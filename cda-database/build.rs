@@ -23,6 +23,9 @@ const COPYRIGHT_HEADER: &str = r"/*
  * https://www.apache.org/licenses/LICENSE-2.0
  */
 
+// This file is @generated - do not edit manually.
+#![allow(clippy::all, warnings)]
+
 ";
 #[cfg(any(feature = "gen-protos", feature = "gen-flatbuffers"))]
 fn prepend_copyright(file_path: &str) -> std::io::Result<()> {

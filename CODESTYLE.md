@@ -31,13 +31,15 @@ This repository follows most of the defaults in rustfmt, with some opinionated u
   - Enable formatting of strings.
 
 As we do not want to require nightly rust for the entire repository, these settings are not yet included in `rustfmt.toml` (but will be once stabilized).
-Instead, run this alias to apply the correct formatting:
+Instead, run this command to apply the correct formatting:
+
 ```sh
 cargo +nightly format
 ```
 
 It is recommended to configure your IDE to use nightly rustfmt with these settings as well.
 Example for VS Code:
+
 ```json
 "rust-analyzer.rustfmt.overrideCommand": [
     "rustfmt",
@@ -51,10 +53,12 @@ Example for VS Code:
 ```
 
 ## Imports
+
 As noted in the formatting section, imports must be grouped and separated with a new line as follows:
-  1. Standard library
-  2. External crates
-  3. Internal modules
+
+1. Standard library
+2. External crates
+3. Internal modules
 
 Additionally the import granularity is set to `crate` to group all imports from the same crate into a single block.
 

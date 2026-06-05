@@ -8,24 +8,23 @@
 # terms of the Apache License Version 2.0 which is available at
 # https://www.apache.org/licenses/LICENSE-2.0
 
+from helper import (
+    derived_id,
+    find_dop_by_shortname,
+    functional_class_ref,
+    matching_request_parameter_subfunction,
+    ref,
+    sid_parameter_pr,
+    sid_parameter_rq,
+    subfunction_rq,
+    texttable_int_str_dop,
+)
 from odxtools.diaglayers.diaglayerraw import DiagLayerRaw
 from odxtools.diagservice import DiagService
 from odxtools.nameditemlist import NamedItemList
 from odxtools.parameters.valueparameter import ValueParameter
 from odxtools.request import Request
 from odxtools.response import Response, ResponseType
-
-from helper import (
-    sid_parameter_rq,
-    sid_parameter_pr,
-    derived_id,
-    subfunction_rq,
-    matching_request_parameter_subfunction,
-    functional_class_ref,
-    ref,
-    texttable_int_str_dop,
-    find_dop_by_shortname,
-)
 
 
 def add_deauthentication(dlr: DiagLayerRaw):
@@ -133,4 +132,3 @@ def add_authentication_services(dlr: DiagLayerRaw):
     # 29 01
     # 29 03
     # 29 04
-    pass

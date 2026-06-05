@@ -8,6 +8,15 @@
 # terms of the Apache License Version 2.0 which is available at
 # https://www.apache.org/licenses/LICENSE-2.0
 
+from helper import (
+    derived_id,
+    functional_class_ref,
+    matching_request_parameter_subfunction,
+    ref,
+    sid_parameter_pr,
+    sid_parameter_rq,
+    subfunction_rq,
+)
 from odxtools.addressing import Addressing
 from odxtools.diaglayers.diaglayerraw import DiagLayerRaw
 from odxtools.diagservice import DiagService
@@ -19,17 +28,6 @@ from odxtools.statechart import StateChart
 from odxtools.statetransition import StateTransition
 from odxtools.statetransitionref import StateTransitionRef
 from odxtools.transmode import TransMode
-
-from helper import (
-    sid_parameter_rq,
-    sid_parameter_pr,
-    subfunction_rq,
-    matching_request_parameter_subfunction,
-    derived_id,
-    functional_class_ref,
-    ref,
-)
-
 
 # adds state charts, states and session switching services (10 xx) for them
 
@@ -76,18 +74,14 @@ def add_session_service(
         pos_response_refs = [ref(response)]
 
     state_transition_refs_session = []
-    session_transitions_session = NamedItemList(
-        dlr.state_charts["Session"].state_transitions
-    )
+    session_transitions_session = NamedItemList(dlr.state_charts["Session"].state_transitions)
     for from_state in from_state_transitions_session:
         stt = session_transitions_session[f"{from_state}_{target_state_session}"]
         if not stt:
             raise Exception(f"no transition {from_state}_{target_state_session}")
         # TODO switch to StateTransitionRef.from_id(stt.odx_id) once it's implemented
         state_transition_refs_session.append(
-            StateTransitionRef(
-                ref_id=stt.odx_id.local_id, ref_docs=stt.odx_id.doc_fragments
-            )
+            StateTransitionRef(ref_id=stt.odx_id.local_id, ref_docs=stt.odx_id.doc_fragments)
         )
 
     dlr.diag_comms_raw.append(
@@ -134,10 +128,7 @@ def add_state_chart_session(dlr: DiagLayerRaw):
             semantic="SESSION",
             start_state_snref="Default",
             states=NamedItemList(
-                [
-                    State(odx_id=derived_id(odx_id, f"ST.{name}"), short_name=name)
-                    for name in states
-                ]
+                [State(odx_id=derived_id(odx_id, f"ST.{name}"), short_name=name) for name in states]
             ),
             state_transitions=[
                 StateTransition(
@@ -155,9 +146,7 @@ def add_state_chart_session(dlr: DiagLayerRaw):
 def add_default_session_services(dlr: DiagLayerRaw):
     # session
     # 10 01 Default_Start
-    add_session_service(
-        dlr, "Default", 1, ["Default", "Programming", "Extended", "Custom"]
-    )
+    add_session_service(dlr, "Default", 1, ["Default", "Programming", "Extended", "Custom"])
     # 10 02 Programming_Start
     add_session_service(dlr, "Programming", 2, ["Default", "Programming", "Extended"])
     # 10 03 Extended_Start

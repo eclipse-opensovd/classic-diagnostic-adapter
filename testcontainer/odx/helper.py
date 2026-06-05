@@ -11,6 +11,7 @@
 from odxtools.compumethods.compucategory import CompuCategory
 from odxtools.compumethods.compuconst import CompuConst
 from odxtools.compumethods.compuinternaltophys import CompuInternalToPhys
+from odxtools.compumethods.compumethod import CompuMethod
 from odxtools.compumethods.compuscale import CompuScale
 from odxtools.compumethods.limit import Limit
 from odxtools.compumethods.texttablecompumethod import TexttableCompuMethod
@@ -19,23 +20,20 @@ from odxtools.diaglayercontainer import DiagLayerContainer
 from odxtools.diaglayers.diaglayerraw import DiagLayerRaw
 from odxtools.element import IdentifiableElement
 from odxtools.functionalclass import FunctionalClass
+from odxtools.nameditemlist import NamedItemList
 from odxtools.odxlink import OdxLinkId, OdxLinkRef
 from odxtools.odxtypes import DataType
 from odxtools.parameters.codedconstparameter import CodedConstParameter
 from odxtools.parameters.matchingrequestparameter import MatchingRequestParameter
+from odxtools.parameters.valueparameter import ValueParameter
 from odxtools.physicaltype import PhysicalType
+from odxtools.response import Response, ResponseType
 from odxtools.standardlengthtype import StandardLengthType
 from odxtools.statetransition import StateTransition
-from odxtools.response import Response, ResponseType
-from odxtools.nameditemlist import NamedItemList
-from odxtools.parameters.valueparameter import ValueParameter
-from odxtools.compumethods.compumethod import CompuMethod
 from odxtools.unit import Unit
 
 
-def find_unit_by_shortname(
-    container: DiagLayerRaw | DiagLayerContainer, shortname: str
-) -> Unit:
+def find_unit_by_shortname(container: DiagLayerRaw | DiagLayerContainer, shortname: str) -> Unit:
     if isinstance(container, DiagLayerRaw):
         unit_spec = container.diag_data_dictionary_spec.unit_spec
         if unit_spec is not None:
@@ -155,9 +153,7 @@ def coded_const_int_parameter(
         byte_position=byte_position,
         bit_position=bit_position,
         coded_value_raw=coded_value_raw,
-        diag_coded_type=StandardLengthType(
-            base_data_type=DataType.A_UINT32, bit_length=bit_length
-        ),
+        diag_coded_type=StandardLengthType(base_data_type=DataType.A_UINT32, bit_length=bit_length),
     )
 
 
@@ -281,9 +277,7 @@ def functional_class_ref(
 
 def derived_id(parent: OdxLinkId | IdentifiableElement, name: str) -> OdxLinkId:
     if isinstance(parent, OdxLinkId):
-        return OdxLinkId(
-            local_id=f"{parent.local_id}.{name}", doc_fragments=parent.doc_fragments
-        )
+        return OdxLinkId(local_id=f"{parent.local_id}.{name}", doc_fragments=parent.doc_fragments)
     elif isinstance(parent, IdentifiableElement):
         return derived_id(parent.odx_id, name)
     else:
@@ -331,9 +325,7 @@ def texttable_int_str_dop(
             physical_type=DataType.A_UNICODE2STRING,
             internal_type=DataType.A_UINT32,
         ),
-        diag_coded_type=StandardLengthType(
-            base_data_type=DataType.A_UINT32, bit_length=bit_length
-        ),
+        diag_coded_type=StandardLengthType(base_data_type=DataType.A_UINT32, bit_length=bit_length),
         physical_type=PhysicalType(base_data_type=DataType.A_UNICODE2STRING),
     )
 
@@ -351,9 +343,7 @@ def negative_response(
             internal_type=DataType.A_BYTEFIELD,
         ),
         physical_type=PhysicalType(base_data_type=DataType.A_BYTEFIELD),
-        diag_coded_type=StandardLengthType(
-            base_data_type=DataType.A_UINT32, bit_length=8
-        ),
+        diag_coded_type=StandardLengthType(base_data_type=DataType.A_UINT32, bit_length=8),
     )
     dlr.diag_data_dictionary_spec.data_object_props.append(nrc_dop)
 

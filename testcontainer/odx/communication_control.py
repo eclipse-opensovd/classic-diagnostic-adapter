@@ -7,31 +7,30 @@
 # This program and the accompanying materials are made available under the
 # terms of the Apache License Version 2.0 which is available at
 # https://www.apache.org/licenses/LICENSE-2.0
+from helper import (
+    derived_id,
+    functional_class_ref,
+    matching_request_parameter_subfunction,
+    ref,
+    sid_parameter_pr,
+    sid_parameter_rq,
+    subfunction_rq,
+)
 from odxtools.addressing import Addressing
+from odxtools.compumethods.compucategory import CompuCategory
+from odxtools.compumethods.identicalcompumethod import IdenticalCompuMethod
+from odxtools.dataobjectproperty import DataObjectProperty
 from odxtools.diaglayers.diaglayerraw import DiagLayerRaw
 from odxtools.diagservice import DiagService
 from odxtools.nameditemlist import NamedItemList
+from odxtools.odxtypes import DataType
 from odxtools.parameters.codedconstparameter import CodedConstParameter
 from odxtools.parameters.valueparameter import ValueParameter
+from odxtools.physicaltype import PhysicalType
 from odxtools.request import Request
 from odxtools.response import Response, ResponseType
-from odxtools.odxtypes import DataType
 from odxtools.standardlengthtype import StandardLengthType
-from odxtools.compumethods.identicalcompumethod import IdenticalCompuMethod
-from odxtools.compumethods.compucategory import CompuCategory
-from odxtools.dataobjectproperty import DataObjectProperty
-from odxtools.physicaltype import PhysicalType
 from odxtools.transmode import TransMode
-
-from helper import (
-    sid_parameter_rq,
-    sid_parameter_pr,
-    derived_id,
-    subfunction_rq,
-    matching_request_parameter_subfunction,
-    functional_class_ref,
-    ref,
-)
 
 
 def add_communication_control_service(
@@ -209,9 +208,7 @@ def add_communication_control_services(
                 internal_type=DataType.A_INT32,
             ),
             physical_type=PhysicalType(base_data_type=DataType.A_INT32),
-            diag_coded_type=StandardLengthType(
-                base_data_type=DataType.A_INT32, bit_length=32
-            ),
+            diag_coded_type=StandardLengthType(base_data_type=DataType.A_INT32, bit_length=32),
         )
         dlr.diag_data_dictionary_spec.data_object_props.append(temporal_era_id_dop)
 
