@@ -89,7 +89,8 @@ pub struct IncludeSchemaQuery {
 pub mod sovd2uds {
     use std::path::PathBuf;
 
-    use serde::{Deserialize, Serialize};
+    pub use cda_interfaces::runtime_update_api::{BulkDataDescriptor, HashAlgorithm};
+    use serde::Serialize;
 
     #[derive(Serialize, schemars::JsonSchema)]
     pub struct FileList {
@@ -100,35 +101,6 @@ pub mod sovd2uds {
         #[schemars(skip)]
         #[serde(skip_serializing_if = "Option::is_none")]
         pub schema: Option<schemars::Schema>,
-    }
-
-    /// A bulk-data descriptor as defined by ISO 17978-3, Table 298.
-    #[derive(Serialize, Deserialize, Debug, Clone, schemars::JsonSchema)]
-    pub struct BulkDataDescriptor {
-        pub id: String,
-        pub mimetype: String,
-        #[serde(skip_serializing_if = "Option::is_none")]
-        pub size: Option<u64>,
-        #[serde(skip_serializing_if = "Option::is_none")]
-        pub hash: Option<String>,
-        #[serde(skip_serializing_if = "Option::is_none")]
-        pub hash_algorithm: Option<HashAlgorithm>,
-        #[serde(
-            rename = "x-sovd2uds-OrigPath",
-            skip_serializing_if = "Option::is_none"
-        )]
-        pub origin_path: Option<String>,
-        #[serde(
-            rename = "x-sovd2uds-revision",
-            skip_serializing_if = "Option::is_none"
-        )]
-        pub revision: Option<String>,
-    }
-
-    #[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq, schemars::JsonSchema)]
-    #[serde(rename_all = "lowercase")]
-    pub enum HashAlgorithm {
-        Sha256,
     }
 }
 

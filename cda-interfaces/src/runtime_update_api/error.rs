@@ -8,7 +8,7 @@
 // terms of the Apache License Version 2.0 which is available at
 // https://www.apache.org/licenses/LICENSE-2.0
 
-use cda_interfaces::storage_api::StorageError as CdaStorageError;
+use crate::storage_api::StorageError as CdaStorageError;
 
 #[derive(Debug, thiserror::Error)]
 pub enum RuntimeUpdateError {

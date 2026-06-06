@@ -17,7 +17,9 @@ use axum::{
     http::{HeaderValue, StatusCode, header::RETRY_AFTER},
     response::{IntoResponse, Response},
 };
-use cda_plugin_runtime_update::{LockStateProvider, RuntimeFilesUpdatePlugin, RuntimeUpdateError};
+use cda_interfaces::runtime_update_api::{
+    LockStateProvider, RuntimeFilesUpdatePlugin, RuntimeUpdateError,
+};
 use sovd_interfaces::error::{ApiErrorResponse, ErrorCode};
 
 use crate::{VendorErrorCode, sovd::update_guard::ExemptRoute};
@@ -192,7 +194,7 @@ pub(crate) mod current {
         extract::{Query, State},
         response::{IntoResponse, Response},
     };
-    use cda_plugin_runtime_update::{LockStateProvider, RuntimeFilesUpdatePlugin};
+    use cda_interfaces::runtime_update_api::{LockStateProvider, RuntimeFilesUpdatePlugin};
     use cda_plugin_security::Secured;
 
     use super::{DbUpdateErrorResponse, RuntimeUpdateRouteState};
@@ -218,7 +220,7 @@ pub(crate) mod nextupdate {
         http::StatusCode,
         response::{IntoResponse, Response},
     };
-    use cda_plugin_runtime_update::{
+    use cda_interfaces::runtime_update_api::{
         LockStateProvider, RuntimeFilesUpdatePlugin, RuntimeUpdateError, UploadFile,
     };
     use cda_plugin_security::Secured;
@@ -308,7 +310,7 @@ pub(crate) mod nextupdate {
             http::StatusCode,
             response::IntoResponse,
         };
-        use cda_plugin_runtime_update::{LockStateProvider, RuntimeFilesUpdatePlugin};
+        use cda_interfaces::runtime_update_api::{LockStateProvider, RuntimeFilesUpdatePlugin};
         use cda_plugin_security::Secured;
 
         use super::super::{DbUpdateErrorResponse, RuntimeUpdateRouteState, require_vehicle_lock};
@@ -349,7 +351,7 @@ pub(crate) mod backup {
         http::StatusCode,
         response::{IntoResponse, Response},
     };
-    use cda_plugin_runtime_update::{LockStateProvider, RuntimeFilesUpdatePlugin};
+    use cda_interfaces::runtime_update_api::{LockStateProvider, RuntimeFilesUpdatePlugin};
     use cda_plugin_security::Secured;
 
     use super::{DbUpdateErrorResponse, RuntimeUpdateRouteState, require_vehicle_lock};
@@ -395,7 +397,7 @@ pub(crate) mod executions {
         http::StatusCode,
         response::IntoResponse,
     };
-    use cda_plugin_runtime_update::{LockStateProvider, RuntimeFilesUpdatePlugin};
+    use cda_interfaces::runtime_update_api::{LockStateProvider, RuntimeFilesUpdatePlugin};
     use cda_plugin_security::Secured;
 
     use super::{DbUpdateErrorResponse, RuntimeUpdateRouteState, require_vehicle_lock};

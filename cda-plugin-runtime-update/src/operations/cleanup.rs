@@ -8,10 +8,12 @@
 // terms of the Apache License Version 2.0 which is available at
 // https://www.apache.org/licenses/LICENSE-2.0
 
-use cda_interfaces::storage_api::{Collection as _, CollectionName, Storage};
+use cda_interfaces::{
+    runtime_update_api::RuntimeUpdateError,
+    storage_api::{Collection as _, CollectionName, Storage},
+};
 
 use super::delete_collection_ignore_missing;
-use crate::RuntimeUpdateError;
 
 /// Clear all staging and backup collections atomically.
 ///

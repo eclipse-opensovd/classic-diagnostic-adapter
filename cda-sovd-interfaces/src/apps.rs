@@ -12,20 +12,9 @@
 
 pub mod sovd2uds {
     pub mod bulk_data {
-        use serde::{Deserialize, Serialize};
-
-        /// Response body for bulk-data list endpoints `BulkDataDescriptor` follows Table 298 shape
-        pub type BulkDataList = crate::Items<crate::sovd2uds::BulkDataDescriptor>;
-
-        /// A single item in a bulk-data creation response (Table 303 shape).
-        #[derive(Debug, Clone, Deserialize, Serialize, schemars::JsonSchema)]
-        pub struct BulkDataCreated {
-            /// Bulk-data identifier created by the SOVD server to identify the bulk-data.
-            pub id: String,
-        }
-
-        /// Response body for bulk-data creation (Table 303 shape).
-        pub type BulkDataCreatedList = crate::Items<BulkDataCreated>;
+        pub use cda_interfaces::runtime_update_api::{
+            BulkDataCreated, BulkDataCreatedList, BulkDataList,
+        };
 
         pub mod flash_files {
             pub mod get {
@@ -34,54 +23,13 @@ pub mod sovd2uds {
         }
 
         pub mod runtimefiles {
-            use std::str::FromStr;
-
-            use serde::{Deserialize, Deserializer, Serialize};
-            use strum::EnumString;
-
-            /// Execution mode for database update operations.
-            #[derive(
-                Debug, Clone, Copy, PartialEq, Eq, Serialize, EnumString, schemars::JsonSchema,
-            )]
-            #[serde(rename_all = "lowercase")]
-            #[strum(ascii_case_insensitive, serialize_all = "lowercase")]
-            pub enum ExecutionMode {
-                /// Apply staged files as the new current version.
-                Apply,
-                /// Revert to the backup from the previous apply.
-                Rollback,
-                /// Remove staged and backup files without applying.
-                Cleanup,
-            }
-
-            impl<'de> Deserialize<'de> for ExecutionMode {
-                fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
-                where
-                    D: Deserializer<'de>,
-                {
-                    let s = String::deserialize(deserializer)?;
-                    ExecutionMode::from_str(&s).map_err(serde::de::Error::custom)
-                }
-            }
+            pub use cda_interfaces::runtime_update_api::{ExecutionMode, RuntimeFilesQuery};
 
             /// Request body for an execution.
-            #[derive(Debug, Deserialize, schemars::JsonSchema)]
+            #[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
             pub struct ExecutionRequest {
                 /// The operation to perform on the staged runtime files.
                 pub mode: ExecutionMode,
-            }
-
-            /// Query parameters for runtime file list endpoints.
-            #[derive(Debug, Default, Deserialize, schemars::JsonSchema)]
-            pub struct RuntimeFilesQuery {
-                #[serde(rename = "include-schema", default)]
-                pub include_schema: bool,
-                #[serde(rename = "x-sovd2uds-include-hash")]
-                pub include_hash: Option<crate::sovd2uds::HashAlgorithm>,
-                #[serde(rename = "x-sovd2uds-include-file-size", default)]
-                pub include_file_size: bool,
-                #[serde(rename = "x-sovd2uds-include-revision", default)]
-                pub include_revision: bool,
             }
         }
     }

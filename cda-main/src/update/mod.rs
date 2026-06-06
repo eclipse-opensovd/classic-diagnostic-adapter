@@ -15,9 +15,12 @@ use std::{future::Future, path::PathBuf, sync::Arc};
 use async_trait::async_trait;
 use cda_comm_doip::DoipDiagGateway;
 use cda_core::{DiagServiceResponseStruct, EcuManager};
-use cda_interfaces::{UdsEcu, datatypes::ComponentsConfig};
-use cda_plugin_runtime_update::{
-    ReloadError, RuntimeFilesUpdatePlugin, RuntimeFilesUpdateSecurityHandler,
+use cda_interfaces::{
+    UdsEcu,
+    datatypes::ComponentsConfig,
+    runtime_update_api::{
+        ReloadError, RuntimeFilesUpdatePlugin, RuntimeFilesUpdateSecurityHandler,
+    },
 };
 use cda_plugin_security::{SecurityPlugin, SecurityPluginLoader};
 use tokio::sync::RwLock;
@@ -96,7 +99,7 @@ where
 }
 
 #[async_trait]
-impl<S, F, P> cda_plugin_runtime_update::RuntimeFileReloadHandler
+impl<S, F, P> cda_interfaces::runtime_update_api::RuntimeFileReloadHandler
     for DefaultRuntimeFileReloadHandler<S, F, P>
 where
     S: SecurityPlugin,

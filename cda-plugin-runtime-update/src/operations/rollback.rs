@@ -8,14 +8,13 @@
 // terms of the Apache License Version 2.0 which is available at
 // https://www.apache.org/licenses/LICENSE-2.0
 
-use cda_interfaces::storage_api::{Collection, CollectionName, Storage, Transaction};
+use cda_interfaces::{
+    runtime_update_api::{RuntimeFileReloadHandler, RuntimeUpdateError},
+    storage_api::{Collection, CollectionName, Storage, Transaction},
+};
 
-use crate::{
-    RuntimeFileReloadHandler, RuntimeUpdateError,
-    operations::{
-        delete_collection_ignore_missing, reload_configuration_if_present,
-        reload_database_if_present,
-    },
+use crate::operations::{
+    delete_collection_ignore_missing, reload_configuration_if_present, reload_database_if_present,
 };
 
 async fn restore_from_backup<S: Storage, C: Collection>(
@@ -99,14 +98,14 @@ pub async fn execute_rollback<S: Storage, R: RuntimeFileReloadHandler>(
 mod tests {
     use std::sync::{Arc, Mutex};
 
-    use cda_interfaces::storage_api::{
-        Collection as _, CollectionName, Storage as _, StorageError,
+    use cda_interfaces::{
+        runtime_update_api::RuntimeUpdateError,
+        storage_api::{Collection as _, CollectionName, Storage as _, StorageError},
     };
 
     use super::execute_rollback;
-    use crate::{
-        RuntimeUpdateError,
-        test_utils::{NoopReloadHandler, RecordingReloadHandler, init_collection, make_storage},
+    use crate::test_utils::{
+        NoopReloadHandler, RecordingReloadHandler, init_collection, make_storage,
     };
 
     #[tokio::test]
@@ -364,11 +363,11 @@ mod tests {
     }
 
     #[async_trait::async_trait]
-    impl crate::RuntimeFileReloadHandler for OrderingReloadHandler {
+    impl cda_interfaces::runtime_update_api::RuntimeFileReloadHandler for OrderingReloadHandler {
         async fn reload_databases(
             &self,
             _paths: Vec<std::path::PathBuf>,
-        ) -> Result<(), crate::ReloadError> {
+        ) -> Result<(), cda_interfaces::runtime_update_api::ReloadError> {
             self.call_order.lock().unwrap().push("databases");
             Ok(())
         }
@@ -376,7 +375,7 @@ mod tests {
         async fn reload_configuration(
             &self,
             _path: std::path::PathBuf,
-        ) -> Result<(), crate::ReloadError> {
+        ) -> Result<(), cda_interfaces::runtime_update_api::ReloadError> {
             self.call_order.lock().unwrap().push("configuration");
             Ok(())
         }

@@ -193,8 +193,8 @@ pub async fn add_runtime_update_routes<S, P, L>(
 ) -> RouteHandle
 where
     S: SecurityPluginLoader,
-    P: cda_plugin_runtime_update::RuntimeFilesUpdatePlugin,
-    L: cda_plugin_runtime_update::LockStateProvider,
+    P: cda_interfaces::runtime_update_api::RuntimeFilesUpdatePlugin,
+    L: cda_interfaces::runtime_update_api::LockStateProvider,
 {
     update_guard
         .extend_exempt(sovd::apps::sovd2uds::bulk_data::runtimefiles::update_exempt_routes())

@@ -11,14 +11,16 @@
 use std::sync::{Arc, atomic::AtomicBool};
 
 use async_trait::async_trait;
-use cda_interfaces::{HashMap, storage_api::Storage};
-use tokio::sync::RwLock;
-
-use crate::{
-    BulkDataCreatedList, BulkDataList, ExecutionMode, LockStateProvider, RuntimeFileReloadHandler,
-    RuntimeFilesQuery, RuntimeFilesUpdatePlugin, RuntimeFilesUpdateSecurityHandler,
-    RuntimeUpdateError, UpdateExecution, UploadFile,
+use cda_interfaces::{
+    HashMap,
+    runtime_update_api::{
+        BulkDataCreatedList, BulkDataList, ExecutionMode, LockStateProvider,
+        RuntimeFileReloadHandler, RuntimeFilesQuery, RuntimeFilesUpdatePlugin,
+        RuntimeFilesUpdateSecurityHandler, RuntimeUpdateError, UpdateExecution, UploadFile,
+    },
+    storage_api::Storage,
 };
+use tokio::sync::RwLock;
 
 /// Default implementation of [`RuntimeFilesUpdatePlugin`] with injectable security and storage.
 pub struct DefaultRuntimeFilesUpdatePlugin<
@@ -151,12 +153,17 @@ impl<
 mod tests {
     use std::sync::Arc;
 
-    use cda_interfaces::storage_api::CollectionName;
+    use cda_interfaces::{
+        runtime_update_api::{
+            ExecutionMode, HashAlgorithm, RuntimeFilesQuery, RuntimeFilesUpdatePlugin,
+            RuntimeUpdateError,
+        },
+        storage_api::CollectionName,
+    };
     use cda_storage::LocalStorage;
 
     use crate::{
-        DefaultRuntimeFilesUpdatePlugin, ExecutionMode, HashAlgorithm, RuntimeFilesQuery,
-        RuntimeFilesUpdatePlugin, RuntimeUpdateError,
+        DefaultRuntimeFilesUpdatePlugin,
         test_utils::{
             MockLockProvider, MockSecurityHandler, NoopReloadHandler, make_storage,
             make_upload_files, make_valid_config, make_valid_mdd, write_test_file,

@@ -10,11 +10,13 @@
  * https://www.apache.org/licenses/LICENSE-2.0
  */
 
-use cda_interfaces::storage_api::{CollectionName, Storage, Transaction};
+use cda_interfaces::{
+    runtime_update_api::{RuntimeFileReloadHandler, RuntimeUpdateError},
+    storage_api::{CollectionName, Storage, Transaction},
+};
 
-use crate::{
-    RuntimeFileReloadHandler, RuntimeUpdateError,
-    operations::{reload_configuration_if_present, reload_database_if_present, try_get_collection},
+use crate::operations::{
+    reload_configuration_if_present, reload_database_if_present, try_get_collection,
 };
 
 async fn swap_collection<S: Storage>(
@@ -117,14 +119,14 @@ mod tests {
     use std::sync::{Arc, Mutex};
 
     use async_trait::async_trait;
-    use cda_interfaces::storage_api::{
-        Collection as _, CollectionName, Storage as _, StorageError,
+    use cda_interfaces::{
+        runtime_update_api::RuntimeUpdateError,
+        storage_api::{Collection as _, CollectionName, Storage as _, StorageError},
     };
 
     use super::execute_apply;
-    use crate::{
-        RuntimeUpdateError,
-        test_utils::{NoopReloadHandler, RecordingReloadHandler, init_collection, make_storage},
+    use crate::test_utils::{
+        NoopReloadHandler, RecordingReloadHandler, init_collection, make_storage,
     };
 
     #[derive(Clone, Default)]
@@ -133,11 +135,11 @@ mod tests {
     }
 
     #[async_trait]
-    impl crate::RuntimeFileReloadHandler for OrderingReloadHandler {
+    impl cda_interfaces::runtime_update_api::RuntimeFileReloadHandler for OrderingReloadHandler {
         async fn reload_databases(
             &self,
             _paths: Vec<std::path::PathBuf>,
-        ) -> Result<(), crate::ReloadError> {
+        ) -> Result<(), cda_interfaces::runtime_update_api::ReloadError> {
             self.call_order.lock().unwrap().push("databases");
             Ok(())
         }
@@ -145,7 +147,7 @@ mod tests {
         async fn reload_configuration(
             &self,
             _path: std::path::PathBuf,
-        ) -> Result<(), crate::ReloadError> {
+        ) -> Result<(), cda_interfaces::runtime_update_api::ReloadError> {
             self.call_order.lock().unwrap().push("configuration");
             Ok(())
         }

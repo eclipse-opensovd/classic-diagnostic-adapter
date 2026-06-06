@@ -14,10 +14,12 @@ use std::{collections::HashSet, sync::Arc};
 
 use async_trait::async_trait;
 use cda_database::mmap_and_decode_mdd;
-use cda_interfaces::storage_api::{Collection, DirectFileAccess};
-use cda_plugin_runtime_update::{
-    ActiveOperationsGuard, LockStateProvider, RuntimeFilesUpdateSecurityHandler,
-    RuntimeUpdateError, UpdateCollections, UpdateFileType, VerificationError,
+use cda_interfaces::{
+    runtime_update_api::{
+        ActiveOperationsGuard, LockStateProvider, RuntimeFilesUpdateSecurityHandler,
+        RuntimeUpdateError, UpdateCollections, UpdateFileType, VerificationError,
+    },
+    storage_api::{Collection, DirectFileAccess},
 };
 
 pub struct UpdateSecurityHandler<L: LockStateProvider, G: ActiveOperationsGuard> {
@@ -147,9 +149,12 @@ mod tests {
     use std::path::PathBuf;
 
     use async_trait::async_trait;
-    use cda_interfaces::storage_api::{CollectionName, Storage as _};
-    use cda_plugin_runtime_update::{
-        RuntimeFilesUpdateSecurityHandler, RuntimeUpdateError, UpdateCollections, UpdateFileType,
+    use cda_interfaces::{
+        runtime_update_api::{
+            RuntimeFilesUpdateSecurityHandler, RuntimeUpdateError, UpdateCollections,
+            UpdateFileType,
+        },
+        storage_api::{CollectionName, Storage as _},
     };
     use cda_storage::{LocalCollection, LocalStorage};
 

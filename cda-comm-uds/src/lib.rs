@@ -102,14 +102,14 @@ pub struct UdsManager<S: EcuGateway, R: DiagServiceResponse, T: EcuManager<Respo
 /// Guard that reports whether any ECU flash data transfers are currently active.
 ///
 /// Used by the runtime update plugin to block updates while transfers are in progress.
-/// Implements [`cda_plugin_runtime_update::ActiveOperationsGuard`] with a conservative
+/// Implements [`cda_interfaces::runtime_update_api::ActiveOperationsGuard`] with a conservative
 /// locking strategy: if the internal mutex is contended, it reports active operations
 /// to prevent TOCTOU races.
 pub struct FlashTransferObserver {
     data_transfers: Arc<Mutex<HashMap<EcuIdentifier, EcuDataTransfer>>>,
 }
 
-impl cda_plugin_runtime_update::ActiveOperationsGuard for FlashTransferObserver {
+impl cda_interfaces::runtime_update_api::ActiveOperationsGuard for FlashTransferObserver {
     fn has_active_operations(&self) -> bool {
         self.data_transfers
             .try_lock()

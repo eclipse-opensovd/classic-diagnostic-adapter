@@ -10,17 +10,18 @@
 
 use std::{fmt::Write, sync::Arc};
 
-use cda_interfaces::storage_api::{
-    Collection, CollectionName, DirectFileAccess, RandomAccessData, Storage, StorageError,
-    Transaction,
+use cda_interfaces::{
+    runtime_update_api::{
+        BulkDataCreated, BulkDataCreatedList, BulkDataDescriptor, BulkDataList, HashAlgorithm,
+        LockStateProvider, RuntimeFilesQuery, RuntimeFilesUpdateSecurityHandler,
+        RuntimeUpdateError, UpdateFileType, UploadFile,
+    },
+    storage_api::{
+        Collection, CollectionName, DirectFileAccess, RandomAccessData, Storage, StorageError,
+        Transaction,
+    },
 };
 use sha2::{Digest, Sha256};
-
-use crate::{
-    BulkDataCreated, BulkDataCreatedList, BulkDataDescriptor, BulkDataList, HashAlgorithm,
-    LockStateProvider, RuntimeFilesQuery, RuntimeFilesUpdateSecurityHandler, RuntimeUpdateError,
-    UpdateFileType, UploadFile,
-};
 
 pub(crate) fn mime_for_key(key: &str) -> String {
     match std::path::Path::new(key)
@@ -514,25 +515,25 @@ async fn get_collection_items(
 mod tests {
     use std::sync::Mutex;
 
-    use cda_interfaces::storage_api::{
-        Collection, CollectionName, RandomAccessData, Storage, StorageError,
+    use cda_interfaces::{
+        runtime_update_api::{
+            BulkDataCreatedList, HashAlgorithm, RuntimeFilesQuery, RuntimeUpdateError, UploadFile,
+        },
+        storage_api::{Collection, CollectionName, RandomAccessData, Storage, StorageError},
     };
     use cda_storage::LocalStorage;
     use sha2::{Digest, Sha256};
 
     use super::{compute_nextupdate_state, compute_sha256, list_collection_files, upload_files};
-    use crate::{
-        HashAlgorithm, RuntimeFilesQuery, RuntimeUpdateError,
-        test_utils::{
-            MockLockProvider, MockSecurityHandler, make_storage, make_upload_files,
-            make_valid_config, make_valid_mdd, make_valid_mdd_with_revision, write_file,
-        },
+    use crate::test_utils::{
+        MockLockProvider, MockSecurityHandler, make_storage, make_upload_files, make_valid_config,
+        make_valid_mdd, make_valid_mdd_with_revision, write_file,
     };
 
     async fn upload<S: cda_interfaces::storage_api::Storage + 'static>(
         storage: &S,
-        files: Vec<crate::UploadFile>,
-    ) -> Result<crate::BulkDataCreatedList, RuntimeUpdateError> {
+        files: Vec<UploadFile>,
+    ) -> Result<BulkDataCreatedList, RuntimeUpdateError> {
         upload_files::<S, MockSecurityHandler, MockLockProvider>(
             storage,
             &MockSecurityHandler::new(),
@@ -542,38 +543,46 @@ mod tests {
     }
 
     struct RejectingSecurityHandler {
-        reject_type: crate::UpdateFileType,
+        reject_type: cda_interfaces::runtime_update_api::UpdateFileType,
     }
 
     #[async_trait::async_trait]
     impl<
-        L: crate::LockStateProvider,
+        L: cda_interfaces::runtime_update_api::LockStateProvider,
         C: cda_interfaces::storage_api::Collection
             + cda_interfaces::storage_api::DirectFileAccess
             + Send
             + Sync
             + 'static,
-    > crate::RuntimeFilesUpdateSecurityHandler<L, C> for RejectingSecurityHandler
+    > cda_interfaces::runtime_update_api::RuntimeFilesUpdateSecurityHandler<L, C>
+        for RejectingSecurityHandler
     {
         async fn check_apply_allowed(
             &self,
             _lock_state_provider: &L,
-            _collections: &crate::UpdateCollections<C>,
-        ) -> Result<(), crate::RuntimeUpdateError> {
+            _collections: &cda_interfaces::runtime_update_api::UpdateCollections<C>,
+        ) -> Result<(), cda_interfaces::runtime_update_api::RuntimeUpdateError> {
             Ok(())
         }
 
         async fn check_file_integrity(
             &self,
-            type_: crate::UpdateFileType,
+            type_: cda_interfaces::runtime_update_api::UpdateFileType,
             _path: &std::path::Path,
-        ) -> Result<(), crate::VerificationError> {
+        ) -> Result<(), cda_interfaces::runtime_update_api::VerificationError> {
             if matches!(
                 (&type_, &self.reject_type),
-                (crate::UpdateFileType::Mdd, crate::UpdateFileType::Mdd)
-                    | (crate::UpdateFileType::Config, crate::UpdateFileType::Config)
+                (
+                    cda_interfaces::runtime_update_api::UpdateFileType::Mdd,
+                    cda_interfaces::runtime_update_api::UpdateFileType::Mdd,
+                ) | (
+                    cda_interfaces::runtime_update_api::UpdateFileType::Config,
+                    cda_interfaces::runtime_update_api::UpdateFileType::Config,
+                )
             ) {
-                return Err(crate::VerificationError("rejected".to_string()));
+                return Err(cda_interfaces::runtime_update_api::VerificationError(
+                    "rejected".to_string(),
+                ));
             }
             Ok(())
         }
@@ -581,9 +590,9 @@ mod tests {
 
     async fn upload_rejecting<S: cda_interfaces::storage_api::Storage + 'static>(
         storage: &S,
-        files: Vec<crate::UploadFile>,
-        reject_type: crate::UpdateFileType,
-    ) -> Result<crate::BulkDataCreatedList, RuntimeUpdateError> {
+        files: Vec<cda_interfaces::runtime_update_api::UploadFile>,
+        reject_type: cda_interfaces::runtime_update_api::UpdateFileType,
+    ) -> Result<BulkDataCreatedList, RuntimeUpdateError> {
         upload_files::<S, RejectingSecurityHandler, MockLockProvider>(
             storage,
             &RejectingSecurityHandler { reject_type },
@@ -598,29 +607,32 @@ mod tests {
 
     #[async_trait::async_trait]
     impl<
-        L: crate::LockStateProvider,
+        L: cda_interfaces::runtime_update_api::LockStateProvider,
         C: cda_interfaces::storage_api::Collection
             + cda_interfaces::storage_api::DirectFileAccess
             + Send
             + Sync
             + 'static,
-    > crate::RuntimeFilesUpdateSecurityHandler<L, C> for RejectingByNameSecurityHandler
+    > cda_interfaces::runtime_update_api::RuntimeFilesUpdateSecurityHandler<L, C>
+        for RejectingByNameSecurityHandler
     {
         async fn check_apply_allowed(
             &self,
             _lock_state_provider: &L,
-            _collections: &crate::UpdateCollections<C>,
-        ) -> Result<(), crate::RuntimeUpdateError> {
+            _collections: &cda_interfaces::runtime_update_api::UpdateCollections<C>,
+        ) -> Result<(), cda_interfaces::runtime_update_api::RuntimeUpdateError> {
             Ok(())
         }
 
         async fn check_file_integrity(
             &self,
-            _type_: crate::UpdateFileType,
+            _type_: cda_interfaces::runtime_update_api::UpdateFileType,
             path: &std::path::Path,
-        ) -> Result<(), crate::VerificationError> {
+        ) -> Result<(), cda_interfaces::runtime_update_api::VerificationError> {
             if path.file_name().and_then(|n| n.to_str()) == Some(self.reject_filename) {
-                return Err(crate::VerificationError("rejected by name".to_string()));
+                return Err(cda_interfaces::runtime_update_api::VerificationError(
+                    "rejected by name".to_string(),
+                ));
             }
             Ok(())
         }
@@ -628,9 +640,9 @@ mod tests {
 
     async fn upload_rejecting_by_name<S: cda_interfaces::storage_api::Storage + 'static>(
         storage: &S,
-        files: Vec<crate::UploadFile>,
+        files: Vec<cda_interfaces::runtime_update_api::UploadFile>,
         reject_filename: &'static str,
-    ) -> Result<crate::BulkDataCreatedList, RuntimeUpdateError> {
+    ) -> Result<BulkDataCreatedList, RuntimeUpdateError> {
         upload_files::<S, RejectingByNameSecurityHandler, MockLockProvider>(
             storage,
             &RejectingByNameSecurityHandler { reject_filename },
@@ -643,7 +655,7 @@ mod tests {
         storage: &impl Storage,
         source: &CollectionName,
         dest: &CollectionName,
-    ) -> Result<(), crate::RuntimeUpdateError> {
+    ) -> Result<(), RuntimeUpdateError> {
         let mut tx = storage.begin_transaction()?;
         storage.copy_collection(&mut tx, source, dest).await?;
         tx.commit().await?;
@@ -1238,7 +1250,7 @@ mod tests {
 
         let result = super::delete_nextupdate_file(&storage, "ecu1.mdd").await;
         assert!(
-            matches!(result, Err(crate::RuntimeUpdateError::FileNotFound(_))),
+            matches!(result, Err(RuntimeUpdateError::FileNotFound(_))),
             "NextUpdate not initialized = FileNotFound, not init-from-current"
         );
     }
@@ -1252,10 +1264,7 @@ mod tests {
             .unwrap();
 
         let result = super::delete_nextupdate_file(&storage, "ghost.mdd").await;
-        assert!(matches!(
-            result,
-            Err(crate::RuntimeUpdateError::FileNotFound(_))
-        ));
+        assert!(matches!(result, Err(RuntimeUpdateError::FileNotFound(_))));
     }
 
     #[tokio::test]
@@ -1282,7 +1291,7 @@ mod tests {
         let result = super::delete_nextupdate_file(&storage, "file.txt").await;
         assert!(matches!(
             result,
-            Err(crate::RuntimeUpdateError::InvalidFileType(_))
+            Err(RuntimeUpdateError::InvalidFileType(_))
         ));
     }
 
@@ -1598,9 +1607,13 @@ mod tests {
         let mdd = make_valid_mdd("TestECU");
         let files = make_upload_files(&[("test.mdd", &mdd)]);
 
-        let err = upload_rejecting(&storage, files, crate::UpdateFileType::Mdd)
-            .await
-            .unwrap_err();
+        let err = upload_rejecting(
+            &storage,
+            files,
+            cda_interfaces::runtime_update_api::UpdateFileType::Mdd,
+        )
+        .await
+        .unwrap_err();
 
         assert!(
             matches!(err, RuntimeUpdateError::ValidationFailed(_)),
@@ -1615,7 +1628,12 @@ mod tests {
         let mdd = make_valid_mdd("TestECU");
         let files = make_upload_files(&[("test.mdd", &mdd)]);
 
-        let _ = upload_rejecting(&storage, files, crate::UpdateFileType::Mdd).await;
+        let _ = upload_rejecting(
+            &storage,
+            files,
+            cda_interfaces::runtime_update_api::UpdateFileType::Mdd,
+        )
+        .await;
 
         let col = storage
             .get_or_create_collection(&CollectionName::DiagnosticDatabaseNextUpdate)
@@ -1638,7 +1656,7 @@ mod tests {
         let _ = upload_rejecting(
             &storage,
             make_upload_files(&[("ecu2.mdd", &mdd2)]),
-            crate::UpdateFileType::Mdd,
+            cda_interfaces::runtime_update_api::UpdateFileType::Mdd,
         )
         .await;
 
@@ -1656,7 +1674,12 @@ mod tests {
         let mdd = make_valid_mdd("TestECU");
         let files = make_upload_files(&[("test.mdd", &mdd)]);
 
-        let result = upload_rejecting(&storage, files, crate::UpdateFileType::Mdd).await;
+        let result = upload_rejecting(
+            &storage,
+            files,
+            cda_interfaces::runtime_update_api::UpdateFileType::Mdd,
+        )
+        .await;
 
         assert!(result.is_err());
     }
@@ -1667,9 +1690,13 @@ mod tests {
         let config = make_valid_config();
         let files = make_upload_files(&[("opensovd-cda.toml", &config)]);
 
-        let upload_err = upload_rejecting(&storage, files, crate::UpdateFileType::Config)
-            .await
-            .unwrap_err();
+        let upload_err = upload_rejecting(
+            &storage,
+            files,
+            cda_interfaces::runtime_update_api::UpdateFileType::Config,
+        )
+        .await
+        .unwrap_err();
         let col = storage
             .get_or_create_collection(&CollectionName::ConfigurationNextUpdate)
             .await

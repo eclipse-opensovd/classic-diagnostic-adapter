@@ -27,9 +27,7 @@ pub mod generate;
 #[must_use]
 pub fn resolve_config_file_path(explicit: Option<&str>) -> String {
     let cda_name = std::option_env!("CDA_NAME").unwrap_or("opensovd-cda");
-    explicit
-        .unwrap_or(&format!("{cda_name}.toml"))
-        .to_owned()
+    explicit.unwrap_or(&format!("{cda_name}.toml")).to_owned()
 }
 
 /// Loads the configuration, merged with defaults and `CDA`-prefixed env vars.
@@ -118,15 +116,14 @@ pub async fn seed_storage_from_config_file(storage_dir: &str, config_file_path: 
         std::iter::once((key.clone(), data)),
     )
     .await
+        && count > 0
     {
-        if count > 0 {
-            tracing::info!(
-                key,
-                config_file_path,
-                storage_dir,
-                "Seeded Configuration collection from config file"
-            );
-        }
+        tracing::info!(
+            key,
+            config_file_path,
+            storage_dir,
+            "Seeded Configuration collection from config file"
+        );
     }
 }
 
@@ -205,7 +202,7 @@ pub async fn load_config_with_storage_override(
 
 #[cfg(test)]
 mod tests {
-    use cda_interfaces::storage_api::{Collection as _, CollectionName, Storage};
+    use cda_interfaces::storage_api::{Collection as _, CollectionName, RandomAccessData, Storage};
     use cda_storage::LocalStorage;
 
     use super::seed_storage_from_config_file;
@@ -310,8 +307,11 @@ mod tests {
             .unwrap();
         let data_handle = collection.read("opensovd-cda.toml").await.unwrap();
         let size = data_handle.data_size().unwrap();
-        let mut buf = vec![0u8; size as usize];
+        let mut buf = vec![0u8; usize::try_from(size).expect("size fits in usize")];
         data_handle.read_at(0, &mut buf).unwrap();
-        assert_eq!(buf, original_data, "Storage must preserve config content byte-for-byte");
+        assert_eq!(
+            buf, original_data,
+            "Storage must preserve config content byte-for-byte"
+        );
     }
 }

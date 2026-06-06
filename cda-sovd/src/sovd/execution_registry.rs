@@ -68,7 +68,7 @@ impl EcuExecutionRegistry {
     }
 }
 
-impl cda_plugin_runtime_update::ActiveOperationsGuard for EcuExecutionRegistry {
+impl cda_interfaces::runtime_update_api::ActiveOperationsGuard for EcuExecutionRegistry {
     fn has_active_operations(&self) -> bool {
         let Ok(inner) = self.inner.try_read() else {
             tracing::error!("EcuExecutionRegistry lock contended in has_active_operations");

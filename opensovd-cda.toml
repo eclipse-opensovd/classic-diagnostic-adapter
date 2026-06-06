@@ -633,6 +633,10 @@
 
 # Configuration for update plugin, i.e. storage paths
 [runtime_update_config]
+# When `true` and the `Configuration` storage collection is empty,
+# seed it from the configuration file loaded from disk on first startup.
+# Default: `false`.
+# init_storage_from_config_file = false
 # When `true` and the `DiagnosticDatabase` storage collection is empty,
 # seed it from `database.path` on first startup by copying all `.mdd` files.
 # Default: `false`.

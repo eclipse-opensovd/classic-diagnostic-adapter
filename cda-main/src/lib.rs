@@ -43,7 +43,6 @@ pub mod config;
 pub mod mdd;
 pub(crate) mod storage_seed;
 pub mod update;
-pub(crate) mod storage_seed;
 
 #[global_allocator]
 static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;

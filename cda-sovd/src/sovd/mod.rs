@@ -34,8 +34,8 @@ use cda_interfaces::{
     datatypes::ComponentsConfig,
     diagservices::{DiagServiceResponse, FieldParseError, UdsPayloadData},
     file_manager::FileManager,
+    runtime_update_api::LockStateProvider,
 };
-use cda_plugin_runtime_update::LockStateProvider;
 use cda_plugin_security::{SecurityPluginLoader, security_plugin_middleware};
 use error::{ApiError, api_error_from_diag_response};
 use http::{Uri, header};

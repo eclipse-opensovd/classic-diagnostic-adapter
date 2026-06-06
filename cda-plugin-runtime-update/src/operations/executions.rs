@@ -15,14 +15,13 @@ use std::sync::{
 
 use cda_interfaces::{
     HashMap,
+    runtime_update_api::{
+        ExecutionMode, ExecutionStatus, LockStateProvider, RuntimeFileReloadHandler,
+        RuntimeFilesUpdateSecurityHandler, RuntimeUpdateError, UpdateCollections, UpdateExecution,
+    },
     storage_api::{CollectionName, Storage},
 };
 use tokio::sync::RwLock;
-
-use crate::{
-    ExecutionMode, ExecutionStatus, LockStateProvider, RuntimeFileReloadHandler,
-    RuntimeFilesUpdateSecurityHandler, RuntimeUpdateError, UpdateCollections, UpdateExecution,
-};
 
 pub(crate) struct ExecutionParams<'a, S, R, T, L> {
     pub(crate) storage: &'a Arc<S>,
@@ -178,15 +177,16 @@ where
 mod tests {
     use std::sync::{Arc, atomic::AtomicBool};
 
-    use cda_interfaces::{HashMap, storage_api::CollectionName};
+    use cda_interfaces::{
+        HashMap,
+        runtime_update_api::{ExecutionMode, ExecutionStatus, RuntimeUpdateError, UpdateExecution},
+        storage_api::CollectionName,
+    };
     use cda_storage::LocalStorage;
     use tokio::sync::RwLock;
 
-    use crate::{
-        ExecutionMode, ExecutionStatus, RuntimeUpdateError, UpdateExecution,
-        test_utils::{
-            MockLockProvider, MockSecurityHandler, NoopReloadHandler, make_storage, write_test_file,
-        },
+    use crate::test_utils::{
+        MockLockProvider, MockSecurityHandler, NoopReloadHandler, make_storage, write_test_file,
     };
 
     struct TestFixture {

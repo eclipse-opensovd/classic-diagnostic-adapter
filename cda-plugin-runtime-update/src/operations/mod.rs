@@ -10,11 +10,12 @@
 
 use std::sync::Arc;
 
-use cda_interfaces::storage_api::{
-    Collection, CollectionName, DirectFileAccess, Storage, StorageError, Transaction,
+use cda_interfaces::{
+    runtime_update_api::{RuntimeFileReloadHandler, RuntimeUpdateError},
+    storage_api::{
+        Collection, CollectionName, DirectFileAccess, Storage, StorageError, Transaction,
+    },
 };
-
-use crate::{RuntimeFileReloadHandler, RuntimeUpdateError};
 
 pub mod apply;
 pub mod cleanup;
