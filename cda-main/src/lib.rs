@@ -887,7 +887,7 @@ pub async fn create_diagnostic_gateway<S: SecurityPlugin>(
     databases: Arc<DatabaseMap<S>>,
     doip_config: &DoipConfig,
     variant_detection: mpsc::Sender<Vec<String>>,
-    shutdown_signal: impl Future<Output = ()> + Send + Clone + 'static,
+    shutdown_signal: impl Future<Output = ()> + Send + 'static,
     health: Option<&cda_health::HealthState>,
 ) -> Result<DoipDiagGateway<EcuManager<S>>, DoipGatewaySetupError> {
     let doip_health_provider = if let Some(health_state) = health {
