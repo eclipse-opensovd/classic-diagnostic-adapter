@@ -29,6 +29,11 @@ pub struct RuntimeUpdateConfig {
     /// Default: `false`.
     #[serde(default)]
     pub init_storage_from_database_path: bool,
+    /// When `true` and the `Configuration` storage collection is empty,
+    /// seed it from the configuration file loaded from disk on first startup.
+    /// Default: `false`.
+    #[serde(default)]
+    pub init_storage_from_config_file: bool,
 }
 
 fn default_retry_after_seconds() -> u64 {
@@ -42,6 +47,7 @@ impl Default for RuntimeUpdateConfig {
             storage_dir: ".".to_owned(),
             retry_after_seconds: default_retry_after_seconds(),
             init_storage_from_database_path: false,
+            init_storage_from_config_file: false,
         }
     }
 }

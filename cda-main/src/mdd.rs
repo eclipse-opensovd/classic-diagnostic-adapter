@@ -303,37 +303,6 @@ async fn load_mdd_paths_from_storage(storage_dir: &str) -> Option<Vec<PathBuf>> 
 /// is empty. This copies all `.mdd` files from the filesystem into storage so that the runtime
 /// update plugin has a populated baseline to work with.
 pub async fn seed_storage_from_database_path(storage_dir: &str, database_path: &str) {
-    let storage = match cda_storage::LocalStorage::new(storage_dir) {
-        Ok(s) => s,
-        Err(e) => {
-            tracing::warn!(error = %e, "Storage not available, skipping seed");
-            return;
-        }
-    };
-
-    let collection = match storage
-        .get_or_create_collection(&CollectionName::DiagnosticDatabase)
-        .await
-    {
-        Ok(c) => c,
-        Err(e) => {
-            tracing::warn!(error = %e, "Cannot access DiagnosticDatabase collection, skipping seed");
-            return;
-        }
-    };
-
-    match collection.is_empty().await {
-        Ok(true) => {}
-        Ok(false) => {
-            tracing::debug!("DiagnosticDatabase collection already populated, skipping seed");
-            return;
-        }
-        Err(e) => {
-            tracing::warn!(error = %e, "Failed to check collection, skipping seed");
-            return;
-        }
-    }
-
     let mdd_files = match std::fs::read_dir(database_path) {
         Ok(entries) => get_mdd_files_and_size(entries),
         Err(e) => {
@@ -347,50 +316,38 @@ pub async fn seed_storage_from_database_path(storage_dir: &str, database_path: &
         return;
     }
 
-    let mut tx = match storage.begin_transaction() {
-        Ok(tx) => tx,
-        Err(e) => {
-            tracing::warn!(error = %e, "Cannot begin transaction for seeding");
-            return;
-        }
-    };
-
-    let mut count = 0usize;
-    for (path, _) in &mdd_files {
+    let entries = mdd_files.into_iter().filter_map(|(path, _)| {
         let key = path
             .file_name()
             .and_then(|n| n.to_str())
             .map(str::to_lowercase)
             .unwrap_or_default();
         if key.is_empty() {
-            continue;
+            return None;
         }
-        let data = match std::fs::read(path) {
-            Ok(d) => d,
+        match std::fs::read(&path) {
+            Ok(data) => Some((key, data)),
             Err(e) => {
                 tracing::warn!(path = %path.display(), error = %e, "Failed to read MDD file for seeding, skipping");
-                continue;
+                None
             }
-        };
-        let mut cursor = std::io::Cursor::new(data);
-        if let Err(e) = collection.write(&mut tx, &key, &mut cursor).await {
-            tracing::warn!(key = %key, error = %e, "Failed to write MDD to storage, skipping");
-            continue;
         }
-        count = count.saturating_add(1);
-    }
+    });
 
-    if let Err(e) = tx.commit().await {
-        tracing::error!(error = %e, "Failed to commit seed transaction");
-        return;
-    }
-
-    tracing::info!(
-        count,
-        database_path,
+    if let Some(count) = crate::storage_seed::seed_storage_collection(
         storage_dir,
-        "Seeded DiagnosticDatabase collection from database path"
-    );
+        &CollectionName::DiagnosticDatabase,
+        entries,
+    )
+    .await
+    {
+        tracing::info!(
+            count,
+            database_path,
+            storage_dir,
+            "Seeded DiagnosticDatabase collection from database path"
+        );
+    }
 }
 
 pub(crate) fn handle_ecu_config_keys<S: SecurityPlugin>(
