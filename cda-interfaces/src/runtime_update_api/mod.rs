@@ -174,7 +174,6 @@ pub trait RuntimeFilesUpdateSecurityHandler<
 }
 
 /// Status of an in-progress or completed database update execution.
-#[allow(dead_code)]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ExecutionStatus {
     Running,
@@ -295,7 +294,6 @@ pub struct UpdateExecution {
 ///
 /// Security validation for mutating operations is delegated to the associated
 /// [`RuntimeFilesUpdateSecurityHandler`].
-#[allow(clippy::ptr_arg)]
 #[async_trait]
 pub trait RuntimeFilesUpdatePlugin: Send + Sync + 'static {
     /// Lists the currently active diagnostic runtime files.

@@ -106,8 +106,7 @@ pub(crate) mod test_utils {
         buf.extend_from_slice(b"MDD version 0      \0");
         buf.extend_from_slice(&[0x0A, 0x01, 0x31]);
         buf.push(0x1A);
-        #[allow(clippy::cast_possible_truncation)]
-        buf.push(ecu_name.len() as u8);
+        buf.push(u8::try_from(ecu_name.len()).expect("ecu_name must be <= 255 bytes"));
         buf.extend_from_slice(ecu_name.as_bytes());
         buf
     }
@@ -117,8 +116,7 @@ pub(crate) mod test_utils {
         let mut buf = make_valid_mdd(ecu_name);
         // Proto field 4, wire type 2 (length-delimited) -> tag byte 0x22
         buf.push(0x22);
-        #[allow(clippy::cast_possible_truncation)]
-        buf.push(revision.len() as u8);
+        buf.push(u8::try_from(revision.len()).expect("revision must be <= 255 bytes"));
         buf.extend_from_slice(revision.as_bytes());
         buf
     }

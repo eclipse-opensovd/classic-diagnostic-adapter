@@ -30,7 +30,10 @@ use crate::{
     },
 };
 
-pub(crate) const NON_OWNER_BEARER_TOKEN: &str = "eyJ0eXAiOiJKV1QiLCJhbGciOiJIUzI1NiJ9.eyJzdWIiOiJvd25lcnNoaXAtdGVzdCIsImV4cCI6MjAwMDAwMDAwMH0.\
+// must be skipped due to conflicting formatter rules between nightly and stable
+#[rustfmt::skip]
+pub(crate) const NON_OWNER_BEARER_TOKEN: &str =
+    "eyJ0eXAiOiJKV1QiLCJhbGciOiJIUzI1NiJ9.eyJzdWIiOiJvd25lcnNoaXAtdGVzdCIsImV4cCI6MjAwMDAwMDAwMH0.\
      _qb-vSkPnV_Lff2wNH4VXugc-DcvGdzJxwTmb4J48Xs";
 
 pub(crate) fn bearer_token_header(token: &str) -> HeaderMap {

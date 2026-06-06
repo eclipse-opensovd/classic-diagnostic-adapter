@@ -10,12 +10,6 @@
  * https://www.apache.org/licenses/LICENSE-2.0
  */
 
-#![allow(
-    clippy::duration_suboptimal_units,
-    clippy::indexing_slicing,
-    clippy::unwrap_used
-)]
-
 use std::time::Duration;
 
 use cda_interfaces::{HashMap, HashMapExtensions};
@@ -132,7 +126,6 @@ async fn runtimefiles_requires_lock() -> Result<(), TestingError> {
 }
 
 #[tokio::test]
-#[allow(clippy::too_many_lines)]
 async fn runtimefiles_lifecycle() -> Result<(), TestingError> {
     // Acquire an exclusive vehicle lock (spec: all modifying actions require one).
     let (runtime, _lock) = setup_integration_test(true).await?;
@@ -155,128 +148,30 @@ async fn runtimefiles_lifecycle() -> Result<(), TestingError> {
         .len();
 
     // POST a .mdd file via multipart form data (spec: "Adds files to the next update").
-    let mdd_bytes = std::fs::read(
-        test_container_dir()
-            .expect("testcontainer dir")
-            .join("odx/FLXC1000.mdd"),
-    )
-    .expect("MDD fixture not found");
-    let auth_value = auth
-        .get(reqwest::header::AUTHORIZATION)
-        .expect("Authorization header missing")
-        .clone();
-    let client = reqwest::Client::new();
-    let form = reqwest::multipart::Form::new().part(
-        "files",
-        reqwest::multipart::Part::bytes(mdd_bytes).file_name("FLXC1000.mdd"),
-    );
-    let upload_url = format!(
-        "http://{}:{}/vehicle/v15/{RUNTIMEFILES_NEXTUPDATE}",
-        runtime.config.server.address, runtime.config.server.port
-    );
-    let upload_response = client
-        .post(&upload_url)
-        .header(reqwest::header::AUTHORIZATION, auth_value)
-        .multipart(form)
-        .send()
-        .await
-        .expect("upload request failed");
+    let upload_response = upload_mdd(&runtime.config, &auth).await;
     assert_eq!(
         upload_response.status(),
         StatusCode::CREATED,
-        "Expected 200 for MDD upload"
+        "Expected 201 for MDD upload"
     );
 
     // GET nextupdate must show the uploaded file (case-insensitive match per spec).
-    let nextupdate_items = get_file_list(&runtime.config, &auth, RUNTIMEFILES_NEXTUPDATE)
-        .await?
-        .items;
-    assert!(
-        !nextupdate_items.is_empty(),
-        "Expected at least one item in nextupdate after upload"
-    );
-    assert!(
-        nextupdate_items
-            .iter()
-            .any(|item| item.id.to_lowercase().contains("flxc1000")),
-        "Expected FLXC1000.mdd in nextupdate items"
-    );
+    assert_nextupdate_contains_flxc1000(&runtime.config, &auth).await?;
 
-    // Trigger "Apply" mode - the pending update becomes the active database.
+    // Trigger "Apply" - pending update becomes active database.
     execute_mode(&runtime.config, &auth, ExecutionMode::Apply).await?;
     cda_interfaces::util::tokio_ext::sleep_for(Duration::from_secs(3)).await;
+    assert_state_after_apply(&runtime.config, &auth).await?;
 
-    // Spec: "new database must be active immediately", "old state must be available
-    // as backup", "state of nextupdate must be reset after applying".
-    let post_apply_current = get_file_list(&runtime.config, &auth, RUNTIMEFILES_CURRENT)
-        .await?
-        .items;
-    assert!(
-        !post_apply_current.is_empty(),
-        "Expected non-empty current after apply"
-    );
-
-    let post_apply_nextupdate = get_file_list(&runtime.config, &auth, RUNTIMEFILES_NEXTUPDATE)
-        .await?
-        .items;
-    assert!(
-        post_apply_nextupdate.is_empty(),
-        "Expected empty nextupdate after apply"
-    );
-
-    let post_apply_backup = get_file_list(&runtime.config, &auth, RUNTIMEFILES_BACKUP)
-        .await?
-        .items;
-    assert!(
-        !post_apply_backup.is_empty(),
-        "Expected non-empty backup after apply (original db backed up)"
-    );
-
-    // Trigger "Rollback" mode - restore previous database from backup.
+    // Trigger "Rollback" - restore previous database from backup.
     execute_mode(&runtime.config, &auth, ExecutionMode::Rollback).await?;
     cda_interfaces::util::tokio_ext::sleep_for(Duration::from_secs(3)).await;
+    assert_state_after_rollback(&runtime.config, &auth, initial_count).await?;
 
-    // Spec: current must match the state before apply (initial_count).
-    let post_rollback_current = get_file_list(&runtime.config, &auth, RUNTIMEFILES_CURRENT)
-        .await?
-        .items;
-    assert_eq!(
-        post_rollback_current.len(),
-        initial_count,
-        "Expected item count to match initial count after rollback"
-    );
-
-    let post_rollback_nextupdate = get_file_list(&runtime.config, &auth, RUNTIMEFILES_NEXTUPDATE)
-        .await?
-        .items;
-    assert!(
-        post_rollback_nextupdate.is_empty(),
-        "Expected empty nextupdate after rollback (spec: state of nextupdate must be reset)"
-    );
-
-    get_file_list(&runtime.config, &auth, RUNTIMEFILES_BACKUP).await?;
-
-    // Trigger "Cleanup" mode - spec: "reset all pending updates, as well as
-    // deleting the backup".
+    // Trigger "Cleanup" - spec: "reset all pending updates, as well as deleting the backup".
     execute_mode(&runtime.config, &auth, ExecutionMode::Cleanup).await?;
     cda_interfaces::util::tokio_ext::sleep_for(Duration::from_secs(1)).await;
-
-    // Backup must be empty after cleanup.
-    let post_cleanup_backup = get_file_list(&runtime.config, &auth, RUNTIMEFILES_BACKUP)
-        .await?
-        .items;
-    assert!(
-        post_cleanup_backup.is_empty(),
-        "Expected empty backup after cleanup"
-    );
-
-    let post_cleanup_nextupdate = get_file_list(&runtime.config, &auth, RUNTIMEFILES_NEXTUPDATE)
-        .await?
-        .items;
-    assert!(
-        post_cleanup_nextupdate.is_empty(),
-        "Expected empty nextupdate after cleanup (spec: reset all pending updates)"
-    );
+    assert_state_after_cleanup(&runtime.config, &auth).await?;
 
     // Release the vehicle lock.
     lock_operation(
@@ -1118,6 +1013,177 @@ async fn execute_mode(
     response_to_t::<OperationIdItem>(&response)
 }
 
+/// Helper: asserts the uploaded FLXC1000.mdd is visible in nextupdate (case-insensitive).
+async fn assert_nextupdate_contains_flxc1000(
+    config: &Configuration,
+    auth: &http::HeaderMap,
+) -> Result<(), TestingError> {
+    let items = get_file_list(config, auth, RUNTIMEFILES_NEXTUPDATE)
+        .await?
+        .items;
+    assert!(
+        !items.is_empty(),
+        "Expected at least one item in nextupdate after upload"
+    );
+    assert!(
+        items
+            .iter()
+            .any(|item| item.id.to_lowercase().contains("flxc1000")),
+        "Expected FLXC1000.mdd in nextupdate items"
+    );
+    Ok(())
+}
+
+/// Helper: verifies the post-Apply invariants:
+/// current non-empty, nextupdate empty, backup non-empty.
+async fn assert_state_after_apply(
+    config: &Configuration,
+    auth: &http::HeaderMap,
+) -> Result<(), TestingError> {
+    let current = get_file_list(config, auth, RUNTIMEFILES_CURRENT)
+        .await?
+        .items;
+    assert!(
+        !current.is_empty(),
+        "Expected non-empty current after apply"
+    );
+
+    let nextupdate = get_file_list(config, auth, RUNTIMEFILES_NEXTUPDATE)
+        .await?
+        .items;
+    assert!(
+        nextupdate.is_empty(),
+        "Expected empty nextupdate after apply"
+    );
+
+    let backup = get_file_list(config, auth, RUNTIMEFILES_BACKUP)
+        .await?
+        .items;
+    assert!(
+        !backup.is_empty(),
+        "Expected non-empty backup after apply (original db backed up)"
+    );
+
+    Ok(())
+}
+
+/// Helper: verifies the post-Rollback invariants:
+/// current count matches `expected_count`, nextupdate empty.
+async fn assert_state_after_rollback(
+    config: &Configuration,
+    auth: &http::HeaderMap,
+    expected_count: usize,
+) -> Result<(), TestingError> {
+    let current = get_file_list(config, auth, RUNTIMEFILES_CURRENT)
+        .await?
+        .items;
+    assert_eq!(
+        current.len(),
+        expected_count,
+        "Expected item count to match initial count after rollback"
+    );
+
+    let nextupdate = get_file_list(config, auth, RUNTIMEFILES_NEXTUPDATE)
+        .await?
+        .items;
+    assert!(
+        nextupdate.is_empty(),
+        "Expected empty nextupdate after rollback (spec: state of nextupdate must be reset)"
+    );
+
+    get_file_list(config, auth, RUNTIMEFILES_BACKUP).await?;
+
+    Ok(())
+}
+
+/// Helper: verifies the post-Cleanup invariants:
+/// backup empty, nextupdate empty.
+async fn assert_state_after_cleanup(
+    config: &Configuration,
+    auth: &http::HeaderMap,
+) -> Result<(), TestingError> {
+    let backup = get_file_list(config, auth, RUNTIMEFILES_BACKUP)
+        .await?
+        .items;
+    assert!(backup.is_empty(), "Expected empty backup after cleanup");
+
+    let nextupdate = get_file_list(config, auth, RUNTIMEFILES_NEXTUPDATE)
+        .await?
+        .items;
+    assert!(
+        nextupdate.is_empty(),
+        "Expected empty nextupdate after cleanup (spec: reset all pending updates)"
+    );
+
+    Ok(())
+}
+
+/// Helper: finds the FLXC1000 entry id in nextupdate, failing the test if absent.
+async fn find_flxc1000_id_in_nextupdate(
+    config: &Configuration,
+    auth: &http::HeaderMap,
+) -> Result<String, TestingError> {
+    let items = get_file_list(config, auth, RUNTIMEFILES_NEXTUPDATE)
+        .await?
+        .items;
+    let id = items
+        .iter()
+        .find(|item| item.id.to_lowercase().contains("flxc1000"))
+        .expect("Expected flxc1000.mdd in nextupdate after staging init")
+        .id
+        .clone();
+    Ok(id)
+}
+
+/// Helper: verifies ECU route state after Apply (FLXC1000 gone, FSNR2000 present, health ok).
+async fn assert_ecu_routes_after_apply(
+    config: &Configuration,
+    auth: &http::HeaderMap,
+) -> Result<(), TestingError> {
+    // FLXC1000 was removed from staging -> its route no longer exists.
+    send_cda_request(
+        config,
+        ECU_FLXC1000_ENDPOINT,
+        StatusCode::NOT_FOUND,
+        Method::GET,
+        None,
+        Some(auth),
+        None,
+    )
+    .await?;
+
+    // FSNR2000 was in staging, so its route must survive the rebuild.
+    send_cda_request(
+        config,
+        ECU_FSNR2000_ENDPOINT,
+        StatusCode::OK,
+        Method::GET,
+        None,
+        Some(auth),
+        None,
+    )
+    .await?;
+
+    // The health route lives in a separate group and must not be affected
+    // by replace_routes on the vehicle route handle.
+    let health_url = format!(
+        "http://{}:{}/health/ready",
+        config.server.address, config.server.port
+    );
+    let health_response = reqwest::Client::new()
+        .get(&health_url)
+        .send()
+        .await
+        .expect("health request failed");
+    assert_eq!(
+        health_response.status(),
+        StatusCode::NO_CONTENT,
+        "Expected 204 from /health/ready after Apply"
+    );
+
+    Ok(())
+}
+
 /// Spec: DELETE on /runtimefiles-nextupdate removes all pending changes - nextupdate
 /// returns empty because there are no pending files.
 #[tokio::test]
@@ -1304,7 +1370,10 @@ async fn runtimefiles_case_insensitive_filenames() -> Result<(), TestingError> {
     );
 
     // Verify deletion also works case-insensitively
-    let file_id = &matching_items[0].id;
+    let file_id = &matching_items
+        .first()
+        .expect("Expected at least one FLXC1000 item")
+        .id;
     let opposite_case_id = if file_id.chars().any(char::is_uppercase) {
         file_id.to_lowercase()
     } else {
@@ -1523,7 +1592,6 @@ async fn runtimefiles_only_lock_holder_can_mutate() -> Result<(), TestingError> 
 ///
 /// Workflow: upload FSNR2000 to trigger staging init from the seeded current collection,
 /// then explicitly delete flxc1000.mdd from nextupdate, then Apply.
-#[allow(clippy::too_many_lines)]
 #[tokio::test]
 async fn runtimefiles_apply_removes_ecu_routes() -> Result<(), TestingError> {
     // Acquire an exclusive integration-test lock so no other test interferes.
@@ -1551,21 +1619,11 @@ async fn runtimefiles_apply_removes_ecu_routes() -> Result<(), TestingError> {
     assert_eq!(
         upload_response.status(),
         StatusCode::CREATED,
-        "Expected 200 for FSNR2000.mdd upload"
+        "Expected 201 for FSNR2000.mdd upload"
     );
 
-    // Verify FLXC1000 is in nextupdate (copied from current during init).
-    let nextupdate_items = get_file_list(&runtime.config, &auth, RUNTIMEFILES_NEXTUPDATE)
-        .await?
-        .items;
-    let flxc1000_entry = nextupdate_items
-        .iter()
-        .find(|item| item.id.to_lowercase().contains("flxc1000"));
-    assert!(
-        flxc1000_entry.is_some(),
-        "Expected flxc1000.mdd in nextupdate after staging init"
-    );
-    let flxc1000_id = flxc1000_entry.unwrap().id.clone();
+    // Verify FLXC1000 is in nextupdate (copied from current during init) and delete it.
+    let flxc1000_id = find_flxc1000_id_in_nextupdate(&runtime.config, &auth).await?;
 
     // Explicitly delete FLXC1000 from nextupdate - staging now lacks FLXC1000.
     send_cda_request(
@@ -1580,56 +1638,14 @@ async fn runtimefiles_apply_removes_ecu_routes() -> Result<(), TestingError> {
     .await?;
 
     // Trigger Apply - the CDA replaces its entire DB with staging (without FLXC1000).
-    execute_mode(&runtime.config, &auth, ExecutionMode::Apply).await?;
-
     // The reload_databases path shuts down the old UDS/gateway and rebuilds routes;
     // 5 s is sufficient for the integration-test environment.
+    execute_mode(&runtime.config, &auth, ExecutionMode::Apply).await?;
     cda_interfaces::util::tokio_ext::sleep_for(Duration::from_secs(5)).await;
-
-    // FLXC1000 was removed from staging -> its route no longer exists.
-    send_cda_request(
-        &runtime.config,
-        ECU_FLXC1000_ENDPOINT,
-        StatusCode::NOT_FOUND,
-        Method::GET,
-        None,
-        Some(&auth),
-        None,
-    )
-    .await?;
-
-    // FSNR2000 was in staging, so its route must survive the rebuild.
-    send_cda_request(
-        &runtime.config,
-        ECU_FSNR2000_ENDPOINT,
-        StatusCode::OK,
-        Method::GET,
-        None,
-        Some(&auth),
-        None,
-    )
-    .await?;
-
-    // The health route lives in a separate group and must not be affected
-    // by replace_routes on the vehicle route handle.
-    let health_url = format!(
-        "http://{}:{}/health/ready",
-        runtime.config.server.address, runtime.config.server.port
-    );
-    let health_response = reqwest::Client::new()
-        .get(&health_url)
-        .send()
-        .await
-        .expect("health request failed");
-    assert_eq!(
-        health_response.status(),
-        StatusCode::NO_CONTENT,
-        "Expected 204 from /health/ready after Apply"
-    );
+    assert_ecu_routes_after_apply(&runtime.config, &auth).await?;
 
     // Apply created a backup of the original database; Rollback restores it.
     execute_mode(&runtime.config, &auth, ExecutionMode::Rollback).await?;
-
     cda_interfaces::util::tokio_ext::sleep_for(Duration::from_secs(5)).await;
 
     // Rollback restores the original database -> FLXC1000 is back.

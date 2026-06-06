@@ -114,14 +114,15 @@ pub async fn execute_apply<S: Storage, R: RuntimeFileReloadHandler>(
 }
 
 #[cfg(test)]
-#[allow(clippy::items_after_statements, clippy::cast_possible_truncation)]
 mod tests {
     use std::sync::{Arc, Mutex};
 
     use async_trait::async_trait;
     use cda_interfaces::{
         runtime_update_api::RuntimeUpdateError,
-        storage_api::{Collection as _, CollectionName, Storage as _, StorageError},
+        storage_api::{
+            Collection as _, CollectionName, RandomAccessData as _, Storage as _, StorageError,
+        },
     };
 
     use super::execute_apply;
@@ -182,9 +183,8 @@ mod tests {
             .get_or_create_collection(&CollectionName::DiagnosticDatabase)
             .await
             .unwrap();
-        use cda_interfaces::storage_api::RandomAccessData as _;
         let handle = db_col.read("ecu1.mdd").await.unwrap();
-        let size = handle.data_size().unwrap() as usize;
+        let size = usize::try_from(handle.data_size().unwrap()).expect("size fits usize");
         let mut buf = vec![0u8; size];
         handle.read_at(0, &mut buf).unwrap();
         assert_eq!(&buf, b"new_data");
@@ -195,7 +195,7 @@ mod tests {
             .await
             .unwrap();
         let handle = backup_col.read("ecu1.mdd").await.unwrap();
-        let size = handle.data_size().unwrap() as usize;
+        let size = usize::try_from(handle.data_size().unwrap()).expect("size fits usize");
         let mut buf = vec![0u8; size];
         handle.read_at(0, &mut buf).unwrap();
         assert_eq!(&buf, b"old_data");
@@ -253,9 +253,8 @@ mod tests {
         let keys = db_col.list().await.unwrap();
         assert_eq!(keys.len(), 3);
 
-        use cda_interfaces::storage_api::RandomAccessData as _;
         let handle = db_col.read("ecu3.mdd").await.unwrap();
-        let size = handle.data_size().unwrap() as usize;
+        let size = usize::try_from(handle.data_size().unwrap()).expect("size fits usize");
         let mut buf = vec![0u8; size];
         handle.read_at(0, &mut buf).unwrap();
         assert_eq!(&buf, b"new3");
@@ -358,9 +357,8 @@ mod tests {
             .get_or_create_collection(&CollectionName::Configuration)
             .await
             .unwrap();
-        use cda_interfaces::storage_api::RandomAccessData as _;
         let handle = config_col.read("config.toml").await.unwrap();
-        let size = handle.data_size().unwrap() as usize;
+        let size = usize::try_from(handle.data_size().unwrap()).expect("size fits usize");
         let mut buf = vec![0u8; size];
         handle.read_at(0, &mut buf).unwrap();
         assert_eq!(&buf, b"[new_config]");
@@ -371,7 +369,7 @@ mod tests {
             .await
             .unwrap();
         let handle = backup_col.read("config.toml").await.unwrap();
-        let size = handle.data_size().unwrap() as usize;
+        let size = usize::try_from(handle.data_size().unwrap()).expect("size fits usize");
         let mut buf = vec![0u8; size];
         handle.read_at(0, &mut buf).unwrap();
         assert_eq!(&buf, b"[old_config]");
@@ -411,9 +409,8 @@ mod tests {
                 .get_or_create_collection(&CollectionName::Configuration)
                 .await
                 .unwrap();
-            use cda_interfaces::storage_api::RandomAccessData as _;
             let handle = config_col.read("config.toml").await.unwrap();
-            let size = handle.data_size().unwrap() as usize;
+            let size = usize::try_from(handle.data_size().unwrap()).expect("size fits usize");
             let mut buf = vec![0u8; size];
             handle.read_at(0, &mut buf).unwrap();
             assert_eq!(&buf, b"[original]");
@@ -552,9 +549,8 @@ mod tests {
             .get_or_create_collection(&CollectionName::Configuration)
             .await
             .unwrap();
-        use cda_interfaces::storage_api::RandomAccessData as _;
         let handle = config_col.read("config.toml").await.unwrap();
-        let size = handle.data_size().unwrap() as usize;
+        let size = usize::try_from(handle.data_size().unwrap()).expect("size fits usize");
         let mut buf = vec![0u8; size];
         handle.read_at(0, &mut buf).unwrap();
         assert_eq!(&buf, b"[new_config]");
@@ -563,7 +559,6 @@ mod tests {
         let result = storage
             .get_collection(&CollectionName::ConfigurationNextUpdate)
             .await;
-        use cda_interfaces::storage_api::StorageError;
         assert!(matches!(result, Err(StorageError::CollectionNotFound(_))));
 
         // DiagnosticDatabase should be untouched (not even created)
@@ -617,7 +612,6 @@ mod tests {
         .await;
 
         // Create DiagnosticDatabaseNextUpdate as initialized-but-empty (no files)
-        use cda_interfaces::storage_api::Storage as _;
         storage
             .get_or_create_collection(&CollectionName::DiagnosticDatabaseNextUpdate)
             .await
@@ -682,9 +676,8 @@ mod tests {
         let keys = db_col.list().await.unwrap();
         assert_eq!(keys, vec!["ecu1.mdd"]);
 
-        use cda_interfaces::storage_api::RandomAccessData as _;
         let handle = db_col.read("ecu1.mdd").await.unwrap();
-        let size = handle.data_size().unwrap() as usize;
+        let size = usize::try_from(handle.data_size().unwrap()).expect("size fits usize");
         let mut buf = vec![0u8; size];
         handle.read_at(0, &mut buf).unwrap();
         assert_eq!(&buf, b"data1_updated");

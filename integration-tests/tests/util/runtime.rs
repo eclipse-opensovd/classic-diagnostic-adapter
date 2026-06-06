@@ -726,7 +726,6 @@ async fn wait_for_http_ready_with_timeout(
 async fn wait_for_ecu_sim_ready(host: &str, sim_control_port: u16) -> Result<(), TestingError> {
     let url = format!("http://{host}:{sim_control_port}");
     // Allow extra time for Gradle to download its distribution on a cold cache.
-    #[allow(clippy::duration_suboptimal_units)] // from_mins not stable on rust 1.88
     let timeout = if use_docker() {
         Duration::from_secs(10)
     } else {

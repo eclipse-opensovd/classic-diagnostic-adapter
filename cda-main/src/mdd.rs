@@ -146,30 +146,20 @@ pub async fn load_databases<S: SecurityPlugin>(
     let mut file_managers_map: HashMap<String, FileManager> = HashMap::new();
 
     for path in mdd_paths {
-        let (ecu_name, ecu_manager, file_manager) = match load_single_mdd::<S>(
-            path,
-            config.flat_buf.mdd_decompress,
-            &config.flat_buf,
-            &config.database,
-            &protocol,
-            &config.com_params,
-            &config.database.naming_convention,
-            &config.functional_description,
-            config.database.fallback_to_base_variant,
-            &ecu_config_map,
-        ) {
-            Ok(result) => result,
-            Err(e) if config.database.ignore_invalid_mdd => {
-                tracing::warn!(path = %path.display(), error = %e, "Skipping invalid MDD file");
-                continue;
-            }
-            Err(e) => {
-                if let Some(provider) = db_health_provider {
-                    provider.update_status(cda_health::Status::Failed).await;
+        let (ecu_name, ecu_manager, file_manager) =
+            match load_single_mdd::<S>(path, config, &ecu_config_map, &protocol) {
+                Ok(result) => result,
+                Err(e) if config.database.ignore_invalid_mdd => {
+                    tracing::warn!(path = %path.display(), error = %e, "Skipping invalid MDD file");
+                    continue;
                 }
-                return Err(AppError::DataError(e.to_string()));
-            }
-        };
+                Err(e) => {
+                    if let Some(provider) = db_health_provider {
+                        provider.update_status(cda_health::Status::Failed).await;
+                    }
+                    return Err(AppError::DataError(e.to_string()));
+                }
+            };
 
         let mdd_path = path.to_str().unwrap_or_default().to_owned();
         insert_or_update_ecu(
@@ -288,15 +278,18 @@ async fn load_mdd_paths_from_storage(storage_dir: &str) -> Option<Vec<PathBuf>> 
         }
     };
 
-    Some(keys.iter()
-        .filter_map(|k| match collection.file_path(k) {
-            Ok(p) => Some(p),
-            Err(e) => {
-                tracing::warn!(key = %k, error = %e, "Failed to resolve MDD path in storage, skipping");
-                None
-            }
-        })
-        .collect())
+    Some(
+        keys.iter()
+            .filter_map(|k| match collection.file_path(k) {
+                Ok(p) => Some(p),
+                Err(e) => {
+                    tracing::warn!(key = %k, error = %e,
+                    "Failed to resolve MDD path in storage, skipping");
+                    None
+                }
+            })
+            .collect(),
+    )
 }
 
 /// Seeds the `DiagnosticDatabase` storage collection from `database_path` when the collection
@@ -328,7 +321,8 @@ pub async fn seed_storage_from_database_path(storage_dir: &str, database_path: &
         match std::fs::read(&path) {
             Ok(data) => Some((key, data)),
             Err(e) => {
-                tracing::warn!(path = %path.display(), error = %e, "Failed to read MDD file for seeding, skipping");
+                tracing::warn!(path = %path.display(),
+                    error = %e, "Failed to read MDD file for seeding, skipping");
                 None
             }
         }
@@ -545,19 +539,11 @@ fn load_ecu_from_file<S: SecurityPlugin>(
 /// # Errors
 ///
 /// Returns [`MddLoadingError`] if decompression or loading fails.
-// allowed because the only alternative is a struct with the same fields
-#[allow(clippy::too_many_arguments)]
 fn load_single_mdd<S: SecurityPlugin>(
     path: &Path,
-    mdd_decompress: bool,
-    flat_buf_settings: &FlatbBufConfig,
-    database_config: &cda_database::DatabaseConfig,
-    protocol: &Protocol,
-    com_params: &ComParams,
-    database_naming_convention: &DatabaseNamingConvention,
-    func_description_cfg: &FunctionalDescriptionConfig,
-    fallback_to_base_variant: bool,
+    config: &Configuration,
     ecu_config_map: &HashMap<String, EcuConfig>,
+    protocol: &Protocol,
 ) -> Result<(String, EcuManager<S>, FileManager), MddLoadingError> {
     let mdd_path =
         path.to_str()
@@ -569,7 +555,9 @@ fn load_single_mdd<S: SecurityPlugin>(
 
     // Ensure the MDD file contains uncompressed data (rewrite on first
     // use), so that subsequent loads skip LZMA decompression.
-    if mdd_decompress && let Err(e) = update_mdd_uncompressed(&mdd_path) {
+    if config.flat_buf.mdd_decompress
+        && let Err(e) = update_mdd_uncompressed(&mdd_path)
+    {
         return Err(MddLoadingError::DecompressFailed {
             path: mdd_path,
             reason: e.to_string(),
@@ -583,21 +571,21 @@ fn load_single_mdd<S: SecurityPlugin>(
         })?;
 
     let mddfile = PathBuf::from(path);
-    let com_params = Arc::new(com_params.clone());
+    let com_params = Arc::new(config.com_params.clone());
     let ecu_config_map = Arc::new(ecu_config_map.clone());
 
     let ctx = EcuLoadContext {
         mdd_path: mdd_path.clone(),
         mddfile: &mddfile,
         ecu_name: ecu_name.clone(),
-        flat_buf_settings,
-        database_config,
+        flat_buf_settings: &config.flat_buf,
+        database_config: &config.database,
         ecu_config_map: &ecu_config_map,
-        database_naming_convention: database_naming_convention.clone(),
-        func_description_cfg,
+        database_naming_convention: config.database.naming_convention.clone(),
+        func_description_cfg: &config.functional_description,
         protocol,
         com_params: &com_params,
-        fallback_to_base_variant,
+        fallback_to_base_variant: config.database.fallback_to_base_variant,
     };
 
     let per_ecu_cfg = ecu_config_map.get(&ecu_name.to_lowercase());

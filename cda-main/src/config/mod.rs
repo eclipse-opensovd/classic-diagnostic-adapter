@@ -72,6 +72,8 @@ pub fn load_config_with_fallback(config_path: Option<&str>) -> (configfile::Conf
 /// Returns [`AppError`](crate::AppError) when no configuration source is found
 /// (only when the `config-optional` feature is disabled).
 #[cfg(feature = "config-optional")]
+// The `Result` return type is required so both cfg variants share the same signature;
+// this variant never actually fails, which is what clippy flags.
 #[allow(clippy::unnecessary_wraps)]
 pub fn require_config_source() -> Result<(), crate::AppError> {
     println!("No configuration found on disk or in storage. Using default values.");

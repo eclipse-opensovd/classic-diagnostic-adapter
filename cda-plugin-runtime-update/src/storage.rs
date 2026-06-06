@@ -511,7 +511,6 @@ async fn get_collection_items(
 }
 
 #[cfg(test)]
-#[allow(clippy::items_after_statements, clippy::cast_possible_truncation)]
 mod tests {
     use std::sync::Mutex;
 
@@ -685,8 +684,7 @@ mod tests {
             self.reads.lock().unwrap().push(buf.len());
 
             // test-only: data fits in memory
-            #[allow(clippy::cast_possible_truncation)]
-            let start = offset as usize;
+            let start = usize::try_from(offset).expect("offset fits usize");
             if start >= self.data.len() {
                 return Ok(0);
             }
