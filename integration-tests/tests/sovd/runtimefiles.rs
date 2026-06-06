@@ -29,9 +29,12 @@ use sovd_interfaces::{
 
 use crate::{
     sovd,
-    sovd::locks::{
-        self, NON_OWNER_BEARER_TOKEN, bearer_token_header, create_lock, default_timeout,
-        lock_operation,
+    sovd::{
+        ECU_FLXC1000_ENDPOINT, ECU_FSNR2000_ENDPOINT,
+        locks::{
+            self, NON_OWNER_BEARER_TOKEN, bearer_token_header, create_lock, default_timeout,
+            lock_operation,
+        },
     },
     util::{
         TestingError,
@@ -199,7 +202,7 @@ async fn runtimefiles_lifecycle() -> Result<(), TestingError> {
         "Expected FLXC1000.mdd in nextupdate items"
     );
 
-    // Trigger "Apply" mode — the pending update becomes the active database.
+    // Trigger "Apply" mode - the pending update becomes the active database.
     execute_mode(&runtime.config, &auth, ExecutionMode::Apply).await?;
     cda_interfaces::util::tokio_ext::sleep_for(Duration::from_secs(3)).await;
 
@@ -229,7 +232,7 @@ async fn runtimefiles_lifecycle() -> Result<(), TestingError> {
         "Expected non-empty backup after apply (original db backed up)"
     );
 
-    // Trigger "Rollback" mode — restore previous database from backup.
+    // Trigger "Rollback" mode - restore previous database from backup.
     execute_mode(&runtime.config, &auth, ExecutionMode::Rollback).await?;
     cda_interfaces::util::tokio_ext::sleep_for(Duration::from_secs(3)).await;
 
@@ -253,7 +256,7 @@ async fn runtimefiles_lifecycle() -> Result<(), TestingError> {
 
     get_file_list(&runtime.config, &auth, RUNTIMEFILES_BACKUP).await?;
 
-    // Trigger "Cleanup" mode — spec: "reset all pending updates, as well as
+    // Trigger "Cleanup" mode - spec: "reset all pending updates, as well as
     // deleting the backup".
     execute_mode(&runtime.config, &auth, ExecutionMode::Cleanup).await?;
     cda_interfaces::util::tokio_ext::sleep_for(Duration::from_secs(1)).await;
@@ -441,7 +444,7 @@ async fn runtimefiles_file_retrieval_not_allowed() -> Result<(), TestingError> {
     Ok(())
 }
 
-/// Spec: "Deletes the file from the pending update" — file must exist to be deleted.
+/// Spec: "Deletes the file from the pending update" - file must exist to be deleted.
 #[tokio::test]
 async fn runtimefiles_delete_nonexistent_file_returns_not_found() -> Result<(), TestingError> {
     let (runtime, _lock) = setup_integration_test(true).await?;
@@ -733,7 +736,7 @@ async fn runtimefiles_apply_with_no_pending_changes() -> Result<(), TestingError
     let lock_id = setup_with_lock(&runtime.config, &auth).await;
 
     // Reset nextupdate to current state (spec: DELETE removes all pending changes,
-    // resetting nextupdate to the currently active database — not to empty).
+    // resetting nextupdate to the currently active database - not to empty).
     send_cda_request(
         &runtime.config,
         RUNTIMEFILES_NEXTUPDATE,
@@ -745,7 +748,7 @@ async fn runtimefiles_apply_with_no_pending_changes() -> Result<(), TestingError
     )
     .await?;
 
-    // Attempt Apply with no pending changes (nextupdate == current) — must NOT return 202
+    // Attempt Apply with no pending changes (nextupdate == current) - must NOT return 202
     let body = mode_json(ExecutionMode::Apply);
     let apply_response = send_cda_request(
         &runtime.config,
@@ -758,7 +761,7 @@ async fn runtimefiles_apply_with_no_pending_changes() -> Result<(), TestingError
     )
     .await;
     if apply_response.is_err() {
-        // If the server returns something other than 404, that's a finding — log it but don't fail
+        // If the server returns something other than 404, that's a finding - log it but don't fail
         // The primary assertion is that it must NOT be 202
     }
 
@@ -803,7 +806,7 @@ async fn runtimefiles_rollback_with_no_backup() -> Result<(), TestingError> {
         "Precondition: backup must be empty before Rollback"
     );
 
-    // Attempt Rollback with empty backup — expect 404
+    // Attempt Rollback with empty backup - expect 404
     let body = mode_json(ExecutionMode::Rollback);
     send_cda_request(
         &runtime.config,
@@ -846,7 +849,7 @@ async fn runtimefiles_rollback_clears_nextupdate_with_new_pending() -> Result<()
         upload_response2.status()
     );
 
-    // Step 3: Rollback — should revert current and clear nextupdate
+    // Step 3: Rollback - should revert current and clear nextupdate
     execute_mode(&runtime.config, &auth, ExecutionMode::Rollback).await?;
     cda_interfaces::util::tokio_ext::sleep_for(Duration::from_secs(3)).await;
 
@@ -901,7 +904,7 @@ async fn runtimefiles_apply_blocked_by_active_operations() -> Result<(), Testing
     .await;
     let fg_lock_id = response_to_t::<LockResponse>(&fg_lock_response)?.id;
 
-    // Attempt Apply while functional group lock is held — expect 409 Conflict
+    // Attempt Apply while functional group lock is held - expect 409 Conflict
     let body = mode_json(ExecutionMode::Apply);
     send_cda_request(
         &runtime.config,
@@ -1115,7 +1118,7 @@ async fn execute_mode(
     response_to_t::<OperationIdItem>(&response)
 }
 
-/// Spec: DELETE on /runtimefiles-nextupdate removes all pending changes — nextupdate
+/// Spec: DELETE on /runtimefiles-nextupdate removes all pending changes - nextupdate
 /// returns empty because there are no pending files.
 #[tokio::test]
 async fn runtimefiles_delete_nextupdate_clears_pending() -> Result<(), TestingError> {
@@ -1281,7 +1284,7 @@ async fn runtimefiles_case_insensitive_filenames() -> Result<(), TestingError> {
     let upload_response = upload_mdd_with_filename(&runtime.config, &auth, "FLXC1000.MDD").await;
     assert_eq!(upload_response.status(), StatusCode::CREATED);
 
-    // Upload again with lowercase — should overwrite, not duplicate
+    // Upload again with lowercase - should overwrite, not duplicate
     let upload_response2 = upload_mdd_with_filename(&runtime.config, &auth, "flxc1000.mdd").await;
     assert_eq!(upload_response2.status(), StatusCode::CREATED);
 
@@ -1542,7 +1545,7 @@ async fn runtimefiles_apply_removes_ecu_routes() -> Result<(), TestingError> {
     // All mutating runtimefiles endpoints require a vehicle lock.
     let lock_id = setup_with_lock(&runtime.config, &auth).await;
 
-    // Upload FSNR2000.mdd → triggers init_collection_from_copy_if_missing, copying all
+    // Upload FSNR2000.mdd -> triggers init_collection_from_copy_if_missing, copying all
     // current MDDs into nextupdate, then adds FSNR2000 on top.
     let upload_response = upload_mdd_by_name(&runtime.config, &auth, "FSNR2000.mdd").await;
     assert_eq!(
@@ -1564,7 +1567,7 @@ async fn runtimefiles_apply_removes_ecu_routes() -> Result<(), TestingError> {
     );
     let flxc1000_id = flxc1000_entry.unwrap().id.clone();
 
-    // Explicitly delete FLXC1000 from nextupdate — staging now lacks FLXC1000.
+    // Explicitly delete FLXC1000 from nextupdate - staging now lacks FLXC1000.
     send_cda_request(
         &runtime.config,
         &format!("{RUNTIMEFILES_NEXTUPDATE}/{flxc1000_id}"),
@@ -1576,17 +1579,17 @@ async fn runtimefiles_apply_removes_ecu_routes() -> Result<(), TestingError> {
     )
     .await?;
 
-    // Trigger Apply — the CDA replaces its entire DB with staging (without FLXC1000).
+    // Trigger Apply - the CDA replaces its entire DB with staging (without FLXC1000).
     execute_mode(&runtime.config, &auth, ExecutionMode::Apply).await?;
 
     // The reload_databases path shuts down the old UDS/gateway and rebuilds routes;
     // 5 s is sufficient for the integration-test environment.
     cda_interfaces::util::tokio_ext::sleep_for(Duration::from_secs(5)).await;
 
-    // FLXC1000 was removed from staging → its route no longer exists.
+    // FLXC1000 was removed from staging -> its route no longer exists.
     send_cda_request(
         &runtime.config,
-        "components/flxc1000",
+        ECU_FLXC1000_ENDPOINT,
         StatusCode::NOT_FOUND,
         Method::GET,
         None,
@@ -1598,7 +1601,7 @@ async fn runtimefiles_apply_removes_ecu_routes() -> Result<(), TestingError> {
     // FSNR2000 was in staging, so its route must survive the rebuild.
     send_cda_request(
         &runtime.config,
-        "components/fsnr2000",
+        ECU_FSNR2000_ENDPOINT,
         StatusCode::OK,
         Method::GET,
         None,
@@ -1629,10 +1632,10 @@ async fn runtimefiles_apply_removes_ecu_routes() -> Result<(), TestingError> {
 
     cda_interfaces::util::tokio_ext::sleep_for(Duration::from_secs(5)).await;
 
-    // Rollback restores the original database → FLXC1000 is back.
+    // Rollback restores the original database -> FLXC1000 is back.
     send_cda_request(
         &runtime.config,
-        "components/flxc1000",
+        ECU_FLXC1000_ENDPOINT,
         StatusCode::OK,
         Method::GET,
         None,
@@ -1688,7 +1691,7 @@ async fn runtimefiles_apply_blocked_by_vehicle_and_ecu_lock() -> Result<(), Test
     let ecu_lock_id = response_to_t::<LockResponse>(&ecu_lock_response)?.id;
 
     // The caller owns both locks, but the ECU lock still prevents a live
-    // database swap — expect 409 Conflict.
+    // database swap - expect 409 Conflict.
     let body = mode_json(ExecutionMode::Apply);
     send_cda_request(
         &runtime.config,

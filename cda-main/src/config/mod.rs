@@ -86,16 +86,16 @@ pub fn require_config_source() -> Result<(), crate::AppError> {
 
 /// Attempts to load configuration from the storage Configuration collection.
 ///
-/// Scans the collection for configuration files. The filename is not prescribed — any
+/// Scans the collection for configuration files. The filename is not prescribed - any
 /// single entry in the collection is accepted.
 ///
 /// # Errors
-/// - `Err(AppError::ConfigurationError)` — more than one entry exists (ambiguous) or
+/// - `Err(AppError::ConfigurationError)` - more than one entry exists (ambiguous) or
 ///   reading/parsing the stored configuration failed.
 ///
 /// # Returns
-/// - `Ok(None)` — storage is unavailable or the collection is empty (no override).
-/// - `Ok(Some(config))` — exactly one configuration was found and parsed successfully.
+/// - `Ok(None)` - storage is unavailable or the collection is empty (no override).
+/// - `Ok(Some(config))` - exactly one configuration was found and parsed successfully.
 pub async fn load_config_with_storage_override(
     storage_path: &str,
 ) -> Result<Option<configfile::Configuration>, AppError> {

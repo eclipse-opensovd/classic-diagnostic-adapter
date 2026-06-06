@@ -49,7 +49,7 @@ pub(crate) async fn init_collection_from_copy_if_missing(
     }
     match storage.copy_collection(tx, source, destination).await {
         Ok(()) | Err(StorageError::CollectionNotFound(_)) => {
-            // Fresh system: no current collection to init from — skip.
+            // Fresh system: no current collection to init from - skip.
         }
         Err(e) => return Err(e.into()),
     }
@@ -275,14 +275,14 @@ pub(crate) async fn delete_all_backup(storage: &impl Storage) -> Result<(), Runt
 ///
 /// For each collection pair (MDD and Configuration), the logic is:
 /// - If the `NextUpdate` collection **exists** (even if empty), its contents represent the target
-///   state for that category — an empty `NextUpdate` means "delete all" for that category.
+///   state for that category - an empty `NextUpdate` means "delete all" for that category.
 /// - If the `NextUpdate` collection **does not exist** (`CollectionNotFound`), an empty list is
-///   returned for that category — no update is pending.
+///   returned for that category - no update is pending.
 ///
-/// MDD and Configuration are handled **independently** — one may be initialized while the other
+/// MDD and Configuration are handled **independently** - one may be initialized while the other
 /// returns empty.
 ///
-/// This is a **read-only** operation — no writes or transactions are performed.
+/// This is a **read-only** operation - no writes or transactions are performed.
 ///
 /// # Errors
 ///
@@ -1061,7 +1061,7 @@ mod tests {
         };
         let result = compute_nextupdate_state(&storage, &query).await.unwrap();
 
-        // NextUpdate exists → only NextUpdate content is shown (snapshot model)
+        // NextUpdate exists -> only NextUpdate content is shown (snapshot model)
         assert_eq!(result.items.len(), 1);
         let alpha = result.items.iter().find(|i| i.id == "alpha.mdd").unwrap();
         assert_eq!(alpha.size, Some(9));
@@ -1086,7 +1086,7 @@ mod tests {
         let query = RuntimeFilesQuery::default();
         let result = compute_nextupdate_state(&storage, &query).await.unwrap();
 
-        // NextUpdate exists → only NextUpdate content is shown (snapshot model)
+        // NextUpdate exists -> only NextUpdate content is shown (snapshot model)
         assert_eq!(result.items.len(), 1);
         let Some(item) = result.items.first() else {
             panic!("expected item")
@@ -1314,7 +1314,7 @@ mod tests {
 
         super::delete_all_nextupdate(&storage).await.unwrap();
 
-        // After delete_all_nextupdate, collections are gone → no pending changes = empty
+        // After delete_all_nextupdate, collections are gone -> no pending changes = empty
         let query = RuntimeFilesQuery::default();
         let result = compute_nextupdate_state(&storage, &query).await.unwrap();
         assert!(

@@ -42,6 +42,7 @@ mod version_endpoint;
 
 pub(crate) const ECU_FLXC1000_ENDPOINT: &str = "components/flxc1000";
 pub(crate) const ECU_FLXCNG1000_ENDPOINT: &str = "components/flxcng1000";
+pub(crate) const ECU_FSNR2000_ENDPOINT: &str = "components/fsnr2000";
 pub(crate) const ECU_TMCC3000_ENDPOINT: &str = "components/tmcc3000";
 pub(crate) const ECU_HOVR4000_ENDPOINT: &str = "components/hovr4000";
 pub(crate) const ECU_JGWT5000_ENDPOINT: &str = "components/jgwt5000";

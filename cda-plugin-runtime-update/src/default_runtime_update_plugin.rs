@@ -273,7 +273,7 @@ mod tests {
         };
         let result = plugin.list_nextupdate(&query).await.unwrap();
 
-        assert_eq!(result.items.len(), 2, "{}", format!("{:#?}", result.items));
+        assert_eq!(result.items.len(), 2, "{:#?}", result.items);
         let existing = result
             .items
             .iter()

@@ -444,7 +444,7 @@ pub(crate) mod test_utils {
     /// Like `make_valid_mdd` but also encodes a `revision` field (proto tag 4).
     pub fn make_valid_mdd_with_revision(ecu_name: &str, revision: &str) -> Vec<u8> {
         let mut buf = make_valid_mdd(ecu_name);
-        // Proto field 4, wire type 2 (length-delimited) → tag byte 0x22
+        // Proto field 4, wire type 2 (length-delimited) -> tag byte 0x22
         buf.push(0x22);
         #[allow(clippy::cast_possible_truncation)]
         buf.push(revision.len() as u8);
@@ -689,7 +689,7 @@ mod tests {
             tokio::spawn(async move { p2.list_current(&<RuntimeFilesQuery>::default()).await });
 
         // Both tasks will reach the barrier and wait, proving they run concurrently.
-        // Once both hit the barrier they proceed to notified() — at that point
+        // Once both hit the barrier they proceed to notified() - at that point
         // concurrent_reads must be 2.
         tokio::task::yield_now().await;
         // Allow a few yields for tasks to reach the barrier
@@ -737,7 +737,7 @@ mod tests {
         write_notify.notify_waiters();
         t1.await.unwrap().unwrap();
 
-        // Now the second write can proceed — release it too
+        // Now the second write can proceed - release it too
         write_notify.notify_waiters();
         t2.await.unwrap().unwrap();
     }
@@ -771,7 +771,7 @@ mod tests {
         }
         assert_eq!(concurrent_writes.load(Ordering::SeqCst), 1);
 
-        // Start a read — it should be blocked by the write lock
+        // Start a read - it should be blocked by the write lock
         let p2 = Arc::clone(&plugin);
         let t2 =
             tokio::spawn(async move { p2.list_current(&<RuntimeFilesQuery>::default()).await });

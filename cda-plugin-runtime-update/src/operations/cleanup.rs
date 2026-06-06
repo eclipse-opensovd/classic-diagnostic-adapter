@@ -17,12 +17,12 @@ use crate::RuntimeUpdateError;
 ///
 /// Deletes the `NextUpdate` collections entirely and clears all entries from the backup collections
 /// in a single transaction:
-/// - [`CollectionName::DiagnosticDatabaseNextUpdate`] — deleted (collection removed)
-/// - [`CollectionName::DiagnosticDatabaseBackup`] — cleared
-/// - [`CollectionName::ConfigurationNextUpdate`] — deleted (collection removed)
-/// - [`CollectionName::ConfigurationBackup`] — cleared
+/// - [`CollectionName::DiagnosticDatabaseNextUpdate`] - deleted (collection removed)
+/// - [`CollectionName::DiagnosticDatabaseBackup`] - cleared
+/// - [`CollectionName::ConfigurationNextUpdate`] - deleted (collection removed)
+/// - [`CollectionName::ConfigurationBackup`] - cleared
 ///
-/// This operation is idempotent — calling it when collections are already absent or empty succeeds.
+/// This operation is idempotent - calling it when collections are already absent or empty succeeds.
 /// The current database ([`CollectionName::DiagnosticDatabase`]) and active configuration
 /// ([`CollectionName::Configuration`]) are never touched.
 /// # Errors

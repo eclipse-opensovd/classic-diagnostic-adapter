@@ -1,6 +1,6 @@
 /*
  * SPDX-License-Identifier: Apache-2.0
- * SPDX-FileCopyrightText: 2025 The Contributors to Eclipse OpenSOVD (see CONTRIBUTORS)
+ * SPDX-FileCopyrightText: 2026 The Contributors to Eclipse OpenSOVD (see CONTRIBUTORS)
  *
  * See the NOTICE file(s) distributed with this work for additional
  * information regarding copyright ownership.
@@ -934,7 +934,7 @@ mod tests {
         let storage_dir = tempfile::tempdir().expect("storage dir");
         let db_dir = create_database_dir(&[("ECU.mdd", b"DATA")]);
 
-        // Do NOT seed — storage remains empty.
+        // Do NOT seed - storage remains empty.
         let paths = resolve_mdd_paths(
             storage_dir.path().to_str().unwrap(),
             db_dir.path().to_str().unwrap(),
