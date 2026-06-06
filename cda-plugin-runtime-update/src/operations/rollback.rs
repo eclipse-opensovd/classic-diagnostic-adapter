@@ -49,6 +49,8 @@ pub async fn execute_rollback<S: Storage, R: RuntimeFileReloadHandler>(
     let mdd_backup_empty = mdd_backup_col.is_empty().await?;
     let config_backup_empty = config_backup_col.is_empty().await?;
 
+    // Guard also checked synchronously in `start_execution` before the task is spawned,
+    // so 404 is returned before 202 is sent. Kept here for correctness if called directly.
     if mdd_backup_empty && config_backup_empty {
         return Err(RuntimeUpdateError::NoBackup);
     }

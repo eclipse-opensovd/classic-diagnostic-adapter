@@ -89,6 +89,23 @@ where
         }
     }
 
+    // For Rollback: verify backup is non-empty before accepting the request.
+    // This must happen before spawning the task so that the 404 is returned
+    // synchronously instead of 202 being sent with a later Failed status.
+    if mode == ExecutionMode::Rollback {
+        match crate::storage::is_backup_empty(&**params.storage).await {
+            Ok(true) => {
+                params.update_in_progress.store(false, Ordering::Release);
+                return Err(RuntimeUpdateError::NoBackup);
+            }
+            Err(e) => {
+                params.update_in_progress.store(false, Ordering::Release);
+                return Err(e);
+            }
+            Ok(false) => {}
+        }
+    }
+
     let execution_id = uuid::Uuid::new_v4().to_string();
     {
         let mut execs = params.executions.write().await;
@@ -96,7 +113,7 @@ where
             execution_id.clone(),
             UpdateExecution {
                 id: execution_id.clone(),
-                mode: mode.clone(),
+                mode,
                 status: ExecutionStatus::Running,
             },
         );
@@ -106,7 +123,7 @@ where
     let reload_handler = Arc::clone(params.reload_handler);
     let executions = Arc::clone(params.executions);
     let exec_id_clone = execution_id.clone();
-    let mode_clone = mode.clone();
+    let mode_clone = mode;
     let update_in_progress = Arc::clone(params.update_in_progress);
     let mdd_decompress = params.mdd_decompress;
 

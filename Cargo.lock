@@ -504,7 +504,6 @@ dependencies = [
  "bytes",
  "cda-database",
  "cda-interfaces",
- "cda-plugin-security",
  "cda-storage",
  "schemars",
  "serde",

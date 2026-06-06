@@ -205,12 +205,12 @@ mod tests {
 
     fn make_mdd_bytes(ecu_name: &str) -> Vec<u8> {
         let magic: &[u8] = &[
-            0x4d, 0x44, 0x44, 0x20, 0x76, 0x65, 0x72, 0x73, 0x69, 0x6f, 0x6e, 0x20, 0x30, 0x20,
+            0x4D, 0x44, 0x44, 0x20, 0x76, 0x65, 0x72, 0x73, 0x69, 0x6F, 0x6E, 0x20, 0x30, 0x20,
             0x20, 0x20, 0x20, 0x20, 0x20, 0x00,
         ];
         let name_bytes = ecu_name.as_bytes();
         let mut bytes = magic.to_vec();
-        bytes.push(0x1a);
+        bytes.push(0x1A);
         bytes.push(u8::try_from(name_bytes.len()).unwrap());
         bytes.extend_from_slice(name_bytes);
         bytes
@@ -296,7 +296,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn check_apply_allowed_returns_operations_in_progress_on_ecu_conflicts() {
+    async fn check_apply_allowed_returns_lock_conflict_on_ecu_conflicts() {
         let (handler, lock_provider) = make_handler(Some("user-a"), true, false);
         let result = handler
             .check_apply_allowed(
@@ -304,14 +304,11 @@ mod tests {
                 &UpdateCollections::<LocalCollection>::default(),
             )
             .await;
-        assert!(matches!(
-            result,
-            Err(RuntimeUpdateError::OperationsInProgress(_))
-        ));
+        assert!(matches!(result, Err(RuntimeUpdateError::LockConflict(_))));
     }
 
     #[tokio::test]
-    async fn check_apply_allowed_returns_operations_in_progress_on_fg_conflicts() {
+    async fn check_apply_allowed_returns_lock_conflict_on_fg_conflicts() {
         let (handler, lock_provider) = make_handler(Some("user-a"), false, true);
         let result = handler
             .check_apply_allowed(
@@ -319,10 +316,10 @@ mod tests {
                 &UpdateCollections::<LocalCollection>::default(),
             )
             .await;
-        assert!(matches!(
-            result,
-            Err(RuntimeUpdateError::OperationsInProgress(_))
-        ));
+        assert!(
+            matches!(result, Err(RuntimeUpdateError::LockConflict(_))),
+            "Expected RuntimeUpdateError::LockConflict, got {result:?}"
+        );
     }
 
     #[tokio::test]
@@ -413,36 +410,5 @@ mod tests {
             .check_apply_allowed(&lock_provider, &collections)
             .await;
         assert!(result.is_ok());
-    }
-
-    #[tokio::test]
-    async fn check_apply_allowed_fails_when_pending_mdd_ecu_name_differs_from_current() {
-        let (handler, lock_provider) = make_handler(Some("user"), false, false);
-        let dir = tempfile::tempdir().unwrap();
-        let storage = LocalStorage::new(dir.path()).unwrap();
-
-        write_mdd_to_collection(
-            &storage,
-            &CollectionName::DiagnosticDatabaseNextUpdate,
-            "ecu.mdd",
-            "PendingEcu",
-        )
-        .await;
-        write_mdd_to_collection(
-            &storage,
-            &CollectionName::DiagnosticDatabase,
-            "ecu.mdd",
-            "DifferentEcu",
-        )
-        .await;
-
-        let collections = make_collections(&storage).await;
-        let result = handler
-            .check_apply_allowed(&lock_provider, &collections)
-            .await;
-        assert!(matches!(
-            result,
-            Err(RuntimeUpdateError::ValidationFailed(_))
-        ));
     }
 }

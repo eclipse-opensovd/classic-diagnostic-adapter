@@ -28,7 +28,6 @@ cda-database = { workspace = true }
 sovd-interfaces = { workspace = true }
 async-trait = { workspace = true }
 bytes = { workspace = true }
-cda-plugin-security = { workspace = true }
 serde_json = { workspace = true }
 serde = { workspace = true }
 sha2 = { workspace = true }
@@ -39,5 +38,6 @@ uuid = { workspace = true, features = ["v4"] }
 schemars = { workspace = true }
 
 [dev-dependencies]
+cda-database = { workspace = true, features = ["database-builder"] }
 cda-storage = { workspace = true }
 tempfile = { workspace = true }

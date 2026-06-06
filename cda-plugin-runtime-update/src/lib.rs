@@ -372,7 +372,7 @@ pub(crate) mod test_utils {
         collection_name: &CollectionName,
         key: &str,
         data: &mut impl ReadableStream,
-    ) -> Result<(), crate::RuntimeUpdateError> {
+    ) -> Result<(), RuntimeUpdateError> {
         let key = key.to_lowercase();
         let collection = storage.get_or_create_collection(collection_name).await?;
         collection.write(tx, &key, data).await?;
@@ -433,11 +433,22 @@ pub(crate) mod test_utils {
     pub fn make_valid_mdd(ecu_name: &str) -> Vec<u8> {
         let mut buf = Vec::new();
         buf.extend_from_slice(b"MDD version 0      \0");
-        buf.extend_from_slice(&[0x0a, 0x01, 0x31]);
-        buf.push(0x1a);
+        buf.extend_from_slice(&[0x0A, 0x01, 0x31]);
+        buf.push(0x1A);
         #[allow(clippy::cast_possible_truncation)]
         buf.push(ecu_name.len() as u8);
         buf.extend_from_slice(ecu_name.as_bytes());
+        buf
+    }
+
+    /// Like `make_valid_mdd` but also encodes a `revision` field (proto tag 4).
+    pub fn make_valid_mdd_with_revision(ecu_name: &str, revision: &str) -> Vec<u8> {
+        let mut buf = make_valid_mdd(ecu_name);
+        // Proto field 4, wire type 2 (length-delimited) → tag byte 0x22
+        buf.push(0x22);
+        #[allow(clippy::cast_possible_truncation)]
+        buf.push(revision.len() as u8);
+        buf.extend_from_slice(revision.as_bytes());
         buf
     }
 

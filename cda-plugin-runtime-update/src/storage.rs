@@ -85,7 +85,7 @@ pub(crate) fn compute_sha256(data: &impl RandomAccessData) -> Result<String, Run
 
 /// Lists all files in a collection, optionally enriching each item with size and hash metadata.
 pub(crate) async fn list_collection_files(
-    collection: &impl Collection,
+    collection: &(impl Collection + DirectFileAccess),
     query: &RuntimeFilesQuery,
 ) -> Result<BulkDataList, RuntimeUpdateError> {
     let keys = collection.list().await?;
@@ -125,6 +125,18 @@ pub(crate) async fn list_collection_files(
                     item.hash_algorithm = Some(HashAlgorithm::Sha256);
                 }
             }
+        }
+
+        if query.include_revision {
+            let path = collection.file_path(key)?;
+            let path_str = path.to_str().ok_or_else(|| {
+                RuntimeUpdateError::StorageError(StorageError::Other(format!(
+                    "file path for key '{key}' is not valid UTF-8"
+                )))
+            })?;
+            item.revision = cda_database::mmap_and_decode_mdd(path_str)
+                .ok()
+                .and_then(|mdd| mdd.revision);
         }
 
         items.push(item);
@@ -229,6 +241,19 @@ pub(crate) async fn delete_all_nextupdate(
 
     tx.commit().await?;
     Ok(())
+}
+
+/// Returns `true` if both backup collections (MDD and configuration) are empty or do not exist.
+///
+/// Used as a pre-condition check before starting a Rollback execution.
+pub(crate) async fn is_backup_empty(storage: &impl Storage) -> Result<bool, RuntimeUpdateError> {
+    let mdd_backup = storage
+        .get_or_create_collection(&CollectionName::DiagnosticDatabaseBackup)
+        .await?;
+    let cfg_backup = storage
+        .get_or_create_collection(&CollectionName::ConfigurationBackup)
+        .await?;
+    Ok(mdd_backup.is_empty().await? && cfg_backup.is_empty().await?)
 }
 
 pub(crate) async fn delete_all_backup(storage: &impl Storage) -> Result<(), RuntimeUpdateError> {
@@ -500,7 +525,7 @@ mod tests {
         HashAlgorithm, RuntimeFilesQuery, RuntimeUpdateError,
         test_utils::{
             MockLockProvider, MockSecurityHandler, make_storage, make_upload_files,
-            make_valid_config, make_valid_mdd, write_file,
+            make_valid_config, make_valid_mdd, make_valid_mdd_with_revision, write_file,
         },
     };
 
@@ -836,7 +861,8 @@ mod tests {
             .await
             .unwrap();
 
-        write_test_file_to_collection(&storage, &*collection, "full.mdd", b"full test data").await;
+        let mdd = make_valid_mdd_with_revision("FullECU", "v1.2.3");
+        write_test_file_to_collection(&storage, &*collection, "full.mdd", &mdd).await;
 
         let query = RuntimeFilesQuery {
             include_schema: false,
@@ -851,7 +877,49 @@ mod tests {
         assert_eq!(item.id, "full.mdd");
         assert!(item.hash.is_some());
         assert_eq!(item.hash_algorithm, Some(HashAlgorithm::Sha256));
-        assert_eq!(item.size, Some(14));
+        assert_eq!(item.size, Some(mdd.len() as u64));
+        assert_eq!(item.revision, Some("v1.2.3".to_owned()));
+    }
+
+    #[tokio::test]
+    async fn include_revision_returns_revision_for_mdd() {
+        let (storage, _dir) = make_storage();
+        let collection = storage
+            .get_or_create_collection(&CollectionName::DiagnosticDatabase)
+            .await
+            .unwrap();
+
+        let mdd = make_valid_mdd_with_revision("RevECU", "rev-42");
+        write_test_file_to_collection(&storage, &*collection, "rev.mdd", &mdd).await;
+
+        let query = RuntimeFilesQuery {
+            include_revision: true,
+            ..RuntimeFilesQuery::default()
+        };
+        let result = list_collection_files(&*collection, &query).await.unwrap();
+
+        let item = result.items.first().unwrap();
+        assert_eq!(item.revision, Some("rev-42".to_owned()));
+    }
+
+    #[tokio::test]
+    async fn include_revision_is_none_for_mdd_without_revision_field() {
+        let (storage, _dir) = make_storage();
+        let collection = storage
+            .get_or_create_collection(&CollectionName::DiagnosticDatabase)
+            .await
+            .unwrap();
+
+        let mdd = make_valid_mdd("NoRevECU");
+        write_test_file_to_collection(&storage, &*collection, "norev.mdd", &mdd).await;
+
+        let query = RuntimeFilesQuery {
+            include_revision: true,
+            ..RuntimeFilesQuery::default()
+        };
+        let result = list_collection_files(&*collection, &query).await.unwrap();
+
+        let item = result.items.first().unwrap();
         assert!(item.revision.is_none());
     }
 
@@ -1537,7 +1605,7 @@ mod tests {
         assert!(
             matches!(err, RuntimeUpdateError::ValidationFailed(_)),
             "{}",
-            format!("err={}", err)
+            format!("err={err}")
         );
     }
 
@@ -1610,7 +1678,7 @@ mod tests {
         assert!(
             keys.is_empty(),
             "{}",
-            format!("keys={:#?}, upload_err={:?}", keys, upload_err)
+            format!("keys={keys:#?}, upload_err={upload_err:?}")
         );
     }
 

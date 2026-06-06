@@ -195,25 +195,15 @@ pub(crate) mod current {
     use cda_plugin_runtime_update::{LockStateProvider, RuntimeFilesUpdatePlugin};
     use cda_plugin_security::Secured;
 
-    use super::{DbUpdateErrorResponse, RuntimeUpdateRouteState, require_vehicle_lock};
+    use super::{DbUpdateErrorResponse, RuntimeUpdateRouteState};
 
     pub(crate) async fn get<P: RuntimeFilesUpdatePlugin, L: LockStateProvider>(
         State(route_state): State<RuntimeUpdateRouteState<P, L>>,
-        Secured(sec_plugin): Secured,
+        Secured(_sec_plugin): Secured,
         Query(query): Query<
             sovd_interfaces::apps::sovd2uds::bulk_data::runtimefiles::RuntimeFilesQuery,
         >,
     ) -> Response {
-        let claims = sec_plugin.as_auth_plugin().claims();
-        if let Err(resp) = require_vehicle_lock(
-            &*route_state.vehicle_lock_states,
-            *claims,
-            route_state.retry_after_seconds,
-        )
-        .await
-        {
-            return resp;
-        }
         route_state.plugin.list_current(&query).await.map_or_else(
             |e| DbUpdateErrorResponse::new(e, route_state.retry_after_seconds).into_response(),
             |list| super::bulk_data_list_response(list, query.include_schema),
@@ -237,21 +227,11 @@ pub(crate) mod nextupdate {
 
     pub(crate) async fn get<P: RuntimeFilesUpdatePlugin, L: LockStateProvider>(
         State(route_state): State<RuntimeUpdateRouteState<P, L>>,
-        Secured(sec_plugin): Secured,
+        Secured(_sec_plugin): Secured,
         Query(query): Query<
             sovd_interfaces::apps::sovd2uds::bulk_data::runtimefiles::RuntimeFilesQuery,
         >,
     ) -> Response {
-        let claims = sec_plugin.as_auth_plugin().claims();
-        if let Err(resp) = require_vehicle_lock(
-            &*route_state.vehicle_lock_states,
-            *claims,
-            route_state.retry_after_seconds,
-        )
-        .await
-        {
-            return resp;
-        }
         route_state
             .plugin
             .list_nextupdate(&query)
@@ -376,21 +356,11 @@ pub(crate) mod backup {
 
     pub(crate) async fn get<P: RuntimeFilesUpdatePlugin, L: LockStateProvider>(
         State(route_state): State<RuntimeUpdateRouteState<P, L>>,
-        Secured(sec_plugin): Secured,
+        Secured(_sec_plugin): Secured,
         Query(query): Query<
             sovd_interfaces::apps::sovd2uds::bulk_data::runtimefiles::RuntimeFilesQuery,
         >,
     ) -> Response {
-        let claims = sec_plugin.as_auth_plugin().claims();
-        if let Err(resp) = require_vehicle_lock(
-            &*route_state.vehicle_lock_states,
-            *claims,
-            route_state.retry_after_seconds,
-        )
-        .await
-        {
-            return resp;
-        }
         route_state.plugin.list_backup(&query).await.map_or_else(
             |e| DbUpdateErrorResponse::new(e, route_state.retry_after_seconds).into_response(),
             |list| super::bulk_data_list_response(list, query.include_schema),

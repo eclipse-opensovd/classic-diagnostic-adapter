@@ -601,6 +601,9 @@ async fn runtimefiles_query_parameters_all_endpoints() -> Result<(), TestingErro
         upload_response.status()
     );
 
+    // Reads should not depend on a vehicle lock, so release it before GET checks.
+    teardown_lock(&runtime.config, &auth, &lock_id).await;
+
     // Test hash query on nextupdate
     let mut hash_params = HashMap::new();
     hash_params.insert("x-sovd2uds-include-hash".to_owned(), "sha256".to_owned());
@@ -623,8 +626,10 @@ async fn runtimefiles_query_parameters_all_endpoints() -> Result<(), TestingErro
     }
 
     // Apply to populate backup
+    let lock_id = setup_with_lock(&runtime.config, &auth).await;
     execute_mode(&runtime.config, &auth, ExecutionMode::Apply).await?;
     cda_interfaces::util::tokio_ext::sleep_for(Duration::from_secs(3)).await;
+    teardown_lock(&runtime.config, &auth, &lock_id).await;
 
     // Test file-size query on backup
     let mut size_params = HashMap::new();
@@ -646,8 +651,6 @@ async fn runtimefiles_query_parameters_all_endpoints() -> Result<(), TestingErro
             "Expected file size field in backup when x-sovd2uds-include-file-size=true is set"
         );
     }
-
-    teardown_lock(&runtime.config, &auth, &lock_id).await;
     Ok(())
 }
 
@@ -1258,9 +1261,10 @@ async fn runtimefiles_delete_backup() -> Result<(), TestingError> {
         "Expected empty backup after DELETE"
     );
 
-    // Restore original state
-    execute_mode(&runtime.config, &auth, ExecutionMode::Rollback).await?;
-    cda_interfaces::util::tokio_ext::sleep_for(Duration::from_secs(3)).await;
+    // The backup was deleted above, so Rollback is not possible (no backup to restore from).
+    // Use Cleanup instead to clear any pending state and leave the server in a clean state.
+    execute_mode(&runtime.config, &auth, ExecutionMode::Cleanup).await?;
+    cda_interfaces::util::tokio_ext::sleep_for(Duration::from_secs(1)).await;
 
     teardown_lock(&runtime.config, &auth, &lock_id).await;
     Ok(())
@@ -1397,10 +1401,16 @@ async fn runtimefiles_query_parameters() -> Result<(), TestingError> {
     )
     .await?;
     let revision_list = response_to_t::<BulkDataList>(&revision_response)?;
-    if let Some(first_item) = revision_list.items.first() {
+    if !revision_list.items.is_empty() {
+        // Not all the test ecus have a revision set
         assert!(
-            first_item.revision.is_some(),
-            "Expected 'revision' field when x-sovd2uds-include-revision=true is set"
+            revision_list
+                .items
+                .iter()
+                .any(|item| item.revision.is_some()),
+            "Expected at least one item with 'revision' field when \
+             x-sovd2uds-include-revision=true is set, items: {:?}",
+            revision_list.items
         );
     }
 

@@ -941,11 +941,13 @@ mod tests {
         )
         .await;
 
+        let first = paths.first().expect("first should exist");
+
         assert_eq!(paths.len(), 1, "Expected 1 MDD path from fallback");
         assert!(
-            paths[0].starts_with(db_dir.path()),
+            first.starts_with(db_dir.path()),
             "Path should come from database dir when storage is empty: {}",
-            paths[0].display()
+            first.display()
         );
     }
 }
