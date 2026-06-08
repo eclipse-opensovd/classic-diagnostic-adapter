@@ -76,3 +76,18 @@ pub trait DoipComParamProvider: Send + Sync + 'static {
     #[must_use]
     fn connection_retry_attempts(&self) -> u32;
 }
+
+/// Provider for CAN-specific communication parameters from MDD.
+pub trait CanComParamProvider: Send + Sync + 'static {
+    /// Physical request CAN ID (e.g., 0x79B)
+    #[must_use]
+    fn can_request_id(&self) -> Option<u32>;
+
+    /// Physical response CAN ID (e.g., 0x7BB)
+    #[must_use]
+    fn can_response_id(&self) -> Option<u32>;
+
+    /// Functional CAN ID for broadcast requests
+    #[must_use]
+    fn can_functional_id(&self) -> Option<u32>;
+}

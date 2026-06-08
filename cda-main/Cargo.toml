@@ -30,6 +30,7 @@ path = "src/lib.rs"
 
 [dependencies]
 cda-core = { workspace = true }
+cda-comm-can = { workspace = true }
 cda-comm-doip = { workspace = true }
 cda-comm-uds = { workspace = true }
 cda-database = { workspace = true }
@@ -83,9 +84,12 @@ chrono = { workspace = true }
 default = ["health", "openssl", "config-optional"]
 tokio-tracing = ["cda-interfaces/tokio-tracing", "cda-tracing/tokio-tracing"]
 openssl = ["cda-comm-doip/openssl"]
-openssl-vendored = ["openssl", "cda-comm-doip/openssl-vendored"]
+openssl-vendored = [
+  "openssl",
+  "cda-comm-doip/openssl-vendored",
+]
 mbedtls = ["cda-comm-doip/mbedtls"]
-dlt-tracing = ["cda-tracing/dlt-tracing"]
+dlt-tracing = ["cda-tracing/dlt-tracing", "cda-comm-can/dlt-tracing"]
 integration-tests = []
 
 health = []

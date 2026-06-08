@@ -10,6 +10,7 @@
  * https://www.apache.org/licenses/LICENSE-2.0
  */
 
+pub use cda_comm_can::config::CanConfig;
 pub use cda_comm_doip::config::DoipConfig;
 pub use cda_database::DatabaseConfig;
 use cda_interfaces::{
@@ -136,6 +137,10 @@ pub struct Configuration {
     pub server: ServerConfig,
     /// `DoIP` (Diagnostics over IP) transport layer settings.
     pub doip: DoipConfig,
+    /// Optional CAN bus transport configuration.
+    /// When enabled, the adapter can communicate with ECUs over CAN bus.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub can: Option<CanConfig>,
     /// Diagnostic database loading and naming settings.
     pub database: DatabaseConfig,
     /// Logging, file output, and tracing backend settings.
@@ -216,6 +221,7 @@ impl Default for Configuration {
                 tester_address: "10.2.1.240".to_owned(),
                 ..Default::default()
             },
+            can: None,
             logging: cda_tracing::LoggingConfig::default(),
             com_params: ComParams::default(),
             flat_buf: FlatbBufConfig::default(),

@@ -1,0 +1,94 @@
+# Copyright (c) 2025 The Contributors to Eclipse OpenSOVD (see CONTRIBUTORS)
+#
+# See the NOTICE file(s) distributed with this work for additional
+# information regarding copyright ownership.
+#
+# This program and the accompanying materials are made available under the
+# terms of the Apache License Version 2.0 which is available at
+# https://www.apache.org/licenses/LICENSE-2.0
+#
+# SPDX-License-Identifier: Apache-2.0
+
+# Example configuration for CAN bus transport
+# This enables CAN communication while keeping DoIP disabled.
+
+flash_files_path = "./flash"
+onboard_tester = false
+
+[server]
+address = "0.0.0.0"
+port = 20002
+
+[database]
+path = "./mdds"
+fallback_to_base_variant = true
+
+# DoIP is disabled. The block is still required (Configuration.doip is
+# non-Option), but CDA skips DoIP initialization when enabled = false.
+# Set enabled = true and fill in tester_address if you want DoIP as well.
+[doip]
+enabled = false
+tester_address = "127.0.0.1"
+tester_subnet = "255.255.0.0"
+gateway_port = 13400
+send_timeout_ms = 1000
+
+# CAN bus configuration
+[can]
+# CAN interface name (e.g., "vxcan0", "can0", "vcan0")
+interface = "vxcan0"
+
+# Response timeout in milliseconds (default: 2000ms)
+response_timeout_ms = 2000
+
+# Probe timeout in milliseconds for ECU discovery (default: 100ms)
+probe_timeout_ms = 100
+
+# CAN ID mappings. CDA does not (yet) extract these from the MDD's
+# CP_UniqueRespIdTable, so we set them explicitly here. The BMS453 uses
+# request_id = 0x79B and response_id = 0x7BB.
+[[can.ecu_mappings]]
+ecu_name = "BMS453"
+request_id = 0x79B
+response_id = 0x7BB
+
+# Optional: explicit CAN ID mappings
+# Use this to override CAN IDs from MDD files or when MDD doesn't contain them
+# [[can.ecu_mappings]]
+# ecu_name = "MyECU"
+# request_id = 0x7E0    # Physical request CAN ID
+# response_id = 0x7E8   # Physical response CAN ID
+#
+# [[can.ecu_mappings]]
+# ecu_name = "AnotherECU"
+# request_id = 0x700
+# response_id = 0x708
+
+# Optional: per-ECU transport selection overrides
+#
+# By default, DoIP is used when a DoIP gateway is available, falling back to CAN.
+# Use transport_overrides to force specific ECUs onto a particular transport.
+# This is useful when:
+#   - An ECU is CAN-only and has no DoIP logical address
+#   - The MDD contains DoIP COM params for a gateway device, but you want to
+#     talk to the ECU directly over CAN
+#   - You want to test CAN communication for an ECU that is also reachable via DoIP
+#
+# Supported values: "can", "doip" (case-insensitive)
+# ECU names are matched case-insensitively.
+#
+# [[can.transport_overrides]]
+# ecu_name = "CanOnlyEcu"
+# transport = "can"
+#
+# [[can.transport_overrides]]
+# ecu_name = "ForceDoipEcu"
+# transport = "doip"
+
+[logging.otel]
+enabled = false
+
+# Uncomment to enable OpenTelemetry tracing
+# [logging.otel]
+# enabled = true
+# endpoint = "http://localhost:4317"

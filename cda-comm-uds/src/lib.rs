@@ -43,6 +43,7 @@ use tokio::{
 };
 
 type EcuIdentifier = String;
+type EcuRequestLockKey = String;
 
 #[derive(Copy, Clone, Display)]
 enum ResetType {
@@ -86,7 +87,7 @@ pub struct UdsManager<S: EcuGateway, R: DiagServiceResponse, T: EcuManager<Respo
     ecus: Arc<HashMap<String, RwLock<T>>>,
     gateway: S,
     data_transfers: Arc<Mutex<HashMap<EcuIdentifier, EcuDataTransfer>>>,
-    ecu_semaphores: Arc<Mutex<HashMap<u16, Arc<Semaphore>>>>,
+    ecu_semaphores: Arc<Mutex<HashMap<EcuRequestLockKey, Arc<Semaphore>>>>,
     tester_present_tasks: Arc<RwLock<HashMap<EcuIdentifier, TesterPresentTask>>>,
     session_reset_tasks: Arc<RwLock<HashMap<EcuIdentifier, JoinHandle<()>>>>,
     security_reset_tasks: Arc<RwLock<HashMap<EcuIdentifier, JoinHandle<()>>>>,
@@ -320,6 +321,7 @@ impl<S: EcuGateway, R: DiagServiceResponse, T: EcuManager<Response = R>> UdsMana
         let sent_sid = *payload.data.first().ok_or(DiagServiceError::BadPayload(
             "Cannot sent message without SID".to_owned(),
         ))?;
+        let ecu_request_lock_key = ecu.read().await.request_lock_key();
 
         // todo: what timeout should we use to wait till the ecu is 'free'?
         let semaphore = {
@@ -327,16 +329,24 @@ impl<S: EcuGateway, R: DiagServiceResponse, T: EcuManager<Response = R>> UdsMana
                 self.ecu_semaphores
                     .lock()
                     .await
-                    .entry(ecu_logical_address)
+                    .entry(ecu_request_lock_key.clone())
                     .or_insert_with(|| Arc::new(Semaphore::new(1))),
             )
         };
+
+        tracing::trace!(
+            ecu = ecu_name,
+            logical_address = ecu_logical_address,
+            request_lock_key = %ecu_request_lock_key,
+            "Acquiring ECU request lock"
+        );
 
         let ecu_sem = tokio::time::timeout(Duration::from_secs(10), semaphore.acquire())
             .await
             .map_err(|_| {
                 tracing::error!(
                     ecu = ecu_name,
+                    request_lock_key = %ecu_request_lock_key,
                     "Timeout waiting for ecu to become available for requests."
                 );
                 DiagServiceError::Timeout
@@ -1976,6 +1986,10 @@ impl<S: EcuGateway, R: DiagServiceResponse, T: EcuManager<Response = R>> UdsEcu
 
         let ecu = self.ecu_manager(ecu_name)?;
 
+        // The variant detection requests contain the DiagComm short_name
+        // (e.g., "Identification_RenaultR2"), which must be used directly for
+        // the service lookup. The previous code incorrectly split the name at
+        // the first underscore, causing lookup failures.
         let requests = ecu
             .read()
             .await

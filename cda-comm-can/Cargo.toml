@@ -1,0 +1,45 @@
+# Copyright (c) 2025 The Contributors to Eclipse OpenSOVD (see CONTRIBUTORS)
+#
+# See the NOTICE file(s) distributed with this work for additional
+# information regarding copyright ownership.
+#
+# This program and the accompanying materials are made available under the
+# terms of the Apache License Version 2.0 which is available at
+# https://www.apache.org/licenses/LICENSE-2.0
+#
+# SPDX-License-Identifier: Apache-2.0
+
+[package]
+name = "cda-comm-can"
+version = "0.1.0"
+edition.workspace = true
+publish = false
+description = "CAN bus communication layer used in CDA"
+homepage.workspace = true
+license.workspace = true
+
+[lints]
+workspace = true
+
+[lib]
+path = "src/lib.rs"
+
+[dependencies]
+# internal dependencies
+cda-interfaces = { workspace = true }
+# external
+thiserror = { workspace = true }
+serde = { workspace = true, features = ["derive"] }
+# tokio
+tokio = { workspace = true, features = ["rt", "time", "sync", "io-util"] }
+# CAN / ISO-TP
+tokio-socketcan-isotp = "0.2"
+# logging & tracing
+tracing = { workspace = true }
+# utilities
+hex = { workspace = true }
+schemars = { workspace = true }
+
+[features]
+default = []
+dlt-tracing = ["cda-interfaces/dlt-tracing"]

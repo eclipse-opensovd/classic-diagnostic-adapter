@@ -17,7 +17,11 @@ use cda_interfaces::{
 
 use crate::flatbuf::diagnostic_description::dataformat;
 
-pub(super) fn lookup(
+/// Lookup a COM parameter by name and return its raw value
+///
+/// # Errors
+/// Returns an error if the COM parameter is not found or cannot be resolved
+pub fn lookup(
     ecu_data: &crate::datatypes::DiagnosticDatabase,
     protocol: Option<&dataformat::Protocol>,
     param_name: &str,
