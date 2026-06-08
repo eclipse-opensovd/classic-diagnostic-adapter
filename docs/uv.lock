@@ -54,8 +54,8 @@ dependencies = [
 requires-dist = [
     { name = "myst-parser", specifier = "==5.0.0" },
     { name = "sphinx", specifier = ">=8.2,<9" },
-    { name = "sphinx-codelinks", git = "https://github.com/useblocks/sphinx-codelinks.git?rev=c440f593f5097c97e953c4a34a284d51f3243c10" },
-    { name = "sphinx-needs", specifier = "==6.3.0" },
+    { name = "sphinx-codelinks", git = "https://github.com/useblocks/sphinx-codelinks.git?tag=1.2.0" },
+    { name = "sphinx-needs", specifier = "==8.1.1" },
     { name = "sphinxcontrib-plantuml", specifier = "==0.31.0" },
 ]
 
@@ -337,6 +337,25 @@ source = { registry = "https://pypi.org/simple" }
 sdist = { url = "https://files.pythonhosted.org/packages/d6/54/cfe61301667036ec958cb99bd3efefba235e65cdeb9c84d24a8293ba1d90/mdurl-0.1.2.tar.gz", hash = "sha256:bb413d29f5eea38f31dd4754dd7377d4465116fb207585f97bf925588687c1ba", size = 8729, upload-time = "2022-08-14T12:40:10.846Z" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/b3/38/89ba8ad64ae25be8de66a6d463314cf1eb366222074cfda9ee839c56a4b4/mdurl-0.1.2-py3-none-any.whl", hash = "sha256:84008a41e51615a49fc9966191ff91509e3c40b939176e643fd50a5c2196b8f8", size = 9979, upload-time = "2022-08-14T12:40:09.779Z" },
+]
+
+[[package]]
+name = "minijinja"
+version = "2.20.0"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/10/43/ebdf02703cafe163402ce09f2c4fd2eaf7f6f667a0f056b9bb1ac893f7f7/minijinja-2.20.0.tar.gz", hash = "sha256:93364945c36a2b44d8b62af068ff0c11c8b3f3fa2b11599190249bd4cd2c31ad", size = 292230, upload-time = "2026-05-20T00:01:47.084Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/c4/93/a2dff85e5cc4a2c62fb00c814c6f380830e733cb5b42d5cbfeeb92a3acda/minijinja-2.20.0-cp38-abi3-macosx_10_12_x86_64.macosx_11_0_arm64.macosx_10_12_universal2.whl", hash = "sha256:9693c7bc574d881d24e3e64c63f7ba90d9e3dbc64a13cb9d730585f63b7fb058", size = 2118981, upload-time = "2026-05-20T00:01:26.185Z" },
+    { url = "https://files.pythonhosted.org/packages/1d/9a/4a5f57d1fc0d2c58c2e327f2c02cdeeaa550631c901eebed3b6c477f8de2/minijinja-2.20.0-cp38-abi3-manylinux_2_17_aarch64.manylinux2014_aarch64.whl", hash = "sha256:1d1de5065a0cd0158623a35f30d138ef9fc98156dd5f550527f06ba22f4ab70f", size = 1105692, upload-time = "2026-05-20T00:01:28.363Z" },
+    { url = "https://files.pythonhosted.org/packages/cb/e3/b7d03968426748db76823703f5460cc22a8286d58ce834dd967ae2b75cb3/minijinja-2.20.0-cp38-abi3-manylinux_2_17_armv7l.manylinux2014_armv7l.whl", hash = "sha256:698bbc1ece5dad03aa5d322d7af52e54b907febe9971731b59384addf2783c8a", size = 1079016, upload-time = "2026-05-20T00:01:30.014Z" },
+    { url = "https://files.pythonhosted.org/packages/b7/b3/0b14377d8a9171f823aa51640dd23e8256641577b9e01d3a4496aecb5c2c/minijinja-2.20.0-cp38-abi3-manylinux_2_17_x86_64.manylinux2014_x86_64.whl", hash = "sha256:203ab639b0f3b71d6af6910da6311348b3a4f1a84e6702ab7c1c1f392293d16c", size = 1141684, upload-time = "2026-05-20T00:01:31.61Z" },
+    { url = "https://files.pythonhosted.org/packages/3a/34/4b786ec1f99ac470e53098e7888d5efe673230975e76d1e87fce9a91ff90/minijinja-2.20.0-cp38-abi3-manylinux_2_5_i686.manylinux1_i686.whl", hash = "sha256:a60b4396cd68ef02a6a5470d086f0ae8ae0ecdfd16a24457897f6abd5e5cede4", size = 1268541, upload-time = "2026-05-20T00:01:33.197Z" },
+    { url = "https://files.pythonhosted.org/packages/3b/69/fb95c87b560487d87ec38f871ae5b184b1a20bc11bf0b0f6054895b0b508/minijinja-2.20.0-cp38-abi3-musllinux_1_2_aarch64.whl", hash = "sha256:a28d60be22a2f76accf00d84274450aa1264911fa8f45c79e4120bfddf8471cc", size = 1282035, upload-time = "2026-05-20T00:01:35.002Z" },
+    { url = "https://files.pythonhosted.org/packages/b0/d4/7b934a43a144345cd898ae4c70c4cc35783ca685cc81bbf0f6f1d26b4b85/minijinja-2.20.0-cp38-abi3-musllinux_1_2_armv7l.whl", hash = "sha256:cb8d3a1e30666b883eb2ba2b3619620c62504be474e85ecc490cb28334210fd6", size = 1353836, upload-time = "2026-05-20T00:01:36.964Z" },
+    { url = "https://files.pythonhosted.org/packages/16/3f/498458cec8b299a11b44b7812d564ae377b8d51e3d4308925fd203c2ac92/minijinja-2.20.0-cp38-abi3-musllinux_1_2_i686.whl", hash = "sha256:daa32983bc995b53a16616a4cb65f9d3d5e4996fe68b61cda37909161cac4674", size = 1434449, upload-time = "2026-05-20T00:01:38.86Z" },
+    { url = "https://files.pythonhosted.org/packages/b2/1d/339ee68f10f69be825395aeb3e543153300dc80bc3a7181b7334821ed4f1/minijinja-2.20.0-cp38-abi3-musllinux_1_2_x86_64.whl", hash = "sha256:494b8ec3307ab4d69ea74fc9fed927f2bbd38c5636feab16bdb4ef2fc3891aa0", size = 1362165, upload-time = "2026-05-20T00:01:40.705Z" },
+    { url = "https://files.pythonhosted.org/packages/cd/79/4e4c4559e1a77a1509fe2b03c4346b6b2571e2786fe8b566e407f6a4bf24/minijinja-2.20.0-cp38-abi3-win32.whl", hash = "sha256:1a2348e52708d58be056c7c6ddfab0bf008d80221e2264d0e1c1d007ac6903ba", size = 1034517, upload-time = "2026-05-20T00:01:42.57Z" },
+    { url = "https://files.pythonhosted.org/packages/86/9e/fc1d88c3a373c9d49e31c8220bc2e8fa919405538b848bdf681f378100cd/minijinja-2.20.0-cp38-abi3-win_amd64.whl", hash = "sha256:18be801f16cfa0026cb932df32077a169e3737d5808f7d9a2ca19afcea217140", size = 1095692, upload-time = "2026-05-20T00:01:44.908Z" },
 ]
 
 [[package]]
@@ -636,8 +655,8 @@ wheels = [
 
 [[package]]
 name = "sphinx-codelinks"
-version = "1.1.0"
-source = { git = "https://github.com/useblocks/sphinx-codelinks.git?rev=c440f593f5097c97e953c4a34a284d51f3243c10#c440f593f5097c97e953c4a34a284d51f3243c10" }
+version = "1.2.0"
+source = { git = "https://github.com/useblocks/sphinx-codelinks.git?tag=1.2.0#d30193c63d2475eb919b36e48c8b421331c61482" }
 dependencies = [
     { name = "click" },
     { name = "comment-parser" },
@@ -672,10 +691,11 @@ wheels = [
 
 [[package]]
 name = "sphinx-needs"
-version = "6.3.0"
+version = "8.1.1"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "jsonschema-rs" },
+    { name = "minijinja" },
     { name = "requests" },
     { name = "requests-file" },
     { name = "sphinx" },
@@ -683,9 +703,9 @@ dependencies = [
     { name = "sphinxcontrib-jquery" },
     { name = "typing-extensions" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/39/e6/f518eac2340b798111f5dab7337339d5e42a52a5be8ecf6c3a25ac5e4800/sphinx_needs-6.3.0.tar.gz", hash = "sha256:a8a1cccc1525b94551e7a2f9525bf36eaae88654abceb5047b5470d57472b346", size = 27590098, upload-time = "2025-12-15T15:06:39.633Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/3d/65/c7707a4bf7857ac6b8c30461dd90ae8f4986c7e5a386f1c0069249057afa/sphinx_needs-8.1.1.tar.gz", hash = "sha256:fd72d22c958ece9a90aea517fd276197d7f602fc6ecf9fd48c1840b85cb96574", size = 27649386, upload-time = "2026-05-20T15:54:48.5Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/3d/a7/8ee6a99d548d270e731333a8b4a2b067182fac1a6bbcdd1f692121ccbb9d/sphinx_needs-6.3.0-py3-none-any.whl", hash = "sha256:761901765844c69f6181580065b099b31016895a86962a25e7860a9f5bea54a2", size = 2685357, upload-time = "2025-12-15T15:06:37.427Z" },
+    { url = "https://files.pythonhosted.org/packages/22/e5/de7fb014e4c63e0266e61ee79b08d2b17367cec5becd171b8f17869e4953/sphinx_needs-8.1.1-py3-none-any.whl", hash = "sha256:bd5bb71aa01726e1e1b5ac4ac7ce6b1e81acb8b519b480fae2faf7553a1271c5", size = 2704205, upload-time = "2026-05-20T15:54:45.962Z" },
 ]
 
 [[package]]

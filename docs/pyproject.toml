@@ -14,11 +14,11 @@ version = "1.0.0"
 requires-python = ">=3.13"
 dependencies = [
   "sphinx>=8.2,<9",
-  "sphinx-needs==6.3.0",
+  "sphinx-needs==8.1.1",
   "sphinxcontrib-plantuml==0.31.0",
-  "sphinx-codelinks",
+  "sphinx-codelinks==1.2.0",
   "myst-parser==5.0.0",
 ]
 
 [tool.uv.sources]
-sphinx-codelinks = { git = "https://github.com/useblocks/sphinx-codelinks.git", rev = "c440f593f5097c97e953c4a34a284d51f3243c10" }
+sphinx-codelinks = { git = "https://github.com/useblocks/sphinx-codelinks.git", tag = "1.2.0" }
