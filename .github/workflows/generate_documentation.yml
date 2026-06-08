@@ -31,7 +31,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
         with:
           submodules: false
       - name: Set up Docker Buildx
@@ -59,7 +59,7 @@ jobs:
             ghcr.io/${{ github.repository }}/sphinxdoc:latest \
             bash -c "sphinx-build -W -b html /docs /docs/_build/html"
       - name: Upload documentation (html)
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         id: upload-docs-html
         with:
           if-no-files-found: 'error'
@@ -71,7 +71,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
         with:
           submodules: false
       - name: Install Rust toolchain
@@ -87,7 +87,7 @@ jobs:
       - name: Add redirect
         run: echo '<meta http-equiv="refresh" content="0;url=cda_plugin_security/index.html">' > target/doc/index.html
       - name: Upload documentation (rustdoc)
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         id: upload-rustdoc
         with:
           if-no-files-found: 'error'
@@ -106,19 +106,19 @@ jobs:
       url: ${{ steps.deployment.outputs.page_url }}
     steps:
       - name: Download Sphinx documentation
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           name: cda-docs
           path: pages/
       - name: Download Rustdoc documentation
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           name: rustdoc
           path: pages/rustdoc/
       - name: Upload Pages artifact
-        uses: actions/upload-pages-artifact@v3
+        uses: actions/upload-pages-artifact@v5
         with:
           path: pages/
       - name: Deploy to GitHub Pages
         id: deployment
-        uses: actions/deploy-pages@v4
+        uses: actions/deploy-pages@v5

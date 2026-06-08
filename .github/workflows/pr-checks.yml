@@ -33,7 +33,7 @@ jobs:
       IS_FORK: ${{ github.event.pull_request.head.repo.fork == true }}
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
         with:
           submodules: false
       - name: Setup DLT tracing lib
