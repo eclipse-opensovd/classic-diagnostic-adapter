@@ -47,7 +47,7 @@ struct RegistryInner {
 
 impl EcuExecutionRegistry {
     pub(crate) async fn register(
-        &mut self,
+        &self,
         comparam: SharedExecutionMap<IndexMap<Uuid, Execution>>,
         service: SharedExecutionMap<HashMap<String, IndexMap<Uuid, ServiceExecution>>>,
     ) {
