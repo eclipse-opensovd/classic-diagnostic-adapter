@@ -41,6 +41,7 @@ enum class SecurityAccess(
     LEVEL_03(3),
     LEVEL_05(5),
     LEVEL_07(7),
+    LEVEL_09(9),
     ;
 
     companion object {

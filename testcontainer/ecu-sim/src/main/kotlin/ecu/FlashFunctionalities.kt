@@ -127,7 +127,7 @@ fun RequestsData.addFlashRequests() {
     request("34 []", "RequestDownload") {
         ensureEcuModeIn(Variant.BOOT)
         ensureSessionIn(SessionState.PROGRAMMING)
-        ensureSecurityAccessIn(SecurityAccess.LEVEL_07)
+        ensureSecurityAccessIn(SecurityAccess.LEVEL_05, SecurityAccess.LEVEL_07, SecurityAccess.LEVEL_09)
 
         val ecuState = ecu.ecuState()
 
@@ -153,7 +153,7 @@ fun RequestsData.addFlashRequests() {
     request("36 []", "TransferData") {
         ensureEcuModeIn(Variant.BOOT)
         ensureSessionIn(SessionState.PROGRAMMING)
-        ensureSecurityAccessIn(SecurityAccess.LEVEL_07)
+        ensureSecurityAccessIn(SecurityAccess.LEVEL_05, SecurityAccess.LEVEL_07, SecurityAccess.LEVEL_09)
 
         val dataTransfers = ecu.dataTransfersDownload()
         val currentTransfer = dataTransfers.lastOrNull() ?: throw NrcException(NrcError.RequestSequenceError)
@@ -177,7 +177,7 @@ fun RequestsData.addFlashRequests() {
     request("37 []", "RequestTransferExit") {
         ensureEcuModeIn(Variant.BOOT)
         ensureSessionIn(SessionState.PROGRAMMING)
-        ensureSecurityAccessIn(SecurityAccess.LEVEL_07)
+        ensureSecurityAccessIn(SecurityAccess.LEVEL_05, SecurityAccess.LEVEL_07, SecurityAccess.LEVEL_09)
 
         val dataTransfers = ecu.dataTransfersDownload()
         val currentTransfer = dataTransfers.lastOrNull() ?: throw NrcException(NrcError.RequestSequenceError)
@@ -189,7 +189,7 @@ fun RequestsData.addFlashRequests() {
     request("31 01 FF 00", "EraseMemory_Start") {
         ensureEcuModeIn(Variant.BOOT)
         ensureSessionIn(SessionState.PROGRAMMING)
-        ensureSecurityAccessIn(SecurityAccess.LEVEL_07)
+        ensureSecurityAccessIn(SecurityAccess.LEVEL_05, SecurityAccess.LEVEL_07, SecurityAccess.LEVEL_09)
 
         val dataTransfers = ecu.dataTransfersDownload()
         dataTransfers.clear()

@@ -1654,7 +1654,6 @@ impl<S: EcuGateway, R: DiagServiceResponse, T: EcuManager<Response = R>> UdsEcu
                 ecu_name,
                 &default_security_access,
                 None,
-                None,
                 security_plugin,
                 None,
             )
@@ -1679,7 +1678,6 @@ impl<S: EcuGateway, R: DiagServiceResponse, T: EcuManager<Response = R>> UdsEcu
         &self,
         ecu_name: &str,
         level: &str,
-        seed_service: Option<&String>,
         authentication_data: Option<UdsPayloadData>,
         security_plugin: &DynamicPlugin,
         expiration: Option<Duration>,
@@ -1688,7 +1686,7 @@ impl<S: EcuGateway, R: DiagServiceResponse, T: EcuManager<Response = R>> UdsEcu
         let security_access = ecu_diag_service
             .read()
             .await
-            .lookup_security_access_change(level, seed_service, authentication_data.is_some())
+            .lookup_security_access_change(level, authentication_data.is_some())
             .await?;
         match &security_access {
             SecurityAccess::RequestSeed(dc) => Ok((
@@ -1728,7 +1726,7 @@ impl<S: EcuGateway, R: DiagServiceResponse, T: EcuManager<Response = R>> UdsEcu
         let security_access = ecu_diag_service
             .read()
             .await
-            .lookup_security_access_change(level, None, true)
+            .lookup_security_access_change(level, true)
             .await?;
         match &security_access {
             SecurityAccess::RequestSeed(_) => {

@@ -115,8 +115,16 @@ $env:OPENSSL_INCLUDE_DIR="C:\Program Files\OpenSSL-Win64\include"
 
 ### pre commit
 
+Check staged files:
+
 ```shell
 uv run --group tools prek run
+```
+
+Check all files:
+
+```shell
+uv run --group tools prek run --all-files
 ```
 
 Install this command as documented here: <https://git-scm.com/book/en/v2/Customizing-Git-Git-Hooks>

@@ -26,7 +26,10 @@ use cda_interfaces::{
     },
     diagservices::{DiagServiceResponse, DiagServiceResponseType, FieldParseError, UdsPayloadData},
     dlt_ctx, service_ids, subfunction_ids,
-    util::{self, ends_with_ignore_ascii_case, starts_with_ignore_ascii_case},
+    util::{
+        self, contains_ignore_ascii_case, ends_with_ignore_ascii_case,
+        starts_with_ignore_ascii_case,
+    },
 };
 use cda_plugin_security::SecurityPlugin;
 use tokio::sync::RwLock;
@@ -1125,7 +1128,6 @@ impl<S: SecurityPlugin> cda_interfaces::EcuManager for EcuManager<S> {
     async fn lookup_security_access_change(
         &self,
         level: &str,
-        seed_service: Option<&String>,
         has_key: bool,
     ) -> Result<SecurityAccess, DiagServiceError> {
         let current_security_name = self.security_access().await?;
@@ -1138,6 +1140,12 @@ impl<S: SecurityPlugin> cda_interfaces::EcuManager for EcuManager<S> {
             )?;
             Ok(SecurityAccess::SendKey(security_service))
         } else {
+            // Find the RequestSeed service for the requested level by searching all SID 0x27
+            // services in the ISO 14229-1 RequestSeed subfunction range and selecting the one
+            // whose short name contains the level name (underscores stripped, case-insensitive).
+            // 2 request parameters (SID + subfunction, no key payload) distinguishes RequestSeed
+            // from SendKey services whose subfunctions overlap in the ISO range.
+            let level_stripped = level.replace('_', "");
             let request_seed_service = self
                 .lookup_services_by_sid(service_ids::SECURITY_ACCESS)?
                 .into_iter()
@@ -1151,35 +1159,21 @@ impl<S: SecurityPlugin> cda_interfaces::EcuManager for EcuManager<S> {
                         return false;
                     };
 
-                    let name_matches = if let Some(seed_service_name) = seed_service {
-                        service.diag_comm().is_some_and(|dc| {
-                            dc.short_name().is_some_and(|n| {
-                                let n = n.replace('_', "");
-                                starts_with_ignore_ascii_case(&n, seed_service_name)
-                            })
-                        })
-                    } else {
-                        true
-                    };
-
-                    // ISO 14229-1:2020 specifies the given ranges for request seed
-                    // 2 parameters: sid_rq and sub_func
-                    // needed because the ranges for request seed and send key overlap
                     sid == service_ids::SECURITY_ACCESS
                         && matches!(sub_func, 1 | 3..=5 | 7..=41)
                         && service
                             .request()
                             .is_some_and(|r| r.params().is_some_and(|p| p.len() >= 2))
-                        && name_matches
+                        && service.diag_comm().is_some_and(|dc| {
+                            dc.short_name().is_some_and(|n| {
+                                contains_ignore_ascii_case(&n.replace('_', ""), &level_stripped)
+                            })
+                        })
                 })
                 .ok_or_else(|| {
                     DiagServiceError::NotFound(format!(
                         "No matching 'request seed' SecurityAccess service found for level \
-                         '{level}'{}",
-                        seed_service
-                            .as_ref()
-                            .map(|s| format!(" and seed service '{s}'"))
-                            .unwrap_or_default()
+                         '{level}'"
                     ))
                 })?;
 

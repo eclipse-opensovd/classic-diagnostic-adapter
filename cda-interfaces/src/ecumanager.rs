@@ -490,7 +490,6 @@ pub trait EcuManager:
     fn lookup_security_access_change(
         &self,
         level: &str,
-        seed_service: Option<&String>,
         has_key: bool,
     ) -> impl Future<Output = Result<SecurityAccess, DiagServiceError>> + Send;
     /// Retrieves the name of the parameter used to send the key for security access.
