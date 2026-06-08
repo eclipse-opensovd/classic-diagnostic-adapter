@@ -29,6 +29,7 @@ members = [
   "cda-plugin-security",
   "cda-health",
   "cda-extra",
+  "cda-storage",
   "integration-tests",
   "cda-build",
   "comm-mbedtls/mbedtls-sys",
@@ -47,6 +48,7 @@ cda-plugin-security = { path = "cda-plugin-security" }
 cda-sovd = { path = "cda-sovd" }
 cda-tracing = { path = "cda-tracing" }
 cda-health = { path = "cda-health" }
+cda-storage = { path = "cda-storage" }
 cda-extra = { path = "cda-extra" }
 sovd-interfaces = { path = "cda-sovd-interfaces" }
 cda-build = { path = "cda-build" }
@@ -91,10 +93,15 @@ ouroboros = "0.18.5"
 toml = "0.9.8"
 cargo_toml = "0.22.3"
 libc = "0.2.177"
+crc32fast = "1.4"
 foldhash = "0.2.0"
 memmap2 = "0.9"
 mockall = "0.14.0"
 sha2 = "0.10"
+rkyv = { version = "0.8.16", default-features = false, features = [
+  "std",
+  "bytecheck",
+] }
 
 # ---- tracing & logging crates ----
 tracing = "0.1.41"
@@ -133,12 +140,12 @@ rustversion = "1.0.22"  # macros for conditional compilation
 
 [workspace.lints.clippy]
 # enable pedantic
-pedantic = { level = "warn", priority = -1 }
+pedantic = { level = "deny", priority = -1 }
 ## exclude some too pedantic lints for now
 similar_names = "allow"
 
 # additional lints
-clone_on_ref_ptr = "warn"
+clone_on_ref_ptr = "deny"
 indexing_slicing = "deny"
 unwrap_used = "deny"
 arithmetic_side_effects = "deny"

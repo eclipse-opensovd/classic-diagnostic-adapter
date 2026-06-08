@@ -129,6 +129,8 @@ Bulk Data
     .. note::
        IMPORTANT: All calls to the aforementioned endpoints can fail with reasonable HTTP status codes (e.g. 401, 403, 409, 501), depending on the context and state.
 
+    .. uml:: 02_sovd-api/images/bulk_data.puml
+
 Entities
 ^^^^^^^^
 
@@ -304,6 +306,12 @@ Data Resources -- SID 22\ :sub:`16` & 2E\ :sub:`16`
 
     Names for data resources are determined by taking all diag-services defined for 22\ :sub:`16` and 2E\ :sub:`16` -- their short name is taken as a base and processed by removing configurable prefixes/suffixes, to determine the data identifier within the ``/data/{data-identifier}`` path.
 
+    The following diagrams illustrate the message flow for reading and writing data resources:
+
+    .. uml:: 02_sovd-api/images/data_read.puml
+
+    .. uml:: 02_sovd-api/images/data_write.puml
+
 Categories
 ^^^^^^^^^^
 
@@ -360,6 +368,12 @@ Configurations -- SID 22\ :sub:`16` & 2E\ :sub:`16`
          - Always ``parameter``
        * - x-sovd2uds-serviceAbstract
          - Array of strings containing the SIDs and data identifier as a hexadecimal string (e.g. ["2E1234", "221234"])
+
+    The following diagrams illustrate the message flow for reading and writing configuration resources:
+
+    .. uml:: 02_sovd-api/images/configuration_read.puml
+
+    .. uml:: 02_sovd-api/images/configuration_write.puml
 
     .. note::
        ``x-sovd2uds-serviceAbstract`` is an extension to the standard.
@@ -421,6 +435,8 @@ Operations
     execute the routine with ``POST /operations/{routine-name}/executions`` is executed synchronously
     and will directly return the response from the ECU with HTTP status ``200 OK``.
 
+    .. uml:: 02_sovd-api/images/operation_sync.puml
+
     .. note::
        Operations without a ``Start`` subfunction can exist in the operations list but will fail
        execution with an error unless the ``x-sovd2uds-suppressService`` query parameter is set to ``true``.
@@ -460,6 +476,8 @@ Operations
 
     When ``x-sovd2uds-force=true``, the execution is removed from tracking even if the Stop
     request fails or returns a negative response.
+
+    .. uml:: 02_sovd-api/images/operation_async.puml
 
     **Stop Response Data**
 
@@ -531,6 +549,8 @@ Session -- SID 10\ :sub:`16`
 
     See also chapter 7.16 in ISO 17978-3.
 
+    .. uml:: 02_sovd-api/images/session_switch.puml
+
 
 Security -- SID 27\ :sub:`16`
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
@@ -543,6 +563,8 @@ Security -- SID 27\ :sub:`16`
 
     Works similarly to Session defined in the previous chapter. The names of the security access levels are
     determined through the state charts for the SID 27\ :sub:`16` services.
+
+    .. uml:: 02_sovd-api/images/security_access.puml
 
 
 Authentication -- SID 29\ :sub:`16`
@@ -560,6 +582,8 @@ Authentication -- SID 29\ :sub:`16`
 
     Diagnostic data descriptions have to specify the used services including the subfunction individually, so the
     request parameters can be converted into UDS payloads.
+
+    .. uml:: 02_sovd-api/images/authentication.puml
 
 
 Communication Control -- SID 28\ :sub:`16`
@@ -585,6 +609,8 @@ Communication Control -- SID 28\ :sub:`16`
     .. note::
        Other values are not supported.
 
+    .. uml:: 02_sovd-api/images/communication_control.puml
+
 
 DTC Setting -- SID 85\ :sub:`16`
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
@@ -603,6 +629,8 @@ DTC Setting -- SID 85\ :sub:`16`
 
     .. note::
        Other specific extensions to the values are not supported.
+
+    .. uml:: 02_sovd-api/images/dtc_setting.puml
 
 
 Faults -- SID 14\ :sub:`16` & 19\ :sub:`16`
@@ -657,6 +685,30 @@ Faults -- SID 14\ :sub:`16` & 19\ :sub:`16`
 
     Additionally, a special key called ``mask`` is available, which takes a hexadecimal mask as a value
     to allow filtering by the complete status byte. Using other keys together with ``mask`` is not supported.
+
+    .. uml:: 02_sovd-api/images/fault_read.puml
+
+
+Generic Service
+---------------
+
+.. arch:: Generic Service Endpoint
+    :id: arch~sovd-api-generic-service
+    :status: draft
+
+    The ``/genericservice`` endpoint provides raw UDS passthrough functionality, allowing clients to send
+    arbitrary UDS requests to an ECU without relying on diagnostic description (MDD) service resolution
+    or parameter encoding.
+
+    The client sends a hex-encoded UDS request in the JSON body, and receives the raw hex-encoded UDS
+    response from the ECU.
+
+    Permissions for generic service calls can be checked and enforced through the security plugin. Since
+    generic service requests bypass the structured service resolution, the security plugin receives the
+    raw UDS request payload (e.g. ``22 F1 90``) and is responsible for evaluating whether the authenticated
+    client is authorized to send that specific UDS command to the target ECU.
+
+    .. uml:: 02_sovd-api/images/generic_service.puml
 
 
 Version Endpoint
@@ -724,6 +776,8 @@ Version Endpoint
 
     Both endpoint types are available immediately after the HTTP server starts and do not require
     any ECU communication.
+
+    .. uml:: 02_sovd-api/images/version_registration.puml
 
     .. note:: The current implementation only registers ``/data/version`` and ``/apps/sovd2uds/data/version``
 

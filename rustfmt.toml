@@ -8,6 +8,7 @@
 # terms of the Apache License Version 2.0 which is available at
 # https://www.apache.org/licenses/LICENSE-2.0
 
+unstable_features = true # needed for `group_imports` feature
 max_width = 100
 
 # in case rustfmt stopps working again, enable these options

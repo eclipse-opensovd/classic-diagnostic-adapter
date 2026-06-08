@@ -83,7 +83,8 @@ async fn test_wrong_did_in_response_returns_504() {
 
 async fn cleanup(ecu_sim: &EcuSim) {
     // Clean up: remove the interceptor so other tests are not affected.
-    ecusim::clear_interceptor(ecu_sim, "FLXC1000", "did_mismatch")
-        .await
-        .expect("Failed to clear interceptor");
+    // Cannot use panic, in a panic handler, hence have to resort to eprintln
+    if let Err(e) = ecusim::clear_interceptor(ecu_sim, "FLXC1000", "did_mismatch").await {
+        eprintln!("Failed to clear raw response override: {e}");
+    }
 }

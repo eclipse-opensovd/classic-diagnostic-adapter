@@ -48,6 +48,8 @@ Communication Parameters (ComParams)
 
     These operations require a lock on the entity. Only one execution of communication parameters per entity is allowed.
 
+    .. uml:: /03_architecture/02_sovd-api/03_extensions/images/comparams.puml
+
 .. arch:: Retrieve Communication Parameters without Lock
     :id: arch~sovd-api-comparams-without-lock
     :status: draft
@@ -67,6 +69,8 @@ Communication Parameters (ComParams)
 
     Handling this with the POST/GET semantic with only a single execution would make the handling
     extremely complicated for parallel clients with & without locks.
+
+    .. uml:: /03_architecture/02_sovd-api/03_extensions/images/comparams_without_lock.puml
 
     Example for directly retrieving communication parameters:
 

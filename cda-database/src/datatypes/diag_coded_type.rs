@@ -1363,7 +1363,7 @@ mod tests {
         let payload: Vec<u8> = vec![0b_1010_1010];
         // 10101010 - payload
         // 11110000 - mask
-        // ----------
+        // ........
         // 10100000
         let (data, bit_len) = unpack_data(8, 0, Some(&mask), &payload, ByteOrder::Keep).unwrap();
         assert_eq!(data, vec![0b_1010_0000]);
@@ -1491,7 +1491,7 @@ mod tests {
         // First reverse bytes, then apply condensed mask:
         // 0011_0011 1100_1100
         // 1111_0000 1111_0000
-        // ---------------
+        // ..................
         // 0011_---- 1100_---
         assert_eq!(data, vec![0b_0011_1100]);
         assert_eq!(bit_len, 8);
@@ -2428,18 +2428,18 @@ mod tests {
         // 1. Mask the input with
         //   0000 1111 0101 0101
         // & 1111 0000 0000 1111
-        //   -------------------
+        //   ....................
         //   00000 0000 0000 0101
         // 2. Clear all bits in the cut-out where bit mask is 1
         //    Do this by negating the mask and AND'ing with uds_payload
         //   1111 0000 1010 1010
         // & 0000 1111 1111 0000
-        //   -------------------
+        //   ....................
         //   0000 0000 1010 0000
         // 3. OR the results of step 1 and step 2
         //   0000 0000 0000 0101
         // | 0000 0000 1010 0000
-        //   -------------------
+        //   ...................
         //   0000 0000 1010 0101
         assert_eq!(uds_payload, vec![0b0000_0000, 0b1010_0101]);
     }

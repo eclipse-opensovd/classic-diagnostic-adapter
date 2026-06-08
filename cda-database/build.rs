@@ -12,7 +12,8 @@
 
 #[cfg(any(feature = "gen-protos", feature = "gen-flatbuffers"))]
 const COPYRIGHT_HEADER: &str = r"/*
- * Copyright (c) 2025 The Contributors to Eclipse OpenSOVD (see CONTRIBUTORS)
+ * SPDX-License-Identifier: Apache-2.0
+ * SPDX-FileCopyrightText: 2026 The Contributors to Eclipse OpenSOVD (see CONTRIBUTORS)
  *
  * See the NOTICE file(s) distributed with this work for additional
  * information regarding copyright ownership.
@@ -20,9 +21,10 @@ const COPYRIGHT_HEADER: &str = r"/*
  * This program and the accompanying materials are made available under the
  * terms of the Apache License Version 2.0 which is available at
  * https://www.apache.org/licenses/LICENSE-2.0
- *
- * SPDX-License-Identifier: Apache-2.0
  */
+
+// This file is @generated - do not edit manually.
+#![allow(clippy::all, warnings)]
 
 ";
 #[cfg(any(feature = "gen-protos", feature = "gen-flatbuffers"))]
@@ -30,6 +32,14 @@ fn prepend_copyright(file_path: &str) -> std::io::Result<()> {
     let content = std::fs::read_to_string(file_path)?;
     let new_content = format!("{COPYRIGHT_HEADER}{content}");
     std::fs::write(file_path, new_content)?;
+    Ok(())
+}
+
+#[cfg(feature = "gen-flatbuffers")]
+fn normalize_trailing_newline(file_path: &str) -> std::io::Result<()> {
+    let content = std::fs::read_to_string(file_path)?;
+    let normalized = format!("{}\n", content.trim_end_matches('\n'));
+    std::fs::write(file_path, normalized)?;
     Ok(())
 }
 
@@ -163,6 +173,7 @@ fn generate_flatbuffers() -> std::io::Result<()> {
     let final_file = format!("{output_dir}{schema_name}.rs");
     std::fs::rename(generated_file, &final_file)?;
     prepend_copyright(&final_file)?;
+    normalize_trailing_newline(&final_file)?;
 
     Ok(())
 }

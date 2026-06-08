@@ -35,3 +35,6 @@ mbedtls-4*
 
 # binary files (used in integration tests)
 *.bin
+
+# macOS metadata
+.DS_Store

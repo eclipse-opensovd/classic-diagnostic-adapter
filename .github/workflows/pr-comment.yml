@@ -1,0 +1,30 @@
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: 2026 The Contributors to Eclipse OpenSOVD (see CONTRIBUTORS)
+#
+# See the NOTICE file(s) distributed with this work for additional
+# information regarding copyright ownership.
+#
+# This program and the accompanying materials are made available under the
+# terms of the Apache License Version 2.0 which is available at
+# https://www.apache.org/licenses/LICENSE-2.0
+
+# Post PR comments from artifacts produced by the "Rust CI" workflow.
+# This workflow_run trigger runs in the context of the base repository, so
+# it has write permissions even when the PR originates from a fork.
+
+name: Post PR Comments
+
+on:
+  workflow_run:
+    workflows: ["Rust CI"]
+    types: [completed]
+
+jobs:
+  post:
+    if: github.event.workflow_run.event == 'pull_request'
+    uses: eclipse-opensovd/cicd-workflows/.github/workflows/post-pr-comments.yml@e5e7addf1d63b31646b52c30cacacd5934b623e1
+    with:
+      run-id: ${{ github.event.workflow_run.id }}
+    permissions:
+      actions: read
+      pull-requests: write

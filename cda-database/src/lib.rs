@@ -22,7 +22,7 @@ pub use mdd_data::{
 };
 use serde::{Deserialize, Serialize};
 
-// Allowed because this holds a set of independent configuration flags.
+// Allowed because it makes sense for a configuration to have more than 3 bools
 #[allow(clippy::struct_excessive_bools)]
 #[derive(Deserialize, Serialize, Clone, Debug, Default, schemars::JsonSchema)]
 pub struct DatabaseConfig {
@@ -51,4 +51,10 @@ pub struct DatabaseConfig {
     /// When `false` (default), unexpected parameters trigger a warning log but
     /// are otherwise ignored.
     pub strict_parameter_validation: bool,
+    /// When `true`, the application will exit with an error if any key under
+    /// `[ecu.<name>]` in the configuration does not match a loaded MDD database.
+    ///
+    /// This helps catch typos in ECU names early. When `false` (default),
+    /// unmatched per-ECU config entries only produce a warning.
+    pub strict_ecu_config: bool,
 }

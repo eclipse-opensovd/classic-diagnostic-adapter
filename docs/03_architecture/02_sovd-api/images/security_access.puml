@@ -1,0 +1,118 @@
+' SPDX-License-Identifier: Apache-2.0
+' SPDX-FileCopyrightText: 2026 The Contributors to Eclipse OpenSOVD (see CONTRIBUTORS)
+'
+' See the NOTICE file(s) distributed with this work for additional
+' information regarding copyright ownership.
+'
+' This program and the accompanying materials are made available under the
+' terms of the Apache License Version 2.0 which is available at
+' https://www.apache.org/licenses/LICENSE-2.0
+
+@startuml
+title Security Access -- SID 27
+
+participant Client
+participant "HTTP Server\n(Axum)" as HTTP
+participant "Security\nMiddleware" as SEC
+participant "Modes Handler" as HANDLER
+participant "Diagnostic\nKernel" as DIAG
+participant "UDS / DoIP" as COMM
+participant ECU
+
+== GET current security level ==
+
+Client -> HTTP : GET /components/{ecu}/modes/security
+activate HTTP
+
+HTTP -> SEC : authenticate & authorize
+activate SEC
+SEC -> HTTP : OK
+deactivate SEC
+
+HTTP -> HANDLER : route to modes handler
+activate HANDLER
+
+HANDLER -> DIAG : get current security state
+activate DIAG
+DIAG -> HANDLER : current security level name
+deactivate DIAG
+
+HANDLER -> HTTP : JSON body
+deactivate HANDLER
+
+HTTP -> Client : HTTP 200 OK\n{ "name": "Security access", "value": "<level>" }
+deactivate HTTP
+
+== PUT requestSeed (no Key field) ==
+
+Client -> HTTP : PUT /components/{ecu}/modes/security\n{ "value": "<level>_RequestSeed" }
+activate HTTP
+
+HTTP -> SEC : authenticate & authorize
+activate SEC
+SEC -> HTTP : OK
+deactivate SEC
+
+HTTP -> HANDLER : route to modes handler
+activate HANDLER
+
+HANDLER -> DIAG : request seed (level name)
+activate DIAG
+
+DIAG -> DIAG : resolve state chart\n(level name -> SID 27 subfunction)
+
+DIAG -> COMM : send UDS request (requestSeed)
+activate COMM
+COMM -> ECU : DoIP -> UDS SecurityAccess\n(27 {subfunction})
+activate ECU
+ECU -> COMM : positive response\n(67 {subfunction} {seed})
+deactivate ECU
+COMM -> DIAG : raw UDS response
+deactivate COMM
+
+DIAG -> HANDLER : seed value
+deactivate DIAG
+
+HANDLER -> HTTP : JSON body
+deactivate HANDLER
+
+HTTP -> Client : HTTP 200 OK\n{ "id": "security",\n"seed": { "Request_Seed": "0xAB 0xCD 0xEF ..." } }
+deactivate HTTP
+
+== PUT sendKey (Key field present) ==
+
+Client -> HTTP : PUT /components/{ecu}/modes/security\n{ "value": "<level>",\n"Key": { "Send_Key": "0xAB 0xCD ..." } }
+activate HTTP
+
+HTTP -> SEC : authenticate & authorize
+activate SEC
+SEC -> HTTP : OK
+deactivate SEC
+
+HTTP -> HANDLER : route to modes handler
+activate HANDLER
+
+HANDLER -> DIAG : send key (level name, key)
+activate DIAG
+
+DIAG -> DIAG : resolve state chart\n(level name -> SID 27 subfunction+1)
+
+DIAG -> COMM : send UDS request (sendKey)
+activate COMM
+COMM -> ECU : DoIP -> UDS SecurityAccess\n(27 {subfunction+1} {key})
+activate ECU
+ECU -> COMM : positive response\n(67 {subfunction+1})
+deactivate ECU
+COMM -> DIAG : raw UDS response
+deactivate COMM
+
+DIAG -> HANDLER : security access granted
+deactivate DIAG
+
+HANDLER -> HTTP : JSON body
+deactivate HANDLER
+
+HTTP -> Client : HTTP 200 OK\n{ "id": "security", "value": "<level>" }
+deactivate HTTP
+
+@enduml

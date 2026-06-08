@@ -20,11 +20,11 @@ In this project, traceability is achieved through the use of `sphinx-needs`_ too
 .. _sphinx-needs: https://sphinx-needs.readthedocs.io
 
 
-Conventions
-===========
+Traceability Conventions
+------------------------
 
 Types
------
+^^^^^
 
 .. list-table:: Need Types and ID Patterns
    :header-rows: 1
@@ -66,7 +66,7 @@ Combining design and implementation reduces overhead, and is acceptable when the
 it's easier to show the design in code comments than in separate documents.
 
 Properties
-----------
+^^^^^^^^^^
 
 This section documents the metadata properties used on sphinx-needs items to support
 Automotive SPICE (ASPICE) process compliance. These properties enable consistent
@@ -74,7 +74,7 @@ classification, maturity tracking, and review workflows across all documentation
 
 
 Status
-^^^^^^
+""""""
 
 The ``:status:`` option tracks the maturity of each documentation item through its lifecycle.
 It applies to all need types (``req``, ``arch``, ``dsgn``, ``impl``, ``dimpl``, ``test``, ``itest``).
@@ -110,7 +110,7 @@ It applies to all need types (``req``, ``arch``, ``dsgn``, ``impl``, ``dimpl``, 
 Items without an explicit ``:status:`` should be treated as ``draft``.
 
 Lifecycle
-^^^^^^^^^
+"""""""""
 
 The typical status progression for an item is:
 
@@ -133,7 +133,7 @@ Items may transition to ``obsolete`` from any status when they are superseded or
 
 
 Requirement Type
-----------------
+^^^^^^^^^^^^^^^^
 
 The ``:type:`` option classifies requirements by their nature. This is primarily relevant
 for ``req`` needs, but may optionally be applied to ``arch`` and ``dsgn`` items for
@@ -174,7 +174,7 @@ additional classification.
 
 
 Code
-^^^^
+""""
 
 Code can be added to the traceability by utilizing sphinx-codelinks. The short format in a comment is as follows:
 
@@ -197,7 +197,7 @@ One-Line Example:
 
 
 Overviews
----------
+^^^^^^^^^
 
 **Software Requirements**
 

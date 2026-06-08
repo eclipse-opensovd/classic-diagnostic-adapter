@@ -18,6 +18,9 @@ path = [
   "CONTRIBUTORS",
   "LICENSES/**.txt",
   "**/.env.example",
+  "**/.gitkeep",
+  "**/.markdownlintignore",
+  "**/*.fbs",
 ]
 SPDX-FileCopyrightText = "The Contributors to Eclipse OpenSOVD (see CONTRIBUTORS)"
 SPDX-License-Identifier = "Apache-2.0"

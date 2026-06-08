@@ -121,6 +121,41 @@ pub(crate) struct DtcMinimal {
     pub(crate) emissions_related: bool,
 }
 
+#[derive(Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+#[allow(dead_code)]
+pub(crate) struct ExtDataRecord {
+    pub(crate) record_number: String,
+    pub(crate) data: String,
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+#[allow(dead_code)]
+pub(crate) struct SnapshotData {
+    pub(crate) did: String,
+    pub(crate) data: String,
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+#[allow(dead_code)]
+pub(crate) struct SnapshotRecord {
+    pub(crate) record_number: String,
+    pub(crate) records: Vec<SnapshotData>,
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+#[allow(dead_code)]
+pub(crate) struct DtcExtended {
+    pub(crate) id: String,
+    pub(crate) status_mask: String,
+    pub(crate) emissions_related: bool,
+    pub(crate) snapshots: Vec<SnapshotRecord>,
+    pub(crate) extended_data: Vec<ExtDataRecord>,
+}
+
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase", transparent)]
 #[allow(dead_code)]
@@ -168,12 +203,12 @@ fn sim_endpoint(sim: &EcuSim) -> Result<reqwest::Url, TestingError> {
     Ok(url)
 }
 
-/// Add a DTC to the ECU simulator
-pub(crate) async fn add_dtc(
+/// Add a DTC to the ECU simulator. Accepts either [`DtcMinimal`] or [`DtcExtended`].
+pub(crate) async fn add_dtc<T: serde::Serialize>(
     sim: &EcuSim,
     ecu: &str,
     fault_memory: &str,
-    dtc: &DtcMinimal,
+    dtc: &T,
 ) -> Result<(), TestingError> {
     let mut url = sim_endpoint(sim)?;
     url.path_segments_mut()

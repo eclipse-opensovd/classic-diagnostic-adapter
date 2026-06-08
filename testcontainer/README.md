@@ -18,6 +18,7 @@ and for some there are open issues to make them work.
 ## Test using docker compose
 
 ### Prerequisites
+
 - Docker and Docker Compose installed
 - ODX converter built (optional, for PDX to MDD conversion)
 
@@ -64,7 +65,7 @@ This step is only necessary when changes to the ECU database have been made.
 
 For normal operation / testing this is not needed.
 
-```
+```sh
 # Generate ODX files
 cd testcontainer/odx
 ./generate_docker.sh

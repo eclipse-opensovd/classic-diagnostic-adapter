@@ -37,14 +37,18 @@ It handles the communication to the ECUs, by using the communication parameters 
 
 1. Obtain one or more `.mdd` files (see prerequisites below).
 2. Start the CDA, pointing it at your databases directory and DoIP interface:
+
    ```shell
    cargo run --release -- --databases-path ./databases --tester-address <YOUR_IP>
    ```
+
 3. Wait a few seconds for DoIP discovery, then confirm the CDA found your ECUs:
+
    ```shell
    curl http://localhost:20002/vehicle/v15/components | jq
    ```
-4. Browse the full API interactively at **http://localhost:20002/swagger-ui**.
+
+4. Browse the full API interactively at **<http://localhost:20002/swagger-ui>**.
 
 ### prerequisites
 
@@ -55,8 +59,9 @@ Once you have the `MDD`(s) you can update the config in `opensovd-cda.toml` to p
 ### running
 
 Ensure that the config (`opensovd-cda.toml`) fits your setup:
- - tester_address is set to the IP of your DoIP interface.
- - databases_path points to a valid path containing one or more `.mdd` files.
+
+- tester_address is set to the IP of your DoIP interface.
+- databases_path points to a valid path containing one or more `.mdd` files.
 
 Run the cda via `cargo run --release` or after building from the target directory `./opensovd-cda`
 
@@ -78,9 +83,9 @@ cargo run --release -- --databases-path ./databases --tester-address <YOUR_IP> -
 
 ## building
 
-### prerequisites
+### prerequisites for building & sdk
 
-You need to install a rust compiler & sdk - we recommend using [rustup](https://rustup.rs/) for this.
+We recommend using [rustup](https://rustup.rs/) for this.
 The minimum required version of the toolchain is [Rust 1.88.0](https://blog.rust-lang.org/2025/06/26/Rust-1.88.0/).
 
 ### build the executable
@@ -89,12 +94,32 @@ The minimum required version of the toolchain is [Rust 1.88.0](https://blog.rust
 cargo build --release
 ```
 
+### Windows
+
+Prerequisite:
+
+- Build Toolchain for Windows
+- OpenSSL (if targeting the OpenSSL build)
+   `winget install openssl`
+
+#### Setup Env
+
+```pwsh
+$env:CMAKE_GENERATOR="Ninja"
+$env:OPENSSL_DIR="C:\Program Files\OpenSSL-Win64"
+$env:OPENSSL_LIB_DIR="C:\Program Files\OpenSSL-Win64\lib\VC\x64\MD"
+$env:OPENSSL_INCLUDE_DIR="C:\Program Files\OpenSSL-Win64\include"
+```
+
 ## developing
 
 ### pre commit
+
 ```shell
-uv run https://raw.githubusercontent.com/eclipse-opensovd/cicd-workflows/main/run_checks.py
+uv run --group tools prek run
 ```
+
+Install this command as documented here: <https://git-scm.com/book/en/v2/Customizing-Git-Git-Hooks>
 
 ### codestyle
 
@@ -105,6 +130,7 @@ see [codestyle](CODESTYLE.md)
 #### unit tests
 
 Unittests are placed in the relevant module as usual in rust:
+
 ```rust
 ...
 #[cfg(test)]
@@ -114,6 +140,7 @@ mod test {
 ```
 
 Run unit tests with:
+
 ```shell
 cargo test --locked --lib
 ```
@@ -121,12 +148,13 @@ cargo test --locked --lib
 #### integration tests
 
 Integration tests are located in the `integration-tests/` directory and test the complete CDA system end-to-end, including:
+
 - SOVD API endpoints
 - ECU communication via DoIP
 - Session management and locking
 
-
 The integration test framework automatically manages the test environment by:
+
 1. Starting an ECU simulator
 2. Starting the CDA with appropriate configuration
 3. Running tests against the running system
@@ -158,7 +186,7 @@ cargo test --locked --features integration-tests
 ```
 
 When running without Docker, the ECU simulator and CDA will run as local processes with default ports (20002 for CDA, 13400 for DoIP gateway, 8181 for ECU sim control).
-Furthermore the local setup does _not_ automatically build the MDD files from ODX data, so ensure that the required MDD files are already present.
+Furthermore the local setup does *not* automatically build the MDD files from ODX data, so ensure that the required MDD files are already present.
 
 ##### environment variables
 
@@ -170,6 +198,7 @@ The integration test framework supports the following environment variables:
   - `false`: Runs services as local processes (useful for debugging)
 
   Example:
+
   ```shell
   export CDA_INTEGRATION_TEST_USE_DOCKER=false
   ```
@@ -179,6 +208,7 @@ The integration test framework supports the following environment variables:
   Some systems may require using a specific interface address (e.g., `127.0.0.1` or a specific network interface IP) for proper ECU simulator connectivity.
 
   Example:
+
   ```shell
   export CDA_INTEGRATION_TEST_TESTER_ADDRESS=127.0.0.1
   ```
@@ -186,12 +216,14 @@ The integration test framework supports the following environment variables:
 ##### test structure
 
 Tests use a shared runtime to avoid repeatedly starting/stopping the CDA and ECU simulator:
+
 - Tests can request exclusive or shared access to the test runtime
 - Exclusive tests hold a mutex lock to prevent concurrent execution
 - The test framework automatically finds available ports when using Docker
 - Test resources (Docker containers, processes) are automatically cleaned up on exit
 
 Example test:
+
 ```rust
 #[tokio::test]
 async fn test_ecu_session_switching() {
@@ -206,6 +238,7 @@ async fn test_ecu_session_switching() {
 ```
 
 ### generate module dependency graph for workspace
+
 With the help of [cargo-depgraph](https://github.com/jplatte/cargo-depgraph) a simple diagram showing
 the relations between the workspace crates can be generated. To create a png from the output of
 cargo-depgraph, [Graphviz](https://graphviz.org/) is required.
@@ -215,20 +248,24 @@ cargo depgraph --target-deps --dedup-transitive-deps --workspace-only | dot -Tpn
 ```
 
 ### build with tokio-tracing for tokio-console
+
 To analyze the runtime during execution you can build and run the cda with
 [tokio-console](https://github.com/tokio-rs/console) support.
 
 #### install tokio-console
+
 ```shell
 cargo install --locked tokio-console
 ```
 
 You need to enable tokio-experimental in the rustflags.
+
 ```shell
 RUSTFLAGS="--cfg tokio_unstable" cargo run --release --features tokio-tracing
 ```
 
 If you don't want to specify the env all the time, you can add this to your `.cargo/config.toml`
+
 ```toml
 [build]
 rustflags = ["--cfg", "tokio_unstable"]
@@ -236,8 +273,6 @@ rustflags = ["--cfg", "tokio_unstable"]
 
 In a second terminal window start `tokio-console` and it should automatically connect.
 
-
-
 ### architecture
 
-see [overview](docs/architecture/index.adoc)
+see [overview](https://eclipse-opensovd.github.io/classic-diagnostic-adapter/03_architecture/index.html)

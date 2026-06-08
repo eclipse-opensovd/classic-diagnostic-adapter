@@ -8,6 +8,18 @@
 # terms of the Apache License Version 2.0 which is available at
 # https://www.apache.org/licenses/LICENSE-2.0
 
+from helper import (
+    derived_id,
+    did_parameter_rq,
+    find_dop_by_shortname,
+    find_unit_by_shortname,
+    functional_class_ref,
+    matching_request_parameter_did,
+    ref,
+    sid_parameter_pr,
+    sid_parameter_rq,
+    texttable_int_str_dop,
+)
 from odxtools.compumethods.compucategory import CompuCategory
 from odxtools.compumethods.identicalcompumethod import IdenticalCompuMethod
 from odxtools.dataobjectproperty import DataObjectProperty
@@ -24,19 +36,6 @@ from odxtools.response import Response, ResponseType
 from odxtools.standardlengthtype import StandardLengthType
 from odxtools.termination import Termination
 from packaging.version import Version
-
-from helper import (
-    derived_id,
-    sid_parameter_rq,
-    sid_parameter_pr,
-    ref,
-    functional_class_ref,
-    matching_request_parameter_did,
-    did_parameter_rq,
-    texttable_int_str_dop,
-    find_dop_by_shortname,
-    find_unit_by_shortname,
-)
 from security_access import add_state_chart_security_access
 from sessions import add_default_session_services, add_state_chart_session
 
@@ -71,9 +70,7 @@ def add_common_datatypes(dlr: DiagLayerRaw):
                 internal_type=DataType.A_UINT32,
             ),
             physical_type=PhysicalType(base_data_type=DataType.A_UINT32),
-            diag_coded_type=StandardLengthType(
-                base_data_type=DataType.A_UINT32, bit_length=8
-            ),
+            diag_coded_type=StandardLengthType(base_data_type=DataType.A_UINT32, bit_length=8),
         )
     )
 
@@ -83,9 +80,7 @@ def add_common_datatypes(dlr: DiagLayerRaw):
             short_name="IDENTICAL_UINT_16",
             compu_method=compu_method_identical_uint32,
             physical_type=PhysicalType(base_data_type=DataType.A_UINT32),
-            diag_coded_type=StandardLengthType(
-                base_data_type=DataType.A_UINT32, bit_length=16
-            ),
+            diag_coded_type=StandardLengthType(base_data_type=DataType.A_UINT32, bit_length=16),
         )
     )
 
@@ -95,9 +90,7 @@ def add_common_datatypes(dlr: DiagLayerRaw):
             short_name="IDENTICAL_UINT_32",
             compu_method=compu_method_identical_uint32,
             physical_type=PhysicalType(base_data_type=DataType.A_UINT32),
-            diag_coded_type=StandardLengthType(
-                base_data_type=DataType.A_UINT32, bit_length=32
-            ),
+            diag_coded_type=StandardLengthType(base_data_type=DataType.A_UINT32, bit_length=32),
         )
     )
 
@@ -126,9 +119,7 @@ def add_common_datatypes(dlr: DiagLayerRaw):
                 internal_type=DataType.A_INT32,
             ),
             physical_type=PhysicalType(base_data_type=DataType.A_INT32),
-            diag_coded_type=StandardLengthType(
-                base_data_type=DataType.A_INT32, bit_length=32
-            ),
+            diag_coded_type=StandardLengthType(base_data_type=DataType.A_INT32, bit_length=32),
             unit_ref=ref(find_unit_by_shortname(dlr, "Watt")),
         )
     )
@@ -143,9 +134,7 @@ def add_common_datatypes(dlr: DiagLayerRaw):
                 internal_type=DataType.A_FLOAT32,
             ),
             physical_type=PhysicalType(base_data_type=DataType.A_FLOAT32),
-            diag_coded_type=StandardLengthType(
-                base_data_type=DataType.A_FLOAT32, bit_length=32
-            ),
+            diag_coded_type=StandardLengthType(base_data_type=DataType.A_FLOAT32, bit_length=32),
             unit_ref=ref(find_unit_by_shortname(dlr, "GigaWatt")),
         )
     )
@@ -306,14 +295,10 @@ def add_ident_service(dlr: DiagLayerRaw):
             internal_type=DataType.A_UINT32,
         ),
         physical_type=PhysicalType(base_data_type=DataType.A_UINT32),
-        diag_coded_type=StandardLengthType(
-            base_data_type=DataType.A_UINT32, bit_length=24
-        ),
+        diag_coded_type=StandardLengthType(base_data_type=DataType.A_UINT32, bit_length=24),
     )
     dlr.diag_data_dictionary_spec.data_object_props.append(uint24_dop)
-    add_service_did(
-        dlr, "Identification", "Identification", 0xF100, uint24_dop, add_write=False
-    )
+    add_service_did(dlr, "Identification", "Identification", 0xF100, uint24_dop, add_write=False)
 
 
 def add_session_type_service(dlr: DiagLayerRaw):

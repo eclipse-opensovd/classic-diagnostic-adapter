@@ -8,7 +8,25 @@
 # terms of the Apache License Version 2.0 which is available at
 # https://www.apache.org/licenses/LICENSE-2.0
 
+
 import odxtools
+from authentication import add_authentication_services
+from communication_control import add_communication_control_services
+from comparams import generate_comparam_refs, generate_minimal_comparam_refs
+from dtc_services import (
+    add_dtc_clear_services,
+    add_dtc_clear_user_memory_service,
+    add_dtc_read_services,
+    add_dtc_setting_services,
+)
+from functional_groups import generate_functional_groups
+from helper import ref
+from metadata import (
+    add_additional_audiences,
+    add_admin_data,
+    add_company_datas,
+    add_functional_classes,
+)
 from odxtools.database import Database
 from odxtools.diagdatadictionaryspec import DiagDataDictionarySpec
 from odxtools.diaglayercontainer import DiagLayerContainer
@@ -19,41 +37,22 @@ from odxtools.diaglayers.ecuvariant import EcuVariant
 from odxtools.diaglayers.ecuvariantraw import EcuVariantRaw
 from odxtools.ecuvariantpattern import EcuVariantPattern
 from odxtools.matchingparameter import MatchingParameter
-from odxtools.odxlink import OdxLinkId, DocType, OdxDocFragment
+from odxtools.odxlink import DocType, OdxDocFragment, OdxLinkId
 from odxtools.parentref import ParentRef
 from odxtools.specialdata import SpecialData
 from odxtools.specialdatagroup import SpecialDataGroup
 from odxtools.specialdatagroupcaption import SpecialDataGroupCaption
-
-from authentication import add_authentication_services
-from communication_control import add_communication_control_services
-from comparams import generate_comparam_refs
-from functional_groups import generate_functional_groups
-from helper import ref
-from metadata import (
-    add_functional_classes,
-    add_admin_data,
-    add_company_datas,
-    add_additional_audiences,
-)
 from reset import add_reset_services
 from routine_control import add_routine_control_services
 from security_access import add_security_access_services
 from shared import (
     add_common_datatypes,
-    add_state_charts,
     add_common_diag_comms,
     add_power_consumption_service,
-)
-from dtc_services import (
-    add_dtc_clear_services,
-    add_dtc_clear_user_memory_service,
-    add_dtc_read_services,
-    add_dtc_setting_services,
+    add_state_charts,
 )
 from shared_units import add_common_units
 from transferdata import add_transfer_services
-from typing import List, Tuple
 
 
 def add_variant(dlc: DiagLayerContainer, name: str, identification_pattern: int):
@@ -116,7 +115,7 @@ def add_base_variant(
     gateway_address: int,
     functional_address: int,
     database: Database,
-    sdgs: list[SpecialDataGroup] = None,
+    sdgs: list[SpecialDataGroup] | None = None,
 ):
     ecu_name = dlc.short_name
     doc_frags = dlc.odx_id.doc_fragments
@@ -200,7 +199,7 @@ def generate_for_ecu(
     logical_address: int,
     gateway_address: int,
     functional_address: int,
-    variants: List[Tuple[str, int]],
+    variants: list[tuple[str, int]],
 ):
     print(f"Generating for {ecu_name}")
     database = Database()
@@ -249,6 +248,120 @@ def generate_for_ecu(
     odxtools.write_pdx_file(f"{ecu_name}.pdx", database)
 
 
+def generate_for_ecu_minimal_comparams(
+    ecu_name: str,
+    logical_address: int,
+    variants: list[tuple[str, int]],
+    protocol_snref: str | None = None,
+):
+    """Generate an ECU database with only CP_UniqueRespIdTable as comparam.
+
+    Gateway and functional addresses are intentionally absent from the MDD so
+    that they can be supplied via the CDA's per-ECU config overrides.
+    """
+    print(f"Generating (minimal comparams) for {ecu_name}")
+    database = Database()
+    database.short_name = ecu_name
+
+    odx_files = [
+        "base/ISO_13400_2.odx-cs",
+        "base/ISO_14229_5.odx-cs",
+        "base/ISO_14229_5_on_ISO_13400_2.odx-c",
+    ]
+    if protocol_snref is not None:
+        odx_files.append("base/DMC_DoIP.odx-d")
+
+    for odx_filename in odx_files:
+        database.add_odx_file(odx_filename)
+
+    database.refresh()
+
+    doc_frags = (OdxDocFragment(ecu_name, DocType.CONTAINER),)
+
+    dlc = DiagLayerContainer(
+        odx_id=OdxLinkId(f"DLC.{ecu_name}", doc_fragments=doc_frags),
+        short_name=ecu_name,
+    )
+    add_admin_data(dlc)
+    add_company_datas(dlc)
+    add_additional_audiences(dlc)
+
+    # Use minimal comparam refs - only CP_UniqueRespIdTable
+    _add_base_variant_minimal_comparams(
+        dlc=dlc,
+        logical_address=logical_address,
+        database=database,
+        protocol_snref=protocol_snref,
+    )
+
+    for variant_name, identification_pattern in variants:
+        add_variant(
+            dlc=dlc,
+            name=f"{ecu_name}_{variant_name}",
+            identification_pattern=identification_pattern,
+        )
+
+    database.diag_layer_containers.append(dlc)
+    database.refresh()
+    odxtools.write_pdx_file(f"{ecu_name}.pdx", database)
+
+
+def _add_base_variant_minimal_comparams(
+    dlc: DiagLayerContainer,
+    logical_address: int,
+    database: Database,
+    protocol_snref: str | None = None,
+):
+    """Like add_base_variant but uses generate_minimal_comparam_refs."""
+    ecu_name = dlc.short_name
+    doc_frags = dlc.odx_id.doc_fragments
+    base_variant = BaseVariantRaw(
+        odx_id=OdxLinkId(local_id=f"BV.{ecu_name}", doc_fragments=doc_frags),
+        short_name=ecu_name,
+        comparam_refs=generate_minimal_comparam_refs(
+            ecu_name=ecu_name,
+            logical_address=logical_address,
+            database=database,
+            protocol_snref=protocol_snref,
+        ),
+        variant_type=DiagLayerType.BASE_VARIANT,
+        parent_refs=[
+            ParentRef(
+                layer_ref=ref(
+                    OdxLinkId(
+                        local_id=f"PROTO.{protocol_snref}",
+                        doc_fragments=(
+                            OdxDocFragment(doc_name=protocol_snref, doc_type=DocType.CONTAINER),
+                        ),
+                    )
+                )
+            ),
+        ]
+        if protocol_snref is not None
+        else [],
+        diag_data_dictionary_spec=DiagDataDictionarySpec(),
+        sdgs=get_default_sdgs(dlc, ecu_name),
+    )
+
+    add_functional_classes(base_variant)
+    add_common_units(base_variant)
+    add_common_datatypes(base_variant)
+    add_state_charts(base_variant)
+
+    add_common_diag_comms(base_variant)
+    add_reset_services(base_variant)
+    add_communication_control_services(base_variant)
+    add_authentication_services(base_variant)
+    add_transfer_services(base_variant)
+    add_dtc_setting_services(base_variant)
+    add_dtc_read_services(base_variant)
+    add_dtc_clear_services(base_variant)
+    add_dtc_clear_user_memory_service(base_variant)
+    add_routine_control_services(base_variant)
+
+    dlc.base_variants.append(BaseVariant(diag_layer_raw=base_variant))
+
+
 generate_for_ecu(
     ecu_name="FLXC1000",
     logical_address=0x1000,
@@ -258,7 +371,8 @@ generate_for_ecu(
 )
 
 # mirror a use-case, where for different markets different hardware revisions
-# (for whatever reason) are used, but due to having the same function, the logical address would be the same.
+# (for whatever reason) are used, but due to having the same function,
+# the logical address would be the same.
 # The CDA should be able to differentiate those variants based on the variant response.
 # During variant detection on of the ECUs is selected, whereas the other is marked as duplicate.
 generate_for_ecu(
@@ -275,6 +389,42 @@ generate_for_ecu(
     gateway_address=0x2000,
     functional_address=0xFFFF,
     variants=[("Boot_Variant", 0xFF0000), ("App_0101", 0x000101)],
+)
+
+# TMCC3000 - Time Machine Control Computer
+# CP_UniqueRespIdTable is present so the CDA resolves the ECU logical address.
+# CP_DoIPLogicalGatewayAddress is present with a *wrong* value (0xDEAD) so
+# that the integration test can verify precedence = "Config" overrides the DB.
+# The correct gateway address (0x3000) is supplied via per-ECU config.
+# No protocol is referenced (no parent_ref, no protocol_snref), so
+# ignore_protocol must be enabled.
+generate_for_ecu_minimal_comparams(
+    ecu_name="TMCC3000",
+    logical_address=0x3000,
+    variants=[("App_0101", 0x000301)],
+)
+
+# HOVR4000 - Hover conversion.
+# Uses DMC_DoIP as protocol short-name (differs from the global default
+# UDS_Ethernet_DoIP_DOBT), so the CDA must be configured with a per-ECU
+# protocol override to load this ECU.
+generate_for_ecu_minimal_comparams(
+    ecu_name="HOVR4000",
+    logical_address=0x4000,
+    variants=[("App_0101", 0x000401)],
+    protocol_snref="DMC_DoIP",
+)
+
+# JGWT5000 - Jigowatt Power Regulator.
+# Uses DMC_DoIP as protocol short-name (doesn't match the global default
+# UDS_Ethernet_DoIP_DOBT), but unlike HOVR4000 there is NO per-ECU protocol
+# override. Instead, ignore_protocol is enabled so into_db_protocol falls
+# back to the single DB protocol and com-param lookup matches by name alone.
+generate_for_ecu_minimal_comparams(
+    ecu_name="JGWT5000",
+    logical_address=0x5000,
+    variants=[("App_0101", 0x000501)],
+    protocol_snref="DMC_DoIP",
 )
 
 generate_functional_groups("functional_groups.pdx")

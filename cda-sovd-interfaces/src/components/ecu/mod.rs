@@ -523,7 +523,7 @@ pub mod faults {
                 pub memory_selection: Option<u8>,
             }
 
-            #[derive(Serialize, schemars::JsonSchema)]
+            #[derive(Debug, Serialize, Deserialize, schemars::JsonSchema)]
             pub struct Snapshot {
                 #[serde(rename = "DTCSnapshotRecordNumberOfIdentifiers")]
                 pub number_of_identifiers: u64,
@@ -531,7 +531,7 @@ pub mod faults {
                 pub record: Vec<serde_json::Value>,
             }
 
-            #[derive(Serialize, schemars::JsonSchema)]
+            #[derive(Debug, Serialize, Deserialize, schemars::JsonSchema)]
             pub struct ExtendedSnapshots<T> {
                 #[serde(skip_serializing_if = "Option::is_none")]
                 pub data: Option<HashMap<String, Snapshot>>,
@@ -539,7 +539,7 @@ pub mod faults {
                 pub errors: Option<Vec<DataError<T>>>,
             }
 
-            #[derive(Serialize, schemars::JsonSchema)]
+            #[derive(Debug, Serialize, Deserialize, schemars::JsonSchema)]
             pub struct ExtendedDataRecords<T> {
                 #[serde(skip_serializing_if = "Option::is_none")]
                 pub data: Option<HashMap<String, serde_json::Value>>,
@@ -547,7 +547,7 @@ pub mod faults {
                 pub errors: Option<Vec<DataError<T>>>,
             }
 
-            #[derive(Serialize, schemars::JsonSchema)]
+            #[derive(Debug, Serialize, Deserialize, schemars::JsonSchema)]
             pub struct EnvironmentData<T> {
                 #[serde(skip_serializing_if = "Option::is_none")]
                 pub extended_data_records: Option<ExtendedDataRecords<T>>,
@@ -556,7 +556,7 @@ pub mod faults {
                 pub snapshots: Option<ExtendedSnapshots<T>>,
             }
 
-            #[derive(Serialize, schemars::JsonSchema)]
+            #[derive(Debug, Serialize, Deserialize, schemars::JsonSchema)]
             pub struct ExtendedFault<T> {
                 pub item: Fault,
                 #[serde(skip_serializing_if = "Option::is_none")]

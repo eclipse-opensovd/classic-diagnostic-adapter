@@ -12,6 +12,9 @@
 
 package webserver
 
+import ecu.DTCExtendedDataRecord
+import ecu.DTCSnapshotParameter
+import ecu.DTCSnapshotRecord
 import ecu.DTCStatusMask
 import ecu.DTCStatusMask.Companion.parse
 import ecu.DtcFault
@@ -64,11 +67,31 @@ fun DTCStatusMask.toDto() =
     )
 
 @Serializable
+class DTCSnapshotRecordDto(
+    var did: String,
+    var data: String,
+)
+
+@Serializable
+class DTCSnapshotParameterDto(
+    var recordNumber: String,
+    var records: List<DTCSnapshotRecordDto> = emptyList(),
+)
+
+@Serializable
+class DTCExtendedDataRecordDto(
+    var recordNumber: String,
+    var data: String,
+)
+
+@Serializable
 class DtcFaultDto(
     var id: String?,
     var status: DTCStatusMaskDto?,
     var statusMask: String?,
     var emissionsRelated: Boolean?,
+    var snapshots: List<DTCSnapshotParameterDto>? = null,
+    var extendedData: List<DTCExtendedDataRecordDto>? = null,
 )
 
 fun dtcFaultFromDto(dto: DtcFaultDto): DtcFault =
@@ -76,7 +99,34 @@ fun dtcFaultFromDto(dto: DtcFaultDto): DtcFault =
         id = dto.id!!.dtcToId(),
         status = statusMaskFromDto(dto.status, dto.statusMask),
         emissionsRelated = dto.emissionsRelated ?: false,
-        // TODO set snapshot and extendedData
+        snapshots =
+            dto.snapshots?.map { snapshotDto ->
+                DTCSnapshotParameter(
+                    recordNumber = snapshotDto.recordNumber.toUByte(16).toByte(),
+                    records =
+                        snapshotDto.records.map { recordDto ->
+                            object : DTCSnapshotRecord {
+                                override val did: UShort = recordDto.did.toUShort(16)
+                                override val data: ByteArray =
+                                    recordDto.data
+                                        .chunked(2)
+                                        .map { it.toUByte(16).toByte() }
+                                        .toByteArray()
+                            }
+                        },
+                )
+            } ?: emptyList(),
+        extendedData =
+            dto.extendedData?.map { extDto ->
+                object : DTCExtendedDataRecord {
+                    override val recordNumber: Byte = extDto.recordNumber.toUByte(16).toByte()
+                    override val asByteArray: ByteArray =
+                        extDto.data
+                            .chunked(2)
+                            .map { it.toUByte(16).toByte() }
+                            .toByteArray()
+                }
+            } ?: emptyList(),
     )
 
 fun DtcFault.toDto(): DtcFaultDto =
@@ -85,4 +135,32 @@ fun DtcFault.toDto(): DtcFaultDto =
         status = status.toDto(),
         statusMask = status.asByteArray.toHexString(),
         emissionsRelated = emissionsRelated,
+        snapshots =
+            snapshots.map { snapshot ->
+                DTCSnapshotParameterDto(
+                    recordNumber =
+                        snapshot.recordNumber
+                            .toUByte()
+                            .toString(16)
+                            .padStart(2, '0'),
+                    records =
+                        snapshot.records.map { record ->
+                            DTCSnapshotRecordDto(
+                                did = record.did.toString(16).padStart(4, '0'),
+                                data = record.data.toHexString(separator = ""),
+                            )
+                        },
+                )
+            },
+        extendedData =
+            extendedData.map { ext ->
+                DTCExtendedDataRecordDto(
+                    recordNumber =
+                        ext.recordNumber
+                            .toUByte()
+                            .toString(16)
+                            .padStart(2, '0'),
+                    data = ext.asByteArray.toHexString(separator = ""),
+                )
+            },
     )

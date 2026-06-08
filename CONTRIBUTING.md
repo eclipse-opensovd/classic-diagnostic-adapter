@@ -13,7 +13,7 @@ https://www.apache.org/licenses/LICENSE-2.0
 # Contributing
 
 Welcome to the OpenSOVD community. Start here for info on how to contribute and help improve our project.
-Please observe our [Community Code of Conduct](./CODE_OF_CONDUCT.md).
+Please observe our [Community Code of Conduct](https://github.com/eclipse-opensovd/opensovd/blob/main/CODE_OF_CONDUCT.md).
 
 ## How to Contribute
 

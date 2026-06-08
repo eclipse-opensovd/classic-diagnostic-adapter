@@ -47,6 +47,8 @@ MDD Embedded Files API
 
     Other methods are not allowed (e.g. data can't be modified), and will return an HTTP 405 error code.
 
+    .. uml:: /03_architecture/02_sovd-api/03_extensions/images/mdd_embedded_files.puml
+
 .. todo:: OpenAPI?
 
 .. todo:: maybe move to a general bulk-data endpoint?

@@ -87,7 +87,7 @@ pub struct TokioTracingConfig {
 pub struct DltTracingConfig {
     /// DLT application ID, max 4 characters
     pub app_id: String,
-    /// DLT application description string.
+    /// DLT application description string, max 256 characters.
     pub app_description: String,
     /// Whether DLT tracing output is enabled.
     pub enabled: bool,

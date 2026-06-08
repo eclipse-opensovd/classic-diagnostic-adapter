@@ -1,0 +1,57 @@
+' SPDX-License-Identifier: Apache-2.0
+' SPDX-FileCopyrightText: 2026 The Contributors to Eclipse OpenSOVD (see CONTRIBUTORS)
+'
+' See the NOTICE file(s) distributed with this work for additional
+' information regarding copyright ownership.
+'
+' This program and the accompanying materials are made available under the
+' terms of the Apache License Version 2.0 which is available at
+' https://www.apache.org/licenses/LICENSE-2.0
+
+@startuml
+title DTC Setting -- SID 85
+
+participant Client
+participant "HTTP Server\n(Axum)" as HTTP
+participant "Security\nMiddleware" as SEC
+participant "Modes Handler" as HANDLER
+participant "Diagnostic\nKernel" as DIAG
+participant "UDS / DoIP" as COMM
+participant ECU
+
+Client -> HTTP : PUT /components/{ecu}/modes/dtcsetting\n{ "value": "off", "parameters": { ... } }
+activate HTTP
+
+HTTP -> SEC : authenticate & authorize
+activate SEC
+SEC -> HTTP : OK
+deactivate SEC
+
+HTTP -> HANDLER : route to modes handler
+activate HANDLER
+
+HANDLER -> DIAG : set DTC setting (value, parameters)
+activate DIAG
+
+DIAG -> DIAG : resolve service from MDD\n(value -> SID 85 subfunction)
+DIAG -> DIAG : encode parameters into\nUDS request payload
+
+DIAG -> COMM : send UDS request
+activate COMM
+COMM -> ECU : DoIP -> UDS ControlDTCSetting\n(85 {subfunction} {params})
+activate ECU
+ECU -> COMM : positive response\n(C5 {subfunction})
+deactivate ECU
+COMM -> DIAG : raw UDS response
+deactivate COMM
+
+DIAG -> HANDLER : DTC setting confirmed
+deactivate DIAG
+
+HANDLER -> HTTP : JSON body
+deactivate HANDLER
+
+HTTP -> Client : HTTP 200 OK\n{ "id": "dtcsetting", "value": "off" }
+deactivate HTTP
+
+@enduml

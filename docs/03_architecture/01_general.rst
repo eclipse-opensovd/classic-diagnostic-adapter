@@ -37,6 +37,8 @@ Storage Access
                 PermissionDenied(String)
                 TransactionError(String)
                 NoSpaceLeft(String)
+                Io(String)
+                Corruption(String)
                 Other(String)
             }
 
@@ -44,6 +46,7 @@ Storage Access
                 DiagnosticDatabase
                 DiagnosticDatabaseNextUpdate
                 DiagnosticDatabaseBackup
+                Configuration
                 Custom(String)
             }
 
@@ -67,7 +70,7 @@ Storage Access
 
             +interface Metadata {
                 +name() -> Result<String, StorageError>
-                +data_size() -> Result<usize, StorageError>
+                +data_size() -> Result<u64, StorageError>
                 +custom_props() -> Result<Vec<MetadataProperty>, StorageError>
             }
 
