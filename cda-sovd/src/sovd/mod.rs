@@ -461,8 +461,8 @@ pub async fn route<
         update_in_progress,
     };
 
-    let mut registry = EcuExecutionRegistry::default();
-    let router = components_route::<R, T, U>(state.clone(), &mut file_manager, &mut registry).await;
+    let registry = EcuExecutionRegistry::default();
+    let router = components_route::<R, T, U>(state.clone(), &mut file_manager, &registry).await;
 
     let vehicle_router = vehicle_route::<T, S>(state, router, functional_group_config)
         .await
@@ -598,7 +598,7 @@ async fn components_route<
 >(
     state: WebserverState<T>,
     file_manager: &mut HashMap<String, U>,
-    registry: &mut EcuExecutionRegistry,
+    registry: &EcuExecutionRegistry,
 ) -> Router<WebserverState<T>> {
     let mut router = Router::new().api_route(
         "/vehicle/v15/components",
@@ -628,7 +628,7 @@ async fn ecu_route<
     ecu_name: &str,
     state: &WebserverState<T>,
     file_manager: &mut HashMap<String, U>,
-    registry: &mut EcuExecutionRegistry,
+    registry: &EcuExecutionRegistry,
 ) -> Result<(String, Router), SovdError> {
     let ecu_lower = ecu_name.to_lowercase();
     let ecu_state = WebserverEcuState {
