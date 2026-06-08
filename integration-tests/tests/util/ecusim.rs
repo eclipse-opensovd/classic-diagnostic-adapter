@@ -43,6 +43,8 @@ pub(crate) enum SecurityAccess {
     Level05,
     #[serde(rename = "LEVEL_07")]
     Level07,
+    #[serde(rename = "LEVEL_09")]
+    Level09,
 }
 
 #[derive(Debug, Deserialize)]

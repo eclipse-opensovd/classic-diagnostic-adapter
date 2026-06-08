@@ -48,16 +48,18 @@ def add_state_chart_security_access(dlr: DiagLayerRaw):
     # todo use doc_frags
     # doc_frags = dlr.odx_id.doc_fragments
 
-    states = ["Locked", "Level_3", "Level_5", "Level_7"]
+    states = ["Locked", "Level_3", "Level_5", "Level_7", "Supplier"]
 
     state_transitions = [
         ("Locked", "Locked"),
         ("Locked", "Level_3"),
         ("Locked", "Level_5"),
         ("Locked", "Level_7"),
+        ("Locked", "Supplier"),
         ("Level_3", "Locked"),
         ("Level_5", "Locked"),
         ("Level_7", "Locked"),
+        ("Supplier", "Locked"),
     ]
 
     odx_id = derived_id(dlr, "SC.SecurityAccess")
@@ -189,6 +191,120 @@ def add_send_key_service(
     dlr.diag_comms_raw.append(service)
 
 
+def add_request_seed_service_labeled(
+    dlc: DiagLayerContainer,
+    dlr: DiagLayerRaw,
+    level: int,
+    label: str,
+    end_of_pdu_array_dop: DataObjectProperty,
+    prefix: str = "RequestSeed",
+):
+    """Add a RequestSeed service whose short name uses a semantic label instead
+    of the numeric level. The subfunction byte is
+    still the numeric level value."""
+    request = Request(
+        odx_id=derived_id(dlr, f"RQ.RQ_{prefix}_{label}"),
+        short_name=f"RQ_{prefix}_{label}",
+        parameters=NamedItemList(
+            [
+                sid_parameter_rq(0x27),
+                subfunction_rq(level, short_name="SecurityAccessType"),
+            ]
+        ),
+    )
+    dlr.requests.append(request)
+
+    response = Response(
+        odx_id=derived_id(dlr, f"PR.PR_{prefix}_{label}"),
+        short_name=f"PR_{prefix}_{label}",
+        parameters=NamedItemList(
+            [
+                sid_parameter_pr(0x27 + 0x40),
+                matching_request_parameter_subfunction("SecurityAccessType"),
+                ValueParameter(
+                    short_name="SecuritySeed",
+                    semantic="DATA",
+                    byte_position=2,
+                    dop_ref=ref(end_of_pdu_array_dop),
+                ),
+            ]
+        ),
+        response_type=ResponseType.POSITIVE,
+    )
+    dlr.positive_responses.append(response)
+
+    service = DiagService(
+        odx_id=derived_id(dlr, f"DC.{prefix}_{label}"),
+        short_name=f"{prefix}_{label}",
+        request_ref=ref(request),
+        pos_response_refs=[ref(response)],
+        functional_class_refs=[functional_class_ref(dlc, "SecurityAccess")],
+    )
+
+    dlr.diag_comms_raw.append(service)
+
+
+def add_send_key_service_labeled(
+    dlc: DiagLayerContainer,
+    dlr: DiagLayerRaw,
+    level: int,
+    label: str,
+    end_of_pdu_array_dop: DataObjectProperty,
+    prefix: str = "SendKey",
+):
+    """Add a SendKey service whose short name uses a semantic label instead of
+    the numeric level. The state transition is looked up as ``Locked_<label>``."""
+    request = Request(
+        odx_id=derived_id(dlr, f"RQ.RQ_{prefix}_{label}"),
+        short_name=f"RQ_{prefix}_{label}",
+        parameters=NamedItemList(
+            [
+                sid_parameter_rq(0x27),
+                subfunction_rq(level + 1),
+                ValueParameter(
+                    short_name="SecurityKey",
+                    semantic="DATA",
+                    byte_position=2,
+                    dop_ref=ref(end_of_pdu_array_dop),
+                ),
+            ]
+        ),
+    )
+    dlr.requests.append(request)
+
+    response = Response(
+        odx_id=derived_id(dlr, f"PR.PR_{prefix}_{label}"),
+        short_name=f"PR_{prefix}_{label}",
+        parameters=NamedItemList(
+            [
+                sid_parameter_pr(0x27 + 0x40),
+                matching_request_parameter_subfunction("SecurityAccessType"),
+            ]
+        ),
+        response_type=ResponseType.POSITIVE,
+    )
+    dlr.positive_responses.append(response)
+
+    neg_response = negative_response(dlr, short_name=f"NR_{prefix}_{label}")
+    dlr.negative_responses.append(neg_response)
+
+    stt = find_state_transition(dlc, f"Locked_{label}")
+
+    service = DiagService(
+        odx_id=derived_id(dlr, f"DC.{prefix}_{label}"),
+        short_name=f"{prefix}_{label}",
+        request_ref=ref(request),
+        pos_response_refs=[ref(response)],
+        neg_response_refs=[ref(neg_response)],
+        state_transition_refs=[
+            StateTransitionRef(ref_id=stt.odx_id.local_id, ref_docs=stt.odx_id.doc_fragments)
+        ],
+        functional_class_refs=[functional_class_ref(dlc, "SecurityAccess")],
+    )
+
+    dlr.diag_comms_raw.append(service)
+
+
 def add_security_access_services(dlc: DiagLayerContainer, dlr: DiagLayerRaw):
     end_of_pdu_array_dop = DataObjectProperty(
         odx_id=derived_id(dlr, "DOP.SecurityAccess_EndOfPduByteArray"),
@@ -222,6 +338,10 @@ def add_security_access_services(dlc: DiagLayerContainer, dlr: DiagLayerRaw):
     # 27 06 SendKey_Level_5
     add_send_key_service(dlc, dlr, 5, end_of_pdu_array_dop)
     # 27 07 RequestSeed_Level_7
-    add_request_seed_service(dlc, dlr, 7, end_of_pdu_array_dop)
+    add_request_seed_service_labeled(dlc, dlr, 7, "Level_7", end_of_pdu_array_dop, "Request_Seed")
     # 27 08 SendKey_Level_7
-    add_send_key_service(dlc, dlr, 7, end_of_pdu_array_dop)
+    add_send_key_service_labeled(dlc, dlr, 7, "Level_7", end_of_pdu_array_dop, "Send_Key")
+    # 27 09 RequestSeed_Supplier  (no level number in short name)
+    add_request_seed_service_labeled(dlc, dlr, 9, "Supplier", end_of_pdu_array_dop)
+    # 27 0A SendKey_Supplier
+    add_send_key_service_labeled(dlc, dlr, 9, "Supplier", end_of_pdu_array_dop)

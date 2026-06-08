@@ -364,6 +364,22 @@ pub fn starts_with_ignore_ascii_case(text: &str, prefix: &str) -> bool {
     text.len() >= prefix.len() && text[..prefix.len()].eq_ignore_ascii_case(prefix)
 }
 
+/// Fast ASCII-only case-insensitive substring check without allocations.
+/// Returns true if `text` contains `needle` as a substring.
+#[inline]
+#[must_use]
+pub fn contains_ignore_ascii_case(text: &str, needle: &str) -> bool {
+    if needle.is_empty() {
+        return true;
+    }
+    if needle.len() > text.len() {
+        return false;
+    }
+    text.as_bytes()
+        .windows(needle.len())
+        .any(|window| window.eq_ignore_ascii_case(needle.as_bytes()))
+}
+
 /// Fast ASCII-only case-insensitive suffix check without allocations.
 /// Returns true if `text` ends with `suffix`.
 #[inline]

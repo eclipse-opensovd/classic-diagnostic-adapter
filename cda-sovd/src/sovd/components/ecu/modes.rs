@@ -406,6 +406,28 @@ pub(crate) mod security {
             .with(openapi::error_not_found)
     }
 
+    fn is_request_seed_value(input: &str) -> bool {
+        let parts: Vec<&str> = input.split('_').collect();
+        let last_is_request_seed = parts
+            .last()
+            .is_some_and(|last| last.eq_ignore_ascii_case("RequestSeed"));
+        parts.len() >= 2 && last_is_request_seed
+    }
+
+    fn level_from_value(input: &str) -> String {
+        let parts: Vec<&str> = input.split('_').collect();
+        let last_is_request_seed = parts
+            .last()
+            .is_some_and(|last| last.eq_ignore_ascii_case("RequestSeed"));
+        if parts.len() >= 2 && last_is_request_seed {
+            parts
+                .get(..parts.len().saturating_sub(1))
+                .map_or_else(|| input.to_string(), |slice| slice.join("_"))
+        } else {
+            input.to_string()
+        }
+    }
+
     pub(crate) async fn put<R: DiagServiceResponse, T: UdsEcu + Clone, U: FileManager>(
         UseApi(Secured(security_plugin), _): UseApi<Secured, ()>,
         WithRejection(Query(query), _): WithRejection<Query<sovd_modes::Query>, ApiError>,
@@ -420,20 +442,6 @@ pub(crate) mod security {
             ApiError,
         >,
     ) -> Response {
-        fn split_at_last_underscore(input: &str) -> (String, Option<String>) {
-            let parts: Vec<&str> = input.split('_').collect();
-
-            if parts.len() > 2 {
-                let last_part = parts.last().map(|s| (*s).to_string());
-                let remaining = parts
-                    .get(..parts.len().saturating_sub(1))
-                    .map_or_else(|| input.to_string(), |slice| slice.join("_"));
-                (remaining, last_part)
-            } else {
-                (input.to_string(), None)
-            }
-        }
-
         let claims = security_plugin.as_auth_plugin().claims();
         let include_schema = query.include_schema;
 
@@ -441,10 +449,11 @@ pub(crate) mod security {
             return value;
         }
 
-        let (level, request_seed_service) = split_at_last_underscore(&request_body.value);
+        let is_request_seed = is_request_seed_value(&request_body.value);
+        let level = level_from_value(&request_body.value);
         let key = request_body.key.map(|k| k.send_key);
 
-        if request_seed_service.is_some() && key.is_some() {
+        if is_request_seed && key.is_some() {
             return ErrorWrapper {
                 error: ApiError::BadRequest(
                     "RequestSeed and SendKey cannot be used at the same time.".to_string(),
@@ -453,7 +462,7 @@ pub(crate) mod security {
             }
             .into_response();
         }
-        if request_seed_service.is_none() && key.is_none() {
+        if !is_request_seed && key.is_none() {
             return ErrorWrapper {
                 error: ApiError::BadRequest(
                     "RequestSeed is not set but no key is given.".to_string(),
@@ -495,7 +504,6 @@ pub(crate) mod security {
             .set_ecu_security_access(
                 &ecu_name,
                 &level,
-                request_seed_service.as_ref(),
                 payload,
                 &(security_plugin as DynamicPlugin),
                 request_body.mode_expiration.map(Duration::from_secs),
