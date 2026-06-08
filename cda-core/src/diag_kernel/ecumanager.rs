@@ -165,7 +165,7 @@ struct DbCache {
 }
 
 impl DbCache {
-    pub(crate) async fn reset(&mut self) {
+    pub(crate) async fn reset(&self) {
         self.diag_services.write().await.clear();
     }
 }
@@ -4290,7 +4290,7 @@ impl<S: SecurityPlugin> EcuManager<S> {
         &self,
         mapped_service: &datatypes::DiagService,
         uds_payload: &mut Payload,
-        data: &mut MappedDiagServiceResponsePayload,
+        data: &MappedDiagServiceResponsePayload,
         repeated_dop: &datatypes::DopField,
         start: usize,
     ) -> Result<(HashMap<String, DiagDataTypeContainer>, usize), DiagServiceError> {
