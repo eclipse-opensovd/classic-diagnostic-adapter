@@ -419,14 +419,22 @@ pub(crate) mod executions {
         {
             return resp.into_response();
         }
-        //
+
         route_state
             .plugin
             .start_execution(body.mode)
             .await
             .map_or_else(
                 |e| DbUpdateErrorResponse::new(e, route_state.retry_after_seconds).into_response(),
-                |id| (StatusCode::ACCEPTED, Json(serde_json::json!({ "id": id }))).into_response(),
+                |id| {
+                    (
+                        StatusCode::ACCEPTED,
+                        Json(
+                            sovd_interfaces::apps::sovd2uds::bulk_data::runtimefiles::ExecutionCreatedResponse { id },
+                        ),
+                    )
+                        .into_response()
+                },
             )
     }
 
@@ -437,11 +445,9 @@ pub(crate) mod executions {
         match route_state.plugin.get_execution_status(&id).await {
             Some(exec) => (
                 StatusCode::OK,
-                Json(serde_json::json!({
-                    "id": exec.id,
-                    "mode": format!("{:?}", exec.mode),
-                    "status": format!("{:?}", exec.status),
-                })),
+                Json(
+                    sovd_interfaces::apps::sovd2uds::bulk_data::runtimefiles::ExecutionResponse::from(exec),
+                ),
             )
                 .into_response(),
             None => StatusCode::NOT_FOUND.into_response(),

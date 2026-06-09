@@ -23,13 +23,61 @@ pub mod sovd2uds {
         }
 
         pub mod runtimefiles {
-            pub use cda_interfaces::runtime_update_api::{ExecutionMode, RuntimeFilesQuery};
+            pub use cda_interfaces::runtime_update_api::{
+                ExecutionMode, ExecutionStatus, RuntimeFilesQuery, UpdateExecution,
+            };
 
             /// Request body for an execution.
             #[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
             pub struct ExecutionRequest {
                 /// The operation to perform on the staged runtime files.
                 pub mode: ExecutionMode,
+            }
+
+            /// The discriminant of an execution's status without the inner payload.
+            #[derive(Debug, serde::Serialize, schemars::JsonSchema)]
+            #[serde(rename_all = "lowercase")]
+            pub enum ExecutionStatusKind {
+                Running,
+                Completed,
+                Failed,
+            }
+
+            /// Response body returned by `POST /executions`.
+            #[derive(Debug, serde::Serialize, schemars::JsonSchema)]
+            pub struct ExecutionCreatedResponse {
+                /// Unique execution identifier assigned by the server.
+                pub id: String,
+            }
+
+            /// Response body returned by `GET /executions/{id}`.
+            #[derive(Debug, serde::Serialize, schemars::JsonSchema)]
+            pub struct ExecutionResponse {
+                /// Unique execution identifier.
+                pub id: String,
+                /// The operation that was requested.
+                pub mode: ExecutionMode,
+                /// Current lifecycle state of the execution.
+                pub status: ExecutionStatusKind,
+                /// Human-readable failure description, present only when `status` is `failed`.
+                #[serde(skip_serializing_if = "Option::is_none")]
+                pub reason: Option<String>,
+            }
+
+            impl From<UpdateExecution> for ExecutionResponse {
+                fn from(exec: UpdateExecution) -> Self {
+                    let (status, reason) = match exec.status {
+                        ExecutionStatus::Running => (ExecutionStatusKind::Running, None),
+                        ExecutionStatus::Completed => (ExecutionStatusKind::Completed, None),
+                        ExecutionStatus::Failed(msg) => (ExecutionStatusKind::Failed, Some(msg)),
+                    };
+                    Self {
+                        id: exec.id,
+                        mode: exec.mode,
+                        status,
+                        reason,
+                    }
+                }
             }
         }
     }
