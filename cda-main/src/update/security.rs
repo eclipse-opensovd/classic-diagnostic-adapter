@@ -99,7 +99,7 @@ impl<
                 })?;
             }
             UpdateFileType::Config => {
-                let content = std::fs::read_to_string(path).map_err(|e| {
+                let content = tokio::fs::read_to_string(path).await.map_err(|e| {
                     VerificationError(format!("Failed to read config '{}': {e}", path.display()))
                 })?;
                 toml::from_str::<crate::config::configfile::Configuration>(&content).map_err(

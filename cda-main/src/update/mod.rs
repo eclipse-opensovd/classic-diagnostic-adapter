@@ -181,7 +181,8 @@ async fn reload_configuration_from_path(
     config: &Arc<RwLock<crate::config::configfile::Configuration>>,
     config_path: PathBuf,
 ) -> Result<(), ReloadError> {
-    let content = std::fs::read_to_string(&config_path)
+    let content = tokio::fs::read_to_string(&config_path)
+        .await
         .map_err(|e| ReloadError(format!("Failed to read config: {e}")))?;
     let parsed = toml::from_str(&content)
         .map_err(|e| ReloadError(format!("Failed to parse config: {e}")))?;
