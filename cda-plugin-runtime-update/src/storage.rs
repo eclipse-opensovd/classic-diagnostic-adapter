@@ -292,17 +292,14 @@ pub async fn compute_nextupdate_state(
     storage: &impl Storage,
     query: &RuntimeFilesQuery,
 ) -> Result<BulkDataList, RuntimeUpdateError> {
-    let compute = async |collection_next: &CollectionName|
-           -> Result<Vec<BulkDataDescriptor>, RuntimeUpdateError> {
-        match storage.get_collection(collection_next).await {
-            Ok(_) => Ok(get_collection_items(storage, collection_next, query).await?),
-            Err(StorageError::CollectionNotFound(_)) => Ok(vec![]),
-            Err(e) => Err(RuntimeUpdateError::from(e)),
-        }
-    };
-
-    let mdd_items = compute(&CollectionName::DiagnosticDatabaseNextUpdate).await?;
-    let config_items = compute(&CollectionName::ConfigurationNextUpdate).await?;
+    let mdd_items = get_collection_items(
+        storage,
+        &CollectionName::DiagnosticDatabaseNextUpdate,
+        query,
+    )
+    .await?;
+    let config_items =
+        get_collection_items(storage, &CollectionName::ConfigurationNextUpdate, query).await?;
 
     let mut items = mdd_items;
     items.extend(config_items);

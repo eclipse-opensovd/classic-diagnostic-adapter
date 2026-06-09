@@ -65,7 +65,7 @@ impl<
         }
         if self.guard.has_active_operations() {
             return Err(RuntimeUpdateError::OperationsInProgress(
-                "Another operation operation is running already (i.e. flash transfer)".to_owned(),
+                "Another operation is running already (i.e. flash transfer)".to_owned(),
             ));
         }
 
