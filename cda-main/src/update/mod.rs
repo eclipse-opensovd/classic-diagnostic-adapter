@@ -18,9 +18,7 @@ use cda_core::{DiagServiceResponseStruct, EcuManager};
 use cda_interfaces::{
     UdsEcu,
     datatypes::ComponentsConfig,
-    runtime_update_api::{
-        ReloadError, RuntimeFilesUpdatePlugin, RuntimeFilesUpdateSecurityHandler,
-    },
+    runtime_update_api::{ReloadError, RuntimeFilesUpdateSecurityHandler},
 };
 use cda_plugin_security::{SecurityPlugin, SecurityPluginLoader};
 use tokio::sync::RwLock;
@@ -215,15 +213,45 @@ pub struct RuntimeUpdateContext<
     pub variant_detection_handle: tokio::task::JoinHandle<()>,
 }
 
-/// Registers the runtime update routes on the dynamic router using the provided context.
+/// Registers the runtime update routes on the dynamic router using the provided plugin.
 ///
-/// Initializes the reload handler, storage backend, and update plugin from the given
-/// [`RuntimeUpdateContext`], then delegates to [`cda_sovd::add_runtime_update_routes`] to
-/// mount the HTTP endpoints.
+/// Wraps the plugin in [`ExclusiveRuntimePlugin`] for read/write mutual exclusion and
+/// mounts the HTTP endpoints by delegating to [`cda_sovd::add_runtime_update_routes`].
+/// The caller is responsible for constructing the plugin (e.g. via
+/// [`init_default_runtime_update_plugin`]) before calling this function.
+pub async fn add_runtime_update_routes<S, P>(
+    dynamic_router: &cda_sovd::dynamic_router::DynamicRouter,
+    plugin: P,
+    lock_provider: Arc<cda_sovd::SovdLockStateProvider>,
+    update_guard: &cda_sovd::UpdateGuardState,
+    upload_body_limit_bytes: usize,
+    retry_after_seconds: u64,
+) where
+    S: SecurityPluginLoader,
+    P: cda_interfaces::runtime_update_api::RuntimeFilesUpdatePlugin,
+{
+    let service = Arc::new(plugin.with_exclusive_access());
+    cda_sovd::add_runtime_update_routes::<S, _, cda_sovd::SovdLockStateProvider>(
+        dynamic_router,
+        service,
+        lock_provider,
+        update_guard,
+        upload_body_limit_bytes,
+        retry_after_seconds,
+    )
+    .await;
+}
+
+/// Initializes the default runtime update plugin.
+///
+/// Creates the reload handler, storage backend, and returns a configured
+/// [`cda_plugin_runtime_update::DefaultRuntimeFilesUpdatePlugin`] instance.
+/// The returned plugin is not wrapped in Arc; the caller should apply Arc wrapping
+/// if needed.
 ///
 /// # Errors
-/// Returns [`AppError`] if runtime update route setup fails.
-pub async fn add_runtime_update_routes<S, F, P>(
+/// Returns [`AppError`] if storage initialization fails.
+pub async fn init_default_runtime_update_plugin<S, F, P>(
     ctx: RuntimeUpdateContext<
         S,
         F,
@@ -232,7 +260,18 @@ pub async fn add_runtime_update_routes<S, F, P>(
             cda_storage::LocalCollection,
         >,
     >,
-) -> Result<(), AppError>
+) -> Result<
+    cda_plugin_runtime_update::DefaultRuntimeFilesUpdatePlugin<
+        cda_storage::LocalStorage,
+        DefaultRuntimeFileReloadHandler<S, F, P>,
+        impl RuntimeFilesUpdateSecurityHandler<
+            cda_sovd::SovdLockStateProvider,
+            cda_storage::LocalCollection,
+        >,
+        cda_sovd::SovdLockStateProvider,
+    >,
+    AppError,
+>
 where
     S: SecurityPlugin,
     F: Future<Output = ()> + Clone + Send + Sync + 'static,
@@ -261,26 +300,16 @@ where
             .map_err(|e| AppError::InitializationFailed(format!("DbUpdate storage: {e}")))?,
     );
     let mdd_decompress = config.read().await.flat_buf.mdd_decompress;
-    let db_update_state = cda_plugin_runtime_update::DefaultRuntimeFilesUpdatePlugin::new(
-        Arc::clone(&storage),
+
+    let update_plugin = cda_plugin_runtime_update::DefaultRuntimeFilesUpdatePlugin::new(
+        storage,
         reload_handler,
         ctx.security_handler,
-        Arc::clone(&ctx.lock_provider),
+        ctx.lock_provider,
         mdd_decompress,
         ctx.update_guard.busy_handle(),
     );
-    let service = Arc::new(db_update_state.with_exclusive_access());
-    let lock_state = Arc::clone(&ctx.lock_provider);
-    cda_sovd::add_runtime_update_routes::<P, _, _>(
-        &ctx.dynamic_router,
-        service,
-        lock_state,
-        &ctx.update_guard,
-        ctx.runtime_update_config.upload_body_limit_bytes,
-        ctx.runtime_update_config.retry_after_seconds,
-    )
-    .await;
-    Ok(())
+    Ok(update_plugin)
 }
 
 #[cfg(test)]
