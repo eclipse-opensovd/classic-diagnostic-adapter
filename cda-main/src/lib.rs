@@ -628,11 +628,7 @@ pub async fn load_databases<S: SecurityPlugin>(
     let fallback_to_base_variant = config.database.fallback_to_base_variant;
     let database_config = config.database.clone();
     let strict_ecu_config = database_config.strict_ecu_config;
-    // Use "auto" so `into_db_protocol` picks a CAN-named protocol if one
-    // exists in the MDD; this lets CAN-only setups work without an explicit
-    // per-ECU override. The default from `DoipConfig::default()` is
-    // "UDS_Ethernet_DoIP_DOBT", which would be wrong for a CAN-only MDD.
-    let protocol = cda_interfaces::Protocol::new("auto".to_owned());
+    let protocol = cda_interfaces::Protocol::new(config.doip.protocol_name.clone());
     let com_params = config.com_params.clone();
 
     // Build a normalised (lowercase keys) copy of the per-ECU config map so
