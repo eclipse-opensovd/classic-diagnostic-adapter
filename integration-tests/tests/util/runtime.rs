@@ -165,6 +165,7 @@ fn cda_test_config(
             gateway_port,
             ..Default::default()
         },
+        can: None,
         database: DatabaseConfig {
             path: mdd_file_path()?,
             naming_convention: DatabaseNamingConvention::default(),

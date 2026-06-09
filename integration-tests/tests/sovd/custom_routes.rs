@@ -140,6 +140,7 @@ async fn test_custom_demo_endpoint() {
     let gateway = opensovd_cda_lib::create_diagnostic_gateway(
         Arc::clone(&databases),
         &doip_config,
+        None,
         variant_tx,
         shutdown_signal.clone(),
         health.as_ref(),

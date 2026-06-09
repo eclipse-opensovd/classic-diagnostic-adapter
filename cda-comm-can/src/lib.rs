@@ -1,14 +1,6 @@
 /*
- * Copyright (c) 2025 The Contributors to Eclipse OpenSOVD (see CONTRIBUTORS)
- *
- * See the NOTICE file(s) distributed with this work for additional
- * information regarding copyright ownership.
- *
- * This program and the accompanying materials are made available under the
- * terms of the Apache License Version 2.0 which is available at
- * https://www.apache.org/licenses/LICENSE-2.0
- *
  * SPDX-License-Identifier: Apache-2.0
+ * SPDX-FileCopyrightText: 2026 The Contributors to Eclipse OpenSOVD (see CONTRIBUTORS)
  */
 
 use std::{
@@ -554,7 +546,7 @@ impl EcuGateway for CanDiagGateway {
                             break;
                         }
 
-                        // Read next response on the SAME socket — no re-send
+                        // Read next response on the SAME socket - no re-send
                         match exchange.read_response(response_timeout).await {
                             Ok(next_response) => {
                                 current_response = next_response;
@@ -599,7 +591,7 @@ impl EcuGateway for CanDiagGateway {
         let ecu_name_lower = ecu_name.to_lowercase();
 
         // Check if we have a connection AND the ECU was discovered.
-        // All lookups use owned data — no shared ECU RwLock is touched.
+        // All lookups use owned data - no shared ECU RwLock is touched.
         if self.connections.read().await.contains_key(&ecu_name_lower)
             && (self.is_ecu_discovered_by_name(&ecu_name_lower).await
                 || self

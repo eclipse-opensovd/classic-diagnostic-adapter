@@ -1,14 +1,6 @@
 #!/bin/bash
-# Copyright (c) 2025 The Contributors to Eclipse OpenSOVD (see CONTRIBUTORS)
-#
-# See the NOTICE file(s) distributed with this work for additional
-# information regarding copyright ownership.
-#
-# This program and the accompanying materials are made available under the
-# terms of the Apache License Version 2.0 which is available at
-# https://www.apache.org/licenses/LICENSE-2.0
-#
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: 2026 The Contributors to Eclipse OpenSOVD (see CONTRIBUTORS)
 
 # Setup virtual CAN pair for testing
 # vxcan0 <-> vxcan1 are linked together
@@ -54,7 +46,7 @@ ip link set up vxcan0
 ip link set up vxcan1
 
 echo ""
-echo "✓ Virtual CAN pair created successfully!"
+echo "[OK] Virtual CAN pair created successfully!"
 echo ""
 echo "Interfaces:"
 echo "  vxcan0 - for classic-diagnostic-adapter"

@@ -51,6 +51,15 @@ allow = ["bzip2-1.0.6"]
 name = "libbz2-rs-sys"
 version = "0.2"
 
+# The upstream `tokio-socketcan-isotp` crate publishes its manifest with
+# `license-file = "LICENCE"` (British spelling) and no `license` field, so
+# cargo-deny's license checker cannot auto-resolve the SPDX identifier even
+# though the in-repo `LICENCE` file is MIT. The crate is only used on Linux.
+[[licenses.exceptions]]
+allow = ["MIT"]
+name = "tokio-socketcan-isotp"
+version = "0.2"
+
 [licenses.private]
 ignore = true
 registries = []

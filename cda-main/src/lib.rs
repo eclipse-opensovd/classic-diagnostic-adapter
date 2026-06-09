@@ -1230,7 +1230,7 @@ where
 ///
 /// Always returns a `MultiTransportGateway<DoipDiagGateway<EcuManager<S>>>`
 /// that holds `Option`s for both transports. The caller can therefore have
-/// a CAN-only setup, a DoIP-only setup, or both — without changing the
+/// a CAN-only setup, a DoIP-only setup, or both - without changing the
 /// return type.
 ///
 /// Behavior:
@@ -1240,6 +1240,11 @@ where
 /// - If CAN initialization fails, that is fatal (we wouldn't have a gateway).
 /// - If both transports are unavailable, returns a `DoipGatewaySetupError`
 ///   with the original error from whichever transport we tried first.
+///
+/// # Panics
+/// Panics if the internal `variant_detection` sender has already been taken
+/// by another branch of this function (programmer error - `create_diagnostic_gateway`
+/// must not be called twice concurrently on the same caller's `mpsc::Sender`).
 ///
 /// # Errors
 /// Returns a setup error if at least one transport could not be initialized.
@@ -1302,7 +1307,7 @@ pub async fn create_diagnostic_gateway<S: SecurityPlugin>(
 
         let vd = variant_detection.take().expect("sender was available");
         let result =
-            DoipDiagGateway::new(doip_config, databases.clone(), vd, shutdown_signal).await;
+            DoipDiagGateway::new(doip_config, Arc::clone(&databases), vd, shutdown_signal).await;
         let status = if result.is_ok() {
             cda_health::Status::Up
         } else {

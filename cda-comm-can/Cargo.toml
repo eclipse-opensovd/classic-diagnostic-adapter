@@ -1,13 +1,5 @@
-# Copyright (c) 2025 The Contributors to Eclipse OpenSOVD (see CONTRIBUTORS)
-#
-# See the NOTICE file(s) distributed with this work for additional
-# information regarding copyright ownership.
-#
-# This program and the accompanying materials are made available under the
-# terms of the Apache License Version 2.0 which is available at
-# https://www.apache.org/licenses/LICENSE-2.0
-#
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: 2026 The Contributors to Eclipse OpenSOVD (see CONTRIBUTORS)
 
 [package]
 name = "cda-comm-can"
@@ -32,13 +24,20 @@ thiserror = { workspace = true }
 serde = { workspace = true, features = ["derive"] }
 # tokio
 tokio = { workspace = true, features = ["rt", "time", "sync", "io-util"] }
-# CAN / ISO-TP
-tokio-socketcan-isotp = "0.2"
 # logging & tracing
 tracing = { workspace = true }
 # utilities
 hex = { workspace = true }
 schemars = { workspace = true }
+
+# CAN / ISO-TP
+# `tokio-socketcan-isotp` only supports Linux (it links to `nix::net`,
+# `tokio::io::unix`, and `libc::fcntl`/`O_NONBLOCK`/`SOCK_DGRAM`), so the
+# dependency and all socket-using code are gated to Linux. The upstream
+# crate's missing-`license`-field warning is silenced by a
+# `[[licenses.exceptions]]` entry in `deny.toml`.
+[target.'cfg(target_os = "linux")'.dependencies]
+tokio-socketcan-isotp = "0.2"
 
 [features]
 default = []

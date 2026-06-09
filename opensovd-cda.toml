@@ -11,6 +11,30 @@
 # Path to the directory containing flash files.
 # flash_files_path = "."
 
+# Functional CAN ID for broadcast requests
+[com_params.can.functional_id]
+# Communication parameter identifier (`CP_xxx` name from the database).
+# name = "CP_CanFuncReqId"
+# Controls whether a com-parameter value is resolved from the MDD database
+# or forced from the configuration file.
+# precedence = "Database"
+
+# Physical request CAN ID (tester -> ECU)
+[com_params.can.physical_request_id]
+# Communication parameter identifier (`CP_xxx` name from the database).
+# name = "CP_CanPhysReqId"
+# Controls whether a com-parameter value is resolved from the MDD database
+# or forced from the configuration file.
+# precedence = "Database"
+
+# Physical response CAN ID (ECU -> tester)
+[com_params.can.physical_response_id]
+# Communication parameter identifier (`CP_xxx` name from the database).
+# name = "CP_CanRespUSDTId"
+# Controls whether a com-parameter value is resolved from the MDD database
+# or forced from the configuration file.
+# precedence = "Database"
+
 # DoIP-specific communication parameters.
 [com_params.doip]
 # Only the ID of this com param is needed right now
@@ -495,10 +519,17 @@
 
 # `DoIP` (Diagnostics over IP) transport layer settings.
 [doip]
+# Whether the `DoIP` transport is enabled.
+# When `false`, CDA skips `DoIP` initialization entirely (useful for
+# CAN-only or DoIP-less test setups).
+# Defaults to `true` to preserve the historical DoIP-first behavior.
+# enabled = true
 # UDP/TCP port for `DoIP` gateway discovery and communication.
 # gateway_port = 13400
 # The name of the protocol to use.
 # Matched case-insensitive against the database.
+# The special value `"auto"` defers the choice to the MDD-driven
+# auto-detect (see `into_db_protocol`).
 # protocol_name = "UDS_Ethernet_DoIP_DOBT"
 # `DoIP` protocol version byte (e.g. 0x02 for ISO 13400-2:2012).
 # protocol_version = 2

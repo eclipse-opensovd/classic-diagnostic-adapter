@@ -1,4 +1,13 @@
 #!/bin/bash
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: 2026 The Contributors to Eclipse OpenSOVD (see CONTRIBUTORS)
+#
+# See the NOTICE file(s) distributed with this work for additional
+# information regarding copyright ownership.
+#
+# This program and the accompanying materials are made available under the
+# terms of the Apache License Version 2.0 which is available at
+# https://www.apache.org/licenses/LICENSE-2.0
 
 # Start or stop the CDA process running over CAN.
 #
@@ -53,9 +62,9 @@ start() {
 
     sleep 1
     if is_running; then
-        echo "✓ CDA started (pid $(cat "$PID_FILE")). Tail with: tail -f $LOG_FILE"
+        echo "[OK] CDA started (pid $(cat "$PID_FILE")). Tail with: tail -f $LOG_FILE"
     else
-        echo "✗ CDA exited immediately. Last log lines:"
+        echo "[FAIL] CDA exited immediately. Last log lines:"
         tail -20 "$LOG_FILE"
         rm -f "$PID_FILE"
         return 1
@@ -82,7 +91,7 @@ stop() {
     for _ in $(seq 1 20); do
         if ! kill -0 "$pid" 2>/dev/null; then
             rm -f "$PID_FILE"
-            echo "✓ CDA stopped."
+            echo "[OK] CDA stopped."
             return 0
         fi
         sleep 0.5
@@ -92,7 +101,7 @@ stop() {
     pkill -KILL -P "$pid" 2>/dev/null || true
     kill -KILL "$pid" 2>/dev/null || true
     rm -f "$PID_FILE"
-    echo "✓ CDA killed."
+    echo "[OK] CDA killed."
 }
 
 status() {
