@@ -252,12 +252,14 @@ pub async fn add_runtime_update_routes<S, P>(
 /// # Errors
 /// Returns [`AppError`] if storage initialization fails.
 pub async fn init_default_runtime_update_plugin<S, F, P>(
-    ctx: RuntimeUpdateContext<
-        S,
-        F,
-        impl RuntimeFilesUpdateSecurityHandler<
-            cda_sovd::SovdLockStateProvider,
-            cda_storage::LocalCollection,
+    ctx: Box<
+        RuntimeUpdateContext<
+            S,
+            F,
+            impl RuntimeFilesUpdateSecurityHandler<
+                cda_sovd::SovdLockStateProvider,
+                cda_storage::LocalCollection,
+            >,
         >,
     >,
 ) -> Result<
@@ -277,6 +279,9 @@ where
     F: Future<Output = ()> + Clone + Send + Sync + 'static,
     P: SecurityPluginLoader,
 {
+    // Move out of the box so the large context fields are consumed into
+    // heap-backed Arcs before the first await, keeping the future small.
+    let ctx = *ctx;
     let config = Arc::new(RwLock::new(ctx.config));
     let reload_handler = Arc::new(DefaultRuntimeFileReloadHandler::<S, F, P>::new(
         ReloadHandlerDeps {

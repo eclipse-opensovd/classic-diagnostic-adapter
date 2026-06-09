@@ -316,7 +316,7 @@ pub fn generate_config_cmd(output: Option<&PathBuf>) -> Result<(), AppError> {
 /// # Errors
 /// Returns [`AppError`] if configuration loading, validation, or startup fails.
 pub async fn run_from_cli() -> Result<(), AppError> {
-    run(AppArgs::parse()).await
+    Box::pin(run(AppArgs::parse())).await
 }
 
 #[tracing::instrument(
@@ -335,8 +335,7 @@ pub async fn run(args: AppArgs) -> Result<(), AppError> {
         return generate_config_cmd(output.as_ref());
     }
 
-    let (mut config, disk_loaded) =
-        config::load_config_with_fallback(args.config.as_deref());
+    let (mut config, disk_loaded) = config::load_config_with_fallback(args.config.as_deref());
 
     if disk_loaded && config.runtime_update_config.init_storage_from_config_file {
         let config_file = config::resolve_config_file_path(args.config.as_deref());
@@ -347,10 +346,8 @@ pub async fn run(args: AppArgs) -> Result<(), AppError> {
         .await;
     }
 
-    if let Some(storage_config) = config::load_config_with_storage_override(
-        &config.runtime_update_config.storage_dir,
-    )
-    .await?
+    if let Some(storage_config) =
+        config::load_config_with_storage_override(&config.runtime_update_config.storage_dir).await?
     {
         config = storage_config;
     } else if !disk_loaded {
@@ -507,7 +504,7 @@ async fn setup_vehicle_and_routes(
         DefaultSecurityPluginData,
         _,
         DefaultSecurityPlugin,
-    >(RuntimeUpdateContext {
+    >(Box::new(RuntimeUpdateContext {
         dynamic_router: dynamic_router.clone(),
         vehicle_route_handle,
         config,
@@ -526,7 +523,7 @@ async fn setup_vehicle_and_routes(
             Arc::clone(&lock_provider),
             (flash_transfer_guard, ecu_execution_registry),
         )),
-    })
+    }))
     .await?;
     update::add_runtime_update_routes::<DefaultSecurityPlugin, _>(
         dynamic_router,
