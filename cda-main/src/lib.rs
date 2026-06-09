@@ -25,13 +25,15 @@ use cda_interfaces::{
     dlt_ctx,
     file_manager::{Chunk, ChunkType},
 };
-use cda_plugin_security::SecurityPlugin;
+use cda_plugin_security::{DefaultSecurityPlugin, DefaultSecurityPluginData, SecurityPlugin};
 use cda_sovd::Locks;
 use cda_tracing::{OtelGuard, TracingSetupError, TracingWorkerGuard};
+use clap::{Parser, Subcommand};
 use figment::{
     Figment,
     providers::{Format, Serialized, Toml},
 };
+use futures::future::FutureExt;
 use tokio::{
     signal,
     sync::{RwLock, mpsc},
@@ -40,7 +42,7 @@ use tokio::{
 use tracing::Instrument;
 use tracing_subscriber::layer::SubscriberExt;
 
-use crate::config::configfile::{Configuration, EcuConfig};
+use crate::config::configfile::{ConfigSanity, Configuration, EcuConfig};
 
 pub mod config;
 
@@ -52,8 +54,80 @@ const DB_PARALLEL_LOAD_TASKS: usize = 2;
 const DB_HEALTH_COMPONENT_KEY: &str = "database";
 const DOIP_HEALTH_COMPONENT_KEY: &str = "doip";
 
+#[cfg(feature = "health")]
+const MAIN_HEALTH_COMPONENT_KEY: &str = "main";
+
 pub type DatabaseMap<S> = HashMap<String, RwLock<EcuManager<S>>>;
 pub type FileManagerMap = HashMap<String, FileManager>;
+
+#[derive(Subcommand, Debug)]
+pub enum Command {
+    /// Generate a reference TOML configuration file with all fields commented out
+    GenerateConfig {
+        /// Output file path (defaults to opensovd-cda.toml). Use "-" for stdout.
+        #[arg(short, long)]
+        output: Option<PathBuf>,
+    },
+}
+
+#[derive(Parser, Debug)]
+#[command(version, about, long_about = None)]
+pub struct AppArgs {
+    #[arg(short, long, env = "CDA_CONFIG_FILE")]
+    pub config: Option<String>,
+
+    #[command(subcommand)]
+    pub command: Option<Command>,
+
+    #[arg(short, long)]
+    pub databases_path: Option<String>,
+
+    #[arg(short, long)]
+    pub tester_address: Option<String>,
+
+    #[arg(long)]
+    pub tester_subnet: Option<String>,
+
+    #[arg(long)]
+    pub gateway_port: Option<u16>,
+
+    /// Protocol name used for com-param lookups
+    /// in the diagnostic database (matched case-insensitively).
+    /// Examples: `UDS_Ethernet_DoIP`, `UDS_Ethernet_DoIP_DOBT`
+    #[arg(long)]
+    pub protocol_name: Option<String>,
+
+    #[arg(long)]
+    pub listen_address: Option<String>,
+
+    #[arg(long)]
+    pub listen_port: Option<u16>,
+
+    #[arg(short, long)]
+    pub flash_files_path: Option<String>,
+
+    #[arg(long)]
+    pub file_logging: Option<bool>,
+
+    #[arg(long)]
+    pub log_file_dir: Option<String>,
+
+    #[arg(long)]
+    pub log_file_name: Option<String>,
+
+    #[arg(long)]
+    pub exit_no_database_loaded: Option<bool>,
+
+    #[arg(long)]
+    pub fallback_to_base_variant: Option<bool>,
+
+    /// Set to true, to rewrite mdd files without compression, which
+    /// reduces memory usage due to mmap significantly.
+    // Could use Action::SetFalse here, as the default is false but then we would have
+    // two different ways to set booleans (with and without `true`)
+    #[arg(long)]
+    pub mdd_decompress: Option<bool>,
+}
 
 #[derive(Debug)]
 struct EcuMetadata {
@@ -203,6 +277,274 @@ pub const PROTO_LOAD_CONFIG: &[ProtoLoadConfig; 4] = &[
         name: None,
     },
 ];
+
+impl AppArgs {
+    #[tracing::instrument(skip(self, config),
+        fields(
+            dlt_context = dlt_ctx!("MAIN"),
+        )
+    )]
+    pub fn update_config(self, config: &mut Configuration) {
+        if let Some(databases_path) = self.databases_path {
+            config.database.path = databases_path;
+        }
+        if let Some(exit_no_database_loaded) = self.exit_no_database_loaded {
+            config.database.exit_no_database_loaded = exit_no_database_loaded;
+        }
+        if let Some(fallback_to_base_variant) = self.fallback_to_base_variant {
+            config.database.fallback_to_base_variant = fallback_to_base_variant;
+        }
+        if let Some(flash_files_path) = self.flash_files_path {
+            config.flash_files_path = flash_files_path;
+        }
+        if let Some(tester_address) = self.tester_address {
+            config.doip.tester_address = tester_address;
+        }
+        if let Some(tester_subnet) = self.tester_subnet {
+            config.doip.tester_subnet = tester_subnet;
+        }
+        if let Some(gateway_port) = self.gateway_port {
+            config.doip.gateway_port = gateway_port;
+        }
+        if let Some(protocol_name) = self.protocol_name {
+            config.doip.protocol_name = protocol_name;
+        }
+        if let Some(listen_address) = self.listen_address {
+            config.server.address = listen_address;
+        }
+        if let Some(listen_port) = self.listen_port {
+            config.server.port = listen_port;
+        }
+        if let Some(file_logging) = self.file_logging {
+            config.logging.log_file_config.enabled = file_logging;
+        }
+        if let Some(log_file_dir) = self.log_file_dir {
+            config.logging.log_file_config.path = log_file_dir;
+        }
+        if let Some(log_file_name) = self.log_file_name {
+            config.logging.log_file_config.name = log_file_name;
+        }
+        if let Some(mdd_decompress) = self.mdd_decompress {
+            config.flat_buf.mdd_decompress = mdd_decompress;
+        }
+    }
+}
+
+/// Generate a reference CDA configuration and write it to the requested output.
+///
+/// # Errors
+/// Returns [`AppError`] if generating the reference configuration or writing it fails.
+pub fn generate_config_cmd(output: Option<&PathBuf>) -> Result<(), AppError> {
+    let content = config::generate::generate_reference_config()
+        .map_err(|e| AppError::RuntimeError(format!("Failed to generate config: {e}")))?;
+
+    match output.map(|p| p.as_os_str()) {
+        Some(p) if p == "-" => {
+            use std::io::Write;
+            std::io::stdout()
+                .write_all(content.as_bytes())
+                .map_err(|e| AppError::RuntimeError(format!("Failed to write stdout: {e}")))?;
+        }
+        Some(path) => {
+            std::fs::write(path, &content)
+                .map_err(|e| AppError::RuntimeError(format!("Failed to write config: {e}")))?;
+        }
+        None => {
+            std::fs::write("opensovd-cda.toml", &content)
+                .map_err(|e| AppError::RuntimeError(format!("Failed to write config: {e}")))?;
+        }
+    }
+    Ok(())
+}
+
+#[cfg(feature = "config-optional")]
+#[allow(clippy::unnecessary_wraps)] // signature must match the `not(feature)` variant
+fn load_config_or_default(config_path: Option<&str>) -> Result<Configuration, AppError> {
+    Ok(config::load_config(config_path).unwrap_or_else(|e| {
+        println!("Failed to load configuration: {e}");
+        println!("Using default values");
+        config::default_config()
+    }))
+}
+
+/// Without `config-optional`, a missing or invalid configuration is a hard error.
+#[cfg(not(feature = "config-optional"))]
+fn load_config_or_default(config_path: Option<&str>) -> Result<Configuration, AppError> {
+    config::load_config(config_path).map_err(|e| {
+        println!("Failed to load configuration: {e}");
+        println!(
+            "Provide a configuration file or build with the 'config-optional' feature to allow \
+             starting without one."
+        );
+        AppError::ConfigurationError(e)
+    })
+}
+
+/// Parse CLI arguments and start the CDA with the default startup flow.
+///
+/// # Errors
+/// Returns [`AppError`] if configuration loading, validation, or startup fails.
+pub async fn run_from_cli() -> Result<(), AppError> {
+    run(AppArgs::parse()).await
+}
+
+#[tracing::instrument(
+    skip(args),
+    fields(
+        dlt_context = dlt_ctx!("MAIN"),
+    )
+)]
+/// Run the CDA from parsed CLI arguments.
+///
+/// # Errors
+/// Returns [`AppError`] if configuration loading, validation, or startup fails.
+pub async fn run(args: AppArgs) -> Result<(), AppError> {
+    if let Some(Command::GenerateConfig { output }) = args.command.as_ref() {
+        // Exiting after generating config is on purpose.
+        return generate_config_cmd(output.as_ref());
+    }
+
+    let mut config = load_config_or_default(args.config.as_deref())?;
+    config.validate_sanity()?;
+
+    args.update_config(&mut config);
+
+    run_with_config(config).await
+}
+
+/// Start the CDA runtime from a prepared configuration.
+///
+/// # Errors
+/// Returns [`AppError`] if tracing setup, webserver startup, data loading, or route setup fails.
+pub async fn run_with_config(config: Configuration) -> Result<(), AppError> {
+    let _tracing_guards = setup_tracing(&config)?;
+    tracing::info!("Starting CDA - version {}", cda_version());
+
+    let webserver_config = cda_sovd::WebServerConfig {
+        host: config.server.address.clone(),
+        port: config.server.port,
+    };
+
+    let clonable_shutdown_signal = shutdown_signal().shared();
+
+    let (dynamic_router, webserver_task) =
+        cda_sovd::launch_webserver(webserver_config.clone(), clonable_shutdown_signal.clone())
+            .await?;
+
+    #[cfg(feature = "health")]
+    let (health_state, main_health_provider) = if config.health.enabled {
+        let health_state =
+            cda_health::add_health_routes(&dynamic_router, cda_version().to_owned()).await;
+        let main_health_provider = Arc::new(cda_health::StatusHealthProvider::new(
+            cda_health::Status::Starting,
+        ));
+
+        if let Err(e) = health_state
+            .register_provider(
+                MAIN_HEALTH_COMPONENT_KEY,
+                Arc::clone(&main_health_provider) as Arc<dyn cda_health::HealthProvider>,
+            )
+            .await
+        {
+            tracing::warn!(error = %e, "Failed to register main health provider");
+        }
+        (Some(health_state), Some(main_health_provider))
+    } else {
+        (None, None)
+    };
+
+    #[cfg(not(feature = "health"))]
+    let (health_state, main_health_provider): (
+        Option<cda_health::HealthState>,
+        Option<Arc<cda_health::StatusHealthProvider>>,
+    ) = (None, None);
+
+    #[cfg(feature = "systemd-notify")]
+    let _sd_notify_task =
+        cda_extra::create_sd_notify_task(health_state.clone(), clonable_shutdown_signal.clone());
+
+    tracing::debug!("Webserver is running. Loading sovd routes...");
+
+    let vehicle_data = match load_vehicle_data::<_, DefaultSecurityPluginData>(
+        &config,
+        clonable_shutdown_signal.clone(),
+        health_state.as_ref(),
+    )
+    .await
+    {
+        Ok(data) => data,
+        Err(AppError::ShutdownRequested) => {
+            tracing::info!("Shutdown requested during database load, exiting cleanly");
+            return Ok(());
+        }
+        Err(e) => return Err(e),
+    };
+
+    if vehicle_data.databases.is_empty() && config.database.exit_no_database_loaded {
+        return Err(AppError::ResourceError(
+            "No database loaded, exiting as configured".to_string(),
+        ));
+    }
+
+    cda_sovd::add_vehicle_routes::<DiagServiceResponseStruct, _, _, DefaultSecurityPlugin>(
+        &dynamic_router,
+        vehicle_data.uds_manager,
+        config.flash_files_path.clone(),
+        vehicle_data.file_managers,
+        vehicle_data.locks,
+        config.functional_description,
+        config.components,
+    )
+    .await?;
+
+    // [[ dimpl~sovd-api-version-endpoint, Register Version Endpoint ]]
+    if let serde_json::Value::Object(version_info) = serde_json::json!({
+        "id": "version",
+        "data": {
+            "name": "Eclipse OpenSOVD Classic Diagnostic Adapter",
+            "api": {
+                // 1.1 to match the sovd standard version
+                "version": "1.1"
+            },
+            "implementation": {
+                "version": cda_version(),
+                "commit": env!("GIT_COMMIT_HASH").to_owned(),
+                "build_date": env!("BUILD_DATE").to_owned(),
+            }
+        }
+    }) {
+        cda_sovd::add_static_data_endpoint(
+            &dynamic_router,
+            version_info.clone(),
+            "/vehicle/v15/apps/sovd2uds/data/version",
+        )
+        .await;
+        // For now, both version endpoints serve the same data. This might change in the future.
+        cda_sovd::add_static_data_endpoint(
+            &dynamic_router,
+            version_info,
+            "/vehicle/v15/data/version",
+        )
+        .await;
+    } else {
+        tracing::error!("Failed to build version information");
+    }
+
+    cda_sovd::add_openapi_routes(&dynamic_router, &webserver_config).await;
+
+    tracing::info!("CDA fully initialized and ready to serve requests");
+    if let Some(provider) = main_health_provider {
+        provider.update_status(cda_health::Status::Up).await;
+    }
+
+    clonable_shutdown_signal.await;
+    tracing::info!("Shutting down...");
+    webserver_task
+        .await
+        .map_err(|e| AppError::RuntimeError(format!("Webserver task join error: {e}")))?;
+
+    Ok(())
+}
 
 /// Loads vehicle databases and sets up SOVD routes in the webserver.
 /// # Errors
