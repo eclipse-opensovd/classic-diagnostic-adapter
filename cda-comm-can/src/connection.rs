@@ -5,8 +5,6 @@
 
 use std::time::Duration;
 
-use crate::error::CanError;
-
 // On Linux we use the real `tokio-socketcan-isotp` types. On other platforms
 // (e.g. Windows) the upstream crate is unavailable, so the public API of
 // `CanEcuConnection` is preserved but the socket code is stubbed out and
@@ -14,6 +12,8 @@ use crate::error::CanError;
 // rest of the workspace compilable on every supported target.
 #[cfg(target_os = "linux")]
 use tokio_socketcan_isotp::{IsoTpBehaviour, IsoTpOptions, IsoTpSocket, StandardId};
+
+use crate::error::CanError;
 
 /// Represents a CAN connection to a single ECU using ISO-TP.
 pub struct CanEcuConnection {
@@ -126,8 +126,8 @@ impl CanEcuConnection {
     #[cfg(not(target_os = "linux"))]
     pub async fn begin_exchange(&self, _request: &[u8]) -> Result<CanExchange, CanError> {
         Err(CanError::SocketError(
-            "CAN bus transport is only supported on Linux; \
-             tokio-socketcan-isotp does not build on this target."
+            "CAN bus transport is only supported on Linux; tokio-socketcan-isotp does not build \
+             on this target."
                 .to_owned(),
         ))
     }
@@ -215,8 +215,8 @@ impl CanExchange {
     /// the public API identical across platforms.
     pub async fn read_response(&self, _timeout: Duration) -> Result<Vec<u8>, CanError> {
         Err(CanError::SocketError(
-            "CAN bus transport is only supported on Linux; \
-             tokio-socketcan-isotp does not build on this target."
+            "CAN bus transport is only supported on Linux; tokio-socketcan-isotp does not build \
+             on this target."
                 .to_owned(),
         ))
     }

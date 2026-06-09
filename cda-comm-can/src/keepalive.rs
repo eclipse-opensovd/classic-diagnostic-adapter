@@ -19,7 +19,6 @@ use std::time::Duration;
 
 use cda_interfaces::util::tokio_ext::sleep_for;
 use tokio::task::JoinHandle;
-
 #[cfg(target_os = "linux")]
 use tokio_socketcan_isotp::{IsoTpBehaviour, IsoTpOptions, IsoTpSocket, StandardId};
 
