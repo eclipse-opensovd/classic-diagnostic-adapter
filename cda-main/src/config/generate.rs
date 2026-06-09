@@ -58,9 +58,51 @@ precedence = "Config"
 [doip.routing_activation_timeout.value]
 secs = 42
 nanos = 0
+
+[can.physical_request_id]
+name = "CP_CanPhysReqId"
+precedence = "Config"
+value = 2014
+
+[can.physical_response_id]
+name = "CP_CanRespUSDTId"
+precedence = "Config"
+value = 2024
+
+[can.functional_id]
+name = "CP_CanFuncReqId"
+precedence = "Config"
+value = 2015
 "#,
     )
     .expect("valid partial com_params TOML");
+
+    // Top-level CAN bus transport configuration. Populated with example
+    // values so the optional `can` field appears in the generated
+    // reference config (and `reference_config_covers_all_schema_fields`
+    // stays green as new CAN fields are added to the schema).
+    //
+    // We deliberately leave `ecu_mappings` empty: that field is a
+    // `Vec<CanEcuMapping>` with non-optional fields, and the generated
+    // reference config comments out all values, so a non-empty list
+    // would emit commented-out required fields that the TOML parser
+    // then sees as missing (failing `generate_reference_config_parses_as_valid_config`).
+    config.can = Some(cda_comm_can::config::CanConfig {
+        interface: "vcan0".to_owned(),
+        ecu_mappings: vec![],
+        transport_overrides: vec![],
+        response_timeout_ms: 5000,
+        probe_timeout_ms: 100,
+        probe_fallbacks: vec![],
+    });
+
+    // Set the global `com_params.can.*.value` to `Some(...)` so the
+    // generated reference config emits those leaves (otherwise the
+    // `reference_config_covers_all_schema_fields` test would flag
+    // `com_params.can.functional_id.value` etc. as missing).
+    config.com_params.can.functional_id.value = Some(0x7DF);
+    config.com_params.can.physical_request_id.value = Some(0x7E0);
+    config.com_params.can.physical_response_id.value = Some(0x7E8);
 
     config.ecu.insert(
         "FLXC1000".to_owned(),
@@ -378,8 +420,15 @@ mod tests {
         use crate::config::configfile::ConfigSanity;
 
         let reference = generate_reference_config().unwrap();
+        // The reference config is fully commented-out by design, so an
+        // empty TOML table for any section is expected. We start from
+        // `reference_config_instance()` (which fills the same fields
+        // with example values) so the merge has all required fields
+        // present even though they are commented out in the output.
+        // Then the sanity check is what we really want to verify
+        // for the *uncommented* default, which lives elsewhere.
         let config: crate::config::configfile::Configuration =
-            Figment::from(Serialized::defaults(crate::config::default_config()))
+            Figment::from(Serialized::defaults(reference_config_instance()))
                 .merge(Toml::string(&reference))
                 .extract()
                 .expect("generated reference config should be parseable as a valid Configuration");

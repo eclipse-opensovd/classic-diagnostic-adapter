@@ -11,6 +11,16 @@
 # Path to the directory containing flash files.
 # flash_files_path = "."
 
+# Optional CAN bus transport configuration.
+# When enabled, the adapter can communicate with ECUs over CAN bus.
+[can]
+# ecu_mappings = []
+# interface = "vcan0"
+# probe_fallbacks = []
+# probe_timeout_ms = 100
+# response_timeout_ms = 5000
+# transport_overrides = []
+
 # Functional CAN ID for broadcast requests
 [com_params.can.functional_id]
 # Communication parameter identifier (`CP_xxx` name from the database).
@@ -18,6 +28,8 @@
 # Controls whether a com-parameter value is resolved from the MDD database
 # or forced from the configuration file.
 # precedence = "Database"
+# Value used when the database does not provide one, or precedence is set to `Config`.
+# value = 2015
 
 # Physical request CAN ID (tester -> ECU)
 [com_params.can.physical_request_id]
@@ -26,6 +38,8 @@
 # Controls whether a com-parameter value is resolved from the MDD database
 # or forced from the configuration file.
 # precedence = "Database"
+# Value used when the database does not provide one, or precedence is set to `Config`.
+# value = 2016
 
 # Physical response CAN ID (ECU -> tester)
 [com_params.can.physical_response_id]
@@ -34,6 +48,8 @@
 # Controls whether a com-parameter value is resolved from the MDD database
 # or forced from the configuration file.
 # precedence = "Database"
+# Value used when the database does not provide one, or precedence is set to `Config`.
+# value = 2024
 
 # DoIP-specific communication parameters.
 [com_params.doip]
@@ -543,6 +559,21 @@
 # tester_subnet = "255.255.0.0"
 # TLS port for secure `DoIP` communication.
 # tls_port = 3496
+
+[ecu.FLXC1000.com_params.can.functional_id]
+# name = "CP_CanFuncReqId"
+# precedence = "Config"
+# value = 2015
+
+[ecu.FLXC1000.com_params.can.physical_request_id]
+# name = "CP_CanPhysReqId"
+# precedence = "Config"
+# value = 2014
+
+[ecu.FLXC1000.com_params.can.physical_response_id]
+# name = "CP_CanRespUSDTId"
+# precedence = "Config"
+# value = 2024
 
 [ecu.FLXC1000.com_params.doip.routing_activation_timeout]
 # name = "CP_DoIPRoutingActivationTimeout"
