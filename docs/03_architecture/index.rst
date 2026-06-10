@@ -18,3 +18,4 @@ Architecture
 .. include:: 03_communication.rst
 .. include:: 04_diagnostic_tester.rst
 .. include:: 05_plugins.rst
+.. include:: 06_error_handling.rst

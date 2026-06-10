@@ -21,3 +21,4 @@ The actual architecture and implementation details are defined in different docu
 .. include:: 03_diagnostic_tester.rst
 .. include:: 04_communication.rst
 .. include:: 05_plugins.rst
+.. include:: 06_error_handling.rst
