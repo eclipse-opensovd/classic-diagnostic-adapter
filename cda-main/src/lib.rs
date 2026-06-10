@@ -12,7 +12,11 @@
 
 use std::{fs::ReadDir, future::Future, path::PathBuf, sync::Arc};
 
-use cda_comm_can::{CanDiagGateway, MultiTransportGateway, TransportType, config::CanConfig};
+#[cfg(feature = "can")]
+use cda_comm_can::CanDiagGateway;
+use cda_comm_can::MultiTransportGateway;
+#[cfg(feature = "can")]
+use cda_comm_can::{TransportType, config::CanConfig};
 use cda_comm_doip::{DoipDiagGateway, config::DoipConfig};
 use cda_comm_uds::UdsManager;
 use cda_core::{DiagServiceResponseStruct, EcuManager};
@@ -567,7 +571,9 @@ pub async fn load_vehicle_data<
 
     let (variant_detection_tx, variant_detection_rx) = mpsc::channel(50);
     let databases = Arc::new(databases);
-    let diagnostic_gateway = match create_diagnostic_gateway(
+
+    #[cfg(feature = "can")]
+    let diagnostic_gateway_result = create_diagnostic_gateway(
         Arc::clone(&databases),
         &config.doip,
         config.can.as_ref(),
@@ -575,8 +581,19 @@ pub async fn load_vehicle_data<
         clonable_shutdown_signal.clone(),
         health,
     )
-    .await
-    {
+    .await;
+
+    #[cfg(not(feature = "can"))]
+    let diagnostic_gateway_result = create_diagnostic_gateway(
+        Arc::clone(&databases),
+        &config.doip,
+        variant_detection_tx,
+        clonable_shutdown_signal.clone(),
+        health,
+    )
+    .await;
+
+    let diagnostic_gateway = match diagnostic_gateway_result {
         Ok(gateway) => gateway,
         Err(e) => {
             tracing::error!(error = %e, "Failed to create diagnostic gateway");
@@ -1244,6 +1261,7 @@ where
 ///
 /// # Errors
 /// Returns a setup error if at least one transport could not be initialized.
+#[cfg(feature = "can")]
 #[tracing::instrument(
     skip(databases, doip_config, can_config, variant_detection, shutdown_signal, health),
     fields(
@@ -1367,6 +1385,90 @@ pub async fn create_diagnostic_gateway<S: SecurityPlugin>(
     }
 
     Ok(gateway)
+}
+
+/// Creates a new diagnostic gateway for the webserver (without CAN support).
+///
+/// This version is compiled when the `can` feature is disabled.
+/// It only supports DoIP transport.
+///
+/// Behavior:
+/// - If `doip_config.enabled` is `false`, DoIP is skipped entirely.
+/// - If both transports are unavailable, returns a `DoipGatewaySetupError`
+///   with the original error from DoIP initialization.
+///
+/// # Panics
+/// Panics if the internal `variant_detection` sender has already been taken
+/// by another branch of this function (programmer error - `create_diagnostic_gateway`
+/// must not be called twice concurrently on the same caller's `mpsc::Sender`).
+///
+/// # Errors
+/// Returns a setup error if DoIP transport could not be initialized.
+#[cfg(not(feature = "can"))]
+#[tracing::instrument(
+    skip(databases, doip_config, variant_detection, shutdown_signal, health),
+    fields(
+        database_count = databases.len(),
+        doip_enabled = doip_config.enabled,
+        dlt_context = dlt_ctx!("MAIN"),
+    )
+)]
+pub async fn create_diagnostic_gateway<S: SecurityPlugin>(
+    databases: Arc<DatabaseMap<S>>,
+    doip_config: &DoipConfig,
+    variant_detection: mpsc::Sender<Vec<String>>,
+    shutdown_signal: impl Future<Output = ()> + Send + 'static,
+    health: Option<&cda_health::HealthState>,
+) -> Result<MultiTransportGateway<DoipDiagGateway<EcuManager<S>>>, DoipGatewaySetupError> {
+    // Build the multi-transport gateway skeleton without transport overrides.
+    let gateway =
+        MultiTransportGateway::<DoipDiagGateway<EcuManager<S>>>::new(HashMap::default());
+
+    // --- DoIP ---
+    // `mpsc::Sender` is not Clone, so we hand the variant-detection sender to
+    // the DoIP gateway. The caller creates the channel once and we pass it down.
+    let mut variant_detection = Some(variant_detection);
+    if doip_config.enabled {
+        let doip_health_provider = if let Some(health_state) = health {
+            let provider = Arc::new(cda_health::StatusHealthProvider::new(
+                cda_health::Status::Starting,
+            ));
+            if let Err(e) = health_state
+                .register_provider(
+                    DOIP_HEALTH_COMPONENT_KEY,
+                    Arc::clone(&provider) as Arc<dyn cda_health::HealthProvider>,
+                )
+                .await
+            {
+                tracing::warn!(error = %e, "Failed to register DoIP health provider");
+            }
+            Some(provider)
+        } else {
+            None
+        };
+
+        let vd = variant_detection.take().expect("sender was available");
+        let result =
+            DoipDiagGateway::new(doip_config, Arc::clone(&databases), vd, shutdown_signal).await;
+        let status = if result.is_ok() {
+            cda_health::Status::Up
+        } else {
+            cda_health::Status::Failed
+        };
+        if let Some(provider) = doip_health_provider {
+            provider.update_status(status).await;
+        }
+        match result {
+            Ok(d) => {
+                tracing::info!("DoIP gateway initialized");
+                Ok(gateway.with_doip(d))
+            }
+            Err(e) => Err(e),
+        }
+    } else {
+        tracing::info!("DoIP transport disabled by config (doip.enabled = false)");
+        Ok(gateway)
+    }
 }
 
 /// Waits for a shutdown signal, such as Ctrl+C or SIGTERM (on unix).

@@ -89,6 +89,7 @@ openssl-vendored = [
   "cda-comm-doip/openssl-vendored",
 ]
 mbedtls = ["cda-comm-doip/mbedtls"]
+can = ["cda-comm-can/can"]
 dlt-tracing = ["cda-tracing/dlt-tracing", "cda-comm-can/dlt-tracing"]
 integration-tests = []
 

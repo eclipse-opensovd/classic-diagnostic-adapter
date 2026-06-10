@@ -31,14 +31,12 @@ hex = { workspace = true }
 schemars = { workspace = true }
 
 # CAN / ISO-TP
-# `tokio-socketcan-isotp` only supports Linux (it links to `nix::net`,
-# `tokio::io::unix`, and `libc::fcntl`/`O_NONBLOCK`/`SOCK_DGRAM`), so the
-# dependency and all socket-using code are gated to Linux. The upstream
-# crate's missing-`license`-field warning is silenced by a
+# This dependency is only enabled when the `can` feature is active.
+# The upstream crate's missing-`license`-field warning is silenced by a
 # `[[licenses.exceptions]]` entry in `deny.toml`.
-[target.'cfg(target_os = "linux")'.dependencies]
-tokio-socketcan-isotp = "0.2"
+tokio-socketcan-isotp = { version = "0.2", optional = true }
 
 [features]
 default = []
+can = ["dep:tokio-socketcan-isotp"]
 dlt-tracing = ["cda-interfaces/dlt-tracing"]

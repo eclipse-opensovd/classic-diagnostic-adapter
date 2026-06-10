@@ -10,7 +10,21 @@
  * https://www.apache.org/licenses/LICENSE-2.0
  */
 
+#[cfg(feature = "can")]
 pub use cda_comm_can::config::CanConfig;
+
+/// Stub CanConfig for when the `can` feature is disabled.
+/// This ensures that if a user provides a `[can]` section in the config
+/// file, deserialization will fail with a clear error message.
+#[cfg(not(feature = "can"))]
+#[derive(Deserialize, Serialize, Clone, Debug, schemars::JsonSchema)]
+pub struct CanConfig {
+    /// Stub field - CAN support is not compiled in.
+    /// Enable the `can` feature to use CAN bus transport.
+    #[allow(dead_code)]
+    pub _disabled: String,
+}
+
 pub use cda_comm_doip::config::DoipConfig;
 pub use cda_database::DatabaseConfig;
 use cda_interfaces::{

@@ -52,3 +52,4 @@ cda.pid
 # BMS453 simulator runtime artifacts (start_bms453_simulator.sh writes these)
 simulator.log
 simulator.pid
+.playwright-mcp/

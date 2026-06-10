@@ -5,12 +5,6 @@
 
 use std::time::Duration;
 
-// On Linux we use the real `tokio-socketcan-isotp` types. On other platforms
-// (e.g. Windows) the upstream crate is unavailable, so the public API of
-// `CanEcuConnection` is preserved but the socket code is stubbed out and
-// every operation returns an explanatory `SocketError`. This keeps the
-// rest of the workspace compilable on every supported target.
-#[cfg(target_os = "linux")]
 use tokio_socketcan_isotp::{IsoTpBehaviour, IsoTpOptions, IsoTpSocket, StandardId};
 
 use crate::error::CanError;
@@ -40,7 +34,6 @@ impl CanEcuConnection {
     }
 
     /// Opens an ISO-TP socket for this ECU connection.
-    #[cfg(target_os = "linux")]
     fn open_socket(&self) -> Result<IsoTpSocket, CanError> {
         // Standard CAN IDs are 11-bit (0-0x7FF), so truncation is expected for valid IDs
         // Note: ISO-TP socket uses (rx_id, tx_id) not (src, dst)
@@ -100,7 +93,6 @@ impl CanEcuConnection {
     /// a pending notification and then later the real response on the same
     /// transport connection. Dropping the socket between reads would create a
     /// race where the real response arrives while no socket is listening.
-    #[cfg(target_os = "linux")]
     pub async fn begin_exchange(&self, request: &[u8]) -> Result<CanExchange, CanError> {
         let socket = self.open_socket()?;
 
@@ -120,16 +112,6 @@ impl CanEcuConnection {
             socket,
             ecu_name: self.ecu_name.clone(),
         })
-    }
-
-    /// Stub for non-Linux targets where `tokio-socketcan-isotp` is unavailable.
-    #[cfg(not(target_os = "linux"))]
-    pub async fn begin_exchange(&self, _request: &[u8]) -> Result<CanExchange, CanError> {
-        Err(CanError::SocketError(
-            "CAN bus transport is only supported on Linux; tokio-socketcan-isotp does not build \
-             on this target."
-                .to_owned(),
-        ))
     }
 
     /// Probes the ECU using the provided request payload.
@@ -171,19 +153,11 @@ impl CanEcuConnection {
 ///
 /// Keeps the underlying socket open so that multiple responses can be read
 /// from the same transport session (required for NRC 0x78 handling).
-#[cfg(target_os = "linux")]
 pub(crate) struct CanExchange {
     socket: IsoTpSocket,
     ecu_name: String,
 }
 
-/// Stub type for non-Linux targets. `begin_exchange` is never successfully
-/// constructed there, so this is mostly a placeholder to keep the public
-/// signature identical across platforms.
-#[cfg(not(target_os = "linux"))]
-pub(crate) struct CanExchange;
-
-#[cfg(target_os = "linux")]
 impl CanExchange {
     /// Reads the next response from the ECU on this exchange's socket.
     pub async fn read_response(&self, timeout: Duration) -> Result<Vec<u8>, CanError> {
@@ -205,20 +179,6 @@ impl CanExchange {
             ))),
             Err(_) => Err(CanError::Timeout),
         }
-    }
-}
-
-#[cfg(not(target_os = "linux"))]
-impl CanExchange {
-    /// Stub for non-Linux targets. `begin_exchange` never successfully
-    /// constructs a `CanExchange` there, so this is only present to keep
-    /// the public API identical across platforms.
-    pub async fn read_response(&self, _timeout: Duration) -> Result<Vec<u8>, CanError> {
-        Err(CanError::SocketError(
-            "CAN bus transport is only supported on Linux; tokio-socketcan-isotp does not build \
-             on this target."
-                .to_owned(),
-        ))
     }
 }
 
