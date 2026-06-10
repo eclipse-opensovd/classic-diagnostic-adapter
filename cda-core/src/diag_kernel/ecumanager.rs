@@ -3498,6 +3498,20 @@ impl<S: SecurityPlugin> EcuManager<S> {
         Ok(())
     }
 
+    fn reject_unexpected_keys<'e, 'k>(
+        expected: impl Iterator<Item = &'e str>,
+        provided: impl Iterator<Item = &'k str>,
+    ) -> Result<(), DiagServiceError> {
+        let expected_names: HashSet<&str> = expected.collect();
+        let unexpected: Vec<&str> = provided.filter(|k| !expected_names.contains(k)).collect();
+        if !unexpected.is_empty() {
+            return Err(DiagServiceError::BadPayload(format!(
+                "Unexpected parameters in request: {unexpected:?}"
+            )));
+        }
+        Ok(())
+    }
+
     fn map_mux_to_uds(
         &self,
         mux_dop: &datatypes::MuxDop,
@@ -3576,6 +3590,13 @@ impl<S: SecurityPlugin> EcuManager<S> {
                         )
                     })?;
 
+                if self.strict_parameter_validation {
+                    Self::reject_unexpected_keys(
+                        ["Selector", case_name].into_iter(),
+                        value.keys().map(String::as_str),
+                    )?;
+                }
+
                 if let Some(struct_) = struct_ {
                     let struct_data = value.get(case_name).ok_or_else(|| {
                         DiagServiceError::BadPayload(format!(
@@ -3619,18 +3640,10 @@ impl<S: SecurityPlugin> EcuManager<S> {
             .collect();
 
         if self.strict_parameter_validation {
-            let expected_names: HashSet<&str> =
-                params.iter().filter_map(|p| p.short_name()).collect();
-            let unexpected: Vec<&str> = value
-                .keys()
-                .filter(|k| !expected_names.contains(k.as_str()))
-                .map(String::as_str)
-                .collect();
-            if !unexpected.is_empty() {
-                return Err(DiagServiceError::BadPayload(format!(
-                    "Unexpected parameters in request: {unexpected:?}"
-                )));
-            }
+            Self::reject_unexpected_keys(
+                params.iter().filter_map(|p| p.short_name()),
+                value.keys().map(String::as_str),
+            )?;
         }
 
         params.into_iter().try_for_each(|param| {
@@ -3649,20 +3662,10 @@ impl<S: SecurityPlugin> EcuManager<S> {
         uds: &mut Vec<u8>,
     ) -> Result<(), DiagServiceError> {
         if self.strict_parameter_validation {
-            let expected_names: HashSet<&str> = mapped_params
-                .iter()
-                .filter_map(|p| p.short_name())
-                .collect();
-            let unexpected: Vec<&str> = json_values
-                .keys()
-                .filter(|k| !expected_names.contains(k.as_str()))
-                .map(String::as_str)
-                .collect();
-            if !unexpected.is_empty() {
-                return Err(DiagServiceError::BadPayload(format!(
-                    "Unexpected parameters in request: {unexpected:?}"
-                )));
-            }
+            Self::reject_unexpected_keys(
+                mapped_params.iter().filter_map(|p| p.short_name()),
+                json_values.keys().map(String::as_str),
+            )?;
         }
 
         for param in mapped_params {
@@ -8211,6 +8214,51 @@ mod tests {
             assert!(
                 e.to_string().contains("Unexpected parameters in request"),
                 "Expected unexpected parameter error for nested param, got: {e}"
+            );
+        }
+    }
+
+    /// Strict mode must reject unexpected keys inside a Mux parameter object.
+    ///
+    /// `map_mux_to_uds` only reads `"Selector"` and the matched case name;
+    /// any extra keys must be rejected when `strict_parameter_validation` is
+    /// enabled, mirroring the behaviour of `map_struct_to_uds` and
+    /// `process_parameter_map`.
+    #[tokio::test]
+    async fn test_map_mux_to_uds_unexpected_params_strict() {
+        let (mut ecu_manager, service, _) = create_ecu_manager_with_mux_service(None, None, None);
+        ecu_manager.strict_parameter_validation = true;
+
+        // Valid mux payload with an extra key "bogus_mux_key" at the mux
+        // object level.  "Selector" and "mux_1_case_1" are the only
+        // legitimate keys for this request.
+        let test_value = json!({
+            "mux_1_param": {
+                "Selector": 5,
+                "mux_1_case_1": {
+                    "mux_1_case_1_param_1": 13.37f32,
+                    "mux_1_case_1_param_2": 7
+                },
+                "bogus_mux_key": "should be rejected"
+            }
+        });
+
+        let payload_data =
+            UdsPayloadData::ParameterMap(serde_json::from_value(test_value).unwrap());
+
+        let result = ecu_manager
+            .create_uds_payload(&service, &skip_sec_plugin!(), Some(payload_data), None)
+            .await;
+
+        assert!(
+            result.is_err(),
+            "Expected strict mode to reject unexpected mux-level key 'bogus_mux_key', but the \
+             request succeeded"
+        );
+        if let Err(e) = result {
+            assert!(
+                e.to_string().contains("Unexpected parameters in request"),
+                "Expected 'Unexpected parameters in request' error, got: {e}"
             );
         }
     }
