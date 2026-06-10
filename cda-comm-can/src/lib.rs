@@ -3,6 +3,16 @@
  * SPDX-FileCopyrightText: 2026 The Contributors to Eclipse OpenSOVD (see CONTRIBUTORS)
  */
 
+// The `can` feature relies on Linux SocketCAN ISO-TP sockets
+// (tokio-socketcan-isotp). Fail early with an actionable message instead of
+// letting the Linux-only dependency produce cryptic build errors on other
+// platforms.
+#[cfg(all(feature = "can", not(target_os = "linux")))]
+compile_error!(
+    "The `can` feature requires Linux (SocketCAN/ISO-TP). Build without `--features can` on this \
+     platform."
+);
+
 pub mod config;
 pub mod multi_transport;
 
@@ -18,9 +28,6 @@ pub mod error;
 pub mod keepalive;
 
 #[cfg(feature = "can")]
-pub use keepalive::{KeepAliveHandle, start_keepalive_broadcast};
-
-#[cfg(feature = "can")]
 use std::{
     sync::Arc,
     time::{Duration, Instant},
@@ -31,6 +38,8 @@ use cda_interfaces::{
     CanComParamProvider, DiagServiceError, EcuAddressProvider, EcuGateway, HashMap, ServicePayload,
     TransmissionParameters, UdsResponse,
 };
+#[cfg(feature = "can")]
+pub use keepalive::{KeepAliveHandle, start_keepalive_broadcast};
 #[cfg(feature = "can")]
 use tokio::sync::{RwLock, mpsc};
 
@@ -666,35 +675,31 @@ impl Clone for CanDiagGateway {
     }
 }
 
-/// Stub CanDiagGateway when the `can` feature is disabled.
-/// This type exists only to satisfy type requirements in MultiTransportGateway.
-/// It cannot be constructed and will panic if any methods are called.
+/// Stub `CanDiagGateway` when the `can` feature is disabled.
+///
+/// This type exists only to satisfy the `Option<CanDiagGateway>` field in
+/// [`MultiTransportGateway`]. It has no constructor, so a value of this type
+/// can never exist in a non-`can` build: the `EcuGateway` impl below is only
+/// needed for type-checking and is statically unreachable.
 #[cfg(not(feature = "can"))]
 #[derive(Clone)]
 pub struct CanDiagGateway {
-    _private: (),
+    _unconstructable: std::convert::Infallible,
 }
 
+// The stub methods must keep the `async` signatures of the real
+// implementation because `MultiTransportGateway::transport_stats` awaits
+// them in both builds.
+#[allow(clippy::unused_async)]
 #[cfg(not(feature = "can"))]
 impl CanDiagGateway {
-    /// Creates a new stub gateway.
-    ///
-    /// # Panics
-    /// Always panics with a message indicating that the `can` feature must be enabled.
-    pub async fn new<T>(
-        _config: &config::CanConfig,
-        _ecus: &cda_interfaces::HashMap<String, tokio::sync::RwLock<T>>,
-        _variant_detection: tokio::sync::mpsc::Sender<Vec<String>>,
-    ) -> Result<Self, std::convert::Infallible> {
-        panic!("CAN support is not enabled. Compile with the `can` feature to use CAN bus transport.")
-    }
-
-    /// Returns 0.
+    /// Returns 0. Unreachable (the stub cannot be constructed); exists so
+    /// `MultiTransportGateway::transport_stats` type-checks in both builds.
     pub async fn connection_count(&self) -> usize {
         0
     }
 
-    /// Returns 0.
+    /// Returns 0. Unreachable; see [`Self::connection_count`].
     pub async fn discovered_count(&self) -> usize {
         0
     }
@@ -738,7 +743,10 @@ impl cda_interfaces::EcuGateway for CanDiagGateway {
         _timeout: std::time::Duration,
         _expect_positive_response: bool,
     ) -> Result<
-        cda_interfaces::HashMap<String, Result<cda_interfaces::UdsResponse, cda_interfaces::DiagServiceError>>,
+        cda_interfaces::HashMap<
+            String,
+            Result<cda_interfaces::UdsResponse, cda_interfaces::DiagServiceError>,
+        >,
         cda_interfaces::DiagServiceError,
     > {
         Ok(expected_ecu_logical_addrs

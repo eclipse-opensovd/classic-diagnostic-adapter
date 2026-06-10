@@ -57,7 +57,9 @@ start() {
     echo "Starting CDA in background (RUST_LOG=$RUST_LOG, config=$CDA_CONFIG_FILE)..."
     echo "Output is being redirected to: $LOG_FILE"
 
-    nohup cargo run -p opensovd-cda > "$LOG_FILE" 2>&1 &
+    # CAN support is behind the `can` cargo feature (disabled by default);
+    # without it the binary rejects the [can] section in the config file.
+    nohup cargo run -p opensovd-cda --features can > "$LOG_FILE" 2>&1 &
     echo $! > "$PID_FILE"
 
     sleep 1

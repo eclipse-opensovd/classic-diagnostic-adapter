@@ -3,9 +3,11 @@
 
 # Example configuration for CAN bus transport
 # This enables CAN communication while keeping DoIP disabled.
+# Requires a binary built with the `can` cargo feature, e.g.
+#   cargo run -p opensovd-cda --features can
+# (see start_with_can.sh).
 
 flash_files_path = "./flash"
-onboard_tester = false
 
 [server]
 address = "0.0.0.0"
@@ -43,6 +45,15 @@ probe_timeout_ms = 100
 ecu_name = "BMS453"
 request_id = 0x79B
 response_id = 0x7BB
+
+# CAN ECUs need a protocol override: the global default protocol name
+# (doip.protocol_name, "UDS_Ethernet_DoIP_DOBT") is DoIP-specific and will
+# not match the diag layers in a CAN MDD, which makes the ECU fail to load.
+# "UDS_CAN" engages the CAN alias chain in protocol resolution
+# (UDS_CAN -> ISO_11898_2_DWCAN -> ISO_11898_3_DWFTCAN -> CAN -> first
+# available protocol in the MDD).
+[ecu.BMS453]
+protocol = "UDS_CAN"
 
 # Optional: explicit CAN ID mappings
 # Use this to override CAN IDs from MDD files or when MDD doesn't contain them

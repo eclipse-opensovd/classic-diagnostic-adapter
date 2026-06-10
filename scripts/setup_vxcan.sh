@@ -58,6 +58,6 @@ ip link show vxcan1
 echo ""
 echo "Next steps:"
 echo "1. Start BMS simulator"
-echo "2. Start CDA: cargo run --release -- --config opensovd-cda-can.toml"
+echo "2. Start CDA: cargo run --release --features can -- --config opensovd-cda-can.toml"
 echo "3. Test with: curl http://localhost:20002/diagnostics"
 echo ""

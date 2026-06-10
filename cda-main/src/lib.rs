@@ -14,9 +14,11 @@ use std::{fs::ReadDir, future::Future, path::PathBuf, sync::Arc};
 
 #[cfg(feature = "can")]
 use cda_comm_can::CanDiagGateway;
-use cda_comm_can::MultiTransportGateway;
-#[cfg(feature = "can")]
-use cda_comm_can::{TransportType, config::CanConfig};
+// MultiTransportGateway, TransportType and CanConfig are deliberately NOT
+// feature-gated: they are compiled into cda-comm-can unconditionally so that
+// the public API of this crate (`create_diagnostic_gateway`,
+// `Configuration::can`) keeps a single signature across feature combinations.
+use cda_comm_can::{MultiTransportGateway, TransportType, config::CanConfig};
 use cda_comm_doip::{DoipDiagGateway, config::DoipConfig};
 use cda_comm_uds::UdsManager;
 use cda_core::{DiagServiceResponseStruct, EcuManager};
@@ -572,21 +574,10 @@ pub async fn load_vehicle_data<
     let (variant_detection_tx, variant_detection_rx) = mpsc::channel(50);
     let databases = Arc::new(databases);
 
-    #[cfg(feature = "can")]
     let diagnostic_gateway_result = create_diagnostic_gateway(
         Arc::clone(&databases),
         &config.doip,
         config.can.as_ref(),
-        variant_detection_tx,
-        clonable_shutdown_signal.clone(),
-        health,
-    )
-    .await;
-
-    #[cfg(not(feature = "can"))]
-    let diagnostic_gateway_result = create_diagnostic_gateway(
-        Arc::clone(&databases),
-        &config.doip,
         variant_detection_tx,
         clonable_shutdown_signal.clone(),
         health,
@@ -1246,22 +1237,23 @@ where
 /// a CAN-only setup, a DoIP-only setup, or both - without changing the
 /// return type.
 ///
-/// Behavior:
-/// - If `doip_config.enabled` is `false`, DoIP is skipped entirely.
-/// - If DoIP initialization fails AND `can_config` is `Some`, DoIP failure
-///   is non-fatal: the error is logged and DoIP is dropped from the gateway.
-/// - If CAN initialization fails, that is fatal (we wouldn't have a gateway).
-/// - If both transports are unavailable, returns a `DoipGatewaySetupError`
-///   with the original error from whichever transport we tried first.
+/// This function has the same signature regardless of the `can` feature so
+/// that callers (including other crates, under cargo feature unification)
+/// never need feature-gated call sites. Without the `can` feature, passing
+/// `Some` CAN config is a configuration error.
 ///
-/// # Panics
-/// Panics if the internal `variant_detection` sender has already been taken
-/// by another branch of this function (programmer error - `create_diagnostic_gateway`
-/// must not be called twice concurrently on the same caller's `mpsc::Sender`).
+/// Behavior:
+/// - If `doip_config.enabled` is `false`, `DoIP` is skipped entirely.
+/// - If `DoIP` initialization fails AND `can_config` is `Some`, `DoIP` failure
+///   is non-fatal: the error is logged and CDA continues with CAN only.
+/// - If CAN initialization fails and `DoIP` is unavailable, that is fatal
+///   (we would not have any transport).
+/// - Both transports can be active at the same time; per-ECU routing is
+///   controlled by `can.transport_overrides` (default: `DoIP` preferred).
 ///
 /// # Errors
-/// Returns a setup error if at least one transport could not be initialized.
-#[cfg(feature = "can")]
+/// Returns a setup error if a configured transport could not be initialized,
+/// or if `can_config` is `Some` on a build without the `can` feature.
 #[tracing::instrument(
     skip(databases, doip_config, can_config, variant_detection, shutdown_signal, health),
     fields(
@@ -1294,12 +1286,20 @@ pub async fn create_diagnostic_gateway<S: SecurityPlugin>(
     let mut gateway =
         MultiTransportGateway::<DoipDiagGateway<EcuManager<S>>>::new(transport_overrides);
 
+    // Reject CAN configuration up front on builds without CAN support.
+    // `Configuration::validate_sanity` reports this earlier in the normal
+    // startup path; this guard keeps the function safe for callers that
+    // construct their own config without validating it.
+    #[cfg(not(feature = "can"))]
+    if can_config.is_some() {
+        return Err(DoipGatewaySetupError::InvalidConfiguration(
+            "[can] is configured, but this binary was built without CAN support. Rebuild with \
+             `--features can` or remove the [can] section."
+                .to_owned(),
+        ));
+    }
+
     // --- DoIP ---
-    // `mpsc::Sender` is not Clone, so we hand the variant-detection sender to
-    // exactly one gateway: DoIP if enabled, else CAN. The caller creates the
-    // channel once and we pass it down.
-    let mut variant_detection = Some(variant_detection);
-    let doip_took_sender = doip_config.enabled;
     if doip_config.enabled {
         let doip_health_provider = if let Some(health_state) = health {
             let provider = Arc::new(cda_health::StatusHealthProvider::new(
@@ -1319,9 +1319,16 @@ pub async fn create_diagnostic_gateway<S: SecurityPlugin>(
             None
         };
 
-        let vd = variant_detection.take().expect("sender was available");
-        let result =
-            DoipDiagGateway::new(doip_config, Arc::clone(&databases), vd, shutdown_signal).await;
+        // Each transport gets its own clone of the variant-detection sender
+        // (`tokio::sync::mpsc::Sender` is Clone - it is a multi-producer
+        // channel), so DoIP and CAN can both report the ECUs they discover.
+        let result = DoipDiagGateway::new(
+            doip_config,
+            Arc::clone(&databases),
+            variant_detection.clone(),
+            shutdown_signal,
+        )
+        .await;
         let status = if result.is_ok() {
             cda_health::Status::Up
         } else {
@@ -1336,13 +1343,12 @@ pub async fn create_diagnostic_gateway<S: SecurityPlugin>(
                 gateway = gateway.with_doip(d);
             }
             Err(e) if can_config.is_some() => {
+                // Documented behavior: with CAN configured, a DoIP failure is
+                // non-fatal - CDA degrades to CAN-only operation.
                 tracing::warn!(
                     error = %e,
-                    "DoIP gateway initialization failed; CAN will not be initialized because the \
-                     variant-detection sender was consumed by DoIP. To run CAN-only, set \
-                     doip.enabled = false in your config."
+                    "DoIP gateway initialization failed; continuing with CAN only"
                 );
-                return Err(e);
             }
             Err(e) => {
                 return Err(e);
@@ -1353,122 +1359,25 @@ pub async fn create_diagnostic_gateway<S: SecurityPlugin>(
     }
 
     // --- CAN ---
-    // We can only pass the variant-detection sender to the CAN gateway if
-    // DoIP was disabled. (See the long comment in the DoIP block above.)
+    #[cfg(feature = "can")]
     if let Some(can_cfg) = can_config {
-        if doip_took_sender {
-            // DoIP already consumed the sender; CAN cannot be initialized.
-            // Operator must set doip.enabled = false to use CAN-only.
-            tracing::warn!(
-                "CAN gateway not initialized because DoIP already consumed the variant-detection \
-                 sender. Set doip.enabled = false in your config to use CAN-only."
-            );
-        } else {
-            let vd = variant_detection
-                .take()
-                .expect("DoIP disabled, sender still available");
-            match CanDiagGateway::new(can_cfg, &databases, vd).await {
-                Ok(c) => {
-                    tracing::info!(interface = %can_cfg.interface, "CAN gateway initialized");
-                    gateway = gateway.with_can(c);
-                }
-                Err(e) => {
-                    tracing::error!(error = %e, "CAN gateway initialization failed");
-                    if !gateway.has_doip() {
-                        return Err(DoipGatewaySetupError::SocketCreationFailed(format!(
-                            "CAN gateway failed and no DoIP fallback: {e}"
-                        )));
-                    }
+        match CanDiagGateway::new(can_cfg, &databases, variant_detection.clone()).await {
+            Ok(c) => {
+                tracing::info!(interface = %can_cfg.interface, "CAN gateway initialized");
+                gateway = gateway.with_can(c);
+            }
+            Err(e) => {
+                tracing::error!(error = %e, "CAN gateway initialization failed");
+                if !gateway.has_doip() {
+                    return Err(DoipGatewaySetupError::SocketCreationFailed(format!(
+                        "CAN gateway failed and no DoIP fallback: {e}"
+                    )));
                 }
             }
         }
     }
 
     Ok(gateway)
-}
-
-/// Creates a new diagnostic gateway for the webserver (without CAN support).
-///
-/// This version is compiled when the `can` feature is disabled.
-/// It only supports DoIP transport.
-///
-/// Behavior:
-/// - If `doip_config.enabled` is `false`, DoIP is skipped entirely.
-/// - If both transports are unavailable, returns a `DoipGatewaySetupError`
-///   with the original error from DoIP initialization.
-///
-/// # Panics
-/// Panics if the internal `variant_detection` sender has already been taken
-/// by another branch of this function (programmer error - `create_diagnostic_gateway`
-/// must not be called twice concurrently on the same caller's `mpsc::Sender`).
-///
-/// # Errors
-/// Returns a setup error if DoIP transport could not be initialized.
-#[cfg(not(feature = "can"))]
-#[tracing::instrument(
-    skip(databases, doip_config, variant_detection, shutdown_signal, health),
-    fields(
-        database_count = databases.len(),
-        doip_enabled = doip_config.enabled,
-        dlt_context = dlt_ctx!("MAIN"),
-    )
-)]
-pub async fn create_diagnostic_gateway<S: SecurityPlugin>(
-    databases: Arc<DatabaseMap<S>>,
-    doip_config: &DoipConfig,
-    variant_detection: mpsc::Sender<Vec<String>>,
-    shutdown_signal: impl Future<Output = ()> + Send + 'static,
-    health: Option<&cda_health::HealthState>,
-) -> Result<MultiTransportGateway<DoipDiagGateway<EcuManager<S>>>, DoipGatewaySetupError> {
-    // Build the multi-transport gateway skeleton without transport overrides.
-    let gateway =
-        MultiTransportGateway::<DoipDiagGateway<EcuManager<S>>>::new(HashMap::default());
-
-    // --- DoIP ---
-    // `mpsc::Sender` is not Clone, so we hand the variant-detection sender to
-    // the DoIP gateway. The caller creates the channel once and we pass it down.
-    let mut variant_detection = Some(variant_detection);
-    if doip_config.enabled {
-        let doip_health_provider = if let Some(health_state) = health {
-            let provider = Arc::new(cda_health::StatusHealthProvider::new(
-                cda_health::Status::Starting,
-            ));
-            if let Err(e) = health_state
-                .register_provider(
-                    DOIP_HEALTH_COMPONENT_KEY,
-                    Arc::clone(&provider) as Arc<dyn cda_health::HealthProvider>,
-                )
-                .await
-            {
-                tracing::warn!(error = %e, "Failed to register DoIP health provider");
-            }
-            Some(provider)
-        } else {
-            None
-        };
-
-        let vd = variant_detection.take().expect("sender was available");
-        let result =
-            DoipDiagGateway::new(doip_config, Arc::clone(&databases), vd, shutdown_signal).await;
-        let status = if result.is_ok() {
-            cda_health::Status::Up
-        } else {
-            cda_health::Status::Failed
-        };
-        if let Some(provider) = doip_health_provider {
-            provider.update_status(status).await;
-        }
-        match result {
-            Ok(d) => {
-                tracing::info!("DoIP gateway initialized");
-                Ok(gateway.with_doip(d))
-            }
-            Err(e) => Err(e),
-        }
-    } else {
-        tracing::info!("DoIP transport disabled by config (doip.enabled = false)");
-        Ok(gateway)
-    }
 }
 
 /// Waits for a shutdown signal, such as Ctrl+C or SIGTERM (on unix).

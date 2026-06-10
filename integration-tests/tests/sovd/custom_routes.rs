@@ -137,22 +137,12 @@ async fn test_custom_demo_endpoint() {
     };
     let health = Some(health);
 
-    #[cfg(feature = "can")]
+    // `create_diagnostic_gateway` has a single signature regardless of the
+    // `can` feature; this test runtime is DoIP-only, so no CAN config.
     let gateway = opensovd_cda_lib::create_diagnostic_gateway(
         Arc::clone(&databases),
         &doip_config,
         None,
-        variant_tx,
-        shutdown_signal.clone(),
-        health.as_ref(),
-    )
-    .await
-    .expect("Failed to create gateway");
-
-    #[cfg(not(feature = "can"))]
-    let gateway = opensovd_cda_lib::create_diagnostic_gateway(
-        Arc::clone(&databases),
-        &doip_config,
         variant_tx,
         shutdown_signal.clone(),
         health.as_ref(),

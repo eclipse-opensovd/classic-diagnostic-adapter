@@ -10,21 +10,15 @@
  * https://www.apache.org/licenses/LICENSE-2.0
  */
 
-#[cfg(feature = "can")]
+// `CanConfig` is always available: the `config` module of cda-comm-can is not
+// gated on the `can` feature, only the SocketCAN transport code is. This keeps
+// the configuration schema (and all public function signatures that mention
+// `CanConfig`) identical across feature combinations, which matters because
+// cargo feature unification can otherwise produce mismatched signatures
+// between crates (e.g. integration-tests vs. opensovd_cda_lib under
+// `--all-features`). A `[can]` section in a non-`can` build is rejected with
+// an actionable error in `Configuration::validate_sanity` instead.
 pub use cda_comm_can::config::CanConfig;
-
-/// Stub CanConfig for when the `can` feature is disabled.
-/// This ensures that if a user provides a `[can]` section in the config
-/// file, deserialization will fail with a clear error message.
-#[cfg(not(feature = "can"))]
-#[derive(Deserialize, Serialize, Clone, Debug, schemars::JsonSchema)]
-pub struct CanConfig {
-    /// Stub field - CAN support is not compiled in.
-    /// Enable the `can` feature to use CAN bus transport.
-    #[allow(dead_code)]
-    pub _disabled: String,
-}
-
 pub use cda_comm_doip::config::DoipConfig;
 pub use cda_database::DatabaseConfig;
 use cda_interfaces::{
@@ -278,6 +272,18 @@ impl Default for Configuration {
 impl ConfigSanity for Configuration {
     fn validate_sanity(&self) -> Result<(), AppError> {
         self.database.naming_convention.validate_sanity()?;
+        // CAN support is compile-time optional. The config type itself parses
+        // in every build (see the `CanConfig` re-export above), so reject a
+        // configured [can] section here with an actionable message instead of
+        // failing later during gateway setup.
+        #[cfg(not(feature = "can"))]
+        if self.can.is_some() {
+            return Err(AppError::ConfigurationError(
+                "[can] is configured, but this binary was built without CAN support. Rebuild with \
+                 `--features can` or remove the [can] section."
+                    .to_owned(),
+            ));
+        }
         // Add more checks for Configuration fields here if needed
         Ok(())
     }
@@ -441,6 +447,39 @@ description_database = "teapot"
                 vec!["Control_".to_string()]
             ))
         );
+        Ok(())
+    }
+
+    /// A `[can]` section must parse in every build (the config type is not
+    /// feature-gated), but `validate_sanity` must reject it when the binary
+    /// was built without CAN support.
+    #[tokio::test]
+    async fn can_section_parses_and_sanity_depends_on_feature()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let config_str = r#"
+[can]
+interface = "vcan0"
+"#;
+        let figment = Figment::from(Serialized::defaults(Configuration::default()))
+            .merge(Toml::string(config_str));
+        let config: Configuration = figment.extract()?;
+        let can = config.can.as_ref().expect("can section should be parsed");
+        assert_eq!(can.interface, "vcan0");
+
+        #[cfg(feature = "can")]
+        config
+            .validate_sanity()
+            .expect("can section should pass sanity with can feature");
+        #[cfg(not(feature = "can"))]
+        {
+            let err = config
+                .validate_sanity()
+                .expect_err("can section should fail sanity without can feature");
+            assert!(
+                err.to_string().contains("--features can"),
+                "error should tell the user how to enable CAN support, got: {err}"
+            );
+        }
         Ok(())
     }
 
