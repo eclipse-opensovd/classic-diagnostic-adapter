@@ -14,7 +14,7 @@ use std::{fs::ReadDir, future::Future, path::PathBuf, sync::Arc};
 
 use cda_comm_doip::{DoipDiagGateway, config::DoipConfig};
 use cda_comm_uds::UdsManager;
-use cda_core::{DiagServiceResponseStruct, EcuManager};
+use cda_core::{DiagServiceResponseStruct, EcuManager, EcuManagerConfig};
 use cda_database::{FileManager, ProtoLoadConfig, update_mdd_uncompressed};
 use cda_health::{HealthState, StatusHealthProvider};
 use cda_interfaces::{
@@ -148,6 +148,7 @@ struct EcuLoadContext<'a> {
     protocol: &'a Protocol,
     com_params: &'a Arc<ComParams>,
     fallback_to_base_variant: bool,
+    strict_parameter_validation: bool,
 }
 
 /// Result of building an ECU manager and associated metadata.
@@ -620,6 +621,7 @@ pub async fn load_databases<S: SecurityPlugin>(
     let database_naming_convention = config.database.naming_convention.clone();
     let func_description_cfg = config.functional_description.clone();
     let fallback_to_base_variant = config.database.fallback_to_base_variant;
+    let strict_parameter_validation = config.database.strict_parameter_validation;
     let database_config = config.database.clone();
     let strict_ecu_config = database_config.strict_ecu_config;
     let protocol = cda_interfaces::Protocol::new(config.doip.protocol_name.clone());
@@ -692,6 +694,7 @@ pub async fn load_databases<S: SecurityPlugin>(
                         flat_buf_settings,
                         func_description_cfg,
                         fallback_to_base_variant,
+                        strict_parameter_validation,
                         database_config,
                     )
                     .await;
@@ -968,9 +971,12 @@ fn create_ecu_manager<S: SecurityPlugin>(
         protocol,
         effective_com_params,
         ctx.database_naming_convention.clone(),
-        ecu_type,
+        EcuManagerConfig {
+            type_: ecu_type,
+            fallback_to_base_variant: ctx.fallback_to_base_variant,
+            strict_parameter_validation: ctx.strict_parameter_validation,
+        },
         ctx.func_description_cfg,
-        ctx.fallback_to_base_variant,
     )
     .map_err(|e| {
         tracing::error!(
@@ -1084,6 +1090,7 @@ async fn load_database<S: SecurityPlugin>(
     flat_buf_settings: FlatbBufConfig,
     func_description_cfg: FunctionalDescriptionConfig,
     fallback_to_base_variant: bool,
+    strict_parameter_validation: bool,
     database_config: cda_database::DatabaseConfig,
 ) {
     for (mddfile, _) in paths {
@@ -1121,6 +1128,7 @@ async fn load_database<S: SecurityPlugin>(
                     protocol: &protocol,
                     com_params: &com_params,
                     fallback_to_base_variant,
+                    strict_parameter_validation,
                 };
 
                 if let Some(result) = load_ecu_from_file(proto_data, &ctx, per_ecu_cfg) {
