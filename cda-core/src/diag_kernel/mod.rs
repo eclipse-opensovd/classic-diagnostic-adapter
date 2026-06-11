@@ -20,14 +20,19 @@ use cda_interfaces::{DiagServiceError, HashMap};
 use serde::{Serialize, Serializer};
 
 pub(crate) mod comparam;
+pub(crate) mod component_info;
 pub(crate) mod diagservices;
+pub(crate) mod dtc;
 pub(crate) mod ecumanager;
 pub(crate) mod iso_14229_nrc;
 mod operations;
 pub(crate) mod param_metadata;
-mod payload;
+pub(crate) mod payload_decode;
+pub(crate) mod payload_encode;
+pub(crate) mod payload;
 mod schema;
 pub(crate) mod service_lookup;
+pub(crate) mod state;
 #[cfg(test)]
 pub(crate) mod test_utils;
 mod variant_detection;

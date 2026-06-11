@@ -14,7 +14,7 @@ use std::collections::VecDeque;
 
 use cda_interfaces::DiagServiceError;
 
-pub(in crate::diag_kernel) struct Payload<'a> {
+pub(crate) struct Payload<'a> {
     data: &'a [u8],
     current_index: usize,
     slices: VecDeque<(usize, usize)>,
@@ -23,7 +23,7 @@ pub(in crate::diag_kernel) struct Payload<'a> {
 }
 
 impl<'a> Payload<'a> {
-    pub(in crate::diag_kernel) fn new(data: &'a [u8]) -> Self {
+    pub(crate) fn new(data: &'a [u8]) -> Self {
         Self {
             data,
             current_index: 0,
@@ -32,7 +32,7 @@ impl<'a> Payload<'a> {
             bytes_to_skip: 0,
         }
     }
-    pub(in crate::diag_kernel) fn set_last_read_byte_pos(&mut self, pos: usize) {
+    pub(crate) fn set_last_read_byte_pos(&mut self, pos: usize) {
         if pos > self.len() {
             self.last_read_byte_pos = self.len();
         } else {
@@ -40,19 +40,19 @@ impl<'a> Payload<'a> {
         }
     }
 
-    pub(in crate::diag_kernel) fn set_bytes_to_skip(&mut self, count: usize) {
+    pub(crate) fn set_bytes_to_skip(&mut self, count: usize) {
         self.bytes_to_skip = self.bytes_to_skip.saturating_add(count);
     }
 
-    pub(in crate::diag_kernel) fn bytes_to_skip(&self) -> usize {
+    pub(crate) fn bytes_to_skip(&self) -> usize {
         self.bytes_to_skip
     }
 
-    pub(in crate::diag_kernel) fn last_read_byte_pos(&self) -> usize {
+    pub(crate) fn last_read_byte_pos(&self) -> usize {
         self.last_read_byte_pos
     }
 
-    pub(in crate::diag_kernel) fn data(&self) -> Result<&[u8], DiagServiceError> {
+    pub(crate) fn data(&self) -> Result<&[u8], DiagServiceError> {
         if let Some(&(start, end)) = self.slices.back() {
             self.data.get(start..end)
         } else {
@@ -63,7 +63,7 @@ impl<'a> Payload<'a> {
         ))
     }
 
-    pub(in crate::diag_kernel) fn pos(&self) -> usize {
+    pub(crate) fn pos(&self) -> usize {
         if let Some(&(start, _)) = self.slices.back() {
             start
         } else {
@@ -71,7 +71,7 @@ impl<'a> Payload<'a> {
         }
     }
 
-    pub(in crate::diag_kernel) fn consume(&mut self) -> usize {
+    pub(crate) fn consume(&mut self) -> usize {
         let advance_len = self.last_read_byte_pos.saturating_add(self.bytes_to_skip);
         if self.pos().saturating_add(advance_len) > self.data.len() {
             self.current_index = self.data.len(); // Move to the end if we exceed
@@ -83,7 +83,7 @@ impl<'a> Payload<'a> {
         advance_len
     }
 
-    pub(in crate::diag_kernel) fn len(&self) -> usize {
+    pub(crate) fn len(&self) -> usize {
         if let Some(&(start, end)) = self.slices.back() {
             end.saturating_sub(start)
         } else {
@@ -91,7 +91,7 @@ impl<'a> Payload<'a> {
         }
     }
 
-    pub(in crate::diag_kernel) fn exhausted(&self) -> bool {
+    pub(crate) fn exhausted(&self) -> bool {
         if let Some(&(_, end)) = self.slices.back() {
             self.current_index >= end
         } else {
@@ -99,18 +99,18 @@ impl<'a> Payload<'a> {
         }
     }
 
-    pub(in crate::diag_kernel) fn first(&self) -> Option<&u8> {
+    pub(crate) fn first(&self) -> Option<&u8> {
         self.data.get(self.pos())
     }
 
-    pub(in crate::diag_kernel) fn push_slice_to_abs_end(
+    pub(crate) fn push_slice_to_abs_end(
         &mut self,
         start: usize,
     ) -> Result<(), DiagServiceError> {
         self.push_slice(start, self.len())
     }
 
-    pub(in crate::diag_kernel) fn push_slice(
+    pub(crate) fn push_slice(
         &mut self,
         start: usize,
         end: usize,
@@ -133,7 +133,7 @@ impl<'a> Payload<'a> {
         Ok(())
     }
 
-    pub(in crate::diag_kernel) fn pop_slice(&mut self) -> Result<(), DiagServiceError> {
+    pub(crate) fn pop_slice(&mut self) -> Result<(), DiagServiceError> {
         if self.slices.pop_back().is_none() {
             return Err(DiagServiceError::BadPayload(
                 "No restricted view to pop".to_owned(),
