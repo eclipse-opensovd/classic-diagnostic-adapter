@@ -177,29 +177,18 @@ impl<S: EcuGateway, R: DiagServiceResponse, T: EcuManager<Response = R>> UdsMana
 
     /// Abort all background tasks owned by this instance. Idempotent.
     pub async fn shutdown(&self) {
+        let mut tester_present_tasks = self.tester_present_tasks.write().await;
+        let mut session_reset_tasks = self.session_reset_tasks.write().await;
+        let mut security_reset_tasks = self.security_reset_tasks.write().await;
+        let mut data_transfers = self.data_transfers.lock().await;
+        for handle in tester_present_tasks
+            .drain()
+            .map(|(_, tp)| tp.task)
+            .chain(session_reset_tasks.drain().map(|(_, h)| h))
+            .chain(security_reset_tasks.drain().map(|(_, h)| h))
+            .chain(data_transfers.drain().map(|(_, t)| t.task))
         {
-            let mut tasks = self.tester_present_tasks.write().await;
-            for (_, tp_task) in tasks.drain() {
-                tp_task.task.abort();
-            }
-        }
-        {
-            let mut tasks = self.session_reset_tasks.write().await;
-            for (_, handle) in tasks.drain() {
-                handle.abort();
-            }
-        }
-        {
-            let mut tasks = self.security_reset_tasks.write().await;
-            for (_, handle) in tasks.drain() {
-                handle.abort();
-            }
-        }
-        {
-            let mut transfers = self.data_transfers.lock().await;
-            for (_, transfer) in transfers.drain() {
-                transfer.task.abort();
-            }
+            handle.abort();
         }
     }
 
