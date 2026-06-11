@@ -19,6 +19,7 @@ use cda_database::{
 use cda_interfaces::{DiagServiceError, HashMap};
 use serde::{Serialize, Serializer};
 
+pub(crate) mod comparam;
 pub(crate) mod diagservices;
 pub(crate) mod ecumanager;
 pub(crate) mod iso_14229_nrc;
@@ -26,6 +27,9 @@ mod operations;
 pub(crate) mod param_metadata;
 mod payload;
 mod schema;
+pub(crate) mod service_lookup;
+#[cfg(test)]
+pub(crate) mod test_utils;
 mod variant_detection;
 
 #[derive(Debug)]
