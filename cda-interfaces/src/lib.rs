@@ -31,6 +31,7 @@ pub use ecuuds::*;
 pub mod file_manager;
 mod schema;
 pub use schema::*;
+pub mod runtime_update_api;
 pub mod storage_api;
 
 // Deliberately not using new type pattern here, to make sure all crates that take

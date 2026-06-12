@@ -20,6 +20,7 @@ use doip_definitions::{
     payload::{DoipPayload, VehicleIdentificationRequest},
 };
 use tokio::sync::{Mutex, RwLock, mpsc};
+use tokio_util::sync::CancellationToken;
 
 use crate::{
     DoipDiagGateway, DoipTarget,
@@ -107,6 +108,7 @@ pub(crate) async fn listen_for_vams<T, F>(
     variant_detection: mpsc::Sender<Vec<String>>,
     send_timeout: Duration,
     mut shutdown_signal: futures::future::Shared<F>,
+    cancel_token: CancellationToken,
 ) where
     T: EcuAddressProvider + DoipComParamProvider,
     F: Future<Output = ()> + Send + 'static,
@@ -285,6 +287,9 @@ pub(crate) async fn listen_for_vams<T, F>(
                 let mut socket = broadcast_socket.lock().await;
                 tokio::select! {
                     () = &mut shutdown_signal => {
+                        break
+                    },
+                    () = cancel_token.cancelled() => {
                         break
                     },
                     Some(Ok((doip_msg, source_addr))) = socket.recv() => {

@@ -22,7 +22,8 @@ use std::{
 
 use async_trait::async_trait;
 use cda_interfaces::storage_api::{
-    Collection, CollectionName, Operation, Storage, StorageError, Transaction, TransactionCommitter,
+    Collection, CollectionName, DirectFileAccess, Operation, Storage, StorageError, Transaction,
+    TransactionCommitter,
 };
 
 use crate::{
@@ -92,10 +93,12 @@ impl LocalStorage {
 }
 
 impl Storage for LocalStorage {
+    type CollectionHandle = LocalCollection;
+
     async fn get_collection(
         &self,
         name: &CollectionName,
-    ) -> Result<Arc<impl Collection + 'static>, StorageError> {
+    ) -> Result<Arc<LocalCollection>, StorageError> {
         let _guard = self.data_lock.read().await;
         let dir = self.collection_dir(name)?;
         if !dir.exists() {
@@ -111,7 +114,7 @@ impl Storage for LocalStorage {
     async fn get_or_create_collection(
         &self,
         name: &CollectionName,
-    ) -> Result<Arc<impl Collection + 'static>, StorageError> {
+    ) -> Result<Arc<impl Collection + DirectFileAccess + 'static>, StorageError> {
         let dir = self.collection_dir(name)?;
 
         let read_guard = self.data_lock.read().await;
@@ -127,9 +130,7 @@ impl Storage for LocalStorage {
         // Collection does not exist -- acquire a write lock to create it.
         // Reject if a transaction is active.
         if self.tx_active.load(Ordering::Acquire) {
-            return Err(StorageError::TransactionError(
-                "Cannot create collection while a transaction is active".to_string(),
-            ));
+            return Err(StorageError::TransactionBusy);
         }
         let write_guard = self.data_lock.write().await;
         // Re-check after acquiring write lock
@@ -150,9 +151,7 @@ impl Storage for LocalStorage {
         // Enforce single-transaction-at-a-time.
         let was_active = self.tx_active.swap(true, Ordering::AcqRel);
         if was_active {
-            return Err(StorageError::TransactionError(
-                "A transaction is already active".to_string(),
-            ));
+            return Err(StorageError::TransactionBusy);
         }
 
         let wal_path = self.journal_dir.join(wal::WAL_FILE_NAME);
@@ -187,10 +186,10 @@ impl Storage for LocalStorage {
         &self,
         tx: &mut Transaction,
         name: &CollectionName,
-    ) -> Result<Arc<impl Collection + 'static>, StorageError> {
+    ) -> Result<Arc<impl Collection + DirectFileAccess + 'static>, StorageError> {
         let dir = self.collection_dir(name)?;
         if dir.exists() {
-            return Err(StorageError::TransactionError(format!(
+            return Err(StorageError::TransactionConflict(format!(
                 "Collection already exists: {name}"
             )));
         }

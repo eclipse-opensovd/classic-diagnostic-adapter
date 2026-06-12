@@ -26,6 +26,7 @@ path = "src/lib.rs"
 [dependencies]
 # internal dependencies
 cda-interfaces = { workspace = true }
+cda-plugin-runtime-update = { workspace = true }
 
 async-trait = { workspace = true }
 

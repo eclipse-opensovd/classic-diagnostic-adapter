@@ -28,7 +28,7 @@ use crate::{io, paths, wal};
 /// A collection backed by a directory on the local filesystem.
 ///
 /// Each entry is stored as a file named after its key (normalized to lowercase).
-pub(crate) struct LocalCollection {
+pub struct LocalCollection {
     /// The name of this collection.
     name: CollectionName,
     /// Path to the collection directory: `{root}/collections/{collection_name}/`.

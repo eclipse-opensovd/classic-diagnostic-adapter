@@ -50,4 +50,4 @@ tokio = { workspace = true, features = [
   "rt-multi-thread",
   "io-util",
 ] }
-tempfile = "3"
+tempfile = { workspace = true }

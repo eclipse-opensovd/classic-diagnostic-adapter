@@ -39,12 +39,15 @@ cda-tracing = { workspace = true }
 cda-plugin-security = { workspace = true }
 cda-health = { workspace = true }
 cda-extra = { workspace = true, optional = true }
+cda-plugin-runtime-update = { workspace = true }
+cda-storage = { workspace = true }
 # args
 clap = { workspace = true, features = ["derive", "env"] }
 # config
 figment = { workspace = true, features = ["env", "toml"] }
 toml = { workspace = true }
 futures = { workspace = true }
+async-trait = { workspace = true }
 # allocator
 mimalloc = { git = "https://github.com/theswiftfox/mimalloc.git", rev = "afbaaa5" }
 schemars = { workspace = true }
@@ -72,9 +75,7 @@ tracing-subscriber = { workspace = true, features = [
 
 [dev-dependencies]
 chrono = { workspace = true }
-http = { workspace = true }
-mime = { workspace = true }
-reqwest = { workspace = true }
+tempfile = { workspace = true }
 
 [build-dependencies]
 chrono = { workspace = true }
