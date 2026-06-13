@@ -3,14 +3,15 @@
  * SPDX-FileCopyrightText: 2026 The Contributors to Eclipse OpenSOVD (see CONTRIBUTORS)
  */
 
-// The `can` feature relies on Linux SocketCAN ISO-TP sockets
-// (tokio-socketcan-isotp). Fail early with an actionable message instead of
-// letting the Linux-only dependency produce cryptic build errors on other
-// platforms.
-#[cfg(all(feature = "can", not(target_os = "linux")))]
+// The `can` feature alone relies on Linux SocketCAN ISO-TP sockets
+// (tokio-socketcan-isotp). Off Linux it is only usable together with
+// `can-tcp`, which carries CAN frames over TCP (`tcp:<host>:<port>`
+// interface scheme). Fail early with an actionable message instead of
+// letting socket creation fail at runtime with a cryptic error.
+#[cfg(all(feature = "can", not(target_os = "linux"), not(feature = "can-tcp")))]
 compile_error!(
-    "The `can` feature requires Linux (SocketCAN/ISO-TP). Build without `--features can` on this \
-     platform."
+    "The `can` feature requires Linux (SocketCAN/ISO-TP). On other platforms enable `can-tcp` to \
+     use the TCP frame transport."
 );
 
 pub mod config;

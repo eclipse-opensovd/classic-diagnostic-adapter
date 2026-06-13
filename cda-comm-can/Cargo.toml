@@ -30,13 +30,19 @@ tracing = { workspace = true }
 hex = { workspace = true }
 schemars = { workspace = true }
 
-# CAN / ISO-TP
-# This dependency is only enabled when the `can` feature is active.
-# The upstream crate's missing-`license`-field warning is silenced by a
-# `[[licenses.exceptions]]` entry in `deny.toml`.
-tokio-socketcan-isotp = { version = "0.2", optional = true }
+# CAN / ISO-TP, enabled by the `can` feature. The crate gates its
+# SocketCAN/kernel code to Linux internally; with its `tcp` feature it also
+# builds on other platforms. A `compile_error!` in `src/lib.rs` enforces that
+# off-Linux builds with `can` also enable `can-tcp`.
+tokio-socketcan-isotp = { git = "https://github.com/MarkSchmitt/tokio-socketcan-isotp.git", tag = "v0.3.0", optional = true }
 
 [features]
 default = []
 can = ["dep:tokio-socketcan-isotp"]
+# Userspace ISO-TP over raw CAN: enables the `rawcan:<ifname>` interface
+# scheme (vcan without the can_isotp kernel module).
+can-isotp-userspace = ["can", "tokio-socketcan-isotp/isotp-userspace"]
+# CAN frames over TCP: enables the `tcp:<host>:<port>` interface scheme
+# (no CAN support needed at all; also works on non-Linux platforms).
+can-tcp = ["can-isotp-userspace", "tokio-socketcan-isotp/tcp"]
 dlt-tracing = ["cda-interfaces/dlt-tracing"]
