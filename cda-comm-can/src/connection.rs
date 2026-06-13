@@ -37,8 +37,8 @@ impl CanEcuConnection {
     fn open_socket(&self) -> Result<IsoTpSocket, CanError> {
         // Standard CAN IDs are 11-bit (0-0x7FF), so truncation is expected for valid IDs
         // Note: ISO-TP socket uses (rx_id, tx_id) not (src, dst)
-        // rx_id = what we receive on (ECU's response ID = 0x7BB)
-        // tx_id = what we transmit on (ECU's request ID = 0x79B)
+        // rx_id = what we receive on (ECU's response ID, e.g. 0x7E8)
+        // tx_id = what we transmit on (ECU's request ID, e.g. 0x7E0)
         #[allow(clippy::cast_possible_truncation)]
         let rx_id = StandardId::new(self.response_id as u16).ok_or_else(|| {
             CanError::SocketError(format!(

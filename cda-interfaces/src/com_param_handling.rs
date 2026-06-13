@@ -79,11 +79,11 @@ pub trait DoipComParamProvider: Send + Sync + 'static {
 
 /// Provider for CAN-specific communication parameters from MDD.
 pub trait CanComParamProvider: Send + Sync + 'static {
-    /// Physical request CAN ID (e.g., 0x79B)
+    /// Physical request CAN ID (e.g., 0x7E0)
     #[must_use]
     fn can_request_id(&self) -> Option<u32>;
 
-    /// Physical response CAN ID (e.g., 0x7BB)
+    /// Physical response CAN ID (e.g., 0x7E8)
     #[must_use]
     fn can_response_id(&self) -> Option<u32>;
 
