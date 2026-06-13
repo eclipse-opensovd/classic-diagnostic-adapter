@@ -11,6 +11,46 @@
 # Path to the directory containing flash files.
 # flash_files_path = "."
 
+# Optional CAN bus transport configuration.
+# When enabled, the adapter can communicate with ECUs over CAN bus.
+[can]
+# ecu_mappings = []
+# interface = "vcan0"
+# probe_fallbacks = []
+# probe_timeout_ms = 100
+# response_timeout_ms = 5000
+# transport_overrides = []
+
+# Functional CAN ID for broadcast requests
+[com_params.can.functional_id]
+# Communication parameter identifier (`CP_xxx` name from the database).
+# name = "CP_CanFuncReqId"
+# Controls whether a com-parameter value is resolved from the MDD database
+# or forced from the configuration file.
+# precedence = "Database"
+# Value used when the database does not provide one, or precedence is set to `Config`.
+# value = 2015
+
+# Physical request CAN ID (tester -> ECU)
+[com_params.can.physical_request_id]
+# Communication parameter identifier (`CP_xxx` name from the database).
+# name = "CP_CanPhysReqId"
+# Controls whether a com-parameter value is resolved from the MDD database
+# or forced from the configuration file.
+# precedence = "Database"
+# Value used when the database does not provide one, or precedence is set to `Config`.
+# value = 2016
+
+# Physical response CAN ID (ECU -> tester)
+[com_params.can.physical_response_id]
+# Communication parameter identifier (`CP_xxx` name from the database).
+# name = "CP_CanRespUSDTId"
+# Controls whether a com-parameter value is resolved from the MDD database
+# or forced from the configuration file.
+# precedence = "Database"
+# Value used when the database does not provide one, or precedence is set to `Config`.
+# value = 2024
+
 # DoIP-specific communication parameters.
 [com_params.doip]
 # Only the ID of this com param is needed right now
@@ -495,10 +535,17 @@
 
 # `DoIP` (Diagnostics over IP) transport layer settings.
 [doip]
+# Whether the `DoIP` transport is enabled.
+# When `false`, CDA skips `DoIP` initialization entirely (useful for
+# CAN-only or DoIP-less test setups).
+# Defaults to `true` to preserve the historical DoIP-first behavior.
+# enabled = true
 # UDP/TCP port for `DoIP` gateway discovery and communication.
 # gateway_port = 13400
 # The name of the protocol to use.
 # Matched case-insensitive against the database.
+# The special value `"auto"` defers the choice to the MDD-driven
+# auto-detect (see `into_db_protocol`).
 # protocol_name = "UDS_Ethernet_DoIP_DOBT"
 # `DoIP` protocol version byte (e.g. 0x02 for ISO 13400-2:2012).
 # protocol_version = 2
@@ -512,6 +559,21 @@
 # tester_subnet = "255.255.0.0"
 # TLS port for secure `DoIP` communication.
 # tls_port = 3496
+
+[ecu.FLXC1000.com_params.can.functional_id]
+# name = "CP_CanFuncReqId"
+# precedence = "Config"
+# value = 2015
+
+[ecu.FLXC1000.com_params.can.physical_request_id]
+# name = "CP_CanPhysReqId"
+# precedence = "Config"
+# value = 2014
+
+[ecu.FLXC1000.com_params.can.physical_response_id]
+# name = "CP_CanRespUSDTId"
+# precedence = "Config"
+# value = 2024
 
 [ecu.FLXC1000.com_params.doip.routing_activation_timeout]
 # name = "CP_DoIPRoutingActivationTimeout"

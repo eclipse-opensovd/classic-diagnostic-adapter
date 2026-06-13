@@ -44,6 +44,15 @@ impl DiagDataValue {
     fn new(diag_type: DataType, data: &[u8]) -> Result<Self, DiagServiceError> {
         match diag_type {
             DataType::Int32 | DataType::UInt32 | DataType::Float32 => {
+                // Some MDDs use a numeric DiagCodedType (e.g. UInt32) for
+                // "reserved" or padding fields whose actual byte length is
+                // not 4. Padded-numeric conversion can't represent that
+                // (e.g. 6 bytes for a 48-bit field). Fall back to a
+                // ByteField so the value is preserved and downstream
+                // consumers can still see the raw bytes.
+                if data.len() > 4 {
+                    return Ok(DiagDataValue::ByteField(data.to_vec()));
+                }
                 let bytes = cda_interfaces::util::u32_padded_bytes(data)?;
                 match diag_type {
                     DataType::Int32 => Ok(DiagDataValue::Int32(i32::from_be_bytes(bytes))),
@@ -63,6 +72,9 @@ impl DiagDataValue {
             }
             DataType::ByteField => Ok(DiagDataValue::ByteField(data.to_vec())),
             DataType::Float64 => {
+                if data.len() > 8 {
+                    return Ok(DiagDataValue::ByteField(data.to_vec()));
+                }
                 let bytes = cda_interfaces::util::f64_padded_bytes(data)?;
                 Ok(DiagDataValue::Float64(f64::from_be_bytes(bytes)))
             }
@@ -237,6 +249,34 @@ pub fn into_db_protocol<'db>(
     let protocol_name = protocol.to_string();
     let all_protocols = database.protocols()?;
 
+    // Auto-detect: when the user has not picked a protocol explicitly, scan
+    // the MDD's protocols and prefer a CAN-named one (if any), else fall back
+    // to the first available protocol. This lets a CAN-only setup work
+    // without a per-ECU `[ecu.<name>] protocol = "UDS_CAN"` override.
+    if protocol_name == "auto" {
+        if let Some(p) = all_protocols.iter().find(|p| {
+            p.diag_layer()
+                .and_then(|dl| dl.short_name())
+                .is_some_and(|sn| {
+                    let up = sn.to_ascii_uppercase();
+                    up.contains("CAN") || up.contains("ISO_11898")
+                })
+        }) {
+            tracing::info!("Auto-detected CAN protocol from MDD; using it as the default");
+            return Ok(datatypes::Protocol(*p));
+        }
+        if let Some(p) = all_protocols.first() {
+            tracing::warn!(
+                "No CAN-named protocol found in MDD; auto-detect falling back to first available \
+                 protocol"
+            );
+            return Ok(datatypes::Protocol(*p));
+        }
+        return Err(DiagServiceError::InvalidDatabase(
+            "No protocols found in database (auto-detect)".to_owned(),
+        ));
+    }
+
     // Try exact match first.
     if let Some(p) = all_protocols.iter().find(|p| {
         p.diag_layer()
@@ -244,6 +284,27 @@ pub fn into_db_protocol<'db>(
             .is_some_and(|sn| sn.eq_ignore_ascii_case(&protocol_name))
     }) {
         return Ok(datatypes::Protocol(*p));
+    }
+
+    // CAN-specific fallback: try common CAN protocol short names
+    if protocol_name == "UDS_CAN" {
+        let can_aliases = ["UDS_CAN", "ISO_11898_2_DWCAN", "ISO_11898_3_DWFTCAN", "CAN"];
+        for alias in &can_aliases[1..] {
+            if let Some(p) = all_protocols.iter().find(|p| {
+                p.diag_layer()
+                    .and_then(|dl| dl.short_name())
+                    .is_some_and(|sn| sn.eq_ignore_ascii_case(alias))
+            }) {
+                return Ok(datatypes::Protocol(*p));
+            }
+        }
+        // If still no match, use the first available protocol (MDD might not name it)
+        if let Some(p) = all_protocols.first() {
+            tracing::warn!(
+                "CAN protocol not found by name, using first available protocol in database"
+            );
+            return Ok(datatypes::Protocol(*p));
+        }
     }
 
     // Fallback: when ignore_protocol is enabled and only one distinct protocol

@@ -36,6 +36,8 @@ COPY cda-interfaces/Cargo.toml ./cda-interfaces/Cargo.toml
 COPY cda-core/Cargo.toml ./cda-core/Cargo.toml
 COPY cda-comm-doip/Cargo.toml ./cda-comm-doip/Cargo.toml
 COPY cda-comm-uds/Cargo.toml ./cda-comm-uds/Cargo.toml
+COPY cda-comm-can/Cargo.toml ./cda-comm-can/Cargo.toml
+COPY cda-simulator/Cargo.toml ./cda-simulator/Cargo.toml
 COPY cda-database/Cargo.toml ./cda-database/Cargo.toml
 COPY cda-plugin-security/Cargo.toml ./cda-plugin-security/Cargo.toml
 COPY cda-sovd/Cargo.toml ./cda-sovd/Cargo.toml
@@ -83,6 +85,8 @@ COPY cda-interfaces ./cda-interfaces
 COPY cda-core ./cda-core
 COPY cda-comm-doip ./cda-comm-doip
 COPY cda-comm-uds ./cda-comm-uds
+COPY cda-comm-can ./cda-comm-can
+COPY cda-simulator ./cda-simulator
 COPY cda-database ./cda-database
 COPY cda-plugin-security ./cda-plugin-security
 COPY cda-sovd ./cda-sovd

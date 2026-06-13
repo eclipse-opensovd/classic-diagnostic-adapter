@@ -16,6 +16,12 @@ use serde::{Deserialize, Serialize};
 /// `DoIP` (Diagnostics over IP) transport layer configuration.
 #[derive(Deserialize, Serialize, Clone, Debug, schemars::JsonSchema)]
 pub struct DoipConfig {
+    /// Whether the `DoIP` transport is enabled.
+    /// When `false`, CDA skips `DoIP` initialization entirely (useful for
+    /// CAN-only or DoIP-less test setups).
+    /// Defaults to `true` to preserve the historical DoIP-first behavior.
+    #[serde(default = "default_doip_enabled")]
+    pub enabled: bool,
     /// `DoIP` protocol version byte (e.g. 0x02 for ISO 13400-2:2012).
     pub protocol_version: u8,
     /// IP address of the diagnostic tester interface.
@@ -32,12 +38,19 @@ pub struct DoipConfig {
     pub send_diagnostic_message_ack: bool,
     /// The name of the protocol to use.
     /// Matched case-insensitive against the database.
+    /// The special value `"auto"` defers the choice to the MDD-driven
+    /// auto-detect (see `into_db_protocol`).
     pub protocol_name: String,
+}
+
+fn default_doip_enabled() -> bool {
+    true
 }
 
 impl Default for DoipConfig {
     fn default() -> Self {
         Self {
+            enabled: true,
             protocol_version: 0x02,
             tester_address: "127.0.0.1".to_owned(),
             tester_subnet: "255.255.0.0".to_owned(),

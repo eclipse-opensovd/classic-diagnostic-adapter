@@ -216,6 +216,13 @@ impl<S: SecurityPlugin> cda_interfaces::EcuManager for EcuManager<S> {
         self.variant.clone()
     }
 
+    fn request_lock_key(&self) -> String {
+        format!(
+            "logical:0x{:04X}@0x{:04X}",
+            self.logical_gateway_address, self.logical_address
+        )
+    }
+
     fn state(&self) -> EcuState {
         self.variant.state
     }
@@ -1942,6 +1949,22 @@ impl<S: SecurityPlugin> cda_interfaces::DoipComParamProvider for EcuManager<S> {
     }
     fn connection_retry_attempts(&self) -> u32 {
         self.connection_retry_attempts
+    }
+}
+
+impl<S: SecurityPlugin> cda_interfaces::CanComParamProvider for EcuManager<S> {
+    fn can_request_id(&self) -> Option<u32> {
+        // CAN IDs are not yet extracted into the EcuManager; CAN config relies
+        // on the explicit [[can.ecu_mappings]] block in opensovd-cda-can.toml.
+        None
+    }
+
+    fn can_response_id(&self) -> Option<u32> {
+        None
+    }
+
+    fn can_functional_id(&self) -> Option<u32> {
+        None
     }
 }
 

@@ -64,11 +64,11 @@ jobs:
           echo "Generated files are up to date."
       - name: Verify reference config is up to date
         run: |
-          cargo run --locked --all-features -- generate-config --output /tmp/opensovd-cda.toml
+          cargo run --locked --all-features -p opensovd-cda -- generate-config --output /tmp/opensovd-cda.toml
           if ! diff -u opensovd-cda.toml /tmp/opensovd-cda.toml; then
             echo ""
             echo "::error::opensovd-cda.toml is out of date."
-            echo "Regenerate with: cargo run --all-features -- generate-config --output opensovd-cda.toml"
+            echo "Regenerate with: cargo run --all-features -p opensovd-cda -- generate-config --output opensovd-cda.toml"
             exit 1
           fi
           echo "opensovd-cda.toml is up to date."
