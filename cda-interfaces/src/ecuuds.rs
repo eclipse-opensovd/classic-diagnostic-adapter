@@ -16,8 +16,8 @@ use std::time::Duration;
 use async_trait::async_trait;
 
 use crate::{
-    DiagComm, DiagServiceError, DynamicPlugin, EcuVariant, HashMap, SecurityAccess,
-    TesterPresentType,
+    DiagComm, DiagServiceError, DoipComParams, DynamicPlugin, EcuAddresses, EcuStateManager,
+    EcuVariant, HashMap, SecurityAccess, TesterPresentType, UdsComParams,
     datatypes::{
         ComplexComParamValue, ComponentConfigurationsInfo, ComponentDataInfo,
         ComponentOperationsInfo, DataTransferMetaData, DtcCode, DtcExtendedInfo,
@@ -566,6 +566,27 @@ pub trait UdsEcu: UdsTransport + UdsSession + UdsSecurity + UdsTesterPresent {
     ) -> Result<HashMap<String, Result<Self::Response, DiagServiceError>>, DiagServiceError>;
 }
 
+/// Minimum trait bound for the ECU type `T` in `UdsManager`.
+///
+/// This covers the traits used directly by the raw UDS transport layer
+/// (`send_with_raw_payload`, `ecu_send_params`).  Higher-level operations
+/// add `EcuManager` bounds on their impl blocks.
+///
+/// Note: This uses a blanket-implemented marker trait as a workaround because
+/// trait aliases (`trait UdsEcuDb = A + B + ...;`) are not yet stable:
+/// <https://github.com/rust-lang/rust/issues/41517>
+pub trait UdsEcuDb:
+    EcuStateManager + UdsComParams + DoipComParams + EcuAddresses + Send + Sync + 'static
+{
+}
+
+/// Blanket implementation so that any type satisfying the super-traits
+/// automatically implements `UdsEcuDb` without an explicit `impl` block.
+impl<T> UdsEcuDb for T where
+    T: EcuStateManager + UdsComParams + DoipComParams + EcuAddresses + Send + Sync + 'static
+{
+}
+
 #[cfg(feature = "test-utils")]
 pub mod mock {
     use std::time::Duration;
@@ -877,6 +898,9 @@ pub mod mock {
 
     use crate::schema::{SchemaDescription, SchemaProvider};
 
+    // We have to adhere to the signature of the trait, which is async, but we don't actually need to do any async work here.
+    // core::future::ready what clippy suggest as alternative if not available on 1.88
+    #[cfg_attr(nightly, allow(unknown_lints, clippy::unused_async_trait_impl))]
     impl SchemaProvider for MockUdsEcu {
         async fn schema_for_request(
             &self,

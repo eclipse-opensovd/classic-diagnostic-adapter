@@ -19,8 +19,7 @@ use axum::{
 };
 use axum_extra::extract::WithRejection;
 use cda_interfaces::{
-    DynamicPlugin, UdsEcu, datatypes::ComponentConfigurationsInfo,
-    diagservices::DiagServiceResponse, file_manager::FileManager,
+    DynamicPlugin, UdsEcu, datatypes::ComponentConfigurationsInfo, file_manager::FileManager,
 };
 use cda_plugin_security::Secured;
 use http::StatusCode;
@@ -31,9 +30,9 @@ use crate::sovd::{
     error::{ApiError, ErrorWrapper},
 };
 
-pub(crate) async fn get<R: DiagServiceResponse, T: UdsEcu + Clone, U: FileManager>(
+pub(crate) async fn get<T: UdsEcu + Clone, U: FileManager>(
     UseApi(Secured(security_plugin), _): UseApi<Secured, ()>,
-    State(WebserverEcuState { ecu_name, uds, .. }): State<WebserverEcuState<R, T, U>>,
+    State(WebserverEcuState { ecu_name, uds, .. }): State<WebserverEcuState<T, U>>,
     WithRejection(Query(query), _): WithRejection<
         Query<sovd_configurations::ConfigurationsQuery>,
         ApiError,
@@ -117,8 +116,7 @@ pub(crate) mod diag_service {
     };
     use axum_extra::extract::WithRejection;
     use cda_interfaces::{
-        DiagComm, DiagCommType, SchemaProvider, UdsEcu, diagservices::DiagServiceResponse,
-        file_manager::FileManager,
+        DiagComm, DiagCommType, SchemaProvider, UdsEcu, file_manager::FileManager,
     };
     use cda_plugin_security::Secured;
     use http::HeaderMap;
@@ -133,11 +131,7 @@ pub(crate) mod diag_service {
         },
     };
 
-    pub(crate) async fn put<
-        R: DiagServiceResponse,
-        T: UdsEcu + SchemaProvider + Clone,
-        U: FileManager,
-    >(
+    pub(crate) async fn put<T: UdsEcu + SchemaProvider + Clone, U: FileManager>(
         headers: HeaderMap,
         UseApi(Secured(security_plugin), _): UseApi<Secured, ()>,
         Path(DiagServicePathParam { service }): Path<DiagServicePathParam>,
@@ -145,7 +139,7 @@ pub(crate) mod diag_service {
             Query<sovd_configurations::ConfigurationsQuery>,
             ApiError,
         >,
-        State(WebserverEcuState { ecu_name, uds, .. }): State<WebserverEcuState<R, T, U>>,
+        State(WebserverEcuState { ecu_name, uds, .. }): State<WebserverEcuState<T, U>>,
         body: Bytes,
     ) -> Response {
         let include_schema = query.include_schema;

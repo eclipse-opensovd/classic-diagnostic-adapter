@@ -17,17 +17,15 @@ use std::{
 };
 
 use cda_interfaces::{
-    DiagComm, DiagServiceError, DynamicPlugin, EcuGateway, EcuManager, ServicePayload,
-    TransmissionParameters, UdsResponse, UdsTransport,
-    datatypes::RetryPolicy,
-    diagservices::{DiagServiceResponse, UdsPayloadData},
-    dlt_ctx, service_ids,
+    DiagComm, DiagServiceError, DynamicPlugin, EcuGateway, EcuManager, PayloadDecoder,
+    ServicePayload, TransmissionParameters, UdsResponse, UdsTransport, datatypes::RetryPolicy,
+    diagservices::UdsPayloadData, dlt_ctx, service_ids,
 };
 use tokio::sync::{RwLock, Semaphore, mpsc};
 
-use crate::{UdsManager, types::UdsParameters};
+use crate::{UdsEcuDb, UdsManager, types::UdsParameters};
 
-impl<S: EcuGateway, R: DiagServiceResponse, T: EcuManager<Response = R>> UdsManager<S, R, T> {
+impl<S: EcuGateway, T: EcuManager> UdsManager<S, T> {
     #[tracing::instrument(
         skip(self, service, payload),
         fields(
@@ -45,7 +43,7 @@ impl<S: EcuGateway, R: DiagServiceResponse, T: EcuManager<Response = R>> UdsMana
         payload: Option<UdsPayloadData>,
         map_to_json: bool,
         timeout: Option<Duration>,
-    ) -> Result<R, DiagServiceError> {
+    ) -> Result<<T as PayloadDecoder>::Response, DiagServiceError> {
         let start = Instant::now();
         tracing::debug!(
             service = ?service,
@@ -53,7 +51,7 @@ impl<S: EcuGateway, R: DiagServiceResponse, T: EcuManager<Response = R>> UdsMana
                 .map(std::string::ToString::to_string),
             "Sending UDS request"
         );
-        let ecu = self.ecu_manager(ecu_name)?;
+        let ecu = self.uds_ecu_db(ecu_name)?;
         let payload = {
             let ecu = ecu.read().await;
             ecu.create_uds_payload(&service, security_plugin, payload, None)
@@ -69,7 +67,7 @@ impl<S: EcuGateway, R: DiagServiceResponse, T: EcuManager<Response = R>> UdsMana
 
         let response = match response {
             Ok(msg) => {
-                self.ecu_manager(ecu_name)
+                self.uds_ecu_db(ecu_name)
                     .expect("ECU name has been already checked")
                     .read()
                     .await
@@ -98,7 +96,9 @@ impl<S: EcuGateway, R: DiagServiceResponse, T: EcuManager<Response = R>> UdsMana
 
         response
     }
+}
 
+impl<S: EcuGateway, T: UdsEcuDb> UdsManager<S, T> {
     // allowed for clarity, to make it clearer which of the loops is being continued
     #[allow(clippy::needless_continue)]
     // allow too many lines, as it is better to keep this together for now
@@ -121,7 +121,7 @@ impl<S: EcuGateway, R: DiagServiceResponse, T: EcuManager<Response = R>> UdsMana
         // when we have an ongoing data transfer as well?
         let start = std::time::Instant::now();
 
-        let ecu = self.ecu_manager(ecu_name)?;
+        let ecu = self.uds_ecu_db(ecu_name)?;
         let (uds_params, transmission_params) = Self::ecu_send_params(ecu).await;
         let ecu_logical_address = ecu.read().await.logical_address();
         let sent_sid = *payload.data.first().ok_or(DiagServiceError::BadPayload(
@@ -299,7 +299,7 @@ impl<S: EcuGateway, R: DiagServiceResponse, T: EcuManager<Response = R>> UdsMana
             && msg.is_positive_response_for_sid(sent_sid)
         {
             let ecu_mgr = self
-                .ecu_manager(ecu_name)
+                .uds_ecu_db(ecu_name)
                 .expect("ECU name has been already checked");
             let ecu_read = ecu_mgr.read().await;
             if let Some(new_session) = payload.new_session {
@@ -356,10 +356,8 @@ impl<S: EcuGateway, R: DiagServiceResponse, T: EcuManager<Response = R>> UdsMana
 }
 
 #[async_trait::async_trait]
-impl<S: EcuGateway, R: DiagServiceResponse, T: EcuManager<Response = R>> UdsTransport
-    for UdsManager<S, R, T>
-{
-    type Response = R;
+impl<S: EcuGateway, T: EcuManager> UdsTransport for UdsManager<S, T> {
+    type Response = <T as PayloadDecoder>::Response;
 
     async fn send_with_timeout(
         &self,
@@ -369,7 +367,7 @@ impl<S: EcuGateway, R: DiagServiceResponse, T: EcuManager<Response = R>> UdsTran
         payload: Option<UdsPayloadData>,
         map_to_json: bool,
         timeout: Duration,
-    ) -> Result<R, DiagServiceError> {
+    ) -> Result<Self::Response, DiagServiceError> {
         self.send_with_optional_timeout(
             ecu_name,
             service,
@@ -388,7 +386,7 @@ impl<S: EcuGateway, R: DiagServiceResponse, T: EcuManager<Response = R>> UdsTran
         security_plugin: &DynamicPlugin,
         payload: Option<UdsPayloadData>,
         map_to_json: bool,
-    ) -> Result<R, DiagServiceError> {
+    ) -> Result<Self::Response, DiagServiceError> {
         self.send_with_optional_timeout(
             ecu_name,
             service,
@@ -413,7 +411,7 @@ impl<S: EcuGateway, R: DiagServiceResponse, T: EcuManager<Response = R>> UdsTran
         tracing::trace!(ecu_name = %ecu_name, payload = ?payload, "Sending raw UDS packet");
 
         let payload = self
-            .ecu_manager(ecu_name)?
+            .uds_ecu_db(ecu_name)?
             .read()
             .await
             .check_genericservice(security_plugin, payload)
@@ -534,66 +532,36 @@ mod send_tests {
     };
 
     use cda_interfaces::{
-        DiagComm, DiagServiceError, DynamicPlugin, EcuAddressProvider, EcuGateway, EcuManager,
-        EcuSchemaProvider, EcuState, EcuVariant, FunctionalDescriptionConfig, HashMap,
-        HashMapExtensions, HashSet, Protocol, SchemaDescription, SecurityAccess, ServicePayload,
-        TransmissionParameters, UdsResponse,
-        datatypes::{
-            AddressingMode, ComplexComParamValue, ComponentConfigurationsInfo, ComponentDataInfo,
-            ComponentOperationsInfo, DiagnosticServiceAffixPosition, DtcLookup,
-            DtcReadInformationFunction, FaultConfig, RetryPolicy, RoutineSubfunctions, SdSdg,
-            TesterPresentSendType, single_ecu,
-        },
-        diagservices::{
-            DiagServiceJsonResponse, DiagServiceResponse, DiagServiceResponseType, MappedNRC,
-            UdsPayloadData,
-        },
+        DiagComm, DiagServiceError, EcuAddresses, EcuGateway, EcuStateManager, HashMap,
+        HashMapExtensions, ServicePayload, TransmissionParameters, UdsResponse,
+        datatypes::{AddressingMode, FaultConfig, RetryPolicy, TesterPresentSendType},
     };
     use tokio::sync::{RwLock, mpsc};
 
-    use crate::UdsManager;
+    use crate::{UdsEcuDb, UdsManager};
 
-    // Manual mock: DiagServiceResponse
-    #[derive(Clone, Debug)]
-    struct TestResponse {
-        data: Vec<u8>,
-    }
-
-    impl DiagServiceResponse for TestResponse {
-        fn is_empty(&self) -> bool {
-            self.data.is_empty()
-        }
-
-        fn service_name(&self) -> String {
-            "TestService".to_string()
-        }
-
-        fn get_raw(&self) -> &[u8] {
-            &self.data
-        }
-
-        fn into_json(self) -> Result<DiagServiceJsonResponse, DiagServiceError> {
-            unimplemented!()
-        }
-
-        fn as_nrc(&self) -> Result<MappedNRC, DiagServiceError> {
-            unimplemented!()
-        }
-
-        fn get_dtcs(
-            &self,
-        ) -> Result<
-            Vec<(
-                cda_interfaces::datatypes::DtcField,
-                cda_interfaces::datatypes::DtcRecord,
-            )>,
-            DiagServiceError,
-        > {
-            unimplemented!()
-        }
-
-        fn response_type(&self) -> DiagServiceResponseType {
-            DiagServiceResponseType::Positive
+    impl<S: EcuGateway, T: UdsEcuDb> UdsManager<S, T> {
+        /// Test-only constructor that creates a `UdsManager` without spawning
+        /// background tasks (variant detection, etc.), so `T` only needs the
+        /// narrower trait bounds required by `send_with_raw_payload`.
+        fn new_for_raw_payload_tests(
+            gateway: S,
+            ecus: Arc<HashMap<String, RwLock<T>>>,
+            fault_config: FaultConfig,
+            update_in_progress: Arc<AtomicBool>,
+        ) -> Self {
+            Self {
+                ecus,
+                gateway,
+                data_transfers: Arc::new(tokio::sync::Mutex::new(HashMap::default())),
+                ecu_semaphores: Arc::new(tokio::sync::Mutex::new(HashMap::default())),
+                tester_present_tasks: Arc::new(RwLock::new(HashMap::default())),
+                session_reset_tasks: Arc::new(RwLock::new(HashMap::default())),
+                security_reset_tasks: Arc::new(RwLock::new(HashMap::default())),
+                functional_description_database: String::new(),
+                fault_config,
+                update_in_progress,
+            }
         }
     }
 
@@ -626,7 +594,7 @@ mod send_tests {
             async move { result }
         }
 
-        async fn ecu_online<T: EcuAddressProvider>(
+        async fn ecu_online<T: EcuAddresses>(
             &self,
             _ecu_name: &str,
             _ecu_db: &RwLock<T>,
@@ -647,9 +615,11 @@ mod send_tests {
         }
     }
 
-    // Manual mock: EcuManager (TestEcuDb)
+    // Manual mock: TestEcuDb
 
-    /// Minimal `EcuManager` implementation for testing `send_with_raw_payload`.
+    /// Minimal mock for testing `send_with_raw_payload`. Only implements the
+    /// traits actually needed: `EcuStateProvider`, `UdsComParamProvider`,
+    /// `DoipComParamProvider`, and `EcuAddressProvider`.
     struct TestEcuDb {
         service_states: tokio::sync::Mutex<std::collections::HashMap<u8, String>>,
     }
@@ -663,7 +633,7 @@ mod send_tests {
     }
 
     // EcuAddressProvider
-    impl EcuAddressProvider for TestEcuDb {
+    impl EcuAddresses for TestEcuDb {
         fn tester_address(&self) -> u16 {
             0x0E00
         }
@@ -679,13 +649,13 @@ mod send_tests {
         fn ecu_name(&self) -> String {
             "TestECU".to_string()
         }
-        fn logical_address_eq<T: EcuAddressProvider>(&self, other: &T) -> bool {
+        fn logical_address_eq<T: EcuAddresses>(&self, other: &T) -> bool {
             self.logical_address() == other.logical_address()
         }
     }
 
     // DoipComParamProvider
-    impl cda_interfaces::DoipComParamProvider for TestEcuDb {
+    impl cda_interfaces::DoipComParams for TestEcuDb {
         fn nack_number_of_retries(&self) -> &HashMap<u8, u32> {
             // Return a static reference by leaking - acceptable in tests only
             static EMPTY: std::sync::OnceLock<HashMap<u8, u32>> = std::sync::OnceLock::new();
@@ -715,7 +685,7 @@ mod send_tests {
     }
 
     // UdsComParamProvider
-    impl cda_interfaces::UdsComParamProvider for TestEcuDb {
+    impl cda_interfaces::UdsComParams for TestEcuDb {
         fn tester_present_retry_policy(&self) -> bool {
             false
         }
@@ -775,124 +745,8 @@ mod send_tests {
         }
     }
 
-    // EcuSchemaProvider
-    impl EcuSchemaProvider for TestEcuDb {
-        async fn schema_for_request(
-            &self,
-            _service: &DiagComm,
-        ) -> Result<SchemaDescription, DiagServiceError> {
-            unimplemented!()
-        }
-        async fn schema_for_responses(
-            &self,
-            _service: &DiagComm,
-        ) -> Result<SchemaDescription, DiagServiceError> {
-            unimplemented!()
-        }
-        async fn schema_for_fg_request(
-            &self,
-            _service: &DiagComm,
-            _functional_group_name: &str,
-        ) -> Result<SchemaDescription, DiagServiceError> {
-            unimplemented!()
-        }
-    }
-
-    // EcuManager
-    impl EcuManager for TestEcuDb {
-        type Response = TestResponse;
-
-        fn is_physical_ecu(&self) -> bool {
-            true
-        }
-        fn variant(&self) -> EcuVariant {
-            EcuVariant {
-                name: Some("TestVariant".to_string()),
-                is_base_variant: true,
-                is_fallback: false,
-                state: EcuState::Online,
-                logical_address: 0x0001,
-            }
-        }
-        fn state(&self) -> EcuState {
-            EcuState::Online
-        }
-        fn protocol(&self) -> &Protocol {
-            // Leaked for test lifetime; acceptable in test code.
-            static PROTO: std::sync::OnceLock<Protocol> = std::sync::OnceLock::new();
-            PROTO.get_or_init(Protocol::default)
-        }
-        fn is_loaded(&self) -> bool {
-            true
-        }
-        fn functional_groups(&self) -> Vec<String> {
-            vec![]
-        }
-        fn set_duplicating_ecu_names(&mut self, _duplicate_ecus: HashSet<String>) {}
-        fn duplicating_ecu_names(&self) -> Option<&HashSet<String>> {
-            None
-        }
-        fn mark_as_duplicate(&mut self) {}
-        fn mark_as_no_variant_detected(&mut self) {}
-        fn load(&mut self) -> Result<(), DiagServiceError> {
-            Ok(())
-        }
-        async fn detect_variant<V: DiagServiceResponse + Sized>(
-            &mut self,
-            _service_responses: HashMap<String, V>,
-        ) -> Result<(), DiagServiceError> {
-            Ok(())
-        }
-        fn get_variant_detection_requests(&self) -> &HashMap<String, DiagComm> {
-            static EMPTY: std::sync::OnceLock<HashMap<String, DiagComm>> =
-                std::sync::OnceLock::new();
-            EMPTY.get_or_init(HashMap::new)
-        }
-        fn comparams(&self) -> Result<ComplexComParamValue, DiagServiceError> {
-            unimplemented!()
-        }
-        async fn sdgs(&self, _service: Option<&DiagComm>) -> Result<Vec<SdSdg>, DiagServiceError> {
-            Ok(vec![])
-        }
-        async fn convert_from_uds(
-            &self,
-            _diag_service: &DiagComm,
-            _payload: &ServicePayload,
-            _map_to_json: bool,
-            _functional_group_name: Option<&str>,
-        ) -> Result<Self::Response, DiagServiceError> {
-            unimplemented!()
-        }
-        async fn check_genericservice(
-            &self,
-            _security_plugin: &DynamicPlugin,
-            _rawdata: Vec<u8>,
-        ) -> Result<ServicePayload, DiagServiceError> {
-            unimplemented!()
-        }
-        async fn create_uds_payload(
-            &self,
-            _diag_service: &DiagComm,
-            _security_plugin: &DynamicPlugin,
-            _data: Option<UdsPayloadData>,
-            _functional_group_name: Option<&str>,
-        ) -> Result<ServicePayload, DiagServiceError> {
-            unimplemented!()
-        }
-        async fn convert_request_from_uds(
-            &self,
-            _diag_service: &DiagComm,
-            _payload: &ServicePayload,
-            _map_to_json: bool,
-        ) -> Result<Self::Response, DiagServiceError> {
-            unimplemented!()
-        }
-        fn lookup_single_ecu_job(
-            &self,
-            _job_name: &str,
-        ) -> Result<single_ecu::Job, DiagServiceError> {
-            unimplemented!()
-        }
+    // EcuStateProvider
+    impl EcuStateManager for TestEcuDb {
         fn set_service_state(&self, sid: u8, value: String) -> impl Future<Output = ()> + Send {
             let states = &self.service_states;
             async move {
@@ -903,25 +757,6 @@ mod send_tests {
             let states = &self.service_states;
             async move { states.lock().await.get(&sid).cloned() }
         }
-        async fn lookup_session_change(
-            &self,
-            _session: &str,
-        ) -> Result<DiagComm, DiagServiceError> {
-            unimplemented!()
-        }
-        async fn lookup_security_access_change(
-            &self,
-            _level: &str,
-            _has_key: bool,
-        ) -> Result<SecurityAccess, DiagServiceError> {
-            unimplemented!()
-        }
-        async fn get_send_key_param_name(
-            &self,
-            _diag_service: &DiagComm,
-        ) -> Result<String, DiagServiceError> {
-            unimplemented!()
-        }
         async fn session(&self) -> Result<String, DiagServiceError> {
             Ok("default".to_string())
         }
@@ -931,124 +766,14 @@ mod send_tests {
         async fn security_access(&self) -> Result<String, DiagServiceError> {
             Ok("locked".to_string())
         }
-        fn default_security_access(&self) -> Result<String, DiagServiceError> {
-            Ok("locked".to_string())
-        }
-        fn lookup_service_through_func_class(
+        async fn lookup_session_change(
             &self,
-            _func_class_name: &str,
-            _service_id: u8,
+            _session: &str,
         ) -> Result<DiagComm, DiagServiceError> {
             unimplemented!()
         }
-        fn lookup_diagcomms_by_request_prefix(
-            &self,
-            _service_bytes: &[u8],
-        ) -> Result<Vec<DiagComm>, DiagServiceError> {
-            unimplemented!()
-        }
-        fn lookup_service_by_sid_and_name(
-            &self,
-            _service_id: u8,
-            _name: &str,
-            _functional_group_name: Option<&str>,
-        ) -> Result<DiagComm, DiagServiceError> {
-            unimplemented!()
-        }
-        fn get_request_parameter_metadata(
-            &self,
-            _service_name: &str,
-        ) -> Result<Vec<cda_interfaces::ServiceParameterMetadata>, DiagServiceError> {
-            unimplemented!()
-        }
-        fn get_response_parameter_metadata(
-            &self,
-            _service_name: &str,
-        ) -> Result<Vec<cda_interfaces::ResponseParameterInfo>, DiagServiceError> {
-            unimplemented!()
-        }
-        fn get_mux_cases_for_service(
-            &self,
-            _service_name: &str,
-        ) -> Result<Vec<cda_interfaces::MuxCaseInfo>, DiagServiceError> {
-            unimplemented!()
-        }
-        fn get_components_data_info(
-            &self,
-            _security_plugin: &DynamicPlugin,
-        ) -> Vec<ComponentDataInfo> {
-            unimplemented!()
-        }
-        fn get_functional_group_data_info(
-            &self,
-            _security_plugin: &DynamicPlugin,
-            _functional_group_name: &str,
-        ) -> Result<Vec<ComponentDataInfo>, DiagServiceError> {
-            unimplemented!()
-        }
-        fn get_components_configurations_info(
-            &self,
-            _security_plugin: &DynamicPlugin,
-        ) -> Result<Vec<ComponentConfigurationsInfo>, DiagServiceError> {
-            unimplemented!()
-        }
-        fn get_components_operations_info(
-            &self,
-            _security_plugin: &DynamicPlugin,
-        ) -> Vec<ComponentOperationsInfo> {
-            unimplemented!()
-        }
-        fn get_routine_subfunctions(
-            &self,
-            _service_name: &str,
-            _security_plugin: &DynamicPlugin,
-        ) -> Result<RoutineSubfunctions, DiagServiceError> {
-            unimplemented!()
-        }
-        fn get_functional_group_operations_info(
-            &self,
-            _security_plugin: &DynamicPlugin,
-            _functional_group_name: &str,
-        ) -> Result<Vec<ComponentOperationsInfo>, DiagServiceError> {
-            unimplemented!()
-        }
-        fn get_functional_group_routine_subfunctions(
-            &self,
-            _security_plugin: &DynamicPlugin,
-            _functional_group_name: &str,
-            _service_name: &str,
-        ) -> Result<RoutineSubfunctions, DiagServiceError> {
-            unimplemented!()
-        }
-        fn get_components_single_ecu_jobs_info(&self) -> Vec<ComponentDataInfo> {
-            unimplemented!()
-        }
-        fn lookup_dtc_services(
-            &self,
-            _service_types: Vec<DtcReadInformationFunction>,
-        ) -> Result<HashMap<DtcReadInformationFunction, DtcLookup>, DiagServiceError> {
-            unimplemented!()
-        }
-        async fn is_service_allowed(
-            &self,
-            _service: &DiagComm,
-            _security_plugin: &DynamicPlugin,
-        ) -> Result<(), DiagServiceError> {
+        async fn set_default_states(&self) -> Result<(), DiagServiceError> {
             Ok(())
-        }
-        fn revision(&self) -> String {
-            "1.0.0".to_string()
-        }
-        fn convert_service_14_response(
-            &self,
-            _diag_comm: DiagComm,
-            _response: ServicePayload,
-        ) -> Result<Self::Response, DiagServiceError> {
-            unimplemented!()
-        }
-
-        async fn init_default_states(&self) -> Result<(), DiagServiceError> {
-            unimplemented!()
         }
     }
 
@@ -1066,50 +791,31 @@ mod send_tests {
         }
     }
 
-    fn make_manager(gateway: TestGateway) -> UdsManager<TestGateway, TestResponse, TestEcuDb> {
+    fn make_manager(gateway: TestGateway) -> UdsManager<TestGateway, TestEcuDb> {
         let ecus = Arc::new(HashMap::from_iter([(
             "TestECU".to_string(),
             RwLock::new(TestEcuDb::new()),
         )]));
-        let (_tx, rx) = mpsc::channel(1);
-        UdsManager::new(
+        UdsManager::new_for_raw_payload_tests(
             gateway,
             ecus,
-            rx,
-            &FunctionalDescriptionConfig {
-                description_database: "functional_groups".to_string(),
-                enabled_functional_groups: None,
-                protocol_position: DiagnosticServiceAffixPosition::Suffix,
-            },
             FaultConfig::default(),
             Arc::new(AtomicBool::new(false)),
         )
     }
 
-    fn make_manager_no_ecus(
-        gateway: TestGateway,
-    ) -> UdsManager<TestGateway, TestResponse, TestEcuDb> {
+    fn make_manager_no_ecus(gateway: TestGateway) -> UdsManager<TestGateway, TestEcuDb> {
         let ecus = Arc::new(HashMap::new());
-        let (_tx, rx) = mpsc::channel(1);
-        UdsManager::new(
+        UdsManager::new_for_raw_payload_tests(
             gateway,
             ecus,
-            rx,
-            &FunctionalDescriptionConfig {
-                description_database: "functional_groups".to_string(),
-                enabled_functional_groups: None,
-                protocol_position: DiagnosticServiceAffixPosition::Suffix,
-            },
             FaultConfig::default(),
             Arc::new(AtomicBool::new(false)),
         )
     }
 
-    // Tests
-
-    #[tokio::test]
-    async fn test_send_with_raw_payload_positive_response() {
-        let gateway = TestGateway {
+    fn make_gateway() -> TestGateway {
+        TestGateway {
             send_fn: Arc::new(|response_tx, _| {
                 let msg = UdsResponse::Message(ServicePayload {
                     data: vec![0x50, 0x01],
@@ -1121,7 +827,14 @@ mod send_tests {
                 response_tx.try_send(Ok(Some(msg))).ok();
                 Ok(())
             }),
-        };
+        }
+    }
+
+    // Tests
+
+    #[tokio::test]
+    async fn test_send_with_raw_payload_positive_response() {
+        let gateway = make_gateway();
         let manager = make_manager(gateway);
         let payload = make_test_payload(0x10, &[0x01]);
 
@@ -1385,19 +1098,7 @@ mod send_tests {
 
     #[tokio::test]
     async fn test_send_with_raw_payload_custom_timeout() {
-        let gateway = TestGateway {
-            send_fn: Arc::new(|response_tx, _| {
-                let msg = UdsResponse::Message(ServicePayload {
-                    data: vec![0x50, 0x01],
-                    source_address: 0x0001,
-                    target_address: 0x0E00,
-                    new_session: None,
-                    new_security: None,
-                });
-                response_tx.try_send(Ok(Some(msg))).ok();
-                Ok(())
-            }),
-        };
+        let gateway = make_gateway();
         let manager = make_manager(gateway);
         let payload = make_test_payload(0x10, &[0x01]);
 
@@ -1428,16 +1129,9 @@ mod send_tests {
             "TestECU".to_string(),
             RwLock::new(TestEcuDb::new()),
         )]));
-        let (_tx, rx) = mpsc::channel(1);
-        let manager = UdsManager::new(
+        let manager: UdsManager<TestGateway, TestEcuDb> = UdsManager::new_for_raw_payload_tests(
             gateway,
             Arc::clone(&ecus),
-            rx,
-            &FunctionalDescriptionConfig {
-                description_database: "functional_groups".to_string(),
-                enabled_functional_groups: None,
-                protocol_position: DiagnosticServiceAffixPosition::Suffix,
-            },
             FaultConfig::default(),
             Arc::new(AtomicBool::new(false)),
         );

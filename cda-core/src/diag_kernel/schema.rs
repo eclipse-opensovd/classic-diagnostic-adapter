@@ -11,14 +11,12 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 use cda_database::datatypes::{self, DiagService, DiagnosticDatabase};
-use cda_interfaces::{
-    DiagServiceError, EcuAddressProvider, EcuSchemaProvider, SchemaDescription, dlt_ctx,
-};
+use cda_interfaces::{DiagServiceError, EcuAddresses, EcuSchemas, SchemaDescription, dlt_ctx};
 use cda_plugin_security::SecurityPlugin;
 
 use crate::EcuManager;
 
-impl<S: SecurityPlugin> EcuSchemaProvider for EcuManager<S> {
+impl<S: SecurityPlugin> EcuSchemas for EcuManager<S> {
     async fn schema_for_request(
         &self,
         service: &cda_interfaces::DiagComm,

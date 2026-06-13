@@ -81,7 +81,7 @@ fn schema_find_recursive<'a>(
     None
 }
 
-pub trait EcuSchemaProvider {
+pub trait EcuSchemas {
     fn schema_for_request(
         &self,
         service: &DiagComm,
@@ -94,7 +94,7 @@ pub trait EcuSchemaProvider {
 
     /// Get the request schema for a service defined in a functional group's diag layer.
     ///
-    /// This is equivalent to [`schema_for_request`](EcuSchemaProvider::schema_for_request)
+    /// This is equivalent to [`schema_for_request`](EcuSchemas::schema_for_request)
     /// but looks up the service in the given functional group instead of the variant.
     fn schema_for_fg_request(
         &self,

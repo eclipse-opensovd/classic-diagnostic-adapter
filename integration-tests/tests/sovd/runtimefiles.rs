@@ -133,7 +133,7 @@ async fn runtimefiles_lifecycle() -> Result<(), TestingError> {
     let auth = auth_header(&runtime.config, None).await?;
 
     let lock_response = create_lock(
-        Duration::from_secs(300),
+        Duration::from_secs(333),
         locks::VEHICLE_ENDPOINT,
         StatusCode::CREATED,
         &runtime.config,
@@ -772,7 +772,7 @@ async fn runtimefiles_apply_blocked_by_active_operations() -> Result<(), Testing
 
     // Create vehicle lock (required for runtimefiles mutations)
     let vehicle_lock_response = create_lock(
-        Duration::from_secs(300),
+        Duration::from_secs(333),
         locks::VEHICLE_ENDPOINT,
         StatusCode::CREATED,
         &runtime.config,
@@ -791,7 +791,7 @@ async fn runtimefiles_apply_blocked_by_active_operations() -> Result<(), Testing
 
     // Create functional group lock (same user) to block Apply
     let fg_lock_response = create_lock(
-        Duration::from_secs(300),
+        Duration::from_secs(333),
         locks::FUNCTIONAL_GROUP_ENDPOINT,
         StatusCode::CREATED,
         &runtime.config,
@@ -943,7 +943,7 @@ async fn upload_mdd_with_filename(
 /// Helper: creates a vehicle lock and returns the lock id.
 async fn setup_with_lock(config: &Configuration, auth: &http::HeaderMap) -> String {
     let lock_response = create_lock(
-        Duration::from_secs(300),
+        Duration::from_secs(333),
         locks::VEHICLE_ENDPOINT,
         StatusCode::CREATED,
         config,

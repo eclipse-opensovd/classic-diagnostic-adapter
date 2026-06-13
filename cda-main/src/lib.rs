@@ -15,7 +15,7 @@ use std::{future::Future, path::PathBuf, sync::Arc};
 
 use cda_comm_doip::{DoipDiagGateway, config::DoipConfig};
 use cda_comm_uds::UdsManager;
-use cda_core::{DiagServiceResponseStruct, EcuManager};
+use cda_core::EcuManager;
 use cda_database::FileManager;
 use cda_interfaces::{
     DiagServiceError, DoipGatewaySetupError, FunctionalDescriptionConfig, HashMap, UdsEcu,
@@ -462,7 +462,11 @@ where
     let (health_state, main_health_provider): (
         Option<cda_health::HealthState>,
         Option<Arc<cda_health::StatusHealthProvider>>,
-    ) = (None, None);
+    ) = {
+        // Prevents compiler warning for unused variable when health feature is disabled
+        let _ = extra_health_providers;
+        (None, None)
+    };
 
     #[cfg(feature = "systemd-notify")]
     let _sd_notify_task =
@@ -549,22 +553,21 @@ pub async fn setup_vehicle_and_routes<SP: SecurityPlugin, SL: SecurityPluginLoad
     let components_config = config.components.clone();
     let runtime_update_config = config.runtime_update_config.clone();
 
-    let (ecu_execution_registry, vehicle_route_handle) =
-        cda_sovd::add_vehicle_routes::<DiagServiceResponseStruct, _, _, SL>(
-            dynamic_router,
-            cda_sovd::VehicleConfig {
-                flash_files_path: config.flash_files_path.clone(),
-                functional_group_config: config.functional_description.clone(),
-                components_config: config.components.clone(),
-            },
-            cda_sovd::VehicleResources {
-                ecu_uds: vehicle_data.uds_manager.clone(),
-                file_manager: vehicle_data.file_managers,
-                locks: Arc::clone(&vehicle_data.locks),
-                update_in_progress: vehicle_data.update_guard.busy_handle(),
-            },
-        )
-        .await?;
+    let (ecu_execution_registry, vehicle_route_handle) = cda_sovd::add_vehicle_routes::<_, _, SL>(
+        dynamic_router,
+        cda_sovd::VehicleConfig {
+            flash_files_path: config.flash_files_path.clone(),
+            functional_group_config: config.functional_description.clone(),
+            components_config: config.components.clone(),
+        },
+        cda_sovd::VehicleResources {
+            ecu_uds: vehicle_data.uds_manager.clone(),
+            file_manager: vehicle_data.file_managers,
+            locks: Arc::clone(&vehicle_data.locks),
+            update_in_progress: vehicle_data.update_guard.busy_handle(),
+        },
+    )
+    .await?;
 
     let lock_provider: Arc<cda_sovd::SovdLockStateProvider> = Arc::new(
         cda_sovd::SovdLockStateProvider::new(Arc::clone(&vehicle_data.locks)),
@@ -716,8 +719,7 @@ pub async fn load_vehicle_data<
     })
 }
 
-pub type UdsManagerType<S> =
-    UdsManager<DoipDiagGateway<EcuManager<S>>, DiagServiceResponseStruct, EcuManager<S>>;
+pub type UdsManagerType<S> = UdsManager<DoipDiagGateway<EcuManager<S>>, EcuManager<S>>;
 
 /// Creates a new UDS manager for the webserver.
 /// type alias does not allow specifying hasher, we set the hasher globally.

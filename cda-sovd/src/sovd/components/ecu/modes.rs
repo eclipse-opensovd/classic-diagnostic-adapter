@@ -216,8 +216,8 @@ pub(crate) mod session {
             session_value = %request_body.value,
             mode_expiration = ?request_body.mode_expiration
         )
-    )]
-    pub(crate) async fn put<R: DiagServiceResponse, T: UdsEcu + Clone, U: FileManager>(
+        )]
+    pub(crate) async fn put<T: UdsEcu + Clone, U: FileManager>(
         UseApi(Secured(security_plugin), _): UseApi<Secured, ()>,
         WithRejection(Query(query), _): WithRejection<Query<sovd_modes::Query>, ApiError>,
         State(WebserverEcuState {
@@ -225,7 +225,7 @@ pub(crate) mod session {
             uds,
             locks,
             ..
-        }): State<WebserverEcuState<R, T, U>>,
+        }): State<WebserverEcuState<T, U>>,
         WithRejection(Json(request_body), _): WithRejection<
             Json<sovd_modes::security_and_session::put::Request>,
             ApiError,
@@ -309,14 +309,10 @@ pub(crate) mod session {
             .with(openapi::error_bad_gateway)
     }
 
-    pub(crate) async fn get<
-        R: DiagServiceResponse,
-        T: UdsEcu + SchemaProvider + Clone,
-        U: FileManager,
-    >(
+    pub(crate) async fn get<T: UdsEcu + SchemaProvider + Clone, U: FileManager>(
         UseApi(Secured(_security_plugin), _): UseApi<Secured, ()>,
         WithRejection(Query(query), _): WithRejection<Query<sovd_modes::Query>, ApiError>,
-        State(WebserverEcuState { ecu_name, uds, .. }): State<WebserverEcuState<R, T, U>>,
+        State(WebserverEcuState { ecu_name, uds, .. }): State<WebserverEcuState<T, U>>,
     ) -> Response {
         handle_mode_get(
             &uds,
@@ -353,7 +349,8 @@ pub(crate) mod security {
     use aide::UseApi;
     use cda_interfaces::{
         DynamicPlugin, HashMapExtensions, SchemaProvider, SecurityAccess,
-        diagservices::UdsPayloadData, service_ids,
+        diagservices::{DiagServiceResponse, UdsPayloadData},
+        service_ids,
     };
     use cda_plugin_security::Secured;
     use sovd_interfaces::components::ecu::modes::security_and_session::put::{
@@ -363,11 +360,7 @@ pub(crate) mod security {
     use super::*;
     use crate::{openapi, sovd::error::ErrorWrapper};
 
-    pub(crate) async fn get<
-        R: DiagServiceResponse,
-        T: UdsEcu + SchemaProvider + Clone,
-        U: FileManager,
-    >(
+    pub(crate) async fn get<T: UdsEcu + SchemaProvider + Clone, U: FileManager>(
         UseApi(Secured(security_plugin), _): UseApi<Secured, ()>,
         WithRejection(Query(query), _): WithRejection<Query<sovd_modes::Query>, ApiError>,
         State(WebserverEcuState {
@@ -375,7 +368,7 @@ pub(crate) mod security {
             uds,
             locks,
             ..
-        }): State<WebserverEcuState<R, T, U>>,
+        }): State<WebserverEcuState<T, U>>,
     ) -> Response {
         handle_mode_get(
             &uds,
@@ -429,7 +422,7 @@ pub(crate) mod security {
         }
     }
 
-    pub(crate) async fn put<R: DiagServiceResponse, T: UdsEcu + Clone, U: FileManager>(
+    pub(crate) async fn put<T: UdsEcu + Clone, U: FileManager>(
         UseApi(Secured(security_plugin), _): UseApi<Secured, ()>,
         WithRejection(Query(query), _): WithRejection<Query<sovd_modes::Query>, ApiError>,
         State(WebserverEcuState {
@@ -437,7 +430,7 @@ pub(crate) mod security {
             uds,
             locks,
             ..
-        }): State<WebserverEcuState<R, T, U>>,
+        }): State<WebserverEcuState<T, U>>,
         WithRejection(Json(request_body), _): WithRejection<
             Json<sovd_modes::security_and_session::put::Request>,
             ApiError,
@@ -597,10 +590,7 @@ pub(crate) mod commctrl {
         response::Response,
     };
     use axum_extra::extract::WithRejection;
-    use cda_interfaces::{
-        SchemaProvider, UdsEcu, diagservices::DiagServiceResponse, file_manager::FileManager,
-        service_ids,
-    };
+    use cda_interfaces::{SchemaProvider, UdsEcu, file_manager::FileManager, service_ids};
     use cda_plugin_security::Secured;
     use sovd_interfaces::{
         common::modes::{COMM_CONTROL_ID, COMM_CONTROL_NAME},
@@ -616,14 +606,10 @@ pub(crate) mod commctrl {
         },
     };
 
-    pub(crate) async fn get<
-        R: DiagServiceResponse,
-        T: UdsEcu + SchemaProvider + Clone,
-        U: FileManager,
-    >(
+    pub(crate) async fn get<T: UdsEcu + SchemaProvider + Clone, U: FileManager>(
         UseApi(Secured(_security_plugin), _): UseApi<Secured, ()>,
         WithRejection(Query(query), _): WithRejection<Query<sovd_modes::Query>, ApiError>,
-        State(WebserverEcuState { ecu_name, uds, .. }): State<WebserverEcuState<R, T, U>>,
+        State(WebserverEcuState { ecu_name, uds, .. }): State<WebserverEcuState<T, U>>,
     ) -> Response {
         handle_mode_get(
             &uds,
@@ -655,7 +641,7 @@ pub(crate) mod commctrl {
             .with(openapi::error_not_found)
     }
 
-    pub(crate) async fn put<R: DiagServiceResponse, T: UdsEcu + Clone, U: FileManager>(
+    pub(crate) async fn put<T: UdsEcu + Clone, U: FileManager>(
         UseApi(Secured(security_plugin), _): UseApi<Secured, ()>,
         WithRejection(Query(query), _): WithRejection<Query<sovd_modes::Query>, ApiError>,
         State(WebserverEcuState {
@@ -663,7 +649,7 @@ pub(crate) mod commctrl {
             uds,
             locks,
             ..
-        }): State<WebserverEcuState<R, T, U>>,
+        }): State<WebserverEcuState<T, U>>,
         WithRejection(Json(request_body), _): WithRejection<
             Json<sovd_modes::commctrl::put::Request>,
             ApiError,
@@ -711,10 +697,7 @@ pub(crate) mod dtcsetting {
         response::Response,
     };
     use axum_extra::extract::WithRejection;
-    use cda_interfaces::{
-        SchemaProvider, UdsEcu, diagservices::DiagServiceResponse, file_manager::FileManager,
-        service_ids,
-    };
+    use cda_interfaces::{SchemaProvider, UdsEcu, file_manager::FileManager, service_ids};
     use cda_plugin_security::Secured;
     use sovd_interfaces::{
         common::modes::{DTC_SETTING_ID, DTC_SETTING_NAME},
@@ -730,14 +713,10 @@ pub(crate) mod dtcsetting {
         },
     };
 
-    pub(crate) async fn get<
-        R: DiagServiceResponse,
-        T: UdsEcu + SchemaProvider + Clone,
-        U: FileManager,
-    >(
+    pub(crate) async fn get<T: UdsEcu + SchemaProvider + Clone, U: FileManager>(
         UseApi(Secured(_security_plugin), _): UseApi<Secured, ()>,
         WithRejection(Query(query), _): WithRejection<Query<sovd_modes::Query>, ApiError>,
-        State(WebserverEcuState { ecu_name, uds, .. }): State<WebserverEcuState<R, T, U>>,
+        State(WebserverEcuState { ecu_name, uds, .. }): State<WebserverEcuState<T, U>>,
     ) -> Response {
         handle_mode_get(
             &uds,
@@ -769,7 +748,7 @@ pub(crate) mod dtcsetting {
             .with(openapi::error_not_found)
     }
 
-    pub(crate) async fn put<R: DiagServiceResponse, T: UdsEcu + Clone, U: FileManager>(
+    pub(crate) async fn put<T: UdsEcu + Clone, U: FileManager>(
         UseApi(Secured(security_plugin), _): UseApi<Secured, ()>,
         WithRejection(Query(query), _): WithRejection<Query<sovd_modes::Query>, ApiError>,
         State(WebserverEcuState {
@@ -777,7 +756,7 @@ pub(crate) mod dtcsetting {
             uds,
             locks,
             ..
-        }): State<WebserverEcuState<R, T, U>>,
+        }): State<WebserverEcuState<T, U>>,
         WithRejection(Json(request_body), _): WithRejection<
             Json<sovd_modes::dtcsetting::put::Request>,
             ApiError,

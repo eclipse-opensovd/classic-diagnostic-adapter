@@ -24,8 +24,8 @@ use async_trait::async_trait;
 use cda_interfaces::{
     DiagComm, DiagServiceError, DynamicPlugin, EcuGateway, EcuManager, EcuState, EcuVariant,
     FlashTransferStartParams, FunctionalDescriptionConfig, HashMap, HashMapExtensions, HashSet,
-    HashSetExtensions, SchemaDescription, SchemaProvider, ServicePayload, TransmissionParameters,
-    UdsEcu, UdsResponse, UdsTransport,
+    HashSetExtensions, PayloadDecoder, SchemaDescription, SchemaProvider, ServicePayload,
+    TransmissionParameters, UdsEcu, UdsEcuDb, UdsResponse, UdsTransport,
     datatypes::{
         self, ComponentConfigurationsInfo, ComponentOperationsInfo, DTC_CODE_BIT_LEN,
         DataTransferError, DataTransferMetaData, DataTransferStatus, DtcCode, DtcExtendedInfo,
@@ -60,7 +60,7 @@ const DTC_RECORD_NUMBER_ALL: u8 = 0xFF;
 /// Sending `0xFFFFFF` as the group-of-DTC clears all groups.
 const DTC_GROUP_ALL: [u8; 3] = [0xFF, 0xFF, 0xFF];
 
-pub struct UdsManager<S: EcuGateway, R: DiagServiceResponse, T: EcuManager<Response = R>> {
+pub struct UdsManager<S: EcuGateway, T: UdsEcuDb> {
     ecus: Arc<HashMap<String, RwLock<T>>>,
     gateway: S,
     data_transfers: Arc<Mutex<HashMap<EcuIdentifier, EcuDataTransfer>>>,
@@ -91,7 +91,15 @@ impl cda_interfaces::runtime_update_api::ActivityGuard for FlashTransferObserver
     }
 }
 
-impl<S: EcuGateway, R: DiagServiceResponse, T: EcuManager<Response = R>> UdsManager<S, R, T> {
+impl<S: EcuGateway, T: UdsEcuDb> UdsManager<S, T> {
+    fn uds_ecu_db(&self, ecu_name: &str) -> Result<&RwLock<T>, DiagServiceError> {
+        self.ecus
+            .get(ecu_name)
+            .ok_or_else(|| DiagServiceError::NotFound(format!("ECU {ecu_name} not found")))
+    }
+}
+
+impl<S: EcuGateway, T: EcuManager> UdsManager<S, T> {
     pub fn new(
         gateway: S,
         ecus: Arc<HashMap<String, RwLock<T>>>,
@@ -161,12 +169,6 @@ impl<S: EcuGateway, R: DiagServiceResponse, T: EcuManager<Response = R>> UdsMana
             .chain(security_reset_tasks.drain().map(|(_, h)| h))
             .chain(data_transfers.drain().map(|(_, t)| t.task))
             .for_each(|h| h.abort());
-    }
-
-    fn ecu_manager(&self, ecu_name: &str) -> Result<&RwLock<T>, DiagServiceError> {
-        self.ecus
-            .get(ecu_name)
-            .ok_or_else(|| DiagServiceError::NotFound(format!("ECU {ecu_name} not found")))
     }
 
     #[tracing::instrument(
@@ -347,12 +349,19 @@ impl<S: EcuGateway, R: DiagServiceResponse, T: EcuManager<Response = R>> UdsMana
         service_types: Vec<DtcReadInformationFunction>,
         memory_selection: Option<u8>,
         include_schema: bool,
-    ) -> Result<(R, DtcReadInformationFunction, Option<SchemaDescription>), DiagServiceError> {
-        let ecu = self.ecu_manager(ecu_name)?;
+    ) -> Result<
+        (
+            <T as PayloadDecoder>::Response,
+            DtcReadInformationFunction,
+            Option<SchemaDescription>,
+        ),
+        DiagServiceError,
+    > {
+        let ecu = self.uds_ecu_db(ecu_name)?;
         let (read_func, extended_data_lookup) = ecu
             .read()
             .await
-            .lookup_dtc_services(service_types)?
+            .lookup_dtc_services(&service_types)?
             .into_iter()
             .find(|(_, lookup)| lookup.dtcs.iter().any(|dtc| dtc.code == dtc_code))
             .ok_or(DiagServiceError::InvalidRequest(format!(
@@ -599,7 +608,7 @@ impl<S: EcuGateway, R: DiagServiceResponse, T: EcuManager<Response = R>> UdsMana
         map_to_json: bool,
         timeout: Duration,
         functional_group_name: &str,
-    ) -> HashMap<String, Result<R, DiagServiceError>> {
+    ) -> HashMap<String, Result<<T as PayloadDecoder>::Response, DiagServiceError>> {
         // Inspect the subfunction byte for suppressPosRspMsgIndicationBit (bit 7).
         // When set, ECUs are not expected to send a positive response.
         let expect_positive_response = !payload.is_suppress_positive_response();
@@ -671,9 +680,7 @@ impl<S: EcuGateway, R: DiagServiceResponse, T: EcuManager<Response = R>> UdsMana
     }
 }
 
-impl<S: EcuGateway, R: DiagServiceResponse, T: EcuManager<Response = R>> Clone
-    for UdsManager<S, R, T>
-{
+impl<S: Clone + EcuGateway, T: UdsEcuDb> Clone for UdsManager<S, T> {
     fn clone(&self) -> Self {
         Self {
             ecus: Arc::clone(&self.ecus),
@@ -691,9 +698,7 @@ impl<S: EcuGateway, R: DiagServiceResponse, T: EcuManager<Response = R>> Clone
 }
 
 #[async_trait]
-impl<S: EcuGateway, R: DiagServiceResponse, T: EcuManager<Response = R>> UdsEcu
-    for UdsManager<S, R, T>
-{
+impl<S: EcuGateway, T: EcuManager> UdsEcu for UdsManager<S, T> {
     async fn get_ecus(&self) -> Vec<String> {
         self.ecus.keys().cloned().collect()
     }
@@ -847,14 +852,14 @@ impl<S: EcuGateway, R: DiagServiceResponse, T: EcuManager<Response = R>> UdsEcu
         ecu_name: &str,
         service: Option<&DiagComm>,
     ) -> Result<Vec<cda_interfaces::datatypes::SdSdg>, DiagServiceError> {
-        self.ecu_manager(ecu_name)?.read().await.sdgs(service).await
+        self.uds_ecu_db(ecu_name)?.read().await.sdgs(service).await
     }
 
     async fn get_comparams(
         &self,
         ecu: &str,
     ) -> Result<cda_interfaces::datatypes::ComplexComParamValue, DiagServiceError> {
-        self.ecu_manager(ecu)?.read().await.comparams()
+        self.uds_ecu_db(ecu)?.read().await.comparams()
     }
 
     async fn get_components_data_info(
@@ -863,7 +868,7 @@ impl<S: EcuGateway, R: DiagServiceResponse, T: EcuManager<Response = R>> UdsEcu
         security_plugin: &DynamicPlugin,
     ) -> Result<Vec<cda_interfaces::datatypes::ComponentDataInfo>, DiagServiceError> {
         let items = self
-            .ecu_manager(ecu)?
+            .uds_ecu_db(ecu)?
             .read()
             .await
             .get_components_data_info(security_plugin);
@@ -876,7 +881,7 @@ impl<S: EcuGateway, R: DiagServiceResponse, T: EcuManager<Response = R>> UdsEcu
         security_plugin: &DynamicPlugin,
         functional_group_name: &str,
     ) -> Result<Vec<cda_interfaces::datatypes::ComponentDataInfo>, DiagServiceError> {
-        self.ecu_manager(&self.functional_description_database)?
+        self.uds_ecu_db(&self.functional_description_database)?
             .read()
             .await
             .get_functional_group_data_info(security_plugin, functional_group_name)
@@ -887,7 +892,7 @@ impl<S: EcuGateway, R: DiagServiceResponse, T: EcuManager<Response = R>> UdsEcu
         security_plugin: &DynamicPlugin,
         functional_group_name: &str,
     ) -> Result<Vec<ComponentOperationsInfo>, DiagServiceError> {
-        self.ecu_manager(&self.functional_description_database)?
+        self.uds_ecu_db(&self.functional_description_database)?
             .read()
             .await
             .get_functional_group_operations_info(security_plugin, functional_group_name)
@@ -899,7 +904,7 @@ impl<S: EcuGateway, R: DiagServiceResponse, T: EcuManager<Response = R>> UdsEcu
         functional_group_name: &str,
         service_name: &str,
     ) -> Result<RoutineSubfunctions, DiagServiceError> {
-        self.ecu_manager(&self.functional_description_database)?
+        self.uds_ecu_db(&self.functional_description_database)?
             .read()
             .await
             .get_functional_group_routine_subfunctions(
@@ -914,7 +919,7 @@ impl<S: EcuGateway, R: DiagServiceResponse, T: EcuManager<Response = R>> UdsEcu
         ecu: &str,
         security_plugin: &DynamicPlugin,
     ) -> Result<Vec<ComponentConfigurationsInfo>, DiagServiceError> {
-        self.ecu_manager(ecu)?
+        self.uds_ecu_db(ecu)?
             .read()
             .await
             .get_components_configurations_info(security_plugin)
@@ -926,7 +931,7 @@ impl<S: EcuGateway, R: DiagServiceResponse, T: EcuManager<Response = R>> UdsEcu
         security_plugin: &DynamicPlugin,
     ) -> Result<Vec<ComponentOperationsInfo>, DiagServiceError> {
         let items = self
-            .ecu_manager(ecu)?
+            .uds_ecu_db(ecu)?
             .read()
             .await
             .get_components_operations_info(security_plugin);
@@ -939,7 +944,7 @@ impl<S: EcuGateway, R: DiagServiceResponse, T: EcuManager<Response = R>> UdsEcu
         service_name: &str,
         security_plugin: &DynamicPlugin,
     ) -> Result<RoutineSubfunctions, DiagServiceError> {
-        self.ecu_manager(ecu_name)?
+        self.uds_ecu_db(ecu_name)?
             .read()
             .await
             .get_routine_subfunctions(service_name, security_plugin)
@@ -965,7 +970,7 @@ impl<S: EcuGateway, R: DiagServiceResponse, T: EcuManager<Response = R>> UdsEcu
         ecu: &str,
         job_name: &str,
     ) -> Result<cda_interfaces::datatypes::single_ecu::Job, DiagServiceError> {
-        self.ecu_manager(ecu)?
+        self.uds_ecu_db(ecu)?
             .read()
             .await
             .lookup_single_ecu_job(job_name)
@@ -975,7 +980,7 @@ impl<S: EcuGateway, R: DiagServiceResponse, T: EcuManager<Response = R>> UdsEcu
         &self,
         ecu_name: &str,
     ) -> Result<Vec<String>, DiagServiceError> {
-        let diag_manager = self.ecu_manager(ecu_name)?.read().await;
+        let diag_manager = self.uds_ecu_db(ecu_name)?.read().await;
 
         let reset_services = diag_manager
             .lookup_diagcomms_by_request_prefix(&[service_ids::ECU_RESET])?
@@ -992,7 +997,7 @@ impl<S: EcuGateway, R: DiagServiceResponse, T: EcuManager<Response = R>> UdsEcu
         ecu_name: &str,
         service: u8,
     ) -> Result<String, DiagServiceError> {
-        let diag_manager = self.ecu_manager(ecu_name)?.read().await;
+        let diag_manager = self.uds_ecu_db(ecu_name)?.read().await;
         diag_manager
             .get_service_state(service)
             .await
@@ -1008,8 +1013,8 @@ impl<S: EcuGateway, R: DiagServiceResponse, T: EcuManager<Response = R>> UdsEcu
         service_id: u8,
         security_plugin: &DynamicPlugin,
         data: UdsPayloadData,
-    ) -> Result<R, DiagServiceError> {
-        let ecu_diag_service = self.ecu_manager(ecu_name)?;
+    ) -> Result<Self::Response, DiagServiceError> {
+        let ecu_diag_service = self.uds_ecu_db(ecu_name)?;
         let ecu = ecu_diag_service.read().await;
         let request = ecu.lookup_service_through_func_class(func_class_name, service_id)?;
         self.send(ecu_name, request, security_plugin, Some(data), true)
@@ -1022,7 +1027,7 @@ impl<S: EcuGateway, R: DiagServiceResponse, T: EcuManager<Response = R>> UdsEcu
         func_class_name: &str,
         service_id: u8,
     ) -> Result<DiagComm, DiagServiceError> {
-        let ecu_diag_service = self.ecu_manager(ecu_name)?;
+        let ecu_diag_service = self.uds_ecu_db(ecu_name)?;
         let ecu = ecu_diag_service.read().await;
         ecu.lookup_service_through_func_class(func_class_name, service_id)
     }
@@ -1080,7 +1085,7 @@ impl<S: EcuGateway, R: DiagServiceResponse, T: EcuManager<Response = R>> UdsEcu
                 DiagServiceError::InvalidRequest(format!("Failed to seek to offset in file: {e:?}"))
             })?;
 
-        let ecu = self.ecu_manager(ecu_name)?;
+        let ecu = self.uds_ecu_db(ecu_name)?;
         let request = ecu
             .read()
             .await
@@ -1209,7 +1214,7 @@ impl<S: EcuGateway, R: DiagServiceResponse, T: EcuManager<Response = R>> UdsEcu
             NoDetection,
         }
 
-        let ecu = self.ecu_manager(ecu_name)?;
+        let ecu = self.uds_ecu_db(ecu_name)?;
 
         let requests = ecu
             .read()
@@ -1228,7 +1233,7 @@ impl<S: EcuGateway, R: DiagServiceResponse, T: EcuManager<Response = R>> UdsEcu
         // Seed the session/security map before sending detection requests so
         // that check_service_preconditions can validate them. This only
         // works for ECUS whose state charts are defined on the base variant level
-        if let Err(e) = ecu.read().await.init_default_states().await {
+        if let Err(e) = ecu.read().await.set_default_states().await {
             tracing::debug!(
                 error = %e,
                 "Could not pre-initialize ECU default states"
@@ -1364,7 +1369,7 @@ impl<S: EcuGateway, R: DiagServiceResponse, T: EcuManager<Response = R>> UdsEcu
     }
 
     async fn get_variant(&self, ecu_name: &str) -> Result<EcuVariant, DiagServiceError> {
-        let ecu = self.ecu_manager(ecu_name)?;
+        let ecu = self.uds_ecu_db(ecu_name)?;
         let variant = ecu.read().await.variant();
         Ok(variant)
     }
@@ -1386,7 +1391,12 @@ impl<S: EcuGateway, R: DiagServiceResponse, T: EcuManager<Response = R>> UdsEcu
                 self.gateway.ecu_online(ecu_name, db).await
             {
                 // empty response means ECU is offline
-                if let Err(e) = db.write().await.detect_variant::<R>(HashMap::new()).await {
+                if let Err(e) = db
+                    .write()
+                    .await
+                    .detect_variant::<<T as PayloadDecoder>::Response>(HashMap::new())
+                    .await
+                {
                     tracing::error!(ecu_name = %ecu_name,
                         "Failed to set ECU offline during variant detection: {e:?}");
                 }
@@ -1417,12 +1427,12 @@ impl<S: EcuGateway, R: DiagServiceResponse, T: EcuManager<Response = R>> UdsEcu
         scope: Option<String>,
         memory_selection: Option<u8>,
     ) -> Result<HashMap<DtcCode, DtcRecordAndStatus>, DiagServiceError> {
-        let ecu = self.ecu_manager(ecu_name)?;
+        let ecu = self.uds_ecu_db(ecu_name)?;
         let mut all_dtcs = HashMap::new();
         let scoped_services: Vec<_> = ecu
             .read()
             .await
-            .lookup_dtc_services(vec![
+            .lookup_dtc_services(&[
                 DtcReadInformationFunction::FaultMemoryByStatusMask,
                 DtcReadInformationFunction::UserMemoryDtcByStatusMask,
             ])?
@@ -1597,8 +1607,8 @@ impl<S: EcuGateway, R: DiagServiceResponse, T: EcuManager<Response = R>> UdsEcu
         ecu_name: &str,
         security_plugin: &DynamicPlugin,
         fault_code: Option<String>,
-    ) -> Result<R, DiagServiceError> {
-        let ecu = self.ecu_manager(ecu_name)?;
+    ) -> Result<Self::Response, DiagServiceError> {
+        let ecu = self.uds_ecu_db(ecu_name)?;
         let delete_dtc_service = ecu.read().await.lookup_service_through_func_class(
             "faultmem",
             service_ids::CLEAR_DIAGNOSTIC_INFORMATION,
@@ -1640,10 +1650,7 @@ impl<S: EcuGateway, R: DiagServiceResponse, T: EcuManager<Response = R>> UdsEcu
             None => Err(DiagServiceError::NoResponse(
                 "ECU did not respond to DTC clear".to_owned(),
             )),
-            Some(resp) => ecu
-                .read()
-                .await
-                .convert_service_14_response(delete_dtc_service, resp),
+            Some(resp) => T::convert_service_14_response(delete_dtc_service, resp),
         }
     }
 
@@ -1652,8 +1659,8 @@ impl<S: EcuGateway, R: DiagServiceResponse, T: EcuManager<Response = R>> UdsEcu
         ecu_name: &str,
         security_plugin: &DynamicPlugin,
         scope: &str,
-    ) -> Result<R, DiagServiceError> {
-        let ecu = self.ecu_manager(ecu_name)?;
+    ) -> Result<Self::Response, DiagServiceError> {
+        let ecu = self.uds_ecu_db(ecu_name)?;
 
         // If the requested scope is the default scope, delegate to the standard delete_dtcs path.
         if scope.eq_ignore_ascii_case(&self.fault_config.default_scope) {
@@ -1708,7 +1715,7 @@ impl<S: EcuGateway, R: DiagServiceResponse, T: EcuManager<Response = R>> UdsEcu
     }
 
     async fn ecu_functional_groups(&self, ecu_name: &str) -> Result<Vec<String>, DiagServiceError> {
-        let groups = self.ecu_manager(ecu_name)?.read().await.functional_groups();
+        let groups = self.uds_ecu_db(ecu_name)?.read().await.functional_groups();
         Ok(groups)
     }
 
@@ -1747,7 +1754,7 @@ impl<S: EcuGateway, R: DiagServiceResponse, T: EcuManager<Response = R>> UdsEcu
         security_plugin: &DynamicPlugin,
         payload: Option<UdsPayloadData>,
         map_to_json: bool,
-    ) -> HashMap<String, Result<R, DiagServiceError>> {
+    ) -> HashMap<String, Result<Self::Response, DiagServiceError>> {
         let ecu_list = self
             .ecus_for_functional_group(functional_group, false)
             .await;
@@ -1788,8 +1795,9 @@ impl<S: EcuGateway, R: DiagServiceResponse, T: EcuManager<Response = R>> UdsEcu
             }
         };
 
-        let result_map: Arc<Mutex<HashMap<String, Result<R, DiagServiceError>>>> =
-            Arc::new(Mutex::new(HashMap::new()));
+        let result_map: Arc<
+            Mutex<HashMap<String, Result<<T as PayloadDecoder>::Response, DiagServiceError>>>,
+        > = Arc::new(Mutex::new(HashMap::new()));
 
         // Group ECUs by their gateway address
         let mut ecus_by_gateway: HashMap<u16, PerGatewayInfo> = HashMap::new();
@@ -1915,7 +1923,7 @@ impl<S: EcuGateway, R: DiagServiceResponse, T: EcuManager<Response = R>> UdsEcu
         params: Option<HashMap<String, serde_json::Value>>,
         map_to_json: bool,
     ) -> Result<Self::Response, DiagServiceError> {
-        let ecu = self.ecu_manager(ecu_name)?;
+        let ecu = self.uds_ecu_db(ecu_name)?;
         let service = ecu
             .read()
             .await
@@ -1953,7 +1961,7 @@ impl<S: EcuGateway, R: DiagServiceResponse, T: EcuManager<Response = R>> UdsEcu
         mode_expiration: Option<Duration>,
         map_to_json: bool,
     ) -> Result<HashMap<String, Result<Self::Response, DiagServiceError>>, DiagServiceError> {
-        let func_group = self.ecu_manager(&self.functional_description_database)?;
+        let func_group = self.uds_ecu_db(&self.functional_description_database)?;
         let service = func_group.read().await.lookup_service_by_sid_and_name(
             sid,
             service_name,
@@ -2061,15 +2069,13 @@ fn get_dtc_status_for_mask(mask: u8) -> datatypes::DtcStatus {
     }
 }
 
-impl<S: EcuGateway, R: DiagServiceResponse, T: EcuManager<Response = R>> SchemaProvider
-    for UdsManager<S, R, T>
-{
+impl<S: EcuGateway, T: EcuManager> SchemaProvider for UdsManager<S, T> {
     async fn schema_for_request(
         &self,
         ecu: &str,
         service: &DiagComm,
     ) -> Result<cda_interfaces::SchemaDescription, DiagServiceError> {
-        self.ecu_manager(ecu)?
+        self.uds_ecu_db(ecu)?
             .read()
             .await
             .schema_for_request(service)
@@ -2081,7 +2087,7 @@ impl<S: EcuGateway, R: DiagServiceResponse, T: EcuManager<Response = R>> SchemaP
         ecu: &str,
         service: &DiagComm,
     ) -> Result<cda_interfaces::SchemaDescription, DiagServiceError> {
-        self.ecu_manager(ecu)?
+        self.uds_ecu_db(ecu)?
             .read()
             .await
             .schema_for_responses(service)
@@ -2093,7 +2099,7 @@ impl<S: EcuGateway, R: DiagServiceResponse, T: EcuManager<Response = R>> SchemaP
         service: &DiagComm,
         functional_group_name: &str,
     ) -> Result<cda_interfaces::SchemaDescription, DiagServiceError> {
-        self.ecu_manager(&self.functional_description_database)?
+        self.uds_ecu_db(&self.functional_description_database)?
             .read()
             .await
             .schema_for_fg_request(service, functional_group_name)

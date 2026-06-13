@@ -47,7 +47,6 @@ pub(crate) mod mdd_embedded_files {
     use axum_extra::extract::WithRejection;
     use cda_interfaces::{
         UdsEcu,
-        diagservices::DiagServiceResponse,
         file_manager::{ChunkMetaData, FileManager},
     };
     use http::{StatusCode, header};
@@ -55,14 +54,14 @@ pub(crate) mod mdd_embedded_files {
 
     use crate::sovd::{WebserverEcuState, create_schema, error::ApiError};
 
-    pub(crate) async fn get<R: DiagServiceResponse, T: UdsEcu + Clone, U: FileManager>(
+    pub(crate) async fn get<T: UdsEcu + Clone, U: FileManager>(
         WithRejection(Query(query), _): WithRejection<
             Query<sovd2uds::bulk_data::embedded_files::get::Query>,
             ApiError,
         >,
         State(WebserverEcuState {
             mdd_embedded_files, ..
-        }): State<WebserverEcuState<R, T, U>>,
+        }): State<WebserverEcuState<T, U>>,
     ) -> Response {
         let schema = if query.include_schema {
             Some(create_schema!(
@@ -114,19 +113,18 @@ pub(crate) mod mdd_embedded_files {
 
     pub(crate) mod id {
         use super::{
-            ApiError, DiagServiceResponse, FileManager, IntoResponse, Path, Response, State,
-            StatusCode, TransformOperation, UdsEcu, WebserverEcuState, content_type_from_meta,
-            header,
+            ApiError, FileManager, IntoResponse, Path, Response, State, StatusCode,
+            TransformOperation, UdsEcu, WebserverEcuState, content_type_from_meta, header,
         };
         use crate::{
             openapi,
             sovd::{components::IdPathParam, error::ErrorWrapper},
         };
-        pub(crate) async fn get<R: DiagServiceResponse, T: UdsEcu + Clone, U: FileManager>(
+        pub(crate) async fn get<T: UdsEcu + Clone, U: FileManager>(
             Path(id): Path<IdPathParam>,
             State(WebserverEcuState {
                 mdd_embedded_files, ..
-            }): State<WebserverEcuState<R, T, U>>,
+            }): State<WebserverEcuState<T, U>>,
         ) -> Response {
             match mdd_embedded_files.get(&id).await {
                 Ok((meta, payload)) => (

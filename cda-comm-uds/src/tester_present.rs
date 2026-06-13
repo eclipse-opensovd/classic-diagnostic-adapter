@@ -15,13 +15,13 @@ use async_trait::async_trait;
 use cda_interfaces::{
     DiagServiceError, EcuGateway, EcuManager, EcuState, SUPPRESS_POSITIVE_RESPONSE_BIT,
     ServicePayload, TesterPresentControlMessage, TesterPresentMode, TesterPresentType, UdsEcu,
-    UdsTesterPresent, diagservices::DiagServiceResponse, dlt_ctx, service_ids,
+    UdsTesterPresent, dlt_ctx, service_ids,
 };
 use tokio::time::{MissedTickBehavior, interval as tokio_interval};
 
 use crate::{UdsManager, types::TesterPresentTask};
 
-impl<S: EcuGateway, R: DiagServiceResponse, T: EcuManager<Response = R>> UdsManager<S, R, T> {
+impl<S: EcuGateway, T: EcuManager> UdsManager<S, T> {
     /// Start or stop a tester present task for a single ECU.
     async fn control_tester_present(
         &self,
@@ -40,7 +40,7 @@ impl<S: EcuGateway, R: DiagServiceResponse, T: EcuManager<Response = R>> UdsMana
                 let interval = if let Some(i) = control_msg.interval {
                     i
                 } else {
-                    self.ecu_manager(&control_msg.ecu)?
+                    self.uds_ecu_db(&control_msg.ecu)?
                         .read()
                         .await
                         .tester_present_time()
@@ -77,7 +77,7 @@ impl<S: EcuGateway, R: DiagServiceResponse, T: EcuManager<Response = R>> UdsMana
                             let _ = schedule.tick().await;
                             // Skip sending if the ECU is not online; the loop will
                             // naturally resume once the ECU is detected online again.
-                            if let Ok(ecu) = uds.ecu_manager(&control_msg.ecu) {
+                            if let Ok(ecu) = uds.uds_ecu_db(&control_msg.ecu) {
                                 let ecu_state = ecu.read().await.variant().state;
                                 if ecu_state != EcuState::Online {
                                     tracing::debug!(
@@ -143,7 +143,7 @@ impl<S: EcuGateway, R: DiagServiceResponse, T: EcuManager<Response = R>> UdsMana
         control_msg: &TesterPresentControlMessage,
     ) -> Result<(), DiagServiceError> {
         let payload = {
-            let ecu = self.ecu_manager(&control_msg.ecu)?;
+            let ecu = self.uds_ecu_db(&control_msg.ecu)?;
             let target_address = match &control_msg.type_ {
                 TesterPresentType::Functional(_) => ecu.read().await.logical_functional_address(),
                 TesterPresentType::Ecu(_) => ecu.read().await.logical_address(),
@@ -168,9 +168,7 @@ impl<S: EcuGateway, R: DiagServiceResponse, T: EcuManager<Response = R>> UdsMana
 }
 
 #[async_trait]
-impl<S: EcuGateway, R: DiagServiceResponse, T: EcuManager<Response = R>> UdsTesterPresent
-    for UdsManager<S, R, T>
-{
+impl<S: EcuGateway, T: EcuManager> UdsTesterPresent for UdsManager<S, T> {
     #[tracing::instrument(skip_all,
         fields(dlt_context = dlt_ctx!("UDS"))
     )]

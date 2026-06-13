@@ -16,7 +16,6 @@ use std::{
     time::{Duration, Instant},
 };
 
-use cda_core::DiagServiceResponseStruct;
 use cda_health::config::HealthConfig;
 use cda_interfaces::{
     FunctionalDescriptionConfig, HashMap, HashMapExtensions,
@@ -377,7 +376,7 @@ fn start_cda(config: Configuration) {
             .await;
         }
 
-        cda_sovd::add_vehicle_routes::<DiagServiceResponseStruct, _, _, DefaultSecurityPlugin>(
+        cda_sovd::add_vehicle_routes::<_, _, DefaultSecurityPlugin>(
             &dynamic_router,
             cda_sovd::VehicleConfig {
                 flash_files_path: config.flash_files_path.clone(),
@@ -731,7 +730,9 @@ async fn wait_for_ecu_sim_ready(host: &str, sim_control_port: u16) -> Result<(),
     let timeout = if use_docker() {
         Duration::from_secs(10)
     } else {
-        Duration::from_secs(300)
+        // use 333 as its not divisible by 60 to prevent
+        // nightly clippy from suggesting to use from_mins
+        Duration::from_secs(333)
     };
     wait_for_http_ready_with_timeout(url, "ECU sim", None, timeout).await
 }
