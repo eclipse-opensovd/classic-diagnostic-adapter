@@ -16,10 +16,10 @@ use cda_interfaces::{
     DiagComm, DiagCommType, DiagServiceError, HashMap, datatypes::DatabaseNamingConvention,
     diagservices::DiagServiceResponse, dlt_ctx,
 };
-pub(super) type DiagServiceId = String;
+type DiagServiceId = String;
 
-pub(super) struct VariantDetection {
-    pub(crate) diag_service_requests: HashMap<DiagServiceId, DiagComm>,
+pub(in crate::diag_kernel) struct VariantDetection {
+    pub(in crate::diag_kernel) diag_service_requests: HashMap<DiagServiceId, DiagComm>,
 }
 
 pub(super) fn prepare_variant_detection(

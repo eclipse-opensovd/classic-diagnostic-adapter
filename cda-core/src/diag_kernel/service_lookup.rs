@@ -28,17 +28,17 @@ use tokio::sync::RwLock;
 use super::ecumanager::EcuManager;
 
 #[derive(Default)]
-pub(crate) struct DbCache {
-    pub(crate) diag_services: RwLock<HashMap<StringId, Option<CacheLocation>>>,
+pub(in crate::diag_kernel) struct DbCache {
+    diag_services: RwLock<HashMap<StringId, Option<CacheLocation>>>,
 }
 
 impl DbCache {
-    pub(crate) async fn reset(&self) {
+    pub(in crate::diag_kernel) async fn reset(&self) {
         self.diag_services.write().await.clear();
     }
 }
 
-pub(crate) enum CacheLocation {
+pub(in crate::diag_kernel) enum CacheLocation {
     Variant(usize),
     ParentRef(usize),
 }
@@ -217,7 +217,7 @@ impl<S: SecurityPlugin> EcuManager<S> {
         }
     }
 
-    pub(crate) fn search_with_location<F>(
+    fn search_with_location<F>(
         &self,
         predicate: &F,
     ) -> Option<(datatypes::DiagService<'_>, CacheLocation)>
@@ -255,7 +255,7 @@ impl<S: SecurityPlugin> EcuManager<S> {
         None
     }
 
-    pub(crate) fn get_services_from_diag_layer_and_parent_refs<'a, F>(
+    fn get_services_from_diag_layer_and_parent_refs<'a, F>(
         diag_layer: &datatypes::DiagLayer<'a>,
         parent_refs: impl Iterator<Item = impl Into<datatypes::ParentRef<'a>>>,
         service_filter: F,
@@ -290,7 +290,7 @@ impl<S: SecurityPlugin> EcuManager<S> {
     ///     |job| job.diag_comm().and_then(|dc| dc.short_name()) == Some("MyJob"),
     /// );
     /// ```
-    pub(crate) fn get_single_ecu_jobs_from_diag_layer_and_parent_refs<'a, F>(
+    fn get_single_ecu_jobs_from_diag_layer_and_parent_refs<'a, F>(
         diag_layer: &datatypes::DiagLayer<'a>,
         parent_refs: impl Iterator<Item = impl Into<datatypes::ParentRef<'a>>>,
         service_filter: F,
@@ -328,7 +328,7 @@ impl<S: SecurityPlugin> EcuManager<S> {
     ///     println!("{:?}", service.diag_comm().and_then(|dc| dc.short_name()));
     /// }
     /// ```
-    pub(crate) fn get_services_from_variant_and_parent_refs<F>(
+    pub(in crate::diag_kernel) fn get_services_from_variant_and_parent_refs<F>(
         &self,
         service_filter: F,
     ) -> Vec<datatypes::DiagService<'_>>
@@ -368,7 +368,7 @@ impl<S: SecurityPlugin> EcuManager<S> {
     ///     println!("{:?}", service.diag_comm().and_then(|dc| dc.short_name()));
     /// }
     /// ```
-    pub(crate) fn get_services_from_functional_group_and_parent_refs<F>(
+    pub(in crate::diag_kernel) fn get_services_from_functional_group_and_parent_refs<F>(
         &self,
         group_name: &str,
         service_filter: F,
@@ -417,7 +417,7 @@ impl<S: SecurityPlugin> EcuManager<S> {
     ///     |job| job.diag_comm().and_then(|dc| dc.short_name()) == Some("ReadSerialNumber"),
     /// );
     /// ```
-    pub(crate) fn get_single_ecu_jobs_from_variant_and_parent_refs<F>(
+    pub(in crate::diag_kernel) fn get_single_ecu_jobs_from_variant_and_parent_refs<F>(
         &self,
         service_filter: F,
     ) -> Vec<datatypes::SingleEcuJob<'_>>
@@ -435,7 +435,7 @@ impl<S: SecurityPlugin> EcuManager<S> {
             })
     }
 
-    pub(crate) fn get_service_by_location(
+    pub(in crate::diag_kernel) fn get_service_by_location(
         &self,
         location: &CacheLocation,
     ) -> Option<datatypes::DiagService<'_>> {
@@ -469,12 +469,12 @@ impl<S: SecurityPlugin> EcuManager<S> {
     ///     |service| service.diag_comm().and_then(|dc| dc.short_name()),
     /// );
     /// ```
-    pub(crate) fn get_parent_ref_diag_comms_recursive<'a, T>(
+    pub(in crate::diag_kernel) fn get_parent_ref_diag_comms_recursive<'a, T>(
         parent_refs: impl Iterator<Item = impl Into<datatypes::ParentRef<'a>>>,
         extract: impl Fn(&datatypes::DiagLayer<'a>) -> Option<Vec<T>>,
         get_name: impl Fn(&T) -> Option<&str>,
     ) -> Option<Vec<T>> {
-        let all_items: Vec<T> = Self::get_parent_ref_diag_layers_with_refs_recursive(parent_refs)
+        let all_items: Vec<T> = get_parent_ref_diag_layers_with_refs_recursive(parent_refs)
             .into_iter()
             .filter_map(|(parent_ref, diag_layer)| {
                 let not_inherited_names: Vec<&str> = parent_ref
@@ -511,7 +511,7 @@ impl<S: SecurityPlugin> EcuManager<S> {
     /// );
     /// // jobs: Option<Vec<datatypes::SingleEcuJob>>
     /// ```
-    pub(crate) fn get_parent_ref_jobs_recursive<'a>(
+    pub(in crate::diag_kernel) fn get_parent_ref_jobs_recursive<'a>(
         parent_refs: impl Iterator<Item = impl Into<datatypes::ParentRef<'a>>>,
     ) -> Option<Vec<datatypes::SingleEcuJob<'a>>> {
         Self::get_parent_ref_diag_comms_recursive(
@@ -536,7 +536,7 @@ impl<S: SecurityPlugin> EcuManager<S> {
     /// );
     /// // services: Option<Vec<datatypes::DiagService>>
     /// ```
-    pub(crate) fn get_parent_ref_services_recursive<'a>(
+    pub(in crate::diag_kernel) fn get_parent_ref_services_recursive<'a>(
         parent_refs: impl Iterator<Item = impl Into<datatypes::ParentRef<'a>>>,
     ) -> Option<Vec<datatypes::DiagService<'a>>> {
         Self::get_parent_ref_diag_comms_recursive(
@@ -564,7 +564,7 @@ impl<S: SecurityPlugin> EcuManager<S> {
     ///     }
     /// }
     /// ```
-    pub(crate) fn get_variant_parent_ref_services(
+    pub(in crate::diag_kernel) fn get_variant_parent_ref_services(
         &self,
     ) -> Option<Vec<datatypes::DiagService<'_>>> {
         self.variant()
@@ -594,7 +594,7 @@ impl<S: SecurityPlugin> EcuManager<S> {
     ///     println!("{:?}", layer.short_name());
     /// }
     /// ```
-    pub(crate) fn get_diag_layers_from_variant_and_parent_refs(
+    pub(in crate::diag_kernel) fn get_diag_layers_from_variant_and_parent_refs(
         &self,
     ) -> Vec<datatypes::DiagLayer<'_>> {
         let Some(variant) = self.variant() else {
@@ -610,110 +610,13 @@ impl<S: SecurityPlugin> EcuManager<S> {
             .chain(
                 variant
                     .parent_refs()
-                    .map(|refs| Self::get_parent_ref_diag_layers_recursive(refs.iter()))
+                    .map(|refs| get_parent_ref_diag_layers_recursive(refs.iter()))
                     .unwrap_or_default(),
             )
             .collect()
     }
 
-    /// Recursively resolves parent references and collects their `DiagLayers`.
-    /// This is a convenience wrapper around [`get_parent_ref_diag_layers_with_refs_recursive`]
-    /// that discards the associated `ParentRef` and returns only the `DiagLayer` values.
-    ///
-    /// # Example
-    ///
-    /// ```ignore
-    /// let layers: Vec<datatypes::DiagLayer> = EcuManager::get_parent_ref_diag_layers_recursive(
-    ///     parent_refs.iter().map(datatypes::ParentRef),
-    /// );
-    /// ```
-    pub(crate) fn get_parent_ref_diag_layers_recursive<'a>(
-        parent_refs: impl Iterator<Item = impl Into<datatypes::ParentRef<'a>>>,
-    ) -> Vec<datatypes::DiagLayer<'a>> {
-        Self::get_parent_ref_diag_layers_with_refs_recursive(parent_refs)
-            .into_iter()
-            .map(|(_, diag_layer)| diag_layer)
-            .collect()
-    }
-
-    /// Recursively resolves parent references and returns `(ParentRef, DiagLayer)` pairs.
-    /// Uses a stack-based traversal to handle the parent reference hierarchy:
-    /// - **`FunctionalGroup`**: extracts the `DiagLayer` and pushes its nested `ParentRef`s
-    ///   onto the stack for further traversal.
-    /// - **`Variant`**: extracts the `DiagLayer` and pushes its nested `ParentRef`s
-    ///   onto the stack for further traversal.
-    /// - **`Protocol`**: extracts the `DiagLayer` and pushes its nested `ParentRef`
-    ///   items onto the stack for further traversal.
-    /// - **`EcuSharedData`**: extracts the `DiagLayer` (leaf node, no `parent_refs`).
-    ///
-    /// # Example
-    ///
-    /// ```ignore
-    /// let pairs: Vec<(datatypes::ParentRef, datatypes::DiagLayer)> =
-    ///     EcuManager::get_parent_ref_diag_layers_with_refs_recursive(
-    ///         parent_refs.iter().map(datatypes::ParentRef),
-    ///     );
-    /// for (parent_ref, diag_layer) in &pairs {
-    ///     println!("ref type: {:?}, layer: {:?}", parent_ref.ref_type(), diag_layer.short_name());
-    /// }
-    /// ```
-    pub(crate) fn get_parent_ref_diag_layers_with_refs_recursive<'a>(
-        parent_refs: impl Iterator<Item = impl Into<datatypes::ParentRef<'a>>>,
-    ) -> Vec<(datatypes::ParentRef<'a>, datatypes::DiagLayer<'a>)> {
-        let mut result = Vec::new();
-        let mut stack: Vec<datatypes::ParentRef<'a>> =
-            parent_refs.into_iter().map(Into::into).collect();
-
-        while let Some(parent_ref) = stack.pop() {
-            match parent_ref.ref_type().try_into() {
-                Ok(datatypes::ParentRefType::FunctionalGroup) => {
-                    if let Some(fg) = parent_ref.ref__as_functional_group() {
-                        if let Some(nested_refs) = fg.parent_refs() {
-                            stack.extend(nested_refs.iter().map(datatypes::ParentRef));
-                        }
-                        if let Some(dl) = fg.diag_layer() {
-                            result.push((parent_ref, datatypes::DiagLayer(dl)));
-                        }
-                    }
-                }
-                Ok(datatypes::ParentRefType::EcuSharedData) => {
-                    if let Some(dl) = parent_ref
-                        .ref__as_ecu_shared_data()
-                        .and_then(|esd| esd.diag_layer())
-                    {
-                        result.push((parent_ref, datatypes::DiagLayer(dl)));
-                    }
-                }
-                Ok(datatypes::ParentRefType::Protocol) => {
-                    if let Some(p) = parent_ref.ref__as_protocol() {
-                        if let Some(nested_refs) = p.parent_refs() {
-                            stack.extend(nested_refs.iter().map(datatypes::ParentRef));
-                        }
-                        if let Some(dl) = p.diag_layer() {
-                            result.push((parent_ref, datatypes::DiagLayer(dl)));
-                        }
-                    }
-                }
-                Ok(datatypes::ParentRefType::Variant) => {
-                    if let Some(v) = parent_ref.ref__as_variant() {
-                        if let Some(nested_refs) = v.parent_refs() {
-                            stack.extend(nested_refs.iter().map(datatypes::ParentRef));
-                        }
-                        if let Some(dl) = v.diag_layer() {
-                            result.push((parent_ref, datatypes::DiagLayer(dl)));
-                        }
-                    }
-                }
-                _ => {
-                    tracing::error!("Unsupported ParentRefType in ECU shared service lookup.");
-                }
-            }
-        }
-
-        result
-    }
-
-    pub(crate) fn lookup_services_by_sid(
+    pub(in crate::diag_kernel) fn lookup_services_by_sid(
         &self,
         service_id: u8,
     ) -> Result<Vec<datatypes::DiagService<'_>>, DiagServiceError> {
@@ -734,13 +637,109 @@ impl<S: SecurityPlugin> EcuManager<S> {
     }
 }
 
+/// Recursively resolves parent references and collects their `DiagLayers`.
+/// This is a convenience wrapper around [`get_parent_ref_diag_layers_with_refs_recursive`]
+/// that discards the associated `ParentRef` and returns only the `DiagLayer` values.
+///
+/// # Example
+///
+/// ```ignore
+/// let layers: Vec<datatypes::DiagLayer> = EcuManager::get_parent_ref_diag_layers_recursive(
+///     parent_refs.iter().map(datatypes::ParentRef),
+/// );
+/// ```
+pub(in crate::diag_kernel) fn get_parent_ref_diag_layers_recursive<'a>(
+    parent_refs: impl Iterator<Item = impl Into<datatypes::ParentRef<'a>>>,
+) -> Vec<datatypes::DiagLayer<'a>> {
+    get_parent_ref_diag_layers_with_refs_recursive(parent_refs)
+        .into_iter()
+        .map(|(_, diag_layer)| diag_layer)
+        .collect()
+}
+
+/// Recursively resolves parent references and returns `(ParentRef, DiagLayer)` pairs.
+/// Uses a stack-based traversal to handle the parent reference hierarchy:
+/// - **`FunctionalGroup`**: extracts the `DiagLayer` and pushes its nested `ParentRef`s
+///   onto the stack for further traversal.
+/// - **`Variant`**: extracts the `DiagLayer` and pushes its nested `ParentRef`s
+///   onto the stack for further traversal.
+/// - **`Protocol`**: extracts the `DiagLayer` and pushes its nested `ParentRef`
+///   items onto the stack for further traversal.
+/// - **`EcuSharedData`**: extracts the `DiagLayer` (leaf node, no `parent_refs`).
+///
+/// # Example
+///
+/// ```ignore
+/// let pairs: Vec<(datatypes::ParentRef, datatypes::DiagLayer)> =
+///     EcuManager::get_parent_ref_diag_layers_with_refs_recursive(
+///         parent_refs.iter().map(datatypes::ParentRef),
+///     );
+/// for (parent_ref, diag_layer) in &pairs {
+///     println!("ref type: {:?}, layer: {:?}", parent_ref.ref_type(), diag_layer.short_name());
+/// }
+/// ```
+fn get_parent_ref_diag_layers_with_refs_recursive<'a>(
+    parent_refs: impl Iterator<Item = impl Into<datatypes::ParentRef<'a>>>,
+) -> Vec<(datatypes::ParentRef<'a>, datatypes::DiagLayer<'a>)> {
+    let mut result = Vec::new();
+    let mut stack: Vec<datatypes::ParentRef<'a>> =
+        parent_refs.into_iter().map(Into::into).collect();
+
+    while let Some(parent_ref) = stack.pop() {
+        match parent_ref.ref_type().try_into() {
+            Ok(datatypes::ParentRefType::FunctionalGroup) => {
+                if let Some(fg) = parent_ref.ref__as_functional_group() {
+                    if let Some(nested_refs) = fg.parent_refs() {
+                        stack.extend(nested_refs.iter().map(datatypes::ParentRef));
+                    }
+                    if let Some(dl) = fg.diag_layer() {
+                        result.push((parent_ref, datatypes::DiagLayer(dl)));
+                    }
+                }
+            }
+            Ok(datatypes::ParentRefType::EcuSharedData) => {
+                if let Some(dl) = parent_ref
+                    .ref__as_ecu_shared_data()
+                    .and_then(|esd| esd.diag_layer())
+                {
+                    result.push((parent_ref, datatypes::DiagLayer(dl)));
+                }
+            }
+            Ok(datatypes::ParentRefType::Protocol) => {
+                if let Some(p) = parent_ref.ref__as_protocol() {
+                    if let Some(nested_refs) = p.parent_refs() {
+                        stack.extend(nested_refs.iter().map(datatypes::ParentRef));
+                    }
+                    if let Some(dl) = p.diag_layer() {
+                        result.push((parent_ref, datatypes::DiagLayer(dl)));
+                    }
+                }
+            }
+            Ok(datatypes::ParentRefType::Variant) => {
+                if let Some(v) = parent_ref.ref__as_variant() {
+                    if let Some(nested_refs) = v.parent_refs() {
+                        stack.extend(nested_refs.iter().map(datatypes::ParentRef));
+                    }
+                    if let Some(dl) = v.diag_layer() {
+                        result.push((parent_ref, datatypes::DiagLayer(dl)));
+                    }
+                }
+            }
+            _ => {
+                tracing::error!("Unsupported ParentRefType in ECU shared service lookup.");
+            }
+        }
+    }
+
+    result
+}
+
 #[cfg(test)]
 mod tests {
     use cda_database::datatypes::database_builder::{
         DataFormatParentRefType, DiagLayerParams, EcuDataBuilder, EcuDataParams,
     };
-    use cda_interfaces::{DiagComm, DiagServiceError, EcuManager as _, subfunction_ids};
-    use cda_plugin_security::DefaultSecurityPluginData;
+    use cda_interfaces::{DiagComm, DiagCommLookup, DiagServiceError, subfunction_ids};
 
     use super::*;
     use crate::diag_kernel::test_utils::ecu_manager_builder::create_ecu_manager_with_routine_control_service;
@@ -842,13 +841,12 @@ mod tests {
         let variant = ecu_data.variants().unwrap().get(0);
         let parent_refs = variant.parent_refs().unwrap();
 
-        let names: Vec<_> = EcuManager::<DefaultSecurityPluginData>
-            ::get_parent_ref_diag_layers_with_refs_recursive(
+        let names: Vec<_> = get_parent_ref_diag_layers_with_refs_recursive(
             parent_refs.iter().map(datatypes::ParentRef),
         )
-            .into_iter()
-            .filter_map(|(_, dl)| dl.short_name().map(str::to_owned))
-            .collect();
+        .into_iter()
+        .filter_map(|(_, dl)| dl.short_name().map(str::to_owned))
+        .collect();
 
         // every layer from every level must be present
         for expected in [

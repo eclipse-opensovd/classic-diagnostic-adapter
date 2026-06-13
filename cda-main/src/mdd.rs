@@ -21,7 +21,7 @@ use cda_core::{EcuManager, EcuManagerConfig};
 use cda_database::{FileManager, ProtoLoadConfig, update_mdd_uncompressed};
 use cda_health::StatusHealthProvider;
 use cda_interfaces::{
-    EcuAddressProvider, EcuManager as EcuManagerTrait, EcuManagerType, FunctionalDescriptionConfig,
+    EcuAddresses, EcuManager as EcuManagerTrait, EcuManagerType, FunctionalDescriptionConfig,
     HashMap, HashMapEntry, HashMapExtensions, HashSet, Protocol,
     datatypes::{ComParams, DatabaseNamingConvention, FlatbBufConfig},
     file_manager::{Chunk, ChunkType},

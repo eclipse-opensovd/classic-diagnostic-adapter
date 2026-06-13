@@ -13,8 +13,8 @@
 
 //! Communication parameter provider trait implementations for [`EcuManager`].
 //!
-//! This module contains the [`cda_interfaces::UdsComParamProvider`] and
-//! [`cda_interfaces::DoipComParamProvider`] trait implementations.
+//! This module contains the [`cda_interfaces::UdsComParams`] and
+//! [`cda_interfaces::DoipComParams`] trait implementations.
 
 use std::time::Duration;
 
@@ -26,7 +26,7 @@ use cda_plugin_security::SecurityPlugin;
 
 use super::ecumanager::EcuManager;
 
-impl<S: SecurityPlugin> cda_interfaces::UdsComParamProvider for EcuManager<S> {
+impl<S: SecurityPlugin> cda_interfaces::UdsComParams for EcuManager<S> {
     fn tester_present_retry_policy(&self) -> bool {
         self.tester_present_retry_policy
     }
@@ -86,7 +86,7 @@ impl<S: SecurityPlugin> cda_interfaces::UdsComParamProvider for EcuManager<S> {
     }
 }
 
-impl<S: SecurityPlugin> cda_interfaces::DoipComParamProvider for EcuManager<S> {
+impl<S: SecurityPlugin> cda_interfaces::DoipComParams for EcuManager<S> {
     fn nack_number_of_retries(&self) -> &HashMap<u8, u32> {
         &self.nack_number_of_retries
     }

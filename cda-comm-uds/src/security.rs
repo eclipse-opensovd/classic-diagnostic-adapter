@@ -23,9 +23,7 @@ use cda_interfaces::{
 use crate::{UdsManager, types::ResetType};
 
 #[async_trait]
-impl<S: EcuGateway, R: DiagServiceResponse, T: EcuManager<Response = R>> UdsSecurity
-    for UdsManager<S, R, T>
-{
+impl<S: EcuGateway, T: EcuManager> UdsSecurity for UdsManager<S, T> {
     async fn reset_ecu_security_access(
         &self,
         ecu_name: &str,
@@ -36,7 +34,7 @@ impl<S: EcuGateway, R: DiagServiceResponse, T: EcuManager<Response = R>> UdsSecu
             old_task.abort();
         }
 
-        let ecu_diag_service = self.ecu_manager(ecu_name)?;
+        let ecu_diag_service = self.uds_ecu_db(ecu_name)?;
         let default_security_access = ecu_diag_service.read().await.default_security_access()?;
         let current_security_access = ecu_diag_service.read().await.security_access().await?;
 
@@ -77,8 +75,8 @@ impl<S: EcuGateway, R: DiagServiceResponse, T: EcuManager<Response = R>> UdsSecu
         authentication_data: Option<UdsPayloadData>,
         security_plugin: &DynamicPlugin,
         expiration: Option<Duration>,
-    ) -> Result<(SecurityAccess, R), DiagServiceError> {
-        let ecu_diag_service = self.ecu_manager(ecu_name)?;
+    ) -> Result<(SecurityAccess, Self::Response), DiagServiceError> {
+        let ecu_diag_service = self.uds_ecu_db(ecu_name)?;
         let security_access = ecu_diag_service
             .read()
             .await
@@ -118,7 +116,7 @@ impl<S: EcuGateway, R: DiagServiceResponse, T: EcuManager<Response = R>> UdsSecu
         ecu_name: &str,
         level: &str,
     ) -> Result<String, DiagServiceError> {
-        let ecu_diag_service = self.ecu_manager(ecu_name)?;
+        let ecu_diag_service = self.uds_ecu_db(ecu_name)?;
         let security_access = ecu_diag_service
             .read()
             .await

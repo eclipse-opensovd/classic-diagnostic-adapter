@@ -21,8 +21,7 @@ use axum::{
 };
 use axum_extra::extract::WithRejection;
 use cda_interfaces::{
-    DynamicPlugin, HashMap, HashMapExtensions, TesterPresentType, UdsEcu,
-    diagservices::DiagServiceResponse, file_manager::FileManager,
+    DynamicPlugin, HashMap, HashMapExtensions, TesterPresentType, UdsEcu, file_manager::FileManager,
 };
 use cda_plugin_security::{Claims, SecurityPlugin};
 use chrono::{DateTime, SecondsFormat, Utc};
@@ -305,25 +304,25 @@ pub(crate) mod ecu {
     use cda_plugin_security::Secured;
 
     use super::{
-        ApiError, DiagServiceResponse, ErrorWrapper, FileManager, IntoResponse, Json, LockContext,
-        LockPathParam, Path, Response, State, UdsEcu, WebserverEcuState, WithRejection,
-        delete_handler, get_handler, get_id_handler, post_handler, put_handler, vehicle_read_lock,
+        ApiError, ErrorWrapper, FileManager, IntoResponse, Json, LockContext, LockPathParam, Path,
+        Response, State, UdsEcu, WebserverEcuState, WithRejection, delete_handler, get_handler,
+        get_id_handler, post_handler, put_handler, vehicle_read_lock,
     };
     use crate::sovd;
 
     pub(crate) mod lock {
         use super::{
-            ApiError, DiagServiceResponse, FileManager, Json, LockPathParam, Path, Response,
-            Secured, State, TransformOperation, UdsEcu, UseApi, WebserverEcuState, WithRejection,
-            delete_handler, get_id_handler, put_handler,
+            ApiError, FileManager, Json, LockPathParam, Path, Response, Secured, State,
+            TransformOperation, UdsEcu, UseApi, WebserverEcuState, WithRejection, delete_handler,
+            get_id_handler, put_handler,
         };
         use crate::openapi;
-        pub(crate) async fn delete<R: DiagServiceResponse, T: UdsEcu + Clone, U: FileManager>(
+        pub(crate) async fn delete<T: UdsEcu + Clone, U: FileManager>(
             Path(lock): Path<LockPathParam>,
             UseApi(sec_plugin, _): UseApi<Secured, ()>,
             State(WebserverEcuState {
                 ecu_name, locks, ..
-            }): State<WebserverEcuState<R, T, U>>,
+            }): State<WebserverEcuState<T, U>>,
         ) -> Response {
             let claims = sec_plugin.as_auth_plugin().claims();
 
@@ -337,12 +336,12 @@ pub(crate) mod ecu {
                 .with(openapi::lock_not_owned)
         }
 
-        pub(crate) async fn put<R: DiagServiceResponse, T: UdsEcu + Clone, U: FileManager>(
+        pub(crate) async fn put<T: UdsEcu + Clone, U: FileManager>(
             Path(lock): Path<LockPathParam>,
             UseApi(sec_plugin, _): UseApi<Secured, ()>,
             State(WebserverEcuState {
                 ecu_name, locks, ..
-            }): State<WebserverEcuState<R, T, U>>,
+            }): State<WebserverEcuState<T, U>>,
             WithRejection(Json(body), _): WithRejection<
                 Json<sovd_interfaces::locking::Request>,
                 ApiError,
@@ -359,12 +358,12 @@ pub(crate) mod ecu {
                 .with(openapi::lock_not_owned)
         }
 
-        pub(crate) async fn get<R: DiagServiceResponse, T: UdsEcu + Clone, U: FileManager>(
+        pub(crate) async fn get<T: UdsEcu + Clone, U: FileManager>(
             Path(lock): Path<LockPathParam>,
             UseApi(_sec_plugin, _): UseApi<Secured, ()>,
             State(WebserverEcuState {
                 ecu_name, locks, ..
-            }): State<WebserverEcuState<R, T, U>>,
+            }): State<WebserverEcuState<T, U>>,
         ) -> Response {
             get_id_handler(&locks.ecu, &lock, Some(&ecu_name), false).await
         }
@@ -382,14 +381,14 @@ pub(crate) mod ecu {
         }
     }
 
-    pub(crate) async fn post<R: DiagServiceResponse, T: UdsEcu + Clone, U: FileManager>(
+    pub(crate) async fn post<T: UdsEcu + Clone, U: FileManager>(
         UseApi(Secured(sec_plugin), _): UseApi<Secured, ()>,
         State(WebserverEcuState {
             ecu_name,
             locks,
             uds,
             ..
-        }): State<WebserverEcuState<R, T, U>>,
+        }): State<WebserverEcuState<T, U>>,
         WithRejection(Json(body), _): WithRejection<
             Json<sovd_interfaces::locking::Request>,
             ApiError,
@@ -453,11 +452,11 @@ pub(crate) mod ecu {
             })
     }
 
-    pub(crate) async fn get<R: DiagServiceResponse, T: UdsEcu + Clone, U: FileManager>(
+    pub(crate) async fn get<T: UdsEcu + Clone, U: FileManager>(
         UseApi(sec_plugin, _): UseApi<Secured, ()>,
         State(WebserverEcuState {
             ecu_name, locks, ..
-        }): State<WebserverEcuState<R, T, U>>,
+        }): State<WebserverEcuState<T, U>>,
     ) -> Response {
         let claims = sec_plugin.as_auth_plugin().claims();
         get_handler(&locks.ecu, &claims, Some(&ecu_name)).await

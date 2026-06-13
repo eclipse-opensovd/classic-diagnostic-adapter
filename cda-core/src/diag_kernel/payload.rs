@@ -13,6 +13,7 @@
 
 use std::collections::VecDeque;
 
+use cda_database::datatypes;
 use cda_interfaces::DiagServiceError;
 
 pub(in crate::diag_kernel) struct Payload<'a> {
@@ -142,6 +143,37 @@ impl<'a> Payload<'a> {
         }
         Ok(())
     }
+}
+
+pub(in crate::diag_kernel) fn str_to_json_value(
+    value: &str,
+    data_type: datatypes::DataType,
+) -> Result<serde_json::Value, DiagServiceError> {
+    let json_value = match data_type {
+        datatypes::DataType::Int32 => {
+            let i32val = value.parse::<i32>().map_err(|e| {
+                DiagServiceError::InvalidDatabase(format!("CodedConst value conversion error: {e}"))
+            })?;
+            serde_json::Number::from(i32val).into()
+        }
+        datatypes::DataType::UInt32 => {
+            let u32val = value.parse::<u32>().map_err(|e| {
+                DiagServiceError::InvalidDatabase(format!("CodedConst value conversion error: {e}"))
+            })?;
+            serde_json::Number::from(u32val).into()
+        }
+        datatypes::DataType::Float32 | datatypes::DataType::Float64 => {
+            let f64val = value.parse::<f64>().map_err(|e| {
+                DiagServiceError::InvalidDatabase(format!("CodedConst value conversion error: {e}"))
+            })?;
+            serde_json::Number::from_f64(f64val).into()
+        }
+        datatypes::DataType::AsciiString
+        | datatypes::DataType::Utf8String
+        | datatypes::DataType::Unicode2String
+        | datatypes::DataType::ByteField => serde_json::Value::from(value),
+    };
+    Ok(json_value)
 }
 
 #[cfg(test)]

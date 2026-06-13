@@ -157,12 +157,7 @@ async fn test_custom_demo_endpoint() {
     );
     add_custom_routes(&dynamic_router).await;
     let ecu_names = uds_manager.get_ecus().await;
-    cda_sovd::add_vehicle_routes::<
-        cda_core::DiagServiceResponseStruct,
-        _,
-        _,
-        cda_plugin_security::DefaultSecurityPlugin,
-    >(
+    cda_sovd::add_vehicle_routes::<_, _, cda_plugin_security::DefaultSecurityPlugin>(
         &dynamic_router,
         cda_sovd::VehicleConfig {
             flash_files_path: String::new(),

@@ -15,7 +15,7 @@ use std::time::Duration;
 
 use tokio::sync::{RwLock, mpsc};
 
-use crate::{DiagServiceError, EcuAddressProvider, HashMap, ServicePayload};
+use crate::{DiagServiceError, EcuAddresses, HashMap, ServicePayload};
 
 #[derive(Debug, Clone)]
 pub enum UdsResponse {
@@ -87,7 +87,7 @@ pub trait EcuGateway: Clone + Send + Sync + 'static {
     /// Otherwise, returns `Ok(())`.
     /// # Errors
     ///  `DiagServiceError::EcuOffline` if the ECU cannot be reached, is not found, or is offline.
-    fn ecu_online<T: EcuAddressProvider>(
+    fn ecu_online<T: EcuAddresses>(
         &self,
         ecu_name: &str,
         ecu_db: &RwLock<T>,

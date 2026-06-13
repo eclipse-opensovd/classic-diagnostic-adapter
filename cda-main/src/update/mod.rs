@@ -15,7 +15,7 @@ use std::{future::Future, path::PathBuf, sync::Arc};
 
 use async_trait::async_trait;
 use cda_comm_doip::DoipDiagGateway;
-use cda_core::{DiagServiceResponseStruct, EcuManager};
+use cda_core::EcuManager;
 use cda_interfaces::{
     UdsEcu,
     datatypes::ComponentsConfig,
@@ -143,21 +143,20 @@ where
         let current_locks = self.lock_provider.current_locks().await;
 
         // Build and replace vehicle routes
-        let (vehicle_router, new_registry) =
-            cda_sovd::build_vehicle_routes::<DiagServiceResponseStruct, _, _, P>(
-                cda_sovd::VehicleConfig {
-                    flash_files_path: self.flash_files_path.clone(),
-                    functional_group_config: cfg.functional_description.clone(),
-                    components_config: self.components_config.clone(),
-                },
-                cda_sovd::VehicleResources {
-                    ecu_uds: new_components.uds_manager,
-                    file_manager: new_components.file_managers,
-                    locks: current_locks,
-                    update_in_progress: self.update_guard.busy_handle(),
-                },
-            )
-            .await;
+        let (vehicle_router, new_registry) = cda_sovd::build_vehicle_routes::<_, _, P>(
+            cda_sovd::VehicleConfig {
+                flash_files_path: self.flash_files_path.clone(),
+                functional_group_config: cfg.functional_description.clone(),
+                components_config: self.components_config.clone(),
+            },
+            cda_sovd::VehicleResources {
+                ecu_uds: new_components.uds_manager,
+                file_manager: new_components.file_managers,
+                locks: current_locks,
+                update_in_progress: self.update_guard.busy_handle(),
+            },
+        )
+        .await;
         self.ecu_execution_registry.replace(&new_registry).await;
         self.dynamic_router
             .replace_routes(&self.vehicle_route_handle, vehicle_router)

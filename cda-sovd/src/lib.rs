@@ -23,8 +23,7 @@ use axum::{
 };
 use cda_interfaces::{
     DoipGatewaySetupError, FunctionalDescriptionConfig, HashMap, SchemaProvider, UdsEcu,
-    datatypes::ComponentsConfig, diagservices::DiagServiceResponse, dlt_ctx,
-    file_manager::FileManager,
+    datatypes::ComponentsConfig, dlt_ctx, file_manager::FileManager,
 };
 use cda_plugin_security::SecurityPluginLoader;
 use dynamic_router::DynamicRouter;
@@ -137,18 +136,17 @@ where
         flash_files_path = %config.flash_files_path
     )
 )]
-pub async fn add_vehicle_routes<R, T, M, S>(
+pub async fn add_vehicle_routes<T, M, S>(
     dynamic_router: &DynamicRouter,
     config: VehicleConfig,
     resources: VehicleResources<T, M>,
 ) -> Result<(EcuExecutionRegistry, RouteHandle), DoipGatewaySetupError>
 where
-    R: DiagServiceResponse,
     T: UdsEcu + SchemaProvider + Clone + Send + Sync + 'static,
     M: FileManager + Send + Sync + 'static,
     S: SecurityPluginLoader,
 {
-    let (vehicle_router, registry) = build_vehicle_routes::<R, T, M, S>(config, resources).await;
+    let (vehicle_router, registry) = build_vehicle_routes::<T, M, S>(config, resources).await;
 
     let handle = dynamic_router.add_routes(vehicle_router).await;
 
@@ -157,17 +155,16 @@ where
 }
 
 #[allow(clippy::implicit_hasher)]
-pub async fn build_vehicle_routes<R, T, M, S>(
+pub async fn build_vehicle_routes<T, M, S>(
     config: VehicleConfig,
     resources: VehicleResources<T, M>,
 ) -> (aide::axum::ApiRouter, EcuExecutionRegistry)
 where
-    R: DiagServiceResponse,
     T: UdsEcu + SchemaProvider + Clone + Send + Sync + 'static,
     M: FileManager + Send + Sync + 'static,
     S: SecurityPluginLoader,
 {
-    let (router, registry) = sovd::route::<R, T, M, S>(
+    let (router, registry) = sovd::route::<T, M, S>(
         config.functional_group_config,
         config.components_config,
         &resources.ecu_uds,

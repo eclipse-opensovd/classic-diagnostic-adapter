@@ -14,8 +14,8 @@
 use std::{sync::Arc, time::Duration};
 
 use cda_interfaces::{
-    DataParseError, DiagServiceError, DoipComParamProvider, EcuAddressProvider, HashMap,
-    HashMapExtensions, dlt_ctx, service_ids,
+    DataParseError, DiagServiceError, DoipComParams, EcuAddresses, HashMap, HashMapExtensions,
+    dlt_ctx, service_ids,
 };
 use doip_definitions::payload::{
     ActivationType, AliveCheckRequest, DiagnosticAckCode, DiagnosticMessageAck, DoipPayload,
@@ -110,7 +110,7 @@ pub(crate) async fn handle_gateway_connection<T>(
     send_timeout: Duration,
 ) -> Result<u16, EcuError>
 where
-    T: EcuAddressProvider + DoipComParamProvider,
+    T: EcuAddresses + DoipComParams,
 {
     let tester_address = ecus
         .get(&gateway.ecu)

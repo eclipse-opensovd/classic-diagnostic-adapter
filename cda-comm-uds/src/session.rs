@@ -22,7 +22,7 @@ use cda_interfaces::{
 
 use crate::{UdsManager, types::ResetType};
 
-impl<S: EcuGateway, R: DiagServiceResponse, T: EcuManager<Response = R>> UdsManager<S, R, T> {
+impl<S: EcuGateway, T: EcuManager> UdsManager<S, T> {
     /// Spawn a background task that resets the ECU session or security access
     /// after the given expiration duration.
     pub(crate) async fn start_reset_task(
@@ -97,9 +97,7 @@ impl<S: EcuGateway, R: DiagServiceResponse, T: EcuManager<Response = R>> UdsMana
 }
 
 #[async_trait]
-impl<S: EcuGateway, R: DiagServiceResponse, T: EcuManager<Response = R>> UdsSession
-    for UdsManager<S, R, T>
-{
+impl<S: EcuGateway, T: EcuManager> UdsSession for UdsManager<S, T> {
     #[tracing::instrument(skip_all,
         fields(dlt_context = dlt_ctx!("UDS"))
     )]
@@ -109,9 +107,9 @@ impl<S: EcuGateway, R: DiagServiceResponse, T: EcuManager<Response = R>> UdsSess
         session: &str,
         security_plugin: &DynamicPlugin,
         expiration: Option<Duration>,
-    ) -> Result<R, DiagServiceError> {
+    ) -> Result<Self::Response, DiagServiceError> {
         tracing::info!(ecu_name = %ecu_name, session = %session, "Setting session");
-        let ecu_diag_service = self.ecu_manager(ecu_name)?;
+        let ecu_diag_service = self.uds_ecu_db(ecu_name)?;
         let dc = ecu_diag_service
             .read()
             .await
@@ -141,7 +139,7 @@ impl<S: EcuGateway, R: DiagServiceResponse, T: EcuManager<Response = R>> UdsSess
             old_task.abort();
         }
 
-        let ecu_diag_service = self.ecu_manager(ecu_name)?;
+        let ecu_diag_service = self.uds_ecu_db(ecu_name)?;
         let default_session = ecu_diag_service.read().await.default_session()?;
         let current_session = ecu_diag_service.read().await.session().await?;
 

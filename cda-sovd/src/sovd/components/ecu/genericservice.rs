@@ -13,11 +13,7 @@
 
 use aide::UseApi;
 use axum::{body::Bytes, extract::State, response::Response};
-use cda_interfaces::{
-    UdsEcu,
-    diagservices::{DiagServiceResponse, UdsPayloadData},
-    file_manager::FileManager,
-};
+use cda_interfaces::{UdsEcu, diagservices::UdsPayloadData, file_manager::FileManager};
 use cda_plugin_security::Secured;
 use http::{HeaderMap, header};
 
@@ -27,10 +23,10 @@ use crate::{
     sovd::{WebserverEcuState, get_octet_stream_payload},
 };
 
-pub(crate) async fn put<R: DiagServiceResponse, T: UdsEcu + Clone, U: FileManager>(
+pub(crate) async fn put<T: UdsEcu + Clone, U: FileManager>(
     headers: HeaderMap,
     UseApi(Secured(security_plugin), _): UseApi<Secured, ()>,
-    State(WebserverEcuState { ecu_name, uds, .. }): State<WebserverEcuState<R, T, U>>,
+    State(WebserverEcuState { ecu_name, uds, .. }): State<WebserverEcuState<T, U>>,
     body: Bytes,
 ) -> Response {
     match headers.get(header::ACCEPT) {

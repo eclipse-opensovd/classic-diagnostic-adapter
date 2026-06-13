@@ -14,7 +14,7 @@
 use std::{future::Future, sync::Arc, time::Duration};
 
 use cda_interfaces::{
-    DiagServiceError, DoipComParamProvider, EcuAddressProvider, HashMap, HashMapExtensions, dlt_ctx,
+    DiagServiceError, DoipComParams, EcuAddresses, HashMap, HashMapExtensions, dlt_ctx,
 };
 use doip_definitions::{
     header::PayloadType,
@@ -37,7 +37,7 @@ pub(crate) async fn get_vehicle_identification<T, F>(
     mut shutdown_signal: futures::future::Shared<F>,
 ) -> Result<Vec<DoipTarget>, DiagServiceError>
 where
-    T: EcuAddressProvider,
+    T: EcuAddresses,
     F: Future<Output = ()> + Send + 'static,
 {
     // send VIR
@@ -111,7 +111,7 @@ pub(crate) async fn listen_for_vams<T, F>(
     mut shutdown_signal: futures::future::Shared<F>,
     cancel_token: CancellationToken,
 ) where
-    T: EcuAddressProvider + DoipComParamProvider,
+    T: EcuAddresses + DoipComParams,
     F: Future<Output = ()> + Send + 'static,
 {
     #[derive(Debug)]
@@ -134,7 +134,7 @@ pub(crate) async fn listen_for_vams<T, F>(
             dlt_context = dlt_ctx!("DOIP")
         )
     )]
-    async fn handle_doip_response<T: EcuAddressProvider + DoipComParamProvider>(
+    async fn handle_doip_response<T: EcuAddresses + DoipComParams>(
         connection_config: &ConnectionConfig,
         gateway: &DoipDiagGateway<T>,
         send_timeout: Duration,
@@ -327,7 +327,7 @@ async fn handle_vam<T>(
     netmask: u32,
 ) -> Result<Option<DoipTarget>, String>
 where
-    T: EcuAddressProvider,
+    T: EcuAddresses,
 {
     match source_addr {
         std::net::SocketAddr::V4(socket_addr_v4) => {

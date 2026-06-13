@@ -33,7 +33,7 @@ use axum_extra::extract::WithRejection;
 use cda_interfaces::{
     FunctionalDescriptionConfig, HashMap, HashMapExtensions as _, SchemaProvider, UdsEcu,
     datatypes::ComponentsConfig,
-    diagservices::{DiagServiceResponse, FieldParseError, UdsPayloadData},
+    diagservices::{FieldParseError, UdsPayloadData},
     file_manager::FileManager,
     runtime_update_api::LockStateProvider,
 };
@@ -114,7 +114,7 @@ pub(crate) enum SovdError {
     RouteError(String),
 }
 
-pub(crate) struct WebserverEcuState<R: DiagServiceResponse, T: UdsEcu + Clone, U: FileManager> {
+pub(crate) struct WebserverEcuState<T: UdsEcu + Clone, U: FileManager> {
     ecu_name: String,
     uds: T,
     locks: Arc<Locks>,
@@ -125,7 +125,6 @@ pub(crate) struct WebserverEcuState<R: DiagServiceResponse, T: UdsEcu + Clone, U
     flash_data: Arc<RwLock<sovd_interfaces::sovd2uds::FileList>>,
     mdd_embedded_files: Arc<U>,
     update_in_progress: Arc<std::sync::atomic::AtomicBool>,
-    _phantom: std::marker::PhantomData<R>,
 }
 
 /// Shared behaviour for execution-state types (`ServiceExecution` for single-ECU
@@ -382,9 +381,7 @@ pub(crate) async fn remove_reserved_execution<E: ExecutionStatus>(
     }
 }
 
-impl<R: DiagServiceResponse, T: UdsEcu + Clone, U: FileManager> Clone
-    for WebserverEcuState<R, T, U>
-{
+impl<T: UdsEcu + Clone, U: FileManager> Clone for WebserverEcuState<T, U> {
     fn clone(&self) -> Self {
         Self {
             ecu_name: self.ecu_name.clone(),
@@ -395,7 +392,6 @@ impl<R: DiagServiceResponse, T: UdsEcu + Clone, U: FileManager> Clone
             flash_data: Arc::clone(&self.flash_data),
             mdd_embedded_files: Arc::clone(&self.mdd_embedded_files),
             update_in_progress: Arc::clone(&self.update_in_progress),
-            _phantom: std::marker::PhantomData::<R>,
         }
     }
 }
@@ -435,12 +431,7 @@ pub(crate) fn resource_response(
     (StatusCode::OK, Json(components)).into_response()
 }
 
-pub async fn route<
-    R: DiagServiceResponse,
-    T: UdsEcu + SchemaProvider + Clone,
-    U: FileManager,
-    S: SecurityPluginLoader,
->(
+pub async fn route<T: UdsEcu + SchemaProvider + Clone, U: FileManager, S: SecurityPluginLoader>(
     functional_group_config: FunctionalDescriptionConfig,
     components_config: ComponentsConfig,
     uds: &T,
@@ -463,7 +454,7 @@ pub async fn route<
     };
 
     let registry = EcuExecutionRegistry::default();
-    let router = components_route::<R, T, U>(state.clone(), &mut file_manager, &registry).await;
+    let router = components_route::<T, U>(state.clone(), &mut file_manager, &registry).await;
 
     let vehicle_router = vehicle_route::<T, S>(state, router, functional_group_config)
         .await
@@ -592,11 +583,7 @@ fn docs_components(op: TransformOperation) -> TransformOperation {
         })
 }
 
-async fn components_route<
-    R: DiagServiceResponse,
-    T: UdsEcu + SchemaProvider + Clone,
-    U: FileManager + 'static,
->(
+async fn components_route<T: UdsEcu + SchemaProvider + Clone, U: FileManager + 'static>(
     state: WebserverState<T>,
     file_manager: &mut HashMap<String, U>,
     registry: &EcuExecutionRegistry,
@@ -607,7 +594,7 @@ async fn components_route<
     );
     let mut ecus = state.uds.get_physical_ecus().await;
     for ecu_name in ecus.drain(0..) {
-        match ecu_route::<R, T, U>(&ecu_name, &state, file_manager, registry).await {
+        match ecu_route::<T, U>(&ecu_name, &state, file_manager, registry).await {
             Ok((ecu_path, nested)) => {
                 router = router.nest_api_service(&ecu_path, nested);
             }
@@ -621,11 +608,7 @@ async fn components_route<
 
 // Disabled as for now it makes sense to keep the route creation together
 #[allow(clippy::too_many_lines)]
-async fn ecu_route<
-    R: DiagServiceResponse,
-    T: UdsEcu + SchemaProvider + Clone,
-    U: FileManager + 'static,
->(
+async fn ecu_route<T: UdsEcu + SchemaProvider + Clone, U: FileManager + 'static>(
     ecu_name: &str,
     state: &WebserverState<T>,
     file_manager: &mut HashMap<String, U>,
@@ -645,7 +628,6 @@ async fn ecu_route<
             ))
         })?),
         update_in_progress: Arc::clone(&state.update_in_progress),
-        _phantom: std::marker::PhantomData::<R>,
     };
     registry
         .register(
@@ -1154,21 +1136,17 @@ impl IntoSovd for FieldParseError {
 #[cfg(test)]
 pub(crate) mod tests {
 
-    use cda_interfaces::{UdsEcu, diagservices::DiagServiceResponse, file_manager::FileManager};
+    use cda_interfaces::{UdsEcu, file_manager::FileManager};
     use sovd_interfaces::sovd2uds::FileList;
 
     use super::*;
     use crate::sovd::locks::LockType;
 
-    pub fn create_test_webserver_state<
-        R: DiagServiceResponse,
-        T: UdsEcu + Clone,
-        U: FileManager,
-    >(
+    pub fn create_test_webserver_state<T: UdsEcu + Clone, U: FileManager>(
         ecu_name: String,
         uds: T,
         file_manager: U,
-    ) -> WebserverEcuState<R, T, U> {
+    ) -> WebserverEcuState<T, U> {
         WebserverEcuState {
             ecu_name: ecu_name.clone(),
             uds,
@@ -1190,7 +1168,6 @@ pub(crate) mod tests {
             })),
             mdd_embedded_files: Arc::new(file_manager),
             update_in_progress: Arc::new(std::sync::atomic::AtomicBool::new(false)),
-            _phantom: std::marker::PhantomData::<R>,
         }
     }
 }

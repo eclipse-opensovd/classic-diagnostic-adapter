@@ -18,8 +18,8 @@ use std::{
 };
 
 use cda_interfaces::{
-    DiagServiceError, DoipComParamProvider, DoipGatewaySetupError, EcuAddressProvider, EcuGateway,
-    HashMap, HashMapExtensions, ServicePayload, TransmissionParameters, UdsResponse, dlt_ctx,
+    DiagServiceError, DoipComParams, DoipGatewaySetupError, EcuAddresses, EcuGateway, HashMap,
+    HashMapExtensions, ServicePayload, TransmissionParameters, UdsResponse, dlt_ctx,
     util::{self, tokio_ext},
 };
 use doip_definitions::{
@@ -73,7 +73,7 @@ enum DiagnosticResponse {
     TemporarilyNotAvailable(u16),
 }
 
-pub struct DoipDiagGateway<T: EcuAddressProvider + DoipComParamProvider> {
+pub struct DoipDiagGateway<T: EcuAddresses + DoipComParams> {
     doip_connections: Arc<RwLock<Vec<Arc<DoipConnection>>>>,
     logical_address_to_connection: Arc<RwLock<HashMap<u16, usize>>>,
     ecus: Arc<HashMap<String, RwLock<T>>>,
@@ -146,7 +146,7 @@ impl TryFrom<DiagnosticResponse> for Option<UdsResponse> {
     }
 }
 
-impl<T: EcuAddressProvider + DoipComParamProvider> DoipDiagGateway<T> {
+impl<T: EcuAddresses + DoipComParams> DoipDiagGateway<T> {
     /// Create a new `DoipDiagGateway` instance.
     /// # Errors
     /// Returns `String` if initialization fails, e.g. when socket creation fails.
@@ -341,7 +341,7 @@ impl<T: EcuAddressProvider + DoipComParamProvider> DoipDiagGateway<T> {
     }
 }
 
-impl<T: EcuAddressProvider + DoipComParamProvider> EcuGateway for DoipDiagGateway<T> {
+impl<T: EcuAddresses + DoipComParams> EcuGateway for DoipDiagGateway<T> {
     async fn get_gateway_network_address(&self, logical_address: u16) -> Option<String> {
         self.doip_connections
             .read()
@@ -580,7 +580,7 @@ impl<T: EcuAddressProvider + DoipComParamProvider> EcuGateway for DoipDiagGatewa
         Ok(())
     }
 
-    async fn ecu_online<E: EcuAddressProvider>(
+    async fn ecu_online<E: EcuAddresses>(
         &self,
         ecu_name: &str,
         ecu_db: &RwLock<E>,
@@ -848,7 +848,7 @@ fn create_socket(
     })
 }
 
-impl<T: EcuAddressProvider + DoipComParamProvider> Clone for DoipDiagGateway<T> {
+impl<T: EcuAddresses + DoipComParams> Clone for DoipDiagGateway<T> {
     fn clone(&self) -> Self {
         Self {
             doip_connections: Arc::clone(&self.doip_connections),

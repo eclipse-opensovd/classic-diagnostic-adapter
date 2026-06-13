@@ -18,7 +18,7 @@ use crate::{
     datatypes::{AddressingMode, RetryPolicy, TesterPresentSendType},
 };
 
-pub trait UdsComParamProvider: Send + Sync + 'static {
+pub trait UdsComParams: Send + Sync + 'static {
     #[must_use]
     fn tester_present_retry_policy(&self) -> bool;
     #[must_use]
@@ -59,7 +59,7 @@ pub trait UdsComParamProvider: Send + Sync + 'static {
     fn timeout_default(&self) -> Duration;
 }
 
-pub trait DoipComParamProvider: Send + Sync + 'static {
+pub trait DoipComParams: Send + Sync + 'static {
     #[must_use]
     fn nack_number_of_retries(&self) -> &HashMap<u8, u32>;
     #[must_use]
