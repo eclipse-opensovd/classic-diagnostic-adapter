@@ -1,0 +1,74 @@
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: 2026 The Contributors to Eclipse OpenSOVD (see CONTRIBUTORS)
+
+[package]
+name = "cda-simulator"
+version = "0.1.0"
+edition.workspace = true
+publish = false
+description = "MDD-based ECU Simulator for testing CAN/ISO-TP diagnostic operations"
+homepage.workspace = true
+license.workspace = true
+
+[lints]
+workspace = true
+
+[[bin]]
+name = "cda-simulator"
+path = "src/main.rs"
+
+[lib]
+name = "cda_simulator"
+path = "src/lib.rs"
+
+[dependencies]
+# Internal dependencies
+cda-database = { workspace = true }
+cda-interfaces = { workspace = true }
+cda-tracing = { workspace = true }
+
+# CLI arguments
+clap = { workspace = true, features = ["derive"] }
+
+# Async runtime
+tokio = { workspace = true, features = [
+    "rt-multi-thread",
+    "macros",
+    "io-util",
+    "time",
+    "signal",
+    "sync",
+] }
+
+# REST API
+axum = { workspace = true, features = ["macros", "json", "http1", "tokio"] }
+# OpenAPI generation via aide - same stack as cda-sovd. The spec is built
+# from the routes and the JsonSchema derives on the API types, so it cannot
+# drift from the handlers. schemars drives the per-type schemas.
+aide = { workspace = true, features = ["axum", "swagger", "axum-json"] }
+schemars = { workspace = true }
+
+# Serialization
+serde = { workspace = true, features = ["derive"] }
+serde_json = { workspace = true }
+toml = { workspace = true }
+
+# Error handling
+thiserror = { workspace = true }
+
+# Logging
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true, features = ["env-filter", "fmt"] }
+
+# Utilities
+hex = { workspace = true }
+
+# CAN / ISO-TP. With the crate's `tcp` feature the simulator builds and runs
+# on all platforms (interface `tcplisten:<addr>:<port>`); kernel ISO-TP and
+# `rawcan:` remain Linux-only and fail at socket open elsewhere.
+# https (not ssh) so CI, docker, and anonymous clones can fetch it.
+tokio-socketcan-isotp = { git = "https://github.com/MarkSchmitt/tokio-socketcan-isotp.git", tag = "v0.3.0", features = ["tcp"] }
+
+[features]
+default = []
+dlt-tracing = ["cda-interfaces/dlt-tracing", "cda-tracing/dlt-tracing"]

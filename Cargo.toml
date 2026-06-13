@@ -23,6 +23,7 @@ members = [
   "cda-comm-doip",
   "cda-comm-can",
   "cda-comm-uds",
+  "cda-simulator",
   "cda-sovd",
   "cda-sovd-interfaces",
   "cda-main",
