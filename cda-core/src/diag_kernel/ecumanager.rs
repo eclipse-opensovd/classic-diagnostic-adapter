@@ -103,6 +103,23 @@ impl VariantData {
     }
 }
 
+/// Configuration options passed to [`EcuManager::new`].
+///
+/// Grouping these together keeps the constructor signature manageable and
+/// makes call sites self-documenting.
+#[derive(Copy, Clone)]
+pub struct EcuManagerConfig {
+    /// Whether this ECU represents a physical ECU (`Ecu`) or a functional
+    /// group description (`FunctionalDescription`).
+    pub type_: EcuManagerType,
+    /// When `true`, variant detection failures fall back to the base variant
+    /// instead of returning an error.
+    pub fallback_to_base_variant: bool,
+    /// When `true`, requests containing parameters not defined in the service
+    /// are rejected with a `BadPayload` error (400 Bad Request).
+    pub strict_parameter_validation: bool,
+}
+
 // Allowed because this holds a bunch of config values.
 #[allow(clippy::struct_excessive_bools)]
 pub struct EcuManager<S: SecurityPlugin> {
@@ -129,6 +146,7 @@ pub struct EcuManager<S: SecurityPlugin> {
     variant_index: Option<usize>,
     variant: EcuVariant,
     fallback_to_base_variant: bool,
+    strict_parameter_validation: bool,
     duplicating_ecu_names: Option<HashSet<String>>,
 
     protocol: Protocol,
@@ -2039,28 +2057,25 @@ impl<S: SecurityPlugin> EcuManager<S> {
         protocol: Protocol,
         com_params: &ComParams,
         database_naming_convention: DatabaseNamingConvention,
-        type_: EcuManagerType,
+        config: EcuManagerConfig,
         func_description_config: &cda_interfaces::FunctionalDescriptionConfig,
-        fallback_to_base_variant: bool,
     ) -> Result<Self, DiagServiceError> {
-        match type_ {
+        match config.type_ {
             EcuManagerType::Ecu => Self::new_ecu_description(
                 database,
                 protocol,
                 com_params,
                 database_naming_convention,
-                type_,
+                config,
                 func_description_config,
-                fallback_to_base_variant,
             ),
             EcuManagerType::FunctionalDescription => Self::new_functional_description(
                 database,
                 protocol,
                 com_params,
                 database_naming_convention,
-                type_,
+                config,
                 func_description_config,
-                fallback_to_base_variant,
             ),
         }
     }
@@ -2072,9 +2087,8 @@ impl<S: SecurityPlugin> EcuManager<S> {
         protocol: Protocol,
         com_params: &ComParams,
         database_naming_convention: DatabaseNamingConvention,
-        type_: EcuManagerType,
+        config: EcuManagerConfig,
         func_description_config: &cda_interfaces::FunctionalDescriptionConfig,
-        fallback_to_base_variant: bool,
     ) -> Result<Self, DiagServiceError> {
         let variant_detection =
             variant_detection::prepare_variant_detection(&database, &database_naming_convention)?;
@@ -2141,7 +2155,7 @@ impl<S: SecurityPlugin> EcuManager<S> {
         Ok(Self {
             db_cache: DbCache::default(),
             ecu_name,
-            description_type: type_,
+            description_type: config.type_,
             database_naming_convention,
             tester_address: database
                 .find_com_param(data_protocol_ref, &com_params.doip.logical_tester_address)?,
@@ -2178,7 +2192,8 @@ impl<S: SecurityPlugin> EcuManager<S> {
                 state: EcuState::NotTested,
                 logical_address: logical_ecu_address,
             },
-            fallback_to_base_variant,
+            fallback_to_base_variant: config.fallback_to_base_variant,
+            strict_parameter_validation: config.strict_parameter_validation,
             duplicating_ecu_names: None,
             protocol,
             fg_protocol_position: func_description_config.protocol_position.clone(),
@@ -2243,9 +2258,8 @@ impl<S: SecurityPlugin> EcuManager<S> {
         protocol: Protocol,
         com_params: &ComParams,
         database_naming_convention: DatabaseNamingConvention,
-        type_: EcuManagerType,
+        config: EcuManagerConfig,
         func_description_config: &cda_interfaces::FunctionalDescriptionConfig,
-        fallback_to_base_variant: bool,
     ) -> Result<Self, DiagServiceError> {
         // Functional group description: use defaults for all com params
         let logical_ecu_address = com_params.doip.logical_ecu_address.value;
@@ -2267,7 +2281,7 @@ impl<S: SecurityPlugin> EcuManager<S> {
             diag_database: database,
             db_cache: DbCache::default(),
             ecu_name,
-            description_type: type_,
+            description_type: config.type_,
             database_naming_convention,
             tester_address: com_params.doip.logical_tester_address.value,
             logical_address: logical_ecu_address,
@@ -2295,7 +2309,8 @@ impl<S: SecurityPlugin> EcuManager<S> {
                 state: EcuState::NotTested,
                 logical_address: logical_ecu_address,
             },
-            fallback_to_base_variant,
+            fallback_to_base_variant: config.fallback_to_base_variant,
+            strict_parameter_validation: config.strict_parameter_validation,
             duplicating_ecu_names: None,
             protocol,
             fg_protocol_position: func_description_config.protocol_position.clone(),
@@ -3483,6 +3498,20 @@ impl<S: SecurityPlugin> EcuManager<S> {
         Ok(())
     }
 
+    fn reject_unexpected_keys<'e, 'k>(
+        expected: impl Iterator<Item = &'e str>,
+        provided: impl Iterator<Item = &'k str>,
+    ) -> Result<(), DiagServiceError> {
+        let expected_names: HashSet<&str> = expected.collect();
+        let unexpected: Vec<&str> = provided.filter(|k| !expected_names.contains(k)).collect();
+        if !unexpected.is_empty() {
+            return Err(DiagServiceError::BadPayload(format!(
+                "Unexpected parameters in request: {unexpected:?}"
+            )));
+        }
+        Ok(())
+    }
+
     fn map_mux_to_uds(
         &self,
         mux_dop: &datatypes::MuxDop,
@@ -3561,6 +3590,13 @@ impl<S: SecurityPlugin> EcuManager<S> {
                         )
                     })?;
 
+                if self.strict_parameter_validation {
+                    Self::reject_unexpected_keys(
+                        ["Selector", case_name].into_iter(),
+                        value.keys().map(String::as_str),
+                    )?;
+                }
+
                 if let Some(struct_) = struct_ {
                     let struct_data = value.get(case_name).ok_or_else(|| {
                         DiagServiceError::BadPayload(format!(
@@ -3596,20 +3632,27 @@ impl<S: SecurityPlugin> EcuManager<S> {
             )));
         };
 
-        structure
+        let params: Vec<_> = structure
             .params()
             .into_iter()
             .flatten()
             .map(datatypes::Parameter)
-            .try_for_each(|param| {
-                let short_name = param.short_name().ok_or_else(|| {
-                    DiagServiceError::InvalidDatabase(
-                        "Unable to find short name for param".to_owned(),
-                    )
-                })?;
+            .collect();
 
-                self.map_param_to_uds(&param, value.get(short_name), payload, struct_byte_pos)
-            })
+        if self.strict_parameter_validation {
+            Self::reject_unexpected_keys(
+                params.iter().filter_map(|p| p.short_name()),
+                value.keys().map(String::as_str),
+            )?;
+        }
+
+        params.into_iter().try_for_each(|param| {
+            let short_name = param.short_name().ok_or_else(|| {
+                DiagServiceError::InvalidDatabase("Unable to find short name for param".to_owned())
+            })?;
+
+            self.map_param_to_uds(&param, value.get(short_name), payload, struct_byte_pos)
+        })
     }
 
     fn process_parameter_map(
@@ -3618,6 +3661,13 @@ impl<S: SecurityPlugin> EcuManager<S> {
         json_values: &HashMap<String, serde_json::Value>,
         uds: &mut Vec<u8>,
     ) -> Result<(), DiagServiceError> {
+        if self.strict_parameter_validation {
+            Self::reject_unexpected_keys(
+                mapped_params.iter().filter_map(|p| p.short_name()),
+                json_values.keys().map(String::as_str),
+            )?;
+        }
+
         for param in mapped_params {
             // When BYTE-POSITION is omitted (ISO 22901-1 §7.4.8) the
             // parameter follows a variable-length PARAM-LENGTH-INFO field
@@ -3648,6 +3698,7 @@ impl<S: SecurityPlugin> EcuManager<S> {
             };
             self.map_param_to_uds(param, json_values.get(short_name), uds, parent_byte_pos)?;
         }
+
         Ok(())
     }
 
@@ -5735,14 +5786,17 @@ mod tests {
             Protocol::default(),
             &ComParams::default(),
             DatabaseNamingConvention::default(),
-            EcuManagerType::Ecu,
+            super::EcuManagerConfig {
+                type_: EcuManagerType::Ecu,
+                fallback_to_base_variant: true,
+                strict_parameter_validation: false,
+            },
             &cda_interfaces::FunctionalDescriptionConfig {
                 description_database: "functional_groups".to_owned(),
                 enabled_functional_groups: None,
                 protocol_position:
                     cda_interfaces::datatypes::DiagnosticServiceAffixPosition::Suffix,
             },
-            true,
         )
         .expect("Failed to create EcuManager");
 
@@ -5767,14 +5821,17 @@ mod tests {
             Protocol::default(),
             &ComParams::default(),
             DatabaseNamingConvention::default(),
-            EcuManagerType::Ecu,
+            super::EcuManagerConfig {
+                type_: EcuManagerType::Ecu,
+                fallback_to_base_variant: false,
+                strict_parameter_validation: false,
+            },
             &cda_interfaces::FunctionalDescriptionConfig {
                 description_database: "functional_groups".to_owned(),
                 enabled_functional_groups: None,
                 protocol_position:
                     cda_interfaces::datatypes::DiagnosticServiceAffixPosition::Suffix,
             },
-            false,
         )
         .unwrap()
     }
@@ -8074,6 +8131,134 @@ mod tests {
             assert!(
                 e.to_string()
                     .contains("Required parameter 'param2' missing")
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn test_process_parameter_map_unexpected_params_lenient() {
+        let (ecu_manager, service, _, _) = create_ecu_manager_with_struct_service(1);
+
+        let struct_value = json!({"param1": 0x1234u32, "param2": 1.0f32, "param3": "hello"});
+        // bogus_param is at the top-level service parameter map, not defined in the service
+        let payload_data = UdsPayloadData::ParameterMap(
+            [
+                ("main_param".to_string(), struct_value),
+                ("bogus_param".to_string(), json!("should be ignored")),
+            ]
+            .into_iter()
+            .collect(),
+        );
+
+        // Lenient mode (default): unexpected params are ignored, request succeeds
+        let result = ecu_manager
+            .create_uds_payload(&service, &skip_sec_plugin!(), Some(payload_data), None)
+            .await;
+
+        assert!(
+            result.is_ok(),
+            "Expected success in lenient mode, got: {result:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_process_parameter_map_unexpected_params_strict() {
+        let (mut ecu_manager, service, _, _) = create_ecu_manager_with_struct_service(1);
+        ecu_manager.strict_parameter_validation = true;
+
+        let struct_value = json!({"param1": 0x1234u32, "param2": 1.0f32, "param3": "hello"});
+        // bogus_param is at the top-level service parameter map, not defined in the service
+        let payload_data = UdsPayloadData::ParameterMap(
+            [
+                ("main_param".to_string(), struct_value),
+                ("bogus_param".to_string(), json!("should be rejected")),
+            ]
+            .into_iter()
+            .collect(),
+        );
+
+        // Strict mode: unexpected params cause a BadPayload error
+        let result = ecu_manager
+            .create_uds_payload(&service, &skip_sec_plugin!(), Some(payload_data), None)
+            .await;
+
+        assert!(result.is_err());
+        if let Err(e) = result {
+            assert!(
+                e.to_string().contains("Unexpected parameters in request"),
+                "Expected unexpected parameter error, got: {e}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn test_process_parameter_map_nested_unexpected_params_strict() {
+        let (mut ecu_manager, service, _, _) = create_ecu_manager_with_struct_service(1);
+        ecu_manager.strict_parameter_validation = true;
+
+        // bogus_nested is inside the struct value, not defined in the struct's sub-params
+        let struct_value = json!({"param1": 0x1234u32, "param2": 1.0f32, "param3": "hello", "bogus_nested": "reject me"});
+        let payload_data = UdsPayloadData::ParameterMap(
+            [("main_param".to_string(), struct_value)]
+                .into_iter()
+                .collect(),
+        );
+
+        // Strict mode: unexpected nested params cause a BadPayload error
+        let result = ecu_manager
+            .create_uds_payload(&service, &skip_sec_plugin!(), Some(payload_data), None)
+            .await;
+
+        assert!(result.is_err());
+        if let Err(e) = result {
+            assert!(
+                e.to_string().contains("Unexpected parameters in request"),
+                "Expected unexpected parameter error for nested param, got: {e}"
+            );
+        }
+    }
+
+    /// Strict mode must reject unexpected keys inside a Mux parameter object.
+    ///
+    /// `map_mux_to_uds` only reads `"Selector"` and the matched case name;
+    /// any extra keys must be rejected when `strict_parameter_validation` is
+    /// enabled, mirroring the behaviour of `map_struct_to_uds` and
+    /// `process_parameter_map`.
+    #[tokio::test]
+    async fn test_map_mux_to_uds_unexpected_params_strict() {
+        let (mut ecu_manager, service, _) = create_ecu_manager_with_mux_service(None, None, None);
+        ecu_manager.strict_parameter_validation = true;
+
+        // Valid mux payload with an extra key "bogus_mux_key" at the mux
+        // object level.  "Selector" and "mux_1_case_1" are the only
+        // legitimate keys for this request.
+        let test_value = json!({
+            "mux_1_param": {
+                "Selector": 5,
+                "mux_1_case_1": {
+                    "mux_1_case_1_param_1": 13.37f32,
+                    "mux_1_case_1_param_2": 7
+                },
+                "bogus_mux_key": "should be rejected"
+            }
+        });
+
+        let payload_data =
+            UdsPayloadData::ParameterMap(serde_json::from_value(test_value).unwrap());
+
+        let result = ecu_manager
+            .create_uds_payload(&service, &skip_sec_plugin!(), Some(payload_data), None)
+            .await;
+
+        assert!(
+            result.is_err(),
+            "Expected strict mode to reject unexpected mux-level key 'bogus_mux_key', but the \
+             request succeeded"
+        );
+        if let Err(e) = result {
+            assert!(
+                e.to_string().contains("Unexpected parameters in request"),
+                "Expected 'Unexpected parameters in request' error, got: {e}"
             );
         }
     }

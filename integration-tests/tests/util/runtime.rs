@@ -171,6 +171,7 @@ fn cda_test_config(
             exit_no_database_loaded: true,
             fallback_to_base_variant: true,
             ignore_protocol: false,
+            strict_parameter_validation: false,
             strict_ecu_config: false,
         },
         logging: LoggingConfig::default(),

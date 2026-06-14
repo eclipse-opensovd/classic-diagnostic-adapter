@@ -203,6 +203,7 @@ impl Default for Configuration {
                 exit_no_database_loaded: false,
                 fallback_to_base_variant: true,
                 ignore_protocol: false,
+                strict_parameter_validation: false,
                 strict_ecu_config: false,
             },
             flash_files_path: ".".to_owned(),
