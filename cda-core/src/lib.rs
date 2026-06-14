@@ -12,4 +12,7 @@
 
 mod diag_kernel;
 
-pub use diag_kernel::{diagservices::*, ecumanager::EcuManager};
+pub use diag_kernel::{
+    diagservices::*,
+    ecumanager::{EcuManager, EcuManagerConfig},
+};

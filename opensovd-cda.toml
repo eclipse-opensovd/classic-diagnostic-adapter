@@ -401,6 +401,11 @@
 # This helps catch typos in ECU names early. When `false` (default),
 # unmatched per-ECU config entries only produce a warning.
 # strict_ecu_config = false
+# When `true`, requests that contain parameters not defined in the service
+# are rejected with a `BadPayload` error (400 Bad Request).
+# When `false` (default), unexpected parameters trigger a warning log but
+# are otherwise ignored.
+# strict_parameter_validation = false
 
 # Holds configuration for diagnostic service naming conventions.
 #
