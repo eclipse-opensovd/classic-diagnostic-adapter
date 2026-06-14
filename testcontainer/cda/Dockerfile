@@ -73,6 +73,9 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry,sharing=locked \
 FROM chef AS builder
 ARG SOURCE_DATE_EPOCH
 ARG SOURCE_GIT_SHA
+# Optional extra cargo features for the opensovd-cda binary, e.g. "can-tcp" to
+# compile in the CAN-over-TCP transport used by the CAN integration tests.
+ARG CDA_FEATURES=""
 
 WORKDIR /app
 # Copy pre-built dependencies from the cacher stage
@@ -108,7 +111,7 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry,sharing=locked \
     --mount=type=cache,target=$SCCACHE_DIR,sharing=locked \
     export SOURCE_DATE_EPOCH=${SOURCE_DATE_EPOCH} && \
     export SOURCE_GIT_SHA=${SOURCE_GIT_SHA} && \
-    cargo build --release --bin opensovd-cda && \
+    cargo build --release --bin opensovd-cda ${CDA_FEATURES:+--features "$CDA_FEATURES"} && \
     cp target/release/opensovd-cda /tmp/opensovd-cda
 
 # --- Stage 5: Runtime base with dependencies ---

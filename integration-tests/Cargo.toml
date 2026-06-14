@@ -80,9 +80,13 @@ const_format = { workspace = true }
 cda-build = { workspace = true }
 
 [features]
-# We need the health endpoint to check if the CDA is online
+# We need the health endpoint to check if CDA is online
 default = ["opensovd_cda_lib/health"]
 integration-tests = []
+# Variant of the integration tests that exercises the CAN transport
+# (`CDA_INTEGRATION_TEST_USE_CAN=true`). Compiles in `can-tcp` so the
+# CDA-side TCP frame hub backend is actually wired in.
+can-integration-tests = ["integration-tests", "opensovd_cda_lib/can-tcp"]
 
 # Integration tests are only compiled when the feature is enabled.
 [[test]]

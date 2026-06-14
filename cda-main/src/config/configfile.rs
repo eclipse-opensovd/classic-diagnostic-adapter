@@ -18,7 +18,7 @@
 // between crates (e.g. integration-tests vs. opensovd_cda_lib under
 // `--all-features`). A `[can]` section in a non-`can` build is rejected with
 // an actionable error in `Configuration::validate_sanity` instead.
-pub use cda_comm_can::config::CanConfig;
+pub use cda_comm_can::config::{CanConfig, CanEcuMapping};
 pub use cda_comm_doip::config::DoipConfig;
 pub use cda_database::DatabaseConfig;
 use cda_interfaces::{

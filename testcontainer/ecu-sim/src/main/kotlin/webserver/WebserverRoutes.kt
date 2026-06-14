@@ -45,6 +45,10 @@ fun findByEcuName(ecuName: String): SimEcu? {
             return ecu
         }
     }
+    val canEcu = can.CanNetworks.findEcuByName(ecuName, true)
+    if (canEcu != null) {
+        return canEcu
+    }
     throw NotFoundException()
 }
 
@@ -58,6 +62,13 @@ fun Route.addStateRoutes() {
         MDC.clear()
         networkInstances().forEach { network ->
             network.reset()
+        }
+        // The CAN connections share their SimEcu with the DoIP entities reset
+        // above, so only the CAN-specific ISO-TP transport state needs clearing.
+        can.CanNetworks.all().forEach { net ->
+            net.connections().forEach { conn ->
+                conn.machine.reset()
+            }
         }
         call.respond(HttpStatusCode.NoContent)
     }
