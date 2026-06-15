@@ -45,19 +45,8 @@ jobs:
           # The action queries the GitHub API to fetch releases data,
           # to avoid rate limiting, passing the default token.
           repo-token: ${{ secrets.GITHUB_TOKEN }}
-      - name: Format and Clippy - Stable toolchain
-        uses: eclipse-opensovd/cicd-workflows/rust-lint-and-format-action@b5496db6e121cc417071b31688935a51ccb94f06
-        with:
-          toolchain: 1.88.0
-          github-token: ${{ secrets.GITHUB_TOKEN }}
-          fail-on-format-error: "true"
-          fail-on-clippy-error: "true"
-          clippy-deny-warnings: "true"
-          clippy-features: "all-features"
-          rustfmt-enable-reviewdog: "false"
-          error-on-unformatted: "false"
       - name: Format and Clippy - Nightly toolchain pinned
-        uses: eclipse-opensovd/cicd-workflows/rust-lint-and-format-action@b5496db6e121cc417071b31688935a51ccb94f06
+        uses: eclipse-opensovd/cicd-workflows/rust-lint-and-format-action@4a09b9e3092caa6013eefbaa2810ccb0ad013579
         with:
           toolchain: nightly-2025-07-14
           github-token: ${{ secrets.GITHUB_TOKEN }}
@@ -70,7 +59,7 @@ jobs:
       - name: Format and Clippy - Nightly toolchain latest
         id: nightly-clippy
         continue-on-error: true
-        uses: eclipse-opensovd/cicd-workflows/rust-lint-and-format-action@b5496db6e121cc417071b31688935a51ccb94f06
+        uses: eclipse-opensovd/cicd-workflows/rust-lint-and-format-action@4a09b9e3092caa6013eefbaa2810ccb0ad013579
         with:
           toolchain: nightly
           github-token: ${{ secrets.GITHUB_TOKEN }}
