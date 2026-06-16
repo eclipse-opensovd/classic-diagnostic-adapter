@@ -22,7 +22,7 @@ on:
 jobs:
   update:
     if: github.event.workflow_run.conclusion == 'success'
-    uses: eclipse-opensovd/cicd-workflows/.github/workflows/crap-baseline.yml@07140bdd84f20b66fd4aff58a83c5148deec388c
+    uses: eclipse-opensovd/cicd-workflows/.github/workflows/crap-baseline.yml@ce8704cb92a29e070eb30f423387f85a131553fe
     with:
       run-id: ${{ github.event.workflow_run.id }}
       rust-version: "1.88.0"

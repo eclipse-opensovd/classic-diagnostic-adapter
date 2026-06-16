@@ -23,9 +23,10 @@ on:
 jobs:
   post:
     if: github.event.workflow_run.event == 'pull_request'
-    uses: eclipse-opensovd/cicd-workflows/.github/workflows/post-pr-comments.yml@07140bdd84f20b66fd4aff58a83c5148deec388c
+    uses: eclipse-opensovd/cicd-workflows/.github/workflows/post-pr-comments.yml@ce8704cb92a29e070eb30f423387f85a131553fe
     with:
       run-id: ${{ github.event.workflow_run.id }}
+      comment-artifacts: pr-comment-coverage pr-comment-crap pr-comment-nightly-clippy
     permissions:
       actions: read
       pull-requests: write
