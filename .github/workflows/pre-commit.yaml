@@ -34,6 +34,6 @@ jobs:
         with:
           submodules: false
       - name: Run checks
-        uses: eclipse-opensovd/cicd-workflows/pre-commit-action@07140bdd84f20b66fd4aff58a83c5148deec388c
+        uses: eclipse-opensovd/cicd-workflows/pre-commit-action@9be069bea9795283152ca01da2ba94cf2b8de5f8
         with:
           rust-toolchain: "1.88"

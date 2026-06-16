@@ -147,7 +147,7 @@ jobs:
 
   coverage:
     name: Coverage
-    uses: eclipse-opensovd/cicd-workflows/.github/workflows/coverage.yml@07140bdd84f20b66fd4aff58a83c5148deec388c
+    uses: eclipse-opensovd/cicd-workflows/.github/workflows/coverage.yml@bc4742225426b519497faff8df1cec52f6d6b364
     with:
       rust-version: "1.88.0"
       cargo-extra-args: "--features integration-tests"
@@ -156,11 +156,36 @@ jobs:
       contents: read
       pull-requests: write
 
+  nightly_clippy:
+    name: Nightly Clippy (diff-filtered)
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v6
+        with:
+          submodules: false
+          fetch-depth: 0
+      - name: Setup DLT tracing lib
+        uses: eclipse-opensovd/dlt-tracing-lib/.github/actions/setup-dlt@main
+      - name: Install Protoc
+        uses: arduino/setup-protoc@v3
+        with:
+          version: "34.1"
+          repo-token: ${{ secrets.GITHUB_TOKEN }}
+      - name: Nightly Format and Clippy
+        uses: eclipse-opensovd/cicd-workflows/rust-lint-and-format-action@bc4742225426b519497faff8df1cec52f6d6b364
+        with:
+          toolchain: nightly
+          all-features: "true"
+          base-sha: ${{ github.event.pull_request.base.sha }}
+          post-pr-comment: "true"
+
   cargo-crap:
     name: CRAP (Change Risk Anti-Patterns)
     if: github.event_name == 'pull_request'
     needs: [coverage]
-    uses: eclipse-opensovd/cicd-workflows/.github/workflows/crap.yml@07140bdd84f20b66fd4aff58a83c5148deec388c
+    uses: eclipse-opensovd/cicd-workflows/.github/workflows/crap.yml@bc4742225426b519497faff8df1cec52f6d6b364
     with:
       rust-version: "1.88.0"
       cargo-crap-git-url: "https://github.com/theswiftfox/cargo-crap.git"
