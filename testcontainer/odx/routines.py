@@ -45,6 +45,7 @@ def add_routine(
     functional_class: str = "Identification",
     description: str | None = None,
     is_functional: bool = False,
+    sdgs: list | None = None,
 ) -> None:
     """Add a RoutineControl (0x31) operation service to the diagnostic layer.
 
@@ -142,6 +143,7 @@ def add_routine(
             functional_class_refs=[functional_class_ref(dlr, functional_class)],
             request_ref=ref(request),
             pos_response_refs=[ref(response)],
+            sdgs=sdgs or [],
         )
     )
 

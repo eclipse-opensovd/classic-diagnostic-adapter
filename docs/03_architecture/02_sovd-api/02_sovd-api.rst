@@ -204,6 +204,7 @@ SDG/SD Metadata
 
 .. arch:: Component SDG/SDs
     :id: arch~sovd-api-component-sdgsd
+    :links: dimpl~sovd-api-component-sdgsd, dimpl~sovd-api-component-data-sdgsd, dimpl~sovd-api-component-operations-sdgsd, itest~sovd-api-component-sdgsd, itest~sovd-api-component-alias-sdgsd, itest~sovd-api-component-data-sdgsd, itest~sovd-api-component-operations-sdgsd
     :status: draft
 
     Special Data Groups (SDGs) and Special Data (SDs) from the diagnostic description can be retrieved through an
@@ -230,11 +231,10 @@ SDG/SD Metadata
     contains an ``items`` map keyed by a combination of the service name and its action type, where each entry
     holds the list of SDGs for that service action.
 
-    .. note::
-
-        TODO We need to define handling for asynchronous operations, since they consist of multiple services
-        with (possibly conflicting) SDGs/SDs - current idea would be add dummy SDGs at the top, with the si set
-        to the "original" type of the operation
+    For asynchronous operations (which consist of multiple subfunctions such as Start, Stop, RequestResults),
+    each subfunction's SDGs are returned as separate entries in the ``items`` map, keyed by
+    ``{service_name}_{action_type}`` (lowercased). This naturally separates potentially conflicting SDGs
+    from different subfunctions without requiring wrapper entries.
 
     **Data format**
 

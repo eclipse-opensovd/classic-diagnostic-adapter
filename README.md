@@ -133,6 +133,20 @@ Install this command as documented here: <https://git-scm.com/book/en/v2/Customi
 
 see [codestyle](CODESTYLE.md)
 
+### linting
+
+To run clippy with the same settings as the CI/CD pipeline (nightly toolchain, all targets and features, warnings as errors):
+
+```shell
+cargo +nightly-2025-07-14 clippy --all-targets --all-features -- -D warnings
+```
+
+Or using the `cargo lint` alias (stable toolchain, otherwise identical flags):
+
+```shell
+cargo lint
+```
+
 ### testing
 
 #### unit tests

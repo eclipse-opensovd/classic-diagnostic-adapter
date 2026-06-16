@@ -864,6 +864,7 @@ async fn test_ecu_session_reset_on_lock_reacquire() {
     .await;
 }
 
+/// [[ itest~sovd-api-component-sdgsd, ECU-level SDG retrieval, itest ]]
 #[tokio::test]
 async fn test_ecu_sdg_retrieval() {
     let (runtime, _lock) = setup_integration_test(true).await.unwrap();
@@ -964,6 +965,7 @@ async fn test_ecu_sdg_retrieval() {
     assert_eq!(sd.get("value").unwrap().as_str(), Some("1.21GW"));
 }
 
+/// [[ itest~sovd-api-component-alias-sdgsd, ECU-level SDG retrieval (alias param), itest ]]
 #[tokio::test]
 async fn test_ecu_sdg_retrieval_alias() {
     let (runtime, _lock) = setup_integration_test(true).await.unwrap();
@@ -1002,6 +1004,152 @@ async fn test_ecu_sdg_retrieval_alias() {
         Some("power_requirement_max")
     );
     assert_eq!(sd.get("value").unwrap().as_str(), Some("1.21GW"));
+}
+
+/// [[ itest~sovd-api-component-data-sdgsd, Data-level SDG retrieval, itest ]]
+#[tokio::test]
+async fn test_data_sdg_retrieval() {
+    let (runtime, _lock) = setup_integration_test(true).await.unwrap();
+    let auth = auth_header(&runtime.config, None).await.unwrap();
+
+    let params = QueryParams(HashMap::from_iter([(
+        "x-sovd2uds-includesdgs".to_string(),
+        "true".to_string(),
+    )]));
+    let response = send_cda_request(
+        &runtime.config,
+        &format!(
+            "{}/data/FluxCapacitorPowerConsumption",
+            sovd::ECU_FLXC1000_ENDPOINT
+        ),
+        StatusCode::OK,
+        Method::GET,
+        None,
+        Some(&auth),
+        Some(&params),
+    )
+    .await
+    .expect("Failed to get data SDGs");
+
+    let data = response_to_json(&response).unwrap();
+
+    // The response should be a ServicesSdgs with an "items" map
+    let items = data
+        .get("items")
+        .expect("response should contain 'items'")
+        .as_object()
+        .expect("items should be an object");
+
+    assert!(
+        !items.is_empty(),
+        "items map should contain at least one entry"
+    );
+
+    // Find the entry - key format is "{service_name}_{action:?}" lowercased
+    let entry = items
+        .values()
+        .next()
+        .expect("should have at least one service SDG entry");
+
+    let sdgs = entry
+        .get("sdgs")
+        .expect("entry should have 'sdgs'")
+        .as_array()
+        .expect("sdgs should be an array");
+
+    assert!(!sdgs.is_empty(), "sdgs array should not be empty");
+
+    let sdg = sdgs
+        .first()
+        .expect("sdgs array should have at least one element");
+    assert_eq!(
+        sdg.get("caption").unwrap().as_str(),
+        Some("flux_capacitor_sdg")
+    );
+    assert_eq!(sdg.get("si").unwrap().as_str(), Some("sensor_metadata"));
+
+    let inner = sdg
+        .get("sdgs")
+        .unwrap()
+        .as_array()
+        .expect("nested sdgs should be an array");
+    assert_eq!(inner.len(), 1);
+
+    let sd = inner
+        .first()
+        .expect("inner sdgs should have at least one element");
+    assert_eq!(sd.get("si").unwrap().as_str(), Some("measurement_unit"));
+    assert_eq!(sd.get("value").unwrap().as_str(), Some("gigawatts"));
+}
+
+/// [[ itest~sovd-api-component-operations-sdgsd, Operation-level SDG retrieval, itest ]]
+#[tokio::test]
+async fn test_operation_sdg_retrieval() {
+    let (runtime, _lock) = setup_integration_test(true).await.unwrap();
+    let auth = auth_header(&runtime.config, None).await.unwrap();
+
+    let params = QueryParams(HashMap::from_iter([(
+        "x-sovd2uds-includesdgs".to_string(),
+        "true".to_string(),
+    )]));
+    let response = send_cda_request(
+        &runtime.config,
+        &format!("{}/operations/SelfTest", sovd::ECU_FLXC1000_ENDPOINT),
+        StatusCode::OK,
+        Method::GET,
+        None,
+        Some(&auth),
+        Some(&params),
+    )
+    .await
+    .expect("Failed to get operation SDGs");
+
+    let data = response_to_json(&response).unwrap();
+
+    // The response should be a ServicesSdgs with an "items" map
+    let items = data
+        .get("items")
+        .expect("response should contain 'items'")
+        .as_object()
+        .expect("items should be an object");
+
+    assert!(
+        !items.is_empty(),
+        "items map should contain at least one entry"
+    );
+
+    // Find the entry
+    let entry = items
+        .values()
+        .next()
+        .expect("should have at least one service SDG entry");
+
+    let sdgs = entry
+        .get("sdgs")
+        .expect("entry should have 'sdgs'")
+        .as_array()
+        .expect("sdgs should be an array");
+
+    assert!(!sdgs.is_empty(), "sdgs array should not be empty");
+
+    let sdg = sdgs
+        .first()
+        .expect("sdgs array should have at least one element");
+    assert_eq!(sdg.get("caption").unwrap().as_str(), Some("self_test_sdg"));
+    assert_eq!(sdg.get("si").unwrap().as_str(), Some("routine_metadata"));
+
+    let inner = sdg
+        .get("sdgs")
+        .unwrap()
+        .as_array()
+        .expect("nested sdgs should be an array");
+    assert_eq!(inner.len(), 1);
+
+    let sd = inner
+        .first()
+        .expect("inner sdgs should have at least one element");
+    assert_eq!(sd.get("si").unwrap().as_str(), Some("expected_duration_ms"));
+    assert_eq!(sd.get("value").unwrap().as_str(), Some("5000"));
 }
 
 async fn validate_ecu_state(
