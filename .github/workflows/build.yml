@@ -155,6 +155,20 @@ jobs:
       contents: read
       pull-requests: write
 
+  cargo-crap:
+    name: CRAP (Change Risk Anti-Patterns)
+    if: github.event_name == 'pull_request'
+    needs: [coverage]
+    uses: eclipse-opensovd/cicd-workflows/.github/workflows/crap.yml@0c732cbf4a95b2935ccde369e69a466d0ea2b84a
+    with:
+      rust-version: "1.88.0"
+      cargo-crap-git-url: "https://github.com/theswiftfox/cargo-crap.git"
+      cargo-crap-git-rev: "212cfcd3b77fc86b8947e81ee660e99fc26ced5a"
+      post-pr-comment: true
+    permissions:
+      contents: read
+      pull-requests: write
+
   build_windows:
     runs-on: windows-latest
 
