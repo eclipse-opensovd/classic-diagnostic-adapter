@@ -116,6 +116,7 @@ pub(crate) mod diag_service {
         },
     };
 
+    // [[ dimpl~sovd-api-component-data-sdgsd, GET /data/{service} SDG handler ]]
     async fn get_sdgs_handler<T: UdsEcu + Clone>(
         service: String,
         ecu_name: &str,

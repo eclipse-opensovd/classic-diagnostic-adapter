@@ -619,6 +619,10 @@ fn ecu_route<
             routing::get_with(operations::get, operations::docs_get),
         )
         .api_route(
+            "/operations/{service}",
+            routing::get_with(operations::service::get, operations::service::docs_get),
+        )
+        .api_route(
             "/operations/{service}/docs",
             routing::get_with(
                 operations::service::docs_endpoint::get,
