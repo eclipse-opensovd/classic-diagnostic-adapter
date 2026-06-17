@@ -345,6 +345,10 @@ impl<S: SecurityPlugin> cda_interfaces::EcuManager for EcuManager<S> {
         &self.variant_detection.diag_service_requests
     }
 
+    fn init_default_states(&self) -> impl Future<Output = Result<(), DiagServiceError>> + Send {
+        self.set_default_states()
+    }
+
     #[tracing::instrument(skip(self),
         fields(
             ecu_name = self.ecu_name,
@@ -2914,7 +2918,11 @@ impl<S: SecurityPlugin> EcuManager<S> {
     /// Collects all `DiagLayers` from the current variant and its parent references.
     /// The variants own `DiagLayer` is placed first to give it higher priority in
     /// subsequent operations, followed by layers resolved recursively from parent references.
-    /// Returns an empty vector if no variant is set.
+    ///
+    /// When no specific variant has been detected yet, falls back to the base variant so
+    /// that state-chart and service lookups work correctly during variant detection.
+    /// Returns an empty vector only if neither a detected variant nor a base variant
+    /// is available.
     ///
     /// # Example
     ///
@@ -2927,7 +2935,14 @@ impl<S: SecurityPlugin> EcuManager<S> {
     /// }
     /// ```
     fn get_diag_layers_from_variant_and_parent_refs(&self) -> Vec<datatypes::DiagLayer<'_>> {
-        let Some(variant) = self.variant() else {
+        // Fall back to the base variant when no specific variant has been detected yet.
+        // This is necessary to allow state-chart and service lookups during variant detection,
+        // consistent with the approach used in `get_variant_parent_ref_services` and
+        // the service lookup functions.
+        let Some(variant) = self
+            .variant()
+            .or_else(|| self.diag_database.base_variant().ok())
+        else {
             return Vec::new();
         };
 

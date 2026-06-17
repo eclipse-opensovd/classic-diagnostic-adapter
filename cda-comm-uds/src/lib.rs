@@ -1988,6 +1988,16 @@ impl<S: EcuGateway, R: DiagServiceResponse, T: EcuManager<Response = R>> UdsEcu
             })?;
         }
 
+        // Seed the session/security map before sending detection requests so
+        // that check_service_preconditions can validate them. This only
+        // works for ECUS whose state charts are defined on the base variant level
+        if let Err(e) = ecu.read().await.init_default_states().await {
+            tracing::debug!(
+                error = %e,
+                "Could not pre-initialize ECU default states"
+            );
+        }
+
         let mut service_responses = HashMap::new();
         'variant_detection_calls: {
             for (name, service) in requests {

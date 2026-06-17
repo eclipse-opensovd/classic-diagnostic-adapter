@@ -362,6 +362,16 @@ pub trait EcuManager:
         &mut self,
         service_responses: HashMap<String, T>,
     ) -> impl Future<Output = Result<(), DiagServiceError>> + Send;
+    /// Initialize default ECU service states (session, security level, etc.) if not
+    /// already set. Must be called after [`Self::load`] and before sending any service
+    /// requests that have `pre_condition_state_refs`.
+    ///
+    /// Uses `entry().or_insert()` semantics - safe to call multiple times; will never
+    /// overwrite a live state set by a previous successful variant detection.
+    ///
+    /// # Errors
+    /// Returns `Err` if the database state charts cannot be found.
+    fn init_default_states(&self) -> impl Future<Output = Result<(), DiagServiceError>> + Send;
     fn get_variant_detection_requests(&self) -> &HashMap<String, DiagComm>;
     /// Communication parameters for the ECU.
     /// # Errors
