@@ -318,7 +318,7 @@ pub fn generate_config_cmd(output: Option<&PathBuf>) -> Result<(), AppError> {
 /// Returns [`AppError`] if configuration loading, validation, or startup fails.
 pub async fn run_from_cli() -> Result<(), AppError> {
     // Box is needed because it's a large future with a size of 16392 bytes
-    Box::pin(run_from_args(AppArgs::parse())).await
+    Box::pin(run(AppArgs::parse())).await
 }
 
 #[tracing::instrument(
@@ -332,7 +332,7 @@ pub async fn run_from_cli() -> Result<(), AppError> {
 ///
 /// # Errors
 /// Returns [`AppError`] if configuration loading, validation, or startup fails.
-pub async fn run<SP, SL, H, Fut>(
+pub async fn run_with_ext<SP, SL, H, Fut>(
     args: AppArgs,
     extra_health_providers: Vec<(&'static str, Arc<dyn cda_health::HealthProvider>)>,
     pre_load_hook: H,
@@ -380,12 +380,13 @@ where
 ///
 /// # Errors
 /// Returns [`AppError`] if configuration loading, validation, or startup fails.
-pub async fn run_from_args(args: AppArgs) -> Result<(), AppError> {
-    Box::pin(
-        run::<DefaultSecurityPluginData, DefaultSecurityPlugin, _, _>(args, vec![], |_| async {
-            Ok(())
-        }),
-    )
+pub async fn run(args: AppArgs) -> Result<(), AppError> {
+    Box::pin(run_with_ext::<
+        DefaultSecurityPluginData,
+        DefaultSecurityPlugin,
+        _,
+        _,
+    >(args, vec![], |_| async { Ok(()) }))
     .await
 }
 
