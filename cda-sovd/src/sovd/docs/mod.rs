@@ -18,6 +18,7 @@
 //! [`PathItem`]s and passes them to [`build_openapi_doc`] to produce a valid,
 //! self-contained `OpenAPI` specification returned by `GET .../docs`.
 
+pub mod data;
 pub mod operations;
 
 use aide::openapi::{
