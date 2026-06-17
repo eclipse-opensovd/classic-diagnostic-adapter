@@ -21,12 +21,12 @@ on:
 jobs:
   update:
     if: github.event.workflow_run.conclusion == 'success'
-    uses: eclipse-opensovd/cicd-workflows/.github/workflows/crap-baseline.yml@0c732cbf4a95b2935ccde369e69a466d0ea2b84a
+    uses: eclipse-opensovd/cicd-workflows/.github/workflows/crap-baseline.yml@1c1b2bf54c6fd213b7d983603d563b2739ad7d2a
     with:
       run-id: ${{ github.event.workflow_run.id }}
       rust-version: "1.88.0"
       cargo-crap-git-url: "https://github.com/theswiftfox/cargo-crap.git"
-      cargo-crap-git-rev: "212cfcd3b77fc86b8947e81ee660e99fc26ced5a"
+      cargo-crap-git-rev: "27bab7d86c0ff9c4f8f681d6538be24572ca1a8d"
     permissions:
       contents: write
       actions: read
