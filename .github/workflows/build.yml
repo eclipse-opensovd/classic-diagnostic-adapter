@@ -64,11 +64,11 @@ jobs:
           echo "Generated files are up to date."
       - name: Verify reference config is up to date
         run: |
-          cargo run --locked --all-features -- generate-config --output /tmp/opensovd-cda.toml
+          cargo run --locked --all-features -p opensovd-cda -- generate-config --output /tmp/opensovd-cda.toml
           if ! diff -u opensovd-cda.toml /tmp/opensovd-cda.toml; then
             echo ""
             echo "::error::opensovd-cda.toml is out of date."
-            echo "Regenerate with: cargo run --all-features -- generate-config --output opensovd-cda.toml"
+            echo "Regenerate with: cargo run --all-features -p opensovd-cda -- generate-config --output opensovd-cda.toml"
             exit 1
           fi
           echo "opensovd-cda.toml is up to date."
@@ -143,6 +143,66 @@ jobs:
         env:
           CACHE_REGISTRY: ghcr.io/${{ github.repository }}
         run: cargo test --locked --features integration-tests -- --show-output
+
+  can_integration_tests:
+    name: CAN integration tests
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v6
+        with:
+          submodules: false
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+      - name: Install Rust toolchain
+        uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          toolchain: 1.88.0
+          components: clippy, rustfmt
+      # The CAN suite runs the same containers as the DoIP suite, but the CDA
+      # image is built with the `can-tcp` transport and the ecu-sim starts a
+      # CAN frame hub (wired via docker-compose `SIM_CAN_HUB`/`CDA_FEATURES`,
+      # written into the generated .env by the test harness). CAN frames cross
+      # the compose bridge network over TCP, so no kernel CAN modules are needed.
+      - name: Build CDA docker image (can-tcp)
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          file: testcontainer/cda/Dockerfile
+          push: false
+          tags: ghcr.io/${{ github.repository }}/opensovd-cda:can
+          load: true
+          build-args: |
+            CDA_FEATURES=can-tcp
+          cache-from: |
+            type=gha,scope=cda-can-cargo-${{ github.ref_name }}
+            type=gha,scope=cda-can-cargo-main
+            type=gha,scope=cda-can-sccache-${{ github.ref_name }}
+            type=gha,scope=cda-can-sccache-main
+          cache-to: |
+            type=gha,mode=max,scope=cda-can-cargo-${{ github.ref_name }}
+            type=gha,mode=max,scope=cda-can-sccache-${{ github.ref_name }}
+      - name: Build ECU Sim docker image
+        uses: docker/build-push-action@v5
+        with:
+          context: testcontainer/ecu-sim/
+          file: testcontainer/ecu-sim/docker/Dockerfile
+          push: false
+          tags: ghcr.io/${{ github.repository }}/ecu-sim:latest
+          load: true
+          cache-from: |
+            type=gha,scope=ecu-sim-gradle-${{ github.ref_name }}
+            type=gha,scope=ecu-sim-gradle-main
+          cache-to: |
+            type=gha,mode=max,scope=ecu-sim-gradle-${{ github.ref_name }}
+      - name: Run CAN integration tests
+        env:
+          CACHE_REGISTRY: ghcr.io/${{ github.repository }}
+          CDA_INTEGRATION_TEST_USE_CAN: "true"
+        # Run serially: the CAN transport is timing-sensitive (per-transaction
+        # TCP sockets + TesterPresent keepalive), so parallel tests can flake.
+        run: cargo test --locked -p integration-tests --features can-integration-tests --test integration_tests -- --show-output --test-threads=1
 
   coverage:
     name: Coverage

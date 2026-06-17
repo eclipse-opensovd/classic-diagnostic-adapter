@@ -10,6 +10,15 @@
  * https://www.apache.org/licenses/LICENSE-2.0
  */
 
+// `CanConfig` is always available: the `config` module of cda-comm-can is not
+// gated on the `can` feature, only the SocketCAN transport code is. This keeps
+// the configuration schema (and all public function signatures that mention
+// `CanConfig`) identical across feature combinations, which matters because
+// cargo feature unification can otherwise produce mismatched signatures
+// between crates (e.g. integration-tests vs. opensovd_cda_lib under
+// `--all-features`). A `[can]` section in a non-`can` build is rejected with
+// an actionable error in `Configuration::validate_sanity` instead.
+pub use cda_comm_can::config::{CanConfig, CanEcuMapping};
 pub use cda_comm_doip::config::DoipConfig;
 pub use cda_database::DatabaseConfig;
 use cda_interfaces::{
@@ -136,6 +145,10 @@ pub struct Configuration {
     pub server: ServerConfig,
     /// `DoIP` (Diagnostics over IP) transport layer settings.
     pub doip: DoipConfig,
+    /// Optional CAN bus transport configuration.
+    /// When enabled, the adapter can communicate with ECUs over CAN bus.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub can: Option<CanConfig>,
     /// Diagnostic database loading and naming settings.
     pub database: DatabaseConfig,
     /// Logging, file output, and tracing backend settings.
@@ -217,6 +230,7 @@ impl Default for Configuration {
                 tester_address: "10.2.1.240".to_owned(),
                 ..Default::default()
             },
+            can: None,
             logging: cda_tracing::LoggingConfig::default(),
             com_params: ComParams::default(),
             flat_buf: FlatbBufConfig::default(),
@@ -259,6 +273,18 @@ impl Default for Configuration {
 impl ConfigSanity for Configuration {
     fn validate_sanity(&self) -> Result<(), AppError> {
         self.database.naming_convention.validate_sanity()?;
+        // CAN support is compile-time optional. The config type itself parses
+        // in every build (see the `CanConfig` re-export above), so reject a
+        // configured [can] section here with an actionable message instead of
+        // failing later during gateway setup.
+        #[cfg(not(feature = "can"))]
+        if self.can.is_some() {
+            return Err(AppError::ConfigurationError(
+                "[can] is configured, but this binary was built without CAN support. Rebuild with \
+                 `--features can` or remove the [can] section."
+                    .to_owned(),
+            ));
+        }
         // Add more checks for Configuration fields here if needed
         Ok(())
     }
@@ -422,6 +448,39 @@ description_database = "teapot"
                 vec!["Control_".to_string()]
             ))
         );
+        Ok(())
+    }
+
+    /// A `[can]` section must parse in every build (the config type is not
+    /// feature-gated), but `validate_sanity` must reject it when the binary
+    /// was built without CAN support.
+    #[tokio::test]
+    async fn can_section_parses_and_sanity_depends_on_feature()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let config_str = r#"
+[can]
+interface = "vcan0"
+"#;
+        let figment = Figment::from(Serialized::defaults(Configuration::default()))
+            .merge(Toml::string(config_str));
+        let config: Configuration = figment.extract()?;
+        let can = config.can.as_ref().expect("can section should be parsed");
+        assert_eq!(can.interface, "vcan0");
+
+        #[cfg(feature = "can")]
+        config
+            .validate_sanity()
+            .expect("can section should pass sanity with can feature");
+        #[cfg(not(feature = "can"))]
+        {
+            let err = config
+                .validate_sanity()
+                .expect_err("can section should fail sanity without can feature");
+            assert!(
+                err.to_string().contains("--features can"),
+                "error should tell the user how to enable CAN support, got: {err}"
+            );
+        }
         Ok(())
     }
 

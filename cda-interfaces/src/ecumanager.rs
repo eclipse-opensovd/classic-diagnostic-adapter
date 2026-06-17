@@ -327,6 +327,13 @@ pub trait EcuManager:
     #[must_use]
     fn protocol(&self) -> &Protocol;
 
+    /// Stable key used to serialize requests that must not overlap on the same transport target.
+    ///
+    /// For CAN this should ideally reflect the physical request/response IDs, while for `DoIP` it
+    /// can be based on the gateway/logical address pair.
+    #[must_use]
+    fn request_lock_key(&self) -> String;
+
     #[must_use]
     fn is_loaded(&self) -> bool;
 
@@ -688,6 +695,13 @@ pub trait EcuManager:
 pub enum EcuManagerType {
     Ecu,
     FunctionalDescription,
+}
+
+impl Protocol {
+    #[must_use]
+    pub fn value(&self) -> &str {
+        &self.0
+    }
 }
 
 impl std::fmt::Display for EcuState {

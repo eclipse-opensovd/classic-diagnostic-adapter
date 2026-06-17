@@ -36,6 +36,8 @@ COPY cda-interfaces/Cargo.toml ./cda-interfaces/Cargo.toml
 COPY cda-core/Cargo.toml ./cda-core/Cargo.toml
 COPY cda-comm-doip/Cargo.toml ./cda-comm-doip/Cargo.toml
 COPY cda-comm-uds/Cargo.toml ./cda-comm-uds/Cargo.toml
+COPY cda-comm-can/Cargo.toml ./cda-comm-can/Cargo.toml
+COPY cda-simulator/Cargo.toml ./cda-simulator/Cargo.toml
 COPY cda-database/Cargo.toml ./cda-database/Cargo.toml
 COPY cda-plugin-security/Cargo.toml ./cda-plugin-security/Cargo.toml
 COPY cda-sovd/Cargo.toml ./cda-sovd/Cargo.toml
@@ -71,6 +73,9 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry,sharing=locked \
 FROM chef AS builder
 ARG SOURCE_DATE_EPOCH
 ARG SOURCE_GIT_SHA
+# Optional extra cargo features for the opensovd-cda binary, e.g. "can-tcp" to
+# compile in the CAN-over-TCP transport used by the CAN integration tests.
+ARG CDA_FEATURES=""
 
 WORKDIR /app
 # Copy pre-built dependencies from the cacher stage
@@ -83,6 +88,8 @@ COPY cda-interfaces ./cda-interfaces
 COPY cda-core ./cda-core
 COPY cda-comm-doip ./cda-comm-doip
 COPY cda-comm-uds ./cda-comm-uds
+COPY cda-comm-can ./cda-comm-can
+COPY cda-simulator ./cda-simulator
 COPY cda-database ./cda-database
 COPY cda-plugin-security ./cda-plugin-security
 COPY cda-sovd ./cda-sovd
@@ -104,7 +111,7 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry,sharing=locked \
     --mount=type=cache,target=$SCCACHE_DIR,sharing=locked \
     export SOURCE_DATE_EPOCH=${SOURCE_DATE_EPOCH} && \
     export SOURCE_GIT_SHA=${SOURCE_GIT_SHA} && \
-    cargo build --release --bin opensovd-cda && \
+    cargo build --release --bin opensovd-cda ${CDA_FEATURES:+--features "$CDA_FEATURES"} && \
     cp target/release/opensovd-cda /tmp/opensovd-cda
 
 # --- Stage 5: Runtime base with dependencies ---

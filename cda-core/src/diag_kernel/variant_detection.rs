@@ -127,12 +127,22 @@ pub(super) fn evaluate_variant<T: DiagServiceResponse + Sized>(
                                         .iter()
                                         .find(|(name, _)| **name == expected_param)
                                         .map(|(_name, value)| {
-                                            let matches = value.replace('"', "") == expected_value;
+                                            // Normalize the received value by removing 0x prefixes
+                                            // and spaces (ByteField serializes as "0x04 0x70")
+                                            let normalized_value = value
+                                                .replace('"', "")
+                                                .replace("0x", "")
+                                                .replace("0X", "")
+                                                .replace(' ', "")
+                                                .to_uppercase();
+                                            let normalized_expected = expected_value.to_uppercase();
+                                            let matches = normalized_value == normalized_expected;
                                             tracing::debug!(
                                                 service = %service,
                                                 parameter = %expected_param,
                                                 expected_value = %expected_value,
                                                 received_value = %value,
+                                                normalized_value = %normalized_value,
                                                 ecu = %diagnostic_database.ecu_name()
                                                     .unwrap_or("Unknown".to_owned()),
                                                 matches = matches,

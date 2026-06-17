@@ -19,6 +19,9 @@ services:
     environment:
       - USE_MULTIPLE_IPS=true
       - SIM_NETWORK_INTERFACE=eth0
+      # When set (e.g. "0.0.0.0:19800") the sim starts a CAN frame hub on that
+      # address so CDA can attach over TCP. Empty/unset disables it.
+      - SIM_CAN_HUB=${SIM_CAN_HUB:-}
     ports:
       - "${SIM_CONTROL_PORT:-8181}:8181"
     networks:
@@ -38,6 +41,8 @@ services:
       args:
         - SOURCE_DATE_EPOCH
         - SOURCE_GIT_SHA
+        # Extra cargo features for the CDA image; "can-tcp" for CAN tests.
+        - CDA_FEATURES=${CDA_FEATURES:-}
     ports:
       - "${CDA_PORT:-20002}:20002"
     volumes:

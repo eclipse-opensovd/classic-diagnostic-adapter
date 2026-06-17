@@ -1,0 +1,31 @@
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: 2026 The Contributors to Eclipse OpenSOVD (see CONTRIBUTORS)
+#
+# Default parameter values loaded by cda-simulator at startup, after
+# variant-detection patterns. The simulator reads this file when it loads
+# the sibling HOVR4000.mdd; the path can also be set explicitly via
+# --defaults.
+#
+# IMPORTANT: these values are SYNTHETIC TEST MARKERS. Do not mistake them
+# for real vehicle data. The VIN below is deliberately prefixed "CDA-SIM-"
+# and is exactly 17 ASCII characters (ISO 3779 length), so it cannot be
+# confused with a real-world VIN.
+#
+# Format:
+#   [overrides."<service_name>".<param_name>]
+#   value = <f64 | i64 | string>   # physical; for string params, raw ASCII bytes
+#   bytes = "<hex>"                # alternative: explicit raw bytes
+#
+# Unknown service/param names are logged as warnings and ignored.
+
+[overrides."VINDataIdentifier_Read".VIN]
+# 17 ASCII bytes (ISO 3779 length). Padded with '0'.
+value = "CDA-SIM-MARKER000"
+
+[overrides."ActiveDiagnosticSessionDataIdentifier_Read".EcuSessionType]
+# 1 = Default diagnostic session.
+value = 1
+
+[overrides."Identification_Read".Identification]
+# 3 raw bytes (0xAA 0xBB 0xCC).
+bytes = "AABBCC"
