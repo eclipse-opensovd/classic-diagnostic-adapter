@@ -39,6 +39,7 @@ mod flash_download;
 mod locks;
 mod operations;
 mod runtimefiles;
+mod tester_present;
 mod version_endpoint;
 
 pub(crate) const ECU_FLXC1000_ENDPOINT: &str = "components/flxc1000";
