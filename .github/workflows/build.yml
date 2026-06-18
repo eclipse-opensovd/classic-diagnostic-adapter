@@ -99,9 +99,11 @@ jobs:
         uses: actions-rust-lang/setup-rust-toolchain@v1
         with:
           toolchain: 1.88.0
-          components: clippy, rustfmt
+          components: clippy, rustfmt, llvm-tools-preview
       - name: Install cargo-deny
         run: cargo install --locked --version 0.18.9 cargo-deny
+      - name: Install cargo-llvm-cov
+        uses: taiki-e/install-action@cargo-llvm-cov
       - name: Build
         run: cargo build --locked --verbose
       - name: Check licenses
@@ -127,6 +129,22 @@ jobs:
           cache-to: |
             type=gha,mode=max,scope=cda-cargo-${{ github.ref_name }}
             type=gha,mode=max,scope=cda-sccache-${{ github.ref_name }}
+      - name: Build CDA docker image (coverage-enabled)
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          file: testcontainer/cda/Dockerfile.coverage
+          push: false
+          tags: ghcr.io/${{ github.repository }}/opensovd-cda:coverage
+          load: true
+          cache-from: |
+            type=gha,scope=cda-cargo-${{ github.ref_name }}
+            type=gha,scope=cda-cargo-main
+            type=gha,scope=cda-sccache-${{ github.ref_name }}
+            type=gha,scope=cda-sccache-main
+          cache-to: |
+            type=gha,mode=max,scope=cda-cargo-${{ github.ref_name }}
+            type=gha,mode=max,scope=cda-sccache-${{ github.ref_name }}
       - name: Build ECU Sim docker image
         uses: docker/build-push-action@v5
         with:
@@ -140,26 +158,122 @@ jobs:
             type=gha,scope=ecu-sim-gradle-main
           cache-to: |
             type=gha,mode=max,scope=ecu-sim-gradle-${{ github.ref_name }}
-      - name: Run tests
+      - name: Run unit tests with coverage
+        run: cargo llvm-cov --locked --workspace --features integration-tests --lcov --output-path lcov.info -- --show-output
+      - name: Run integration tests with Docker coverage
         env:
           CACHE_REGISTRY: ghcr.io/${{ github.repository }}
-        run: cargo test --locked --features integration-tests -- --show-output
+          CDA_INTEGRATION_TEST_COVERAGE: "true"
+        run: cargo test --locked -p integration-tests --features integration-tests -- --show-output
+      - name: Collect Docker coverage data
+        run: |
+          set -x
 
-  coverage:
-    name: Coverage
-    uses: eclipse-opensovd/cicd-workflows/.github/workflows/coverage.yml@07140bdd84f20b66fd4aff58a83c5148deec388c
-    with:
-      rust-version: "1.88.0"
-      cargo-extra-args: "--features integration-tests"
-      post-pr-comment: true
-    permissions:
-      contents: read
-      pull-requests: write
+          # Get the path to LLVM tools
+          LLVM_PROFDATA=$(rustc --print sysroot)/lib/rustlib/x86_64-unknown-linux-gnu/bin/llvm-profdata
+          LLVM_COV=$(rustc --print sysroot)/lib/rustlib/x86_64-unknown-linux-gnu/bin/llvm-cov
+
+          if [ -f "target/coverage/opensovd-cda" ] && ls target/coverage/*.profraw 1> /dev/null 2>&1; then
+            echo "Found Docker coverage data, processing..."
+
+            # Merge Docker .profraw files into a single .profdata
+            $LLVM_PROFDATA merge -sparse target/coverage/*.profraw -o target/coverage/docker.profdata
+
+            # Export coverage for Docker binary, restricting to workspace sources only
+            # (mirrors what cargo llvm-cov --workspace does internally)
+            $LLVM_COV export -format=lcov \
+              target/coverage/opensovd-cda \
+              -instr-profile=target/coverage/docker.profdata \
+              --ignore-filename-regex='\.cargo/registry|\.cargo/git|rustup/toolchains|/rustc/' \
+              > lcov-integration.info
+          else
+            echo "No Docker coverage data found (integration tests may have failed early)"
+            touch lcov-integration.info
+          fi
+      - name: Merge coverage data
+        run: |
+          set -x
+          sudo apt-get update && sudo apt-get install -y lcov
+
+          if [ -s lcov.info ] && [ -s lcov-integration.info ]; then
+            echo "Merging unit test and integration coverage..."
+            lcov --add-tracefile lcov.info --add-tracefile lcov-integration.info \
+              --output-file lcov-merged.info --ignore-errors inconsistent
+          elif [ -s lcov.info ]; then
+            echo "Only unit test coverage available"
+            cp lcov.info lcov-merged.info
+          else
+            echo "No coverage data available"
+            touch lcov-merged.info
+          fi
+
+          # Print summary
+          if [ -s lcov-merged.info ]; then
+            SUMMARY=$(lcov --summary lcov-merged.info 2>&1 || true)
+            echo "$SUMMARY"
+            TOTAL_COV=$(echo "$SUMMARY" | grep -oP 'lines\.*:\s*\K[0-9.]+' || echo "0")
+            echo "**Total line coverage: ${TOTAL_COV}%**" >> "$GITHUB_STEP_SUMMARY"
+          fi
+      - name: Upload coverage artifact
+        uses: actions/upload-artifact@v7
+        with:
+          name: coverage-lcov
+          path: lcov-merged.info
+          retention-days: 30
+      - name: Post coverage comment
+        if: github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository
+        uses: actions/github-script@v9
+        with:
+          script: |
+            const fs = require('fs');
+            const { execSync } = require('child_process');
+
+            let total = '0';
+            try {
+              const summary = execSync('lcov --summary lcov-merged.info 2>&1', { encoding: 'utf8' });
+              const match = summary.match(/lines\.*:\s*([\d.]+)/);
+              if (match) total = match[1];
+            } catch (e) {
+              console.log('Could not extract coverage:', e.message);
+            }
+
+            const marker = '<!-- coverage-report -->';
+            const runUrl = `${process.env.GITHUB_SERVER_URL}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}`;
+            const body = [
+              marker,
+              '### \u{1F4CA} Coverage Report (unit + integration)',
+              '',
+              `**Total line coverage: ${total}%**`,
+              '',
+              `[Full build artifacts](${runUrl})`,
+            ].join('\n');
+
+            const { data: comments } = await github.rest.issues.listComments({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: context.issue.number,
+            });
+            const existing = comments.find(c => c.body.includes(marker));
+            if (existing) {
+              await github.rest.issues.updateComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                comment_id: existing.id,
+                body,
+              });
+            } else {
+              await github.rest.issues.createComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: context.issue.number,
+                body,
+              });
+            }
 
   cargo-crap:
     name: CRAP (Change Risk Anti-Patterns)
     if: github.event_name == 'pull_request'
-    needs: [coverage]
+    needs: [build_and_test]
     uses: eclipse-opensovd/cicd-workflows/.github/workflows/crap.yml@07140bdd84f20b66fd4aff58a83c5148deec388c
     with:
       rust-version: "1.88.0"
