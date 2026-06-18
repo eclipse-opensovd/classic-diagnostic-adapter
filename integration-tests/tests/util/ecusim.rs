@@ -380,3 +380,42 @@ pub(crate) async fn clear_interceptor(
     .await?;
     Ok(())
 }
+
+/// Force-close all active `DoIP` TCP connections for the specified ECU.
+///
+/// This simulates a network disconnect or ECU reboot where the TCP link is lost.
+/// After the disconnect, the ECU will re-announce itself via VAMs and the CDA
+/// should re-establish the connection automatically.
+pub(crate) async fn disconnect(sim: &EcuSim, ecu: &str) -> Result<(), TestingError> {
+    let mut url = sim_endpoint(sim)?;
+    url.path_segments_mut()
+        .map_err(|()| TestingError::InvalidUrl("cannot modify URL path".to_owned()))?
+        .push(ecu)
+        .push("disconnect");
+
+    crate::util::http::send_request(StatusCode::OK, http::Method::POST, None, None, url).await?;
+    Ok(())
+}
+
+/// Configure the ECU simulator's hard reset duration.
+///
+/// When set to a value > 0, subsequent UDS ECU Reset (0x11 0x01) requests will cause
+/// the ECU to close its TCP connection for the specified number of seconds, simulating
+/// a real ECU reboot with `DoIP` disconnection.
+pub(crate) async fn set_hard_reset_duration(
+    sim: &EcuSim,
+    ecu: &str,
+    seconds: i32,
+) -> Result<(), TestingError> {
+    let mut url = sim_endpoint(sim)?;
+    url.path_segments_mut()
+        .map_err(|()| TestingError::InvalidUrl("cannot modify URL path".to_owned()))?
+        .push(ecu)
+        .push("state");
+
+    let body = serde_json::json!({"hardResetForSeconds": seconds}).to_string();
+
+    crate::util::http::send_request(StatusCode::OK, http::Method::PUT, Some(&body), None, url)
+        .await?;
+    Ok(())
+}
