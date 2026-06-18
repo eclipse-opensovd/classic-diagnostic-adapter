@@ -58,6 +58,7 @@ fun EcuState.updateWith(dto: EcuStateDto) {
     this.vin = dto.vin ?: this.vin
     this.maxNumberOfBlockLength = dto.maxNumberOfBlockLength ?: this.maxNumberOfBlockLength
     this.dtcSettingType = dto.dtcSettingType ?: this.dtcSettingType
+    this.hardResetForSeconds = dto.hardResetForSeconds ?: this.hardResetForSeconds
 }
 
 fun EcuState.toDto() =
