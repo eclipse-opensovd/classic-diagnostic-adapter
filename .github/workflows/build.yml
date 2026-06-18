@@ -99,9 +99,11 @@ jobs:
         uses: actions-rust-lang/setup-rust-toolchain@v1
         with:
           toolchain: 1.88.0
-          components: clippy, rustfmt
+          components: clippy, rustfmt, llvm-tools
       - name: Install cargo-deny
         run: cargo install --locked --version 0.18.9 cargo-deny
+      - name: Install cargo-llvm-cov
+        run: cargo install --locked cargo-llvm-cov
       - name: Build
         run: cargo build --locked --verbose
       - name: Check licenses
@@ -127,6 +129,25 @@ jobs:
           cache-to: |
             type=gha,mode=max,scope=cda-cargo-${{ github.ref_name }}
             type=gha,mode=max,scope=cda-sccache-${{ github.ref_name }}
+      - name: Build CDA docker image (coverage-enabled)
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          file: testcontainer/cda/Dockerfile
+          build-args: |
+            BUILD_PROFILE=dev
+            RUSTFLAGS=-C instrument-coverage
+          push: false
+          tags: ghcr.io/${{ github.repository }}/opensovd-cda:coverage
+          load: true
+          cache-from: |
+            type=gha,scope=cda-cargo-${{ github.ref_name }}
+            type=gha,scope=cda-cargo-main
+            type=gha,scope=cda-sccache-${{ github.ref_name }}
+            type=gha,scope=cda-sccache-main
+          cache-to: |
+            type=gha,mode=max,scope=cda-cargo-${{ github.ref_name }}
+            type=gha,mode=max,scope=cda-sccache-${{ github.ref_name }}
       - name: Build ECU Sim docker image
         uses: docker/build-push-action@v5
         with:
@@ -140,26 +161,83 @@ jobs:
             type=gha,scope=ecu-sim-gradle-main
           cache-to: |
             type=gha,mode=max,scope=ecu-sim-gradle-${{ github.ref_name }}
-      - name: Run tests
+      - name: Run unit tests with coverage
+        run: cargo llvm-cov --locked --workspace --lcov --output-path lcov.info -- --show-output
+      - name: Run integration tests with Docker coverage
         env:
           CACHE_REGISTRY: ghcr.io/${{ github.repository }}
-        run: cargo test --locked --features integration-tests -- --show-output
+          CDA_INTEGRATION_TEST_COVERAGE: "true"
+        run: cargo test --locked -p integration-tests --features integration-tests -- --show-output
+      - name: Collect and merge coverage data
+        run: |
+          set -x
 
-  coverage:
-    name: Coverage
-    uses: eclipse-opensovd/cicd-workflows/.github/workflows/coverage.yml@07140bdd84f20b66fd4aff58a83c5148deec388c
-    with:
-      rust-version: "1.88.0"
-      cargo-extra-args: "--features integration-tests"
-      post-pr-comment: true
-    permissions:
-      contents: read
-      pull-requests: write
+          LLVM_PROFDATA=$(rustc --print sysroot)/lib/rustlib/x86_64-unknown-linux-gnu/bin/llvm-profdata
+          LLVM_COV=$(rustc --print sysroot)/lib/rustlib/x86_64-unknown-linux-gnu/bin/llvm-cov
+
+          sudo apt-get update && sudo apt-get install -y lcov
+
+          if [ -f "target/coverage/opensovd-cda" ] && ls target/coverage/*.profraw 1>/dev/null 2>&1; then
+            echo "Processing Docker coverage data..."
+            $LLVM_PROFDATA merge -sparse target/coverage/*.profraw -o target/coverage/docker.profdata
+
+            # Export Docker coverage, filtering to workspace sources (/app/) only
+            $LLVM_COV export -format=lcov \
+              target/coverage/opensovd-cda \
+              -instr-profile=target/coverage/docker.profdata \
+              --ignore-filename-regex='/usr/local/cargo|/usr/local/rustup' \
+              > lcov-docker-raw.info
+
+            # Rewrite /app/ paths to match the runner workspace paths so lcov --add
+            # recognises them as the same files and unions hit counts instead of stacking
+            WORKSPACE=$(cargo metadata --no-deps --format-version 1 | jq -r '.workspace_root')
+            sed "s|SF:/app/|SF:${WORKSPACE}/|g" lcov-docker-raw.info > lcov-docker.info
+
+            echo "Merging unit test and Docker integration coverage..."
+            lcov --add-tracefile lcov.info --add-tracefile lcov-docker.info \
+              --output-file lcov-merged.info --ignore-errors inconsistent
+          else
+            echo "No Docker coverage data found, using unit test coverage only"
+            cp lcov.info lcov-merged.info
+          fi
+
+          SUMMARY=$(lcov --summary lcov-merged.info 2>&1 || true)
+          echo "$SUMMARY"
+          TOTAL_COV=$(echo "$SUMMARY" | grep -oP 'lines\.*:\s*\K[0-9.]+' || echo "0")
+          echo "**Total line coverage: ${TOTAL_COV}%**" >> "$GITHUB_STEP_SUMMARY"
+      - name: Upload coverage artifact
+        uses: actions/upload-artifact@v7
+        with:
+          name: coverage-lcov
+          path: lcov-merged.info
+          retention-days: 30
+      - name: Generate coverage PR comment artifact
+        if: github.event_name == 'pull_request'
+        run: |
+          TOTAL_COV=$(lcov --summary lcov-merged.info 2>&1 | grep -oP 'lines\.*:\s*\K[0-9.]+' || echo "0")
+          RUN_URL="${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}"
+          SYMBOL="$(printf '\xf0\x9f\x93\x8a')"
+          mkdir -p pr-comment-coverage
+          echo "${{ github.event.number }}" > pr-comment-coverage/pr_number
+          printf '%s\n' \
+            '<!-- coverage-report -->' \
+            "### ${SYMBOL} Coverage Report (unit + integration)" \
+            '' \
+            "**Total line coverage: ${TOTAL_COV}%**" \
+            '' \
+            "[Full build artifacts](${RUN_URL})" \
+            > pr-comment-coverage/body.md
+      - name: Upload coverage PR comment artifact
+        if: github.event_name == 'pull_request'
+        uses: actions/upload-artifact@v7
+        with:
+          name: pr-comment-coverage
+          path: pr-comment-coverage/
 
   cargo-crap:
     name: CRAP (Change Risk Anti-Patterns)
     if: github.event_name == 'pull_request'
-    needs: [coverage]
+    needs: [build_and_test]
     uses: eclipse-opensovd/cicd-workflows/.github/workflows/crap.yml@07140bdd84f20b66fd4aff58a83c5148deec388c
     with:
       rust-version: "1.88.0"

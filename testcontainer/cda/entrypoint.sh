@@ -19,4 +19,6 @@ echo "Using DoIpTesterIp: $DOIP_TESTER_IP"
 
 find "." -maxdepth 1 -type f -print0 | xargs -0 sha1sum
 
-/app/opensovd-cda --tester-address "$DOIP_TESTER_IP" "$@"
+# Exec is needed for the coverage results, to detach the CDA from PID 1 of the container.
+# Otherwise the container will be stopped after the CDA has finished but the coverage won't be fully written to disk yet.
+exec /app/opensovd-cda --tester-address "$DOIP_TESTER_IP" "$@"
