@@ -40,7 +40,7 @@ schemars = { workspace = true }
 serde = { workspace = true, features = ["derive"] }
 socket2 = { workspace = true, features = ["all"] }
 #tokio
-tokio = { workspace = true, features = ["time", "fs", "sync"] }
+tokio = { workspace = true, features = ["time", "fs", "sync", "rt", "macros"] }
 tokio-util = { workspace = true, features = ["codec", "net"] }
 # futures
 futures = { workspace = true }
@@ -61,3 +61,7 @@ mbedtls = ["dep:mbedtls-rs"]
 openssl = ["dep:openssl", "dep:tokio-openssl"]
 openssl-vendored = ["openssl", "openssl/vendored"]
 dlt-tracing = ["cda-interfaces/dlt-tracing"]
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["macros", "rt", "time", "sync", "test-util"] }
+serde_json = { workspace = true }
