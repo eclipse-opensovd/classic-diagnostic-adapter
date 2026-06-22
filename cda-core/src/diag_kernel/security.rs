@@ -316,7 +316,7 @@ pub(in crate::diag_kernel) fn check_security_plugin<S: SecurityPlugin>(
 
 #[cfg(test)]
 mod tests {
-    use cda_interfaces::{DiagServiceError, EcuSecurity, EcuStateManager, SecurityAccess, service_ids};
+    use cda_interfaces::{DiagServiceError, EcuSecurity, SecurityAccess, service_ids};
 
     use crate::diag_kernel::test_utils::ecu_manager_builder::create_ecu_manager_with_security_access_services;
 
