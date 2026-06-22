@@ -25,7 +25,7 @@ use tokio_util::sync::CancellationToken;
 
 use crate::{
     DoipDiagGateway, DoipTarget,
-    connections::handle_gateway_connection,
+    connections::{GatewayConfig, GatewayState, handle_gateway_connection},
     ecu_connection::ConnectionConfig,
     socket::{DoIPConfig, DoIPUdpSocket},
 };
@@ -108,6 +108,7 @@ pub(crate) async fn listen_for_vams<T, F>(
     gateway: DoipDiagGateway<T>,
     variant_detection: mpsc::Sender<Vec<String>>,
     send_timeout: Duration,
+    alive_check_interval: Duration,
     mut shutdown_signal: futures::future::Shared<F>,
     cancel_token: CancellationToken,
 ) where
@@ -138,6 +139,7 @@ pub(crate) async fn listen_for_vams<T, F>(
         connection_config: &ConnectionConfig,
         gateway: &DoipDiagGateway<T>,
         send_timeout: Duration,
+        alive_check_interval: Duration,
         doip_msg_ctx: DoipMessageContext,
         gateway_ecu_map: &HashMap<u16, Vec<u16>>,
         gateway_ecu_name_map: &HashMap<u16, Vec<String>>,
@@ -175,13 +177,18 @@ pub(crate) async fn listen_for_vams<T, F>(
                     tracing::info!(ecu_name = %doip_target.ecu, "New Gateway ECU detected");
 
                     match handle_gateway_connection::<T>(
-                        connection_config,
                         doip_target,
-                        doip_connection_config,
-                        &gateway.doip_connections,
-                        &gateway.ecus,
-                        gateway_ecu_map,
-                        send_timeout,
+                        &GatewayConfig {
+                            connection: connection_config.clone(),
+                            doip: doip_connection_config,
+                            send_timeout,
+                            alive_check_interval,
+                        },
+                        &GatewayState {
+                            doip_connections: Arc::clone(&gateway.doip_connections),
+                            ecus: Arc::clone(&gateway.ecus),
+                            gateway_ecu_map: gateway_ecu_map.clone(),
+                        },
                     )
                     .await
                     {
@@ -299,6 +306,7 @@ pub(crate) async fn listen_for_vams<T, F>(
                                 &connection_config,
                                 &gateway,
                                 send_timeout,
+                                alive_check_interval,
                                 DoipMessageContext {
                                     doip_msg,
                                     source_addr,
