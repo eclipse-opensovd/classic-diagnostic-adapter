@@ -31,6 +31,10 @@ pub struct DoipConfig {
     pub send_timeout_ms: u64,
     /// Whether to request a diagnostic message positive acknowledgement.
     pub send_diagnostic_message_ack: bool,
+    /// Interval in seconds between `DoIP` alive check requests sent on idle connections.
+    /// The alive check is only sent when no diagnostic communication has occurred
+    /// for this duration. Set to 0 to disable the alive check.
+    pub alive_check_interval_secs: u64,
     /// The name of the protocol to use.
     /// Matched case-insensitive against the database.
     pub protocol_name: String,
@@ -46,6 +50,7 @@ impl Default for DoipConfig {
             tls_port: 3496,
             send_timeout_ms: 1000,
             send_diagnostic_message_ack: true,
+            alive_check_interval_secs: 1800, // 30 minutes
             protocol_name: Protocol::default().to_string(),
         }
     }

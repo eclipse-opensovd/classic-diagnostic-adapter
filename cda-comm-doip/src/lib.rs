@@ -33,7 +33,7 @@ use tokio_util::sync::CancellationToken;
 
 use crate::{
     config::DoipConfig,
-    connections::EcuError,
+    connections::{EcuError, GatewayConfig, GatewayState},
     ecu_connection::ConnectionConfig,
     socket::{DoIPConfig, DoIPUdpSocket},
 };
@@ -43,8 +43,6 @@ mod connections;
 mod ecu_connection;
 mod socket;
 mod vir_vam;
-
-const SLEEP_INTERVAL: Duration = Duration::from_secs(30);
 
 /// Timeout when suppressPosRspMsgIndicationBit is set.
 /// ECUs that reject a request usually respond quickly with an NRC and
@@ -176,6 +174,7 @@ impl<T: EcuAddresses + DoipComParams> DoipDiagGateway<T> {
             tls_port,
             send_timeout_ms,
             send_diagnostic_message_ack,
+            alive_check_interval_secs,
             ..
         } = doip_config;
         let gateway_port = *gateway_port;
@@ -193,6 +192,7 @@ impl<T: EcuAddresses + DoipComParams> DoipDiagGateway<T> {
             send_diagnostic_message_ack: *send_diagnostic_message_ack,
         };
         let send_timeout = Duration::from_millis(*send_timeout_ms);
+        let alive_check_interval = Duration::from_secs(*alive_check_interval_secs);
 
         tracing::info!("Initializing DoipDiagGateway");
 
@@ -245,13 +245,18 @@ impl<T: EcuAddresses + DoipComParams> DoipDiagGateway<T> {
 
             for gateway in gateways {
                 if let Ok(logical_address) = connections::handle_gateway_connection::<T>(
-                    &connection_config,
                     gateway,
-                    doip_connection_config,
-                    &doip_connections,
-                    &ecus,
-                    &gateway_ecu_map,
-                    send_timeout,
+                    &GatewayConfig {
+                        connection: connection_config.clone(),
+                        doip: doip_connection_config,
+                        send_timeout,
+                        alive_check_interval,
+                    },
+                    &GatewayState {
+                        doip_connections: Arc::clone(&doip_connections),
+                        ecus: Arc::clone(&ecus),
+                        gateway_ecu_map: gateway_ecu_map.clone(),
+                    },
                 )
                 .await
                 {
@@ -279,6 +284,7 @@ impl<T: EcuAddresses + DoipComParams> DoipDiagGateway<T> {
             gateway.clone(),
             variant_detection,
             send_timeout,
+            alive_check_interval,
             shared_shutdown_signal,
             gateway.cancel_token.child_token(),
         )
