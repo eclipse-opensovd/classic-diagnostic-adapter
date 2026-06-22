@@ -123,11 +123,18 @@ impl<S: SecurityPlugin> EcuManager<S> {
                 let transition_source = state_transition.source_short_name_ref()?;
                 let transition_target = state_transition.target_short_name_ref()?;
 
-                // Check if this transition exists in the state chart and starts from current state
+                // Check if this transition exists in the state chart and starts from current state.
+                // All comparisons are case-insensitive because state names may be stored
+                // with different casing (e.g. "extended" vs "Extended") depending on the
+                // source (SOVD mode value vs ODX state chart definition).
                 if state_chart.state_transitions()?.iter().any(|chart_st| {
-                    chart_st.source_short_name_ref() == Some(transition_source)
-                        && chart_st.target_short_name_ref() == Some(transition_target)
-                        && transition_source == current_state
+                    chart_st
+                        .source_short_name_ref()
+                        .is_some_and(|s| s.eq_ignore_ascii_case(transition_source))
+                        && chart_st
+                            .target_short_name_ref()
+                            .is_some_and(|t| t.eq_ignore_ascii_case(transition_target))
+                        && transition_source.eq_ignore_ascii_case(current_state)
                 }) {
                     Some(transition_target.to_owned())
                 } else {
@@ -159,22 +166,53 @@ impl<S: SecurityPlugin> EcuManager<S> {
             })
         });
 
+        if state_chart_session.is_none() {
+            tracing::debug!(
+                diag_comm_name = ?diag_comm.short_name(),
+                "No SESSION state chart found in diag layers"
+            );
+        }
+        if state_chart_security.is_none() {
+            tracing::debug!(
+                diag_comm_name = ?diag_comm.short_name(),
+                "No SECURITY state chart found in diag layers"
+            );
+        }
+
         let states = self.ecu_service_states.write().await;
-        let new_session = states
-            .get(&service_ids::SESSION_CONTROL)
-            .as_ref()
-            .and_then(|session| {
-                state_chart_session
-                    .and_then(|sc| Self::lookup_state_transition(diag_comm, &(sc.into()), session))
-            });
-        let new_security = states
-            .get(&service_ids::SECURITY_ACCESS)
-            .as_ref()
-            .and_then(|session| {
-                state_chart_security
-                    .and_then(|sc| Self::lookup_state_transition(diag_comm, &(sc.into()), session))
-            });
+
+        let current_session = states.get(&service_ids::SESSION_CONTROL);
+        let current_security = states.get(&service_ids::SECURITY_ACCESS);
+
+        if current_session.is_none() {
+            tracing::warn!(
+                diag_comm_name = ?diag_comm.short_name(),
+                "ecu_service_states has no SESSION_CONTROL entry - states not initialized"
+            );
+        }
+        if current_security.is_none() {
+            tracing::warn!(
+                diag_comm_name = ?diag_comm.short_name(),
+                "ecu_service_states has no SECURITY_ACCESS entry - states not initialized"
+            );
+        }
+
+        let new_session = current_session.and_then(|session| {
+            state_chart_session
+                .and_then(|sc| Self::lookup_state_transition(diag_comm, &(sc.into()), session))
+        });
+        let new_security = current_security.and_then(|security| {
+            state_chart_security
+                .and_then(|sc| Self::lookup_state_transition(diag_comm, &(sc.into()), security))
+        });
         drop(states);
+
+        tracing::debug!(
+            diag_comm_name = ?diag_comm.short_name(),
+            new_session = ?new_session,
+            new_security = ?new_security,
+            "Lookup state transition for active service"
+        );
 
         (new_session, new_security)
     }
@@ -427,6 +465,44 @@ mod tests {
             fg_result.is_ok(),
             "Functional group service should skip precondition check. Error: {:?}",
             fg_result.err()
+        );
+    }
+
+    #[tokio::test]
+    async fn test_lookup_state_transition_ignore_case() {
+        let (ecu_manager, _dc) =
+            create_ecu_manager_with_state_transitions(ServiceSecurityTransition::LockedToExtended);
+        {
+            let mut states = ecu_manager.ecu_service_states.write().await;
+            states.insert(service_ids::SESSION_CONTROL, "defaultSession".to_owned());
+            states.insert(service_ids::SECURITY_ACCESS, "LockedSecurity".to_owned());
+        }
+        let result = ecu_manager.lookup_session_change("extendedSessioN").await;
+        assert!(
+            result.is_ok(),
+            "Current_state must resolve against PascalCase chart: {result:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_lookup_state_transition_wrong_current_state_returns_none() {
+        let (ecu_manager, _dc) =
+            create_ecu_manager_with_state_transitions(ServiceSecurityTransition::LockedToExtended);
+        {
+            let mut states = ecu_manager.ecu_service_states.write().await;
+            // ECU is already in ExtendedSession - the service's session transition is
+            // DefaultSession -> ExtendedSession, which does not start from Extended.
+            states.insert(service_ids::SESSION_CONTROL, "ExtendedSession".to_owned());
+            states.insert(service_ids::SECURITY_ACCESS, "LockedSecurity".to_owned());
+        }
+        // There is no service whose session transition starts from ExtendedSession, so
+        // lookup_session_change to ProgrammingSession must fail.
+        let result = ecu_manager
+            .lookup_session_change("ProgrammingSession")
+            .await;
+        assert!(
+            result.is_err(),
+            "transition from wrong source state must not match: {result:?}"
         );
     }
 }
