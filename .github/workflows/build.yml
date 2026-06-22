@@ -63,13 +63,28 @@ jobs:
             exit 1
           fi
           echo "Generated files are up to date."
-      - name: Verify reference config is up to date
+      - name: Verify reference config matches generated config
         run: |
           cargo run --locked --all-features -- generate-config --output /tmp/opensovd-cda.toml
           if ! diff -u opensovd-cda.toml /tmp/opensovd-cda.toml; then
             echo ""
-            echo "::error::opensovd-cda.toml is out of date."
-            echo "Regenerate with: cargo run --all-features -- generate-config --output opensovd-cda.toml"
+            echo "::error::opensovd-cda.toml does not match configuration generated from code."
+
+            cat <<EOF
+          The opensovd-cda.toml file is a reference generated from the source code.
+          You should not edit it directly and it needs to be regenerated when you
+          edit the configuration fields in the source code.
+
+          You can regenerate it with:
+          cargo run --all-features -- generate-config --output opensovd-cda.toml
+
+          You will need DLT installed as a library on your system.
+          You can install it like so:
+            * On Debian-based systems: apt install libdlt-dev
+            * On macOS with Homebrew:
+              brew tap COVESA/dlt-daemon https://github.com/COVESA/dlt-daemon
+              brew install COVESA/dlt-daemon/dlt-daemon
+          EOF
             exit 1
           fi
           echo "opensovd-cda.toml is up to date."
