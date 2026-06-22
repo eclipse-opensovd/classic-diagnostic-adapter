@@ -505,4 +505,62 @@ mod tests {
             "transition from wrong source state must not match: {result:?}"
         );
     }
+
+    #[tokio::test]
+    async fn test_lookup_state_transition_no_match_returns_none() {
+        let (ecu_manager, dc) =
+            create_ecu_manager_with_state_transitions(ServiceSecurityTransition::LockedToExtended);
+        {
+            let mut states = ecu_manager.ecu_service_states.write().await;
+            states.insert(
+                service_ids::SESSION_CONTROL,
+                "Programmingsession".to_owned(),
+            );
+            states.insert(
+                service_ids::SECURITY_ACCESS,
+                "programmingsecurity".to_owned(),
+            );
+        }
+        let payload_data = UdsPayloadData::Raw(vec![service_ids::WRITE_DATA_BY_IDENTIFIER]);
+        let result = ecu_manager
+            .create_uds_payload(&dc, &skip_sec_plugin!(), Some(payload_data), None)
+            .await;
+        assert!(
+            result.is_ok(),
+            "UDS payload creation should succeed: {:?}",
+            result.err()
+        );
+        let payload = result.unwrap();
+        assert!(
+            payload.new_session.is_none(),
+            "expected no session transition when current state does not match"
+        );
+        assert!(
+            payload.new_security.is_none(),
+            "expected no security transition when current state does not match"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_lookup_state_transition_match_returns_target() {
+        let (ecu_manager, dc) =
+            create_ecu_manager_with_state_transitions(ServiceSecurityTransition::LockedToExtended);
+        {
+            let mut states = ecu_manager.ecu_service_states.write().await;
+            states.insert(service_ids::SESSION_CONTROL, "DefaultSession".to_owned());
+            states.insert(service_ids::SECURITY_ACCESS, "LockedSecurity".to_owned());
+        }
+        let payload_data = UdsPayloadData::Raw(vec![service_ids::WRITE_DATA_BY_IDENTIFIER]);
+        let result = ecu_manager
+            .create_uds_payload(&dc, &skip_sec_plugin!(), Some(payload_data), None)
+            .await;
+        assert!(
+            result.is_ok(),
+            "UDS payload creation should succeed: {:?}",
+            result.err()
+        );
+        let payload = result.unwrap();
+        assert_eq!(payload.new_session, Some("ExtendedSession".to_owned()));
+        assert_eq!(payload.new_security, Some("ExtendedSecurity".to_owned()));
+    }
 }
