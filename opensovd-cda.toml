@@ -494,6 +494,10 @@
 
 # `DoIP` (Diagnostics over IP) transport layer settings.
 [doip]
+# Interval in seconds between `DoIP` alive check requests sent on idle connections.
+# The alive check is only sent when no diagnostic communication has occurred
+# for this duration. Set to 0 to disable the alive check.
+# alive_check_interval_secs = 1800
 # UDP/TCP port for `DoIP` gateway discovery and communication.
 # gateway_port = 13400
 # The name of the protocol to use.
