@@ -2022,3 +2022,168 @@ pub(crate) fn create_ecu_manager_with_routine_control_service()
     let db = finish_db!(db_builder, protocol, vec![diag_service]);
     new_ecu_manager(db)
 }
+
+/// Build an ECU manager with two SID 0x27 (`SecurityAccess`) `RequestSeed` services,
+/// one `SendKey` service, and a SECURITY state chart.
+///
+/// Services:
+/// - `RequestSeed_level_01`: sub-function 0x01, 2 params (SID + `sub_func`)
+/// - `RequestSeed_level_12`: sub-function 0x12 (18 dec), 2 params
+/// - `SendKey_level_01`: sub-function 0x02, 3 params, carries LockedSecurity->ExtendedSecurity ref
+///
+/// Returns `(ecu_manager, request_seed_name_01, request_seed_name_12, send_key_name)`.
+#[allow(clippy::too_many_lines)] // Splitting the 'create' function up, makes it worse to read.
+pub(crate) fn create_ecu_manager_with_security_access_services() -> (
+    crate::diag_kernel::ecumanager::EcuManager<DefaultSecurityPluginData>,
+    String,
+    String,
+    String,
+) {
+    let mut db_builder = EcuDataBuilder::new();
+    let protocol_name = Protocol::default().to_string();
+    let protocol = db_builder.create_protocol(&protocol_name, None, None, None);
+    let cp_ref = db_builder.create_com_param_ref(None, None, None, Some(protocol), None);
+
+    let sid = service_ids::SECURITY_ACCESS;
+
+    let request_seed_01_name = "RequestSeed_level_01";
+    let request_seed_01_sid = db_builder.create_coded_const_param(
+        SID_PARM_NAME,
+        &sid.to_string(),
+        0,
+        0,
+        8,
+        DataType::UInt32,
+    );
+    let request_seed_01_sub_func =
+        db_builder.create_coded_const_param("sub_func", "1", 1, 0, 8, DataType::UInt32);
+    let request_seed_01_request = db_builder.create_request(
+        Some(vec![request_seed_01_sid, request_seed_01_sub_func]),
+        None,
+    );
+    let request_seed_01_diag_comm = db_builder.create_diag_comm(DiagCommParams {
+        short_name: request_seed_01_name,
+        protocols: Some(vec![protocol]),
+        ..Default::default()
+    });
+    let request_seed_01_service = new_diag_service!(
+        db_builder,
+        request_seed_01_diag_comm,
+        request_seed_01_request,
+        vec![],
+        vec![]
+    );
+
+    // Sub-function 0x12 (18 dec) - used to test the hex-string id fallback path.
+    let request_seed_12_name = "RequestSeed_level_12";
+    let request_seed_12_sid = db_builder.create_coded_const_param(
+        SID_PARM_NAME,
+        &sid.to_string(),
+        0,
+        0,
+        8,
+        DataType::UInt32,
+    );
+    let request_seed_12_sub_func =
+        db_builder.create_coded_const_param("sub_func", "18", 1, 0, 8, DataType::UInt32);
+    let request_seed_12_request = db_builder.create_request(
+        Some(vec![request_seed_12_sid, request_seed_12_sub_func]),
+        None,
+    );
+    let request_seed_12_diag_comm = db_builder.create_diag_comm(DiagCommParams {
+        short_name: request_seed_12_name,
+        protocols: Some(vec![protocol]),
+        ..Default::default()
+    });
+    let request_seed_12_service = new_diag_service!(
+        db_builder,
+        request_seed_12_diag_comm,
+        request_seed_12_request,
+        vec![],
+        vec![]
+    );
+
+    let locked_state = db_builder.create_state("LockedSecurity", None);
+    let extended_state = db_builder.create_state("ExtendedSecurity", None);
+
+    let locked_to_extended = db_builder.create_state_transition(
+        "LockedToExtended",
+        Some("LockedSecurity"),
+        Some("ExtendedSecurity"),
+    );
+
+    let security_state_chart = db_builder.create_state_chart(
+        "SecurityAccess",
+        Some(semantics::SECURITY),
+        Some(vec![locked_to_extended]),
+        Some("LockedSecurity"),
+        Some(vec![locked_state, extended_state]),
+    );
+
+    let default_session_state = db_builder.create_state("DefaultSession", None);
+    let session_state_chart = db_builder.create_state_chart(
+        "Session",
+        Some(semantics::SESSION),
+        None,
+        Some("DefaultSession"),
+        Some(vec![default_session_state]),
+    );
+
+    let send_key_01_name = "SendKey_level_01";
+    let send_key_01_sid = db_builder.create_coded_const_param(
+        SID_PARM_NAME,
+        &sid.to_string(),
+        0,
+        0,
+        8,
+        DataType::UInt32,
+    );
+    let send_key_01_sub_func =
+        db_builder.create_coded_const_param("sub_func", "2", 1, 0, 8, DataType::UInt32);
+    let send_key_01_key =
+        db_builder.create_coded_const_param("key", "0", 2, 0, 8, DataType::UInt32);
+    let send_key_01_request = db_builder.create_request(
+        Some(vec![send_key_01_sid, send_key_01_sub_func, send_key_01_key]),
+        None,
+    );
+    let locked_to_extended_ref = db_builder.create_state_transition_ref(locked_to_extended);
+    let send_key_01_diag_comm = db_builder.create_diag_comm(DiagCommParams {
+        short_name: send_key_01_name,
+        state_transition_refs: Some(vec![locked_to_extended_ref]),
+        protocols: Some(vec![protocol]),
+        ..Default::default()
+    });
+    let send_key_01_service = new_diag_service!(
+        db_builder,
+        send_key_01_diag_comm,
+        send_key_01_request,
+        vec![],
+        vec![]
+    );
+
+    let diag_layer = db_builder.create_diag_layer(DiagLayerParams {
+        short_name: TEST_DIAG_LAYER,
+        com_param_refs: Some(vec![cp_ref]),
+        diag_services: Some(vec![
+            request_seed_01_service,
+            request_seed_12_service,
+            send_key_01_service,
+        ]),
+        state_charts: Some(vec![session_state_chart, security_state_chart]),
+        ..Default::default()
+    });
+    let variant = db_builder.create_variant(diag_layer, true, None, None);
+    let db = db_builder.finish(EcuDataParams {
+        revision: "1",
+        version: "1.0.0",
+        variants: Some(vec![variant]),
+        ..Default::default()
+    });
+
+    (
+        new_ecu_manager(db),
+        request_seed_01_name.to_owned(),
+        request_seed_12_name.to_owned(),
+        send_key_01_name.to_owned(),
+    )
+}

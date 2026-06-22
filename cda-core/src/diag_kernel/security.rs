@@ -41,6 +41,10 @@ impl<S: SecurityPlugin> EcuSecurity for EcuManager<S> {
             // whose short name contains the level name (underscores stripped, case-insensitive).
             // 2 request parameters (SID + subfunction, no key payload) distinguishes RequestSeed
             // from SendKey services whose subfunctions overlap in the ISO range.
+            let level_sub_func: Option<u32> = level
+                .split('_')
+                .next_back()
+                .and_then(|l| u32::from_str_radix(l, 16).ok().or_else(|| l.parse().ok()));
             let level_stripped = level.replace('_', "");
             let request_seed_service = self
                 .lookup_services_by_sid(service_ids::SECURITY_ACCESS)?
@@ -60,11 +64,13 @@ impl<S: SecurityPlugin> EcuSecurity for EcuManager<S> {
                         && service
                             .request()
                             .is_some_and(|r| r.params().is_some_and(|p| p.len() >= 2))
-                        && service.diag_comm().is_some_and(|dc| {
+                        // Try matching by name first, if that did not yield a result,
+                        // check if the subfunction ID matches the level.
+                        && (service.diag_comm().is_some_and(|dc| {
                             dc.short_name().is_some_and(|n| {
                                 contains_ignore_ascii_case(&n.replace('_', ""), &level_stripped)
                             })
-                        })
+                        })  || Some(sub_func) == level_sub_func)
                 })
                 .ok_or_else(|| {
                     DiagServiceError::NotFound(format!(
@@ -74,6 +80,10 @@ impl<S: SecurityPlugin> EcuSecurity for EcuManager<S> {
                 })?;
 
             let request_seed_service = request_seed_service.try_into()?;
+            tracing::debug!(
+                "Found request_seed_service: {request_seed_service:?}, sub function id \
+                 {level_sub_func:?}"
+            );
 
             Ok(SecurityAccess::RequestSeed(request_seed_service))
         }
@@ -302,4 +312,114 @@ pub(in crate::diag_kernel) fn check_security_plugin<S: SecurityPlugin>(
         .map(SecurityPlugin::as_security_plugin)?;
 
     security_plugin.validate_service(service)
+}
+
+#[cfg(test)]
+mod tests {
+    use cda_interfaces::{DiagServiceError, EcuSecurity, EcuStateManager, SecurityAccess, service_ids};
+
+    use crate::diag_kernel::test_utils::ecu_manager_builder::create_ecu_manager_with_security_access_services;
+
+    /// Name-based lookup: level name is contained in the service's `short_name`
+    /// (underscores stripped, case-insensitive). The matching service is returned
+    /// as `SecurityAccess::RequestSeed`.
+    #[tokio::test]
+    async fn test_lookup_security_access_request_seed_by_name() {
+        let (ecu_manager, _, request_seed_12_name, _) =
+            create_ecu_manager_with_security_access_services();
+        {
+            let mut states = ecu_manager.ecu_service_states.write().await;
+            states.insert(service_ids::SESSION_CONTROL, "DefaultSession".to_owned());
+            states.insert(service_ids::SECURITY_ACCESS, "LockedSecurity".to_owned());
+        }
+
+        let result = ecu_manager
+            .lookup_security_access_change("level_12", false)
+            .await;
+        assert!(
+            result.is_ok(),
+            "name-based lookup for level_12 failed: {:?}",
+            result.err()
+        );
+        let SecurityAccess::RequestSeed(dc) = result.unwrap() else {
+            panic!("expected SecurityAccess::RequestSeed");
+        };
+        assert_eq!(dc.name, request_seed_12_name);
+    }
+
+    /// Per-id lookup with a bare hex-encoded trailing suffix (no "0x" prefix).
+    /// `"access_12"` -> trailing segment "12" -> `from_str_radix("12", 16)` = 18 = 0x12
+    /// -> sub-func 0x12 -> matches `RequestSeed_level_12`.
+    #[tokio::test]
+    async fn test_lookup_security_access_request_seed_by_subfunction_id_hex() {
+        let (ecu_manager, _, request_seed_12_name, _) =
+            create_ecu_manager_with_security_access_services();
+        {
+            let mut states = ecu_manager.ecu_service_states.write().await;
+            states.insert(service_ids::SESSION_CONTROL, "DefaultSession".to_owned());
+            states.insert(service_ids::SECURITY_ACCESS, "LockedSecurity".to_owned());
+        }
+
+        // "access_12" -> trailing "12" -> from_str_radix("12", 16) = 18 -> sub-func 0x12
+        let result = ecu_manager
+            .lookup_security_access_change("access_12", false)
+            .await;
+        assert!(
+            result.is_ok(),
+            "subfunction-id bare-hex fallback lookup failed: {:?}",
+            result.err()
+        );
+        let SecurityAccess::RequestSeed(dc) = result.unwrap() else {
+            panic!("expected SecurityAccess::RequestSeed");
+        };
+        assert_eq!(dc.name, request_seed_12_name);
+    }
+
+    /// A level that cannot be resolved either by name or by subfunction ID must
+    /// return `Err(DiagServiceError::NotFound)`.
+    #[tokio::test]
+    async fn test_lookup_security_access_request_seed_not_found() {
+        let (ecu_manager, ..) = create_ecu_manager_with_security_access_services();
+        {
+            let mut states = ecu_manager.ecu_service_states.write().await;
+            states.insert(service_ids::SESSION_CONTROL, "DefaultSession".to_owned());
+            states.insert(service_ids::SECURITY_ACCESS, "LockedSecurity".to_owned());
+        }
+
+        // "unknown_99" - name not in any service, sub-func 99 (0x63) is outside
+        // the RequestSeed range (1 | 3..=5 | 7..=41) so no service matches.
+        let result = ecu_manager
+            .lookup_security_access_change("unknown_99", false)
+            .await;
+        assert!(
+            matches!(result, Err(DiagServiceError::NotFound(_))),
+            "expected NotFound for unresolvable level, got {:?}",
+            result.err()
+        );
+    }
+
+    /// `has_key = true` path: `lookup_security_access_change` must delegate to
+    /// `lookup_state_transition_for_active` on the SECURITY state chart and
+    /// return `SecurityAccess::SendKey` pointing at the service that carries the
+    /// `LockedSecurity -> ExtendedSecurity` transition ref.
+    #[tokio::test]
+    async fn test_lookup_security_access_send_key_via_state_transition() {
+        let (ecu_manager, _, _, send_key_01_name) =
+            create_ecu_manager_with_security_access_services();
+        {
+            let mut states = ecu_manager.ecu_service_states.write().await;
+            states.insert(service_ids::SESSION_CONTROL, "DefaultSession".to_owned());
+            states.insert(service_ids::SECURITY_ACCESS, "LockedSecurity".to_owned());
+        }
+
+        // Transition LockedSecurity -> ExtendedSecurity; SendKey_level_01 carries that ref.
+        let result = ecu_manager
+            .lookup_security_access_change("ExtendedSecurity", true)
+            .await;
+        assert!(result.is_ok(), "SendKey lookup failed: {:?}", result.err());
+        let SecurityAccess::SendKey(dc) = result.unwrap() else {
+            panic!("expected SecurityAccess::SendKey");
+        };
+        assert_eq!(dc.name, send_key_01_name);
+    }
 }
