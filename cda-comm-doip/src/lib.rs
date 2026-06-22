@@ -420,7 +420,10 @@ impl<T: EcuAddresses + DoipComParams> EcuGateway for DoipDiagGateway<T> {
                                 if let Ok(result) = ecu.receiver.recv().await {
                                     match result {
                                         Ok(DiagnosticResponse::Ack((_, prev))) => {
-                                            tracing::debug!("Received ACK");
+                                            tracing::debug!(
+                                                ecu_name = %transmission_params.ecu_name,
+                                                "Received ACK"
+                                            );
                                             if !prev.is_empty()
                                                 && !doip_message.message.starts_with(&prev)
                                             {
@@ -440,6 +443,11 @@ impl<T: EcuAddresses + DoipComParams> EcuGateway for DoipDiagGateway<T> {
                                         }
                                         Ok(DiagnosticResponse::GenericNack(nack)) => {
                                             // todo #22: handle generic NACK
+                                            tracing::warn!(
+                                                ecu_name = %transmission_params.ecu_name,
+                                                nack_code = ?nack.nack_code,
+                                                "Received generic NACK"
+                                            );
                                             try_send_uds_response(
                                                 &response_sender,
                                                 Err(DiagServiceError::Nack(u8::from(
@@ -449,6 +457,11 @@ impl<T: EcuAddresses + DoipComParams> EcuGateway for DoipDiagGateway<T> {
                                             .await;
                                         }
                                         Ok(DiagnosticResponse::Nack(nack)) => {
+                                            tracing::warn!(
+                                                ecu_name = %transmission_params.ecu_name,
+                                                nack_code = ?nack.nack_code,
+                                                "Received NACK"
+                                            );
                                             try_send_uds_response(
                                                 &response_sender,
                                                 Err(DiagServiceError::Nack(u8::from(
@@ -459,8 +472,8 @@ impl<T: EcuAddresses + DoipComParams> EcuGateway for DoipDiagGateway<T> {
                                         }
                                         Ok(msg) => {
                                             tracing::warn!(
-                                                "Expected ACK/NACK but received unexpected \
-                                                 message: {:?}",
+                                                ecu_name = %transmission_params.ecu_name,
+                                                "Expected ACK/NACK but received unexpected message: {:?}",
                                                 msg
                                             );
                                             // any response but ACK/NACK is unexpected because
@@ -472,6 +485,11 @@ impl<T: EcuAddresses + DoipComParams> EcuGateway for DoipDiagGateway<T> {
                                             continue 'ack_waiting;
                                         }
                                         Err(e) => {
+                                            tracing::error!(
+                                                ecu_name = %transmission_params.ecu_name,
+                                                error = %e,
+                                                "Error while waiting for ACK/NACK"
+                                            );
                                             try_send_uds_response(
                                                 &response_sender,
                                                 Err(DiagServiceError::NoResponse(format!(
@@ -485,6 +503,10 @@ impl<T: EcuAddresses + DoipComParams> EcuGateway for DoipDiagGateway<T> {
                                     break 'ack_waiting false;
                                 }
                                 // did not get anything from ecu receiver, meaning it is closed.
+                                tracing::error!(
+                                    ecu_name = %transmission_params.ecu_name,
+                                    "ECU receiver unexpectedly closed while waiting for ACK/NACK"
+                                );
                                 try_send_uds_response(
                                     &response_sender,
                                     Err(DiagServiceError::NoResponse(
@@ -504,8 +526,9 @@ impl<T: EcuAddresses + DoipComParams> EcuGateway for DoipDiagGateway<T> {
                         }
                     } else {
                         tracing::warn!(
-                            "Timeout waiting for ACK/NACK from ECU after {:?}",
-                            transmission_params.timeout_ack
+                            ecu_name = %transmission_params.ecu_name,
+                            timeout = ?transmission_params.timeout_ack,
+                            "Timeout waiting for ACK/NACK from ECU"
                         );
                         // timeout branch of tokio::select, no response received,
                         // informing receiver about timeout and giving up.
@@ -536,6 +559,11 @@ impl<T: EcuAddresses + DoipComParams> EcuGateway for DoipDiagGateway<T> {
                                         }
                                     }
                                     Err(e) => {
+                                        tracing::error!(
+                                            ecu_name = %transmission_params.ecu_name,
+                                            error = %e,
+                                            "Error while waiting for response message"
+                                        );
                                         if !try_send_uds_response(
                                                 &response_sender,
                                                 Err(DiagServiceError::NoResponse(
@@ -546,6 +574,10 @@ impl<T: EcuAddresses + DoipComParams> EcuGateway for DoipDiagGateway<T> {
                                         }
                                     }
                                 } } else {
+                                    tracing::error!(
+                                        ecu_name = %transmission_params.ecu_name,
+                                        "ECU receiver unexpectedly closed while waiting for response"
+                                    );
                                     try_send_uds_response(&response_sender,
                                         Err(DiagServiceError::NoResponse(
                                             "ECU receiver unexpectedly closed".to_owned(),
@@ -554,7 +586,10 @@ impl<T: EcuAddresses + DoipComParams> EcuGateway for DoipDiagGateway<T> {
                                 }
                             }
                             () = response_sender.closed() => {
-                                tracing::debug!("Response sender closed, aborting loop");
+                                tracing::debug!(
+                                    ecu_name = %transmission_params.ecu_name,
+                                    "Response sender closed, aborting loop"
+                                );
                                 break;
                             }
                         }
@@ -566,6 +601,7 @@ impl<T: EcuAddresses + DoipComParams> EcuGateway for DoipDiagGateway<T> {
                         .saturating_sub(send_and_ackd_after)
                         .saturating_sub(receiver_flushed);
                     tracing::debug!(
+                        ecu_name = %transmission_params.ecu_name,
                         total_duration = ?start.elapsed(),
                         lock_duration = ?lock_acquired,
                         flush_duration = ?receiver_flushed,
