@@ -745,6 +745,9 @@ fn spawn_gateway_receiver_task(
             }
 
             // wait for a message to be received or a send request
+            // Tokio is randomizing which branch takes precedence when both are ready.
+            // this is good here because it prevents send / receive starvation by
+            // not prioritizing one of the branches.
             tokio::select! {
                 send_pending_result = send_pending_rx.changed() => {
                     if let Err(()) = handle_send_pending(
