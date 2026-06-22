@@ -556,6 +556,11 @@ impl<T: EcuAddresses + DoipComParams> EcuGateway for DoipDiagGateway<T> {
                     // i.e. when the ecu is busy and sends NRC 0x78
                     loop {
                         tokio::select! {
+                            // Using biased saves a bit of CPU time, because tokio does not
+                            // have to generate a random number to select the branch.
+                            // Prioritizing the ecu.reciver over the closed handler is fine
+                            // because it is unlikely that both signal at the exact same time.
+                            biased;
                             res = ecu.receiver.recv() => {
                                 if let Ok(res) = res { match res {
                                     Ok(response) => {

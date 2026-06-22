@@ -58,6 +58,10 @@ where
     let vam_timeout = Duration::from_secs(1); // not the actual timeout from the spec ...
 
     tokio::select! {
+        // Use `biased` to prioritize shutdown signal over the VIR receive loop.
+        // This ensures that if shutdown is already signaled when entering the
+        // select, we exit immediately without starting unnecessary work.
+        biased;
         () = &mut shutdown_signal => {
             tracing::info!("Shutdown signal received");
         },
@@ -294,6 +298,9 @@ pub(crate) async fn listen_for_vams<T, F>(
             loop {
                 let mut socket = broadcast_socket.lock().await;
                 tokio::select! {
+                    // Use `biased` to prioritize shutdown signal and cancel handling
+                    // over processing the VAM
+                    biased;
                     () = &mut shutdown_signal => {
                         break
                     },
