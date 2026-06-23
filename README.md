@@ -236,6 +236,19 @@ The integration test framework supports the following environment variables:
   export CDA_INTEGRATION_TEST_TESTER_ADDRESS=127.0.0.1
   ```
 
+- **`PCAP_OUTPUT`**
+  Enables packet capture of all DoIP and HTTP traffic during the test run using `tcpdump`.
+  The value must be an absolute or relative path to the output `.pcap` file.
+
+  Requires `tcpdump` to be installed and have permission to capture on the loopback interface.
+  On macOS you may need to run once: `sudo chmod 666 /dev/bpf*`
+
+  Example:
+  ```shell
+  export PCAP_OUTPUT=/tmp/test-capture.pcap
+  cargo test --locked --features integration-tests
+  ```
+
 ##### test structure
 
 Tests use a shared runtime to avoid repeatedly starting/stopping the CDA and ECU simulator:

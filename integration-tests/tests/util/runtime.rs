@@ -56,6 +56,11 @@ static TOKIO_RUNTIME: LazyLock<tokio::runtime::Runtime> =
 static ECU_SIM_PROCESS: LazyLock<Mutex<Option<std::process::Child>>> =
     LazyLock::new(|| Mutex::new(None));
 
+static TCPDUMP_PROCESS: LazyLock<Mutex<Option<std::process::Child>>> =
+    LazyLock::new(|| Mutex::new(None));
+
+const PCAP_OUTPUT: &str = "PCAP_OUTPUT";
+
 const CDA_INTEGRATION_TEST_USE_DOCKER: &str = "CDA_INTEGRATION_TEST_USE_DOCKER";
 const CDA_INTEGRATION_TEST_TESTER_ADDRESS: &str = "CDA_INTEGRATION_TEST_TESTER_ADDRESS";
 
@@ -134,6 +139,7 @@ async fn initialize_runtime() -> Result<TestRuntime, TestingError> {
         control_port: sim_control_port,
     };
 
+    start_pcap_capture(cda_port, gateway_port);
     register_cleanup();
     register_panic_hook();
     if use_docker() {
@@ -827,8 +833,63 @@ pub(crate) fn test_container_dir() -> Result<std::path::PathBuf, TestingError> {
         .ok_or_else(|| TestingError::PathNotFound("testcontainer directory not found".to_owned()))
 }
 
+fn start_pcap_capture(cda_port: u16, gateway_port: u16) {
+    let pcap_path = match std::env::var(PCAP_OUTPUT) {
+        Ok(path) if !path.is_empty() => path,
+        _ => return,
+    };
+
+    let tcpdump = match std::process::Command::new("tcpdump").arg("--version").output() {
+        Ok(_) => "tcpdump",
+        Err(_) => {
+            tracing::warn!(
+                "PCAP_OUTPUT is set but tcpdump was not found. Install tcpdump to capture traffic."
+            );
+            return;
+        }
+    };
+
+    let interface = if cfg!(target_os = "macos") {
+        "lo0"
+    } else {
+        "lo"
+    };
+
+    let filter = format!("port {gateway_port} or port {cda_port}");
+
+    match std::process::Command::new(tcpdump)
+        .args(["-i", interface, "-U", "-w", &pcap_path, &filter])
+        .spawn()
+    {
+        Ok(child) => {
+            tracing::info!(
+                "tcpdump capturing on {interface} (filter: {filter}) to {pcap_path}, pid={}",
+                child.id()
+            );
+            TOKIO_RUNTIME.block_on(async {
+                *TCPDUMP_PROCESS.lock().await = Some(child);
+            });
+        }
+        Err(e) => {
+            tracing::warn!("Failed to start tcpdump: {e}. Try running with sudo or chmod /dev/bpf*.");
+        }
+    }
+}
+
+fn stop_pcap_capture() {
+    TOKIO_RUNTIME.block_on(async {
+        if let Some(mut child) = TCPDUMP_PROCESS.lock().await.take() {
+            tracing::info!("Stopping tcpdump (pid={})", child.id());
+            let _ = child.kill();
+            let _ = child.wait();
+        }
+    });
+}
+
 fn register_cleanup() {
     extern "C" fn cleanup_handler() {
+        stop_pcap_capture();
+
         let use_docker =
             std::env::var(CDA_INTEGRATION_TEST_USE_DOCKER).map_or(true, |s| s == "true");
 
