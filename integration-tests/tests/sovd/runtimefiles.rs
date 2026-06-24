@@ -34,7 +34,7 @@ use crate::{
     util::{
         TestingError,
         http::{QueryParams, auth_header, response_to_t, send_cda_request},
-        runtime::{setup_integration_test, test_container_dir},
+        runtime::{setup_integration_test, test_container_dir, wait_for_ecus_online},
     },
 };
 
@@ -1648,6 +1648,12 @@ async fn runtimefiles_apply_removes_ecu_routes() -> Result<(), TestingError> {
     // Apply created a backup of the original database; Rollback restores it.
     execute_mode(&runtime.config, &auth, ExecutionMode::Rollback).await?;
     cda_interfaces::util::tokio_ext::sleep_for(Duration::from_secs(5)).await;
+
+    // Wait for all ECUs to come back online after the reload triggered by rollback.
+    // The reload creates a fresh DoIP gateway that must re-discover ECUs via VIR/VAM
+    // and run variant detection. Without this wait, subsequent tests may find ECUs
+    // still in Offline state.
+    wait_for_ecus_online(&runtime.config).await?;
 
     // Rollback restores the original database -> FLXC1000 is back.
     send_cda_request(

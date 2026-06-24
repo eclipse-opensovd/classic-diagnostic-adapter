@@ -107,7 +107,6 @@ pub(crate) async fn handle_gateway_connection<T>(
     doip_connections: &Arc<RwLock<Vec<Arc<DoipConnection>>>>,
     ecus: &Arc<HashMap<String, RwLock<T>>>,
     gateway_ecu_map: &HashMap<u16, Vec<u16>>,
-    send_timeout: Duration,
     variant_detection: Option<(mpsc::Sender<Vec<String>>, Vec<String>)>,
 ) -> Result<u16, EcuError>
 where
@@ -159,7 +158,7 @@ where
             retry_delay: connection_retry_delay,
             connect_timeout: connection_timeout,
             max_retry_attempts: connection_retry_attempts,
-            send_timeout,
+            send_timeout: doip_connection_config.send_timeout,
         },
         variant_detection,
     )
@@ -185,6 +184,7 @@ where
         .push(Arc::new(DoipConnection {
             ecus: doip_ecus,
             ip: gateway.ip,
+            task_handles,
         }));
 
     Ok(gateway.logical_address)
@@ -293,7 +293,7 @@ async fn connection_handler(
     let (conn_reset_tx, conn_reset_rx) = mpsc::channel::<ConnectionResetReason>(1);
     // task to handle connection resets and reconnects
     let conn_reset = Arc::<EcuConnectionTarget>::clone(&gateway_conn);
-    spawn_connection_reset_task(
+    let reset_handle = spawn_connection_reset_task(
         connection_config.clone(),
         gateway_ip.clone(),
         doip_connection_config,
@@ -301,12 +301,13 @@ async fn connection_handler(
         conn_reset_rx,
         conn_reset,
         connection_settings,
+        variant_detection,
     );
 
     // communication between send / receiver task to unlock the connection in the receiver task
     // when sender task wants to send something
     let (send_pending_tx, send_pending_rx) = watch::channel::<bool>(false);
-    spawn_gateway_sender_task(
+    let sender_handle = spawn_gateway_sender_task(
         &gateway_ip,
         inrx,
         Arc::<EcuConnectionTarget>::clone(&gateway_conn),
@@ -314,7 +315,7 @@ async fn connection_handler(
         conn_reset_tx.clone(),
         send_pending_tx.clone(),
     );
-    spawn_gateway_receiver_task(
+    let receiver_handle = spawn_gateway_receiver_task(
         gateway_ip.clone(),
         gateway_name.clone(),
         outtx,
@@ -325,7 +326,11 @@ async fn connection_handler(
     );
 
     // no need to wait until the connection is alive, we will reconnect automatically anyway
-    Ok((intx, outrx))
+    Ok((
+        intx,
+        outrx,
+        vec![reset_handle, sender_handle, receiver_handle],
+    ))
 }
 
 #[tracing::instrument(
@@ -425,7 +430,7 @@ fn spawn_connection_reset_task(
                 }
             }
         })
-    );
+    )
 }
 
 #[tracing::instrument(
@@ -441,7 +446,7 @@ fn spawn_gateway_sender_task(
     send_timeout: Duration,
     reset_tx: mpsc::Sender<ConnectionResetReason>,
     send_pending_tx: watch::Sender<bool>,
-) {
+) -> tokio::task::JoinHandle<()> {
     cda_interfaces::spawn_named!(&format!("doip-gateway-sender-{gateway_ip}"), async move {
         fn send_pending_status(
             send_pending_tx: &watch::Sender<bool>,
@@ -462,7 +467,12 @@ fn spawn_gateway_sender_task(
         alive_interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
         loop {
             tokio::select! {
-                Some(msg) = inrx.recv() => {
+                msg = inrx.recv() => {
+                    let Some(msg) = msg else {
+                        // Channel closed - all senders dropped (gateway shut down).
+                        tracing::debug!("Send channel closed, shutting down sender task");
+                        break;
+                    };
                     let lock = send_mtx.lock().await;
                     // let rx task know that we want to send something.
                     if send_pending_status(&send_pending_tx, true).is_err() {
@@ -552,7 +562,7 @@ fn spawn_gateway_sender_task(
                 }
             }
         }
-    });
+    })
 }
 
 /// allowed because there are two inline functions in here,
@@ -575,7 +585,7 @@ fn spawn_gateway_receiver_task(
     mut send_pending_rx: watch::Receiver<bool>,
     reset_tx: mpsc::Sender<ConnectionResetReason>,
     send_tx: mpsc::Sender<DoipPayload>,
-) {
+) -> tokio::task::JoinHandle<()> {
     // note: the handlers are defined here, as rustfmt cannot format the correctly inside the
     // tokio::select! macro block
     async fn handle_send_pending(
@@ -774,7 +784,7 @@ fn spawn_gateway_receiver_task(
                 }
             }
         }
-    });
+    })
 }
 
 async fn send_alive_request(conn: &EcuConnectionTarget) -> Result<(), ()> {
