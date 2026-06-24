@@ -232,11 +232,13 @@ impl<T: EcuAddresses + DoipComParams> DoipDiagGateway<T> {
 
             // create mapping gateway_logical_address -> Vec<ecu_logical_address>
             let mut gateway_ecu_map: HashMap<u16, Vec<u16>> = HashMap::new();
+            let mut gateway_ecu_name_map: HashMap<u16, Vec<String>> = HashMap::new();
             for ecu_lock in ecus.values() {
                 let ecu = ecu_lock.read().await;
                 let addr = ecu.logical_address();
                 let gateway = ecu.logical_gateway_address();
                 gateway_ecu_map.entry(gateway).or_default().push(addr);
+                gateway_ecu_name_map.entry(gateway).or_default().push(ecu.ecu_name());
             }
 
             let doip_connections: Arc<RwLock<Vec<Arc<DoipConnection>>>> =
@@ -244,6 +246,10 @@ impl<T: EcuAddresses + DoipComParams> DoipDiagGateway<T> {
             let mut logical_address_to_connection = HashMap::new();
 
             for gateway in gateways {
+                let ecu_names_for_gateway = gateway_ecu_name_map
+                    .get(&gateway.logical_address)
+                    .cloned()
+                    .unwrap_or_default();
                 if let Ok(logical_address) = connections::handle_gateway_connection::<T>(
                     gateway,
                     &GatewayConfig {
@@ -257,6 +263,7 @@ impl<T: EcuAddresses + DoipComParams> DoipDiagGateway<T> {
                         ecus: Arc::clone(&ecus),
                         gateway_ecu_map: gateway_ecu_map.clone(),
                     },
+                    Some((variant_detection.clone(), ecu_names_for_gateway)),
                 )
                 .await
                 {

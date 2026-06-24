@@ -123,6 +123,7 @@ pub(crate) async fn handle_gateway_connection<T>(
     gateway: DoipTarget,
     config: &GatewayConfig,
     state: &GatewayState<T>,
+    variant_detection: Option<(mpsc::Sender<Vec<String>>, Vec<String>)>,
 ) -> Result<u16, EcuError>
 where
     T: EcuAddresses + DoipComParams,
@@ -163,7 +164,7 @@ where
     let connection_timeout = gateway_ecu.connection_timeout();
     let connection_retry_attempts = gateway_ecu.connection_retry_attempts();
 
-    let (sender, receiver) = match connection_handler(
+    let (sender, receiver, task_handles) = match connection_handler(
         config.connection.clone(),
         gateway.ip.clone(),
         gateway.ecu.clone(),
@@ -178,10 +179,11 @@ where
             send_timeout: config.send_timeout,
             alive_check_interval: config.alive_check_interval,
         },
+        variant_detection,
     )
     .await
     {
-        Ok((sender, receiver)) => (sender, receiver),
+        Ok((sender, receiver, task_handles)) => (sender, receiver, task_handles),
         Err(e) => {
             return Err(EcuError::EcuConnectionError(
                 ConnectionError::ConnectionFailed(format!(
@@ -261,10 +263,12 @@ async fn connection_handler(
     routing_activation_request: RoutingActivationRequest,
     ecus: Vec<u16>,
     connection_settings: ConnectionSettings,
+    variant_detection: Option<(mpsc::Sender<Vec<String>>, Vec<String>)>,
 ) -> Result<
     (
         mpsc::Sender<DoipPayload>,
         HashMap<u16, broadcast::Receiver<Result<DiagnosticResponse, EcuError>>>,
+        Vec<tokio::task::JoinHandle<()>>,
     ),
     EcuError,
 > {
@@ -308,7 +312,7 @@ async fn connection_handler(
     let (conn_reset_tx, conn_reset_rx) = mpsc::channel::<ConnectionResetReason>(1);
     // task to handle connection resets and reconnects
     let conn_reset = Arc::<EcuConnectionTarget>::clone(&gateway_conn);
-    spawn_connection_reset_task(
+    let connection_reset_task = spawn_connection_reset_task(
         connection_config.clone(),
         gateway_ip.clone(),
         doip_connection_config,
@@ -316,12 +320,13 @@ async fn connection_handler(
         conn_reset_rx,
         conn_reset,
         connection_settings,
+        variant_detection,
     );
 
     // communication between send / receiver task to unlock the connection in the receiver task
     // when sender task wants to send something
     let (send_pending_tx, send_pending_rx) = watch::channel::<bool>(false);
-    spawn_gateway_sender_task(
+    let gateway_sender_task = spawn_gateway_sender_task(
         &gateway_ip,
         inrx,
         Arc::<EcuConnectionTarget>::clone(&gateway_conn),
@@ -330,7 +335,7 @@ async fn connection_handler(
         send_pending_tx.clone(),
         connection_settings.alive_check_interval,
     );
-    spawn_gateway_receiver_task(
+    let gateway_receiver_task = spawn_gateway_receiver_task(
         gateway_ip.clone(),
         gateway_name.clone(),
         outtx,
@@ -341,7 +346,7 @@ async fn connection_handler(
     );
 
     // no need to wait until the connection is alive, we will reconnect automatically anyway
-    Ok((intx, outrx))
+    Ok((intx, outrx, vec![connection_reset_task, gateway_sender_task, gateway_receiver_task]))
 }
 
 #[tracing::instrument(
@@ -358,7 +363,8 @@ fn spawn_connection_reset_task(
     mut conn_reset_rx: mpsc::Receiver<ConnectionResetReason>,
     conn_reset: Arc<EcuConnectionTarget>,
     connection_timeouts: ConnectionSettings,
-) {
+    variant_detection: Option<(mpsc::Sender<Vec<String>>, Vec<String>)>,
+) -> tokio::task::JoinHandle<()> {
     cda_interfaces::spawn_named!(
         &format!("doip-connection-reset-{gateway_ip}"),
         Box::pin(async move {
@@ -395,6 +401,21 @@ fn spawn_connection_reset_task(
                                         return;
                                     }
                                 }
+                                // Trigger variant detection after successful reconnection
+                                // so that ECUs transition back to Online.
+                                if let Some((ref vd_tx, ref ecu_names)) = variant_detection {
+                                    if let Err(e) = vd_tx.send(ecu_names.clone()).await {
+                                        tracing::error!(
+                                            error = ?e,
+                                            "Failed to trigger variant detection after reconnect"
+                                        );
+                                    } else {
+                                        tracing::info!(
+                                            ecus = ?ecu_names,
+                                            "Triggered variant detection after reconnect"
+                                        );
+                                    }
+                                }
                                 break 'reconnect;
                             }
                             Err(e) => {
@@ -425,7 +446,7 @@ fn spawn_connection_reset_task(
                 }
             }
         })
-    );
+    )
 }
 
 #[tracing::instrument(
@@ -588,7 +609,7 @@ fn spawn_gateway_receiver_task<T>(
     mut send_pending_rx: watch::Receiver<bool>,
     reset_tx: mpsc::Sender<ConnectionResetReason>,
     send_tx: mpsc::Sender<DoipPayload>,
-) where
+) -> tokio::task::JoinHandle<()> where
     T: AsyncRead + AsyncWrite + Unpin + Send + 'static,
 {
     // note: the handlers are defined here, as rustfmt cannot format the correctly inside the
@@ -792,7 +813,7 @@ fn spawn_gateway_receiver_task<T>(
                 }
             }
         }
-    });
+    })
 }
 
 async fn send_alive_response<T>(
