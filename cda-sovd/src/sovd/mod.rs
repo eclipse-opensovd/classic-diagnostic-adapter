@@ -685,11 +685,25 @@ async fn ecu_route<
             )
             .get_with(data::diag_service::get, data::diag_service::docs_get),
         )
+        .api_route(
+            "/configurations/{service}/docs",
+            routing::get_with(
+                configurations::diag_service::docs_endpoint::get,
+                configurations::diag_service::docs_endpoint::docs_transform,
+            ),
+        )
         .api_route("/data", routing::get_with(data::get, data::docs_get))
         .api_route(
             "/data/{service}",
             routing::get_with(data::diag_service::get, data::diag_service::docs_get)
                 .put_with(data::diag_service::put, data::diag_service::docs_put),
+        )
+        .api_route(
+            "/data/{service}/docs",
+            routing::get_with(
+                data::diag_service::docs_endpoint::get,
+                data::diag_service::docs_endpoint::docs_transform,
+            ),
         )
         .api_route(
             "/genericservice",
