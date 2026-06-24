@@ -295,6 +295,15 @@ pub struct FunctionalDescriptionConfig {
     /// Position of the protocol identifier in service names.
     pub protocol_position: datatypes::DiagnosticServiceAffixPosition,
 }
+impl Default for FunctionalDescriptionConfig {
+    fn default() -> Self {
+        Self {
+            description_database: "functional_groups".to_owned(),
+            enabled_functional_groups: None,
+            protocol_position: datatypes::DiagnosticServiceAffixPosition::Suffix,
+        }
+    }
+}
 
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
 pub enum DiagServiceError {

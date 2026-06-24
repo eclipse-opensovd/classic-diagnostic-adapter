@@ -25,7 +25,7 @@ use serde::{Deserialize, Serialize};
 
 // Allowed because it makes sense for a configuration to have more than 3 bools
 #[allow(clippy::struct_excessive_bools)]
-#[derive(Deserialize, Serialize, Clone, Debug, Default, schemars::JsonSchema)]
+#[derive(Deserialize, Serialize, Clone, Debug, schemars::JsonSchema)]
 pub struct DatabaseConfig {
     /// Path to load the databases from, this must be a directory.
     pub path: String,
@@ -63,4 +63,19 @@ pub struct DatabaseConfig {
     /// failure aborts the entire load/reload operation.
     #[serde(default)]
     pub ignore_invalid_mdd: bool,
+}
+
+impl Default for DatabaseConfig {
+    fn default() -> Self {
+        Self {
+            path: ".".to_owned(),
+            naming_convention: DatabaseNamingConvention::default(),
+            exit_no_database_loaded: false,
+            fallback_to_base_variant: true,
+            ignore_protocol: false,
+            strict_parameter_validation: false,
+            strict_ecu_config: false,
+            ignore_invalid_mdd: false,
+        }
+    }
 }
