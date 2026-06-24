@@ -41,7 +41,7 @@ use crate::{
 pub mod config;
 mod connections;
 mod ecu_connection;
-mod socket;
+pub mod socket;
 mod vir_vam;
 
 /// Timeout when suppressPosRspMsgIndicationBit is set.
@@ -71,12 +71,17 @@ enum DiagnosticResponse {
     TemporarilyNotAvailable(u16),
 }
 
+pub(crate) struct DoipGatewayState<T: EcuAddresses + DoipComParams> {
+    pub(crate) doip_connections: Arc<RwLock<Vec<Arc<DoipConnection>>>>,
+    pub(crate) logical_address_to_connection: Arc<RwLock<HashMap<u16, usize>>>,
+    pub(crate) ecus: Arc<HashMap<String, RwLock<T>>>,
+    pub(crate) socket: Arc<Mutex<DoIPUdpSocket>>,
+}
+
 pub struct DoipDiagGateway<T: EcuAddresses + DoipComParams> {
-    doip_connections: Arc<RwLock<Vec<Arc<DoipConnection>>>>,
-    logical_address_to_connection: Arc<RwLock<HashMap<u16, usize>>>,
-    ecus: Arc<HashMap<String, RwLock<T>>>,
-    socket: Arc<Mutex<DoIPUdpSocket>>,
+    state: Arc<DoipGatewayState<T>>,
     cancel_token: CancellationToken,
+    vam_listener_handle: Arc<tokio::task::JoinHandle<()>>,
 }
 
 #[derive(Debug)]
@@ -94,6 +99,7 @@ struct DoipEcu {
 struct DoipConnection {
     ecus: HashMap<u16, Arc<Mutex<DoipEcu>>>,
     ip: String,
+    task_handles: Vec<tokio::task::JoinHandle<()>>,
 }
 
 #[derive(Error, Debug, Clone)]
@@ -149,7 +155,7 @@ impl<T: EcuAddresses + DoipComParams> DoipDiagGateway<T> {
     /// # Errors
     /// Returns `String` if initialization fails, e.g. when socket creation fails.
     #[tracing::instrument(
-        skip(doip_config, ecus, variant_detection, shutdown_signal),
+        skip(doip_config, ecus, variant_detection, shutdown_signal, doip_socket),
         fields(
             tester_ip = doip_config.tester_address,
             gateway_port = doip_config.gateway_port,
@@ -162,6 +168,7 @@ impl<T: EcuAddresses + DoipComParams> DoipDiagGateway<T> {
         ecus: Arc<HashMap<String, RwLock<T>>>,
         variant_detection: mpsc::Sender<Vec<String>>,
         shutdown_signal: F,
+        doip_socket: Arc<Mutex<DoIPUdpSocket>>,
     ) -> Result<Self, DoipGatewaySetupError>
     where
         F: Future<Output = ()> + Send + 'static,
@@ -190,23 +197,19 @@ impl<T: EcuAddresses + DoipComParams> DoipDiagGateway<T> {
                 ))
             })?,
             send_diagnostic_message_ack: *send_diagnostic_message_ack,
+            send_timeout: Duration::from_millis(*send_timeout_ms),
+            alive_check_interval: Duration::from_secs(*alive_check_interval_secs),
         };
         let send_timeout = Duration::from_millis(*send_timeout_ms);
         let alive_check_interval = Duration::from_secs(*alive_check_interval_secs);
 
         tracing::info!("Initializing DoipDiagGateway");
 
-        let mut socket = create_socket(
-            tester_ip,
-            gateway_port,
-            doip_connection_config.protocol_version,
-        )?;
         let mask = create_netmask(tester_ip, tester_subnet)?;
 
         let shared_shutdown_signal = shutdown_signal.shared();
-
         let gateways = vir_vam::get_vehicle_identification::<T, F>(
-            &mut socket,
+            &mut *doip_socket.lock().await,
             mask,
             gateway_port,
             &ecus,
@@ -219,14 +222,15 @@ impl<T: EcuAddresses + DoipComParams> DoipDiagGateway<T> {
             ))
         })?;
 
-        let gateway = if gateways.is_empty() {
-            DoipDiagGateway {
+        let cancel_token = CancellationToken::new();
+
+        let state = if gateways.is_empty() {
+            Arc::new(DoipGatewayState {
                 doip_connections: Arc::new(RwLock::new(Vec::new())),
                 logical_address_to_connection: Arc::new(RwLock::new(HashMap::new())),
                 ecus,
-                socket: Arc::new(Mutex::new(socket)),
-                cancel_token: CancellationToken::new(),
-            }
+                socket: Arc::clone(&doip_socket),
+            })
         } else {
             tracing::info!(gateway_count = gateways.len(), "Gateways found");
 
@@ -238,7 +242,10 @@ impl<T: EcuAddresses + DoipComParams> DoipDiagGateway<T> {
                 let addr = ecu.logical_address();
                 let gateway = ecu.logical_gateway_address();
                 gateway_ecu_map.entry(gateway).or_default().push(addr);
-                gateway_ecu_name_map.entry(gateway).or_default().push(ecu.ecu_name());
+                gateway_ecu_name_map
+                    .entry(gateway)
+                    .or_default()
+                    .push(ecu.ecu_name().to_lowercase());
             }
 
             let doip_connections: Arc<RwLock<Vec<Arc<DoipConnection>>>> =
@@ -274,34 +281,55 @@ impl<T: EcuAddresses + DoipComParams> DoipDiagGateway<T> {
                 }
             }
 
-            DoipDiagGateway {
+            Arc::new(DoipGatewayState {
                 doip_connections,
                 logical_address_to_connection: Arc::new(RwLock::new(logical_address_to_connection)),
                 ecus,
-                socket: Arc::new(Mutex::new(socket)),
-                cancel_token: CancellationToken::new(),
-            }
+                socket: Arc::clone(&doip_socket),
+            })
         };
 
-        vir_vam::listen_for_vams(
+        let vam_listener_handle = vir_vam::listen_for_vams(
             connection_config,
             gateway_port,
             doip_connection_config,
             mask,
-            gateway.clone(),
+            Arc::clone(&state),
             variant_detection,
-            send_timeout,
-            alive_check_interval,
             shared_shutdown_signal,
-            gateway.cancel_token.child_token(),
+            cancel_token.child_token(),
         )
         .await;
 
-        Ok(gateway)
+        Ok(DoipDiagGateway {
+            state,
+            cancel_token,
+            vam_listener_handle: Arc::new(vam_listener_handle),
+        })
     }
 
-    pub fn shutdown(&self) {
+    pub async fn shutdown(&mut self) {
         self.cancel_token.cancel();
+        // Abort and await the VAM listener task so it stops reading from the
+        // shared UDP socket before a new gateway reuses it.
+        self.vam_listener_handle.abort();
+        // Abort all background tasks (sender, receiver, connection-reset) for each
+        // gateway connection. This immediately drops their TCP socket halves.
+        let connections = self.state.doip_connections.write().await;
+        for conn in connections.iter() {
+            for handle in &conn.task_handles {
+                handle.abort();
+            }
+        }
+        drop(connections);
+        self.state.doip_connections.write().await.clear();
+    }
+
+    /// Returns a clone of the UDP socket Arc for reuse in a new gateway instance.
+    /// This avoids binding a second socket on the same port during reloads.
+    #[must_use]
+    pub fn udp_socket(&self) -> Arc<Mutex<DoIPUdpSocket>> {
+        Arc::clone(&self.state.socket)
     }
 
     async fn get_doip_connection(
@@ -309,13 +337,14 @@ impl<T: EcuAddresses + DoipComParams> DoipDiagGateway<T> {
         logical_address: u16,
     ) -> Result<Arc<DoipConnection>, DiagServiceError> {
         let conn_idx = *self
+            .state
             .logical_address_to_connection
             .read()
             .await
             .get(&logical_address)
             .ok_or_else(|| DiagServiceError::EcuOffline(format!("[{logical_address}]")))?;
 
-        let lock = self.doip_connections.read().await;
+        let lock = self.state.doip_connections.read().await;
         let conn = lock
             .get(conn_idx)
             .ok_or(DiagServiceError::ConnectionClosed(format!(
@@ -341,7 +370,10 @@ impl<T: EcuAddresses + DoipComParams> DoipDiagGateway<T> {
         // in that case, lookup the ecu name and check if the functional address
         // matches the given address.
         // this will be the case for tester present.
-        if let Some(ecu) = self.ecus.get(&transmission_params.ecu_name.to_lowercase())
+        if let Some(ecu) = self
+            .state
+            .ecus
+            .get(&transmission_params.ecu_name.to_lowercase())
             && ecu.read().await.logical_functional_address() == message.target_address
             && let Some(gateway_ecu) = doip_conn.ecus.get(&transmission_params.gateway_address)
         {
@@ -356,7 +388,8 @@ impl<T: EcuAddresses + DoipComParams> DoipDiagGateway<T> {
 
 impl<T: EcuAddresses + DoipComParams> EcuGateway for DoipDiagGateway<T> {
     async fn get_gateway_network_address(&self, logical_address: u16) -> Option<String> {
-        self.doip_connections
+        self.state
+            .doip_connections
             .read()
             .await
             .iter()
@@ -839,7 +872,24 @@ fn create_netmask(tester_ip: &str, tester_subnet: &str) -> Result<u32, DoipGatew
     Ok(ip.to_bits() & subnet.to_bits())
 }
 
-fn create_socket(
+/// Creates a UDP socket for `DoIP` communication.
+///
+/// # Errors
+///
+/// Returns [`DoipGatewaySetupError::InvalidConfiguration`] if `protocol_version` does not map
+/// to a valid [`ProtocolVersion`], or any error propagated from the underlying socket setup.
+pub fn create_socket(
+    tester_ip: &str,
+    gateway_port: u16,
+    protocol_version: u8,
+) -> Result<DoIPUdpSocket, DoipGatewaySetupError> {
+    let protocol_version = ProtocolVersion::try_from(&protocol_version).map_err(|err| {
+        DoipGatewaySetupError::InvalidConfiguration(format!("Invalid DoIP protocol version: {err}"))
+    })?;
+    create_socket_with_protocol(tester_ip, gateway_port, protocol_version)
+}
+
+fn create_socket_with_protocol(
     tester_ip: &str,
     gateway_port: u16,
     protocol_version: ProtocolVersion,
@@ -905,11 +955,9 @@ fn create_socket(
 impl<T: EcuAddresses + DoipComParams> Clone for DoipDiagGateway<T> {
     fn clone(&self) -> Self {
         Self {
-            doip_connections: Arc::clone(&self.doip_connections),
-            logical_address_to_connection: Arc::clone(&self.logical_address_to_connection),
-            ecus: Arc::clone(&self.ecus),
-            socket: Arc::clone(&self.socket),
+            state: Arc::clone(&self.state),
             cancel_token: self.cancel_token.clone(),
+            vam_listener_handle: Arc::clone(&self.vam_listener_handle),
         }
     }
 }
