@@ -1256,9 +1256,10 @@ impl<S: EcuGateway, T: EcuManager> UdsEcu for UdsManager<S, T> {
                 {
                     Ok(response) => response,
                     Err(e) => {
-                        tracing::debug!(
+                        tracing::warn!(
                             request_name = %name,
                             error = %e,
+                            ecu_name = %ecu_name,
                             "Failed to send variant detection request"
                         );
                         break 'variant_detection_calls; // no need to continue if one fails
