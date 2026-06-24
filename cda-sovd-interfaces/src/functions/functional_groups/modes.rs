@@ -11,7 +11,10 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 use cda_interfaces::HashMap;
-use serde::{Deserialize, Serialize};
+use serde::{
+    Deserialize,
+    Serialize,
+};
 
 use crate::error::DataError;
 
@@ -78,7 +81,10 @@ pub mod session {
     }
     pub mod put {
         use cda_interfaces::HashMap;
-        use serde::{Deserialize, Serialize};
+        use serde::{
+            Deserialize,
+            Serialize,
+        };
 
         use crate::error::ApiErrorResponse;
 

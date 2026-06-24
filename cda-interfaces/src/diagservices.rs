@@ -12,8 +12,13 @@
  */
 
 use crate::{
-    DataParseError, DiagServiceError, HashMap,
-    datatypes::{DtcField, DtcRecord},
+    DataParseError,
+    DiagServiceError,
+    HashMap,
+    datatypes::{
+        DtcField,
+        DtcRecord,
+    },
     util,
 };
 
@@ -99,7 +104,11 @@ impl DiagServiceJsonResponse {
 
 #[cfg(feature = "test-utils")]
 pub mod mock {
-    use crate::{DiagServiceError, datatypes, diagservices};
+    use crate::{
+        DiagServiceError,
+        datatypes,
+        diagservices,
+    };
 
     mockall::mock! {
         pub DiagServiceResponse {}

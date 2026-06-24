@@ -14,18 +14,34 @@
 use std::sync::Arc;
 
 use aide::{
-    axum::{ApiRouter as Router, routing},
+    axum::{
+        ApiRouter as Router,
+        routing,
+    },
     transform::TransformOperation,
 };
 use axum::{
     Json,
-    extract::{Path, Query, State},
-    response::{IntoResponse, Response},
+    extract::{
+        Path,
+        Query,
+        State,
+    },
+    response::{
+        IntoResponse,
+        Response,
+    },
 };
 use axum_extra::extract::WithRejection;
 use cda_interfaces::{
-    FunctionalDescriptionConfig, HashMap, SchemaProvider, UdsEcu,
-    diagservices::{DiagServiceResponse, DiagServiceResponseType},
+    FunctionalDescriptionConfig,
+    HashMap,
+    SchemaProvider,
+    UdsEcu,
+    diagservices::{
+        DiagServiceResponse,
+        DiagServiceResponseType,
+    },
 };
 use http::StatusCode;
 use indexmap::IndexMap;
@@ -35,8 +51,14 @@ use uuid::Uuid;
 use crate::{
     create_schema,
     sovd::{
-        FgServiceExecution, WebserverState,
-        error::{ApiError, ErrorWrapper, VendorErrorCode, nrc_to_api_error_response},
+        FgServiceExecution,
+        WebserverState,
+        error::{
+            ApiError,
+            ErrorWrapper,
+            VendorErrorCode,
+            nrc_to_api_error_response,
+        },
         field_parse_errors_to_json,
         locks::Locks,
     },
@@ -491,7 +513,10 @@ pub(crate) mod tests {
     use super::WebserverFgState;
     use crate::sovd::{
         HashMap,
-        locks::{LockType, Locks},
+        locks::{
+            LockType,
+            Locks,
+        },
     };
 
     pub fn create_test_fg_state<T: UdsEcu + Clone>(

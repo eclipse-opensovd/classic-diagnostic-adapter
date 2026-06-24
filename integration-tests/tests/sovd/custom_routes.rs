@@ -13,24 +13,49 @@
 
 use std::sync::Arc;
 
-use aide::axum::{ApiRouter, routing};
-use axum::{Json, http::StatusCode};
+use aide::axum::{
+    ApiRouter,
+    routing,
+};
+use axum::{
+    Json,
+    http::StatusCode,
+};
 use cda_comm_doip::config::DoipConfig;
 use cda_interfaces::{
-    FunctionalDescriptionConfig, HashMap, HashMapExtensions, UdsEcu,
-    datatypes::{ComponentsConfig, FaultConfig},
+    FunctionalDescriptionConfig,
+    HashMap,
+    HashMapExtensions,
+    UdsEcu,
+    datatypes::{
+        ComponentsConfig,
+        FaultConfig,
+    },
 };
-use cda_sovd::{Locks, dynamic_router::DynamicRouter};
+use cda_sovd::{
+    Locks,
+    dynamic_router::DynamicRouter,
+};
 use futures::FutureExt;
 use opensovd_cda_lib::{
-    DatabaseMap, FileManagerMap, cda_version, config::configfile::ServerConfig,
+    DatabaseMap,
+    FileManagerMap,
+    cda_version,
+    config::configfile::ServerConfig,
 };
 use reqwest::Method;
-use serde::{Deserialize, Serialize};
+use serde::{
+    Deserialize,
+    Serialize,
+};
 
 use crate::util::{
     http::response_to_t,
-    runtime::{find_available_tcp_port, host, wait_for_cda_online},
+    runtime::{
+        find_available_tcp_port,
+        host,
+        wait_for_cda_online,
+    },
 };
 
 const MAIN_HEALTH_COMPONENT_KEY: &str = "main";

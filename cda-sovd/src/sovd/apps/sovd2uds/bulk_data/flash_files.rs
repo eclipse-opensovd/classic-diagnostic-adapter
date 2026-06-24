@@ -11,13 +11,22 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-use std::{path::PathBuf, sync::LazyLock};
+use std::{
+    path::PathBuf,
+    sync::LazyLock,
+};
 
 use aide::transform::TransformOperation;
 use axum::{
     Json,
-    extract::{Query, State},
-    response::{IntoResponse, Response},
+    extract::{
+        Query,
+        State,
+    },
+    response::{
+        IntoResponse,
+        Response,
+    },
 };
 use axum_extra::extract::WithRejection;
 use cda_interfaces::UdsEcu;
@@ -25,8 +34,12 @@ use http::StatusCode;
 use regex::Regex;
 
 use crate::sovd::{
-    WebserverState, create_schema,
-    error::{ApiError, ErrorWrapper},
+    WebserverState,
+    create_schema,
+    error::{
+        ApiError,
+        ErrorWrapper,
+    },
 };
 
 fn file_name_to_id(file_name: &str) -> String {

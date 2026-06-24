@@ -16,7 +16,11 @@
 use std::io::Write as _;
 
 use cda_interfaces::storage_api::{
-    Collection as _, CollectionName, RandomAccessData as _, Storage, StorageError,
+    Collection as _,
+    CollectionName,
+    RandomAccessData as _,
+    Storage,
+    StorageError,
 };
 use cda_storage::LocalStorage;
 

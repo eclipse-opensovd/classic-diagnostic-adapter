@@ -11,11 +11,18 @@ use cda_interfaces::HashMap;
  *
  * SPDX-License-Identifier: Apache-2.0
  */
-use http::{Method, StatusCode};
+use http::{
+    Method,
+    StatusCode,
+};
 use serde::Deserialize;
 use sovd_interfaces::{
     Items,
-    components::ecu::operations::{AsyncGetByIdResponse, ExecutionStatus, OperationCollectionItem},
+    components::ecu::operations::{
+        AsyncGetByIdResponse,
+        ExecutionStatus,
+        OperationCollectionItem,
+    },
 };
 
 /// Local deserializable mirror of `AsyncPostResponse` (the interface type is serialize-only).
@@ -30,7 +37,11 @@ use crate::{
     util::{
         ecusim,
         http::{
-            QueryParams, auth_header, extract_field_from_json, response_to_json, response_to_t,
+            QueryParams,
+            auth_header,
+            extract_field_from_json,
+            response_to_json,
+            response_to_t,
             send_cda_request,
         },
         runtime::setup_integration_test,
@@ -538,7 +549,11 @@ async fn acquire_ecu_lock(
 ) -> String {
     use std::time::Duration;
 
-    use crate::sovd::locks::{self, create_lock, lock_operation};
+    use crate::sovd::locks::{
+        self,
+        create_lock,
+        lock_operation,
+    };
 
     #[cfg_attr(nightly, allow(unknown_lints, clippy::duration_suboptimal_units))]
     let expiration_timeout = Duration::from_secs(60);
@@ -574,7 +589,10 @@ async fn release_ecu_lock(
     auth: &http::HeaderMap,
     lock_id: &str,
 ) {
-    use crate::sovd::locks::{self, lock_operation};
+    use crate::sovd::locks::{
+        self,
+        lock_operation,
+    };
 
     lock_operation(
         locks::ECU_ENDPOINT,
@@ -595,7 +613,11 @@ async fn acquire_fg_lock(
 ) -> String {
     use std::time::Duration;
 
-    use crate::sovd::locks::{self, create_lock, lock_operation};
+    use crate::sovd::locks::{
+        self,
+        create_lock,
+        lock_operation,
+    };
 
     #[cfg_attr(nightly, allow(unknown_lints, clippy::duration_suboptimal_units))]
     let expiration_timeout = Duration::from_secs(60);
@@ -631,7 +653,10 @@ async fn release_fg_lock(
     auth: &http::HeaderMap,
     lock_id: &str,
 ) {
-    use crate::sovd::locks::{self, lock_operation};
+    use crate::sovd::locks::{
+        self,
+        lock_operation,
+    };
 
     lock_operation(
         locks::FUNCTIONAL_GROUP_ENDPOINT,

@@ -16,3 +16,4 @@ imports_granularity = "Crate"
 unstable_features = true
 format_strings = true
 hex_literal_case = "Upper"
+imports_layout = "Vertical"

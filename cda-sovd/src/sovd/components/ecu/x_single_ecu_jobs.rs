@@ -15,18 +15,34 @@ pub(crate) mod single_ecu {
     use aide::transform::TransformOperation;
     use axum::{
         Json,
-        extract::{Path, Query, State},
+        extract::{
+            Path,
+            Query,
+            State,
+        },
         http::StatusCode,
-        response::{IntoResponse as _, Response},
+        response::{
+            IntoResponse as _,
+            Response,
+        },
     };
     use axum_extra::extract::WithRejection;
-    use cda_interfaces::{UdsEcu, diagservices::DiagServiceResponse, file_manager::FileManager};
+    use cda_interfaces::{
+        UdsEcu,
+        diagservices::DiagServiceResponse,
+        file_manager::FileManager,
+    };
 
     use crate::{
         openapi,
         sovd::{
-            IntoSovd, WebserverEcuState, create_schema,
-            error::{ApiError, ErrorWrapper},
+            IntoSovd,
+            WebserverEcuState,
+            create_schema,
+            error::{
+                ApiError,
+                ErrorWrapper,
+            },
         },
     };
 
@@ -246,7 +262,10 @@ pub(crate) mod single_ecu {
 
     #[cfg(test)]
     mod tests {
-        use sovd_interfaces::components::ecu::x::single_ecu_job::{LongName, Param};
+        use sovd_interfaces::components::ecu::x::single_ecu_job::{
+            LongName,
+            Param,
+        };
 
         #[test]
         fn test_param_serialization() {

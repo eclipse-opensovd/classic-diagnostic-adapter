@@ -14,28 +14,56 @@
 use std::{
     future::Future,
     sync::Arc,
-    time::{Duration, Instant},
+    time::{
+        Duration,
+        Instant,
+    },
 };
 
 use cda_interfaces::{
-    DiagServiceError, DoipComParamProvider, DoipGatewaySetupError, EcuAddressProvider, EcuGateway,
-    HashMap, HashMapExtensions, ServicePayload, TransmissionParameters, UdsResponse, dlt_ctx,
-    util::{self, tokio_ext},
+    DiagServiceError,
+    DoipComParamProvider,
+    DoipGatewaySetupError,
+    EcuAddressProvider,
+    EcuGateway,
+    HashMap,
+    HashMapExtensions,
+    ServicePayload,
+    TransmissionParameters,
+    UdsResponse,
+    dlt_ctx,
+    util::{
+        self,
+        tokio_ext,
+    },
 };
 use doip_definitions::{
     header::ProtocolVersion,
-    payload::{DiagnosticMessage, DiagnosticMessageNack, DoipPayload, GenericNack},
+    payload::{
+        DiagnosticMessage,
+        DiagnosticMessageNack,
+        DoipPayload,
+        GenericNack,
+    },
 };
 use futures::FutureExt;
 use thiserror::Error;
-use tokio::sync::{Mutex, RwLock, broadcast, mpsc};
+use tokio::sync::{
+    Mutex,
+    RwLock,
+    broadcast,
+    mpsc,
+};
 use tokio_util::sync::CancellationToken;
 
 use crate::{
     config::DoipConfig,
     connections::EcuError,
     ecu_connection::ConnectionConfig,
-    socket::{DoIPConfig, DoIPUdpSocket},
+    socket::{
+        DoIPConfig,
+        DoIPUdpSocket,
+    },
 };
 
 pub mod config;

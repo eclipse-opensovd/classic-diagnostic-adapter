@@ -12,7 +12,10 @@
  */
 
 use cda_interfaces::HashMap;
-use serde::{Deserialize, Serialize};
+use serde::{
+    Deserialize,
+    Serialize,
+};
 
 pub mod ecu;
 

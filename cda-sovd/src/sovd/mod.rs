@@ -11,12 +11,18 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-use std::{path::PathBuf, sync::Arc};
+use std::{
+    path::PathBuf,
+    sync::Arc,
+};
 
 use aide::{
     axum::{
         ApiRouter as Router,
-        routing::{self, get_with},
+        routing::{
+            self,
+            get_with,
+        },
     },
     transform::TransformOperation,
 };
@@ -24,28 +30,58 @@ use async_trait::async_trait;
 use axum::{
     Json,
     body::Bytes,
-    extract::{Query, State},
-    http::{HeaderMap, StatusCode},
+    extract::{
+        Query,
+        State,
+    },
+    http::{
+        HeaderMap,
+        StatusCode,
+    },
     middleware,
-    response::{IntoResponse, Response},
+    response::{
+        IntoResponse,
+        Response,
+    },
 };
 use axum_extra::extract::WithRejection;
 use cda_interfaces::{
-    FunctionalDescriptionConfig, HashMap, HashMapExtensions as _, SchemaProvider, UdsEcu,
+    FunctionalDescriptionConfig,
+    HashMap,
+    HashMapExtensions as _,
+    SchemaProvider,
+    UdsEcu,
     datatypes::ComponentsConfig,
-    diagservices::{DiagServiceResponse, FieldParseError, UdsPayloadData},
+    diagservices::{
+        DiagServiceResponse,
+        FieldParseError,
+        UdsPayloadData,
+    },
     file_manager::FileManager,
     runtime_update_api::LockStateProvider,
 };
-use cda_plugin_security::{SecurityPluginLoader, security_plugin_middleware};
-use error::{ApiError, api_error_from_diag_response};
-use http::{Uri, header};
+use cda_plugin_security::{
+    SecurityPluginLoader,
+    security_plugin_middleware,
+};
+use error::{
+    ApiError,
+    api_error_from_diag_response,
+};
+use http::{
+    Uri,
+    header,
+};
 use indexmap::IndexMap;
 pub use locks::Locks;
 use schemars::Schema;
 use sovd_interfaces::{
-    IncludeSchemaQuery, Resource,
-    components::{ComponentsResponse, ecu as sovd_ecu},
+    IncludeSchemaQuery,
+    Resource,
+    components::{
+        ComponentsResponse,
+        ecu as sovd_ecu,
+    },
     error::DataError,
 };
 use tokio::sync::RwLock;
@@ -54,8 +90,15 @@ use uuid::Uuid;
 use crate::{
     VendorErrorCode,
     sovd::components::ecu::{
-        configurations, data, faults, genericservice, modes, operations, x_single_ecu_jobs,
-        x_sovd2uds_bulk_data, x_sovd2uds_download,
+        configurations,
+        data,
+        faults,
+        genericservice,
+        modes,
+        operations,
+        x_single_ecu_jobs,
+        x_sovd2uds_bulk_data,
+        x_sovd2uds_download,
     },
 };
 
@@ -1026,17 +1069,29 @@ use crate::sovd::locks::ReadLock;
 
 pub(crate) mod static_data {
     use aide::{
-        axum::{ApiRouter, routing},
+        axum::{
+            ApiRouter,
+            routing,
+        },
         transform::TransformOperation,
     };
     use axum::{
         Json,
-        extract::{Query, State},
-        response::{IntoResponse, Response},
+        extract::{
+            Query,
+            State,
+        },
+        response::{
+            IntoResponse,
+            Response,
+        },
     };
     use http::StatusCode;
 
-    use crate::{dynamic_router::DynamicRouter, sovd::error::ApiError};
+    use crate::{
+        dynamic_router::DynamicRouter,
+        sovd::error::ApiError,
+    };
 
     /// Add an endpoint serving static data.
     /// For example it can be used, to serve version information.
@@ -1154,7 +1209,11 @@ impl IntoSovd for FieldParseError {
 #[cfg(test)]
 pub(crate) mod tests {
 
-    use cda_interfaces::{UdsEcu, diagservices::DiagServiceResponse, file_manager::FileManager};
+    use cda_interfaces::{
+        UdsEcu,
+        diagservices::DiagServiceResponse,
+        file_manager::FileManager,
+    };
     use sovd_interfaces::sovd2uds::FileList;
 
     use super::*;

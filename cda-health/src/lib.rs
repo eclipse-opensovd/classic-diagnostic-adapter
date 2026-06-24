@@ -13,11 +13,17 @@
 
 use std::sync::Arc;
 
-use aide::axum::{ApiRouter as Router, routing};
+use aide::axum::{
+    ApiRouter as Router,
+    routing,
+};
 use cda_interfaces::HashMap;
 use cda_sovd::dynamic_router::DynamicRouter;
 use futures::future;
-use serde::{Deserialize, Serialize};
+use serde::{
+    Deserialize,
+    Serialize,
+};
 use tokio::sync::RwLock;
 
 pub mod config;
@@ -140,12 +146,21 @@ mod routes {
     use axum::{
         Json,
         extract::State,
-        response::{IntoResponse, Response},
+        response::{
+            IntoResponse,
+            Response,
+        },
     };
     use cda_interfaces::HashMap;
-    use serde::{Deserialize, Serialize};
+    use serde::{
+        Deserialize,
+        Serialize,
+    };
 
-    use crate::{HealthState, Status};
+    use crate::{
+        HealthState,
+        Status,
+    };
 
     /// Health status response containing overall application health and component details.
     ///
@@ -227,10 +242,17 @@ mod routes {
         use axum::{
             extract::State,
             http::StatusCode,
-            response::{IntoResponse, Response},
+            response::{
+                IntoResponse,
+                Response,
+            },
         };
 
-        use crate::{HealthState, Status, routes::health_response};
+        use crate::{
+            HealthState,
+            Status,
+            routes::health_response,
+        };
 
         pub(crate) async fn get(state: State<HealthState>) -> Response {
             let health = health_response(&state).await;

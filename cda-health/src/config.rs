@@ -11,7 +11,10 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-use serde::{Deserialize, Serialize};
+use serde::{
+    Deserialize,
+    Serialize,
+};
 
 /// Health check endpoint configuration.
 #[derive(Clone, Debug, Serialize, Deserialize, schemars::JsonSchema)]

@@ -14,18 +14,31 @@
 use std::fmt::Display;
 
 use cda_database::datatypes::{
-    self, BitLength, CompuMethod, CompuScale, DataType, DiagCodedTypeVariant, MinMaxLengthType,
+    self,
+    BitLength,
+    CompuMethod,
+    CompuScale,
+    DataType,
+    DiagCodedTypeVariant,
+    MinMaxLengthType,
     PhysicalType,
 };
 use cda_interfaces::{
     DiagServiceError,
-    util::{decode_hex, tracing::print_hex},
+    util::{
+        decode_hex,
+        tracing::print_hex,
+    },
 };
 
 use crate::diag_kernel::{
     DiagDataValue,
-    diagservices::{DiagDataTypeContainer, DiagDataTypeContainerRaw},
-    iso_14229_nrc, pad_msb_to_len,
+    diagservices::{
+        DiagDataTypeContainer,
+        DiagDataTypeContainerRaw,
+    },
+    iso_14229_nrc,
+    pad_msb_to_len,
     payload::Payload,
 };
 
@@ -1068,9 +1081,23 @@ where
 #[cfg(test)]
 mod tests {
     use cda_database::datatypes::{
-        BitLength, CompuCategory, CompuFunction, CompuMethod, CompuRationalCoefficients,
-        CompuScale, CompuValues, DataType, DiagCodedType, DiagCodedTypeVariant, IntervalType,
-        Limit, MinMaxLengthType, PhysicalType, Radix, StandardLengthType, Termination,
+        BitLength,
+        CompuCategory,
+        CompuFunction,
+        CompuMethod,
+        CompuRationalCoefficients,
+        CompuScale,
+        CompuValues,
+        DataType,
+        DiagCodedType,
+        DiagCodedTypeVariant,
+        IntervalType,
+        Limit,
+        MinMaxLengthType,
+        PhysicalType,
+        Radix,
+        StandardLengthType,
+        Termination,
     };
 
     /// Helper function to create a `DiagCodedType` as `StandardLength` Type for testing
@@ -1116,7 +1143,10 @@ mod tests {
         .unwrap()
     }
 
-    use crate::diag_kernel::{operations::extract_diag_data_container, payload::Payload};
+    use crate::diag_kernel::{
+        operations::extract_diag_data_container,
+        payload::Payload,
+    };
 
     #[test]
     fn test_hex_values() {

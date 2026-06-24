@@ -13,7 +13,10 @@
 
 use std::{
     env,
-    path::{Path, PathBuf},
+    path::{
+        Path,
+        PathBuf,
+    },
 };
 
 const MBEDTLS_VERSION: &str = "4.0.0";

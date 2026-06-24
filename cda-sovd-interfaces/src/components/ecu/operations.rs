@@ -11,13 +11,23 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-use cda_interfaces::{HashMap, HashMapExtensions};
-use serde::{Deserialize, Serialize};
+use cda_interfaces::{
+    HashMap,
+    HashMapExtensions,
+};
+use serde::{
+    Deserialize,
+    Serialize,
+};
 
 pub mod comparams {
     use serde::Deserializer;
 
-    use super::{Deserialize, HashMap, Serialize};
+    use super::{
+        Deserialize,
+        HashMap,
+        Serialize,
+    };
 
     #[derive(Deserialize, Serialize, Clone, Debug, schemars::JsonSchema)]
     pub struct Unit {
@@ -81,7 +91,12 @@ pub mod comparams {
     }
 
     pub mod executions {
-        use super::{ComParamValue, Deserialize, HashMap, Serialize};
+        use super::{
+            ComParamValue,
+            Deserialize,
+            HashMap,
+            Serialize,
+        };
 
         #[derive(Deserialize, Serialize, Clone)]
         #[serde(rename_all = "lowercase")]
@@ -109,7 +124,14 @@ pub mod comparams {
         }
 
         pub mod update {
-            use super::{Capability, ComParamValue, Deserialize, HashMap, Serialize, Status};
+            use super::{
+                Capability,
+                ComParamValue,
+                Deserialize,
+                HashMap,
+                Serialize,
+                Status,
+            };
             // todo: which ones are optional or not
             #[derive(Deserialize)]
             #[allow(dead_code)]
@@ -144,9 +166,21 @@ pub mod comparams {
         }
 
         pub mod id {
-            use super::{Capability, ComParamValue, HashMap, Serialize, Status};
+            use super::{
+                Capability,
+                ComParamValue,
+                HashMap,
+                Serialize,
+                Status,
+            };
             pub mod get {
-                use super::{Capability, ComParamValue, HashMap, Serialize, Status};
+                use super::{
+                    Capability,
+                    ComParamValue,
+                    HashMap,
+                    Serialize,
+                    Status,
+                };
                 #[derive(Serialize, schemars::JsonSchema)]
                 #[schemars(rename = "GetExecutionResponse")]
                 pub struct Response {
@@ -167,10 +201,23 @@ pub mod comparams {
 }
 
 pub mod service {
-    use super::{Deserialize, HashMap, HashMapExtensions, Serialize};
+    use super::{
+        Deserialize,
+        HashMap,
+        HashMapExtensions,
+        Serialize,
+    };
     pub mod executions {
-        use super::{Deserialize, HashMap, HashMapExtensions, Serialize};
-        use crate::{Payload, error::DataError};
+        use super::{
+            Deserialize,
+            HashMap,
+            HashMapExtensions,
+            Serialize,
+        };
+        use crate::{
+            Payload,
+            error::DataError,
+        };
 
         #[derive(Serialize, schemars::JsonSchema)]
         pub struct Response<T> {
@@ -203,7 +250,10 @@ pub mod service {
     }
 }
 
-pub use crate::common::operations::{OperationDeleteQuery, OperationQuery};
+pub use crate::common::operations::{
+    OperationDeleteQuery,
+    OperationQuery,
+};
 
 /// Status of a service execution.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, schemars::JsonSchema)]

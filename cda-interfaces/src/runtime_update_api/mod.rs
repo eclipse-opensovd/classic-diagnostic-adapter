@@ -27,17 +27,32 @@
 //!
 //! The concrete plugin implementation lives in `cda-plugin-runtime-update`.
 
-use std::{path::PathBuf, str::FromStr, sync::Arc};
+use std::{
+    path::PathBuf,
+    str::FromStr,
+    sync::Arc,
+};
 
 use async_trait::async_trait;
 use bytes::Bytes;
-use serde::{Deserialize, Deserializer, Serialize};
+use serde::{
+    Deserialize,
+    Deserializer,
+    Serialize,
+};
 use strum_macros::EnumString;
 
-use crate::storage_api::{Collection, DirectFileAccess};
+use crate::storage_api::{
+    Collection,
+    DirectFileAccess,
+};
 
 mod error;
-pub use error::{ReloadError, RuntimeUpdateError, VerificationError};
+pub use error::{
+    ReloadError,
+    RuntimeUpdateError,
+    VerificationError,
+};
 
 /// Guards against activity during a runtime update.
 pub trait ActivityGuard: Send + Sync + 'static {

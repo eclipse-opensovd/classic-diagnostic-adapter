@@ -17,19 +17,36 @@ use aide::transform::TransformOperation;
 use axum::{
     Json,
     extract::Query,
-    response::{IntoResponse, Response},
+    response::{
+        IntoResponse,
+        Response,
+    },
 };
 use axum_extra::extract::WithRejection;
-use cda_interfaces::{DiagServiceError, HashMap, UdsEcu, diagservices::DiagServiceResponse};
+use cda_interfaces::{
+    DiagServiceError,
+    HashMap,
+    UdsEcu,
+    diagservices::DiagServiceResponse,
+};
 use http::StatusCode;
 use serde::Serialize;
 use sovd_interfaces::common::modes::{
-    COMM_CONTROL_ID, COMM_CONTROL_NAME, DTC_SETTING_ID, DTC_SETTING_NAME, SESSION_ID, SESSION_NAME,
+    COMM_CONTROL_ID,
+    COMM_CONTROL_NAME,
+    DTC_SETTING_ID,
+    DTC_SETTING_NAME,
+    SESSION_ID,
+    SESSION_NAME,
 };
 
 use crate::{
     create_schema,
-    sovd::error::{ApiError, VendorErrorCode, nrc_to_api_error_response},
+    sovd::error::{
+        ApiError,
+        VendorErrorCode,
+        nrc_to_api_error_response,
+    },
 };
 
 pub(crate) async fn get(
@@ -38,7 +55,10 @@ pub(crate) async fn get(
         ApiError,
     >,
 ) -> Response {
-    use sovd_interfaces::functions::functional_groups::modes::get::{Response, ResponseItem};
+    use sovd_interfaces::functions::functional_groups::modes::get::{
+        Response,
+        ResponseItem,
+    };
     let schema = if query.include_schema {
         Some(create_schema!(Response))
     } else {
@@ -71,7 +91,10 @@ pub(crate) async fn get(
 }
 
 pub(crate) fn docs_get(op: TransformOperation) -> TransformOperation {
-    use sovd_interfaces::functions::functional_groups::modes::get::{Response, ResponseItem};
+    use sovd_interfaces::functions::functional_groups::modes::get::{
+        Response,
+        ResponseItem,
+    };
     op.description("Get the available modes for the ECU")
         .response_with::<200, Json<Response>, _>(|res| {
             res.description("Available modes for the ECU")
@@ -297,20 +320,35 @@ pub(crate) mod commctrl {
     use cda_interfaces::service_ids;
     use cda_plugin_security::Secured;
     use sovd_interfaces::{
-        common::modes::{COMM_CONTROL_ID, COMM_CONTROL_NAME},
+        common::modes::{
+            COMM_CONTROL_ID,
+            COMM_CONTROL_NAME,
+        },
         functions::{
             functional_groups,
-            functional_groups::modes::{self as sovd_modes},
+            functional_groups::modes::{
+                self as sovd_modes,
+            },
         },
     };
 
     use super::{
-        ApiError, Json, Query, Response, TransformOperation, UdsEcu, WithRejection,
-        handle_mode_change, handle_mode_get,
+        ApiError,
+        Json,
+        Query,
+        Response,
+        TransformOperation,
+        UdsEcu,
+        WithRejection,
+        handle_mode_change,
+        handle_mode_get,
     };
     use crate::{
         openapi,
-        sovd::{error::VendorErrorCode, functions::functional_groups::WebserverFgState},
+        sovd::{
+            error::VendorErrorCode,
+            functions::functional_groups::WebserverFgState,
+        },
     };
 
     pub(crate) async fn get<T: UdsEcu + Clone>(
@@ -396,20 +434,35 @@ pub(crate) mod dtcsetting {
     use cda_interfaces::service_ids;
     use cda_plugin_security::Secured;
     use sovd_interfaces::{
-        common::modes::{DTC_SETTING_ID, DTC_SETTING_NAME},
+        common::modes::{
+            DTC_SETTING_ID,
+            DTC_SETTING_NAME,
+        },
         functions::{
             functional_groups,
-            functional_groups::modes::{self as sovd_modes},
+            functional_groups::modes::{
+                self as sovd_modes,
+            },
         },
     };
 
     use super::{
-        ApiError, Json, Query, Response, TransformOperation, UdsEcu, WithRejection,
-        handle_mode_change, handle_mode_get,
+        ApiError,
+        Json,
+        Query,
+        Response,
+        TransformOperation,
+        UdsEcu,
+        WithRejection,
+        handle_mode_change,
+        handle_mode_get,
     };
     use crate::{
         openapi,
-        sovd::{error::VendorErrorCode, functions::functional_groups::WebserverFgState},
+        sovd::{
+            error::VendorErrorCode,
+            functions::functional_groups::WebserverFgState,
+        },
     };
 
     pub(crate) async fn get<T: UdsEcu + Clone>(
@@ -490,15 +543,30 @@ pub(crate) mod session {
     use axum::extract::State;
     use cda_interfaces::service_ids;
     use cda_plugin_security::Secured;
-    use sovd_interfaces::functions::functional_groups::{self, modes as sovd_modes};
+    use sovd_interfaces::functions::functional_groups::{
+        self,
+        modes as sovd_modes,
+    };
 
     use super::{
-        ApiError, Json, Query, Response, SESSION_ID, SESSION_NAME, TransformOperation, UdsEcu,
-        WithRejection, handle_mode_change, handle_mode_get,
+        ApiError,
+        Json,
+        Query,
+        Response,
+        SESSION_ID,
+        SESSION_NAME,
+        TransformOperation,
+        UdsEcu,
+        WithRejection,
+        handle_mode_change,
+        handle_mode_get,
     };
     use crate::{
         openapi,
-        sovd::{error::VendorErrorCode, functions::functional_groups::WebserverFgState},
+        sovd::{
+            error::VendorErrorCode,
+            functions::functional_groups::WebserverFgState,
+        },
     };
 
     pub(crate) async fn get<T: UdsEcu + Clone>(

@@ -12,10 +12,17 @@
  */
 
 //
-use cda_interfaces::{DiagServiceError, dlt_ctx, util::decode_hex};
+use cda_interfaces::{
+    DiagServiceError,
+    dlt_ctx,
+    util::decode_hex,
+};
 
 use crate::{
-    datatypes::{self, DataType},
+    datatypes::{
+        self,
+        DataType,
+    },
     flatbuf::diagnostic_description::dataformat,
 };
 

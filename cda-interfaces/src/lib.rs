@@ -12,11 +12,17 @@
  */
 
 use std::{
-    fmt::{Display, Formatter},
+    fmt::{
+        Display,
+        Formatter,
+    },
     time::Duration,
 };
 
-use serde::{Deserialize, Serialize};
+use serde::{
+    Deserialize,
+    Serialize,
+};
 use thiserror::Error;
 
 mod com_param_handling;
@@ -45,7 +51,10 @@ pub type HashMapEntry<'a, K, V> = std::collections::hash_map::Entry<'a, K, V>;
 pub type HashSet<V> = std::collections::HashSet<V, Hasher>;
 // Note: hash_set_entry is unstable, hence not defining it.
 
-pub use foldhash::{HashMapExt as HashMapExtensions, HashSetExt as HashSetExtensions};
+pub use foldhash::{
+    HashMapExt as HashMapExtensions,
+    HashSetExt as HashSetExtensions,
+};
 
 /// # strings module
 /// This module contains a type that allows to store unique strings and use references to them

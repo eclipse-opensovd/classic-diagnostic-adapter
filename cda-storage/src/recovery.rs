@@ -29,9 +29,15 @@
 
 use std::path::Path;
 
-use cda_interfaces::storage_api::{Operation, StorageError};
+use cda_interfaces::storage_api::{
+    Operation,
+    StorageError,
+};
 
-use crate::wal::{self, WalStatus};
+use crate::wal::{
+    self,
+    WalStatus,
+};
 
 /// File extension used for backup files created during the commit phase.
 pub(crate) const BACKUP_EXTENSION: &str = "bak";

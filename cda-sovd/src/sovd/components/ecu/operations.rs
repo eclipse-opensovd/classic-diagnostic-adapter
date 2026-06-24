@@ -11,23 +11,39 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-use aide::{UseApi, transform::TransformOperation};
+use aide::{
+    UseApi,
+    transform::TransformOperation,
+};
 use axum::{
     Json,
-    extract::{Query, State},
+    extract::{
+        Query,
+        State,
+    },
     http::StatusCode,
-    response::{IntoResponse as _, Response},
+    response::{
+        IntoResponse as _,
+        Response,
+    },
 };
 use axum_extra::extract::WithRejection;
 use cda_interfaces::{
-    SchemaProvider, UdsEcu, diagservices::DiagServiceResponse, file_manager::FileManager,
+    SchemaProvider,
+    UdsEcu,
+    diagservices::DiagServiceResponse,
+    file_manager::FileManager,
 };
 use cda_plugin_security::Secured;
 use sovd_interfaces::components::ecu::operations::OperationCollectionItem;
 
 use crate::sovd::{
-    WebserverEcuState, create_schema,
-    error::{ApiError, ErrorWrapper},
+    WebserverEcuState,
+    create_schema,
+    error::{
+        ApiError,
+        ErrorWrapper,
+    },
 };
 
 pub(crate) async fn get<
@@ -93,16 +109,33 @@ pub(crate) mod comparams {
     pub(crate) mod executions {
         use std::sync::Arc;
 
-        use aide::{UseApi, transform::TransformOperation};
+        use aide::{
+            UseApi,
+            transform::TransformOperation,
+        };
         use axum::{
             Json,
-            extract::{OriginalUri, Path, Query, State},
-            http::{StatusCode, header},
-            response::{IntoResponse as _, Response},
+            extract::{
+                OriginalUri,
+                Path,
+                Query,
+                State,
+            },
+            http::{
+                StatusCode,
+                header,
+            },
+            response::{
+                IntoResponse as _,
+                Response,
+            },
         };
         use axum_extra::extract::WithRejection;
         use cda_interfaces::{
-            HashMap, HashMapExtensions, UdsEcu, diagservices::DiagServiceResponse,
+            HashMap,
+            HashMapExtensions,
+            UdsEcu,
+            diagservices::DiagServiceResponse,
             file_manager::FileManager,
         };
         use indexmap::IndexMap;
@@ -112,8 +145,13 @@ pub(crate) mod comparams {
         use uuid::Uuid;
 
         use crate::sovd::{
-            IntoSovd, WebserverEcuState, create_schema,
-            error::{ApiError, ErrorWrapper},
+            IntoSovd,
+            WebserverEcuState,
+            create_schema,
+            error::{
+                ApiError,
+                ErrorWrapper,
+            },
         };
 
         fn parse_exec_uuid(id: &str, include_schema: bool) -> Result<Uuid, ErrorWrapper> {
@@ -278,7 +316,10 @@ pub(crate) mod comparams {
 
         pub(crate) mod id {
             use super::*;
-            use crate::{openapi, sovd::components::IdPathParam};
+            use crate::{
+                openapi,
+                sovd::components::IdPathParam,
+            };
             pub(crate) async fn get<R: DiagServiceResponse, T: UdsEcu + Clone, U: FileManager>(
                 Path(id): Path<IdPathParam>,
                 WithRejection(Query(query), _): WithRejection<
@@ -587,7 +628,12 @@ pub(crate) mod service {
         include_schema: bool,
     ) -> axum::response::Response {
         use axum::response::IntoResponse as _;
-        use cda_interfaces::{DiagComm, DiagCommType, HashMap, HashMapExtensions};
+        use cda_interfaces::{
+            DiagComm,
+            DiagCommType,
+            HashMap,
+            HashMapExtensions,
+        };
 
         use crate::sovd::IntoSovd;
 
@@ -666,16 +712,32 @@ pub(crate) mod service {
 
     /// `GET /operations/{service}/docs` - online capability description
     pub(crate) mod docs_endpoint {
-        use aide::{UseApi, openapi::OpenApi, transform::TransformOperation};
+        use aide::{
+            UseApi,
+            openapi::OpenApi,
+            transform::TransformOperation,
+        };
         use axum::{
             Json,
-            extract::{Path, State},
+            extract::{
+                Path,
+                State,
+            },
             http::StatusCode,
-            response::{IntoResponse as _, Response},
+            response::{
+                IntoResponse as _,
+                Response,
+            },
         };
         use cda_interfaces::{
-            DiagComm, DiagCommType, DynamicPlugin, SchemaProvider, UdsEcu,
-            diagservices::DiagServiceResponse, file_manager::FileManager, subfunction_ids,
+            DiagComm,
+            DiagCommType,
+            DynamicPlugin,
+            SchemaProvider,
+            UdsEcu,
+            diagservices::DiagServiceResponse,
+            file_manager::FileManager,
+            subfunction_ids,
         };
         use cda_plugin_security::Secured;
 
@@ -683,7 +745,10 @@ pub(crate) mod service {
             openapi,
             sovd::{
                 WebserverEcuState,
-                docs::{self, operations::OperationDocsMeta},
+                docs::{
+                    self,
+                    operations::OperationDocsMeta,
+                },
                 error::ApiError,
             },
         };
@@ -765,27 +830,60 @@ pub(crate) mod service {
     }
 
     pub(crate) mod executions {
-        use aide::{UseApi, transform::TransformOperation};
+        use aide::{
+            UseApi,
+            transform::TransformOperation,
+        };
         use axum::{
             Json,
             body::Bytes,
-            extract::{OriginalUri, Path, Query, State},
-            http::{HeaderMap, StatusCode, header},
-            response::{IntoResponse as _, Response},
+            extract::{
+                OriginalUri,
+                Path,
+                Query,
+                State,
+            },
+            http::{
+                HeaderMap,
+                StatusCode,
+                header,
+            },
+            response::{
+                IntoResponse as _,
+                Response,
+            },
         };
-        use axum_extra::extract::{Host, WithRejection};
+        use axum_extra::extract::{
+            Host,
+            WithRejection,
+        };
         use cda_interfaces::{
-            DiagComm, DiagCommType, DynamicPlugin, SchemaProvider, UdsEcu,
-            diagservices::{DiagServiceJsonResponse, DiagServiceResponse, DiagServiceResponseType},
+            DiagComm,
+            DiagCommType,
+            DynamicPlugin,
+            SchemaProvider,
+            UdsEcu,
+            diagservices::{
+                DiagServiceJsonResponse,
+                DiagServiceResponse,
+                DiagServiceResponseType,
+            },
             file_manager::FileManager,
             subfunction_ids,
         };
-        use cda_plugin_security::{Secured, SecurityPlugin};
+        use cda_plugin_security::{
+            Secured,
+            SecurityPlugin,
+        };
         use sovd_interfaces::{
             common::operations::OperationIdItem,
             components::ecu::operations::{
-                AsyncGetByIdResponse, AsyncPostResponse, ExecutionStatus, OperationDeleteQuery,
-                OperationQuery, service::executions as sovd_executions,
+                AsyncGetByIdResponse,
+                AsyncPostResponse,
+                ExecutionStatus,
+                OperationDeleteQuery,
+                OperationQuery,
+                service::executions as sovd_executions,
             },
         };
         use uuid::Uuid;
@@ -793,13 +891,24 @@ pub(crate) mod service {
         use crate::{
             openapi,
             sovd::{
-                self, ServiceExecution, WebserverEcuState, api_error_from_diag_response,
+                self,
+                ServiceExecution,
+                WebserverEcuState,
+                api_error_from_diag_response,
                 components::get_content_type_and_accept,
-                create_response_schema, create_schema,
-                error::{ApiError, ErrorWrapper, VendorErrorCode},
-                field_parse_errors_to_json, finalize_execution, guard_execution,
+                create_response_schema,
+                create_schema,
+                error::{
+                    ApiError,
+                    ErrorWrapper,
+                    VendorErrorCode,
+                },
+                field_parse_errors_to_json,
+                finalize_execution,
+                guard_execution,
                 locks::validate_lock,
-                remove_reserved_execution, reserve_execution,
+                remove_reserved_execution,
+                reserve_execution,
             },
         };
 
@@ -1929,13 +2038,21 @@ mod tests {
 
     mod ecu_operations_collection {
         use aide::UseApi;
-        use axum::{extract::State, http::StatusCode};
+        use axum::{
+            extract::State,
+            http::StatusCode,
+        };
         use axum_extra::extract::WithRejection;
         use cda_interfaces::{
-            datatypes::ComponentOperationsInfo, diagservices::mock::MockDiagServiceResponse,
-            file_manager::mock::MockFileManager, mock::MockUdsEcu,
+            datatypes::ComponentOperationsInfo,
+            diagservices::mock::MockDiagServiceResponse,
+            file_manager::mock::MockFileManager,
+            mock::MockUdsEcu,
         };
-        use cda_plugin_security::{Secured, mock::TestSecurityPlugin};
+        use cda_plugin_security::{
+            Secured,
+            mock::TestSecurityPlugin,
+        };
         use sovd_interfaces::components::ecu::operations::OperationCollectionItem;
 
         use super::super::*;
@@ -2102,27 +2219,43 @@ mod tests {
 
         use aide::UseApi;
         use axum::{
-            extract::{Path, Query, State},
+            extract::{
+                Path,
+                Query,
+                State,
+            },
             http::StatusCode,
         };
         use axum_extra::extract::WithRejection;
         use cda_interfaces::{
-            DiagCommType, DiagServiceError,
+            DiagCommType,
+            DiagServiceError,
             diagservices::{
-                DiagServiceJsonResponse, DiagServiceResponseType, mock::MockDiagServiceResponse,
+                DiagServiceJsonResponse,
+                DiagServiceResponseType,
+                mock::MockDiagServiceResponse,
             },
             file_manager::mock::MockFileManager,
             mock::MockUdsEcu,
         };
-        use cda_plugin_security::{Secured, mock::TestSecurityPlugin};
+        use cda_plugin_security::{
+            Secured,
+            mock::TestSecurityPlugin,
+        };
         use indexmap::IndexMap;
         use sovd_interfaces::{
-            common::operations::OperationIdItem, components::ecu::operations::ExecutionStatus,
+            common::operations::OperationIdItem,
+            components::ecu::operations::ExecutionStatus,
         };
 
-        use super::super::service::{executions as handlers, executions::id as id_handlers};
+        use super::super::service::{
+            executions as handlers,
+            executions::id as id_handlers,
+        };
         use crate::sovd::{
-            ServiceExecution, locks::insert_test_ecu_lock, tests::create_test_webserver_state,
+            ServiceExecution,
+            locks::insert_test_ecu_lock,
+            tests::create_test_webserver_state,
         };
 
         fn make_json_response(data: serde_json::Value) -> MockDiagServiceResponse {

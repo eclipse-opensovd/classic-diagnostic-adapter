@@ -11,9 +11,15 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 use http::StatusCode;
-use serde::{Deserialize, Serialize};
+use serde::{
+    Deserialize,
+    Serialize,
+};
 
-use crate::util::{TestingError, runtime::EcuSim};
+use crate::util::{
+    TestingError,
+    runtime::EcuSim,
+};
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "SCREAMING_SNAKE_CASE")]

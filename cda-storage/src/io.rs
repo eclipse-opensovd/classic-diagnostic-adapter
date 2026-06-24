@@ -17,9 +17,15 @@
 use std::os::unix::fs::FileExt;
 #[cfg(windows)]
 use std::os::windows::fs::FileExt;
-use std::{fs::File, sync::Arc};
+use std::{
+    fs::File,
+    sync::Arc,
+};
 
-use cda_interfaces::storage_api::{RandomAccessData, StorageError};
+use cda_interfaces::storage_api::{
+    RandomAccessData,
+    StorageError,
+};
 use tokio::sync::OwnedRwLockReadGuard;
 
 #[cfg(windows)]

@@ -44,16 +44,30 @@
 
 use std::{
     io,
-    os::raw::{c_int, c_uchar, c_void},
+    os::raw::{
+        c_int,
+        c_uchar,
+        c_void,
+    },
     pin::Pin,
     sync::Arc,
-    task::{Context, Poll},
+    task::{
+        Context,
+        Poll,
+    },
 };
 
 use mbedtls_sys as ffi;
-use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
+use tokio::io::{
+    AsyncRead,
+    AsyncWrite,
+    ReadBuf,
+};
 
-use crate::{error::MbedtlsError, ssl::SslConfig};
+use crate::{
+    error::MbedtlsError,
+    ssl::SslConfig,
+};
 
 // Internal memory BIO
 

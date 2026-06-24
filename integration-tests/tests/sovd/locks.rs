@@ -13,10 +13,20 @@
 
 use std::time::Duration;
 
-use chrono::{DateTime, Utc};
-use http::{HeaderMap, Method, StatusCode};
+use chrono::{
+    DateTime,
+    Utc,
+};
+use http::{
+    HeaderMap,
+    Method,
+    StatusCode,
+};
 use opensovd_cda_lib::config::configfile::Configuration;
-use serde::{self, Deserialize};
+use serde::{
+    self,
+    Deserialize,
+};
 
 use crate::{
     sovd,
@@ -24,10 +34,18 @@ use crate::{
     util::{
         TestingError,
         http::{
-            Response, auth_header, extract_field_from_json, response_to_json,
-            response_to_json_to_field, send_cda_json_request, send_cda_request,
+            Response,
+            auth_header,
+            extract_field_from_json,
+            response_to_json,
+            response_to_json_to_field,
+            send_cda_json_request,
+            send_cda_request,
         },
-        runtime::{TestRuntime, setup_integration_test},
+        runtime::{
+            TestRuntime,
+            setup_integration_test,
+        },
     },
 };
 

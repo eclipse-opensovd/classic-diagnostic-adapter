@@ -11,7 +11,11 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-use cda_interfaces::storage_api::{Collection, CollectionName, Storage};
+use cda_interfaces::storage_api::{
+    Collection,
+    CollectionName,
+    Storage,
+};
 
 /// Seeds a storage collection from an iterator of `(key, data)` pairs when the collection is
 /// empty.  No-op if the collection is already populated or the iterator yields no items.

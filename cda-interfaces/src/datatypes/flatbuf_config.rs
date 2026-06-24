@@ -11,7 +11,10 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-use serde::{Deserialize, Serialize};
+use serde::{
+    Deserialize,
+    Serialize,
+};
 
 /// `FlatBuffers` verification settings for MDD database parsing.
 #[derive(Deserialize, Serialize, Clone, Debug, schemars::JsonSchema)]

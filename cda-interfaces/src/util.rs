@@ -10,7 +10,10 @@
  *
  * SPDX-License-Identifier: Apache-2.0
  */
-use crate::{DiagServiceError, service_ids};
+use crate::{
+    DiagServiceError,
+    service_ids,
+};
 
 pub mod tracing {
     #[must_use]
@@ -107,9 +110,19 @@ pub mod serde_ext {
     ///
     /// Returns a deserialization error if a key is not a valid `u8` in either format.
     pub mod normalized_u8_key_map {
-        use std::{collections::HashMap, fmt, hash::BuildHasher};
+        use std::{
+            collections::HashMap,
+            fmt,
+            hash::BuildHasher,
+        };
 
-        use serde::de::{self, Deserialize, Deserializer, MapAccess, Visitor};
+        use serde::de::{
+            self,
+            Deserialize,
+            Deserializer,
+            MapAccess,
+            Visitor,
+        };
 
         /// Parses a string as a `u8` in decimal or hexadecimal (`0x`/`0X` prefix) format
         /// and returns its decimal string representation.

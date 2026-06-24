@@ -11,32 +11,52 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-use aide::{UseApi, transform::TransformOperation};
+use aide::{
+    UseApi,
+    transform::TransformOperation,
+};
 use axum::{
     Json,
     extract::State,
     http::StatusCode,
-    response::{IntoResponse as _, Response},
+    response::{
+        IntoResponse as _,
+        Response,
+    },
 };
 use axum_extra::extract::WithRejection;
 use cda_interfaces::{
-    DynamicPlugin, UdsEcu,
+    DynamicPlugin,
+    UdsEcu,
     datatypes::DtcRecordAndStatus,
-    diagservices::{DiagServiceResponse, DiagServiceResponseType},
+    diagservices::{
+        DiagServiceResponse,
+        DiagServiceResponseType,
+    },
     file_manager::FileManager,
 };
 use cda_plugin_security::Secured;
 use serde_qs::axum::QsQuery;
 use sovd_interfaces::components::ecu::{
     faults,
-    faults::{Fault, delete::FaultQuery as DeleteFaultQuery, get::FaultQuery as GetFaultQuery},
+    faults::{
+        Fault,
+        delete::FaultQuery as DeleteFaultQuery,
+        get::FaultQuery as GetFaultQuery,
+    },
 };
 
 use crate::{
     openapi,
     sovd::{
-        IntoSovd, WebserverEcuState, create_schema,
-        error::{ApiError, ErrorWrapper, api_error_from_diag_response},
+        IntoSovd,
+        WebserverEcuState,
+        create_schema,
+        error::{
+            ApiError,
+            ErrorWrapper,
+            api_error_from_diag_response,
+        },
         faults::faults::FaultStatus,
         locks::validate_lock,
         remove_descriptions_recursive,
@@ -191,15 +211,24 @@ pub(crate) fn docs_delete(op: TransformOperation) -> TransformOperation {
 
 pub(crate) mod id {
     use aide::UseApi;
-    use axum::extract::{Path, Query};
+    use axum::extract::{
+        Path,
+        Query,
+    };
     use cda_interfaces::{
         DynamicPlugin,
-        datatypes::{self},
+        datatypes::{
+            self,
+        },
     };
     use cda_plugin_security::Secured;
     use sovd_interfaces::{
         components::ecu::faults::id::get::{
-            DtcIdQuery, EnvironmentData, ExtendedDataRecords, ExtendedFault, ExtendedSnapshots,
+            DtcIdQuery,
+            EnvironmentData,
+            ExtendedDataRecords,
+            ExtendedFault,
+            ExtendedSnapshots,
             Snapshot,
         },
         error::DataError,
@@ -207,7 +236,9 @@ pub(crate) mod id {
 
     use super::*;
     use crate::sovd::{
-        IntoSovdWithSchema, components::IdPathParam, error::VendorErrorCode,
+        IntoSovdWithSchema,
+        components::IdPathParam,
+        error::VendorErrorCode,
         remove_descriptions_recursive,
     };
 
@@ -432,7 +463,11 @@ pub(crate) mod id {
 mod tests {
     use cda_interfaces::{
         HashMap,
-        datatypes::{DtcReadInformationFunction, DtcRecord, DtcStatus},
+        datatypes::{
+            DtcReadInformationFunction,
+            DtcRecord,
+            DtcStatus,
+        },
         diagservices::mock::MockDiagServiceResponse,
         file_manager::mock::MockFileManager,
         mock::MockUdsEcu,

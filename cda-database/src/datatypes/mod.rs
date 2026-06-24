@@ -14,9 +14,14 @@
 use std::fmt::Debug;
 
 use cda_interfaces::{
-    DiagServiceError, HashSet,
+    DiagServiceError,
+    HashSet,
     datatypes::{
-        ComParamConfig, ComParamPrecedence, ComParamValue, DeserializableCompParam, FlatbBufConfig,
+        ComParamConfig,
+        ComParamPrecedence,
+        ComParamValue,
+        DeserializableCompParam,
+        FlatbBufConfig,
     },
     dlt_ctx,
 };
@@ -28,9 +33,13 @@ use serde::Serialize;
 pub use service::*;
 
 use crate::{
-    DatabaseConfig, datatypes,
+    DatabaseConfig,
+    datatypes,
     flatbuf::diagnostic_description::dataformat,
-    mdd_data::{self, read_ecudata},
+    mdd_data::{
+        self,
+        read_ecudata,
+    },
 };
 
 #[cfg(feature = "database-builder")]

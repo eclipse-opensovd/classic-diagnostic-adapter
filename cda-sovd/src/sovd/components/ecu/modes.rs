@@ -15,22 +15,38 @@ use std::time::Duration;
 use aide::transform::TransformOperation;
 use axum::{
     Json,
-    extract::{Query, State},
+    extract::{
+        Query,
+        State,
+    },
     http::StatusCode,
-    response::{IntoResponse as _, Response},
+    response::{
+        IntoResponse as _,
+        Response,
+    },
 };
 use axum_extra::extract::WithRejection;
 use cda_interfaces::{
-    HashMap, UdsEcu,
-    diagservices::{DiagServiceResponse, DiagServiceResponseType},
+    HashMap,
+    UdsEcu,
+    diagservices::{
+        DiagServiceResponse,
+        DiagServiceResponseType,
+    },
     file_manager::FileManager,
 };
 use schemars::Schema;
 use serde::Serialize;
 use sovd_interfaces::{
     common::modes::{
-        COMM_CONTROL_ID, COMM_CONTROL_NAME, DTC_SETTING_ID, DTC_SETTING_NAME, SECURITY_ID,
-        SECURITY_NAME, SESSION_ID, SESSION_NAME,
+        COMM_CONTROL_ID,
+        COMM_CONTROL_NAME,
+        DTC_SETTING_ID,
+        DTC_SETTING_NAME,
+        SECURITY_ID,
+        SECURITY_NAME,
+        SESSION_ID,
+        SESSION_NAME,
     },
     components::ecu::modes as sovd_modes,
 };
@@ -38,8 +54,13 @@ use sovd_interfaces::{
 use crate::{
     Locks,
     sovd::{
-        WebserverEcuState, create_schema,
-        error::{ApiError, ErrorWrapper, api_error_from_diag_response},
+        WebserverEcuState,
+        create_schema,
+        error::{
+            ApiError,
+            ErrorWrapper,
+            api_error_from_diag_response,
+        },
         locks::validate_lock,
     },
 };
@@ -203,11 +224,18 @@ async fn handle_mode_get<T: UdsEcu + Clone, R: schemars::JsonSchema + Serialize>
 
 pub(crate) mod session {
     use aide::UseApi;
-    use cda_interfaces::{DynamicPlugin, SchemaProvider, service_ids};
+    use cda_interfaces::{
+        DynamicPlugin,
+        SchemaProvider,
+        service_ids,
+    };
     use cda_plugin_security::Secured;
 
     use super::*;
-    use crate::{openapi, sovd::error::ErrorWrapper};
+    use crate::{
+        openapi,
+        sovd::error::ErrorWrapper,
+    };
 
     #[tracing::instrument(
         skip(locks, uds, security_plugin),
@@ -352,16 +380,24 @@ pub(crate) mod session {
 pub(crate) mod security {
     use aide::UseApi;
     use cda_interfaces::{
-        DynamicPlugin, HashMapExtensions, SchemaProvider, SecurityAccess,
-        diagservices::UdsPayloadData, service_ids,
+        DynamicPlugin,
+        HashMapExtensions,
+        SchemaProvider,
+        SecurityAccess,
+        diagservices::UdsPayloadData,
+        service_ids,
     };
     use cda_plugin_security::Secured;
     use sovd_interfaces::components::ecu::modes::security_and_session::put::{
-        RequestSeedResponse, SovdSeed,
+        RequestSeedResponse,
+        SovdSeed,
     };
 
     use super::*;
-    use crate::{openapi, sovd::error::ErrorWrapper};
+    use crate::{
+        openapi,
+        sovd::error::ErrorWrapper,
+    };
 
     pub(crate) async fn get<
         R: DiagServiceResponse,
@@ -590,20 +626,32 @@ pub(crate) mod security {
 }
 
 pub(crate) mod commctrl {
-    use aide::{UseApi, transform::TransformOperation};
+    use aide::{
+        UseApi,
+        transform::TransformOperation,
+    };
     use axum::{
         Json,
-        extract::{Query, State},
+        extract::{
+            Query,
+            State,
+        },
         response::Response,
     };
     use axum_extra::extract::WithRejection;
     use cda_interfaces::{
-        SchemaProvider, UdsEcu, diagservices::DiagServiceResponse, file_manager::FileManager,
+        SchemaProvider,
+        UdsEcu,
+        diagservices::DiagServiceResponse,
+        file_manager::FileManager,
         service_ids,
     };
     use cda_plugin_security::Secured;
     use sovd_interfaces::{
-        common::modes::{COMM_CONTROL_ID, COMM_CONTROL_NAME},
+        common::modes::{
+            COMM_CONTROL_ID,
+            COMM_CONTROL_NAME,
+        },
         components::ecu::modes as sovd_modes,
     };
 
@@ -611,7 +659,10 @@ pub(crate) mod commctrl {
         openapi,
         sovd::{
             WebserverEcuState,
-            components::ecu::modes::{handle_mode_change, handle_mode_get},
+            components::ecu::modes::{
+                handle_mode_change,
+                handle_mode_get,
+            },
             error::ApiError,
         },
     };
@@ -704,20 +755,32 @@ pub(crate) mod commctrl {
 }
 
 pub(crate) mod dtcsetting {
-    use aide::{UseApi, transform::TransformOperation};
+    use aide::{
+        UseApi,
+        transform::TransformOperation,
+    };
     use axum::{
         Json,
-        extract::{Query, State},
+        extract::{
+            Query,
+            State,
+        },
         response::Response,
     };
     use axum_extra::extract::WithRejection;
     use cda_interfaces::{
-        SchemaProvider, UdsEcu, diagservices::DiagServiceResponse, file_manager::FileManager,
+        SchemaProvider,
+        UdsEcu,
+        diagservices::DiagServiceResponse,
+        file_manager::FileManager,
         service_ids,
     };
     use cda_plugin_security::Secured;
     use sovd_interfaces::{
-        common::modes::{DTC_SETTING_ID, DTC_SETTING_NAME},
+        common::modes::{
+            DTC_SETTING_ID,
+            DTC_SETTING_NAME,
+        },
         components::ecu::modes as sovd_modes,
     };
 
@@ -725,7 +788,10 @@ pub(crate) mod dtcsetting {
         openapi,
         sovd::{
             WebserverEcuState,
-            components::ecu::modes::{handle_mode_change, handle_mode_get},
+            components::ecu::modes::{
+                handle_mode_change,
+                handle_mode_get,
+            },
             error::ApiError,
         },
     };

@@ -19,7 +19,11 @@
 
 use cda_database::datatypes;
 use cda_interfaces::{
-    DiagCommAction, DiagServiceError, HashMap, STRINGS, StringId,
+    DiagCommAction,
+    DiagServiceError,
+    HashMap,
+    STRINGS,
+    StringId,
     util::starts_with_ignore_ascii_case,
 };
 use cda_plugin_security::SecurityPlugin;
@@ -737,9 +741,17 @@ impl<S: SecurityPlugin> EcuManager<S> {
 #[cfg(test)]
 mod tests {
     use cda_database::datatypes::database_builder::{
-        DataFormatParentRefType, DiagLayerParams, EcuDataBuilder, EcuDataParams,
+        DataFormatParentRefType,
+        DiagLayerParams,
+        EcuDataBuilder,
+        EcuDataParams,
     };
-    use cda_interfaces::{DiagComm, DiagServiceError, EcuManager as _, subfunction_ids};
+    use cda_interfaces::{
+        DiagComm,
+        DiagServiceError,
+        EcuManager as _,
+        subfunction_ids,
+    };
     use cda_plugin_security::DefaultSecurityPluginData;
 
     use super::*;

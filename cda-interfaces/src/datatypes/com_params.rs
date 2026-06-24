@@ -11,13 +11,26 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-use std::{fmt::Debug, time::Duration};
+use std::{
+    fmt::Debug,
+    time::Duration,
+};
 
-use serde::{Deserialize, Deserializer, Serialize, Serializer, de::DeserializeOwned};
+use serde::{
+    Deserialize,
+    Deserializer,
+    Serialize,
+    Serializer,
+    de::DeserializeOwned,
+};
 
 use crate::{
     HashMap,
-    datatypes::{ComParamValue, ComplexComParamValue, Unit},
+    datatypes::{
+        ComParamValue,
+        ComplexComParamValue,
+        Unit,
+    },
 };
 
 /// Default communication parameters for diagnostic protocols.

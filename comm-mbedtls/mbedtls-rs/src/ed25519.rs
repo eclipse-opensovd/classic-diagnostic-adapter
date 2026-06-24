@@ -17,7 +17,11 @@
 //! C PSA accelerator driver (`csrc/ed25519_psa_driver.c`) calls to perform
 //! the actual Ed25519 cryptographic verification.
 
-use ed25519_dalek::{Signature, Verifier, VerifyingKey};
+use ed25519_dalek::{
+    Signature,
+    Verifier,
+    VerifyingKey,
+};
 
 const ED25519_PUB_KEY_LEN: usize = 32;
 const ED25519_SIG_LEN: usize = 64;

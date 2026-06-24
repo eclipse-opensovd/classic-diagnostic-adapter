@@ -12,14 +12,27 @@
  */
 
 use aide::{
-    openapi::{Contact, License, MediaType, SchemaObject, Server, Tag},
-    transform::{TransformOpenApi, TransformOperation},
+    openapi::{
+        Contact,
+        License,
+        MediaType,
+        SchemaObject,
+        Server,
+        Tag,
+    },
+    transform::{
+        TransformOpenApi,
+        TransformOperation,
+    },
 };
 use axum::Json;
 use schemars::JsonSchema;
 use sovd_interfaces::error::ApiErrorResponse;
 
-use crate::sovd::{self, error::VendorErrorCode};
+use crate::sovd::{
+    self,
+    error::VendorErrorCode,
+};
 
 pub(crate) mod aide_helper {
     /// Helper macro to generate path params that have an openapi

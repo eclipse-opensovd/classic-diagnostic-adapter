@@ -16,15 +16,32 @@ use std::time::Duration;
 use async_trait::async_trait;
 
 use crate::{
-    DiagComm, DiagServiceError, DynamicPlugin, EcuVariant, HashMap, SecurityAccess,
+    DiagComm,
+    DiagServiceError,
+    DynamicPlugin,
+    EcuVariant,
+    HashMap,
+    SecurityAccess,
     TesterPresentType,
     datatypes::{
-        ComplexComParamValue, ComponentConfigurationsInfo, ComponentDataInfo,
-        ComponentOperationsInfo, DataTransferMetaData, DtcCode, DtcExtendedInfo,
-        DtcRecordAndStatus, NetworkStructure, RoutineSubfunctions, SdBoolMappings, SdSdg,
+        ComplexComParamValue,
+        ComponentConfigurationsInfo,
+        ComponentDataInfo,
+        ComponentOperationsInfo,
+        DataTransferMetaData,
+        DtcCode,
+        DtcExtendedInfo,
+        DtcRecordAndStatus,
+        NetworkStructure,
+        RoutineSubfunctions,
+        SdBoolMappings,
+        SdSdg,
         single_ecu,
     },
-    diagservices::{DiagServiceResponse, UdsPayloadData},
+    diagservices::{
+        DiagServiceResponse,
+        UdsPayloadData,
+    },
 };
 
 pub struct FlashTransferStartParams<'a> {
@@ -574,12 +591,31 @@ pub mod mock {
 
     use super::FlashTransferStartParams;
     use crate::{
-        DiagComm, DiagServiceError, DynamicPlugin, EcuVariant, HashMap, SecurityAccess,
-        TesterPresentType, UdsEcu, UdsSecurity, UdsSession, UdsTesterPresent, UdsTransport,
+        DiagComm,
+        DiagServiceError,
+        DynamicPlugin,
+        EcuVariant,
+        HashMap,
+        SecurityAccess,
+        TesterPresentType,
+        UdsEcu,
+        UdsSecurity,
+        UdsSession,
+        UdsTesterPresent,
+        UdsTransport,
         datatypes::{
-            ComplexComParamValue, ComponentConfigurationsInfo, ComponentDataInfo,
-            ComponentOperationsInfo, DataTransferMetaData, DtcCode, DtcExtendedInfo,
-            DtcRecordAndStatus, NetworkStructure, RoutineSubfunctions, SdBoolMappings, SdSdg,
+            ComplexComParamValue,
+            ComponentConfigurationsInfo,
+            ComponentDataInfo,
+            ComponentOperationsInfo,
+            DataTransferMetaData,
+            DtcCode,
+            DtcExtendedInfo,
+            DtcRecordAndStatus,
+            NetworkStructure,
+            RoutineSubfunctions,
+            SdBoolMappings,
+            SdSdg,
             single_ecu,
         },
         diagservices::UdsPayloadData,
@@ -875,7 +911,10 @@ pub mod mock {
         }
     }
 
-    use crate::schema::{SchemaDescription, SchemaProvider};
+    use crate::schema::{
+        SchemaDescription,
+        SchemaProvider,
+    };
 
     impl SchemaProvider for MockUdsEcu {
         async fn schema_for_request(
@@ -906,7 +945,10 @@ pub mod mock {
 
 #[cfg(all(test, feature = "test-utils"))]
 mod tests {
-    use super::{UdsEcu, mock::MockUdsEcu};
+    use super::{
+        UdsEcu,
+        mock::MockUdsEcu,
+    };
     use crate::service_ids;
 
     #[tokio::test]

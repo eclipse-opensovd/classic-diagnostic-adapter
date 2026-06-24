@@ -15,32 +15,85 @@ use std::{
     fmt::Write as _,
     sync::{
         Arc,
-        atomic::{AtomicBool, Ordering},
+        atomic::{
+            AtomicBool,
+            Ordering,
+        },
     },
     time::Duration,
 };
 
 use async_trait::async_trait;
 use cda_interfaces::{
-    DiagComm, DiagServiceError, DynamicPlugin, EcuGateway, EcuManager, EcuState, EcuVariant,
-    FlashTransferStartParams, FunctionalDescriptionConfig, HashMap, HashMapExtensions, HashSet,
-    HashSetExtensions, SchemaDescription, SchemaProvider, ServicePayload, TransmissionParameters,
-    UdsEcu, UdsResponse, UdsTransport,
+    DiagComm,
+    DiagServiceError,
+    DynamicPlugin,
+    EcuGateway,
+    EcuManager,
+    EcuState,
+    EcuVariant,
+    FlashTransferStartParams,
+    FunctionalDescriptionConfig,
+    HashMap,
+    HashMapExtensions,
+    HashSet,
+    HashSetExtensions,
+    SchemaDescription,
+    SchemaProvider,
+    ServicePayload,
+    TransmissionParameters,
+    UdsEcu,
+    UdsResponse,
+    UdsTransport,
     datatypes::{
-        self, ComponentConfigurationsInfo, ComponentOperationsInfo, DTC_CODE_BIT_LEN,
-        DataTransferError, DataTransferMetaData, DataTransferStatus, DtcCode, DtcExtendedInfo,
-        DtcMask, DtcReadInformationFunction, DtcRecordAndStatus, DtcSnapshot, Ecu,
-        ExtendedDataRecords, ExtendedSnapshots, FaultConfig, FunctionalGroup, Gateway,
-        NetworkStructure, RoutineSubfunctions, SdBoolMappings, SdSdg,
+        self,
+        ComponentConfigurationsInfo,
+        ComponentOperationsInfo,
+        DTC_CODE_BIT_LEN,
+        DataTransferError,
+        DataTransferMetaData,
+        DataTransferStatus,
+        DtcCode,
+        DtcExtendedInfo,
+        DtcMask,
+        DtcReadInformationFunction,
+        DtcRecordAndStatus,
+        DtcSnapshot,
+        Ecu,
+        ExtendedDataRecords,
+        ExtendedSnapshots,
+        FaultConfig,
+        FunctionalGroup,
+        Gateway,
+        NetworkStructure,
+        RoutineSubfunctions,
+        SdBoolMappings,
+        SdSdg,
     },
-    diagservices::{DiagServiceResponse, DiagServiceResponseType, UdsPayloadData},
-    dlt_ctx, service_ids, util,
+    diagservices::{
+        DiagServiceResponse,
+        DiagServiceResponseType,
+        UdsPayloadData,
+    },
+    dlt_ctx,
+    service_ids,
+    util,
 };
 use strum::IntoEnumIterator;
 use tokio::{
     fs::File,
-    io::{AsyncReadExt, AsyncSeekExt, BufReader},
-    sync::{Mutex, RwLock, Semaphore, mpsc, watch},
+    io::{
+        AsyncReadExt,
+        AsyncSeekExt,
+        BufReader,
+    },
+    sync::{
+        Mutex,
+        RwLock,
+        Semaphore,
+        mpsc,
+        watch,
+    },
     task::JoinHandle,
 };
 
@@ -51,7 +104,12 @@ mod transport;
 mod types;
 
 pub use types::TesterPresentTask;
-use types::{EcuDataTransfer, EcuIdentifier, PerGatewayInfo, ResetType};
+use types::{
+    EcuDataTransfer,
+    EcuIdentifier,
+    PerGatewayInfo,
+    ResetType,
+};
 
 /// Record number requesting all records/all memory (ISO 14229-1).
 const DTC_RECORD_NUMBER_ALL: u8 = 0xFF;
@@ -2215,7 +2273,11 @@ fn check_sd_sdg_recursive(expected: &SdBoolMappings, sd_sdg: &SdSdg) -> bool {
 mod tests {
     use cda_interfaces::{
         HashMap,
-        datatypes::{DtcMask, SdMappingsTruthyValue, SdSdg},
+        datatypes::{
+            DtcMask,
+            SdMappingsTruthyValue,
+            SdSdg,
+        },
     };
     use serde_json::json;
 

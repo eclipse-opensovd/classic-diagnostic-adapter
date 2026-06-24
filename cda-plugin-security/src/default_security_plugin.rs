@@ -50,20 +50,51 @@ use std::sync::LazyLock;
 
 use aide::axum::IntoApiResponse;
 use async_trait::async_trait;
-use axum::{Json, RequestPartsExt, body::Bytes, http::StatusCode, response::IntoResponse};
+use axum::{
+    Json,
+    RequestPartsExt,
+    body::Bytes,
+    http::StatusCode,
+    response::IntoResponse,
+};
 use axum_extra::{
     TypedHeader,
-    headers::{Authorization, authorization::Bearer},
+    headers::{
+        Authorization,
+        authorization::Bearer,
+    },
 };
-use http::{HeaderMap, request::Parts};
-use jsonwebtoken::{DecodingKey, EncodingKey, Header, TokenData, encode};
+use http::{
+    HeaderMap,
+    request::Parts,
+};
+use jsonwebtoken::{
+    DecodingKey,
+    EncodingKey,
+    Header,
+    TokenData,
+    encode,
+};
 use schemars::JsonSchema;
-use serde::{Deserialize, Serialize, de::DeserializeOwned};
-use sovd_interfaces::error::{ApiErrorResponse, ErrorCode};
+use serde::{
+    Deserialize,
+    Serialize,
+    de::DeserializeOwned,
+};
+use sovd_interfaces::error::{
+    ApiErrorResponse,
+    ErrorCode,
+};
 
 use crate::{
-    AuthApi, AuthError, AuthorizationRequestHandler, Claims as ClaimsTrait, SecurityApi,
-    SecurityPlugin, SecurityPluginInitializer, SecurityPluginLoader,
+    AuthApi,
+    AuthError,
+    AuthorizationRequestHandler,
+    Claims as ClaimsTrait,
+    SecurityApi,
+    SecurityPlugin,
+    SecurityPluginInitializer,
+    SecurityPluginLoader,
 };
 
 // allowed because the variant for enabled auth needs the Result

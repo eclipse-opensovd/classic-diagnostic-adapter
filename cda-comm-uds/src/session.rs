@@ -11,16 +11,30 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-use std::{sync::Arc, time::Duration};
+use std::{
+    sync::Arc,
+    time::Duration,
+};
 
 use async_trait::async_trait;
 use cda_interfaces::{
-    DiagServiceError, DynamicPlugin, EcuGateway, EcuManager, UdsSecurity, UdsSession,
-    diagservices::{DiagServiceResponse, DiagServiceResponseType},
+    DiagServiceError,
+    DynamicPlugin,
+    EcuGateway,
+    EcuManager,
+    UdsSecurity,
+    UdsSession,
+    diagservices::{
+        DiagServiceResponse,
+        DiagServiceResponseType,
+    },
     dlt_ctx,
 };
 
-use crate::{UdsManager, types::ResetType};
+use crate::{
+    UdsManager,
+    types::ResetType,
+};
 
 impl<S: EcuGateway, R: DiagServiceResponse, T: EcuManager<Response = R>> UdsManager<S, R, T> {
     /// Spawn a background task that resets the ECU session or security access

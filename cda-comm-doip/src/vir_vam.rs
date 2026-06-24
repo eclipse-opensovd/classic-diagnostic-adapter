@@ -11,23 +11,43 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-use std::{future::Future, sync::Arc, time::Duration};
+use std::{
+    future::Future,
+    sync::Arc,
+    time::Duration,
+};
 
 use cda_interfaces::{
-    DiagServiceError, DoipComParamProvider, EcuAddressProvider, HashMap, HashMapExtensions, dlt_ctx,
+    DiagServiceError,
+    DoipComParamProvider,
+    EcuAddressProvider,
+    HashMap,
+    HashMapExtensions,
+    dlt_ctx,
 };
 use doip_definitions::{
     header::PayloadType,
-    payload::{DoipPayload, VehicleIdentificationRequest},
+    payload::{
+        DoipPayload,
+        VehicleIdentificationRequest,
+    },
 };
-use tokio::sync::{Mutex, RwLock, mpsc};
+use tokio::sync::{
+    Mutex,
+    RwLock,
+    mpsc,
+};
 use tokio_util::sync::CancellationToken;
 
 use crate::{
-    DoipDiagGateway, DoipTarget,
+    DoipDiagGateway,
+    DoipTarget,
     connections::handle_gateway_connection,
     ecu_connection::ConnectionConfig,
-    socket::{DoIPConfig, DoIPUdpSocket},
+    socket::{
+        DoIPConfig,
+        DoIPUdpSocket,
+    },
 };
 pub(crate) async fn get_vehicle_identification<T, F>(
     socket: &mut DoIPUdpSocket,

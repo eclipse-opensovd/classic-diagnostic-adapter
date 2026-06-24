@@ -13,7 +13,10 @@
 
 use std::time::Duration;
 
-use cda_health::{HealthState, Status as HealthStatus};
+use cda_health::{
+    HealthState,
+    Status as HealthStatus,
+};
 use cda_interfaces::spawn_named;
 use tokio::task::JoinHandle;
 

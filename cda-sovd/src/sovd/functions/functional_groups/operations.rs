@@ -11,14 +11,26 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-use aide::{UseApi, transform::TransformOperation};
+use aide::{
+    UseApi,
+    transform::TransformOperation,
+};
 use axum::{
     Json,
-    extract::{Query, State},
-    response::{IntoResponse, Response},
+    extract::{
+        Query,
+        State,
+    },
+    response::{
+        IntoResponse,
+        Response,
+    },
 };
 use axum_extra::extract::WithRejection;
-use cda_interfaces::{DynamicPlugin, UdsEcu};
+use cda_interfaces::{
+    DynamicPlugin,
+    UdsEcu,
+};
 use cda_plugin_security::Secured;
 use http::StatusCode;
 use sovd_interfaces::functions::functional_groups::operations::OperationCollectionItem;
@@ -26,7 +38,10 @@ use sovd_interfaces::functions::functional_groups::operations::OperationCollecti
 use super::WebserverFgState;
 use crate::sovd::{
     create_schema,
-    error::{ApiError, ErrorWrapper},
+    error::{
+        ApiError,
+        ErrorWrapper,
+    },
 };
 
 pub(crate) async fn get<T: UdsEcu + Clone>(
@@ -89,14 +104,29 @@ pub(crate) fn docs_get(op: TransformOperation) -> TransformOperation {
 /// `GET /operations/{service}/docs` - online capability description for a
 /// functional-group operation.
 pub(crate) mod docs_endpoint {
-    use aide::{UseApi, openapi::OpenApi, transform::TransformOperation};
+    use aide::{
+        UseApi,
+        openapi::OpenApi,
+        transform::TransformOperation,
+    };
     use axum::{
         Json,
-        extract::{Path, State},
-        response::{IntoResponse, Response},
+        extract::{
+            Path,
+            State,
+        },
+        response::{
+            IntoResponse,
+            Response,
+        },
     };
     use cda_interfaces::{
-        DiagComm, DiagCommType, DynamicPlugin, SchemaProvider, UdsEcu, subfunction_ids,
+        DiagComm,
+        DiagCommType,
+        DynamicPlugin,
+        SchemaProvider,
+        UdsEcu,
+        subfunction_ids,
     };
     use cda_plugin_security::Secured;
     use http::StatusCode;
@@ -105,7 +135,10 @@ pub(crate) mod docs_endpoint {
     use crate::{
         openapi,
         sovd::{
-            docs::{self, operations::OperationDocsMeta},
+            docs::{
+                self,
+                operations::OperationDocsMeta,
+            },
             error::ApiError,
         },
     };
@@ -185,37 +218,77 @@ pub(crate) mod docs_endpoint {
 }
 
 pub(crate) mod diag_service {
-    use aide::{UseApi, transform::TransformOperation};
+    use aide::{
+        UseApi,
+        transform::TransformOperation,
+    };
     use axum::{
         Json,
         body::Bytes,
-        extract::{OriginalUri, Path, Query, State},
-        http::{HeaderMap, StatusCode, Uri, header},
-        response::{IntoResponse, Response},
+        extract::{
+            OriginalUri,
+            Path,
+            Query,
+            State,
+        },
+        http::{
+            HeaderMap,
+            StatusCode,
+            Uri,
+            header,
+        },
+        response::{
+            IntoResponse,
+            Response,
+        },
     };
-    use axum_extra::extract::{Host, WithRejection};
+    use axum_extra::extract::{
+        Host,
+        WithRejection,
+    };
     use cda_interfaces::{
-        DiagComm, DiagCommType, DynamicPlugin, HashMap, UdsEcu, diagservices::DiagServiceResponse,
+        DiagComm,
+        DiagCommType,
+        DynamicPlugin,
+        HashMap,
+        UdsEcu,
+        diagservices::DiagServiceResponse,
         subfunction_ids,
     };
     use cda_plugin_security::Secured;
     use indexmap::IndexMap;
-    use sovd_interfaces::components::ecu::operations::{AsyncPostResponse, ExecutionStatus};
+    use sovd_interfaces::components::ecu::operations::{
+        AsyncPostResponse,
+        ExecutionStatus,
+    };
     use tokio::sync::RwLock;
     use uuid::Uuid;
 
     use super::super::WebserverFgState;
     use crate::{
-        create_schema, openapi,
+        create_schema,
+        openapi,
         sovd::{
             FgServiceExecution,
-            components::{ecu::DiagServicePathParam, get_content_type_and_accept},
-            error::{ApiError, ErrorWrapper, VendorErrorCode},
+            components::{
+                ecu::DiagServicePathParam,
+                get_content_type_and_accept,
+            },
+            error::{
+                ApiError,
+                ErrorWrapper,
+                VendorErrorCode,
+            },
             finalize_execution,
-            functions::functional_groups::{handle_ecu_response, map_to_json},
-            get_payload_data, guard_execution,
+            functions::functional_groups::{
+                handle_ecu_response,
+                map_to_json,
+            },
+            get_payload_data,
+            guard_execution,
             locks::validate_fg_lock,
-            remove_reserved_execution, reserve_execution,
+            remove_reserved_execution,
+            reserve_execution,
         },
     };
 
@@ -294,11 +367,21 @@ pub(crate) mod diag_service {
     }
 
     pub(crate) mod executions {
-        use aide::{UseApi, transform::TransformOperation};
+        use aide::{
+            UseApi,
+            transform::TransformOperation,
+        };
         use axum::{
             Json,
-            extract::{Path, Query, State},
-            response::{IntoResponse, Response},
+            extract::{
+                Path,
+                Query,
+                State,
+            },
+            response::{
+                IntoResponse,
+                Response,
+            },
         };
         use axum_extra::extract::WithRejection;
         use cda_interfaces::UdsEcu;
@@ -307,7 +390,11 @@ pub(crate) mod diag_service {
         use sovd_interfaces::common::operations::OperationIdItem;
 
         use super::super::super::WebserverFgState;
-        use crate::sovd::{components::ecu::DiagServicePathParam, create_schema, error::ApiError};
+        use crate::sovd::{
+            components::ecu::DiagServicePathParam,
+            create_schema,
+            error::ApiError,
+        };
 
         pub(crate) async fn get<T: UdsEcu + Clone>(
             UseApi(Secured(_security_plugin), _): UseApi<Secured, ()>,
@@ -728,35 +815,61 @@ pub(crate) mod diag_service {
     }
 
     pub(crate) mod id {
-        use aide::{UseApi, transform::TransformOperation};
+        use aide::{
+            UseApi,
+            transform::TransformOperation,
+        };
         use axum::{
             Json,
-            extract::{Path, Query, State},
-            response::{IntoResponse, Response},
+            extract::{
+                Path,
+                Query,
+                State,
+            },
+            response::{
+                IntoResponse,
+                Response,
+            },
         };
         use axum_extra::extract::WithRejection;
         use cda_interfaces::{
-            DiagComm, DiagCommType, DynamicPlugin, HashMap, UdsEcu, subfunction_ids,
+            DiagComm,
+            DiagCommType,
+            DynamicPlugin,
+            HashMap,
+            UdsEcu,
+            subfunction_ids,
         };
         use cda_plugin_security::Secured;
         use http::StatusCode;
         use indexmap::IndexMap;
         use sovd_interfaces::{
-            components::ecu::operations::{ExecutionStatus, GetByIdCapability, OperationQuery},
+            components::ecu::operations::{
+                ExecutionStatus,
+                GetByIdCapability,
+                OperationQuery,
+            },
             functions::functional_groups::operations::FgAsyncGetByIdResponse,
         };
         use tokio::sync::RwLock;
         use uuid::Uuid;
 
         use super::{
-            super::super::WebserverFgState, EcuResponsesData, OperationAndIdPathParam,
+            super::super::WebserverFgState,
+            EcuResponsesData,
+            OperationAndIdPathParam,
             handle_ecu_responses,
         };
         use crate::{
-            create_schema, openapi,
+            create_schema,
+            openapi,
             sovd::{
                 FgServiceExecution,
-                error::{ApiError, ErrorWrapper, VendorErrorCode},
+                error::{
+                    ApiError,
+                    ErrorWrapper,
+                    VendorErrorCode,
+                },
                 locks::validate_fg_lock,
             },
         };
@@ -1042,16 +1155,26 @@ pub(crate) mod diag_service {
         use std::sync::Arc;
 
         use aide::UseApi;
-        use axum::{body::Bytes, extract::State, http::StatusCode};
+        use axum::{
+            body::Bytes,
+            extract::State,
+            http::StatusCode,
+        };
         use axum_extra::extract::WithRejection;
         use cda_interfaces::{
             DiagServiceError,
             datatypes::RoutineSubfunctions,
-            diagservices::{DiagServiceJsonResponse, mock::MockDiagServiceResponse},
+            diagservices::{
+                DiagServiceJsonResponse,
+                mock::MockDiagServiceResponse,
+            },
             mock::MockUdsEcu,
             subfunction_ids,
         };
-        use cda_plugin_security::{Secured, mock::TestSecurityPlugin};
+        use cda_plugin_security::{
+            Secured,
+            mock::TestSecurityPlugin,
+        };
         use http::HeaderMap;
         use indexmap::IndexMap;
         use sovd_interfaces::components::ecu::operations::ExecutionStatus;
@@ -1059,7 +1182,8 @@ pub(crate) mod diag_service {
 
         use super::*;
         use crate::sovd::{
-            FgServiceExecution, functions::functional_groups::tests::create_test_fg_state,
+            FgServiceExecution,
+            functions::functional_groups::tests::create_test_fg_state,
             locks::insert_test_fg_lock,
         };
 
@@ -2432,10 +2556,19 @@ pub(crate) mod diag_service {
 #[cfg(test)]
 mod tests {
     use aide::UseApi;
-    use axum::{extract::State, http::StatusCode};
+    use axum::{
+        extract::State,
+        http::StatusCode,
+    };
     use axum_extra::extract::WithRejection;
-    use cda_interfaces::{datatypes::ComponentOperationsInfo, mock::MockUdsEcu};
-    use cda_plugin_security::{Secured, mock::TestSecurityPlugin};
+    use cda_interfaces::{
+        datatypes::ComponentOperationsInfo,
+        mock::MockUdsEcu,
+    };
+    use cda_plugin_security::{
+        Secured,
+        mock::TestSecurityPlugin,
+    };
     use sovd_interfaces::functions::functional_groups::operations::OperationCollectionItem;
 
     use super::*;

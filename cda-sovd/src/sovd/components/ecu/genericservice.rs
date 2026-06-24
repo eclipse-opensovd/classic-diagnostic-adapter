@@ -12,19 +12,39 @@
  */
 
 use aide::UseApi;
-use axum::{body::Bytes, extract::State, response::Response};
+use axum::{
+    body::Bytes,
+    extract::State,
+    response::Response,
+};
 use cda_interfaces::{
     UdsEcu,
-    diagservices::{DiagServiceResponse, UdsPayloadData},
+    diagservices::{
+        DiagServiceResponse,
+        UdsPayloadData,
+    },
     file_manager::FileManager,
 };
 use cda_plugin_security::Secured;
-use http::{HeaderMap, header};
+use http::{
+    HeaderMap,
+    header,
+};
 
-use super::{ApiError, DynamicPlugin, ErrorWrapper, IntoResponse, StatusCode, TransformOperation};
+use super::{
+    ApiError,
+    DynamicPlugin,
+    ErrorWrapper,
+    IntoResponse,
+    StatusCode,
+    TransformOperation,
+};
 use crate::{
     openapi,
-    sovd::{WebserverEcuState, get_octet_stream_payload},
+    sovd::{
+        WebserverEcuState,
+        get_octet_stream_payload,
+    },
 };
 
 pub(crate) async fn put<R: DiagServiceResponse, T: UdsEcu + Clone, U: FileManager>(

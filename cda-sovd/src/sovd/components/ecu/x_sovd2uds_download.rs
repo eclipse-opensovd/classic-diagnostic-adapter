@@ -13,21 +13,36 @@
 
 use aide::UseApi;
 use axum::{
-    extract::{OriginalUri, Query},
-    response::{IntoResponse, Response},
+    extract::{
+        OriginalUri,
+        Query,
+    },
+    response::{
+        IntoResponse,
+        Response,
+    },
 };
 use axum_extra::extract::WithRejection;
 use cda_interfaces::{
-    DynamicPlugin, HashMap, UdsEcu,
+    DynamicPlugin,
+    HashMap,
+    UdsEcu,
     diagservices::{
-        DiagServiceJsonResponse, DiagServiceResponse, DiagServiceResponseType, UdsPayloadData,
+        DiagServiceJsonResponse,
+        DiagServiceResponse,
+        DiagServiceResponseType,
+        UdsPayloadData,
     },
 };
 use cda_plugin_security::SecurityPlugin;
 use opensovd_axum_extra::ExtractHost;
 
 use crate::sovd::{
-    error::{ApiError, ErrorWrapper, api_error_from_diag_response},
+    error::{
+        ApiError,
+        ErrorWrapper,
+        api_error_from_diag_response,
+    },
     resource_response,
 };
 
@@ -97,17 +112,30 @@ pub(crate) async fn get(
 }
 
 pub(crate) mod request_download {
-    use aide::{UseApi, transform::TransformOperation};
+    use aide::{
+        UseApi,
+        transform::TransformOperation,
+    };
     use axum::{
         Json,
-        extract::{Query, State},
+        extract::{
+            Query,
+            State,
+        },
         http::StatusCode,
-        response::{IntoResponse as _, Response},
+        response::{
+            IntoResponse as _,
+            Response,
+        },
     };
     use axum_extra::extract::WithRejection;
     use cda_interfaces::{
-        SchemaProvider, UdsEcu,
-        diagservices::{DiagServiceJsonResponse, DiagServiceResponse},
+        SchemaProvider,
+        UdsEcu,
+        diagservices::{
+            DiagServiceJsonResponse,
+            DiagServiceResponse,
+        },
         file_manager::FileManager,
         service_ids,
     };
@@ -117,11 +145,17 @@ pub(crate) mod request_download {
     use crate::{
         openapi,
         sovd::{
-            WebserverEcuState, create_response_schema,
-            error::{ApiError, ErrorWrapper, VendorErrorCode},
+            WebserverEcuState,
+            create_response_schema,
+            error::{
+                ApiError,
+                ErrorWrapper,
+                VendorErrorCode,
+            },
             field_parse_errors_to_json,
             x_sovd2uds_download::{
-                FLASH_DOWNLOAD_UPLOAD_FUNC_CLASS, sovd_to_func_class_service_exec,
+                FLASH_DOWNLOAD_UPLOAD_FUNC_CLASS,
+                sovd_to_func_class_service_exec,
             },
         },
     };
@@ -251,15 +285,28 @@ pub(crate) mod request_download {
 pub(crate) mod flash_transfer {
     use std::path::PathBuf;
 
-    use aide::{UseApi, transform::TransformOperation};
+    use aide::{
+        UseApi,
+        transform::TransformOperation,
+    };
     use axum::{
         Json,
-        extract::{Path, Query, State},
-        response::{IntoResponse, Response},
+        extract::{
+            Path,
+            Query,
+            State,
+        },
+        response::{
+            IntoResponse,
+            Response,
+        },
     };
     use axum_extra::extract::WithRejection;
     use cda_interfaces::{
-        DynamicPlugin, FlashTransferStartParams, UdsEcu, diagservices::DiagServiceResponse,
+        DynamicPlugin,
+        FlashTransferStartParams,
+        UdsEcu,
+        diagservices::DiagServiceResponse,
         file_manager::FileManager,
     };
     use cda_plugin_security::Secured;
@@ -270,8 +317,13 @@ pub(crate) mod flash_transfer {
     use crate::{
         openapi,
         sovd::{
-            IntoSovd, WebserverEcuState, create_schema,
-            error::{ApiError, ErrorWrapper},
+            IntoSovd,
+            WebserverEcuState,
+            create_schema,
+            error::{
+                ApiError,
+                ErrorWrapper,
+            },
             x_sovd2uds_download::FLASH_DOWNLOAD_UPLOAD_FUNC_CLASS,
         },
     };
@@ -415,7 +467,10 @@ pub(crate) mod flash_transfer {
     }
 
     pub(crate) fn docs_get(op: TransformOperation) -> TransformOperation {
-        use sovd2uds::download::flash_transfer::get::{DataTransferMetaData, DataTransferStatus};
+        use sovd2uds::download::flash_transfer::get::{
+            DataTransferMetaData,
+            DataTransferStatus,
+        };
         op.description("Get all flash transfers for the component")
             .response_with::<200, Json<sovd2uds::download::flash_transfer::get::Response>, _>(
                 |res| {
@@ -438,9 +493,27 @@ pub(crate) mod flash_transfer {
 
     pub(crate) mod id {
         use super::{
-            ApiError, DiagServiceResponse, ErrorWrapper, FileManager, IntoResponse, IntoSovd, Json,
-            Path, Query, Response, Secured, State, StatusCode, TransformOperation, UdsEcu, UseApi,
-            WebserverEcuState, WithRejection, create_schema, openapi, sovd2uds,
+            ApiError,
+            DiagServiceResponse,
+            ErrorWrapper,
+            FileManager,
+            IntoResponse,
+            IntoSovd,
+            Json,
+            Path,
+            Query,
+            Response,
+            Secured,
+            State,
+            StatusCode,
+            TransformOperation,
+            UdsEcu,
+            UseApi,
+            WebserverEcuState,
+            WithRejection,
+            create_schema,
+            openapi,
+            sovd2uds,
         };
         use crate::sovd::components::IdPathParam;
         pub(crate) async fn get<R: DiagServiceResponse, T: UdsEcu + Clone, U: FileManager>(
@@ -472,7 +545,8 @@ pub(crate) mod flash_transfer {
 
         pub(crate) fn docs_get(op: TransformOperation) -> TransformOperation {
             use sovd2uds::download::flash_transfer::get::{
-                DataTransferMetaData, DataTransferStatus,
+                DataTransferMetaData,
+                DataTransferStatus,
             };
 
             op.description("Get flash transfer status for a specific transfer")
@@ -571,14 +645,24 @@ pub(crate) mod flash_transfer {
 }
 
 pub(crate) mod transferexit {
-    use aide::{UseApi, transform::TransformOperation};
+    use aide::{
+        UseApi,
+        transform::TransformOperation,
+    };
     use axum::{
         extract::State,
-        response::{IntoResponse, Response},
+        response::{
+            IntoResponse,
+            Response,
+        },
     };
     use cda_interfaces::{
-        HashMap, HashMapExtensions, UdsEcu, diagservices::DiagServiceResponse,
-        file_manager::FileManager, service_ids,
+        HashMap,
+        HashMapExtensions,
+        UdsEcu,
+        diagservices::DiagServiceResponse,
+        file_manager::FileManager,
+        service_ids,
     };
     use cda_plugin_security::Secured;
     use http::StatusCode;
@@ -588,7 +672,8 @@ pub(crate) mod transferexit {
         sovd::{
             WebserverEcuState,
             x_sovd2uds_download::{
-                FLASH_DOWNLOAD_UPLOAD_FUNC_CLASS, sovd_to_func_class_service_exec,
+                FLASH_DOWNLOAD_UPLOAD_FUNC_CLASS,
+                sovd_to_func_class_service_exec,
             },
         },
     };

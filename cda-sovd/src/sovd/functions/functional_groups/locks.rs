@@ -11,19 +11,37 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-use aide::{UseApi, transform::TransformOperation};
+use aide::{
+    UseApi,
+    transform::TransformOperation,
+};
 use cda_interfaces::UdsEcu;
 use cda_plugin_security::Secured;
 
 use super::{
-    ApiError, ErrorWrapper, IntoResponse, Json, Path, Response, State, WebserverFgState,
+    ApiError,
+    ErrorWrapper,
+    IntoResponse,
+    Json,
+    Path,
+    Response,
+    State,
+    WebserverFgState,
     WithRejection,
 };
 use crate::{
     openapi,
     sovd::locks::{
-        LockContext, LockPathParam, LockType, delete_handler, delete_lock, get_handler,
-        get_id_handler, post_handler, put_handler, vehicle_read_lock,
+        LockContext,
+        LockPathParam,
+        LockType,
+        delete_handler,
+        delete_lock,
+        get_handler,
+        get_id_handler,
+        post_handler,
+        put_handler,
+        vehicle_read_lock,
     },
 };
 
@@ -31,8 +49,21 @@ pub(crate) mod lock {
     use cda_interfaces::UdsEcu;
 
     use super::{
-        ApiError, Json, LockPathParam, Path, Response, Secured, State, TransformOperation, UseApi,
-        WebserverFgState, WithRejection, delete_handler, get_id_handler, openapi, put_handler,
+        ApiError,
+        Json,
+        LockPathParam,
+        Path,
+        Response,
+        Secured,
+        State,
+        TransformOperation,
+        UseApi,
+        WebserverFgState,
+        WithRejection,
+        delete_handler,
+        get_id_handler,
+        openapi,
+        put_handler,
     };
 
     pub(crate) async fn delete<T: UdsEcu + Clone>(

@@ -21,7 +21,10 @@
 
 use cda_database::datatypes;
 use cda_interfaces::{
-    CompuScaleInfo, DiagServiceError, ParameterTypeMetadata, ResponseParameterInfo,
+    CompuScaleInfo,
+    DiagServiceError,
+    ParameterTypeMetadata,
+    ResponseParameterInfo,
 };
 
 /// Parse a limit value string as a `u64`.
@@ -416,14 +419,30 @@ pub(crate) fn expand_mux_cases(
 #[cfg(test)]
 mod tests {
     use cda_database::datatypes::{
-        self, CompuCategory, DataType, IntervalType, Limit, ResponseType,
-        database_builder::{DiagCommParams, DiagServiceParams, EcuDataBuilder},
+        self,
+        CompuCategory,
+        DataType,
+        IntervalType,
+        Limit,
+        ResponseType,
+        database_builder::{
+            DiagCommParams,
+            DiagServiceParams,
+            EcuDataBuilder,
+        },
     };
-    use cda_interfaces::{ParameterTypeMetadata, Protocol};
+    use cda_interfaces::{
+        ParameterTypeMetadata,
+        Protocol,
+    };
 
     use super::{
-        byte_size_from_coded_const, byte_size_from_value_param, expand_mux_cases,
-        extract_request_param_type, extract_response_param_type, extract_value_dop_info,
+        byte_size_from_coded_const,
+        byte_size_from_value_param,
+        expand_mux_cases,
+        extract_request_param_type,
+        extract_response_param_type,
+        extract_value_dop_info,
         resolve_phys_const_coded_value,
     };
 

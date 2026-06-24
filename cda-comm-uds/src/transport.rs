@@ -13,19 +13,40 @@
 
 use std::{
     sync::Arc,
-    time::{Duration, Instant},
+    time::{
+        Duration,
+        Instant,
+    },
 };
 
 use cda_interfaces::{
-    DiagComm, DiagServiceError, DynamicPlugin, EcuGateway, EcuManager, ServicePayload,
-    TransmissionParameters, UdsResponse, UdsTransport,
+    DiagComm,
+    DiagServiceError,
+    DynamicPlugin,
+    EcuGateway,
+    EcuManager,
+    ServicePayload,
+    TransmissionParameters,
+    UdsResponse,
+    UdsTransport,
     datatypes::RetryPolicy,
-    diagservices::{DiagServiceResponse, UdsPayloadData},
-    dlt_ctx, service_ids,
+    diagservices::{
+        DiagServiceResponse,
+        UdsPayloadData,
+    },
+    dlt_ctx,
+    service_ids,
 };
-use tokio::sync::{RwLock, Semaphore, mpsc};
+use tokio::sync::{
+    RwLock,
+    Semaphore,
+    mpsc,
+};
 
-use crate::{UdsManager, types::UdsParameters};
+use crate::{
+    UdsManager,
+    types::UdsParameters,
+};
 
 impl<S: EcuGateway, R: DiagServiceResponse, T: EcuManager<Response = R>> UdsManager<S, R, T> {
     #[tracing::instrument(
@@ -529,27 +550,61 @@ mod tests {
 #[cfg(test)]
 mod send_tests {
     use std::{
-        sync::{Arc, atomic::AtomicBool},
+        sync::{
+            Arc,
+            atomic::AtomicBool,
+        },
         time::Duration,
     };
 
     use cda_interfaces::{
-        DiagComm, DiagServiceError, DynamicPlugin, EcuAddressProvider, EcuGateway, EcuManager,
-        EcuSchemaProvider, EcuState, EcuVariant, FunctionalDescriptionConfig, HashMap,
-        HashMapExtensions, HashSet, Protocol, SchemaDescription, SecurityAccess, ServicePayload,
-        TransmissionParameters, UdsResponse,
+        DiagComm,
+        DiagServiceError,
+        DynamicPlugin,
+        EcuAddressProvider,
+        EcuGateway,
+        EcuManager,
+        EcuSchemaProvider,
+        EcuState,
+        EcuVariant,
+        FunctionalDescriptionConfig,
+        HashMap,
+        HashMapExtensions,
+        HashSet,
+        Protocol,
+        SchemaDescription,
+        SecurityAccess,
+        ServicePayload,
+        TransmissionParameters,
+        UdsResponse,
         datatypes::{
-            AddressingMode, ComplexComParamValue, ComponentConfigurationsInfo, ComponentDataInfo,
-            ComponentOperationsInfo, DiagnosticServiceAffixPosition, DtcLookup,
-            DtcReadInformationFunction, FaultConfig, RetryPolicy, RoutineSubfunctions, SdSdg,
-            TesterPresentSendType, single_ecu,
+            AddressingMode,
+            ComplexComParamValue,
+            ComponentConfigurationsInfo,
+            ComponentDataInfo,
+            ComponentOperationsInfo,
+            DiagnosticServiceAffixPosition,
+            DtcLookup,
+            DtcReadInformationFunction,
+            FaultConfig,
+            RetryPolicy,
+            RoutineSubfunctions,
+            SdSdg,
+            TesterPresentSendType,
+            single_ecu,
         },
         diagservices::{
-            DiagServiceJsonResponse, DiagServiceResponse, DiagServiceResponseType, MappedNRC,
+            DiagServiceJsonResponse,
+            DiagServiceResponse,
+            DiagServiceResponseType,
+            MappedNRC,
             UdsPayloadData,
         },
     };
-    use tokio::sync::{RwLock, mpsc};
+    use tokio::sync::{
+        RwLock,
+        mpsc,
+    };
 
     use crate::UdsManager;
 

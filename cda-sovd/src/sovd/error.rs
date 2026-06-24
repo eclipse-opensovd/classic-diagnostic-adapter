@@ -17,20 +17,41 @@ use axum::{
     body::Body,
     extract::{
         Request,
-        rejection::{JsonRejection, QueryRejection},
+        rejection::{
+            JsonRejection,
+            QueryRejection,
+        },
     },
-    http::{StatusCode, Uri},
+    http::{
+        StatusCode,
+        Uri,
+    },
     middleware::Next,
-    response::{IntoResponse, Response},
+    response::{
+        IntoResponse,
+        Response,
+    },
 };
 use cda_interfaces::{
-    DiagServiceError, HashMap, HashMapExtensions, HashSet,
-    diagservices::{DiagServiceResponse, MappedNRC},
+    DiagServiceError,
+    HashMap,
+    HashMapExtensions,
+    HashSet,
+    diagservices::{
+        DiagServiceResponse,
+        MappedNRC,
+    },
     file_manager::MddError,
 };
-use serde::{Deserialize, Serialize};
+use serde::{
+    Deserialize,
+    Serialize,
+};
 use serde_qs::axum::QsQueryRejection;
-use sovd_interfaces::error::{ApiErrorResponse, ErrorCode};
+use sovd_interfaces::error::{
+    ApiErrorResponse,
+    ErrorCode,
+};
 
 #[allow(dead_code)]
 #[derive(Debug, Deserialize, Serialize, schemars::JsonSchema, thiserror::Error)]

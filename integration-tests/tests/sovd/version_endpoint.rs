@@ -16,7 +16,10 @@ use opensovd_cda_lib::cda_version;
 use reqwest::Method;
 
 use crate::util::{
-    http::{extract_field_from_json, response_to_json},
+    http::{
+        extract_field_from_json,
+        response_to_json,
+    },
     runtime::setup_integration_test,
 };
 

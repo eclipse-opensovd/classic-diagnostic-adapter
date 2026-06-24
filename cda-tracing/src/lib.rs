@@ -13,18 +13,29 @@
 use std::ops::Deref;
 
 use opentelemetry::trace::TracerProvider;
-use serde::{Deserialize, Serialize};
+use serde::{
+    Deserialize,
+    Serialize,
+};
 use thiserror::Error;
 use tracing_appender::non_blocking::WorkerGuard;
 use tracing_subscriber::{
-    EnvFilter, Layer, Registry,
-    layer::{Layered, SubscriberExt},
+    EnvFilter,
+    Layer,
+    Registry,
+    layer::{
+        Layered,
+        SubscriberExt,
+    },
     registry::LookupSpan,
     util::SubscriberInitExt,
 };
 
 mod otel;
-pub use otel::{OtelConfig, OtelGuard};
+pub use otel::{
+    OtelConfig,
+    OtelGuard,
+};
 pub mod subscriber;
 
 const DEFAULT_LOG_FILE_NAME: &str = "opensovd-cda.log";

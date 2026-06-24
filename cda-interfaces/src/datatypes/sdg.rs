@@ -11,9 +11,15 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-use serde::{Deserialize, Serialize};
+use serde::{
+    Deserialize,
+    Serialize,
+};
 
-use crate::{HashMap, HashSet};
+use crate::{
+    HashMap,
+    HashSet,
+};
 
 #[derive(Debug, Serialize)]
 #[serde(untagged)]

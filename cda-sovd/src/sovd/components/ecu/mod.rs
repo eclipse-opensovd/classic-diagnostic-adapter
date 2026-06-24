@@ -11,30 +11,56 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-use aide::{axum::IntoApiResponse, transform::TransformOperation};
+use aide::{
+    axum::IntoApiResponse,
+    transform::TransformOperation,
+};
 use axum::{
     Json,
     body::Bytes,
-    extract::{Query, State},
-    response::{IntoResponse, Response},
+    extract::{
+        Query,
+        State,
+    },
+    response::{
+        IntoResponse,
+        Response,
+    },
 };
 use axum_extra::extract::WithRejection;
 use cda_interfaces::{
-    DiagComm, DynamicPlugin, SchemaProvider, UdsEcu,
-    diagservices::{DiagServiceJsonResponse, DiagServiceResponse, DiagServiceResponseType},
+    DiagComm,
+    DynamicPlugin,
+    SchemaProvider,
+    UdsEcu,
+    diagservices::{
+        DiagServiceJsonResponse,
+        DiagServiceResponse,
+        DiagServiceResponseType,
+    },
     file_manager::FileManager,
 };
 use cda_plugin_security::SecurityPlugin;
-use http::{HeaderMap, StatusCode};
+use http::{
+    HeaderMap,
+    StatusCode,
+};
 
 use crate::{
     openapi,
     sovd::{
-        IntoSovd, WebserverEcuState,
+        IntoSovd,
+        WebserverEcuState,
         components::get_content_type_and_accept,
-        create_response_schema, create_schema,
-        error::{ApiError, ErrorWrapper, api_error_from_diag_response},
-        field_parse_errors_to_json, get_payload_data,
+        create_response_schema,
+        create_schema,
+        error::{
+            ApiError,
+            ErrorWrapper,
+            api_error_from_diag_response,
+        },
+        field_parse_errors_to_json,
+        get_payload_data,
     },
 };
 

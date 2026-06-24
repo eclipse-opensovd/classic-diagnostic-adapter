@@ -11,35 +11,75 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-use std::{future::Future, path::PathBuf, sync::Arc};
+use std::{
+    future::Future,
+    path::PathBuf,
+    sync::Arc,
+};
 
-use cda_comm_doip::{DoipDiagGateway, config::DoipConfig};
+use cda_comm_doip::{
+    DoipDiagGateway,
+    config::DoipConfig,
+};
 use cda_comm_uds::UdsManager;
-use cda_core::{DiagServiceResponseStruct, EcuManager};
+use cda_core::{
+    DiagServiceResponseStruct,
+    EcuManager,
+};
 use cda_database::FileManager;
 use cda_interfaces::{
-    DiagServiceError, DoipGatewaySetupError, FunctionalDescriptionConfig, HashMap, UdsEcu,
-    datatypes::{ComParams, FaultConfig},
+    DiagServiceError,
+    DoipGatewaySetupError,
+    FunctionalDescriptionConfig,
+    HashMap,
+    UdsEcu,
+    datatypes::{
+        ComParams,
+        FaultConfig,
+    },
     dlt_ctx,
 };
 use cda_plugin_security::{
-    DefaultSecurityPlugin, DefaultSecurityPluginData, SecurityPlugin, SecurityPluginLoader,
+    DefaultSecurityPlugin,
+    DefaultSecurityPluginData,
+    SecurityPlugin,
+    SecurityPluginLoader,
 };
 use cda_sovd::Locks;
-use cda_tracing::{OtelGuard, TracingSetupError, TracingWorkerGuard};
-use clap::{Parser, Subcommand};
+use cda_tracing::{
+    OtelGuard,
+    TracingSetupError,
+    TracingWorkerGuard,
+};
+use clap::{
+    Parser,
+    Subcommand,
+};
 use figment::{
     Figment,
-    providers::{Format, Serialized, Toml},
+    providers::{
+        Format,
+        Serialized,
+        Toml,
+    },
 };
 use futures::future::FutureExt;
-use tokio::sync::{RwLock, mpsc};
+use tokio::sync::{
+    RwLock,
+    mpsc,
+};
 use tracing_subscriber::layer::SubscriberExt;
 
 use crate::{
     config::configfile::Configuration,
-    mdd::{load_databases, resolve_mdd_paths},
-    update::{RuntimeUpdateContext, security::UpdateSecurityHandler},
+    mdd::{
+        load_databases,
+        resolve_mdd_paths,
+    },
+    update::{
+        RuntimeUpdateContext,
+        security::UpdateSecurityHandler,
+    },
 };
 
 pub mod config;

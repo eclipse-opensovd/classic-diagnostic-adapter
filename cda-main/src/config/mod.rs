@@ -10,10 +10,19 @@
  *
  * SPDX-License-Identifier: Apache-2.0
  */
-use cda_interfaces::storage_api::{Collection, RandomAccessData, Storage};
+use cda_interfaces::storage_api::{
+    Collection,
+    RandomAccessData,
+    Storage,
+};
 use figment::{
     Figment,
-    providers::{Env, Format as _, Serialized, Toml},
+    providers::{
+        Env,
+        Format as _,
+        Serialized,
+        Toml,
+    },
 };
 
 use crate::AppError;
@@ -203,7 +212,12 @@ pub async fn load_config_with_storage_override(
 
 #[cfg(test)]
 mod tests {
-    use cda_interfaces::storage_api::{Collection as _, CollectionName, RandomAccessData, Storage};
+    use cda_interfaces::storage_api::{
+        Collection as _,
+        CollectionName,
+        RandomAccessData,
+        Storage,
+    };
     use cda_storage::LocalStorage;
 
     use super::seed_storage_from_config_file;

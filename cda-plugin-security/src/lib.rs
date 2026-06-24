@@ -105,24 +105,47 @@
 //! 4. **Testing**: Provide comprehensive test coverage for security logic
 //! 5. **Documentation**: Document any vendor-specific behavior or requirements
 
-use std::{any::Any, ops::Deref, sync::Arc};
+use std::{
+    any::Any,
+    ops::Deref,
+    sync::Arc,
+};
 
 use aide::axum::IntoApiResponse;
 use async_trait::async_trait;
 use axum::{
     Json,
     body::Bytes,
-    extract::{FromRequestParts, Request},
+    extract::{
+        FromRequestParts,
+        Request,
+    },
     middleware::Next,
-    response::{IntoResponse, Response},
+    response::{
+        IntoResponse,
+        Response,
+    },
 };
-use cda_interfaces::{DiagServiceError, HashMap};
-use http::{HeaderMap, StatusCode, request::Parts};
-use sovd_interfaces::error::{ApiErrorResponse, ErrorCode};
+use cda_interfaces::{
+    DiagServiceError,
+    HashMap,
+};
+use http::{
+    HeaderMap,
+    StatusCode,
+    request::Parts,
+};
+use sovd_interfaces::error::{
+    ApiErrorResponse,
+    ErrorCode,
+};
 use thiserror::Error;
 
 mod default_security_plugin;
-pub use default_security_plugin::{DefaultSecurityPlugin, DefaultSecurityPluginData};
+pub use default_security_plugin::{
+    DefaultSecurityPlugin,
+    DefaultSecurityPluginData,
+};
 
 /// Represents JWT claims that provide user identity and token metadata.
 ///
@@ -457,13 +480,26 @@ impl IntoResponse for AuthError {
 pub mod mock {
     use aide::axum::IntoApiResponse;
     use async_trait::async_trait;
-    use axum::{Json, body::Bytes, http::StatusCode};
+    use axum::{
+        Json,
+        body::Bytes,
+        http::StatusCode,
+    };
     use cda_interfaces::DiagServiceError;
-    use http::{HeaderMap, request::Parts};
+    use http::{
+        HeaderMap,
+        request::Parts,
+    };
 
     use crate::{
-        AuthApi, AuthError, AuthorizationRequestHandler, Claims, SecurityApi, SecurityPlugin,
-        SecurityPluginInitializer, SecurityPluginLoader,
+        AuthApi,
+        AuthError,
+        AuthorizationRequestHandler,
+        Claims,
+        SecurityApi,
+        SecurityPlugin,
+        SecurityPluginInitializer,
+        SecurityPluginLoader,
     };
 
     mockall::mock! {

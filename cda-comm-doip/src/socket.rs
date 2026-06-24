@@ -18,13 +18,29 @@ use doip_definitions::{
     builder::DoipMessageBuilder,
     header::ProtocolVersion,
     message::DoipMessage,
-    payload::{DiagnosticAckCode, DiagnosticMessageAck, DoipPayload},
+    payload::{
+        DiagnosticAckCode,
+        DiagnosticMessageAck,
+        DoipPayload,
+    },
 };
-use futures::{SinkExt, StreamExt};
-use tokio::io::{AsyncRead, AsyncWrite, ReadHalf, WriteHalf};
+use futures::{
+    SinkExt,
+    StreamExt,
+};
+use tokio::io::{
+    AsyncRead,
+    AsyncWrite,
+    ReadHalf,
+    WriteHalf,
+};
 use tokio_util::{
     bytes::Buf,
-    codec::{Framed, FramedRead, FramedWrite},
+    codec::{
+        Framed,
+        FramedRead,
+        FramedWrite,
+    },
     udp::UdpFramed,
 };
 

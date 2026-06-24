@@ -11,7 +11,10 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-use serde::{Deserialize, Serialize};
+use serde::{
+    Deserialize,
+    Serialize,
+};
 
 use crate::Items;
 
@@ -42,15 +45,24 @@ impl From<Request> for chrono::DateTime<chrono::Utc> {
 }
 
 pub mod get {
-    use super::{Items, Lock};
+    use super::{
+        Items,
+        Lock,
+    };
 
     pub type Response = Items<Lock>;
 }
 
 pub mod id {
-    use super::{Deserialize, Serialize};
+    use super::{
+        Deserialize,
+        Serialize,
+    };
     pub mod get {
-        use super::{Deserialize, Serialize};
+        use super::{
+            Deserialize,
+            Serialize,
+        };
         #[derive(Serialize, Deserialize, schemars::JsonSchema)]
         #[schemars(rename = "LockResponse")]
         pub struct Response {

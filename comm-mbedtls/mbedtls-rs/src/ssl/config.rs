@@ -13,13 +13,23 @@
 
 //! Safe wrapper around `mbedtls_ssl_config`.
 
-use std::{ffi::CString, io, sync::Arc};
+use std::{
+    ffi::CString,
+    io,
+    sync::Arc,
+};
 
 use mbedtls_sys as ffi;
 
 use crate::{
-    error::{MbedtlsError, result_from_raw},
-    x509::{PrivateKey, X509Certificate},
+    error::{
+        MbedtlsError,
+        result_from_raw,
+    },
+    x509::{
+        PrivateKey,
+        X509Certificate,
+    },
 };
 
 const ZERO_TERMINATOR: u8 = 0;

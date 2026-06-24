@@ -41,12 +41,22 @@
 //! validation (or is truncated) marks the end of the valid journal.
 
 use std::{
-    fs::{File, OpenOptions},
-    io::{Seek, SeekFrom, Write},
+    fs::{
+        File,
+        OpenOptions,
+    },
+    io::{
+        Seek,
+        SeekFrom,
+        Write,
+    },
     path::Path,
 };
 
-use cda_interfaces::storage_api::{Operation, StorageError};
+use cda_interfaces::storage_api::{
+    Operation,
+    StorageError,
+};
 
 /// Magic byte identifying a valid WAL file header.
 const WAL_MAGIC: u8 = 0xCA;

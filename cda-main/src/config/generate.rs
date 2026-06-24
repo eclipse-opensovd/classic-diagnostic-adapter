@@ -11,11 +11,21 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-use std::{collections::BTreeMap, fmt::Write};
+use std::{
+    collections::BTreeMap,
+    fmt::Write,
+};
 
-use cda_interfaces::{FunctionalDescriptionConfig, datatypes::FaultConfig};
+use cda_interfaces::{
+    FunctionalDescriptionConfig,
+    datatypes::FaultConfig,
+};
 
-use crate::config::configfile::{Configuration, EcuComParams, EcuConfig};
+use crate::config::configfile::{
+    Configuration,
+    EcuComParams,
+    EcuConfig,
+};
 
 /// Create a Configuration instance with example values for fields that default to `None`.
 /// This ensures they appear in the generated reference config output.
@@ -374,7 +384,11 @@ mod tests {
     fn generate_reference_config_parses_as_valid_config() {
         use figment::{
             Figment,
-            providers::{Format, Serialized, Toml},
+            providers::{
+                Format,
+                Serialized,
+                Toml,
+            },
         };
 
         use crate::config::configfile::ConfigSanity;

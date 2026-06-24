@@ -13,14 +13,31 @@
 use serde::Serialize;
 
 use crate::{
-    DiagComm, DiagServiceError, DoipComParamProvider, DynamicPlugin, EcuSchemaProvider, HashMap,
-    HashSet, SecurityAccess, UDS_ID_RESPONSE_BITMASK, UdsComParamProvider,
+    DiagComm,
+    DiagServiceError,
+    DoipComParamProvider,
+    DynamicPlugin,
+    EcuSchemaProvider,
+    HashMap,
+    HashSet,
+    SecurityAccess,
+    UDS_ID_RESPONSE_BITMASK,
+    UdsComParamProvider,
     datatypes::{
-        ComplexComParamValue, ComponentConfigurationsInfo, ComponentDataInfo,
-        ComponentOperationsInfo, DtcLookup, DtcReadInformationFunction, RoutineSubfunctions, SdSdg,
+        ComplexComParamValue,
+        ComponentConfigurationsInfo,
+        ComponentDataInfo,
+        ComponentOperationsInfo,
+        DtcLookup,
+        DtcReadInformationFunction,
+        RoutineSubfunctions,
+        SdSdg,
         single_ecu,
     },
-    diagservices::{DiagServiceResponse, UdsPayloadData},
+    diagservices::{
+        DiagServiceResponse,
+        UdsPayloadData,
+    },
     service_ids,
 };
 

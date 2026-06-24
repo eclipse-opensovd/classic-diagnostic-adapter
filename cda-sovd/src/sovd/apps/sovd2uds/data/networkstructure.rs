@@ -16,14 +16,24 @@ use std::vec;
 use aide::transform::TransformOperation;
 use axum::{
     Json,
-    extract::{Query, State},
-    response::{IntoResponse as _, Response},
+    extract::{
+        Query,
+        State,
+    },
+    response::{
+        IntoResponse as _,
+        Response,
+    },
 };
 use axum_extra::extract::WithRejection;
 use cda_interfaces::UdsEcu;
 use http::StatusCode;
 
-use crate::sovd::{IntoSovd, create_schema, error::ApiError};
+use crate::sovd::{
+    IntoSovd,
+    create_schema,
+    error::ApiError,
+};
 
 pub(crate) async fn get<T: UdsEcu>(
     WithRejection(Query(query), _): WithRejection<
@@ -57,7 +67,9 @@ pub(crate) async fn get<T: UdsEcu>(
 
 pub(crate) fn docs_get(op: TransformOperation) -> TransformOperation {
     use sovd_interfaces::apps::sovd2uds::data::network_structure::{
-        Gateway, NetworkStructure, get::Response,
+        Gateway,
+        NetworkStructure,
+        get::Response,
     };
 
     op.description("Get the network structure of the Vehicle")

@@ -71,7 +71,11 @@ pub trait FileManager: Clone + Send + Sync + 'static {
 
 #[cfg(feature = "test-utils")]
 pub mod mock {
-    use super::{ChunkMetaData, FileManager, MddError};
+    use super::{
+        ChunkMetaData,
+        FileManager,
+        MddError,
+    };
     use crate::HashMap;
 
     mockall::mock! {

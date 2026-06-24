@@ -11,16 +11,27 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-use std::{collections::HashSet, sync::Arc};
+use std::{
+    collections::HashSet,
+    sync::Arc,
+};
 
 use async_trait::async_trait;
 use cda_database::mmap_and_decode_mdd;
 use cda_interfaces::{
     runtime_update_api::{
-        ActivityGuard, LockStateProvider, RuntimeFilesUpdateSecurityHandler, RuntimeUpdateError,
-        UpdateCollections, UpdateFileType, VerificationError,
+        ActivityGuard,
+        LockStateProvider,
+        RuntimeFilesUpdateSecurityHandler,
+        RuntimeUpdateError,
+        UpdateCollections,
+        UpdateFileType,
+        VerificationError,
     },
-    storage_api::{Collection, DirectFileAccess},
+    storage_api::{
+        Collection,
+        DirectFileAccess,
+    },
 };
 
 pub struct UpdateSecurityHandler<L: LockStateProvider> {
@@ -149,12 +160,20 @@ mod tests {
     use async_trait::async_trait;
     use cda_interfaces::{
         runtime_update_api::{
-            RuntimeFilesUpdateSecurityHandler, RuntimeUpdateError, UpdateCollections,
+            RuntimeFilesUpdateSecurityHandler,
+            RuntimeUpdateError,
+            UpdateCollections,
             UpdateFileType,
         },
-        storage_api::{CollectionName, Storage as _},
+        storage_api::{
+            CollectionName,
+            Storage as _,
+        },
     };
-    use cda_storage::{LocalCollection, LocalStorage};
+    use cda_storage::{
+        LocalCollection,
+        LocalStorage,
+    };
 
     use super::*;
 

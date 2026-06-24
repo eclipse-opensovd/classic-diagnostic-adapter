@@ -12,7 +12,10 @@
  */
 
 use cda_interfaces::HashMap;
-use serde::{Deserialize, Serialize};
+use serde::{
+    Deserialize,
+    Serialize,
+};
 
 use crate::Items;
 
@@ -119,7 +122,10 @@ pub mod get {
 }
 
 pub mod configurations {
-    use super::{Deserialize, Serialize};
+    use super::{
+        Deserialize,
+        Serialize,
+    };
 
     #[derive(Deserialize, Serialize, Debug, schemars::JsonSchema)]
     pub struct Components {
@@ -199,7 +205,10 @@ pub mod x {
         pub mod bulk_data {
             pub mod embedded_files {
                 pub mod get {
-                    use crate::{Items, sovd2uds::BulkDataDescriptor};
+                    use crate::{
+                        Items,
+                        sovd2uds::BulkDataDescriptor,
+                    };
 
                     pub type Response = Items<BulkDataDescriptor>;
                     pub type Query = crate::IncludeSchemaQuery;
@@ -209,7 +218,10 @@ pub mod x {
         pub mod download {
             pub mod flash_transfer {
                 pub mod post {
-                    use serde::{Deserialize, Serialize};
+                    use serde::{
+                        Deserialize,
+                        Serialize,
+                    };
                     #[derive(Debug, Deserialize, schemars::JsonSchema)]
                     #[schemars(rename = "FlashTransferRequest")]
                     pub struct Request {
@@ -282,7 +294,10 @@ pub mod x {
             pub mod request_download {
                 pub mod put {
                     use cda_interfaces::HashMap;
-                    use serde::{Deserialize, Serialize};
+                    use serde::{
+                        Deserialize,
+                        Serialize,
+                    };
 
                     use crate::error::DataError;
 
@@ -309,7 +324,10 @@ pub mod x {
     }
 
     pub mod single_ecu_job {
-        use serde::{Deserialize, Serialize};
+        use serde::{
+            Deserialize,
+            Serialize,
+        };
 
         #[derive(Serialize, Deserialize, schemars::JsonSchema)]
         pub struct LongName {
@@ -389,7 +407,11 @@ pub mod x {
 }
 
 pub mod faults {
-    use super::{Deserialize, HashMap, Serialize};
+    use super::{
+        Deserialize,
+        HashMap,
+        Serialize,
+    };
 
     /// Representation of a fault / DTC (Diagnostic Trouble Code)
     /// as described in the `OpenSOVD` specification.
@@ -443,7 +465,12 @@ pub mod faults {
     }
 
     pub mod get {
-        use super::{Deserialize, Fault, HashMap, Serialize};
+        use super::{
+            Deserialize,
+            Fault,
+            HashMap,
+            Serialize,
+        };
 
         #[derive(Debug, Serialize, Deserialize, schemars::JsonSchema)]
         /// Query parameters for filtering DTC by the given fields.
@@ -491,7 +518,10 @@ pub mod faults {
     }
 
     pub mod delete {
-        use serde::{Deserialize, Serialize};
+        use serde::{
+            Deserialize,
+            Serialize,
+        };
 
         #[derive(Deserialize, Serialize, schemars::JsonSchema)]
         pub struct FaultQuery {
@@ -502,10 +532,23 @@ pub mod faults {
     }
 
     pub mod id {
-        use super::{Deserialize, Fault, HashMap, Serialize};
+        use super::{
+            Deserialize,
+            Fault,
+            HashMap,
+            Serialize,
+        };
         pub mod get {
-            use super::{Deserialize, Fault, HashMap, Serialize};
-            use crate::{default_true, error::DataError};
+            use super::{
+                Deserialize,
+                Fault,
+                HashMap,
+                Serialize,
+            };
+            use crate::{
+                default_true,
+                error::DataError,
+            };
 
             #[derive(Serialize, Deserialize, schemars::JsonSchema)]
             #[serde(rename_all = "kebab-case")]

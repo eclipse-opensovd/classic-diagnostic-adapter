@@ -27,7 +27,10 @@ pub mod security_and_session {
         pub type Response = crate::common::modes::get::Mode<String>;
     }
     pub mod put {
-        use serde::{Deserialize, Serialize};
+        use serde::{
+            Deserialize,
+            Serialize,
+        };
 
         #[derive(Serialize, Deserialize, schemars::JsonSchema)]
         pub struct SovdSeed {

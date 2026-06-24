@@ -16,11 +16,26 @@ use cda_plugin_security::Secured;
 use sovd_interfaces::error::ApiErrorResponse;
 
 use super::{
-    ApiError, DiagServiceResponse, DynamicPlugin, ErrorWrapper, FileManager, IntoResponse, Json,
-    Query, Response, State, StatusCode, TransformOperation, UdsEcu, WebserverEcuState,
+    ApiError,
+    DiagServiceResponse,
+    DynamicPlugin,
+    ErrorWrapper,
+    FileManager,
+    IntoResponse,
+    Json,
+    Query,
+    Response,
+    State,
+    StatusCode,
+    TransformOperation,
+    UdsEcu,
+    WebserverEcuState,
     WithRejection,
 };
-use crate::sovd::{self, create_schema};
+use crate::sovd::{
+    self,
+    create_schema,
+};
 
 pub(crate) async fn get<R: DiagServiceResponse, T: UdsEcu + Clone, U: FileManager>(
     UseApi(Secured(security_plugin), _): UseApi<Secured, ()>,
@@ -91,29 +106,55 @@ pub(crate) fn docs_get(op: TransformOperation) -> TransformOperation {
 pub(crate) mod diag_service {
     use aide::{
         UseApi,
-        transform::{TransformOperation, TransformParameter},
+        transform::{
+            TransformOperation,
+            TransformParameter,
+        },
     };
     use axum::{
         Json,
         body::Bytes,
-        extract::{Path, Query, State},
-        response::{IntoResponse, Response},
+        extract::{
+            Path,
+            Query,
+            State,
+        },
+        response::{
+            IntoResponse,
+            Response,
+        },
     };
     use axum_extra::extract::WithRejection;
     use cda_interfaces::{
-        DiagComm, DiagCommType, HashMap, HashMapExtensions, SchemaProvider, UdsEcu,
-        diagservices::DiagServiceResponse, file_manager::FileManager,
+        DiagComm,
+        DiagCommType,
+        HashMap,
+        HashMapExtensions,
+        SchemaProvider,
+        UdsEcu,
+        diagservices::DiagServiceResponse,
+        file_manager::FileManager,
     };
     use cda_plugin_security::Secured;
-    use http::{HeaderMap, StatusCode};
+    use http::{
+        HeaderMap,
+        StatusCode,
+    };
 
     use crate::{
         openapi,
         sovd::{
-            IntoSovd, WebserverEcuState,
-            components::ecu::{DiagServicePathParam, data_request},
+            IntoSovd,
+            WebserverEcuState,
+            components::ecu::{
+                DiagServicePathParam,
+                data_request,
+            },
             create_schema,
-            error::{ApiError, ErrorWrapper},
+            error::{
+                ApiError,
+                ErrorWrapper,
+            },
         },
     };
 

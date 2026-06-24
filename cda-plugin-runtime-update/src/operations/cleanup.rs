@@ -22,7 +22,11 @@
 
 use cda_interfaces::{
     runtime_update_api::RuntimeUpdateError,
-    storage_api::{Collection as _, CollectionName, Storage},
+    storage_api::{
+        Collection as _,
+        CollectionName,
+        Storage,
+    },
 };
 
 use super::delete_collection_ignore_missing;
@@ -70,12 +74,18 @@ pub async fn execute_cleanup<S: Storage>(storage: &S) -> Result<(), RuntimeUpdat
 #[cfg(test)]
 mod tests {
     use cda_interfaces::storage_api::{
-        Collection as _, CollectionName, Storage as _, StorageError,
+        Collection as _,
+        CollectionName,
+        Storage as _,
+        StorageError,
     };
     use cda_storage::LocalStorage;
 
     use super::execute_cleanup;
-    use crate::test_utils::{make_storage, write_file};
+    use crate::test_utils::{
+        make_storage,
+        write_file,
+    };
 
     async fn write_dummy(storage: &LocalStorage, collection: &CollectionName, key: &str) {
         storage.get_or_create_collection(collection).await.unwrap();

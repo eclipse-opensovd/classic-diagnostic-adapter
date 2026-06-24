@@ -20,7 +20,11 @@ use std::time::Duration;
 
 use cda_interfaces::{
     HashMap,
-    datatypes::{AddressingMode, RetryPolicy, TesterPresentSendType},
+    datatypes::{
+        AddressingMode,
+        RetryPolicy,
+        TesterPresentSendType,
+    },
 };
 use cda_plugin_security::SecurityPlugin;
 

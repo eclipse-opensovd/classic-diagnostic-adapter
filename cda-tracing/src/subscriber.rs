@@ -12,18 +12,38 @@
  */
 
 use std::{
-    collections::{HashMap, HashSet},
+    collections::{
+        HashMap,
+        HashSet,
+    },
     path::Path,
 };
 
-use nu_ansi_term::{Color, Style};
-use tracing::{Event, Level, Subscriber, field::Visit};
+use nu_ansi_term::{
+    Color,
+    Style,
+};
+use tracing::{
+    Event,
+    Level,
+    Subscriber,
+    field::Visit,
+};
 use tracing_subscriber::{
     field::VisitOutput as _,
     fmt::{
-        FmtContext, FormattedFields,
-        format::{DefaultVisitor, FormatEvent, FormatFields, Writer},
-        time::{ChronoUtc, FormatTime},
+        FmtContext,
+        FormattedFields,
+        format::{
+            DefaultVisitor,
+            FormatEvent,
+            FormatFields,
+            Writer,
+        },
+        time::{
+            ChronoUtc,
+            FormatTime,
+        },
     },
     registry::LookupSpan,
 };

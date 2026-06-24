@@ -14,17 +14,31 @@
 //! Local filesystem implementation of the [`Collection`] trait.
 
 use std::{
-    path::{Path, PathBuf},
+    path::{
+        Path,
+        PathBuf,
+    },
     sync::Arc,
 };
 
 use cda_interfaces::storage_api::{
-    Collection, CollectionName, DirectFileAccess, Metadata, Operation, RandomAccessData,
-    ReadableStream, StorageError, Transaction,
+    Collection,
+    CollectionName,
+    DirectFileAccess,
+    Metadata,
+    Operation,
+    RandomAccessData,
+    ReadableStream,
+    StorageError,
+    Transaction,
 };
 use tokio::io::AsyncWriteExt;
 
-use crate::{io, paths, wal};
+use crate::{
+    io,
+    paths,
+    wal,
+};
 
 /// A collection backed by a directory on the local filesystem.
 ///

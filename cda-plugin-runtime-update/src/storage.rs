@@ -20,20 +20,39 @@
 // terms of the Apache License Version 2.0 which is available at
 // https://www.apache.org/licenses/LICENSE-2.0
 
-use std::{fmt::Write, sync::Arc};
+use std::{
+    fmt::Write,
+    sync::Arc,
+};
 
 use cda_interfaces::{
     runtime_update_api::{
-        BulkDataCreated, BulkDataCreatedList, BulkDataDescriptor, BulkDataList, HashAlgorithm,
-        LockStateProvider, RuntimeFilesQuery, RuntimeFilesUpdateSecurityHandler,
-        RuntimeUpdateError, UpdateFileType, UploadFile,
+        BulkDataCreated,
+        BulkDataCreatedList,
+        BulkDataDescriptor,
+        BulkDataList,
+        HashAlgorithm,
+        LockStateProvider,
+        RuntimeFilesQuery,
+        RuntimeFilesUpdateSecurityHandler,
+        RuntimeUpdateError,
+        UpdateFileType,
+        UploadFile,
     },
     storage_api::{
-        Collection, CollectionName, DirectFileAccess, RandomAccessData, Storage, StorageError,
+        Collection,
+        CollectionName,
+        DirectFileAccess,
+        RandomAccessData,
+        Storage,
+        StorageError,
         Transaction,
     },
 };
-use sha2::{Digest, Sha256};
+use sha2::{
+    Digest,
+    Sha256,
+};
 
 pub(crate) fn mime_for_key(key: &str) -> String {
     match std::path::Path::new(key)
@@ -525,17 +544,41 @@ mod tests {
 
     use cda_interfaces::{
         runtime_update_api::{
-            BulkDataCreatedList, HashAlgorithm, RuntimeFilesQuery, RuntimeUpdateError, UploadFile,
+            BulkDataCreatedList,
+            HashAlgorithm,
+            RuntimeFilesQuery,
+            RuntimeUpdateError,
+            UploadFile,
         },
-        storage_api::{Collection, CollectionName, RandomAccessData, Storage, StorageError},
+        storage_api::{
+            Collection,
+            CollectionName,
+            RandomAccessData,
+            Storage,
+            StorageError,
+        },
     };
     use cda_storage::LocalStorage;
-    use sha2::{Digest, Sha256};
+    use sha2::{
+        Digest,
+        Sha256,
+    };
 
-    use super::{compute_nextupdate_state, compute_sha256, list_collection_files, upload_files};
+    use super::{
+        compute_nextupdate_state,
+        compute_sha256,
+        list_collection_files,
+        upload_files,
+    };
     use crate::test_utils::{
-        MockLockProvider, MockSecurityHandler, make_storage, make_upload_files, make_valid_config,
-        make_valid_mdd, make_valid_mdd_with_revision, write_file,
+        MockLockProvider,
+        MockSecurityHandler,
+        make_storage,
+        make_upload_files,
+        make_valid_config,
+        make_valid_mdd,
+        make_valid_mdd_with_revision,
+        write_file,
     };
 
     async fn upload<S: cda_interfaces::storage_api::Storage + 'static>(

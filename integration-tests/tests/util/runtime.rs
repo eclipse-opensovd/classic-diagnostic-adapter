@@ -12,33 +12,62 @@
  */
 
 use std::{
-    sync::{Arc, LazyLock},
-    time::{Duration, Instant},
+    sync::{
+        Arc,
+        LazyLock,
+    },
+    time::{
+        Duration,
+        Instant,
+    },
 };
 
 use cda_core::DiagServiceResponseStruct;
 use cda_health::config::HealthConfig;
 use cda_interfaces::{
-    FunctionalDescriptionConfig, HashMap, HashMapExtensions,
+    FunctionalDescriptionConfig,
+    HashMap,
+    HashMapExtensions,
     datatypes::{
-        ComParamConfig, ComParamPrecedence, ComParams, ComponentsConfig, DatabaseNamingConvention,
-        DoipComParams, FaultConfig, FlatbBufConfig,
+        ComParamConfig,
+        ComParamPrecedence,
+        ComParams,
+        ComponentsConfig,
+        DatabaseNamingConvention,
+        DoipComParams,
+        FaultConfig,
+        FlatbBufConfig,
     },
 };
-use cda_plugin_security::{DefaultSecurityPlugin, DefaultSecurityPluginData};
+use cda_plugin_security::{
+    DefaultSecurityPlugin,
+    DefaultSecurityPluginData,
+};
 use cda_tracing::LoggingConfig;
 use futures::FutureExt as _;
 use opensovd_cda_lib::{
     cda_version,
     config::configfile::{
-        ConfigSanity, Configuration, DatabaseConfig, EcuComParams, EcuConfig, RuntimeUpdateConfig,
+        ConfigSanity,
+        Configuration,
+        DatabaseConfig,
+        EcuComParams,
+        EcuConfig,
+        RuntimeUpdateConfig,
         ServerConfig,
     },
 };
-use tokio::sync::{Mutex, MutexGuard, OnceCell};
+use tokio::sync::{
+    Mutex,
+    MutexGuard,
+    OnceCell,
+};
 use tracing_subscriber::layer::SubscriberExt;
 
-use crate::util::{TestingError, ecusim};
+use crate::util::{
+    TestingError,
+    ecusim,
+};
 
 static TEST_RUNTIME: OnceCell<TestRuntime> = OnceCell::const_new();
 

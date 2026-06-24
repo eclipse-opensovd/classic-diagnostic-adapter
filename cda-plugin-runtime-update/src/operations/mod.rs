@@ -23,9 +23,17 @@
 use std::sync::Arc;
 
 use cda_interfaces::{
-    runtime_update_api::{RuntimeFileReloadHandler, RuntimeUpdateError},
+    runtime_update_api::{
+        RuntimeFileReloadHandler,
+        RuntimeUpdateError,
+    },
     storage_api::{
-        Collection, CollectionName, DirectFileAccess, Storage, StorageError, Transaction,
+        Collection,
+        CollectionName,
+        DirectFileAccess,
+        Storage,
+        StorageError,
+        Transaction,
     },
 };
 
@@ -127,14 +135,23 @@ pub(crate) async fn reload_database_if_present<S: Storage, R: RuntimeFileReloadH
 
 #[cfg(test)]
 mod tests {
-    use cda_interfaces::storage_api::{CollectionName, Storage as _, StorageError};
+    use cda_interfaces::storage_api::{
+        CollectionName,
+        Storage as _,
+        StorageError,
+    };
 
     use super::{
-        delete_collection_ignore_missing, reload_configuration_if_present,
-        reload_database_if_present, try_get_collection,
+        delete_collection_ignore_missing,
+        reload_configuration_if_present,
+        reload_database_if_present,
+        try_get_collection,
     };
     use crate::test_utils::{
-        RecordingReloadHandler, init_collection, make_storage, write_test_file,
+        RecordingReloadHandler,
+        init_collection,
+        make_storage,
+        write_test_file,
     };
 
     #[tokio::test]

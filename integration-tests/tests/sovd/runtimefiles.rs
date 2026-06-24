@@ -13,11 +13,20 @@
 
 use std::time::Duration;
 
-use cda_interfaces::{HashMap, HashMapExtensions};
-use http::{Method, StatusCode};
+use cda_interfaces::{
+    HashMap,
+    HashMapExtensions,
+};
+use http::{
+    Method,
+    StatusCode,
+};
 use opensovd_cda_lib::config::configfile::Configuration;
 use sovd_interfaces::{
-    apps::sovd2uds::bulk_data::{BulkDataList, runtimefiles::ExecutionMode},
+    apps::sovd2uds::bulk_data::{
+        BulkDataList,
+        runtimefiles::ExecutionMode,
+    },
     common::operations::OperationIdItem,
     locking::post_put::Response as LockResponse,
 };
@@ -25,16 +34,29 @@ use sovd_interfaces::{
 use crate::{
     sovd,
     sovd::{
-        ECU_FLXC1000_ENDPOINT, ECU_FSNR2000_ENDPOINT,
+        ECU_FLXC1000_ENDPOINT,
+        ECU_FSNR2000_ENDPOINT,
         locks::{
-            self, NON_OWNER_BEARER_TOKEN, bearer_token_header, create_lock, default_timeout,
+            self,
+            NON_OWNER_BEARER_TOKEN,
+            bearer_token_header,
+            create_lock,
+            default_timeout,
             lock_operation,
         },
     },
     util::{
         TestingError,
-        http::{QueryParams, auth_header, response_to_t, send_cda_request},
-        runtime::{setup_integration_test, test_container_dir},
+        http::{
+            QueryParams,
+            auth_header,
+            response_to_t,
+            send_cda_request,
+        },
+        runtime::{
+            setup_integration_test,
+            test_container_dir,
+        },
     },
 };
 

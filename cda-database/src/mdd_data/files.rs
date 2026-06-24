@@ -13,12 +13,20 @@
 
 use std::{
     sync::Arc,
-    time::{Duration, Instant},
+    time::{
+        Duration,
+        Instant,
+    },
 };
 
 use cda_interfaces::{
-    HashMap, dlt_ctx,
-    file_manager::{Chunk, ChunkMetaData, MddError},
+    HashMap,
+    dlt_ctx,
+    file_manager::{
+        Chunk,
+        ChunkMetaData,
+        MddError,
+    },
 };
 use tokio::sync::RwLock;
 

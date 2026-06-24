@@ -20,15 +20,26 @@
 // terms of the Apache License Version 2.0 which is available at
 // https://www.apache.org/licenses/LICENSE-2.0
 
-use std::sync::{Arc, atomic::AtomicBool};
+use std::sync::{
+    Arc,
+    atomic::AtomicBool,
+};
 
 use async_trait::async_trait;
 use cda_interfaces::{
     HashMap,
     runtime_update_api::{
-        BulkDataCreatedList, BulkDataList, ExecutionMode, LockStateProvider,
-        RuntimeFileReloadHandler, RuntimeFilesQuery, RuntimeFilesUpdatePlugin,
-        RuntimeFilesUpdateSecurityHandler, RuntimeUpdateError, UpdateExecution, UploadFile,
+        BulkDataCreatedList,
+        BulkDataList,
+        ExecutionMode,
+        LockStateProvider,
+        RuntimeFileReloadHandler,
+        RuntimeFilesQuery,
+        RuntimeFilesUpdatePlugin,
+        RuntimeFilesUpdateSecurityHandler,
+        RuntimeUpdateError,
+        UpdateExecution,
+        UploadFile,
     },
     storage_api::Storage,
 };
@@ -171,7 +182,10 @@ mod tests {
 
     use cda_interfaces::{
         runtime_update_api::{
-            ExecutionMode, HashAlgorithm, RuntimeFilesQuery, RuntimeFilesUpdatePlugin,
+            ExecutionMode,
+            HashAlgorithm,
+            RuntimeFilesQuery,
+            RuntimeFilesUpdatePlugin,
             RuntimeUpdateError,
         },
         storage_api::CollectionName,
@@ -181,8 +195,14 @@ mod tests {
     use crate::{
         DefaultRuntimeFilesUpdatePlugin,
         test_utils::{
-            MockLockProvider, MockSecurityHandler, NoopReloadHandler, make_storage,
-            make_upload_files, make_valid_config, make_valid_mdd, write_test_file,
+            MockLockProvider,
+            MockSecurityHandler,
+            NoopReloadHandler,
+            make_storage,
+            make_upload_files,
+            make_valid_config,
+            make_valid_mdd,
+            write_test_file,
         },
     };
 

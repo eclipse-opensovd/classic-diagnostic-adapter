@@ -11,7 +11,10 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-use serde::{Deserialize, Serialize};
+use serde::{
+    Deserialize,
+    Serialize,
+};
 
 #[derive(Serialize, Deserialize, Clone, schemars::JsonSchema, Debug)]
 pub struct RuntimeUpdateConfig {

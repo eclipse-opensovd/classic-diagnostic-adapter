@@ -12,13 +12,19 @@
  */
 
 use std::{
-    path::{Path, PathBuf},
+    path::{
+        Path,
+        PathBuf,
+    },
     sync::Arc,
 };
 
 use super::{
     error::StorageError,
-    io::{RandomAccessData, ReadableStream},
+    io::{
+        RandomAccessData,
+        ReadableStream,
+    },
     transaction::Transaction,
 };
 

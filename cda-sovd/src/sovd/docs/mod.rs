@@ -21,8 +21,18 @@
 pub mod operations;
 
 use aide::openapi::{
-    Info, MediaType, OpenApi, Operation, PathItem, Paths, ReferenceOr, RequestBody, Response,
-    Responses, SchemaObject, StatusCode,
+    Info,
+    MediaType,
+    OpenApi,
+    Operation,
+    PathItem,
+    Paths,
+    ReferenceOr,
+    RequestBody,
+    Response,
+    Responses,
+    SchemaObject,
+    StatusCode,
 };
 use indexmap::IndexMap;
 use schemars::Schema;

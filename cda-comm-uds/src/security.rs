@@ -15,12 +15,24 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use cda_interfaces::{
-    DiagServiceError, DynamicPlugin, EcuGateway, EcuManager, SecurityAccess, UdsSecurity,
+    DiagServiceError,
+    DynamicPlugin,
+    EcuGateway,
+    EcuManager,
+    SecurityAccess,
+    UdsSecurity,
     UdsTransport,
-    diagservices::{DiagServiceResponse, DiagServiceResponseType, UdsPayloadData},
+    diagservices::{
+        DiagServiceResponse,
+        DiagServiceResponseType,
+        UdsPayloadData,
+    },
 };
 
-use crate::{UdsManager, types::ResetType};
+use crate::{
+    UdsManager,
+    types::ResetType,
+};
 
 #[async_trait]
 impl<S: EcuGateway, R: DiagServiceResponse, T: EcuManager<Response = R>> UdsSecurity

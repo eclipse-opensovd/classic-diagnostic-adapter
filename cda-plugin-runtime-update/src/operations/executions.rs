@@ -22,16 +22,28 @@
 
 use std::sync::{
     Arc,
-    atomic::{AtomicBool, Ordering},
+    atomic::{
+        AtomicBool,
+        Ordering,
+    },
 };
 
 use cda_interfaces::{
     HashMap,
     runtime_update_api::{
-        ExecutionMode, ExecutionStatus, LockStateProvider, RuntimeFileReloadHandler,
-        RuntimeFilesUpdateSecurityHandler, RuntimeUpdateError, UpdateCollections, UpdateExecution,
+        ExecutionMode,
+        ExecutionStatus,
+        LockStateProvider,
+        RuntimeFileReloadHandler,
+        RuntimeFilesUpdateSecurityHandler,
+        RuntimeUpdateError,
+        UpdateCollections,
+        UpdateExecution,
     },
-    storage_api::{CollectionName, Storage},
+    storage_api::{
+        CollectionName,
+        Storage,
+    },
 };
 use tokio::sync::RwLock;
 
@@ -192,18 +204,30 @@ where
 
 #[cfg(test)]
 mod tests {
-    use std::sync::{Arc, atomic::AtomicBool};
+    use std::sync::{
+        Arc,
+        atomic::AtomicBool,
+    };
 
     use cda_interfaces::{
         HashMap,
-        runtime_update_api::{ExecutionMode, ExecutionStatus, RuntimeUpdateError, UpdateExecution},
+        runtime_update_api::{
+            ExecutionMode,
+            ExecutionStatus,
+            RuntimeUpdateError,
+            UpdateExecution,
+        },
         storage_api::CollectionName,
     };
     use cda_storage::LocalStorage;
     use tokio::sync::RwLock;
 
     use crate::test_utils::{
-        MockLockProvider, MockSecurityHandler, NoopReloadHandler, make_storage, write_test_file,
+        MockLockProvider,
+        MockSecurityHandler,
+        NoopReloadHandler,
+        make_storage,
+        write_test_file,
     };
 
     struct TestFixture {

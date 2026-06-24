@@ -32,18 +32,31 @@ pub mod storage;
 pub(crate) mod test_utils {
     use std::{
         path::PathBuf,
-        sync::{Arc, Mutex},
+        sync::{
+            Arc,
+            Mutex,
+        },
     };
 
     use async_trait::async_trait;
     use bytes::Bytes;
     use cda_interfaces::{
         runtime_update_api::{
-            LockStateProvider, ReloadError, RuntimeFileReloadHandler, RuntimeUpdateError,
-            UpdateFileType, UploadFile, VerificationError,
+            LockStateProvider,
+            ReloadError,
+            RuntimeFileReloadHandler,
+            RuntimeUpdateError,
+            UpdateFileType,
+            UploadFile,
+            VerificationError,
         },
         storage_api::{
-            Collection, CollectionName, DirectFileAccess, ReadableStream, Storage, Transaction,
+            Collection,
+            CollectionName,
+            DirectFileAccess,
+            ReadableStream,
+            Storage,
+            Transaction,
         },
     };
     use cda_storage::LocalStorage;
@@ -232,16 +245,28 @@ pub(crate) mod test_utils {
 mod tests {
     use std::sync::{
         Arc,
-        atomic::{AtomicUsize, Ordering},
+        atomic::{
+            AtomicUsize,
+            Ordering,
+        },
     };
 
     use async_trait::async_trait;
     use cda_interfaces::runtime_update_api::{
-        BulkDataCreatedList, BulkDataList, ExclusiveRuntimePlugin, ExecutionMode,
-        RuntimeFilesQuery, RuntimeFilesUpdatePlugin, RuntimeUpdateError, UpdateExecution,
+        BulkDataCreatedList,
+        BulkDataList,
+        ExclusiveRuntimePlugin,
+        ExecutionMode,
+        RuntimeFilesQuery,
+        RuntimeFilesUpdatePlugin,
+        RuntimeUpdateError,
+        UpdateExecution,
         UploadFile,
     };
-    use tokio::sync::{Barrier, Notify};
+    use tokio::sync::{
+        Barrier,
+        Notify,
+    };
 
     struct DelayPlugin {
         read_barrier: Arc<Barrier>,

@@ -15,15 +15,30 @@ use std::sync::Arc;
 
 use axum::{
     Json,
-    http::{HeaderValue, StatusCode, header::RETRY_AFTER},
-    response::{IntoResponse, Response},
+    http::{
+        HeaderValue,
+        StatusCode,
+        header::RETRY_AFTER,
+    },
+    response::{
+        IntoResponse,
+        Response,
+    },
 };
 use cda_interfaces::runtime_update_api::{
-    LockStateProvider, RuntimeFilesUpdatePlugin, RuntimeUpdateError,
+    LockStateProvider,
+    RuntimeFilesUpdatePlugin,
+    RuntimeUpdateError,
 };
-use sovd_interfaces::error::{ApiErrorResponse, ErrorCode};
+use sovd_interfaces::error::{
+    ApiErrorResponse,
+    ErrorCode,
+};
 
-use crate::{VendorErrorCode, sovd::update_guard::ExemptRoute};
+use crate::{
+    VendorErrorCode,
+    sovd::update_guard::ExemptRoute,
+};
 
 const EXECUTIONS_ROUTE: &str =
     "/vehicle/v15/apps/sovd2uds/bulk-data/runtimefiles-nextupdate/executions";
@@ -192,13 +207,25 @@ async fn require_vehicle_lock(
 
 pub(crate) mod current {
     use axum::{
-        extract::{Query, State},
-        response::{IntoResponse, Response},
+        extract::{
+            Query,
+            State,
+        },
+        response::{
+            IntoResponse,
+            Response,
+        },
     };
-    use cda_interfaces::runtime_update_api::{LockStateProvider, RuntimeFilesUpdatePlugin};
+    use cda_interfaces::runtime_update_api::{
+        LockStateProvider,
+        RuntimeFilesUpdatePlugin,
+    };
     use cda_plugin_security::Secured;
 
-    use super::{DbUpdateErrorResponse, RuntimeUpdateRouteState};
+    use super::{
+        DbUpdateErrorResponse,
+        RuntimeUpdateRouteState,
+    };
 
     pub(crate) async fn get<P: RuntimeFilesUpdatePlugin, L: LockStateProvider>(
         State(route_state): State<RuntimeUpdateRouteState<P, L>>,
@@ -217,16 +244,29 @@ pub(crate) mod current {
 pub(crate) mod nextupdate {
     use axum::{
         Json,
-        extract::{Query, State},
+        extract::{
+            Query,
+            State,
+        },
         http::StatusCode,
-        response::{IntoResponse, Response},
+        response::{
+            IntoResponse,
+            Response,
+        },
     };
     use cda_interfaces::runtime_update_api::{
-        LockStateProvider, RuntimeFilesUpdatePlugin, RuntimeUpdateError, UploadFile,
+        LockStateProvider,
+        RuntimeFilesUpdatePlugin,
+        RuntimeUpdateError,
+        UploadFile,
     };
     use cda_plugin_security::Secured;
 
-    use super::{DbUpdateErrorResponse, RuntimeUpdateRouteState, require_vehicle_lock};
+    use super::{
+        DbUpdateErrorResponse,
+        RuntimeUpdateRouteState,
+        require_vehicle_lock,
+    };
 
     pub(crate) async fn get<P: RuntimeFilesUpdatePlugin, L: LockStateProvider>(
         State(route_state): State<RuntimeUpdateRouteState<P, L>>,
@@ -307,14 +347,24 @@ pub(crate) mod nextupdate {
 
     pub(crate) mod id {
         use axum::{
-            extract::{Path, State},
+            extract::{
+                Path,
+                State,
+            },
             http::StatusCode,
             response::IntoResponse,
         };
-        use cda_interfaces::runtime_update_api::{LockStateProvider, RuntimeFilesUpdatePlugin};
+        use cda_interfaces::runtime_update_api::{
+            LockStateProvider,
+            RuntimeFilesUpdatePlugin,
+        };
         use cda_plugin_security::Secured;
 
-        use super::super::{DbUpdateErrorResponse, RuntimeUpdateRouteState, require_vehicle_lock};
+        use super::super::{
+            DbUpdateErrorResponse,
+            RuntimeUpdateRouteState,
+            require_vehicle_lock,
+        };
 
         pub(crate) async fn delete<P: RuntimeFilesUpdatePlugin, L: LockStateProvider>(
             State(route_state): State<RuntimeUpdateRouteState<P, L>>,
@@ -348,14 +398,27 @@ pub(crate) mod nextupdate {
 
 pub(crate) mod backup {
     use axum::{
-        extract::{Query, State},
+        extract::{
+            Query,
+            State,
+        },
         http::StatusCode,
-        response::{IntoResponse, Response},
+        response::{
+            IntoResponse,
+            Response,
+        },
     };
-    use cda_interfaces::runtime_update_api::{LockStateProvider, RuntimeFilesUpdatePlugin};
+    use cda_interfaces::runtime_update_api::{
+        LockStateProvider,
+        RuntimeFilesUpdatePlugin,
+    };
     use cda_plugin_security::Secured;
 
-    use super::{DbUpdateErrorResponse, RuntimeUpdateRouteState, require_vehicle_lock};
+    use super::{
+        DbUpdateErrorResponse,
+        RuntimeUpdateRouteState,
+        require_vehicle_lock,
+    };
 
     pub(crate) async fn get<P: RuntimeFilesUpdatePlugin, L: LockStateProvider>(
         State(route_state): State<RuntimeUpdateRouteState<P, L>>,
@@ -394,18 +457,30 @@ pub(crate) mod backup {
 pub(crate) mod executions {
     use axum::{
         Json,
-        extract::{Query, State},
+        extract::{
+            Query,
+            State,
+        },
         http::StatusCode,
         response::IntoResponse,
     };
     use axum_extra::extract::WithRejection;
-    use cda_interfaces::runtime_update_api::{LockStateProvider, RuntimeFilesUpdatePlugin};
+    use cda_interfaces::runtime_update_api::{
+        LockStateProvider,
+        RuntimeFilesUpdatePlugin,
+    };
     use cda_plugin_security::Secured;
     use sovd_interfaces::apps::sovd2uds::bulk_data::runtimefiles::{
-        ExecutionListResponse, ExecutionResponse, ExecutionsQuery,
+        ExecutionListResponse,
+        ExecutionResponse,
+        ExecutionsQuery,
     };
 
-    use super::{DbUpdateErrorResponse, RuntimeUpdateRouteState, require_vehicle_lock};
+    use super::{
+        DbUpdateErrorResponse,
+        RuntimeUpdateRouteState,
+        require_vehicle_lock,
+    };
     use crate::sovd::error::ApiError;
 
     pub(crate) async fn get<P: RuntimeFilesUpdatePlugin, L: LockStateProvider>(
@@ -470,14 +545,22 @@ pub(crate) mod executions {
     pub(crate) mod id {
         use axum::{
             Json,
-            extract::{Path, Query, State},
+            extract::{
+                Path,
+                Query,
+                State,
+            },
             http::StatusCode,
             response::IntoResponse,
         };
         use axum_extra::extract::WithRejection;
-        use cda_interfaces::runtime_update_api::{LockStateProvider, RuntimeFilesUpdatePlugin};
+        use cda_interfaces::runtime_update_api::{
+            LockStateProvider,
+            RuntimeFilesUpdatePlugin,
+        };
         use sovd_interfaces::apps::sovd2uds::bulk_data::runtimefiles::{
-            ExecutionResponse, ExecutionsQuery,
+            ExecutionResponse,
+            ExecutionsQuery,
         };
 
         use super::super::RuntimeUpdateRouteState;

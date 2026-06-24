@@ -13,13 +13,20 @@
 
 use aide::UseApi;
 use axum::{
-    extract::{OriginalUri, Query},
+    extract::{
+        OriginalUri,
+        Query,
+    },
     response::Response,
 };
 use axum_extra::extract::WithRejection;
 use opensovd_axum_extra::ExtractHost;
 
-use crate::sovd::{IntoSovd, error::ApiError, resource_response};
+use crate::sovd::{
+    IntoSovd,
+    error::ApiError,
+    resource_response,
+};
 
 pub(crate) mod sovd2uds;
 

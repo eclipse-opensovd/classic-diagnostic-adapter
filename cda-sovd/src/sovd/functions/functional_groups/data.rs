@@ -11,21 +11,37 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-use aide::{UseApi, transform::TransformOperation};
+use aide::{
+    UseApi,
+    transform::TransformOperation,
+};
 use axum::{
     Json,
-    extract::{Query, State},
-    response::{IntoResponse, Response},
+    extract::{
+        Query,
+        State,
+    },
+    response::{
+        IntoResponse,
+        Response,
+    },
 };
 use axum_extra::extract::WithRejection;
-use cda_interfaces::{DynamicPlugin, UdsEcu};
+use cda_interfaces::{
+    DynamicPlugin,
+    UdsEcu,
+};
 use cda_plugin_security::Secured;
 use http::StatusCode;
 
 use super::WebserverFgState;
 use crate::sovd::{
-    IntoSovd, create_schema,
-    error::{ApiError, ErrorWrapper},
+    IntoSovd,
+    create_schema,
+    error::{
+        ApiError,
+        ErrorWrapper,
+    },
 };
 
 pub(crate) async fn get<T: UdsEcu + Clone>(
@@ -87,24 +103,53 @@ pub(crate) fn docs_get(op: TransformOperation) -> TransformOperation {
 }
 
 pub(crate) mod diag_service {
-    use aide::{UseApi, transform::TransformOperation};
+    use aide::{
+        UseApi,
+        transform::TransformOperation,
+    };
     use axum::{
         Json,
         body::Bytes,
-        extract::{Path, Query, State},
-        http::{HeaderMap, StatusCode},
-        response::{IntoResponse, Response},
+        extract::{
+            Path,
+            Query,
+            State,
+        },
+        http::{
+            HeaderMap,
+            StatusCode,
+        },
+        response::{
+            IntoResponse,
+            Response,
+        },
     };
     use axum_extra::extract::WithRejection;
-    use cda_interfaces::{DiagComm, DiagCommType, HashMap, UdsEcu};
+    use cda_interfaces::{
+        DiagComm,
+        DiagCommType,
+        HashMap,
+        UdsEcu,
+    };
     use cda_plugin_security::Secured;
 
     use crate::{
         openapi,
         sovd::{
-            components::{ecu::DiagServicePathParam, get_content_type_and_accept},
-            error::{ApiError, ErrorWrapper, VendorErrorCode},
-            functions::functional_groups::{WebserverFgState, handle_ecu_response, map_to_json},
+            components::{
+                ecu::DiagServicePathParam,
+                get_content_type_and_accept,
+            },
+            error::{
+                ApiError,
+                ErrorWrapper,
+                VendorErrorCode,
+            },
+            functions::functional_groups::{
+                WebserverFgState,
+                handle_ecu_response,
+                map_to_json,
+            },
             get_payload_data,
         },
     };

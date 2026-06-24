@@ -14,7 +14,9 @@
 pub mod sovd2uds {
     pub mod bulk_data {
         pub use cda_interfaces::runtime_update_api::{
-            BulkDataCreated, BulkDataCreatedList, BulkDataList,
+            BulkDataCreated,
+            BulkDataCreatedList,
+            BulkDataList,
         };
 
         pub mod flash_files {
@@ -25,7 +27,10 @@ pub mod sovd2uds {
 
         pub mod runtimefiles {
             pub use cda_interfaces::runtime_update_api::{
-                ExecutionMode, ExecutionStatus, RuntimeFilesQuery, UpdateExecution,
+                ExecutionMode,
+                ExecutionStatus,
+                RuntimeFilesQuery,
+                UpdateExecution,
             };
 
             /// Request body for an execution.

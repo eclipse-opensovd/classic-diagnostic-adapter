@@ -11,25 +11,55 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-use std::{sync::Arc, time::Duration};
+use std::{
+    sync::Arc,
+    time::Duration,
+};
 
 use cda_interfaces::{
-    DataParseError, DiagServiceError, DoipComParamProvider, EcuAddressProvider, HashMap,
-    HashMapExtensions, dlt_ctx, service_ids,
+    DataParseError,
+    DiagServiceError,
+    DoipComParamProvider,
+    EcuAddressProvider,
+    HashMap,
+    HashMapExtensions,
+    dlt_ctx,
+    service_ids,
 };
 use doip_definitions::payload::{
-    ActivationType, AliveCheckRequest, DiagnosticAckCode, DiagnosticMessageAck, DoipPayload,
+    ActivationType,
+    AliveCheckRequest,
+    DiagnosticAckCode,
+    DiagnosticMessageAck,
+    DoipPayload,
     RoutingActivationRequest,
 };
 use thiserror::Error;
-use tokio::sync::{Mutex, RwLock, broadcast, mpsc, watch};
+use tokio::sync::{
+    Mutex,
+    RwLock,
+    broadcast,
+    mpsc,
+    watch,
+};
 
 use crate::{
-    ConnectionError, DiagnosticResponse, DoipConnection, DoipEcu, DoipTarget,
-    NRC_BUSY_REPEAT_REQUEST, NRC_RESPONSE_PENDING, NRC_TEMPORARILY_NOT_AVAILABLE, SLEEP_INTERVAL,
+    ConnectionError,
+    DiagnosticResponse,
+    DoipConnection,
+    DoipEcu,
+    DoipTarget,
+    NRC_BUSY_REPEAT_REQUEST,
+    NRC_RESPONSE_PENDING,
+    NRC_TEMPORARILY_NOT_AVAILABLE,
+    SLEEP_INTERVAL,
     connections::EcuError::EcuConnectionError,
     ecu_connection::{
-        self, ConnectionConfig, ECUConnectionRead, ECUConnectionSend as _, EcuConnectionTarget,
+        self,
+        ConnectionConfig,
+        ECUConnectionRead,
+        ECUConnectionSend as _,
+        EcuConnectionTarget,
     },
     socket::DoIPConfig,
 };

@@ -17,13 +17,20 @@
 //! (`/executions`, `/executions/{execution-id}`) and embeds request/response
 //! parameter schemas obtained from the diagnostic layer.
 
-use aide::openapi::{Operation, PathItem};
+use aide::openapi::{
+    Operation,
+    PathItem,
+};
 use indexmap::IndexMap;
 use schemars::Schema;
 use sovd_interfaces::docs;
 
 use super::{
-    empty_response, error_schema, json_request_body, json_response, operation_with_extensions,
+    empty_response,
+    error_schema,
+    json_request_body,
+    json_response,
+    operation_with_extensions,
     responses,
 };
 

@@ -11,20 +11,36 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-use std::{future::Future, path::PathBuf, sync::Arc};
+use std::{
+    future::Future,
+    path::PathBuf,
+    sync::Arc,
+};
 
 use async_trait::async_trait;
 use cda_comm_doip::DoipDiagGateway;
-use cda_core::{DiagServiceResponseStruct, EcuManager};
+use cda_core::{
+    DiagServiceResponseStruct,
+    EcuManager,
+};
 use cda_interfaces::{
     UdsEcu,
     datatypes::ComponentsConfig,
-    runtime_update_api::{ReloadError, RuntimeFilesUpdateSecurityHandler},
+    runtime_update_api::{
+        ReloadError,
+        RuntimeFilesUpdateSecurityHandler,
+    },
 };
-use cda_plugin_security::{SecurityPlugin, SecurityPluginLoader};
+use cda_plugin_security::{
+    SecurityPlugin,
+    SecurityPluginLoader,
+};
 use tokio::sync::RwLock;
 
-use crate::{AppError, UdsManagerType};
+use crate::{
+    AppError,
+    UdsManagerType,
+};
 
 pub mod security;
 
@@ -322,7 +338,10 @@ where
 
 #[cfg(test)]
 mod tests {
-    use std::{path::PathBuf, sync::Arc};
+    use std::{
+        path::PathBuf,
+        sync::Arc,
+    };
 
     use tokio::sync::RwLock;
 

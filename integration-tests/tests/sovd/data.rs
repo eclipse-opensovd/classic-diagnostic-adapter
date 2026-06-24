@@ -11,14 +11,23 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-use http::{Method, StatusCode};
+use http::{
+    Method,
+    StatusCode,
+};
 
 use crate::{
     sovd::hook_cleanup,
     util::{
         ecusim,
-        http::{auth_header, send_cda_request},
-        runtime::{EcuSim, setup_integration_test},
+        http::{
+            auth_header,
+            send_cda_request,
+        },
+        runtime::{
+            EcuSim,
+            setup_integration_test,
+        },
     },
 };
 

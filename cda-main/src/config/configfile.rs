@@ -14,14 +14,24 @@
 pub use cda_comm_doip::config::DoipConfig;
 pub use cda_database::DatabaseConfig;
 use cda_interfaces::{
-    FunctionalDescriptionConfig, HashMap,
+    FunctionalDescriptionConfig,
+    HashMap,
     datatypes::{
-        ComParams, ComponentsConfig, DatabaseNamingConvention, DiagnosticServiceAffixPosition,
-        FaultConfig, FlatbBufConfig, SdBoolMappings, SdMappingsTruthyValue,
+        ComParams,
+        ComponentsConfig,
+        DatabaseNamingConvention,
+        DiagnosticServiceAffixPosition,
+        FaultConfig,
+        FlatbBufConfig,
+        SdBoolMappings,
+        SdMappingsTruthyValue,
     },
 };
 pub use cda_plugin_runtime_update::config::RuntimeUpdateConfig;
-use serde::{Deserialize, Serialize};
+use serde::{
+    Deserialize,
+    Serialize,
+};
 
 use crate::AppError;
 
@@ -326,7 +336,11 @@ mod tests {
     use cda_interfaces::datatypes::DiagnosticServiceAffixPosition;
     use figment::{
         Figment,
-        providers::{Format, Serialized, Toml},
+        providers::{
+            Format,
+            Serialized,
+            Toml,
+        },
     };
 
     use super::*;

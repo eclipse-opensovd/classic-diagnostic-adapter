@@ -13,7 +13,10 @@
 
 use std::vec;
 
-use cda_interfaces::{DiagServiceError, util::set_bit_checked};
+use cda_interfaces::{
+    DiagServiceError,
+    util::set_bit_checked,
+};
 
 use crate::flatbuf::diagnostic_description::dataformat;
 

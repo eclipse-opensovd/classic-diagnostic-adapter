@@ -13,22 +13,36 @@
 
 use std::time::Duration;
 
-use http::{Method, StatusCode};
+use http::{
+    Method,
+    StatusCode,
+};
 use serde::Deserialize;
 use sovd_interfaces::components::ecu::modes::security_and_session::put::RequestSeedResponse;
 
 use crate::{
     sovd::{
-        self, compute_security_key,
+        self,
+        compute_security_key,
         ecu::switch_session,
-        locks::{self, create_lock, lock_operation},
+        locks::{
+            self,
+            create_lock,
+            lock_operation,
+        },
         put_mode,
     },
     util::{
         TestingError,
-        ecusim::{self},
+        ecusim::{
+            self,
+        },
         http::{
-            auth_header, extract_field_from_json, response_to_json, response_to_t, send_cda_request,
+            auth_header,
+            extract_field_from_json,
+            response_to_json,
+            response_to_t,
+            send_cda_request,
         },
         runtime::setup_integration_test,
     },

@@ -13,35 +13,64 @@
 
 use std::{
     future::Future,
-    sync::{Arc, atomic::AtomicBool},
+    sync::{
+        Arc,
+        atomic::AtomicBool,
+    },
 };
 
-use aide::{axum::routing, swagger::Swagger};
+use aide::{
+    axum::routing,
+    swagger::Swagger,
+};
 use axum::{
     Json,
-    http::{self, Request},
+    http::{
+        self,
+        Request,
+    },
 };
 use cda_interfaces::{
-    DoipGatewaySetupError, FunctionalDescriptionConfig, HashMap, SchemaProvider, UdsEcu,
-    datatypes::ComponentsConfig, diagservices::DiagServiceResponse, dlt_ctx,
+    DoipGatewaySetupError,
+    FunctionalDescriptionConfig,
+    HashMap,
+    SchemaProvider,
+    UdsEcu,
+    datatypes::ComponentsConfig,
+    diagservices::DiagServiceResponse,
+    dlt_ctx,
     file_manager::FileManager,
 };
 use cda_plugin_security::SecurityPluginLoader;
 use dynamic_router::DynamicRouter;
-pub use dynamic_router::{RouteGroupNotFound, RouteHandle};
+pub use dynamic_router::{
+    RouteGroupNotFound,
+    RouteHandle,
+};
 pub use http::Method;
 use tokio::net::TcpListener;
-use tower::{Layer, ServiceExt as TowerServiceExt};
-use tower_http::{normalize_path::NormalizePathLayer, trace::TraceLayer};
+use tower::{
+    Layer,
+    ServiceExt as TowerServiceExt,
+};
+use tower_http::{
+    normalize_path::NormalizePathLayer,
+    trace::TraceLayer,
+};
 
 /// Public API surface re-exported from the crate-internal `sovd` module.
 pub use crate::sovd::{
-    EcuExecutionRegistry, SovdLockStateProvider,
+    EcuExecutionRegistry,
+    SovdLockStateProvider,
     apps::sovd2uds::bulk_data::runtimefiles::RuntimeUpdateRouteState,
     error::VendorErrorCode,
     locks::Locks,
     static_data::add_static_data_endpoint,
-    update_guard::{ExemptRoute, UpdateGuardLayer, UpdateGuardState},
+    update_guard::{
+        ExemptRoute,
+        UpdateGuardLayer,
+        UpdateGuardState,
+    },
 };
 pub mod dynamic_router;
 mod openapi;

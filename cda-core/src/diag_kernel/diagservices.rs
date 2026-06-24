@@ -11,18 +11,34 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-use cda_database::datatypes::{self, DataType};
+use cda_database::datatypes::{
+    self,
+    DataType,
+};
 use cda_interfaces::{
-    DiagComm, DiagServiceError, HashMap, HashMapExtensions,
-    datatypes::{DtcField, DtcRecord},
+    DiagComm,
+    DiagServiceError,
+    HashMap,
+    HashMapExtensions,
+    datatypes::{
+        DtcField,
+        DtcRecord,
+    },
     diagservices::{
-        DiagServiceJsonResponse, DiagServiceResponse, DiagServiceResponseType, FieldParseError,
+        DiagServiceJsonResponse,
+        DiagServiceResponse,
+        DiagServiceResponseType,
+        FieldParseError,
         MappedNRC,
     },
     service_ids::NEGATIVE_RESPONSE,
 };
 
-use crate::diag_kernel::{DiagDataValue, iso_14229_nrc, operations};
+use crate::diag_kernel::{
+    DiagDataValue,
+    iso_14229_nrc,
+    operations,
+};
 
 #[derive(Debug, Clone)]
 pub struct DiagServiceResponseStruct {

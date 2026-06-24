@@ -16,19 +16,31 @@ use std::{
     pin::Pin,
     sync::{
         Arc,
-        atomic::{AtomicBool, Ordering},
+        atomic::{
+            AtomicBool,
+            Ordering,
+        },
     },
-    task::{Context, Poll},
+    task::{
+        Context,
+        Poll,
+    },
 };
 
 use axum::{
     Json,
     http::StatusCode,
-    response::{IntoResponse, Response},
+    response::{
+        IntoResponse,
+        Response,
+    },
 };
 use http::Method;
 use tokio::sync::RwLock;
-use tower::{Layer, Service};
+use tower::{
+    Layer,
+    Service,
+};
 
 /// A route prefix and set of HTTP methods that are allowed to bypass the update guard.
 #[derive(Clone)]
@@ -160,7 +172,11 @@ where
 
 #[cfg(test)]
 mod tests {
-    use axum::{Router, body::Body, routing::get};
+    use axum::{
+        Router,
+        body::Body,
+        routing::get,
+    };
     use http::Request;
     use tower::ServiceExt;
 

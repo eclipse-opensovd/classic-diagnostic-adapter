@@ -15,7 +15,10 @@ use std::time::Duration;
 use cda_interfaces::HashMap;
 use http::HeaderMap;
 use opensovd_cda_lib::config::configfile::Configuration;
-use reqwest::{Method, StatusCode};
+use reqwest::{
+    Method,
+    StatusCode,
+};
 use serde::de::DeserializeOwned;
 
 use crate::util::TestingError;

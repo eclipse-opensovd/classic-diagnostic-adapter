@@ -11,7 +11,10 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-use crate::{DiagComm, HashMap};
+use crate::{
+    DiagComm,
+    HashMap,
+};
 
 #[derive(Debug)]
 pub struct State {

@@ -11,7 +11,10 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-use crate::{DiagComm, DiagServiceError};
+use crate::{
+    DiagComm,
+    DiagServiceError,
+};
 
 pub struct SchemaDescription {
     /// A unique name for the schema.

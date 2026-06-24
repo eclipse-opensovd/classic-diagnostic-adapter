@@ -36,7 +36,10 @@ pub(crate) use finish_db;
 /// Build a database with a single variant and functional groups.
 macro_rules! finish_db_with_functional_groups {
     ($builder:expr, $protocol:expr, $variant_services:expr, $functional_groups:expr) => {{
-        use cda_database::datatypes::database_builder::{DiagLayerParams, EcuDataParams};
+        use cda_database::datatypes::database_builder::{
+            DiagLayerParams,
+            EcuDataParams,
+        };
         let cp_ref = $builder.create_com_param_ref(None, None, None, Some($protocol), None);
         let diag_layer = $builder.create_diag_layer(DiagLayerParams {
             short_name: $crate::diag_kernel::test_utils::ecu_manager_builder::TEST_DIAG_LAYER,

@@ -11,24 +11,41 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-use aide::{UseApi, transform::TransformOperation};
+use aide::{
+    UseApi,
+    transform::TransformOperation,
+};
 use axum::{
     Json,
-    extract::{Query, State},
-    response::{IntoResponse, Response},
+    extract::{
+        Query,
+        State,
+    },
+    response::{
+        IntoResponse,
+        Response,
+    },
 };
 use axum_extra::extract::WithRejection;
 use cda_interfaces::{
-    DynamicPlugin, UdsEcu, datatypes::ComponentConfigurationsInfo,
-    diagservices::DiagServiceResponse, file_manager::FileManager,
+    DynamicPlugin,
+    UdsEcu,
+    datatypes::ComponentConfigurationsInfo,
+    diagservices::DiagServiceResponse,
+    file_manager::FileManager,
 };
 use cda_plugin_security::Secured;
 use http::StatusCode;
 use sovd_interfaces::components::ecu::configurations as sovd_configurations;
 
 use crate::sovd::{
-    IntoSovd, WebserverEcuState, create_schema,
-    error::{ApiError, ErrorWrapper},
+    IntoSovd,
+    WebserverEcuState,
+    create_schema,
+    error::{
+        ApiError,
+        ErrorWrapper,
+    },
 };
 
 pub(crate) async fn get<R: DiagServiceResponse, T: UdsEcu + Clone, U: FileManager>(
@@ -109,15 +126,29 @@ impl IntoSovd for ComponentConfigurationsInfo {
 }
 
 pub(crate) mod diag_service {
-    use aide::{UseApi, transform::TransformOperation};
+    use aide::{
+        UseApi,
+        transform::TransformOperation,
+    };
     use axum::{
         body::Bytes,
-        extract::{Path, Query, State},
-        response::{IntoResponse, Response},
+        extract::{
+            Path,
+            Query,
+            State,
+        },
+        response::{
+            IntoResponse,
+            Response,
+        },
     };
     use axum_extra::extract::WithRejection;
     use cda_interfaces::{
-        DiagComm, DiagCommType, SchemaProvider, UdsEcu, diagservices::DiagServiceResponse,
+        DiagComm,
+        DiagCommType,
+        SchemaProvider,
+        UdsEcu,
+        diagservices::DiagServiceResponse,
         file_manager::FileManager,
     };
     use cda_plugin_security::Secured;
@@ -128,8 +159,14 @@ pub(crate) mod diag_service {
         openapi,
         sovd::{
             WebserverEcuState,
-            components::ecu::{DiagServicePathParam, data_request},
-            error::{ApiError, ErrorWrapper},
+            components::ecu::{
+                DiagServicePathParam,
+                data_request,
+            },
+            error::{
+                ApiError,
+                ErrorWrapper,
+            },
         },
     };
 

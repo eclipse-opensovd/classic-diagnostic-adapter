@@ -16,5 +16,15 @@
 mod config;
 mod context;
 
-pub use config::{MaxFragLen, SslConfig, SslConfigBuilder, SslVerifyMode, TlsVersion};
-pub use context::{HandshakeError, MidHandshakeSslStream, SslStream};
+pub use config::{
+    MaxFragLen,
+    SslConfig,
+    SslConfigBuilder,
+    SslVerifyMode,
+    TlsVersion,
+};
+pub use context::{
+    HandshakeError,
+    MidHandshakeSslStream,
+    SslStream,
+};

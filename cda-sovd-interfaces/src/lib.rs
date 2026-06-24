@@ -12,7 +12,10 @@
  */
 
 use cda_interfaces::HashMap;
-use serde::{Deserialize, Serialize};
+use serde::{
+    Deserialize,
+    Serialize,
+};
 
 use crate::error::DataError;
 
@@ -90,7 +93,10 @@ pub struct IncludeSchemaQuery {
 pub mod sovd2uds {
     use std::path::PathBuf;
 
-    pub use cda_interfaces::runtime_update_api::{BulkDataDescriptor, HashAlgorithm};
+    pub use cda_interfaces::runtime_update_api::{
+        BulkDataDescriptor,
+        HashAlgorithm,
+    };
     use serde::Serialize;
 
     #[derive(Serialize, schemars::JsonSchema)]
@@ -107,7 +113,10 @@ pub mod sovd2uds {
 
 pub mod common {
     pub mod operations {
-        use serde::{Deserialize, Serialize};
+        use serde::{
+            Deserialize,
+            Serialize,
+        };
 
         /// A single item in an operation IDs collection.
         #[derive(Serialize, Deserialize, schemars::JsonSchema)]
@@ -171,7 +180,10 @@ pub mod common {
 
         pub type Query = crate::IncludeSchemaQuery;
         pub mod get {
-            use serde::{Deserialize, Serialize};
+            use serde::{
+                Deserialize,
+                Serialize,
+            };
 
             use crate::Items;
 
@@ -208,7 +220,10 @@ pub mod common {
         }
 
         pub mod put {
-            use serde::{Deserialize, Serialize};
+            use serde::{
+                Deserialize,
+                Serialize,
+            };
 
             #[derive(Debug, Deserialize, Serialize, schemars::JsonSchema)]
             #[schemars(rename = "UpdateAccessModesResponse")]
@@ -224,7 +239,10 @@ pub mod common {
         pub mod commctrl {
             pub mod put {
                 use cda_interfaces::HashMap;
-                use serde::{Deserialize, Serialize};
+                use serde::{
+                    Deserialize,
+                    Serialize,
+                };
 
                 #[derive(Debug, Deserialize, Serialize, schemars::JsonSchema)]
                 #[schemars(rename = "UpdateCommCtrlModesRequest")]
@@ -240,7 +258,10 @@ pub mod common {
         pub mod dtcsetting {
             pub mod put {
                 use cda_interfaces::HashMap;
-                use serde::{Deserialize, Serialize};
+                use serde::{
+                    Deserialize,
+                    Serialize,
+                };
 
                 #[derive(Debug, Deserialize, Serialize, schemars::JsonSchema)]
                 #[schemars(rename = "UpdateDtcSettingsModesRequest")]

@@ -21,15 +21,26 @@
 
 use std::{
     ffi::CStr,
-    io::{self, Read, Write},
-    os::raw::{c_int, c_uchar, c_void},
+    io::{
+        self,
+        Read,
+        Write,
+    },
+    os::raw::{
+        c_int,
+        c_uchar,
+        c_void,
+    },
     pin::Pin,
     sync::Arc,
 };
 
 use mbedtls_sys as ffi;
 
-use crate::{error::MbedtlsError, ssl::SslConfig};
+use crate::{
+    error::MbedtlsError,
+    ssl::SslConfig,
+};
 
 // BIO callbacks - bridge mbedtls I/O to Rust Read/Write
 

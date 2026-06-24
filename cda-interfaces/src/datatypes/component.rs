@@ -11,9 +11,15 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-use serde::{Deserialize, Serialize};
+use serde::{
+    Deserialize,
+    Serialize,
+};
 
-use crate::{HashMap, datatypes::SdBoolMappings};
+use crate::{
+    HashMap,
+    datatypes::SdBoolMappings,
+};
 
 pub struct ComponentDataInfo {
     pub category: String,

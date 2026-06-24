@@ -12,8 +12,13 @@
  */
 
 use cda_interfaces::{
-    DiagServiceError, HashMap,
-    datatypes::{ComParamSimpleValue, ComParamValue, Unit},
+    DiagServiceError,
+    HashMap,
+    datatypes::{
+        ComParamSimpleValue,
+        ComParamValue,
+        Unit,
+    },
 };
 
 use crate::flatbuf::diagnostic_description::dataformat;
@@ -271,12 +276,19 @@ pub fn map_nack_number_of_retries<K: AsRef<str>>(
 
 #[cfg(test)]
 mod tests {
-    use cda_interfaces::{HashSet, HashSetExtensions};
+    use cda_interfaces::{
+        HashSet,
+        HashSetExtensions,
+    };
 
     use super::*;
     use crate::datatypes::{
         DatabaseConfig,
-        database_builder::{DiagLayerParams, EcuDataBuilder, EcuDataParams},
+        database_builder::{
+            DiagLayerParams,
+            EcuDataBuilder,
+            EcuDataParams,
+        },
     };
 
     struct ComParamRefSpec<'a> {
@@ -512,7 +524,10 @@ mod tests {
 
     #[test]
     fn test_map_nack_number_of_retries_from_complex_value() {
-        use cda_interfaces::datatypes::{ComplexComParamValue, DeserializableCompParam};
+        use cda_interfaces::datatypes::{
+            ComplexComParamValue,
+            DeserializableCompParam,
+        };
 
         let mut complex: ComplexComParamValue = HashMap::default();
         complex.insert(

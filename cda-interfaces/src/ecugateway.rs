@@ -13,9 +13,17 @@
 
 use std::time::Duration;
 
-use tokio::sync::{RwLock, mpsc};
+use tokio::sync::{
+    RwLock,
+    mpsc,
+};
 
-use crate::{DiagServiceError, EcuAddressProvider, HashMap, ServicePayload};
+use crate::{
+    DiagServiceError,
+    EcuAddressProvider,
+    HashMap,
+    ServicePayload,
+};
 
 #[derive(Debug, Clone)]
 pub enum UdsResponse {

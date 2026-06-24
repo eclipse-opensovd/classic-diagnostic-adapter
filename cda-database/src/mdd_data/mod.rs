@@ -11,14 +11,22 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-use std::{io::Read, time::Instant};
+use std::{
+    io::Read,
+    time::Instant,
+};
 
 use bytes::Bytes;
 use cda_interfaces::{
     HashMap,
     datatypes::FlatbBufConfig,
     dlt_ctx,
-    file_manager::{Chunk, ChunkMetaData, ChunkType, MddError},
+    file_manager::{
+        Chunk,
+        ChunkMetaData,
+        ChunkType,
+        MddError,
+    },
 };
 use flatbuffers::VerifierOptions;
 use prost::Message;
@@ -26,7 +34,10 @@ use sha2::Digest;
 
 use crate::{
     flatbuf::diagnostic_description::dataformat,
-    proto::{fileformat, fileformat::chunk::DataType as ChunkDataType},
+    proto::{
+        fileformat,
+        fileformat::chunk::DataType as ChunkDataType,
+    },
 };
 
 pub mod files;

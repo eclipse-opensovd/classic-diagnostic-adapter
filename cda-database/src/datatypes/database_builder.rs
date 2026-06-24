@@ -15,19 +15,32 @@
 // within a WipOffset<T> where we cannot provide a conversion for.
 // This is only the case for types where we have to be able to name the type, i.e.
 // for function parameters and return types.
-pub use dataformat::{DefaultCase, ParentRefType as DataFormatParentRefType, SwitchKey};
+pub use dataformat::{
+    DefaultCase,
+    ParentRefType as DataFormatParentRefType,
+    SwitchKey,
+};
 use flatbuffers::UnionWIPOffset;
 pub use flatbuffers::WIPOffset;
 
 use crate::{
     dataformat_wrapper,
     datatypes::{
-        CompuCategory, DataType, DiagCodedTypeVariant, IntervalType, Limit, ResponseType,
+        CompuCategory,
+        DataType,
+        DiagCodedTypeVariant,
+        IntervalType,
+        Limit,
+        ResponseType,
         Termination,
     },
     flatbuf::diagnostic_description::{
         dataformat,
-        dataformat::{CompuInternalToPhys, CompuPhysToInternal, EcuDataArgs},
+        dataformat::{
+            CompuInternalToPhys,
+            CompuPhysToInternal,
+            EcuDataArgs,
+        },
     },
 };
 

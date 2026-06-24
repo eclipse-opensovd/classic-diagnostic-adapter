@@ -12,7 +12,10 @@
  */
 
 use cda_interfaces::Protocol;
-use serde::{Deserialize, Serialize};
+use serde::{
+    Deserialize,
+    Serialize,
+};
 
 /// `DoIP` (Diagnostics over IP) transport layer configuration.
 #[derive(Deserialize, Serialize, Clone, Debug, schemars::JsonSchema)]

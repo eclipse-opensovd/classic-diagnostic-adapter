@@ -13,13 +13,19 @@
 
 use aide::UseApi;
 use axum::{
-    extract::{OriginalUri, Query},
+    extract::{
+        OriginalUri,
+        Query,
+    },
     response::Response,
 };
 use axum_extra::extract::WithRejection;
 use opensovd_axum_extra::ExtractHost;
 
-use crate::sovd::{error::ApiError, resource_response};
+use crate::sovd::{
+    error::ApiError,
+    resource_response,
+};
 
 pub(crate) async fn get(
     WithRejection(Query(query), _): WithRejection<
@@ -41,19 +47,36 @@ pub(crate) mod mdd_embedded_files {
     use aide::transform::TransformOperation;
     use axum::{
         Json,
-        extract::{Path, Query, State},
-        response::{IntoResponse, Response},
+        extract::{
+            Path,
+            Query,
+            State,
+        },
+        response::{
+            IntoResponse,
+            Response,
+        },
     };
     use axum_extra::extract::WithRejection;
     use cda_interfaces::{
         UdsEcu,
         diagservices::DiagServiceResponse,
-        file_manager::{ChunkMetaData, FileManager},
+        file_manager::{
+            ChunkMetaData,
+            FileManager,
+        },
     };
-    use http::{StatusCode, header};
+    use http::{
+        StatusCode,
+        header,
+    };
     use sovd_interfaces::components::ecu::x::sovd2uds;
 
-    use crate::sovd::{WebserverEcuState, create_schema, error::ApiError};
+    use crate::sovd::{
+        WebserverEcuState,
+        create_schema,
+        error::ApiError,
+    };
 
     pub(crate) async fn get<R: DiagServiceResponse, T: UdsEcu + Clone, U: FileManager>(
         WithRejection(Query(query), _): WithRejection<
@@ -114,13 +137,26 @@ pub(crate) mod mdd_embedded_files {
 
     pub(crate) mod id {
         use super::{
-            ApiError, DiagServiceResponse, FileManager, IntoResponse, Path, Response, State,
-            StatusCode, TransformOperation, UdsEcu, WebserverEcuState, content_type_from_meta,
+            ApiError,
+            DiagServiceResponse,
+            FileManager,
+            IntoResponse,
+            Path,
+            Response,
+            State,
+            StatusCode,
+            TransformOperation,
+            UdsEcu,
+            WebserverEcuState,
+            content_type_from_meta,
             header,
         };
         use crate::{
             openapi,
-            sovd::{components::IdPathParam, error::ErrorWrapper},
+            sovd::{
+                components::IdPathParam,
+                error::ErrorWrapper,
+            },
         };
         pub(crate) async fn get<R: DiagServiceResponse, T: UdsEcu + Clone, U: FileManager>(
             Path(id): Path<IdPathParam>,

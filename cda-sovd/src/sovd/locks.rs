@@ -11,33 +11,72 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-use std::{fmt, option::Option, pin::Pin, sync::Arc, time::Duration};
+use std::{
+    fmt,
+    option::Option,
+    pin::Pin,
+    sync::Arc,
+    time::Duration,
+};
 
 use axum::{
     Json,
-    extract::{Path, State},
+    extract::{
+        Path,
+        State,
+    },
     http::StatusCode,
-    response::{IntoResponse, Response},
+    response::{
+        IntoResponse,
+        Response,
+    },
 };
 use axum_extra::extract::WithRejection;
 use cda_interfaces::{
-    DynamicPlugin, HashMap, HashMapExtensions, TesterPresentType, UdsEcu,
-    diagservices::DiagServiceResponse, file_manager::FileManager,
+    DynamicPlugin,
+    HashMap,
+    HashMapExtensions,
+    TesterPresentType,
+    UdsEcu,
+    diagservices::DiagServiceResponse,
+    file_manager::FileManager,
 };
-use cda_plugin_security::{Claims, SecurityPlugin};
-use chrono::{DateTime, SecondsFormat, Utc};
+use cda_plugin_security::{
+    Claims,
+    SecurityPlugin,
+};
+use chrono::{
+    DateTime,
+    SecondsFormat,
+    Utc,
+};
 use tokio::{
-    sync::{RwLock, RwLockReadGuard, RwLockWriteGuard},
-    task::{self, JoinHandle},
-    time::{Instant, sleep_until},
+    sync::{
+        RwLock,
+        RwLockReadGuard,
+        RwLockWriteGuard,
+    },
+    task::{
+        self,
+        JoinHandle,
+    },
+    time::{
+        Instant,
+        sleep_until,
+    },
 };
 use uuid::Uuid;
 
 use crate::{
     openapi,
     sovd::{
-        IntoSovd, WebserverEcuState, WebserverState,
-        error::{ApiError, ErrorWrapper},
+        IntoSovd,
+        WebserverEcuState,
+        WebserverState,
+        error::{
+            ApiError,
+            ErrorWrapper,
+        },
     },
 };
 
@@ -301,21 +340,56 @@ impl LockType {
 openapi::aide_helper::gen_path_param!(LockPathParam lock String);
 
 pub(crate) mod ecu {
-    use aide::{UseApi, axum::IntoApiResponse, transform::TransformOperation};
+    use aide::{
+        UseApi,
+        axum::IntoApiResponse,
+        transform::TransformOperation,
+    };
     use cda_plugin_security::Secured;
 
     use super::{
-        ApiError, DiagServiceResponse, ErrorWrapper, FileManager, IntoResponse, Json, LockContext,
-        LockPathParam, Path, Response, State, UdsEcu, WebserverEcuState, WithRejection,
-        delete_handler, get_handler, get_id_handler, post_handler, put_handler, vehicle_read_lock,
+        ApiError,
+        DiagServiceResponse,
+        ErrorWrapper,
+        FileManager,
+        IntoResponse,
+        Json,
+        LockContext,
+        LockPathParam,
+        Path,
+        Response,
+        State,
+        UdsEcu,
+        WebserverEcuState,
+        WithRejection,
+        delete_handler,
+        get_handler,
+        get_id_handler,
+        post_handler,
+        put_handler,
+        vehicle_read_lock,
     };
     use crate::sovd;
 
     pub(crate) mod lock {
         use super::{
-            ApiError, DiagServiceResponse, FileManager, Json, LockPathParam, Path, Response,
-            Secured, State, TransformOperation, UdsEcu, UseApi, WebserverEcuState, WithRejection,
-            delete_handler, get_id_handler, put_handler,
+            ApiError,
+            DiagServiceResponse,
+            FileManager,
+            Json,
+            LockPathParam,
+            Path,
+            Response,
+            Secured,
+            State,
+            TransformOperation,
+            UdsEcu,
+            UseApi,
+            WebserverEcuState,
+            WithRejection,
+            delete_handler,
+            get_id_handler,
+            put_handler,
         };
         use crate::openapi;
         pub(crate) async fn delete<R: DiagServiceResponse, T: UdsEcu + Clone, U: FileManager>(
@@ -479,14 +553,32 @@ pub(crate) mod ecu {
 }
 
 pub(crate) mod vehicle {
-    use aide::{UseApi, transform::TransformOperation};
+    use aide::{
+        UseApi,
+        transform::TransformOperation,
+    };
     use cda_interfaces::UdsEcu;
     use cda_plugin_security::Secured;
 
     use super::{
-        ApiError, ErrorWrapper, IntoResponse, Json, LockContext, LockPathParam, Path, Response,
-        State, WebserverState, WithRejection, all_locks_owned, delete_handler, get_handler,
-        get_id_handler, post_handler, put_handler, validate_claim,
+        ApiError,
+        ErrorWrapper,
+        IntoResponse,
+        Json,
+        LockContext,
+        LockPathParam,
+        Path,
+        Response,
+        State,
+        WebserverState,
+        WithRejection,
+        all_locks_owned,
+        delete_handler,
+        get_handler,
+        get_id_handler,
+        post_handler,
+        put_handler,
+        validate_claim,
     };
     use crate::openapi;
 
@@ -494,8 +586,20 @@ pub(crate) mod vehicle {
         use cda_interfaces::UdsEcu;
 
         use super::{
-            ApiError, Json, LockPathParam, Path, Response, Secured, State, TransformOperation,
-            UseApi, WebserverState, WithRejection, delete_handler, get_id_handler, openapi,
+            ApiError,
+            Json,
+            LockPathParam,
+            Path,
+            Response,
+            Secured,
+            State,
+            TransformOperation,
+            UseApi,
+            WebserverState,
+            WithRejection,
+            delete_handler,
+            get_id_handler,
+            openapi,
             put_handler,
         };
 
@@ -1397,7 +1501,10 @@ pub(crate) async fn insert_test_fg_lock(locks: &Locks, functional_group_name: &s
 #[cfg(test)]
 mod tests {
     use cda_interfaces::mock::MockUdsEcu;
-    use cda_plugin_security::{AuthApi, mock::TestSecurityPlugin};
+    use cda_plugin_security::{
+        AuthApi,
+        mock::TestSecurityPlugin,
+    };
     use mockall::predicate::*;
 
     use super::*;

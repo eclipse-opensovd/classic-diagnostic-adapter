@@ -18,10 +18,18 @@ pub(crate) mod proto;
 
 use cda_interfaces::datatypes::DatabaseNamingConvention;
 pub use mdd_data::{
-    ProtoLoadConfig, files::FileManager, load_chunk, load_ecudata, load_proto_data,
-    mmap_and_decode_mdd, update_mdd_uncompressed,
+    ProtoLoadConfig,
+    files::FileManager,
+    load_chunk,
+    load_ecudata,
+    load_proto_data,
+    mmap_and_decode_mdd,
+    update_mdd_uncompressed,
 };
-use serde::{Deserialize, Serialize};
+use serde::{
+    Deserialize,
+    Serialize,
+};
 
 // Allowed because it makes sense for a configuration to have more than 3 bools
 #[allow(clippy::struct_excessive_bools)]

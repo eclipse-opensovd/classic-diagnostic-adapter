@@ -13,13 +13,30 @@
 
 use async_trait::async_trait;
 use cda_interfaces::{
-    DiagServiceError, EcuGateway, EcuManager, EcuState, SUPPRESS_POSITIVE_RESPONSE_BIT,
-    ServicePayload, TesterPresentControlMessage, TesterPresentMode, TesterPresentType, UdsEcu,
-    UdsTesterPresent, diagservices::DiagServiceResponse, dlt_ctx, service_ids,
+    DiagServiceError,
+    EcuGateway,
+    EcuManager,
+    EcuState,
+    SUPPRESS_POSITIVE_RESPONSE_BIT,
+    ServicePayload,
+    TesterPresentControlMessage,
+    TesterPresentMode,
+    TesterPresentType,
+    UdsEcu,
+    UdsTesterPresent,
+    diagservices::DiagServiceResponse,
+    dlt_ctx,
+    service_ids,
 };
-use tokio::time::{MissedTickBehavior, interval as tokio_interval};
+use tokio::time::{
+    MissedTickBehavior,
+    interval as tokio_interval,
+};
 
-use crate::{UdsManager, types::TesterPresentTask};
+use crate::{
+    UdsManager,
+    types::TesterPresentTask,
+};
 
 impl<S: EcuGateway, R: DiagServiceResponse, T: EcuManager<Response = R>> UdsManager<S, R, T> {
     /// Start or stop a tester present task for a single ECU.

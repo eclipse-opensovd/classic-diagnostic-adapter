@@ -16,11 +16,20 @@ use std::convert::Infallible;
 use aide::OperationInput;
 use axum::{
     RequestPartsExt,
-    extract::{FromRequestParts, OptionalFromRequestParts},
-    response::{IntoResponse, Response},
+    extract::{
+        FromRequestParts,
+        OptionalFromRequestParts,
+    },
+    response::{
+        IntoResponse,
+        Response,
+    },
 };
 #[cfg(feature = "forwarded")]
-use http::header::{FORWARDED, HeaderMap};
+use http::header::{
+    FORWARDED,
+    HeaderMap,
+};
 use http::request::Parts;
 #[cfg(feature = "uri-authority")]
 use http::uri::Authority;

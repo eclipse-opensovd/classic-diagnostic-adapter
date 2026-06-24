@@ -13,25 +13,50 @@
 use std::time::Duration;
 
 use cda_interfaces::HashMap;
-use http::{HeaderMap, Method, StatusCode};
+use http::{
+    HeaderMap,
+    Method,
+    StatusCode,
+};
 use opensovd_cda_lib::config::configfile::Configuration;
 use serde::de::DeserializeOwned;
-use sovd_interfaces::components::ecu::modes::{self, dtcsetting};
+use sovd_interfaces::components::ecu::modes::{
+    self,
+    dtcsetting,
+};
 
 use crate::{
     sovd::{
-        self, compute_security_key, get_ecu_component,
-        locks::{self, create_lock, lock_operation},
+        self,
+        compute_security_key,
+        get_ecu_component,
+        locks::{
+            self,
+            create_lock,
+            lock_operation,
+        },
         put_mode,
     },
     util::{
         TestingError,
-        ecusim::{self},
+        ecusim::{
+            self,
+        },
         http::{
-            QueryParams, auth_header, extract_field_from_json, response_to_json, response_to_t,
+            QueryParams,
+            auth_header,
+            extract_field_from_json,
+            response_to_json,
+            response_to_t,
             send_cda_request,
         },
-        runtime::{TestRuntime, restart_cda, setup_integration_test, start_ecu_sim, stop_ecu_sim},
+        runtime::{
+            TestRuntime,
+            restart_cda,
+            setup_integration_test,
+            start_ecu_sim,
+            stop_ecu_sim,
+        },
     },
 };
 

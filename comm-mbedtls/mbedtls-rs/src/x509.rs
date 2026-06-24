@@ -13,11 +13,18 @@
 
 //! Safe wrappers for mbedtls X.509 certificates and private keys.
 
-use std::{ffi::CString, io, ptr};
+use std::{
+    ffi::CString,
+    io,
+    ptr,
+};
 
 use mbedtls_sys as ffi;
 
-use crate::error::{MbedtlsError, result_from_raw};
+use crate::error::{
+    MbedtlsError,
+    result_from_raw,
+};
 
 /// A parsed X.509 certificate chain.
 ///

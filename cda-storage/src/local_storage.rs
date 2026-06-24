@@ -14,22 +14,36 @@
 //! Local filesystem implementation of the [`Storage`] trait.
 
 use std::{
-    path::{Path, PathBuf},
+    path::{
+        Path,
+        PathBuf,
+    },
     sync::{
         Arc,
-        atomic::{AtomicBool, Ordering},
+        atomic::{
+            AtomicBool,
+            Ordering,
+        },
     },
 };
 
 use async_trait::async_trait;
 use cda_interfaces::storage_api::{
-    CollectionName, Operation, Storage, StorageError, Transaction, TransactionCommitter,
+    CollectionName,
+    Operation,
+    Storage,
+    StorageError,
+    Transaction,
+    TransactionCommitter,
 };
 
 use crate::{
     local_collection::LocalCollection,
     paths,
-    recovery::{self, BACKUP_EXTENSION},
+    recovery::{
+        self,
+        BACKUP_EXTENSION,
+    },
     wal,
 };
 

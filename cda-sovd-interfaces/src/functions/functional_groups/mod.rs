@@ -22,7 +22,10 @@ pub mod operations;
 pub mod data;
 
 use cda_interfaces::HashMap;
-use serde::{Deserialize, Serialize};
+use serde::{
+    Deserialize,
+    Serialize,
+};
 
 use crate::error::DataError;
 

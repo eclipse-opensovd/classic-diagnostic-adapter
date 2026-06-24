@@ -14,7 +14,11 @@
 use std::sync::Arc;
 
 use super::{
-    collection::{Collection, CollectionName, DirectFileAccess},
+    collection::{
+        Collection,
+        CollectionName,
+        DirectFileAccess,
+    },
     error::StorageError,
     transaction::Transaction,
 };

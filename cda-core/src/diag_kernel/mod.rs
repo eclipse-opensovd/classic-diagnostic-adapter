@@ -15,10 +15,20 @@ use std::fmt::Debug;
 
 use cda_database::{
     datatypes,
-    datatypes::{DataType, IntervalType, Limit},
+    datatypes::{
+        DataType,
+        IntervalType,
+        Limit,
+    },
 };
-use cda_interfaces::{DiagServiceError, HashMap};
-use serde::{Serialize, Serializer};
+use cda_interfaces::{
+    DiagServiceError,
+    HashMap,
+};
+use serde::{
+    Serialize,
+    Serializer,
+};
 
 pub(crate) mod comparam;
 pub(crate) mod diagservices;

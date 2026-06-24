@@ -14,11 +14,18 @@
 use std::time::Duration;
 
 use cda_interfaces::{
-    HashMap, TransmissionParameters,
-    datatypes::{DataTransferMetaData, RetryPolicy},
+    HashMap,
+    TransmissionParameters,
+    datatypes::{
+        DataTransferMetaData,
+        RetryPolicy,
+    },
 };
 use strum::Display;
-use tokio::{sync::watch, task::JoinHandle};
+use tokio::{
+    sync::watch,
+    task::JoinHandle,
+};
 
 pub(crate) type EcuIdentifier = String;
 

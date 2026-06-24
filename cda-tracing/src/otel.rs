@@ -11,18 +11,35 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-use opentelemetry::{KeyValue, global};
+use opentelemetry::{
+    KeyValue,
+    global,
+};
 use opentelemetry_otlp::WithExportConfig;
 use opentelemetry_sdk::{
     Resource,
-    metrics::{MeterProviderBuilder, PeriodicReader, SdkMeterProvider},
-    trace::{RandomIdGenerator, Sampler, SdkTracerProvider},
+    metrics::{
+        MeterProviderBuilder,
+        PeriodicReader,
+        SdkMeterProvider,
+    },
+    trace::{
+        RandomIdGenerator,
+        Sampler,
+        SdkTracerProvider,
+    },
 };
 use opentelemetry_semantic_conventions::{
     SCHEMA_URL,
-    resource::{DEPLOYMENT_ENVIRONMENT_NAME, SERVICE_VERSION},
+    resource::{
+        DEPLOYMENT_ENVIRONMENT_NAME,
+        SERVICE_VERSION,
+    },
 };
-use serde::{Deserialize, Serialize};
+use serde::{
+    Deserialize,
+    Serialize,
+};
 
 use crate::TracingSetupError;
 

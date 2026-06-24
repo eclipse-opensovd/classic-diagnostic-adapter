@@ -10,9 +10,16 @@
  *
  * SPDX-License-Identifier: Apache-2.0
  */
-use serde::{Deserialize, Serialize};
+use serde::{
+    Deserialize,
+    Serialize,
+};
 
-use crate::{HashMap, service_ids, util::serde_ext};
+use crate::{
+    HashMap,
+    service_ids,
+    util::serde_ext,
+};
 
 /// Holds configuration for diagnostic service naming conventions.
 ///

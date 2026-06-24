@@ -10,9 +10,17 @@
  *
  * SPDX-License-Identifier: Apache-2.0
  */
-use cda_database::datatypes::{self, DiagService, DiagnosticDatabase};
+use cda_database::datatypes::{
+    self,
+    DiagService,
+    DiagnosticDatabase,
+};
 use cda_interfaces::{
-    DiagServiceError, EcuAddressProvider, EcuSchemaProvider, SchemaDescription, dlt_ctx,
+    DiagServiceError,
+    EcuAddressProvider,
+    EcuSchemaProvider,
+    SchemaDescription,
+    dlt_ctx,
 };
 use cda_plugin_security::SecurityPlugin;
 

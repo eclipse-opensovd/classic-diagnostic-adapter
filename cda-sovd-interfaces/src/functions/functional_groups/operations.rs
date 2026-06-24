@@ -11,12 +11,20 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-use super::{DataError, HashMap, Serialize};
+use super::{
+    DataError,
+    HashMap,
+    Serialize,
+};
 
 pub mod service {
     use serde::Deserialize;
 
-    use super::{DataError, HashMap, Serialize};
+    use super::{
+        DataError,
+        HashMap,
+        Serialize,
+    };
     pub use crate::common::operations::OperationQuery as Query;
 
     /// Request payload for functional group operations

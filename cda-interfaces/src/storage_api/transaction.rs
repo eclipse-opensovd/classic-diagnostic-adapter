@@ -12,13 +12,19 @@
  */
 
 use std::{
-    path::{Path, PathBuf},
+    path::{
+        Path,
+        PathBuf,
+    },
     sync::Arc,
 };
 
 use async_trait::async_trait;
 
-use super::{collection::CollectionName, error::StorageError};
+use super::{
+    collection::CollectionName,
+    error::StorageError,
+};
 
 /// A recorded operation in the transaction journal.
 ///

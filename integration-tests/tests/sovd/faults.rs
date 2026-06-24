@@ -13,25 +13,54 @@
 use std::time::Duration;
 
 use cda_sovd::VendorErrorCode;
-use http::{Method, StatusCode};
+use http::{
+    Method,
+    StatusCode,
+};
 use sovd_interfaces::components::ecu::{
     faults::{
         Fault,
-        id::get::{ExtendedDataRecords, ExtendedFault, ExtendedSnapshots},
+        id::get::{
+            ExtendedDataRecords,
+            ExtendedFault,
+            ExtendedSnapshots,
+        },
     },
     modes::dtcsetting,
 };
 
 use crate::{
     sovd::{
-        self, delete_all_faults, delete_all_faults_with_scope, delete_fault,
+        self,
+        delete_all_faults,
+        delete_all_faults_with_scope,
+        delete_fault,
         delete_fault_with_scope,
-        ecu::{get_dtc_setting, switch_session},
-        get_extended_fault, get_fault, get_faults, locks, set_dtc_setting,
+        ecu::{
+            get_dtc_setting,
+            switch_session,
+        },
+        get_extended_fault,
+        get_fault,
+        get_faults,
+        locks,
+        set_dtc_setting,
     },
     util::{
-        ecusim::{self, DtcExtended, DtcMinimal, ExtDataRecord, SnapshotData, SnapshotRecord},
-        http::{auth_header, extract_field_from_json, response_to_json, send_cda_request},
+        ecusim::{
+            self,
+            DtcExtended,
+            DtcMinimal,
+            ExtDataRecord,
+            SnapshotData,
+            SnapshotRecord,
+        },
+        http::{
+            auth_header,
+            extract_field_from_json,
+            response_to_json,
+            send_cda_request,
+        },
         runtime::setup_integration_test,
     },
 };

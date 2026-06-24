@@ -11,7 +11,10 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-use std::{env, process::Command};
+use std::{
+    env,
+    process::Command,
+};
 
 const DATE_FORMAT: &str = "%Y-%m-%dT%H:%M:%SZ";
 

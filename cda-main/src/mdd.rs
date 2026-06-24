@@ -13,26 +13,60 @@
 
 use std::{
     fs::ReadDir,
-    path::{Path, PathBuf},
+    path::{
+        Path,
+        PathBuf,
+    },
     sync::Arc,
 };
 
-use cda_core::{EcuManager, EcuManagerConfig};
-use cda_database::{FileManager, ProtoLoadConfig, update_mdd_uncompressed};
+use cda_core::{
+    EcuManager,
+    EcuManagerConfig,
+};
+use cda_database::{
+    FileManager,
+    ProtoLoadConfig,
+    update_mdd_uncompressed,
+};
 use cda_health::StatusHealthProvider;
 use cda_interfaces::{
-    EcuAddressProvider, EcuManager as EcuManagerTrait, EcuManagerType, FunctionalDescriptionConfig,
-    HashMap, HashMapEntry, HashMapExtensions, HashSet, Protocol,
-    datatypes::{ComParams, DatabaseNamingConvention, FlatbBufConfig},
-    file_manager::{Chunk, ChunkType},
-    storage_api::{Collection, CollectionName, DirectFileAccess, Storage},
+    EcuAddressProvider,
+    EcuManager as EcuManagerTrait,
+    EcuManagerType,
+    FunctionalDescriptionConfig,
+    HashMap,
+    HashMapEntry,
+    HashMapExtensions,
+    HashSet,
+    Protocol,
+    datatypes::{
+        ComParams,
+        DatabaseNamingConvention,
+        FlatbBufConfig,
+    },
+    file_manager::{
+        Chunk,
+        ChunkType,
+    },
+    storage_api::{
+        Collection,
+        CollectionName,
+        DirectFileAccess,
+        Storage,
+    },
 };
 use cda_plugin_security::SecurityPlugin;
 use tokio::sync::RwLock;
 
 use crate::{
-    AppError, DatabaseMap, FileManagerMap,
-    config::configfile::{Configuration, EcuConfig},
+    AppError,
+    DatabaseMap,
+    FileManagerMap,
+    config::configfile::{
+        Configuration,
+        EcuConfig,
+    },
     resolve_com_params,
 };
 
@@ -682,10 +716,18 @@ mod tests {
         );
     }
 
-    use cda_interfaces::storage_api::{Collection as _, CollectionName, DirectFileAccess, Storage};
+    use cda_interfaces::storage_api::{
+        Collection as _,
+        CollectionName,
+        DirectFileAccess,
+        Storage,
+    };
     use cda_storage::LocalStorage;
 
-    use super::{resolve_mdd_paths, seed_storage_from_database_path};
+    use super::{
+        resolve_mdd_paths,
+        seed_storage_from_database_path,
+    };
 
     /// Helper: create a temp dir with `.mdd` files containing given data.
     fn create_database_dir(files: &[(&str, &[u8])]) -> tempfile::TempDir {

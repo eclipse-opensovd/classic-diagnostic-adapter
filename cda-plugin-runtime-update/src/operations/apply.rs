@@ -12,12 +12,21 @@
  */
 
 use cda_interfaces::{
-    runtime_update_api::{RuntimeFileReloadHandler, RuntimeUpdateError},
-    storage_api::{CollectionName, Storage, Transaction},
+    runtime_update_api::{
+        RuntimeFileReloadHandler,
+        RuntimeUpdateError,
+    },
+    storage_api::{
+        CollectionName,
+        Storage,
+        Transaction,
+    },
 };
 
 use crate::operations::{
-    reload_configuration_if_present, reload_database_if_present, try_get_collection,
+    reload_configuration_if_present,
+    reload_database_if_present,
+    try_get_collection,
 };
 
 async fn swap_collection<S: Storage>(
@@ -116,19 +125,29 @@ pub async fn execute_apply<S: Storage, R: RuntimeFileReloadHandler>(
 
 #[cfg(test)]
 mod tests {
-    use std::sync::{Arc, Mutex};
+    use std::sync::{
+        Arc,
+        Mutex,
+    };
 
     use async_trait::async_trait;
     use cda_interfaces::{
         runtime_update_api::RuntimeUpdateError,
         storage_api::{
-            Collection as _, CollectionName, RandomAccessData as _, Storage as _, StorageError,
+            Collection as _,
+            CollectionName,
+            RandomAccessData as _,
+            Storage as _,
+            StorageError,
         },
     };
 
     use super::execute_apply;
     use crate::test_utils::{
-        NoopReloadHandler, RecordingReloadHandler, init_collection, make_storage,
+        NoopReloadHandler,
+        RecordingReloadHandler,
+        init_collection,
+        make_storage,
     };
 
     #[derive(Clone, Default)]

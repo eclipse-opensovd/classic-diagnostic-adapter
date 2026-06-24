@@ -11,14 +11,20 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 use std::{
-    fmt::{Debug, Display},
+    fmt::{
+        Debug,
+        Display,
+    },
     ops::Deref,
     sync::LazyLock,
 };
 
 use parking_lot::RwLock;
 
-use crate::{HashMap, HashMapExtensions};
+use crate::{
+    HashMap,
+    HashMapExtensions,
+};
 
 /// Strings manager that provides a thread-safe way to store and retrieve strings by their IDs.
 ///

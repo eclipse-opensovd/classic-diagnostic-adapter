@@ -21,12 +21,22 @@
 // https://www.apache.org/licenses/LICENSE-2.0
 
 use cda_interfaces::{
-    runtime_update_api::{RuntimeFileReloadHandler, RuntimeUpdateError},
-    storage_api::{Collection, CollectionName, Storage, Transaction},
+    runtime_update_api::{
+        RuntimeFileReloadHandler,
+        RuntimeUpdateError,
+    },
+    storage_api::{
+        Collection,
+        CollectionName,
+        Storage,
+        Transaction,
+    },
 };
 
 use crate::operations::{
-    delete_collection_ignore_missing, reload_configuration_if_present, reload_database_if_present,
+    delete_collection_ignore_missing,
+    reload_configuration_if_present,
+    reload_database_if_present,
 };
 
 async fn restore_from_backup<S: Storage, C: Collection>(
@@ -107,18 +117,28 @@ pub async fn execute_rollback<S: Storage, R: RuntimeFileReloadHandler>(
 
 #[cfg(test)]
 mod tests {
-    use std::sync::{Arc, Mutex};
+    use std::sync::{
+        Arc,
+        Mutex,
+    };
 
     use cda_interfaces::{
         runtime_update_api::RuntimeUpdateError,
         storage_api::{
-            Collection as _, CollectionName, RandomAccessData as _, Storage as _, StorageError,
+            Collection as _,
+            CollectionName,
+            RandomAccessData as _,
+            Storage as _,
+            StorageError,
         },
     };
 
     use super::execute_rollback;
     use crate::test_utils::{
-        NoopReloadHandler, RecordingReloadHandler, init_collection, make_storage,
+        NoopReloadHandler,
+        RecordingReloadHandler,
+        init_collection,
+        make_storage,
     };
 
     #[tokio::test]

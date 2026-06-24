@@ -13,15 +13,24 @@
 
 use std::sync::{
     Arc,
-    atomic::{AtomicU64, Ordering},
+    atomic::{
+        AtomicU64,
+        Ordering,
+    },
 };
 
-use aide::{axum::ApiRouter, openapi::OpenApi};
+use aide::{
+    axum::ApiRouter,
+    openapi::OpenApi,
+};
 use axum::middleware;
 use indexmap::IndexMap;
 use tokio::sync::RwLock;
 
-use crate::{create_trace_layer, sovd};
+use crate::{
+    create_trace_layer,
+    sovd,
+};
 
 type RouteFinalizer = Arc<dyn Fn(axum::Router) -> axum::Router + Send + Sync>;
 /// Insertion order determines override precedence in the fallback chain.
@@ -258,8 +267,14 @@ impl Default for DynamicRouter {
 
 #[cfg(test)]
 mod tests {
-    use aide::{axum::routing, openapi::ReferenceOr};
-    use axum::{http::StatusCode, response::IntoResponse};
+    use aide::{
+        axum::routing,
+        openapi::ReferenceOr,
+    };
+    use axum::{
+        http::StatusCode,
+        response::IntoResponse,
+    };
     use tower::ServiceExt;
 
     use super::*;

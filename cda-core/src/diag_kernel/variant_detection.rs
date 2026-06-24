@@ -13,8 +13,13 @@
 
 use cda_database::datatypes;
 use cda_interfaces::{
-    DiagComm, DiagCommType, DiagServiceError, HashMap, datatypes::DatabaseNamingConvention,
-    diagservices::DiagServiceResponse, dlt_ctx,
+    DiagComm,
+    DiagCommType,
+    DiagServiceError,
+    HashMap,
+    datatypes::DatabaseNamingConvention,
+    diagservices::DiagServiceResponse,
+    dlt_ctx,
 };
 pub(super) type DiagServiceId = String;
 

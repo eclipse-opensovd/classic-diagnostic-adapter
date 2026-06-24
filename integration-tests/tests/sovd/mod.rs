@@ -13,21 +13,39 @@
 use std::collections::HashSet;
 
 use cda_sovd::VendorErrorCode;
-use http::{HeaderMap, Method, StatusCode};
+use http::{
+    HeaderMap,
+    Method,
+    StatusCode,
+};
 use opensovd_cda_lib::config::configfile::Configuration;
-use serde::{Deserialize, Serialize, de::DeserializeOwned};
+use serde::{
+    Deserialize,
+    Serialize,
+    de::DeserializeOwned,
+};
 use sovd_interfaces::{
     components::ecu::{
-        faults::{Fault, id::get::ExtendedFault},
+        faults::{
+            Fault,
+            id::get::ExtendedFault,
+        },
         modes::dtcsetting,
     },
-    error::{ApiErrorResponse, ErrorCode},
+    error::{
+        ApiErrorResponse,
+        ErrorCode,
+    },
 };
 
 use crate::util::{
     TestingError,
     http::{
-        QueryParams, extract_field_from_json, response_to_json, response_to_t, send_cda_request,
+        QueryParams,
+        extract_field_from_json,
+        response_to_json,
+        response_to_t,
+        send_cda_request,
     },
 };
 

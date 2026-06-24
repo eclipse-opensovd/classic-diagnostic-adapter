@@ -13,20 +13,42 @@
 
 use std::time::Duration;
 
-use cda_interfaces::{DiagServiceError, dlt_ctx};
+use cda_interfaces::{
+    DiagServiceError,
+    dlt_ctx,
+};
 use doip_definitions::{
     message::DoipMessage,
-    payload::{ActivationCode, DoipPayload, RoutingActivationRequest, RoutingActivationResponse},
+    payload::{
+        ActivationCode,
+        DoipPayload,
+        RoutingActivationRequest,
+        RoutingActivationResponse,
+    },
 };
 #[cfg(all(feature = "mbedtls", not(feature = "openssl")))]
 use mbedtls_rs::{
     async_stream::TlsStream,
-    ssl::{SslConfigBuilder, SslVerifyMode, TlsVersion},
+    ssl::{
+        SslConfigBuilder,
+        SslVerifyMode,
+        TlsVersion,
+    },
 };
 #[cfg(feature = "openssl")]
-use openssl::ssl::{Ssl, SslContextBuilder, SslMethod, SslOptions, SslVerifyMode, SslVersion};
+use openssl::ssl::{
+    Ssl,
+    SslContextBuilder,
+    SslMethod,
+    SslOptions,
+    SslVerifyMode,
+    SslVersion,
+};
 use tokio::{
-    net::{TcpSocket, TcpStream},
+    net::{
+        TcpSocket,
+        TcpStream,
+    },
     sync::Mutex,
 };
 #[cfg(feature = "openssl")]
@@ -34,7 +56,12 @@ use tokio_openssl::SslStream as TlsStream;
 
 use crate::{
     ConnectionError,
-    socket::{DoIPConfig, DoIPConnection, DoIPConnectionReadHalf, DoIPConnectionWriteHalf},
+    socket::{
+        DoIPConfig,
+        DoIPConnection,
+        DoIPConnectionReadHalf,
+        DoIPConnectionWriteHalf,
+    },
 };
 
 /// This module contains the (currently) static TLS configuration for the CDA
@@ -43,15 +70,24 @@ use crate::{
 mod tlsconfig {
     #[cfg(all(feature = "mbedtls", not(feature = "openssl")))]
     use mbedtls_rs::ffi::{
-        MBEDTLS_SSL_EMPTY_RENEGOTIATION_INFO, MBEDTLS_SSL_IANA_TLS_GROUP_BP256R1,
-        MBEDTLS_SSL_IANA_TLS_GROUP_BP384R1, MBEDTLS_SSL_IANA_TLS_GROUP_BP512R1,
-        MBEDTLS_SSL_IANA_TLS_GROUP_SECP256R1, MBEDTLS_SSL_IANA_TLS_GROUP_SECP384R1,
-        MBEDTLS_SSL_IANA_TLS_GROUP_SECP521R1, MBEDTLS_SSL_IANA_TLS_GROUP_X448,
-        MBEDTLS_SSL_IANA_TLS_GROUP_X25519, MBEDTLS_TLS_ECDHE_ECDSA_WITH_NULL_SHA,
-        MBEDTLS_TLS1_3_SIG_ECDSA_SECP256R1_SHA256, MBEDTLS_TLS1_3_SIG_ECDSA_SECP384R1_SHA384,
-        MBEDTLS_TLS1_3_SIG_ECDSA_SECP521R1_SHA512, MBEDTLS_TLS1_3_SIG_ECDSA_SHA1,
-        MBEDTLS_TLS1_3_SIG_ED25519, MBEDTLS_TLS1_3_SIG_RSA_PKCS1_SHA1,
-        MBEDTLS_TLS1_3_SIG_RSA_PKCS1_SHA256, MBEDTLS_TLS1_3_SIG_RSA_PKCS1_SHA384,
+        MBEDTLS_SSL_EMPTY_RENEGOTIATION_INFO,
+        MBEDTLS_SSL_IANA_TLS_GROUP_BP256R1,
+        MBEDTLS_SSL_IANA_TLS_GROUP_BP384R1,
+        MBEDTLS_SSL_IANA_TLS_GROUP_BP512R1,
+        MBEDTLS_SSL_IANA_TLS_GROUP_SECP256R1,
+        MBEDTLS_SSL_IANA_TLS_GROUP_SECP384R1,
+        MBEDTLS_SSL_IANA_TLS_GROUP_SECP521R1,
+        MBEDTLS_SSL_IANA_TLS_GROUP_X448,
+        MBEDTLS_SSL_IANA_TLS_GROUP_X25519,
+        MBEDTLS_TLS_ECDHE_ECDSA_WITH_NULL_SHA,
+        MBEDTLS_TLS1_3_SIG_ECDSA_SECP256R1_SHA256,
+        MBEDTLS_TLS1_3_SIG_ECDSA_SECP384R1_SHA384,
+        MBEDTLS_TLS1_3_SIG_ECDSA_SECP521R1_SHA512,
+        MBEDTLS_TLS1_3_SIG_ECDSA_SHA1,
+        MBEDTLS_TLS1_3_SIG_ED25519,
+        MBEDTLS_TLS1_3_SIG_RSA_PKCS1_SHA1,
+        MBEDTLS_TLS1_3_SIG_RSA_PKCS1_SHA256,
+        MBEDTLS_TLS1_3_SIG_RSA_PKCS1_SHA384,
         MBEDTLS_TLS1_3_SIG_RSA_PKCS1_SHA512,
     };
 

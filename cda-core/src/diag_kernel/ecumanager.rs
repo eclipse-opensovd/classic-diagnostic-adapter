@@ -11,24 +11,62 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-use std::{sync::Arc, time::Duration};
+use std::{
+    sync::Arc,
+    time::Duration,
+};
 
 use cda_database::datatypes;
 use cda_interfaces::{
-    DiagComm, DiagCommType, DiagServiceError, DynamicPlugin, EcuManagerType, EcuState, EcuVariant,
-    HashMap, HashMapExtensions, HashSet, HashSetExtensions, Protocol, SecurityAccess,
+    DiagComm,
+    DiagCommType,
+    DiagServiceError,
+    DynamicPlugin,
+    EcuManagerType,
+    EcuState,
+    EcuVariant,
+    HashMap,
+    HashMapExtensions,
+    HashSet,
+    HashSetExtensions,
+    Protocol,
+    SecurityAccess,
     ServicePayload,
     datatypes::{
-        AddressingMode, CLEAR_FAULT_MEM_POS_RESPONSE_SID, ComParamConfig, ComParamPrecedence,
-        ComParams, ComplexComParamValue, ComponentConfigurationsInfo, ComponentDataInfo,
-        ComponentOperationsInfo, DTC_CODE_BIT_LEN, DatabaseNamingConvention,
-        DiagnosticServiceAffixPosition, DtcLookup, DtcReadInformationFunction, RetryPolicy,
-        RoutineSubfunctions, SdSdg, TesterPresentSendType, semantics, single_ecu,
+        AddressingMode,
+        CLEAR_FAULT_MEM_POS_RESPONSE_SID,
+        ComParamConfig,
+        ComParamPrecedence,
+        ComParams,
+        ComplexComParamValue,
+        ComponentConfigurationsInfo,
+        ComponentDataInfo,
+        ComponentOperationsInfo,
+        DTC_CODE_BIT_LEN,
+        DatabaseNamingConvention,
+        DiagnosticServiceAffixPosition,
+        DtcLookup,
+        DtcReadInformationFunction,
+        RetryPolicy,
+        RoutineSubfunctions,
+        SdSdg,
+        TesterPresentSendType,
+        semantics,
+        single_ecu,
     },
-    diagservices::{DiagServiceResponse, DiagServiceResponseType, FieldParseError, UdsPayloadData},
-    dlt_ctx, service_ids, subfunction_ids,
+    diagservices::{
+        DiagServiceResponse,
+        DiagServiceResponseType,
+        FieldParseError,
+        UdsPayloadData,
+    },
+    dlt_ctx,
+    service_ids,
+    subfunction_ids,
     util::{
-        self, contains_ignore_ascii_case, ends_with_ignore_ascii_case,
+        self,
+        contains_ignore_ascii_case,
+        ends_with_ignore_ascii_case,
         starts_with_ignore_ascii_case,
     },
 };
@@ -37,17 +75,26 @@ use tokio::sync::RwLock;
 
 use super::service_lookup::DbCache;
 use crate::{
-    DiagDataContainerDtc, MappedResponseData,
+    DiagDataContainerDtc,
+    MappedResponseData,
     diag_kernel::{
         DiagDataValue,
         diagservices::{
-            DiagDataTypeContainer, DiagDataTypeContainerRaw, DiagServiceResponseStruct,
+            DiagDataTypeContainer,
+            DiagDataTypeContainerRaw,
+            DiagServiceResponseStruct,
             MappedDiagServiceResponsePayload,
         },
         into_db_protocol,
-        operations::{self, json_value_to_uds_data},
+        operations::{
+            self,
+            json_value_to_uds_data,
+        },
         payload::Payload,
-        variant_detection::{self, VariantDetection},
+        variant_detection::{
+            self,
+            VariantDetection,
+        },
     },
 };
 
@@ -1660,7 +1707,9 @@ impl<S: SecurityPlugin> cda_interfaces::EcuManager for EcuManager<S> {
         use cda_interfaces::ResponseParameterInfo;
 
         use crate::diag_kernel::param_metadata::{
-            byte_size_from_coded_const, byte_size_from_value_param, expand_mux_cases,
+            byte_size_from_coded_const,
+            byte_size_from_value_param,
+            expand_mux_cases,
             extract_response_param_type,
         };
 
@@ -4829,24 +4878,42 @@ mod tests {
 
     use cda_database::datatypes::{
         DataType,
-        database_builder::{DiagClassType, DiagCommParams, DiagLayerParams, EcuDataBuilder},
+        database_builder::{
+            DiagClassType,
+            DiagCommParams,
+            DiagLayerParams,
+            EcuDataBuilder,
+        },
     };
-    use cda_interfaces::{EcuManager, Protocol, UDS_ID_RESPONSE_BITMASK};
+    use cda_interfaces::{
+        EcuManager,
+        Protocol,
+        UDS_ID_RESPONSE_BITMASK,
+    };
     use cda_plugin_security::DefaultSecurityPluginData;
     use serde_json::json;
 
     use super::*;
     use crate::diag_kernel::test_utils::{
-        db_builder::{finish_db, finish_db_with_functional_groups},
+        db_builder::{
+            finish_db,
+            finish_db_with_functional_groups,
+        },
         ecu_manager_builder::{
-            EndOfPduStructureType, SID_PARM_NAME, ServiceSecurityTransition,
-            create_ecu_manager_dlf_sibling_no_byte_pos, create_ecu_manager_env_data_no_wildcard,
-            create_ecu_manager_variant_detection, create_ecu_manager_with_dtc,
+            EndOfPduStructureType,
+            SID_PARM_NAME,
+            ServiceSecurityTransition,
+            create_ecu_manager_dlf_sibling_no_byte_pos,
+            create_ecu_manager_env_data_no_wildcard,
+            create_ecu_manager_variant_detection,
+            create_ecu_manager_with_dtc,
             create_ecu_manager_with_dynamic_length_field_service,
-            create_ecu_manager_with_end_pdu_service, create_ecu_manager_with_env_data_desc,
+            create_ecu_manager_with_end_pdu_service,
+            create_ecu_manager_with_env_data_desc,
             create_ecu_manager_with_env_data_desc_wildcard,
             create_ecu_manager_with_length_key_request_service,
-            create_ecu_manager_with_mixed_functional_group, create_ecu_manager_with_mux_service,
+            create_ecu_manager_with_mixed_functional_group,
+            create_ecu_manager_with_mux_service,
             create_ecu_manager_with_mux_service_and_default_case,
             create_ecu_manager_with_param_length_info_service,
             create_ecu_manager_with_parameter_metadata,
@@ -4854,11 +4921,16 @@ mod tests {
             create_ecu_manager_with_phys_const_structure_dop_service,
             create_ecu_manager_with_preconditions_and_functional_group,
             create_ecu_manager_with_state_transitions,
-            create_ecu_manager_with_static_field_service, create_ecu_manager_with_struct_service,
+            create_ecu_manager_with_static_field_service,
+            create_ecu_manager_with_struct_service,
             create_ecu_manager_with_trailing_param_after_param_length_info_service,
             new_ecu_manager,
         },
-        mdd_type_builder::{create_sid_only_request, new_diag_comm, new_diag_service},
+        mdd_type_builder::{
+            create_sid_only_request,
+            new_diag_comm,
+            new_diag_service,
+        },
     };
 
     macro_rules! skip_sec_plugin {

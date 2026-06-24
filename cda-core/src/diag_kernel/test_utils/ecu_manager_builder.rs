@@ -14,12 +14,21 @@
 //! Factory helpers for constructing [`EcuManager`] instances in tests.
 
 use cda_interfaces::{
-    EcuManagerType, EcuState, EcuVariant, Protocol,
-    datatypes::{ComParams, DatabaseNamingConvention},
+    EcuManagerType,
+    EcuState,
+    EcuVariant,
+    Protocol,
+    datatypes::{
+        ComParams,
+        DatabaseNamingConvention,
+    },
 };
 use cda_plugin_security::DefaultSecurityPluginData;
 
-use crate::diag_kernel::ecumanager::{EcuManager, EcuManagerConfig};
+use crate::diag_kernel::ecumanager::{
+    EcuManager,
+    EcuManagerConfig,
+};
 
 pub(crate) const TEST_DIAG_LAYER: &str = "TestLayer";
 pub(crate) const SID_PARM_NAME: &str = "sid";
@@ -90,22 +99,41 @@ pub(crate) fn new_ecu_manager_no_base_fallback(
 use cda_database::{
     datatypes,
     datatypes::{
-        CompuCategory, DataType, DiagCodedTypeVariant, Limit, ResponseType,
+        CompuCategory,
+        DataType,
+        DiagCodedTypeVariant,
+        Limit,
+        ResponseType,
         database_builder::{
-            DiagClassType, DiagCommParams, DiagLayerParams, DopType, EcuDataBuilder, EcuDataParams,
+            DiagClassType,
+            DiagCommParams,
+            DiagLayerParams,
+            DopType,
+            EcuDataBuilder,
+            EcuDataParams,
             SpecificDOPData,
         },
     },
 };
 use cda_interfaces::{
-    DiagCommType, UDS_ID_RESPONSE_BITMASK, datatypes::semantics, service_ids, subfunction_ids,
+    DiagCommType,
+    UDS_ID_RESPONSE_BITMASK,
+    datatypes::semantics,
+    service_ids,
+    subfunction_ids,
 };
 use flatbuffers::WIPOffset;
 
 use crate::diag_kernel::test_utils::{
-    db_builder::{finish_db, finish_db_with_functional_groups},
+    db_builder::{
+        finish_db,
+        finish_db_with_functional_groups,
+    },
     mdd_type_builder::{
-        create_pos_response_with_param, create_sid_only_request, create_sid_param, new_diag_comm,
+        create_pos_response_with_param,
+        create_sid_only_request,
+        create_sid_param,
+        new_diag_comm,
         new_diag_service,
     },
 };
