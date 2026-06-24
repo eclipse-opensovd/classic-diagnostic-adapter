@@ -190,6 +190,14 @@ pub struct ServerConfig {
     /// TCP port the server listens on.
     pub port: u16,
 }
+impl Default for ServerConfig {
+    fn default() -> Self {
+        Self {
+            address: "0.0.0.0".to_owned(),
+            port: 20002,
+        }
+    }
+}
 
 pub trait ConfigSanity {
     /// Checks the configuration for common mistakes and returns an error message if found.
@@ -201,21 +209,9 @@ pub trait ConfigSanity {
 impl Default for Configuration {
     fn default() -> Self {
         Configuration {
-            database: DatabaseConfig {
-                path: ".".to_owned(),
-                naming_convention: DatabaseNamingConvention::default(),
-                exit_no_database_loaded: false,
-                fallback_to_base_variant: true,
-                ignore_protocol: false,
-                strict_parameter_validation: false,
-                strict_ecu_config: false,
-                ignore_invalid_mdd: false,
-            },
+            database: DatabaseConfig::default(),
             flash_files_path: ".".to_owned(),
-            server: ServerConfig {
-                address: "0.0.0.0".to_owned(),
-                port: 20002,
-            },
+            server: ServerConfig::default(),
             #[cfg(feature = "health")]
             health: cda_health::config::HealthConfig::default(),
             doip: DoipConfig {
@@ -225,12 +221,7 @@ impl Default for Configuration {
             logging: cda_tracing::LoggingConfig::default(),
             com_params: ComParams::default(),
             flat_buf: FlatbBufConfig::default(),
-            functional_description: FunctionalDescriptionConfig {
-                description_database: "functional_groups".to_owned(),
-                enabled_functional_groups: None,
-                protocol_position:
-                    cda_interfaces::datatypes::DiagnosticServiceAffixPosition::Suffix,
-            },
+            functional_description: FunctionalDescriptionConfig::default(),
             components: ComponentsConfig {
                 additional_fields: HashMap::from_iter([
                     (
