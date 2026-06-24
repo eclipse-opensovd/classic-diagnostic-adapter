@@ -597,6 +597,37 @@ fn write_config_toml(
             config_path.display()
         ))
     })?;
+
+    // Sync the file itself to ensure content is flushed to disk before Docker
+    // mounts the volume. This prevents a race condition where Docker reads a
+    // partially written or cached config file.
+    let file = std::fs::File::open(&config_path).map_err(|e| {
+        TestingError::ProcessFailed(format!(
+            "Failed to open config file for sync '{}': {e}",
+            config_path.display()
+        ))
+    })?;
+    file.sync_all().map_err(|e| {
+        TestingError::ProcessFailed(format!(
+            "Failed to fsync config file '{}': {e}",
+            config_path.display()
+        ))
+    })?;
+
+    // Also sync the directory to ensure metadata is flushed.
+    let dir = std::fs::File::open(test_container_dir).map_err(|e| {
+        TestingError::ProcessFailed(format!(
+            "Failed to open config directory '{}': {e}",
+            test_container_dir.display()
+        ))
+    })?;
+    dir.sync_all().map_err(|e| {
+        TestingError::ProcessFailed(format!(
+            "Failed to fsync config directory '{}': {e}",
+            test_container_dir.display()
+        ))
+    })?;
+
     tracing::debug!("Wrote CDA test config to {:?}", config_path);
     Ok(())
 }
