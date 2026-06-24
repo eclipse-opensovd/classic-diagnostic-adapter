@@ -26,7 +26,7 @@ use tokio::sync::{Mutex, RwLock, broadcast, mpsc, watch};
 
 use crate::{
     ConnectionError, DiagnosticResponse, DoipConnection, DoipEcu, DoipTarget,
-    NRC_BUSY_REPEAT_REQUEST, NRC_RESPONSE_PENDING, NRC_TEMPORARILY_NOT_AVAILABLE, SLEEP_INTERVAL,
+    NRC_BUSY_REPEAT_REQUEST, NRC_RESPONSE_PENDING, NRC_TEMPORARILY_NOT_AVAILABLE,
     connections::EcuError::EcuConnectionError,
     ecu_connection::{
         self, ConnectionConfig, ECUConnectionRead, ECUConnectionSend as _, EcuConnectionTarget,
@@ -36,6 +36,21 @@ use crate::{
 
 type ConnectionResetReason = String;
 
+/// Configuration for establishing a gateway connection.
+pub(crate) struct GatewayConfig {
+    pub connection: ConnectionConfig,
+    pub doip: DoIPConfig,
+    pub send_timeout: Duration,
+    pub alive_check_interval: Duration,
+}
+
+/// Runtime state for managing active gateway connections and ECU mappings.
+pub(crate) struct GatewayState<T> {
+    pub doip_connections: Arc<RwLock<Vec<Arc<DoipConnection>>>>,
+    pub ecus: Arc<HashMap<String, RwLock<T>>>,
+    pub gateway_ecu_map: HashMap<u16, Vec<u16>>,
+}
+
 #[derive(Clone, Copy)]
 struct ConnectionSettings {
     routing_activation: Duration,
@@ -43,6 +58,7 @@ struct ConnectionSettings {
     connect_timeout: Duration,
     max_retry_attempts: u32,
     send_timeout: Duration,
+    alive_check_interval: Duration,
 }
 
 #[derive(Error, Debug, Clone)]
@@ -89,11 +105,11 @@ impl From<EcuError> for DiagServiceError {
 }
 
 #[tracing::instrument(
-    skip(doip_connections, ecus, gateway_ecu_map, connection_config),
+    skip(config, state),
     fields(
-        tester_ip = connection_config.source_ip.clone(),
-        port = connection_config.port,
-        tls_port = connection_config.tls_port,
+        tester_ip = config.connection.source_ip.clone(),
+        port = config.connection.port,
+        tls_port = config.connection.tls_port,
         gateway_ecu = %gateway.ecu,
         gateway_ip = %gateway.ip,
         logical_address = %format!("{:#06x}", gateway.logical_address),
@@ -101,18 +117,15 @@ impl From<EcuError> for DiagServiceError {
     )
 )]
 pub(crate) async fn handle_gateway_connection<T>(
-    connection_config: &ConnectionConfig,
     gateway: DoipTarget,
-    doip_connection_config: DoIPConfig,
-    doip_connections: &Arc<RwLock<Vec<Arc<DoipConnection>>>>,
-    ecus: &Arc<HashMap<String, RwLock<T>>>,
-    gateway_ecu_map: &HashMap<u16, Vec<u16>>,
-    send_timeout: Duration,
+    config: &GatewayConfig,
+    state: &GatewayState<T>,
 ) -> Result<u16, EcuError>
 where
     T: EcuAddresses + DoipComParams,
 {
-    let tester_address = ecus
+    let tester_address = state
+        .ecus
         .get(&gateway.ecu)
         .map(|ecu| async { ecu.read().await.tester_address() })
         .ok_or_else(|| EcuError::ResourceNotFound("ECU not found".to_owned()))?
@@ -124,16 +137,17 @@ where
         buffer: [0, 0, 0, 0],
     };
 
-    let ecu_ids: Vec<u16> = if let Some(ecu_ids) = gateway_ecu_map.get(&gateway.logical_address) {
-        ecu_ids.clone()
-    } else {
-        return Err(EcuError::ResourceNotFound(format!(
-            "No ECUs found for gateway address {}. Skipping, as the gateway cannot be used.",
-            gateway.logical_address
-        )));
-    };
+    let ecu_ids: Vec<u16> =
+        if let Some(ecu_ids) = state.gateway_ecu_map.get(&gateway.logical_address) {
+            ecu_ids.clone()
+        } else {
+            return Err(EcuError::ResourceNotFound(format!(
+                "No ECUs found for gateway address {}. Skipping, as the gateway cannot be used.",
+                gateway.logical_address
+            )));
+        };
 
-    let gateway_ecu = match ecus.get(&gateway.ecu) {
+    let gateway_ecu = match state.ecus.get(&gateway.ecu) {
         Some(ecu) => ecu.read().await,
         None => {
             return Err(EcuError::ResourceNotFound(
@@ -147,10 +161,10 @@ where
     let connection_retry_attempts = gateway_ecu.connection_retry_attempts();
 
     let (sender, receiver) = match connection_handler(
-        connection_config.clone(),
+        config.connection.clone(),
         gateway.ip.clone(),
         gateway.ecu.clone(),
-        doip_connection_config,
+        config.doip,
         routing_activation_request,
         ecu_ids.clone(),
         ConnectionSettings {
@@ -158,7 +172,8 @@ where
             retry_delay: connection_retry_delay,
             connect_timeout: connection_timeout,
             max_retry_attempts: connection_retry_attempts,
-            send_timeout,
+            send_timeout: config.send_timeout,
+            alive_check_interval: config.alive_check_interval,
         },
     )
     .await
@@ -177,7 +192,8 @@ where
     let doip_ecus = create_ecu_receiver_map(ecu_ids, &sender, &receiver);
 
     tracing::info!("Connected to gateway");
-    doip_connections
+    state
+        .doip_connections
         .write()
         .await
         .push(Arc::new(DoipConnection {
@@ -309,6 +325,7 @@ async fn connection_handler(
         connection_settings.send_timeout,
         conn_reset_tx.clone(),
         send_pending_tx.clone(),
+        connection_settings.alive_check_interval,
     );
     spawn_gateway_receiver_task(
         gateway_ip.clone(),
@@ -421,6 +438,7 @@ fn spawn_gateway_sender_task(
     send_timeout: Duration,
     reset_tx: mpsc::Sender<ConnectionResetReason>,
     send_pending_tx: watch::Sender<bool>,
+    alive_check_interval: Duration,
 ) {
     cda_interfaces::spawn_named!(&format!("doip-gateway-sender-{gateway_ip}"), async move {
         fn send_pending_status(
@@ -432,18 +450,30 @@ fn spawn_gateway_sender_task(
             })
         }
 
-        let send_mtx = Arc::new(Mutex::new(()));
+        let alive_check_enabled = alive_check_interval > Duration::ZERO;
+        let effective_interval = if alive_check_enabled {
+            alive_check_interval
+        } else {
+            // Use a very large duration when disabled so the interval never fires.
+            // tokio::time::Instant is limited so we use ~136 years which is well
+            // within the representable range.
+            Duration::from_secs(u64::MAX)
+        };
         let mut alive_interval = tokio::time::interval_at(
             tokio::time::Instant::now()
-                .checked_add(SLEEP_INTERVAL)
+                .checked_add(effective_interval)
                 .expect("interval start overflow"),
-            SLEEP_INTERVAL,
+            effective_interval,
         );
         alive_interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
         loop {
             tokio::select! {
+                // Per default tokio, randomized which branch is checked first to ensure fairness.
+                // We always want to priotize sending messages over the alive check.
+                // Adding 'biased' means the selects are checked in order from top to bottom.
+                // https://docs.rs/tokio/latest/tokio/macro.select.html#fairness
+                biased;
                 Some(msg) = inrx.recv() => {
-                    let lock = send_mtx.lock().await;
                     // let rx task know that we want to send something.
                     if send_pending_status(&send_pending_tx, true).is_err() {
                         break;
@@ -455,11 +485,7 @@ fn spawn_gateway_sender_task(
                             let conn = guard.get_sender();
                             let lock_after = start.elapsed();
 
-                            match tokio::time::timeout(send_timeout, conn
-                                .send(msg)
-                            )
-                                .await
-                            {
+                            match tokio::time::timeout(send_timeout, conn.send(msg)).await {
                                 Ok(Ok(())) => {},
                                 Ok(Err(e)) => {
                                     tracing::error!(error = ?e, "Failed to send message");
@@ -486,10 +512,12 @@ fn spawn_gateway_sender_task(
                     if send_pending_status(&send_pending_tx, false).is_err() {
                         break;
                     }
-                    drop(lock);
+                    // Reset the alive check timer so it only fires after a full
+                    // interval of silence - never during active communication.
+                    alive_interval.reset();
                 },
-                _ = alive_interval.tick() => {
-                    let lock = send_mtx.lock().await;
+
+                _ = alive_interval.tick(), if alive_check_enabled => {
                     if send_pending_status(&send_pending_tx, true).is_err() {
                         break;
                     }
@@ -528,7 +556,6 @@ fn spawn_gateway_sender_task(
                     if send_pending_status(&send_pending_tx, false).is_err() {
                         break;
                     }
-                    drop(lock);
                 }
             }
         }
@@ -718,6 +745,9 @@ fn spawn_gateway_receiver_task(
             }
 
             // wait for a message to be received or a send request
+            // Tokio is randomizing which branch takes precedence when both are ready.
+            // this is good here because it prevents send / receive starvation by
+            // not prioritizing one of the branches.
             tokio::select! {
                 send_pending_result = send_pending_rx.changed() => {
                     if let Err(()) = handle_send_pending(
@@ -881,4 +911,231 @@ async fn try_read(
     tokio::time::timeout(timeout, read_response(reader))
         .await
         .ok()
+}
+
+#[cfg(test)]
+mod tests {
+    use std::time::Duration;
+
+    use tokio::sync::{mpsc, watch};
+
+    /// This test validates that the alive check timer resets after each message send,
+    /// ensuring the alive check only fires after a full interval of idle time.
+    ///
+    /// It uses the same `tokio::select! { biased; ... }` pattern as
+    /// `spawn_gateway_sender_task` to verify the timer reset logic.
+    #[tokio::test]
+    async fn alive_check_only_fires_when_idle() {
+        // Pause real time - tokio::time::advance() moves virtual time instantly,
+        // so tests run in milliseconds despite simulating many seconds.
+        tokio::time::pause();
+
+        let alive_check_interval = Duration::from_secs(10);
+        let (msg_tx, mut msg_rx) = mpsc::channel::<u32>(10);
+        let (alive_fire_tx, mut alive_fire_rx) = mpsc::channel::<()>(10);
+        let (stop_tx, mut stop_rx) = mpsc::channel::<()>(1);
+
+        let task = tokio::spawn(async move {
+            let mut alive_interval = tokio::time::interval_at(
+                tokio::time::Instant::now()
+                    .checked_add(alive_check_interval)
+                    .expect("interval start overflow"),
+                alive_check_interval,
+            );
+            alive_interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+
+            loop {
+                tokio::select! {
+                    biased;
+
+                    _ = stop_rx.recv() => {
+                        break;
+                    },
+
+                    Some(_msg) = msg_rx.recv() => {
+                        // Simulate message send completed; reset the alive check timer.
+                        alive_interval.reset();
+                    },
+
+                    _ = alive_interval.tick() => {
+                        // Alive check fired.
+                        let _ = alive_fire_tx.send(()).await;
+                    }
+                }
+            }
+        });
+
+        // Sending messages before the interval elapses prevents alive check
+        // Send a message at t=4s (before 10s interval)
+        tokio::time::advance(Duration::from_secs(4)).await;
+        msg_tx.send(1).await.unwrap();
+        // Yield to let the task process the message
+        tokio::task::yield_now().await;
+
+        // Advance another 4s (total 8s from last send, still within 10s interval)
+        tokio::time::advance(Duration::from_secs(4)).await;
+        msg_tx.send(2).await.unwrap();
+        tokio::task::yield_now().await;
+
+        // Advance 9s (total 9s from last send, still within 10s interval)
+        tokio::time::advance(Duration::from_secs(9)).await;
+        tokio::task::yield_now().await;
+
+        // Alive check should NOT have fired
+        assert!(
+            alive_fire_rx.try_recv().is_err(),
+            "Alive check should not fire during active communication"
+        );
+
+        // After full idle interval, alive check fires
+        // Advance 2 more seconds (total 11s from last send, exceeds 10s interval)
+        tokio::time::advance(Duration::from_secs(2)).await;
+        tokio::task::yield_now().await;
+
+        // Alive check should have fired exactly once
+        assert!(
+            alive_fire_rx.try_recv().is_ok(),
+            "Alive check should fire after idle interval expires"
+        );
+
+        // Test 3: After alive check fires, sending a message resets the timer
+        msg_tx.send(3).await.unwrap();
+        tokio::task::yield_now().await;
+
+        // Advance 9s (within 10s interval from last send)
+        tokio::time::advance(Duration::from_secs(9)).await;
+        tokio::task::yield_now().await;
+
+        assert!(
+            alive_fire_rx.try_recv().is_err(),
+            "Alive check should not fire after timer reset by message send"
+        );
+
+        // Advance 2 more seconds (total 11s from last send)
+        tokio::time::advance(Duration::from_secs(2)).await;
+        tokio::task::yield_now().await;
+
+        assert!(
+            alive_fire_rx.try_recv().is_ok(),
+            "Alive check should fire again after another idle interval"
+        );
+
+        // Clean up
+        stop_tx.send(()).await.unwrap();
+        task.await.unwrap();
+    }
+
+    /// Validates that the alive check does not fire when the interval is set to zero
+    /// (disabled).
+    #[tokio::test]
+    async fn alive_check_disabled_when_interval_zero() {
+        // Pause real time - tokio::time::advance() moves virtual time instantly,
+        // so tests run in milliseconds despite simulating many seconds.
+        tokio::time::pause();
+
+        let alive_check_interval = Duration::ZERO;
+        let alive_check_enabled = alive_check_interval > Duration::ZERO;
+        let (alive_fire_tx, mut alive_fire_rx) = mpsc::channel::<()>(10);
+        let (stop_tx, mut stop_rx) = watch::channel(false);
+
+        let effective_interval = Duration::from_secs(u64::from(u32::MAX));
+
+        let task = tokio::spawn(async move {
+            let mut alive_interval = tokio::time::interval_at(
+                tokio::time::Instant::now()
+                    .checked_add(effective_interval)
+                    .expect("interval start overflow"),
+                effective_interval,
+            );
+            alive_interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+
+            loop {
+                tokio::select! {
+                    biased;
+
+                    Ok(()) = stop_rx.changed() => {
+                        break;
+                    },
+
+                    _ = alive_interval.tick(), if alive_check_enabled => {
+                        let _ = alive_fire_tx.send(()).await;
+                    }
+                }
+            }
+        });
+
+        // Advance a very long time - alive check should never fire
+        tokio::time::advance(Duration::from_secs(7200)).await;
+        tokio::task::yield_now().await;
+
+        assert!(
+            alive_fire_rx.try_recv().is_err(),
+            "Alive check should never fire when interval is zero (disabled)"
+        );
+
+        stop_tx.send(true).unwrap();
+        task.await.unwrap();
+    }
+
+    /// Validates that when both a message and the alive check are ready simultaneously,
+    /// the biased select ensures the message branch wins.
+    #[tokio::test]
+    async fn biased_select_prioritizes_messages_over_alive_check() {
+        // Pause real time - tokio::time::advance() moves virtual time instantly,
+        // so tests run in milliseconds despite simulating many seconds.
+        tokio::time::pause();
+
+        let alive_check_interval = Duration::from_secs(5);
+        let (msg_tx, mut msg_rx) = mpsc::channel::<u32>(10);
+        let (event_tx, mut event_rx) = mpsc::channel::<&str>(10);
+        let (stop_tx, mut stop_rx) = mpsc::channel::<()>(1);
+
+        let task = tokio::spawn(async move {
+            let mut alive_interval = tokio::time::interval_at(
+                tokio::time::Instant::now()
+                    .checked_add(alive_check_interval)
+                    .expect("interval start overflow"),
+                alive_check_interval,
+            );
+            alive_interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+
+            loop {
+                tokio::select! {
+                    biased;
+
+                    _ = stop_rx.recv() => {
+                        break;
+                    },
+
+                    Some(_msg) = msg_rx.recv() => {
+                        let _ = event_tx.send("message").await;
+                        alive_interval.reset();
+                    },
+
+                    _ = alive_interval.tick() => {
+                        let _ = event_tx.send("alive_check").await;
+                    }
+                }
+            }
+        });
+
+        // Advance time past the alive check interval
+        tokio::time::advance(Duration::from_secs(6)).await;
+        // Now send a message - both the tick and message are ready
+        msg_tx.send(1).await.unwrap();
+        tokio::task::yield_now().await;
+
+        // Due to biased select, the stop branch is checked first, then message,
+        // then alive_check. Since the stop branch has no message, the message
+        // branch should win over the alive check.
+        let first_event = event_rx.recv().await.unwrap();
+        assert_eq!(
+            first_event, "message",
+            "Biased select should prioritize message over alive check"
+        );
+
+        // Clean up
+        stop_tx.send(()).await.unwrap();
+        task.await.unwrap();
+    }
 }
