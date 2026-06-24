@@ -174,6 +174,10 @@ pub(crate) async fn listen_for_vams<T, F>(
                 } else {
                     tracing::info!(ecu_name = %doip_target.ecu, "New Gateway ECU detected");
 
+                    let ecu_names_for_gateway = gateway_ecu_name_map
+                        .get(&doip_target.logical_address)
+                        .cloned()
+                        .unwrap_or_default();
                     match handle_gateway_connection::<T>(
                         connection_config,
                         doip_target,
@@ -182,6 +186,7 @@ pub(crate) async fn listen_for_vams<T, F>(
                         &gateway.ecus,
                         gateway_ecu_map,
                         send_timeout,
+                        Some((variant_detection.clone(), ecu_names_for_gateway)),
                     )
                     .await
                     {

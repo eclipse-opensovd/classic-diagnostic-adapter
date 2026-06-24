@@ -244,6 +244,10 @@ impl<T: EcuAddresses + DoipComParams> DoipDiagGateway<T> {
             let mut logical_address_to_connection = HashMap::new();
 
             for gateway in gateways {
+                let ecu_names_for_gateway = gateway_ecu_name_map
+                    .get(&gateway.logical_address)
+                    .cloned()
+                    .unwrap_or_default();
                 if let Ok(logical_address) = connections::handle_gateway_connection::<T>(
                     &connection_config,
                     gateway,
@@ -252,6 +256,7 @@ impl<T: EcuAddresses + DoipComParams> DoipDiagGateway<T> {
                     &ecus,
                     &gateway_ecu_map,
                     send_timeout,
+                    Some((variant_detection.clone(), ecu_names_for_gateway)),
                 )
                 .await
                 {
