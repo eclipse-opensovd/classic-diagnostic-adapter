@@ -58,10 +58,9 @@ pub struct DatabaseConfig {
     /// This helps catch typos in ECU names early. When `false` (default),
     /// unmatched per-ECU config entries only produce a warning.
     pub strict_ecu_config: bool,
-    /// When `true`, MDD files that fail to load are skipped and the remaining
-    /// databases continue loading. When `false` (the default), any MDD load
+    /// When `true` (the default), MDD files that fail to load are skipped and
+    /// the remaining databases continue loading. When `false`, any MDD load
     /// failure aborts the entire load/reload operation.
-    #[serde(default)]
     pub ignore_invalid_mdd: bool,
 }
 
@@ -75,7 +74,7 @@ impl Default for DatabaseConfig {
             ignore_protocol: false,
             strict_parameter_validation: false,
             strict_ecu_config: false,
-            ignore_invalid_mdd: false,
+            ignore_invalid_mdd: true,
         }
     }
 }
