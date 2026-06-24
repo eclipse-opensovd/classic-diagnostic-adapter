@@ -382,10 +382,10 @@
 # If true, when variant detection fails to find a matching variant,
 # the ECU will fall back to the base variant instead of reporting an error.
 # fallback_to_base_variant = true
-# When `true`, MDD files that fail to load are skipped and the remaining
-# databases continue loading. When `false` (the default), any MDD load
+# When `true` (the default), MDD files that fail to load are skipped and
+# the remaining databases continue loading. When `false`, any MDD load
 # failure aborts the entire load/reload operation.
-# ignore_invalid_mdd = false
+# ignore_invalid_mdd = true
 # When `true`, com-param and protocol lookups ignore the protocol filter
 # and match by parameter name alone.
 #
