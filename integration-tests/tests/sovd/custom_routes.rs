@@ -139,6 +139,7 @@ async fn test_custom_demo_endpoint() {
         variant_tx,
         shutdown_signal.clone(),
         None,
+        None,
     )
     .await
     .expect("Failed to create gateway");

@@ -204,6 +204,7 @@ where
         .push(Arc::new(DoipConnection {
             ecus: doip_ecus,
             ip: gateway.ip,
+            task_handles,
         }));
 
     Ok(gateway.logical_address)
@@ -346,7 +347,15 @@ async fn connection_handler(
     );
 
     // no need to wait until the connection is alive, we will reconnect automatically anyway
-    Ok((intx, outrx, vec![connection_reset_task, gateway_sender_task, gateway_receiver_task]))
+    Ok((
+        intx,
+        outrx,
+        vec![
+            connection_reset_task,
+            gateway_sender_task,
+            gateway_receiver_task,
+        ],
+    ))
 }
 
 #[tracing::instrument(
@@ -500,7 +509,12 @@ where
                 // Adding 'biased' means the selects are checked in order from top to bottom.
                 // https://docs.rs/tokio/latest/tokio/macro.select.html#fairness
                 biased;
-                Some(msg) = inrx.recv() => {
+                msg = inrx.recv() => {
+                    let Some(msg) = msg else {
+                        // Channel closed - all senders dropped (gateway shut down).
+                        tracing::debug!("Send channel closed, shutting down sender task");
+                        break;
+                    };
                     // let rx task know that we want to send something.
                     if send_pending_status(&send_pending_tx, true).is_err() {
                         break;
@@ -609,7 +623,8 @@ fn spawn_gateway_receiver_task<T>(
     mut send_pending_rx: watch::Receiver<bool>,
     reset_tx: mpsc::Sender<ConnectionResetReason>,
     send_tx: mpsc::Sender<DoipPayload>,
-) -> tokio::task::JoinHandle<()> where
+) -> tokio::task::JoinHandle<()>
+where
     T: AsyncRead + AsyncWrite + Unpin + Send + 'static,
 {
     // note: the handlers are defined here, as rustfmt cannot format the correctly inside the
@@ -981,6 +996,8 @@ mod tests {
         let config = DoIPConfig {
             protocol_version: ProtocolVersion::Iso13400_2012,
             send_diagnostic_message_ack: false,
+            send_timeout: Duration::from_secs(10),
+            alive_check_interval: Duration::from_secs(10),
         };
         let server_conn = DoIPConnection::new(server, config);
         let (read_half, write_half) = DoIPConnection::new(client, config).into_split();
