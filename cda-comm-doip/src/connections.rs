@@ -64,6 +64,28 @@ struct ConnectionSettings {
     alive_check_interval: Duration,
 }
 
+#[derive(Clone)]
+struct GatewayTarget {
+    ip: String,
+    name: String,
+    ecus: Vec<u16>,
+}
+
+#[derive(Clone)]
+struct GatewayHandlerConfig {
+    connection_config: ConnectionConfig,
+    doip_connection_config: DoIPConfig,
+    routing_activation_request: RoutingActivationRequest,
+    connection_settings: ConnectionSettings,
+    variant_detection: Option<(mpsc::Sender<Vec<String>>, Vec<String>)>,
+}
+
+struct GatewayConnectionHandles {
+    sender: mpsc::Sender<DoipPayload>,
+    receivers: HashMap<u16, broadcast::Receiver<Result<DiagnosticResponse, EcuError>>>,
+    task_handles: Vec<tokio::task::JoinHandle<()>>,
+}
+
 #[derive(Error, Debug, Clone)]
 pub enum EcuError {
     #[error("Resource not found: `{0}`")]
@@ -164,14 +186,16 @@ where
     let connection_timeout = gateway_ecu.connection_timeout();
     let connection_retry_attempts = gateway_ecu.connection_retry_attempts();
 
-    let (sender, receiver, task_handles) = match connection_handler(
-        config.connection.clone(),
-        gateway.ip.clone(),
-        gateway.ecu.clone(),
-        config.doip,
+    let target = GatewayTarget {
+        ip: gateway.ip.clone(),
+        name: gateway.ecu.clone(),
+        ecus: ecu_ids.clone(),
+    };
+    let config = GatewayHandlerConfig {
+        connection_config: connection_config.clone(),
+        doip_connection_config,
         routing_activation_request,
-        ecu_ids.clone(),
-        ConnectionSettings {
+        connection_settings: ConnectionSettings {
             routing_activation: routing_activation_timeout,
             retry_delay: connection_retry_delay,
             connect_timeout: connection_timeout,
@@ -180,10 +204,13 @@ where
             alive_check_interval: config.alive_check_interval,
         },
         variant_detection,
-    )
-    .await
-    {
-        Ok((sender, receiver, task_handles)) => (sender, receiver, task_handles),
+    };
+    let GatewayConnectionHandles {
+        sender,
+        receivers,
+        task_handles,
+    } = match connection_handler(target, config).await {
+        Ok(handles) => handles,
         Err(e) => {
             return Err(EcuError::EcuConnectionError(
                 ConnectionError::ConnectionFailed(format!(
@@ -194,7 +221,7 @@ where
         }
     };
 
-    let doip_ecus = create_ecu_receiver_map(ecu_ids, &sender, &receiver);
+    let doip_ecus = create_ecu_receiver_map(ecu_ids, &sender, &receivers);
 
     tracing::info!("Connected to gateway");
     state
@@ -243,36 +270,22 @@ fn create_ecu_receiver_map(
     doip_ecus
 }
 
-#[allow(clippy::type_complexity)]
 #[tracing::instrument(
-    skip(routing_activation_request, connection_settings, connection_config),
+    skip(target, config),
     fields(
-        tester_ip = connection_config.source_ip.clone(),
-        port = connection_config.port,
-        tls_port = connection_config.tls_port,
-        gateway_ip = %gateway_ip,
-        gateway_name = %gateway_name,
-        ecu_count = ecus.len(),
+        tester_ip = config.connection_config.source_ip.clone(),
+        port = config.connection_config.port,
+        tls_port = config.connection_config.tls_port,
+        gateway_ip = %target.ip,
+        gateway_name = %target.name,
+        ecu_count = target.ecus.len(),
         dlt_context = dlt_ctx!("DOIP"),
     )
 )]
 async fn connection_handler(
-    connection_config: ConnectionConfig,
-    gateway_ip: String,
-    gateway_name: String,
-    doip_connection_config: DoIPConfig,
-    routing_activation_request: RoutingActivationRequest,
-    ecus: Vec<u16>,
-    connection_settings: ConnectionSettings,
-    variant_detection: Option<(mpsc::Sender<Vec<String>>, Vec<String>)>,
-) -> Result<
-    (
-        mpsc::Sender<DoipPayload>,
-        HashMap<u16, broadcast::Receiver<Result<DiagnosticResponse, EcuError>>>,
-        Vec<tokio::task::JoinHandle<()>>,
-    ),
-    EcuError,
-> {
+    target: GatewayTarget,
+    config: GatewayHandlerConfig,
+) -> Result<GatewayConnectionHandles, EcuError> {
     // channel to send messages to the gateway / ecus
     let (intx, inrx) = mpsc::channel::<DoipPayload>(50);
 
@@ -285,7 +298,7 @@ async fn connection_handler(
         HashMap::new();
 
     // create ecu response channels
-    for ecu in ecus {
+    for &ecu in &target.ecus {
         let (tx, rx) = broadcast::channel::<Result<DiagnosticResponse, EcuError>>(10);
 
         outtx.insert(ecu, tx);
@@ -295,17 +308,17 @@ async fn connection_handler(
     // setting up initial gateway connection
     let gateway_conn = Arc::new(
         ecu_connection::establish_ecu_connection(
-            &connection_config,
-            &gateway_ip,
-            &gateway_name,
-            doip_connection_config,
-            routing_activation_request,
-            connection_settings.connect_timeout,
-            connection_settings.routing_activation,
+            &config.connection_config,
+            &target.ip,
+            &target.name,
+            config.doip_connection_config,
+            config.routing_activation_request,
+            config.connection_settings.connect_timeout,
+            config.connection_settings.routing_activation,
         )
         .await
         .inspect_err(|e| {
-            tracing::error!("Failed to connect to gateway at {gateway_ip}: {e:?}");
+            tracing::error!("Failed to connect to gateway at {}: {e:?}", target.ip);
         })?,
     );
 
@@ -313,32 +326,25 @@ async fn connection_handler(
     let (conn_reset_tx, conn_reset_rx) = mpsc::channel::<ConnectionResetReason>(1);
     // task to handle connection resets and reconnects
     let conn_reset = Arc::<EcuConnectionTarget>::clone(&gateway_conn);
-    let connection_reset_task = spawn_connection_reset_task(
-        connection_config.clone(),
-        gateway_ip.clone(),
-        doip_connection_config,
-        routing_activation_request,
-        conn_reset_rx,
-        conn_reset,
-        connection_settings,
-        variant_detection,
-    );
+    let send_timeout = config.connection_settings.send_timeout;
+    let connection_reset_task =
+        spawn_connection_reset_task(target.clone(), config, conn_reset_rx, conn_reset);
 
     // communication between send / receiver task to unlock the connection in the receiver task
     // when sender task wants to send something
     let (send_pending_tx, send_pending_rx) = watch::channel::<bool>(false);
     let gateway_sender_task = spawn_gateway_sender_task(
-        &gateway_ip,
+        &target.ip,
         inrx,
         Arc::<EcuConnectionTarget>::clone(&gateway_conn),
-        connection_settings.send_timeout,
+        send_timeout,
         conn_reset_tx.clone(),
         send_pending_tx.clone(),
         connection_settings.alive_check_interval,
     );
     let gateway_receiver_task = spawn_gateway_receiver_task(
-        gateway_ip.clone(),
-        gateway_name.clone(),
+        target.ip.clone(),
+        target.name.clone(),
         outtx,
         Arc::<EcuConnectionTarget>::clone(&gateway_conn),
         send_pending_rx,
@@ -347,33 +353,37 @@ async fn connection_handler(
     );
 
     // no need to wait until the connection is alive, we will reconnect automatically anyway
-    Ok((
-        intx,
-        outrx,
-        vec![
+    Ok(GatewayConnectionHandles {
+        sender: intx,
+        receivers: outrx,
+        task_handles: vec![
             connection_reset_task,
             gateway_sender_task,
             gateway_receiver_task,
         ],
-    ))
+    })
 }
 
 #[tracing::instrument(
-    skip_all
+    skip_all,
     fields(
         dlt_context = dlt_ctx!("DOIP")
     )
 )]
 fn spawn_connection_reset_task(
-    connection_config: ConnectionConfig,
-    gateway_ip: String,
-    doip_connection_config: DoIPConfig,
-    routing_activation_request: RoutingActivationRequest,
+    target: GatewayTarget,
+    config: GatewayHandlerConfig,
     mut conn_reset_rx: mpsc::Receiver<ConnectionResetReason>,
     conn_reset: Arc<EcuConnectionTarget>,
-    connection_timeouts: ConnectionSettings,
-    variant_detection: Option<(mpsc::Sender<Vec<String>>, Vec<String>)>,
 ) -> tokio::task::JoinHandle<()> {
+    let GatewayTarget { ip: gateway_ip, .. } = target;
+    let GatewayHandlerConfig {
+        connection_config,
+        doip_connection_config,
+        routing_activation_request,
+        connection_settings: connection_timeouts,
+        variant_detection,
+    } = config;
     cda_interfaces::spawn_named!(
         &format!("doip-connection-reset-{gateway_ip}"),
         Box::pin(async move {

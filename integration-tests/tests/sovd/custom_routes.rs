@@ -83,6 +83,7 @@ async fn add_custom_routes(dynamic_router: &DynamicRouter) {
 }
 
 #[tokio::test]
+#[allow(clippy::too_many_lines)] // makes sense to keep the test together
 async fn test_custom_demo_endpoint() {
     // Use loopback since we don't need actual ECU connections for this test
     let host = host();
@@ -133,13 +134,19 @@ async fn test_custom_demo_endpoint() {
         provider
     };
 
+    let doip_socket = cda_comm_doip::create_socket(
+        &doip_config.tester_address,
+        doip_config.gateway_port,
+        doip_config.protocol_version,
+    )
+    .expect("Failed to create DoIP socket");
     let gateway = opensovd_cda_lib::create_diagnostic_gateway(
         Arc::clone(&databases),
         &doip_config,
         variant_tx,
         shutdown_signal.clone(),
         None,
-        None,
+        Arc::new(tokio::sync::Mutex::new(doip_socket)),
     )
     .await
     .expect("Failed to create gateway");
