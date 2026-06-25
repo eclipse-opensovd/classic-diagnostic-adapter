@@ -194,11 +194,7 @@ pub async fn load_databases<S: SecurityPlugin>(
         .map(|(k, v): (String, FileManager)| (k.to_lowercase(), v))
         .collect();
 
-    handle_ecu_config_keys(
-        &ecu_config_map,
-        &databases,
-        config.database.strict_ecu_config,
-    )?;
+    handle_ecu_config_keys(&ecu_config_map, &databases, config.strict.ecu_config())?;
 
     let end = std::time::Instant::now();
     tracing::info!(
@@ -371,7 +367,7 @@ pub(crate) fn handle_ecu_config_keys<S: SecurityPlugin>(
     }
     if strict && !unmatched.is_empty() {
         return Err(AppError::ConfigurationError(format!(
-            "strict_ecu_config is enabled and the following per-ECU config entries do not match \
+            "[strict] ecu_config is enabled and the following per-ECU config entries do not match \
              any loaded database: {}",
             unmatched.join(", ")
         )));
@@ -599,7 +595,7 @@ fn load_single_mdd<S: SecurityPlugin>(
         protocol,
         com_params: &com_params,
         fallback_to_base_variant: config.database.fallback_to_base_variant,
-        strict_parameter_validation: config.database.strict_parameter_validation,
+        strict_parameter_validation: config.strict.parameter_validation(),
     };
 
     let per_ecu_cfg = ecu_config_map.get(&ecu_name.to_lowercase());

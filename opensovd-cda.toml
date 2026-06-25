@@ -400,17 +400,6 @@
 # ignore_protocol = false
 # Path to load the databases from, this must be a directory.
 # path = "."
-# When `true`, the application will exit with an error if any key under
-# `[ecu.<name>]` in the configuration does not match a loaded MDD database.
-#
-# This helps catch typos in ECU names early. When `false` (default),
-# unmatched per-ECU config entries only produce a warning.
-# strict_ecu_config = false
-# When `true`, requests that contain parameters not defined in the service
-# are rejected with a `BadPayload` error (400 Bad Request).
-# When `false` (default), unexpected parameters trigger a warning log but
-# are otherwise ignored.
-# strict_parameter_validation = false
 
 # Holds configuration for diagnostic service naming conventions.
 #
@@ -663,3 +652,14 @@
 # address = "0.0.0.0"
 # TCP port the server listens on.
 # port = 20002
+
+# Strict-mode validation flags.
+[strict]
+# Exit with an error if any key under `[ecu.<name>]` does not match a
+# loaded MDD database.
+# ecu_config = false
+# Master switch - when `true`, all individual strict checks are enabled.
+# enabled = false
+# Reject requests containing parameters not defined in the diagnostic
+# service with a `BadPayload` error (HTTP 400).
+# parameter_validation = false
