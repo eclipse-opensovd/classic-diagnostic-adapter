@@ -8,6 +8,9 @@ project=${PROJECT:-"automotive.opensovd"}
 manifest_path=${MANIFEST_PATH:-"Cargo.toml"}
 token=${1:-}
 
+# Ensure the summary file exists even when checks fail early so CI can upload it as artifact.
+: > "$dash_summary"
+
 echo "creating 3rd party dependency list..."
 cargo tree --manifest-path "$manifest_path" --workspace -e no-build,no-dev --prefix none --no-dedupe --locked \
   | sed -n '2~1p' \
