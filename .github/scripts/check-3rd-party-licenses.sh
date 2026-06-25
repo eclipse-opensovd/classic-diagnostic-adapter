@@ -27,15 +27,20 @@ cargo tree --manifest-path "$manifest_path" --workspace -e no-build,no-dev --pre
 
 if [[ ! -r "$dash_jar" ]]; then
   echo "Eclipse Dash JAR file [${dash_jar}] not found, downloading latest version from Eclipse repository..."
-  dash_url="https://repo.eclipse.org/service/local/artifact/maven/redirect?r=dash-licenses&g=org.eclipse.dash&a=org.eclipse.dash.licenses&v=LATEST"
+  dash_url=${DASH_URL:-"https://repo.eclipse.org/service/rest/v1/search/assets/download?sort=version&repository=dash-maven2-releases&maven.groupId=org.eclipse.dash&maven.artifactId=org.eclipse.dash.licenses&maven.extension=jar"}
 
   if command -v wget >/dev/null 2>&1; then
-    wget --quiet -O "$dash_jar" "$dash_url"
+    wget --tries=3 --retry-connrefused --waitretry=2 -O "$dash_jar" "$dash_url"
   elif command -v curl >/dev/null 2>&1; then
-    curl --fail --silent --show-error --location --output "$dash_jar" "$dash_url"
+    curl --fail --silent --show-error --location --retry 3 --retry-delay 2 --output "$dash_jar" "$dash_url"
   else
     echo "Neither wget nor curl is available on PATH"
     exit 127
+  fi
+
+  if [[ ! -s "$dash_jar" ]]; then
+    echo "Failed to download Eclipse Dash JAR from ${dash_url}"
+    exit 1
   fi
 
   echo "successfully downloaded Eclipse Dash JAR to ${dash_jar}"
