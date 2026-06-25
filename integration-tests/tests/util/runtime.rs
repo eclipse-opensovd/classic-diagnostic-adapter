@@ -31,7 +31,7 @@ use opensovd_cda_lib::{
     cda_version,
     config::configfile::{
         ConfigSanity, Configuration, DatabaseConfig, EcuComParams, EcuConfig, RuntimeUpdateConfig,
-        ServerConfig,
+        ServerConfig, StrictConfig,
     },
 };
 use tokio::sync::{Mutex, MutexGuard, OnceCell};
@@ -172,8 +172,6 @@ fn cda_test_config(
             exit_no_database_loaded: true,
             fallback_to_base_variant: true,
             ignore_protocol: false,
-            strict_parameter_validation: false,
-            strict_ecu_config: false,
             ignore_invalid_mdd: false,
         },
         logging: LoggingConfig::default(),
@@ -273,6 +271,7 @@ fn cda_test_config(
             init_storage_from_database_path: true,
             ..RuntimeUpdateConfig::default()
         },
+        strict: StrictConfig::default(),
     };
     Ok(config)
 }

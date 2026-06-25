@@ -131,6 +131,38 @@ impl schemars::JsonSchema for EcuComParams {
     }
 }
 
+/// Strict-mode flags that opt in to stricter runtime validation.
+///
+/// When `enabled` is `true`, every individual check is activated regardless
+/// of its own value.  Individual flags can also be turned on independently
+/// for more granular control.
+#[derive(Deserialize, Serialize, Clone, Debug, Default, schemars::JsonSchema)]
+pub struct StrictConfig {
+    /// Master switch - when `true`, all individual strict checks are enabled.
+    #[serde(default)]
+    pub enabled: bool,
+    /// Reject requests containing parameters not defined in the diagnostic
+    /// service with a `BadPayload` error (HTTP 400).
+    #[serde(default)]
+    pub parameter_validation: bool,
+    /// Exit with an error if any key under `[ecu.<name>]` does not match a
+    /// loaded MDD database.
+    #[serde(default)]
+    pub ecu_config: bool,
+}
+
+impl StrictConfig {
+    #[must_use]
+    pub fn parameter_validation(&self) -> bool {
+        self.enabled || self.parameter_validation
+    }
+
+    #[must_use]
+    pub fn ecu_config(&self) -> bool {
+        self.enabled || self.ecu_config
+    }
+}
+
 /// Top-level application configuration.
 #[derive(Deserialize, Serialize, Clone, Debug, schemars::JsonSchema)]
 pub struct Configuration {
@@ -163,6 +195,9 @@ pub struct Configuration {
     pub ecu: HashMap<String, EcuConfig>,
     /// Configuration for update plugin, i.e. storage paths
     pub runtime_update_config: RuntimeUpdateConfig,
+    /// Strict-mode validation flags.
+    #[serde(default)]
+    pub strict: StrictConfig,
 }
 
 /// Per-ECU configuration block.
@@ -249,6 +284,7 @@ impl Default for Configuration {
             faults: FaultConfig::default(),
             ecu: HashMap::default(),
             runtime_update_config: RuntimeUpdateConfig::default(),
+            strict: StrictConfig::default(),
         }
     }
 }
@@ -701,5 +737,48 @@ logical_gateway_address = 9999
             "figment extraction must fail when the TOML contains an incompatible type; confirms \
              the resolve_com_params Err branch is reachable"
         );
+    }
+
+    #[test]
+    fn strict_config_master_switch_enables_all() {
+        let cfg = StrictConfig {
+            enabled: true,
+            parameter_validation: false,
+            ecu_config: false,
+        };
+        assert!(cfg.parameter_validation());
+        assert!(cfg.ecu_config());
+    }
+
+    #[test]
+    fn strict_config_individual_flags_work_independently() {
+        let cfg = StrictConfig {
+            enabled: false,
+            parameter_validation: true,
+            ecu_config: false,
+        };
+        assert!(cfg.parameter_validation());
+        assert!(!cfg.ecu_config());
+    }
+
+    #[test]
+    fn strict_config_defaults_to_all_disabled() {
+        let cfg = StrictConfig::default();
+        assert!(!cfg.parameter_validation());
+        assert!(!cfg.ecu_config());
+    }
+
+    #[tokio::test]
+    async fn strict_config_parsed_from_toml() {
+        let config_str = r"
+[strict]
+enabled = false
+parameter_validation = true
+";
+        let figment = Figment::from(Serialized::defaults(Configuration::default()))
+            .merge(Toml::string(config_str));
+        let config: Configuration = figment.extract().unwrap();
+        assert!(config.strict.parameter_validation());
+        assert!(!config.strict.ecu_config());
     }
 }

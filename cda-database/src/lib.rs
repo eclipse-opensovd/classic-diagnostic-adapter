@@ -47,17 +47,6 @@ pub struct DatabaseConfig {
     /// attempting a lookup with this flag set against a multi-protocol database
     /// returns `DiagServiceError::InvalidDatabase`.
     pub ignore_protocol: bool,
-    /// When `true`, requests that contain parameters not defined in the service
-    /// are rejected with a `BadPayload` error (400 Bad Request).
-    /// When `false` (default), unexpected parameters trigger a warning log but
-    /// are otherwise ignored.
-    pub strict_parameter_validation: bool,
-    /// When `true`, the application will exit with an error if any key under
-    /// `[ecu.<name>]` in the configuration does not match a loaded MDD database.
-    ///
-    /// This helps catch typos in ECU names early. When `false` (default),
-    /// unmatched per-ECU config entries only produce a warning.
-    pub strict_ecu_config: bool,
     /// When `true` (the default), MDD files that fail to load are skipped and
     /// the remaining databases continue loading. When `false`, any MDD load
     /// failure aborts the entire load/reload operation.
@@ -72,8 +61,6 @@ impl Default for DatabaseConfig {
             exit_no_database_loaded: false,
             fallback_to_base_variant: true,
             ignore_protocol: false,
-            strict_parameter_validation: false,
-            strict_ecu_config: false,
             ignore_invalid_mdd: true,
         }
     }
