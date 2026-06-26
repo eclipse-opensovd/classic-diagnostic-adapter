@@ -103,7 +103,7 @@ jobs:
       - name: Install cargo-deny
         run: cargo install --locked --version 0.18.9 cargo-deny
       - name: Install cargo-llvm-cov
-        uses: taiki-e/install-action@cargo-llvm-cov
+        run: cargo install --locked cargo-llvm-cov
       - name: Build
         run: cargo build --locked --verbose
       - name: Check licenses
@@ -159,41 +159,48 @@ jobs:
           cache-to: |
             type=gha,mode=max,scope=ecu-sim-gradle-${{ github.ref_name }}
       - name: Run unit tests with coverage
-        run: cargo llvm-cov --locked --workspace --features integration-tests --no-report -- --show-output
+        run: cargo llvm-cov --locked --workspace --lcov --output-path lcov.info -- --show-output
       - name: Run integration tests with Docker coverage
         env:
           CACHE_REGISTRY: ghcr.io/${{ github.repository }}
           CDA_INTEGRATION_TEST_COVERAGE: "true"
         run: cargo test --locked -p integration-tests --features integration-tests -- --show-output
-      - name: Generate merged coverage report
+      - name: Collect and merge coverage data
         run: |
           set -x
 
           LLVM_PROFDATA=$(rustc --print sysroot)/lib/rustlib/x86_64-unknown-linux-gnu/bin/llvm-profdata
+          LLVM_COV=$(rustc --print sysroot)/lib/rustlib/x86_64-unknown-linux-gnu/bin/llvm-cov
 
-          # Merge all profraw files: unit tests (written by cargo llvm-cov) + Docker integration tests
-          ALL_PROFRAW=$(find target/llvm-cov-target -name '*.profraw' 2>/dev/null)
-          DOCKER_PROFRAW=$(ls target/coverage/*.profraw 2>/dev/null || true)
+          sudo apt-get update && sudo apt-get install -y lcov
 
-          if [ -n "$DOCKER_PROFRAW" ]; then
+          if [ -f "target/coverage/opensovd-cda" ] && ls target/coverage/*.profraw 1>/dev/null 2>&1; then
+            echo "Processing Docker coverage data..."
+            $LLVM_PROFDATA merge -sparse target/coverage/*.profraw -o target/coverage/docker.profdata
+
+            # Export Docker coverage, filtering to workspace sources (/app/) only
+            $LLVM_COV export -format=lcov \
+              target/coverage/opensovd-cda \
+              -instr-profile=target/coverage/docker.profdata \
+              --ignore-filename-regex='/usr/local/cargo|/usr/local/rustup' \
+              > lcov-docker-raw.info
+
+            # Rewrite /app/ paths to match the runner workspace paths so lcov --add
+            # recognises them as the same files and unions hit counts instead of stacking
+            WORKSPACE=$(cargo metadata --no-deps --format-version 1 | jq -r '.workspace_root')
+            sed "s|SF:/app/|SF:${WORKSPACE}/|g" lcov-docker-raw.info > lcov-docker.info
+
             echo "Merging unit test and Docker integration coverage..."
-            $LLVM_PROFDATA merge -sparse $ALL_PROFRAW $DOCKER_PROFRAW -o target/llvm-cov-merged.profdata
+            lcov --add-tracefile lcov.info --add-tracefile lcov-docker.info \
+              --output-file lcov-merged.info --ignore-errors inconsistent
           else
-            echo "No Docker coverage data, using unit test coverage only..."
-            $LLVM_PROFDATA merge -sparse $ALL_PROFRAW -o target/llvm-cov-merged.profdata
+            echo "No Docker coverage data found, using unit test coverage only"
+            cp lcov.info lcov-merged.info
           fi
 
-          # Use cargo llvm-cov report with the merged profdata — this uses the same
-          # workspace binaries cargo llvm-cov built, so source paths and line counts
-          # are identical to what main's Coverage job produces.
-          cargo llvm-cov report \
-            --instr-profile target/llvm-cov-merged.profdata \
-            --lcov --output-path lcov-merged.info
-
-          SUMMARY=$(cargo llvm-cov report \
-            --instr-profile target/llvm-cov-merged.profdata 2>&1 | tail -3 || true)
+          SUMMARY=$(lcov --summary lcov-merged.info 2>&1 || true)
           echo "$SUMMARY"
-          TOTAL_COV=$(echo "$SUMMARY" | grep -oP 'TOTAL\s+.*\s+\K[0-9.]+(?=%)' | tail -1 || echo "0")
+          TOTAL_COV=$(echo "$SUMMARY" | grep -oP 'lines\.*:\s*\K[0-9.]+' || echo "0")
           echo "**Total line coverage: ${TOTAL_COV}%**" >> "$GITHUB_STEP_SUMMARY"
       - name: Upload coverage artifact
         uses: actions/upload-artifact@v7
@@ -201,55 +208,28 @@ jobs:
           name: coverage-lcov
           path: lcov-merged.info
           retention-days: 30
-      - name: Post coverage comment
-        if: github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository
-        uses: actions/github-script@v9
+      - name: Generate coverage PR comment artifact
+        if: github.event_name == 'pull_request'
+        run: |
+          TOTAL_COV=$(lcov --summary lcov-merged.info 2>&1 | grep -oP 'lines\.*:\s*\K[0-9.]+' || echo "0")
+          RUN_URL="${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}"
+          SYMBOL="$(printf '\xf0\x9f\x93\x8a')"
+          mkdir -p pr-comment-coverage
+          echo "${{ github.event.number }}" > pr-comment-coverage/pr_number
+          printf '%s\n' \
+            '<!-- coverage-report -->' \
+            "### ${SYMBOL} Coverage Report (unit + integration)" \
+            '' \
+            "**Total line coverage: ${TOTAL_COV}%**" \
+            '' \
+            "[Full build artifacts](${RUN_URL})" \
+            > pr-comment-coverage/body.md
+      - name: Upload coverage PR comment artifact
+        if: github.event_name == 'pull_request'
+        uses: actions/upload-artifact@v7
         with:
-          script: |
-            const fs = require('fs');
-            const { execSync } = require('child_process');
-
-            let total = '0';
-            try {
-              const summary = execSync('lcov --summary lcov-merged.info 2>&1', { encoding: 'utf8' });
-              const match = summary.match(/lines\.*:\s*([\d.]+)/);
-              if (match) total = match[1];
-            } catch (e) {
-              console.log('Could not extract coverage:', e.message);
-            }
-
-            const marker = '<!-- coverage-report -->';
-            const runUrl = `${process.env.GITHUB_SERVER_URL}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}`;
-            const body = [
-              marker,
-              '### \u{1F4CA} Coverage Report (unit + integration)',
-              '',
-              `**Total line coverage: ${total}%**`,
-              '',
-              `[Full build artifacts](${runUrl})`,
-            ].join('\n');
-
-            const { data: comments } = await github.rest.issues.listComments({
-              owner: context.repo.owner,
-              repo: context.repo.repo,
-              issue_number: context.issue.number,
-            });
-            const existing = comments.find(c => c.body.includes(marker));
-            if (existing) {
-              await github.rest.issues.updateComment({
-                owner: context.repo.owner,
-                repo: context.repo.repo,
-                comment_id: existing.id,
-                body,
-              });
-            } else {
-              await github.rest.issues.createComment({
-                owner: context.repo.owner,
-                repo: context.repo.repo,
-                issue_number: context.issue.number,
-                body,
-              });
-            }
+          name: pr-comment-coverage
+          path: pr-comment-coverage/
 
   cargo-crap:
     name: CRAP (Change Risk Anti-Patterns)
