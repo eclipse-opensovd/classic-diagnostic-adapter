@@ -179,13 +179,17 @@ jobs:
             # Merge Docker .profraw files into a single .profdata
             $LLVM_PROFDATA merge -sparse target/coverage/*.profraw -o target/coverage/docker.profdata
 
-            # Export coverage for Docker binary, restricting to workspace sources only
-            # (mirrors what cargo llvm-cov --workspace does internally)
+            # Export coverage for Docker binary, restricting to workspace sources only.
+            # The Docker image builds sources at /app, dependencies at /usr/local/cargo.
             $LLVM_COV export -format=lcov \
               target/coverage/opensovd-cda \
               -instr-profile=target/coverage/docker.profdata \
-              --ignore-filename-regex='\.cargo/registry|\.cargo/git|rustup/toolchains|/rustc/' \
+              --ignore-filename-regex='/usr/local/cargo|/usr/local/rustup|/root/.cargo|/root/.rustup' \
               > lcov-integration.info
+
+            # Debug: show unique source path prefixes so we can verify the filter
+            echo "=== Source file path prefixes in lcov-integration.info ==="
+            grep '^SF:' lcov-integration.info | sed 's|SF:||' | awk -F'/' '{print "/"$2"/"$3}' | sort -u | head -20
           else
             echo "No Docker coverage data found (integration tests may have failed early)"
             touch lcov-integration.info
