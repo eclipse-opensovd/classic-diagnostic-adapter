@@ -705,7 +705,7 @@ fn resolve_required_param<S: AsRef<str>>(
                     "Required parameter '{param_name}' missing",
                 ))
             })?;
-            phys_value_str_to_json(str_val.as_ref(), param_name)
+            Ok(phys_value_str_to_json(str_val.as_ref()))
         }
         _ => Err(DiagServiceError::InvalidRequest(format!(
             "Required parameter '{param_name}' missing",
@@ -713,19 +713,13 @@ fn resolve_required_param<S: AsRef<str>>(
     }
 }
 
-fn phys_value_str_to_json(
-    value: &str,
-    param_short_name: &str,
-) -> Result<serde_json::Value, DiagServiceError> {
-    if value.chars().all(char::is_numeric) {
-        let number = value.parse::<u64>().map_err(|e| {
-            DiagServiceError::InvalidRequest(format!(
-                "Failed to parse numeric value for parameter '{param_short_name}': {e}"
-            ))
-        })?;
-        Ok(serde_json::Value::Number(number.into()))
+fn phys_value_str_to_json(value: &str) -> serde_json::Value {
+    if let Ok(number) = value.parse::<i64>() {
+        serde_json::Value::Number(number.into())
+    } else if let Ok(number) = value.parse::<u64>() {
+        serde_json::Value::Number(number.into())
     } else {
-        Ok(serde_json::Value::from(value))
+        serde_json::Value::from(value)
     }
 }
 

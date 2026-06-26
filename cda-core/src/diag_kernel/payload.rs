@@ -145,6 +145,16 @@ impl<'a> Payload<'a> {
     }
 }
 
+/// Converts a `CODED-CONST` string value from the ODX database into a JSON value.
+///
+/// The input is the raw string stored in the ODX data, so it follows ODX value
+/// coding rules (ISO 22901-1 §7.1.3): numeric values are decimal-coded. Per the
+/// value-coding restrictions, `A_INT32`/`A_UINT32` (`Int32`/`UInt32`) "shall be
+/// defined decimal", and floats follow XSD `float`/`double` (decimal, optional
+/// `e`-notation). Radix prefixes such as `0x`, `0o`, or `0b` are therefore NOT
+/// valid here and must not be parsed. Note that ODX `A_UINT32` may carry a
+/// `DISPLAY-RADIX` (HEX/DEC/BIN/OCT), but that only governs visualization at the
+/// tester, not the coding of the stored value, which stays decimal.
 pub(in crate::diag_kernel) fn str_to_json_value(
     value: &str,
     data_type: datatypes::DataType,
