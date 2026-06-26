@@ -322,7 +322,7 @@ impl<S: SecurityPlugin> EcuManager<S> {
         database: &datatypes::DiagnosticDatabase,
         data_protocol: Option<&datatypes::Protocol<'_>>,
         config: &ComParamConfig<u16>,
-        addr_type: datatypes::LogicalAddressType,
+        addr_type: &datatypes::LogicalAddressType,
     ) -> u16 {
         if config.precedence == ComParamPrecedence::Config {
             tracing::debug!(
@@ -335,7 +335,12 @@ impl<S: SecurityPlugin> EcuManager<S> {
         match database.find_logical_address(addr_type, database, data_protocol.map(|v| &**v)) {
             Ok(address) => address,
             Err(e) => {
-                tracing::error!(param_name = %config.name, "Failed to find logical address: {e}");
+                tracing::error!(
+                    config = ?config,
+                    protocol = ?data_protocol,
+                    addr_type =  ?addr_type,
+                    error = %e,
+                    "Failed to find logical address");
                 config.value
             }
         }
@@ -429,7 +434,7 @@ impl<S: SecurityPlugin> EcuManager<S> {
             &database,
             data_protocol_ref,
             &com_params.doip.logical_gateway_address,
-            datatypes::LogicalAddressType::Gateway(
+            &datatypes::LogicalAddressType::Gateway(
                 com_params.doip.logical_gateway_address.name.clone(),
             ),
         );
@@ -438,7 +443,7 @@ impl<S: SecurityPlugin> EcuManager<S> {
             &database,
             data_protocol_ref,
             &com_params.doip.logical_ecu_address,
-            datatypes::LogicalAddressType::Ecu(
+            &datatypes::LogicalAddressType::Ecu(
                 com_params.doip.logical_response_id_table_name.clone(),
                 com_params.doip.logical_ecu_address.name.clone(),
             ),
@@ -448,7 +453,7 @@ impl<S: SecurityPlugin> EcuManager<S> {
             &database,
             data_protocol_ref,
             &com_params.doip.logical_functional_address,
-            datatypes::LogicalAddressType::Functional(
+            &datatypes::LogicalAddressType::Functional(
                 com_params.doip.logical_functional_address.name.clone(),
             ),
         );
