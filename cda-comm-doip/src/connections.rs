@@ -45,6 +45,11 @@ struct ConnectionSettings {
     send_timeout: Duration,
 }
 
+struct GatewayId {
+    ip: String,
+    name: String,
+}
+
 #[derive(Error, Debug, Clone)]
 pub enum EcuError {
     #[error("Resource not found: `{0}`")]
@@ -311,13 +316,16 @@ async fn connection_handler(
         send_pending_tx.clone(),
     );
     spawn_gateway_receiver_task(
-        gateway_ip.clone(),
-        gateway_name.clone(),
+        GatewayId {
+            ip: gateway_ip.clone(),
+            name: gateway_name.clone(),
+        },
         outtx,
         Arc::<EcuConnectionTarget>::clone(&gateway_conn),
         send_pending_rx,
         conn_reset_tx,
         intx.clone(),
+        doip_connection_config,
     );
 
     // no need to wait until the connection is alive, we will reconnect automatically anyway
@@ -537,24 +545,23 @@ fn spawn_gateway_sender_task(
 
 /// allowed because there are two inline functions in here,
 /// that should be kept private to this function.
-#[allow(clippy::too_many_lines)]
 #[tracing::instrument(
-    skip(outtx, gateway_conn, send_pending_rx, reset_tx),
+    skip(gateway_id, outtx, gateway_conn, send_pending_rx, reset_tx),
     fields(
-        gateway_ip = %gateway_ip,
-        gateway_name = %gateway_name,
+        gateway_ip = %gateway_id.ip,
+        gateway_name = %gateway_id.name,
         active_ecus = outtx.len(),
         dlt_context = dlt_ctx!("DOIP"),
     )
 )]
 fn spawn_gateway_receiver_task(
-    gateway_ip: String,
-    gateway_name: String,
+    gateway_id: GatewayId,
     outtx: HashMap<u16, broadcast::Sender<Result<DiagnosticResponse, EcuError>>>,
     gateway_conn: Arc<EcuConnectionTarget>,
     mut send_pending_rx: watch::Receiver<bool>,
     reset_tx: mpsc::Sender<ConnectionResetReason>,
     send_tx: mpsc::Sender<DoipPayload>,
+    doip_connection_config: DoIPConfig,
 ) {
     // note: the handlers are defined here, as rustfmt cannot format the correctly inside the
     // tokio::select! macro block
@@ -604,113 +611,7 @@ fn spawn_gateway_receiver_task(
         }
     }
 
-    #[tracing::instrument(
-        skip_all,
-        fields(dlt_context = dlt_ctx!("DOIP"))
-    )]
-    async fn handle_response(
-        gateway_name: &str,
-        gateway_ip: &str,
-        outtx: &HashMap<u16, broadcast::Sender<Result<DiagnosticResponse, EcuError>>>,
-        reset_tx: &mpsc::Sender<ConnectionResetReason>,
-        ack_tx: &mpsc::Sender<DoipPayload>,
-        response: Option<Result<DiagnosticResponse, ConnectionError>>,
-    ) {
-        match response {
-            Some(Ok(response)) => {
-                match response {
-                    DiagnosticResponse::Ack((source_address, _)) => {
-                        tracing::debug!(
-                            gateway_name = %gateway_name,
-                            gateway_ip = %gateway_ip,
-                            source_address = %source_address,
-                            "Received ACK"
-                        );
-                        outtx
-                            .get(&source_address)
-                            .map(|router| router.send(Ok(response)));
-                    }
-                    DiagnosticResponse::Pending(source_address)
-                    | DiagnosticResponse::BusyRepeatRequest(source_address)
-                    | DiagnosticResponse::TemporarilyNotAvailable(source_address) => {
-                        outtx
-                            .get(&source_address)
-                            .map(|router| router.send(Ok(response)));
-                    }
-                    DiagnosticResponse::Msg(msg) => {
-                        let addr = u16::from_be_bytes(msg.source_address);
-                        let target_addr = u16::from_be_bytes(msg.target_address);
-                        // send DoIP DiagnosticMessageAck before returning the message to the caller
-                        let _ = ack_tx
-                            .send(DoipPayload::DiagnosticMessageAck(DiagnosticMessageAck {
-                                source_address: msg.target_address,
-                                target_address: msg.source_address,
-                                ack_code: DiagnosticAckCode::Acknowledged,
-                                previous_message: Vec::new(), // skip optional previous payload
-                            }))
-                            .await
-                            .inspect_err(|e| {
-                                tracing::error!(
-                                    error = ?e,
-                                    gateway_name = %gateway_name,
-                                    gateway_ip = %gateway_ip,
-                                    source_address = %addr,
-                                    target_address = %target_addr,
-                                    "Failed to send DiagnosticMessageAck"
-                                );
-                            });
-                        tracing::debug!("DOIP OK - Returning response from ECU {:04x}", addr);
-                        outtx
-                            .get(&addr)
-                            .map(|router| router.send(Ok(DiagnosticResponse::Msg(msg))));
-                    }
-                    DiagnosticResponse::Nack(nack) => {
-                        tracing::debug!(nack = ?nack, "Received NACK");
-                        let addr = u16::from_be_bytes(nack.source_address);
-                        outtx
-                            .get(&addr)
-                            .map(|router| router.send(Ok(DiagnosticResponse::Nack(nack))));
-                    }
-                    DiagnosticResponse::GenericNack(_) => {
-                        // todo implement generic NACK handling according to spec #22
-                        tracing::error!("Received Generic NACK");
-                    }
-                    DiagnosticResponse::AliveCheckResponse => {
-                        tracing::debug!(
-                            "Received Alive Check Response. Probably ECU responded too slow"
-                        );
-                    }
-                    DiagnosticResponse::TesterPresentNRC(c) => {
-                        tracing::debug!(nrc = ?c, "Received Tester Present NRC");
-                    }
-                }
-            }
-            Some(Err(err)) => {
-                match err {
-                    ConnectionError::Closed => {
-                        if let Err(e) = reset_tx
-                            .send("Connection has been closed.".to_owned())
-                            .await
-                        {
-                            tracing::error!(error = ?e, "Failed to send connection reset request");
-                        }
-                    }
-                    _ => {
-                        // for POC purposes we just log the error and do not reset the connection
-                        tracing::error!(
-                            error = ?err,
-                            "Error reading response, either due to timeout or decoding issue"
-                        );
-                    }
-                }
-            }
-            None => {
-                // No data to receive, but try_read timed out
-            }
-        }
-    }
-
-    cda_interfaces::spawn_named!(&format!("gateway-receiver-{gateway_ip}"), async move {
+    cda_interfaces::spawn_named!(&format!("gateway-receiver-{}", gateway_id.ip), async move {
         'receive: loop {
             if outtx.iter().all(|(_, tx)| tx.receiver_count() == 0) {
                 tracing::debug!("All out channels closed. Shutting down connection");
@@ -721,8 +622,8 @@ fn spawn_gateway_receiver_task(
             tokio::select! {
                 send_pending_result = send_pending_rx.changed() => {
                     if let Err(()) = handle_send_pending(
-                        &gateway_name,
-                        &gateway_ip,
+                        &gateway_id.name,
+                        &gateway_id.ip,
                         &mut send_pending_rx,
                         send_pending_result
                     ).await {
@@ -743,11 +644,11 @@ fn spawn_gateway_receiver_task(
                 } => {
                     if let Some(response) = response {
                         handle_response(
-                            &gateway_name,
-                            &gateway_ip,
+                            &gateway_id,
                             &outtx,
                             &reset_tx,
                             &send_tx,
+                            doip_connection_config.send_diagnostic_message_ack,
                             response
                         ).await;
                     }
@@ -881,4 +782,179 @@ async fn try_read(
     tokio::time::timeout(timeout, read_response(reader))
         .await
         .ok()
+}
+
+#[tracing::instrument(
+    skip_all,
+    fields(dlt_context = dlt_ctx!("DOIP"))
+)]
+async fn handle_response(
+    gateway_id: &GatewayId,
+    outtx: &HashMap<u16, broadcast::Sender<Result<DiagnosticResponse, EcuError>>>,
+    reset_tx: &mpsc::Sender<ConnectionResetReason>,
+    ack_tx: &mpsc::Sender<DoipPayload>,
+    send_diagnostic_message_ack: bool,
+    response: Option<Result<DiagnosticResponse, ConnectionError>>,
+) {
+    match response {
+        Some(Ok(response)) => {
+            match response {
+                DiagnosticResponse::Ack((source_address, _)) => {
+                    tracing::debug!(
+                        gateway_name = %gateway_id.name,
+                        gateway_ip = %gateway_id.ip,
+                        source_address = %source_address,
+                        "Received ACK"
+                    );
+                    outtx
+                        .get(&source_address)
+                        .map(|router| router.send(Ok(response)));
+                }
+                DiagnosticResponse::Pending(source_address)
+                | DiagnosticResponse::BusyRepeatRequest(source_address)
+                | DiagnosticResponse::TemporarilyNotAvailable(source_address) => {
+                    outtx
+                        .get(&source_address)
+                        .map(|router| router.send(Ok(response)));
+                }
+                DiagnosticResponse::Msg(msg) => {
+                    let addr = u16::from_be_bytes(msg.source_address);
+                    let target_addr = u16::from_be_bytes(msg.target_address);
+                    if send_diagnostic_message_ack {
+                        // send DoIP DiagnosticMessageAck before returning the message to the caller
+                        let _ = ack_tx
+                            .send(DoipPayload::DiagnosticMessageAck(DiagnosticMessageAck {
+                                source_address: msg.target_address,
+                                target_address: msg.source_address,
+                                ack_code: DiagnosticAckCode::Acknowledged,
+                                previous_message: Vec::new(), // skip optional previous payload
+                            }))
+                            .await
+                            .inspect_err(|e| {
+                                tracing::error!(
+                                    error = ?e,
+                                    gateway_name = %gateway_id.name,
+                                    gateway_ip = %gateway_id.ip,
+                                    source_address = %addr,
+                                    target_address = %target_addr,
+                                    "Failed to send DiagnosticMessageAck"
+                                );
+                            });
+                    }
+                    tracing::debug!("DOIP OK - Returning response from ECU {:04x}", addr);
+                    outtx
+                        .get(&addr)
+                        .map(|router| router.send(Ok(DiagnosticResponse::Msg(msg))));
+                }
+                DiagnosticResponse::Nack(nack) => {
+                    tracing::debug!(nack = ?nack, "Received NACK");
+                    let addr = u16::from_be_bytes(nack.source_address);
+                    outtx
+                        .get(&addr)
+                        .map(|router| router.send(Ok(DiagnosticResponse::Nack(nack))));
+                }
+                DiagnosticResponse::GenericNack(_) => {
+                    // todo implement generic NACK handling according to spec #22
+                    tracing::error!("Received Generic NACK");
+                }
+                DiagnosticResponse::AliveCheckResponse => {
+                    tracing::debug!(
+                        "Received Alive Check Response. Probably ECU responded too slow"
+                    );
+                }
+                DiagnosticResponse::TesterPresentNRC(c) => {
+                    tracing::debug!(nrc = ?c, "Received Tester Present NRC");
+                }
+            }
+        }
+        Some(Err(err)) => {
+            match err {
+                ConnectionError::Closed => {
+                    if let Err(e) = reset_tx
+                        .send("Connection has been closed.".to_owned())
+                        .await
+                    {
+                        tracing::error!(error = ?e, "Failed to send connection reset request");
+                    }
+                }
+                _ => {
+                    // for POC purposes we just log the error and do not reset the connection
+                    tracing::error!(
+                        error = ?err,
+                        "Error reading response, either due to timeout or decoding issue"
+                    );
+                }
+            }
+        }
+        None => {
+            // No data to receive, but try_read timed out
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use cda_interfaces::{HashMap, HashMapExtensions, service_ids};
+    use doip_definitions::payload::DiagnosticMessage;
+    use tokio::sync::{broadcast, mpsc};
+
+    use crate::{
+        DiagnosticResponse,
+        connections::{GatewayId, handle_response},
+    };
+
+    #[tokio::test]
+    async fn no_ack_sent_when_ack_disabled() {
+        let ecu_addr: u16 = 0x0E00;
+        let tester_addr: u16 = 0x0E01;
+
+        // outtx: broadcast channel so handle_response can route the message
+        let (outtx_tx, mut outtx_rx) =
+            broadcast::channel::<Result<DiagnosticResponse, super::EcuError>>(4);
+        let mut outtx = HashMap::new();
+        outtx.insert(ecu_addr, outtx_tx);
+
+        // reset channel - must not receive anything in this test
+        let (reset_tx, mut reset_rx) = mpsc::channel::<super::ConnectionResetReason>(1);
+
+        // ack channel - the subject under test: nothing should arrive here
+        let (ack_tx, mut ack_rx) = mpsc::channel::<doip_definitions::payload::DoipPayload>(4);
+
+        let diagnostic_msg_response = DiagnosticResponse::Msg(DiagnosticMessage {
+            source_address: ecu_addr.to_be_bytes(),
+            target_address: tester_addr.to_be_bytes(),
+            // arbitrary UDS ReadDataByIdentifier positive response
+            message: vec![service_ids::READ_DATA_BY_IDENTIFIER, 0xF1, 0x90],
+        });
+        handle_response(
+            &GatewayId {
+                ip: "127.0.0.1".to_owned(),
+                name: "test-gw".to_owned(),
+            },
+            &outtx,
+            &reset_tx,
+            &ack_tx,
+            false, // ACK disabled
+            Some(Ok(diagnostic_msg_response)),
+        )
+        .await;
+
+        // The diagnostic message must still be forwarded to the ECU channel
+        assert!(
+            outtx_rx.try_recv().is_ok(),
+            "diagnostic message was not forwarded to the ECU broadcast channel"
+        );
+
+        // No ACK must have been enqueued on the ack channel
+        assert!(
+            ack_rx.try_recv().is_err(),
+            "an ACK was sent despite send_diagnostic_message_ack being false"
+        );
+
+        // No connection reset must have been triggered
+        assert!(
+            reset_rx.try_recv().is_err(),
+            "unexpected connection reset was triggered"
+        );
+    }
 }
