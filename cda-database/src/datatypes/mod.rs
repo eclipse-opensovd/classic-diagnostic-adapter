@@ -592,7 +592,7 @@ impl DiagnosticDatabase {
             LogicalAddressType::Gateway(p) | LogicalAddressType::Functional(p) => (p, None),
         };
 
-        match comparam::lookup(diag_database, protocol, &param_name)? {
+        match comparam::lookup(diag_database, protocol, param_name)? {
             ComParamValue::Simple(simple_value) => {
                 let val_as_u16 = simple_value.value.parse::<u16>().map_err(|e| {
                     DiagServiceError::ParameterConversionError(format!("Invalid address: {e}"))

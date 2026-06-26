@@ -792,7 +792,9 @@ fn process_coded_constants(
 
 #[cfg(test)]
 mod tests {
-    use cda_interfaces::{PayloadDecoder, PayloadEncoder, diagservices::UdsPayloadData, service_ids};
+    use cda_interfaces::{
+        PayloadDecoder, PayloadEncoder, diagservices::UdsPayloadData, service_ids,
+    };
     use cda_plugin_security::DefaultSecurityPluginData;
     use serde_json::json;
 

@@ -266,6 +266,7 @@ impl ConfigSanity for DatabaseNamingConvention {
         const SHORT_NAME_AFFIX_KEY: &str = "database_naming_convention.short_name_affixes";
         const LONG_NAME_AFFIX_KEY: &str = "database_naming_convention.long_name_affixes";
         const SERVICE_NAME_AFFIX_KEY: &str = "database_naming_convention.service_name_affixes";
+        const ACTION_AFFIX_KEY: &str = "database_naming_convention.action_affixes";
 
         fn validate_affix(
             affix: &str,
@@ -306,6 +307,18 @@ impl ConfigSanity for DatabaseNamingConvention {
             for affix in affixes {
                 validate_affix(affix, pos, SERVICE_NAME_AFFIX_KEY)?;
             }
+        }
+
+        // Validate action affixes
+        let action_pos = &self.action_affixes.position;
+        for affix in [
+            &self.action_affixes.read,
+            &self.action_affixes.write,
+            &self.action_affixes.start,
+            &self.action_affixes.request_results,
+            &self.action_affixes.stop,
+        ] {
+            validate_affix(affix, action_pos, ACTION_AFFIX_KEY)?;
         }
 
         Ok(())
