@@ -65,7 +65,11 @@ pub(super) fn lookup(
             })
         })
         .ok_or_else(|| {
-            DiagServiceError::NotFound(format!("No ComParamRef found for {param_name}"))
+            DiagServiceError::NotFound(format!(
+                "No ComParamRef found for {param_name}, meaning we cannot lookup the protocol for \
+                 this comparam, the protocol lookup can be disabled by using `ignore_protocol` if \
+                 the database only contains one protocol"
+            ))
         })?;
 
     let cp = cp_ref.com_param().ok_or(DiagServiceError::InvalidDatabase(
