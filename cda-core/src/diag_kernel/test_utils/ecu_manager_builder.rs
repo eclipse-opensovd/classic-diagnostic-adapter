@@ -315,7 +315,7 @@ pub(crate) fn create_ecu_manager_with_parameter_metadata()
 
     // Create a service with CODED-CONST parameters
     let sid = service_ids::READ_DATA_BY_IDENTIFIER;
-    let dc_name = "RDBI_TestService";
+    let dc_name = "TestService";
 
     // Create DOP for VALUE parameter
     let value_dop =
@@ -327,7 +327,7 @@ pub(crate) fn create_ecu_manager_with_parameter_metadata()
     let request = {
         let sid_param = create_sid_param!(db_builder, sid);
         let did_param =
-            db_builder.create_coded_const_param("RDBI_DID", "0xF190", 1, 0, 16, DataType::UInt32);
+            db_builder.create_coded_const_param("DID", "0xF190", 1, 0, 16, DataType::UInt32);
         let value_param = db_builder.create_value_param("data", value_dop, 3, 0);
         db_builder.create_request(Some(vec![sid_param, did_param, value_param]), None)
     };
@@ -1535,6 +1535,77 @@ pub(crate) fn create_ecu_manager_with_phys_const_structure_dop_service() -> (
     (ecu_manager, dc, sid_response)
 }
 
+/// Create an [`EcuManager`] with a single service whose request contains:
+///   byte 0: SID (CODED-CONST, 0x22 = `ReadDataByIdentifier`)
+///   byte 1: MODE (VALUE param, Normal DOP with `TextTable` compu method,
+///            `physical_default_value` = "ACTIVE", coded value = 1, u8)
+///
+/// This exercises the path in `map_param_value_to_uds` where
+/// `physical_default_value` is a non-numeric string that must be resolved
+/// through the `TextTable` compu method (not parsed as a number).
+pub(crate) fn create_ecu_manager_with_value_default_text_table_service() -> (
+    crate::diag_kernel::ecumanager::EcuManager<DefaultSecurityPluginData>,
+    cda_interfaces::DiagComm,
+    u8,
+) {
+    let mut db_builder = EcuDataBuilder::new();
+    let u8_diag_type = db_builder.create_diag_coded_type_standard_length(8, DataType::UInt32);
+
+    // Create a TextTable compu method: "ACTIVE" -> 1, "INACTIVE" -> 0
+    let compu_text_table = db_builder.create_text_table_compu_method(&[
+        (
+            "INACTIVE",
+            0,
+            datatypes::IntervalType::Closed,
+            datatypes::IntervalType::Closed,
+        ),
+        (
+            "ACTIVE",
+            1,
+            datatypes::IntervalType::Closed,
+            datatypes::IntervalType::Closed,
+        ),
+    ]);
+
+    // Create Normal DOP with the TextTable compu method
+    let mode_dop = db_builder.create_regular_normal_dop("mode_dop", u8_diag_type, compu_text_table);
+
+    let sid = service_ids::READ_DATA_BY_IDENTIFIER;
+    let dc_name = "TestValueDefaultTextTableService";
+    let protocol_name = Protocol::default().to_string();
+    let protocol = db_builder.create_protocol(&protocol_name, None, None, None);
+    let diag_comm = new_diag_comm!(db_builder, dc_name, protocol);
+
+    // Request: SID (coded const) + MODE (VALUE param with physical_default_value "ACTIVE")
+    let request = {
+        let sid_param = create_sid_param!(db_builder, "sid", sid);
+        let mode_param =
+            db_builder.create_value_param_with_default("MODE", mode_dop, 1, 0, Some("ACTIVE"));
+        db_builder.create_request(Some(vec![sid_param, mode_param]), None)
+    };
+
+    let pos_response = {
+        let sid_param = create_sid_param!(db_builder, "pos_sid", (sid + UDS_ID_RESPONSE_BITMASK));
+        db_builder.create_response(ResponseType::Positive, Some(vec![sid_param]), None)
+    };
+
+    let diag_service =
+        new_diag_service!(db_builder, diag_comm, request, vec![pos_response], vec![]);
+
+    let db = finish_db!(db_builder, protocol, vec![diag_service]);
+
+    let ecu_manager = new_ecu_manager(db);
+
+    let dc = cda_interfaces::DiagComm {
+        name: dc_name.to_owned(),
+        type_: DiagCommType::Data,
+        lookup_name: Some(dc_name.to_owned()),
+        subfunction_id: None,
+    };
+
+    (ecu_manager, dc, sid)
+}
+
 /// Helper function to create an ECU manager with services that have state transition refs.
 ///
 /// `security_transition` controls which security transition the service
@@ -2208,4 +2279,77 @@ pub(crate) fn create_ecu_manager_with_security_access_services() -> (
         request_seed_12_name.to_owned(),
         send_key_01_name.to_owned(),
     )
+}
+
+/// Creates an `EcuManager` with a service that uses a `PhysConst` parameter
+/// whose value is a **text-table key** (e.g. `"ACTIVE"`) rather than a numeric literal.
+///
+/// Service layout (request):
+///   byte 0: SID (CODED-CONST, 0x31 = `RoutineControl`)
+///   byte 1: MODE (PHYS-CONST, Normal DOP with `TextTable` compu method,
+///            `phys_constant_value` = "ACTIVE", coded value = 1, u8)
+///
+/// This exercises the path in `map_phys_const_param_to_uds` where
+/// `phys_constant_value` is a non-numeric string that must be resolved
+/// through the `TextTable` compu method (not parsed as a number).
+pub(crate) fn create_ecu_manager_with_phys_const_text_table_service() -> (
+    crate::diag_kernel::ecumanager::EcuManager<DefaultSecurityPluginData>,
+    cda_interfaces::DiagComm,
+    u8,
+) {
+    let mut db_builder = EcuDataBuilder::new();
+    let u8_diag_type = db_builder.create_diag_coded_type_standard_length(8, DataType::UInt32);
+
+    // Create a TextTable compu method: "ACTIVE" -> 1, "INACTIVE" -> 0
+    let compu_text_table = db_builder.create_text_table_compu_method(&[
+        (
+            "INACTIVE",
+            0,
+            datatypes::IntervalType::Closed,
+            datatypes::IntervalType::Closed,
+        ),
+        (
+            "ACTIVE",
+            1,
+            datatypes::IntervalType::Closed,
+            datatypes::IntervalType::Closed,
+        ),
+    ]);
+
+    // Create Normal DOP with the TextTable compu method
+    let mode_dop = db_builder.create_regular_normal_dop("mode_dop", u8_diag_type, compu_text_table);
+
+    let sid = service_ids::READ_DATA_BY_IDENTIFIER;
+    let dc_name = "TestPhysConstTextTableService";
+    let protocol_name = Protocol::default().to_string();
+    let protocol = db_builder.create_protocol(&protocol_name, None, None, None);
+    let diag_comm = new_diag_comm!(db_builder, dc_name, protocol);
+
+    // Request: SID (coded const) + MODE (phys const with text-table value "ACTIVE")
+    let request = {
+        let sid_param = create_sid_param!(db_builder, "sid", sid);
+        let mode_param = db_builder.create_phys_const_param("MODE", Some("ACTIVE"), mode_dop, 1, 0);
+        db_builder.create_request(Some(vec![sid_param, mode_param]), None)
+    };
+
+    let pos_response = {
+        let sid_param = create_sid_param!(db_builder, "pos_sid", (sid + UDS_ID_RESPONSE_BITMASK));
+        db_builder.create_response(ResponseType::Positive, Some(vec![sid_param]), None)
+    };
+
+    let diag_service =
+        new_diag_service!(db_builder, diag_comm, request, vec![pos_response], vec![]);
+
+    let db = finish_db!(db_builder, protocol, vec![diag_service]);
+
+    let ecu_manager = new_ecu_manager(db);
+
+    let dc = cda_interfaces::DiagComm {
+        name: dc_name.to_owned(),
+        type_: DiagCommType::Data,
+        lookup_name: Some(dc_name.to_owned()),
+        subfunction_id: None,
+    };
+
+    (ecu_manager, dc, sid)
 }
