@@ -186,11 +186,11 @@ jobs:
           # Use cargo llvm-cov report with the merged profdata — this uses the same
           # workspace binaries cargo llvm-cov built, so source paths and line counts
           # are identical to what main's Coverage job produces.
-          cargo llvm-cov report --locked --workspace --features integration-tests \
+          cargo llvm-cov report \
             --instr-profile target/llvm-cov-merged.profdata \
             --lcov --output-path lcov-merged.info
 
-          SUMMARY=$(cargo llvm-cov report --locked --workspace --features integration-tests \
+          SUMMARY=$(cargo llvm-cov report \
             --instr-profile target/llvm-cov-merged.profdata 2>&1 | tail -3 || true)
           echo "$SUMMARY"
           TOTAL_COV=$(echo "$SUMMARY" | grep -oP 'TOTAL\s+.*\s+\K[0-9.]+(?=%)' | tail -1 || echo "0")
