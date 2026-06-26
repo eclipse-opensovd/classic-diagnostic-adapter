@@ -597,18 +597,35 @@ impl<T: EcuAddresses + DoipComParams> EcuGateway for DoipDiagGateway<T> {
                                             )
                                             .await;
                                         }
+                                        Ok(
+                                            response @ (DiagnosticResponse::Msg(_)
+                                            | DiagnosticResponse::Pending(_)
+                                            | DiagnosticResponse::BusyRepeatRequest(_)
+                                            | DiagnosticResponse::TemporarilyNotAvailable(
+                                                _,
+                                            )),
+                                        ) => {
+                                            // Some ECUs do not send an ACK before the
+                                            // diagnostic response. Treat a valid diagnostic
+                                            // response as an implicit ACK and forward it
+                                            // directly to the response channel.
+                                            tracing::debug!(
+                                                "Received diagnostic response before ACK, \
+                                                 treating as implicit ACK"
+                                            );
+                                            try_send_uds_response(
+                                                &response_sender,
+                                                response.try_into(),
+                                            )
+                                            .await;
+                                            break 'ack_waiting true;
+                                        }
                                         Ok(msg) => {
                                             tracing::warn!(
                                                 ecu_name = %transmission_params.ecu_name,
                                                 "Expected ACK/NACK but received unexpected message: {:?}",
                                                 msg
                                             );
-                                            // any response but ACK/NACK is unexpected because
-                                            // every sent message should be answered with
-                                            // ACK or NACK before sending anything else.
-                                            // however, we should still continue waiting
-                                            // for ACK/NACK in case we get something unexpected,
-                                            // as some ECUs might not follow the spec properly.
                                             continue 'ack_waiting;
                                         }
                                         Err(e) => {
