@@ -327,7 +327,6 @@ async fn connection_handler(
         ReceiverChannels {
             send_pending_rx,
             reset_tx: conn_reset_tx,
-            send_tx: intx.clone(),
         },
     ));
     drop(tasks);

@@ -472,6 +472,25 @@
 #     "_control",
 # ]
 
+# Affixes used to derive a service lookup name from a [`DiagCommAction`].
+#
+# These are applied when a [`crate::DiagComm`] has no explicit `lookup_name`
+# and the lookup name must be derived from the diagnostic communication's
+# action (read, write, start, request results, stop).
+[database.naming_convention.action_affixes]
+# Position of the action affixes relative to the service name.
+# position = "Suffix"
+# Affix applied for [`DiagCommAction::Read`].
+# read = "_Read"
+# Affix applied for [`DiagCommAction::RequestResults`].
+# request_results = "_RequestResults"
+# Affix applied for [`DiagCommAction::Start`].
+# start = "_Start"
+# Affix applied for [`DiagCommAction::Stop`].
+# stop = "_Stop"
+# Affix applied for [`DiagCommAction::Write`].
+# write = "_Write"
+
 # Database semantics to identify the type of service
 [database.naming_convention.semantics]
 # Semantic to identify `data` parameter within a UDS response, by matching the

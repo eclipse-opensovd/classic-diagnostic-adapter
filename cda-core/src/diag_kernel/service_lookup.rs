@@ -19,8 +19,7 @@
 
 use cda_database::datatypes;
 use cda_interfaces::{
-    DiagCommAction, DiagServiceError, HashMap, STRINGS, StringId,
-    util::starts_with_ignore_ascii_case,
+    DiagServiceError, HashMap, STRINGS, StringId, util::starts_with_ignore_ascii_case,
 };
 use cda_plugin_security::SecurityPlugin;
 use tokio::sync::RwLock;
@@ -142,20 +141,14 @@ impl<S: SecurityPlugin> EcuManager<S> {
             )));
         }
 
-        let lookup_name = if let Some(name) = &diag_comm.lookup_name {
-            name.to_owned()
-        } else {
-            match diag_comm.action() {
-                DiagCommAction::Read => format!("{}_Read", diag_comm.name),
-                DiagCommAction::Write => format!("{}_Write", diag_comm.name),
-                DiagCommAction::Start => format!("{}_Start", diag_comm.name),
-                DiagCommAction::RequestResults => {
-                    format!("{}_RequestResults", diag_comm.name)
-                }
-                DiagCommAction::Stop => format!("{}_Stop", diag_comm.name),
-            }
-        }
-        .to_lowercase();
+        let lookup_name = diag_comm
+            .lookup_name
+            .clone()
+            .unwrap_or_else(|| {
+                self.database_naming_convention
+                    .apply_action_affix(&diag_comm.name, &diag_comm.action())
+            })
+            .to_lowercase();
 
         let prefixes = diag_comm.type_.service_prefixes();
         let predicate = |service: &datatypes::DiagService<'_>| {
