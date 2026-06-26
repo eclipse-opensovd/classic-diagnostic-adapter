@@ -19,4 +19,4 @@ echo "Using DoIpTesterIp: $DOIP_TESTER_IP"
 
 find "." -maxdepth 1 -type f -print0 | xargs -0 sha1sum
 
-/app/opensovd-cda --tester-address "$DOIP_TESTER_IP" "$@"
+exec /app/opensovd-cda --tester-address "$DOIP_TESTER_IP" "$@"

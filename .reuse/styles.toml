@@ -11,5 +11,5 @@
 
 [styles]
 c = ["*.rs", "*.kt", "*.kts", "*.fbs"]
-python = [".env.example", ".gitkeep", ".markdownlintignore", ".yamlfmt"]
+python = [".env.example", ".gitkeep", ".markdownlintignore", ".yamlfmt", "Dockerfile.coverage"]
 html = ["*.odx-*"]
