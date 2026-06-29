@@ -711,7 +711,7 @@ mod tests {
 
         let ecu_manager = create_ecu_manager_with_parameter_metadata();
 
-        let result = ecu_manager.get_request_parameter_metadata("RDBI_TestService");
+        let result = ecu_manager.get_request_parameter_metadata("TestService");
         assert!(result.is_ok());
 
         let metadata = result.unwrap();
@@ -726,7 +726,7 @@ mod tests {
             assert_eq!(coded_value, "34");
         }
 
-        let did_param = metadata.iter().find(|m| m.name == "RDBI_DID").unwrap();
+        let did_param = metadata.iter().find(|m| m.name == "DID").unwrap();
         if let ParameterTypeMetadata::CodedConst { coded_value } = &did_param.param_type {
             assert_eq!(coded_value, "0xF190");
         } else {
@@ -789,7 +789,7 @@ mod tests {
     fn test_get_mux_cases_for_service_no_mux_cases() {
         let ecu_manager = create_ecu_manager_with_parameter_metadata();
 
-        let result = ecu_manager.get_mux_cases_for_service("RDBI_TestService");
+        let result = ecu_manager.get_mux_cases_for_service("TestService");
         assert!(result.is_ok());
 
         let mux_cases = result.unwrap();
@@ -802,12 +802,12 @@ mod tests {
 
         let ecu_manager = create_ecu_manager_with_parameter_metadata();
 
-        let result = ecu_manager.get_request_parameter_metadata("RDBI_TestService");
+        let result = ecu_manager.get_request_parameter_metadata("TestService");
         assert!(result.is_ok());
 
         let metadata = result.unwrap();
 
-        let did_param = metadata.iter().find(|m| m.name == "RDBI_DID").unwrap();
+        let did_param = metadata.iter().find(|m| m.name == "DID").unwrap();
 
         if let ParameterTypeMetadata::CodedConst { coded_value } = &did_param.param_type {
             let did_value = if coded_value.starts_with("0x") || coded_value.starts_with("0X") {
