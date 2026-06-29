@@ -188,6 +188,7 @@ pub(crate) struct EcuConnectionTarget<
     pub(crate) ecu_connection_tx: Mutex<Option<EcuConnectionSendVariant<T>>>,
     pub(crate) gateway_name: String,
     pub(crate) gateway_ip: String,
+    pub(crate) tester_address: [u8; 2],
 }
 
 pub struct EcuConnectionSendGuard<'a, T: AsyncWrite + Unpin = TcpStream> {
@@ -375,6 +376,7 @@ pub(crate) async fn establish_ecu_connection(
                         ecu_connection_rx: Mutex::new(Some(read)),
                         gateway_name: gateway_name.to_owned(),
                         gateway_ip: gateway_ip.to_owned(),
+                        tester_address: routing_activation_request.source_address,
                     })
                 }
                 ActivationCode::DeniedRequestEncryptedTLSConnection => {
@@ -485,6 +487,7 @@ pub(crate) async fn establish_tls_ecu_connection(
                 ecu_connection_rx: Mutex::new(Some(read)),
                 gateway_name: gateway_name.to_owned(),
                 gateway_ip: gateway_ip.to_owned(),
+                tester_address: routing_activation_request.source_address,
             }) // Routing activated
         }
         Err(e) => Err(ConnectionError::RoutingError(format!(
