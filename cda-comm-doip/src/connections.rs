@@ -18,7 +18,7 @@ use cda_interfaces::{
     dlt_ctx, service_ids,
 };
 use doip_definitions::payload::{
-    ActivationType, AliveCheckRequest, DiagnosticAckCode, DiagnosticMessageAck, DoipPayload,
+    ActivationType, AliveCheckResponse, DiagnosticAckCode, DiagnosticMessageAck, DoipPayload,
     RoutingActivationRequest,
 };
 use thiserror::Error;
@@ -530,7 +530,7 @@ where
 
                     let (alive_response, conn_gateway_name, conn_gateway_ip) = {
                         (
-                            send_alive_request(&gateway_conn).await,
+                            send_alive_response(&gateway_conn, gateway_conn.tester_address).await,
                             gateway_conn.gateway_name.clone(),
                             gateway_conn.gateway_ip.clone(),
                         )
@@ -795,7 +795,10 @@ fn spawn_gateway_receiver_task<T>(
     });
 }
 
-async fn send_alive_request<T>(conn: &EcuConnectionTarget<T>) -> Result<(), ()>
+async fn send_alive_response<T>(
+    conn: &EcuConnectionTarget<T>,
+    tester_address: [u8; 2],
+) -> Result<(), ()>
 where
     T: AsyncRead + AsyncWrite + Unpin + Send + 'static,
 {
@@ -843,7 +846,9 @@ where
     };
     match sender
         .get_sender()
-        .send(DoipPayload::AliveCheckRequest(AliveCheckRequest {}))
+        .send(DoipPayload::AliveCheckResponse(AliveCheckResponse {
+            source_address: tester_address,
+        }))
         .await
     {
         Ok(()) => {
@@ -963,6 +968,7 @@ mod tests {
             ecu_connection_tx: Mutex::new(Some(EcuConnectionSendVariant::Plain(write_half))),
             gateway_name: String::new(),
             gateway_ip: String::new(),
+            tester_address: [0, 0],
         };
         (target, server_conn)
     }
