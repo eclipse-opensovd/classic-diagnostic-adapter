@@ -121,7 +121,7 @@ percent-encoding = "2.3.2"
 
 # ---- opentelemetry crates ----
 opentelemetry = { version = "0.31.0", default-features = false }
-opentelemetry_sdk = { version = "0.31.0", default-features = false }
+opentelemetry_sdk = { version = "0.32.1", default-features = false }
 opentelemetry-otlp = "0.31.0"
 opentelemetry-semantic-conventions = "0.31.0"
 
