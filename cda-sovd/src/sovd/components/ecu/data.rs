@@ -292,10 +292,7 @@ pub(crate) mod diag_service {
             extract::{Path, State},
             response::{IntoResponse as _, Response},
         };
-        use cda_interfaces::{
-            DynamicPlugin, SchemaProvider, UdsEcu, diagservices::DiagServiceResponse,
-            file_manager::FileManager,
-        };
+        use cda_interfaces::{DynamicPlugin, SchemaProvider, UdsEcu, file_manager::FileManager};
         use cda_plugin_security::Secured;
 
         use crate::{
@@ -305,14 +302,10 @@ pub(crate) mod diag_service {
 
         openapi::aide_helper::gen_path_param!(DataDocsPathParam service String);
 
-        pub(crate) async fn get<
-            R: DiagServiceResponse,
-            T: UdsEcu + SchemaProvider + Clone,
-            U: FileManager,
-        >(
+        pub(crate) async fn get<T: UdsEcu + SchemaProvider + Clone, U: FileManager>(
             UseApi(Secured(security_plugin), _): UseApi<Secured, ()>,
             Path(DataDocsPathParam { service }): Path<DataDocsPathParam>,
-            State(WebserverEcuState { ecu_name, uds, .. }): State<WebserverEcuState<R, T, U>>,
+            State(WebserverEcuState { ecu_name, uds, .. }): State<WebserverEcuState<T, U>>,
         ) -> Response {
             let security_plugin: DynamicPlugin = security_plugin;
 
@@ -354,8 +347,7 @@ pub(crate) mod diag_service {
             use axum::{extract::State, http::StatusCode};
             use cda_interfaces::{
                 DiagServiceError, datatypes::ComponentDataInfo,
-                diagservices::mock::MockDiagServiceResponse, file_manager::mock::MockFileManager,
-                mock::MockUdsEcu,
+                file_manager::mock::MockFileManager, mock::MockUdsEcu,
             };
             use cda_plugin_security::{Secured, mock::TestSecurityPlugin};
 
@@ -377,14 +369,13 @@ pub(crate) mod diag_service {
                         }])
                     });
 
-                let state =
-                    create_test_webserver_state::<
-                        MockDiagServiceResponse,
-                        MockUdsEcu,
-                        MockFileManager,
-                    >("TestECU".to_owned(), mock_uds, MockFileManager::new());
+                let state = create_test_webserver_state::<MockUdsEcu, MockFileManager>(
+                    "TestECU".to_owned(),
+                    mock_uds,
+                    MockFileManager::new(),
+                );
 
-                let response = get::<MockDiagServiceResponse, MockUdsEcu, MockFileManager>(
+                let response = get::<MockUdsEcu, MockFileManager>(
                     UseApi(
                         Secured(Box::new(TestSecurityPlugin)),
                         std::marker::PhantomData,
@@ -421,14 +412,13 @@ pub(crate) mod diag_service {
                         }])
                     });
 
-                let state =
-                    create_test_webserver_state::<
-                        MockDiagServiceResponse,
-                        MockUdsEcu,
-                        MockFileManager,
-                    >("TestECU".to_owned(), mock_uds, MockFileManager::new());
+                let state = create_test_webserver_state::<MockUdsEcu, MockFileManager>(
+                    "TestECU".to_owned(),
+                    mock_uds,
+                    MockFileManager::new(),
+                );
 
-                let response = get::<MockDiagServiceResponse, MockUdsEcu, MockFileManager>(
+                let response = get::<MockUdsEcu, MockFileManager>(
                     UseApi(
                         Secured(Box::new(TestSecurityPlugin)),
                         std::marker::PhantomData,
@@ -450,14 +440,13 @@ pub(crate) mod diag_service {
                     .expect_get_components_data_info()
                     .returning(|_, _| Err(DiagServiceError::NotFound("ECU not found".to_owned())));
 
-                let state =
-                    create_test_webserver_state::<
-                        MockDiagServiceResponse,
-                        MockUdsEcu,
-                        MockFileManager,
-                    >("TestECU".to_owned(), mock_uds, MockFileManager::new());
+                let state = create_test_webserver_state::<MockUdsEcu, MockFileManager>(
+                    "TestECU".to_owned(),
+                    mock_uds,
+                    MockFileManager::new(),
+                );
 
-                let response = get::<MockDiagServiceResponse, MockUdsEcu, MockFileManager>(
+                let response = get::<MockUdsEcu, MockFileManager>(
                     UseApi(
                         Secured(Box::new(TestSecurityPlugin)),
                         std::marker::PhantomData,
