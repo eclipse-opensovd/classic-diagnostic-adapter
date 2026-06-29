@@ -24,7 +24,10 @@ use cda_interfaces::{
 };
 use doip_definitions::{
     header::ProtocolVersion,
-    payload::{DiagnosticMessage, DiagnosticMessageNack, DoipPayload, GenericNack},
+    payload::{
+        DiagnosticMessage, DiagnosticMessageNack, DoipPayload, GenericNack,
+        RoutingActivationRequest,
+    },
 };
 use futures::FutureExt;
 use thiserror::Error;
@@ -33,9 +36,8 @@ use tokio_util::sync::CancellationToken;
 
 use crate::{
     config::DoipConfig,
-    connections::{EcuError, GatewayConfig, GatewayState},
-    ecu_connection::ConnectionConfig,
-    socket::{DoIPConfig, DoIPUdpSocket},
+    connections::{EcuError, GatewayState},
+    socket::{DoIPUdpSocket, DoipSocketConfig},
 };
 
 pub mod config;
@@ -84,11 +86,78 @@ pub struct DoipDiagGateway<T: EcuAddresses + DoipComParams> {
     vam_listener_handle: Arc<tokio::task::JoinHandle<()>>,
 }
 
+/// A gateway discovered on the network during `DoIP` vehicle discovery.
+///
+/// Contains the IP address, ECU name, and logical address obtained from a
+/// `VehicleIdentificationResponse` or `EntityStatusResponse` message.
 #[derive(Debug)]
-struct DoipTarget {
-    ip: String,
-    ecu: String,
-    logical_address: u16,
+pub(crate) struct DiscoveredGateway {
+    pub(crate) ip: String,
+    pub(crate) ecu_name: String,
+    pub(crate) logical_address: u16,
+}
+
+/// Transport-level settings shared across all `DoIP` gateway connections.
+/// Built once from `DoipConfig` in `DoipDiagGateway::new`; cloned into each
+/// `GatewayDoipConfig` when a specific gateway is discovered.
+#[derive(Clone)]
+pub(crate) struct DoipTransportConfig {
+    /// IP address of the diagnostic tester interface.
+    pub(crate) tester_ip: String,
+    /// TCP port for `DoIP` communication.
+    pub(crate) port: u16,
+    /// TCP port for `DoIP` over TLS communication.
+    pub(crate) tls_port: u16,
+    /// `DoIP` socket-level settings (protocol version, ack behavior).
+    pub(crate) socket: DoipSocketConfig,
+    /// Timeout for sending a single `DoIP` message.
+    pub(crate) send_timeout: Duration,
+    /// Interval between alive-check requests on idle connections (0 = disabled).
+    pub(crate) alive_check_interval: Duration,
+}
+
+/// Per-gateway configuration combining the discovered gateway identity with the
+/// shared transport settings.  Only constructed inside `handle_gateway_connection`
+/// once a real `ip` and `name` are known - never holds placeholder values.
+#[derive(Clone)]
+pub(crate) struct GatewayDoipConfig {
+    /// IP address of the gateway ECU.
+    pub(crate) gateway_ip: String,
+    /// Name of the gateway ECU.
+    pub(crate) name: String,
+    /// UDS address of the tester.
+    pub(crate) tester_address: [u8; 2],
+    /// Shared transport-level settings (tester IP, ports, socket config, timeouts).
+    pub(crate) transport: DoipTransportConfig,
+}
+
+/// ECU-lifecycle timeouts sourced from `EcuAddresses` / `DoipComParams` during gateway setup.
+#[derive(Clone, Copy)]
+pub(crate) struct EcuTimeouts {
+    pub(crate) routing_activation: Duration,
+    pub(crate) retry_delay: Duration,
+    pub(crate) connection: Duration,
+    pub(crate) max_retry_attempts: u32,
+}
+
+/// Parameters needed to (re-)establish a TCP connection to one `DoIP` gateway.
+/// Cloned into the reconnect task and passed to `ecu_connection` functions;
+/// does **not** carry one-time setup data such as the ECU list or variant-detection channel.
+#[derive(Clone)]
+pub(crate) struct GatewayConnectionConfig {
+    pub(crate) doip: GatewayDoipConfig,
+    pub(crate) routing_activation_request: RoutingActivationRequest,
+    pub(crate) ecu_timeouts: EcuTimeouts,
+}
+
+/// One-shot setup bundle consumed by `connection_handler` when bringing up a new gateway.
+/// Carries `GatewayConnectionConfig` plus the data that is only needed during initial
+/// channel creation (`ecus`) and reconnection signlling (`variant_detection`).
+#[derive(Clone)]
+pub(crate) struct GatewaySetup {
+    pub(crate) connection: GatewayConnectionConfig,
+    pub(crate) ecus: Vec<u16>,
+    pub(crate) variant_detection: Option<(mpsc::Sender<Vec<String>>, Vec<String>)>,
 }
 
 struct DoipEcu {
@@ -185,23 +254,21 @@ impl<T: EcuAddresses + DoipComParams> DoipDiagGateway<T> {
             ..
         } = doip_config;
         let gateway_port = *gateway_port;
-        let connection_config = ConnectionConfig {
-            source_ip: tester_ip.to_owned(),
+        let transport_config = DoipTransportConfig {
+            tester_ip: tester_ip.to_owned(),
             port: gateway_port,
             tls_port: *tls_port,
-        };
-        let doip_connection_config = DoIPConfig {
-            protocol_version: ProtocolVersion::try_from(protocol_version).map_err(|err| {
-                DoipGatewaySetupError::InvalidConfiguration(format!(
-                    "Invalid DoIP protocol version: {err}"
-                ))
-            })?,
-            send_diagnostic_message_ack: *send_diagnostic_message_ack,
+            socket: DoipSocketConfig {
+                protocol_version: ProtocolVersion::try_from(protocol_version).map_err(|err| {
+                    DoipGatewaySetupError::InvalidConfiguration(format!(
+                        "Invalid DoIP protocol version: {err}"
+                    ))
+                })?,
+                send_diagnostic_message_ack: *send_diagnostic_message_ack,
+            },
             send_timeout: Duration::from_millis(*send_timeout_ms),
             alive_check_interval: Duration::from_secs(*alive_check_interval_secs),
         };
-        let send_timeout = Duration::from_millis(*send_timeout_ms);
-        let alive_check_interval = Duration::from_secs(*alive_check_interval_secs);
 
         tracing::info!("Initializing DoipDiagGateway");
 
@@ -257,14 +324,10 @@ impl<T: EcuAddresses + DoipComParams> DoipDiagGateway<T> {
                     .get(&gateway.logical_address)
                     .cloned()
                     .unwrap_or_default();
+
                 if let Ok(logical_address) = connections::handle_gateway_connection::<T>(
                     gateway,
-                    &GatewayConfig {
-                        connection: connection_config.clone(),
-                        doip: doip_connection_config,
-                        send_timeout,
-                        alive_check_interval,
-                    },
+                    &transport_config,
                     &GatewayState {
                         doip_connections: Arc::clone(&doip_connections),
                         ecus: Arc::clone(&ecus),
@@ -290,9 +353,7 @@ impl<T: EcuAddresses + DoipComParams> DoipDiagGateway<T> {
         };
 
         let vam_listener_handle = vir_vam::listen_for_vams(
-            connection_config,
-            gateway_port,
-            doip_connection_config,
+            transport_config,
             mask,
             Arc::clone(&state),
             variant_detection,
