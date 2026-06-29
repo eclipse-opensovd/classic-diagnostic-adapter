@@ -11,7 +11,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-use std::{net::SocketAddr, time::Duration};
+use std::net::SocketAddr;
 
 use doip_codec::DoipCodec;
 use doip_definitions::{
@@ -31,19 +31,18 @@ use tokio_util::{
 use crate::ConnectionError;
 
 #[derive(Copy, Clone, Debug)]
-pub(crate) struct DoIPConfig {
+pub(crate) struct DoipSocketConfig {
     pub protocol_version: ProtocolVersion,
     pub send_diagnostic_message_ack: bool,
-    pub send_timeout: Duration,
 }
 
 pub(crate) struct DoIPConnection<T: AsyncRead + AsyncWrite + Unpin> {
     io: Framed<T, DoipCodec>,
-    config: DoIPConfig,
+    config: DoipSocketConfig,
 }
 
 impl<T: AsyncRead + AsyncWrite + Unpin> DoIPConnection<T> {
-    pub fn new(io: T, config: DoIPConfig) -> Self {
+    pub fn new(io: T, config: DoipSocketConfig) -> Self {
         Self {
             io: Framed::new(io, DoipCodec {}),
             config,
