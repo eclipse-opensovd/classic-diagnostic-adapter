@@ -198,27 +198,16 @@ data class SimpleInterceptorDto(
 /**
  * Routes to simulate DoIP TCP connection disruptions.
  *
- * - POST /{ecu}/disconnect: Closes all active TCP connections to the specified ECU's DoIP entity.
+ * - POST /disconnect: Closes all active TCP connections on all DoIP entities.
  *   This simulates a network disconnect or ECU reboot where the TCP link is lost.
- *   After the disconnect, the ECU will re-announce itself via VAMs and the tester
+ *   After the disconnect, ECUs will re-announce themselves via VAMs and the tester
  *   should re-establish the connection.
  */
 fun Route.addDisconnectRoutes() {
-    post("/{ecu}/disconnect") {
+    post("/disconnect") {
         MDC.clear()
-        val ecuName = call.parameters["ecu"].orEmpty()
         var closedConnections = 0
 
-        // Verify the ECU exists
-        findByEcuName(ecuName)
-            ?: return@post call.respond(
-                HttpStatusCode.NotFound,
-                mapOf("message" to "ECU $ecuName not found"),
-            )
-
-        // Close all TCP connections on all DoIP entities in all network instances.
-        // Since a single TCP connection may serve multiple ECUs through the same gateway,
-        // we close all connections to ensure the target ECU's connection is dropped.
         networkInstances().forEach { network ->
             network.doipEntities.forEach { entity ->
                 entity.connectionHandlers.toList().forEach { handler ->
@@ -230,7 +219,7 @@ fun Route.addDisconnectRoutes() {
 
         call.respond(
             HttpStatusCode.OK,
-            mapOf("message" to "Closed $closedConnections TCP connection(s) for ECU $ecuName"),
+            mapOf("message" to "Closed $closedConnections TCP connection(s)"),
         )
     }
 }

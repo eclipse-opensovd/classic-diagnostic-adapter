@@ -11,12 +11,10 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-use std::time::Duration;
-
 use cda_interfaces::{DiagServiceError, dlt_ctx};
 use doip_definitions::{
     message::DoipMessage,
-    payload::{ActivationCode, DoipPayload, RoutingActivationRequest, RoutingActivationResponse},
+    payload::{ActivationCode, DoipPayload, RoutingActivationResponse},
 };
 #[cfg(all(feature = "mbedtls", not(feature = "openssl")))]
 use mbedtls_rs::{
@@ -34,8 +32,8 @@ use tokio::{
 use tokio_openssl::SslStream as TlsStream;
 
 use crate::{
-    ConnectionError,
-    socket::{DoIPConfig, DoIPConnection, DoIPConnectionReadHalf, DoIPConnectionWriteHalf},
+    ConnectionError, GatewayConnectionConfig, GatewayDoipConfig,
+    socket::{DoIPConnection, DoIPConnectionReadHalf, DoIPConnectionWriteHalf, DoipSocketConfig},
 };
 
 /// This module contains the (currently) static TLS configuration for the CDA
@@ -106,13 +104,6 @@ mod tlsconfig {
         MBEDTLS_TLS1_3_SIG_RSA_PKCS1_SHA1 as u16,
         MBEDTLS_TLS1_3_SIG_ED25519 as u16,
     ];
-}
-
-#[derive(Clone)]
-pub(crate) struct ConnectionConfig {
-    pub source_ip: String,
-    pub port: u16,
-    pub tls_port: u16,
 }
 
 pub(crate) trait ECUConnectionRead {
@@ -186,9 +177,7 @@ pub(crate) struct EcuConnectionTarget<
 > {
     pub(crate) ecu_connection_rx: Mutex<Option<EcuConnectionReadVariant<T>>>,
     pub(crate) ecu_connection_tx: Mutex<Option<EcuConnectionSendVariant<T>>>,
-    pub(crate) gateway_name: String,
-    pub(crate) gateway_ip: String,
-    pub(crate) tester_address: [u8; 2],
+    pub(crate) gateway_doip_config: GatewayDoipConfig,
 }
 
 pub struct EcuConnectionSendGuard<'a, T: AsyncWrite + Unpin = TcpStream> {
@@ -305,38 +294,32 @@ async fn connect_to_gateway(
 }
 
 #[tracing::instrument(
-    skip(routing_activation_request, connection_config),
+    skip_all,
     fields(
-        source_ip = connection_config.source_ip.clone(),
-        port = connection_config.port,
-        gateway_ip,
-        gateway_name,
-        connect_timeout_ms = connect_timeout.as_millis(),
-        routing_timeout_ms = routing_activation_timeout.as_millis(),
+        tester_ip = config.doip.transport.tester_ip.clone(),
+        port = config.doip.transport.port,
+        gateway_ip = config.doip.gateway_ip.clone(),
+        gateway_name = config.doip.name.clone(),
+        connect_timeout_ms = config.ecu_timeouts.connection.as_millis(),
+        routing_timeout_ms = config.ecu_timeouts.routing_activation.as_millis(),
         dlt_context = dlt_ctx!("DOIP"),
     )
 )]
 pub(crate) async fn establish_ecu_connection(
-    connection_config: &ConnectionConfig,
-    gateway_ip: &str,
-    gateway_name: &str,
-    doip_connection_config: DoIPConfig,
-    routing_activation_request: RoutingActivationRequest,
-    connect_timeout: Duration,
-    routing_activation_timeout: Duration,
+    config: &GatewayConnectionConfig,
 ) -> Result<EcuConnectionTarget, ConnectionError> {
     let mut gateway_conn = match tokio::time::timeout(
-        connect_timeout,
+        config.ecu_timeouts.connection,
         connect_to_gateway(
-            &connection_config.source_ip,
-            gateway_ip,
-            connection_config.port,
+            &config.doip.transport.tester_ip,
+            &config.doip.gateway_ip,
+            config.doip.transport.port,
         ),
     )
     .await
     {
         Ok(Ok(stream)) => {
-            EcuConnectionVariant::Plain(DoIPConnection::new(stream, doip_connection_config))
+            EcuConnectionVariant::Plain(DoIPConnection::new(stream, config.doip.transport.socket))
         }
         Ok(Err(e)) => return Err(e),
         Err(_) => {
@@ -348,7 +331,7 @@ pub(crate) async fn establish_ecu_connection(
 
     if let Err(e) = gateway_conn
         .send(DoipPayload::RoutingActivationRequest(
-            routing_activation_request,
+            config.routing_activation_request,
         ))
         .await
     {
@@ -358,10 +341,10 @@ pub(crate) async fn establish_ecu_connection(
     }
 
     match try_read_routing_activation_response(
-        routing_activation_timeout,
+        config.ecu_timeouts.routing_activation,
         &mut gateway_conn,
-        gateway_name,
-        gateway_ip,
+        &config.doip.name,
+        &config.doip.gateway_ip,
     )
     .await
     {
@@ -374,29 +357,20 @@ pub(crate) async fn establish_ecu_connection(
                     Ok(EcuConnectionTarget {
                         ecu_connection_tx: Mutex::new(Some(write)),
                         ecu_connection_rx: Mutex::new(Some(read)),
-                        gateway_name: gateway_name.to_owned(),
-                        gateway_ip: gateway_ip.to_owned(),
-                        tester_address: routing_activation_request.source_address,
+                        gateway_doip_config: config.doip.clone(),
                     })
                 }
                 ActivationCode::DeniedRequestEncryptedTLSConnection => {
                     tracing::info!("TLS connection requested");
-                    let tls_gateway_name = if gateway_name.ends_with("[TLS]") {
-                        gateway_name.to_owned()
+                    let tls_gateway_name = if config.doip.name.ends_with("[TLS]") {
+                        config.doip.name.clone()
                     } else {
-                        format!("{gateway_name} [TLS]")
+                        format!("{} [TLS]", config.doip.name)
                     };
 
-                    establish_tls_ecu_connection(
-                        connection_config,
-                        gateway_ip,
-                        &tls_gateway_name,
-                        doip_connection_config,
-                        routing_activation_request,
-                        connect_timeout,
-                        routing_activation_timeout,
-                    )
-                    .await
+                    let mut tls_config = config.clone();
+                    tls_config.doip.name = tls_gateway_name;
+                    establish_tls_ecu_connection(&tls_config).await
                 }
                 _ => Err(ConnectionError::RoutingError(format!(
                     "Failed to activate routing: {:?}",
@@ -411,37 +385,31 @@ pub(crate) async fn establish_ecu_connection(
 }
 
 #[tracing::instrument(
-    skip(routing_activation_request, connection_config),
+    skip_all,
     fields(
-        source_ip = connection_config.source_ip.clone(),
-        port = connection_config.tls_port,
-        gateway_ip,
-        gateway_name,
-        connect_timeout_ms = connnect_timeout.as_millis(),
-        routing_timeout_ms = routing_activation_timeout.as_millis(),
+        tester_ip = config.doip.transport.tester_ip.clone(),
+        port = config.doip.transport.tls_port,
+        gateway_ip = config.doip.gateway_ip.clone(),
+        gateway_name = config.doip.name.clone(),
+        connect_timeout_ms = config.ecu_timeouts.connection.as_millis(),
+        routing_timeout_ms = config.ecu_timeouts.routing_activation.as_millis(),
         dlt_context = dlt_ctx!("DOIP"),
     )
 )]
 pub(crate) async fn establish_tls_ecu_connection(
-    connection_config: &ConnectionConfig,
-    gateway_ip: &str,
-    gateway_name: &str,
-    doip_connection_config: DoIPConfig,
-    routing_activation_request: RoutingActivationRequest,
-    connnect_timeout: Duration,
-    routing_activation_timeout: Duration,
+    config: &GatewayConnectionConfig,
 ) -> Result<EcuConnectionTarget, ConnectionError> {
     let mut gateway_conn = match tokio::time::timeout(
-        connnect_timeout,
+        config.ecu_timeouts.connection,
         connect_to_gateway(
-            &connection_config.source_ip,
-            gateway_ip,
-            connection_config.tls_port,
+            &config.doip.transport.tester_ip,
+            &config.doip.gateway_ip,
+            config.doip.transport.tls_port,
         ),
     )
     .await
     {
-        Ok(Ok(stream)) => create_tls_stream(stream, doip_connection_config).await?,
+        Ok(Ok(stream)) => create_tls_stream(stream, config.doip.transport.socket).await?,
         Ok(Err(e)) => {
             return Err(ConnectionError::ConnectionFailed(format!(
                 "Connect failed: {e:?}"
@@ -456,7 +424,7 @@ pub(crate) async fn establish_tls_ecu_connection(
 
     if let Err(e) = gateway_conn
         .send(DoipPayload::RoutingActivationRequest(
-            routing_activation_request,
+            config.routing_activation_request,
         ))
         .await
     {
@@ -466,10 +434,10 @@ pub(crate) async fn establish_tls_ecu_connection(
     }
 
     match try_read_routing_activation_response(
-        routing_activation_timeout,
+        config.ecu_timeouts.routing_activation,
         &mut gateway_conn,
-        gateway_name,
-        gateway_ip,
+        &config.doip.name,
+        &config.doip.gateway_ip,
     )
     .await
     {
@@ -485,9 +453,7 @@ pub(crate) async fn establish_tls_ecu_connection(
             Ok(EcuConnectionTarget {
                 ecu_connection_tx: Mutex::new(Some(write)),
                 ecu_connection_rx: Mutex::new(Some(read)),
-                gateway_name: gateway_name.to_owned(),
-                gateway_ip: gateway_ip.to_owned(),
-                tester_address: routing_activation_request.source_address,
+                gateway_doip_config: config.doip.clone(),
             }) // Routing activated
         }
         Err(e) => Err(ConnectionError::RoutingError(format!(
@@ -499,7 +465,7 @@ pub(crate) async fn establish_tls_ecu_connection(
 #[cfg(all(feature = "mbedtls", not(feature = "openssl")))]
 async fn create_tls_stream(
     stream: tokio::net::TcpStream,
-    doip_connection_config: DoIPConfig,
+    socket_config: DoipSocketConfig,
 ) -> Result<EcuConnectionVariant, ConnectionError> {
     let config = SslConfigBuilder::new_client()
         .map_err(|e| {
@@ -520,14 +486,14 @@ async fn create_tls_stream(
         })?;
     Ok(EcuConnectionVariant::Tls(DoIPConnection::new(
         ssl,
-        doip_connection_config,
+        socket_config,
     )))
 }
 
 #[cfg(feature = "openssl")]
 async fn create_tls_stream(
     stream: tokio::net::TcpStream,
-    doip_connection_config: DoIPConfig,
+    socket_config: DoipSocketConfig,
 ) -> Result<EcuConnectionVariant, ConnectionError> {
     // allow unsafe ciphers
     let mut builder = SslContextBuilder::new(SslMethod::tls_client()).map_err(|e| {
@@ -581,7 +547,7 @@ async fn create_tls_stream(
 
     Ok(EcuConnectionVariant::Tls(DoIPConnection::new(
         stream,
-        doip_connection_config,
+        socket_config,
     )))
 }
 
@@ -589,7 +555,7 @@ async fn create_tls_stream(
 #[cfg(all(not(feature = "openssl"), not(feature = "mbedtls")))]
 async fn create_tls_stream(
     _stream: tokio::net::TcpStream,
-    _doip_connection_config: DoIPConfig,
+    _socket_config: DoipSocketConfig,
 ) -> Result<EcuConnectionVariant, ConnectionError> {
     Err(ConnectionError::ConnectionFailed(
         "CDA built without TLS support.".to_owned(),
