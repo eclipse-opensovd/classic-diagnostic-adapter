@@ -619,7 +619,6 @@ pub async fn setup_vehicle_and_routes<SP: SecurityPlugin, SL: SecurityPluginLoad
     cda_sovd::add_openapi_routes(dynamic_router, &vehicle_data.update_guard, webserver_config)
         .await;
 
-    // SAFETY: Must be applied AFTER all routes are registered (layer only covers existing routes).
     cda_sovd::install_update_guard(dynamic_router, vehicle_data.update_guard.clone()).await;
 
     Ok(())
