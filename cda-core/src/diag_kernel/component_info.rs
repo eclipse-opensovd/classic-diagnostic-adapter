@@ -228,7 +228,8 @@ impl<S: SecurityPlugin> ComponentInfos for EcuManager<S> {
                 && is_service_visible::<S>(security_plugin, service)
                 && service.diag_comm().is_some_and(|dc| {
                     dc.short_name().is_some_and(|name| {
-                        self.trim_routine_name(name)
+                        self.database_naming_convention
+                            .trim_routine_name(name)
                             .eq_ignore_ascii_case(service_name)
                     })
                 })
@@ -288,7 +289,8 @@ impl<S: SecurityPlugin> ComponentInfos for EcuManager<S> {
                     && is_service_visible::<S>(security_plugin, service)
                     && service.diag_comm().is_some_and(|dc| {
                         dc.short_name().is_some_and(|name| {
-                            self.trim_routine_name(name)
+                            self.database_naming_convention
+                                .trim_routine_name(name)
                                 .eq_ignore_ascii_case(service_name)
                         })
                     })
@@ -567,15 +569,6 @@ impl<S: SecurityPlugin> EcuManager<S> {
         }
     }
 
-    /// Trims affixes from a routine control service name to derive the base routine name.
-    fn trim_routine_name(&self, name: &str) -> String {
-        let name_trimmed = self
-            .database_naming_convention
-            .trim_service_name_affixes(service_ids::ROUTINE_CONTROL, name.to_owned());
-        self.database_naming_convention
-            .trim_short_name_affixes(&name_trimmed)
-    }
-
     /// Filter and transform services into `ComponentOperationsInfo`
     /// This is used for operation lookup and metadata.
     fn filter_and_transform_operations(
@@ -589,7 +582,9 @@ impl<S: SecurityPlugin> EcuManager<S> {
             // without any affixes
             .filter_map(|service| {
                 let diag_comm = service.diag_comm()?;
-                let id = self.trim_routine_name(diag_comm.short_name()?);
+                let id = self
+                    .database_naming_convention
+                    .trim_routine_name(diag_comm.short_name()?);
                 Some((id, service))
             })
             // fold over the id of the previous steps creating a map of
