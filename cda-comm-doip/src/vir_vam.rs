@@ -14,7 +14,8 @@
 use std::{future::Future, sync::Arc, time::Duration};
 
 use cda_interfaces::{
-    DiagServiceError, DoipComParams, EcuAddresses, HashMap, HashMapExtensions, dlt_ctx,
+    DiagServiceError, DoipComParams, DoipGatewaySetupError, EcuAddresses, HashMap,
+    HashMapExtensions, dlt_ctx,
 };
 use doip_definitions::{
     header::PayloadType,
@@ -260,11 +261,7 @@ where
             let broadcast_socket = if transport_config.tester_ip == broadcast_ip {
                 Arc::clone(&state.socket)
             } else {
-                match crate::create_socket_with_protocol(
-                    broadcast_ip,
-                    transport_config.port,
-                    transport_config.socket.protocol_version,
-                ) {
+                match crate::create_udp_vir_socket(broadcast_ip, transport_config.port) {
                     Ok(sock) => Arc::new(Mutex::new(sock)),
                     Err(e) => {
                         tracing::warn!(
@@ -322,7 +319,7 @@ async fn handle_vam<T>(
     doip_msg: doip_definitions::message::DoipMessage,
     source_addr: std::net::SocketAddr,
     netmask: u32,
-) -> Result<Option<DiscoveredGateway>, String>
+) -> Result<Option<DiscoveredGateway>, DoipGatewaySetupError>
 where
     T: EcuAddresses,
 {
@@ -358,21 +355,25 @@ where
                     ecu_name = %ecu,
                     source_ip = %source_addr.ip(),
                     logical_address = %format!("{:#06x}", logical_address),
+                    protocol_version = ?doip_msg.header.protocol_version,
                     "Matching ECU found"
                 );
                 Ok(Some(DiscoveredGateway {
                     ip: source_addr.ip().to_string(),
                     ecu_name: ecu.clone(),
                     logical_address,
+                    doip_protocol_version: doip_msg.header.protocol_version,
                 }))
             } else {
                 tracing::warn!("VAM received but no matching ECU found");
-                Err(format!(
-                    "No matching ECU found for VAM: {:02x?}",
-                    vam.logical_address
-                ))
+                Err(DoipGatewaySetupError::UnknownECU {
+                    logical_address: u16::from_be_bytes(vam.logical_address),
+                    protocol_version: u8::from(doip_msg.header.protocol_version),
+                })
             }
         }
-        _ => Err(format!("Expected VAM, got: {doip_msg:?}")),
+        _ => Err(DoipGatewaySetupError::ResourceError(format!(
+            "Expected VAM, got: {doip_msg:?}"
+        ))),
     }
 }

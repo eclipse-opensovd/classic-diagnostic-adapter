@@ -17,8 +17,6 @@ use serde::{Deserialize, Serialize};
 /// `DoIP` (Diagnostics over IP) transport layer configuration.
 #[derive(Deserialize, Serialize, Clone, Debug, schemars::JsonSchema)]
 pub struct DoipConfig {
-    /// `DoIP` protocol version byte (e.g. 0x02 for ISO 13400-2:2012).
-    pub protocol_version: u8,
     /// IP address of the diagnostic tester interface.
     pub tester_address: String,
     /// Subnet mask for the tester network.
@@ -43,7 +41,6 @@ pub struct DoipConfig {
 impl Default for DoipConfig {
     fn default() -> Self {
         Self {
-            protocol_version: 0x02,
             tester_address: "127.0.0.1".to_owned(),
             tester_subnet: "255.255.0.0".to_owned(),
             gateway_port: 13400,
