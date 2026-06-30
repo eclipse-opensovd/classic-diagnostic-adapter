@@ -153,6 +153,14 @@ impl DatabaseNamingConvention {
         }
         short_name
     }
+
+    /// Trims affixes from a routine control service name to derive the base routine name.
+    #[must_use]
+    pub fn trim_routine_name(&self, name: &str) -> String {
+        let name_trimmed =
+            self.trim_service_name_affixes(service_ids::ROUTINE_CONTROL, name.to_owned());
+        self.trim_short_name_affixes(&name_trimmed)
+    }
 }
 
 impl Default for DatabaseNamingConvention {
