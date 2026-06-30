@@ -4,14 +4,20 @@
  */
 
 // The `can` feature alone relies on Linux SocketCAN ISO-TP sockets
-// (tokio-socketcan-isotp). Off Linux it is only usable together with
-// `can-tcp`, which carries CAN frames over TCP (`tcp:<host>:<port>`
-// interface scheme). Fail early with an actionable message instead of
-// letting socket creation fail at runtime with a cryptic error.
-#[cfg(all(feature = "can", not(target_os = "linux"), not(feature = "can-tcp")))]
+// (tokio-socketcan-isotp). Off Linux it is only usable together with a
+// platform-independent transport: `can-tcp` (`tcp:<host>:<port>`) or
+// `can-socketcand` (`socketcand:<host>:<port>:<bus>`). Fail early with an
+// actionable message instead of letting socket creation fail at runtime
+// with a cryptic error.
+#[cfg(all(
+    feature = "can",
+    not(target_os = "linux"),
+    not(feature = "can-tcp"),
+    not(feature = "can-socketcand")
+))]
 compile_error!(
-    "The `can` feature requires Linux (SocketCAN/ISO-TP). On other platforms enable `can-tcp` to \
-     use the TCP frame transport."
+    "The `can` feature requires Linux (SocketCAN/ISO-TP). On other platforms enable `can-tcp` or \
+     `can-socketcand` to use a TCP-based frame transport."
 );
 
 pub mod config;

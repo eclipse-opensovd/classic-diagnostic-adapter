@@ -19,6 +19,7 @@ import RequestsData
 import addDtcRequests
 import can.CanNetworking
 import can.CanNetworks
+import library.can.CanTransport
 import networkInstances
 
 private fun generateDefaultEcuState() = EcuState()
@@ -112,15 +113,16 @@ fun RequestsData.addAllFunctionality() {
  * Top-level builder for a CAN network. Mirrors the DSL's `network { ... }`
  * but operates on a [CanNetworking] instead of [NetworkingData].
  *
- * Multiple CAN networks are supported (one process-global registry per
- * `CanNetworks`); the integration tests use a single network.
+ * [transportFactory] creates the raw-frame [CanTransport] the network's ISO-TP
+ * endpoints run on (e.g. a `SocketcandTransport`); it is invoked once, on
+ * [CanNetworking.start]. Multiple CAN networks are supported (one process-global
+ * registry per `CanNetworks`); the integration tests use a single network.
  */
 fun canNetwork(
-    listenAddress: String,
-    port: Int,
+    transportFactory: () -> CanTransport,
     block: CanNetworking.() -> Unit,
 ): CanNetworking {
-    val net = CanNetworking(listenAddress, port)
+    val net = CanNetworking(transportFactory)
     net.block()
     CanNetworks.add(net)
     net.start()

@@ -12,7 +12,6 @@
 
 package webserver
 
-import can.addCanRoutes
 import io.ktor.http.HttpStatusCode
 import io.ktor.serialization.kotlinx.json.json
 import io.ktor.server.application.Application
@@ -83,7 +82,6 @@ fun Application.appModule() {
         addRecordingRoutes()
         addDtcFaultsRoutes()
         addInterceptorRoutes()
-        addCanRoutes()
         addJwtAuthServerMockRoutes()
 
         post("/shutdown") {

@@ -63,13 +63,10 @@ fun Route.addStateRoutes() {
         networkInstances().forEach { network ->
             network.reset()
         }
-        // The CAN connections share their SimEcu with the DoIP entities reset
-        // above, so only the CAN-specific ISO-TP transport state needs clearing.
-        can.CanNetworks.all().forEach { net ->
-            net.connections().forEach { conn ->
-                conn.machine.reset()
-            }
-        }
+        // The CAN networks share their SimEcu instances with the DoIP entities
+        // reset above; the ISO-TP endpoints keep no cross-message state, so this
+        // is a no-op kept for symmetry.
+        can.CanNetworks.all().forEach { net -> net.reset() }
         call.respond(HttpStatusCode.NoContent)
     }
 

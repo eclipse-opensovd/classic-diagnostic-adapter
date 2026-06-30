@@ -58,13 +58,14 @@ static ECU_SIM_PROCESS: LazyLock<Mutex<Option<std::process::Child>>> =
 const CDA_INTEGRATION_TEST_USE_DOCKER: &str = "CDA_INTEGRATION_TEST_USE_DOCKER";
 const CDA_INTEGRATION_TEST_TESTER_ADDRESS: &str = "CDA_INTEGRATION_TEST_TESTER_ADDRESS";
 const CDA_INTEGRATION_TEST_USE_CAN: &str = "CDA_INTEGRATION_TEST_USE_CAN";
-const CAN_HUB_PORT_DEFAULT: u16 = 19800;
-/// Address the CAN frame hub binds to *inside* the ecu-sim container (all
-/// interfaces, so the cda container can reach it over the compose bridge).
-const CAN_DOCKER_HUB_BIND: &str = "0.0.0.0:19800";
-/// CAN interface CDA uses *inside* the cda container: the ecu-sim service is
-/// reachable by its compose service name over the bridge network.
-const CAN_DOCKER_INTERFACE: &str = "tcp:ecu-sim:19800";
+/// Port of the socketcand daemon that fronts the shared (v)can bus. CDA and the
+/// ecu-sim both connect to it as rawmode clients.
+const SOCKETCAND_PORT: u16 = 29536;
+/// Name of the CAN bus exposed by socketcand.
+const CAN_BUS_NAME: &str = "vcan0";
+/// socketcand host CDA + ecu-sim use *inside* their containers: the socketcand
+/// service is reachable by its compose service name over the bridge network.
+const CAN_DOCKER_SOCKETCAND_HOST: &str = "socketcand";
 
 const MAIN_HEALTH_COMPONENT_KEY: &str = "main";
 
@@ -122,7 +123,7 @@ async fn initialize_runtime() -> Result<TestRuntime, TestingError> {
     // this is useful for debugging tests
     // without having to rebuild the docker containers every time.
     let host = host();
-    let (cda_port, gateway_port, sim_control_port, can_hub_port) = if use_docker() {
+    let (cda_port, gateway_port, sim_control_port) = if use_docker() {
         (
             find_available_tcp_port(&host)?,
             // gateway_port is written to `.env` as SIM_GATEWAY_PORT but the JVM
@@ -130,17 +131,13 @@ async fn initialize_runtime() -> Result<TestRuntime, TestingError> {
             // a pre-existing behaviour; cleanup tracked separately).
             find_available_tcp_port(&host)?,
             find_available_tcp_port(&host)?,
-            // In docker the CAN hub runs inside the ecu-sim container on a fixed
-            // port (CAN_DOCKER_HUB_BIND), reached from the cda container via
-            // CAN_DOCKER_INTERFACE; no host port is allocated for it.
-            CAN_HUB_PORT_DEFAULT,
         )
     } else {
-        (20002, 13400, 8181, CAN_HUB_PORT_DEFAULT) // default ports for local usage
+        (20002, 13400, 8181) // default ports for local usage
     };
 
     let config = if use_can() {
-        cda_test_config_can(host.clone(), cda_port, can_hub_port)
+        cda_test_config_can(host.clone(), cda_port)
     } else {
         cda_test_config(host.clone(), cda_port, gateway_port)
     };
@@ -159,7 +156,7 @@ async fn initialize_runtime() -> Result<TestRuntime, TestingError> {
         start_docker_compose(cda_port, gateway_port, sim_control_port)?;
     } else {
         if use_can() {
-            start_ecu_sim_can(&ecu_sim, can_hub_port).await?;
+            start_ecu_sim_can(&ecu_sim).await?;
         } else {
             start_ecu_sim(&ecu_sim).await?;
         }
@@ -178,11 +175,11 @@ fn cda_test_config(host: String, cda_port: u16, gateway_port: u16) -> Configurat
     doip_test_config(host, cda_port, gateway_port, per_ecu_configs_for_doip())
 }
 
-fn cda_test_config_can(host: String, cda_port: u16, can_hub_port: u16) -> Configuration {
+fn cda_test_config_can(host: String, cda_port: u16) -> Configuration {
     let mut config = doip_test_config(host, cda_port, /*unused*/ 0, per_ecu_configs_for_can());
     config.doip.enabled = false;
     config.can = Some(CanConfig {
-        interface: format!("tcp:127.0.0.1:{can_hub_port}"),
+        interface: format!("socketcand:127.0.0.1:{SOCKETCAND_PORT}:{CAN_BUS_NAME}"),
         ecu_mappings: can_ecu_mappings(),
         transport_overrides: vec![],
         response_timeout_ms: 2000,
@@ -524,6 +521,7 @@ fn start_docker_compose(
         .arg("--build-arg")
         .arg("SOURCE_GIT_SHA=unknown")
         .env("DOCKER_BUILDKIT", "1")
+        .env("COMPOSE_PROFILES", compose_profiles())
         .current_dir(&test_container_dir)
         .status()
         .map_err(|e| TestingError::ProcessFailed(format!("Failed to build docker compose: {e}")))?;
@@ -538,7 +536,8 @@ fn docker_compose_up(container: Option<String>) -> Result<(), TestingError> {
     cmd.arg("compose")
         .arg("up")
         .arg("-d")
-        .env("DOCKER_BUILDKIT", "1");
+        .env("DOCKER_BUILDKIT", "1")
+        .env("COMPOSE_PROFILES", compose_profiles());
     if let Some(container_name) = container {
         cmd.arg(container_name);
     }
@@ -556,6 +555,7 @@ fn docker_compose_down(container: Option<String>) -> Result<(), TestingError> {
         .arg("down")
         .arg("--remove-orphans")
         .env("DOCKER_BUILDKIT", "1")
+        .env("COMPOSE_PROFILES", compose_profiles())
         .current_dir(&test_container_dir);
 
     if let Some(container_name) = container {
@@ -657,10 +657,11 @@ fn write_config_toml(
     "0.0.0.0".clone_into(&mut config.server.address);
     "/app/odx".clone_into(&mut config.database.path);
 
-    // In docker the CAN hub runs in the ecu-sim container, reachable by service
-    // name over the bridge network (not the host loopback used in local mode).
+    // In docker the socketcand daemon runs in its own service, reachable by
+    // service name over the bridge network (not the host loopback used locally).
     if let Some(can) = config.can.as_mut() {
-        CAN_DOCKER_INTERFACE.clone_into(&mut can.interface);
+        can.interface =
+            format!("socketcand:{CAN_DOCKER_SOCKETCAND_HOST}:{SOCKETCAND_PORT}:{CAN_BUS_NAME}");
     }
 
     let config_path = test_container_dir.join("cda-test-config.toml");
@@ -693,14 +694,14 @@ fn write_docker_env_file(
     if use_can() {
         use std::fmt::Write as _;
 
-        // Start the CAN frame hub inside the ecu-sim container (bind all
-        // interfaces so the cda container can reach it over the bridge) and
-        // compile the CDA image with the CAN-over-TCP transport.
+        // Point the ecu-sim at the socketcand service over the compose bridge,
+        // and compile the CDA image with the socketcand transport.
         let _ = write!(
             env_content,
-            "# CAN frame hub bind address inside the ecu-sim \
-             container\nSIM_CAN_HUB={CAN_DOCKER_HUB_BIND}\n# Extra cargo features for the CDA \
-             image\nCDA_FEATURES=can-tcp\n",
+            "# socketcand daemon the ecu-sim connects \
+             to\nSIM_CAN_SOCKETCAND_HOST={CAN_DOCKER_SOCKETCAND_HOST}\\
+             nSIM_CAN_SOCKETCAND_PORT={SOCKETCAND_PORT}\nSIM_CAN_SOCKETCAND_BUS={CAN_BUS_NAME}\n# \
+             Extra cargo features for the CDA image\nCDA_FEATURES=can-socketcand\n",
         );
     }
 
@@ -735,11 +736,13 @@ pub(crate) async fn start_ecu_sim(sim: &EcuSim) -> Result<(), TestingError> {
     wait_for_ecu_sim_ready(&sim.host, sim.control_port).await
 }
 
-pub(crate) async fn start_ecu_sim_can(sim: &EcuSim, can_hub_port: u16) -> Result<(), TestingError> {
+pub(crate) async fn start_ecu_sim_can(sim: &EcuSim) -> Result<(), TestingError> {
     // Local (non-docker) CAN path: spawn the same `ecu-sim-all.jar` as the DoIP
-    // path but with `SIM_CAN_HUB` set so the JVM also starts the CAN frame hub.
-    // In docker mode the hub is started inside the ecu-sim container via compose
-    // (see `write_docker_env_file` / docker-compose.yml), not here.
+    // path but with `SIM_CAN_SOCKETCAND_*` set so the JVM connects to a
+    // socketcand daemon. The daemon and its (v)can bus must already be running
+    // locally (e.g. `socketcand -i vcan0` on 127.0.0.1:29536). In docker mode
+    // the daemon runs in its own compose service (see `write_docker_env_file` /
+    // docker-compose.yml), not here.
     let ecu_sim_dir = ecu_sim_dir()?;
     if !ecu_sim_dir.exists() {
         return Err(TestingError::PathNotFound(format!(
@@ -767,7 +770,9 @@ pub(crate) async fn start_ecu_sim_can(sim: &EcuSim, can_hub_port: u16) -> Result
         .env("SIM_DOIP_PORT", "13400")
         .env("SIM_REST_PORT", sim.control_port.to_string())
         .env("SIM_NETWORK_INTERFACE", "127.0.0.1")
-        .env("SIM_CAN_HUB", format!("127.0.0.1:{can_hub_port}"))
+        .env("SIM_CAN_SOCKETCAND_HOST", "127.0.0.1")
+        .env("SIM_CAN_SOCKETCAND_PORT", SOCKETCAND_PORT.to_string())
+        .env("SIM_CAN_SOCKETCAND_BUS", CAN_BUS_NAME)
         .spawn()
         .map_err(|e| {
             TestingError::ProcessFailed(format!(
@@ -826,6 +831,12 @@ fn use_docker() -> bool {
 
 pub(crate) fn use_can() -> bool {
     std::env::var(CDA_INTEGRATION_TEST_USE_CAN).is_ok_and(|s| s == "true")
+}
+
+/// Compose profiles to activate: the `can` profile (which includes the
+/// socketcand service) only for CAN runs, so DoIP runs need no vcan module.
+fn compose_profiles() -> &'static str {
+    if use_can() { "can" } else { "" }
 }
 
 /// Guard, returning `true` (and logging a skip notice), for tests that cannot

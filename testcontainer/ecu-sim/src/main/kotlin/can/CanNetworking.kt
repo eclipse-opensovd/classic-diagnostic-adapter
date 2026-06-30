@@ -15,93 +15,142 @@ package can
 import SimEcu
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
-import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.runBlocking
+import library.UdsMessage
+import library.can.CanTransport
+import library.can.CanUdsMessage
+import library.can.isotp.IsoTpEndpoint
+import library.can.isotp.IsoTpOptions
 import org.slf4j.LoggerFactory
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.atomic.AtomicBoolean
 
 /**
- * A CAN network, holding one or more [CanEcuConnection]s sharing a single
- * [CanFrameHub].
+ * Serves existing [SimEcu] instances over UDS/ISO-TP on a single CAN bus,
+ * using the doip-sim-ecu-dsl CAN library (PR#164): one [IsoTpEndpoint] per ECU
+ * on a shared [CanTransport] (here socketcand).
  *
- * This is the transport-agnostic counterpart to the DoIP `NetworkingData` /
- * `SimDoipNetworking` pair. It does *not* use `doip-sim-ecu-dsl`'s
- * `NetworkingData` because the DSL is hard-wired to UDP/TCP. Instead, it
- * constructs `SimEcu` instances directly from `EcuData` and re-uses the
- * DSL's request matcher / handler chain via `SimEcu.onIncomingUdsMessage`.
+ * The ECUs are the *same* instances as the DoIP entities defined in the
+ * `network { ... }` block - looked up by name via [addSimCanEcu] - so anything
+ * the REST control plane changes (state, interceptors, `/reset`) is observed on
+ * both the DoIP and the CAN path, because there is only one [SimEcu] behind a
+ * given name. ISO-TP segmentation/reassembly and the raw-frame transport are
+ * provided entirely by the library; this class only wires endpoints to ECUs and
+ * dispatches reassembled requests through `SimEcu.onIncomingUdsMessage`.
  */
 class CanNetworking(
-    val listenAddress: String,
-    val port: Int,
+    private val transportFactory: () -> CanTransport,
 ) {
     private val log = LoggerFactory.getLogger(CanNetworking::class.java)
     private val started = AtomicBoolean(false)
-    private val ecusByName = ConcurrentHashMap<String, CanEcuConnection>()
-
-    val hub: CanFrameHub = CanFrameHub(listenAddress, port)
-    val scope: CoroutineScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+    private val ecusByName = ConcurrentHashMap<String, CanEcu>()
+    private val endpoints = mutableListOf<IsoTpEndpoint>()
+    private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
 
     @Volatile
-    var dispatcherJob: Job? = null
-        private set
+    private var transport: CanTransport? = null
+
+    private data class CanEcu(
+        val name: String,
+        val ecu: SimEcu,
+        val rxId: Int,
+        val txId: Int,
+    )
 
     fun addEcu(
         name: String,
         ecu: SimEcu,
         rxId: Int,
         txId: Int,
-    ): CanEcuConnection {
+    ) {
         require(!started.get()) { "Cannot add ECUs after start()" }
         require(ecusByName[name] == null) { "ECU '$name' already registered on this network" }
-        val connection =
-            CanEcuConnection(
-                name = name,
-                ecu = ecu,
-                rxId = rxId,
-                txId = txId,
-                hub = hub,
-                scope = scope,
-            )
-        ecusByName[name] = connection
-        return connection
+        ecusByName[name] = CanEcu(name, ecu, rxId, txId)
     }
 
     fun start() {
         if (!started.compareAndSet(false, true)) return
-        hub.start()
-        log.info("CanNetworking dispatcher starting, ECUs: {}", ecusByName.keys)
-        dispatcherJob =
-            scope.launch {
-                try {
-                    while (isActive) {
-                        val next = hub.receive() ?: break
-                        val frame = next.frame
-                        val conn =
-                            ecusByName.values.firstOrNull { it.rxId == frame.canId }
-                        if (conn == null) {
-                            log.debug("No ECU for arbitration id 0x{:X}", frame.canId)
-                            continue
-                        }
-                        try {
-                            conn.onCanFrame(frame)
-                        } catch (e: Exception) {
-                            log.warn("Connection '{}' failed to process frame: {}", conn.name, e.message)
-                        }
-                    }
-                } catch (e: Exception) {
-                    if (isActive) log.error("CAN dispatcher failed", e)
+        val transport = transportFactory()
+        this.transport = transport
+
+        // Attach the endpoints before connecting the transport, so no frame
+        // received right after connecting can be lost.
+        ecusByName.values.forEach { canEcu ->
+            lateinit var endpoint: IsoTpEndpoint
+            endpoint =
+                IsoTpEndpoint(
+                    transport = transport,
+                    physicalRxId = canEcu.rxId,
+                    functionalRxId = null,
+                    txId = canEcu.txId,
+                    options = IsoTpOptions(),
+                ) { payload, functional ->
+                    dispatchRequest(canEcu, endpoint, payload, functional)
                 }
-            }
+            endpoint.start(scope)
+            endpoints.add(endpoint)
+            log.info(
+                "ECU '{}' listening on 0x{} (responding on 0x{})",
+                canEcu.name,
+                canEcu.rxId.toString(16),
+                canEcu.txId.toString(16),
+            )
+        }
+
+        runBlocking { transport.start(scope) }
+        log.info("CAN network connected via {}", transport.name)
     }
+
+    /**
+     * The [IsoTpEndpoint] handler runs on the endpoint's frame-processing
+     * coroutine and must not block, so the (blocking) DSL handler chain is run
+     * on a separate coroutine. It uses the scope's [Dispatchers.IO] (not
+     * [Dispatchers.Default]): `CanUdsMessage.respond` performs the ISO-TP
+     * transmission via a blocking `runBlocking`, and a multi-frame response
+     * blocks its thread until flow control arrives - on the small Default pool
+     * concurrent operations would starve it (and the simulator's HTTP server).
+     * The response is written back through [IsoTpEndpoint.outputChannel] by
+     * [CanUdsMessage.respond], which emits raw UDS (no DoIP framing).
+     */
+    private fun dispatchRequest(
+        canEcu: CanEcu,
+        endpoint: IsoTpEndpoint,
+        payload: ByteArray,
+        functional: Boolean,
+    ) {
+        val request =
+            CanUdsMessage(
+                targetAddressType = if (functional) UdsMessage.FUNCTIONAL else UdsMessage.PHYSICAL,
+                message = payload,
+                output = endpoint.outputChannel,
+                requestCanId = canEcu.rxId,
+                responseCanId = canEcu.txId,
+            )
+        scope.launch {
+            try {
+                canEcu.ecu.onIncomingUdsMessage(request)
+            } catch (e: Exception) {
+                log.error("ECU '${canEcu.name}' handler threw", e)
+            }
+        }
+    }
+
+    /**
+     * The CAN ECUs share their [SimEcu] with the DoIP entities, which are reset
+     * via the DoIP `networkInstances()`; the ISO-TP endpoints keep no
+     * cross-message state that needs clearing here.
+     */
+    fun reset() = Unit
 
     fun stop() {
         if (!started.compareAndSet(true, false)) return
-        dispatcherJob?.cancel()
-        hub.stop()
+        endpoints.forEach { it.stop() }
+        endpoints.clear()
+        transport?.close()
+        transport = null
         scope.cancel()
     }
 
@@ -109,8 +158,6 @@ class CanNetworking(
         name: String,
         ignoreCase: Boolean = true,
     ): SimEcu? = ecusByName.values.firstOrNull { name.equals(it.name, ignoreCase) }?.ecu
-
-    fun connections(): Collection<CanEcuConnection> = ecusByName.values.toList()
 
     fun isStarted(): Boolean = started.get()
 }

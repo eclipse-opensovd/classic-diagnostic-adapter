@@ -160,12 +160,19 @@ jobs:
         with:
           toolchain: 1.88.0
           components: clippy, rustfmt
-      # The CAN suite runs the same containers as the DoIP suite, but the CDA
-      # image is built with the `can-tcp` transport and the ecu-sim starts a
-      # CAN frame hub (wired via docker-compose `SIM_CAN_HUB`/`CDA_FEATURES`,
-      # written into the generated .env by the test harness). CAN frames cross
-      # the compose bridge network over TCP, so no kernel CAN modules are needed.
-      - name: Build CDA docker image (can-tcp)
+      # The vcan kernel module backs the socketcand container's shared bus.
+      - name: Load vcan kernel module
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y "linux-modules-extra-$(uname -r)" || true
+          sudo modprobe vcan
+      # The CAN suite runs the same containers as the DoIP suite plus a
+      # socketcand daemon (compose profile `can`) that fronts a shared vcan
+      # bus. The CDA image is built with the `can-socketcand` transport and the
+      # ecu-sim connects to the daemon (wired via docker-compose
+      # `SIM_CAN_SOCKETCAND_*`/`CDA_FEATURES`, written into the generated .env by
+      # the test harness). CDA and the ecu-sim reach the bus over TCP.
+      - name: Build CDA docker image (can-socketcand)
         uses: docker/build-push-action@v5
         with:
           context: .
@@ -174,7 +181,7 @@ jobs:
           tags: ghcr.io/${{ github.repository }}/opensovd-cda:can
           load: true
           build-args: |
-            CDA_FEATURES=can-tcp
+            CDA_FEATURES=can-socketcand
           cache-from: |
             type=gha,scope=cda-can-cargo-${{ github.ref_name }}
             type=gha,scope=cda-can-cargo-main

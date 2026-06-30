@@ -9,6 +9,27 @@
 # https://www.apache.org/licenses/LICENSE-2.0
 
 services:
+  # socketcand daemon fronting a shared vcan bus. Only started for the CAN
+  # integration tests (compose profile `can`); requires the `vcan` kernel
+  # module on the host. CDA and the ecu-sim both connect to it over TCP.
+  socketcand:
+    build:
+      context: ./socketcand
+    privileged: true
+    cap_add:
+      - NET_ADMIN
+    profiles:
+      - can
+    networks:
+      - testcontainer-net
+    healthcheck:
+      test: ["CMD-SHELL", "ss -ltn | grep -q 29536 || exit 1"]
+      interval: 1s
+      timeout: 5s
+      retries: 15
+      start_period: 10s
+    restart: unless-stopped
+
   ecu-sim:
     build:
       context: ./ecu-sim
@@ -19,9 +40,11 @@ services:
     environment:
       - USE_MULTIPLE_IPS=true
       - SIM_NETWORK_INTERFACE=eth0
-      # When set (e.g. "0.0.0.0:19800") the sim starts a CAN frame hub on that
-      # address so CDA can attach over TCP. Empty/unset disables it.
-      - SIM_CAN_HUB=${SIM_CAN_HUB:-}
+      # When a socketcand host is set the sim serves its ECUs over CAN/ISO-TP
+      # via that daemon. Empty/unset disables the CAN path (DoIP-only).
+      - SIM_CAN_SOCKETCAND_HOST=${SIM_CAN_SOCKETCAND_HOST:-}
+      - SIM_CAN_SOCKETCAND_PORT=${SIM_CAN_SOCKETCAND_PORT:-29536}
+      - SIM_CAN_SOCKETCAND_BUS=${SIM_CAN_SOCKETCAND_BUS:-vcan0}
     ports:
       - "${SIM_CONTROL_PORT:-8181}:8181"
     networks:
@@ -41,7 +64,7 @@ services:
       args:
         - SOURCE_DATE_EPOCH
         - SOURCE_GIT_SHA
-        # Extra cargo features for the CDA image; "can-tcp" for CAN tests.
+        # Extra cargo features for the CDA image; "can-socketcand" for CAN tests.
         - CDA_FEATURES=${CDA_FEATURES:-}
     ports:
       - "${CDA_PORT:-20002}:20002"

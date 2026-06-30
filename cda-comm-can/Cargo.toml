@@ -34,7 +34,7 @@ schemars = { workspace = true }
 # SocketCAN/kernel code to Linux internally; with its `tcp` feature it also
 # builds on other platforms. A `compile_error!` in `src/lib.rs` enforces that
 # off-Linux builds with `can` also enable `can-tcp`.
-tokio-socketcan-isotp = { git = "https://github.com/MarkSchmitt/tokio-socketcan-isotp.git", tag = "v0.3.0", optional = true }
+tokio-socketcan-isotp = { git = "https://github.com/MarkSchmitt/tokio-socketcan-isotp.git", tag = "v0.4.0", optional = true }
 
 [features]
 default = []
@@ -45,4 +45,8 @@ can-isotp-userspace = ["can", "tokio-socketcan-isotp/isotp-userspace"]
 # CAN frames over TCP: enables the `tcp:<host>:<port>` interface scheme
 # (no CAN support needed at all; also works on non-Linux platforms).
 can-tcp = ["can-isotp-userspace", "tokio-socketcan-isotp/tcp"]
+# CAN frames over a socketcand daemon: enables the
+# `socketcand:<host>:<port>:<bus>` interface scheme (no kernel CAN needed on
+# the client; also works on non-Linux platforms).
+can-socketcand = ["can-isotp-userspace", "tokio-socketcan-isotp/socketcand"]
 dlt-tracing = ["cda-interfaces/dlt-tracing"]
