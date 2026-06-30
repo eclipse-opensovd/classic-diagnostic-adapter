@@ -51,7 +51,7 @@ repos:
       - id: conventional-pre-commit
         stages: [commit-msg]
   - repo: https://github.com/eclipse-opensovd/cicd-workflows
-    rev: 07140bdd84f20b66fd4aff58a83c5148deec388c
+    rev: 780f272050caf091ed1d07de805b1245b747f03c
     hooks:
       - id: reuse-annotate
       - id: no-unicode-check
@@ -61,10 +61,25 @@ repos:
         exclude: ^comm-mbedtls/
       - id: validate-cargo-lints
       - id: cargo-fmt
-      - id: clippy
-        name: Clippy
-        entry: shared-config/cargo-clippy.sh
-        language: script
-        pass_filenames: false
-        args: ["--all-targets", "--", "-D", "warnings"]
+        args:
+          - --toolchain=nightly-2025-07-14
+          - --all
+      - id: cargo-clippy
+        name: clippy (stable)
+        args:
+          - --toolchain=1.88
+          - --all-targets
+          - --locked
+          - --
+          - -D
+          - warnings
+      - id: cargo-clippy
+        name: clippy (nightly)
+        args:
+          - --toolchain=nightly-2025-07-14
+          - --all-targets
+          - --locked
+          - --
+          - -D
+          - warnings
       - id: check-hooks

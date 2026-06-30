@@ -9,7 +9,7 @@
 #
 # SPDX-License-Identifier: Apache-2.0
 
-name: Nightly Advisories, Clippy and Format Checks
+name: Nightly Advisories and Clippy
 
 on:
   schedule:
@@ -18,7 +18,7 @@ on:
 
 permissions:
   contents: read
-  checks: write
+  pull-requests: write
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref_name }}
@@ -43,7 +43,7 @@ jobs:
         run: cargo deny check advisories
   nightly_clippy:
     runs-on: ubuntu-latest
-    name: "Nightly Lint and Format"
+    name: "Nightly Clippy"
     steps:
       - name: Checkout repository
         uses: actions/checkout@v6
@@ -56,25 +56,9 @@ jobs:
         with:
           version: "34.1"
           repo-token: ${{ secrets.GITHUB_TOKEN }}
-      - name: Format and Clippy - Nightly toolchain pinned
-        continue-on-error: true
-        uses: eclipse-opensovd/cicd-workflows/rust-lint-and-format-action@07140bdd84f20b66fd4aff58a83c5148deec388c
+      - name: Clippy (nightly)
+        uses: eclipse-opensovd/cicd-workflows/rust-lint-and-format-action@780f272050caf091ed1d07de805b1245b747f03c
         with:
           toolchain: nightly-2025-07-14
-          github-token: ${{ secrets.GITHUB_TOKEN }}
-          fail-on-format-error: "false"
-          fail-on-clippy-error: "false"
-          clippy-deny-warnings: "false"
-          clippy-features: "all-features"
-          reporter: github-check
-      - name: Format and Clippy - Nightly toolchain latest
-        continue-on-error: true
-        uses: eclipse-opensovd/cicd-workflows/rust-lint-and-format-action@07140bdd84f20b66fd4aff58a83c5148deec388c
-        with:
-          toolchain: nightly
-          github-token: ${{ secrets.GITHUB_TOKEN }}
-          fail-on-format-error: "false"
-          fail-on-clippy-error: "false"
-          clippy-deny-warnings: "false"
-          clippy-features: "all-features"
-          reporter: github-check
+          extra-args: --all-features --all-targets --locked -- -D warnings
+
