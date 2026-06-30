@@ -195,7 +195,7 @@ async fn test_custom_demo_endpoint() {
 
     let url = reqwest::Url::parse(&format!("http://{host}:{test_port}/test")).expect("Invalid URL");
     wait_for_cda_online(&ServerConfig {
-        address: host,
+        address: host.clone(),
         port: test_port,
     })
     .await
