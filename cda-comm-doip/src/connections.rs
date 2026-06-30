@@ -1119,7 +1119,6 @@ mod tests {
         let mut harness = GatewaySenderTestHarness::new(Duration::ZERO);
 
         // Advance a very long time - alive check should never fire.
-        #[allow(unknown_lints, clippy::duration_suboptimal_units)]
         tokio::time::advance(Duration::from_secs(4200)).await;
         tokio::task::yield_now().await;
 

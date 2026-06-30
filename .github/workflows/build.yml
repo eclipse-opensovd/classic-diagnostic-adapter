@@ -162,7 +162,7 @@ jobs:
 
   coverage:
     name: Coverage
-    uses: eclipse-opensovd/cicd-workflows/.github/workflows/coverage.yml@ce8704cb92a29e070eb30f423387f85a131553fe
+    uses: eclipse-opensovd/cicd-workflows/.github/workflows/coverage.yml@780f272050caf091ed1d07de805b1245b747f03c
     with:
       rust-version: "1.88.0"
       cargo-extra-args: "--features integration-tests"
@@ -171,8 +171,8 @@ jobs:
       contents: read
       pull-requests: write
 
-  nightly_clippy:
-    name: Nightly Clippy (diff-filtered)
+  stable_clippy:
+    name: Stable Clippy
     if: github.event_name == 'pull_request'
     runs-on: ubuntu-latest
     steps:
@@ -180,7 +180,6 @@ jobs:
         uses: actions/checkout@v6
         with:
           submodules: false
-          fetch-depth: 0
       - name: Setup DLT tracing lib
         uses: eclipse-opensovd/dlt-tracing-lib/.github/actions/setup-dlt@main
       - name: Install Protoc
@@ -188,19 +187,39 @@ jobs:
         with:
           version: "34.1"
           repo-token: ${{ secrets.GITHUB_TOKEN }}
-      - name: Nightly Format and Clippy
-        uses: eclipse-opensovd/cicd-workflows/rust-lint-and-format-action@ce8704cb92a29e070eb30f423387f85a131553fe
+      - name: Clippy (stable)
+        uses: eclipse-opensovd/cicd-workflows/rust-lint-and-format-action@780f272050caf091ed1d07de805b1245b747f03c
         with:
-          toolchain: nightly
-          all-features: "true"
-          base-sha: ${{ github.event.pull_request.base.sha }}
-          post-pr-comment: "true"
+          toolchain: 1.88.0
+          extra-args: --all-features --all-targets --locked -- -D warnings
+
+  nightly_clippy:
+    name: Nightly Clippy
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v6
+        with:
+          submodules: false
+      - name: Setup DLT tracing lib
+        uses: eclipse-opensovd/dlt-tracing-lib/.github/actions/setup-dlt@main
+      - name: Install Protoc
+        uses: arduino/setup-protoc@v3
+        with:
+          version: "34.1"
+          repo-token: ${{ secrets.GITHUB_TOKEN }}
+      - name: Clippy (nightly)
+        uses: eclipse-opensovd/cicd-workflows/rust-lint-and-format-action@780f272050caf091ed1d07de805b1245b747f03c
+        with:
+          toolchain: nightly-2025-07-14
+          extra-args: --all-features --all-targets --locked -- -D warnings
 
   cargo-crap:
     name: CRAP (Change Risk Anti-Patterns)
     if: github.event_name == 'pull_request'
     needs: [coverage]
-    uses: eclipse-opensovd/cicd-workflows/.github/workflows/crap.yml@ce8704cb92a29e070eb30f423387f85a131553fe
+    uses: eclipse-opensovd/cicd-workflows/.github/workflows/crap.yml@780f272050caf091ed1d07de805b1245b747f03c
     with:
       rust-version: "1.88.0"
       cargo-crap-git-url: "https://github.com/theswiftfox/cargo-crap.git"

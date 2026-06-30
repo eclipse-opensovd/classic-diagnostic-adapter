@@ -82,7 +82,7 @@ impl<S: EcuGateway, T: EcuManager> UdsManager<S, T> {
             Err(e) => Err(e),
         };
 
-        let response_mapped = start
+            let response_mapped = start
             .elapsed()
             .saturating_sub(payload_build_after)
             .saturating_sub(response_after);
@@ -102,7 +102,6 @@ impl<S: EcuGateway, T: UdsEcuDb> UdsManager<S, T> {
     // allowed for clarity, to make it clearer which of the loops is being continued
     #[allow(clippy::needless_continue)]
     // allow too many lines, as it is better to keep this together for now
-    #[allow(clippy::too_many_lines)]
     #[tracing::instrument(
         skip(self, payload),
         fields(ecu_name,

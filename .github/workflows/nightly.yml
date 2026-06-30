@@ -9,7 +9,7 @@
 #
 # SPDX-License-Identifier: Apache-2.0
 
-name: Nightly Advisories, Clippy and Format Checks
+name: Nightly Advisories and Clippy
 
 on:
   schedule:
@@ -43,7 +43,7 @@ jobs:
         run: cargo deny check advisories
   nightly_clippy:
     runs-on: ubuntu-latest
-    name: "Nightly Lint and Format"
+    name: "Nightly Clippy"
     steps:
       - name: Checkout repository
         uses: actions/checkout@v6
@@ -56,8 +56,9 @@ jobs:
         with:
           version: "34.1"
           repo-token: ${{ secrets.GITHUB_TOKEN }}
-      - name: Format and Clippy
-        uses: eclipse-opensovd/cicd-workflows/rust-lint-and-format-action@ce8704cb92a29e070eb30f423387f85a131553fe
+      - name: Clippy (nightly)
+        uses: eclipse-opensovd/cicd-workflows/rust-lint-and-format-action@780f272050caf091ed1d07de805b1245b747f03c
         with:
           toolchain: nightly-2025-07-14
-          all-features: "true"
+          extra-args: --all-features --all-targets --locked -- -D warnings
+
