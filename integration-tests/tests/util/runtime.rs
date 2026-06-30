@@ -57,6 +57,7 @@ static ECU_SIM_PROCESS: LazyLock<Mutex<Option<std::process::Child>>> =
 
 const CDA_INTEGRATION_TEST_USE_DOCKER: &str = "CDA_INTEGRATION_TEST_USE_DOCKER";
 const CDA_INTEGRATION_TEST_TESTER_ADDRESS: &str = "CDA_INTEGRATION_TEST_TESTER_ADDRESS";
+const CDA_INTEGRATION_TEST_COVERAGE: &str = "CDA_INTEGRATION_TEST_COVERAGE";
 
 const MAIN_HEALTH_COMPONENT_KEY: &str = "main";
 
@@ -438,9 +439,14 @@ fn start_docker_compose(
         sim_control_port,
     )?;
 
-    let status = std::process::Command::new("docker")
-        .arg("compose")
-        .arg("build")
+    let mut cmd = std::process::Command::new("docker");
+    cmd.arg("compose");
+
+    if coverage_mode() {
+        append_coverage_compose_files(&mut cmd);
+    }
+
+    cmd.arg("build")
         // For actual reproducible builds, this should be stamped with something related
         // to the source, but does not matter for the integration tests.
         // If it is not set the build you try to fetch it via git, which is not available either.
@@ -450,7 +456,9 @@ fn start_docker_compose(
         .arg("--build-arg")
         .arg("SOURCE_GIT_SHA=unknown")
         .env("DOCKER_BUILDKIT", "1")
-        .current_dir(&test_container_dir)
+        .current_dir(&test_container_dir);
+
+    let status = cmd
         .status()
         .map_err(|e| TestingError::ProcessFailed(format!("Failed to build docker compose: {e}")))?;
     check_command_success(status, "docker compose build failed")?;
@@ -461,10 +469,16 @@ fn start_docker_compose(
 fn docker_compose_up(container: Option<String>) -> Result<(), TestingError> {
     let test_container_dir = test_container_dir()?;
     let mut cmd = std::process::Command::new("docker");
-    cmd.arg("compose")
-        .arg("up")
-        .arg("-d")
-        .env("DOCKER_BUILDKIT", "1");
+    cmd.arg("compose");
+
+    // Use coverage-enabled compose file when running with coverage instrumentation
+    // Note: -f flags are global options and must appear before the subcommand
+    if coverage_mode() {
+        append_coverage_compose_files(&mut cmd);
+    }
+
+    cmd.arg("up").arg("-d").env("DOCKER_BUILDKIT", "1");
+
     if let Some(container_name) = container {
         cmd.arg(container_name);
     }
@@ -478,8 +492,15 @@ fn docker_compose_up(container: Option<String>) -> Result<(), TestingError> {
 fn docker_compose_down(container: Option<String>) -> Result<(), TestingError> {
     let test_container_dir = test_container_dir()?;
     let mut cmd = std::process::Command::new("docker");
-    cmd.arg("compose")
-        .arg("down")
+    cmd.arg("compose");
+
+    // Use coverage-enabled compose file when running with coverage instrumentation
+    // Note: -f flags are global options and must appear before the subcommand
+    if coverage_mode() {
+        append_coverage_compose_files(&mut cmd);
+    }
+
+    cmd.arg("down")
         .arg("--remove-orphans")
         .env("DOCKER_BUILDKIT", "1")
         .current_dir(&test_container_dir);
@@ -534,6 +555,13 @@ fn dump_docker_logs() {
     }
 
     tracing::error!("========== End Docker Compose Logs ==========");
+}
+
+fn append_coverage_compose_files(cmd: &mut std::process::Command) {
+    cmd.arg("-f")
+        .arg("docker-compose.yml")
+        .arg("-f")
+        .arg("docker-compose.coverage.yml");
 }
 
 /// Strips ANSI escape codes from a string (e.g., color codes like \x1b[0m)
@@ -686,6 +714,10 @@ fn use_docker() -> bool {
     std::env::var(CDA_INTEGRATION_TEST_USE_DOCKER).map_or(true, |s| s == "true")
 }
 
+fn coverage_mode() -> bool {
+    std::env::var(CDA_INTEGRATION_TEST_COVERAGE).is_ok_and(|s| s == "true")
+}
+
 async fn wait_for_http_ready(
     url: String,
     service_name: &str,
@@ -833,6 +865,13 @@ fn register_cleanup() {
             std::env::var(CDA_INTEGRATION_TEST_USE_DOCKER).map_or(true, |s| s == "true");
 
         if use_docker {
+            // Extract coverage data before shutting down containers
+            if coverage_mode()
+                && let Err(e) = extract_coverage_from_container()
+            {
+                eprintln!("Failed to extract coverage data: {e}");
+            }
+
             if let Err(e) = docker_compose_down(None) {
                 eprintln!("Failed to stop docker compose: {e}");
             }
@@ -843,6 +882,89 @@ fn register_cleanup() {
     unsafe {
         libc::atexit(cleanup_handler);
     }
+}
+
+/// Extracts .profraw files from the CDA container's coverage volume.
+/// The files are copied to the target/coverage directory on the host for merging.
+/// Also extracts the instrumented binary so coverage can be properly decoded.
+///
+/// The CDA container must be gracefully stopped first so that the LLVM coverage
+/// runtime writes the .profraw files (they are written on process exit via atexit).
+fn extract_coverage_from_container() -> Result<(), TestingError> {
+    let test_container_dir = test_container_dir()?;
+    let project_dir = test_container_dir.parent().ok_or_else(|| {
+        TestingError::PathNotFound("Could not determine project root directory".to_owned())
+    })?;
+    let coverage_output_dir = project_dir.join("target").join("coverage");
+
+    std::fs::create_dir_all(&coverage_output_dir).map_err(|e| {
+        TestingError::ProcessFailed(format!("Failed to create coverage output directory: {e}"))
+    })?;
+
+    // Stop the CDA container gracefully so the LLVM coverage runtime writes .profraw files.
+    // SIGTERM is sent first (which the CDA binary handles for graceful shutdown), then
+    // Docker waits for stop_grace_period before sending SIGKILL.
+    let mut cmd = std::process::Command::new("docker");
+    cmd.arg("compose");
+    append_coverage_compose_files(&mut cmd);
+    let stop_status = cmd
+        .arg("stop")
+        .arg("-t")
+        .arg("10")
+        .arg("cda")
+        .current_dir(&test_container_dir)
+        .status()
+        .map_err(|e| {
+            TestingError::ProcessFailed(format!("Failed to stop CDA container for coverage: {e}"))
+        })?;
+
+    if !stop_status.success() {
+        return Err(TestingError::ProcessFailed(
+            "Failed to stop CDA container for coverage".to_owned(),
+        ));
+    }
+
+    // Copy coverage data from the (now stopped) container
+    let mut cmd = std::process::Command::new("docker");
+    cmd.arg("compose");
+    append_coverage_compose_files(&mut cmd);
+    let status = cmd
+        .arg("cp")
+        .arg("cda:/app/coverage/.")
+        .arg(coverage_output_dir.to_str().unwrap_or_default())
+        .current_dir(&test_container_dir)
+        .status()
+        .map_err(|e| TestingError::ProcessFailed(format!("Failed to copy coverage data: {e}")))?;
+
+    if !status.success() {
+        return Err(TestingError::ProcessFailed(
+            "Failed to copy coverage data from container".to_owned(),
+        ));
+    }
+
+    // Also extract the instrumented binary from the container
+    // This is needed to decode the coverage data (the binary contains the coverage mapping)
+    let binary_output_path = coverage_output_dir.join("opensovd-cda");
+    let mut cmd = std::process::Command::new("docker");
+    cmd.arg("compose");
+    append_coverage_compose_files(&mut cmd);
+    let status = cmd
+        .arg("cp")
+        .arg("cda:/app/opensovd-cda")
+        .arg(binary_output_path.to_str().unwrap_or_default())
+        .current_dir(&test_container_dir)
+        .status()
+        .map_err(|e| {
+            TestingError::ProcessFailed(format!("Failed to copy instrumented binary: {e}"))
+        })?;
+
+    if !status.success() {
+        return Err(TestingError::ProcessFailed(
+            "Failed to copy instrumented binary from container".to_owned(),
+        ));
+    }
+
+    Ok(())
 }
 
 /// Registers a custom panic hook that dumps docker logs before the default panic handler runs.

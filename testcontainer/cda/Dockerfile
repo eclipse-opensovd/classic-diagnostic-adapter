@@ -60,6 +60,9 @@ FROM chef AS cacher
 WORKDIR /app
 COPY --from=planner /app/recipe.json recipe.json
 
+ARG BUILD_PROFILE=release
+ARG RUSTFLAGS=
+
 # Use BuildKit cache mounts for Cargo registry, Git, and sccache
 # This significantly speeds up subsequent builds by reusing downloaded crates and compiled artifacts.
 ENV RUSTC_WRAPPER=sccache \
@@ -67,12 +70,19 @@ ENV RUSTC_WRAPPER=sccache \
 RUN --mount=type=cache,target=/usr/local/cargo/registry,sharing=locked \
     --mount=type=cache,target=/usr/local/cargo/git,sharing=locked \
     --mount=type=cache,target=$SCCACHE_DIR,sharing=locked \
-    cargo chef cook --release --recipe-path recipe.json
+    if [ "$BUILD_PROFILE" = "dev" ]; then \
+        export RUSTFLAGS="$RUSTFLAGS"; \
+        cargo chef cook --profile dev --recipe-path recipe.json; \
+    else \
+        cargo chef cook --release --recipe-path recipe.json; \
+    fi
 
 # --- Stage 4: Build the application ---
 FROM chef AS builder
 ARG SOURCE_DATE_EPOCH
 ARG SOURCE_GIT_SHA
+ARG BUILD_PROFILE=release
+ARG RUSTFLAGS=
 
 WORKDIR /app
 # Copy pre-built dependencies from the cacher stage
@@ -107,8 +117,14 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry,sharing=locked \
     --mount=type=cache,target=$SCCACHE_DIR,sharing=locked \
     export SOURCE_DATE_EPOCH=${SOURCE_DATE_EPOCH} && \
     export SOURCE_GIT_SHA=${SOURCE_GIT_SHA} && \
-    cargo build --release --bin opensovd-cda && \
-    cp target/release/opensovd-cda /tmp/opensovd-cda
+    if [ "$BUILD_PROFILE" = "dev" ]; then \
+        export RUSTFLAGS="$RUSTFLAGS"; \
+        cargo build --profile dev --bin opensovd-cda && \
+        cp target/debug/opensovd-cda /tmp/opensovd-cda; \
+    else \
+        cargo build --release --bin opensovd-cda && \
+        cp target/release/opensovd-cda /tmp/opensovd-cda; \
+    fi
 
 # --- Stage 5: Runtime base with dependencies ---
 FROM debian:trixie-slim AS runtime-base
@@ -125,7 +141,7 @@ WORKDIR /app
 
 # Copy the binary from /tmp
 COPY --from=builder /tmp/opensovd-cda /app/opensovd-cda
-RUN mkdir -p /app/odx
+RUN mkdir -p /app/odx /app/coverage
 
 COPY --chmod=755 testcontainer/cda/entrypoint.sh /app/entrypoint.sh
 ENTRYPOINT ["/app/entrypoint.sh"]
