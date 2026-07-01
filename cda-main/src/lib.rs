@@ -18,7 +18,8 @@ use cda_comm_uds::UdsManager;
 use cda_core::EcuManager;
 use cda_database::FileManager;
 use cda_interfaces::{
-    DiagServiceError, DoipGatewaySetupError, FunctionalDescriptionConfig, HashMap, UdsEcu,
+    DiagServiceError, DoipGatewaySetupError, FunctionalDescriptionConfig, HashMap, UdsQuery,
+    UdsVariant,
     datatypes::{ComParams, FaultConfig},
     dlt_ctx,
 };

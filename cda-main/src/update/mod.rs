@@ -17,7 +17,7 @@ use async_trait::async_trait;
 use cda_comm_doip::DoipDiagGateway;
 use cda_core::EcuManager;
 use cda_interfaces::{
-    UdsEcu,
+    UdsQuery,
     datatypes::ComponentsConfig,
     runtime_update_api::{ReloadError, RuntimeFilesUpdateSecurityHandler},
 };
