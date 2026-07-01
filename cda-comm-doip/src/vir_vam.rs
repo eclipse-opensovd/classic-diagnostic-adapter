@@ -181,6 +181,7 @@ where
                             doip_connections: Arc::clone(&state.doip_connections),
                             ecus: Arc::clone(&state.ecus),
                             gateway_ecu_map: gateway_ecu_map.clone(),
+                            connection_tasks: Arc::clone(&state.connection_tasks),
                         },
                         Some((variant_detection.clone(), ecu_names_for_gateway)),
                     )
