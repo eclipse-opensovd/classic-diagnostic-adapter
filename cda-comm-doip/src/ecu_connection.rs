@@ -587,6 +587,7 @@ async fn create_tls_stream(
 
 // Allow building CDA without TLS support
 #[cfg(all(not(feature = "openssl"), not(feature = "mbedtls")))]
+#[allow(clippy::unused_async)] // async matches the signature of the TLS-enabled variant
 async fn create_tls_stream(
     _stream: tokio::net::TcpStream,
     _doip_connection_config: DoIPConfig,
