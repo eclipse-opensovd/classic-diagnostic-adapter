@@ -64,6 +64,22 @@ struct ConnectionSettings {
     alive_check_interval: Duration,
 }
 
+/// Identity of a `DoIP` gateway (IP address and ECU name).
+#[derive(Debug)]
+struct GatewayIdentity {
+    ip: String,
+    name: String,
+}
+
+/// Context for notifying the UDS layer when ECUs behind a gateway disconnect.
+#[derive(Debug)]
+struct DisconnectNotifier {
+    /// Names of ECUs reachable through this gateway connection.
+    ecu_names: Vec<String>,
+    /// Channel to send disconnect notifications to the UDS state coordinator.
+    tx: mpsc::Sender<Vec<String>>,
+}
+
 #[derive(Error, Debug, Clone)]
 pub enum EcuError {
     #[error("Resource not found: `{0}`")]
@@ -123,6 +139,7 @@ pub(crate) async fn handle_gateway_connection<T>(
     gateway: DoipTarget,
     config: &GatewayConfig,
     state: &GatewayState<T>,
+    ecu_disconnect_tx: mpsc::Sender<Vec<String>>,
 ) -> Result<u16, EcuError>
 where
     T: EcuAddresses + DoipComParams,
@@ -150,6 +167,15 @@ where
             )));
         };
 
+    // Build list of ECU names behind this gateway for disconnect notifications
+    let mut ecu_names_for_gateway: Vec<String> = Vec::new();
+    for (name, ecu_lock) in state.ecus.iter() {
+        let ecu = ecu_lock.read().await;
+        if ecu_ids.contains(&ecu.logical_address()) {
+            ecu_names_for_gateway.push(name.clone());
+        }
+    }
+
     let gateway_ecu = match state.ecus.get(&gateway.ecu) {
         Some(ecu) => ecu.read().await,
         None => {
@@ -165,8 +191,10 @@ where
 
     let (sender, receiver) = match connection_handler(
         config.connection.clone(),
-        gateway.ip.clone(),
-        gateway.ecu.clone(),
+        GatewayIdentity {
+            ip: gateway.ip.clone(),
+            name: gateway.ecu.clone(),
+        },
         config.doip,
         routing_activation_request,
         ecu_ids.clone(),
@@ -177,6 +205,10 @@ where
             max_retry_attempts: connection_retry_attempts,
             send_timeout: config.send_timeout,
             alive_check_interval: config.alive_check_interval,
+        },
+        DisconnectNotifier {
+            ecu_names: ecu_names_for_gateway,
+            tx: ecu_disconnect_tx,
         },
     )
     .await
@@ -242,25 +274,25 @@ fn create_ecu_receiver_map(
 
 #[allow(clippy::type_complexity)]
 #[tracing::instrument(
-    skip(routing_activation_request, connection_settings, connection_config),
+    skip(routing_activation_request, connection_settings, connection_config, disconnect),
     fields(
         tester_ip = connection_config.source_ip.clone(),
         port = connection_config.port,
         tls_port = connection_config.tls_port,
-        gateway_ip = %gateway_ip,
-        gateway_name = %gateway_name,
+        gateway_ip = %gateway.ip,
+        gateway_name = %gateway.name,
         ecu_count = ecus.len(),
         dlt_context = dlt_ctx!("DOIP"),
     )
 )]
 async fn connection_handler(
     connection_config: ConnectionConfig,
-    gateway_ip: String,
-    gateway_name: String,
+    gateway: GatewayIdentity,
     doip_connection_config: DoIPConfig,
     routing_activation_request: RoutingActivationRequest,
     ecus: Vec<u16>,
     connection_settings: ConnectionSettings,
+    disconnect: DisconnectNotifier,
 ) -> Result<
     (
         mpsc::Sender<DoipPayload>,
@@ -291,8 +323,8 @@ async fn connection_handler(
     let gateway_conn = Arc::new(
         ecu_connection::establish_ecu_connection(
             &connection_config,
-            &gateway_ip,
-            &gateway_name,
+            &gateway.ip,
+            &gateway.name,
             doip_connection_config,
             routing_activation_request,
             connection_settings.connect_timeout,
@@ -300,7 +332,7 @@ async fn connection_handler(
         )
         .await
         .inspect_err(|e| {
-            tracing::error!("Failed to connect to gateway at {gateway_ip}: {e:?}");
+            tracing::error!("Failed to connect to gateway at {}: {e:?}", gateway.ip);
         })?,
     );
 
@@ -310,7 +342,7 @@ async fn connection_handler(
     let conn_reset = Arc::<EcuConnectionTarget>::clone(&gateway_conn);
     spawn_connection_reset_task(
         connection_config.clone(),
-        gateway_ip.clone(),
+        gateway.ip.clone(),
         doip_connection_config,
         routing_activation_request,
         conn_reset_rx,
@@ -322,7 +354,7 @@ async fn connection_handler(
     // when sender task wants to send something
     let (send_pending_tx, send_pending_rx) = watch::channel::<bool>(false);
     spawn_gateway_sender_task(
-        &gateway_ip,
+        &gateway.ip,
         inrx,
         Arc::<EcuConnectionTarget>::clone(&gateway_conn),
         connection_settings.send_timeout,
@@ -331,13 +363,13 @@ async fn connection_handler(
         connection_settings.alive_check_interval,
     );
     spawn_gateway_receiver_task(
-        gateway_ip.clone(),
-        gateway_name.clone(),
+        gateway,
         outtx,
         Arc::<EcuConnectionTarget>::clone(&gateway_conn),
         send_pending_rx,
         conn_reset_tx,
         intx.clone(),
+        disconnect,
     );
 
     // no need to wait until the connection is alive, we will reconnect automatically anyway
@@ -572,38 +604,37 @@ where
 /// that should be kept private to this function.
 #[allow(clippy::too_many_lines)]
 #[tracing::instrument(
-    skip(outtx, gateway_conn, send_pending_rx, reset_tx),
+    skip(outtx, gateway_conn, send_pending_rx, reset_tx, disconnect),
     fields(
-        gateway_ip = %gateway_ip,
-        gateway_name = %gateway_name,
+        gateway_ip = %gateway.ip,
+        gateway_name = %gateway.name,
         active_ecus = outtx.len(),
         dlt_context = dlt_ctx!("DOIP"),
     )
 )]
 fn spawn_gateway_receiver_task<T>(
-    gateway_ip: String,
-    gateway_name: String,
+    gateway: GatewayIdentity,
     outtx: HashMap<u16, broadcast::Sender<Result<DiagnosticResponse, EcuError>>>,
     gateway_conn: Arc<EcuConnectionTarget<T>>,
     mut send_pending_rx: watch::Receiver<bool>,
     reset_tx: mpsc::Sender<ConnectionResetReason>,
     send_tx: mpsc::Sender<DoipPayload>,
+    disconnect: DisconnectNotifier,
 ) where
     T: AsyncRead + AsyncWrite + Unpin + Send + 'static,
 {
     // note: the handlers are defined here, as rustfmt cannot format the correctly inside the
     // tokio::select! macro block
     async fn handle_send_pending(
-        gateway_name: &str,
-        gateway_ip: &str,
+        gateway: &GatewayIdentity,
         send_pending_rx: &mut watch::Receiver<bool>,
         send_pending_result: Result<(), watch::error::RecvError>,
     ) -> Result<(), ()> {
         let request_received = std::time::Instant::now();
         if send_pending_result.is_ok() {
             tracing::debug!(
-                gateway_name = %gateway_name,
-                gateway_ip = %gateway_ip,
+                gateway_name = %gateway.name,
+                gateway_ip = %gateway.ip,
                 "Received tx request, unlocking connection"
             );
             let send_pending = *send_pending_rx.borrow();
@@ -611,16 +642,16 @@ fn spawn_gateway_receiver_task<T>(
                 match send_pending_rx.changed().await {
                     Ok(()) => {
                         tracing::debug!(
-                            gateway_name = %gateway_name,
-                            gateway_ip = %gateway_ip,
+                            gateway_name = %gateway.name,
+                            gateway_ip = %gateway.ip,
                             request_duration = ?request_received.elapsed(),
                             "Send done, continue rx await"
                         );
                     }
                     Err(e) => {
                         tracing::warn!(
-                            gateway_name = %gateway_name,
-                            gateway_ip = %gateway_ip,
+                            gateway_name = %gateway.name,
+                            gateway_ip = %gateway.ip,
                             error = ?e,
                             "Send pending receiver closed"
                         );
@@ -631,8 +662,8 @@ fn spawn_gateway_receiver_task<T>(
             Ok(())
         } else {
             tracing::warn!(
-                gateway_name = %gateway_name,
-                gateway_ip = %gateway_ip,
+                gateway_name = %gateway.name,
+                gateway_ip = %gateway.ip,
                 "Send pending receiver closed"
             );
             Err(())
@@ -644,20 +675,20 @@ fn spawn_gateway_receiver_task<T>(
         fields(dlt_context = dlt_ctx!("DOIP"))
     )]
     async fn handle_response(
-        gateway_name: &str,
-        gateway_ip: &str,
+        gateway: &GatewayIdentity,
         outtx: &HashMap<u16, broadcast::Sender<Result<DiagnosticResponse, EcuError>>>,
         reset_tx: &mpsc::Sender<ConnectionResetReason>,
         ack_tx: &mpsc::Sender<DoipPayload>,
         response: Option<Result<DiagnosticResponse, ConnectionError>>,
+        disconnect: &DisconnectNotifier,
     ) {
         match response {
             Some(Ok(response)) => {
                 match response {
                     DiagnosticResponse::Ack((source_address, _)) => {
                         tracing::debug!(
-                            gateway_name = %gateway_name,
-                            gateway_ip = %gateway_ip,
+                            gateway_name = %gateway.name,
+                            gateway_ip = %gateway.ip,
                             source_address = %source_address,
                             "Received ACK"
                         );
@@ -687,8 +718,8 @@ fn spawn_gateway_receiver_task<T>(
                             .inspect_err(|e| {
                                 tracing::error!(
                                     error = ?e,
-                                    gateway_name = %gateway_name,
-                                    gateway_ip = %gateway_ip,
+                                    gateway_name = %gateway.name,
+                                    gateway_ip = %gateway.ip,
                                     source_address = %addr,
                                     target_address = %target_addr,
                                     "Failed to send DiagnosticMessageAck"
@@ -729,6 +760,13 @@ fn spawn_gateway_receiver_task<T>(
                         {
                             tracing::error!(error = ?e, "Failed to send connection reset request");
                         }
+                        // Notify UDS layer that ECUs on this connection are disconnected
+                        if let Err(e) = disconnect.tx.send(disconnect.ecu_names.clone()).await {
+                            tracing::error!(
+                                error = ?e,
+                                "Failed to send ECU disconnect notification"
+                            );
+                        }
                     }
                     _ => {
                         // for POC purposes we just log the error and do not reset the connection
@@ -745,7 +783,7 @@ fn spawn_gateway_receiver_task<T>(
         }
     }
 
-    cda_interfaces::spawn_named!(&format!("gateway-receiver-{gateway_ip}"), async move {
+    cda_interfaces::spawn_named!(&format!("gateway-receiver-{}", gateway.ip), async move {
         'receive: loop {
             if outtx.iter().all(|(_, tx)| tx.receiver_count() == 0) {
                 tracing::debug!("All out channels closed. Shutting down connection");
@@ -759,8 +797,7 @@ fn spawn_gateway_receiver_task<T>(
             tokio::select! {
                 send_pending_result = send_pending_rx.changed() => {
                     if let Err(()) = handle_send_pending(
-                        &gateway_name,
-                        &gateway_ip,
+                        &gateway,
                         &mut send_pending_rx,
                         send_pending_result
                     ).await {
@@ -781,12 +818,12 @@ fn spawn_gateway_receiver_task<T>(
                 } => {
                     if let Some(response) = response {
                         handle_response(
-                            &gateway_name,
-                            &gateway_ip,
+                            &gateway,
                             &outtx,
                             &reset_tx,
                             &send_tx,
-                            response
+                            response,
+                            &disconnect,
                         ).await;
                     }
                 }

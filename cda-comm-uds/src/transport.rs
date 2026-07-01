@@ -17,9 +17,10 @@ use std::{
 };
 
 use cda_interfaces::{
-    DiagComm, DiagServiceError, DynamicPlugin, EcuGateway, EcuManager, PayloadDecoder,
-    ServicePayload, TransmissionParameters, UdsResponse, UdsTransport, datatypes::RetryPolicy,
-    diagservices::UdsPayloadData, dlt_ctx, service_ids,
+    Connectivity, DiagComm, DiagServiceError, DynamicPlugin, EcuGateway, EcuManager,
+    PayloadDecoder, ServicePayload, TransmissionParameters, UdsEcu, UdsResponse, UdsTransport,
+    VariantDetection, VariantState, datatypes::RetryPolicy, diagservices::UdsPayloadData, dlt_ctx,
+    service_ids,
 };
 use tokio::sync::{RwLock, Semaphore, mpsc};
 
@@ -44,14 +45,65 @@ impl<S: EcuGateway, T: EcuManager> UdsManager<S, T> {
         map_to_json: bool,
         timeout: Option<Duration>,
     ) -> Result<<T as PayloadDecoder>::Response, DiagServiceError> {
+        let ecu = self.uds_ecu_db(ecu_name)?;
+
+        // Pre-send: if variant is not set or ECU was disconnected, attempt synchronous
+        // detection before proceeding. This handles the case where the ECU was previously
+        // unreachable or had its variant cleared after a session change.
+        {
+            let status = ecu.read().await.ecu_status();
+            let needs_detection = matches!(status.variant_state, VariantState::NotDetected)
+                || (status.connectivity == Connectivity::Offline
+                    && matches!(
+                        status.variant_state,
+                        VariantState::Detected { .. } | VariantState::NotDetected
+                    ));
+            if needs_detection && self.gateway.ecu_online(ecu_name, ecu).await.is_ok() {
+                tracing::info!(
+                    ecu_name,
+                    "No variant detected -> triggering variant detection before send"
+                );
+                if let Err(e) = self.detect_variant(ecu_name).await {
+                    tracing::warn!(
+                        ecu_name,
+                        error = %e,
+                        "Pre-send variant detection failed"
+                    );
+                }
+            }
+        }
+
+        self.send_without_variant_guard(
+            ecu_name,
+            service,
+            security_plugin,
+            payload,
+            map_to_json,
+            timeout,
+        )
+        .await
+    }
+
+    /// Inner send path that skips the variant detection guard.
+    /// Used by `detect_variant` to avoid infinite recursion.
+    pub(crate) async fn send_without_variant_guard(
+        &self,
+        ecu_name: &str,
+        service: DiagComm,
+        security_plugin: &DynamicPlugin,
+        payload: Option<UdsPayloadData>,
+        map_to_json: bool,
+        timeout: Option<Duration>,
+    ) -> Result<<T as PayloadDecoder>::Response, DiagServiceError> {
         let start = Instant::now();
         tracing::debug!(
             service = ?service,
             payload = ?payload.as_ref()
-                .map(std::string::ToString::to_string),
+                .map(ToString::to_string),
             "Sending UDS request"
         );
         let ecu = self.uds_ecu_db(ecu_name)?;
+
         let payload = {
             let ecu = ecu.read().await;
             ecu.create_uds_payload(&service, security_plugin, payload, None)
@@ -98,7 +150,7 @@ impl<S: EcuGateway, T: EcuManager> UdsManager<S, T> {
     }
 }
 
-impl<S: EcuGateway, T: UdsEcuDb> UdsManager<S, T> {
+impl<S: EcuGateway, T: UdsEcuDb + VariantDetection> UdsManager<S, T> {
     // allowed for clarity, to make it clearer which of the loops is being continued
     #[allow(clippy::needless_continue)]
     // allow too many lines, as it is better to keep this together for now
@@ -294,6 +346,17 @@ impl<S: EcuGateway, T: UdsEcuDb> UdsManager<S, T> {
         };
         drop(response_rx);
         drop(ecu_sem);
+
+        // Post-send: if a service send (not tester present) timed out,
+        // the ECU is unreachable - notify the coordinator.
+        // The coordinator will suppress this if variant detection is in progress.
+        if matches!(response, Err(DiagServiceError::Timeout))
+            && sent_sid != service_ids::TESTER_PRESENT
+        {
+            self.state_coordinator
+                .handle_ecu_disconnected(ecu_name)
+                .await;
+        }
 
         if let Ok(ref msg) = response
             && msg.is_positive_response_for_sid(sent_sid)
@@ -532,15 +595,17 @@ mod send_tests {
     };
 
     use cda_interfaces::{
-        DiagComm, DiagServiceError, EcuAddresses, EcuGateway, EcuStateManager, HashMap,
-        HashMapExtensions, ServicePayload, TransmissionParameters, UdsResponse,
-        datatypes::{AddressingMode, FaultConfig, RetryPolicy, TesterPresentSendType},
+        DiagServiceError, EcuAddresses, EcuGateway, EcuRuntimeState, EcuStateManager, HashMap,
+        HashMapExtensions, ServicePayload, TransmissionParameters, UdsResponse, VariantDetection,
+        datatypes::FaultConfig,
     };
     use tokio::sync::{RwLock, mpsc};
 
-    use crate::{UdsEcuDb, UdsManager};
+    use crate::{
+        UdsEcuDb, UdsManager, state_coordinator::EcuStateCoordinator, test_helpers::TestEcuDb,
+    };
 
-    impl<S: EcuGateway, T: UdsEcuDb> UdsManager<S, T> {
+    impl<S: EcuGateway, T: UdsEcuDb + VariantDetection + EcuAddresses> UdsManager<S, T> {
         /// Test-only constructor that creates a `UdsManager` without spawning
         /// background tasks (variant detection, etc.), so `T` only needs the
         /// narrower trait bounds required by `send_with_raw_payload`.
@@ -550,6 +615,11 @@ mod send_tests {
             fault_config: FaultConfig,
             update_in_progress: Arc<AtomicBool>,
         ) -> Self {
+            let runtime_states: HashMap<String, EcuRuntimeState> = ecus
+                .keys()
+                .map(|name| (name.clone(), EcuRuntimeState::new()))
+                .collect();
+            let state_coordinator = EcuStateCoordinator::new(runtime_states);
             Self {
                 ecus,
                 gateway,
@@ -558,6 +628,7 @@ mod send_tests {
                 tester_present_tasks: Arc::new(RwLock::new(HashMap::default())),
                 session_reset_tasks: Arc::new(RwLock::new(HashMap::default())),
                 security_reset_tasks: Arc::new(RwLock::new(HashMap::default())),
+                state_coordinator,
                 functional_description_database: String::new(),
                 fault_config,
                 update_in_progress,
@@ -612,168 +683,6 @@ mod send_tests {
         ) -> Result<HashMap<String, Result<UdsResponse, DiagServiceError>>, DiagServiceError>
         {
             Ok(HashMap::new())
-        }
-    }
-
-    // Manual mock: TestEcuDb
-
-    /// Minimal mock for testing `send_with_raw_payload`. Only implements the
-    /// traits actually needed: `EcuStateProvider`, `UdsComParamProvider`,
-    /// `DoipComParamProvider`, and `EcuAddressProvider`.
-    struct TestEcuDb {
-        service_states: tokio::sync::Mutex<std::collections::HashMap<u8, String>>,
-    }
-
-    impl TestEcuDb {
-        fn new() -> Self {
-            Self {
-                service_states: tokio::sync::Mutex::new(std::collections::HashMap::new()),
-            }
-        }
-    }
-
-    // EcuAddressProvider
-    impl EcuAddresses for TestEcuDb {
-        fn tester_address(&self) -> u16 {
-            0x0E00
-        }
-        fn logical_address(&self) -> u16 {
-            0x0001
-        }
-        fn logical_gateway_address(&self) -> u16 {
-            0x0000
-        }
-        fn logical_functional_address(&self) -> u16 {
-            0xFFFF
-        }
-        fn ecu_name(&self) -> String {
-            "TestECU".to_string()
-        }
-        fn logical_address_eq<T: EcuAddresses>(&self, other: &T) -> bool {
-            self.logical_address() == other.logical_address()
-        }
-    }
-
-    // DoipComParamProvider
-    impl cda_interfaces::DoipComParams for TestEcuDb {
-        fn nack_number_of_retries(&self) -> &HashMap<u8, u32> {
-            // Return a static reference by leaking - acceptable in tests only
-            static EMPTY: std::sync::OnceLock<HashMap<u8, u32>> = std::sync::OnceLock::new();
-            EMPTY.get_or_init(HashMap::new)
-        }
-        fn diagnostic_ack_timeout(&self) -> Duration {
-            Duration::from_secs(2)
-        }
-        fn retry_period(&self) -> Duration {
-            Duration::from_millis(100)
-        }
-        fn routing_activation_timeout(&self) -> Duration {
-            Duration::from_secs(5)
-        }
-        fn repeat_request_count_transmission(&self) -> u32 {
-            3
-        }
-        fn connection_timeout(&self) -> Duration {
-            Duration::from_secs(5)
-        }
-        fn connection_retry_delay(&self) -> Duration {
-            Duration::from_secs(1)
-        }
-        fn connection_retry_attempts(&self) -> u32 {
-            3
-        }
-    }
-
-    // UdsComParamProvider
-    impl cda_interfaces::UdsComParams for TestEcuDb {
-        fn tester_present_retry_policy(&self) -> bool {
-            false
-        }
-        fn tester_present_addr_mode(self) -> AddressingMode {
-            unimplemented!()
-        }
-        fn tester_present_response_expected(self) -> bool {
-            unimplemented!()
-        }
-        fn tester_present_send_type(self) -> TesterPresentSendType {
-            unimplemented!()
-        }
-        fn tester_present_message(self) -> Vec<u8> {
-            unimplemented!()
-        }
-        fn tester_present_exp_pos_resp(self) -> Vec<u8> {
-            unimplemented!()
-        }
-        fn tester_present_exp_neg_resp(self) -> Vec<u8> {
-            unimplemented!()
-        }
-        fn tester_present_time(&self) -> Duration {
-            Duration::from_secs(2)
-        }
-        fn repeat_req_count_app(&self) -> u32 {
-            3
-        }
-        fn rc_21_retry_policy(&self) -> RetryPolicy {
-            RetryPolicy::ContinueUntilTimeout
-        }
-        fn rc_21_completion_timeout(&self) -> Duration {
-            Duration::from_secs(10)
-        }
-        fn rc_21_repeat_request_time(&self) -> Duration {
-            Duration::from_millis(10)
-        }
-        fn rc_78_retry_policy(&self) -> RetryPolicy {
-            RetryPolicy::ContinueUntilTimeout
-        }
-        fn rc_78_completion_timeout(&self) -> Duration {
-            Duration::from_secs(30)
-        }
-        fn rc_78_timeout(&self) -> Duration {
-            Duration::from_secs(5)
-        }
-        fn rc_94_retry_policy(&self) -> RetryPolicy {
-            RetryPolicy::ContinueUntilTimeout
-        }
-        fn rc_94_completion_timeout(&self) -> Duration {
-            Duration::from_secs(10)
-        }
-        fn rc_94_repeat_request_time(&self) -> Duration {
-            Duration::from_millis(10)
-        }
-        fn timeout_default(&self) -> Duration {
-            Duration::from_secs(5)
-        }
-    }
-
-    // EcuStateProvider
-    impl EcuStateManager for TestEcuDb {
-        fn set_service_state(&self, sid: u8, value: String) -> impl Future<Output = ()> + Send {
-            let states = &self.service_states;
-            async move {
-                states.lock().await.insert(sid, value);
-            }
-        }
-        fn get_service_state(&self, sid: u8) -> impl Future<Output = Option<String>> + Send {
-            let states = &self.service_states;
-            async move { states.lock().await.get(&sid).cloned() }
-        }
-        async fn session(&self) -> Result<String, DiagServiceError> {
-            Ok("default".to_string())
-        }
-        fn default_session(&self) -> Result<String, DiagServiceError> {
-            Ok("default".to_string())
-        }
-        async fn security_access(&self) -> Result<String, DiagServiceError> {
-            Ok("locked".to_string())
-        }
-        async fn lookup_session_change(
-            &self,
-            _session: &str,
-        ) -> Result<DiagComm, DiagServiceError> {
-            unimplemented!()
-        }
-        async fn set_default_states(&self) -> Result<(), DiagServiceError> {
-            Ok(())
         }
     }
 

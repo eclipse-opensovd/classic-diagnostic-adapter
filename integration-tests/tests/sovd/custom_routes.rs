@@ -133,10 +133,13 @@ async fn test_custom_demo_endpoint() {
         provider
     };
 
+    let (ecu_disconnect_tx, ecu_disconnect_rx) = tokio::sync::mpsc::channel(50);
+
     let gateway = opensovd_cda_lib::create_diagnostic_gateway(
         Arc::clone(&databases),
         &doip_config,
         variant_tx,
+        ecu_disconnect_tx,
         shutdown_signal.clone(),
         None,
     )
@@ -147,6 +150,7 @@ async fn test_custom_demo_endpoint() {
         gateway,
         databases,
         variant_rx,
+        ecu_disconnect_rx,
         &cda_interfaces::FunctionalDescriptionConfig {
             description_database: "functional_groups".to_owned(),
             enabled_functional_groups: None,

@@ -734,6 +734,7 @@ pub fn create_uds_manager<S: SecurityPlugin>(
     gateway: DoipDiagGateway<EcuManager<S>>,
     databases: Arc<HashMap<String, RwLock<EcuManager<S>>>>,
     variant_detection_receiver: mpsc::Receiver<Vec<String>>,
+    disconnect_receiver: mpsc::Receiver<Vec<String>>,
     functional_description_config: &FunctionalDescriptionConfig,
     fault_config: FaultConfig,
     update_in_progress: Arc<std::sync::atomic::AtomicBool>,
@@ -742,6 +743,7 @@ pub fn create_uds_manager<S: SecurityPlugin>(
         gateway,
         databases,
         variant_detection_receiver,
+        disconnect_receiver,
         functional_description_config,
         fault_config,
         update_in_progress,
@@ -773,11 +775,13 @@ pub async fn create_vehicle_components<
     let (databases, file_managers) = load_databases::<S>(config, mdd_paths, db_provider).await?;
 
     let (variant_detection_tx, variant_detection_rx) = mpsc::channel(50);
+    let (ecu_disconnect_tx, ecu_disconnect_rx) = mpsc::channel(50);
     let databases = Arc::new(databases);
     let diagnostic_gateway = create_diagnostic_gateway(
         Arc::clone(&databases),
         &config.doip,
         variant_detection_tx,
+        ecu_disconnect_tx,
         shutdown_signal,
         doip_provider,
     )
@@ -787,6 +791,7 @@ pub async fn create_vehicle_components<
         diagnostic_gateway.clone(),
         Arc::clone(&databases),
         variant_detection_rx,
+        ecu_disconnect_rx,
         &config.functional_description,
         config.faults.clone(),
         update_in_progress,
@@ -807,7 +812,7 @@ pub async fn create_vehicle_components<
 }
 
 #[tracing::instrument(
-    skip(databases, variant_detection, shutdown_signal, doip_health_provider),
+    skip(databases, variant_detection, ecu_disconnect_tx, shutdown_signal, doip_health_provider),
     fields(
         database_count = databases.len(),
         dlt_context = dlt_ctx!("MAIN"),
@@ -819,6 +824,7 @@ pub async fn create_diagnostic_gateway<S: SecurityPlugin>(
     databases: Arc<DatabaseMap<S>>,
     doip_config: &DoipConfig,
     variant_detection: mpsc::Sender<Vec<String>>,
+    ecu_disconnect_tx: mpsc::Sender<Vec<String>>,
     shutdown_signal: impl Future<Output = ()> + Send + 'static,
     doip_health_provider: Option<&Arc<cda_health::StatusHealthProvider>>,
 ) -> Result<DoipDiagGateway<EcuManager<S>>, DoipGatewaySetupError> {
@@ -826,8 +832,14 @@ pub async fn create_diagnostic_gateway<S: SecurityPlugin>(
         provider.update_status(cda_health::Status::Starting).await;
     }
 
-    let result =
-        DoipDiagGateway::new(doip_config, databases, variant_detection, shutdown_signal).await;
+    let result = DoipDiagGateway::new(
+        doip_config,
+        databases,
+        variant_detection,
+        ecu_disconnect_tx,
+        shutdown_signal,
+    )
+    .await;
     let status = if result.is_ok() {
         cda_health::Status::Up
     } else {

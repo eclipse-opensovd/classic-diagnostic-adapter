@@ -89,16 +89,18 @@ impl IntoSovd for cda_interfaces::datatypes::Ecu {
     type SovdType = sovd_interfaces::apps::sovd2uds::data::network_structure::Ecu;
 
     fn into_sovd(self) -> Self::SovdType {
+        let state: super::sovd_ecu::State = self.variant.clone().into_sovd();
+        let variant_name = if let Some(n) = self.variant.name() {
+            n.to_owned()
+        } else if self.variant.is_base_variant() {
+            "BaseVariant".to_owned()
+        } else {
+            "Unknown".to_owned()
+        };
         Self::SovdType {
             qualifier: self.qualifier,
-            variant: if let Some(n) = self.variant.name {
-                n.clone()
-            } else if self.variant.is_base_variant {
-                "BaseVariant".to_owned()
-            } else {
-                "Unknown".to_owned()
-            },
-            state: self.variant.state.to_string(),
+            variant: variant_name,
+            state: format!("{state:?}"),
             logical_address: self.logical_address,
             logical_link: self.logical_link,
         }

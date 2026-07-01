@@ -161,6 +161,7 @@ impl<T: EcuAddresses + DoipComParams> DoipDiagGateway<T> {
         doip_config: &DoipConfig,
         ecus: Arc<HashMap<String, RwLock<T>>>,
         variant_detection: mpsc::Sender<Vec<String>>,
+        ecu_disconnect_tx: mpsc::Sender<Vec<String>>,
         shutdown_signal: F,
     ) -> Result<Self, DoipGatewaySetupError>
     where
@@ -257,6 +258,7 @@ impl<T: EcuAddresses + DoipComParams> DoipDiagGateway<T> {
                         ecus: Arc::clone(&ecus),
                         gateway_ecu_map: gateway_ecu_map.clone(),
                     },
+                    ecu_disconnect_tx.clone(),
                 )
                 .await
                 {
@@ -283,6 +285,7 @@ impl<T: EcuAddresses + DoipComParams> DoipDiagGateway<T> {
             mask,
             gateway.clone(),
             variant_detection,
+            ecu_disconnect_tx,
             send_timeout,
             alive_check_interval,
             shared_shutdown_signal,

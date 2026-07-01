@@ -36,6 +36,14 @@ impl DbCache {
     pub(in crate::diag_kernel) async fn reset(&self) {
         self.diag_services.write().await.clear();
     }
+
+    /// Synchronous cache reset. Used when the DB is unloaded (no async context needed
+    /// because no one should be concurrently reading the cache during unload).
+    pub(in crate::diag_kernel) fn reset_sync(&self) {
+        if let Ok(mut guard) = self.diag_services.try_write() {
+            guard.clear();
+        }
+    }
 }
 
 pub(in crate::diag_kernel) enum CacheLocation {

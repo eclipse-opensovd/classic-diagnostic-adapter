@@ -111,6 +111,7 @@ pub(crate) async fn listen_for_vams<T, F>(
     netmask: u32,
     gateway: DoipDiagGateway<T>,
     variant_detection: mpsc::Sender<Vec<String>>,
+    ecu_disconnect_tx: mpsc::Sender<Vec<String>>,
     send_timeout: Duration,
     alive_check_interval: Duration,
     mut shutdown_signal: futures::future::Shared<F>,
@@ -133,6 +134,7 @@ pub(crate) async fn listen_for_vams<T, F>(
             gateway_ecu_map,
             gateway_ecu_name_map,
             variant_detection,
+            ecu_disconnect_tx,
             connection_config
         ),
         fields(
@@ -148,6 +150,7 @@ pub(crate) async fn listen_for_vams<T, F>(
         gateway_ecu_map: &HashMap<u16, Vec<u16>>,
         gateway_ecu_name_map: &HashMap<u16, Vec<String>>,
         variant_detection: mpsc::Sender<Vec<String>>,
+        ecu_disconnect_tx: mpsc::Sender<Vec<String>>,
     ) {
         let DoipMessageContext {
             doip_msg,
@@ -193,6 +196,7 @@ pub(crate) async fn listen_for_vams<T, F>(
                             ecus: Arc::clone(&gateway.ecus),
                             gateway_ecu_map: gateway_ecu_map.clone(),
                         },
+                        ecu_disconnect_tx,
                     )
                     .await
                     {
@@ -323,6 +327,7 @@ pub(crate) async fn listen_for_vams<T, F>(
                                 &gateway_ecu_map,
                                 &gateway_ecu_name_map,
                                 variant_detection.clone(),
+                                ecu_disconnect_tx.clone(),
                             ).await;
                         }
                     },
