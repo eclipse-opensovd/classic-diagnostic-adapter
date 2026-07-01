@@ -594,10 +594,15 @@ fn dump_docker_logs() {
 
     tracing::error!("========== Docker Compose Logs ==========");
 
+    // Set the active compose profiles so profile-gated services (e.g. the
+    // `socketcand` daemon under the `can` profile) are included in the dump —
+    // without this only the default services (cda, ecu-sim) are known here, and
+    // the socketcand side stays invisible when debugging CAN failures.
     let output = std::process::Command::new("docker")
         .arg("compose")
         .arg("logs")
         .arg("--no-color")
+        .env("COMPOSE_PROFILES", compose_profiles())
         .current_dir(&test_container_dir)
         .output();
 
@@ -688,6 +693,48 @@ fn write_config_toml(
     Ok(())
 }
 
+/// Build the docker-compose `.env` file contents. Pure (no I/O, no env lookups)
+/// so the exact bytes fed to compose can be unit-tested — a malformed literal
+/// here previously mangled `SIM_CAN_SOCKETCAND_HOST` into `socketcand\`, which
+/// made the ecu-sim silently never join the CAN bus in CI.
+fn docker_env_content(
+    can: bool,
+    cda_port: u16,
+    gateway_port: u16,
+    sim_control_port: u16,
+) -> String {
+    let mut env_content = format!(
+        "# Auto-generated environment file for integration tests\n# ECU Simulator Control \
+         Port\nSIM_CONTROL_PORT={sim_control_port}\n# ECU Simulator Gateway \
+         Port\nSIM_GATEWAY_PORT={gateway_port}\n# CDA Service Port\nCDA_PORT={cda_port}\n",
+    );
+
+    if can {
+        use std::fmt::Write as _;
+
+        // Point the ecu-sim at the socketcand service over the compose bridge,
+        // and compile the CDA image with the socketcand transport.
+        //
+        // NOTE: emit one short `writeln!` per line rather than a single long
+        // literal. rustfmt's `format_strings` rewraps long literals at the
+        // column limit and, when a wrap lands on an escape, mangles `\n` into
+        // `\\` + `n` — which is exactly how the host once became `socketcand\`,
+        // silently keeping the sim off the CAN bus in CI. Short lines are never
+        // rewrapped, so this stays correct across `cargo fmt`.
+        let _ = writeln!(env_content, "# socketcand daemon the ecu-sim connects to");
+        let _ = writeln!(
+            env_content,
+            "SIM_CAN_SOCKETCAND_HOST={CAN_DOCKER_SOCKETCAND_HOST}"
+        );
+        let _ = writeln!(env_content, "SIM_CAN_SOCKETCAND_PORT={SOCKETCAND_PORT}");
+        let _ = writeln!(env_content, "SIM_CAN_SOCKETCAND_BUS={CAN_BUS_NAME}");
+        let _ = writeln!(env_content, "# Extra cargo features for the CDA image");
+        let _ = writeln!(env_content, "CDA_FEATURES=can-socketcand");
+    }
+
+    env_content
+}
+
 fn write_docker_env_file(
     test_container_dir: &std::path::Path,
     cda_port: u16,
@@ -695,25 +742,7 @@ fn write_docker_env_file(
     sim_control_port: u16,
 ) -> Result<(), TestingError> {
     let env_file_path = test_container_dir.join(".env");
-    let mut env_content = format!(
-        "# Auto-generated environment file for integration tests\n# ECU Simulator Control \
-         Port\nSIM_CONTROL_PORT={sim_control_port}\n# ECU Simulator Gateway \
-         Port\nSIM_GATEWAY_PORT={gateway_port}\n# CDA Service Port\nCDA_PORT={cda_port}\n",
-    );
-
-    if use_can() {
-        use std::fmt::Write as _;
-
-        // Point the ecu-sim at the socketcand service over the compose bridge,
-        // and compile the CDA image with the socketcand transport.
-        let _ = write!(
-            env_content,
-            "# socketcand daemon the ecu-sim connects \
-             to\nSIM_CAN_SOCKETCAND_HOST={CAN_DOCKER_SOCKETCAND_HOST}\\
-             nSIM_CAN_SOCKETCAND_PORT={SOCKETCAND_PORT}\nSIM_CAN_SOCKETCAND_BUS={CAN_BUS_NAME}\n# \
-             Extra cargo features for the CDA image\nCDA_FEATURES=can-socketcand\n",
-        );
-    }
+    let env_content = docker_env_content(use_can(), cda_port, gateway_port, sim_control_port);
 
     std::fs::write(&env_file_path, env_content)
         .map_err(|e| TestingError::ProcessFailed(format!("Failed to write .env file: {e}")))?;
@@ -844,7 +873,7 @@ pub(crate) fn use_can() -> bool {
 }
 
 /// Compose profiles to activate: the `can` profile (which includes the
-/// socketcand service) only for CAN runs, so DoIP runs need no vcan module.
+/// socketcand service) only for CAN runs, so `DoIP` runs need no vcan module.
 fn compose_profiles() -> &'static str {
     if use_can() { "can" } else { "" }
 }
@@ -1045,5 +1074,70 @@ fn check_command_success(
         Ok(())
     } else {
         Err(TestingError::ProcessFailed(error_msg.to_owned()))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn docker_env_can_socketcand_lines_are_well_formed() {
+        let content = docker_env_content(true, 20002, 13400, 8181);
+
+        // Regression guard: a malformed string literal previously produced
+        // `SIM_CAN_SOCKETCAND_HOST=socketcand\` (trailing backslash) with the
+        // PORT var mangled onto a continuation line, so the ecu-sim tried to
+        // resolve host `socketcand\`, never joined the CAN bus, and every CDA
+        // discovery probe timed out in CI.
+        assert!(
+            content.contains("SIM_CAN_SOCKETCAND_HOST=socketcand\n"),
+            "host line malformed:\n{content}"
+        );
+        assert!(
+            !content.contains("socketcand\\"),
+            "host value has a stray backslash:\n{content}"
+        );
+        assert!(
+            content.contains(&format!("SIM_CAN_SOCKETCAND_PORT={SOCKETCAND_PORT}\n")),
+            "port line malformed:\n{content}"
+        );
+        assert!(
+            content.contains(&format!("SIM_CAN_SOCKETCAND_BUS={CAN_BUS_NAME}\n")),
+            "bus line malformed:\n{content}"
+        );
+        assert!(
+            content.contains("CDA_FEATURES=can-socketcand\n"),
+            "features line malformed:\n{content}"
+        );
+        // Every line is a comment or a well-formed KEY=VALUE (no stray leading
+        // whitespace, exactly the shape docker-compose's dotenv parser expects).
+        for line in content
+            .lines()
+            .filter(|l| !l.is_empty() && !l.starts_with('#'))
+        {
+            let (key, _) = line
+                .split_once('=')
+                .unwrap_or_else(|| panic!("not KEY=VALUE: {line:?}"));
+            assert_eq!(key, key.trim(), "key has stray whitespace: {line:?}");
+            assert!(
+                key.chars()
+                    .all(|c| c.is_ascii_uppercase() || c == '_' || c.is_ascii_digit()),
+                "unexpected key {key:?} in line {line:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn docker_env_without_can_has_no_socketcand_vars() {
+        let content = docker_env_content(false, 20002, 13400, 8181);
+        assert!(
+            !content.contains("SOCKETCAND"),
+            "unexpected CAN vars:\n{content}"
+        );
+        assert!(
+            !content.contains("CDA_FEATURES"),
+            "unexpected CDA_FEATURES:\n{content}"
+        );
     }
 }
