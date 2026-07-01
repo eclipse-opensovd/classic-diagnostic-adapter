@@ -101,7 +101,7 @@ impl<S: EcuGateway, T: EcuManager> UdsQuery for UdsManager<S, T> {
             let ecu_name = ecu.ecu_name();
             Ecu {
                 qualifier: ecu_name.clone(),
-                variant: ecu.variant(),
+                variant: ecu.ecu_status(),
                 logical_address: logical_address_string,
                 logical_link: format!("{}_on_{}", ecu_name, ecu.protocol()),
             }

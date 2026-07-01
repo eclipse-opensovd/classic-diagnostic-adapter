@@ -355,6 +355,9 @@ async fn test_variant_detection_duplicates() {
     ecusim::switch_variant(&runtime.ecu_sim, "FLXC1000", "APPLICATION")
         .await
         .unwrap();
+    force_variant_detection(&runtime.config, &auth, sovd::ECU_FLXC1000_ENDPOINT)
+        .await
+        .unwrap();
     let ecu = ecu_status(&runtime.config, &auth, sovd::ECU_FLXC1000_ENDPOINT)
         .await
         .unwrap();

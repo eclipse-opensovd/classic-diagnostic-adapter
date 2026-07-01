@@ -170,6 +170,30 @@ pub mod serde_ext {
     }
 }
 
+pub mod std_ext {
+    #[inline]
+    pub fn lock_read<T>(lock: &std::sync::RwLock<T>) -> std::sync::RwLockReadGuard<'_, T> {
+        match lock.read() {
+            Ok(guard) => guard,
+            Err(poisoned) => {
+                tracing::warn!("RwLock poisoned, proceeding with poisoned read lock");
+                poisoned.into_inner()
+            }
+        }
+    }
+
+    #[inline]
+    pub fn lock_write<T>(lock: &std::sync::RwLock<T>) -> std::sync::RwLockWriteGuard<'_, T> {
+        match lock.write() {
+            Ok(guard) => guard,
+            Err(poisoned) => {
+                tracing::warn!("RwLock poisoned, proceeding with poisoned write lock");
+                poisoned.into_inner()
+            }
+        }
+    }
+}
+
 /// Pad a byte slice to 4 bytes for u32 conversion.
 /// # Errors
 /// Returns `DiagServiceError::ParameterConversionError` if the input slice is longer than 4 bytes.

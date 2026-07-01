@@ -10,11 +10,15 @@
  *
  * SPDX-License-Identifier: Apache-2.0
  */
+
+use std::{fmt::Display, future::Future};
+
+use async_trait::async_trait;
 use serde::Serialize;
 
 use crate::{
-    DiagComm, DiagServiceError, DoipComParams, DynamicPlugin, EcuSchemas, HashMap, HashSet,
-    SecurityAccess, UDS_ID_RESPONSE_BITMASK, UdsComParams,
+    DiagComm, DiagServiceError, DoipComParams, DynamicPlugin, EcuSchemas, HashMap,
+    HashMapExtensions, HashSet, SecurityAccess, UDS_ID_RESPONSE_BITMASK, UdsComParams,
     datatypes::{
         ComplexComParamValue, ComponentConfigurationsInfo, ComponentDataInfo,
         ComponentOperationsInfo, DtcLookup, DtcReadInformationFunction, RoutineSubfunctions, SdSdg,
@@ -22,6 +26,7 @@ use crate::{
     },
     diagservices::{DiagServiceResponse, UdsPayloadData},
     service_ids,
+    util::std_ext,
 };
 
 /// Metadata for a service parameter, including constant values for discovery
@@ -123,26 +128,169 @@ pub struct MuxCaseInfo {
     pub upper_limit: Option<String>,
 }
 
-#[derive(Clone, Copy, Debug, Serialize, PartialEq)]
-pub enum EcuState {
+/// Combined ECU state as exposed in the SOVD API.
+///
+/// Derived from [`Connectivity`] + [`VariantState`] via [`EcuStatus::to_ecu_state()`].
+///
+/// ECU connectivity state, eg. reachable via underlying transport
+#[derive(Clone, Copy, Debug, Serialize, PartialEq, Eq)]
+pub enum Connectivity {
+    /// ECU responded to the last communication attempt.
     Online,
+    /// ECU is currently unreachable (never connected, or lost connection).
     Offline,
-    NotTested,
-    Duplicate,
-    Disconnected,
-    NoVariantDetected,
 }
 
-#[derive(Clone, Serialize)]
-pub struct EcuVariant {
-    pub name: Option<String>,
-    pub is_base_variant: bool,
-    /// Indicates whether this variant was selected as a fallback when no specific variant matched.
-    /// When true, this is a fallback scenario.
-    /// When false, it's an exact match (even if `is_base_variant` is true).
-    pub is_fallback: bool,
-    pub state: EcuState,
-    pub logical_address: u16,
+impl Display for Connectivity {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Online => f.write_str("Online"),
+            Self::Offline => f.write_str("Offline"),
+        }
+    }
+}
+
+/// ECU variant detection result.
+#[derive(Clone, Debug, Serialize, PartialEq)]
+pub enum VariantState {
+    /// Never attempted detection.
+    NotTested,
+    /// Successfully detected variant.
+    Detected {
+        /// Variant name from the database.
+        name: String,
+        /// Whether this is the base (top-level) variant.
+        is_base_variant: bool,
+        /// Whether this variant was selected as a fallback when no specific variant matched.
+        is_fallback: bool,
+    },
+    /// Ambiguous among duplicate ECUs sharing the same logical address.
+    /// Overrides connectivity in SOVD API mapping.
+    Duplicate,
+    /// Detection attempted but no variant matched (and no fallback available).
+    NotDetected,
+}
+
+impl VariantState {
+    /// Returns the variant name if detected, `None` otherwise.
+    #[must_use]
+    pub fn name(&self) -> Option<&str> {
+        match self {
+            Self::Detected { name, .. } => Some(name),
+            _ => None,
+        }
+    }
+
+    /// Returns `true` if the variant is the base variant.
+    #[must_use]
+    pub fn is_base_variant(&self) -> bool {
+        matches!(
+            self,
+            Self::Detected {
+                is_base_variant: true,
+                ..
+            }
+        )
+    }
+
+    /// Returns `true` if the variant was selected as a fallback.
+    #[must_use]
+    pub fn is_fallback(&self) -> bool {
+        matches!(
+            self,
+            Self::Detected {
+                is_fallback: true,
+                ..
+            }
+        )
+    }
+}
+
+/// Combined ECU status snapshot (connectivity + variant + detection index).
+#[derive(Clone, Debug)]
+pub struct EcuState {
+    /// Whether the ECU is currently reachable.
+    pub connectivity: Connectivity,
+    /// Variant detection result.
+    pub variant_state: VariantState,
+    /// Index into the diagnostic database's variant list. `None` until detection succeeds.
+    pub variant_index: Option<usize>,
+}
+
+impl EcuState {
+    /// Returns the variant name if detected, `None` otherwise.
+    #[must_use]
+    pub fn name(&self) -> Option<&str> {
+        self.variant_state.name()
+    }
+
+    /// Returns `true` if the variant is the base variant.
+    #[must_use]
+    pub fn is_base_variant(&self) -> bool {
+        self.variant_state.is_base_variant()
+    }
+
+    /// Returns `true` if the variant was selected as a fallback.
+    #[must_use]
+    pub fn is_fallback(&self) -> bool {
+        self.variant_state.is_fallback()
+    }
+
+    /// Returns `true` if the ECU is online with a successfully detected variant.
+    #[must_use]
+    pub fn is_online_and_detected(&self) -> bool {
+        self.connectivity == Connectivity::Online
+            && matches!(self.variant_state, VariantState::Detected { .. })
+    }
+}
+
+impl Default for EcuState {
+    fn default() -> Self {
+        Self {
+            connectivity: Connectivity::Offline,
+            variant_state: VariantState::NotTested,
+            variant_index: None,
+        }
+    }
+}
+
+/// Shared ECU runtime state, held by both `EcuManager` and the coordinator actor.
+///
+/// Cheap to clone (two `Arc` handles). The split into separate locks ensures that
+/// variant-identity reads (needed for DB lookups) never deadlock with service-state
+/// writes (session/security mutations).
+/// `std::sync::RwLock` is used intentionally here rather than a tokio async lock:
+/// all critical sections are short-lived (field reads/writes only, no I/O),
+/// so blocking is negligible and the sync lock avoids pervasive `.await` at every state access.
+#[derive(Debug, Clone)]
+pub struct EcuRuntimeState {
+    /// ECU identity: connectivity + variant detection result.
+    pub ecu_state: std::sync::Arc<std::sync::RwLock<EcuState>>,
+    /// Active service states keyed by SID (0x10 = session, 0x27 = security, etc.).
+    pub service_states: std::sync::Arc<std::sync::RwLock<HashMap<u8, String>>>,
+}
+
+impl EcuRuntimeState {
+    /// Create initial state for a newly constructed ECU (not yet variant-detected).
+    #[must_use]
+    pub fn new() -> Self {
+        Self {
+            ecu_state: std::sync::Arc::new(std::sync::RwLock::new(EcuState::default())),
+            service_states: std::sync::Arc::new(std::sync::RwLock::new(HashMap::new())),
+        }
+    }
+
+    /// Convenience: get an [`EcuState`] snapshot.
+    #[must_use]
+    pub fn status(&self) -> EcuState {
+        std_ext::lock_read(&self.ecu_state).clone()
+    }
+}
+
+impl Default for EcuRuntimeState {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -601,9 +749,9 @@ pub trait Dtc: Send + Sync + 'static {
 
 /// Provides variant detection and ECU variant identity.
 pub trait VariantDetection: Send + Sync + 'static {
-    /// Returns the current ECU variant (name, state, flags).
+    /// Returns the current ECU status (connectivity + variant state).
     #[must_use]
-    fn variant(&self) -> EcuVariant;
+    fn ecu_status(&self) -> EcuState;
 
     /// Runs variant detection against the provided service responses.
     /// # Errors
@@ -617,13 +765,27 @@ pub trait VariantDetection: Send + Sync + 'static {
     #[must_use]
     fn get_variant_detection_requests(&self) -> &HashMap<String, DiagComm>;
 
-    /// Mark this ECU as duplicate. Sets the state to `EcuState::Duplicate` and unloads the
-    /// database. Database will be reloaded before next variant detection.
+    /// Mark this ECU as duplicate. Sets the variant state to [`VariantState::Duplicate`] and
+    /// unloads the database. Database will be reloaded before next variant detection.
     fn mark_as_duplicate(&mut self);
 
-    /// Mark this ECU as having no variant detected. Sets the state to
-    /// `EcuState::NoVariantDetected` and unloads the database.
+    /// Mark this ECU as having no variant detected. Sets the variant state to
+    /// [`VariantState::NotDetected`] and unloads the database.
     fn mark_as_no_variant_detected(&mut self);
+
+    /// Clear the current variant to trigger re-detection on the next send.
+    /// Sets variant state to [`VariantState::NotDetected`] and clears the variant name.
+    fn clear_variant_for_redetect(&mut self);
+}
+
+/// Callback interface for transport-level ECU connectivity changes.
+#[async_trait]
+pub trait EcuConnectivityHandler: Send + Sync + 'static {
+    /// Called when a connection is established or re-established for an ECU.
+    async fn on_connected_bulk(&self, ecu_names: &[String]);
+
+    /// Called when a connection is lost for an ECU.
+    async fn on_disconnected_bulk(&self, ecu_names: &[String]);
 }
 
 /// Resolves `DiagComm` handles from the database by various search criteria.
@@ -696,10 +858,6 @@ pub trait EcuManager:
     #[must_use]
     fn is_physical_ecu(&self) -> bool;
 
-    /// Returns the current ECU state.
-    #[must_use]
-    fn state(&self) -> EcuState;
-
     #[must_use]
     fn protocol(&self) -> &Protocol;
 
@@ -735,25 +893,19 @@ pub trait EcuManager:
 
     /// Retrieve the revision of the ECU variant if available, otherwise return 0.0.0.
     fn revision(&self) -> String;
+
+    /// Returns a clone of the shared runtime state.
+    ///
+    /// Cheap (two `Arc` clones). Used by the coordinator actor to share access to
+    /// the same underlying locks for connectivity/variant and service states.
+    #[must_use]
+    fn runtime_state(&self) -> EcuRuntimeState;
 }
 
 #[derive(PartialEq, Eq, Debug, Clone, Copy)]
 pub enum EcuManagerType {
     Ecu,
     FunctionalDescription,
-}
-
-impl std::fmt::Display for EcuState {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            EcuState::Online => write!(f, "Online"),
-            EcuState::Offline => write!(f, "Offline"),
-            EcuState::NotTested => write!(f, "NotTested"),
-            EcuState::Duplicate => write!(f, "Duplicate"),
-            EcuState::Disconnected => write!(f, "Disconnected"),
-            EcuState::NoVariantDetected => write!(f, "NoVariantDetected"),
-        }
-    }
 }
 
 #[cfg(test)]

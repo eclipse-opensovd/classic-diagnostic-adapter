@@ -12,7 +12,7 @@
  */
 
 use cda_database::datatypes;
-use cda_interfaces::{DiagServiceError, EcuStateManager, dlt_ctx, service_ids};
+use cda_interfaces::{DiagServiceError, EcuStateManager, dlt_ctx, service_ids, util::std_ext};
 use cda_plugin_security::SecurityPlugin;
 
 use super::ecumanager::EcuManager;
@@ -20,17 +20,17 @@ use super::ecumanager::EcuManager;
 impl<S: SecurityPlugin> EcuStateManager for EcuManager<S> {
     async fn set_service_state(&self, sid: u8, value: String) {
         tracing::debug!("Setting service state: SID: {sid}, Value: {value}");
-        self.ecu_service_states.write().await.insert(sid, value);
+        std_ext::lock_write(&self.runtime_state.service_states).insert(sid, value);
     }
 
     async fn get_service_state(&self, sid: u8) -> Option<String> {
-        self.ecu_service_states.read().await.get(&sid).cloned()
+        std_ext::lock_read(&self.runtime_state.service_states)
+            .get(&sid)
+            .cloned()
     }
 
     async fn session(&self) -> Result<String, DiagServiceError> {
-        self.ecu_service_states
-            .read()
-            .await
+        std_ext::lock_read(&self.runtime_state.service_states)
             .get(&service_ids::SESSION_CONTROL)
             .cloned()
             .ok_or(DiagServiceError::InvalidState(
@@ -43,9 +43,7 @@ impl<S: SecurityPlugin> EcuStateManager for EcuManager<S> {
     }
 
     async fn security_access(&self) -> Result<String, DiagServiceError> {
-        self.ecu_service_states
-            .read()
-            .await
+        std_ext::lock_read(&self.runtime_state.service_states)
             .get(&service_ids::SECURITY_ACCESS)
             .cloned()
             .ok_or(DiagServiceError::InvalidState(
@@ -57,10 +55,7 @@ impl<S: SecurityPlugin> EcuStateManager for EcuManager<S> {
         &self,
         target_session_name: &str,
     ) -> Result<cda_interfaces::DiagComm, DiagServiceError> {
-        let current_session_name = self
-            .ecu_service_states
-            .read()
-            .await
+        let current_session_name = std_ext::lock_read(&self.runtime_state.service_states)
             .get(&service_ids::SESSION_CONTROL)
             .cloned()
             .ok_or(DiagServiceError::InvalidState(
@@ -85,18 +80,14 @@ impl<S: SecurityPlugin> EcuStateManager for EcuManager<S> {
         // For example when switching to 'extended' immediately after the service
         // signals 'ready'
 
-        let mut states = self.ecu_service_states.write().await;
-        states
-            .entry(service_ids::SESSION_CONTROL)
+        let mut ss = std_ext::lock_write(&self.runtime_state.service_states);
+        ss.entry(service_ids::SESSION_CONTROL)
             .or_insert(self.default_state(&self.database_naming_convention.semantics.session)?);
-        states
-            .entry(service_ids::SECURITY_ACCESS)
+        ss.entry(service_ids::SECURITY_ACCESS)
             .or_insert(self.default_state(&self.database_naming_convention.semantics.security)?);
-        states
-            .entry(service_ids::CONTROL_DTC_SETTING)
+        ss.entry(service_ids::CONTROL_DTC_SETTING)
             .or_insert_with(|| "on".to_owned());
-        states
-            .entry(service_ids::COMMUNICATION_CONTROL)
+        ss.entry(service_ids::COMMUNICATION_CONTROL)
             .or_insert_with(|| "enablerxandenabletx".to_owned());
         Ok(())
     }
@@ -141,7 +132,7 @@ impl<S: SecurityPlugin> EcuManager<S> {
             })
     }
 
-    pub(in crate::diag_kernel) async fn lookup_state_transition_by_diagcomm_for_active(
+    pub(in crate::diag_kernel) fn lookup_state_transition_by_diagcomm_for_active(
         &self,
         diag_comm: &datatypes::DiagComm<'_>,
     ) -> (Option<String>, Option<String>) {
@@ -179,10 +170,10 @@ impl<S: SecurityPlugin> EcuManager<S> {
             );
         }
 
-        let states = self.ecu_service_states.write().await;
+        let ss = std_ext::lock_read(&self.runtime_state.service_states);
 
-        let current_session = states.get(&service_ids::SESSION_CONTROL);
-        let current_security = states.get(&service_ids::SECURITY_ACCESS);
+        let current_session = ss.get(&service_ids::SESSION_CONTROL);
+        let current_security = ss.get(&service_ids::SECURITY_ACCESS);
 
         if current_session.is_none() {
             tracing::warn!(
@@ -205,7 +196,7 @@ impl<S: SecurityPlugin> EcuManager<S> {
             state_chart_security
                 .and_then(|sc| Self::lookup_state_transition(diag_comm, &(sc.into()), security))
         });
-        drop(states);
+        drop(ss);
 
         tracing::debug!(
             diag_comm_name = ?diag_comm.short_name(),
@@ -361,9 +352,9 @@ mod tests {
             create_ecu_manager_with_state_transitions(ServiceSecurityTransition::LockedToExtended);
 
         {
-            let mut ecu_states = ecu_manager.ecu_service_states.write().await;
-            ecu_states.insert(service_ids::SESSION_CONTROL, "DefaultSession".to_string());
-            ecu_states.insert(service_ids::SECURITY_ACCESS, "LockedSecurity".to_string());
+            let mut guard = std_ext::lock_write(&ecu_manager.runtime_state.service_states);
+            guard.insert(service_ids::SESSION_CONTROL, "DefaultSession".to_string());
+            guard.insert(service_ids::SECURITY_ACCESS, "LockedSecurity".to_string());
         }
 
         let payload_data = UdsPayloadData::Raw(vec![service_ids::WRITE_DATA_BY_IDENTIFIER]);
@@ -385,9 +376,9 @@ mod tests {
             create_ecu_manager_with_state_transitions(ServiceSecurityTransition::LockedToExtended);
 
         {
-            let mut ecu_states = ecu_manager.ecu_service_states.write().await;
-            ecu_states.insert(service_ids::SESSION_CONTROL, "DefaultSession".to_string());
-            ecu_states.insert(
+            let mut guard = std_ext::lock_write(&ecu_manager.runtime_state.service_states);
+            guard.insert(service_ids::SESSION_CONTROL, "DefaultSession".to_string());
+            guard.insert(
                 service_ids::SECURITY_ACCESS,
                 "ProgrammingSecurity".to_string(),
             );
@@ -412,9 +403,9 @@ mod tests {
         );
 
         {
-            let mut ecu_states = ecu_manager.ecu_service_states.write().await;
-            ecu_states.insert(service_ids::SESSION_CONTROL, "DefaultSession".to_string());
-            ecu_states.insert(service_ids::SECURITY_ACCESS, "LockedSecurity".to_string());
+            let mut guard = std_ext::lock_write(&ecu_manager.runtime_state.service_states);
+            guard.insert(service_ids::SESSION_CONTROL, "DefaultSession".to_string());
+            guard.insert(service_ids::SECURITY_ACCESS, "LockedSecurity".to_string());
         }
 
         let payload_data = UdsPayloadData::Raw(vec![service_ids::WRITE_DATA_BY_IDENTIFIER]);
@@ -435,9 +426,9 @@ mod tests {
         let (ecu_manager, dc, sid) = create_ecu_manager_with_preconditions_and_functional_group();
 
         {
-            let mut ecu_states = ecu_manager.ecu_service_states.write().await;
-            ecu_states.insert(service_ids::SESSION_CONTROL, "DefaultSession".to_string());
-            ecu_states.insert(service_ids::SECURITY_ACCESS, "LockedSecurity".to_string());
+            let mut guard = std_ext::lock_write(&ecu_manager.runtime_state.service_states);
+            guard.insert(service_ids::SESSION_CONTROL, "DefaultSession".to_string());
+            guard.insert(service_ids::SECURITY_ACCESS, "LockedSecurity".to_string());
         }
 
         let variant_result = ecu_manager
@@ -473,9 +464,9 @@ mod tests {
         let (ecu_manager, _dc) =
             create_ecu_manager_with_state_transitions(ServiceSecurityTransition::LockedToExtended);
         {
-            let mut states = ecu_manager.ecu_service_states.write().await;
-            states.insert(service_ids::SESSION_CONTROL, "defaultSession".to_owned());
-            states.insert(service_ids::SECURITY_ACCESS, "LockedSecurity".to_owned());
+            let mut guard = std_ext::lock_write(&ecu_manager.runtime_state.service_states);
+            guard.insert(service_ids::SESSION_CONTROL, "defaultSession".to_owned());
+            guard.insert(service_ids::SECURITY_ACCESS, "LockedSecurity".to_owned());
         }
         let result = ecu_manager.lookup_session_change("extendedSessioN").await;
         assert!(
@@ -489,11 +480,11 @@ mod tests {
         let (ecu_manager, _dc) =
             create_ecu_manager_with_state_transitions(ServiceSecurityTransition::LockedToExtended);
         {
-            let mut states = ecu_manager.ecu_service_states.write().await;
+            let mut guard = std_ext::lock_write(&ecu_manager.runtime_state.service_states);
             // ECU is already in ExtendedSession - the service's session transition is
             // DefaultSession -> ExtendedSession, which does not start from Extended.
-            states.insert(service_ids::SESSION_CONTROL, "ExtendedSession".to_owned());
-            states.insert(service_ids::SECURITY_ACCESS, "LockedSecurity".to_owned());
+            guard.insert(service_ids::SESSION_CONTROL, "ExtendedSession".to_owned());
+            guard.insert(service_ids::SECURITY_ACCESS, "LockedSecurity".to_owned());
         }
         // There is no service whose session transition starts from ExtendedSession, so
         // lookup_session_change to ProgrammingSession must fail.
@@ -511,12 +502,12 @@ mod tests {
         let (ecu_manager, dc) =
             create_ecu_manager_with_state_transitions(ServiceSecurityTransition::LockedToExtended);
         {
-            let mut states = ecu_manager.ecu_service_states.write().await;
-            states.insert(
+            let mut guard = std_ext::lock_write(&ecu_manager.runtime_state.service_states);
+            guard.insert(
                 service_ids::SESSION_CONTROL,
                 "Programmingsession".to_owned(),
             );
-            states.insert(
+            guard.insert(
                 service_ids::SECURITY_ACCESS,
                 "programmingsecurity".to_owned(),
             );
@@ -546,9 +537,9 @@ mod tests {
         let (ecu_manager, dc) =
             create_ecu_manager_with_state_transitions(ServiceSecurityTransition::LockedToExtended);
         {
-            let mut states = ecu_manager.ecu_service_states.write().await;
-            states.insert(service_ids::SESSION_CONTROL, "DefaultSession".to_owned());
-            states.insert(service_ids::SECURITY_ACCESS, "LockedSecurity".to_owned());
+            let mut guard = std_ext::lock_write(&ecu_manager.runtime_state.service_states);
+            guard.insert(service_ids::SESSION_CONTROL, "DefaultSession".to_owned());
+            guard.insert(service_ids::SECURITY_ACCESS, "LockedSecurity".to_owned());
         }
         let payload_data = UdsPayloadData::Raw(vec![service_ids::WRITE_DATA_BY_IDENTIFIER]);
         let result = ecu_manager

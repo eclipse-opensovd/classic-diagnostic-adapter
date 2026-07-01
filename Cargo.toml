@@ -98,6 +98,7 @@ cargo_toml = "0.22.3"
 libc = "0.2.177"
 crc32fast = "1.4"
 foldhash = "0.2.0"
+kameo = { version = "0.21", default-features = false, features = ["macros"] }
 memmap2 = "0.9"
 mockall = "0.14.0"
 tempfile = "3"

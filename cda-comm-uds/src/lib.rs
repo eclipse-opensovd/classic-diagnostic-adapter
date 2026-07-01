@@ -23,18 +23,24 @@ use tokio::{
     task::JoinHandle,
 };
 
+pub mod coordinator;
 mod data_transfer;
 mod dtc;
 mod functional_group;
 mod query;
 mod security;
 mod session;
+pub mod state_coordinator;
 mod tester_present;
 mod transport;
 mod types;
 mod util;
 mod variant;
 
+#[cfg(test)]
+mod test_helpers;
+
+pub use state_coordinator::EcuStateCoordinator;
 pub use types::TesterPresentTask;
 use types::{EcuDataTransfer, EcuIdentifier};
 
@@ -46,6 +52,7 @@ pub struct UdsManager<S: EcuGateway, T: UdsEcuDb> {
     tester_present_tasks: Arc<RwLock<HashMap<EcuIdentifier, TesterPresentTask>>>,
     session_reset_tasks: Arc<RwLock<HashMap<EcuIdentifier, JoinHandle<()>>>>,
     security_reset_tasks: Arc<RwLock<HashMap<EcuIdentifier, JoinHandle<()>>>>,
+    state_coordinator: EcuStateCoordinator,
     functional_description_database: String,
     fault_config: FaultConfig,
     update_in_progress: Arc<AtomicBool>,
@@ -78,10 +85,12 @@ impl<S: EcuGateway, T: UdsEcuDb> UdsManager<S, T> {
 }
 
 impl<S: EcuGateway, T: EcuManager> UdsManager<S, T> {
+    /// Create a new [`UdsManager`].
     pub fn new(
         gateway: S,
         ecus: Arc<HashMap<String, RwLock<T>>>,
         mut variant_detection_receiver: mpsc::Receiver<Vec<String>>,
+        state_coordinator: EcuStateCoordinator,
         functional_description_config: &FunctionalDescriptionConfig,
         fault_config: FaultConfig,
         update_in_progress: Arc<AtomicBool>,
@@ -94,6 +103,7 @@ impl<S: EcuGateway, T: EcuManager> UdsManager<S, T> {
             tester_present_tasks: Arc::new(RwLock::new(HashMap::new())),
             session_reset_tasks: Arc::new(RwLock::new(HashMap::new())),
             security_reset_tasks: Arc::new(RwLock::new(HashMap::new())),
+            state_coordinator,
             functional_description_database: functional_description_config
                 .description_database
                 .clone(),
@@ -134,6 +144,12 @@ impl<S: EcuGateway, T: EcuManager> UdsManager<S, T> {
         }
     }
 
+    /// Returns a clone of the state coordinator for use by the `DoIP` layer.
+    /// The coordinator implements `EcuStateEvents` and propagates disconnect events.
+    pub fn state_coordinator(&self) -> EcuStateCoordinator {
+        self.state_coordinator.clone()
+    }
+
     /// Abort all background tasks owned by this instance. Idempotent.
     pub async fn shutdown(&self) {
         let mut tester_present_tasks = self.tester_present_tasks.write().await;
@@ -160,6 +176,7 @@ impl<S: Clone + EcuGateway, T: UdsEcuDb> Clone for UdsManager<S, T> {
             tester_present_tasks: Arc::clone(&self.tester_present_tasks),
             session_reset_tasks: Arc::clone(&self.session_reset_tasks),
             security_reset_tasks: Arc::clone(&self.security_reset_tasks),
+            state_coordinator: self.state_coordinator.clone(),
             functional_description_database: self.functional_description_database.clone(),
             fault_config: self.fault_config.clone(),
             update_in_progress: Arc::clone(&self.update_in_progress),

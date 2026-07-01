@@ -143,9 +143,8 @@ impl<S: SecurityPlugin> PayloadDecoder for EcuManager<S> {
             let response_type = response.response_type().try_into()?;
             // in case of a positive response update potential session or security access changes
             if response_type == datatypes::ResponseType::Positive {
-                let (new_session, new_security) = self
-                    .lookup_state_transition_by_diagcomm_for_active(&mapped_diag_comm)
-                    .await;
+                let (new_session, new_security) =
+                    self.lookup_state_transition_by_diagcomm_for_active(&mapped_diag_comm);
 
                 if let Some(new_session) = new_session {
                     self.set_service_state(service_ids::SESSION_CONTROL, new_session)

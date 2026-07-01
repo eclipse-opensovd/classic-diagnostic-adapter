@@ -13,8 +13,8 @@
 
 // Needed so that `self.load()` is callable inside the EcuVariantProvider impl
 use cda_interfaces::{
-    DiagComm, DiagServiceError, EcuManager as EcuManagerTrait, EcuState, EcuVariant, HashMap,
-    VariantDetection, diagservices::DiagServiceResponse, dlt_ctx,
+    Connectivity, DiagComm, DiagServiceError, EcuManager as EcuManagerTrait, EcuState, HashMap,
+    VariantDetection, VariantState, diagservices::DiagServiceResponse, dlt_ctx, util::std_ext,
 };
 use cda_plugin_security::SecurityPlugin;
 
@@ -22,8 +22,8 @@ use super::ecumanager::{EcuManager, VariantData};
 use crate::diag_kernel::variant_detection;
 
 impl<S: SecurityPlugin> VariantDetection for EcuManager<S> {
-    fn variant(&self) -> EcuVariant {
-        self.variant.clone()
+    fn ecu_status(&self) -> EcuState {
+        self.runtime_state.status()
     }
 
     #[tracing::instrument(
@@ -44,27 +44,12 @@ impl<S: SecurityPlugin> VariantDetection for EcuManager<S> {
         }
 
         if service_responses.is_empty() {
-            let state = if matches!(
-                self.variant.state,
-                EcuState::Online
-                    | EcuState::Duplicate
-                    | EcuState::Disconnected
-                    | EcuState::NoVariantDetected
-            ) {
-                EcuState::Disconnected
-            } else {
-                EcuState::Offline
-            };
-
-            self.variant = EcuVariant {
-                name: None,
-                is_base_variant: false,
-                is_fallback: false,
-                state,
-                logical_address: self.logical_address,
-            };
+            // No responses means ECU is unreachable -> set connectivity to Offline.
+            // Variant state is intentionally preserved (we still know what variant it was).
+            std_ext::lock_write(&self.runtime_state.ecu_state).connectivity = Connectivity::Offline;
             return Ok(());
         }
+
         match variant_detection::evaluate_variant(service_responses, &self.diag_database) {
             Ok(v) => {
                 let variant_data = VariantData::from_variant_and_fallback(&v, false);
@@ -72,13 +57,13 @@ impl<S: SecurityPlugin> VariantDetection for EcuManager<S> {
             }
             Err(e) => {
                 if !self.fallback_to_base_variant {
-                    self.variant = EcuVariant {
-                        name: None,
-                        is_base_variant: false,
-                        is_fallback: false,
-                        state: EcuState::NoVariantDetected,
-                        logical_address: self.logical_address,
-                    };
+                    let mut es = std_ext::lock_write(&self.runtime_state.ecu_state);
+
+                    es.variant_state = VariantState::NotDetected;
+                    es.variant_index = None;
+                    // Connectivity is Online. We got responses but couldn't match a variant
+                    es.connectivity = Connectivity::Online;
+                    drop(es);
                     self.diag_database.unload();
                     tracing::debug!(
                         "No variant detected, fallback to base variant disabled, unloading DB"
@@ -89,13 +74,11 @@ impl<S: SecurityPlugin> VariantDetection for EcuManager<S> {
                 let base_variant = match self.diag_database.base_variant() {
                     Ok(base_variant) => base_variant,
                     Err(e) => {
-                        self.variant = EcuVariant {
-                            name: None,
-                            is_base_variant: false,
-                            is_fallback: false,
-                            state: EcuState::NoVariantDetected,
-                            logical_address: self.logical_address,
-                        };
+                        let mut es = std_ext::lock_write(&self.runtime_state.ecu_state);
+                        es.variant_state = VariantState::NotDetected;
+                        es.variant_index = None;
+                        es.connectivity = Connectivity::Online;
+                        drop(es);
                         self.diag_database.unload();
                         tracing::debug!(
                             "No variant detected, and no base variant found in DB, unloading DB"
@@ -115,12 +98,30 @@ impl<S: SecurityPlugin> VariantDetection for EcuManager<S> {
     }
 
     fn mark_as_duplicate(&mut self) {
-        self.variant.state = EcuState::Duplicate;
+        let mut es = std_ext::lock_write(&self.runtime_state.ecu_state);
+        es.variant_state = VariantState::Duplicate;
+        es.variant_index = None;
+        drop(es);
+        self.db_cache.reset_sync();
         self.diag_database.unload();
     }
 
     fn mark_as_no_variant_detected(&mut self) {
-        self.variant.state = EcuState::NoVariantDetected;
+        let mut es = std_ext::lock_write(&self.runtime_state.ecu_state);
+        es.variant_state = VariantState::NotDetected;
+        es.variant_index = None;
+        drop(es);
+        self.db_cache.reset_sync();
         self.diag_database.unload();
+    }
+
+    fn clear_variant_for_redetect(&mut self) {
+        tracing::debug!(
+            ecu = %self.ecu_name,
+            "Clearing variant to trigger re-detection on next request"
+        );
+        let mut es = std_ext::lock_write(&self.runtime_state.ecu_state);
+        es.variant_state = VariantState::NotDetected;
+        es.variant_index = None;
     }
 }
