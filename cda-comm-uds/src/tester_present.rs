@@ -14,8 +14,8 @@
 use async_trait::async_trait;
 use cda_interfaces::{
     DiagServiceError, EcuGateway, EcuManager, EcuState, SUPPRESS_POSITIVE_RESPONSE_BIT,
-    ServicePayload, TesterPresentControlMessage, TesterPresentMode, TesterPresentType, UdsEcu,
-    UdsTesterPresent, dlt_ctx, service_ids,
+    ServicePayload, TesterPresentControlMessage, TesterPresentMode, TesterPresentType,
+    UdsFunctionalGroup, UdsTesterPresent, dlt_ctx, service_ids,
 };
 use tokio::time::{MissedTickBehavior, interval as tokio_interval};
 

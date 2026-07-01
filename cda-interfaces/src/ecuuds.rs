@@ -181,18 +181,120 @@ pub trait UdsTesterPresent: UdsTransport {
     async fn check_tester_present_active(&self, type_: &TesterPresentType) -> bool;
 }
 
-/// UDS communication interface
+/// UDS data transfer interface for flash/upload operations.
 #[async_trait]
-pub trait UdsEcu: UdsTransport + UdsSession + UdsSecurity + UdsTesterPresent {
+pub trait UdsDataTransfer {
+    /// Start a flash transfer for the given ECU.
+    /// Setting the ECU into the appropriate session and security access must be done
+    /// before calling this function, otherwise the ECU will not accept the transfer.
+    /// # Errors
+    /// * `DiagServiceError::InvalidRequest`
+    ///   * A transfer is already in progress for the given ECU.
+    ///   * The given file path does not exist or is not readable.
+    ///   * The offset and length do not match the file size.
+    /// * `DiagServiceError::NotFound`
+    ///   * The ECU with the given name does not exist.
+    async fn ecu_flash_transfer_start(
+        &self,
+        ecu_name: &str,
+        func_class_name: &str,
+        security_plugin: &DynamicPlugin,
+        parameters: FlashTransferStartParams<'_>,
+    ) -> Result<(), DiagServiceError>;
+    /// Once the transfer has finished transfer exit must be called to finalize the transfer.
+    /// No new transfer can be started before this is called.
+    /// # Errors
+    /// * `DiagServiceError::NotFound`
+    ///  * The ECU with the given name does not exist.
+    ///  * The transfer with the given ID does not exist.
+    /// * `DiagServiceError::InvalidRequest`
+    ///   * The transfer is not in a state where it can be exited, e.g. it is still in progress.
+    ///   * Failures on retrieving the transfer exit status.
+    async fn ecu_flash_transfer_exit(
+        &self,
+        ecu_name: &str,
+        id: &str,
+    ) -> Result<(), DiagServiceError>;
+    /// Fetch all flash transfers for the given ECU.
+    /// # Errors
+    /// * `DiagServiceError::NotFound`
+    ///   * The ECU with the given name does not exist.
+    async fn ecu_flash_transfer_status(
+        &self,
+        ecu_name: &str,
+    ) -> Result<Vec<DataTransferMetaData>, DiagServiceError>;
+    /// Fetch the status of a specific flash transfer by its ID.
+    /// # Errors
+    /// * `DiagServiceError::NotFound`
+    ///   * The ECU with the given name does not exist.
+    ///   * The transfer with the given ID does not exist.
+    async fn ecu_flash_transfer_status_id(
+        &self,
+        ecu_name: &str,
+        id: &str,
+    ) -> Result<DataTransferMetaData, DiagServiceError>;
+}
+
+/// UDS diagnostic trouble code (DTC) interface.
+#[async_trait]
+pub trait UdsDtc: UdsTransport {
+    /// Retrieve all faults for the given ECU,
+    /// with optional filtering by status, severity and scope.
+    async fn ecu_dtc_by_mask(
+        &self,
+        ecu_name: &str,
+        security_plugin: &DynamicPlugin,
+        status: Option<HashMap<String, serde_json::Value>>,
+        severity: Option<u32>,
+        scope: Option<String>,
+        memory_selection: Option<u8>,
+    ) -> Result<HashMap<DtcCode, DtcRecordAndStatus>, DiagServiceError>;
+
+    // alternative of passing a struct DtcOptions containing
+    // the include_ and memory_selection parameters isn't better for readability.
+    #[allow(clippy::too_many_arguments)]
+    async fn ecu_dtc_extended(
+        &self,
+        ecu_name: &str,
+        security_plugin: &DynamicPlugin,
+        sae_dtc: &str,
+        include_extended_data: bool,
+        include_snapshot: bool,
+        include_schema: bool,
+        memory_selection: Option<u8>,
+    ) -> Result<DtcExtendedInfo, DiagServiceError>;
+
+    /// Clear the faults for the given ECU
+    /// if the parameter `fault_code` is provided
+    /// only that DTC is deleted
+    async fn delete_dtcs(
+        &self,
+        ecu_name: &str,
+        security_plugin: &DynamicPlugin,
+        fault_code: Option<String>,
+    ) -> Result<Self::Response, DiagServiceError>;
+
+    /// Clear DTCs using a user-defined scope
+    async fn delete_dtcs_scoped(
+        &self,
+        ecu_name: &str,
+        security_plugin: &DynamicPlugin,
+        scope: &str,
+    ) -> Result<Self::Response, DiagServiceError>;
+}
+
+/// UDS query/read interface for retrieving ECU metadata and configuration.
+#[async_trait]
+pub trait UdsQuery: UdsTransport {
     /// Returns a list of loaded ECUs.
     /// They are not necessarily online, but have been loaded from the database.
     async fn get_ecus(&self) -> Vec<String>;
     /// Returns a list of loaded ECUs, filtering out the functional description.
-    /// The same constraints as [get_ecus](UdsEcu::get_ecus) apply.
+    /// The same constraints as [get_ecus](UdsQuery::get_ecus) apply.
     async fn get_physical_ecus(&self) -> Vec<String>;
     /// Returns a list of loaded ECUs, filtering by a specific SD
     /// Additionally it can be specified if all ecus or physical only should be returned.
-    /// The same constraints as [get_ecus](UdsEcu::get_ecus) apply.
+    /// The same constraints as [get_ecus](UdsQuery::get_ecus) apply.
     async fn get_ecus_with_sds(
         &self,
         physical_only: bool,
@@ -311,118 +413,11 @@ pub trait UdsEcu: UdsTransport + UdsSession + UdsSecurity + UdsTesterPresent {
         func_class_name: &str,
         service_id: u8,
     ) -> Result<DiagComm, DiagServiceError>;
+}
 
-    /// Start a flash transfer for the given ECU.
-    /// Setting the ECU into the appropriate session and security access must be done
-    /// before calling this function, otherwise the ECU will not accept the transfer.
-    /// # Errors
-    /// * `DiagServiceError::InvalidRequest`
-    ///   * A transfer is already in progress for the given ECU.
-    ///   * The given file path does not exist or is not readable.
-    ///   * The offset and length do not match the file size.
-    /// * `DiagServiceError::NotFound`
-    ///   * The ECU with the given name does not exist.
-    async fn ecu_flash_transfer_start(
-        &self,
-        ecu_name: &str,
-        func_class_name: &str,
-        security_plugin: &DynamicPlugin,
-        parameters: FlashTransferStartParams<'_>,
-    ) -> Result<(), DiagServiceError>;
-    /// Once the transfer has finished transfer exit must be called to finalize the transfer.
-    /// No new transfer can be started before this is called.
-    /// # Errors
-    /// * `DiagServiceError::NotFound`
-    ///  * The ECU with the given name does not exist.
-    ///  * The transfer with the given ID does not exist.
-    /// * `DiagServiceError::InvalidRequest`
-    ///   * The transfer is not in a state where it can be exited, e.g. it is still in progress.
-    ///   * Failures on retrieving the transfer exit status.
-    async fn ecu_flash_transfer_exit(
-        &self,
-        ecu_name: &str,
-        id: &str,
-    ) -> Result<(), DiagServiceError>;
-    /// Fetch all flash transfers for the given ECU.
-    /// # Errors
-    /// * `DiagServiceError::NotFound`
-    ///   * The ECU with the given name does not exist.
-    async fn ecu_flash_transfer_status(
-        &self,
-        ecu_name: &str,
-    ) -> Result<Vec<DataTransferMetaData>, DiagServiceError>;
-    /// Fetch the status of a specific flash transfer by its ID.
-    /// # Errors
-    /// * `DiagServiceError::NotFound`
-    ///   * The ECU with the given name does not exist.
-    ///   * The transfer with the given ID does not exist.
-    async fn ecu_flash_transfer_status_id(
-        &self,
-        ecu_name: &str,
-        id: &str,
-    ) -> Result<DataTransferMetaData, DiagServiceError>;
-
-    /// Trigger variant detection for the given ECU.
-    /// # Errors
-    /// Will return `Err` if the variant detection cannot be triggered, e.g. if the given ECU
-    /// does not exist or no service for variant detection is available.
-    async fn detect_variant(&self, ecu_name: &str) -> Result<(), DiagServiceError>;
-
-    /// Get the name of the variant for the given ECU.
-    /// # Errors
-    /// Will return Err if the ECU does not exist.
-    /// If the variant is cannot be resolved, "Unknown" will be returned.
-    async fn get_variant(&self, ecu_name: &str) -> Result<EcuVariant, DiagServiceError>;
-
-    /// trigger the variant detection process for all ECUs.
-    /// Main work will be done in the background, there is no result returned,
-    /// as the data is internally stored and used in `EcuUds`
-    async fn start_variant_detection(&self);
-
-    /// Retrieve all faults for the given ECU,
-    /// with optional filtering by status, severity and scope.
-    async fn ecu_dtc_by_mask(
-        &self,
-        ecu_name: &str,
-        security_plugin: &DynamicPlugin,
-        status: Option<HashMap<String, serde_json::Value>>,
-        severity: Option<u32>,
-        scope: Option<String>,
-        memory_selection: Option<u8>,
-    ) -> Result<HashMap<DtcCode, DtcRecordAndStatus>, DiagServiceError>;
-
-    // alternative of passing a struct DtcOptions containing
-    // the include_ and memory_selection parameters isn't better for readability.
-    #[allow(clippy::too_many_arguments)]
-    async fn ecu_dtc_extended(
-        &self,
-        ecu_name: &str,
-        security_plugin: &DynamicPlugin,
-        sae_dtc: &str,
-        include_extended_data: bool,
-        include_snapshot: bool,
-        include_schema: bool,
-        memory_selection: Option<u8>,
-    ) -> Result<DtcExtendedInfo, DiagServiceError>;
-
-    /// Clear the faults for the given ECU
-    /// if the parameter `fault_code` is provided
-    /// only that DTC is deleted
-    async fn delete_dtcs(
-        &self,
-        ecu_name: &str,
-        security_plugin: &DynamicPlugin,
-        fault_code: Option<String>,
-    ) -> Result<Self::Response, DiagServiceError>;
-
-    /// Clear DTCs using a user-defined scope
-    async fn delete_dtcs_scoped(
-        &self,
-        ecu_name: &str,
-        security_plugin: &DynamicPlugin,
-        scope: &str,
-    ) -> Result<Self::Response, DiagServiceError>;
-
+/// UDS functional group interface for multi-ECU functional communication.
+#[async_trait]
+pub trait UdsFunctionalGroup: UdsTransport {
     /// Retrieve all `read` services for a specific functional group.
     /// # Errors
     /// Will return `Err` if the description database ECU does not exist.
@@ -566,6 +561,42 @@ pub trait UdsEcu: UdsTransport + UdsSession + UdsSecurity + UdsTesterPresent {
     ) -> Result<HashMap<String, Result<Self::Response, DiagServiceError>>, DiagServiceError>;
 }
 
+/// UDS variant detection interface.
+#[async_trait]
+pub trait UdsVariant {
+    /// Trigger variant detection for the given ECU.
+    /// # Errors
+    /// Will return `Err` if the variant detection cannot be triggered, e.g. if the given ECU
+    /// does not exist or no service for variant detection is available.
+    async fn detect_variant(&self, ecu_name: &str) -> Result<(), DiagServiceError>;
+
+    /// Get the name of the variant for the given ECU.
+    /// # Errors
+    /// Will return Err if the ECU does not exist.
+    /// If the variant is cannot be resolved, "Unknown" will be returned.
+    async fn get_variant(&self, ecu_name: &str) -> Result<EcuVariant, DiagServiceError>;
+
+    /// trigger the variant detection process for all ECUs.
+    /// Main work will be done in the background, there is no result returned,
+    /// as the data is internally stored and used in `EcuUds`
+    async fn start_variant_detection(&self);
+}
+
+/// UDS communication interface - composite supertrait combining all UDS subtraits.
+#[async_trait]
+pub trait UdsEcu:
+    UdsTransport
+    + UdsSession
+    + UdsSecurity
+    + UdsTesterPresent
+    + UdsDataTransfer
+    + UdsDtc
+    + UdsFunctionalGroup
+    + UdsQuery
+    + UdsVariant
+{
+}
+
 /// Minimum trait bound for the ECU type `T` in `UdsManager`.
 ///
 /// This covers the traits used directly by the raw UDS transport layer
@@ -588,6 +619,13 @@ impl<T> UdsEcuDb for T where
 }
 
 #[cfg(feature = "test-utils")]
+// `mockall::mock!` expands into a struct whose fields all share the
+// `ecu_flash_transfer` prefix (triggering `struct_field_names`) and into
+// function signatures with `&Option<&T>` parameters (triggering
+// `ref_option_ref`). Both are artefacts of the generated code that we cannot
+// change; the allow must be on the enclosing module because attributes on
+// macro invocations are ignored for lints that fire inside the expansion.
+#[allow(clippy::struct_field_names, clippy::ref_option_ref)]
 pub mod mock {
     use std::time::Duration;
 
@@ -596,7 +634,8 @@ pub mod mock {
     use super::FlashTransferStartParams;
     use crate::{
         DiagComm, DiagServiceError, DynamicPlugin, EcuVariant, HashMap, SecurityAccess,
-        TesterPresentType, UdsEcu, UdsSecurity, UdsSession, UdsTesterPresent, UdsTransport,
+        TesterPresentType, UdsDataTransfer, UdsDtc, UdsEcu, UdsFunctionalGroup, UdsQuery,
+        UdsSecurity, UdsSession, UdsTesterPresent, UdsTransport, UdsVariant,
         datatypes::{
             ComplexComParamValue, ComponentConfigurationsInfo, ComponentDataInfo,
             ComponentOperationsInfo, DataTransferMetaData, DtcCode, DtcExtendedInfo,
@@ -704,10 +743,69 @@ pub mod mock {
             ) -> bool;
         }
 
-        // allowed because the mock! macro generates references to Option types
-        #[allow(clippy::ref_option_ref)]
         #[async_trait]
-        impl UdsEcu for UdsEcu {
+        impl UdsDataTransfer for UdsEcu {
+            #[mockall::concretize]
+            async fn ecu_flash_transfer_start(
+                &self,
+                ecu_name: &str,
+                func_class_name: &str,
+                security_plugin: &DynamicPlugin,
+                parameters: FlashTransferStartParams<'_>,
+            ) -> Result<(), DiagServiceError>;
+            async fn ecu_flash_transfer_exit(
+                &self,
+                ecu_name: &str,
+                id: &str,
+            ) -> Result<(), DiagServiceError>;
+            async fn ecu_flash_transfer_status(
+                &self,
+                ecu_name: &str,
+            ) -> Result<Vec<DataTransferMetaData>, DiagServiceError>;
+            async fn ecu_flash_transfer_status_id(
+                &self,
+                ecu_name: &str,
+                id: &str,
+            ) -> Result<DataTransferMetaData, DiagServiceError>;
+        }
+
+        #[async_trait]
+        impl UdsDtc for UdsEcu {
+            async fn ecu_dtc_by_mask(
+                &self,
+                ecu_name: &str,
+                security_plugin: &DynamicPlugin,
+                status: Option<HashMap<String, serde_json::Value>>,
+                severity: Option<u32>,
+                scope: Option<String>,
+                memory_selection: Option<u8>,
+            ) -> Result<HashMap<DtcCode, DtcRecordAndStatus>, DiagServiceError>;
+            async fn ecu_dtc_extended(
+                &self,
+                ecu_name: &str,
+                security_plugin: &DynamicPlugin,
+                sae_dtc: &str,
+                include_extended_data: bool,
+                include_snapshot: bool,
+                include_schema: bool,
+                memory_selection: Option<u8>,
+            ) -> Result<DtcExtendedInfo, DiagServiceError>;
+            async fn delete_dtcs(
+                &self,
+                ecu_name: &str,
+                security_plugin: &DynamicPlugin,
+                fault_code: Option<String>,
+            ) -> Result<<MockUdsEcu as UdsTransport>::Response, DiagServiceError>;
+            async fn delete_dtcs_scoped(
+                &self,
+                ecu_name: &str,
+                security_plugin: &DynamicPlugin,
+                scope: &str,
+            ) -> Result<<MockUdsEcu as UdsTransport>::Response, DiagServiceError>;
+        }
+
+        #[async_trait]
+        impl UdsQuery for UdsEcu {
             async fn get_ecus(&self) -> Vec<String>;
             async fn get_physical_ecus(&self) -> Vec<String>;
             async fn get_ecus_with_sds(
@@ -778,68 +876,10 @@ pub mod mock {
                 func_class_name: &str,
                 service_id: u8,
             ) -> Result<DiagComm, DiagServiceError>;
-            #[mockall::concretize]
-            async fn ecu_flash_transfer_start(
-                &self,
-                ecu_name: &str,
-                func_class_name: &str,
-                security_plugin: &DynamicPlugin,
-                parameters: FlashTransferStartParams<'_>,
-            ) -> Result<(), DiagServiceError>;
-            async fn ecu_flash_transfer_exit(
-                &self,
-                ecu_name: &str,
-                id: &str,
-            ) -> Result<(), DiagServiceError>;
-            async fn ecu_flash_transfer_status(
-                &self,
-                ecu_name: &str,
-            ) -> Result<Vec<DataTransferMetaData>, DiagServiceError>;
-            async fn ecu_flash_transfer_status_id(
-                &self,
-                ecu_name: &str,
-                id: &str,
-            ) -> Result<DataTransferMetaData, DiagServiceError>;
-            async fn detect_variant(
-                &self,
-                ecu_name: &str,
-            ) -> Result<(), DiagServiceError>;
-            async fn get_variant(
-                &self,
-                ecu_name: &str,
-            ) -> Result<EcuVariant, DiagServiceError>;
-            async fn start_variant_detection(&self);
-            async fn ecu_dtc_by_mask(
-                &self,
-                ecu_name: &str,
-                security_plugin: &DynamicPlugin,
-                status: Option<HashMap<String, serde_json::Value>>,
-                severity: Option<u32>,
-                scope: Option<String>,
-                memory_selection: Option<u8>,
-            ) -> Result<HashMap<DtcCode, DtcRecordAndStatus>, DiagServiceError>;
-            async fn ecu_dtc_extended(
-                &self,
-                ecu_name: &str,
-                security_plugin: &DynamicPlugin,
-                sae_dtc: &str,
-                include_extended_data: bool,
-                include_snapshot: bool,
-                include_schema: bool,
-                memory_selection: Option<u8>,
-            ) -> Result<DtcExtendedInfo, DiagServiceError>;
-            async fn delete_dtcs(
-                &self,
-                ecu_name: &str,
-                security_plugin: &DynamicPlugin,
-                fault_code: Option<String>,
-            ) -> Result<<MockUdsEcu as UdsTransport>::Response, DiagServiceError>;
-            async fn delete_dtcs_scoped(
-                &self,
-                ecu_name: &str,
-                security_plugin: &DynamicPlugin,
-                scope: &str,
-            ) -> Result<<MockUdsEcu as UdsTransport>::Response, DiagServiceError>;
+        }
+
+        #[async_trait]
+        impl UdsFunctionalGroup for UdsEcu {
             async fn get_functional_group_data_info(
                 &self,
                 security_plugin: &DynamicPlugin,
@@ -894,6 +934,22 @@ pub mod mock {
             ) -> Result<HashMap<String, Result<<MockUdsEcu as UdsTransport>::Response,
                     DiagServiceError>>, DiagServiceError>;
         }
+
+        #[async_trait]
+        impl UdsVariant for UdsEcu {
+            async fn detect_variant(
+                &self,
+                ecu_name: &str,
+            ) -> Result<(), DiagServiceError>;
+            async fn get_variant(
+                &self,
+                ecu_name: &str,
+            ) -> Result<EcuVariant, DiagServiceError>;
+            async fn start_variant_detection(&self);
+        }
+
+        #[async_trait]
+        impl UdsEcu for UdsEcu {}
     }
 
     use crate::schema::{SchemaDescription, SchemaProvider};
@@ -930,7 +986,7 @@ pub mod mock {
 
 #[cfg(all(test, feature = "test-utils"))]
 mod tests {
-    use super::{UdsEcu, mock::MockUdsEcu};
+    use super::{UdsQuery, mock::MockUdsEcu};
     use crate::service_ids;
 
     #[tokio::test]
