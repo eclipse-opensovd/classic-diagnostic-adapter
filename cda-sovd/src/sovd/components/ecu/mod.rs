@@ -21,7 +21,7 @@ use axum::{
 use axum_extra::extract::WithRejection;
 use cda_interfaces::{
     DiagComm, DynamicPlugin, SchemaProvider, UdsEcu,
-    diagservices::{DiagServiceJsonResponse, DiagServiceResponse, DiagServiceResponseType},
+    diagservices::{DiagServiceJsonResponse, DiagServiceResponseType},
     file_manager::FileManager,
 };
 use cda_plugin_security::SecurityPlugin;
@@ -219,42 +219,30 @@ impl IntoSovd for cda_interfaces::datatypes::ComParamSimpleValue {
 }
 
 openapi::aide_helper::gen_path_param!(DiagServicePathParam service String);
-#[allow(clippy::too_many_lines)] // splitting is not worth it here
-async fn data_request<T: UdsEcu + SchemaProvider + Clone>(
-    service: DiagComm,
-    ecu_name: &str,
-    gateway: &T,
-    headers: HeaderMap,
+
+/// Parsed and validated inputs extracted from request headers and body.
+#[derive(Debug)]
+struct ParsedRequest {
+    data: Option<cda_interfaces::diagservices::UdsPayloadData>,
+    map_to_json: bool,
+}
+
+/// Parses and validates the HTTP headers and optional request body for a data
+/// service request. Returns a [`ParsedRequest`] on success or an [`ApiError`]
+/// describing the first validation failure.
+fn parse_data_request(
+    headers: &HeaderMap,
     body: Option<Bytes>,
-    security_plugin: Box<dyn SecurityPlugin>,
     include_schema: bool,
-) -> Response {
-    let (content_type, accept) = match get_content_type_and_accept(&headers) {
-        Ok(v) => v,
-        Err(e) => {
-            return ErrorWrapper {
-                error: e,
-                include_schema,
-            }
-            .into_response();
-        }
-    };
+) -> Result<ParsedRequest, ApiError> {
+    let (content_type, accept) = get_content_type_and_accept(headers)?;
 
     let data = if let Some(body) = body {
-        match get_payload_data::<sovd_interfaces::components::ecu::data::DataRequestPayload>(
+        get_payload_data::<sovd_interfaces::components::ecu::data::DataRequestPayload>(
             content_type.as_ref(),
-            &headers,
+            headers,
             &body,
-        ) {
-            Ok(value) => value,
-            Err(e) => {
-                return ErrorWrapper {
-                    error: e,
-                    include_schema,
-                }
-                .into_response();
-            }
-        }
+        )?
     } else {
         None
     };
@@ -263,48 +251,49 @@ async fn data_request<T: UdsEcu + SchemaProvider + Clone>(
         (mime::APPLICATION, mime::JSON) => true,
         (mime::APPLICATION, mime::OCTET_STREAM) => false,
         unsupported => {
-            return ErrorWrapper {
-                error: ApiError::BadRequest(format!("Unsupported Accept: {unsupported:?}")),
-                include_schema,
-            }
-            .into_response();
+            return Err(ApiError::BadRequest(format!(
+                "Unsupported Accept: {unsupported:?}"
+            )));
         }
     };
 
     if !map_to_json && include_schema {
-        return ErrorWrapper {
-            error: ApiError::BadRequest(
-                "Cannot use include-schema with non-JSON response".to_string(),
-            ),
-            include_schema,
-        }
-        .into_response();
+        return Err(ApiError::BadRequest(
+            "Cannot use include-schema with non-JSON response".to_string(),
+        ));
     }
 
+    Ok(ParsedRequest { data, map_to_json })
+}
+
+/// Fetches the optional response schema and sends the UDS diagnostic request.
+/// Returns the raw response and optional schema on success, or an [`ApiError`] on failure.
+async fn execute_uds_data_request<T: UdsEcu + SchemaProvider + Clone>(
+    gateway: &T,
+    ecu_name: &str,
+    service: &DiagComm,
+    security_plugin: Box<dyn SecurityPlugin>,
+    data: Option<cda_interfaces::diagservices::UdsPayloadData>,
+    map_to_json: bool,
+    include_schema: bool,
+) -> Result<(T::Response, Option<schemars::Schema>), ApiError> {
     let schema = if include_schema {
-        match gateway
-            .schema_for_responses(ecu_name, &service)
+        let data_schema = gateway
+            .schema_for_responses(ecu_name, service)
             .await
             .map(cda_interfaces::SchemaDescription::into_schema)
-        {
-            Ok(data_schema) => Some(create_response_schema!(
-                sovd_interfaces::ObjectDataItem<VendorErrorCode>,
-                "data",
-                data_schema
-            )),
-            Err(e) => {
-                return ErrorWrapper {
-                    error: e.into(),
-                    include_schema,
-                }
-                .into_response();
-            }
-        }
+            .map_err(Into::into)
+            .map_err(|e: ApiError| e)?;
+        Some(create_response_schema!(
+            sovd_interfaces::ObjectDataItem<VendorErrorCode>,
+            "data",
+            data_schema
+        ))
     } else {
         None
     };
 
-    let response = match gateway
+    let response = gateway
         .send(
             ecu_name,
             service.clone(),
@@ -314,17 +303,20 @@ async fn data_request<T: UdsEcu + SchemaProvider + Clone>(
         )
         .await
         .map_err(Into::into)
-    {
-        Err(e) => {
-            return ErrorWrapper {
-                error: e,
-                include_schema,
-            }
-            .into_response();
-        }
-        Ok(v) => v,
-    };
+        .map_err(|e: ApiError| e)?;
 
+    Ok((response, schema))
+}
+
+/// Converts a completed [`DiagServiceResponse`] into an HTTP [`Response`],
+/// honoring the `map_to_json` flag and the optional inline schema.
+fn format_data_response<R: cda_interfaces::diagservices::DiagServiceResponse>(
+    response: R,
+    service: &DiagComm,
+    map_to_json: bool,
+    include_schema: bool,
+    schema: Option<schemars::Schema>,
+) -> Response {
     if let DiagServiceResponseType::Negative = response.response_type() {
         return api_error_from_diag_response(&response, include_schema).into_response();
     }
@@ -379,5 +371,446 @@ async fn data_request<T: UdsEcu + SchemaProvider + Clone>(
     } else {
         let data = response.get_raw().to_vec();
         (StatusCode::OK, Bytes::from_owner(data)).into_response()
+    }
+}
+
+/// Orchestrates [`parse_data_request`], [`execute_uds_data_request`], and
+/// [`format_data_response`] to handle a complete ECU data service request.
+async fn data_request<T: UdsEcu + SchemaProvider + Clone>(
+    service: DiagComm,
+    ecu_name: &str,
+    gateway: &T,
+    headers: HeaderMap,
+    body: Option<Bytes>,
+    security_plugin: Box<dyn SecurityPlugin>,
+    include_schema: bool,
+) -> Response {
+    let parsed = match parse_data_request(&headers, body, include_schema) {
+        Ok(v) => v,
+        Err(e) => {
+            return ErrorWrapper {
+                error: e,
+                include_schema,
+            }
+            .into_response();
+        }
+    };
+
+    let (response, schema) = match execute_uds_data_request(
+        gateway,
+        ecu_name,
+        &service,
+        security_plugin,
+        parsed.data,
+        parsed.map_to_json,
+        include_schema,
+    )
+    .await
+    {
+        Ok(v) => v,
+        Err(e) => {
+            return ErrorWrapper {
+                error: e,
+                include_schema,
+            }
+            .into_response();
+        }
+    };
+
+    format_data_response(
+        response,
+        &service,
+        parsed.map_to_json,
+        include_schema,
+        schema,
+    )
+}
+
+#[cfg(test)]
+mod tests {
+    use bytes::Bytes;
+    use cda_interfaces::{
+        DataParseError, DiagComm, DiagCommType,
+        diagservices::{
+            DiagServiceJsonResponse, DiagServiceResponseType, FieldParseError,
+            mock::MockDiagServiceResponse,
+        },
+    };
+    use http::{HeaderMap, HeaderValue, StatusCode, header};
+
+    use super::{format_data_response, parse_data_request};
+    use crate::sovd::error::ApiError;
+
+    async fn body_bytes(response: axum::response::Response) -> Bytes {
+        axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap()
+    }
+
+    fn make_field_parse_error(path: &str, value: &str, details: &str) -> FieldParseError {
+        FieldParseError {
+            path: path.to_string(),
+            error: DataParseError {
+                value: value.to_string(),
+                details: details.to_string(),
+            },
+        }
+    }
+
+    #[test]
+    fn negative_response_returns_bad_gateway() {
+        let mut mock = MockDiagServiceResponse::new();
+        mock.expect_response_type()
+            .returning(|| DiagServiceResponseType::Negative);
+        mock.expect_as_nrc().returning(|| {
+            Ok(cda_interfaces::diagservices::MappedNRC {
+                code: Some(0x22),
+                description: Some("conditionsNotCorrect".to_string()),
+                sid: Some(0x22),
+            })
+        });
+
+        let service = DiagComm::new("ReadRPM", DiagCommType::Data);
+        let response = format_data_response(mock, &service, true, false, None);
+
+        assert_eq!(response.status(), StatusCode::BAD_GATEWAY);
+    }
+
+    #[tokio::test]
+    async fn empty_positive_response_returns_no_content() {
+        let mut mock = MockDiagServiceResponse::new();
+        mock.expect_response_type()
+            .returning(|| DiagServiceResponseType::Positive);
+        mock.expect_is_empty().returning(|| true);
+
+        let service = DiagComm::new("ReadRPM", DiagCommType::Data);
+        let response = format_data_response(mock, &service, true, false, None);
+
+        assert_eq!(response.status(), StatusCode::NO_CONTENT);
+        assert!(body_bytes(response).await.is_empty());
+    }
+
+    #[tokio::test]
+    async fn map_to_json_with_object_data_returns_200_with_json_body() {
+        let mut mock = MockDiagServiceResponse::new();
+        mock.expect_response_type()
+            .returning(|| DiagServiceResponseType::Positive);
+        mock.expect_is_empty().returning(|| false);
+        mock.expect_into_json().returning(|| {
+            let mut map = serde_json::Map::new();
+            map.insert("rpm".to_string(), serde_json::json!(1200));
+            Ok(DiagServiceJsonResponse {
+                data: serde_json::Value::Object(map),
+                errors: vec![],
+            })
+        });
+
+        let service = DiagComm::new("ReadRPM", DiagCommType::Data);
+        let response = format_data_response(mock, &service, true, false, None);
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = body_bytes(response).await;
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(json.get("id").and_then(|v| v.as_str()), Some("readrpm"));
+        assert_eq!(
+            json.get("data")
+                .and_then(|v| v.get("rpm"))
+                .and_then(serde_json::Value::as_u64),
+            Some(1200)
+        );
+    }
+
+    #[tokio::test]
+    async fn map_to_json_null_data_with_no_errors_returns_no_content() {
+        let mut mock = MockDiagServiceResponse::new();
+        mock.expect_response_type()
+            .returning(|| DiagServiceResponseType::Positive);
+        mock.expect_is_empty().returning(|| false);
+        mock.expect_into_json().returning(|| {
+            Ok(DiagServiceJsonResponse {
+                data: serde_json::Value::Null,
+                errors: vec![],
+            })
+        });
+
+        let service = DiagComm::new("ReadRPM", DiagCommType::Data);
+        let response = format_data_response(mock, &service, true, false, None);
+
+        assert_eq!(response.status(), StatusCode::NO_CONTENT);
+    }
+
+    #[tokio::test]
+    async fn map_to_json_non_object_data_returns_500() {
+        let mut mock = MockDiagServiceResponse::new();
+        mock.expect_response_type()
+            .returning(|| DiagServiceResponseType::Positive);
+        mock.expect_is_empty().returning(|| false);
+        mock.expect_into_json().returning(|| {
+            Ok(DiagServiceJsonResponse {
+                data: serde_json::json!([1, 2, 3]),
+                errors: vec![],
+            })
+        });
+
+        let service = DiagComm::new("ReadRPM", DiagCommType::Data);
+        let response = format_data_response(mock, &service, true, false, None);
+
+        assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
+    }
+
+    #[tokio::test]
+    async fn map_to_json_into_json_error_returns_500() {
+        let mut mock = MockDiagServiceResponse::new();
+        mock.expect_response_type()
+            .returning(|| DiagServiceResponseType::Positive);
+        mock.expect_is_empty().returning(|| false);
+        mock.expect_into_json().returning(|| {
+            Err(cda_interfaces::DiagServiceError::InvalidRequest(
+                "test".into(),
+            ))
+        });
+
+        let service = DiagComm::new("ReadRPM", DiagCommType::Data);
+        let response = format_data_response(mock, &service, true, false, None);
+
+        assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
+    }
+
+    #[tokio::test]
+    async fn raw_response_returns_200_with_binary_body() {
+        let mut mock = MockDiagServiceResponse::new();
+        mock.expect_response_type()
+            .returning(|| DiagServiceResponseType::Positive);
+        mock.expect_is_empty().returning(|| false);
+        mock.expect_get_raw()
+            .return_const(vec![0xDEu8, 0xAD, 0xBE, 0xEF]);
+
+        let service = DiagComm::new("ReadRaw", DiagCommType::Data);
+        let response = format_data_response(mock, &service, false, false, None);
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = body_bytes(response).await;
+        assert_eq!(body.as_ref(), &[0xDEu8, 0xAD, 0xBE, 0xEF]);
+    }
+
+    #[tokio::test]
+    async fn map_to_json_includes_schema_when_provided() {
+        let mut mock = MockDiagServiceResponse::new();
+        mock.expect_response_type()
+            .returning(|| DiagServiceResponseType::Positive);
+        mock.expect_is_empty().returning(|| false);
+        mock.expect_into_json().returning(|| {
+            Ok(DiagServiceJsonResponse {
+                data: serde_json::Value::Object(serde_json::Map::new()),
+                errors: vec![],
+            })
+        });
+
+        let schema: schemars::Schema =
+            serde_json::from_value(serde_json::json!({"type": "object"})).unwrap();
+
+        let service = DiagComm::new("ReadRPM", DiagCommType::Data);
+        let response = format_data_response(mock, &service, true, true, Some(schema));
+
+        assert_eq!(response.status(), StatusCode::OK);
+        // schema is present in the body because ObjectDataItem serialises it when Some
+        let body = body_bytes(response).await;
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert!(
+            json.get("schema").is_some(),
+            "expected schema field in body"
+        );
+    }
+
+    #[tokio::test]
+    async fn map_to_json_with_field_parse_errors_includes_errors_in_body() {
+        let mut mock = MockDiagServiceResponse::new();
+        mock.expect_response_type()
+            .returning(|| DiagServiceResponseType::Positive);
+        mock.expect_is_empty().returning(|| false);
+        mock.expect_into_json().returning(|| {
+            let mut map = serde_json::Map::new();
+            map.insert("voltage".to_string(), serde_json::json!(12.0));
+            Ok(DiagServiceJsonResponse {
+                data: serde_json::Value::Object(map),
+                errors: vec![
+                    make_field_parse_error("/current", "0xFF", "unknown encoding"),
+                    make_field_parse_error("/temperature", "0xAB", "out of range"),
+                ],
+            })
+        });
+
+        let service = DiagComm::new("ReadBattery", DiagCommType::Data);
+        let response = format_data_response(mock, &service, true, false, None);
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = body_bytes(response).await;
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        let errors = json
+            .get("errors")
+            .and_then(|v| v.as_array())
+            .expect("expected errors array");
+        assert_eq!(errors.len(), 2);
+        // paths should be prefixed with /data
+        let paths: Vec<&str> = errors.iter().map(|e| e["path"].as_str().unwrap()).collect();
+        assert!(paths.iter().all(|p| p.starts_with("/data")));
+    }
+
+    fn headers_with(pairs: &[(&str, &str)]) -> HeaderMap {
+        let mut map = HeaderMap::new();
+        for (name, value) in pairs {
+            map.insert(
+                header::HeaderName::from_bytes(name.as_bytes()).unwrap(),
+                HeaderValue::from_str(value).unwrap(),
+            );
+        }
+        map
+    }
+
+    #[test]
+    fn no_headers_no_body_defaults_to_json() {
+        // No Content-Type, no Accept -> should default to application/json
+        let headers = HeaderMap::new();
+        let result = parse_data_request(&headers, None, false);
+
+        let parsed = result.expect("should succeed");
+        assert!(parsed.map_to_json, "expected map_to_json=true");
+        assert!(parsed.data.is_none(), "expected no data");
+    }
+
+    #[test]
+    fn accept_json_no_body_sets_map_to_json_true() {
+        let headers = headers_with(&[("accept", "application/json")]);
+        let result = parse_data_request(&headers, None, false);
+
+        let parsed = result.expect("should succeed");
+        assert!(parsed.map_to_json);
+        assert!(parsed.data.is_none());
+    }
+
+    #[test]
+    fn accept_octet_stream_no_body_sets_map_to_json_false() {
+        let headers = headers_with(&[("accept", "application/octet-stream")]);
+        let result = parse_data_request(&headers, None, false);
+
+        let parsed = result.expect("should succeed");
+        assert!(!parsed.map_to_json);
+        assert!(parsed.data.is_none());
+    }
+
+    #[test]
+    fn accept_wildcard_falls_back_to_json_when_no_content_type() {
+        // Accept: */* with no Content-Type -> content_type is None, accept_header
+        // collapses to APPLICATION_JSON per get_content_type_and_accept logic.
+        let headers = headers_with(&[("accept", "*/*")]);
+        let result = parse_data_request(&headers, None, false);
+
+        let parsed = result.expect("should succeed");
+        assert!(parsed.map_to_json);
+    }
+
+    #[test]
+    fn unsupported_accept_returns_bad_request() {
+        let headers = headers_with(&[("accept", "text/plain")]);
+        let result = parse_data_request(&headers, None, false);
+
+        match result {
+            Err(ApiError::BadRequest(msg)) => {
+                assert!(msg.contains("Unsupported Accept"), "unexpected msg: {msg}");
+            }
+            other => panic!("expected BadRequest, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn malformed_accept_header_returns_bad_request() {
+        let mut headers = HeaderMap::new();
+        // Insert raw bytes that are not valid UTF-8
+        headers.insert(
+            header::ACCEPT,
+            HeaderValue::from_bytes(b"\xFF\xFE").unwrap(),
+        );
+        let result = parse_data_request(&headers, None, false);
+
+        assert!(
+            matches!(result, Err(ApiError::BadRequest(_))),
+            "expected BadRequest for malformed Accept"
+        );
+    }
+
+    #[test]
+    fn octet_stream_with_include_schema_returns_bad_request() {
+        let headers = headers_with(&[("accept", "application/octet-stream")]);
+        let result = parse_data_request(&headers, None, true);
+
+        match result {
+            Err(ApiError::BadRequest(msg)) => {
+                assert!(msg.contains("include-schema"), "unexpected msg: {msg}");
+            }
+            other => panic!("expected BadRequest, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn json_body_is_parsed_into_parameter_map() {
+        let headers = headers_with(&[
+            ("content-type", "application/json"),
+            ("accept", "application/json"),
+        ]);
+        let body = Bytes::from_static(br#"{"data":{"rpm":1200}}"#);
+        let result = parse_data_request(&headers, Some(body), false);
+
+        let parsed = result.expect("should succeed");
+        assert!(parsed.map_to_json);
+
+        match parsed.data {
+            Some(cda_interfaces::diagservices::UdsPayloadData::ParameterMap(map)) => {
+                assert_eq!(
+                    map.get("rpm"),
+                    Some(&serde_json::json!(1200)),
+                    "expected 'rpm' key in parameter map"
+                );
+            }
+            other => panic!("expected ParameterMap, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn invalid_json_body_returns_bad_request() {
+        let headers = headers_with(&[
+            ("content-type", "application/json"),
+            ("accept", "application/json"),
+        ]);
+        let body = Bytes::from_static(b"not-json");
+        let result = parse_data_request(&headers, Some(body), false);
+
+        match result {
+            Err(ApiError::BadRequest(msg)) => {
+                assert!(msg.contains("Invalid JSON"), "unexpected msg: {msg}");
+            }
+            other => panic!("expected BadRequest, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn octet_stream_body_is_parsed_into_raw() {
+        let payload: &[u8] = &[0x22, 0x01, 0xFF];
+        let headers = headers_with(&[
+            ("content-type", "application/octet-stream"),
+            ("accept", "application/octet-stream"),
+            ("content-length", &payload.len().to_string()),
+        ]);
+        let body = Bytes::copy_from_slice(payload);
+        let result = parse_data_request(&headers, Some(body), false);
+
+        let parsed = result.expect("should succeed");
+        assert!(!parsed.map_to_json);
+
+        match parsed.data {
+            Some(cda_interfaces::diagservices::UdsPayloadData::Raw(bytes)) => {
+                assert_eq!(bytes, payload);
+            }
+            other => panic!("expected Raw, got {other:?}"),
+        }
     }
 }
