@@ -24,4 +24,9 @@ RUN apt-get update \
 # host plus NET_ADMIN), then serve it over rawmode TCP on the default port
 # 29536. The bus name `vcan0` is what clients pass in `< open vcan0 >`.
 # `-n` disables the UDP discovery beacon (clients connect by host:port).
-CMD ["/bin/sh", "-c", "ip link add dev vcan0 type vcan && ip link set up vcan0 && exec socketcand -n -i vcan0 -l 0.0.0.0"]
+#
+# NOTE: socketcand's `-l` takes an *interface name* (default `eth0`), NOT an IP
+# address — passing `-l 0.0.0.0` makes it look up a non-existent interface and
+# die with "bind: Cannot assign requested address". `eth0` is the container's
+# interface on the compose bridge network, so clients reach it by service name.
+CMD ["/bin/sh", "-c", "ip link add dev vcan0 type vcan && ip link set up vcan0 && exec socketcand -n -i vcan0 -l eth0"]
