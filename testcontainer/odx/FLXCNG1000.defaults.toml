@@ -1,5 +1,4 @@
 # SPDX-License-Identifier: Apache-2.0
-# SPDX-FileCopyrightText: 2026 The Contributors to Eclipse OpenSOVD (see CONTRIBUTORS)
 #
 # Default parameter values loaded by cda-simulator at startup, after
 # variant-detection patterns. The simulator reads this file when it loads
