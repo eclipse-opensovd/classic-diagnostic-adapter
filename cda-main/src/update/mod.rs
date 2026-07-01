@@ -22,7 +22,7 @@ use cda_interfaces::{
     runtime_update_api::{ReloadError, RuntimeFilesUpdateSecurityHandler},
 };
 use cda_plugin_security::{SecurityPlugin, SecurityPluginLoader};
-use tokio::sync::RwLock;
+use tokio::sync::{Mutex, RwLock};
 
 use crate::{AppError, UdsManagerType};
 
@@ -45,7 +45,7 @@ where
     pub ecu_execution_registry: cda_sovd::EcuExecutionRegistry,
     pub update_guard: cda_sovd::UpdateGuardState,
     pub health: Option<crate::HealthProviders>,
-    pub variant_detection_handle: tokio::sync::Mutex<tokio::task::JoinHandle<()>>,
+    pub variant_detection_handle: Mutex<Option<tokio::task::JoinHandle<()>>>,
 }
 
 pub struct DefaultRuntimeFileReloadHandler<S, F, P>
@@ -66,7 +66,7 @@ where
     update_guard: cda_sovd::UpdateGuardState,
     ecu_execution_registry: cda_sovd::EcuExecutionRegistry,
     health: Option<crate::HealthProviders>,
-    variant_detection_handle: tokio::sync::Mutex<tokio::task::JoinHandle<()>>,
+    variant_detection_handle: Mutex<Option<tokio::task::JoinHandle<()>>>,
     _phantom: std::marker::PhantomData<P>,
 }
 
@@ -112,7 +112,11 @@ where
         // conflicts. Reuse the existing UDP socket so that there is never a second
         // socket bound to the same DoIP port (which would cause non-deterministic
         // VAM delivery between old and new listeners).
-        self.variant_detection_handle.lock().await.abort();
+        if let Some(variant_detection_handle) = self.variant_detection_handle.lock().await.take() {
+            variant_detection_handle.abort();
+            let _ = variant_detection_handle.await;
+        }
+
         self.uds_manager.write().await.shutdown().await;
         let doip_socket = {
             let mut gw = self.doip_gateway.write().await;
@@ -133,7 +137,7 @@ where
         .map_err(|e| ReloadError(format!("Failed to create vehicle components: {e}")))?;
 
         // Replace with new components
-        *self.variant_detection_handle.lock().await = new_components.variant_detection_handle;
+        *self.variant_detection_handle.lock().await = Some(new_components.variant_detection_handle);
         *self.uds_manager.write().await = new_components.uds_manager.clone();
         *self.doip_gateway.write().await = new_components.diagnostic_gateway;
 
@@ -213,7 +217,7 @@ pub struct RuntimeUpdateContext<
     pub uds_manager: UdsManagerType<S>,
     pub doip_gateway: DoipDiagGateway<EcuManager<S>>,
     pub health: Option<crate::HealthProviders>,
-    pub variant_detection_handle: tokio::task::JoinHandle<()>,
+    pub variant_detection_handle: Option<tokio::task::JoinHandle<()>>,
 }
 
 /// Registers the runtime update routes on the dynamic router using the provided plugin.
@@ -302,7 +306,7 @@ where
             update_guard: ctx.update_guard.clone(),
             ecu_execution_registry: ctx.ecu_execution_registry,
             health: ctx.health,
-            variant_detection_handle: tokio::sync::Mutex::new(ctx.variant_detection_handle),
+            variant_detection_handle: Mutex::new(ctx.variant_detection_handle),
         },
     ));
     let storage = Arc::new(

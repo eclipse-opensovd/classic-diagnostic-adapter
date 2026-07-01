@@ -590,7 +590,7 @@ pub async fn setup_vehicle_and_routes<SP: SecurityPlugin, SL: SecurityPluginLoad
             uds_manager: vehicle_data.uds_manager,
             doip_gateway: vehicle_data.diagnostic_gateway,
             health: vehicle_data.health_providers,
-            variant_detection_handle: vehicle_data.variant_detection_handle,
+            variant_detection_handle: Some(vehicle_data.variant_detection_handle),
             security_handler: Arc::new(UpdateSecurityHandler::new(
                 Arc::clone(&lock_provider),
                 vec![

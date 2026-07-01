@@ -25,6 +25,7 @@ use thiserror::Error;
 use tokio::{
     io::{AsyncRead, AsyncWrite},
     sync::{Mutex, RwLock, broadcast, mpsc, watch},
+    task::{JoinError, JoinSet},
 };
 
 use crate::{
@@ -42,12 +43,12 @@ pub(crate) struct GatewayState<T> {
     pub doip_connections: Arc<RwLock<Vec<Arc<DoipConnection>>>>,
     pub ecus: Arc<HashMap<String, RwLock<T>>>,
     pub gateway_ecu_map: HashMap<u16, Vec<u16>>,
+    pub connection_tasks: Arc<Mutex<JoinSet<Result<(), JoinError>>>>,
 }
 
 struct GatewayConnectionHandles {
     sender: mpsc::Sender<DoipPayload>,
     receivers: HashMap<u16, broadcast::Receiver<Result<DiagnosticResponse, EcuError>>>,
-    task_handles: Vec<tokio::task::JoinHandle<()>>,
 }
 
 #[derive(Error, Debug, Clone)]
@@ -171,21 +172,18 @@ where
         ecus: ecu_ids.clone(),
         variant_detection,
     };
-    let GatewayConnectionHandles {
-        sender,
-        receivers,
-        task_handles,
-    } = match connection_handler(gateway).await {
-        Ok(handles) => handles,
-        Err(e) => {
-            return Err(EcuError::EcuConnectionError(
-                ConnectionError::ConnectionFailed(format!(
-                    "Failed to connect to {}: {}",
-                    discovered_gateway.ecu_name, e
-                )),
-            ));
-        }
-    };
+    let GatewayConnectionHandles { sender, receivers } =
+        match connection_handler(gateway, Arc::clone(&state.connection_tasks)).await {
+            Ok(handles) => handles,
+            Err(e) => {
+                return Err(EcuError::EcuConnectionError(
+                    ConnectionError::ConnectionFailed(format!(
+                        "Failed to connect to {}: {}",
+                        discovered_gateway.ecu_name, e
+                    )),
+                ));
+            }
+        };
 
     let doip_ecus = create_ecu_receiver_map(ecu_ids, &sender, &receivers);
 
@@ -197,7 +195,6 @@ where
         .push(Arc::new(DoipConnection {
             ecus: doip_ecus,
             ip: discovered_gateway.ip,
-            task_handles,
         }));
 
     Ok(discovered_gateway.logical_address)
@@ -245,7 +242,10 @@ fn create_ecu_receiver_map(
         dlt_context = dlt_ctx!("DOIP"),
     )
 )]
-async fn connection_handler(gateway: GatewaySetup) -> Result<GatewayConnectionHandles, EcuError> {
+async fn connection_handler(
+    gateway: GatewaySetup,
+    connection_tasks: Arc<Mutex<JoinSet<Result<(), JoinError>>>>,
+) -> Result<GatewayConnectionHandles, EcuError> {
     // channel to send messages to the gateway / ecus
     let (intx, inrx) = mpsc::channel::<DoipPayload>(50);
 
@@ -281,35 +281,36 @@ async fn connection_handler(gateway: GatewaySetup) -> Result<GatewayConnectionHa
     let (conn_reset_tx, conn_reset_rx) = mpsc::channel::<ConnectionResetReason>(1);
     // task to handle connection resets and reconnects
     let conn_reset = Arc::<EcuConnectionTarget>::clone(&gateway_conn);
-    let connection_reset_task =
-        spawn_connection_reset_task(gateway.clone(), conn_reset_rx, conn_reset);
+
+    let mut tasks = connection_tasks.lock().await;
+    tasks.spawn(spawn_connection_reset_task(
+        gateway.clone(),
+        conn_reset_rx,
+        conn_reset,
+    ));
 
     // communication between send / receiver task to unlock the connection in the receiver task
     // when sender task wants to send something
     let (send_pending_tx, send_pending_rx) = watch::channel::<bool>(false);
-    let gateway_sender_task = spawn_gateway_sender_task(
+    tasks.spawn(spawn_gateway_sender_task(
         Arc::<EcuConnectionTarget>::clone(&gateway_conn),
         inrx,
         conn_reset_tx.clone(),
         send_pending_tx.clone(),
-    );
-    let gateway_receiver_task = spawn_gateway_receiver_task(
+    ));
+    tasks.spawn(spawn_gateway_receiver_task(
         outtx,
         Arc::<EcuConnectionTarget>::clone(&gateway_conn),
         send_pending_rx,
         conn_reset_tx,
         intx.clone(),
-    );
+    ));
+    drop(tasks);
 
     // no need to wait until the connection is alive, we will reconnect automatically anyway
     Ok(GatewayConnectionHandles {
         sender: intx,
         receivers: outrx,
-        task_handles: vec![
-            connection_reset_task,
-            gateway_sender_task,
-            gateway_receiver_task,
-        ],
     })
 }
 

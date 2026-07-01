@@ -31,7 +31,10 @@ use doip_definitions::{
 };
 use futures::FutureExt;
 use thiserror::Error;
-use tokio::sync::{Mutex, RwLock, broadcast, mpsc};
+use tokio::{
+    sync::{Mutex, RwLock, broadcast, mpsc},
+    task::{JoinError, JoinSet},
+};
 use tokio_util::sync::CancellationToken;
 
 use crate::{
@@ -78,6 +81,7 @@ pub(crate) struct DoipGatewayState<T: EcuAddresses + DoipComParams> {
     pub(crate) logical_address_to_connection: Arc<RwLock<HashMap<u16, usize>>>,
     pub(crate) ecus: Arc<HashMap<String, RwLock<T>>>,
     pub(crate) socket: Arc<Mutex<DoIPUdpSocket>>,
+    pub(crate) connection_tasks: Arc<Mutex<JoinSet<Result<(), JoinError>>>>,
 }
 
 impl<T: EcuAddresses + DoipComParams> Clone for DoipGatewayState<T> {
@@ -87,6 +91,7 @@ impl<T: EcuAddresses + DoipComParams> Clone for DoipGatewayState<T> {
             logical_address_to_connection: Arc::clone(&self.logical_address_to_connection),
             ecus: Arc::clone(&self.ecus),
             socket: Arc::clone(&self.socket),
+            connection_tasks: Arc::clone(&self.connection_tasks),
         }
     }
 }
@@ -94,7 +99,7 @@ impl<T: EcuAddresses + DoipComParams> Clone for DoipGatewayState<T> {
 pub struct DoipDiagGateway<T: EcuAddresses + DoipComParams> {
     state: DoipGatewayState<T>,
     cancel_token: CancellationToken,
-    vam_listener_handle: Arc<tokio::task::JoinHandle<()>>,
+    vam_listener_handle: Arc<Mutex<Option<tokio::task::JoinHandle<()>>>>,
 }
 
 /// A gateway discovered on the network during `DoIP` vehicle discovery.
@@ -179,7 +184,6 @@ struct DoipEcu {
 struct DoipConnection {
     ecus: HashMap<u16, Arc<Mutex<DoipEcu>>>,
     ip: String,
-    task_handles: Vec<tokio::task::JoinHandle<()>>,
 }
 
 #[derive(Error, Debug, Clone)]
@@ -302,12 +306,15 @@ impl<T: EcuAddresses + DoipComParams> DoipDiagGateway<T> {
 
         let cancel_token = CancellationToken::new();
 
+        let connection_tasks = Arc::new(Mutex::new(JoinSet::new()));
+
         let state = if gateways.is_empty() {
             DoipGatewayState {
                 doip_connections: Arc::new(RwLock::new(Vec::new())),
                 logical_address_to_connection: Arc::new(RwLock::new(HashMap::new())),
                 ecus,
                 socket: Arc::clone(&doip_socket),
+                connection_tasks,
             }
         } else {
             tracing::info!(gateway_count = gateways.len(), "Gateways found");
@@ -343,6 +350,7 @@ impl<T: EcuAddresses + DoipComParams> DoipDiagGateway<T> {
                         doip_connections: Arc::clone(&doip_connections),
                         ecus: Arc::clone(&ecus),
                         gateway_ecu_map: gateway_ecu_map.clone(),
+                        connection_tasks: Arc::clone(&connection_tasks),
                     },
                     Some((variant_detection.clone(), ecu_names_for_gateway)),
                 )
@@ -360,6 +368,7 @@ impl<T: EcuAddresses + DoipComParams> DoipDiagGateway<T> {
                 logical_address_to_connection: Arc::new(RwLock::new(logical_address_to_connection)),
                 ecus,
                 socket: Arc::clone(&doip_socket),
+                connection_tasks,
             }
         };
 
@@ -376,23 +385,27 @@ impl<T: EcuAddresses + DoipComParams> DoipDiagGateway<T> {
         Ok(DoipDiagGateway {
             state,
             cancel_token,
-            vam_listener_handle: Arc::new(vam_listener_handle),
+            vam_listener_handle: Arc::new(Mutex::new(Some(vam_listener_handle))),
         })
     }
 
     pub async fn shutdown(&mut self) {
         self.cancel_token.cancel();
-        // Abort and await the VAM listener task so it stops reading from the
-        // shared UDP socket before a new gateway reuses it.
-        self.vam_listener_handle.abort();
+
+        if let Some(vam_listener_handle) = self.vam_listener_handle.lock().await.take() {
+            // Abort and await the VAM listener task so it stops reading from the
+            // shared UDP socket before a new gateway reuses it.
+            vam_listener_handle.abort();
+            let _ = vam_listener_handle.await;
+        }
+
         // Abort all background tasks (sender, receiver, connection-reset) for each
         // gateway connection. This immediately drops their TCP socket halves.
         let connections = self.state.doip_connections.write().await;
-        for conn in connections.iter() {
-            for handle in &conn.task_handles {
-                handle.abort();
-            }
-        }
+        let mut tasks = self.state.connection_tasks.lock().await;
+        tasks.abort_all();
+        while tasks.join_next().await.is_some() {}
+        drop(tasks);
         drop(connections);
         self.state.doip_connections.write().await.clear();
     }
