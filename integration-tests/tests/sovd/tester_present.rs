@@ -359,7 +359,7 @@ async fn tester_present_resumes_after_network_disconnect() -> Result<(), Testing
 
     // Force-close all active DoIP TCP connections - simulates a transient network fault.
     // The ECU is still running and will re-announce itself via VAMs immediately.
-    ecusim::disconnect(&runtime.ecu_sim, ECU_SIM_NAME)
+    ecusim::disconnect(&runtime.ecu_sim)
         .await
         .expect("failed to disconnect ECU sim");
 
