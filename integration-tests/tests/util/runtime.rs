@@ -595,7 +595,7 @@ fn dump_docker_logs() {
     tracing::error!("========== Docker Compose Logs ==========");
 
     // Set the active compose profiles so profile-gated services (e.g. the
-    // `socketcand` daemon under the `can` profile) are included in the dump —
+    // `socketcand` daemon under the `can` profile) are included in the dump --
     // without this only the default services (cda, ecu-sim) are known here, and
     // the socketcand side stays invisible when debugging CAN failures.
     let output = std::process::Command::new("docker")
@@ -694,7 +694,7 @@ fn write_config_toml(
 }
 
 /// Build the docker-compose `.env` file contents. Pure (no I/O, no env lookups)
-/// so the exact bytes fed to compose can be unit-tested — a malformed literal
+/// so the exact bytes fed to compose can be unit-tested -- a malformed literal
 /// here previously mangled `SIM_CAN_SOCKETCAND_HOST` into `socketcand\`, which
 /// made the ecu-sim silently never join the CAN bus in CI.
 fn docker_env_content(
@@ -718,7 +718,7 @@ fn docker_env_content(
         // NOTE: emit one short `writeln!` per line rather than a single long
         // literal. rustfmt's `format_strings` rewraps long literals at the
         // column limit and, when a wrap lands on an escape, mangles `\n` into
-        // `\\` + `n` — which is exactly how the host once became `socketcand\`,
+        // `\\` + `n` -- which is exactly how the host once became `socketcand\`,
         // silently keeping the sim off the CAN bus in CI. Short lines are never
         // rewrapped, so this stays correct across `cargo fmt`.
         let _ = writeln!(env_content, "# socketcand daemon the ecu-sim connects to");
