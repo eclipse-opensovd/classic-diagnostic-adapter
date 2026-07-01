@@ -475,16 +475,30 @@ where
     register_version_endpoints(&dynamic_router).await;
     pre_load_hook(dynamic_router.clone()).await?;
 
+    let display_address = if config.server.address == "0.0.0.0" {
+        "127.0.0.1"
+    } else {
+        &config.server.address
+    };
+    let swagger_ui_url = format!(
+        "http://{}:{}{}",
+        display_address,
+        config.server.port,
+        cda_sovd::SWAGGER_UI_ROUTE
+    );
+
     setup_vehicle_and_routes::<SP, SL>(
         config,
         &dynamic_router,
-        &webserver_config,
         health_state.as_ref(),
         clonable_shutdown_signal.clone(),
     )
     .await?;
 
-    tracing::info!("CDA fully initialized and ready to serve requests");
+    tracing::info!(
+        "CDA fully initialized and ready to serve requests.\nYou can access the REST API \
+         documentation at: {swagger_ui_url}"
+    );
     if let Some(provider) = main_health_provider {
         provider.update_status(cda_health::Status::Up).await;
     }
@@ -523,7 +537,6 @@ pub async fn run_with_config(config: Configuration) -> Result<(), AppError> {
 pub async fn setup_vehicle_and_routes<SP: SecurityPlugin, SL: SecurityPluginLoader>(
     config: Configuration,
     dynamic_router: &cda_sovd::dynamic_router::DynamicRouter,
-    webserver_config: &cda_sovd::WebServerConfig,
     health_state: Option<&cda_health::HealthState>,
     clonable_shutdown_signal: futures::future::Shared<
         impl std::future::Future<Output = ()> + Send + 'static,
@@ -609,8 +622,7 @@ pub async fn setup_vehicle_and_routes<SP: SecurityPlugin, SL: SecurityPluginLoad
     )
     .await;
 
-    cda_sovd::add_openapi_routes(dynamic_router, &vehicle_data.update_guard, webserver_config)
-        .await;
+    cda_sovd::add_openapi_routes(dynamic_router, &vehicle_data.update_guard).await;
 
     // SAFETY: Must be applied AFTER all routes are registered (layer only covers existing routes).
     cda_sovd::install_update_guard(dynamic_router, vehicle_data.update_guard.clone()).await;

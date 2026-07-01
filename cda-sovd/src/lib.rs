@@ -21,6 +21,7 @@ use axum::{
     Json,
     http::{self, Request},
 };
+use opensovd_axum_extra::ExtractHost;
 use cda_interfaces::{
     DoipGatewaySetupError, FunctionalDescriptionConfig, HashMap, SchemaProvider, UdsEcu,
     datatypes::ComponentsConfig, dlt_ctx, file_manager::FileManager,
@@ -211,29 +212,35 @@ where
 }
 
 /// `OpenAPI` spec regenerates on every recomposition, reflecting current routes.
+///
+/// The server URL embedded in `openapi.json` is derived dynamically from each
+/// request's `Host` header (with `X-Forwarded-Host` / `Forwarded` taking
+/// precedence for reverse-proxy deployments), so the Swagger-UI always reflects
+/// the address the client actually used to reach CDA.
 pub async fn add_openapi_routes(
     dynamic_router: &DynamicRouter,
     _update_guard: &UpdateGuardState,
-    web_server_config: &WebServerConfig,
 ) {
-    let server_url = format!(
-        "http://{}:{}",
-        web_server_config.host, web_server_config.port
-    );
     let dr = dynamic_router.clone();
     dynamic_router
         .add_finalizer(Arc::new(move |router: axum::Router| -> axum::Router {
-            let server_url = server_url.clone();
             let dr = dr.clone();
             let swagger_route: axum::routing::MethodRouter =
                 Swagger::new(OPENAPI_JSON_ROUTE).axum_route().into();
-            let openapi_route: axum::routing::MethodRouter = routing::get(move || async move {
-                let mut api = (*dr.get_openapi().await).clone();
-                let _ =
-                    openapi::api_docs(aide::transform::TransformOpenApi::new(&mut api), server_url);
-                Json(api)
-            })
-            .into();
+            let openapi_route: axum::routing::MethodRouter =
+                routing::get(move |ExtractHost(host): ExtractHost| {
+                    let dr = dr.clone();
+                    async move {
+                        let mut api = (*dr.get_openapi().await).clone();
+                        let server_url = format!("http://{host}");
+                        let _ = openapi::api_docs(
+                            aide::transform::TransformOpenApi::new(&mut api),
+                            server_url,
+                        );
+                        Json(api)
+                    }
+                })
+                .into();
             router
                 .route(SWAGGER_UI_ROUTE, swagger_route)
                 .route(OPENAPI_JSON_ROUTE, openapi_route)
