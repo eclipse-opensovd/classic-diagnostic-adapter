@@ -890,6 +890,13 @@ pub async fn create_diagnostic_gateway<S: SecurityPlugin>(
         }
     } else {
         tracing::info!("DoIP transport disabled by config (doip.enabled = false)");
+        // Mark the DoIP health provider ready so readiness (/health/ready) does
+        // not wait forever on a transport that is intentionally disabled (e.g.
+        // CAN-only operation); otherwise it stays `Starting` and readiness never
+        // reports `Up`.
+        if let Some(provider) = doip_health_provider {
+            provider.update_status(cda_health::Status::Up).await;
+        }
     }
 
     // --- CAN ---

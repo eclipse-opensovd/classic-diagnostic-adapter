@@ -398,7 +398,7 @@ dependencies = [
  "serde",
  "thiserror 2.0.17",
  "tokio",
- "tokio-socketcan-isotp 0.4.0",
+ "tokio-socketcan-isotp 0.5.0",
  "tracing",
 ]
 
@@ -1191,7 +1191,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "39cab71617ae0d63f51a36d69f866391735b51691dbda63cf6f96d042b63efeb"
 dependencies = [
  "libc",
- "windows-sys 0.61.2",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
@@ -3233,7 +3233,7 @@ dependencies = [
  "errno",
  "libc",
  "linux-raw-sys",
- "windows-sys 0.61.2",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
@@ -3757,7 +3757,7 @@ dependencies = [
  "getrandom 0.3.4",
  "once_cell",
  "rustix",
- "windows-sys 0.61.2",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
@@ -3945,8 +3945,8 @@ dependencies = [
 
 [[package]]
 name = "tokio-socketcan-isotp"
-version = "0.4.0"
-source = "git+https://github.com/MarkSchmitt/tokio-socketcan-isotp.git?tag=v0.4.0#7b083c63661543ec1124325bfed190ea940b8fbf"
+version = "0.5.0"
+source = "git+https://github.com/MarkSchmitt/tokio-socketcan-isotp.git?tag=v0.5.0#13fda92e1e483cb422ba0e4fcdad718a41a8c3c8"
 dependencies = [
  "bitflags 2.10.0",
  "embedded-can",
