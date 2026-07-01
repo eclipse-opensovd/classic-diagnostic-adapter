@@ -80,8 +80,19 @@ pub(crate) struct DoipGatewayState<T: EcuAddresses + DoipComParams> {
     pub(crate) socket: Arc<Mutex<DoIPUdpSocket>>,
 }
 
+impl<T: EcuAddresses + DoipComParams> Clone for DoipGatewayState<T> {
+    fn clone(&self) -> Self {
+        Self {
+            doip_connections: Arc::clone(&self.doip_connections),
+            logical_address_to_connection: Arc::clone(&self.logical_address_to_connection),
+            ecus: Arc::clone(&self.ecus),
+            socket: Arc::clone(&self.socket),
+        }
+    }
+}
+
 pub struct DoipDiagGateway<T: EcuAddresses + DoipComParams> {
-    state: Arc<DoipGatewayState<T>>,
+    state: DoipGatewayState<T>,
     cancel_token: CancellationToken,
     vam_listener_handle: Arc<tokio::task::JoinHandle<()>>,
 }
@@ -292,12 +303,12 @@ impl<T: EcuAddresses + DoipComParams> DoipDiagGateway<T> {
         let cancel_token = CancellationToken::new();
 
         let state = if gateways.is_empty() {
-            Arc::new(DoipGatewayState {
+            DoipGatewayState {
                 doip_connections: Arc::new(RwLock::new(Vec::new())),
                 logical_address_to_connection: Arc::new(RwLock::new(HashMap::new())),
                 ecus,
                 socket: Arc::clone(&doip_socket),
-            })
+            }
         } else {
             tracing::info!(gateway_count = gateways.len(), "Gateways found");
 
@@ -344,18 +355,18 @@ impl<T: EcuAddresses + DoipComParams> DoipDiagGateway<T> {
                 }
             }
 
-            Arc::new(DoipGatewayState {
+            DoipGatewayState {
                 doip_connections,
                 logical_address_to_connection: Arc::new(RwLock::new(logical_address_to_connection)),
                 ecus,
                 socket: Arc::clone(&doip_socket),
-            })
+            }
         };
 
         let vam_listener_handle = vir_vam::listen_for_vams(
             transport_config,
             mask,
-            Arc::clone(&state),
+            state.clone(),
             variant_detection,
             shared_shutdown_signal,
             cancel_token.child_token(),
@@ -1016,7 +1027,7 @@ fn create_socket_with_protocol(
 impl<T: EcuAddresses + DoipComParams> Clone for DoipDiagGateway<T> {
     fn clone(&self) -> Self {
         Self {
-            state: Arc::clone(&self.state),
+            state: self.state.clone(),
             cancel_token: self.cancel_token.clone(),
             vam_listener_handle: Arc::clone(&self.vam_listener_handle),
         }

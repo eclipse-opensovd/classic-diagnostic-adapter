@@ -104,7 +104,7 @@ where
 pub(crate) async fn listen_for_vams<T, F>(
     transport_config: DoipTransportConfig,
     netmask: u32,
-    state: Arc<DoipGatewayState<T>>,
+    state: DoipGatewayState<T>,
     variant_detection: mpsc::Sender<Vec<String>>,
     mut shutdown_signal: futures::future::Shared<F>,
     cancel_token: CancellationToken,
