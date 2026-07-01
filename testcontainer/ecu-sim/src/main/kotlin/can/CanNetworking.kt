@@ -17,8 +17,9 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
-import kotlinx.coroutines.runBlocking
 import library.UdsMessage
 import library.can.CanTransport
 import library.can.CanUdsMessage
@@ -100,8 +101,32 @@ class CanNetworking(
             )
         }
 
-        runBlocking { transport.start(scope) }
-        log.info("CAN network connected via {}", transport.name)
+        // Connect the transport in the background rather than blocking the
+        // caller: the simulator's HTTP control server must come up regardless of
+        // whether socketcand is reachable yet (in docker the daemon may still be
+        // starting). `SocketcandTransport.start` only auto-reconnects *after* a
+        // successful initial connect, so retry that initial connect here until
+        // the daemon is up; the endpoints are already subscribed to the frame
+        // flow, so nothing is lost.
+        scope.launch {
+            var attempt = 0
+            while (isActive) {
+                try {
+                    transport.start(scope)
+                    log.info("CAN network connected via {}", transport.name)
+                    break
+                } catch (e: Exception) {
+                    attempt++
+                    log.warn(
+                        "CAN transport '{}' initial connect failed (attempt {}), retrying: {}",
+                        transport.name,
+                        attempt,
+                        e.message,
+                    )
+                    delay(minOf(5000L, 500L * attempt))
+                }
+            }
+        }
     }
 
     /**
