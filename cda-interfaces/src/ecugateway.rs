@@ -126,4 +126,9 @@ pub trait EcuGateway: Clone + Send + Sync + 'static {
     ) -> impl Future<
         Output = Result<HashMap<String, Result<UdsResponse, DiagServiceError>>, DiagServiceError>,
     > + Send;
+
+    /// Stops the gateway, aborting its background tasks and releasing its
+    /// transport resources. Used when the gateway is replaced (e.g. on a
+    /// runtime database reload).
+    fn shutdown(&self);
 }

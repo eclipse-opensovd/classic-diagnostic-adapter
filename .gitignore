@@ -27,6 +27,9 @@ docs/images/*.svg
 
 **/*.html
 
+# MDD database files (proprietary, not for version control)
+mdds/*.mdd
+
 # Docker environment settings
 .env
 
@@ -42,3 +45,12 @@ mbedtls-4*
 
 # Python virtual environments
 .venv
+
+# CDA runtime artifacts (start_with_can.sh writes these at the repo root)
+cda.log
+cda.pid
+
+# BMS453 simulator runtime artifacts (start_bms453_simulator.sh writes these)
+simulator.log
+simulator.pid
+.playwright-mcp/

@@ -159,6 +159,22 @@ impl<S: SecurityPlugin> cda_interfaces::EcuAddresses for EcuManager<S> {
     }
 }
 
+impl<S: SecurityPlugin> cda_interfaces::CanComParamProvider for EcuManager<S> {
+    fn can_request_id(&self) -> Option<u32> {
+        // CAN IDs are not yet extracted into the EcuManager; CAN config relies
+        // on the explicit [[can.ecu_mappings]] block in opensovd-cda-can.toml.
+        None
+    }
+
+    fn can_response_id(&self) -> Option<u32> {
+        None
+    }
+
+    fn can_functional_id(&self) -> Option<u32> {
+        None
+    }
+}
+
 impl<S: SecurityPlugin> cda_interfaces::EcuManager for EcuManager<S> {
     type Response = <Self as PayloadDecoder>::Response;
     fn is_physical_ecu(&self) -> bool {

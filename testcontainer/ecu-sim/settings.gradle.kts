@@ -13,6 +13,10 @@
 
 rootProject.name = "ecu-sim"
 
+plugins {
+    id("org.gradle.toolchains.foojay-resolver-convention") version "0.8.0"
+}
+
 dependencyResolutionManagement {
     versionCatalogs {
         create("libs") {
@@ -35,7 +39,13 @@ dependencyResolutionManagement {
                 "ktor-server-content-negotiation",
             ).versionRef("ktorVersion")
 
-            library("doip-sim-dsl", "io.github.doip-sim-ecu:doip-sim-ecu-dsl:0.22.0")
+            // PR#164 (feat/can: CAN bus + ISO-TP + socketcand transport), pinned
+            // to its head commit via JitPack until the change is released to Maven
+            // Central. https://github.com/doip-sim-ecu/doip-sim-ecu-dsl/pull/164
+            library(
+                "doip-sim-dsl",
+                "com.github.doip-sim-ecu:doip-sim-ecu-dsl:0622d63d23579c07f18e440e0f8a5006dc089cdf",
+            )
             library("logback-classic", "ch.qos.logback:logback-classic:1.5.18")
             library("auth0-jwt", "com.auth0:java-jwt:4.5.0")
             library("google-guava", "com.google.guava:guava:33.4.8-jre")

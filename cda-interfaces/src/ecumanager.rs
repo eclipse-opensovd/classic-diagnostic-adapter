@@ -302,6 +302,19 @@ pub trait EcuAddresses: Send + Sync + 'static {
     fn ecu_name(&self) -> String;
     #[must_use]
     fn logical_address_eq<T: EcuAddresses>(&self, other: &T) -> bool;
+
+    /// Stable key used to serialize requests that must not overlap on the same
+    /// transport target. Derived from the gateway/logical address pair; for CAN
+    /// this still uniquely identifies an ECU because each is configured with a
+    /// distinct logical address.
+    #[must_use]
+    fn request_lock_key(&self) -> String {
+        format!(
+            "logical:0x{:04X}@0x{:04X}",
+            self.logical_gateway_address(),
+            self.logical_address()
+        )
+    }
 }
 
 /// Encodes UDS request payloads from structured data.

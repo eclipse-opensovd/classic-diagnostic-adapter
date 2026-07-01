@@ -902,28 +902,28 @@ pub mod mock {
     // core::future::ready what clippy suggest as alternative if not available on 1.88
     #[cfg_attr(nightly, allow(unknown_lints, clippy::unused_async_trait_impl))]
     impl SchemaProvider for MockUdsEcu {
-        async fn schema_for_request(
+        fn schema_for_request(
             &self,
             _ecu: &str,
             _service: &crate::DiagComm,
-        ) -> Result<SchemaDescription, DiagServiceError> {
-            Err(DiagServiceError::NotFound(String::new()))
+        ) -> impl Future<Output = Result<SchemaDescription, DiagServiceError>> {
+            std::future::ready(Err(DiagServiceError::NotFound(String::new())))
         }
 
-        async fn schema_for_responses(
+        fn schema_for_responses(
             &self,
             _ecu: &str,
             _service: &crate::DiagComm,
-        ) -> Result<SchemaDescription, DiagServiceError> {
-            Err(DiagServiceError::NotFound(String::new()))
+        ) -> impl Future<Output = Result<SchemaDescription, DiagServiceError>> {
+            std::future::ready(Err(DiagServiceError::NotFound(String::new())))
         }
 
-        async fn schema_for_fg_request(
+        fn schema_for_fg_request(
             &self,
             _service: &crate::DiagComm,
             _functional_group_name: &str,
-        ) -> Result<SchemaDescription, DiagServiceError> {
-            Err(DiagServiceError::NotFound(String::new()))
+        ) -> impl Future<Output = Result<SchemaDescription, DiagServiceError>> {
+            std::future::ready(Err(DiagServiceError::NotFound(String::new())))
         }
     }
 }

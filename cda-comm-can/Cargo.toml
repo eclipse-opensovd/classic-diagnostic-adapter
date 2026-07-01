@@ -1,0 +1,60 @@
+# SPDX-FileCopyrightText: 2026 Copyright (c) Contributors to the Eclipse Foundation
+#
+# See the NOTICE file(s) distributed with this work for additional
+# information regarding copyright ownership.
+#
+# This program and the accompanying materials are made available under the
+# terms of the Apache License Version 2.0 which is available at
+# https://www.apache.org/licenses/LICENSE-2.0
+#
+# SPDX-License-Identifier: Apache-2.0
+
+[package]
+name = "cda-comm-can"
+version = "0.1.0"
+edition.workspace = true
+publish = false
+description = "CAN bus communication layer used in CDA"
+homepage.workspace = true
+license.workspace = true
+
+[lints]
+workspace = true
+
+[lib]
+path = "src/lib.rs"
+
+[dependencies]
+# internal dependencies
+cda-interfaces = { workspace = true }
+# external
+thiserror = { workspace = true }
+serde = { workspace = true, features = ["derive"] }
+# tokio
+tokio = { workspace = true, features = ["rt", "time", "sync", "io-util"] }
+# logging & tracing
+tracing = { workspace = true }
+# utilities
+hex = { workspace = true }
+schemars = { workspace = true }
+
+# CAN / ISO-TP, enabled by the `can` feature. The crate gates its
+# SocketCAN/kernel code to Linux internally; with its `tcp` feature it also
+# builds on other platforms. A `compile_error!` in `src/lib.rs` enforces that
+# off-Linux builds with `can` also enable `can-tcp`.
+tokio-socketcan-isotp = { git = "https://github.com/MarkSchmitt/tokio-socketcan-isotp.git", tag = "v0.5.0", optional = true }
+
+[features]
+default = []
+can = ["dep:tokio-socketcan-isotp"]
+# Userspace ISO-TP over raw CAN: enables the `rawcan:<ifname>` interface
+# scheme (vcan without the can_isotp kernel module).
+can-isotp-userspace = ["can", "tokio-socketcan-isotp/isotp-userspace"]
+# CAN frames over TCP: enables the `tcp:<host>:<port>` interface scheme
+# (no CAN support needed at all; also works on non-Linux platforms).
+can-tcp = ["can-isotp-userspace", "tokio-socketcan-isotp/tcp"]
+# CAN frames over a socketcand daemon: enables the
+# `socketcand:<host>:<port>:<bus>` interface scheme (no kernel CAN needed on
+# the client; also works on non-Linux platforms).
+can-socketcand = ["can-isotp-userspace", "tokio-socketcan-isotp/socketcand"]
+dlt-tracing = ["cda-interfaces/dlt-tracing"]

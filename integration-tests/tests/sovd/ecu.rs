@@ -31,7 +31,10 @@ use crate::{
             QueryParams, auth_header, extract_field_from_json, response_to_json, response_to_t,
             send_cda_request,
         },
-        runtime::{TestRuntime, restart_cda, setup_integration_test, start_ecu_sim, stop_ecu_sim},
+        runtime::{
+            TestRuntime, restart_cda, setup_integration_test, skip_for_can, start_ecu_sim,
+            stop_ecu_sim,
+        },
     },
 };
 
@@ -119,6 +122,15 @@ async fn test_jgwt5000_ignore_protocol_with_db_protocol() {
 #[allow(clippy::too_many_lines)] // makes sense to keep test together
 #[tokio::test]
 async fn test_ecu_session_switching() {
+    // TODO(can): SecurityAccess seed/key/lock sequencing is not yet reliable
+    // over the CAN transport (see follow-up tracking issue). Re-enable once the
+    // CAN session/security path is hardened.
+    if skip_for_can(
+        "test_ecu_session_switching",
+        "SecurityAccess sequencing not yet supported over CAN",
+    ) {
+        return;
+    }
     let (runtime, _lock) = setup_integration_test(true).await.unwrap();
     let auth = auth_header(&runtime.config, None).await.unwrap();
     let ecu_endpoint = sovd::ECU_FLXC1000_ENDPOINT;
@@ -348,6 +360,15 @@ async fn test_ecu_session_switching() {
 
 #[tokio::test]
 async fn test_variant_detection_duplicates() {
+    // DoIP-only: relies on spontaneous VAM announcements and restarts the sim's
+    // DoIP entities (which has no CAN-hub equivalent), so it cannot run over the
+    // CAN transport.
+    if skip_for_can(
+        "test_variant_detection_duplicates",
+        "depends on DoIP VAM announcements and sim restart",
+    ) {
+        return;
+    }
     let (runtime, _lock) = setup_integration_test(true).await.unwrap();
     let auth = auth_header(&runtime.config, None).await.unwrap();
 
@@ -786,6 +807,15 @@ async fn test_boot_variant_service_inheritance() {
 
 #[tokio::test]
 async fn test_ecu_session_reset_on_lock_reacquire() {
+    // TODO(can): session expiry depends on TesterPresent keepalive cadence,
+    // which is not yet reliable over the CAN transport (per-transaction sockets
+    // + busy-poll dispatcher are too slow; see follow-up tracking issue).
+    if skip_for_can(
+        "test_ecu_session_reset_on_lock_reacquire",
+        "session-expiry keepalive timing not yet reliable over CAN",
+    ) {
+        return;
+    }
     let (runtime, _lock) = setup_integration_test(true).await.unwrap();
     let auth = auth_header(&runtime.config, None).await.unwrap();
     let ecu_endpoint = sovd::ECU_FLXC1000_ENDPOINT;

@@ -348,6 +348,10 @@ impl<T: EcuAddresses + DoipComParams> DoipDiagGateway<T> {
 }
 
 impl<T: EcuAddresses + DoipComParams> EcuGateway for DoipDiagGateway<T> {
+    fn shutdown(&self) {
+        self.cancel_token.cancel();
+    }
+
     async fn get_gateway_network_address(&self, logical_address: u16) -> Option<String> {
         self.doip_connections
             .read()
