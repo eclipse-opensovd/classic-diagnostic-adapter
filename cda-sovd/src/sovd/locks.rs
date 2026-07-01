@@ -1,6 +1,5 @@
 /*
- * SPDX-License-Identifier: Apache-2.0
- * SPDX-FileCopyrightText: 2025 The Contributors to Eclipse OpenSOVD (see CONTRIBUTORS)
+ * SPDX-FileCopyrightText: 2025 Copyright (c) Contributors to the Eclipse Foundation
  *
  * See the NOTICE file(s) distributed with this work for additional
  * information regarding copyright ownership.
@@ -8,6 +7,8 @@
  * This program and the accompanying materials are made available under the
  * terms of the Apache License Version 2.0 which is available at
  * https://www.apache.org/licenses/LICENSE-2.0
+ *
+ * SPDX-License-Identifier: Apache-2.0
  */
 
 use std::{fmt, option::Option, pin::Pin, sync::Arc, time::Duration};
@@ -20,8 +21,7 @@ use axum::{
 };
 use axum_extra::extract::WithRejection;
 use cda_interfaces::{
-    DynamicPlugin, HashMap, HashMapExtensions, TesterPresentType, UdsEcu,
-    diagservices::DiagServiceResponse, file_manager::FileManager,
+    DynamicPlugin, HashMap, HashMapExtensions, TesterPresentType, UdsEcu, file_manager::FileManager,
 };
 use cda_plugin_security::{Claims, SecurityPlugin};
 use chrono::{DateTime, SecondsFormat, Utc};
@@ -43,6 +43,14 @@ use crate::{
 // later this likely will be a Vector of locks to support non exclusive locks
 pub type LockHashMap = HashMap<String, Option<Lock>>;
 pub type LockOption = Option<Lock>;
+
+#[derive(Debug, thiserror::Error)]
+pub enum LockUpdateError {
+    #[error("Cannot update while ECU locks are held")]
+    EcuLocksHeld,
+    #[error("Cannot update while functional-group locks are held")]
+    FunctionalGroupLocksHeld,
+}
 
 pub struct Lock {
     sovd: sovd_interfaces::locking::Lock,
@@ -71,6 +79,9 @@ impl Lock {
 
     pub(crate) fn is_owned_by(&self, claim_sub: &str) -> bool {
         self.owner == claim_sub
+    }
+    pub(crate) fn owner(&self) -> &str {
+        &self.owner
     }
     pub(crate) fn id(&self) -> &str {
         &self.sovd.id
@@ -122,6 +133,40 @@ impl Locks {
             functional_group: LockType::FunctionalGroup(Arc::new(RwLock::new(HashMap::new()))),
         }
     }
+
+    /// Rebuilds the ECU lock entries for a new configuration.
+    /// Only the vehicle lock is preserved. Functional-group lock entries are
+    /// dynamic and not modified, but no FG locks may be held.
+    ///
+    /// # Errors
+    /// Returns an error if any ECU or functional-group lock is currently held.
+    pub async fn update_entries(&self, new_ecu_names: Vec<String>) -> Result<(), LockUpdateError> {
+        let LockType::FunctionalGroup(fg_rwlock) = &self.functional_group else {
+            return Ok(());
+        };
+        let fg_map = fg_rwlock.read().await;
+        if fg_map.values().any(Option::is_some) {
+            return Err(LockUpdateError::FunctionalGroupLocksHeld);
+        }
+        drop(fg_map);
+
+        let LockType::Ecu(ecu_rwlock) = &self.ecu else {
+            return Ok(());
+        };
+        let mut ecu_map = ecu_rwlock.write().await;
+        if ecu_map.values().any(Option::is_some) {
+            return Err(LockUpdateError::EcuLocksHeld);
+        }
+
+        let new_ecu_set: std::collections::HashSet<&str> =
+            new_ecu_names.iter().map(String::as_str).collect();
+        ecu_map.retain(|name, _| new_ecu_set.contains(name.as_str()));
+        for name in new_ecu_names {
+            ecu_map.entry(name).or_insert(None);
+        }
+
+        Ok(())
+    }
 }
 
 #[derive(Clone)]
@@ -167,9 +212,9 @@ impl ReadLock<'_> {
         }
     }
 
-    fn is_any_locked(&self) -> bool {
+    pub(crate) fn is_any_locked(&self) -> bool {
         match self {
-            ReadLock::HashMapLock(l) => !l.is_empty(),
+            ReadLock::HashMapLock(l) => l.values().any(Option::is_some),
             ReadLock::OptionLock(l) => !l.is_none(),
         }
     }
@@ -259,25 +304,25 @@ pub(crate) mod ecu {
     use cda_plugin_security::Secured;
 
     use super::{
-        ApiError, DiagServiceResponse, ErrorWrapper, FileManager, IntoResponse, Json, LockContext,
-        LockPathParam, Path, Response, State, UdsEcu, WebserverEcuState, WithRejection,
-        delete_handler, get_handler, get_id_handler, post_handler, put_handler, vehicle_read_lock,
+        ApiError, ErrorWrapper, FileManager, IntoResponse, Json, LockContext, LockPathParam, Path,
+        Response, State, UdsEcu, WebserverEcuState, WithRejection, delete_handler, get_handler,
+        get_id_handler, post_handler, put_handler, vehicle_read_lock,
     };
     use crate::sovd;
 
     pub(crate) mod lock {
         use super::{
-            ApiError, DiagServiceResponse, FileManager, Json, LockPathParam, Path, Response,
-            Secured, State, TransformOperation, UdsEcu, UseApi, WebserverEcuState, WithRejection,
-            delete_handler, get_id_handler, put_handler,
+            ApiError, FileManager, Json, LockPathParam, Path, Response, Secured, State,
+            TransformOperation, UdsEcu, UseApi, WebserverEcuState, WithRejection, delete_handler,
+            get_id_handler, put_handler,
         };
         use crate::openapi;
-        pub(crate) async fn delete<R: DiagServiceResponse, T: UdsEcu + Clone, U: FileManager>(
+        pub(crate) async fn delete<T: UdsEcu + Clone, U: FileManager>(
             Path(lock): Path<LockPathParam>,
             UseApi(sec_plugin, _): UseApi<Secured, ()>,
             State(WebserverEcuState {
                 ecu_name, locks, ..
-            }): State<WebserverEcuState<R, T, U>>,
+            }): State<WebserverEcuState<T, U>>,
         ) -> Response {
             let claims = sec_plugin.as_auth_plugin().claims();
 
@@ -291,12 +336,12 @@ pub(crate) mod ecu {
                 .with(openapi::lock_not_owned)
         }
 
-        pub(crate) async fn put<R: DiagServiceResponse, T: UdsEcu + Clone, U: FileManager>(
+        pub(crate) async fn put<T: UdsEcu + Clone, U: FileManager>(
             Path(lock): Path<LockPathParam>,
             UseApi(sec_plugin, _): UseApi<Secured, ()>,
             State(WebserverEcuState {
                 ecu_name, locks, ..
-            }): State<WebserverEcuState<R, T, U>>,
+            }): State<WebserverEcuState<T, U>>,
             WithRejection(Json(body), _): WithRejection<
                 Json<sovd_interfaces::locking::Request>,
                 ApiError,
@@ -313,12 +358,12 @@ pub(crate) mod ecu {
                 .with(openapi::lock_not_owned)
         }
 
-        pub(crate) async fn get<R: DiagServiceResponse, T: UdsEcu + Clone, U: FileManager>(
+        pub(crate) async fn get<T: UdsEcu + Clone, U: FileManager>(
             Path(lock): Path<LockPathParam>,
             UseApi(_sec_plugin, _): UseApi<Secured, ()>,
             State(WebserverEcuState {
                 ecu_name, locks, ..
-            }): State<WebserverEcuState<R, T, U>>,
+            }): State<WebserverEcuState<T, U>>,
         ) -> Response {
             get_id_handler(&locks.ecu, &lock, Some(&ecu_name), false).await
         }
@@ -336,14 +381,14 @@ pub(crate) mod ecu {
         }
     }
 
-    pub(crate) async fn post<R: DiagServiceResponse, T: UdsEcu + Clone, U: FileManager>(
+    pub(crate) async fn post<T: UdsEcu + Clone, U: FileManager>(
         UseApi(Secured(sec_plugin), _): UseApi<Secured, ()>,
         State(WebserverEcuState {
             ecu_name,
             locks,
             uds,
             ..
-        }): State<WebserverEcuState<R, T, U>>,
+        }): State<WebserverEcuState<T, U>>,
         WithRejection(Json(body), _): WithRejection<
             Json<sovd_interfaces::locking::Request>,
             ApiError,
@@ -407,11 +452,11 @@ pub(crate) mod ecu {
             })
     }
 
-    pub(crate) async fn get<R: DiagServiceResponse, T: UdsEcu + Clone, U: FileManager>(
+    pub(crate) async fn get<T: UdsEcu + Clone, U: FileManager>(
         UseApi(sec_plugin, _): UseApi<Secured, ()>,
         State(WebserverEcuState {
             ecu_name, locks, ..
-        }): State<WebserverEcuState<R, T, U>>,
+        }): State<WebserverEcuState<T, U>>,
     ) -> Response {
         let claims = sec_plugin.as_auth_plugin().claims();
         get_handler(&locks.ecu, &claims, Some(&ecu_name)).await
@@ -1441,11 +1486,21 @@ mod tests {
         assert!(!locks.vehicle.lock_ro().await.is_any_locked());
     }
 
-    fn init_locks() -> Arc<Locks> {
+    pub fn init_locks() -> Arc<Locks> {
+        // Initialize ecu_map with dummy data
+        let mut ecu_map = LockHashMap::new();
+        ecu_map.insert("flxc1000".to_string(), None);
+
+        // Initialize functional_group_map with dummy data
+        let mut functional_group_map = LockHashMap::new();
+        functional_group_map.insert("func_group".to_string(), None);
+
         Arc::new(Locks {
             vehicle: LockType::Vehicle(Arc::new(RwLock::new(None))),
-            ecu: LockType::Ecu(Arc::new(RwLock::new(LockHashMap::new()))),
-            functional_group: LockType::FunctionalGroup(Arc::new(RwLock::new(LockHashMap::new()))),
+            ecu: LockType::Ecu(Arc::new(RwLock::new(ecu_map))),
+            functional_group: LockType::FunctionalGroup(Arc::new(RwLock::new(
+                functional_group_map,
+            ))),
         })
     }
 

@@ -1,6 +1,5 @@
 /*
- * SPDX-License-Identifier: Apache-2.0
- * SPDX-FileCopyrightText: 2025 The Contributors to Eclipse OpenSOVD (see CONTRIBUTORS)
+ * SPDX-FileCopyrightText: 2025 Copyright (c) Contributors to the Eclipse Foundation
  *
  * See the NOTICE file(s) distributed with this work for additional
  * information regarding copyright ownership.
@@ -8,6 +7,8 @@
  * This program and the accompanying materials are made available under the
  * terms of the Apache License Version 2.0 which is available at
  * https://www.apache.org/licenses/LICENSE-2.0
+ *
+ * SPDX-License-Identifier: Apache-2.0
  */
 
 use std::time::Duration;
@@ -15,8 +16,8 @@ use std::time::Duration;
 use async_trait::async_trait;
 
 use crate::{
-    DiagComm, DiagServiceError, DynamicPlugin, EcuVariant, HashMap, SecurityAccess,
-    TesterPresentType,
+    DiagComm, DiagServiceError, DoipComParams, DynamicPlugin, EcuAddresses, EcuStateManager,
+    EcuVariant, HashMap, SecurityAccess, TesterPresentType, UdsComParams,
     datatypes::{
         ComplexComParamValue, ComponentConfigurationsInfo, ComponentDataInfo,
         ComponentOperationsInfo, DataTransferMetaData, DtcCode, DtcExtendedInfo,
@@ -33,10 +34,156 @@ pub struct FlashTransferStartParams<'a> {
     pub transfer_meta_data: DataTransferMetaData,
 }
 
+/// UDS transport interface for sending diagnostic messages to ECUs.
+#[async_trait]
+pub trait UdsTransport: Send + Sync + 'static {
+    /// The response type returned by diagnostic service operations.
+    type Response: DiagServiceResponse;
+
+    /// Send a message via the given `DiagComm` and Payload to the ECU.
+    /// The timeout is set to the given duration, instead of the default timeout.
+    /// Can be used to override the default timeout for a specific request, especially
+    /// for requests which expect to take longer.
+    async fn send_with_timeout(
+        &self,
+        ecu_name: &str,
+        service: DiagComm,
+        security_plugin: &DynamicPlugin,
+        payload: Option<UdsPayloadData>,
+        map_to_json: bool,
+        timeout: Duration,
+    ) -> Result<Self::Response, DiagServiceError>;
+
+    /// Send a message via the given `DiagComm` and Payload to the ECU.
+    /// The default timeouts of the ECU, read from the communication parameters, will be used.
+    /// # Error
+    /// Will return `Err` if the ECU does not exist or if the request fails.
+    async fn send(
+        &self,
+        ecu_name: &str,
+        service: DiagComm,
+        security_plugin: &DynamicPlugin,
+        payload: Option<UdsPayloadData>,
+        map_to_json: bool,
+    ) -> Result<Self::Response, DiagServiceError>;
+
+    /// Send a raw uds packet to the ECU
+    /// The initial bytes of the packet are analyzed to resolve the diag-service,
+    /// but the rest of the data is not validated / checked for consistency
+    /// # Error
+    /// Will return `Err` if the ECU does not exist, the diag-service cannot be
+    /// resolved or if the request fails.
+    async fn send_genericservice(
+        &self,
+        ecu_name: &str,
+        security_plugin: &DynamicPlugin,
+        payload: Vec<u8>,
+        timeout: Option<Duration>,
+    ) -> Result<Vec<u8>, DiagServiceError>;
+}
+
+/// UDS session management interface.
+#[async_trait]
+pub trait UdsSession: UdsTransport {
+    /// Set the session for the given ECU.
+    /// No authentication is done by the implementation itself, it is assumed that the
+    /// caller has already set the appropriate security access if required.
+    /// If not the ECU will return a negative response
+    /// Expiration is used to reset the ECU to the default session after the given duration.
+    /// Upon positive response, the internally tracked session is updated.
+    /// # Errors
+    /// * `DiagServiceError::NotFound` if the ECU or service lookup failed.
+    ///
+    /// Forwards errors from the `send` function.
+    async fn set_ecu_session(
+        &self,
+        ecu_name: &str,
+        session: &str,
+        security_plugin: &DynamicPlugin,
+        expiration: Option<Duration>,
+    ) -> Result<Self::Response, DiagServiceError>;
+
+    /// Reset the session of the given ECU to default.
+    /// # Errors
+    /// * `DiagServiceError::NotFound` if the ECU does not
+    ///     exist or the state chart/default session cannot be found.
+    /// * `DiagServiceError::InvalidDatabase` if no start state is defined in the state chart.
+    /// * `DiagServiceError::UnexpectedResponse` if the ECU returns a negative
+    ///     response when resetting the session.
+    ///
+    /// Forwards errors from the `set_ecu_session` and `send` functions.
+    async fn reset_ecu_session(
+        &self,
+        ecu_name: &str,
+        security_plugin: &DynamicPlugin,
+    ) -> Result<(), DiagServiceError>;
+}
+
+/// UDS security access interface.
+#[async_trait]
+pub trait UdsSecurity: UdsTransport {
+    /// Set the security access for the given ECU.
+    /// The returned `SecurityAccess` defines whether further authentication is required
+    /// `SecurityAccess::RequestSeed` means that the reply contains a seed to calculate a key,
+    ///  `SecurityAccess::SendKey` sends the key calculated by the seed, to the ECU.
+    /// On a positive response after sending the key, the internally tracked session is updated.
+    ///
+    /// Expiration is used to reset the ECU to the default security access after the given duration
+    /// # Errors
+    /// * `DiagServiceError::NotFound` if the ECU or service lookup failed.
+    ///
+    /// Forwards errors from the `send` function.
+    async fn set_ecu_security_access(
+        &self,
+        ecu_name: &str,
+        level: &str,
+        authentication_data: Option<UdsPayloadData>,
+        security_plugin: &DynamicPlugin,
+        expiration: Option<Duration>,
+    ) -> Result<(SecurityAccess, Self::Response), DiagServiceError>;
+
+    /// Reset the security access of the given ECU to default.
+    /// # Errors
+    /// * `DiagServiceError::NotFound` if the ECU does not exist or
+    ///     the state chart/default session cannot be found.
+    /// * `DiagServiceError::InvalidDatabase` if no start state is defined in the state chart.
+    /// * `DiagServiceError::UnexpectedResponse` if the ECU returns a negative
+    ///     response when resetting the session.
+    ///
+    /// Forwards errors from the `set_ecu_security` and `send` functions.
+    async fn reset_ecu_security_access(
+        &self,
+        ecu_name: &str,
+        security_plugin: &DynamicPlugin,
+    ) -> Result<(), DiagServiceError>;
+
+    /// Get the name of the parameter used to send the key for the given ECU and security level.
+    /// # Errors
+    /// Returns an error if the ECU or security level is not found.
+    async fn get_send_key_param_name(
+        &self,
+        ecu_name: &str,
+        level: &str,
+    ) -> Result<String, DiagServiceError>;
+}
+
+/// UDS tester present interface for keeping ECU sessions alive.
+#[async_trait]
+pub trait UdsTesterPresent: UdsTransport {
+    /// Start sending periodic tester present messages to keep the session alive.
+    /// The interval is defined per ECU in the communication parameters.
+    async fn start_tester_present(&self, type_: TesterPresentType) -> Result<(), DiagServiceError>;
+
+    /// Stop sending periodic tester present messages.
+    async fn stop_tester_present(&self, type_: TesterPresentType) -> Result<(), DiagServiceError>;
+
+    /// Check if a tester present is active for the given type.
+    async fn check_tester_present_active(&self, type_: &TesterPresentType) -> bool;
+}
+
 /// UDS communication interface
 #[async_trait]
-pub trait UdsEcu: Send + Sync + 'static {
-    type Response: DiagServiceResponse;
+pub trait UdsEcu: UdsTransport + UdsSession + UdsSecurity + UdsTesterPresent {
     /// Returns a list of loaded ECUs.
     /// They are not necessarily online, but have been loaded from the database.
     async fn get_ecus(&self) -> Vec<String>;
@@ -122,118 +269,6 @@ pub trait UdsEcu: Send + Sync + 'static {
         ecu: &str,
         job_name: &str,
     ) -> Result<single_ecu::Job, DiagServiceError>;
-    /// Send a message via the given `DiagComm` and Payload to the ECU.
-    /// The timeout is set to the given duration, instead of the default timeout.
-    /// Can be used to override the default timeout for a specific request, especially
-    /// for requests which expect to take longer.
-    async fn send_with_timeout(
-        &self,
-        ecu_name: &str,
-        service: DiagComm,
-        security_plugin: &DynamicPlugin,
-        payload: Option<UdsPayloadData>,
-        map_to_json: bool,
-        timeout: Duration,
-    ) -> Result<Self::Response, DiagServiceError>;
-    /// Send a message via the given `DiagComm` and Payload to the ECU.
-    /// The default timeouts of the ECU, read from the communication parameters, will be used.
-    /// # Error
-    /// Will return `Err` if the ECU does not exist or if the request fails.
-    async fn send(
-        &self,
-        ecu_name: &str,
-        service: DiagComm,
-        security_plugin: &DynamicPlugin,
-        payload: Option<UdsPayloadData>,
-        map_to_json: bool,
-    ) -> Result<Self::Response, DiagServiceError>;
-    /// Send a raw uds packet to the ECU
-    /// The initial bytes of the packet are analyzed to resolve the diag-service,
-    /// but the rest of the data is not validated / checked for consistency
-    /// # Error
-    /// Will return `Err` if the ECU does not exist, the diag-service cannot be
-    /// resolved or if the request fails.
-    async fn send_genericservice(
-        &self,
-        ecu_name: &str,
-        security_plugin: &DynamicPlugin,
-        payload: Vec<u8>,
-        timeout: Option<Duration>,
-    ) -> Result<Vec<u8>, DiagServiceError>;
-    /// Set the session for the given ECU.
-    /// No authentication is done by the implementation itself, it is assumed that the
-    /// caller has already set the appropriate security access if required.
-    /// If not the ECU will return a negative response
-    /// Expiration is used to reset the ECU to the default session after the given duration.
-    /// Upon positive response, the internally tracked session is updated.
-    /// # Errors
-    /// * `DiagServiceError::NotFound` if the ECU or service lookup failed.
-    ///
-    /// Forwards errors from the `send` function.
-    async fn set_ecu_session(
-        &self,
-        ecu_name: &str,
-        session: &str,
-        security_plugin: &DynamicPlugin,
-        expiration: Option<Duration>,
-    ) -> Result<Self::Response, DiagServiceError>;
-    /// Reset the session of the given ECU to default.
-    /// # Errors
-    /// * `DiagServiceError::NotFound` if the ECU does not
-    ///     exist or the state chart/default session cannot be found.
-    /// * `DiagServiceError::InvalidDatabase` if no start state is defined in the state chart.
-    /// * `DiagServiceError::UnexpectedResponse` if the ECU returns a negative
-    ///     response when resetting the session.
-    ///
-    /// Forwards errors from the `set_ecu_session` and `send` functions.
-    async fn reset_ecu_session(
-        &self,
-        ecu_name: &str,
-        security_plugin: &DynamicPlugin,
-    ) -> Result<(), DiagServiceError>;
-
-    /// Set the security access for the given ECU.
-    /// The returned `SecurityAccess` defines whether further authentication is required
-    /// `SecurityAccess::RequestSeed` means that the reply contains a seed to calculate a key,
-    ///  `SecurityAccess::SendKey` sends the key calculated by the seed, to the ECU.
-    /// On a positive response after sending the key, the internally tracked session is updated.
-    ///
-    /// Expiration is used to reset the ECU to the default security access after the given duration
-    /// # Errors
-    /// * `DiagServiceError::NotFound` if the ECU or service lookup failed.
-    ///
-    /// Forwards errors from the `send` function.
-    async fn set_ecu_security_access(
-        &self,
-        ecu_name: &str,
-        level: &str,
-        seed_service: Option<&String>,
-        authentication_data: Option<UdsPayloadData>,
-        security_plugin: &DynamicPlugin,
-        expiration: Option<Duration>,
-    ) -> Result<(SecurityAccess, Self::Response), DiagServiceError>;
-    /// Reset the security access of the given ECU to default.
-    /// # Errors
-    /// * `DiagServiceError::NotFound` if the ECU does not exist or
-    ///     the state chart/default session cannot be found.
-    /// * `DiagServiceError::InvalidDatabase` if no start state is defined in the state chart.
-    /// * `DiagServiceError::UnexpectedResponse` if the ECU returns a negative
-    ///     response when resetting the session.
-    ///
-    /// Forwards errors from the `set_ecu_security` and `send` functions.
-    async fn reset_ecu_security_access(
-        &self,
-        ecu_name: &str,
-        security_plugin: &DynamicPlugin,
-    ) -> Result<(), DiagServiceError>;
-    /// Get the name of the parameter used to send the key for the given ECU and security level.
-    /// # Errors
-    /// Returns an error if the ECU or security level is not found.
-    async fn get_send_key_param_name(
-        &self,
-        ecu_name: &str,
-        level: &str,
-    ) -> Result<String, DiagServiceError>;
     /// Retrieve service to reset the ECU.
     async fn get_ecu_reset_services(&self, ecu_name: &str)
     -> Result<Vec<String>, DiagServiceError>;
@@ -343,16 +378,6 @@ pub trait UdsEcu: Send + Sync + 'static {
     /// Main work will be done in the background, there is no result returned,
     /// as the data is internally stored and used in `EcuUds`
     async fn start_variant_detection(&self);
-
-    /// Start sending periodic tester present messages to keep the session alive.
-    /// The interval is defined per ECU in the communication parameters.
-    async fn start_tester_present(&self, type_: TesterPresentType) -> Result<(), DiagServiceError>;
-
-    /// Stop sending periodic tester present messages.
-    async fn stop_tester_present(&self, type_: TesterPresentType) -> Result<(), DiagServiceError>;
-
-    /// Check if a tester present is active for the given type.
-    async fn check_tester_present_active(&self, type_: &TesterPresentType) -> bool;
 
     /// Retrieve all faults for the given ECU,
     /// with optional filtering by status, severity and scope.
@@ -541,6 +566,27 @@ pub trait UdsEcu: Send + Sync + 'static {
     ) -> Result<HashMap<String, Result<Self::Response, DiagServiceError>>, DiagServiceError>;
 }
 
+/// Minimum trait bound for the ECU type `T` in `UdsManager`.
+///
+/// This covers the traits used directly by the raw UDS transport layer
+/// (`send_with_raw_payload`, `ecu_send_params`).  Higher-level operations
+/// add `EcuManager` bounds on their impl blocks.
+///
+/// Note: This uses a blanket-implemented marker trait as a workaround because
+/// trait aliases (`trait UdsEcuDb = A + B + ...;`) are not yet stable:
+/// <https://github.com/rust-lang/rust/issues/41517>
+pub trait UdsEcuDb:
+    EcuStateManager + UdsComParams + DoipComParams + EcuAddresses + Send + Sync + 'static
+{
+}
+
+/// Blanket implementation so that any type satisfying the super-traits
+/// automatically implements `UdsEcuDb` without an explicit `impl` block.
+impl<T> UdsEcuDb for T where
+    T: EcuStateManager + UdsComParams + DoipComParams + EcuAddresses + Send + Sync + 'static
+{
+}
+
 #[cfg(feature = "test-utils")]
 pub mod mock {
     use std::time::Duration;
@@ -550,7 +596,7 @@ pub mod mock {
     use super::FlashTransferStartParams;
     use crate::{
         DiagComm, DiagServiceError, DynamicPlugin, EcuVariant, HashMap, SecurityAccess,
-        TesterPresentType, UdsEcu,
+        TesterPresentType, UdsEcu, UdsSecurity, UdsSession, UdsTesterPresent, UdsTransport,
         datatypes::{
             ComplexComParamValue, ComponentConfigurationsInfo, ComponentDataInfo,
             ComponentOperationsInfo, DataTransferMetaData, DtcCode, DtcExtendedInfo,
@@ -570,9 +616,98 @@ pub mod mock {
         // allowed because the mock! macro generates references to Option types
         #[allow(clippy::ref_option_ref)]
         #[async_trait]
-        impl UdsEcu for UdsEcu {
+        impl UdsTransport for UdsEcu {
             type Response = crate::diagservices::mock::MockDiagServiceResponse;
 
+            async fn send_with_timeout(
+                &self,
+                ecu_name: &str,
+                service: DiagComm,
+                security_plugin: &DynamicPlugin,
+                payload: Option<UdsPayloadData>,
+                map_to_json: bool,
+                timeout: Duration,
+            ) -> Result<<MockUdsEcu as UdsTransport>::Response, DiagServiceError>;
+            async fn send(
+                &self,
+                ecu_name: &str,
+                service: DiagComm,
+                security_plugin: &DynamicPlugin,
+                payload: Option<UdsPayloadData>,
+                map_to_json: bool,
+            ) -> Result<<MockUdsEcu as UdsTransport>::Response, DiagServiceError>;
+            async fn send_genericservice(
+                &self,
+                ecu_name: &str,
+                security_plugin: &DynamicPlugin,
+                payload: Vec<u8>,
+                timeout: Option<Duration>,
+            ) -> Result<Vec<u8>, DiagServiceError>;
+        }
+
+        // allowed because the mock! macro generates references to Option types
+        #[allow(clippy::ref_option_ref)]
+        #[async_trait]
+        impl UdsSession for UdsEcu {
+            async fn set_ecu_session(
+                &self,
+                ecu_name: &str,
+                session: &str,
+                security_plugin: &DynamicPlugin,
+                expiration: Option<Duration>,
+            ) -> Result<<MockUdsEcu as UdsTransport>::Response, DiagServiceError>;
+            async fn reset_ecu_session(
+                &self,
+                ecu_name: &str,
+                security_plugin: &DynamicPlugin,
+            ) ->  Result<(), DiagServiceError>;
+        }
+
+        // allowed because the mock! macro generates references to Option types
+        #[allow(clippy::ref_option_ref)]
+        #[async_trait]
+        impl UdsSecurity for UdsEcu {
+            async fn reset_ecu_security_access(
+                &self,
+                ecu_name: &str,
+                security_plugin: &DynamicPlugin,
+            ) ->  Result<(), DiagServiceError>;
+            #[mockall::concretize]
+            async fn set_ecu_security_access(
+                &self,
+                ecu_name: &str,
+                level: &str,
+                authentication_data: Option<UdsPayloadData>,
+                security_plugin: &DynamicPlugin,
+                expiration: Option<Duration>,
+            ) -> Result<(SecurityAccess, <MockUdsEcu as UdsTransport>::Response), DiagServiceError>;
+            async fn get_send_key_param_name(
+                &self,
+                ecu_name: &str,
+                level: &str,
+            ) -> Result<String, DiagServiceError>;
+        }
+
+        #[async_trait]
+        impl UdsTesterPresent for UdsEcu {
+            async fn start_tester_present(
+                &self,
+                type_: TesterPresentType,
+            ) -> Result<(), DiagServiceError>;
+            async fn stop_tester_present(
+                &self,
+                type_: TesterPresentType,
+            ) -> Result<(), DiagServiceError>;
+            async fn check_tester_present_active(
+                &self,
+                type_: &TesterPresentType,
+            ) -> bool;
+        }
+
+        // allowed because the mock! macro generates references to Option types
+        #[allow(clippy::ref_option_ref)]
+        #[async_trait]
+        impl UdsEcu for UdsEcu {
             async fn get_ecus(&self) -> Vec<String>;
             async fn get_physical_ecus(&self) -> Vec<String>;
             async fn get_ecus_with_sds(
@@ -620,62 +755,6 @@ pub mod mock {
                 ecu: &str,
                 job_name: &str,
             ) -> Result<single_ecu::Job, DiagServiceError>;
-            async fn send_with_timeout(
-                &self,
-                ecu_name: &str,
-                service: DiagComm,
-                security_plugin: &DynamicPlugin,
-                payload: Option<UdsPayloadData>,
-                map_to_json: bool,
-                timeout: Duration,
-            ) -> Result<<MockUdsEcu as UdsEcu>::Response, DiagServiceError>;
-            async fn send(
-                &self,
-                ecu_name: &str,
-                service: DiagComm,
-                security_plugin: &DynamicPlugin,
-                payload: Option<UdsPayloadData>,
-                map_to_json: bool,
-            ) -> Result<<MockUdsEcu as UdsEcu>::Response, DiagServiceError>;
-            async fn send_genericservice(
-                &self,
-                ecu_name: &str,
-                security_plugin: &DynamicPlugin,
-                payload: Vec<u8>,
-                timeout: Option<Duration>,
-            ) -> Result<Vec<u8>, DiagServiceError>;
-            async fn set_ecu_session(
-                &self,
-                ecu_name: &str,
-                session: &str,
-                security_plugin: &DynamicPlugin,
-                expiration: Option<Duration>,
-            ) -> Result<<MockUdsEcu as UdsEcu>::Response, DiagServiceError>;
-            async fn reset_ecu_session(
-                &self,
-                ecu_name: &str,
-                security_plugin: &DynamicPlugin,
-            ) ->  Result<(), DiagServiceError>;
-            async fn reset_ecu_security_access(
-                &self,
-                ecu_name: &str,
-                security_plugin: &DynamicPlugin,
-            ) ->  Result<(), DiagServiceError>;
-            #[mockall::concretize]
-            async fn set_ecu_security_access(
-                &self,
-                ecu_name: &str,
-                level: &str,
-                seed_service: Option<&String>,
-                authentication_data: Option<UdsPayloadData>,
-                security_plugin: &DynamicPlugin,
-                expiration: Option<Duration>,
-            ) -> Result<(SecurityAccess, <MockUdsEcu as UdsEcu>::Response), DiagServiceError>;
-            async fn get_send_key_param_name(
-                &self,
-                ecu_name: &str,
-                level: &str,
-            ) -> Result<String, DiagServiceError>;
             async fn get_ecu_reset_services(
                 &self,
                 ecu_name: &str,
@@ -692,7 +771,7 @@ pub mod mock {
                 service_id: u8,
                 security_plugin: &DynamicPlugin,
                 data: UdsPayloadData,
-            ) -> Result<<MockUdsEcu as UdsEcu>::Response, DiagServiceError>;
+            ) -> Result<<MockUdsEcu as UdsTransport>::Response, DiagServiceError>;
             async fn ecu_lookup_service_through_func_class(
                 &self,
                 ecu_name: &str,
@@ -730,18 +809,6 @@ pub mod mock {
                 ecu_name: &str,
             ) -> Result<EcuVariant, DiagServiceError>;
             async fn start_variant_detection(&self);
-            async fn start_tester_present(
-                &self,
-                type_: TesterPresentType,
-            ) -> Result<(), DiagServiceError>;
-            async fn stop_tester_present(
-                &self,
-                type_: TesterPresentType,
-            ) -> Result<(), DiagServiceError>;
-            async fn check_tester_present_active(
-                &self,
-                type_: &TesterPresentType,
-            ) -> bool;
             async fn ecu_dtc_by_mask(
                 &self,
                 ecu_name: &str,
@@ -766,13 +833,13 @@ pub mod mock {
                 ecu_name: &str,
                 security_plugin: &DynamicPlugin,
                 fault_code: Option<String>,
-            ) -> Result<<MockUdsEcu as UdsEcu>::Response, DiagServiceError>;
+            ) -> Result<<MockUdsEcu as UdsTransport>::Response, DiagServiceError>;
             async fn delete_dtcs_scoped(
                 &self,
                 ecu_name: &str,
                 security_plugin: &DynamicPlugin,
                 scope: &str,
-            ) -> Result<<MockUdsEcu as UdsEcu>::Response, DiagServiceError>;
+            ) -> Result<<MockUdsEcu as UdsTransport>::Response, DiagServiceError>;
             async fn get_functional_group_data_info(
                 &self,
                 security_plugin: &DynamicPlugin,
@@ -805,7 +872,7 @@ pub mod mock {
                 security_plugin: &DynamicPlugin,
                 payload: Option<UdsPayloadData>,
                 map_to_json: bool,
-            ) -> HashMap<String, Result<<MockUdsEcu as UdsEcu>::Response, DiagServiceError>>;
+            ) -> HashMap<String, Result<<MockUdsEcu as UdsTransport>::Response, DiagServiceError>>;
             async fn set_ecu_state(
                 &self,
                 ecu_name: &str,
@@ -814,7 +881,7 @@ pub mod mock {
                 service_name: &str,
                 params: Option<HashMap<String, serde_json::Value>>,
                 map_to_json: bool,
-            ) -> Result<<MockUdsEcu as UdsEcu>::Response, DiagServiceError>;
+            ) -> Result<<MockUdsEcu as UdsTransport>::Response, DiagServiceError>;
              async fn set_functional_state(
                 &self,
                 group_name: &str,
@@ -824,13 +891,16 @@ pub mod mock {
                 params: Option<HashMap<String, serde_json::Value>>,
                 mode_expiration: Option<Duration>,
                 map_to_json: bool,
-            ) -> Result<HashMap<String, Result<<MockUdsEcu as UdsEcu>::Response,
+            ) -> Result<HashMap<String, Result<<MockUdsEcu as UdsTransport>::Response,
                     DiagServiceError>>, DiagServiceError>;
         }
     }
 
     use crate::schema::{SchemaDescription, SchemaProvider};
 
+    // We have to adhere to the signature of the trait, which is async, but we don't actually need to do any async work here.
+    // core::future::ready what clippy suggest as alternative if not available on 1.88
+    #[cfg_attr(nightly, allow(unknown_lints, clippy::unused_async_trait_impl))]
     impl SchemaProvider for MockUdsEcu {
         fn schema_for_request(
             &self,

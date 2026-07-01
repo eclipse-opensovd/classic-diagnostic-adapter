@@ -1,6 +1,5 @@
 /*
- * SPDX-License-Identifier: Apache-2.0
- * SPDX-FileCopyrightText: 2026 The Contributors to Eclipse OpenSOVD (see CONTRIBUTORS)
+ * SPDX-FileCopyrightText: 2026 Copyright (c) Contributors to the Eclipse Foundation
  *
  * See the NOTICE file(s) distributed with this work for additional
  * information regarding copyright ownership.
@@ -8,6 +7,8 @@
  * This program and the accompanying materials are made available under the
  * terms of the Apache License Version 2.0 which is available at
  * https://www.apache.org/licenses/LICENSE-2.0
+ *
+ * SPDX-License-Identifier: Apache-2.0
  */
 
 /// Errors that can occur during storage operations.
@@ -25,9 +26,13 @@ pub enum StorageError {
     #[error("Permission denied: {0}")]
     PermissionDenied(String),
 
-    /// A transaction-related error occurred (e.g., a transaction is already active).
-    #[error("Transaction error: {0}")]
-    TransactionError(String),
+    /// Another transaction is already active (contention).
+    #[error("Transaction busy: another transaction is already active")]
+    TransactionBusy,
+
+    /// A logical conflict within a transaction (e.g., duplicate collection).
+    #[error("Transaction conflict: {0}")]
+    TransactionConflict(String),
 
     /// The storage backend has no space left for the requested operation.
     #[error("No space left: {0}")]

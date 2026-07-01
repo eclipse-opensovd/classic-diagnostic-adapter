@@ -1,6 +1,5 @@
 /*
- * SPDX-License-Identifier: Apache-2.0
- * SPDX-FileCopyrightText: 2025 The Contributors to Eclipse OpenSOVD (see CONTRIBUTORS)
+ * SPDX-FileCopyrightText: 2025 Copyright (c) Contributors to the Eclipse Foundation
  *
  * See the NOTICE file(s) distributed with this work for additional
  * information regarding copyright ownership.
@@ -8,6 +7,8 @@
  * This program and the accompanying materials are made available under the
  * terms of the Apache License Version 2.0 which is available at
  * https://www.apache.org/licenses/LICENSE-2.0
+ *
+ * SPDX-License-Identifier: Apache-2.0
  */
 
 use aide::{UseApi, transform::TransformOperation};
@@ -369,6 +370,7 @@ pub(crate) mod diag_service {
             locks,
             functional_group_name,
             fg_executions,
+            update_in_progress,
             ..
         }): State<WebserverFgState<T>>,
         body: Bytes,
@@ -400,13 +402,18 @@ pub(crate) mod diag_service {
         // conflict and, if none, inserts a placeholder so that a second
         // concurrent POST for the same operation sees 409 Conflict.
         let operation_lower = operation.to_lowercase();
-        let exec_id =
-            match reserve_execution(&fg_executions, &operation_lower, &operation, include_schema)
-                .await
-            {
-                Ok(id) => id,
-                Err(err) => return err.into_response(),
-            };
+        let exec_id = match reserve_execution(
+            &fg_executions,
+            &operation_lower,
+            &operation,
+            include_schema,
+            &update_in_progress,
+        )
+        .await
+        {
+            Ok(id) => id,
+            Err(err) => return err.into_response(),
+        };
 
         let is_async = if suppress_service {
             // suppress service is always treated as async

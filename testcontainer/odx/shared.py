@@ -1,5 +1,4 @@
-# SPDX-License-Identifier: Apache-2.0
-# SPDX-FileCopyrightText: 2025 The Contributors to Eclipse OpenSOVD (see CONTRIBUTORS)
+# SPDX-FileCopyrightText: 2025 Copyright (c) Contributors to the Eclipse Foundation
 #
 # See the NOTICE file(s) distributed with this work for additional
 # information regarding copyright ownership.
@@ -7,6 +6,8 @@
 # This program and the accompanying materials are made available under the
 # terms of the Apache License Version 2.0 which is available at
 # https://www.apache.org/licenses/LICENSE-2.0
+#
+# SPDX-License-Identifier: Apache-2.0
 
 from helper import (
     derived_id,
@@ -163,6 +164,7 @@ def add_service_did(
     funct_class: str = "Ident",
     long_name: str | None = None,
     semantic: str | None = None,
+    sdgs: list | None = None,
 ):
     if not dop:
         raise Exception("dop property is required")
@@ -206,6 +208,7 @@ def add_service_did(
             request_ref=ref(request),
             pos_response_refs=[ref(response)],
             semantic=semantic,
+            sdgs=sdgs or [],
         )
     )
 
@@ -313,7 +316,7 @@ def add_session_type_service(dlr: DiagLayerRaw):
     )
 
 
-def add_power_consumption_service(dlr: DiagLayerRaw):
+def add_power_consumption_service(dlr: DiagLayerRaw, sdgs: list | None = None):
     add_service_did(
         dlr=dlr,
         service_name="FluxCapacitorPowerConsumption",
@@ -323,6 +326,7 @@ def add_power_consumption_service(dlr: DiagLayerRaw):
         add_write=False,
         long_name="Flux Capacitor Power Consumption",
         semantic="CURRENTDATA",
+        sdgs=sdgs,
     )
 
 

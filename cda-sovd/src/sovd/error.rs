@@ -1,6 +1,5 @@
 /*
- * SPDX-License-Identifier: Apache-2.0
- * SPDX-FileCopyrightText: 2025 The Contributors to Eclipse OpenSOVD (see CONTRIBUTORS)
+ * SPDX-FileCopyrightText: 2025 Copyright (c) Contributors to the Eclipse Foundation
  *
  * See the NOTICE file(s) distributed with this work for additional
  * information regarding copyright ownership.
@@ -8,6 +7,8 @@
  * This program and the accompanying materials are made available under the
  * terms of the Apache License Version 2.0 which is available at
  * https://www.apache.org/licenses/LICENSE-2.0
+ *
+ * SPDX-License-Identifier: Apache-2.0
  */
 
 use aide::OperationOutput;
@@ -179,6 +180,18 @@ pub enum VendorErrorCode {
     ErrorInterpretingMessage,
     /// The given parameter is not valid.
     InvalidParameter,
+    /// Used when a storage operation cannot be execution because a conflicting operation
+    /// Already is in progress.
+    StorageTransactionBusy,
+    /// The provided data was not valid.
+    InvalidData,
+    /// A severe error occurred that needs further investigation, safe operation is still possible
+    /// but this indicates an issue that should be investigated
+    SevereError,
+    /// Indicates that something went terribly wrong and safe operation cannot be guaranteed at
+    /// this point. The application still tries to serve requests in the best effort,
+    /// but correctness may be affected by this error.
+    FatalError,
 }
 
 impl OperationOutput for ErrorWrapper {

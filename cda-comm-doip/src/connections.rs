@@ -1,6 +1,5 @@
 /*
- * SPDX-License-Identifier: Apache-2.0
- * SPDX-FileCopyrightText: 2025 The Contributors to Eclipse OpenSOVD (see CONTRIBUTORS)
+ * SPDX-FileCopyrightText: 2025 Copyright (c) Contributors to the Eclipse Foundation
  *
  * See the NOTICE file(s) distributed with this work for additional
  * information regarding copyright ownership.
@@ -8,24 +7,29 @@
  * This program and the accompanying materials are made available under the
  * terms of the Apache License Version 2.0 which is available at
  * https://www.apache.org/licenses/LICENSE-2.0
+ *
+ * SPDX-License-Identifier: Apache-2.0
  */
 
 use std::{sync::Arc, time::Duration};
 
 use cda_interfaces::{
-    DataParseError, DiagServiceError, DoipComParamProvider, EcuAddressProvider, HashMap,
-    HashMapExtensions, dlt_ctx, service_ids,
+    DataParseError, DiagServiceError, DoipComParams, EcuAddresses, HashMap, HashMapExtensions,
+    dlt_ctx, service_ids,
 };
 use doip_definitions::payload::{
-    ActivationType, AliveCheckRequest, DiagnosticAckCode, DiagnosticMessageAck, DoipPayload,
+    ActivationType, AliveCheckResponse, DiagnosticAckCode, DiagnosticMessageAck, DoipPayload,
     RoutingActivationRequest,
 };
 use thiserror::Error;
-use tokio::sync::{Mutex, RwLock, broadcast, mpsc, watch};
+use tokio::{
+    io::{AsyncRead, AsyncWrite},
+    sync::{Mutex, RwLock, broadcast, mpsc, watch},
+};
 
 use crate::{
     ConnectionError, DiagnosticResponse, DoipConnection, DoipEcu, DoipTarget,
-    NRC_BUSY_REPEAT_REQUEST, NRC_RESPONSE_PENDING, NRC_TEMPORARILY_NOT_AVAILABLE, SLEEP_INTERVAL,
+    NRC_BUSY_REPEAT_REQUEST, NRC_RESPONSE_PENDING, NRC_TEMPORARILY_NOT_AVAILABLE,
     connections::EcuError::EcuConnectionError,
     ecu_connection::{
         self, ConnectionConfig, ECUConnectionRead, ECUConnectionSend as _, EcuConnectionTarget,
@@ -35,6 +39,21 @@ use crate::{
 
 type ConnectionResetReason = String;
 
+/// Configuration for establishing a gateway connection.
+pub(crate) struct GatewayConfig {
+    pub connection: ConnectionConfig,
+    pub doip: DoIPConfig,
+    pub send_timeout: Duration,
+    pub alive_check_interval: Duration,
+}
+
+/// Runtime state for managing active gateway connections and ECU mappings.
+pub(crate) struct GatewayState<T> {
+    pub doip_connections: Arc<RwLock<Vec<Arc<DoipConnection>>>>,
+    pub ecus: Arc<HashMap<String, RwLock<T>>>,
+    pub gateway_ecu_map: HashMap<u16, Vec<u16>>,
+}
+
 #[derive(Clone, Copy)]
 struct ConnectionSettings {
     routing_activation: Duration,
@@ -42,6 +61,7 @@ struct ConnectionSettings {
     connect_timeout: Duration,
     max_retry_attempts: u32,
     send_timeout: Duration,
+    alive_check_interval: Duration,
 }
 
 #[derive(Error, Debug, Clone)]
@@ -88,11 +108,11 @@ impl From<EcuError> for DiagServiceError {
 }
 
 #[tracing::instrument(
-    skip(doip_connections, ecus, gateway_ecu_map, connection_config),
+    skip(config, state),
     fields(
-        tester_ip = connection_config.source_ip.clone(),
-        port = connection_config.port,
-        tls_port = connection_config.tls_port,
+        tester_ip = config.connection.source_ip.clone(),
+        port = config.connection.port,
+        tls_port = config.connection.tls_port,
         gateway_ecu = %gateway.ecu,
         gateway_ip = %gateway.ip,
         logical_address = %format!("{:#06x}", gateway.logical_address),
@@ -100,18 +120,15 @@ impl From<EcuError> for DiagServiceError {
     )
 )]
 pub(crate) async fn handle_gateway_connection<T>(
-    connection_config: &ConnectionConfig,
     gateway: DoipTarget,
-    doip_connection_config: DoIPConfig,
-    doip_connections: &Arc<RwLock<Vec<Arc<DoipConnection>>>>,
-    ecus: &Arc<HashMap<String, RwLock<T>>>,
-    gateway_ecu_map: &HashMap<u16, Vec<u16>>,
-    send_timeout: Duration,
+    config: &GatewayConfig,
+    state: &GatewayState<T>,
 ) -> Result<u16, EcuError>
 where
-    T: EcuAddressProvider + DoipComParamProvider,
+    T: EcuAddresses + DoipComParams,
 {
-    let tester_address = ecus
+    let tester_address = state
+        .ecus
         .get(&gateway.ecu)
         .map(|ecu| async { ecu.read().await.tester_address() })
         .ok_or_else(|| EcuError::ResourceNotFound("ECU not found".to_owned()))?
@@ -123,16 +140,17 @@ where
         buffer: [0, 0, 0, 0],
     };
 
-    let ecu_ids: Vec<u16> = if let Some(ecu_ids) = gateway_ecu_map.get(&gateway.logical_address) {
-        ecu_ids.clone()
-    } else {
-        return Err(EcuError::ResourceNotFound(format!(
-            "No ECUs found for gateway address {}. Skipping, as the gateway cannot be used.",
-            gateway.logical_address
-        )));
-    };
+    let ecu_ids: Vec<u16> =
+        if let Some(ecu_ids) = state.gateway_ecu_map.get(&gateway.logical_address) {
+            ecu_ids.clone()
+        } else {
+            return Err(EcuError::ResourceNotFound(format!(
+                "No ECUs found for gateway address {}. Skipping, as the gateway cannot be used.",
+                gateway.logical_address
+            )));
+        };
 
-    let gateway_ecu = match ecus.get(&gateway.ecu) {
+    let gateway_ecu = match state.ecus.get(&gateway.ecu) {
         Some(ecu) => ecu.read().await,
         None => {
             return Err(EcuError::ResourceNotFound(
@@ -146,10 +164,10 @@ where
     let connection_retry_attempts = gateway_ecu.connection_retry_attempts();
 
     let (sender, receiver) = match connection_handler(
-        connection_config.clone(),
+        config.connection.clone(),
         gateway.ip.clone(),
         gateway.ecu.clone(),
-        doip_connection_config,
+        config.doip,
         routing_activation_request,
         ecu_ids.clone(),
         ConnectionSettings {
@@ -157,7 +175,8 @@ where
             retry_delay: connection_retry_delay,
             connect_timeout: connection_timeout,
             max_retry_attempts: connection_retry_attempts,
-            send_timeout,
+            send_timeout: config.send_timeout,
+            alive_check_interval: config.alive_check_interval,
         },
     )
     .await
@@ -176,7 +195,8 @@ where
     let doip_ecus = create_ecu_receiver_map(ecu_ids, &sender, &receiver);
 
     tracing::info!("Connected to gateway");
-    doip_connections
+    state
+        .doip_connections
         .write()
         .await
         .push(Arc::new(DoipConnection {
@@ -308,6 +328,7 @@ async fn connection_handler(
         connection_settings.send_timeout,
         conn_reset_tx.clone(),
         send_pending_tx.clone(),
+        connection_settings.alive_check_interval,
     );
     spawn_gateway_receiver_task(
         gateway_ip.clone(),
@@ -413,14 +434,18 @@ fn spawn_connection_reset_task(
         dlt_context = dlt_ctx!("DOIP")
     )
 )]
-fn spawn_gateway_sender_task(
+fn spawn_gateway_sender_task<T>(
     gateway_ip: &str,
     mut inrx: mpsc::Receiver<DoipPayload>,
-    gateway_conn: Arc<EcuConnectionTarget>,
+    gateway_conn: Arc<EcuConnectionTarget<T>>,
     send_timeout: Duration,
     reset_tx: mpsc::Sender<ConnectionResetReason>,
     send_pending_tx: watch::Sender<bool>,
-) {
+    alive_check_interval: Duration,
+) -> tokio::task::JoinHandle<()>
+where
+    T: AsyncRead + AsyncWrite + Unpin + Send + 'static,
+{
     cda_interfaces::spawn_named!(&format!("doip-gateway-sender-{gateway_ip}"), async move {
         fn send_pending_status(
             send_pending_tx: &watch::Sender<bool>,
@@ -431,18 +456,30 @@ fn spawn_gateway_sender_task(
             })
         }
 
-        let send_mtx = Arc::new(Mutex::new(()));
+        let alive_check_enabled = alive_check_interval > Duration::ZERO;
+        let effective_interval = if alive_check_enabled {
+            alive_check_interval
+        } else {
+            // Use a very large duration when disabled so the interval never fires.
+            // tokio::time::Instant is limited so we use ~136 years which is well
+            // within the representable range.
+            Duration::from_secs(u64::from(u32::MAX))
+        };
         let mut alive_interval = tokio::time::interval_at(
             tokio::time::Instant::now()
-                .checked_add(SLEEP_INTERVAL)
+                .checked_add(effective_interval)
                 .expect("interval start overflow"),
-            SLEEP_INTERVAL,
+            effective_interval,
         );
         alive_interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
         loop {
             tokio::select! {
+                // Per default tokio, randomized which branch is checked first to ensure fairness.
+                // We always want to priotize sending messages over the alive check.
+                // Adding 'biased' means the selects are checked in order from top to bottom.
+                // https://docs.rs/tokio/latest/tokio/macro.select.html#fairness
+                biased;
                 Some(msg) = inrx.recv() => {
-                    let lock = send_mtx.lock().await;
                     // let rx task know that we want to send something.
                     if send_pending_status(&send_pending_tx, true).is_err() {
                         break;
@@ -454,11 +491,7 @@ fn spawn_gateway_sender_task(
                             let conn = guard.get_sender();
                             let lock_after = start.elapsed();
 
-                            match tokio::time::timeout(send_timeout, conn
-                                .send(msg)
-                            )
-                                .await
-                            {
+                            match tokio::time::timeout(send_timeout, conn.send(msg)).await {
                                 Ok(Ok(())) => {},
                                 Ok(Err(e)) => {
                                     tracing::error!(error = ?e, "Failed to send message");
@@ -485,17 +518,19 @@ fn spawn_gateway_sender_task(
                     if send_pending_status(&send_pending_tx, false).is_err() {
                         break;
                     }
-                    drop(lock);
+                    // Reset the alive check timer so it only fires after a full
+                    // interval of silence - never during active communication.
+                    alive_interval.reset();
                 },
-                _ = alive_interval.tick() => {
-                    let lock = send_mtx.lock().await;
+
+                _ = alive_interval.tick(), if alive_check_enabled => {
                     if send_pending_status(&send_pending_tx, true).is_err() {
                         break;
                     }
 
                     let (alive_response, conn_gateway_name, conn_gateway_ip) = {
                         (
-                            send_alive_request(&gateway_conn).await,
+                            send_alive_response(&gateway_conn, gateway_conn.tester_address).await,
                             gateway_conn.gateway_name.clone(),
                             gateway_conn.gateway_ip.clone(),
                         )
@@ -527,11 +562,10 @@ fn spawn_gateway_sender_task(
                     if send_pending_status(&send_pending_tx, false).is_err() {
                         break;
                     }
-                    drop(lock);
                 }
             }
         }
-    });
+    })
 }
 
 /// allowed because there are two inline functions in here,
@@ -546,15 +580,17 @@ fn spawn_gateway_sender_task(
         dlt_context = dlt_ctx!("DOIP"),
     )
 )]
-fn spawn_gateway_receiver_task(
+fn spawn_gateway_receiver_task<T>(
     gateway_ip: String,
     gateway_name: String,
     outtx: HashMap<u16, broadcast::Sender<Result<DiagnosticResponse, EcuError>>>,
-    gateway_conn: Arc<EcuConnectionTarget>,
+    gateway_conn: Arc<EcuConnectionTarget<T>>,
     mut send_pending_rx: watch::Receiver<bool>,
     reset_tx: mpsc::Sender<ConnectionResetReason>,
     send_tx: mpsc::Sender<DoipPayload>,
-) {
+) where
+    T: AsyncRead + AsyncWrite + Unpin + Send + 'static,
+{
     // note: the handlers are defined here, as rustfmt cannot format the correctly inside the
     // tokio::select! macro block
     async fn handle_send_pending(
@@ -717,6 +753,9 @@ fn spawn_gateway_receiver_task(
             }
 
             // wait for a message to be received or a send request
+            // Tokio is randomizing which branch takes precedence when both are ready.
+            // this is good here because it prevents send / receive starvation by
+            // not prioritizing one of the branches.
             tokio::select! {
                 send_pending_result = send_pending_rx.changed() => {
                     if let Err(()) = handle_send_pending(
@@ -756,8 +795,17 @@ fn spawn_gateway_receiver_task(
     });
 }
 
-async fn send_alive_request(conn: &EcuConnectionTarget) -> Result<(), ()> {
-    async fn handle_alive_request_response(conn: &EcuConnectionTarget) {
+async fn send_alive_response<T>(
+    conn: &EcuConnectionTarget<T>,
+    tester_address: [u8; 2],
+) -> Result<(), ()>
+where
+    T: AsyncRead + AsyncWrite + Unpin + Send + 'static,
+{
+    async fn handle_alive_request_response<T>(conn: &EcuConnectionTarget<T>)
+    where
+        T: AsyncRead + AsyncWrite + Unpin + Send + 'static,
+    {
         if tokio::time::timeout(Duration::from_secs(1), async {
             let Ok(mut reader_mtx) = conn.lock_read().await else {
                 return;
@@ -798,7 +846,9 @@ async fn send_alive_request(conn: &EcuConnectionTarget) -> Result<(), ()> {
     };
     match sender
         .get_sender()
-        .send(DoipPayload::AliveCheckRequest(AliveCheckRequest {}))
+        .send(DoipPayload::AliveCheckResponse(AliveCheckResponse {
+            source_address: tester_address,
+        }))
         .await
     {
         Ok(()) => {
@@ -880,4 +930,233 @@ async fn try_read(
     tokio::time::timeout(timeout, read_response(reader))
         .await
         .ok()
+}
+
+#[cfg(test)]
+mod tests {
+    use std::{sync::Arc, time::Duration};
+
+    use doip_definitions::{
+        header::ProtocolVersion,
+        payload::{DoipPayload, EntityStatusRequest},
+    };
+    use tokio::sync::{Mutex, mpsc, watch};
+
+    use crate::{
+        connections::{ConnectionResetReason, spawn_gateway_sender_task},
+        ecu_connection::{EcuConnectionReadVariant, EcuConnectionSendVariant, EcuConnectionTarget},
+        socket::{DoIPConfig, DoIPConnection},
+    };
+
+    /// Builds a duplex-backed `EcuConnectionTarget` together with the server-side
+    /// `DoIPConnection` used to respond to alive checks and dummy messages.
+    /// `lock_send()` succeeds and `alive_interval.reset()` is called on each
+    /// message processed by the sender task.
+    fn duplex_ecu_connection_target() -> (
+        EcuConnectionTarget<tokio::io::DuplexStream>,
+        DoIPConnection<tokio::io::DuplexStream>,
+    ) {
+        let (client, server) = tokio::io::duplex(1024);
+        let config = DoIPConfig {
+            protocol_version: ProtocolVersion::Iso13400_2012,
+            send_diagnostic_message_ack: false,
+        };
+        let server_conn = DoIPConnection::new(server, config);
+        let (read_half, write_half) = DoIPConnection::new(client, config).into_split();
+        let target = EcuConnectionTarget {
+            ecu_connection_rx: Mutex::new(Some(EcuConnectionReadVariant::Plain(read_half))),
+            ecu_connection_tx: Mutex::new(Some(EcuConnectionSendVariant::Plain(write_half))),
+            gateway_name: String::new(),
+            gateway_ip: String::new(),
+            tester_address: [0, 0],
+        };
+        (target, server_conn)
+    }
+
+    /// Shared test harness for gateway sender task tests.
+    /// Creates all channels, the duplex connection, pauses time, spawns the task,
+    /// and starts a background responder that simulates a real gateway on the
+    /// server side of the duplex.
+    ///
+    /// The responder handles two types of incoming messages:
+    /// - `AliveCheckRequest`: replies with `AliveCheckResponse` so the sender's
+    ///   alive check completes immediately instead of timing out.
+    /// - `EntityStatusRequest` (dummy diagnostic messages sent by the test):
+    ///   replies with `DiagnosticMessageAck` to simulate a real gateway that
+    ///   acknowledges incoming diagnostic messages. Without this, the ack would
+    ///   be missing from the read buffer, which would make the test less realistic.
+    ///
+    /// The test then uses the returned handles to drive the scenario.
+    struct GatewaySenderTestHarness {
+        msg_tx: mpsc::Sender<DoipPayload>,
+        reset_rx: mpsc::Receiver<ConnectionResetReason>,
+        _gateway_conn: Arc<EcuConnectionTarget<tokio::io::DuplexStream>>,
+        _send_pending_rx: watch::Receiver<bool>,
+        task: tokio::task::JoinHandle<()>,
+    }
+
+    impl GatewaySenderTestHarness {
+        fn new(alive_check_interval: Duration) -> Self {
+            tokio::time::pause();
+
+            let (msg_tx, msg_rx) = mpsc::channel::<DoipPayload>(10);
+            let (reset_tx, reset_rx) = mpsc::channel::<ConnectionResetReason>(10);
+            let (send_pending_tx, send_pending_rx) = watch::channel(false);
+            let (gateway_target, _) = duplex_ecu_connection_target();
+
+            let gateway_conn = Arc::new(gateway_target);
+
+            let task = spawn_gateway_sender_task(
+                "127.0.0.1",
+                msg_rx,
+                Arc::clone(&gateway_conn),
+                Duration::from_secs(1),
+                reset_tx,
+                send_pending_tx,
+                alive_check_interval,
+            );
+
+            Self {
+                msg_tx,
+                reset_rx,
+                _gateway_conn: gateway_conn,
+                _send_pending_rx: send_pending_rx,
+                task,
+            }
+        }
+
+        /// Sends a dummy diagnostic message through the message channel.
+        ///
+        /// The payload (`EntityStatusRequest`) is just a placeholder - the only
+        /// thing that matters is that sending any message through `msg_tx` triggers
+        /// `alive_interval.reset()` inside the sender task.  The exact variant is
+        /// irrelevant for the timer behavior we are testing here.
+        ///
+        /// After sending, we yield once so the sender task is polled and actually
+        /// processes the message.
+        async fn send_dummy_message(&self) {
+            self.msg_tx
+                .send(DoipPayload::EntityStatusRequest(EntityStatusRequest {}))
+                .await
+                .unwrap();
+            tokio::task::yield_now().await;
+        }
+    }
+
+    /// This test validates that the alive check timer resets after each message send,
+    /// ensuring the alive check only fires after a full interval of idle time.
+    #[tokio::test]
+    async fn alive_check_only_fires_when_idle() {
+        let harness = GatewaySenderTestHarness::new(Duration::from_secs(10));
+
+        // Sending messages before the interval elapses prevents alive check.
+        // Send a message at t=4s (before 10s interval).
+        tokio::time::advance(Duration::from_secs(4)).await;
+        harness.send_dummy_message().await;
+
+        // Advance another 4s (total 8s from last send, still within 10s interval).
+        tokio::time::advance(Duration::from_secs(4)).await;
+        harness.send_dummy_message().await;
+
+        // Advance 9s (total 9s from last send, still within 10s interval).
+        tokio::time::advance(Duration::from_secs(9)).await;
+        tokio::task::yield_now().await;
+
+        // The alive check interval has not elapsed since the last message send -
+        // the sender task should still be running and no reset should have been requested.
+        assert!(
+            !harness.task.is_finished(),
+            "Alive check should not have fired during active communication"
+        );
+
+        // Advance 2 more seconds (total 11s from last send, exceeds 10s interval).
+        // The alive check fires: the responder task automatically replies with
+        // AliveCheckResponse, so the request/response cycle completes without
+        // waiting for any timeout.
+        tokio::time::advance(Duration::from_secs(2)).await;
+        // Yield twice so the sender task sends the request, the responder replies,
+        // and the sender reads the response.
+        tokio::task::yield_now().await;
+        tokio::task::yield_now().await;
+
+        // Task should still be alive after the alive check fired.
+        assert!(
+            !harness.task.is_finished(),
+            "Task should still be running after alive check fired"
+        );
+
+        // After alive check fires, sending a message resets the timer.
+        harness.send_dummy_message().await;
+
+        // Advance 9s (within 10s interval from last send).
+        tokio::time::advance(Duration::from_secs(9)).await;
+        tokio::task::yield_now().await;
+
+        assert!(
+            !harness.task.is_finished(),
+            "Alive check should not fire after timer reset by message send"
+        );
+
+        // Advance 2 more seconds (total 11s from last send) - alive check fires again.
+        tokio::time::advance(Duration::from_secs(2)).await;
+        tokio::task::yield_now().await;
+        tokio::task::yield_now().await;
+
+        assert!(
+            !harness.task.is_finished(),
+            "Task should still be running after second alive check fired"
+        );
+
+        // Clean up: abort the task.
+        harness.task.abort();
+        let _ = harness.task.await;
+    }
+
+    /// Validates that the alive check does not fire when the interval is set to zero
+    /// (disabled).
+    #[tokio::test]
+    async fn alive_check_disabled_when_interval_zero() {
+        let mut harness = GatewaySenderTestHarness::new(Duration::ZERO);
+
+        // Advance a very long time - alive check should never fire.
+        #[allow(unknown_lints, clippy::duration_suboptimal_units)]
+        tokio::time::advance(Duration::from_secs(4200)).await;
+        tokio::task::yield_now().await;
+
+        assert!(
+            harness.reset_rx.try_recv().is_err(),
+            "Alive check should never fire when interval is zero (disabled)"
+        );
+        assert!(!harness.task.is_finished(), "Task should still be running");
+
+        // Clean up: abort the task.
+        harness.task.abort();
+        let _ = harness.task.await;
+    }
+
+    /// Validates that when both a message and the alive check are ready simultaneously,
+    /// the biased select ensures the message branch wins.
+    #[tokio::test]
+    async fn biased_select_prioritizes_messages_over_alive_check() {
+        let mut harness = GatewaySenderTestHarness::new(Duration::from_secs(5));
+
+        // Advance time past the alive check interval so both tick and message are ready.
+        tokio::time::advance(Duration::from_secs(6)).await;
+        // Send a message - both the tick and the message channel are now ready.
+        harness.send_dummy_message().await;
+
+        // Due to biased select the message branch is evaluated before the alive check
+        // branch. The message is processed first, which resets the timer - so the
+        // alive check does not fire this iteration and no reset is triggered.
+        assert!(
+            harness.reset_rx.try_recv().is_err(),
+            "Biased select should process the message before the alive check,              \
+             preventing an immediate reset"
+        );
+        assert!(!harness.task.is_finished(), "Task should still be running");
+
+        // Clean up: abort the task.
+        harness.task.abort();
+        let _ = harness.task.await;
+    }
 }

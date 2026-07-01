@@ -1,6 +1,5 @@
 /*
- * SPDX-License-Identifier: Apache-2.0
- * SPDX-FileCopyrightText: 2025 The Contributors to Eclipse OpenSOVD (see CONTRIBUTORS)
+ * SPDX-FileCopyrightText: 2025 Copyright (c) Contributors to the Eclipse Foundation
  *
  * See the NOTICE file(s) distributed with this work for additional
  * information regarding copyright ownership.
@@ -8,6 +7,8 @@
  * This program and the accompanying materials are made available under the
  * terms of the Apache License Version 2.0 which is available at
  * https://www.apache.org/licenses/LICENSE-2.0
+ *
+ * SPDX-License-Identifier: Apache-2.0
  */
 
 use aide::UseApi;
@@ -46,7 +47,6 @@ pub(crate) mod mdd_embedded_files {
     use axum_extra::extract::WithRejection;
     use cda_interfaces::{
         UdsEcu,
-        diagservices::DiagServiceResponse,
         file_manager::{ChunkMetaData, FileManager},
     };
     use http::{StatusCode, header};
@@ -54,14 +54,14 @@ pub(crate) mod mdd_embedded_files {
 
     use crate::sovd::{WebserverEcuState, create_schema, error::ApiError};
 
-    pub(crate) async fn get<R: DiagServiceResponse, T: UdsEcu + Clone, U: FileManager>(
+    pub(crate) async fn get<T: UdsEcu + Clone, U: FileManager>(
         WithRejection(Query(query), _): WithRejection<
             Query<sovd2uds::bulk_data::embedded_files::get::Query>,
             ApiError,
         >,
         State(WebserverEcuState {
             mdd_embedded_files, ..
-        }): State<WebserverEcuState<R, T, U>>,
+        }): State<WebserverEcuState<T, U>>,
     ) -> Response {
         let schema = if query.include_schema {
             Some(create_schema!(
@@ -75,13 +75,14 @@ pub(crate) mod mdd_embedded_files {
                 .list()
                 .await
                 .iter()
-                .map(|(id, meta)| sovd_interfaces::sovd2uds::File {
+                .map(|(id, meta)| sovd_interfaces::sovd2uds::BulkDataDescriptor {
                     hash: None,
                     hash_algorithm: None,
                     id: id.clone(),
                     mimetype: content_type_from_meta(meta),
-                    size: meta.uncompressed_size,
-                    origin_path: meta.name.clone(),
+                    size: Some(meta.uncompressed_size),
+                    origin_path: Some(meta.name.clone()),
+                    revision: None,
                 })
                 .collect(),
             schema,
@@ -95,13 +96,14 @@ pub(crate) mod mdd_embedded_files {
             .response_with::<200, Json<sovd2uds::bulk_data::embedded_files::get::Response>, _>(
                 |res| {
                     res.example(sovd2uds::bulk_data::embedded_files::get::Response {
-                        items: vec![sovd_interfaces::sovd2uds::File {
+                        items: vec![sovd_interfaces::sovd2uds::BulkDataDescriptor {
                             id: "example_file".to_owned(),
                             mimetype: "application/octet-stream".to_owned(),
-                            size: 1234,
+                            size: Some(1234),
                             hash: None,
                             hash_algorithm: None,
-                            origin_path: "example/path/to/file".to_owned(),
+                            origin_path: Some("example/path/to/file".to_owned()),
+                            revision: None,
                         }],
                         schema: None,
                     })
@@ -111,19 +113,18 @@ pub(crate) mod mdd_embedded_files {
 
     pub(crate) mod id {
         use super::{
-            ApiError, DiagServiceResponse, FileManager, IntoResponse, Path, Response, State,
-            StatusCode, TransformOperation, UdsEcu, WebserverEcuState, content_type_from_meta,
-            header,
+            ApiError, FileManager, IntoResponse, Path, Response, State, StatusCode,
+            TransformOperation, UdsEcu, WebserverEcuState, content_type_from_meta, header,
         };
         use crate::{
             openapi,
             sovd::{components::IdPathParam, error::ErrorWrapper},
         };
-        pub(crate) async fn get<R: DiagServiceResponse, T: UdsEcu + Clone, U: FileManager>(
+        pub(crate) async fn get<T: UdsEcu + Clone, U: FileManager>(
             Path(id): Path<IdPathParam>,
             State(WebserverEcuState {
                 mdd_embedded_files, ..
-            }): State<WebserverEcuState<R, T, U>>,
+            }): State<WebserverEcuState<T, U>>,
         ) -> Response {
             match mdd_embedded_files.get(&id).await {
                 Ok((meta, payload)) => (

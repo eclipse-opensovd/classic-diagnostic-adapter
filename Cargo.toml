@@ -1,5 +1,4 @@
-# SPDX-License-Identifier: Apache-2.0
-# SPDX-FileCopyrightText: 2025 The Contributors to Eclipse OpenSOVD (see CONTRIBUTORS)
+# SPDX-FileCopyrightText: 2025 Copyright (c) Contributors to the Eclipse Foundation
 #
 # See the NOTICE file(s) distributed with this work for additional
 # information regarding copyright ownership.
@@ -7,6 +6,8 @@
 # This program and the accompanying materials are made available under the
 # terms of the Apache License Version 2.0 which is available at
 # https://www.apache.org/licenses/LICENSE-2.0
+#
+# SPDX-License-Identifier: Apache-2.0
 
 [workspace.package]
 edition = "2024"
@@ -29,6 +30,7 @@ members = [
   "cda-main",
   "cda-tracing",
   "cda-plugin-security",
+  "cda-plugin-runtime-update",
   "cda-health",
   "cda-extra",
   "cda-storage",
@@ -48,6 +50,7 @@ cda-comm-can = { path = "cda-comm-can" }
 cda-comm-uds = { path = "cda-comm-uds" }
 cda-database = { path = "cda-database" }
 cda-plugin-security = { path = "cda-plugin-security" }
+cda-plugin-runtime-update = { path = "cda-plugin-runtime-update" }
 cda-sovd = { path = "cda-sovd" }
 cda-tracing = { path = "cda-tracing" }
 cda-health = { path = "cda-health" }
@@ -100,6 +103,7 @@ crc32fast = "1.4"
 foldhash = "0.2.0"
 memmap2 = "0.9"
 mockall = "0.14.0"
+tempfile = "3"
 sha2 = "0.10"
 rkyv = { version = "0.8.16", default-features = false, features = [
   "std",
@@ -154,6 +158,8 @@ unwrap_used = "deny"
 arithmetic_side_effects = "deny"
 separated_literal_suffix = "deny"
 disallowed_methods = "deny"
+string_slice = "deny"
+needless_pass_by_ref_mut = "deny"
 
 [workspace.lints.rust]
 unexpected_cfgs = { level = "warn", check-cfg = ['cfg(nightly)'] }

@@ -1,6 +1,5 @@
 /*
- * SPDX-License-Identifier: Apache-2.0
- * SPDX-FileCopyrightText: 2025 The Contributors to Eclipse OpenSOVD (see CONTRIBUTORS)
+ * SPDX-FileCopyrightText: 2025 Copyright (c) Contributors to the Eclipse Foundation
  *
  * See the NOTICE file(s) distributed with this work for additional
  * information regarding copyright ownership.
@@ -8,6 +7,8 @@
  * This program and the accompanying materials are made available under the
  * terms of the Apache License Version 2.0 which is available at
  * https://www.apache.org/licenses/LICENSE-2.0
+ *
+ * SPDX-License-Identifier: Apache-2.0
  */
 
 use aide::{UseApi, transform::TransformOperation};
@@ -18,8 +19,7 @@ use axum::{
 };
 use axum_extra::extract::WithRejection;
 use cda_interfaces::{
-    DynamicPlugin, UdsEcu, datatypes::ComponentConfigurationsInfo,
-    diagservices::DiagServiceResponse, file_manager::FileManager,
+    DynamicPlugin, UdsEcu, datatypes::ComponentConfigurationsInfo, file_manager::FileManager,
 };
 use cda_plugin_security::Secured;
 use http::StatusCode;
@@ -30,9 +30,9 @@ use crate::sovd::{
     error::{ApiError, ErrorWrapper},
 };
 
-pub(crate) async fn get<R: DiagServiceResponse, T: UdsEcu + Clone, U: FileManager>(
+pub(crate) async fn get<T: UdsEcu + Clone, U: FileManager>(
     UseApi(Secured(security_plugin), _): UseApi<Secured, ()>,
-    State(WebserverEcuState { ecu_name, uds, .. }): State<WebserverEcuState<R, T, U>>,
+    State(WebserverEcuState { ecu_name, uds, .. }): State<WebserverEcuState<T, U>>,
     WithRejection(Query(query), _): WithRejection<
         Query<sovd_configurations::ConfigurationsQuery>,
         ApiError,
@@ -116,8 +116,7 @@ pub(crate) mod diag_service {
     };
     use axum_extra::extract::WithRejection;
     use cda_interfaces::{
-        DiagComm, DiagCommType, SchemaProvider, UdsEcu, diagservices::DiagServiceResponse,
-        file_manager::FileManager,
+        DiagComm, DiagCommType, SchemaProvider, UdsEcu, file_manager::FileManager,
     };
     use cda_plugin_security::Secured;
     use http::HeaderMap;
@@ -132,11 +131,7 @@ pub(crate) mod diag_service {
         },
     };
 
-    pub(crate) async fn put<
-        R: DiagServiceResponse,
-        T: UdsEcu + SchemaProvider + Clone,
-        U: FileManager,
-    >(
+    pub(crate) async fn put<T: UdsEcu + SchemaProvider + Clone, U: FileManager>(
         headers: HeaderMap,
         UseApi(Secured(security_plugin), _): UseApi<Secured, ()>,
         Path(DiagServicePathParam { service }): Path<DiagServicePathParam>,
@@ -144,7 +139,7 @@ pub(crate) mod diag_service {
             Query<sovd_configurations::ConfigurationsQuery>,
             ApiError,
         >,
-        State(WebserverEcuState { ecu_name, uds, .. }): State<WebserverEcuState<R, T, U>>,
+        State(WebserverEcuState { ecu_name, uds, .. }): State<WebserverEcuState<T, U>>,
         body: Bytes,
     ) -> Response {
         let include_schema = query.include_schema;
@@ -184,5 +179,196 @@ pub(crate) mod diag_service {
             .with(openapi::error_conflict)
             .with(openapi::error_bad_request)
             .with(openapi::error_bad_gateway)
+    }
+
+    /// `GET /configurations/{service}/docs` - online capability description for a
+    /// configuration service.
+    pub(crate) mod docs_endpoint {
+        use aide::{UseApi, openapi::OpenApi, transform::TransformOperation};
+        use axum::{
+            Json,
+            extract::{Path, State},
+            response::{IntoResponse as _, Response},
+        };
+        use cda_interfaces::{DynamicPlugin, SchemaProvider, UdsEcu, file_manager::FileManager};
+        use cda_plugin_security::Secured;
+
+        use crate::{
+            openapi,
+            sovd::{WebserverEcuState, docs, error::ApiError},
+        };
+
+        openapi::aide_helper::gen_path_param!(ConfigDocsPathParam service String);
+
+        pub(crate) async fn get<T: UdsEcu + SchemaProvider + Clone, U: FileManager>(
+            UseApi(Secured(security_plugin), _): UseApi<Secured, ()>,
+            Path(ConfigDocsPathParam { service }): Path<ConfigDocsPathParam>,
+            State(WebserverEcuState { ecu_name, uds, .. }): State<WebserverEcuState<T, U>>,
+        ) -> Response {
+            let security_plugin: DynamicPlugin = security_plugin;
+
+            // Verify the configuration service exists
+            let config_info = match uds
+                .get_components_configuration_info(&ecu_name, &security_plugin)
+                .await
+            {
+                Ok(info) => info,
+                Err(e) => return ApiError::from(e).into_response(),
+            };
+
+            if !config_info
+                .iter()
+                .any(|c| c.id.eq_ignore_ascii_case(&service))
+            {
+                return ApiError::NotFound(Some(format!(
+                    "Configuration service '{service}' not found"
+                )))
+                .into_response();
+            }
+
+            docs::data::build_docs_response(&uds, &ecu_name, &service, "configurations").await
+        }
+
+        pub(crate) fn docs_transform(op: TransformOperation) -> TransformOperation {
+            op.description(
+                "Online capability description for a specific configuration service on this ECU \
+                 component (ISO 17978-3 Section 7.5). Returns a self-contained OpenAPI \
+                 specification describing the available methods (GET and PUT) with their data \
+                 types.",
+            )
+            .response_with::<200, Json<OpenApi>, _>(|res| {
+                res.description(
+                    "Self-contained OpenAPI 3.1 specification for this configuration service.",
+                )
+            })
+            .with(openapi::error_not_found)
+        }
+
+        #[cfg(test)]
+        mod tests {
+            use aide::UseApi;
+            use axum::{extract::State, http::StatusCode};
+            use cda_interfaces::{
+                DiagServiceError, datatypes::ComponentConfigurationsInfo,
+                file_manager::mock::MockFileManager, mock::MockUdsEcu,
+            };
+            use cda_plugin_security::{Secured, mock::TestSecurityPlugin};
+
+            use super::*;
+            use crate::sovd::tests::create_test_webserver_state;
+
+            #[tokio::test]
+            async fn returns_200_with_openapi_doc_when_config_exists() {
+                let mut mock_uds = MockUdsEcu::new();
+                mock_uds
+                    .expect_get_components_configuration_info()
+                    .withf(|ecu, _| ecu == "TestECU")
+                    .times(1)
+                    .returning(|_, _| {
+                        Ok(vec![ComponentConfigurationsInfo {
+                            id: "VarCoding1".to_owned(),
+                            name: "Variant Coding 1".to_owned(),
+                            configurations_type: "varcoding".to_owned(),
+                            service_abstract: vec![vec![0x22, 0x01, 0x00]],
+                        }])
+                    });
+
+                let state = create_test_webserver_state::<MockUdsEcu, MockFileManager>(
+                    "TestECU".to_owned(),
+                    mock_uds,
+                    MockFileManager::new(),
+                );
+
+                let response = get::<MockUdsEcu, MockFileManager>(
+                    UseApi(
+                        Secured(Box::new(TestSecurityPlugin)),
+                        std::marker::PhantomData,
+                    ),
+                    Path(ConfigDocsPathParam {
+                        service: "VarCoding1".to_owned(),
+                    }),
+                    State(state),
+                )
+                .await;
+
+                assert_eq!(response.status(), StatusCode::OK);
+                let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+                    .await
+                    .unwrap();
+                let doc: serde_json::Value = serde_json::from_slice(&body).unwrap();
+                assert!(
+                    doc.get("info").is_some(),
+                    "Response should be a valid OpenAPI doc"
+                );
+                assert!(doc.get("paths").is_some(), "Response should contain paths");
+            }
+
+            #[tokio::test]
+            async fn returns_404_when_config_not_found() {
+                let mut mock_uds = MockUdsEcu::new();
+                mock_uds
+                    .expect_get_components_configuration_info()
+                    .returning(|_, _| {
+                        Ok(vec![ComponentConfigurationsInfo {
+                            id: "VarCoding1".to_owned(),
+                            name: "Variant Coding 1".to_owned(),
+                            configurations_type: "varcoding".to_owned(),
+                            service_abstract: vec![],
+                        }])
+                    });
+
+                let state = create_test_webserver_state::<MockUdsEcu, MockFileManager>(
+                    "TestECU".to_owned(),
+                    mock_uds,
+                    MockFileManager::new(),
+                );
+
+                let response = get::<MockUdsEcu, MockFileManager>(
+                    UseApi(
+                        Secured(Box::new(TestSecurityPlugin)),
+                        std::marker::PhantomData,
+                    ),
+                    Path(ConfigDocsPathParam {
+                        service: "NonExistent".to_owned(),
+                    }),
+                    State(state),
+                )
+                .await;
+
+                assert_eq!(response.status(), StatusCode::NOT_FOUND);
+            }
+
+            #[tokio::test]
+            async fn returns_error_when_config_info_lookup_fails() {
+                let mut mock_uds = MockUdsEcu::new();
+                mock_uds
+                    .expect_get_components_configuration_info()
+                    .returning(|_, _| {
+                        Err(DiagServiceError::NotFound(
+                            "Functional class not found".to_owned(),
+                        ))
+                    });
+
+                let state = create_test_webserver_state::<MockUdsEcu, MockFileManager>(
+                    "TestECU".to_owned(),
+                    mock_uds,
+                    MockFileManager::new(),
+                );
+
+                let response = get::<MockUdsEcu, MockFileManager>(
+                    UseApi(
+                        Secured(Box::new(TestSecurityPlugin)),
+                        std::marker::PhantomData,
+                    ),
+                    Path(ConfigDocsPathParam {
+                        service: "Anything".to_owned(),
+                    }),
+                    State(state),
+                )
+                .await;
+
+                assert_eq!(response.status(), StatusCode::NOT_FOUND);
+            }
+        }
     }
 }

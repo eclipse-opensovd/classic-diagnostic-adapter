@@ -1,6 +1,5 @@
 /*
- * SPDX-License-Identifier: Apache-2.0
- * SPDX-FileCopyrightText: 2026 The Contributors to Eclipse OpenSOVD (see CONTRIBUTORS)
+ * SPDX-FileCopyrightText: 2026 Copyright (c) Contributors to the Eclipse Foundation
  *
  * See the NOTICE file(s) distributed with this work for additional
  * information regarding copyright ownership.
@@ -8,6 +7,8 @@
  * This program and the accompanying materials are made available under the
  * terms of the Apache License Version 2.0 which is available at
  * https://www.apache.org/licenses/LICENSE-2.0
+ *
+ * SPDX-License-Identifier: Apache-2.0
  */
 
 //! Local filesystem implementation of the [`Collection`] trait.
@@ -28,7 +29,7 @@ use crate::{io, paths, wal};
 /// A collection backed by a directory on the local filesystem.
 ///
 /// Each entry is stored as a file named after its key (normalized to lowercase).
-pub(crate) struct LocalCollection {
+pub struct LocalCollection {
     /// The name of this collection.
     name: CollectionName,
     /// Path to the collection directory: `{root}/collections/{collection_name}/`.

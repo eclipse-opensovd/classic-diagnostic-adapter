@@ -1,6 +1,5 @@
 /*
- * SPDX-License-Identifier: Apache-2.0
- * SPDX-FileCopyrightText: 2025 The Contributors to Eclipse OpenSOVD (see CONTRIBUTORS)
+ * SPDX-FileCopyrightText: 2025 Copyright (c) Contributors to the Eclipse Foundation
  *
  * See the NOTICE file(s) distributed with this work for additional
  * information regarding copyright ownership.
@@ -8,10 +7,13 @@
  * This program and the accompanying materials are made available under the
  * terms of the Apache License Version 2.0 which is available at
  * https://www.apache.org/licenses/LICENSE-2.0
+ *
+ * SPDX-License-Identifier: Apache-2.0
  */
 
 use std::collections::VecDeque;
 
+use cda_database::datatypes;
 use cda_interfaces::DiagServiceError;
 
 pub(in crate::diag_kernel) struct Payload<'a> {
@@ -143,8 +145,50 @@ impl<'a> Payload<'a> {
     }
 }
 
+pub(in crate::diag_kernel) fn str_to_json_value(
+    value: &str,
+    data_type: datatypes::DataType,
+) -> Result<serde_json::Value, DiagServiceError> {
+    let json_value = match data_type {
+        datatypes::DataType::Int32 => {
+            let i32val = value.parse::<i32>().map_err(|e| {
+                DiagServiceError::InvalidDatabase(format!(
+                    "CodedConst value ({value}) conversion error: {e}"
+                ))
+            })?;
+            serde_json::Number::from(i32val).into()
+        }
+        datatypes::DataType::UInt32 => {
+            let u32val = value.parse::<u32>().map_err(|e| {
+                DiagServiceError::InvalidDatabase(format!(
+                    "CodedConst value ({value}) conversion error: {e}"
+                ))
+            })?;
+            serde_json::Number::from(u32val).into()
+        }
+        datatypes::DataType::Float32 | datatypes::DataType::Float64 => {
+            let f64val = value.parse::<f64>().map_err(|e| {
+                DiagServiceError::InvalidDatabase(format!(
+                    "CodedConst value ({value}) conversion error: {e}"
+                ))
+            })?;
+            serde_json::Number::from_f64(f64val).into()
+        }
+        datatypes::DataType::AsciiString
+        | datatypes::DataType::Utf8String
+        | datatypes::DataType::Unicode2String
+        | datatypes::DataType::ByteField => serde_json::Value::from(value),
+    };
+    Ok(json_value)
+}
+
 #[cfg(test)]
 mod tests {
+    use cda_database::datatypes::DataType;
+    use serde_json::json;
+
+    use super::*;
+
     #[test]
     fn test_payload_type() {
         let raw_payload = vec![
@@ -167,5 +211,66 @@ mod tests {
         payload.set_last_read_byte_pos(20);
         payload.consume();
         assert!(payload.exhausted()); // should be exhausted now
+    }
+
+    #[test]
+    fn test_str_to_json_value_int32_success() {
+        assert_eq!(str_to_json_value("42", DataType::Int32), Ok(json!(42)));
+        assert_eq!(str_to_json_value("-1", DataType::Int32), Ok(json!(-1)));
+    }
+
+    #[test]
+    fn test_str_to_json_value_int32_invalid() {
+        assert!(str_to_json_value("abc", DataType::Int32).is_err());
+        assert!(str_to_json_value("12.5", DataType::Int32).is_err());
+    }
+
+    #[test]
+    fn test_str_to_json_value_uint32_success() {
+        assert_eq!(str_to_json_value("42", DataType::UInt32), Ok(json!(42)));
+    }
+
+    #[test]
+    fn test_str_to_json_value_uint32_invalid() {
+        assert!(str_to_json_value("-1", DataType::UInt32).is_err());
+        assert!(str_to_json_value("abc", DataType::UInt32).is_err());
+    }
+
+    #[test]
+    fn test_str_to_json_value_float32() {
+        assert_eq!(
+            str_to_json_value("3.42", DataType::Float32),
+            Ok(json!(3.42))
+        );
+        assert_eq!(str_to_json_value("42", DataType::Float32), Ok(json!(42.0)));
+        assert!(str_to_json_value("abc", DataType::Float32).is_err());
+    }
+
+    #[test]
+    fn test_str_to_json_value_float64() {
+        assert_eq!(
+            str_to_json_value("3.42", DataType::Float64),
+            Ok(json!(3.42))
+        );
+    }
+
+    #[test]
+    fn test_str_to_json_value_string_types() {
+        assert_eq!(
+            str_to_json_value("hello", DataType::AsciiString),
+            Ok(json!("hello"))
+        );
+        assert_eq!(
+            str_to_json_value("hello", DataType::Utf8String),
+            Ok(json!("hello"))
+        );
+        assert_eq!(
+            str_to_json_value("hello", DataType::Unicode2String),
+            Ok(json!("hello"))
+        );
+        assert_eq!(
+            str_to_json_value("hello", DataType::ByteField),
+            Ok(json!("hello"))
+        );
     }
 }

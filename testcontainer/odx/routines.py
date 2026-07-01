@@ -1,5 +1,4 @@
-# SPDX-License-Identifier: Apache-2.0
-# SPDX-FileCopyrightText: 2025 The Contributors to Eclipse OpenSOVD (see CONTRIBUTORS)
+# SPDX-FileCopyrightText: 2025 Copyright (c) Contributors to the Eclipse Foundation
 #
 # See the NOTICE file(s) distributed with this work for additional
 # information regarding copyright ownership.
@@ -7,6 +6,8 @@
 # This program and the accompanying materials are made available under the
 # terms of the Apache License Version 2.0 which is available at
 # https://www.apache.org/licenses/LICENSE-2.0
+#
+# SPDX-License-Identifier: Apache-2.0
 
 from helper import (
     coded_const_int_parameter,
@@ -45,6 +46,7 @@ def add_routine(
     functional_class: str = "Identification",
     description: str | None = None,
     is_functional: bool = False,
+    sdgs: list | None = None,
 ) -> None:
     """Add a RoutineControl (0x31) operation service to the diagnostic layer.
 
@@ -142,6 +144,7 @@ def add_routine(
             functional_class_refs=[functional_class_ref(dlr, functional_class)],
             request_ref=ref(request),
             pos_response_refs=[ref(response)],
+            sdgs=sdgs or [],
         )
     )
 

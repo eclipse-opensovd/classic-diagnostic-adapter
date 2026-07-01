@@ -1,6 +1,5 @@
 /*
- * SPDX-License-Identifier: Apache-2.0
- * SPDX-FileCopyrightText: 2025 The Contributors to Eclipse OpenSOVD (see CONTRIBUTORS)
+ * SPDX-FileCopyrightText: 2025 Copyright (c) Contributors to the Eclipse Foundation
  *
  * See the NOTICE file(s) distributed with this work for additional
  * information regarding copyright ownership.
@@ -8,6 +7,8 @@
  * This program and the accompanying materials are made available under the
  * terms of the Apache License Version 2.0 which is available at
  * https://www.apache.org/licenses/LICENSE-2.0
+ *
+ * SPDX-License-Identifier: Apache-2.0
  */
 
 use cda_interfaces::HashMap;
@@ -198,9 +199,9 @@ pub mod x {
         pub mod bulk_data {
             pub mod embedded_files {
                 pub mod get {
-                    use crate::{Items, sovd2uds::File};
+                    use crate::{Items, sovd2uds::BulkDataDescriptor};
 
-                    pub type Response = Items<File>;
+                    pub type Response = Items<BulkDataDescriptor>;
                     pub type Query = crate::IncludeSchemaQuery;
                 }
             }

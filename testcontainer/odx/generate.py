@@ -1,5 +1,4 @@
-# SPDX-License-Identifier: Apache-2.0
-# SPDX-FileCopyrightText: 2025 The Contributors to Eclipse OpenSOVD (see CONTRIBUTORS)
+# SPDX-FileCopyrightText: 2025 Copyright (c) Contributors to the Eclipse Foundation
 #
 # See the NOTICE file(s) distributed with this work for additional
 # information regarding copyright ownership.
@@ -7,6 +6,8 @@
 # This program and the accompanying materials are made available under the
 # terms of the Apache License Version 2.0 which is available at
 # https://www.apache.org/licenses/LICENSE-2.0
+#
+# SPDX-License-Identifier: Apache-2.0
 
 
 import odxtools
@@ -109,6 +110,64 @@ def get_default_sdgs(dlc: DiagLayerContainer, ecu_name: str) -> list[SpecialData
     return []
 
 
+def get_service_sdgs(
+    dlc: DiagLayerContainer, ecu_name: str
+) -> tuple[list[SpecialDataGroup], dict[str, list[SpecialDataGroup]]]:
+    """Return (data_service_sdgs, routine_sdgs_by_service) for the given ECU.
+
+    data_service_sdgs: SDGs to attach to the FluxCapacitorPowerConsumption_Read service.
+    routine_sdgs_by_service: maps routine service short names to their SDG lists.
+    """
+    doc_frags = dlc.odx_id.doc_fragments
+
+    if ecu_name != "FLXC1000":
+        return [], {}
+
+    data_sdgs = [
+        SpecialDataGroup(
+            sdg_caption=SpecialDataGroupCaption(
+                odx_id=OdxLinkId(
+                    local_id=f"EV.{ecu_name}.SDG.FluxCapacitorSDG",
+                    doc_fragments=doc_frags,
+                ),
+                short_name="flux_capacitor_sdg",
+                long_name="Flux Capacitor Metadata",
+            ),
+            semantic_info="sensor_metadata",
+            values=[
+                SpecialData(
+                    semantic_info="measurement_unit",
+                    value="gigawatts",
+                )
+            ],
+        )
+    ]
+
+    routine_sdgs = {
+        "SelfTest_Start": [
+            SpecialDataGroup(
+                sdg_caption=SpecialDataGroupCaption(
+                    odx_id=OdxLinkId(
+                        local_id=f"EV.{ecu_name}.SDG.SelfTestSDG",
+                        doc_fragments=doc_frags,
+                    ),
+                    short_name="self_test_sdg",
+                    long_name="Self Test Metadata",
+                ),
+                semantic_info="routine_metadata",
+                values=[
+                    SpecialData(
+                        semantic_info="expected_duration_ms",
+                        value="5000",
+                    )
+                ],
+            )
+        ]
+    }
+
+    return data_sdgs, routine_sdgs
+
+
 def add_base_variant(
     dlc: DiagLayerContainer,
     logical_address: int,
@@ -166,6 +225,9 @@ def add_base_variant(
     add_common_datatypes(base_variant)
     add_state_charts(base_variant)
 
+    # Retrieve service-level SDGs (only populated for FLXC1000)
+    data_sdgs, routine_sdgs = get_service_sdgs(dlc, ecu_name)
+
     # common services (session (10 xx), vin, ident)
     add_common_diag_comms(base_variant)
     # 11
@@ -185,11 +247,11 @@ def add_base_variant(
     # 31 - Clear User-Defined DTC Memory
     add_dtc_clear_user_memory_service(base_variant)
     # 31 - Operations (SelfTest, CalibrateSensors)
-    add_routine_control_services(base_variant)
+    add_routine_control_services(base_variant, sdgs_by_service=routine_sdgs)
 
     # FLXC1000-specific services
     if ecu_name == "FLXC1000":
-        add_power_consumption_service(base_variant)
+        add_power_consumption_service(base_variant, sdgs=data_sdgs)
 
     dlc.base_variants.append(BaseVariant(diag_layer_raw=base_variant))
 

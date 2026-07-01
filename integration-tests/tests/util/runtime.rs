@@ -1,6 +1,5 @@
 /*
- * SPDX-License-Identifier: Apache-2.0
- * SPDX-FileCopyrightText: 2025 The Contributors to Eclipse OpenSOVD (see CONTRIBUTORS)
+ * SPDX-FileCopyrightText: 2025 Copyright (c) Contributors to the Eclipse Foundation
  *
  * See the NOTICE file(s) distributed with this work for additional
  * information regarding copyright ownership.
@@ -8,6 +7,8 @@
  * This program and the accompanying materials are made available under the
  * terms of the Apache License Version 2.0 which is available at
  * https://www.apache.org/licenses/LICENSE-2.0
+ *
+ * SPDX-License-Identifier: Apache-2.0
  */
 
 use std::{
@@ -15,7 +16,6 @@ use std::{
     time::{Duration, Instant},
 };
 
-use cda_core::DiagServiceResponseStruct;
 use cda_health::config::HealthConfig;
 use cda_interfaces::{
     FunctionalDescriptionConfig, HashMap, HashMapExtensions,
@@ -31,7 +31,7 @@ use opensovd_cda_lib::{
     cda_version,
     config::configfile::{
         CanConfig, CanEcuMapping, ConfigSanity, Configuration, DatabaseConfig, EcuComParams,
-        EcuConfig, ServerConfig,
+        EcuConfig, RuntimeUpdateConfig, ServerConfig, StrictConfig,
     },
 };
 use tokio::sync::{Mutex, MutexGuard, OnceCell};
@@ -212,7 +212,7 @@ fn doip_test_config(
             exit_no_database_loaded: true,
             fallback_to_base_variant: true,
             ignore_protocol: false,
-            strict_ecu_config: false,
+            ignore_invalid_mdd: false,
         },
         logging: LoggingConfig::default(),
         flash_files_path: flash_files_path().unwrap_or_else(|_| ".".to_string()),
@@ -241,6 +241,11 @@ fn doip_test_config(
             ..Default::default()
         },
         ecu,
+        runtime_update_config: RuntimeUpdateConfig {
+            init_storage_from_database_path: true,
+            ..RuntimeUpdateConfig::default()
+        },
+        strict: StrictConfig::default(),
     }
 }
 
@@ -451,14 +456,19 @@ fn start_cda(config: Configuration) {
             .await;
         }
 
-        cda_sovd::add_vehicle_routes::<DiagServiceResponseStruct, _, _, DefaultSecurityPlugin>(
+        cda_sovd::add_vehicle_routes::<_, _, DefaultSecurityPlugin>(
             &dynamic_router,
-            vehicle_data.uds_manager,
-            config.flash_files_path.clone(),
-            vehicle_data.file_managers,
-            vehicle_data.locks,
-            config.functional_description,
-            config.components,
+            cda_sovd::VehicleConfig {
+                flash_files_path: config.flash_files_path.clone(),
+                functional_group_config: config.functional_description,
+                components_config: config.components,
+            },
+            cda_sovd::VehicleResources {
+                ecu_uds: vehicle_data.uds_manager,
+                file_manager: vehicle_data.file_managers,
+                locks: vehicle_data.locks,
+                update_in_progress: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            },
         )
         .await
         .map_err(|e| {
@@ -894,7 +904,9 @@ async fn wait_for_ecu_sim_ready(host: &str, sim_control_port: u16) -> Result<(),
     let timeout = if use_docker() {
         Duration::from_secs(10)
     } else {
-        Duration::from_secs(300)
+        // use 333 as its not divisible by 60 to prevent
+        // nightly clippy from suggesting to use from_mins
+        Duration::from_secs(333)
     };
     wait_for_http_ready_with_timeout(url, "ECU sim", None, timeout).await
 }
@@ -977,7 +989,7 @@ pub(crate) fn find_available_tcp_port(listen_address: &str) -> Result<u16, Testi
         .port())
 }
 
-fn test_container_dir() -> Result<std::path::PathBuf, TestingError> {
+pub(crate) fn test_container_dir() -> Result<std::path::PathBuf, TestingError> {
     std::env::var("CARGO_MANIFEST_DIR")
         .map(|dir| {
             let mut path = std::path::PathBuf::from(dir);

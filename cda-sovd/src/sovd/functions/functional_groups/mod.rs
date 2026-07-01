@@ -1,6 +1,5 @@
 /*
- * SPDX-License-Identifier: Apache-2.0
- * SPDX-FileCopyrightText: 2025 The Contributors to Eclipse OpenSOVD (see CONTRIBUTORS)
+ * SPDX-FileCopyrightText: 2025 Copyright (c) Contributors to the Eclipse Foundation
  *
  * See the NOTICE file(s) distributed with this work for additional
  * information regarding copyright ownership.
@@ -8,6 +7,8 @@
  * This program and the accompanying materials are made available under the
  * terms of the Apache License Version 2.0 which is available at
  * https://www.apache.org/licenses/LICENSE-2.0
+ *
+ * SPDX-License-Identifier: Apache-2.0
  */
 
 use std::sync::Arc;
@@ -52,6 +53,7 @@ pub(crate) struct WebserverFgState<T: UdsEcu + Clone> {
     locks: Arc<Locks>,
     functional_group_name: String,
     fg_executions: Arc<RwLock<HashMap<String, IndexMap<Uuid, FgServiceExecution>>>>,
+    update_in_progress: Arc<std::sync::atomic::AtomicBool>,
 }
 
 pub(crate) async fn create_functional_group_routes<T: UdsEcu + SchemaProvider + Clone>(
@@ -141,6 +143,7 @@ pub(crate) async fn create_functional_group_routes<T: UdsEcu + SchemaProvider + 
             locks: Arc::clone(&state.locks),
             functional_group_name: group.clone(),
             fg_executions: Arc::new(RwLock::new(HashMap::default())),
+            update_in_progress: Arc::clone(&state.update_in_progress),
         };
         functional_groups_router = functional_groups_router.nest_api_service(
             &format!("/functionalgroups/{group}"),
@@ -506,6 +509,7 @@ pub(crate) mod tests {
             }),
             functional_group_name,
             fg_executions: Arc::new(RwLock::new(HashMap::default())),
+            update_in_progress: Arc::new(std::sync::atomic::AtomicBool::new(false)),
         }
     }
 }

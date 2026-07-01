@@ -1,6 +1,5 @@
 /*
- * SPDX-License-Identifier: Apache-2.0
- * SPDX-FileCopyrightText: 2025 The Contributors to Eclipse OpenSOVD (see CONTRIBUTORS)
+ * SPDX-FileCopyrightText: 2025 Copyright (c) Contributors to the Eclipse Foundation
  *
  * See the NOTICE file(s) distributed with this work for additional
  * information regarding copyright ownership.
@@ -8,6 +7,8 @@
  * This program and the accompanying materials are made available under the
  * terms of the Apache License Version 2.0 which is available at
  * https://www.apache.org/licenses/LICENSE-2.0
+ *
+ * SPDX-License-Identifier: Apache-2.0
  */
 
 use aide::{axum::IntoApiResponse, transform::TransformOperation};
@@ -47,8 +48,9 @@ pub(crate) mod x_single_ecu_jobs;
 pub(crate) mod x_sovd2uds_bulk_data;
 pub(crate) mod x_sovd2uds_download;
 
-pub(crate) async fn get<R: DiagServiceResponse, T: UdsEcu + Clone, U: FileManager>(
-    State(WebserverEcuState { ecu_name, uds, .. }): State<WebserverEcuState<R, T, U>>,
+// [[ dimpl~sovd-api-component-sdgsd, GET /components/{ecu} SDG handler ]]
+pub(crate) async fn get<T: UdsEcu + Clone, U: FileManager>(
+    State(WebserverEcuState { ecu_name, uds, .. }): State<WebserverEcuState<T, U>>,
     WithRejection(Query(query), _): WithRejection<
         Query<sovd_interfaces::components::ComponentQuery>,
         ApiError,
@@ -145,8 +147,8 @@ pub(crate) fn docs_get(op: TransformOperation) -> TransformOperation {
         })
 }
 
-pub(crate) async fn post<R: DiagServiceResponse, T: UdsEcu + Clone, U: FileManager>(
-    State(WebserverEcuState { ecu_name, uds, .. }): State<WebserverEcuState<R, T, U>>,
+pub(crate) async fn post<T: UdsEcu + Clone, U: FileManager>(
+    State(WebserverEcuState { ecu_name, uds, .. }): State<WebserverEcuState<T, U>>,
 ) -> Response {
     update(&ecu_name, uds).await
 }
@@ -157,8 +159,8 @@ pub(crate) async fn post<R: DiagServiceResponse, T: UdsEcu + Clone, U: FileManag
 // Delegates to the UDS layer which sends diagnostic requests to the ECU and
 // evaluates the responses against known variant patterns. Returns 201 on
 // success or an error response if detection fails.
-pub(crate) async fn put<R: DiagServiceResponse, T: UdsEcu + Clone, U: FileManager>(
-    State(WebserverEcuState { ecu_name, uds, .. }): State<WebserverEcuState<R, T, U>>,
+pub(crate) async fn put<T: UdsEcu + Clone, U: FileManager>(
+    State(WebserverEcuState { ecu_name, uds, .. }): State<WebserverEcuState<T, U>>,
 ) -> Response {
     update(&ecu_name, uds).await
 }

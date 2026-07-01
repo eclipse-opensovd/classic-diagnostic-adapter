@@ -1,5 +1,4 @@
-# SPDX-License-Identifier: Apache-2.0
-# SPDX-FileCopyrightText: 2025 The Contributors to Eclipse OpenSOVD (see CONTRIBUTORS)
+# SPDX-FileCopyrightText: 2025 Copyright (c) Contributors to the Eclipse Foundation
 #
 # See the NOTICE file(s) distributed with this work for additional
 # information regarding copyright ownership.
@@ -7,6 +6,8 @@
 # This program and the accompanying materials are made available under the
 # terms of the Apache License Version 2.0 which is available at
 # https://www.apache.org/licenses/LICENSE-2.0
+#
+# SPDX-License-Identifier: Apache-2.0
 
 [package]
 name = "cda-sovd"
@@ -25,7 +26,9 @@ workspace = true
 
 [dependencies]
 # internal dependencies
+async-trait = { workspace = true }
 cda-interfaces = { workspace = true }
+cda-plugin-runtime-update = { workspace = true }
 cda-plugin-security = { workspace = true }
 cda-tracing = { workspace = true }
 opensovd-axum-extra = { workspace = true, features = [
@@ -64,8 +67,10 @@ axum = { workspace = true, features = [
   "query",
   "matched-path",
   "original-uri",
+  "multipart",
 ] }
 axum-extra = { workspace = true, features = ["typed-header", "with-rejection"] }
+bytes = { workspace = true }
 chrono = { workspace = true }
 http = { workspace = true }
 indexmap = { workspace = true }

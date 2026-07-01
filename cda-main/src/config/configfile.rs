@@ -1,6 +1,5 @@
 /*
- * SPDX-License-Identifier: Apache-2.0
- * SPDX-FileCopyrightText: 2025 The Contributors to Eclipse OpenSOVD (see CONTRIBUTORS)
+ * SPDX-FileCopyrightText: 2025 Copyright (c) Contributors to the Eclipse Foundation
  *
  * See the NOTICE file(s) distributed with this work for additional
  * information regarding copyright ownership.
@@ -8,6 +7,8 @@
  * This program and the accompanying materials are made available under the
  * terms of the Apache License Version 2.0 which is available at
  * https://www.apache.org/licenses/LICENSE-2.0
+ *
+ * SPDX-License-Identifier: Apache-2.0
  */
 
 // `CanConfig` is always available: the `config` module of cda-comm-can is not
@@ -28,6 +29,7 @@ use cda_interfaces::{
         FaultConfig, FlatbBufConfig, SdBoolMappings, SdMappingsTruthyValue,
     },
 };
+pub use cda_plugin_runtime_update::config::RuntimeUpdateConfig;
 use serde::{Deserialize, Serialize};
 
 use crate::AppError;
@@ -138,6 +140,35 @@ impl schemars::JsonSchema for EcuComParams {
     }
 }
 
+/// Strict-mode flags that opt in to stricter runtime validation.
+///
+/// When `enabled` is `true`, every individual check is activated regardless
+/// of its own value.  Individual flags can also be turned on independently
+/// for more granular control.
+#[derive(Deserialize, Serialize, Clone, Debug, Default, schemars::JsonSchema)]
+pub struct StrictConfig {
+    /// Master switch - when `true`, all individual strict checks are enabled.
+    pub enabled: bool,
+    /// Reject requests containing parameters not defined in the diagnostic
+    /// service with a `BadPayload` error (HTTP 400).
+    pub parameter_validation: bool,
+    /// Exit with an error if any key under `[ecu.<name>]` does not match a
+    /// loaded MDD database.
+    pub ecu_config: bool,
+}
+
+impl StrictConfig {
+    #[must_use]
+    pub fn parameter_validation(&self) -> bool {
+        self.enabled || self.parameter_validation
+    }
+
+    #[must_use]
+    pub fn ecu_config(&self) -> bool {
+        self.enabled || self.ecu_config
+    }
+}
+
 /// Top-level application configuration.
 #[derive(Deserialize, Serialize, Clone, Debug, schemars::JsonSchema)]
 pub struct Configuration {
@@ -170,8 +201,11 @@ pub struct Configuration {
     pub faults: FaultConfig,
     /// Per-ECU configuration blocks keyed by ECU short name (case-insensitive
     /// match against the MDD short name returned by `load_proto_data`).
-    #[serde(default)]
     pub ecu: HashMap<String, EcuConfig>,
+    /// Configuration for update plugin, i.e. storage paths
+    pub runtime_update_config: RuntimeUpdateConfig,
+    /// Strict-mode validation flags.
+    pub strict: StrictConfig,
 }
 
 /// Per-ECU configuration block.
@@ -199,6 +233,14 @@ pub struct ServerConfig {
     /// TCP port the server listens on.
     pub port: u16,
 }
+impl Default for ServerConfig {
+    fn default() -> Self {
+        Self {
+            address: "0.0.0.0".to_owned(),
+            port: 20002,
+        }
+    }
+}
 
 pub trait ConfigSanity {
     /// Checks the configuration for common mistakes and returns an error message if found.
@@ -210,19 +252,9 @@ pub trait ConfigSanity {
 impl Default for Configuration {
     fn default() -> Self {
         Configuration {
-            database: DatabaseConfig {
-                path: ".".to_owned(),
-                naming_convention: DatabaseNamingConvention::default(),
-                exit_no_database_loaded: false,
-                fallback_to_base_variant: true,
-                ignore_protocol: false,
-                strict_ecu_config: false,
-            },
+            database: DatabaseConfig::default(),
             flash_files_path: ".".to_owned(),
-            server: ServerConfig {
-                address: "0.0.0.0".to_owned(),
-                port: 20002,
-            },
+            server: ServerConfig::default(),
             #[cfg(feature = "health")]
             health: cda_health::config::HealthConfig::default(),
             doip: DoipConfig {
@@ -233,12 +265,7 @@ impl Default for Configuration {
             logging: cda_tracing::LoggingConfig::default(),
             com_params: ComParams::default(),
             flat_buf: FlatbBufConfig::default(),
-            functional_description: FunctionalDescriptionConfig {
-                description_database: "functional_groups".to_owned(),
-                enabled_functional_groups: None,
-                protocol_position:
-                    cda_interfaces::datatypes::DiagnosticServiceAffixPosition::Suffix,
-            },
+            functional_description: FunctionalDescriptionConfig::default(),
             components: ComponentsConfig {
                 additional_fields: HashMap::from_iter([
                     (
@@ -265,6 +292,8 @@ impl Default for Configuration {
             },
             faults: FaultConfig::default(),
             ecu: HashMap::default(),
+            runtime_update_config: RuntimeUpdateConfig::default(),
+            strict: StrictConfig::default(),
         }
     }
 }
@@ -762,5 +791,48 @@ logical_gateway_address = 9999
             "figment extraction must fail when the TOML contains an incompatible type; confirms \
              the resolve_com_params Err branch is reachable"
         );
+    }
+
+    #[test]
+    fn strict_config_master_switch_enables_all() {
+        let cfg = StrictConfig {
+            enabled: true,
+            parameter_validation: false,
+            ecu_config: false,
+        };
+        assert!(cfg.parameter_validation());
+        assert!(cfg.ecu_config());
+    }
+
+    #[test]
+    fn strict_config_individual_flags_work_independently() {
+        let cfg = StrictConfig {
+            enabled: false,
+            parameter_validation: true,
+            ecu_config: false,
+        };
+        assert!(cfg.parameter_validation());
+        assert!(!cfg.ecu_config());
+    }
+
+    #[test]
+    fn strict_config_defaults_to_all_disabled() {
+        let cfg = StrictConfig::default();
+        assert!(!cfg.parameter_validation());
+        assert!(!cfg.ecu_config());
+    }
+
+    #[tokio::test]
+    async fn strict_config_parsed_from_toml() {
+        let config_str = r"
+[strict]
+enabled = false
+parameter_validation = true
+";
+        let figment = Figment::from(Serialized::defaults(Configuration::default()))
+            .merge(Toml::string(config_str));
+        let config: Configuration = figment.extract().unwrap();
+        assert!(config.strict.parameter_validation());
+        assert!(!config.strict.ecu_config());
     }
 }

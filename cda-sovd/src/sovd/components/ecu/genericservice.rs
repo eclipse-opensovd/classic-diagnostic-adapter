@@ -1,6 +1,5 @@
 /*
- * SPDX-License-Identifier: Apache-2.0
- * SPDX-FileCopyrightText: 2025 The Contributors to Eclipse OpenSOVD (see CONTRIBUTORS)
+ * SPDX-FileCopyrightText: 2025 Copyright (c) Contributors to the Eclipse Foundation
  *
  * See the NOTICE file(s) distributed with this work for additional
  * information regarding copyright ownership.
@@ -8,15 +7,13 @@
  * This program and the accompanying materials are made available under the
  * terms of the Apache License Version 2.0 which is available at
  * https://www.apache.org/licenses/LICENSE-2.0
+ *
+ * SPDX-License-Identifier: Apache-2.0
  */
 
 use aide::UseApi;
 use axum::{body::Bytes, extract::State, response::Response};
-use cda_interfaces::{
-    UdsEcu,
-    diagservices::{DiagServiceResponse, UdsPayloadData},
-    file_manager::FileManager,
-};
+use cda_interfaces::{UdsEcu, diagservices::UdsPayloadData, file_manager::FileManager};
 use cda_plugin_security::Secured;
 use http::{HeaderMap, header};
 
@@ -26,10 +23,10 @@ use crate::{
     sovd::{WebserverEcuState, get_octet_stream_payload},
 };
 
-pub(crate) async fn put<R: DiagServiceResponse, T: UdsEcu + Clone, U: FileManager>(
+pub(crate) async fn put<T: UdsEcu + Clone, U: FileManager>(
     headers: HeaderMap,
     UseApi(Secured(security_plugin), _): UseApi<Secured, ()>,
-    State(WebserverEcuState { ecu_name, uds, .. }): State<WebserverEcuState<R, T, U>>,
+    State(WebserverEcuState { ecu_name, uds, .. }): State<WebserverEcuState<T, U>>,
     body: Bytes,
 ) -> Response {
     match headers.get(header::ACCEPT) {

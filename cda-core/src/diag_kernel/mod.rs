@@ -1,6 +1,5 @@
 /*
- * SPDX-License-Identifier: Apache-2.0
- * SPDX-FileCopyrightText: 2025 The Contributors to Eclipse OpenSOVD (see CONTRIBUTORS)
+ * SPDX-FileCopyrightText: 2025 Copyright (c) Contributors to the Eclipse Foundation
  *
  * See the NOTICE file(s) distributed with this work for additional
  * information regarding copyright ownership.
@@ -8,6 +7,8 @@
  * This program and the accompanying materials are made available under the
  * terms of the Apache License Version 2.0 which is available at
  * https://www.apache.org/licenses/LICENSE-2.0
+ *
+ * SPDX-License-Identifier: Apache-2.0
  */
 
 use std::fmt::Debug;
@@ -19,13 +20,27 @@ use cda_database::{
 use cda_interfaces::{DiagServiceError, HashMap};
 use serde::{Serialize, Serializer};
 
+pub(crate) mod comparam;
+pub(crate) mod component_info;
+pub(crate) mod diag_comm_lookup;
 pub(crate) mod diagservices;
+pub(crate) mod dtc;
 pub(crate) mod ecumanager;
 pub(crate) mod iso_14229_nrc;
 mod operations;
 pub(crate) mod param_metadata;
-mod payload;
+pub(crate) mod payload;
+pub(crate) mod payload_decode;
+pub(crate) mod payload_encode;
 mod schema;
+pub(crate) mod security;
+pub(crate) mod service_lookup;
+pub(crate) mod state;
+pub(crate) mod variant;
+
+#[cfg(test)]
+pub(crate) mod test_utils;
+
 mod variant_detection;
 
 #[derive(Debug)]

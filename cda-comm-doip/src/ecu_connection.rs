@@ -1,6 +1,5 @@
 /*
- * SPDX-License-Identifier: Apache-2.0
- * SPDX-FileCopyrightText: 2025 The Contributors to Eclipse OpenSOVD (see CONTRIBUTORS)
+ * SPDX-FileCopyrightText: 2025 Copyright (c) Contributors to the Eclipse Foundation
  *
  * See the NOTICE file(s) distributed with this work for additional
  * information regarding copyright ownership.
@@ -8,6 +7,8 @@
  * This program and the accompanying materials are made available under the
  * terms of the Apache License Version 2.0 which is available at
  * https://www.apache.org/licenses/LICENSE-2.0
+ *
+ * SPDX-License-Identifier: Apache-2.0
  */
 
 use std::time::Duration;
@@ -25,6 +26,7 @@ use mbedtls_rs::{
 #[cfg(feature = "openssl")]
 use openssl::ssl::{Ssl, SslContextBuilder, SslMethod, SslOptions, SslVerifyMode, SslVersion};
 use tokio::{
+    io::{AsyncRead, AsyncWrite},
     net::{TcpSocket, TcpStream},
     sync::Mutex,
 };
@@ -125,13 +127,13 @@ pub(crate) trait ECUConnectionSend {
         Self: std::borrow::Borrow<Self>;
 }
 
-enum EcuConnectionVariant {
+enum EcuConnectionVariant<T: AsyncRead + AsyncWrite + Unpin = TcpStream> {
     #[cfg(any(feature = "openssl", feature = "mbedtls"))]
     Tls(DoIPConnection<TlsStream<TcpStream>>),
-    Plain(DoIPConnection<TcpStream>),
+    Plain(DoIPConnection<T>),
 }
 
-impl EcuConnectionVariant {
+impl<T: AsyncRead + AsyncWrite + Unpin> EcuConnectionVariant<T> {
     async fn send(&mut self, msg: DoipPayload) -> Result<(), ConnectionError> {
         match self {
             #[cfg(any(feature = "openssl", feature = "mbedtls"))]
@@ -147,7 +149,7 @@ impl EcuConnectionVariant {
             EcuConnectionVariant::Plain(conn) => conn.read().await,
         }
     }
-    fn into_split(self) -> (EcuConnectionReadVariant, EcuConnectionSendVariant) {
+    fn into_split(self) -> (EcuConnectionReadVariant<T>, EcuConnectionSendVariant<T>) {
         match self {
             #[cfg(any(feature = "openssl", feature = "mbedtls"))]
             EcuConnectionVariant::Tls(conn) => {
@@ -168,51 +170,54 @@ impl EcuConnectionVariant {
     }
 }
 
-pub(crate) enum EcuConnectionReadVariant {
+pub(crate) enum EcuConnectionReadVariant<T: AsyncRead + Unpin = TcpStream> {
     #[cfg(any(feature = "openssl", feature = "mbedtls"))]
     Tls(DoIPConnectionReadHalf<TlsStream<TcpStream>>),
-    Plain(DoIPConnectionReadHalf<TcpStream>),
+    Plain(DoIPConnectionReadHalf<T>),
 }
-pub(crate) enum EcuConnectionSendVariant {
+pub(crate) enum EcuConnectionSendVariant<T: AsyncWrite + Unpin = TcpStream> {
     #[cfg(any(feature = "openssl", feature = "mbedtls"))]
     Tls(DoIPConnectionWriteHalf<TlsStream<TcpStream>>),
-    Plain(DoIPConnectionWriteHalf<TcpStream>),
+    Plain(DoIPConnectionWriteHalf<T>),
 }
 
-pub(crate) struct EcuConnectionTarget {
-    pub(crate) ecu_connection_rx: Mutex<Option<EcuConnectionReadVariant>>,
-    pub(crate) ecu_connection_tx: Mutex<Option<EcuConnectionSendVariant>>,
+pub(crate) struct EcuConnectionTarget<
+    T: AsyncRead + AsyncWrite + Unpin + Send + 'static = TcpStream,
+> {
+    pub(crate) ecu_connection_rx: Mutex<Option<EcuConnectionReadVariant<T>>>,
+    pub(crate) ecu_connection_tx: Mutex<Option<EcuConnectionSendVariant<T>>>,
     pub(crate) gateway_name: String,
     pub(crate) gateway_ip: String,
+    pub(crate) tester_address: [u8; 2],
 }
 
-pub struct EcuConnectionSendGuard<'a> {
-    guard: tokio::sync::MutexGuard<'a, Option<EcuConnectionSendVariant>>,
+pub struct EcuConnectionSendGuard<'a, T: AsyncWrite + Unpin = TcpStream> {
+    guard: tokio::sync::MutexGuard<'a, Option<EcuConnectionSendVariant<T>>>,
 }
 
-impl EcuConnectionSendGuard<'_> {
-    pub(crate) fn get_sender(&mut self) -> &mut EcuConnectionSendVariant {
+impl<T: AsyncWrite + Unpin> EcuConnectionSendGuard<'_, T> {
+    pub(crate) fn get_sender(&mut self) -> &mut EcuConnectionSendVariant<T> {
         self.guard.as_mut().expect("Sender should be Some")
     }
 }
 
-pub struct EcuConnectionReadGuard<'a> {
-    guard: tokio::sync::MutexGuard<'a, Option<EcuConnectionReadVariant>>,
+pub struct EcuConnectionReadGuard<'a, T: AsyncRead + Unpin = TcpStream> {
+    guard: tokio::sync::MutexGuard<'a, Option<EcuConnectionReadVariant<T>>>,
 }
 
-impl EcuConnectionReadGuard<'_> {
-    pub(crate) fn get_reader(&mut self) -> &mut EcuConnectionReadVariant {
+impl<T: AsyncRead + Unpin> EcuConnectionReadGuard<'_, T> {
+    pub(crate) fn get_reader(&mut self) -> &mut EcuConnectionReadVariant<T> {
         self.guard.as_mut().expect("Reader should be Some")
     }
 }
 
-pub struct EcuConnectionGuard<'a> {
-    read_guard: EcuConnectionReadGuard<'a>,
-    send_guard: EcuConnectionSendGuard<'a>,
+pub struct EcuConnectionGuard<'a, T: AsyncRead + AsyncWrite + Unpin + Send + 'static = TcpStream> {
+    read_guard: EcuConnectionReadGuard<'a, T>,
+    send_guard: EcuConnectionSendGuard<'a, T>,
 }
 
-impl EcuConnectionTarget {
-    pub(crate) async fn lock_send(&self) -> Result<EcuConnectionSendGuard<'_>, ConnectionError> {
+impl<T: AsyncRead + AsyncWrite + Unpin + Send + 'static> EcuConnectionTarget<T> {
+    pub(crate) async fn lock_send(&self) -> Result<EcuConnectionSendGuard<'_, T>, ConnectionError> {
         let guard = self.ecu_connection_tx.lock().await;
         match *guard {
             Some(_) => Ok(EcuConnectionSendGuard { guard }),
@@ -220,7 +225,7 @@ impl EcuConnectionTarget {
         }
     }
 
-    pub(crate) async fn lock_read(&self) -> Result<EcuConnectionReadGuard<'_>, ConnectionError> {
+    pub(crate) async fn lock_read(&self) -> Result<EcuConnectionReadGuard<'_, T>, ConnectionError> {
         let guard = self.ecu_connection_rx.lock().await;
         match *guard {
             Some(_) => Ok(EcuConnectionReadGuard { guard }),
@@ -228,7 +233,7 @@ impl EcuConnectionTarget {
         }
     }
 
-    pub(crate) async fn lock_connection(&self) -> EcuConnectionGuard<'_> {
+    pub(crate) async fn lock_connection(&self) -> EcuConnectionGuard<'_, T> {
         let ecu_connection_rx = self.ecu_connection_rx.lock().await;
         let ecu_connection_tx = self.ecu_connection_tx.lock().await;
         EcuConnectionGuard {
@@ -241,13 +246,16 @@ impl EcuConnectionTarget {
         }
     }
 
-    pub(crate) fn reconnect(guard: &mut EcuConnectionGuard<'_>, new_target: EcuConnectionTarget) {
+    pub(crate) fn reconnect(
+        guard: &mut EcuConnectionGuard<'_, T>,
+        new_target: EcuConnectionTarget<T>,
+    ) {
         *guard.read_guard.guard = new_target.ecu_connection_rx.into_inner();
         *guard.send_guard.guard = new_target.ecu_connection_tx.into_inner();
     }
 }
 
-impl ECUConnectionSend for EcuConnectionSendVariant {
+impl<T: AsyncWrite + Unpin> ECUConnectionSend for EcuConnectionSendVariant<T> {
     async fn send(&mut self, msg: DoipPayload) -> Result<(), ConnectionError> {
         match self {
             #[cfg(any(feature = "openssl", feature = "mbedtls"))]
@@ -258,7 +266,7 @@ impl ECUConnectionSend for EcuConnectionSendVariant {
     }
 }
 
-impl ECUConnectionRead for EcuConnectionReadVariant {
+impl<T: AsyncRead + Unpin> ECUConnectionRead for EcuConnectionReadVariant<T> {
     async fn read(&mut self) -> Option<Result<DoipMessage, ConnectionError>> {
         match self {
             #[cfg(any(feature = "openssl", feature = "mbedtls"))]
@@ -368,6 +376,7 @@ pub(crate) async fn establish_ecu_connection(
                         ecu_connection_rx: Mutex::new(Some(read)),
                         gateway_name: gateway_name.to_owned(),
                         gateway_ip: gateway_ip.to_owned(),
+                        tester_address: routing_activation_request.source_address,
                     })
                 }
                 ActivationCode::DeniedRequestEncryptedTLSConnection => {
@@ -478,6 +487,7 @@ pub(crate) async fn establish_tls_ecu_connection(
                 ecu_connection_rx: Mutex::new(Some(read)),
                 gateway_name: gateway_name.to_owned(),
                 gateway_ip: gateway_ip.to_owned(),
+                tester_address: routing_activation_request.source_address,
             }) // Routing activated
         }
         Err(e) => Err(ConnectionError::RoutingError(format!(
@@ -598,9 +608,9 @@ async fn create_tls_stream(
         dlt_context  = dlt_ctx!("DOIP"),
     )
 )]
-async fn try_read_routing_activation_response(
+async fn try_read_routing_activation_response<T: AsyncRead + AsyncWrite + Unpin>(
     timeout: std::time::Duration,
-    reader: &mut EcuConnectionVariant,
+    reader: &mut EcuConnectionVariant<T>,
     _gateway_name: &str,
     _gateway_ip: &str,
 ) -> Result<RoutingActivationResponse, DiagServiceError> {

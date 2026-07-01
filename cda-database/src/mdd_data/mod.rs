@@ -1,6 +1,5 @@
 /*
- * SPDX-License-Identifier: Apache-2.0
- * SPDX-FileCopyrightText: 2025 The Contributors to Eclipse OpenSOVD (see CONTRIBUTORS)
+ * SPDX-FileCopyrightText: 2025 Copyright (c) Contributors to the Eclipse Foundation
  *
  * See the NOTICE file(s) distributed with this work for additional
  * information regarding copyright ownership.
@@ -8,6 +7,8 @@
  * This program and the accompanying materials are made available under the
  * terms of the Apache License Version 2.0 which is available at
  * https://www.apache.org/licenses/LICENSE-2.0
+ *
+ * SPDX-License-Identifier: Apache-2.0
  */
 
 use std::{io::Read, time::Instant};
@@ -96,7 +97,7 @@ fn decompress_chunk_data(
 /// # Errors
 /// Returns an error if the file cannot be opened, memory-mapped, has invalid
 /// magic bytes, or cannot be parsed as a protobuf.
-fn mmap_and_decode_mdd(mdd_path: &str) -> Result<fileformat::MddFile, MddError> {
+pub fn mmap_and_decode_mdd(mdd_path: &str) -> Result<fileformat::MddFile, MddError> {
     let mdd_file = std::fs::File::open(mdd_path)
         .map_err(|e| MddError::Io(format!("Failed to open MDD file '{mdd_path}': {e}")))?;
 

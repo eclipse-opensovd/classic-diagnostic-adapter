@@ -1,5 +1,4 @@
-.. SPDX-License-Identifier: Apache-2.0
-.. SPDX-FileCopyrightText: 2026 The Contributors to Eclipse OpenSOVD (see CONTRIBUTORS)
+.. SPDX-FileCopyrightText: 2026 Copyright (c) Contributors to the Eclipse Foundation
 ..
 .. See the NOTICE file(s) distributed with this work for additional
 .. information regarding copyright ownership.
@@ -7,6 +6,8 @@
 .. This program and the accompanying materials are made available under the
 .. terms of the Apache License Version 2.0 which is available at
 .. https://www.apache.org/licenses/LICENSE-2.0
+..
+.. SPDX-License-Identifier: Apache-2.0
 
 Diagnostic Database Update Plugin
 ---------------------------------
@@ -65,11 +66,60 @@ Diagnostic Database Update Plugin
          - ``/apps/sovd2uds/bulk-data/runtimefiles-backup``
          - Deletes the backup of the previously used diagnostic database, to free up storage space. This also means that rolling back to the previous state isn't possible anymore after deleting the backup.
 
+       * - GET
+         - ``/apps/sovd2uds/bulk-data/runtimefiles-nextupdate/executions``
+         - Returns the list of current executions. Always contains at most one entry. Supports the ``include-schema`` query parameter.
+
+       * - GET
+         - ``/apps/sovd2uds/bulk-data/runtimefiles-nextupdate/executions/{id}``
+         - Returns the status of a specific execution by its ID.
+
+       * - POST
+         - ``/apps/sovd2uds/bulk-data/runtimefiles-nextupdate/executions``
+         - Starts a new execution (Apply, Rollback, or Cleanup). Returns 202 Accepted with the execution ID.
+
     .. note:: The following query parameters must be supported for the GET endpoints:
 
        - ``x-sovd2uds-include-hash`` (string, default: not present -- supported is only sha256) - to include file hashes of the files
        - ``x-sovd2uds-include-file-size`` (boolean, default: false) - to include file sizes of the files
        - ``x-sovd2uds-include-revision`` (boolean, default: false) - to include the revision inside the files
+
+    **Configuration File Support**
+
+    In addition to MDD database files (``.mdd``), the plugin supports uploading CDA configuration
+    files (``.toml``) through the **same** ``runtimefiles-*`` bulk-data endpoints. The upload handler
+    routes each file to the appropriate internal storage collection based on its extension:
+
+    - ``.mdd`` files go to the ``DiagnosticDatabase*`` collections.
+    - ``.toml`` files go to the ``Configuration*`` collections.
+
+    Only one ``.toml`` configuration file per upload request is supported; uploading more than one
+    in a single ``POST`` to ``runtimefiles-nextupdate`` is rejected.
+
+    All GET endpoints (``runtimefiles-current``, ``runtimefiles-nextupdate``, ``runtimefiles-backup``)
+    return both MDD and configuration file entries in a single combined response.
+
+    The HTTP handler implementation for these endpoints resides in
+    ``cda-sovd/src/sovd/apps/sovd2uds/bulk_data/runtimefiles.rs``.
+
+    **Coupled MDD and Configuration Updates**
+
+    When an MDD file update requires a simultaneous configuration change (e.g., a new MDD file
+    introduces changes that require updated communication parameters in the CDA configuration), both
+    files must be uploaded to ``runtimefiles-nextupdate`` and applied via a **single** ``Apply``
+    execution. A single ``Apply`` execution will atomically apply all pending MDD and configuration
+    changes together in one transaction, provided both ``NextUpdate`` collections are populated.
+
+    .. warning::
+
+        There is **no guaranteed atomic coupling** when MDD and configuration updates are applied
+        in separate executions. Applying them independently means they take effect at different
+        points in time, which may leave the system in a partially updated state during the interval
+        between the two applies.
+
+        Users must account for this by uploading all related files (MDD and configuration) in the
+        same ``runtimefiles-nextupdate`` batch and triggering a single ``Apply``. This is an accepted
+        limitation of the unified endpoint design.
 
     **Limitations to bulk-data operations**
 
@@ -111,6 +161,22 @@ Diagnostic Database Update Plugin
 
     The same endpoint must also be made available as ``/apps/sovd2uds/operations/diagnostic-database-update``
     to allow triggering the actions through a standard compliant operation.
+
+    **Execution Lifecycle**
+
+    Only one execution can be in-flight at a time. Starting a new execution while one is already running must
+    be rejected with a conflict error.
+
+    Execution entries are retained in memory and remain queryable via
+    ``GET /apps/sovd2uds/bulk-data/runtimefiles-nextupdate/executions/{id}`` until the next execution is
+    started. When a new execution is started, all previous terminal-state (``Completed`` or ``Failed``)
+    entries are removed. Entries must not be removed based on time (no TTL). This ensures that the result
+    of the last execution remains available for inspection without requiring indefinite memory growth.
+
+    The list endpoint ``GET /apps/sovd2uds/bulk-data/runtimefiles-nextupdate/executions`` returns all
+    currently tracked executions and always contains at most one entry. It supports the ``include-schema``
+    query parameter to include the JSON Schema of the response. No vehicle lock is required to use the
+    list or status endpoints.
 
     After applying, or rolling back the diagnostic database, the new database must be active immediately, without
     requiring a restart of the CDA, and the old state must be available as a backup until the next update is applied,

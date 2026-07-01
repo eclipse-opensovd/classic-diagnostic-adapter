@@ -1,6 +1,5 @@
 /*
- * SPDX-License-Identifier: Apache-2.0
- * SPDX-FileCopyrightText: 2025 The Contributors to Eclipse OpenSOVD (see CONTRIBUTORS)
+ * SPDX-FileCopyrightText: 2025 Copyright (c) Contributors to the Eclipse Foundation
  *
  * See the NOTICE file(s) distributed with this work for additional
  * information regarding copyright ownership.
@@ -8,13 +7,15 @@
  * This program and the accompanying materials are made available under the
  * terms of the Apache License Version 2.0 which is available at
  * https://www.apache.org/licenses/LICENSE-2.0
+ *
+ * SPDX-License-Identifier: Apache-2.0
  */
 
 use std::time::Duration;
 
 use tokio::sync::{RwLock, mpsc};
 
-use crate::{DiagServiceError, EcuAddressProvider, HashMap, ServicePayload};
+use crate::{DiagServiceError, EcuAddresses, HashMap, ServicePayload};
 
 #[derive(Debug, Clone)]
 pub enum UdsResponse {
@@ -86,7 +87,7 @@ pub trait EcuGateway: Clone + Send + Sync + 'static {
     /// Otherwise, returns `Ok(())`.
     /// # Errors
     ///  `DiagServiceError::EcuOffline` if the ECU cannot be reached, is not found, or is offline.
-    fn ecu_online<T: EcuAddressProvider>(
+    fn ecu_online<T: EcuAddresses>(
         &self,
         ecu_name: &str,
         ecu_db: &RwLock<T>,
@@ -125,4 +126,9 @@ pub trait EcuGateway: Clone + Send + Sync + 'static {
     ) -> impl Future<
         Output = Result<HashMap<String, Result<UdsResponse, DiagServiceError>>, DiagServiceError>,
     > + Send;
+
+    /// Stops the gateway, aborting its background tasks and releasing its
+    /// transport resources. Used when the gateway is replaced (e.g. on a
+    /// runtime database reload).
+    fn shutdown(&self);
 }

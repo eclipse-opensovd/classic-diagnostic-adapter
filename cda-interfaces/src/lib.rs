@@ -1,6 +1,5 @@
 /*
- * SPDX-License-Identifier: Apache-2.0
- * SPDX-FileCopyrightText: 2025 The Contributors to Eclipse OpenSOVD (see CONTRIBUTORS)
+ * SPDX-FileCopyrightText: 2025 Copyright (c) Contributors to the Eclipse Foundation
  *
  * See the NOTICE file(s) distributed with this work for additional
  * information regarding copyright ownership.
@@ -8,6 +7,8 @@
  * This program and the accompanying materials are made available under the
  * terms of the Apache License Version 2.0 which is available at
  * https://www.apache.org/licenses/LICENSE-2.0
+ *
+ * SPDX-License-Identifier: Apache-2.0
  */
 
 use std::{
@@ -31,6 +32,7 @@ pub use ecuuds::*;
 pub mod file_manager;
 mod schema;
 pub use schema::*;
+pub mod runtime_update_api;
 pub mod storage_api;
 
 // Deliberately not using new type pattern here, to make sure all crates that take
@@ -213,6 +215,10 @@ pub mod service_ids {
 
 pub const UDS_ID_RESPONSE_BITMASK: u8 = 0x40;
 
+/// Suppress-positive-response bit (bit 7) of the UDS sub-function byte.
+/// When set, the ECU shall not send a positive response message (ISO 14229-1).
+pub const SUPPRESS_POSITIVE_RESPONSE_BIT: u8 = 0x80;
+
 /// Default bitmask applied to subfunction IDs during service lookups.
 /// Masks out the suppress-positive-response bit (bit 7, `0x80`),
 /// so that for example `0x01` and `0x81` both match the subfunction ID `0x01`.
@@ -295,6 +301,15 @@ pub struct FunctionalDescriptionConfig {
     pub enabled_functional_groups: Option<HashSet<String>>,
     /// Position of the protocol identifier in service names.
     pub protocol_position: datatypes::DiagnosticServiceAffixPosition,
+}
+impl Default for FunctionalDescriptionConfig {
+    fn default() -> Self {
+        Self {
+            description_database: "functional_groups".to_owned(),
+            enabled_functional_groups: None,
+            protocol_position: datatypes::DiagnosticServiceAffixPosition::Suffix,
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Error)]

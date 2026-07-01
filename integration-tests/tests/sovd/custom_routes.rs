@@ -1,6 +1,5 @@
 /*
- * SPDX-License-Identifier: Apache-2.0
- * SPDX-FileCopyrightText: 2025 The Contributors to Eclipse OpenSOVD (see CONTRIBUTORS)
+ * SPDX-FileCopyrightText: 2025 Copyright (c) Contributors to the Eclipse Foundation
  *
  * See the NOTICE file(s) distributed with this work for additional
  * information regarding copyright ownership.
@@ -8,6 +7,8 @@
  * This program and the accompanying materials are made available under the
  * terms of the Apache License Version 2.0 which is available at
  * https://www.apache.org/licenses/LICENSE-2.0
+ *
+ * SPDX-License-Identifier: Apache-2.0
  */
 
 use std::sync::Arc;
@@ -78,11 +79,7 @@ async fn add_custom_routes(dynamic_router: &DynamicRouter) {
         ),
     );
 
-    // Update the router with the new routes,
-    // merge with existing router to preserve existing routes
-    dynamic_router
-        .update_router(move |old_router| old_router.merge(custom_router))
-        .await;
+    dynamic_router.merge_routes(custom_router).await;
 }
 
 #[tokio::test]
@@ -135,7 +132,6 @@ async fn test_custom_demo_endpoint() {
             .expect("Failed to register main health provider");
         provider
     };
-    let health = Some(health);
 
     // `create_diagnostic_gateway` has a single signature regardless of the
     // `can` feature; this test runtime is DoIP-only, so no CAN config.
@@ -145,7 +141,7 @@ async fn test_custom_demo_endpoint() {
         None,
         variant_tx,
         shutdown_signal.clone(),
-        health.as_ref(),
+        None,
     )
     .await
     .expect("Failed to create gateway");
@@ -160,27 +156,29 @@ async fn test_custom_demo_endpoint() {
             protocol_position: cda_interfaces::datatypes::DiagnosticServiceAffixPosition::Suffix,
         },
         FaultConfig::default(),
+        Arc::new(std::sync::atomic::AtomicBool::new(false)),
     );
     add_custom_routes(&dynamic_router).await;
     let ecu_names = uds_manager.get_ecus().await;
-    cda_sovd::add_vehicle_routes::<
-        cda_core::DiagServiceResponseStruct,
-        _,
-        _,
-        cda_plugin_security::DefaultSecurityPlugin,
-    >(
+    cda_sovd::add_vehicle_routes::<_, _, cda_plugin_security::DefaultSecurityPlugin>(
         &dynamic_router,
-        uds_manager,
-        String::new(),
-        file_managers,
-        Arc::new(Locks::new(ecu_names)),
-        FunctionalDescriptionConfig {
-            description_database: "functional_groups".to_owned(),
-            enabled_functional_groups: None,
-            protocol_position: cda_interfaces::datatypes::DiagnosticServiceAffixPosition::Suffix,
+        cda_sovd::VehicleConfig {
+            flash_files_path: String::new(),
+            functional_group_config: FunctionalDescriptionConfig {
+                description_database: "functional_groups".to_owned(),
+                enabled_functional_groups: None,
+                protocol_position:
+                    cda_interfaces::datatypes::DiagnosticServiceAffixPosition::Suffix,
+            },
+            components_config: ComponentsConfig {
+                additional_fields: HashMap::new(),
+            },
         },
-        ComponentsConfig {
-            additional_fields: HashMap::new(),
+        cda_sovd::VehicleResources {
+            ecu_uds: uds_manager,
+            file_manager: file_managers,
+            locks: Arc::new(Locks::new(ecu_names)),
+            update_in_progress: Arc::new(std::sync::atomic::AtomicBool::new(false)),
         },
     )
     .await

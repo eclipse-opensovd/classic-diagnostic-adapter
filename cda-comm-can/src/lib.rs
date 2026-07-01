@@ -42,7 +42,7 @@ use std::{
 
 #[cfg(feature = "can")]
 use cda_interfaces::{
-    CanComParamProvider, DiagServiceError, EcuAddressProvider, EcuGateway, HashMap, ServicePayload,
+    CanComParamProvider, DiagServiceError, EcuAddresses, EcuGateway, HashMap, ServicePayload,
     TransmissionParameters, UdsResponse,
 };
 #[cfg(feature = "can")]
@@ -130,7 +130,7 @@ impl CanDiagGateway {
             ecu_count = ecus.len(),
         )
     )]
-    pub async fn new<T: EcuAddressProvider + CanComParamProvider>(
+    pub async fn new<T: EcuAddresses + CanComParamProvider>(
         config: &CanConfig,
         ecus: &HashMap<String, RwLock<T>>,
         variant_detection: mpsc::Sender<Vec<String>>,
@@ -477,6 +477,13 @@ impl CanDiagGateway {
 
 #[cfg(feature = "can")]
 impl EcuGateway for CanDiagGateway {
+    fn shutdown(&self) {
+        // CAN uses per-transaction ISO-TP sockets (no long-lived connection
+        // tasks), and the keep-alive broadcast is aborted when the last clone
+        // of the gateway is dropped (its `KeepAliveHandle` aborts on Drop), so
+        // there is nothing to cancel proactively here.
+    }
+
     async fn get_gateway_network_address(&self, logical_address: u16) -> Option<String> {
         let ecu_name = self.logical_address_to_ecu.get(&logical_address)?;
         if !self.is_ecu_discovered_by_name(ecu_name).await {
@@ -617,7 +624,7 @@ impl EcuGateway for CanDiagGateway {
         Ok(())
     }
 
-    async fn ecu_online<E: EcuAddressProvider>(
+    async fn ecu_online<E: EcuAddresses>(
         &self,
         ecu_name: &str,
         _ecu_db: &RwLock<E>,
@@ -714,6 +721,8 @@ impl CanDiagGateway {
 
 #[cfg(not(feature = "can"))]
 impl cda_interfaces::EcuGateway for CanDiagGateway {
+    fn shutdown(&self) {}
+
     async fn get_gateway_network_address(&self, _logical_address: u16) -> Option<String> {
         None
     }
@@ -732,7 +741,7 @@ impl cda_interfaces::EcuGateway for CanDiagGateway {
         ))
     }
 
-    async fn ecu_online<E: cda_interfaces::EcuAddressProvider>(
+    async fn ecu_online<E: cda_interfaces::EcuAddresses>(
         &self,
         _ecu_name: &str,
         _ecu_db: &tokio::sync::RwLock<E>,

@@ -1,6 +1,5 @@
 /*
- * SPDX-License-Identifier: Apache-2.0
- * SPDX-FileCopyrightText: 2026 The Contributors to Eclipse OpenSOVD (see CONTRIBUTORS)
+ * SPDX-FileCopyrightText: 2026 Copyright (c) Contributors to the Eclipse Foundation
  *
  * See the NOTICE file(s) distributed with this work for additional
  * information regarding copyright ownership.
@@ -8,6 +7,8 @@
  * This program and the accompanying materials are made available under the
  * terms of the Apache License Version 2.0 which is available at
  * https://www.apache.org/licenses/LICENSE-2.0
+ *
+ * SPDX-License-Identifier: Apache-2.0
  */
 
 use std::{
@@ -298,13 +299,19 @@ fn ensure_mbedtls_source(workspace_dir: &Path) {
         return;
     }
 
+    // Patches are applied relative to the parent of the mbedtls source tree so
+    // that paths like `mbedtls-4.0.0/library/ssl_client.c` resolve correctly
+    // regardless of whether the source lives inside workspace_dir or was
+    // supplied via MBEDTLS_DIR pointing at an external location.
+    let patch_work_dir = mbedtls_dir.parent().unwrap_or(workspace_dir);
+
     // Apply record-size-limit patch adding the extension for TLS1.2 aswell
     let patch_file = workspace_dir
         .join("patches")
         .join("record-size-limit-tls12.patch");
     if patch_file.exists() {
         eprintln!("Applying record-size-limit patch ...");
-        apply_patch(&patch_file, workspace_dir);
+        apply_patch(&patch_file, patch_work_dir);
     } else {
         eprintln!(
             "warning: patch file {} not found - skipping",
@@ -318,7 +325,7 @@ fn ensure_mbedtls_source(workspace_dir: &Path) {
         .join("ed25519-psa-driver.patch");
     if patch_file.exists() {
         eprintln!("Applying Ed25519 patch ...");
-        apply_patch(&patch_file, workspace_dir);
+        apply_patch(&patch_file, patch_work_dir);
     } else {
         eprintln!(
             "warning: patch file {} not found - skipping",

@@ -1,6 +1,5 @@
 /*
- * SPDX-License-Identifier: Apache-2.0
- * SPDX-FileCopyrightText: 2025 The Contributors to Eclipse OpenSOVD (see CONTRIBUTORS)
+ * SPDX-FileCopyrightText: 2025 Copyright (c) Contributors to the Eclipse Foundation
  *
  * See the NOTICE file(s) distributed with this work for additional
  * information regarding copyright ownership.
@@ -8,6 +7,8 @@
  * This program and the accompanying materials are made available under the
  * terms of the Apache License Version 2.0 which is available at
  * https://www.apache.org/licenses/LICENSE-2.0
+ *
+ * SPDX-License-Identifier: Apache-2.0
  */
 
 use cda_interfaces::Protocol;
@@ -36,6 +37,10 @@ pub struct DoipConfig {
     pub send_timeout_ms: u64,
     /// Whether to request a diagnostic message positive acknowledgement.
     pub send_diagnostic_message_ack: bool,
+    /// Interval in seconds between `DoIP` alive check requests sent on idle connections.
+    /// The alive check is only sent when no diagnostic communication has occurred
+    /// for this duration. Set to 0 to disable the alive check.
+    pub alive_check_interval_secs: u64,
     /// The name of the protocol to use.
     /// Matched case-insensitive against the database.
     /// The special value `"auto"` defers the choice to the MDD-driven
@@ -58,6 +63,7 @@ impl Default for DoipConfig {
             tls_port: 3496,
             send_timeout_ms: 1000,
             send_diagnostic_message_ack: true,
+            alive_check_interval_secs: 1800, // 30 minutes
             protocol_name: Protocol::default().to_string(),
         }
     }

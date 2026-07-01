@@ -1,6 +1,5 @@
 /*
- * SPDX-License-Identifier: Apache-2.0
- * SPDX-FileCopyrightText: 2026 The Contributors to Eclipse OpenSOVD (see CONTRIBUTORS)
+ * SPDX-FileCopyrightText: 2026 Copyright (c) Contributors to the Eclipse Foundation
  *
  * See the NOTICE file(s) distributed with this work for additional
  * information regarding copyright ownership.
@@ -8,6 +7,8 @@
  * This program and the accompanying materials are made available under the
  * terms of the Apache License Version 2.0 which is available at
  * https://www.apache.org/licenses/LICENSE-2.0
+ *
+ * SPDX-License-Identifier: Apache-2.0
  */
 
 use std::{
@@ -35,6 +36,10 @@ pub enum CollectionName {
     DiagnosticDatabaseBackup,
     /// Configuration collection for CDA settings.
     Configuration,
+    /// Staging area for a pending configuration update.
+    ConfigurationNextUpdate,
+    /// Backup of the configuration before an update.
+    ConfigurationBackup,
     /// A user-defined collection with an arbitrary name.
     Custom(String),
 }
@@ -48,6 +53,8 @@ impl CollectionName {
             Self::DiagnosticDatabaseNextUpdate => "diagnostic_database_next_update",
             Self::DiagnosticDatabaseBackup => "diagnostic_database_backup",
             Self::Configuration => "configuration",
+            Self::ConfigurationNextUpdate => "configuration_next_update",
+            Self::ConfigurationBackup => "configuration_backup",
             Self::Custom(name) => name.as_str(),
         }
     }

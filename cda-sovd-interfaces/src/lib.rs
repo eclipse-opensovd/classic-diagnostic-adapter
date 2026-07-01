@@ -1,6 +1,5 @@
 /*
- * SPDX-License-Identifier: Apache-2.0
- * SPDX-FileCopyrightText: 2025 The Contributors to Eclipse OpenSOVD (see CONTRIBUTORS)
+ * SPDX-FileCopyrightText: 2025 Copyright (c) Contributors to the Eclipse Foundation
  *
  * See the NOTICE file(s) distributed with this work for additional
  * information regarding copyright ownership.
@@ -8,6 +7,8 @@
  * This program and the accompanying materials are made available under the
  * terms of the Apache License Version 2.0 which is available at
  * https://www.apache.org/licenses/LICENSE-2.0
+ *
+ * SPDX-License-Identifier: Apache-2.0
  */
 
 use cda_interfaces::HashMap;
@@ -46,6 +47,15 @@ pub struct Items<T> {
     pub schema: Option<schemars::Schema>,
 }
 
+impl<T> Default for Items<T> {
+    fn default() -> Self {
+        Self {
+            items: Vec::new(),
+            schema: None,
+        }
+    }
+}
+
 #[derive(Serialize, schemars::JsonSchema)]
 pub struct ResourceResponse {
     pub items: Vec<Resource>,
@@ -80,35 +90,18 @@ pub struct IncludeSchemaQuery {
 pub mod sovd2uds {
     use std::path::PathBuf;
 
+    pub use cda_interfaces::runtime_update_api::{BulkDataDescriptor, HashAlgorithm};
     use serde::Serialize;
 
     #[derive(Serialize, schemars::JsonSchema)]
     pub struct FileList {
         #[serde(rename = "items")]
-        pub files: Vec<File>,
+        pub files: Vec<BulkDataDescriptor>,
         #[serde(skip_serializing)]
         pub path: Option<PathBuf>,
         #[schemars(skip)]
         #[serde(skip_serializing_if = "Option::is_none")]
         pub schema: Option<schemars::Schema>,
-    }
-
-    #[derive(Serialize, Debug, Clone, schemars::JsonSchema)]
-    pub struct File {
-        #[serde(skip_serializing_if = "Option::is_none")]
-        pub hash: Option<String>,
-        #[serde(skip_serializing_if = "Option::is_none")]
-        pub hash_algorithm: Option<HashAlgorithm>,
-        pub id: String,
-        pub mimetype: String,
-        pub size: u64,
-        #[serde(rename = "x-sovd2uds-OrigPath")]
-        pub origin_path: String,
-    }
-    #[derive(Serialize, Debug, Clone, schemars::JsonSchema)]
-    pub enum HashAlgorithm {
-        None,
-        // todo: support hashing algorithms
     }
 }
 

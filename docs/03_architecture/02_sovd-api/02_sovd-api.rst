@@ -1,5 +1,4 @@
-.. SPDX-License-Identifier: Apache-2.0
-.. SPDX-FileCopyrightText: 2025 The Contributors to Eclipse OpenSOVD (see CONTRIBUTORS)
+.. SPDX-FileCopyrightText: 2025 Copyright (c) Contributors to the Eclipse Foundation
 ..
 .. See the NOTICE file(s) distributed with this work for additional
 .. information regarding copyright ownership.
@@ -7,6 +6,8 @@
 .. This program and the accompanying materials are made available under the
 .. terms of the Apache License Version 2.0 which is available at
 .. https://www.apache.org/licenses/LICENSE-2.0
+..
+.. SPDX-License-Identifier: Apache-2.0
 
 SOVD-API
 --------
@@ -204,6 +205,7 @@ SDG/SD Metadata
 
 .. arch:: Component SDG/SDs
     :id: arch~sovd-api-component-sdgsd
+    :links: dimpl~sovd-api-component-sdgsd, dimpl~sovd-api-component-data-sdgsd, dimpl~sovd-api-component-operations-sdgsd, itest~sovd-api-component-sdgsd, itest~sovd-api-component-alias-sdgsd, itest~sovd-api-component-data-sdgsd, itest~sovd-api-component-operations-sdgsd
     :status: draft
 
     Special Data Groups (SDGs) and Special Data (SDs) from the diagnostic description can be retrieved through an
@@ -230,11 +232,10 @@ SDG/SD Metadata
     contains an ``items`` map keyed by a combination of the service name and its action type, where each entry
     holds the list of SDGs for that service action.
 
-    .. note::
-
-        TODO We need to define handling for asynchronous operations, since they consist of multiple services
-        with (possibly conflicting) SDGs/SDs - current idea would be add dummy SDGs at the top, with the si set
-        to the "original" type of the operation
+    For asynchronous operations (which consist of multiple subfunctions such as Start, Stop, RequestResults),
+    each subfunction's SDGs are returned as separate entries in the ``items`` map, keyed by
+    ``{service_name}_{action_type}`` (lowercased). This naturally separates potentially conflicting SDGs
+    from different subfunctions without requiring wrapper entries.
 
     **Data format**
 
@@ -563,6 +564,71 @@ Security -- SID 27\ :sub:`16`
 
     Works similarly to Session defined in the previous chapter. The names of the security access levels are
     determined through the state charts for the SID 27\ :sub:`16` services.
+
+    **RequestSeed flow**
+
+    A client initiates security access by sending a ``PUT /modes/security`` request with a ``value``
+    field that encodes both the target level and whether this is a RequestSeed or SendKey request.
+    The CDA inspects the value to determine:
+
+    * ``level`` -- the state-chart level name, obtained by stripping the trailing ``_RequestSeed``
+      suffix when present (e.g. ``Level_7_RequestSeed`` -> ``Level_7``, ``Supplier_RequestSeed`` ->
+      ``Supplier``)
+    * whether the request is a **RequestSeed** (value ends with ``_RequestSeed``) or a
+      **SendKey** (value is the level name alone, accompanied by a key)
+
+    Example values and their parsed components:
+
+    .. list-table::
+       :header-rows: 1
+
+       * - ``value`` field
+         - ``level``
+         - Request type
+       * - ``Level_7_RequestSeed``
+         - ``Level_7``
+         - RequestSeed
+       * - ``Supplier_RequestSeed``
+         - ``Supplier``
+         - RequestSeed
+       * - ``Supplier``
+         - ``Supplier``
+         - SendKey
+
+    **RequestSeed service name resolution**
+
+    The CDA resolves the UDS RequestSeed service (SID 27\ :sub:`16`) by searching all SID
+    27\ :sub:`16` services in the ISO 14229-1 RequestSeed subfunction range (odd subfunctions
+    1, 3-5, 7-41, exactly 2 request parameters) and selecting the first whose short name
+    **contains** the level name (underscores stripped, case-insensitive).
+
+    This requires the level name to be embedded in the service short name, which both supported
+    naming conventions satisfy:
+
+    * **Level-encoded names** (e.g. ``RequestSeed_Level_3``): the level substring ``Level3``
+      is contained in the short name.
+    * **Semantic label names** (e.g. ``RequestSeed_Supplier``): the label ``Supplier`` is
+      both the level name and the label in the short name.
+
+    .. list-table:: Naming convention examples
+       :header-rows: 1
+
+       * - Short name in description
+         - Subfunction
+         - Level value
+         - Resolved by
+       * - ``RequestSeed_Level_3``
+         - 0x03
+         - ``Level_3``
+         - level substring ``Level3`` found in short name
+       * - ``RequestSeed_Level_7``
+         - 0x07
+         - ``Level_7``
+         - level substring ``Level7`` found in short name
+       * - ``RequestSeed_Supplier``
+         - 0x09
+         - ``Supplier``
+         - level substring ``Supplier`` found in short name
 
     .. uml:: 02_sovd-api/images/security_access.puml
 

@@ -1,6 +1,5 @@
 /*
- * SPDX-License-Identifier: Apache-2.0
- * SPDX-FileCopyrightText: 2026 The Contributors to Eclipse OpenSOVD (see CONTRIBUTORS)
+ * SPDX-FileCopyrightText: 2026 Copyright (c) Contributors to the Eclipse Foundation
  *
  * See the NOTICE file(s) distributed with this work for additional
  * information regarding copyright ownership.
@@ -8,6 +7,8 @@
  * This program and the accompanying materials are made available under the
  * terms of the Apache License Version 2.0 which is available at
  * https://www.apache.org/licenses/LICENSE-2.0
+ *
+ * SPDX-License-Identifier: Apache-2.0
  */
 
 use std::time::Duration;
@@ -39,7 +40,7 @@ use crate::{
 /// Prerequisites enforced by the ECU simulator:
 /// - Variant must be BOOT
 /// - Session must be PROGRAMMING
-/// - `SecurityAccess` must be `LEVEL_07`
+/// - `SecurityAccess` must be at least `LEVEL_05` (test uses `LEVEL_07`)
 #[tokio::test]
 #[allow(clippy::too_many_lines)]
 async fn test_flash_download_transfer_sequence() {
@@ -107,6 +108,11 @@ async fn test_flash_download_transfer_sequence() {
         "Should be in programming session"
     );
 
+    // Start recording to verify the raw UDS frames sent for SecurityAccess Level 7
+    ecusim::start_recording(&runtime.ecu_sim, "flxc1000")
+        .await
+        .expect("Failed to start ECU sim recording");
+
     // SecurityAccess Level 7 (request seed + send key)
     let seed_response: RequestSeedResponse = put_mode(
         &runtime.config,
@@ -166,6 +172,26 @@ async fn test_flash_download_transfer_sequence() {
         ),
         "ECU sim should be at SecurityAccess Level 07, got {:?}",
         ecu_state.security_access
+    );
+
+    // Verify the raw UDS frames sent during SecurityAccess Level 7:
+    //   RequestSeed: 27 07
+    //   SendKey:     27 08 <key> (seed 00..07, key = each byte + 13 = 0d..14)
+    let recorded_frames = ecusim::stop_and_clear_recording(&runtime.ecu_sim, "flxc1000")
+        .await
+        .expect("Failed to stop ECU sim recording");
+    assert!(
+        recorded_frames
+            .iter()
+            .any(|f| f.eq_ignore_ascii_case("2707")),
+        "Expected RequestSeed Level_7 frame (2707) in recording, got: {recorded_frames:?}"
+    );
+    assert!(
+        recorded_frames
+            .iter()
+            .any(|f| f.eq_ignore_ascii_case("27080d0e0f1011121314")),
+        "Expected SendKey Level_7 frame (27080d0e0f1011121314) in recording, got: \
+         {recorded_frames:?}"
     );
 
     // List flash files to get the file ID
@@ -397,6 +423,7 @@ async fn test_flash_download_transfer_sequence() {
 
 /// Verify that attempting a flash transfer with length=0 is rejected with a bad request error.
 /// This guards against a zero-length transfer silently staying in "running" status forever.
+/// Uses `SecurityAccess` `LEVEL_05` (minimum level accepted by the ECU simulator for flash operations).
 #[tokio::test]
 #[allow(clippy::too_many_lines)]
 async fn test_flash_transfer_zero_length_rejected() {
@@ -458,14 +485,19 @@ async fn test_flash_transfer_zero_length_rejected() {
     .unwrap()
     .unwrap();
 
-    // SecurityAccess Level 7
+    // Start recording to verify the raw UDS frames sent for SecurityAccess Level 5
+    ecusim::start_recording(&runtime.ecu_sim, "flxc1000")
+        .await
+        .expect("Failed to start ECU sim recording");
+
+    // SecurityAccess Level 5
     let seed_response: RequestSeedResponse = put_mode(
         &runtime.config,
         &auth,
         ecu_endpoint,
         "security",
         sovd_interfaces::components::ecu::modes::security_and_session::put::Request {
-            value: "Level_7_RequestSeed".to_owned(),
+            value: "Level_5_RequestSeed".to_owned(),
             mode_expiration: None,
             key: None,
         },
@@ -475,18 +507,23 @@ async fn test_flash_transfer_zero_length_rejected() {
     .unwrap()
     .unwrap();
 
+    // Verify that the seed payload is the deterministic sequence 0x00..0x07
+    assert_eq!(
+        seed_response.seed.request_seed, "0x00 0x01 0x02 0x03 0x04 0x05 0x06 0x07",
+        "Expected deterministic seed payload from ECU sim"
+    );
+
     let key = compute_security_key(&seed_response.seed.request_seed);
 
-    put_mode::<
-        sovd_interfaces::components::ecu::modes::security_and_session::put::Response<String>,
-        _,
-    >(
+    let key_result: sovd_interfaces::components::ecu::modes::security_and_session::put::Response<
+        String,
+    > = put_mode(
         &runtime.config,
         &auth,
         ecu_endpoint,
         "security",
         sovd_interfaces::components::ecu::modes::security_and_session::put::Request {
-            value: "Level_7".to_owned(),
+            value: "Level_5".to_owned(),
             mode_expiration: None,
             key: Some(
                 sovd_interfaces::components::ecu::modes::security_and_session::put::ModeKey {
@@ -499,6 +536,40 @@ async fn test_flash_transfer_zero_length_rejected() {
     .await
     .unwrap()
     .unwrap();
+    assert_eq!(key_result.value, "Level_5");
+
+    // Verify the ECU sim is in the expected state
+    let ecu_state = ecusim::get_ecu_state(&runtime.ecu_sim, "flxc1000")
+        .await
+        .expect("Failed to get ECU sim state");
+    assert!(
+        matches!(
+            ecu_state.security_access,
+            Some(ecusim::SecurityAccess::Level05)
+        ),
+        "ECU sim should be at SecurityAccess Level 05, got {:?}",
+        ecu_state.security_access
+    );
+
+    // Verify the raw UDS frames sent during SecurityAccess Level 5:
+    //   `RequestSeed`: 27 05
+    //   `SendKey`:     27 06 <key> (seed 00..07, key = each byte + 13 = 0d..14)
+    let recorded_frames = ecusim::stop_and_clear_recording(&runtime.ecu_sim, "flxc1000")
+        .await
+        .expect("Failed to stop ECU sim recording");
+    assert!(
+        recorded_frames
+            .iter()
+            .any(|f| f.eq_ignore_ascii_case("2705")),
+        "Expected RequestSeed Level_5 frame (2705) in recording, got: {recorded_frames:?}"
+    );
+    assert!(
+        recorded_frames
+            .iter()
+            .any(|f| f.eq_ignore_ascii_case("27060d0e0f1011121314")),
+        "Expected SendKey Level_5 frame (27060d0e0f1011121314) in recording, got: \
+         {recorded_frames:?}"
+    );
 
     // RequestDownload (required before flash transfer)
     let request_download_body = serde_json::json!({
@@ -571,6 +642,181 @@ async fn test_flash_transfer_zero_length_rejected() {
     )
     .await
     .unwrap();
+
+    // Cleanup
+    lock_operation(
+        locks::ECU_ENDPOINT,
+        Some(&lock_id),
+        &runtime.config,
+        &auth,
+        StatusCode::NO_CONTENT,
+        Method::DELETE,
+    )
+    .await;
+
+    ecusim::switch_variant(&runtime.ecu_sim, "FLXC1000", "APPLICATION")
+        .await
+        .unwrap();
+}
+
+/// Integration test for the `Supplier` security access level, which uses (semantic label)
+/// naming in the ODX database: `RequestSeed_Supplier` / `SendKey_Supplier`.
+///
+/// The SOVD seed hint `"Supplier_RequestSeed"` has only two underscore-separated parts,
+/// so the lookup relies on the `split_at_last_underscore` two-part path and phase-1
+/// service resolution (the level name `"Supplier"` is contained in `RequestSeed_Supplier`).
+///
+/// UDS bytes verified:
+/// - `RequestSeed`: `27 09`
+/// - `SendKey`:     `27 0A <key>` (seed 00..07, key = each byte + 13 = 0d..14)
+#[tokio::test]
+#[allow(clippy::too_many_lines)]
+async fn test_security_access_supplier_level() {
+    let (runtime, _lock) = setup_integration_test(true).await.unwrap();
+    let auth = auth_header(&runtime.config, None).await.unwrap();
+    let ecu_endpoint = sovd::ECU_FLXC1000_ENDPOINT;
+
+    // Create and acquire ECU lock
+    #[cfg_attr(nightly, allow(unknown_lints, clippy::duration_suboptimal_units))]
+    let expiration_timeout = Duration::from_secs(120);
+    let ecu_lock = create_lock(
+        expiration_timeout,
+        locks::ECU_ENDPOINT,
+        StatusCode::CREATED,
+        &runtime.config,
+        &auth,
+    )
+    .await;
+    let lock_id =
+        extract_field_from_json::<String>(&response_to_json(&ecu_lock).unwrap(), "id").unwrap();
+
+    lock_operation(
+        locks::ECU_ENDPOINT,
+        Some(&lock_id),
+        &runtime.config,
+        &auth,
+        StatusCode::OK,
+        Method::GET,
+    )
+    .await;
+
+    // Switch ECU sim to BOOT variant (security access services live on the boot variant)
+    ecusim::switch_variant(&runtime.ecu_sim, "FLXC1000", "BOOT")
+        .await
+        .unwrap();
+
+    // Force variant detection
+    send_cda_request(
+        &runtime.config,
+        ecu_endpoint,
+        StatusCode::CREATED,
+        Method::PUT,
+        None,
+        Some(&auth),
+        None,
+    )
+    .await
+    .unwrap();
+
+    // Switch to programming session
+    switch_session(
+        "programming",
+        &runtime.config,
+        &auth,
+        ecu_endpoint,
+        StatusCode::OK,
+    )
+    .await
+    .unwrap()
+    .unwrap();
+
+    // Start recording to verify the raw UDS frames sent for SecurityAccess Supplier (Level 9)
+    ecusim::start_recording(&runtime.ecu_sim, "flxc1000")
+        .await
+        .expect("Failed to start ECU sim recording");
+
+    // SecurityAccess Supplier - RequestSeed via ODX name RequestSeed_Supplier
+    // The SOVD value "Supplier_RequestSeed" has exactly two underscore-separated parts;
+    // split_at_last_underscore recognises "RequestSeed" as the service suffix and
+    // produces level="Supplier", seed_service=Some("RequestSeed").
+    let seed_response: RequestSeedResponse = put_mode(
+        &runtime.config,
+        &auth,
+        ecu_endpoint,
+        "security",
+        sovd_interfaces::components::ecu::modes::security_and_session::put::Request {
+            value: "Supplier_RequestSeed".to_owned(),
+            mode_expiration: None,
+            key: None,
+        },
+        StatusCode::OK,
+    )
+    .await
+    .unwrap()
+    .unwrap();
+
+    assert_eq!(
+        seed_response.seed.request_seed, "0x00 0x01 0x02 0x03 0x04 0x05 0x06 0x07",
+        "Expected deterministic seed payload from ECU sim"
+    );
+
+    let key = compute_security_key(&seed_response.seed.request_seed);
+
+    let key_result: sovd_interfaces::components::ecu::modes::security_and_session::put::Response<
+        String,
+    > = put_mode(
+        &runtime.config,
+        &auth,
+        ecu_endpoint,
+        "security",
+        sovd_interfaces::components::ecu::modes::security_and_session::put::Request {
+            value: "Supplier".to_owned(),
+            mode_expiration: None,
+            key: Some(
+                sovd_interfaces::components::ecu::modes::security_and_session::put::ModeKey {
+                    send_key: key,
+                },
+            ),
+        },
+        StatusCode::OK,
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    assert_eq!(key_result.value, "Supplier");
+
+    // Verify the ECU sim is in the expected state
+    let ecu_state = ecusim::get_ecu_state(&runtime.ecu_sim, "flxc1000")
+        .await
+        .expect("Failed to get ECU sim state");
+    assert!(
+        matches!(
+            ecu_state.security_access,
+            Some(ecusim::SecurityAccess::Level09)
+        ),
+        "ECU sim should be at SecurityAccess Level 09, got {:?}",
+        ecu_state.security_access
+    );
+
+    // Verify the raw UDS frames sent during SecurityAccess Supplier:
+    //   RequestSeed: 27 09
+    //   SendKey:     27 0A <key> (seed 00..07, key = each byte + 13 = 0d..14)
+    let recorded_frames = ecusim::stop_and_clear_recording(&runtime.ecu_sim, "flxc1000")
+        .await
+        .expect("Failed to stop ECU sim recording");
+    assert!(
+        recorded_frames
+            .iter()
+            .any(|f| f.eq_ignore_ascii_case("2709")),
+        "Expected RequestSeed Supplier frame (2709) in recording, got: {recorded_frames:?}"
+    );
+    assert!(
+        recorded_frames
+            .iter()
+            .any(|f| f.eq_ignore_ascii_case("270a0d0e0f1011121314")),
+        "Expected SendKey Supplier frame (270a0d0e0f1011121314) in recording, got: \
+         {recorded_frames:?}"
+    );
 
     // Cleanup
     lock_operation(

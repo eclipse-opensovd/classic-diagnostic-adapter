@@ -1,6 +1,5 @@
 /*
- * SPDX-License-Identifier: Apache-2.0
- * SPDX-FileCopyrightText: 2026 The Contributors to Eclipse OpenSOVD (see CONTRIBUTORS)
+ * SPDX-FileCopyrightText: 2026 Copyright (c) Contributors to the Eclipse Foundation
  *
  * See the NOTICE file(s) distributed with this work for additional
  * information regarding copyright ownership.
@@ -8,6 +7,8 @@
  * This program and the accompanying materials are made available under the
  * terms of the Apache License Version 2.0 which is available at
  * https://www.apache.org/licenses/LICENSE-2.0
+ *
+ * SPDX-License-Identifier: Apache-2.0
  */
 
 //! Local filesystem storage backend for the CDA Storage Access API.
@@ -58,7 +59,9 @@ mod local_collection;
 mod local_storage;
 mod paths;
 pub(crate) mod recovery;
+pub mod storage_seed;
 /// Write-ahead log utilities. Exposed publicly for use in recovery tests.
 pub mod wal;
 
+pub use local_collection::LocalCollection;
 pub use local_storage::LocalStorage;

@@ -1,5 +1,4 @@
-# SPDX-License-Identifier: Apache-2.0
-# SPDX-FileCopyrightText: 2025 The Contributors to Eclipse OpenSOVD (see CONTRIBUTORS)
+# SPDX-FileCopyrightText: 2025 Copyright (c) Contributors to the Eclipse Foundation
 #
 # See the NOTICE file(s) distributed with this work for additional
 # information regarding copyright ownership.
@@ -7,6 +6,8 @@
 # This program and the accompanying materials are made available under the
 # terms of the Apache License Version 2.0 which is available at
 # https://www.apache.org/licenses/LICENSE-2.0
+#
+# SPDX-License-Identifier: Apache-2.0
 
 ARG RUST_VERSION=1.88
 ARG SOURCE_DATE_EPOCH
@@ -40,6 +41,7 @@ COPY cda-comm-can/Cargo.toml ./cda-comm-can/Cargo.toml
 COPY cda-simulator/Cargo.toml ./cda-simulator/Cargo.toml
 COPY cda-database/Cargo.toml ./cda-database/Cargo.toml
 COPY cda-plugin-security/Cargo.toml ./cda-plugin-security/Cargo.toml
+COPY cda-plugin-runtime-update/Cargo.toml ./cda-plugin-runtime-update/Cargo.toml
 COPY cda-sovd/Cargo.toml ./cda-sovd/Cargo.toml
 COPY cda-tracing/Cargo.toml ./cda-tracing/Cargo.toml
 COPY cda-sovd-interfaces/Cargo.toml ./cda-sovd-interfaces/Cargo.toml
@@ -92,6 +94,7 @@ COPY cda-comm-can ./cda-comm-can
 COPY cda-simulator ./cda-simulator
 COPY cda-database ./cda-database
 COPY cda-plugin-security ./cda-plugin-security
+COPY cda-plugin-runtime-update ./cda-plugin-runtime-update
 COPY cda-sovd ./cda-sovd
 COPY cda-tracing ./cda-tracing
 COPY cda-sovd-interfaces ./cda-sovd-interfaces

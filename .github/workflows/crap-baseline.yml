@@ -1,0 +1,33 @@
+# SPDX-FileCopyrightText: 2026 Copyright (c) Contributors to the Eclipse Foundation
+#
+# See the NOTICE file(s) distributed with this work for additional
+# information regarding copyright ownership.
+#
+# This program and the accompanying materials are made available under the
+# terms of the Apache License Version 2.0 which is available at
+# https://www.apache.org/licenses/LICENSE-2.0
+#
+# SPDX-License-Identifier: Apache-2.0
+
+# Update the CRAP baseline after a successful CI run on the main branch.
+
+name: Update CRAP baseline
+
+on:
+  workflow_run:
+    workflows: ["Rust CI"]
+    types: [completed]
+    branches: [main]
+
+jobs:
+  update:
+    if: github.event.workflow_run.conclusion == 'success'
+    uses: eclipse-opensovd/cicd-workflows/.github/workflows/crap-baseline.yml@07140bdd84f20b66fd4aff58a83c5148deec388c
+    with:
+      run-id: ${{ github.event.workflow_run.id }}
+      rust-version: "1.88.0"
+      cargo-crap-git-url: "https://github.com/theswiftfox/cargo-crap.git"
+      cargo-crap-git-rev: "27bab7d86c0ff9c4f8f681d6538be24572ca1a8d"
+    permissions:
+      contents: write
+      actions: read

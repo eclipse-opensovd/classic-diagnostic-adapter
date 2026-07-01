@@ -1,6 +1,5 @@
 /*
- * SPDX-License-Identifier: Apache-2.0
- * SPDX-FileCopyrightText: 2025 The Contributors to Eclipse OpenSOVD (see CONTRIBUTORS)
+ * SPDX-FileCopyrightText: 2025 Copyright (c) Contributors to the Eclipse Foundation
  *
  * See the NOTICE file(s) distributed with this work for additional
  * information regarding copyright ownership.
@@ -8,6 +7,8 @@
  * This program and the accompanying materials are made available under the
  * terms of the Apache License Version 2.0 which is available at
  * https://www.apache.org/licenses/LICENSE-2.0
+ *
+ * SPDX-License-Identifier: Apache-2.0
  */
 
 package ecu
@@ -127,7 +128,7 @@ fun RequestsData.addFlashRequests() {
     request("34 []", "RequestDownload") {
         ensureEcuModeIn(Variant.BOOT)
         ensureSessionIn(SessionState.PROGRAMMING)
-        ensureSecurityAccessIn(SecurityAccess.LEVEL_07)
+        ensureSecurityAccessIn(SecurityAccess.LEVEL_05, SecurityAccess.LEVEL_07, SecurityAccess.LEVEL_09)
 
         val ecuState = ecu.ecuState()
 
@@ -153,7 +154,7 @@ fun RequestsData.addFlashRequests() {
     request("36 []", "TransferData") {
         ensureEcuModeIn(Variant.BOOT)
         ensureSessionIn(SessionState.PROGRAMMING)
-        ensureSecurityAccessIn(SecurityAccess.LEVEL_07)
+        ensureSecurityAccessIn(SecurityAccess.LEVEL_05, SecurityAccess.LEVEL_07, SecurityAccess.LEVEL_09)
 
         val dataTransfers = ecu.dataTransfersDownload()
         val currentTransfer = dataTransfers.lastOrNull() ?: throw NrcException(NrcError.RequestSequenceError)
@@ -177,7 +178,7 @@ fun RequestsData.addFlashRequests() {
     request("37 []", "RequestTransferExit") {
         ensureEcuModeIn(Variant.BOOT)
         ensureSessionIn(SessionState.PROGRAMMING)
-        ensureSecurityAccessIn(SecurityAccess.LEVEL_07)
+        ensureSecurityAccessIn(SecurityAccess.LEVEL_05, SecurityAccess.LEVEL_07, SecurityAccess.LEVEL_09)
 
         val dataTransfers = ecu.dataTransfersDownload()
         val currentTransfer = dataTransfers.lastOrNull() ?: throw NrcException(NrcError.RequestSequenceError)
@@ -189,7 +190,7 @@ fun RequestsData.addFlashRequests() {
     request("31 01 FF 00", "EraseMemory_Start") {
         ensureEcuModeIn(Variant.BOOT)
         ensureSessionIn(SessionState.PROGRAMMING)
-        ensureSecurityAccessIn(SecurityAccess.LEVEL_07)
+        ensureSecurityAccessIn(SecurityAccess.LEVEL_05, SecurityAccess.LEVEL_07, SecurityAccess.LEVEL_09)
 
         val dataTransfers = ecu.dataTransfersDownload()
         dataTransfers.clear()

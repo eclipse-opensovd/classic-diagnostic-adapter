@@ -1,6 +1,5 @@
 /*
- * SPDX-License-Identifier: Apache-2.0
- * SPDX-FileCopyrightText: 2025 The Contributors to Eclipse OpenSOVD (see CONTRIBUTORS)
+ * SPDX-FileCopyrightText: 2025 Copyright (c) Contributors to the Eclipse Foundation
  *
  * See the NOTICE file(s) distributed with this work for additional
  * information regarding copyright ownership.
@@ -8,6 +7,8 @@
  * This program and the accompanying materials are made available under the
  * terms of the Apache License Version 2.0 which is available at
  * https://www.apache.org/licenses/LICENSE-2.0
+ *
+ * SPDX-License-Identifier: Apache-2.0
  */
 use serde::{Deserialize, Serialize};
 
@@ -80,12 +81,18 @@ impl DatabaseNamingConvention {
             if self.long_name_affix_position == DiagnosticServiceAffixPosition::Prefix
                 && long_name_lowercase.starts_with(affix)
             {
-                return long_name[affix.len()..].to_string();
+                return long_name
+                    .get(affix.len()..)
+                    .unwrap_or(long_name)
+                    .to_string();
             }
             if self.long_name_affix_position == DiagnosticServiceAffixPosition::Suffix
                 && long_name_lowercase.ends_with(affix)
             {
-                return long_name[..long_name.len().saturating_sub(affix.len())].to_string();
+                return long_name
+                    .get(..long_name.len().saturating_sub(affix.len()))
+                    .unwrap_or(long_name)
+                    .to_string();
             }
         }
         long_name.to_string()
@@ -102,12 +109,18 @@ impl DatabaseNamingConvention {
             if self.short_name_affix_position == DiagnosticServiceAffixPosition::Prefix
                 && short_name_lowercase.starts_with(affix)
             {
-                return short_name[affix.len()..].to_string();
+                return short_name
+                    .get(affix.len()..)
+                    .unwrap_or(short_name)
+                    .to_string();
             }
             if self.short_name_affix_position == DiagnosticServiceAffixPosition::Suffix
                 && short_name_lowercase.ends_with(affix)
             {
-                return short_name[..short_name.len().saturating_sub(affix.len())].to_string();
+                return short_name
+                    .get(..short_name.len().saturating_sub(affix.len()))
+                    .unwrap_or(short_name)
+                    .to_string();
             }
         }
         short_name.to_string()
@@ -124,12 +137,18 @@ impl DatabaseNamingConvention {
             if *position == DiagnosticServiceAffixPosition::Prefix
                 && short_name_lowercase.starts_with(affix_lowercase.as_str())
             {
-                return short_name[affix.len()..].to_string();
+                return short_name
+                    .get(affix.len()..)
+                    .unwrap_or(&short_name)
+                    .to_string();
             }
             if *position == DiagnosticServiceAffixPosition::Suffix
                 && short_name_lowercase.ends_with(affix_lowercase.as_str())
             {
-                return short_name[..short_name.len().saturating_sub(affix.len())].to_string();
+                return short_name
+                    .get(..short_name.len().saturating_sub(affix.len()))
+                    .unwrap_or(&short_name)
+                    .to_string();
             }
         }
         short_name

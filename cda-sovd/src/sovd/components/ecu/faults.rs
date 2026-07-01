@@ -1,6 +1,5 @@
 /*
- * SPDX-License-Identifier: Apache-2.0
- * SPDX-FileCopyrightText: 2025 The Contributors to Eclipse OpenSOVD (see CONTRIBUTORS)
+ * SPDX-FileCopyrightText: 2025 Copyright (c) Contributors to the Eclipse Foundation
  *
  * See the NOTICE file(s) distributed with this work for additional
  * information regarding copyright ownership.
@@ -8,6 +7,8 @@
  * This program and the accompanying materials are made available under the
  * terms of the Apache License Version 2.0 which is available at
  * https://www.apache.org/licenses/LICENSE-2.0
+ *
+ * SPDX-License-Identifier: Apache-2.0
  */
 
 use aide::{UseApi, transform::TransformOperation};
@@ -73,13 +74,9 @@ impl IntoSovd for DtcRecordAndStatus {
     }
 }
 
-pub(crate) async fn get<
-    R: DiagServiceResponse + Send + Sync,
-    T: UdsEcu + Send + Sync + Clone,
-    U: FileManager + Send + Sync + Clone,
->(
+pub(crate) async fn get<T: UdsEcu + Send + Sync + Clone, U: FileManager + Send + Sync + Clone>(
     UseApi(Secured(security_plugin), _): UseApi<Secured, ()>,
-    State(WebserverEcuState { ecu_name, uds, .. }): State<WebserverEcuState<R, T, U>>,
+    State(WebserverEcuState { ecu_name, uds, .. }): State<WebserverEcuState<T, U>>,
     WithRejection(QsQuery(query), _): WithRejection<QsQuery<GetFaultQuery>, ApiError>,
 ) -> Response {
     let dtcs = match uds
@@ -137,7 +134,6 @@ pub(crate) fn docs_get(op: TransformOperation) -> TransformOperation {
 }
 
 pub(crate) async fn delete<
-    R: DiagServiceResponse + Send + Sync,
     T: UdsEcu + Send + Sync + Clone,
     U: FileManager + Send + Sync + Clone,
 >(
@@ -147,7 +143,7 @@ pub(crate) async fn delete<
         uds,
         locks,
         ..
-    }): State<WebserverEcuState<R, T, U>>,
+    }): State<WebserverEcuState<T, U>>,
     WithRejection(QsQuery(query), _): WithRejection<QsQuery<DeleteFaultQuery>, ApiError>,
 ) -> Response {
     let claims = security_plugin.claims();
@@ -324,14 +320,13 @@ pub(crate) mod id {
     }
 
     pub(crate) async fn get<
-        R: DiagServiceResponse + Send + Sync,
         T: UdsEcu + Send + Sync + Clone,
         U: FileManager + Send + Sync + Clone,
     >(
         UseApi(Secured(security_plugin), _): UseApi<Secured, ()>,
         Path(id): Path<IdPathParam>,
         Query(query): Query<DtcIdQuery>,
-        State(WebserverEcuState { ecu_name, uds, .. }): State<WebserverEcuState<R, T, U>>,
+        State(WebserverEcuState { ecu_name, uds, .. }): State<WebserverEcuState<T, U>>,
     ) -> Response {
         match uds
             .ecu_dtc_extended(
@@ -371,7 +366,6 @@ pub(crate) mod id {
     }
 
     pub(crate) async fn delete<
-        R: DiagServiceResponse + Send + Sync,
         T: UdsEcu + Send + Sync + Clone,
         U: FileManager + Send + Sync + Clone,
     >(
@@ -382,7 +376,7 @@ pub(crate) mod id {
             uds,
             locks,
             ..
-        }): State<WebserverEcuState<R, T, U>>,
+        }): State<WebserverEcuState<T, U>>,
         WithRejection(QsQuery(query), _): WithRejection<QsQuery<DeleteFaultQuery>, ApiError>,
     ) -> Response {
         let claims = security_plugin.claims();
@@ -432,7 +426,6 @@ mod tests {
     use cda_interfaces::{
         HashMap,
         datatypes::{DtcReadInformationFunction, DtcRecord, DtcStatus},
-        diagservices::mock::MockDiagServiceResponse,
         file_manager::mock::MockFileManager,
         mock::MockUdsEcu,
     };
@@ -489,11 +482,11 @@ mod tests {
             });
 
         // Create state using test utility
-        let state = create_test_webserver_state::<
-            MockDiagServiceResponse,
-            MockUdsEcu,
-            MockFileManager,
-        >(ecu_name, mock_uds, mock_file_manager);
+        let state = create_test_webserver_state::<MockUdsEcu, MockFileManager>(
+            ecu_name,
+            mock_uds,
+            mock_file_manager,
+        );
 
         let query = GetFaultQuery {
             status: None,
@@ -505,7 +498,7 @@ mod tests {
 
         // Create security plugin using test utility
         let security_plugin = Box::new(TestSecurityPlugin);
-        let response = get::<MockDiagServiceResponse, MockUdsEcu, MockFileManager>(
+        let response = get::<MockUdsEcu, MockFileManager>(
             UseApi(Secured(security_plugin), std::marker::PhantomData),
             State(state),
             WithRejection(QsQuery(query), std::marker::PhantomData),

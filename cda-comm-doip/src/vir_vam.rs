@@ -1,6 +1,5 @@
 /*
- * SPDX-License-Identifier: Apache-2.0
- * SPDX-FileCopyrightText: 2025 The Contributors to Eclipse OpenSOVD (see CONTRIBUTORS)
+ * SPDX-FileCopyrightText: 2025 Copyright (c) Contributors to the Eclipse Foundation
  *
  * See the NOTICE file(s) distributed with this work for additional
  * information regarding copyright ownership.
@@ -8,22 +7,25 @@
  * This program and the accompanying materials are made available under the
  * terms of the Apache License Version 2.0 which is available at
  * https://www.apache.org/licenses/LICENSE-2.0
+ *
+ * SPDX-License-Identifier: Apache-2.0
  */
 
 use std::{future::Future, sync::Arc, time::Duration};
 
 use cda_interfaces::{
-    DiagServiceError, DoipComParamProvider, EcuAddressProvider, HashMap, HashMapExtensions, dlt_ctx,
+    DiagServiceError, DoipComParams, EcuAddresses, HashMap, HashMapExtensions, dlt_ctx,
 };
 use doip_definitions::{
     header::PayloadType,
     payload::{DoipPayload, VehicleIdentificationRequest},
 };
 use tokio::sync::{Mutex, RwLock, mpsc};
+use tokio_util::sync::CancellationToken;
 
 use crate::{
     DoipDiagGateway, DoipTarget,
-    connections::handle_gateway_connection,
+    connections::{GatewayConfig, GatewayState, handle_gateway_connection},
     ecu_connection::ConnectionConfig,
     socket::{DoIPConfig, DoIPUdpSocket},
 };
@@ -35,7 +37,7 @@ pub(crate) async fn get_vehicle_identification<T, F>(
     mut shutdown_signal: futures::future::Shared<F>,
 ) -> Result<Vec<DoipTarget>, DiagServiceError>
 where
-    T: EcuAddressProvider,
+    T: EcuAddresses,
     F: Future<Output = ()> + Send + 'static,
 {
     // send VIR
@@ -56,6 +58,10 @@ where
     let vam_timeout = Duration::from_secs(1); // not the actual timeout from the spec ...
 
     tokio::select! {
+        // Use `biased` to prioritize shutdown signal over the VIR receive loop.
+        // This ensures that if shutdown is already signaled when entering the
+        // select, we exit immediately without starting unnecessary work.
+        biased;
         () = &mut shutdown_signal => {
             tracing::info!("Shutdown signal received");
         },
@@ -106,9 +112,11 @@ pub(crate) async fn listen_for_vams<T, F>(
     gateway: DoipDiagGateway<T>,
     variant_detection: mpsc::Sender<Vec<String>>,
     send_timeout: Duration,
+    alive_check_interval: Duration,
     mut shutdown_signal: futures::future::Shared<F>,
+    cancel_token: CancellationToken,
 ) where
-    T: EcuAddressProvider + DoipComParamProvider,
+    T: EcuAddresses + DoipComParams,
     F: Future<Output = ()> + Send + 'static,
 {
     #[derive(Debug)]
@@ -131,10 +139,11 @@ pub(crate) async fn listen_for_vams<T, F>(
             dlt_context = dlt_ctx!("DOIP")
         )
     )]
-    async fn handle_doip_response<T: EcuAddressProvider + DoipComParamProvider>(
+    async fn handle_doip_response<T: EcuAddresses + DoipComParams>(
         connection_config: &ConnectionConfig,
         gateway: &DoipDiagGateway<T>,
         send_timeout: Duration,
+        alive_check_interval: Duration,
         doip_msg_ctx: DoipMessageContext,
         gateway_ecu_map: &HashMap<u16, Vec<u16>>,
         gateway_ecu_name_map: &HashMap<u16, Vec<String>>,
@@ -172,13 +181,18 @@ pub(crate) async fn listen_for_vams<T, F>(
                     tracing::info!(ecu_name = %doip_target.ecu, "New Gateway ECU detected");
 
                     match handle_gateway_connection::<T>(
-                        connection_config,
                         doip_target,
-                        doip_connection_config,
-                        &gateway.doip_connections,
-                        &gateway.ecus,
-                        gateway_ecu_map,
-                        send_timeout,
+                        &GatewayConfig {
+                            connection: connection_config.clone(),
+                            doip: doip_connection_config,
+                            send_timeout,
+                            alive_check_interval,
+                        },
+                        &GatewayState {
+                            doip_connections: Arc::clone(&gateway.doip_connections),
+                            ecus: Arc::clone(&gateway.ecus),
+                            gateway_ecu_map: gateway_ecu_map.clone(),
+                        },
                     )
                     .await
                     {
@@ -284,7 +298,13 @@ pub(crate) async fn listen_for_vams<T, F>(
             loop {
                 let mut socket = broadcast_socket.lock().await;
                 tokio::select! {
+                    // Use `biased` to prioritize shutdown signal and cancel handling
+                    // over processing the VAM
+                    biased;
                     () = &mut shutdown_signal => {
+                        break
+                    },
+                    () = cancel_token.cancelled() => {
                         break
                     },
                     Some(Ok((doip_msg, source_addr))) = socket.recv() => {
@@ -293,6 +313,7 @@ pub(crate) async fn listen_for_vams<T, F>(
                                 &connection_config,
                                 &gateway,
                                 send_timeout,
+                                alive_check_interval,
                                 DoipMessageContext {
                                     doip_msg,
                                     source_addr,
@@ -321,7 +342,7 @@ async fn handle_vam<T>(
     netmask: u32,
 ) -> Result<Option<DoipTarget>, String>
 where
-    T: EcuAddressProvider,
+    T: EcuAddresses,
 {
     match source_addr {
         std::net::SocketAddr::V4(socket_addr_v4) => {

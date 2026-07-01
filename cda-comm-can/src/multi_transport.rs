@@ -28,8 +28,8 @@
 use std::sync::Arc;
 
 use cda_interfaces::{
-    DiagServiceError, EcuAddressProvider, EcuGateway, HashMap, ServicePayload,
-    TransmissionParameters, UdsResponse,
+    DiagServiceError, EcuAddresses, EcuGateway, HashMap, ServicePayload, TransmissionParameters,
+    UdsResponse,
 };
 use serde::{Deserialize, Serialize};
 use tokio::sync::{RwLock, mpsc};
@@ -177,6 +177,15 @@ pub struct TransportStats {
 }
 
 impl<D: EcuGateway> EcuGateway for MultiTransportGateway<D> {
+    fn shutdown(&self) {
+        if let Some(ref doip) = self.doip_gateway {
+            doip.shutdown();
+        }
+        if let Some(ref can) = self.can_gateway {
+            can.shutdown();
+        }
+    }
+
     async fn get_gateway_network_address(&self, logical_address: u16) -> Option<String> {
         // Try DoIP first
         if let Some(ref doip) = self.doip_gateway
@@ -240,7 +249,7 @@ impl<D: EcuGateway> EcuGateway for MultiTransportGateway<D> {
         }
     }
 
-    async fn ecu_online<E: EcuAddressProvider>(
+    async fn ecu_online<E: EcuAddresses>(
         &self,
         ecu_name: &str,
         ecu_db: &RwLock<E>,

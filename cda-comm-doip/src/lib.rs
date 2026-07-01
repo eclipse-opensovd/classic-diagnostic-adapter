@@ -1,6 +1,5 @@
 /*
- * SPDX-License-Identifier: Apache-2.0
- * SPDX-FileCopyrightText: 2025 The Contributors to Eclipse OpenSOVD (see CONTRIBUTORS)
+ * SPDX-FileCopyrightText: 2025 Copyright (c) Contributors to the Eclipse Foundation
  *
  * See the NOTICE file(s) distributed with this work for additional
  * information regarding copyright ownership.
@@ -8,6 +7,8 @@
  * This program and the accompanying materials are made available under the
  * terms of the Apache License Version 2.0 which is available at
  * https://www.apache.org/licenses/LICENSE-2.0
+ *
+ * SPDX-License-Identifier: Apache-2.0
  */
 
 use std::{
@@ -17,8 +18,8 @@ use std::{
 };
 
 use cda_interfaces::{
-    DiagServiceError, DoipComParamProvider, DoipGatewaySetupError, EcuAddressProvider, EcuGateway,
-    HashMap, HashMapExtensions, ServicePayload, TransmissionParameters, UdsResponse, dlt_ctx,
+    DiagServiceError, DoipComParams, DoipGatewaySetupError, EcuAddresses, EcuGateway, HashMap,
+    HashMapExtensions, ServicePayload, TransmissionParameters, UdsResponse, dlt_ctx,
     util::{self, tokio_ext},
 };
 use doip_definitions::{
@@ -28,10 +29,11 @@ use doip_definitions::{
 use futures::FutureExt;
 use thiserror::Error;
 use tokio::sync::{Mutex, RwLock, broadcast, mpsc};
+use tokio_util::sync::CancellationToken;
 
 use crate::{
     config::DoipConfig,
-    connections::EcuError,
+    connections::{EcuError, GatewayConfig, GatewayState},
     ecu_connection::ConnectionConfig,
     socket::{DoIPConfig, DoIPUdpSocket},
 };
@@ -41,8 +43,6 @@ mod connections;
 mod ecu_connection;
 mod socket;
 mod vir_vam;
-
-const SLEEP_INTERVAL: Duration = Duration::from_secs(30);
 
 /// Timeout when suppressPosRspMsgIndicationBit is set.
 /// ECUs that reject a request usually respond quickly with an NRC and
@@ -71,11 +71,12 @@ enum DiagnosticResponse {
     TemporarilyNotAvailable(u16),
 }
 
-pub struct DoipDiagGateway<T: EcuAddressProvider + DoipComParamProvider> {
+pub struct DoipDiagGateway<T: EcuAddresses + DoipComParams> {
     doip_connections: Arc<RwLock<Vec<Arc<DoipConnection>>>>,
     logical_address_to_connection: Arc<RwLock<HashMap<u16, usize>>>,
     ecus: Arc<HashMap<String, RwLock<T>>>,
     socket: Arc<Mutex<DoIPUdpSocket>>,
+    cancel_token: CancellationToken,
 }
 
 #[derive(Debug)]
@@ -143,7 +144,7 @@ impl TryFrom<DiagnosticResponse> for Option<UdsResponse> {
     }
 }
 
-impl<T: EcuAddressProvider + DoipComParamProvider> DoipDiagGateway<T> {
+impl<T: EcuAddresses + DoipComParams> DoipDiagGateway<T> {
     /// Create a new `DoipDiagGateway` instance.
     /// # Errors
     /// Returns `String` if initialization fails, e.g. when socket creation fails.
@@ -173,6 +174,7 @@ impl<T: EcuAddressProvider + DoipComParamProvider> DoipDiagGateway<T> {
             tls_port,
             send_timeout_ms,
             send_diagnostic_message_ack,
+            alive_check_interval_secs,
             ..
         } = doip_config;
         let gateway_port = *gateway_port;
@@ -190,6 +192,7 @@ impl<T: EcuAddressProvider + DoipComParamProvider> DoipDiagGateway<T> {
             send_diagnostic_message_ack: *send_diagnostic_message_ack,
         };
         let send_timeout = Duration::from_millis(*send_timeout_ms);
+        let alive_check_interval = Duration::from_secs(*alive_check_interval_secs);
 
         tracing::info!("Initializing DoipDiagGateway");
 
@@ -222,6 +225,7 @@ impl<T: EcuAddressProvider + DoipComParamProvider> DoipDiagGateway<T> {
                 logical_address_to_connection: Arc::new(RwLock::new(HashMap::new())),
                 ecus,
                 socket: Arc::new(Mutex::new(socket)),
+                cancel_token: CancellationToken::new(),
             }
         } else {
             tracing::info!(gateway_count = gateways.len(), "Gateways found");
@@ -241,13 +245,18 @@ impl<T: EcuAddressProvider + DoipComParamProvider> DoipDiagGateway<T> {
 
             for gateway in gateways {
                 if let Ok(logical_address) = connections::handle_gateway_connection::<T>(
-                    &connection_config,
                     gateway,
-                    doip_connection_config,
-                    &doip_connections,
-                    &ecus,
-                    &gateway_ecu_map,
-                    send_timeout,
+                    &GatewayConfig {
+                        connection: connection_config.clone(),
+                        doip: doip_connection_config,
+                        send_timeout,
+                        alive_check_interval,
+                    },
+                    &GatewayState {
+                        doip_connections: Arc::clone(&doip_connections),
+                        ecus: Arc::clone(&ecus),
+                        gateway_ecu_map: gateway_ecu_map.clone(),
+                    },
                 )
                 .await
                 {
@@ -263,6 +272,7 @@ impl<T: EcuAddressProvider + DoipComParamProvider> DoipDiagGateway<T> {
                 logical_address_to_connection: Arc::new(RwLock::new(logical_address_to_connection)),
                 ecus,
                 socket: Arc::new(Mutex::new(socket)),
+                cancel_token: CancellationToken::new(),
             }
         };
 
@@ -274,11 +284,17 @@ impl<T: EcuAddressProvider + DoipComParamProvider> DoipDiagGateway<T> {
             gateway.clone(),
             variant_detection,
             send_timeout,
+            alive_check_interval,
             shared_shutdown_signal,
+            gateway.cancel_token.child_token(),
         )
         .await;
 
         Ok(gateway)
+    }
+
+    pub fn shutdown(&self) {
+        self.cancel_token.cancel();
     }
 
     async fn get_doip_connection(
@@ -331,7 +347,11 @@ impl<T: EcuAddressProvider + DoipComParamProvider> DoipDiagGateway<T> {
     }
 }
 
-impl<T: EcuAddressProvider + DoipComParamProvider> EcuGateway for DoipDiagGateway<T> {
+impl<T: EcuAddresses + DoipComParams> EcuGateway for DoipDiagGateway<T> {
+    fn shutdown(&self) {
+        self.cancel_token.cancel();
+    }
+
     async fn get_gateway_network_address(&self, logical_address: u16) -> Option<String> {
         self.doip_connections
             .read()
@@ -410,7 +430,10 @@ impl<T: EcuAddressProvider + DoipComParamProvider> EcuGateway for DoipDiagGatewa
                                 if let Ok(result) = ecu.receiver.recv().await {
                                     match result {
                                         Ok(DiagnosticResponse::Ack((_, prev))) => {
-                                            tracing::debug!("Received ACK");
+                                            tracing::debug!(
+                                                ecu_name = %transmission_params.ecu_name,
+                                                "Received ACK"
+                                            );
                                             if !prev.is_empty()
                                                 && !doip_message.message.starts_with(&prev)
                                             {
@@ -430,6 +453,11 @@ impl<T: EcuAddressProvider + DoipComParamProvider> EcuGateway for DoipDiagGatewa
                                         }
                                         Ok(DiagnosticResponse::GenericNack(nack)) => {
                                             // todo #22: handle generic NACK
+                                            tracing::warn!(
+                                                ecu_name = %transmission_params.ecu_name,
+                                                nack_code = ?nack.nack_code,
+                                                "Received generic NACK"
+                                            );
                                             try_send_uds_response(
                                                 &response_sender,
                                                 Err(DiagServiceError::Nack(u8::from(
@@ -439,6 +467,11 @@ impl<T: EcuAddressProvider + DoipComParamProvider> EcuGateway for DoipDiagGatewa
                                             .await;
                                         }
                                         Ok(DiagnosticResponse::Nack(nack)) => {
+                                            tracing::warn!(
+                                                ecu_name = %transmission_params.ecu_name,
+                                                nack_code = ?nack.nack_code,
+                                                "Received NACK"
+                                            );
                                             try_send_uds_response(
                                                 &response_sender,
                                                 Err(DiagServiceError::Nack(u8::from(
@@ -449,8 +482,8 @@ impl<T: EcuAddressProvider + DoipComParamProvider> EcuGateway for DoipDiagGatewa
                                         }
                                         Ok(msg) => {
                                             tracing::warn!(
-                                                "Expected ACK/NACK but received unexpected \
-                                                 message: {:?}",
+                                                ecu_name = %transmission_params.ecu_name,
+                                                "Expected ACK/NACK but received unexpected message: {:?}",
                                                 msg
                                             );
                                             // any response but ACK/NACK is unexpected because
@@ -462,6 +495,11 @@ impl<T: EcuAddressProvider + DoipComParamProvider> EcuGateway for DoipDiagGatewa
                                             continue 'ack_waiting;
                                         }
                                         Err(e) => {
+                                            tracing::error!(
+                                                ecu_name = %transmission_params.ecu_name,
+                                                error = %e,
+                                                "Error while waiting for ACK/NACK"
+                                            );
                                             try_send_uds_response(
                                                 &response_sender,
                                                 Err(DiagServiceError::NoResponse(format!(
@@ -475,6 +513,10 @@ impl<T: EcuAddressProvider + DoipComParamProvider> EcuGateway for DoipDiagGatewa
                                     break 'ack_waiting false;
                                 }
                                 // did not get anything from ecu receiver, meaning it is closed.
+                                tracing::error!(
+                                    ecu_name = %transmission_params.ecu_name,
+                                    "ECU receiver unexpectedly closed while waiting for ACK/NACK"
+                                );
                                 try_send_uds_response(
                                     &response_sender,
                                     Err(DiagServiceError::NoResponse(
@@ -494,8 +536,9 @@ impl<T: EcuAddressProvider + DoipComParamProvider> EcuGateway for DoipDiagGatewa
                         }
                     } else {
                         tracing::warn!(
-                            "Timeout waiting for ACK/NACK from ECU after {:?}",
-                            transmission_params.timeout_ack
+                            ecu_name = %transmission_params.ecu_name,
+                            timeout = ?transmission_params.timeout_ack,
+                            "Timeout waiting for ACK/NACK from ECU"
                         );
                         // timeout branch of tokio::select, no response received,
                         // informing receiver about timeout and giving up.
@@ -517,6 +560,11 @@ impl<T: EcuAddressProvider + DoipComParamProvider> EcuGateway for DoipDiagGatewa
                     // i.e. when the ecu is busy and sends NRC 0x78
                     loop {
                         tokio::select! {
+                            // Using biased saves a bit of CPU time, because tokio does not
+                            // have to generate a random number to select the branch.
+                            // Prioritizing the ecu.reciver over the closed handler is fine
+                            // because it is unlikely that both signal at the exact same time.
+                            biased;
                             res = ecu.receiver.recv() => {
                                 if let Ok(res) = res { match res {
                                     Ok(response) => {
@@ -526,6 +574,11 @@ impl<T: EcuAddressProvider + DoipComParamProvider> EcuGateway for DoipDiagGatewa
                                         }
                                     }
                                     Err(e) => {
+                                        tracing::error!(
+                                            ecu_name = %transmission_params.ecu_name,
+                                            error = %e,
+                                            "Error while waiting for response message"
+                                        );
                                         if !try_send_uds_response(
                                                 &response_sender,
                                                 Err(DiagServiceError::NoResponse(
@@ -536,6 +589,10 @@ impl<T: EcuAddressProvider + DoipComParamProvider> EcuGateway for DoipDiagGatewa
                                         }
                                     }
                                 } } else {
+                                    tracing::error!(
+                                        ecu_name = %transmission_params.ecu_name,
+                                        "ECU receiver unexpectedly closed while waiting for response"
+                                    );
                                     try_send_uds_response(&response_sender,
                                         Err(DiagServiceError::NoResponse(
                                             "ECU receiver unexpectedly closed".to_owned(),
@@ -544,7 +601,10 @@ impl<T: EcuAddressProvider + DoipComParamProvider> EcuGateway for DoipDiagGatewa
                                 }
                             }
                             () = response_sender.closed() => {
-                                tracing::debug!("Response sender closed, aborting loop");
+                                tracing::debug!(
+                                    ecu_name = %transmission_params.ecu_name,
+                                    "Response sender closed, aborting loop"
+                                );
                                 break;
                             }
                         }
@@ -556,6 +616,7 @@ impl<T: EcuAddressProvider + DoipComParamProvider> EcuGateway for DoipDiagGatewa
                         .saturating_sub(send_and_ackd_after)
                         .saturating_sub(receiver_flushed);
                     tracing::debug!(
+                        ecu_name = %transmission_params.ecu_name,
                         total_duration = ?start.elapsed(),
                         lock_duration = ?lock_acquired,
                         flush_duration = ?receiver_flushed,
@@ -570,7 +631,7 @@ impl<T: EcuAddressProvider + DoipComParamProvider> EcuGateway for DoipDiagGatewa
         Ok(())
     }
 
-    async fn ecu_online<E: EcuAddressProvider>(
+    async fn ecu_online<E: EcuAddresses>(
         &self,
         ecu_name: &str,
         ecu_db: &RwLock<E>,
@@ -838,13 +899,14 @@ fn create_socket(
     })
 }
 
-impl<T: EcuAddressProvider + DoipComParamProvider> Clone for DoipDiagGateway<T> {
+impl<T: EcuAddresses + DoipComParams> Clone for DoipDiagGateway<T> {
     fn clone(&self) -> Self {
         Self {
             doip_connections: Arc::clone(&self.doip_connections),
             logical_address_to_connection: Arc::clone(&self.logical_address_to_connection),
             ecus: Arc::clone(&self.ecus),
             socket: Arc::clone(&self.socket),
+            cancel_token: self.cancel_token.clone(),
         }
     }
 }

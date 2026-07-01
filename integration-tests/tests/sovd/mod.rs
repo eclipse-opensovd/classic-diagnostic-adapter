@@ -1,6 +1,5 @@
 /*
- * SPDX-License-Identifier: Apache-2.0
- * SPDX-FileCopyrightText: 2025 The Contributors to Eclipse OpenSOVD (see CONTRIBUTORS)
+ * SPDX-FileCopyrightText: 2025 Copyright (c) Contributors to the Eclipse Foundation
  *
  * See the NOTICE file(s) distributed with this work for additional
  * information regarding copyright ownership.
@@ -8,6 +7,8 @@
  * This program and the accompanying materials are made available under the
  * terms of the Apache License Version 2.0 which is available at
  * https://www.apache.org/licenses/LICENSE-2.0
+ *
+ * SPDX-License-Identifier: Apache-2.0
  */
 use std::collections::HashSet;
 
@@ -37,10 +38,12 @@ mod faults;
 mod flash_download;
 mod locks;
 mod operations;
+mod runtimefiles;
 mod version_endpoint;
 
 pub(crate) const ECU_FLXC1000_ENDPOINT: &str = "components/flxc1000";
 pub(crate) const ECU_FLXCNG1000_ENDPOINT: &str = "components/flxcng1000";
+pub(crate) const ECU_FSNR2000_ENDPOINT: &str = "components/fsnr2000";
 pub(crate) const ECU_TMCC3000_ENDPOINT: &str = "components/tmcc3000";
 pub(crate) const ECU_HOVR4000_ENDPOINT: &str = "components/hovr4000";
 pub(crate) const ECU_JGWT5000_ENDPOINT: &str = "components/jgwt5000";
@@ -385,8 +388,8 @@ where
             // are already unwinding a panic, that second panic is not
             // catchable and aborts the whole process (SIGABRT), masking the
             // real assertion failure and killing the rest of the suite.
-            std::thread::scope(|scope| {
-                scope.spawn(|| {
+            std::thread::scope(|s| {
+                s.spawn(|| {
                     if let Ok(rt) = tokio::runtime::Builder::new_current_thread()
                         .enable_all()
                         .build()

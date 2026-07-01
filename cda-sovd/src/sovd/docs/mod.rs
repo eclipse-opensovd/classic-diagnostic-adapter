@@ -1,6 +1,5 @@
 /*
- * SPDX-License-Identifier: Apache-2.0
- * SPDX-FileCopyrightText: 2026 The Contributors to Eclipse OpenSOVD (see CONTRIBUTORS)
+ * SPDX-FileCopyrightText: 2026 Copyright (c) Contributors to the Eclipse Foundation
  *
  * See the NOTICE file(s) distributed with this work for additional
  * information regarding copyright ownership.
@@ -8,6 +7,8 @@
  * This program and the accompanying materials are made available under the
  * terms of the Apache License Version 2.0 which is available at
  * https://www.apache.org/licenses/LICENSE-2.0
+ *
+ * SPDX-License-Identifier: Apache-2.0
  */
 
 //! Reusable utilities for building self-contained `OpenAPI` 3.1 documents
@@ -17,6 +18,7 @@
 //! [`PathItem`]s and passes them to [`build_openapi_doc`] to produce a valid,
 //! self-contained `OpenAPI` specification returned by `GET .../docs`.
 
+pub mod data;
 pub mod operations;
 
 use aide::openapi::{

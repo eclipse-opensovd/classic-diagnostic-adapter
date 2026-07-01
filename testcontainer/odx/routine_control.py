@@ -1,5 +1,4 @@
-# SPDX-License-Identifier: Apache-2.0
-# SPDX-FileCopyrightText: 2025 The Contributors to Eclipse OpenSOVD (see CONTRIBUTORS)
+# SPDX-FileCopyrightText: 2025 Copyright (c) Contributors to the Eclipse Foundation
 #
 # See the NOTICE file(s) distributed with this work for additional
 # information regarding copyright ownership.
@@ -7,12 +6,19 @@
 # This program and the accompanying materials are made available under the
 # terms of the Apache License Version 2.0 which is available at
 # https://www.apache.org/licenses/LICENSE-2.0
+#
+# SPDX-License-Identifier: Apache-2.0
 
 from odxtools.diaglayers.diaglayerraw import DiagLayerRaw
+from odxtools.specialdatagroup import SpecialDataGroup
 from routines import add_routine
 
 
-def add_routine_control_services(dlr: DiagLayerRaw):
+def add_routine_control_services(
+    dlr: DiagLayerRaw, sdgs_by_service: dict[str, list[SpecialDataGroup]] | None = None
+):
+    sdgs_map = sdgs_by_service or {}
+
     # 31 01 10 01 - SelfTest Start (synchronous, Start only)
     add_routine(
         dlr,
@@ -21,6 +27,7 @@ def add_routine_control_services(dlr: DiagLayerRaw):
         routine_type="Start",
         functional_class="Routines",
         description="Self Test",
+        sdgs=sdgs_map.get("SelfTest_Start"),
     )
 
     # 31 01 10 02 - CalibrateSensors Start (asynchronous)
@@ -31,6 +38,7 @@ def add_routine_control_services(dlr: DiagLayerRaw):
         routine_type="Start",
         functional_class="Routines",
         description="Calibrate Sensors",
+        sdgs=sdgs_map.get("CalibrateSensors_Start"),
     )
 
     # 31 02 10 02 - CalibrateSensors Stop
@@ -41,6 +49,7 @@ def add_routine_control_services(dlr: DiagLayerRaw):
         routine_type="Stop",
         functional_class="Routines",
         description="Calibrate Sensors Stop",
+        sdgs=sdgs_map.get("CalibrateSensors_Stop"),
     )
 
     # 31 03 10 02 - CalibrateSensors RequestResults
@@ -51,4 +60,5 @@ def add_routine_control_services(dlr: DiagLayerRaw):
         routine_type="RequestResults",
         functional_class="Routines",
         description="Calibrate Sensors Request Results",
+        sdgs=sdgs_map.get("CalibrateSensors_RequestResults"),
     )

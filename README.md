@@ -1,6 +1,5 @@
 <!--
-SPDX-License-Identifier: Apache-2.0
-SPDX-FileCopyrightText: 2026 The Contributors to Eclipse OpenSOVD (see CONTRIBUTORS)
+SPDX-FileCopyrightText: 2026 Copyright (c) Contributors to the Eclipse Foundation
 
 See the NOTICE file(s) distributed with this work for additional
 information regarding copyright ownership.
@@ -8,6 +7,8 @@ information regarding copyright ownership.
 This program and the accompanying materials are made available under the
 terms of the Apache License Version 2.0 which is available at
 https://www.apache.org/licenses/LICENSE-2.0
+
+SPDX-License-Identifier: Apache-2.0
 -->
 
 # 🚗 Classic Diagnostic Adapter 🏥
@@ -115,8 +116,16 @@ $env:OPENSSL_INCLUDE_DIR="C:\Program Files\OpenSSL-Win64\include"
 
 ### pre commit
 
+Check staged files:
+
 ```shell
 uv run --group tools prek run
+```
+
+Check all files:
+
+```shell
+uv run --group tools prek run --all-files
 ```
 
 Install this command as documented here: <https://git-scm.com/book/en/v2/Customizing-Git-Git-Hooks>
@@ -124,6 +133,20 @@ Install this command as documented here: <https://git-scm.com/book/en/v2/Customi
 ### codestyle
 
 see [codestyle](CODESTYLE.md)
+
+### linting
+
+To run clippy with the same settings as the CI/CD pipeline (nightly toolchain, all targets and features, warnings as errors):
+
+```shell
+cargo +nightly-2025-07-14 clippy --all-targets --all-features -- -D warnings
+```
+
+Or using the `cargo lint` alias (stable toolchain, otherwise identical flags):
+
+```shell
+cargo lint
+```
 
 ### testing
 
