@@ -182,17 +182,6 @@ impl DynamicRouter {
         self.recompose().await;
     }
 
-    /// Adds routes under an auto-generated name. Useful for one-off route additions
-    /// where the caller does not need to replace or remove them later.
-    pub async fn merge_routes(&self, new_routes: ApiRouter) {
-        let id = self.next_id.fetch_add(1, Ordering::Relaxed);
-        {
-            let mut groups = self.route_groups.write().await;
-            groups.insert(id, new_routes);
-        }
-        self.recompose().await;
-    }
-
     async fn recompose(&self) {
         let groups = self.route_groups.read().await;
         let finalizers = self.finalizers.read().await;

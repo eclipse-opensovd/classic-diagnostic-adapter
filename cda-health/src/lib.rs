@@ -131,7 +131,7 @@ pub async fn add_health_routes(dynamic_router: &DynamicRouter, cda_version: Stri
         )
         .with_state(state.clone());
 
-    dynamic_router.merge_routes(router).await;
+    dynamic_router.add_routes(router).await;
     state
 }
 

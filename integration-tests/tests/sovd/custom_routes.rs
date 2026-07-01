@@ -79,7 +79,7 @@ async fn add_custom_routes(dynamic_router: &DynamicRouter) {
         ),
     );
 
-    dynamic_router.merge_routes(custom_router).await;
+    dynamic_router.add_routes(custom_router).await;
 }
 
 #[tokio::test]
