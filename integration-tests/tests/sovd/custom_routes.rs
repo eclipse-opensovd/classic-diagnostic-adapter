@@ -17,7 +17,7 @@ use aide::axum::{ApiRouter, routing};
 use axum::{Json, http::StatusCode};
 use cda_comm_doip::config::DoipConfig;
 use cda_interfaces::{
-    FunctionalDescriptionConfig, HashMap, HashMapExtensions, UdsEcu,
+    FunctionalDescriptionConfig, HashMap, HashMapExtensions, UdsQuery,
     datatypes::{ComponentsConfig, FaultConfig},
 };
 use cda_sovd::{Locks, dynamic_router::DynamicRouter};
