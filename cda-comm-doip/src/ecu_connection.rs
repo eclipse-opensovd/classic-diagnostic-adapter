@@ -318,9 +318,13 @@ pub(crate) async fn establish_ecu_connection(
     )
     .await
     {
-        Ok(Ok(stream)) => {
-            EcuConnectionVariant::Plain(DoIPConnection::new(stream, config.doip.transport.socket))
-        }
+        Ok(Ok(stream)) => EcuConnectionVariant::Plain(DoIPConnection::new(
+            stream,
+            DoipSocketConfig {
+                protocol_version: config.doip.protocol_version,
+                send_diagnostic_message_ack: config.doip.transport.send_diagnostic_message_ack,
+            },
+        )),
         Ok(Err(e)) => return Err(e),
         Err(_) => {
             return Err(ConnectionError::Timeout(
@@ -409,7 +413,16 @@ pub(crate) async fn establish_tls_ecu_connection(
     )
     .await
     {
-        Ok(Ok(stream)) => create_tls_stream(stream, config.doip.transport.socket).await?,
+        Ok(Ok(stream)) => {
+            create_tls_stream(
+                stream,
+                DoipSocketConfig {
+                    protocol_version: config.doip.protocol_version,
+                    send_diagnostic_message_ack: config.doip.transport.send_diagnostic_message_ack,
+                },
+            )
+            .await?
+        }
         Ok(Err(e)) => {
             return Err(ConnectionError::ConnectionFailed(format!(
                 "Connect failed: {e:?}"

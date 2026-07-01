@@ -211,6 +211,7 @@ impl From<DoipGatewaySetupError> for AppError {
         match value {
             DoipGatewaySetupError::InvalidAddress(_) => Self::ConnectionError(value.to_string()),
             DoipGatewaySetupError::SocketCreationFailed(_)
+            | DoipGatewaySetupError::InvalidProtocol(_)
             | DoipGatewaySetupError::PortBindFailed(_) => {
                 Self::InitializationFailed(value.to_string())
             }
@@ -219,6 +220,12 @@ impl From<DoipGatewaySetupError> for AppError {
             }
             DoipGatewaySetupError::ResourceError(_) => Self::ResourceError(value.to_string()),
             DoipGatewaySetupError::ServerError(_) => Self::ServerError(value.to_string()),
+            DoipGatewaySetupError::UnknownECU {
+                logical_address,
+                protocol_version: u8,
+            } => Self::ConfigurationError(format!(
+                "Unknown ECU with logical address {logical_address} and protocol version {u8}"
+            )),
         }
     }
 }
@@ -697,12 +704,11 @@ pub async fn load_vehicle_data<
     };
 
     let update_guard = cda_sovd::UpdateGuardState::new();
-    let doip_socket = cda_comm_doip::create_socket(
-        &config.doip.tester_address,
-        config.doip.gateway_port,
-        config.doip.protocol_version,
-    )
-    .map_err(|e| AppError::InitializationFailed(format!("Failed to create DoIP socket: {e}")))?;
+    let doip_socket =
+        cda_comm_doip::create_udp_vir_socket(&config.doip.tester_address, config.doip.gateway_port)
+            .map_err(|e| {
+                AppError::InitializationFailed(format!("Failed to create DoIP socket: {e}"))
+            })?;
     let components = create_vehicle_components::<F, S>(
         config,
         &mdd_paths,

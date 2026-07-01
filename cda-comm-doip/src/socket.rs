@@ -78,7 +78,7 @@ impl<T: AsyncRead + AsyncWrite + Unpin> DoIPConnection<T> {
         let (read, write) = tokio::io::split(stream);
         (
             DoIPConnectionReadHalf::new(read),
-            DoIPConnectionWriteHalf::new(write, self.config.protocol_version),
+            DoIPConnectionWriteHalf::new(write, self.config),
         )
     }
 }
@@ -87,19 +87,19 @@ pub(crate) struct DoIPConnectionReadHalf<T: AsyncRead + Unpin> {
 }
 pub(crate) struct DoIPConnectionWriteHalf<T: AsyncWrite + Unpin> {
     io: FramedWrite<WriteHalf<T>, DoipCodec>,
-    protocol_version: ProtocolVersion,
+    config: DoipSocketConfig,
 }
 
 impl<T: AsyncWrite + Unpin> DoIPConnectionWriteHalf<T> {
-    pub fn new(io: WriteHalf<T>, protocol_version: ProtocolVersion) -> Self {
+    pub fn new(io: WriteHalf<T>, config: DoipSocketConfig) -> Self {
         Self {
             io: FramedWrite::new(io, DoipCodec {}),
-            protocol_version,
+            config,
         }
     }
 
     pub async fn send(&mut self, msg: DoipPayload) -> Result<(), ConnectionError> {
-        send_doip(&mut self.io, self.protocol_version, msg).await
+        send_doip(&mut self.io, self.config.protocol_version, msg).await
     }
 }
 impl<T: AsyncRead + Unpin> DoIPConnectionReadHalf<T> {
@@ -115,18 +115,18 @@ impl<T: AsyncRead + Unpin> DoIPConnectionReadHalf<T> {
 
 pub struct DoIPUdpSocket {
     io: UdpFramed<DoipCodec, tokio::net::UdpSocket>,
-    protocol_version: ProtocolVersion,
+    config: DoipSocketConfig,
 }
 
 impl DoIPUdpSocket {
     pub(crate) fn new(
         socket: std::net::UdpSocket,
-        protocol_version: ProtocolVersion,
+        config: DoipSocketConfig,
     ) -> Result<Self, std::io::Error> {
         let tokio_socket = tokio::net::UdpSocket::from_std(socket)?;
         Ok(Self {
             io: UdpFramed::new(tokio_socket, DoipCodec {}),
-            protocol_version,
+            config,
         })
     }
 
@@ -136,7 +136,7 @@ impl DoIPUdpSocket {
         addr: SocketAddr,
     ) -> Result<(), ConnectionError> {
         let msg = DoipMessageBuilder::new()
-            .protocol_version(self.protocol_version)
+            .protocol_version(self.config.protocol_version)
             .payload(payload)
             .build();
         self.io
