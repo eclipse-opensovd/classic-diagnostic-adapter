@@ -1831,6 +1831,7 @@ dependencies = [
  "axum",
  "cda-build",
  "cda-comm-doip",
+ "cda-comm-uds",
  "cda-core",
  "cda-database",
  "cda-health",

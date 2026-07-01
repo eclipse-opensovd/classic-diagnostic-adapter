@@ -10,6 +10,10 @@
  *
  * SPDX-License-Identifier: Apache-2.0
  */
+
+use std::{fmt::Display, future::Future};
+
+use async_trait::async_trait;
 use serde::Serialize;
 
 use crate::{
@@ -135,6 +139,15 @@ pub enum Connectivity {
     Online,
     /// ECU is currently unreachable (never connected, or lost connection).
     Offline,
+}
+
+impl Display for Connectivity {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Online => f.write_str("Online"),
+            Self::Offline => f.write_str("Offline"),
+        }
+    }
 }
 
 /// ECU variant detection result.
@@ -762,14 +775,14 @@ pub trait VariantDetection: Send + Sync + 'static {
     fn clear_variant_for_redetect(&mut self);
 }
 
-/// Notification interface for ECU connectivity events.
-///
-/// Implemented by the UDS state coordinator and consumed by the `DoIP` layer
-/// to propagate transport-level disconnect events up to the diagnostic state machine.
-pub trait EcuStateEvents: Clone + Send + Sync + 'static {
-    /// Called when a `DoIP` transport connection to an ECU is lost or a service send times out.
-    /// Implementations should clear session and security state and cancel expiry timers.
-    fn on_ecu_disconnected(&self, ecu_name: &str) -> impl Future<Output = ()> + Send;
+/// Callback interface for transport-level ECU connectivity changes.
+#[async_trait]
+pub trait EcuConnectivityHandler: Send + Sync + 'static {
+    /// Called when a connection is established or re-established for an ECU.
+    async fn on_connected_bulk(&self, ecu_names: &[String]);
+
+    /// Called when a connection is lost for an ECU.
+    async fn on_disconnected_bulk(&self, ecu_names: &[String]);
 }
 
 /// Resolves `DiagComm` handles from the database by various search criteria.

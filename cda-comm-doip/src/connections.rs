@@ -14,8 +14,8 @@
 use std::{sync::Arc, time::Duration};
 
 use cda_interfaces::{
-    DataParseError, DiagServiceError, DoipComParams, EcuAddresses, HashMap, HashMapExtensions,
-    dlt_ctx, service_ids,
+    DataParseError, DiagServiceError, DoipComParams, EcuAddresses, EcuConnectivityHandler, HashMap,
+    HashMapExtensions, dlt_ctx, service_ids,
 };
 use doip_definitions::payload::{
     ActivationType, AliveCheckRequest, DiagnosticAckCode, DiagnosticMessageAck, DoipPayload,
@@ -71,15 +71,6 @@ struct GatewayIdentity {
     name: String,
 }
 
-/// Context for notifying the UDS layer when ECUs behind a gateway disconnect.
-#[derive(Debug)]
-struct DisconnectNotifier {
-    /// Names of ECUs reachable through this gateway connection.
-    ecu_names: Vec<String>,
-    /// Channel to send disconnect notifications to the UDS state coordinator.
-    tx: mpsc::Sender<Vec<String>>,
-}
-
 #[derive(Error, Debug, Clone)]
 pub enum EcuError {
     #[error("Resource not found: `{0}`")]
@@ -124,7 +115,7 @@ impl From<EcuError> for DiagServiceError {
 }
 
 #[tracing::instrument(
-    skip(config, state),
+    skip(config, state, connectivity_handler),
     fields(
         tester_ip = config.connection.source_ip.clone(),
         port = config.connection.port,
@@ -139,7 +130,7 @@ pub(crate) async fn handle_gateway_connection<T>(
     gateway: DoipTarget,
     config: &GatewayConfig,
     state: &GatewayState<T>,
-    ecu_disconnect_tx: mpsc::Sender<Vec<String>>,
+    connectivity_handler: Arc<dyn EcuConnectivityHandler>,
 ) -> Result<u16, EcuError>
 where
     T: EcuAddresses + DoipComParams,
@@ -206,10 +197,8 @@ where
             send_timeout: config.send_timeout,
             alive_check_interval: config.alive_check_interval,
         },
-        DisconnectNotifier {
-            ecu_names: ecu_names_for_gateway,
-            tx: ecu_disconnect_tx,
-        },
+        ecu_names_for_gateway,
+        Arc::clone(&connectivity_handler),
     )
     .await
     {
@@ -274,7 +263,7 @@ fn create_ecu_receiver_map(
 
 #[allow(clippy::type_complexity)]
 #[tracing::instrument(
-    skip(routing_activation_request, connection_settings, connection_config, disconnect),
+    skip(routing_activation_request, connection_settings, connection_config, connectivity_handler),
     fields(
         tester_ip = connection_config.source_ip.clone(),
         port = connection_config.port,
@@ -285,6 +274,7 @@ fn create_ecu_receiver_map(
         dlt_context = dlt_ctx!("DOIP"),
     )
 )]
+#[allow(clippy::too_many_arguments)] // allow for now, as after rebase on #390 this should be resolvable.
 async fn connection_handler(
     connection_config: ConnectionConfig,
     gateway: GatewayIdentity,
@@ -292,7 +282,8 @@ async fn connection_handler(
     routing_activation_request: RoutingActivationRequest,
     ecus: Vec<u16>,
     connection_settings: ConnectionSettings,
-    disconnect: DisconnectNotifier,
+    ecu_names: Vec<String>,
+    connectivity_handler: Arc<dyn EcuConnectivityHandler>,
 ) -> Result<
     (
         mpsc::Sender<DoipPayload>,
@@ -348,6 +339,8 @@ async fn connection_handler(
         conn_reset_rx,
         conn_reset,
         connection_settings,
+        ecu_names.clone(),
+        Arc::clone(&connectivity_handler),
     );
 
     // communication between send / receiver task to unlock the connection in the receiver task
@@ -369,7 +362,8 @@ async fn connection_handler(
         send_pending_rx,
         conn_reset_tx,
         intx.clone(),
-        disconnect,
+        ecu_names,
+        connectivity_handler,
     );
 
     // no need to wait until the connection is alive, we will reconnect automatically anyway
@@ -382,6 +376,7 @@ async fn connection_handler(
         dlt_context = dlt_ctx!("DOIP")
     )
 )]
+#[allow(clippy::too_many_arguments)] // allow for now, as after rebase on #390 this should be resolvable.
 fn spawn_connection_reset_task(
     connection_config: ConnectionConfig,
     gateway_ip: String,
@@ -390,6 +385,8 @@ fn spawn_connection_reset_task(
     mut conn_reset_rx: mpsc::Receiver<ConnectionResetReason>,
     conn_reset: Arc<EcuConnectionTarget>,
     connection_timeouts: ConnectionSettings,
+    ecu_names: Vec<String>,
+    connectivity_handler: Arc<dyn EcuConnectivityHandler>,
 ) {
     cda_interfaces::spawn_named!(
         &format!("doip-connection-reset-{gateway_ip}"),
@@ -419,6 +416,7 @@ fn spawn_connection_reset_task(
                                     &mut conn_guard,
                                     conn,
                                 );
+                                connectivity_handler.on_connected_bulk(&ecu_names).await;
                                 while !conn_reset_rx.is_empty() {
                                     // drain the receiver to avoid resetting the connection again
                                     // immediately after a reset
@@ -603,8 +601,9 @@ where
 /// allowed because there are two inline functions in here,
 /// that should be kept private to this function.
 #[allow(clippy::too_many_lines)]
+#[allow(clippy::too_many_arguments)] // allow for now, as after rebase on #390 this should be resolvable.
 #[tracing::instrument(
-    skip(outtx, gateway_conn, send_pending_rx, reset_tx, disconnect),
+    skip(outtx, gateway_conn, send_pending_rx, reset_tx, connectivity_handler),
     fields(
         gateway_ip = %gateway.ip,
         gateway_name = %gateway.name,
@@ -619,7 +618,8 @@ fn spawn_gateway_receiver_task<T>(
     mut send_pending_rx: watch::Receiver<bool>,
     reset_tx: mpsc::Sender<ConnectionResetReason>,
     send_tx: mpsc::Sender<DoipPayload>,
-    disconnect: DisconnectNotifier,
+    ecu_names: Vec<String>,
+    connectivity_handler: Arc<dyn EcuConnectivityHandler>,
 ) where
     T: AsyncRead + AsyncWrite + Unpin + Send + 'static,
 {
@@ -680,7 +680,8 @@ fn spawn_gateway_receiver_task<T>(
         reset_tx: &mpsc::Sender<ConnectionResetReason>,
         ack_tx: &mpsc::Sender<DoipPayload>,
         response: Option<Result<DiagnosticResponse, ConnectionError>>,
-        disconnect: &DisconnectNotifier,
+        ecu_names: &[String],
+        connectivity_handler: &Arc<dyn EcuConnectivityHandler>,
     ) {
         match response {
             Some(Ok(response)) => {
@@ -761,12 +762,7 @@ fn spawn_gateway_receiver_task<T>(
                             tracing::error!(error = ?e, "Failed to send connection reset request");
                         }
                         // Notify UDS layer that ECUs on this connection are disconnected
-                        if let Err(e) = disconnect.tx.send(disconnect.ecu_names.clone()).await {
-                            tracing::error!(
-                                error = ?e,
-                                "Failed to send ECU disconnect notification"
-                            );
-                        }
+                        connectivity_handler.on_disconnected_bulk(ecu_names).await;
                     }
                     _ => {
                         // for POC purposes we just log the error and do not reset the connection
@@ -823,7 +819,8 @@ fn spawn_gateway_receiver_task<T>(
                             &reset_tx,
                             &send_tx,
                             response,
-                            &disconnect,
+                            &ecu_names,
+                            &connectivity_handler,
                         ).await;
                     }
                 }

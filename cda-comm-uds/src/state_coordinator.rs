@@ -13,18 +13,19 @@
 
 use std::sync::Arc;
 
-use cda_interfaces::{EcuRuntimeState, EcuStateEvents, HashMap, dlt_ctx};
+use async_trait::async_trait;
+use cda_interfaces::{EcuConnectivityHandler, EcuRuntimeState, HashMap, dlt_ctx};
 
 use crate::coordinator::{
-    EcuCoordinatorHandle, EcuDisconnected, FinishVariantDetection, PrepareVariantDetection,
+    EcuConnected, EcuCoordinatorHandle, EcuDisconnected, FinishVariantDetection,
+    PrepareVariantDetection,
 };
 
 /// Coordinates ECU state transitions in response to connectivity events.
 ///
 /// Holds per-ECU [`EcuCoordinatorHandle`]s that provide actor-serialized state mutations.
-/// Passed to the `DoIP` layer (as `impl EcuStateEvents`) so transport-level disconnects
-/// can propagate variant invalidation up to the diagnostic layer without acquiring any
-/// `RwLock<EcuManager>`.
+/// Passed to the transport layer so connectivity events can propagate to the diagnostic
+/// layer without acquiring any `RwLock<EcuManager>`.
 ///
 /// On disconnect only the variant is cleared (marked for re-detection).
 /// Session and security state are preserved, as they are owned by the
@@ -40,7 +41,8 @@ impl EcuStateCoordinator {
     ///
     /// Each ECU gets its own actor spawned, sharing the `EcuRuntimeState` from the
     /// `EcuManager` stored in `ecus`.
-    pub(crate) fn new(runtime_states: HashMap<String, EcuRuntimeState>) -> Self {
+    #[must_use]
+    pub fn new(runtime_states: HashMap<String, EcuRuntimeState>) -> Self {
         let handles: HashMap<String, EcuCoordinatorHandle> = runtime_states
             .into_iter()
             .map(|(ecu_name, state)| {
@@ -51,6 +53,19 @@ impl EcuStateCoordinator {
 
         Self {
             handles: Arc::new(handles),
+        }
+    }
+
+    /// Mark the ECU as connected (Online) on the next request.
+    ///
+    /// Sends a fire-and-forget message to the ECU's coordinator actor.
+    /// Does NOT acquire any `RwLock<EcuManager>` - safe to call from any context.
+    #[tracing::instrument(skip_all, fields(ecu_name, dlt_context = dlt_ctx!("UDS")))]
+    pub(crate) async fn handle_ecu_connected(&self, ecu_name: &str) {
+        tracing::info!(ecu_name, "ECU connected - setting connectivity to Online");
+
+        if let Some(handle) = self.handles.get(ecu_name) {
+            let _ = handle.actor_ref.tell(EcuConnected).await;
         }
     }
 
@@ -94,15 +109,24 @@ impl EcuStateCoordinator {
     }
 }
 
-impl EcuStateEvents for EcuStateCoordinator {
-    async fn on_ecu_disconnected(&self, ecu_name: &str) {
-        self.handle_ecu_disconnected(ecu_name).await;
+#[async_trait]
+impl EcuConnectivityHandler for EcuStateCoordinator {
+    async fn on_connected_bulk(&self, ecu_names: &[String]) {
+        for ecu_name in ecu_names {
+            self.handle_ecu_connected(ecu_name).await;
+        }
+    }
+
+    async fn on_disconnected_bulk(&self, ecu_names: &[String]) {
+        for ecu_name in ecu_names {
+            self.handle_ecu_disconnected(ecu_name).await;
+        }
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use cda_interfaces::{Connectivity, EcuRuntimeState, EcuStateEvents, HashMap, VariantState};
+    use cda_interfaces::{Connectivity, EcuRuntimeState, HashMap, VariantState};
 
     use super::EcuStateCoordinator;
 
@@ -166,11 +190,13 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn ecu_state_events_dispatches_to_disconnected() {
-        let (coordinator, runtime_state) = make_coordinator();
+    async fn connected_event_sets_online() {
+        let runtime_state = EcuRuntimeState::new();
+        let runtime_states: HashMap<String, EcuRuntimeState> =
+            HashMap::from_iter([("TestECU".to_string(), runtime_state.clone())]);
+        let coordinator = EcuStateCoordinator::new(runtime_states);
 
-        // Call via the trait interface
-        EcuStateEvents::on_ecu_disconnected(&coordinator, "TestECU").await;
+        coordinator.handle_ecu_connected("TestECU").await;
 
         // Give actor time to process
         cda_interfaces::util::tokio_ext::sleep_for(std::time::Duration::from_millis(10)).await;
@@ -178,8 +204,8 @@ mod tests {
         let state = runtime_state.ecu_state.read().unwrap();
         assert_eq!(
             state.connectivity,
-            Connectivity::Offline,
-            "Variant should be marked as disconnected via trait dispatch"
+            Connectivity::Online,
+            "ECU should be marked as Online after connected event"
         );
     }
 }

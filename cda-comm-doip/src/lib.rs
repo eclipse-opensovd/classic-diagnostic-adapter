@@ -18,8 +18,9 @@ use std::{
 };
 
 use cda_interfaces::{
-    DiagServiceError, DoipComParams, DoipGatewaySetupError, EcuAddresses, EcuGateway, HashMap,
-    HashMapExtensions, ServicePayload, TransmissionParameters, UdsResponse, dlt_ctx,
+    DiagServiceError, DoipComParams, DoipGatewaySetupError, EcuAddresses, EcuConnectivityHandler,
+    EcuGateway, HashMap, HashMapExtensions, ServicePayload, TransmissionParameters, UdsResponse,
+    dlt_ctx,
     util::{self, tokio_ext},
 };
 use doip_definitions::{
@@ -149,7 +150,7 @@ impl<T: EcuAddresses + DoipComParams> DoipDiagGateway<T> {
     /// # Errors
     /// Returns `String` if initialization fails, e.g. when socket creation fails.
     #[tracing::instrument(
-        skip(doip_config, ecus, variant_detection, shutdown_signal),
+        skip(doip_config, ecus, variant_detection, connectivity_handler, shutdown_signal),
         fields(
             tester_ip = doip_config.tester_address,
             gateway_port = doip_config.gateway_port,
@@ -161,7 +162,7 @@ impl<T: EcuAddresses + DoipComParams> DoipDiagGateway<T> {
         doip_config: &DoipConfig,
         ecus: Arc<HashMap<String, RwLock<T>>>,
         variant_detection: mpsc::Sender<Vec<String>>,
-        ecu_disconnect_tx: mpsc::Sender<Vec<String>>,
+        connectivity_handler: Arc<dyn EcuConnectivityHandler>,
         shutdown_signal: F,
     ) -> Result<Self, DoipGatewaySetupError>
     where
@@ -258,7 +259,7 @@ impl<T: EcuAddresses + DoipComParams> DoipDiagGateway<T> {
                         ecus: Arc::clone(&ecus),
                         gateway_ecu_map: gateway_ecu_map.clone(),
                     },
-                    ecu_disconnect_tx.clone(),
+                    Arc::clone(&connectivity_handler),
                 )
                 .await
                 {
@@ -285,7 +286,7 @@ impl<T: EcuAddresses + DoipComParams> DoipDiagGateway<T> {
             mask,
             gateway.clone(),
             variant_detection,
-            ecu_disconnect_tx,
+            connectivity_handler,
             send_timeout,
             alive_check_interval,
             shared_shutdown_signal,

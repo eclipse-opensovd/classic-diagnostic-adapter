@@ -207,6 +207,39 @@ impl Message<EcuDisconnected> for EcuCoordinator {
     }
 }
 
+/// ECU connected event -> sets connectivity to Online.
+///
+/// Only transitions from `Offline` to `Online`. If already `Online`, this is a no-op.
+/// Variant state is **intentionally untouched**; variant detection runs separately.
+pub struct EcuConnected;
+
+impl Message<EcuConnected> for EcuCoordinator {
+    type Reply = ();
+
+    async fn handle(
+        &mut self,
+        _msg: EcuConnected,
+        _ctx: &mut Context<Self, Self::Reply>,
+    ) -> Self::Reply {
+        let mut es = std_ext::lock_write(&self.state.ecu_state);
+
+        if es.connectivity == Connectivity::Offline {
+            tracing::info!(
+                ecu = %self.ecu_name,
+                dlt_context = dlt_ctx!("UDS"),
+                "ECU connected. Setting connectivity to Online"
+            );
+            es.connectivity = Connectivity::Online;
+        } else {
+            tracing::debug!(
+                ecu = %self.ecu_name,
+                current = ?es.connectivity,
+                "ECU connected received but already Online..skipping"
+            );
+        }
+    }
+}
+
 /// Suppress disconnect events for this ECU during variant detection.
 ///
 /// Uses `ask` (request-response) to guarantee the suppression is active
@@ -518,6 +551,38 @@ mod tests {
         tokio::task::yield_now().await;
 
         assert_eq!(handle.ecu_status().variant_state, VariantState::Duplicate);
+    }
+
+    #[tokio::test]
+    async fn ecu_connected_transitions_offline_to_online() {
+        let handle = spawn_test_coordinator("TestECU");
+        // Initial state is Offline
+
+        handle
+            .actor_ref
+            .tell(EcuConnected)
+            .await
+            .expect("Actor should be alive");
+        tokio::task::yield_now().await;
+
+        assert_eq!(handle.connectivity(), Connectivity::Online);
+        // Variant state should be untouched
+        assert_eq!(handle.ecu_status().variant_state, VariantState::NotTested);
+    }
+
+    #[tokio::test]
+    async fn ecu_connected_is_noop_when_already_online() {
+        let handle = spawn_test_coordinator("TestECU");
+        handle.state.ecu_state.write().unwrap().connectivity = Connectivity::Online;
+
+        handle
+            .actor_ref
+            .tell(EcuConnected)
+            .await
+            .expect("Actor should be alive");
+        tokio::task::yield_now().await;
+
+        assert_eq!(handle.connectivity(), Connectivity::Online);
     }
 
     #[tokio::test]

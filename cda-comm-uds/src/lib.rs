@@ -107,34 +107,16 @@ impl<S: EcuGateway, T: UdsEcuDb> UdsManager<S, T> {
 }
 
 impl<S: EcuGateway, T: EcuManager> UdsManager<S, T> {
-    /// Create a new [`UdsManager`] and spawn background tasks for variant detection
-    /// and disconnect handling.
-    ///
-    /// # Panics
-    /// Panics if an ECU `RwLock` is contested during construction, which should not
-    /// happen.
+    /// Create a new [`UdsManager`].
     pub fn new(
         gateway: S,
         ecus: Arc<HashMap<String, RwLock<T>>>,
         mut variant_detection_receiver: mpsc::Receiver<Vec<String>>,
-        mut disconnect_receiver: mpsc::Receiver<Vec<String>>,
+        state_coordinator: EcuStateCoordinator,
         functional_description_config: &FunctionalDescriptionConfig,
         fault_config: FaultConfig,
         update_in_progress: Arc<AtomicBool>,
     ) -> Self {
-        let runtime_states = ecus
-            .iter()
-            .map(|(name, ecu_lock)| {
-                // At construction time no one else holds a reference, so try_read succeeds.
-                let guard = ecu_lock
-                    .try_read()
-                    .expect("ECU lock should be uncontested during UdsManager construction");
-                let state = guard.runtime_state();
-                (name.clone(), state)
-            })
-            .collect::<HashMap<_, _>>();
-        let state_coordinator = EcuStateCoordinator::new(runtime_states);
-
         let manager = Self {
             ecus,
             gateway,
@@ -172,17 +154,6 @@ impl<S: EcuGateway, T: EcuManager> UdsManager<S, T> {
                 }
 
                 vd_uds_clone.start_variant_detection_for_ecus(deduplicated_ecus);
-            }
-        });
-
-        let disconnect_coordinator = manager.state_coordinator.clone();
-        cda_interfaces::spawn_named!("ecu-disconnect-receiver", async move {
-            while let Some(ecu_names) = disconnect_receiver.recv().await {
-                for ecu_name in &ecu_names {
-                    disconnect_coordinator
-                        .handle_ecu_disconnected(ecu_name)
-                        .await;
-                }
             }
         });
 
