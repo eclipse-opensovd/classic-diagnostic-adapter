@@ -14,7 +14,8 @@
 use std::{future::Future, sync::Arc, time::Duration};
 
 use cda_interfaces::{
-    DiagServiceError, DoipComParams, EcuAddresses, HashMap, HashMapExtensions, dlt_ctx,
+    DiagServiceError, DoipComParams, EcuAddresses, EcuConnectivityHandler, HashMap,
+    HashMapExtensions, dlt_ctx,
 };
 use doip_definitions::{
     header::PayloadType,
@@ -111,6 +112,7 @@ pub(crate) async fn listen_for_vams<T, F>(
     netmask: u32,
     gateway: DoipDiagGateway<T>,
     variant_detection: mpsc::Sender<Vec<String>>,
+    connectivity_handler: Arc<dyn EcuConnectivityHandler>,
     send_timeout: Duration,
     alive_check_interval: Duration,
     mut shutdown_signal: futures::future::Shared<F>,
@@ -133,6 +135,7 @@ pub(crate) async fn listen_for_vams<T, F>(
             gateway_ecu_map,
             gateway_ecu_name_map,
             variant_detection,
+            connectivity_handler,
             connection_config
         ),
         fields(
@@ -148,6 +151,7 @@ pub(crate) async fn listen_for_vams<T, F>(
         gateway_ecu_map: &HashMap<u16, Vec<u16>>,
         gateway_ecu_name_map: &HashMap<u16, Vec<String>>,
         variant_detection: mpsc::Sender<Vec<String>>,
+        connectivity_handler: Arc<dyn EcuConnectivityHandler>,
     ) {
         let DoipMessageContext {
             doip_msg,
@@ -193,6 +197,7 @@ pub(crate) async fn listen_for_vams<T, F>(
                             ecus: Arc::clone(&gateway.ecus),
                             gateway_ecu_map: gateway_ecu_map.clone(),
                         },
+                        connectivity_handler,
                     )
                     .await
                     {
@@ -323,6 +328,7 @@ pub(crate) async fn listen_for_vams<T, F>(
                                 &gateway_ecu_map,
                                 &gateway_ecu_name_map,
                                 variant_detection.clone(),
+                                Arc::clone(&connectivity_handler),
                             ).await;
                         }
                     },

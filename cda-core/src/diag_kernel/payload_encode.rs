@@ -60,9 +60,8 @@ impl<S: SecurityPlugin> PayloadEncoder for EcuManager<S> {
         self.check_service_access(security_plugin, mapped_service)
             .await?;
 
-        let (new_session, new_security) = self
-            .lookup_state_transition_by_diagcomm_for_active(&mapped_dc)
-            .await;
+        let (new_session, new_security) =
+            self.lookup_state_transition_by_diagcomm_for_active(&mapped_dc);
 
         Ok(ServicePayload {
             data: rawdata,
@@ -157,9 +156,8 @@ impl<S: SecurityPlugin> PayloadEncoder for EcuManager<S> {
             }
         }
 
-        let (new_session, new_security) = self
-            .lookup_state_transition_by_diagcomm_for_active(&(mapped_dc.into()))
-            .await;
+        let (new_session, new_security) =
+            self.lookup_state_transition_by_diagcomm_for_active(&(mapped_dc.into()));
         tracing::Span::current().record("output", util::tracing::print_hex(&uds, 10));
         Ok(ServicePayload {
             data: uds,

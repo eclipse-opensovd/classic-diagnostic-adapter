@@ -13,7 +13,7 @@
 
 use async_trait::async_trait;
 use cda_interfaces::{
-    DiagServiceError, EcuGateway, EcuManager, EcuState, SUPPRESS_POSITIVE_RESPONSE_BIT,
+    Connectivity, DiagServiceError, EcuGateway, EcuManager, SUPPRESS_POSITIVE_RESPONSE_BIT,
     ServicePayload, TesterPresentControlMessage, TesterPresentMode, TesterPresentType, UdsEcu,
     UdsTesterPresent, dlt_ctx, service_ids,
 };
@@ -78,8 +78,9 @@ impl<S: EcuGateway, T: EcuManager> UdsManager<S, T> {
                             // Skip sending if the ECU is not online; the loop will
                             // naturally resume once the ECU is detected online again.
                             if let Ok(ecu) = uds.uds_ecu_db(&control_msg.ecu) {
-                                let ecu_state = ecu.read().await.variant().state;
-                                if ecu_state != EcuState::Online {
+                                let ecu_state =
+                                    ecu.read().await.runtime_state().status().connectivity;
+                                if ecu_state != Connectivity::Online {
                                     tracing::debug!(
                                         ecu = %control_msg.ecu,
                                         ecu_state = %ecu_state,
@@ -88,6 +89,7 @@ impl<S: EcuGateway, T: EcuManager> UdsManager<S, T> {
                                     continue;
                                 }
                             }
+
                             // abort sending if it takes longer than `interval` and log an
                             // error, but try to continue sending tester present afterwards.
                             if let Ok(r) = tokio::time::timeout(

@@ -16,8 +16,8 @@ use std::time::Duration;
 use async_trait::async_trait;
 
 use crate::{
-    DiagComm, DiagServiceError, DoipComParams, DynamicPlugin, EcuAddresses, EcuStateManager,
-    EcuVariant, HashMap, SecurityAccess, TesterPresentType, UdsComParams,
+    DiagComm, DiagServiceError, DoipComParams, DynamicPlugin, EcuAddresses, EcuState,
+    EcuStateManager, HashMap, SecurityAccess, TesterPresentType, UdsComParams,
     datatypes::{
         ComplexComParamValue, ComponentConfigurationsInfo, ComponentDataInfo,
         ComponentOperationsInfo, DataTransferMetaData, DtcCode, DtcExtendedInfo,
@@ -368,11 +368,15 @@ pub trait UdsEcu: UdsTransport + UdsSession + UdsSecurity + UdsTesterPresent {
     /// does not exist or no service for variant detection is available.
     async fn detect_variant(&self, ecu_name: &str) -> Result<(), DiagServiceError>;
 
-    /// Get the name of the variant for the given ECU.
+    /// Get the ECU status (connectivity + variant state) for the given ECU.
     /// # Errors
     /// Will return Err if the ECU does not exist.
-    /// If the variant is cannot be resolved, "Unknown" will be returned.
-    async fn get_variant(&self, ecu_name: &str) -> Result<EcuVariant, DiagServiceError>;
+    async fn get_ecu_status(&self, ecu_name: &str) -> Result<EcuState, DiagServiceError>;
+
+    /// Get the logical address of the given ECU.
+    /// # Errors
+    /// Will return Err if the ECU does not exist.
+    async fn get_logical_address(&self, ecu_name: &str) -> Result<u16, DiagServiceError>;
 
     /// trigger the variant detection process for all ECUs.
     /// Main work will be done in the background, there is no result returned,
@@ -595,7 +599,7 @@ pub mod mock {
 
     use super::FlashTransferStartParams;
     use crate::{
-        DiagComm, DiagServiceError, DynamicPlugin, EcuVariant, HashMap, SecurityAccess,
+        DiagComm, DiagServiceError, DynamicPlugin, EcuState, HashMap, SecurityAccess,
         TesterPresentType, UdsEcu, UdsSecurity, UdsSession, UdsTesterPresent, UdsTransport,
         datatypes::{
             ComplexComParamValue, ComponentConfigurationsInfo, ComponentDataInfo,
@@ -804,10 +808,14 @@ pub mod mock {
                 &self,
                 ecu_name: &str,
             ) -> Result<(), DiagServiceError>;
-            async fn get_variant(
+            async fn get_ecu_status(
                 &self,
                 ecu_name: &str,
-            ) -> Result<EcuVariant, DiagServiceError>;
+            ) -> Result<EcuState, DiagServiceError>;
+            async fn get_logical_address(
+                &self,
+                ecu_name: &str,
+            ) -> Result<u16, DiagServiceError>;
             async fn start_variant_detection(&self);
             async fn ecu_dtc_by_mask(
                 &self,

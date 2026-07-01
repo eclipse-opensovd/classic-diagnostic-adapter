@@ -14,11 +14,12 @@
 use std::{future::Future, path::PathBuf, sync::Arc};
 
 use cda_comm_doip::{DoipDiagGateway, config::DoipConfig};
-use cda_comm_uds::UdsManager;
+use cda_comm_uds::{UdsManager, state_coordinator::EcuStateCoordinator};
 use cda_core::EcuManager;
 use cda_database::FileManager;
 use cda_interfaces::{
-    DiagServiceError, DoipGatewaySetupError, FunctionalDescriptionConfig, HashMap, UdsEcu,
+    DiagServiceError, DoipGatewaySetupError, EcuConnectivityHandler, FunctionalDescriptionConfig,
+    HashMap, HashMapExtensions, UdsEcu,
     datatypes::{ComParams, FaultConfig},
     dlt_ctx,
 };
@@ -734,6 +735,7 @@ pub fn create_uds_manager<S: SecurityPlugin>(
     gateway: DoipDiagGateway<EcuManager<S>>,
     databases: Arc<HashMap<String, RwLock<EcuManager<S>>>>,
     variant_detection_receiver: mpsc::Receiver<Vec<String>>,
+    state_coordinator: EcuStateCoordinator,
     functional_description_config: &FunctionalDescriptionConfig,
     fault_config: FaultConfig,
     update_in_progress: Arc<std::sync::atomic::AtomicBool>,
@@ -742,6 +744,7 @@ pub fn create_uds_manager<S: SecurityPlugin>(
         gateway,
         databases,
         variant_detection_receiver,
+        state_coordinator,
         functional_description_config,
         fault_config,
         update_in_progress,
@@ -774,10 +777,24 @@ pub async fn create_vehicle_components<
 
     let (variant_detection_tx, variant_detection_rx) = mpsc::channel(50);
     let databases = Arc::new(databases);
+
+    // Build runtime states for EcuStateCoordinator from all loaded ECU databases.
+    let runtime_states = {
+        let mut states = HashMap::new();
+        for (ecu_name, ecu_lock) in databases.as_ref() {
+            let state = ecu_lock.read().await.runtime_state();
+            states.insert(ecu_name.clone(), state);
+        }
+        states
+    };
+    let state_coordinator = EcuStateCoordinator::new(runtime_states);
+    let connectivity_handler: Arc<dyn EcuConnectivityHandler> = Arc::new(state_coordinator.clone());
+
     let diagnostic_gateway = create_diagnostic_gateway(
         Arc::clone(&databases),
         &config.doip,
         variant_detection_tx,
+        connectivity_handler,
         shutdown_signal,
         doip_provider,
     )
@@ -787,6 +804,7 @@ pub async fn create_vehicle_components<
         diagnostic_gateway.clone(),
         Arc::clone(&databases),
         variant_detection_rx,
+        state_coordinator,
         &config.functional_description,
         config.faults.clone(),
         update_in_progress,
@@ -807,7 +825,7 @@ pub async fn create_vehicle_components<
 }
 
 #[tracing::instrument(
-    skip(databases, variant_detection, shutdown_signal, doip_health_provider),
+    skip(databases, variant_detection, connectivity_handler, shutdown_signal, doip_health_provider),
     fields(
         database_count = databases.len(),
         dlt_context = dlt_ctx!("MAIN"),
@@ -819,6 +837,7 @@ pub async fn create_diagnostic_gateway<S: SecurityPlugin>(
     databases: Arc<DatabaseMap<S>>,
     doip_config: &DoipConfig,
     variant_detection: mpsc::Sender<Vec<String>>,
+    connectivity_handler: Arc<dyn EcuConnectivityHandler>,
     shutdown_signal: impl Future<Output = ()> + Send + 'static,
     doip_health_provider: Option<&Arc<cda_health::StatusHealthProvider>>,
 ) -> Result<DoipDiagGateway<EcuManager<S>>, DoipGatewaySetupError> {
@@ -826,8 +845,14 @@ pub async fn create_diagnostic_gateway<S: SecurityPlugin>(
         provider.update_status(cda_health::Status::Starting).await;
     }
 
-    let result =
-        DoipDiagGateway::new(doip_config, databases, variant_detection, shutdown_signal).await;
+    let result = DoipDiagGateway::new(
+        doip_config,
+        databases,
+        variant_detection,
+        connectivity_handler,
+        shutdown_signal,
+    )
+    .await;
     let status = if result.is_ok() {
         cda_health::Status::Up
     } else {
