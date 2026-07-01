@@ -31,18 +31,18 @@ use tokio_util::{
 use crate::ConnectionError;
 
 #[derive(Copy, Clone, Debug)]
-pub(crate) struct DoIPConfig {
+pub(crate) struct DoipSocketConfig {
     pub protocol_version: ProtocolVersion,
     pub send_diagnostic_message_ack: bool,
 }
 
 pub(crate) struct DoIPConnection<T: AsyncRead + AsyncWrite + Unpin> {
     io: Framed<T, DoipCodec>,
-    config: DoIPConfig,
+    config: DoipSocketConfig,
 }
 
 impl<T: AsyncRead + AsyncWrite + Unpin> DoIPConnection<T> {
-    pub fn new(io: T, config: DoIPConfig) -> Self {
+    pub fn new(io: T, config: DoipSocketConfig) -> Self {
         Self {
             io: Framed::new(io, DoipCodec {}),
             config,
@@ -113,13 +113,13 @@ impl<T: AsyncRead + Unpin> DoIPConnectionReadHalf<T> {
     }
 }
 
-pub(crate) struct DoIPUdpSocket {
+pub struct DoIPUdpSocket {
     io: UdpFramed<DoipCodec, tokio::net::UdpSocket>,
     protocol_version: ProtocolVersion,
 }
 
 impl DoIPUdpSocket {
-    pub fn new(
+    pub(crate) fn new(
         socket: std::net::UdpSocket,
         protocol_version: ProtocolVersion,
     ) -> Result<Self, std::io::Error> {
@@ -130,7 +130,7 @@ impl DoIPUdpSocket {
         })
     }
 
-    pub async fn send(
+    pub(crate) async fn send(
         &mut self,
         payload: DoipPayload,
         addr: SocketAddr,
@@ -145,7 +145,9 @@ impl DoIPUdpSocket {
             .map_err(|e| ConnectionError::SendFailed(format!("Failed to send message: {e:?}")))
     }
 
-    pub async fn recv(&mut self) -> Option<Result<(DoipMessage, SocketAddr), ConnectionError>> {
+    pub(crate) async fn recv(
+        &mut self,
+    ) -> Option<Result<(DoipMessage, SocketAddr), ConnectionError>> {
         self.io.next().await.map(|opt| {
             opt.map_err(|e| {
                 // In case of error (remaining bytes, corrupted DoIP message, etc...),

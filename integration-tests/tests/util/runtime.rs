@@ -27,6 +27,7 @@ use cda_interfaces::{
 use cda_plugin_security::{DefaultSecurityPlugin, DefaultSecurityPluginData};
 use cda_tracing::LoggingConfig;
 use futures::FutureExt as _;
+use http::{Method, StatusCode};
 use opensovd_cda_lib::{
     cda_version,
     config::configfile::{
@@ -34,10 +35,14 @@ use opensovd_cda_lib::{
         ServerConfig, StrictConfig,
     },
 };
+use sovd_interfaces::apps::sovd2uds::data::network_structure::get::Response as NetworkStructureResponse;
 use tokio::sync::{Mutex, MutexGuard, OnceCell};
 use tracing_subscriber::layer::SubscriberExt;
 
-use crate::util::{TestingError, ecusim};
+use crate::util::{
+    TestingError, ecusim,
+    http::{response_to_t, send_cda_request},
+};
 
 static TEST_RUNTIME: OnceCell<TestRuntime> = OnceCell::const_new();
 
@@ -89,7 +94,6 @@ pub(crate) async fn setup_integration_test<'a>(
 
     // Make sure we have a clean state at the beginning of the test
     ecusim::reset_sim(&runtime.ecu_sim).await?;
-
     if exclusive {
         // If exclusive access is requested, lock the dedicated mutex
         // and return the guard. The test must hold onto this guard.
@@ -593,6 +597,37 @@ fn write_config_toml(
             config_path.display()
         ))
     })?;
+
+    // Sync the file itself to ensure content is flushed to disk before Docker
+    // mounts the volume. This prevents a race condition where Docker reads a
+    // partially written or cached config file.
+    let file = std::fs::File::open(&config_path).map_err(|e| {
+        TestingError::ProcessFailed(format!(
+            "Failed to open config file for sync '{}': {e}",
+            config_path.display()
+        ))
+    })?;
+    file.sync_all().map_err(|e| {
+        TestingError::ProcessFailed(format!(
+            "Failed to fsync config file '{}': {e}",
+            config_path.display()
+        ))
+    })?;
+
+    // Also sync the directory to ensure metadata is flushed.
+    let dir = std::fs::File::open(test_container_dir).map_err(|e| {
+        TestingError::ProcessFailed(format!(
+            "Failed to open config directory '{}': {e}",
+            test_container_dir.display()
+        ))
+    })?;
+    dir.sync_all().map_err(|e| {
+        TestingError::ProcessFailed(format!(
+            "Failed to fsync config directory '{}': {e}",
+            test_container_dir.display()
+        ))
+    })?;
+
     tracing::debug!("Wrote CDA test config to {:?}", config_path);
     Ok(())
 }
@@ -704,18 +739,16 @@ async fn wait_for_http_ready_with_timeout(
     let start_time = Instant::now();
 
     while start_time.elapsed() < timeout {
-        match client.get(&url).send().await {
-            Ok(response) => {
-                if let Some(expected_status) = result {
-                    if response.status() == expected_status {
-                        return Ok(());
-                    }
-                } else {
+        if let Ok(response) = client.get(&url).send().await {
+            if let Some(expected_status) = result {
+                if response.status() == expected_status {
                     return Ok(());
                 }
+            } else {
+                return Ok(());
             }
-            _ => cda_interfaces::util::tokio_ext::sleep_for(Duration::from_millis(250)).await,
         }
+        cda_interfaces::util::tokio_ext::sleep_for(Duration::from_millis(250)).await;
     }
 
     Err(TestingError::ProcessFailed(format!(
@@ -739,6 +772,63 @@ async fn wait_for_ecu_sim_ready(host: &str, sim_control_port: u16) -> Result<(),
 pub(crate) async fn wait_for_cda_online(cfg: &ServerConfig) -> Result<(), TestingError> {
     let url = format!("http://{}:{}/health/ready", cfg.address, cfg.port);
     wait_for_http_ready(url, "CDA", Some(http::StatusCode::NO_CONTENT)).await
+}
+
+/// Poll the networkstructure endpoint until every ECU in every gateway reports
+/// `"Online"`, or until the timeout elapses.
+///
+/// This is needed after `reset_sim` because the `DoIP` reconnection and variant
+/// detection run asynchronously: returning immediately after reset would allow
+/// tests to start before the ECU is reachable, causing `ecu_state=Offline` at
+/// lock creation time and making tester-present tasks skip every tick.
+pub(crate) async fn wait_for_ecus_online(config: &Configuration) -> Result<(), TestingError> {
+    const POLL_INTERVAL: Duration = Duration::from_secs(1);
+    const TIMEOUT: Duration = Duration::from_secs(30);
+    let deadline = Instant::now().checked_add(TIMEOUT).ok_or_else(|| {
+        TestingError::SetupError("timeout duration overflowed Instant".to_owned())
+    })?;
+    let mut last_offline_ecus: Option<String> = None;
+
+    loop {
+        if Instant::now() >= deadline {
+            return Err(TestingError::ProcessFailed(format!(
+                "ECUs did not reach Online state within 30s after reset: {}",
+                last_offline_ecus.unwrap_or_else(|| "unknown".to_owned())
+            )));
+        }
+
+        let response = send_cda_request(
+            config,
+            "apps/sovd2uds/data/networkstructure",
+            StatusCode::OK,
+            Method::GET,
+            None,
+            None,
+            None,
+        )
+        .await?;
+        let network_structure_response: NetworkStructureResponse = response_to_t(&response)
+            .map_err(|e| {
+                TestingError::InvalidData(format!("Failed to parse networkstructure response: {e}"))
+            })?;
+
+        let offline_ecus: Vec<String> = network_structure_response
+            .data
+            .iter()
+            .flat_map(|ns| ns.gateways.iter())
+            .flat_map(|gw| gw.ecus.iter())
+            .filter(|ecu| !matches!(ecu.state.as_str(), "Online" | "Duplicate"))
+            .map(|ecu| format!("{}={}", ecu.qualifier, ecu.state))
+            .collect();
+
+        if offline_ecus.is_empty() {
+            return Ok(());
+        }
+
+        last_offline_ecus = Some(offline_ecus.join(", "));
+
+        cda_interfaces::util::tokio_ext::sleep_for(POLL_INTERVAL).await;
+    }
 }
 
 fn ecu_sim_dir() -> Result<std::path::PathBuf, TestingError> {

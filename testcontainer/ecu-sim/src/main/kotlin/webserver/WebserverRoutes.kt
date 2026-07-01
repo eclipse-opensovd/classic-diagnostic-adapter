@@ -196,6 +196,35 @@ data class SimpleInterceptorDto(
 )
 
 /**
+ * Routes to simulate DoIP TCP connection disruptions.
+ *
+ * - POST /disconnect: Closes all active TCP connections on all DoIP entities.
+ *   This simulates a network disconnect or ECU reboot where the TCP link is lost.
+ *   After the disconnect, ECUs will re-announce themselves via VAMs and the tester
+ *   should re-establish the connection.
+ */
+fun Route.addDisconnectRoutes() {
+    post("/disconnect") {
+        MDC.clear()
+        var closedConnections = 0
+
+        networkInstances().forEach { network ->
+            network.doipEntities.forEach { entity ->
+                entity.connectionHandlers.toList().forEach { handler ->
+                    handler.closeSocket()
+                    closedConnections++
+                }
+            }
+        }
+
+        call.respond(
+            HttpStatusCode.OK,
+            mapOf("message" to "Closed $closedConnections TCP connection(s)"),
+        )
+    }
+}
+
+/**
  * Routes to install/remove named inbound interceptors on ECUs.
  * This is used in integration tests to simulate custom ECU responses
  * (e.g., malformed responses, suppressed responses, or temporary overrides).

@@ -24,10 +24,9 @@ use tokio::sync::{Mutex, RwLock, mpsc};
 use tokio_util::sync::CancellationToken;
 
 use crate::{
-    DoipDiagGateway, DoipTarget,
-    connections::{GatewayConfig, GatewayState, handle_gateway_connection},
-    ecu_connection::ConnectionConfig,
-    socket::{DoIPConfig, DoIPUdpSocket},
+    DiscoveredGateway, DoipGatewayState, DoipTransportConfig,
+    connections::{GatewayState, handle_gateway_connection},
+    socket::DoIPUdpSocket,
 };
 pub(crate) async fn get_vehicle_identification<T, F>(
     socket: &mut DoIPUdpSocket,
@@ -35,7 +34,7 @@ pub(crate) async fn get_vehicle_identification<T, F>(
     gateway_port: u16,
     ecus: &Arc<HashMap<String, RwLock<T>>>,
     mut shutdown_signal: futures::future::Shared<F>,
-) -> Result<Vec<DoipTarget>, DiagServiceError>
+) -> Result<Vec<DiscoveredGateway>, DiagServiceError>
 where
     T: EcuAddresses,
     F: Future<Output = ()> + Send + 'static,
@@ -102,20 +101,15 @@ where
 
 // allowed due to nested functions
 #[allow(clippy::too_many_lines)]
-// allowed as it does not improve readability here to put args in a struct
-#[allow(clippy::too_many_arguments)]
 pub(crate) async fn listen_for_vams<T, F>(
-    connection_config: ConnectionConfig,
-    gateway_port: u16,
-    doip_connection_config: DoIPConfig,
+    transport_config: DoipTransportConfig,
     netmask: u32,
-    gateway: DoipDiagGateway<T>,
+    state: DoipGatewayState<T>,
     variant_detection: mpsc::Sender<Vec<String>>,
-    send_timeout: Duration,
-    alive_check_interval: Duration,
     mut shutdown_signal: futures::future::Shared<F>,
     cancel_token: CancellationToken,
-) where
+) -> tokio::task::JoinHandle<()>
+where
     T: EcuAddresses + DoipComParams,
     F: Future<Output = ()> + Send + 'static,
 {
@@ -124,26 +118,23 @@ pub(crate) async fn listen_for_vams<T, F>(
         doip_msg: doip_definitions::message::DoipMessage,
         source_addr: std::net::SocketAddr,
         netmask: u32,
-        doip_connection_config: DoIPConfig,
     }
 
     #[tracing::instrument(
         skip(
-            gateway,
+            state,
             gateway_ecu_map,
             gateway_ecu_name_map,
             variant_detection,
-            connection_config
+            transport_config
         ),
         fields(
             dlt_context = dlt_ctx!("DOIP")
         )
     )]
     async fn handle_doip_response<T: EcuAddresses + DoipComParams>(
-        connection_config: &ConnectionConfig,
-        gateway: &DoipDiagGateway<T>,
-        send_timeout: Duration,
-        alive_check_interval: Duration,
+        transport_config: &DoipTransportConfig,
+        state: &DoipGatewayState<T>,
         doip_msg_ctx: DoipMessageContext,
         gateway_ecu_map: &HashMap<u16, Vec<u16>>,
         gateway_ecu_name_map: &HashMap<u16, Vec<String>>,
@@ -153,16 +144,15 @@ pub(crate) async fn listen_for_vams<T, F>(
             doip_msg,
             source_addr,
             netmask,
-            doip_connection_config,
         } = doip_msg_ctx;
-        match handle_vam::<T>(&gateway.ecus, doip_msg, source_addr, netmask).await {
+        match handle_vam::<T>(&state.ecus, doip_msg, source_addr, netmask).await {
             Ok(Some(doip_target)) => {
                 tracing::debug!(
-                    ecu_name = %doip_target.ecu,
+                    ecu_name = %doip_target.ecu_name,
                     logical_address = %format!("{:#06x}", doip_target.logical_address),
                     "VAM received"
                 );
-                if gateway
+                if state
                     .logical_address_to_connection
                     .read()
                     .await
@@ -178,33 +168,29 @@ pub(crate) async fn listen_for_vams<T, F>(
                     )
                     .await;
                 } else {
-                    tracing::info!(ecu_name = %doip_target.ecu, "New Gateway ECU detected");
+                    tracing::info!(ecu_name = %doip_target.ecu_name, "New Gateway ECU detected");
 
+                    let ecu_names_for_gateway = gateway_ecu_name_map
+                        .get(&doip_target.logical_address)
+                        .cloned()
+                        .unwrap_or_default();
                     match handle_gateway_connection::<T>(
                         doip_target,
-                        &GatewayConfig {
-                            connection: connection_config.clone(),
-                            doip: doip_connection_config,
-                            send_timeout,
-                            alive_check_interval,
-                        },
+                        transport_config,
                         &GatewayState {
-                            doip_connections: Arc::clone(&gateway.doip_connections),
-                            ecus: Arc::clone(&gateway.ecus),
+                            doip_connections: Arc::clone(&state.doip_connections),
+                            ecus: Arc::clone(&state.ecus),
                             gateway_ecu_map: gateway_ecu_map.clone(),
+                            connection_tasks: Arc::clone(&state.connection_tasks),
                         },
+                        Some((variant_detection.clone(), ecu_names_for_gateway)),
                     )
                     .await
                     {
                         Ok(logical_address) => {
-                            gateway.logical_address_to_connection.write().await.insert(
+                            state.logical_address_to_connection.write().await.insert(
                                 logical_address,
-                                gateway
-                                    .doip_connections
-                                    .read()
-                                    .await
-                                    .len()
-                                    .saturating_sub(1),
+                                state.doip_connections.read().await.len().saturating_sub(1),
                             );
                             send_variant_detection(
                                 gateway_ecu_name_map,
@@ -237,7 +223,7 @@ pub(crate) async fn listen_for_vams<T, F>(
     ) {
         if let Some(ecus) = gateway_ecu_name_map.get(&logical_address) {
             if let Err(e) = variant_detection.send(ecus.clone()).await {
-                tracing::error!(
+                tracing::warn!(
                     error = ?e,
                     "Failed to send variant detection request"
                 );
@@ -253,15 +239,15 @@ pub(crate) async fn listen_for_vams<T, F>(
     // create mapping gateway_logical_address -> Vec<ecu_logical_address>
     let mut gateway_ecu_map: HashMap<u16, Vec<u16>> = HashMap::new();
     let mut gateway_ecu_name_map: HashMap<u16, Vec<String>> = HashMap::new();
-    for ecu_lock in gateway.ecus.values() {
+    for ecu_lock in state.ecus.values() {
         let ecu = ecu_lock.read().await;
         let ecu_name = ecu.ecu_name();
 
         let addr = ecu.logical_address();
-        let gateway = ecu.logical_gateway_address();
-        gateway_ecu_map.entry(gateway).or_default().push(addr);
+        let gateway_addr = ecu.logical_gateway_address();
+        gateway_ecu_map.entry(gateway_addr).or_default().push(addr);
         gateway_ecu_name_map
-            .entry(gateway)
+            .entry(gateway_addr)
             .or_default()
             .push(ecu_name.to_lowercase());
     }
@@ -272,25 +258,25 @@ pub(crate) async fn listen_for_vams<T, F>(
         "vam-listen",
         Box::pin(async move {
             let broadcast_ip = "0.0.0.0";
-            let broadcast_socket = if connection_config.source_ip == broadcast_ip {
-                Arc::clone(&gateway.socket)
+            let broadcast_socket = if transport_config.tester_ip == broadcast_ip {
+                Arc::clone(&state.socket)
             } else {
-                match crate::create_socket(
+                match crate::create_socket_with_protocol(
                     broadcast_ip,
-                    gateway_port,
-                    doip_connection_config.protocol_version,
+                    transport_config.port,
+                    transport_config.socket.protocol_version,
                 ) {
                     Ok(sock) => Arc::new(Mutex::new(sock)),
                     Err(e) => {
                         tracing::warn!(
                             broadcast_ip = %broadcast_ip,
-                            tester_ip = %connection_config.source_ip,
-                            gateway_port = %gateway_port,
+                            tester_ip = %transport_config.tester_ip,
+                            gateway_port = %transport_config.port,
                             error = ?e,
                             "Failed to bind broadcast socket, falling back to tester IP,\
                              this can lead to missed VAMs"
                         );
-                        Arc::clone(&gateway.socket)
+                        Arc::clone(&state.socket)
                     }
                 }
             };
@@ -310,15 +296,12 @@ pub(crate) async fn listen_for_vams<T, F>(
                     Some(Ok((doip_msg, source_addr))) = socket.recv() => {
                         if let DoipPayload::VehicleAnnouncementMessage(_) = &doip_msg.payload {
                             handle_doip_response(
-                                &connection_config,
-                                &gateway,
-                                send_timeout,
-                                alive_check_interval,
+                                &transport_config,
+                                &state,
                                 DoipMessageContext {
                                     doip_msg,
                                     source_addr,
                                     netmask,
-                                    doip_connection_config
                                 },
                                 &gateway_ecu_map,
                                 &gateway_ecu_name_map,
@@ -329,7 +312,7 @@ pub(crate) async fn listen_for_vams<T, F>(
                 }
             }
         })
-    );
+    )
 }
 
 #[tracing::instrument(skip_all,
@@ -340,7 +323,7 @@ async fn handle_vam<T>(
     doip_msg: doip_definitions::message::DoipMessage,
     source_addr: std::net::SocketAddr,
     netmask: u32,
-) -> Result<Option<DoipTarget>, String>
+) -> Result<Option<DiscoveredGateway>, String>
 where
     T: EcuAddresses,
 {
@@ -378,9 +361,9 @@ where
                     logical_address = %format!("{:#06x}", logical_address),
                     "Matching ECU found"
                 );
-                Ok(Some(DoipTarget {
+                Ok(Some(DiscoveredGateway {
                     ip: source_addr.ip().to_string(),
-                    ecu: ecu.clone(),
+                    ecu_name: ecu.clone(),
                     logical_address,
                 }))
             } else {

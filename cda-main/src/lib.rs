@@ -33,7 +33,7 @@ use figment::{
     providers::{Format, Serialized, Toml},
 };
 use futures::future::FutureExt;
-use tokio::sync::{RwLock, mpsc};
+use tokio::sync::{Mutex, RwLock, mpsc};
 use tracing_subscriber::layer::SubscriberExt;
 
 use crate::{
@@ -589,7 +589,7 @@ pub async fn setup_vehicle_and_routes<SP: SecurityPlugin, SL: SecurityPluginLoad
             uds_manager: vehicle_data.uds_manager,
             doip_gateway: vehicle_data.diagnostic_gateway,
             health: vehicle_data.health_providers,
-            variant_detection_handle: vehicle_data.variant_detection_handle,
+            variant_detection_handle: Some(vehicle_data.variant_detection_handle),
             security_handler: Arc::new(UpdateSecurityHandler::new(
                 Arc::clone(&lock_provider),
                 vec![
@@ -697,12 +697,19 @@ pub async fn load_vehicle_data<
     };
 
     let update_guard = cda_sovd::UpdateGuardState::new();
+    let doip_socket = cda_comm_doip::create_socket(
+        &config.doip.tester_address,
+        config.doip.gateway_port,
+        config.doip.protocol_version,
+    )
+    .map_err(|e| AppError::InitializationFailed(format!("Failed to create DoIP socket: {e}")))?;
     let components = create_vehicle_components::<F, S>(
         config,
         &mdd_paths,
         clonable_shutdown_signal,
         health_providers.as_ref(),
         update_guard.busy_handle(),
+        Arc::new(Mutex::new(doip_socket)),
     )
     .await?;
 
@@ -766,6 +773,7 @@ pub async fn create_vehicle_components<
     shutdown_signal: F,
     health_providers: Option<&HealthProviders>,
     update_in_progress: Arc<std::sync::atomic::AtomicBool>,
+    doip_socket: Arc<tokio::sync::Mutex<cda_comm_doip::socket::DoIPUdpSocket>>,
 ) -> Result<VehicleComponents<S>, AppError> {
     let db_provider = health_providers.map(|h| &h.database);
     let doip_provider = health_providers.map(|h| &h.doip);
@@ -780,6 +788,7 @@ pub async fn create_vehicle_components<
         variant_detection_tx,
         shutdown_signal,
         doip_provider,
+        doip_socket,
     )
     .await?;
 
@@ -807,7 +816,7 @@ pub async fn create_vehicle_components<
 }
 
 #[tracing::instrument(
-    skip(databases, variant_detection, shutdown_signal, doip_health_provider),
+    skip(databases, variant_detection, shutdown_signal, doip_health_provider, doip_socket),
     fields(
         database_count = databases.len(),
         dlt_context = dlt_ctx!("MAIN"),
@@ -821,13 +830,20 @@ pub async fn create_diagnostic_gateway<S: SecurityPlugin>(
     variant_detection: mpsc::Sender<Vec<String>>,
     shutdown_signal: impl Future<Output = ()> + Send + 'static,
     doip_health_provider: Option<&Arc<cda_health::StatusHealthProvider>>,
+    doip_socket: Arc<Mutex<cda_comm_doip::socket::DoIPUdpSocket>>,
 ) -> Result<DoipDiagGateway<EcuManager<S>>, DoipGatewaySetupError> {
     if let Some(provider) = doip_health_provider {
         provider.update_status(cda_health::Status::Starting).await;
     }
 
-    let result =
-        DoipDiagGateway::new(doip_config, databases, variant_detection, shutdown_signal).await;
+    let result = DoipDiagGateway::new(
+        doip_config,
+        databases,
+        variant_detection,
+        shutdown_signal,
+        doip_socket,
+    )
+    .await;
     let status = if result.is_ok() {
         cda_health::Status::Up
     } else {
