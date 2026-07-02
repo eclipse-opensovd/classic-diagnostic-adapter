@@ -31,5 +31,4 @@ mod flatbuf_config;
 mod jobs;
 mod networkstructure;
 mod sdg;
-pub mod semantics;
 mod state;

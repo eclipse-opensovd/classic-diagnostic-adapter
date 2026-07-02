@@ -98,7 +98,7 @@ use cda_database::{
     },
 };
 use cda_interfaces::{
-    DiagCommType, UDS_ID_RESPONSE_BITMASK, datatypes::semantics, service_ids, subfunction_ids,
+    DiagCommType, UDS_ID_RESPONSE_BITMASK, datatypes::Semantics, service_ids, subfunction_ids,
 };
 use flatbuffers::WIPOffset;
 
@@ -1172,6 +1172,8 @@ pub(crate) fn create_ecu_manager_variant_detection(
         vec![]
     );
 
+    let semantics = Semantics::default();
+
     // Create state charts for session and security
     let session_state_chart = {
         let default_session_name = "DefaultSession";
@@ -1179,7 +1181,7 @@ pub(crate) fn create_ecu_manager_variant_detection(
 
         db_builder.create_state_chart(
             "Session",
-            Some(semantics::SESSION),
+            Some(&semantics.session),
             None,
             Some(default_session_name),
             Some(vec![default_session_state]),
@@ -1192,7 +1194,7 @@ pub(crate) fn create_ecu_manager_variant_detection(
 
         db_builder.create_state_chart(
             "SecurityAccess",
-            Some(semantics::SECURITY),
+            Some(&semantics.security),
             None,
             Some(default_security_name),
             Some(vec![default_security_state]),
@@ -1581,10 +1583,11 @@ pub(crate) fn create_ecu_manager_with_state_transitions(
         Some("ProgrammingSecurity"),
     );
 
+    let semantics = Semantics::default();
     // Create state chart for security
     let security_state_chart = db_builder.create_state_chart(
         "SecurityAccess",
-        Some(semantics::SECURITY),
+        Some(&semantics.security),
         Some(vec![
             locked_to_extended_transition,
             extended_to_programming_transition,
@@ -1596,7 +1599,7 @@ pub(crate) fn create_ecu_manager_with_state_transitions(
     // Create state chart for session
     let session_state_chart = db_builder.create_state_chart(
         "Session",
-        Some(semantics::SESSION),
+        Some(&semantics.session),
         Some(vec![
             default_to_extended_session,
             extended_to_programming_session,
@@ -1705,16 +1708,17 @@ pub(crate) fn create_ecu_manager_with_preconditions_and_functional_group() -> (
         Some("ProgrammingSession"),
     );
 
+    let semantics = Semantics::default();
     let security_state_chart = db_builder.create_state_chart(
         "SecurityAccess",
-        Some(semantics::SECURITY),
+        Some(&semantics.security),
         Some(vec![locked_to_extended, extended_to_programming]),
         Some("LockedSecurity"),
         Some(vec![locked_state, extended_state, programming_state]),
     );
     let session_state_chart = db_builder.create_state_chart(
         "Session",
-        Some(semantics::SESSION),
+        Some(&semantics.session),
         Some(vec![
             default_to_extended_session,
             extended_to_programming_session,
@@ -2126,9 +2130,10 @@ pub(crate) fn create_ecu_manager_with_security_access_services() -> (
         Some("ExtendedSecurity"),
     );
 
+    let semantics = Semantics::default();
     let security_state_chart = db_builder.create_state_chart(
         "SecurityAccess",
-        Some(semantics::SECURITY),
+        Some(&semantics.security),
         Some(vec![locked_to_extended]),
         Some("LockedSecurity"),
         Some(vec![locked_state, extended_state]),
@@ -2137,7 +2142,7 @@ pub(crate) fn create_ecu_manager_with_security_access_services() -> (
     let default_session_state = db_builder.create_state("DefaultSession", None);
     let session_state_chart = db_builder.create_state_chart(
         "Session",
-        Some(semantics::SESSION),
+        Some(&semantics.session),
         None,
         Some("DefaultSession"),
         Some(vec![default_session_state]),

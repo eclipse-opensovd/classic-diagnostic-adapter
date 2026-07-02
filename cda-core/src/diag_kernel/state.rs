@@ -12,9 +12,7 @@
  */
 
 use cda_database::datatypes;
-use cda_interfaces::{
-    DiagServiceError, EcuStateManager, datatypes::semantics, dlt_ctx, service_ids,
-};
+use cda_interfaces::{DiagServiceError, EcuStateManager, dlt_ctx, service_ids};
 use cda_plugin_security::SecurityPlugin;
 
 use super::ecumanager::EcuManager;
@@ -41,7 +39,7 @@ impl<S: SecurityPlugin> EcuStateManager for EcuManager<S> {
     }
 
     fn default_session(&self) -> Result<String, DiagServiceError> {
-        self.default_state(semantics::SESSION)
+        self.default_state(&self.database_naming_convention.semantics.session)
     }
 
     async fn security_access(&self) -> Result<String, DiagServiceError> {
@@ -70,7 +68,7 @@ impl<S: SecurityPlugin> EcuStateManager for EcuManager<S> {
             ))?;
 
         self.lookup_state_transition_for_active(
-            semantics::SESSION,
+            &self.database_naming_convention.semantics.session,
             &current_session_name,
             target_session_name,
         )
@@ -90,10 +88,10 @@ impl<S: SecurityPlugin> EcuStateManager for EcuManager<S> {
         let mut states = self.ecu_service_states.write().await;
         states
             .entry(service_ids::SESSION_CONTROL)
-            .or_insert(self.default_state(semantics::SESSION)?);
+            .or_insert(self.default_state(&self.database_naming_convention.semantics.session)?);
         states
             .entry(service_ids::SECURITY_ACCESS)
-            .or_insert(self.default_state(semantics::SECURITY)?);
+            .or_insert(self.default_state(&self.database_naming_convention.semantics.security)?);
         states
             .entry(service_ids::CONTROL_DTC_SETTING)
             .or_insert_with(|| "on".to_owned());
@@ -152,16 +150,18 @@ impl<S: SecurityPlugin> EcuManager<S> {
         let state_chart_session = diag_layers.iter().find_map(|dl| {
             dl.state_charts().and_then(|charts| {
                 charts.iter().find(|c| {
-                    c.semantic()
-                        .is_some_and(|n| n.eq_ignore_ascii_case(semantics::SESSION))
+                    c.semantic().is_some_and(|n| {
+                        n.eq_ignore_ascii_case(&self.database_naming_convention.semantics.session)
+                    })
                 })
             })
         });
         let state_chart_security = diag_layers.iter().find_map(|dl| {
             dl.state_charts().and_then(|charts| {
                 charts.iter().find(|c| {
-                    c.semantic()
-                        .is_some_and(|n| n.eq_ignore_ascii_case(semantics::SECURITY))
+                    c.semantic().is_some_and(|n| {
+                        n.eq_ignore_ascii_case(&self.database_naming_convention.semantics.security)
+                    })
                 })
             })
         });
