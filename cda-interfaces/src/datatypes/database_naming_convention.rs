@@ -35,6 +35,7 @@ use crate::{HashMap, service_ids, util::serde_ext};
 ///  - `service_affixes`: List of affixes that apply only to the given service.
 ///    This can be used to remove additional things from a service name during lookup.
 ///    All affixes share the same position (prefix or suffix).
+///    Keys support both decimal (`"133"`) and hexadecimal (`"0x85"` / `"0X85"`) service IDs.
 ///    Example: The service is named `DTC_Settings_Mode_Off`, but "off" is passed via SOVD.
 ///    To match the service configure, `[0x85, (Prefix, ["Dtc_Settings_Mode_"])]`
 ///
@@ -61,12 +62,44 @@ pub struct DatabaseNamingConvention {
     pub long_name_affixes: Vec<String>,
     /// Per-service-ID affixes for additional name stripping during lookup.
     ///
-    /// The key is the UDS service ID as a string (e.g. "133" for 0x85).
+    /// The key is the UDS service ID as a string and can be decimal (`"133"`) or hex
+    /// (`"0x85"` / `"0X85"`); keys are normalized internally to decimal strings.
     /// Each entry specifies the affix position and a list of affixes.
     // technically key should be u8, but it's not supported for toml parse / figment.
     // it will be validated in the validate sanity function
     #[serde(deserialize_with = "serde_ext::normalized_u8_key_map::deserialize")]
     pub service_affixes: HashMap<String, (DiagnosticServiceAffixPosition, Vec<String>)>,
+    /// Database semantics to identify the type of service
+    pub semantics: Semantics,
+}
+
+/// Defines the name for the database semantics. Although they should follow the labels
+/// defined in the standards, in practice some OEM deviate from this.
+#[derive(Deserialize, Serialize, Clone, Debug, schemars::JsonSchema)]
+pub struct Semantics {
+    /// Semantic to identify `data` parameter within a UDS response, by matching the
+    ///  parameter semantic against this value.
+    pub data: String,
+    /// Semantic to identify the `request id` parameter within a UDS response,
+    /// by matching the parameter semantic against this value.
+    pub service_id_rq: String,
+    /// Semantic for `session` services. Used to lookup services and state charts that
+    /// control the `session` of an ECU.
+    pub session: String,
+    /// Semantic for `security` services. Used to lookup services and state charts that
+    /// control the `security` (level) of an ECU.
+    pub security: String,
+}
+
+impl Default for Semantics {
+    fn default() -> Self {
+        Self {
+            data: "DATA".to_owned(),
+            service_id_rq: "SERVICEIDRQ".to_owned(),
+            session: "SESSION".to_owned(),
+            security: "SECURITY".to_owned(),
+        }
+    }
 }
 
 impl DatabaseNamingConvention {
@@ -219,6 +252,7 @@ impl Default for DatabaseNamingConvention {
                     ),
                 ),
             ]),
+            semantics: Semantics::default(),
         }
     }
 }
@@ -261,6 +295,7 @@ mod tests {
                 vec![" post".to_owned(), " l".to_owned()]
             },
             service_affixes: HashMap::default(),
+            semantics: Semantics::default(),
         }
     }
 
@@ -352,6 +387,7 @@ mod tests {
             configuration_service_parameter_semantic_id: "ID".to_owned(),
             functional_class_varcoding: "varcoding".to_owned(),
             service_affixes: HashMap::default(),
+            semantics: Semantics::default(),
         };
         assert_eq!(conv.trim_short_name_affixes("PRE_data"), "data");
         assert_eq!(conv.trim_long_name_affixes("Data POST"), "Data");
@@ -393,5 +429,39 @@ mod tests {
         // Should return original string if affix is longer than input
         assert_eq!(conv.trim_short_name_affixes("short"), "short");
         assert_eq!(conv.trim_long_name_affixes("tiny"), "tiny");
+    }
+
+    #[test]
+    fn test_service_affixes_accepts_hex_key() {
+        let json = r#"
+        {
+            "short_name_affix_position": "Suffix",
+            "long_name_affix_position": "Suffix",
+            "configuration_service_parameter_semantic_id": "ID",
+            "functional_class_varcoding": "varcoding",
+            "short_name_affixes": [],
+            "long_name_affixes": [],
+            "service_affixes": {
+                "0x85": ["Prefix", ["DTC_Setting_Mode_"]]
+            },
+            "semantics": {
+                "data": "DATA",
+                "service_id_rq": "SERVICEIDRQ",
+                "session": "SESSION",
+                "security": "SECURITY"
+            }
+        }
+        "#;
+
+        let conv: DatabaseNamingConvention =
+            serde_json::from_str(json).expect("hex key should deserialize");
+
+        assert_eq!(
+            conv.service_affixes.get("133"),
+            Some(&(
+                DiagnosticServiceAffixPosition::Prefix,
+                vec!["DTC_Setting_Mode_".to_owned()]
+            ))
+        );
     }
 }

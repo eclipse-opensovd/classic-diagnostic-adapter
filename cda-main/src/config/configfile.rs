@@ -468,6 +468,54 @@ short_name_affixes = [ " Read", " Write_" ]
     }
 
     #[tokio::test]
+    async fn load_config_toml_service_affixes_hex_keys() -> Result<(), Box<dyn std::error::Error>> {
+        let config_str = r#"
+[database.naming_convention]
+short_name_affix_position = "Suffix"
+long_name_affix_position = "Suffix"
+
+[database.naming_convention.service_affixes]
+0x31 = ["Suffix", ["_start", "_stop", "_requestresults", "_start_func", "_stop_func", "_requestresults_func"]]
+0x85 = ["Prefix", ["DTC_Setting_Mode_"]]
+"#;
+
+        let figment = Figment::from(Serialized::defaults(Configuration::default()))
+            .merge(Toml::string(config_str));
+        let config: Configuration = figment.extract()?;
+
+        assert_eq!(
+            config
+                .database
+                .naming_convention
+                .service_affixes
+                .get(&0x31_u8.to_string()),
+            Some(&(
+                DiagnosticServiceAffixPosition::Suffix,
+                vec![
+                    "_start".to_owned(),
+                    "_stop".to_owned(),
+                    "_requestresults".to_owned(),
+                    "_start_func".to_owned(),
+                    "_stop_func".to_owned(),
+                    "_requestresults_func".to_owned(),
+                ]
+            ))
+        );
+        assert_eq!(
+            config
+                .database
+                .naming_convention
+                .service_affixes
+                .get(&0x85_u8.to_string()),
+            Some(&(
+                DiagnosticServiceAffixPosition::Prefix,
+                vec!["DTC_Setting_Mode_".to_owned()]
+            ))
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
     async fn load_config_toml_sanityfail_long_name() -> Result<(), Box<dyn std::error::Error>> {
         let config_str = r#"
 [database.naming_convention]

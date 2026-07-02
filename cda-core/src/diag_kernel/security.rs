@@ -14,7 +14,7 @@
 use cda_database::datatypes;
 use cda_interfaces::{
     DiagServiceError, DynamicPlugin, EcuSecurity, EcuStateManager, HashSet, SecurityAccess,
-    datatypes::semantics, dlt_ctx, service_ids, util::contains_ignore_ascii_case,
+    dlt_ctx, service_ids, util::contains_ignore_ascii_case,
 };
 use cda_plugin_security::SecurityPlugin;
 
@@ -30,7 +30,7 @@ impl<S: SecurityPlugin> EcuSecurity for EcuManager<S> {
 
         if has_key {
             let security_service = self.lookup_state_transition_for_active(
-                semantics::SECURITY,
+                &self.database_naming_convention.semantics.security,
                 &current_security_name,
                 level,
             )?;
@@ -105,7 +105,9 @@ impl<S: SecurityPlugin> EcuSecurity for EcuManager<S> {
             .params()
             .and_then(|params| {
                 params.iter().find_map(|p| {
-                    if p.semantic().is_some_and(|s| s == semantics::DATA) {
+                    if p.semantic()
+                        .is_some_and(|s| s == self.database_naming_convention.semantics.data)
+                    {
                         p.short_name().map(ToOwned::to_owned)
                     } else {
                         None
@@ -118,7 +120,7 @@ impl<S: SecurityPlugin> EcuSecurity for EcuManager<S> {
     }
 
     fn default_security_access(&self) -> Result<String, DiagServiceError> {
-        self.default_state(semantics::SECURITY)
+        self.default_state(&self.database_naming_convention.semantics.security)
     }
 
     async fn is_service_allowed(
@@ -207,8 +209,8 @@ impl<S: SecurityPlugin> EcuManager<S> {
                 .collect::<HashSet<_>>())
         };
 
-        let session_states = get_state_names(semantics::SESSION)?;
-        let security_states = get_state_names(semantics::SECURITY)?;
+        let session_states = get_state_names(&self.database_naming_convention.semantics.session)?;
+        let security_states = get_state_names(&self.database_naming_convention.semantics.security)?;
 
         let precondition_states: Vec<_> = pre_condition_state_ref
             .iter()
@@ -248,9 +250,11 @@ impl<S: SecurityPlugin> EcuManager<S> {
         // preconditions we also accept the default state as a valid "current" state,
         // so that services whose preconditions include the default are always reachable
         // regardless of the actual ECU state.
-        let default_session = self.default_state(semantics::SESSION)?.to_ascii_lowercase();
+        let default_session = self
+            .default_state(&self.database_naming_convention.semantics.session)?
+            .to_ascii_lowercase();
         let default_security = self
-            .default_state(semantics::SECURITY)?
+            .default_state(&self.database_naming_convention.semantics.security)?
             .to_ascii_lowercase();
 
         let validate_state = |required: &HashSet<String>,

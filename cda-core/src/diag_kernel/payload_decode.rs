@@ -14,7 +14,7 @@
 use cda_database::datatypes;
 use cda_interfaces::{
     DiagComm, DiagServiceError, EcuStateManager, HashMap, PayloadDecoder, ServicePayload,
-    datatypes::{CLEAR_FAULT_MEM_POS_RESPONSE_SID, semantics},
+    datatypes::CLEAR_FAULT_MEM_POS_RESPONSE_SID,
     diagservices::{DiagServiceResponseType, FieldParseError},
     dlt_ctx, service_ids,
     util::{self},
@@ -157,7 +157,10 @@ impl<S: SecurityPlugin> PayloadDecoder for EcuManager<S> {
             let raw_uds_payload = {
                 let base_offset = params
                     .iter()
-                    .filter(|p| p.semantic().is_some_and(|s| s == semantics::DATA))
+                    .filter(|p| {
+                        p.semantic()
+                            .is_some_and(|s| s == self.database_naming_convention.semantics.data)
+                    })
                     .map(datatypes::Parameter::byte_position)
                     .min()
                     .unwrap_or(0);
@@ -181,7 +184,8 @@ impl<S: SecurityPlugin> PayloadDecoder for EcuManager<S> {
             for param in sorted_params {
                 let semantic = param.semantic();
                 if semantic.is_some_and(|semantic| {
-                    semantic != semantics::DATA && semantic != semantics::SERVICEIDRQ
+                    semantic != self.database_naming_convention.semantics.data
+                        && semantic != self.database_naming_convention.semantics.service_id_rq
                 }) {
                     continue;
                 }
