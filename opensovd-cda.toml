@@ -68,7 +68,7 @@
 # or forced from the configuration file.
 # precedence = "Database"
 # Value used when the database does not provide one, or precedence is set to `Config`.
-# value = 0
+# value = 0x00
 
 # Functional address of the ECU
 [com_params.doip.logical_functional_address]
@@ -78,7 +78,7 @@
 # or forced from the configuration file.
 # precedence = "Database"
 # Value used when the database does not provide one, or precedence is set to `Config`.
-# value = 0
+# value = 0x00
 
 # Logical address of a `DoIP` entity.
 # In case of directly reachable `DoIP` entity it's equal to the
@@ -90,7 +90,7 @@
 # or forced from the configuration file.
 # precedence = "Database"
 # Value used when the database does not provide one, or precedence is set to `Config`.
-# value = 0
+# value = 0x00
 
 # Logical address of the tester
 [com_params.doip.logical_tester_address]
@@ -100,7 +100,7 @@
 # or forced from the configuration file.
 # precedence = "Database"
 # Value used when the database does not provide one, or precedence is set to `Config`.
-# value = 0
+# value = 0x00
 
 # Number of retries for specific NACKs
 # The key must be a string, because parsing from toml requires keys to be strings,
@@ -283,8 +283,8 @@
 # precedence = "Database"
 # Value used when the database does not provide one, or precedence is set to `Config`.
 # value = [
-#     127,
-#     62,
+#     0x7F,
+#     0x3E,
 # ]
 
 # Expected positive response (if required)
@@ -296,8 +296,8 @@
 # precedence = "Database"
 # Value used when the database does not provide one, or precedence is set to `Config`.
 # value = [
-#     126,
-#     0,
+#     0x7E,
+#     0x00,
 # ]
 
 # Message to be sent for tester present
@@ -309,8 +309,8 @@
 # precedence = "Database"
 # Value used when the database does not provide one, or precedence is set to `Config`.
 # value = [
-#     62,
-#     0,
+#     0x3E,
+#     0x00,
 # ]
 
 # Define expectation for Tester Present responses
@@ -422,6 +422,7 @@
 #  - `service_affixes`: List of affixes that apply only to the given service.
 #    This can be used to remove additional things from a service name during lookup.
 #    All affixes share the same position (prefix or suffix).
+#    Keys support both decimal (`"133"`) and hexadecimal (`"0x85"` / `"0X85"`) service IDs.
 #    Example: The service is named `DTC_Settings_Mode_Off`, but "off" is passed via SOVD.
 #    To match the service configure, `[0x85, (Prefix, ["Dtc_Settings_Mode_"])]`
 #
@@ -471,16 +472,32 @@
 #     "_control",
 # ]
 
+# Database semantics to identify the type of service
+[database.naming_convention.semantics]
+# Semantic to identify `data` parameter within a UDS response, by matching the
+#  parameter semantic against this value.
+# data = "DATA"
+# Semantic for `security` services. Used to lookup services and state charts that
+# control the `security` (level) of an ECU.
+# security = "SECURITY"
+# Semantic to identify the `request id` parameter within a UDS response,
+# by matching the parameter semantic against this value.
+# service_id_rq = "SERVICEIDRQ"
+# Semantic for `session` services. Used to lookup services and state charts that
+# control the `session` of an ECU.
+# session = "SESSION"
+
 # Per-service-ID affixes for additional name stripping during lookup.
 #
-# The key is the UDS service ID as a string (e.g. "133" for 0x85).
+# The key is the UDS service ID as a string and can be decimal (`"133"`) or hex
+# (`"0x85"` / `"0X85"`); keys are normalized internally to decimal strings.
 # Each entry specifies the affix position and a list of affixes.
 [database.naming_convention.service_affixes]
-# 133 = [
+# "0x85" = [
 #     "Prefix",
 #     ["DTC_Setting_Mode_"],
 # ]
-# 49 = [
+# "0x31" = [
 #     "Suffix",
 #     [
 #     "_start",
@@ -545,10 +562,10 @@
 #
 # If not set, clearing user-defined DTCs is not supported.
 # user_defined_dtc_clear_service = [
-#     49,
-#     1,
-#     2,
-#     70,
+#     0x31,
+#     0x01,
+#     0x02,
+#     0x46,
 # ]
 # Name of the scope to pass to the DTC functions to read from the user defined DTC memory.
 # Matching will be case-insensitive.

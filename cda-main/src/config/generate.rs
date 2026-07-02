@@ -129,12 +129,13 @@ pub fn generate_reference_config() -> Result<String, GenerateConfigError> {
     let sorted_value = sort_toml_value(toml_value);
     let default_toml =
         toml::to_string_pretty(&sorted_value).map_err(GenerateConfigError::TomlFormat)?;
+    let formatted_toml = format_selected_hex_literals(&default_toml);
 
     let desc_map = build_description_map(&schema_json);
 
     Ok(format!(
         "{SPDX_HEADER}{}",
-        process_toml(&default_toml, &desc_map)
+        process_toml(&formatted_toml, &desc_map)
     ))
 }
 
@@ -155,6 +156,156 @@ fn sort_toml_value(value: toml::Value) -> toml::Value {
         }
         other => other,
     }
+}
+
+/// Reformat selected config values in TOML output as hex literals for readability.
+fn format_selected_hex_literals(raw_toml: &str) -> String {
+    const SERVICE_AFFIXES_SECTION: &str = "database.naming_convention.service_affixes";
+    const HEX_U8_ARRAY_TARGETS: &[(&str, &str)] = &[
+        ("com_params.uds.tester_present_exp_neg_resp", "value"),
+        ("com_params.uds.tester_present_exp_pos_resp", "value"),
+        ("com_params.uds.tester_present_message", "value"),
+        ("faults", "user_defined_dtc_clear_service"),
+    ];
+
+    let mut current_section = String::new();
+    let mut in_hex_array = false;
+
+    raw_toml
+        .lines()
+        .map(|line| {
+            let trimmed = line.trim();
+
+            if is_toml_section_header(trimmed) {
+                trimmed
+                    .trim_start_matches('[')
+                    .trim_end_matches(']')
+                    .clone_into(&mut current_section);
+                in_hex_array = false;
+                return line.to_owned();
+            }
+
+            if current_section == SERVICE_AFFIXES_SECTION
+                && let Some(line) = format_service_affix_key_as_hex(line)
+            {
+                return line;
+            }
+
+            if let Some((_, key)) = HEX_U8_ARRAY_TARGETS
+                .iter()
+                .find(|(section, _)| *section == current_section)
+            {
+                let array_start = format!("{key} = [");
+                if trimmed.starts_with(&array_start) {
+                    in_hex_array = !trimmed.contains(']');
+                    return format_inline_array_values_as_hex(line);
+                }
+
+                if in_hex_array {
+                    if trimmed == "]" {
+                        in_hex_array = false;
+                        return line.to_owned();
+                    }
+                    return format_array_item_as_hex(line);
+                }
+            }
+
+            if let Some(line) = format_address_value_as_hex(line, &current_section) {
+                return line;
+            }
+
+            line.to_owned()
+        })
+        .fold(String::new(), |mut acc, line| {
+            let _ = writeln!(acc, "{line}");
+            acc
+        })
+}
+
+fn format_service_affix_key_as_hex(line: &str) -> Option<String> {
+    let eq_pos = line.find('=')?;
+    let key = line.get(..eq_pos)?.trim();
+    let key_value = key.parse::<u8>().ok()?;
+    let indent_len = line.len().saturating_sub(line.trim_start().len());
+    let indent = line.get(..indent_len)?;
+    let rhs = line.get(eq_pos.saturating_add(1)..)?.trim_start();
+    Some(format!("{indent}\"0x{key_value:02X}\" = {rhs}"))
+}
+
+fn format_inline_array_values_as_hex(line: &str) -> String {
+    let Some(open_bracket) = line.find('[') else {
+        return line.to_owned();
+    };
+    let Some(close_bracket_rel) = line.get(open_bracket..).and_then(|s| s.find(']')) else {
+        return line.to_owned();
+    };
+    let Some(close_bracket) = open_bracket.checked_add(close_bracket_rel) else {
+        return line.to_owned();
+    };
+
+    let Some(content) = line.get(open_bracket.saturating_add(1)..close_bracket) else {
+        return line.to_owned();
+    };
+    let converted = content
+        .split(',')
+        .map(str::trim)
+        .filter(|token| !token.is_empty())
+        .map(|token| {
+            token
+                .parse::<u8>()
+                .map_or_else(|_| token.to_owned(), |value| format!("0x{value:02X}"))
+        })
+        .collect::<Vec<_>>()
+        .join(", ");
+
+    let Some(prefix) = line.get(..open_bracket.saturating_add(1)) else {
+        return line.to_owned();
+    };
+    let Some(suffix) = line.get(close_bracket..) else {
+        return line.to_owned();
+    };
+    format!("{prefix}{converted}{suffix}")
+}
+
+fn format_array_item_as_hex(line: &str) -> String {
+    let indent_len = line.len().saturating_sub(line.trim_start().len());
+    let Some(indent) = line.get(..indent_len) else {
+        return line.to_owned();
+    };
+    let trimmed = line.trim();
+    let (number, trailing_comma) = if let Some(number) = trimmed.strip_suffix(',') {
+        (number.trim(), ",")
+    } else {
+        (trimmed, "")
+    };
+
+    number.parse::<u8>().map_or_else(
+        |_| line.to_owned(),
+        |value| format!("{indent}0x{value:02X}{trailing_comma}"),
+    )
+}
+
+fn format_address_value_as_hex(line: &str, current_section: &str) -> Option<String> {
+    let eq_pos = line.find('=')?;
+    let key = line.get(..eq_pos)?.trim();
+    if !key.contains("address") && !current_section.contains("address") {
+        return None;
+    }
+
+    let value = line.get(eq_pos.saturating_add(1)..)?.trim();
+    let decimal = value.parse::<u64>().ok()?;
+    let indent_len = line.len().saturating_sub(line.trim_start().len());
+    let indent = line.get(..indent_len)?;
+
+    Some(format!("{indent}{key} = {}", format_hex_u64(decimal)))
+}
+
+fn format_hex_u64(value: u64) -> String {
+    let mut digits = format!("{value:X}");
+    if digits.len() < 2 || !digits.len().is_multiple_of(2) {
+        digits.insert(0, '0');
+    }
+    format!("0x{digits}")
 }
 
 /// Build a map from TOML dotted path (e.g. "server.address") to description string.
