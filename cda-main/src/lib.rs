@@ -20,6 +20,7 @@ use cda_database::FileManager;
 use cda_interfaces::{
     DiagServiceError, DoipGatewaySetupError, FunctionalDescriptionConfig, HashMap, UdsQuery,
     UdsVariant,
+    config::{ConfigSanity, ConfigSanityError},
     datatypes::{ComParams, FaultConfig},
     dlt_ctx,
 };
@@ -235,6 +236,12 @@ impl From<TracingSetupError> for AppError {
     }
 }
 
+impl From<ConfigSanityError> for AppError {
+    fn from(value: ConfigSanityError) -> Self {
+        AppError::ConfigurationError(value.to_string())
+    }
+}
+
 impl AppArgs {
     #[tracing::instrument(skip(self, config),
         fields(
@@ -372,8 +379,7 @@ where
     // Command line arguments always take precedence over stored configuration
     args.update_config(&mut config);
 
-    use crate::config::configfile::ConfigSanity;
-    config.validate_sanity()?;
+    config.validate_sanity().map_err(AppError::from)?;
 
     run_with_config_ext::<SP, SL, _, _>(config, extra_health_providers, pre_load_hook).await
 }
