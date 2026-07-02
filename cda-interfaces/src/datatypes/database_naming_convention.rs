@@ -12,7 +12,12 @@
  */
 use serde::{Deserialize, Serialize};
 
-use crate::{HashMap, service_ids, util::serde_ext};
+use crate::{
+    HashMap,
+    config::{ConfigSanity, ConfigSanityError},
+    service_ids,
+    util::serde_ext,
+};
 
 /// Holds configuration for diagnostic service naming conventions.
 ///
@@ -67,6 +72,59 @@ pub struct DatabaseNamingConvention {
     // it will be validated in the validate sanity function
     #[serde(deserialize_with = "serde_ext::normalized_u8_key_map::deserialize")]
     pub service_affixes: HashMap<String, (DiagnosticServiceAffixPosition, Vec<String>)>,
+}
+
+impl ConfigSanity for DatabaseNamingConvention {
+    fn validate_sanity(&self) -> Result<(), ConfigSanityError> {
+        const SHORT_NAME_AFFIX_KEY: &str = "database_naming_convention.short_name_affixes";
+        const LONG_NAME_AFFIX_KEY: &str = "database_naming_convention.long_name_affixes";
+        const SERVICE_NAME_AFFIX_KEY: &str = "database_naming_convention.service_name_affixes";
+
+        fn validate_affix(
+            affix: &str,
+            pos: &DiagnosticServiceAffixPosition,
+            key: &str,
+        ) -> Result<(), ConfigSanityError> {
+            match pos {
+                DiagnosticServiceAffixPosition::Prefix => {
+                    if affix.starts_with(' ') {
+                        return Err(ConfigSanityError::InvalidValue {
+                            field: key.to_owned(),
+                            reason: format!("'{affix}' has leading whitespace"),
+                        });
+                    }
+                }
+                DiagnosticServiceAffixPosition::Suffix => {
+                    if affix.ends_with(' ') {
+                        return Err(ConfigSanityError::InvalidValue {
+                            field: key.to_owned(),
+                            reason: format!("'{affix}' has trailing whitespace"),
+                        });
+                    }
+                }
+            }
+            Ok(())
+        }
+
+        // Check short name affixes
+        for affix in &self.short_name_affixes {
+            validate_affix(affix, &self.short_name_affix_position, SHORT_NAME_AFFIX_KEY)?;
+        }
+
+        // Check long name affixes
+        for affix in &self.long_name_affixes {
+            validate_affix(affix, &self.long_name_affix_position, LONG_NAME_AFFIX_KEY)?;
+        }
+
+        // Validate services affixes
+        for (pos, affixes) in self.service_affixes.values() {
+            for affix in affixes {
+                validate_affix(affix, pos, SERVICE_NAME_AFFIX_KEY)?;
+            }
+        }
+
+        Ok(())
+    }
 }
 
 impl DatabaseNamingConvention {

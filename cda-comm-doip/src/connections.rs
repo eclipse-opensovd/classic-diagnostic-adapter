@@ -26,6 +26,7 @@ use tokio::{
     io::{AsyncRead, AsyncWrite},
     sync::{Mutex, RwLock, broadcast, mpsc, watch},
     task::{JoinError, JoinSet},
+    time::Interval,
 };
 
 use crate::{
@@ -445,21 +446,18 @@ where
                 .transport
                 .send_timeout;
             let alive_check_enabled = alive_check_interval > Duration::ZERO;
-            let effective_interval = if alive_check_enabled {
-                alive_check_interval
-            } else {
-                // Use a very large duration when disabled so the interval never fires.
-                // tokio::time::Instant is limited so we use ~136 years which is well
-                // within the representable range.
-                Duration::from_secs(u64::from(u32::MAX))
-            };
-            let mut alive_interval = tokio::time::interval_at(
-                tokio::time::Instant::now()
-                    .checked_add(effective_interval)
-                    .expect("interval start overflow"),
-                effective_interval,
-            );
-            alive_interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+            let mut alive_interval = alive_check_enabled.then(|| {
+                let mut interval = tokio::time::interval_at(
+                    // If setting a huge value for the alive check this is okay to fail,
+                    // as it is guarded by a config sanity check.
+                    tokio::time::Instant::now()
+                        .checked_add(alive_check_interval)
+                        .expect("Failed to set interval, alive check value is too big"),
+                    alive_check_interval,
+                );
+                interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+                interval
+            });
             loop {
                 tokio::select! {
                     // Per default tokio, randomized which branch is checked first to ensure fairness.
@@ -513,10 +511,15 @@ where
                         }
                         // Reset the alive check timer so it only fires after a full
                         // interval of silence - never during active communication.
-                        alive_interval.reset();
+                       alive_interval.as_mut().map(Interval::reset);
                     },
 
-                    _ = alive_interval.tick(), if alive_check_enabled => {
+                   _ = async {
+                        match alive_interval.as_mut() {
+                                Some(interval) => interval.tick().await,
+                                None => std::future::pending().await,
+                            }
+                        }, if alive_check_enabled => {
                         if send_pending_status(&send_pending_tx, true).is_err() {
                             break;
                         }

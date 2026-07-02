@@ -32,6 +32,7 @@ pub use ecuuds::*;
 pub mod file_manager;
 mod schema;
 pub use schema::*;
+pub mod config;
 pub mod runtime_update_api;
 pub mod storage_api;
 

@@ -302,7 +302,7 @@ fn format_toml_line(
 mod tests {
     use std::time::Duration;
 
-    use cda_interfaces::datatypes::ComParamPrecedence;
+    use cda_interfaces::{config::ConfigSanity, datatypes::ComParamPrecedence};
 
     use super::*;
 
@@ -376,8 +376,6 @@ mod tests {
             Figment,
             providers::{Format, Serialized, Toml},
         };
-
-        use crate::config::configfile::ConfigSanity;
 
         let reference = generate_reference_config().unwrap();
         let config: crate::config::configfile::Configuration =

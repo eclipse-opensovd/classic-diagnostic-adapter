@@ -19,6 +19,7 @@ use std::{
 use cda_health::config::HealthConfig;
 use cda_interfaces::{
     FunctionalDescriptionConfig, HashMap, HashMapExtensions,
+    config::ConfigSanity,
     datatypes::{
         ComParamConfig, ComParamPrecedence, ComParams, ComponentsConfig, DatabaseNamingConvention,
         DoipComParams, FaultConfig, FlatbBufConfig,
@@ -31,8 +32,8 @@ use http::{Method, StatusCode};
 use opensovd_cda_lib::{
     cda_version,
     config::configfile::{
-        ConfigSanity, Configuration, DatabaseConfig, EcuComParams, EcuConfig, RuntimeUpdateConfig,
-        ServerConfig, StrictConfig,
+        Configuration, DatabaseConfig, EcuComParams, EcuConfig, RuntimeUpdateConfig, ServerConfig,
+        StrictConfig,
     },
 };
 use sovd_interfaces::apps::sovd2uds::data::network_structure::get::Response as NetworkStructureResponse;

@@ -11,7 +11,10 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-use cda_interfaces::Protocol;
+use cda_interfaces::{
+    Protocol,
+    config::{ConfigSanity, ConfigSanityError},
+};
 use serde::{Deserialize, Serialize};
 
 /// `DoIP` (Diagnostics over IP) transport layer configuration.
@@ -53,6 +56,53 @@ impl Default for DoipConfig {
             alive_check_interval_secs: 1800, // 30 minutes
             protocol_name: Protocol::default().to_string(),
         }
+    }
+}
+
+impl ConfigSanity for DoipConfig {
+    fn validate_sanity(&self) -> Result<(), ConfigSanityError> {
+        fn validate_ip(ip: &str, field: &str) -> Result<(), ConfigSanityError> {
+            ip.parse::<std::net::IpAddr>().map(|_| ()).map_err(|_| {
+                ConfigSanityError::InvalidValue {
+                    field: field.to_owned(),
+                    reason: format!("{ip} is neither a valid IPv4 nor IPv6 address"),
+                }
+            })
+        }
+
+        fn validate_port(port: u16, field: &str) -> Result<(), ConfigSanityError> {
+            if port == 0 {
+                return Err(ConfigSanityError::InvalidValue {
+                    field: field.to_owned(),
+                    reason: "Port must be greater than 0".to_string(),
+                });
+            }
+            Ok(())
+        }
+
+        fn validate_timeout(timeout: u64, field: &str) -> Result<(), ConfigSanityError> {
+            if timeout == 0 {
+                return Err(ConfigSanityError::InvalidValue {
+                    field: field.to_owned(),
+                    reason: "Timeout must be greater than 0".to_string(),
+                });
+            }
+            Ok(())
+        }
+
+        validate_ip(&self.tester_address, "tester_address")?;
+        validate_ip(&self.tester_subnet, "tester_address")?;
+        validate_port(self.gateway_port, "gateway_port")?;
+        validate_port(self.tls_port, "tls_port")?;
+        validate_timeout(self.send_timeout_ms, "send_timeout_ms")?;
+        if self.alive_check_interval_secs > u64::from(u32::MAX) {
+            return Err(ConfigSanityError::InvalidValue {
+                field: "alive_check_interval_secs".to_owned(),
+                reason: "Interval is too large, use 0 to disable it".to_string(),
+            });
+        }
+
+        Ok(())
     }
 }
 
