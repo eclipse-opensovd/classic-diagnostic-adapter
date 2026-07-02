@@ -48,7 +48,7 @@ strip-ansi-escapes = { workspace = true } # Strip ANSI escape codes from strings
 nu-ansi-term = { workspace = true } # ANSI terminal support for terminal log output
 # otel
 opentelemetry = { workspace = true, features = ["trace"] }
-opentelemetry_sdk = { workspace = true, features = ["trace"] }
+opentelemetry_sdk = { workspace = true, features = ["trace", "metrics"] }
 opentelemetry-otlp = { workspace = true, features = ["metrics", "grpc-tonic"] }
 opentelemetry-semantic-conventions = { workspace = true, features = [
   "semconv_experimental",
