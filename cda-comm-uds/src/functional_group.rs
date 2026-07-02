@@ -185,7 +185,6 @@ impl<S: EcuGateway, T: EcuManager> UdsFunctionalGroup for UdsManager<S, T> {
         ecu_names
     }
 
-    #[allow(clippy::too_many_lines)]
     #[tracing::instrument(skip(self, security_plugin, payload),
         fields(dlt_context = dlt_ctx!("UDS"))
     )]

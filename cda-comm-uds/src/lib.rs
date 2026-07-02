@@ -15,8 +15,8 @@ use std::sync::{Arc, atomic::AtomicBool};
 
 use cda_interfaces::{
     DiagComm, DiagServiceError, EcuGateway, EcuManager, FunctionalDescriptionConfig, HashMap,
-    HashMapExtensions, HashSetExtensions, SchemaDescription, SchemaProvider, UdsEcu, UdsEcuDb,
-    datatypes::FaultConfig,
+    HashMapExtensions, HashSet, HashSetExtensions, SchemaDescription, SchemaProvider, UdsEcu,
+    UdsEcuDb, datatypes::FaultConfig,
 };
 use tokio::{
     sync::{Mutex, RwLock, Semaphore, mpsc},
@@ -104,7 +104,7 @@ impl<S: EcuGateway, T: EcuManager> UdsManager<S, T> {
         let vd_uds_clone = manager.clone();
         cda_interfaces::spawn_named!("variant-detection-receiver", async move {
             while let Some(ecus) = variant_detection_receiver.recv().await {
-                let mut processed_duplicates = cda_interfaces::HashSet::new();
+                let mut processed_duplicates = HashSet::new();
                 let mut deduplicated_ecus = Vec::new();
 
                 for ecu_name in ecus {
