@@ -488,7 +488,7 @@ long_name_affix_position = "Suffix"
                 .database
                 .naming_convention
                 .service_affixes
-                .get(&0x31_u8.to_string()),
+                .get(&0x31u8.to_string()),
             Some(&(
                 DiagnosticServiceAffixPosition::Suffix,
                 vec![
@@ -506,7 +506,7 @@ long_name_affix_position = "Suffix"
                 .database
                 .naming_convention
                 .service_affixes
-                .get(&0x85_u8.to_string()),
+                .get(&0x85u8.to_string()),
             Some(&(
                 DiagnosticServiceAffixPosition::Prefix,
                 vec!["DTC_Setting_Mode_".to_owned()]
