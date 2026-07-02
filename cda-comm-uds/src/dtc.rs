@@ -14,7 +14,7 @@
 use async_trait::async_trait;
 use cda_interfaces::{
     DiagServiceError, DynamicPlugin, EcuGateway, EcuManager, HashMap, HashMapExtensions, HashSet,
-    PayloadDecoder, SchemaDescription, SchemaProvider, UdsDtc, UdsTransport,
+    PayloadDecoder, SchemaDescription, SchemaProvider, ServicePayload, UdsDtc, UdsTransport,
     datatypes::{
         self, DTC_CODE_BIT_LEN, DtcCode, DtcExtendedInfo, DtcMask, DtcReadInformationFunction,
         DtcRecordAndStatus, DtcSnapshot, ExtendedDataRecords, ExtendedSnapshots,
@@ -227,11 +227,8 @@ impl<S: EcuGateway, T: EcuManager> UdsManager<S, T> {
                 "DTC {dtc_code:X} not found in ECU {ecu_name}"
             )))?;
 
-        let mut raw_payload = cda_interfaces::util::extract_bits(
-            DTC_CODE_BIT_LEN as usize,
-            0,
-            &dtc_code.to_be_bytes(),
-        )?;
+        let mut raw_payload =
+            util::extract_bits(DTC_CODE_BIT_LEN as usize, 0, &dtc_code.to_be_bytes())?;
         raw_payload.push(DTC_RECORD_NUMBER_ALL);
 
         if read_func.is_user_scope() {
@@ -674,7 +671,7 @@ impl<S: EcuGateway, T: EcuManager> UdsDtc for UdsManager<S, T> {
             let read_lock = ecu.read().await;
             (read_lock.tester_address(), read_lock.logical_address())
         };
-        let service_payload = cda_interfaces::ServicePayload {
+        let service_payload = ServicePayload {
             data: payload,
             source_address,
             target_address,

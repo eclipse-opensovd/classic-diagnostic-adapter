@@ -13,7 +13,7 @@
 
 use cda_database::datatypes;
 use cda_interfaces::{
-    ComponentInfos, DiagServiceError, DynamicPlugin, HashMap,
+    ComponentInfos, DiagServiceError, DynamicPlugin, HashMap, HashSet,
     datatypes::{
         ComponentConfigurationsInfo, ComponentDataInfo, ComponentOperationsInfo,
         DiagnosticServiceAffixPosition, RoutineSubfunctions,
@@ -94,7 +94,7 @@ impl<S: SecurityPlugin> ComponentInfos for EcuManager<S> {
 
         // Maps a common abbreviated service short name (using the configured affixes) to
         // a vector of bytes of: service_id, ID_parameter_coded_const
-        let mut result_map: HashMap<String, cda_interfaces::HashSet<Vec<u8>>> = HashMap::default();
+        let mut result_map: HashMap<String, HashSet<Vec<u8>>> = HashMap::default();
 
         // Maps common short name to long name
         let mut long_name_map: HashMap<String, String> = HashMap::default();

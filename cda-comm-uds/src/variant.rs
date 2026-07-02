@@ -231,7 +231,7 @@ impl<S: EcuGateway, T: EcuManager> UdsVariant for UdsManager<S, T> {
                 );
                 continue;
             }
-            if let Err(cda_interfaces::DiagServiceError::EcuOffline(_)) =
+            if let Err(DiagServiceError::EcuOffline(_)) =
                 self.gateway.ecu_online(ecu_name, db).await
             {
                 // empty response means ECU is offline

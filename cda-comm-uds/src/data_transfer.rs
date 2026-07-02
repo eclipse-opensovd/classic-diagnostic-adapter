@@ -19,7 +19,7 @@ use cda_interfaces::{
     HashMap, UdsDataTransfer, UdsTransport,
     datatypes::{DataTransferError, DataTransferMetaData, DataTransferStatus},
     diagservices::UdsPayloadData,
-    dlt_ctx, service_ids,
+    dlt_ctx, service_ids, spawn_named,
 };
 use tokio::{
     fs::File,
@@ -78,7 +78,7 @@ impl<S: EcuGateway, T: EcuManager> UdsManager<S, T> {
 
         // we do not want to check the service on every execution, but it is checked before
         // transfer_ecu_data is called
-        let skip_security_plugin_check: cda_interfaces::DynamicPlugin = Box::new(());
+        let skip_security_plugin_check: DynamicPlugin = Box::new(());
         while remaining_bytes > 0 {
             let Some(remaining_as_usize) = remaining_bytes.try_into().ok() else {
                 set_transfer_aborted(
@@ -264,11 +264,10 @@ impl<S: EcuGateway, T: EcuManager> UdsDataTransfer for UdsManager<S, T> {
             ));
         }
         let uds = self.clone();
-        let transfer_task =
-            cda_interfaces::spawn_named!(&format!("flashtransfer-{ecu_name}"), async move {
-                uds.transfer_ecu_data(&ecu_name, length, request, sender, reader)
-                    .await;
-            });
+        let transfer_task = spawn_named!(&format!("flashtransfer-{ecu_name}"), async move {
+            uds.transfer_ecu_data(&ecu_name, length, request, sender, reader)
+                .await;
+        });
 
         transfer_lock.insert(
             ecu_name_clone,
