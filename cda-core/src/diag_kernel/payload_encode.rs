@@ -568,6 +568,7 @@ impl<S: SecurityPlugin> EcuManager<S> {
                         let selector = operations::uds_data_to_serializable(
                             switch_key_diag_type.base_datatype(),
                             None,
+                            None,
                             false,
                             &mux_payload,
                         )?;

@@ -58,6 +58,10 @@ pub struct DiagDataTypeContainerRaw {
     pub data: Vec<u8>,
     pub bit_len: usize,
     pub data_type: DataType,
+    /// Base type of the DOP's PHYSICAL-TYPE, when one is declared. Types the
+    /// result of a compu-method conversion; `data_type` (the coded type)
+    /// would truncate e.g. a linear scale factor of 1/16 back to an integer.
+    pub physical_data_type: Option<DataType>,
     pub compu_method: Option<datatypes::CompuMethod>,
 }
 
@@ -100,6 +104,7 @@ impl DiagServiceResponse for DiagServiceResponseStruct {
                     let raw = u8::from_be(*nrc.data.first()?);
                     let message = match operations::uds_data_to_serializable(
                         nrc.data_type,
+                        nrc.physical_data_type,
                         nrc.compu_method.as_ref(),
                         true,
                         &nrc.data,
@@ -270,6 +275,7 @@ impl DiagServiceResponseStruct {
                     DiagDataTypeContainer::RawContainer(raw) => {
                         operations::uds_data_to_serializable(
                             raw.data_type,
+                            raw.physical_data_type,
                             raw.compu_method.as_ref(),
                             false,
                             &raw.data,
@@ -349,6 +355,7 @@ impl DiagServiceResponseStruct {
         match data {
             DiagDataTypeContainer::RawContainer(raw) => Ok(operations::uds_data_to_serializable(
                 raw.data_type,
+                raw.physical_data_type,
                 raw.compu_method.as_ref(),
                 false,
                 &raw.data,

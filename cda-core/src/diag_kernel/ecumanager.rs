@@ -739,6 +739,7 @@ mod tests {
                         data: vec![value],
                         bit_len: 8,
                         data_type: DataType::UInt32,
+                        physical_data_type: None,
                         compu_method: None,
                     }),
                 )

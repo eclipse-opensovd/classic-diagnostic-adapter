@@ -391,7 +391,15 @@ fn normal_dop_to_schema(
                     "Mapping {ctx}: Diag Coded Type not found in ECU database"
                 )));
             };
-            let type_ = ecu_datatype_to_jsontype(datatype.base_datatype());
+            // Values are exposed in their physical representation, so the
+            // schema type follows the declared PHYSICAL-TYPE where present
+            // (e.g. a linear scale of 1/16 turns an integer coded type into
+            // a float physical value); the coded type is the fallback.
+            let json_datatype = normal_dop.physical_type().map_or_else(
+                || datatype.base_datatype(),
+                |pt| datatypes::PhysicalType::from(pt).base_type,
+            );
+            let type_ = ecu_datatype_to_jsontype(json_datatype);
 
             let mut param_schema = schemars::json_schema!({
                 "default": default_value,

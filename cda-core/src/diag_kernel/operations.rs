@@ -31,6 +31,7 @@ use crate::diag_kernel::{
 
 pub(in crate::diag_kernel) fn uds_data_to_serializable(
     diag_type: datatypes::DataType,
+    physical_type: Option<datatypes::DataType>,
     compu_method: Option<&datatypes::CompuMethod>,
     is_negative_response: bool,
     data: &[u8],
@@ -47,6 +48,7 @@ pub(in crate::diag_kernel) fn uds_data_to_serializable(
                 category => {
                     return compu_lookup(
                         diag_type,
+                        physical_type,
                         compu_method,
                         category,
                         is_negative_response,
@@ -131,6 +133,7 @@ fn apply_linear_conversion(
 
 fn compu_lookup(
     diag_type: DataType,
+    physical_type: Option<DataType>,
     compu_method: &datatypes::CompuMethod,
     category: datatypes::CompuCategory,
     is_negative_response: bool,
@@ -152,11 +155,14 @@ fn compu_lookup(
     }) {
         Some(scale) => match category {
             datatypes::CompuCategory::Identical => unreachable!("Already handled"),
-            datatypes::CompuCategory::Linear => {
-                compu_lookup_linear(diag_type, compu_method, lookup, scale)
-            }
+            datatypes::CompuCategory::Linear => compu_lookup_linear(
+                physical_type.unwrap_or(diag_type),
+                compu_method,
+                lookup,
+                scale,
+            ),
             datatypes::CompuCategory::ScaleLinear => {
-                compu_lookup_scale_linear(diag_type, lookup, scale)
+                compu_lookup_scale_linear(physical_type.unwrap_or(diag_type), lookup, scale)
             }
             datatypes::CompuCategory::TextTable => compu_lookup_text_table(scale),
             datatypes::CompuCategory::CompuCode => Err(DiagServiceError::RequestNotSupported(
@@ -663,6 +669,7 @@ pub(in crate::diag_kernel) fn extract_diag_data_container(
     param_bit_pos: usize,
     payload: &mut Payload,
     diag_type: &datatypes::DiagCodedType,
+    physical_type: Option<datatypes::PhysicalType>,
     compu_method: Option<datatypes::CompuMethod>,
 ) -> Result<DiagDataTypeContainer, DiagServiceError> {
     let uds_payload = payload.data()?;
@@ -702,6 +709,7 @@ pub(in crate::diag_kernel) fn extract_diag_data_container(
             data,
             bit_len,
             data_type,
+            physical_data_type: physical_type.map(|pt| pt.base_type),
             compu_method,
         },
     ))
@@ -1710,8 +1718,13 @@ mod tests {
         };
 
         let data = 3u32.to_be_bytes();
-        let result =
-            super::uds_data_to_serializable(DataType::UInt32, Some(&compu_method), false, &data);
+        let result = super::uds_data_to_serializable(
+            DataType::UInt32,
+            None,
+            Some(&compu_method),
+            false,
+            &data,
+        );
         // Should fail because LINEAR has 2 scales instead of 1
         assert!(result.is_err());
         if let Err(e) = result {
@@ -1729,10 +1742,69 @@ mod tests {
         };
 
         let data = 3u32.to_be_bytes();
-        let result =
-            super::uds_data_to_serializable(DataType::UInt32, Some(&compu_method), false, &data);
+        let result = super::uds_data_to_serializable(
+            DataType::UInt32,
+            None,
+            Some(&compu_method),
+            false,
+            &data,
+        );
         // Should fail because value doesn't match any scale (no scales exist)
         assert!(result.is_err());
+    }
+
+    #[test]
+    #[allow(clippy::float_cmp)]
+    fn test_compu_linear_result_typed_by_physical_type() {
+        // A fractional linear scale (factor 1/16, as used by e.g. battery SOC
+        // parameters) with a declared float PHYSICAL-TYPE must preserve the
+        // fraction. Typing the result with the coded type instead would
+        // truncate 57.375 to 57 and silently discard resolution.
+        let compu_method = CompuMethod {
+            category: CompuCategory::Linear,
+            internal_to_phys: CompuFunction {
+                scales: vec![CompuScale {
+                    rational_coefficients: Some(CompuRationalCoefficients {
+                        numerator: vec![0.0, 1.0],
+                        denominator: vec![16.0],
+                    }),
+                    consts: None,
+                    lower_limit: None,
+                    upper_limit: None,
+                    inverse_values: None,
+                }],
+            },
+        };
+
+        let data = 918u32.to_be_bytes();
+
+        // Physical type declared as float: full resolution.
+        let result = super::uds_data_to_serializable(
+            DataType::UInt32,
+            Some(DataType::Float64),
+            Some(&compu_method),
+            false,
+            &data,
+        )
+        .expect("linear conversion with float physical type");
+        match result {
+            crate::diag_kernel::DiagDataValue::Float64(v) => assert_eq!(v, 57.375),
+            other => panic!("expected Float64, got {other:?}"),
+        }
+
+        // No physical type declared: fall back to the coded type (integer).
+        let result = super::uds_data_to_serializable(
+            DataType::UInt32,
+            None,
+            Some(&compu_method),
+            false,
+            &data,
+        )
+        .expect("linear conversion without physical type");
+        match result {
+            crate::diag_kernel::DiagDataValue::UInt32(v) => assert_eq!(v, 57),
+            other => panic!("expected UInt32, got {other:?}"),
+        }
     }
 
     #[test]
@@ -1803,8 +1875,13 @@ mod tests {
         // First interval: [0, 2) -> f(x) = 1 + 2x
         // Forward: x=0 -> y=1
         let data = 0u32.to_be_bytes();
-        let result =
-            super::uds_data_to_serializable(DataType::UInt32, Some(&compu_method), false, &data);
+        let result = super::uds_data_to_serializable(
+            DataType::UInt32,
+            None,
+            Some(&compu_method),
+            false,
+            &data,
+        );
         assert!(result.is_ok());
         let value: f64 = result.unwrap().try_into().unwrap();
         assert_eq!(value, 1.0);
@@ -1829,8 +1906,13 @@ mod tests {
 
         // Forward: x=1 -> y=3
         let data = 1u32.to_be_bytes();
-        let result =
-            super::uds_data_to_serializable(DataType::UInt32, Some(&compu_method), false, &data);
+        let result = super::uds_data_to_serializable(
+            DataType::UInt32,
+            None,
+            Some(&compu_method),
+            false,
+            &data,
+        );
         assert!(result.is_ok());
         let value: f64 = result.unwrap().try_into().unwrap();
         assert_eq!(value, 3.0);
@@ -1850,8 +1932,13 @@ mod tests {
 
         // Forward: x=1.5 -> y=4
         let data = 1.5f32.to_be_bytes();
-        let result =
-            super::uds_data_to_serializable(DataType::Float32, Some(&compu_method), false, &data);
+        let result = super::uds_data_to_serializable(
+            DataType::Float32,
+            None,
+            Some(&compu_method),
+            false,
+            &data,
+        );
         assert!(result.is_ok());
         let value: f64 = result.unwrap().try_into().unwrap();
         assert_eq!(value, 4.0);
@@ -1872,8 +1959,13 @@ mod tests {
         // Second interval: [2, 5) -> f(x) = 3 + x
         // Forward: x=2 -> y=5 (boundary, CLOSED at 2)
         let data = 2u32.to_be_bytes();
-        let result =
-            super::uds_data_to_serializable(DataType::UInt32, Some(&compu_method), false, &data);
+        let result = super::uds_data_to_serializable(
+            DataType::UInt32,
+            None,
+            Some(&compu_method),
+            false,
+            &data,
+        );
         assert!(result.is_ok());
         let value: f64 = result.unwrap().try_into().unwrap();
         assert_eq!(value, 5.0);
@@ -1893,8 +1985,13 @@ mod tests {
 
         // Forward: x=3 -> y=6
         let data = 3u32.to_be_bytes();
-        let result =
-            super::uds_data_to_serializable(DataType::UInt32, Some(&compu_method), false, &data);
+        let result = super::uds_data_to_serializable(
+            DataType::UInt32,
+            None,
+            Some(&compu_method),
+            false,
+            &data,
+        );
         assert!(result.is_ok());
         let value: f64 = result.unwrap().try_into().unwrap();
         assert_eq!(value, 6.0);
@@ -1914,8 +2011,13 @@ mod tests {
 
         // Forward: x=4 -> y=7
         let data = 4u32.to_be_bytes();
-        let result =
-            super::uds_data_to_serializable(DataType::UInt32, Some(&compu_method), false, &data);
+        let result = super::uds_data_to_serializable(
+            DataType::UInt32,
+            None,
+            Some(&compu_method),
+            false,
+            &data,
+        );
         assert!(result.is_ok());
         let value: f64 = result.unwrap().try_into().unwrap();
         assert_eq!(value, 7.0);
@@ -1936,24 +2038,39 @@ mod tests {
         // Third interval: [5, infinity) -> f(x) = 8 (constant)
         // Forward: x=5 -> y=8 (boundary)
         let data = 5u32.to_be_bytes();
-        let result =
-            super::uds_data_to_serializable(DataType::UInt32, Some(&compu_method), false, &data);
+        let result = super::uds_data_to_serializable(
+            DataType::UInt32,
+            None,
+            Some(&compu_method),
+            false,
+            &data,
+        );
         assert!(result.is_ok());
         let value: f64 = result.unwrap().try_into().unwrap();
         assert_eq!(value, 8.0);
 
         // Forward: x=10 -> y=8 (constant)
         let data = 10u32.to_be_bytes();
-        let result =
-            super::uds_data_to_serializable(DataType::UInt32, Some(&compu_method), false, &data);
+        let result = super::uds_data_to_serializable(
+            DataType::UInt32,
+            None,
+            Some(&compu_method),
+            false,
+            &data,
+        );
         assert!(result.is_ok());
         let value: f64 = result.unwrap().try_into().unwrap();
         assert_eq!(value, 8.0);
 
         // Forward: x=100 -> y=8 (constant)
         let data = 100u32.to_be_bytes();
-        let result =
-            super::uds_data_to_serializable(DataType::UInt32, Some(&compu_method), false, &data);
+        let result = super::uds_data_to_serializable(
+            DataType::UInt32,
+            None,
+            Some(&compu_method),
+            false,
+            &data,
+        );
         assert!(result.is_ok());
         let value: f64 = result.unwrap().try_into().unwrap();
         assert_eq!(value, 8.0);
@@ -2023,16 +2140,26 @@ mod tests {
 
         // First interval: x=2, f(2) = (2 + 4*2) / 2 = 10 / 2 = 5
         let data = 2u32.to_be_bytes();
-        let result =
-            super::uds_data_to_serializable(DataType::UInt32, Some(&compu_method), false, &data);
+        let result = super::uds_data_to_serializable(
+            DataType::UInt32,
+            None,
+            Some(&compu_method),
+            false,
+            &data,
+        );
         assert!(result.is_ok());
         let value: f64 = result.unwrap().try_into().unwrap();
         assert_eq!(value, 5.0);
 
         // Second interval: x=6, f(6) = (50 + 10*6) / 5 = 110 / 5 = 22
         let data = 6u32.to_be_bytes();
-        let result =
-            super::uds_data_to_serializable(DataType::UInt32, Some(&compu_method), false, &data);
+        let result = super::uds_data_to_serializable(
+            DataType::UInt32,
+            None,
+            Some(&compu_method),
+            false,
+            &data,
+        );
         assert!(result.is_ok());
         let value: f64 = result.unwrap().try_into().unwrap();
         assert_eq!(value, 22.0);
@@ -2065,15 +2192,25 @@ mod tests {
 
         // x=5 is outside [10, 20] -> falls back to raw value (parsing continues)
         let data = 5u32.to_be_bytes();
-        let result =
-            super::uds_data_to_serializable(DataType::UInt32, Some(&compu_method), false, &data);
+        let result = super::uds_data_to_serializable(
+            DataType::UInt32,
+            None,
+            Some(&compu_method),
+            false,
+            &data,
+        );
         let raw: u32 = result.unwrap().try_into().unwrap();
         assert_eq!(raw, 5);
 
         // x=25 is outside [10, 20] -> falls back to raw value (parsing continues)
         let data = 25u32.to_be_bytes();
-        let result =
-            super::uds_data_to_serializable(DataType::UInt32, Some(&compu_method), false, &data);
+        let result = super::uds_data_to_serializable(
+            DataType::UInt32,
+            None,
+            Some(&compu_method),
+            false,
+            &data,
+        );
         let raw: u32 = result.unwrap().try_into().unwrap();
         assert_eq!(raw, 25);
     }
@@ -2172,7 +2309,8 @@ mod tests {
 
         let data: [u8; 0] = [];
         let mut payload = Payload::new(&data);
-        let res = extract_diag_data_container(Some("test_param"), 0, 0, &mut payload, &dct, None);
+        let res =
+            extract_diag_data_container(Some("test_param"), 0, 0, &mut payload, &dct, None, None);
         assert!(
             res.is_ok(),
             "MinMaxLengthType with min_length 0 should be no error"
@@ -2182,7 +2320,15 @@ mod tests {
             create_diag_coded_type_minmax(DataType::ByteField, 1, Some(1), Termination::EndOfPdu);
         let mut payload = Payload::new(&data);
         let res: Result<crate::DiagDataTypeContainer, cda_interfaces::DiagServiceError> =
-            extract_diag_data_container(Some("test_param"), 0, 0, &mut payload, &dct_min1, None);
+            extract_diag_data_container(
+                Some("test_param"),
+                0,
+                0,
+                &mut payload,
+                &dct_min1,
+                None,
+                None,
+            );
         // the param is at or beyond the payload boundary, so it is treated as absent and optional
         // regardless of min_length.
         assert!(
@@ -2193,8 +2339,15 @@ mod tests {
         // But if there IS data and it's shorter than min_length, that should still error.
         let short_data: [u8; 0] = [];
         let mut payload = Payload::new(&short_data);
-        let res =
-            extract_diag_data_container(Some("test_param"), 0, 0, &mut payload, &dct_min1, None);
+        let res = extract_diag_data_container(
+            Some("test_param"),
+            0,
+            0,
+            &mut payload,
+            &dct_min1,
+            None,
+            None,
+        );
         assert!(res.is_ok(), "Boundary param is absent, not an error");
     }
 
