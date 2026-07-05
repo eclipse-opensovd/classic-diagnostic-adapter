@@ -89,6 +89,8 @@ pub struct EcuManager<S: SecurityPlugin> {
     pub(in crate::diag_kernel) logical_address: u16,
     pub(in crate::diag_kernel) logical_gateway_address: u16,
     pub(in crate::diag_kernel) logical_functional_address: u16,
+    /// See [`Self::doip_addresses_resolved`] for the semantics.
+    pub(in crate::diag_kernel) doip_addresses_resolved: bool,
 
     pub(in crate::diag_kernel) nack_number_of_retries: HashMap<u8, u32>,
     pub(in crate::diag_kernel) diagnostic_ack_timeout: Duration,
@@ -317,23 +319,53 @@ impl<S: SecurityPlugin> cda_interfaces::EcuManager for EcuManager<S> {
     }
 }
 
+/// A `DoIP` logical address plus the provenance duplicate detection needs.
+struct DoipLogicalAddress {
+    /// The address value to use.
+    address: u16,
+    /// `true` when the database lookup failed and `address` is merely the
+    /// com-param default, not an address actually assigned to this ECU.
+    /// CAN-only MDDs carry no `DoIP` addressing, so all their ECUs share the
+    /// default value - which must not be mistaken for an address collision.
+    is_comparam_default: bool,
+}
+
 impl<S: SecurityPlugin> EcuManager<S> {
+    /// Whether gateway and ECU logical address come from the database (or an
+    /// explicit config override) rather than the com-param default fallback.
+    ///
+    /// ECUs whose MDDs carry no `DoIP` addressing (e.g. CAN-only databases) all
+    /// share the fallback values; address-based logic such as duplicate
+    /// detection must not treat that as a real address collision.
+    pub fn doip_addresses_resolved(&self) -> bool {
+        self.doip_addresses_resolved
+    }
+
+    /// Resolve a logical address, keeping track of whether it was actually
+    /// resolved (config override or database hit) as opposed to falling back
+    /// to the com-param default.
     fn resolve_logical_address(
         database: &datatypes::DiagnosticDatabase,
         data_protocol: Option<&datatypes::Protocol<'_>>,
         config: &ComParamConfig<u16>,
         addr_type: &datatypes::LogicalAddressType,
-    ) -> u16 {
+    ) -> DoipLogicalAddress {
         if config.precedence == ComParamPrecedence::Config {
             tracing::debug!(
                 param_name = %config.name,
                 "Using config value (precedence = Config), DB lookup skipped"
             );
-            return config.value;
+            return DoipLogicalAddress {
+                address: config.value,
+                is_comparam_default: false,
+            };
         }
 
         match database.find_logical_address(addr_type, database, data_protocol.map(|v| &**v)) {
-            Ok(address) => address,
+            Ok(address) => DoipLogicalAddress {
+                address,
+                is_comparam_default: false,
+            },
             Err(e) => {
                 tracing::error!(
                     config = ?config,
@@ -341,7 +373,10 @@ impl<S: SecurityPlugin> EcuManager<S> {
                     addr_type =  ?addr_type,
                     error = %e,
                     "Failed to find logical address");
-                config.value
+                DoipLogicalAddress {
+                    address: config.value,
+                    is_comparam_default: true,
+                }
             }
         }
     }
@@ -477,9 +512,11 @@ impl<S: SecurityPlugin> EcuManager<S> {
             database_naming_convention,
             tester_address: database
                 .find_com_param(data_protocol_ref, &com_params.doip.logical_tester_address)?,
-            logical_address: logical_ecu_address,
-            logical_gateway_address,
-            logical_functional_address,
+            logical_address: logical_ecu_address.address,
+            logical_gateway_address: logical_gateway_address.address,
+            logical_functional_address: logical_functional_address.address,
+            doip_addresses_resolved: !logical_gateway_address.is_comparam_default
+                && !logical_ecu_address.is_comparam_default,
             nack_number_of_retries,
             diagnostic_ack_timeout: database
                 .find_com_param(data_protocol_ref, &com_params.doip.diagnostic_ack_timeout)?,
@@ -597,6 +634,8 @@ impl<S: SecurityPlugin> EcuManager<S> {
             logical_address: logical_ecu_address,
             logical_gateway_address: com_params.doip.logical_gateway_address.value,
             logical_functional_address: com_params.doip.logical_functional_address.value,
+            // Functional descriptions use the com-param defaults verbatim.
+            doip_addresses_resolved: false,
             nack_number_of_retries,
             diagnostic_ack_timeout: com_params.doip.diagnostic_ack_timeout.value,
             retry_period: com_params.doip.retry_period.value,

@@ -382,6 +382,19 @@ async fn mark_duplicate_ecus_by_address<S: SecurityPlugin>(
     let mut ecus_by_address: HashMap<u16, HashMap<u16, Vec<String>>> = HashMap::new();
     for (name, db_lock) in databases {
         let db = db_lock.read().await;
+        if !db.doip_addresses_resolved() {
+            // The addresses are com-param fallback values (e.g. a CAN-only
+            // MDD without DoIP addressing, or a functional description). All
+            // such ECUs share the same defaults, which is no evidence of an
+            // actual address collision - grouping them would spuriously mark
+            // unrelated ECUs as duplicates and suppress base-variant
+            // fallback for all of them.
+            tracing::debug!(
+                ecu_name = %name,
+                "Skipping duplicate detection - no resolved DoIP addressing"
+            );
+            continue;
+        }
         let logical_address = db.logical_address();
         let gateway_address = db.logical_gateway_address();
         ecus_by_address
