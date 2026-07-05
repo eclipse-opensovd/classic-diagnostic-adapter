@@ -602,6 +602,28 @@ mod tests {
     }
 
     #[test]
+    fn test_oversized_numeric_payload_is_an_error() {
+        // Numeric decode must stay strict: a payload longer than the numeric
+        // type indicates a malformed response (or an MDD defect that has to
+        // be handled at the declaration layer), never a silent type change.
+        for data_type in [DataType::UInt32, DataType::Int32, DataType::Float32] {
+            assert!(
+                DiagDataValue::new(data_type, &[0u8; 5]).is_err(),
+                "5 bytes must not decode as {data_type:?}"
+            );
+        }
+        assert!(DiagDataValue::new(DataType::Float64, &[0u8; 9]).is_err());
+    }
+
+    #[test]
+    fn test_short_numeric_payload_is_padded() {
+        match DiagDataValue::new(DataType::UInt32, &[0x00, 0x01, 0x01]) {
+            Ok(DiagDataValue::UInt32(v)) => assert_eq!(v, 0x0101),
+            other => panic!("expected UInt32, got {other:?}"),
+        }
+    }
+
+    #[test]
     fn test_mixed_interval_types() {
         let value = DiagDataValue::Int32(50);
 
