@@ -558,6 +558,7 @@ impl<S: SecurityPlugin> EcuManager<S> {
                     param_ctx.parameter.bit_position() as usize,
                     uds_payload,
                     &diag_type,
+                    normal_dop.physical_type().map(Into::into),
                     None,
                 )?;
 
@@ -794,6 +795,7 @@ impl<S: SecurityPlugin> EcuManager<S> {
             Some(DiagDataTypeContainer::RawContainer(raw)) => {
                 let phys_val = operations::uds_data_to_serializable(
                     raw.data_type,
+                    None,
                     raw.compu_method.as_ref(),
                     false,
                     &raw.data,
@@ -828,6 +830,9 @@ impl<S: SecurityPlugin> EcuManager<S> {
         let compu_method: Option<datatypes::CompuMethod> =
             normal_dop.compu_method().map(Into::into);
         let data_type = diag_coded_type.base_datatype();
+        let physical_data_type = normal_dop
+            .physical_type()
+            .map(|pt| datatypes::PhysicalType::from(pt).base_type);
 
         if byte_count == 0 {
             tracing::debug!(
@@ -840,6 +845,7 @@ impl<S: SecurityPlugin> EcuManager<S> {
                     data: vec![],
                     bit_len: 0,
                     data_type,
+                    physical_data_type,
                     compu_method,
                 }),
             );
@@ -863,6 +869,7 @@ impl<S: SecurityPlugin> EcuManager<S> {
                 data: decoded_bytes,
                 bit_len,
                 data_type,
+                physical_data_type,
                 compu_method,
             }),
         );
@@ -923,7 +930,8 @@ impl<S: SecurityPlugin> EcuManager<S> {
 
         let num_items_diag_val = operations::uds_data_to_serializable(
             datatypes::DataType::UInt32, // Using hard coded UInt32 as per ISO 22901-1:2008
-            None,                        // Also according per spec, no compu method defined.
+            None,
+            None, // Also according per spec, no compu method defined.
             false,
             &num_items_data,
         )?;
@@ -1131,6 +1139,7 @@ impl<S: SecurityPlugin> EcuManager<S> {
             Some(DiagDataTypeContainer::RawContainer(raw)) => {
                 let val = operations::uds_data_to_serializable(
                     raw.data_type,
+                    None,
                     raw.compu_method.as_ref(),
                     false,
                     &raw.data,
@@ -1362,6 +1371,7 @@ impl<S: SecurityPlugin> EcuManager<S> {
                 param_ctx.parameter.bit_position() as usize,
                 uds_payload,
                 &diag_coded_type,
+                normal_dop.physical_type().map(Into::into),
                 Some(compu_method),
             )?,
         );
@@ -1408,6 +1418,7 @@ impl<S: SecurityPlugin> EcuManager<S> {
 
                 let switch_key_value = operations::uds_data_to_serializable(
                     switch_key_diag_type.base_datatype(),
+                    None,
                     normal_dop.compu_method().map(Into::into).as_ref(),
                     false,
                     &switch_key_data,
@@ -1420,6 +1431,7 @@ impl<S: SecurityPlugin> EcuManager<S> {
                         data: switch_key_data.clone(),
                         data_type: switch_key_diag_type.base_datatype(),
                         bit_len,
+                        physical_data_type: None,
                         compu_method: None,
                     }),
                 );
@@ -1516,6 +1528,7 @@ fn map_param_reserved_from_uds(
             data: param_data,
             bit_len,
             data_type: datatypes::DataType::UInt32,
+            physical_data_type: None,
             compu_method: None,
         }),
     );
@@ -1546,6 +1559,7 @@ fn map_param_coded_const_from_uds(
         param_ctx.parameter.bit_position() as usize,
         uds_payload,
         &diag_type,
+        None,
         None,
     )?;
 
