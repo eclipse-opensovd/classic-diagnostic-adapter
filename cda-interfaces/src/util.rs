@@ -448,9 +448,95 @@ pub fn try_extract_sid_from_payload(payload: &[u8]) -> Result<u8, DiagServiceErr
     Ok(sid)
 }
 
+/// Parse a `u32` given either as decimal (`2015`) or `0x`-prefixed hex
+/// (`0x7DF`), as CAN IDs appear in MDD com-params and config files.
+/// # Errors
+/// Returns the integer parse error message when `input` is neither.
+pub fn parse_u32_maybe_hex(input: &str) -> Result<u32, String> {
+    if let Some(hex_str) = input
+        .strip_prefix("0x")
+        .or_else(|| input.strip_prefix("0X"))
+    {
+        u32::from_str_radix(hex_str, 16).map_err(|e| format!("{e:?}"))
+    } else {
+        input.parse::<u32>().map_err(|e| format!("{e:?}"))
+    }
+}
+
+/// Normalize a display-hex value for comparison: per whitespace-separated
+/// token, strip a `0x`/`0X` prefix and uppercase, then concatenate.
+/// Example: `"0x04 0x80"` and `"0480"` both normalize to `"0480"`.
+#[must_use]
+pub fn normalize_hex(value: &str) -> String {
+    value
+        .split_whitespace()
+        .map(|token| {
+            token
+                .trim_start_matches("0x")
+                .trim_start_matches("0X")
+                .to_ascii_uppercase()
+        })
+        .collect()
+}
+
+/// Compare a byte-field parameter against a variant pattern's expected value.
+///
+/// A decoded `ByteField` serializes as space-separated `0x`-prefixed bytes
+/// (e.g. `"0x04 0x80"`), while variant patterns in real-world MDDs carry the
+/// expected coded value as a bare hex string (e.g. `"0480"`). Those can never
+/// be equal verbatim, so byte-field values get compared on normalized hex.
+///
+/// The normalization applies only when the received value is exactly the
+/// byte-field serialization: ASCII values (which may legitimately contain
+/// `0x` or differ only in case) keep the strict comparison of the caller.
+#[must_use]
+pub fn byte_field_matches_hex_pattern(received: &str, expected: &str) -> bool {
+    fn is_byte_field_repr(value: &str) -> bool {
+        !value.is_empty()
+            && value.split(' ').all(|token| {
+                token.len() == 4
+                    && token
+                        .strip_prefix("0x")
+                        .or_else(|| token.strip_prefix("0X"))
+                        .is_some_and(|hex| hex.chars().all(|c| c.is_ascii_hexdigit()))
+            })
+    }
+
+    is_byte_field_repr(received) && normalize_hex(received) == normalize_hex(expected)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn byte_field_matches_bare_hex_pattern() {
+        // Single byte, as serialized by DiagDataValue::ByteField.
+        assert!(byte_field_matches_hex_pattern("0x04", "04"));
+        // Multi byte against a contiguous hex pattern.
+        assert!(byte_field_matches_hex_pattern("0x04 0x80", "0480"));
+        // Hex digit case differences must not matter.
+        assert!(byte_field_matches_hex_pattern("0xAB 0xCD", "abcd"));
+        // Patterns written with prefixes/spaces normalize the same way.
+        assert!(byte_field_matches_hex_pattern("0x04 0x80", "0x04 0x80"));
+    }
+
+    #[test]
+    fn non_byte_field_values_never_match_via_normalization() {
+        // ASCII values keep the strict comparison - no hex reinterpretation.
+        assert!(!byte_field_matches_hex_pattern("DA1", "da1"));
+        // A value merely containing 0x is not a byte-field serialization.
+        assert!(!byte_field_matches_hex_pattern("v0x10", "v10"));
+        // Tokens must be exactly 0x + two hex digits.
+        assert!(!byte_field_matches_hex_pattern("0x123", "123"));
+        assert!(!byte_field_matches_hex_pattern("", ""));
+    }
+
+    #[test]
+    fn byte_field_mismatch_stays_a_mismatch() {
+        assert!(!byte_field_matches_hex_pattern("0x04 0x80", "0470"));
+        assert!(!byte_field_matches_hex_pattern("0x04", "0400"));
+    }
     #[test]
     fn test_extract_bits_standard_length_cases() {
         let result = extract_bits(4, 5, &[0b_1100_0011, 0b_1010_1000]).unwrap();
