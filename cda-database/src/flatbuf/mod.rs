@@ -15,5 +15,13 @@
 
 
 #[rustfmt::skip]
-#[allow(clippy::all, clippy::pedantic, dead_code, unused_imports, warnings, clippy::unwrap_used)]
+#[allow(
+    clippy::all,
+    clippy::pedantic,
+    dead_code,
+    unused_imports,
+    warnings,
+    clippy::unwrap_used,
+    reason = "Generated FlatBuffers code"
+)]
 pub mod diagnostic_description;

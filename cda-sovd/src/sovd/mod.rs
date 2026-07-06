@@ -606,8 +606,10 @@ async fn components_route<T: UdsEcu + SchemaProvider + Clone, U: FileManager + '
     router.with_state(state)
 }
 
-// Disabled as for now it makes sense to keep the route creation together
-#[allow(clippy::too_many_lines)]
+#[allow(
+    clippy::too_many_lines,
+    reason = "Route creation kept together for structural clarity"
+)]
 async fn ecu_route<T: UdsEcu + SchemaProvider + Clone, U: FileManager + 'static>(
     ecu_name: &str,
     state: &WebserverState<T>,
@@ -1004,10 +1006,10 @@ pub(crate) use create_response_schema;
 #[macro_export]
 macro_rules! create_schema {
     ($type_:ty) => {{
-        // allowed because for some invocations
-        // of the macro the import might be in scope
-        // already, but this is the rarer case.
-        #[allow(unused_imports)]
+        #[allow(
+            unused_imports,
+            reason = "Import may already be in scope at the macro call site"
+        )]
         use schemars::JsonSchema as _;
 
         let mut generator = schemars::SchemaGenerator::new(

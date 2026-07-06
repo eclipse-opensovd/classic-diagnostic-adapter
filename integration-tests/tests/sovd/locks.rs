@@ -373,7 +373,6 @@ async fn test_vehicle_lock_delete_hierarchy() -> Result<(), TestingError> {
         Ok((ecu_lock_id, func_lock_id))
     }
 
-    #[allow(unused_variables)] // with functional group tests disabled func_lock_id is unused
     async fn assert_ecu_and_func_locks_deleted(
         ecu_lock_id: &str,
         func_lock_id: &str,

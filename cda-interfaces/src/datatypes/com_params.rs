@@ -607,8 +607,10 @@ impl DeserializableCompParam for u16 {
     }
 }
 
-// type alias does not allow specifying hasher, we set the hasher globally.
-#[allow(clippy::implicit_hasher)]
+#[allow(
+    clippy::implicit_hasher,
+    reason = "type alias does not allow specifying hasher, we set the hasher globally."
+)]
 impl<T: DeserializeOwned> DeserializableCompParam for HashMap<String, T> {
     fn parse_from_db(input: &str, _unit: Option<&Unit>) -> Result<Self, String> {
         serde_json::from_str(input).map_err(|e| e.to_string())
@@ -674,12 +676,14 @@ impl DeserializableCompParam for Duration {
             .unwrap_or(0.000_001);
         // base unit would be seconds, but internally use microseconds for better precision
         let result = std::panic::catch_unwind(|| {
-            // Warning allowed because the truncated value is still large
-            // enough to represent durations accurately.
-            // Losing the sign is not an issue here,
-            // because value is already checked to be positive.
-            #[allow(clippy::cast_possible_truncation)]
-            #[allow(clippy::cast_sign_loss)]
+            #[allow(
+                clippy::cast_possible_truncation,
+                reason = "Value range validated above"
+            )]
+            #[allow(
+                clippy::cast_sign_loss,
+                reason = "Value is checked to be positive above"
+            )]
             Duration::from_micros((value * factor * 1_000_000f64) as u64)
         });
 

@@ -66,8 +66,10 @@ use crate::{
     SecurityPlugin, SecurityPluginInitializer, SecurityPluginLoader,
 };
 
-// allowed because the variant for enabled auth needs the Result
-#[allow(clippy::unnecessary_wraps)]
+#[allow(
+    clippy::unnecessary_wraps,
+    reason = "Return type must match the feature-enabled auth variant signature"
+)]
 #[cfg(not(feature = "auth"))]
 #[tracing::instrument(skip(_payload))]
 fn check_auth_payload(_payload: &AuthPayload) -> Result<(), AuthError> {
@@ -333,9 +335,10 @@ pub struct AuthPayload {
     /// Client identifier for authentication
     client_id: String,
     /// Client secret for authentication
-    // allowing unused because client_secret
-    // will not be used when auth feature is disabled
-    #[allow(unused)]
+    #[allow(
+        unused,
+        reason = "client_secret is only used when the auth feature is enabled"
+    )]
     client_secret: String,
 }
 

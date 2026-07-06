@@ -26,9 +26,10 @@ pub mod tracing {
 }
 
 pub mod tokio_ext {
-    // allow the check for unexpected cfg for tokio_unstable here, as this is a `tokio`` specific
-    // cfg flag that is required to have the `tokio::task::Builder` available.
-    #![allow(unexpected_cfgs)]
+    #![allow(
+        unexpected_cfgs,
+        reason = "tokio_unstable is a tokio-specific cfg flag required for tokio::task::Builder"
+    )]
 
     #[macro_export]
     #[cfg(all(tokio_unstable, feature = "tokio-tracing"))]

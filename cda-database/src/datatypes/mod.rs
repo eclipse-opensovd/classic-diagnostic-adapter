@@ -178,10 +178,10 @@ impl RawCodedConstParam {
 impl DiagService<'_> {
     #[must_use]
     pub fn request_id(&self) -> Option<u8> {
-        // allow the truncation, so we can re-use the same conversion function
-        // for the sub-function id which is u32
-        // per ISO 14229-1 the SID is 1 byte
-        #[allow(clippy::cast_possible_truncation)]
+        #[allow(
+            clippy::cast_possible_truncation,
+            reason = "SID is 1 byte per ISO 14229-1. Truncation is correct by spec"
+        )]
         self.find_request_sid_or_sub_func_param(0, 0)
             .map(|(sid, _)| sid as u8)
     }

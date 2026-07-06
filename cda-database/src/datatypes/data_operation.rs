@@ -188,9 +188,11 @@ impl TryInto<u32> for &Limit {
                 self.value
             )));
         }
-        // checked above
-        #[allow(clippy::cast_possible_truncation)]
-        #[allow(clippy::cast_sign_loss)]
+        #[allow(
+            clippy::cast_possible_truncation,
+            reason = "Value range validated above"
+        )]
+        #[allow(clippy::cast_sign_loss, reason = "Value range validated above")]
         Ok(f as u32)
     }
 }
@@ -206,8 +208,10 @@ impl TryInto<i32> for &Limit {
             )));
         }
 
-        // checked above
-        #[allow(clippy::cast_possible_truncation)]
+        #[allow(
+            clippy::cast_possible_truncation,
+            reason = "Value range validated above"
+        )]
         Ok(f as i32)
     }
 }
@@ -265,9 +269,14 @@ impl TryInto<Vec<u8>> for &Limit {
                             "Invalid value for float, error={e}"
                         ))
                     })?;
-                    // this is expected behavior when converting from a float.
-                    #[allow(clippy::cast_possible_truncation)]
-                    #[allow(clippy::cast_sign_loss)]
+                    #[allow(
+                        clippy::cast_possible_truncation,
+                        reason = "Expected behavior when converting from float to u8"
+                    )]
+                    #[allow(
+                        clippy::cast_sign_loss,
+                        reason = "Expected behavior when converting from float to u8"
+                    )]
                     Ok((float_value as u8).to_be_bytes().to_vec())
                 } else if let Some(stripped) = value.to_lowercase().strip_prefix("0x") {
                     decode_hex(stripped)

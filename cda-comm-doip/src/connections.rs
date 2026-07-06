@@ -565,9 +565,10 @@ where
     )
 }
 
-/// allowed because there are two inline functions in here,
-/// that should be kept private to this function.
-#[allow(clippy::too_many_lines)]
+#[allow(
+    clippy::too_many_lines,
+    reason = "Contains two private inline functions that should remain in scope"
+)]
 #[tracing::instrument(
     skip(outtx, gateway_conn, send_pending_rx, reset_tx),
     fields(
@@ -1124,7 +1125,12 @@ mod tests {
         let mut harness = GatewaySenderTestHarness::new(Duration::ZERO);
 
         // Advance a very long time - alive check should never fire.
-        #[allow(unknown_lints, clippy::duration_suboptimal_units)]
+        #[allow(
+            unknown_lints,
+            clippy::duration_suboptimal_units,
+            reason = "Literal duration value chosen for test clarity; suboptimal units lint not \
+                      available in all toolchain versions"
+        )]
         tokio::time::advance(Duration::from_secs(4200)).await;
         tokio::task::yield_now().await;
 

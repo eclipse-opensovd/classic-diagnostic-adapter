@@ -137,7 +137,10 @@ impl DopType {
     pub const DTC: Self = Self(dataformat::DOPType::DTC);
 }
 
-#[allow(non_upper_case_globals)] // to comply with flatbuffers enum naming
+#[allow(
+    non_upper_case_globals,
+    reason = "Names follow FlatBuffers enum naming conventions"
+)]
 impl SpecificDOPData {
     pub const NormalDOP: Self = Self(dataformat::SpecificDOPData::NormalDOP);
     pub const EndOfPduField: Self = Self(dataformat::SpecificDOPData::EndOfPduField);

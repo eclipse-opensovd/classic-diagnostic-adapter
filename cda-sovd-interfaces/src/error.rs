@@ -16,9 +16,10 @@ use serde::{Deserialize, Serialize};
 
 #[derive(Serialize, Deserialize, Debug)]
 #[serde(rename_all = "kebab-case")]
-// allowed, so we can pre-fill this with all sovd error codes
-// even though not all are used yet.
-#[allow(dead_code)]
+#[allow(
+    dead_code,
+    reason = "Pre-filled with all SOVD error codes; not all variants used yet"
+)]
 #[derive(schemars::JsonSchema, PartialEq, Eq)]
 pub enum ErrorCode {
     /// Details are specified in the `vendor_code`

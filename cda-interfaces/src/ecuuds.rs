@@ -250,9 +250,10 @@ pub trait UdsDtc: UdsTransport {
         memory_selection: Option<u8>,
     ) -> Result<HashMap<DtcCode, DtcRecordAndStatus>, DiagServiceError>;
 
-    // alternative of passing a struct DtcOptions containing
-    // the include_ and memory_selection parameters isn't better for readability.
-    #[allow(clippy::too_many_arguments)]
+    #[allow(
+        clippy::too_many_arguments,
+        reason = "Combining parameters into a struct would not improve readability here"
+    )]
     async fn ecu_dtc_extended(
         &self,
         ecu_name: &str,
@@ -548,7 +549,10 @@ pub trait UdsFunctionalGroup: UdsTransport {
     ///
     /// # Errors
     /// Returns error if the functional group doesn't exist or if the request cannot be sent
-    #[allow(clippy::too_many_arguments)] // there is not much benefit in passing a structure here
+    #[allow(
+        clippy::too_many_arguments,
+        reason = "Passing a struct would not benefit readability here"
+    )]
     async fn set_functional_state(
         &self,
         group_name: &str,
@@ -625,7 +629,12 @@ impl<T> UdsEcuDb for T where
 // `ref_option_ref`). Both are artefacts of the generated code that we cannot
 // change; the allow must be on the enclosing module because attributes on
 // macro invocations are ignored for lints that fire inside the expansion.
-#[allow(clippy::struct_field_names, clippy::ref_option_ref)]
+#[allow(
+    clippy::struct_field_names,
+    clippy::ref_option_ref,
+    reason = "mockall macro generates struct field names and Option references that cannot be \
+              controlled"
+)]
 pub mod mock {
     use std::time::Duration;
 
@@ -652,8 +661,6 @@ pub mod mock {
             fn clone(&self) -> Self;
         }
 
-        // allowed because the mock! macro generates references to Option types
-        #[allow(clippy::ref_option_ref)]
         #[async_trait]
         impl UdsTransport for UdsEcu {
             type Response = crate::diagservices::mock::MockDiagServiceResponse;
@@ -684,8 +691,6 @@ pub mod mock {
             ) -> Result<Vec<u8>, DiagServiceError>;
         }
 
-        // allowed because the mock! macro generates references to Option types
-        #[allow(clippy::ref_option_ref)]
         #[async_trait]
         impl UdsSession for UdsEcu {
             async fn set_ecu_session(
@@ -702,8 +707,6 @@ pub mod mock {
             ) ->  Result<(), DiagServiceError>;
         }
 
-        // allowed because the mock! macro generates references to Option types
-        #[allow(clippy::ref_option_ref)]
         #[async_trait]
         impl UdsSecurity for UdsEcu {
             async fn reset_ecu_security_access(

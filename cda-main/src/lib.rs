@@ -735,9 +735,10 @@ pub async fn load_vehicle_data<
 
 pub type UdsManagerType<S> = UdsManager<DoipDiagGateway<EcuManager<S>>, EcuManager<S>>;
 
-/// Creates a new UDS manager for the webserver.
-/// type alias does not allow specifying hasher, we set the hasher globally.
-#[allow(clippy::implicit_hasher)]
+#[allow(
+    clippy::implicit_hasher,
+    reason = "Type alias does not allow specifying hasher. Hasher is set globally"
+)]
 #[tracing::instrument(skip_all,
     fields(
         database_count = databases.len(),

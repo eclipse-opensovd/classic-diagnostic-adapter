@@ -562,9 +562,10 @@ async fn create_tls_stream(
     ))
 }
 
-// Allow the underscore bindings because the variables
-// are not used, but we want them in the tracing fields.
-#[allow(clippy::used_underscore_binding)]
+#[allow(
+    clippy::used_underscore_binding,
+    reason = "Variables are unused in the function but required as named tracing fields"
+)]
 #[tracing::instrument(
     skip(reader),
     fields(

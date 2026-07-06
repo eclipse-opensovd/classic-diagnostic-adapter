@@ -11,7 +11,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-#[allow(dead_code)] // if we are on nightly, stable is never referenced
+#[allow(dead_code, reason = "if we are on nightly, stable is never referenced")]
 #[derive(PartialEq, Eq)]
 enum Rustc {
     Nightly,

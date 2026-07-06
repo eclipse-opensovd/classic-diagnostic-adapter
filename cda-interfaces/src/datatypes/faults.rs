@@ -127,8 +127,11 @@ pub struct DtcField {
 }
 
 #[derive(Serialize, Deserialize, Debug, Default, Clone)]
-// The warning is allowed because the bools represent the status bits of a DTC.
-#[allow(clippy::struct_excessive_bools)]
+#[allow(
+    clippy::struct_excessive_bools,
+    reason = "Bools represent individual DTC status bits. A bitfield-like struct is appropriate \
+              here"
+)]
 pub struct DtcStatus {
     pub test_failed: bool,
     pub test_failed_this_operation_cycle: bool,
