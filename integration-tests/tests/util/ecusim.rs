@@ -87,7 +87,10 @@ pub(crate) enum DtcSettingType {
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
-#[allow(dead_code)]
+#[allow(
+    dead_code,
+    reason = "Struct fields deserialized from ECU simulator JSON. Not all fields consumed by tests"
+)]
 pub(crate) struct DataBlockDto {
     pub(crate) id: String,
     pub(crate) r#type: DataBlockType,
@@ -97,7 +100,10 @@ pub(crate) struct DataBlockDto {
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
-#[allow(dead_code)]
+#[allow(
+    dead_code,
+    reason = "Struct fields deserialized from ECU simulator JSON. Not all fields consumed by tests"
+)]
 pub(crate) struct EcuState {
     pub(crate) variant: Option<Variant>,
     pub(crate) session_state: Option<SessionState>,
@@ -117,7 +123,10 @@ pub(crate) struct EcuState {
 
 #[derive(Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
-#[allow(dead_code)]
+#[allow(
+    dead_code,
+    reason = "Struct fields deserialized from ECU simulator JSON. Not all fields consumed by tests"
+)]
 pub(crate) struct DtcMinimal {
     pub(crate) id: String,
     pub(crate) status_mask: String,
@@ -126,7 +135,10 @@ pub(crate) struct DtcMinimal {
 
 #[derive(Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
-#[allow(dead_code)]
+#[allow(
+    dead_code,
+    reason = "Struct fields deserialized from ECU simulator JSON. Not all fields consumed by tests"
+)]
 pub(crate) struct ExtDataRecord {
     pub(crate) record_number: String,
     pub(crate) data: String,
@@ -134,7 +146,10 @@ pub(crate) struct ExtDataRecord {
 
 #[derive(Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
-#[allow(dead_code)]
+#[allow(
+    dead_code,
+    reason = "Struct fields deserialized from ECU simulator JSON. Not all fields consumed by tests"
+)]
 pub(crate) struct SnapshotData {
     pub(crate) did: String,
     pub(crate) data: String,
@@ -142,7 +157,10 @@ pub(crate) struct SnapshotData {
 
 #[derive(Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
-#[allow(dead_code)]
+#[allow(
+    dead_code,
+    reason = "Struct fields deserialized from ECU simulator JSON. Not all fields consumed by tests"
+)]
 pub(crate) struct SnapshotRecord {
     pub(crate) record_number: String,
     pub(crate) records: Vec<SnapshotData>,
@@ -150,7 +168,10 @@ pub(crate) struct SnapshotRecord {
 
 #[derive(Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
-#[allow(dead_code)]
+#[allow(
+    dead_code,
+    reason = "Struct fields deserialized from ECU simulator JSON. Not all fields consumed by tests"
+)]
 pub(crate) struct DtcExtended {
     pub(crate) id: String,
     pub(crate) status_mask: String,
@@ -161,7 +182,10 @@ pub(crate) struct DtcExtended {
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase", transparent)]
-#[allow(dead_code)]
+#[allow(
+    dead_code,
+    reason = "Struct fields deserialized from ECU simulator JSON. Not all fields consumed by tests"
+)]
 pub(crate) struct DtcState {
     pub(crate) dtcs: Vec<DtcMinimal>,
 }

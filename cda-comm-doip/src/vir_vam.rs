@@ -99,8 +99,10 @@ where
     Ok(gateways)
 }
 
-// allowed due to nested functions
-#[allow(clippy::too_many_lines)]
+#[allow(
+    clippy::too_many_lines,
+    reason = "Contains nested private functions that should remain in scope"
+)]
 pub(crate) async fn listen_for_vams<T, F>(
     transport_config: DoipTransportConfig,
     netmask: u32,

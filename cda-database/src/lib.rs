@@ -23,8 +23,10 @@ pub use mdd_data::{
 };
 use serde::{Deserialize, Serialize};
 
-// Allowed because it makes sense for a configuration to have more than 3 bools
-#[allow(clippy::struct_excessive_bools)]
+#[allow(
+    clippy::struct_excessive_bools,
+    reason = "Configuration struct legitimately has multiple independent boolean fields"
+)]
 #[derive(Deserialize, Serialize, Clone, Debug, schemars::JsonSchema)]
 pub struct DatabaseConfig {
     /// Path to load the databases from, this must be a directory.

@@ -12,7 +12,7 @@
  */
 
 #[cfg(any(feature = "gen-protos", feature = "gen-flatbuffers"))]
-const COPYRIGHT_HEADER: &str = r"/*
+const COPYRIGHT_HEADER: &str = r#"/*
  * SPDX-FileCopyrightText: 2026 Copyright (c) Contributors to the Eclipse Foundation
  *
  * See the NOTICE file(s) distributed with this work for additional
@@ -27,9 +27,14 @@ const COPYRIGHT_HEADER: &str = r"/*
 
 
 // This file is @generated - do not edit manually.
-#![allow(clippy::all, warnings)]
+#![allow(
+    clippy::all,
+    clippy::allow_attributes_without_reason,
+    warnings,
+    reason = "Generated code"
+)]
 
-";
+"#;
 #[cfg(any(feature = "gen-protos", feature = "gen-flatbuffers"))]
 fn prepend_copyright(file_path: &str) -> std::io::Result<()> {
     let content = std::fs::read_to_string(file_path)?;
@@ -190,8 +195,10 @@ fn out_dir() -> Result<String, std::io::Error> {
     Ok(out_dir)
 }
 
-// allow using result as it is used when features are enabled
-#[allow(clippy::unnecessary_wraps)]
+#[allow(
+    clippy::unnecessary_wraps,
+    reason = "Return type must be Result to satisfy feature-gated code paths"
+)]
 fn main() -> std::io::Result<()> {
     cda_build::set_nightly_flag();
 

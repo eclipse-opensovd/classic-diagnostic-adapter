@@ -37,8 +37,10 @@ pub enum SslVerifyMode {
 
 impl SslVerifyMode {
     fn to_raw(self) -> i32 {
-        // these constants are between 0 and 2, so cast is fine
-        #[allow(clippy::cast_possible_wrap)]
+        #[allow(
+            clippy::cast_possible_wrap,
+            reason = "MBEDTLS_SSL_VERIFY_* constants are between 0 and 2"
+        )]
         match self {
             Self::None => ffi::MBEDTLS_SSL_VERIFY_NONE as i32,
             Self::Optional => ffi::MBEDTLS_SSL_VERIFY_OPTIONAL as i32,
@@ -63,9 +65,10 @@ pub enum MaxFragLen {
 
 impl MaxFragLen {
     fn to_raw(self) -> u8 {
-        // these constants are between 0 and 4 as defined in the RFC
-        // so the cast is fine
-        #[allow(clippy::cast_possible_truncation)]
+        #[allow(
+            clippy::cast_possible_truncation,
+            reason = "MBEDTLS_SSL_MAX_FRAG_LEN_* constants are 0-4 per RFC"
+        )]
         match self {
             Self::None => ffi::MBEDTLS_SSL_MAX_FRAG_LEN_NONE as u8,
             Self::Len512 => ffi::MBEDTLS_SSL_MAX_FRAG_LEN_512 as u8,
@@ -125,8 +128,10 @@ impl SslConfigBuilder {
     ///   returns an error when initializing the ssl context with the set
     ///   config.
     pub fn new_client() -> Result<Self, MbedtlsError> {
-        // these constants are all 0, so cast is fine
-        #[allow(clippy::cast_possible_wrap)]
+        #[allow(
+            clippy::cast_possible_wrap,
+            reason = "MBEDTLS_SSL_IS_CLIENT/TRANSPORT_STREAM/PRESET_DEFAULT constants are 0"
+        )]
         Self::new(
             ffi::MBEDTLS_SSL_IS_CLIENT as i32,
             ffi::MBEDTLS_SSL_TRANSPORT_STREAM as i32,
@@ -141,8 +146,10 @@ impl SslConfigBuilder {
     ///   returns an error when initializing the ssl context with the set
     ///   config.
     pub fn new_server() -> Result<Self, MbedtlsError> {
-        // these constants are either 1 or 0, so cast is fine
-        #[allow(clippy::cast_possible_wrap)]
+        #[allow(
+            clippy::cast_possible_wrap,
+            reason = "MBEDTLS_SSL_IS_SERVER/TRANSPORT_STREAM/PRESET_DEFAULT constants are 0 or 1"
+        )]
         Self::new(
             ffi::MBEDTLS_SSL_IS_SERVER as i32,
             ffi::MBEDTLS_SSL_TRANSPORT_STREAM as i32,
@@ -305,8 +312,10 @@ impl SslConfigBuilder {
     #[must_use]
     pub fn sig_algs(mut self, sig_algs: &[u16]) -> Self {
         let mut sa: Vec<u16> = sig_algs.to_vec();
-        // MBEDTLS_TLS1_3_SIG_NONE is 0 so the cast is safe
-        #[allow(clippy::cast_possible_truncation)]
+        #[allow(
+            clippy::cast_possible_truncation,
+            reason = "MBEDTLS_TLS1_3_SIG_NONE is 0. Truncation to u16 is safe"
+        )]
         sa.push(ffi::MBEDTLS_TLS1_3_SIG_NONE as u16); // add the expected zero terminator
         unsafe {
             ffi::mbedtls_ssl_conf_sig_algs(&raw mut self.inner, sa.as_ptr());

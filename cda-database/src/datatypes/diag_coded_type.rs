@@ -479,8 +479,10 @@ impl DiagCodedType {
     }
 
     #[inline]
-    // length is checked before accessing, using indices is fine
-    #[allow(clippy::indexing_slicing)]
+    #[allow(
+        clippy::indexing_slicing,
+        reason = "Length is validated before accessing. Indexing is safe"
+    )]
     fn usize_from_bytes(length_info_bytes: &[u8]) -> Result<usize, DiagServiceError> {
         let len = match length_info_bytes.len() {
             1 => length_info_bytes[0] as usize,
@@ -1021,8 +1023,10 @@ fn pack_data(
         if remainder != 0 {
             let last_byte_idx = bit_length / 8;
             if let Some(last_byte) = result.get_mut(last_byte_idx) {
-                // this can be allowed as this operation here can never underflow.
-                #[allow(clippy::arithmetic_side_effects)]
+                #[allow(
+                    clippy::arithmetic_side_effects,
+                    reason = "Operation cannot underflow: shift is bounded by bit count"
+                )]
                 let mask_byte = (1u8 << remainder) - 1;
                 *last_byte &= mask_byte;
             }

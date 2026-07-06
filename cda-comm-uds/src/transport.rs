@@ -99,10 +99,15 @@ impl<S: EcuGateway, T: EcuManager> UdsManager<S, T> {
 }
 
 impl<S: EcuGateway, T: UdsEcuDb> UdsManager<S, T> {
-    // allowed for clarity, to make it clearer which of the loops is being continued
-    #[allow(clippy::needless_continue)]
-    // allow too many lines, as it is better to keep this together for now
-    #[allow(clippy::too_many_lines)]
+    #[allow(
+        clippy::needless_continue,
+        reason = "Explicit continue improves readability to make it clearer, which loop is being \
+                  continued"
+    )]
+    #[allow(
+        clippy::too_many_lines,
+        reason = "Splitting the send/receive flow would reduce readability"
+    )]
     #[tracing::instrument(
         skip(self, payload),
         fields(ecu_name,

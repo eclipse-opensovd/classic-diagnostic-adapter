@@ -127,9 +127,13 @@ where
 /// Add vehicle routes to the dynamic router
 ///
 /// This function should be called after the database is loaded to add all vehicle routes
+///
 /// # Errors
-/// Will return `Err` if routes cannot be added to the dynamic router.
-#[allow(clippy::implicit_hasher, clippy::missing_errors_doc)]
+/// Returns `Err` if routes cannot be added to the dynamic router.
+#[allow(
+    clippy::implicit_hasher,
+    reason = "Type alias doesn't allow specifying hasher"
+)]
 #[tracing::instrument(
     skip(dynamic_router, config, resources),
     fields(
@@ -154,7 +158,10 @@ where
     Ok((registry, handle))
 }
 
-#[allow(clippy::implicit_hasher)]
+#[allow(
+    clippy::implicit_hasher,
+    reason = "Type alias doesn't allow specifying hasher"
+)]
 pub async fn build_vehicle_routes<T, M, S>(
     config: VehicleConfig,
     resources: VehicleResources<T, M>,

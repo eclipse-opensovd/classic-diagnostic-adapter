@@ -1405,7 +1405,11 @@ mod tests {
     #[tokio::test]
     async fn test_ecu_lock_cleanup_calls_reset() {
         let (mock_uds, ecu_name, locks) = setup_ecu_lock_test();
-        #[allow(unknown_lints, clippy::duration_suboptimal_units)]
+        #[allow(
+            unknown_lints,
+            clippy::duration_suboptimal_units,
+            reason = "Literal duration for test clarity. Lint not available in all toolchains"
+        )]
         let lock_id = create_ecu_lock(&mock_uds, &locks, &ecu_name, Duration::from_secs(60)).await;
 
         let delete_response = delete_handler(
@@ -1461,7 +1465,11 @@ mod tests {
     #[tokio::test]
     async fn test_vehicle_lock_cleanup_calls_reset_for_all_ecus() {
         let (mock_uds, locks) = setup_vehicle_lock_test();
-        #[allow(unknown_lints, clippy::duration_suboptimal_units)]
+        #[allow(
+            unknown_lints,
+            clippy::duration_suboptimal_units,
+            reason = "Literal duration for test clarity. Lint not available in all toolchains"
+        )]
         let lock_id = create_vehicle_lock(&mock_uds, &locks, Duration::from_secs(60)).await;
 
         let delete_response = delete_handler(

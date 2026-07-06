@@ -283,8 +283,10 @@ impl<S: SecurityPlugin> EcuManager<S> {
                 // Check length of provided array
                 if value.len() < end_of_pdu_dop.min_number_of_items().unwrap_or(0) as usize
                     || end_of_pdu_dop.max_number_of_items().is_some_and(|max| {
-                        // truncation is okay, we check for that below
-                        #[allow(clippy::cast_possible_truncation)]
+                        #[allow(
+                            clippy::cast_possible_truncation,
+                            reason = "Truncation is safe; overflow is checked below"
+                        )]
                         let value_len_u32 = value.len() as u32;
 
                         value.len() > u32::MAX as usize || max > value_len_u32

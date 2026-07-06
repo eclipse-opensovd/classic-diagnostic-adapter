@@ -83,7 +83,10 @@ async fn add_custom_routes(dynamic_router: &DynamicRouter) {
 }
 
 #[tokio::test]
-#[allow(clippy::too_many_lines)] // makes sense to keep the test together
+#[allow(
+    clippy::too_many_lines,
+    reason = "Makes sense to keep the test together"
+)]
 async fn test_custom_demo_endpoint() {
     // Use loopback since we don't need actual ECU connections for this test
     let host = host();

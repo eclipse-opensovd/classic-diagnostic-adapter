@@ -222,9 +222,11 @@ impl TryInto<u32> for DiagDataValue {
                         "Float32 value out of u32 range".to_owned(),
                     ));
                 }
-                // validated above, safe to cast
-                #[allow(clippy::cast_possible_truncation)]
-                #[allow(clippy::cast_sign_loss)]
+                #[allow(
+                    clippy::cast_possible_truncation,
+                    reason = "Value range validated above"
+                )]
+                #[allow(clippy::cast_sign_loss, reason = "Value range validated above")]
                 Ok(f as u32)
             }
             DiagDataValue::Float64(f) => {
@@ -233,9 +235,11 @@ impl TryInto<u32> for DiagDataValue {
                         "Float64 value out of u32 range".to_owned(),
                     ));
                 }
-                // validated above, safe to cast
-                #[allow(clippy::cast_possible_truncation)]
-                #[allow(clippy::cast_sign_loss)]
+                #[allow(
+                    clippy::cast_possible_truncation,
+                    reason = "Value range validated above"
+                )]
+                #[allow(clippy::cast_sign_loss, reason = "Value range validated above")]
                 Ok(f as u32)
             }
             _ => Err(DiagServiceError::ParameterConversionError(

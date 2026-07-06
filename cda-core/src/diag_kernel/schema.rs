@@ -211,7 +211,10 @@ fn params_to_schema(
                     .find(|params| {
                         params.byte_position().is_some_and(|bp| {
                             let request_bp = matching.request_byte_pos();
-                            #[allow(clippy::cast_sign_loss)] // okay because >= is checked
+                            #[allow(
+                                clippy::cast_sign_loss,
+                                reason = "Safe because sign is checked with >= 0 above"
+                            )]
                             let matching_request_byte_pos = matching.request_byte_pos() as u32;
                             request_bp >= 0 && bp == matching_request_byte_pos
                         })

@@ -22,10 +22,16 @@ use crate::util::TestingError;
 
 #[derive(Debug)]
 pub(crate) struct Response {
-    #[allow(dead_code)]
+    #[allow(
+        dead_code,
+        reason = "Status captured for debugging. Not all tests assert on it"
+    )]
     status: StatusCode,
     body: Option<String>,
-    #[allow(dead_code)]
+    #[allow(
+        dead_code,
+        reason = "Headers captured for debugging. Not all tests assert on them"
+    )]
     header_map: HeaderMap,
 }
 

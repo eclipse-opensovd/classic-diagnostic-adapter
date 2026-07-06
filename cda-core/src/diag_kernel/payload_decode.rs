@@ -87,8 +87,11 @@ impl<S: SecurityPlugin> PayloadDecoder for EcuManager<S> {
         ),
         err
     )]
-    // allow keeping the function together as it makes sense structurally
-    #[allow(clippy::too_many_lines)]
+    #[allow(
+        clippy::too_many_lines,
+        reason = "Keeping the function together makes structural sense. Splitting would hurt \
+                  readability"
+    )]
     async fn convert_from_uds(
         &self,
         diag_service: &cda_interfaces::DiagComm,

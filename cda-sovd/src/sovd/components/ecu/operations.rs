@@ -840,8 +840,10 @@ pub(crate) mod service {
                 })
         }
 
-        // cannot simply combine the axum extractors without creating a new custom extractor.
-        #[allow(clippy::too_many_arguments)]
+        #[allow(
+            clippy::too_many_arguments,
+            reason = "Axum extractors cannot be combined without a new custom extractor"
+        )]
         pub(crate) async fn post<T: UdsEcu + SchemaProvider + Clone, U: FileManager>(
             UseApi(Secured(security_plugin), _): UseApi<Secured, ()>,
             Path(OperationServicePathParam { service }): Path<OperationServicePathParam>,
@@ -1333,9 +1335,10 @@ pub(crate) mod service {
             }
         }
 
-        // allowed for now, the current implementation does not contain a lot of
-        // potential to extract smaller functions
-        #[allow(clippy::too_many_lines)]
+        #[allow(
+            clippy::too_many_lines,
+            reason = "Current implementation has little potential to extract smaller functions"
+        )]
         async fn ecu_reset_handler<T: UdsEcu + SchemaProvider + Clone>(
             service: String,
             ecu_name: &str,
@@ -1847,8 +1850,7 @@ mod tests {
     use sovd_interfaces::components::ecu::operations::comparams::ComParamSimpleValue;
 
     #[test]
-    // allowing float comparison because we actually want to test exact values here
-    #[allow(clippy::float_cmp)]
+    #[allow(clippy::float_cmp, reason = "Test verifies exact deserialized values")]
     fn com_param_simple_deserialization() {
         let json_data_string = "\"example_value\"";
         let deserialized_string: ComParamSimpleValue =

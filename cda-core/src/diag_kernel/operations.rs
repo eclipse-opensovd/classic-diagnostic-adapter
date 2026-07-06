@@ -177,8 +177,10 @@ fn compu_lookup(
                 let lookup: u32 = lookup.try_into()?;
                 if lookup <= 0xFF {
                     Ok(DiagDataValue::String(
-                        // Okay because the NRC is defined as u8
-                        #[allow(clippy::cast_possible_truncation)]
+                        #[allow(
+                            clippy::cast_possible_truncation,
+                            reason = "NRC is defined as u8. truncation is correct by spec"
+                        )]
                         iso_14229_nrc::get_nrc_code(lookup as u8).to_owned(),
                     ))
                 } else {
@@ -355,9 +357,11 @@ fn parse_json_to_f64(
         return Ok(num);
     }
 
-    // we can accept the precision loss here since the value is being converted to f64 anyway
-    // when compu methods are applied.
-    #[allow(clippy::cast_precision_loss)]
+    #[allow(
+        clippy::cast_precision_loss,
+        reason = "Precision loss is acceptable since value is converted to f64 for compu method \
+                  application"
+    )]
     if let Some(num) = value.as_i64() {
         return Ok(num as f64);
     }
@@ -429,8 +433,14 @@ fn parse_json_to_f64(
 
 /// Helper function to convert an internal value to bytes based on data type
 // Casting and truncating is defined in the ISO instead of rounding
-#[allow(clippy::cast_possible_truncation)]
-#[allow(clippy::cast_sign_loss)]
+#[allow(
+    clippy::cast_possible_truncation,
+    reason = "Casting behavior is defined by ISO spec, not rounding"
+)]
+#[allow(
+    clippy::cast_sign_loss,
+    reason = "Casting behavior is defined by ISO spec"
+)]
 fn linear_scaled_value_to_bytes(
     value: f64,
     diag_type: datatypes::DataType,
@@ -823,8 +833,12 @@ fn process_numeric_json_value(
             })?;
             Ok(int_val.to_be_bytes().to_vec())
         }
-        DataType::Float32 => {
-            #[allow(clippy::cast_possible_truncation)] // truncating f64 to f32 is intended here
+        DataType::Float32 =>
+        {
+            #[allow(
+                clippy::cast_possible_truncation,
+                reason = "Truncating f64 to f32 is intentional here"
+            )]
             json_value
                 .as_f64()
                 .ok_or(DiagServiceError::ParameterConversionError(
@@ -1736,8 +1750,14 @@ mod tests {
     }
 
     #[test]
-    #[allow(clippy::too_many_lines)]
-    #[allow(clippy::float_cmp)]
+    #[allow(
+        clippy::too_many_lines,
+        reason = "Test data is large. keeping together aids comprehension"
+    )]
+    #[allow(
+        clippy::float_cmp,
+        reason = "Test verifies exact float values by specification"
+    )]
     fn test_compu_lookup_scale_linear_piecewise_function() {
         // ISO 22901-1:2008 Figure 80 example:
         // f(x) = { 1+2x, xE[0,2), 3+x, xE[2,5), 8, xE[5,infinity) }
@@ -1977,7 +1997,10 @@ mod tests {
 
     #[test]
     // allowed because we expect an exact match on floating point values in this test
-    #[allow(clippy::float_cmp)]
+    #[allow(
+        clippy::float_cmp,
+        reason = "Test verifies exact float values. Precision is controlled by specification"
+    )]
     fn test_compu_lookup_scale_linear_with_different_denominators() {
         // SCALE-LINEAR with different denominators per interval
         // f(x) = { (2+4x)/2, xE[0,5), (50+10x)/5, xE[5,10] }
@@ -2130,7 +2153,10 @@ mod tests {
 
     #[test]
     // the given data in the tests allows and requires exact float comparisons
-    #[allow(clippy::float_cmp)]
+    #[allow(
+        clippy::float_cmp,
+        reason = "Test data requires exact float comparisons"
+    )]
     fn test_parse_json_to_f64() {
         // test decimal representations
         let str_decimal_int = serde_json::json!("1");

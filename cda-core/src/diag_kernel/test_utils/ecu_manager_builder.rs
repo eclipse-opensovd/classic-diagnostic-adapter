@@ -182,8 +182,10 @@ pub(crate) fn create_ecu_manager_with_mixed_functional_group()
 ///   that repeats a structure based on `num_items`
 ///   - Each repeated structure contains `item_param` (u16)
 /// - **DOPs**: `NormalDOP` for `num_items`, `DynamicLengthField` DOP for response
-// allowed because creation of test data should keep together
-#[allow(clippy::too_many_lines)]
+#[allow(
+    clippy::too_many_lines,
+    reason = "Test data creation should be kept together for readability"
+)]
 pub(crate) fn create_ecu_manager_with_dynamic_length_field_service() -> (
     crate::diag_kernel::ecumanager::EcuManager<DefaultSecurityPluginData>,
     cda_interfaces::DiagComm,
@@ -1115,7 +1117,10 @@ pub(crate) fn create_ecu_manager_dlf_sibling_no_byte_pos() -> (
 ///     - Contains variant detection service
 ///     - State charts: Session (`DefaultSession`), Security (Locked)
 /// - **ECU name**: "`VariantDetectionEcu`"
-#[allow(clippy::too_many_lines)] // must be kept together
+#[allow(
+    clippy::too_many_lines,
+    reason = "Test data creation must be kept together for readability"
+)] // must be kept together
 pub(crate) fn create_ecu_manager_variant_detection(
     fallback_to_base: bool,
 ) -> crate::diag_kernel::ecumanager::EcuManager<DefaultSecurityPluginData> {
@@ -1280,7 +1285,10 @@ pub(crate) fn create_ecu_manager_variant_detection(
 ///   byte 0: SID (CODED-CONST)
 ///   byte 1-2: DID (PHYS-CONST, Normal DOP, u16)
 ///   byte 3: `data_param` (VALUE, u8)
-#[allow(clippy::too_many_lines)]
+#[allow(
+    clippy::too_many_lines,
+    reason = "Test data creation should be kept together for readability"
+)]
 pub(crate) fn create_ecu_manager_with_phys_const_normal_dop_service() -> (
     crate::diag_kernel::ecumanager::EcuManager<DefaultSecurityPluginData>,
     cda_interfaces::DiagComm,
@@ -1385,7 +1393,10 @@ pub(crate) fn create_ecu_manager_with_phys_const_normal_dop_service() -> (
 ///   byte 3+: DREC (PHYS-CONST, Structure DOP with sub-params)
 ///     sub-param1: u16 at byte 0
 ///     sub-param2: u8 at byte 2
-#[allow(clippy::too_many_lines)]
+#[allow(
+    clippy::too_many_lines,
+    reason = "Test data creation should be kept together for readability"
+)]
 pub(crate) fn create_ecu_manager_with_phys_const_structure_dop_service() -> (
     crate::diag_kernel::ecumanager::EcuManager<DefaultSecurityPluginData>,
     cda_interfaces::DiagComm,
@@ -2032,7 +2043,10 @@ pub(crate) fn create_ecu_manager_with_routine_control_service()
 /// - `SendKey_level_01`: sub-function 0x02, 3 params, carries LockedSecurity->ExtendedSecurity ref
 ///
 /// Returns `(ecu_manager, request_seed_name_01, request_seed_name_12, send_key_name)`.
-#[allow(clippy::too_many_lines)] // Splitting the 'create' function up, makes it worse to read.
+#[allow(
+    clippy::too_many_lines,
+    reason = "Splitting the create function would make it harder to read"
+)] // Splitting the 'create' function up, makes it worse to read.
 pub(crate) fn create_ecu_manager_with_security_access_services() -> (
     crate::diag_kernel::ecumanager::EcuManager<DefaultSecurityPluginData>,
     String,

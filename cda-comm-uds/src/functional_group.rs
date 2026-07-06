@@ -31,9 +31,11 @@ use crate::{
 
 impl<S: EcuGateway, T: EcuManager> UdsManager<S, T> {
     /// Send a functional request to a single gateway and collect responses from all expected ECUs
-    #[allow(clippy::too_many_arguments)] // allowing this for now. while combining some arguments
-    // based on semantics here would be possible, its preferred to have to call semantics similar
-    // in all send functions, as this makes it easier to glance the parameters of the function.
+    #[allow(
+        clippy::too_many_arguments,
+        reason = "Combining parameters into a struct is not preferred here, to keep call \
+                  semantics consistent across all send functions"
+    )]
     async fn send_functional_to_gateway(
         &self,
         transmission_params: TransmissionParameters,

@@ -66,7 +66,10 @@ pub(crate) fn sanitize_path_segment(segment: &str) -> Result<(), StorageError> {
 
 /// No-op path validation when the `sanitize-paths` feature is disabled.
 #[cfg(not(feature = "sanitize-paths"))]
-#[allow(clippy::unnecessary_wraps)] // Signature must match the feature-enabled variant.
+#[allow(
+    clippy::unnecessary_wraps,
+    reason = "Signature must match the feature-enabled variant"
+)]
 pub(crate) fn sanitize_path_segment(_segment: &str) -> Result<(), StorageError> {
     Ok(())
 }

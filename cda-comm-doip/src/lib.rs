@@ -482,12 +482,13 @@ impl<T: EcuAddresses + DoipComParams> EcuGateway for DoipDiagGateway<T> {
             .map(|conn| conn.ip.clone())
     }
 
-    // most of this function is handling different error cases and timeouts.
-    // it is easier to comprehend when kept together.
     #[tracing::instrument(skip_all,
         fields(dlt_context = dlt_ctx!("DOIP"))
     )]
-    #[allow(clippy::too_many_lines)]
+    #[allow(
+        clippy::too_many_lines,
+        reason = "Splitting would reduce readability and make following the flow harder"
+    )]
     async fn send(
         &self,
         transmission_params: TransmissionParameters,
@@ -542,9 +543,7 @@ impl<T: EcuAddresses + DoipComParams> EcuGateway for DoipDiagGateway<T> {
                         return;
                     }
 
-                    // allow continue expression here
-                    // as it makes it more clear on what exactly is happening.
-                    #[allow(clippy::needless_continue)]
+                    #[allow(clippy::needless_continue, reason = "Explicit continue improves readability of the ACK-waiting loop")]
                     if let Ok(ack_received) =
                         tokio::time::timeout(transmission_params.timeout_ack, async {
                             'ack_waiting: loop {
@@ -913,7 +912,10 @@ impl<T: EcuAddresses + DoipComParams> EcuGateway for DoipDiagGateway<T> {
     }
 }
 
-#[allow(clippy::needless_continue)] // allow continue as it improves readability
+#[allow(
+    clippy::needless_continue,
+    reason = "Explicit continue improves readability of complex loop logic"
+)]
 async fn wait_for_ecu_response(
     ecu: &mut DoipEcu,
     timeout: Duration,

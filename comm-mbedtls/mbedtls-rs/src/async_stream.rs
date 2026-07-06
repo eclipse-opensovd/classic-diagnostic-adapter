@@ -99,9 +99,10 @@ impl MemBio {
         }
         let n = avail.min(buf.len());
         let new_cursor = self.incoming_cursor.saturating_add(n);
-        // fine as `incoming_available` ensures avail is always < incoming.len - cursor
-        // and n is always the lesser of buf.len and avail
-        #[allow(clippy::indexing_slicing)]
+        #[allow(
+            clippy::indexing_slicing,
+            reason = "Bounds guaranteed by incoming_available check above"
+        )]
         buf[..n].copy_from_slice(&self.incoming[self.incoming_cursor..new_cursor]);
         self.incoming_cursor = self.incoming_cursor.saturating_add(n);
         n
@@ -265,8 +266,10 @@ where
                             "connection closed during TLS handshake",
                         ));
                     }
-                    // the n returned from `AsyncReadExt::read` is at most the buffer length
-                    #[allow(clippy::indexing_slicing)]
+                    #[allow(
+                        clippy::indexing_slicing,
+                        reason = "n is bounded by buf.len() from AsyncReadExt::read"
+                    )]
                     self.bio_mut().feed_incoming(&buf[..n]);
                 } else if err.is_want_write() {
                     // mbedtls wants us to flush - already done above.
@@ -348,14 +351,20 @@ where
         let mut offset = 0;
         while offset < data.len() {
             let inner = Pin::new(&mut self.inner);
-            #[allow(clippy::indexing_slicing)] // checked by loop condition
+            #[allow(
+                clippy::indexing_slicing,
+                reason = "Checked by loop condition: offset < data.len()"
+            )] // checked by loop condition
             match inner.poll_write(cx, &data[offset..]) {
                 Poll::Ready(Ok(n)) => offset = offset.saturating_add(n),
                 Poll::Ready(Err(e)) => return Some(Poll::Ready(Err(e))),
                 Poll::Pending => {
                     // in case of pending store the remainder back in the outgoing buffer for
                     // the next flush attempt.
-                    #[allow(clippy::indexing_slicing)] // checked by loop condition
+                    #[allow(
+                        clippy::indexing_slicing,
+                        reason = "Checked by loop condition: offset < data.len()"
+                    )]
                     self.bio_mut().outgoing.extend_from_slice(&data[offset..]);
                     return Some(Poll::Pending);
                 }
@@ -387,8 +396,10 @@ where
                         // EOF on transport.
                         break;
                     }
-                    // fine as n is the length of the filled buffer part
-                    #[allow(clippy::indexing_slicing)]
+                    #[allow(
+                        clippy::indexing_slicing,
+                        reason = "n is the filled portion of network_buf; slice is within bounds"
+                    )]
                     self.bio_mut().feed_incoming(&network_buf[..n]);
                 }
                 Poll::Ready(Err(e)) => return Poll::Ready(Err(e)),
@@ -414,7 +425,7 @@ where
 
         match ret {
             n if n > 0 => {
-                #[allow(clippy::cast_sign_loss)] // fine, as we check if n > 0
+                #[allow(clippy::cast_sign_loss, reason = "n is checked to be positive above")]
                 buf.advance(n as usize);
                 Poll::Ready(Ok(()))
             }
@@ -449,7 +460,7 @@ where
         }
 
         match ret {
-            #[allow(clippy::cast_sign_loss)] // this is fine, as we check if n > 0
+            #[allow(clippy::cast_sign_loss, reason = "n is checked to be positive above")]
             n if n > 0 => Poll::Ready(Ok(n as usize)),
             0 => Poll::Ready(Ok(0)),
             n => {

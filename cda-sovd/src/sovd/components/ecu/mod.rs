@@ -219,7 +219,10 @@ impl IntoSovd for cda_interfaces::datatypes::ComParamSimpleValue {
 }
 
 openapi::aide_helper::gen_path_param!(DiagServicePathParam service String);
-#[allow(clippy::too_many_lines)] // splitting is not worth it here
+#[allow(
+    clippy::too_many_lines,
+    reason = "Splitting this function is not worth it here"
+)]
 async fn data_request<T: UdsEcu + SchemaProvider + Clone>(
     service: DiagComm,
     ecu_name: &str,

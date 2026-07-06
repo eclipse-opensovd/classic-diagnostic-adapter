@@ -75,8 +75,10 @@ pub struct EcuManagerConfig {
     pub strict_parameter_validation: bool,
 }
 
-// Allowed because this holds a bunch of config values.
-#[allow(clippy::struct_excessive_bools)]
+#[allow(
+    clippy::struct_excessive_bools,
+    reason = "Struct holds multiple independent boolean config flags"
+)]
 pub struct EcuManager<S: SecurityPlugin> {
     pub(in crate::diag_kernel) diag_database: datatypes::DiagnosticDatabase,
     pub(in crate::diag_kernel) db_cache: DbCache,
@@ -301,9 +303,11 @@ impl<S: SecurityPlugin> cda_interfaces::EcuManager for EcuManager<S> {
     }
 
     fn revision(&self) -> String {
-        // We cannot remove the closure because there is no direct
-        // access to the underlying flatbuf type, as it's not exported from the database crate.
-        #[allow(clippy::redundant_closure_for_method_calls)]
+        #[allow(
+            clippy::redundant_closure_for_method_calls,
+            reason = "Cannot remove closure: underlying flatbuf type is not exported from the \
+                      database crate"
+        )]
         self.diag_database
             .ecu_data()
             .ok()
@@ -386,8 +390,10 @@ impl<S: SecurityPlugin> EcuManager<S> {
         }
     }
 
-    // allow keeping the function together as it makes sense structurally
-    #[allow(clippy::too_many_lines)]
+    #[allow(
+        clippy::too_many_lines,
+        reason = "Keeping the function together makes structural sense"
+    )]
     fn new_ecu_description(
         database: datatypes::DiagnosticDatabase,
         protocol: Protocol,
