@@ -45,6 +45,7 @@ services:
       - ./odx:/app/odx:ro
       - ./cda-test-config.toml:/app/cda-test-config.toml:ro
       - ./flash_files:/app/flash:ro
+      - /tmp/host:/tmp/trace
     hostname: cda
     networks:
       - testcontainer-net
@@ -54,6 +55,7 @@ services:
     environment:
       - RUST_LOG=debug
       - CDA_CONFIG_FILE=/app/cda-test-config.toml
+      - FB_TRACE_PATH=/tmp/trace/flatbuffers-values.jsonl
     command: ["-d", "/app/odx"]
     restart: unless-stopped
 

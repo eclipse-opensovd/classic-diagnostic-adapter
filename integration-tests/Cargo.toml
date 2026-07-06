@@ -25,7 +25,7 @@ workspace = true
 # internal dependencies
 cda-interfaces = { workspace = true }
 cda-core = { workspace = true }
-cda-database = { workspace = true }
+cda-database = { workspace = true, features = ["gen-flatbuffers","trace-flatbuffers"] }
 cda-sovd = { workspace = true }
 sovd-interfaces = { workspace = true }
 cda-tracing = { workspace = true }

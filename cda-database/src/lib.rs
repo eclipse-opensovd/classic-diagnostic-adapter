@@ -65,3 +65,93 @@ impl Default for DatabaseConfig {
         }
     }
 }
+#[cfg(feature = "trace-flatbuffers")]
+pub mod __fb_trace {
+    use serde::Serialize;
+    use std::{
+        fs::{File, OpenOptions},
+        io::{BufWriter, Write},
+        path::Path,
+        sync::{
+            atomic::{AtomicU64, Ordering},
+            Mutex, OnceLock,
+        },
+    };
+
+    static SEQ: AtomicU64 = AtomicU64::new(0);
+    static WRITER: OnceLock<Mutex<BufWriter<File>>> = OnceLock::new();
+
+    #[derive(Serialize)]
+    struct Event {
+        seq: u64,
+        function: &'static str,
+        thread: String,
+        value: String,
+        value_type: String,
+    }
+
+    fn writer() -> &'static Mutex<BufWriter<File>> {
+        WRITER.get_or_init(|| {
+            let path = std::env::var("FB_TRACE_PATH")
+                .unwrap_or_else(|_| "flatbuffers-values.jsonl".to_string());
+
+            if let Some(parent) = Path::new(&path).parent()
+                && !parent.as_os_str().is_empty()
+            {
+                std::fs::create_dir_all(parent)
+                    .expect("failed to create parent directory for flatbuffers trace file");
+            }
+
+            Mutex::new(BufWriter::new(
+                OpenOptions::new()
+                    .create(true)
+                    .append(true)
+                    .open(path)
+                    .expect("failed to open flatbuffers trace file"),
+            ))
+        })
+    }
+
+    fn write_event(event: Event) {
+        let mut writer = writer().lock().unwrap();
+        serde_json::to_writer(&mut *writer, &event).unwrap();
+        writer.write_all(b"\n").unwrap();
+        writer.flush().unwrap();
+    }
+
+    pub fn value_debug<T: std::fmt::Debug>(function: &'static str, value: &T) {
+        write_event(Event {
+            seq: SEQ.fetch_add(1, Ordering::Relaxed),
+            function,
+            thread: format!("{:?}", std::thread::current().id()),
+            value: format!("{value:?}"),
+            value_type: std::any::type_name::<T>().to_string(),
+        });
+    }
+
+    pub fn wip_offset<T>(function: &'static str, value: &flatbuffers::WIPOffset<T>) {
+        write_event(Event {
+            seq: SEQ.fetch_add(1, Ordering::Relaxed),
+            function,
+            thread: format!("{:?}", std::thread::current().id()),
+            value: value.value().to_string(),
+            value_type: std::any::type_name::<flatbuffers::WIPOffset<T>>().to_string(),
+        });
+    }
+
+    pub fn flush() {
+        writer().lock().unwrap().flush().unwrap();
+    }
+}
+
+#[cfg(not(feature = "trace-flatbuffers"))]
+pub mod __fb_trace {
+    #[inline(always)]
+    pub fn value_debug<T>(_: &'static str, _: &T) {}
+
+    #[inline(always)]
+    pub fn wip_offset<T>(_: &'static str, _: &flatbuffers::WIPOffset<T>) {}
+
+    #[inline(always)]
+    pub fn flush() {}
+}

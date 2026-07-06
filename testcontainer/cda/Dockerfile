@@ -17,6 +17,8 @@ ARG SOURCE_GIT_SHA
 FROM rust:${RUST_VERSION}-slim-trixie AS chef
 RUN apt-get update && apt-get install -y --no-install-recommends \
     build-essential \
+    cmake \
+    git \
     pkg-config \
     libssl-dev \
     perl \
@@ -107,10 +109,29 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry,sharing=locked \
     --mount=type=cache,target=$SCCACHE_DIR,sharing=locked \
     export SOURCE_DATE_EPOCH=${SOURCE_DATE_EPOCH} && \
     export SOURCE_GIT_SHA=${SOURCE_GIT_SHA} && \
-    cargo build --release --bin opensovd-cda && \
+        cargo build --release --bin opensovd-cda \
+            --features cda-database/gen-flatbuffers,cda-database/trace-flatbuffers && \
     cp target/release/opensovd-cda /tmp/opensovd-cda
 
-# --- Stage 5: Runtime base with dependencies ---
+# --- Stage 5: Build patched flatc ---
+FROM chef AS flatc-builder
+ARG FLATBUFFERS_GIT_REV=0ba3307d110a6def7419ad1158245cdf47c6d0c5
+WORKDIR /tmp
+
+RUN git clone https://github.com/alexmohr/flatbuffers.git flatbuffers && \
+    cd flatbuffers && \
+    git checkout ${FLATBUFFERS_GIT_REV} && \
+    cmake -S . -B build \
+      -DCMAKE_BUILD_TYPE=Release \
+      -DFLATBUFFERS_BUILD_TESTS=OFF \
+      -DFLATBUFFERS_BUILD_FLATLIB=OFF \
+      -DFLATBUFFERS_BUILD_GRPCTEST=OFF \
+      -DFLATBUFFERS_BUILD_SHAREDLIB=OFF \
+      -DFLATBUFFERS_LIBCXX_WITH_CLANG=OFF && \
+    cmake --build build --target flatc -- -j"$(nproc)" && \
+    cp build/flatc /tmp/flatc
+
+# --- Stage 6: Runtime base with dependencies ---
 FROM debian:trixie-slim AS runtime-base
 RUN apt-get update && apt-get install -y --no-install-recommends \
     iproute2 \
@@ -119,12 +140,14 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     libssl-dev \
     && rm -rf /var/lib/apt/lists/*
 
-# --- Stage 6: Runtime stage ---
+# --- Stage 7: Runtime stage ---
 FROM runtime-base
 WORKDIR /app
+ENV FB_TRACE_PATH=/tmp/trace/flatbuffers-values.jsonl
 
 # Copy the binary from /tmp
 COPY --from=builder /tmp/opensovd-cda /app/opensovd-cda
+COPY --from=flatc-builder /tmp/flatc /usr/local/bin/flatc
 RUN mkdir -p /app/odx
 
 COPY --chmod=755 testcontainer/cda/entrypoint.sh /app/entrypoint.sh
