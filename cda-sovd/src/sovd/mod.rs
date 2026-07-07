@@ -114,6 +114,7 @@ pub(crate) enum SovdError {
     RouteError(String),
 }
 
+#[derive(Clone)]
 pub(crate) struct WebserverEcuState<T: UdsEcu + Clone, U: FileManager> {
     ecu_name: String,
     uds: T,
@@ -377,21 +378,6 @@ pub(crate) async fn remove_reserved_execution<E: ExecutionStatus>(
         map.shift_remove(exec_id);
         if map.is_empty() {
             guard.remove(service);
-        }
-    }
-}
-
-impl<T: UdsEcu + Clone, U: FileManager> Clone for WebserverEcuState<T, U> {
-    fn clone(&self) -> Self {
-        Self {
-            ecu_name: self.ecu_name.clone(),
-            uds: self.uds.clone(),
-            locks: Arc::clone(&self.locks),
-            comparam_executions: Arc::clone(&self.comparam_executions),
-            service_executions: Arc::clone(&self.service_executions),
-            flash_data: Arc::clone(&self.flash_data),
-            mdd_embedded_files: Arc::clone(&self.mdd_embedded_files),
-            update_in_progress: Arc::clone(&self.update_in_progress),
         }
     }
 }
