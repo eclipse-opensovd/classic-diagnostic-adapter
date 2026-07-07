@@ -45,6 +45,8 @@ use crate::{
 };
 
 pub mod config;
+mod connection_receiver;
+mod connection_sender;
 mod connections;
 mod ecu_connection;
 pub mod socket;
