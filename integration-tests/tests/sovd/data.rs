@@ -82,10 +82,78 @@ async fn test_wrong_did_in_response_returns_504() {
     cleanup(&runtime.ecu_sim).await;
 }
 
+/// Tests that CDA returns an error response when an ECU replies with a positive
+/// `ReadDataByIdentifier` response that is too short to contain the expected data.
+///
+/// According to ISO 14229-1, a `ReadDataByIdentifier` positive response (`0x62`) must
+/// include the DID echo bytes followed by the actual data record. If the ECU sends only
+/// the SID and DID bytes (3 bytes total) without any data payload, CDA must return an
+/// error indicating the payload was too short.
+///
+/// This test verifies that CDA correctly detects the truncated response and returns
+/// HTTP 400 Bad Request.
+#[tokio::test]
+async fn test_short_ecu_response_returns_error() {
+    let (runtime, _lock) = setup_integration_test(true).await.unwrap();
+
+    let cleanup_sim = runtime.ecu_sim.clone();
+    hook_cleanup(move || {
+        let sim = cleanup_sim.clone();
+        async move { cleanup_truncated(&sim).await }
+    });
+
+    let auth = auth_header(&runtime.config, None).await.unwrap();
+
+    // Install a raw response override on FLXC1000:
+    // When the ECU receives ReadDataByIdentifier for DID 0xF200 (FluxCapacitorPowerConsumption),
+    // respond with correct SID+DID bytes only, no data payload.
+    //
+    // Normal request:  22 F2 00  (ReadDataByIdentifier, DID=0xF200)
+    // Normal response: 62 F2 00 <4 data bytes>  (INT32 power consumption value)
+    // Override response: 62 F2 00  (correct SID+DID, but missing the 4 data bytes)
+    ecusim::set_interceptor(
+        &runtime.ecu_sim,
+        "FLXC1000",
+        "truncated_response",
+        "22f200",
+        "62f200",
+    )
+    .await
+    .expect("Failed to install interceptor");
+
+    // Attempt to read the FluxCapacitorPowerConsumption data from FLXC1000.
+    // CDA should detect the truncated payload and return an error, not 204 No Content.
+    let result = send_cda_request(
+        &runtime.config,
+        "components/flxc1000/data/fluxcapacitorpowerconsumption",
+        StatusCode::BAD_REQUEST,
+        Method::GET,
+        None,
+        Some(&auth),
+        None,
+    )
+    .await;
+
+    assert!(
+        result.is_ok(),
+        "Expected 400 Bad Request when ECU responds with truncated payload, got: {result:?}"
+    );
+
+    cleanup_truncated(&runtime.ecu_sim).await;
+}
+
 async fn cleanup(ecu_sim: &EcuSim) {
     // Clean up: remove the interceptor so other tests are not affected.
     // Cannot use panic, in a panic handler, hence have to resort to eprintln
     if let Err(e) = ecusim::clear_interceptor(ecu_sim, "FLXC1000", "did_mismatch").await {
         eprintln!("Failed to clear raw response override: {e}");
+    }
+}
+
+async fn cleanup_truncated(ecu_sim: &EcuSim) {
+    // Clean up: remove the interceptor so other tests are not affected.
+    // Cannot use panic, in a panic handler, hence have to resort to eprintln
+    if let Err(e) = ecusim::clear_interceptor(ecu_sim, "FLXC1000", "truncated_response").await {
+        eprintln!("Failed to clear truncated response interceptor: {e}");
     }
 }
