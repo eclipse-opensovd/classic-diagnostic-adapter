@@ -19,8 +19,8 @@ use std::{
 
 use cda_interfaces::{
     DiagServiceError, DoipComParams, DoipGatewaySetupError, EcuAddresses, EcuConnectivityHandler,
-    EcuGateway, HashMap, HashMapExtensions, ServicePayload, TransmissionParameters, UdsResponse,
-    dlt_ctx,
+    EcuGateway, HashMap, HashMapExtensions, ServicePayload, TransmissionParameters,
+    UDS_ID_RESPONSE_BITMASK, UdsResponse, dlt_ctx,
     util::{self, tokio_ext},
 };
 use doip_definitions::{
@@ -69,14 +69,43 @@ const NRC_TEMPORARILY_NOT_AVAILABLE: u8 = 0x94;
 #[derive(Debug, Clone)]
 enum DiagnosticResponse {
     Msg(DiagnosticMessage),
-    Pending(u16),
+    Pending {
+        source_address: u16,
+        request_sid: u8,
+    },
     Ack((u16, Vec<u8>)),
     Nack(DiagnosticMessageNack),
     AliveCheckResponse,
     TesterPresentNRC(u8),
     GenericNack(GenericNack), // todo #22 -> we need the address of the ECU that sent the nack
-    BusyRepeatRequest(u16),
-    TemporarilyNotAvailable(u16),
+    BusyRepeatRequest {
+        source_address: u16,
+        request_sid: u8,
+    },
+    TemporarilyNotAvailable {
+        source_address: u16,
+        request_sid: u8,
+    },
+}
+
+impl DiagnosticResponse {
+    fn matches_request(&self, request: &[u8]) -> bool {
+        let Some(sid) = request.first() else {
+            return false;
+        };
+
+        match self {
+            Self::Ack((_, previous)) => request.starts_with(previous),
+            Self::Msg(msg) => msg
+                .message
+                .first()
+                .is_some_and(|response_sid| *response_sid == (*sid | UDS_ID_RESPONSE_BITMASK)),
+            Self::Pending { request_sid, .. }
+            | Self::BusyRepeatRequest { request_sid, .. }
+            | Self::TemporarilyNotAvailable { request_sid, .. } => *request_sid == *sid,
+            _ => false,
+        }
+    }
 }
 
 pub(crate) struct DoipGatewayState<T: EcuAddresses + DoipComParams> {
@@ -224,13 +253,18 @@ impl TryFrom<DiagnosticResponse> for Option<UdsResponse> {
                 new_session: None,
                 new_security: None,
             }))),
-            DiagnosticResponse::Pending(addr) => Ok(Some(UdsResponse::ResponsePending(addr))),
-            DiagnosticResponse::BusyRepeatRequest(addr) => {
-                Ok(Some(UdsResponse::BusyRepeatRequest(addr)))
-            }
-            DiagnosticResponse::TemporarilyNotAvailable(addr) => {
-                Ok(Some(UdsResponse::TemporarilyNotAvailable(addr)))
-            }
+            DiagnosticResponse::Pending {
+                source_address: addr,
+                request_sid: _,
+            } => Ok(Some(UdsResponse::ResponsePending(addr))),
+            DiagnosticResponse::BusyRepeatRequest {
+                source_address: addr,
+                request_sid: _,
+            } => Ok(Some(UdsResponse::BusyRepeatRequest(addr))),
+            DiagnosticResponse::TemporarilyNotAvailable {
+                source_address: addr,
+                request_sid: _,
+            } => Ok(Some(UdsResponse::TemporarilyNotAvailable(addr))),
             DiagnosticResponse::TesterPresentNRC(code) => {
                 Ok(Some(UdsResponse::TesterPresentNRC(code)))
             }
@@ -537,7 +571,7 @@ impl<T: EcuAddresses + DoipComParams> EcuGateway for DoipDiagGateway<T> {
                         return;
                     }
 
-                    let first_response = match wait_for_ack_or_response(
+                    let received_message = match wait_for_ack_or_response_until_timeout(
                         &mut ecu.receiver,
                         &transmission_params.ecu_name,
                         &doip_message,
@@ -568,7 +602,7 @@ impl<T: EcuAddresses + DoipComParams> EcuGateway for DoipDiagGateway<T> {
                         &mut ecu.receiver,
                         &transmission_params.ecu_name,
                         &response_sender,
-                        first_response,
+                        received_message,
                     )
                     .await;
 
@@ -756,83 +790,31 @@ impl<T: EcuAddresses + DoipComParams> EcuGateway for DoipDiagGateway<T> {
 
 /// Waits for the `DoIP` diagnostic-message acknowledgement from the gateway,
 /// with a deadline of `timeout`.
-///
-/// Returns:
-/// - `Ok(None)`            - explicit ACK received; proceed to reading responses.
-/// - `Ok(Some(response))`  - a diagnostic response arrived before the ACK (ISO
-///   13400 permits this); treat as implicit ACK and pass the response as the
-///   first item into [`read_ecu_responses`].
-/// - `Err(e)`              - NACK, connection error, or timeout; the caller
-///   should forward `e` and return.
 #[allow(
     clippy::needless_continue,
     reason = "Explicit continue improves readability of wait logic"
 )]
-async fn wait_for_ack_or_response(
+async fn wait_for_ack_or_response_until_timeout(
     receiver: &mut broadcast::Receiver<Result<DiagnosticResponse, EcuError>>,
     ecu_name: &str,
     sent_message: &DiagnosticMessage,
     timeout: Duration,
 ) -> Result<Option<DiagnosticResponse>, DiagServiceError> {
-    tokio::time::timeout(timeout, async {
-        'ack_waiting: loop {
-            match receiver.recv().await {
-                Ok(Ok(DiagnosticResponse::Ack((_, prev)))) => {
-                    tracing::debug!(ecu_name = %ecu_name, "Received ACK");
-                    if !prev.is_empty() && !sent_message.message.starts_with(&prev) {
-                        tracing::warn!(
-                            previous = %util::tracing::print_hex(&prev, 8),
-                            sent = %util::tracing::print_hex(&sent_message.message, 8),
-                            "ACK previous message does not match sent message"
-                        );
-                        continue 'ack_waiting;
-                    }
-                    return Ok(None);
-                }
-                Ok(Ok(DiagnosticResponse::GenericNack(nack))) => {
-                    // todo #22: handle generic NACK
-                    tracing::warn!(
-                        ecu_name = %ecu_name,
-                        nack_code = ?nack.nack_code,
-                        "Received generic NACK"
-                    );
-                    return Err(DiagServiceError::Nack(u8::from(nack.nack_code)));
-                }
-                Ok(Ok(DiagnosticResponse::Nack(nack))) => {
-                    tracing::warn!(
-                        ecu_name = %ecu_name,
-                        nack_code = ?nack.nack_code,
-                        "Received NACK"
-                    );
-                    return Err(DiagServiceError::Nack(u8::from(nack.nack_code)));
-                }
-                Ok(Ok(
-                    response @ (DiagnosticResponse::Msg(_)
-                    | DiagnosticResponse::Pending(_)
-                    | DiagnosticResponse::BusyRepeatRequest(_)
-                    | DiagnosticResponse::TemporarilyNotAvailable(_)),
-                )) => {
-                    // Some ECUs skip the ACK and send the diagnostic response
-                    // directly. Return it so the caller can seed read_ecu_responses.
-                    tracing::debug!(
-                        "Received diagnostic response before ACK, treating as implicit ACK"
-                    );
-                    return Ok(Some(response));
-                }
-                Ok(Ok(msg)) => {
-                    tracing::warn!(
-                        ecu_name = %ecu_name,
-                        "Expected ACK/NACK but received unexpected message: {:?}",
-                        msg
-                    );
-                    continue 'ack_waiting;
-                }
+    async fn wait_for_ack_or_response(
+        receiver: &mut broadcast::Receiver<Result<DiagnosticResponse, EcuError>>,
+        ecu_name: &str,
+        sent_message: &DiagnosticMessage,
+    ) -> Result<Option<DiagnosticResponse>, DiagServiceError> {
+        loop {
+            let response = match receiver.recv().await {
+                Ok(Ok(response)) => response,
                 Ok(Err(e)) => {
                     tracing::error!(
                         ecu_name = %ecu_name,
                         error = %e,
                         "Error while waiting for ACK/NACK"
                     );
+
                     return Err(DiagServiceError::NoResponse(format!(
                         "Error while waiting for ACK/NACK, {e}"
                     )));
@@ -842,38 +824,106 @@ async fn wait_for_ack_or_response(
                         ecu_name = %ecu_name,
                         "ECU receiver unexpectedly closed while waiting for ACK/NACK"
                     );
+
                     return Err(DiagServiceError::NoResponse(
                         "ECU receiver unexpectedly closed".to_owned(),
                     ));
                 }
+            };
+
+            match &response {
+                DiagnosticResponse::Nack(nack) => {
+                    tracing::warn!(
+                        ecu_name = %ecu_name,
+                        nack_code = ?nack.nack_code,
+                        "Received NACK"
+                    );
+                    return Err(DiagServiceError::Nack(u8::from(nack.nack_code)));
+                }
+                DiagnosticResponse::GenericNack(nack) => {
+                    tracing::warn!(
+                        ecu_name = %ecu_name,
+                        nack_code = ?nack.nack_code,
+                        "Received generic NACK"
+                    );
+                    return Err(DiagServiceError::Nack(u8::from(nack.nack_code)));
+                }
+                _ => {}
             }
+
+            if !response.matches_request(&sent_message.message) {
+                if let DiagnosticResponse::Ack((_, previous)) = &response {
+                    tracing::warn!(
+                        ecu_name = %ecu_name,
+                        previous = %util::tracing::print_hex(previous, 8),
+                        sent = %util::tracing::print_hex(&sent_message.message, 8),
+                        "ACK previous message does not match sent message"
+                    );
+                } else {
+                    tracing::debug!(
+                        ecu_name = %ecu_name,
+                        ?response,
+                        "Received response does not match sent message. Ignoring."
+                    );
+                }
+
+                continue;
+            }
+
+            return match response {
+                DiagnosticResponse::Ack((_, _)) => {
+                    tracing::debug!(
+                        ecu_name = %ecu_name,
+                        "Received ACK"
+                    );
+
+                    Ok(None)
+                }
+
+                response => {
+                    tracing::debug!(
+                        ecu_name = %ecu_name,
+                        "Received diagnostic response before ACK, treating as implicit ACK"
+                    );
+
+                    Ok(Some(response))
+                }
+            };
         }
-    })
+    }
+
+    if let Ok(result) = tokio::time::timeout(
+        timeout,
+        wait_for_ack_or_response(receiver, ecu_name, sent_message),
+    )
     .await
-    .unwrap_or_else(|_elapsed| {
+    {
+        result
+    } else {
         tracing::warn!(
             ecu_name = %ecu_name,
             timeout = ?timeout,
             "Timeout waiting for ACK/NACK from ECU"
         );
+
         Err(DiagServiceError::Timeout)
-    })
+    }
 }
 
 /// Reads ECU responses from `receiver` and forwards them through
 /// `response_sender` until either the sender is closed (caller no longer
 /// interested) or the receiver is closed (connection dropped).
 ///
-/// `first` carries an already-received response from the implicit-ACK path
+/// `received_message` carries an already-received response from the implicit-ACK path
 /// (where the ECU skipped the ACK and sent the diagnostic reply directly).
 /// Pass `None` after a normal explicit ACK.
 async fn read_ecu_responses(
     receiver: &mut broadcast::Receiver<Result<DiagnosticResponse, EcuError>>,
     ecu_name: &str,
     response_sender: &mpsc::Sender<Result<Option<UdsResponse>, DiagServiceError>>,
-    first: Option<DiagnosticResponse>,
+    received_message: Option<DiagnosticResponse>,
 ) {
-    if let Some(response) = first
+    if let Some(response) = received_message
         && !try_send_uds_response(response_sender, response.try_into()).await
     {
         return;
@@ -1128,7 +1178,7 @@ mod tests {
 
     use crate::{
         DiagnosticResponse, DoIPUdpSocket, DoipConnection, DoipDiagGateway, DoipEcu,
-        DoipGatewayState, read_ecu_responses, wait_for_ack_or_response,
+        DoipGatewayState, read_ecu_responses, wait_for_ack_or_response_until_timeout,
     };
 
     const ECU_ADDR: u16 = 0x0E80;
@@ -1386,8 +1436,11 @@ mod tests {
         // ECU sends BusyRepeatRequest - no ACK (implicit ACK path).
         harness
             .broadcast_tx
-            .send(Ok(DiagnosticResponse::BusyRepeatRequest(ECU_ADDR)))
-            .unwrap();
+            .send(Ok(DiagnosticResponse::BusyRepeatRequest {
+                source_address: ECU_ADDR,
+                request_sid: REQUEST_DATA[0],
+            }))
+            .expect("Failed to sent busy repeat request");
         let first = harness.recv_response().await;
         assert!(
             matches!(first, Ok(Some(UdsResponse::BusyRepeatRequest(_)))),
@@ -1395,7 +1448,10 @@ mod tests {
         );
 
         // ECU sends the final Msg.
-        harness.broadcast_tx.send(Ok(ecu_msg_response())).unwrap();
+        harness
+            .broadcast_tx
+            .send(Ok(ecu_msg_response()))
+            .expect("Failed to sent final message");
         let second = harness.recv_response().await;
         assert!(
             matches!(second, Ok(Some(UdsResponse::Message(_)))),
@@ -1416,7 +1472,10 @@ mod tests {
         let mut harness = TestHarness::new().await;
 
         // ECU sends a single Msg - no ACK (implicit ACK path).
-        harness.broadcast_tx.send(Ok(ecu_msg_response())).unwrap();
+        harness
+            .broadcast_tx
+            .send(Ok(ecu_msg_response()))
+            .expect("Failed to sent message");
         let response = harness.recv_response().await;
         assert!(
             matches!(response, Ok(Some(UdsResponse::Message(_)))),
@@ -1438,8 +1497,13 @@ mod tests {
         tx.send(Ok(DiagnosticResponse::Ack((ECU_ADDR, vec![]))))
             .expect("Failed to send ack");
 
-        let result =
-            wait_for_ack_or_response(&mut rx, "test-ecu", &msg, Duration::from_secs(1)).await;
+        let result = wait_for_ack_or_response_until_timeout(
+            &mut rx,
+            "test-ecu",
+            &msg,
+            Duration::from_secs(1),
+        )
+        .await;
         assert!(
             matches!(result, Ok(None)),
             "expected Ok(None), got {result:?}"
@@ -1453,10 +1517,16 @@ mod tests {
     async fn wait_for_ack_or_response_ok_some_on_diagnostic_msg() {
         let (tx, mut rx) = make_broadcast_pair();
         let msg = diag_msg();
-        tx.send(Ok(ecu_msg_response())).unwrap();
+        tx.send(Ok(ecu_msg_response()))
+            .expect("Failed to send message");
 
-        let result =
-            wait_for_ack_or_response(&mut rx, "test-ecu", &msg, Duration::from_secs(1)).await;
+        let result = wait_for_ack_or_response_until_timeout(
+            &mut rx,
+            "test-ecu",
+            &msg,
+            Duration::from_secs(1),
+        )
+        .await;
 
         assert!(
             matches!(result, Ok(Some(DiagnosticResponse::Msg(_)))),
@@ -1470,14 +1540,28 @@ mod tests {
         let (tx, mut rx) = make_broadcast_pair();
         let msg = diag_msg();
 
-        tx.send(Ok(DiagnosticResponse::BusyRepeatRequest(ECU_ADDR)))
-            .unwrap();
+        tx.send(Ok(DiagnosticResponse::BusyRepeatRequest {
+            source_address: ECU_ADDR,
+            request_sid: REQUEST_DATA[0],
+        }))
+        .expect("Failed to busy repeat request");
 
-        let result =
-            wait_for_ack_or_response(&mut rx, "test-ecu", &msg, Duration::from_secs(1)).await;
+        let result = wait_for_ack_or_response_until_timeout(
+            &mut rx,
+            "test-ecu",
+            &msg,
+            Duration::from_secs(1),
+        )
+        .await;
 
         assert!(
-            matches!(result, Ok(Some(DiagnosticResponse::BusyRepeatRequest(_)))),
+            matches!(
+                result,
+                Ok(Some(DiagnosticResponse::BusyRepeatRequest {
+                    source_address: _,
+                    request_sid: _
+                }))
+            ),
             "expected Ok(Some(BusyRepeatRequest)), got {result:?}"
         );
     }
@@ -1495,10 +1579,15 @@ mod tests {
             target_address: TESTER_ADDR.to_be_bytes(),
             nack_code: DiagnosticNackCode::UnknownTargetAddress,
         })))
-        .unwrap();
+        .expect("Failed to send nack");
 
-        let result =
-            wait_for_ack_or_response(&mut rx, "test-ecu", &msg, Duration::from_secs(1)).await;
+        let result = wait_for_ack_or_response_until_timeout(
+            &mut rx,
+            "test-ecu",
+            &msg,
+            Duration::from_secs(1),
+        )
+        .await;
 
         assert!(
             matches!(result, Err(DiagServiceError::Nack(_))),
@@ -1517,10 +1606,15 @@ mod tests {
         tx.send(Ok(DiagnosticResponse::GenericNack(GenericNack {
             nack_code: NackCode::InvalidPayloadLength,
         })))
-        .unwrap();
+        .expect("Failed to send generic nack");
 
-        let result =
-            wait_for_ack_or_response(&mut rx, "test-ecu", &msg, Duration::from_secs(1)).await;
+        let result = wait_for_ack_or_response_until_timeout(
+            &mut rx,
+            "test-ecu",
+            &msg,
+            Duration::from_secs(1),
+        )
+        .await;
 
         assert!(
             matches!(result, Err(DiagServiceError::Nack(_))),
@@ -1534,8 +1628,13 @@ mod tests {
         let (_tx, mut rx) = make_broadcast_pair();
         let msg = diag_msg();
 
-        let result =
-            wait_for_ack_or_response(&mut rx, "test-ecu", &msg, Duration::from_millis(200)).await;
+        let result = wait_for_ack_or_response_until_timeout(
+            &mut rx,
+            "test-ecu",
+            &msg,
+            Duration::from_millis(200),
+        )
+        .await;
 
         assert!(
             matches!(result, Err(DiagServiceError::Timeout)),
@@ -1551,8 +1650,13 @@ mod tests {
 
         drop(tx);
 
-        let result =
-            wait_for_ack_or_response(&mut rx, "test-ecu", &msg, Duration::from_secs(1)).await;
+        let result = wait_for_ack_or_response_until_timeout(
+            &mut rx,
+            "test-ecu",
+            &msg,
+            Duration::from_secs(1),
+        )
+        .await;
 
         assert!(
             matches!(result, Err(DiagServiceError::NoResponse(_))),
@@ -1567,12 +1671,18 @@ mod tests {
         let (tx, mut rx) = make_broadcast_pair();
         let msg = diag_msg();
 
-        tx.send(Ok(DiagnosticResponse::AliveCheckResponse)).unwrap();
+        tx.send(Ok(DiagnosticResponse::AliveCheckResponse))
+            .expect("Failed to send alive check response");
         tx.send(Ok(DiagnosticResponse::Ack((ECU_ADDR, vec![]))))
-            .unwrap();
+            .expect("Failed to send ack");
 
-        let result =
-            wait_for_ack_or_response(&mut rx, "test-ecu", &msg, Duration::from_secs(1)).await;
+        let result = wait_for_ack_or_response_until_timeout(
+            &mut rx,
+            "test-ecu",
+            &msg,
+            Duration::from_secs(1),
+        )
+        .await;
 
         drop(tx);
         assert!(
@@ -1586,7 +1696,8 @@ mod tests {
         let (tx, mut rx) = make_broadcast_pair();
         let (resp_tx, mut resp_rx) = make_response_channel();
 
-        tx.send(Ok(ecu_msg_response())).unwrap();
+        tx.send(Ok(ecu_msg_response()))
+            .expect("Failed to send message");
 
         // Spawn the response reader in a separate task.
         let handle = tokio::spawn(async move {
@@ -1615,9 +1726,13 @@ mod tests {
     async fn read_ecu_responses_forwards_multiple_responses() {
         let (tx, mut rx) = make_broadcast_pair();
         let (resp_tx, mut resp_rx) = make_response_channel();
-
-        tx.send(Ok(DiagnosticResponse::Pending(ECU_ADDR))).unwrap();
-        tx.send(Ok(ecu_msg_response())).unwrap();
+        tx.send(Ok(DiagnosticResponse::Pending {
+            source_address: ECU_ADDR,
+            request_sid: REQUEST_DATA[0],
+        }))
+        .expect("Failed to send pending response");
+        tx.send(Ok(ecu_msg_response()))
+            .expect("Failed to send response");
         // Keep tx alive across awaits so the channel is not closed while the
         // spawned task is reading buffered messages.
         let _tx = tx;
@@ -1659,7 +1774,11 @@ mod tests {
         let (resp_tx, mut resp_rx) = make_response_channel();
 
         let first = ecu_msg_response();
-        tx.send(Ok(DiagnosticResponse::Pending(ECU_ADDR))).unwrap();
+        tx.send(Ok(DiagnosticResponse::Pending {
+            source_address: ECU_ADDR,
+            request_sid: REQUEST_DATA[0],
+        }))
+        .expect("Failed to send pending response");
         let _tx = tx;
 
         let handle = tokio::spawn(async move {

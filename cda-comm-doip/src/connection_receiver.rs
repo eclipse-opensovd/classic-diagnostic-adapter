@@ -192,9 +192,9 @@ async fn handle_ok_response(
                 response,
             );
         }
-        DiagnosticResponse::Pending(source_address)
-        | DiagnosticResponse::BusyRepeatRequest(source_address)
-        | DiagnosticResponse::TemporarilyNotAvailable(source_address) => {
+        DiagnosticResponse::Pending { source_address, .. }
+        | DiagnosticResponse::BusyRepeatRequest { source_address, .. }
+        | DiagnosticResponse::TemporarilyNotAvailable { source_address, .. } => {
             outtx
                 .get(&source_address)
                 .map(|router| router.send(Ok(response)));
@@ -293,7 +293,6 @@ where
     let ReceiverChannels {
         mut send_pending_rx,
         reset_tx,
-        send_tx: _send_tx,
     } = channels;
     let ecu_names = gateway.ecu_names;
     let connectivity_handler = gateway.connectivity_handler;
@@ -398,10 +397,19 @@ mod tests {
         let addr: u16 = 0x0030;
         let (outtx, mut rx) = make_outtx(addr);
 
-        handle_ok_response("gw", "1.2.3.4", &outtx, DiagnosticResponse::Pending(addr)).await;
+        handle_ok_response(
+            "gw",
+            "1.2.3.4",
+            &outtx,
+            DiagnosticResponse::Pending {
+                source_address: addr,
+                request_sid: 0x42,
+            },
+        )
+        .await;
 
         let msg = rx.try_recv().expect("expected Pending on channel");
-        assert!(matches!(msg, Ok(DiagnosticResponse::Pending(_))));
+        assert!(matches!(msg, Ok(DiagnosticResponse::Pending { .. })));
     }
 
     #[tokio::test]
