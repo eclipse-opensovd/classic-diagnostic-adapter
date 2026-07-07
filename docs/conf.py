@@ -10,6 +10,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import os
+import shutil
 
 extensions = [
     "sphinx_needs",
@@ -39,7 +40,11 @@ html_static_path = ["_static"]
 html_css_files = ["force_light_theme.css"]
 html_js_files = ["force_light_theme.js"]
 
-plantuml = os.environ.get("PLANTUML", "java -jar /usr/local/bin/plantuml.jar")
+plantuml = (
+    os.environ.get("PLANTUML")
+    or shutil.which("plantuml")
+    or "java -jar /usr/local/bin/plantuml.jar"
+)
 
 # a needs json should be generated
 needs_build_json = True
