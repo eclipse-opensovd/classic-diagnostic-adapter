@@ -224,9 +224,10 @@ impl From<DoipGatewaySetupError> for AppError {
             DoipGatewaySetupError::ServerError(_) => Self::ServerError(value.to_string()),
             DoipGatewaySetupError::UnknownECU {
                 logical_address,
-                protocol_version: u8,
+                protocol_version,
             } => Self::ConfigurationError(format!(
-                "Unknown ECU with logical address {logical_address} and protocol version {u8}"
+                "Unknown ECU with logical address {logical_address} and protocol version \
+                 {protocol_version}"
             )),
         }
     }

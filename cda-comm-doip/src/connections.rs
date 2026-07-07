@@ -957,7 +957,7 @@ mod tests {
     ) {
         let (client, server) = tokio::io::duplex(1024);
         let config = DoipSocketConfig {
-            protocol_version: ProtocolVersion::Iso13400_2010,
+            protocol_version: ProtocolVersion::Iso13400_2012,
             send_diagnostic_message_ack: false,
         };
         let server_conn = DoIPConnection::new(server, config);

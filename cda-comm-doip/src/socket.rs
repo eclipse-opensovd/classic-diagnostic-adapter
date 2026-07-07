@@ -87,19 +87,19 @@ pub(crate) struct DoIPConnectionReadHalf<T: AsyncRead + Unpin> {
 }
 pub(crate) struct DoIPConnectionWriteHalf<T: AsyncWrite + Unpin> {
     io: FramedWrite<WriteHalf<T>, DoipCodec>,
-    config: DoipSocketConfig,
+    protocol_version: ProtocolVersion,
 }
 
 impl<T: AsyncWrite + Unpin> DoIPConnectionWriteHalf<T> {
     pub fn new(io: WriteHalf<T>, config: DoipSocketConfig) -> Self {
         Self {
             io: FramedWrite::new(io, DoipCodec {}),
-            config,
+            protocol_version: config.protocol_version,
         }
     }
 
     pub async fn send(&mut self, msg: DoipPayload) -> Result<(), ConnectionError> {
-        send_doip(&mut self.io, self.config.protocol_version, msg).await
+        send_doip(&mut self.io, self.protocol_version, msg).await
     }
 }
 impl<T: AsyncRead + Unpin> DoIPConnectionReadHalf<T> {

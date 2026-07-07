@@ -145,7 +145,7 @@ pub(crate) struct GatewayDoipConfig {
     /// UDS address of the tester.
     pub(crate) tester_address: [u8; 2],
     /// The `DoIp` protocol version to use for this gateway connection.
-    /// Setup from the value in the VAM.
+    /// Set from the protocol version field in the VAM.
     pub(crate) protocol_version: ProtocolVersion,
     /// Shared transport-level settings (tester IP, ports, socket config, timeouts).
     pub(crate) transport: DoipTransportConfig,
@@ -967,8 +967,6 @@ fn create_netmask(tester_ip: &str, tester_subnet: &str) -> Result<u32, DoipGatew
 ///   resulting in a `DoipGatewaySetupError::PortBindFailed`.
 /// * Setting the `SO_BROADCAST` socket option fails,
 ///   resulting in a `DoipGatewaySetupError::SocketCreationFailed`.
-/// * Setting the socket to non-blocking mode fails,
-///   resulting in a `DoipGatewaySetupError::InvalidConfiguration`.
 /// * Binding the socket to the specified `tester_ip` and `gateway_port` fails,
 ///   resulting in a `DoipGatewaySetupError::SocketCreationFailed`.
 /// * The `DoIPUdpSocket` constructor fails to create the DoIP-specific socket from the standard UDP socket,
@@ -1031,7 +1029,7 @@ pub fn create_udp_vir_socket(
     DoIPUdpSocket::new(
         std_sock,
         DoipSocketConfig {
-            // Using ::DefaultValue here, because this socket is used to send the VIR, where
+            // Using ::DefaultValue (0xFF) here, because this socket is used to send the VIR, where
             // we do not know the protocol yet.
             // The correct protocol will be set per gateway once we receive its VAM.
             protocol_version: ProtocolVersion::DefaultValue,
