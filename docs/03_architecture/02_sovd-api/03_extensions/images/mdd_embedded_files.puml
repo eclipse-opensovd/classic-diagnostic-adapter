@@ -16,7 +16,7 @@ participant Client
 participant "HTTP Server\n(Axum)" as HTTP
 participant "Security\nMiddleware" as SEC
 participant "Embedded Files\nHandler" as HANDLER
-participant "Diagnostic\nKernel" as DIAG
+participant "File Manager" as FM
 
 == List embedded files ==
 
@@ -31,11 +31,10 @@ deactivate SEC
 HTTP -> HANDLER : route to embedded files handler
 activate HANDLER
 
-HANDLER -> DIAG : list embedded files (variant)
-activate DIAG
-DIAG -> DIAG : read file metadata\nfrom MDD
-DIAG -> HANDLER : list of file entries with metadata
-deactivate DIAG
+HANDLER -> FM : list()
+activate FM
+FM -> HANDLER : HashMap<id, ChunkMetaData>
+deactivate FM
 
 HANDLER -> HTTP : JSON body
 deactivate HANDLER
@@ -56,11 +55,11 @@ deactivate SEC
 HTTP -> HANDLER : route to embedded files handler
 activate HANDLER
 
-HANDLER -> DIAG : get embedded file data (id, variant)
-activate DIAG
-DIAG -> DIAG : extract file content\nfrom MDD
-DIAG -> HANDLER : binary file data
-deactivate DIAG
+HANDLER -> FM : get(id)
+activate FM
+FM -> FM : lazily load payload\nfrom MDD file
+FM -> HANDLER : (ChunkMetaData, binary data)
+deactivate FM
 
 HANDLER -> HTTP : binary response
 deactivate HANDLER

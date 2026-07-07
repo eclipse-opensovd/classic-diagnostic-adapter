@@ -918,7 +918,9 @@ MDD Embedded files
     :links: arch~sovd-api-mdd-embedded-files
     :status: draft
 
-    The CDA must support reading embedded files from the mdd file, and provide them via the ``/components/{ecu-name}/files/{file-name}`` endpoint.
+    The CDA must support reading embedded files from the MDD file, and provide them via the
+    ``/components/{ecuName}/x-sovd2uds-bulk-data/mdd-embedded-files`` endpoint (listing) and
+    ``/components/{ecuName}/x-sovd2uds-bulk-data/mdd-embedded-files/{id}`` endpoint (retrieval).
 
     **Rationale**
 
