@@ -82,6 +82,131 @@ Use `--protocol-name` to select the DoIP protocol variant used for com-param loo
 cargo run --release -- --databases-path ./databases --tester-address <YOUR_IP> --protocol-name UDS_Ethernet_DoIP
 ```
 
+## ODX to SOVD path mapping
+
+The CDA translates ODX diagnostic descriptions into SOVD REST resources. The
+mapping is driven by two rules: the `DiagLayerContainer` short name determines
+the component path, and the `DiagService` / `DiagComm` short name — with its
+type-specific affix stripped — determines the resource id within that component.
+
+### Component paths
+
+Each `.mdd` file represents one ECU. The `DiagLayerContainer` short name is
+lowercased to form the component path segment:
+
+| ODX `DiagLayerContainer` short name | SOVD path |
+|--------------------------------------|-----------|
+| `FLXC1000` | `/vehicle/v15/components/flxc1000` |
+| `FSNR2000` | `/vehicle/v15/components/fsnr2000` |
+
+Every component path exposes a fixed set of sub-resources (data, operations,
+configurations, faults, modes, locks).
+
+### Data resources — SID `0x22` / `0x2E`
+
+ODX `DiagService` entries whose request SID is `0x22` (ReadDataByIdentifier)
+are exposed under `/data`. The `_Read`, `_Write`, and `_Dump` suffixes are
+stripped from the `DiagComm` short name to produce the resource id:
+
+| ODX `DiagComm` short name | UDS SID | SOVD path |
+|---------------------------|---------|-----------|
+| `VINDataIdentifier_Read` | `0x22` | `.../data/VINDataIdentifier` |
+| `FluxCapacitorPowerConsumption_Read` | `0x22` | `.../data/FluxCapacitorPowerConsumption` |
+
+If a matching `_Write` service (SID `0x2E`) exists for the same base name, the
+same SOVD id is accessible via `PUT`.
+
+### Operations — SID `0x31`
+
+ODX `RoutineControl` services (SID `0x31`) are exposed under `/operations`. The
+`_Start`, `_Stop`, and `_RequestResults` suffixes are stripped. All sub-function
+variants of the same routine collapse to a single SOVD operation id:
+
+| ODX `DiagComm` short name | UDS SID + sub-function | SOVD path |
+|---------------------------|------------------------|-----------|
+| `SelfTest_Start` | `0x31 0x01` | `.../operations/SelfTest` |
+| `CalibrateSensors_Start` | `0x31 0x01` | `.../operations/CalibrateSensors` |
+| `CalibrateSensors_Stop` | `0x31 0x02` | `.../operations/CalibrateSensors` |
+| `CalibrateSensors_RequestResults` | `0x31 0x03` | `.../operations/CalibrateSensors` |
+
+When `_Stop` or `_RequestResults` services are present, the operation response
+includes `has_stop` / `has_request_results` flags accordingly.
+
+### Configurations — SID `0x22` / `0x2E`, varcoding functional class
+
+Services that belong to the `varcoding` functional class are exposed under
+`/configurations` instead of `/data`. Read and write services for the same base
+name are grouped into a single configuration resource:
+
+| ODX `DiagComm` short name | Functional class | SOVD path |
+|---------------------------|-----------------|-----------|
+| `ActiveDiagnosticSessionDataIdentifier_Read` | `varcoding` | `.../configurations/ActiveDiagnosticSessionDataIdentifier` |
+| `ActiveDiagnosticSessionDataIdentifier_Write` | `varcoding` | `.../configurations/ActiveDiagnosticSessionDataIdentifier` |
+
+### Functional groups — `/functions/{id}`
+
+ODX `FunctionalGroup` layers are exposed under `/functions`. Only groups whose
+short name ends with (suffix position, default) or starts with (prefix position)
+the configured protocol name are included. The matching name is lowercased:
+
+| ODX functional group short name | Protocol config | SOVD path |
+|---------------------------------|-----------------|-----------|
+| `FGL_UDS_Ethernet_DoIP_DOBT` | `UDS_Ethernet_DoIP_DOBT` | `/vehicle/v15/functions/fgl_uds_ethernet_doip_dobt` |
+| `FGL_UDS_Ethernet_DoIP` | `UDS_Ethernet_DoIP` | `/vehicle/v15/functions/fgl_uds_ethernet_doip` |
+
+### Affix stripping
+
+The default affixes stripped from `DiagService` short names are:
+
+| Category | Stripped suffixes |
+|----------|------------------|
+| Data / Configurations (SID `0x22`, `0x2E`) | `_Read`, `_Write`, `_Dump` (and `_Func` variants) |
+| Operations (SID `0x31`) | `_Start`, `_Stop`, `_RequestResults` (and `_Func` variants) |
+| DTC setting (SID `0x85`) | `DTC_Setting_Mode_` prefix |
+
+Matching is case-insensitive. Compound affixes (e.g. `_Read_Dump`) take
+precedence over their base forms (`_Dump`) because order matters — compound
+forms must appear first in the list.
+
+The affix position (prefix or suffix), the list of affixes, and the
+`varcoding` functional class name are all configurable via
+`DatabaseNamingConvention` in `opensovd-cda.toml`.
+
+### End-to-end example
+
+Reading the VIN from ECU `FLXC1000`:
+
+```plain
+# SOVD request
+GET /vehicle/v15/components/flxc1000/data/VINDataIdentifier
+
+# CDA looks up DiagService whose DiagComm short name matches "VINDataIdentifier_Read"
+# and whose request SID is 0x22 (ReadDataByIdentifier), DID = 0xF190
+
+# UDS bytes sent over DoIP
+[0x22, 0xF1, 0x90]
+
+# Positive response received (example)
+[0x62, 0xF1, 0x90, 0x57, 0x30, 0x42, 0x41, 0x58, 0x58, 0x58, 0x58, 0x58, 0x58, ...]
+#  ^    ^     ^     ^--- VIN data bytes, decoded using the ODX DOP
+#  |    +-----+--- echoed DID
+#  +--- response SID (0x22 + 0x40)
+
+# JSON response returned to the SOVD client
+{
+  "data": {
+    "VINDataIdentifier": "W0BAXXXXXXX..."
+  }
+}
+```
+
+Note: `VINDataIdentifier` is the SOVD resource id derived from the parameter name in the ODXs
+`VINDataIdentifier_Read` service. The parameter name and DiagComm name are identical in this case,
+but they may differ in general.
+
+The same pattern applies for write (`PUT`), operations (`POST .../executions`),
+and configurations.
+
 ## building
 
 ### prerequisites for building & sdk
