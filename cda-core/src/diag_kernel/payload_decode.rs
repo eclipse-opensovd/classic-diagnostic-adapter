@@ -956,13 +956,21 @@ impl<S: SecurityPlugin> EcuManager<S> {
         let mut start = 0usize;
 
         for _ in 0..num_items {
-            let (item_data, item_size) = self.decode_dynamic_length_field_item(
+            let (item_data, item_size) = match self.decode_dynamic_length_field_item(
                 mapped_service,
                 uds_payload,
                 data,
                 &repeated_dop,
                 start,
-            )?;
+            ) {
+                Ok(result) => result,
+                Err(DiagServiceError::NotEnoughData { .. }) => {
+                    // ECU sent fewer bytes than the item count implied; treat as end of list.
+                    tracing::warn!("Not enough data for next DynamicLengthField item, truncating");
+                    break;
+                }
+                Err(e) => return Err(e),
+            };
             tracing::debug!(
                 item_index = repeated_data.len(),
                 item_size,
@@ -1468,12 +1476,23 @@ impl<S: SecurityPlugin> EcuManager<S> {
                     // to last_read_byte_pos; it must be 0 (start of case data)
                     // rather than stale from a previous context.
                     uds_payload.set_last_read_byte_pos(0);
-                    let case_data = self.map_struct_from_uds(
+                    let case_data = match self.map_struct_from_uds(
                         &case_structure,
                         mapped_service,
                         uds_payload,
                         data,
-                    )?;
+                    ) {
+                        Ok(d) => d,
+                        Err(DiagServiceError::NotEnoughData { .. }) => {
+                            // ECU payload is too short to contain the case structure;
+                            // treat as absent (no case data decoded).
+                            tracing::warn!(
+                                "Not enough data to decode mux case structure, treating as empty"
+                            );
+                            HashMap::default()
+                        }
+                        Err(e) => return Err(e),
+                    };
                     uds_payload.pop_slice()?;
                     mux_data.insert(case_name, DiagDataTypeContainer::Struct(case_data));
                 }

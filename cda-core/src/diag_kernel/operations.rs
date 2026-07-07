@@ -677,30 +677,43 @@ pub(in crate::diag_kernel) fn extract_diag_data_container(
 ) -> Result<DiagDataTypeContainer, DiagServiceError> {
     let uds_payload = payload.data()?;
 
-    // When the parameter position is at or beyond the payload boundary, treat
-    // it as absent (trailing field past end-of-PDU). Catch decode errors at
-    // that boundary and return empty data instead of propagating NotEnoughData.
+    // For MinMaxLength parameters, silently treat a boundary-position failure as an absent
+    // field: if the start position is at or beyond the payload end, the field is simply not
+    // present in this PDU. Fixed-size (StandardLength) parameters do not get this treatment.
+    // If their position is beyond the payload end, the ECU sent a malformed response.
+    let is_variable_length_at_boundary =
+        matches!(diag_type.type_(), DiagCodedTypeVariant::MinMaxLength(_))
+            && param_byte_pos >= uds_payload.len();
+
     let (data, bit_len) = match diag_type.decode(uds_payload, param_byte_pos, param_bit_pos) {
         Ok(result) => result,
-        Err(_) if param_byte_pos >= uds_payload.len() => (vec![], 0),
+        Err(_) if is_variable_length_at_boundary => (vec![], 0),
         Err(e) => return Err(e),
     };
 
+    // A parameter is optional when either:
+    //   - its type declares a minimum length of zero (MinMaxLength with min_length == 0), or
+    //   - it is a variable-length field at boundary position (absent from this PDU, see above).
+    //
+    // Fixed-size parameters at boundary are NOT optional: a positive UDS response that is
+    // too short to contain a required field is a malformed payload and must surface as an
+    // error rather than silently returning empty data (which would produce 204 No Content).
     let is_optional = match diag_type.type_() {
-        DiagCodedTypeVariant::MinMaxLength(MinMaxLengthType { min_length, .. }) => *min_length == 0,
+        DiagCodedTypeVariant::MinMaxLength(MinMaxLengthType { min_length, .. }) => {
+            *min_length == 0 || param_byte_pos >= uds_payload.len()
+        }
         _ => false,
-    } || param_byte_pos >= uds_payload.len();
+    };
     if data.is_empty() && !is_optional {
-        // at least 1 byte expected, we are using NotEnoughData error here, because
-        // this might happen when parsing end of pdu and leftover bytes can be ignored
         tracing::debug!(
-            "Not enough Data for parameter {:?} in extract_diag_data_container, expected at least \
-             1 byte",
-            param_short_name
+            "Not enough data for parameter {:?} in extract_diag_data_container, expected at least \
+             1 byte, payload length {}",
+            param_short_name,
+            uds_payload.len(),
         );
         return Err(DiagServiceError::NotEnoughData {
-            expected: 1,
-            actual: 0,
+            expected: param_byte_pos.saturating_add(1),
+            actual: uds_payload.len(),
         });
     }
 

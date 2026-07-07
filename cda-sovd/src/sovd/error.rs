@@ -92,13 +92,15 @@ impl From<DiagServiceError> for ApiError {
             | DiagServiceError::ConnectionClosed(_)
             | DiagServiceError::SendFailed(_)
             | DiagServiceError::InvalidAddress(_)
-            | DiagServiceError::NotEnoughData { .. }
             | DiagServiceError::UnexpectedResponse(_)
             | DiagServiceError::DataError(_)
             | DiagServiceError::InvalidConfiguration(_)
             | DiagServiceError::InvalidSecurityPlugin => {
                 ApiError::InternalServerError(Some(value.to_string()))
             }
+            DiagServiceError::NotEnoughData { expected, actual } => ApiError::BadRequest(format!(
+                "Payload too short, expected at least {expected} bytes, got {actual} bytes"
+            )),
             DiagServiceError::InvalidRequest(_)
             | DiagServiceError::Nack(_)
             | DiagServiceError::ParameterConversionError(_)
