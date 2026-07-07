@@ -714,12 +714,30 @@ fn resolve_required_param<S: AsRef<str>>(
 }
 
 fn phys_value_str_to_json(value: &str) -> serde_json::Value {
-    if let Ok(number) = value.parse::<i64>() {
-        serde_json::Value::Number(number.into())
-    } else if let Ok(number) = value.parse::<u64>() {
-        serde_json::Value::Number(number.into())
+    if let Ok(number) = try_parse_str_as_json_number(value) {
+        number
     } else {
         serde_json::Value::from(value)
+    }
+}
+
+fn try_parse_str_as_json_number(value: &str) -> Result<serde_json::Value, DiagServiceError> {
+    if let Ok(number) = value.parse::<i64>() {
+        Ok(serde_json::Value::Number(number.into()))
+    } else if let Ok(number) = value.parse::<u64>() {
+        Ok(serde_json::Value::Number(number.into()))
+    } else if let Ok(number) = value.parse::<f64>() {
+        let float = serde_json::Number::from_f64(number).ok_or_else(|| {
+            DiagServiceError::ParameterConversionError(format!(
+                "Failed to parse string '{value}' as a number"
+            ))
+        })?;
+
+        Ok(serde_json::Value::Number(float))
+    } else {
+        Err(DiagServiceError::ParameterConversionError(format!(
+            "Failed to parse string '{value}' as a number"
+        )))
     }
 }
 
@@ -748,20 +766,12 @@ fn process_coded_constants(
                         param.short_name().unwrap_or_default()
                     )))?;
 
-            let const_json_value = if coded_const_value.chars().all(char::is_numeric) {
-                serde_json::Value::Number(
-                    coded_const_value
-                        .parse::<u64>()
-                        .map_err(|e| {
-                            DiagServiceError::InvalidDatabase(format!(
-                                "CodedConst value conversion error: {e}"
-                            ))
-                        })?
-                        .into(),
-                )
-            } else {
-                str_to_json_value(coded_const_value, diag_type.base_datatype())?
-            };
+            let const_json_value =
+                if let Ok(number) = try_parse_str_as_json_number(coded_const_value) {
+                    number
+                } else {
+                    str_to_json_value(coded_const_value, diag_type.base_datatype())?
+                };
 
             let uds_val = json_value_to_uds_data(&diag_type, None, None, &const_json_value)
                 .inspect_err(|e| {

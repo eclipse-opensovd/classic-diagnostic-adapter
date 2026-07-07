@@ -53,7 +53,6 @@ struct GatewayConnectionHandles {
 pub(crate) struct ReceiverChannels {
     pub(crate) send_pending_rx: watch::Receiver<bool>,
     pub(crate) reset_tx: mpsc::Sender<ConnectionResetReason>,
-    pub(crate) send_tx: mpsc::Sender<DoipPayload>,
 }
 
 #[derive(Error, Debug, Clone)]
@@ -448,13 +447,20 @@ pub(crate) async fn try_read(
                                     message = ?msg.message,
                                     "UDS NRC - Response pending"
                                 );
-                                DiagnosticResponse::Pending(source_address)
+                                DiagnosticResponse::Pending {
+                                    source_address,
+                                    request_sid,
+                                }
                             }
-                            NRC_BUSY_REPEAT_REQUEST => {
-                                DiagnosticResponse::BusyRepeatRequest(source_address)
-                            }
+                            NRC_BUSY_REPEAT_REQUEST => DiagnosticResponse::BusyRepeatRequest {
+                                source_address,
+                                request_sid,
+                            },
                             NRC_TEMPORARILY_NOT_AVAILABLE => {
-                                DiagnosticResponse::TemporarilyNotAvailable(source_address)
+                                DiagnosticResponse::TemporarilyNotAvailable {
+                                    source_address,
+                                    request_sid,
+                                }
                             }
                             _ => return Ok(DiagnosticResponse::Msg(msg)),
                         };
