@@ -70,8 +70,8 @@ ENV RUSTC_WRAPPER=sccache \
 RUN --mount=type=cache,target=/usr/local/cargo/registry,sharing=locked \
     --mount=type=cache,target=/usr/local/cargo/git,sharing=locked \
     --mount=type=cache,target=$SCCACHE_DIR,sharing=locked \
+    export RUSTFLAGS="$RUSTFLAGS"; \
     if [ "$BUILD_PROFILE" = "dev" ]; then \
-        export RUSTFLAGS="$RUSTFLAGS"; \
         cargo chef cook --profile dev --recipe-path recipe.json; \
     else \
         cargo chef cook --release --recipe-path recipe.json; \
@@ -117,8 +117,8 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry,sharing=locked \
     --mount=type=cache,target=$SCCACHE_DIR,sharing=locked \
     export SOURCE_DATE_EPOCH=${SOURCE_DATE_EPOCH} && \
     export SOURCE_GIT_SHA=${SOURCE_GIT_SHA} && \
+    export RUSTFLAGS="$RUSTFLAGS"; \
     if [ "$BUILD_PROFILE" = "dev" ]; then \
-        export RUSTFLAGS="$RUSTFLAGS"; \
         cargo build --profile dev --bin opensovd-cda && \
         cp target/debug/opensovd-cda /tmp/opensovd-cda; \
     else \
