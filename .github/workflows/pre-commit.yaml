@@ -20,6 +20,7 @@ on:
 
 permissions:
   contents: read
+  pull-requests: read
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref_name }}-${{ github.event.pull_request.number || github.sha }}
@@ -37,3 +38,22 @@ jobs:
         uses: eclipse-opensovd/cicd-workflows/pre-commit-action@07140bdd84f20b66fd4aff58a83c5148deec388c
         with:
           rust-toolchain: "1.88"
+      - name: Validate commit subjects (Conventional Commits)
+        if: github.event_name == 'pull_request'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          fail=0
+          for sha in $(gh api "/repos/${{ github.repository }}/pulls/${{ github.event.number }}/commits" --jq '.[].sha'); do
+            git log -1 --format=%B "$sha" > /tmp/commit-msg 2>/dev/null || {
+              git fetch --no-tags --depth=1 origin "$sha"
+              git log -1 --format=%B "$sha" > /tmp/commit-msg
+            }
+            if ! uv run --locked prek run --hook-stage commit-msg \
+              --commit-msg-filename /tmp/commit-msg conventional-pre-commit; then
+              echo "::error::Non-conventional commit subject: $(git log -1 --format='%h %s' "$sha")"
+              fail=1
+            fi
+          done
+          exit "$fail"
