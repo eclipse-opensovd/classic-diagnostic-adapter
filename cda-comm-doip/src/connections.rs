@@ -226,7 +226,7 @@ where
     // Notify connectivity handler that ECUs behind this gateway are now online.
     // This sets their state to Online so the pre-send variant detection guard works correctly.
     connectivity_handler
-        .on_connected_bulk(&ecu_names_for_gateway)
+        .on_gateway_connected(&ecu_names_for_gateway)
         .await;
 
     Ok(discovered_gateway.logical_address)
@@ -383,7 +383,7 @@ fn spawn_connection_reset_task(
                                 );
                                 gateway
                                     .connectivity_handler
-                                    .on_connected_bulk(&gateway.ecu_names)
+                                    .on_gateway_connected(&gateway.ecu_names)
                                     .await;
                                 while !conn_reset_rx.is_empty() {
                                     // drain the receiver to avoid resetting the connection again
@@ -759,7 +759,9 @@ where
                             tracing::error!(error = ?e, "Failed to send connection reset request");
                         }
                         // Notify UDS layer that ECUs on this connection are disconnected
-                        connectivity_handler.on_disconnected_bulk(ecu_names).await;
+                        connectivity_handler
+                            .on_gateway_disconnected(ecu_names)
+                            .await;
                     }
                     _ => {
                         // for POC purposes we just log the error and do not reset the connection

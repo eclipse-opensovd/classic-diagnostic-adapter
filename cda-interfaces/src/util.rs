@@ -177,6 +177,7 @@ pub mod std_ext {
             Ok(guard) => guard,
             Err(poisoned) => {
                 tracing::warn!("RwLock poisoned, proceeding with poisoned read lock");
+                lock.clear_poison();
                 poisoned.into_inner()
             }
         }
@@ -188,6 +189,7 @@ pub mod std_ext {
             Ok(guard) => guard,
             Err(poisoned) => {
                 tracing::warn!("RwLock poisoned, proceeding with poisoned write lock");
+                lock.clear_poison();
                 poisoned.into_inner()
             }
         }

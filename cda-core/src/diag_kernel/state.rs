@@ -80,14 +80,18 @@ impl<S: SecurityPlugin> EcuStateManager for EcuManager<S> {
         // For example when switching to 'extended' immediately after the service
         // signals 'ready'
 
-        let mut ss = std_ext::lock_write(&self.runtime_state.service_states);
-        ss.entry(service_ids::SESSION_CONTROL)
+        let mut service_state = std_ext::lock_write(&self.runtime_state.service_states);
+        service_state
+            .entry(service_ids::SESSION_CONTROL)
             .or_insert(self.default_state(&self.database_naming_convention.semantics.session)?);
-        ss.entry(service_ids::SECURITY_ACCESS)
+        service_state
+            .entry(service_ids::SECURITY_ACCESS)
             .or_insert(self.default_state(&self.database_naming_convention.semantics.security)?);
-        ss.entry(service_ids::CONTROL_DTC_SETTING)
+        service_state
+            .entry(service_ids::CONTROL_DTC_SETTING)
             .or_insert_with(|| "on".to_owned());
-        ss.entry(service_ids::COMMUNICATION_CONTROL)
+        service_state
+            .entry(service_ids::COMMUNICATION_CONTROL)
             .or_insert_with(|| "enablerxandenabletx".to_owned());
         Ok(())
     }
@@ -170,10 +174,10 @@ impl<S: SecurityPlugin> EcuManager<S> {
             );
         }
 
-        let ss = std_ext::lock_read(&self.runtime_state.service_states);
+        let service_state = std_ext::lock_read(&self.runtime_state.service_states);
 
-        let current_session = ss.get(&service_ids::SESSION_CONTROL);
-        let current_security = ss.get(&service_ids::SECURITY_ACCESS);
+        let current_session = service_state.get(&service_ids::SESSION_CONTROL);
+        let current_security = service_state.get(&service_ids::SECURITY_ACCESS);
 
         if current_session.is_none() {
             tracing::warn!(
@@ -196,7 +200,7 @@ impl<S: SecurityPlugin> EcuManager<S> {
             state_chart_security
                 .and_then(|sc| Self::lookup_state_transition(diag_comm, &(sc.into()), security))
         });
-        drop(ss);
+        drop(service_state);
 
         tracing::debug!(
             diag_comm_name = ?diag_comm.short_name(),

@@ -248,14 +248,14 @@ impl Message<EcuConnected> for EcuCoordinator {
 ///
 /// Uses `ask` (request-response) to guarantee the suppression is active
 /// before variant detection sends begin.
-pub struct PrepareVariantDetection;
+pub struct SuppressDisconnectHandling;
 
-impl Message<PrepareVariantDetection> for EcuCoordinator {
+impl Message<SuppressDisconnectHandling> for EcuCoordinator {
     type Reply = ();
 
     async fn handle(
         &mut self,
-        _msg: PrepareVariantDetection,
+        _msg: SuppressDisconnectHandling,
         _ctx: &mut Context<Self, Self::Reply>,
     ) -> Self::Reply {
         tracing::debug!(
@@ -267,14 +267,14 @@ impl Message<PrepareVariantDetection> for EcuCoordinator {
 }
 
 /// Re-enable disconnect events after variant detection completes.
-pub struct FinishVariantDetection;
+pub struct RestoreDisconnectHandling;
 
-impl Message<FinishVariantDetection> for EcuCoordinator {
+impl Message<RestoreDisconnectHandling> for EcuCoordinator {
     type Reply = ();
 
     async fn handle(
         &mut self,
-        _msg: FinishVariantDetection,
+        _msg: RestoreDisconnectHandling,
         _ctx: &mut Context<Self, Self::Reply>,
     ) -> Self::Reply {
         tracing::debug!(
@@ -282,27 +282,6 @@ impl Message<FinishVariantDetection> for EcuCoordinator {
             "Variant detection finished. Re-enabling disconnect events"
         );
         self.suppress_disconnect = false;
-    }
-}
-
-/// Clear the variant to trigger re-detection on the next UDS send.
-pub struct ClearVariantForRedetect;
-
-impl Message<ClearVariantForRedetect> for EcuCoordinator {
-    type Reply = ();
-
-    async fn handle(
-        &mut self,
-        _msg: ClearVariantForRedetect,
-        _ctx: &mut Context<Self, Self::Reply>,
-    ) -> Self::Reply {
-        tracing::info!(
-            ecu = %self.ecu_name,
-            "Clearing variant for re-detection"
-        );
-        let mut ecu_state = std_ext::lock_write(&self.state.ecu_state);
-        ecu_state.variant_state = VariantState::NotTested;
-        ecu_state.variant_index = None;
     }
 }
 
@@ -514,34 +493,6 @@ mod tests {
             }
         );
         assert_eq!(status.variant_index, Some(3));
-    }
-
-    #[tokio::test]
-    async fn clear_variant_for_redetect_sets_not_tested() {
-        let handle = spawn_test_coordinator("TestECU");
-        {
-            let mut ecu_state = handle.state.ecu_state.write().unwrap();
-            ecu_state.connectivity = Connectivity::Online;
-            ecu_state.variant_state = VariantState::Detected {
-                name: "V1".to_owned(),
-                is_base_variant: true,
-                is_fallback: false,
-            };
-            ecu_state.variant_index = Some(1);
-        }
-
-        handle
-            .actor_ref
-            .tell(ClearVariantForRedetect)
-            .await
-            .expect("Actor should be alive");
-        tokio::task::yield_now().await;
-
-        let status = handle.ecu_status();
-        assert_eq!(status.variant_state, VariantState::NotTested);
-        assert_eq!(status.variant_index, None);
-        // Connectivity preserved
-        assert_eq!(status.connectivity, Connectivity::Online);
     }
 
     #[tokio::test]

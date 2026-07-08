@@ -13,13 +13,7 @@
 
 //! Shared test doubles for `cda-comm-uds` tests.
 
-use std::{
-    sync::{
-        Arc,
-        atomic::{AtomicBool, Ordering},
-    },
-    time::Duration,
-};
+use std::time::Duration;
 
 use cda_interfaces::{
     DiagComm, DiagServiceError, DoipComParams, EcuAddresses, EcuState, EcuStateManager, HashMap,
@@ -29,19 +23,14 @@ use cda_interfaces::{
 };
 
 /// Minimal test double satisfying `UdsEcuDb + VariantDetection`.
-///
-/// Observable side-effects are tracked via atomic counters/flags.
 pub(crate) struct TestEcuDb {
     service_states: tokio::sync::Mutex<std::collections::HashMap<u8, String>>,
-    /// Set to `true` when `clear_variant_for_redetect` is called.
-    pub variant_cleared: Arc<AtomicBool>,
 }
 
 impl TestEcuDb {
     pub fn new() -> Self {
         Self {
             service_states: tokio::sync::Mutex::new(std::collections::HashMap::new()),
-            variant_cleared: Arc::new(AtomicBool::new(false)),
         }
     }
 }
@@ -217,9 +206,5 @@ impl VariantDetection for TestEcuDb {
 
     fn mark_as_no_variant_detected(&mut self) {
         unimplemented!()
-    }
-
-    fn clear_variant_for_redetect(&mut self) {
-        self.variant_cleared.store(true, Ordering::Relaxed);
     }
 }

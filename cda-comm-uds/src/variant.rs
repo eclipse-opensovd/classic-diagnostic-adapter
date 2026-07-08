@@ -86,8 +86,10 @@ impl<S: EcuGateway, T: EcuManager> UdsVariant for UdsManager<S, T> {
 
         let mut service_responses = HashMap::new();
         'variant_detection_calls: {
+            // Suppress disconnect events while UDS requests are in-flight to
+            // prevent a timeout from re-triggering variant detection in a loop.
             self.state_coordinator
-                .prepare_variant_detection(ecu_name)
+                .suppress_disconnect_handling(ecu_name)
                 .await;
             for (name, service) in requests {
                 let response = match self
@@ -114,8 +116,9 @@ impl<S: EcuGateway, T: EcuManager> UdsVariant for UdsManager<S, T> {
                 service_responses.insert(name, response);
             }
         }
+        // Re-enable disconnect events now that UDS sends are complete.
         self.state_coordinator
-            .finish_variant_detection(ecu_name)
+            .restore_disconnect_handling(ecu_name)
             .await;
 
         // No responses gathered -> ECU is unreachable.
@@ -255,7 +258,7 @@ impl<S: EcuGateway, T: EcuManager> UdsVariant for UdsManager<S, T> {
         Ok(())
     }
 
-    async fn get_ecu_status(&self, ecu_name: &str) -> Result<EcuState, DiagServiceError> {
+    async fn get_ecu_state(&self, ecu_name: &str) -> Result<EcuState, DiagServiceError> {
         let ecu = self.uds_ecu_db(ecu_name)?;
         let status = ecu.read().await.ecu_status();
         Ok(status)

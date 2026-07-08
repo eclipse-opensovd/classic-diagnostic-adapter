@@ -17,8 +17,8 @@ use async_trait::async_trait;
 use cda_interfaces::{EcuConnectivityHandler, EcuRuntimeState, HashMap, dlt_ctx};
 
 use crate::coordinator::{
-    EcuConnected, EcuCoordinatorHandle, EcuDisconnected, FinishVariantDetection,
-    PrepareVariantDetection,
+    EcuConnected, EcuCoordinatorHandle, EcuDisconnected, RestoreDisconnectHandling,
+    SuppressDisconnectHandling,
 };
 
 /// Coordinates ECU state transitions in response to connectivity events.
@@ -95,29 +95,29 @@ impl EcuStateCoordinator {
     ///
     /// Uses `ask` (request-response) to guarantee suppression is active before
     /// variant detection sends begin.
-    pub(crate) async fn prepare_variant_detection(&self, ecu_name: &str) {
+    pub(crate) async fn suppress_disconnect_handling(&self, ecu_name: &str) {
         if let Some(handle) = self.handles.get(ecu_name) {
-            let _ = handle.actor_ref.ask(PrepareVariantDetection).await;
+            let _ = handle.actor_ref.ask(SuppressDisconnectHandling).await;
         }
     }
 
     /// Re-enable disconnect events for the given ECU after variant detection completes.
-    pub(crate) async fn finish_variant_detection(&self, ecu_name: &str) {
+    pub(crate) async fn restore_disconnect_handling(&self, ecu_name: &str) {
         if let Some(handle) = self.handles.get(ecu_name) {
-            let _ = handle.actor_ref.tell(FinishVariantDetection).await;
+            let _ = handle.actor_ref.tell(RestoreDisconnectHandling).await;
         }
     }
 }
 
 #[async_trait]
 impl EcuConnectivityHandler for EcuStateCoordinator {
-    async fn on_connected_bulk(&self, ecu_names: &[String]) {
+    async fn on_gateway_connected(&self, ecu_names: &[String]) {
         for ecu_name in ecu_names {
             self.handle_ecu_connected(ecu_name).await;
         }
     }
 
-    async fn on_disconnected_bulk(&self, ecu_names: &[String]) {
+    async fn on_gateway_disconnected(&self, ecu_names: &[String]) {
         for ecu_name in ecu_names {
             self.handle_ecu_disconnected(ecu_name).await;
         }
@@ -134,9 +134,9 @@ mod tests {
         let runtime_state = EcuRuntimeState::new();
         // Set variant to Online + Detected so disconnect can change connectivity
         {
-            let mut es = runtime_state.ecu_state.write().unwrap();
-            es.connectivity = Connectivity::Online;
-            es.variant_state = VariantState::Detected {
+            let mut ecu_state = runtime_state.ecu_state.write().unwrap();
+            ecu_state.connectivity = Connectivity::Online;
+            ecu_state.variant_state = VariantState::Detected {
                 name: "TestVariant".to_owned(),
                 is_base_variant: true,
                 is_fallback: false,

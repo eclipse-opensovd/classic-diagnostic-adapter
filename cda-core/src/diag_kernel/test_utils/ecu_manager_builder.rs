@@ -53,14 +53,14 @@ pub(crate) fn new_ecu_manager(
 
     // not using set_variant here, because that would require us to build state charts etc.
     {
-        let mut es = std_ext::lock_write(&manager.runtime_state.ecu_state);
-        es.connectivity = Connectivity::Online;
-        es.variant_state = VariantState::Detected {
+        let mut ecu_state = std_ext::lock_write(&manager.runtime_state.ecu_state);
+        ecu_state.connectivity = Connectivity::Online;
+        ecu_state.variant_state = VariantState::Detected {
             name: TEST_DIAG_LAYER.to_owned(),
             is_base_variant: true,
             is_fallback: false,
         };
-        es.variant_index = Some(0);
+        ecu_state.variant_index = Some(0);
     }
 
     manager

@@ -58,7 +58,7 @@ pub(crate) async fn get<T: UdsEcu + Clone, U: FileManager>(
 ) -> impl IntoApiResponse {
     let include_schema = query.include_schema;
     let base_path = format!("http://localhost:20002/vehicle/v15/components/{ecu_name}");
-    let status = match uds.get_ecu_status(&ecu_name).await {
+    let status = match uds.get_ecu_state(&ecu_name).await {
         Ok(v) => v,
         Err(e) => {
             return ErrorWrapper {

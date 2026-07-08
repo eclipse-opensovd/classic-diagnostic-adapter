@@ -772,20 +772,20 @@ pub trait VariantDetection: Send + Sync + 'static {
     /// Mark this ECU as having no variant detected. Sets the variant state to
     /// [`VariantState::NotDetected`] and unloads the database.
     fn mark_as_no_variant_detected(&mut self);
-
-    /// Clear the current variant to trigger re-detection on the next send.
-    /// Sets variant state to [`VariantState::NotDetected`] and clears the variant name.
-    fn clear_variant_for_redetect(&mut self);
 }
 
-/// Callback interface for transport-level ECU connectivity changes.
+/// Callback interface for connectivity changes for ECUs behind a `DoIP` gateway.
 #[async_trait]
 pub trait EcuConnectivityHandler: Send + Sync + 'static {
-    /// Called when a connection is established or re-established for an ECU.
-    async fn on_connected_bulk(&self, ecu_names: &[String]);
+    /// Called when a `DoIP` gateway connection is established or re-established.
+    ///
+    /// Notifies for all ECUs behind (and including) the gateway.
+    async fn on_gateway_connected(&self, ecu_names: &[String]);
 
-    /// Called when a connection is lost for an ECU.
-    async fn on_disconnected_bulk(&self, ecu_names: &[String]);
+    /// Called when a `DoIP` gateway connection is lost.
+    ///
+    /// Notifies for all ECUs behind (and including) the gateway.
+    async fn on_gateway_disconnected(&self, ecu_names: &[String]);
 }
 
 /// Resolves `DiagComm` handles from the database by various search criteria.

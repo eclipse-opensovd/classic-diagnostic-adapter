@@ -574,10 +574,10 @@ pub trait UdsVariant {
     /// does not exist or no service for variant detection is available.
     async fn detect_variant(&self, ecu_name: &str) -> Result<(), DiagServiceError>;
 
-    /// Get the ECU status (connectivity + variant state) for the given ECU.
+    /// Get the ECU state (connectivity + variant state) for the given ECU.
     /// # Errors
     /// Will return Err if the ECU does not exist.
-    async fn get_ecu_status(&self, ecu_name: &str) -> Result<EcuState, DiagServiceError>;
+    async fn get_ecu_state(&self, ecu_name: &str) -> Result<EcuState, DiagServiceError>;
 
     /// trigger the variant detection process for all ECUs.
     /// Main work will be done in the background, there is no result returned,
@@ -948,7 +948,7 @@ pub mod mock {
                 &self,
                 ecu_name: &str,
             ) -> Result<(), DiagServiceError>;
-            async fn get_ecu_status(
+            async fn get_ecu_state(
                 &self,
                 ecu_name: &str,
             ) -> Result<EcuState, DiagServiceError>;
