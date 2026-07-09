@@ -38,6 +38,7 @@ thiserror = { workspace = true }
 async-trait = { workspace = true }
 #tokio
 tokio = { workspace = true, features = ["sync", "time"] }
+futures = { workspace = true }
 # runtime size info
 hex = { workspace = true }
 strum = { workspace = true }

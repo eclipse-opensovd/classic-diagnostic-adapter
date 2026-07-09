@@ -16,6 +16,8 @@ use std::{
     time::Duration,
 };
 
+use async_trait::async_trait;
+use futures::{FutureExt, future::BoxFuture};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
@@ -32,6 +34,7 @@ pub use ecumanager::*;
 mod ecuuds;
 pub use ecuuds::*;
 pub mod file_manager;
+pub mod health;
 mod schema;
 pub use schema::*;
 pub mod config;
@@ -435,4 +438,24 @@ impl Display for DiagCommAction {
             DiagCommAction::Stop => write!(f, "Stop"),
         }
     }
+}
+
+/// Type alias for the boxed shared shutdown signal.
+/// This provides a concrete named type for use in generic bounds.
+pub type ShutdownSignal = futures::future::Shared<BoxFuture<'static, ()>>;
+
+pub fn shutdown_signal<F>(future: F) -> ShutdownSignal
+where
+    F: Future<Output = ()> + Send + 'static,
+{
+    future.boxed().shared()
+}
+
+/// Capability for gracefully shutting down background tasks/connections, e.g. before a
+/// hot-reload replaces the underlying component with a freshly constructed one.
+#[async_trait]
+pub trait Shutdown: Send + Sync + 'static {
+    /// Aborts background tasks and releases connections/resources owned by this instance.
+    /// Implementations should be idempotent where practical.
+    async fn shutdown(&self);
 }

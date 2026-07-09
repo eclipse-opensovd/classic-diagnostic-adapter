@@ -380,6 +380,7 @@ dependencies = [
 name = "cda-comm-can"
 version = "0.1.0"
 dependencies = [
+ "async-trait",
  "cda-interfaces",
  "hex",
  "schemars",
@@ -396,6 +397,7 @@ dependencies = [
 name = "cda-comm-doip"
 version = "0.1.0"
 dependencies = [
+ "async-trait",
  "cda-interfaces",
  "doip-codec",
  "doip-definitions",
@@ -510,6 +512,7 @@ dependencies = [
  "bytes",
  "cda-build",
  "foldhash",
+ "futures",
  "hex",
  "mockall",
  "parking_lot",
@@ -532,15 +535,17 @@ dependencies = [
  "bytes",
  "cda-database",
  "cda-interfaces",
+ "cda-plugin-security",
+ "cda-sovd",
  "cda-storage",
  "schemars",
  "serde",
  "serde_json",
  "sha2",
- "sovd-interfaces",
  "tempfile",
  "thiserror 2.0.17",
  "tokio",
+ "toml 0.9.8",
  "tracing",
  "uuid",
 ]
@@ -577,9 +582,7 @@ dependencies = [
  "bytes",
  "cda-build",
  "cda-interfaces",
- "cda-plugin-runtime-update",
  "cda-plugin-security",
- "cda-tracing",
  "chrono",
  "http",
  "indexmap",
