@@ -29,9 +29,7 @@ workspace = true
 async-trait = { workspace = true }
 cda-interfaces = { workspace = true }
 cda-comm-doip = { workspace = true }
-cda-plugin-runtime-update = { workspace = true }
 cda-plugin-security = { workspace = true }
-cda-tracing = { workspace = true }
 opensovd-axum-extra = { workspace = true, features = [
   "forwarded",
   "x-forwarded-host",
@@ -41,7 +39,7 @@ opensovd-axum-extra = { workspace = true, features = [
 sovd-interfaces = { workspace = true }
 
 # external
-tokio = { workspace = true, features = ["net"] }
+tokio = { workspace = true, features = ["net", "sync"] }
 
 # openapi generation
 aide = { workspace = true, features = [

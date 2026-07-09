@@ -27,8 +27,9 @@ use cda_interfaces::{
     DiagServiceError, EcuConnectivityHandler, FunctionalDescriptionConfig, HashMap,
     HashMapExtensions, TransportType, UdsQuery, UdsVariant,
     config::{ConfigSanity, ConfigSanityError},
-    datatypes::FaultConfig,
+    datatypes::{ComParams, FaultConfig},
     dlt_ctx,
+    runtime_update_api::UpdateGuard,
 };
 use cda_plugin_security::{
     DefaultSecurityPlugin, DefaultSecurityPluginData, SecurityPlugin, SecurityPluginLoader,
@@ -37,6 +38,10 @@ use cda_sovd::Locks;
 use cda_tracing::{OtelGuard, TracingSetupError, TracingWorkerGuard};
 use cda_transport_router::DiagnosticTransportRouter;
 use clap::{Parser, Subcommand};
+use figment::{
+    Figment,
+    providers::{Format, Serialized, Toml},
+};
 use futures::future::FutureExt;
 use tokio::sync::{Mutex, RwLock, mpsc};
 use tracing_subscriber::layer::SubscriberExt;
@@ -44,7 +49,7 @@ use tracing_subscriber::layer::SubscriberExt;
 use crate::{
     config::configfile::Configuration,
     mdd::{load_databases, resolve_mdd_paths},
-    update::{RuntimeUpdateContext, security::UpdateSecurityHandler},
+    update::RuntimeUpdateContext,
 };
 
 pub mod config;
@@ -509,30 +514,16 @@ where
     register_version_endpoints(&dynamic_router).await;
     pre_load_hook(dynamic_router.clone()).await?;
 
-    let display_address = if config.server.address == "0.0.0.0" {
-        "127.0.0.1"
-    } else {
-        &config.server.address
-    };
-    let swagger_ui_url = format!(
-        "http://{}:{}{}",
-        display_address,
-        config.server.port,
-        cda_sovd::SWAGGER_UI_ROUTE
-    );
-
     setup_vehicle_and_routes::<SP, SL>(
         config,
         &dynamic_router,
+        &webserver_config,
         health_state.as_ref(),
         clonable_shutdown_signal.clone(),
     )
     .await?;
 
-    tracing::info!(
-        "CDA fully initialized and ready to serve requests.\nYou can access the REST API \
-         documentation at: {swagger_ui_url}"
-    );
+    tracing::info!("CDA fully initialized and ready to serve requests");
     if let Some(provider) = main_health_provider {
         provider.update_status(cda_health::Status::Up).await;
     }
@@ -552,15 +543,11 @@ where
 /// # Errors
 /// Returns [`AppError`] if tracing setup, webserver startup, data loading, or route setup fails.
 pub async fn run_with_config(config: Configuration) -> Result<(), AppError> {
-    // Boxed: the composed runtime future exceeds clippy::large_futures'
-    // threshold, and this once-per-process startup future is not worth
-    // keeping on the caller's stack.
-    Box::pin(run_with_config_ext::<
-        DefaultSecurityPluginData,
-        DefaultSecurityPlugin,
-        _,
-        _,
-    >(config, vec![], |_| async { Ok(()) }))
+    run_with_config_ext::<DefaultSecurityPluginData, DefaultSecurityPlugin, _, _>(
+        config,
+        vec![],
+        |_| async { Ok(()) },
+    )
     .await
 }
 
@@ -575,6 +562,7 @@ pub async fn run_with_config(config: Configuration) -> Result<(), AppError> {
 pub async fn setup_vehicle_and_routes<SP: SecurityPlugin, SL: SecurityPluginLoader>(
     config: Configuration,
     dynamic_router: &cda_sovd::dynamic_router::DynamicRouter,
+    _webserver_config: &cda_sovd::WebServerConfig,
     health_state: Option<&cda_health::HealthState>,
     clonable_shutdown_signal: futures::future::Shared<
         impl std::future::Future<Output = ()> + Send + 'static,
@@ -641,13 +629,15 @@ pub async fn setup_vehicle_and_routes<SP: SecurityPlugin, SL: SecurityPluginLoad
             transport_router: vehicle_data.diagnostic_gateway,
             health: vehicle_data.health_providers,
             variant_detection_handle: Some(vehicle_data.variant_detection_handle),
-            security_handler: Arc::new(UpdateSecurityHandler::new(
-                Arc::clone(&lock_provider),
-                vec![
-                    Box::new(flash_transfer_guard),
-                    Box::new(ecu_execution_registry),
-                ],
-            )),
+            security_handler: Arc::new(
+                cda_plugin_runtime_update::DefaultUpdateSecurityHandler::new(
+                    Arc::clone(&lock_provider),
+                    vec![
+                        Box::new(flash_transfer_guard),
+                        Box::new(ecu_execution_registry),
+                    ],
+                ),
+            ),
         }))
         .await?;
     update::add_runtime_update_routes::<SL, _>(
@@ -829,8 +819,8 @@ pub fn create_uds_manager<S: SecurityPlugin>(
 }
 
 pub struct HealthProviders {
-    pub doip: Arc<cda_health::StatusHealthProvider>,
-    pub database: Arc<cda_health::StatusHealthProvider>,
+    pub doip: Arc<dyn cda_health::HealthProvider>,
+    pub database: Arc<dyn cda_health::HealthProvider>,
 }
 
 /// Creates vehicle components (databases, `DoIP` gateway, UDS manager) from configuration.
@@ -924,11 +914,7 @@ pub async fn create_diagnostic_gateway<S: SecurityPlugin>(
     variant_detection: mpsc::Sender<Vec<String>>,
     connectivity_handler: Arc<dyn EcuConnectivityHandler>,
     shutdown_signal: impl Future<Output = ()> + Send + 'static,
-    doip_health_provider: Option<&Arc<cda_health::StatusHealthProvider>>,
-    // `None` is only valid in CAN-only operation (doip.enabled = false); when
-    // DoIP is enabled the caller owns socket creation so the runtime-update
-    // reload path can hand the existing socket over (never two sockets bound
-    // to the same DoIP port).
+    doip_health_provider: Option<&Arc<dyn cda_health::HealthProvider>>,
     doip_socket: Option<Arc<Mutex<cda_comm_doip::socket::DoIPUdpSocket>>>,
 ) -> Result<DiagnosticTransportRouter<DoipDiagGateway<EcuManager<S>>, CanDiagGateway>, AppError> {
     let TransportConfigs {
@@ -953,8 +939,6 @@ pub async fn create_diagnostic_gateway<S: SecurityPlugin>(
         );
 
     // Fail clearly when CAN is configured on a build without CAN support.
-    // (validate_sanity rejects this too; kept as defense in depth for direct
-    // callers of this function.)
     #[cfg(not(feature = "can"))]
     if can_config.is_some() {
         return Err(AppError::ConfigurationError(
@@ -987,18 +971,14 @@ pub async fn create_diagnostic_gateway<S: SecurityPlugin>(
 }
 
 /// Initializes the `DoIP` transport, reporting the attempt on the health
-/// provider. Returns `Ok(None)` when `DoIP` is disabled by config; in that
-/// CAN-only operation (`validate_sanity` rejects configs with no transport
-/// at all) the health provider is marked `Up` immediately so readiness
-/// (/health/ready) does not wait forever on an intentionally disabled
-/// transport.
+/// provider. Returns `Ok(None)` when `DoIP` is disabled by config.
 async fn init_doip_gateway<S: SecurityPlugin>(
     databases: &Arc<DatabaseMap<S>>,
     doip_config: &DoipConfig,
     variant_detection: mpsc::Sender<Vec<String>>,
     connectivity_handler: Arc<dyn EcuConnectivityHandler>,
     shutdown_signal: impl Future<Output = ()> + Send + 'static,
-    doip_health_provider: Option<&Arc<cda_health::StatusHealthProvider>>,
+    doip_health_provider: Option<&Arc<dyn cda_health::HealthProvider>>,
     doip_socket: Option<Arc<Mutex<cda_comm_doip::socket::DoIPUdpSocket>>>,
 ) -> Result<Option<DoipDiagGateway<EcuManager<S>>>, AppError> {
     if !doip_config.enabled {
@@ -1039,7 +1019,6 @@ async fn init_doip_gateway<S: SecurityPlugin>(
             tracing::info!("DoIP gateway initialized");
             Ok(Some(d))
         }
-        // Fatal; main reports the error on exit.
         Err(e) => Err(e.into()),
     }
 }
@@ -1056,7 +1035,6 @@ async fn init_can_gateway<S: SecurityPlugin>(
             tracing::info!(interface = %can_cfg.interface, "CAN gateway initialized");
             Ok(c)
         }
-        // Fatal; main reports the error on exit.
         Err(e) => Err(e.into()),
     }
 }
@@ -1140,4 +1118,74 @@ pub fn setup_tracing(config: &Configuration) -> Result<TracingGuards, TracingSet
 #[must_use]
 pub fn cda_version() -> &'static str {
     env!("CARGO_PKG_VERSION")
+}
+
+/// Compute the effective [`ComParams`] for a single ECU.
+///
+/// Starts from the global `global` config and merges any per-ECU TOML overrides
+/// present in `ecu_table`.
+///
+/// Returns `None` (and emits a `tracing::error!`) if the TOML table cannot be
+/// serialised or if figment extraction fails - the caller should `continue` to
+/// the next ECU.
+pub fn resolve_com_params(
+    ecu_name: &str,
+    global: &ComParams,
+    ecu_overrides: Option<&config::configfile::EcuComParams>,
+) -> Option<ComParams> {
+    let params: ComParams = match ecu_overrides {
+        None => global.clone(),
+        Some(overrides) => {
+            let toml_str = match toml::to_string(overrides) {
+                Ok(s) => s,
+                Err(e) => {
+                    tracing::error!(
+                        ecu_name = %ecu_name,
+                        error = %e,
+                        "Failed to serialize per-ECU com_params TOML table; skipping ECU"
+                    );
+                    return None;
+                }
+            };
+            match Figment::from(Serialized::defaults(global))
+                .merge(Toml::string(&toml_str))
+                .extract::<ComParams>()
+            {
+                Ok(p) => p,
+                Err(e) => {
+                    tracing::error!(
+                        ecu_name = %ecu_name,
+                        error = %e,
+                        "Failed to merge per-ECU com_params overrides; skipping ECU"
+                    );
+                    return None;
+                }
+            }
+        }
+    };
+
+    Some(params)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn resolve_com_params_returns_none_on_figment_extraction_failure() {
+        let global = ComParams::default();
+        // Put a string where figment expects a table (the `uds` key should map
+        // to a struct, not a scalar); this reliably triggers an extraction error.
+        let mut table = toml::Table::new();
+        table.insert(
+            "uds".to_owned(),
+            toml::Value::String("not_a_struct".to_owned()),
+        );
+        let ecu_params = crate::config::configfile::EcuComParams(table);
+        let result = resolve_com_params("BAD_ECU", &global, Some(&ecu_params));
+        assert!(
+            result.is_none(),
+            "resolve_com_params must return None when figment extraction fails"
+        );
+    }
 }

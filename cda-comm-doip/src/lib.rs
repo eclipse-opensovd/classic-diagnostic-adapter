@@ -18,10 +18,10 @@ use std::{
 };
 
 use cda_interfaces::{
-    DiagServiceError, DoipComParams, EcuAddresses, EcuConnectivityHandler, FunctionalTransport,
-    HashMap, HashMapExtensions, NetworkTopology, PhysicalTransport, RouteStatus, ServicePayload,
-    TransmissionParameters, TransportProbe, TransportResponse, dlt_ctx, pending_nrc_from_raw,
-    uds_response_from_raw,
+    DiagServiceError, DoipComParams, EcuAddresses, EcuConnectivityHandler, EcuGatewaySockets,
+    FunctionalTransport, HashMap, HashMapExtensions, NetworkTopology, PhysicalTransport,
+    RouteStatus, ServicePayload, TransmissionParameters, TransportProbe, TransportResponse,
+    dlt_ctx, pending_nrc_from_raw, uds_response_from_raw,
     util::{self, tokio_ext},
 };
 use doip_definitions::{
@@ -363,12 +363,6 @@ impl<T: EcuAddresses + DoipComParams> DoipDiagGateway<T> {
         })
     }
 
-    /// Returns a clone of the UDP socket Arc for reuse in a new gateway instance.
-    /// This avoids binding a second socket on the same port during reloads.
-    #[must_use]
-    pub fn udp_socket(&self) -> Arc<Mutex<DoIPUdpSocket>> {
-        Arc::clone(&self.state.socket)
-    }
 
     async fn get_doip_connection(
         &self,
@@ -1135,6 +1129,23 @@ impl<T: EcuAddresses + DoipComParams> Clone for DoipDiagGateway<T> {
             cancel_token: self.cancel_token.clone(),
             vam_listener_handle: Arc::clone(&self.vam_listener_handle),
         }
+    }
+}
+
+#[async_trait::async_trait]
+impl<T: EcuAddresses + DoipComParams> cda_interfaces::Shutdown for DoipDiagGateway<T> {
+    async fn shutdown(&mut self) {
+        PhysicalTransport::shutdown(self).await;
+    }
+}
+
+impl<T: EcuAddresses + DoipComParams> EcuGatewaySockets for DoipDiagGateway<T> {
+    type Socket = DoIPUdpSocket;
+
+    fn upd_socket(
+        &self,
+    ) -> std::sync::Arc<tokio::sync::Mutex<<DoipDiagGateway<T> as EcuGatewaySockets>::Socket>> {
+        Arc::clone(&self.state.socket)
     }
 }
 

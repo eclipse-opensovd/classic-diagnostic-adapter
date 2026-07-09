@@ -18,17 +18,17 @@ use cda_comm_can::CanDiagGateway;
 use cda_comm_doip::DoipDiagGateway;
 use cda_core::EcuManager;
 use cda_interfaces::{
-    PhysicalTransport, UdsQuery,
+    EcuGatewaySockets, PhysicalTransport, Shutdown, UdsQuery,
     datatypes::ComponentsConfig,
-    runtime_update_api::{ReloadError, RuntimeFilesUpdateSecurityHandler},
+    runtime_update_api::{
+        ReloadError, RuntimeReloaderPlugin, RuntimeUpdateSecurityPlugin, UpdateGuard,
+    },
 };
 use cda_plugin_security::{SecurityPlugin, SecurityPluginLoader};
 use cda_transport_router::DiagnosticTransportRouter;
 use tokio::sync::{Mutex, RwLock};
 
 use crate::{AppError, UdsManagerType};
-
-pub mod security;
 
 pub struct ReloadHandlerDeps<S, F>
 where
@@ -102,7 +102,7 @@ where
 }
 
 #[async_trait]
-impl<S, F, P> cda_interfaces::runtime_update_api::RuntimeFileReloadHandler
+impl<S, F, P> cda_interfaces::runtime_update_api::RuntimeReloaderPlugin
     for DefaultRuntimeFileReloadHandler<S, F, P>
 where
     S: SecurityPlugin,
@@ -121,13 +121,13 @@ where
             let _ = variant_detection_handle.await;
         }
 
-        self.uds_manager.write().await.shutdown().await;
+        Shutdown::shutdown(&mut *self.uds_manager.write().await).await;
         let doip_socket = {
             let mut gw = self.transport_router.write().await;
             // `None` in CAN-only operation (no DoIP transport configured);
             // `create_vehicle_components` only needs the socket when DoIP is
             // enabled.
-            let socket = gw.doip().map(DoipDiagGateway::udp_socket);
+            let socket = gw.doip().map(EcuGatewaySockets::upd_socket);
             // Shut down all transports and await their task termination, so
             // the VAM listener has stopped reading from the shared UDP socket
             // before the replacement gateway reuses it.
@@ -208,7 +208,7 @@ async fn reload_configuration_from_path(
 pub struct RuntimeUpdateContext<
     S: SecurityPlugin,
     F,
-    T: RuntimeFilesUpdateSecurityHandler<
+    T: RuntimeUpdateSecurityPlugin<
             cda_sovd::SovdLockStateProvider,
             cda_storage::LocalCollection,
         >,
@@ -262,7 +262,7 @@ pub async fn add_runtime_update_routes<S, P>(
 /// Initializes the default runtime update plugin.
 ///
 /// Creates the reload handler, storage backend, and returns a configured
-/// [`cda_plugin_runtime_update::DefaultRuntimeFilesUpdatePlugin`] instance.
+/// runtime update plugin instance.
 /// The returned plugin is not wrapped in Arc; the caller should apply Arc wrapping
 /// if needed.
 ///
@@ -275,24 +275,13 @@ pub async fn init_default_runtime_update_plugin<S, F, P>(
         RuntimeUpdateContext<
             S,
             F,
-            impl RuntimeFilesUpdateSecurityHandler<
+            impl RuntimeUpdateSecurityPlugin<
                 cda_sovd::SovdLockStateProvider,
                 cda_storage::LocalCollection,
             >,
         >,
     >,
-) -> Result<
-    cda_plugin_runtime_update::DefaultRuntimeFilesUpdatePlugin<
-        cda_storage::LocalStorage,
-        DefaultRuntimeFileReloadHandler<S, F, P>,
-        impl RuntimeFilesUpdateSecurityHandler<
-            cda_sovd::SovdLockStateProvider,
-            cda_storage::LocalCollection,
-        >,
-        cda_sovd::SovdLockStateProvider,
-    >,
-    AppError,
->
+) -> Result<impl cda_interfaces::runtime_update_api::RuntimeFilesUpdatePlugin, AppError>
 where
     S: SecurityPlugin,
     F: Future<Output = ()> + Clone + Send + Sync + 'static,
@@ -302,37 +291,36 @@ where
     // heap-backed Arcs before the first await, keeping the future small.
     let ctx = *ctx;
     let config = Arc::new(RwLock::new(ctx.config));
-    let reload_handler = Arc::new(DefaultRuntimeFileReloadHandler::<S, F, P>::new(
-        ReloadHandlerDeps {
-            config: Arc::clone(&config),
-            dynamic_router: ctx.dynamic_router.clone(),
-            vehicle_route_handle: ctx.vehicle_route_handle,
-            flash_files_path: ctx.flash_files_path,
-            components_config: ctx.components_config,
-            lock_provider: Arc::clone(&ctx.lock_provider),
-            shutdown_signal: ctx.shutdown_signal,
-            uds_manager: RwLock::new(ctx.uds_manager),
-            transport_router: RwLock::new(ctx.transport_router),
-            update_guard: ctx.update_guard.clone(),
-            ecu_execution_registry: ctx.ecu_execution_registry,
-            health: ctx.health,
-            variant_detection_handle: Mutex::new(ctx.variant_detection_handle),
-        },
-    ));
-    let storage = Arc::new(
-        cda_storage::LocalStorage::new(&ctx.runtime_update_config.storage_dir)
-            .map_err(|e| AppError::InitializationFailed(format!("DbUpdate storage: {e}")))?,
-    );
+    let reload_handler: Arc<dyn RuntimeReloaderPlugin> =
+        Arc::new(DefaultRuntimeFileReloadHandler::<S, F, P>::new(
+            ReloadHandlerDeps {
+                config: Arc::clone(&config),
+                dynamic_router: ctx.dynamic_router.clone(),
+                vehicle_route_handle: ctx.vehicle_route_handle,
+                flash_files_path: ctx.flash_files_path,
+                components_config: ctx.components_config,
+                lock_provider: Arc::clone(&ctx.lock_provider),
+                shutdown_signal: ctx.shutdown_signal,
+                uds_manager: RwLock::new(ctx.uds_manager),
+                transport_router: RwLock::new(ctx.transport_router),
+                update_guard: ctx.update_guard.clone(),
+                ecu_execution_registry: ctx.ecu_execution_registry,
+                health: ctx.health,
+                variant_detection_handle: Mutex::new(ctx.variant_detection_handle),
+            },
+        ));
     let mdd_decompress = config.read().await.flat_buf.mdd_decompress;
 
-    let update_plugin = cda_plugin_runtime_update::DefaultRuntimeFilesUpdatePlugin::new(
-        storage,
+    let update_plugin = cda_plugin_runtime_update::init_default_runtime_update_plugin(
+        &ctx.runtime_update_config.storage_dir,
         reload_handler,
         ctx.security_handler,
         ctx.lock_provider,
         mdd_decompress,
         ctx.update_guard.busy_handle(),
-    );
+        crate::config::configfile::ConfigurationValidator::new(),
+    )
+    .map_err(|e| AppError::InitializationFailed(format!("DbUpdate plugin: {e}")))?;
     Ok(update_plugin)
 }
 

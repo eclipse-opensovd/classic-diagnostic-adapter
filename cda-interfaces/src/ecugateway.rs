@@ -13,7 +13,7 @@
 
 use std::time::Duration;
 
-use tokio::sync::{RwLock, mpsc};
+use tokio::sync::{Mutex, RwLock, mpsc};
 
 use crate::{DiagServiceError, EcuAddresses, HashMap, ServicePayload, uds::TransportResponse};
 
@@ -166,4 +166,20 @@ pub enum RouteStatus {
     /// The transport has an endpoint for the ECU, but it is currently not a
     /// usable route and cannot be made usable by an on-demand probe.
     Unavailable,
+}
+
+/// An [`EcuGateway`] that owns a reusable UDP socket.
+///
+/// Implementing this trait allows a reload handler to retrieve and hand back the existing
+/// UDP socket to the factory so that no second socket is ever bound to the same `DoIP` port
+/// during a database reload.
+///
+/// The associated type `UdpSocket` is deliberately opaque in `cda-interfaces` so that this
+/// crate stays free of any dependency on `cda-comm-doip`.
+pub trait EcuGatewaySockets {
+    /// Opaque socket handle type (e.g. `cda_comm_doip::socket::DoIPUdpSocket`).
+    type Socket: Send + Sync + 'static;
+
+    /// Returns a shared, cloneable handle to the underlying UDP socket.
+    fn upd_socket(&self) -> std::sync::Arc<Mutex<Self::Socket>>;
 }
