@@ -20,12 +20,63 @@
 // terms of the Apache License Version 2.0 which is available at
 // https://www.apache.org/licenses/LICENSE-2.0
 
-pub use default_runtime_update_plugin::DefaultRuntimeFilesUpdatePlugin;
+pub use default_runtime_update_plugin::DefaultRuntimeUpdatePlugin;
+pub use security::DefaultUpdateSecurityHandler;
 
 pub mod config;
+pub mod default_runtime_reloader_plugin;
+pub use default_runtime_reloader_plugin::{ReloadContext, RuntimeReloaderConfig};
 pub mod default_runtime_update_plugin;
 pub mod operations;
+pub mod security;
 pub mod storage;
+
+use std::sync::{Arc, atomic::AtomicBool};
+
+use cda_interfaces::runtime_update_api::{
+    ConfigValidator, LockStateProvider, RuntimeFilesUpdatePlugin, RuntimeReloaderPlugin,
+    RuntimeUpdateError, RuntimeUpdateSecurityPlugin,
+};
+use cda_storage::{LocalCollection, LocalStorage};
+
+/// Initializes the default runtime-update plugin with a local storage backend.
+///
+/// This replaces the former `DefaultRuntimeFilesUpdatePluginLoader` factory trait: callers
+/// construct the plugin directly via this function. The reload handler is accepted as
+/// `Arc<dyn RuntimeReloaderPlugin>`, allowing any implementation to be injected.
+///
+/// # Type parameters
+/// * `T` - security/integrity handler ([`RuntimeUpdateSecurityPlugin`])
+/// * `L` - lock-state provider ([`LockStateProvider`])
+/// * `V` - config validator ([`ConfigValidator`]; use `()` if no validation is needed)
+///
+/// # Errors
+/// Returns [`RuntimeUpdateError`] if the local storage directory cannot be initialised.
+pub fn init_default_runtime_update_plugin<T, L, V>(
+    storage_dir: &str,
+    reloader_plugin: Arc<dyn RuntimeReloaderPlugin>,
+    security_handler: Arc<T>,
+    lock_provider: Arc<L>,
+    mdd_decompress: bool,
+    update_in_progress: Arc<AtomicBool>,
+    config_validator: V,
+) -> Result<impl RuntimeFilesUpdatePlugin + use<T, L, V>, RuntimeUpdateError>
+where
+    T: RuntimeUpdateSecurityPlugin<L, LocalCollection>,
+    L: LockStateProvider,
+    V: ConfigValidator,
+{
+    let storage = Arc::new(LocalStorage::new(storage_dir)?);
+    Ok(DefaultRuntimeUpdatePlugin::new(
+        storage,
+        reloader_plugin,
+        security_handler,
+        lock_provider,
+        mdd_decompress,
+        update_in_progress,
+        config_validator,
+    ))
+}
 
 /// Shared test utilities for the runtime update plugin tests.
 #[cfg(test)]
@@ -39,8 +90,8 @@ pub(crate) mod test_utils {
     use bytes::Bytes;
     use cda_interfaces::{
         runtime_update_api::{
-            LockStateProvider, ReloadError, RuntimeFileReloadHandler, RuntimeUpdateError,
-            UpdateFileType, UploadFile, VerificationError,
+            ConfigValidator, LockStateProvider, ReloadError, RuntimeReloaderPlugin,
+            RuntimeUpdateError, UpdateFileType, UploadFile, VerificationError,
         },
         storage_api::{
             Collection, CollectionName, DirectFileAccess, ReadableStream, Storage, Transaction,
@@ -87,7 +138,7 @@ pub(crate) mod test_utils {
 
     #[async_trait]
     impl<L: LockStateProvider, C: Collection + DirectFileAccess + Send + Sync + 'static>
-        cda_interfaces::runtime_update_api::RuntimeFilesUpdateSecurityHandler<L, C>
+        cda_interfaces::runtime_update_api::RuntimeUpdateSecurityPlugin<L, C>
         for MockSecurityHandler
     {
         async fn check_apply_allowed(
@@ -104,10 +155,11 @@ pub(crate) mod test_utils {
             }
         }
 
-        async fn check_file_integrity(
+        async fn check_file_integrity<V: ConfigValidator>(
             &self,
             _type: UpdateFileType,
             _path: &std::path::Path,
+            _config_validator: &V,
         ) -> Result<(), VerificationError> {
             Ok(())
         }
@@ -201,7 +253,7 @@ pub(crate) mod test_utils {
     }
 
     #[async_trait]
-    impl RuntimeFileReloadHandler for RecordingReloadHandler {
+    impl RuntimeReloaderPlugin for RecordingReloadHandler {
         async fn reload_databases(&self, paths: Vec<PathBuf>) -> Result<(), ReloadError> {
             self.reload_calls.lock().unwrap().push(paths);
             Ok(())
@@ -213,11 +265,11 @@ pub(crate) mod test_utils {
         }
     }
 
-    /// A [`RuntimeFileReloadHandler`] that does nothing, useful as a default in tests.
+    /// A [`RuntimeReloaderPlugin`] that does nothing, useful as a default in tests.
     pub struct NoopReloadHandler;
 
     #[async_trait]
-    impl RuntimeFileReloadHandler for NoopReloadHandler {
+    impl RuntimeReloaderPlugin for NoopReloadHandler {
         async fn reload_databases(&self, _mdd_paths: Vec<PathBuf>) -> Result<(), ReloadError> {
             Ok(())
         }

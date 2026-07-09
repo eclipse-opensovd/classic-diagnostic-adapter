@@ -27,7 +27,7 @@ use cda_core::EcuManager;
 use cda_database::FileManager;
 use cda_interfaces::{
     EcuConnectivityHandler, FunctionalDescriptionConfig, HashMap, HashMapExtensions, UdsQuery,
-    UdsVariant, config::ConfigSanity, datatypes::FaultConfig, dlt_ctx,
+    UdsVariant, config::ConfigSanity, datatypes::{ComParams, FaultConfig}, dlt_ctx,
 };
 use cda_plugin_security::{
     DefaultSecurityPlugin, DefaultSecurityPluginData, SecurityPlugin, SecurityPluginLoader,
@@ -36,6 +36,10 @@ use cda_sovd::Locks;
 use cda_tracing::{OtelGuard, TracingSetupError, TracingWorkerGuard};
 use clap::{Parser, Subcommand};
 pub use error::AppError;
+use figment::{
+    Figment,
+    providers::{Format, Serialized, Toml},
+};
 use futures::future::FutureExt;
 use tokio::sync::{Mutex, RwLock, mpsc};
 use tracing_subscriber::layer::SubscriberExt;
@@ -390,30 +394,16 @@ where
     register_version_endpoints(&dynamic_router).await;
     pre_load_hook(dynamic_router.clone()).await?;
 
-    let display_address = if config.server.address == "0.0.0.0" {
-        "127.0.0.1"
-    } else {
-        &config.server.address
-    };
-    let swagger_ui_url = format!(
-        "http://{}:{}{}",
-        display_address,
-        config.server.port,
-        cda_sovd::SWAGGER_UI_ROUTE
-    );
-
     setup_vehicle_and_routes::<SP, SL>(
         config,
         &dynamic_router,
+        &webserver_config,
         health_state.as_ref(),
         clonable_shutdown_signal.clone(),
     )
     .await?;
 
-    tracing::info!(
-        "CDA fully initialized and ready to serve requests.\nYou can access the REST API \
-         documentation at: {swagger_ui_url}"
-    );
+    tracing::info!("CDA fully initialized and ready to serve requests");
     if let Some(provider) = main_health_provider {
         provider.update_status(cda_health::Status::Up).await;
     }
@@ -456,6 +446,7 @@ pub async fn run_with_config(config: Configuration) -> Result<(), AppError> {
 pub async fn setup_vehicle_and_routes<SP: SecurityPlugin, SL: SecurityPluginLoader>(
     config: Configuration,
     dynamic_router: &cda_sovd::dynamic_router::DynamicRouter,
+    webserver_config: &cda_sovd::WebServerConfig,
     health_state: Option<&cda_health::HealthState>,
     clonable_shutdown_signal: futures::future::Shared<
         impl std::future::Future<Output = ()> + Send + 'static,
@@ -541,7 +532,8 @@ pub async fn setup_vehicle_and_routes<SP: SecurityPlugin, SL: SecurityPluginLoad
     )
     .await;
 
-    cda_sovd::add_openapi_routes(dynamic_router, &vehicle_data.update_guard).await;
+    cda_sovd::add_openapi_routes(dynamic_router, &vehicle_data.update_guard, webserver_config)
+        .await;
 
     cda_sovd::install_update_guard(dynamic_router, vehicle_data.update_guard.clone()).await;
 
@@ -1021,4 +1013,74 @@ pub fn setup_tracing(config: &Configuration) -> Result<TracingGuards, TracingSet
 #[must_use]
 pub fn cda_version() -> &'static str {
     option_env!("CDA_VERSION").unwrap_or(env!("CARGO_PKG_VERSION"))
+}
+
+/// Compute the effective [`ComParams`] for a single ECU.
+///
+/// Starts from the global `global` config and merges any per-ECU TOML overrides
+/// present in `ecu_table`.
+///
+/// Returns `None` (and emits a `tracing::error!`) if the TOML table cannot be
+/// serialised or if figment extraction fails - the caller should `continue` to
+/// the next ECU.
+pub fn resolve_com_params(
+    ecu_name: &str,
+    global: &ComParams,
+    ecu_overrides: Option<&config::configfile::EcuComParams>,
+) -> Option<ComParams> {
+    let params: ComParams = match ecu_overrides {
+        None => global.clone(),
+        Some(overrides) => {
+            let toml_str = match toml::to_string(overrides) {
+                Ok(s) => s,
+                Err(e) => {
+                    tracing::error!(
+                        ecu_name = %ecu_name,
+                        error = %e,
+                        "Failed to serialize per-ECU com_params TOML table; skipping ECU"
+                    );
+                    return None;
+                }
+            };
+            match Figment::from(Serialized::defaults(global))
+                .merge(Toml::string(&toml_str))
+                .extract::<ComParams>()
+            {
+                Ok(p) => p,
+                Err(e) => {
+                    tracing::error!(
+                        ecu_name = %ecu_name,
+                        error = %e,
+                        "Failed to merge per-ECU com_params overrides; skipping ECU"
+                    );
+                    return None;
+                }
+            }
+        }
+    };
+
+    Some(params)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn resolve_com_params_returns_none_on_figment_extraction_failure() {
+        let global = ComParams::default();
+        // Put a string where figment expects a table (the `uds` key should map
+        // to a struct, not a scalar); this reliably triggers an extraction error.
+        let mut table = toml::Table::new();
+        table.insert(
+            "uds".to_owned(),
+            toml::Value::String("not_a_struct".to_owned()),
+        );
+        let ecu_params = crate::config::configfile::EcuComParams(table);
+        let result = resolve_com_params("BAD_ECU", &global, Some(&ecu_params));
+        assert!(
+            result.is_none(),
+            "resolve_com_params must return None when figment extraction fails"
+        );
+    }
 }
