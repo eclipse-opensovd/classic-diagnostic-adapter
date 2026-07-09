@@ -19,12 +19,12 @@ use std::{
 
 use cda_core::{EcuManager, EcuManagerConfig};
 use cda_database::{FileManager, ProtoLoadConfig, update_mdd_uncompressed};
-use cda_health::StatusHealthProvider;
 use cda_interfaces::{
     EcuAddresses, EcuManager as EcuManagerTrait, EcuManagerType, FunctionalDescriptionConfig,
     HashMap, HashMapEntry, HashMapExtensions, HashSet, Protocol,
     datatypes::{ComParams, DatabaseNamingConvention, FlatbBufConfig},
     file_manager::{Chunk, ChunkType},
+    health::HealthProvider,
     storage_api::{Collection, CollectionName, DirectFileAccess, Storage},
 };
 use cda_plugin_security::SecurityPlugin;
@@ -129,7 +129,7 @@ fn get_mdd_files_and_size(files: ReadDir) -> Vec<(PathBuf, u64)> {
 pub async fn load_databases<S: SecurityPlugin>(
     config: &Configuration,
     mdd_paths: &[PathBuf],
-    db_health_provider: Option<&Arc<StatusHealthProvider>>,
+    db_health_provider: Option<&Arc<dyn HealthProvider>>,
 ) -> Result<(DatabaseMap<S>, FileManagerMap), AppError> {
     if let Some(provider) = db_health_provider {
         provider.update_status(cda_health::Status::Starting).await;

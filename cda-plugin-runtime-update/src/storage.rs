@@ -24,9 +24,9 @@ use std::{fmt::Write, sync::Arc};
 
 use cda_interfaces::{
     runtime_update_api::{
-        BulkDataCreated, BulkDataCreatedList, BulkDataDescriptor, BulkDataList, HashAlgorithm,
-        LockStateProvider, RuntimeFilesQuery, RuntimeFilesUpdateSecurityHandler,
-        RuntimeUpdateError, UpdateFileType, UploadFile,
+        BulkDataCreated, BulkDataCreatedList, BulkDataDescriptor, BulkDataList, ConfigValidator,
+        HashAlgorithm, LockStateProvider, RuntimeFilesQuery, RuntimeUpdateError,
+        RuntimeUpdateSecurityPlugin, UpdateFileType, UploadFile,
     },
     storage_api::{
         Collection, CollectionName, DirectFileAccess, RandomAccessData, Storage, StorageError,
@@ -335,12 +335,14 @@ pub async fn compute_nextupdate_state(
 /// deleted (best-effort) and the error is returned; previously accepted files are kept.
 pub(crate) async fn upload_files<
     S: Storage + 'static,
-    T: RuntimeFilesUpdateSecurityHandler<L, S::CollectionHandle>,
+    T: RuntimeUpdateSecurityPlugin<L, S::CollectionHandle>,
     L: LockStateProvider,
+    V: ConfigValidator,
 >(
     storage: &S,
     security_handler: &T,
     files: Vec<UploadFile>,
+    config_validator: &V,
 ) -> Result<BulkDataCreatedList, RuntimeUpdateError> {
     let mut result = BulkDataCreatedList::default();
     let mut config_seen = false;
@@ -398,6 +400,7 @@ pub(crate) async fn upload_files<
                     &mdd_collection,
                     &key,
                     UpdateFileType::Mdd,
+                    config_validator,
                 )
                 .await?;
 
@@ -434,6 +437,7 @@ pub(crate) async fn upload_files<
                     &cfg_collection,
                     &key,
                     UpdateFileType::Config,
+                    config_validator,
                 )
                 .await?;
 
@@ -448,17 +452,19 @@ pub(crate) async fn upload_files<
 
 async fn check_file_integrity_and_roll_back_on_error<
     S: Storage + 'static,
-    T: RuntimeFilesUpdateSecurityHandler<L, S::CollectionHandle>,
+    T: RuntimeUpdateSecurityPlugin<L, S::CollectionHandle>,
     L: LockStateProvider,
+    V: ConfigValidator,
 >(
     storage: &S,
     security_handler: &T,
     collection: &Arc<impl Collection + DirectFileAccess>,
     key: &String,
     file_type: UpdateFileType,
+    config_validator: &V,
 ) -> Result<(), RuntimeUpdateError> {
     if let Err(verification_error) = security_handler
-        .check_file_integrity(file_type, &collection.file_path(key)?)
+        .check_file_integrity(file_type, &collection.file_path(key)?, config_validator)
         .await
     {
         tracing::warn!(
@@ -525,7 +531,8 @@ mod tests {
 
     use cda_interfaces::{
         runtime_update_api::{
-            BulkDataCreatedList, HashAlgorithm, RuntimeFilesQuery, RuntimeUpdateError, UploadFile,
+            BulkDataCreatedList, ConfigValidator, HashAlgorithm, RuntimeFilesQuery,
+            RuntimeUpdateError, UploadFile,
         },
         storage_api::{Collection, CollectionName, RandomAccessData, Storage, StorageError},
     };
@@ -542,10 +549,11 @@ mod tests {
         storage: &S,
         files: Vec<UploadFile>,
     ) -> Result<BulkDataCreatedList, RuntimeUpdateError> {
-        upload_files::<S, MockSecurityHandler, MockLockProvider>(
+        upload_files::<S, MockSecurityHandler, MockLockProvider, ()>(
             storage,
             &MockSecurityHandler::new(),
             files,
+            &(),
         )
         .await
     }
@@ -562,7 +570,7 @@ mod tests {
             + Send
             + Sync
             + 'static,
-    > cda_interfaces::runtime_update_api::RuntimeFilesUpdateSecurityHandler<L, C>
+    > cda_interfaces::runtime_update_api::RuntimeUpdateSecurityPlugin<L, C>
         for RejectingSecurityHandler
     {
         async fn check_apply_allowed(
@@ -573,10 +581,11 @@ mod tests {
             Ok(())
         }
 
-        async fn check_file_integrity(
+        async fn check_file_integrity<V: ConfigValidator>(
             &self,
             type_: cda_interfaces::runtime_update_api::UpdateFileType,
             _path: &std::path::Path,
+            _config_validator: &V,
         ) -> Result<(), cda_interfaces::runtime_update_api::VerificationError> {
             if matches!(
                 (&type_, &self.reject_type),
@@ -601,10 +610,11 @@ mod tests {
         files: Vec<cda_interfaces::runtime_update_api::UploadFile>,
         reject_type: cda_interfaces::runtime_update_api::UpdateFileType,
     ) -> Result<BulkDataCreatedList, RuntimeUpdateError> {
-        upload_files::<S, RejectingSecurityHandler, MockLockProvider>(
+        upload_files::<S, RejectingSecurityHandler, MockLockProvider, ()>(
             storage,
             &RejectingSecurityHandler { reject_type },
             files,
+            &(),
         )
         .await
     }
@@ -621,7 +631,7 @@ mod tests {
             + Send
             + Sync
             + 'static,
-    > cda_interfaces::runtime_update_api::RuntimeFilesUpdateSecurityHandler<L, C>
+    > cda_interfaces::runtime_update_api::RuntimeUpdateSecurityPlugin<L, C>
         for RejectingByNameSecurityHandler
     {
         async fn check_apply_allowed(
@@ -632,10 +642,11 @@ mod tests {
             Ok(())
         }
 
-        async fn check_file_integrity(
+        async fn check_file_integrity<V: ConfigValidator>(
             &self,
             _type_: cda_interfaces::runtime_update_api::UpdateFileType,
             path: &std::path::Path,
+            _config_validator: &V,
         ) -> Result<(), cda_interfaces::runtime_update_api::VerificationError> {
             if path.file_name().and_then(|n| n.to_str()) == Some(self.reject_filename) {
                 return Err(cda_interfaces::runtime_update_api::VerificationError(
@@ -651,10 +662,11 @@ mod tests {
         files: Vec<cda_interfaces::runtime_update_api::UploadFile>,
         reject_filename: &'static str,
     ) -> Result<BulkDataCreatedList, RuntimeUpdateError> {
-        upload_files::<S, RejectingByNameSecurityHandler, MockLockProvider>(
+        upload_files::<S, RejectingByNameSecurityHandler, MockLockProvider, ()>(
             storage,
             &RejectingByNameSecurityHandler { reject_filename },
             files,
+            &(),
         )
         .await
     }

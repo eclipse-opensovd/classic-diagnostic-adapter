@@ -12,7 +12,7 @@
  */
 
 use cda_interfaces::{
-    runtime_update_api::{RuntimeFileReloadHandler, RuntimeUpdateError},
+    runtime_update_api::{RuntimeReloaderPlugin, RuntimeUpdateError},
     storage_api::{CollectionName, Storage, Transaction},
 };
 
@@ -46,7 +46,7 @@ async fn swap_collection<S: Storage>(
 ///
 /// # Errors
 /// Returns [`RuntimeUpdateError`] if validation, transaction, or reload fails.
-pub async fn execute_apply<S: Storage, R: RuntimeFileReloadHandler>(
+pub async fn execute_apply<S: Storage, R: RuntimeReloaderPlugin + ?Sized>(
     storage: &S,
     reload_handler: &R,
     mdd_decompress: bool,
@@ -137,7 +137,7 @@ mod tests {
     }
 
     #[async_trait]
-    impl cda_interfaces::runtime_update_api::RuntimeFileReloadHandler for OrderingReloadHandler {
+    impl cda_interfaces::runtime_update_api::RuntimeReloaderPlugin for OrderingReloadHandler {
         async fn reload_databases(
             &self,
             _paths: Vec<std::path::PathBuf>,

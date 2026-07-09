@@ -23,7 +23,7 @@ use cda_interfaces::runtime_update_api::{
 };
 use sovd_interfaces::error::{ApiErrorResponse, ErrorCode};
 
-use crate::{VendorErrorCode, sovd::update_guard::ExemptRoute};
+use crate::{ExemptRoute, VendorErrorCode};
 
 const EXECUTIONS_ROUTE: &str =
     "/vehicle/v15/apps/sovd2uds/bulk-data/runtimefiles-nextupdate/executions";

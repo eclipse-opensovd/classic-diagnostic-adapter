@@ -27,17 +27,27 @@
 //!
 //! The concrete plugin implementation lives in `cda-plugin-runtime-update`.
 
-use std::{path::PathBuf, str::FromStr, sync::Arc};
+use std::{
+    path::PathBuf,
+    str::FromStr,
+    sync::{Arc, atomic::AtomicBool},
+};
 
 use async_trait::async_trait;
 use bytes::Bytes;
 use serde::{Deserialize, Deserializer, Serialize};
 use strum_macros::EnumString;
+use tokio::sync::Mutex;
 
-use crate::storage_api::{Collection, DirectFileAccess};
+use crate::{
+    HashMap, Shutdown, UdsQuery,
+    ecugateway::EcuGatewaySockets,
+    file_manager::FileManager,
+    storage_api::{Collection, DirectFileAccess},
+};
 
 mod error;
-pub use error::{ReloadError, RuntimeUpdateError, VerificationError};
+pub use error::{ConfigValidationError, ReloadError, RuntimeUpdateError, VerificationError};
 
 /// Guards against activity during a runtime update.
 pub trait ActivityGuard: Send + Sync + 'static {
@@ -50,6 +60,61 @@ impl ActivityGuard for Vec<Box<dyn ActivityGuard>> {
     }
 }
 
+/// Minimal in-progress-update signal needed by a reload handler.
+///
+/// Provides a shared handle to an "update in progress" flag.
+pub trait UpdateGuard: Clone + Send + Sync + 'static {
+    /// Returns a shared handle to the "update in progress" flag.
+    fn busy_handle(&self) -> Arc<AtomicBool>;
+}
+
+/// The result of creating a fresh set of vehicle components inside
+/// [`VehicleComponentFactory::create`].
+pub struct VehicleComponents<UdsManager, EcuSockets, File>
+where
+    UdsManager: UdsQuery + Shutdown,
+    EcuSockets: EcuGatewaySockets + Shutdown,
+    File: FileManager,
+{
+    pub uds_manager: UdsManager,
+    pub file_managers: HashMap<String, File>,
+    pub diagnostic_gateway: EcuSockets,
+    pub variant_detection_handle: tokio::task::JoinHandle<()>,
+    pub functional_group_config: crate::FunctionalDescriptionConfig,
+}
+
+/// Async factory that recreates vehicle components (UDS manager, `DoIP` gateway,
+/// file managers, variant-detection task) from a configuration snapshot and new MDD paths.
+///
+///
+/// # Type parameters
+/// - `C`: opaque application configuration
+/// - `Q`: UDS manager type - must implement [`UdsQuery`] + [`Shutdown`]
+/// - `G`: diagnostic gateway type - must implement [`EcuGatewaySockets`] + [`Shutdown`]
+#[async_trait]
+pub trait VehicleComponentFactory<Config, Uds, Gateway>: Send + Sync + 'static
+where
+    Config: Send + Sync + 'static,
+    Uds: UdsQuery + Shutdown,
+    Gateway: EcuGatewaySockets + Shutdown,
+{
+    /// Concrete file-manager type produced by this factory.
+    type FileManager: FileManager;
+
+    /// Creates a fresh set of vehicle components.
+    ///
+    /// `existing_udp_socket` is the socket currently owned by the gateway that is being
+    /// replaced.  The implementation should reuse it to avoid binding a second socket to
+    /// the same port while the old gateway is still running.
+    async fn create(
+        &self,
+        config: &Config,
+        mdd_paths: &[PathBuf],
+        update_in_progress: Arc<AtomicBool>,
+        existing_udp_socket: Arc<Mutex<Gateway::Socket>>,
+    ) -> Result<VehicleComponents<Uds, Gateway, Self::FileManager>, ReloadError>;
+}
+
 /// A file to be uploaded to the CDA during a runtime update.
 #[derive(Debug)]
 pub struct UploadFile {
@@ -59,7 +124,7 @@ pub struct UploadFile {
     pub data: Bytes,
 }
 
-/// Collections passed to [`RuntimeFilesUpdateSecurityHandler::check_apply_allowed`].
+/// Collections passed to [`RuntimeUpdateSecurityPlugin::check_apply_allowed`].
 ///
 /// Provides direct access to the staged (`*NextUpdate`) and currently active collections
 /// so implementations can inspect file lists, read metadata, or verify file content
@@ -114,7 +179,7 @@ pub trait LockStateProvider: Send + Sync + 'static {
 /// Implementors bridge the runtime-files plugin to the application's live diagnostic state,
 /// ensuring that newly applied MDD databases and configuration are picked up without a restart.
 #[async_trait]
-pub trait RuntimeFileReloadHandler: Send + Sync + 'static {
+pub trait RuntimeReloaderPlugin: Send + Sync + 'static {
     /// Loads (or re-loads) the MDD databases at the given paths into the running system.
     ///
     /// Called after a successful apply operation with the paths of all newly active MDD files.
@@ -124,7 +189,33 @@ pub trait RuntimeFileReloadHandler: Send + Sync + 'static {
     ///
     /// Called when a configuration file is part of the applied update.
     /// The default implementation is a no-op (returns `Ok(())`).
-    async fn reload_configuration(&self, _config_path: PathBuf) -> Result<(), ReloadError>;
+    async fn reload_configuration(&self, config_path: PathBuf) -> Result<(), ReloadError>;
+}
+
+/// Validates configuration file content during runtime updates.
+///
+/// Implementors parse and validate TOML (or other format) configuration files
+/// to ensure they are syntactically valid and semantically acceptable before
+/// being applied.
+pub trait ConfigValidator: Send + Sync + 'static {
+    /// Validates configuration file content.
+    ///
+    /// # Arguments
+    /// * `content` - Raw file content as string
+    ///
+    /// # Returns
+    /// * `Ok(())` if configuration is valid
+    /// * `Err(ConfigValidationError)` if invalid
+    /// # Errors
+    /// Returns `ConfigValidationError` on failure during validation.
+    fn validate(&self, content: &str) -> Result<(), ConfigValidationError>;
+}
+
+/// No-Op configuration validator, which can be used to skip configuration validation.
+impl ConfigValidator for () {
+    fn validate(&self, _content: &str) -> Result<(), ConfigValidationError> {
+        Ok(())
+    }
 }
 
 /// Security and file integrity handler for the diagnostic database update process.
@@ -137,7 +228,7 @@ pub trait RuntimeFileReloadHandler: Send + Sync + 'static {
 /// Vehicle lock ownership for modifying operations (upload, delete) is enforced at
 /// the HTTP handler layer in cda-sovd, not through this trait.
 #[async_trait]
-pub trait RuntimeFilesUpdateSecurityHandler<
+pub trait RuntimeUpdateSecurityPlugin<
     L: LockStateProvider,
     C: Collection + DirectFileAccess + Send + Sync + 'static,
 >: Send + Sync + 'static
@@ -164,12 +255,18 @@ pub trait RuntimeFilesUpdateSecurityHandler<
     /// Implementations may perform signature verification, hash checks, version
     /// compatibility validation, or any other file-level security checks.
     ///
+    /// # Arguments
+    /// * `type_` - The type of file being validated (MDD or Config)
+    /// * `path` - Path to the file to validate
+    /// * `config_validator` - Validator for configuration file content.
+    ///
     /// # Errors
     /// Return [`VerificationError`] to abort the apply operation.
-    async fn check_file_integrity(
+    async fn check_file_integrity<V: ConfigValidator>(
         &self,
         type_: UpdateFileType,
         path: &std::path::Path,
+        config_validator: &V,
     ) -> Result<(), VerificationError>;
 }
 
@@ -293,7 +390,7 @@ pub struct UpdateExecution {
 /// and executing apply/rollback/cleanup operations on the diagnostic database.
 ///
 /// Security validation for mutating operations is delegated to the associated
-/// [`RuntimeFilesUpdateSecurityHandler`].
+/// [`RuntimeUpdateSecurityPlugin`].
 #[async_trait]
 pub trait RuntimeFilesUpdatePlugin: Send + Sync + 'static {
     /// Lists the currently active diagnostic runtime files.

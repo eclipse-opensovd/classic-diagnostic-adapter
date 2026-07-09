@@ -26,6 +26,7 @@ use axum::{
     http::StatusCode,
     response::{IntoResponse, Response},
 };
+use cda_interfaces::runtime_update_api::UpdateGuard;
 use http::Method;
 use tokio::sync::RwLock;
 use tower::{Layer, Service};
@@ -56,14 +57,6 @@ impl UpdateGuardState {
         }
     }
 
-    /// Returns a shared handle to the in-progress flag.
-    ///
-    /// Callers can set or clear this flag to signal whether an update is currently active.
-    #[must_use]
-    pub fn busy_handle(&self) -> Arc<AtomicBool> {
-        Arc::clone(&self.busy)
-    }
-
     /// Registers a single route that should bypass the update guard.
     pub async fn add_exempt(&self, route: ExemptRoute) {
         self.exempt_routes.write().await.push(route);
@@ -72,6 +65,23 @@ impl UpdateGuardState {
     /// Registers multiple routes that should bypass the update guard.
     pub async fn extend_exempt(&self, routes: impl IntoIterator<Item = ExemptRoute>) {
         self.exempt_routes.write().await.extend(routes);
+    }
+
+    /// Returns `true` when an update is currently in progress.
+    #[must_use]
+    pub fn is_busy(&self) -> bool {
+        self.busy.load(Ordering::Acquire)
+    }
+
+    /// Returns a shared reference to the exempt routes list.
+    pub async fn exempt_routes(&self) -> Vec<ExemptRoute> {
+        self.exempt_routes.read().await.clone()
+    }
+}
+
+impl UpdateGuard for UpdateGuardState {
+    fn busy_handle(&self) -> Arc<AtomicBool> {
+        Arc::clone(&self.busy)
     }
 }
 
@@ -127,10 +137,10 @@ where
         // Heap-allocate the future because async blocks are opaque, unsized types
         // that cannot satisfy the concrete `Pin<Box<dyn Future>>` return type directly.
         Box::pin(async move {
-            if state.busy.load(Ordering::Acquire) {
+            if state.is_busy() {
                 let path = req.uri().path().to_owned();
                 let method = req.method().clone();
-                let exempt_routes = state.exempt_routes.read().await;
+                let exempt_routes = state.exempt_routes().await;
                 let is_exempt = exempt_routes.iter().any(|exempt| {
                     path.starts_with(&exempt.prefix) && exempt.methods.contains(&method)
                 });

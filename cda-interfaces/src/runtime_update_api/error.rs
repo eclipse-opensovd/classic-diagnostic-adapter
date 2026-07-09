@@ -77,3 +77,8 @@ pub struct VerificationError(pub String);
 #[derive(Debug, thiserror::Error)]
 #[error("Reload error: {0}")]
 pub struct ReloadError(pub String);
+
+/// Error type for configuration validation failures.
+#[derive(Debug, thiserror::Error)]
+#[error("Config validation error: {0}")]
+pub struct ConfigValidationError(pub String);

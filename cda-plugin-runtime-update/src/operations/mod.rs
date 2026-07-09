@@ -23,7 +23,7 @@
 use std::sync::Arc;
 
 use cda_interfaces::{
-    runtime_update_api::{RuntimeFileReloadHandler, RuntimeUpdateError},
+    runtime_update_api::{RuntimeReloaderPlugin, RuntimeUpdateError},
     storage_api::{
         Collection, CollectionName, DirectFileAccess, Storage, StorageError, Transaction,
     },
@@ -56,7 +56,10 @@ pub(crate) async fn delete_collection_ignore_missing<S: Storage>(
     }
 }
 
-pub(crate) async fn reload_configuration_if_present<S: Storage, R: RuntimeFileReloadHandler>(
+pub(crate) async fn reload_configuration_if_present<
+    S: Storage,
+    R: RuntimeReloaderPlugin + ?Sized,
+>(
     storage: &S,
     reload_handler: &R,
 ) -> Result<(), RuntimeUpdateError> {
@@ -74,7 +77,7 @@ pub(crate) async fn reload_configuration_if_present<S: Storage, R: RuntimeFileRe
     Ok(())
 }
 
-pub(crate) async fn reload_database_if_present<S: Storage, R: RuntimeFileReloadHandler>(
+pub(crate) async fn reload_database_if_present<S: Storage, R: RuntimeReloaderPlugin + ?Sized>(
     storage: &S,
     reload_handler: &R,
     decompress: bool,
