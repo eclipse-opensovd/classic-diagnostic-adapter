@@ -27,7 +27,6 @@ use cda_interfaces::{
 };
 use cda_plugin_security::{DefaultSecurityPlugin, DefaultSecurityPluginData};
 use cda_tracing::LoggingConfig;
-use futures::FutureExt as _;
 use http::{Method, StatusCode};
 use opensovd_cda_lib::{
     cda_version,
@@ -305,10 +304,9 @@ fn start_cda(config: Configuration) {
         let (shutdown_tx, mut shutdown_rx) = tokio::sync::broadcast::channel(1);
         *CDA_SHUTDOWN.lock().await = Some(shutdown_tx);
 
-        let clonable_shutdown_signal = async move {
+        let clonable_shutdown_signal = cda_interfaces::shutdown_signal(async move {
             shutdown_rx.recv().await.ok();
-        }
-        .shared();
+        });
 
         // Launch the webserver with deferred initialization
         let (dynamic_router, webserver_join_handle) =
@@ -342,7 +340,7 @@ fn start_cda(config: Configuration) {
         };
         let health = Some(health);
 
-        let vehicle_data = opensovd_cda_lib::load_vehicle_data::<_, DefaultSecurityPluginData>(
+        let vehicle_data = opensovd_cda_lib::load_vehicle_data::<DefaultSecurityPluginData>(
             &config,
             clonable_shutdown_signal.clone(),
             health.as_ref(),

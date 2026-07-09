@@ -28,14 +28,14 @@ use std::sync::{
 use cda_interfaces::{
     HashMap,
     runtime_update_api::{
-        ExecutionMode, ExecutionStatus, LockStateProvider, RuntimeFileReloadHandler,
-        RuntimeFilesUpdateSecurityHandler, RuntimeUpdateError, UpdateCollections, UpdateExecution,
+        ExecutionMode, ExecutionStatus, LockStateProvider, RuntimeReloaderPlugin,
+        RuntimeUpdateError, RuntimeUpdateSecurityPlugin, UpdateCollections, UpdateExecution,
     },
     storage_api::{CollectionName, Storage},
 };
 use tokio::sync::RwLock;
 
-pub(crate) struct ExecutionParams<'a, S, R, T, L> {
+pub(crate) struct ExecutionParams<'a, S, R: ?Sized, T, L> {
     pub(crate) storage: &'a Arc<S>,
     pub(crate) security_handler: &'a Arc<T>,
     pub(crate) reload_handler: &'a Arc<R>,
@@ -44,15 +44,14 @@ pub(crate) struct ExecutionParams<'a, S, R, T, L> {
     pub(crate) mdd_decompress: bool,
     pub(crate) lock_state_provider: &'a L,
 }
-
 pub(crate) async fn start_execution<S, R, T, L>(
     params: &ExecutionParams<'_, S, R, T, L>,
     mode: ExecutionMode,
 ) -> Result<String, RuntimeUpdateError>
 where
     S: Storage + Send + Sync + 'static,
-    R: RuntimeFileReloadHandler,
-    T: RuntimeFilesUpdateSecurityHandler<L, S::CollectionHandle>,
+    R: RuntimeReloaderPlugin + ?Sized,
+    T: RuntimeUpdateSecurityPlugin<L, S::CollectionHandle>,
     L: LockStateProvider,
 {
     params
@@ -177,7 +176,7 @@ async fn execute_operation<S, R>(
 ) -> Result<(), RuntimeUpdateError>
 where
     S: Storage + Send + Sync + 'static,
-    R: RuntimeFileReloadHandler,
+    R: RuntimeReloaderPlugin + ?Sized,
 {
     match mode {
         ExecutionMode::Apply => {

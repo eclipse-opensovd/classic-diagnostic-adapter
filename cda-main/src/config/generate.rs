@@ -11,7 +11,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-use std::{collections::BTreeMap, fmt::Write};
+use std::{collections::BTreeMap, fmt::Write, path::PathBuf};
 
 use cda_interfaces::{FunctionalDescriptionConfig, datatypes::FaultConfig};
 

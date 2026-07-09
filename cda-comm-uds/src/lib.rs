@@ -149,21 +149,6 @@ impl<S: EcuGateway, T: EcuManager> UdsManager<S, T> {
     pub fn state_coordinator(&self) -> EcuStateCoordinator {
         self.state_coordinator.clone()
     }
-
-    /// Abort all background tasks owned by this instance. Idempotent.
-    pub async fn shutdown(&self) {
-        let mut tester_present_tasks = self.tester_present_tasks.write().await;
-        let mut session_reset_tasks = self.session_reset_tasks.write().await;
-        let mut security_reset_tasks = self.security_reset_tasks.write().await;
-        let mut data_transfers = self.data_transfers.lock().await;
-        tester_present_tasks
-            .drain()
-            .map(|(_, tp)| tp.task)
-            .chain(session_reset_tasks.drain().map(|(_, h)| h))
-            .chain(security_reset_tasks.drain().map(|(_, h)| h))
-            .chain(data_transfers.drain().map(|(_, t)| t.task))
-            .for_each(|h| h.abort());
-    }
 }
 
 impl<S: Clone + EcuGateway, T: UdsEcuDb> Clone for UdsManager<S, T> {
@@ -181,6 +166,23 @@ impl<S: Clone + EcuGateway, T: UdsEcuDb> Clone for UdsManager<S, T> {
             fault_config: self.fault_config.clone(),
             update_in_progress: Arc::clone(&self.update_in_progress),
         }
+    }
+}
+
+#[async_trait::async_trait]
+impl<S: EcuGateway, T: EcuManager> cda_interfaces::Shutdown for UdsManager<S, T> {
+    async fn shutdown(&mut self) {
+        let mut tester_present_tasks = self.tester_present_tasks.write().await;
+        let mut session_reset_tasks = self.session_reset_tasks.write().await;
+        let mut security_reset_tasks = self.security_reset_tasks.write().await;
+        let mut data_transfers = self.data_transfers.lock().await;
+        tester_present_tasks
+            .drain()
+            .map(|(_, tp)| tp.task)
+            .chain(session_reset_tasks.drain().map(|(_, h)| h))
+            .chain(security_reset_tasks.drain().map(|(_, h)| h))
+            .chain(data_transfers.drain().map(|(_, t)| t.task))
+            .for_each(|h| h.abort());
     }
 }
 
