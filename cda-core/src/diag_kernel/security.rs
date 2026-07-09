@@ -36,56 +36,7 @@ impl<S: SecurityPlugin> EcuSecurity for EcuManager<S> {
             )?;
             Ok(SecurityAccess::SendKey(security_service))
         } else {
-            // Find the RequestSeed service for the requested level by searching all SID 0x27
-            // services in the ISO 14229-1 RequestSeed subfunction range and selecting the one
-            // whose short name contains the level name (underscores stripped, case-insensitive).
-            // 2 request parameters (SID + subfunction, no key payload) distinguishes RequestSeed
-            // from SendKey services whose subfunctions overlap in the ISO range.
-            let level_sub_func: Option<u32> = level
-                .split('_')
-                .next_back()
-                .and_then(|l| u32::from_str_radix(l, 16).ok().or_else(|| l.parse().ok()));
-            let level_stripped = level.replace('_', "");
-            let request_seed_service = self
-                .lookup_services_by_sid(service_ids::SECURITY_ACCESS)?
-                .into_iter()
-                .find(|service| {
-                    let service: datatypes::DiagService = (**service).into();
-
-                    let Some(sid) = service.request_id() else {
-                        return false;
-                    };
-                    let Some((sub_func, _)) = service.request_sub_function_id() else {
-                        return false;
-                    };
-
-                    sid == service_ids::SECURITY_ACCESS
-                        && matches!(sub_func, 1 | 3..=5 | 7..=41)
-                        && service
-                            .request()
-                            .is_some_and(|r| r.params().is_some_and(|p| p.len() >= 2))
-                        // Try matching by name first, if that did not yield a result,
-                        // check if the subfunction ID matches the level.
-                        && (service.diag_comm().is_some_and(|dc| {
-                            dc.short_name().is_some_and(|n| {
-                                contains_ignore_ascii_case(&n.replace('_', ""), &level_stripped)
-                            })
-                        })  || Some(sub_func) == level_sub_func)
-                })
-                .ok_or_else(|| {
-                    DiagServiceError::NotFound(format!(
-                        "No matching 'request seed' SecurityAccess service found for level \
-                         '{level}'"
-                    ))
-                })?;
-
-            let request_seed_service = request_seed_service.try_into()?;
-            tracing::debug!(
-                "Found request_seed_service: {request_seed_service:?}, sub function id \
-                 {level_sub_func:?}"
-            );
-
-            Ok(SecurityAccess::RequestSeed(request_seed_service))
+            lookup_request_seed_service(self, level)
         }
     }
 
@@ -277,6 +228,67 @@ impl<S: SecurityPlugin> EcuManager<S> {
         )?;
         validate_state(&allowed_session, &ecu_session, &default_session, "Session")
     }
+}
+
+/// Finds the `RequestSeed` `SecurityAccess` service (SID `0x27`) matching the
+/// given security level name.
+///
+/// # Errors
+/// Returns [`DiagServiceError::NotFound`] if no matching `RequestSeed` service
+/// exists for the given level.
+#[override_macros::vendor_overridable(name = lookup_request_seed_service)]
+fn lookup_request_seed_service_base<S: SecurityPlugin>(
+    ecu_mgr: &EcuManager<S>,
+    level: &str,
+) -> Result<SecurityAccess, DiagServiceError> {
+    // Find the RequestSeed service for the requested level by searching all SID 0x27
+    // services in the ISO 14229-1 RequestSeed subfunction range and selecting the one
+    // whose short name contains the level name (underscores stripped, case-insensitive).
+    // 2 request parameters (SID + subfunction, no key payload) distinguishes RequestSeed
+    // from SendKey services whose subfunctions overlap in the ISO range.
+    let level_sub_func: Option<u32> = level
+        .split('_')
+        .next_back()
+        .and_then(|l| u32::from_str_radix(l, 16).ok().or_else(|| l.parse().ok()));
+    let level_stripped = level.replace('_', "");
+    let request_seed_service = ecu_mgr
+        .lookup_services_by_sid(service_ids::SECURITY_ACCESS)?
+        .into_iter()
+        .find(|service| {
+            let service: datatypes::DiagService = (**service).into();
+
+            let Some(sid) = service.request_id() else {
+                return false;
+            };
+            let Some((sub_func, _)) = service.request_sub_function_id() else {
+                return false;
+            };
+
+            sid == service_ids::SECURITY_ACCESS
+                    && matches!(sub_func, 1 | 3..=5 | 7..=41)
+                    && service
+                        .request()
+                        .is_some_and(|r| r.params().is_some_and(|p| p.len() >= 2))
+                    // Try matching by name first, if that did not yield a result,
+                    // check if the subfunction ID matches the level.
+                    && (service.diag_comm().is_some_and(|dc| {
+                        dc.short_name().is_some_and(|n| {
+                            contains_ignore_ascii_case(&n.replace('_', ""), &level_stripped)
+                        })
+                    })  || Some(sub_func) == level_sub_func)
+        })
+        .ok_or_else(|| {
+            DiagServiceError::NotFound(format!(
+                "No matching 'request seed' SecurityAccess service found for level '{level}'"
+            ))
+        })?;
+
+    let request_seed_service = request_seed_service.try_into()?;
+    tracing::debug!(
+        "Found request_seed_service: {request_seed_service:?}, sub function id {level_sub_func:?}"
+    );
+
+    Ok(SecurityAccess::RequestSeed(request_seed_service))
 }
 
 /// Returns true if the security plugin allows the user to see this service.
