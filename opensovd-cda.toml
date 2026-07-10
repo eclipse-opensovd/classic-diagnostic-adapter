@@ -520,8 +520,6 @@
 # The name of the protocol to use.
 # Matched case-insensitive against the database.
 # protocol_name = "UDS_Ethernet_DoIP_DOBT"
-# `DoIP` protocol version byte (e.g. 0x02 for ISO 13400-2:2012).
-# protocol_version = 2
 # Whether to request a diagnostic message positive acknowledgement.
 # send_diagnostic_message_ack = true
 # Timeout in milliseconds for sending `DoIP` messages.

@@ -40,7 +40,7 @@ use tokio_util::sync::CancellationToken;
 use crate::{
     config::DoipConfig,
     connections::{EcuError, GatewayState},
-    socket::{DoIPUdpSocket, DoipSocketConfig},
+    socket::DoIPUdpSocket,
 };
 
 pub mod config;
@@ -111,6 +111,7 @@ pub(crate) struct DiscoveredGateway {
     pub(crate) ip: String,
     pub(crate) ecu_name: String,
     pub(crate) logical_address: u16,
+    pub(crate) doip_protocol_version: ProtocolVersion,
 }
 
 /// Transport-level settings shared across all `DoIP` gateway connections.
@@ -124,8 +125,8 @@ pub(crate) struct DoipTransportConfig {
     pub(crate) port: u16,
     /// TCP port for `DoIP` over TLS communication.
     pub(crate) tls_port: u16,
-    /// `DoIP` socket-level settings (protocol version, ack behavior).
-    pub(crate) socket: DoipSocketConfig,
+    /// Whether to send a `DiagnosticMessageAck` upon receiving a `DiagnosticMessage`.
+    pub(crate) send_diagnostic_message_ack: bool,
     /// Timeout for sending a single `DoIP` message.
     pub(crate) send_timeout: Duration,
     /// Interval between alive-check requests on idle connections (0 = disabled).
@@ -143,6 +144,9 @@ pub(crate) struct GatewayDoipConfig {
     pub(crate) name: String,
     /// UDS address of the tester.
     pub(crate) tester_address: [u8; 2],
+    /// The `DoIp` protocol version to use for this gateway connection.
+    /// Set from the protocol version field in the VAM.
+    pub(crate) protocol_version: ProtocolVersion,
     /// Shared transport-level settings (tester IP, ports, socket config, timeouts).
     pub(crate) transport: DoipTransportConfig,
 }
@@ -258,7 +262,6 @@ impl<T: EcuAddresses + DoipComParams> DoipDiagGateway<T> {
         F: Future<Output = ()> + Send + 'static,
     {
         let DoipConfig {
-            protocol_version,
             tester_address: tester_ip,
             tester_subnet,
             gateway_port,
@@ -273,14 +276,7 @@ impl<T: EcuAddresses + DoipComParams> DoipDiagGateway<T> {
             tester_ip: tester_ip.to_owned(),
             port: gateway_port,
             tls_port: *tls_port,
-            socket: DoipSocketConfig {
-                protocol_version: ProtocolVersion::try_from(protocol_version).map_err(|err| {
-                    DoipGatewaySetupError::InvalidConfiguration(format!(
-                        "Invalid DoIP protocol version: {err}"
-                    ))
-                })?,
-                send_diagnostic_message_ack: *send_diagnostic_message_ack,
-            },
+            send_diagnostic_message_ack: *send_diagnostic_message_ack,
             send_timeout: Duration::from_millis(*send_timeout_ms),
             alive_check_interval: Duration::from_secs(*alive_check_interval_secs),
         };
@@ -962,24 +958,24 @@ fn create_netmask(tester_ip: &str, tester_subnet: &str) -> Result<u32, DoipGatew
 /// Creates a UDP socket for `DoIP` communication.
 ///
 /// # Errors
-///
-/// Returns [`DoipGatewaySetupError::InvalidConfiguration`] if `protocol_version` does not map
-/// to a valid [`ProtocolVersion`], or any error propagated from the underlying socket setup.
-pub fn create_socket(
+/// Returns errors when:
+/// * The provided `tester_ip` and `gateway_port` cannot be parsed into a valid `SocketAddr`,
+///   resulting in a `DoipGatewaySetupError::InvalidAddress`.
+/// * The underlying system call to create a new socket fails,
+///   resulting in a `DoipGatewaySetupError::SocketCreationFailed`.
+/// * Setting the `SO_REUSEADDR` socket option fails,
+///   resulting in a `DoipGatewaySetupError::InvalidAddress`.
+/// * On Unix-like systems, setting the `SO_REUSEPORT` socket option fails,
+///   resulting in a `DoipGatewaySetupError::PortBindFailed`.
+/// * Setting the `SO_BROADCAST` socket option fails,
+///   resulting in a `DoipGatewaySetupError::SocketCreationFailed`.
+/// * Binding the socket to the specified `tester_ip` and `gateway_port` fails,
+///   resulting in a `DoipGatewaySetupError::SocketCreationFailed`.
+/// * The `DoIPUdpSocket` constructor fails to create the DoIP-specific socket from the standard UDP socket,
+///   resulting in a `DoipGatewaySetupError::SocketCreationFailed`.
+pub fn create_udp_vir_socket(
     tester_ip: &str,
     gateway_port: u16,
-    protocol_version: u8,
-) -> Result<DoIPUdpSocket, DoipGatewaySetupError> {
-    let protocol_version = ProtocolVersion::try_from(&protocol_version).map_err(|err| {
-        DoipGatewaySetupError::InvalidConfiguration(format!("Invalid DoIP protocol version: {err}"))
-    })?;
-    create_socket_with_protocol(tester_ip, gateway_port, protocol_version)
-}
-
-fn create_socket_with_protocol(
-    tester_ip: &str,
-    gateway_port: u16,
-    protocol_version: ProtocolVersion,
 ) -> Result<DoIPUdpSocket, DoipGatewaySetupError> {
     let tester_ip = match tester_ip {
         "127.0.0.1" => "0.0.0.0",
@@ -1032,7 +1028,7 @@ fn create_socket_with_protocol(
     })?;
 
     let std_sock: std::net::UdpSocket = socket.into();
-    DoIPUdpSocket::new(std_sock, protocol_version).map_err(|e| {
+    DoIPUdpSocket::new(std_sock, ProtocolVersion::DefaultValue).map_err(|e| {
         DoipGatewaySetupError::SocketCreationFailed(format!(
             "DoipGateway: Failed to create DoIP socket from std socket: {e:?}"
         ))
