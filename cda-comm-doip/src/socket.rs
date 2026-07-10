@@ -78,7 +78,7 @@ impl<T: AsyncRead + AsyncWrite + Unpin> DoIPConnection<T> {
         let (read, write) = tokio::io::split(stream);
         (
             DoIPConnectionReadHalf::new(read),
-            DoIPConnectionWriteHalf::new(write, self.config),
+            DoIPConnectionWriteHalf::new(write, self.config.protocol_version),
         )
     }
 }
@@ -91,10 +91,10 @@ pub(crate) struct DoIPConnectionWriteHalf<T: AsyncWrite + Unpin> {
 }
 
 impl<T: AsyncWrite + Unpin> DoIPConnectionWriteHalf<T> {
-    pub fn new(io: WriteHalf<T>, config: DoipSocketConfig) -> Self {
+    pub fn new(io: WriteHalf<T>, protocol_version: ProtocolVersion) -> Self {
         Self {
             io: FramedWrite::new(io, DoipCodec {}),
-            protocol_version: config.protocol_version,
+            protocol_version,
         }
     }
 
@@ -115,18 +115,18 @@ impl<T: AsyncRead + Unpin> DoIPConnectionReadHalf<T> {
 
 pub struct DoIPUdpSocket {
     io: UdpFramed<DoipCodec, tokio::net::UdpSocket>,
-    config: DoipSocketConfig,
+    protocol_version: ProtocolVersion,
 }
 
 impl DoIPUdpSocket {
     pub(crate) fn new(
         socket: std::net::UdpSocket,
-        config: DoipSocketConfig,
+        protocol_version: ProtocolVersion,
     ) -> Result<Self, std::io::Error> {
         let tokio_socket = tokio::net::UdpSocket::from_std(socket)?;
         Ok(Self {
             io: UdpFramed::new(tokio_socket, DoipCodec {}),
-            config,
+            protocol_version,
         })
     }
 
@@ -136,7 +136,7 @@ impl DoIPUdpSocket {
         addr: SocketAddr,
     ) -> Result<(), ConnectionError> {
         let msg = DoipMessageBuilder::new()
-            .protocol_version(self.config.protocol_version)
+            .protocol_version(self.protocol_version)
             .payload(payload)
             .build();
         self.io

@@ -213,7 +213,6 @@ impl From<DoipGatewaySetupError> for AppError {
         match value {
             DoipGatewaySetupError::InvalidAddress(_) => Self::ConnectionError(value.to_string()),
             DoipGatewaySetupError::SocketCreationFailed(_)
-            | DoipGatewaySetupError::InvalidProtocol(_)
             | DoipGatewaySetupError::PortBindFailed(_) => {
                 Self::InitializationFailed(value.to_string())
             }

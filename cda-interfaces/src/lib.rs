@@ -378,8 +378,6 @@ pub enum DiagServiceError {
 pub enum DoipGatewaySetupError {
     #[error("Invalid address: `{0}`")]
     InvalidAddress(String),
-    #[error("Invalid protocol: `{0}`")]
-    InvalidProtocol(String),
     #[error(
         "Received an unknown ECU in VAM (Logical Address: {logical_address}, Protocol Version: \
          {protocol_version}). Likely there is no MDD loaded for this ECU."

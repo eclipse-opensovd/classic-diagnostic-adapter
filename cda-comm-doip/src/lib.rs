@@ -40,7 +40,7 @@ use tokio_util::sync::CancellationToken;
 use crate::{
     config::DoipConfig,
     connections::{EcuError, GatewayState},
-    socket::{DoIPUdpSocket, DoipSocketConfig},
+    socket::DoIPUdpSocket,
 };
 
 pub mod config;
@@ -1026,18 +1026,7 @@ pub fn create_udp_vir_socket(
     })?;
 
     let std_sock: std::net::UdpSocket = socket.into();
-    DoIPUdpSocket::new(
-        std_sock,
-        DoipSocketConfig {
-            // Using ::DefaultValue (0xFF) here, because this socket is used to send the VIR, where
-            // we do not know the protocol yet.
-            // The correct protocol will be set per gateway once we receive its VAM.
-            protocol_version: ProtocolVersion::DefaultValue,
-            // UDP socket only sends VIR frames; DiagMsgAck is TCP-only
-            send_diagnostic_message_ack: false,
-        },
-    )
-    .map_err(|e| {
+    DoIPUdpSocket::new(std_sock, ProtocolVersion::DefaultValue).map_err(|e| {
         DoipGatewaySetupError::SocketCreationFailed(format!(
             "DoipGateway: Failed to create DoIP socket from std socket: {e:?}"
         ))
