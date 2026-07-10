@@ -16,10 +16,10 @@ use std::{
     time::{Duration, Instant},
 };
 
+use cda_config::validate::ConfigSanity;
 use cda_health::config::HealthConfig;
 use cda_interfaces::{
     FunctionalDescriptionConfig, HashMap, HashMapExtensions,
-    config::ConfigSanity,
     datatypes::{
         ComParamConfig, ComParamPrecedence, ComParams, ComponentsConfig, DatabaseNamingConvention,
         DoipComParams, FaultConfig, FlatbBufConfig,

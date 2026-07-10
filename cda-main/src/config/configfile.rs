@@ -12,10 +12,10 @@
  */
 
 pub use cda_comm_doip::config::DoipConfig;
+use cda_config::validate::{ConfigSanity, ConfigSanityError};
 pub use cda_database::DatabaseConfig;
 use cda_interfaces::{
     FunctionalDescriptionConfig, HashMap,
-    config::{ConfigSanity, ConfigSanityError},
     datatypes::{
         ComParams, ComponentsConfig, FaultConfig, FlatbBufConfig, SdBoolMappings,
         SdMappingsTruthyValue,

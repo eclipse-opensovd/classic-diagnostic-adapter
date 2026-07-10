@@ -374,6 +374,7 @@ dependencies = [
 name = "cda-comm-doip"
 version = "0.1.0"
 dependencies = [
+ "cda-config",
  "cda-interfaces",
  "doip-codec",
  "doip-definitions",
@@ -410,6 +411,9 @@ dependencies = [
 [[package]]
 name = "cda-config"
 version = "0.1.0"
+dependencies = [
+ "thiserror 2.0.17",
+]
 
 [[package]]
 name = "cda-core"
@@ -488,6 +492,7 @@ version = "0.1.0"
 dependencies = [
  "async-trait",
  "bytes",
+ "cda-config",
  "foldhash",
  "hex",
  "mockall",
@@ -1837,6 +1842,7 @@ dependencies = [
  "cda-build",
  "cda-comm-doip",
  "cda-comm-uds",
+ "cda-config",
  "cda-core",
  "cda-database",
  "cda-health",
@@ -2363,6 +2369,7 @@ dependencies = [
  "async-trait",
  "cda-comm-doip",
  "cda-comm-uds",
+ "cda-config",
  "cda-core",
  "cda-database",
  "cda-extra",

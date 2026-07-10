@@ -15,14 +15,12 @@ use std::{future::Future, path::PathBuf, sync::Arc};
 
 use cda_comm_doip::{DoipDiagGateway, config::DoipConfig};
 use cda_comm_uds::{UdsManager, state_coordinator::EcuStateCoordinator};
+use cda_config::validate::{ConfigSanity, ConfigSanityError};
 use cda_core::EcuManager;
 use cda_database::FileManager;
 use cda_interfaces::{
     DiagServiceError, DoipGatewaySetupError, EcuConnectivityHandler, FunctionalDescriptionConfig,
-    HashMap, HashMapExtensions, UdsQuery, UdsVariant,
-    config::{ConfigSanity, ConfigSanityError},
-    datatypes::FaultConfig,
-    dlt_ctx,
+    HashMap, HashMapExtensions, UdsQuery, UdsVariant, datatypes::FaultConfig, dlt_ctx,
 };
 use cda_plugin_security::{
     DefaultSecurityPlugin, DefaultSecurityPluginData, SecurityPlugin, SecurityPluginLoader,

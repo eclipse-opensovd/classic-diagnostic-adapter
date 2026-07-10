@@ -11,10 +11,8 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-use cda_interfaces::{
-    Protocol,
-    config::{ConfigSanity, ConfigSanityError},
-};
+use cda_config::validate::{ConfigSanity, ConfigSanityError};
+use cda_interfaces::Protocol;
 use serde::{Deserialize, Serialize};
 
 /// `DoIP` (Diagnostics over IP) transport layer configuration.

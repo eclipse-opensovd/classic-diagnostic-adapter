@@ -456,7 +456,8 @@ fn format_toml_line(
 mod tests {
     use std::time::Duration;
 
-    use cda_interfaces::{config::ConfigSanity, datatypes::ComParamPrecedence};
+    use cda_config::validate::ConfigSanity;
+    use cda_interfaces::datatypes::ComParamPrecedence;
 
     use super::*;
 
