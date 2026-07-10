@@ -11,12 +11,11 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-pub use cda_config::datatypes::DoipConfig;
+pub use cda_config::datatypes::{DatabaseConfig, DoipConfig};
 use cda_config::{
     datatypes::FunctionalDescriptionConfig,
     validate::{ConfigSanity, ConfigSanityError},
 };
-pub use cda_database::DatabaseConfig;
 use cda_interfaces::{
     HashMap,
     datatypes::{

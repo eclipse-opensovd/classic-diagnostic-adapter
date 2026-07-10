@@ -13,6 +13,7 @@
 
 use std::fmt::Debug;
 
+use cda_config::datatypes::DatabaseConfig;
 use cda_interfaces::{
     DiagServiceError, HashSet,
     datatypes::{
@@ -28,7 +29,7 @@ use serde::Serialize;
 pub use service::*;
 
 use crate::{
-    DatabaseConfig, datatypes,
+    datatypes,
     flatbuf::diagnostic_description::dataformat,
     mdd_data::{self, read_ecudata},
 };

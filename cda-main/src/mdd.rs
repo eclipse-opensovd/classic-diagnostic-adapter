@@ -81,7 +81,7 @@ struct EcuLoadContext<'a> {
     mddfile: &'a PathBuf,
     ecu_name: String,
     flat_buf_settings: &'a FlatbBufConfig,
-    database_config: &'a cda_database::DatabaseConfig,
+    database_config: &'a cda_config::datatypes::DatabaseConfig,
     ecu_config_map: &'a Arc<HashMap<String, EcuConfig>>,
     database_naming_convention: DatabaseNamingConvention,
     func_description_cfg: &'a FunctionalDescriptionConfig,
