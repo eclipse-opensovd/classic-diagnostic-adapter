@@ -23,22 +23,15 @@ pub struct RuntimeUpdateConfig {
     /// Value of the Retry-After header (in seconds) sent when the service is
     /// temporarily unavailable due to a busy transaction.
     /// Default: 1 second.
-    #[serde(default = "default_retry_after_seconds")]
     pub retry_after_seconds: u64,
     /// When `true` and the `DiagnosticDatabase` storage collection is empty,
     /// seed it from `database.path` on first startup by copying all `.mdd` files.
     /// Default: `false`.
-    #[serde(default)]
     pub init_storage_from_database_path: bool,
     /// When `true` and the `Configuration` storage collection is empty,
     /// seed it from the configuration file loaded from disk on first startup.
     /// Default: `false`.
-    #[serde(default)]
     pub init_storage_from_config_file: bool,
-}
-
-fn default_retry_after_seconds() -> u64 {
-    1
 }
 
 impl Default for RuntimeUpdateConfig {
@@ -46,7 +39,7 @@ impl Default for RuntimeUpdateConfig {
         Self {
             upload_body_limit_bytes: 50 * 1024 * 1024, // 50 MB,
             storage_dir: ".".to_owned(),
-            retry_after_seconds: default_retry_after_seconds(),
+            retry_after_seconds: 1,
             init_storage_from_database_path: false,
             init_storage_from_config_file: false,
         }
