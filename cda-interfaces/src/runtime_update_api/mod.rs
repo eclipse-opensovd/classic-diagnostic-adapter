@@ -37,10 +37,10 @@ use async_trait::async_trait;
 use bytes::Bytes;
 use serde::{Deserialize, Deserializer, Serialize};
 use strum_macros::EnumString;
-use tokio::sync::Mutex;
+use tokio::{sync::Mutex, task::JoinHandle};
 
 use crate::{
-    HashMap, Shutdown, UdsQuery,
+    FunctionalDescriptionConfig, HashMap, Shutdown, UdsQuery,
     ecugateway::EcuGatewaySockets,
     file_manager::FileManager,
     storage_api::{Collection, DirectFileAccess},
@@ -60,14 +60,6 @@ impl ActivityGuard for Vec<Box<dyn ActivityGuard>> {
     }
 }
 
-/// Minimal in-progress-update signal needed by a reload handler.
-///
-/// Provides a shared handle to an "update in progress" flag.
-pub trait UpdateGuard: Clone + Send + Sync + 'static {
-    /// Returns a shared handle to the "update in progress" flag.
-    fn busy_handle(&self) -> Arc<AtomicBool>;
-}
-
 /// The result of creating a fresh set of vehicle components inside
 /// [`VehicleComponentFactory::create`].
 pub struct VehicleComponents<UdsManager, EcuSockets, File>
@@ -79,8 +71,8 @@ where
     pub uds_manager: UdsManager,
     pub file_managers: HashMap<String, File>,
     pub diagnostic_gateway: EcuSockets,
-    pub variant_detection_handle: tokio::task::JoinHandle<()>,
-    pub functional_group_config: crate::FunctionalDescriptionConfig,
+    pub variant_detection_handle: JoinHandle<()>,
+    pub functional_group_config: FunctionalDescriptionConfig,
 }
 
 /// Async factory that recreates vehicle components (UDS manager, `DoIP` gateway,
@@ -152,12 +144,21 @@ impl<C: Collection + DirectFileAccess> Default for UpdateCollections<C> {
 }
 
 /// Determines the kind of file being applied in a runtime update.
-#[derive(Debug, Clone)]
-pub enum UpdateFileType {
+#[derive(Clone)]
+pub enum UpdateFileType<'a> {
     /// A diagnostic database file (`.mdd`).
     Mdd,
-    /// A CDA configuration file (`.toml`).
-    Config,
+    /// A CDA configuration file (`.toml`), with an associated config validator.
+    Config(&'a dyn ConfigValidator),
+}
+
+impl std::fmt::Debug for UpdateFileType<'_> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Mdd => write!(f, "Mdd"),
+            Self::Config(_) => write!(f, "Config"),
+        }
+    }
 }
 
 /// Provides read-only access to vehicle lock state for security validation.
@@ -255,18 +256,18 @@ pub trait RuntimeUpdateSecurityPlugin<
     /// Implementations may perform signature verification, hash checks, version
     /// compatibility validation, or any other file-level security checks.
     ///
+    /// The config validator, if needed, is embedded in the [`UpdateFileType::Config`] variant.
+    ///
     /// # Arguments
     /// * `type_` - The type of file being validated (MDD or Config)
     /// * `path` - Path to the file to validate
-    /// * `config_validator` - Validator for configuration file content.
     ///
     /// # Errors
     /// Return [`VerificationError`] to abort the apply operation.
-    async fn check_file_integrity<V: ConfigValidator>(
+    async fn check_file_integrity(
         &self,
-        type_: UpdateFileType,
+        type_: UpdateFileType<'_>,
         path: &std::path::Path,
-        config_validator: &V,
     ) -> Result<(), VerificationError>;
 }
 

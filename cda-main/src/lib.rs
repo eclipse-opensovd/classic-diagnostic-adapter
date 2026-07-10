@@ -29,7 +29,6 @@ use cda_interfaces::{
     config::{ConfigSanity, ConfigSanityError},
     datatypes::{ComParams, FaultConfig},
     dlt_ctx,
-    runtime_update_api::UpdateGuard,
 };
 use cda_plugin_security::{
     DefaultSecurityPlugin, DefaultSecurityPluginData, SecurityPlugin, SecurityPluginLoader,
@@ -984,7 +983,7 @@ async fn init_doip_gateway<S: SecurityPlugin>(
     if !doip_config.enabled {
         tracing::info!("DoIP transport disabled by config (doip.enabled = false)");
         if let Some(provider) = doip_health_provider {
-            provider.update_status(cda_health::Status::Up).await;
+            provider.set_status(cda_health::Status::Up).await;
         }
         return Ok(None);
     }
@@ -995,7 +994,7 @@ async fn init_doip_gateway<S: SecurityPlugin>(
         )
     })?;
     if let Some(provider) = doip_health_provider {
-        provider.update_status(cda_health::Status::Starting).await;
+        provider.set_status(cda_health::Status::Starting).await;
     }
     let result = DoipDiagGateway::new(
         doip_config,
@@ -1012,7 +1011,7 @@ async fn init_doip_gateway<S: SecurityPlugin>(
         cda_health::Status::Failed
     };
     if let Some(provider) = doip_health_provider {
-        provider.update_status(status).await;
+        provider.set_status(status).await;
     }
     match result {
         Ok(d) => {

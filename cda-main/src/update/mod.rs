@@ -20,9 +20,7 @@ use cda_core::EcuManager;
 use cda_interfaces::{
     EcuGatewaySockets, PhysicalTransport, Shutdown, UdsQuery,
     datatypes::ComponentsConfig,
-    runtime_update_api::{
-        ReloadError, RuntimeReloaderPlugin, RuntimeUpdateSecurityPlugin, UpdateGuard,
-    },
+    runtime_update_api::{ReloadError, RuntimeReloaderPlugin, RuntimeUpdateSecurityPlugin},
 };
 use cda_plugin_security::{SecurityPlugin, SecurityPluginLoader};
 use cda_transport_router::DiagnosticTransportRouter;
@@ -311,16 +309,19 @@ where
         ));
     let mdd_decompress = config.read().await.flat_buf.mdd_decompress;
 
-    let update_plugin = cda_plugin_runtime_update::init_default_runtime_update_plugin(
-        &ctx.runtime_update_config.storage_dir,
+    let storage = Arc::new(
+        cda_storage::LocalStorage::new(&ctx.runtime_update_config.storage_dir)
+            .map_err(|e| AppError::InitializationFailed(format!("DbUpdate storage: {e}")))?,
+    );
+    let update_plugin = cda_plugin_runtime_update::DefaultRuntimeUpdatePlugin::new(
+        storage,
         reload_handler,
         ctx.security_handler,
         ctx.lock_provider,
         mdd_decompress,
         ctx.update_guard.busy_handle(),
         crate::config::configfile::ConfigurationValidator::new(),
-    )
-    .map_err(|e| AppError::InitializationFailed(format!("DbUpdate plugin: {e}")))?;
+    );
     Ok(update_plugin)
 }
 

@@ -36,27 +36,22 @@ use tokio::sync::RwLock;
 
 /// Default implementation of [`RuntimeFilesUpdatePlugin`] with injectable security and storage.
 ///
-/// Type parameters:
-/// - `S`: Storage backend
-/// - `T`: Security handler
-/// - `L`: Lock state provider
-/// - `V`: Config validator (use `()` if no validation needed)
 pub struct DefaultRuntimeUpdatePlugin<
-    S: Storage,
-    T: RuntimeUpdateSecurityPlugin<L, S::CollectionHandle>,
-    L: LockStateProvider,
-    V: ConfigValidator,
+    Store: Storage,
+    UpdateSecurityPlugin: RuntimeUpdateSecurityPlugin<Lock, Store::CollectionHandle>,
+    Lock: LockStateProvider,
+    Validator: ConfigValidator,
 > {
     /// Access to the persistent storage layer (all mutations go through this)
-    storage: Arc<S>,
+    storage: Arc<Store>,
     /// Hot-reload notification handler
     reloader_plugin: Arc<dyn RuntimeReloaderPlugin>,
     /// Security and file integrity handler
-    security_handler: Arc<T>,
+    security_handler: Arc<UpdateSecurityPlugin>,
     /// Lock state provider passed to security checks
-    lock_provider: Arc<L>,
+    lock_provider: Arc<Lock>,
     /// Validator for configuration file content
-    config_validator: V,
+    config_validator: Validator,
     /// Tracking map for in-progress executions: `exec_id` -> `DbUpdateExecution`
     executions: Arc<RwLock<HashMap<String, UpdateExecution>>>,
     /// If true, call `update_mdd_uncompressed()` after Apply for each MDD file
@@ -68,11 +63,11 @@ pub struct DefaultRuntimeUpdatePlugin<
 }
 
 impl<
-    S: Storage,
-    T: RuntimeUpdateSecurityPlugin<L, S::CollectionHandle>,
-    L: LockStateProvider,
-    V: ConfigValidator,
-> DefaultRuntimeUpdatePlugin<S, T, L, V>
+    Store: Storage,
+    UpdateSecurityPlugin: RuntimeUpdateSecurityPlugin<Lock, Store::CollectionHandle>,
+    Lock: LockStateProvider,
+    Validator: ConfigValidator,
+> DefaultRuntimeUpdatePlugin<Store, UpdateSecurityPlugin, Lock, Validator>
 {
     /// Creates a new plugin instance.
     ///
@@ -85,13 +80,13 @@ impl<
     /// * `update_in_progress` - Shared flag read by other components to gate operations
     /// * `config_validator` - Validator for configuration file content (use `()` if not needed)
     pub fn new(
-        storage: Arc<S>,
+        storage: Arc<Store>,
         reloader_plugin: Arc<dyn RuntimeReloaderPlugin>,
-        security_handler: Arc<T>,
-        lock_provider: Arc<L>,
+        security_handler: Arc<UpdateSecurityPlugin>,
+        lock_provider: Arc<Lock>,
         mdd_decompress: bool,
         update_in_progress: Arc<AtomicBool>,
-        config_validator: V,
+        config_validator: Validator,
     ) -> Self {
         Self {
             storage,
@@ -108,11 +103,12 @@ impl<
 
 #[async_trait]
 impl<
-    S: Storage + Send + Sync + 'static,
-    T: RuntimeUpdateSecurityPlugin<L, S::CollectionHandle>,
-    L: LockStateProvider,
-    V: ConfigValidator,
-> RuntimeFilesUpdatePlugin for DefaultRuntimeUpdatePlugin<S, T, L, V>
+    Store: Storage + Send + Sync + 'static,
+    UpdateSecurityPlugin: RuntimeUpdateSecurityPlugin<Lock, Store::CollectionHandle>,
+    Lock: LockStateProvider,
+    Validator: ConfigValidator,
+> RuntimeFilesUpdatePlugin
+    for DefaultRuntimeUpdatePlugin<Store, UpdateSecurityPlugin, Lock, Validator>
 {
     async fn list_current(
         &self,
@@ -143,7 +139,7 @@ impl<
             &*self.storage,
             &*self.security_handler,
             files,
-            &self.config_validator,
+            &self.config_validator as &dyn ConfigValidator,
         )
         .await
     }
