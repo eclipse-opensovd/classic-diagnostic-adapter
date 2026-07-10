@@ -408,6 +408,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "cda-config"
+version = "0.1.0"
+
+[[package]]
 name = "cda-core"
 version = "0.1.0"
 dependencies = [

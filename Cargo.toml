@@ -23,6 +23,7 @@ members = [
   "cda-core",
   "cda-comm-doip",
   "cda-comm-uds",
+  "cda-config",
   "cda-sovd",
   "cda-sovd-interfaces",
   "cda-main",
@@ -45,6 +46,7 @@ cda-interfaces = { path = "cda-interfaces" }
 cda-core = { path = "cda-core" }
 cda-comm-doip = { path = "cda-comm-doip" }
 cda-comm-uds = { path = "cda-comm-uds" }
+cda-config = { path = "cda-config" }
 cda-database = { path = "cda-database" }
 cda-plugin-security = { path = "cda-plugin-security" }
 cda-plugin-runtime-update = { path = "cda-plugin-runtime-update" }
