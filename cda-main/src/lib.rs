@@ -791,8 +791,7 @@ async fn check_duplicate_ecu_names<S: SecurityPlugin>(
     }
 }
 
-type UdsManagerType<S> =
-    UdsManager<DoipDiagGateway<EcuManager<S>>, EcuManager<S>>;
+type UdsManagerType<S> = UdsManager<DoipDiagGateway<EcuManager<S>>, EcuManager<S>>;
 
 async fn create_state_coordinator<S: SecurityPlugin>(
     databases: &HashMap<String, RwLock<EcuManager<S>>>,

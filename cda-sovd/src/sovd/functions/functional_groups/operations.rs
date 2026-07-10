@@ -193,13 +193,14 @@ pub(crate) mod diag_service {
         http::{HeaderMap, StatusCode, Uri, header},
         response::{IntoResponse, Response},
     };
-    use axum_extra::extract::{Host, WithRejection};
+    use axum_extra::extract::WithRejection;
     use cda_interfaces::{
         DiagComm, DiagCommType, DynamicPlugin, HashMap, UdsEcu, diagservices::DiagServiceResponse,
         subfunction_ids,
     };
     use cda_plugin_security::Secured;
     use indexmap::IndexMap;
+    use opensovd_axum_extra::ExtractHost;
     use sovd_interfaces::components::ecu::operations::{AsyncPostResponse, ExecutionStatus};
     use tokio::sync::RwLock;
     use uuid::Uuid;
@@ -360,7 +361,7 @@ pub(crate) mod diag_service {
     pub(crate) async fn post<T: UdsEcu + Clone>(
         headers: HeaderMap,
         UseApi(Secured(security_plugin), _): UseApi<Secured, ()>,
-        UseApi(Host(host), _): UseApi<Host, String>,
+        UseApi(ExtractHost(host), _): UseApi<ExtractHost, String>,
         OriginalUri(uri): OriginalUri,
         Path(DiagServicePathParam { service: operation }): Path<DiagServicePathParam>,
         WithRejection(Query(query), _): WithRejection<

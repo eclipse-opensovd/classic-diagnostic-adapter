@@ -2372,6 +2372,7 @@ dependencies = [
  "cda-core",
  "cda-database",
  "cda-extra",
+ "cda-health",
  "cda-interfaces",
  "cda-plugin-runtime-update",
  "cda-sovd",
