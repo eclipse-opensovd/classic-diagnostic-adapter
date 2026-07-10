@@ -29,7 +29,6 @@ use cda_interfaces::{
     },
 };
 use cda_plugin_security::{DefaultSecurityPlugin, DefaultSecurityPluginData};
-use cda_tracing::LoggingConfig;
 use futures::FutureExt as _;
 use http::{Method, StatusCode};
 use opensovd_cda_lib::{
@@ -113,7 +112,7 @@ pub(crate) async fn setup_integration_test<'a>(
 async fn initialize_runtime() -> Result<TestRuntime, TestingError> {
     let tracing = cda_tracing::new();
     let layers = vec![cda_tracing::new_term_subscriber(
-        &cda_tracing::LoggingConfig::default(),
+        &cda_config::datatypes::LoggingConfig::default(),
     )];
     cda_tracing::init_tracing(tracing.with(layers)).map_err(|e| {
         TestingError::SetupError(format!("Failed to initialize tracing for tests: {e}"))

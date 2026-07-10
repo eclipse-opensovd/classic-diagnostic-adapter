@@ -615,6 +615,7 @@ name = "cda-tracing"
 version = "0.1.0"
 dependencies = [
  "cda-build",
+ "cda-config",
  "console-subscriber",
  "nu-ansi-term",
  "opentelemetry",

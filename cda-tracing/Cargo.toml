@@ -25,6 +25,7 @@ workspace = true
 path = "src/lib.rs"
 
 [dependencies]
+cda-config = { workspace = true }
 schemars = { workspace = true }
 serde = { workspace = true, features = ["derive"] }
 tokio = { workspace = true }

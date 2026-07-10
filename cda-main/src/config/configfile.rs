@@ -66,7 +66,7 @@ pub struct Configuration {
     /// Diagnostic database loading and naming settings.
     pub database: DatabaseConfig,
     /// Logging, file output, and tracing backend settings.
-    pub logging: cda_tracing::LoggingConfig,
+    pub logging: cda_config::datatypes::LoggingConfig,
     /// Path to the directory containing flash files.
     pub flash_files_path: String,
     /// Default communication parameters for UDS and `DoIP` protocols.
@@ -137,7 +137,7 @@ impl Default for Configuration {
                 tester_address: "10.2.1.240".to_owned(),
                 ..Default::default()
             },
-            logging: cda_tracing::LoggingConfig::default(),
+            logging: cda_config::datatypes::LoggingConfig::default(),
             com_params: ComParams::default(),
             flat_buf: FlatbBufConfig::default(),
             functional_description: FunctionalDescriptionConfig::default(),

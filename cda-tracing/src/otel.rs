@@ -22,27 +22,8 @@ use opentelemetry_semantic_conventions::{
     SCHEMA_URL,
     resource::{DEPLOYMENT_ENVIRONMENT_NAME, SERVICE_VERSION},
 };
-use serde::{Deserialize, Serialize};
 
 use crate::TracingSetupError;
-
-/// OpenTelemetry exporter configuration.
-#[derive(Deserialize, Serialize, Clone, Debug, schemars::JsonSchema)]
-pub struct OtelConfig {
-    /// Whether OpenTelemetry tracing and metrics export is enabled.
-    pub enabled: bool,
-    /// OTLP collector endpoint URL (e.g. `http://localhost:4317`).
-    pub endpoint: String,
-}
-
-impl Default for OtelConfig {
-    fn default() -> Self {
-        Self {
-            enabled: false,
-            endpoint: "http://localhost:4317".to_owned(),
-        }
-    }
-}
 
 // Create a Resource that captures information about the entity for which telemetry is recorded.
 fn resource() -> Resource {
