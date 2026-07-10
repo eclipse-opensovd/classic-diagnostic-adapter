@@ -17,13 +17,14 @@ use std::{
     sync::Arc,
 };
 
+use cda_config::datatypes::{DatabaseNamingConvention, FunctionalDescriptionConfig};
 use cda_core::{EcuManager, EcuManagerConfig};
 use cda_database::{FileManager, ProtoLoadConfig, update_mdd_uncompressed};
 use cda_health::StatusHealthProvider;
 use cda_interfaces::{
-    EcuAddresses, EcuManager as EcuManagerTrait, EcuManagerType, FunctionalDescriptionConfig,
-    HashMap, HashMapEntry, HashMapExtensions, HashSet, Protocol,
-    datatypes::{ComParams, DatabaseNamingConvention, FlatbBufConfig},
+    EcuAddresses, EcuManager as EcuManagerTrait, EcuManagerType, HashMap, HashMapEntry,
+    HashMapExtensions, HashSet, Protocol,
+    datatypes::{ComParams, FlatbBufConfig},
     file_manager::{Chunk, ChunkType},
     storage_api::{Collection, CollectionName, DirectFileAccess, Storage},
 };

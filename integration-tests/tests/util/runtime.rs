@@ -16,13 +16,16 @@ use std::{
     time::{Duration, Instant},
 };
 
-use cda_config::validate::ConfigSanity;
+use cda_config::{
+    datatypes::{DatabaseNamingConvention, FunctionalDescriptionConfig},
+    validate::ConfigSanity,
+};
 use cda_health::config::HealthConfig;
 use cda_interfaces::{
-    FunctionalDescriptionConfig, HashMap, HashMapExtensions,
+    HashMap, HashMapExtensions,
     datatypes::{
-        ComParamConfig, ComParamPrecedence, ComParams, ComponentsConfig, DatabaseNamingConvention,
-        DoipComParams, FaultConfig, FlatbBufConfig,
+        ComParamConfig, ComParamPrecedence, ComParams, ComponentsConfig, DoipComParams,
+        FaultConfig, FlatbBufConfig,
     },
 };
 use cda_plugin_security::{DefaultSecurityPlugin, DefaultSecurityPluginData};
@@ -195,7 +198,7 @@ fn cda_test_config(
         functional_description: FunctionalDescriptionConfig {
             description_database: "functional_groups".to_owned(),
             enabled_functional_groups: None,
-            protocol_position: cda_interfaces::datatypes::DiagnosticServiceAffixPosition::Suffix,
+            protocol_position: cda_config::datatypes::DiagnosticServiceAffixPosition::Suffix,
         },
         health: HealthConfig::default(),
         components: ComponentsConfig {

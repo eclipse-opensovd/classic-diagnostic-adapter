@@ -397,6 +397,7 @@ name = "cda-comm-uds"
 version = "0.1.0"
 dependencies = [
  "async-trait",
+ "cda-config",
  "cda-interfaces",
  "cda-plugin-runtime-update",
  "futures",
@@ -412,6 +413,10 @@ dependencies = [
 name = "cda-config"
 version = "0.1.0"
 dependencies = [
+ "cda-interfaces",
+ "schemars",
+ "serde",
+ "serde_json",
  "thiserror 2.0.17",
 ]
 
@@ -420,6 +425,7 @@ name = "cda-core"
 version = "0.1.0"
 dependencies = [
  "async-trait",
+ "cda-config",
  "cda-database",
  "cda-interfaces",
  "cda-plugin-security",
@@ -440,6 +446,7 @@ dependencies = [
  "bytes",
  "cargo_toml",
  "cda-build",
+ "cda-config",
  "cda-database",
  "cda-interfaces",
  "flatbuffers",
@@ -492,7 +499,6 @@ version = "0.1.0"
 dependencies = [
  "async-trait",
  "bytes",
- "cda-config",
  "foldhash",
  "hex",
  "mockall",
@@ -560,6 +566,7 @@ dependencies = [
  "axum-extra",
  "bytes",
  "cda-build",
+ "cda-config",
  "cda-interfaces",
  "cda-plugin-runtime-update",
  "cda-plugin-security",

@@ -12,10 +12,13 @@
  */
 
 pub use cda_comm_doip::config::DoipConfig;
-use cda_config::validate::{ConfigSanity, ConfigSanityError};
+use cda_config::{
+    datatypes::FunctionalDescriptionConfig,
+    validate::{ConfigSanity, ConfigSanityError},
+};
 pub use cda_database::DatabaseConfig;
 use cda_interfaces::{
-    FunctionalDescriptionConfig, HashMap,
+    HashMap,
     datatypes::{
         ComParams, ComponentsConfig, FaultConfig, FlatbBufConfig, SdBoolMappings,
         SdMappingsTruthyValue,
@@ -183,7 +186,7 @@ impl ConfigSanity for Configuration {
 
 #[cfg(test)]
 mod tests {
-    use cda_interfaces::datatypes::DiagnosticServiceAffixPosition;
+    use cda_config::datatypes::DiagnosticServiceAffixPosition;
     use figment::{
         Figment,
         providers::{Format, Serialized, Toml},

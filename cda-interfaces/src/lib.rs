@@ -16,7 +16,6 @@ use std::{
     time::Duration,
 };
 
-use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 mod com_param_handling;
@@ -280,27 +279,6 @@ impl DiagCommType {
             DiagCommType::Faults => &FAULTS_PREFIXES,
             DiagCommType::Modes => &MODES_PREFIXES,
             DiagCommType::Operations => &OPERATIONS_PREFIXES,
-        }
-    }
-}
-
-/// Functional group description and lookup configuration.
-#[derive(Deserialize, Serialize, Clone, Debug, schemars::JsonSchema)]
-pub struct FunctionalDescriptionConfig {
-    /// Name of the database containing functional group definitions.
-    pub description_database: String,
-    /// Optional set of functional group names to enable.
-    /// When absent, all functional groups are enabled.
-    pub enabled_functional_groups: Option<HashSet<String>>,
-    /// Position of the protocol identifier in service names.
-    pub protocol_position: datatypes::DiagnosticServiceAffixPosition,
-}
-impl Default for FunctionalDescriptionConfig {
-    fn default() -> Self {
-        Self {
-            description_database: "functional_groups".to_owned(),
-            enabled_functional_groups: None,
-            protocol_position: datatypes::DiagnosticServiceAffixPosition::Suffix,
         }
     }
 }

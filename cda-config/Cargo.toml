@@ -20,7 +20,15 @@ homepage.workspace = true
 license.workspace = true
 
 [dependencies]
+# internal dependencies
+cda-interfaces = { workspace = true }
+
+schemars = { workspace = true }
+serde = { workspace = true, features = ["derive"] }
 thiserror = { workspace = true }
+
+[dev-dependencies]
+serde_json = { workspace = true }
 
 [lints]
 workspace = true

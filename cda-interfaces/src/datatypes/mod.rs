@@ -13,7 +13,6 @@
 
 pub use com_params::*;
 pub use component::*;
-pub use database_naming_convention::*;
 pub use execution::*;
 pub use faults::*;
 pub use flatbuf_config::*;
@@ -24,7 +23,6 @@ pub use state::*;
 
 mod com_params;
 mod component;
-mod database_naming_convention;
 mod execution;
 mod faults;
 mod flatbuf_config;

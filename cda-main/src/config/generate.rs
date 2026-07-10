@@ -13,7 +13,8 @@
 
 use std::{collections::BTreeMap, fmt::Write};
 
-use cda_interfaces::{FunctionalDescriptionConfig, datatypes::FaultConfig};
+use cda_config::datatypes::FunctionalDescriptionConfig;
+use cda_interfaces::datatypes::FaultConfig;
 
 use crate::config::{
     com_params::EcuComParams,
