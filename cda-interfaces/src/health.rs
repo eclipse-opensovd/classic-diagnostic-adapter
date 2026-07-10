@@ -11,11 +11,6 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-//! Health reporting interfaces.
-//!
-//! Kept dependency-free (no `cda-sovd`/`cda-health` coupling) so that any crate can
-//! implement [`HealthProvider`]
-
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 
@@ -33,8 +28,8 @@ pub enum Status {
 #[async_trait]
 pub trait HealthProvider: Send + Sync + 'static {
     /// Returns the current health status of the component.
-    async fn check_health(&self) -> Status;
+    async fn status(&self) -> Status;
 
     /// Updates the health status of the component.
-    async fn update_status(&self, status: Status);
+    async fn set_status(&self, status: Status);
 }
