@@ -18,7 +18,7 @@ use cda_interfaces::{
     datatypes::ComponentsConfig,
     health::HealthProvider,
     runtime_update_api::{
-        ReloadError, RuntimeReloaderPlugin, UpdateGuard, VehicleComponentFactory, VehicleComponents,
+        ReloadError, RuntimeReloaderPlugin, VehicleComponentFactory, VehicleComponents,
     },
 };
 use cda_plugin_security::SecurityPluginLoader;
@@ -29,7 +29,7 @@ use tokio::sync::{Mutex, RwLock};
 ///
 /// This struct contains all the components needed to reload runtime databases
 /// and configuration. It bundles the infrastructure required by the reloader plugin.
-pub struct ReloadContext<Uds, Gateway, Config>
+pub struct DefaultReloadContext<Uds, Gateway, Config>
 where
     Uds: UdsEcu + SchemaProvider + Clone + Shutdown + Send + Sync + 'static,
     Gateway: EcuGatewaySockets + Shutdown,
@@ -124,7 +124,7 @@ where
     VehicleFactory: VehicleComponentFactory<Config, Uds, Gateway>,
 {
     /// Runtime context containing all CDA components.
-    pub infrastructure: ReloadContext<Uds, Gateway, Config>,
+    pub infrastructure: DefaultReloadContext<Uds, Gateway, Config>,
     /// Factory for creating vehicle components on reload.
     pub factory: Arc<VehicleFactory>,
 }
@@ -140,7 +140,7 @@ where
     /// Creates a new [`RuntimeReloaderConfig`] from context and a factory.
     #[must_use]
     pub fn new(
-        infrastructure: ReloadContext<Uds, Gateway, Config>,
+        infrastructure: DefaultReloadContext<Uds, Gateway, Config>,
         factory: Arc<VehicleFactory>,
     ) -> Self {
         Self {

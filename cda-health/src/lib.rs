@@ -54,11 +54,11 @@ impl StatusHealthProvider {
 
 #[async_trait::async_trait]
 impl HealthProvider for StatusHealthProvider {
-    async fn check_health(&self) -> Status {
+    async fn status(&self) -> Status {
         *self.status.read().await
     }
 
-    async fn update_status(&self, status: Status) {
+    async fn set_status(&self, status: Status) {
         *self.status.write().await = status;
     }
 }
@@ -96,7 +96,7 @@ impl HealthState {
         let providers = self.providers.read().await;
 
         let futures = providers.iter().map(|(name, provider)| async move {
-            let status = provider.check_health().await;
+            let status = provider.status().await;
             (name.clone(), status)
         });
 

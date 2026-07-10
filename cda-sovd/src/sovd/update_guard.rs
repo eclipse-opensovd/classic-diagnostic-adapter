@@ -26,7 +26,6 @@ use axum::{
     http::StatusCode,
     response::{IntoResponse, Response},
 };
-use cda_interfaces::runtime_update_api::UpdateGuard;
 use http::Method;
 use tokio::sync::RwLock;
 use tower::{Layer, Service};
@@ -73,15 +72,15 @@ impl UpdateGuardState {
         self.busy.load(Ordering::Acquire)
     }
 
+    /// Returns a shared handle to the busy flag.
+    #[must_use]
+    pub fn busy_handle(&self) -> Arc<AtomicBool> {
+        Arc::clone(&self.busy)
+    }
+
     /// Returns a shared reference to the exempt routes list.
     pub async fn exempt_routes(&self) -> Vec<ExemptRoute> {
         self.exempt_routes.read().await.clone()
-    }
-}
-
-impl UpdateGuard for UpdateGuardState {
-    fn busy_handle(&self) -> Arc<AtomicBool> {
-        Arc::clone(&self.busy)
     }
 }
 
