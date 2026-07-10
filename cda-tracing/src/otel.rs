@@ -11,6 +11,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+use cda_config::datatypes::OtelConfig;
 use opentelemetry::{KeyValue, global};
 use opentelemetry_otlp::WithExportConfig;
 use opentelemetry_sdk::{

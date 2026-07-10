@@ -17,7 +17,7 @@ use std::{
 };
 
 use cda_config::{
-    datatypes::{DatabaseNamingConvention, FunctionalDescriptionConfig},
+    datatypes::{DatabaseNamingConvention, FunctionalDescriptionConfig, LoggingConfig},
     validate::ConfigSanity,
 };
 use cda_health::config::HealthConfig;

@@ -63,6 +63,6 @@ cda-build = { workspace = true }
 
 [features]
 default = []
-tokio-tracing = ["dep:console-subscriber", "tokio/tracing"]
-dlt-tracing = ["dep:tracing-dlt"]
+tokio-tracing = ["dep:console-subscriber", "tokio/tracing", "cda-config/tokio-tracing"]
+dlt-tracing = ["dep:tracing-dlt", "cda-config/dlt-tracing"]
 dlt-tracing-load-control = ["dlt-tracing", "tracing-dlt?/trace_load_ctrl"]

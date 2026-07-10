@@ -15,10 +15,12 @@ pub use database::*;
 pub use database_naming_convention::*;
 pub use doip::*;
 pub use functional_description::*;
+pub use logging::*;
 pub use runtime_update::*;
 
 mod database;
 mod database_naming_convention;
 mod doip;
 mod functional_description;
+mod logging;
 mod runtime_update;
