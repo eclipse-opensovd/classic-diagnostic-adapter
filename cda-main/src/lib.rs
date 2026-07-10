@@ -13,10 +13,10 @@
 
 use std::{future::Future, path::PathBuf, sync::Arc};
 
-use cda_comm_doip::{DoipDiagGateway, config::DoipConfig};
+use cda_comm_doip::DoipDiagGateway;
 use cda_comm_uds::{UdsManager, state_coordinator::EcuStateCoordinator};
 use cda_config::{
-    datatypes::FunctionalDescriptionConfig,
+    datatypes::{DoipConfig, FunctionalDescriptionConfig},
     validate::{ConfigSanity, ConfigSanityError},
 };
 use cda_core::EcuManager;

@@ -1,5 +1,5 @@
 /*
- * SPDX-FileCopyrightText: 2025 Copyright (c) Contributors to the Eclipse Foundation
+ * SPDX-FileCopyrightText: 2026 Copyright (c) Contributors to the Eclipse Foundation
  *
  * See the NOTICE file(s) distributed with this work for additional
  * information regarding copyright ownership.
@@ -11,9 +11,10 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-use cda_config::validate::{ConfigSanity, ConfigSanityError};
 use cda_interfaces::Protocol;
 use serde::{Deserialize, Serialize};
+
+use crate::validate::{ConfigSanity, ConfigSanityError};
 
 /// `DoIP` (Diagnostics over IP) transport layer configuration.
 #[derive(Deserialize, Serialize, Clone, Debug, schemars::JsonSchema)]

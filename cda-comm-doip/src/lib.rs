@@ -17,6 +17,7 @@ use std::{
     time::{Duration, Instant},
 };
 
+use cda_config::datatypes::DoipConfig;
 use cda_interfaces::{
     DiagServiceError, DoipComParams, DoipGatewaySetupError, EcuAddresses, EcuConnectivityHandler,
     EcuGateway, HashMap, HashMapExtensions, ServicePayload, TransmissionParameters,
@@ -39,12 +40,10 @@ use tokio::{
 use tokio_util::sync::CancellationToken;
 
 use crate::{
-    config::DoipConfig,
     connections::{EcuError, GatewayState},
     socket::DoIPUdpSocket,
 };
 
-pub mod config;
 mod connection_receiver;
 mod connection_sender;
 mod connections;

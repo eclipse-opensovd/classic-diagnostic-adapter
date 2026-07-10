@@ -15,9 +15,8 @@ use std::sync::Arc;
 
 use aide::axum::{ApiRouter, routing};
 use axum::{Json, http::StatusCode};
-use cda_comm_doip::config::DoipConfig;
 use cda_comm_uds::state_coordinator::EcuStateCoordinator;
-use cda_config::datatypes::FunctionalDescriptionConfig;
+use cda_config::datatypes::{DoipConfig, FunctionalDescriptionConfig};
 use cda_interfaces::{
     EcuConnectivityHandler, HashMap, HashMapExtensions, UdsQuery,
     datatypes::{ComponentsConfig, FaultConfig},

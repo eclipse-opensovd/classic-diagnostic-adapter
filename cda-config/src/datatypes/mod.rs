@@ -12,7 +12,9 @@
  */
 
 pub use database_naming_convention::*;
+pub use doip::*;
 pub use functional_description::*;
 
 mod database_naming_convention;
+mod doip;
 mod functional_description;
