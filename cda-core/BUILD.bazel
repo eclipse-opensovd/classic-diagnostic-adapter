@@ -10,25 +10,17 @@
 
 # cda-core: Diagnostic core logic and orchestration.
 
-load("@rules_rust//rust:defs.bzl", "rust_library")
+load("//:bazel/rust_crate.bzl", "workspace_rust_library")
 
 package(default_visibility = ["//visibility:public"])
 
-rust_library(
+workspace_rust_library(
     name = "cda-core",
     srcs = glob(["src/**/*.rs"]),
     crate_name = "cda_core",
-    edition = "2024",
-    deps = [
+    local_deps = [
         "//cda-database",
         "//cda-interfaces",
         "//cda-plugin-security",
-        "@crate_index//:num-traits",
-        "@crate_index//:parking_lot",
-        "@crate_index//:schemars",
-        "@crate_index//:serde",
-        "@crate_index//:serde_json",
-        "@crate_index//:tokio",
-        "@crate_index//:tracing",
     ],
 )

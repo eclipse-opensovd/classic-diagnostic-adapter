@@ -10,23 +10,17 @@
 
 # mbedtls-rs: Safe Rust wrapper around mbedtls with async (Tokio) TLS support.
 
-load("@rules_rust//rust:defs.bzl", "rust_library")
+load("//:bazel/rust_crate.bzl", "workspace_rust_library")
 
 package(default_visibility = ["//visibility:public"])
 
-rust_library(
+workspace_rust_library(
     name = "mbedtls-rs",
     srcs = glob(["src/**/*.rs"]),
-    edition = "2024",
     crate_features = [
         "default",
         "tokio",
     ],
     crate_name = "mbedtls_rs",
-    deps = [
-        "//comm-mbedtls/mbedtls-sys",
-        "@crate_index//:ed25519-dalek",
-        "@crate_index//:tokio",
-        "@crate_index//:tracing",
-    ],
+    local_deps = ["//comm-mbedtls/mbedtls-sys"],
 )

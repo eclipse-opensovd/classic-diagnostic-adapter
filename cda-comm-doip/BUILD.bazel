@@ -11,36 +11,20 @@
 # cda-comm-doip: DoIP (Diagnostics over IP) communication transport.
 # TLS backend is selected via //:tls_backend config flag (openssl or mbedtls).
 
-load("@rules_rust//rust:defs.bzl", "rust_library")
+load("//:bazel/rust_crate.bzl", "workspace_rust_library")
 
 package(default_visibility = ["//visibility:public"])
 
-rust_library(
+workspace_rust_library(
     name = "cda-comm-doip",
     srcs = glob(["src/**/*.rs"]),
-    edition = "2024",
     crate_features = select({
         "//:use_openssl": ["openssl"],
         "//:use_mbedtls": ["mbedtls"],
     }),
     crate_name = "cda_comm_doip",
-    deps = [
-        "//cda-interfaces",
-        "@crate_index//:doip-codec",
-        "@crate_index//:doip-definitions",
-        "@crate_index//:futures",
-        "@crate_index//:schemars",
-        "@crate_index//:serde",
-        "@crate_index//:socket2",
-        "@crate_index//:thiserror",
-        "@crate_index//:tokio",
-        "@crate_index//:tokio-util",
-        "@crate_index//:tracing",
-    ] + select({
-        "//:use_openssl": [
-            "@crate_index//:openssl",
-            "@crate_index//:tokio-openssl",
-        ],
+    local_deps = ["//cda-interfaces"] + select({
+        "//:use_openssl": [],
         "//:use_mbedtls": [
             "//comm-mbedtls/mbedtls-rs",
         ],

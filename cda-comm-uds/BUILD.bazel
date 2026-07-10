@@ -10,25 +10,13 @@
 
 # cda-comm-uds: UDS (Unified Diagnostic Services) messaging layer.
 
-load("@rules_rust//rust:defs.bzl", "rust_library")
+load("//:bazel/rust_crate.bzl", "workspace_rust_library")
 
 package(default_visibility = ["//visibility:public"])
 
-rust_library(
+workspace_rust_library(
     name = "cda-comm-uds",
     srcs = glob(["src/**/*.rs"]),
     crate_name = "cda_comm_uds",
-    edition = "2024",
-    deps = [
-        "//cda-interfaces",
-        "@crate_index//:futures",
-        "@crate_index//:serde_json",
-        "@crate_index//:socket2",
-        "@crate_index//:strum",
-        "@crate_index//:tokio",
-        "@crate_index//:tracing",
-    ],
-    proc_macro_deps = [
-        "@crate_index//:async-trait",
-    ],
+    local_deps = ["//cda-interfaces"],
 )

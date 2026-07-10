@@ -49,7 +49,7 @@ nu-ansi-term = { workspace = true } # ANSI terminal support for terminal log out
 # otel
 opentelemetry = { workspace = true, features = ["trace"] }
 opentelemetry_sdk = { workspace = true, features = ["trace", "metrics"] }
-opentelemetry-otlp = { workspace = true, features = ["metrics", "grpc-tonic"] }
+opentelemetry-otlp = { workspace = true, features = ["trace", "metrics", "grpc-tonic"] }
 opentelemetry-semantic-conventions = { workspace = true, features = [
   "semconv_experimental",
 ] }

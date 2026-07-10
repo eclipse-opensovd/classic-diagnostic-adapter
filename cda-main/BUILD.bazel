@@ -12,39 +12,34 @@
 # Builds the opensovd-cda binary and library.
 # TLS backend is selected via //:tls_backend config flag.
 
-load("@rules_rust//cargo:defs.bzl", "cargo_build_script")
-load("@rules_rust//rust:defs.bzl", "rust_binary", "rust_library")
+load("//:bazel/rust_crate.bzl", "workspace_cargo_build_script", "workspace_rust_binary", "workspace_rust_library")
 
 package(default_visibility = ["//visibility:public"])
 
-cargo_build_script(
+workspace_cargo_build_script(
     name = "build_script",
     srcs = ["build.rs"],
-    edition = "2024",
+    local_deps = ["@crate_index//:chrono"],
     build_script_env = {
         # Provide deterministic build metadata.
         # For production builds, override via --action_env or workspace_status_command.
         "SOURCE_DATE_EPOCH": "0",
         "SOURCE_GIT_SHA": "bazel",
     },
-    deps = [
-        "@crate_index//:chrono",
-    ],
 )
 
-rust_library(
+workspace_rust_library(
     name = "opensovd_cda_lib",
     srcs = glob(
         ["src/**/*.rs"],
         exclude = ["src/main.rs"],
     ),
-    edition = "2024",
     crate_features = ["health"] + select({
         "//:use_openssl": ["openssl"],
         "//:use_mbedtls": ["mbedtls"],
     }),
     crate_name = "opensovd_cda_lib",
-    deps = [
+    local_deps = [
         ":build_script",
         "//cda-comm-doip",
         "//cda-comm-uds",
@@ -52,44 +47,30 @@ rust_library(
         "//cda-database",
         "//cda-health",
         "//cda-interfaces",
+        "//cda-plugin-runtime-update",
         "//cda-plugin-security",
         "//cda-sovd",
+        "//cda-storage",
         "//cda-tracing",
-        "@crate_index//:clap",
-        "@crate_index//:figment",
-        "@crate_index//:futures",
-        "@crate_index//:mimalloc",
-        "@crate_index//:schemars",
-        "@crate_index//:serde",
-        "@crate_index//:serde_json",
-        "@crate_index//:thiserror",
-        "@crate_index//:tokio",
-        "@crate_index//:toml",
-        "@crate_index//:tracing",
-        "@crate_index//:tracing-subscriber",
     ],
 )
 
-rust_binary(
+workspace_rust_binary(
     name = "opensovd-cda",
     srcs = ["src/main.rs"],
-    edition = "2024",
     crate_features = ["health"] + select({
         "//:use_openssl": ["openssl"],
         "//:use_mbedtls": ["mbedtls"],
     }),
-    deps = [
+    local_deps = [
         ":build_script",
         ":opensovd_cda_lib",
         "//cda-core",
         "//cda-health",
         "//cda-interfaces",
+        "//cda-plugin-runtime-update",
         "//cda-plugin-security",
         "//cda-sovd",
-        "@crate_index//:clap",
-        "@crate_index//:futures",
-        "@crate_index//:serde_json",
-        "@crate_index//:tokio",
-        "@crate_index//:tracing",
+        "//cda-storage",
     ],
 )

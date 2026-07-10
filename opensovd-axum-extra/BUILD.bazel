@@ -10,14 +10,13 @@
 
 # opensovd-axum-extra: Optional axum extractors for host source detection.
 
-load("@rules_rust//rust:defs.bzl", "rust_library")
+load("//:bazel/rust_crate.bzl", "workspace_rust_library")
 
 package(default_visibility = ["//visibility:public"])
 
-rust_library(
+workspace_rust_library(
     name = "opensovd-axum-extra",
     srcs = glob(["src/**/*.rs"]),
-    edition = "2024",
     crate_features = [
         "default",
         "forwarded",
@@ -26,9 +25,4 @@ rust_library(
         "x-forwarded-host",
     ],
     crate_name = "opensovd_axum_extra",
-    deps = [
-        "@crate_index//:aide",
-        "@crate_index//:axum",
-        "@crate_index//:http",
-    ],
 )

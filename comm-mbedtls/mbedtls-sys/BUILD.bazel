@@ -14,8 +14,7 @@
 # via rules_foreign_cc. The build.rs (cargo_build_script) only runs bindgen to generate
 # Rust FFI bindings -- cmake/cc steps are skipped via MBEDTLS_SKIP_BUILD=1.
 
-load("@rules_rust//cargo:defs.bzl", "cargo_build_script")
-load("@rules_rust//rust:defs.bzl", "rust_library")
+load("//:bazel/rust_crate.bzl", "workspace_cargo_build_script", "workspace_rust_library")
 
 package(default_visibility = ["//visibility:public"])
 
@@ -27,10 +26,9 @@ exports_files([
     "wrapper.h",
 ])
 
-cargo_build_script(
+workspace_cargo_build_script(
     name = "build_script",
     srcs = ["build.rs"],
-    edition = "2024",
     build_script_env = {
         "MBEDTLS_DIR": "$(execpath @mbedtls//:CMakeLists.txt)",
         "MBEDTLS_SKIP_BUILD": "1",
@@ -43,25 +41,13 @@ cargo_build_script(
         "@mbedtls//:CMakeLists.txt",
         "@mbedtls//:all_srcs",
     ] + glob(["csrc/**"]),
-    deps = [
-        "@crate_index//:bindgen",
-        "@crate_index//:bzip2",
-        "@crate_index//:cc",
-        "@crate_index//:cmake",
-        "@crate_index//:const_format",
-        "@crate_index//:diffy",
-        "@crate_index//:sha256",
-        "@crate_index//:tar",
-        "@crate_index//:ureq",
-    ],
 )
 
-rust_library(
+workspace_rust_library(
     name = "mbedtls-sys",
     srcs = glob(["src/**/*.rs"]),
     crate_name = "mbedtls_sys",
-    edition = "2024",
-    deps = [
+    local_deps = [
         ":build_script",
         "//third_party/mbedtls",
         "//third_party/mbedtls:ed25519_psa_driver",

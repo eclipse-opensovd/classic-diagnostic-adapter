@@ -10,21 +10,13 @@
 
 # sovd-interfaces: Data models and trait definitions for SOVD API resources.
 
-load("@rules_rust//rust:defs.bzl", "rust_library")
+load("//:bazel/rust_crate.bzl", "workspace_rust_library")
 
 package(default_visibility = ["//visibility:public"])
 
-rust_library(
+workspace_rust_library(
     name = "sovd-interfaces",
     srcs = glob(["src/**/*.rs"]),
     crate_name = "sovd_interfaces",
-    edition = "2024",
-    deps = [
-        "//cda-interfaces",
-        "@crate_index//:chrono",
-        "@crate_index//:schemars",
-        "@crate_index//:serde",
-        "@crate_index//:serde_json",
-        "@crate_index//:strum",
-    ],
+    local_deps = ["//cda-interfaces"],
 )

@@ -25,7 +25,10 @@ cmake(
     cache_entries = {
         # Force ar instead of libtool to avoid rules_foreign_cc wrapper issues on macOS
         "CMAKE_AR": "/usr/bin/ar",
-        "CMAKE_C_FLAGS": "-DMBEDTLS_SSL_RECORD_SIZE_LIMIT -DMBEDTLS_SSL_NULL_CIPHERSUITES -DMBEDTLS_ED25519_PSA_DRIVER -I$$EXT_BUILD_ROOT$$/comm-mbedtls/mbedtls-sys/csrc",
+        # Support both repository layouts:
+        # 1) CDA as the main workspace:      $EXT_BUILD_ROOT/comm-mbedtls/...
+        # 2) CDA consumed as external module: $EXT_BUILD_ROOT/external/classic-diagnostic-adapter+/comm-mbedtls/...
+        "CMAKE_C_FLAGS": "-DMBEDTLS_SSL_RECORD_SIZE_LIMIT -DMBEDTLS_SSL_NULL_CIPHERSUITES -DMBEDTLS_ED25519_PSA_DRIVER -I$$EXT_BUILD_ROOT$$/comm-mbedtls/mbedtls-sys/csrc -I$$EXT_BUILD_ROOT$$/external/classic-diagnostic-adapter+/comm-mbedtls/mbedtls-sys/csrc",
         "ENABLE_PROGRAMS": "OFF",
         "ENABLE_TESTING": "OFF",
         "GEN_FILES": "OFF",

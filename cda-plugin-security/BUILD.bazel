@@ -10,31 +10,17 @@
 
 # cda-plugin-security: Security plugin APIs for authentication and ECU security access.
 
-load("@rules_rust//rust:defs.bzl", "rust_library")
+load("//:bazel/rust_crate.bzl", "workspace_rust_library")
 
 package(default_visibility = ["//visibility:public"])
 
-rust_library(
+workspace_rust_library(
     name = "cda-plugin-security",
     srcs = glob(["src/**/*.rs"]),
     crate_name = "cda_plugin_security",
-    edition = "2024",
-    deps = [
+    local_deps = [
         "//cda-database",
         "//cda-interfaces",
         "//cda-sovd-interfaces:sovd-interfaces",
-        "@crate_index//:aide",
-        "@crate_index//:axum",
-        "@crate_index//:axum-extra",
-        "@crate_index//:http",
-        "@crate_index//:jsonwebtoken",
-        "@crate_index//:schemars",
-        "@crate_index//:serde",
-        "@crate_index//:serde_json",
-        "@crate_index//:thiserror",
-        "@crate_index//:tracing",
-    ],
-    proc_macro_deps = [
-        "@crate_index//:async-trait",
     ],
 )

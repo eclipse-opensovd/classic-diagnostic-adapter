@@ -59,27 +59,7 @@ crate = use_extension("@rules_rust//crate_universe:extensions.bzl", "crate", iso
 crate.from_cargo(
     name = "crate_index",
     cargo_lockfile = "//:Cargo.lock",
-    manifests = [
-        "//:Cargo.toml",
-        "//cda-build:Cargo.toml",
-        "//cda-comm-doip:Cargo.toml",
-        "//cda-comm-uds:Cargo.toml",
-        "//cda-core:Cargo.toml",
-        "//cda-database:Cargo.toml",
-        "//cda-extra:Cargo.toml",
-        "//cda-health:Cargo.toml",
-        "//cda-interfaces:Cargo.toml",
-        "//cda-main:Cargo.toml",
-        "//cda-plugin-security:Cargo.toml",
-        "//cda-sovd:Cargo.toml",
-        "//cda-sovd-interfaces:Cargo.toml",
-        "//cda-storage:Cargo.toml",
-        "//cda-tracing:Cargo.toml",
-        "//comm-mbedtls/mbedtls-rs:Cargo.toml",
-        "//comm-mbedtls/mbedtls-sys:Cargo.toml",
-        "//integration-tests:Cargo.toml",
-        "//opensovd-axum-extra:Cargo.toml",
-    ],
+    manifests = ["//:Cargo.toml"],
 )
 
 # mbedtls-sys: point build.rs at pre-fetched + pre-patched source, skip native build
