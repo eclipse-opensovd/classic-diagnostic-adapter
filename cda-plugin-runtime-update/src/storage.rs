@@ -337,12 +337,11 @@ pub(crate) async fn upload_files<
     S: Storage + 'static,
     T: RuntimeUpdateSecurityPlugin<L, S::CollectionHandle>,
     L: LockStateProvider,
-    V: ConfigValidator,
 >(
     storage: &S,
     security_handler: &T,
     files: Vec<UploadFile>,
-    config_validator: &V,
+    config_validator: &dyn ConfigValidator,
 ) -> Result<BulkDataCreatedList, RuntimeUpdateError> {
     let mut result = BulkDataCreatedList::default();
     let mut config_seen = false;
@@ -400,7 +399,6 @@ pub(crate) async fn upload_files<
                     &mdd_collection,
                     &key,
                     UpdateFileType::Mdd,
-                    config_validator,
                 )
                 .await?;
 
@@ -436,8 +434,7 @@ pub(crate) async fn upload_files<
                     security_handler,
                     &cfg_collection,
                     &key,
-                    UpdateFileType::Config,
-                    config_validator,
+                    UpdateFileType::Config(config_validator),
                 )
                 .await?;
 
@@ -454,17 +451,15 @@ async fn check_file_integrity_and_roll_back_on_error<
     S: Storage + 'static,
     T: RuntimeUpdateSecurityPlugin<L, S::CollectionHandle>,
     L: LockStateProvider,
-    V: ConfigValidator,
 >(
     storage: &S,
     security_handler: &T,
     collection: &Arc<impl Collection + DirectFileAccess>,
     key: &String,
-    file_type: UpdateFileType,
-    config_validator: &V,
+    file_type: UpdateFileType<'_>,
 ) -> Result<(), RuntimeUpdateError> {
     if let Err(verification_error) = security_handler
-        .check_file_integrity(file_type, &collection.file_path(key)?, config_validator)
+        .check_file_integrity(file_type, &collection.file_path(key)?)
         .await
     {
         tracing::warn!(
@@ -531,8 +526,7 @@ mod tests {
 
     use cda_interfaces::{
         runtime_update_api::{
-            BulkDataCreatedList, ConfigValidator, HashAlgorithm, RuntimeFilesQuery,
-            RuntimeUpdateError, UploadFile,
+            BulkDataCreatedList, HashAlgorithm, RuntimeFilesQuery, RuntimeUpdateError, UploadFile,
         },
         storage_api::{Collection, CollectionName, RandomAccessData, Storage, StorageError},
     };
@@ -549,17 +543,23 @@ mod tests {
         storage: &S,
         files: Vec<UploadFile>,
     ) -> Result<BulkDataCreatedList, RuntimeUpdateError> {
-        upload_files::<S, MockSecurityHandler, MockLockProvider, ()>(
+        let noop: () = ();
+        upload_files::<S, MockSecurityHandler, MockLockProvider>(
             storage,
             &MockSecurityHandler::new(),
             files,
-            &(),
+            &noop,
         )
         .await
     }
 
+    enum RejectKind {
+        Mdd,
+        Config,
+    }
+
     struct RejectingSecurityHandler {
-        reject_type: cda_interfaces::runtime_update_api::UpdateFileType,
+        reject_type: RejectKind,
     }
 
     #[async_trait::async_trait]
@@ -581,22 +581,22 @@ mod tests {
             Ok(())
         }
 
-        async fn check_file_integrity<V: ConfigValidator>(
+        async fn check_file_integrity(
             &self,
-            type_: cda_interfaces::runtime_update_api::UpdateFileType,
+            type_: cda_interfaces::runtime_update_api::UpdateFileType<'_>,
             _path: &std::path::Path,
-            _config_validator: &V,
         ) -> Result<(), cda_interfaces::runtime_update_api::VerificationError> {
-            if matches!(
+            let rejected = matches!(
                 (&type_, &self.reject_type),
                 (
                     cda_interfaces::runtime_update_api::UpdateFileType::Mdd,
-                    cda_interfaces::runtime_update_api::UpdateFileType::Mdd,
+                    RejectKind::Mdd,
                 ) | (
-                    cda_interfaces::runtime_update_api::UpdateFileType::Config,
-                    cda_interfaces::runtime_update_api::UpdateFileType::Config,
+                    cda_interfaces::runtime_update_api::UpdateFileType::Config(_),
+                    RejectKind::Config,
                 )
-            ) {
+            );
+            if rejected {
                 return Err(cda_interfaces::runtime_update_api::VerificationError(
                     "rejected".to_string(),
                 ));
@@ -608,13 +608,16 @@ mod tests {
     async fn upload_rejecting<S: cda_interfaces::storage_api::Storage + 'static>(
         storage: &S,
         files: Vec<cda_interfaces::runtime_update_api::UploadFile>,
-        reject_type: cda_interfaces::runtime_update_api::UpdateFileType,
+        reject_kind: RejectKind,
     ) -> Result<BulkDataCreatedList, RuntimeUpdateError> {
-        upload_files::<S, RejectingSecurityHandler, MockLockProvider, ()>(
+        let noop: () = ();
+        upload_files::<S, RejectingSecurityHandler, MockLockProvider>(
             storage,
-            &RejectingSecurityHandler { reject_type },
+            &RejectingSecurityHandler {
+                reject_type: reject_kind,
+            },
             files,
-            &(),
+            &noop,
         )
         .await
     }
@@ -642,11 +645,10 @@ mod tests {
             Ok(())
         }
 
-        async fn check_file_integrity<V: ConfigValidator>(
+        async fn check_file_integrity(
             &self,
-            _type_: cda_interfaces::runtime_update_api::UpdateFileType,
+            _type_: cda_interfaces::runtime_update_api::UpdateFileType<'_>,
             path: &std::path::Path,
-            _config_validator: &V,
         ) -> Result<(), cda_interfaces::runtime_update_api::VerificationError> {
             if path.file_name().and_then(|n| n.to_str()) == Some(self.reject_filename) {
                 return Err(cda_interfaces::runtime_update_api::VerificationError(
@@ -662,11 +664,12 @@ mod tests {
         files: Vec<cda_interfaces::runtime_update_api::UploadFile>,
         reject_filename: &'static str,
     ) -> Result<BulkDataCreatedList, RuntimeUpdateError> {
-        upload_files::<S, RejectingByNameSecurityHandler, MockLockProvider, ()>(
+        let noop: () = ();
+        upload_files::<S, RejectingByNameSecurityHandler, MockLockProvider>(
             storage,
             &RejectingByNameSecurityHandler { reject_filename },
             files,
-            &(),
+            &noop,
         )
         .await
     }
@@ -1626,13 +1629,9 @@ mod tests {
         let mdd = make_valid_mdd("TestECU");
         let files = make_upload_files(&[("test.mdd", &mdd)]);
 
-        let err = upload_rejecting(
-            &storage,
-            files,
-            cda_interfaces::runtime_update_api::UpdateFileType::Mdd,
-        )
-        .await
-        .unwrap_err();
+        let err = upload_rejecting(&storage, files, RejectKind::Mdd)
+            .await
+            .unwrap_err();
 
         assert!(
             matches!(err, RuntimeUpdateError::ValidationFailed(_)),
@@ -1647,12 +1646,7 @@ mod tests {
         let mdd = make_valid_mdd("TestECU");
         let files = make_upload_files(&[("test.mdd", &mdd)]);
 
-        let _ = upload_rejecting(
-            &storage,
-            files,
-            cda_interfaces::runtime_update_api::UpdateFileType::Mdd,
-        )
-        .await;
+        let _ = upload_rejecting(&storage, files, RejectKind::Mdd).await;
 
         let col = storage
             .get_or_create_collection(&CollectionName::DiagnosticDatabaseNextUpdate)
@@ -1675,7 +1669,7 @@ mod tests {
         let _ = upload_rejecting(
             &storage,
             make_upload_files(&[("ecu2.mdd", &mdd2)]),
-            cda_interfaces::runtime_update_api::UpdateFileType::Mdd,
+            RejectKind::Mdd,
         )
         .await;
 
@@ -1693,12 +1687,7 @@ mod tests {
         let mdd = make_valid_mdd("TestECU");
         let files = make_upload_files(&[("test.mdd", &mdd)]);
 
-        let result = upload_rejecting(
-            &storage,
-            files,
-            cda_interfaces::runtime_update_api::UpdateFileType::Mdd,
-        )
-        .await;
+        let result = upload_rejecting(&storage, files, RejectKind::Mdd).await;
 
         assert!(result.is_err());
     }
@@ -1709,13 +1698,9 @@ mod tests {
         let config = make_valid_config();
         let files = make_upload_files(&[("opensovd-cda.toml", &config)]);
 
-        let upload_err = upload_rejecting(
-            &storage,
-            files,
-            cda_interfaces::runtime_update_api::UpdateFileType::Config,
-        )
-        .await
-        .unwrap_err();
+        let upload_err = upload_rejecting(&storage, files, RejectKind::Config)
+            .await
+            .unwrap_err();
         let col = storage
             .get_or_create_collection(&CollectionName::ConfigurationNextUpdate)
             .await

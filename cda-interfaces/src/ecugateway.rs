@@ -11,7 +11,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-use std::time::Duration;
+use std::{sync::Arc, time::Duration};
 
 use tokio::sync::{Mutex, RwLock, mpsc};
 
@@ -141,5 +141,5 @@ pub trait EcuGatewaySockets {
     type Socket: Send + Sync + 'static;
 
     /// Returns a shared, cloneable handle to the underlying UDP socket.
-    fn upd_socket(&self) -> std::sync::Arc<Mutex<Self::Socket>>;
+    fn upd_socket(&self) -> Arc<Mutex<Self::Socket>>;
 }

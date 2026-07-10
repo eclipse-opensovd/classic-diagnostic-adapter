@@ -132,7 +132,7 @@ pub async fn load_databases<S: SecurityPlugin>(
     db_health_provider: Option<&Arc<dyn HealthProvider>>,
 ) -> Result<(DatabaseMap<S>, FileManagerMap), AppError> {
     if let Some(provider) = db_health_provider {
-        provider.update_status(cda_health::Status::Starting).await;
+        provider.set_status(cda_health::Status::Starting).await;
     }
     let start = std::time::Instant::now();
 
@@ -157,7 +157,7 @@ pub async fn load_databases<S: SecurityPlugin>(
                 }
                 Err(e) => {
                     if let Some(provider) = db_health_provider {
-                        provider.update_status(cda_health::Status::Failed).await;
+                        provider.set_status(cda_health::Status::Failed).await;
                     }
                     return Err(AppError::DataError(e.to_string()));
                 }
@@ -209,7 +209,7 @@ pub async fn load_databases<S: SecurityPlugin>(
         cda_health::Status::Up
     };
     if let Some(provider) = db_health_provider {
-        provider.update_status(status).await;
+        provider.set_status(status).await;
     }
 
     Ok((databases, file_managers))

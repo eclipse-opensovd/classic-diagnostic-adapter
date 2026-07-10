@@ -23,20 +23,22 @@ use cda_interfaces::{
     },
 };
 use cda_plugin_runtime_update::{
-    DefaultUpdateSecurityHandler,
+    DefaultRuntimeUpdatePlugin, DefaultUpdateSecurityHandler,
     default_runtime_reloader_plugin::{
-        DefaultRuntimeReloaderPlugin, ReloadContext as ReloaderContext,
+        DefaultReloadContext as ReloaderContext, DefaultRuntimeReloaderPlugin,
     },
 };
 use cda_plugin_security::{
     DefaultSecurityPlugin, DefaultSecurityPluginData, SecurityPlugin, SecurityPluginLoader,
 };
 use cda_sovd::{SovdLockStateProvider, UpdateGuardState};
+use cda_storage::LocalStorage;
 use tokio::sync::Mutex;
 
 use crate::{
-    AppError, CdaRuntime, UdsManagerType,
+    AppError, UdsManagerType,
     config::configfile::{Configuration, ConfigurationValidator},
+    setup::CdaRuntime,
 };
 
 /// Setup configuration for CDA runtime initialization.
@@ -220,7 +222,6 @@ pub(crate) async fn create_default_update_plugin(
         ecu_execution_registry: infra.ecu_execution_registry.clone(),
         health: infra.health,
         variant_detection_handle: Mutex::new(infra.variant_detection_handle.lock().await.take()),
-        // flash_transfer_guard is not passed - it's used separately for the security handler
         storage_dir: infra.storage_dir.clone(),
         mdd_decompress: infra.mdd_decompress,
     };
@@ -236,8 +237,11 @@ pub(crate) async fn create_default_update_plugin(
         _,
     >::new(reloader_config));
 
-    let plugin = cda_plugin_runtime_update::init_default_runtime_update_plugin(
-        &infra.storage_dir,
+    let storage = Arc::new(LocalStorage::new(&infra.storage_dir).map_err(|e| {
+        AppError::InitializationFailed(format!("Failed to init storage, error={e:?}"))
+    })?);
+    Ok(DefaultRuntimeUpdatePlugin::new(
+        storage,
         reloader_plugin,
         Arc::new(DefaultUpdateSecurityHandler::new(
             Arc::clone(&infra.lock_provider),
@@ -250,7 +254,5 @@ pub(crate) async fn create_default_update_plugin(
         infra.mdd_decompress,
         Arc::clone(&infra.update_in_progress),
         ConfigurationValidator::new(),
-    )?;
-
-    Ok(plugin)
+    ))
 }

@@ -17,8 +17,8 @@ use async_trait::async_trait;
 use cda_database::mmap_and_decode_mdd;
 use cda_interfaces::{
     runtime_update_api::{
-        ActivityGuard, ConfigValidator, LockStateProvider, RuntimeUpdateError,
-        RuntimeUpdateSecurityPlugin, UpdateCollections, UpdateFileType, VerificationError,
+        ActivityGuard, LockStateProvider, RuntimeUpdateError, RuntimeUpdateSecurityPlugin,
+        UpdateCollections, UpdateFileType, VerificationError,
     },
     storage_api::{Collection, DirectFileAccess},
 };
@@ -91,11 +91,10 @@ impl<L: LockStateProvider, C: Collection + DirectFileAccess + Send + Sync + 'sta
         Ok(())
     }
 
-    async fn check_file_integrity<V: ConfigValidator>(
+    async fn check_file_integrity(
         &self,
-        type_: UpdateFileType,
+        type_: UpdateFileType<'_>,
         path: &std::path::Path,
-        config_validator: &V,
     ) -> Result<(), VerificationError> {
         match type_ {
             UpdateFileType::Mdd => {
@@ -106,12 +105,12 @@ impl<L: LockStateProvider, C: Collection + DirectFileAccess + Send + Sync + 'sta
                     VerificationError(format!("Failed to parse MDD '{}': {e}", path.display()))
                 })?;
             }
-            UpdateFileType::Config => {
+            UpdateFileType::Config(config_validator) => {
                 let content = tokio::fs::read_to_string(path).await.map_err(|e| {
                     VerificationError(format!("Failed to read config '{}': {e}", path.display()))
                 })?;
 
-                // Validate config content using the provided validator
+                // Validate config content using the embedded validator
                 config_validator.validate(&content).map_err(|e| {
                     VerificationError(format!(
                         "Failed to validate config '{}': {e}",
@@ -203,15 +202,6 @@ mod tests {
         }
     }
 
-    /// A config validator that always succeeds (no validation)
-    struct NoOpConfigValidator;
-
-    impl ConfigValidator for NoOpConfigValidator {
-        fn validate(&self, _content: &str) -> Result<(), ConfigValidationError> {
-            Ok(())
-        }
-    }
-
     fn make_lock_provider(
         owner: Option<&str>,
         has_ecu_conflicts: bool,
@@ -224,16 +214,15 @@ mod tests {
         }
     }
 
-    async fn check_file_integrity<V: ConfigValidator>(
+    async fn check_file_integrity(
         handler: &DefaultUpdateSecurityHandler<MockLockProvider>,
-        type_: UpdateFileType,
+        type_: UpdateFileType<'_>,
         path: &std::path::Path,
-        validator: &V,
     ) -> Result<(), VerificationError> {
         <DefaultUpdateSecurityHandler<_> as RuntimeUpdateSecurityPlugin<
             MockLockProvider,
             LocalCollection,
-        >>::check_file_integrity(handler, type_, path, validator)
+        >>::check_file_integrity(handler, type_, path)
         .await
     }
 
@@ -376,7 +365,7 @@ mod tests {
         let path = PathBuf::from("/nonexistent/config.toml");
         let validator = TestConfigValidator;
         let result =
-            check_file_integrity(&handler, UpdateFileType::Config, &path, &validator).await;
+            check_file_integrity(&handler, UpdateFileType::Config(&validator), &path).await;
         assert!(result.is_err());
     }
 
@@ -388,7 +377,7 @@ mod tests {
         std::fs::write(&path, "this is not valid toml {{{").unwrap();
         let validator = TestConfigValidator;
         let result =
-            check_file_integrity(&handler, UpdateFileType::Config, &path, &validator).await;
+            check_file_integrity(&handler, UpdateFileType::Config(&validator), &path).await;
         assert!(result.is_err());
     }
 
@@ -400,7 +389,7 @@ mod tests {
         std::fs::write(&path, "[section]\nkey = \"value\"\n").unwrap();
         let validator = TestConfigValidator;
         let result =
-            check_file_integrity(&handler, UpdateFileType::Config, &path, &validator).await;
+            check_file_integrity(&handler, UpdateFileType::Config(&validator), &path).await;
         assert!(result.is_ok());
     }
 
@@ -411,9 +400,9 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("any.toml");
         std::fs::write(&path, "any content even invalid {{{").unwrap();
-        let validator = NoOpConfigValidator;
+        let validator = ();
         let result =
-            check_file_integrity(&handler, UpdateFileType::Config, &path, &validator).await;
+            check_file_integrity(&handler, UpdateFileType::Config(&validator), &path).await;
         // Should succeed because NoOpConfigValidator always returns Ok
         assert!(result.is_ok());
     }
@@ -422,8 +411,7 @@ mod tests {
     async fn check_file_integrity_mdd_fails_on_nonexistent_file() {
         let (handler, _) = make_handler(Some("user-a"), false, false);
         let path = PathBuf::from("/nonexistent/test.mdd");
-        let validator = NoOpConfigValidator;
-        let result = check_file_integrity(&handler, UpdateFileType::Mdd, &path, &validator).await;
+        let result = check_file_integrity(&handler, UpdateFileType::Mdd, &path).await;
         assert!(result.is_err());
     }
 
@@ -433,8 +421,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("bad.mdd");
         std::fs::write(&path, b"not a valid mdd file").unwrap();
-        let validator = NoOpConfigValidator;
-        let result = check_file_integrity(&handler, UpdateFileType::Mdd, &path, &validator).await;
+        let result = check_file_integrity(&handler, UpdateFileType::Mdd, &path).await;
         assert!(result.is_err());
     }
 
