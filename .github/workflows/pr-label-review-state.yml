@@ -41,6 +41,7 @@ jobs:
 
             const NEEDS_REVIEW = 'needs review';
             const CHANGES_REQUESTED = 'changes requested';
+            const READY_TO_MERGE = 'ready to merge';
 
             async function addLabel(label) {
               try {
@@ -80,14 +81,14 @@ jobs:
 
             const latestByReviewer = {};
             for (const review of reviews) {
-              if (review.state === 'COMMENTED') continue;
+              if (review.state === 'COMMENTED' || review.state === 'DISMISSED') continue;
               latestByReviewer[review.user.login] = review.state;
             }
 
             const states = Object.values(latestByReviewer);
             const hasChangesRequested = states.includes('CHANGES_REQUESTED');
             const allApproved = states.length > 0
-              && states.every(s => s === 'APPROVED' || s === 'DISMISSED');
+              && states.every(s => s === 'APPROVED');
 
             const { repository } = await github.graphql(`
               query($owner: String!, $repo: String!, $pr: Int!) {
@@ -134,6 +135,7 @@ jobs:
               core.info('PR is a draft, removing review labels.');
               await removeLabel(NEEDS_REVIEW);
               await removeLabel(CHANGES_REQUESTED);
+              await removeLabel(READY_TO_MERGE);
               return;
             }
 
@@ -144,25 +146,31 @@ jobs:
                 && context.payload.review.state === 'changes_requested') {
               await addLabel(CHANGES_REQUESTED);
               await removeLabel(NEEDS_REVIEW);
+              await removeLabel(READY_TO_MERGE);
 
             } else if (allApproved && !hasUnresolvedThreads) {
+              await addLabel(READY_TO_MERGE);
               await removeLabel(NEEDS_REVIEW);
               await removeLabel(CHANGES_REQUESTED);
 
             } else if (eventName === 'pull_request_target' && action === 'synchronize') {
               await addLabel(NEEDS_REVIEW);
               await removeLabel(CHANGES_REQUESTED);
+              await removeLabel(READY_TO_MERGE);
 
             } else if (hasUnresolvedThreads && authorRepliedToAll) {
               // Author replied to every reviewer thread - ready for re-review
               await addLabel(NEEDS_REVIEW);
               await removeLabel(CHANGES_REQUESTED);
+              await removeLabel(READY_TO_MERGE);
 
             } else if (hasUnresolvedThreads) {
               await addLabel(CHANGES_REQUESTED);
               await removeLabel(NEEDS_REVIEW);
+              await removeLabel(READY_TO_MERGE);
 
             } else {
               await addLabel(NEEDS_REVIEW);
               await removeLabel(CHANGES_REQUESTED);
+              await removeLabel(READY_TO_MERGE);
             }
