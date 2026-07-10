@@ -2375,6 +2375,7 @@ dependencies = [
  "cda-health",
  "cda-interfaces",
  "cda-plugin-runtime-update",
+ "cda-plugin-security",
  "cda-sovd",
  "cda-storage",
  "cda-tracing",
