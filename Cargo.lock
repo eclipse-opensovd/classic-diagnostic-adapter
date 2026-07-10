@@ -521,6 +521,7 @@ version = "0.1.0"
 dependencies = [
  "async-trait",
  "bytes",
+ "cda-config",
  "cda-database",
  "cda-interfaces",
  "cda-storage",

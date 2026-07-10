@@ -24,6 +24,7 @@ workspace = true
 path = "src/lib.rs"
 
 [dependencies]
+cda-config = { workspace = true }
 cda-interfaces = { workspace = true }
 cda-database = { workspace = true }
 sovd-interfaces = { workspace = true }

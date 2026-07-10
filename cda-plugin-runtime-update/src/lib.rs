@@ -22,7 +22,6 @@
 
 pub use default_runtime_update_plugin::DefaultRuntimeFilesUpdatePlugin;
 
-pub mod config;
 pub mod default_runtime_update_plugin;
 pub mod operations;
 pub mod storage;

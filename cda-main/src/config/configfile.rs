@@ -11,7 +11,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-pub use cda_config::datatypes::{DatabaseConfig, DoipConfig};
+pub use cda_config::datatypes::{DatabaseConfig, DoipConfig, RuntimeUpdateConfig};
 use cda_config::{
     datatypes::FunctionalDescriptionConfig,
     validate::{ConfigSanity, ConfigSanityError},
@@ -23,7 +23,6 @@ use cda_interfaces::{
         SdMappingsTruthyValue,
     },
 };
-pub use cda_plugin_runtime_update::config::RuntimeUpdateConfig;
 use serde::{Deserialize, Serialize};
 
 pub use super::com_params::EcuComParams;
