@@ -258,6 +258,7 @@ jobs:
       rust-version: "1.88.0"
       cargo-crap-git-url: "https://github.com/theswiftfox/cargo-crap.git"
       cargo-crap-git-rev: "27bab7d86c0ff9c4f8f681d6538be24572ca1a8d"
+      lcov-file: "lcov-merged.info"
       post-pr-comment: true
       fail-regressions: false
     permissions:
