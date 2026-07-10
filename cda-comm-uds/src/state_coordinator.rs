@@ -102,9 +102,12 @@ impl EcuStateCoordinator {
     }
 
     /// Re-enable disconnect events for the given ECU after variant detection completes.
+    ///
+    /// Uses `ask` (request-response) to guarantee the restore has been processed
+    /// before returning, so concurrent suppress/restore calls cannot interleave.
     pub(crate) async fn restore_disconnect_handling(&self, ecu_name: &str) {
         if let Some(handle) = self.handles.get(ecu_name) {
-            let _ = handle.actor_ref.tell(RestoreDisconnectHandling).await;
+            let _ = handle.actor_ref.ask(RestoreDisconnectHandling).await;
         }
     }
 }

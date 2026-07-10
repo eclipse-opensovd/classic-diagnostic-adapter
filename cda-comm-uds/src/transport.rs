@@ -17,8 +17,8 @@ use std::{
 };
 
 use cda_interfaces::{
-    DiagComm, DiagServiceError, DynamicPlugin, EcuGateway, EcuManager, PayloadDecoder,
-    ServicePayload, TransmissionParameters, UdsResponse, UdsTransport, UdsVariant,
+    Connectivity, DiagComm, DiagServiceError, DynamicPlugin, EcuGateway, EcuManager, EcuState,
+    PayloadDecoder, ServicePayload, TransmissionParameters, UdsResponse, UdsTransport, UdsVariant,
     VariantDetection, VariantState, datatypes::RetryPolicy, diagservices::UdsPayloadData, dlt_ctx,
     service_ids,
 };
@@ -47,15 +47,17 @@ impl<S: EcuGateway, T: EcuManager> UdsManager<S, T> {
     ) -> Result<<T as PayloadDecoder>::Response, DiagServiceError> {
         let ecu = self.uds_ecu_db(ecu_name)?;
 
-        // Pre-send: if variant has not been tested yet, attempt detection before proceeding.
-        // This handles initial boot and reconnect (EcuConnected clears variant to NotTested).
+        // Pre-send: run variant detection when required (see
+        // `needs_variant_detection`). Detection also acts as a reachability
+        // probe for ECUs marked Offline.
         {
             let status = ecu.read().await.ecu_status();
-            let needs_detection = matches!(status.variant_state, VariantState::NotTested);
-            if needs_detection {
+            if needs_variant_detection(&status) {
                 tracing::info!(
                     ecu_name,
-                    "No variant detected -> triggering variant detection before send"
+                    connectivity = ?status.connectivity,
+                    variant_state = ?status.variant_state,
+                    "Triggering variant detection before send"
                 );
                 if let Err(e) = self.detect_variant(ecu_name).await {
                     tracing::warn!(
@@ -63,6 +65,13 @@ impl<S: EcuGateway, T: EcuManager> UdsManager<S, T> {
                         error = %e,
                         "Pre-send variant detection failed"
                     );
+                }
+
+                // Detection doubles as a reachability probe: if the ECU is still
+                // Offline afterwards, the actual send is doomed to time out as
+                // well - fail fast instead of waiting for a second timeout.
+                if ecu.read().await.ecu_status().connectivity == Connectivity::Offline {
+                    return Err(DiagServiceError::EcuOffline(ecu_name.to_owned()));
                 }
             }
         }
@@ -489,6 +498,28 @@ impl<S: EcuGateway, T: EcuManager> UdsTransport for UdsManager<S, T> {
     }
 }
 
+/// Decide whether variant detection must run before sending a UDS request.
+///
+/// Detection is required when
+/// - the variant has not been tested yet (initial boot, or reconnect cleared
+///   the variant to `NotTested`), or
+/// - the ECU is `Offline` with a previously known variant state
+///   (`Detected`/`NotDetected`). This covers ECUs behind a gateway: they share
+///   the gateway's transport connection and never receive a per-ECU reconnect
+///   event, so detection doubles as a reachability probe to bring them back
+///   `Online`.
+///
+/// `Duplicate` ECUs are excluded: resolving a duplicate requires manual
+/// intervention, re-running detection on every send would be pointless.
+pub(crate) fn needs_variant_detection(status: &EcuState) -> bool {
+    matches!(status.variant_state, VariantState::NotTested)
+        || (status.connectivity == Connectivity::Offline
+            && matches!(
+                status.variant_state,
+                VariantState::Detected { .. } | VariantState::NotDetected
+            ))
+}
+
 #[tracing::instrument(skip_all,
     fields(dlt_context = dlt_ctx!("UDS"))
 )]
@@ -583,6 +614,75 @@ mod tests {
             &Duration::from_secs(1),
         );
         assert!(result.is_ok());
+    }
+
+    fn ecu_state(connectivity: Connectivity, variant_state: VariantState) -> EcuState {
+        EcuState {
+            connectivity,
+            variant_state,
+            variant_index: None,
+        }
+    }
+
+    fn detected_variant() -> VariantState {
+        VariantState::Detected {
+            name: "TestVariant".to_owned(),
+            is_base_variant: false,
+            is_fallback: false,
+        }
+    }
+
+    #[test]
+    fn test_needs_variant_detection_not_tested() {
+        // NotTested always triggers detection, regardless of connectivity.
+        assert!(needs_variant_detection(&ecu_state(
+            Connectivity::Online,
+            VariantState::NotTested
+        )));
+        assert!(needs_variant_detection(&ecu_state(
+            Connectivity::Offline,
+            VariantState::NotTested
+        )));
+    }
+
+    #[test]
+    fn test_needs_variant_detection_offline_with_known_variant() {
+        // Offline ECUs with a previously known variant state must be re-probed.
+        // This is the recovery path for ECUs behind a gateway, which never
+        // receive a per-ECU reconnect event.
+        assert!(needs_variant_detection(&ecu_state(
+            Connectivity::Offline,
+            detected_variant()
+        )));
+        assert!(needs_variant_detection(&ecu_state(
+            Connectivity::Offline,
+            VariantState::NotDetected
+        )));
+    }
+
+    #[test]
+    fn test_needs_variant_detection_online_skips_detection() {
+        assert!(!needs_variant_detection(&ecu_state(
+            Connectivity::Online,
+            detected_variant()
+        )));
+        assert!(!needs_variant_detection(&ecu_state(
+            Connectivity::Online,
+            VariantState::NotDetected
+        )));
+    }
+
+    #[test]
+    fn test_needs_variant_detection_duplicate_never_triggers() {
+        // Duplicates require manual resolution, no automatic re-detection.
+        assert!(!needs_variant_detection(&ecu_state(
+            Connectivity::Online,
+            VariantState::Duplicate
+        )));
+        assert!(!needs_variant_detection(&ecu_state(
+            Connectivity::Offline,
+            VariantState::Duplicate
+        )));
     }
 }
 
