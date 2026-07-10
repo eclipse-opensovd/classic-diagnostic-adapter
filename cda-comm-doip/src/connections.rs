@@ -14,8 +14,8 @@
 use std::{sync::Arc, time::Duration};
 
 use cda_interfaces::{
-    DataParseError, DiagServiceError, DoipComParams, EcuAddresses, HashMap, HashMapExtensions,
-    dlt_ctx, service_ids,
+    DataParseError, DiagServiceError, DoipComParams, EcuAddresses, EcuConnectivityHandler, HashMap,
+    HashMapExtensions, dlt_ctx, service_ids,
 };
 use doip_definitions::payload::{
     ActivationType, AliveCheckResponse, DiagnosticAckCode, DiagnosticMessageAck, DoipPayload,
@@ -50,6 +50,20 @@ pub(crate) struct GatewayState<T> {
 struct GatewayConnectionHandles {
     sender: mpsc::Sender<DoipPayload>,
     receivers: HashMap<u16, broadcast::Receiver<Result<DiagnosticResponse, EcuError>>>,
+}
+
+/// Identity of a `DoIP` gateway (IP address and ECU name).
+#[derive(Debug)]
+struct GatewayIdentity {
+    ip: String,
+    name: String,
+}
+
+/// Channels used by the gateway receiver task for bidirectional flow control.
+struct ReceiverChannels {
+    send_pending_rx: watch::Receiver<bool>,
+    reset_tx: mpsc::Sender<ConnectionResetReason>,
+    send_tx: mpsc::Sender<DoipPayload>,
 }
 
 #[derive(Error, Debug, Clone)]
@@ -96,7 +110,7 @@ impl From<EcuError> for DiagServiceError {
 }
 
 #[tracing::instrument(
-    skip(transport, state),
+    skip(transport, state, connectivity_handler),
     fields(
         tester_ip = transport.tester_ip.clone(),
         port = transport.port,
@@ -111,7 +125,7 @@ pub(crate) async fn handle_gateway_connection<T>(
     discovered_gateway: DiscoveredGateway,
     transport: &DoipTransportConfig,
     state: &GatewayState<T>,
-    variant_detection: Option<(mpsc::Sender<Vec<String>>, Vec<String>)>,
+    connectivity_handler: Arc<dyn EcuConnectivityHandler>,
 ) -> Result<u16, EcuError>
 where
     T: EcuAddresses + DoipComParams,
@@ -140,6 +154,15 @@ where
             discovered_gateway.logical_address
         )));
     };
+
+    // Build list of ECU names behind this gateway for notifications
+    let mut ecu_names_for_gateway: Vec<String> = Vec::new();
+    for (name, ecu_lock) in state.ecus.iter() {
+        let ecu = ecu_lock.read().await;
+        if ecu_ids.contains(&ecu.logical_address()) {
+            ecu_names_for_gateway.push(name.clone());
+        }
+    }
 
     let gateway_ecu = match state.ecus.get(&discovered_gateway.ecu_name) {
         Some(ecu) => ecu.read().await,
@@ -172,7 +195,8 @@ where
             },
         },
         ecus: ecu_ids.clone(),
-        variant_detection,
+        ecu_names: ecu_names_for_gateway.clone(),
+        connectivity_handler: Arc::clone(&connectivity_handler),
     };
     let GatewayConnectionHandles { sender, receivers } =
         match connection_handler(gateway, Arc::clone(&state.connection_tasks)).await {
@@ -198,6 +222,12 @@ where
             ecus: doip_ecus,
             ip: discovered_gateway.ip,
         }));
+
+    // Notify connectivity handler that ECUs behind this gateway are now online.
+    // This sets their state to Online so the pre-send variant detection guard works correctly.
+    connectivity_handler
+        .on_gateway_connected(&ecu_names_for_gateway)
+        .await;
 
     Ok(discovered_gateway.logical_address)
 }
@@ -301,11 +331,14 @@ async fn connection_handler(
         send_pending_tx.clone(),
     ));
     tasks.spawn(spawn_gateway_receiver_task(
+        gateway,
         outtx,
         Arc::<EcuConnectionTarget>::clone(&gateway_conn),
-        send_pending_rx,
-        conn_reset_tx,
-        intx.clone(),
+        ReceiverChannels {
+            send_pending_rx,
+            reset_tx: conn_reset_tx,
+            send_tx: intx.clone(),
+        },
     ));
     drop(tasks);
 
@@ -348,28 +381,16 @@ fn spawn_connection_reset_task(
                                     &mut conn_guard,
                                     conn,
                                 );
+                                gateway
+                                    .connectivity_handler
+                                    .on_gateway_connected(&gateway.ecu_names)
+                                    .await;
                                 while !conn_reset_rx.is_empty() {
                                     // drain the receiver to avoid resetting the connection again
                                     // immediately after a reset
                                     if conn_reset_rx.recv().await.is_none() {
                                         tracing::warn!("Connection reset receiver closed");
                                         return;
-                                    }
-                                }
-                                // Trigger variant detection after successful reconnection
-                                // so that ECUs transition back to Online.
-                                if let Some((ref vd_tx, ref ecu_names)) = gateway.variant_detection
-                                {
-                                    if let Err(e) = vd_tx.send(ecu_names.clone()).await {
-                                        tracing::error!(
-                                            error = ?e,
-                                            "Failed to trigger variant detection after reconnect"
-                                        );
-                                    } else {
-                                        tracing::info!(
-                                            ecus = ?ecu_names,
-                                            "Triggered variant detection after reconnect"
-                                        );
                                     }
                                 }
                                 break 'reconnect;
@@ -571,7 +592,7 @@ where
     reason = "Contains two private inline functions that should remain in scope"
 )]
 #[tracing::instrument(
-    skip(outtx, gateway_conn, send_pending_rx, reset_tx),
+    skip_all,
     fields(
         gateway_ip = %gateway_conn.gateway_doip_config.gateway_ip,
         gateway_name = %gateway_conn.gateway_doip_config.name,
@@ -580,30 +601,37 @@ where
     )
 )]
 fn spawn_gateway_receiver_task<T>(
+    gateway: GatewaySetup,
     outtx: HashMap<u16, broadcast::Sender<Result<DiagnosticResponse, EcuError>>>,
     gateway_conn: Arc<EcuConnectionTarget<T>>,
-    mut send_pending_rx: watch::Receiver<bool>,
-    reset_tx: mpsc::Sender<ConnectionResetReason>,
-    send_tx: mpsc::Sender<DoipPayload>,
+    channels: ReceiverChannels,
 ) -> tokio::task::JoinHandle<()>
 where
     T: AsyncRead + AsyncWrite + Unpin + Send + 'static,
 {
-    let gateway_ip = gateway_conn.gateway_doip_config.gateway_ip.clone();
-    let gateway_name = gateway_conn.gateway_doip_config.name.clone();
+    let gateway_id = GatewayIdentity {
+        ip: gateway.connection.doip.gateway_ip,
+        name: gateway.connection.doip.name,
+    };
+    let ReceiverChannels {
+        mut send_pending_rx,
+        reset_tx,
+        send_tx,
+    } = channels;
+    let ecu_names = gateway.ecu_names;
+    let connectivity_handler = gateway.connectivity_handler;
     // note: the handlers are defined here, as rustfmt cannot format the correctly inside the
     // tokio::select! macro block
     async fn handle_send_pending(
-        gateway_name: &str,
-        gateway_ip: &str,
+        gateway: &GatewayIdentity,
         send_pending_rx: &mut watch::Receiver<bool>,
         send_pending_result: Result<(), watch::error::RecvError>,
     ) -> Result<(), ()> {
         let request_received = std::time::Instant::now();
         if send_pending_result.is_ok() {
             tracing::debug!(
-                gateway_name = %gateway_name,
-                gateway_ip = %gateway_ip,
+                gateway_name = %gateway.name,
+                gateway_ip = %gateway.ip,
                 "Received tx request, unlocking connection"
             );
             let send_pending = *send_pending_rx.borrow();
@@ -611,16 +639,16 @@ where
                 match send_pending_rx.changed().await {
                     Ok(()) => {
                         tracing::debug!(
-                            gateway_name = %gateway_name,
-                            gateway_ip = %gateway_ip,
+                            gateway_name = %gateway.name,
+                            gateway_ip = %gateway.ip,
                             request_duration = ?request_received.elapsed(),
                             "Send done, continue rx await"
                         );
                     }
                     Err(e) => {
                         tracing::warn!(
-                            gateway_name = %gateway_name,
-                            gateway_ip = %gateway_ip,
+                            gateway_name = %gateway.name,
+                            gateway_ip = %gateway.ip,
                             error = ?e,
                             "Send pending receiver closed"
                         );
@@ -631,8 +659,8 @@ where
             Ok(())
         } else {
             tracing::warn!(
-                gateway_name = %gateway_name,
-                gateway_ip = %gateway_ip,
+                gateway_name = %gateway.name,
+                gateway_ip = %gateway.ip,
                 "Send pending receiver closed"
             );
             Err(())
@@ -644,20 +672,21 @@ where
         fields(dlt_context = dlt_ctx!("DOIP"))
     )]
     async fn handle_response(
-        gateway_name: &str,
-        gateway_ip: &str,
+        gateway: &GatewayIdentity,
         outtx: &HashMap<u16, broadcast::Sender<Result<DiagnosticResponse, EcuError>>>,
         reset_tx: &mpsc::Sender<ConnectionResetReason>,
         ack_tx: &mpsc::Sender<DoipPayload>,
         response: Option<Result<DiagnosticResponse, ConnectionError>>,
+        ecu_names: &[String],
+        connectivity_handler: &Arc<dyn EcuConnectivityHandler>,
     ) {
         match response {
             Some(Ok(response)) => {
                 match response {
                     DiagnosticResponse::Ack((source_address, _)) => {
                         tracing::debug!(
-                            gateway_name = %gateway_name,
-                            gateway_ip = %gateway_ip,
+                            gateway_name = %gateway.name,
+                            gateway_ip = %gateway.ip,
                             source_address = %source_address,
                             "Received ACK"
                         );
@@ -687,8 +716,8 @@ where
                             .inspect_err(|e| {
                                 tracing::error!(
                                     error = ?e,
-                                    gateway_name = %gateway_name,
-                                    gateway_ip = %gateway_ip,
+                                    gateway_name = %gateway.name,
+                                    gateway_ip = %gateway.ip,
                                     source_address = %addr,
                                     target_address = %target_addr,
                                     "Failed to send DiagnosticMessageAck"
@@ -729,6 +758,10 @@ where
                         {
                             tracing::error!(error = ?e, "Failed to send connection reset request");
                         }
+                        // Notify UDS layer that ECUs on this connection are disconnected
+                        connectivity_handler
+                            .on_gateway_disconnected(ecu_names)
+                            .await;
                     }
                     _ => {
                         // for POC purposes we just log the error and do not reset the connection
@@ -745,7 +778,7 @@ where
         }
     }
 
-    cda_interfaces::spawn_named!(&format!("gateway-receiver-{gateway_ip}"), async move {
+    cda_interfaces::spawn_named!(&format!("gateway-receiver-{}", gateway_id.ip), async move {
         'receive: loop {
             if outtx.iter().all(|(_, tx)| tx.receiver_count() == 0) {
                 tracing::debug!("All out channels closed. Shutting down connection");
@@ -759,8 +792,7 @@ where
             tokio::select! {
                 send_pending_result = send_pending_rx.changed() => {
                     if let Err(()) = handle_send_pending(
-                        &gateway_name,
-                        &gateway_ip,
+                        &gateway_id,
                         &mut send_pending_rx,
                         send_pending_result
                     ).await {
@@ -781,12 +813,13 @@ where
                 } => {
                     if let Some(response) = response {
                         handle_response(
-                            &gateway_name,
-                            &gateway_ip,
+                            &gateway_id,
                             &outtx,
                             &reset_tx,
                             &send_tx,
-                            response
+                            response,
+                            &ecu_names,
+                            &connectivity_handler,
                         ).await;
                     }
                 }

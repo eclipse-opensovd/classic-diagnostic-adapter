@@ -14,8 +14,8 @@
 use std::{future::Future, sync::Arc, time::Duration};
 
 use cda_interfaces::{
-    DiagServiceError, DoipComParams, DoipGatewaySetupError, EcuAddresses, HashMap,
-    HashMapExtensions, dlt_ctx,
+    DiagServiceError, DoipComParams, DoipGatewaySetupError, EcuAddresses, EcuConnectivityHandler,
+    HashMap, HashMapExtensions, dlt_ctx,
 };
 use doip_definitions::{
     header::PayloadType,
@@ -109,6 +109,7 @@ pub(crate) async fn listen_for_vams<T, F>(
     netmask: u32,
     state: DoipGatewayState<T>,
     variant_detection: mpsc::Sender<Vec<String>>,
+    connectivity_handler: Arc<dyn EcuConnectivityHandler>,
     mut shutdown_signal: futures::future::Shared<F>,
     cancel_token: CancellationToken,
 ) -> tokio::task::JoinHandle<()>
@@ -129,6 +130,7 @@ where
             gateway_ecu_map,
             gateway_ecu_name_map,
             variant_detection,
+            connectivity_handler,
             transport_config
         ),
         fields(
@@ -142,6 +144,7 @@ where
         gateway_ecu_map: &HashMap<u16, Vec<u16>>,
         gateway_ecu_name_map: &HashMap<u16, Vec<String>>,
         variant_detection: mpsc::Sender<Vec<String>>,
+        connectivity_handler: Arc<dyn EcuConnectivityHandler>,
     ) {
         let DoipMessageContext {
             doip_msg,
@@ -173,10 +176,6 @@ where
                 } else {
                     tracing::info!(ecu_name = %doip_target.ecu_name, "New Gateway ECU detected");
 
-                    let ecu_names_for_gateway = gateway_ecu_name_map
-                        .get(&doip_target.logical_address)
-                        .cloned()
-                        .unwrap_or_default();
                     match handle_gateway_connection::<T>(
                         doip_target,
                         transport_config,
@@ -186,7 +185,7 @@ where
                             gateway_ecu_map: gateway_ecu_map.clone(),
                             connection_tasks: Arc::clone(&state.connection_tasks),
                         },
-                        Some((variant_detection.clone(), ecu_names_for_gateway)),
+                        connectivity_handler,
                     )
                     .await
                     {
@@ -305,6 +304,7 @@ where
                                 &gateway_ecu_map,
                                 &gateway_ecu_name_map,
                                 variant_detection.clone(),
+                                Arc::clone(&connectivity_handler),
                             ).await;
                         }
                     },

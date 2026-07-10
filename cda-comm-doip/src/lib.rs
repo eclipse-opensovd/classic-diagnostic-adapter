@@ -18,8 +18,9 @@ use std::{
 };
 
 use cda_interfaces::{
-    DiagServiceError, DoipComParams, DoipGatewaySetupError, EcuAddresses, EcuGateway, HashMap,
-    HashMapExtensions, ServicePayload, TransmissionParameters, UdsResponse, dlt_ctx,
+    DiagServiceError, DoipComParams, DoipGatewaySetupError, EcuAddresses, EcuConnectivityHandler,
+    EcuGateway, HashMap, HashMapExtensions, ServicePayload, TransmissionParameters, UdsResponse,
+    dlt_ctx,
     util::{self, tokio_ext},
 };
 use doip_definitions::{
@@ -171,13 +172,14 @@ pub(crate) struct GatewayConnectionConfig {
 }
 
 /// One-shot setup bundle consumed by `connection_handler` when bringing up a new gateway.
-/// Carries `GatewayConnectionConfig` plus the data that is only needed during initial
-/// channel creation (`ecus`) and reconnection signlling (`variant_detection`).
+/// Carries `GatewayConnectionConfig` plus the ECU list needed during initial channel creation
+/// and the `ConnectivityHandler` for propagating connection events.
 #[derive(Clone)]
 pub(crate) struct GatewaySetup {
     pub(crate) connection: GatewayConnectionConfig,
     pub(crate) ecus: Vec<u16>,
-    pub(crate) variant_detection: Option<(mpsc::Sender<Vec<String>>, Vec<String>)>,
+    pub(crate) ecu_names: Vec<String>,
+    pub(crate) connectivity_handler: Arc<dyn EcuConnectivityHandler>,
 }
 
 struct DoipEcu {
@@ -243,7 +245,7 @@ impl<T: EcuAddresses + DoipComParams> DoipDiagGateway<T> {
     /// # Errors
     /// Returns `String` if initialization fails, e.g. when socket creation fails.
     #[tracing::instrument(
-        skip(doip_config, ecus, variant_detection, shutdown_signal, doip_socket),
+        skip(doip_config, ecus, variant_detection, connectivity_handler, shutdown_signal, doip_socket),
         fields(
             tester_ip = doip_config.tester_address,
             gateway_port = doip_config.gateway_port,
@@ -255,6 +257,7 @@ impl<T: EcuAddresses + DoipComParams> DoipDiagGateway<T> {
         doip_config: &DoipConfig,
         ecus: Arc<HashMap<String, RwLock<T>>>,
         variant_detection: mpsc::Sender<Vec<String>>,
+        connectivity_handler: Arc<dyn EcuConnectivityHandler>,
         shutdown_signal: F,
         doip_socket: Arc<Mutex<DoIPUdpSocket>>,
     ) -> Result<Self, DoipGatewaySetupError>
@@ -334,11 +337,6 @@ impl<T: EcuAddresses + DoipComParams> DoipDiagGateway<T> {
             let mut logical_address_to_connection = HashMap::new();
 
             for gateway in gateways {
-                let ecu_names_for_gateway = gateway_ecu_name_map
-                    .get(&gateway.logical_address)
-                    .cloned()
-                    .unwrap_or_default();
-
                 if let Ok(logical_address) = connections::handle_gateway_connection::<T>(
                     gateway,
                     &transport_config,
@@ -348,7 +346,7 @@ impl<T: EcuAddresses + DoipComParams> DoipDiagGateway<T> {
                         gateway_ecu_map: gateway_ecu_map.clone(),
                         connection_tasks: Arc::clone(&connection_tasks),
                     },
-                    Some((variant_detection.clone(), ecu_names_for_gateway)),
+                    Arc::clone(&connectivity_handler),
                 )
                 .await
                 {
@@ -373,6 +371,7 @@ impl<T: EcuAddresses + DoipComParams> DoipDiagGateway<T> {
             mask,
             state.clone(),
             variant_detection,
+            connectivity_handler,
             shared_shutdown_signal,
             cancel_token.child_token(),
         )

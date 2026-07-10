@@ -58,7 +58,7 @@ pub(crate) async fn get<T: UdsEcu + Clone, U: FileManager>(
 ) -> impl IntoApiResponse {
     let include_schema = query.include_schema;
     let base_path = format!("http://localhost:20002/vehicle/v15/components/{ecu_name}");
-    let variant = match uds.get_variant(&ecu_name).await {
+    let status = match uds.get_ecu_state(&ecu_name).await {
         Ok(v) => v,
         Err(e) => {
             return ErrorWrapper {
@@ -67,6 +67,23 @@ pub(crate) async fn get<T: UdsEcu + Clone, U: FileManager>(
             }
             .into_response();
         }
+    };
+    let logical_address = match uds.get_logical_address(&ecu_name).await {
+        Ok(v) => v,
+        Err(e) => {
+            return ErrorWrapper {
+                error: e.into(),
+                include_schema,
+            }
+            .into_response();
+        }
+    };
+
+    let variant = sovd_interfaces::components::ecu::Variant {
+        name: status.name().unwrap_or("Unknown").to_owned(),
+        is_base_variant: status.is_base_variant(),
+        state: status.into_sovd(),
+        logical_address: format!("0x{logical_address:02x}"),
     };
 
     let sdgs = if query.include_sdgs {
@@ -101,7 +118,7 @@ pub(crate) async fn get<T: UdsEcu + Clone, U: FileManager>(
         Json(sovd_interfaces::components::ecu::get::Response {
             id: ecu_name.to_lowercase(),
             name: ecu_name.clone(),
-            variant: variant.into_sovd(),
+            variant,
             locks: format!("{base_path}/locks"),
             operations: format!("{base_path}/operations"),
             configurations: format!("{base_path}/configurations"),

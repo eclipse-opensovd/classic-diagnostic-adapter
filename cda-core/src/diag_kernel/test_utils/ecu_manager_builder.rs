@@ -14,8 +14,9 @@
 //! Factory helpers for constructing [`EcuManager`] instances in tests.
 
 use cda_interfaces::{
-    EcuManagerType, EcuState, EcuVariant, Protocol,
+    Connectivity, EcuManagerType, Protocol, VariantState,
     datatypes::{ComParams, DatabaseNamingConvention},
+    util::std_ext,
 };
 use cda_plugin_security::DefaultSecurityPluginData;
 
@@ -32,7 +33,7 @@ pub(crate) const SID_PARM_NAME: &str = "sid";
 pub(crate) fn new_ecu_manager(
     db: cda_database::datatypes::DiagnosticDatabase,
 ) -> EcuManager<DefaultSecurityPluginData> {
-    let mut manager = EcuManager::new(
+    let manager = EcuManager::new(
         db,
         Protocol::default(),
         &ComParams::default(),
@@ -51,14 +52,16 @@ pub(crate) fn new_ecu_manager(
     .expect("Failed to create EcuManager");
 
     // not using set_variant here, because that would require us to build state charts etc.
-    manager.variant = EcuVariant {
-        name: Some(TEST_DIAG_LAYER.to_owned()),
-        is_base_variant: true,
-        is_fallback: false,
-        state: EcuState::Online,
-        logical_address: 0,
-    };
-    manager.variant_index = Some(0);
+    {
+        let mut ecu_state = std_ext::lock_write(&manager.runtime_state.ecu_state);
+        ecu_state.connectivity = Connectivity::Online;
+        ecu_state.variant_state = VariantState::Detected {
+            name: TEST_DIAG_LAYER.to_owned(),
+            is_base_variant: true,
+            is_fallback: false,
+        };
+        ecu_state.variant_index = Some(0);
+    }
 
     manager
 }

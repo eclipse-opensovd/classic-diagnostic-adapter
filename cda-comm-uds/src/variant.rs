@@ -15,8 +15,8 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use cda_interfaces::{
-    DiagComm, DiagServiceError, DynamicPlugin, EcuGateway, EcuManager, EcuVariant, HashMap,
-    HashMapExtensions, PayloadDecoder, UdsTransport, UdsVariant, dlt_ctx,
+    DiagComm, DiagServiceError, DynamicPlugin, EcuGateway, EcuManager, EcuState, HashMap,
+    HashMapExtensions, PayloadDecoder, UdsVariant, dlt_ctx,
 };
 
 use crate::UdsManager;
@@ -86,15 +86,20 @@ impl<S: EcuGateway, T: EcuManager> UdsVariant for UdsManager<S, T> {
 
         let mut service_responses = HashMap::new();
         'variant_detection_calls: {
+            // Suppress disconnect events while UDS requests are in-flight to
+            // prevent a timeout from re-triggering variant detection in a loop.
+            self.state_coordinator
+                .suppress_disconnect_handling(ecu_name)
+                .await;
             for (name, service) in requests {
                 let response = match self
-                    .send_with_timeout(
+                    .send_without_variant_guard(
                         ecu_name,
                         service,
                         &(Box::new(()) as DynamicPlugin),
                         None,
                         true,
-                        Duration::from_secs(10),
+                        Some(Duration::from_secs(10)),
                     )
                     .await
                 {
@@ -110,6 +115,47 @@ impl<S: EcuGateway, T: EcuManager> UdsVariant for UdsManager<S, T> {
                 };
                 service_responses.insert(name, response);
             }
+        }
+        // Re-enable disconnect events now that UDS sends are complete.
+        self.state_coordinator
+            .restore_disconnect_handling(ecu_name)
+            .await;
+
+        // No responses gathered -> ECU is unreachable.
+        // Call detect_variant with empty responses to set appropriate state
+        // (Disconnected if was online, Offline if never tested).
+        // If this ECU has duplicates, set them all to disconnected as well.
+        if service_responses.is_empty() {
+            ecu.write()
+                .await
+                .detect_variant::<<T as PayloadDecoder>::Response>(HashMap::new())
+                .await
+                .map_err(|e| {
+                    DiagServiceError::VariantDetectionError(format!(
+                        "Failed to detect variant: {e:?}"
+                    ))
+                })?;
+
+            // Also set all duplicates to the same state
+            if let Some(duplicates) = ecu
+                .read()
+                .await
+                .duplicating_ecu_names()
+                .cloned()
+                .filter(|d| !d.is_empty())
+            {
+                for dup_name in &duplicates {
+                    if let Some(dup_ecu) = self.ecus.get(dup_name) {
+                        let _ = dup_ecu
+                            .write()
+                            .await
+                            .detect_variant::<<T as PayloadDecoder>::Response>(HashMap::new())
+                            .await;
+                    }
+                }
+            }
+
+            return Ok(());
         }
 
         let Some(mut duplicated_ecus) = ecu
@@ -158,14 +204,14 @@ impl<S: EcuGateway, T: EcuManager> UdsVariant for UdsManager<S, T> {
                     continue;
                 }
 
-                let variant = ecu.read().await.variant();
-                if variant.state != cda_interfaces::EcuState::Online {
+                let status = ecu.read().await.ecu_status();
+                if !status.is_online_and_detected() {
                     continue;
                 }
 
                 any_online = true;
 
-                if variant.is_fallback {
+                if status.is_fallback() {
                     first_fallback.get_or_insert(ecu_name);
                 } else {
                     result = Some(VariantDetectionResult::ExactMatch(ecu_name));
@@ -212,10 +258,10 @@ impl<S: EcuGateway, T: EcuManager> UdsVariant for UdsManager<S, T> {
         Ok(())
     }
 
-    async fn get_variant(&self, ecu_name: &str) -> Result<EcuVariant, DiagServiceError> {
+    async fn get_ecu_state(&self, ecu_name: &str) -> Result<EcuState, DiagServiceError> {
         let ecu = self.uds_ecu_db(ecu_name)?;
-        let variant = ecu.read().await.variant();
-        Ok(variant)
+        let status = ecu.read().await.ecu_status();
+        Ok(status)
     }
 
     #[tracing::instrument(skip_all,
@@ -234,7 +280,8 @@ impl<S: EcuGateway, T: EcuManager> UdsVariant for UdsManager<S, T> {
             if let Err(DiagServiceError::EcuOffline(_)) =
                 self.gateway.ecu_online(ecu_name, db).await
             {
-                // empty response means ECU is offline
+                // ECU is offline -> call detect_variant with empty responses to set
+                // appropriate state (Disconnected if was online, Offline if never tested)
                 if let Err(e) = db
                     .write()
                     .await
@@ -260,5 +307,11 @@ impl<S: EcuGateway, T: EcuManager> UdsVariant for UdsManager<S, T> {
         }
         let cloned = self.clone();
         cloned.start_variant_detection_for_ecus(ecus);
+    }
+
+    async fn get_logical_address(&self, ecu_name: &str) -> Result<u16, DiagServiceError> {
+        let ecu = self.uds_ecu_db(ecu_name)?;
+        let logical_address = ecu.read().await.logical_address();
+        Ok(logical_address)
     }
 }
