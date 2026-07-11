@@ -236,6 +236,17 @@ The integration test framework supports the following environment variables:
   export CDA_INTEGRATION_TEST_TESTER_ADDRESS=127.0.0.1
   ```
 
+- **`CDA_INTEGRATION_TEST_COVERAGE`** (default: `false`)
+  When set to `true`, uses coverage-instrumented Docker images for integration tests.
+  This enables code coverage collection from tests running inside Docker containers.
+
+  Example:
+
+  ```shell
+  export CDA_INTEGRATION_TEST_COVERAGE=true
+  cargo llvm-cov --locked --features integration-tests --lcov --output-path lcov.info
+  ```
+
 ##### test structure
 
 Tests use a shared runtime to avoid repeatedly starting/stopping the CDA and ECU simulator:

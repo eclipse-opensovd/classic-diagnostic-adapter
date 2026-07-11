@@ -16,8 +16,8 @@ use std::time::Duration;
 use async_trait::async_trait;
 
 use crate::{
-    DiagComm, DiagServiceError, DoipComParams, DynamicPlugin, EcuAddresses, EcuStateManager,
-    EcuVariant, HashMap, SecurityAccess, TesterPresentType, UdsComParams,
+    DiagComm, DiagServiceError, DoipComParams, DynamicPlugin, EcuAddresses, EcuState,
+    EcuStateManager, HashMap, SecurityAccess, TesterPresentType, UdsComParams,
     datatypes::{
         ComplexComParamValue, ComponentConfigurationsInfo, ComponentDataInfo,
         ComponentOperationsInfo, DataTransferMetaData, DtcCode, DtcExtendedInfo,
@@ -250,9 +250,10 @@ pub trait UdsDtc: UdsTransport {
         memory_selection: Option<u8>,
     ) -> Result<HashMap<DtcCode, DtcRecordAndStatus>, DiagServiceError>;
 
-    // alternative of passing a struct DtcOptions containing
-    // the include_ and memory_selection parameters isn't better for readability.
-    #[allow(clippy::too_many_arguments)]
+    #[allow(
+        clippy::too_many_arguments,
+        reason = "Combining parameters into a struct would not improve readability here"
+    )]
     async fn ecu_dtc_extended(
         &self,
         ecu_name: &str,
@@ -548,7 +549,10 @@ pub trait UdsFunctionalGroup: UdsTransport {
     ///
     /// # Errors
     /// Returns error if the functional group doesn't exist or if the request cannot be sent
-    #[allow(clippy::too_many_arguments)] // there is not much benefit in passing a structure here
+    #[allow(
+        clippy::too_many_arguments,
+        reason = "Passing a struct would not benefit readability here"
+    )]
     async fn set_functional_state(
         &self,
         group_name: &str,
@@ -570,16 +574,20 @@ pub trait UdsVariant {
     /// does not exist or no service for variant detection is available.
     async fn detect_variant(&self, ecu_name: &str) -> Result<(), DiagServiceError>;
 
-    /// Get the name of the variant for the given ECU.
+    /// Get the ECU state (connectivity + variant state) for the given ECU.
     /// # Errors
     /// Will return Err if the ECU does not exist.
-    /// If the variant is cannot be resolved, "Unknown" will be returned.
-    async fn get_variant(&self, ecu_name: &str) -> Result<EcuVariant, DiagServiceError>;
+    async fn get_ecu_state(&self, ecu_name: &str) -> Result<EcuState, DiagServiceError>;
 
     /// trigger the variant detection process for all ECUs.
     /// Main work will be done in the background, there is no result returned,
     /// as the data is internally stored and used in `EcuUds`
     async fn start_variant_detection(&self);
+
+    /// Get the logical address of the given ECU.
+    /// # Errors
+    /// Will return Err if the ECU does not exist.
+    async fn get_logical_address(&self, ecu_name: &str) -> Result<u16, DiagServiceError>;
 }
 
 /// UDS communication interface - composite supertrait combining all UDS subtraits.
@@ -625,7 +633,12 @@ impl<T> UdsEcuDb for T where
 // `ref_option_ref`). Both are artefacts of the generated code that we cannot
 // change; the allow must be on the enclosing module because attributes on
 // macro invocations are ignored for lints that fire inside the expansion.
-#[allow(clippy::struct_field_names, clippy::ref_option_ref)]
+#[allow(
+    clippy::struct_field_names,
+    clippy::ref_option_ref,
+    reason = "mockall macro generates struct field names and Option references that cannot be \
+              controlled"
+)]
 pub mod mock {
     use std::time::Duration;
 
@@ -633,7 +646,7 @@ pub mod mock {
 
     use super::FlashTransferStartParams;
     use crate::{
-        DiagComm, DiagServiceError, DynamicPlugin, EcuVariant, HashMap, SecurityAccess,
+        DiagComm, DiagServiceError, DynamicPlugin, EcuState, HashMap, SecurityAccess,
         TesterPresentType, UdsDataTransfer, UdsDtc, UdsEcu, UdsFunctionalGroup, UdsQuery,
         UdsSecurity, UdsSession, UdsTesterPresent, UdsTransport, UdsVariant,
         datatypes::{
@@ -652,8 +665,6 @@ pub mod mock {
             fn clone(&self) -> Self;
         }
 
-        // allowed because the mock! macro generates references to Option types
-        #[allow(clippy::ref_option_ref)]
         #[async_trait]
         impl UdsTransport for UdsEcu {
             type Response = crate::diagservices::mock::MockDiagServiceResponse;
@@ -684,8 +695,6 @@ pub mod mock {
             ) -> Result<Vec<u8>, DiagServiceError>;
         }
 
-        // allowed because the mock! macro generates references to Option types
-        #[allow(clippy::ref_option_ref)]
         #[async_trait]
         impl UdsSession for UdsEcu {
             async fn set_ecu_session(
@@ -702,8 +711,6 @@ pub mod mock {
             ) ->  Result<(), DiagServiceError>;
         }
 
-        // allowed because the mock! macro generates references to Option types
-        #[allow(clippy::ref_option_ref)]
         #[async_trait]
         impl UdsSecurity for UdsEcu {
             async fn reset_ecu_security_access(
@@ -941,11 +948,15 @@ pub mod mock {
                 &self,
                 ecu_name: &str,
             ) -> Result<(), DiagServiceError>;
-            async fn get_variant(
+            async fn get_ecu_state(
                 &self,
                 ecu_name: &str,
-            ) -> Result<EcuVariant, DiagServiceError>;
+            ) -> Result<EcuState, DiagServiceError>;
             async fn start_variant_detection(&self);
+            async fn get_logical_address(
+                &self,
+                ecu_name: &str,
+            ) -> Result<u16, DiagServiceError>;
         }
 
         #[async_trait]

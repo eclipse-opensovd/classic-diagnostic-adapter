@@ -98,6 +98,7 @@ cargo_toml = "0.22.3"
 libc = "0.2.177"
 crc32fast = "1.4"
 foldhash = "0.2.0"
+kameo = { version = "0.21", default-features = false, features = ["macros"] }
 memmap2 = "0.9"
 mockall = "0.14.0"
 tempfile = "3"
@@ -157,6 +158,7 @@ separated_literal_suffix = "deny"
 disallowed_methods = "deny"
 string_slice = "deny"
 needless_pass_by_ref_mut = "deny"
+allow_attributes_without_reason = "deny"
 
 [workspace.lints.rust]
 unexpected_cfgs = { level = "warn", check-cfg = ['cfg(nightly)'] }

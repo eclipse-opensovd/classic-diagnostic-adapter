@@ -110,8 +110,10 @@ pub(crate) fn docs_get(op: TransformOperation) -> TransformOperation {
         })
 }
 
-// there is not much benefit in passing a structure here,
-#[allow(clippy::too_many_arguments)]
+#[allow(
+    clippy::too_many_arguments,
+    reason = "Struct would not improve readability here"
+)]
 async fn handle_mode_change<T: UdsEcu + Clone>(
     uds: &T,
     ecu_name: &str,

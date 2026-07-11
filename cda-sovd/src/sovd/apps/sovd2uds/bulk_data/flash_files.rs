@@ -30,10 +30,10 @@ use crate::sovd::{
 };
 
 fn file_name_to_id(file_name: &str) -> String {
-    // Keeping the regex as a static Lazy variable to avoid recompilation
-    // the expression is checked by clippy:
-    // https://rust-lang.github.io/rust-clippy/master/#invalid_regex
-    #[allow(clippy::unwrap_used)]
+    #[allow(
+        clippy::unwrap_used,
+        reason = "Regex literal is valid; checked by clippy::invalid_regex"
+    )]
     static RE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"[^a-zA-Z0-9_]").unwrap());
     RE.replace_all(file_name, "_").to_string()
 }

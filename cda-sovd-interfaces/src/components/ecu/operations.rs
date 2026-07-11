@@ -112,7 +112,10 @@ pub mod comparams {
             use super::{Capability, ComParamValue, Deserialize, HashMap, Serialize, Status};
             // todo: which ones are optional or not
             #[derive(Deserialize)]
-            #[allow(dead_code)]
+            #[allow(
+                dead_code,
+                reason = "Request fields not all consumed yet. Struct kept for future use"
+            )]
             #[derive(schemars::JsonSchema)]
             #[schemars(rename = "UpdateExecutionRequest")]
             pub struct Request {

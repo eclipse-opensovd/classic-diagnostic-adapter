@@ -26,9 +26,10 @@ pub mod tracing {
 }
 
 pub mod tokio_ext {
-    // allow the check for unexpected cfg for tokio_unstable here, as this is a `tokio`` specific
-    // cfg flag that is required to have the `tokio::task::Builder` available.
-    #![allow(unexpected_cfgs)]
+    #![allow(
+        unexpected_cfgs,
+        reason = "tokio_unstable is a tokio-specific cfg flag required for tokio::task::Builder"
+    )]
 
     #[macro_export]
     #[cfg(all(tokio_unstable, feature = "tokio-tracing"))]
@@ -165,6 +166,32 @@ pub mod serde_ext {
             }
             .map(|v| v.to_string())
             .map_err(|e| format!("Invalid hex number: {s}, error={e}"))
+        }
+    }
+}
+
+pub mod std_ext {
+    #[inline]
+    pub fn lock_read<T>(lock: &std::sync::RwLock<T>) -> std::sync::RwLockReadGuard<'_, T> {
+        match lock.read() {
+            Ok(guard) => guard,
+            Err(poisoned) => {
+                tracing::warn!("RwLock poisoned, proceeding with poisoned read lock");
+                lock.clear_poison();
+                poisoned.into_inner()
+            }
+        }
+    }
+
+    #[inline]
+    pub fn lock_write<T>(lock: &std::sync::RwLock<T>) -> std::sync::RwLockWriteGuard<'_, T> {
+        match lock.write() {
+            Ok(guard) => guard,
+            Err(poisoned) => {
+                tracing::warn!("RwLock poisoned, proceeding with poisoned write lock");
+                lock.clear_poison();
+                poisoned.into_inner()
+            }
         }
     }
 }

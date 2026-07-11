@@ -11,21 +11,21 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-use std::{sync::Arc, time::Duration};
+use std::time::Duration;
 
 use cda_database::datatypes;
 use cda_interfaces::{
-    DiagServiceError, EcuManagerType, EcuState, EcuStateManager, EcuVariant, HashMap,
-    HashMapExtensions, HashSet, PayloadDecoder, Protocol,
+    Connectivity, DiagServiceError, EcuManagerType, EcuRuntimeState, EcuStateManager, HashMap,
+    HashMapExtensions, HashSet, PayloadDecoder, Protocol, VariantState,
     datatypes::{
         AddressingMode, ComParamConfig, ComParamPrecedence, ComParams, ComplexComParamValue,
         DatabaseNamingConvention, DiagnosticServiceAffixPosition, RetryPolicy, SdSdg,
         TesterPresentSendType,
     },
     dlt_ctx,
+    util::std_ext,
 };
 use cda_plugin_security::SecurityPlugin;
-use tokio::sync::RwLock;
 
 use super::service_lookup::DbCache;
 use crate::diag_kernel::{
@@ -75,8 +75,10 @@ pub struct EcuManagerConfig {
     pub strict_parameter_validation: bool,
 }
 
-// Allowed because this holds a bunch of config values.
-#[allow(clippy::struct_excessive_bools)]
+#[allow(
+    clippy::struct_excessive_bools,
+    reason = "Struct holds multiple independent boolean config flags"
+)]
 pub struct EcuManager<S: SecurityPlugin> {
     pub(in crate::diag_kernel) diag_database: datatypes::DiagnosticDatabase,
     pub(in crate::diag_kernel) db_cache: DbCache,
@@ -98,8 +100,6 @@ pub struct EcuManager<S: SecurityPlugin> {
     pub(in crate::diag_kernel) connection_retry_attempts: u32,
 
     pub(in crate::diag_kernel) variant_detection: variant_detection::VariantDetection,
-    pub(in crate::diag_kernel) variant_index: Option<usize>,
-    pub(in crate::diag_kernel) variant: EcuVariant,
     pub(in crate::diag_kernel) fallback_to_base_variant: bool,
     pub(in crate::diag_kernel) strict_parameter_validation: bool,
     pub(in crate::diag_kernel) duplicating_ecu_names: Option<HashSet<String>>,
@@ -107,7 +107,10 @@ pub struct EcuManager<S: SecurityPlugin> {
     pub(in crate::diag_kernel) protocol: Protocol,
     // functional group: protocol prefixed or postfixed
     pub(in crate::diag_kernel) fg_protocol_position: DiagnosticServiceAffixPosition,
-    pub(in crate::diag_kernel) ecu_service_states: Arc<RwLock<HashMap<u8, String>>>,
+
+    /// Shared runtime state.
+    /// Also held by the coordinator actor for external event-driven mutations.
+    pub(in crate::diag_kernel) runtime_state: EcuRuntimeState,
 
     pub(in crate::diag_kernel) tester_present_retry_policy: bool,
     pub(in crate::diag_kernel) tester_present_addr_mode: AddressingMode,
@@ -163,10 +166,6 @@ impl<S: SecurityPlugin> cda_interfaces::EcuManager for EcuManager<S> {
     type Response = <Self as PayloadDecoder>::Response;
     fn is_physical_ecu(&self) -> bool {
         self.description_type == EcuManagerType::Ecu
-    }
-
-    fn state(&self) -> EcuState {
-        self.variant.state
     }
 
     fn protocol(&self) -> &Protocol {
@@ -301,14 +300,20 @@ impl<S: SecurityPlugin> cda_interfaces::EcuManager for EcuManager<S> {
     }
 
     fn revision(&self) -> String {
-        // We cannot remove the closure because there is no direct
-        // access to the underlying flatbuf type, as it's not exported from the database crate.
-        #[allow(clippy::redundant_closure_for_method_calls)]
+        #[allow(
+            clippy::redundant_closure_for_method_calls,
+            reason = "Cannot remove closure: underlying flatbuf type is not exported from the \
+                      database crate"
+        )]
         self.diag_database
             .ecu_data()
             .ok()
             .and_then(|s| s.revision())
             .map_or_else(|| "0.0.0".to_owned(), ToOwned::to_owned)
+    }
+
+    fn runtime_state(&self) -> EcuRuntimeState {
+        self.runtime_state.clone()
     }
 }
 
@@ -317,7 +322,7 @@ impl<S: SecurityPlugin> EcuManager<S> {
         database: &datatypes::DiagnosticDatabase,
         data_protocol: Option<&datatypes::Protocol<'_>>,
         config: &ComParamConfig<u16>,
-        addr_type: datatypes::LogicalAddressType,
+        addr_type: &datatypes::LogicalAddressType,
     ) -> u16 {
         if config.precedence == ComParamPrecedence::Config {
             tracing::debug!(
@@ -330,7 +335,12 @@ impl<S: SecurityPlugin> EcuManager<S> {
         match database.find_logical_address(addr_type, database, data_protocol.map(|v| &**v)) {
             Ok(address) => address,
             Err(e) => {
-                tracing::error!(param_name = %config.name, "Failed to find logical address: {e}");
+                tracing::error!(
+                    config = ?config,
+                    protocol = ?data_protocol,
+                    addr_type =  ?addr_type,
+                    error = %e,
+                    "Failed to find logical address");
                 config.value
             }
         }
@@ -386,8 +396,10 @@ impl<S: SecurityPlugin> EcuManager<S> {
         }
     }
 
-    // allow keeping the function together as it makes sense structurally
-    #[allow(clippy::too_many_lines)]
+    #[allow(
+        clippy::too_many_lines,
+        reason = "Keeping the function together makes structural sense"
+    )]
     fn new_ecu_description(
         database: datatypes::DiagnosticDatabase,
         protocol: Protocol,
@@ -422,7 +434,7 @@ impl<S: SecurityPlugin> EcuManager<S> {
             &database,
             data_protocol_ref,
             &com_params.doip.logical_gateway_address,
-            datatypes::LogicalAddressType::Gateway(
+            &datatypes::LogicalAddressType::Gateway(
                 com_params.doip.logical_gateway_address.name.clone(),
             ),
         );
@@ -431,7 +443,7 @@ impl<S: SecurityPlugin> EcuManager<S> {
             &database,
             data_protocol_ref,
             &com_params.doip.logical_ecu_address,
-            datatypes::LogicalAddressType::Ecu(
+            &datatypes::LogicalAddressType::Ecu(
                 com_params.doip.logical_response_id_table_name.clone(),
                 com_params.doip.logical_ecu_address.name.clone(),
             ),
@@ -441,7 +453,7 @@ impl<S: SecurityPlugin> EcuManager<S> {
             &database,
             data_protocol_ref,
             &com_params.doip.logical_functional_address,
-            datatypes::LogicalAddressType::Functional(
+            &datatypes::LogicalAddressType::Functional(
                 com_params.doip.logical_functional_address.name.clone(),
             ),
         );
@@ -490,20 +502,12 @@ impl<S: SecurityPlugin> EcuManager<S> {
                 &com_params.doip.connection_retry_attempts,
             )?,
             variant_detection,
-            variant_index: None,
-            variant: EcuVariant {
-                name: None,
-                is_base_variant: false,
-                is_fallback: false,
-                state: EcuState::NotTested,
-                logical_address: logical_ecu_address,
-            },
             fallback_to_base_variant: config.fallback_to_base_variant,
             strict_parameter_validation: config.strict_parameter_validation,
             duplicating_ecu_names: None,
             protocol,
             fg_protocol_position: func_description_config.protocol_position.clone(),
-            ecu_service_states: Arc::new(RwLock::default()),
+            runtime_state: EcuRuntimeState::new(),
             tester_present_retry_policy: database
                 .find_com_param(
                     data_protocol_ref,
@@ -607,20 +611,12 @@ impl<S: SecurityPlugin> EcuManager<S> {
             variant_detection: VariantDetection {
                 diag_service_requests: HashMap::new(),
             },
-            variant_index: None,
-            variant: EcuVariant {
-                name: None,
-                is_base_variant: false,
-                is_fallback: false,
-                state: EcuState::NotTested,
-                logical_address: logical_ecu_address,
-            },
             fallback_to_base_variant: config.fallback_to_base_variant,
             strict_parameter_validation: config.strict_parameter_validation,
             duplicating_ecu_names: None,
             protocol,
             fg_protocol_position: func_description_config.protocol_position.clone(),
-            ecu_service_states: Arc::new(RwLock::default()),
+            runtime_state: EcuRuntimeState::new(),
             tester_present_retry_policy: com_params
                 .uds
                 .tester_present_retry_policy
@@ -655,15 +651,20 @@ impl<S: SecurityPlugin> EcuManager<S> {
     }
 
     pub(crate) fn variant(&self) -> Option<datatypes::Variant<'_>> {
-        let idx = self.variant_index?;
+        let idx = std_ext::lock_read(&self.runtime_state.ecu_state).variant_index?;
         let variants = self.diag_database.ecu_data().ok()?.variants()?;
         Some(variants.get(idx).into())
     }
 
-    pub(crate) async fn set_variant(
-        &mut self,
-        variant: VariantData,
-    ) -> Result<(), DiagServiceError> {
+    /// Returns a clone of the shared runtime state.
+    ///
+    /// Used by the coordinator actor to share access to the same underlying state.
+    #[must_use]
+    pub fn runtime_state(&self) -> EcuRuntimeState {
+        self.runtime_state.clone()
+    }
+
+    pub(crate) async fn set_variant(&self, variant: VariantData) -> Result<(), DiagServiceError> {
         let variant_name = &variant.name;
         let variant_index = self.diag_database.ecu_data().ok().and_then(|ecu_data| {
             ecu_data.variants().and_then(|variants| {
@@ -676,28 +677,30 @@ impl<S: SecurityPlugin> EcuManager<S> {
             })
         });
 
-        if self.variant_index != variant_index {
-            self.variant_index = variant_index;
+        let current_variant_index = std_ext::lock_read(&self.runtime_state.ecu_state).variant_index;
+        if current_variant_index != variant_index {
             // reset cache, because services may have the same lookup names
             // but differ in parameters etc. between variants
             self.db_cache.reset().await;
         }
 
-        let state = if variant_index.is_none() {
-            tracing::warn!("Variant '{variant_name}' not found in database variants");
-            EcuState::NoVariantDetected
-        } else {
-            EcuState::Online
-        };
+        tracing::debug!("Setting variant to '{variant_name}'");
+        {
+            let mut ecu_state = std_ext::lock_write(&self.runtime_state.ecu_state);
 
-        tracing::debug!("Setting variant to '{variant_name}' with state {state:?}");
-        self.variant = EcuVariant {
-            name: Some(variant.name.clone()),
-            is_base_variant: variant.is_base_variant,
-            is_fallback: variant.is_fallback,
-            state,
-            logical_address: self.logical_address,
-        };
+            if variant_index.is_some() {
+                ecu_state.connectivity = Connectivity::Online;
+                ecu_state.variant_state = VariantState::Detected {
+                    name: variant.name.clone(),
+                    is_base_variant: variant.is_base_variant,
+                    is_fallback: variant.is_fallback,
+                };
+            } else {
+                tracing::warn!("Variant '{variant_name}' not found in database variants");
+                ecu_state.variant_state = VariantState::NotDetected;
+            }
+            ecu_state.variant_index = variant_index;
+        }
 
         self.set_default_states().await
     }
@@ -758,10 +761,9 @@ mod tests {
 
     async fn detect_variant(
         variant_id: u8,
-        is_base: bool,
-        name: String,
-        state: EcuState,
         ecu_manger: Option<super::EcuManager<DefaultSecurityPluginData>>,
+        connectivity_state: Connectivity,
+        variant_state: VariantState,
     ) {
         let mut ecu_manager = ecu_manger.unwrap_or(create_ecu_manager_variant_detection(true));
 
@@ -776,52 +778,42 @@ mod tests {
         service_responses.insert("ReadVariantData".to_owned(), response);
 
         ecu_manager.detect_variant(service_responses).await.unwrap();
-        assert_eq!(ecu_manager.variant.name, Some(name));
-        assert_eq!(ecu_manager.variant.is_base_variant, is_base);
-        assert_eq!(ecu_manager.variant.state, state);
-    }
-
-    #[tokio::test]
-    async fn test_detect_variant_with_empty_responses_to_disconnected() {
-        let mut ecu_manager = create_ecu_manager_variant_detection(true);
-
-        for state in [
-            EcuState::Online,
-            EcuState::NoVariantDetected,
-            EcuState::Duplicate,
-            EcuState::Disconnected,
-        ] {
-            ecu_manager.variant.state = state;
-
-            let service_responses: HashMap<String, DiagServiceResponseStruct> = HashMap::default();
-            ecu_manager
-                .detect_variant::<DiagServiceResponseStruct>(service_responses)
-                .await
-                .unwrap();
-
-            assert_eq!(ecu_manager.variant.name, None);
-            assert!(!ecu_manager.variant.is_base_variant);
-            assert_eq!(
-                ecu_manager.variant.state,
-                EcuState::Disconnected,
-                "State should transition to Disconnected from {state:?} with empty responses",
-            );
-        }
+        let rs = ecu_manager.runtime_state.ecu_state.read().unwrap();
+        assert_eq!(rs.variant_state.name(), variant_state.name());
+        assert_eq!(
+            rs.variant_state.is_base_variant(),
+            variant_state.is_base_variant()
+        );
+        assert_eq!(rs.connectivity, connectivity_state);
+        assert_eq!(rs.variant_state, variant_state);
     }
 
     #[tokio::test]
     async fn test_detect_base_variant() {
-        detect_variant(0, true, "BaseVariant".to_owned(), EcuState::Online, None).await;
+        detect_variant(
+            0,
+            None,
+            Connectivity::Online,
+            VariantState::Detected {
+                name: "BaseVariant".to_owned(),
+                is_base_variant: true,
+                is_fallback: false,
+            },
+        )
+        .await;
     }
 
     #[tokio::test]
     async fn test_detect_specific_variant() {
         detect_variant(
             1,
-            false,
-            "SpecificVariant".to_owned(),
-            EcuState::Online,
             None,
+            Connectivity::Online,
+            VariantState::Detected {
+                name: "SpecificVariant".to_owned(),
+                is_base_variant: false,
+                is_fallback: false,
+            },
         )
         .await;
     }
@@ -848,17 +840,52 @@ mod tests {
             )
         );
 
-        assert!(ecu_manager.variant.name.is_none());
+        assert!(
+            ecu_manager
+                .runtime_state
+                .ecu_state
+                .read()
+                .unwrap()
+                .variant_state
+                .name()
+                .is_none()
+        );
         assert!(!ecu_manager.diag_database.is_loaded());
-        assert!(!ecu_manager.variant.is_base_variant);
-        assert_eq!(ecu_manager.variant.state, EcuState::NoVariantDetected);
+        assert!(
+            !ecu_manager
+                .runtime_state
+                .ecu_state
+                .read()
+                .unwrap()
+                .variant_state
+                .is_base_variant()
+        );
+        assert_eq!(
+            ecu_manager.runtime_state.status().variant_state,
+            VariantState::NotDetected
+        );
     }
 
     #[tokio::test]
     async fn test_detect_variant_with_response_from_offline_to_online() {
-        let mut ecu_manager = create_ecu_manager_variant_detection(true);
-        ecu_manager.variant.state = EcuState::Offline;
-        detect_variant(0, true, "BaseVariant".to_owned(), EcuState::Online, None).await;
+        let ecu_manager = create_ecu_manager_variant_detection(true);
+        ecu_manager
+            .runtime_state
+            .ecu_state
+            .write()
+            .unwrap()
+            .connectivity = Connectivity::Offline;
+        detect_variant(
+            0,
+            Some(ecu_manager),
+            Connectivity::Online,
+            VariantState::Detected {
+                name: "BaseVariant".to_owned(),
+                is_base_variant: true,
+                is_fallback: false,
+            },
+        )
+        .await;
     }
 
     #[tokio::test]
@@ -876,10 +903,23 @@ mod tests {
 
         ecu_manager.detect_variant(service_responses).await.unwrap();
 
-        assert_eq!(ecu_manager.variant.name, Some("BaseVariant".to_owned()));
-        assert!(ecu_manager.variant.is_base_variant);
-        assert_eq!(ecu_manager.variant.state, EcuState::Online);
+        let rs = ecu_manager.runtime_state.ecu_state.read().unwrap();
+        assert_eq!(
+            rs.variant_state.name().map(ToOwned::to_owned),
+            Some("BaseVariant".to_owned())
+        );
+        assert!(rs.variant_state.is_base_variant());
+        assert_eq!(rs.connectivity, Connectivity::Online);
+        drop(rs);
         assert!(ecu_manager.diag_database.is_loaded());
-        assert!(ecu_manager.variant_index.is_some());
+        assert!(
+            ecu_manager
+                .runtime_state
+                .ecu_state
+                .read()
+                .unwrap()
+                .variant_index
+                .is_some()
+        );
     }
 }

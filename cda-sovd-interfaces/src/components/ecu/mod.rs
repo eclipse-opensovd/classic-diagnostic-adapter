@@ -259,10 +259,11 @@ pub mod x {
                     #[derive(Serialize, Debug, Clone, PartialEq)]
                     #[serde(rename_all = "lowercase")]
                     #[derive(schemars::JsonSchema)]
-                    // allow unused because not all variants are used in the sovd
-                    // context yet but are needed to match the CDA internal types
-                    // and are useful for an sovd server as well
-                    #[allow(dead_code)]
+                    #[allow(
+                        dead_code,
+                        reason = "Not all variants are used yet. Kept to match CDA internal types \
+                                  and future SOVD server use"
+                    )]
                     pub enum DataTransferStatus {
                         Running,
                         Aborted,
@@ -376,9 +377,10 @@ pub mod x {
             pub schema: Option<schemars::Schema>,
         }
 
-        // Clippy would prefer if we would pass Option<&LongName> instead.
-        // But this is not compatible with the Serialization derive from serde.
-        #[allow(clippy::ref_option)]
+        #[allow(
+            clippy::ref_option,
+            reason = "Option<&LongName> not compatible with serde Serialize derive"
+        )]
         fn skip_long_name_if_none_or_empty(long_name: &Option<LongName>) -> bool {
             long_name
                 .as_ref()

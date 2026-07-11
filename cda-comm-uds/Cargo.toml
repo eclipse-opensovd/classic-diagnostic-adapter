@@ -39,6 +39,9 @@ futures = { workspace = true }
 
 serde_json = { workspace = true }
 
+# actor framework
+kameo = { workspace = true }
+
 # logging & tracing
 tracing = { workspace = true }
 strum = { workspace = true, features = ["derive"] }

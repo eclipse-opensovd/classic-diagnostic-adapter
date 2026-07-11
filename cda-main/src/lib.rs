@@ -14,12 +14,12 @@
 use std::{future::Future, path::PathBuf, sync::Arc};
 
 use cda_comm_doip::{DoipDiagGateway, config::DoipConfig};
-use cda_comm_uds::UdsManager;
+use cda_comm_uds::{UdsManager, state_coordinator::EcuStateCoordinator};
 use cda_core::EcuManager;
 use cda_database::FileManager;
 use cda_interfaces::{
-    DiagServiceError, DoipGatewaySetupError, FunctionalDescriptionConfig, HashMap, UdsQuery,
-    UdsVariant,
+    DiagServiceError, DoipGatewaySetupError, EcuConnectivityHandler, FunctionalDescriptionConfig,
+    HashMap, HashMapExtensions, UdsQuery, UdsVariant,
     config::{ConfigSanity, ConfigSanityError},
     datatypes::{ComParams, FaultConfig},
     dlt_ctx,
@@ -221,6 +221,13 @@ impl From<DoipGatewaySetupError> for AppError {
             }
             DoipGatewaySetupError::ResourceError(_) => Self::ResourceError(value.to_string()),
             DoipGatewaySetupError::ServerError(_) => Self::ServerError(value.to_string()),
+            DoipGatewaySetupError::UnknownECU {
+                logical_address,
+                protocol_version,
+            } => Self::ConfigurationError(format!(
+                "Unknown ECU with logical address {logical_address} and protocol version \
+                 {protocol_version}"
+            )),
         }
     }
 }
@@ -619,7 +626,6 @@ pub async fn setup_vehicle_and_routes<SP: SecurityPlugin, SL: SecurityPluginLoad
     cda_sovd::add_openapi_routes(dynamic_router, &vehicle_data.update_guard, webserver_config)
         .await;
 
-    // SAFETY: Must be applied AFTER all routes are registered (layer only covers existing routes).
     cda_sovd::install_update_guard(dynamic_router, vehicle_data.update_guard.clone()).await;
 
     Ok(())
@@ -704,12 +710,11 @@ pub async fn load_vehicle_data<
     };
 
     let update_guard = cda_sovd::UpdateGuardState::new();
-    let doip_socket = cda_comm_doip::create_socket(
-        &config.doip.tester_address,
-        config.doip.gateway_port,
-        config.doip.protocol_version,
-    )
-    .map_err(|e| AppError::InitializationFailed(format!("Failed to create DoIP socket: {e}")))?;
+    let doip_socket =
+        cda_comm_doip::create_udp_vir_socket(&config.doip.tester_address, config.doip.gateway_port)
+            .map_err(|e| {
+                AppError::InitializationFailed(format!("Failed to create DoIP socket: {e}"))
+            })?;
     let components = create_vehicle_components::<F, S>(
         config,
         &mdd_paths,
@@ -735,9 +740,10 @@ pub async fn load_vehicle_data<
 
 pub type UdsManagerType<S> = UdsManager<DoipDiagGateway<EcuManager<S>>, EcuManager<S>>;
 
-/// Creates a new UDS manager for the webserver.
-/// type alias does not allow specifying hasher, we set the hasher globally.
-#[allow(clippy::implicit_hasher)]
+#[allow(
+    clippy::implicit_hasher,
+    reason = "Type alias does not allow specifying hasher. Hasher is set globally"
+)]
 #[tracing::instrument(skip_all,
     fields(
         database_count = databases.len(),
@@ -748,6 +754,7 @@ pub fn create_uds_manager<S: SecurityPlugin>(
     gateway: DoipDiagGateway<EcuManager<S>>,
     databases: Arc<HashMap<String, RwLock<EcuManager<S>>>>,
     variant_detection_receiver: mpsc::Receiver<Vec<String>>,
+    state_coordinator: EcuStateCoordinator,
     functional_description_config: &FunctionalDescriptionConfig,
     fault_config: FaultConfig,
     update_in_progress: Arc<std::sync::atomic::AtomicBool>,
@@ -756,6 +763,7 @@ pub fn create_uds_manager<S: SecurityPlugin>(
         gateway,
         databases,
         variant_detection_receiver,
+        state_coordinator,
         functional_description_config,
         fault_config,
         update_in_progress,
@@ -789,10 +797,24 @@ pub async fn create_vehicle_components<
 
     let (variant_detection_tx, variant_detection_rx) = mpsc::channel(50);
     let databases = Arc::new(databases);
+
+    // Build runtime states for EcuStateCoordinator from all loaded ECU databases.
+    let runtime_states = {
+        let mut states = HashMap::new();
+        for (ecu_name, ecu_lock) in databases.as_ref() {
+            let state = ecu_lock.read().await.runtime_state();
+            states.insert(ecu_name.clone(), state);
+        }
+        states
+    };
+    let state_coordinator = EcuStateCoordinator::new(runtime_states);
+    let connectivity_handler: Arc<dyn EcuConnectivityHandler> = Arc::new(state_coordinator.clone());
+
     let diagnostic_gateway = create_diagnostic_gateway(
         Arc::clone(&databases),
         &config.doip,
         variant_detection_tx,
+        connectivity_handler,
         shutdown_signal,
         doip_provider,
         doip_socket,
@@ -803,6 +825,7 @@ pub async fn create_vehicle_components<
         diagnostic_gateway.clone(),
         Arc::clone(&databases),
         variant_detection_rx,
+        state_coordinator,
         &config.functional_description,
         config.faults.clone(),
         update_in_progress,
@@ -823,7 +846,7 @@ pub async fn create_vehicle_components<
 }
 
 #[tracing::instrument(
-    skip(databases, variant_detection, shutdown_signal, doip_health_provider, doip_socket),
+    skip(databases, variant_detection, connectivity_handler, shutdown_signal, doip_health_provider, doip_socket),
     fields(
         database_count = databases.len(),
         dlt_context = dlt_ctx!("MAIN"),
@@ -835,6 +858,7 @@ pub async fn create_diagnostic_gateway<S: SecurityPlugin>(
     databases: Arc<DatabaseMap<S>>,
     doip_config: &DoipConfig,
     variant_detection: mpsc::Sender<Vec<String>>,
+    connectivity_handler: Arc<dyn EcuConnectivityHandler>,
     shutdown_signal: impl Future<Output = ()> + Send + 'static,
     doip_health_provider: Option<&Arc<cda_health::StatusHealthProvider>>,
     doip_socket: Arc<Mutex<cda_comm_doip::socket::DoIPUdpSocket>>,
@@ -847,6 +871,7 @@ pub async fn create_diagnostic_gateway<S: SecurityPlugin>(
         doip_config,
         databases,
         variant_detection,
+        connectivity_handler,
         shutdown_signal,
         doip_socket,
     )

@@ -116,7 +116,7 @@ async fn test_jgwt5000_ignore_protocol_with_db_protocol() {
     );
 }
 
-#[allow(clippy::too_many_lines)] // makes sense to keep test together
+#[allow(clippy::too_many_lines, reason = "Makes sense to keep test together")]
 #[tokio::test]
 async fn test_ecu_session_switching() {
     let (runtime, _lock) = setup_integration_test(true).await.unwrap();
@@ -355,6 +355,9 @@ async fn test_variant_detection_duplicates() {
     ecusim::switch_variant(&runtime.ecu_sim, "FLXC1000", "APPLICATION")
         .await
         .unwrap();
+    force_variant_detection(&runtime.config, &auth, sovd::ECU_FLXC1000_ENDPOINT)
+        .await
+        .unwrap();
     let ecu = ecu_status(&runtime.config, &auth, sovd::ECU_FLXC1000_ENDPOINT)
         .await
         .unwrap();
@@ -479,7 +482,7 @@ async fn test_variant_detection_duplicates() {
 }
 
 #[tokio::test]
-#[allow(clippy::too_many_lines)] // Keep the test together
+#[allow(clippy::too_many_lines, reason = "Keep the test together")]
 async fn test_communication_control() {
     let (runtime, _lock) = setup_integration_test(true).await.unwrap();
     let auth = auth_header(&runtime.config, None).await.unwrap();

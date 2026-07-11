@@ -14,7 +14,8 @@
 use std::{future::Future, sync::Arc, time::Duration};
 
 use cda_interfaces::{
-    DiagServiceError, DoipComParams, EcuAddresses, HashMap, HashMapExtensions, dlt_ctx,
+    DiagServiceError, DoipComParams, DoipGatewaySetupError, EcuAddresses, EcuConnectivityHandler,
+    HashMap, HashMapExtensions, dlt_ctx,
 };
 use doip_definitions::{
     header::PayloadType,
@@ -99,13 +100,16 @@ where
     Ok(gateways)
 }
 
-// allowed due to nested functions
-#[allow(clippy::too_many_lines)]
+#[allow(
+    clippy::too_many_lines,
+    reason = "Contains nested private functions that should remain in scope"
+)]
 pub(crate) async fn listen_for_vams<T, F>(
     transport_config: DoipTransportConfig,
     netmask: u32,
     state: DoipGatewayState<T>,
     variant_detection: mpsc::Sender<Vec<String>>,
+    connectivity_handler: Arc<dyn EcuConnectivityHandler>,
     mut shutdown_signal: futures::future::Shared<F>,
     cancel_token: CancellationToken,
 ) -> tokio::task::JoinHandle<()>
@@ -126,6 +130,7 @@ where
             gateway_ecu_map,
             gateway_ecu_name_map,
             variant_detection,
+            connectivity_handler,
             transport_config
         ),
         fields(
@@ -139,6 +144,7 @@ where
         gateway_ecu_map: &HashMap<u16, Vec<u16>>,
         gateway_ecu_name_map: &HashMap<u16, Vec<String>>,
         variant_detection: mpsc::Sender<Vec<String>>,
+        connectivity_handler: Arc<dyn EcuConnectivityHandler>,
     ) {
         let DoipMessageContext {
             doip_msg,
@@ -170,10 +176,6 @@ where
                 } else {
                     tracing::info!(ecu_name = %doip_target.ecu_name, "New Gateway ECU detected");
 
-                    let ecu_names_for_gateway = gateway_ecu_name_map
-                        .get(&doip_target.logical_address)
-                        .cloned()
-                        .unwrap_or_default();
                     match handle_gateway_connection::<T>(
                         doip_target,
                         transport_config,
@@ -183,7 +185,7 @@ where
                             gateway_ecu_map: gateway_ecu_map.clone(),
                             connection_tasks: Arc::clone(&state.connection_tasks),
                         },
-                        Some((variant_detection.clone(), ecu_names_for_gateway)),
+                        connectivity_handler,
                     )
                     .await
                     {
@@ -261,11 +263,7 @@ where
             let broadcast_socket = if transport_config.tester_ip == broadcast_ip {
                 Arc::clone(&state.socket)
             } else {
-                match crate::create_socket_with_protocol(
-                    broadcast_ip,
-                    transport_config.port,
-                    transport_config.socket.protocol_version,
-                ) {
+                match crate::create_udp_vir_socket(broadcast_ip, transport_config.port) {
                     Ok(sock) => Arc::new(Mutex::new(sock)),
                     Err(e) => {
                         tracing::warn!(
@@ -306,6 +304,7 @@ where
                                 &gateway_ecu_map,
                                 &gateway_ecu_name_map,
                                 variant_detection.clone(),
+                                Arc::clone(&connectivity_handler),
                             ).await;
                         }
                     },
@@ -323,7 +322,7 @@ async fn handle_vam<T>(
     doip_msg: doip_definitions::message::DoipMessage,
     source_addr: std::net::SocketAddr,
     netmask: u32,
-) -> Result<Option<DiscoveredGateway>, String>
+) -> Result<Option<DiscoveredGateway>, DoipGatewaySetupError>
 where
     T: EcuAddresses,
 {
@@ -359,21 +358,25 @@ where
                     ecu_name = %ecu,
                     source_ip = %source_addr.ip(),
                     logical_address = %format!("{:#06x}", logical_address),
+                    protocol_version = ?doip_msg.header.protocol_version,
                     "Matching ECU found"
                 );
                 Ok(Some(DiscoveredGateway {
                     ip: source_addr.ip().to_string(),
                     ecu_name: ecu.clone(),
                     logical_address,
+                    doip_protocol_version: doip_msg.header.protocol_version,
                 }))
             } else {
                 tracing::warn!("VAM received but no matching ECU found");
-                Err(format!(
-                    "No matching ECU found for VAM: {:02x?}",
-                    vam.logical_address
-                ))
+                Err(DoipGatewaySetupError::UnknownECU {
+                    logical_address: u16::from_be_bytes(vam.logical_address),
+                    protocol_version: u8::from(doip_msg.header.protocol_version),
+                })
             }
         }
-        _ => Err(format!("Expected VAM, got: {doip_msg:?}")),
+        _ => Err(DoipGatewaySetupError::ResourceError(format!(
+            "Expected VAM, got: {doip_msg:?}"
+        ))),
     }
 }

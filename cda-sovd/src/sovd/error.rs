@@ -32,7 +32,10 @@ use serde::{Deserialize, Serialize};
 use serde_qs::axum::QsQueryRejection;
 use sovd_interfaces::error::{ApiErrorResponse, ErrorCode};
 
-#[allow(dead_code)]
+#[allow(
+    dead_code,
+    reason = "Not all ApiError variants are used in all configurations"
+)]
 #[derive(Debug, Deserialize, Serialize, schemars::JsonSchema, thiserror::Error)]
 pub enum ApiError {
     #[error("Bad Request: {0}")]
@@ -89,13 +92,15 @@ impl From<DiagServiceError> for ApiError {
             | DiagServiceError::ConnectionClosed(_)
             | DiagServiceError::SendFailed(_)
             | DiagServiceError::InvalidAddress(_)
-            | DiagServiceError::NotEnoughData { .. }
             | DiagServiceError::UnexpectedResponse(_)
             | DiagServiceError::DataError(_)
             | DiagServiceError::InvalidConfiguration(_)
             | DiagServiceError::InvalidSecurityPlugin => {
                 ApiError::InternalServerError(Some(value.to_string()))
             }
+            DiagServiceError::NotEnoughData { expected, actual } => ApiError::BadRequest(format!(
+                "Payload too short, expected at least {expected} bytes, got {actual} bytes"
+            )),
             DiagServiceError::InvalidRequest(_)
             | DiagServiceError::Nack(_)
             | DiagServiceError::ParameterConversionError(_)

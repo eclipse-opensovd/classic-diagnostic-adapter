@@ -14,5 +14,11 @@
 // @generated
 
 #[rustfmt::skip]
-#[allow(clippy::all, clippy::pedantic, dead_code, warnings)]
+#[allow(
+    clippy::all,
+    clippy::pedantic,
+    dead_code,
+    warnings,
+    reason = "Generated prost-build code"
+)]
 pub mod fileformat;

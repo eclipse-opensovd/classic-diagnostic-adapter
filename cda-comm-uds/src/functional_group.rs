@@ -15,9 +15,9 @@ use std::{sync::Arc, time::Duration};
 
 use async_trait::async_trait;
 use cda_interfaces::{
-    DiagComm, DiagServiceError, DynamicPlugin, EcuGateway, EcuManager, EcuState, HashMap,
-    HashMapExtensions, PayloadDecoder, ServicePayload, TransmissionParameters, UdsFunctionalGroup,
-    UdsResponse, UdsTransport,
+    DiagComm, DiagServiceError, DynamicPlugin, EcuGateway, EcuManager, HashMap, HashMapExtensions,
+    PayloadDecoder, ServicePayload, TransmissionParameters, UdsFunctionalGroup, UdsResponse,
+    UdsTransport,
     datatypes::{ComponentDataInfo, ComponentOperationsInfo, RoutineSubfunctions},
     diagservices::{DiagServiceResponse, DiagServiceResponseType, UdsPayloadData},
     dlt_ctx,
@@ -31,9 +31,11 @@ use crate::{
 
 impl<S: EcuGateway, T: EcuManager> UdsManager<S, T> {
     /// Send a functional request to a single gateway and collect responses from all expected ECUs
-    #[allow(clippy::too_many_arguments)] // allowing this for now. while combining some arguments
-    // based on semantics here would be possible, its preferred to have to call semantics similar
-    // in all send functions, as this makes it easier to glance the parameters of the function.
+    #[allow(
+        clippy::too_many_arguments,
+        reason = "Combining parameters into a struct is not preferred here, to keep call \
+                  semantics consistent across all send functions"
+    )]
     async fn send_functional_to_gateway(
         &self,
         transmission_params: TransmissionParameters,
@@ -251,11 +253,12 @@ impl<S: EcuGateway, T: EcuManager> UdsFunctionalGroup for UdsManager<S, T> {
                     continue;
                 }
 
-                let ecu_state = ecu_lock.variant().state;
-                if ecu_state != EcuState::Online {
+                let ecu_status = ecu_lock.ecu_status();
+                if !ecu_status.is_online_and_detected() {
                     tracing::debug!(
                         ecu = %ecu_name,
-                        ecu_state = %ecu_state,
+                        connectivity = ?ecu_status.connectivity,
+                        variant_state = ?ecu_status.variant_state,
                         "Skipping ECU that is not online"
                     );
                     continue;

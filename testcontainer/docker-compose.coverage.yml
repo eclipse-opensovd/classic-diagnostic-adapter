@@ -1,0 +1,42 @@
+# SPDX-FileCopyrightText: 2026 Copyright (c) Contributors to the Eclipse Foundation
+#
+# See the NOTICE file(s) distributed with this work for additional
+# information regarding copyright ownership.
+#
+# This program and the accompanying materials are made available under the
+# terms of the Apache License Version 2.0 which is available at
+# https://www.apache.org/licenses/LICENSE-2.0
+#
+# SPDX-License-Identifier: Apache-2.0
+
+# Docker Compose override for coverage-instrumented builds.
+# Usage: docker compose -f docker-compose.yml -f docker-compose.coverage.yml up
+#
+# This override:
+#   - Uses the base CDA Dockerfile with coverage build args
+#   - Mounts a volume to collect .profraw files generated during test execution
+#   - Sets LLVM_PROFILE_FILE to control where coverage data is written
+#
+# In CI, set CACHE_REGISTRY to use the pre-built coverage image instead of rebuilding.
+
+services:
+  cda:
+    image: ${CACHE_REGISTRY:-local}/opensovd-cda:coverage
+    build:
+      context: ..
+      dockerfile: testcontainer/cda/Dockerfile
+      args:
+        BUILD_PROFILE: dev
+        RUSTFLAGS: "-C instrument-coverage"
+    volumes:
+      - coverage-data:/app/coverage
+    environment:
+      - RUST_LOG=debug
+      - CDA_CONFIG_FILE=/app/cda-test-config.toml
+      - LLVM_PROFILE_FILE=/app/coverage/cda-%p-%m.profraw
+    stop_signal: SIGTERM
+    stop_grace_period: 10s
+
+volumes:
+  coverage-data:
+    name: cda-coverage-data

@@ -31,7 +31,8 @@ use axum::{
 };
 use axum_extra::extract::WithRejection;
 use cda_interfaces::{
-    FunctionalDescriptionConfig, HashMap, HashMapExtensions as _, SchemaProvider, UdsEcu,
+    Connectivity, FunctionalDescriptionConfig, HashMap, HashMapExtensions as _, SchemaProvider,
+    UdsEcu, VariantState,
     datatypes::ComponentsConfig,
     diagservices::{FieldParseError, UdsPayloadData},
     file_manager::FileManager,
@@ -80,30 +81,19 @@ trait IntoSovdWithSchema {
     fn into_sovd_with_schema(self, include_schema: bool) -> Result<Self::SovdType, ApiError>;
 }
 
-impl IntoSovd for cda_interfaces::EcuVariant {
-    type SovdType = sovd_ecu::Variant;
-
-    fn into_sovd(self) -> Self::SovdType {
-        sovd_ecu::Variant {
-            name: self.name.unwrap_or("Unknown".to_string()),
-            is_base_variant: self.is_base_variant,
-            state: self.state.into_sovd(),
-            logical_address: format!("0x{:02x}", self.logical_address),
-        }
-    }
-}
-
 impl IntoSovd for cda_interfaces::EcuState {
     type SovdType = sovd_ecu::State;
 
     fn into_sovd(self) -> Self::SovdType {
-        match self {
-            cda_interfaces::EcuState::Online => sovd_ecu::State::Online,
-            cda_interfaces::EcuState::Offline => sovd_ecu::State::Offline,
-            cda_interfaces::EcuState::NotTested => sovd_ecu::State::NotTested,
-            cda_interfaces::EcuState::Duplicate => sovd_ecu::State::Duplicate,
-            cda_interfaces::EcuState::Disconnected => sovd_ecu::State::Disconnected,
-            cda_interfaces::EcuState::NoVariantDetected => sovd_ecu::State::NoVariantDetected,
+        match (&self.connectivity, &self.variant_state) {
+            (_, VariantState::Duplicate) => sovd_ecu::State::Duplicate,
+            (Connectivity::Online, VariantState::Detected { .. }) => sovd_ecu::State::Online,
+            (Connectivity::Online, VariantState::NotDetected) => sovd_ecu::State::NoVariantDetected,
+            (Connectivity::Online, VariantState::NotTested) => sovd_ecu::State::NotTested,
+            (Connectivity::Offline, VariantState::NotTested) => sovd_ecu::State::Offline,
+            (Connectivity::Offline, VariantState::Detected { .. } | VariantState::NotDetected) => {
+                sovd_ecu::State::Disconnected
+            }
         }
     }
 }
@@ -114,6 +104,7 @@ pub(crate) enum SovdError {
     RouteError(String),
 }
 
+#[derive(Clone)]
 pub(crate) struct WebserverEcuState<T: UdsEcu + Clone, U: FileManager> {
     ecu_name: String,
     uds: T,
@@ -381,21 +372,6 @@ pub(crate) async fn remove_reserved_execution<E: ExecutionStatus>(
     }
 }
 
-impl<T: UdsEcu + Clone, U: FileManager> Clone for WebserverEcuState<T, U> {
-    fn clone(&self) -> Self {
-        Self {
-            ecu_name: self.ecu_name.clone(),
-            uds: self.uds.clone(),
-            locks: Arc::clone(&self.locks),
-            comparam_executions: Arc::clone(&self.comparam_executions),
-            service_executions: Arc::clone(&self.service_executions),
-            flash_data: Arc::clone(&self.flash_data),
-            mdd_embedded_files: Arc::clone(&self.mdd_embedded_files),
-            update_in_progress: Arc::clone(&self.update_in_progress),
-        }
-    }
-}
-
 #[derive(Clone)]
 pub(crate) struct WebserverState<T: UdsEcu + Clone> {
     uds: T,
@@ -606,8 +582,10 @@ async fn components_route<T: UdsEcu + SchemaProvider + Clone, U: FileManager + '
     router.with_state(state)
 }
 
-// Disabled as for now it makes sense to keep the route creation together
-#[allow(clippy::too_many_lines)]
+#[allow(
+    clippy::too_many_lines,
+    reason = "Route creation kept together for structural clarity"
+)]
 async fn ecu_route<T: UdsEcu + SchemaProvider + Clone, U: FileManager + 'static>(
     ecu_name: &str,
     state: &WebserverState<T>,
@@ -1004,10 +982,10 @@ pub(crate) use create_response_schema;
 #[macro_export]
 macro_rules! create_schema {
     ($type_:ty) => {{
-        // allowed because for some invocations
-        // of the macro the import might be in scope
-        // already, but this is the rarer case.
-        #[allow(unused_imports)]
+        #[allow(
+            unused_imports,
+            reason = "Import may already be in scope at the macro call site"
+        )]
         use schemars::JsonSchema as _;
 
         let mut generator = schemars::SchemaGenerator::new(

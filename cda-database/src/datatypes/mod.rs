@@ -178,10 +178,10 @@ impl RawCodedConstParam {
 impl DiagService<'_> {
     #[must_use]
     pub fn request_id(&self) -> Option<u8> {
-        // allow the truncation, so we can re-use the same conversion function
-        // for the sub-function id which is u32
-        // per ISO 14229-1 the SID is 1 byte
-        #[allow(clippy::cast_possible_truncation)]
+        #[allow(
+            clippy::cast_possible_truncation,
+            reason = "SID is 1 byte per ISO 14229-1. Truncation is correct by spec"
+        )]
         self.find_request_sid_or_sub_func_param(0, 0)
             .map(|(sid, _)| sid as u8)
     }
@@ -458,7 +458,7 @@ pub struct DiagnosticDatabase {
     config: DatabaseConfig,
 }
 
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub enum LogicalAddressType {
     /// Lookup for the ECU address.
     /// Looking up the ECU address usually consists of two parts.
@@ -581,7 +581,7 @@ impl DiagnosticDatabase {
     /// * `DiagServiceError::ParameterConversionError` if the com param value cannot be converted
     pub fn find_logical_address(
         &self,
-        type_: LogicalAddressType,
+        type_: &LogicalAddressType,
         diag_database: &DiagnosticDatabase,
         protocol: Option<&dataformat::Protocol>,
     ) -> Result<u16, DiagServiceError> {
@@ -592,7 +592,7 @@ impl DiagnosticDatabase {
             LogicalAddressType::Gateway(p) | LogicalAddressType::Functional(p) => (p, None),
         };
 
-        match comparam::lookup(diag_database, protocol, &param_name)? {
+        match comparam::lookup(diag_database, protocol, param_name)? {
             ComParamValue::Simple(simple_value) => {
                 let val_as_u16 = simple_value.value.parse::<u16>().map_err(|e| {
                     DiagServiceError::ParameterConversionError(format!("Invalid address: {e}"))
@@ -600,7 +600,7 @@ impl DiagnosticDatabase {
                 Ok(val_as_u16)
             }
             ComParamValue::Complex(complex) => {
-                match complex.get(&additional_param_name.ok_or_else(|| {
+                match complex.get(additional_param_name.ok_or_else(|| {
                     DiagServiceError::InvalidDatabase(format!(
                         "{param_name:?} not found in complex value"
                     ))

@@ -16,8 +16,9 @@ use std::sync::Arc;
 use aide::axum::{ApiRouter, routing};
 use axum::{Json, http::StatusCode};
 use cda_comm_doip::config::DoipConfig;
+use cda_comm_uds::state_coordinator::EcuStateCoordinator;
 use cda_interfaces::{
-    FunctionalDescriptionConfig, HashMap, HashMapExtensions, UdsQuery,
+    EcuConnectivityHandler, FunctionalDescriptionConfig, HashMap, HashMapExtensions, UdsQuery,
     datatypes::{ComponentsConfig, FaultConfig},
 };
 use cda_sovd::{Locks, dynamic_router::DynamicRouter};
@@ -79,11 +80,14 @@ async fn add_custom_routes(dynamic_router: &DynamicRouter) {
         ),
     );
 
-    dynamic_router.merge_routes(custom_router).await;
+    dynamic_router.add_routes(custom_router).await;
 }
 
 #[tokio::test]
-#[allow(clippy::too_many_lines)] // makes sense to keep the test together
+#[allow(
+    clippy::too_many_lines,
+    reason = "Makes sense to keep the test together"
+)]
 async fn test_custom_demo_endpoint() {
     // Use loopback since we don't need actual ECU connections for this test
     let host = host();
@@ -134,16 +138,18 @@ async fn test_custom_demo_endpoint() {
         provider
     };
 
-    let doip_socket = cda_comm_doip::create_socket(
-        &doip_config.tester_address,
-        doip_config.gateway_port,
-        doip_config.protocol_version,
-    )
-    .expect("Failed to create DoIP socket");
+    let doip_socket =
+        cda_comm_doip::create_udp_vir_socket(&doip_config.tester_address, doip_config.gateway_port)
+            .expect("Failed to create DoIP socket");
+
+    let state_coordinator = EcuStateCoordinator::new(HashMap::new());
+    let connectivity_handler: Arc<dyn EcuConnectivityHandler> = Arc::new(state_coordinator.clone());
+
     let gateway = opensovd_cda_lib::create_diagnostic_gateway(
         Arc::clone(&databases),
         &doip_config,
         variant_tx,
+        connectivity_handler,
         shutdown_signal.clone(),
         None,
         Arc::new(tokio::sync::Mutex::new(doip_socket)),
@@ -155,6 +161,7 @@ async fn test_custom_demo_endpoint() {
         gateway,
         databases,
         variant_rx,
+        state_coordinator,
         &cda_interfaces::FunctionalDescriptionConfig {
             description_database: "functional_groups".to_owned(),
             enabled_functional_groups: None,

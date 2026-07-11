@@ -14,7 +14,8 @@
 use cda_database::datatypes;
 use cda_interfaces::{
     DiagServiceError, DynamicPlugin, EcuSecurity, EcuStateManager, HashSet, SecurityAccess,
-    datatypes::semantics, dlt_ctx, service_ids, util::contains_ignore_ascii_case,
+    dlt_ctx, service_ids,
+    util::{contains_ignore_ascii_case, std_ext},
 };
 use cda_plugin_security::SecurityPlugin;
 
@@ -30,7 +31,7 @@ impl<S: SecurityPlugin> EcuSecurity for EcuManager<S> {
 
         if has_key {
             let security_service = self.lookup_state_transition_for_active(
-                semantics::SECURITY,
+                &self.database_naming_convention.semantics.security,
                 &current_security_name,
                 level,
             )?;
@@ -105,7 +106,9 @@ impl<S: SecurityPlugin> EcuSecurity for EcuManager<S> {
             .params()
             .and_then(|params| {
                 params.iter().find_map(|p| {
-                    if p.semantic().is_some_and(|s| s == semantics::DATA) {
+                    if p.semantic()
+                        .is_some_and(|s| s == self.database_naming_convention.semantics.data)
+                    {
                         p.short_name().map(ToOwned::to_owned)
                     } else {
                         None
@@ -118,7 +121,7 @@ impl<S: SecurityPlugin> EcuSecurity for EcuManager<S> {
     }
 
     fn default_security_access(&self) -> Result<String, DiagServiceError> {
-        self.default_state(semantics::SECURITY)
+        self.default_state(&self.database_naming_convention.semantics.security)
     }
 
     async fn is_service_allowed(
@@ -152,11 +155,11 @@ impl<S: SecurityPlugin> EcuManager<S> {
             .ok_or(DiagServiceError::InvalidDatabase(
                 "Service has no DiagComm".to_owned(),
             ))?;
-        self.check_service_preconditions(&diag_comm.into()).await?;
+        self.check_service_preconditions(&diag_comm.into())?;
         check_security_plugin::<S>(security_plugin, service)
     }
 
-    async fn check_service_preconditions(
+    fn check_service_preconditions(
         &self,
         diag_comm: &datatypes::DiagComm<'_>,
     ) -> Result<(), DiagServiceError> {
@@ -175,9 +178,9 @@ impl<S: SecurityPlugin> EcuManager<S> {
 
         // Get current ECU states
         let (ecu_session, ecu_security_level) = {
-            let ecu_states = self.ecu_service_states.read().await;
+            let service_states = std_ext::lock_read(&self.runtime_state.service_states);
 
-            let session = ecu_states
+            let session = service_states
                 .get(&service_ids::SESSION_CONTROL)
                 .cloned()
                 .ok_or(DiagServiceError::InvalidState(
@@ -185,7 +188,7 @@ impl<S: SecurityPlugin> EcuManager<S> {
                 ))?
                 .to_ascii_lowercase();
 
-            let security = ecu_states
+            let security = service_states
                 .get(&service_ids::SECURITY_ACCESS)
                 .cloned()
                 .ok_or(DiagServiceError::InvalidState(
@@ -207,8 +210,8 @@ impl<S: SecurityPlugin> EcuManager<S> {
                 .collect::<HashSet<_>>())
         };
 
-        let session_states = get_state_names(semantics::SESSION)?;
-        let security_states = get_state_names(semantics::SECURITY)?;
+        let session_states = get_state_names(&self.database_naming_convention.semantics.session)?;
+        let security_states = get_state_names(&self.database_naming_convention.semantics.security)?;
 
         let precondition_states: Vec<_> = pre_condition_state_ref
             .iter()
@@ -248,9 +251,11 @@ impl<S: SecurityPlugin> EcuManager<S> {
         // preconditions we also accept the default state as a valid "current" state,
         // so that services whose preconditions include the default are always reachable
         // regardless of the actual ECU state.
-        let default_session = self.default_state(semantics::SESSION)?.to_ascii_lowercase();
+        let default_session = self
+            .default_state(&self.database_naming_convention.semantics.session)?
+            .to_ascii_lowercase();
         let default_security = self
-            .default_state(semantics::SECURITY)?
+            .default_state(&self.database_naming_convention.semantics.security)?
             .to_ascii_lowercase();
 
         let validate_state = |required: &HashSet<String>,
@@ -328,9 +333,9 @@ mod tests {
         let (ecu_manager, _, request_seed_12_name, _) =
             create_ecu_manager_with_security_access_services();
         {
-            let mut states = ecu_manager.ecu_service_states.write().await;
-            states.insert(service_ids::SESSION_CONTROL, "DefaultSession".to_owned());
-            states.insert(service_ids::SECURITY_ACCESS, "LockedSecurity".to_owned());
+            let mut guard = ecu_manager.runtime_state.service_states.write().unwrap();
+            guard.insert(service_ids::SESSION_CONTROL, "DefaultSession".to_owned());
+            guard.insert(service_ids::SECURITY_ACCESS, "LockedSecurity".to_owned());
         }
 
         let result = ecu_manager
@@ -355,9 +360,9 @@ mod tests {
         let (ecu_manager, _, request_seed_12_name, _) =
             create_ecu_manager_with_security_access_services();
         {
-            let mut states = ecu_manager.ecu_service_states.write().await;
-            states.insert(service_ids::SESSION_CONTROL, "DefaultSession".to_owned());
-            states.insert(service_ids::SECURITY_ACCESS, "LockedSecurity".to_owned());
+            let mut guard = ecu_manager.runtime_state.service_states.write().unwrap();
+            guard.insert(service_ids::SESSION_CONTROL, "DefaultSession".to_owned());
+            guard.insert(service_ids::SECURITY_ACCESS, "LockedSecurity".to_owned());
         }
 
         // "access_12" -> trailing "12" -> from_str_radix("12", 16) = 18 -> sub-func 0x12
@@ -381,9 +386,9 @@ mod tests {
     async fn test_lookup_security_access_request_seed_not_found() {
         let (ecu_manager, ..) = create_ecu_manager_with_security_access_services();
         {
-            let mut states = ecu_manager.ecu_service_states.write().await;
-            states.insert(service_ids::SESSION_CONTROL, "DefaultSession".to_owned());
-            states.insert(service_ids::SECURITY_ACCESS, "LockedSecurity".to_owned());
+            let mut guard = ecu_manager.runtime_state.service_states.write().unwrap();
+            guard.insert(service_ids::SESSION_CONTROL, "DefaultSession".to_owned());
+            guard.insert(service_ids::SECURITY_ACCESS, "LockedSecurity".to_owned());
         }
 
         // "unknown_99" - name not in any service, sub-func 99 (0x63) is outside
@@ -407,9 +412,9 @@ mod tests {
         let (ecu_manager, _, _, send_key_01_name) =
             create_ecu_manager_with_security_access_services();
         {
-            let mut states = ecu_manager.ecu_service_states.write().await;
-            states.insert(service_ids::SESSION_CONTROL, "DefaultSession".to_owned());
-            states.insert(service_ids::SECURITY_ACCESS, "LockedSecurity".to_owned());
+            let mut guard = ecu_manager.runtime_state.service_states.write().unwrap();
+            guard.insert(service_ids::SESSION_CONTROL, "DefaultSession".to_owned());
+            guard.insert(service_ids::SECURITY_ACCESS, "LockedSecurity".to_owned());
         }
 
         // Transition LockedSecurity -> ExtendedSecurity; SendKey_level_01 carries that ref.

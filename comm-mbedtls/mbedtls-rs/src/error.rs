@@ -98,8 +98,14 @@ impl fmt::Display for MbedtlsError {
         // mbedtls uses negative integers for errors,
         // to display them as positive hexadecimal values, we negate the code and
         // add the '-' sign into the string
-        #[allow(clippy::arithmetic_side_effects)]
-        #[allow(clippy::cast_sign_loss)]
+        #[allow(
+            clippy::arithmetic_side_effects,
+            reason = "Negation of i32 error code; MBEDTLS_ERR_* values are defined to fit"
+        )]
+        #[allow(
+            clippy::cast_sign_loss,
+            reason = "Negated code is non-negative; cast to u32 is safe"
+        )]
         match self.name() {
             Some(name) => write!(f, "mbedtls error: {name} (-0x{:04X})", (-self.code) as u32),
             None => write!(f, "mbedtls error: -0x{:04X}", (-self.code) as u32),

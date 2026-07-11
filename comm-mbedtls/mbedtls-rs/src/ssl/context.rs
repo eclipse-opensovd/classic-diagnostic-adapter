@@ -289,7 +289,7 @@ impl<S: Read + Write> Read for SslStream<S> {
     fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
         let ret = unsafe { ffi::mbedtls_ssl_read(&raw mut self.ssl, buf.as_mut_ptr(), buf.len()) };
         match ret {
-            #[allow(clippy::cast_sign_loss)] // ret is checked if it is positive
+            #[allow(clippy::cast_sign_loss, reason = "ret is checked to be positive above")]
             n if n > 0 => Ok(n as usize),
             0 => Ok(0), // EOF / peer closed
             n => {
@@ -308,7 +308,10 @@ impl<S: Read + Write> Write for SslStream<S> {
     fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
         let ret = unsafe { ffi::mbedtls_ssl_write(&raw mut self.ssl, buf.as_ptr(), buf.len()) };
         if ret >= 0 {
-            #[allow(clippy::cast_sign_loss)] // ret is check if it is not negative
+            #[allow(
+                clippy::cast_sign_loss,
+                reason = "ret is checked to be non-negative above"
+            )]
             Ok(ret as usize)
         } else {
             let err = MbedtlsError::from_raw(ret);

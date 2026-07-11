@@ -293,6 +293,13 @@ async fn connect_to_gateway(
     Ok(stream)
 }
 
+fn socket_config(config: &GatewayConnectionConfig) -> DoipSocketConfig {
+    DoipSocketConfig {
+        protocol_version: config.doip.protocol_version,
+        send_diagnostic_message_ack: config.doip.transport.send_diagnostic_message_ack,
+    }
+}
+
 #[tracing::instrument(
     skip_all,
     fields(
@@ -319,7 +326,7 @@ pub(crate) async fn establish_ecu_connection(
     .await
     {
         Ok(Ok(stream)) => {
-            EcuConnectionVariant::Plain(DoIPConnection::new(stream, config.doip.transport.socket))
+            EcuConnectionVariant::Plain(DoIPConnection::new(stream, socket_config(config)))
         }
         Ok(Err(e)) => return Err(e),
         Err(_) => {
@@ -409,7 +416,7 @@ pub(crate) async fn establish_tls_ecu_connection(
     )
     .await
     {
-        Ok(Ok(stream)) => create_tls_stream(stream, config.doip.transport.socket).await?,
+        Ok(Ok(stream)) => create_tls_stream(stream, socket_config(config)).await?,
         Ok(Err(e)) => {
             return Err(ConnectionError::ConnectionFailed(format!(
                 "Connect failed: {e:?}"
@@ -553,6 +560,10 @@ async fn create_tls_stream(
 
 // Allow building CDA without TLS support
 #[cfg(all(not(feature = "openssl"), not(feature = "mbedtls")))]
+#[allow(
+    clippy::unused_async,
+    reason = "async matches the signature of the TLS-enabled variant"
+)]
 async fn create_tls_stream(
     _stream: tokio::net::TcpStream,
     _socket_config: DoipSocketConfig,
@@ -562,9 +573,10 @@ async fn create_tls_stream(
     ))
 }
 
-// Allow the underscore bindings because the variables
-// are not used, but we want them in the tracing fields.
-#[allow(clippy::used_underscore_binding)]
+#[allow(
+    clippy::used_underscore_binding,
+    reason = "Variables are unused in the function but required as named tracing fields"
+)]
 #[tracing::instrument(
     skip(reader),
     fields(

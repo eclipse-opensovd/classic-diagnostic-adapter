@@ -14,7 +14,7 @@
 use cda_database::datatypes;
 use cda_interfaces::{
     DiagComm, DiagServiceError, EcuStateManager, HashMap, PayloadDecoder, ServicePayload,
-    datatypes::{CLEAR_FAULT_MEM_POS_RESPONSE_SID, semantics},
+    datatypes::CLEAR_FAULT_MEM_POS_RESPONSE_SID,
     diagservices::{DiagServiceResponseType, FieldParseError},
     dlt_ctx, service_ids,
     util::{self},
@@ -87,8 +87,11 @@ impl<S: SecurityPlugin> PayloadDecoder for EcuManager<S> {
         ),
         err
     )]
-    // allow keeping the function together as it makes sense structurally
-    #[allow(clippy::too_many_lines)]
+    #[allow(
+        clippy::too_many_lines,
+        reason = "Keeping the function together makes structural sense. Splitting would hurt \
+                  readability"
+    )]
     async fn convert_from_uds(
         &self,
         diag_service: &cda_interfaces::DiagComm,
@@ -140,9 +143,8 @@ impl<S: SecurityPlugin> PayloadDecoder for EcuManager<S> {
             let response_type = response.response_type().try_into()?;
             // in case of a positive response update potential session or security access changes
             if response_type == datatypes::ResponseType::Positive {
-                let (new_session, new_security) = self
-                    .lookup_state_transition_by_diagcomm_for_active(&mapped_diag_comm)
-                    .await;
+                let (new_session, new_security) =
+                    self.lookup_state_transition_by_diagcomm_for_active(&mapped_diag_comm);
 
                 if let Some(new_session) = new_session {
                     self.set_service_state(service_ids::SESSION_CONTROL, new_session)
@@ -157,7 +159,10 @@ impl<S: SecurityPlugin> PayloadDecoder for EcuManager<S> {
             let raw_uds_payload = {
                 let base_offset = params
                     .iter()
-                    .filter(|p| p.semantic().is_some_and(|s| s == semantics::DATA))
+                    .filter(|p| {
+                        p.semantic()
+                            .is_some_and(|s| s == self.database_naming_convention.semantics.data)
+                    })
                     .map(datatypes::Parameter::byte_position)
                     .min()
                     .unwrap_or(0);
@@ -181,7 +186,8 @@ impl<S: SecurityPlugin> PayloadDecoder for EcuManager<S> {
             for param in sorted_params {
                 let semantic = param.semantic();
                 if semantic.is_some_and(|semantic| {
-                    semantic != semantics::DATA && semantic != semantics::SERVICEIDRQ
+                    semantic != self.database_naming_convention.semantics.data
+                        && semantic != self.database_naming_convention.semantics.service_id_rq
                 }) {
                     continue;
                 }
@@ -953,13 +959,21 @@ impl<S: SecurityPlugin> EcuManager<S> {
         let mut start = 0usize;
 
         for _ in 0..num_items {
-            let (item_data, item_size) = self.decode_dynamic_length_field_item(
+            let (item_data, item_size) = match self.decode_dynamic_length_field_item(
                 mapped_service,
                 uds_payload,
                 data,
                 &repeated_dop,
                 start,
-            )?;
+            ) {
+                Ok(result) => result,
+                Err(DiagServiceError::NotEnoughData { .. }) => {
+                    // ECU sent fewer bytes than the item count implied; treat as end of list.
+                    tracing::warn!("Not enough data for next DynamicLengthField item, truncating");
+                    break;
+                }
+                Err(e) => return Err(e),
+            };
             tracing::debug!(
                 item_index = repeated_data.len(),
                 item_size,
@@ -1465,12 +1479,23 @@ impl<S: SecurityPlugin> EcuManager<S> {
                     // to last_read_byte_pos; it must be 0 (start of case data)
                     // rather than stale from a previous context.
                     uds_payload.set_last_read_byte_pos(0);
-                    let case_data = self.map_struct_from_uds(
+                    let case_data = match self.map_struct_from_uds(
                         &case_structure,
                         mapped_service,
                         uds_payload,
                         data,
-                    )?;
+                    ) {
+                        Ok(d) => d,
+                        Err(DiagServiceError::NotEnoughData { .. }) => {
+                            // ECU payload is too short to contain the case structure;
+                            // treat as absent (no case data decoded).
+                            tracing::warn!(
+                                "Not enough data to decode mux case structure, treating as empty"
+                            );
+                            HashMap::default()
+                        }
+                        Err(e) => return Err(e),
+                    };
                     uds_payload.pop_slice()?;
                     mux_data.insert(case_name, DiagDataTypeContainer::Struct(case_data));
                 }

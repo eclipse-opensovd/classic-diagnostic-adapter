@@ -28,9 +28,11 @@ use cda_interfaces::{
 ///
 /// Tries integer parsing first; falls back to `f64` parsing with
 /// truncation for values like `"3.0"` that ODX databases occasionally use.
-// f64->u64 cast is intentional: ODX limit values are expected to fit
-// within u64; fractional parts are truncated by design.
-#[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+#[allow(
+    clippy::cast_possible_truncation,
+    clippy::cast_sign_loss,
+    reason = "ODX limit values fit within u64. Fractional truncation is intentional by design"
+)]
 fn parse_limit_as_u64(value: &str) -> Option<u64> {
     value
         .parse::<u64>()

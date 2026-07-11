@@ -353,8 +353,10 @@ pub(crate) mod diag_service {
         }
     }
 
-    // cannot easily combine the axum extractors without creating a new custom extractor.
-    #[allow(clippy::too_many_arguments)]
+    #[allow(
+        clippy::too_many_arguments,
+        reason = "Axum extractors cannot be combined without a new custom extractor"
+    )]
     pub(crate) async fn post<T: UdsEcu + Clone>(
         headers: HeaderMap,
         UseApi(Secured(security_plugin), _): UseApi<Secured, ()>,

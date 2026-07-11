@@ -37,7 +37,7 @@ use crate::{
 };
 
 #[tokio::test]
-#[allow(clippy::too_many_lines)] // keep test together.
+#[allow(clippy::too_many_lines, reason = "Keep test together")]
 async fn test_dtc_setting() {
     let (runtime, _lock) = setup_integration_test(true).await.unwrap();
     let auth = auth_header(&runtime.config, None).await.unwrap();
@@ -226,7 +226,10 @@ async fn test_dtc_setting() {
 }
 
 #[tokio::test]
-#[allow(clippy::too_many_lines)] // its easier to understand the test if its kept together
+#[allow(
+    clippy::too_many_lines,
+    reason = "Easier to understand the test if kept together"
+)]
 async fn test_dtc_deletion() {
     let (runtime, _lock) = setup_integration_test(true).await.unwrap();
     let auth = auth_header(&runtime.config, None).await.unwrap();
@@ -424,7 +427,7 @@ async fn test_dtc_deletion() {
 
 /// Test GET /faults and GET /faults/{fault-code} with various DTC mask scenarios
 #[tokio::test]
-#[allow(clippy::too_many_lines)]
+#[allow(clippy::too_many_lines, reason = "Keep test together")]
 async fn test_get_faults_with_different_dtc_masks() {
     let (runtime, _lock) = setup_integration_test(true).await.unwrap();
     let auth = auth_header(&runtime.config, None).await.unwrap();
@@ -1164,7 +1167,10 @@ fn filter_failed_faults(faults: Vec<Fault>) -> Vec<Fault> {
 ///    and clears only the Development faults in the ECU sim.
 /// 3. Standard fault memory faults are not affected by the scoped clear.
 #[tokio::test]
-#[allow(clippy::too_many_lines)]
+#[allow(
+    clippy::too_many_lines,
+    reason = "Test scenario is easier to understand kept together"
+)]
 async fn test_dtc_deletion_user_memory() {
     let (runtime, _lock) = setup_integration_test(true).await.unwrap();
     let auth = auth_header(&runtime.config, None).await.unwrap();
