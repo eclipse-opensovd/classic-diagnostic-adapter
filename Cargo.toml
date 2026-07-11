@@ -68,7 +68,7 @@ serde_json = "1.0"
 tokio = { version = "1.48.0", default-features = false }
 tokio-util = { version = "0.7.3", default-features = false }
 futures = "0.3"
-sd-notify = "0.5.0"
+sd-notify = { version = "0.5.0", default-features = false }
 regex = "1.12.2"
 uuid = "1.18.1"
 bytes = "1"
