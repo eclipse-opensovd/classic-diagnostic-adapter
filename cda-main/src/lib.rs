@@ -21,7 +21,7 @@ use cda_interfaces::{
     DiagServiceError, DoipGatewaySetupError, EcuConnectivityHandler, FunctionalDescriptionConfig,
     HashMap, HashMapExtensions, UdsQuery, UdsVariant,
     config::{ConfigSanity, ConfigSanityError},
-    datatypes::{ComParams, FaultConfig},
+    datatypes::FaultConfig,
     dlt_ctx,
 };
 use cda_plugin_security::{
@@ -30,10 +30,6 @@ use cda_plugin_security::{
 use cda_sovd::Locks;
 use cda_tracing::{OtelGuard, TracingSetupError, TracingWorkerGuard};
 use clap::{Parser, Subcommand};
-use figment::{
-    Figment,
-    providers::{Format, Serialized, Toml},
-};
 use futures::future::FutureExt;
 use tokio::sync::{Mutex, RwLock, mpsc};
 use tracing_subscriber::layer::SubscriberExt;
@@ -978,74 +974,4 @@ pub fn setup_tracing(config: &Configuration) -> Result<TracingGuards, TracingSet
 #[must_use]
 pub fn cda_version() -> &'static str {
     env!("CARGO_PKG_VERSION")
-}
-
-/// Compute the effective [`ComParams`] for a single ECU.
-///
-/// Starts from the global `global` config and merges any per-ECU TOML overrides
-/// present in `ecu_table`.
-///
-/// Returns `None` (and emits a `tracing::error!`) if the TOML table cannot be
-/// serialised or if figment extraction fails - the caller should `continue` to
-/// the next ECU.
-pub fn resolve_com_params(
-    ecu_name: &str,
-    global: &ComParams,
-    ecu_overrides: Option<&config::configfile::EcuComParams>,
-) -> Option<ComParams> {
-    let params: ComParams = match ecu_overrides {
-        None => global.clone(),
-        Some(overrides) => {
-            let toml_str = match toml::to_string(overrides) {
-                Ok(s) => s,
-                Err(e) => {
-                    tracing::error!(
-                        ecu_name = %ecu_name,
-                        error = %e,
-                        "Failed to serialize per-ECU com_params TOML table; skipping ECU"
-                    );
-                    return None;
-                }
-            };
-            match Figment::from(Serialized::defaults(global))
-                .merge(Toml::string(&toml_str))
-                .extract::<ComParams>()
-            {
-                Ok(p) => p,
-                Err(e) => {
-                    tracing::error!(
-                        ecu_name = %ecu_name,
-                        error = %e,
-                        "Failed to merge per-ECU com_params overrides; skipping ECU"
-                    );
-                    return None;
-                }
-            }
-        }
-    };
-
-    Some(params)
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn resolve_com_params_returns_none_on_figment_extraction_failure() {
-        let global = ComParams::default();
-        // Put a string where figment expects a table (the `uds` key should map
-        // to a struct, not a scalar); this reliably triggers an extraction error.
-        let mut table = toml::Table::new();
-        table.insert(
-            "uds".to_owned(),
-            toml::Value::String("not_a_struct".to_owned()),
-        );
-        let ecu_params = crate::config::configfile::EcuComParams(table);
-        let result = resolve_com_params("BAD_ECU", &global, Some(&ecu_params));
-        assert!(
-            result.is_none(),
-            "resolve_com_params must return None when figment extraction fails"
-        );
-    }
 }
