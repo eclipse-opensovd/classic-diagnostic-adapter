@@ -285,6 +285,32 @@ impl ConfigSanity for Configuration {
     }
 }
 
+/// Validates TOML configuration files against the `Configuration` schema.
+///
+/// This validator is used by the runtime update security handler to ensure
+/// configuration files are valid before they are applied.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct ConfigurationValidator;
+
+impl ConfigurationValidator {
+    /// Creates a new configuration validator.
+    #[must_use]
+    pub fn new() -> Self {
+        Self
+    }
+}
+
+impl cda_interfaces::runtime_update_api::ConfigValidator for ConfigurationValidator {
+    fn validate(
+        &self,
+        content: &str,
+    ) -> Result<(), cda_interfaces::runtime_update_api::ConfigValidationError> {
+        toml::from_str::<Configuration>(content)
+            .map(|_| ())
+            .map_err(|e| cda_interfaces::runtime_update_api::ConfigValidationError(e.to_string()))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use cda_interfaces::datatypes::DiagnosticServiceAffixPosition;

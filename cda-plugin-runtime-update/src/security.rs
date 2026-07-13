@@ -17,18 +17,27 @@ use async_trait::async_trait;
 use cda_database::mmap_and_decode_mdd;
 use cda_interfaces::{
     runtime_update_api::{
-        ActivityGuard, LockStateProvider, RuntimeFilesUpdateSecurityHandler, RuntimeUpdateError,
+        ActivityGuard, LockStateProvider, RuntimeUpdateError, RuntimeUpdateSecurityPlugin,
         UpdateCollections, UpdateFileType, VerificationError,
     },
     storage_api::{Collection, DirectFileAccess},
 };
 
-pub struct UpdateSecurityHandler<L: LockStateProvider> {
+/// Default implementation of the runtime update security handler.
+///
+/// Validates vehicle lock ownership, detects lock conflicts, and verifies
+/// file integrity for both MDD databases and configuration files.
+pub struct DefaultUpdateSecurityHandler<L: LockStateProvider> {
     guard: Vec<Box<dyn ActivityGuard>>,
     _lock_provider: std::marker::PhantomData<L>,
 }
 
-impl<L: LockStateProvider> UpdateSecurityHandler<L> {
+impl<L: LockStateProvider> DefaultUpdateSecurityHandler<L> {
+    /// Creates a new security handler with the given activity guards.
+    ///
+    /// # Arguments
+    /// * `_lock_provider` - The lock state provider (used for type inference)
+    /// * `guard` - Activity guards that prevent updates while operations are in progress
     pub fn new(_lock_provider: Arc<L>, guard: Vec<Box<dyn ActivityGuard>>) -> Self {
         Self {
             guard,
@@ -39,7 +48,7 @@ impl<L: LockStateProvider> UpdateSecurityHandler<L> {
 
 #[async_trait]
 impl<L: LockStateProvider, C: Collection + DirectFileAccess + Send + Sync + 'static>
-    RuntimeFilesUpdateSecurityHandler<L, C> for UpdateSecurityHandler<L>
+    RuntimeUpdateSecurityPlugin<L, C> for DefaultUpdateSecurityHandler<L>
 {
     /// Validates that the caller is allowed to start an execution (apply/rollback/cleanup).
     ///
@@ -84,7 +93,7 @@ impl<L: LockStateProvider, C: Collection + DirectFileAccess + Send + Sync + 'sta
 
     async fn check_file_integrity(
         &self,
-        type_: UpdateFileType,
+        type_: UpdateFileType<'_>,
         path: &std::path::Path,
     ) -> Result<(), VerificationError> {
         match type_ {
@@ -96,18 +105,18 @@ impl<L: LockStateProvider, C: Collection + DirectFileAccess + Send + Sync + 'sta
                     VerificationError(format!("Failed to parse MDD '{}': {e}", path.display()))
                 })?;
             }
-            UpdateFileType::Config => {
+            UpdateFileType::Config(config_validator) => {
                 let content = tokio::fs::read_to_string(path).await.map_err(|e| {
                     VerificationError(format!("Failed to read config '{}': {e}", path.display()))
                 })?;
-                toml::from_str::<crate::config::configfile::Configuration>(&content).map_err(
-                    |e| {
-                        VerificationError(format!(
-                            "Failed to parse config '{}': {e}",
-                            path.display()
-                        ))
-                    },
-                )?;
+
+                // Validate config content using the embedded validator
+                config_validator.validate(&content).map_err(|e| {
+                    VerificationError(format!(
+                        "Failed to validate config '{}': {e}",
+                        path.display()
+                    ))
+                })?;
             }
         }
         Ok(())
@@ -149,8 +158,8 @@ mod tests {
     use async_trait::async_trait;
     use cda_interfaces::{
         runtime_update_api::{
-            RuntimeFilesUpdateSecurityHandler, RuntimeUpdateError, UpdateCollections,
-            UpdateFileType,
+            ConfigValidationError, ConfigValidator, RuntimeUpdateError,
+            RuntimeUpdateSecurityPlugin, UpdateCollections, UpdateFileType,
         },
         storage_api::{CollectionName, Storage as _},
     };
@@ -182,6 +191,17 @@ mod tests {
         }
     }
 
+    /// A simple test config validator that checks if content is valid TOML
+    struct TestConfigValidator;
+
+    impl ConfigValidator for TestConfigValidator {
+        fn validate(&self, content: &str) -> Result<(), ConfigValidationError> {
+            toml::from_str::<toml::Table>(content)
+                .map(|_| ())
+                .map_err(|e| ConfigValidationError(e.to_string()))
+        }
+    }
+
     fn make_lock_provider(
         owner: Option<&str>,
         has_ecu_conflicts: bool,
@@ -195,11 +215,11 @@ mod tests {
     }
 
     async fn check_file_integrity(
-        handler: &UpdateSecurityHandler<MockLockProvider>,
-        type_: UpdateFileType,
+        handler: &DefaultUpdateSecurityHandler<MockLockProvider>,
+        type_: UpdateFileType<'_>,
         path: &std::path::Path,
     ) -> Result<(), VerificationError> {
-        <UpdateSecurityHandler<_> as RuntimeFilesUpdateSecurityHandler<
+        <DefaultUpdateSecurityHandler<_> as RuntimeUpdateSecurityPlugin<
             MockLockProvider,
             LocalCollection,
         >>::check_file_integrity(handler, type_, path)
@@ -258,9 +278,12 @@ mod tests {
         owner: Option<&str>,
         has_ecu_conflicts: bool,
         has_fg_conflicts: bool,
-    ) -> (UpdateSecurityHandler<MockLockProvider>, MockLockProvider) {
+    ) -> (
+        DefaultUpdateSecurityHandler<MockLockProvider>,
+        MockLockProvider,
+    ) {
         let lock_provider = make_lock_provider(owner, has_ecu_conflicts, has_fg_conflicts);
-        let handler = UpdateSecurityHandler::new(
+        let handler = DefaultUpdateSecurityHandler::new(
             Arc::new(MockLockProvider {
                 owner: owner.map(ToOwned::to_owned),
                 has_ecu_conflicts,
@@ -340,7 +363,9 @@ mod tests {
     async fn check_file_integrity_config_fails_on_nonexistent_file() {
         let (handler, _) = make_handler(Some("user-a"), false, false);
         let path = PathBuf::from("/nonexistent/config.toml");
-        let result = check_file_integrity(&handler, UpdateFileType::Config, &path).await;
+        let validator = TestConfigValidator;
+        let result =
+            check_file_integrity(&handler, UpdateFileType::Config(&validator), &path).await;
         assert!(result.is_err());
     }
 
@@ -350,19 +375,35 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("bad.toml");
         std::fs::write(&path, "this is not valid toml {{{").unwrap();
-        let result = check_file_integrity(&handler, UpdateFileType::Config, &path).await;
+        let validator = TestConfigValidator;
+        let result =
+            check_file_integrity(&handler, UpdateFileType::Config(&validator), &path).await;
         assert!(result.is_err());
     }
 
     #[tokio::test]
     async fn check_file_integrity_config_succeeds_on_valid_toml() {
         let (handler, _) = make_handler(Some("user-a"), false, false);
-        let config = crate::config::configfile::Configuration::default();
-        let toml_str = toml::to_string(&config).unwrap();
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("valid.toml");
-        std::fs::write(&path, &toml_str).unwrap();
-        let result = check_file_integrity(&handler, UpdateFileType::Config, &path).await;
+        std::fs::write(&path, "[section]\nkey = \"value\"\n").unwrap();
+        let validator = TestConfigValidator;
+        let result =
+            check_file_integrity(&handler, UpdateFileType::Config(&validator), &path).await;
+        assert!(result.is_ok());
+    }
+
+    #[tokio::test]
+    async fn check_file_integrity_config_succeeds_without_validation() {
+        // With NoOpConfigValidator, only file readability is checked (TOML validation is skipped)
+        let (handler, _) = make_handler(Some("user-a"), false, false);
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("any.toml");
+        std::fs::write(&path, "any content even invalid {{{").unwrap();
+        let validator = ();
+        let result =
+            check_file_integrity(&handler, UpdateFileType::Config(&validator), &path).await;
+        // Should succeed because NoOpConfigValidator always returns Ok
         assert!(result.is_ok());
     }
 

@@ -11,20 +11,15 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-// SPDX-License-Identifier: Apache-2.0
-//
-// See the NOTICE file(s) distributed with this work for additional
-// information regarding copyright ownership.
-//
-// This program and the accompanying materials are made available under the
-// terms of the Apache License Version 2.0 which is available at
-// https://www.apache.org/licenses/LICENSE-2.0
-
-pub use default_runtime_update_plugin::DefaultRuntimeFilesUpdatePlugin;
+pub use default_runtime_update_plugin::DefaultRuntimeUpdatePlugin;
+pub use security::DefaultUpdateSecurityHandler;
 
 pub mod config;
+pub mod default_runtime_reloader_plugin;
+pub use default_runtime_reloader_plugin::{DefaultReloadContext, RuntimeReloaderConfig};
 pub mod default_runtime_update_plugin;
 pub mod operations;
+pub mod security;
 pub mod storage;
 
 /// Shared test utilities for the runtime update plugin tests.
@@ -39,7 +34,7 @@ pub(crate) mod test_utils {
     use bytes::Bytes;
     use cda_interfaces::{
         runtime_update_api::{
-            LockStateProvider, ReloadError, RuntimeFileReloadHandler, RuntimeUpdateError,
+            LockStateProvider, ReloadError, RuntimeReloaderPlugin, RuntimeUpdateError,
             UpdateFileType, UploadFile, VerificationError,
         },
         storage_api::{
@@ -87,7 +82,7 @@ pub(crate) mod test_utils {
 
     #[async_trait]
     impl<L: LockStateProvider, C: Collection + DirectFileAccess + Send + Sync + 'static>
-        cda_interfaces::runtime_update_api::RuntimeFilesUpdateSecurityHandler<L, C>
+        cda_interfaces::runtime_update_api::RuntimeUpdateSecurityPlugin<L, C>
         for MockSecurityHandler
     {
         async fn check_apply_allowed(
@@ -106,7 +101,7 @@ pub(crate) mod test_utils {
 
         async fn check_file_integrity(
             &self,
-            _type: UpdateFileType,
+            _type: UpdateFileType<'_>,
             _path: &std::path::Path,
         ) -> Result<(), VerificationError> {
             Ok(())
@@ -201,7 +196,7 @@ pub(crate) mod test_utils {
     }
 
     #[async_trait]
-    impl RuntimeFileReloadHandler for RecordingReloadHandler {
+    impl RuntimeReloaderPlugin for RecordingReloadHandler {
         async fn reload_databases(&self, paths: Vec<PathBuf>) -> Result<(), ReloadError> {
             self.reload_calls.lock().unwrap().push(paths);
             Ok(())
@@ -213,11 +208,11 @@ pub(crate) mod test_utils {
         }
     }
 
-    /// A [`RuntimeFileReloadHandler`] that does nothing, useful as a default in tests.
+    /// A [`RuntimeReloaderPlugin`] that does nothing, useful as a default in tests.
     pub struct NoopReloadHandler;
 
     #[async_trait]
-    impl RuntimeFileReloadHandler for NoopReloadHandler {
+    impl RuntimeReloaderPlugin for NoopReloadHandler {
         async fn reload_databases(&self, _mdd_paths: Vec<PathBuf>) -> Result<(), ReloadError> {
             Ok(())
         }

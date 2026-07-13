@@ -21,7 +21,7 @@
 // https://www.apache.org/licenses/LICENSE-2.0
 
 use cda_interfaces::{
-    runtime_update_api::{RuntimeFileReloadHandler, RuntimeUpdateError},
+    runtime_update_api::{RuntimeReloaderPlugin, RuntimeUpdateError},
     storage_api::{Collection, CollectionName, Storage, Transaction},
 };
 
@@ -46,7 +46,7 @@ async fn restore_from_backup<S: Storage, C: Collection>(
 /// Roll back the entire update from the backup.
 /// # Errors
 /// Returns [`RuntimeUpdateError`] if restore or reload fails.
-pub async fn execute_rollback<S: Storage, R: RuntimeFileReloadHandler>(
+pub async fn execute_rollback<S: Storage, R: RuntimeReloaderPlugin + ?Sized>(
     storage: &S,
     reload_handler: &R,
 ) -> Result<(), RuntimeUpdateError> {
@@ -373,7 +373,7 @@ mod tests {
     }
 
     #[async_trait::async_trait]
-    impl cda_interfaces::runtime_update_api::RuntimeFileReloadHandler for OrderingReloadHandler {
+    impl cda_interfaces::runtime_update_api::RuntimeReloaderPlugin for OrderingReloadHandler {
         async fn reload_databases(
             &self,
             _paths: Vec<std::path::PathBuf>,

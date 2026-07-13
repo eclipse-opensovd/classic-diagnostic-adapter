@@ -26,29 +26,32 @@ use async_trait::async_trait;
 use cda_interfaces::{
     HashMap,
     runtime_update_api::{
-        BulkDataCreatedList, BulkDataList, ExecutionMode, LockStateProvider,
-        RuntimeFileReloadHandler, RuntimeFilesQuery, RuntimeFilesUpdatePlugin,
-        RuntimeFilesUpdateSecurityHandler, RuntimeUpdateError, UpdateExecution, UploadFile,
+        BulkDataCreatedList, BulkDataList, ConfigValidator, ExecutionMode, LockStateProvider,
+        RuntimeFilesQuery, RuntimeFilesUpdatePlugin, RuntimeReloaderPlugin, RuntimeUpdateError,
+        RuntimeUpdateSecurityPlugin, UpdateExecution, UploadFile,
     },
     storage_api::Storage,
 };
 use tokio::sync::RwLock;
 
 /// Default implementation of [`RuntimeFilesUpdatePlugin`] with injectable security and storage.
-pub struct DefaultRuntimeFilesUpdatePlugin<
-    S: Storage,
-    R: RuntimeFileReloadHandler,
-    T: RuntimeFilesUpdateSecurityHandler<L, S::CollectionHandle>,
-    L: LockStateProvider,
+///
+pub struct DefaultRuntimeUpdatePlugin<
+    Store: Storage,
+    UpdateSecurityPlugin: RuntimeUpdateSecurityPlugin<Lock, Store::CollectionHandle>,
+    Lock: LockStateProvider,
+    Validator: ConfigValidator,
 > {
     /// Access to the persistent storage layer (all mutations go through this)
-    storage: Arc<S>,
+    storage: Arc<Store>,
     /// Hot-reload notification handler
-    reload_handler: Arc<R>,
+    reloader_plugin: Arc<dyn RuntimeReloaderPlugin>,
     /// Security and file integrity handler
-    security_handler: Arc<T>,
+    security_handler: Arc<UpdateSecurityPlugin>,
     /// Lock state provider passed to security checks
-    lock_provider: Arc<L>,
+    lock_provider: Arc<Lock>,
+    /// Validator for configuration file content
+    config_validator: Validator,
     /// Tracking map for in-progress executions: `exec_id` -> `DbUpdateExecution`
     executions: Arc<RwLock<HashMap<String, UpdateExecution>>>,
     /// If true, call `update_mdd_uncompressed()` after Apply for each MDD file
@@ -60,11 +63,11 @@ pub struct DefaultRuntimeFilesUpdatePlugin<
 }
 
 impl<
-    S: Storage,
-    R: RuntimeFileReloadHandler,
-    T: RuntimeFilesUpdateSecurityHandler<L, S::CollectionHandle>,
-    L: LockStateProvider,
-> DefaultRuntimeFilesUpdatePlugin<S, R, T, L>
+    Store: Storage,
+    UpdateSecurityPlugin: RuntimeUpdateSecurityPlugin<Lock, Store::CollectionHandle>,
+    Lock: LockStateProvider,
+    Validator: ConfigValidator,
+> DefaultRuntimeUpdatePlugin<Store, UpdateSecurityPlugin, Lock, Validator>
 {
     /// Creates a new plugin instance.
     ///
@@ -75,19 +78,22 @@ impl<
     /// * `lock_provider` - Provides lock state for security validation
     /// * `mdd_decompress` - Whether to decompress MDD files after apply
     /// * `update_in_progress` - Shared flag read by other components to gate operations
+    /// * `config_validator` - Validator for configuration file content (use `()` if not needed)
     pub fn new(
-        storage: Arc<S>,
-        reload_handler: Arc<R>,
-        security_handler: Arc<T>,
-        lock_provider: Arc<L>,
+        storage: Arc<Store>,
+        reloader_plugin: Arc<dyn RuntimeReloaderPlugin>,
+        security_handler: Arc<UpdateSecurityPlugin>,
+        lock_provider: Arc<Lock>,
         mdd_decompress: bool,
         update_in_progress: Arc<AtomicBool>,
+        config_validator: Validator,
     ) -> Self {
         Self {
             storage,
-            reload_handler,
+            reloader_plugin,
             security_handler,
             lock_provider,
+            config_validator,
             executions: Arc::new(RwLock::new(HashMap::default())),
             mdd_decompress,
             update_in_progress,
@@ -97,11 +103,12 @@ impl<
 
 #[async_trait]
 impl<
-    S: Storage + Send + Sync + 'static,
-    R: RuntimeFileReloadHandler,
-    T: RuntimeFilesUpdateSecurityHandler<L, S::CollectionHandle>,
-    L: LockStateProvider,
-> RuntimeFilesUpdatePlugin for DefaultRuntimeFilesUpdatePlugin<S, R, T, L>
+    Store: Storage + Send + Sync + 'static,
+    UpdateSecurityPlugin: RuntimeUpdateSecurityPlugin<Lock, Store::CollectionHandle>,
+    Lock: LockStateProvider,
+    Validator: ConfigValidator,
+> RuntimeFilesUpdatePlugin
+    for DefaultRuntimeUpdatePlugin<Store, UpdateSecurityPlugin, Lock, Validator>
 {
     async fn list_current(
         &self,
@@ -128,7 +135,13 @@ impl<
         &self,
         files: Vec<UploadFile>,
     ) -> Result<BulkDataCreatedList, RuntimeUpdateError> {
-        crate::storage::upload_files(&*self.storage, &*self.security_handler, files).await
+        crate::storage::upload_files(
+            &*self.storage,
+            &*self.security_handler,
+            files,
+            &self.config_validator as &dyn ConfigValidator,
+        )
+        .await
     }
 
     async fn delete_nextupdate(&self) -> Result<(), RuntimeUpdateError> {
@@ -147,7 +160,7 @@ impl<
         let params = crate::operations::executions::ExecutionParams {
             storage: &self.storage,
             security_handler: &self.security_handler,
-            reload_handler: &self.reload_handler,
+            reload_handler: &self.reloader_plugin,
             executions: &self.executions,
             update_in_progress: &self.update_in_progress,
             mdd_decompress: self.mdd_decompress,
@@ -179,7 +192,7 @@ mod tests {
     use cda_storage::LocalStorage;
 
     use crate::{
-        DefaultRuntimeFilesUpdatePlugin,
+        DefaultRuntimeUpdatePlugin,
         test_utils::{
             MockLockProvider, MockSecurityHandler, NoopReloadHandler, make_storage,
             make_upload_files, make_valid_config, make_valid_mdd, write_test_file,
@@ -188,12 +201,7 @@ mod tests {
 
     fn make_plugin(
         storage: LocalStorage,
-    ) -> DefaultRuntimeFilesUpdatePlugin<
-        LocalStorage,
-        NoopReloadHandler,
-        MockSecurityHandler,
-        MockLockProvider,
-    > {
+    ) -> DefaultRuntimeUpdatePlugin<LocalStorage, MockSecurityHandler, MockLockProvider, ()> {
         make_state_with_lock(storage, Some("test-user"), false)
     }
 
@@ -201,13 +209,8 @@ mod tests {
         storage: LocalStorage,
         owner: Option<&str>,
         has_conflicts: bool,
-    ) -> DefaultRuntimeFilesUpdatePlugin<
-        LocalStorage,
-        NoopReloadHandler,
-        MockSecurityHandler,
-        MockLockProvider,
-    > {
-        DefaultRuntimeFilesUpdatePlugin::new(
+    ) -> DefaultRuntimeUpdatePlugin<LocalStorage, MockSecurityHandler, MockLockProvider, ()> {
+        DefaultRuntimeUpdatePlugin::new(
             Arc::new(storage),
             Arc::new(NoopReloadHandler),
             Arc::new(MockSecurityHandler::new()),
@@ -217,6 +220,7 @@ mod tests {
             }),
             false,
             Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            (),
         )
     }
 
