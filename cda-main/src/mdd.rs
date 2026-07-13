@@ -36,6 +36,8 @@ use crate::{
     config::configfile::{Configuration, EcuComParams, EcuConfig},
 };
 
+pub(crate) const DB_HEALTH_COMPONENT_KEY: &str = "database";
+
 pub(crate) fn resolve_com_params(
     ecu_name: &str,
     global: &ComParams,
