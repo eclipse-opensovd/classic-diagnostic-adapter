@@ -28,15 +28,31 @@ use cda_interfaces::{
     storage_api::{Collection, CollectionName, DirectFileAccess, Storage},
 };
 use cda_plugin_security::SecurityPlugin;
+use figment::{Figment, providers::Serialized};
 use tokio::sync::RwLock;
 
 use crate::{
     AppError, DatabaseMap, FileManagerMap,
-    config::configfile::{Configuration, EcuConfig},
-    resolve_com_params,
+    config::configfile::{Configuration, EcuComParams, EcuConfig},
 };
 
-pub(crate) const DB_HEALTH_COMPONENT_KEY: &str = "database";
+pub(crate) fn resolve_com_params(
+    ecu_name: &str,
+    global: &ComParams,
+    ecu_overrides: Option<&EcuComParams>,
+) -> Option<ComParams> {
+    let Some(ecu_overrides) = ecu_overrides else {
+        return Some(global.clone());
+    };
+
+    Figment::from(Serialized::defaults(global.clone()))
+        .merge(Serialized::defaults(ecu_overrides))
+        .extract::<ComParams>()
+        .map_err(|error| {
+            tracing::error!(ecu_name, %error, "Failed to resolve ECU communication parameters");
+        })
+        .ok()
+}
 
 #[derive(Debug, thiserror::Error)]
 pub enum MddLoadingError {
@@ -659,8 +675,6 @@ fn insert_or_update_ecu<S: SecurityPlugin>(
 
 #[cfg(test)]
 mod tests {
-    use crate::resolve_com_params;
-
     #[test]
     fn resolve_com_params_returns_none_on_figment_extraction_failure() {
         use cda_interfaces::datatypes::ComParams;

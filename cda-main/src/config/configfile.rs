@@ -562,9 +562,12 @@ value = 65535
             .get("TMCC3000")
             .expect("TMCC3000 ecu config should be present");
         let ecu_com_params = tmcc.com_params.as_ref().expect("com_params should be Some");
-        let resolved =
-            crate::resolve_com_params("TMCC3000", &config.com_params, Some(ecu_com_params))
-                .expect("resolve should succeed");
+        let resolved = crate::mdd::resolve_com_params(
+            "TMCC3000",
+            &config.com_params,
+            Some(ecu_com_params),
+        )
+        .expect("resolve should succeed");
 
         assert_eq!(
             resolved.doip.logical_gateway_address.value, 12288u16,
@@ -587,7 +590,7 @@ value = 12288
 ";
         let ecu_overrides = parse_ecu_com_params(ecu_toml).expect("Failed to parse ECU com params");
         let global = ComParams::default();
-        let effective = crate::resolve_com_params("test", &global, Some(&ecu_overrides))
+        let effective = crate::mdd::resolve_com_params("test", &global, Some(&ecu_overrides))
             .expect("Resolve should succeed");
 
         assert_eq!(
@@ -609,7 +612,7 @@ value = 9999
         let mut global = ComParams::default();
         global.doip.logical_gateway_address.value = 0x1234u16;
 
-        let effective = crate::resolve_com_params("test", &global, Some(&ecu_overrides))
+        let effective = crate::mdd::resolve_com_params("test", &global, Some(&ecu_overrides))
             .expect("resolve should succeed");
 
         assert_eq!(
@@ -631,7 +634,7 @@ precedence = "Config"
 "#;
         let ecu_overrides = parse_ecu_com_params(ecu_toml).expect("Failed to parse ECU com params");
         let global = ComParams::default();
-        let effective = crate::resolve_com_params("test", &global, Some(&ecu_overrides))
+        let effective = crate::mdd::resolve_com_params("test", &global, Some(&ecu_overrides))
             .expect("resolve should succeed");
 
         assert_eq!(
@@ -649,7 +652,7 @@ value = 12288
 ";
         let ecu_overrides = parse_ecu_com_params(ecu_toml).expect("Failed to parse ECU com params");
         let global = ComParams::default();
-        let effective = crate::resolve_com_params("test", &global, Some(&ecu_overrides))
+        let effective = crate::mdd::resolve_com_params("test", &global, Some(&ecu_overrides))
             .expect("resolve should succeed");
 
         assert_eq!(

@@ -41,6 +41,7 @@ use tracing_subscriber::layer::SubscriberExt;
 use crate::config::configfile::Configuration;
 
 pub mod config;
+pub mod mdd;
 
 #[global_allocator]
 static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
@@ -273,6 +274,11 @@ impl From<ConfigSanityError> for AppError {
     }
 }
 
+/// Generate a reference configuration file.
+///
+/// # Errors
+///
+/// Returns [`AppError`] when configuration generation or writing the output fails.
 pub fn generate_config_cmd(output: Option<&PathBuf>) -> Result<(), AppError> {
     let content = config::generate::generate_reference_config()
         .map_err(|e| AppError::RuntimeError(format!("Failed to generate config: {e}")))?;
@@ -595,7 +601,10 @@ async fn mark_duplicate_ecus_by_address<S: SecurityPlugin>(
     }
 }
 
-#[allow(clippy::too_many_arguments)]
+#[allow(
+    clippy::too_many_arguments,
+    reason = "database loading setup passes several independent configuration inputs"
+)]
 #[tracing::instrument(
     skip_all,
     fields(
@@ -808,7 +817,10 @@ async fn create_state_coordinator<S: SecurityPlugin>(
 
 /// Creates a new UDS manager for the webserver.
 // type alias does not allow specifying hasher, we set the hasher globally.
-#[allow(clippy::implicit_hasher)]
+#[allow(
+    clippy::implicit_hasher,
+    reason = "this API uses the workspace HashMap alias with the default hasher"
+)]
 #[tracing::instrument(skip_all,
     fields(
         database_count = databases.len(),
@@ -976,6 +988,11 @@ pub fn cda_version() -> &'static str {
     env!("CARGO_PKG_VERSION")
 }
 
+/// Run the CDA with an already-resolved configuration.
+///
+/// # Errors
+///
+/// Returns [`AppError`] if tracing, webserver startup, database loading, or route setup fails.
 pub async fn run_with_config(config: Configuration) -> Result<(), AppError> {
     let _tracing_guards = setup_tracing(&config)?;
     tracing::info!("Starting CDA - version {}", cda_version());
@@ -1069,6 +1086,11 @@ async fn register_version_endpoints(dynamic_router: &cda_sovd::dynamic_router::D
         .await;
 }
 
+/// Run the CDA from parsed command-line arguments.
+///
+/// # Errors
+///
+/// Returns [`AppError`] if config loading, validation, or runtime initialization fails.
 pub async fn run(args: AppArgs) -> Result<(), AppError> {
     if let Some(Command::GenerateConfig { output }) = args.command.as_ref() {
         return generate_config_cmd(output.as_ref());
@@ -1083,6 +1105,11 @@ pub async fn run(args: AppArgs) -> Result<(), AppError> {
     run_with_config(config).await
 }
 
+/// Parse CLI arguments and run the CDA.
+///
+/// # Errors
+///
+/// Returns [`AppError`] if argument-driven startup or runtime initialization fails.
 pub async fn run_from_cli() -> Result<(), AppError> {
     Box::pin(run(AppArgs::parse())).await
 }
