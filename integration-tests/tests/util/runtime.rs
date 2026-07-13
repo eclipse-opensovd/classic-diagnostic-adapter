@@ -17,10 +17,11 @@ use std::{
 };
 
 use cda_config::{
-    datatypes::{DatabaseNamingConvention, FunctionalDescriptionConfig, LoggingConfig},
+    datatypes::{
+        DatabaseNamingConvention, FunctionalDescriptionConfig, HealthConfig, LoggingConfig,
+    },
     validate::ConfigSanity,
 };
-use cda_health::config::HealthConfig;
 use cda_interfaces::{
     HashMap, HashMapExtensions,
     datatypes::{

@@ -79,7 +79,7 @@ pub struct Configuration {
     pub components: ComponentsConfig,
     /// Health check endpoint settings.
     #[cfg(feature = "health")]
-    pub health: cda_health::config::HealthConfig,
+    pub health: cda_config::datatypes::HealthConfig,
     /// DTC (Diagnostic Trouble Code) fault memory settings.
     pub faults: FaultConfig,
     /// Per-ECU configuration blocks keyed by ECU short name (case-insensitive
@@ -132,7 +132,7 @@ impl Default for Configuration {
             flash_files_path: ".".to_owned(),
             server: ServerConfig::default(),
             #[cfg(feature = "health")]
-            health: cda_health::config::HealthConfig::default(),
+            health: cda_config::datatypes::HealthConfig::default(),
             doip: DoipConfig {
                 tester_address: "10.2.1.240".to_owned(),
                 ..Default::default()

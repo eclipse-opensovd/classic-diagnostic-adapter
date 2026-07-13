@@ -20,8 +20,6 @@ use futures::future;
 use serde::{Deserialize, Serialize};
 use tokio::sync::RwLock;
 
-pub mod config;
-
 #[derive(thiserror::Error, Debug, PartialEq)]
 pub enum HealthError {
     #[error("Provider {0} already exists")]

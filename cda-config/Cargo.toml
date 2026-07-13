@@ -38,5 +38,6 @@ workspace = true
 path = "src/lib.rs"
 
 [features]
-tokio-tracing = []
 dlt-tracing = []
+health = []
+tokio-tracing = []

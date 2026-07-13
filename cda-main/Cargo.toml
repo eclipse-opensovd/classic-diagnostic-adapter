@@ -91,6 +91,6 @@ mbedtls = ["cda-comm-doip/mbedtls"]
 dlt-tracing = ["cda-tracing/dlt-tracing"]
 integration-tests = []
 
-health = []
+health = ["cda-config/health"]
 config-optional = []
 systemd-notify = ["dep:cda-extra", "cda-extra/systemd-notify"]

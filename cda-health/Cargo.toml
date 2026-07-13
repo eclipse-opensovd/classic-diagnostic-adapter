@@ -26,8 +26,8 @@ path = "src/lib.rs"
 
 [dependencies]
 # internal dependencies
-cda-sovd = { workspace = true }
 cda-interfaces = { workspace = true }
+cda-sovd = { workspace = true }
 
 # external
 async-trait = { workspace = true }
