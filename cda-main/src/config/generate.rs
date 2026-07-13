@@ -15,7 +15,10 @@ use std::{collections::BTreeMap, fmt::Write};
 
 use cda_interfaces::{FunctionalDescriptionConfig, datatypes::FaultConfig};
 
-use crate::config::configfile::{Configuration, EcuComParams, EcuConfig};
+use crate::config::{
+    com_params::EcuComParams,
+    configfile::{Configuration, EcuConfig},
+};
 
 /// Create a Configuration instance with example values for fields that default to `None`.
 /// This ensures they appear in the generated reference config output.
@@ -773,9 +776,12 @@ mod tests {
             .as_ref()
             .expect("FLXC1000 should have com_params");
 
-        let resolved =
-            crate::resolve_com_params("FLXC1000", &config.com_params, Some(ecu_overrides))
-                .expect("resolve_com_params should succeed for FLXC1000");
+        let resolved = crate::config::com_params::resolve_com_params(
+            "FLXC1000",
+            &config.com_params,
+            Some(ecu_overrides),
+        )
+        .expect("resolve_com_params should succeed for FLXC1000");
 
         assert_eq!(
             resolved.uds.timeout_default.value,

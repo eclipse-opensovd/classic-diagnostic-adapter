@@ -33,7 +33,6 @@ use tokio::sync::RwLock;
 use crate::{
     AppError, DatabaseMap, FileManagerMap,
     config::configfile::{Configuration, EcuConfig},
-    resolve_com_params,
 };
 
 pub(crate) const DB_HEALTH_COMPONENT_KEY: &str = "database";
@@ -517,7 +516,7 @@ fn load_ecu_from_file<S: SecurityPlugin>(
 ) -> Option<EcuLoadResult<S>> {
     let mut proto_data = proto_data;
     let diag_database = build_diagnostic_database(&mut proto_data, ctx)?;
-    let effective_com_params = resolve_com_params(
+    let effective_com_params = crate::config::com_params::resolve_com_params(
         &ctx.ecu_name,
         ctx.com_params,
         per_ecu_cfg.and_then(|c| c.com_params.as_ref()),
@@ -659,25 +658,6 @@ fn insert_or_update_ecu<S: SecurityPlugin>(
 
 #[cfg(test)]
 mod tests {
-    use crate::resolve_com_params;
-
-    #[test]
-    fn resolve_com_params_returns_none_on_figment_extraction_failure() {
-        use cda_interfaces::datatypes::ComParams;
-        let global = ComParams::default();
-        let mut table = toml::Table::new();
-        table.insert(
-            "uds".to_owned(),
-            toml::Value::String("not_a_struct".to_owned()),
-        );
-        let ecu_params = crate::config::configfile::EcuComParams(table);
-        let result = resolve_com_params("BAD_ECU", &global, Some(&ecu_params));
-        assert!(
-            result.is_none(),
-            "resolve_com_params must return None when figment extraction fails"
-        );
-    }
-
     use cda_interfaces::storage_api::{Collection as _, CollectionName, DirectFileAccess, Storage};
     use cda_storage::LocalStorage;
 

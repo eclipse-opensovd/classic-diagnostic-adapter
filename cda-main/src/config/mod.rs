@@ -18,6 +18,7 @@ use figment::{
 
 use crate::AppError;
 
+pub mod com_params;
 pub mod configfile;
 pub mod generate;
 
