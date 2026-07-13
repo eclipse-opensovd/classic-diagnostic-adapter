@@ -695,7 +695,7 @@ mod tests {
     use cda_interfaces::storage_api::{Collection as _, CollectionName, DirectFileAccess, Storage};
     use cda_storage::LocalStorage;
 
-    use super::{resolve_mdd_paths, seed_storage_from_database_path};
+    use super::{resolve_com_params, resolve_mdd_paths, seed_storage_from_database_path};
 
     /// Helper: create a temp dir with `.mdd` files containing given data.
     fn create_database_dir(files: &[(&str, &[u8])]) -> tempfile::TempDir {

@@ -562,12 +562,9 @@ value = 65535
             .get("TMCC3000")
             .expect("TMCC3000 ecu config should be present");
         let ecu_com_params = tmcc.com_params.as_ref().expect("com_params should be Some");
-        let resolved = crate::mdd::resolve_com_params(
-            "TMCC3000",
-            &config.com_params,
-            Some(ecu_com_params),
-        )
-        .expect("resolve should succeed");
+        let resolved =
+            crate::mdd::resolve_com_params("TMCC3000", &config.com_params, Some(ecu_com_params))
+                .expect("resolve should succeed");
 
         assert_eq!(
             resolved.doip.logical_gateway_address.value, 12288u16,

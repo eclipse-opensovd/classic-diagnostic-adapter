@@ -773,12 +773,9 @@ mod tests {
             .as_ref()
             .expect("FLXC1000 should have com_params");
 
-        let resolved = crate::mdd::resolve_com_params(
-            "FLXC1000",
-            &config.com_params,
-            Some(ecu_overrides),
-        )
-        .expect("resolve_com_params should succeed for FLXC1000");
+        let resolved =
+            crate::mdd::resolve_com_params("FLXC1000", &config.com_params, Some(ecu_overrides))
+                .expect("resolve_com_params should succeed for FLXC1000");
 
         assert_eq!(
             resolved.uds.timeout_default.value,
