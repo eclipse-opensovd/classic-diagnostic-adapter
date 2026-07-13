@@ -235,25 +235,12 @@ impl<S: SecurityPlugin> EcuManager<S> {
             ));
         };
 
-        let dop_variant = dop.variant()?;
-
-        let value = if let Some(value) = value {
-            value
-        } else if let datatypes::DataOperationVariant::Normal(normal_dop) = dop_variant {
-            let diag_type = normal_dop.diag_coded_type()?;
-            &value_data
-                .physical_default_value()
-                .ok_or(DiagServiceError::InvalidRequest(format!(
-                    "Required parameter '{}' missing",
-                    param.short_name().unwrap_or_default()
-                )))
-                .and_then(|value| str_to_json_value(value, diag_type.base_datatype()))?
-        } else {
-            return Err(DiagServiceError::InvalidRequest(format!(
-                "Required parameter '{}' missing",
-                param.short_name().unwrap_or_default()
-            )));
-        };
+        let value = resolve_required_param(
+            value,
+            &dop,
+            || value_data.physical_default_value(),
+            param.short_name().unwrap_or_default(),
+        )?;
 
         match dop.variant()? {
             datatypes::DataOperationVariant::Normal(normal_dop) => {
@@ -262,7 +249,7 @@ impl<S: SecurityPlugin> EcuManager<S> {
                     &diag_type,
                     normal_dop.compu_method().map(Into::into),
                     normal_dop.physical_type().map(Into::into),
-                    value,
+                    &value,
                 )?;
                 diag_type.encode(
                     uds_data,
@@ -323,7 +310,7 @@ impl<S: SecurityPlugin> EcuManager<S> {
             datatypes::DataOperationVariant::Structure(structure_dop) => self.map_struct_to_uds(
                 &structure_dop,
                 (param.byte_position() as usize).saturating_add(parent_byte_pos),
-                value,
+                &value,
                 payload,
             ),
             datatypes::DataOperationVariant::StaticField(_static_field) => {
@@ -332,7 +319,7 @@ impl<S: SecurityPlugin> EcuManager<S> {
                 ))
             }
             datatypes::DataOperationVariant::Mux(mux_dop) => {
-                self.map_mux_to_uds(&mux_dop, value, payload)
+                self.map_mux_to_uds(&mux_dop, &value, payload)
             }
             datatypes::DataOperationVariant::EnvDataDesc(_)
             | datatypes::DataOperationVariant::EnvData(_)
@@ -445,24 +432,12 @@ impl<S: SecurityPlugin> EcuManager<S> {
                     "PhysConst has no DOP".to_owned(),
                 ))?;
 
-        let dop_variant = dop.variant()?;
-
-        let value = if let Some(value) = param_data {
-            value
-        } else if let datatypes::DataOperationVariant::Normal(normal_dop) = dop_variant {
-            let diag_type = normal_dop.diag_coded_type()?;
-            &p.phys_constant_value()
-                .ok_or(DiagServiceError::InvalidRequest(format!(
-                    "Required parameter '{}' missing",
-                    param.short_name().unwrap_or_default()
-                )))
-                .and_then(|value| str_to_json_value(value, diag_type.base_datatype()))?
-        } else {
-            return Err(DiagServiceError::InvalidRequest(format!(
-                "Required parameter '{}' missing",
-                param.short_name().unwrap_or_default()
-            )));
-        };
+        let value = resolve_required_param(
+            param_data,
+            &dop,
+            || p.phys_constant_value(),
+            param.short_name().unwrap_or_default(),
+        )?;
 
         // Handle different DOP variants - PhysConst can have Normal or Structure DOPs
         match dop.variant()? {
@@ -472,7 +447,7 @@ impl<S: SecurityPlugin> EcuManager<S> {
                     &diag_type,
                     normal_dop.compu_method().map(Into::into),
                     normal_dop.physical_type().map(Into::into),
-                    value,
+                    &value,
                 )?;
                 diag_type.encode(
                     uds_data,
@@ -485,12 +460,12 @@ impl<S: SecurityPlugin> EcuManager<S> {
                 self.map_struct_to_uds(
                     &structure_dop,
                     param.byte_position() as usize,
-                    value,
+                    &value,
                     uds_payload_data,
                 )?;
             }
             datatypes::DataOperationVariant::Mux(mux_dop) => {
-                self.map_mux_to_uds(&mux_dop, value, uds_payload_data)?;
+                self.map_mux_to_uds(&mux_dop, &value, uds_payload_data)?;
             }
             _ => {
                 return Err(DiagServiceError::InvalidDatabase(format!(
@@ -706,6 +681,66 @@ impl<S: SecurityPlugin> EcuManager<S> {
     }
 }
 
+/// Convert a *physical* value string (e.g. a `PHYSICAL-DEFAULT-VALUE` or
+/// `PHYS-CONSTANT-VALUE`) into a [`serde_json::Value`] for compu-method encoding.
+///
+/// Unlike [`str_to_json_value`], which parses a value against the *coded*
+/// datatype, physical values may be text-table keys (e.g. `"ACTIVE"`).
+/// Numeric strings become `Value::Number`; all other strings are kept as
+/// `Value::String` so a downstream `TEXTTABLE` compu method can resolve them
+/// to the coded value.
+fn resolve_required_param<S: AsRef<str>>(
+    provided_value: Option<&serde_json::Value>,
+    dop: &datatypes::DataOperation,
+    default_value: impl FnOnce() -> Option<S>,
+    param_name: &str,
+) -> Result<serde_json::Value, DiagServiceError> {
+    if let Some(value) = provided_value {
+        return Ok(value.clone());
+    }
+    match dop.variant()? {
+        datatypes::DataOperationVariant::Normal(_) => {
+            let str_val = default_value().ok_or_else(|| {
+                DiagServiceError::InvalidRequest(format!(
+                    "Required parameter '{param_name}' missing",
+                ))
+            })?;
+            Ok(phys_value_str_to_json(str_val.as_ref()))
+        }
+        _ => Err(DiagServiceError::InvalidRequest(format!(
+            "Required parameter '{param_name}' missing",
+        ))),
+    }
+}
+
+fn phys_value_str_to_json(value: &str) -> serde_json::Value {
+    if let Ok(number) = try_parse_str_as_json_number(value) {
+        number
+    } else {
+        serde_json::Value::from(value)
+    }
+}
+
+fn try_parse_str_as_json_number(value: &str) -> Result<serde_json::Value, DiagServiceError> {
+    if let Ok(number) = value.parse::<i64>() {
+        Ok(serde_json::Value::Number(number.into()))
+    } else if let Ok(number) = value.parse::<u64>() {
+        Ok(serde_json::Value::Number(number.into()))
+    } else if let Ok(number) = value.parse::<f64>() {
+        let float = serde_json::Number::from_f64(number).ok_or_else(|| {
+            DiagServiceError::ParameterConversionError(format!(
+                "Failed to parse string '{value}' as a number"
+            ))
+        })?;
+
+        Ok(serde_json::Value::Number(float))
+    } else {
+        Err(DiagServiceError::ParameterConversionError(format!(
+            "Failed to parse string '{value}' as a number"
+        )))
+    }
+}
+
 fn process_coded_constants(
     mapped_params: &[datatypes::Parameter],
 ) -> Result<Vec<u8>, DiagServiceError> {
@@ -730,7 +765,13 @@ fn process_coded_constants(
                         "Param '{}' is missing coded value",
                         param.short_name().unwrap_or_default()
                     )))?;
-            let const_json_value = str_to_json_value(coded_const_value, diag_type.base_datatype())?;
+
+            let const_json_value =
+                if let Ok(number) = try_parse_str_as_json_number(coded_const_value) {
+                    number
+                } else {
+                    str_to_json_value(coded_const_value, diag_type.base_datatype())?
+                };
 
             let uds_val = json_value_to_uds_data(&diag_type, None, None, &const_json_value)
                 .inspect_err(|e| {
@@ -755,7 +796,9 @@ fn process_coded_constants(
 
 #[cfg(test)]
 mod tests {
-    use cda_interfaces::{PayloadDecoder, PayloadEncoder, diagservices::UdsPayloadData};
+    use cda_interfaces::{
+        PayloadDecoder, PayloadEncoder, diagservices::UdsPayloadData, service_ids,
+    };
     use cda_plugin_security::DefaultSecurityPluginData;
     use serde_json::json;
 
@@ -766,8 +809,10 @@ mod tests {
         create_ecu_manager_with_param_length_info_service,
         create_ecu_manager_with_phys_const_normal_dop_service,
         create_ecu_manager_with_phys_const_structure_dop_service,
+        create_ecu_manager_with_phys_const_text_table_service,
         create_ecu_manager_with_struct_service,
         create_ecu_manager_with_trailing_param_after_param_length_info_service,
+        create_ecu_manager_with_value_default_text_table_service,
     };
 
     macro_rules! skip_sec_plugin {
@@ -1513,5 +1558,94 @@ mod tests {
                 "Expected 'Unexpected parameters in request' error, got: {e}"
             );
         }
+    }
+
+    /// Verifies that `map_phys_const_param_to_uds` correctly handles a
+    /// `PHYS-CONST` parameter whose `phys_constant_value` is a text-table key
+    /// (e.g. "ACTIVE") rather than a numeric literal.
+    ///
+    /// Regression test: previously, calling `str_to_json_value("ACTIVE", UInt32)`
+    /// tried to parse the text-table key as a numeric value and failed with
+    /// "cannot parse as u32". The fix wraps non-numeric values as JSON strings,
+    /// allowing the `TextTable` compu method to resolve them to the coded value.
+    #[tokio::test]
+    async fn test_phys_const_text_table_value_encodes_correctly() {
+        let (ecu_manager, dc, _sid) = create_ecu_manager_with_phys_const_text_table_service();
+
+        // No user-provided parameters - the PHYS-CONST "MODE" uses its
+        // embedded phys_constant_value "ACTIVE" which maps to coded value 1
+        // via the TextTable compu method.
+        let payload_data = UdsPayloadData::ParameterMap(serde_json::from_value(json!({})).unwrap());
+
+        let result = ecu_manager
+            .create_uds_payload(&dc, &skip_sec_plugin!(), Some(payload_data), None)
+            .await;
+
+        assert!(
+            result.is_ok(),
+            "Encoding failed (text-table phys const value not resolved): {:?}",
+            result.unwrap_err()
+        );
+
+        let service_payload = result.unwrap();
+        let uds_bytes = &service_payload.data;
+
+        // byte 0: SID coded const = 0x22 (ReadDataByIdentifier)
+        assert_eq!(
+            uds_bytes.first().copied().unwrap(),
+            service_ids::READ_DATA_BY_IDENTIFIER,
+            "SID byte should be 0x22 (ReadDataByIdentifier)"
+        );
+        // byte 1: MODE phys const "ACTIVE" -> text-table maps to coded value 1
+        assert_eq!(
+            uds_bytes.get(1).copied().unwrap(),
+            0x01,
+            "MODE byte should be 0x01 (text-table key 'ACTIVE' resolved to coded value 1)"
+        );
+    }
+
+    /// Verifies that `map_param_value_to_uds` correctly handles a VALUE
+    /// parameter whose `physical_default_value` is a text-table key
+    /// (e.g. "ACTIVE") rather than a numeric literal.
+    ///
+    /// Regression test: currently, calling `str_to_json_value("ACTIVE", UInt32)`
+    /// tries to parse the text-table key as a numeric value and fails with
+    /// "cannot parse as u32". The fix should wrap non-numeric values as JSON
+    /// strings, allowing the `TextTable` compu method to resolve them to the
+    /// coded value.
+    #[tokio::test]
+    async fn test_value_default_text_table_value_encodes_correctly() {
+        let (ecu_manager, dc, _sid) = create_ecu_manager_with_value_default_text_table_service();
+
+        // No user-provided parameters - the VALUE param "MODE" uses its
+        // embedded physical_default_value "ACTIVE" which should map to coded
+        // value 1 via the TextTable compu method.
+        let payload_data = UdsPayloadData::ParameterMap(serde_json::from_value(json!({})).unwrap());
+
+        let result = ecu_manager
+            .create_uds_payload(&dc, &skip_sec_plugin!(), Some(payload_data), None)
+            .await;
+
+        assert!(
+            result.is_ok(),
+            "Encoding failed (text-table VALUE default value not resolved): {:?}",
+            result.unwrap_err()
+        );
+
+        let service_payload = result.unwrap();
+        let uds_bytes = &service_payload.data;
+
+        // byte 0: SID coded const = 0x22 (ReadDataByIdentifier)
+        assert_eq!(
+            uds_bytes.first().copied().unwrap(),
+            service_ids::READ_DATA_BY_IDENTIFIER,
+            "SID byte should be 0x22 (ReadDataByIdentifier)"
+        );
+        // byte 1: MODE VALUE default "ACTIVE" -> text-table maps to coded value 1
+        assert_eq!(
+            uds_bytes.get(1).copied().unwrap(),
+            0x01,
+            "MODE byte should be 0x01 (text-table key 'ACTIVE' resolved to coded value 1)"
+        );
     }
 }
