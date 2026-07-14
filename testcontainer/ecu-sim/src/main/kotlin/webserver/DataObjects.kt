@@ -47,7 +47,6 @@ data class EcuStateDto(
     val communicationControlType: CommunicationControlType? = null,
     val temporalEraId: Int? = null,
     val dtcSettingType: DtcSettingType? = null,
-    val runningCalibration: Boolean? = null,
 )
 
 fun EcuState.updateWith(dto: EcuStateDto) {
@@ -74,7 +73,6 @@ fun EcuState.toDto() =
         communicationControlType = this.communicationControlType,
         temporalEraId = this.temporalEraId,
         dtcSettingType = this.dtcSettingType,
-        runningCalibration = this.runningCalibration,
     )
 
 @Serializable
