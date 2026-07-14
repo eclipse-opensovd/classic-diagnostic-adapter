@@ -176,6 +176,7 @@ impl<S: SecurityPlugin> EcuManager<S> {
         value: Option<&serde_json::Value>,
         payload: &mut Vec<u8>,
         parent_byte_pos: usize,
+        sibling_values: Option<&HashMap<String, serde_json::Value>>,
     ) -> Result<(), DiagServiceError> {
         //  ISO_22901-1:2008-11 7.3.5.4
         //  MATCHING-REQUEST-PARAM, DYNAMIC and NRC-CONST are only allowed in responses
@@ -188,9 +189,9 @@ impl<S: SecurityPlugin> EcuManager<S> {
                 self.map_param_value_to_uds(param, value, payload, parent_byte_pos)
             }
             datatypes::ParamType::Reserved => Self::map_reserved_param_to_uds(param, payload),
-            datatypes::ParamType::TableStruct => Err(DiagServiceError::ParameterConversionError(
-                "Mapping TableStructParam DoP to UDS payload not implemented".to_owned(),
-            )),
+            datatypes::ParamType::TableStruct => {
+                self.map_table_struct_to_uds(param, value, payload, parent_byte_pos, sibling_values)
+            }
             datatypes::ParamType::Dynamic => Err(DiagServiceError::ParameterConversionError(
                 "Mapping Dynamic DoP to UDS payload not implemented".to_owned(),
             )),
@@ -209,9 +210,9 @@ impl<S: SecurityPlugin> EcuManager<S> {
             datatypes::ParamType::TableEntry => Err(DiagServiceError::ParameterConversionError(
                 "Mapping TableEntry DoP to UDS payload not implemented".to_owned(),
             )),
-            datatypes::ParamType::TableKey => Err(DiagServiceError::ParameterConversionError(
-                "Mapping TableKey DoP to UDS payload not implemented".to_owned(),
-            )),
+            datatypes::ParamType::TableKey => {
+                Self::map_table_key_to_uds(param, value, payload, parent_byte_pos)
+            }
         }
     }
 
@@ -600,6 +601,216 @@ impl<S: SecurityPlugin> EcuManager<S> {
         }
     }
 
+    /// Encode a TABLE-KEY parameter: resolve the key string to its wire
+    /// representation using the table's key DOP and compu method.
+    fn map_table_key_to_uds(
+        param: &datatypes::Parameter,
+        value: Option<&serde_json::Value>,
+        payload: &mut Vec<u8>,
+        parent_byte_pos: usize,
+    ) -> Result<(), DiagServiceError> {
+        let value = value.ok_or_else(|| {
+            DiagServiceError::InvalidRequest(format!(
+                "Required TABLE-KEY parameter '{}' missing",
+                param.short_name().unwrap_or_default()
+            ))
+        })?;
+
+        let key_str = value.as_str().ok_or_else(|| {
+            DiagServiceError::InvalidRequest(format!(
+                "TABLE-KEY parameter '{}' must be a string, got: {value}",
+                param.short_name().unwrap_or_default()
+            ))
+        })?;
+
+        let table_key_data =
+            param
+                .specific_data_as_table_key()
+                .ok_or(DiagServiceError::InvalidDatabase(
+                    "TABLE-KEY param missing TableKey specific data".to_owned(),
+                ))?;
+
+        let table_dop = table_key_data.table_key_reference_as_table_dop().ok_or(
+            DiagServiceError::InvalidDatabase("TABLE-KEY has no TableDop reference".to_owned()),
+        )?;
+
+        let key_dop = table_dop.key_dop().map(datatypes::DataOperation).ok_or(
+            DiagServiceError::InvalidDatabase("TableDop missing key_dop".to_owned()),
+        )?;
+
+        let rows = table_dop.rows().ok_or(DiagServiceError::InvalidDatabase(
+            "TableDop missing rows".to_owned(),
+        ))?;
+
+        // Verify the row exists (validates the key value)
+        let row_exists = rows.iter().any(|row| {
+            row.short_name().is_some_and(|name| name == key_str)
+                || row.key().is_some_and(|k| k == key_str)
+        });
+        if !row_exists {
+            let available: Vec<&str> = rows.iter().filter_map(|r| r.short_name()).collect();
+            return Err(DiagServiceError::InvalidRequest(format!(
+                "TABLE-KEY value '{key_str}' does not match any row. Available: {available:?}"
+            )));
+        }
+
+        // Encode the key value using the key DOP's compu method
+        match key_dop.variant()? {
+            datatypes::DataOperationVariant::Normal(normal_dop) => {
+                let diag_type = normal_dop.diag_coded_type()?;
+                let uds_data = json_value_to_uds_data(
+                    &diag_type,
+                    normal_dop.compu_method().map(Into::into),
+                    normal_dop.physical_type().map(Into::into),
+                    value,
+                )?;
+                diag_type.encode(
+                    uds_data,
+                    payload,
+                    parent_byte_pos.saturating_add(param.byte_position() as usize),
+                    param.bit_position() as usize,
+                )?;
+                Ok(())
+            }
+            _ => Err(DiagServiceError::InvalidDatabase(
+                "TABLE-KEY key_dop must be a NormalDOP".to_owned(),
+            )),
+        }
+    }
+
+    /// Encode a TABLE-STRUCT parameter: look up which row was selected by the
+    /// companion TABLE-KEY, then encode that row's structure (if any).
+    fn map_table_struct_to_uds(
+        &self,
+        param: &datatypes::Parameter,
+        value: Option<&serde_json::Value>,
+        payload: &mut Vec<u8>,
+        parent_byte_pos: usize,
+        sibling_values: Option<&HashMap<String, serde_json::Value>>,
+    ) -> Result<(), DiagServiceError> {
+        let table_struct_data =
+            param
+                .specific_data_as_table_struct()
+                .ok_or(DiagServiceError::InvalidDatabase(
+                    "TABLE-STRUCT param missing TableStruct specific data".to_owned(),
+                ))?;
+
+        // Follow back-reference to the TABLE-KEY param
+        let table_key_param =
+            table_struct_data
+                .table_key()
+                .ok_or(DiagServiceError::InvalidDatabase(
+                    "TABLE-STRUCT missing table_key back-reference".to_owned(),
+                ))?;
+        let table_key_param = datatypes::Parameter(table_key_param);
+
+        // Get the TABLE-KEY's short_name so we can look up the selected key
+        // value from the sibling parameters
+        let key_param_name =
+            table_key_param
+                .short_name()
+                .ok_or(DiagServiceError::InvalidDatabase(
+                    "TABLE-KEY param referenced by TABLE-STRUCT has no short_name".to_owned(),
+                ))?;
+
+        // Look up the selected key value from the sibling JSON values
+        let sibling_values = sibling_values.ok_or_else(|| {
+            DiagServiceError::InvalidRequest(
+                "TABLE-STRUCT requires sibling parameter context to resolve the TABLE-KEY value"
+                    .to_owned(),
+            )
+        })?;
+        let key_value = sibling_values.get(key_param_name).ok_or_else(|| {
+            DiagServiceError::InvalidRequest(format!(
+                "TABLE-STRUCT references TABLE-KEY '{key_param_name}' but it is not in the \
+                 request parameters"
+            ))
+        })?;
+        let key_str = key_value.as_str().ok_or_else(|| {
+            DiagServiceError::InvalidRequest(format!(
+                "TABLE-KEY '{key_param_name}' must be a string, got: {key_value}"
+            ))
+        })?;
+
+        // Resolve the TableDop and find the selected row
+        let table_key_data = table_key_param.specific_data_as_table_key().ok_or(
+            DiagServiceError::InvalidDatabase(
+                "TABLE-KEY param missing TableKey specific data".to_owned(),
+            ),
+        )?;
+        let table_dop = table_key_data.table_key_reference_as_table_dop().ok_or(
+            DiagServiceError::InvalidDatabase("TABLE-KEY has no TableDop reference".to_owned()),
+        )?;
+        let rows = table_dop.rows().ok_or(DiagServiceError::InvalidDatabase(
+            "TableDop missing rows".to_owned(),
+        ))?;
+        let selected_row = rows
+            .iter()
+            .find(|row| {
+                row.short_name().is_some_and(|name| name == key_str)
+                    || row.key().is_some_and(|k| k == key_str)
+            })
+            .ok_or_else(|| {
+                DiagServiceError::InvalidRequest(format!(
+                    "TABLE-KEY value '{key_str}' does not match any table row"
+                ))
+            })?;
+
+        // Get the row's structure DOP (may be None for rows with no struct data)
+        let structure_dop = selected_row.structure();
+
+        match structure_dop {
+            None => {
+                // No structure for this row - accept empty input or None
+                if let Some(v) = value
+                    && !v.as_object().is_some_and(serde_json::Map::is_empty)
+                {
+                    return Err(DiagServiceError::InvalidRequest(format!(
+                        "TABLE-STRUCT for row '{}' has no structure, but non-empty data was \
+                         provided: {v}",
+                        selected_row.short_name().unwrap_or_default()
+                    )));
+                }
+                Ok(())
+            }
+            Some(structure_dop_ref) => {
+                let structure_dop = datatypes::DataOperation(structure_dop_ref);
+                match structure_dop.variant()? {
+                    datatypes::DataOperationVariant::Structure(struct_dop) => {
+                        // The JSON value should be either:
+                        // - {<row_short_name>: {<params>}} (full form)
+                        // - {} (acceptable if structure has no required params)
+                        let row_name = selected_row.short_name().unwrap_or_default();
+                        let struct_value = value.and_then(|v| v.as_object()).and_then(|obj| {
+                            if obj.is_empty() {
+                                // Empty object - treat as empty struct data
+                                None
+                            } else {
+                                obj.get(row_name)
+                            }
+                        });
+
+                        let struct_json = match struct_value {
+                            Some(v) => v.clone(),
+                            None => serde_json::Value::Object(serde_json::Map::new()),
+                        };
+
+                        self.map_struct_to_uds(
+                            &struct_dop,
+                            parent_byte_pos.saturating_add(param.byte_position() as usize),
+                            &struct_json,
+                            payload,
+                        )
+                    }
+                    _ => Err(DiagServiceError::InvalidDatabase(format!(
+                        "TABLE-STRUCT row '{}' structure DOP is not a Structure variant",
+                        selected_row.short_name().unwrap_or_default()
+                    ))),
+                }
+            }
+        }
+    }
+
     fn map_struct_to_uds(
         &self,
         structure: &datatypes::StructureDop,
@@ -632,7 +843,13 @@ impl<S: SecurityPlugin> EcuManager<S> {
                 DiagServiceError::InvalidDatabase("Unable to find short name for param".to_owned())
             })?;
 
-            self.map_param_to_uds(&param, value.get(short_name), payload, struct_byte_pos)
+            self.map_param_to_uds(
+                &param,
+                value.get(short_name),
+                payload,
+                struct_byte_pos,
+                None,
+            )
         })
     }
 
@@ -675,7 +892,13 @@ impl<S: SecurityPlugin> EcuManager<S> {
             } else {
                 effective_byte_pos
             };
-            self.map_param_to_uds(param, json_values.get(short_name), uds, parent_byte_pos)?;
+            self.map_param_to_uds(
+                param,
+                json_values.get(short_name),
+                uds,
+                parent_byte_pos,
+                Some(json_values),
+            )?;
         }
         Ok(())
     }

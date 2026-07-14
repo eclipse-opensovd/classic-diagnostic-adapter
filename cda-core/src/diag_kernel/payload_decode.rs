@@ -415,10 +415,16 @@ impl<S: SecurityPlugin> EcuManager<S> {
                 tracing::error!("System ParamType not implemented.");
             }
             datatypes::ParamType::TableKey => {
-                tracing::error!("TableKey ParamType not implemented.");
+                Self::map_table_key_from_uds(param_name, uds_payload, data, param_ctx)?;
             }
             datatypes::ParamType::TableStruct => {
-                tracing::error!("TableStruct ParamType not implemented.");
+                self.map_table_struct_from_uds(
+                    mapped_service,
+                    param_name,
+                    uds_payload,
+                    data,
+                    param_ctx,
+                )?;
             }
         }
         Ok(())
@@ -608,6 +614,194 @@ impl<S: SecurityPlugin> EcuManager<S> {
         }
 
         Ok(())
+    }
+
+    /// Decode a TABLE-KEY parameter from a UDS response payload.
+    /// Reads the key byte(s), resolves through the key DOP's compu method
+    /// to the physical representation (row key string), and stores it in `data`.
+    fn map_table_key_from_uds(
+        param_name: &str,
+        uds_payload: &mut Payload,
+        data: &mut MappedDiagServiceResponsePayload,
+        param_ctx: ParamContext<'_>,
+    ) -> Result<(), DiagServiceError> {
+        let table_key_data = param_ctx.parameter.specific_data_as_table_key().ok_or(
+            DiagServiceError::InvalidDatabase(
+                "TABLE-KEY param missing TableKey specific data".to_owned(),
+            ),
+        )?;
+
+        let table_dop = table_key_data.table_key_reference_as_table_dop().ok_or(
+            DiagServiceError::InvalidDatabase("TABLE-KEY has no TableDop reference".to_owned()),
+        )?;
+
+        let key_dop = table_dop.key_dop().map(datatypes::DataOperation).ok_or(
+            DiagServiceError::InvalidDatabase("TableDop missing key_dop".to_owned()),
+        )?;
+
+        match key_dop.variant()? {
+            datatypes::DataOperationVariant::Normal(normal_dop) => {
+                let diag_type = normal_dop.diag_coded_type()?;
+                let compu_method: Option<datatypes::CompuMethod> =
+                    normal_dop.compu_method().map(Into::into);
+
+                data.insert(
+                    param_name.to_owned(),
+                    operations::extract_diag_data_container(
+                        param_ctx.parameter.short_name(),
+                        param_ctx.abs_byte_pos(),
+                        param_ctx.parameter.bit_position() as usize,
+                        uds_payload,
+                        &diag_type,
+                        compu_method,
+                    )?,
+                );
+                Ok(())
+            }
+            _ => Err(DiagServiceError::InvalidDatabase(
+                "TABLE-KEY key_dop must be a NormalDOP".to_owned(),
+            )),
+        }
+    }
+
+    /// Decode a TABLE-STRUCT parameter from a UDS response payload.
+    /// Looks up which row was selected by the companion TABLE-KEY (already
+    /// decoded and stored in `data`), then decodes that row's structure.
+    fn map_table_struct_from_uds(
+        &self,
+        mapped_service: &datatypes::DiagService,
+        param_name: &str,
+        uds_payload: &mut Payload,
+        data: &mut MappedDiagServiceResponsePayload,
+        param_ctx: ParamContext<'_>,
+    ) -> Result<(), DiagServiceError> {
+        let table_struct_data = param_ctx.parameter.specific_data_as_table_struct().ok_or(
+            DiagServiceError::InvalidDatabase(
+                "TABLE-STRUCT param missing TableStruct specific data".to_owned(),
+            ),
+        )?;
+
+        // Follow back-reference to the TABLE-KEY param
+        let table_key_param =
+            table_struct_data
+                .table_key()
+                .ok_or(DiagServiceError::InvalidDatabase(
+                    "TABLE-STRUCT missing table_key back-reference".to_owned(),
+                ))?;
+        let table_key_param = datatypes::Parameter(table_key_param);
+
+        let key_param_name =
+            table_key_param
+                .short_name()
+                .ok_or(DiagServiceError::InvalidDatabase(
+                    "TABLE-KEY param referenced by TABLE-STRUCT has no short_name".to_owned(),
+                ))?;
+
+        // Look up the TABLE-KEY's decoded value from data (it was already
+        // decoded since TABLE-KEY has a lower byte position)
+        let key_container = data.get(key_param_name).ok_or_else(|| {
+            DiagServiceError::InvalidRequest(format!(
+                "TABLE-STRUCT references TABLE-KEY '{key_param_name}' but it was not decoded"
+            ))
+        })?;
+
+        // Extract the physical key string from the decoded TABLE-KEY value
+        let key_str = match key_container {
+            DiagDataTypeContainer::RawContainer(raw) => {
+                let value = operations::uds_data_to_serializable(
+                    raw.data_type,
+                    raw.compu_method.as_ref(),
+                    false,
+                    &raw.data,
+                )?;
+                match value {
+                    DiagDataValue::String(s) => s,
+                    DiagDataValue::UInt32(n) => n.to_string(),
+                    DiagDataValue::Int32(n) => n.to_string(),
+                    other => {
+                        return Err(DiagServiceError::ParameterConversionError(format!(
+                            "TABLE-KEY '{key_param_name}' decoded to unexpected type: {other:?}"
+                        )));
+                    }
+                }
+            }
+            _ => {
+                return Err(DiagServiceError::ParameterConversionError(format!(
+                    "TABLE-KEY '{key_param_name}' expected RawContainer, got complex type"
+                )));
+            }
+        };
+
+        // Resolve the TableDop and find the selected row
+        let table_key_specific = table_key_param.specific_data_as_table_key().ok_or(
+            DiagServiceError::InvalidDatabase(
+                "TABLE-KEY param missing TableKey specific data".to_owned(),
+            ),
+        )?;
+        let table_dop = table_key_specific
+            .table_key_reference_as_table_dop()
+            .ok_or(DiagServiceError::InvalidDatabase(
+                "TABLE-KEY has no TableDop reference".to_owned(),
+            ))?;
+        let rows = table_dop.rows().ok_or(DiagServiceError::InvalidDatabase(
+            "TableDop missing rows".to_owned(),
+        ))?;
+
+        let selected_row = rows
+            .iter()
+            .find(|row| {
+                row.short_name().is_some_and(|name| name == key_str)
+                    || row.key().is_some_and(|k| k == key_str)
+            })
+            .ok_or_else(|| {
+                DiagServiceError::InvalidRequest(format!(
+                    "TABLE-KEY value '{key_str}' does not match any table row"
+                ))
+            })?;
+
+        let row_name = selected_row.short_name().unwrap_or_default().to_owned();
+
+        // Get the row's structure DOP
+        match selected_row.structure() {
+            None => {
+                // No structure for this row - store an empty struct
+                data.insert(
+                    param_name.to_owned(),
+                    DiagDataTypeContainer::Struct(HashMap::default()),
+                );
+                Ok(())
+            }
+            Some(structure_dop_ref) => {
+                let structure_dop = datatypes::DataOperation(structure_dop_ref);
+                match structure_dop.variant()? {
+                    datatypes::DataOperationVariant::Structure(struct_dop) => {
+                        let struct_start = param_ctx.abs_byte_pos();
+                        uds_payload.push_slice(struct_start, uds_payload.len())?;
+                        uds_payload.set_last_read_byte_pos(0);
+                        let struct_data = self.map_struct_from_uds(
+                            &struct_dop,
+                            mapped_service,
+                            uds_payload,
+                            data,
+                        )?;
+                        uds_payload.pop_slice()?;
+
+                        // Wrap in row name, matching the encode convention:
+                        // {<row_short_name>: {<struct_params>}}
+                        let mut wrapper = HashMap::default();
+                        wrapper.insert(row_name, DiagDataTypeContainer::Struct(struct_data));
+                        data.insert(
+                            param_name.to_owned(),
+                            DiagDataTypeContainer::Struct(wrapper),
+                        );
+                        Ok(())
+                    }
+                    _ => Err(DiagServiceError::InvalidDatabase(format!(
+                        "TABLE-STRUCT row '{row_name}' structure DOP is not a Structure variant"
+                    ))),
+                }
+            }
+        }
     }
 
     fn map_struct_from_uds(
