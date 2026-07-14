@@ -785,3 +785,54 @@ async fn test_functional_operation_lifecycle_no_request_results() {
 
     release_fg_lock(runtime, &auth, &lock_id).await;
 }
+
+/// Verify that GET `{ecu}/operations/{op}` returns 200 OK with the correct operation info even
+/// when the ECU has never been contacted (variant is in the initial `NotTested` state).
+#[tokio::test]
+async fn test_get_operation_info_before_variant_detection() {
+    let (runtime, _lock) = setup_integration_test(true).await.unwrap();
+    let auth = auth_header(&runtime.config, None).await.unwrap();
+    let ecu_endpoint = sovd::ECU_FLXC1000_ENDPOINT;
+
+    // Use ecusim recording to prove no UDS frame is sent for a pure info GET.
+    ecusim::start_recording(&runtime.ecu_sim, "flxc1000")
+        .await
+        .unwrap();
+
+    let response = send_cda_request(
+        &runtime.config,
+        &format!("{ecu_endpoint}/operations/selftest"),
+        StatusCode::OK,
+        Method::GET,
+        None,
+        Some(&auth),
+        None,
+    )
+    .await
+    .unwrap();
+
+    let frames = ecusim::stop_and_clear_recording(&runtime.ecu_sim, "flxc1000")
+        .await
+        .unwrap();
+    assert!(
+        frames.is_empty(),
+        "Expected no UDS frames for a pure info GET, but got: {frames:?}"
+    );
+
+    let list: Items<OperationCollectionItem> = response_to_t(&response).unwrap();
+    assert_eq!(list.items.len(), 1, "Expected exactly one item in response");
+    let op = list.items.first().expect("Expected one operation item");
+    assert!(
+        op.id.eq_ignore_ascii_case("selftest"),
+        "Expected id 'selftest', got: {}",
+        op.id
+    );
+    assert!(
+        !op.asynchronous_execution,
+        "selftest should not be asynchronous (no Stop or RequestResults)"
+    );
+    assert!(
+        !op.proximity_proof_required,
+        "selftest should not require proximity proof"
+    );
+}
