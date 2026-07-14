@@ -298,13 +298,22 @@ impl<S: SecurityPlugin> EcuManager<S> {
                     "EndOfPdu basic structure lookup failed".to_owned(),
                 ))?;
 
+                // The EndOfPdu field's own BYTE-POSITION only anchors the *first*
+                // repeated structure. Each subsequent item must be appended directly
+                // after the previously encoded one, because `DiagCodedType::encode`
+                // writes at an absolute byte offset (resizing/overwriting `payload`),
+                // rather than appending. Reusing a single fixed offset for every item
+                // would make each item overwrite the previous one instead of
+                // following it, silently discarding all but the last array element.
+                let field_start_pos =
+                    (param.byte_position() as usize).saturating_add(parent_byte_pos);
                 for v in value {
-                    self.map_struct_to_uds(
-                        &structure,
-                        (param.byte_position() as usize).saturating_add(parent_byte_pos),
-                        v,
-                        payload,
-                    )?;
+                    // Use the current end of the payload as the position for this
+                    // item, but never go backwards past the field's own start
+                    // position (relevant for the very first item, in case earlier
+                    // padding/reserved bits have not extended `payload` that far).
+                    let item_byte_pos = payload.len().max(field_start_pos);
+                    self.map_struct_to_uds(&structure, item_byte_pos, v, payload)?;
                 }
                 Ok(())
             }
@@ -1027,6 +1036,7 @@ mod tests {
 
     use super::*;
     use crate::diag_kernel::test_utils::ecu_manager_builder::{
+        create_ecu_manager_with_end_pdu_request_service,
         create_ecu_manager_with_length_key_request_service, create_ecu_manager_with_mux_service,
         create_ecu_manager_with_mux_service_and_default_case,
         create_ecu_manager_with_param_length_info_service,
@@ -1869,6 +1879,54 @@ mod tests {
             uds_bytes.get(1).copied().unwrap(),
             0x01,
             "MODE byte should be 0x01 (text-table key 'ACTIVE' resolved to coded value 1)"
+        );
+    }
+
+    /// Regression test for a fixed-count `EndOfPdu` array parameter (`min_items ==
+    /// max_items == 2`), where each item is a struct containing a single
+    /// leading-length-prefixed byte field (`RepeatedItem { leading_length_field:
+    /// <leading-length ByteField> }`).
+    ///
+    /// Each `leading_length_field` value is encoded as `[len_byte, ...data]`. With
+    /// two distinct 1-byte values (`0xAA` and `0xBB`), the correctly encoded
+    /// request must contain BOTH items back-to-back:
+    /// `SID, 0x01, 0xAA,  0x01, 0xBB` (6 bytes total).
+    ///
+    /// Before the fix, `map_param_value_to_uds`'s `EndOfPdu` handling computed the
+    /// struct byte position once, outside the loop over array items, and reused it
+    /// for every item. Since `DiagCodedType::encode` writes at an *absolute* byte
+    /// offset (overwriting, not appending), every item after the first one clobbers
+    /// the bytes of the previous item at the same offset. The resulting payload only
+    /// contains the last-encoded item, i.e. `SID, 0x01, 0xBB` (3 bytes) - the first
+    /// `RepeatedItem` entry (and its leading-length field) is silently lost.
+    #[tokio::test]
+    async fn test_end_of_pdu_request_encodes_all_items_not_just_last() {
+        let (ecu_manager, service, sid) =
+            create_ecu_manager_with_end_pdu_request_service(2, Some(2));
+
+        let payload_data = UdsPayloadData::ParameterMap(
+            serde_json::from_value(json!({
+                "repeated_items": [
+                    { "leading_length_field": "AA" },
+                    { "leading_length_field": "BB" }
+                ]
+            }))
+            .unwrap(),
+        );
+
+        let result = ecu_manager
+            .create_uds_payload(&service, &skip_sec_plugin!(), Some(payload_data), None)
+            .await;
+
+        let service_payload = result
+            .unwrap_or_else(|e| panic!("Encoding the two-item EndOfPdu request failed: {e:?}"));
+        let uds_bytes = &service_payload.data;
+
+        assert_eq!(
+            uds_bytes.as_slice(),
+            &[sid, 0x01, 0xAA, 0x01, 0xBB][..],
+            "Expected both RepeatedItem entries to be appended sequentially, but the second item \
+             overwrote the first at the same absolute byte offset"
         );
     }
 }

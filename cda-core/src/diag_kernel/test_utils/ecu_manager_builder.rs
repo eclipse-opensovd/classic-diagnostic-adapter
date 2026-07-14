@@ -760,6 +760,88 @@ pub(crate) fn create_ecu_manager_with_end_pdu_service(
     )
 }
 
+/// Creates an ECU manager with a *request* containing a repeated `EndOfPdu` structure
+/// with a fixed (`min == max`) item count, where each item is a struct with a single
+/// leading-length-prefixed byte field.
+///
+/// This mirrors the shape of a real-world bidirectional-authentication request where an
+/// `EndOfPdu` array parameter with a fixed item count (e.g. `min == max == 2`) is used to
+/// submit repeated leading-length-prefixed byte fields on the *request* side (as opposed to
+/// [`create_ecu_manager_with_end_pdu_service`], which only exercises the *response*/decode
+/// path). It is intended to reproduce bugs where repeated `EndOfPdu` items are encoded at
+/// the same absolute byte offset instead of being appended one after another.
+///
+/// # Database contents:
+/// - **Service**: `TestEndOfPduRequestService` (SID: `RoutineControl` - 0x31)
+/// - **Request**:
+///   - `sid` (`CodedConst`, byte 0)
+///   - `repeated_items` (`EndOfPdu` DOP, byte 1), repeating `RepeatedItem`:
+///     - `leading_length_field`: `ByteField` with an 8-bit leading length prefix
+/// - **Response**: Simple positive response with only SID
+///
+/// # Parameters:
+/// - `min_items` / `max_items`: constraints on the number of `RepeatedItem` entries
+pub(crate) fn create_ecu_manager_with_end_pdu_request_service(
+    min_items: u32,
+    max_items: Option<u32>,
+) -> (
+    crate::diag_kernel::ecumanager::EcuManager<DefaultSecurityPluginData>,
+    cda_interfaces::DiagComm,
+    u8,
+) {
+    let mut db_builder = EcuDataBuilder::new();
+    let protocol_name = Protocol::default().to_string();
+    let protocol = db_builder.create_protocol(&protocol_name, None, None, None);
+    let compu_identical =
+        db_builder.create_compu_method(datatypes::CompuCategory::Identical, None, None);
+
+    // RepeatedItem { leading_length_field: <leading-length ByteField> }
+    let leading_length_diag_type = db_builder.create_diag_coded_type(
+        None,
+        DataType::ByteField,
+        true,
+        DiagCodedTypeVariant::LeadingLengthInfo(8),
+    );
+    let leading_length_field_dop = db_builder.create_regular_normal_dop(
+        "leading_length_field_dop",
+        leading_length_diag_type,
+        compu_identical,
+    );
+    let leading_length_field_param =
+        db_builder.create_value_param("leading_length_field", leading_length_field_dop, 0, 0);
+    let repeated_item_structure =
+        db_builder.create_structure(Some(vec![leading_length_field_param]), None, true);
+
+    let end_pdu_dop =
+        db_builder.create_end_of_pdu_field_dop(min_items, max_items, Some(repeated_item_structure));
+
+    let sid = service_ids::ROUTINE_CONTROL;
+    let dc_name = "TestEndOfPduRequestService";
+    let diag_comm = new_diag_comm!(db_builder, dc_name, protocol);
+
+    let request = {
+        let sid_param = create_sid_param!(db_builder, sid);
+        let repeated_items_param =
+            db_builder.create_value_param("repeated_items", end_pdu_dop, 1, 0);
+        db_builder.create_request(Some(vec![sid_param, repeated_items_param]), None)
+    };
+
+    let pos_response = {
+        let sid_param = create_sid_param!(db_builder, "test_service_pos_sid", sid);
+        db_builder.create_response(ResponseType::Positive, Some(vec![sid_param]), None)
+    };
+
+    let diag_service =
+        new_diag_service!(db_builder, diag_comm, request, vec![pos_response], vec![]);
+
+    let db = finish_db!(db_builder, protocol, vec![diag_service]);
+    (
+        new_ecu_manager(db),
+        cda_interfaces::DiagComm::new(dc_name, DiagCommType::Operations),
+        sid,
+    )
+}
+
 /// Creates an ECU manager with a DTC (Diagnostic Trouble Code) service.
 ///
 /// # Database contents:
