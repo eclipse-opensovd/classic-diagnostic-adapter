@@ -314,8 +314,10 @@ impl<S: SecurityPlugin> EcuManager<S> {
     }
 
     /// Retrieves diagnostic services from the current variants `DiagLayer` and its parent
-    /// references, filtered by the provided predicate. Returns an empty vector if no variant
-    /// is set.
+    /// references, filtered by the provided predicate. Falls back to the base variant when no
+    /// specific variant has been detected yet (e.g. before first UDS contact with the ECU or
+    /// while the ECU is offline), so that info-listing endpoints return meaningful data
+    /// regardless of the current connectivity or detection state.
     ///
     /// # Example
     ///
@@ -337,6 +339,9 @@ impl<S: SecurityPlugin> EcuManager<S> {
         F: Fn(&datatypes::DiagService) -> bool,
     {
         self.variant()
+            // This is necessary, so we are able to lookup services
+            // _before_ a variant has been found i.e. for variant detection.
+            .or_else(|| self.diag_database.base_variant().ok())
             .and_then(|v| v.diag_layer().map(|dl| (dl, v.parent_refs())))
             .map_or(<_>::default(), |(diag_layer, parent_refs)| {
                 Self::get_services_from_diag_layer_and_parent_refs(
@@ -408,8 +413,10 @@ impl<S: SecurityPlugin> EcuManager<S> {
     }
 
     /// Retrieves single ECU jobs from the current variants `DiagLayer` and its parent
-    /// references, filtered by the provided predicate. Returns an empty vector if no variant
-    /// is set.
+    /// references, filtered by the provided predicate. Falls back to the base variant when no
+    /// specific variant has been detected yet (e.g. before first UDS contact with the ECU or
+    /// while the ECU is offline), so that info-listing endpoints return meaningful data
+    /// regardless of the current connectivity or detection state.
     ///
     /// # Example
     ///
@@ -426,6 +433,9 @@ impl<S: SecurityPlugin> EcuManager<S> {
         F: Fn(&datatypes::SingleEcuJob) -> bool,
     {
         self.variant()
+            // This is necessary, so we are able to lookup services
+            // _before_ a variant has been found i.e. for variant detection.
+            .or_else(|| self.diag_database.base_variant().ok())
             .and_then(|v| v.diag_layer().map(|dl| (dl, v.parent_refs())))
             .map_or(<_>::default(), |(diag_layer, parent_refs)| {
                 Self::get_single_ecu_jobs_from_diag_layer_and_parent_refs(
@@ -583,7 +593,10 @@ impl<S: SecurityPlugin> EcuManager<S> {
     /// Collects all `DiagLayers` from the current variant and its parent references.
     /// The variants own `DiagLayer` is placed first to give it higher priority in
     /// subsequent operations, followed by layers resolved recursively from parent references.
-    /// Returns an empty vector if no variant is set.
+    /// Falls back to the base variant when no specific variant has been detected yet
+    /// (e.g. before first UDS contact with the ECU or while the ECU is offline), so that
+    /// info-listing endpoints return meaningful data regardless of the current connectivity
+    /// or detection state.
     ///
     /// # Example
     ///
@@ -598,7 +611,12 @@ impl<S: SecurityPlugin> EcuManager<S> {
     pub(in crate::diag_kernel) fn get_diag_layers_from_variant_and_parent_refs(
         &self,
     ) -> Vec<datatypes::DiagLayer<'_>> {
-        let Some(variant) = self.variant() else {
+        let Some(variant) = self
+            .variant()
+            // This is necessary, so we are able to lookup services
+            // _before_ a variant has been found i.e. for variant detection.
+            .or_else(|| self.diag_database.base_variant().ok())
+        else {
             return Vec::new();
         };
 
