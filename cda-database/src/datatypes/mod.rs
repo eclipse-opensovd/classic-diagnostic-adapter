@@ -33,6 +33,12 @@ use crate::{
     mdd_data::{self, read_ecudata},
 };
 
+/// Short-name of a protocol layer, the key used for all protocol matching.
+#[must_use]
+pub fn protocol_short_name<'db>(p: &dataformat::Protocol<'db>) -> Option<&'db str> {
+    p.diag_layer().and_then(|dl| dl.short_name())
+}
+
 #[cfg(feature = "database-builder")]
 pub mod database_builder;
 
