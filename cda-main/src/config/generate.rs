@@ -774,7 +774,7 @@ mod tests {
             .expect("FLXC1000 should have com_params");
 
         let resolved =
-            crate::resolve_com_params("FLXC1000", &config.com_params, Some(ecu_overrides))
+            crate::mdd::resolve_com_params("FLXC1000", &config.com_params, Some(ecu_overrides))
                 .expect("resolve_com_params should succeed for FLXC1000");
 
         assert_eq!(

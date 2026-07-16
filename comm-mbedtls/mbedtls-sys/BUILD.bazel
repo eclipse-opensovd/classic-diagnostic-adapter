@@ -1,0 +1,55 @@
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: 2025 The Contributors to Eclipse OpenSOVD (see CONTRIBUTORS)
+#
+# See the NOTICE file(s) distributed with this work for additional
+# information regarding copyright ownership.
+#
+# This program and the accompanying materials are made available under the
+# terms of the Apache License Version 2.0 which is available at
+# https://www.apache.org/licenses/LICENSE-2.0
+
+# mbedtls-sys: Raw FFI bindings to mbedtls 4.0.0.
+#
+# In Bazel, the native mbedtls libraries are built by //third_party/mbedtls:mbedtls
+# via rules_foreign_cc. The build.rs (cargo_build_script) only runs bindgen to generate
+# Rust FFI bindings -- cmake/cc steps are skipped via MBEDTLS_SKIP_BUILD=1.
+
+load("//:bazel/rust_crate.bzl", "workspace_cargo_build_script", "workspace_rust_library")
+
+package(default_visibility = ["//visibility:public"])
+
+# Export C source files for //third_party/mbedtls:ed25519_psa_driver
+exports_files([
+    "csrc/ed25519_extract.h",
+    "csrc/ed25519_psa_driver.c",
+    "csrc/ed25519_psa_driver.h",
+    "wrapper.h",
+])
+
+workspace_cargo_build_script(
+    name = "build_script",
+    srcs = ["build.rs"],
+    build_script_env = {
+        "MBEDTLS_DIR": "$(execpath @mbedtls//:CMakeLists.txt)",
+        "MBEDTLS_SKIP_BUILD": "1",
+        "MBEDTLS_SKIP_PATCH": "1",
+        # Explicit path to wrapper.h for bindgen (sandbox-safe)
+        "MBEDTLS_WRAPPER_H": "$(execpath wrapper.h)",
+    },
+    data = [
+        "wrapper.h",
+        "@mbedtls//:CMakeLists.txt",
+        "@mbedtls//:all_srcs",
+    ] + glob(["csrc/**"]),
+)
+
+workspace_rust_library(
+    name = "mbedtls-sys",
+    srcs = glob(["src/**/*.rs"]),
+    crate_name = "mbedtls_sys",
+    local_deps = [
+        ":build_script",
+        "//third_party/mbedtls",
+        "//third_party/mbedtls:ed25519_psa_driver",
+    ],
+)

@@ -54,6 +54,7 @@ repos:
     rev: 07140bdd84f20b66fd4aff58a83c5148deec388c
     hooks:
       - id: reuse-annotate
+        exclude: '(^|/)(BUILD\.bazel|MODULE\.bazel|LICENSE|NOTICE|CONTRIBUTORS)$'
       - id: no-unicode-check
         args:
           - --allowed-chars=µ,§

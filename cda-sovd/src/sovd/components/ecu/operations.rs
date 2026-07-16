@@ -755,7 +755,7 @@ pub(crate) mod service {
             http::{HeaderMap, StatusCode, header},
             response::{IntoResponse as _, Response},
         };
-        use axum_extra::extract::{Host, WithRejection};
+        use axum_extra::extract::WithRejection;
         use cda_interfaces::{
             DiagComm, DiagCommType, DynamicPlugin, SchemaProvider, UdsEcu,
             diagservices::{DiagServiceJsonResponse, DiagServiceResponse, DiagServiceResponseType},
@@ -763,6 +763,7 @@ pub(crate) mod service {
             subfunction_ids,
         };
         use cda_plugin_security::{Secured, SecurityPlugin};
+        use opensovd_axum_extra::ExtractHost;
         use sovd_interfaces::{
             common::operations::OperationIdItem,
             components::ecu::operations::{
@@ -856,7 +857,7 @@ pub(crate) mod service {
                 update_in_progress,
                 ..
             }): State<WebserverEcuState<T, U>>,
-            UseApi(Host(host), _): UseApi<Host, String>,
+            UseApi(ExtractHost(host), _): UseApi<ExtractHost, String>,
             OriginalUri(uri): OriginalUri,
             headers: HeaderMap,
             body: Bytes,

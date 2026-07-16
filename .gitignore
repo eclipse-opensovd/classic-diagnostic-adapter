@@ -37,6 +37,13 @@ mbedtls-4*
 # binary files (used in integration tests)
 *.bin
 
+# Bazel convenience symlinks and generated files
+/bazel-bin
+/bazel-out
+/bazel-testlogs
+/bazel-classic-diagnostic-adapter
+MODULE.bazel.lock
+
 # macOS metadata
 .DS_Store
 

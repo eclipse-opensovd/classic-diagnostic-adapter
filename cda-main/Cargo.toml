@@ -34,13 +34,13 @@ cda-core = { workspace = true }
 cda-comm-doip = { workspace = true }
 cda-comm-uds = { workspace = true }
 cda-database = { workspace = true }
+cda-health = { workspace = true }
 cda-interfaces = { workspace = true }
 cda-sovd = { workspace = true }
 cda-tracing = { workspace = true }
-cda-plugin-security = { workspace = true }
-cda-health = { workspace = true }
 cda-extra = { workspace = true, optional = true }
 cda-plugin-runtime-update = { workspace = true }
+cda-plugin-security = { workspace = true }
 cda-storage = { workspace = true }
 # args
 clap = { workspace = true, features = ["derive", "env"] }

@@ -1,0 +1,62 @@
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: 2025 The Contributors to Eclipse OpenSOVD (see CONTRIBUTORS)
+#
+# See the NOTICE file(s) distributed with this work for additional
+# information regarding copyright ownership.
+#
+# This program and the accompanying materials are made available under the
+# terms of the Apache License Version 2.0 which is available at
+# https://www.apache.org/licenses/LICENSE-2.0
+
+# Build mbedtls 4.0.0 from source via cmake (rules_foreign_cc).
+# The source is pre-fetched and patched by the @mbedtls http_archive in MODULE.bazel.
+
+load("@rules_cc//cc:cc_library.bzl", "cc_library")
+load("@rules_foreign_cc//foreign_cc:defs.bzl", "cmake")
+
+package(default_visibility = ["//visibility:public"])
+
+cmake(
+    name = "mbedtls",
+    build_data = [
+        "//comm-mbedtls/mbedtls-sys:csrc/ed25519_extract.h",
+        "//comm-mbedtls/mbedtls-sys:csrc/ed25519_psa_driver.h",
+    ],
+    cache_entries = {
+        # Force ar instead of libtool to avoid rules_foreign_cc wrapper issues on macOS
+        "CMAKE_AR": "/usr/bin/ar",
+        # Support both repository layouts:
+        # 1) CDA as the main workspace:      $EXT_BUILD_ROOT/comm-mbedtls/...
+        # 2) CDA consumed as external module: $EXT_BUILD_ROOT/external/classic-diagnostic-adapter+/comm-mbedtls/...
+        "CMAKE_C_FLAGS": "-DMBEDTLS_SSL_RECORD_SIZE_LIMIT -DMBEDTLS_SSL_NULL_CIPHERSUITES -DMBEDTLS_ED25519_PSA_DRIVER -I$$EXT_BUILD_ROOT$$/comm-mbedtls/mbedtls-sys/csrc -I$$EXT_BUILD_ROOT$$/external/classic-diagnostic-adapter+/comm-mbedtls/mbedtls-sys/csrc",
+        "ENABLE_PROGRAMS": "OFF",
+        "ENABLE_TESTING": "OFF",
+        "GEN_FILES": "OFF",
+        "MBEDTLS_FATAL_WARNINGS": "OFF",
+        "USE_SHARED_MBEDTLS_LIBRARY": "OFF",
+        "USE_STATIC_MBEDTLS_LIBRARY": "ON",
+    },
+    # Use Ninja to avoid macOS libtool wrapper issues with rules_foreign_cc
+    generate_args = ["-GNinja"],
+    lib_source = "@mbedtls//:all_srcs",
+    out_static_libs = [
+        "libmbedtls.a",
+        "libmbedx509.a",
+        "libtfpsacrypto.a",
+    ],
+)
+
+# Custom Ed25519 PSA accelerator driver (compiled from CDA source).
+# alwayslink ensures symbols are available to libtfpsacrypto regardless of
+# link order (tfpsacrypto references ed25519_psa_import_key etc.).
+cc_library(
+    name = "ed25519_psa_driver",
+    srcs = ["//comm-mbedtls/mbedtls-sys:csrc/ed25519_psa_driver.c"],
+    hdrs = [
+        "//comm-mbedtls/mbedtls-sys:csrc/ed25519_extract.h",
+        "//comm-mbedtls/mbedtls-sys:csrc/ed25519_psa_driver.h",
+    ],
+    alwayslink = True,
+    copts = ["-DMBEDTLS_ED25519_PSA_DRIVER"],
+    deps = [":mbedtls"],
+)

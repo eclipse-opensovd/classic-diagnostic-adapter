@@ -1,0 +1,76 @@
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: 2025 The Contributors to Eclipse OpenSOVD (see CONTRIBUTORS)
+#
+# See the NOTICE file(s) distributed with this work for additional
+# information regarding copyright ownership.
+#
+# This program and the accompanying materials are made available under the
+# terms of the Apache License Version 2.0 which is available at
+# https://www.apache.org/licenses/LICENSE-2.0
+
+# cda-main: Main binary entry point for the CDA application.
+# Builds the opensovd-cda binary and library.
+# TLS backend is selected via //:tls_backend config flag.
+
+load("//:bazel/rust_crate.bzl", "workspace_cargo_build_script", "workspace_rust_binary", "workspace_rust_library")
+
+package(default_visibility = ["//visibility:public"])
+
+workspace_cargo_build_script(
+    name = "build_script",
+    srcs = ["build.rs"],
+    local_deps = ["@crate_index//:chrono"],
+    build_script_env = {
+        # Provide deterministic build metadata.
+        # For production builds, override via --action_env or workspace_status_command.
+        "SOURCE_DATE_EPOCH": "0",
+        "SOURCE_GIT_SHA": "bazel",
+    },
+)
+
+workspace_rust_library(
+    name = "opensovd_cda_lib",
+    srcs = glob(
+        ["src/**/*.rs"],
+        exclude = ["src/main.rs"],
+    ),
+    crate_features = ["health"] + select({
+        "//:use_openssl": ["openssl"],
+        "//:use_mbedtls": ["mbedtls"],
+    }),
+    crate_name = "opensovd_cda_lib",
+    local_deps = [
+        ":build_script",
+        "//cda-comm-doip",
+        "//cda-comm-uds",
+        "//cda-core",
+        "//cda-database",
+        "//cda-health",
+        "//cda-interfaces",
+        "//cda-plugin-runtime-update",
+        "//cda-plugin-security",
+        "//cda-sovd",
+        "//cda-storage",
+        "//cda-tracing",
+    ],
+)
+
+workspace_rust_binary(
+    name = "opensovd-cda",
+    srcs = ["src/main.rs"],
+    crate_features = ["health"] + select({
+        "//:use_openssl": ["openssl"],
+        "//:use_mbedtls": ["mbedtls"],
+    }),
+    local_deps = [
+        ":build_script",
+        ":opensovd_cda_lib",
+        "//cda-core",
+        "//cda-health",
+        "//cda-interfaces",
+        "//cda-plugin-runtime-update",
+        "//cda-plugin-security",
+        "//cda-sovd",
+        "//cda-storage",
+    ],
+)

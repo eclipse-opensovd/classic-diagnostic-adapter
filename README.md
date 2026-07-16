@@ -237,6 +237,32 @@ $env:OPENSSL_LIB_DIR="C:\Program Files\OpenSSL-Win64\lib\VC\x64\MD"
 $env:OPENSSL_INCLUDE_DIR="C:\Program Files\OpenSSL-Win64\include"
 ```
 
+### building with Bazel
+
+As an alternative to Cargo, the project can be built with [Bazel](https://bazel.build/) (via [Bazelisk](https://github.com/bazelbuild/bazelisk)).
+
+```shell
+# Build with OpenSSL (default TLS backend)
+bazel build //:opensovd-cda
+
+# Build with mbedtls TLS backend
+bazel build --config=mbedtls //:opensovd-cda
+```
+
+The resulting binary is located at `bazel-bin/cda-main/opensovd-cda`.
+
+### Rust toolchain policy (Bazel)
+
+This repository is intentionally toolchain-neutral when consumed as a Bazel dependency.
+It does not force downstream projects to use a specific Rust distribution.
+
+- Local development in this repository uses upstream `rules_rust` toolchains.
+- Downstream integrators can register their own Rust toolchains (for example Ferrocene)
+  in their top-level `MODULE.bazel`.
+
+This keeps OpenSOVD independent from SCORE-specific toolchain modules while still allowing
+SCORE-based integrations to use Ferrocene where required.
+
 ## developing
 
 ### pre commit
