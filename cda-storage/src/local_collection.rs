@@ -62,17 +62,74 @@ impl LocalCollection {
         paths::sanitize_path_segment(key)?;
         Ok(self.dir.join(key))
     }
+
+    /// Ensures that a file matching `key` (already normalized to lowercase) exists on disk
+    /// under exactly that (lowercase) name.
+    ///
+    /// All keys are normalized to lowercase (see [`normalize_key`]), and [`list`](Collection::list)
+    /// returns keys in that same normalized form. However, a file can end up on disk with a
+    /// different case than its normalized key - for example when files are placed directly in
+    /// the collection directory outside of [`Collection::write`] (such as during initial
+    /// provisioning of OEM-supplied files, which often use mixed-case names). If left
+    /// unaddressed, such a file would be listed (via its normalized key) but every other
+    /// operation (`metadata`, `read`, `delete`, `file_path`) would fail with `KeyNotFound`,
+    /// since they resolve the path via the lowercase key directly.
+    ///
+    /// This self-heals that situation: if no file exists at the exact lowercase path but one
+    /// exists under a different case, it is renamed in place to the normalized name (a metadata-
+    /// only, same-filesystem operation) so that the on-disk state matches the key-normalization
+    /// invariant relied on everywhere else. No-op if the normalized path already exists or no
+    /// case-insensitive match is found.
+    ///
+    /// This is a best-effort, synchronous operation (no lock is taken): the rename is atomic
+    /// and idempotent, so a benign race with a concurrent caller doing the same self-heal (or
+    /// with a commit) simply results in a harmless `rename` failure that is ignored, since the
+    /// target either already exists in the desired state or will shortly.
+    fn ensure_normalized_on_disk(&self, key: &str) {
+        let target = self.dir.join(key);
+        if target.exists() {
+            return;
+        }
+
+        let Ok(entries) = std::fs::read_dir(&self.dir) else {
+            return;
+        };
+
+        for entry in entries.flatten() {
+            let path = entry.path();
+            let Some(name) = path.file_name().and_then(|n| n.to_str()) else {
+                continue;
+            };
+            // For valid files which would be listed, check if the name deviates, and normalize
+            if is_valid_key(&path) && name != key && name.eq_ignore_ascii_case(key) {
+                // Best-effort: ignore errors (e.g. lost the race to another renamer, or the
+                // target now exists).
+                let _ = std::fs::rename(&path, &target);
+                break;
+            }
+        }
+    }
 }
 
 /// Normalize a key to lowercase for case-insensitive storage.
 fn normalize_key(key: &str) -> String {
-    key.to_lowercase()
+    key.to_ascii_lowercase()
+}
+
+/// Checks if a key should be listed in a collection
+fn is_valid_key(path: &Path) -> bool {
+    let bak_ext = std::ffi::OsStr::new(crate::recovery::BACKUP_EXTENSION);
+    let tmp_ext = std::ffi::OsStr::new(crate::recovery::STAGING_EXTENSION);
+
+    // Only files are valid, when they are not backup or staging files.
+    path.is_file() && path.extension() != Some(bak_ext) && path.extension() != Some(tmp_ext)
 }
 
 impl Collection for LocalCollection {
     async fn read(&self, key: &str) -> Result<Arc<impl RandomAccessData + 'static>, StorageError> {
         let key = normalize_key(key);
         let path = self.key_path(&key)?;
+        self.ensure_normalized_on_disk(&key);
 
         let guard = io::acquire_read_lock(&self.data_lock).await;
 
@@ -87,6 +144,7 @@ impl Collection for LocalCollection {
     async fn metadata(&self, key: &str) -> Result<Metadata, StorageError> {
         let key = normalize_key(key);
         let path = self.key_path(&key)?;
+        self.ensure_normalized_on_disk(&key);
 
         let _guard = io::acquire_read_lock(&self.data_lock).await;
 
@@ -160,6 +218,7 @@ impl Collection for LocalCollection {
 
     async fn delete(&self, tx: &mut Transaction, key: &str) -> Result<(), StorageError> {
         let key = normalize_key(key);
+        self.ensure_normalized_on_disk(&key);
 
         // Verify the key exists in committed state.
         let path = self.key_path(&key)?;
@@ -197,6 +256,7 @@ impl DirectFileAccess for LocalCollection {
 
     fn file_path(&self, key: &str) -> Result<PathBuf, StorageError> {
         let key = normalize_key(key);
+        self.ensure_normalized_on_disk(&key);
         let path = self.key_path(&key)?;
         if !path.exists() {
             return Err(StorageError::KeyNotFound(key));
@@ -206,6 +266,14 @@ impl DirectFileAccess for LocalCollection {
 }
 
 /// List all file names (keys) in a directory, excluding backup and staging files.
+///
+/// Returned keys are normalized to lowercase to match the invariant used by
+/// [`Collection::read`], [`Collection::metadata`], and [`DirectFileAccess::file_path`], all of
+/// which normalize the key before resolving it to a path. Without this normalization, a file
+/// that ended up on disk with a mixed-case name (e.g. placed there outside of
+/// [`Collection::write`], such as during initial provisioning) would be listed under its
+/// original case but then fail to resolve via `metadata`/`read`/`file_path`, which look up the
+/// lowercased path - causing spurious "key not found" errors on case-sensitive filesystems.
 fn list_keys_in_dir(dir: &Path) -> Result<Vec<String>, StorageError> {
     let mut keys = Vec::new();
 
@@ -213,20 +281,17 @@ fn list_keys_in_dir(dir: &Path) -> Result<Vec<String>, StorageError> {
         return Ok(keys);
     }
 
-    let bak_ext = std::ffi::OsStr::new(crate::recovery::BACKUP_EXTENSION);
-    let tmp_ext = std::ffi::OsStr::new(crate::recovery::STAGING_EXTENSION);
-
     for entry in std::fs::read_dir(dir)? {
         let entry = entry?;
         let path = entry.path();
 
         // Skip directories, backup files, and staging files.
-        if path.is_dir() || path.extension() == Some(bak_ext) || path.extension() == Some(tmp_ext) {
+        if !is_valid_key(&path) {
             continue;
         }
 
         if let Some(name) = path.file_name().and_then(|n| n.to_str()) {
-            keys.push(name.to_string());
+            keys.push(normalize_key(name));
         }
     }
 
