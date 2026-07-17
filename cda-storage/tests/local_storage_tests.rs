@@ -830,3 +830,52 @@ async fn recovery_create_collection_with_write_removes_orphaned_dir() {
         "Orphaned empty collection directory was left behind after recovery"
     );
 }
+
+/// Regression test for a bug where `list()` returned a file's on-disk (possibly mixed-case)
+/// name verbatim, while `metadata()`/`read()`/`file_path()` normalize keys to lowercase before
+/// resolving them to a path. On a case-sensitive filesystem this mismatch caused every
+/// mixed-case file to appear in `list()` but then fail with `KeyNotFound` as soon as any
+/// per-key lookup (`metadata`, `read`, `file_path`) was attempted - exactly the "key vanished
+/// during iteration" symptom, even with no concurrent writer at all.
+///
+/// Simulates a file that ended up on disk with a mixed-case name outside of `Collection::write`
+/// (e.g. placed there during initial provisioning), then verifies that `list()`, `metadata()`,
+/// and `read()` are all consistent with each other.
+#[tokio::test]
+async fn list_normalizes_mixed_case_filenames_to_match_metadata_and_read() {
+    let (storage, dir) = create_test_storage();
+    let name = CollectionName::DiagnosticDatabase;
+
+    // Create the collection directory and place a mixed-case file directly on disk, bypassing
+    // `Collection::write` (which would have normalized the name to lowercase).
+    let collection_dir = dir.path().join("collections").join(name.as_str());
+    std::fs::create_dir_all(&collection_dir).unwrap();
+    std::fs::write(
+        collection_dir.join("FLXC1000_06.18.13.mdd"),
+        b"mixed case data",
+    )
+    .unwrap();
+
+    let collection = storage.get_or_create_collection(&name).await.unwrap();
+
+    // `list()` must return the normalized (lowercase) key, matching what `metadata`/`read`/
+    // `file_path` expect.
+    let keys = collection.list().await.unwrap();
+    assert_eq!(keys, vec!["flxc1000_06.18.13.mdd".to_string()]);
+
+    // Every key returned by `list()` must be resolvable via `metadata()` without a
+    // `KeyNotFound` error.
+    for key in &keys {
+        let meta = collection.metadata(key).await.unwrap();
+        assert_eq!(meta.data_size, "mixed case data".len() as u64);
+    }
+
+    // Every key returned by `list()` must also be resolvable via `read()`.
+    let Some(key) = keys.first() else {
+        panic!("expected one key");
+    };
+    let handle = collection.read(key).await.unwrap();
+    let mut buf = vec![0u8; "mixed case data".len()];
+    handle.read_at(0, &mut buf).unwrap();
+    assert_eq!(&buf, b"mixed case data");
+}
