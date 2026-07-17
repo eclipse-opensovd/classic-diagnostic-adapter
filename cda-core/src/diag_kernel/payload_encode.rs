@@ -275,7 +275,7 @@ impl<S: SecurityPlugin> EcuManager<S> {
                         )]
                         let value_len_u32 = value.len() as u32;
 
-                        value.len() > u32::MAX as usize || max > value_len_u32
+                        value.len() > u32::MAX as usize || value_len_u32 > max
                     })
                 {
                     return Err(DiagServiceError::InvalidRequest(
@@ -1927,6 +1927,67 @@ mod tests {
             &[sid, 0x01, 0xAA, 0x01, 0xBB][..],
             "Expected both RepeatedItem entries to be appended sequentially, but the second item \
              overwrote the first at the same absolute byte offset"
+        );
+    }
+
+    /// Regression test for the `EndOfPdu` item-count validation bug where the
+    /// comparison `max > value_len` was used instead of `value_len > max`.
+    ///
+    /// With `min_items = 1` and `max_items = Some(20)`, providing a single item is valid
+    /// (`1` is within `[1, 20]`), but the buggy comparison (`20 > 1` => `true`) incorrectly
+    /// rejected the request with "`EndOfPdu` expected different amount of items".
+    #[tokio::test]
+    async fn test_end_of_pdu_accepts_item_count_within_min_max_range() {
+        let (ecu_manager, service, sid) =
+            create_ecu_manager_with_end_pdu_request_service(1, Some(20));
+
+        let payload_data = UdsPayloadData::ParameterMap(
+            serde_json::from_value(json!({
+                "repeated_items": [
+                    { "leading_length_field": "AA" }
+                ]
+            }))
+            .unwrap(),
+        );
+
+        let result = ecu_manager
+            .create_uds_payload(&service, &skip_sec_plugin!(), Some(payload_data), None)
+            .await;
+
+        let service_payload = result.unwrap_or_else(|e| {
+            panic!(
+                "Encoding a single-item EndOfPdu request (within min/max range) should succeed, \
+                 but failed with: {e:?}"
+            )
+        });
+
+        assert_eq!(service_payload.data.as_slice(), &[sid, 0x01, 0xAA][..]);
+    }
+
+    /// Regression test ensuring that providing MORE items than `max_number_of_items`
+    /// is still correctly rejected after fixing the comparison direction.
+    #[tokio::test]
+    async fn test_end_of_pdu_rejects_item_count_above_max() {
+        let (ecu_manager, service, _sid) =
+            create_ecu_manager_with_end_pdu_request_service(1, Some(1));
+
+        let payload_data = UdsPayloadData::ParameterMap(
+            serde_json::from_value(json!({
+                "repeated_items": [
+                    { "leading_length_field": "AA" },
+                    { "leading_length_field": "BB" }
+                ]
+            }))
+            .unwrap(),
+        );
+
+        let result = ecu_manager
+            .create_uds_payload(&service, &skip_sec_plugin!(), Some(payload_data), None)
+            .await;
+
+        assert!(
+            result.is_err(),
+            "Expected an error when providing more items than max_number_of_items allows"
         );
     }
 }
