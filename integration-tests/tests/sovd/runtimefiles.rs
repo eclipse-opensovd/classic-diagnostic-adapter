@@ -20,6 +20,7 @@ use sovd_interfaces::{
     apps::sovd2uds::bulk_data::{BulkDataList, runtimefiles::ExecutionMode},
     common::operations::OperationIdItem,
     locking::post_put::Response as LockResponse,
+    sovd2uds::BulkDataDescriptor,
 };
 
 use crate::{
@@ -749,14 +750,26 @@ async fn runtimefiles_rollback_clears_nextupdate_with_new_pending() -> Result<()
     execute_mode(&runtime.config, &auth, ExecutionMode::Rollback).await?;
     cda_interfaces::util::tokio_ext::sleep_for(Duration::from_secs(3)).await;
 
-    // Step 4: Verify nextupdate is empty after rollback
+    // Step 4: Verify NEW_PENDING.mdd (the uploaded pending file) is gone, and nextupdate mirrors
+    // the restored current state.
     let nextupdate_items = get_file_list(&runtime.config, &auth, RUNTIMEFILES_NEXTUPDATE)
         .await?
         .items;
     assert!(
-        nextupdate_items.is_empty(),
-        "Expected nextupdate to be empty after Rollback, but found {} items",
-        nextupdate_items.len()
+        !nextupdate_items
+            .iter()
+            .any(|i| i.id.to_lowercase().contains("new_pending")),
+        "Expected NEW_PENDING.mdd to be gone from nextupdate after Rollback, got {:?}",
+        nextupdate_items.iter().map(|i| &i.id).collect::<Vec<_>>()
+    );
+
+    let current_items = get_file_list(&runtime.config, &auth, RUNTIMEFILES_CURRENT)
+        .await?
+        .items;
+    assert_eq!(
+        ids_of(&nextupdate_items),
+        ids_of(&current_items),
+        "Expected nextupdate to mirror current after Rollback (no pending changes)"
     );
 
     teardown_lock(&runtime.config, &auth, &lock_id).await;
@@ -1036,7 +1049,7 @@ async fn assert_nextupdate_contains_flxc1000(
 }
 
 /// Helper: verifies the post-Apply invariants:
-/// current non-empty, nextupdate empty, backup non-empty.
+/// current non-empty, nextupdate mirrors current (no pending changes), backup non-empty.
 async fn assert_state_after_apply(
     config: &Configuration,
     auth: &http::HeaderMap,
@@ -1052,9 +1065,10 @@ async fn assert_state_after_apply(
     let nextupdate = get_file_list(config, auth, RUNTIMEFILES_NEXTUPDATE)
         .await?
         .items;
-    assert!(
-        nextupdate.is_empty(),
-        "Expected empty nextupdate after apply"
+    assert_eq!(
+        ids_of(&nextupdate),
+        ids_of(&current),
+        "Expected nextupdate to mirror current after apply (no pending changes)"
     );
 
     let backup = get_file_list(config, auth, RUNTIMEFILES_BACKUP)
@@ -1069,7 +1083,7 @@ async fn assert_state_after_apply(
 }
 
 /// Helper: verifies the post-Rollback invariants:
-/// current count matches `expected_count`, nextupdate empty.
+/// current count matches `expected_count`, nextupdate mirrors current (no pending changes).
 async fn assert_state_after_rollback(
     config: &Configuration,
     auth: &http::HeaderMap,
@@ -1087,9 +1101,11 @@ async fn assert_state_after_rollback(
     let nextupdate = get_file_list(config, auth, RUNTIMEFILES_NEXTUPDATE)
         .await?
         .items;
-    assert!(
-        nextupdate.is_empty(),
-        "Expected empty nextupdate after rollback (spec: state of nextupdate must be reset)"
+    assert_eq!(
+        ids_of(&nextupdate),
+        ids_of(&current),
+        "Expected nextupdate to mirror current after rollback (spec: state of nextupdate must be \
+         reset)"
     );
 
     get_file_list(config, auth, RUNTIMEFILES_BACKUP).await?;
@@ -1098,7 +1114,7 @@ async fn assert_state_after_rollback(
 }
 
 /// Helper: verifies the post-Cleanup invariants:
-/// backup empty, nextupdate empty.
+/// backup empty, nextupdate mirrors current (no pending changes).
 async fn assert_state_after_cleanup(
     config: &Configuration,
     auth: &http::HeaderMap,
@@ -1108,15 +1124,27 @@ async fn assert_state_after_cleanup(
         .items;
     assert!(backup.is_empty(), "Expected empty backup after cleanup");
 
+    let current = get_file_list(config, auth, RUNTIMEFILES_CURRENT)
+        .await?
+        .items;
     let nextupdate = get_file_list(config, auth, RUNTIMEFILES_NEXTUPDATE)
         .await?
         .items;
-    assert!(
-        nextupdate.is_empty(),
-        "Expected empty nextupdate after cleanup (spec: reset all pending updates)"
+    assert_eq!(
+        ids_of(&nextupdate),
+        ids_of(&current),
+        "Expected nextupdate to mirror current after cleanup (spec: reset all pending updates)"
     );
 
     Ok(())
+}
+
+/// Helper: returns the sorted set of item ids from a bulk-data item list, for order-independent
+/// comparisons between `runtimefiles-current` and `runtimefiles-nextupdate`.
+fn ids_of(items: &[BulkDataDescriptor]) -> Vec<String> {
+    let mut ids: Vec<String> = items.iter().map(|i| i.id.to_lowercase()).collect();
+    ids.sort();
+    ids
 }
 
 /// Helper: finds the FLXC1000 entry id in nextupdate, failing the test if absent.
@@ -1186,7 +1214,7 @@ async fn assert_ecu_routes_after_apply(
 }
 
 /// Spec: DELETE on /runtimefiles-nextupdate removes all pending changes - nextupdate
-/// returns empty because there are no pending files.
+/// mirrors runtimefiles-current because there are no pending files anymore.
 #[tokio::test]
 async fn runtimefiles_delete_nextupdate_clears_pending() -> Result<(), TestingError> {
     let (runtime, _lock) = setup_integration_test(true).await?;
@@ -1218,9 +1246,13 @@ async fn runtimefiles_delete_nextupdate_clears_pending() -> Result<(), TestingEr
     let post_delete_items = get_file_list(&runtime.config, &auth, RUNTIMEFILES_NEXTUPDATE)
         .await?
         .items;
-    assert!(
-        post_delete_items.is_empty(),
-        "Expected empty nextupdate after DELETE (no pending files)"
+    let current_items = get_file_list(&runtime.config, &auth, RUNTIMEFILES_CURRENT)
+        .await?
+        .items;
+    assert_eq!(
+        ids_of(&post_delete_items),
+        ids_of(&current_items),
+        "Expected nextupdate to mirror current after DELETE (no pending files)"
     );
 
     teardown_lock(&runtime.config, &auth, &lock_id).await;
