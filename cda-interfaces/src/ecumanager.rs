@@ -748,6 +748,7 @@ pub trait Dtc: Send + Sync + 'static {
 }
 
 /// Provides variant detection and ECU variant identity.
+#[async_trait]
 pub trait VariantDetection: Send + Sync + 'static {
     /// Returns the current ECU status (connectivity + variant state).
     #[must_use]
@@ -756,10 +757,10 @@ pub trait VariantDetection: Send + Sync + 'static {
     /// Runs variant detection against the provided service responses.
     /// # Errors
     /// Returns `DiagServiceError` if no matching variant is found and fallback is disabled.
-    fn detect_variant<T: DiagServiceResponse + Sized>(
+    async fn detect_variant<T: DiagServiceResponse + Sized>(
         &mut self,
         service_responses: HashMap<String, T>,
-    ) -> impl Future<Output = Result<(), DiagServiceError>> + Send;
+    ) -> Result<(), DiagServiceError>;
 
     /// Returns the map of service requests used for variant detection.
     #[must_use]
@@ -767,11 +768,11 @@ pub trait VariantDetection: Send + Sync + 'static {
 
     /// Mark this ECU as duplicate. Sets the variant state to [`VariantState::Duplicate`] and
     /// unloads the database. Database will be reloaded before next variant detection.
-    fn mark_as_duplicate(&mut self) -> impl Future<Output = ()> + Send;
+    async fn mark_as_duplicate(&mut self);
 
     /// Mark this ECU as having no variant detected. Sets the variant state to
     /// [`VariantState::NotDetected`] and unloads the database.
-    fn mark_as_no_variant_detected(&mut self) -> impl Future<Output = ()> + Send;
+    async fn mark_as_no_variant_detected(&mut self);
 }
 
 /// Callback interface for connectivity changes for ECUs behind a `DoIP` gateway.

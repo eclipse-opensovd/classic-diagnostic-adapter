@@ -11,6 +11,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+use async_trait::async_trait;
 // Needed so that `self.load()` is callable inside the EcuVariantProvider impl
 use cda_interfaces::{
     Connectivity, DiagComm, DiagServiceError, EcuManager as EcuManagerTrait, EcuState, HashMap,
@@ -33,6 +34,7 @@ impl<S: SecurityPlugin> EcuManager<S> {
     }
 }
 
+#[async_trait]
 impl<S: SecurityPlugin> VariantDetection for EcuManager<S> {
     fn ecu_status(&self) -> EcuState {
         self.runtime_state.status()

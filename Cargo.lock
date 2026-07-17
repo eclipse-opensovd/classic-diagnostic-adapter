@@ -411,6 +411,7 @@ dependencies = [
 name = "cda-core"
 version = "0.1.0"
 dependencies = [
+ "async-trait",
  "cda-database",
  "cda-interfaces",
  "cda-plugin-security",
