@@ -23,13 +23,23 @@ pub enum Status {
     Failed,
 }
 
-/// Trait for health providers that are queried on-demand when a health check request comes in,
-/// and updated as components transition between states.
+/// Read-only health status provider, queried on-demand when a health check request arrives.
+///
+/// Implement this trait for components whose health is derived from internal state
+/// (e.g. [`CommState`]) rather than set externally. The health endpoint only requires
+/// `HealthStatus`, so read-only providers do not need to implement `HealthProvider`.
 #[async_trait]
-pub trait HealthProvider: Send + Sync + 'static {
+pub trait HealthStatus: Send + Sync + 'static {
     /// Returns the current health status of the component.
     async fn status(&self) -> Status;
+}
 
+/// Read-write health provider: a [`HealthStatus`] whose status can also be updated externally.
+///
+/// Use this for components (e.g. database initialization) that report health through
+/// an explicit `set_status()` call rather than deriving it from shared state.
+#[async_trait]
+pub trait HealthProvider: HealthStatus {
     /// Updates the health status of the component.
     async fn set_status(&self, status: Status);
 }
