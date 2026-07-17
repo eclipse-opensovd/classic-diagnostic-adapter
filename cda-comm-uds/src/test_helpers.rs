@@ -200,11 +200,11 @@ impl VariantDetection for TestEcuDb {
         unimplemented!()
     }
 
-    fn mark_as_duplicate(&mut self) {
+    async fn mark_as_duplicate(&mut self) {
         unimplemented!()
     }
 
-    fn mark_as_no_variant_detected(&mut self) {
+    async fn mark_as_no_variant_detected(&mut self) {
         unimplemented!()
     }
 }

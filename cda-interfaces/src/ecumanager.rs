@@ -767,11 +767,11 @@ pub trait VariantDetection: Send + Sync + 'static {
 
     /// Mark this ECU as duplicate. Sets the variant state to [`VariantState::Duplicate`] and
     /// unloads the database. Database will be reloaded before next variant detection.
-    fn mark_as_duplicate(&mut self);
+    fn mark_as_duplicate(&mut self) -> impl Future<Output = ()> + Send;
 
     /// Mark this ECU as having no variant detected. Sets the variant state to
     /// [`VariantState::NotDetected`] and unloads the database.
-    fn mark_as_no_variant_detected(&mut self);
+    fn mark_as_no_variant_detected(&mut self) -> impl Future<Output = ()> + Send;
 }
 
 /// Callback interface for connectivity changes for ECUs behind a `DoIP` gateway.
