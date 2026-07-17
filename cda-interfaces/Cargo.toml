@@ -36,6 +36,7 @@ serde = { workspace = true, features = ["derive"] }
 serde_json = { workspace = true }
 thiserror = { workspace = true }
 async-trait = { workspace = true }
+struct-patch = { workspace = true, features = ["nesting"] }
 #tokio
 tokio = { workspace = true, features = ["sync", "time"] }
 # runtime size info

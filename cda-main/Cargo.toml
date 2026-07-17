@@ -55,6 +55,7 @@ mimalloc = { git = "https://github.com/theswiftfox/mimalloc.git", rev = "afbaaa5
 schemars = { workspace = true }
 serde = { workspace = true, features = ["derive"] }
 serde_json = { workspace = true }
+struct-patch = { workspace = true }
 tokio = { workspace = true, features = [
   "rt-multi-thread",
   "macros",

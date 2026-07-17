@@ -21,13 +21,18 @@ use crate::{
 };
 
 /// Default communication parameters for diagnostic protocols.
-#[derive(Deserialize, Serialize, Clone, Debug, Default, schemars::JsonSchema)]
+#[derive(Deserialize, Serialize, Clone, Debug, Default, schemars::JsonSchema, struct_patch::Patch)]
+#[patch(attribute(derive(Deserialize, Serialize, Clone, Debug)))]
+#[patch(attribute(serde(deny_unknown_fields)))]
 pub struct ComParams {
     /// UDS (Unified Diagnostic Services) communication parameters.
+    #[patch(nesting)]
     pub uds: UdsComParams,
     /// DoIP-specific communication parameters.
+    #[patch(nesting)]
     pub doip: DoipComParams,
 }
+
 
 pub type ComParamName = String;
 
@@ -187,7 +192,9 @@ impl schemars::JsonSchema for ComParamBool {
 
 /// Defines the default values for the Communication
 /// parameters which are used in the UDS communication
-#[derive(Deserialize, Serialize, Clone, Debug, schemars::JsonSchema)]
+#[derive(Deserialize, Serialize, Clone, Debug, schemars::JsonSchema, PartialEq, struct_patch::Patch)]
+#[patch(attribute(derive(Deserialize, Serialize, Clone, Debug)))]
+#[patch(attribute(serde(deny_unknown_fields)))]
 pub struct UdsComParams {
     // todo use this in #53
     /// Define Tester Present generation
@@ -274,7 +281,9 @@ pub struct UdsComParams {
 }
 
 /// Defines the Communication parameters which are used in the `DoIP` communication
-#[derive(Deserialize, Serialize, Clone, Debug, schemars::JsonSchema)]
+#[derive(Deserialize, Serialize, Clone, Debug, schemars::JsonSchema, PartialEq, struct_patch::Patch)]
+#[patch(attribute(derive(Deserialize, Serialize, Clone, Debug)))]
+#[patch(attribute(serde(deny_unknown_fields)))]
 pub struct DoipComParams {
     /// Logical address of a `DoIP` entity.
     /// In case of directly reachable `DoIP` entity it's equal to the
@@ -341,7 +350,7 @@ pub enum RetryPolicy {
 }
 
 /// UDS message addressing mode.
-#[derive(Deserialize, Serialize, Clone, Debug, schemars::JsonSchema)]
+#[derive(Deserialize, Serialize, Clone, Debug, schemars::JsonSchema, PartialEq)]
 pub enum AddressingMode {
     /// Physical (point-to-point) addressing targets a single ECU.
     Physical,
