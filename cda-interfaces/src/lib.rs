@@ -37,7 +37,15 @@ pub mod file_manager;
 pub mod health;
 mod schema;
 pub use schema::*;
+pub mod communication_control;
 pub mod config;
+pub use communication_control::{
+    CommControlError, CommState, CommunicationControl, CommunicationInitMode,
+    CommunicationSettings, GatewayInstall, PostUpdateCommunicationMode,
+};
+pub mod deferred_init_api;
+pub use deferred_init_api::{BoxFuture, InitializationPlugin, OnDemandInitPlugin};
+pub mod guard;
 pub mod runtime_update_api;
 pub mod storage_api;
 

@@ -15,17 +15,9 @@ use std::sync::Arc;
 
 use aide::axum::{ApiRouter, routing};
 use axum::{Json, http::StatusCode};
-use cda_comm_doip::config::DoipConfig;
-use cda_comm_uds::state_coordinator::EcuStateCoordinator;
-use cda_interfaces::{
-    EcuConnectivityHandler, FunctionalDescriptionConfig, HashMap, HashMapExtensions, UdsQuery,
-    datatypes::{ComponentsConfig, FaultConfig},
-};
-use cda_sovd::{Locks, dynamic_router::DynamicRouter};
+use cda_sovd::dynamic_router::DynamicRouter;
 use futures::FutureExt;
-use opensovd_cda_lib::{
-    DatabaseMap, FileManagerMap, cda_version, config::configfile::ServerConfig,
-};
+use opensovd_cda_lib::{cda_version, config::configfile::ServerConfig};
 use reqwest::Method;
 use serde::{Deserialize, Serialize};
 
@@ -104,20 +96,6 @@ async fn test_custom_demo_endpoint() {
     }
     .shared();
 
-    // Empty db, file managers and gateway for testing
-    let databases: DatabaseMap<cda_plugin_security::DefaultSecurityPluginData> =
-        DatabaseMap::default();
-    let file_managers: FileManagerMap = FileManagerMap::default();
-    let databases = Arc::new(databases);
-    let gateway_port = find_available_tcp_port(&host).expect("Failed to find available port");
-    let (variant_tx, variant_rx) = tokio::sync::mpsc::channel(1);
-    let doip_config = DoipConfig {
-        tester_address: host.clone(),
-        gateway_port,
-        send_timeout_ms: 5000,
-        ..Default::default()
-    };
-
     let (dynamic_router, webserver_join_handle) =
         cda_sovd::launch_webserver(webserver_config, shutdown_signal.clone())
             .await
@@ -131,70 +109,15 @@ async fn test_custom_demo_endpoint() {
         health
             .register_provider(
                 MAIN_HEALTH_COMPONENT_KEY,
-                Arc::clone(&provider) as Arc<dyn cda_health::HealthProvider>,
+                Arc::clone(&provider) as Arc<dyn cda_health::HealthStatus>,
             )
             .await
             .expect("Failed to register main health provider");
         provider
     };
 
-    let doip_socket =
-        cda_comm_doip::create_udp_vir_socket(&doip_config.tester_address, doip_config.gateway_port)
-            .expect("Failed to create DoIP socket");
-
-    let state_coordinator = EcuStateCoordinator::new(HashMap::new());
-    let connectivity_handler: Arc<dyn EcuConnectivityHandler> = Arc::new(state_coordinator.clone());
-
-    let gateway = opensovd_cda_lib::create_diagnostic_gateway(
-        Arc::clone(&databases),
-        &doip_config,
-        variant_tx,
-        connectivity_handler,
-        shutdown_signal.clone(),
-        None,
-        Arc::new(tokio::sync::Mutex::new(doip_socket)),
-    )
-    .await
-    .expect("Failed to create gateway");
-
-    let uds_manager = opensovd_cda_lib::create_uds_manager(
-        gateway,
-        databases,
-        variant_rx,
-        state_coordinator,
-        &cda_interfaces::FunctionalDescriptionConfig {
-            description_database: "functional_groups".to_owned(),
-            enabled_functional_groups: None,
-            protocol_position: cda_interfaces::datatypes::DiagnosticServiceAffixPosition::Suffix,
-        },
-        FaultConfig::default(),
-        Arc::new(std::sync::atomic::AtomicBool::new(false)),
-    );
+    // Add custom routes directly - no vehicle routes needed for this test
     add_custom_routes(&dynamic_router).await;
-    let ecu_names = uds_manager.get_ecus().await;
-    cda_sovd::add_vehicle_routes::<_, _, cda_plugin_security::DefaultSecurityPlugin>(
-        &dynamic_router,
-        cda_sovd::VehicleConfig {
-            flash_files_path: String::new(),
-            functional_group_config: FunctionalDescriptionConfig {
-                description_database: "functional_groups".to_owned(),
-                enabled_functional_groups: None,
-                protocol_position:
-                    cda_interfaces::datatypes::DiagnosticServiceAffixPosition::Suffix,
-            },
-            components_config: ComponentsConfig {
-                additional_fields: HashMap::new(),
-            },
-        },
-        cda_sovd::VehicleResources {
-            ecu_uds: uds_manager,
-            file_manager: file_managers,
-            locks: Arc::new(Locks::new(ecu_names)),
-            update_in_progress: Arc::new(std::sync::atomic::AtomicBool::new(false)),
-        },
-    )
-    .await
-    .expect("Failed to add vehicle routes");
 
     main_health_provider
         .update_status(cda_health::Status::Up)

@@ -31,9 +31,11 @@ cda-sovd = { workspace = true }
 cda-storage = { workspace = true }
 async-trait = { workspace = true }
 bytes = { workspace = true }
+http = { workspace = true }
 serde_json = { workspace = true }
 serde = { workspace = true }
 sha2 = { workspace = true }
+sovd-interfaces = { workspace = true }
 thiserror = { workspace = true }
 tokio = { workspace = true, features = ["rt", "sync", "macros", "fs"] }
 toml = { workspace = true }

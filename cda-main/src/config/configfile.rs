@@ -13,6 +13,9 @@
 
 pub use cda_comm_doip::config::DoipConfig;
 pub use cda_database::DatabaseConfig;
+pub use cda_interfaces::{
+    CommunicationInitMode, CommunicationSettings, PostUpdateCommunicationMode,
+};
 use cda_interfaces::{
     FunctionalDescriptionConfig, HashMap,
     config::{ConfigSanity, ConfigSanityError},
@@ -168,6 +171,8 @@ pub struct Configuration {
     pub doip: DoipConfig,
     /// Diagnostic database loading and naming settings.
     pub database: DatabaseConfig,
+    /// Communication initialization and lifecycle settings.
+    pub communication: CommunicationSettings,
     /// Logging, file output, and tracing backend settings.
     pub logging: cda_tracing::LoggingConfig,
     /// Path to the directory containing flash files.
@@ -232,6 +237,7 @@ impl Default for Configuration {
     fn default() -> Self {
         Configuration {
             database: DatabaseConfig::default(),
+            communication: CommunicationSettings::default(),
             flash_files_path: ".".to_owned(),
             server: ServerConfig::default(),
             #[cfg(feature = "health")]

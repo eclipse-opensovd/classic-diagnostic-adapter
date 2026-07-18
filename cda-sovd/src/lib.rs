@@ -23,7 +23,7 @@ use axum::{
 };
 use cda_interfaces::{
     DoipGatewaySetupError, FunctionalDescriptionConfig, HashMap, SchemaProvider, UdsEcu,
-    datatypes::ComponentsConfig, dlt_ctx, file_manager::FileManager,
+    datatypes::ComponentsConfig, dlt_ctx, file_manager::FileManager, guard::ExemptRoutes,
 };
 use cda_plugin_security::SecurityPluginLoader;
 use dynamic_router::DynamicRouter;
@@ -39,8 +39,8 @@ pub use crate::sovd::{
     apps::sovd2uds::bulk_data::runtimefiles::RuntimeUpdateRouteState,
     error::VendorErrorCode,
     locks::Locks,
+    request_guard::{GuardLayer, GuardService, install_guard},
     static_data::add_static_data_endpoint,
-    update_guard::{ExemptRoute, UpdateGuardLayer, UpdateGuardState},
 };
 pub mod dynamic_router;
 mod openapi;
@@ -65,7 +65,7 @@ pub struct VehicleConfig {
 /// Runtime resources (handles, shared state) for vehicle SOVD routes.
 pub struct VehicleResources<T, M> {
     pub ecu_uds: T,
-    pub file_manager: HashMap<String, M>,
+    pub file_managers: HashMap<String, M>,
     pub locks: Arc<Locks>,
     pub update_in_progress: Arc<AtomicBool>,
 }
@@ -176,7 +176,7 @@ where
         config.components_config,
         &resources.ecu_uds,
         config.flash_files_path,
-        resources.file_manager,
+        resources.file_managers,
         resources.locks,
         resources.update_in_progress,
     )
@@ -187,12 +187,12 @@ where
 /// Mounts the runtime-update HTTP routes onto the dynamic router and returns a handle to them.
 ///
 /// Adds the runtime-file update endpoints to the router, registers exempt routes on the
-/// [`UpdateGuardState`], and logs when the routes become active.
+/// update guard, and logs when the routes become active.
 pub async fn add_runtime_update_routes<S, P, L>(
     dynamic_router: &DynamicRouter,
     plugin: Arc<P>,
     lock_state: Arc<L>,
-    update_guard: &UpdateGuardState,
+    update_guard: &impl ExemptRoutes,
     upload_limit: usize,
     retry_after_seconds: u64,
 ) -> RouteHandle
@@ -220,7 +220,6 @@ where
 /// `OpenAPI` spec regenerates on every recomposition, reflecting current routes.
 pub async fn add_openapi_routes(
     dynamic_router: &DynamicRouter,
-    _update_guard: &UpdateGuardState,
     web_server_config: &WebServerConfig,
 ) {
     let server_url = format!(
@@ -244,15 +243,6 @@ pub async fn add_openapi_routes(
             router
                 .route(SWAGGER_UI_ROUTE, swagger_route)
                 .route(OPENAPI_JSON_ROUTE, openapi_route)
-        }))
-        .await;
-}
-
-pub async fn install_update_guard(dynamic_router: &DynamicRouter, update_guard: UpdateGuardState) {
-    let layer = UpdateGuardLayer::new(update_guard);
-    dynamic_router
-        .add_finalizer(Arc::new(move |router: axum::Router| -> axum::Router {
-            router.layer(layer.clone())
         }))
         .await;
 }

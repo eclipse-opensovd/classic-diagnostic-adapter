@@ -13,30 +13,26 @@
 use std::{path::PathBuf, sync::Arc};
 
 use async_trait::async_trait;
-use cda_comm_doip::DoipDiagGateway;
+use cda_comm_doip::{DoipDiagGateway, comm_handle::DoipCommHandle};
 use cda_core::EcuManager;
 use cda_interfaces::{
-    HashMap, ShutdownSignal,
-    health::HealthProvider,
+    CommunicationControl, ShutdownSignal,
     runtime_update_api::{
         ReloadError, RuntimeFilesUpdatePlugin, VehicleComponentFactory, VehicleComponents,
     },
 };
 use cda_plugin_runtime_update::{
     DefaultRuntimeUpdatePlugin, DefaultUpdateSecurityHandler,
-    default_runtime_reloader_plugin::{
-        DefaultReloadContext as ReloaderContext, DefaultRuntimeReloaderPlugin,
-    },
+    default_runtime_reloader_plugin::DefaultRuntimeReloaderPlugin,
 };
 use cda_plugin_security::{
     DefaultSecurityPlugin, DefaultSecurityPluginData, SecurityPlugin, SecurityPluginLoader,
 };
-use cda_sovd::{SovdLockStateProvider, UpdateGuardState};
-use cda_storage::LocalStorage;
+use cda_sovd::SovdLockStateProvider;
 use tokio::sync::Mutex;
 
 use crate::{
-    AppError, UdsManagerType,
+    AppError, UdsManagerType, UpdateGuard,
     config::configfile::{Configuration, ConfigurationValidator},
     setup::CdaRuntime,
 };
@@ -104,8 +100,11 @@ pub struct CdaMainVehicleFactory<SP>
 where
     SP: SecurityPlugin,
 {
+    #[expect(
+        dead_code,
+        reason = "shutdown_signal is stored for potential future use"
+    )]
     shutdown_signal: ShutdownSignal,
-    health_providers: Option<HashMap<String, Arc<dyn HealthProvider>>>,
     _phantom: std::marker::PhantomData<SP>,
 }
 
@@ -114,13 +113,9 @@ where
     SP: SecurityPlugin,
 {
     #[must_use]
-    pub fn new(
-        shutdown_signal: ShutdownSignal,
-        health_providers: Option<HashMap<String, Arc<dyn HealthProvider>>>,
-    ) -> Self {
+    pub fn new(shutdown_signal: ShutdownSignal) -> Self {
         Self {
             shutdown_signal,
-            health_providers,
             _phantom: std::marker::PhantomData,
         }
     }
@@ -144,18 +139,47 @@ where
         VehicleComponents<UdsManagerType<SP>, DoipDiagGateway<EcuManager<SP>>, Self::FileManager>,
         ReloadError,
     > {
-        let (components, _databases) = crate::create_vehicle_components::<SP>(
+        // Build the vehicle stack, reusing the existing UDP socket so the DoIP port
+        // is never double-bound between the old and new actors.
+        // Wrap the incoming Arc<AtomicBool> in an UpdateGuard so it threads through
+        // build_vehicle_stack while keeping the original flag connected.
+        let guard = UpdateGuard::from_arc(Arc::clone(&update_in_progress));
+        let stack = crate::build_vehicle_stack::<SP>(
             config,
             mdd_paths,
-            self.shutdown_signal.clone(),
-            self.health_providers.as_ref(),
-            update_in_progress,
-            existing_udp_socket,
+            None,
+            guard,
+            Some(existing_udp_socket),
         )
         .await
         .map_err(|e| ReloadError(format!("Failed to create vehicle components: {e}")))?;
 
-        Ok(components)
+        // Enable communication on the new temporary actor (start the DoIP sequence
+        // so the new gateway is fully connected before we extract it).
+        stack
+            .comm_handle
+            .enable()
+            .await
+            .map_err(|e| ReloadError(format!("Failed to enable DoIP communication: {e}")))?;
+
+        // Extract the gateway from the slot for the VehicleComponents.
+        // After enable() this slot is guaranteed to be Some.
+        let deferred_gateway = stack.comm_handle.deferred_gateway();
+        let diagnostic_gateway = {
+            let slot_guard = deferred_gateway.slot().read().await;
+            slot_guard
+                .as_ref()
+                .ok_or_else(|| ReloadError("Gateway should be active after enable".to_string()))?
+                .clone()
+        };
+
+        Ok(VehicleComponents {
+            uds_manager: stack.uds_manager,
+            diagnostic_gateway,
+            file_managers: stack.file_managers,
+            variant_detection_handle: stack.variant_detection_handle,
+            functional_group_config: config.functional_description.clone(),
+        })
     }
 }
 
@@ -168,7 +192,7 @@ pub async fn add_runtime_update_routes<S, P>(
     dynamic_router: &cda_sovd::dynamic_router::DynamicRouter,
     plugin: P,
     lock_provider: Arc<SovdLockStateProvider>,
-    update_guard: &UpdateGuardState,
+    update_guard: &UpdateGuard,
     upload_body_limit_bytes: usize,
     retry_after_seconds: u64,
 ) where
@@ -201,14 +225,15 @@ pub async fn add_runtime_update_routes<S, P>(
 pub(crate) async fn create_default_update_plugin(
     infra: CdaRuntime<DefaultSecurityPluginData>,
 ) -> Result<impl RuntimeFilesUpdatePlugin, AppError> {
-    let health_providers = infra.health.clone();
     let shutdown_signal = infra.shutdown_signal.clone();
     let factory = Arc::new(CdaMainVehicleFactory::<DefaultSecurityPluginData>::new(
         shutdown_signal,
-        health_providers,
     ));
 
-    let reloader_infra = ReloaderContext {
+    let post_update_mode = infra.post_update_mode.clone();
+    let init_plugin = infra.init_plugin.clone();
+
+    let reloader_infra = cda_plugin_runtime_update::DefaultReloadContext {
         config: infra.config,
         dynamic_router: infra.dynamic_router,
         vehicle_route_handle: infra.vehicle_route_handle,
@@ -217,13 +242,16 @@ pub(crate) async fn create_default_update_plugin(
         lock_provider: Arc::clone(&infra.lock_provider),
         shutdown_signal: infra.shutdown_signal,
         uds_manager: infra.uds_manager,
-        doip_gateway: infra.doip_gateway,
+        comm_handle: infra.comm_handle,
         update_guard: infra.update_guard,
         ecu_execution_registry: infra.ecu_execution_registry.clone(),
         health: infra.health,
         variant_detection_handle: Mutex::new(infra.variant_detection_handle.lock().await.take()),
         storage_dir: infra.storage_dir.clone(),
         mdd_decompress: infra.mdd_decompress,
+        post_update_mode,
+        init_plugin,
+        _gateway: std::marker::PhantomData,
     };
 
     let reloader_config =
@@ -235,13 +263,14 @@ pub(crate) async fn create_default_update_plugin(
         Configuration,
         DefaultSecurityPlugin,
         _,
+        DoipCommHandle<EcuManager<DefaultSecurityPluginData>>,
     >::new(reloader_config));
 
-    let storage = Arc::new(LocalStorage::new(&infra.storage_dir).map_err(|e| {
-        AppError::InitializationFailed(format!("Failed to init storage, error={e:?}"))
-    })?);
-    Ok(DefaultRuntimeUpdatePlugin::new(
-        storage,
+    let storage = cda_storage::LocalStorage::new(&infra.storage_dir)
+        .map_err(|e| AppError::InitializationFailed(format!("Failed to create storage: {e}")))?;
+
+    let plugin = DefaultRuntimeUpdatePlugin::new(
+        Arc::new(storage),
         reloader_plugin,
         Arc::new(DefaultUpdateSecurityHandler::new(
             Arc::clone(&infra.lock_provider),
@@ -254,5 +283,7 @@ pub(crate) async fn create_default_update_plugin(
         infra.mdd_decompress,
         Arc::clone(&infra.update_in_progress),
         ConfigurationValidator::new(),
-    ))
+    );
+
+    Ok(plugin)
 }

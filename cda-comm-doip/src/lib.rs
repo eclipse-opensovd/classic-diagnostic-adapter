@@ -44,11 +44,14 @@ use crate::{
     socket::DoIPUdpSocket,
 };
 
+pub mod comm_handle;
 pub mod config;
 mod connection_receiver;
 mod connection_sender;
 mod connections;
+pub mod deferred_gateway;
 mod ecu_connection;
+pub mod health;
 pub mod socket;
 mod vir_vam;
 

@@ -29,6 +29,7 @@ members = [
   "cda-tracing",
   "cda-plugin-security",
   "cda-plugin-runtime-update",
+  "cda-plugin-deferred-init",
   "cda-health",
   "cda-extra",
   "cda-storage",
@@ -48,6 +49,7 @@ cda-comm-uds = { path = "cda-comm-uds" }
 cda-database = { path = "cda-database" }
 cda-plugin-security = { path = "cda-plugin-security" }
 cda-plugin-runtime-update = { path = "cda-plugin-runtime-update" }
+cda-plugin-deferred-init = { path = "cda-plugin-deferred-init" }
 cda-sovd = { path = "cda-sovd" }
 cda-tracing = { path = "cda-tracing" }
 cda-health = { path = "cda-health" }
@@ -76,7 +78,7 @@ prost = "0.14"
 flatbuffers = "25.9.23"
 xz2 = "0.1.7"
 hex = "0.4.3"
-strum = "0.27.2"
+strum = { version = "0.27.2", features = ["derive"] }
 strum_macros = "0.27.2"
 indexmap = "2.12.1"
 http = "1.3.1"

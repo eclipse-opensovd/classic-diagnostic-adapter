@@ -13,6 +13,8 @@
 
 use std::{path::PathBuf, sync::Arc};
 
+pub mod request_guard;
+
 use aide::{
     axum::{
         ApiRouter as Router,
@@ -67,7 +69,6 @@ pub(crate) mod error;
 pub mod execution_registry;
 pub(crate) mod functions;
 pub(crate) mod locks;
-pub mod update_guard;
 
 pub use execution_registry::EcuExecutionRegistry;
 

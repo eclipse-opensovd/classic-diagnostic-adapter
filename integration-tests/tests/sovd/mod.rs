@@ -33,6 +33,7 @@ use crate::util::{
 
 mod custom_routes;
 mod data;
+mod deferred_init;
 mod ecu;
 mod faults;
 mod flash_download;

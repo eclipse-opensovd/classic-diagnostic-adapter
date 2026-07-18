@@ -13,9 +13,11 @@
 
 pub use default_runtime_update_plugin::DefaultRuntimeUpdatePlugin;
 pub use security::DefaultUpdateSecurityHandler;
+pub use update_guard::UpdateGuard;
 
 pub mod config;
 pub mod default_runtime_reloader_plugin;
+pub mod update_guard;
 pub use default_runtime_reloader_plugin::{DefaultReloadContext, RuntimeReloaderConfig};
 pub mod default_runtime_update_plugin;
 pub mod operations;

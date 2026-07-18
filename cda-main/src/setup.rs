@@ -13,107 +13,223 @@
 
 use std::{future::Future, sync::Arc};
 
-use cda_comm_doip::DoipDiagGateway;
+use cda_comm_doip::comm_handle::DoipCommHandle;
 use cda_comm_uds::FlashTransferObserver;
 use cda_core::EcuManager;
-use cda_interfaces::{HashMap, ShutdownSignal, health::HealthProvider};
+use cda_interfaces::{
+    HashMap, InitializationPlugin, ShutdownSignal,
+    communication_control::PostUpdateCommunicationMode, health::HealthStatus,
+};
+use cda_plugin_runtime_update::UpdateGuard;
 use cda_plugin_security::{SecurityPlugin, SecurityPluginLoader};
-use cda_sovd::UpdateGuardState;
 use futures::future::BoxFuture;
 use tokio::sync::{Mutex, RwLock};
 
 use crate::{
-    UdsManagerType, VehicleData, WebserverState,
+    VehicleStack,
     config::configfile::Configuration,
     error::AppError,
     update::{UpdatePluginBuilder, add_runtime_update_routes},
 };
 
-pub(crate) async fn setup_runtime_routes<SP, SL, UPB>(
-    config: Configuration,
-    vehicle_data: VehicleData<SP>,
-    ws: &WebserverState,
-    build_update_plugin: Option<UPB>,
-) -> Result<(), AppError>
+/// Sets up vehicle routes with the given resources.
+///
+/// This helper function consolidates the common route setup logic used in both
+/// Enabled and Deferred initialization modes.
+///
+/// # Errors
+/// Returns [`AppError`] if route registration fails.
+pub(crate) async fn setup_vehicle_routes<SP, SL>(
+    dynamic_router: &cda_sovd::dynamic_router::DynamicRouter,
+    config: &Configuration,
+    uds_manager: &crate::UdsManagerType<SP>,
+    file_managers: crate::FileManagerMap,
+    locks: Arc<cda_sovd::Locks>,
+    update_in_progress: Arc<std::sync::atomic::AtomicBool>,
+) -> Result<
+    (
+        Arc<cda_sovd::SovdLockStateProvider>,
+        cda_sovd::RouteHandle,
+        cda_sovd::EcuExecutionRegistry,
+    ),
+    AppError,
+>
 where
     SP: SecurityPlugin,
     SL: SecurityPluginLoader,
-    UPB: UpdatePluginBuilder<SP>,
 {
-    let mdd_decompress = config.flat_buf.mdd_decompress;
-    let flash_files_path = config.flash_files_path.clone();
-    let components_config = config.components.clone();
-    let runtime_update_config = config.runtime_update_config.clone();
-
     let (ecu_execution_registry, vehicle_route_handle) = cda_sovd::add_vehicle_routes::<_, _, SL>(
-        &ws.dynamic_router,
+        dynamic_router,
         cda_sovd::VehicleConfig {
             flash_files_path: config.flash_files_path.clone(),
             functional_group_config: config.functional_description.clone(),
             components_config: config.components.clone(),
         },
         cda_sovd::VehicleResources {
-            ecu_uds: vehicle_data.uds_manager.clone(),
-            file_manager: vehicle_data.file_managers,
-            locks: Arc::clone(&vehicle_data.locks),
-            update_in_progress: vehicle_data.update_guard.busy_handle(),
+            ecu_uds: uds_manager.clone(),
+            file_managers,
+            locks: Arc::clone(&locks),
+            update_in_progress,
         },
     )
     .await?;
 
-    let lock_provider: Arc<cda_sovd::SovdLockStateProvider> = Arc::new(
-        cda_sovd::SovdLockStateProvider::new(Arc::clone(&vehicle_data.locks)),
-    );
+    let lock_provider: Arc<cda_sovd::SovdLockStateProvider> =
+        Arc::new(cda_sovd::SovdLockStateProvider::new(Arc::clone(&locks)));
 
-    let flash_transfer_guard = vehicle_data.uds_manager.flash_transfer_guard();
+    Ok((lock_provider, vehicle_route_handle, ecu_execution_registry))
+}
+
+/// Sets up runtime routes for Enabled mode.
+///
+/// This function consolidates the Enabled-mode route setup logic:
+/// - Sets up vehicle routes
+/// - Builds `CdaRuntime`
+/// - Registers update plugin (if provided)
+/// - Registers `OpenAPI` routes
+/// - Installs update guard
+/// - Calls [`InitializationPlugin::on_ready`] on the init plugin (if provided)
+///   with the active [`CommunicationControl`] handle
+///
+/// # Errors
+/// Returns [`AppError`] if route registration or plugin setup fails.
+pub(crate) async fn setup_runtime_routes<SP, SL, UPB>(
+    config: Configuration,
+    stack: VehicleStack<SP>,
+    dynamic_router: &cda_sovd::dynamic_router::DynamicRouter,
+    webserver_config: &cda_sovd::WebServerConfig,
+    shutdown_signal: ShutdownSignal,
+    build_update_plugin: Option<UPB>,
+    init_plugin: Option<Arc<dyn InitializationPlugin>>,
+) -> Result<(), AppError>
+where
+    SP: SecurityPlugin,
+    SL: SecurityPluginLoader,
+    UPB: UpdatePluginBuilder<SP>,
+{
+    use cda_interfaces::communication_control::CommunicationControl;
+
+    let runtime_update_config = config.runtime_update_config.clone();
+
+    let locks = stack.lock_provider.current_locks().await;
+
+    let (lock_provider, vehicle_route_handle, ecu_execution_registry) =
+        setup_vehicle_routes::<SP, SL>(
+            dynamic_router,
+            &config,
+            &stack.uds_manager,
+            stack.file_managers.clone(),
+            locks,
+            stack.update_guard.busy_handle(),
+        )
+        .await?;
+
+    let flash_transfer_guard = stack.uds_manager.flash_transfer_guard();
+
+    let post_update_mode = config.communication.post_update_mode.clone();
+
+    // Obtain a CommunicationControl handle before comm_handle is moved into the runtime.
+    let comm_control: Arc<dyn CommunicationControl> = Arc::new(stack.comm_handle.clone());
 
     // Build the runtime infrastructure
-    let config_arc = Arc::new(RwLock::new(config));
-    let infra = CdaRuntime {
-        config: Arc::clone(&config_arc),
-        uds_manager: Arc::new(RwLock::new(vehicle_data.uds_manager)),
-        doip_gateway: Arc::new(RwLock::new(vehicle_data.diagnostic_gateway)),
-        dynamic_router: ws.dynamic_router.clone(),
+    let infra = build_cda_runtime(
+        config,
+        stack.uds_manager,
+        stack.comm_handle,
+        dynamic_router.clone(),
         vehicle_route_handle,
-        lock_provider: Arc::clone(&lock_provider),
-        ecu_execution_registry: ecu_execution_registry.clone(),
-        update_guard: vehicle_data.update_guard.clone(),
-        update_in_progress: vehicle_data.update_guard.busy_handle(),
-        flash_files_path,
-        components_config,
-        variant_detection_handle: Mutex::new(Some(vehicle_data.variant_detection_handle)),
-        health: vehicle_data.health_providers,
+        &lock_provider,
+        ecu_execution_registry,
+        &stack.update_guard,
+        stack.variant_detection_handle,
+        stack.health_providers.as_ref(),
         flash_transfer_guard,
-        storage_dir: runtime_update_config.storage_dir,
-        mdd_decompress,
-        shutdown_signal: ws.shutdown_signal.clone(),
-    };
+        shutdown_signal,
+        post_update_mode,
+        init_plugin.clone(),
+    );
 
     // Build and install update plugin using the callback if provided
     if let Some(builder) = build_update_plugin {
         let runtime_update_plugin = builder.build(infra).await?;
 
         add_runtime_update_routes::<SL, _>(
-            &ws.dynamic_router,
+            dynamic_router,
             runtime_update_plugin,
             lock_provider,
-            &vehicle_data.update_guard,
+            &stack.update_guard,
             runtime_update_config.upload_body_limit_bytes,
             runtime_update_config.retry_after_seconds,
         )
         .await;
     }
 
-    cda_sovd::add_openapi_routes(
-        &ws.dynamic_router,
-        &vehicle_data.update_guard,
-        &ws.webserver_config,
-    )
-    .await;
+    cda_sovd::add_openapi_routes(dynamic_router, webserver_config).await;
 
-    cda_sovd::install_update_guard(&ws.dynamic_router, vehicle_data.update_guard.clone()).await;
+    cda_sovd::install_guard(dynamic_router, stack.update_guard.clone()).await;
+
+    // Notify the init plugin that communication is active so it can perform
+    // any post-activation work (e.g., registering proactive trigger callbacks).
+    if let Some(plugin) = init_plugin {
+        plugin.on_ready(comm_control).await;
+    }
 
     Ok(())
+}
+
+/// Builds a `CdaRuntime` instance from the given components.
+///
+/// This helper function consolidates the runtime construction logic used in both
+/// Enabled mode and deferred initialization (via `deferred_init.rs`).
+#[allow(
+    clippy::too_many_arguments,
+    reason = "Runtime construction requires many components"
+)] // todo alexmohr refactor this
+pub(crate) fn build_cda_runtime<SP: SecurityPlugin>(
+    config: Configuration,
+    uds_manager: crate::UdsManagerType<SP>,
+    comm_handle: DoipCommHandle<EcuManager<SP>>,
+    dynamic_router: cda_sovd::dynamic_router::DynamicRouter,
+    vehicle_route_handle: cda_sovd::RouteHandle,
+    lock_provider: &Arc<cda_sovd::SovdLockStateProvider>,
+    ecu_execution_registry: cda_sovd::EcuExecutionRegistry,
+    update_guard: &UpdateGuard,
+    variant_detection_handle: tokio::task::JoinHandle<()>,
+    health_providers: Option<&crate::HealthProviders>,
+    flash_transfer_guard: cda_comm_uds::FlashTransferObserver,
+    shutdown_signal: ShutdownSignal,
+    post_update_mode: PostUpdateCommunicationMode,
+    init_plugin: Option<Arc<dyn InitializationPlugin>>,
+) -> CdaRuntime<SP> {
+    let health_map = health_providers.map(crate::HealthProviders::to_health_map);
+
+    // Extract fields before moving config into Arc
+    let flash_files_path = config.flash_files_path.clone();
+    let components_config = config.components.clone();
+    let storage_dir = config.runtime_update_config.storage_dir.clone();
+    let mdd_decompress = config.flat_buf.mdd_decompress;
+
+    CdaRuntime {
+        config: Arc::new(RwLock::new(config)),
+        uds_manager: Arc::new(RwLock::new(uds_manager)),
+        comm_handle,
+        dynamic_router,
+        vehicle_route_handle,
+        lock_provider: Arc::clone(lock_provider),
+        ecu_execution_registry,
+        update_guard: update_guard.clone(),
+        update_in_progress: update_guard.busy_handle(),
+        flash_files_path,
+        components_config,
+        variant_detection_handle: Mutex::new(Some(variant_detection_handle)),
+        health: health_map,
+        flash_transfer_guard,
+        storage_dir,
+        mdd_decompress,
+        shutdown_signal,
+        post_update_mode,
+        init_plugin,
+    }
 }
 
 /// Runtime context produced during CDA initialization, made available to the update plugin callback.
@@ -125,10 +241,15 @@ pub struct CdaRuntime<SP: SecurityPlugin> {
     pub config: Arc<RwLock<Configuration>>,
 
     /// Vehicle diagnostic manager
-    pub uds_manager: Arc<RwLock<UdsManagerType<SP>>>,
+    pub uds_manager: Arc<RwLock<crate::UdsManagerType<SP>>>,
 
-    /// `DoIP` diagnostic gateway
-    pub doip_gateway: Arc<RwLock<DoipDiagGateway<EcuManager<SP>>>>,
+    /// Handle to the `DoIP` communication actor.
+    ///
+    /// Used by the runtime-update reload path to disable the old connection,
+    /// install the freshly-built gateway, and re-activate communication.
+    /// Also provides access to the reserved UDP socket via [`DoipCommHandle::socket`]
+    /// so the `VehicleComponentFactory` can reuse the bound port.
+    pub comm_handle: DoipCommHandle<EcuManager<SP>>,
 
     /// Dynamic router for hot-swapping routes
     pub dynamic_router: cda_sovd::dynamic_router::DynamicRouter,
@@ -142,8 +263,8 @@ pub struct CdaRuntime<SP: SecurityPlugin> {
     /// ECU execution registry for tracking in-flight operations
     pub ecu_execution_registry: cda_sovd::EcuExecutionRegistry,
 
-    /// Update guard state
-    pub update_guard: UpdateGuardState,
+    /// Update guard
+    pub update_guard: UpdateGuard,
 
     /// Flag indicating whether an update is in progress
     pub update_in_progress: Arc<std::sync::atomic::AtomicBool>,
@@ -158,7 +279,7 @@ pub struct CdaRuntime<SP: SecurityPlugin> {
     pub variant_detection_handle: Mutex<Option<tokio::task::JoinHandle<()>>>,
 
     /// Health providers for monitoring
-    pub health: Option<HashMap<String, Arc<dyn HealthProvider>>>,
+    pub health: Option<HashMap<String, Arc<dyn HealthStatus>>>,
 
     /// Guard that signals whether a flash transfer is in progress
     pub flash_transfer_guard: FlashTransferObserver,
@@ -171,6 +292,20 @@ pub struct CdaRuntime<SP: SecurityPlugin> {
 
     /// Shutdown signal for graceful termination
     pub shutdown_signal: ShutdownSignal,
+
+    /// Controls communication behavior after a runtime database update.
+    ///
+    /// Threaded from `config.communication.post_update_mode` at setup time so
+    /// the update plugin builder doesn't need to re-read the config.
+    pub post_update_mode: PostUpdateCommunicationMode,
+
+    /// Optional initialization plugin.
+    ///
+    /// In deferred mode this is set at startup. In enabled mode it is set so
+    /// the plugin receives the `on_ready` callback once communication is active.
+    /// The reloader also calls `on_ready` after installing a new gateway in
+    /// deferred mode so the plugin can re-arm its trigger.
+    pub init_plugin: Option<Arc<dyn InitializationPlugin>>,
 }
 
 /// Setup configuration for CDA runtime initialization.
@@ -188,14 +323,21 @@ pub struct CdaRuntime<SP: SecurityPlugin> {
 ///     .with_update_plugin(update_plugin_fn(|infra| async move {
 ///         let plugin = MyCustomPlugin::new(infra);
 ///         Ok(plugin)
+///     }))
+///     .with_init_plugin(deferred_init::init_plugin_fn(|| async move {
+///         Ok(MyInitPlugin::new())
 ///     }));
 /// ```
+#[allow(
+    clippy::type_complexity,
+    reason = "closure type is dictated by the dynamic router API"
+)]
 pub(crate) type PreLoadHook = Box<
     dyn FnOnce(cda_sovd::dynamic_router::DynamicRouter) -> BoxFuture<'static, Result<(), AppError>>
         + Send,
 >;
 
-pub struct Setup<SP: SecurityPlugin, SL: SecurityPluginLoader, UpdatePluginBuilder = ()> {
+pub struct Setup<SP: SecurityPlugin, SL: SecurityPluginLoader, UPB = (), IPB = ()> {
     _phantom: std::marker::PhantomData<(SP, SL)>,
 
     /// Optional callback run before vehicle data is loaded.
@@ -203,9 +345,15 @@ pub struct Setup<SP: SecurityPlugin, SL: SecurityPluginLoader, UpdatePluginBuild
     /// If not set, no preload hook is executed.
     pub(crate) pre_load: Option<PreLoadHook>,
 
-    /// Plugin builder. Set via [`Setup::with_update_plugin`].
-    /// When `UpdatePluginBuilder = ()` (the default), no update plugin is registered.
-    pub(crate) build_update_plugin: Option<UpdatePluginBuilder>,
+    /// Update plugin builder. Set via [`Setup::with_update_plugin`].
+    /// When `UPB = ()` (the default), no update plugin is registered.
+    pub(crate) build_update_plugin: Option<UPB>,
+
+    /// Init plugin builder. Set via [`Setup::with_init_plugin`].
+    /// When `IPB = ()` (the default), `OnDemandInitPlugin` is used.
+    /// In `CommunicationInitMode::Deferred`, gates diagnostic requests until triggered.
+    /// In `CommunicationInitMode::Enabled`, receives `on_ready` once communication is active.
+    pub(crate) build_init_plugin: Option<IPB>,
 }
 
 impl<SP: SecurityPlugin, SL: SecurityPluginLoader> Default for Setup<SP, SL> {
@@ -221,17 +369,24 @@ impl<SP: SecurityPlugin, SL: SecurityPluginLoader> Setup<SP, SL> {
     /// starts but before vehicle data is loaded.
     ///
     /// Use `with_update_plugin()` to provide a custom update plugin builder.
+    ///
+    /// Use `with_init_plugin()` to provide a custom deferred-init plugin builder.
     #[must_use]
     pub fn new() -> Self {
         Self {
             _phantom: std::marker::PhantomData,
             pre_load: None,
             build_update_plugin: None,
+            build_init_plugin: None,
         }
     }
 }
 
-impl<SP: SecurityPlugin, SL: SecurityPluginLoader, UPB> Setup<SP, SL, UPB> {
+impl<SP, SL, UPB, IPB> Setup<SP, SL, UPB, IPB>
+where
+    SP: SecurityPlugin,
+    SL: SecurityPluginLoader,
+{
     /// Sets the preload hook callback.
     ///
     /// This callback is called after the webserver starts but before vehicle data is loaded.
@@ -254,11 +409,39 @@ impl<SP: SecurityPlugin, SL: SecurityPluginLoader, UPB> Setup<SP, SL, UPB> {
     /// It should return a `RuntimeFilesUpdatePlugin` implementation.
     ///
     /// Use [`update_plugin_fn`] to wrap an async closure as a builder.
-    pub fn with_update_plugin<UPB2>(self, builder: UPB2) -> Setup<SP, SL, UPB2> {
+    #[must_use]
+    pub fn with_update_plugin<UPB2>(self, builder: UPB2) -> Setup<SP, SL, UPB2, IPB>
+    where
+        UPB2: UpdatePluginBuilder<SP>,
+    {
         Setup {
             _phantom: self._phantom,
             pre_load: self.pre_load,
             build_update_plugin: Some(builder),
+            build_init_plugin: self.build_init_plugin,
+        }
+    }
+
+    /// Sets the deferred-initialization plugin builder.
+    ///
+    /// The builder is called with no runtime context (vehicle components do not exist yet
+    /// in deferred mode) and returns an [`InitializationPlugin`](cda_interfaces::InitializationPlugin).
+    /// It is only consulted when `config.communication.init_mode` is set to `Deferred`.
+    ///
+    /// If not set, [`OnDemandInitPlugin`](cda_interfaces::OnDemandInitPlugin) is used by default,
+    /// which triggers initialization on the first diagnostic HTTP request.
+    ///
+    /// Use [`init_plugin_fn`](cda_interfaces::deferred_init_api::init_plugin_fn) to wrap an async closure as a builder.
+    #[must_use]
+    pub fn with_init_plugin<IPB2>(self, builder: IPB2) -> Setup<SP, SL, UPB, IPB2>
+    where
+        IPB2: crate::deferred_init::AppInitPluginBuilder<SP>,
+    {
+        Setup {
+            _phantom: self._phantom,
+            pre_load: self.pre_load,
+            build_update_plugin: self.build_update_plugin,
+            build_init_plugin: Some(builder),
         }
     }
 }

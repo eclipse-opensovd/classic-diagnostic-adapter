@@ -143,3 +143,19 @@ pub trait EcuGatewaySockets {
     /// Returns a shared, cloneable handle to the underlying UDP socket.
     fn upd_socket(&self) -> Arc<Mutex<Self::Socket>>;
 }
+
+/// Provides access to the underlying UDP socket owned by a control-plane handle.
+///
+/// Distinct from [`EcuGatewaySockets`] (which is implemented on *data-plane* gateway objects
+/// like `DoipDiagGateway`): `SocketProvider` is implemented on *control-plane* handles
+/// (e.g. `DoipCommHandle`) that retain the socket independently of any gateway instance.
+///
+/// Returning an owned `Arc<Mutex<Self::Socket>>` is the correct API -- the caller receives
+/// a reference-counted handle with no lifetime constraints.
+pub trait SocketProvider {
+    /// Opaque socket type.
+    type Socket: Send + Sync + 'static;
+
+    /// Returns a shared handle to the underlying UDP socket.
+    fn socket(&self) -> Arc<Mutex<Self::Socket>>;
+}

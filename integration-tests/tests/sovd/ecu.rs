@@ -31,7 +31,10 @@ use crate::{
             QueryParams, auth_header, extract_field_from_json, response_to_json, response_to_t,
             send_cda_request,
         },
-        runtime::{TestRuntime, restart_cda, setup_integration_test, start_ecu_sim, stop_ecu_sim},
+        runtime::{
+            TestRuntime, restart_cda, setup_integration_test, start_ecu_sim, stop_ecu_sim,
+            wait_for_ecus_online,
+        },
     },
 };
 
@@ -455,22 +458,7 @@ async fn test_variant_detection_duplicates() {
     // status should be detected without manual variant detection
     start_ecu_sim(&runtime.ecu_sim).await.unwrap();
 
-    // wait in loop, to check if the CDA receives the spontaneous VAM when is online
-    for attempt in 0..=5 {
-        let status = ecu_status(&runtime.config, &auth, sovd::ECU_FLXC1000_ENDPOINT)
-            .await
-            .expect("failed to get ecu status");
-
-        if status.variant.state == sovd_interfaces::components::ecu::State::Online {
-            break;
-        }
-
-        assert!(
-            attempt < 5,
-            "ECU did not come online in time, status {status:?}"
-        );
-        cda_interfaces::util::tokio_ext::sleep_for(Duration::from_secs(1)).await;
-    }
+    wait_for_ecus_online(&runtime.config).await.unwrap();
 
     validate_ecu_state(
         runtime,
@@ -499,6 +487,14 @@ async fn test_communication_control() {
     )
     .await
     .unwrap();
+
+    // Ensure FLXC1000 variant is detected before acquiring the lock.  The lock
+    // creation starts TesterPresent which competes with the variant-detection
+    // UDS semaphore, potentially causing force_variant_detection to time out if
+    // placed after the lock.
+    force_variant_detection(&runtime.config, &auth, ecu_endpoint)
+        .await
+        .unwrap();
 
     // Create and acquire lock
     // Duration::from_mins is only available in rust >= 1.91.0, we want to support 1.88.0
@@ -792,6 +788,14 @@ async fn test_ecu_session_reset_on_lock_reacquire() {
     let (runtime, _lock) = setup_integration_test(true).await.unwrap();
     let auth = auth_header(&runtime.config, None).await.unwrap();
     let ecu_endpoint = sovd::ECU_FLXC1000_ENDPOINT;
+
+    // Ensure variant is detected before acquiring the lock.  The lock creation
+    // starts TesterPresent which competes with the variant-detection UDS
+    // semaphore, potentially causing the force_variant_detection call to time
+    // out if placed after the lock.
+    force_variant_detection(&runtime.config, &auth, ecu_endpoint)
+        .await
+        .unwrap();
 
     // Create and acquire lock with 30s timeout
     let lock_expiration_timeout = Duration::from_secs(30);

@@ -454,6 +454,63 @@ pub trait RuntimeFilesUpdatePlugin: Send + Sync + 'static {
     }
 }
 
+/// Blanket implementation so that `Box<dyn RuntimeFilesUpdatePlugin>` (as produced
+/// by `DeferredUpdatePluginFn`) can be passed directly to `add_runtime_update_routes`.
+#[async_trait]
+impl RuntimeFilesUpdatePlugin for Box<dyn RuntimeFilesUpdatePlugin> {
+    async fn list_current(
+        &self,
+        query: &RuntimeFilesQuery,
+    ) -> Result<BulkDataList, RuntimeUpdateError> {
+        (**self).list_current(query).await
+    }
+
+    async fn list_nextupdate(
+        &self,
+        query: &RuntimeFilesQuery,
+    ) -> Result<BulkDataList, RuntimeUpdateError> {
+        (**self).list_nextupdate(query).await
+    }
+
+    async fn list_backup(
+        &self,
+        query: &RuntimeFilesQuery,
+    ) -> Result<BulkDataList, RuntimeUpdateError> {
+        (**self).list_backup(query).await
+    }
+
+    async fn upload(
+        &self,
+        files: Vec<UploadFile>,
+    ) -> Result<BulkDataCreatedList, RuntimeUpdateError> {
+        (**self).upload(files).await
+    }
+
+    async fn delete_nextupdate(&self) -> Result<(), RuntimeUpdateError> {
+        (**self).delete_nextupdate().await
+    }
+
+    async fn delete_nextupdate_by_id(&self, file_id: &str) -> Result<(), RuntimeUpdateError> {
+        (**self).delete_nextupdate_by_id(file_id).await
+    }
+
+    async fn delete_backup(&self) -> Result<(), RuntimeUpdateError> {
+        (**self).delete_backup().await
+    }
+
+    async fn start_execution(&self, mode: ExecutionMode) -> Result<String, RuntimeUpdateError> {
+        (**self).start_execution(mode).await
+    }
+
+    async fn list_executions(&self) -> Vec<UpdateExecution> {
+        (**self).list_executions().await
+    }
+
+    async fn get_execution_status(&self, execution_id: &str) -> Option<UpdateExecution> {
+        (**self).get_execution_status(execution_id).await
+    }
+}
+
 /// Wrapper that enforces mutual exclusion on any [`RuntimeFilesUpdatePlugin`].
 ///
 /// Read operations (`list_*`, `get_execution_status`) acquire a shared read lock,

@@ -353,6 +353,27 @@ Deferred Initialization
     The CDA supports deferred initialization of ECU communication to enable scenarios where
     the HTTP API must be available before vehicle communication begins.
 
+    **Configuration**
+
+    Deferred initialization is controlled by three fields in the ``[database]`` section of the
+    configuration file:
+
+    - ``communication_init``: controls when DoIP gateway creation begins.
+
+      - ``Enabled`` (default): DoIP gateway is created immediately during startup.
+      - ``Deferred``: DoIP gateway creation is postponed until a trigger event occurs.
+
+    - ``post_update_communication``: controls DoIP behavior after a runtime database update
+      (see *Dynamic Database Reload* in the plugins documentation).
+
+      - ``Enabled`` (default): reconnect DoIP immediately after each update.
+      - ``Deferred``: return to deferred state after each update.
+      - ``Last``: preserve the state DoIP was in before the update started.
+
+    - ``deferred_retry_after_seconds`` (default: 30): value for the HTTP ``Retry-After`` response
+      header when a diagnostic request arrives while initialization is still pending.
+      Allows time for variant detection to complete before the client retries.
+
     **Dynamic Router Architecture**
 
     The HTTP server is launched with a dynamic router that supports adding routes after the server
@@ -367,25 +388,173 @@ Deferred Initialization
     When deferred initialization is configured, DoIP gateway creation and ECU discovery are
     postponed until one of the following triggers:
 
-    - **On-demand**: First diagnostic request to any ECU endpoint triggers initialization
-    - **Plugin API**: A custom plugin calls the initialization API based on application-specific
-      conditions (e.g., security unlock, session establishment)
+    - **On-demand**: The first HTTP request to a DoIP-communicating endpoint triggers
+      initialization. These are paths under ``/vehicle/v15/components/{ecu}/`` and
+      ``/vehicle/v15/functions/functionalgroups/{group}/``.
+    - **Plugin API**: A custom plugin stores the ``CommunicationControl`` handle passed to
+      ``InitializationPlugin::on_ready`` and calls ``enable()`` on it based on
+      application-specific conditions (e.g., security unlock, session establishment). Unlike
+      the on-demand path, calling ``enable()`` directly bypasses ``can_initialize`` entirely
+      -- a plugin that calls it has already decided initialization should happen now.
+
+    **Path-Based Filtering**
+
+    The deferred-init guard is a Tower middleware layer installed as a ``DynamicRouter`` finalizer.
+    It uses path-prefix matching to determine which requests are gated:
+
+    - ``/vehicle/v15/components/`` -- individual ECU diagnostic routes (with trailing slash)
+    - ``/vehicle/v15/functions/functionalgroups/`` -- functional group routes (with trailing slash)
+
+    All other endpoints (health, version, locks, apps, authorize, ECU/FG listing endpoints) pass
+    through unconditionally and never trigger initialization. The trailing slash is intentional:
+    ``/vehicle/v15/components`` (the ECU listing endpoint) is not gated because it reads ECU names
+    from MDD metadata without DoIP communication.
+
+    The finalizer approach ensures that OEM-added routes on other paths are never incorrectly
+    gated -- only the two standard SOVD paths above are affected.
+
+    **HTTP Response for Pending State**
+
+    Per SOVD ISO DIS 17978-3 §5.8.2 Table 15, HTTP 503 is defined as "Method temporarily
+    unavailable" and explicitly supports a ``Retry-After`` header. When a diagnostic request
+    arrives while initialization is pending, the response is:
+
+    - HTTP 503 Service Unavailable
+    - ``Retry-After: <deferred_retry_after_seconds>`` header
+    - Body: ``{"error_code": "preconditions-not-fulfilled", "message": "ECU communication initialization pending"}``
+
+    The ``vendor_code`` field is omitted per SOVD §5.8.3 Table 16, which states it is only
+    populated when ``error_code`` is ``vendor-specific``.
+
+    **Initialization Plugin**
+
+    The ``InitializationPlugin`` trait (in ``cda-interfaces``) allows custom control over
+    when initialization is triggered:
+
+    .. code-block:: rust
+
+        pub trait InitializationPlugin: Send + Sync + 'static {
+            fn on_ready(&self, comm: Arc<dyn CommunicationControl>) -> BoxFuture<'_, ()>;
+            fn can_initialize(&self, context: &InitializationContext) -> BoxFuture<'_, bool>;
+            fn on_initialized<'a>(&'a self, result: &'a InitResult) -> BoxFuture<'a, ()>;
+        }
+
+    - ``on_ready`` is called once the deferred pipeline is armed (at startup, and again after
+      every post-update re-deferral). Store the ``CommunicationControl`` handle for proactive,
+      application-driven initialization (e.g., after a security unlock). All three methods are
+      required -- there are no default implementations.
+    - ``can_initialize`` is consulted on each diagnostic request while initialization is pending.
+      It receives an ``InitializationContext`` describing the trigger reason and attempt count.
+      Return ``true`` to allow initialization to begin. Return ``false`` to keep it deferred (503).
+    - ``on_initialized`` is called by the guard after each ``CommunicationControl::enable()``
+      attempt completes (success or failure). It may be called again after a post-update
+      re-deferral causes a new init cycle.
+
+    The default ``OnDemandInitPlugin`` always returns ``true`` from ``can_initialize`` and
+    performs no action in ``on_ready`` or ``on_initialized``.
+
+    Custom plugins are passed at startup via ``run_with_init_plugin`` (AppArgs entry point) or
+    ``run_with_config_and_init_plugin`` (Configuration entry point).
+
+    **Deferred Init Architecture**
+
+    The DoIP communication lifecycle is managed by ``DoipCommActor`` (a ``kameo``
+    actor in ``cda-comm-doip``) with states: ``Disabled`` -> ``Initializing`` ->
+    ``Active`` | ``Failed``. The actor starts in ``Disabled`` state with a UDP
+    socket already bound (reserving the port), but no VIR broadcasts, TCP
+    connections, or routing activation occur until triggered.
+
+    A ``DeferredGateway`` wrapper (in ``cda-comm-doip``) holds an
+    ``Arc<RwLock<Option<DoipDiagGateway<T>>>>`` shared with the actor. When the
+    slot is ``None`` (disabled), all gateway operations return ``EcuOffline``.
+    When the actor enables communication and populates the slot, the same
+    ``UdsManager`` instance immediately begins serving real diagnostic responses
+    without any route reconstruction.
+
+    The ``DeferredInitGuard`` (in ``cda-plugin-deferred-init``) implements the
+    ``RequestGuard`` trait and is installed as generic Tower middleware via
+    ``install_guard()``. It reads an ``Arc<AtomicBool>`` (fast-path, single atomic
+    load) and only evaluates requests when communication is not yet active. On
+    evaluation, it consults the ``InitializationPlugin`` and fires
+    ``CommunicationControl::enable()`` if permitted.
+
+    ``cda-sovd`` has no dependency on ``kameo``: the guard holds an
+    ``Arc<dyn CommunicationControl>`` (defined in ``cda-interfaces``), keeping the
+    actor framework dependency confined to ``cda-comm-doip``.
 
     **Pre-initialization State**
 
     While initialization is deferred:
 
-    - When health monitoring is enabled, health endpoints report status for available components
-      (configuration, HTTP server)
-    - ECU-specific endpoints return an appropriate status code indicating pending initialization
-    - The dynamic router is prepared to receive SOVD routes once initialization completes
+    - When health monitoring is enabled, the ``doip`` health provider is in ``Pending`` state
+      (not ``Starting``). The ``database`` health provider is in ``Up`` state after MDD load.
+      The ``main`` health provider is in ``Up`` state once the HTTP API is operational.
+    - ECU-specific endpoints return HTTP 503 with ``Retry-After``.
+    - Vehicle routes (ECU/functional-group listing, locks, authorize, and
+      diagnostic endpoints) are registered **immediately at startup** via
+      ``add_vehicle_routes`` using a ``DeferredGateway``. The ``UdsManager`` is
+      fully constructed but returns ``EcuOffline`` for diagnostic operations until
+      the ``DoipCommActor`` enables communication.
+    - Diagnostic-path requests (``/vehicle/v15/components/{ecu}/...``) are
+      intercepted by the ``DeferredInitGuard`` middleware which returns HTTP 503
+      with ``Retry-After`` until communication is active. Non-diagnostic paths
+      (listing, health, OpenAPI) pass through unconditionally.
 
     **Initialization Sequence**
 
-    Once triggered, initialization proceeds identically to the immediate initialization path:
-    DoIP gateway creation, TCP connection establishment, UDS manager creation, and variant
-    detection. Upon completion, SOVD routes are registered and, when health monitoring is
-    enabled, health status transitions to "Up".
+    Once triggered (by an HTTP request or plugin API), initialization proceeds:
+
+    1. ``DoipCommActor`` receives ``Enable`` message and transitions to
+       ``Initializing``: performs VIR/VAM exchange (using the pre-bound UDP socket),
+       establishes TCP connections, routing activation, and variant detection.
+    2. On success, the actor populates the ``DeferredGateway``'s shared slot with
+       the live ``DoipDiagGateway`` and sets the atomic ``active`` flag to
+       ``true``. The guard's fast-path (``is_active()``) immediately starts
+       passing diagnostic requests through to the now-functional handlers.
+    3. The ``doip`` health provider transitions to ``Up`` (or ``Failed`` on error).
+    4. The ``DeferredInitGuard`` calls ``InitializationPlugin::on_initialized()``
+       with the result (``InitResult::Ok`` on success, ``InitResult::Failed`` with
+       a ``DeferredInitError::InitFailed`` on failure). This callback fires
+       regardless of whether initialization succeeded or failed.
+
+    Route registration happens **once at startup** and is not repeated on
+    initialization. The runtime-update reload path uses
+    ``DynamicRouter::replace_routes`` when the ECU set changes after a database
+    update, but this is independent of the deferred initialization path.
+
+    **Post-Update Behavior**
+
+    The ``post_update_communication`` configuration field controls what happens after a
+    runtime database update. The reloader in ``cda-plugin-runtime-update`` reads the
+    ``PostUpdateCommunicationMode`` value and calls the appropriate ``DoipCommHandle``
+    methods accordingly:
+
+    .. list-table:: Post-Update Behavior Matrix
+       :header-rows: 1
+
+       * - Mode
+         - Pre-update state
+         - Post-update state
+         - Reloader action
+       * - ``Enabled`` (default)
+         - Any
+         - DoIP reconnects immediately
+         - ``replace_gateway()`` (disable + rebuild + enable)
+       * - ``Deferred``
+         - Any
+         - Returns to deferred (503) state
+         - ``replace_gateway_deferred()`` (install gateway disabled; guard re-arms)
+       * - ``Last``
+         - Active (initialized)
+         - DoIP reconnects immediately
+         - ``replace_gateway()``
+       * - ``Last``
+         - Deferred (not yet triggered)
+         - Stays deferred (503) state
+         - ``replace_gateway_deferred()``
+
+    In ``Deferred`` mode, after ``replace_gateway_deferred()`` completes, the reloader
+    calls ``InitializationPlugin::on_ready()`` again so the plugin can re-arm its trigger.
 
 
 Health Monitoring
@@ -695,11 +864,14 @@ Error Handling
       NoVariantDetected state; diagnostic operations may still be attempted with base variant.
 
     - **Deferred initialization failure**: When deferred initialization is triggered
-      (by first request or plugin API) and the subsequent DoIP gateway creation or
-      UDS manager creation fails, the error is reported to the caller. When health
-      monitoring is enabled, the DoIP health provider transitions to "Failed" state.
-      The HTTP server and non-ECU endpoints remain operational. Subsequent trigger
-      attempts may retry initialization.
+      (by first request or plugin API) and the subsequent DoIP communication setup
+      fails, ``DeferredInitError::InitFailed(message)`` is produced. The guard calls
+      ``InitializationPlugin::on_initialized()`` with ``InitResult::Failed``. When
+      health monitoring is enabled, the DoIP health provider transitions to "Failed"
+      state. The HTTP server and non-ECU endpoints remain operational. Subsequent
+      trigger attempts may retry initialization. Timeout and cancellation during
+      shutdown are reported as ``DeferredInitError::Timeout`` and
+      ``DeferredInitError::Cancelled`` respectively.
 
     - **Configuration file load failure**: The system falls back to default configuration values
       and logs a warning. Startup continues with defaults, which may be overridden by CLI arguments.

@@ -501,6 +501,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "cda-plugin-deferred-init"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "cda-interfaces",
+ "serde",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
 name = "cda-plugin-runtime-update"
 version = "0.1.0"
 dependencies = [
@@ -511,10 +522,12 @@ dependencies = [
  "cda-plugin-security",
  "cda-sovd",
  "cda-storage",
+ "http",
  "schemars",
  "serde",
  "serde_json",
  "sha2",
+ "sovd-interfaces",
  "tempfile",
  "thiserror",
  "tokio",
@@ -1847,6 +1860,7 @@ name = "integration-tests"
 version = "0.1.0"
 dependencies = [
  "aide",
+ "async-trait",
  "axum",
  "cda-build",
  "cda-comm-doip",
@@ -1855,6 +1869,7 @@ dependencies = [
  "cda-database",
  "cda-health",
  "cda-interfaces",
+ "cda-plugin-deferred-init",
  "cda-plugin-security",
  "cda-sovd",
  "cda-tracing",
@@ -1863,6 +1878,7 @@ dependencies = [
  "figment",
  "futures",
  "http",
+ "kameo",
  "libc",
  "mime",
  "opensovd-cda",
@@ -1872,8 +1888,10 @@ dependencies = [
  "serde_json",
  "serde_qs",
  "sovd-interfaces",
+ "tempfile",
  "thiserror",
  "tokio",
+ "tokio-util",
  "toml 0.9.12+spec-1.1.0",
  "tracing",
  "tracing-subscriber",
@@ -2376,6 +2394,7 @@ dependencies = [
  "cda-extra",
  "cda-health",
  "cda-interfaces",
+ "cda-plugin-deferred-init",
  "cda-plugin-runtime-update",
  "cda-plugin-security",
  "cda-sovd",
@@ -2385,6 +2404,7 @@ dependencies = [
  "clap",
  "figment",
  "futures",
+ "kameo",
  "mimalloc",
  "schemars",
  "serde",
@@ -2392,6 +2412,7 @@ dependencies = [
  "tempfile",
  "thiserror",
  "tokio",
+ "tokio-util",
  "toml 0.9.12+spec-1.1.0",
  "tracing",
  "tracing-subscriber",

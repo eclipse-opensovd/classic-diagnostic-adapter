@@ -31,8 +31,8 @@ use http::{Method, StatusCode};
 use opensovd_cda_lib::{
     cda_version,
     config::configfile::{
-        Configuration, DatabaseConfig, EcuComParams, EcuConfig, RuntimeUpdateConfig, ServerConfig,
-        StrictConfig,
+        CommunicationSettings, Configuration, DatabaseConfig, EcuComParams, EcuConfig,
+        RuntimeUpdateConfig, ServerConfig, StrictConfig,
     },
 };
 use sovd_interfaces::apps::sovd2uds::data::network_structure::get::Response as NetworkStructureResponse;
@@ -179,6 +179,7 @@ fn cda_test_config(
             ignore_protocol: false,
             ignore_invalid_mdd: false,
         },
+        communication: CommunicationSettings::default(),
         logging: LoggingConfig::default(),
         flash_files_path: flash_files_path()?,
         com_params: {
@@ -328,7 +329,7 @@ fn start_cda(config: Configuration) {
             health
                 .register_provider(
                     MAIN_HEALTH_COMPONENT_KEY,
-                    Arc::clone(&provider) as Arc<dyn cda_health::HealthProvider>,
+                    Arc::clone(&provider) as Arc<dyn cda_health::HealthStatus>,
                 )
                 .await
                 .map_err(|e| {
@@ -388,8 +389,8 @@ fn start_cda(config: Configuration) {
             },
             cda_sovd::VehicleResources {
                 ecu_uds: vehicle_data.uds_manager,
-                file_manager: vehicle_data.file_managers,
-                locks: vehicle_data.locks,
+                file_managers: vehicle_data.file_managers,
+                locks: vehicle_data.lock_provider.current_locks().await,
                 update_in_progress: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             },
         )
@@ -465,6 +466,12 @@ fn start_docker_compose(
         .status()
         .map_err(|e| TestingError::ProcessFailed(format!("Failed to build docker compose: {e}")))?;
     check_command_success(status, "docker compose build failed")?;
+
+    // Tear down any leftover containers from a previous (possibly crashed) run before
+    // starting fresh. Without this, `docker compose up` fails with a "container name
+    // already in use" conflict when the atexit cleanup did not run (e.g. the process
+    // was killed with SIGKILL or panicked before atexit handlers fired).
+    docker_compose_down(None)?;
 
     docker_compose_up(None)
 }
@@ -744,7 +751,7 @@ pub(crate) async fn restart_cda(config: &Configuration) -> Result<(), TestingErr
     wait_for_cda_online(&config.server).await
 }
 
-fn use_docker() -> bool {
+pub(crate) fn use_docker() -> bool {
     std::env::var(CDA_INTEGRATION_TEST_USE_DOCKER).map_or(true, |s| s == "true")
 }
 
@@ -806,7 +813,7 @@ pub(crate) async fn wait_for_cda_online(cfg: &ServerConfig) -> Result<(), Testin
 }
 
 /// Poll the networkstructure endpoint until every ECU in every gateway reports
-/// `"Online"`, or until the timeout elapses.
+/// `"Online"` or `"Duplicate"`, or until the timeout elapses.
 ///
 /// This is needed after `reset_sim` because the `DoIP` reconnection and variant
 /// detection run asynchronously: returning immediately after reset would allow
@@ -848,7 +855,7 @@ pub(crate) async fn wait_for_ecus_online(config: &Configuration) -> Result<(), T
             .iter()
             .flat_map(|ns| ns.gateways.iter())
             .flat_map(|gw| gw.ecus.iter())
-            .filter(|ecu| !matches!(ecu.state.as_str(), "Online" | "Duplicate"))
+            .filter(|ecu| !matches!(ecu.state.as_str(), "Online" | "Duplicate" | "NotTested"))
             .map(|ecu| format!("{}={}", ecu.qualifier, ecu.state))
             .collect();
 
