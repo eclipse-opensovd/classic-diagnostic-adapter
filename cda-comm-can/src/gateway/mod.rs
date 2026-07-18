@@ -40,6 +40,16 @@ use self::{
 use crate::config::CanConfig;
 
 const NRC_RESPONSE_PENDING: u8 = 0x78;
+/// A positive UDS response echoes the request SID with this bit set
+/// (ISO 14229-1: response SID = request SID + 0x40).
+const POSITIVE_RESPONSE_SID_FLAG: u8 = 0x40;
+
+/// The instant `timeout` from now, saturating instead of panicking on the
+/// (theoretical) overflow of the underlying monotonic clock.
+fn deadline_in(timeout: Duration) -> tokio::time::Instant {
+    let now = tokio::time::Instant::now();
+    now.checked_add(timeout).unwrap_or(now)
+}
 
 /// CAN bus diagnostic gateway implementing the `EcuGateway` trait.
 ///
@@ -388,67 +398,94 @@ impl EcuGateway for CanDiagGateway {
                     return;
                 }
 
-                // Read initial response
-                let first_response = match exchange.read_response(response_timeout).await {
-                    Ok(data) => data,
-                    Err(CanError::Timeout) => {
-                        let _ = response_sender.send(Err(DiagServiceError::Timeout)).await;
-                        return;
-                    }
-                    Err(e) => {
-                        let _ = response_sender
-                            .send(Err(DiagServiceError::NoResponse(e.to_string())))
-                            .await;
-                        return;
-                    }
-                };
-
-                // Process response, handling NRC 0x78 (Response Pending) by
-                // reading follow-up responses on the same socket.
-                let mut current_response = first_response;
+                // Read until a response that belongs to this request arrives
+                // or the overall deadline expires. CAN is a shared medium:
+                // frames can show up on the response ID that were never an
+                // answer to our request - e.g. an ECU that rejects the
+                // broadcast keep-alive replies `7F 3E 12` on its physical
+                // response ID, and that lands on this socket if it arrives
+                // inside the request/response window. Treating the first
+                // frame read as "the" response would close the socket while
+                // the real answer is still in flight, turning a healthy
+                // exchange into a timeout. So frames whose SID does not echo
+                // the request are dropped here and the read continues; the
+                // socket closes as soon as a genuine final response has been
+                // forwarded, keeping its lifetime short (two sockets open on
+                // the same ID pair would both answer a segmented transfer
+                // with flow control and abort it).
+                //
+                // The deadline is extended only when the ECU signals NRC
+                // 0x78 (Response Pending), matching the caller's rc_78
+                // policy. Dropped unsolicited frames do NOT extend it, so a
+                // peer chattering on our response ID cannot keep a request
+                // whose real response never arrives (e.g. its reassembly was
+                // aborted by an interleaved frame) alive forever and wedge
+                // the per-ECU request semaphore.
+                let sent_sid = request_data.first().copied().unwrap_or_default();
+                let mut deadline = deadline_in(response_timeout);
                 loop {
-                    if current_response.first() == Some(&0x7F)
-                        && current_response.len() >= 3
-                        && current_response.get(2) == Some(&NRC_RESPONSE_PENDING)
-                    {
-                        if response_sender
-                            .send(Ok(Some(UdsResponse::ResponsePending(source_address))))
-                            .await
-                            .is_err()
-                        {
-                            break;
-                        }
-
-                        // Read next response on the SAME socket - no re-send
-                        match exchange.read_response(response_timeout).await {
-                            Ok(next_response) => {
-                                current_response = next_response;
+                    let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+                    let response = tokio::select! {
+                        () = response_sender.closed() => break,
+                        response = exchange.read_response(remaining) => response,
+                    };
+                    match response {
+                        Ok(data) => {
+                            let is_negative = data.first() == Some(&0x7F);
+                            if is_negative
+                                && data.len() >= 3
+                                && data.get(2) == Some(&NRC_RESPONSE_PENDING)
+                            {
+                                // NRC 0x78 (Response Pending): typed so the
+                                // UDS layer applies its completion policy;
+                                // the next response arrives on this socket.
+                                deadline = deadline_in(response_timeout);
+                                if response_sender
+                                    .send(Ok(Some(UdsResponse::ResponsePending(source_address))))
+                                    .await
+                                    .is_err()
+                                {
+                                    break;
+                                }
                                 continue;
                             }
-                            Err(CanError::Timeout) => {
-                                let _ = response_sender.send(Err(DiagServiceError::Timeout)).await;
-                                break;
+                            let is_for_request = if is_negative {
+                                data.get(1) == Some(&sent_sid)
+                            } else {
+                                data.first() == Some(&(sent_sid | POSITIVE_RESPONSE_SID_FLAG))
+                            };
+                            if !is_for_request {
+                                tracing::debug!(
+                                    data = %hex::encode(&data),
+                                    request_sid = format_args!("{sent_sid:#04x}"),
+                                    "Dropping response not belonging to the pending \
+                                     request, continue reading"
+                                );
+                                continue;
                             }
-                            Err(e) => {
-                                let _ = response_sender
-                                    .send(Err(DiagServiceError::NoResponse(e.to_string())))
-                                    .await;
-                                break;
-                            }
+
+                            // Final response (positive or negative)
+                            let uds_response = UdsResponse::Message(ServicePayload {
+                                data,
+                                source_address,
+                                target_address,
+                                new_session: None,
+                                new_security: None,
+                            });
+                            let _ = response_sender.send(Ok(Some(uds_response))).await;
+                            break;
+                        }
+                        Err(CanError::Timeout) => {
+                            let _ = response_sender.send(Err(DiagServiceError::Timeout)).await;
+                            break;
+                        }
+                        Err(e) => {
+                            let _ = response_sender
+                                .send(Err(DiagServiceError::NoResponse(e.to_string())))
+                                .await;
+                            break;
                         }
                     }
-
-                    // Final response (positive or negative)
-                    let uds_response = UdsResponse::Message(ServicePayload {
-                        data: current_response,
-                        source_address,
-                        target_address,
-                        new_session: None,
-                        new_security: None,
-                    });
-
-                    let _ = response_sender.send(Ok(Some(uds_response))).await;
-                    break;
                 }
             }
         });
