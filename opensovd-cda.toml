@@ -367,6 +367,25 @@
 # nanos = 0
 # secs = 1
 
+# Communication initialization and lifecycle settings.
+[communication]
+# The value (in seconds) for the HTTP `Retry-After` header returned when a
+# diagnostic request arrives while initialization is still pending.
+#
+# This gives the client a hint for how long to wait before retrying.
+# Defaults to 30s, which allows time for variant detection to complete.
+# deferred_retry_after_seconds = 30
+# Controls when `DoIP` gateway creation and ECU communication begins.
+#
+# Defaults to [`CommunicationInitMode::Enabled`], which preserves the
+# existing startup behavior.
+# init_mode = "Enabled"
+# Controls `DoIP` behavior after a runtime database update.
+#
+# Defaults to [`PostUpdateCommunicationMode::Enabled`], which reconnects
+# `DoIP` immediately after each update (existing behavior).
+# post_update_mode = "Enabled"
+
 [components.additional_fields.x-sovd2uds-can-ecus.CAN]
 # ignore_case = true
 # values = ["yes"]
