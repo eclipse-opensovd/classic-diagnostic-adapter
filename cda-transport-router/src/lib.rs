@@ -39,7 +39,10 @@
 //!     .with_can(can_gateway);
 //! ```
 
-use std::sync::Arc;
+use std::sync::{
+    Arc,
+    atomic::{AtomicBool, Ordering},
+};
 
 pub use cda_interfaces::TransportType;
 use cda_interfaces::{
@@ -70,6 +73,7 @@ pub struct DiagnosticTransportRouter<
     /// transport). Entries are written once and never change at runtime, so
     /// a diagnostic session can never silently switch transports.
     ecu_bindings: Arc<RwLock<HashMap<String, TransportType>>>,
+    communication_active: Option<Arc<AtomicBool>>,
 }
 
 impl<D: EcuGateway + FunctionalTransport + TransportProbe, C: EcuGateway + TransportProbe>
@@ -83,6 +87,7 @@ impl<D: EcuGateway + FunctionalTransport + TransportProbe, C: EcuGateway + Trans
             can_gateway: None,
             transport_overrides: Arc::new(transport_overrides),
             ecu_bindings: Arc::new(RwLock::new(HashMap::default())),
+            communication_active: None,
         }
     }
 
@@ -98,6 +103,26 @@ impl<D: EcuGateway + FunctionalTransport + TransportProbe, C: EcuGateway + Trans
     pub fn with_can(mut self, gateway: C) -> Self {
         self.can_gateway = Some(gateway);
         self
+    }
+
+    /// Inhibits all routed communication while `active` is false.
+    #[must_use]
+    pub fn with_communication_active(mut self, active: Arc<AtomicBool>) -> Self {
+        self.communication_active = Some(active);
+        self
+    }
+
+    fn ensure_communication_active(&self) -> Result<(), DiagServiceError> {
+        if self
+            .communication_active
+            .as_ref()
+            .is_some_and(|active| !active.load(Ordering::Acquire))
+        {
+            return Err(DiagServiceError::RequestNotSupported(
+                "diagnostic communication disabled".to_owned(),
+            ));
+        }
+        Ok(())
     }
 
     /// Returns the wrapped `DoIP` gateway, if one is configured.
@@ -230,6 +255,7 @@ impl<D: EcuGateway + FunctionalTransport + TransportProbe, C: EcuGateway + Trans
         response_sender: mpsc::Sender<Result<Option<TransportResponse>, DiagServiceError>>,
         expect_uds_reply: bool,
     ) -> Result<(), DiagServiceError> {
+        self.ensure_communication_active()?;
         let ecu_name = transmission_params.ecu_name.to_lowercase();
         let transport = self.resolve_transport(&ecu_name).await?;
 
@@ -266,6 +292,7 @@ impl<D: EcuGateway + FunctionalTransport + TransportProbe, C: EcuGateway + Trans
         ecu_name: &str,
         ecu_db: &RwLock<E>,
     ) -> Result<(), DiagServiceError> {
+        self.ensure_communication_active()?;
         // resolve_transport handles: overrides -> existing bindings -> first detection
         let transport = self.resolve_transport(ecu_name).await?;
 
@@ -303,6 +330,7 @@ impl<D: EcuGateway + FunctionalTransport + TransportProbe, C: EcuGateway + Trans
         timeout: std::time::Duration,
         expect_positive_response: bool,
     ) -> Result<HashMap<String, Result<ServicePayload, DiagServiceError>>, DiagServiceError> {
+        self.ensure_communication_active()?;
         if let Some(ref doip) = self.doip_gateway {
             return doip
                 .send_functional(
@@ -385,6 +413,7 @@ impl<D: EcuGateway + FunctionalTransport + TransportProbe, C: EcuGateway + Trans
             can_gateway: self.can_gateway.clone(),
             transport_overrides: Arc::clone(&self.transport_overrides),
             ecu_bindings: Arc::clone(&self.ecu_bindings),
+            communication_active: self.communication_active.as_ref().map(Arc::clone),
         }
     }
 }

@@ -38,13 +38,16 @@ use tokio::{
 };
 use tokio_util::sync::CancellationToken;
 
+pub mod comm_handle;
 pub mod config;
+pub mod deferred_gateway;
 pub mod error;
 pub use error::{ConnectionError, DoipGatewaySetupError};
 mod connection_receiver;
 mod connection_sender;
 mod connections;
 mod ecu_connection;
+pub mod health;
 pub mod socket;
 mod vir_vam;
 
@@ -362,7 +365,6 @@ impl<T: EcuAddresses + DoipComParams> DoipDiagGateway<T> {
             vam_listener_handle: Arc::new(Mutex::new(Some(vam_listener_handle))),
         })
     }
-
 
     async fn get_doip_connection(
         &self,

@@ -27,6 +27,7 @@ cda-interfaces = { workspace = true }
 cda-core = { workspace = true }
 cda-database = { workspace = true }
 cda-sovd = { workspace = true }
+cda-plugin-deferred-init = { workspace = true }
 sovd-interfaces = { workspace = true }
 cda-tracing = { workspace = true }
 cda-plugin-security = { workspace = true }
@@ -34,6 +35,8 @@ cda-comm-doip = { workspace = true }
 cda-comm-uds = { workspace = true }
 cda-health = { workspace = true }
 opensovd_cda_lib = { workspace = true, features = ["integration-tests"] }
+kameo = { workspace = true }
+tokio-util = { workspace = true }
 
 # External dependencies
 # tokio
@@ -45,7 +48,7 @@ serde_qs = { workspace = true, features = ["axum"] }
 # http
 aide = { workspace = true, features = ["axum"] }
 axum = { workspace = true }
-reqwest = { workspace = true, features = ["multipart"] }
+reqwest = { workspace = true, features = ["multipart", "json"] }
 http = { workspace = true }
 mime = { workspace = true }
 schemars = { workspace = true }
@@ -74,6 +77,10 @@ chrono = { workspace = true }
 futures = { workspace = true }
 # libc
 libc = { workspace = true }
+# temporary directories for isolated CDA instances in tests
+tempfile = { workspace = true }
+# async trait for StubCommControl in deferred-init tests
+async-trait = { workspace = true }
 
 # compile time format
 const_format = { workspace = true }

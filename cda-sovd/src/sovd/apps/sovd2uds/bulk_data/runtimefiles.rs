@@ -18,12 +18,13 @@ use axum::{
     http::{HeaderValue, StatusCode, header::RETRY_AFTER},
     response::{IntoResponse, Response},
 };
-use cda_interfaces::runtime_update_api::{
-    LockStateProvider, RuntimeFilesUpdatePlugin, RuntimeUpdateError,
+use cda_interfaces::{
+    guard::ExemptRoute,
+    runtime_update_api::{LockStateProvider, RuntimeFilesUpdatePlugin, RuntimeUpdateError},
 };
 use sovd_interfaces::error::{ApiErrorResponse, ErrorCode};
 
-use crate::{ExemptRoute, VendorErrorCode};
+use crate::VendorErrorCode;
 
 const EXECUTIONS_ROUTE: &str =
     "/vehicle/v15/apps/sovd2uds/bulk-data/runtimefiles-nextupdate/executions";
@@ -552,6 +553,6 @@ pub fn routes<
 pub fn update_exempt_routes() -> Vec<ExemptRoute> {
     vec![ExemptRoute {
         prefix: EXECUTIONS_ROUTE.to_string(),
-        methods: vec![http::Method::GET],
+        methods: vec![cda_interfaces::guard::HttpMethod::Get],
     }]
 }

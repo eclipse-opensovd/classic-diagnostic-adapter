@@ -18,3 +18,4 @@ Architecture Decision Records
 .. include:: 02_mbedtls_tls_backend.rst
 .. include:: 03_mmap_strategy.rst
 .. include:: 04_wal_format.rst
+.. include:: 05_deferred_initialization.rst
