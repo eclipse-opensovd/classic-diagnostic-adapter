@@ -148,7 +148,11 @@ impl CanDiagGateway {
                     "Added CAN connection from config mapping"
                 );
 
-                logical_address_to_ecu.insert(logical_addr, ecu_name.clone());
+                Self::register_logical_address(
+                    &mut logical_address_to_ecu,
+                    logical_addr,
+                    &ecu_name,
+                );
                 connections.insert(ecu_name, Arc::new(conn));
             } else {
                 tracing::warn!(
@@ -186,7 +190,11 @@ impl CanDiagGateway {
                     response_id = %response_id,
                     "Added CAN connection from MDD COM params"
                 );
-                logical_address_to_ecu.insert(logical_addr, ecu_name.clone());
+                Self::register_logical_address(
+                    &mut logical_address_to_ecu,
+                    logical_addr,
+                    &ecu_name,
+                );
                 connections.insert(ecu_name, Arc::new(conn));
             }
         }
@@ -266,6 +274,28 @@ impl CanDiagGateway {
         }
 
         Ok(gateway)
+    }
+
+    /// Records the logical-address -> ECU lookup used by the
+    /// address-oriented `EcuGateway` methods (network structure, discovery
+    /// checks). ECUs of CAN-only databases have no `DoIP` addressing and all
+    /// carry the unresolved fallback address `0x0000` - registering that
+    /// would map the shared "address" onto whichever ECU came last, so those
+    /// ECUs stay unregistered here and are served by the name-based paths
+    /// only.
+    fn register_logical_address(
+        logical_address_to_ecu: &mut HashMap<u16, String>,
+        logical_addr: u16,
+        ecu_name: &str,
+    ) {
+        if logical_addr == 0 {
+            tracing::debug!(
+                ecu = %ecu_name,
+                "No resolved logical address; ECU reachable via name-based lookups only"
+            );
+            return;
+        }
+        logical_address_to_ecu.insert(logical_addr, ecu_name.to_owned());
     }
 
     /// Converts a raw configured/com-param CAN ID into a validated [`CanId`]

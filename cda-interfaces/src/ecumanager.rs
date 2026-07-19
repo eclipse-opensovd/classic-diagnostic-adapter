@@ -452,16 +452,45 @@ pub trait EcuAddresses: Send + Sync + 'static {
     fn logical_address_eq<T: EcuAddresses>(&self, other: &T) -> bool;
 
     /// Stable key used to serialize requests that must not overlap on the same
-    /// transport target. Derived from the gateway/logical address pair; for CAN
-    /// this still uniquely identifies an ECU because each is configured with a
-    /// distinct logical address.
+    /// transport target; see [`request_lock_key_for`] for the semantics.
+    ///
+    /// This default assumes the gateway/logical address pair is genuinely
+    /// resolved. Implementations that can carry unresolved fallback addresses
+    /// (all ECUs of a CAN-only database share the com-param default) must
+    /// override it with [`request_lock_key_for`] and their resolved-ness flag,
+    /// otherwise unrelated ECUs end up serialized behind one semaphore.
     #[must_use]
     fn request_lock_key(&self) -> String {
-        format!(
-            "logical:0x{:04X}@0x{:04X}",
+        request_lock_key_for(
+            true,
             self.logical_gateway_address(),
-            self.logical_address()
+            self.logical_address(),
+            "",
         )
+    }
+}
+
+/// Builds the key under which requests to the same transport target are
+/// serialized (the per-ECU request semaphore).
+///
+/// Resolved gateway/logical addresses identify the physical target: ECUs of a
+/// duplicate group share their address pair on purpose, so they share the key
+/// and their requests never overlap on the shared node. When the addresses
+/// are *not* resolved (e.g. a CAN-only MDD without `DoIP` addressing, where
+/// every ECU carries the same com-param fallback values), the address pair
+/// identifies nothing, and keying on it would serialize requests of unrelated
+/// ECUs behind one semaphore - so such ECUs fall back to their unique name.
+#[must_use]
+pub fn request_lock_key_for(
+    addresses_resolved: bool,
+    logical_gateway_address: u16,
+    logical_address: u16,
+    ecu_name: &str,
+) -> String {
+    if addresses_resolved {
+        format!("logical:0x{logical_gateway_address:04X}@0x{logical_address:04X}")
+    } else {
+        format!("ecu:{}", ecu_name.to_lowercase())
     }
 }
 
@@ -1115,5 +1144,42 @@ mod tests {
         // Response: positive with wrong DID
         let response = make_payload(vec![0x6E, 0xF2, 0x00]);
         assert!(!response.has_matching_echo_bytes(&request));
+    }
+
+    // request_lock_key_for: the per-ECU request-serialization key
+
+    #[test]
+    fn resolved_addresses_share_the_key_per_target() {
+        // Duplicate-group ECUs share their resolved address pair on purpose:
+        // both names map onto the same key, serializing requests to the
+        // shared physical node.
+        let a = request_lock_key_for(true, 0x1000, 0x0712, "R0_13_453");
+        let b = request_lock_key_for(true, 0x1000, 0x0712, "R_MID453");
+        assert_eq!(a, b);
+        assert_eq!(a, "logical:0x1000@0x0712");
+        // Distinct resolved addresses keep distinct keys.
+        assert_ne!(a, request_lock_key_for(true, 0x1000, 0x0713, "OTHER"));
+    }
+
+    #[test]
+    fn unresolved_addresses_key_by_name() {
+        // CAN-only MDDs: every ECU carries the same fallback address pair
+        // (0x0000@0x0000). Keying on it would serialize unrelated ECUs behind
+        // one semaphore, so unresolved ECUs key by their unique name instead.
+        let a = request_lock_key_for(false, 0, 0, "BMS453");
+        let b = request_lock_key_for(false, 0, 0, "BIC453");
+        assert_ne!(a, b);
+        assert_eq!(a, "ecu:bms453");
+        // Case-insensitive: the ECU map is lowercase-keyed, config casing may
+        // differ.
+        assert_eq!(
+            request_lock_key_for(false, 0, 0, "Bms453"),
+            request_lock_key_for(false, 0, 0, "BMS453")
+        );
+        // Name-based and address-based keys can never collide.
+        assert_ne!(
+            request_lock_key_for(false, 0x1000, 0x0712, "ecu1"),
+            request_lock_key_for(true, 0x1000, 0x0712, "ecu1")
+        );
     }
 }

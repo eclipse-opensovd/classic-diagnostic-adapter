@@ -162,6 +162,19 @@ impl<S: SecurityPlugin> cda_interfaces::EcuAddresses for EcuManager<S> {
         self.logical_address == other.logical_address()
             && self.logical_gateway_address() == other.logical_gateway_address()
     }
+
+    fn request_lock_key(&self) -> String {
+        // CAN-only MDDs carry no DoIP addressing: their ECUs all share the
+        // com-param fallback addresses, which must not collapse them onto one
+        // request semaphore. Observed on a real vehicle where every ECU
+        // resolved to 0x0000@0x0000 and all requests serialized globally.
+        cda_interfaces::request_lock_key_for(
+            self.doip_addresses_resolved,
+            self.logical_gateway_address,
+            self.logical_address,
+            &self.ecu_name,
+        )
+    }
 }
 
 /// Prepared hook for extracting CAN addressing from the MDD com-params
