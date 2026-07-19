@@ -457,14 +457,16 @@ pub trait EcuAddresses: Send + Sync + 'static {
     /// This default assumes the gateway/logical address pair is genuinely
     /// resolved. Implementations that can carry unresolved fallback addresses
     /// (all ECUs of a CAN-only database share the com-param default) must
-    /// override it with [`request_lock_key_for`] and their resolved-ness flag,
-    /// otherwise unrelated ECUs end up serialized behind one semaphore.
+    /// override it with [`request_lock_key_for`], their resolved-ness flag
+    /// and their CAN IDs, otherwise unrelated ECUs end up serialized behind
+    /// one semaphore.
     #[must_use]
     fn request_lock_key(&self) -> String {
         request_lock_key_for(
             true,
             self.logical_gateway_address(),
             self.logical_address(),
+            None,
             "",
         )
     }
@@ -473,22 +475,31 @@ pub trait EcuAddresses: Send + Sync + 'static {
 /// Builds the key under which requests to the same transport target are
 /// serialized (the per-ECU request semaphore).
 ///
-/// Resolved gateway/logical addresses identify the physical target: ECUs of a
-/// duplicate group share their address pair on purpose, so they share the key
-/// and their requests never overlap on the shared node. When the addresses
-/// are *not* resolved (e.g. a CAN-only MDD without `DoIP` addressing, where
-/// every ECU carries the same com-param fallback values), the address pair
-/// identifies nothing, and keying on it would serialize requests of unrelated
-/// ECUs behind one semaphore - so such ECUs fall back to their unique name.
+/// A transport target is shared by every candidate description of the same
+/// physical node (a duplicate group), and concurrent requests to one node
+/// must never overlap - on CAN they would even corrupt each other's
+/// segmented transfers via doubled flow control. In priority order:
+///
+/// 1. Resolved `DoIP` gateway/logical address pair - the established key;
+///    duplicate-group ECUs share their pair on purpose.
+/// 2. The CAN arbitration ID pair from the MDD com-params - the target
+///    identity for ECUs without `DoIP` addressing (CAN-only databases);
+///    candidate models sharing one pair share the key.
+/// 3. The unique ECU name - when nothing identifies the target, the shared
+///    com-param fallback addresses must NOT collapse unrelated ECUs onto one
+///    semaphore.
 #[must_use]
 pub fn request_lock_key_for(
     addresses_resolved: bool,
     logical_gateway_address: u16,
     logical_address: u16,
+    can_ids: Option<(u32, u32)>,
     ecu_name: &str,
 ) -> String {
     if addresses_resolved {
         format!("logical:0x{logical_gateway_address:04X}@0x{logical_address:04X}")
+    } else if let Some((request_id, response_id)) = can_ids {
+        format!("can:0x{request_id:X}@0x{response_id:X}")
     } else {
         format!("ecu:{}", ecu_name.to_lowercase())
     }
@@ -1153,33 +1164,59 @@ mod tests {
         // Duplicate-group ECUs share their resolved address pair on purpose:
         // both names map onto the same key, serializing requests to the
         // shared physical node.
-        let a = request_lock_key_for(true, 0x1000, 0x0712, "R0_13_453");
-        let b = request_lock_key_for(true, 0x1000, 0x0712, "R_MID453");
+        let a = request_lock_key_for(true, 0x1000, 0x0712, None, "R0_13_453");
+        let b = request_lock_key_for(true, 0x1000, 0x0712, None, "R_MID453");
         assert_eq!(a, b);
         assert_eq!(a, "logical:0x1000@0x0712");
         // Distinct resolved addresses keep distinct keys.
-        assert_ne!(a, request_lock_key_for(true, 0x1000, 0x0713, "OTHER"));
+        assert_ne!(a, request_lock_key_for(true, 0x1000, 0x0713, None, "OTHER"));
+        // Resolved DoIP addressing outranks CAN IDs: the established key
+        // stays stable when an MDD carries both.
+        assert_eq!(
+            request_lock_key_for(true, 0x1000, 0x0712, Some((0x712, 0x732)), "R0_13_453"),
+            a
+        );
     }
 
     #[test]
-    fn unresolved_addresses_key_by_name() {
-        // CAN-only MDDs: every ECU carries the same fallback address pair
-        // (0x0000@0x0000). Keying on it would serialize unrelated ECUs behind
-        // one semaphore, so unresolved ECUs key by their unique name instead.
-        let a = request_lock_key_for(false, 0, 0, "BMS453");
-        let b = request_lock_key_for(false, 0, 0, "BIC453");
+    fn can_ids_share_the_key_per_node() {
+        // CAN-only duplicate group: R0_13_453 and R_MID453 both derive
+        // 0x712/0x732 from their MDDs - one physical radio, two candidate
+        // descriptions. They must share the key so their requests serialize.
+        let a = request_lock_key_for(false, 0, 0, Some((0x712, 0x732)), "R0_13_453");
+        let b = request_lock_key_for(false, 0, 0, Some((0x712, 0x732)), "R_MID453");
+        assert_eq!(a, b);
+        assert_eq!(a, "can:0x712@0x732");
+        // Distinct nodes keep distinct keys.
+        assert_ne!(
+            a,
+            request_lock_key_for(false, 0, 0, Some((0x79B, 0x7BB)), "BMS453")
+        );
+    }
+
+    #[test]
+    fn unresolved_addresses_without_can_ids_key_by_name() {
+        // Neither resolved DoIP addressing nor CAN IDs: the shared com-param
+        // fallback addresses must not collapse unrelated ECUs onto one
+        // semaphore, so the unique name is the key.
+        let a = request_lock_key_for(false, 0, 0, None, "BMS453");
+        let b = request_lock_key_for(false, 0, 0, None, "BIC453");
         assert_ne!(a, b);
         assert_eq!(a, "ecu:bms453");
         // Case-insensitive: the ECU map is lowercase-keyed, config casing may
         // differ.
         assert_eq!(
-            request_lock_key_for(false, 0, 0, "Bms453"),
-            request_lock_key_for(false, 0, 0, "BMS453")
+            request_lock_key_for(false, 0, 0, None, "Bms453"),
+            request_lock_key_for(false, 0, 0, None, "BMS453")
         );
-        // Name-based and address-based keys can never collide.
+        // The three key namespaces can never collide.
         assert_ne!(
-            request_lock_key_for(false, 0x1000, 0x0712, "ecu1"),
-            request_lock_key_for(true, 0x1000, 0x0712, "ecu1")
+            request_lock_key_for(false, 0x1000, 0x0712, None, "ecu1"),
+            request_lock_key_for(true, 0x1000, 0x0712, None, "ecu1")
+        );
+        assert_ne!(
+            request_lock_key_for(false, 0, 0, Some((0x1000, 0x0712)), "ecu1"),
+            request_lock_key_for(true, 0x1000, 0x0712, None, "ecu1")
         );
     }
 }

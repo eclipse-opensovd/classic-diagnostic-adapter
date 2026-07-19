@@ -173,10 +173,13 @@ impl<S: SecurityPlugin> cda_interfaces::EcuAddresses for EcuManager<S> {
         // com-param fallback addresses, which must not collapse them onto one
         // request semaphore. Observed on a real vehicle where every ECU
         // resolved to 0x0000@0x0000 and all requests serialized globally.
+        // The CAN ID pair is the target identity there - shared by the
+        // candidate descriptions of one physical node (duplicate group).
         cda_interfaces::request_lock_key_for(
             self.doip_addresses_resolved,
             self.logical_gateway_address,
             self.logical_address,
+            self.can_request_id.zip(self.can_response_id),
             &self.ecu_name,
         )
     }
