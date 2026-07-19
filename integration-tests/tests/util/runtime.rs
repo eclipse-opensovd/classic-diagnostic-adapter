@@ -32,8 +32,8 @@ use http::{Method, StatusCode};
 use opensovd_cda_lib::{
     cda_version,
     config::configfile::{
-        Configuration, DatabaseConfig, EcuComParams, EcuConfig, RuntimeUpdateConfig, ServerConfig,
-        StrictConfig,
+        CanConfig, CanEcuMapping, Configuration, DatabaseConfig, EcuComParams, EcuConfig,
+        RuntimeUpdateConfig, ServerConfig, StrictConfig, TransportOverride, TransportType,
     },
 };
 use sovd_interfaces::apps::sovd2uds::data::network_structure::get::Response as NetworkStructureResponse;
@@ -64,6 +64,19 @@ static ECU_SIM_PROCESS: LazyLock<Mutex<Option<std::process::Child>>> =
 const CDA_INTEGRATION_TEST_USE_DOCKER: &str = "CDA_INTEGRATION_TEST_USE_DOCKER";
 const CDA_INTEGRATION_TEST_TESTER_ADDRESS: &str = "CDA_INTEGRATION_TEST_TESTER_ADDRESS";
 const CDA_INTEGRATION_TEST_COVERAGE: &str = "CDA_INTEGRATION_TEST_COVERAGE";
+const CDA_INTEGRATION_TEST_USE_CAN: &str = "CDA_INTEGRATION_TEST_USE_CAN";
+/// Mixed mode: `DoIP` and CAN run simultaneously. TMCC3000/HOVR4000/JGWT5000
+/// are pinned to CAN, FLXC1000 to `DoIP`, the remaining ECUs bind at first
+/// detection.
+const CDA_INTEGRATION_TEST_USE_MIXED: &str = "CDA_INTEGRATION_TEST_USE_MIXED";
+/// Port of the socketcand daemon that fronts the shared (v)can bus. CDA and the
+/// ecu-sim both connect to it as rawmode clients.
+const SOCKETCAND_PORT: u16 = 29536;
+/// Name of the CAN bus exposed by socketcand.
+const CAN_BUS_NAME: &str = "vcan0";
+/// socketcand host CDA + ecu-sim use *inside* their containers: the socketcand
+/// service is reachable by its compose service name over the bridge network.
+const CAN_DOCKER_SOCKETCAND_HOST: &str = "socketcand";
 
 const MAIN_HEALTH_COMPONENT_KEY: &str = "main";
 
@@ -123,6 +136,9 @@ async fn initialize_runtime() -> Result<TestRuntime, TestingError> {
     let (cda_port, gateway_port, sim_control_port) = if use_docker() {
         (
             find_available_tcp_port(&host)?,
+            // gateway_port is written to `.env` as SIM_GATEWAY_PORT but the JVM
+            // reads SIM_DOIP_PORT, so this allocation is currently dead (kept as
+            // a pre-existing behaviour; cleanup tracked separately).
             find_available_tcp_port(&host)?,
             find_available_tcp_port(&host)?,
         )
@@ -130,7 +146,13 @@ async fn initialize_runtime() -> Result<TestRuntime, TestingError> {
         (20002, 13400, 8181) // default ports for local usage
     };
 
-    let config = cda_test_config(host.clone(), cda_port, gateway_port)?;
+    let config = if use_mixed() {
+        cda_test_config_mixed(host.clone(), cda_port, gateway_port)?
+    } else if use_can() {
+        cda_test_config_can(host.clone(), cda_port)?
+    } else {
+        cda_test_config(host.clone(), cda_port, gateway_port)?
+    };
     config.validate_sanity().map_err(|e| {
         TestingError::SetupError(format!("Configuration sanity check failed: {e:?}"))
     })?;
@@ -145,7 +167,11 @@ async fn initialize_runtime() -> Result<TestRuntime, TestingError> {
         write_config_toml(&test_container_dir()?, config.clone())?;
         start_docker_compose(cda_port, gateway_port, sim_control_port)?;
     } else {
-        start_ecu_sim(&ecu_sim).await?;
+        if can_infra() {
+            start_ecu_sim_can(&ecu_sim).await?;
+        } else {
+            start_ecu_sim(&ecu_sim).await?;
+        }
         start_cda(config.clone());
     }
 
@@ -162,7 +188,67 @@ fn cda_test_config(
     cda_port: u16,
     gateway_port: u16,
 ) -> Result<Configuration, TestingError> {
-    let config = Configuration {
+    doip_test_config(host, cda_port, gateway_port, per_ecu_configs_for_doip())
+}
+
+fn cda_test_config_can(host: String, cda_port: u16) -> Result<Configuration, TestingError> {
+    let mut config =
+        doip_test_config(host, cda_port, /*unused*/ 0, per_ecu_configs_for_can())?;
+    config.doip.enabled = false;
+    config.can = Some(test_can_config(vec![]));
+    Ok(config)
+}
+
+/// Mixed `DoIP`+CAN configuration: both transports are live. The three ECUs
+/// that already have CAN-style per-ECU configs are pinned to CAN; FLXC1000 is
+/// pinned to `DoIP` so the session/security/variant tests (which target it)
+/// run deterministically over `DoIP`; the remaining ECUs are left unpinned to
+/// exercise sticky first-detection binding.
+fn cda_test_config_mixed(
+    host: String,
+    cda_port: u16,
+    gateway_port: u16,
+) -> Result<Configuration, TestingError> {
+    let mut ecu = per_ecu_configs_for_doip();
+    // Pinned-to-CAN ECUs use the CAN-style protocol handling.
+    for (name, cfg) in per_ecu_configs_for_can() {
+        ecu.insert(name, cfg);
+    }
+    let mut config = doip_test_config(host, cda_port, gateway_port, ecu)?;
+    let pins = [
+        ("TMCC3000", TransportType::Can),
+        ("HOVR4000", TransportType::Can),
+        ("JGWT5000", TransportType::Can),
+        ("FLXC1000", TransportType::DoIP),
+    ]
+    .into_iter()
+    .map(|(ecu_name, transport)| TransportOverride {
+        ecu_name: ecu_name.to_owned(),
+        transport,
+    })
+    .collect();
+    config.can = Some(test_can_config(pins));
+    Ok(config)
+}
+
+fn test_can_config(transport_overrides: Vec<TransportOverride>) -> CanConfig {
+    CanConfig {
+        interface: format!("socketcand:127.0.0.1:{SOCKETCAND_PORT}:{CAN_BUS_NAME}"),
+        ecu_mappings: can_ecu_mappings(),
+        transport_overrides,
+        response_timeout_ms: 2000,
+        probe_timeout_ms: 500,
+        probe_fallbacks: vec![],
+    }
+}
+
+fn doip_test_config(
+    host: String,
+    cda_port: u16,
+    gateway_port: u16,
+    ecu: HashMap<String, EcuConfig>,
+) -> Result<Configuration, TestingError> {
+    Ok(Configuration {
         server: opensovd_cda_lib::config::configfile::ServerConfig {
             address: host.clone(),
             port: cda_port,
@@ -172,6 +258,7 @@ fn cda_test_config(
             gateway_port,
             ..Default::default()
         },
+        can: None,
         database: DatabaseConfig {
             path: mdd_file_path()?,
             naming_convention: DatabaseNamingConvention::default(),
@@ -206,80 +293,121 @@ fn cda_test_config(
             user_memory_scope: "Development".to_owned(),
             ..Default::default()
         },
-        ecu: {
-            let mut map = HashMap::new();
-            map.insert(
-                "TMCC3000".to_owned(),
-                EcuConfig {
-                    ignore_protocol: Some(true),
-                    com_params: Some(
-                        EcuComParams::try_from(ComParams {
-                            doip: DoipComParams {
-                                logical_gateway_address: ComParamConfig {
-                                    name: "logical_gateway_address".to_string(),
-                                    value: 0x3000,
-                                    precedence: ComParamPrecedence::Config,
-                                },
-                                ..Default::default()
-                            },
-                            ..Default::default()
-                        })
-                        .expect("Failed to create EcuConfig for TMCC3000"),
-                    ),
-                    ..Default::default()
-                },
-            );
-            map.insert(
-                "HOVR4000".to_owned(),
-                EcuConfig {
-                    com_params: Some(
-                        EcuComParams::try_from(ComParams {
-                            doip: DoipComParams {
-                                logical_gateway_address: ComParamConfig {
-                                    name: "logical_gateway_address".to_string(),
-                                    value: 0x4000,
-                                    precedence: ComParamPrecedence::Config,
-                                },
-                                ..Default::default()
-                            },
-                            ..Default::default()
-                        })
-                        .expect("Failed to create EcuConfig for HOVR4000"),
-                    ),
-                    protocol: Some("DMC_DoIP".to_owned()),
-                    ignore_protocol: Some(false),
-                },
-            );
-            map.insert(
-                "JGWT5000".to_owned(),
-                EcuConfig {
-                    ignore_protocol: Some(true),
-                    com_params: Some(
-                        EcuComParams::try_from(ComParams {
-                            doip: DoipComParams {
-                                logical_gateway_address: ComParamConfig {
-                                    name: "logical_gateway_address".to_string(),
-                                    value: 0x5000,
-                                    precedence: ComParamPrecedence::Config,
-                                },
-                                ..Default::default()
-                            },
-                            ..Default::default()
-                        })
-                        .expect("Failed to create EcuConfig for JGWT5000"),
-                    ),
-                    ..Default::default()
-                },
-            );
-            map
-        },
+        ecu,
         runtime_update_config: RuntimeUpdateConfig {
             init_storage_from_database_path: true,
             ..RuntimeUpdateConfig::default()
         },
         strict: StrictConfig::default(),
-    };
-    Ok(config)
+    })
+}
+
+fn per_ecu_configs_for_doip() -> HashMap<String, EcuConfig> {
+    let mut map = HashMap::new();
+    map.insert(
+        "TMCC3000".to_owned(),
+        EcuConfig {
+            ignore_protocol: Some(true),
+            com_params: Some(
+                EcuComParams::try_from(ComParams {
+                    doip: DoipComParams {
+                        logical_gateway_address: ComParamConfig {
+                            name: "logical_gateway_address".to_string(),
+                            value: 0x3000,
+                            precedence: ComParamPrecedence::Config,
+                        },
+                        ..Default::default()
+                    },
+                    ..Default::default()
+                })
+                .expect("Failed to create EcuConfig for TMCC3000"),
+            ),
+            ..Default::default()
+        },
+    );
+    map.insert(
+        "HOVR4000".to_owned(),
+        EcuConfig {
+            com_params: Some(
+                EcuComParams::try_from(ComParams {
+                    doip: DoipComParams {
+                        logical_gateway_address: ComParamConfig {
+                            name: "logical_gateway_address".to_string(),
+                            value: 0x4000,
+                            precedence: ComParamPrecedence::Config,
+                        },
+                        ..Default::default()
+                    },
+                    ..Default::default()
+                })
+                .expect("Failed to create EcuConfig for HOVR4000"),
+            ),
+            protocol: Some("DMC_DoIP".to_owned()),
+            ignore_protocol: Some(false),
+        },
+    );
+    map.insert(
+        "JGWT5000".to_owned(),
+        EcuConfig {
+            ignore_protocol: Some(true),
+            com_params: Some(
+                EcuComParams::try_from(ComParams {
+                    doip: DoipComParams {
+                        logical_gateway_address: ComParamConfig {
+                            name: "logical_gateway_address".to_string(),
+                            value: 0x5000,
+                            precedence: ComParamPrecedence::Config,
+                        },
+                        ..Default::default()
+                    },
+                    ..Default::default()
+                })
+                .expect("Failed to create EcuConfig for JGWT5000"),
+            ),
+            ..Default::default()
+        },
+    );
+    map
+}
+
+fn per_ecu_configs_for_can() -> HashMap<String, EcuConfig> {
+    // For CAN we let the MDD's protocol layer win where it exists, and
+    // fall back to `ignore_protocol = true` for the protocol-less MDDs
+    // (TMCC3000, JGWT5000). This mirrors the working configuration in
+    // `scripts/test_can_e2e.sh`.
+    let mut map = HashMap::new();
+    for name in ["TMCC3000", "HOVR4000", "JGWT5000"] {
+        map.insert(
+            name.to_owned(),
+            EcuConfig {
+                ignore_protocol: Some(true),
+                ..Default::default()
+            },
+        );
+    }
+    map
+}
+
+fn can_ecu_mappings() -> Vec<CanEcuMapping> {
+    // The Kotlin sim assigns each example ECU a distinct (rxId, txId)
+    // pair. CDA must mirror the same mapping on its side so that the
+    // per-ECU ISO-TP sockets connect to the right arbitration IDs.
+    let pairs: &[(&str, u32, u32)] = &[
+        ("FLXC1000", 0x700, 0x708),
+        ("TMC1001", 0x710, 0x718),
+        ("FSNR2000", 0x720, 0x728),
+        ("TMCC3000", 0x730, 0x738),
+        ("HOVR4000", 0x740, 0x748),
+        ("JGWT5000", 0x750, 0x758),
+    ];
+    pairs
+        .iter()
+        .map(|(name, req, resp)| CanEcuMapping {
+            ecu_name: (*name).to_owned(),
+            request_id: *req,
+            response_id: *resp,
+        })
+        .collect()
 }
 
 pub(crate) fn host() -> String {
@@ -461,6 +589,7 @@ fn start_docker_compose(
         .arg("--build-arg")
         .arg("SOURCE_GIT_SHA=unknown")
         .env("DOCKER_BUILDKIT", "1")
+        .env("COMPOSE_PROFILES", compose_profiles())
         .current_dir(&test_container_dir);
 
     let status = cmd
@@ -482,7 +611,10 @@ fn docker_compose_up(container: Option<String>) -> Result<(), TestingError> {
         append_coverage_compose_files(&mut cmd);
     }
 
-    cmd.arg("up").arg("-d").env("DOCKER_BUILDKIT", "1");
+    cmd.arg("up")
+        .arg("-d")
+        .env("DOCKER_BUILDKIT", "1")
+        .env("COMPOSE_PROFILES", compose_profiles());
 
     if let Some(container_name) = container {
         cmd.arg(container_name);
@@ -508,6 +640,7 @@ fn docker_compose_down(container: Option<String>) -> Result<(), TestingError> {
     cmd.arg("down")
         .arg("--remove-orphans")
         .env("DOCKER_BUILDKIT", "1")
+        .env("COMPOSE_PROFILES", compose_profiles())
         .current_dir(&test_container_dir);
 
     if let Some(container_name) = container {
@@ -536,10 +669,15 @@ fn dump_docker_logs() {
 
     tracing::error!("========== Docker Compose Logs ==========");
 
+    // Set the active compose profiles so profile-gated services (e.g. the
+    // `socketcand` daemon under the `can` profile) are included in the dump --
+    // without this only the default services (cda, ecu-sim) are known here, and
+    // the socketcand side stays invisible when debugging CAN failures.
     let output = std::process::Command::new("docker")
         .arg("compose")
         .arg("logs")
         .arg("--no-color")
+        .env("COMPOSE_PROFILES", compose_profiles())
         .current_dir(&test_container_dir)
         .output();
 
@@ -616,6 +754,13 @@ fn write_config_toml(
     "0.0.0.0".clone_into(&mut config.server.address);
     "/app/odx".clone_into(&mut config.database.path);
 
+    // In docker the socketcand daemon runs in its own service, reachable by
+    // service name over the bridge network (not the host loopback used locally).
+    if let Some(can) = config.can.as_mut() {
+        can.interface =
+            format!("socketcand:{CAN_DOCKER_SOCKETCAND_HOST}:{SOCKETCAND_PORT}:{CAN_BUS_NAME}");
+    }
+
     let config_path = test_container_dir.join("cda-test-config.toml");
     let toml_content = toml::to_string_pretty(&config).map_err(|e| {
         TestingError::SetupError(format!("Failed to serialize config to TOML: {e}"))
@@ -661,6 +806,48 @@ fn write_config_toml(
     Ok(())
 }
 
+/// Build the docker-compose `.env` file contents. Pure (no I/O, no env lookups)
+/// so the exact bytes fed to compose can be unit-tested -- a malformed literal
+/// here previously mangled `SIM_CAN_SOCKETCAND_HOST` into `socketcand\`, which
+/// made the ecu-sim silently never join the CAN bus in CI.
+fn docker_env_content(
+    can: bool,
+    cda_port: u16,
+    gateway_port: u16,
+    sim_control_port: u16,
+) -> String {
+    let mut env_content = format!(
+        "# Auto-generated environment file for integration tests\n# ECU Simulator Control \
+         Port\nSIM_CONTROL_PORT={sim_control_port}\n# ECU Simulator Gateway \
+         Port\nSIM_GATEWAY_PORT={gateway_port}\n# CDA Service Port\nCDA_PORT={cda_port}\n",
+    );
+
+    if can {
+        use std::fmt::Write as _;
+
+        // Point the ecu-sim at the socketcand service over the compose bridge,
+        // and compile the CDA image with the socketcand transport.
+        //
+        // NOTE: emit one short `writeln!` per line rather than a single long
+        // literal. rustfmt's `format_strings` rewraps long literals at the
+        // column limit and, when a wrap lands on an escape, mangles `\n` into
+        // `\\` + `n` -- which is exactly how the host once became `socketcand\`,
+        // silently keeping the sim off the CAN bus in CI. Short lines are never
+        // rewrapped, so this stays correct across `cargo fmt`.
+        let _ = writeln!(env_content, "# socketcand daemon the ecu-sim connects to");
+        let _ = writeln!(
+            env_content,
+            "SIM_CAN_SOCKETCAND_HOST={CAN_DOCKER_SOCKETCAND_HOST}"
+        );
+        let _ = writeln!(env_content, "SIM_CAN_SOCKETCAND_PORT={SOCKETCAND_PORT}");
+        let _ = writeln!(env_content, "SIM_CAN_SOCKETCAND_BUS={CAN_BUS_NAME}");
+        let _ = writeln!(env_content, "# Extra cargo features for the CDA image");
+        let _ = writeln!(env_content, "CDA_FEATURES=can-socketcand");
+    }
+
+    env_content
+}
+
 fn write_docker_env_file(
     test_container_dir: &std::path::Path,
     cda_port: u16,
@@ -668,11 +855,7 @@ fn write_docker_env_file(
     sim_control_port: u16,
 ) -> Result<(), TestingError> {
     let env_file_path = test_container_dir.join(".env");
-    let env_content = format!(
-        "# Auto-generated environment file for integration tests\n# ECU Simulator Control \
-         Port\nSIM_CONTROL_PORT={sim_control_port}\n# ECU Simulator Gateway \
-         Port\nSIM_GATEWAY_PORT={gateway_port}\n# CDA Service Port\nCDA_PORT={cda_port}\n",
-    );
+    let env_content = docker_env_content(can_infra(), cda_port, gateway_port, sim_control_port);
 
     std::fs::write(&env_file_path, env_content)
         .map_err(|e| TestingError::ProcessFailed(format!("Failed to write .env file: {e}")))?;
@@ -702,6 +885,71 @@ pub(crate) async fn start_ecu_sim(sim: &EcuSim) -> Result<(), TestingError> {
 
         *ECU_SIM_PROCESS.lock().await = Some(child);
     }
+    wait_for_ecu_sim_ready(&sim.host, sim.control_port).await
+}
+
+/// Starts the ecu-sim the same way the current test mode originally started
+/// it: with the CAN stack when CAN infrastructure is in use (pure-CAN and
+/// mixed runs), plain `DoIP` otherwise. Tests that restart the sim must use
+/// this so the sim comes back on the same transports.
+///
+/// In docker mode the compose service carries its CAN configuration in the
+/// generated `.env`, so restarting the container restores the right
+/// transports for every mode; `start_ecu_sim_can` only implements the local
+/// (non-docker) jar path.
+pub(crate) async fn start_ecu_sim_for_mode(sim: &EcuSim) -> Result<(), TestingError> {
+    if !use_docker() && can_infra() {
+        start_ecu_sim_can(sim).await
+    } else {
+        start_ecu_sim(sim).await
+    }
+}
+
+pub(crate) async fn start_ecu_sim_can(sim: &EcuSim) -> Result<(), TestingError> {
+    // Local (non-docker) CAN path: spawn the same `ecu-sim-all.jar` as the DoIP
+    // path but with `SIM_CAN_SOCKETCAND_*` set so the JVM connects to a
+    // socketcand daemon. The daemon and its (v)can bus must already be running
+    // locally (e.g. `socketcand -i vcan0` on 127.0.0.1:29536). In docker mode
+    // the daemon runs in its own compose service (see `write_docker_env_file` /
+    // docker-compose.yml), not here.
+    let ecu_sim_dir = ecu_sim_dir()?;
+    if !ecu_sim_dir.exists() {
+        return Err(TestingError::PathNotFound(format!(
+            "ecu-sim run script not found at {}",
+            ecu_sim_dir.display()
+        )));
+    }
+    let jar = ecu_sim_dir.join("build/libs/ecu-sim-all.jar");
+    if !jar.exists() {
+        return Err(TestingError::PathNotFound(format!(
+            "ecu-sim-all.jar not found at {}. Run `./gradlew shadowJar` in the ecu-sim directory \
+             first.",
+            jar.display()
+        )));
+    }
+
+    // The shadow JAR is built for JDK 21. Use the local JDK 25 to run it
+    // (the gentoo system has /opt/openjdk-bin-25.0.2_p10). The user can
+    // override with JAVA_BIN.
+    let java_bin = std::env::var("CDA_INTEGRATION_TEST_JAVA_BIN")
+        .unwrap_or_else(|_| "/opt/openjdk-bin-25.0.2_p10/bin/java".to_owned());
+    let child = std::process::Command::new(&java_bin)
+        .arg("-jar")
+        .arg(&jar)
+        .env("SIM_DOIP_PORT", "13400")
+        .env("SIM_REST_PORT", sim.control_port.to_string())
+        .env("SIM_NETWORK_INTERFACE", "127.0.0.1")
+        .env("SIM_CAN_SOCKETCAND_HOST", "127.0.0.1")
+        .env("SIM_CAN_SOCKETCAND_PORT", SOCKETCAND_PORT.to_string())
+        .env("SIM_CAN_SOCKETCAND_BUS", CAN_BUS_NAME)
+        .spawn()
+        .map_err(|e| {
+            TestingError::ProcessFailed(format!(
+                "Failed to start ecu-sim CAN sim with {java_bin}: {e}"
+            ))
+        })?;
+
+    *ECU_SIM_PROCESS.lock().await = Some(child);
     wait_for_ecu_sim_ready(&sim.host, sim.control_port).await
 }
 
@@ -752,6 +1000,41 @@ fn use_docker() -> bool {
 
 fn coverage_mode() -> bool {
     std::env::var(CDA_INTEGRATION_TEST_COVERAGE).is_ok_and(|s| s == "true")
+}
+
+pub(crate) fn use_can() -> bool {
+    std::env::var(CDA_INTEGRATION_TEST_USE_CAN).is_ok_and(|s| s == "true")
+}
+
+fn use_mixed() -> bool {
+    std::env::var(CDA_INTEGRATION_TEST_USE_MIXED).is_ok_and(|s| s == "true")
+}
+
+/// Whether the CAN infrastructure (socketcand + sim CAN stack) is needed:
+/// true in pure-CAN and in mixed mode.
+fn can_infra() -> bool {
+    use_can() || use_mixed()
+}
+
+/// Compose profiles to activate: the `can` profile (which includes the
+/// socketcand service) whenever CAN infrastructure is needed (pure-CAN and
+/// mixed runs), so `DoIP`-only runs need no vcan module.
+fn compose_profiles() -> &'static str {
+    if can_infra() { "can" } else { "" }
+}
+
+/// Guard, returning `true` (and logging a skip notice), for tests that cannot
+/// run in the pure-CAN suite: either they exercise `DoIP`-only mechanisms
+/// (`VAM`, sim restart) or they depend on session/security timing not yet
+/// reliable over the CAN transport. Each gated call site documents its
+/// specific reason. In MIXED mode these tests DO run: the ECUs they target
+/// (FLXC1000/FLXCNG1000) are served over `DoIP` there.
+pub(crate) fn skip_for_can(test_name: &str, reason: &str) -> bool {
+    if use_can() {
+        eprintln!("[can] skipping {test_name}: {reason}");
+        return true;
+    }
+    false
 }
 
 async fn wait_for_http_ready(
@@ -1083,5 +1366,70 @@ fn check_command_success(
         Ok(())
     } else {
         Err(TestingError::ProcessFailed(error_msg.to_owned()))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn docker_env_can_socketcand_lines_are_well_formed() {
+        let content = docker_env_content(true, 20002, 13400, 8181);
+
+        // Regression guard: a malformed string literal previously produced
+        // `SIM_CAN_SOCKETCAND_HOST=socketcand\` (trailing backslash) with the
+        // PORT var mangled onto a continuation line, so the ecu-sim tried to
+        // resolve host `socketcand\`, never joined the CAN bus, and every CDA
+        // discovery probe timed out in CI.
+        assert!(
+            content.contains("SIM_CAN_SOCKETCAND_HOST=socketcand\n"),
+            "host line malformed:\n{content}"
+        );
+        assert!(
+            !content.contains("socketcand\\"),
+            "host value has a stray backslash:\n{content}"
+        );
+        assert!(
+            content.contains(&format!("SIM_CAN_SOCKETCAND_PORT={SOCKETCAND_PORT}\n")),
+            "port line malformed:\n{content}"
+        );
+        assert!(
+            content.contains(&format!("SIM_CAN_SOCKETCAND_BUS={CAN_BUS_NAME}\n")),
+            "bus line malformed:\n{content}"
+        );
+        assert!(
+            content.contains("CDA_FEATURES=can-socketcand\n"),
+            "features line malformed:\n{content}"
+        );
+        // Every line is a comment or a well-formed KEY=VALUE (no stray leading
+        // whitespace, exactly the shape docker-compose's dotenv parser expects).
+        for line in content
+            .lines()
+            .filter(|l| !l.is_empty() && !l.starts_with('#'))
+        {
+            let (key, _) = line
+                .split_once('=')
+                .unwrap_or_else(|| panic!("not KEY=VALUE: {line:?}"));
+            assert_eq!(key, key.trim(), "key has stray whitespace: {line:?}");
+            assert!(
+                key.chars()
+                    .all(|c| c.is_ascii_uppercase() || c == '_' || c.is_ascii_digit()),
+                "unexpected key {key:?} in line {line:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn docker_env_without_can_has_no_socketcand_vars() {
+        let content = docker_env_content(false, 20002, 13400, 8181);
+        assert!(
+            !content.contains("SOCKETCAND"),
+            "unexpected CAN vars:\n{content}"
+        );
+        assert!(
+            !content.contains("CDA_FEATURES"),
+            "unexpected CDA_FEATURES:\n{content}"
+        );
     }
 }

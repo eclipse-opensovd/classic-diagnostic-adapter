@@ -31,9 +31,38 @@ use crate::{
             QueryParams, auth_header, extract_field_from_json, response_to_json, response_to_t,
             send_cda_request,
         },
-        runtime::{TestRuntime, restart_cda, setup_integration_test, start_ecu_sim, stop_ecu_sim},
+        runtime::{
+            TestRuntime, restart_cda, setup_integration_test, skip_for_can, start_ecu_sim_for_mode,
+            stop_ecu_sim,
+        },
     },
 };
+
+/// Reads the Identification DID from the ECU over its transport. Unlike the
+/// component listing (served from the loaded MDD even when the ECU is dead),
+/// this request only succeeds if the ECU actually answers on the bus, so it
+/// proves end-to-end liveness.
+async fn assert_ecu_answers_on_bus(runtime: &TestRuntime, ecu_endpoint: &str) {
+    let auth = auth_header(&runtime.config, None)
+        .await
+        .expect("auth header should be obtainable");
+    let response = send_cda_request(
+        &runtime.config,
+        &format!("{ecu_endpoint}/data/identification"),
+        StatusCode::OK,
+        Method::GET,
+        None,
+        Some(&auth),
+        None,
+    )
+    .await
+    .expect("live Identification read over the bus should succeed");
+    let json = response_to_json(&response).expect("data response should be JSON");
+    assert!(
+        json.to_string().contains("Identification"),
+        "data response should contain the Identification parameter: {json}"
+    );
+}
 
 /// This ECU is missing comm parameters and thus must be configured via the configuration file.
 /// The test verifies that the ECU is reachable and reports the correct name and state.
@@ -59,6 +88,8 @@ async fn test_tmcc3000_ecu_online() {
         "tmcc3000",
         "Component name should be tmcc3000"
     );
+
+    assert_ecu_answers_on_bus(runtime, sovd::ECU_TMCC3000_ENDPOINT).await;
 }
 
 /// HOVR4000 uses a non-default protocol (`DMC_DoIP`) in its MDD. The global
@@ -87,6 +118,8 @@ async fn test_hovr4000_per_ecu_protocol_override() {
         "hovr4000",
         "Component name should be hovr4000"
     );
+
+    assert_ecu_answers_on_bus(runtime, sovd::ECU_HOVR4000_ENDPOINT).await;
 }
 
 /// JGWT5000 has a non-default protocol (`DMC_DoIP`) in its MDD but no per-ECU
@@ -114,11 +147,22 @@ async fn test_jgwt5000_ignore_protocol_with_db_protocol() {
         "jgwt5000",
         "Component name should be jgwt5000"
     );
+
+    assert_ecu_answers_on_bus(runtime, sovd::ECU_JGWT5000_ENDPOINT).await;
 }
 
 #[allow(clippy::too_many_lines, reason = "Makes sense to keep test together")]
 #[tokio::test]
 async fn test_ecu_session_switching() {
+    // TODO(can): SecurityAccess seed/key/lock sequencing is not yet reliable
+    // over the CAN transport (see follow-up tracking issue). Re-enable once the
+    // CAN session/security path is hardened.
+    if skip_for_can(
+        "test_ecu_session_switching",
+        "SecurityAccess sequencing not yet supported over CAN",
+    ) {
+        return;
+    }
     let (runtime, _lock) = setup_integration_test(true).await.unwrap();
     let auth = auth_header(&runtime.config, None).await.unwrap();
     let ecu_endpoint = sovd::ECU_FLXC1000_ENDPOINT;
@@ -348,6 +392,15 @@ async fn test_ecu_session_switching() {
 
 #[tokio::test]
 async fn test_variant_detection_duplicates() {
+    // DoIP-only: relies on spontaneous VAM announcements and restarts the sim's
+    // DoIP entities (which has no CAN-hub equivalent), so it cannot run over the
+    // CAN transport.
+    if skip_for_can(
+        "test_variant_detection_duplicates",
+        "depends on DoIP VAM announcements and sim restart",
+    ) {
+        return;
+    }
     let (runtime, _lock) = setup_integration_test(true).await.unwrap();
     let auth = auth_header(&runtime.config, None).await.unwrap();
 
@@ -453,7 +506,7 @@ async fn test_variant_detection_duplicates() {
 
     // restart sim and wait for ECUs to come online,
     // status should be detected without manual variant detection
-    start_ecu_sim(&runtime.ecu_sim).await.unwrap();
+    start_ecu_sim_for_mode(&runtime.ecu_sim).await.unwrap();
 
     // wait in loop, to check if the CDA receives the spontaneous VAM when is online
     for attempt in 0..=5 {
@@ -789,6 +842,15 @@ async fn test_boot_variant_service_inheritance() {
 
 #[tokio::test]
 async fn test_ecu_session_reset_on_lock_reacquire() {
+    // TODO(can): session expiry depends on TesterPresent keepalive cadence,
+    // which is not yet reliable over the CAN transport (per-transaction sockets
+    // + busy-poll dispatcher are too slow; see follow-up tracking issue).
+    if skip_for_can(
+        "test_ecu_session_reset_on_lock_reacquire",
+        "session-expiry keepalive timing not yet reliable over CAN",
+    ) {
+        return;
+    }
     let (runtime, _lock) = setup_integration_test(true).await.unwrap();
     let auth = auth_header(&runtime.config, None).await.unwrap();
     let ecu_endpoint = sovd::ECU_FLXC1000_ENDPOINT;
@@ -1156,18 +1218,31 @@ async fn test_operation_sdg_retrieval() {
     assert_eq!(sd.get("value").unwrap().as_str(), Some("5000"));
 }
 
+/// Polls until the ECU reaches the expected state, then asserts.
+///
+/// ECU states are updated asynchronously (variant detection tasks probe each
+/// ECU on its transport, with per-probe timeouts), so a one-shot check races
+/// the startup/detection loop -- especially in mixed mode where undetected
+/// CAN-mapped ECUs cost a probe timeout each before the loop moves on.
 async fn validate_ecu_state(
     runtime: &TestRuntime,
     auth: &HeaderMap,
     ecu: &str,
     expected_state: sovd_interfaces::components::ecu::State,
 ) {
-    let ecu_status = ecu_status(&runtime.config, auth, ecu)
+    let started = std::time::Instant::now();
+    let mut status = ecu_status(&runtime.config, auth, ecu)
         .await
         .expect("failed to get ecu status");
+    while status.variant.state != expected_state && started.elapsed() < Duration::from_secs(10) {
+        cda_interfaces::util::tokio_ext::sleep_for(Duration::from_millis(200)).await;
+        status = ecu_status(&runtime.config, auth, ecu)
+            .await
+            .expect("failed to get ecu status");
+    }
     assert_eq!(
-        ecu_status.variant.state, expected_state,
-        "ECU {ecu} state does not match {ecu_status:?}"
+        status.variant.state, expected_state,
+        "ECU {ecu} state does not match {status:?}"
     );
 }
 

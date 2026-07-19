@@ -12,6 +12,48 @@
 # Path to the directory containing flash files.
 # flash_files_path = "."
 
+# Optional CAN bus transport configuration.
+# When enabled, the adapter can communicate with ECUs over CAN bus.
+# [can]
+# ecu_mappings = []
+# interface = "vcan0"
+# probe_fallbacks = []
+# probe_retries = 0
+# probe_retry_delay_ms = 100
+# probe_timeout_ms = 100
+# response_timeout_ms = 5000
+# transport_overrides = []
+
+# Functional CAN ID for broadcast requests
+[com_params.can.functional_id]
+# Communication parameter identifier (`CP_xxx` name from the database).
+# name = "CP_CanFuncReqId"
+# Controls whether a com-parameter value is resolved from the MDD database
+# or forced from the configuration file.
+# precedence = "Database"
+# Value used when the database does not provide one, or precedence is set to `Config`.
+# value = 2015
+
+# Physical request CAN ID (tester -> ECU)
+[com_params.can.physical_request_id]
+# Communication parameter identifier (`CP_xxx` name from the database).
+# name = "CP_CanPhysReqId"
+# Controls whether a com-parameter value is resolved from the MDD database
+# or forced from the configuration file.
+# precedence = "Database"
+# Value used when the database does not provide one, or precedence is set to `Config`.
+# value = 2016
+
+# Physical response CAN ID (ECU -> tester)
+[com_params.can.physical_response_id]
+# Communication parameter identifier (`CP_xxx` name from the database).
+# name = "CP_CanRespUSDTId"
+# Controls whether a com-parameter value is resolved from the MDD database
+# or forced from the configuration file.
+# precedence = "Database"
+# Value used when the database does not provide one, or precedence is set to `Config`.
+# value = 2024
+
 # DoIP-specific communication parameters.
 [com_params.doip]
 # Only the ID of this com param is needed right now
@@ -429,6 +471,25 @@
 # Common affixes (e.g. `read`, `write`) should be placed first for performance, but compound
 # affixes must precede their base forms for correct matching.
 [database.naming_convention]
+# Protocol short-names that identify diagnostics-over-CAN in the MDD,
+# matched case-insensitively. When the configured protocol name is one
+# of these but the database has no layer of exactly that name, protocol
+# resolution tries the other entries in order. OEM databases with
+# different protocol names configure their own list.
+# can_protocol_aliases = [
+#     "UDS_CAN",
+#     "ISO_11898_2_DWCAN",
+#     "ISO_11898_3_DWFTCAN",
+#     "CAN",
+#     "ISO_15765_2",
+#     "ISO_15765_3",
+# ]
+# Case-insensitive substrings that mark a protocol short-name as
+# diagnostics-over-CAN during `"auto-can"` protocol detection.
+# can_protocol_markers = [
+#     "CAN",
+#     "ISO_11898",
+# ]
 # Semantic ID used to identify the distinguishing parameter of a service.
 # configuration_service_parameter_semantic_id = "ID"
 # Functional class name used to filter varcoding services.
@@ -534,10 +595,18 @@
 # The alive check is only sent when no diagnostic communication has occurred
 # for this duration. Set to 0 to disable the alive check.
 # alive_check_interval_secs = 1800
+# Whether the `DoIP` transport is enabled.
+# When `false`, CDA skips `DoIP` initialization entirely (useful for
+# CAN-only or DoIP-less test setups).
+# Defaults to `true` to preserve the historical DoIP-first behavior.
+# enabled = true
 # UDP/TCP port for `DoIP` gateway discovery and communication.
 # gateway_port = 13400
 # The name of the protocol to use.
 # Matched case-insensitive against the database.
+# The special value `"auto-can"` defers the choice to the MDD-driven
+# CAN protocol auto-detection (see `into_db_protocol`; the markers are
+# configurable via `database.naming_convention.can_protocol_markers`).
 # protocol_name = "UDS_Ethernet_DoIP_DOBT"
 # Whether to request a diagnostic message positive acknowledgement.
 # send_diagnostic_message_ack = true
@@ -550,19 +619,34 @@
 # TLS port for secure `DoIP` communication.
 # tls_port = 3496
 
-[ecu.FLXC1000.com_params.doip.routing_activation_timeout]
+# [ecu.FLXC1000.com_params.can.functional_id]
+# name = "CP_CanFuncReqId"
+# precedence = "Config"
+# value = 2015
+
+# [ecu.FLXC1000.com_params.can.physical_request_id]
+# name = "CP_CanPhysReqId"
+# precedence = "Config"
+# value = 2014
+
+# [ecu.FLXC1000.com_params.can.physical_response_id]
+# name = "CP_CanRespUSDTId"
+# precedence = "Config"
+# value = 2024
+
+# [ecu.FLXC1000.com_params.doip.routing_activation_timeout]
 # name = "CP_DoIPRoutingActivationTimeout"
 # precedence = "Config"
 
-[ecu.FLXC1000.com_params.doip.routing_activation_timeout.value]
+# [ecu.FLXC1000.com_params.doip.routing_activation_timeout.value]
 # nanos = 0
 # secs = 42
 
-[ecu.FLXC1000.com_params.uds.timeout_default]
+# [ecu.FLXC1000.com_params.uds.timeout_default]
 # name = "CP_P6Max"
 # precedence = "Config"
 
-[ecu.FLXC1000.com_params.uds.timeout_default.value]
+# [ecu.FLXC1000.com_params.uds.timeout_default.value]
 # nanos = 0
 # secs = 5
 

@@ -145,14 +145,19 @@ async fn test_custom_demo_endpoint() {
     let state_coordinator = EcuStateCoordinator::new(HashMap::new());
     let connectivity_handler: Arc<dyn EcuConnectivityHandler> = Arc::new(state_coordinator.clone());
 
+    // This test runtime is DoIP-only: no CAN config, socket present because
+    // DoIP is enabled.
     let gateway = opensovd_cda_lib::create_diagnostic_gateway(
         Arc::clone(&databases),
-        &doip_config,
+        opensovd_cda_lib::TransportConfigs {
+            doip: &doip_config,
+            can: None,
+        },
         variant_tx,
         connectivity_handler,
         shutdown_signal.clone(),
         None,
-        Arc::new(tokio::sync::Mutex::new(doip_socket)),
+        Some(Arc::new(tokio::sync::Mutex::new(doip_socket))),
     )
     .await
     .expect("Failed to create gateway");

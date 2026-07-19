@@ -183,7 +183,10 @@ impl<S: EcuGateway, T: UdsEcuDb + VariantDetection> UdsManager<S, T> {
 
         let ecu = self.uds_ecu_db(ecu_name)?;
         let (uds_params, transmission_params) = Self::ecu_send_params(ecu).await;
-        let ecu_logical_address = ecu.read().await.logical_address();
+        // Serialize requests per transport target. `request_lock_key` reflects
+        // the physical request/response IDs for CAN and the gateway/logical
+        // address pair for DoIP, so requests that share a target don't overlap.
+        let ecu_request_lock_key = ecu.read().await.request_lock_key();
         let sent_sid = *payload.data.first().ok_or(DiagServiceError::BadPayload(
             "Cannot sent message without SID".to_owned(),
         ))?;
@@ -193,7 +196,7 @@ impl<S: EcuGateway, T: UdsEcuDb + VariantDetection> UdsManager<S, T> {
                 self.ecu_semaphores
                     .lock()
                     .await
-                    .entry(ecu_logical_address)
+                    .entry(ecu_request_lock_key.clone())
                     .or_insert_with(|| Arc::new(Semaphore::new(1))),
             )
         };
@@ -204,6 +207,7 @@ impl<S: EcuGateway, T: UdsEcuDb + VariantDetection> UdsManager<S, T> {
             .map_err(|_| {
                 tracing::error!(
                     ecu = ecu_name,
+                    request_lock_key = %ecu_request_lock_key,
                     "Timeout waiting for ecu to become available for requests."
                 );
                 DiagServiceError::Timeout
@@ -749,6 +753,8 @@ mod send_tests {
         + Sync;
 
     impl EcuGateway for TestGateway {
+        fn shutdown(&self) {}
+
         async fn get_gateway_network_address(&self, _logical_address: u16) -> Option<String> {
             None
         }

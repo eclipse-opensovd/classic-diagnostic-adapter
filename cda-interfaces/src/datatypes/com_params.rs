@@ -27,6 +27,7 @@ pub struct ComParams {
     pub uds: UdsComParams,
     /// DoIP-specific communication parameters.
     pub doip: DoipComParams,
+    pub can: CanComParams,
 }
 
 pub type ComParamName = String;
@@ -329,6 +330,19 @@ pub struct DoipComParams {
     pub connection_retry_attempts: ComParamConfig<u32>,
 }
 
+/// Defines the Communication parameters which are used in CAN bus communication
+#[derive(Deserialize, Serialize, Clone, Debug, schemars::JsonSchema)]
+pub struct CanComParams {
+    /// Physical request CAN ID (tester -> ECU)
+    pub physical_request_id: ComParamConfig<Option<u32>>,
+
+    /// Physical response CAN ID (ECU -> tester)
+    pub physical_response_id: ComParamConfig<Option<u32>>,
+
+    /// Functional CAN ID for broadcast requests
+    pub functional_id: ComParamConfig<Option<u32>>,
+}
+
 /// Strategy for retrying after specific negative response codes.
 #[derive(Deserialize, Serialize, Clone, Debug, schemars::JsonSchema, PartialEq)]
 pub enum RetryPolicy {
@@ -586,6 +600,34 @@ impl Default for DoipComParams {
                 precedence: ComParamPrecedence::Database,
             },
         }
+    }
+}
+
+impl Default for CanComParams {
+    fn default() -> Self {
+        Self {
+            physical_request_id: ComParamConfig {
+                name: "CP_CanPhysReqId".to_owned(),
+                value: None,
+                precedence: ComParamPrecedence::Database,
+            },
+            physical_response_id: ComParamConfig {
+                name: "CP_CanRespUSDTId".to_owned(), // USDT = User Specific Diagnostic Test
+                value: None,
+                precedence: ComParamPrecedence::Database,
+            },
+            functional_id: ComParamConfig {
+                name: "CP_CanFuncReqId".to_owned(),
+                value: None,
+                precedence: ComParamPrecedence::Database,
+            },
+        }
+    }
+}
+
+impl DeserializableCompParam for Option<u32> {
+    fn parse_from_db(input: &str, _unit: Option<&Unit>) -> Result<Self, String> {
+        crate::util::parse_u32_maybe_hex(input).map(Some)
     }
 }
 

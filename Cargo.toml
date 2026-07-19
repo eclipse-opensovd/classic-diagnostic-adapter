@@ -22,6 +22,7 @@ members = [
   "cda-interfaces",
   "cda-core",
   "cda-comm-doip",
+  "cda-comm-can",
   "cda-comm-uds",
   "cda-sovd",
   "cda-sovd-interfaces",
@@ -44,6 +45,7 @@ opensovd_cda_lib = { path = "cda-main", package = "opensovd-cda" }
 cda-interfaces = { path = "cda-interfaces" }
 cda-core = { path = "cda-core" }
 cda-comm-doip = { path = "cda-comm-doip" }
+cda-comm-can = { path = "cda-comm-can" }
 cda-comm-uds = { path = "cda-comm-uds" }
 cda-database = { path = "cda-database" }
 cda-plugin-security = { path = "cda-plugin-security" }

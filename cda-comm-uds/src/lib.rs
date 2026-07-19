@@ -48,7 +48,7 @@ pub struct UdsManager<S: EcuGateway, T: UdsEcuDb> {
     ecus: Arc<HashMap<String, RwLock<T>>>,
     gateway: S,
     data_transfers: Arc<Mutex<HashMap<EcuIdentifier, EcuDataTransfer>>>,
-    ecu_semaphores: Arc<Mutex<HashMap<u16, Arc<Semaphore>>>>,
+    ecu_semaphores: Arc<Mutex<HashMap<String, Arc<Semaphore>>>>,
     tester_present_tasks: Arc<RwLock<HashMap<EcuIdentifier, TesterPresentTask>>>,
     session_reset_tasks: Arc<RwLock<HashMap<EcuIdentifier, JoinHandle<()>>>>,
     security_reset_tasks: Arc<RwLock<HashMap<EcuIdentifier, JoinHandle<()>>>>,
@@ -128,6 +128,15 @@ impl<S: EcuGateway, T: EcuManager> UdsManager<S, T> {
                             processed_duplicates.extend(duplicates.iter().cloned());
                         }
                         deduplicated_ecus.push(ecu_name);
+                    } else {
+                        // A silent drop here once masked a casing mismatch
+                        // between a transport's discovery names and the
+                        // lowercase-keyed ECU map, leaving discovered ECUs
+                        // NotTested until their first request.
+                        tracing::warn!(
+                            ecu_name,
+                            "Variant detection trigger for unknown ECU dropped"
+                        );
                     }
                 }
 
