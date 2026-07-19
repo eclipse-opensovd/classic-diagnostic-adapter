@@ -228,9 +228,8 @@ async fn test_can_only_ecu_from_configuration() {
 #[tokio::test]
 async fn test_ecu_session_switching() {
     // TODO(can): SecurityAccess seed/key/lock sequencing is not yet reliable
-    // over the CAN transport. Re-enable once the CAN session/security path is
-    // hardened; tracking issue to be filed before merge (CAN follow-up:
-    // session/security hardening).
+    // over the CAN transport. Re-enable once the CAN session/security path
+    // is hardened, see #444
     if skip_for_can(
         "test_ecu_session_switching",
         "SecurityAccess sequencing not yet supported over CAN",
@@ -918,8 +917,7 @@ async fn test_boot_variant_service_inheritance() {
 async fn test_ecu_session_reset_on_lock_reacquire() {
     // TODO(can): session expiry depends on TesterPresent keepalive cadence,
     // which is not yet reliable over the CAN transport (per-transaction
-    // sockets + busy-poll dispatcher are too slow). Tracking issue to be
-    // filed before merge (CAN follow-up: session/security hardening).
+    // sockets + busy-poll dispatcher are too slow), see #444
     if skip_for_can(
         "test_ecu_session_reset_on_lock_reacquire",
         "session-expiry keepalive timing not yet reliable over CAN",

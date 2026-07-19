@@ -187,8 +187,7 @@ impl<S: SecurityPlugin> cda_interfaces::EcuAddresses for EcuManager<S> {
 
 /// CAN addressing extracted from the MDD com-params (`CP_CanPhysReqId` /
 /// `CP_CanRespUSDTId` / `CP_CanFuncReqId`, preferring the per-ECU
-/// `CP_UniqueRespIdTable` entries), implementing
-/// <https://github.com/eclipse-opensovd/classic-diagnostic-adapter/issues/415>.
+/// `CP_UniqueRespIdTable` entries), implementing #415.
 /// `None` when neither the database nor the config provides a value; the CAN
 /// gateway then relies on the explicit `[[can.ecu_mappings]]` config block,
 /// which always takes precedence over these values anyway.

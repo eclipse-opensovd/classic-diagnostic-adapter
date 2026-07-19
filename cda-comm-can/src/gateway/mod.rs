@@ -673,8 +673,7 @@ impl EcuGateway for CanDiagGateway {
         cda_interfaces::HashMap<String, Result<cda_interfaces::UdsResponse, DiagServiceError>>,
         DiagServiceError,
     > {
-        // CAN functional addressing is not implemented yet, tracked in
-        // https://github.com/eclipse-opensovd/classic-diagnostic-adapter/issues/417
+        // CAN functional addressing is not implemented yet, see #417.
         // Fail the whole request honestly; the UDS layer maps a gateway-level
         // error to a per-ECU error result, so clients see WHY it failed
         // instead of every ECU appearing to be offline.
