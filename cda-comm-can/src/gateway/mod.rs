@@ -16,11 +16,13 @@
 //! Everything below this module can assume the feature is enabled; the
 //! feature gate lives on the single `mod gateway` declaration in `lib.rs`.
 
+mod background;
 pub(crate) mod can_id;
 pub(crate) mod connection;
 pub mod error;
 pub mod keepalive;
 mod probe;
+mod rediscovery;
 
 use std::{sync::Arc, time::Duration};
 
@@ -31,10 +33,10 @@ use cda_interfaces::{
 use tokio::sync::{RwLock, mpsc};
 
 use self::{
+    background::BackgroundTask,
     can_id::CanId,
     connection::CanEcuConnection,
     error::{CanError, CanGatewaySetupError},
-    keepalive::KeepAliveHandle,
     probe::ProbeRequest,
 };
 use crate::config::CanConfig;
@@ -81,7 +83,11 @@ pub struct CanDiagGateway {
     /// Keep-alive broadcast handle, shared across gateway clones. Stopped
     /// and awaited in [`EcuGateway::shutdown`]; dropping the last clone
     /// aborts the task as a fallback.
-    keepalive_handle: Arc<KeepAliveHandle>,
+    keepalive_handle: Arc<BackgroundTask>,
+    /// Rediscovery task handle; empty only in unit-test instances. Set once
+    /// right after construction (the task needs a gateway clone, so it
+    /// cannot be spawned before the struct exists).
+    rediscovery_handle: Arc<std::sync::OnceLock<BackgroundTask>>,
 }
 
 impl CanDiagGateway {
@@ -170,7 +176,7 @@ impl CanDiagGateway {
         )
         .await;
 
-        Self::validate_can_pins(config, &connections)?;
+        Self::validate_can_pins(config, ecus, &connections)?;
 
         // Fail fast on configurations that cannot work: a [can] section with
         // no usable ECU addressing means every request would fail at runtime
@@ -231,6 +237,7 @@ impl CanDiagGateway {
             probe_retry_delay: Duration::from_millis(config.probe_retry_delay_ms),
             probe_sequence: Arc::new(probe_sequence),
             keepalive_handle: Arc::new(keepalive_handle),
+            rediscovery_handle: Arc::new(std::sync::OnceLock::new()),
         };
 
         // Perform initial discovery
@@ -251,6 +258,11 @@ impl CanDiagGateway {
                 );
             }
         }
+
+        // Start after the initial sweep so the two never probe concurrently.
+        let _ = gateway
+            .rediscovery_handle
+            .set(gateway.start_rediscovery(variant_detection));
 
         Ok(gateway)
     }
@@ -332,8 +344,15 @@ impl CanDiagGateway {
     /// sanity check: whether an ECU has CAN addressing may only be known
     /// once the database is loaded (MDD com-params), which the config layer
     /// cannot see.
-    fn validate_can_pins(
+    ///
+    /// A pin for an ECU that is not in the loaded database at all is moot,
+    /// not an error: the configuration legitimately outlives the currently
+    /// loaded fleet (runtime file updates add and remove ECU databases while
+    /// the config stays put), and an absent ECU has no routes the pin could
+    /// misdirect.
+    fn validate_can_pins<T>(
         config: &CanConfig,
+        ecus: &HashMap<String, RwLock<T>>,
         connections: &HashMap<String, Arc<CanEcuConnection>>,
     ) -> Result<(), CanGatewaySetupError> {
         for pinned in config
@@ -341,13 +360,22 @@ impl CanDiagGateway {
             .iter()
             .filter(|o| o.transport == crate::multi_transport::TransportType::Can)
         {
-            if !connections.contains_key(&pinned.ecu_name.to_lowercase()) {
-                return Err(CanGatewaySetupError::InvalidConfiguration(format!(
-                    "transport_overrides pins ECU '{}' to CAN, but it has neither a \
-                     [[can.ecu_mappings]] entry nor CAN addressing in its MDD com-params",
-                    pinned.ecu_name
-                )));
+            let ecu_name = pinned.ecu_name.to_lowercase();
+            if connections.contains_key(&ecu_name) {
+                continue;
             }
+            if !ecus.contains_key(&ecu_name) {
+                tracing::debug!(
+                    ecu = %pinned.ecu_name,
+                    "Transport pin to CAN for an ECU without a loaded database, ignoring"
+                );
+                continue;
+            }
+            return Err(CanGatewaySetupError::InvalidConfiguration(format!(
+                "transport_overrides pins ECU '{}' to CAN, but it has neither a \
+                 [[can.ecu_mappings]] entry nor CAN addressing in its MDD com-params",
+                pinned.ecu_name
+            )));
         }
         Ok(())
     }
@@ -427,7 +455,12 @@ impl CanDiagGateway {
 impl EcuGateway for CanDiagGateway {
     async fn shutdown(&mut self) {
         // CAN uses per-transaction ISO-TP sockets (no long-lived connection
-        // tasks); the keep-alive broadcast is the only background task.
+        // tasks); only the broadcast keep-alive and the rediscovery loop run
+        // in the background. Rediscovery first: it holds a gateway clone, so
+        // awaiting it here also breaks that reference cycle.
+        if let Some(rediscovery) = self.rediscovery_handle.get() {
+            rediscovery.shutdown().await;
+        }
         self.keepalive_handle.shutdown().await;
     }
 
@@ -624,6 +657,11 @@ impl EcuGateway for CanDiagGateway {
         }
     }
 
+    async fn get_ecu_network_address(&self, ecu_name: &str) -> Option<String> {
+        self.get_connection(&ecu_name.to_lowercase())
+            .map(|conn| conn.network_address())
+    }
+
     async fn send_functional(
         &self,
         _transmission_params: cda_interfaces::TransmissionParameters,
@@ -659,6 +697,7 @@ impl Clone for CanDiagGateway {
             probe_retry_delay: self.probe_retry_delay,
             probe_sequence: Arc::clone(&self.probe_sequence),
             keepalive_handle: Arc::clone(&self.keepalive_handle),
+            rediscovery_handle: Arc::clone(&self.rediscovery_handle),
         }
     }
 }
@@ -698,6 +737,7 @@ impl CanDiagGateway {
             probe_retries: 0,
             probe_retry_delay: Duration::from_millis(10),
             probe_sequence: Arc::new(vec![ProbeRequest::tester_present()]),
+            rediscovery_handle: Arc::new(std::sync::OnceLock::new()),
             keepalive_handle: Arc::new(keepalive::start_keepalive_broadcast(
                 "test0".to_owned(),
                 CanId::try_from(keepalive::DEFAULT_FUNCTIONAL_BROADCAST_ID)

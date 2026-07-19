@@ -142,6 +142,18 @@ impl<D: EcuGateway> MultiTransportGateway<D> {
         bound
     }
 
+    /// The CAN gateway's network address for the ECU, behind the `can://`
+    /// scheme (see `get_ecu_network_address`).
+    async fn can_ecu_network_address(&self, ecu_name: &str) -> Option<String> {
+        match self.can_gateway {
+            Some(ref can) => can
+                .get_ecu_network_address(ecu_name)
+                .await
+                .map(|addr| format!("can://{addr}")),
+            None => None,
+        }
+    }
+
     /// Attempts to detect the ECU on the CAN bus: already discovered, or
     /// mapped and answering an on-demand probe. A CAN-mapped ECU that was
     /// offline during startup discovery is detected here on first use.
@@ -203,6 +215,31 @@ impl<D: EcuGateway> EcuGateway for MultiTransportGateway<D> {
         }
 
         None
+    }
+
+    async fn get_ecu_network_address(&self, ecu_name: &str) -> Option<String> {
+        // Answer for the transport the ECU is pinned or bound to, so the
+        // reported address always agrees with where send() routes (an ECU
+        // can be known to both transports, e.g. a CAN mapping alongside its
+        // DoIP identity). Same scheme convention as the address-based
+        // lookup: DoIP addresses verbatim (the default impl yields None
+        // today), CAN addresses behind a can:// scheme.
+        let ecu_name = ecu_name.to_lowercase();
+        match self.pinned_or_bound(&ecu_name).await {
+            Some(TransportType::DoIP) => match self.doip_gateway {
+                Some(ref doip) => doip.get_ecu_network_address(&ecu_name).await,
+                None => None,
+            },
+            Some(TransportType::Can) => self.can_ecu_network_address(&ecu_name).await,
+            None => {
+                if let Some(ref doip) = self.doip_gateway
+                    && let Some(addr) = doip.get_ecu_network_address(&ecu_name).await
+                {
+                    return Some(addr);
+                }
+                self.can_ecu_network_address(&ecu_name).await
+            }
+        }
     }
 
     #[tracing::instrument(skip_all, fields(

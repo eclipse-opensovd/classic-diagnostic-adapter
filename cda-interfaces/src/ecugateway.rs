@@ -132,4 +132,18 @@ pub trait EcuGateway: Clone + Send + Sync + 'static {
     /// terminated, so callers (e.g. the runtime database reload, which reuses
     /// the `DoIP` UDP socket) can rely on the transport being quiescent.
     fn shutdown(&mut self) -> impl Future<Output = ()> + Send;
+
+    /// Network address of a specific ECU, looked up by name.
+    ///
+    /// Fallback for ECUs whose logical addresses are unresolved com-param
+    /// defaults (CAN-only databases all share the fallback `0x0000`, so the
+    /// address-based [`Self::get_gateway_network_address`] cannot identify
+    /// them). Transports whose addressing is genuinely logical-address-based
+    /// (`DoIP`) keep the default `None`.
+    fn get_ecu_network_address(
+        &self,
+        _ecu_name: &str,
+    ) -> impl Future<Output = Option<String>> + Send {
+        std::future::ready(None)
+    }
 }

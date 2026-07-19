@@ -23,11 +23,10 @@
 use std::time::Duration;
 
 use cda_interfaces::util::tokio_ext::sleep_for;
-use tokio::task::JoinHandle;
 use tokio_socketcan_isotp::{IsoTpBehaviour, IsoTpOptions, IsoTpSocket};
 use tokio_util::sync::CancellationToken;
 
-use super::{can_id::CanId, error::CanError};
+use super::{background::BackgroundTask, can_id::CanId, error::CanError};
 
 /// Default functional broadcast CAN ID (ISO 15765-4), used when the MDD
 /// com-params do not define `CP_CanFuncReqId`.
@@ -46,38 +45,6 @@ pub(crate) const DEFAULT_KEEPALIVE_INTERVAL: Duration = Duration::from_secs(2);
 /// UDS `TesterPresent` with `suppressPositiveResponse`.
 const TESTER_PRESENT_PAYLOAD: [u8; 2] = [0x3E, 0x80];
 
-/// A handle to a running keep-alive broadcast task.
-///
-/// Call [`Self::shutdown`] to stop the task and wait for its termination.
-/// Dropping the handle without a shutdown aborts the task as a last resort,
-/// without waiting for it to finish.
-pub(crate) struct KeepAliveHandle {
-    cancel: CancellationToken,
-    task: std::sync::Mutex<Option<JoinHandle<()>>>,
-}
-
-impl KeepAliveHandle {
-    /// Stops the broadcast task and waits until it has terminated. Idempotent.
-    pub(crate) async fn shutdown(&self) {
-        self.cancel.cancel();
-        let task = self.task.lock().map_or(None, |mut guard| guard.take());
-        if let Some(task) = task {
-            let _ = task.await;
-        }
-    }
-}
-
-impl Drop for KeepAliveHandle {
-    fn drop(&mut self) {
-        self.cancel.cancel();
-        if let Ok(mut guard) = self.task.lock()
-            && let Some(task) = guard.take()
-        {
-            task.abort();
-        }
-    }
-}
-
 /// Starts a background task that periodically sends a functional-broadcast
 /// `TesterPresent` (`0x3E 0x80`) on the given CAN interface.
 ///
@@ -92,14 +59,14 @@ impl Drop for KeepAliveHandle {
 /// * `interval` - How often to send the keep-alive
 ///
 /// # Returns
-/// A [`KeepAliveHandle`] that stops the broadcast via
-/// [`KeepAliveHandle::shutdown`].
+/// A [`BackgroundTask`] that stops the broadcast via
+/// [`BackgroundTask::shutdown`].
 #[must_use]
 pub(crate) fn start_keepalive_broadcast(
     interface: String,
     functional_id: CanId,
     interval: Duration,
-) -> KeepAliveHandle {
+) -> BackgroundTask {
     let cancel = CancellationToken::new();
     let task_cancel = cancel.clone();
     let task = cda_interfaces::spawn_named!("can-keepalive-broadcast", async move {
@@ -183,10 +150,7 @@ pub(crate) fn start_keepalive_broadcast(
         );
     });
 
-    KeepAliveHandle {
-        cancel,
-        task: std::sync::Mutex::new(Some(task)),
-    }
+    BackgroundTask::new(cancel, task)
 }
 
 /// Opens the ISO-TP socket used for the functional broadcast.
