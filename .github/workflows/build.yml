@@ -219,35 +219,16 @@ jobs:
           SUMMARY=$(lcov --summary lcov-merged.info 2>&1 || true)
           echo "$SUMMARY"
           TOTAL_COV=$(echo "$SUMMARY" | grep -oP 'lines\.*:\s*\K[0-9.]+' || echo "0")
-          echo "**Total line coverage: ${TOTAL_COV}%**" >> "$GITHUB_STEP_SUMMARY"
-      - name: Upload coverage artifact
+          echo "**Line coverage (unit + DoIP integration): ${TOTAL_COV}%**" >> "$GITHUB_STEP_SUMMARY"
+          cp lcov-merged.info lcov-doip.info
+      # The final merged artifact (unit + DoIP + CAN + mixed) is assembled in
+      # the merge_coverage job; this uploads the per-suite share.
+      - name: Upload coverage artifact (unit + DoIP)
         uses: actions/upload-artifact@v7
         with:
-          name: coverage-lcov
-          path: lcov-merged.info
+          name: coverage-lcov-doip
+          path: lcov-doip.info
           retention-days: 30
-      - name: Generate coverage PR comment artifact
-        if: github.event_name == 'pull_request'
-        run: |
-          TOTAL_COV=$(lcov --summary lcov-merged.info 2>&1 | grep -oP 'lines\.*:\s*\K[0-9.]+' || echo "0")
-          RUN_URL="${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}"
-          SYMBOL="$(printf '\xf0\x9f\x93\x8a')"
-          mkdir -p pr-comment-coverage
-          echo "${{ github.event.number }}" > pr-comment-coverage/pr_number
-          printf '%s\n' \
-            '<!-- coverage-report -->' \
-            "### ${SYMBOL} Coverage Report (unit + integration)" \
-            '' \
-            "**Total line coverage: ${TOTAL_COV}%**" \
-            '' \
-            "[Full build artifacts](${RUN_URL})" \
-            > pr-comment-coverage/body.md
-      - name: Upload coverage PR comment artifact
-        if: github.event_name == 'pull_request'
-        uses: actions/upload-artifact@v7
-        with:
-          name: pr-comment-coverage
-          path: pr-comment-coverage/
   can_integration_tests:
     name: CAN integration tests
     runs-on: ubuntu-latest
@@ -263,7 +244,7 @@ jobs:
         uses: actions-rust-lang/setup-rust-toolchain@v1
         with:
           toolchain: 1.88.0
-          components: clippy, rustfmt
+          components: clippy, rustfmt, llvm-tools
       # The vcan kernel module backs the socketcand container's shared bus.
       - name: Load vcan kernel module
         run: |
@@ -276,15 +257,19 @@ jobs:
       # ecu-sim connects to the daemon (wired via docker-compose
       # `SIM_CAN_SOCKETCAND_*`/`CDA_FEATURES`, written into the generated .env by
       # the test harness). CDA and the ecu-sim reach the bus over TCP.
-      - name: Build CDA docker image (can-socketcand)
+      # The suite always runs coverage-instrumented so it counts toward the
+      # merged coverage report (see merge_coverage).
+      - name: Build CDA docker image (can-socketcand, coverage-enabled)
         uses: docker/build-push-action@v5
         with:
           context: .
           file: testcontainer/cda/Dockerfile
           push: false
-          tags: ghcr.io/${{ github.repository }}/opensovd-cda:can
+          tags: ghcr.io/${{ github.repository }}/opensovd-cda:coverage
           load: true
           build-args: |
+            BUILD_PROFILE=dev
+            RUSTFLAGS=-C instrument-coverage
             CDA_FEATURES=can-socketcand
           cache-from: |
             type=gha,scope=cda-can-cargo-${{ github.ref_name }}
@@ -307,13 +292,59 @@ jobs:
             type=gha,scope=ecu-sim-gradle-main
           cache-to: |
             type=gha,mode=max,scope=ecu-sim-gradle-${{ github.ref_name }}
+      # Unit tests gated on the can features (e.g. the CAN example config
+      # validity test) run nowhere else: the main test job uses default
+      # features and the clippy workflow does not execute tests. Collected
+      # under coverage so they count toward the merged report like the
+      # default-features unit tests in build_and_test.
+      - name: Install cargo-llvm-cov
+        run: cargo install --locked cargo-llvm-cov
+      - name: Run unit tests with coverage (CAN features)
+        run: cargo llvm-cov --locked -p opensovd-cda -p cda-comm-can --features opensovd-cda/can-socketcand,cda-comm-can/can-socketcand --lcov --output-path lcov-can-unit.info -- --show-output
       - name: Run CAN integration tests
         env:
           CACHE_REGISTRY: ghcr.io/${{ github.repository }}
           CDA_INTEGRATION_TEST_USE_CAN: "true"
+          CDA_INTEGRATION_TEST_COVERAGE: "true"
         # Run serially: the CAN transport is timing-sensitive (per-transaction
         # TCP sockets + TesterPresent keepalive), so parallel tests can flake.
         run: cargo test --locked -p integration-tests --features can-integration-tests --test integration_tests -- --show-output --test-threads=1
+      - name: Export CAN integration coverage
+        run: |
+          set -x
+          LLVM_PROFDATA=$(rustc --print sysroot)/lib/rustlib/x86_64-unknown-linux-gnu/bin/llvm-profdata
+          LLVM_COV=$(rustc --print sysroot)/lib/rustlib/x86_64-unknown-linux-gnu/bin/llvm-cov
+          if [ -f "target/coverage/opensovd-cda" ] && ls target/coverage/*.profraw 1>/dev/null 2>&1; then
+            $LLVM_PROFDATA merge -sparse target/coverage/*.profraw -o target/coverage/docker.profdata
+            $LLVM_COV export -format=lcov \
+              target/coverage/opensovd-cda \
+              -instr-profile=target/coverage/docker.profdata \
+              --ignore-filename-regex='/usr/local/cargo|/usr/local/rustup' \
+              > lcov-can-raw.info
+            # Rewrite /app/ paths to the runner workspace paths so lcov --add
+            # unions hit counts with the other suites' tracefiles.
+            WORKSPACE=$(cargo metadata --no-deps --format-version 1 | jq -r '.workspace_root')
+            sed "s|SF:/app/|SF:${WORKSPACE}/|g" lcov-can-raw.info > lcov-can-docker.info
+          else
+            echo "No Docker coverage data found"
+            touch lcov-can-docker.info
+          fi
+          # Union with the host unit-test coverage (CAN features).
+          sudo apt-get update && sudo apt-get install -y lcov
+          if [ -s lcov-can-docker.info ] && [ -s lcov-can-unit.info ]; then
+            lcov --add-tracefile lcov-can-docker.info --add-tracefile lcov-can-unit.info \
+              --output-file lcov-can.info --ignore-errors inconsistent
+          elif [ -s lcov-can-unit.info ]; then
+            cp lcov-can-unit.info lcov-can.info
+          else
+            cp lcov-can-docker.info lcov-can.info
+          fi
+      - name: Upload CAN coverage artifact
+        uses: actions/upload-artifact@v7
+        with:
+          name: coverage-lcov-can
+          path: lcov-can.info
+          retention-days: 30
 
   mixed_integration_tests:
     name: Mixed DoIP+CAN integration tests
@@ -330,7 +361,7 @@ jobs:
         uses: actions-rust-lang/setup-rust-toolchain@v1
         with:
           toolchain: 1.88.0
-          components: clippy, rustfmt
+          components: clippy, rustfmt, llvm-tools
       - name: Load vcan kernel module
         run: |
           sudo apt-get update
@@ -343,15 +374,19 @@ jobs:
       # DoIP-preferred first detection, sticky bindings) with both gateways
       # alive, and it also runs the session/security tests that the pure-CAN
       # job skips.
-      - name: Build CDA docker image (can-socketcand)
+      # The suite always runs coverage-instrumented so it counts toward the
+      # merged coverage report (see merge_coverage).
+      - name: Build CDA docker image (can-socketcand, coverage-enabled)
         uses: docker/build-push-action@v5
         with:
           context: .
           file: testcontainer/cda/Dockerfile
           push: false
-          tags: ghcr.io/${{ github.repository }}/opensovd-cda:can
+          tags: ghcr.io/${{ github.repository }}/opensovd-cda:coverage
           load: true
           build-args: |
+            BUILD_PROFILE=dev
+            RUSTFLAGS=-C instrument-coverage
             CDA_FEATURES=can-socketcand
           cache-from: |
             type=gha,scope=cda-can-cargo-${{ github.ref_name }}
@@ -378,12 +413,93 @@ jobs:
         env:
           CACHE_REGISTRY: ghcr.io/${{ github.repository }}
           CDA_INTEGRATION_TEST_USE_MIXED: "true"
+          CDA_INTEGRATION_TEST_COVERAGE: "true"
         run: cargo test --locked -p integration-tests --features can-integration-tests --test integration_tests -- --show-output --test-threads=1
+      - name: Export mixed integration coverage
+        run: |
+          set -x
+          LLVM_PROFDATA=$(rustc --print sysroot)/lib/rustlib/x86_64-unknown-linux-gnu/bin/llvm-profdata
+          LLVM_COV=$(rustc --print sysroot)/lib/rustlib/x86_64-unknown-linux-gnu/bin/llvm-cov
+          if [ -f "target/coverage/opensovd-cda" ] && ls target/coverage/*.profraw 1>/dev/null 2>&1; then
+            $LLVM_PROFDATA merge -sparse target/coverage/*.profraw -o target/coverage/docker.profdata
+            $LLVM_COV export -format=lcov \
+              target/coverage/opensovd-cda \
+              -instr-profile=target/coverage/docker.profdata \
+              --ignore-filename-regex='/usr/local/cargo|/usr/local/rustup' \
+              > lcov-mixed-raw.info
+            # Rewrite /app/ paths to the runner workspace paths so lcov --add
+            # unions hit counts with the other suites' tracefiles.
+            WORKSPACE=$(cargo metadata --no-deps --format-version 1 | jq -r '.workspace_root')
+            sed "s|SF:/app/|SF:${WORKSPACE}/|g" lcov-mixed-raw.info > lcov-mixed.info
+          else
+            echo "No Docker coverage data found"
+            touch lcov-mixed.info
+          fi
+      - name: Upload mixed coverage artifact
+        uses: actions/upload-artifact@v7
+        with:
+          name: coverage-lcov-mixed
+          path: lcov-mixed.info
+          retention-days: 30
+
+  merge_coverage:
+    name: Merge coverage
+    runs-on: ubuntu-latest
+    needs: [build_and_test, can_integration_tests, mixed_integration_tests]
+    steps:
+      - name: Download per-suite coverage artifacts
+        uses: actions/download-artifact@v7
+        with:
+          pattern: coverage-lcov-*
+          merge-multiple: true
+      - name: Merge coverage data
+        run: |
+          set -x
+          sudo apt-get update && sudo apt-get install -y lcov
+          ADD_ARGS=""
+          for f in lcov-doip.info lcov-can.info lcov-mixed.info; do
+            if [ -s "$f" ]; then
+              ADD_ARGS="$ADD_ARGS --add-tracefile $f"
+            fi
+          done
+          lcov $ADD_ARGS --output-file lcov-merged.info --ignore-errors inconsistent
+          SUMMARY=$(lcov --summary lcov-merged.info 2>&1 || true)
+          echo "$SUMMARY"
+          TOTAL_COV=$(echo "$SUMMARY" | grep -oP 'lines\.*:\s*\K[0-9.]+' || echo "0")
+          echo "**Total line coverage: ${TOTAL_COV}%**" >> "$GITHUB_STEP_SUMMARY"
+      - name: Upload merged coverage artifact
+        uses: actions/upload-artifact@v7
+        with:
+          name: coverage-lcov
+          path: lcov-merged.info
+          retention-days: 30
+      - name: Generate coverage PR comment artifact
+        if: github.event_name == 'pull_request'
+        run: |
+          TOTAL_COV=$(lcov --summary lcov-merged.info 2>&1 | grep -oP 'lines\.*:\s*\K[0-9.]+' || echo "0")
+          RUN_URL="${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}"
+          SYMBOL="$(printf '\xf0\x9f\x93\x8a')"
+          mkdir -p pr-comment-coverage
+          echo "${{ github.event.number }}" > pr-comment-coverage/pr_number
+          printf '%s\n' \
+            '<!-- coverage-report -->' \
+            "### ${SYMBOL} Coverage Report (unit + DoIP/CAN/mixed integration)" \
+            '' \
+            "**Total line coverage: ${TOTAL_COV}%**" \
+            '' \
+            "[Full build artifacts](${RUN_URL})" \
+            > pr-comment-coverage/body.md
+      - name: Upload coverage PR comment artifact
+        if: github.event_name == 'pull_request'
+        uses: actions/upload-artifact@v7
+        with:
+          name: pr-comment-coverage
+          path: pr-comment-coverage/
 
   cargo-crap:
     name: CRAP (Change Risk Anti-Patterns)
     if: github.event_name == 'pull_request'
-    needs: [build_and_test]
+    needs: [merge_coverage]
     uses: eclipse-opensovd/cicd-workflows/.github/workflows/crap.yml@07140bdd84f20b66fd4aff58a83c5148deec388c
     with:
       rust-version: "1.88.0"
@@ -408,7 +524,7 @@ jobs:
         uses: actions-rust-lang/setup-rust-toolchain@v1
         with:
           toolchain: 1.88.0
-          components: clippy, rustfmt
+          components: clippy, rustfmt, llvm-tools
       - name: Setup OpenSSL (Windows) Environment
         run: |
           echo "OPENSSL_DIR=$env:OPENSSL_DIR" >> $env:GITHUB_ENV
