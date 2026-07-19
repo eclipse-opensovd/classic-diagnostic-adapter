@@ -341,6 +341,14 @@ pub struct CanComParams {
 
     /// Functional CAN ID for broadcast requests
     pub functional_id: ComParamConfig<Option<u32>>,
+
+    /// Name of the COMPLEX com-param table carrying the per-ECU CAN
+    /// addressing (ISO 22900/ODX `CP_UniqueRespIdTable`). Its sub-parameters
+    /// are matched against the `name`s of the ID parameters above and take
+    /// precedence over top-level scalar com-params of the same names.
+    /// OEM databases using a different table name configure it here (mirrors
+    /// `DoipComParams::logical_response_id_table_name`).
+    pub unique_resp_id_table_name: String,
 }
 
 /// Strategy for retrying after specific negative response codes.
@@ -621,6 +629,7 @@ impl Default for CanComParams {
                 value: None,
                 precedence: ComParamPrecedence::Database,
             },
+            unique_resp_id_table_name: "CP_UniqueRespIdTable".to_owned(),
         }
     }
 }

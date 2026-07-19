@@ -18,9 +18,9 @@ use cda_interfaces::{
     Connectivity, DiagServiceError, EcuManagerType, EcuRuntimeState, EcuStateManager, HashMap,
     HashMapExtensions, HashSet, PayloadDecoder, Protocol, VariantState,
     datatypes::{
-        AddressingMode, ComParamConfig, ComParamPrecedence, ComParams, ComplexComParamValue,
-        DatabaseNamingConvention, DiagnosticServiceAffixPosition, RetryPolicy, SdSdg,
-        TesterPresentSendType,
+        AddressingMode, ComParamConfig, ComParamPrecedence, ComParamValue, ComParams,
+        ComplexComParamValue, DatabaseNamingConvention, DiagnosticServiceAffixPosition,
+        RetryPolicy, SdSdg, TesterPresentSendType,
     },
     dlt_ctx,
     util::std_ext,
@@ -91,6 +91,11 @@ pub struct EcuManager<S: SecurityPlugin> {
     pub(in crate::diag_kernel) logical_functional_address: u16,
     /// See [`Self::doip_addresses_resolved`] for the semantics.
     pub(in crate::diag_kernel) doip_addresses_resolved: bool,
+    /// CAN arbitration IDs from the MDD com-params (or config override), when
+    /// present; see [`Self::resolve_can_id`] for the resolution order.
+    pub(in crate::diag_kernel) can_request_id: Option<u32>,
+    pub(in crate::diag_kernel) can_response_id: Option<u32>,
+    pub(in crate::diag_kernel) can_functional_id: Option<u32>,
 
     pub(in crate::diag_kernel) nack_number_of_retries: HashMap<u8, u32>,
     pub(in crate::diag_kernel) diagnostic_ack_timeout: Duration,
@@ -177,22 +182,24 @@ impl<S: SecurityPlugin> cda_interfaces::EcuAddresses for EcuManager<S> {
     }
 }
 
-/// Prepared hook for extracting CAN addressing from the MDD com-params
-/// (`CP_CanPhysReqId` / `CP_CanRespUSDTId` / `CP_CanFuncReqId`), tracked in
+/// CAN addressing extracted from the MDD com-params (`CP_CanPhysReqId` /
+/// `CP_CanRespUSDTId` / `CP_CanFuncReqId`, preferring the per-ECU
+/// `CP_UniqueRespIdTable` entries), implementing
 /// <https://github.com/eclipse-opensovd/classic-diagnostic-adapter/issues/415>.
-/// Until that lands every accessor returns `None` and the CAN gateway relies
-/// on the explicit `[[can.ecu_mappings]]` config block.
+/// `None` when neither the database nor the config provides a value; the CAN
+/// gateway then relies on the explicit `[[can.ecu_mappings]]` config block,
+/// which always takes precedence over these values anyway.
 impl<S: SecurityPlugin> cda_interfaces::CanComParamProvider for EcuManager<S> {
     fn can_request_id(&self) -> Option<u32> {
-        None
+        self.can_request_id
     }
 
     fn can_response_id(&self) -> Option<u32> {
-        None
+        self.can_response_id
     }
 
     fn can_functional_id(&self) -> Option<u32> {
-        None
+        self.can_functional_id
     }
 }
 
@@ -351,6 +358,28 @@ impl<S: SecurityPlugin> cda_interfaces::EcuManager for EcuManager<S> {
     }
 }
 
+/// Reads a CAN arbitration ID sub-parameter out of a resolved
+/// unique-response-ID table. Values appear as decimal or `0x`-prefixed hex
+/// strings depending on the authoring tool; unparseable values are treated
+/// as absent (with a warning) so the scalar com-param fallback still runs.
+fn can_id_from_table(entries: &ComplexComParamValue, param_name: &str) -> Option<u32> {
+    let ComParamValue::Simple(simple) = entries.get(param_name)? else {
+        return None;
+    };
+    match cda_interfaces::util::parse_u32_maybe_hex(simple.value.trim()) {
+        Ok(id) => Some(id),
+        Err(e) => {
+            tracing::warn!(
+                param_name,
+                value = %simple.value,
+                error = %e,
+                "Unparseable CAN ID in unique-response-ID table, treating as absent"
+            );
+            None
+        }
+    }
+}
+
 /// A `DoIP` logical address plus the provenance duplicate detection needs.
 struct DoipLogicalAddress {
     /// The address value to use.
@@ -371,6 +400,73 @@ impl<S: SecurityPlugin> EcuManager<S> {
     /// detection must not treat that as a real address collision.
     pub fn doip_addresses_resolved(&self) -> bool {
         self.doip_addresses_resolved
+    }
+
+    /// Looks up the unique-response-ID table (`CP_UniqueRespIdTable` by
+    /// default) that carries the per-ECU CAN addressing as sub-parameters.
+    /// `None` when the database has no such table for the protocol (the
+    /// scalar com-param fallback in [`Self::resolve_can_id`] still applies).
+    ///
+    /// A multi-row table collapses to one entry per sub-parameter name here
+    /// (per-ECU MDDs carry a single row; shared multi-ECU descriptions are
+    /// out of scope).
+    fn resolve_can_id_table(
+        database: &datatypes::DiagnosticDatabase,
+        data_protocol: Option<&datatypes::Protocol<'_>>,
+        com_params: &ComParams,
+    ) -> Option<ComplexComParamValue> {
+        match datatypes::lookup(
+            database,
+            data_protocol.map(|v| &**v),
+            &com_params.can.unique_resp_id_table_name,
+        ) {
+            Ok(ComParamValue::Complex(entries)) => Some(entries),
+            Ok(ComParamValue::Simple(_)) => {
+                tracing::warn!(
+                    table = %com_params.can.unique_resp_id_table_name,
+                    "Unique-response-ID table is a simple com-param, expected a complex table; \
+                     ignoring it for CAN addressing"
+                );
+                None
+            }
+            // Most commonly NotFound (no CAN addressing in this database).
+            Err(_) => None,
+        }
+    }
+
+    /// Resolves one CAN arbitration ID with the precedence
+    /// config override (`precedence = "Config"`) > unique-response-ID-table
+    /// sub-parameter > top-level scalar com-param > `None`.
+    fn resolve_can_id(
+        database: &datatypes::DiagnosticDatabase,
+        data_protocol: Option<&datatypes::Protocol<'_>>,
+        table: Option<&ComplexComParamValue>,
+        config: &ComParamConfig<Option<u32>>,
+    ) -> Option<u32> {
+        if config.precedence == ComParamPrecedence::Config {
+            tracing::debug!(
+                param_name = %config.name,
+                "Using config value (precedence = Config), DB lookup skipped"
+            );
+            return config.value;
+        }
+
+        if let Some(id) = table.and_then(|entries| can_id_from_table(entries, &config.name)) {
+            return Some(id);
+        }
+
+        // Top-level scalar com-param; a missing entry falls back to the
+        // config value (`None` by default) inside find_com_param.
+        database
+            .find_com_param(data_protocol, config)
+            .unwrap_or_else(|e| {
+                tracing::warn!(
+                    param_name = %config.name,
+                    error = %e,
+                    "Failed to read CAN ID com-param, treating as absent"
+                );
+                None
+            })
     }
 
     /// Resolve a logical address, keeping track of whether it was actually
@@ -531,6 +627,29 @@ impl<S: SecurityPlugin> EcuManager<S> {
             .map(datatypes::map_nack_number_of_retries)
             .collect::<Result<HashMap<u8, u32>, DiagServiceError>>()?;
 
+        // Per-ECU CAN addressing lives in the unique-response-ID table (one
+        // row per ECU description); resolve it once and let all three ID
+        // lookups read from it before falling back to scalar com-params.
+        let can_id_table = Self::resolve_can_id_table(&database, data_protocol_ref, com_params);
+        let can_request_id = Self::resolve_can_id(
+            &database,
+            data_protocol_ref,
+            can_id_table.as_ref(),
+            &com_params.can.physical_request_id,
+        );
+        let can_response_id = Self::resolve_can_id(
+            &database,
+            data_protocol_ref,
+            can_id_table.as_ref(),
+            &com_params.can.physical_response_id,
+        );
+        let can_functional_id = Self::resolve_can_id(
+            &database,
+            data_protocol_ref,
+            can_id_table.as_ref(),
+            &com_params.can.functional_id,
+        );
+
         let ecu_name = database
             .ecu_data()?
             .ecu_name()
@@ -549,6 +668,9 @@ impl<S: SecurityPlugin> EcuManager<S> {
             logical_functional_address: logical_functional_address.address,
             doip_addresses_resolved: !logical_gateway_address.is_comparam_default
                 && !logical_ecu_address.is_comparam_default,
+            can_request_id,
+            can_response_id,
+            can_functional_id,
             nack_number_of_retries,
             diagnostic_ack_timeout: database
                 .find_com_param(data_protocol_ref, &com_params.doip.diagnostic_ack_timeout)?,
@@ -668,6 +790,10 @@ impl<S: SecurityPlugin> EcuManager<S> {
             logical_functional_address: com_params.doip.logical_functional_address.value,
             // Functional descriptions use the com-param defaults verbatim.
             doip_addresses_resolved: false,
+            // Functional descriptions are not physical CAN nodes.
+            can_request_id: None,
+            can_response_id: None,
+            can_functional_id: com_params.can.functional_id.value,
             nack_number_of_retries,
             diagnostic_ack_timeout: com_params.doip.diagnostic_ack_timeout.value,
             retry_period: com_params.doip.retry_period.value,
@@ -992,5 +1118,53 @@ mod tests {
                 .variant_index
                 .is_some()
         );
+    }
+
+    // can_id_from_table: reading CAN IDs out of a resolved
+    // unique-response-ID table
+
+    fn table_with(entries: &[(&str, &str)]) -> ComplexComParamValue {
+        entries
+            .iter()
+            .map(|(name, value)| {
+                (
+                    (*name).to_owned(),
+                    ComParamValue::Simple(cda_interfaces::datatypes::ComParamSimpleValue {
+                        value: (*value).to_owned(),
+                        unit: None,
+                    }),
+                )
+            })
+            .collect()
+    }
+
+    #[test]
+    fn can_id_from_table_parses_hex_and_decimal() {
+        // Real smart453 values: request 0x79B, response 0x7BB. Authoring
+        // tools emit either 0x-prefixed hex or plain decimal.
+        let table = table_with(&[
+            ("CP_CanPhysReqId", "0x79B"),
+            ("CP_CanRespUSDTId", "1979"),
+            ("CP_Padded", " 0x7DF "),
+        ]);
+        assert_eq!(can_id_from_table(&table, "CP_CanPhysReqId"), Some(0x79B));
+        assert_eq!(can_id_from_table(&table, "CP_CanRespUSDTId"), Some(1979));
+        assert_eq!(can_id_from_table(&table, "CP_Padded"), Some(0x7DF));
+    }
+
+    #[test]
+    fn can_id_from_table_treats_missing_and_invalid_as_absent() {
+        let table = table_with(&[("CP_CanPhysReqId", "not-a-number")]);
+        // Unparseable value: absent, so the scalar com-param fallback runs.
+        assert_eq!(can_id_from_table(&table, "CP_CanPhysReqId"), None);
+        assert_eq!(can_id_from_table(&table, "CP_CanRespUSDTId"), None);
+
+        // A nested complex sub-value is not an ID either.
+        let mut nested = table_with(&[]);
+        nested.insert(
+            "CP_CanPhysReqId".to_owned(),
+            ComParamValue::Complex(table_with(&[("inner", "0x123")])),
+        );
+        assert_eq!(can_id_from_table(&nested, "CP_CanPhysReqId"), None);
     }
 }

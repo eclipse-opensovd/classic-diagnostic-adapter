@@ -162,42 +162,15 @@ impl CanDiagGateway {
             }
         }
 
-        // Try to get CAN IDs from MDD COM parameters for ECUs without explicit mappings
-        for (name, ecu_lock) in ecus {
-            let ecu = ecu_lock.read().await;
-            let logical_addr = ecu.logical_address();
-            let ecu_name = name.to_lowercase();
+        Self::add_connections_from_com_params(
+            config,
+            ecus,
+            &mut connections,
+            &mut logical_address_to_ecu,
+        )
+        .await;
 
-            // Skip if already have a mapping
-            if connections.contains_key(&ecu_name) {
-                continue;
-            }
-
-            // Try to get CAN IDs from COM parameters
-            if let (Some(req_id), Some(resp_id)) = (ecu.can_request_id(), ecu.can_response_id()) {
-                let request_id = Self::validate_can_id(name, "request_id", req_id)?;
-                let response_id = Self::validate_can_id(name, "response_id", resp_id)?;
-                let conn = CanEcuConnection::new(
-                    name.clone(),
-                    config.interface.clone(),
-                    request_id,
-                    response_id,
-                );
-                tracing::debug!(
-                    ecu = %name,
-                    logical_addr = logical_addr,
-                    request_id = %request_id,
-                    response_id = %response_id,
-                    "Added CAN connection from MDD COM params"
-                );
-                Self::register_logical_address(
-                    &mut logical_address_to_ecu,
-                    logical_addr,
-                    &ecu_name,
-                );
-                connections.insert(ecu_name, Arc::new(conn));
-            }
-        }
+        Self::validate_can_pins(config, &connections)?;
 
         // Fail fast on configurations that cannot work: a [can] section with
         // no usable ECU addressing means every request would fail at runtime
@@ -228,7 +201,13 @@ impl CanDiagGateway {
         for ecu_lock in ecus.values() {
             let ecu = ecu_lock.read().await;
             if let Some(id) = ecu.can_functional_id() {
-                functional_id = Self::validate_can_id("<functional>", "functional_id", id)?;
+                match Self::validate_can_id("<functional>", "functional_id", id) {
+                    Ok(valid) => functional_id = valid,
+                    Err(e) => tracing::warn!(
+                        error = %e,
+                        "Invalid functional CAN ID in MDD com-params, keeping the default"
+                    ),
+                }
                 break;
             }
         }
@@ -274,6 +253,103 @@ impl CanDiagGateway {
         }
 
         Ok(gateway)
+    }
+
+    /// Adds connections for ECUs whose CAN addressing comes from the MDD
+    /// com-params (ECUs with an explicit `[[can.ecu_mappings]]` entry are
+    /// skipped - config overrides the database).
+    ///
+    /// Unlike config mappings, database values are not under the user's
+    /// control, so a bad value skips the ECU (with a warning) instead of
+    /// failing setup: one malformed MDD must not take down diagnostics for
+    /// the whole vehicle. Several ECU descriptions may legitimately share
+    /// one ID pair - candidate models of the same physical node (e.g. the
+    /// radio variants of a duplicate group); each gets its own connection
+    /// and variant detection decides which one is actually installed,
+    /// exactly like `DoIP` address duplicates.
+    async fn add_connections_from_com_params<T: EcuAddresses + CanComParamProvider>(
+        config: &CanConfig,
+        ecus: &HashMap<String, RwLock<T>>,
+        connections: &mut HashMap<String, Arc<CanEcuConnection>>,
+        logical_address_to_ecu: &mut HashMap<u16, String>,
+    ) {
+        for (name, ecu_lock) in ecus {
+            let ecu = ecu_lock.read().await;
+            let logical_addr = ecu.logical_address();
+            let ecu_name = name.to_lowercase();
+
+            if connections.contains_key(&ecu_name) {
+                continue;
+            }
+            let (Some(req_id), Some(resp_id)) = (ecu.can_request_id(), ecu.can_response_id())
+            else {
+                continue;
+            };
+
+            if req_id == resp_id {
+                tracing::warn!(
+                    ecu = %name,
+                    can_id = format_args!("{req_id:#X}"),
+                    "MDD CAN addressing uses the same ID for request and response, skipping \
+                     this ECU (a [[can.ecu_mappings]] entry can override)"
+                );
+                continue;
+            }
+            let ids = Self::validate_can_id(name, "request_id", req_id).and_then(|req| {
+                Self::validate_can_id(name, "response_id", resp_id).map(|resp| (req, resp))
+            });
+            let (request_id, response_id) = match ids {
+                Ok(ids) => ids,
+                Err(e) => {
+                    tracing::warn!(
+                        ecu = %name,
+                        error = %e,
+                        "Invalid CAN addressing in MDD com-params, skipping this ECU (a \
+                         [[can.ecu_mappings]] entry can override)"
+                    );
+                    continue;
+                }
+            };
+            let conn = CanEcuConnection::new(
+                name.clone(),
+                config.interface.clone(),
+                request_id,
+                response_id,
+            );
+            tracing::debug!(
+                ecu = %name,
+                logical_addr = logical_addr,
+                request_id = %request_id,
+                response_id = %response_id,
+                "Added CAN connection from MDD COM params"
+            );
+            Self::register_logical_address(logical_address_to_ecu, logical_addr, &ecu_name);
+            connections.insert(ecu_name, Arc::new(conn));
+        }
+    }
+
+    /// Transport pins to CAN are validated here rather than in the config
+    /// sanity check: whether an ECU has CAN addressing may only be known
+    /// once the database is loaded (MDD com-params), which the config layer
+    /// cannot see.
+    fn validate_can_pins(
+        config: &CanConfig,
+        connections: &HashMap<String, Arc<CanEcuConnection>>,
+    ) -> Result<(), CanGatewaySetupError> {
+        for pinned in config
+            .transport_overrides
+            .iter()
+            .filter(|o| o.transport == crate::multi_transport::TransportType::Can)
+        {
+            if !connections.contains_key(&pinned.ecu_name.to_lowercase()) {
+                return Err(CanGatewaySetupError::InvalidConfiguration(format!(
+                    "transport_overrides pins ECU '{}' to CAN, but it has neither a \
+                     [[can.ecu_mappings]] entry nor CAN addressing in its MDD com-params",
+                    pinned.ecu_name
+                )));
+            }
+        }
+        Ok(())
     }
 
     /// Records the logical-address -> ECU lookup used by the

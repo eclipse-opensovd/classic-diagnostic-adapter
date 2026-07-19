@@ -24,6 +24,16 @@
 # response_timeout_ms = 5000
 # transport_overrides = []
 
+# Defines the Communication parameters which are used in CAN bus communication
+[com_params.can]
+# Name of the COMPLEX com-param table carrying the per-ECU CAN
+# addressing (ISO 22900/ODX `CP_UniqueRespIdTable`). Its sub-parameters
+# are matched against the `name`s of the ID parameters above and take
+# precedence over top-level scalar com-params of the same names.
+# OEM databases using a different table name configure it here (mirrors
+# `DoipComParams::logical_response_id_table_name`).
+# unique_resp_id_table_name = "CP_UniqueRespIdTable"
+
 # Functional CAN ID for broadcast requests
 [com_params.can.functional_id]
 # Communication parameter identifier (`CP_xxx` name from the database).

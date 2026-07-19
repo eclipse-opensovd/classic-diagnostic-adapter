@@ -53,10 +53,12 @@ probe_timeout_ms = 100
 # Delay between probe retry rounds in milliseconds (default: 100ms)
 # probe_retry_delay_ms = 100
 
-# CAN ID mappings. CDA does not (yet) extract these from the MDD's
-# CP_UniqueRespIdTable, so we set them explicitly here. The example
+# CAN ID mappings. CDA extracts CAN addressing from the MDD com-params
+# (per-ECU CP_UniqueRespIdTable entries first, then top-level
+# CP_CanPhysReqId / CP_CanRespUSDTId scalars); an [[can.ecu_mappings]]
+# entry OVERRIDES whatever the MDD provides for that ECU. The example
 # MDDs in testcontainer/odx/ (e.g. FLXC1000) do not carry CAN addressing
-# com-params, so a fallback request/response ID pair is required.
+# com-params, so a fallback request/response ID pair is required here.
 # 0x7E0/0x7E8 are the OBD-II request/response IDs and work as a generic
 # default for the test/example MDDs.
 [[can.ecu_mappings]]

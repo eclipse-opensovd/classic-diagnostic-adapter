@@ -270,22 +270,10 @@ impl Configuration {
         };
         for transport_override in &can.transport_overrides {
             match transport_override.transport {
-                cda_comm_can::TransportType::Can => {
-                    let has_mapping = can.ecu_mappings.iter().any(|m| {
-                        m.ecu_name
-                            .eq_ignore_ascii_case(&transport_override.ecu_name)
-                    });
-                    if !has_mapping {
-                        return Err(ConfigSanityError::InvalidValue {
-                            field: "can.transport_overrides".to_owned(),
-                            reason: format!(
-                                "pins ECU '{}' to CAN, but there is no [[can.ecu_mappings]] entry \
-                                 for it",
-                                transport_override.ecu_name
-                            ),
-                        });
-                    }
-                }
+                // A pin to CAN is validated at gateway setup, not here: the
+                // ECU may get its CAN addressing from the MDD com-params,
+                // which the config layer cannot see.
+                cda_comm_can::TransportType::Can => {}
                 cda_comm_can::TransportType::DoIP => {
                     if !self.doip.enabled {
                         return Err(ConfigSanityError::InvalidValue {
