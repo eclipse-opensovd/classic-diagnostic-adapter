@@ -170,7 +170,7 @@ async fn initialize_runtime() -> Result<TestRuntime, TestingError> {
         if can_infra() {
             start_ecu_sim_can(&ecu_sim).await?;
         } else {
-            start_ecu_sim(&ecu_sim).await?;
+            start_ecu_sim_doip(&ecu_sim).await?;
         }
         start_cda(config.clone());
     }
@@ -188,13 +188,14 @@ fn cda_test_config(
     cda_port: u16,
     gateway_port: u16,
 ) -> Result<Configuration, TestingError> {
-    doip_test_config(host, cda_port, gateway_port, per_ecu_configs_for_doip())
+    let mut config = base_test_config(host, cda_port, per_ecu_configs_for_doip())?;
+    enable_doip(&mut config, gateway_port);
+    Ok(config)
 }
 
+/// CAN-only configuration: no `DoIP` transport, so no gateway port either.
 fn cda_test_config_can(host: String, cda_port: u16) -> Result<Configuration, TestingError> {
-    let mut config =
-        doip_test_config(host, cda_port, /*unused*/ 0, per_ecu_configs_for_can())?;
-    config.doip.enabled = false;
+    let mut config = base_test_config(host, cda_port, per_ecu_configs_for_can())?;
     config.can = Some(test_can_config(vec![]));
     Ok(config)
 }
@@ -214,7 +215,8 @@ fn cda_test_config_mixed(
     for (name, cfg) in per_ecu_configs_for_can() {
         ecu.insert(name, cfg);
     }
-    let mut config = doip_test_config(host, cda_port, gateway_port, ecu)?;
+    let mut config = base_test_config(host, cda_port, ecu)?;
+    enable_doip(&mut config, gateway_port);
     let pins = [
         ("TMCC3000", TransportType::Can),
         ("HOVR4000", TransportType::Can),
@@ -231,6 +233,12 @@ fn cda_test_config_mixed(
     Ok(config)
 }
 
+/// Turns on the `DoIP` transport of a [`base_test_config`].
+fn enable_doip(config: &mut Configuration, gateway_port: u16) {
+    config.doip.enabled = true;
+    config.doip.gateway_port = gateway_port;
+}
+
 fn test_can_config(transport_overrides: Vec<TransportOverride>) -> CanConfig {
     CanConfig {
         interface: format!("socketcand:127.0.0.1:{SOCKETCAND_PORT}:{CAN_BUS_NAME}"),
@@ -238,14 +246,16 @@ fn test_can_config(transport_overrides: Vec<TransportOverride>) -> CanConfig {
         transport_overrides,
         response_timeout_ms: 2000,
         probe_timeout_ms: 500,
-        probe_fallbacks: vec![],
+        ..CanConfig::default()
     }
 }
 
-fn doip_test_config(
+/// Transport-less base of every test configuration (server, database,
+/// com-params, ...). The `DoIP` section is present but disabled; callers add
+/// their transports via [`enable_doip`] and/or by setting `config.can`.
+fn base_test_config(
     host: String,
     cda_port: u16,
-    gateway_port: u16,
     ecu: HashMap<String, EcuConfig>,
 ) -> Result<Configuration, TestingError> {
     Ok(Configuration {
@@ -255,7 +265,8 @@ fn doip_test_config(
         },
         doip: opensovd_cda_lib::config::configfile::DoipConfig {
             tester_address: host,
-            gateway_port,
+            enabled: false,
+            gateway_port: 0,
             ..Default::default()
         },
         can: None,
@@ -276,6 +287,13 @@ fn doip_test_config(
             // are unaffected because the DB value takes precedence.
             let mut p = ComParams::default();
             p.doip.logical_functional_address.value = 0xFFFF;
+            // Faster reconnect ladder against the local simulator: with the
+            // production default of 5s, recovering from a simulated gateway
+            // restart (several failed reconnect rounds while the entities are
+            // down) can take longer than the 30s `wait_for_ecus_online`
+            // budget. Precedence Config so the MDD cannot override it.
+            p.doip.connection_retry_delay.value = std::time::Duration::from_secs(1);
+            p.doip.connection_retry_delay.precedence = ComParamPrecedence::Config;
             p
         },
         flat_buf: FlatbBufConfig::default(),
@@ -373,8 +391,7 @@ fn per_ecu_configs_for_doip() -> HashMap<String, EcuConfig> {
 fn per_ecu_configs_for_can() -> HashMap<String, EcuConfig> {
     // For CAN we let the MDD's protocol layer win where it exists, and
     // fall back to `ignore_protocol = true` for the protocol-less MDDs
-    // (TMCC3000, JGWT5000). This mirrors the working configuration in
-    // `scripts/test_can_e2e.sh`.
+    // (TMCC3000, JGWT5000).
     let mut map = HashMap::new();
     for name in ["TMCC3000", "HOVR4000", "JGWT5000"] {
         map.insert(
@@ -670,7 +687,7 @@ fn dump_docker_logs() {
     tracing::error!("========== Docker Compose Logs ==========");
 
     // Set the active compose profiles so profile-gated services (e.g. the
-    // `socketcand` daemon under the `can` profile) are included in the dump --
+    // `socketcand` daemon under the `can` profile) are included in the dump -
     // without this only the default services (cda, ecu-sim) are known here, and
     // the socketcand side stays invisible when debugging CAN failures.
     let output = std::process::Command::new("docker")
@@ -806,10 +823,8 @@ fn write_config_toml(
     Ok(())
 }
 
-/// Build the docker-compose `.env` file contents. Pure (no I/O, no env lookups)
-/// so the exact bytes fed to compose can be unit-tested -- a malformed literal
-/// here previously mangled `SIM_CAN_SOCKETCAND_HOST` into `socketcand\`, which
-/// made the ecu-sim silently never join the CAN bus in CI.
+/// Build the docker-compose `.env` file contents. Pure (no I/O, no env
+/// lookups) so the exact bytes fed to compose can be unit-tested.
 fn docker_env_content(
     can: bool,
     cda_port: u16,
@@ -829,10 +844,9 @@ fn docker_env_content(
         // and compile the CDA image with the socketcand transport.
         //
         // NOTE: emit one short `writeln!` per line rather than a single long
-        // literal. rustfmt's `format_strings` rewraps long literals at the
-        // column limit and, when a wrap lands on an escape, mangles `\n` into
-        // `\\` + `n` -- which is exactly how the host once became `socketcand\`,
-        // silently keeping the sim off the CAN bus in CI. Short lines are never
+        // literal: rustfmt's `format_strings` rewraps long literals at the
+        // column limit and can mangle an `\n` escape at the wrap point into a
+        // stray backslash in the emitted file. Short lines are never
         // rewrapped, so this stays correct across `cargo fmt`.
         let _ = writeln!(env_content, "# socketcand daemon the ecu-sim connects to");
         let _ = writeln!(
@@ -864,7 +878,7 @@ fn write_docker_env_file(
     Ok(())
 }
 
-pub(crate) async fn start_ecu_sim(sim: &EcuSim) -> Result<(), TestingError> {
+pub(crate) async fn start_ecu_sim_doip(sim: &EcuSim) -> Result<(), TestingError> {
     if use_docker() {
         docker_compose_up(Some("ecu-sim".to_owned()))?;
     } else {
@@ -901,7 +915,7 @@ pub(crate) async fn start_ecu_sim_for_mode(sim: &EcuSim) -> Result<(), TestingEr
     if !use_docker() && can_infra() {
         start_ecu_sim_can(sim).await
     } else {
-        start_ecu_sim(sim).await
+        start_ecu_sim_doip(sim).await
     }
 }
 
@@ -928,11 +942,11 @@ pub(crate) async fn start_ecu_sim_can(sim: &EcuSim) -> Result<(), TestingError> 
         )));
     }
 
-    // The shadow JAR is built for JDK 21. Use the local JDK 25 to run it
-    // (the gentoo system has /opt/openjdk-bin-25.0.2_p10). The user can
-    // override with JAVA_BIN.
-    let java_bin = std::env::var("CDA_INTEGRATION_TEST_JAVA_BIN")
-        .unwrap_or_else(|_| "/opt/openjdk-bin-25.0.2_p10/bin/java".to_owned());
+    // Use `java` from PATH by default; CDA_INTEGRATION_TEST_JAVA_BIN
+    // overrides it for systems where the required JDK (>= 21) is not the
+    // default one.
+    let java_bin =
+        std::env::var("CDA_INTEGRATION_TEST_JAVA_BIN").unwrap_or_else(|_| "java".to_owned());
     let child = std::process::Command::new(&java_bin)
         .arg("-jar")
         .arg(&jar)
@@ -1012,7 +1026,7 @@ fn use_mixed() -> bool {
 
 /// Whether the CAN infrastructure (socketcand + sim CAN stack) is needed:
 /// true in pure-CAN and in mixed mode.
-fn can_infra() -> bool {
+pub(crate) fn can_infra() -> bool {
     use_can() || use_mixed()
 }
 
@@ -1377,11 +1391,8 @@ mod tests {
     fn docker_env_can_socketcand_lines_are_well_formed() {
         let content = docker_env_content(true, 20002, 13400, 8181);
 
-        // Regression guard: a malformed string literal previously produced
-        // `SIM_CAN_SOCKETCAND_HOST=socketcand\` (trailing backslash) with the
-        // PORT var mangled onto a continuation line, so the ecu-sim tried to
-        // resolve host `socketcand\`, never joined the CAN bus, and every CDA
-        // discovery probe timed out in CI.
+        // Guards against string-literal mangling (e.g. a stray backslash in a
+        // value), which would silently keep the ecu-sim off the CAN bus.
         assert!(
             content.contains("SIM_CAN_SOCKETCAND_HOST=socketcand\n"),
             "host line malformed:\n{content}"
@@ -1402,8 +1413,7 @@ mod tests {
             content.contains("CDA_FEATURES=can-socketcand\n"),
             "features line malformed:\n{content}"
         );
-        // Every line is a comment or a well-formed KEY=VALUE (no stray leading
-        // whitespace, exactly the shape docker-compose's dotenv parser expects).
+        // Every line is a comment or a well-formed KEY=VALUE line.
         for line in content
             .lines()
             .filter(|l| !l.is_empty() && !l.starts_with('#'))

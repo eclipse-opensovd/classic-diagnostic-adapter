@@ -32,8 +32,8 @@ use crate::{
             send_cda_request,
         },
         runtime::{
-            TestRuntime, restart_cda, setup_integration_test, skip_for_can, start_ecu_sim_for_mode,
-            stop_ecu_sim,
+            TestRuntime, can_infra, restart_cda, setup_integration_test, skip_for_can,
+            start_ecu_sim_for_mode, stop_ecu_sim,
         },
     },
 };
@@ -151,12 +151,86 @@ async fn test_jgwt5000_ignore_protocol_with_db_protocol() {
     assert_ecu_answers_on_bus(runtime, sovd::ECU_JGWT5000_ENDPOINT).await;
 }
 
+/// A CAN-only ECU must be usable purely from configuration: TMCC3000's MDD
+/// carries no `DoIP` addressing and its CAN request/response IDs come
+/// exclusively from `[[can.ecu_mappings]]` plus the per-ECU protocol
+/// handling in the test config (in mixed mode additionally a transport
+/// override pins it to CAN). The test asserts the ECU is actually served
+/// over a CAN network address and answers a live read on the bus.
+#[tokio::test]
+async fn test_can_only_ecu_from_configuration() {
+    if !can_infra() {
+        eprintln!(
+            "[doip] skipping test_can_only_ecu_from_configuration: needs the CAN transport \
+             (pure-CAN or mixed mode)"
+        );
+        return;
+    }
+    let (runtime, _lock) = setup_integration_test(false).await.unwrap();
+
+    // Live read proves the ECU answers on the bus at all.
+    assert_ecu_answers_on_bus(runtime, sovd::ECU_TMCC3000_ENDPOINT).await;
+
+    // The network structure must serve TMCC3000 behind a CAN network address
+    // (can:// scheme) carrying the configured request/response CAN IDs.
+    let response = send_cda_request(
+        &runtime.config,
+        "apps/sovd2uds/data/networkstructure",
+        StatusCode::OK,
+        Method::GET,
+        None,
+        None,
+        None,
+    )
+    .await
+    .expect("network structure should be readable");
+    let json = response_to_json(&response).expect("network structure should be JSON");
+    let gateways: Vec<&serde_json::Value> = json
+        .get("data")
+        .and_then(|d| d.as_array())
+        .map(|structures| {
+            structures
+                .iter()
+                .flat_map(|ns| ns.get("Gateways").and_then(|g| g.as_array()))
+                .flatten()
+                .collect()
+        })
+        .unwrap_or_default();
+    let tmcc3000_gateway = gateways
+        .iter()
+        .find(|gw| {
+            gw.get("Ecus")
+                .and_then(|ecus| ecus.as_array())
+                .is_some_and(|ecus| {
+                    ecus.iter().any(|ecu| {
+                        ecu.get("Qualifier")
+                            .and_then(|q| q.as_str())
+                            .is_some_and(|q| q.eq_ignore_ascii_case("tmcc3000"))
+                    })
+                })
+        })
+        .unwrap_or_else(|| panic!("TMCC3000 missing from network structure: {json}"));
+    let network_address = tmcc3000_gateway
+        .get("NetworkAddress")
+        .and_then(|a| a.as_str())
+        .expect("gateway should have a network address");
+    assert!(
+        network_address.starts_with("can://"),
+        "TMCC3000 should be served over CAN, got network address {network_address}"
+    );
+    assert!(
+        network_address.contains("0x730") && network_address.contains("0x738"),
+        "CAN address should carry the configured request/response IDs: {network_address}"
+    );
+}
+
 #[allow(clippy::too_many_lines, reason = "Makes sense to keep test together")]
 #[tokio::test]
 async fn test_ecu_session_switching() {
     // TODO(can): SecurityAccess seed/key/lock sequencing is not yet reliable
-    // over the CAN transport (see follow-up tracking issue). Re-enable once the
-    // CAN session/security path is hardened.
+    // over the CAN transport. Re-enable once the CAN session/security path is
+    // hardened; tracking issue to be filed before merge (CAN follow-up:
+    // session/security hardening).
     if skip_for_can(
         "test_ecu_session_switching",
         "SecurityAccess sequencing not yet supported over CAN",
@@ -843,8 +917,9 @@ async fn test_boot_variant_service_inheritance() {
 #[tokio::test]
 async fn test_ecu_session_reset_on_lock_reacquire() {
     // TODO(can): session expiry depends on TesterPresent keepalive cadence,
-    // which is not yet reliable over the CAN transport (per-transaction sockets
-    // + busy-poll dispatcher are too slow; see follow-up tracking issue).
+    // which is not yet reliable over the CAN transport (per-transaction
+    // sockets + busy-poll dispatcher are too slow). Tracking issue to be
+    // filed before merge (CAN follow-up: session/security hardening).
     if skip_for_can(
         "test_ecu_session_reset_on_lock_reacquire",
         "session-expiry keepalive timing not yet reliable over CAN",
@@ -1222,7 +1297,7 @@ async fn test_operation_sdg_retrieval() {
 ///
 /// ECU states are updated asynchronously (variant detection tasks probe each
 /// ECU on its transport, with per-probe timeouts), so a one-shot check races
-/// the startup/detection loop -- especially in mixed mode where undetected
+/// the startup/detection loop - especially in mixed mode where undetected
 /// CAN-mapped ECUs cost a probe timeout each before the loop moves on.
 async fn validate_ecu_state(
     runtime: &TestRuntime,

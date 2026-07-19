@@ -140,7 +140,9 @@ impl<S: EcuGateway, T: EcuManager> UdsManager<S, T> {
                     }
                 }
 
-                vd_uds_clone.start_variant_detection_for_ecus(deduplicated_ecus);
+                vd_uds_clone
+                    .start_variant_detection_for_ecus(deduplicated_ecus)
+                    .await;
             }
         });
 

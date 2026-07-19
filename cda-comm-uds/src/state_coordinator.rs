@@ -34,6 +34,12 @@ use crate::coordinator::{
 #[derive(Clone)]
 pub struct EcuStateCoordinator {
     handles: Arc<HashMap<String, EcuCoordinatorHandle>>,
+    /// When set, a real `Offline` -> `Online` transition pushes the ECU into
+    /// this channel to trigger a variant re-detection. Without it, an ECU
+    /// that reconnects (variant reset to `NotTested`) stays undetected until
+    /// the next UDS request arrives via the pre-send guard - too late for
+    /// consumers that only read states, like the network structure.
+    redetect: Option<tokio::sync::mpsc::Sender<Vec<String>>>,
 }
 
 impl EcuStateCoordinator {
@@ -53,7 +59,18 @@ impl EcuStateCoordinator {
 
         Self {
             handles: Arc::new(handles),
+            redetect: None,
         }
+    }
+
+    /// Push reconnected ECUs into `trigger` for variant re-detection.
+    #[must_use]
+    pub fn with_redetect_trigger(
+        mut self,
+        trigger: tokio::sync::mpsc::Sender<Vec<String>>,
+    ) -> Self {
+        self.redetect = Some(trigger);
+        self
     }
 
     /// Mark the ECU as connected (Online) on the next request.
@@ -65,7 +82,19 @@ impl EcuStateCoordinator {
         tracing::info!(ecu_name, "ECU connected - setting connectivity to Online");
 
         if let Some(handle) = self.handles.get(ecu_name) {
-            let _ = handle.actor_ref.tell(EcuConnected).await;
+            let transitioned = handle.actor_ref.ask(EcuConnected).await.unwrap_or_default();
+            // Push a re-detection whenever the reconnected ECU has no valid
+            // variant: a real Offline -> Online transition resets it to
+            // NotTested, and a reconnect during variant detection (when
+            // disconnect events are suppressed, so no transition is seen)
+            // can leave a stale offline verdict behind. Triggering on every
+            // such reconnect mirrors the transport announcing the ECU;
+            // detection runs are coalesced downstream.
+            let needs_detection =
+                transitioned || crate::transport::needs_variant_detection(&handle.ecu_status());
+            if needs_detection && let Some(ref redetect) = self.redetect {
+                let _ = redetect.send(vec![ecu_name.to_owned()]).await;
+            }
         }
     }
 
