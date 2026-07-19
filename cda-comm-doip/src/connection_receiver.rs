@@ -13,7 +13,7 @@
 
 use std::{sync::Arc, time::Duration};
 
-use cda_interfaces::{EcuConnectivityHandler, HashMap, dlt_ctx};
+use cda_interfaces::{HashMap, dlt_ctx};
 use tokio::{
     io::{AsyncRead, AsyncWrite},
     sync::{broadcast, mpsc, watch},
@@ -147,8 +147,6 @@ pub(super) async fn handle_response(
     outtx: &HashMap<u16, broadcast::Sender<Result<DiagnosticResponse, EcuError>>>,
     reset_tx: &mpsc::Sender<ConnectionResetReason>,
     response: Option<Result<DiagnosticResponse, ConnectionError>>,
-    ecu_names: &[String],
-    connectivity_handler: &Arc<dyn EcuConnectivityHandler>,
 ) {
     let Some(result) = response else {
         return;
@@ -158,15 +156,7 @@ pub(super) async fn handle_response(
             handle_ok_response(gateway_name, gateway_ip, outtx, response).await;
         }
         Err(err) => {
-            handle_connection_error(
-                gateway_name,
-                gateway_ip,
-                reset_tx,
-                err,
-                ecu_names,
-                connectivity_handler,
-            )
-            .await;
+            handle_connection_error(gateway_name, gateway_ip, reset_tx, err).await;
         }
     }
 }
@@ -231,11 +221,15 @@ async fn handle_connection_error(
     gateway_ip: &str,
     reset_tx: &mpsc::Sender<ConnectionResetReason>,
     err: ConnectionError,
-    ecu_names: &[String],
-    connectivity_handler: &Arc<dyn EcuConnectivityHandler>,
 ) {
     match err {
         ConnectionError::Closed => {
+            // Connectivity notifications are owned by the connection-reset
+            // task: it serializes disconnected -> (reconnect) -> connected.
+            // Emitting disconnected from here raced the reset task - the
+            // read loop hits Closed repeatedly while a reconnect is already
+            // succeeding, and a late disconnected arriving after the reset
+            // task's connected left healthy ECUs marked Offline for good.
             if let Err(e) = reset_tx
                 .send("Connection has been closed.".to_owned())
                 .await
@@ -247,10 +241,6 @@ async fn handle_connection_error(
                     "Failed to send connection reset request"
                 );
             }
-            // Notify UDS layer that ECUs on this connection are disconnected
-            connectivity_handler
-                .on_gateway_disconnected(ecu_names)
-                .await;
         }
         _ => {
             // for POC purposes we just log the error and do not reset the connection
@@ -294,8 +284,6 @@ where
         mut send_pending_rx,
         reset_tx,
     } = channels;
-    let ecu_names = gateway.ecu_names;
-    let connectivity_handler = gateway.connectivity_handler;
 
     cda_interfaces::spawn_named!(&format!("gateway-receiver-{}", gateway_id.ip), async move {
         'receive: loop {
@@ -338,8 +326,6 @@ where
                             &outtx,
                             &reset_tx,
                             response,
-                            &ecu_names,
-                            &connectivity_handler,
                         ).await;
                     }
                 }
