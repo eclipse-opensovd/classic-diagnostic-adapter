@@ -431,6 +431,18 @@ where
     let _tracing_guards = setup_tracing(&config)?;
     tracing::info!("Starting CDA - version {}", cda_version());
 
+    // Vendor overrides are registered via `linkme` distributed slices, whose
+    // final contents are only known after linking; this checks that at most
+    // one override is linked in per overridable function before any of them
+    // are used. Every crate that defines vendor-overridable functions must
+    // be listed here.
+    if let Err(errors) = cda_core::validate_vendor_overrides() {
+        return Err(AppError::InitializationFailed(format!(
+            "Vendor override configuration error(s): {}",
+            errors.join("; ")
+        )));
+    }
+
     let webserver_config = cda_sovd::WebServerConfig {
         host: config.server.address.clone(),
         port: config.server.port,

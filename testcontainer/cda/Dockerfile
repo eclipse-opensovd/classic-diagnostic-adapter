@@ -51,6 +51,7 @@ COPY cda-build/Cargo.toml ./cda-build/Cargo.toml
 COPY comm-mbedtls/mbedtls-rs/Cargo.toml ./comm-mbedtls/mbedtls-rs/Cargo.toml
 COPY comm-mbedtls/mbedtls-sys/Cargo.toml ./comm-mbedtls/mbedtls-sys/Cargo.toml
 COPY opensovd-axum-extra/Cargo.toml ./opensovd-axum-extra/Cargo.toml
+COPY override-macros/Cargo.toml ./override-macros/Cargo.toml
 
 # Generate the recipe.json which describes dependencies
 RUN cargo chef prepare --recipe-path recipe.json
@@ -72,9 +73,9 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry,sharing=locked \
     --mount=type=cache,target=$SCCACHE_DIR,sharing=locked \
     export RUSTFLAGS="$RUSTFLAGS"; \
     if [ "$BUILD_PROFILE" = "dev" ]; then \
-        cargo chef cook --profile dev --recipe-path recipe.json; \
+    cargo chef cook --profile dev --recipe-path recipe.json; \
     else \
-        cargo chef cook --release --recipe-path recipe.json; \
+    cargo chef cook --release --recipe-path recipe.json; \
     fi
 
 # --- Stage 4: Build the application ---
@@ -108,6 +109,7 @@ COPY integration-tests ./integration-tests
 COPY cda-build ./cda-build
 COPY comm-mbedtls ./comm-mbedtls
 COPY opensovd-axum-extra ./opensovd-axum-extra
+COPY override-macros ./override-macros
 
 ENV RUSTC_WRAPPER=sccache \
     SCCACHE_DIR=/sccache
@@ -119,11 +121,11 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry,sharing=locked \
     export SOURCE_GIT_SHA=${SOURCE_GIT_SHA} && \
     export RUSTFLAGS="$RUSTFLAGS"; \
     if [ "$BUILD_PROFILE" = "dev" ]; then \
-        cargo build --profile dev --bin opensovd-cda && \
-        cp target/debug/opensovd-cda /tmp/opensovd-cda; \
+    cargo build --profile dev --bin opensovd-cda && \
+    cp target/debug/opensovd-cda /tmp/opensovd-cda; \
     else \
-        cargo build --release --bin opensovd-cda && \
-        cp target/release/opensovd-cda /tmp/opensovd-cda; \
+    cargo build --release --bin opensovd-cda && \
+    cp target/release/opensovd-cda /tmp/opensovd-cda; \
     fi
 
 # --- Stage 5: Runtime base with dependencies ---

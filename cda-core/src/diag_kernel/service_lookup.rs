@@ -635,7 +635,12 @@ impl<S: SecurityPlugin> EcuManager<S> {
             .collect()
     }
 
-    pub(in crate::diag_kernel) fn lookup_services_by_sid(
+    /// Looks up all diagnostic services with the given service ID (SID) in the current variant
+    /// and its parent references. Returns a vector of matching services, or an error if none are found.
+    ///
+    /// # Errors
+    /// Will return `Err` if no services with the specified SID are found in the variant, base variant, or ECU shared data.
+    pub fn lookup_services_by_sid(
         &self,
         service_id: u8,
     ) -> Result<Vec<datatypes::DiagService<'_>>, DiagServiceError> {
