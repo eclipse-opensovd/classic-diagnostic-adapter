@@ -29,8 +29,11 @@ use tokio::task::JoinHandle;
 /// - `Watchdog` while healthy (`Up` -> `Up`)
 /// - `WatchdogTrigger` when health degrades (`Up` -> `Failed`)
 ///
-/// The notification interval is the systemd-configured watchdog timeout
-/// minus 5 seconds (to avoid timing issues).
+/// The notification interval is half of the systemd-configured watchdog timeout,
+/// per the systemd-recommended convention.
+///
+/// When the shutdown signal fires, `Stopping` is sent so systemd treats the exit
+/// as intentional rather than a watchdog failure.
 ///
 /// If systemd is not detected or the watchdog is not enabled, returns `None`
 /// and the CDA runs without `sd_notify` behavior.
@@ -46,7 +49,7 @@ where
         tracing::info!("Systemd not detected, skipping sd_notify initialization");
         return None;
     }
-    let Some(interval) = determine_interval() else {
+    let Some(interval) = watchdog_notify_interval() else {
         tracing::info!("Systemd watchdog not enabled, skipping sd_notify initialization");
         return None;
     };
@@ -62,7 +65,12 @@ where
     let sd_notify_future = spawn_named!("sd_notify", async move {
         tokio::select! {
             _ = watchdog_future => {},
-            () = shutdown_signal => {},
+            () = shutdown_signal => {
+                tracing::debug!("Shutdown signal received, notifying systemd of stopping state");
+                if let Err(e) = sd_notify::notify(&[sd_notify::NotifyState::Stopping]) {
+                    tracing::warn!(error = %e, "Failed to send sd_notify stopping notification");
+                }
+            },
         }
     });
     tracing::info!(
@@ -73,16 +81,11 @@ where
     Some(sd_notify_future)
 }
 
-fn determine_interval() -> Option<Duration> {
-    sd_notify::watchdog_enabled().map(|duration| {
-        // ensure we are sending a bit more often than the watchdog expects,
-        // to avoid any timing issues
-        if let Some(interval) = duration.checked_sub(Duration::from_secs(5)) {
-            interval.min(Duration::from_secs(1))
-        } else {
-            duration
-        }
-    })
+/// Interval at which watchdog notifications should be sent: half of the
+/// systemd-configured watchdog timeout, per the systemd-recommended convention
+/// (see `sd_watchdog_enabled(3)`).
+fn watchdog_notify_interval() -> Option<Duration> {
+    sd_notify::watchdog_enabled().map(|timeout| timeout / 2)
 }
 
 async fn trigger_watchdog(
