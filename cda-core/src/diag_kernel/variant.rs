@@ -23,14 +23,21 @@ use super::ecumanager::{EcuManager, VariantData};
 use crate::diag_kernel::variant_detection;
 
 impl<S: SecurityPlugin> EcuManager<S> {
-    fn clear_variant(&self, variant_state: VariantState, connectivity: Option<Connectivity>) {
-        let mut ecu_state = std_ext::lock_write(&self.runtime_state.ecu_state);
-        ecu_state.variant_state = variant_state;
-        ecu_state.variant_index = None;
-        if let Some(connectivity) = connectivity {
-            ecu_state.connectivity = connectivity;
+    async fn clear_variant_and_unload(
+        &mut self,
+        variant_state: VariantState,
+        connectivity: Option<Connectivity>,
+    ) {
+        {
+            let mut ecu_state = std_ext::lock_write(&self.runtime_state.ecu_state);
+            ecu_state.variant_state = variant_state;
+            ecu_state.variant_index = None;
+            if let Some(connectivity) = connectivity {
+                ecu_state.connectivity = connectivity;
+            }
         }
-        drop(ecu_state);
+        self.db_cache.reset().await;
+        self.diag_database.unload();
     }
 }
 
@@ -72,9 +79,11 @@ impl<S: SecurityPlugin> VariantDetection for EcuManager<S> {
             Err(e) => {
                 if !self.fallback_to_base_variant {
                     // Connectivity is Online. We got responses but couldn't match a variant.
-                    self.clear_variant(VariantState::NotDetected, Some(Connectivity::Online));
-                    self.db_cache.reset().await;
-                    self.diag_database.unload();
+                    self.clear_variant_and_unload(
+                        VariantState::NotDetected,
+                        Some(Connectivity::Online),
+                    )
+                    .await;
                     tracing::debug!(
                         "No variant detected, fallback to base variant disabled, unloading DB"
                     );
@@ -84,9 +93,11 @@ impl<S: SecurityPlugin> VariantDetection for EcuManager<S> {
                 let base_variant = match self.diag_database.base_variant() {
                     Ok(base_variant) => base_variant,
                     Err(e) => {
-                        self.clear_variant(VariantState::NotDetected, Some(Connectivity::Online));
-                        self.db_cache.reset().await;
-                        self.diag_database.unload();
+                        self.clear_variant_and_unload(
+                            VariantState::NotDetected,
+                            Some(Connectivity::Online),
+                        )
+                        .await;
                         tracing::debug!(
                             "No variant detected, and no base variant found in DB, unloading DB"
                         );
@@ -105,14 +116,12 @@ impl<S: SecurityPlugin> VariantDetection for EcuManager<S> {
     }
 
     async fn mark_as_duplicate(&mut self) {
-        self.clear_variant(VariantState::Duplicate, None);
-        self.db_cache.reset().await;
-        self.diag_database.unload();
+        self.clear_variant_and_unload(VariantState::Duplicate, None)
+            .await;
     }
 
     async fn mark_as_no_variant_detected(&mut self) {
-        self.clear_variant(VariantState::NotDetected, None);
-        self.db_cache.reset().await;
-        self.diag_database.unload();
+        self.clear_variant_and_unload(VariantState::NotDetected, None)
+            .await;
     }
 }
