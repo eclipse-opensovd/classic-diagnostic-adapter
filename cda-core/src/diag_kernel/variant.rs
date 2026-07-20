@@ -11,6 +11,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+use async_trait::async_trait;
 // Needed so that `self.load()` is callable inside the EcuVariantProvider impl
 use cda_interfaces::{
     Connectivity, DiagComm, DiagServiceError, EcuManager as EcuManagerTrait, EcuState, HashMap,
@@ -21,6 +22,26 @@ use cda_plugin_security::SecurityPlugin;
 use super::ecumanager::{EcuManager, VariantData};
 use crate::diag_kernel::variant_detection;
 
+impl<S: SecurityPlugin> EcuManager<S> {
+    async fn clear_variant_and_unload(
+        &mut self,
+        variant_state: VariantState,
+        connectivity: Option<Connectivity>,
+    ) {
+        {
+            let mut ecu_state = std_ext::lock_write(&self.runtime_state.ecu_state);
+            ecu_state.variant_state = variant_state;
+            ecu_state.variant_index = None;
+            if let Some(connectivity) = connectivity {
+                ecu_state.connectivity = connectivity;
+            }
+        }
+        self.db_cache.reset().await;
+        self.diag_database.unload();
+    }
+}
+
+#[async_trait]
 impl<S: SecurityPlugin> VariantDetection for EcuManager<S> {
     fn ecu_status(&self) -> EcuState {
         self.runtime_state.status()
@@ -57,14 +78,12 @@ impl<S: SecurityPlugin> VariantDetection for EcuManager<S> {
             }
             Err(e) => {
                 if !self.fallback_to_base_variant {
-                    let mut ecu_state = std_ext::lock_write(&self.runtime_state.ecu_state);
-
-                    ecu_state.variant_state = VariantState::NotDetected;
-                    ecu_state.variant_index = None;
-                    // Connectivity is Online. We got responses but couldn't match a variant
-                    ecu_state.connectivity = Connectivity::Online;
-                    drop(ecu_state);
-                    self.diag_database.unload();
+                    // Connectivity is Online. We got responses but couldn't match a variant.
+                    self.clear_variant_and_unload(
+                        VariantState::NotDetected,
+                        Some(Connectivity::Online),
+                    )
+                    .await;
                     tracing::debug!(
                         "No variant detected, fallback to base variant disabled, unloading DB"
                     );
@@ -74,12 +93,11 @@ impl<S: SecurityPlugin> VariantDetection for EcuManager<S> {
                 let base_variant = match self.diag_database.base_variant() {
                     Ok(base_variant) => base_variant,
                     Err(e) => {
-                        let mut ecu_state = std_ext::lock_write(&self.runtime_state.ecu_state);
-                        ecu_state.variant_state = VariantState::NotDetected;
-                        ecu_state.variant_index = None;
-                        ecu_state.connectivity = Connectivity::Online;
-                        drop(ecu_state);
-                        self.diag_database.unload();
+                        self.clear_variant_and_unload(
+                            VariantState::NotDetected,
+                            Some(Connectivity::Online),
+                        )
+                        .await;
                         tracing::debug!(
                             "No variant detected, and no base variant found in DB, unloading DB"
                         );
@@ -97,21 +115,13 @@ impl<S: SecurityPlugin> VariantDetection for EcuManager<S> {
         &self.variant_detection.diag_service_requests
     }
 
-    fn mark_as_duplicate(&mut self) {
-        let mut ecu_state = std_ext::lock_write(&self.runtime_state.ecu_state);
-        ecu_state.variant_state = VariantState::Duplicate;
-        ecu_state.variant_index = None;
-        drop(ecu_state);
-        self.db_cache.reset_sync();
-        self.diag_database.unload();
+    async fn mark_as_duplicate(&mut self) {
+        self.clear_variant_and_unload(VariantState::Duplicate, None)
+            .await;
     }
 
-    fn mark_as_no_variant_detected(&mut self) {
-        let mut ecu_state = std_ext::lock_write(&self.runtime_state.ecu_state);
-        ecu_state.variant_state = VariantState::NotDetected;
-        ecu_state.variant_index = None;
-        drop(ecu_state);
-        self.db_cache.reset_sync();
-        self.diag_database.unload();
+    async fn mark_as_no_variant_detected(&mut self) {
+        self.clear_variant_and_unload(VariantState::NotDetected, None)
+            .await;
     }
 }

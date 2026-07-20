@@ -15,6 +15,7 @@
 
 use std::time::Duration;
 
+use async_trait::async_trait;
 use cda_interfaces::{
     DiagComm, DiagServiceError, DoipComParams, EcuAddresses, EcuState, EcuStateManager, HashMap,
     HashMapExtensions, UdsComParams, VariantDetection,
@@ -184,6 +185,7 @@ impl EcuStateManager for TestEcuDb {
     }
 }
 
+#[async_trait]
 impl VariantDetection for TestEcuDb {
     fn ecu_status(&self) -> EcuState {
         unimplemented!()
@@ -200,11 +202,11 @@ impl VariantDetection for TestEcuDb {
         unimplemented!()
     }
 
-    fn mark_as_duplicate(&mut self) {
+    async fn mark_as_duplicate(&mut self) {
         unimplemented!()
     }
 
-    fn mark_as_no_variant_detected(&mut self) {
+    async fn mark_as_no_variant_detected(&mut self) {
         unimplemented!()
     }
 }

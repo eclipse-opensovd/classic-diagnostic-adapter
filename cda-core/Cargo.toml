@@ -31,6 +31,7 @@ cda-database = { workspace = true }
 cda-plugin-security = { workspace = true }
 
 # external
+async-trait = { workspace = true }
 num-traits = { workspace = true }
 parking_lot = { workspace = true }
 serde = { workspace = true }

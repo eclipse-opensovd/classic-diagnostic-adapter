@@ -239,7 +239,7 @@ impl<S: EcuGateway, T: EcuManager> UdsVariant for UdsManager<S, T> {
                         continue;
                     }
                     if let Some(ecu) = self.ecus.get(ecu_name) {
-                        ecu.write().await.mark_as_duplicate();
+                        ecu.write().await.mark_as_duplicate().await;
                     }
                 }
             }
@@ -248,7 +248,7 @@ impl<S: EcuGateway, T: EcuManager> UdsVariant for UdsManager<S, T> {
                 // Falling back to base variant is only allowed when there are no duplicates.
                 for ecu_name in &duplicated_ecus {
                     if let Some(ecu) = self.ecus.get(ecu_name) {
-                        ecu.write().await.mark_as_no_variant_detected();
+                        ecu.write().await.mark_as_no_variant_detected().await;
                     }
                 }
             }

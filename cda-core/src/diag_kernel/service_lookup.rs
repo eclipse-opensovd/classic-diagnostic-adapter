@@ -28,26 +28,23 @@ use super::ecumanager::EcuManager;
 
 #[derive(Default)]
 pub(in crate::diag_kernel) struct DbCache {
-    diag_services: RwLock<HashMap<StringId, Option<CacheLocation>>>,
+    diag_services: RwLock<HashMap<StringId, CachedService>>,
 }
 
 impl DbCache {
     pub(in crate::diag_kernel) async fn reset(&self) {
         self.diag_services.write().await.clear();
     }
-
-    /// Synchronous cache reset. Used when the DB is unloaded (no async context needed
-    /// because no one should be concurrently reading the cache during unload).
-    pub(in crate::diag_kernel) fn reset_sync(&self) {
-        if let Ok(mut guard) = self.diag_services.try_write() {
-            guard.clear();
-        }
-    }
 }
 
 pub(in crate::diag_kernel) enum CacheLocation {
     Variant(usize),
     ParentRef(usize),
+}
+
+struct CachedService {
+    variant_index: Option<usize>,
+    location: Option<CacheLocation>,
 }
 
 fn diag_comm_short_name_starts_with(
@@ -115,8 +112,17 @@ impl<S: SecurityPlugin> EcuManager<S> {
             let cache_key = format!("{base_name}:sf{sf_id}:m{effective_mask:02X}");
             let lookup_id = STRINGS.get_or_insert(&cache_key);
 
-            if let Some(Some(location)) = self.db_cache.diag_services.read().await.get(&lookup_id) {
-                return match self.get_service_by_location(location) {
+            let variant_index = self.current_variant_index();
+            if let Some(cached) = self
+                .db_cache
+                .diag_services
+                .read()
+                .await
+                .get(&lookup_id)
+                .filter(|cached| cached.variant_index == variant_index)
+                .and_then(|cached| cached.location.as_ref())
+            {
+                return match self.get_service_by_location(cached) {
                     Some(service) => Ok(service),
                     None => Err(DiagServiceError::NotFound(format!(
                         "Cached diagnostic service '{base_name}' with subfunction {sf_id:#04X} \
@@ -129,11 +135,13 @@ impl<S: SecurityPlugin> EcuManager<S> {
                 return Ok(service);
             }
 
-            self.db_cache
-                .diag_services
-                .write()
-                .await
-                .insert(lookup_id, None);
+            self.db_cache.diag_services.write().await.insert(
+                lookup_id,
+                CachedService {
+                    variant_index,
+                    location: None,
+                },
+            );
 
             return Err(DiagServiceError::NotFound(format!(
                 "Diagnostic service '{base_name}' with subfunction {sf_id:#04X} not found in \
@@ -173,8 +181,17 @@ impl<S: SecurityPlugin> EcuManager<S> {
 
         let lookup_id = STRINGS.get_or_insert(&lookup_name);
 
-        if let Some(Some(location)) = self.db_cache.diag_services.read().await.get(&lookup_id) {
-            return match self.get_service_by_location(location) {
+        let variant_index = self.current_variant_index();
+        if let Some(cached) = self
+            .db_cache
+            .diag_services
+            .read()
+            .await
+            .get(&lookup_id)
+            .filter(|cached| cached.variant_index == variant_index)
+            .and_then(|cached| cached.location.as_ref())
+        {
+            return match self.get_service_by_location(cached) {
                 Some(service) => Ok(service),
                 None => Err(DiagServiceError::NotFound(format!(
                     "Cached diagnostic service '{lookup_name}' not found at stored location"
@@ -186,11 +203,13 @@ impl<S: SecurityPlugin> EcuManager<S> {
             return Ok(service);
         }
 
-        self.db_cache
-            .diag_services
-            .write()
-            .await
-            .insert(lookup_id, None);
+        self.db_cache.diag_services.write().await.insert(
+            lookup_id,
+            CachedService {
+                variant_index,
+                location: None,
+            },
+        );
 
         Err(DiagServiceError::NotFound(format!(
             "Diagnostic service '{lookup_name}' not found in variant, base variant, or ECU shared \
@@ -207,15 +226,22 @@ impl<S: SecurityPlugin> EcuManager<S> {
         F: Fn(&datatypes::DiagService<'_>) -> bool,
     {
         if let Some((service, location)) = self.search_with_location(predicate) {
-            self.db_cache
-                .diag_services
-                .write()
-                .await
-                .insert(lookup_id, Some(location));
+            let variant_index = self.current_variant_index();
+            self.db_cache.diag_services.write().await.insert(
+                lookup_id,
+                CachedService {
+                    variant_index,
+                    location: Some(location),
+                },
+            );
             Some(service)
         } else {
             None
         }
+    }
+
+    fn current_variant_index(&self) -> Option<usize> {
+        cda_interfaces::util::std_ext::lock_read(&self.runtime_state.ecu_state).variant_index
     }
 
     fn search_with_location<F>(
@@ -758,10 +784,52 @@ mod tests {
     use cda_database::datatypes::database_builder::{
         DataFormatParentRefType, DiagLayerParams, EcuDataBuilder, EcuDataParams,
     };
-    use cda_interfaces::{DiagComm, DiagCommLookup, DiagServiceError, subfunction_ids};
+    use cda_interfaces::{
+        DiagComm, DiagCommLookup, DiagServiceError, VariantDetection, subfunction_ids,
+        util::std_ext,
+    };
 
     use super::*;
-    use crate::diag_kernel::test_utils::ecu_manager_builder::create_ecu_manager_with_routine_control_service;
+    use crate::diag_kernel::test_utils::ecu_manager_builder::{
+        create_ecu_manager_variant_detection, create_ecu_manager_with_routine_control_service,
+    };
+
+    #[tokio::test]
+    async fn stale_variant_cache_is_ignored_after_variant_is_cleared() {
+        let ecu_manager = create_ecu_manager_variant_detection(true);
+        let service = ecu_manager
+            .get_variant_detection_requests()
+            .values()
+            .next()
+            .expect("Expected variant detection service")
+            .clone();
+        let lookup_name = service
+            .lookup_name
+            .clone()
+            .unwrap_or_else(|| {
+                ecu_manager
+                    .database_naming_convention
+                    .apply_action_affix(&service.name, &service.action())
+            })
+            .to_lowercase();
+        let lookup_id = STRINGS.get_or_insert(&lookup_name);
+
+        ecu_manager.db_cache.diag_services.write().await.insert(
+            lookup_id,
+            CachedService {
+                variant_index: Some(1),
+                location: Some(CacheLocation::Variant(usize::MAX)),
+            },
+        );
+        std_ext::lock_write(&ecu_manager.runtime_state.ecu_state).variant_index = None;
+
+        let result = ecu_manager.lookup_diag_service(&service, None, None).await;
+
+        assert!(
+            result.is_ok(),
+            "Expected lookup to ignore cache from previous variant, got: {result:?}"
+        );
+    }
 
     /// Tests that `get_parent_ref_diag_layers_with_refs_recursive` correctly resolves a
     /// mixed parent-ref hierarchy with the following structure:
