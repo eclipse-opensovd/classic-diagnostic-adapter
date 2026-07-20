@@ -203,6 +203,7 @@ impl schemars::JsonSchema for ComParamBool {
 pub struct UdsComParams {
     // todo use this in #53
     /// Define Tester Present generation
+    #[patch(nesting)]
     pub tester_present_retry_policy: ComParamConfig<ComParamBool>,
 
     // todo use this in #53
