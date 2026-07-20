@@ -1,5 +1,5 @@
 /*
- * SPDX-FileCopyrightText: 2025 Copyright (c) Contributors to the Eclipse Foundation
+ * SPDX-FileCopyrightText: 2026 Copyright (c) Contributors to the Eclipse Foundation
  *
  * See the NOTICE file(s) distributed with this work for additional
  * information regarding copyright ownership.
@@ -11,6 +11,8 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+mod patch;
+
 use std::{fmt::Debug, time::Duration};
 
 use serde::{Deserialize, Deserializer, Serialize, Serializer, de::DeserializeOwned};
@@ -21,7 +23,9 @@ use crate::{
 };
 
 /// Default communication parameters for diagnostic protocols.
-#[derive(Deserialize, Serialize, Clone, Debug, Default, schemars::JsonSchema, struct_patch::Patch)]
+#[derive(
+    Deserialize, Serialize, Clone, Debug, Default, schemars::JsonSchema, struct_patch::Patch,
+)]
 #[patch(attribute(derive(Deserialize, Serialize, Clone, Debug)))]
 #[patch(attribute(serde(deny_unknown_fields)))]
 pub struct ComParams {
@@ -32,7 +36,6 @@ pub struct ComParams {
     #[patch(nesting)]
     pub doip: DoipComParams,
 }
-
 
 pub type ComParamName = String;
 
@@ -192,7 +195,9 @@ impl schemars::JsonSchema for ComParamBool {
 
 /// Defines the default values for the Communication
 /// parameters which are used in the UDS communication
-#[derive(Deserialize, Serialize, Clone, Debug, schemars::JsonSchema, PartialEq, struct_patch::Patch)]
+#[derive(
+    Deserialize, Serialize, Clone, Debug, schemars::JsonSchema, PartialEq, struct_patch::Patch,
+)]
 #[patch(attribute(derive(Deserialize, Serialize, Clone, Debug)))]
 #[patch(attribute(serde(deny_unknown_fields)))]
 pub struct UdsComParams {
@@ -281,7 +286,9 @@ pub struct UdsComParams {
 }
 
 /// Defines the Communication parameters which are used in the `DoIP` communication
-#[derive(Deserialize, Serialize, Clone, Debug, schemars::JsonSchema, PartialEq, struct_patch::Patch)]
+#[derive(
+    Deserialize, Serialize, Clone, Debug, schemars::JsonSchema, PartialEq, struct_patch::Patch,
+)]
 #[patch(attribute(derive(Deserialize, Serialize, Clone, Debug)))]
 #[patch(attribute(serde(deny_unknown_fields)))]
 pub struct DoipComParams {

@@ -27,7 +27,8 @@ pub fn resolve_com_params(
     ecu_name: &str, //TODO remove
     global: &ComParams,
     ecu_overrides: Option<&EcuComParams>,
-) -> Option<ComParams> { //TODO always return ComParams
+) -> Option<ComParams> {
+    //TODO always return ComParams
     let params: ComParams = match ecu_overrides {
         None => global.clone(),
         Some(overrides) => {
@@ -58,7 +59,8 @@ pub struct EcuComParams(pub(crate) ComParamsPatch);
 /// Returns an error if `params` cannot be serialized to a TOML table.
 impl TryFrom<ComParams> for EcuComParams {
     type Error = toml::ser::Error;
-    fn try_from(com_params: ComParams) -> Result<Self, Self::Error> { //TODO try_from → from
+    fn try_from(com_params: ComParams) -> Result<Self, Self::Error> {
+        //TODO try_from → from
         Ok(Self(Patch::into_patch(com_params)))
     }
 }
@@ -71,8 +73,7 @@ impl Serialize for EcuComParams {
 
 impl<'de> Deserialize<'de> for EcuComParams {
     fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
-        ComParamsPatch::deserialize(deserializer)
-            .map(Self)
+        ComParamsPatch::deserialize(deserializer).map(Self)
     }
 }
 
@@ -91,36 +92,36 @@ mod tests {
     use super::*;
     use crate::config::configfile::Configuration;
 
-//     #[tokio::test]
-//     async fn load_config_toml_per_ecu_com_params() { //TODO
-//         let config_str = r"
-// [ecu.TMCC3000.com_params.doip.logical_gateway_address]
-// value = 12288
-//
-// [ecu.TMCC3000.com_params.doip.logical_functional_address]
-// value = 65535
-// ";
-//         let figment = Figment::from(Serialized::defaults(Configuration::default()))
-//             .merge(Toml::string(config_str));
-//         let config: Configuration = figment.extract().expect("Failed to parse config file");
-//
-//         let tmcc = config
-//             .ecu
-//             .get("TMCC3000")
-//             .expect("TMCC3000 ecu config should be present");
-//         let ecu_com_params = tmcc.com_params.as_ref().expect("com_params should be Some");
-//         let resolved = resolve_com_params("TMCC3000", &config.com_params, Some(ecu_com_params))
-//             .expect("resolve should succeed");
-//
-//         assert_eq!(
-//             resolved.doip.logical_gateway_address.value, 12288u16,
-//             "logical_gateway_address.default should be 12288"
-//         );
-//         assert_eq!(
-//             resolved.doip.logical_functional_address.value, 65535u16,
-//             "logical_functional_address.default should be 65535"
-//         );
-//     }
+    //     #[tokio::test]
+    //     async fn load_config_toml_per_ecu_com_params() { //TODO
+    //         let config_str = r"
+    // [ecu.TMCC3000.com_params.doip.logical_gateway_address]
+    // value = 12288
+    //
+    // [ecu.TMCC3000.com_params.doip.logical_functional_address]
+    // value = 65535
+    // ";
+    //         let figment = Figment::from(Serialized::defaults(Configuration::default()))
+    //             .merge(Toml::string(config_str));
+    //         let config: Configuration = figment.extract().expect("Failed to parse config file");
+    //
+    //         let tmcc = config
+    //             .ecu
+    //             .get("TMCC3000")
+    //             .expect("TMCC3000 ecu config should be present");
+    //         let ecu_com_params = tmcc.com_params.as_ref().expect("com_params should be Some");
+    //         let resolved = resolve_com_params("TMCC3000", &config.com_params, Some(ecu_com_params))
+    //             .expect("resolve should succeed");
+    //
+    //         assert_eq!(
+    //             resolved.doip.logical_gateway_address.value, 12288u16,
+    //             "logical_gateway_address.default should be 12288"
+    //         );
+    //         assert_eq!(
+    //             resolved.doip.logical_functional_address.value, 65535u16,
+    //             "logical_functional_address.default should be 65535"
+    //         );
+    //     }
 
     /// A per-ECU field that IS set in the TOML overrides the global value.
     #[tokio::test]
