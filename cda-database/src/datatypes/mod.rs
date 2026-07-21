@@ -754,7 +754,7 @@ impl DiagnosticDatabase {
         let protocols = self.protocols()?;
         let seen: HashSet<&str> = protocols
             .iter()
-            .filter_map(|p| p.diag_layer().and_then(|dl| dl.short_name()))
+            .filter_map(|p| protocol_short_name(p))
             .collect();
         Ok(seen.len())
     }

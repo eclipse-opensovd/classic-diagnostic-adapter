@@ -158,8 +158,9 @@ pub mod serde_ext {
         }
 
         fn normalize_key(s: &str) -> Result<String, String> {
+            use crate::util::try_strip_hex_prefix;
             let s = s.trim();
-            if let Some(hex) = s.to_lowercase().strip_prefix("0x") {
+            if let Some(hex) = try_strip_hex_prefix(s) {
                 u8::from_str_radix(hex, 16)
             } else {
                 s.parse::<u8>()
@@ -461,15 +462,33 @@ pub fn uds_response_matches_request_sid(request_sid: u8, response: &[u8]) -> boo
     }
 }
 
+/// Strip a single `0x` or `0X` prefix from `s`, returning the remainder.
+/// Returns the original slice when no hex prefix is present.
+#[must_use]
+pub fn strip_hex_prefix(s: &str) -> &str {
+    s.strip_prefix("0x")
+        .or_else(|| s.strip_prefix("0X"))
+        .unwrap_or(s)
+}
+
+/// Strip a single `0x` or `0X` prefix from `s`, returning `Some(remainder)`
+/// when present, or `None` when no prefix is found.
+#[must_use]
+pub fn try_strip_hex_prefix(s: &str) -> Option<&str> {
+    let rest = strip_hex_prefix(s);
+    if rest.len() == s.len() {
+        None
+    } else {
+        Some(rest)
+    }
+}
+
 /// Parse a `u32` given either as decimal (`2015`) or `0x`-prefixed hex
 /// (`0x7DF`), as CAN IDs appear in MDD com-params and config files.
 /// # Errors
 /// Returns the integer parse error message when `input` is neither.
 pub fn parse_u32_maybe_hex(input: &str) -> Result<u32, String> {
-    if let Some(hex_str) = input
-        .strip_prefix("0x")
-        .or_else(|| input.strip_prefix("0X"))
-    {
+    if let Some(hex_str) = try_strip_hex_prefix(input) {
         u32::from_str_radix(hex_str, 16).map_err(|e| format!("{e:?}"))
     } else {
         input.parse::<u32>().map_err(|e| format!("{e:?}"))
@@ -483,12 +502,7 @@ pub fn parse_u32_maybe_hex(input: &str) -> Result<u32, String> {
 pub fn normalize_hex(value: &str) -> String {
     value
         .split_whitespace()
-        .map(|token| {
-            token
-                .trim_start_matches("0x")
-                .trim_start_matches("0X")
-                .to_ascii_uppercase()
-        })
+        .map(|token| strip_hex_prefix(token).to_ascii_uppercase())
         .collect()
 }
 
@@ -508,9 +522,7 @@ pub fn byte_field_matches_hex_pattern(received: &str, expected: &str) -> bool {
         !value.is_empty()
             && value.split(' ').all(|token| {
                 token.len() == 4
-                    && token
-                        .strip_prefix("0x")
-                        .or_else(|| token.strip_prefix("0X"))
+                    && try_strip_hex_prefix(token)
                         .is_some_and(|hex| hex.chars().all(|c| c.is_ascii_hexdigit()))
             })
     }
@@ -521,6 +533,23 @@ pub fn byte_field_matches_hex_pattern(received: &str, expected: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn uds_response_matching_accepts_only_echoes_of_the_request() {
+        // Positive response: request SID with the response bit set.
+        assert!(uds_response_matches_request_sid(0x22, &[0x62, 0xF1, 0x90]));
+        // Negative response echoing the request SID.
+        assert!(uds_response_matches_request_sid(0x22, &[0x7F, 0x22, 0x31]));
+        // Unrelated positive response (different SID).
+        assert!(!uds_response_matches_request_sid(0x22, &[0x50, 0x03]));
+        // Unrelated negative response: an ECU NRC-ing the broadcast
+        // keep-alive (7F 3E 12) lands on the response ID mid-exchange and
+        // must not be taken as the answer to a 0x22 request.
+        assert!(!uds_response_matches_request_sid(0x22, &[0x7F, 0x3E, 0x12]));
+        // Degenerate frames.
+        assert!(!uds_response_matches_request_sid(0x22, &[]));
+        assert!(!uds_response_matches_request_sid(0x22, &[0x7F]));
+    }
 
     #[test]
     fn byte_field_matches_bare_hex_pattern() {

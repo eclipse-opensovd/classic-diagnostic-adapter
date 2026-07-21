@@ -46,6 +46,9 @@ cda-interfaces = { path = "cda-interfaces" }
 cda-core = { path = "cda-core" }
 cda-comm-doip = { path = "cda-comm-doip" }
 cda-comm-can = { path = "cda-comm-can" }
+# CAN / ISO-TP library shared by the can feature set (fork: upstream 0.2.0
+# lacks the socketcand and userspace ISO-TP backends the CI suites use)
+tokio-socketcan-isotp = { git = "https://github.com/MarkSchmitt/tokio-socketcan-isotp.git", tag = "v0.6.0" }
 cda-comm-uds = { path = "cda-comm-uds" }
 cda-database = { path = "cda-database" }
 cda-plugin-security = { path = "cda-plugin-security" }
