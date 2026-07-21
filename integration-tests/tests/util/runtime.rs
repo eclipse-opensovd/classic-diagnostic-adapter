@@ -1051,6 +1051,16 @@ pub(crate) fn skip_for_can(test_name: &str, reason: &str) -> bool {
     false
 }
 
+/// Guard for tests that need the CAN infrastructure (pure-CAN or mixed
+/// mode); mirrors [`skip_for_can`].
+pub(crate) fn skip_for_doip(test_name: &str, reason: &str) -> bool {
+    if !can_infra() {
+        eprintln!("[doip] skipping {test_name}: {reason}");
+        return true;
+    }
+    false
+}
+
 async fn wait_for_http_ready(
     url: String,
     service_name: &str,
@@ -1416,7 +1426,7 @@ mod tests {
         // Every line is a comment or a well-formed KEY=VALUE line.
         for line in content
             .lines()
-            .filter(|l| !l.is_empty() && !l.starts_with('#'))
+            .filter(|l| !l.is_empty() && !l.trim_start().starts_with('#'))
         {
             let (key, _) = line
                 .split_once('=')

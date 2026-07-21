@@ -32,7 +32,7 @@ use crate::{
             send_cda_request,
         },
         runtime::{
-            TestRuntime, can_infra, restart_cda, setup_integration_test, skip_for_can,
+            TestRuntime, restart_cda, setup_integration_test, skip_for_can, skip_for_doip,
             start_ecu_sim_for_mode, stop_ecu_sim,
         },
     },
@@ -159,11 +159,10 @@ async fn test_jgwt5000_ignore_protocol_with_db_protocol() {
 /// over a CAN network address and answers a live read on the bus.
 #[tokio::test]
 async fn test_can_only_ecu_from_configuration() {
-    if !can_infra() {
-        eprintln!(
-            "[doip] skipping test_can_only_ecu_from_configuration: needs the CAN transport \
-             (pure-CAN or mixed mode)"
-        );
+    if skip_for_doip(
+        "test_can_only_ecu_from_configuration",
+        "needs the CAN transport (pure-CAN or mixed mode)",
+    ) {
         return;
     }
     let (runtime, _lock) = setup_integration_test(false).await.unwrap();
