@@ -76,10 +76,10 @@ pub struct CanDiagGateway {
     probe_retry_delay: Duration,
     /// Ordered list of discovery probes to try per ECU.
     probe_sequence: Arc<Vec<ProbeRequest>>,
-    /// Keep-alive broadcast handle, shared across gateway clones. Stopped
-    /// and awaited in [`EcuGateway::shutdown`]; dropping the last clone
-    /// aborts the task as a fallback.
-    keepalive_handle: Arc<BackgroundTask>,
+    /// Keep-alive broadcast handle; `None` when disabled via
+    /// `keepalive_interval_ms = 0`. Stopped in [`EcuGateway::shutdown`];
+    /// dropping the last clone aborts the task as a fallback.
+    keepalive_handle: Option<Arc<BackgroundTask>>,
     /// Rediscovery task handle; empty only in unit-test instances. Set once
     /// right after construction (the task needs a gateway clone, so it
     /// cannot be spawned before the struct exists).
@@ -221,13 +221,18 @@ impl CanDiagGateway {
             })?;
         }
 
-        // Start functional-broadcast TesterPresent keep-alive to prevent
-        // ECUs from going to sleep while CDA is running.
-        let keepalive_handle = keepalive::start_keepalive_broadcast(
-            config.interface.clone(),
-            functional_id,
-            keepalive::DEFAULT_KEEPALIVE_INTERVAL,
-        );
+        // Keeps ECUs awake while CDA runs; disabled (= 0) for resident
+        // deployments, see CanConfig::keepalive_interval_ms.
+        let keepalive_handle = if config.keepalive_interval_ms == 0 {
+            tracing::info!("Functional broadcast keep-alive disabled by config");
+            None
+        } else {
+            Some(Arc::new(keepalive::start_keepalive_broadcast(
+                config.interface.clone(),
+                functional_id,
+                Duration::from_millis(config.keepalive_interval_ms),
+            )))
+        };
 
         let gateway = Self {
             interface: config.interface.clone(),
@@ -239,7 +244,7 @@ impl CanDiagGateway {
             probe_retries: config.probe_retries,
             probe_retry_delay: Duration::from_millis(config.probe_retry_delay_ms),
             probe_sequence: Arc::new(probe_sequence),
-            keepalive_handle: Arc::new(keepalive_handle),
+            keepalive_handle,
             rediscovery_handle: Arc::new(std::sync::OnceLock::new()),
         };
 
@@ -480,7 +485,9 @@ impl EcuGateway for CanDiagGateway {
         if let Some(rediscovery) = self.rediscovery_handle.get() {
             rediscovery.shutdown().await;
         }
-        self.keepalive_handle.shutdown().await;
+        if let Some(ref keepalive) = self.keepalive_handle {
+            keepalive.shutdown().await;
+        }
     }
 
     async fn get_gateway_network_address(&self, logical_address: u16) -> Option<String> {
@@ -712,7 +719,7 @@ impl Clone for CanDiagGateway {
             probe_retries: self.probe_retries,
             probe_retry_delay: self.probe_retry_delay,
             probe_sequence: Arc::clone(&self.probe_sequence),
-            keepalive_handle: Arc::clone(&self.keepalive_handle),
+            keepalive_handle: self.keepalive_handle.clone(),
             rediscovery_handle: Arc::clone(&self.rediscovery_handle),
         }
     }
@@ -727,12 +734,7 @@ impl CanDiagGateway {
     }
 
     /// Builds a gateway instance for unit tests without touching any CAN
-    /// interface: no init check, no discovery, inert keep-alive.
-    #[allow(
-        unknown_lints,
-        clippy::duration_suboptimal_units,
-        reason = "Duration::from_hours requires Rust >= 1.91; CI builds with 1.88"
-    )]
+    /// interface: no init check, no discovery, keep-alive disabled.
     pub(crate) fn test_instance(
         connections: Vec<(&str, CanEcuConnection)>,
         discovered: Vec<&str>,
@@ -754,12 +756,7 @@ impl CanDiagGateway {
             probe_retry_delay: Duration::from_millis(10),
             probe_sequence: Arc::new(vec![ProbeRequest::tester_present()]),
             rediscovery_handle: Arc::new(std::sync::OnceLock::new()),
-            keepalive_handle: Arc::new(keepalive::start_keepalive_broadcast(
-                "test0".to_owned(),
-                CanId::try_from(keepalive::DEFAULT_FUNCTIONAL_BROADCAST_ID)
-                    .expect("default broadcast ID is valid"),
-                Duration::from_secs(3600),
-            )),
+            keepalive_handle: None,
         }
     }
 }

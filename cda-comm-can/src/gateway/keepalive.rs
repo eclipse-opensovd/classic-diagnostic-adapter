@@ -19,6 +19,9 @@
 //! defaults to `0x7DF` (ISO 15765-4). The sub-function `0x80` sets the
 //! `suppressPositiveResponse` bit so no ECU will reply, keeping the bus
 //! quiet.
+//!
+//! The interval comes from `can.keepalive_interval_ms`; `0` disables the
+//! broadcast for resident (on-board) deployments.
 
 use std::time::Duration;
 
@@ -37,9 +40,6 @@ pub(crate) const DEFAULT_FUNCTIONAL_BROADCAST_ID: u32 = 0x7DF;
 /// Gateway setup rejects ECUs configured on these IDs.
 pub(crate) const UNUSED_RX_ID_STANDARD: u32 = 0x7FF;
 pub(crate) const UNUSED_RX_ID_EXTENDED: u32 = 0x1FFF_FFFF;
-
-/// Default keep-alive interval (2 seconds).
-pub(crate) const DEFAULT_KEEPALIVE_INTERVAL: Duration = Duration::from_secs(2);
 
 /// UDS `TesterPresent` with `suppressPositiveResponse`.
 const TESTER_PRESENT_PAYLOAD: [u8; 2] = [0x3E, 0x80];
