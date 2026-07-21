@@ -33,13 +33,20 @@ pub(crate) const SID_PARM_NAME: &str = "sid";
 pub(crate) fn new_ecu_manager(
     db: cda_database::datatypes::DiagnosticDatabase,
 ) -> EcuManager<DefaultSecurityPluginData> {
+    let protocol = Protocol::default();
+    let com_params = ComParams::default();
+    let ecu_type = EcuManagerType::Ecu;
+    let effective_com_params =
+        EffectiveComParams::resolve_from(&db, &protocol, &com_params, ecu_type)
+            .expect("Failed to resolve com params");
+
     let manager = EcuManager::new(
         db,
-        Protocol::default(),
-        &ComParams::default(),
+        protocol,
+        effective_com_params,
         DatabaseNamingConvention::default(),
         EcuManagerConfig {
-            type_: EcuManagerType::Ecu,
+            type_: ecu_type,
             fallback_to_base_variant: true,
             strict_parameter_validation: false,
         },
@@ -71,13 +78,20 @@ pub(crate) fn new_ecu_manager(
 pub(crate) fn new_ecu_manager_no_base_fallback(
     db: cda_database::datatypes::DiagnosticDatabase,
 ) -> EcuManager<DefaultSecurityPluginData> {
+    let protocol = Protocol::default();
+    let com_params = ComParams::default();
+    let ecu_type = EcuManagerType::Ecu;
+    let effective_com_params =
+        EffectiveComParams::resolve_from(&db, &protocol, &com_params, ecu_type)
+            .expect("Failed to resolve com params");
+
     EcuManager::new(
         db,
-        Protocol::default(),
-        &ComParams::default(),
+        protocol,
+        effective_com_params,
         DatabaseNamingConvention::default(),
         EcuManagerConfig {
-            type_: EcuManagerType::Ecu,
+            type_: ecu_type,
             fallback_to_base_variant: false,
             strict_parameter_validation: false,
         },
@@ -105,11 +119,14 @@ use cda_interfaces::{
 };
 use flatbuffers::WIPOffset;
 
-use crate::diag_kernel::test_utils::{
-    db_builder::{finish_db, finish_db_with_functional_groups},
-    mdd_type_builder::{
-        create_pos_response_with_param, create_sid_only_request, create_sid_param, new_diag_comm,
-        new_diag_service,
+use crate::diag_kernel::{
+    comparam::EffectiveComParams,
+    test_utils::{
+        db_builder::{finish_db, finish_db_with_functional_groups},
+        mdd_type_builder::{
+            create_pos_response_with_param, create_sid_only_request, create_sid_param,
+            new_diag_comm, new_diag_service,
+        },
     },
 };
 

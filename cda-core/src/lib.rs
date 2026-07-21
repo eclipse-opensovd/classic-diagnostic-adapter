@@ -14,6 +14,7 @@
 mod diag_kernel;
 
 pub use diag_kernel::{
+    comparam::EffectiveComParams,
     diagservices::*,
     ecumanager::{EcuManager, EcuManagerConfig},
 };

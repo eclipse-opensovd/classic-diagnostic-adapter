@@ -20,7 +20,6 @@ use cda_database::{
 use cda_interfaces::{DiagServiceError, HashMap};
 use serde::{Serialize, Serializer};
 
-pub(crate) mod comparam;
 pub(crate) mod component_info;
 pub(crate) mod diag_comm_lookup;
 pub(crate) mod diagservices;
@@ -41,6 +40,7 @@ pub(crate) mod variant;
 #[cfg(test)]
 pub(crate) mod test_utils;
 
+pub(crate) mod comparam;
 mod variant_detection;
 
 #[derive(Debug)]
