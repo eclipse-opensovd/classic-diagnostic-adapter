@@ -1034,13 +1034,8 @@ async fn init_doip_gateway<S: SecurityPlugin>(
             tracing::info!("DoIP gateway initialized");
             Ok(Some(d))
         }
-        Err(e) => {
-            // Transport init failure is fatal: starting without a
-            // configured transport leaves every ECU behind it silently
-            // offline with nothing pointing at the cause.
-            tracing::error!(error = %e, "DoIP gateway initialization failed");
-            Err(e.into())
-        }
+        // Fatal; main reports the error on exit.
+        Err(e) => Err(e.into()),
     }
 }
 
@@ -1056,10 +1051,8 @@ async fn init_can_gateway<S: SecurityPlugin>(
             tracing::info!(interface = %can_cfg.interface, "CAN gateway initialized");
             Ok(c)
         }
-        Err(e) => {
-            tracing::error!(error = %e, "CAN gateway initialization failed");
-            Err(e.into())
-        }
+        // Fatal; main reports the error on exit.
+        Err(e) => Err(e.into()),
     }
 }
 
