@@ -183,31 +183,16 @@ jobs:
           CACHE_REGISTRY: ghcr.io/${{ github.repository }}
           CDA_INTEGRATION_TEST_COVERAGE: "true"
         run: cargo test --locked -p integration-tests --features integration-tests -- --show-output
-      - name: Collect and merge coverage data
+      - name: Install lcov
+        run: sudo apt-get update && sudo apt-get install -y lcov
+      - name: Process Docker coverage
+        uses: ./.github/actions/process-docker-coverage
+        with:
+          output-file: lcov-docker.info
+      - name: Merge coverage data
         run: |
           set -x
-
-          LLVM_PROFDATA=$(rustc --print sysroot)/lib/rustlib/x86_64-unknown-linux-gnu/bin/llvm-profdata
-          LLVM_COV=$(rustc --print sysroot)/lib/rustlib/x86_64-unknown-linux-gnu/bin/llvm-cov
-
-          sudo apt-get update && sudo apt-get install -y lcov
-
-          if [ -f "target/coverage/opensovd-cda" ] && ls target/coverage/*.profraw 1>/dev/null 2>&1; then
-            echo "Processing Docker coverage data..."
-            $LLVM_PROFDATA merge -sparse target/coverage/*.profraw -o target/coverage/docker.profdata
-
-            # Export Docker coverage, filtering to workspace sources (/app/) only
-            $LLVM_COV export -format=lcov \
-              target/coverage/opensovd-cda \
-              -instr-profile=target/coverage/docker.profdata \
-              --ignore-filename-regex='/usr/local/cargo|/usr/local/rustup' \
-              > lcov-docker-raw.info
-
-            # Rewrite /app/ paths to match the runner workspace paths so lcov --add
-            # recognises them as the same files and unions hit counts instead of stacking
-            WORKSPACE=$(cargo metadata --no-deps --format-version 1 | jq -r '.workspace_root')
-            sed "s|SF:/app/|SF:${WORKSPACE}/|g" lcov-docker-raw.info > lcov-docker.info
-
+          if [ -s lcov-docker.info ]; then
             echo "Merging unit test and Docker integration coverage..."
             lcov --add-tracefile lcov.info --add-tracefile lcov-docker.info \
               --output-file lcov-merged.info --ignore-errors inconsistent
@@ -309,28 +294,16 @@ jobs:
         # Run serially: the CAN transport is timing-sensitive (per-transaction
         # TCP sockets + TesterPresent keepalive), so parallel tests can flake.
         run: cargo test --locked -p integration-tests --features can-integration-tests --test integration_tests -- --show-output --test-threads=1
-      - name: Export CAN integration coverage
+      - name: Install lcov
+        run: sudo apt-get update && sudo apt-get install -y lcov
+      - name: Process Docker coverage
+        uses: ./.github/actions/process-docker-coverage
+        with:
+          output-file: lcov-can-docker.info
+      - name: Merge CAN coverage data
         run: |
           set -x
-          LLVM_PROFDATA=$(rustc --print sysroot)/lib/rustlib/x86_64-unknown-linux-gnu/bin/llvm-profdata
-          LLVM_COV=$(rustc --print sysroot)/lib/rustlib/x86_64-unknown-linux-gnu/bin/llvm-cov
-          if [ -f "target/coverage/opensovd-cda" ] && ls target/coverage/*.profraw 1>/dev/null 2>&1; then
-            $LLVM_PROFDATA merge -sparse target/coverage/*.profraw -o target/coverage/docker.profdata
-            $LLVM_COV export -format=lcov \
-              target/coverage/opensovd-cda \
-              -instr-profile=target/coverage/docker.profdata \
-              --ignore-filename-regex='/usr/local/cargo|/usr/local/rustup' \
-              > lcov-can-raw.info
-            # Rewrite /app/ paths to the runner workspace paths so lcov --add
-            # unions hit counts with the other suites' tracefiles.
-            WORKSPACE=$(cargo metadata --no-deps --format-version 1 | jq -r '.workspace_root')
-            sed "s|SF:/app/|SF:${WORKSPACE}/|g" lcov-can-raw.info > lcov-can-docker.info
-          else
-            echo "No Docker coverage data found"
-            touch lcov-can-docker.info
-          fi
           # Union with the host unit-test coverage (CAN features).
-          sudo apt-get update && sudo apt-get install -y lcov
           if [ -s lcov-can-docker.info ] && [ -s lcov-can-unit.info ]; then
             lcov --add-tracefile lcov-can-docker.info --add-tracefile lcov-can-unit.info \
               --output-file lcov-can.info --ignore-errors inconsistent
@@ -415,26 +388,10 @@ jobs:
           CDA_INTEGRATION_TEST_USE_MIXED: "true"
           CDA_INTEGRATION_TEST_COVERAGE: "true"
         run: cargo test --locked -p integration-tests --features can-integration-tests --test integration_tests -- --show-output --test-threads=1
-      - name: Export mixed integration coverage
-        run: |
-          set -x
-          LLVM_PROFDATA=$(rustc --print sysroot)/lib/rustlib/x86_64-unknown-linux-gnu/bin/llvm-profdata
-          LLVM_COV=$(rustc --print sysroot)/lib/rustlib/x86_64-unknown-linux-gnu/bin/llvm-cov
-          if [ -f "target/coverage/opensovd-cda" ] && ls target/coverage/*.profraw 1>/dev/null 2>&1; then
-            $LLVM_PROFDATA merge -sparse target/coverage/*.profraw -o target/coverage/docker.profdata
-            $LLVM_COV export -format=lcov \
-              target/coverage/opensovd-cda \
-              -instr-profile=target/coverage/docker.profdata \
-              --ignore-filename-regex='/usr/local/cargo|/usr/local/rustup' \
-              > lcov-mixed-raw.info
-            # Rewrite /app/ paths to the runner workspace paths so lcov --add
-            # unions hit counts with the other suites' tracefiles.
-            WORKSPACE=$(cargo metadata --no-deps --format-version 1 | jq -r '.workspace_root')
-            sed "s|SF:/app/|SF:${WORKSPACE}/|g" lcov-mixed-raw.info > lcov-mixed.info
-          else
-            echo "No Docker coverage data found"
-            touch lcov-mixed.info
-          fi
+      - name: Process Docker coverage
+        uses: ./.github/actions/process-docker-coverage
+        with:
+          output-file: lcov-mixed.info
       - name: Upload mixed coverage artifact
         uses: actions/upload-artifact@v7
         with:
