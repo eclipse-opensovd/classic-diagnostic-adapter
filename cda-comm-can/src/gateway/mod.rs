@@ -531,6 +531,9 @@ impl EcuGateway for CanDiagGateway {
 
         // Spawn a task to handle the send/receive cycle
         let response_timeout = self.response_timeout;
+        let probe_timeout = self.probe_timeout;
+        let discovered_ecus = Arc::clone(&self.discovered_ecus);
+        let ecu_map_key = ecu_name;
         let ecu_name = transmission_params.ecu_name.clone();
         let source_address = message.source_address;
         let target_address = message.target_address;
@@ -588,6 +591,10 @@ impl EcuGateway for CanDiagGateway {
                 // the per-ECU request semaphore.
                 let sent_sid = request_data.first().copied().unwrap_or_default();
                 let mut deadline = deadline_in(response_timeout);
+                // Whether any frame arrived on this exchange at all - see the
+                // silence check after the loop.
+                let mut received_any_frame = false;
+                let exchange_start = tokio::time::Instant::now();
                 loop {
                     let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
                     let response = tokio::select! {
@@ -596,6 +603,7 @@ impl EcuGateway for CanDiagGateway {
                     };
                     match response {
                         Ok(data) => {
+                            received_any_frame = true;
                             let is_negative = data.first()
                                 == Some(&cda_interfaces::service_ids::NEGATIVE_RESPONSE);
                             if is_negative
@@ -649,6 +657,25 @@ impl EcuGateway for CanDiagGateway {
                             break;
                         }
                     }
+                }
+
+                // Zero frames for the whole exchange is the sleep
+                // signature: drop the ECU from the discovered set so
+                // background rediscovery (undiscovered ECUs only) recovers
+                // it on wake. Checked after the loop because the caller's
+                // receive window (CP_P6Max) usually closes the channel
+                // before the gateway deadline; an awake ECU emits something
+                // within P6Max. The probe-timeout floor keeps instant
+                // client aborts from striking healthy ECUs.
+                if !received_any_frame && exchange_start.elapsed() >= probe_timeout {
+                    tracing::info!(
+                        ecu = %ecu_name,
+                        elapsed_ms =
+                            u32::try_from(exchange_start.elapsed().as_millis()).unwrap_or(u32::MAX),
+                        "No frame received for the whole exchange; marking the ECU undiscovered \
+                         so background rediscovery re-probes it"
+                    );
+                    discovered_ecus.write().await.remove(&ecu_map_key);
                 }
             }
         });

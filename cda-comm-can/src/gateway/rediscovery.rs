@@ -17,9 +17,11 @@
 //! the bus is to ask it. Requests to undiscovered ECUs are rejected before
 //! reaching the bus, and state reads never touch the transport, so without
 //! this task an ECU that was offline during startup discovery - or dropped
-//! off and rebooted - would stay `Offline` until some caller happens to
-//! trigger the on-demand probe in `ecu_online`. The transport is responsible
-//! for presenting settled online/offline states on its own.
+//! off and rebooted, or was marked undiscovered after an all-silent
+//! exchange (an ECU asleep while the keep-alive broadcast is disabled) -
+//! would stay `Offline` until some caller happens to trigger the on-demand
+//! probe in `ecu_online`. The transport is responsible for presenting
+//! settled online/offline states on its own.
 //!
 //! Bus load is bounded: only currently-undiscovered ECUs are probed, one
 //! round per interval, sequentially.
