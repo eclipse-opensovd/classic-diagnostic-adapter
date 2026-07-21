@@ -142,7 +142,8 @@ async fn test_custom_demo_endpoint() {
         cda_comm_doip::create_udp_vir_socket(&doip_config.tester_address, doip_config.gateway_port)
             .expect("Failed to create DoIP socket");
 
-    let state_coordinator = EcuStateCoordinator::new(HashMap::new());
+    let (redetect_tx, _redetect_rx) = tokio::sync::mpsc::channel(8);
+    let state_coordinator = EcuStateCoordinator::new(HashMap::new(), redetect_tx);
     let connectivity_handler: Arc<dyn EcuConnectivityHandler> = Arc::new(state_coordinator.clone());
 
     // This test runtime is DoIP-only: no CAN config, socket present because

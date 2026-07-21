@@ -356,8 +356,17 @@ impl Default for DatabaseNamingConvention {
                     ),
                 ),
             ]),
-            can_protocol_aliases: default_can_protocol_aliases(),
-            can_protocol_markers: default_can_protocol_markers(),
+            can_protocol_aliases: [
+                "UDS_CAN",
+                "ISO_11898_2_DWCAN",
+                "ISO_11898_3_DWFTCAN",
+                "CAN",
+                "ISO_15765_2",
+                "ISO_15765_3",
+            ]
+            .map(str::to_owned)
+            .to_vec(),
+            can_protocol_markers: ["CAN", "ISO_11898"].map(str::to_owned).to_vec(),
             semantics: Semantics::default(),
             action_affixes: DiagCommActionAffixes::default(),
         }
@@ -365,20 +374,11 @@ impl Default for DatabaseNamingConvention {
 }
 
 fn default_can_protocol_aliases() -> Vec<String> {
-    [
-        "UDS_CAN",
-        "ISO_11898_2_DWCAN",
-        "ISO_11898_3_DWFTCAN",
-        "CAN",
-        "ISO_15765_2",
-        "ISO_15765_3",
-    ]
-    .map(str::to_owned)
-    .to_vec()
+    DatabaseNamingConvention::default().can_protocol_aliases
 }
 
 fn default_can_protocol_markers() -> Vec<String> {
-    ["CAN", "ISO_11898"].map(str::to_owned).to_vec()
+    DatabaseNamingConvention::default().can_protocol_markers
 }
 
 /// Position of a naming affix relative to the diagnostic service name.

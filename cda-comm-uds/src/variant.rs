@@ -215,11 +215,20 @@ impl<S: EcuGateway, T: EcuManager> UdsManager<S, T> {
         {
             for dup_name in &duplicates {
                 if let Some(dup_ecu) = self.ecus.get(dup_name) {
-                    let _ = dup_ecu
+                    // Best effort: one failing member must not stop
+                    // marking the rest; the primary error is propagated.
+                    if let Err(e) = dup_ecu
                         .write()
                         .await
                         .detect_variant::<<T as PayloadDecoder>::Response>(HashMap::new())
-                        .await;
+                        .await
+                    {
+                        tracing::debug!(
+                            ecu_name = %dup_name,
+                            error = ?e,
+                            "Failed to mark duplicate as unreachable"
+                        );
+                    }
                 }
             }
         }
@@ -238,6 +247,8 @@ impl<S: EcuGateway, T: EcuManager> UdsManager<S, T> {
     ) -> GroupDetectionResult {
         // First ECU that is online and fell back to base variant (no specific match).
         let mut first_fallback = None;
+        // Tracked independently of detection success: an online member
+        // with failed detection must yield NoDetection, not NoOnlineEcu.
         let mut any_online = false;
 
         for ecu_name in duplicated_ecus {
@@ -254,15 +265,16 @@ impl<S: EcuGateway, T: EcuManager> UdsManager<S, T> {
                 tracing::warn!(
                     "Variant detection failed for ECU {ecu_name}: {e:?}, marking as undetected"
                 );
+                any_online |= ecu.read().await.ecu_status().connectivity
+                    == cda_interfaces::Connectivity::Online;
                 continue;
             }
 
             let status = ecu.read().await.ecu_status();
+            any_online |= status.connectivity == cda_interfaces::Connectivity::Online;
             if !status.is_online_and_detected() {
                 continue;
             }
-
-            any_online = true;
 
             if status.is_fallback() {
                 first_fallback.get_or_insert(ecu_name);
@@ -273,8 +285,8 @@ impl<S: EcuGateway, T: EcuManager> UdsManager<S, T> {
 
         match (first_fallback, any_online) {
             (Some(_), true) => GroupDetectionResult::AllFallbacks,
-            (_, true) => GroupDetectionResult::NoDetection,
-            _ => GroupDetectionResult::NoOnlineEcu,
+            (None, true) => GroupDetectionResult::NoDetection,
+            (_, false) => GroupDetectionResult::NoOnlineEcu,
         }
     }
 

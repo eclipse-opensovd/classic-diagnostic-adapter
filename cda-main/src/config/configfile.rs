@@ -210,7 +210,7 @@ impl Configuration {
         if !self.doip.enabled && self.can.is_none() {
             return Err(ConfigSanityError::InvalidValue {
                 field: "doip.enabled".to_owned(),
-                reason: "no transport configured: doip.enabled = false and no [can] section. \
+                reason: "No transport configured: doip.enabled = false and no [can] section. \
                          Enable DoIP or configure CAN."
                     .to_owned(),
             });
@@ -228,14 +228,14 @@ impl Configuration {
             return Ok(());
         };
 
-        let mut names = std::collections::HashSet::new();
-        let mut id_pairs = std::collections::HashSet::new();
+        let mut names = cda_interfaces::HashSet::default();
+        let mut id_pairs = cda_interfaces::HashSet::default();
         for mapping in &can.ecu_mappings {
             if mapping.request_id == mapping.response_id {
                 return Err(ConfigSanityError::InvalidValue {
                     field: "can.ecu_mappings".to_owned(),
                     reason: format!(
-                        "ECU '{}' uses the same CAN ID 0x{:X} as request_id and response_id",
+                        "ECU '{}' uses the same CAN ID {:#X} as request_id and response_id",
                         mapping.ecu_name, mapping.request_id
                     ),
                 });
@@ -244,7 +244,7 @@ impl Configuration {
                 return Err(ConfigSanityError::InvalidValue {
                     field: "can.ecu_mappings".to_owned(),
                     reason: format!(
-                        "duplicate mapping for ECU '{}' (names are matched case-insensitively)",
+                        "Duplicate mapping for ECU '{}' (names are matched case-insensitively)",
                         mapping.ecu_name
                     ),
                 });
@@ -253,7 +253,7 @@ impl Configuration {
                 return Err(ConfigSanityError::InvalidValue {
                     field: "can.ecu_mappings".to_owned(),
                     reason: format!(
-                        "ECU '{}' reuses the CAN ID pair 0x{:X}/0x{:X} of another mapping",
+                        "ECU '{}' reuses the CAN ID pair {:#X}/{:#X} of another mapping",
                         mapping.ecu_name, mapping.request_id, mapping.response_id
                     ),
                 });
@@ -279,7 +279,7 @@ impl Configuration {
                         return Err(ConfigSanityError::InvalidValue {
                             field: "can.transport_overrides".to_owned(),
                             reason: format!(
-                                "pins ECU '{}' to DoIP, but doip.enabled = false",
+                                "Pins ECU '{}' to DoIP, but doip.enabled = false",
                                 transport_override.ecu_name
                             ),
                         });
@@ -498,7 +498,7 @@ response_id = 0x7E9
         let err = duplicate_name
             .validate_sanity()
             .expect_err("case-insensitive duplicate ECU name should fail sanity");
-        assert!(err.to_string().contains("duplicate mapping"), "got: {err}");
+        assert!(err.to_string().contains("Duplicate mapping"), "got: {err}");
 
         let duplicate_pair = config_with_mappings(
             r#"

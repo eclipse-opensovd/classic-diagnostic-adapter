@@ -34,12 +34,11 @@ use crate::coordinator::{
 #[derive(Clone)]
 pub struct EcuStateCoordinator {
     handles: Arc<HashMap<String, EcuCoordinatorHandle>>,
-    /// When set, a real `Offline` -> `Online` transition pushes the ECU into
-    /// this channel to trigger a variant re-detection. Without it, an ECU
-    /// that reconnects (variant reset to `NotTested`) stays undetected until
-    /// the next UDS request arrives via the pre-send guard - too late for
-    /// consumers that only read states, like the network structure.
-    redetect: Option<tokio::sync::mpsc::Sender<Vec<String>>>,
+    /// A real `Offline` -> `Online` transition pushes the ECU into this
+    /// channel for variant re-detection; without it a reconnected ECU
+    /// stays `NotTested` until the next UDS request, too late for
+    /// state-only consumers like the network structure.
+    redetect: tokio::sync::mpsc::Sender<Vec<String>>,
 }
 
 impl EcuStateCoordinator {
@@ -47,8 +46,15 @@ impl EcuStateCoordinator {
     ///
     /// Each ECU gets its own actor spawned, sharing the `EcuRuntimeState` from the
     /// `EcuManager` stored in `ecus`.
+    ///
+    /// `redetect` receives reconnected ECUs for variant re-detection; a
+    /// coordinator that swallows reconnects leaves ECUs undetected, so it
+    /// is required. Tests pass a channel and drop the receiver.
     #[must_use]
-    pub fn new(runtime_states: HashMap<String, EcuRuntimeState>) -> Self {
+    pub fn new(
+        runtime_states: HashMap<String, EcuRuntimeState>,
+        redetect: tokio::sync::mpsc::Sender<Vec<String>>,
+    ) -> Self {
         let handles: HashMap<String, EcuCoordinatorHandle> = runtime_states
             .into_iter()
             .map(|(ecu_name, state)| {
@@ -59,18 +65,8 @@ impl EcuStateCoordinator {
 
         Self {
             handles: Arc::new(handles),
-            redetect: None,
+            redetect,
         }
-    }
-
-    /// Push reconnected ECUs into `trigger` for variant re-detection.
-    #[must_use]
-    pub fn with_redetect_trigger(
-        mut self,
-        trigger: tokio::sync::mpsc::Sender<Vec<String>>,
-    ) -> Self {
-        self.redetect = Some(trigger);
-        self
     }
 
     /// Mark the ECU as connected (Online) on the next request.
@@ -92,8 +88,8 @@ impl EcuStateCoordinator {
             // detection runs are coalesced downstream.
             let needs_detection =
                 transitioned || crate::transport::needs_variant_detection(&handle.ecu_status());
-            if needs_detection && let Some(ref redetect) = self.redetect {
-                let _ = redetect.send(vec![ecu_name.to_owned()]).await;
+            if needs_detection {
+                let _ = self.redetect.send(vec![ecu_name.to_owned()]).await;
             }
         }
     }
@@ -178,7 +174,8 @@ mod tests {
         let runtime_states: HashMap<String, EcuRuntimeState> =
             HashMap::from_iter([("TestECU".to_string(), runtime_state.clone())]);
 
-        let coordinator = EcuStateCoordinator::new(runtime_states);
+        let (redetect_tx, _redetect_rx) = tokio::sync::mpsc::channel(8);
+        let coordinator = EcuStateCoordinator::new(runtime_states, redetect_tx);
         (coordinator, runtime_state)
     }
 
@@ -230,7 +227,8 @@ mod tests {
         let runtime_state = EcuRuntimeState::new();
         let runtime_states: HashMap<String, EcuRuntimeState> =
             HashMap::from_iter([("TestECU".to_string(), runtime_state.clone())]);
-        let coordinator = EcuStateCoordinator::new(runtime_states);
+        let (redetect_tx, _redetect_rx) = tokio::sync::mpsc::channel(8);
+        let coordinator = EcuStateCoordinator::new(runtime_states, redetect_tx);
 
         coordinator.handle_ecu_connected("TestECU").await;
 

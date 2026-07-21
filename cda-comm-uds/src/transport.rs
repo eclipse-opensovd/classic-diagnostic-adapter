@@ -719,7 +719,8 @@ mod send_tests {
                 .keys()
                 .map(|name| (name.clone(), EcuRuntimeState::new()))
                 .collect();
-            let state_coordinator = EcuStateCoordinator::new(runtime_states);
+            let (redetect_tx, _redetect_rx) = tokio::sync::mpsc::channel(8);
+            let state_coordinator = EcuStateCoordinator::new(runtime_states, redetect_tx);
             Self {
                 ecus,
                 gateway,

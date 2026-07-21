@@ -862,8 +862,7 @@ pub async fn create_vehicle_components<
         }
         states
     };
-    let state_coordinator = EcuStateCoordinator::new(runtime_states)
-        .with_redetect_trigger(variant_detection_tx.clone());
+    let state_coordinator = EcuStateCoordinator::new(runtime_states, variant_detection_tx.clone());
     let connectivity_handler: Arc<dyn EcuConnectivityHandler> = Arc::new(state_coordinator.clone());
 
     let diagnostic_gateway = create_diagnostic_gateway(
