@@ -50,6 +50,8 @@ impl CanDiagGateway {
         let task = cda_interfaces::spawn_named!("can-rediscovery", async move {
             loop {
                 tokio::select! {
+                    // Prefer shutdown over starting another round.
+                    biased;
                     () = task_cancel.cancelled() => break,
                     () = cda_interfaces::util::tokio_ext::sleep_for(REDISCOVERY_INTERVAL) => {}
                 }

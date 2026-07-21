@@ -53,6 +53,12 @@ probe_timeout_ms = 100
 # Delay between probe retry rounds in milliseconds (default: 100ms)
 # probe_retry_delay_ms = 100
 
+# Whether the built-in TesterPresent probe heads the discovery probe
+# sequence (default: true). Set to false for fleets whose ECUs never answer
+# TesterPresent; [[can.probe_fallbacks]] must then be non-empty and is used
+# as the complete probe sequence.
+# default_probes = true
+
 # CAN ID mappings. CDA extracts CAN addressing from the MDD com-params
 # (per-ECU CP_UniqueRespIdTable entries first, then top-level
 # CP_CanPhysReqId / CP_CanRespUSDTId scalars); an [[can.ecu_mappings]]

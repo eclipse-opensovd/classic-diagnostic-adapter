@@ -448,6 +448,19 @@ pub fn try_extract_sid_from_payload(payload: &[u8]) -> Result<u8, DiagServiceErr
     Ok(sid)
 }
 
+/// Whether `response` belongs to a request with SID `request_sid`: its
+/// positive response (SID with the response bit set) or a negative
+/// response (`7F <SID> <NRC>`). Used to tell the answer apart from
+/// unrelated traffic on a shared channel.
+#[must_use]
+pub fn uds_response_matches_request_sid(request_sid: u8, response: &[u8]) -> bool {
+    if response.first() == Some(&crate::service_ids::NEGATIVE_RESPONSE) {
+        response.get(1) == Some(&request_sid)
+    } else {
+        response.first() == Some(&(request_sid | crate::UDS_ID_RESPONSE_BITMASK))
+    }
+}
+
 /// Parse a `u32` given either as decimal (`2015`) or `0x`-prefixed hex
 /// (`0x7DF`), as CAN IDs appear in MDD com-params and config files.
 /// # Errors

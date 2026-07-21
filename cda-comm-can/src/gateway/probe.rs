@@ -35,7 +35,7 @@ impl ProbeRequest {
     pub(super) fn tester_present() -> Self {
         Self {
             name: "tester_present".to_owned(),
-            payload: vec![0x3E, 0x00],
+            payload: vec![cda_interfaces::service_ids::TESTER_PRESENT, 0x00],
         }
     }
 }
@@ -44,7 +44,20 @@ impl CanDiagGateway {
     pub(super) fn build_probe_sequence(
         config: &CanConfig,
     ) -> Result<Vec<ProbeRequest>, CanGatewaySetupError> {
-        let mut probes = vec![ProbeRequest::tester_present()];
+        let mut probes = if config.default_probes {
+            vec![ProbeRequest::tester_present()]
+        } else {
+            // With the built-in probe disabled the fallbacks are the whole
+            // sequence; empty would make discovery a silent no-op.
+            if config.probe_fallbacks.is_empty() {
+                return Err(CanGatewaySetupError::InvalidConfiguration(
+                    "can.default_probes = false requires at least one [[can.probe_fallbacks]] \
+                     entry"
+                        .to_owned(),
+                ));
+            }
+            Vec::new()
+        };
 
         for fallback in &config.probe_fallbacks {
             let payload = fallback
@@ -70,8 +83,6 @@ impl CanDiagGateway {
         &self,
         conn: &CanEcuConnection,
         logical_addr: u16,
-        discovery_index: usize,
-        discovery_total: usize,
     ) -> Result<(), CanError> {
         let mut last_error = None;
 
@@ -89,7 +100,7 @@ impl CanDiagGateway {
                 cda_interfaces::util::tokio_ext::sleep_for(self.probe_retry_delay).await;
             }
             if let Ok(()) = self
-                .probe_sequence_once(conn, logical_addr, discovery_index, discovery_total)
+                .probe_sequence_once(conn, logical_addr)
                 .await
                 .map_err(|e| last_error = Some(e))
             {
@@ -106,26 +117,15 @@ impl CanDiagGateway {
         &self,
         conn: &CanEcuConnection,
         logical_addr: u16,
-        discovery_index: usize,
-        discovery_total: usize,
     ) -> Result<(), CanError> {
         let mut last_error = None;
 
-        #[allow(
-            clippy::arithmetic_side_effects,
-            reason = "1-based display index; overflow impossible"
-        )]
-        for (probe_index_0, probe) in self.probe_sequence.iter().enumerate() {
-            let probe_index = probe_index_0 + 1;
+        for probe in self.probe_sequence.iter() {
             let start = Instant::now();
             tracing::debug!(
                 ecu = %conn.ecu_name,
                 logical_addr,
                 network_addr = %conn.network_address(),
-                discovery_index,
-                discovery_total,
-                probe_index,
-                probe_total = self.probe_sequence.len(),
                 probe_name = %probe.name,
                 probe_payload = %hex::encode_upper(&probe.payload),
                 timeout_ms = u32::try_from(self.probe_timeout.as_millis()).unwrap_or(u32::MAX),
@@ -140,12 +140,12 @@ impl CanDiagGateway {
                     let elapsed = start.elapsed();
                     let response_kind = if response.first() == Some(&0x7F) {
                         format!(
-                            "negative-response nrc=0x{:02X}",
+                            "negative-response nrc={:#04X}",
                             response.get(2).copied().unwrap_or(0)
                         )
                     } else {
                         format!(
-                            "positive-response sid=0x{:02X}",
+                            "positive-response sid={:#04X}",
                             response.first().copied().unwrap_or(0)
                         )
                     };
@@ -154,10 +154,6 @@ impl CanDiagGateway {
                         ecu = %conn.ecu_name,
                         logical_addr,
                         network_addr = %conn.network_address(),
-                        discovery_index,
-                        discovery_total,
-                        probe_index,
-                        probe_total = self.probe_sequence.len(),
                         probe_name = %probe.name,
                         probe_payload = %hex::encode_upper(&probe.payload),
                         response_kind,
@@ -173,10 +169,6 @@ impl CanDiagGateway {
                         ecu = %conn.ecu_name,
                         logical_addr,
                         network_addr = %conn.network_address(),
-                        discovery_index,
-                        discovery_total,
-                        probe_index,
-                        probe_total = self.probe_sequence.len(),
                         probe_name = %probe.name,
                         probe_payload = %hex::encode_upper(&probe.payload),
                         elapsed_ms = u32::try_from(elapsed.as_millis()).unwrap_or(u32::MAX),
@@ -191,30 +183,21 @@ impl CanDiagGateway {
         Err(last_error.unwrap_or(CanError::EcuNotResponding(conn.request_id.raw())))
     }
 
-    /// Discovers ECUs on the CAN bus by probing with `TesterPresent`.
-    ///
-    /// Sends a `TesterPresent` (0x3E 0x00) request to each configured ECU
-    /// and waits for a response. ECUs that respond are considered online.
+    /// Discovers ECUs on the CAN bus by running the configured probe
+    /// sequence (`TesterPresent` by default, plus/or the configured
+    /// fallbacks) against each configured ECU. ECUs that answer any probe
+    /// are considered online.
     ///
     /// # Returns
-    /// A list of ECU names that responded to the probe.
+    /// A list of ECU names that responded to a probe.
     #[tracing::instrument(skip_all, fields(dlt_context = dlt_ctx!("CAN")))]
     pub async fn discover_ecus(&self) -> Vec<String> {
         let mut discovered = Vec::new();
-        let discovery_total = self.connections.len();
 
-        for (discovery_index, (ecu_name, conn)) in self.connections.iter().enumerate() {
+        for (ecu_name, conn) in self.connections.iter() {
             let logical_addr = self.logical_address_for_ecu(ecu_name);
 
-            match self
-                .probe_connection(
-                    conn,
-                    logical_addr,
-                    discovery_index.saturating_add(1),
-                    discovery_total,
-                )
-                .await
-            {
+            match self.probe_connection(conn, logical_addr).await {
                 Ok(()) => {
                     tracing::info!(
                         ecu = %conn.ecu_name,
@@ -259,16 +242,57 @@ impl CanDiagGateway {
         };
         let logical_addr = self.logical_address_for_ecu(&ecu_name);
 
-        if self
-            .probe_connection(&conn, logical_addr, 1, 1)
-            .await
-            .is_ok()
-        {
+        if self.probe_connection(&conn, logical_addr).await.is_ok() {
             self.discovered_ecus.write().await.insert(ecu_name);
             true
         } else {
             self.discovered_ecus.write().await.remove(&ecu_name);
             false
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::config::CanProbeConfig;
+
+    #[test]
+    fn default_probe_sequence_starts_with_tester_present() {
+        let config = CanConfig::default();
+        let probes = CanDiagGateway::build_probe_sequence(&config).expect("valid config");
+        assert_eq!(probes.len(), 1);
+        assert_eq!(
+            probes.first().map(|p| p.payload.clone()),
+            Some(vec![cda_interfaces::service_ids::TESTER_PRESENT, 0x00])
+        );
+    }
+
+    #[test]
+    fn disabled_default_probes_use_the_fallbacks_verbatim() {
+        let config = CanConfig {
+            default_probes: false,
+            probe_fallbacks: vec![CanProbeConfig {
+                name: Some("read-did".to_owned()),
+                payload_hex: "22F190".to_owned(),
+            }],
+            ..CanConfig::default()
+        };
+        let probes = CanDiagGateway::build_probe_sequence(&config).expect("valid config");
+        assert_eq!(probes.len(), 1);
+        assert_eq!(
+            probes.first().map(|p| p.payload.clone()),
+            Some(vec![0x22, 0xF1, 0x90])
+        );
+    }
+
+    #[test]
+    fn disabled_default_probes_without_fallbacks_fail_setup() {
+        let config = CanConfig {
+            default_probes: false,
+            ..CanConfig::default()
+        };
+        // An empty probe sequence would make discovery a silent no-op.
+        assert!(CanDiagGateway::build_probe_sequence(&config).is_err());
     }
 }

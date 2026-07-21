@@ -15,6 +15,7 @@
 # Optional CAN bus transport configuration.
 # When enabled, the adapter can communicate with ECUs over CAN bus.
 # [can]
+# default_probes = true
 # ecu_mappings = []
 # interface = "vcan0"
 # probe_fallbacks = []

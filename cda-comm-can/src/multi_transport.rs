@@ -67,6 +67,11 @@ pub enum TransportType {
 /// This gateway wraps both `DoIP` and CAN gateways. Each ECU is either pinned
 /// to a transport via config override or bound to the transport it was first
 /// detected on (`DoIP` preferred); see the module docs for the full strategy.
+///
+/// The `DoIP` side is generic over [`EcuGateway`] while the CAN side is
+/// concrete: routing needs CAN-specific capabilities (on-demand probing,
+/// the `can://` scheme). Lifting this into a transport orchestrator
+/// generic over all transports is tracked in #442.
 pub struct MultiTransportGateway<D: EcuGateway> {
     /// Optional `DoIP` gateway
     doip_gateway: Option<D>,

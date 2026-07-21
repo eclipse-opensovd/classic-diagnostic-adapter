@@ -68,7 +68,15 @@ pub struct CanConfig {
     #[serde(default = "default_probe_retry_delay_ms")]
     pub probe_retry_delay_ms: u64,
 
-    /// Optional fallback probe payloads used after the default `TesterPresent` probe.
+    /// Whether the built-in `TesterPresent` probe heads the discovery
+    /// probe sequence; with `false`, `probe_fallbacks` must be non-empty
+    /// and is used verbatim.
+    /// See `response_timeout_ms` for why the serde default is needed.
+    #[serde(default = "default_default_probes")]
+    pub default_probes: bool,
+
+    /// Optional fallback probe payloads used after the default `TesterPresent` probe
+    /// (or, with `default_probes = false`, the complete probe sequence).
     ///
     /// This is useful for ECUs that do not answer `TesterPresent` during discovery,
     /// but do respond to another lightweight diagnostic request.
@@ -162,6 +170,7 @@ impl Default for CanConfig {
             probe_timeout_ms: 100,
             probe_retries: 0,
             probe_retry_delay_ms: 100,
+            default_probes: true,
             probe_fallbacks: Vec::new(),
         }
     }
@@ -181,6 +190,10 @@ fn default_probe_retries() -> u32 {
 
 fn default_probe_retry_delay_ms() -> u64 {
     CanConfig::default().probe_retry_delay_ms
+}
+
+fn default_default_probes() -> bool {
+    CanConfig::default().default_probes
 }
 
 #[cfg(test)]
@@ -203,6 +216,7 @@ mod tests {
             config.probe_timeout_ms,
             CanConfig::default().probe_timeout_ms
         );
+        assert!(config.default_probes);
         assert!(config.ecu_mappings.is_empty());
         assert!(config.transport_overrides.is_empty());
         assert!(config.probe_fallbacks.is_empty());

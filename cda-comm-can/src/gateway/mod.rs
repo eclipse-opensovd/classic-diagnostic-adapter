@@ -41,9 +41,6 @@ use self::{
 use crate::config::CanConfig;
 
 const NRC_RESPONSE_PENDING: u8 = 0x78;
-/// A positive UDS response echoes the request SID with this bit set
-/// (ISO 14229-1: response SID = request SID + 0x40).
-const POSITIVE_RESPONSE_SID_FLAG: u8 = 0x40;
 
 /// The instant `timeout` from now, saturating instead of panicking on the
 /// (theoretical) overflow of the underlying monotonic clock.
@@ -124,6 +121,24 @@ impl CanDiagGateway {
 
         let probe_sequence = Self::build_probe_sequence(config)?;
 
+        // Functional broadcast ID for the TesterPresent keep-alive: prefer the
+        // MDD com-params (CP_CanFuncReqId), fall back to the ISO 15765-4
+        // default 0x7DF. May be an 11-bit standard or a 29-bit extended ID
+        // (e.g. 0x18DB33F1 for normal fixed addressing). Resolved before the
+        // connections so their IDs can be checked against it.
+        let mut functional_id = Self::validate_can_id(
+            "<functional>",
+            "default",
+            keepalive::DEFAULT_FUNCTIONAL_BROADCAST_ID,
+        )?;
+        for ecu_lock in ecus.values() {
+            // Already range-validated at MDD extraction.
+            if let Some(id) = ecu_lock.read().await.can_functional_id() {
+                functional_id = id;
+                break;
+            }
+        }
+
         let mut connections: HashMap<String, Arc<CanEcuConnection>> = HashMap::default();
         let mut logical_address_to_ecu: HashMap<u16, String> = HashMap::default();
 
@@ -133,6 +148,17 @@ impl CanDiagGateway {
                 Self::validate_can_id(&mapping.ecu_name, "request_id", mapping.request_id)?;
             let response_id =
                 Self::validate_can_id(&mapping.ecu_name, "response_id", mapping.response_id)?;
+            // Reserved IDs (broadcast, keep-alive RX) cannot address an
+            // ECU; config values are user-controlled, so fail setup.
+            for (field, id) in [("request_id", request_id), ("response_id", response_id)] {
+                if Self::is_reserved_can_id(id, functional_id) {
+                    return Err(CanGatewaySetupError::InvalidConfiguration(format!(
+                        "ECU {}: {field} {id} collides with the functional broadcast ID \
+                         ({functional_id}) or a reserved keep-alive ID",
+                        mapping.ecu_name
+                    )));
+                }
+            }
             let ecu_name = mapping.ecu_name.to_lowercase();
             if let Some(ecu_lock) = ecus.get(&ecu_name) {
                 let ecu = ecu_lock.read().await;
@@ -170,6 +196,7 @@ impl CanDiagGateway {
         Self::add_connections_from_com_params(
             config,
             ecus,
+            functional_id,
             &mut connections,
             &mut logical_address_to_ecu,
         )
@@ -189,26 +216,9 @@ impl CanDiagGateway {
         // socket for a real connection exercises the exact same path every
         // later request uses.
         if let Some(conn) = connections.values().next() {
-            conn.check_open().map_err(|e| {
+            conn.verify_socket_openable().map_err(|e| {
                 CanGatewaySetupError::InterfaceOpenFailed(config.interface.clone(), e.to_string())
             })?;
-        }
-
-        // Functional broadcast ID for the TesterPresent keep-alive: prefer the
-        // MDD com-params (CP_CanFuncReqId), fall back to the ISO 15765-4
-        // default 0x7DF. May be an 11-bit standard or a 29-bit extended ID
-        // (e.g. 0x18DB33F1 for normal fixed addressing).
-        let mut functional_id = Self::validate_can_id(
-            "<functional>",
-            "default",
-            keepalive::DEFAULT_FUNCTIONAL_BROADCAST_ID,
-        )?;
-        for ecu_lock in ecus.values() {
-            // Already range-validated at MDD extraction.
-            if let Some(id) = ecu_lock.read().await.can_functional_id() {
-                functional_id = id;
-                break;
-            }
         }
 
         // Start functional-broadcast TesterPresent keep-alive to prevent
@@ -275,6 +285,7 @@ impl CanDiagGateway {
     async fn add_connections_from_com_params<T: EcuAddresses + CanComParamProvider>(
         config: &CanConfig,
         ecus: &HashMap<String, RwLock<T>>,
+        functional_id: CanId,
         connections: &mut HashMap<String, Arc<CanEcuConnection>>,
         logical_address_to_ecu: &mut HashMap<u16, String>,
     ) {
@@ -303,6 +314,22 @@ impl CanDiagGateway {
                     can_id = %ids.request,
                     "MDD CAN addressing uses the same ID for request and response, skipping \
                      this ECU (a [[can.ecu_mappings]] entry can override)"
+                );
+                continue;
+            }
+            // Same reserved-ID rule, but MDD values are not
+            // user-controlled: warn and skip instead of failing setup.
+            if Self::is_reserved_can_id(ids.request, functional_id)
+                || Self::is_reserved_can_id(ids.response, functional_id)
+            {
+                tracing::warn!(
+                    ecu = %name,
+                    request_id = %ids.request,
+                    response_id = %ids.response,
+                    functional_id = %functional_id,
+                    "MDD CAN addressing collides with the functional broadcast ID or a \
+                     reserved keep-alive ID, skipping this ECU (a [[can.ecu_mappings]] entry \
+                     can override)"
                 );
                 continue;
             }
@@ -384,6 +411,14 @@ impl CanDiagGateway {
             return;
         }
         logical_address_to_ecu.insert(logical_addr, ecu_name.to_owned());
+    }
+
+    /// IDs no ECU pair may use: the functional broadcast ID and the
+    /// reserved RX IDs backing the keep-alive socket.
+    fn is_reserved_can_id(id: CanId, functional_id: CanId) -> bool {
+        id == functional_id
+            || id.raw() == keepalive::UNUSED_RX_ID_STANDARD
+            || id.raw() == keepalive::UNUSED_RX_ID_EXTENDED
     }
 
     /// Converts a raw configured/com-param CAN ID into a validated [`CanId`]
@@ -554,7 +589,8 @@ impl EcuGateway for CanDiagGateway {
                     };
                     match response {
                         Ok(data) => {
-                            let is_negative = data.first() == Some(&0x7F);
+                            let is_negative = data.first()
+                                == Some(&cda_interfaces::service_ids::NEGATIVE_RESPONSE);
                             if is_negative
                                 && data.len() >= 3
                                 && data.get(2) == Some(&NRC_RESPONSE_PENDING)
@@ -572,12 +608,9 @@ impl EcuGateway for CanDiagGateway {
                                 }
                                 continue;
                             }
-                            let is_for_request = if is_negative {
-                                data.get(1) == Some(&sent_sid)
-                            } else {
-                                data.first() == Some(&(sent_sid | POSITIVE_RESPONSE_SID_FLAG))
-                            };
-                            if !is_for_request {
+                            if !cda_interfaces::util::uds_response_matches_request_sid(
+                                sent_sid, &data,
+                            ) {
                                 tracing::debug!(
                                     data = %hex::encode(&data),
                                     request_sid = format_args!("{sent_sid:#04x}"),
@@ -734,6 +767,21 @@ impl CanDiagGateway {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn reserved_ids_cover_broadcast_and_keepalive_rx() {
+        let functional = CanId::try_from(0x7DF).expect("valid ID");
+        for reserved in [0x7DF, 0x7FF, 0x1FFF_FFFF] {
+            assert!(CanDiagGateway::is_reserved_can_id(
+                CanId::try_from(reserved).expect("valid ID"),
+                functional
+            ));
+        }
+        assert!(!CanDiagGateway::is_reserved_can_id(
+            CanId::try_from(0x7E0).expect("valid ID"),
+            functional
+        ));
+    }
 
     #[test]
     fn validate_can_id_accepts_standard_and_extended() {

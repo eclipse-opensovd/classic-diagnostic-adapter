@@ -32,12 +32,11 @@ use super::{background::BackgroundTask, can_id::CanIdExt, error::CanError};
 /// com-params do not define `CP_CanFuncReqId`.
 pub(crate) const DEFAULT_FUNCTIONAL_BROADCAST_ID: u32 = 0x7DF;
 
-/// Dummy RX CAN IDs - we never expect a response because we use
-/// suppressPositiveResponse (0x80), but the ISO-TP socket API requires an
-/// `rx_id`. Use an ID that won't conflict, matching the kind (standard or
-/// extended) of the broadcast ID.
-const DUMMY_RX_ID_STANDARD: u32 = 0x7FF;
-const DUMMY_RX_ID_EXTENDED: u32 = 0x1FFF_FFFF;
+/// RX side of the TX-only broadcast socket; no response ever arrives
+/// (suppressPositiveResponse) but the socket API requires an `rx_id`.
+/// Gateway setup rejects ECUs configured on these IDs.
+pub(crate) const UNUSED_RX_ID_STANDARD: u32 = 0x7FF;
+pub(crate) const UNUSED_RX_ID_EXTENDED: u32 = 0x1FFF_FFFF;
 
 /// Default keep-alive interval (2 seconds).
 pub(crate) const DEFAULT_KEEPALIVE_INTERVAL: Duration = Duration::from_secs(2);
@@ -118,6 +117,8 @@ pub(crate) fn start_keepalive_broadcast(
 
             if let Some(ref s) = socket {
                 tokio::select! {
+                    // Prefer shutdown when both arms are ready.
+                    biased;
                     () = task_cancel.cancelled() => break,
                     result = s.write_packet(&TESTER_PRESENT_PAYLOAD) => match result {
                         Ok(()) => {
@@ -140,6 +141,8 @@ pub(crate) fn start_keepalive_broadcast(
             }
 
             tokio::select! {
+                // Prefer shutdown over starting another tick.
+                biased;
                 () = task_cancel.cancelled() => break,
                 () = sleep_for(interval) => {}
             }
@@ -159,9 +162,9 @@ fn open_broadcast_socket(interface: &str, functional_id: CanId) -> Result<IsoTpS
     // Match the dummy RX kind to the broadcast kind so standard and extended
     // buses both work.
     let rx_id = CanId::try_from(if functional_id.is_standard() {
-        DUMMY_RX_ID_STANDARD
+        UNUSED_RX_ID_STANDARD
     } else {
-        DUMMY_RX_ID_EXTENDED
+        UNUSED_RX_ID_EXTENDED
     })?
     .to_socket_id()?;
 

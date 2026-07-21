@@ -79,7 +79,7 @@ impl CanEcuConnection {
     /// Used at gateway setup to fail fast when the CAN interface does not
     /// exist (or the socketcand daemon is unreachable) instead of timing out
     /// on every probe and request later.
-    pub(crate) fn check_open(&self) -> Result<(), CanError> {
+    pub(crate) fn verify_socket_openable(&self) -> Result<(), CanError> {
         self.open_socket().map(|_| ())
     }
 
