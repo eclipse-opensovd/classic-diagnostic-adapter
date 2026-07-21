@@ -91,11 +91,12 @@ pub struct EcuManager<S: SecurityPlugin> {
     pub(in crate::diag_kernel) logical_functional_address: u16,
     /// See [`Self::doip_addresses_resolved`] for the semantics.
     pub(in crate::diag_kernel) doip_addresses_resolved: bool,
-    /// CAN arbitration IDs from the MDD com-params (or config override), when
-    /// present; see [`Self::resolve_can_id`] for the resolution order.
-    pub(in crate::diag_kernel) can_request_id: Option<u32>,
-    pub(in crate::diag_kernel) can_response_id: Option<u32>,
-    pub(in crate::diag_kernel) can_functional_id: Option<u32>,
+    /// CAN arbitration ID pair from the MDD com-params (or config override),
+    /// when present; see [`Self::resolve_can_id`] for the resolution order.
+    /// `None` when the ECU has no CAN addressing (e.g. a pure `DoIP` ECU);
+    /// when `Some`, both IDs are present and range-validated.
+    pub(in crate::diag_kernel) can_ids: Option<cda_interfaces::CanIds>,
+    pub(in crate::diag_kernel) can_functional_id: Option<cda_interfaces::CanId>,
 
     pub(in crate::diag_kernel) nack_number_of_retries: HashMap<u8, u32>,
     pub(in crate::diag_kernel) diagnostic_ack_timeout: Duration,
@@ -179,7 +180,7 @@ impl<S: SecurityPlugin> cda_interfaces::EcuAddresses for EcuManager<S> {
             self.doip_addresses_resolved,
             self.logical_gateway_address,
             self.logical_address,
-            self.can_request_id.zip(self.can_response_id),
+            self.can_ids,
             &self.ecu_name,
         )
     }
@@ -192,15 +193,11 @@ impl<S: SecurityPlugin> cda_interfaces::EcuAddresses for EcuManager<S> {
 /// gateway then relies on the explicit `[[can.ecu_mappings]]` config block,
 /// which always takes precedence over these values anyway.
 impl<S: SecurityPlugin> cda_interfaces::CanComParamProvider for EcuManager<S> {
-    fn can_request_id(&self) -> Option<u32> {
-        self.can_request_id
+    fn can_ids(&self) -> Option<cda_interfaces::CanIds> {
+        self.can_ids
     }
 
-    fn can_response_id(&self) -> Option<u32> {
-        self.can_response_id
-    }
-
-    fn can_functional_id(&self) -> Option<u32> {
+    fn can_functional_id(&self) -> Option<cda_interfaces::CanId> {
         self.can_functional_id
     }
 }
@@ -645,12 +642,36 @@ impl<S: SecurityPlugin> EcuManager<S> {
             can_id_table.as_ref(),
             &com_params.can.physical_response_id,
         );
+        // Out-of-range IDs are treated as absent (with a warning) so one
+        // bad value cannot fail the ECU load; [[can.ecu_mappings]] overrides.
+        let can_ids = can_request_id
+            .zip(can_response_id)
+            .and_then(|(request, response)| {
+                cda_interfaces::CanIds::try_from_raw(request, response)
+                    .inspect_err(|e| {
+                        tracing::warn!(
+                            error = %e,
+                            "Invalid CAN addressing in MDD com-params, treating as absent"
+                        );
+                    })
+                    .ok()
+            });
         let can_functional_id = Self::resolve_can_id(
             &database,
             data_protocol_ref,
             can_id_table.as_ref(),
             &com_params.can.functional_id,
-        );
+        )
+        .and_then(|id| {
+            cda_interfaces::CanId::try_from(id)
+                .inspect_err(|e| {
+                    tracing::warn!(
+                        error = %e,
+                        "Invalid functional CAN ID in MDD com-params, treating as absent"
+                    );
+                })
+                .ok()
+        });
 
         let ecu_name = database
             .ecu_data()?
@@ -670,8 +691,7 @@ impl<S: SecurityPlugin> EcuManager<S> {
             logical_functional_address: logical_functional_address.address,
             doip_addresses_resolved: !logical_gateway_address.is_comparam_default
                 && !logical_ecu_address.is_comparam_default,
-            can_request_id,
-            can_response_id,
+            can_ids,
             can_functional_id,
             nack_number_of_retries,
             diagnostic_ack_timeout: database
@@ -793,9 +813,12 @@ impl<S: SecurityPlugin> EcuManager<S> {
             // Functional descriptions use the com-param defaults verbatim.
             doip_addresses_resolved: false,
             // Functional descriptions are not physical CAN nodes.
-            can_request_id: None,
-            can_response_id: None,
-            can_functional_id: com_params.can.functional_id.value,
+            can_ids: None,
+            can_functional_id: com_params
+                .can
+                .functional_id
+                .value
+                .and_then(|id| cda_interfaces::CanId::try_from(id).ok()),
             nack_number_of_retries,
             diagnostic_ack_timeout: com_params.doip.diagnostic_ack_timeout.value,
             retry_period: com_params.doip.retry_period.value,

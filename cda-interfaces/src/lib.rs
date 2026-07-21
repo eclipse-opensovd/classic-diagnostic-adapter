@@ -19,6 +19,8 @@ use std::{
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
+mod can_id;
+pub use can_id::*;
 mod com_param_handling;
 pub use com_param_handling::*;
 pub mod datatypes;

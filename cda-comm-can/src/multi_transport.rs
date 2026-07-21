@@ -412,11 +412,11 @@ mod tests {
             atomic::{AtomicBool, AtomicUsize, Ordering},
         };
 
-        use cda_interfaces::{DiagServiceError, EcuAddresses};
+        use cda_interfaces::{CanId, DiagServiceError, EcuAddresses};
         use tokio::sync::RwLock;
 
         use super::super::*;
-        use crate::gateway::{can_id::CanId, connection::CanEcuConnection};
+        use crate::gateway::connection::CanEcuConnection;
 
         /// `DoIP` gateway stub whose ECU knowledge can be toggled at runtime.
         #[derive(Clone, Default)]

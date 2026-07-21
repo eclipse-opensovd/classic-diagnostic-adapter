@@ -493,13 +493,13 @@ pub fn request_lock_key_for(
     addresses_resolved: bool,
     logical_gateway_address: u16,
     logical_address: u16,
-    can_ids: Option<(u32, u32)>,
+    can_ids: Option<crate::CanIds>,
     ecu_name: &str,
 ) -> String {
     if addresses_resolved {
         format!("logical:0x{logical_gateway_address:04X}@0x{logical_address:04X}")
-    } else if let Some((request_id, response_id)) = can_ids {
-        format!("can:0x{request_id:X}@0x{response_id:X}")
+    } else if let Some(ids) = can_ids {
+        format!("can:{:#X}@{:#X}", ids.request.raw(), ids.response.raw())
     } else {
         format!("ecu:{}", ecu_name.to_lowercase())
     }
@@ -1173,7 +1173,13 @@ mod tests {
         // Resolved DoIP addressing outranks CAN IDs: the established key
         // stays stable when an MDD carries both.
         assert_eq!(
-            request_lock_key_for(true, 0x1000, 0x0712, Some((0x712, 0x732)), "R0_13_453"),
+            request_lock_key_for(
+                true,
+                0x1000,
+                0x0712,
+                Some(crate::CanIds::try_from_raw(0x712, 0x732).expect("valid pair")),
+                "R0_13_453"
+            ),
             a
         );
     }
@@ -1183,14 +1189,32 @@ mod tests {
         // CAN-only duplicate group: R0_13_453 and R_MID453 both derive
         // 0x712/0x732 from their MDDs - one physical radio, two candidate
         // descriptions. They must share the key so their requests serialize.
-        let a = request_lock_key_for(false, 0, 0, Some((0x712, 0x732)), "R0_13_453");
-        let b = request_lock_key_for(false, 0, 0, Some((0x712, 0x732)), "R_MID453");
+        let a = request_lock_key_for(
+            false,
+            0,
+            0,
+            Some(crate::CanIds::try_from_raw(0x712, 0x732).expect("valid pair")),
+            "R0_13_453",
+        );
+        let b = request_lock_key_for(
+            false,
+            0,
+            0,
+            Some(crate::CanIds::try_from_raw(0x712, 0x732).expect("valid pair")),
+            "R_MID453",
+        );
         assert_eq!(a, b);
         assert_eq!(a, "can:0x712@0x732");
         // Distinct nodes keep distinct keys.
         assert_ne!(
             a,
-            request_lock_key_for(false, 0, 0, Some((0x79B, 0x7BB)), "BMS453")
+            request_lock_key_for(
+                false,
+                0,
+                0,
+                Some(crate::CanIds::try_from_raw(0x79B, 0x7BB).expect("valid pair")),
+                "BMS453"
+            )
         );
     }
 
@@ -1215,7 +1239,13 @@ mod tests {
             request_lock_key_for(true, 0x1000, 0x0712, None, "ecu1")
         );
         assert_ne!(
-            request_lock_key_for(false, 0, 0, Some((0x1000, 0x0712)), "ecu1"),
+            request_lock_key_for(
+                false,
+                0,
+                0,
+                Some(crate::CanIds::try_from_raw(0x1000, 0x0712).expect("valid pair")),
+                "ecu1"
+            ),
             request_lock_key_for(true, 0x1000, 0x0712, None, "ecu1")
         );
     }

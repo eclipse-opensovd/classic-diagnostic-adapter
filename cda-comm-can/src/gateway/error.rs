@@ -29,6 +29,12 @@ pub enum CanGatewaySetupError {
     NoEcuMappings,
 }
 
+impl From<cda_interfaces::InvalidCanId> for CanError {
+    fn from(value: cda_interfaces::InvalidCanId) -> Self {
+        Self::InvalidId(value.to_string())
+    }
+}
+
 /// Errors that can occur during CAN communication.
 #[derive(Error, Debug, Clone)]
 pub enum CanError {

@@ -27,14 +27,13 @@ mod rediscovery;
 use std::{sync::Arc, time::Duration};
 
 use cda_interfaces::{
-    CanComParamProvider, DiagServiceError, EcuAddresses, EcuGateway, HashMap, ServicePayload,
-    TransmissionParameters, UdsResponse, dlt_ctx,
+    CanComParamProvider, CanId, DiagServiceError, EcuAddresses, EcuGateway, HashMap,
+    ServicePayload, TransmissionParameters, UdsResponse, dlt_ctx,
 };
 use tokio::sync::{RwLock, mpsc};
 
 use self::{
     background::BackgroundTask,
-    can_id::CanId,
     connection::CanEcuConnection,
     error::{CanError, CanGatewaySetupError},
     probe::ProbeRequest,
@@ -205,15 +204,9 @@ impl CanDiagGateway {
             keepalive::DEFAULT_FUNCTIONAL_BROADCAST_ID,
         )?;
         for ecu_lock in ecus.values() {
-            let ecu = ecu_lock.read().await;
-            if let Some(id) = ecu.can_functional_id() {
-                match Self::validate_can_id("<functional>", "functional_id", id) {
-                    Ok(valid) => functional_id = valid,
-                    Err(e) => tracing::warn!(
-                        error = %e,
-                        "Invalid functional CAN ID in MDD com-params, keeping the default"
-                    ),
-                }
+            // Already range-validated at MDD extraction.
+            if let Some(id) = ecu_lock.read().await.can_functional_id() {
+                functional_id = id;
                 break;
             }
         }
@@ -293,46 +286,37 @@ impl CanDiagGateway {
             if connections.contains_key(&ecu_name) {
                 continue;
             }
-            let (Some(req_id), Some(resp_id)) = (ecu.can_request_id(), ecu.can_response_id())
-            else {
+            // Normal for DoIP-only ECUs in a mixed fleet, so debug level;
+            // an all-miss CAN-only setup still fails via NoEcuMappings.
+            let Some(ids) = ecu.can_ids() else {
+                tracing::debug!(
+                    ecu = %name,
+                    "No CAN addressing in MDD com-params and no [[can.ecu_mappings]] entry, \
+                     ECU gets no CAN connection"
+                );
                 continue;
             };
 
-            if req_id == resp_id {
+            if ids.request == ids.response {
                 tracing::warn!(
                     ecu = %name,
-                    can_id = format_args!("{req_id:#X}"),
+                    can_id = %ids.request,
                     "MDD CAN addressing uses the same ID for request and response, skipping \
                      this ECU (a [[can.ecu_mappings]] entry can override)"
                 );
                 continue;
             }
-            let ids = Self::validate_can_id(name, "request_id", req_id).and_then(|req| {
-                Self::validate_can_id(name, "response_id", resp_id).map(|resp| (req, resp))
-            });
-            let (request_id, response_id) = match ids {
-                Ok(ids) => ids,
-                Err(e) => {
-                    tracing::warn!(
-                        ecu = %name,
-                        error = %e,
-                        "Invalid CAN addressing in MDD com-params, skipping this ECU (a \
-                         [[can.ecu_mappings]] entry can override)"
-                    );
-                    continue;
-                }
-            };
             let conn = CanEcuConnection::new(
                 name.clone(),
                 config.interface.clone(),
-                request_id,
-                response_id,
+                ids.request,
+                ids.response,
             );
             tracing::debug!(
                 ecu = %name,
                 logical_addr = logical_addr,
-                request_id = %request_id,
-                response_id = %response_id,
+                request_id = %ids.request,
+                response_id = %ids.response,
                 "Added CAN connection from MDD COM params"
             );
             Self::register_logical_address(logical_address_to_ecu, logical_addr, &ecu_name);

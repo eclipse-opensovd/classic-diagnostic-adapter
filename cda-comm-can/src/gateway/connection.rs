@@ -13,9 +13,10 @@
 
 use std::time::Duration;
 
+use cda_interfaces::CanId;
 use tokio_socketcan_isotp::{IsoTpBehaviour, IsoTpOptions, IsoTpSocket};
 
-use super::{can_id::CanId, error::CanError};
+use super::{can_id::CanIdExt, error::CanError};
 
 /// Represents a CAN connection to a single ECU using ISO-TP.
 pub struct CanEcuConnection {

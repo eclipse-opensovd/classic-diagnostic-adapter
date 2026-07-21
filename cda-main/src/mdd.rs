@@ -384,7 +384,7 @@ enum DuplicateTargetKey {
     Doip { gateway: u16, logical: u16 },
     /// CAN arbitration ID pair from the MDD com-params, for ECUs without
     /// resolved `DoIP` addressing (e.g. CAN-only databases).
-    Can { request: u32, response: u32 },
+    Can(cda_interfaces::CanIds),
 }
 
 /// Scans `databases` for ECUs sharing the same transport target - the
@@ -405,9 +405,8 @@ async fn mark_duplicate_ecus_by_address<S: SecurityPlugin>(
                 gateway: db.logical_gateway_address(),
                 logical: db.logical_address(),
             }
-        } else if let (Some(request), Some(response)) = (db.can_request_id(), db.can_response_id())
-        {
-            DuplicateTargetKey::Can { request, response }
+        } else if let Some(ids) = db.can_ids() {
+            DuplicateTargetKey::Can(ids)
         } else {
             // Without resolved DoIP addressing the addresses are com-param
             // fallback values shared by every such ECU (e.g. a functional

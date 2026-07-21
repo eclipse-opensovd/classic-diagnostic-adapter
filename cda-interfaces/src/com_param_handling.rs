@@ -80,15 +80,13 @@ pub trait DoipComParams: Send + Sync + 'static {
 
 /// Provider for CAN-specific communication parameters from MDD.
 pub trait CanComParamProvider: Send + Sync + 'static {
-    /// Physical request CAN ID (e.g., 0x7E0)
+    /// Physical request/response CAN ID pair for addressing this ECU.
+    /// `None` when the ECU has no CAN addressing (e.g. a pure `DoIP` ECU);
+    /// when `Some`, both IDs are present and range-validated.
     #[must_use]
-    fn can_request_id(&self) -> Option<u32>;
-
-    /// Physical response CAN ID (e.g., 0x7E8)
-    #[must_use]
-    fn can_response_id(&self) -> Option<u32>;
+    fn can_ids(&self) -> Option<crate::CanIds>;
 
     /// Functional CAN ID for broadcast requests
     #[must_use]
-    fn can_functional_id(&self) -> Option<u32>;
+    fn can_functional_id(&self) -> Option<crate::CanId>;
 }

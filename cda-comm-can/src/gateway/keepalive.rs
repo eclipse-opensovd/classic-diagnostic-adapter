@@ -22,11 +22,11 @@
 
 use std::time::Duration;
 
-use cda_interfaces::util::tokio_ext::sleep_for;
+use cda_interfaces::{CanId, util::tokio_ext::sleep_for};
 use tokio_socketcan_isotp::{IsoTpBehaviour, IsoTpOptions, IsoTpSocket};
 use tokio_util::sync::CancellationToken;
 
-use super::{background::BackgroundTask, can_id::CanId, error::CanError};
+use super::{background::BackgroundTask, can_id::CanIdExt, error::CanError};
 
 /// Default functional broadcast CAN ID (ISO 15765-4), used when the MDD
 /// com-params do not define `CP_CanFuncReqId`.
