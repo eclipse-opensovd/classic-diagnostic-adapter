@@ -17,6 +17,14 @@
 //! Variant detection writes happen directly via `std::sync::RwLock` (from `EcuManager`),
 //! while disconnect events go through the actor to avoid races.
 //!
+#![cfg_attr(
+    nightly,
+    allow(
+        unknown_lints,
+        clippy::unused_async_trait_impl,
+        reason = "The `Actor` derive macro generates async trait impls that may have no `.await`"
+    )
+)]
 //! Reads go directly through [`EcuCoordinatorHandle::state`] (a `std::sync::RwLock`)
 //! without touching the actor mailbox.
 

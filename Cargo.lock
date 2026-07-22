@@ -396,6 +396,7 @@ name = "cda-comm-uds"
 version = "0.1.0"
 dependencies = [
  "async-trait",
+ "cda-build",
  "cda-interfaces",
  "cda-plugin-runtime-update",
  "futures",
@@ -412,6 +413,7 @@ name = "cda-core"
 version = "0.1.0"
 dependencies = [
  "async-trait",
+ "cda-build",
  "cda-database",
  "cda-interfaces",
  "cda-plugin-security",
@@ -484,6 +486,7 @@ version = "0.1.0"
 dependencies = [
  "async-trait",
  "bytes",
+ "cda-build",
  "foldhash",
  "hex",
  "mockall",
@@ -2348,6 +2351,7 @@ version = "0.1.0"
 dependencies = [
  "aide",
  "axum",
+ "cda-build",
  "http",
  "tokio",
 ]

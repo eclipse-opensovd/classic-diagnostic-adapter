@@ -25,6 +25,7 @@ workspace = true
 ## Enable runtime validation of collection names and keys used as path segments.
 ## Rejects directory traversal attempts (e.g., "..", "/") with an error.
 sanitize-paths = []
+nightly = []
 
 [lib]
 path = "src/lib.rs"

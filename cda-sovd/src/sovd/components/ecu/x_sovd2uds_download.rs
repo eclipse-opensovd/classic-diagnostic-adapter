@@ -33,6 +33,10 @@ use crate::sovd::{
 
 const FLASH_DOWNLOAD_UPLOAD_FUNC_CLASS: &str = "flash_download_upload";
 
+#[allow(
+    clippy::result_large_err,
+    reason = "`axum::Response` is an external type whose size we cannot reduce"
+)]
 async fn sovd_to_func_class_service_exec<T: UdsEcu + Clone>(
     uds: &T,
     func_class: &str,

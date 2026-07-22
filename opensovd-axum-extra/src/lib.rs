@@ -70,10 +70,10 @@ where
 {
     type Rejection = Infallible;
 
-    async fn from_request_parts(
+    fn from_request_parts(
         parts: &mut Parts,
         _state: &S,
-    ) -> Result<Option<Self>, Self::Rejection> {
+    ) -> impl std::future::Future<Output = Result<Option<Self>, Self::Rejection>> + Send {
         // suppress unused-parameter warning when all host resolution features are disabled
         #[cfg(not(any(
             feature = "forwarded",
@@ -83,35 +83,38 @@ where
         )))]
         let _ = parts;
 
-        #[cfg(feature = "forwarded")]
-        if let Some(host) = parse_forwarded(&parts.headers) {
-            return Ok(Some(ExtractHost(host.to_owned())));
-        }
+        let result = (|| {
+            #[cfg(feature = "forwarded")]
+            if let Some(host) = parse_forwarded(&parts.headers) {
+                return Ok(Some(ExtractHost(host.to_owned())));
+            }
 
-        #[cfg(feature = "x-forwarded-host")]
-        if let Some(host) = parts
-            .headers
-            .get(X_FORWARDED_HOST_HEADER_KEY)
-            .and_then(|host| host.to_str().ok())
-        {
-            return Ok(Some(ExtractHost(host.to_owned())));
-        }
+            #[cfg(feature = "x-forwarded-host")]
+            if let Some(host) = parts
+                .headers
+                .get(X_FORWARDED_HOST_HEADER_KEY)
+                .and_then(|host| host.to_str().ok())
+            {
+                return Ok(Some(ExtractHost(host.to_owned())));
+            }
 
-        #[cfg(feature = "host-header")]
-        if let Some(host) = parts
-            .headers
-            .get(http::header::HOST)
-            .and_then(|host| host.to_str().ok())
-        {
-            return Ok(Some(ExtractHost(host.to_owned())));
-        }
+            #[cfg(feature = "host-header")]
+            if let Some(host) = parts
+                .headers
+                .get(http::header::HOST)
+                .and_then(|host| host.to_str().ok())
+            {
+                return Ok(Some(ExtractHost(host.to_owned())));
+            }
 
-        #[cfg(feature = "uri-authority")]
-        if let Some(authority) = parts.uri.authority() {
-            return Ok(Some(ExtractHost(parse_authority(authority).to_owned())));
-        }
+            #[cfg(feature = "uri-authority")]
+            if let Some(authority) = parts.uri.authority() {
+                return Ok(Some(ExtractHost(parse_authority(authority).to_owned())));
+            }
 
-        Ok(None)
+            Ok(None)
+        })();
+        std::future::ready(result)
     }
 }
 

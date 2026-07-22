@@ -49,10 +49,10 @@ jobs:
       - name: Format and Clippy - Nightly toolchain pinned
         uses: eclipse-opensovd/cicd-workflows/rust-lint-and-format-action@07140bdd84f20b66fd4aff58a83c5148deec388c
         with:
-          toolchain: nightly-2025-07-14
+          toolchain: nightly-2026-07-21
           github-token: ${{ secrets.GITHUB_TOKEN }}
           fail-on-format-error: "false"
-          fail-on-clippy-error: "false"
+          fail-on-clippy-error: "true"
           clippy-deny-warnings: "false"
           clippy-features: "all-features"
           error-on-unformatted: "false"
@@ -65,10 +65,11 @@ jobs:
           toolchain: nightly
           github-token: ${{ secrets.GITHUB_TOKEN }}
           fail-on-format-error: "false"
-          fail-on-clippy-error: "false"
+          fail-on-clippy-error: "true"
           clippy-deny-warnings: "false"
           clippy-features: "all-features"
           error-on-unformatted: "false"
           # For nightly, we also want to see files not touched by
-          # the PR, to detect if there are any new warnings introduced by the latest nightly toolchain.
+          # the PR, to detect if there are any new warnings introduced by
+          # the latest nightly toolchain.
           reporter: ${{ env.IS_FORK == 'true' && 'github-annotations' || 'github-pr-check' }}
