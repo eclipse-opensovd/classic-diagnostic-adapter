@@ -1,4 +1,4 @@
-.. SPDX-FileCopyrightText: 2025 Copyright (c) Contributors to the Eclipse Foundation
+.. SPDX-FileCopyrightText: 2026 Copyright (c) Contributors to the Eclipse Foundation
 ..
 .. See the NOTICE file(s) distributed with this work for additional
 .. information regarding copyright ownership.
@@ -11,10 +11,10 @@
 
 .. _architecture_uds_communication:
 
-UDS Communication (DoIP)
-------------------------
+UDS Communication
+-----------------
 
-The UDS (Unified Diagnostic Services) application layer sits above the DoIP transport
+The UDS (Unified Diagnostic Services) application layer sits above the transport
 layer and implements the request-response protocol defined in ISO 14229. It handles
 service payload construction, response matching, negative response code processing,
 tester present session keepalive, and functional group communication.
@@ -169,7 +169,7 @@ Request-Response Flow
 
     The UDS application layer implements the request-response flow using per-ECU
     semaphores for serialization, a SID-specific lookup table for response matching,
-    and a layered retry strategy split between the UDS and DoIP layers.
+    and a layered retry strategy split between the UDS and transport layers.
 
     **Per-ECU Semaphore**
 
@@ -183,9 +183,8 @@ Request-Response Flow
     **Request Transmission**
 
     The UDS layer constructs a payload containing the tester source address, target ECU
-    address, and UDS request data. This payload is passed to the DoIP transport layer
-    for transmission. On DoIP-level transmission failure, retries are handled by the
-    transport layer per ``CP_RepeatReqCountTrans``.
+    address, and UDS request data. This payload is passed to the selected transport for
+    transmission. Transport-specific transmission failures are returned to the UDS layer.
 
     **Response Matching Algorithm**
 
@@ -232,17 +231,23 @@ Request-Response Flow
     length. For a negative response, the first byte is ``0x7F`` and the second byte
     equals the sent SID.
 
-    NRC 0x78, 0x21, and 0x94 are parsed at the DoIP layer and delivered to the UDS layer
-    as typed response variants. These are processed by the NRC handling logic
+    NRC 0x78, 0x21, and 0x94 are classified at the transport boundary by the shared
+    ``pending_nrc_from_raw()`` function into typed ``TransportResponse::Pending(PendingNrc)``
+    variants (``ResponsePending``, ``BusyRepeatRequest``, ``TemporarilyNotAvailable``).
+    This classification runs in both the DoIP transport (``doip_event_to_transport()``,
+    ``cda-comm-doip/src/lib.rs``) and the CAN transport (``exchange.read_response()``,
+    ``cda-comm-can/src/gateway/mod.rs``), ensuring identical behaviour across all
+    transports. These typed variants are then processed by the NRC handling logic
     (see :need:`arch~uds-nrc-handling`) before SID matching is applied to the final
-    response.
+    response. All other NRCs flow through as ``TransportResponse::UdsResponse`` final
+    responses without transport-level interception.
 
     **Timeout and Retry Strategy**
 
     The caller may optionally override the default response timeout. When NRC 0x78 is
     received, the active timeout switches from ``CP_P6Max`` to ``CP_P6Star``. Application-
-    layer retries (``CP_RepeatReqCountApp``) are independent of DoIP transport-layer
-    retries (``CP_RepeatReqCountTrans``).
+    layer retries (``CP_RepeatReqCountApp``) are independent of any transport-level
+    retries configured by the selected transport.
 
     .. uml::
         :caption: UDS Request-Response Flow
@@ -253,7 +258,7 @@ Request-Response Flow
 
         participant "Caller" as Caller
         participant "CDA\n(UDS Layer)" as UDS
-        participant "DoIP\nTransport" as DoIP
+        participant "Transport\n(DoIP or CAN)" as Transport
         participant "ECU" as ECU
 
         == Request ==
@@ -265,13 +270,12 @@ Request-Response Flow
 
         UDS -> UDS: Extract request prefix\nfor response matching\n(length varies by SID)
 
-        UDS -> DoIP: ServicePayload\n[tester_addr, ecu_addr, data]
-        DoIP -> ECU: Diagnostic Message (0x8001)
-        ECU --> DoIP: Diagnostic Message ACK
+        UDS -> Transport: ServicePayload\n[tester_addr, ecu_addr, data]
+        Transport -> ECU: Transport request
 
         == Response Matching ==
-        ECU --> DoIP: UDS response
-        DoIP --> UDS: Response data
+        ECU --> Transport: UDS response
+        Transport --> UDS: TransportResponse
 
         alt Positive response (SID + 0x40 + echoed prefix)
             UDS -> UDS: Prefix match confirmed
@@ -303,10 +307,10 @@ NRC Handling
 
     **Dual-Loop Architecture**
 
-    - **Outer loop** (``'send``): Transmits the UDS request to the DoIP layer. On NRC 0x21
+    - **Outer loop** (``'send``): Transmits the UDS request to the selected transport. On NRC 0x21
       (Busy, Repeat Request) or NRC 0x94 (Temporarily Not Available), control returns to
       this loop after a configured delay, causing the request to be retransmitted.
-    - **Inner loop** (``'read_uds_messages``): Waits for responses from the DoIP layer. On
+    - **Inner loop** (``'read_uds_messages``): Waits for responses from the selected transport. On
       NRC 0x78 (Response Pending), the timeout is extended and the loop continues waiting
       without retransmission.
 
@@ -340,14 +344,107 @@ NRC Handling
     - **Continue until timeout (1)**: Retry until ``CP_RC94CompletionTimeout``.
     - **Continue unlimited (2)**: Retry indefinitely.
 
-    **NRC Classification at Transport Layer**
+    **NRC Classification**
 
-    NRC 0x78, 0x21, and 0x94 are parsed at the DoIP transport layer and delivered to the
-    UDS application layer as typed response variants (``ResponsePending``,
-    ``BusyRepeatRequest``, ``TemporarilyNotAvailable``) rather than raw messages. This
-    allows the UDS layer to apply the appropriate handling logic (retry, wait, or report)
-    based on the NRC type and configured policy. All other NRCs are delivered as standard
-    negative responses for SID-based matching.
+    NRC 0x78, 0x21, and 0x94 are classified at the transport boundary by the shared
+    ``pending_nrc_from_raw()`` function. Both CAN and DoIP transports call this function
+    before forwarding a response, classifying the three pending-lifecycle codes into typed
+    ``TransportResponse::Pending(PendingNrc)`` variants
+    (``ResponsePending``, ``BusyRepeatRequest``, ``TemporarilyNotAvailable``). This
+    guarantees identical classification behaviour regardless of the underlying transport.
+    All other NRCs are delivered as ``TransportResponse::UdsResponse(ServicePayload)``
+    for standard SID-based matching at the UDS service layer.
+
+    .. uml::
+        :caption: NRC Data Flow -- End-to-End Classification Pipeline
+
+        @startuml
+        skinparam backgroundColor #FFFFFF
+        skinparam componentStyle rectangle
+
+        title "UDS NRC Classification Pipeline"
+
+        package "Transport Layer" {
+          [DoIP TCP Reader\n(try_read)] as DoipRead
+          [CAN ISO-TP Reader\n(exchange.read_response)] as CanRead
+        }
+
+        package "Receiver / Per-ECU Routing" {
+          [DoIP connection_receiver\nBypass TesterPresent NRCs\nRoute by source_address] as DoipRecv
+          [CAN Gateway\nExtend ISO-TP deadline\non pending NRC] as CanGw
+        }
+
+        package "Shared UDS Boundary\ncda-interfaces/src/uds.rs" {
+          (pending_nrc_from_raw) as PendingCheck
+          (uds_response_from_raw) as FinalWrap
+        }
+
+        package "TransportResponse\necugateway.rs" {
+          [TransportResponse::Pending\n{PendingNrc}] as PendingResp
+          [TransportResponse::UdsResponse\n{ServicePayload}] as FinalResp
+        }
+
+        package "UDS Transport Layer\ncda-comm-uds/src/transport.rs" {
+          [send_with_raw_payload\n'read_uds_messages loop] as UdsTransport
+        }
+
+        package "UDS Service Layer\ncda-core" {
+          [convert_from_uds()\nMap raw bytes to\nDiagServiceResponse] as Convert
+          [as_nrc()\nExtract NRC code +\ndescription + SID] as AsNrc
+          [extract_nrc_from_raw_data()\nFallback for unmapped\nnegative responses] as ExtractNrc
+        }
+
+        DoipRead --> DoipRecv : DiagnosticResponse::Msg
+        CanRead --> CanGw : Raw UDS bytes
+
+        DoipRecv --> PendingCheck : data, source_address
+        CanGw --> PendingCheck : data, source_address
+
+        PendingCheck --> PendingResp : [YES] 0x78 / 0x21 / 0x94
+        PendingCheck --> FinalWrap : [NO]
+
+        FinalWrap --> FinalResp : ServicePayload
+
+        PendingResp --> UdsTransport : Retry or extend wait
+
+        FinalResp --> UdsTransport : Final response
+
+        UdsTransport --> Convert : Ok(ServicePayload)
+        Convert --> AsNrc : DiagServiceResponse.as_nrc()
+        Convert --> ExtractNrc : Fallback when\nno mapped response data
+
+        note bottom of DoipRecv
+            TesterPresent NRCs (7F 3E xx)
+            are intercepted in connections.rs
+            before any per-ECU routing.
+        end note
+
+        note bottom of CanGw
+            CAN extends the ISO-TP
+            socket deadline when a
+            pending NRC arrives, then
+            forwards to the same
+            classification function.
+        end note
+
+        note bottom of PendingResp
+            0x78 ResponsePending:
+              extend timeout (CP_P6Star)
+              keep waiting in inner loop
+            0x21 BusyRepeatRequest:
+              sleep CP_RC21RequestTime
+              retransmit via outer loop
+            0x94 TemporarilyNotAvailable:
+              sleep CP_RC94RequestTime
+              retransmit via outer loop
+        end note
+
+        note bottom of FinalResp
+            Carries all non-pending responses:
+            - Positive responses (SID | 0x40)
+            - Non-pending NRCs (0x22, 0x31, 0x33, ...)
+        end note
+        @enduml
 
     **Policy Validation**
 
@@ -363,46 +460,119 @@ NRC Handling
         skinparam sequenceArrowThickness 2
 
         participant "CDA\n(UDS Layer)" as UDS
-        participant "DoIP\nTransport" as DoIP
+        participant "Transport\n(DoIP or CAN)" as Transport
         participant "ECU" as ECU
 
         == Outer Loop ('send): Transmit Request ==
-        UDS -> DoIP: UDS request
-        DoIP -> ECU: Diagnostic Message
+        UDS -> Transport: UDS request
+        Transport -> ECU: Transport request
 
         == Inner Loop ('read_uds_messages): Await Response ==
 
         alt NRC 0x78 (Response Pending)
-            ECU --> DoIP: NRC 0x78
-            DoIP --> UDS: ResponsePending
+            ECU --> Transport: NRC 0x78
+            Transport --> UDS: ResponsePending
             note right of UDS: Switch timeout to CP_P6Star\nValidate CP_RC78Handling policy\nStay in inner loop (no retransmit)
-            ECU --> DoIP: Final response
-            DoIP --> UDS: UDS response
+            ECU --> Transport: Final response
+            Transport --> UDS: UDS response
 
         else NRC 0x21 (Busy, Repeat Request)
-            ECU --> DoIP: NRC 0x21
-            DoIP --> UDS: BusyRepeatRequest
+            ECU --> Transport: NRC 0x21
+            Transport --> UDS: BusyRepeatRequest
             note right of UDS: Validate CP_RC21Handling policy\nWait CP_RC21RequestTime
             UDS -> UDS: Break to outer loop\n(retransmit request)
-            UDS -> DoIP: UDS request (retransmit)
-            DoIP -> ECU: Diagnostic Message
-            ECU --> DoIP: Final response
-            DoIP --> UDS: UDS response
+            UDS -> Transport: UDS request (retransmit)
+            Transport -> ECU: Transport request
+            ECU --> Transport: Final response
+            Transport --> UDS: UDS response
 
         else NRC 0x94 (Temporarily Not Available)
-            ECU --> DoIP: NRC 0x94
-            DoIP --> UDS: TemporarilyNotAvailable
+            ECU --> Transport: NRC 0x94
+            Transport --> UDS: TemporarilyNotAvailable
             note right of UDS: Validate CP_RC94Handling policy\nWait CP_RC94RequestTime
             UDS -> UDS: Break to outer loop\n(retransmit request)
-            UDS -> DoIP: UDS request (retransmit)
-            DoIP -> ECU: Diagnostic Message
-            ECU --> DoIP: Final response
-            DoIP --> UDS: UDS response
+            UDS -> Transport: UDS request (retransmit)
+            Transport -> ECU: Transport request
+            ECU --> Transport: Final response
+            Transport --> UDS: UDS response
 
         else Direct Response
-            ECU --> DoIP: UDS response
-            DoIP --> UDS: UDS response
+            ECU --> Transport: UDS response
+            Transport --> UDS: UDS response
             note right of UDS: Within CP_P6Max
+        end
+        @enduml
+
+    The following diagram shows the complete lifecycle of a UDS response byte
+    from the ECU, through the transport classification, through the UDS retry
+    logic, and finally to the service-layer NRC interpretation:
+
+    .. uml::
+        :caption: Complete NRC Response Lifecycle
+
+        @startuml
+        skinparam backgroundColor #FFFFFF
+        skinparam sequenceArrowThickness 2
+
+        participant "ECU" as ECU
+        participant "Transport\n(DoIP / CAN)" as Transport
+        participant "Classification\npending_nrc_from_raw()" as Classify
+        participant "UDS Transport\nsend_with_raw_payload()" as UdsTx
+        participant "UDS Service\nconvert_from_uds()" as UdsSvc
+
+        == ECU sends raw UDS response ==
+        ECU -> Transport: Raw bytes\n[0x7F, SID, NRC]
+
+        == Transport classification ==
+        Transport -> Classify: data, source_address
+
+        alt Pending NRC (0x78 / 0x21 / 0x94)
+            Classify -> Transport: TransportResponse::Pending(PendingNrc)
+            Transport -> UdsTx: PendingNrc
+
+            group Dual-Loop NRC Handling
+                alt 0x78 (ResponsePending)
+                    UdsTx -> UdsTx: Switch timeout to CP_P6Star
+                    note right: Stay in inner loop,\nwait for final response
+                    UdsTx -> Transport: Continue reading
+                    Transport -> ECU: (no retransmit)
+                    ECU -> Transport: Final response
+                    Transport -> UdsTx: TransportResponse::UdsResponse
+
+                else 0x21 (BusyRepeatRequest)
+                    UdsTx -> UdsTx: Validate CP_RC21Handling
+                    note right: Sleep CP_RC21RequestTime,\nthen retransmit
+                    UdsTx -> Transport: Retransmit request
+                    Transport -> ECU: Diagnostic Message
+                    ECU -> Transport: Final response
+                    Transport -> UdsTx: TransportResponse::UdsResponse
+
+                else 0x94 (TemporarilyNotAvailable)
+                    UdsTx -> UdsTx: Validate CP_RC94Handling
+                    note right: Sleep CP_RC94RequestTime,\nthen retransmit
+                    UdsTx -> Transport: Retransmit request
+                    Transport -> ECU: Diagnostic Message
+                    ECU -> Transport: Final response
+                    Transport -> UdsTx: TransportResponse::UdsResponse
+                end
+            end
+
+        else Non-pending NRC or positive response
+            Classify -> Transport: TransportResponse::UdsResponse(ServicePayload)
+            Transport -> UdsTx: ServicePayload {data, addresses}
+            note right: Direct final response,\nno retry needed
+        end
+
+        == UDS Service Layer Interpretation ==
+        UdsTx -> UdsSvc: Ok(ServicePayload)
+
+        alt Positive response
+            UdsSvc -> UdsSvc: Match by SID + 0x40
+            UdsSvc --> Caller: Decoded response
+        else Negative response (NRC)
+            UdsSvc -> UdsSvc: as_nrc() or\nextract_nrc_from_raw_data()
+            note right: Returns MappedNRC\n{code, description, SID}
+            UdsSvc --> Caller: MappedNRC result
         end
         @enduml
 
@@ -463,8 +633,8 @@ Tester Present
     ``[0x3E, 0x00]``). When ``CP_TesterPresentReqResp`` indicates no response is expected,
     the suppress-positive-response bit (``0x80``) is OR-ed onto the sub-function byte,
     producing ``[0x3E, 0x80]``. In this mode the message is sent with
-    ``expect_response = false``, meaning the CDA waits only for the DoIP-level
-    acknowledgement and does not await a UDS-level response. When a response is expected,
+    ``expect_response = false``, meaning the CDA does not await a UDS-level response.
+    When a response is expected,
     the message is sent as-is and the CDA validates the response against
     ``CP_TesterPresentExpPosResp`` and ``CP_TesterPresentExpNegResp``.
 
@@ -482,12 +652,12 @@ Tester Present
 
     **Error Handling**
 
-    - Tester present NRCs received from the DoIP layer are logged at debug level but do
-      not cause task termination. The tester present task continues sending on the next
+    - Tester present NRCs received from the transport layer are logged at debug level but
+      do not cause task termination. The tester present task continues sending on the next
       interval.
     - Send failures (e.g., connection loss) are handled by the standard UDS send path,
-      which may trigger DoIP connection recovery. The tester present task continues
-      attempting to send on subsequent intervals.
+      which may trigger transport-level connection recovery. The tester present task
+      continues attempting to send on subsequent intervals.
 
     **COM Parameter Usage**
 
@@ -543,7 +713,7 @@ Tester Present
 
         participant "SOVD\nLock Manager" as LM
         participant "CDA\n(UDS Layer)" as UDS
-        participant "DoIP\nTransport" as DoIP
+        participant "Transport\n(DoIP / CAN)" as Transport
         participant "ECU" as ECU
 
         LM -> UDS: acquire component lock (ECU)
@@ -554,10 +724,10 @@ Tester Present
         activate UDS #LightBlue
 
         loop Every CP_TesterPresentTime
-            UDS -> DoIP: [0x3E, 0x00] to ECU\nphysical address
-            DoIP -> ECU: Tester Present
-            ECU --> DoIP: [0x7E, 0x00]
-            DoIP --> UDS: Tester Present Response
+            UDS -> Transport: [0x3E, 0x00] to ECU\nphysical address
+            Transport -> ECU: Tester Present
+            ECU --> Transport: [0x7E, 0x00]
+            Transport --> UDS: Tester Present Response
         end
 
         note over LM, ECU: This shows the typical flow.\nActual message content, timing, and response\nhandling depend on the CP_TesterPresent*\ncommunication parameters.
@@ -576,7 +746,7 @@ Tester Present
 
         participant "SOVD\nLock Manager" as LM
         participant "CDA\n(UDS Layer)" as UDS
-        participant "DoIP\nTransport" as DoIP
+        participant "Transport\n(DoIP / CAN)" as Transport
         participant "ECU A\n(Gateway)" as ECUA
 
         LM -> UDS: acquire functional group lock
@@ -586,9 +756,9 @@ Tester Present
         activate UDS #LightGreen
 
         loop Every CP_TesterPresentTime
-            UDS -> DoIP: [0x3E, 0x80] to ECU A\nfunctional address
-            DoIP -> ECUA: Tester Present
-            ECUA --> DoIP: ACK
+            UDS -> Transport: [0x3E, 0x80] to ECU A\nfunctional address
+            Transport -> ECUA: Tester Present
+            ECUA --> Transport: ACK
         end
 
         LM -> UDS: release functional group lock
@@ -628,7 +798,7 @@ Functional Communication
       the corresponding gateway.
 
     Each gateway group produces one diagnostic request targeted at the gateway's functional
-    address (``CP_DoIPLogicalFunctionalAddress``).
+    address (e.g., ``CP_DoIPLogicalFunctionalAddress`` for DoIP gateways).
 
     **Parallel Gateway Communication**
 
@@ -637,12 +807,12 @@ Functional Communication
 
     1. Construct a ``ServicePayload`` with the gateway's tester address as source and the
        functional address as target.
-    2. Send the diagnostic message once to the gateway via the DoIP transport layer.
+    2. Send the diagnostic message once to the gateway via the transport layer.
     3. Wait for responses from all expected ECUs behind the gateway, in parallel.
 
     **Response Collection**
 
-    After the gateway accepts the functional request (DoIP ACK), the DoIP transport layer
+    After the gateway forwards the functional request, the transport layer
     demultiplexes incoming responses by source address. Each ECU behind the gateway has its
     own receive channel, allowing responses to be collected concurrently. ECUs that do not
     respond within ``CP_P6Max`` are reported as individual timeout errors.
@@ -662,10 +832,10 @@ Functional Communication
 
         participant "Caller" as Caller
         participant "CDA\n(UDS Layer)" as UDS
-        participant "DoIP Transport\n(Gateway 1)" as GW1
+        participant "Transport\n(DoIP Gateway 1)" as GW1
         participant "ECU A\n(behind GW1)" as ECUA
         participant "ECU B\n(behind GW1)" as ECUB
-        participant "DoIP Transport\n(Gateway 2)" as GW2
+        participant "Transport\n(DoIP Gateway 2)" as GW2
         participant "ECU C\n(behind GW2)" as ECUC
 
         == Resolve Functional Group ==

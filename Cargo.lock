@@ -382,6 +382,7 @@ version = "0.1.0"
 dependencies = [
  "async-trait",
  "cda-interfaces",
+ "cda-transport-orchestrator",
  "hex",
  "schemars",
  "serde",
@@ -578,6 +579,7 @@ dependencies = [
  "axum-extra",
  "bytes",
  "cda-build",
+ "cda-comm-doip",
  "cda-interfaces",
  "cda-plugin-security",
  "chrono",
@@ -639,6 +641,15 @@ dependencies = [
  "tracing-dlt",
  "tracing-opentelemetry",
  "tracing-subscriber",
+]
+
+[[package]]
+name = "cda-transport-orchestrator"
+version = "0.1.0"
+dependencies = [
+ "cda-interfaces",
+ "tokio",
+ "tracing",
 ]
 
 [[package]]
@@ -2433,6 +2444,7 @@ dependencies = [
  "cda-sovd",
  "cda-storage",
  "cda-tracing",
+ "cda-transport-orchestrator",
  "chrono",
  "clap",
  "figment",

@@ -13,4 +13,5 @@ Communication
 =============
 
 .. include:: /03_architecture/03_communication/01_doip_communication.rst
-.. include:: /03_architecture/03_communication/02_uds_communication.rst
+.. include:: /03_architecture/03_communication/02_can_communication.rst
+.. include:: /03_architecture/03_communication/03_uds_communication.rst

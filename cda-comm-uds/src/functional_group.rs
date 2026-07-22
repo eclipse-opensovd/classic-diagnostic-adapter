@@ -16,8 +16,7 @@ use std::{sync::Arc, time::Duration};
 use async_trait::async_trait;
 use cda_interfaces::{
     DiagComm, DiagServiceError, DynamicPlugin, EcuGateway, EcuManager, HashMap, HashMapExtensions,
-    PayloadDecoder, ServicePayload, TransmissionParameters, UdsFunctionalGroup, UdsResponse,
-    UdsTransport,
+    PayloadDecoder, ServicePayload, TransmissionParameters, UdsFunctionalGroup, UdsTransport,
     datatypes::{ComponentDataInfo, ComponentOperationsInfo, RoutineSubfunctions},
     diagservices::{DiagServiceResponse, DiagServiceResponseType, UdsPayloadData},
     dlt_ctx,
@@ -74,7 +73,7 @@ impl<S: EcuGateway, T: EcuManager> UdsManager<S, T> {
                 };
                 for (ecu_name, uds_result) in uds_responses {
                     match uds_result {
-                        Ok(UdsResponse::Message(msg)) => {
+                        Ok(msg) => {
                             // Process the response using the ECU's convert_from_uds
                             let ecu_read = fgl_ecu.read().await;
                             let response = ecu_read
@@ -86,16 +85,6 @@ impl<S: EcuGateway, T: EcuManager> UdsManager<S, T> {
                                 )
                                 .await;
                             result_map.insert(ecu_name, response);
-                        }
-                        Ok(_) => {
-                            // Other UDS response types shouldn't occur in functional communication
-                            result_map.insert(
-                                ecu_name,
-                                Err(DiagServiceError::UnexpectedResponse(Some(
-                                    "Unexpected UDS response type in functional communication"
-                                        .to_string(),
-                                ))),
-                            );
                         }
                         Err(e) => {
                             result_map.insert(ecu_name, Err(e));
