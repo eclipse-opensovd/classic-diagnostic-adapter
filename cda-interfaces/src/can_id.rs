@@ -83,7 +83,7 @@ impl TryFrom<u32> for CanId {
 
 impl fmt::Display for CanId {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "0x{:03X}", self.raw())
+        write!(f, "{:#05X}", self.raw())
     }
 }
 
