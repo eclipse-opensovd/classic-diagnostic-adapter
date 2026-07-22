@@ -246,6 +246,9 @@ fn test_can_config(transport_overrides: Vec<TransportOverride>) -> CanConfig {
         transport_overrides,
         response_timeout_ms: 2000,
         probe_timeout_ms: 500,
+        // The suites ran with the keep-alive since its introduction; keep
+        // it on (the default is off for resident operation).
+        keepalive_interval_ms: 2000,
         ..CanConfig::default()
     }
 }

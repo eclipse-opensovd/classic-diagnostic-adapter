@@ -42,12 +42,12 @@ interface = "vxcan0"
 # Response timeout in milliseconds (default: 5000ms)
 response_timeout_ms = 2000
 
-# Functional-broadcast TesterPresent keep-alive interval in milliseconds;
-# 0 disables the broadcast (default: 2000ms). Keep the default for an
-# external tester (holds ECUs awake for the session); set 0 for a resident
-# on-board CDA so network management can put ECUs to sleep (rediscovery
-# picks them up once the vehicle wakes them).
-# keepalive_interval_ms = 2000
+# Functional-broadcast TesterPresent keep-alive interval in milliseconds.
+# The default (0) disables the broadcast for resident on-board operation.
+# This file is the external-tester example, so it enables the keep-alive:
+# it holds ECUs awake for the diagnostic session, making discovery work
+# even on a quiet bus.
+keepalive_interval_ms = 2000
 
 # Probe timeout in milliseconds for ECU discovery (default: 100ms)
 probe_timeout_ms = 100

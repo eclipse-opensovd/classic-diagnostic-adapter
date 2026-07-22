@@ -69,10 +69,10 @@ pub struct CanConfig {
     pub probe_retry_delay_ms: u64,
 
     /// Interval of the functional-broadcast `TesterPresent` keep-alive in
-    /// milliseconds; `0` disables it (like `doip.alive_check_interval_secs`).
-    /// The default suits an external tester (holds ECUs awake for the
-    /// session); a resident on-board CDA disables it so network management
-    /// can put ECUs to sleep - rediscovery picks them up on wake.
+    /// milliseconds; `0` (the default) disables it, keeping a resident
+    /// on-board CDA from interfering with network management - sleeping
+    /// ECUs are recovered by rediscovery on wake. External testers should
+    /// set an interval (e.g. 2000) to hold ECUs awake for the session.
     /// See `response_timeout_ms` for why the serde default is needed.
     #[serde(default = "default_keepalive_interval_ms")]
     pub keepalive_interval_ms: u64,
@@ -179,7 +179,7 @@ impl Default for CanConfig {
             probe_timeout_ms: 100,
             probe_retries: 0,
             probe_retry_delay_ms: 100,
-            keepalive_interval_ms: 2000,
+            keepalive_interval_ms: 0,
             default_probes: true,
             probe_fallbacks: Vec::new(),
         }
