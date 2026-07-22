@@ -14,8 +14,8 @@
 use std::{future::Future, sync::Arc, time::Duration};
 
 use cda_interfaces::{
-    DiagServiceError, DoipComParams, DoipGatewaySetupError, EcuAddresses, EcuConnectivityHandler,
-    HashMap, HashMapExtensions, dlt_ctx,
+    DiagServiceError, DoipComParams, EcuAddresses, EcuConnectivityHandler, HashMap,
+    HashMapExtensions, dlt_ctx,
 };
 use doip_definitions::{
     header::PayloadType,
@@ -25,7 +25,7 @@ use tokio::sync::{Mutex, RwLock, mpsc};
 use tokio_util::sync::CancellationToken;
 
 use crate::{
-    DiscoveredGateway, DoipGatewayState, DoipTransportConfig,
+    DiscoveredGateway, DoipGatewaySetupError, DoipGatewayState, DoipTransportConfig,
     connections::{GatewayState, handle_gateway_connection},
     socket::DoIPUdpSocket,
 };

@@ -27,8 +27,9 @@ mod rediscovery;
 use std::{sync::Arc, time::Duration};
 
 use cda_interfaces::{
-    CanComParamProvider, CanId, DiagServiceError, EcuAddresses, EcuGateway, HashMap,
-    ServicePayload, TransmissionParameters, UdsResponse, dlt_ctx,
+    CanComParamProvider, CanId, DiagServiceError, EcuAddresses, EcuCanGateway, EcuGateway, HashMap,
+    ServicePayload, TransmissionParameters, TransportResponse, dlt_ctx, pending_nrc_from_raw,
+    uds_response_from_raw,
 };
 use tokio::sync::{RwLock, mpsc};
 
@@ -39,8 +40,6 @@ use self::{
     probe::ProbeRequest,
 };
 use crate::config::CanConfig;
-
-const NRC_RESPONSE_PENDING: u8 = 0x78;
 
 /// The instant `timeout` from now, saturating instead of panicking on the
 /// (theoretical) overflow of the underlying monotonic clock.
@@ -374,7 +373,7 @@ impl CanDiagGateway {
         for pinned in config
             .transport_overrides
             .iter()
-            .filter(|o| o.transport == crate::multi_transport::TransportType::Can)
+            .filter(|o| o.transport == cda_interfaces::TransportType::Can)
         {
             let ecu_name = pinned.ecu_name.to_lowercase();
             if connections.contains_key(&ecu_name) {
@@ -459,20 +458,34 @@ impl CanDiagGateway {
             .unwrap_or(0)
     }
 
-    /// Checks if a specific ECU was discovered (responded to probe).
-    pub(crate) async fn is_ecu_discovered_by_name(&self, ecu_name: &str) -> bool {
-        self.discovered_ecus.read().await.contains(ecu_name)
-    }
-
-    /// Returns whether this gateway has CAN addressing for the ECU
-    /// (regardless of whether the ECU answered a probe yet).
-    pub(crate) fn knows_ecu(&self, ecu_name: &str) -> bool {
-        self.connections.contains_key(ecu_name)
-    }
-
     /// Gets a connection for the given ECU name.
     fn get_connection(&self, ecu_name: &str) -> Option<Arc<CanEcuConnection>> {
         self.connections.get(ecu_name).cloned()
+    }
+}
+
+impl EcuCanGateway for CanDiagGateway {
+    async fn is_ecu_discovered_by_name(&self, ecu_name: &str) -> bool {
+        self.discovered_ecus.read().await.contains(ecu_name)
+    }
+
+    fn knows_ecu(&self, ecu_name: &str) -> bool {
+        self.connections.contains_key(ecu_name)
+    }
+
+    async fn probe_ecu(&self, ecu_name: &str) -> bool {
+        let ecu_name = ecu_name.to_lowercase();
+        let Some(conn) = self.connections.get(&ecu_name).cloned() else {
+            return false;
+        };
+        let logical_addr = self.logical_address_for_ecu(&ecu_name);
+        if self.probe_connection(&conn, logical_addr).await.is_ok() {
+            self.discovered_ecus.write().await.insert(ecu_name);
+            true
+        } else {
+            self.discovered_ecus.write().await.remove(&ecu_name);
+            false
+        }
     }
 }
 
@@ -509,7 +522,7 @@ impl EcuGateway for CanDiagGateway {
         &self,
         transmission_params: TransmissionParameters,
         message: ServicePayload,
-        response_sender: mpsc::Sender<Result<Option<UdsResponse>, DiagServiceError>>,
+        response_sender: mpsc::Sender<Result<Option<TransportResponse>, DiagServiceError>>,
         expect_uds_reply: bool,
     ) -> Result<(), DiagServiceError> {
         let ecu_name = transmission_params.ecu_name.to_lowercase();
@@ -604,18 +617,15 @@ impl EcuGateway for CanDiagGateway {
                     match response {
                         Ok(data) => {
                             received_any_frame = true;
-                            let is_negative = data.first()
-                                == Some(&cda_interfaces::service_ids::NEGATIVE_RESPONSE);
-                            if is_negative
-                                && data.len() >= 3
-                                && data.get(2) == Some(&NRC_RESPONSE_PENDING)
-                            {
-                                // NRC 0x78 (Response Pending): typed so the
-                                // UDS layer applies its completion policy;
-                                // the next response arrives on this socket.
+
+                            // Check for pending NRCs before SID-filtering: the
+                            // ISO-TP socket must stay open for a follow-up
+                            // response, so we extend the deadline when needed.
+                            // pending_nrc_from_raw covers 0x78, 0x21, and 0x94.
+                            if let Some(pending) = pending_nrc_from_raw(&data, source_address) {
                                 deadline = deadline_in(response_timeout);
                                 if response_sender
-                                    .send(Ok(Some(UdsResponse::ResponsePending(source_address))))
+                                    .send(Ok(Some(TransportResponse::Pending(pending))))
                                     .await
                                     .is_err()
                                 {
@@ -623,6 +633,7 @@ impl EcuGateway for CanDiagGateway {
                                 }
                                 continue;
                             }
+
                             if !cda_interfaces::util::uds_response_matches_request_sid(
                                 sent_sid, &data,
                             ) {
@@ -635,15 +646,13 @@ impl EcuGateway for CanDiagGateway {
                                 continue;
                             }
 
-                            // Final response (positive or negative)
-                            let uds_response = UdsResponse::Message(ServicePayload {
-                                data,
-                                source_address,
-                                target_address,
-                                new_session: None,
-                                new_security: None,
-                            });
-                            let _ = response_sender.send(Ok(Some(uds_response))).await;
+                            // Final response - classify via the shared function
+                            // so NRC mapping is identical to the DoIP path.
+                            let uds_response =
+                                uds_response_from_raw(data, source_address, target_address);
+                            let _ = response_sender
+                                .send(Ok(Some(TransportResponse::UdsResponse(uds_response))))
+                                .await;
                             break;
                         }
                         Err(CanError::Timeout) => {
@@ -721,7 +730,7 @@ impl EcuGateway for CanDiagGateway {
         _timeout: std::time::Duration,
         _expect_positive_response: bool,
     ) -> Result<
-        cda_interfaces::HashMap<String, Result<cda_interfaces::UdsResponse, DiagServiceError>>,
+        cda_interfaces::HashMap<String, Result<cda_interfaces::ServicePayload, DiagServiceError>>,
         DiagServiceError,
     > {
         // CAN functional addressing is not implemented yet, see #417.

@@ -37,6 +37,14 @@ pub use schema::*;
 pub mod config;
 pub mod runtime_update_api;
 pub mod storage_api;
+mod transport;
+pub use transport::TransportType;
+pub mod uds;
+pub use uds::{
+    DEFAULT_SUBFUNCTION_MASK, SERVICE_IDS_PARAMETER_META_DATA, SUPPRESS_POSITIVE_RESPONSE_BIT,
+    UDS_ID_RESPONSE_BITMASK, is_negative_response, is_pending_nrc, is_tester_present_nrc, nrc,
+    pending_nrc_from_raw, service_ids, subfunction_ids, uds_response_from_raw,
+};
 
 // Deliberately not using new type pattern here, to make sure all crates that take
 // std::collection::Hash* still work.
@@ -186,83 +194,6 @@ pub struct TesterPresentControlMessage {
     pub interval: Option<Duration>,
 }
 
-pub mod subfunction_ids {
-    pub mod routine {
-        pub const START: u8 = 0x01;
-        pub const STOP: u8 = 0x02;
-        pub const REQUEST_RESULTS: u8 = 0x03;
-    }
-}
-
-pub mod service_ids {
-    pub const SESSION_CONTROL: u8 = 0x10;
-    pub const ECU_RESET: u8 = 0x11;
-    pub const CLEAR_DIAGNOSTIC_INFORMATION: u8 = 0x14;
-    pub const READ_DTC_INFORMATION: u8 = 0x19;
-    /// KWP2000 `ReadDataByLocalIdentifier` (legacy, used by some older ECUs
-    /// that are not fully UDS-compliant)
-    pub const READ_DATA_BY_LOCAL_IDENTIFIER: u8 = 0x21;
-    pub const READ_DATA_BY_IDENTIFIER: u8 = 0x22;
-    pub const SECURITY_ACCESS: u8 = 0x27;
-    pub const COMMUNICATION_CONTROL: u8 = 0x28;
-    pub const AUTHENTICATION: u8 = 0x29;
-    pub const WRITE_DATA_BY_IDENTIFIER: u8 = 0x2E;
-    pub const INPUT_OUTPUT_CONTROL_BY_IDENTIFIER: u8 = 0x2F;
-    pub const ROUTINE_CONTROL: u8 = 0x31;
-    pub const REQUEST_DOWNLOAD: u8 = 0x34;
-    pub const TRANSFER_DATA: u8 = 0x36;
-    pub const REQUEST_TRANSFER_EXIT: u8 = 0x37;
-    pub const TESTER_PRESENT: u8 = 0x3E;
-    pub const CONTROL_DTC_SETTING: u8 = 0x85;
-    pub const NEGATIVE_RESPONSE: u8 = 0x7F;
-}
-
-pub const UDS_ID_RESPONSE_BITMASK: u8 = 0x40;
-
-/// Suppress-positive-response bit (bit 7) of the UDS sub-function byte.
-/// When set, the ECU shall not send a positive response message (ISO 14229-1).
-pub const SUPPRESS_POSITIVE_RESPONSE_BIT: u8 = 0x80;
-
-/// Default bitmask applied to subfunction IDs during service lookups.
-/// Masks out the suppress-positive-response bit (bit 7, `0x80`),
-/// so that for example `0x01` and `0x81` both match the subfunction ID `0x01`.
-pub const DEFAULT_SUBFUNCTION_MASK: u8 = 0x7F;
-
-const CONFIGURATIONS_PREFIXES: [u8; 1] = [service_ids::WRITE_DATA_BY_IDENTIFIER];
-
-const DATA_PREFIXES: [u8; 2] = [
-    service_ids::READ_DATA_BY_LOCAL_IDENTIFIER,
-    service_ids::READ_DATA_BY_IDENTIFIER,
-];
-
-const FAULTS_PREFIXES: [u8; 2] = [
-    service_ids::CLEAR_DIAGNOSTIC_INFORMATION,
-    service_ids::READ_DTC_INFORMATION,
-];
-
-const MODES_PREFIXES: [u8; 6] = [
-    service_ids::SESSION_CONTROL,
-    service_ids::ECU_RESET,
-    service_ids::SECURITY_ACCESS,
-    service_ids::COMMUNICATION_CONTROL,
-    service_ids::AUTHENTICATION,
-    service_ids::CONTROL_DTC_SETTING,
-];
-
-const OPERATIONS_PREFIXES: [u8; 5] = [
-    service_ids::INPUT_OUTPUT_CONTROL_BY_IDENTIFIER,
-    service_ids::ROUTINE_CONTROL,
-    service_ids::REQUEST_DOWNLOAD,
-    service_ids::TRANSFER_DATA,
-    service_ids::REQUEST_TRANSFER_EXIT,
-];
-
-pub const SERVICE_IDS_PARAMETER_META_DATA: [u8; 3] = [
-    service_ids::READ_DATA_BY_IDENTIFIER,
-    service_ids::WRITE_DATA_BY_IDENTIFIER,
-    service_ids::ROUTINE_CONTROL,
-];
-
 impl TesterPresentType {
     #[must_use]
     pub fn is_functional(&self) -> bool {
@@ -285,6 +216,10 @@ impl DiagCommType {
     ///  - `0x14 | 0x19` -> `<entity>/faults`
     ///  - `0x2F | 0x31` -> `<entity>/operations`
     pub fn service_prefixes(&self) -> &'static [u8] {
+        use crate::uds::{
+            CONFIGURATIONS_PREFIXES, DATA_PREFIXES, FAULTS_PREFIXES, MODES_PREFIXES,
+            OPERATIONS_PREFIXES,
+        };
         match self {
             DiagCommType::Configurations => &CONFIGURATIONS_PREFIXES,
             DiagCommType::Data => &DATA_PREFIXES,
@@ -382,30 +317,6 @@ pub enum DiagServiceError {
     InvalidParameter { possible_values: HashSet<String> },
     #[error("Invalid configuration: {0}")]
     InvalidConfiguration(String),
-}
-
-#[derive(Error, Debug)]
-pub enum DoipGatewaySetupError {
-    #[error("Invalid address: `{0}`")]
-    InvalidAddress(String),
-    #[error(
-        "Received an unknown ECU in VAM (Logical Address: {logical_address}, Protocol Version: \
-         {protocol_version}). Likely there is no MDD loaded for this ECU."
-    )]
-    UnknownECU {
-        logical_address: u16,
-        protocol_version: u8,
-    },
-    #[error("Socket error: `{0}`")]
-    SocketCreationFailed(String),
-    #[error("Port error: `{0}`")]
-    PortBindFailed(String),
-    #[error("Configuration error: `{0}`")]
-    InvalidConfiguration(String),
-    #[error("Resource error: `{0}`")]
-    ResourceError(String),
-    #[error("Server error: `{0}`")]
-    ServerError(String),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

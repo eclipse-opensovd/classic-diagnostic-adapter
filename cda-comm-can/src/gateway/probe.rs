@@ -79,7 +79,7 @@ impl CanDiagGateway {
         Ok(probes)
     }
 
-    async fn probe_connection(
+    pub(super) async fn probe_connection(
         &self,
         conn: &CanEcuConnection,
         logical_addr: u16,
@@ -225,30 +225,6 @@ impl CanDiagGateway {
         }
 
         discovered
-    }
-
-    /// Re-probes a specific ECU to check if it's online.
-    ///
-    /// # Arguments
-    /// * `ecu_name` - Name of the ECU to probe
-    ///
-    /// # Returns
-    /// `true` if the ECU responded, `false` otherwise.
-    #[tracing::instrument(skip(self), fields(dlt_context = dlt_ctx!("CAN")))]
-    pub(crate) async fn probe_ecu(&self, ecu_name: &str) -> bool {
-        let ecu_name = ecu_name.to_lowercase();
-        let Some(conn) = self.connections.get(&ecu_name).cloned() else {
-            return false;
-        };
-        let logical_addr = self.logical_address_for_ecu(&ecu_name);
-
-        if self.probe_connection(&conn, logical_addr).await.is_ok() {
-            self.discovered_ecus.write().await.insert(ecu_name);
-            true
-        } else {
-            self.discovered_ecus.write().await.remove(&ecu_name);
-            false
-        }
     }
 }
 

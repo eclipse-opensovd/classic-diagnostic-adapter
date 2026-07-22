@@ -18,9 +18,9 @@ use std::{
 
 use cda_interfaces::{
     Connectivity, DiagComm, DiagServiceError, DynamicPlugin, EcuGateway, EcuManager, EcuState,
-    PayloadDecoder, ServicePayload, TransmissionParameters, UdsResponse, UdsTransport, UdsVariant,
-    VariantDetection, VariantState, datatypes::RetryPolicy, diagservices::UdsPayloadData, dlt_ctx,
-    service_ids,
+    PayloadDecoder, PendingNrc, ServicePayload, TransmissionParameters, TransportResponse,
+    UdsTransport, UdsVariant, VariantDetection, VariantState, datatypes::RetryPolicy,
+    diagservices::UdsPayloadData, dlt_ctx, service_ids,
 };
 use tokio::sync::{RwLock, Semaphore, mpsc};
 
@@ -243,7 +243,7 @@ impl<S: EcuGateway, T: UdsEcuDb + VariantDetection> UdsManager<S, T> {
                 .await
                 {
                     Ok(Some(result)) => match result {
-                        Ok(Some(UdsResponse::Message(msg))) => {
+                        Ok(Some(TransportResponse::UdsResponse(msg))) => {
                             // if we received a response matching our sent SID, return it
                             // other responses are logged as warnings and ignored.
                             if !msg.data.is_empty() && msg.is_response_for_sid(sent_sid) {
@@ -263,57 +263,57 @@ impl<S: EcuGateway, T: UdsEcuDb + VariantDetection> UdsManager<S, T> {
                             }
                             tracing::warn!("Received unexpected UDS message: {:?}", msg);
                         }
-                        Ok(Some(UdsResponse::BusyRepeatRequest(_))) => {
-                            if let Err(e) = validate_timeout_by_policy(
-                                ecu_name,
-                                &uds_params.rc_21_retry_policy,
-                                &start.elapsed(),
-                                &uds_params.rc_21_completion_timeout,
-                            ) {
-                                break 'read_uds_messages Err(e);
+                        Ok(Some(TransportResponse::Pending(pending))) => match pending {
+                            PendingNrc::BusyRepeatRequest { .. } => {
+                                if let Err(e) = validate_timeout_by_policy(
+                                    ecu_name,
+                                    &uds_params.rc_21_retry_policy,
+                                    &start.elapsed(),
+                                    &uds_params.rc_21_completion_timeout,
+                                ) {
+                                    break 'read_uds_messages Err(e);
+                                }
+                                let sleep_time = uds_params.rc_21_repeat_request_time;
+                                tracing::debug!(
+                                    sleep_time = ?sleep_time,
+                                    "BusyRepeatRequest received, resending after delay"
+                                );
+                                cda_interfaces::util::tokio_ext::sleep_for(sleep_time).await;
+                                continue 'send; // continue 'send, will resend the message
                             }
-
-                            let sleep_time = uds_params.rc_21_repeat_request_time;
-                            tracing::debug!(
-                                sleep_time = ?sleep_time,
-                                "BusyRepeatRequest received, resending after delay"
-                            );
-                            cda_interfaces::util::tokio_ext::sleep_for(sleep_time).await;
-                            continue 'send; // continue 'send, will resend the message
-                        }
-                        Ok(Some(UdsResponse::TemporarilyNotAvailable(_))) => {
-                            if let Err(e) = validate_timeout_by_policy(
-                                ecu_name,
-                                &uds_params.rc_94_retry_policy,
-                                &start.elapsed(),
-                                &uds_params.rc_94_completion_timeout,
-                            ) {
-                                break 'read_uds_messages Err(e);
+                            PendingNrc::TemporarilyNotAvailable { .. } => {
+                                if let Err(e) = validate_timeout_by_policy(
+                                    ecu_name,
+                                    &uds_params.rc_94_retry_policy,
+                                    &start.elapsed(),
+                                    &uds_params.rc_94_completion_timeout,
+                                ) {
+                                    break 'read_uds_messages Err(e);
+                                }
+                                let sleep_time = uds_params.rc_94_repeat_request_time;
+                                tracing::debug!(
+                                    sleep_time = ?sleep_time,
+                                    "TemporarilyNotAvailable received, resending after delay"
+                                );
+                                cda_interfaces::util::tokio_ext::sleep_for(sleep_time).await;
+                                continue 'send; // continue 'send, will resend the message
                             }
-
-                            let sleep_time = uds_params.rc_94_repeat_request_time;
-                            tracing::debug!(
-                                sleep_time = ?sleep_time,
-                                "TemporarilyNotAvailable received, resending after delay"
-                            );
-                            cda_interfaces::util::tokio_ext::sleep_for(sleep_time).await;
-                            continue 'send; // continue 'send, will resend the message
-                        }
-                        Ok(Some(UdsResponse::ResponsePending(_))) => {
-                            if let Err(e) = validate_timeout_by_policy(
-                                ecu_name,
-                                &uds_params.rc_78_retry_policy,
-                                &start.elapsed(),
-                                &uds_params.rc_78_completion_timeout,
-                            ) {
-                                break 'read_uds_messages Err(e);
+                            PendingNrc::ResponsePending { .. } => {
+                                if let Err(e) = validate_timeout_by_policy(
+                                    ecu_name,
+                                    &uds_params.rc_78_retry_policy,
+                                    &start.elapsed(),
+                                    &uds_params.rc_78_completion_timeout,
+                                ) {
+                                    break 'read_uds_messages Err(e);
+                                }
+                                tracing::debug!(
+                                    "ResponsePending received, continue waiting for final response"
+                                );
+                                rx_timeout_next = Some(uds_params.rc_78_timeout);
+                                continue 'read_uds_messages; // continue reading UDS frames
                             }
-                            tracing::debug!(
-                                "ResponsePending received, continue waiting for final response"
-                            );
-                            rx_timeout_next = Some(uds_params.rc_78_timeout);
-                            continue 'read_uds_messages; // continue reading UDS frames
-                        }
+                        },
                         Ok(response) => {
                             break 'read_uds_messages Err(DiagServiceError::UnexpectedResponse(
                                 Some(format!("Unexpected response received: {response:?}")),
@@ -696,8 +696,8 @@ mod send_tests {
 
     use cda_interfaces::{
         DiagServiceError, EcuAddresses, EcuGateway, EcuRuntimeState, EcuStateManager, HashMap,
-        HashMapExtensions, ServicePayload, TransmissionParameters, UdsResponse, VariantDetection,
-        datatypes::FaultConfig,
+        HashMapExtensions, PendingNrc, ServicePayload, TransmissionParameters, TransportResponse,
+        VariantDetection, datatypes::FaultConfig,
     };
     use tokio::sync::{RwLock, mpsc};
 
@@ -744,7 +744,7 @@ mod send_tests {
     }
 
     type TestGatewaySendFn = dyn Fn(
-            mpsc::Sender<Result<Option<UdsResponse>, DiagServiceError>>,
+            mpsc::Sender<Result<Option<TransportResponse>, DiagServiceError>>,
             bool,
         ) -> Result<(), DiagServiceError>
         + Send
@@ -761,7 +761,7 @@ mod send_tests {
             &self,
             _transmission_params: TransmissionParameters,
             _message: ServicePayload,
-            response_sender: mpsc::Sender<Result<Option<UdsResponse>, DiagServiceError>>,
+            response_sender: mpsc::Sender<Result<Option<TransportResponse>, DiagServiceError>>,
             expect_uds_reply: bool,
         ) -> impl Future<Output = Result<(), DiagServiceError>> + Send {
             let result = (self.send_fn)(response_sender, expect_uds_reply);
@@ -783,7 +783,7 @@ mod send_tests {
             _expected_ecu_logical_addrs: HashMap<u16, String>,
             _timeout: Duration,
             _expect_positive_response: bool,
-        ) -> Result<HashMap<String, Result<UdsResponse, DiagServiceError>>, DiagServiceError>
+        ) -> Result<HashMap<String, Result<ServicePayload, DiagServiceError>>, DiagServiceError>
         {
             Ok(HashMap::new())
         }
@@ -829,7 +829,7 @@ mod send_tests {
     fn make_gateway() -> TestGateway {
         TestGateway {
             send_fn: Arc::new(|response_tx, _| {
-                let msg = UdsResponse::Message(ServicePayload {
+                let msg = TransportResponse::UdsResponse(ServicePayload {
                     data: vec![0x50, 0x01],
                     source_address: 0x0001,
                     target_address: 0x0E00,
@@ -976,10 +976,14 @@ mod send_tests {
                 let count = call_count_clone.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
                 if count == 0 {
                     response_tx
-                        .try_send(Ok(Some(UdsResponse::BusyRepeatRequest(0x0001))))
+                        .try_send(Ok(Some(TransportResponse::Pending(
+                            PendingNrc::BusyRepeatRequest {
+                                source_address: 0x0001,
+                            },
+                        ))))
                         .ok();
                 } else {
-                    let msg = UdsResponse::Message(ServicePayload {
+                    let msg = TransportResponse::UdsResponse(ServicePayload {
                         data: vec![0x50, 0x01],
                         source_address: 0x0001,
                         target_address: 0x0E00,
@@ -1015,10 +1019,14 @@ mod send_tests {
                 if count == 0 {
                     // First send ResponsePending, then the actual message
                     response_tx
-                        .try_send(Ok(Some(UdsResponse::ResponsePending(0x0001))))
+                        .try_send(Ok(Some(TransportResponse::Pending(
+                            PendingNrc::ResponsePending {
+                                source_address: 0x0001,
+                            },
+                        ))))
                         .ok();
                     response_tx
-                        .try_send(Ok(Some(UdsResponse::Message(ServicePayload {
+                        .try_send(Ok(Some(TransportResponse::UdsResponse(ServicePayload {
                             data: vec![0x50, 0x01],
                             source_address: 0x0001,
                             target_address: 0x0E00,
@@ -1052,10 +1060,14 @@ mod send_tests {
                 let count = call_count_clone.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
                 if count == 0 {
                     response_tx
-                        .try_send(Ok(Some(UdsResponse::TemporarilyNotAvailable(0x0001))))
+                        .try_send(Ok(Some(TransportResponse::Pending(
+                            PendingNrc::TemporarilyNotAvailable {
+                                source_address: 0x0001,
+                            },
+                        ))))
                         .ok();
                 } else {
-                    let msg = UdsResponse::Message(ServicePayload {
+                    let msg = TransportResponse::UdsResponse(ServicePayload {
                         data: vec![0x50, 0x01],
                         source_address: 0x0001,
                         target_address: 0x0E00,
@@ -1084,7 +1096,7 @@ mod send_tests {
         let gateway = TestGateway {
             send_fn: Arc::new(|response_tx, _| {
                 // NRC 0x7F, SID 0x10, NRC code 0x22 (conditionsNotCorrect)
-                let msg = UdsResponse::Message(ServicePayload {
+                let msg = TransportResponse::UdsResponse(ServicePayload {
                     data: vec![0x7F, 0x10, 0x22],
                     source_address: 0x0001,
                     target_address: 0x0E00,
@@ -1125,7 +1137,7 @@ mod send_tests {
     async fn test_send_with_raw_payload_sets_session_state_on_positive_response() {
         let gateway = TestGateway {
             send_fn: Arc::new(|response_tx, _| {
-                let msg = UdsResponse::Message(ServicePayload {
+                let msg = TransportResponse::UdsResponse(ServicePayload {
                     data: vec![0x50, 0x03],
                     source_address: 0x0001,
                     target_address: 0x0E00,
@@ -1203,7 +1215,7 @@ mod send_tests {
             send_fn: Arc::new(|response_tx, _| {
                 // First: a message with correct SID response but wrong DID (echo bytes)
                 // ReadDataByIdentifier (0x22) response SID is 0x62
-                let wrong_did = UdsResponse::Message(ServicePayload {
+                let wrong_did = TransportResponse::UdsResponse(ServicePayload {
                     data: vec![0x62, 0xF2, 0x00, 0xAA],
                     source_address: 0x0001,
                     target_address: 0x0E00,
@@ -1212,7 +1224,7 @@ mod send_tests {
                 });
                 response_tx.try_send(Ok(Some(wrong_did))).ok();
                 // Then: the correct response with matching DID
-                let correct = UdsResponse::Message(ServicePayload {
+                let correct = TransportResponse::UdsResponse(ServicePayload {
                     data: vec![0x62, 0xF1, 0x90, 0xBB],
                     source_address: 0x0001,
                     target_address: 0x0E00,

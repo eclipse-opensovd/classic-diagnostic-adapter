@@ -19,12 +19,10 @@
 // between crates (e.g. integration-tests vs. opensovd_cda_lib under
 // `--all-features`). A `[can]` section in a non-`can` build is rejected with
 // an actionable error in `Configuration::validate_sanity` instead.
-pub use cda_comm_can::{
-    TransportType,
-    config::{CanConfig, CanEcuMapping, TransportOverride},
-};
+pub use cda_comm_can::config::{CanConfig, CanEcuMapping, TransportOverride};
 pub use cda_comm_doip::config::DoipConfig;
 pub use cda_database::DatabaseConfig;
+pub use cda_interfaces::TransportType;
 use cda_interfaces::{
     FunctionalDescriptionConfig, HashMap,
     config::{ConfigSanity, ConfigSanityError},
@@ -273,8 +271,8 @@ impl Configuration {
                 // A pin to CAN is validated at gateway setup, not here: the
                 // ECU may get its CAN addressing from the MDD com-params,
                 // which the config layer cannot see.
-                cda_comm_can::TransportType::Can => {}
-                cda_comm_can::TransportType::DoIP => {
+                TransportType::Can => {}
+                TransportType::DoIP => {
                     if !self.doip.enabled {
                         return Err(ConfigSanityError::InvalidValue {
                             field: "can.transport_overrides".to_owned(),

@@ -17,18 +17,40 @@ use tokio::sync::{RwLock, mpsc};
 
 use crate::{DiagServiceError, EcuAddresses, HashMap, ServicePayload};
 
+/// Pending-lifecycle NRC variants that signal the transport must keep its
+/// connection/socket open for a follow-up response.
+///
+/// The transport layer classifies raw bytes into these variants via
+/// [`crate::pending_nrc_from_raw`] and performs its own side effects
+/// (deadline extension, socket keep-alive) before forwarding to the UDS layer.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PendingNrc {
+    /// NRC 0x78 -- ECU needs more time, final response will follow.
+    ResponsePending { source_address: u16 },
+    /// NRC 0x21 -- ECU busy, client should retransmit.
+    BusyRepeatRequest { source_address: u16 },
+    /// NRC 0x94 -- Resource temporarily unavailable, retransmit.
+    TemporarilyNotAvailable { source_address: u16 },
+}
+
+/// Response already classified by the transport, with transport-level
+/// side effects (deadline extension, socket keep-alive) already applied.
+///
+/// The transport guarantees:
+/// - For [`TransportResponse::Pending`]: the underlying connection/socket
+///   remains open and any transport-specific timers have been extended.
+/// - For [`TransportResponse::UdsResponse`]: the exchange is complete from the
+///   transport's perspective. The payload is the raw UDS response bytes
+///   (positive or negative response).
 #[derive(Debug, Clone)]
-pub enum UdsResponse {
-    /// Raw UDS message response, which can be a positive or negative response.
-    Message(ServicePayload),
-    /// NRC 0x78 - Response pending.
-    ResponsePending(u16),
-    /// Tester was replied with NRC
-    TesterPresentNRC(u8),
-    /// NRC 0x21 - Busy repeat request.
-    BusyRepeatRequest(u16),
-    /// NRC 0x94 - Temporarily not available.
-    TemporarilyNotAvailable(u16),
+pub enum TransportResponse {
+    /// A pending-lifecycle NRC. The transport has already extended its own
+    /// deadline / kept its socket open. The UDS layer decides retry policy.
+    Pending(PendingNrc),
+    /// A terminal response. The payload contains the raw UDS response bytes --
+    /// either a positive response or a negative response with an NRC other
+    /// than the three pending-lifecycle codes.
+    UdsResponse(ServicePayload),
 }
 
 /// Parameters for sending a UDS message over the network.
@@ -78,7 +100,7 @@ pub trait EcuGateway: Clone + Send + Sync + 'static {
         &self,
         transmission_params: TransmissionParameters,
         message: ServicePayload,
-        response_sender: mpsc::Sender<Result<Option<UdsResponse>, DiagServiceError>>,
+        response_sender: mpsc::Sender<Result<Option<TransportResponse>, DiagServiceError>>,
         expect_uds_reply: bool,
     ) -> impl Future<Output = Result<(), DiagServiceError>> + Send;
 
@@ -124,7 +146,10 @@ pub trait EcuGateway: Clone + Send + Sync + 'static {
         timeout: Duration,
         expect_positive_response: bool,
     ) -> impl Future<
-        Output = Result<HashMap<String, Result<UdsResponse, DiagServiceError>>, DiagServiceError>,
+        Output = Result<
+            HashMap<String, Result<ServicePayload, DiagServiceError>>,
+            DiagServiceError,
+        >,
     > + Send;
 
     /// Stops the gateway, aborting its background tasks and releasing its
@@ -146,4 +171,22 @@ pub trait EcuGateway: Clone + Send + Sync + 'static {
     ) -> impl Future<Output = Option<String>> + Send {
         std::future::ready(None)
     }
+}
+
+/// Extension trait for CAN-specific gateway operations.
+///
+/// Extends [`EcuGateway`] with the ECU lifecycle-detection hooks the
+/// multi-transport orchestrator needs to route to a CAN transport without
+/// depending on the concrete CAN gateway type.
+pub trait EcuCanGateway: EcuGateway {
+    /// Checks if a specific ECU was discovered (responded to a probe).
+    fn is_ecu_discovered_by_name(&self, ecu_name: &str) -> impl Future<Output = bool> + Send;
+
+    /// Returns whether this gateway has addressing for the ECU
+    /// (regardless of whether the ECU answered a probe yet).
+    fn knows_ecu(&self, ecu_name: &str) -> bool;
+
+    /// Attempts to probe/detect a specific ECU on the bus.
+    /// Returns `true` if the ECU responds to the probe.
+    fn probe_ecu(&self, ecu_name: &str) -> impl Future<Output = bool> + Send;
 }

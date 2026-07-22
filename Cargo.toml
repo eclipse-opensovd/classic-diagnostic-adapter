@@ -24,6 +24,7 @@ members = [
   "cda-comm-doip",
   "cda-comm-can",
   "cda-comm-uds",
+  "cda-transport-orchestrator",
   "cda-sovd",
   "cda-sovd-interfaces",
   "cda-main",
@@ -46,6 +47,7 @@ cda-interfaces = { path = "cda-interfaces" }
 cda-core = { path = "cda-core" }
 cda-comm-doip = { path = "cda-comm-doip" }
 cda-comm-can = { path = "cda-comm-can" }
+cda-transport-orchestrator = { path = "cda-transport-orchestrator" }
 # CAN / ISO-TP library shared by the can feature set (fork: upstream 0.2.0
 # lacks the socketcand and userspace ISO-TP backends the CI suites use)
 tokio-socketcan-isotp = { git = "https://github.com/MarkSchmitt/tokio-socketcan-isotp.git", tag = "v0.6.0" }
