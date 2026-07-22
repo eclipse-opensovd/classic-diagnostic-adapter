@@ -12,7 +12,7 @@
  */
 use std::sync::Arc;
 
-use cda_comm_can::MultiTransportGateway;
+use cda_comm_can::CanDiagGateway;
 use cda_comm_doip::DoipDiagGateway;
 use cda_core::EcuManager;
 use cda_interfaces::runtime_update_api::RuntimeFilesUpdatePlugin;
@@ -25,6 +25,7 @@ use cda_plugin_runtime_update::{
 use cda_plugin_security::{SecurityPlugin, SecurityPluginLoader};
 use cda_sovd::{SovdLockStateProvider, UpdateGuardState};
 use cda_storage::LocalStorage;
+use cda_transport_orchestrator::DiagnosticTransportRouter;
 use tokio::sync::Mutex;
 
 use crate::{
@@ -169,7 +170,7 @@ where
 
     let reloader_plugin = Arc::new(DefaultRuntimeReloaderPlugin::<
         UdsManagerType<SP>,
-        MultiTransportGateway<DoipDiagGateway<EcuManager<SP>>>,
+        DiagnosticTransportRouter<DoipDiagGateway<EcuManager<SP>>, CanDiagGateway>,
         Configuration,
         SL,
         _,

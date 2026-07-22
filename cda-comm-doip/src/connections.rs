@@ -15,7 +15,7 @@ use std::{sync::Arc, time::Duration};
 
 use cda_interfaces::{
     DataParseError, DiagServiceError, DoipComParams, EcuAddresses, EcuConnectivityHandler, HashMap,
-    HashMapExtensions, dlt_ctx, service_ids,
+    HashMapExtensions, dlt_ctx, is_tester_present_nrc,
 };
 use doip_definitions::payload::{ActivationType, DoipPayload, RoutingActivationRequest};
 use thiserror::Error;
@@ -27,7 +27,6 @@ use tokio::{
 use crate::{
     ConnectionError, DiagnosticResponse, DiscoveredGateway, DoipConnection, DoipEcu,
     DoipTransportConfig, EcuTimeouts, GatewayConnectionConfig, GatewayDoipConfig, GatewaySetup,
-    NRC_BUSY_REPEAT_REQUEST, NRC_RESPONSE_PENDING, NRC_TEMPORARILY_NOT_AVAILABLE,
     connection_receiver::spawn_gateway_receiver_task,
     connection_sender::spawn_gateway_sender_task,
     connections::EcuError::EcuConnectionError,
@@ -449,42 +448,25 @@ pub(crate) async fn try_read(
         match reader.read().await {
             Some(Ok(msg)) => match msg.payload {
                 DoipPayload::DiagnosticMessage(msg) => {
-                    // handle NRCs
-                    if let Some(&0x7F) = msg.message.first() {
-                        let request_sid = msg.message.get(1).copied().unwrap_or(0);
-                        let error_code = msg.message.get(2).copied().unwrap_or(0);
+                    let source_address = u16::from_be_bytes(msg.source_address);
+                    let target_address = u16::from_be_bytes(msg.target_address);
 
-                        if request_sid == service_ids::TESTER_PRESENT {
-                            return Ok(DiagnosticResponse::TesterPresentNRC(error_code));
-                        }
-
-                        let source_address = u16::from_be_bytes(msg.source_address);
-                        let response = match error_code {
-                            NRC_RESPONSE_PENDING => {
-                                tracing::debug!(
-                                    message = ?msg.message,
-                                    "UDS NRC - Response pending"
-                                );
-                                DiagnosticResponse::Pending {
-                                    source_address,
-                                    request_sid,
-                                }
-                            }
-                            NRC_BUSY_REPEAT_REQUEST => DiagnosticResponse::BusyRepeatRequest {
-                                source_address,
-                                request_sid,
-                            },
-                            NRC_TEMPORARILY_NOT_AVAILABLE => {
-                                DiagnosticResponse::TemporarilyNotAvailable {
-                                    source_address,
-                                    request_sid,
-                                }
-                            }
-                            _ => return Ok(DiagnosticResponse::Msg(msg)),
-                        };
-                        return Ok(response);
+                    // TesterPresent NRCs (7F 3E xx) arrive from the functional
+                    // broadcast keep-alive on the shared TCP connection. They
+                    // carry a real ECU source address but are unrelated to any
+                    // pending physical request. Intercept them as a dedicated
+                    // event so the receiver can log-and-drop without routing
+                    // them to a per-ECU channel.
+                    if is_tester_present_nrc(&msg.message) {
+                        let code = msg.message.get(2).copied().unwrap_or(0);
+                        return Ok(DiagnosticResponse::TesterPresentNRC(code));
                     }
-                    Ok(DiagnosticResponse::Msg(msg))
+
+                    Ok(DiagnosticResponse::Msg {
+                        data: msg.message,
+                        source_address,
+                        target_address,
+                    })
                 }
                 DoipPayload::DiagnosticMessageNack(nack) => Ok(DiagnosticResponse::Nack(nack)),
                 DoipPayload::GenericNack(nack) => Ok(DiagnosticResponse::GenericNack(nack)),

@@ -22,12 +22,13 @@
 
 use std::{future::Future, sync::Arc};
 
-use cda_comm_can::MultiTransportGateway;
+use cda_comm_can::CanDiagGateway;
 use cda_comm_doip::DoipDiagGateway;
 use cda_comm_uds::FlashTransferObserver;
 use cda_core::EcuManager;
 use cda_interfaces::{HashMap, ShutdownSignal, health::HealthProvider};
 use cda_plugin_security::{SecurityPlugin, SecurityPluginLoader};
+use cda_transport_orchestrator::DiagnosticTransportRouter;
 use futures::future::BoxFuture;
 use tokio::sync::{Mutex, RwLock};
 
@@ -51,7 +52,8 @@ pub(crate) type PreLoadHook = Box<
 pub struct CdaRuntime<SP: SecurityPlugin> {
     pub config: Arc<RwLock<Configuration>>,
     pub uds_manager: Arc<RwLock<UdsManagerType<SP>>>,
-    pub gateway: Arc<RwLock<MultiTransportGateway<DoipDiagGateway<EcuManager<SP>>>>>,
+    pub gateway:
+        Arc<RwLock<DiagnosticTransportRouter<DoipDiagGateway<EcuManager<SP>>, CanDiagGateway>>>,
     pub dynamic_router: cda_sovd::dynamic_router::DynamicRouter,
     pub vehicle_route_handle: cda_sovd::RouteHandle,
     pub lock_provider: Arc<cda_sovd::SovdLockStateProvider>,

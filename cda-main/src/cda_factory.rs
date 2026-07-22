@@ -13,7 +13,7 @@
 use std::{path::PathBuf, sync::Arc};
 
 use async_trait::async_trait;
-use cda_comm_can::MultiTransportGateway;
+use cda_comm_can::CanDiagGateway;
 use cda_comm_doip::DoipDiagGateway;
 use cda_core::EcuManager;
 use cda_interfaces::{
@@ -22,6 +22,7 @@ use cda_interfaces::{
     runtime_update_api::{ReloadError, VehicleComponentFactory, VehicleComponents},
 };
 use cda_plugin_security::SecurityPlugin;
+use cda_transport_orchestrator::DiagnosticTransportRouter;
 use tokio::sync::Mutex;
 
 use crate::{UdsManagerType, config::configfile::Configuration};
@@ -62,7 +63,7 @@ impl<SP>
     VehicleComponentFactory<
         Configuration,
         UdsManagerType<SP>,
-        MultiTransportGateway<DoipDiagGateway<EcuManager<SP>>>,
+        DiagnosticTransportRouter<DoipDiagGateway<EcuManager<SP>>, CanDiagGateway>,
     > for CdaMainVehicleFactory<SP>
 where
     SP: SecurityPlugin,
@@ -78,7 +79,7 @@ where
     ) -> Result<
         VehicleComponents<
             UdsManagerType<SP>,
-            MultiTransportGateway<DoipDiagGateway<EcuManager<SP>>>,
+            DiagnosticTransportRouter<DoipDiagGateway<EcuManager<SP>>, CanDiagGateway>,
             Self::FileManager,
         >,
         ReloadError,
