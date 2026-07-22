@@ -33,6 +33,7 @@ path = "src/lib.rs"
 cda-core = { workspace = true }
 cda-comm-can = { workspace = true }
 cda-comm-doip = { workspace = true }
+cda-transport-orchestrator = { workspace = true }
 cda-comm-uds = { workspace = true }
 cda-database = { workspace = true }
 cda-interfaces = { workspace = true }

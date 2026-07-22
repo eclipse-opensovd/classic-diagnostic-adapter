@@ -11,9 +11,8 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+use cda_interfaces::TransportType;
 use serde::{Deserialize, Serialize};
-
-use crate::multi_transport::TransportType;
 
 /// Configuration for CAN bus communication.
 #[derive(Deserialize, Serialize, Clone, Debug, schemars::JsonSchema)]

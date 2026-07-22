@@ -540,17 +540,111 @@ Diagnostic Message Exchange
 
     **Receiving the Diagnostic Response**
 
-    After a successful ACK, the CDA waits for the diagnostic response. Multiple
-    intermediate responses may be received before the final response:
+    After a successful ACK, the CDA waits for the diagnostic response. All responses
+    (including pending NRCs) arrive as raw ``DiagnosticResponse::Msg`` events on the
+    per-ECU broadcast channel. ``doip_event_to_transport()`` classifies the three
+    pending-lifecycle NRCs with ``pending_nrc_from_raw()`` and forwards them as
+    ``TransportResponse::Pending``. It wraps every other response in
+    ``TransportResponse::UdsResponse`` with ``uds_response_from_raw()``.
 
-    - **NRC 0x78 (Response Pending)**: The ECU needs more time. The CDA continues waiting
-      according to ``CP_RC78Handling`` and ``CP_RC78CompletionTimeout``, using the enhanced
-      timeout ``CP_P6Star``.
-    - **NRC 0x21 (Busy, Repeat Request)**: The ECU is busy. Handling depends on
-      ``CP_RC21Handling``, ``CP_RC21CompletionTimeout``, and ``CP_RC21RequestTime``.
-    - **NRC 0x94 (Temporarily Not Available)**: Handling depends on ``CP_RC94Handling``,
-      ``CP_RC94CompletionTimeout``, and ``CP_RC94RequestTime``.
+    The only exception is TesterPresent NRCs (``7F 3E xx``), which are intercepted at
+    the DoIP decoding layer and routed to a dedicated ``TesterPresentNRC`` event so the
+    receiver can log-and-drop them without polluting per-ECU channels.
+
+    Multiple intermediate responses may be received before the final response:
+
+    - **NRC 0x78 (Response Pending)**: The ECU needs more time. Classified at the
+      transport boundary and handled by the UDS layer per ``CP_RC78Handling`` and
+      ``CP_RC78CompletionTimeout``, using the enhanced timeout ``CP_P6Star``.
+    - **NRC 0x21 (Busy, Repeat Request)**: The ECU is busy. Classified at the
+      transport boundary and handled per ``CP_RC21Handling``, ``CP_RC21CompletionTimeout``, and
+      ``CP_RC21RequestTime``.
+    - **NRC 0x94 (Temporarily Not Available)**: Classified at the transport boundary and
+      handled per ``CP_RC94Handling``, ``CP_RC94CompletionTimeout``, and
+      ``CP_RC94RequestTime``.
     - **Final Response**: The complete UDS response is returned to the caller.
+
+    **NRC Classification in the DoIP Receive Path**
+
+    The following diagram traces the complete path of a UDS negative response through
+    the DoIP receive pipeline, from raw TCP bytes to the typed ``TransportResponse``
+    variant that the UDS application layer consumes:
+
+    .. uml::
+        :caption: DoIP NRC Classification Flow
+
+        @startuml
+        skinparam backgroundColor #FFFFFF
+        skinparam componentStyle rectangle
+
+        title "DoIP NRC Classification Flow"
+
+        package "TCP Stream" as TCP {
+          (Raw DoIP frame\n0x8001 DiagnosticMessage) as Raw
+        }
+
+        package "connections.rs: try_read()" as DecodePkg {
+          (Decode DoIP header\nand payload) as Decode
+          (is_tester_present_nrc?) as TpCheck
+        }
+
+        package "connection_receiver.rs\nhandle_ok_response()" as RoutePkg {
+          (Broadcast to per-ECU\nchannel by source_address) as Route
+          (Log and drop) as Drop
+        }
+
+        package "lib.rs\ndoip_event_to_transport()" as ClassifyPkg {
+          (pending_nrc_from_raw?) as NrcCheck
+        }
+
+        package "TransportResponse" as RespPkg {
+          (TransportResponse::Pending\n{PendingNrc}) as Pending
+          (TransportResponse::UdsResponse\n{ServicePayload}) as Final
+        }
+
+        Raw --> Decode
+        Decode --> TpCheck
+
+        TpCheck --> Route : [NO]\nDiagnosticResponse::Msg
+        TpCheck --> Drop : [YES]\nTesterPresentNRC(code)
+
+        Route --> NrcCheck : Per-ECU broadcast\nchannel
+
+        NrcCheck --> Pending : [YES]\n0x78 / 0x21 / 0x94
+        NrcCheck --> Final : [NO]\nAll other responses
+
+        note bottom of Drop
+            TesterPresent NRCs (7F 3E xx)
+            from functional keep-alive are
+            intercepted here and never
+            reach the per-ECU channel.
+            The receiver logs them at
+            debug level and discards them.
+        end note
+
+        note bottom of NrcCheck
+            Shared classification using
+            pending_nrc_from_raw() from
+            cda-interfaces/src/uds.rs.
+            Identical logic for both
+            DoIP and CAN transports.
+        end note
+
+        note bottom of Final
+            This path carries both
+            positive responses and
+            non-pending negative responses
+            (all NRCs except 0x78/0x21/0x94).
+        end note
+        @enduml
+
+    The classification functions are defined in ``cda-interfaces/src/uds.rs``:
+
+    * ``is_tester_present_nrc(data)`` -- checks for ``0x7F 0x3E xx``
+    * ``pending_nrc_from_raw(data, source_address)`` -- classifies ``0x78``/``0x21``/``0x94``
+      into ``PendingNrc`` variants and returns ``None`` for all other responses
+    * ``uds_response_from_raw(data, source_address, target_address)`` -- wraps any
+      remaining response (positive or non-pending negative) into a ``ServicePayload``
 
     **Functional Addressing**
 

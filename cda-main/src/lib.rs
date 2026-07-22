@@ -22,22 +22,22 @@ use std::{
     sync::Arc,
 };
 
-#[cfg(feature = "can")]
-use cda_comm_can::CanDiagGateway;
-use cda_comm_can::{MultiTransportGateway, TransportType, config::CanConfig};
+use cda_comm_can::{CanDiagGateway, config::CanConfig};
 use cda_comm_doip::{DoipDiagGateway, config::DoipConfig};
 use cda_comm_uds::{UdsManager, state_coordinator::EcuStateCoordinator};
 use cda_core::EcuManager;
 use cda_database::FileManager;
 use cda_interfaces::{
-    EcuConnectivityHandler, FunctionalDescriptionConfig, HashMap, HashMapExtensions, UdsQuery,
-    UdsVariant, config::ConfigSanity, datatypes::FaultConfig, dlt_ctx, health::HealthProvider,
+    EcuConnectivityHandler, FunctionalDescriptionConfig, HashMap, HashMapExtensions, TransportType,
+    UdsQuery, UdsVariant, config::ConfigSanity, datatypes::FaultConfig, dlt_ctx,
+    health::HealthProvider,
 };
 use cda_plugin_security::{
     DefaultSecurityPlugin, DefaultSecurityPluginData, SecurityPlugin, SecurityPluginLoader,
 };
 use cda_sovd::Locks;
 use cda_tracing::{OtelGuard, TracingSetupError, TracingWorkerGuard};
+use cda_transport_orchestrator::DiagnosticTransportRouter;
 use clap::{Parser, Subcommand};
 use tokio::sync::{Mutex, RwLock, mpsc};
 use tracing_subscriber::layer::SubscriberExt;
@@ -142,7 +142,8 @@ pub struct AppArgs {
 pub struct VehicleData<S: SecurityPlugin> {
     pub file_managers: FileManagerMap,
     pub uds_manager: UdsManagerType<S>,
-    pub diagnostic_gateway: MultiTransportGateway<DoipDiagGateway<EcuManager<S>>>,
+    pub diagnostic_gateway:
+        DiagnosticTransportRouter<DoipDiagGateway<EcuManager<S>>, CanDiagGateway>,
     pub locks: Arc<cda_sovd::Locks>,
     pub update_guard: cda_sovd::UpdateGuardState,
     pub databases: Arc<DatabaseMap<S>>,
@@ -152,7 +153,8 @@ pub struct VehicleData<S: SecurityPlugin> {
 
 pub struct VehicleComponents<S: SecurityPlugin> {
     pub uds_manager: UdsManagerType<S>,
-    pub diagnostic_gateway: MultiTransportGateway<DoipDiagGateway<EcuManager<S>>>,
+    pub diagnostic_gateway:
+        DiagnosticTransportRouter<DoipDiagGateway<EcuManager<S>>, CanDiagGateway>,
     pub databases: Arc<DatabaseMap<S>>,
     pub file_managers: FileManagerMap,
     pub variant_detection_handle: tokio::task::JoinHandle<()>,
@@ -584,8 +586,10 @@ pub async fn load_vehicle_data<S: SecurityPlugin>(
     })
 }
 
-pub type UdsManagerType<S> =
-    UdsManager<MultiTransportGateway<DoipDiagGateway<EcuManager<S>>>, EcuManager<S>>;
+pub type UdsManagerType<S> = UdsManager<
+    DiagnosticTransportRouter<DoipDiagGateway<EcuManager<S>>, CanDiagGateway>,
+    EcuManager<S>,
+>;
 
 /// The transport sections of the configuration, bundled for
 /// [`create_diagnostic_gateway`] so its signature stays within clippy's
@@ -607,7 +611,7 @@ pub struct TransportConfigs<'a> {
     )
 )]
 pub fn create_uds_manager<S: SecurityPlugin>(
-    gateway: MultiTransportGateway<DoipDiagGateway<EcuManager<S>>>,
+    gateway: DiagnosticTransportRouter<DoipDiagGateway<EcuManager<S>>, CanDiagGateway>,
     databases: Arc<HashMap<String, RwLock<EcuManager<S>>>>,
     variant_detection_receiver: mpsc::Receiver<Vec<String>>,
     state_coordinator: EcuStateCoordinator,
@@ -760,12 +764,12 @@ pub async fn create_diagnostic_gateway<S: SecurityPlugin>(
     // `None` in CAN-only operation - DoIP is skipped entirely.
     // `Some(socket)` on reload - reused to avoid rebinding the DoIP port.
     reusable_doip_socket: Option<Arc<Mutex<cda_comm_doip::socket::DoIPUdpSocket>>>,
-) -> Result<MultiTransportGateway<DoipDiagGateway<EcuManager<S>>>, AppError> {
+) -> Result<DiagnosticTransportRouter<DoipDiagGateway<EcuManager<S>>, CanDiagGateway>, AppError> {
     let TransportConfigs {
         doip: doip_config,
         can: can_config,
     } = transports;
-    // Build the multi-transport gateway skeleton, then populate the configured
+    // Build the diagnostic transport router skeleton, then populate the configured
     // transports. ECUs route over CAN or DoIP per `transport_overrides`,
     // defaulting to DoIP-preferred with CAN fallback.
     let transport_overrides: HashMap<String, TransportType> = can_config
@@ -778,7 +782,9 @@ pub async fn create_diagnostic_gateway<S: SecurityPlugin>(
         .unwrap_or_default();
 
     let mut gateway =
-        MultiTransportGateway::<DoipDiagGateway<EcuManager<S>>>::new(transport_overrides);
+        DiagnosticTransportRouter::<DoipDiagGateway<EcuManager<S>>, CanDiagGateway>::new(
+            transport_overrides,
+        );
 
     // Fail clearly when CAN is configured on a build without CAN support.
     // (validate_sanity rejects this too; kept as defense in depth for direct
