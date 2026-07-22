@@ -1,5 +1,5 @@
 /*
- * SPDX-FileCopyrightText: 2025 Copyright (c) Contributors to the Eclipse Foundation
+ * SPDX-FileCopyrightText: 2026 Copyright (c) Contributors to the Eclipse Foundation
  *
  * See the NOTICE file(s) distributed with this work for additional
  * information regarding copyright ownership.
@@ -13,12 +13,15 @@
 
 // @generated
 
+
 #[rustfmt::skip]
 #[allow(
     clippy::all,
     clippy::pedantic,
     dead_code,
+    unused_imports,
     warnings,
-    reason = "Generated prost-build code"
+    clippy::unwrap_used,
+    reason = "Generated FlatBuffers code"
 )]
-pub mod fileformat;
+pub mod diagnostic_description;
