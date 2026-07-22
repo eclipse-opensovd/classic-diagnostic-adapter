@@ -965,32 +965,32 @@ pub mod mock {
 
     use crate::schema::{SchemaDescription, SchemaProvider};
 
-    // We have to adhere to the signature of the trait, which is async, but we don't actually need to do any async work here.
-    // core::future::ready what clippy suggest as alternative if not available on 1.88
-    #[cfg_attr(nightly, allow(unknown_lints, clippy::unused_async_trait_impl))]
     impl SchemaProvider for MockUdsEcu {
-        async fn schema_for_request(
+        fn schema_for_request(
             &self,
             _ecu: &str,
             _service: &crate::DiagComm,
-        ) -> Result<SchemaDescription, DiagServiceError> {
-            Err(DiagServiceError::NotFound(String::new()))
+        ) -> impl std::future::Future<Output = Result<SchemaDescription, DiagServiceError>> + Send
+        {
+            std::future::ready(Err(DiagServiceError::NotFound(String::new())))
         }
 
-        async fn schema_for_responses(
+        fn schema_for_responses(
             &self,
             _ecu: &str,
             _service: &crate::DiagComm,
-        ) -> Result<SchemaDescription, DiagServiceError> {
-            Err(DiagServiceError::NotFound(String::new()))
+        ) -> impl std::future::Future<Output = Result<SchemaDescription, DiagServiceError>> + Send
+        {
+            std::future::ready(Err(DiagServiceError::NotFound(String::new())))
         }
 
-        async fn schema_for_fg_request(
+        fn schema_for_fg_request(
             &self,
             _service: &crate::DiagComm,
             _functional_group_name: &str,
-        ) -> Result<SchemaDescription, DiagServiceError> {
-            Err(DiagServiceError::NotFound(String::new()))
+        ) -> impl std::future::Future<Output = Result<SchemaDescription, DiagServiceError>> + Send
+        {
+            std::future::ready(Err(DiagServiceError::NotFound(String::new())))
         }
     }
 }

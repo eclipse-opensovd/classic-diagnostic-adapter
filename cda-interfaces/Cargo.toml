@@ -52,6 +52,10 @@ tokio = { workspace = true, features = ["macros", "rt"] }
 
 [features]
 default = []
+nightly = []
 tokio-tracing = ["tokio/tracing"]
 dlt-tracing = []
 test-utils = ["mockall"]
+
+[build-dependencies]
+cda-build = { workspace = true }

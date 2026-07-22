@@ -40,3 +40,6 @@ http = { workspace = true }
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["macros", "rt"] }
+
+[build-dependencies]
+cda-build = { workspace = true }

@@ -251,8 +251,6 @@ async fn test_ecu_session_switching() {
     .await
     .unwrap();
 
-    // Duration::from_mins is only available in rust >= 1.91.0, we want to support 1.88.0
-    #[cfg_attr(nightly, allow(unknown_lints, clippy::duration_suboptimal_units))]
     let expiration_timeout = Duration::from_secs(60);
     let ecu_lock = create_lock(
         expiration_timeout,
@@ -626,8 +624,6 @@ async fn test_communication_control() {
     .unwrap();
 
     // Create and acquire lock
-    // Duration::from_mins is only available in rust >= 1.91.0, we want to support 1.88.0
-    #[cfg_attr(nightly, allow(unknown_lints, clippy::duration_suboptimal_units))]
     let expiration_timeout = Duration::from_secs(60);
     let ecu_lock = create_lock(
         expiration_timeout,

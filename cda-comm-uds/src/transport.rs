@@ -753,8 +753,11 @@ mod send_tests {
     impl EcuGateway for TestGateway {
         async fn shutdown(&mut self) {}
 
-        async fn get_gateway_network_address(&self, _logical_address: u16) -> Option<String> {
-            None
+        fn get_gateway_network_address(
+            &self,
+            _logical_address: u16,
+        ) -> impl Future<Output = Option<String>> + Send {
+            std::future::ready(None)
         }
 
         fn send(
@@ -768,24 +771,28 @@ mod send_tests {
             async move { result }
         }
 
-        async fn ecu_online<T: EcuAddresses>(
+        fn ecu_online<T: EcuAddresses>(
             &self,
             _ecu_name: &str,
             _ecu_db: &RwLock<T>,
-        ) -> Result<(), DiagServiceError> {
-            Ok(())
+        ) -> impl Future<Output = Result<(), DiagServiceError>> + Send {
+            std::future::ready(Ok(()))
         }
 
-        async fn send_functional(
+        fn send_functional(
             &self,
             _transmission_params: TransmissionParameters,
             _message: ServicePayload,
             _expected_ecu_logical_addrs: HashMap<u16, String>,
             _timeout: Duration,
             _expect_positive_response: bool,
-        ) -> Result<HashMap<String, Result<UdsResponse, DiagServiceError>>, DiagServiceError>
-        {
-            Ok(HashMap::new())
+        ) -> impl Future<
+            Output = Result<
+                HashMap<String, Result<UdsResponse, DiagServiceError>>,
+                DiagServiceError,
+            >,
+        > + Send {
+            std::future::ready(Ok(HashMap::new()))
         }
     }
 

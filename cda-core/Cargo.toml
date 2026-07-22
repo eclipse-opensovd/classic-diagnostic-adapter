@@ -43,6 +43,9 @@ schemars = { workspace = true }
 # logging & tracing
 tracing = { workspace = true }
 
+[build-dependencies]
+cda-build = { workspace = true }
+
 [dev-dependencies]
 tokio = { workspace = true, features = ["test-util", "macros"] }
 flatbuffers = { workspace = true }

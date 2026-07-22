@@ -13,7 +13,7 @@
 
 //! Shared test doubles for `cda-comm-uds` tests.
 
-use std::time::Duration;
+use std::{future::Future, time::Duration};
 
 use async_trait::async_trait;
 use cda_interfaces::{
@@ -164,24 +164,24 @@ impl EcuStateManager for TestEcuDb {
         async move { states.lock().await.get(&sid).cloned() }
     }
 
-    async fn session(&self) -> Result<String, DiagServiceError> {
-        Ok("default".to_string())
+    fn session(&self) -> impl Future<Output = Result<String, DiagServiceError>> + Send {
+        std::future::ready(Ok("default".to_string()))
     }
 
     fn default_session(&self) -> Result<String, DiagServiceError> {
         Ok("default".to_string())
     }
 
-    async fn security_access(&self) -> Result<String, DiagServiceError> {
-        Ok("locked".to_string())
+    fn security_access(&self) -> impl Future<Output = Result<String, DiagServiceError>> + Send {
+        std::future::ready(Ok("locked".to_string()))
     }
 
     async fn lookup_session_change(&self, _session: &str) -> Result<DiagComm, DiagServiceError> {
         unimplemented!()
     }
 
-    async fn set_default_states(&self) -> Result<(), DiagServiceError> {
-        Ok(())
+    fn set_default_states(&self) -> impl Future<Output = Result<(), DiagServiceError>> + Send {
+        std::future::ready(Ok(()))
     }
 }
 

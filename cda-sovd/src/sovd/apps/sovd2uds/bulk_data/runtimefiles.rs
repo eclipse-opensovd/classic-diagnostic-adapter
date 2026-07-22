@@ -192,18 +192,22 @@ pub(crate) async fn require_vehicle_lock(
     lock_state: &dyn LockStateProvider,
     claims: &dyn cda_plugin_security::Claims,
     retry_after_seconds: u64,
-) -> Result<(), Response> {
+) -> Result<(), Box<Response>> {
     match lock_state.vehicle_lock_owner_sub().await {
-        None => Err(DbUpdateErrorResponse::new(
-            RuntimeUpdateError::NoLock("Vehicle lock is missing".to_owned()),
-            retry_after_seconds,
-        )
-        .into_response()),
-        Some(owner) if owner != claims.sub() => Err(DbUpdateErrorResponse::new(
-            RuntimeUpdateError::NoLock("Vehicle lock is owned by another user".to_owned()),
-            retry_after_seconds,
-        )
-        .into_response()),
+        None => Err(Box::new(
+            DbUpdateErrorResponse::new(
+                RuntimeUpdateError::NoLock("Vehicle lock is missing".to_owned()),
+                retry_after_seconds,
+            )
+            .into_response(),
+        )),
+        Some(owner) if owner != claims.sub() => Err(Box::new(
+            DbUpdateErrorResponse::new(
+                RuntimeUpdateError::NoLock("Vehicle lock is owned by another user".to_owned()),
+                retry_after_seconds,
+            )
+            .into_response(),
+        )),
         Some(_) => Ok(()),
     }
 }
@@ -466,7 +470,7 @@ pub(crate) mod nextupdate {
             // receiving this response. Drain the remaining body first so the
             // connection can be closed/reused safely.
             while let Ok(Some(_field)) = multipart.next_field().await {}
-            return resp.into_response();
+            return (*resp).into_response();
         }
 
         let mut files = Vec::new();
@@ -561,7 +565,7 @@ pub(crate) mod nextupdate {
         )
         .await
         {
-            return resp.into_response();
+            return (*resp).into_response();
         }
         route_state.plugin.delete_nextupdate().await.map_or_else(
             |e| DbUpdateErrorResponse::new(e, route_state.retry_after_seconds).into_response(),
@@ -602,7 +606,7 @@ pub(crate) mod nextupdate {
             )
             .await
             {
-                return resp.into_response();
+                return (*resp).into_response();
             }
             route_state
                 .plugin
@@ -656,7 +660,7 @@ pub(crate) mod backup {
         )
         .await
         {
-            return resp.into_response();
+            return (*resp).into_response();
         }
         route_state.plugin.delete_backup().await.map_or_else(
             |e| DbUpdateErrorResponse::new(e, route_state.retry_after_seconds).into_response(),

@@ -50,5 +50,8 @@ strum = { workspace = true, features = ["derive"] }
 default = []
 dlt-tracing = ["cda-interfaces/dlt-tracing"]
 
+[build-dependencies]
+cda-build = { workspace = true }
+
 [dev-dependencies]
 tokio = { workspace = true, features = ["test-util", "macros"] }

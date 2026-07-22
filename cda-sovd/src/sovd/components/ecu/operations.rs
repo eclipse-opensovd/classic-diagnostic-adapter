@@ -1047,7 +1047,7 @@ pub(crate) mod service {
                     Ok(r) => r,
                     Err(e) => {
                         remove_reserved_execution(&service_executions, &service, &exec_id).await;
-                        return e;
+                        return *e;
                     }
                 }
             };
@@ -1102,22 +1102,26 @@ pub(crate) mod service {
             data: Option<cda_interfaces::diagservices::UdsPayloadData>,
             map_to_json: bool,
             include_schema: bool,
-        ) -> Result<Option<T::Response>, Response> {
+        ) -> Result<Option<T::Response>, Box<Response>> {
             let response = match uds
                 .send(ecu_name, diag_service, security_plugin, data, map_to_json)
                 .await
             {
                 Ok(v) => v,
                 Err(e) => {
-                    return Err(ErrorWrapper {
-                        error: e.into(),
-                        include_schema,
-                    }
-                    .into_response());
+                    return Err(Box::new(
+                        ErrorWrapper {
+                            error: e.into(),
+                            include_schema,
+                        }
+                        .into_response(),
+                    ));
                 }
             };
             if let DiagServiceResponseType::Negative = response.response_type() {
-                return Err(api_error_from_diag_response(&response, include_schema).into_response());
+                return Err(Box::new(
+                    api_error_from_diag_response(&response, include_schema).into_response(),
+                ));
             }
             Ok(Some(response))
         }
