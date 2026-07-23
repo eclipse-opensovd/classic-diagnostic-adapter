@@ -49,6 +49,9 @@ use crate::{
 async fn test_flash_download_transfer_sequence() {
     let (runtime, _lock) = setup_integration_test(true).await.unwrap();
     let auth = auth_header(&runtime.config, None).await.unwrap();
+    let auth_non_owner = auth_header(&runtime.config, Some("flash-non-owner"))
+        .await
+        .unwrap();
     let ecu_endpoint = sovd::ECU_FLXC1000_ENDPOINT;
 
     // Create and acquire ECU lock
@@ -260,6 +263,18 @@ async fn test_flash_download_transfer_sequence() {
             )
         }
     });
+    send_cda_request(
+        &runtime.config,
+        &format!("{ecu_endpoint}/x-sovd2uds-download/requestdownload"),
+        StatusCode::CONFLICT,
+        Method::PUT,
+        Some(&request_download_body.to_string()),
+        Some(&auth_non_owner),
+        None,
+    )
+    .await
+    .unwrap();
+
     let request_download_response = send_cda_request(
         &runtime.config,
         &format!("{ecu_endpoint}/x-sovd2uds-download/requestdownload"),
@@ -292,6 +307,18 @@ async fn test_flash_download_transfer_sequence() {
         "length": file_size,
         "id": file_id
     });
+
+    send_cda_request(
+        &runtime.config,
+        &format!("{ecu_endpoint}/x-sovd2uds-download/flashtransfer"),
+        StatusCode::CONFLICT,
+        Method::POST,
+        Some(&flash_transfer_body.to_string()),
+        Some(&auth_non_owner),
+        None,
+    )
+    .await
+    .unwrap();
 
     let flash_transfer_response = send_cda_request(
         &runtime.config,
@@ -362,6 +389,18 @@ async fn test_flash_download_transfer_sequence() {
     send_cda_request(
         &runtime.config,
         &format!("{ecu_endpoint}/x-sovd2uds-download/flashtransfer/{transfer_id}"),
+        StatusCode::CONFLICT,
+        Method::DELETE,
+        None,
+        Some(&auth_non_owner),
+        None,
+    )
+    .await
+    .unwrap();
+
+    send_cda_request(
+        &runtime.config,
+        &format!("{ecu_endpoint}/x-sovd2uds-download/flashtransfer/{transfer_id}"),
         StatusCode::NO_CONTENT,
         Method::DELETE,
         None,
@@ -372,6 +411,18 @@ async fn test_flash_download_transfer_sequence() {
     .unwrap();
 
     // TransferExit
+    send_cda_request(
+        &runtime.config,
+        &format!("{ecu_endpoint}/x-sovd2uds-download/transferexit"),
+        StatusCode::CONFLICT,
+        Method::PUT,
+        None,
+        Some(&auth_non_owner),
+        None,
+    )
+    .await
+    .unwrap();
+
     send_cda_request(
         &runtime.config,
         &format!("{ecu_endpoint}/x-sovd2uds-download/transferexit"),

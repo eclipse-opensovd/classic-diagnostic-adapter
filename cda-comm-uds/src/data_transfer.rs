@@ -197,6 +197,7 @@ impl<S: EcuGateway, T: EcuManager> UdsDataTransfer for UdsManager<S, T> {
             file_path,
             offset,
             length,
+            owner,
             transfer_meta_data,
         } = parameters;
 
@@ -273,6 +274,7 @@ impl<S: EcuGateway, T: EcuManager> UdsDataTransfer for UdsManager<S, T> {
             ecu_name_clone,
             EcuDataTransfer {
                 meta_data: transfer_meta_data,
+                owner,
                 status_receiver: receiver,
                 task: transfer_task,
             },
@@ -284,11 +286,18 @@ impl<S: EcuGateway, T: EcuManager> UdsDataTransfer for UdsManager<S, T> {
         &self,
         ecu_name: &str,
         id: &str,
+        owner: &str,
     ) -> Result<(), DiagServiceError> {
         let mut lock = self.data_transfers.lock().await;
         let transfer = lock.get(ecu_name).ok_or_else(|| {
             DiagServiceError::NotFound(format!("Data transfer for ECU {ecu_name} not found"))
         })?;
+
+        if transfer.meta_data.id != id || transfer.owner != owner {
+            return Err(DiagServiceError::NotFound(format!(
+                "Data transfer with id {id} not found for ECU {ecu_name}"
+            )));
+        }
 
         if !matches!(
             transfer.meta_data.status,
@@ -318,6 +327,12 @@ impl<S: EcuGateway, T: EcuManager> UdsDataTransfer for UdsManager<S, T> {
         })?;
 
         Ok(())
+    }
+
+    async fn ecu_flash_transfer_abort(&self, ecu_name: &str) {
+        if let Some(transfer) = self.data_transfers.lock().await.remove(ecu_name) {
+            transfer.task.abort();
+        }
     }
 
     async fn ecu_flash_transfer_status(

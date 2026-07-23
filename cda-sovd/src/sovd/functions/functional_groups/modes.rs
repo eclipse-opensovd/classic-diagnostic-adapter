@@ -384,7 +384,7 @@ pub(crate) mod commctrl {
         >, _>(|res| {
             res.description("Response with results from all ECUs in the functional group")
         })
-        .with(openapi::error_forbidden)
+        .with(openapi::error_conflict)
         .with(openapi::error_not_found)
         .with(openapi::error_internal_server)
         .with(openapi::error_bad_request)
@@ -477,7 +477,7 @@ pub(crate) mod dtcsetting {
         >, _>(|res| {
             res.description("Response with results from all ECUs in the functional group")
         })
-        .with(openapi::error_forbidden)
+        .with(openapi::error_conflict)
         .with(openapi::error_not_found)
         .with(openapi::error_internal_server)
         .with(openapi::error_bad_request)
@@ -560,7 +560,7 @@ pub(crate) mod session {
                     res.description("Response with results from all ECUs in the functional group")
                 },
             )
-            .with(openapi::error_forbidden)
+            .with(openapi::error_conflict)
             .with(openapi::error_not_found)
             .with(openapi::error_internal_server)
             .with(openapi::error_bad_request)

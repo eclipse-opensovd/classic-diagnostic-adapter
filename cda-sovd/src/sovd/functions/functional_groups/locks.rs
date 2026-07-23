@@ -202,7 +202,7 @@ pub(crate) fn docs_post(op: TransformOperation) -> TransformOperation {
             })
             .description("Functional group lock created successfully.")
         })
-        .with(openapi::lock_not_owned)
+        .with(openapi::error_conflict)
 }
 
 pub(crate) async fn get<T: UdsEcu + Clone>(

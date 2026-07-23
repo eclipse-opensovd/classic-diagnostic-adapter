@@ -43,6 +43,7 @@ pub(crate) struct UdsParameters {
 
 pub(crate) struct EcuDataTransfer {
     pub(crate) meta_data: DataTransferMetaData,
+    pub(crate) owner: String,
     pub(crate) status_receiver: watch::Receiver<bool>,
     pub(crate) task: JoinHandle<()>,
 }
