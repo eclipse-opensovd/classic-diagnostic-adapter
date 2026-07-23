@@ -43,8 +43,9 @@ use std::sync::Arc;
 
 pub use cda_interfaces::TransportType;
 use cda_interfaces::{
-    DiagServiceError, EcuAddresses, EcuCanGateway, EcuGateway, HashMap, ServicePayload,
-    TransmissionParameters, TransportResponse,
+    DiagServiceError, EcuAddresses, EcuGateway, FunctionalTransport, HashMap, NetworkTopology,
+    PhysicalTransport, RouteStatus, ServicePayload, TransmissionParameters, TransportProbe,
+    TransportResponse,
 };
 use tokio::sync::{RwLock, mpsc};
 
@@ -54,7 +55,10 @@ use tokio::sync::{RwLock, mpsc};
 /// to a transport via config override or bound to the transport it was first
 /// detected on (`DoIP` preferred); see the module docs for the full strategy.
 #[doc(alias = "MultiTransportGateway")]
-pub struct DiagnosticTransportRouter<D: EcuGateway, C: EcuCanGateway> {
+pub struct DiagnosticTransportRouter<
+    D: EcuGateway + FunctionalTransport + TransportProbe,
+    C: EcuGateway + TransportProbe,
+> {
     /// Optional `DoIP` gateway
     doip_gateway: Option<D>,
     /// Optional CAN gateway
@@ -74,7 +78,9 @@ pub struct DiagnosticTransportRouter<D: EcuGateway, C: EcuCanGateway> {
 #[deprecated(since = "0.1.0", note = "Use DiagnosticTransportRouter instead")]
 pub type MultiTransportGateway<D, C> = DiagnosticTransportRouter<D, C>;
 
-impl<D: EcuGateway, C: EcuCanGateway> DiagnosticTransportRouter<D, C> {
+impl<D: EcuGateway + FunctionalTransport + TransportProbe, C: EcuGateway + TransportProbe>
+    DiagnosticTransportRouter<D, C>
+{
     /// Creates a new diagnostic transport router with the given per-ECU transport overrides.
     #[must_use]
     pub fn new(transport_overrides: HashMap<String, TransportType>) -> Self {
@@ -110,14 +116,6 @@ impl<D: EcuGateway, C: EcuCanGateway> DiagnosticTransportRouter<D, C> {
         self.doip_gateway.as_ref()
     }
 
-    /// Returns the transport this ECU is pinned or already bound to, if any.
-    async fn pinned_or_bound(&self, ecu_name: &str) -> Option<TransportType> {
-        if let Some(&pinned) = self.transport_overrides.get(ecu_name) {
-            return Some(pinned);
-        }
-        self.ecu_bindings.read().await.get(ecu_name).copied()
-    }
-
     /// Binds the ECU to a transport, sticky: if another task bound it first,
     /// the earlier binding wins and is returned.
     async fn bind(&self, ecu_name: &str, transport: TransportType) -> TransportType {
@@ -147,42 +145,86 @@ impl<D: EcuGateway, C: EcuCanGateway> DiagnosticTransportRouter<D, C> {
         }
     }
 
-    /// Attempts to detect the ECU on the CAN bus: already discovered, or
-    /// mapped and answering an on-demand probe. A CAN-mapped ECU that was
-    /// offline during startup discovery is detected here on first use.
-    async fn detect_on_can(&self, ecu_name: &str) -> bool {
-        let Some(ref can) = self.can_gateway else {
-            return false;
-        };
-        if can.is_ecu_discovered_by_name(ecu_name).await {
-            return true;
+    /// Returns the network address for an ECU given its bound transport type.
+    async fn network_address_for_transport(
+        &self,
+        ecu_name: &str,
+        transport: TransportType,
+    ) -> Option<String> {
+        match transport {
+            TransportType::DoIP => match self.doip_gateway {
+                Some(ref doip) => doip.get_ecu_network_address(ecu_name).await,
+                None => None,
+            },
+            TransportType::Can => self.can_ecu_network_address(ecu_name).await,
         }
-        if can.knows_ecu(ecu_name) {
-            return can.probe_ecu(ecu_name).await;
-        }
-        false
     }
-}
 
-impl<D: EcuGateway, C: EcuCanGateway> EcuGateway for DiagnosticTransportRouter<D, C> {
-    async fn get_gateway_network_address(&self, logical_address: u16) -> Option<String> {
-        // DoIP addresses are returned verbatim (bare IP) to keep the SOVD
-        // network-structure API compatible with pre-multi-transport releases.
+    /// Tries to detect and bind an ECU on a single transport.
+    async fn try_bind_transport(
+        &self,
+        ecu_name: &str,
+        gateway: &(impl EcuGateway + TransportProbe),
+        transport: TransportType,
+    ) -> Option<TransportType> {
+        match gateway.route_status(ecu_name).await {
+            RouteStatus::Ready => Some(self.bind(ecu_name, transport).await),
+            RouteStatus::ProbeRequired => {
+                if gateway.probe(ecu_name).await {
+                    Some(self.bind(ecu_name, transport).await)
+                } else {
+                    None
+                }
+            }
+            RouteStatus::NotConfigured | RouteStatus::Unavailable => None,
+        }
+    }
+
+    /// Resolves the transport for an ECU using the unified detection logic.
+    ///
+    /// 1. Check for explicit override
+    /// 2. Check for existing binding
+    /// 3. First-detection: check transports in priority order (`DoIP` first, then CAN)
+    ///    - Ready: bind and return
+    ///    - `ProbeRequired`: probe, then bind and return if successful
+    ///    - NotConfigured/Unavailable: continue to next transport
+    async fn resolve_transport(&self, ecu_name: &str) -> Result<TransportType, DiagServiceError> {
+        let ecu_name_lower = ecu_name.to_lowercase();
+
+        // 1. Check override
+        if let Some(&pinned) = self.transport_overrides.get(&ecu_name_lower) {
+            return Ok(pinned);
+        }
+
+        // 2. Check existing binding
+        if let Some(&bound) = self.ecu_bindings.read().await.get(&ecu_name_lower) {
+            return Ok(bound);
+        }
+
+        // 3. First-detection: check transports in priority order (DoIP first)
         if let Some(ref doip) = self.doip_gateway
-            && let Some(addr) = doip.get_gateway_network_address(logical_address).await
+            && let Some(transport) = self
+                .try_bind_transport(&ecu_name_lower, doip, TransportType::DoIP)
+                .await
         {
-            return Some(addr);
+            return Ok(transport);
         }
 
         if let Some(ref can) = self.can_gateway
-            && let Some(addr) = can.get_gateway_network_address(logical_address).await
+            && let Some(transport) = self
+                .try_bind_transport(&ecu_name_lower, can, TransportType::Can)
+                .await
         {
-            return Some(format!("can://{addr}"));
+            return Ok(transport);
         }
 
-        None
+        Err(DiagServiceError::EcuOffline(ecu_name.to_owned()))
     }
+}
 
+impl<D: EcuGateway + FunctionalTransport + TransportProbe, C: EcuGateway + TransportProbe>
+    PhysicalTransport for DiagnosticTransportRouter<D, C>
+{
     #[tracing::instrument(skip_all, fields(
         ecu = %transmission_params.ecu_name,
         gateway_addr = transmission_params.gateway_address
@@ -195,30 +237,7 @@ impl<D: EcuGateway, C: EcuCanGateway> EcuGateway for DiagnosticTransportRouter<D
         expect_uds_reply: bool,
     ) -> Result<(), DiagServiceError> {
         let ecu_name = transmission_params.ecu_name.to_lowercase();
-
-        let transport = if let Some(t) = self.pinned_or_bound(&ecu_name).await {
-            t
-        } else {
-            // First detection binds the ECU; DoIP is preferred when it
-            // already knows the ECU (an established gateway connection
-            // serves its logical address).
-            let doip_knows = if let Some(ref doip) = self.doip_gateway {
-                doip.get_gateway_network_address(transmission_params.gateway_address)
-                    .await
-                    .is_some()
-            } else {
-                false
-            };
-            if doip_knows {
-                self.bind(&ecu_name, TransportType::DoIP).await
-            } else if self.detect_on_can(&ecu_name).await {
-                self.bind(&ecu_name, TransportType::Can).await
-            } else {
-                return Err(DiagServiceError::EcuOffline(
-                    transmission_params.ecu_name.clone(),
-                ));
-            }
-        };
+        let transport = self.resolve_transport(&ecu_name).await?;
 
         match transport {
             TransportType::DoIP => {
@@ -253,48 +272,43 @@ impl<D: EcuGateway, C: EcuCanGateway> EcuGateway for DiagnosticTransportRouter<D
         ecu_name: &str,
         ecu_db: &RwLock<E>,
     ) -> Result<(), DiagServiceError> {
-        let ecu_name = ecu_name.to_lowercase();
+        // resolve_transport handles: overrides -> existing bindings -> first detection
+        let transport = self.resolve_transport(ecu_name).await?;
 
-        match self.pinned_or_bound(&ecu_name).await {
-            // Pinned or bound: online means online on THAT transport, so the
-            // answer always agrees with where send() routes. No failover.
-            Some(TransportType::DoIP) => match self.doip_gateway {
-                Some(ref doip) => doip.ecu_online(&ecu_name, ecu_db).await,
-                None => Err(DiagServiceError::EcuOffline(ecu_name.clone())),
+        // Online check on the resolved transport only (no failover)
+        match transport {
+            TransportType::DoIP => match self.doip_gateway {
+                Some(ref doip) => doip.ecu_online(ecu_name, ecu_db).await,
+                None => Err(DiagServiceError::EcuOffline(ecu_name.to_owned())),
             },
-            Some(TransportType::Can) => match self.can_gateway {
-                Some(ref can) => can.ecu_online(&ecu_name, ecu_db).await,
-                None => Err(DiagServiceError::EcuOffline(ecu_name.clone())),
+            TransportType::Can => match self.can_gateway {
+                Some(ref can) => can.ecu_online(ecu_name, ecu_db).await,
+                None => Err(DiagServiceError::EcuOffline(ecu_name.to_owned())),
             },
-            None => {
-                // Not seen yet: first successful detection binds the ECU,
-                // DoIP preferred.
-                if let Some(ref doip) = self.doip_gateway
-                    && doip.ecu_online(&ecu_name, ecu_db).await.is_ok()
-                {
-                    self.bind(&ecu_name, TransportType::DoIP).await;
-                    return Ok(());
-                }
-                if self.detect_on_can(&ecu_name).await {
-                    self.bind(&ecu_name, TransportType::Can).await;
-                    return Ok(());
-                }
-                Err(DiagServiceError::EcuOffline(ecu_name.clone()))
-            }
         }
     }
 
+    async fn shutdown(&mut self) {
+        if let Some(ref mut doip) = self.doip_gateway {
+            doip.shutdown().await;
+        }
+        if let Some(ref mut can) = self.can_gateway {
+            can.shutdown().await;
+        }
+    }
+}
+
+impl<D: EcuGateway + FunctionalTransport + TransportProbe, C: EcuGateway + TransportProbe>
+    FunctionalTransport for DiagnosticTransportRouter<D, C>
+{
     async fn send_functional(
         &self,
-        transmission_params: cda_interfaces::TransmissionParameters,
-        message: cda_interfaces::ServicePayload,
-        expected_ecu_logical_addrs: cda_interfaces::HashMap<u16, String>,
+        transmission_params: TransmissionParameters,
+        message: ServicePayload,
+        expected_ecu_logical_addrs: HashMap<u16, String>,
         timeout: std::time::Duration,
         expect_positive_response: bool,
-    ) -> Result<
-        cda_interfaces::HashMap<String, Result<cda_interfaces::ServicePayload, DiagServiceError>>,
-        DiagServiceError,
-    > {
+    ) -> Result<HashMap<String, Result<ServicePayload, DiagServiceError>>, DiagServiceError> {
         if let Some(ref doip) = self.doip_gateway {
             return doip
                 .send_functional(
@@ -306,29 +320,38 @@ impl<D: EcuGateway, C: EcuCanGateway> EcuGateway for DiagnosticTransportRouter<D
                 )
                 .await;
         }
-        if let Some(ref can) = self.can_gateway {
-            return can
-                .send_functional(
-                    transmission_params,
-                    message,
-                    expected_ecu_logical_addrs,
-                    timeout,
-                    expect_positive_response,
-                )
-                .await;
-        }
-        Err(DiagServiceError::EcuOffline(
-            "no transport configured for functional request".to_owned(),
-        ))
-    }
 
-    async fn shutdown(&mut self) {
-        if let Some(ref mut doip) = self.doip_gateway {
-            doip.shutdown().await;
+        if self.can_gateway.is_some() {
+            Err(DiagServiceError::RequestNotSupported(
+                "CAN transport does not support functional communication".to_owned(),
+            ))
+        } else {
+            Err(DiagServiceError::EcuOffline(
+                "No transport configured for functional request".to_owned(),
+            ))
         }
-        if let Some(ref mut can) = self.can_gateway {
-            can.shutdown().await;
+    }
+}
+
+impl<D: EcuGateway + FunctionalTransport + TransportProbe, C: EcuGateway + TransportProbe>
+    NetworkTopology for DiagnosticTransportRouter<D, C>
+{
+    async fn get_gateway_network_address(&self, logical_address: u16) -> Option<String> {
+        // DoIP addresses are returned verbatim (bare IP) to keep the SOVD
+        // network-structure API compatible with pre-multi-transport releases.
+        if let Some(ref doip) = self.doip_gateway
+            && let Some(addr) = doip.get_gateway_network_address(logical_address).await
+        {
+            return Some(addr);
         }
+
+        if let Some(ref can) = self.can_gateway
+            && let Some(addr) = can.get_gateway_network_address(logical_address).await
+        {
+            return Some(format!("can://{addr}"));
+        }
+
+        None
     }
 
     async fn get_ecu_network_address(&self, ecu_name: &str) -> Option<String> {
@@ -339,25 +362,29 @@ impl<D: EcuGateway, C: EcuCanGateway> EcuGateway for DiagnosticTransportRouter<D
         // lookup: DoIP addresses verbatim (the default impl yields None
         // today), CAN addresses behind a can:// scheme.
         let ecu_name = ecu_name.to_lowercase();
-        match self.pinned_or_bound(&ecu_name).await {
-            Some(TransportType::DoIP) => match self.doip_gateway {
-                Some(ref doip) => doip.get_ecu_network_address(&ecu_name).await,
-                None => None,
-            },
-            Some(TransportType::Can) => self.can_ecu_network_address(&ecu_name).await,
-            None => {
-                if let Some(ref doip) = self.doip_gateway
-                    && let Some(addr) = doip.get_ecu_network_address(&ecu_name).await
-                {
-                    return Some(addr);
-                }
-                self.can_ecu_network_address(&ecu_name).await
-            }
+
+        // Check override or existing binding first
+        if let Some(&pinned) = self.transport_overrides.get(&ecu_name) {
+            return self.network_address_for_transport(&ecu_name, pinned).await;
         }
+
+        if let Some(&bound) = self.ecu_bindings.read().await.get(&ecu_name) {
+            return self.network_address_for_transport(&ecu_name, bound).await;
+        }
+
+        // No binding yet - try DoIP first, then CAN
+        if let Some(ref doip) = self.doip_gateway
+            && let Some(addr) = doip.get_ecu_network_address(&ecu_name).await
+        {
+            return Some(addr);
+        }
+        self.can_ecu_network_address(&ecu_name).await
     }
 }
 
-impl<D: EcuGateway, C: EcuCanGateway> Clone for DiagnosticTransportRouter<D, C> {
+impl<D: EcuGateway + FunctionalTransport + TransportProbe, C: EcuGateway + TransportProbe> Clone
+    for DiagnosticTransportRouter<D, C>
+{
     fn clone(&self) -> Self {
         Self {
             doip_gateway: self.doip_gateway.clone(),

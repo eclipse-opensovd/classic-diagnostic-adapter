@@ -26,7 +26,10 @@ pub use com_param_handling::*;
 pub mod datatypes;
 pub mod diagservices;
 mod ecugateway;
-pub use ecugateway::*;
+pub use ecugateway::{
+    EcuGateway, FunctionalTransport, NetworkTopology, PhysicalTransport, RouteStatus,
+    TransmissionParameters, TransportProbe,
+};
 mod ecumanager;
 pub use ecumanager::*;
 mod ecuuds;
@@ -41,9 +44,10 @@ mod transport;
 pub use transport::TransportType;
 pub mod uds;
 pub use uds::{
-    DEFAULT_SUBFUNCTION_MASK, SERVICE_IDS_PARAMETER_META_DATA, SUPPRESS_POSITIVE_RESPONSE_BIT,
-    UDS_ID_RESPONSE_BITMASK, is_negative_response, is_pending_nrc, is_tester_present_nrc, nrc,
-    pending_nrc_from_raw, service_ids, subfunction_ids, uds_response_from_raw,
+    DEFAULT_SUBFUNCTION_MASK, PendingNrc, SERVICE_IDS_PARAMETER_META_DATA,
+    SUPPRESS_POSITIVE_RESPONSE_BIT, TransportResponse, UDS_ID_RESPONSE_BITMASK,
+    is_negative_response, is_pending_nrc, is_tester_present_nrc, nrc, pending_nrc_from_raw,
+    service_ids, subfunction_ids, uds_response_from_raw,
 };
 
 // Deliberately not using new type pattern here, to make sure all crates that take

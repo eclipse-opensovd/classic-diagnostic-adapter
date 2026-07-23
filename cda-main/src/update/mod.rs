@@ -18,7 +18,7 @@ use cda_comm_can::CanDiagGateway;
 use cda_comm_doip::DoipDiagGateway;
 use cda_core::EcuManager;
 use cda_interfaces::{
-    EcuGateway, UdsQuery,
+    PhysicalTransport, UdsQuery,
     datatypes::ComponentsConfig,
     runtime_update_api::{ReloadError, RuntimeFilesUpdateSecurityHandler},
 };

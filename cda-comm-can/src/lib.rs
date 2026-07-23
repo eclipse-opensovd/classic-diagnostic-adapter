@@ -49,12 +49,8 @@ pub struct CanDiagGateway {
 }
 
 #[cfg(not(feature = "can"))]
-impl cda_interfaces::EcuGateway for CanDiagGateway {
+impl cda_interfaces::PhysicalTransport for CanDiagGateway {
     async fn shutdown(&mut self) {}
-
-    async fn get_gateway_network_address(&self, _logical_address: u16) -> Option<String> {
-        None
-    }
 
     async fn send(
         &self,
@@ -79,46 +75,26 @@ impl cda_interfaces::EcuGateway for CanDiagGateway {
             "CAN support is not enabled. Compile with the `can` feature.".to_owned(),
         ))
     }
+}
 
-    async fn send_functional(
-        &self,
-        _transmission_params: cda_interfaces::TransmissionParameters,
-        _message: cda_interfaces::ServicePayload,
-        expected_ecu_logical_addrs: cda_interfaces::HashMap<u16, String>,
-        _timeout: std::time::Duration,
-        _expect_positive_response: bool,
-    ) -> Result<
-        cda_interfaces::HashMap<
-            String,
-            Result<cda_interfaces::ServicePayload, cda_interfaces::DiagServiceError>,
-        >,
-        cda_interfaces::DiagServiceError,
-    > {
-        Ok(expected_ecu_logical_addrs
-            .into_values()
-            .map(|name| {
-                (
-                    name,
-                    Err(cda_interfaces::DiagServiceError::EcuOffline(
-                        "CAN support is not enabled. Compile with the `can` feature.".to_owned(),
-                    )),
-                )
-            })
-            .collect())
+#[cfg(not(feature = "can"))]
+impl cda_interfaces::NetworkTopology for CanDiagGateway {
+    async fn get_gateway_network_address(&self, _logical_address: u16) -> Option<String> {
+        None
+    }
+
+    async fn get_ecu_network_address(&self, _ecu_name: &str) -> Option<String> {
+        None
     }
 }
 
 #[cfg(not(feature = "can"))]
-impl cda_interfaces::EcuCanGateway for CanDiagGateway {
-    async fn is_ecu_discovered_by_name(&self, _ecu_name: &str) -> bool {
-        false
+impl cda_interfaces::TransportProbe for CanDiagGateway {
+    async fn route_status(&self, _ecu_name: &str) -> cda_interfaces::RouteStatus {
+        cda_interfaces::RouteStatus::NotConfigured
     }
 
-    fn knows_ecu(&self, _ecu_name: &str) -> bool {
-        false
-    }
-
-    async fn probe_ecu(&self, _ecu_name: &str) -> bool {
+    async fn probe(&self, _ecu_name: &str) -> bool {
         false
     }
 }
@@ -127,15 +103,16 @@ impl cda_interfaces::EcuCanGateway for CanDiagGateway {
 /// test helpers - `CanDiagGateway::test_instance`, `clear_discovered`,
 /// `CanId`, `CanEcuConnection` - are `pub(crate)` in this crate).
 #[cfg(all(test, feature = "can"))]
-mod multi_transport_routing_tests {
+mod transport_orchestrator_routing_tests {
     use std::sync::{
         Arc,
         atomic::{AtomicBool, AtomicUsize, Ordering},
     };
 
     use cda_interfaces::{
-        CanId, DiagServiceError, EcuAddresses, EcuGateway, HashMap, ServicePayload,
-        TransmissionParameters, TransportType,
+        CanId, DiagServiceError, EcuAddresses, FunctionalTransport, HashMap, NetworkTopology,
+        PhysicalTransport, RouteStatus, ServicePayload, TransmissionParameters, TransportProbe,
+        TransportType,
     };
     use cda_transport_orchestrator::DiagnosticTransportRouter;
     use tokio::sync::{RwLock, mpsc};
@@ -149,13 +126,7 @@ mod multi_transport_routing_tests {
         ecu_online_calls: Arc<AtomicUsize>,
     }
 
-    impl EcuGateway for DoipStub {
-        async fn get_gateway_network_address(&self, _logical_address: u16) -> Option<String> {
-            self.online
-                .load(Ordering::SeqCst)
-                .then(|| "1.2.3.4".to_owned())
-        }
-
+    impl PhysicalTransport for DoipStub {
         async fn send(
             &self,
             _transmission_params: TransmissionParameters,
@@ -181,6 +152,10 @@ mod multi_transport_routing_tests {
             }
         }
 
+        async fn shutdown(&mut self) {}
+    }
+
+    impl FunctionalTransport for DoipStub {
         async fn send_functional(
             &self,
             _transmission_params: TransmissionParameters,
@@ -192,8 +167,28 @@ mod multi_transport_routing_tests {
         {
             Ok(HashMap::default())
         }
+    }
 
-        async fn shutdown(&mut self) {}
+    impl NetworkTopology for DoipStub {
+        async fn get_gateway_network_address(&self, _logical_address: u16) -> Option<String> {
+            self.online
+                .load(Ordering::SeqCst)
+                .then(|| "1.2.3.4".to_owned())
+        }
+    }
+
+    impl TransportProbe for DoipStub {
+        async fn route_status(&self, _ecu_name: &str) -> RouteStatus {
+            if self.online.load(Ordering::SeqCst) {
+                RouteStatus::Ready
+            } else {
+                RouteStatus::Unavailable
+            }
+        }
+
+        async fn probe(&self, _ecu_name: &str) -> bool {
+            false
+        }
     }
 
     struct EcuStub;
