@@ -362,36 +362,39 @@ impl<S: EcuGateway, T: UdsEcuDb + VariantDetection> UdsManager<S, T> {
                             tracing::warn!("Received unexpected UDS message: {:?}", msg);
                         }
                         Ok(Some(TransportResponse::Pending(pending))) => match pending {
-                            PendingNrc::BusyRepeatRequest { .. } => {
+                            // BusyRepeatRequest and TemporarilyNotAvailable differ
+                            // only in which com-params drive
+                            // them: both mean "retry the whole request after a
+                            // delay", unlike ResponsePending which keeps waiting below.
+                            PendingNrc::BusyRepeatRequest { .. }
+                            | PendingNrc::TemporarilyNotAvailable { .. } => {
+                                let (nrc, policy, completion_timeout, sleep_time) =
+                                    if matches!(pending, PendingNrc::BusyRepeatRequest { .. }) {
+                                        (
+                                            "BusyRepeatRequest",
+                                            &uds_params.rc_21_retry_policy,
+                                            &uds_params.rc_21_completion_timeout,
+                                            uds_params.rc_21_repeat_request_time,
+                                        )
+                                    } else {
+                                        (
+                                            "TemporarilyNotAvailable",
+                                            &uds_params.rc_94_retry_policy,
+                                            &uds_params.rc_94_completion_timeout,
+                                            uds_params.rc_94_repeat_request_time,
+                                        )
+                                    };
                                 if let Err(e) = validate_timeout_by_policy(
                                     ecu_name,
-                                    &uds_params.rc_21_retry_policy,
+                                    policy,
                                     &start.elapsed(),
-                                    &uds_params.rc_21_completion_timeout,
+                                    completion_timeout,
                                 ) {
                                     break 'read_uds_messages Err(e);
                                 }
-                                let sleep_time = uds_params.rc_21_repeat_request_time;
                                 tracing::debug!(
                                     sleep_time = ?sleep_time,
-                                    "BusyRepeatRequest received, resending after delay"
-                                );
-                                cda_interfaces::util::tokio_ext::sleep_for(sleep_time).await;
-                                continue 'send; // continue 'send, will resend the message
-                            }
-                            PendingNrc::TemporarilyNotAvailable { .. } => {
-                                if let Err(e) = validate_timeout_by_policy(
-                                    ecu_name,
-                                    &uds_params.rc_94_retry_policy,
-                                    &start.elapsed(),
-                                    &uds_params.rc_94_completion_timeout,
-                                ) {
-                                    break 'read_uds_messages Err(e);
-                                }
-                                let sleep_time = uds_params.rc_94_repeat_request_time;
-                                tracing::debug!(
-                                    sleep_time = ?sleep_time,
-                                    "TemporarilyNotAvailable received, resending after delay"
+                                    "{nrc} received, resending after delay"
                                 );
                                 cda_interfaces::util::tokio_ext::sleep_for(sleep_time).await;
                                 continue 'send; // continue 'send, will resend the message
@@ -881,8 +884,9 @@ mod send_tests {
     };
 
     use cda_interfaces::{
-        DiagServiceError, EcuAddresses, EcuGateway, EcuRuntimeState, EcuStateManager, HashMap,
-        HashMapExtensions, PendingNrc, ServicePayload, TransmissionParameters, TransportResponse,
+        DiagServiceError, EcuAddresses, EcuGateway, EcuRuntimeState, EcuStateManager,
+        FunctionalTransport, HashMap, HashMapExtensions, NetworkTopology, PendingNrc,
+        PhysicalTransport, ServicePayload, TransmissionParameters, TransportResponse,
         UDS_ID_RESPONSE_BITMASK, VariantDetection, datatypes::FaultConfig, service_ids,
     };
     use tokio::sync::{RwLock, mpsc};
@@ -958,14 +962,7 @@ mod send_tests {
             .push(sender);
     }
 
-    impl EcuGateway for TestGateway {
-        fn get_gateway_network_address(
-            &self,
-            _logical_address: u16,
-        ) -> impl Future<Output = Option<String>> + Send {
-            std::future::ready(None)
-        }
-
+    impl PhysicalTransport for TestGateway {
         fn send(
             &self,
             _transmission_params: TransmissionParameters,
@@ -1004,22 +1001,6 @@ mod send_tests {
         ) -> impl Future<Output = Result<(), DiagServiceError>> + Send {
             std::future::ready(Ok(()))
         }
-
-        fn send_functional(
-            &self,
-            _transmission_params: TransmissionParameters,
-            _message: ServicePayload,
-            _expected_ecu_logical_addrs: HashMap<u16, String>,
-            _timeout: Duration,
-            _expect_positive_response: bool,
-        ) -> impl Future<
-            Output = Result<
-                HashMap<String, Result<ServicePayload, DiagServiceError>>,
-                DiagServiceError,
-            >,
-        > + Send {
-            std::future::ready(Ok(HashMap::new()))
-        }
     }
 
     /// Test gateway dedicated to exercising the retry-teardown synchronization
@@ -1039,14 +1020,7 @@ mod send_tests {
         send_times: Arc<std::sync::Mutex<Vec<Instant>>>,
     }
 
-    impl EcuGateway for SlowTeardownGateway {
-        fn get_gateway_network_address(
-            &self,
-            _logical_address: u16,
-        ) -> impl Future<Output = Option<String>> + Send {
-            std::future::ready(None)
-        }
-
+    impl PhysicalTransport for SlowTeardownGateway {
         fn send(
             &self,
             _transmission_params: TransmissionParameters,
@@ -1076,7 +1050,9 @@ mod send_tests {
         ) -> impl Future<Output = Result<(), DiagServiceError>> + Send {
             std::future::ready(Ok(()))
         }
+    }
 
+    impl FunctionalTransport for SlowTeardownGateway {
         fn send_functional(
             &self,
             _transmission_params: TransmissionParameters,
@@ -1092,6 +1068,52 @@ mod send_tests {
         > + Send {
             std::future::ready(Ok(HashMap::new()))
         }
+    }
+
+    impl NetworkTopology for SlowTeardownGateway {
+        fn get_gateway_network_address(
+            &self,
+            _logical_address: u16,
+        ) -> impl Future<Output = Option<String>> + Send {
+            std::future::ready(None)
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl cda_interfaces::Shutdown for SlowTeardownGateway {
+        async fn shutdown(&self) {}
+    }
+
+    impl FunctionalTransport for TestGateway {
+        fn send_functional(
+            &self,
+            _transmission_params: TransmissionParameters,
+            _message: ServicePayload,
+            _expected_ecu_logical_addrs: HashMap<u16, String>,
+            _timeout: Duration,
+            _expect_positive_response: bool,
+        ) -> impl Future<
+            Output = Result<
+                HashMap<String, Result<ServicePayload, DiagServiceError>>,
+                DiagServiceError,
+            >,
+        > + Send {
+            std::future::ready(Ok(HashMap::new()))
+        }
+    }
+
+    impl NetworkTopology for TestGateway {
+        fn get_gateway_network_address(
+            &self,
+            _logical_address: u16,
+        ) -> impl Future<Output = Option<String>> + Send {
+            std::future::ready(None)
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl cda_interfaces::Shutdown for TestGateway {
+        async fn shutdown(&self) {}
     }
 
     // Test helpers
@@ -2095,7 +2117,6 @@ mod send_tests {
         let manager =
             make_manager_with_slow_teardown_gateway(gateway, Duration::from_millis(50), 1);
         let payload = make_test_payload(service_ids::SESSION_CONTROL, &[0x01]);
-
         let start = Instant::now();
         let result = manager
             .send_with_raw_payload("TestECU", payload, None, true)

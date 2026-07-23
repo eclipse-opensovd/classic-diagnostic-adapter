@@ -28,7 +28,7 @@
 
 use std::time::Duration;
 
-use cda_interfaces::EcuCanGateway;
+use cda_interfaces::TransportProbe;
 use tokio_util::sync::CancellationToken;
 
 use super::{CanDiagGateway, background::BackgroundTask};

@@ -28,9 +28,9 @@ use std::{sync::Arc, time::Duration};
 
 use async_trait::async_trait;
 use cda_interfaces::{
-    CanComParamProvider, CanId, DiagServiceError, EcuAddresses, EcuCanGateway, EcuGateway, HashMap,
-    ServicePayload, TransmissionParameters, TransportResponse, dlt_ctx, pending_nrc_from_raw,
-    uds_response_from_raw,
+    CanComParamProvider, CanId, DiagServiceError, EcuAddresses, FunctionalTransport, HashMap,
+    NetworkTopology, PhysicalTransport, RouteStatus, ServicePayload, TransmissionParameters,
+    TransportProbe, TransportResponse, dlt_ctx, pending_nrc_from_raw, uds_response_from_raw,
 };
 use tokio::sync::{RwLock, mpsc};
 
@@ -459,48 +459,18 @@ impl CanDiagGateway {
             .unwrap_or(0)
     }
 
+    /// Checks if a specific ECU was discovered by name.
+    async fn is_ecu_discovered_by_name(&self, ecu_name: &str) -> bool {
+        self.discovered_ecus.read().await.contains(ecu_name)
+    }
+
     /// Gets a connection for the given ECU name.
     fn get_connection(&self, ecu_name: &str) -> Option<Arc<CanEcuConnection>> {
         self.connections.get(ecu_name).cloned()
     }
 }
 
-impl EcuCanGateway for CanDiagGateway {
-    async fn is_ecu_discovered_by_name(&self, ecu_name: &str) -> bool {
-        self.discovered_ecus.read().await.contains(ecu_name)
-    }
-
-    fn knows_ecu(&self, ecu_name: &str) -> bool {
-        self.connections.contains_key(ecu_name)
-    }
-
-    async fn probe_ecu(&self, ecu_name: &str) -> bool {
-        let ecu_name = ecu_name.to_lowercase();
-        let Some(conn) = self.connections.get(&ecu_name).cloned() else {
-            return false;
-        };
-        let logical_addr = self.logical_address_for_ecu(&ecu_name);
-        if self.probe_connection(&conn, logical_addr).await.is_ok() {
-            self.discovered_ecus.write().await.insert(ecu_name);
-            true
-        } else {
-            self.discovered_ecus.write().await.remove(&ecu_name);
-            false
-        }
-    }
-}
-
-impl EcuGateway for CanDiagGateway {
-    async fn get_gateway_network_address(&self, logical_address: u16) -> Option<String> {
-        let ecu_name = self.logical_address_to_ecu.get(&logical_address)?;
-        if !self.is_ecu_discovered_by_name(ecu_name).await {
-            return None;
-        }
-        self.connections
-            .get(ecu_name)
-            .map(|conn| conn.network_address())
-    }
-
+impl PhysicalTransport for CanDiagGateway {
     #[tracing::instrument(skip_all, fields(
         ecu = %transmission_params.ecu_name,
         gateway_addr = transmission_params.gateway_address,
@@ -704,6 +674,18 @@ impl EcuGateway for CanDiagGateway {
             Err(DiagServiceError::EcuOffline(ecu_name.clone()))
         }
     }
+}
+
+impl NetworkTopology for CanDiagGateway {
+    async fn get_gateway_network_address(&self, logical_address: u16) -> Option<String> {
+        let ecu_name = self.logical_address_to_ecu.get(&logical_address)?;
+        if !self.is_ecu_discovered_by_name(ecu_name).await {
+            return None;
+        }
+        self.connections
+            .get(ecu_name)
+            .map(|conn| conn.network_address())
+    }
 
     fn get_ecu_network_address(
         &self,
@@ -714,7 +696,9 @@ impl EcuGateway for CanDiagGateway {
             .map(|conn| conn.network_address());
         std::future::ready(result)
     }
+}
 
+impl FunctionalTransport for CanDiagGateway {
     fn send_functional(
         &self,
         _transmission_params: cda_interfaces::TransmissionParameters,
@@ -738,6 +722,36 @@ impl EcuGateway for CanDiagGateway {
         std::future::ready(Err(DiagServiceError::RequestNotSupported(
             "functional addressing is not implemented for the CAN transport".to_owned(),
         )))
+    }
+}
+
+impl TransportProbe for CanDiagGateway {
+    async fn route_status(&self, ecu_name: &str) -> RouteStatus {
+        let ecu_name = ecu_name.to_lowercase();
+        if !self.connections.contains_key(&ecu_name) {
+            return RouteStatus::NotConfigured;
+        }
+        if self.discovered_ecus.read().await.contains(&ecu_name) {
+            RouteStatus::Ready
+        } else {
+            // CAN has a resolved ID pair and supports a bounded physical probe.
+            RouteStatus::ProbeRequired
+        }
+    }
+
+    async fn probe_ecu(&self, ecu_name: &str) -> bool {
+        let ecu_name = ecu_name.to_lowercase();
+        let Some(conn) = self.connections.get(&ecu_name).cloned() else {
+            return false;
+        };
+        let logical_addr = self.logical_address_for_ecu(&ecu_name);
+        if self.probe_connection(&conn, logical_addr).await.is_ok() {
+            self.discovered_ecus.write().await.insert(ecu_name);
+            true
+        } else {
+            self.discovered_ecus.write().await.remove(&ecu_name);
+            false
+        }
     }
 }
 
@@ -778,7 +792,7 @@ impl Clone for CanDiagGateway {
 #[cfg(test)]
 impl CanDiagGateway {
     /// Drops all discovery state, simulating every ECU vanishing from the
-    /// bus. Test-only counterpart to `probe_ecu` marking ECUs undiscovered.
+    /// bus. Test-only counterpart to `probe` marking ECUs undiscovered.
     pub(crate) async fn clear_discovered(&self) {
         self.discovered_ecus.write().await.clear();
     }

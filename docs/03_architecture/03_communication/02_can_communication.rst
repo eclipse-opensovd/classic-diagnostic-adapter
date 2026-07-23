@@ -260,7 +260,5 @@ Functional Communication Limitation
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 
 .. note::
-
-   ``CanDiagGateway::send_functional()`` currently returns
-   ``DiagServiceError::RequestNotSupported``. The functional CAN ID is used only by the
-   optional gateway keep-alive broadcast, not to implement functional diagnostic requests.
+   Functional transport for CAN is currently not supported.
+   Tracked via https://github.com/eclipse-opensovd/classic-diagnostic-adapter/issues/417

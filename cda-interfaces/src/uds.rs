@@ -16,7 +16,43 @@
 //! Groups the ISO 14229-1 identifiers and transport-level NRC classification
 //! that both the CAN and `DoIP` gateways need.
 
-use crate::{PendingNrc, ServicePayload};
+use crate::ServicePayload;
+
+/// Pending-lifecycle NRC variants that signal the transport must keep its
+/// connection/socket open for a follow-up response.
+///
+/// The transport layer classifies raw bytes into these variants via
+/// [`crate::pending_nrc_from_raw`] and performs its own side effects
+/// (deadline extension, socket keep-alive) before forwarding to the UDS layer.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PendingNrc {
+    /// NRC 0x78 -- ECU needs more time, final response will follow.
+    ResponsePending { source_address: u16 },
+    /// NRC 0x21 -- ECU busy, client should retransmit.
+    BusyRepeatRequest { source_address: u16 },
+    /// NRC 0x94 -- Resource temporarily unavailable, retransmit.
+    TemporarilyNotAvailable { source_address: u16 },
+}
+
+/// Response already classified by the transport, with transport-level
+/// side effects (deadline extension, socket keep-alive) already applied.
+///
+/// The transport guarantees:
+/// - For [`TransportResponse::Pending`]: the underlying connection/socket
+///   remains open and any transport-specific timers have been extended.
+/// - For [`TransportResponse::UdsResponse`]: the exchange is complete from the
+///   transport's perspective. The payload is the raw UDS response bytes
+///   (positive or negative response).
+#[derive(Debug, Clone)]
+pub enum TransportResponse {
+    /// A pending-lifecycle NRC. The transport has already extended its own
+    /// deadline / kept its socket open. The UDS layer decides retry policy.
+    Pending(PendingNrc),
+    /// A terminal response. The payload contains the raw UDS response bytes --
+    /// either a positive response or a negative response with an NRC other
+    /// than the three pending-lifecycle codes.
+    UdsResponse(ServicePayload),
+}
 
 /// UDS Service Identifiers (SIDs) from ISO 14229-1.
 pub mod service_ids {
@@ -221,7 +257,11 @@ mod tests {
 
     #[test]
     fn uds_final_from_raw_preserves_data_and_addresses() {
-        let data = vec![service_ids::NEGATIVE_RESPONSE, 0x10, 0x22];
+        let data = vec![
+            service_ids::NEGATIVE_RESPONSE,
+            service_ids::SESSION_CONTROL,
+            0x22,
+        ];
         let payload = uds_response_from_raw(data.clone(), SOURCE_ADDRESS, TARGET_ADDRESS);
         assert_eq!(payload.data, data);
         assert_eq!(payload.source_address, SOURCE_ADDRESS);
@@ -263,7 +303,7 @@ mod tests {
     fn pending_nrc_0x21_classified_correctly() {
         let data = vec![
             service_ids::NEGATIVE_RESPONSE,
-            0x10, // SessionControl
+            service_ids::SESSION_CONTROL,
             nrc::BUSY_REPEAT_REQUEST,
         ];
         let pending = pending_nrc_from_raw(&data, SOURCE_ADDRESS);
@@ -279,7 +319,7 @@ mod tests {
     fn pending_nrc_0x94_classified_correctly() {
         let data = vec![
             service_ids::NEGATIVE_RESPONSE,
-            0x22, // ReadDataByIdentifier
+            service_ids::READ_DATA_BY_IDENTIFIER,
             nrc::TEMPORARILY_NOT_AVAILABLE,
         ];
         let pending = pending_nrc_from_raw(&data, SOURCE_ADDRESS);
@@ -295,8 +335,8 @@ mod tests {
     fn non_pending_nrc_returns_none() {
         let data = vec![
             service_ids::NEGATIVE_RESPONSE,
-            0x10,
-            0x22, // conditionsNotCorrect
+            service_ids::SESSION_CONTROL,
+            0x22, // conditions not correct
         ];
         assert!(pending_nrc_from_raw(&data, SOURCE_ADDRESS).is_none());
     }

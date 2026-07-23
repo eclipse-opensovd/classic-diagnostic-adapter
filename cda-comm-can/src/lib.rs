@@ -60,11 +60,7 @@ pub struct CanDiagGateway {
 }
 
 #[cfg(not(feature = "can"))]
-impl cda_interfaces::EcuGateway for CanDiagGateway {
-    async fn get_gateway_network_address(&self, _logical_address: u16) -> Option<String> {
-        None
-    }
-
+impl cda_interfaces::PhysicalTransport for CanDiagGateway {
     async fn send(
         &self,
         _transmission_params: cda_interfaces::TransmissionParameters,
@@ -88,12 +84,26 @@ impl cda_interfaces::EcuGateway for CanDiagGateway {
             "CAN support is not enabled. Compile with the `can` feature.".to_owned(),
         ))
     }
+}
 
+#[cfg(not(feature = "can"))]
+impl cda_interfaces::NetworkTopology for CanDiagGateway {
+    async fn get_gateway_network_address(&self, _logical_address: u16) -> Option<String> {
+        None
+    }
+
+    async fn get_ecu_network_address(&self, _ecu_name: &str) -> Option<String> {
+        None
+    }
+}
+
+#[cfg(not(feature = "can"))]
+impl cda_interfaces::FunctionalTransport for CanDiagGateway {
     async fn send_functional(
         &self,
         _transmission_params: cda_interfaces::TransmissionParameters,
         _message: cda_interfaces::ServicePayload,
-        expected_ecu_logical_addrs: cda_interfaces::HashMap<u16, String>,
+        _expected_ecu_logical_addrs: cda_interfaces::HashMap<u16, String>,
         _timeout: std::time::Duration,
         _expect_positive_response: bool,
     ) -> Result<
@@ -103,24 +113,11 @@ impl cda_interfaces::EcuGateway for CanDiagGateway {
         >,
         cda_interfaces::DiagServiceError,
     > {
-        Ok(expected_ecu_logical_addrs
-            .into_values()
-            .map(|name| {
-                (
-                    name,
-                    Err(cda_interfaces::DiagServiceError::EcuOffline(
-                        "CAN support is not enabled. Compile with the `can` feature.".to_owned(),
-                    )),
-                )
-            })
-            .collect())
+        Err(cda_interfaces::DiagServiceError::RequestNotSupported(
+            "CAN functional addressing is not available because CAN support is disabled."
+                .to_owned(),
+        ))
     }
-}
-
-#[cfg(not(feature = "can"))]
-#[async_trait::async_trait]
-impl cda_interfaces::Shutdown for CanDiagGateway {
-    async fn shutdown(&self) {}
 }
 
 #[cfg(not(feature = "can"))]
@@ -135,13 +132,9 @@ impl cda_interfaces::ReusableTransportResource for CanDiagGateway {
 }
 
 #[cfg(not(feature = "can"))]
-impl cda_interfaces::EcuCanGateway for CanDiagGateway {
-    async fn is_ecu_discovered_by_name(&self, _ecu_name: &str) -> bool {
-        false
-    }
-
-    fn knows_ecu(&self, _ecu_name: &str) -> bool {
-        false
+impl cda_interfaces::TransportProbe for CanDiagGateway {
+    async fn route_status(&self, _ecu_name: &str) -> cda_interfaces::RouteStatus {
+        cda_interfaces::RouteStatus::NotConfigured
     }
 
     async fn probe_ecu(&self, _ecu_name: &str) -> bool {
@@ -149,21 +142,28 @@ impl cda_interfaces::EcuCanGateway for CanDiagGateway {
     }
 }
 
+#[cfg(not(feature = "can"))]
+#[async_trait::async_trait]
+impl cda_interfaces::Shutdown for CanDiagGateway {
+    async fn shutdown(&self) {}
+}
+
 /// CAN routing tests for `DiagnosticTransportRouter` (lives here because the
 /// test helpers - `CanDiagGateway::test_instance`, `clear_discovered`,
 /// `CanId`, `CanEcuConnection` - are `pub(crate)` in this crate).
 #[cfg(all(test, feature = "can"))]
-mod multi_transport_routing_tests {
+mod transport_routing_tests {
     use std::sync::{
         Arc,
         atomic::{AtomicBool, AtomicUsize, Ordering},
     };
 
     use cda_interfaces::{
-        CanId, DiagServiceError, EcuAddresses, EcuGateway, HashMap, ServicePayload,
-        TransmissionParameters, TransportType,
+        CanId, DiagServiceError, EcuAddresses, FunctionalTransport, HashMap, NetworkTopology,
+        PhysicalTransport, RouteStatus, ServicePayload, TransmissionParameters, TransportProbe,
+        TransportType,
     };
-    use cda_transport_orchestrator::DiagnosticTransportRouter;
+    use cda_transport_router::DiagnosticTransportRouter;
     use tokio::sync::{RwLock, mpsc};
 
     use crate::{CanDiagGateway, gateway::connection::CanEcuConnection};
@@ -175,14 +175,8 @@ mod multi_transport_routing_tests {
         ecu_online_calls: Arc<AtomicUsize>,
     }
 
-    impl EcuGateway for DoipStub {
-        async fn get_gateway_network_address(&self, _logical_address: u16) -> Option<String> {
-            self.online
-                .load(Ordering::SeqCst)
-                .then(|| "1.2.3.4".to_owned())
-        }
-
-        async fn send(
+    impl PhysicalTransport for DoipStub {
+        fn send(
             &self,
             _transmission_params: TransmissionParameters,
             _message: ServicePayload,
@@ -190,34 +184,73 @@ mod multi_transport_routing_tests {
                 Result<Option<cda_interfaces::TransportResponse>, DiagServiceError>,
             >,
             _expect_uds_reply: bool,
-        ) -> Result<tokio::task::JoinHandle<()>, DiagServiceError> {
-            Ok(tokio::task::spawn(async {}))
+        ) -> impl Future<Output = Result<tokio::task::JoinHandle<()>, DiagServiceError>> + Send
+        {
+            std::future::ready(Ok(tokio::task::spawn(std::future::ready(()))))
         }
 
-        async fn ecu_online<T: EcuAddresses>(
+        fn ecu_online<T: EcuAddresses>(
             &self,
             ecu_name: &str,
             _ecu_db: &RwLock<T>,
-        ) -> Result<(), DiagServiceError> {
+        ) -> impl Future<Output = Result<(), DiagServiceError>> + Send {
             self.ecu_online_calls.fetch_add(1, Ordering::SeqCst);
-            if self.online.load(Ordering::SeqCst) {
+            std::future::ready(if self.online.load(Ordering::SeqCst) {
                 Ok(())
             } else {
                 Err(DiagServiceError::EcuOffline(ecu_name.to_owned()))
-            }
+            })
         }
+    }
 
-        async fn send_functional(
+    impl FunctionalTransport for DoipStub {
+        fn send_functional(
             &self,
             _transmission_params: TransmissionParameters,
             _message: ServicePayload,
             _expected_ecu_logical_addrs: HashMap<u16, String>,
             _timeout: std::time::Duration,
             _expect_positive_response: bool,
-        ) -> Result<HashMap<String, Result<ServicePayload, DiagServiceError>>, DiagServiceError>
-        {
-            Ok(HashMap::default())
+        ) -> impl Future<
+            Output = Result<
+                HashMap<String, Result<ServicePayload, DiagServiceError>>,
+                DiagServiceError,
+            >,
+        > + Send {
+            std::future::ready(Ok(HashMap::default()))
         }
+    }
+
+    impl NetworkTopology for DoipStub {
+        fn get_gateway_network_address(
+            &self,
+            _logical_address: u16,
+        ) -> impl Future<Output = Option<String>> + Send {
+            std::future::ready(
+                self.online
+                    .load(Ordering::SeqCst)
+                    .then(|| "1.2.3.4".to_owned()),
+            )
+        }
+    }
+
+    impl TransportProbe for DoipStub {
+        fn route_status(&self, _ecu_name: &str) -> impl Future<Output = RouteStatus> + Send {
+            std::future::ready(if self.online.load(Ordering::SeqCst) {
+                RouteStatus::Ready
+            } else {
+                RouteStatus::Unavailable
+            })
+        }
+
+        fn probe_ecu(&self, _ecu_name: &str) -> impl Future<Output = bool> + Send {
+            std::future::ready(false)
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl cda_interfaces::Shutdown for DoipStub {
+        async fn shutdown(&self) {}
     }
 
     struct EcuStub;

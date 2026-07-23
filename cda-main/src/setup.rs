@@ -28,7 +28,7 @@ use cda_comm_uds::FlashTransferObserver;
 use cda_core::EcuManager;
 use cda_interfaces::{HashMap, ShutdownSignal, health::HealthProvider};
 use cda_plugin_security::{SecurityPlugin, SecurityPluginLoader};
-use cda_transport_orchestrator::DiagnosticTransportRouter;
+use cda_transport_router::DiagnosticTransportRouter;
 use futures::future::BoxFuture;
 use tokio::sync::{Mutex, RwLock};
 
