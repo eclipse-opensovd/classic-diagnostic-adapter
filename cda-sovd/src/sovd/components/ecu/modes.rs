@@ -305,7 +305,7 @@ pub(crate) mod session {
                 },
             )
             .with(openapi::error_not_found)
-            .with(openapi::error_forbidden)
+            .with(openapi::error_conflict)
             .with(openapi::error_bad_request)
             .with(openapi::error_internal_server)
             .with(openapi::error_bad_gateway)
@@ -400,6 +400,7 @@ pub(crate) mod security {
                     })
             })
             .with(openapi::error_not_found)
+            .with(openapi::error_conflict)
     }
 
     fn is_request_seed_value(input: &str) -> bool {
@@ -577,7 +578,7 @@ pub(crate) mod security {
                 },
             )
             .with(openapi::error_not_found)
-            .with(openapi::error_forbidden)
+            .with(openapi::error_conflict)
             .with(openapi::error_bad_request)
             .with(openapi::error_internal_server)
             .with(openapi::error_bad_gateway)
@@ -684,7 +685,7 @@ pub(crate) mod commctrl {
                 )
             })
             .with(openapi::error_not_found)
-            .with(openapi::error_forbidden)
+            .with(openapi::error_conflict)
             .with(openapi::error_bad_request)
             .with(openapi::error_internal_server)
             .with(openapi::error_bad_gateway)
@@ -791,7 +792,7 @@ pub(crate) mod dtcsetting {
                 )
             })
             .with(openapi::error_not_found)
-            .with(openapi::error_forbidden)
+            .with(openapi::error_conflict)
             .with(openapi::error_bad_request)
             .with(openapi::error_internal_server)
             .with(openapi::error_bad_gateway)

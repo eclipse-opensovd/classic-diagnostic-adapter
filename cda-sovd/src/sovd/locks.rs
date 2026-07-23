@@ -579,7 +579,7 @@ pub(crate) mod vehicle {
 
         if let Err(e) = validate_claim(None, &claims, vehicle_lock.as_ref()) {
             return ErrorWrapper {
-                error: e,
+                error: ApiError::Conflict(e.to_string()),
                 include_schema: false,
             }
             .into_response();
@@ -588,7 +588,7 @@ pub(crate) mod vehicle {
         let ecu_locks = state.locks.ecu.lock_ro().await;
         if let Err(e) = all_locks_owned(&ecu_locks, &claims) {
             return ErrorWrapper {
-                error: e,
+                error: ApiError::Conflict(e.to_string()),
                 include_schema: false,
             }
             .into_response();
@@ -597,7 +597,7 @@ pub(crate) mod vehicle {
         let functional_locks = state.locks.functional_group.lock_ro().await;
         if let Err(e) = all_locks_owned(&functional_locks, &claims) {
             return ErrorWrapper {
-                error: e,
+                error: ApiError::Conflict(e.to_string()),
                 include_schema: false,
             }
             .into_response();
@@ -659,6 +659,8 @@ async fn reset_ecu_session_and_security<T: UdsEcu>(
     context: &str,
     security_plugin: &DynamicPlugin,
 ) {
+    uds.ecu_flash_transfer_abort(ecu_name).await;
+
     if let Err(e) = uds.reset_ecu_session(ecu_name, security_plugin).await {
         tracing::error!("Failed to reset ECU session for ECU {ecu_name} during {context}: {e}");
     } else {
@@ -887,53 +889,34 @@ pub(crate) async fn validate_lock(
     include_schema: bool,
 ) -> Option<Response> {
     let ecu_lock = locks.ecu.lock_ro().await;
-    let ecu_locks = get_locks(claims, &ecu_lock, Some(ecu_name));
-
     let vehicle_lock = locks.vehicle.lock_ro().await;
-    let vehicle_locks = get_locks(claims, &vehicle_lock, None);
+    let ecu_name = ecu_name.to_owned();
+    let ecu_lock = ecu_lock.get(Some(&ecu_name), None);
+    let vehicle_lock = vehicle_lock.get(None, None);
 
-    if ecu_locks.items.is_empty() && vehicle_locks.items.is_empty() {
+    if ecu_lock.is_none() && vehicle_lock.is_none() {
         return Some(
             ErrorWrapper {
-                error: ApiError::Forbidden(Some("Required ECU lock is missing".to_owned())),
+                error: ApiError::Conflict("Required ECU lock is missing".to_owned()),
                 include_schema,
             }
             .into_response(),
         );
     }
 
-    // Validate Vehicle lock is owned
-    if let Err(e) = all_locks_owned(&vehicle_lock, claims) {
-        return Some(
-            ErrorWrapper {
-                error: e,
-                include_schema,
-            }
-            .into_response(),
-        );
+    if ecu_lock.is_some_and(|lock| lock.is_owned_by(claims.sub()))
+        || vehicle_lock.is_some_and(|lock| lock.is_owned_by(claims.sub()))
+    {
+        return None;
     }
 
-    // Validate ECU lock is owned
-    if let Err(e) = all_locks_owned(&ecu_lock, claims) {
-        return Some(
-            ErrorWrapper {
-                error: e,
-                include_schema,
-            }
-            .into_response(),
-        );
-    }
-
-    if let Err(e) = all_locks_owned(&ecu_lock, claims) {
-        return Some(
-            ErrorWrapper {
-                error: e,
-                include_schema,
-            }
-            .into_response(),
-        );
-    }
-    None
+    Some(
+        ErrorWrapper {
+            error: ApiError::Conflict("Required ECU lock is owned by another subject".to_owned()),
+            include_schema,
+        }
+        .into_response(),
+    )
 }
 
 /// Validate that the caller holds a lock on the given **functional group** (or the vehicle lock).
@@ -948,46 +931,36 @@ pub(crate) async fn validate_fg_lock(
     include_schema: bool,
 ) -> Option<Response> {
     let fg_lock = locks.functional_group.lock_ro().await;
-    let fg_locks = get_locks(claims, &fg_lock, Some(functional_group_name));
-
     let vehicle_lock = locks.vehicle.lock_ro().await;
-    let vehicle_locks = get_locks(claims, &vehicle_lock, None);
+    let functional_group_name = functional_group_name.to_owned();
+    let fg_lock = fg_lock.get(Some(&functional_group_name), None);
+    let vehicle_lock = vehicle_lock.get(None, None);
 
-    if fg_locks.items.is_empty() && vehicle_locks.items.is_empty() {
+    if fg_lock.is_none() && vehicle_lock.is_none() {
         return Some(
             ErrorWrapper {
-                error: ApiError::Forbidden(Some(
-                    "Required functional group lock is missing".to_owned(),
-                )),
+                error: ApiError::Conflict("Required functional group lock is missing".to_owned()),
                 include_schema,
             }
             .into_response(),
         );
     }
 
-    // Validate vehicle lock is owned by the caller (if one exists)
-    if let Err(e) = all_locks_owned(&vehicle_lock, claims) {
-        return Some(
-            ErrorWrapper {
-                error: e,
-                include_schema,
-            }
-            .into_response(),
-        );
+    if fg_lock.is_some_and(|lock| lock.is_owned_by(claims.sub()))
+        || vehicle_lock.is_some_and(|lock| lock.is_owned_by(claims.sub()))
+    {
+        return None;
     }
 
-    // Validate functional group lock is owned by the caller
-    if let Err(e) = all_locks_owned(&fg_lock, claims) {
-        return Some(
-            ErrorWrapper {
-                error: e,
-                include_schema,
-            }
-            .into_response(),
-        );
-    }
-
-    None
+    Some(
+        ErrorWrapper {
+            error: ApiError::Conflict(
+                "Required functional group lock is owned by another subject".to_owned(),
+            ),
+            include_schema,
+        }
+        .into_response(),
+    )
 }
 
 pub(crate) async fn delete_lock(
@@ -1090,7 +1063,12 @@ pub(crate) async fn post_handler<T: UdsEcu + Clone>(
         ) {
             Ok(lock) => (StatusCode::CREATED, Json(lock)).into_response(),
             Err(e) => ErrorWrapper {
-                error: e,
+                error: match e {
+                    ApiError::Forbidden(_) => {
+                        ApiError::Conflict("Lock is already owned by another subject".to_owned())
+                    }
+                    other => other,
+                },
                 include_schema,
             }
             .into_response(),
@@ -1233,7 +1211,7 @@ pub(crate) async fn vehicle_read_lock<'a>(
     let vehicle_lock = vehicle_ro_lock.get(None, None);
     match validate_claim(None, claims, vehicle_lock) {
         Ok(()) => Ok(vehicle_ro_lock),
-        Err(e) => Err(e),
+        Err(e) => Err(ApiError::Conflict(e.to_string())),
     }
 }
 
@@ -1494,6 +1472,59 @@ mod tests {
         assert!(!locks.vehicle.lock_ro().await.is_any_locked());
     }
 
+    #[tokio::test]
+    async fn lock_validation_ignores_unrelated_foreign_locks() {
+        let locks = init_locks();
+        insert_test_ecu_lock(&locks, "flxc1000").await;
+        insert_test_fg_lock(&locks, "func_group").await;
+
+        let foreign_ecu_lock = test_lock("foreign-user", "foreign-ecu-lock");
+        let foreign_fg_lock = test_lock("foreign-user", "foreign-fg-lock");
+        match &locks.ecu {
+            LockType::Ecu(map) => {
+                map.write()
+                    .await
+                    .insert("unrelated_ecu".to_owned(), Some(foreign_ecu_lock));
+            }
+            _ => panic!("expected ECU lock type"),
+        }
+        match &locks.functional_group {
+            LockType::FunctionalGroup(map) => {
+                map.write()
+                    .await
+                    .insert("unrelated_fg".to_owned(), Some(foreign_fg_lock));
+            }
+            _ => panic!("expected functional group lock type"),
+        }
+
+        let claims = TestSecurityPlugin.claims();
+        assert!(
+            validate_lock(&claims, "flxc1000", &locks, false)
+                .await
+                .is_none()
+        );
+        assert!(
+            validate_fg_lock(&claims, "func_group", &locks, false)
+                .await
+                .is_none()
+        );
+    }
+
+    fn test_lock(owner: &str, id: &str) -> Lock {
+        Lock::new(
+            sovd_interfaces::locking::Lock {
+                id: id.to_owned(),
+                owned: None,
+            },
+            Utc::now()
+                .checked_add_signed(chrono::TimeDelta::seconds(3600))
+                .expect("test lock expiration must be valid"),
+            owner.to_owned(),
+            tokio::spawn(async {}),
+            LockCleanupFnHelper::new(|| async {}),
+        )
+    }
+
     pub fn init_locks() -> Arc<Locks> {
         // Initialize ecu_map with dummy data
         let mut ecu_map = LockHashMap::new();
@@ -1515,6 +1546,12 @@ mod tests {
     fn expect_ecu_lock_cleanup_multiple(uds_ecu: &mut MockUdsEcu, ecus: &Vec<String>) {
         // Expect reset methods to be called for each ECU during cleanup
         for ecu in ecus {
+            uds_ecu
+                .expect_ecu_flash_transfer_abort()
+                .with(eq(ecu.clone()))
+                .times(1)
+                .returning(|_| ());
+
             uds_ecu
                 .expect_reset_ecu_session()
                 .with(eq(ecu.clone()), always())
@@ -1560,6 +1597,12 @@ mod tests {
                 .returning(|_| Ok(()));
 
             // Expect reset methods to be called during cleanup
+            cloned
+                .expect_ecu_flash_transfer_abort()
+                .with(eq(ecu_name_clone.clone()))
+                .times(1)
+                .returning(|_| ());
+
             cloned
                 .expect_reset_ecu_session()
                 .with(eq(ecu_name_clone.clone()), always())

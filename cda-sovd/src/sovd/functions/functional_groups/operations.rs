@@ -554,7 +554,6 @@ pub(crate) mod diag_service {
                  /operations/{operation}/executions/{id} to stop.",
             )
         })
-        .with(openapi::error_forbidden)
         .with(openapi::error_not_found)
         .with(openapi::error_conflict)
         .with(openapi::error_internal_server)
@@ -688,7 +687,6 @@ pub(crate) mod diag_service {
         })
         .with(openapi::error_not_found)
         .with(openapi::error_bad_request)
-        .with(openapi::error_forbidden)
         .with(openapi::error_conflict)
     }
 
@@ -1007,7 +1005,6 @@ pub(crate) mod diag_service {
             })
             .with(openapi::error_not_found)
             .with(openapi::error_bad_request)
-            .with(openapi::error_forbidden)
             .with(openapi::error_conflict)
             .with(openapi::error_bad_gateway)
         }
@@ -1539,7 +1536,7 @@ pub(crate) mod diag_service {
         }
 
         #[tokio::test]
-        async fn test_fg_delete_no_lock_returns_forbidden() {
+        async fn test_fg_delete_no_lock_returns_conflict() {
             let mock_uds = MockUdsEcu::new();
             // state has no lock set up
             let state = create_test_fg_state(mock_uds, "AllECUs".to_string());
@@ -1562,7 +1559,7 @@ pub(crate) mod diag_service {
             )
             .await;
 
-            assert_eq!(response.status(), StatusCode::FORBIDDEN);
+            assert_eq!(response.status(), StatusCode::CONFLICT);
         }
 
         #[tokio::test]

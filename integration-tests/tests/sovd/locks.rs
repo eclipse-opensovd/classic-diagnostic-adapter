@@ -297,6 +297,48 @@ async fn ownership() -> Result<(), TestingError> {
 }
 
 #[tokio::test]
+async fn lock_acquisition_collision_returns_conflict() -> Result<(), TestingError> {
+    let (runtime, _lock) = setup_integration_test(true).await?;
+    let auth_owner = auth_header(&runtime.config, None).await?;
+    let auth_other = auth_header(&runtime.config, Some("lock-contender")).await?;
+
+    for endpoint in ENDPOINTS {
+        let lock_id: String = response_to_json_to_field(
+            &create_lock(
+                default_timeout(),
+                endpoint,
+                StatusCode::CREATED,
+                &runtime.config,
+                &auth_owner,
+            )
+            .await,
+            "id",
+        )?;
+
+        create_lock(
+            default_timeout(),
+            endpoint,
+            StatusCode::CONFLICT,
+            &runtime.config,
+            &auth_other,
+        )
+        .await;
+
+        lock_operation(
+            endpoint,
+            Some(&lock_id),
+            &runtime.config,
+            &auth_owner,
+            StatusCode::NO_CONTENT,
+            Method::DELETE,
+        )
+        .await;
+    }
+
+    Ok(())
+}
+
+#[tokio::test]
 async fn test_vehicle_locking_blocked_by_other() -> Result<(), TestingError> {
     let (runtime, _lock) = setup_integration_test(true).await?;
     let auth_user1 = auth_header(&runtime.config, None).await?;
@@ -319,7 +361,7 @@ async fn test_vehicle_locking_blocked_by_other() -> Result<(), TestingError> {
     create_lock(
         default_timeout(),
         VEHICLE_ENDPOINT,
-        StatusCode::FORBIDDEN,
+        StatusCode::CONFLICT,
         &runtime.config,
         &auth_user2,
     )
@@ -538,7 +580,7 @@ async fn test_component_ownership_protection_with_vehicle_lock_only() -> Result<
         &runtime.config,
         &auth_non_owner,
         sovd::ECU_FLXC1000_ENDPOINT,
-        StatusCode::FORBIDDEN,
+        StatusCode::CONFLICT,
     )
     .await?;
 
