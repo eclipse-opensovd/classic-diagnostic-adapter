@@ -19,21 +19,23 @@ participant "Diagnostic\nKernel" as DIAG
 participant "UDS / DoIP" as COMM
 participant ECU
 
-Client -> CDA : POST /components/{ecu}/genericservice\n{ "request": "22F190" }
+Client -> CDA : PUT /components/{ecu}/genericservice\nContent-Type: application/octet-stream\nAccept: application/octet-stream\nRaw bytes: 22 F1 90
 activate CDA
-
-CDA -> SEC : check permissions for\nraw UDS request (22 F1 90) on {ecu}
-activate SEC
-SEC -> SEC : evaluate authorization\n(client identity, target ECU,\nUDS SID + payload prefix)
-SEC -> CDA : authorized
-deactivate SEC
-
-CDA -> CDA : parse hex-encoded\nraw UDS request bytes
 
 CDA -> DIAG : send raw UDS (byte array)
 activate DIAG
 
-note over DIAG : no MDD service resolution\nor parameter encoding needed
+DIAG -> DIAG : read SID from first byte (22)\nresolve matching MDD service
+
+note over DIAG : Remaining request bytes are not\nparameter-decoded or validated
+
+DIAG -> DIAG : check service preconditions
+
+DIAG -> SEC : validate resolved diagnostic service
+activate SEC
+SEC -> SEC : evaluate authorization for service
+SEC --> DIAG : authorized
+deactivate SEC
 
 DIAG -> COMM : send raw UDS request
 activate COMM
@@ -47,9 +49,7 @@ deactivate COMM
 DIAG -> CDA : raw response bytes
 deactivate DIAG
 
-CDA -> CDA : hex-encode response
-
-CDA -> Client : HTTP 200 OK\n{ "response": "62F190..." }
+CDA -> Client : HTTP 200 OK\nContent-Type: application/octet-stream\nRaw bytes: 62 F1 90 {data}
 deactivate CDA
 
 @enduml
