@@ -292,22 +292,7 @@ impl<S: EcuGateway, T: EcuManager> UdsDataTransfer for UdsManager<S, T> {
         let transfer = lock.get(ecu_name).ok_or_else(|| {
             DiagServiceError::NotFound(format!("Data transfer for ECU {ecu_name} not found"))
         })?;
-
-        if transfer.meta_data.id != id || transfer.owner != owner {
-            return Err(DiagServiceError::NotFound(format!(
-                "Data transfer with id {id} not found for ECU {ecu_name}"
-            )));
-        }
-
-        if !matches!(
-            transfer.meta_data.status,
-            DataTransferStatus::Aborted | DataTransferStatus::Finished
-        ) {
-            return Err(DiagServiceError::InvalidRequest(format!(
-                "Data transfer with id {id} is currently in status {:?}, cannot exit",
-                transfer.meta_data.status,
-            )));
-        }
+        transfer.validate_exit(ecu_name, id, owner)?;
 
         // Now it is safe to remove the transfer from the map
         let mut transfer = lock.remove(ecu_name).ok_or_else(|| {
