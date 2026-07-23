@@ -182,66 +182,75 @@ impl Storage for LocalStorage {
         ))
     }
 
-    async fn create_collection(
+    fn create_collection(
         &self,
         tx: &mut Transaction,
         name: &CollectionName,
-    ) -> Result<Arc<LocalCollection>, StorageError> {
-        let dir = self.collection_dir(name)?;
-        if dir.exists() {
-            return Err(StorageError::TransactionConflict(format!(
-                "Collection already exists: {name}"
-            )));
-        }
+    ) -> impl std::future::Future<Output = Result<Arc<LocalCollection>, StorageError>> + Send {
+        let result = (|| {
+            let dir = self.collection_dir(name)?;
+            if dir.exists() {
+                return Err(StorageError::TransactionConflict(format!(
+                    "Collection already exists: {name}"
+                )));
+            }
 
-        let op = Operation::CreateCollection { name: name.clone() };
-        wal::append_operation(tx.journal_path(), &op)?;
-        tx.record(op);
+            let op = Operation::CreateCollection { name: name.clone() };
+            wal::append_operation(tx.journal_path(), &op)?;
+            tx.record(op);
 
-        // Return a collection handle that points to where the directory *will* be after commit.
-        Ok(Arc::new(LocalCollection::new(
-            name.clone(),
-            dir,
-            Arc::clone(&self.data_lock),
-        )))
+            // Return a collection handle that points to where the directory *will* be after commit.
+            Ok(Arc::new(LocalCollection::new(
+                name.clone(),
+                dir,
+                Arc::clone(&self.data_lock),
+            )))
+        })();
+        std::future::ready(result)
     }
 
-    async fn delete_collection(
+    fn delete_collection(
         &self,
         tx: &mut Transaction,
         name: &CollectionName,
-    ) -> Result<(), StorageError> {
-        let dir = self.collection_dir(name)?;
-        if !dir.exists() {
-            return Err(StorageError::CollectionNotFound(name.to_string()));
-        }
+    ) -> impl std::future::Future<Output = Result<(), StorageError>> + Send {
+        let result = (|| {
+            let dir = self.collection_dir(name)?;
+            if !dir.exists() {
+                return Err(StorageError::CollectionNotFound(name.to_string()));
+            }
 
-        let op = Operation::DeleteCollection { name: name.clone() };
-        wal::append_operation(tx.journal_path(), &op)?;
-        tx.record(op);
+            let op = Operation::DeleteCollection { name: name.clone() };
+            wal::append_operation(tx.journal_path(), &op)?;
+            tx.record(op);
 
-        Ok(())
+            Ok(())
+        })();
+        std::future::ready(result)
     }
 
-    async fn copy_collection(
+    fn copy_collection(
         &self,
         tx: &mut Transaction,
         source: &CollectionName,
         dest: &CollectionName,
-    ) -> Result<(), StorageError> {
-        let source_dir = self.collection_dir(source)?;
-        if !source_dir.exists() {
-            return Err(StorageError::CollectionNotFound(source.to_string()));
-        }
+    ) -> impl std::future::Future<Output = Result<(), StorageError>> + Send {
+        let result = (|| {
+            let source_dir = self.collection_dir(source)?;
+            if !source_dir.exists() {
+                return Err(StorageError::CollectionNotFound(source.to_string()));
+            }
 
-        let op = Operation::CopyCollection {
-            source: source.clone(),
-            dest: dest.clone(),
-        };
-        wal::append_operation(tx.journal_path(), &op)?;
-        tx.record(op);
+            let op = Operation::CopyCollection {
+                source: source.clone(),
+                dest: dest.clone(),
+            };
+            wal::append_operation(tx.journal_path(), &op)?;
+            tx.record(op);
 
-        Ok(())
+            Ok(())
+        })();
+        std::future::ready(result)
     }
 }
 

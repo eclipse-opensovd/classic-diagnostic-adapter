@@ -748,7 +748,7 @@ async fn test_time_circuits_sends_correct_uds_frames() {
 }
 
 /// Verify the correct UDS frame for `TimeCircuits` Start with `ManualEntry` travel method.
-/// The ManualEntry row encodes: travelMethod key=0x01 followed by
+/// The `ManualEntry` row encodes: travelMethod key=0x01 followed by
 /// destinationYear (uint16), destinationMonth (uint8), destinationDay (uint8).
 #[tokio::test]
 async fn test_time_circuits_manual_entry_uds_frame() {
@@ -819,7 +819,7 @@ async fn test_time_circuits_manual_entry_uds_frame() {
 }
 
 /// Verify the correct UDS frame for `TimeCircuits` Start with `PresetDestination` travel method.
-/// The PresetDestination row encodes: travelMethod key=0x02 followed by presetId (uint8 texttable).
+/// The `PresetDestination` row encodes: travelMethod key=0x02 followed by presetId (uint8 texttable).
 #[tokio::test]
 async fn test_time_circuits_preset_destination_uds_frame() {
     let (runtime, _lock) = setup_integration_test(true).await.unwrap();
@@ -896,7 +896,14 @@ async fn acquire_ecu_lock(
 
     use crate::sovd::locks::{self, create_lock, lock_operation};
 
-    #[cfg_attr(nightly, allow(unknown_lints, clippy::duration_suboptimal_units))]
+    #[cfg_attr(
+        nightly,
+        allow(
+            unknown_lints,
+            clippy::duration_suboptimal_units,
+            reason = "from_mins/from_hours not available in Rust 1.88"
+        )
+    )]
     let expiration_timeout = Duration::from_secs(60);
     let ecu_lock = create_lock(
         expiration_timeout,
@@ -953,7 +960,14 @@ async fn acquire_fg_lock(
 
     use crate::sovd::locks::{self, create_lock, lock_operation};
 
-    #[cfg_attr(nightly, allow(unknown_lints, clippy::duration_suboptimal_units))]
+    #[cfg_attr(
+        nightly,
+        allow(
+            unknown_lints,
+            clippy::duration_suboptimal_units,
+            reason = "from_mins/from_hours not available in Rust 1.88"
+        )
+    )]
     let expiration_timeout = Duration::from_secs(60);
     let fg_lock = create_lock(
         expiration_timeout,

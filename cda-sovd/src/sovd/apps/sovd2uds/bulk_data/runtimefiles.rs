@@ -170,6 +170,10 @@ fn bulk_data_list_response(
     (StatusCode::OK, Json(list)).into_response()
 }
 
+#[allow(
+    clippy::result_large_err,
+    reason = "`axum::Response` is an external type whose size we cannot reduce"
+)]
 async fn require_vehicle_lock(
     lock_state: &dyn LockStateProvider,
     claims: &dyn cda_plugin_security::Claims,

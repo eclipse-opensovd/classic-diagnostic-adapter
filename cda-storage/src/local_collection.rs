@@ -216,36 +216,48 @@ impl Collection for LocalCollection {
         Ok(())
     }
 
-    async fn delete(&self, tx: &mut Transaction, key: &str) -> Result<(), StorageError> {
-        let key = normalize_key(key);
-        self.ensure_normalized_on_disk(&key);
+    fn delete(
+        &self,
+        tx: &mut Transaction,
+        key: &str,
+    ) -> impl std::future::Future<Output = Result<(), StorageError>> + Send {
+        let result = (|| {
+            let key = normalize_key(key);
+            self.ensure_normalized_on_disk(&key);
 
-        // Verify the key exists in committed state.
-        let path = self.key_path(&key)?;
-        if !path.exists() {
-            return Err(StorageError::KeyNotFound(key));
-        }
+            // Verify the key exists in committed state.
+            let path = self.key_path(&key)?;
+            if !path.exists() {
+                return Err(StorageError::KeyNotFound(key));
+            }
 
-        let op = Operation::Delete {
-            collection: self.name.clone(),
-            key,
-        };
+            let op = Operation::Delete {
+                collection: self.name.clone(),
+                key,
+            };
 
-        wal::append_operation(tx.journal_path(), &op)?;
-        tx.record(op);
+            wal::append_operation(tx.journal_path(), &op)?;
+            tx.record(op);
 
-        Ok(())
+            Ok(())
+        })();
+        std::future::ready(result)
     }
 
-    async fn delete_all(&self, tx: &mut Transaction) -> Result<(), StorageError> {
+    fn delete_all(
+        &self,
+        tx: &mut Transaction,
+    ) -> impl std::future::Future<Output = Result<(), StorageError>> + Send {
         let op = Operation::DeleteAll {
             collection: self.name.clone(),
         };
 
-        wal::append_operation(tx.journal_path(), &op)?;
-        tx.record(op);
-
-        Ok(())
+        let result = (|| {
+            wal::append_operation(tx.journal_path(), &op)?;
+            tx.record(op);
+            Ok(())
+        })();
+        std::future::ready(result)
     }
 }
 

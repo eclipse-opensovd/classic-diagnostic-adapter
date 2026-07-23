@@ -1094,6 +1094,10 @@ pub(crate) mod service {
 
         /// Sends the Start subfunction request and returns the positive response, or
         /// `Err(Response)` if the UDS call failed or returned a negative response.
+        #[allow(
+            clippy::result_large_err,
+            reason = "`axum::Response` is an external type whose size we cannot reduce"
+        )]
         async fn send_start_request<T: UdsEcu>(
             uds: &T,
             ecu_name: &str,

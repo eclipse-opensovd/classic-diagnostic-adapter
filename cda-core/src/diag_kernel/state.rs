@@ -11,6 +11,15 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+#![cfg_attr(
+    nightly,
+    allow(
+        unknown_lints,
+        clippy::unused_async_trait_impl,
+        reason = "The `Actor` derive macro generates async trait impls that may have no `.await`"
+    )
+)]
+
 use cda_database::datatypes;
 use cda_interfaces::{DiagServiceError, EcuStateManager, dlt_ctx, service_ids, util::std_ext};
 use cda_plugin_security::SecurityPlugin;
