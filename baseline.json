@@ -1695,15 +1695,6 @@
       "crate": "cda-interfaces"
     },
     {
-      "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-interfaces/src/ecumanager.rs",
-      "function": "Connectivity::fmt",
-      "line": 145,
-      "cyclomatic": 3.0,
-      "coverage": 0.0,
-      "crap": 12.0,
-      "crate": "cda-interfaces"
-    },
-    {
       "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-core/src/diag_kernel/schema.rs",
       "function": "EcuManager::schema_for_request",
       "line": 20,
@@ -2604,15 +2595,6 @@
       "crate": "cda-interfaces"
     },
     {
-      "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-comm-uds/src/tester_present.rs",
-      "function": "UdsManager::control_tester_present",
-      "line": 26,
-      "cyclomatic": 7.0,
-      "coverage": 73.97260273972603,
-      "crap": 7.863949390386539,
-      "crate": "cda-comm-uds"
-    },
-    {
       "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-database/src/datatypes/diag_coded_type.rs",
       "function": "inject_bits",
       "line": 745,
@@ -2656,6 +2638,15 @@
       "coverage": 77.77777777777779,
       "crap": 7.5377229080932775,
       "crate": "cda-core"
+    },
+    {
+      "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-comm-uds/src/tester_present.rs",
+      "function": "UdsManager::control_tester_present",
+      "line": 26,
+      "cyclomatic": 7.0,
+      "coverage": 78.08219178082192,
+      "crap": 7.515926039221936,
+      "crate": "cda-comm-uds"
     },
     {
       "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-main/src/config/com_params.rs",
@@ -5079,6 +5070,15 @@
       "crate": "cda-interfaces"
     },
     {
+      "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-interfaces/src/ecumanager.rs",
+      "function": "Connectivity::fmt",
+      "line": 145,
+      "cyclomatic": 3.0,
+      "coverage": 80.0,
+      "crap": 3.072,
+      "crate": "cda-interfaces"
+    },
+    {
       "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-comm-doip/src/ecu_connection.rs",
       "function": "EcuConnectionVariant::read",
       "line": 136,
@@ -5313,6 +5313,15 @@
       "crate": "cda-database"
     },
     {
+      "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-interfaces/src/strings.rs",
+      "function": "Strings::get_or_insert",
+      "line": 94,
+      "cyclomatic": 3.0,
+      "coverage": 92.85714285714286,
+      "crap": 3.003279883381924,
+      "crate": "cda-interfaces"
+    },
+    {
       "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-comm-doip/src/lib.rs",
       "function": "DoipDiagGateway::shutdown",
       "line": 423,
@@ -5437,15 +5446,6 @@
       "coverage": 100.0,
       "crap": 3.0,
       "crate": "cda-database"
-    },
-    {
-      "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-interfaces/src/strings.rs",
-      "function": "Strings::get_or_insert",
-      "line": 94,
-      "cyclomatic": 3.0,
-      "coverage": 100.0,
-      "crap": 3.0,
-      "crate": "cda-interfaces"
     },
     {
       "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-interfaces/src/ecumanager.rs",
