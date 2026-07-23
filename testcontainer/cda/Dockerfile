@@ -37,6 +37,7 @@ COPY cda-interfaces/Cargo.toml ./cda-interfaces/Cargo.toml
 COPY cda-core/Cargo.toml ./cda-core/Cargo.toml
 COPY cda-comm-doip/Cargo.toml ./cda-comm-doip/Cargo.toml
 COPY cda-comm-uds/Cargo.toml ./cda-comm-uds/Cargo.toml
+COPY cda-comm-can/Cargo.toml ./cda-comm-can/Cargo.toml
 COPY cda-database/Cargo.toml ./cda-database/Cargo.toml
 COPY cda-plugin-security/Cargo.toml ./cda-plugin-security/Cargo.toml
 COPY cda-plugin-runtime-update/Cargo.toml ./cda-plugin-runtime-update/Cargo.toml
@@ -83,6 +84,10 @@ ARG SOURCE_DATE_EPOCH
 ARG SOURCE_GIT_SHA
 ARG BUILD_PROFILE=release
 ARG RUSTFLAGS=
+# Optional extra cargo features for the opensovd-cda binary, e.g.
+# "can-socketcand" to compile in the socketcand-backed CAN transport used by
+# the CAN integration tests.
+ARG CDA_FEATURES=""
 
 WORKDIR /app
 # Copy pre-built dependencies from the cacher stage
@@ -95,6 +100,7 @@ COPY cda-interfaces ./cda-interfaces
 COPY cda-core ./cda-core
 COPY cda-comm-doip ./cda-comm-doip
 COPY cda-comm-uds ./cda-comm-uds
+COPY cda-comm-can ./cda-comm-can
 COPY cda-database ./cda-database
 COPY cda-plugin-security ./cda-plugin-security
 COPY cda-plugin-runtime-update ./cda-plugin-runtime-update
@@ -119,10 +125,10 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry,sharing=locked \
     export SOURCE_GIT_SHA=${SOURCE_GIT_SHA} && \
     export RUSTFLAGS="$RUSTFLAGS"; \
     if [ "$BUILD_PROFILE" = "dev" ]; then \
-        cargo build --profile dev --bin opensovd-cda && \
+        cargo build --profile dev --bin opensovd-cda ${CDA_FEATURES:+--features "$CDA_FEATURES"} && \
         cp target/debug/opensovd-cda /tmp/opensovd-cda; \
     else \
-        cargo build --release --bin opensovd-cda && \
+        cargo build --release --bin opensovd-cda ${CDA_FEATURES:+--features "$CDA_FEATURES"} && \
         cp target/release/opensovd-cda /tmp/opensovd-cda; \
     fi
 

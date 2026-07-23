@@ -74,6 +74,17 @@ pub struct DatabaseNamingConvention {
     // it will be validated in the validate sanity function
     #[serde(deserialize_with = "serde_ext::normalized_u8_key_map::deserialize")]
     pub service_affixes: HashMap<String, (DiagnosticServiceAffixPosition, Vec<String>)>,
+    /// Protocol short-names that identify diagnostics-over-CAN in the MDD,
+    /// matched case-insensitively. When the configured protocol name is one
+    /// of these but the database has no layer of exactly that name, protocol
+    /// resolution tries the other entries in order. OEM databases with
+    /// different protocol names configure their own list.
+    #[serde(default = "default_can_protocol_aliases")]
+    pub can_protocol_aliases: Vec<String>,
+    /// Case-insensitive substrings that mark a protocol short-name as
+    /// diagnostics-over-CAN during `"auto-can"` protocol detection.
+    #[serde(default = "default_can_protocol_markers")]
+    pub can_protocol_markers: Vec<String>,
     /// Affixes used to derive a service lookup name from a [`DiagCommAction`].
     ///
     /// These are applied when a [`crate::DiagComm`] has no explicit `lookup_name`
@@ -345,10 +356,29 @@ impl Default for DatabaseNamingConvention {
                     ),
                 ),
             ]),
+            can_protocol_aliases: [
+                "UDS_CAN",
+                "ISO_11898_2_DWCAN",
+                "ISO_11898_3_DWFTCAN",
+                "CAN",
+                "ISO_15765_2",
+                "ISO_15765_3",
+            ]
+            .map(str::to_owned)
+            .to_vec(),
+            can_protocol_markers: ["CAN", "ISO_11898"].map(str::to_owned).to_vec(),
             semantics: Semantics::default(),
             action_affixes: DiagCommActionAffixes::default(),
         }
     }
+}
+
+fn default_can_protocol_aliases() -> Vec<String> {
+    DatabaseNamingConvention::default().can_protocol_aliases
+}
+
+fn default_can_protocol_markers() -> Vec<String> {
+    DatabaseNamingConvention::default().can_protocol_markers
 }
 
 /// Position of a naming affix relative to the diagnostic service name.
@@ -428,6 +458,7 @@ mod tests {
             service_affixes: HashMap::default(),
             semantics: Semantics::default(),
             action_affixes: DiagCommActionAffixes::default(),
+            ..Default::default()
         }
     }
 
@@ -521,6 +552,7 @@ mod tests {
             service_affixes: HashMap::default(),
             action_affixes: DiagCommActionAffixes::default(),
             semantics: Semantics::default(),
+            ..Default::default()
         };
         assert_eq!(conv.trim_short_name_affixes("PRE_data"), "data");
         assert_eq!(conv.trim_long_name_affixes("Data POST"), "Data");

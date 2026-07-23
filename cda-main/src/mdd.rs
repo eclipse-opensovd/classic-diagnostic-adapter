@@ -374,43 +374,72 @@ pub(crate) fn handle_ecu_config_keys<S: SecurityPlugin>(
     Ok(())
 }
 
-/// Scans `databases` for ECUs sharing the same logical and gateway address and marks them as
-/// duplicates of each other by calling `set_duplicating_ecu_names` on each affected manager.
+/// The transport target an ECU description talks to, as far as duplicate
+/// detection is concerned: several ECU descriptions sharing one target are
+/// candidate models of the same physical node (e.g. the radio variants of a
+/// vehicle), and variant detection decides which one is actually installed.
+#[derive(Hash, PartialEq, Eq)]
+enum DuplicateTargetKey {
+    /// Resolved `DoIP` gateway/logical address pair.
+    Doip { gateway: u16, logical: u16 },
+    /// CAN arbitration ID pair from the MDD com-params, for ECUs without
+    /// resolved `DoIP` addressing (e.g. CAN-only databases).
+    Can(cda_interfaces::CanIds),
+}
+
+/// Scans `databases` for ECUs sharing the same transport target - the
+/// resolved `DoIP` gateway/logical address pair, or (for ECUs without `DoIP`
+/// addressing) the CAN arbitration ID pair from the MDD com-params - and
+/// marks them as duplicates of each other by calling
+/// `set_duplicating_ecu_names` on each affected manager.
 async fn mark_duplicate_ecus_by_address<S: SecurityPlugin>(
     databases: &HashMap<String, RwLock<EcuManager<S>>>,
 ) {
-    let mut ecus_by_address: HashMap<u16, HashMap<u16, Vec<String>>> = HashMap::new();
+    use cda_interfaces::CanComParamProvider as _;
+
+    let mut ecus_by_target: HashMap<DuplicateTargetKey, Vec<String>> = HashMap::new();
     for (name, db_lock) in databases {
         let db = db_lock.read().await;
-        let logical_address = db.logical_address();
-        let gateway_address = db.logical_gateway_address();
-        ecus_by_address
-            .entry(gateway_address)
-            .or_default()
-            .entry(logical_address)
-            .or_default()
-            .push(name.clone());
+        let key = if db.doip_addresses_resolved() {
+            DuplicateTargetKey::Doip {
+                gateway: db.logical_gateway_address(),
+                logical: db.logical_address(),
+            }
+        } else if let Some(ids) = db.can_ids() {
+            DuplicateTargetKey::Can(ids)
+        } else {
+            // Without resolved DoIP addressing the addresses are com-param
+            // fallback values shared by every such ECU (e.g. a functional
+            // description), and without CAN IDs there is no other target
+            // identity - no evidence of an actual collision, so grouping
+            // would spuriously mark unrelated ECUs as duplicates and
+            // suppress base-variant fallback for all of them.
+            tracing::debug!(
+                ecu_name = %name,
+                "Skipping duplicate detection - neither resolved DoIP addressing nor CAN IDs"
+            );
+            continue;
+        };
+        ecus_by_target.entry(key).or_default().push(name.clone());
     }
 
-    for logical_map in ecus_by_address.values() {
-        for ecu_names in logical_map.values() {
-            if ecu_names.len() <= 1 {
+    for ecu_names in ecus_by_target.values() {
+        if ecu_names.len() <= 1 {
+            continue;
+        }
+
+        for ecu_name in ecu_names {
+            let Some(db_lock) = databases.get(ecu_name) else {
                 continue;
-            }
+            };
 
-            for ecu_name in ecu_names {
-                let Some(db_lock) = databases.get(ecu_name) else {
-                    continue;
-                };
-
-                let mut db = db_lock.write().await;
-                let duplicates: HashSet<String> = ecu_names
-                    .iter()
-                    .filter(|&name| name != ecu_name)
-                    .cloned()
-                    .collect();
-                db.set_duplicating_ecu_names(duplicates);
-            }
+            let mut db = db_lock.write().await;
+            let duplicates: HashSet<String> = ecu_names
+                .iter()
+                .filter(|&name| name != ecu_name)
+                .cloned()
+                .collect();
+            db.set_duplicating_ecu_names(duplicates);
         }
     }
 }

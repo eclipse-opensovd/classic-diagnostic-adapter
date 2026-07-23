@@ -356,6 +356,16 @@ fn spawn_connection_reset_task(
                 let mut reconnect_attempts = 0u32;
                 if let Some(reason) = conn_reset_rx.recv().await {
                     tracing::info!(reason = %reason, "Resetting connection");
+                    // This task owns the connectivity notifications for the
+                    // gateway lifecycle: disconnected here, connected after a
+                    // successful reset. Emitting them from one place keeps
+                    // their order strict - notifications racing in from the
+                    // dying connection's IO tasks used to arrive after the
+                    // reconnect's connected and pinned healthy ECUs Offline.
+                    gateway
+                        .connectivity_handler
+                        .on_gateway_disconnected(&gateway.ecu_names)
+                        .await;
                     let mut conn_guard = conn_reset.lock_connection().await;
 
                     'reconnect: loop {
@@ -397,13 +407,21 @@ fn spawn_connection_reset_task(
                                 if reconnect_attempts
                                     >= gateway.connection.ecu_timeouts.max_retry_attempts
                                 {
+                                    // Do NOT end the task here: it is the only
+                                    // reconnect path for this gateway, and the
+                                    // outage may simply outlast the retry
+                                    // budget (e.g. a restarting gateway). Keep
+                                    // listening so the next reset request - a
+                                    // failed send, or the pending ones already
+                                    // queued - starts a fresh retry round.
                                     tracing::error!(
                                         attempts = reconnect_attempts,
                                         max_attempts =
                                             gateway.connection.ecu_timeouts.max_retry_attempts,
-                                        "Max reconnect attempts reached, giving up"
+                                        "Max reconnect attempts reached, giving up until the next \
+                                         reset request"
                                     );
-                                    return;
+                                    break 'reconnect;
                                 }
                             }
                         }

@@ -27,6 +27,9 @@ docs/images/*.svg
 
 **/*.html
 
+# MDD database files (proprietary, not for version control)
+mdds/*.mdd
+
 # Docker environment settings
 .env
 

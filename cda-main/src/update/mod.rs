@@ -14,10 +14,11 @@
 use std::{future::Future, path::PathBuf, sync::Arc};
 
 use async_trait::async_trait;
+use cda_comm_can::MultiTransportGateway;
 use cda_comm_doip::DoipDiagGateway;
 use cda_core::EcuManager;
 use cda_interfaces::{
-    UdsQuery,
+    EcuGateway, UdsQuery,
     datatypes::ComponentsConfig,
     runtime_update_api::{ReloadError, RuntimeFilesUpdateSecurityHandler},
 };
@@ -41,7 +42,7 @@ where
     pub lock_provider: Arc<cda_sovd::SovdLockStateProvider>,
     pub shutdown_signal: F,
     pub uds_manager: RwLock<UdsManagerType<S>>,
-    pub doip_gateway: RwLock<DoipDiagGateway<EcuManager<S>>>,
+    pub doip_gateway: RwLock<MultiTransportGateway<DoipDiagGateway<EcuManager<S>>>>,
     pub ecu_execution_registry: cda_sovd::EcuExecutionRegistry,
     pub update_guard: cda_sovd::UpdateGuardState,
     pub health: Option<crate::HealthProviders>,
@@ -62,7 +63,7 @@ where
     lock_provider: Arc<cda_sovd::SovdLockStateProvider>,
     shutdown_signal: F,
     uds_manager: RwLock<UdsManagerType<S>>,
-    doip_gateway: RwLock<DoipDiagGateway<EcuManager<S>>>,
+    doip_gateway: RwLock<MultiTransportGateway<DoipDiagGateway<EcuManager<S>>>>,
     update_guard: cda_sovd::UpdateGuardState,
     ecu_execution_registry: cda_sovd::EcuExecutionRegistry,
     health: Option<crate::HealthProviders>,
@@ -120,7 +121,13 @@ where
         self.uds_manager.write().await.shutdown().await;
         let doip_socket = {
             let mut gw = self.doip_gateway.write().await;
-            let socket = gw.udp_socket();
+            // `None` in CAN-only operation (no DoIP transport configured);
+            // `create_vehicle_components` only needs the socket when DoIP is
+            // enabled.
+            let socket = gw.doip().map(DoipDiagGateway::udp_socket);
+            // Shut down all transports and await their task termination, so
+            // the VAM listener has stopped reading from the shared UDP socket
+            // before the replacement gateway reuses it.
             gw.shutdown().await;
             socket
         };
@@ -215,7 +222,7 @@ pub struct RuntimeUpdateContext<
     pub security_handler: Arc<T>,
     pub ecu_execution_registry: cda_sovd::EcuExecutionRegistry,
     pub uds_manager: UdsManagerType<S>,
-    pub doip_gateway: DoipDiagGateway<EcuManager<S>>,
+    pub doip_gateway: MultiTransportGateway<DoipDiagGateway<EcuManager<S>>>,
     pub health: Option<crate::HealthProviders>,
     pub variant_detection_handle: Option<tokio::task::JoinHandle<()>>,
 }

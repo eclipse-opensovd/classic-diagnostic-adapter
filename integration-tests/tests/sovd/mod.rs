@@ -388,8 +388,10 @@ where
         // Run cleanup inside catch_unwind so a failure here never triggers
         // a double-panic (which the runtime turns into SIGABRT).
         let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            // Run on a dedicated thread to avoid nesting a new runtime
-            // inside the existing tokio runtime (which would abort).
+            // Drive the cleanup future on a dedicated thread: a nested
+            // runtime on a tokio worker thread panics (see
+            // https://docs.rs/tokio/latest/tokio/runtime/struct.Runtime.html#method.block_on),
+            // and a second panic while unwinding aborts the process.
             std::thread::scope(|s| {
                 s.spawn(|| {
                     if let Ok(rt) = tokio::runtime::Builder::new_current_thread()

@@ -405,8 +405,9 @@ impl<S: SecurityPlugin> EcuManager<S> {
                     "Expected Reserved specific data".to_owned(),
                 ))?;
         let bit_length = reserved_param.bit_length();
+        let data_type = super::reserved_param_data_type(bit_length);
         let coded_type = datatypes::DiagCodedType::new_high_low_byte_order(
-            datatypes::DataType::UInt32,
+            data_type,
             datatypes::DiagCodedTypeVariant::StandardLength(datatypes::StandardLengthType {
                 bit_length,
                 bit_mask: None,

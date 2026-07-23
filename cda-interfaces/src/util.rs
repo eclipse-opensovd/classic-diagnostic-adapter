@@ -158,8 +158,9 @@ pub mod serde_ext {
         }
 
         fn normalize_key(s: &str) -> Result<String, String> {
+            use crate::util::try_strip_hex_prefix;
             let s = s.trim();
-            if let Some(hex) = s.to_lowercase().strip_prefix("0x") {
+            if let Some(hex) = try_strip_hex_prefix(s) {
                 u8::from_str_radix(hex, 16)
             } else {
                 s.parse::<u8>()
@@ -448,9 +449,136 @@ pub fn try_extract_sid_from_payload(payload: &[u8]) -> Result<u8, DiagServiceErr
     Ok(sid)
 }
 
+/// Whether `response` belongs to a request with SID `request_sid`: its
+/// positive response (SID with the response bit set) or a negative
+/// response (`7F <SID> <NRC>`). Used to tell the answer apart from
+/// unrelated traffic on a shared channel.
+#[must_use]
+pub fn uds_response_matches_request_sid(request_sid: u8, response: &[u8]) -> bool {
+    if response.first() == Some(&crate::service_ids::NEGATIVE_RESPONSE) {
+        response.get(1) == Some(&request_sid)
+    } else {
+        response.first() == Some(&(request_sid | crate::UDS_ID_RESPONSE_BITMASK))
+    }
+}
+
+/// Strip a single `0x` or `0X` prefix from `s`, returning the remainder.
+/// Returns the original slice when no hex prefix is present.
+#[must_use]
+pub fn strip_hex_prefix(s: &str) -> &str {
+    s.strip_prefix("0x")
+        .or_else(|| s.strip_prefix("0X"))
+        .unwrap_or(s)
+}
+
+/// Strip a single `0x` or `0X` prefix from `s`, returning `Some(remainder)`
+/// when present, or `None` when no prefix is found.
+#[must_use]
+pub fn try_strip_hex_prefix(s: &str) -> Option<&str> {
+    let rest = strip_hex_prefix(s);
+    if rest.len() == s.len() {
+        None
+    } else {
+        Some(rest)
+    }
+}
+
+/// Parse a `u32` given either as decimal (`2015`) or `0x`-prefixed hex
+/// (`0x7DF`), as CAN IDs appear in MDD com-params and config files.
+/// # Errors
+/// Returns the integer parse error message when `input` is neither.
+pub fn parse_u32_maybe_hex(input: &str) -> Result<u32, String> {
+    if let Some(hex_str) = try_strip_hex_prefix(input) {
+        u32::from_str_radix(hex_str, 16).map_err(|e| format!("{e:?}"))
+    } else {
+        input.parse::<u32>().map_err(|e| format!("{e:?}"))
+    }
+}
+
+/// Normalize a display-hex value for comparison: per whitespace-separated
+/// token, strip a `0x`/`0X` prefix and uppercase, then concatenate.
+/// Example: `"0x04 0x80"` and `"0480"` both normalize to `"0480"`.
+#[must_use]
+pub fn normalize_hex(value: &str) -> String {
+    value
+        .split_whitespace()
+        .map(|token| strip_hex_prefix(token).to_ascii_uppercase())
+        .collect()
+}
+
+/// Compare a byte-field parameter against a variant pattern's expected value.
+///
+/// A decoded `ByteField` serializes as space-separated `0x`-prefixed bytes
+/// (e.g. `"0x04 0x80"`), while variant patterns in real-world MDDs carry the
+/// expected coded value as a bare hex string (e.g. `"0480"`). Those can never
+/// be equal verbatim, so byte-field values get compared on normalized hex.
+///
+/// The normalization applies only when the received value is exactly the
+/// byte-field serialization: ASCII values (which may legitimately contain
+/// `0x` or differ only in case) keep the strict comparison of the caller.
+#[must_use]
+pub fn byte_field_matches_hex_pattern(received: &str, expected: &str) -> bool {
+    fn is_byte_field_repr(value: &str) -> bool {
+        !value.is_empty()
+            && value.split(' ').all(|token| {
+                token.len() == 4
+                    && try_strip_hex_prefix(token)
+                        .is_some_and(|hex| hex.chars().all(|c| c.is_ascii_hexdigit()))
+            })
+    }
+
+    is_byte_field_repr(received) && normalize_hex(received) == normalize_hex(expected)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn uds_response_matching_accepts_only_echoes_of_the_request() {
+        // Positive response: request SID with the response bit set.
+        assert!(uds_response_matches_request_sid(0x22, &[0x62, 0xF1, 0x90]));
+        // Negative response echoing the request SID.
+        assert!(uds_response_matches_request_sid(0x22, &[0x7F, 0x22, 0x31]));
+        // Unrelated positive response (different SID).
+        assert!(!uds_response_matches_request_sid(0x22, &[0x50, 0x03]));
+        // Unrelated negative response: an ECU NRC-ing the broadcast
+        // keep-alive (7F 3E 12) lands on the response ID mid-exchange and
+        // must not be taken as the answer to a 0x22 request.
+        assert!(!uds_response_matches_request_sid(0x22, &[0x7F, 0x3E, 0x12]));
+        // Degenerate frames.
+        assert!(!uds_response_matches_request_sid(0x22, &[]));
+        assert!(!uds_response_matches_request_sid(0x22, &[0x7F]));
+    }
+
+    #[test]
+    fn byte_field_matches_bare_hex_pattern() {
+        // Single byte, as serialized by DiagDataValue::ByteField.
+        assert!(byte_field_matches_hex_pattern("0x04", "04"));
+        // Multi byte against a contiguous hex pattern.
+        assert!(byte_field_matches_hex_pattern("0x04 0x80", "0480"));
+        // Hex digit case differences must not matter.
+        assert!(byte_field_matches_hex_pattern("0xAB 0xCD", "abcd"));
+        // Patterns written with prefixes/spaces normalize the same way.
+        assert!(byte_field_matches_hex_pattern("0x04 0x80", "0x04 0x80"));
+    }
+
+    #[test]
+    fn non_byte_field_values_never_match_via_normalization() {
+        // ASCII values keep the strict comparison - no hex reinterpretation.
+        assert!(!byte_field_matches_hex_pattern("DA1", "da1"));
+        // A value merely containing 0x is not a byte-field serialization.
+        assert!(!byte_field_matches_hex_pattern("v0x10", "v10"));
+        // Tokens must be exactly 0x + two hex digits.
+        assert!(!byte_field_matches_hex_pattern("0x123", "123"));
+        assert!(!byte_field_matches_hex_pattern("", ""));
+    }
+
+    #[test]
+    fn byte_field_mismatch_stays_a_mismatch() {
+        assert!(!byte_field_matches_hex_pattern("0x04 0x80", "0470"));
+        assert!(!byte_field_matches_hex_pattern("0x04", "0400"));
+    }
     #[test]
     fn test_extract_bits_standard_length_cases() {
         let result = extract_bits(4, 5, &[0b_1100_0011, 0b_1010_1000]).unwrap();

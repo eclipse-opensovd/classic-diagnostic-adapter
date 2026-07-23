@@ -80,6 +80,7 @@ allow-git = [
   "https://github.com/theswiftfox/doip-definitions.git",
   "https://github.com/theswiftfox/doip-sockets.git",
   "https://github.com/theswiftfox/mimalloc.git",
+  "https://github.com/MarkSchmitt/tokio-socketcan-isotp.git",
 ]
 
 [sources.allow-org]

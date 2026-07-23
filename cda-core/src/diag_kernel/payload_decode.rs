@@ -1714,8 +1714,9 @@ fn map_param_reserved_from_uds(
         DiagServiceError::InvalidDatabase("Expected Reserved specific data".to_owned()),
     )?;
 
+    let data_type = super::reserved_param_data_type(r.bit_length());
     let coded_type = datatypes::DiagCodedType::new_high_low_byte_order(
-        datatypes::DataType::UInt32,
+        data_type,
         datatypes::DiagCodedTypeVariant::StandardLength(datatypes::StandardLengthType {
             bit_length: r.bit_length(),
             bit_mask: None,
@@ -1734,7 +1735,7 @@ fn map_param_reserved_from_uds(
         DiagDataTypeContainer::RawContainer(DiagDataTypeContainerRaw {
             data: param_data,
             bit_len,
-            data_type: datatypes::DataType::UInt32,
+            data_type,
             compu_method: None,
         }),
     );

@@ -19,6 +19,8 @@ use std::{
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
+mod can_id;
+pub use can_id::*;
 mod com_param_handling;
 pub use com_param_handling::*;
 pub mod datatypes;
@@ -117,7 +119,7 @@ impl From<DiagCommType> for DiagCommAction {
 pub enum DiagCommType {
     /// Service Prefix `0x2E`
     Configurations,
-    /// Service Prefix `0x22`
+    /// Service Prefixes `0x21` (KWP2000), `0x22` (UDS)
     Data,
     /// Service Prefixes `0x14`, `0x19`
     Faults,
@@ -133,7 +135,9 @@ impl TryFrom<u8> for DiagCommType {
     fn try_from(value: u8) -> Result<Self, Self::Error> {
         match value {
             service_ids::WRITE_DATA_BY_IDENTIFIER => Ok(DiagCommType::Configurations),
-            service_ids::READ_DATA_BY_IDENTIFIER => Ok(DiagCommType::Data),
+            service_ids::READ_DATA_BY_LOCAL_IDENTIFIER | service_ids::READ_DATA_BY_IDENTIFIER => {
+                Ok(DiagCommType::Data)
+            }
             service_ids::CLEAR_DIAGNOSTIC_INFORMATION | service_ids::READ_DTC_INFORMATION => {
                 Ok(DiagCommType::Faults)
             }
@@ -195,6 +199,9 @@ pub mod service_ids {
     pub const ECU_RESET: u8 = 0x11;
     pub const CLEAR_DIAGNOSTIC_INFORMATION: u8 = 0x14;
     pub const READ_DTC_INFORMATION: u8 = 0x19;
+    /// KWP2000 `ReadDataByLocalIdentifier` (legacy, used by some older ECUs
+    /// that are not fully UDS-compliant)
+    pub const READ_DATA_BY_LOCAL_IDENTIFIER: u8 = 0x21;
     pub const READ_DATA_BY_IDENTIFIER: u8 = 0x22;
     pub const SECURITY_ACCESS: u8 = 0x27;
     pub const COMMUNICATION_CONTROL: u8 = 0x28;
@@ -223,7 +230,10 @@ pub const DEFAULT_SUBFUNCTION_MASK: u8 = 0x7F;
 
 const CONFIGURATIONS_PREFIXES: [u8; 1] = [service_ids::WRITE_DATA_BY_IDENTIFIER];
 
-const DATA_PREFIXES: [u8; 1] = [service_ids::READ_DATA_BY_IDENTIFIER];
+const DATA_PREFIXES: [u8; 2] = [
+    service_ids::READ_DATA_BY_LOCAL_IDENTIFIER,
+    service_ids::READ_DATA_BY_IDENTIFIER,
+];
 
 const FAULTS_PREFIXES: [u8; 2] = [
     service_ids::CLEAR_DIAGNOSTIC_INFORMATION,
