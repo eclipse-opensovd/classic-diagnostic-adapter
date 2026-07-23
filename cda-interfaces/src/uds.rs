@@ -16,7 +16,43 @@
 //! Groups the ISO 14229-1 identifiers and transport-level NRC classification
 //! that both the CAN and `DoIP` gateways need.
 
-use crate::{PendingNrc, ServicePayload};
+use crate::ServicePayload;
+
+/// Pending-lifecycle NRC variants that signal the transport must keep its
+/// connection/socket open for a follow-up response.
+///
+/// The transport layer classifies raw bytes into these variants via
+/// [`crate::pending_nrc_from_raw`] and performs its own side effects
+/// (deadline extension, socket keep-alive) before forwarding to the UDS layer.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PendingNrc {
+    /// NRC 0x78 -- ECU needs more time, final response will follow.
+    ResponsePending { source_address: u16 },
+    /// NRC 0x21 -- ECU busy, client should retransmit.
+    BusyRepeatRequest { source_address: u16 },
+    /// NRC 0x94 -- Resource temporarily unavailable, retransmit.
+    TemporarilyNotAvailable { source_address: u16 },
+}
+
+/// Response already classified by the transport, with transport-level
+/// side effects (deadline extension, socket keep-alive) already applied.
+///
+/// The transport guarantees:
+/// - For [`TransportResponse::Pending`]: the underlying connection/socket
+///   remains open and any transport-specific timers have been extended.
+/// - For [`TransportResponse::UdsResponse`]: the exchange is complete from the
+///   transport's perspective. The payload is the raw UDS response bytes
+///   (positive or negative response).
+#[derive(Debug, Clone)]
+pub enum TransportResponse {
+    /// A pending-lifecycle NRC. The transport has already extended its own
+    /// deadline / kept its socket open. The UDS layer decides retry policy.
+    Pending(PendingNrc),
+    /// A terminal response. The payload contains the raw UDS response bytes --
+    /// either a positive response or a negative response with an NRC other
+    /// than the three pending-lifecycle codes.
+    UdsResponse(ServicePayload),
+}
 
 /// UDS Service Identifiers (SIDs) from ISO 14229-1.
 pub mod service_ids {

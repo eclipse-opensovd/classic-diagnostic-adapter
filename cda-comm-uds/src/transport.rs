@@ -695,8 +695,9 @@ mod send_tests {
     };
 
     use cda_interfaces::{
-        DiagServiceError, EcuAddresses, EcuGateway, EcuRuntimeState, EcuStateManager, HashMap,
-        HashMapExtensions, PendingNrc, ServicePayload, TransmissionParameters, TransportResponse,
+        DiagServiceError, EcuAddresses, EcuGateway, EcuRuntimeState, EcuStateManager,
+        FunctionalTransport, HashMap, HashMapExtensions, NetworkTopology, PendingNrc,
+        PhysicalTransport, ServicePayload, TransmissionParameters, TransportResponse,
         VariantDetection, datatypes::FaultConfig,
     };
     use tokio::sync::{RwLock, mpsc};
@@ -750,10 +751,8 @@ mod send_tests {
         + Send
         + Sync;
 
-    impl EcuGateway for TestGateway {
-        async fn get_gateway_network_address(&self, _logical_address: u16) -> Option<String> {
-            None
-        }
+    impl PhysicalTransport for TestGateway {
+        async fn shutdown(&mut self) {}
 
         fn send(
             &self,
@@ -773,7 +772,9 @@ mod send_tests {
         ) -> Result<(), DiagServiceError> {
             Ok(())
         }
+    }
 
+    impl FunctionalTransport for TestGateway {
         async fn send_functional(
             &self,
             _transmission_params: TransmissionParameters,
@@ -784,6 +785,12 @@ mod send_tests {
         ) -> Result<HashMap<String, Result<ServicePayload, DiagServiceError>>, DiagServiceError>
         {
             Ok(HashMap::new())
+        }
+    }
+
+    impl NetworkTopology for TestGateway {
+        async fn get_gateway_network_address(&self, _logical_address: u16) -> Option<String> {
+            None
         }
     }
 

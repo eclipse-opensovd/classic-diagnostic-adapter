@@ -19,7 +19,7 @@
 use std::{future::Future, path::PathBuf, sync::Arc};
 
 use cda_comm_can::{CanDiagGateway, config::CanConfig};
-use cda_comm_doip::{DoipDiagGateway, DoipGatewaySetupError, config::DoipConfig};
+use cda_comm_doip::{DoipDiagGateway, config::DoipConfig};
 use cda_comm_uds::{UdsManager, state_coordinator::EcuStateCoordinator};
 use cda_core::EcuManager;
 use cda_database::FileManager;
@@ -33,7 +33,7 @@ use cda_plugin_security::{
 };
 use cda_sovd::Locks;
 use cda_tracing::{OtelGuard, TracingSetupError, TracingWorkerGuard};
-use cda_transport_orchestrator::DiagnosticTransportRouter;
+use cda_transport_router::DiagnosticTransportRouter;
 use clap::{Parser, Subcommand};
 use tokio::sync::{Mutex, RwLock, mpsc};
 use tracing_subscriber::layer::SubscriberExt;

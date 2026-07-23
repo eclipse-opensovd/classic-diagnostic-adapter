@@ -19,9 +19,10 @@ use std::{
 
 use async_trait::async_trait;
 use cda_interfaces::{
-    DiagServiceError, DoipComParams, EcuAddresses, EcuConnectivityHandler, EcuGateway, HashMap,
-    HashMapExtensions, ReusableTransportResource, ServicePayload, TransmissionParameters,
-    TransportResponse, dlt_ctx, pending_nrc_from_raw, uds_response_from_raw,
+    DiagServiceError, DoipComParams, EcuAddresses, EcuConnectivityHandler, FunctionalTransport,
+    HashMap, HashMapExtensions, NetworkTopology, PhysicalTransport, ReusableTransportResource,
+    RouteStatus, ServicePayload, TransmissionParameters, TransportProbe, TransportResponse, dlt_ctx,
+    pending_nrc_from_raw, uds_response_from_raw,
     util::{self, tokio_ext},
 };
 use doip_definitions::{
@@ -424,15 +425,26 @@ impl<T: EcuAddresses + DoipComParams> DoipDiagGateway<T> {
     }
 }
 
-impl<T: EcuAddresses + DoipComParams> EcuGateway for DoipDiagGateway<T> {
-    async fn get_gateway_network_address(&self, logical_address: u16) -> Option<String> {
-        self.state
-            .doip_connections
-            .read()
-            .await
-            .iter()
-            .find(|conn| conn.ecus.contains_key(&logical_address))
-            .map(|conn| conn.ip.clone())
+impl<T: EcuAddresses + DoipComParams> PhysicalTransport for DoipDiagGateway<T> {
+    async fn shutdown(&mut self) {
+        self.cancel_token.cancel();
+
+        if let Some(vam_listener_handle) = self.vam_listener_handle.lock().await.take() {
+            // Abort and await the VAM listener task so it stops reading from the
+            // shared UDP socket before a new gateway reuses it.
+            vam_listener_handle.abort();
+            let _ = vam_listener_handle.await;
+        }
+
+        // Abort all background tasks (sender, receiver, connection-reset) for each
+        // gateway connection. This immediately drops their TCP socket halves.
+        let connections = self.state.doip_connections.write().await;
+        let mut tasks = self.state.connection_tasks.lock().await;
+        tasks.abort_all();
+        while tasks.join_next().await.is_some() {}
+        drop(tasks);
+        drop(connections);
+        self.state.doip_connections.write().await.clear();
     }
 
     #[tracing::instrument(skip_all,
@@ -565,7 +577,9 @@ impl<T: EcuAddresses + DoipComParams> EcuGateway for DoipDiagGateway<T> {
             .ok_or_else(|| DiagServiceError::EcuOffline(ecu_name.to_owned()))?;
         Ok(())
     }
+}
 
+impl<T: EcuAddresses + DoipComParams> FunctionalTransport for DoipDiagGateway<T> {
     async fn send_functional(
         &self,
         transmission_params: TransmissionParameters,
@@ -710,6 +724,44 @@ impl<T: EcuAddresses + DoipComParams> EcuGateway for DoipDiagGateway<T> {
     }
 }
 
+impl<T: EcuAddresses + DoipComParams> NetworkTopology for DoipDiagGateway<T> {
+    async fn get_gateway_network_address(&self, logical_address: u16) -> Option<String> {
+        self.state
+            .doip_connections
+            .read()
+            .await
+            .iter()
+            .find(|conn| conn.ecus.contains_key(&logical_address))
+            .map(|conn| conn.ip.clone())
+    }
+
+    async fn get_ecu_network_address(&self, _ecu_name: &str) -> Option<String> {
+        // DoIP uses logical addressing; per-ECU network address is not applicable
+        None
+    }
+}
+
+impl<T: EcuAddresses + DoipComParams> TransportProbe for DoipDiagGateway<T> {
+    async fn route_status(&self, ecu_name: &str) -> RouteStatus {
+        let ecu_name = ecu_name.to_lowercase();
+        let Some(ecu_lock) = self.state.ecus.get(&ecu_name) else {
+            return RouteStatus::NotConfigured;
+        };
+        // Check if the gateway connection for this ECU is established
+        let gateway_addr = ecu_lock.read().await.logical_gateway_address();
+        if self.get_doip_connection(gateway_addr).await.is_ok() {
+            RouteStatus::Ready
+        } else {
+            // DoIP reachability is driven by VAM discovery and connection
+            // management; the router cannot repair it with a bounded ECU probe.
+            RouteStatus::Unavailable
+        }
+    }
+
+    async fn probe_ecu(&self, _ecu_name: &str) -> bool {
+        false
+    }
+}
 /// Waits for the `DoIP` diagnostic-message acknowledgement from the gateway,
 /// with a deadline of `timeout`.
 #[allow(
@@ -1158,8 +1210,8 @@ mod tests {
     use std::{net::UdpSocket, sync::Arc, time::Duration};
 
     use cda_interfaces::{
-        DiagServiceError, DoipComParams, EcuAddresses, EcuGateway, HashMap, HashMapExtensions,
-        PendingNrc, ServicePayload, TransmissionParameters, TransportResponse,
+        DiagServiceError, DoipComParams, EcuAddresses, HashMap, HashMapExtensions, PendingNrc,
+        PhysicalTransport, ServicePayload, TransmissionParameters, TransportResponse,
         UDS_ID_RESPONSE_BITMASK, nrc, service_ids,
     };
     use doip_definitions::{
