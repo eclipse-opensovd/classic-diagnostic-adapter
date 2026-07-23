@@ -17,13 +17,14 @@ use std::{
     sync::Arc,
 };
 
+use cda_config::datatypes::{DatabaseNamingConvention, FunctionalDescriptionConfig};
 use cda_core::{EcuManager, EcuManagerConfig};
 use cda_database::{FileManager, ProtoLoadConfig, update_mdd_uncompressed};
 use cda_health::StatusHealthProvider;
 use cda_interfaces::{
-    EcuAddresses, EcuManager as EcuManagerTrait, EcuManagerType, FunctionalDescriptionConfig,
-    HashMap, HashMapEntry, HashMapExtensions, HashSet, Protocol,
-    datatypes::{ComParams, DatabaseNamingConvention, FlatbBufConfig},
+    EcuAddresses, EcuManager as EcuManagerTrait, EcuManagerType, HashMap, HashMapEntry,
+    HashMapExtensions, HashSet, Protocol,
+    datatypes::{ComParams, FlatbBufConfig},
     file_manager::{Chunk, ChunkType},
     storage_api::{Collection, CollectionName, DirectFileAccess, Storage},
 };
@@ -80,7 +81,7 @@ struct EcuLoadContext<'a> {
     mddfile: &'a PathBuf,
     ecu_name: String,
     flat_buf_settings: &'a FlatbBufConfig,
-    database_config: &'a cda_database::DatabaseConfig,
+    database_config: &'a cda_config::datatypes::DatabaseConfig,
     ecu_config_map: &'a Arc<HashMap<String, EcuConfig>>,
     database_naming_convention: DatabaseNamingConvention,
     func_description_cfg: &'a FunctionalDescriptionConfig,

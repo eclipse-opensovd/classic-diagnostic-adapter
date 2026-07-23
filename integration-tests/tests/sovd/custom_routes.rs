@@ -15,10 +15,10 @@ use std::sync::Arc;
 
 use aide::axum::{ApiRouter, routing};
 use axum::{Json, http::StatusCode};
-use cda_comm_doip::config::DoipConfig;
 use cda_comm_uds::state_coordinator::EcuStateCoordinator;
+use cda_config::datatypes::{DoipConfig, FunctionalDescriptionConfig};
 use cda_interfaces::{
-    EcuConnectivityHandler, FunctionalDescriptionConfig, HashMap, HashMapExtensions, UdsQuery,
+    EcuConnectivityHandler, HashMap, HashMapExtensions, UdsQuery,
     datatypes::{ComponentsConfig, FaultConfig},
 };
 use cda_sovd::{Locks, dynamic_router::DynamicRouter};
@@ -162,10 +162,10 @@ async fn test_custom_demo_endpoint() {
         databases,
         variant_rx,
         state_coordinator,
-        &cda_interfaces::FunctionalDescriptionConfig {
+        &cda_config::datatypes::FunctionalDescriptionConfig {
             description_database: "functional_groups".to_owned(),
             enabled_functional_groups: None,
-            protocol_position: cda_interfaces::datatypes::DiagnosticServiceAffixPosition::Suffix,
+            protocol_position: cda_config::datatypes::DiagnosticServiceAffixPosition::Suffix,
         },
         FaultConfig::default(),
         Arc::new(std::sync::atomic::AtomicBool::new(false)),
@@ -179,8 +179,7 @@ async fn test_custom_demo_endpoint() {
             functional_group_config: FunctionalDescriptionConfig {
                 description_database: "functional_groups".to_owned(),
                 enabled_functional_groups: None,
-                protocol_position:
-                    cda_interfaces::datatypes::DiagnosticServiceAffixPosition::Suffix,
+                protocol_position: cda_config::datatypes::DiagnosticServiceAffixPosition::Suffix,
             },
             components_config: ComponentsConfig {
                 additional_fields: HashMap::new(),

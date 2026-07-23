@@ -23,6 +23,7 @@ workspace = true
 
 [dependencies]
 # internal dependencies
+cda-config = { workspace = true }
 cda-interfaces = { workspace = true }
 cda-core = { workspace = true }
 cda-database = { workspace = true }

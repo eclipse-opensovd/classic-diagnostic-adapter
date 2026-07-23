@@ -33,6 +33,7 @@ path = "src/lib.rs"
 cda-core = { workspace = true }
 cda-comm-doip = { workspace = true }
 cda-comm-uds = { workspace = true }
+cda-config = { workspace = true }
 cda-database = { workspace = true }
 cda-interfaces = { workspace = true }
 cda-sovd = { workspace = true }
@@ -54,6 +55,7 @@ mimalloc = { git = "https://github.com/theswiftfox/mimalloc.git", rev = "afbaaa5
 schemars = { workspace = true }
 serde = { workspace = true, features = ["derive"] }
 serde_json = { workspace = true }
+struct-patch = { workspace = true }
 tokio = { workspace = true, features = [
   "rt-multi-thread",
   "macros",
@@ -90,6 +92,6 @@ mbedtls = ["cda-comm-doip/mbedtls"]
 dlt-tracing = ["cda-tracing/dlt-tracing"]
 integration-tests = []
 
-health = []
+health = ["cda-config/health"]
 config-optional = []
 systemd-notify = ["dep:cda-extra", "cda-extra/systemd-notify"]

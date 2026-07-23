@@ -211,7 +211,7 @@ pub struct RuntimeUpdateContext<
     pub lock_provider: Arc<cda_sovd::SovdLockStateProvider>,
     pub update_guard: cda_sovd::UpdateGuardState,
     pub shutdown_signal: F,
-    pub runtime_update_config: cda_plugin_runtime_update::config::RuntimeUpdateConfig,
+    pub runtime_update_config: cda_config::datatypes::RuntimeUpdateConfig,
     pub security_handler: Arc<T>,
     pub ecu_execution_registry: cda_sovd::EcuExecutionRegistry,
     pub uds_manager: UdsManagerType<S>,

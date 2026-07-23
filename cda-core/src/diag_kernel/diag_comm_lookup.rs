@@ -11,9 +11,10 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+use cda_config::datatypes::DiagnosticServiceAffixPosition;
 use cda_interfaces::{
     DiagComm, DiagCommLookup, DiagCommType, DiagServiceError, HashSet,
-    datatypes::{DiagnosticServiceAffixPosition, single_ecu},
+    datatypes::single_ecu,
     dlt_ctx,
     util::{ends_with_ignore_ascii_case, starts_with_ignore_ascii_case},
 };

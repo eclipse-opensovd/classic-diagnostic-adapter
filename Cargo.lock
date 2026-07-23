@@ -374,6 +374,7 @@ dependencies = [
 name = "cda-comm-doip"
 version = "0.1.0"
 dependencies = [
+ "cda-config",
  "cda-interfaces",
  "doip-codec",
  "doip-definitions",
@@ -396,6 +397,7 @@ name = "cda-comm-uds"
 version = "0.1.0"
 dependencies = [
  "async-trait",
+ "cda-config",
  "cda-interfaces",
  "cda-plugin-runtime-update",
  "futures",
@@ -408,10 +410,23 @@ dependencies = [
 ]
 
 [[package]]
+name = "cda-config"
+version = "0.1.0"
+dependencies = [
+ "cda-interfaces",
+ "doip-definitions",
+ "schemars",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.17",
+]
+
+[[package]]
 name = "cda-core"
 version = "0.1.0"
 dependencies = [
  "async-trait",
+ "cda-config",
  "cda-database",
  "cda-interfaces",
  "cda-plugin-security",
@@ -432,6 +447,7 @@ dependencies = [
  "bytes",
  "cargo_toml",
  "cda-build",
+ "cda-config",
  "cda-database",
  "cda-interfaces",
  "flatbuffers",
@@ -492,6 +508,7 @@ dependencies = [
  "schemars",
  "serde",
  "serde_json",
+ "struct-patch",
  "strum",
  "strum_macros",
  "thiserror 2.0.17",
@@ -505,6 +522,7 @@ version = "0.1.0"
 dependencies = [
  "async-trait",
  "bytes",
+ "cda-config",
  "cda-database",
  "cda-interfaces",
  "cda-storage",
@@ -551,6 +569,7 @@ dependencies = [
  "axum-extra",
  "bytes",
  "cda-build",
+ "cda-config",
  "cda-interfaces",
  "cda-plugin-runtime-update",
  "cda-plugin-security",
@@ -597,6 +616,7 @@ name = "cda-tracing"
 version = "0.1.0"
 dependencies = [
  "cda-build",
+ "cda-config",
  "console-subscriber",
  "nu-ansi-term",
  "opentelemetry",
@@ -1833,6 +1853,7 @@ dependencies = [
  "cda-build",
  "cda-comm-doip",
  "cda-comm-uds",
+ "cda-config",
  "cda-core",
  "cda-database",
  "cda-health",
@@ -2359,6 +2380,7 @@ dependencies = [
  "async-trait",
  "cda-comm-doip",
  "cda-comm-uds",
+ "cda-config",
  "cda-core",
  "cda-database",
  "cda-extra",
@@ -2377,6 +2399,7 @@ dependencies = [
  "schemars",
  "serde",
  "serde_json",
+ "struct-patch",
  "tempfile",
  "thiserror 2.0.17",
  "tokio",
@@ -3636,6 +3659,26 @@ name = "strsim"
 version = "0.11.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7da8b5736845d9f2fcb837ea5d9e2628564b3b043a70948a3f0b778838c5fb4f"
+
+[[package]]
+name = "struct-patch"
+version = "0.12.7"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "9c33b1be720fec2481ed6f1d2b95fefa464500cc55ce0ba5938aba77718da5f2"
+dependencies = [
+ "struct-patch-derive",
+]
+
+[[package]]
+name = "struct-patch-derive"
+version = "0.12.7"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d4bfb88f9c30c62693f33814de38c84fd833c7a5b92238655d158deb3ac62d9f"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn",
+]
 
 [[package]]
 name = "strum"

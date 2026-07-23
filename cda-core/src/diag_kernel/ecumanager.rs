@@ -13,14 +13,14 @@
 
 use std::time::Duration;
 
+use cda_config::datatypes::{DatabaseNamingConvention, DiagnosticServiceAffixPosition};
 use cda_database::datatypes;
 use cda_interfaces::{
     Connectivity, DiagServiceError, EcuManagerType, EcuRuntimeState, EcuStateManager, HashMap,
     HashMapExtensions, HashSet, PayloadDecoder, Protocol, VariantState,
     datatypes::{
         AddressingMode, ComParamConfig, ComParamPrecedence, ComParams, ComplexComParamValue,
-        DatabaseNamingConvention, DiagnosticServiceAffixPosition, RetryPolicy, SdSdg,
-        TesterPresentSendType,
+        RetryPolicy, SdSdg, TesterPresentSendType,
     },
     dlt_ctx,
     util::std_ext,
@@ -374,7 +374,7 @@ impl<S: SecurityPlugin> EcuManager<S> {
         com_params: &ComParams,
         database_naming_convention: DatabaseNamingConvention,
         config: EcuManagerConfig,
-        func_description_config: &cda_interfaces::FunctionalDescriptionConfig,
+        func_description_config: &cda_config::datatypes::FunctionalDescriptionConfig,
     ) -> Result<Self, DiagServiceError> {
         match config.type_ {
             EcuManagerType::Ecu => Self::new_ecu_description(
@@ -406,7 +406,7 @@ impl<S: SecurityPlugin> EcuManager<S> {
         com_params: &ComParams,
         database_naming_convention: DatabaseNamingConvention,
         config: EcuManagerConfig,
-        func_description_config: &cda_interfaces::FunctionalDescriptionConfig,
+        func_description_config: &cda_config::datatypes::FunctionalDescriptionConfig,
     ) -> Result<Self, DiagServiceError> {
         let variant_detection =
             variant_detection::prepare_variant_detection(&database, &database_naming_convention)?;
@@ -569,7 +569,7 @@ impl<S: SecurityPlugin> EcuManager<S> {
         com_params: &ComParams,
         database_naming_convention: DatabaseNamingConvention,
         config: EcuManagerConfig,
-        func_description_config: &cda_interfaces::FunctionalDescriptionConfig,
+        func_description_config: &cda_config::datatypes::FunctionalDescriptionConfig,
     ) -> Result<Self, DiagServiceError> {
         // Functional group description: use defaults for all com params
         let logical_ecu_address = com_params.doip.logical_ecu_address.value;

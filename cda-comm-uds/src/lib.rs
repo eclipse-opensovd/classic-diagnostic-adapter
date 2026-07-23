@@ -13,10 +13,10 @@
 
 use std::sync::{Arc, atomic::AtomicBool};
 
+use cda_config::datatypes::FunctionalDescriptionConfig;
 use cda_interfaces::{
-    DiagComm, DiagServiceError, EcuGateway, EcuManager, FunctionalDescriptionConfig, HashMap,
-    HashMapExtensions, HashSet, HashSetExtensions, SchemaDescription, SchemaProvider, UdsEcu,
-    UdsEcuDb, datatypes::FaultConfig,
+    DiagComm, DiagServiceError, EcuGateway, EcuManager, HashMap, HashMapExtensions, HashSet,
+    HashSetExtensions, SchemaDescription, SchemaProvider, UdsEcu, UdsEcuDb, datatypes::FaultConfig,
 };
 use tokio::{
     sync::{Mutex, RwLock, Semaphore, mpsc},

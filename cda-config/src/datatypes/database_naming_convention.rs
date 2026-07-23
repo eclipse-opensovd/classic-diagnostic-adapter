@@ -1,5 +1,5 @@
 /*
- * SPDX-FileCopyrightText: 2025 Copyright (c) Contributors to the Eclipse Foundation
+ * SPDX-FileCopyrightText: 2026 Copyright (c) Contributors to the Eclipse Foundation
  *
  * See the NOTICE file(s) distributed with this work for additional
  * information regarding copyright ownership.
@@ -10,14 +10,10 @@
  *
  * SPDX-License-Identifier: Apache-2.0
  */
+use cda_interfaces::{DiagCommAction, HashMap, service_ids, util::serde_ext};
 use serde::{Deserialize, Serialize};
 
-use crate::{
-    DiagCommAction, HashMap,
-    config::{ConfigSanity, ConfigSanityError},
-    service_ids,
-    util::serde_ext,
-};
+use crate::validate::{ConfigSanity, ConfigSanityError};
 
 /// Holds configuration for diagnostic service naming conventions.
 ///

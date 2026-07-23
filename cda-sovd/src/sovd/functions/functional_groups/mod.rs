@@ -23,8 +23,9 @@ use axum::{
     response::{IntoResponse, Response},
 };
 use axum_extra::extract::WithRejection;
+use cda_config::datatypes::FunctionalDescriptionConfig;
 use cda_interfaces::{
-    FunctionalDescriptionConfig, HashMap, SchemaProvider, UdsEcu,
+    HashMap, SchemaProvider, UdsEcu,
     diagservices::{DiagServiceResponse, DiagServiceResponseType},
 };
 use http::StatusCode;

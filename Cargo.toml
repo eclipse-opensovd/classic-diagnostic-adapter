@@ -23,6 +23,7 @@ members = [
   "cda-core",
   "cda-comm-doip",
   "cda-comm-uds",
+  "cda-config",
   "cda-sovd",
   "cda-sovd-interfaces",
   "cda-main",
@@ -45,6 +46,7 @@ cda-interfaces = { path = "cda-interfaces" }
 cda-core = { path = "cda-core" }
 cda-comm-doip = { path = "cda-comm-doip" }
 cda-comm-uds = { path = "cda-comm-uds" }
+cda-config = { path = "cda-config" }
 cda-database = { path = "cda-database" }
 cda-plugin-security = { path = "cda-plugin-security" }
 cda-plugin-runtime-update = { path = "cda-plugin-runtime-update" }
@@ -142,6 +144,7 @@ urlencoding = "2.1.3"
 # ---- utility crates ----
 const_format = "0.2.35" # compile time string formatting
 rustversion = "1.0.22"  # macros for conditional compilation
+struct-patch = { version = "0.12", default-features = false }
 
 [workspace.lints.clippy]
 # enable pedantic

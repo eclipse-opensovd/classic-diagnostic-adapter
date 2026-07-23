@@ -21,9 +21,10 @@ use axum::{
     Json,
     http::{self, Request},
 };
+use cda_config::datatypes::FunctionalDescriptionConfig;
 use cda_interfaces::{
-    DoipGatewaySetupError, FunctionalDescriptionConfig, HashMap, SchemaProvider, UdsEcu,
-    datatypes::ComponentsConfig, dlt_ctx, file_manager::FileManager,
+    DoipGatewaySetupError, HashMap, SchemaProvider, UdsEcu, datatypes::ComponentsConfig, dlt_ctx,
+    file_manager::FileManager,
 };
 use cda_plugin_security::SecurityPluginLoader;
 use dynamic_router::DynamicRouter;

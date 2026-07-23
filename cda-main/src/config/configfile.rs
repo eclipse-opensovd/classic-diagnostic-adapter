@@ -11,17 +11,18 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-pub use cda_comm_doip::config::DoipConfig;
-pub use cda_database::DatabaseConfig;
+pub use cda_config::datatypes::{DatabaseConfig, DoipConfig, RuntimeUpdateConfig};
+use cda_config::{
+    datatypes::FunctionalDescriptionConfig,
+    validate::{ConfigSanity, ConfigSanityError},
+};
 use cda_interfaces::{
-    FunctionalDescriptionConfig, HashMap,
-    config::{ConfigSanity, ConfigSanityError},
+    HashMap,
     datatypes::{
         ComParams, ComponentsConfig, FaultConfig, FlatbBufConfig, SdBoolMappings,
         SdMappingsTruthyValue,
     },
 };
-pub use cda_plugin_runtime_update::config::RuntimeUpdateConfig;
 use serde::{Deserialize, Serialize};
 
 pub use super::com_params::EcuComParams;
@@ -65,7 +66,7 @@ pub struct Configuration {
     /// Diagnostic database loading and naming settings.
     pub database: DatabaseConfig,
     /// Logging, file output, and tracing backend settings.
-    pub logging: cda_tracing::LoggingConfig,
+    pub logging: cda_config::datatypes::LoggingConfig,
     /// Path to the directory containing flash files.
     pub flash_files_path: String,
     /// Default communication parameters for UDS and `DoIP` protocols.
@@ -78,7 +79,7 @@ pub struct Configuration {
     pub components: ComponentsConfig,
     /// Health check endpoint settings.
     #[cfg(feature = "health")]
-    pub health: cda_health::config::HealthConfig,
+    pub health: cda_config::datatypes::HealthConfig,
     /// DTC (Diagnostic Trouble Code) fault memory settings.
     pub faults: FaultConfig,
     /// Per-ECU configuration blocks keyed by ECU short name (case-insensitive
@@ -131,12 +132,12 @@ impl Default for Configuration {
             flash_files_path: ".".to_owned(),
             server: ServerConfig::default(),
             #[cfg(feature = "health")]
-            health: cda_health::config::HealthConfig::default(),
+            health: cda_config::datatypes::HealthConfig::default(),
             doip: DoipConfig {
                 tester_address: "10.2.1.240".to_owned(),
                 ..Default::default()
             },
-            logging: cda_tracing::LoggingConfig::default(),
+            logging: cda_config::datatypes::LoggingConfig::default(),
             com_params: ComParams::default(),
             flat_buf: FlatbBufConfig::default(),
             functional_description: FunctionalDescriptionConfig::default(),
@@ -183,7 +184,7 @@ impl ConfigSanity for Configuration {
 
 #[cfg(test)]
 mod tests {
-    use cda_interfaces::datatypes::DiagnosticServiceAffixPosition;
+    use cda_config::datatypes::DiagnosticServiceAffixPosition;
     use figment::{
         Figment,
         providers::{Format, Serialized, Toml},

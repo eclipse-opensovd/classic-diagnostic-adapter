@@ -13,10 +13,9 @@
 
 //! Factory helpers for constructing [`EcuManager`] instances in tests.
 
+use cda_config::datatypes::DatabaseNamingConvention;
 use cda_interfaces::{
-    Connectivity, EcuManagerType, Protocol, VariantState,
-    datatypes::{ComParams, DatabaseNamingConvention},
-    util::std_ext,
+    Connectivity, EcuManagerType, Protocol, VariantState, datatypes::ComParams, util::std_ext,
 };
 use cda_plugin_security::DefaultSecurityPluginData;
 
@@ -43,10 +42,10 @@ pub(crate) fn new_ecu_manager(
             fallback_to_base_variant: true,
             strict_parameter_validation: false,
         },
-        &cda_interfaces::FunctionalDescriptionConfig {
+        &cda_config::datatypes::FunctionalDescriptionConfig {
             description_database: "functional_groups".to_owned(),
             enabled_functional_groups: None,
-            protocol_position: cda_interfaces::datatypes::DiagnosticServiceAffixPosition::Suffix,
+            protocol_position: cda_config::datatypes::DiagnosticServiceAffixPosition::Suffix,
         },
     )
     .expect("Failed to create EcuManager");
@@ -81,15 +80,16 @@ pub(crate) fn new_ecu_manager_no_base_fallback(
             fallback_to_base_variant: false,
             strict_parameter_validation: false,
         },
-        &cda_interfaces::FunctionalDescriptionConfig {
+        &cda_config::datatypes::FunctionalDescriptionConfig {
             description_database: "functional_groups".to_owned(),
             enabled_functional_groups: None,
-            protocol_position: cda_interfaces::datatypes::DiagnosticServiceAffixPosition::Suffix,
+            protocol_position: cda_config::datatypes::DiagnosticServiceAffixPosition::Suffix,
         },
     )
     .unwrap()
 }
 
+use cda_config::datatypes::Semantics;
 use cda_database::{
     datatypes,
     datatypes::{
@@ -100,9 +100,7 @@ use cda_database::{
         },
     },
 };
-use cda_interfaces::{
-    DiagCommType, UDS_ID_RESPONSE_BITMASK, datatypes::Semantics, service_ids, subfunction_ids,
-};
+use cda_interfaces::{DiagCommType, UDS_ID_RESPONSE_BITMASK, service_ids, subfunction_ids};
 use flatbuffers::WIPOffset;
 
 use crate::diag_kernel::test_utils::{

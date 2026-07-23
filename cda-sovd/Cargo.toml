@@ -27,6 +27,7 @@ workspace = true
 [dependencies]
 # internal dependencies
 async-trait = { workspace = true }
+cda-config = { workspace = true }
 cda-interfaces = { workspace = true }
 cda-plugin-runtime-update = { workspace = true }
 cda-plugin-security = { workspace = true }

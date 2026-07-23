@@ -11,12 +11,13 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+use cda_config::datatypes::DiagnosticServiceAffixPosition;
 use cda_database::datatypes;
 use cda_interfaces::{
     ComponentInfos, DiagServiceError, DynamicPlugin, HashMap, HashSet,
     datatypes::{
         ComponentConfigurationsInfo, ComponentDataInfo, ComponentOperationsInfo,
-        DiagnosticServiceAffixPosition, RoutineSubfunctions,
+        RoutineSubfunctions,
     },
     service_ids, subfunction_ids,
 };

@@ -11,10 +11,10 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+use cda_config::datatypes::DatabaseNamingConvention;
 use cda_database::datatypes;
 use cda_interfaces::{
-    DiagComm, DiagCommType, DiagServiceError, HashMap, datatypes::DatabaseNamingConvention,
-    diagservices::DiagServiceResponse, dlt_ctx,
+    DiagComm, DiagCommType, DiagServiceError, HashMap, diagservices::DiagServiceResponse, dlt_ctx,
 };
 type DiagServiceId = String;
 

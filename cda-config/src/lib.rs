@@ -1,5 +1,5 @@
 /*
- * SPDX-FileCopyrightText: 2025 Copyright (c) Contributors to the Eclipse Foundation
+ * SPDX-FileCopyrightText: 2026 Copyright (c) Contributors to the Eclipse Foundation
  *
  * See the NOTICE file(s) distributed with this work for additional
  * information regarding copyright ownership.
@@ -12,11 +12,4 @@
  */
 
 pub mod datatypes;
-pub(crate) mod flatbuf;
-pub(crate) mod mdd_data;
-pub(crate) mod proto;
-
-pub use mdd_data::{
-    ProtoLoadConfig, files::FileManager, load_chunk, load_ecudata, load_proto_data,
-    mmap_and_decode_mdd, update_mdd_uncompressed,
-};
+pub mod validate;

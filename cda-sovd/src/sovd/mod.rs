@@ -30,9 +30,9 @@ use axum::{
     response::{IntoResponse, Response},
 };
 use axum_extra::extract::WithRejection;
+use cda_config::datatypes::FunctionalDescriptionConfig;
 use cda_interfaces::{
-    Connectivity, FunctionalDescriptionConfig, HashMap, HashMapExtensions as _, SchemaProvider,
-    UdsEcu, VariantState,
+    Connectivity, HashMap, HashMapExtensions as _, SchemaProvider, UdsEcu, VariantState,
     datatypes::ComponentsConfig,
     diagservices::{FieldParseError, UdsPayloadData},
     file_manager::FileManager,

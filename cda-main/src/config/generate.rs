@@ -13,7 +13,8 @@
 
 use std::{collections::BTreeMap, fmt::Write};
 
-use cda_interfaces::{FunctionalDescriptionConfig, datatypes::FaultConfig};
+use cda_config::datatypes::FunctionalDescriptionConfig;
+use cda_interfaces::datatypes::FaultConfig;
 
 use crate::config::{
     com_params::EcuComParams,
@@ -456,7 +457,8 @@ fn format_toml_line(
 mod tests {
     use std::time::Duration;
 
-    use cda_interfaces::{config::ConfigSanity, datatypes::ComParamPrecedence};
+    use cda_config::validate::ConfigSanity;
+    use cda_interfaces::datatypes::ComParamPrecedence;
 
     use super::*;
 

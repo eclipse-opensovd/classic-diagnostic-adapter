@@ -1,4 +1,4 @@
-# SPDX-FileCopyrightText: 2025 Copyright (c) Contributors to the Eclipse Foundation
+# SPDX-FileCopyrightText: 2026 Copyright (c) Contributors to the Eclipse Foundation
 #
 # See the NOTICE file(s) distributed with this work for additional
 # information regarding copyright ownership.
@@ -9,14 +9,27 @@
 #
 # SPDX-License-Identifier: Apache-2.0
 
+
 [package]
-name = "cda-health"
+name = "cda-config"
 version = "0.1.0"
 edition.workspace = true
 publish = false
-description = "Provides a health check interface"
+description = "Configuration types, logic for loading and generating the default configuration"
 homepage.workspace = true
 license.workspace = true
+
+[dependencies]
+# internal dependencies
+cda-interfaces = { workspace = true }
+
+schemars = { workspace = true }
+serde = { workspace = true, features = ["derive"] }
+thiserror = { workspace = true }
+
+[dev-dependencies]
+doip-definitions = { workspace = true }
+serde_json = { workspace = true }
 
 [lints]
 workspace = true
@@ -24,25 +37,7 @@ workspace = true
 [lib]
 path = "src/lib.rs"
 
-[dependencies]
-# internal dependencies
-cda-interfaces = { workspace = true }
-cda-sovd = { workspace = true }
-
-# external
-async-trait = { workspace = true }
-futures = { workspace = true }
-schemars = { workspace = true }
-serde = { workspace = true, features = ["derive"] }
-thiserror = { workspace = true }
-# tokio
-tokio = { workspace = true, features = ["sync"] }
-
-# web server
-axum = { workspace = true, features = ["json"] }
-
-aide = { workspace = true, features = ["axum"] }
-chrono = { workspace = true }
-
 [features]
-default = []
+dlt-tracing = []
+health = []
+tokio-tracing = []
