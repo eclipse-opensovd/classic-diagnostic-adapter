@@ -15,8 +15,8 @@ use std::fmt::Write as _;
 
 use async_trait::async_trait;
 use cda_interfaces::{
-    DiagComm, DiagServiceError, DynamicPlugin, EcuGateway, EcuManager, HashMap, HashMapExtensions,
-    UdsFunctionalGroup, UdsQuery, UdsTransport,
+    DiagComm, DiagServiceError, DynamicPlugin, EcuGateway, EcuManager, FunctionalTransport,
+    HashMap, HashMapExtensions, UdsFunctionalGroup, UdsQuery, UdsTransport,
     datatypes::{
         ComplexComParamValue, ComponentConfigurationsInfo, ComponentDataInfo,
         ComponentOperationsInfo, Ecu, FunctionalGroup, Gateway, NetworkStructure,
@@ -43,7 +43,7 @@ enum GatewayKey {
 }
 
 #[async_trait]
-impl<S: EcuGateway, T: EcuManager> UdsQuery for UdsManager<S, T> {
+impl<S: EcuGateway + FunctionalTransport, T: EcuManager> UdsQuery for UdsManager<S, T> {
     async fn get_ecus(&self) -> Vec<String> {
         self.ecus.keys().cloned().collect()
     }

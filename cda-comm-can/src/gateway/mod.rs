@@ -27,9 +27,9 @@ mod rediscovery;
 use std::{sync::Arc, time::Duration};
 
 use cda_interfaces::{
-    CanComParamProvider, CanId, DiagServiceError, EcuAddresses, EcuCanGateway, EcuGateway, HashMap,
-    ServicePayload, TransmissionParameters, TransportResponse, dlt_ctx, pending_nrc_from_raw,
-    uds_response_from_raw,
+    CanComParamProvider, CanId, DiagServiceError, EcuAddresses, HashMap, NetworkTopology,
+    PhysicalTransport, RouteStatus, ServicePayload, TransmissionParameters, TransportProbe,
+    TransportResponse, dlt_ctx, pending_nrc_from_raw, uds_response_from_raw,
 };
 use tokio::sync::{RwLock, mpsc};
 
@@ -450,6 +450,11 @@ impl CanDiagGateway {
         false
     }
 
+    /// Checks if a specific ECU was discovered by name.
+    async fn is_ecu_discovered_by_name(&self, ecu_name: &str) -> bool {
+        self.discovered_ecus.read().await.contains(ecu_name)
+    }
+
     /// Resolves a logical address to an ECU name from the owned lookup table.
     fn logical_address_for_ecu(&self, ecu_name: &str) -> u16 {
         self.logical_address_to_ecu
@@ -464,32 +469,7 @@ impl CanDiagGateway {
     }
 }
 
-impl EcuCanGateway for CanDiagGateway {
-    async fn is_ecu_discovered_by_name(&self, ecu_name: &str) -> bool {
-        self.discovered_ecus.read().await.contains(ecu_name)
-    }
-
-    fn knows_ecu(&self, ecu_name: &str) -> bool {
-        self.connections.contains_key(ecu_name)
-    }
-
-    async fn probe_ecu(&self, ecu_name: &str) -> bool {
-        let ecu_name = ecu_name.to_lowercase();
-        let Some(conn) = self.connections.get(&ecu_name).cloned() else {
-            return false;
-        };
-        let logical_addr = self.logical_address_for_ecu(&ecu_name);
-        if self.probe_connection(&conn, logical_addr).await.is_ok() {
-            self.discovered_ecus.write().await.insert(ecu_name);
-            true
-        } else {
-            self.discovered_ecus.write().await.remove(&ecu_name);
-            false
-        }
-    }
-}
-
-impl EcuGateway for CanDiagGateway {
+impl PhysicalTransport for CanDiagGateway {
     async fn shutdown(&mut self) {
         // CAN uses per-transaction ISO-TP sockets (no long-lived connection
         // tasks); only the broadcast keep-alive and the rediscovery loop run
@@ -501,16 +481,6 @@ impl EcuGateway for CanDiagGateway {
         if let Some(ref keepalive) = self.keepalive_handle {
             keepalive.shutdown().await;
         }
-    }
-
-    async fn get_gateway_network_address(&self, logical_address: u16) -> Option<String> {
-        let ecu_name = self.logical_address_to_ecu.get(&logical_address)?;
-        if !self.is_ecu_discovered_by_name(ecu_name).await {
-            return None;
-        }
-        self.connections
-            .get(ecu_name)
-            .map(|conn| conn.network_address())
     }
 
     #[tracing::instrument(skip_all, fields(
@@ -710,36 +680,58 @@ impl EcuGateway for CanDiagGateway {
         // On-demand re-detection: the ECU may have come online after the
         // startup discovery (or dropped off and rebooted). One bounded probe
         // per call; on success the ECU is marked discovered again.
-        if self.probe_ecu(&ecu_name).await {
+        if self.probe(&ecu_name).await {
             Ok(())
         } else {
             Err(DiagServiceError::EcuOffline(ecu_name.clone()))
         }
+    }
+}
+
+impl NetworkTopology for CanDiagGateway {
+    async fn get_gateway_network_address(&self, logical_address: u16) -> Option<String> {
+        let ecu_name = self.logical_address_to_ecu.get(&logical_address)?;
+        if !self.is_ecu_discovered_by_name(ecu_name).await {
+            return None;
+        }
+        self.connections
+            .get(ecu_name)
+            .map(|conn| conn.network_address())
     }
 
     async fn get_ecu_network_address(&self, ecu_name: &str) -> Option<String> {
         self.get_connection(&ecu_name.to_lowercase())
             .map(|conn| conn.network_address())
     }
+}
 
-    async fn send_functional(
-        &self,
-        _transmission_params: cda_interfaces::TransmissionParameters,
-        _message: cda_interfaces::ServicePayload,
-        _expected_ecu_logical_addrs: cda_interfaces::HashMap<u16, String>,
-        _timeout: std::time::Duration,
-        _expect_positive_response: bool,
-    ) -> Result<
-        cda_interfaces::HashMap<String, Result<cda_interfaces::ServicePayload, DiagServiceError>>,
-        DiagServiceError,
-    > {
-        // CAN functional addressing is not implemented yet, see #417.
-        // Fail the whole request honestly; the UDS layer maps a gateway-level
-        // error to a per-ECU error result, so clients see WHY it failed
-        // instead of every ECU appearing to be offline.
-        Err(DiagServiceError::RequestNotSupported(
-            "functional addressing is not implemented for the CAN transport".to_owned(),
-        ))
+impl TransportProbe for CanDiagGateway {
+    async fn route_status(&self, ecu_name: &str) -> RouteStatus {
+        let ecu_name = ecu_name.to_lowercase();
+        if !self.connections.contains_key(&ecu_name) {
+            return RouteStatus::NotConfigured;
+        }
+        if self.discovered_ecus.read().await.contains(&ecu_name) {
+            RouteStatus::Ready
+        } else {
+            // CAN has a resolved ID pair and supports a bounded physical probe.
+            RouteStatus::ProbeRequired
+        }
+    }
+
+    async fn probe(&self, ecu_name: &str) -> bool {
+        let ecu_name = ecu_name.to_lowercase();
+        let Some(conn) = self.connections.get(&ecu_name).cloned() else {
+            return false;
+        };
+        let logical_addr = self.logical_address_for_ecu(&ecu_name);
+        if self.probe_connection(&conn, logical_addr).await.is_ok() {
+            self.discovered_ecus.write().await.insert(ecu_name);
+            true
+        } else {
+            self.discovered_ecus.write().await.remove(&ecu_name);
+            false
+        }
     }
 }
 
@@ -764,7 +756,7 @@ impl Clone for CanDiagGateway {
 #[cfg(test)]
 impl CanDiagGateway {
     /// Drops all discovery state, simulating every ECU vanishing from the
-    /// bus. Test-only counterpart to `probe_ecu` marking ECUs undiscovered.
+    /// bus. Test-only counterpart to `probe` marking ECUs undiscovered.
     pub(crate) async fn clear_discovered(&self) {
         self.discovered_ecus.write().await.clear();
     }

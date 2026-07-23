@@ -35,7 +35,7 @@ use cda_plugin_security::{
 };
 use cda_sovd::Locks;
 use cda_tracing::{OtelGuard, TracingSetupError, TracingWorkerGuard};
-use cda_transport_orchestrator::DiagnosticTransportRouter;
+use cda_transport_router::DiagnosticTransportRouter;
 use clap::{Parser, Subcommand};
 use futures::future::FutureExt;
 use tokio::sync::{Mutex, RwLock, mpsc};

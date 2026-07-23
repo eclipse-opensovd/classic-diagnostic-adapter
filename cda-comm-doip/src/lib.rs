@@ -18,9 +18,10 @@ use std::{
 };
 
 use cda_interfaces::{
-    DiagServiceError, DoipComParams, EcuAddresses, EcuConnectivityHandler, EcuGateway, HashMap,
-    HashMapExtensions, ServicePayload, TransmissionParameters, TransportResponse, dlt_ctx,
-    pending_nrc_from_raw, uds_response_from_raw,
+    DiagServiceError, DoipComParams, EcuAddresses, EcuConnectivityHandler, FunctionalTransport,
+    HashMap, HashMapExtensions, NetworkTopology, PhysicalTransport, RouteStatus, ServicePayload,
+    TransmissionParameters, TransportProbe, TransportResponse, dlt_ctx, pending_nrc_from_raw,
+    uds_response_from_raw,
     util::{self, tokio_ext},
 };
 use doip_definitions::{
@@ -423,7 +424,7 @@ impl<T: EcuAddresses + DoipComParams> DoipDiagGateway<T> {
     }
 }
 
-impl<T: EcuAddresses + DoipComParams> EcuGateway for DoipDiagGateway<T> {
+impl<T: EcuAddresses + DoipComParams> PhysicalTransport for DoipDiagGateway<T> {
     async fn shutdown(&mut self) {
         self.cancel_token.cancel();
 
@@ -443,16 +444,6 @@ impl<T: EcuAddresses + DoipComParams> EcuGateway for DoipDiagGateway<T> {
         drop(tasks);
         drop(connections);
         self.state.doip_connections.write().await.clear();
-    }
-
-    async fn get_gateway_network_address(&self, logical_address: u16) -> Option<String> {
-        self.state
-            .doip_connections
-            .read()
-            .await
-            .iter()
-            .find(|conn| conn.ecus.contains_key(&logical_address))
-            .map(|conn| conn.ip.clone())
     }
 
     #[tracing::instrument(skip_all,
@@ -585,7 +576,9 @@ impl<T: EcuAddresses + DoipComParams> EcuGateway for DoipDiagGateway<T> {
             .ok_or_else(|| DiagServiceError::EcuOffline(ecu_name.to_owned()))?;
         Ok(())
     }
+}
 
+impl<T: EcuAddresses + DoipComParams> FunctionalTransport for DoipDiagGateway<T> {
     async fn send_functional(
         &self,
         transmission_params: TransmissionParameters,
@@ -730,6 +723,44 @@ impl<T: EcuAddresses + DoipComParams> EcuGateway for DoipDiagGateway<T> {
     }
 }
 
+impl<T: EcuAddresses + DoipComParams> NetworkTopology for DoipDiagGateway<T> {
+    async fn get_gateway_network_address(&self, logical_address: u16) -> Option<String> {
+        self.state
+            .doip_connections
+            .read()
+            .await
+            .iter()
+            .find(|conn| conn.ecus.contains_key(&logical_address))
+            .map(|conn| conn.ip.clone())
+    }
+
+    async fn get_ecu_network_address(&self, _ecu_name: &str) -> Option<String> {
+        // DoIP uses logical addressing; per-ECU network address is not applicable
+        None
+    }
+}
+
+impl<T: EcuAddresses + DoipComParams> TransportProbe for DoipDiagGateway<T> {
+    async fn route_status(&self, ecu_name: &str) -> RouteStatus {
+        let ecu_name = ecu_name.to_lowercase();
+        let Some(ecu_lock) = self.state.ecus.get(&ecu_name) else {
+            return RouteStatus::NotConfigured;
+        };
+        // Check if the gateway connection for this ECU is established
+        let gateway_addr = ecu_lock.read().await.logical_gateway_address();
+        if self.get_doip_connection(gateway_addr).await.is_ok() {
+            RouteStatus::Ready
+        } else {
+            // DoIP reachability is driven by VAM discovery and connection
+            // management; the router cannot repair it with a bounded ECU probe.
+            RouteStatus::Unavailable
+        }
+    }
+
+    async fn probe(&self, _ecu_name: &str) -> bool {
+        false
+    }
+}
 /// Waits for the `DoIP` diagnostic-message acknowledgement from the gateway,
 /// with a deadline of `timeout`.
 #[allow(
@@ -1146,8 +1177,8 @@ mod tests {
     use std::{net::UdpSocket, sync::Arc, time::Duration};
 
     use cda_interfaces::{
-        DiagServiceError, DoipComParams, EcuAddresses, EcuGateway, HashMap, HashMapExtensions,
-        PendingNrc, ServicePayload, TransmissionParameters, TransportResponse,
+        DiagServiceError, DoipComParams, EcuAddresses, HashMap, HashMapExtensions, PendingNrc,
+        PhysicalTransport, ServicePayload, TransmissionParameters, TransportResponse,
         UDS_ID_RESPONSE_BITMASK, nrc, service_ids,
     };
     use doip_definitions::{

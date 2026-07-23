@@ -381,7 +381,7 @@ name = "cda-comm-can"
 version = "0.1.0"
 dependencies = [
  "cda-interfaces",
- "cda-transport-orchestrator",
+ "cda-transport-router",
  "hex",
  "schemars",
  "serde",
@@ -641,7 +641,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "cda-transport-orchestrator"
+name = "cda-transport-router"
 version = "0.1.0"
 dependencies = [
  "cda-interfaces",
@@ -2440,7 +2440,7 @@ dependencies = [
  "cda-sovd",
  "cda-storage",
  "cda-tracing",
- "cda-transport-orchestrator",
+ "cda-transport-router",
  "chrono",
  "clap",
  "figment",
