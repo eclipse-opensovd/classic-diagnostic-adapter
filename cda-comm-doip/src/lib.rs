@@ -18,9 +18,10 @@ use std::{
 };
 
 use cda_interfaces::{
-    DiagServiceError, DoipComParams, DoipGatewaySetupError, EcuAddresses, EcuConnectivityHandler,
-    EcuGateway, HashMap, HashMapExtensions, ServicePayload, TransmissionParameters, UdsResponse,
-    dlt_ctx,
+    DiagServiceError, DoipComParams, EcuAddresses, EcuConnectivityHandler, FunctionalTransport,
+    HashMap, HashMapExtensions, NetworkTopology, PhysicalTransport, RouteStatus, ServicePayload,
+    TransmissionParameters, TransportProbe, TransportResponse, dlt_ctx, pending_nrc_from_raw,
+    uds_response_from_raw,
     util::{self, tokio_ext},
 };
 use doip_definitions::{
@@ -31,26 +32,27 @@ use doip_definitions::{
     },
 };
 use futures::FutureExt;
-use thiserror::Error;
 use tokio::{
     sync::{Mutex, RwLock, broadcast, mpsc},
     task::{JoinError, JoinSet},
 };
 use tokio_util::sync::CancellationToken;
 
-use crate::{
-    config::DoipConfig,
-    connections::{EcuError, GatewayState},
-    socket::DoIPUdpSocket,
-};
-
 pub mod config;
+pub mod error;
+pub use error::{ConnectionError, DoipGatewaySetupError};
 mod connection_receiver;
 mod connection_sender;
 mod connections;
 mod ecu_connection;
 pub mod socket;
 mod vir_vam;
+
+use crate::{
+    config::DoipConfig,
+    connections::{EcuError, GatewayState},
+    socket::DoIPUdpSocket,
+};
 
 /// Timeout when suppressPosRspMsgIndicationBit is set.
 /// ECUs that reject a request usually respond quickly with an NRC and
@@ -62,30 +64,26 @@ mod vir_vam;
 /// surrounding logic.
 const SUPPRESS_POSITIVE_RESPONSE_TIMEOUT: Duration = Duration::from_millis(500);
 
-const NRC_BUSY_REPEAT_REQUEST: u8 = 0x21;
-const NRC_RESPONSE_PENDING: u8 = 0x78;
-const NRC_TEMPORARILY_NOT_AVAILABLE: u8 = 0x94;
-
+/// Events received on a `DoIP` connection.
+///
+/// `Msg` carries the raw UDS payload and its `DoIP` logical addresses. All other
+/// variants are ISO 13400-2 protocol-level events that must be handled before
+/// any UDS data is forwarded to the caller.
 #[derive(Debug, Clone)]
 enum DiagnosticResponse {
-    Msg(DiagnosticMessage),
-    Pending {
+    /// A UDS payload received from an ECU, carried verbatim before classification.
+    Msg {
         source_address: u16,
-        request_sid: u8,
+        target_address: u16,
+        data: Vec<u8>,
     },
     Ack((u16, Vec<u8>)),
     Nack(DiagnosticMessageNack),
     AliveCheckResponse,
+    /// `TesterPresent` NRC -- intercepted at the decoding layer so the receiver
+    /// can log-and-drop without routing it to a per-ECU channel.
     TesterPresentNRC(u8),
     GenericNack(GenericNack), // todo #22 -> we need the address of the ECU that sent the nack
-    BusyRepeatRequest {
-        source_address: u16,
-        request_sid: u8,
-    },
-    TemporarilyNotAvailable {
-        source_address: u16,
-        request_sid: u8,
-    },
 }
 
 impl DiagnosticResponse {
@@ -100,10 +98,7 @@ impl DiagnosticResponse {
             // final NRC can overtake the ACK, and ignoring it here consumes
             // it from the receiver - the later response read then times out
             // although the ECU answered.
-            Self::Msg(msg) => util::uds_response_matches_request_sid(*sid, &msg.message),
-            Self::Pending { request_sid, .. }
-            | Self::BusyRepeatRequest { request_sid, .. }
-            | Self::TemporarilyNotAvailable { request_sid, .. } => *request_sid == *sid,
+            Self::Msg { data, .. } => util::uds_response_matches_request_sid(*sid, data),
             _ => false,
         }
     }
@@ -222,59 +217,6 @@ struct DoipEcu {
 struct DoipConnection {
     ecus: HashMap<u16, Arc<Mutex<DoipEcu>>>,
     ip: String,
-}
-
-#[derive(Error, Debug, Clone)]
-pub enum ConnectionError {
-    #[error("Connection closed.")]
-    Closed,
-    #[error("Decoding error: `{0}`")]
-    Decoding(String),
-    #[error("Invalid message: `{0}")]
-    InvalidMessage(String),
-    #[error("Connection timeout: `{0}`")]
-    Timeout(String),
-    #[error("Connection failed: `{0}`")]
-    ConnectionFailed(String),
-    #[error("Routing error: `{0}`")]
-    RoutingError(String),
-    #[error("Send failed: `{0}`")]
-    SendFailed(String),
-}
-
-impl TryFrom<DiagnosticResponse> for Option<UdsResponse> {
-    type Error = DiagServiceError;
-
-    fn try_from(value: DiagnosticResponse) -> Result<Self, Self::Error> {
-        match value {
-            DiagnosticResponse::Msg(msg) => Ok(Some(UdsResponse::Message(ServicePayload {
-                data: msg.message,
-                source_address: u16::from_be_bytes(msg.source_address),
-                target_address: u16::from_be_bytes(msg.target_address),
-                new_session: None,
-                new_security: None,
-            }))),
-            DiagnosticResponse::Pending {
-                source_address: addr,
-                request_sid: _,
-            } => Ok(Some(UdsResponse::ResponsePending(addr))),
-            DiagnosticResponse::BusyRepeatRequest {
-                source_address: addr,
-                request_sid: _,
-            } => Ok(Some(UdsResponse::BusyRepeatRequest(addr))),
-            DiagnosticResponse::TemporarilyNotAvailable {
-                source_address: addr,
-                request_sid: _,
-            } => Ok(Some(UdsResponse::TemporarilyNotAvailable(addr))),
-            DiagnosticResponse::TesterPresentNRC(code) => {
-                Ok(Some(UdsResponse::TesterPresentNRC(code)))
-            }
-            _ => Err(DiagServiceError::BadPayload(
-                "Unexpected response type for DiagnosticResponse to UdsResponse conversion"
-                    .to_owned(),
-            )),
-        }
-    }
 }
 
 impl<T: EcuAddresses + DoipComParams> DoipDiagGateway<T> {
@@ -482,7 +424,7 @@ impl<T: EcuAddresses + DoipComParams> DoipDiagGateway<T> {
     }
 }
 
-impl<T: EcuAddresses + DoipComParams> EcuGateway for DoipDiagGateway<T> {
+impl<T: EcuAddresses + DoipComParams> PhysicalTransport for DoipDiagGateway<T> {
     async fn shutdown(&mut self) {
         self.cancel_token.cancel();
 
@@ -504,16 +446,6 @@ impl<T: EcuAddresses + DoipComParams> EcuGateway for DoipDiagGateway<T> {
         self.state.doip_connections.write().await.clear();
     }
 
-    async fn get_gateway_network_address(&self, logical_address: u16) -> Option<String> {
-        self.state
-            .doip_connections
-            .read()
-            .await
-            .iter()
-            .find(|conn| conn.ecus.contains_key(&logical_address))
-            .map(|conn| conn.ip.clone())
-    }
-
     #[tracing::instrument(skip_all,
         fields(dlt_context = dlt_ctx!("DOIP"))
     )]
@@ -522,7 +454,7 @@ impl<T: EcuAddresses + DoipComParams> EcuGateway for DoipDiagGateway<T> {
         &self,
         transmission_params: TransmissionParameters,
         message: ServicePayload,
-        response_sender: mpsc::Sender<Result<Option<UdsResponse>, DiagServiceError>>,
+        response_sender: mpsc::Sender<Result<Option<TransportResponse>, DiagServiceError>>,
         expect_uds_reply: bool,
     ) -> Result<(), DiagServiceError> {
         let start = Instant::now();
@@ -568,11 +500,11 @@ impl<T: EcuAddresses + DoipComParams> EcuGateway for DoipDiagGateway<T> {
                     {
                         // failed to send the message after exhausting retries.
                         // informing receiver and giving up.
-                        try_send_uds_response(&response_sender, Err(e)).await;
+                        try_send_transport_response(&response_sender, Err(e)).await;
                         return;
                     }
 
-                    let received_message = match wait_for_ack_or_response_until_timeout(
+                    let received_event = match wait_for_ack_or_response_until_timeout(
                         &mut ecu.receiver,
                         &transmission_params.ecu_name,
                         &doip_message,
@@ -582,7 +514,7 @@ impl<T: EcuAddresses + DoipComParams> EcuGateway for DoipDiagGateway<T> {
                     {
                         Ok(first) => first,
                         Err(e) => {
-                            try_send_uds_response(&response_sender, Err(e)).await;
+                            try_send_transport_response(&response_sender, Err(e)).await;
                             return;
                         }
                     };
@@ -593,7 +525,7 @@ impl<T: EcuAddresses + DoipComParams> EcuGateway for DoipDiagGateway<T> {
                         .saturating_sub(receiver_flushed);
 
                     if !expect_uds_reply {
-                        try_send_uds_response(&response_sender, Ok(None)).await;
+                        try_send_transport_response(&response_sender, Ok(None)).await;
                     }
 
                     // Read ECU responses as long as the sender is open.
@@ -603,7 +535,7 @@ impl<T: EcuAddresses + DoipComParams> EcuGateway for DoipDiagGateway<T> {
                         &mut ecu.receiver,
                         &transmission_params.ecu_name,
                         &response_sender,
-                        received_message,
+                        received_event,
                     )
                     .await;
 
@@ -644,7 +576,9 @@ impl<T: EcuAddresses + DoipComParams> EcuGateway for DoipDiagGateway<T> {
             .ok_or_else(|| DiagServiceError::EcuOffline(ecu_name.to_owned()))?;
         Ok(())
     }
+}
 
+impl<T: EcuAddresses + DoipComParams> FunctionalTransport for DoipDiagGateway<T> {
     async fn send_functional(
         &self,
         transmission_params: TransmissionParameters,
@@ -652,7 +586,7 @@ impl<T: EcuAddresses + DoipComParams> EcuGateway for DoipDiagGateway<T> {
         expected_ecu_logical_addrs: HashMap<u16, String>,
         timeout: Duration,
         expect_positive_response: bool,
-    ) -> Result<HashMap<String, Result<UdsResponse, DiagServiceError>>, DiagServiceError> {
+    ) -> Result<HashMap<String, Result<ServicePayload, DiagServiceError>>, DiagServiceError> {
         let doip_conn = self
             .get_doip_connection(transmission_params.gateway_address)
             .await?;
@@ -744,13 +678,13 @@ impl<T: EcuAddresses + DoipComParams> EcuGateway for DoipDiagGateway<T> {
                     Ok(msg) => {
                         let source_addr = u16::from_be_bytes(msg.source_address);
 
-                        let uds_response = UdsResponse::Message(ServicePayload {
+                        let uds_response = ServicePayload {
                             data: msg.message,
                             source_address: source_addr,
                             target_address: u16::from_be_bytes(msg.target_address),
                             new_session: None,
                             new_security: None,
-                        });
+                        };
 
                         result_map.insert(ecu_name.clone(), Ok(uds_response));
 
@@ -789,6 +723,44 @@ impl<T: EcuAddresses + DoipComParams> EcuGateway for DoipDiagGateway<T> {
     }
 }
 
+impl<T: EcuAddresses + DoipComParams> NetworkTopology for DoipDiagGateway<T> {
+    async fn get_gateway_network_address(&self, logical_address: u16) -> Option<String> {
+        self.state
+            .doip_connections
+            .read()
+            .await
+            .iter()
+            .find(|conn| conn.ecus.contains_key(&logical_address))
+            .map(|conn| conn.ip.clone())
+    }
+
+    async fn get_ecu_network_address(&self, _ecu_name: &str) -> Option<String> {
+        // DoIP uses logical addressing; per-ECU network address is not applicable
+        None
+    }
+}
+
+impl<T: EcuAddresses + DoipComParams> TransportProbe for DoipDiagGateway<T> {
+    async fn route_status(&self, ecu_name: &str) -> RouteStatus {
+        let ecu_name = ecu_name.to_lowercase();
+        let Some(ecu_lock) = self.state.ecus.get(&ecu_name) else {
+            return RouteStatus::NotConfigured;
+        };
+        // Check if the gateway connection for this ECU is established
+        let gateway_addr = ecu_lock.read().await.logical_gateway_address();
+        if self.get_doip_connection(gateway_addr).await.is_ok() {
+            RouteStatus::Ready
+        } else {
+            // DoIP reachability is driven by VAM discovery and connection
+            // management; the router cannot repair it with a bounded ECU probe.
+            RouteStatus::Unavailable
+        }
+    }
+
+    async fn probe(&self, _ecu_name: &str) -> bool {
+        false
+    }
+}
 /// Waits for the `DoIP` diagnostic-message acknowledgement from the gateway,
 /// with a deadline of `timeout`.
 #[allow(
@@ -873,20 +845,14 @@ async fn wait_for_ack_or_response_until_timeout(
 
             return match response {
                 DiagnosticResponse::Ack((_, _)) => {
-                    tracing::debug!(
-                        ecu_name = %ecu_name,
-                        "Received ACK"
-                    );
-
+                    tracing::debug!(ecu_name = %ecu_name, "Received ACK");
                     Ok(None)
                 }
-
                 response => {
                     tracing::debug!(
                         ecu_name = %ecu_name,
                         "Received diagnostic response before ACK, treating as implicit ACK"
                     );
-
                     Ok(Some(response))
                 }
             };
@@ -906,7 +872,6 @@ async fn wait_for_ack_or_response_until_timeout(
             timeout = ?timeout,
             "Timeout waiting for ACK/NACK from ECU"
         );
-
         Err(DiagServiceError::Timeout)
     }
 }
@@ -921,11 +886,11 @@ async fn wait_for_ack_or_response_until_timeout(
 async fn read_ecu_responses(
     receiver: &mut broadcast::Receiver<Result<DiagnosticResponse, EcuError>>,
     ecu_name: &str,
-    response_sender: &mpsc::Sender<Result<Option<UdsResponse>, DiagServiceError>>,
-    received_message: Option<DiagnosticResponse>,
+    response_sender: &mpsc::Sender<Result<Option<TransportResponse>, DiagServiceError>>,
+    received_event: Option<DiagnosticResponse>,
 ) {
-    if let Some(response) = received_message
-        && !try_send_uds_response(response_sender, response.try_into()).await
+    if let Some(event) = received_event
+        && !try_send_transport_response(response_sender, doip_event_to_transport(event)).await
     {
         return;
     }
@@ -939,8 +904,13 @@ async fn read_ecu_responses(
             res = receiver.recv() => {
                 if let Ok(res) = res {
                     match res {
-                        Ok(response) => {
-                            if !try_send_uds_response(response_sender, response.try_into()).await {
+                        Ok(event) => {
+                            if !try_send_transport_response(
+                                response_sender,
+                                doip_event_to_transport(event),
+                            )
+                            .await
+                            {
                                 break;
                             }
                         }
@@ -950,7 +920,7 @@ async fn read_ecu_responses(
                                 error = %e,
                                 "Error while waiting for response message"
                             );
-                            if !try_send_uds_response(
+                            if !try_send_transport_response(
                                 response_sender,
                                 Err(DiagServiceError::NoResponse(format!(
                                     "Error while waiting for message, {e}"
@@ -967,7 +937,7 @@ async fn read_ecu_responses(
                         ecu_name = %ecu_name,
                         "ECU receiver unexpectedly closed while waiting for response"
                     );
-                    try_send_uds_response(
+                    try_send_transport_response(
                         response_sender,
                         Err(DiagServiceError::NoResponse(
                             "ECU receiver unexpectedly closed".to_owned(),
@@ -988,6 +958,41 @@ async fn read_ecu_responses(
     }
 }
 
+/// Converts a [`DiagnosticResponse::Msg`] to a [`TransportResponse`] result for the
+/// caller channel.
+///
+/// Pending NRCs are classified via [`pending_nrc_from_raw`]; all other frames
+/// are classified as final via [`uds_response_from_raw`].
+///
+/// `TesterPresentNRC` is absorbed by [`connection_receiver`] before it is
+/// broadcast to any per-ECU channel -- it never reaches this function.
+/// All other [`DiagnosticResponse`] variants (Ack, Nack, etc.) must be
+/// handled before calling this function.
+fn doip_event_to_transport(
+    event: DiagnosticResponse,
+) -> Result<Option<TransportResponse>, DiagServiceError> {
+    match event {
+        DiagnosticResponse::Msg {
+            data,
+            source_address,
+            target_address,
+        } => {
+            if let Some(pending) = pending_nrc_from_raw(&data, source_address) {
+                Ok(Some(TransportResponse::Pending(pending)))
+            } else {
+                Ok(Some(TransportResponse::UdsResponse(uds_response_from_raw(
+                    data,
+                    source_address,
+                    target_address,
+                ))))
+            }
+        }
+        _ => Err(DiagServiceError::BadPayload(
+            "Unexpected DoIP event type in UDS response stream".to_owned(),
+        )),
+    }
+}
+
 #[allow(
     clippy::needless_continue,
     reason = "Explicit continue improves readability of complex loop logic"
@@ -999,11 +1004,19 @@ async fn wait_for_ecu_response(
     tokio::time::timeout(timeout, async {
         loop {
             match ecu.receiver.recv().await {
-                Ok(Ok(DiagnosticResponse::Msg(m))) => {
-                    return Some(Ok(m));
+                Ok(Ok(DiagnosticResponse::Msg {
+                    source_address,
+                    target_address,
+                    data,
+                })) => {
+                    return Some(Ok(DiagnosticMessage {
+                        source_address: source_address.to_be_bytes(),
+                        target_address: target_address.to_be_bytes(),
+                        message: data,
+                    }));
                 }
                 Ok(Ok(_ignore)) => {
-                    // Ignore other message types
+                    // Ignore other event types
                     continue;
                 }
                 Ok(Err(e)) => {
@@ -1148,9 +1161,9 @@ async fn send_with_retries(
 #[tracing::instrument(skip_all,
     fields(dlt_context = dlt_ctx!("DOIP"))
 )]
-async fn try_send_uds_response(
-    response_sender: &mpsc::Sender<Result<Option<UdsResponse>, DiagServiceError>>,
-    response: Result<Option<UdsResponse>, DiagServiceError>,
+async fn try_send_transport_response(
+    response_sender: &mpsc::Sender<Result<Option<TransportResponse>, DiagServiceError>>,
+    response: Result<Option<TransportResponse>, DiagServiceError>,
 ) -> bool {
     if let Err(err) = response_sender.send(response).await {
         tracing::error!(error = %err, "Failed to send response");
@@ -1164,8 +1177,9 @@ mod tests {
     use std::{net::UdpSocket, sync::Arc, time::Duration};
 
     use cda_interfaces::{
-        DiagServiceError, DoipComParams, EcuAddresses, EcuGateway, HashMap, HashMapExtensions,
-        ServicePayload, TransmissionParameters, UDS_ID_RESPONSE_BITMASK, UdsResponse, service_ids,
+        DiagServiceError, DoipComParams, EcuAddresses, HashMap, HashMapExtensions, PendingNrc,
+        PhysicalTransport, ServicePayload, TransmissionParameters, TransportResponse,
+        UDS_ID_RESPONSE_BITMASK, nrc, service_ids,
     };
     use doip_definitions::{
         header::ProtocolVersion,
@@ -1316,11 +1330,11 @@ mod tests {
     }
 
     fn ecu_msg_response() -> DiagnosticResponse {
-        DiagnosticResponse::Msg(DiagnosticMessage {
-            source_address: ECU_ADDR.to_be_bytes(),
-            target_address: TESTER_ADDR.to_be_bytes(),
-            message: RESPONSE_DATA.to_vec(),
-        })
+        DiagnosticResponse::Msg {
+            source_address: ECU_ADDR,
+            target_address: TESTER_ADDR,
+            data: RESPONSE_DATA.to_vec(),
+        }
     }
 
     fn diag_msg() -> DiagnosticMessage {
@@ -1341,8 +1355,8 @@ mod tests {
     }
 
     type ResponseChannel = (
-        mpsc::Sender<Result<Option<UdsResponse>, DiagServiceError>>,
-        mpsc::Receiver<Result<Option<UdsResponse>, DiagServiceError>>,
+        mpsc::Sender<Result<Option<TransportResponse>, DiagServiceError>>,
+        mpsc::Receiver<Result<Option<TransportResponse>, DiagServiceError>>,
     );
 
     fn make_response_channel() -> ResponseChannel {
@@ -1350,7 +1364,7 @@ mod tests {
     }
 
     type SendResult = Result<(), cda_interfaces::DiagServiceError>;
-    type ResponseItem = Result<Option<UdsResponse>, cda_interfaces::DiagServiceError>;
+    type ResponseItem = Result<Option<TransportResponse>, cda_interfaces::DiagServiceError>;
 
     /// Shared test harness.
     ///
@@ -1434,17 +1448,30 @@ mod tests {
     async fn implicit_ack_busy_retry_then_final_response() {
         let mut harness = TestHarness::new().await;
 
-        // ECU sends BusyRepeatRequest - no ACK (implicit ACK path).
+        // ECU sends BusyRepeatRequest (NRC 0x21) via the implicit-ACK path:
+        // the DiagnosticMessage arrives before the ACK, so
+        // wait_for_ack_or_response_until_timeout returns it directly as the
+        // seed for read_ecu_responses instead of waiting for a separate ACK.
         harness
             .broadcast_tx
-            .send(Ok(DiagnosticResponse::BusyRepeatRequest {
+            .send(Ok(DiagnosticResponse::Msg {
                 source_address: ECU_ADDR,
-                request_sid: REQUEST_DATA[0],
+                target_address: TESTER_ADDR,
+                data: vec![
+                    service_ids::NEGATIVE_RESPONSE,
+                    REQUEST_DATA[0],
+                    nrc::BUSY_REPEAT_REQUEST,
+                ],
             }))
             .expect("Failed to sent busy repeat request");
         let first = harness.recv_response().await;
         assert!(
-            matches!(first, Ok(Some(UdsResponse::BusyRepeatRequest(_)))),
+            matches!(
+                first,
+                Ok(Some(TransportResponse::Pending(
+                    PendingNrc::BusyRepeatRequest { .. }
+                )))
+            ),
             "expected BusyRepeatRequest, got {first:?}"
         );
 
@@ -1455,7 +1482,7 @@ mod tests {
             .expect("Failed to sent final message");
         let second = harness.recv_response().await;
         assert!(
-            matches!(second, Ok(Some(UdsResponse::Message(_)))),
+            matches!(second, Ok(Some(TransportResponse::UdsResponse(_)))),
             "expected Message, got {second:?}"
         );
 
@@ -1479,7 +1506,7 @@ mod tests {
             .expect("Failed to sent message");
         let response = harness.recv_response().await;
         assert!(
-            matches!(response, Ok(Some(UdsResponse::Message(_)))),
+            matches!(response, Ok(Some(TransportResponse::UdsResponse(_)))),
             "expected Message, got {response:?}"
         );
 
@@ -1530,8 +1557,8 @@ mod tests {
         .await;
 
         assert!(
-            matches!(result, Ok(Some(DiagnosticResponse::Msg(_)))),
-            "expected Ok(Some(Msg)), got {result:?}"
+            matches!(result, Ok(Some(DiagnosticResponse::Msg { .. }))),
+            "expected Ok(Some(Diagnostic)), got {result:?}"
         );
     }
 
@@ -1541,9 +1568,14 @@ mod tests {
         let (tx, mut rx) = make_broadcast_pair();
         let msg = diag_msg();
 
-        tx.send(Ok(DiagnosticResponse::BusyRepeatRequest {
+        tx.send(Ok(DiagnosticResponse::Msg {
             source_address: ECU_ADDR,
-            request_sid: REQUEST_DATA[0],
+            target_address: TESTER_ADDR,
+            data: vec![
+                service_ids::NEGATIVE_RESPONSE,
+                REQUEST_DATA[0],
+                nrc::BUSY_REPEAT_REQUEST,
+            ],
         }))
         .expect("Failed to busy repeat request");
 
@@ -1556,14 +1588,8 @@ mod tests {
         .await;
 
         assert!(
-            matches!(
-                result,
-                Ok(Some(DiagnosticResponse::BusyRepeatRequest {
-                    source_address: _,
-                    request_sid: _
-                }))
-            ),
-            "expected Ok(Some(BusyRepeatRequest)), got {result:?}"
+            matches!(result, Ok(Some(DiagnosticResponse::Msg { .. }))),
+            "expected Ok(Some(Diagnostic(BusyRepeatRequest NRC))), got {result:?}"
         );
     }
 
@@ -1711,7 +1737,7 @@ mod tests {
             .expect("timeout")
             .expect("channel closed");
         assert!(
-            matches!(item, Ok(Some(UdsResponse::Message(_)))),
+            matches!(item, Ok(Some(TransportResponse::UdsResponse(_)))),
             "expected Message, got {item:?}"
         );
 
@@ -1727,9 +1753,14 @@ mod tests {
     async fn read_ecu_responses_forwards_multiple_responses() {
         let (tx, mut rx) = make_broadcast_pair();
         let (resp_tx, mut resp_rx) = make_response_channel();
-        tx.send(Ok(DiagnosticResponse::Pending {
+        tx.send(Ok(DiagnosticResponse::Msg {
             source_address: ECU_ADDR,
-            request_sid: REQUEST_DATA[0],
+            target_address: TESTER_ADDR,
+            data: vec![
+                service_ids::NEGATIVE_RESPONSE,
+                REQUEST_DATA[0],
+                nrc::RESPONSE_PENDING,
+            ],
         }))
         .expect("Failed to send pending response");
         tx.send(Ok(ecu_msg_response()))
@@ -1747,7 +1778,12 @@ mod tests {
             .expect("timeout")
             .expect("closed");
         assert!(
-            matches!(first, Ok(Some(UdsResponse::ResponsePending(_)))),
+            matches!(
+                first,
+                Ok(Some(TransportResponse::Pending(
+                    PendingNrc::ResponsePending { .. }
+                )))
+            ),
             "expected ResponsePending, got {first:?}"
         );
 
@@ -1756,7 +1792,7 @@ mod tests {
             .expect("timeout")
             .expect("closed");
         assert!(
-            matches!(second, Ok(Some(UdsResponse::Message(_)))),
+            matches!(second, Ok(Some(TransportResponse::UdsResponse(_)))),
             "expected Message, got {second:?}"
         );
 
@@ -1775,9 +1811,14 @@ mod tests {
         let (resp_tx, mut resp_rx) = make_response_channel();
 
         let first = ecu_msg_response();
-        tx.send(Ok(DiagnosticResponse::Pending {
+        tx.send(Ok(DiagnosticResponse::Msg {
             source_address: ECU_ADDR,
-            request_sid: REQUEST_DATA[0],
+            target_address: TESTER_ADDR,
+            data: vec![
+                service_ids::NEGATIVE_RESPONSE,
+                REQUEST_DATA[0],
+                nrc::RESPONSE_PENDING,
+            ],
         }))
         .expect("Failed to send pending response");
         let _tx = tx;
@@ -1791,7 +1832,7 @@ mod tests {
             .expect("timeout")
             .expect("closed");
         assert!(
-            matches!(first_item, Ok(Some(UdsResponse::Message(_)))),
+            matches!(first_item, Ok(Some(TransportResponse::UdsResponse(_)))),
             "expected Message from first, got {first_item:?}"
         );
 
@@ -1800,7 +1841,12 @@ mod tests {
             .expect("timeout")
             .expect("closed");
         assert!(
-            matches!(second_item, Ok(Some(UdsResponse::ResponsePending(_)))),
+            matches!(
+                second_item,
+                Ok(Some(TransportResponse::Pending(
+                    PendingNrc::ResponsePending { .. }
+                )))
+            ),
             "expected ResponsePending from receiver, got {second_item:?}"
         );
 

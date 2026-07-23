@@ -14,15 +14,16 @@
 use std::{future::Future, path::PathBuf, sync::Arc};
 
 use async_trait::async_trait;
-use cda_comm_can::MultiTransportGateway;
+use cda_comm_can::CanDiagGateway;
 use cda_comm_doip::DoipDiagGateway;
 use cda_core::EcuManager;
 use cda_interfaces::{
-    EcuGateway, UdsQuery,
+    PhysicalTransport, UdsQuery,
     datatypes::ComponentsConfig,
     runtime_update_api::{ReloadError, RuntimeFilesUpdateSecurityHandler},
 };
 use cda_plugin_security::{SecurityPlugin, SecurityPluginLoader};
+use cda_transport_orchestrator::DiagnosticTransportRouter;
 use tokio::sync::{Mutex, RwLock};
 
 use crate::{AppError, UdsManagerType};
@@ -42,7 +43,8 @@ where
     pub lock_provider: Arc<cda_sovd::SovdLockStateProvider>,
     pub shutdown_signal: F,
     pub uds_manager: RwLock<UdsManagerType<S>>,
-    pub doip_gateway: RwLock<MultiTransportGateway<DoipDiagGateway<EcuManager<S>>>>,
+    pub transport_router:
+        RwLock<DiagnosticTransportRouter<DoipDiagGateway<EcuManager<S>>, CanDiagGateway>>,
     pub ecu_execution_registry: cda_sovd::EcuExecutionRegistry,
     pub update_guard: cda_sovd::UpdateGuardState,
     pub health: Option<crate::HealthProviders>,
@@ -63,7 +65,8 @@ where
     lock_provider: Arc<cda_sovd::SovdLockStateProvider>,
     shutdown_signal: F,
     uds_manager: RwLock<UdsManagerType<S>>,
-    doip_gateway: RwLock<MultiTransportGateway<DoipDiagGateway<EcuManager<S>>>>,
+    transport_router:
+        RwLock<DiagnosticTransportRouter<DoipDiagGateway<EcuManager<S>>, CanDiagGateway>>,
     update_guard: cda_sovd::UpdateGuardState,
     ecu_execution_registry: cda_sovd::EcuExecutionRegistry,
     health: Option<crate::HealthProviders>,
@@ -88,7 +91,7 @@ where
             lock_provider: deps.lock_provider,
             shutdown_signal: deps.shutdown_signal,
             uds_manager: deps.uds_manager,
-            doip_gateway: deps.doip_gateway,
+            transport_router: deps.transport_router,
             update_guard: deps.update_guard,
             ecu_execution_registry: deps.ecu_execution_registry,
             health: deps.health,
@@ -120,7 +123,7 @@ where
 
         self.uds_manager.write().await.shutdown().await;
         let doip_socket = {
-            let mut gw = self.doip_gateway.write().await;
+            let mut gw = self.transport_router.write().await;
             // `None` in CAN-only operation (no DoIP transport configured);
             // `create_vehicle_components` only needs the socket when DoIP is
             // enabled.
@@ -146,7 +149,7 @@ where
         // Replace with new components
         *self.variant_detection_handle.lock().await = Some(new_components.variant_detection_handle);
         *self.uds_manager.write().await = new_components.uds_manager.clone();
-        *self.doip_gateway.write().await = new_components.diagnostic_gateway;
+        *self.transport_router.write().await = new_components.diagnostic_gateway;
 
         // Update lock entries, to make sure new ECUs or removed ECUs are updated.
         let ecu_names = new_components.uds_manager.get_physical_ecus().await;
@@ -222,7 +225,7 @@ pub struct RuntimeUpdateContext<
     pub security_handler: Arc<T>,
     pub ecu_execution_registry: cda_sovd::EcuExecutionRegistry,
     pub uds_manager: UdsManagerType<S>,
-    pub doip_gateway: MultiTransportGateway<DoipDiagGateway<EcuManager<S>>>,
+    pub transport_router: DiagnosticTransportRouter<DoipDiagGateway<EcuManager<S>>, CanDiagGateway>,
     pub health: Option<crate::HealthProviders>,
     pub variant_detection_handle: Option<tokio::task::JoinHandle<()>>,
 }
@@ -309,7 +312,7 @@ where
             lock_provider: Arc::clone(&ctx.lock_provider),
             shutdown_signal: ctx.shutdown_signal,
             uds_manager: RwLock::new(ctx.uds_manager),
-            doip_gateway: RwLock::new(ctx.doip_gateway),
+            transport_router: RwLock::new(ctx.transport_router),
             update_guard: ctx.update_guard.clone(),
             ecu_execution_registry: ctx.ecu_execution_registry,
             health: ctx.health,

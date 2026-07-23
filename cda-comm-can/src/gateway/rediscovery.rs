@@ -28,6 +28,7 @@
 
 use std::time::Duration;
 
+use cda_interfaces::TransportProbe;
 use tokio_util::sync::CancellationToken;
 
 use super::{CanDiagGateway, background::BackgroundTask};
@@ -76,7 +77,7 @@ impl CanDiagGateway {
                     if task_cancel.is_cancelled() {
                         return;
                     }
-                    if gateway.probe_ecu(&ecu_name).await {
+                    if gateway.probe(&ecu_name).await {
                         recovered.push(ecu_name);
                     }
                 }

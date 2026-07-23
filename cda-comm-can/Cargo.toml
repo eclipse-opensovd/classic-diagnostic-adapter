@@ -47,6 +47,7 @@ tokio-socketcan-isotp = { workspace = true, optional = true }
 
 [dev-dependencies]
 toml = { workspace = true }
+cda-transport-orchestrator = { workspace = true }
 
 [features]
 default = []
