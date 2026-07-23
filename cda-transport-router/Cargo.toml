@@ -10,11 +10,11 @@
 # SPDX-License-Identifier: Apache-2.0
 
 [package]
-name = "cda-transport-orchestrator"
+name = "cda-transport-router"
 version = "0.1.0"
 edition.workspace = true
 publish = false
-description = "Transport orchestration layer for the Classic Diagnostic Adapter"
+description = "Transport routing layer for the Classic Diagnostic Adapter"
 homepage.workspace = true
 license.workspace = true
 
@@ -28,9 +28,9 @@ path = "src/lib.rs"
 # internal
 cda-interfaces = { workspace = true }
 # external
+async-trait = { workspace = true }
 tokio = { workspace = true, features = ["sync"] }
 tracing = { workspace = true }
-async-trait = {workspace = true}
 
 [features]
 default = []

@@ -18,7 +18,7 @@ use serde::{Deserialize, Serialize};
 /// Identifies which physical transport is used to reach an ECU.
 ///
 /// Used in per-ECU transport overrides (see `cda-comm-can`'s `TransportOverride`)
-/// and in [`DiagnosticTransportRouter`](cda_transport_orchestrator::DiagnosticTransportRouter)
+/// and in [`DiagnosticTransportRouter`](cda_transport_router::DiagnosticTransportRouter)
 /// for the ECU-binding map.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(rename_all = "lowercase")]

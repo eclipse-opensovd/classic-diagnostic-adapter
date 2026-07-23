@@ -25,7 +25,7 @@ use cda_plugin_runtime_update::{
 use cda_plugin_security::{SecurityPlugin, SecurityPluginLoader};
 use cda_sovd::{SovdLockStateProvider, UpdateGuardState};
 use cda_storage::LocalStorage;
-use cda_transport_orchestrator::DiagnosticTransportRouter;
+use cda_transport_router::DiagnosticTransportRouter;
 use tokio::sync::Mutex;
 
 use crate::{

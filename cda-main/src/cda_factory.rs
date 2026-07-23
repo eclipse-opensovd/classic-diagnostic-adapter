@@ -22,7 +22,7 @@ use cda_interfaces::{
     runtime_update_api::{ReloadError, VehicleComponentFactory, VehicleComponents},
 };
 use cda_plugin_security::SecurityPlugin;
-use cda_transport_orchestrator::DiagnosticTransportRouter;
+use cda_transport_router::DiagnosticTransportRouter;
 use tokio::sync::Mutex;
 
 use crate::{UdsManagerType, config::configfile::Configuration};
