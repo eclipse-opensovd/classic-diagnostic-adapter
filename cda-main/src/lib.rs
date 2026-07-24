@@ -41,7 +41,6 @@ use figment::{
     Figment,
     providers::{Format, Serialized, Toml},
 };
-use futures::future::FutureExt;
 use tokio::sync::{Mutex, RwLock, mpsc};
 use tracing_subscriber::layer::SubscriberExt;
 
@@ -411,9 +410,7 @@ async fn init_webserver(
         port: config.server.port,
     };
 
-    let shutdown_future: std::pin::Pin<Box<dyn Future<Output = ()> + Send + Sync + 'static>> =
-        Box::pin(shutdown_signal());
-    let clonable_shutdown_signal = shutdown_future.shared();
+    let clonable_shutdown_signal = cda_interfaces::shutdown_signal(shutdown_signal());
 
     let (dynamic_router, webserver_task) =
         cda_sovd::launch_webserver(webserver_config.clone(), clonable_shutdown_signal.clone())
@@ -627,9 +624,7 @@ pub(crate) struct WebserverState {
     _tracing_guards: TracingGuards,
     pub dynamic_router: cda_sovd::dynamic_router::DynamicRouter,
     webserver_task: tokio::task::JoinHandle<()>,
-    pub shutdown_signal: futures::future::Shared<
-        std::pin::Pin<Box<dyn Future<Output = ()> + Send + Sync + 'static>>,
-    >,
+    pub shutdown_signal: cda_interfaces::ShutdownSignal,
     health_state: Option<cda_health::HealthState>,
     main_health_provider: Option<Arc<cda_health::StatusHealthProvider>>,
 }

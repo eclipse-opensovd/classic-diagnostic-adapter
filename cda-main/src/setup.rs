@@ -27,7 +27,7 @@ use cda_comm_uds::FlashTransferObserver;
 use cda_core::EcuManager;
 use cda_interfaces::{HashMap, ShutdownSignal, health::HealthProvider};
 use cda_plugin_security::{SecurityPlugin, SecurityPluginLoader};
-use futures::{FutureExt, future::BoxFuture};
+use futures::future::BoxFuture;
 use tokio::sync::{Mutex, RwLock};
 
 use crate::{
@@ -225,9 +225,7 @@ where
     let flash_transfer_guard = vehicle_data.uds_manager.flash_transfer_guard();
     let update_in_progress = vehicle_data.update_guard.busy_handle();
 
-    let shutdown_signal: cda_interfaces::ShutdownSignal = (Box::pin(ws.shutdown_signal.clone())
-        as std::pin::Pin<Box<dyn Future<Output = ()> + Send + Sync + 'static>>)
-        .shared();
+    let shutdown_signal = cda_interfaces::shutdown_signal(ws.shutdown_signal.clone());
 
     // Build the CdaRuntime context for the update plugin builder.
     let infra = CdaRuntime {
@@ -274,13 +272,14 @@ where
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-    use crate::update::{UpdatePluginFn, update_plugin_fn};
     use cda_interfaces::runtime_update_api::{
         BulkDataCreatedList, BulkDataList, ExecutionMode, RuntimeFilesQuery,
         RuntimeFilesUpdatePlugin, RuntimeUpdateError, UpdateExecution,
     };
     use cda_plugin_security::{DefaultSecurityPlugin, DefaultSecurityPluginData};
+
+    use super::*;
+    use crate::update::{UpdatePluginFn, update_plugin_fn};
 
     // Minimal no-op plugin for type-checking.
 
@@ -427,5 +426,4 @@ mod tests {
             "plugin builder must survive chaining"
         );
     }
-
 }

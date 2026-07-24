@@ -13,13 +13,11 @@
 
 use std::{
     fmt::{Display, Formatter},
-    future::Future,
-    pin::Pin,
     time::Duration,
 };
 
 use async_trait::async_trait;
-use futures::FutureExt;
+use futures::{FutureExt, future::BoxFuture};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
@@ -444,16 +442,13 @@ impl Display for DiagCommAction {
 
 /// Type alias for the boxed shared shutdown signal.
 /// This provides a concrete named type for use in generic bounds.
-pub type ShutdownSignal =
-    futures::future::Shared<Pin<Box<dyn Future<Output = ()> + Send + Sync + 'static>>>;
+pub type ShutdownSignal = futures::future::Shared<BoxFuture<'static, ()>>;
 
-/// Helper function to create a `ShutdownSignal` from a future.
-/// This allows ergonomic creation without needing to type the full Pin<Box<dyn ...>> type.
 pub fn shutdown_signal<F>(future: F) -> ShutdownSignal
 where
-    F: Future<Output = ()> + Send + Sync + 'static,
+    F: Future<Output = ()> + Send + 'static,
 {
-    (Box::pin(future) as Pin<Box<dyn Future<Output = ()> + Send + Sync + 'static>>).shared()
+    future.boxed().shared()
 }
 
 /// Capability for gracefully shutting down background tasks/connections, e.g. before a
