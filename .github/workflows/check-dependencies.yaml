@@ -1,0 +1,57 @@
+# SPDX-FileCopyrightText: 2025 Copyright (c) Contributors to the Eclipse Foundation
+#
+# See the NOTICE file(s) distributed with this work for additional
+# information regarding copyright ownership.
+#
+# This program and the accompanying materials are made available under the
+# terms of the Apache License Version 2.0 which is available at
+# https://www.apache.org/licenses/LICENSE-2.0
+#
+# SPDX-License-Identifier: Apache-2.0
+
+name: Check 3rd party dependencies
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  #    paths:
+  #    - "Cargo.lock"
+  workflow_call:
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.ref }}-${{ github.workflow }}
+  cancel-in-progress: true
+
+jobs:
+  deps:
+    name: "Check 3rd party Rust dependencies' licenses"
+    runs-on: ubuntu-latest
+    env:
+      DASH_SUMMARY: "DEPENDENCIES.txt"
+    steps:
+      - uses: actions/checkout@v4
+      - name: "Check 3rd party license compatibility"
+        id: "run-checks"
+        run: |
+          if bash .github/scripts/check-3rd-party-licenses.sh
+          then
+            echo "checks-failed=0" >> $GITHUB_OUTPUT
+            echo "License information of 3rd party dependencies has been vetted successfully." >> $GITHUB_STEP_SUMMARY
+          else
+            echo "checks-failed=1" >> $GITHUB_OUTPUT
+            echo "License information of some 3rd party dependencies could not be vetted successfully." >> $GITHUB_STEP_SUMMARY
+            echo "A DEPENDENCIES file containing the vetted information has been attached to this workflow run." >> $GITHUB_STEP_SUMMARY
+          fi
+      - name: Upload DEPENDENCIES file
+        if: ${{ steps.run-checks.outputs.checks-failed == '1' }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: 3rd-party-dependencies
+          path: ${{ env.DASH_SUMMARY }}
+      - name: "Determine exit code"
+        env:
+          EXIT_CODE: ${{ steps.run-checks.outputs.checks-failed }}
+        run: |
+          exit $EXIT_CODE
