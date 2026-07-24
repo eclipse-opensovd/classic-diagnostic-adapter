@@ -205,7 +205,7 @@ where
         self.uds_manager.write().await.shutdown().await;
         let doip_socket = {
             let mut gw = self.doip_gateway.write().await;
-            let socket = gw.upd_socket();
+            let socket = gw.socket();
             gw.shutdown().await;
             socket
         };
