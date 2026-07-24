@@ -28,9 +28,7 @@ use cda_plugin_runtime_update::{
         DefaultReloadContext as ReloaderContext, DefaultRuntimeReloaderPlugin,
     },
 };
-use cda_plugin_security::{
-    DefaultSecurityPlugin, DefaultSecurityPluginData, SecurityPlugin, SecurityPluginLoader,
-};
+use cda_plugin_security::{SecurityPlugin, SecurityPluginLoader};
 use cda_sovd::{SovdLockStateProvider, UpdateGuardState};
 use cda_storage::LocalStorage;
 use tokio::sync::Mutex;
@@ -41,12 +39,10 @@ use crate::{
     setup::CdaRuntime,
 };
 
-/// Setup configuration for CDA runtime initialization.
-///
 /// Trait for async plugin builders that produce a [`RuntimeFilesUpdatePlugin`].
 ///
 /// Implement this trait (or use a closure via [`update_plugin_fn`]) to provide a
-/// custom update plugin to [`Setup::with_update_plugin`].
+/// custom update plugin to [`crate::Setup::with_update_plugin`].
 pub trait UpdatePluginBuilder<SP: SecurityPlugin>: Send {
     /// The concrete plugin type this builder produces.
     type Plugin: RuntimeFilesUpdatePlugin;
@@ -67,9 +63,11 @@ pub struct UpdatePluginFn<F>(F);
 ///
 /// # Example
 /// ```rust,ignore
-/// Setup::new().with_update_plugin(update_plugin_fn(|infra| async move {
+/// use opensovd_cda_lib::{Setup, update::update_plugin_fn};
+///
+/// let setup = Setup::new().with_update_plugin(update_plugin_fn(|infra| async move {
 ///     Ok(MyPlugin::new(infra))
-/// }))
+/// }));
 /// ```
 pub fn update_plugin_fn<SP, F, Fut, P>(f: F) -> UpdatePluginFn<F>
 where
@@ -98,7 +96,7 @@ where
 /// Concrete [`VehicleComponentFactory`] that delegates to
 /// [`crate::create_vehicle_components`].
 ///
-/// Stored on [`cda_plugin_runtime_update::asd::DefaultRuntimeFileReloadHandler`]
+/// Used by [`DefaultRuntimeReloaderPlugin`]
 /// and called every time the diagnostic databases are reloaded.
 pub struct CdaMainVehicleFactory<SP>
 where
@@ -144,7 +142,7 @@ where
         VehicleComponents<UdsManagerType<SP>, DoipDiagGateway<EcuManager<SP>>, Self::FileManager>,
         ReloadError,
     > {
-        let (components, _databases) = crate::create_vehicle_components::<SP>(
+        let (crate_components, _databases) = crate::create_vehicle_components::<SP>(
             config,
             mdd_paths,
             self.shutdown_signal.clone(),
@@ -155,13 +153,21 @@ where
         .await
         .map_err(|e| ReloadError(format!("Failed to create vehicle components: {e}")))?;
 
-        Ok(components)
+        Ok(VehicleComponents {
+            uds_manager: crate_components.uds_manager,
+            diagnostic_gateway: crate_components.diagnostic_gateway,
+            file_managers: crate_components.file_managers,
+            variant_detection_handle: crate_components.variant_detection_handle,
+            functional_group_config: config.functional_description.clone(),
+        })
     }
 }
 
 /// Registers the runtime update routes on the dynamic router using the provided plugin.
 ///
-/// Wraps the plugin in [`ExclusiveRuntimePlugin`] for read/write mutual exclusion and
+/// Wraps the plugin in
+/// [`ExclusiveRuntimePlugin`](cda_interfaces::runtime_update_api::ExclusiveRuntimePlugin) for
+/// read/write mutual exclusion and
 /// mounts the HTTP endpoints by delegating to [`cda_sovd::add_runtime_update_routes`].
 /// The caller is responsible for constructing the plugin before calling this function.
 pub async fn add_runtime_update_routes<S, P>(
@@ -198,14 +204,18 @@ pub async fn add_runtime_update_routes<S, P>(
 ///
 /// # Errors
 /// Returns [`AppError::RuntimeUpdateError`] if plugin initialization fails.
-pub(crate) async fn create_default_update_plugin(
-    infra: CdaRuntime<DefaultSecurityPluginData>,
-) -> Result<impl RuntimeFilesUpdatePlugin, AppError> {
-    let health_providers = infra.health.clone();
+pub(crate) async fn create_default_update_plugin<SP, SL>(
+    infra: CdaRuntime<SP>,
+) -> Result<impl RuntimeFilesUpdatePlugin, AppError>
+where
+    SP: SecurityPlugin,
+    SL: SecurityPluginLoader,
+{
+    let health_for_factory = infra.health.clone();
     let shutdown_signal = infra.shutdown_signal.clone();
-    let factory = Arc::new(CdaMainVehicleFactory::<DefaultSecurityPluginData>::new(
+    let factory = Arc::new(CdaMainVehicleFactory::<SP>::new(
         shutdown_signal,
-        health_providers,
+        health_for_factory,
     ));
 
     let reloader_infra = ReloaderContext {
@@ -230,10 +240,10 @@ pub(crate) async fn create_default_update_plugin(
         cda_plugin_runtime_update::RuntimeReloaderConfig::new(reloader_infra, factory);
 
     let reloader_plugin = Arc::new(DefaultRuntimeReloaderPlugin::<
-        UdsManagerType<DefaultSecurityPluginData>,
-        DoipDiagGateway<EcuManager<DefaultSecurityPluginData>>,
+        UdsManagerType<SP>,
+        DoipDiagGateway<EcuManager<SP>>,
         Configuration,
-        DefaultSecurityPlugin,
+        SL,
         _,
     >::new(reloader_config));
 
