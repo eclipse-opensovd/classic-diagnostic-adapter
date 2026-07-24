@@ -18,11 +18,8 @@ use cda_comm_uds::{UdsManager, state_coordinator::EcuStateCoordinator};
 use cda_core::EcuManager;
 use cda_database::FileManager;
 use cda_interfaces::{
-    DiagServiceError, DoipGatewaySetupError, EcuConnectivityHandler, FunctionalDescriptionConfig,
-    HashMap, HashMapExtensions, UdsQuery, UdsVariant,
-    config::{ConfigSanity, ConfigSanityError},
-    datatypes::FaultConfig,
-    dlt_ctx,
+    DoipGatewaySetupError, EcuConnectivityHandler, FunctionalDescriptionConfig, HashMap,
+    HashMapExtensions, UdsQuery, UdsVariant, config::ConfigSanity, datatypes::FaultConfig, dlt_ctx,
 };
 use cda_plugin_security::{
     DefaultSecurityPlugin, DefaultSecurityPluginData, SecurityPlugin, SecurityPluginLoader,
@@ -30,6 +27,7 @@ use cda_plugin_security::{
 use cda_sovd::Locks;
 use cda_tracing::{OtelGuard, TracingSetupError, TracingWorkerGuard};
 use clap::{Parser, Subcommand};
+pub use error::AppError;
 use futures::future::FutureExt;
 use tokio::sync::{Mutex, RwLock, mpsc};
 use tracing_subscriber::layer::SubscriberExt;
@@ -41,6 +39,7 @@ use crate::{
 };
 
 pub mod config;
+pub mod error;
 pub mod mdd;
 pub mod update;
 
@@ -141,108 +140,6 @@ pub struct VehicleComponents<S: SecurityPlugin> {
     pub databases: Arc<DatabaseMap<S>>,
     pub file_managers: FileManagerMap,
     pub variant_detection_handle: tokio::task::JoinHandle<()>,
-}
-
-#[derive(thiserror::Error, Debug)]
-pub enum AppError {
-    #[error("Initialization failed `{0}`")]
-    InitializationFailed(String),
-    #[error("Resource error: `{0}`")]
-    ResourceError(String),
-    #[error("Connection error `{0}`")]
-    ConnectionError(String),
-    #[error("Configuration error `{0}`")]
-    ConfigurationError(String),
-    #[error("Data error `{0}`")]
-    DataError(String),
-    #[error("Error during execution `{0}`")]
-    RuntimeError(String),
-    #[error("Not found: `{0}`")]
-    NotFound(String),
-    #[error("Server error: `{0}`")]
-    ServerError(String),
-    #[error("Shutdown requested")]
-    ShutdownRequested,
-}
-
-impl From<DiagServiceError> for AppError {
-    fn from(value: DiagServiceError) -> Self {
-        match value {
-            DiagServiceError::RequestNotSupported(_)
-            | DiagServiceError::BadPayload(_)
-            | DiagServiceError::ConnectionClosed(_)
-            | DiagServiceError::UnexpectedResponse(_)
-            | DiagServiceError::EcuOffline(_)
-            | DiagServiceError::NoResponse(_)
-            | DiagServiceError::SendFailed(_)
-            | DiagServiceError::InvalidAddress(_)
-            | DiagServiceError::InvalidRequest(_)
-            | DiagServiceError::Timeout => Self::ConnectionError(value.to_string()),
-
-            DiagServiceError::ParameterConversionError(_)
-            | DiagServiceError::UnknownOperation
-            | DiagServiceError::UdsLookupError(_)
-            | DiagServiceError::VariantDetectionError(_)
-            | DiagServiceError::AccessDenied(_)
-            | DiagServiceError::InvalidState(_)
-            | DiagServiceError::Nack(_) => Self::RuntimeError(value.to_string()),
-
-            DiagServiceError::InvalidConfiguration(_) | DiagServiceError::InvalidSecurityPlugin => {
-                Self::ConfigurationError(value.to_string())
-            }
-
-            DiagServiceError::ResourceError(_) => Self::ResourceError(value.to_string()),
-
-            DiagServiceError::NotFound(_) => Self::NotFound(value.to_string()),
-
-            DiagServiceError::DataError(_)
-            | DiagServiceError::InvalidDatabase(_)
-            | DiagServiceError::AmbiguousParameters { .. }
-            | DiagServiceError::InvalidParameter { .. }
-            | DiagServiceError::NotEnoughData { .. } => Self::DataError(value.to_string()),
-        }
-    }
-}
-
-impl From<DoipGatewaySetupError> for AppError {
-    fn from(value: DoipGatewaySetupError) -> Self {
-        match value {
-            DoipGatewaySetupError::InvalidAddress(_) => Self::ConnectionError(value.to_string()),
-            DoipGatewaySetupError::SocketCreationFailed(_)
-            | DoipGatewaySetupError::PortBindFailed(_) => {
-                Self::InitializationFailed(value.to_string())
-            }
-            DoipGatewaySetupError::InvalidConfiguration(_) => {
-                Self::ConfigurationError(value.to_string())
-            }
-            DoipGatewaySetupError::ResourceError(_) => Self::ResourceError(value.to_string()),
-            DoipGatewaySetupError::ServerError(_) => Self::ServerError(value.to_string()),
-            DoipGatewaySetupError::UnknownECU {
-                logical_address,
-                protocol_version,
-            } => Self::ConfigurationError(format!(
-                "Unknown ECU with logical address {logical_address} and protocol version \
-                 {protocol_version}"
-            )),
-        }
-    }
-}
-
-impl From<TracingSetupError> for AppError {
-    fn from(value: TracingSetupError) -> Self {
-        match value {
-            TracingSetupError::ResourceCreationFailed(_) => Self::ResourceError(value.to_string()),
-            TracingSetupError::SubscriberInitializationFailed(_) => {
-                Self::InitializationFailed(value.to_string())
-            }
-        }
-    }
-}
-
-impl From<ConfigSanityError> for AppError {
-    fn from(value: ConfigSanityError) -> Self {
-        AppError::ConfigurationError(value.to_string())
-    }
 }
 
 impl AppArgs {
