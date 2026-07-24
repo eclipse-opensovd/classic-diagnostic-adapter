@@ -52,6 +52,11 @@ const DOIP_HEALTH_COMPONENT_KEY: &str = "doip";
 #[cfg(feature = "health")]
 const MAIN_HEALTH_COMPONENT_KEY: &str = "main";
 
+const DEFAULT_CONFIG_FILE: &str = match option_env!("CDA_NAME") {
+    Some(name) => name,
+    None => "opensovd-cda",
+};
+
 pub type DatabaseMap<S> = HashMap<String, RwLock<EcuManager<S>>>;
 pub type FileManagerMap = HashMap<String, FileManager>;
 
@@ -68,8 +73,8 @@ pub enum Command {
 #[derive(Parser, Debug)]
 #[command(version, about, long_about = None)]
 pub struct AppArgs {
-    #[arg(short, long, env = "CDA_CONFIG_FILE")]
-    pub config: Option<String>,
+    #[arg(short, long, env = "CDA_CONFIG_FILE", default_value = DEFAULT_CONFIG_FILE)]
+    pub config: PathBuf,
 
     #[command(subcommand)]
     pub command: Option<Command>,
@@ -151,8 +156,11 @@ pub enum AppError {
     ResourceError(String),
     #[error("Connection error `{0}`")]
     ConnectionError(String),
-    #[error("Configuration error `{0}`")]
-    ConfigurationError(String),
+    #[error("Configuration error `{message}`")]
+    ConfigurationError {
+        message: String,
+        source: Option<Box<dyn std::error::Error>>,
+    },
     #[error("Data error `{0}`")]
     DataError(String),
     #[error("Error during execution `{0}`")]
@@ -360,10 +368,9 @@ where
         return generate_config_cmd(output.as_ref());
     }
 
-    let (mut config, disk_loaded) = config::load_config_with_fallback(args.config.as_deref());
+    let (mut config, disk_loaded) = config::load_config_with_fallback(&args.config);
 
     if disk_loaded && config.runtime_update_config.init_storage_from_config_file {
-        let config_file = config::resolve_config_file_path(args.config.as_deref());
         config::seed_storage_from_config_file(
             &config.runtime_update_config.storage_dir,
             &config_file,

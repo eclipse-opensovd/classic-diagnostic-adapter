@@ -67,8 +67,8 @@ impl<S: SecurityPlugin> PayloadEncoder for EcuManager<S> {
             data: rawdata,
             new_session,
             new_security,
-            source_address: self.tester_address,
-            target_address: self.logical_address,
+            source_address: self.com_params.doip.tester_address,
+            target_address: self.com_params.doip.logical_address,
         })
     }
 
@@ -161,8 +161,8 @@ impl<S: SecurityPlugin> PayloadEncoder for EcuManager<S> {
         tracing::Span::current().record("output", util::tracing::print_hex(&uds, 10));
         Ok(ServicePayload {
             data: uds,
-            source_address: self.tester_address,
-            target_address: self.logical_address,
+            source_address: self.com_params.doip.tester_address,
+            target_address: self.com_params.doip.logical_address,
             new_session,
             new_security,
         })

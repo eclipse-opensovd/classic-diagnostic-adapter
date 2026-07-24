@@ -17,7 +17,7 @@ use std::{
     sync::Arc,
 };
 
-use cda_core::{EcuManager, EcuManagerConfig};
+use cda_core::{EcuManager, EcuManagerConfig, EffectiveComParams};
 use cda_database::{FileManager, ProtoLoadConfig, update_mdd_uncompressed};
 use cda_health::StatusHealthProvider;
 use cda_interfaces::{
@@ -465,7 +465,7 @@ fn create_ecu_manager<S: SecurityPlugin>(
     diag_database: cda_database::datatypes::DiagnosticDatabase,
     protocol: Protocol,
     ecu_type: EcuManagerType,
-    effective_com_params: &ComParams,
+    effective_com_params: EffectiveComParams,
     ctx: &EcuLoadContext<'_>,
 ) -> Option<EcuManager<S>> {
     EcuManager::new(
@@ -510,11 +510,10 @@ fn extract_file_chunks(mut proto_data: HashMap<ChunkType, Vec<Chunk>>) -> Vec<Ch
 
 /// Load and process a single ECU from MDD file.
 fn load_ecu_from_file<S: SecurityPlugin>(
-    proto_data: HashMap<ChunkType, Vec<Chunk>>,
+    mut proto_data: HashMap<ChunkType, Vec<Chunk>>,
     ctx: &EcuLoadContext<'_>,
     per_ecu_cfg: Option<&EcuConfig>,
 ) -> Option<EcuLoadResult<S>> {
-    let mut proto_data = proto_data;
     let diag_database = build_diagnostic_database(&mut proto_data, ctx)?;
     let effective_com_params = crate::config::com_params::resolve_com_params(
         &ctx.ecu_name,
@@ -530,13 +529,21 @@ fn load_ecu_from_file<S: SecurityPlugin>(
     } else {
         EcuManagerType::Ecu
     };
-    let manager = create_ecu_manager(
-        diag_database,
-        protocol,
-        ecu_type,
+    let resolved_com_params = EffectiveComParams::resolve_from(
+        &diag_database,
+        &protocol,
         &effective_com_params,
-        ctx,
-    )?;
+        ecu_type,
+    )
+    .map_err(|e| {
+        tracing::error!(
+            ecu_name = %ctx.ecu_name,
+            error = ?e,
+            "Failed to resolve communication parameters"
+        );
+    })
+    .ok()?;
+    let manager = create_ecu_manager(diag_database, protocol, ecu_type, resolved_com_params, ctx)?;
     let files = extract_file_chunks(proto_data);
 
     Some(EcuLoadResult { manager, files })
