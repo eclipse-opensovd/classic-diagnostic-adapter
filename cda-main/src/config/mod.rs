@@ -10,6 +10,8 @@
  *
  * SPDX-License-Identifier: Apache-2.0
  */
+use std::path::Path;
+
 use cda_interfaces::storage_api::{Collection, RandomAccessData, Storage};
 use figment::{
     Figment,
@@ -22,16 +24,6 @@ pub mod com_params;
 pub mod configfile;
 pub mod generate;
 
-/// Returns the effective configuration file path.
-///
-/// Uses `explicit` if provided, otherwise falls back to `<CDA_NAME>.toml`
-/// (where `CDA_NAME` is a compile-time env var defaulting to `opensovd-cda`).
-#[must_use]
-pub fn resolve_config_file_path(explicit: Option<&str>) -> String {
-    let cda_name = std::option_env!("CDA_NAME").unwrap_or("opensovd-cda");
-    explicit.unwrap_or(&format!("{cda_name}.toml")).to_owned()
-}
-
 /// Loads the configuration, merged with defaults and `CDA`-prefixed env vars.
 ///
 /// Config file resolved in priority order:
@@ -39,9 +31,8 @@ pub fn resolve_config_file_path(explicit: Option<&str>) -> String {
 /// * `<CDA_NAME>.toml`
 /// # Errors
 /// Returns an error message if the configuration file cannot be read or parsed.
-pub fn load_config(config_file_path: Option<&str>) -> Result<configfile::Configuration, String> {
-    let config_file = resolve_config_file_path(config_file_path);
-    println!("Loading configuration from {config_file}");
+pub fn load_config(config_file: &Path) -> Result<configfile::Configuration, String> {
+    println!("Loading configuration from {config_file:?}");
 
     Figment::from(Serialized::defaults(default_config()))
         .merge(Toml::file(config_file))
@@ -58,7 +49,7 @@ pub fn default_config() -> configfile::Configuration {
 /// Attempt to load config from file; on failure, fall back to defaults.
 /// Returns the configuration and whether it was successfully loaded from file.
 #[must_use]
-pub fn load_config_with_fallback(config_path: Option<&str>) -> (configfile::Configuration, bool) {
+pub fn load_config_with_fallback(config_path: &Path) -> (configfile::Configuration, bool) {
     match load_config(config_path) {
         Ok(c) => (c, true),
         Err(e) => {
@@ -89,44 +80,49 @@ pub fn require_config_source() -> Result<(), crate::AppError> {
 /// Seeds the `Configuration` storage collection from `config_file_path` when the collection
 /// is empty. This copies the configuration file into storage so that the runtime update plugin
 /// has a populated baseline to work with.
-pub async fn seed_storage_from_config_file(storage_dir: &str, config_file_path: &str) {
-    let data = match std::fs::read(config_file_path) {
-        Ok(d) => d,
-        Err(e) => {
-            tracing::warn!(error = %e, config_file_path, "Cannot read config file for seeding");
-            return;
-        }
-    };
+pub async fn seed_storage_from_config_file(
+    storage_dir: &str,
+    config_file: &Path,
+) -> Result<(), crate::AppError> {
+    let data =
+        std::fs::read(config_file).map_err(|source| crate::AppError::ConfigurationError {
+            message: format!("Cannot read config file from {config_file:?} for seeding"),
+            source: Some(source.into()),
+        })?;
 
-    let key = std::path::Path::new(config_file_path)
+    let key = config_file
         .file_name()
-        .and_then(|n| n.to_str())
-        .unwrap_or(config_file_path)
-        .to_owned();
+        .map(|file| file.to_string_lossy())
+        .unwrap_or_else(|| config_file.to_string_lossy())
+        .to_string();
 
     let storage = match cda_storage::LocalStorage::new(storage_dir) {
         Ok(s) => s,
         Err(e) => {
             tracing::warn!(error = %e, "Storage not available, skipping seed");
-            return;
+            return Ok(());
         }
     };
 
-    if let Some(count) = cda_storage::storage_seed::seed_storage_collection(
+    let count = cda_storage::storage_seed::seed_storage_collection(
         &storage,
         &cda_interfaces::storage_api::CollectionName::Configuration,
         std::iter::once((key.clone(), data)),
     )
-    .await
+    .await;
+
+    if let Some(count) = count
         && count > 0
     {
+        let config_file = config_file.display().to_string();
         tracing::info!(
             key,
-            config_file_path,
+            config_file,
             storage_dir,
             "Seeded Configuration collection from config file"
         );
     }
+    Ok(())
 }
 
 /// Attempts to load configuration from the storage Configuration collection.
