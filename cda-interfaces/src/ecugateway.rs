@@ -161,5 +161,5 @@ pub trait EcuGatewaySockets {
     type Socket: Send + Sync + 'static;
 
     /// Returns a shared, cloneable handle to the underlying UDP socket.
-    fn upd_socket(&self) -> Arc<Mutex<Self::Socket>>;
+    fn socket(&self) -> Arc<Mutex<Self::Socket>>;
 }

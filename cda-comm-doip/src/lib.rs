@@ -1132,7 +1132,7 @@ impl<T: EcuAddresses + DoipComParams> cda_interfaces::Shutdown for DoipDiagGatew
 impl<T: EcuAddresses + DoipComParams> EcuGatewaySockets for DoipDiagGateway<T> {
     type Socket = DoIPUdpSocket;
 
-    fn upd_socket(
+    fn socket(
         &self,
     ) -> std::sync::Arc<tokio::sync::Mutex<<DoipDiagGateway<T> as EcuGatewaySockets>::Socket>> {
         Arc::clone(&self.state.socket)
