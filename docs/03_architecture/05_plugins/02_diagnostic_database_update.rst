@@ -154,6 +154,37 @@ Diagnostic Database Update Plugin
     The verification includes, but is not limited to, signature verification, hash verification, and version checks
     of the currently active database, as well as the new one.
 
+    **Providing a Custom Update Plugin**
+
+    Applications embedding CDA can replace the complete runtime update implementation at startup.
+    Implement ``cda_interfaces::runtime_update_api::RuntimeFilesUpdatePlugin`` and pass a builder
+    to ``Setup::with_update_plugin``. The builder receives ``CdaRuntime``, which exposes the live
+    configuration, UDS manager, DoIP gateway, lock provider, storage directory, update guard, and
+    reload-related infrastructure required by an implementation.
+
+    The ``update_plugin_fn`` helper adapts an async closure without requiring a separate builder
+    type:
+
+    .. code:: rust
+
+       use opensovd_cda_lib::{Setup, run_with_ext_from_config};
+       use opensovd_cda_lib::update::update_plugin_fn;
+
+       let setup = Setup::<MySecurityPlugin, MySecurityLoader>::new()
+           .with_update_plugin(update_plugin_fn(|runtime| async move {
+               Ok(MyRuntimeUpdatePlugin::new(runtime))
+           }));
+
+       run_with_ext_from_config(config, setup).await?;
+
+    CDA mounts the returned plugin on the standard ``runtimefiles-*`` endpoints and wraps it
+    with read/write mutual exclusion. A replacement plugin therefore implements the complete
+    update lifecycle (listing, upload, deletion, apply, rollback, cleanup, and execution status).
+
+    Implementations that only need custom authorization, signature checks, version policy, or
+    reload behavior should normally retain ``DefaultRuntimeUpdatePlugin`` and provide custom
+    ``RuntimeUpdateSecurityPlugin`` and/or ``RuntimeReloaderPlugin`` implementations instead.
+
 
     **Application of the update**
 

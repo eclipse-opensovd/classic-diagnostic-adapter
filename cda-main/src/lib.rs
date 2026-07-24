@@ -28,6 +28,7 @@ use cda_database::FileManager;
 use cda_interfaces::{
     EcuConnectivityHandler, FunctionalDescriptionConfig, HashMap, HashMapExtensions, UdsQuery,
     UdsVariant, config::ConfigSanity, datatypes::{ComParams, FaultConfig}, dlt_ctx,
+    health::HealthProvider,
 };
 use cda_plugin_security::{
     DefaultSecurityPlugin, DefaultSecurityPluginData, SecurityPlugin, SecurityPluginLoader,
@@ -45,15 +46,20 @@ use tokio::sync::{Mutex, RwLock, mpsc};
 use tracing_subscriber::layer::SubscriberExt;
 
 use crate::{
-    config::configfile::Configuration,
+    config::{configfile::Configuration, generate::generate_config_cmd},
     mdd::{load_databases, resolve_mdd_paths},
-    update::{RuntimeUpdateContext, security::UpdateSecurityHandler},
+    setup::PreLoadHook,
+    update::{UpdatePluginBuilder, create_default_update_plugin, update_plugin_fn},
 };
 
 pub mod config;
 pub mod error;
 pub mod mdd;
+pub mod setup;
 pub mod update;
+
+pub use error::AppError;
+pub use setup::Setup;
 
 #[global_allocator]
 static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
@@ -143,7 +149,7 @@ pub struct VehicleData<S: SecurityPlugin> {
     pub update_guard: cda_sovd::UpdateGuardState,
     pub databases: Arc<DatabaseMap<S>>,
     pub variant_detection_handle: tokio::task::JoinHandle<()>,
-    pub health_providers: Option<HealthProviders>,
+    pub health_providers: Option<HashMap<String, Arc<dyn HealthProvider>>>,
 }
 
 pub struct VehicleComponents<S: SecurityPlugin> {
@@ -206,33 +212,6 @@ impl AppArgs {
     }
 }
 
-/// Generate a reference CDA configuration and write it to the requested output.
-///
-/// # Errors
-/// Returns [`AppError`] if generating the reference configuration or writing it fails.
-pub fn generate_config_cmd(output: Option<&PathBuf>) -> Result<(), AppError> {
-    let content = config::generate::generate_reference_config()
-        .map_err(|e| AppError::RuntimeError(format!("Failed to generate config: {e}")))?;
-
-    match output.map(|p| p.as_os_str()) {
-        Some(p) if p == "-" => {
-            use std::io::Write;
-            std::io::stdout()
-                .write_all(content.as_bytes())
-                .map_err(|e| AppError::RuntimeError(format!("Failed to write stdout: {e}")))?;
-        }
-        Some(path) => {
-            std::fs::write(path, &content)
-                .map_err(|e| AppError::RuntimeError(format!("Failed to write config: {e}")))?;
-        }
-        None => {
-            std::fs::write("opensovd-cda.toml", &content)
-                .map_err(|e| AppError::RuntimeError(format!("Failed to write config: {e}")))?;
-        }
-    }
-    Ok(())
-}
-
 /// Parse CLI arguments and start the CDA with the default startup flow.
 ///
 /// # Errors
@@ -243,26 +222,27 @@ pub async fn run_from_cli() -> Result<(), AppError> {
 }
 
 #[tracing::instrument(
-    skip(args, extra_health_providers, pre_load_hook),
+    skip(args, setup),
     fields(
         dlt_context = dlt_ctx!("MAIN"),
     )
 )]
-/// Run the CDA from parsed CLI arguments, with optional extra health providers and a
-/// pre-vehicle-load hook. See [`run_with_config_ext`] for parameter documentation.
+/// Run the CDA from parsed CLI arguments with a custom [`Setup`].
+///
+/// This is the primary setup-aware entry point. Pass a [`Setup`] created with
+/// [`Setup::new`] and optionally configured with
+/// [`Setup::with_preload`] / [`Setup::with_update_plugin`].
 ///
 /// # Errors
 /// Returns [`AppError`] if configuration loading, validation, or startup fails.
-pub async fn run_with_ext<SP, SL, H, Fut>(
+pub async fn run_with_ext<SP, SL, UPB>(
     args: AppArgs,
-    extra_health_providers: Vec<(&'static str, Arc<dyn cda_health::HealthProvider>)>,
-    pre_load_hook: H,
+    setup: Setup<SP, SL, UPB>,
 ) -> Result<(), AppError>
 where
     SP: SecurityPlugin,
     SL: SecurityPluginLoader,
-    H: FnOnce(cda_sovd::dynamic_router::DynamicRouter) -> Fut + Send,
-    Fut: Future<Output = Result<(), AppError>> + Send,
+    UPB: UpdatePluginBuilder<SP>,
 {
     if let Some(Command::GenerateConfig { output }) = args.command.as_ref() {
         // Exiting after generating config is on purpose.
@@ -293,10 +273,92 @@ where
 
     config.validate_sanity().map_err(AppError::from)?;
 
-    run_with_config_ext::<SP, SL, _, _>(config, extra_health_providers, pre_load_hook).await
+    run_with_ext_from_config(config, setup).await
+}
+
+/// Start the CDA runtime from a prepared configuration with a custom [`Setup`].
+///
+/// This is the setup-aware version of [`run_with_config`]. Supply a [`Setup`] to
+/// configure a custom update plugin and/or a preload hook:
+///
+/// ```rust,ignore
+/// use opensovd_cda_lib::{Setup, run_with_ext_from_config, update::update_plugin_fn};
+/// use opensovd_cda_lib::config::configfile::Configuration;
+///
+/// let config: Configuration = // ... load or construct ...
+/// # todo!();
+///
+/// run_with_ext_from_config::<MySecurityPlugin, MySecurityLoader, _>(
+///     config,
+///     Setup::new().with_update_plugin(update_plugin_fn(|infra| async move {
+///         Ok(MyPlugin::new(infra))
+///     })),
+/// ).await?;
+/// ```
+///
+/// # Errors
+/// Returns [`AppError`] if tracing setup, webserver startup, data loading, or route setup fails.
+pub async fn run_with_ext_from_config<SP, SL, UPB>(
+    config: Configuration,
+    setup: Setup<SP, SL, UPB>,
+) -> Result<(), AppError>
+where
+    SP: SecurityPlugin,
+    SL: SecurityPluginLoader,
+    UPB: UpdatePluginBuilder<SP>,
+{
+    let webserver_state = init_webserver(&config, setup.pre_load).await?;
+
+    tracing::debug!("Webserver is running. Loading sovd routes...");
+    let vehicle_data = match load_vehicle_data::<SP>(
+        &config,
+        webserver_state.shutdown_signal.clone(),
+        webserver_state.health_state.as_ref(),
+    )
+    .await
+    {
+        Ok(data) => data,
+        Err(AppError::ShutdownRequested) => {
+            tracing::info!("Shutdown requested during database load, exiting cleanly");
+            return Ok(());
+        }
+        Err(e) => return Err(e),
+    };
+
+    if vehicle_data.databases.is_empty() && config.database.exit_no_database_loaded {
+        return Err(AppError::ResourceError(
+            "No database loaded, exiting as configured".to_string(),
+        ));
+    }
+
+    setup::setup_runtime_routes::<SP, SL, UPB>(
+        config,
+        vehicle_data,
+        &webserver_state,
+        setup.build_update_plugin,
+    )
+    .await?;
+
+    tracing::info!("CDA fully initialized and ready to serve requests");
+    if let Some(provider) = webserver_state.main_health_provider {
+        provider.update_status(cda_health::Status::Up).await;
+    }
+
+    // Wait for shutdown signal
+    webserver_state.shutdown_signal.await;
+    tracing::info!("Shutting down...");
+    webserver_state
+        .webserver_task
+        .await
+        .map_err(|e| AppError::RuntimeError(format!("Webserver task join error: {e}")))?;
+
+    Ok(())
 }
 
 /// Run the CDA from parsed CLI arguments.
+///
+/// Uses the default security plugin and the default runtime update plugin.
+/// To customize startup behavior, use [`run_with_ext`] instead.
 ///
 /// # Errors
 /// Returns [`AppError`] if configuration loading, validation, or startup fails.
@@ -305,39 +367,43 @@ pub async fn run(args: AppArgs) -> Result<(), AppError> {
         DefaultSecurityPluginData,
         DefaultSecurityPlugin,
         _,
-        _,
-    >(args, vec![], |_| async { Ok(()) }))
+    >(
+        args,
+        Setup::new().with_update_plugin(update_plugin_fn(|infra| async move {
+            create_default_update_plugin::<DefaultSecurityPluginData, DefaultSecurityPlugin>(infra)
+                .await
+        })),
+    ))
     .await
 }
 
-/// Start the CDA runtime from a prepared configuration, with optional extra health providers
-/// and a pre-vehicle-load hook.
+/// Start the CDA runtime from a prepared configuration.
 ///
-/// - `extra_health_providers`: additional `(key, provider)` pairs registered into the health
-///   state alongside the built-in `main` provider. Ignored when the `health` feature is
-///   disabled or `config.health.enabled` is `false`.
-/// - `pre_load_hook`: called after the webserver, health state, and sd-notify are set up but
-///   **before** vehicle data is loaded. Use it to register extra routes or endpoints that
-///   should be available during (and benefit from parallelism with) the database load.
-///   Must return `Ok(())` to continue startup; an `Err` aborts immediately.
-/// - `SP` / `SL`: security plugin data and loader types. Use [`DefaultSecurityPluginData`] and
-///   [`DefaultSecurityPlugin`] for the default behaviour.
+/// Uses the default security plugin and the default runtime update plugin.
+/// To customize startup behavior, use [`run_with_ext_from_config`] instead.
 ///
 /// # Errors
-/// Returns [`AppError`] if tracing setup, webserver startup, hook execution, data loading, or
-/// route setup fails.
-pub async fn run_with_config_ext<SP, SL, H, Fut>(
-    config: Configuration,
-    extra_health_providers: Vec<(&'static str, Arc<dyn cda_health::HealthProvider>)>,
-    pre_load_hook: H,
-) -> Result<(), AppError>
-where
-    SP: SecurityPlugin,
-    SL: SecurityPluginLoader,
-    H: FnOnce(cda_sovd::dynamic_router::DynamicRouter) -> Fut + Send,
-    Fut: Future<Output = Result<(), AppError>> + Send,
-{
-    let _tracing_guards = setup_tracing(&config)?;
+/// Returns [`AppError`] if tracing setup, webserver startup, data loading, or route setup fails.
+pub async fn run_with_config(config: Configuration) -> Result<(), AppError> {
+    run_with_ext_from_config::<DefaultSecurityPluginData, DefaultSecurityPlugin, _>(
+        config,
+        Setup::new().with_update_plugin(update_plugin_fn(
+            |infra: setup::CdaRuntime<DefaultSecurityPluginData>| async move {
+                create_default_update_plugin::<DefaultSecurityPluginData, DefaultSecurityPlugin>(
+                    infra,
+                )
+                .await
+            },
+        )),
+    )
+    .await
+}
+
+async fn init_webserver(
+    config: &Configuration,
+    pre_load: Option<PreLoadHook>,
+) -> Result<WebserverState, AppError> {
+    let tracing_guards = setup_tracing(config)?;
     tracing::info!("Starting CDA - version {}", cda_version());
 
     let webserver_config = cda_sovd::WebServerConfig {
@@ -345,7 +411,9 @@ where
         port: config.server.port,
     };
 
-    let clonable_shutdown_signal = shutdown_signal().shared();
+    let shutdown_future: std::pin::Pin<Box<dyn Future<Output = ()> + Send + Sync + 'static>> =
+        Box::pin(shutdown_signal());
+    let clonable_shutdown_signal = shutdown_future.shared();
 
     let (dynamic_router, webserver_task) =
         cda_sovd::launch_webserver(webserver_config.clone(), clonable_shutdown_signal.clone())
@@ -358,7 +426,6 @@ where
         let main_health_provider = Arc::new(cda_health::StatusHealthProvider::new(
             cda_health::Status::Starting,
         ));
-
         health_state
             .register_provider(
                 MAIN_HEALTH_COMPONENT_KEY,
@@ -366,12 +433,6 @@ where
             )
             .await
             .map_err(|e| AppError::InitializationFailed(e.to_string()))?;
-        for (key, provider) in extra_health_providers {
-            health_state
-                .register_provider(key, provider)
-                .await
-                .map_err(|e| AppError::InitializationFailed(e.to_string()))?;
-        }
         (Some(health_state), Some(main_health_provider))
     } else {
         (None, None)
@@ -381,163 +442,26 @@ where
     let (health_state, main_health_provider): (
         Option<cda_health::HealthState>,
         Option<Arc<cda_health::StatusHealthProvider>>,
-    ) = {
-        // Prevents compiler warning for unused variable when health feature is disabled
-        let _ = extra_health_providers;
-        (None, None)
-    };
+    ) = (None, None);
 
     #[cfg(feature = "systemd-notify")]
     let _sd_notify_task =
         cda_extra::create_sd_notify_task(health_state.clone(), clonable_shutdown_signal.clone());
 
     register_version_endpoints(&dynamic_router).await;
-    pre_load_hook(dynamic_router.clone()).await?;
 
-    setup_vehicle_and_routes::<SP, SL>(
-        config,
-        &dynamic_router,
-        &webserver_config,
-        health_state.as_ref(),
-        clonable_shutdown_signal.clone(),
-    )
-    .await?;
-
-    tracing::info!("CDA fully initialized and ready to serve requests");
-    if let Some(provider) = main_health_provider {
-        provider.update_status(cda_health::Status::Up).await;
+    if let Some(hook) = pre_load {
+        hook(dynamic_router.clone()).await?;
     }
 
-    // Wait for shutdown signal
-    clonable_shutdown_signal.await;
-    tracing::info!("Shutting down...");
-    webserver_task
-        .await
-        .map_err(|e| AppError::RuntimeError(format!("Webserver task join error: {e}")))?;
-
-    Ok(())
-}
-
-/// Start the CDA runtime from a prepared configuration.
-///
-/// # Errors
-/// Returns [`AppError`] if tracing setup, webserver startup, data loading, or route setup fails.
-pub async fn run_with_config(config: Configuration) -> Result<(), AppError> {
-    // Boxed: the composed runtime future exceeds clippy::large_futures'
-    // threshold, and this once-per-process startup future is not worth
-    // keeping on the caller's stack.
-    Box::pin(run_with_config_ext::<
-        DefaultSecurityPluginData,
-        DefaultSecurityPlugin,
-        _,
-        _,
-    >(config, vec![], |_| async { Ok(()) }))
-    .await
-}
-
-/// Loads vehicle data, registers all SOVD routes, runtime-update routes, `OpenAPI` routes,
-/// and installs the update guard. Extracted from `run_with_config` to keep it under the line limit.
-///
-/// The type parameters `SP` and `SL` select the security plugin data and loader implementations.
-/// Use [`DefaultSecurityPluginData`] and [`DefaultSecurityPlugin`] for the default behaviour.
-///
-/// # Errors
-/// Returns [`AppError`] if vehicle data loading, route registration, or update plugin setup fails.
-pub async fn setup_vehicle_and_routes<SP: SecurityPlugin, SL: SecurityPluginLoader>(
-    config: Configuration,
-    dynamic_router: &cda_sovd::dynamic_router::DynamicRouter,
-    webserver_config: &cda_sovd::WebServerConfig,
-    health_state: Option<&cda_health::HealthState>,
-    clonable_shutdown_signal: futures::future::Shared<
-        impl std::future::Future<Output = ()> + Send + 'static,
-    >,
-) -> Result<(), AppError> {
-    tracing::debug!("Webserver is running. Loading sovd routes...");
-
-    let vehicle_data =
-        match load_vehicle_data::<_, SP>(&config, clonable_shutdown_signal.clone(), health_state)
-            .await
-        {
-            Ok(data) => data,
-            Err(AppError::ShutdownRequested) => {
-                tracing::info!("Shutdown requested during database load, exiting cleanly");
-                return Ok(());
-            }
-            Err(e) => return Err(e),
-        };
-
-    if vehicle_data.databases.is_empty() && config.database.exit_no_database_loaded {
-        return Err(AppError::ResourceError(
-            "No database loaded, exiting as configured".to_string(),
-        ));
-    }
-
-    let flash_files_path = config.flash_files_path.clone();
-    let components_config = config.components.clone();
-    let runtime_update_config = config.runtime_update_config.clone();
-
-    let (ecu_execution_registry, vehicle_route_handle) = cda_sovd::add_vehicle_routes::<_, _, SL>(
+    Ok(WebserverState {
+        _tracing_guards: tracing_guards,
         dynamic_router,
-        cda_sovd::VehicleConfig {
-            flash_files_path: config.flash_files_path.clone(),
-            functional_group_config: config.functional_description.clone(),
-            components_config: config.components.clone(),
-        },
-        cda_sovd::VehicleResources {
-            ecu_uds: vehicle_data.uds_manager.clone(),
-            file_manager: vehicle_data.file_managers,
-            locks: Arc::clone(&vehicle_data.locks),
-            update_in_progress: vehicle_data.update_guard.busy_handle(),
-        },
-    )
-    .await?;
-
-    let lock_provider: Arc<cda_sovd::SovdLockStateProvider> = Arc::new(
-        cda_sovd::SovdLockStateProvider::new(Arc::clone(&vehicle_data.locks)),
-    );
-
-    let flash_transfer_guard = vehicle_data.uds_manager.flash_transfer_guard();
-    let runtime_update_plugin =
-        update::init_default_runtime_update_plugin::<SP, _, SL>(Box::new(RuntimeUpdateContext {
-            dynamic_router: dynamic_router.clone(),
-            vehicle_route_handle,
-            config,
-            flash_files_path,
-            components_config,
-            lock_provider: Arc::clone(&lock_provider),
-            update_guard: vehicle_data.update_guard.clone(),
-            shutdown_signal: clonable_shutdown_signal,
-            runtime_update_config: runtime_update_config.clone(),
-            ecu_execution_registry: ecu_execution_registry.clone(),
-            uds_manager: vehicle_data.uds_manager,
-            doip_gateway: vehicle_data.diagnostic_gateway,
-            health: vehicle_data.health_providers,
-            variant_detection_handle: Some(vehicle_data.variant_detection_handle),
-            security_handler: Arc::new(UpdateSecurityHandler::new(
-                Arc::clone(&lock_provider),
-                vec![
-                    Box::new(flash_transfer_guard),
-                    Box::new(ecu_execution_registry),
-                ],
-            )),
-        }))
-        .await?;
-    update::add_runtime_update_routes::<SL, _>(
-        dynamic_router,
-        runtime_update_plugin,
-        lock_provider,
-        &vehicle_data.update_guard,
-        runtime_update_config.upload_body_limit_bytes,
-        runtime_update_config.retry_after_seconds,
-    )
-    .await;
-
-    cda_sovd::add_openapi_routes(dynamic_router, &vehicle_data.update_guard, webserver_config)
-        .await;
-
-    cda_sovd::install_update_guard(dynamic_router, vehicle_data.update_guard.clone()).await;
-
-    Ok(())
+        webserver_task,
+        shutdown_signal: clonable_shutdown_signal,
+        health_state,
+        main_health_provider,
+    })
 }
 
 async fn register_version_endpoints(dynamic_router: &cda_sovd::dynamic_router::DynamicRouter) {
@@ -573,12 +497,9 @@ async fn register_version_endpoints(dynamic_router: &cda_sovd::dynamic_router::D
 ///
 /// # Errors
 /// Returns [`AppError`] if MDD path resolution, database loading, or component creation fails.
-pub async fn load_vehicle_data<
-    F: Future<Output = ()> + Clone + Send + 'static,
-    S: SecurityPlugin,
->(
+pub async fn load_vehicle_data<S: SecurityPlugin>(
     config: &Configuration,
-    clonable_shutdown_signal: F,
+    clonable_shutdown_signal: cda_interfaces::ShutdownSignal,
     health: Option<&cda_health::HealthState>,
 ) -> Result<VehicleData<S>, AppError> {
     let mdd_paths: Vec<PathBuf> = {
@@ -613,34 +534,33 @@ pub async fn load_vehicle_data<
             )
             .await
             .map_err(|e| AppError::InitializationFailed(e.to_string()))?;
-        Some(HealthProviders { doip, database })
+        let mut providers: HashMap<String, Arc<dyn HealthProvider>> = HashMap::default();
+        providers.insert(
+            DOIP_HEALTH_COMPONENT_KEY.to_owned(),
+            doip as Arc<dyn HealthProvider>,
+        );
+        providers.insert(
+            mdd::DB_HEALTH_COMPONENT_KEY.to_owned(),
+            database as Arc<dyn HealthProvider>,
+        );
+        Some(providers)
     } else {
         None
     };
 
     let update_guard = cda_sovd::UpdateGuardState::new();
-    // In CAN-only operation (doip.enabled = false) no DoIP socket is bound at
-    // all: binding one anyway could collide with another DoIP stack on the
-    // host for no benefit.
-    let doip_socket = if config.doip.enabled {
-        let socket = cda_comm_doip::create_udp_vir_socket(
-            &config.doip.tester_address,
-            config.doip.gateway_port,
-        )
-        .map_err(|e| {
-            AppError::InitializationFailed(format!("Failed to create DoIP socket: {e}"))
-        })?;
-        Some(Arc::new(Mutex::new(socket)))
-    } else {
-        None
-    };
-    let components = create_vehicle_components::<F, S>(
+    let doip_socket =
+        cda_comm_doip::create_udp_vir_socket(&config.doip.tester_address, config.doip.gateway_port)
+            .map_err(|e| {
+                AppError::InitializationFailed(format!("Failed to create DoIP socket: {e}"))
+            })?;
+    let components = create_vehicle_components::<S>(
         config,
         &mdd_paths,
         clonable_shutdown_signal,
         health_providers.as_ref(),
         update_guard.busy_handle(),
-        doip_socket,
+        Arc::new(Mutex::new(doip_socket)),
     )
     .await?;
 
@@ -651,7 +571,7 @@ pub async fn load_vehicle_data<
         file_managers: components.file_managers,
         locks: Arc::new(Locks::new(ecu_names)),
         update_guard,
-        databases: components.databases,
+        databases: Arc::clone(&components.databases),
         variant_detection_handle: components.variant_detection_handle,
         health_providers,
     })
@@ -699,28 +619,43 @@ pub fn create_uds_manager<S: SecurityPlugin>(
     )
 }
 
-pub struct HealthProviders {
-    pub doip: Arc<cda_health::StatusHealthProvider>,
-    pub database: Arc<cda_health::StatusHealthProvider>,
+/// Collected webserver state produced by [`init_webserver`].
+///
+/// Passed to [`setup::setup_runtime_routes`] and [`run_with_ext_from_config`] so that
+/// the shutdown signal and health provider are accessible after the webserver is started.
+pub(crate) struct WebserverState {
+    _tracing_guards: TracingGuards,
+    pub dynamic_router: cda_sovd::dynamic_router::DynamicRouter,
+    webserver_task: tokio::task::JoinHandle<()>,
+    pub shutdown_signal: futures::future::Shared<
+        std::pin::Pin<Box<dyn Future<Output = ()> + Send + Sync + 'static>>,
+    >,
+    health_state: Option<cda_health::HealthState>,
+    main_health_provider: Option<Arc<cda_health::StatusHealthProvider>>,
 }
 
 /// Creates vehicle components (databases, `DoIP` gateway, UDS manager) from configuration.
 ///
 /// # Errors
 /// Returns [`AppError`] if database loading or diagnostic gateway creation fails.
-pub async fn create_vehicle_components<
-    F: Future<Output = ()> + Clone + Send + 'static,
-    S: SecurityPlugin,
->(
+pub async fn create_vehicle_components<S: SecurityPlugin>(
     config: &Configuration,
     mdd_paths: &[PathBuf],
-    shutdown_signal: F,
-    health_providers: Option<&HealthProviders>,
+    shutdown_signal: cda_interfaces::ShutdownSignal,
+    health_providers: Option<&HashMap<String, Arc<dyn HealthProvider>>>,
     update_in_progress: Arc<std::sync::atomic::AtomicBool>,
-    doip_socket: Option<Arc<tokio::sync::Mutex<cda_comm_doip::socket::DoIPUdpSocket>>>,
+    doip_socket: Arc<tokio::sync::Mutex<cda_comm_doip::socket::DoIPUdpSocket>>,
 ) -> Result<VehicleComponents<S>, AppError> {
-    let db_provider = health_providers.map(|h| &h.database);
-    let doip_provider = health_providers.map(|h| &h.doip);
+    let db_provider = health_providers.and_then(|h| {
+        h.get(mdd::DB_HEALTH_COMPONENT_KEY)
+            .and_then(|p| p.as_any().downcast_ref::<cda_health::StatusHealthProvider>())
+            .map(|p| Arc::new(p.clone()))
+    });
+    let doip_provider = health_providers.and_then(|h| {
+        h.get(DOIP_HEALTH_COMPONENT_KEY)
+            .and_then(|p| p.as_any().downcast_ref::<cda_health::StatusHealthProvider>())
+            .map(|p| Arc::new(p.clone()))
+    });
 
     let (databases, file_managers) = load_databases::<S>(config, mdd_paths, db_provider).await?;
 
@@ -748,8 +683,8 @@ pub async fn create_vehicle_components<
         variant_detection_tx,
         connectivity_handler,
         shutdown_signal,
-        doip_provider,
-        doip_socket,
+        doip_provider.as_ref(),
+        Some(doip_socket),
     )
     .await?;
 
