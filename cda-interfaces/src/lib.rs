@@ -457,5 +457,5 @@ where
 pub trait Shutdown: Send + Sync + 'static {
     /// Aborts background tasks and releases connections/resources owned by this instance.
     /// Implementations should be idempotent where practical.
-    async fn shutdown(&mut self);
+    async fn shutdown(&self);
 }

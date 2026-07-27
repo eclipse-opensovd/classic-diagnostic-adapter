@@ -127,12 +127,6 @@ pub trait EcuGateway: Clone + Send + Sync + 'static {
         Output = Result<HashMap<String, Result<UdsResponse, DiagServiceError>>, DiagServiceError>,
     > + Send;
 
-    /// Stops the gateway, aborting its background tasks and releasing its
-    /// transport resources. Completes only after the owned tasks have
-    /// terminated, so callers (e.g. the runtime database reload, which reuses
-    /// the `DoIP` UDP socket) can rely on the transport being quiescent.
-    fn shutdown(&mut self) -> impl Future<Output = ()> + Send;
-
     /// Network address of a specific ECU, looked up by name.
     ///
     /// Fallback for ECUs whose logical addresses are unresolved com-param

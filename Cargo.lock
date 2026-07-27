@@ -380,6 +380,7 @@ dependencies = [
 name = "cda-comm-can"
 version = "0.1.0"
 dependencies = [
+ "async-trait",
  "cda-interfaces",
  "hex",
  "schemars",

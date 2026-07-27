@@ -22,6 +22,7 @@
 
 use std::{future::Future, sync::Arc};
 
+use cda_comm_can::MultiTransportGateway;
 use cda_comm_doip::DoipDiagGateway;
 use cda_comm_uds::FlashTransferObserver;
 use cda_core::EcuManager;
@@ -50,7 +51,7 @@ pub(crate) type PreLoadHook = Box<
 pub struct CdaRuntime<SP: SecurityPlugin> {
     pub config: Arc<RwLock<Configuration>>,
     pub uds_manager: Arc<RwLock<UdsManagerType<SP>>>,
-    pub doip_gateway: Arc<RwLock<DoipDiagGateway<EcuManager<SP>>>>,
+    pub doip_gateway: Arc<RwLock<MultiTransportGateway<DoipDiagGateway<EcuManager<SP>>>>>,
     pub dynamic_router: cda_sovd::dynamic_router::DynamicRouter,
     pub vehicle_route_handle: cda_sovd::RouteHandle,
     pub lock_provider: Arc<cda_sovd::SovdLockStateProvider>,

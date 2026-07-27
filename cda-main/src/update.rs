@@ -13,6 +13,7 @@
 use std::{path::PathBuf, sync::Arc};
 
 use async_trait::async_trait;
+use cda_comm_can::MultiTransportGateway;
 use cda_comm_doip::DoipDiagGateway;
 use cda_core::EcuManager;
 use cda_interfaces::{
@@ -125,8 +126,12 @@ where
 }
 
 #[async_trait]
-impl<SP> VehicleComponentFactory<Configuration, UdsManagerType<SP>, DoipDiagGateway<EcuManager<SP>>>
-    for CdaMainVehicleFactory<SP>
+impl<SP>
+    VehicleComponentFactory<
+        Configuration,
+        UdsManagerType<SP>,
+        MultiTransportGateway<DoipDiagGateway<EcuManager<SP>>>,
+    > for CdaMainVehicleFactory<SP>
 where
     SP: SecurityPlugin,
 {
@@ -139,10 +144,14 @@ where
         update_in_progress: Arc<std::sync::atomic::AtomicBool>,
         existing_udp_socket: Arc<Mutex<cda_comm_doip::socket::DoIPUdpSocket>>,
     ) -> Result<
-        VehicleComponents<UdsManagerType<SP>, DoipDiagGateway<EcuManager<SP>>, Self::FileManager>,
+        VehicleComponents<
+            UdsManagerType<SP>,
+            MultiTransportGateway<DoipDiagGateway<EcuManager<SP>>>,
+            Self::FileManager,
+        >,
         ReloadError,
     > {
-        let (crate_components, _databases) = crate::create_vehicle_components::<SP>(
+        let crate_components = crate::create_vehicle_components::<SP>(
             config,
             mdd_paths,
             self.shutdown_signal.clone(),
@@ -241,7 +250,7 @@ where
 
     let reloader_plugin = Arc::new(DefaultRuntimeReloaderPlugin::<
         UdsManagerType<SP>,
-        DoipDiagGateway<EcuManager<SP>>,
+        MultiTransportGateway<DoipDiagGateway<EcuManager<SP>>>,
         Configuration,
         SL,
         _,

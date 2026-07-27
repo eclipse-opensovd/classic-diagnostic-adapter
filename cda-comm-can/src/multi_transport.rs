@@ -41,9 +41,10 @@
 
 use std::sync::Arc;
 
+use async_trait::async_trait;
 use cda_interfaces::{
-    DiagServiceError, EcuAddresses, EcuGateway, HashMap, ServicePayload, TransmissionParameters,
-    UdsResponse,
+    DiagServiceError, EcuAddresses, EcuGateway, EcuGatewaySockets, HashMap, ServicePayload,
+    Shutdown, TransmissionParameters, UdsResponse,
 };
 use serde::{Deserialize, Serialize};
 use tokio::sync::{RwLock, mpsc};
@@ -195,15 +196,6 @@ impl<D: EcuGateway> MultiTransportGateway<D> {
 }
 
 impl<D: EcuGateway> EcuGateway for MultiTransportGateway<D> {
-    async fn shutdown(&mut self) {
-        if let Some(ref mut doip) = self.doip_gateway {
-            doip.shutdown().await;
-        }
-        if let Some(ref mut can) = self.can_gateway {
-            can.shutdown().await;
-        }
-    }
-
     async fn get_gateway_network_address(&self, logical_address: u16) -> Option<String> {
         // DoIP addresses are returned verbatim (bare IP) to keep the SOVD
         // network-structure API compatible with pre-multi-transport releases.
@@ -352,15 +344,12 @@ impl<D: EcuGateway> EcuGateway for MultiTransportGateway<D> {
 
     async fn send_functional(
         &self,
-        transmission_params: cda_interfaces::TransmissionParameters,
-        message: cda_interfaces::ServicePayload,
-        expected_ecu_logical_addrs: cda_interfaces::HashMap<u16, String>,
+        transmission_params: TransmissionParameters,
+        message: ServicePayload,
+        expected_ecu_logical_addrs: HashMap<u16, String>,
         timeout: std::time::Duration,
         expect_positive_response: bool,
-    ) -> Result<
-        cda_interfaces::HashMap<String, Result<cda_interfaces::UdsResponse, DiagServiceError>>,
-        DiagServiceError,
-    > {
+    ) -> Result<HashMap<String, Result<UdsResponse, DiagServiceError>>, DiagServiceError> {
         if let Some(ref doip) = self.doip_gateway {
             return doip
                 .send_functional(
@@ -396,6 +385,29 @@ impl<D: EcuGateway> Clone for MultiTransportGateway<D> {
             can_gateway: self.can_gateway.clone(),
             transport_overrides: Arc::clone(&self.transport_overrides),
             ecu_bindings: Arc::clone(&self.ecu_bindings),
+        }
+    }
+}
+
+impl<D: EcuGateway + EcuGatewaySockets> EcuGatewaySockets for MultiTransportGateway<D> {
+    type Socket = D::Socket;
+
+    fn socket(&self) -> Arc<tokio::sync::Mutex<Self::Socket>> {
+        self.doip_gateway
+            .as_ref()
+            .map(EcuGatewaySockets::socket)
+            .expect("DoIP gateway not configured")
+    }
+}
+
+#[async_trait]
+impl<D: EcuGateway + Shutdown> Shutdown for MultiTransportGateway<D> {
+    async fn shutdown(&self) {
+        if let Some(ref doip) = self.doip_gateway {
+            doip.shutdown().await;
+        }
+        if let Some(ref can) = self.can_gateway {
+            can.shutdown().await;
         }
     }
 }
@@ -471,8 +483,6 @@ mod tests {
             {
                 Ok(HashMap::default())
             }
-
-            async fn shutdown(&mut self) {}
         }
 
         struct EcuStub;
