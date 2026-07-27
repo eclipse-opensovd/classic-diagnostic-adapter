@@ -15,8 +15,7 @@ use std::fmt;
 
 use cda_comm_doip::DoipGatewaySetupError;
 use cda_interfaces::{
-    DiagServiceError, config::ConfigSanityError,
-    runtime_update_api::RuntimeUpdateError,
+    DiagServiceError, config::ConfigSanityError, runtime_update_api::RuntimeUpdateError,
 };
 use cda_tracing::TracingSetupError;
 

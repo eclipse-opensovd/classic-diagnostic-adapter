@@ -24,9 +24,7 @@ use serde::{Deserialize, Serialize};
 #[serde(rename_all = "lowercase")]
 pub enum TransportType {
     /// Diagnostics over IP (Ethernet)
-    #[serde(alias = "DoIP", alias = "DOIP")]
     DoIP,
     /// CAN bus with ISO-TP
-    #[serde(alias = "CAN", alias = "Can")]
     Can,
 }

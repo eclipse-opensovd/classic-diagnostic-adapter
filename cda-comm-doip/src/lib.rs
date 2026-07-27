@@ -21,8 +21,8 @@ use async_trait::async_trait;
 use cda_interfaces::{
     DiagServiceError, DoipComParams, EcuAddresses, EcuConnectivityHandler, FunctionalTransport,
     HashMap, HashMapExtensions, NetworkTopology, PhysicalTransport, ReusableTransportResource,
-    RouteStatus, ServicePayload, TransmissionParameters, TransportProbe, TransportResponse, dlt_ctx,
-    pending_nrc_from_raw, uds_response_from_raw,
+    RouteStatus, ServicePayload, TransmissionParameters, TransportProbe, TransportResponse,
+    dlt_ctx, pending_nrc_from_raw, uds_response_from_raw,
     util::{self, tokio_ext},
 };
 use doip_definitions::{
@@ -81,7 +81,7 @@ enum DiagnosticResponse {
     Ack((u16, Vec<u8>)),
     Nack(DiagnosticMessageNack),
     AliveCheckResponse,
-    /// `TesterPresent` NRC -- intercepted at the decoding layer so the receiver
+    /// `TesterPresent` NRC - intercepted at the decoding layer so the receiver
     /// can log-and-drop without routing it to a per-ECU channel.
     TesterPresentNRC(u8),
     GenericNack(GenericNack), // todo #22 -> we need the address of the ECU that sent the nack
@@ -712,11 +712,6 @@ impl<T: EcuAddresses + DoipComParams> NetworkTopology for DoipDiagGateway<T> {
             .iter()
             .find(|conn| conn.ecus.contains_key(&logical_address))
             .map(|conn| conn.ip.clone())
-    }
-
-    async fn get_ecu_network_address(&self, _ecu_name: &str) -> Option<String> {
-        // DoIP uses logical addressing; per-ECU network address is not applicable
-        None
     }
 }
 

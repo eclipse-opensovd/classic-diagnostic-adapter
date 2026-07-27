@@ -29,7 +29,7 @@ pub mod datatypes;
 pub mod diagservices;
 mod ecugateway;
 pub use ecugateway::{
-    EcuGateway, EcuGatewaySockets, FunctionalTransport, NetworkTopology, PhysicalTransport,
+    EcuGateway, FunctionalTransport, NetworkTopology, PhysicalTransport, ReusableTransportResource,
     RouteStatus, TransmissionParameters, TransportProbe,
 };
 mod ecumanager;

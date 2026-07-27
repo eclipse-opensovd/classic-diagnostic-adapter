@@ -15,7 +15,9 @@ use std::{sync::Arc, time::Duration};
 
 use tokio::sync::{Mutex, RwLock, mpsc};
 
-use crate::{uds::TransportResponse, DiagServiceError, EcuAddresses, HashMap, ServicePayload, Shutdown};
+use crate::{
+    DiagServiceError, EcuAddresses, HashMap, ServicePayload, Shutdown, uds::TransportResponse,
+};
 
 /// Parameters for sending a UDS message over the network.
 #[derive(Debug, Clone)]

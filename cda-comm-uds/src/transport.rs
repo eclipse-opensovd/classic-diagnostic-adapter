@@ -694,10 +694,11 @@ mod send_tests {
         time::Duration,
     };
 
+    use async_trait::async_trait;
     use cda_interfaces::{
         DiagServiceError, EcuAddresses, EcuGateway, EcuRuntimeState, EcuStateManager,
         FunctionalTransport, HashMap, HashMapExtensions, NetworkTopology, PendingNrc,
-        PhysicalTransport, ServicePayload, TransmissionParameters, TransportResponse,
+        PhysicalTransport, ServicePayload, Shutdown, TransmissionParameters, TransportResponse,
         VariantDetection, datatypes::FaultConfig,
     };
     use tokio::sync::{RwLock, mpsc};
@@ -751,9 +752,12 @@ mod send_tests {
         + Send
         + Sync;
 
-    impl PhysicalTransport for TestGateway {
-        async fn shutdown(&mut self) {}
+    #[async_trait]
+    impl Shutdown for TestGateway {
+        async fn shutdown(&self) {}
+    }
 
+    impl PhysicalTransport for TestGateway {
         fn send(
             &self,
             _transmission_params: TransmissionParameters,

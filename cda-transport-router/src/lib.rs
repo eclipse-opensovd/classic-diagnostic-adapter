@@ -38,14 +38,13 @@
 //!     .with_doip(doip_gateway)
 //!     .with_can(can_gateway);
 //! ```
-use async_trait::async_trait;
-
 use std::sync::Arc;
 
+use async_trait::async_trait;
 pub use cda_interfaces::TransportType;
 use cda_interfaces::{
-    DiagServiceError, EcuAddresses, EcuGateway, EcuGatewaySockets, FunctionalTransport, HashMap,
-    NetworkTopology, PhysicalTransport, RouteStatus, ServicePayload, Shutdown,
+    DiagServiceError, EcuAddresses, EcuGateway, FunctionalTransport, HashMap, NetworkTopology,
+    PhysicalTransport, ReusableTransportResource, RouteStatus, ServicePayload, Shutdown,
     TransmissionParameters, TransportProbe, TransportResponse,
 };
 use tokio::sync::{RwLock, mpsc};
@@ -369,8 +368,8 @@ impl<D: EcuGateway + FunctionalTransport + TransportProbe, C: EcuGateway + Trans
 }
 
 #[async_trait]
-impl<D: EcuGateway + FunctionalTransport + TransportProbe, C: EcuGateway + TransportProbe>
-    Shutdown for DiagnosticTransportRouter<D, C>
+impl<D: EcuGateway + FunctionalTransport + TransportProbe, C: EcuGateway + TransportProbe> Shutdown
+    for DiagnosticTransportRouter<D, C>
 {
     async fn shutdown(&self) {
         if let Some(ref doip) = self.doip_gateway {
@@ -382,16 +381,19 @@ impl<D: EcuGateway + FunctionalTransport + TransportProbe, C: EcuGateway + Trans
     }
 }
 
-impl<D: EcuGateway + FunctionalTransport + TransportProbe + EcuGatewaySockets, C: EcuGateway + TransportProbe>
-    EcuGatewaySockets for DiagnosticTransportRouter<D, C>
+impl<
+    D: EcuGateway + FunctionalTransport + TransportProbe + ReusableTransportResource,
+    C: EcuGateway + TransportProbe,
+> ReusableTransportResource for DiagnosticTransportRouter<D, C>
 {
-    type Socket = D::Socket;
+    type TransportResource = D::TransportResource;
 
-    fn socket(&self) -> Arc<tokio::sync::Mutex<Self::Socket>> {
+    fn reusable_transport_resource(
+        &self,
+    ) -> Option<Arc<tokio::sync::Mutex<Self::TransportResource>>> {
         self.doip_gateway
             .as_ref()
-            .expect("EcuGatewaySockets requires a DoIP gateway")
-            .socket()
+            .and_then(ReusableTransportResource::reusable_transport_resource)
     }
 }
 
@@ -405,16 +407,5 @@ impl<D: EcuGateway + FunctionalTransport + TransportProbe, C: EcuGateway + Trans
             transport_overrides: Arc::clone(&self.transport_overrides),
             ecu_bindings: Arc::clone(&self.ecu_bindings),
         }
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn test_transport_type_debug() {
-        assert_eq!(format!("{:?}", TransportType::DoIP), "DoIP");
-        assert_eq!(format!("{:?}", TransportType::Can), "Can");
     }
 }

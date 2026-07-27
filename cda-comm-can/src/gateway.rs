@@ -25,11 +25,12 @@ mod probe;
 mod rediscovery;
 
 use std::{sync::Arc, time::Duration};
+
 use async_trait::async_trait;
 use cda_interfaces::{
     CanComParamProvider, CanId, DiagServiceError, EcuAddresses, HashMap, NetworkTopology,
-    PhysicalTransport, RouteStatus, ServicePayload, TransmissionParameters,
-    TransportProbe, TransportResponse, dlt_ctx, pending_nrc_from_raw, uds_response_from_raw,
+    PhysicalTransport, RouteStatus, ServicePayload, TransmissionParameters, TransportProbe,
+    TransportResponse, dlt_ctx, pending_nrc_from_raw, uds_response_from_raw,
 };
 use tokio::sync::{RwLock, mpsc};
 

@@ -25,7 +25,7 @@ use cda_core::EcuManager;
 use cda_database::FileManager;
 use cda_interfaces::{
     EcuConnectivityHandler, FunctionalDescriptionConfig, HashMap, HashMapExtensions, TransportType,
-    UdsQuery, UdsVariant, config::ConfigSanity, datatypes::{ComParams, FaultConfig}, dlt_ctx,
+    UdsQuery, UdsVariant, config::ConfigSanity, datatypes::FaultConfig, dlt_ctx,
     health::HealthProvider,
 };
 use cda_plugin_security::{

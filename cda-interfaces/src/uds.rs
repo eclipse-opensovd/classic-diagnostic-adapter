@@ -255,7 +255,11 @@ mod tests {
 
     #[test]
     fn uds_final_from_raw_preserves_data_and_addresses() {
-        let data = vec![service_ids::NEGATIVE_RESPONSE, 0x10, 0x22];
+        let data = vec![
+            service_ids::NEGATIVE_RESPONSE,
+            service_ids::SESSION_CONTROL,
+            0x22,
+        ];
         let payload = uds_response_from_raw(data.clone(), SOURCE_ADDRESS, TARGET_ADDRESS);
         assert_eq!(payload.data, data);
         assert_eq!(payload.source_address, SOURCE_ADDRESS);
@@ -297,7 +301,7 @@ mod tests {
     fn pending_nrc_0x21_classified_correctly() {
         let data = vec![
             service_ids::NEGATIVE_RESPONSE,
-            0x10, // SessionControl
+            service_ids::SESSION_CONTROL,
             nrc::BUSY_REPEAT_REQUEST,
         ];
         let pending = pending_nrc_from_raw(&data, SOURCE_ADDRESS);
@@ -313,7 +317,7 @@ mod tests {
     fn pending_nrc_0x94_classified_correctly() {
         let data = vec![
             service_ids::NEGATIVE_RESPONSE,
-            0x22, // ReadDataByIdentifier
+            service_ids::READ_DATA_BY_IDENTIFIER,
             nrc::TEMPORARILY_NOT_AVAILABLE,
         ];
         let pending = pending_nrc_from_raw(&data, SOURCE_ADDRESS);
@@ -329,8 +333,8 @@ mod tests {
     fn non_pending_nrc_returns_none() {
         let data = vec![
             service_ids::NEGATIVE_RESPONSE,
-            0x10,
-            0x22, // conditionsNotCorrect
+            service_ids::SESSION_CONTROL,
+            0x22, // conditions not correct
         ];
         assert!(pending_nrc_from_raw(&data, SOURCE_ADDRESS).is_none());
     }

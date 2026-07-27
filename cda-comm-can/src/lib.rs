@@ -119,17 +119,10 @@ impl cda_interfaces::TransportProbe for CanDiagGateway {
     async fn route_status(&self, _ecu_name: &str) -> cda_interfaces::RouteStatus {
         cda_interfaces::RouteStatus::NotConfigured
     }
-    }
 
     async fn probe_ecu(&self, _ecu_name: &str) -> bool {
         false
     }
-}
-
-#[cfg(not(feature = "can"))]
-#[async_trait::async_trait]
-impl cda_interfaces::Shutdown for CanDiagGateway {
-    async fn shutdown(&self) {}
 }
 
 /// CAN routing tests for `DiagnosticTransportRouter` (lives here because the
