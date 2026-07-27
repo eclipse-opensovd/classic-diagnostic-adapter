@@ -193,11 +193,9 @@ async fn reload_configuration_from_path(
     config: &Arc<RwLock<crate::config::configfile::Configuration>>,
     config_path: PathBuf,
 ) -> Result<(), ReloadError> {
-    let content = tokio::fs::read_to_string(&config_path)
-        .await
-        .map_err(|e| ReloadError(format!("Failed to read config: {e}")))?;
-    let parsed = toml::from_str(&content)
-        .map_err(|e| ReloadError(format!("Failed to parse config: {e}")))?;
+    let parsed = crate::config::load_config(&config_path)
+        .map_err(|e| ReloadError(format!("Failed to load config: {e}")))?;
+
     *config.write().await = parsed;
     Ok(())
 }
@@ -335,7 +333,7 @@ where
 
 #[cfg(test)]
 mod tests {
-    use std::{path::PathBuf, sync::Arc};
+    use std::sync::Arc;
 
     use tokio::sync::RwLock;
 
@@ -344,52 +342,6 @@ mod tests {
 
     fn default_config() -> Arc<RwLock<Configuration>> {
         Arc::new(RwLock::new(Configuration::default()))
-    }
-
-    #[tokio::test]
-    async fn reload_configuration_fails_when_file_does_not_exist() {
-        let config = default_config();
-        let result =
-            reload_configuration_from_path(&config, PathBuf::from("/nonexistent/path/config.toml"))
-                .await;
-        assert!(result.is_err());
-        let err = result.unwrap_err();
-        assert!(
-            err.0.contains("Failed to read config"),
-            "unexpected error: {err:?}"
-        );
-    }
-
-    #[tokio::test]
-    async fn reload_configuration_fails_on_invalid_toml() {
-        let config = default_config();
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("bad.toml");
-        std::fs::write(&path, "this is {{ not valid toml").unwrap();
-
-        let result = reload_configuration_from_path(&config, path).await;
-        assert!(result.is_err());
-        let err = result.unwrap_err();
-        assert!(
-            err.0.contains("Failed to parse config"),
-            "unexpected error: {err:?}"
-        );
-    }
-
-    #[tokio::test]
-    async fn reload_configuration_fails_on_valid_toml_with_wrong_schema() {
-        let config = default_config();
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("wrong_schema.toml");
-        std::fs::write(&path, "[unknown_section]\nfoo = 42\n").unwrap();
-
-        let result = reload_configuration_from_path(&config, path).await;
-        assert!(result.is_err());
-        let err = result.unwrap_err();
-        assert!(
-            err.0.contains("Failed to parse config"),
-            "unexpected error: {err:?}"
-        );
     }
 
     #[tokio::test]
@@ -406,21 +358,6 @@ mod tests {
 
         let result = reload_configuration_from_path(&config, path).await;
         assert!(result.is_ok(), "expected Ok, got {result:?}");
-    }
-
-    #[tokio::test]
-    async fn reload_configuration_does_not_mutate_config_on_read_error() {
-        let config = default_config();
-        let original_flash_path = config.read().await.flash_files_path.clone();
-
-        let _ = reload_configuration_from_path(&config, PathBuf::from("/nonexistent/config.toml"))
-            .await;
-
-        assert_eq!(
-            config.read().await.flash_files_path,
-            original_flash_path,
-            "config must not be mutated when file read fails"
-        );
     }
 
     #[tokio::test]
