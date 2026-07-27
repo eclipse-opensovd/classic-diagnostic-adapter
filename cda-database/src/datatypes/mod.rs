@@ -433,6 +433,12 @@ impl Parameter<'_> {
     }
 }
 
+#[derive(Debug, Clone)]
+pub struct LongName {
+    pub value: Option<String>,
+    pub ti: Option<String>,
+}
+
 impl From<dataformat::LongName<'_>> for LongName {
     fn from(val: dataformat::LongName<'_>) -> Self {
         LongName {
@@ -440,22 +446,6 @@ impl From<dataformat::LongName<'_>> for LongName {
             ti: val.ti().map(ToOwned::to_owned),
         }
     }
-}
-
-#[self_referencing]
-struct EcuData {
-    blob: bytes::Bytes,
-
-    #[borrows(blob)]
-    #[covariant]
-    pub data: dataformat::EcuData<'this>,
-}
-
-pub struct DiagnosticDatabase {
-    ecu_database_path: String,
-    ecu_data: Option<EcuData>,
-    flatbuf_config: FlatbBufConfig,
-    config: DatabaseConfig,
 }
 
 #[derive(Clone, Debug)]
@@ -473,10 +463,20 @@ pub enum LogicalAddressType {
     Functional(String),
 }
 
-#[derive(Debug, Clone)]
-pub struct LongName {
-    pub value: Option<String>,
-    pub ti: Option<String>,
+#[self_referencing]
+struct EcuData {
+    blob: bytes::Bytes,
+
+    #[borrows(blob)]
+    #[covariant]
+    pub data: dataformat::EcuData<'this>,
+}
+
+pub struct DiagnosticDatabase {
+    ecu_database_path: String,
+    ecu_data: Option<EcuData>,
+    flatbuf_config: FlatbBufConfig,
+    config: DatabaseConfig,
 }
 
 impl DiagnosticDatabase {
