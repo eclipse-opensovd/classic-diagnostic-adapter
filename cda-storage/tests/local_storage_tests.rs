@@ -411,6 +411,12 @@ async fn random_access_read_at_offset() {
 }
 
 // Recovery tests
+
+/// Simulates a crash during the recording phase: a WAL file exists with `RECORDING` status and
+/// entries, and orphaned staging files are present, but nothing was ever applied to the
+/// collections directory. Recovery must discard the WAL and staging files and leave the
+/// collection untouched, since the transaction never reached the commit phase.
+/// [[ test~storage-atomicity-recovery-discards-recording-phase-crash, Recovery discards an incomplete transaction that crashed while still recording, test, [arch~system-storage-access-abstraction, req~system-default-local-file-system-storage-access] ]]
 #[tokio::test]
 async fn recovery_cleans_up_incomplete_transaction() {
     // Simulate a crash during the recording phase: WAL exists with RECORDING status and
@@ -460,6 +466,11 @@ async fn recovery_cleans_up_incomplete_transaction() {
     assert!(matches!(result, Err(StorageError::KeyNotFound(_))));
 }
 
+/// Simulates a crash during the commit phase where an existing key was being overwritten: the
+/// WAL has `COMMITTING` status and a `.bak` file exists alongside the partially-written new
+/// file. Recovery must restore the original data from the `.bak` file, upholding the
+/// all-or-nothing guarantee for `Write` operations that overwrite existing keys.
+/// [[ test~storage-atomicity-recovery-restores-overwritten-file, Recovery restores the original file from its backup after an interrupted overwrite, test, [arch~system-storage-access-abstraction, req~system-default-local-file-system-storage-access] ]]
 #[tokio::test]
 async fn recovery_rolls_back_partial_commit_with_bak_files() {
     // Simulate a crash during the commit phase: WAL has COMMITTING status and .bak files
@@ -505,6 +516,11 @@ async fn recovery_rolls_back_partial_commit_with_bak_files() {
     assert_eq!(&buf, b"original data");
 }
 
+/// This is the specific bug being fixed: a crash during commit where only NEW files were
+/// created (no overwrites, so no `.bak` files exist). Recovery must still detect the partial
+/// commit via the `COMMITTING` WAL status and remove the newly created files, since a `Write`
+/// operation that introduces a brand-new key must be all-or-nothing just like an overwrite.
+/// [[ test~storage-atomicity-recovery-removes-new-file, Recovery removes a newly-written file left by an interrupted commit with no backup to restore, test, [arch~system-storage-access-abstraction, req~system-default-local-file-system-storage-access] ]]
 #[tokio::test]
 async fn recovery_rolls_back_new_file_writes_without_bak() {
     // This is the specific bug being fixed: a crash during commit where only NEW files were
@@ -548,6 +564,10 @@ async fn recovery_rolls_back_new_file_writes_without_bak() {
     assert!(matches!(result, Err(StorageError::KeyNotFound(_))));
 }
 
+/// Simulates a crash during commit of a `CreateCollection` operation, where no backup can exist
+/// because the collection is entirely new. Recovery must remove the empty collection directory
+/// so that a partially-applied `CreateCollection` never leaves a visible trace behind.
+/// [[ test~storage-atomicity-recovery-removes-new-collection, Recovery removes an empty collection directory left by an interrupted CreateCollection commit, test, [arch~system-storage-access-abstraction, req~system-default-local-file-system-storage-access] ]]
 #[tokio::test]
 async fn recovery_rolls_back_new_collection_without_bak() {
     // Crash during commit that created a new collection. No .bak exists since it was entirely
@@ -582,6 +602,11 @@ async fn recovery_rolls_back_new_collection_without_bak() {
     assert!(!new_col_dir.exists());
 }
 
+/// Simulates the case where a commit succeeded (the WAL was deleted, marking the point of no
+/// return) but a subsequent crash interrupted the best-effort `.bak` cleanup step. Recovery must
+/// treat the absence of a WAL as "already committed" and simply delete the orphaned backups,
+/// keeping the already-committed data intact.
+/// [[ test~storage-atomicity-recovery-cleans-orphaned-backups, Recovery cleans up orphaned backup files left after a successful commit, test, [arch~system-storage-access-abstraction, req~system-default-local-file-system-storage-access] ]]
 #[tokio::test]
 async fn recovery_handles_no_wal_with_orphaned_bak_files() {
     // Simulate: commit succeeded (WAL was deleted) but crash interrupted .bak cleanup.
@@ -618,6 +643,11 @@ async fn recovery_handles_no_wal_with_orphaned_bak_files() {
     assert_eq!(&buf, b"new committed data");
 }
 
+/// Creates a WAL with a valid entry followed by corrupted (torn-write) bytes. Recovery must
+/// stop reading at the first invalid entry and discard the whole transaction, since a
+/// `RECORDING`-status WAL means nothing was ever applied to collections - so a corrupt tail is
+/// safe to ignore rather than treated as unrecoverable filesystem corruption.
+/// [[ test~storage-atomicity-recovery-discards-corrupt-wal, Recovery discards a WAL with a corrupt checksum during the recording phase, test, [arch~system-storage-access-abstraction, req~system-default-local-file-system-storage-access] ]]
 #[tokio::test]
 async fn recovery_discards_wal_with_corrupt_checksum() {
     // Create a WAL with valid entries followed by a corrupt entry. Recovery should still work
@@ -687,6 +717,12 @@ async fn overwrite_existing_key() {
     assert_eq!(&buf, b"version 2");
 }
 
+/// Verifies the WAL on-disk format at the byte level: appends a mix of `CreateCollection`,
+/// `Write`, and `Delete` operations, then reads them back and checks that each operation is
+/// decoded correctly, in order, with its checksum intact and `truncated` reported as `false`.
+/// This underpins the crash-recovery guarantees, which depend on being able to faithfully replay
+/// exactly the operations that were durably recorded before a crash.
+/// [[ test~storage-wal-checksum-round-trip, WAL entries round-trip through checksum-verified encode/decode, test, [arch~system-storage-access-abstraction, req~system-default-local-file-system-storage-access] ]]
 // WAL checksum round-trip
 #[tokio::test]
 async fn wal_round_trip_with_checksum_verification() {
@@ -742,6 +778,12 @@ async fn wal_round_trip_with_checksum_verification() {
     ));
 }
 
+/// Writes two valid WAL entries, then truncates the file mid-way through the second entry to
+/// simulate a torn write. The reader must return exactly the first (fully valid) operation and
+/// report `truncated: true`, rather than erroring out or fabricating data for the incomplete
+/// entry. This is the detection mechanism that lets recovery safely distinguish "crash mid-write
+/// to the WAL itself" from genuine filesystem corruption.
+/// [[ test~storage-wal-truncation-detection, WAL reader detects and stops at a truncated entry, test, [arch~system-storage-access-abstraction, req~system-default-local-file-system-storage-access] ]]
 #[tokio::test]
 async fn wal_stops_at_truncated_entry() {
     let dir = tempfile::tempdir().unwrap();
@@ -783,6 +825,13 @@ async fn wal_stops_at_truncated_entry() {
     ));
 }
 
+/// Simulates a crash during commit of a multi-operation transaction where a `CreateCollection`
+/// and a `Write` into that same new collection were both partially applied (the directory and
+/// its file both exist on disk, with the WAL in `COMMITTING` status). Since the collection did
+/// not exist before this transaction, recovery must roll back the *entire* transaction as a
+/// unit, removing both the written file and the now-empty collection directory - demonstrating
+/// that atomicity applies across all staged operations in an execution, not just individually.
+/// [[ test~storage-atomicity-recovery-removes-orphaned-collection-dir, Recovery fully rolls back a multi-operation transaction that created a collection and wrote into it, test, [arch~system-storage-access-abstraction, req~system-default-local-file-system-storage-access] ]]
 #[tokio::test]
 async fn recovery_create_collection_with_write_removes_orphaned_dir() {
     let dir = tempfile::tempdir().unwrap();
