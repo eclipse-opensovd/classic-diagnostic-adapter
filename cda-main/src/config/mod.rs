@@ -78,11 +78,13 @@ pub fn require_config_source() -> Result<(), crate::AppError> {
         println!("No configuration found on disk or in storage. Using default values.");
         Ok(())
     } else {
-        Err(crate::AppError::ConfigurationError(
-            "No configuration found. Provide a configuration file, store one via runtime update, \
-             or build with the 'config-optional' feature to allow starting without one."
+        Err(crate::AppError::ConfigurationError {
+            message: "No configuration found. Provide a configuration file, store one via runtime \
+                      update, or build with the 'config-optional' feature to allow starting \
+                      without one."
                 .to_owned(),
-        ))
+            source: None,
+        })
     }
 }
 
@@ -163,9 +165,13 @@ pub async fn load_config_with_storage_override(
         }
     };
 
-    let keys = collection.list().await.map_err(|e| {
-        AppError::ConfigurationError(format!("Failed to list Configuration collection: {e}"))
-    })?;
+    let keys = collection
+        .list()
+        .await
+        .map_err(|source| AppError::ConfigurationError {
+            message: "Failed to list Configuration collection".to_string(),
+            source: Some(source.into()),
+        })?;
 
     let key = match keys.as_slice() {
         [] => {
@@ -173,29 +179,44 @@ pub async fn load_config_with_storage_override(
         }
         [single] => single,
         keys => {
-            return Err(AppError::ConfigurationError(format!(
-                "Expected at most one configuration in storage, found {}: {keys:?}",
-                keys.len()
-            )));
+            return Err(AppError::ConfigurationError {
+                message: format!(
+                    "Expected at most one configuration in storage, found {}: {keys:?}",
+                    keys.len()
+                ),
+                source: None,
+            });
         }
     };
 
-    let data_handle = collection.read(key).await.map_err(|e| {
-        AppError::ConfigurationError(format!("Failed to read stored config '{key}': {e}"))
-    })?;
+    let data_handle =
+        collection
+            .read(key)
+            .await
+            .map_err(|source| AppError::ConfigurationError {
+                message: format!("Failed to read stored config '{key}'"),
+                source: Some(source.into()),
+            })?;
 
-    let size = data_handle.data_size().map_err(|e| {
-        AppError::ConfigurationError(format!("Failed to get stored config size for '{key}': {e}"))
-    })?;
+    let size = data_handle
+        .data_size()
+        .map_err(|source| AppError::ConfigurationError {
+            message: format!("Failed to get stored config size for '{key}'"),
+            source: Some(source.into()),
+        })?;
 
     let mut buf = vec![0u8; usize::try_from(size).unwrap_or(usize::MAX)];
-    data_handle.read_at(0, &mut buf).map_err(|e| {
-        AppError::ConfigurationError(format!("Failed to read stored config data '{key}': {e}"))
-    })?;
+    data_handle
+        .read_at(0, &mut buf)
+        .map_err(|source| AppError::ConfigurationError {
+            message: format!("Failed to read stored config data '{key}'"),
+            source: Some(source.into()),
+        })?;
 
     let config = toml::from_str::<configfile::Configuration>(&String::from_utf8_lossy(&buf))
-        .map_err(|e| {
-            AppError::ConfigurationError(format!("Failed to parse stored config '{key}': {e}"))
+        .map_err(|source| AppError::ConfigurationError {
+            message: format!("Failed to parse stored config '{key}'"),
+            source: Some(source.into()),
         })?;
 
     tracing::info!(key, "Using configuration from storage (overrides disk)");

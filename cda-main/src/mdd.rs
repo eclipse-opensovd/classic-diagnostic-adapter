@@ -365,11 +365,14 @@ pub(crate) fn handle_ecu_config_keys<S: SecurityPlugin>(
         }
     }
     if strict && !unmatched.is_empty() {
-        return Err(AppError::ConfigurationError(format!(
-            "[strict] ecu_config is enabled and the following per-ECU config entries do not match \
-             any loaded database: {}",
-            unmatched.join(", ")
-        )));
+        return Err(AppError::ConfigurationError {
+            message: format!(
+                "[strict] ecu_config is enabled and the following per-ECU config entries do not \
+                 match any loaded database: {}",
+                unmatched.join(", ")
+            ),
+            source: None,
+        });
     }
     Ok(())
 }
