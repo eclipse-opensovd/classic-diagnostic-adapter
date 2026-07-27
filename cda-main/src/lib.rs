@@ -75,8 +75,13 @@ pub enum Command {
 #[derive(Parser, Debug)]
 #[command(version, about, long_about = None)]
 pub struct AppArgs {
-    #[arg(short, long, env = "CDA_CONFIG_FILE")]
-    pub config: Option<String>,
+    #[arg(
+        short,
+        long,
+        env = "CDA_CONFIG_FILE",
+        default_value = "opensovd-cda.toml"
+    )]
+    pub config: PathBuf,
 
     #[command(subcommand)]
     pub command: Option<Command>,
@@ -265,15 +270,14 @@ where
         return generate_config_cmd(output.as_ref());
     }
 
-    let (mut config, disk_loaded) = config::load_config_with_fallback(args.config.as_deref());
+    let (mut config, disk_loaded) = config::load_config_with_fallback(&args.config);
 
-    if disk_loaded && config.runtime_update_config.init_storage_from_config_file {
-        let config_file = config::resolve_config_file_path(args.config.as_deref());
+    if config.runtime_update_config.init_storage_from_config_file {
         config::seed_storage_from_config_file(
             &config.runtime_update_config.storage_dir,
-            &config_file,
+            &args.config,
         )
-        .await;
+        .await?;
     }
 
     if let Some(storage_config) =
