@@ -40,6 +40,17 @@ mod gateway;
 #[cfg(feature = "can")]
 pub use gateway::{CanDiagGateway, error};
 
+#[cfg(feature = "can")]
+impl cda_interfaces::ReusableTransportResource for CanDiagGateway {
+    type TransportResource = ();
+
+    fn reusable_transport_resource(
+        &self,
+    ) -> Option<std::sync::Arc<tokio::sync::Mutex<Self::TransportResource>>> {
+        None
+    }
+}
+
 /// Stub `CanDiagGateway` when the `can` feature is disabled.
 ///
 /// This type exists only to satisfy the `Option<CanDiagGateway>` field in
@@ -114,4 +125,15 @@ impl cda_interfaces::EcuGateway for CanDiagGateway {
 #[async_trait::async_trait]
 impl cda_interfaces::Shutdown for CanDiagGateway {
     async fn shutdown(&self) {}
+}
+
+#[cfg(not(feature = "can"))]
+impl cda_interfaces::ReusableTransportResource for CanDiagGateway {
+    type TransportResource = ();
+
+    fn reusable_transport_resource(
+        &self,
+    ) -> Option<std::sync::Arc<tokio::sync::Mutex<Self::TransportResource>>> {
+        None
+    }
 }

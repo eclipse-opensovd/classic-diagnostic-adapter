@@ -20,7 +20,7 @@ use std::{
 use async_trait::async_trait;
 use cda_interfaces::{
     DiagServiceError, DoipComParams, DoipGatewaySetupError, EcuAddresses, EcuConnectivityHandler,
-    EcuGateway, EcuGatewaySockets, HashMap, HashMapExtensions, ServicePayload,
+    EcuGateway, HashMap, HashMapExtensions, ReusableTransportResource, ServicePayload,
     TransmissionParameters, UdsResponse, dlt_ctx,
     util::{self, tokio_ext},
 };
@@ -1129,13 +1129,11 @@ impl<T: EcuAddresses + DoipComParams> cda_interfaces::Shutdown for DoipDiagGatew
     }
 }
 
-impl<T: EcuAddresses + DoipComParams> EcuGatewaySockets for DoipDiagGateway<T> {
-    type Socket = DoIPUdpSocket;
+impl<T: EcuAddresses + DoipComParams> ReusableTransportResource for DoipDiagGateway<T> {
+    type TransportResource = DoIPUdpSocket;
 
-    fn socket(
-        &self,
-    ) -> std::sync::Arc<tokio::sync::Mutex<<DoipDiagGateway<T> as EcuGatewaySockets>::Socket>> {
-        Arc::clone(&self.state.socket)
+    fn reusable_transport_resource(&self) -> Option<Arc<Mutex<Self::TransportResource>>> {
+        Some(Arc::clone(&self.state.socket))
     }
 }
 

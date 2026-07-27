@@ -41,7 +41,7 @@ use tokio::{sync::Mutex, task::JoinHandle};
 
 use crate::{
     FunctionalDescriptionConfig, HashMap, Shutdown, UdsQuery,
-    ecugateway::EcuGatewaySockets,
+    ecugateway::ReusableTransportResource,
     file_manager::FileManager,
     storage_api::{Collection, DirectFileAccess},
 };
@@ -62,48 +62,47 @@ impl ActivityGuard for Vec<Box<dyn ActivityGuard>> {
 
 /// The result of creating a fresh set of vehicle components inside
 /// [`VehicleComponentFactory::create`].
-pub struct VehicleComponents<UdsManager, EcuSockets, File>
+pub struct VehicleComponents<UdsManager, Gateway, File>
 where
     UdsManager: UdsQuery + Shutdown,
-    EcuSockets: EcuGatewaySockets + Shutdown,
+    Gateway: ReusableTransportResource + Shutdown,
     File: FileManager,
 {
     pub uds_manager: UdsManager,
     pub file_managers: HashMap<String, File>,
-    pub diagnostic_gateway: EcuSockets,
+    pub diagnostic_gateway: Gateway,
     pub variant_detection_handle: JoinHandle<()>,
     pub functional_group_config: FunctionalDescriptionConfig,
 }
 
-/// Async factory that recreates vehicle components (UDS manager, `DoIP` gateway,
+/// Async factory that recreates vehicle components (UDS manager, diagnostic gateway,
 /// file managers, variant-detection task) from a configuration snapshot and new MDD paths.
 ///
 ///
 /// # Type parameters
 /// - `C`: opaque application configuration
 /// - `Q`: UDS manager type - must implement [`UdsQuery`] + [`Shutdown`]
-/// - `G`: diagnostic gateway type - must implement [`EcuGatewaySockets`] + [`Shutdown`]
+/// - `G`: diagnostic gateway type - must implement [`ReusableTransportResource`] + [`Shutdown`]
 #[async_trait]
 pub trait VehicleComponentFactory<Config, Uds, Gateway>: Send + Sync + 'static
 where
     Config: Send + Sync + 'static,
     Uds: UdsQuery + Shutdown,
-    Gateway: EcuGatewaySockets + Shutdown,
+    Gateway: ReusableTransportResource + Shutdown,
 {
     /// Concrete file-manager type produced by this factory.
     type FileManager: FileManager;
 
     /// Creates a fresh set of vehicle components.
     ///
-    /// `existing_udp_socket` is the socket currently owned by the gateway that is being
-    /// replaced.  The implementation should reuse it to avoid binding a second socket to
-    /// the same port while the old gateway is still running.
+    /// `reusable_transport_resource` is the optional transport resource owned by the gateway being
+    /// replaced. Implementations reuse it when their configured transport requires it.
     async fn create(
         &self,
         config: &Config,
         mdd_paths: &[PathBuf],
         update_in_progress: Arc<AtomicBool>,
-        existing_udp_socket: Arc<Mutex<Gateway::Socket>>,
+        reusable_transport_resource: Option<Arc<Mutex<Gateway::TransportResource>>>,
     ) -> Result<VehicleComponents<Uds, Gateway, Self::FileManager>, ReloadError>;
 }
 

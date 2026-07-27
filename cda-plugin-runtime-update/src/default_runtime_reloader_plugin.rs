@@ -14,7 +14,8 @@ use std::{path::PathBuf, sync::Arc};
 
 use async_trait::async_trait;
 use cda_interfaces::{
-    EcuGateway, EcuGatewaySockets, HashMap, SchemaProvider, Shutdown, ShutdownSignal, UdsEcu,
+    EcuGateway, HashMap, ReusableTransportResource, SchemaProvider, Shutdown, ShutdownSignal,
+    UdsEcu,
     datatypes::ComponentsConfig,
     health::HealthProvider,
     runtime_update_api::{
@@ -32,7 +33,7 @@ use tokio::sync::{Mutex, RwLock};
 pub struct DefaultReloadContext<Uds, Gateway, Config>
 where
     Uds: UdsEcu + SchemaProvider + Clone + Shutdown + Send + Sync + 'static,
-    Gateway: EcuGatewaySockets + Shutdown,
+    Gateway: ReusableTransportResource + Shutdown,
     Config: Clone + serde::de::DeserializeOwned + Send + Sync + 'static,
 {
     /// Application configuration
@@ -41,8 +42,8 @@ where
     /// Vehicle diagnostic manager
     pub uds_manager: Arc<RwLock<Uds>>,
 
-    /// `DoIP` diagnostic gateway
-    pub doip_gateway: Arc<RwLock<Gateway>>,
+    /// Diagnostic gateway across all configured transports
+    pub diagnostic_gateway: Arc<RwLock<Gateway>>,
 
     /// Dynamic router for hot-swapping routes
     pub dynamic_router: DynamicRouter,
@@ -92,7 +93,7 @@ where
 pub struct DefaultRuntimeReloaderPlugin<Uds, Gateway, Config, SecurityLoader, VehicleFactory>
 where
     Uds: UdsEcu + SchemaProvider + Clone + Shutdown + Send + Sync + 'static,
-    Gateway: EcuGatewaySockets + Shutdown,
+    Gateway: ReusableTransportResource + Shutdown,
     Config: Clone + serde::de::DeserializeOwned + Send + Sync + 'static,
     SecurityLoader: SecurityPluginLoader,
     VehicleFactory: VehicleComponentFactory<Config, Uds, Gateway>,
@@ -104,7 +105,7 @@ where
     components_config: ComponentsConfig,
     lock_provider: Arc<SovdLockStateProvider>,
     uds_manager: Arc<RwLock<Uds>>,
-    doip_gateway: Arc<RwLock<Gateway>>,
+    diagnostic_gateway: Arc<RwLock<Gateway>>,
     update_guard: UpdateGuardState,
     ecu_execution_registry: cda_sovd::EcuExecutionRegistry,
     variant_detection_handle: Mutex<Option<tokio::task::JoinHandle<()>>>,
@@ -119,7 +120,7 @@ where
 pub struct RuntimeReloaderConfig<Uds, Gateway, Config, VehicleFactory>
 where
     Uds: UdsEcu + SchemaProvider + Clone + Shutdown + Send + Sync + 'static,
-    Gateway: EcuGatewaySockets + Shutdown,
+    Gateway: ReusableTransportResource + Shutdown,
     Config: Clone + serde::de::DeserializeOwned + Send + Sync + 'static,
     VehicleFactory: VehicleComponentFactory<Config, Uds, Gateway>,
 {
@@ -133,7 +134,7 @@ impl<Uds, Gateway, Config, VehicleFactory>
     RuntimeReloaderConfig<Uds, Gateway, Config, VehicleFactory>
 where
     Uds: UdsEcu + SchemaProvider + Clone + Shutdown + Send + Sync + 'static,
-    Gateway: EcuGatewaySockets + Shutdown,
+    Gateway: ReusableTransportResource + Shutdown,
     Config: Clone + serde::de::DeserializeOwned + Send + Sync + 'static,
     VehicleFactory: VehicleComponentFactory<Config, Uds, Gateway>,
 {
@@ -154,7 +155,7 @@ impl<Uds, Gateway, Config, SecurityLoader, VehicleFactory>
     DefaultRuntimeReloaderPlugin<Uds, Gateway, Config, SecurityLoader, VehicleFactory>
 where
     Uds: UdsEcu + SchemaProvider + Clone + Shutdown + Send + Sync + 'static,
-    Gateway: EcuGateway + EcuGatewaySockets + Shutdown,
+    Gateway: EcuGateway + ReusableTransportResource + Shutdown,
     Config: Clone + serde::de::DeserializeOwned + Send + Sync + 'static,
     SecurityLoader: SecurityPluginLoader,
     VehicleFactory: VehicleComponentFactory<Config, Uds, Gateway>,
@@ -170,7 +171,7 @@ where
             components_config: config.infrastructure.components_config,
             lock_provider: config.infrastructure.lock_provider,
             uds_manager: config.infrastructure.uds_manager,
-            doip_gateway: config.infrastructure.doip_gateway,
+            diagnostic_gateway: config.infrastructure.diagnostic_gateway,
             update_guard: config.infrastructure.update_guard,
             ecu_execution_registry: config.infrastructure.ecu_execution_registry,
             variant_detection_handle: config.infrastructure.variant_detection_handle,
@@ -185,7 +186,7 @@ impl<Uds, Gateway, Config, SecurityLoader, VehicleFactory> RuntimeReloaderPlugin
     for DefaultRuntimeReloaderPlugin<Uds, Gateway, Config, SecurityLoader, VehicleFactory>
 where
     Uds: UdsEcu + SchemaProvider + Clone + Shutdown + Send + Sync + 'static,
-    Gateway: EcuGateway + EcuGatewaySockets + Shutdown,
+    Gateway: EcuGateway + ReusableTransportResource + Shutdown,
     Config: Clone + serde::de::DeserializeOwned + Send + Sync + 'static,
     SecurityLoader: SecurityPluginLoader,
     VehicleFactory: VehicleComponentFactory<Config, Uds, Gateway>,
@@ -203,11 +204,11 @@ where
         }
 
         self.uds_manager.write().await.shutdown().await;
-        let doip_socket = {
-            let gw = self.doip_gateway.write().await;
-            let socket = gw.socket();
+        let reusable_transport_resource = {
+            let gw = self.diagnostic_gateway.write().await;
+            let resource = gw.reusable_transport_resource();
             gw.shutdown().await;
-            socket
+            resource
         };
 
         let VehicleComponents {
@@ -222,14 +223,14 @@ where
                 &cfg,
                 &mdd_paths,
                 self.update_guard.busy_handle(),
-                doip_socket,
+                reusable_transport_resource,
             )
             .await?;
 
         // Replace with new components
         *self.variant_detection_handle.lock().await = Some(variant_detection_handle);
         *self.uds_manager.write().await = uds_manager.clone();
-        *self.doip_gateway.write().await = diagnostic_gateway;
+        *self.diagnostic_gateway.write().await = diagnostic_gateway;
 
         // Update lock entries, to make sure new ECUs or removed ECUs are updated.
         let ecu_names = uds_manager.get_physical_ecus().await;

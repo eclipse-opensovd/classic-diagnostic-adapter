@@ -142,18 +142,18 @@ pub trait EcuGateway: Clone + Send + Sync + 'static {
     }
 }
 
-/// An [`EcuGateway`] that owns a reusable UDP socket.
+/// An [`EcuGateway`] that may own a reusable transport resource.
 ///
-/// Implementing this trait allows a reload handler to retrieve and hand back the existing
-/// UDP socket to the factory so that no second socket is ever bound to the same `DoIP` port
-/// during a database reload.
+/// Implementing this trait allows a reload handler to retrieve and hand back an existing
+/// transport resource to the factory during a database reload. Gateways without a reusable
+/// resource, such as CAN-only gateways, return `None`.
 ///
-/// The associated type `UdpSocket` is deliberately opaque in `cda-interfaces` so that this
-/// crate stays free of any dependency on `cda-comm-doip`.
-pub trait EcuGatewaySockets {
-    /// Opaque socket handle type (e.g. `cda_comm_doip::socket::DoIPUdpSocket`).
-    type Socket: Send + Sync + 'static;
+/// The associated resource type is deliberately opaque in `cda-interfaces` so that this crate
+/// stays free of dependencies on concrete transport implementations.
+pub trait ReusableTransportResource {
+    /// Opaque reusable transport resource type (e.g. `cda_comm_doip::socket::DoIPUdpSocket`).
+    type TransportResource: Send + Sync + 'static;
 
-    /// Returns a shared, cloneable handle to the underlying UDP socket.
-    fn socket(&self) -> Arc<Mutex<Self::Socket>>;
+    /// Returns a shared, cloneable handle to the reusable transport resource when present.
+    fn reusable_transport_resource(&self) -> Option<Arc<Mutex<Self::TransportResource>>>;
 }

@@ -222,13 +222,13 @@ pub(crate) mod test_utils {
         }
     }
 
-    /// A [`RuntimeFileReloadHandler`] whose database reload always fails, useful for
+    /// A [`RuntimeReloaderPlugin`] whose database reload always fails, useful for
     /// exercising the async-failure path of an execution that has otherwise been
     /// accepted (i.e. that got past all synchronous pre-checks in `start_execution`).
     pub struct FailingReloadHandler;
 
     #[async_trait]
-    impl RuntimeFileReloadHandler for FailingReloadHandler {
+    impl RuntimeReloaderPlugin for FailingReloadHandler {
         async fn reload_databases(&self, _mdd_paths: Vec<PathBuf>) -> Result<(), ReloadError> {
             Err(ReloadError("simulated reload failure".to_string()))
         }
