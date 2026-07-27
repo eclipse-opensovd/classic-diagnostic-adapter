@@ -37,6 +37,7 @@ use crate::{
 ///
 /// Collections are stored as subdirectories under `{root}/collections/`. The WAL and staging
 /// files live under `{root}/journal/`.
+/// [[ dimpl~storage-local-filesystem-implementation, Local filesystem implementation of the Storage Access API, dimpl ]]
 pub struct LocalStorage {
     /// Base directory for collection data.
     collections_dir: PathBuf,
@@ -257,6 +258,7 @@ struct LocalStorageCommitter {
 
 #[async_trait]
 impl TransactionCommitter for LocalStorageCommitter {
+    /// [[ dimpl~storage-atomic-commit, Atomic commit of a staged transaction via WAL and backup-rename, dimpl ]]
     async fn apply(
         &self,
         operations: Vec<Operation>,

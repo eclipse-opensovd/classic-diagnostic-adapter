@@ -61,6 +61,7 @@ mod paths;
 pub(crate) mod recovery;
 pub mod storage_seed;
 /// Write-ahead log utilities. Exposed publicly for use in recovery tests.
+/// [[ dimpl~storage-wal-journaling, Write-ahead log with checksum-verified one-phase commit, dimpl ]]
 pub mod wal;
 
 pub use local_collection::LocalCollection;

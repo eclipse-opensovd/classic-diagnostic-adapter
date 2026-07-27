@@ -18,6 +18,7 @@ Storage Access
 .. arch:: Storage Access API
     :id: arch~system-storage-access-abstraction
     :status: draft
+    :links: dimpl~storage-local-filesystem-implementation, dimpl~storage-atomic-commit, dimpl~storage-crash-recovery, dimpl~storage-wal-journaling, test~storage-atomicity-recovery-discards-recording-phase-crash, test~storage-atomicity-recovery-restores-overwritten-file, test~storage-atomicity-recovery-removes-new-file, test~storage-atomicity-recovery-removes-new-collection, test~storage-atomicity-recovery-cleans-orphaned-backups, test~storage-atomicity-recovery-discards-corrupt-wal, test~storage-atomicity-recovery-removes-orphaned-collection-dir, test~storage-wal-checksum-round-trip, test~storage-wal-truncation-detection
 
     The Storage Access API provides an abstraction layer for storage access, allowing the CDA to interact with different types of storage systems (e.g., local file system, databases) without being tightly coupled to a specific implementation.
 
