@@ -117,6 +117,19 @@ where
         }
     }
 
+    // For Apply: verify there is at least one pending NextUpdate collection before
+    // accepting the request. This mirrors the Rollback check above, and must happen
+    // before spawning the task so that the 404 is returned synchronously instead of
+    // 202 being sent with a later Failed status (execute_apply's own check runs
+    // inside the spawned task and is too late to affect the HTTP response).
+    if mode == ExecutionMode::Apply
+        && collections.pending_mdd.is_none()
+        && collections.pending_config.is_none()
+    {
+        params.update_in_progress.store(false, Ordering::Release);
+        return Err(RuntimeUpdateError::NoPendingUpdate);
+    }
+
     let execution_id = uuid::Uuid::new_v4().to_string();
     {
         let mut execs = params.executions.write().await;
@@ -313,6 +326,31 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn start_execution_apply_with_no_pending_update_rejected_synchronously() {
+        let f = make_fixture();
+
+        // Nothing seeded into DiagnosticDatabaseNextUpdate or ConfigurationNextUpdate:
+        // Apply must be rejected synchronously (i.e. `start_execution` itself returns
+        // an error) rather than accepted (202-equivalent execution id) only to fail
+        // later inside the spawned task.
+        let result = super::start_execution(&f.params(), ExecutionMode::Apply).await;
+
+        assert!(
+            matches!(result, Err(RuntimeUpdateError::NoPendingUpdate)),
+            "expected NoPendingUpdate, got: {result:?}"
+        );
+        assert!(
+            f.executions.read().await.is_empty(),
+            "no execution should have been recorded for a synchronously-rejected apply"
+        );
+        assert!(
+            !f.update_in_progress
+                .load(std::sync::atomic::Ordering::Acquire),
+            "update_in_progress must be released after a synchronously-rejected apply"
+        );
+    }
+
+    #[tokio::test]
     async fn start_execution_cleanup_succeeds() {
         let f = make_fixture();
 
@@ -402,8 +440,28 @@ mod tests {
     #[tokio::test]
     async fn execution_transitions_to_failed_on_error() {
         let f = make_fixture();
+        // Seed a pending MDD so Apply passes the synchronous NoPendingUpdate
+        // pre-check in `start_execution`, and use a reload handler that fails so
+        // the execution fails asynchronously inside the spawned task instead.
+        write_test_file(
+            &f.storage,
+            &CollectionName::DiagnosticDatabaseNextUpdate,
+            "ecu.mdd",
+            b"mdd_data",
+        )
+        .await;
+        let failing_reload_handler = Arc::new(crate::test_utils::FailingReloadHandler);
+        let params = super::ExecutionParams {
+            storage: &f.storage,
+            security_handler: &f.security_handler,
+            reload_handler: &failing_reload_handler,
+            executions: &f.executions,
+            update_in_progress: &f.update_in_progress,
+            mdd_decompress: false,
+            lock_state_provider: &f.lock_provider,
+        };
 
-        let exec_id = super::start_execution(&f.params(), ExecutionMode::Apply)
+        let exec_id = super::start_execution(&params, ExecutionMode::Apply)
             .await
             .unwrap();
 
