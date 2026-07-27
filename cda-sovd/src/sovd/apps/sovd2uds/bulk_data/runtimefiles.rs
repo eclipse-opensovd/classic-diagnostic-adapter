@@ -259,6 +259,13 @@ pub(crate) mod nextupdate {
         )
         .await
         {
+            // The client may still be streaming the (potentially large) multipart
+            // body. If we respond and close/reset the connection before the body
+            // has been fully read, the client's in-flight write can fail with a
+            // transport-level error (e.g. a connection reset) instead of cleanly
+            // receiving this response. Drain the remaining body first so the
+            // connection can be closed/reused safely.
+            while let Ok(Some(_field)) = multipart.next_field().await {}
             return resp.into_response();
         }
 
