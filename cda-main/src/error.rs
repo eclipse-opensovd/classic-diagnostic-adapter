@@ -11,10 +11,12 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+use std::fmt;
+
 use cda_interfaces::{DiagServiceError, DoipGatewaySetupError, config::ConfigSanityError};
 use cda_tracing::TracingSetupError;
 
-#[derive(thiserror::Error, Debug)]
+#[derive(thiserror::Error)]
 pub enum AppError {
     #[error("Initialization failed `{0}`")]
     InitializationFailed(String),
@@ -22,8 +24,11 @@ pub enum AppError {
     ResourceError(String),
     #[error("Connection error `{0}`")]
     ConnectionError(String),
-    #[error("Configuration error `{0}`")]
-    ConfigurationError(String),
+    #[error("Configuration error `{message}`")]
+    ConfigurationError {
+        message: String,
+        source: Option<Box<dyn std::error::Error>>,
+    },
     #[error("Data error `{0}`")]
     DataError(String),
     #[error("Error during execution `{0}`")]
@@ -59,7 +64,10 @@ impl From<DiagServiceError> for AppError {
             | DiagServiceError::Nack(_) => Self::RuntimeError(value.to_string()),
 
             DiagServiceError::InvalidConfiguration(_) | DiagServiceError::InvalidSecurityPlugin => {
-                Self::ConfigurationError(value.to_string())
+                Self::ConfigurationError {
+                    message: value.to_string(),
+                    source: None,
+                }
             }
 
             DiagServiceError::ResourceError(_) => Self::ResourceError(value.to_string()),
@@ -83,18 +91,22 @@ impl From<DoipGatewaySetupError> for AppError {
             | DoipGatewaySetupError::PortBindFailed(_) => {
                 Self::InitializationFailed(value.to_string())
             }
-            DoipGatewaySetupError::InvalidConfiguration(_) => {
-                Self::ConfigurationError(value.to_string())
-            }
+            DoipGatewaySetupError::InvalidConfiguration(_) => Self::ConfigurationError {
+                message: value.to_string(),
+                source: None,
+            },
             DoipGatewaySetupError::ResourceError(_) => Self::ResourceError(value.to_string()),
             DoipGatewaySetupError::ServerError(_) => Self::ServerError(value.to_string()),
             DoipGatewaySetupError::UnknownECU {
                 logical_address,
                 protocol_version,
-            } => Self::ConfigurationError(format!(
-                "Unknown ECU with logical address {logical_address} and protocol version \
-                 {protocol_version}"
-            )),
+            } => Self::ConfigurationError {
+                message: format!(
+                    "Unknown ECU with logical address {logical_address} and protocol version \
+                     {protocol_version}"
+                ),
+                source: None,
+            },
         }
     }
 }
@@ -112,6 +124,54 @@ impl From<TracingSetupError> for AppError {
 
 impl From<ConfigSanityError> for AppError {
     fn from(value: ConfigSanityError) -> Self {
-        AppError::ConfigurationError(value.to_string())
+        AppError::ConfigurationError {
+            message: "Error while checking configuration sanity".to_string(),
+            source: Some(value.into()),
+        }
+    }
+}
+
+// Representation printed when returned from main().
+impl fmt::Debug for AppError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        writeln!(f, "Error: {self}")?;
+
+        let mut error: &dyn std::error::Error = self;
+
+        while let Some(source) = error.source() {
+            writeln!(f, "    Caused by: {source}")?;
+            error = source;
+        }
+
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn should_write_source_errors_in_debug_format() {
+        let source = "amet, consectetur".to_string();
+
+        let source = AppError::ConfigurationError {
+            message: "dolor sit".to_string(),
+            source: Some(source.into()),
+        };
+        let testee = AppError::ConfigurationError {
+            message: "Lorem ipsum".to_string(),
+            source: Some(source.into()),
+        };
+
+        let result = format!("{testee:?}");
+
+        assert_eq!(
+            result,
+            "Error: Configuration error `Lorem ipsum`
+    Caused by: Configuration error `dolor sit`
+    Caused by: amet, consectetur
+"
+        );
     }
 }
