@@ -27,7 +27,10 @@ use cda_core::EcuManager;
 use cda_database::FileManager;
 use cda_interfaces::{
     EcuConnectivityHandler, FunctionalDescriptionConfig, HashMap, HashMapExtensions, UdsQuery,
-    UdsVariant, config::ConfigSanity, datatypes::{ComParams, FaultConfig}, dlt_ctx,
+    UdsVariant,
+    config::ConfigSanity,
+    datatypes::{ComParams, FaultConfig},
+    dlt_ctx,
     health::HealthProvider,
 };
 use cda_plugin_security::{
@@ -549,18 +552,13 @@ pub async fn load_vehicle_data<S: SecurityPlugin>(
     };
 
     let update_guard = cda_sovd::UpdateGuardState::new();
-    let doip_socket =
-        cda_comm_doip::create_udp_vir_socket(&config.doip.tester_address, config.doip.gateway_port)
-            .map_err(|e| {
-                AppError::InitializationFailed(format!("Failed to create DoIP socket: {e}"))
-            })?;
     let components = create_vehicle_components::<S>(
         config,
         &mdd_paths,
         clonable_shutdown_signal,
         health_providers.as_ref(),
         update_guard.busy_handle(),
-        Arc::new(Mutex::new(doip_socket)),
+        None,
     )
     .await?;
 
@@ -646,7 +644,7 @@ pub async fn create_vehicle_components<S: SecurityPlugin>(
     shutdown_signal: cda_interfaces::ShutdownSignal,
     health_providers: Option<&HashMap<String, Arc<dyn HealthProvider>>>,
     update_in_progress: Arc<std::sync::atomic::AtomicBool>,
-    doip_socket: Arc<Mutex<cda_comm_doip::socket::DoIPUdpSocket>>,
+    reusable_doip_socket: Option<Arc<Mutex<cda_comm_doip::socket::DoIPUdpSocket>>>,
 ) -> Result<VehicleComponents<S>, AppError> {
     let db_provider: Option<&Arc<dyn HealthProvider>> =
         health_providers.and_then(|h| h.get(mdd::DB_HEALTH_COMPONENT_KEY));
@@ -680,7 +678,7 @@ pub async fn create_vehicle_components<S: SecurityPlugin>(
         connectivity_handler,
         shutdown_signal,
         doip_provider,
-        Some(doip_socket),
+        reusable_doip_socket,
     )
     .await?;
 
@@ -709,7 +707,7 @@ pub async fn create_vehicle_components<S: SecurityPlugin>(
 }
 
 #[tracing::instrument(
-    skip(databases, transports, variant_detection, connectivity_handler, shutdown_signal, doip_health_provider, doip_socket),
+    skip(databases, transports, variant_detection, connectivity_handler, shutdown_signal, doip_health_provider, reusable_doip_socket),
     fields(
         database_count = databases.len(),
         dlt_context = dlt_ctx!("MAIN"),
@@ -727,11 +725,10 @@ pub async fn create_diagnostic_gateway<S: SecurityPlugin>(
     connectivity_handler: Arc<dyn EcuConnectivityHandler>,
     shutdown_signal: impl Future<Output = ()> + Send + 'static,
     doip_health_provider: Option<&Arc<dyn HealthProvider>>,
-    // `None` is only valid in CAN-only operation (doip.enabled = false); when
-    // DoIP is enabled the caller owns socket creation so the runtime-update
-    // reload path can hand the existing socket over (never two sockets bound
-    // to the same DoIP port).
-    doip_socket: Option<Arc<Mutex<cda_comm_doip::socket::DoIPUdpSocket>>>,
+    // `None` on initial startup - `init_doip_gateway` creates the socket.
+    // `None` in CAN-only operation - DoIP is skipped entirely.
+    // `Some(socket)` on reload - reused to avoid rebinding the DoIP port.
+    reusable_doip_socket: Option<Arc<Mutex<cda_comm_doip::socket::DoIPUdpSocket>>>,
 ) -> Result<MultiTransportGateway<DoipDiagGateway<EcuManager<S>>>, AppError> {
     let TransportConfigs {
         doip: doip_config,
@@ -772,7 +769,7 @@ pub async fn create_diagnostic_gateway<S: SecurityPlugin>(
         connectivity_handler,
         shutdown_signal,
         doip_health_provider,
-        doip_socket,
+        reusable_doip_socket,
     )
     .await?
     {
@@ -800,7 +797,7 @@ async fn init_doip_gateway<S: SecurityPlugin>(
     connectivity_handler: Arc<dyn EcuConnectivityHandler>,
     shutdown_signal: impl Future<Output = ()> + Send + 'static,
     doip_health_provider: Option<&Arc<dyn HealthProvider>>,
-    doip_socket: Option<Arc<Mutex<cda_comm_doip::socket::DoIPUdpSocket>>>,
+    reusable_doip_socket: Option<Arc<Mutex<cda_comm_doip::socket::DoIPUdpSocket>>>,
 ) -> Result<Option<DoipDiagGateway<EcuManager<S>>>, AppError> {
     if !doip_config.enabled {
         tracing::info!("DoIP transport disabled by config (doip.enabled = false)");
@@ -810,10 +807,11 @@ async fn init_doip_gateway<S: SecurityPlugin>(
         return Ok(None);
     }
 
-    let doip_socket = doip_socket.ok_or_else(|| {
-        AppError::InitializationFailed(
-            "doip.enabled = true but no DoIP socket was provided".to_owned(),
-        )
+    let doip_socket = reuse_or_create_transport_resource(reusable_doip_socket, || {
+        cda_comm_doip::create_udp_vir_socket(&doip_config.tester_address, doip_config.gateway_port)
+            .map_err(|e| {
+                AppError::InitializationFailed(format!("Failed to create DoIP socket: {e}"))
+            })
     })?;
     if let Some(provider) = doip_health_provider {
         provider.set_status(cda_health::Status::Starting).await;
@@ -842,6 +840,17 @@ async fn init_doip_gateway<S: SecurityPlugin>(
         }
         // Fatal; main reports the error on exit.
         Err(e) => Err(e.into()),
+    }
+}
+
+/// Reuses the transport resource supplied by a previous runtime or creates the initial resource.
+fn reuse_or_create_transport_resource<T, E>(
+    reusable_resource: Option<Arc<Mutex<T>>>,
+    create: impl FnOnce() -> Result<T, E>,
+) -> Result<Arc<Mutex<T>>, E> {
+    match reusable_resource {
+        Some(resource) => Ok(resource),
+        None => create().map(|resource| Arc::new(Mutex::new(resource))),
     }
 }
 

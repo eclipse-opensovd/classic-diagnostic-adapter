@@ -142,7 +142,7 @@ where
         config: &Configuration,
         mdd_paths: &[PathBuf],
         update_in_progress: Arc<std::sync::atomic::AtomicBool>,
-        existing_udp_socket: Arc<Mutex<cda_comm_doip::socket::DoIPUdpSocket>>,
+        reusable_transport_resource: Option<Arc<Mutex<cda_comm_doip::socket::DoIPUdpSocket>>>,
     ) -> Result<
         VehicleComponents<
             UdsManagerType<SP>,
@@ -157,7 +157,7 @@ where
             self.shutdown_signal.clone(),
             self.health_providers.as_ref(),
             update_in_progress,
-            existing_udp_socket,
+            reusable_transport_resource,
         )
         .await
         .map_err(|e| ReloadError(format!("Failed to create vehicle components: {e}")))?;
@@ -236,7 +236,7 @@ where
         lock_provider: Arc::clone(&infra.lock_provider),
         shutdown_signal: infra.shutdown_signal,
         uds_manager: infra.uds_manager,
-        doip_gateway: infra.doip_gateway,
+        diagnostic_gateway: infra.gateway,
         update_guard: infra.update_guard,
         ecu_execution_registry: infra.ecu_execution_registry.clone(),
         health: infra.health,

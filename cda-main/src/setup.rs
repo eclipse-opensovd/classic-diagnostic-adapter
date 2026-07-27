@@ -51,7 +51,7 @@ pub(crate) type PreLoadHook = Box<
 pub struct CdaRuntime<SP: SecurityPlugin> {
     pub config: Arc<RwLock<Configuration>>,
     pub uds_manager: Arc<RwLock<UdsManagerType<SP>>>,
-    pub doip_gateway: Arc<RwLock<MultiTransportGateway<DoipDiagGateway<EcuManager<SP>>>>>,
+    pub gateway: Arc<RwLock<MultiTransportGateway<DoipDiagGateway<EcuManager<SP>>>>>,
     pub dynamic_router: cda_sovd::dynamic_router::DynamicRouter,
     pub vehicle_route_handle: cda_sovd::RouteHandle,
     pub lock_provider: Arc<cda_sovd::SovdLockStateProvider>,
@@ -239,7 +239,7 @@ where
         update_guard: vehicle_data.update_guard.clone(),
         shutdown_signal,
         uds_manager: Arc::new(RwLock::new(vehicle_data.uds_manager)),
-        doip_gateway: Arc::new(RwLock::new(vehicle_data.diagnostic_gateway)),
+        gateway: Arc::new(RwLock::new(vehicle_data.diagnostic_gateway)),
         ecu_execution_registry: ecu_execution_registry.clone(),
         health: vehicle_data.health_providers,
         variant_detection_handle: Mutex::new(Some(vehicle_data.variant_detection_handle)),

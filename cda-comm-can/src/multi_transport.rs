@@ -43,7 +43,7 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use cda_interfaces::{
-    DiagServiceError, EcuAddresses, EcuGateway, EcuGatewaySockets, HashMap, ServicePayload,
+    DiagServiceError, EcuAddresses, EcuGateway, HashMap, ReusableTransportResource, ServicePayload,
     Shutdown, TransmissionParameters, UdsResponse,
 };
 use serde::{Deserialize, Serialize};
@@ -389,14 +389,17 @@ impl<D: EcuGateway> Clone for MultiTransportGateway<D> {
     }
 }
 
-impl<D: EcuGateway + EcuGatewaySockets> EcuGatewaySockets for MultiTransportGateway<D> {
-    type Socket = D::Socket;
+impl<D: EcuGateway + ReusableTransportResource> ReusableTransportResource
+    for MultiTransportGateway<D>
+{
+    type TransportResource = D::TransportResource;
 
-    fn socket(&self) -> Arc<tokio::sync::Mutex<Self::Socket>> {
+    fn reusable_transport_resource(
+        &self,
+    ) -> Option<Arc<tokio::sync::Mutex<Self::TransportResource>>> {
         self.doip_gateway
             .as_ref()
-            .map(EcuGatewaySockets::socket)
-            .expect("DoIP gateway not configured")
+            .and_then(ReusableTransportResource::reusable_transport_resource)
     }
 }
 
