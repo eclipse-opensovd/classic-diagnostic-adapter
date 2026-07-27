@@ -38,6 +38,7 @@
 //!     .with_doip(doip_gateway)
 //!     .with_can(can_gateway);
 //! ```
+use async_trait::async_trait;
 
 use std::sync::Arc;
 
@@ -281,15 +282,6 @@ impl<D: EcuGateway + FunctionalTransport + TransportProbe, C: EcuGateway + Trans
             },
         }
     }
-
-    async fn shutdown(&mut self) {
-        if let Some(ref mut doip) = self.doip_gateway {
-            doip.shutdown().await;
-        }
-        if let Some(ref mut can) = self.can_gateway {
-            can.shutdown().await;
-        }
-    }
 }
 
 impl<D: EcuGateway + FunctionalTransport + TransportProbe, C: EcuGateway + TransportProbe>
@@ -376,19 +368,17 @@ impl<D: EcuGateway + FunctionalTransport + TransportProbe, C: EcuGateway + Trans
     }
 }
 
-#[async_trait::async_trait]
-impl<D: EcuGateway + FunctionalTransport + TransportProbe + Shutdown, C: EcuGateway + TransportProbe>
+#[async_trait]
+impl<D: EcuGateway + FunctionalTransport + TransportProbe, C: EcuGateway + TransportProbe>
     Shutdown for DiagnosticTransportRouter<D, C>
 {
     async fn shutdown(&self) {
         if let Some(ref doip) = self.doip_gateway {
             doip.shutdown().await;
         }
-        // CAN shutdown is handled by PhysicalTransport::shutdown(&mut self);
-        // Shutdown trait takes &self so the CAN gateway (which requires &mut self
-        // for PhysicalTransport::shutdown) uses the Shutdown trait impl defined
-        // in its own crate. The router does not own CAN shutdown here because
-        // the runtime drives it separately.
+        if let Some(ref can) = self.can_gateway {
+            can.shutdown().await;
+        }
     }
 }
 

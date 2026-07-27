@@ -61,8 +61,6 @@ pub struct CanDiagGateway {
 
 #[cfg(not(feature = "can"))]
 impl cda_interfaces::PhysicalTransport for CanDiagGateway {
-    async fn shutdown(&mut self) {}
-
     async fn send(
         &self,
         _transmission_params: cda_interfaces::TransmissionParameters,
@@ -128,6 +126,12 @@ impl cda_interfaces::TransportProbe for CanDiagGateway {
     }
 }
 
+#[cfg(not(feature = "can"))]
+#[async_trait::async_trait]
+impl cda_interfaces::Shutdown for CanDiagGateway {
+    async fn shutdown(&self) {}
+}
+
 /// CAN routing tests for `DiagnosticTransportRouter` (lives here because the
 /// test helpers - `CanDiagGateway::test_instance`, `clear_discovered`,
 /// `CanId`, `CanEcuConnection` - are `pub(crate)` in this crate).
@@ -180,8 +184,6 @@ mod transport_routing_tests {
                 Err(DiagServiceError::EcuOffline(ecu_name.to_owned()))
             }
         }
-
-        async fn shutdown(&mut self) {}
     }
 
     impl FunctionalTransport for DoipStub {
@@ -218,6 +220,11 @@ mod transport_routing_tests {
         async fn probe_ecu(&self, _ecu_name: &str) -> bool {
             false
         }
+    }
+
+    #[async_trait::async_trait]
+    impl cda_interfaces::Shutdown for DoipStub {
+        async fn shutdown(&self) {}
     }
 
     struct EcuStub;

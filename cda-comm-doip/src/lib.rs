@@ -426,27 +426,6 @@ impl<T: EcuAddresses + DoipComParams> DoipDiagGateway<T> {
 }
 
 impl<T: EcuAddresses + DoipComParams> PhysicalTransport for DoipDiagGateway<T> {
-    async fn shutdown(&mut self) {
-        self.cancel_token.cancel();
-
-        if let Some(vam_listener_handle) = self.vam_listener_handle.lock().await.take() {
-            // Abort and await the VAM listener task so it stops reading from the
-            // shared UDP socket before a new gateway reuses it.
-            vam_listener_handle.abort();
-            let _ = vam_listener_handle.await;
-        }
-
-        // Abort all background tasks (sender, receiver, connection-reset) for each
-        // gateway connection. This immediately drops their TCP socket halves.
-        let connections = self.state.doip_connections.write().await;
-        let mut tasks = self.state.connection_tasks.lock().await;
-        tasks.abort_all();
-        while tasks.join_next().await.is_some() {}
-        drop(tasks);
-        drop(connections);
-        self.state.doip_connections.write().await.clear();
-    }
-
     #[tracing::instrument(skip_all,
         fields(dlt_context = dlt_ctx!("DOIP"))
     )]

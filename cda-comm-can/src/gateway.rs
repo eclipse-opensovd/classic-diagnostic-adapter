@@ -25,11 +25,10 @@ mod probe;
 mod rediscovery;
 
 use std::{sync::Arc, time::Duration};
-
 use async_trait::async_trait;
 use cda_interfaces::{
     CanComParamProvider, CanId, DiagServiceError, EcuAddresses, HashMap, NetworkTopology,
-    PhysicalTransport, RouteStatus, ServicePayload, Shutdown, TransmissionParameters,
+    PhysicalTransport, RouteStatus, ServicePayload, TransmissionParameters,
     TransportProbe, TransportResponse, dlt_ctx, pending_nrc_from_raw, uds_response_from_raw,
 };
 use tokio::sync::{RwLock, mpsc};
@@ -471,19 +470,6 @@ impl CanDiagGateway {
 }
 
 impl PhysicalTransport for CanDiagGateway {
-    async fn shutdown(&mut self) {
-        // CAN uses per-transaction ISO-TP sockets (no long-lived connection
-        // tasks); only the broadcast keep-alive and the rediscovery loop run
-        // in the background. Rediscovery first: it holds a gateway clone, so
-        // awaiting it here also breaks that reference cycle.
-        if let Some(rediscovery) = self.rediscovery_handle.get() {
-            rediscovery.shutdown().await;
-        }
-        if let Some(ref keepalive) = self.keepalive_handle {
-            keepalive.shutdown().await;
-        }
-    }
-
     #[tracing::instrument(skip_all, fields(
         ecu = %transmission_params.ecu_name,
         gateway_addr = transmission_params.gateway_address,

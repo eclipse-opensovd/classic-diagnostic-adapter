@@ -15,7 +15,7 @@ use std::{sync::Arc, time::Duration};
 
 use tokio::sync::{Mutex, RwLock, mpsc};
 
-use crate::{DiagServiceError, EcuAddresses, HashMap, ServicePayload, uds::TransportResponse};
+use crate::{uds::TransportResponse, DiagServiceError, EcuAddresses, HashMap, ServicePayload, Shutdown};
 
 /// Parameters for sending a UDS message over the network.
 #[derive(Debug, Clone)]
@@ -28,7 +28,7 @@ pub struct TransmissionParameters {
 
 /// Physical diagnostic send - the core transport capability.
 /// Every transport (`DoIP`, CAN) implements this.
-pub trait PhysicalTransport: Clone + Send + Sync + 'static {
+pub trait PhysicalTransport: Shutdown + Clone + Send + Sync + 'static {
     /// Send a UDS request and stream classified responses back.
     /// The transport handles framing, retries, ACKs, pending-NRC classification,
     /// and any transport-specific keep-open/deadline side effects internally.
@@ -48,11 +48,6 @@ pub trait PhysicalTransport: Clone + Send + Sync + 'static {
         ecu_name: &str,
         ecu_db: &RwLock<T>,
     ) -> impl Future<Output = Result<(), DiagServiceError>> + Send;
-
-    /// Graceful shutdown: abort background tasks, close sockets.
-    // #425 is introducing a separate shutdown trait, once this is merged
-    // will implement that trait instead.
-    fn shutdown(&mut self) -> impl Future<Output = ()> + Send;
 }
 
 /// Functional diagnostic send (optional capability).
@@ -141,7 +136,7 @@ pub trait ReusableTransportResource {
 /// Core gateway supertrait: physical send + topology queries.
 /// `FunctionalTransport` (functional addressing) is intentionally excluded - not
 /// all transports support it (CAN does not). Callers that need functional send
-/// must additionally bound on `FunctionalTransport` explicitly.
+/// must additionally bind on `FunctionalTransport` explicitly.
 pub trait EcuGateway: PhysicalTransport + NetworkTopology {}
 impl<T> EcuGateway for T where T: PhysicalTransport + NetworkTopology {}
 
