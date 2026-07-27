@@ -1524,6 +1524,15 @@
       "crate": "cda-core"
     },
     {
+      "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-plugin-runtime-update/src/operations/executions.rs",
+      "function": "start_execution",
+      "line": 48,
+      "cyclomatic": 14.0,
+      "coverage": 95.74468085106383,
+      "crap": 14.015102626585632,
+      "crate": "cda-plugin-runtime-update"
+    },
+    {
       "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-sovd/src/sovd/components/ecu/x_sovd2uds_download.rs",
       "function": "request_download::put",
       "line": 127,
@@ -1972,15 +1981,6 @@
       "coverage": 23.52941176470588,
       "crap": 11.154895176063507,
       "crate": "cda-sovd"
-    },
-    {
-      "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-plugin-runtime-update/src/operations/executions.rs",
-      "function": "start_execution",
-      "line": 48,
-      "cyclomatic": 11.0,
-      "coverage": 95.45454545454545,
-      "crap": 11.011363636363637,
-      "crate": "cda-plugin-runtime-update"
     },
     {
       "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-core/src/diag_kernel/mod.rs",
@@ -4775,7 +4775,7 @@
     {
       "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-plugin-runtime-update/src/operations/executions.rs",
       "function": "execute_operation",
-      "line": 172,
+      "line": 185,
       "cyclomatic": 4.0,
       "coverage": 100.0,
       "crap": 4.0,
@@ -12182,7 +12182,7 @@
     {
       "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-plugin-runtime-update/src/operations/executions.rs",
       "function": "get_execution_status",
-      "line": 164,
+      "line": 177,
       "cyclomatic": 1.0,
       "coverage": 100.0,
       "crap": 1.0,
