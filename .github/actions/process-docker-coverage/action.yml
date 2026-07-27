@@ -1,0 +1,40 @@
+# SPDX-FileCopyrightText: 2026 Copyright (c) Contributors to the Eclipse Foundation
+#
+# See the NOTICE file(s) distributed with this work for additional
+# information regarding copyright ownership.
+#
+# This program and the accompanying materials are made available under the
+# terms of the Apache License Version 2.0 which is available at
+# https://www.apache.org/licenses/LICENSE-2.0
+#
+# SPDX-License-Identifier: Apache-2.0
+
+name: Process Docker coverage
+description: >-
+  Export an lcov tracefile from a coverage-instrumented docker test run (target/coverage/*.profraw) and rewrite the in-container /app/ source paths to the runner workspace so lcov --add unions hit counts across suites. Produces an empty tracefile when the run left no coverage data.
+inputs:
+  output-file:
+    description: Path of the resulting lcov tracefile
+    required: true
+runs:
+  using: composite
+  steps:
+    - name: Export Docker coverage
+      shell: bash
+      run: |
+        set -x
+        LLVM_PROFDATA=$(rustc --print sysroot)/lib/rustlib/x86_64-unknown-linux-gnu/bin/llvm-profdata
+        LLVM_COV=$(rustc --print sysroot)/lib/rustlib/x86_64-unknown-linux-gnu/bin/llvm-cov
+        if [ -f "target/coverage/opensovd-cda" ] && ls target/coverage/*.profraw 1>/dev/null 2>&1; then
+          $LLVM_PROFDATA merge -sparse target/coverage/*.profraw -o target/coverage/docker.profdata
+          $LLVM_COV export -format=lcov \
+            target/coverage/opensovd-cda \
+            -instr-profile=target/coverage/docker.profdata \
+            --ignore-filename-regex='/usr/local/cargo|/usr/local/rustup' \
+            > "${{ inputs.output-file }}.raw"
+          WORKSPACE=$(cargo metadata --no-deps --format-version 1 | jq -r '.workspace_root')
+          sed "s|SF:/app/|SF:${WORKSPACE}/|g" "${{ inputs.output-file }}.raw" > "${{ inputs.output-file }}"
+        else
+          echo "No Docker coverage data found"
+          touch "${{ inputs.output-file }}"
+        fi
