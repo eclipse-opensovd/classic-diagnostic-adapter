@@ -26,6 +26,7 @@ mod rediscovery;
 
 use std::{sync::Arc, time::Duration};
 
+use async_trait::async_trait;
 use cda_interfaces::{
     CanComParamProvider, CanId, DiagServiceError, EcuAddresses, EcuGateway, HashMap,
     ServicePayload, TransmissionParameters, UdsResponse, dlt_ctx,
@@ -477,19 +478,6 @@ impl CanDiagGateway {
 }
 
 impl EcuGateway for CanDiagGateway {
-    async fn shutdown(&mut self) {
-        // CAN uses per-transaction ISO-TP sockets (no long-lived connection
-        // tasks); only the broadcast keep-alive and the rediscovery loop run
-        // in the background. Rediscovery first: it holds a gateway clone, so
-        // awaiting it here also breaks that reference cycle.
-        if let Some(rediscovery) = self.rediscovery_handle.get() {
-            rediscovery.shutdown().await;
-        }
-        if let Some(ref keepalive) = self.keepalive_handle {
-            keepalive.shutdown().await;
-        }
-    }
-
     async fn get_gateway_network_address(&self, logical_address: u16) -> Option<String> {
         let ecu_name = self.logical_address_to_ecu.get(&logical_address)?;
         if !self.is_ecu_discovered_by_name(ecu_name).await {
@@ -738,6 +726,22 @@ impl EcuGateway for CanDiagGateway {
         std::future::ready(Err(DiagServiceError::RequestNotSupported(
             "functional addressing is not implemented for the CAN transport".to_owned(),
         )))
+    }
+}
+
+#[async_trait]
+impl cda_interfaces::Shutdown for CanDiagGateway {
+    async fn shutdown(&self) {
+        // CAN uses per-transaction ISO-TP sockets (no long-lived connection
+        // tasks); only the broadcast keep-alive and the rediscovery loop run
+        // in the background. Rediscovery first: it holds a gateway clone, so
+        // awaiting it here also breaks that reference cycle.
+        if let Some(rediscovery) = self.rediscovery_handle.get() {
+            rediscovery.shutdown().await;
+        }
+        if let Some(ref keepalive) = self.keepalive_handle {
+            keepalive.shutdown().await;
+        }
     }
 }
 

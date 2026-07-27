@@ -54,8 +54,6 @@ pub struct CanDiagGateway {
 
 #[cfg(not(feature = "can"))]
 impl cda_interfaces::EcuGateway for CanDiagGateway {
-    async fn shutdown(&mut self) {}
-
     async fn get_gateway_network_address(&self, _logical_address: u16) -> Option<String> {
         None
     }
@@ -110,4 +108,10 @@ impl cda_interfaces::EcuGateway for CanDiagGateway {
             })
             .collect())
     }
+}
+
+#[cfg(not(feature = "can"))]
+#[async_trait::async_trait]
+impl cda_interfaces::Shutdown for CanDiagGateway {
+    async fn shutdown(&self) {}
 }

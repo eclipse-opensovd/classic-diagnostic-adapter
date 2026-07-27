@@ -14,6 +14,7 @@
 use std::{
     collections::{BTreeMap, BTreeSet},
     fmt::Write,
+    path::PathBuf,
 };
 
 use cda_interfaces::{FunctionalDescriptionConfig, datatypes::FaultConfig};

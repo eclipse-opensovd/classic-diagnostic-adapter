@@ -36,7 +36,6 @@ use cda_plugin_security::{
 use cda_sovd::Locks;
 use cda_tracing::{OtelGuard, TracingSetupError, TracingWorkerGuard};
 use clap::{Parser, Subcommand};
-pub use error::AppError;
 use figment::{
     Figment,
     providers::{Format, Serialized, Toml},
@@ -384,7 +383,11 @@ pub async fn run(args: AppArgs) -> Result<(), AppError> {
 /// # Errors
 /// Returns [`AppError`] if tracing setup, webserver startup, data loading, or route setup fails.
 pub async fn run_with_config(config: Configuration) -> Result<(), AppError> {
-    run_with_ext_from_config::<DefaultSecurityPluginData, DefaultSecurityPlugin, _>(
+    Box::pin(run_with_ext_from_config::<
+        DefaultSecurityPluginData,
+        DefaultSecurityPlugin,
+        _,
+    >(
         config,
         Setup::new().with_update_plugin(update_plugin_fn(
             |infra: setup::CdaRuntime<DefaultSecurityPluginData>| async move {
@@ -394,7 +397,7 @@ pub async fn run_with_config(config: Configuration) -> Result<(), AppError> {
                 .await
             },
         )),
-    )
+    ))
     .await
 }
 
@@ -633,24 +636,22 @@ pub(crate) struct WebserverState {
 ///
 /// # Errors
 /// Returns [`AppError`] if database loading or diagnostic gateway creation fails.
+#[allow(
+    clippy::implicit_hasher,
+    reason = "Type alias doesn't allow specifying hasher"
+)]
 pub async fn create_vehicle_components<S: SecurityPlugin>(
     config: &Configuration,
     mdd_paths: &[PathBuf],
     shutdown_signal: cda_interfaces::ShutdownSignal,
     health_providers: Option<&HashMap<String, Arc<dyn HealthProvider>>>,
     update_in_progress: Arc<std::sync::atomic::AtomicBool>,
-    doip_socket: Arc<tokio::sync::Mutex<cda_comm_doip::socket::DoIPUdpSocket>>,
+    doip_socket: Arc<Mutex<cda_comm_doip::socket::DoIPUdpSocket>>,
 ) -> Result<VehicleComponents<S>, AppError> {
-    let db_provider = health_providers.and_then(|h| {
-        h.get(mdd::DB_HEALTH_COMPONENT_KEY)
-            .and_then(|p| p.as_any().downcast_ref::<cda_health::StatusHealthProvider>())
-            .map(|p| Arc::new(p.clone()))
-    });
-    let doip_provider = health_providers.and_then(|h| {
-        h.get(DOIP_HEALTH_COMPONENT_KEY)
-            .and_then(|p| p.as_any().downcast_ref::<cda_health::StatusHealthProvider>())
-            .map(|p| Arc::new(p.clone()))
-    });
+    let db_provider: Option<&Arc<dyn HealthProvider>> =
+        health_providers.and_then(|h| h.get(mdd::DB_HEALTH_COMPONENT_KEY));
+    let doip_provider: Option<&Arc<dyn HealthProvider>> =
+        health_providers.and_then(|h| h.get(DOIP_HEALTH_COMPONENT_KEY));
 
     let (databases, file_managers) = load_databases::<S>(config, mdd_paths, db_provider).await?;
 
@@ -678,7 +679,7 @@ pub async fn create_vehicle_components<S: SecurityPlugin>(
         variant_detection_tx,
         connectivity_handler,
         shutdown_signal,
-        doip_provider.as_ref(),
+        doip_provider,
         Some(doip_socket),
     )
     .await?;
@@ -725,7 +726,7 @@ pub async fn create_diagnostic_gateway<S: SecurityPlugin>(
     variant_detection: mpsc::Sender<Vec<String>>,
     connectivity_handler: Arc<dyn EcuConnectivityHandler>,
     shutdown_signal: impl Future<Output = ()> + Send + 'static,
-    doip_health_provider: Option<&Arc<cda_health::StatusHealthProvider>>,
+    doip_health_provider: Option<&Arc<dyn HealthProvider>>,
     // `None` is only valid in CAN-only operation (doip.enabled = false); when
     // DoIP is enabled the caller owns socket creation so the runtime-update
     // reload path can hand the existing socket over (never two sockets bound
@@ -798,13 +799,13 @@ async fn init_doip_gateway<S: SecurityPlugin>(
     variant_detection: mpsc::Sender<Vec<String>>,
     connectivity_handler: Arc<dyn EcuConnectivityHandler>,
     shutdown_signal: impl Future<Output = ()> + Send + 'static,
-    doip_health_provider: Option<&Arc<cda_health::StatusHealthProvider>>,
+    doip_health_provider: Option<&Arc<dyn HealthProvider>>,
     doip_socket: Option<Arc<Mutex<cda_comm_doip::socket::DoIPUdpSocket>>>,
 ) -> Result<Option<DoipDiagGateway<EcuManager<S>>>, AppError> {
     if !doip_config.enabled {
         tracing::info!("DoIP transport disabled by config (doip.enabled = false)");
         if let Some(provider) = doip_health_provider {
-            provider.update_status(cda_health::Status::Up).await;
+            provider.set_status(cda_health::Status::Up).await;
         }
         return Ok(None);
     }
@@ -815,7 +816,7 @@ async fn init_doip_gateway<S: SecurityPlugin>(
         )
     })?;
     if let Some(provider) = doip_health_provider {
-        provider.update_status(cda_health::Status::Starting).await;
+        provider.set_status(cda_health::Status::Starting).await;
     }
     let result = DoipDiagGateway::new(
         doip_config,
@@ -832,7 +833,7 @@ async fn init_doip_gateway<S: SecurityPlugin>(
         cda_health::Status::Failed
     };
     if let Some(provider) = doip_health_provider {
-        provider.update_status(status).await;
+        provider.set_status(status).await;
     }
     match result {
         Ok(d) => {

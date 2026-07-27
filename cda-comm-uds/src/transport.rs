@@ -751,7 +751,6 @@ mod send_tests {
         + Sync;
 
     impl EcuGateway for TestGateway {
-        async fn shutdown(&mut self) {}
 
         fn get_gateway_network_address(
             &self,

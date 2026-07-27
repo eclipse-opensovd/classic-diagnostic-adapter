@@ -17,11 +17,11 @@ use std::{
     time::{Duration, Instant},
 };
 
+use async_trait::async_trait;
 use cda_interfaces::{
     DiagServiceError, DoipComParams, DoipGatewaySetupError, EcuAddresses, EcuConnectivityHandler,
     EcuGateway, EcuGatewaySockets, HashMap, HashMapExtensions, ServicePayload,
-    TransmissionParameters, UdsResponse,
-    dlt_ctx,
+    TransmissionParameters, UdsResponse, dlt_ctx,
     util::{self, tokio_ext},
 };
 use doip_definitions::{
@@ -1105,9 +1105,9 @@ impl<T: EcuAddresses + DoipComParams> Clone for DoipDiagGateway<T> {
     }
 }
 
-#[async_trait::async_trait]
+#[async_trait]
 impl<T: EcuAddresses + DoipComParams> cda_interfaces::Shutdown for DoipDiagGateway<T> {
-    async fn shutdown(&mut self) {
+    async fn shutdown(&self) {
         self.cancel_token.cancel();
 
         if let Some(vam_listener_handle) = self.vam_listener_handle.lock().await.take() {

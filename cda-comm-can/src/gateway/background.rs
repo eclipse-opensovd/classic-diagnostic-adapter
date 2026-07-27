@@ -14,6 +14,8 @@
 //! Handle for the gateway's cancellable background tasks (keep-alive
 //! broadcast, rediscovery).
 
+use async_trait::async_trait;
+use cda_interfaces::Shutdown;
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 
@@ -35,9 +37,11 @@ impl BackgroundTask {
             task: std::sync::Mutex::new(Some(task)),
         }
     }
+}
 
-    /// Stops the task and waits until it has terminated. Idempotent.
-    pub(crate) async fn shutdown(&self) {
+#[async_trait]
+impl Shutdown for BackgroundTask {
+    async fn shutdown(&self) {
         self.cancel.cancel();
         let task = self.task.lock().map_or(None, |mut guard| guard.take());
         if let Some(task) = task {
