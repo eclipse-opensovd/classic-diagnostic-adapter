@@ -47,6 +47,7 @@ pub(crate) const STAGING_EXTENSION: &str = "tmp";
 ///
 /// Returns a [`StorageError`] if recovery cannot complete (e.g., filesystem is read-only or
 /// corrupted beyond repair).
+/// [[ dimpl~storage-crash-recovery, Startup recovery of interrupted transactions from the WAL, dimpl ]]
 pub(crate) fn recover(journal_dir: &Path, collections_dir: &Path) -> Result<(), StorageError> {
     let wal_path = journal_dir.join(wal::WAL_FILE_NAME);
     let staging_dir = journal_dir.join(wal::STAGING_DIR_NAME);
