@@ -253,7 +253,7 @@ jobs:
     name: CRAP (Change Risk Anti-Patterns)
     if: github.event_name == 'pull_request'
     needs: [build_and_test]
-    uses: eclipse-opensovd/cicd-workflows/.github/workflows/crap.yml@07140bdd84f20b66fd4aff58a83c5148deec388c
+    uses: eclipse-opensovd/cicd-workflows/.github/workflows/crap.yml@0f19d767c22f0abd428bbb8559d44d787963b313
     with:
       rust-version: "1.88.0"
       cargo-crap-git-url: "https://github.com/theswiftfox/cargo-crap.git"
