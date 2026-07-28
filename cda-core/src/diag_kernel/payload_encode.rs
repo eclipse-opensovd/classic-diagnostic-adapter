@@ -37,22 +37,26 @@ impl<S: SecurityPlugin> PayloadEncoder for EcuManager<S> {
             DiagServiceError::BadPayload("Expected at least 1 byte to read SID".to_owned())
         })?;
 
-        // iterate through the services and for each service, resolve the parameters
-        // sort the parameters by byte_pos & bit_pos, and take the first parameter
-        // this is the service id. check if the provided rawdata matches the expected
-        // bytes for the service id, and if yes, return this service.
-        // If no service with a matching SIDRQ can be found, DiagServiceError::NotFound
-        // is returned to the caller.
-        let matched_services = self.get_services_from_variant_and_parent_refs(|service| {
-            service
-                .request_id()
-                .is_some_and(|service_id| raw_data_sid == service_id)
-        });
-        let mapped_service = matched_services.first().ok_or_else(|| {
-            DiagServiceError::NotFound(format!(
-                "No matching generic service found for SID {raw_data_sid:#04X}"
-            ))
-        })?;
+        // First narrow down to all services matching the SID (first byte), then
+        // further narrow down by comparing the full sequence of coded-constant
+        // bytes (SID, sub-function, DID, ...) against the provided raw payload.
+        // This is required because multiple services commonly share the same
+        // SID (e.g. every WriteDataByIdentifier DID is typically its own
+        // service entry, all sharing SID 0x2E), so matching on the SID alone is
+        // not sufficient to identify the correct service - doing so would pick
+        // an arbitrary service with that SID, causing the wrong service to be
+        // used for the access check (and thus reported in any resulting error).
+        // If no service with a matching prefix can be found,
+        // DiagServiceError::NotFound is returned to the caller.
+        let sid_matched_services = self.lookup_services_by_sid(raw_data_sid)?;
+        let mapped_service = sid_matched_services
+            .iter()
+            .find(|service| service.matches_request_prefix(&rawdata))
+            .ok_or_else(|| {
+                DiagServiceError::NotFound(format!(
+                    "No matching generic service found for request prefix: {rawdata:02X?}"
+                ))
+            })?;
         let mapped_dc = mapped_service.diag_comm().map(datatypes::DiagComm).ok_or(
             DiagServiceError::InvalidDatabase("Service is missing DiagComm".to_owned()),
         )?;
@@ -1030,7 +1034,7 @@ fn process_coded_constants(
 #[cfg(test)]
 mod tests {
     use cda_interfaces::{
-        PayloadDecoder, PayloadEncoder, diagservices::UdsPayloadData, service_ids,
+        PayloadDecoder, PayloadEncoder, diagservices::UdsPayloadData, service_ids, util::std_ext,
     };
     use cda_plugin_security::DefaultSecurityPluginData;
     use serde_json::json;
@@ -1038,7 +1042,9 @@ mod tests {
     use super::*;
     use crate::diag_kernel::test_utils::ecu_manager_builder::{
         create_ecu_manager_with_end_pdu_request_service,
-        create_ecu_manager_with_length_key_request_service, create_ecu_manager_with_mux_service,
+        create_ecu_manager_with_length_key_request_service,
+        create_ecu_manager_with_multiple_routine_control_services,
+        create_ecu_manager_with_multiple_write_did_services, create_ecu_manager_with_mux_service,
         create_ecu_manager_with_mux_service_and_default_case,
         create_ecu_manager_with_param_length_info_service,
         create_ecu_manager_with_phys_const_normal_dop_service,
@@ -1989,6 +1995,156 @@ mod tests {
         assert!(
             result.is_err(),
             "Expected an error when providing more items than max_number_of_items allows"
+        );
+    }
+
+    /// Regression test for `check_genericservice` incorrectly matching services
+    /// by SID alone. When multiple services share the same SID (e.g. several
+    /// `WriteDataByIdentifier` services, each for a different DID, all sharing
+    /// SID `0x2E`), the raw payload bytes *following* the SID (the DID) must
+    /// also be compared, otherwise an arbitrary same-SID service can be
+    /// selected - resulting in the wrong service being used for the
+    /// precondition/access check (and thus the wrong service name being
+    /// reported in any resulting error).
+    #[tokio::test]
+    async fn test_check_genericservice_matches_correct_did_not_first_same_sid_service() {
+        let (
+            ecu_manager,
+            unrestricted_did,
+            unrestricted_name,
+            programming_only_did,
+            programming_only_name,
+        ) = create_ecu_manager_with_multiple_write_did_services();
+
+        // Default state: LockedSecurity / DefaultSession - does NOT satisfy the
+        // ProgrammingSecurity precondition of the second service.
+        {
+            let mut guard = std_ext::lock_write(&ecu_manager.runtime_state.service_states);
+            guard.insert(service_ids::SESSION_CONTROL, "DefaultSession".to_string());
+            guard.insert(service_ids::SECURITY_ACCESS, "LockedSecurity".to_string());
+        }
+
+        let sid = service_ids::WRITE_DATA_BY_IDENTIFIER;
+        let did_hi = |did: u16| (did >> 8) as u8;
+        let did_lo = |did: u16| (did & 0xFF) as u8;
+
+        // Raw payload for the unrestricted DID must succeed, regardless of
+        // which same-SID service happens to be evaluated first.
+        let unrestricted_payload = vec![sid, did_hi(unrestricted_did), did_lo(unrestricted_did)];
+        let unrestricted_result = ecu_manager
+            .check_genericservice(&skip_sec_plugin!(), unrestricted_payload)
+            .await;
+        assert!(
+            unrestricted_result.is_ok(),
+            "Expected genericservice call for unrestricted DID {unrestricted_did:#06X} \
+             ({unrestricted_name}) to succeed, got: {:?}",
+            unrestricted_result.err()
+        );
+
+        // Raw payload for the DID that requires ProgrammingSecurity must be
+        // rejected, and the error must reference the *actually matched*
+        // service, not an arbitrary same-SID service.
+        let programming_only_payload = vec![
+            sid,
+            did_hi(programming_only_did),
+            did_lo(programming_only_did),
+        ];
+        let programming_only_result = ecu_manager
+            .check_genericservice(&skip_sec_plugin!(), programming_only_payload)
+            .await;
+        let err = programming_only_result.expect_err(&format!(
+            "Expected genericservice call for restricted DID {programming_only_did:#06X} \
+             ({programming_only_name}) to fail due to unmet ProgrammingSecurity precondition"
+        ));
+        let err_msg = err.to_string();
+        assert!(
+            err_msg.contains(&programming_only_name),
+            "Expected error message to reference the actually matched service \
+             '{programming_only_name}', got: {err_msg}"
+        );
+        assert!(
+            !err_msg.contains(&unrestricted_name),
+            "Error message should not reference the unrelated service '{unrestricted_name}', got: \
+             {err_msg}"
+        );
+    }
+
+    /// Regression test for `check_genericservice` incorrectly matching services
+    /// by SID alone, for a service (`RoutineControl`, SID `0x31`) whose
+    /// disambiguating bytes span a sub-function byte *and* a routine
+    /// identifier, rather than a single DID immediately following the SID.
+    /// Matching by SID alone would arbitrarily pick a same-SID service,
+    /// resulting in the wrong service being used for the precondition/access
+    /// check (and thus the wrong service name being reported in any resulting
+    /// error).
+    #[tokio::test]
+    async fn test_check_genericservice_matches_correct_routine_not_first_same_sid_service() {
+        let (
+            ecu_manager,
+            unrestricted_routine_id,
+            unrestricted_name,
+            programming_only_routine_id,
+            programming_only_name,
+        ) = create_ecu_manager_with_multiple_routine_control_services();
+
+        // Default state: LockedSecurity / DefaultSession - does NOT satisfy the
+        // ProgrammingSecurity precondition of the second service.
+        {
+            let mut guard = std_ext::lock_write(&ecu_manager.runtime_state.service_states);
+            guard.insert(service_ids::SESSION_CONTROL, "DefaultSession".to_string());
+            guard.insert(service_ids::SECURITY_ACCESS, "LockedSecurity".to_string());
+        }
+
+        let sid = service_ids::ROUTINE_CONTROL;
+        let subfunction = cda_interfaces::subfunction_ids::routine::REQUEST_RESULTS;
+        let id_hi = |id: u16| (id >> 8) as u8;
+        let id_lo = |id: u16| (id & 0xFF) as u8;
+
+        // Raw payload for the unrestricted routine ID must succeed, regardless
+        // of which same-SID service happens to be evaluated first.
+        let unrestricted_payload = vec![
+            sid,
+            subfunction,
+            id_hi(unrestricted_routine_id),
+            id_lo(unrestricted_routine_id),
+        ];
+        let unrestricted_result = ecu_manager
+            .check_genericservice(&skip_sec_plugin!(), unrestricted_payload)
+            .await;
+        assert!(
+            unrestricted_result.is_ok(),
+            "Expected genericservice call for unrestricted routine ID \
+             {unrestricted_routine_id:#06X} ({unrestricted_name}) to succeed, got: {:?}",
+            unrestricted_result.err()
+        );
+
+        // Raw payload for the routine ID that requires ProgrammingSecurity must
+        // be rejected, and the error must reference the *actually matched*
+        // service, not an arbitrary same-SID service.
+        let programming_only_payload = vec![
+            sid,
+            subfunction,
+            id_hi(programming_only_routine_id),
+            id_lo(programming_only_routine_id),
+        ];
+        let programming_only_result = ecu_manager
+            .check_genericservice(&skip_sec_plugin!(), programming_only_payload)
+            .await;
+        let err = programming_only_result.expect_err(&format!(
+            "Expected genericservice call for restricted routine ID \
+             {programming_only_routine_id:#06X} ({programming_only_name}) to fail due to unmet \
+             ProgrammingSecurity precondition"
+        ));
+        let err_msg = err.to_string();
+        assert!(
+            err_msg.contains(&programming_only_name),
+            "Expected error message to reference the actually matched service \
+             '{programming_only_name}', got: {err_msg}"
+        );
+        assert!(
+            !err_msg.contains(&unrestricted_name),
+            "Error message should not reference the unrelated service '{unrestricted_name}', got: \
+             {err_msg}"
         );
     }
 }
