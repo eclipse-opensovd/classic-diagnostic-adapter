@@ -14,9 +14,10 @@
 use std::sync::{Arc, atomic::AtomicBool};
 
 use cda_interfaces::{
-    DiagComm, DiagServiceError, EcuGateway, EcuManager, FunctionalDescriptionConfig, HashMap,
-    HashMapExtensions, HashSet, HashSetExtensions, SchemaDescription, SchemaProvider, UdsEcu,
-    UdsEcuDb, datatypes::FaultConfig,
+    DiagComm, DiagServiceError, DynamicPlugin, EcuGateway, EcuManager,
+    FunctionalDescriptionConfig, HashMap, HashMapExtensions, HashSet, HashSetExtensions,
+    SchemaDescription, SchemaProvider, UdsEcu, UdsEcuDb, UdsTransport, datatypes::FaultConfig,
+    diagservices::UdsPayloadData,
 };
 use tokio::{
     sync::{Mutex, RwLock, Semaphore, mpsc},
@@ -174,6 +175,86 @@ impl<S: EcuGateway, T: EcuManager> UdsManager<S, T> {
             .chain(security_reset_tasks.drain().map(|(_, h)| h))
             .chain(data_transfers.drain().map(|(_, t)| t.task))
             .for_each(|h| h.abort());
+    }
+
+    /// Send a diagnostic service by its SID, looking up the service definition
+    /// in the ODX database and encoding JSON parameters according to the
+    /// service's parameter definitions.
+    ///
+    /// This method builds a request prefix from the service ID and request
+    /// payload, resolves the matching service definition(s) via
+    /// `lookup_diagcomms_by_request_prefix` (matching against coded constant
+    /// parameters in the ODX database), and sends the first match with the
+    /// provided parameters encoded through `create_uds_payload`.
+    ///
+    /// The `request_payload` is appended after the service ID to form the
+    /// full prefix used for service resolution. This allows services that
+    /// use coded constant parameters (e.g., specific DID values) to be
+    /// resolved by matching the exact byte sequence.
+    ///
+    /// # Arguments
+    /// * `ecu_name` - The name of the target ECU
+    /// * `service_id` - The UDS service identifier (SID), e.g. 0x22 for RDBI
+    /// * `request_payload` - Bytes that follow the SID in the UDS request frame.
+    ///   These bytes are used together with the SID to resolve the service via
+    ///   `lookup_diagcomms_by_request_prefix`.
+    /// * `security_plugin` - Security plugin to validate the request
+    /// * `params` - JSON parameters keyed by ODX parameter short names
+    /// * `map_to_json` - Whether to map the response to JSON format
+    ///
+    /// # Example
+    /// ```ignore
+    /// // ReadDataByIdentifier DID 0xF190
+    /// uds.send_by_sid(
+    ///     "ECU_NAME",
+    ///     0x22,                              // SID
+    ///     vec![0xF1, 0x90],                  // DID bytes (request payload)
+    ///     &security_plugin,
+    ///     HashMap::from([("did".into(), json!(0xF190))]),
+    ///     true,
+    /// ).await?;
+    /// ```
+    pub async fn send_by_sid(
+        &self,
+        ecu_name: &str,
+        service_id: u8,
+        request_payload: Vec<u8>,
+        security_plugin: &DynamicPlugin,
+        params: HashMap<String, serde_json::Value>,
+        map_to_json: bool,
+    ) -> Result<<T as cda_interfaces::PayloadDecoder>::Response, DiagServiceError> {
+        // Build the full request prefix: [SID] + request_payload
+        let mut prefix = Vec::with_capacity(1 + request_payload.len());
+        prefix.push(service_id);
+        prefix.extend_from_slice(&request_payload);
+
+        // Look up the service definition in the ODX database using the same
+        // approach as lookup_diagcomms_by_request_prefix — matches against
+        // coded constant parameter values in the database.
+        let ecu = self.uds_ecu_db(ecu_name)?;
+        let services = ecu.read().await.lookup_diagcomms_by_request_prefix(&prefix)?;
+
+        let diag_comm = services.into_iter().next().ok_or_else(|| {
+            DiagServiceError::NotFound(format!(
+                "No diagnostic service found matching request prefix: {:02X?}",
+                prefix
+            ))
+        })?;
+
+        // Send using the standard send pipeline which handles:
+        // - variant detection
+        // - security checks
+        // - parameter encoding via create_uds_payload
+        // - transport
+        // - response conversion
+        self.send(
+            ecu_name,
+            diag_comm,
+            security_plugin,
+            Some(UdsPayloadData::ParameterMap(params)),
+            map_to_json,
+        )
+        .await
     }
 }
 
