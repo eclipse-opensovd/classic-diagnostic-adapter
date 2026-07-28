@@ -1822,6 +1822,224 @@ pub(crate) fn create_ecu_manager_with_state_transitions(
     (new_ecu_manager(db), dc)
 }
 
+/// Build an ECU manager with two services that share the same SID but are
+/// distinguished by the coded-constant bytes following the SID (as described
+/// by `extra_params`). The second service additionally requires a
+/// `ProgrammingSecurity` precondition, which a freshly created ECU manager
+/// (default `LockedSecurity`/`DefaultSession`) does not satisfy.
+///
+/// `extra_params` describes the layout of the coded-constant parameters that
+/// follow the SID (shared by both services): `(name, byte_position,
+/// bit_length)`. `unrestricted_values` / `programming_only_values` provide the
+/// per-service values for each of those parameters, in the same order.
+///
+/// This is used to verify that service lookups which only match the SID byte
+/// of a raw UDS payload are NOT sufficient to identify the correct service -
+/// the bytes following the SID must also be compared, otherwise an arbitrary
+/// same-SID service could be selected, resulting in the wrong service being
+/// used for the access/precondition check.
+fn create_ecu_manager_with_two_same_sid_services(
+    sid: u8,
+    extra_params: &[(&str, u32, u32)],
+    unrestricted_name: &str,
+    unrestricted_values: &[u32],
+    programming_only_name: &str,
+    programming_only_values: &[u32],
+) -> crate::diag_kernel::ecumanager::EcuManager<DefaultSecurityPluginData> {
+    let mut db_builder = EcuDataBuilder::new();
+    let protocol_name = Protocol::default().to_string();
+    let protocol = db_builder.create_protocol(&protocol_name, None, None, None);
+    let cp_ref = db_builder.create_com_param_ref(None, None, None, Some(protocol), None);
+
+    // Security states - a freshly created ECU manager defaults to LockedSecurity.
+    let locked_state = db_builder.create_state("LockedSecurity", None);
+    let programming_state = db_builder.create_state("ProgrammingSecurity", None);
+    let locked_to_programming_transition = db_builder.create_state_transition(
+        "LockedToProgramming",
+        Some("LockedSecurity"),
+        Some("ProgrammingSecurity"),
+    );
+
+    // Session states - a freshly created ECU manager defaults to DefaultSession.
+    let default_session_state = db_builder.create_state("DefaultSession", None);
+
+    let semantics = Semantics::default();
+    let security_state_chart = db_builder.create_state_chart(
+        "SecurityAccess",
+        Some(&semantics.security),
+        Some(vec![locked_to_programming_transition]),
+        Some("LockedSecurity"),
+        Some(vec![locked_state, programming_state]),
+    );
+    let session_state_chart = db_builder.create_state_chart(
+        "Session",
+        Some(&semantics.session),
+        None,
+        Some("DefaultSession"),
+        Some(vec![default_session_state]),
+    );
+
+    // Builds a request consisting of the SID followed by `extra_params`'
+    // coded-constant parameters, using the given per-parameter `values`.
+    macro_rules! build_request {
+        ($values:expr) => {{
+            let mut params = vec![create_sid_param!(db_builder, sid)];
+            for ((name, byte_pos, bit_length), value) in extra_params.iter().zip($values) {
+                params.push(db_builder.create_coded_const_param(
+                    name,
+                    &value.to_string(),
+                    *byte_pos,
+                    0,
+                    *bit_length,
+                    DataType::UInt32,
+                ));
+            }
+            db_builder.create_request(Some(params), None)
+        }};
+    }
+
+    // Service 1: unrestricted
+    let unrestricted_diag_comm = db_builder.create_diag_comm(DiagCommParams {
+        short_name: unrestricted_name,
+        diag_class_type: DiagClassType::START_COMM,
+        protocols: Some(vec![protocol]),
+        ..Default::default()
+    });
+    let unrestricted_request = build_request!(unrestricted_values);
+    let unrestricted_service = new_diag_service!(
+        db_builder,
+        unrestricted_diag_comm,
+        unrestricted_request,
+        vec![],
+        vec![]
+    );
+
+    // Service 2: requires ProgrammingSecurity
+    let precondition_ref = db_builder.create_pre_condition_state_ref(programming_state);
+    let programming_only_diag_comm = db_builder.create_diag_comm(DiagCommParams {
+        short_name: programming_only_name,
+        diag_class_type: DiagClassType::START_COMM,
+        protocols: Some(vec![protocol]),
+        pre_condition_state_refs: Some(vec![precondition_ref]),
+        ..Default::default()
+    });
+    let programming_only_request = build_request!(programming_only_values);
+    let programming_only_service = new_diag_service!(
+        db_builder,
+        programming_only_diag_comm,
+        programming_only_request,
+        vec![],
+        vec![]
+    );
+
+    let diag_layer = db_builder.create_diag_layer(DiagLayerParams {
+        short_name: "TestVariantDiagLayer",
+        com_param_refs: Some(vec![cp_ref]),
+        diag_services: Some(vec![unrestricted_service, programming_only_service]),
+        state_charts: Some(vec![session_state_chart, security_state_chart]),
+        ..Default::default()
+    });
+
+    let variant = db_builder.create_variant(diag_layer, true, None, None);
+    let db = db_builder.finish(EcuDataParams {
+        revision: "revision_1",
+        version: "1.0.0",
+        variants: Some(vec![variant]),
+        ..Default::default()
+    });
+
+    new_ecu_manager(db)
+}
+
+/// Build an ECU manager with two `WriteDataByIdentifier` (SID `0x2E`) services
+/// that share the same SID but target different, distinct 2-byte DIDs:
+/// - `WriteDid_Unrestricted` (DID `0xF190`): no precondition, always allowed.
+/// - `WriteDid_ProgrammingOnly` (DID `0xF191`): requires `ProgrammingSecurity`
+///   precondition state, which a freshly created ECU manager (default
+///   `LockedSecurity`/`DefaultSession`) does not satisfy.
+///
+/// See [`create_ecu_manager_with_two_same_sid_services`] for the rationale.
+///
+/// Returns `(ecu_manager, unrestricted_did, unrestricted_name,
+/// programming_only_did, programming_only_name)`.
+pub(crate) fn create_ecu_manager_with_multiple_write_did_services() -> (
+    crate::diag_kernel::ecumanager::EcuManager<DefaultSecurityPluginData>,
+    u16,
+    String,
+    u16,
+    String,
+) {
+    const UNRESTRICTED_DID: u16 = 0xF190;
+    const PROGRAMMING_ONLY_DID: u16 = 0xF191;
+    const UNRESTRICTED_NAME: &str = "WriteDid_Unrestricted";
+    const PROGRAMMING_ONLY_NAME: &str = "WriteDid_ProgrammingOnly";
+
+    let ecu_manager = create_ecu_manager_with_two_same_sid_services(
+        service_ids::WRITE_DATA_BY_IDENTIFIER,
+        &[("DID", 1, 16)],
+        UNRESTRICTED_NAME,
+        &[u32::from(UNRESTRICTED_DID)],
+        PROGRAMMING_ONLY_NAME,
+        &[u32::from(PROGRAMMING_ONLY_DID)],
+    );
+
+    (
+        ecu_manager,
+        UNRESTRICTED_DID,
+        UNRESTRICTED_NAME.to_owned(),
+        PROGRAMMING_ONLY_DID,
+        PROGRAMMING_ONLY_NAME.to_owned(),
+    )
+}
+
+/// Build an ECU manager with two `RoutineControl` (SID `0x31`) services that
+/// share the same SID and sub-function, but target different, distinct
+/// 2-byte routine identifiers:
+/// - `RoutineControl_Unrestricted` (routine ID `0x0A5C`): no precondition,
+///   always allowed.
+/// - `RoutineControl_ProgrammingOnly` (routine ID `0x0A5D`): requires
+///   `ProgrammingSecurity` precondition state, which a freshly created ECU
+///   manager (default `LockedSecurity`/`DefaultSession`) does not satisfy.
+///
+/// This mirrors [`create_ecu_manager_with_multiple_write_did_services`], but
+/// for a service (`RoutineControl`) whose disambiguating bytes span a
+/// sub-function byte *and* a routine identifier, rather than a DID
+/// immediately following the SID. See
+/// [`create_ecu_manager_with_two_same_sid_services`] for the rationale.
+///
+/// Returns `(ecu_manager, unrestricted_routine_id, unrestricted_name,
+/// programming_only_routine_id, programming_only_name)`.
+pub(crate) fn create_ecu_manager_with_multiple_routine_control_services() -> (
+    crate::diag_kernel::ecumanager::EcuManager<DefaultSecurityPluginData>,
+    u16,
+    String,
+    u16,
+    String,
+) {
+    const UNRESTRICTED_ROUTINE_ID: u16 = 0x0A5C;
+    const PROGRAMMING_ONLY_ROUTINE_ID: u16 = 0x0A5D;
+    const UNRESTRICTED_NAME: &str = "RoutineControl_Unrestricted";
+    const PROGRAMMING_ONLY_NAME: &str = "RoutineControl_ProgrammingOnly";
+    let subfunction = u32::from(subfunction_ids::routine::REQUEST_RESULTS);
+
+    let ecu_manager = create_ecu_manager_with_two_same_sid_services(
+        service_ids::ROUTINE_CONTROL,
+        &[("RoutineControlType", 1, 8), ("RoutineIdentifier", 2, 16)],
+        UNRESTRICTED_NAME,
+        &[subfunction, u32::from(UNRESTRICTED_ROUTINE_ID)],
+        PROGRAMMING_ONLY_NAME,
+        &[subfunction, u32::from(PROGRAMMING_ONLY_ROUTINE_ID)],
+    );
+
+    (
+        ecu_manager,
+        UNRESTRICTED_ROUTINE_ID,
+        UNRESTRICTED_NAME.to_owned(),
+        PROGRAMMING_ONLY_ROUTINE_ID,
+        PROGRAMMING_ONLY_NAME.to_owned(),
+    )
+}
+
 /// Helper that builds an ECU manager whose variant has a service with a
 /// `ProgrammingSecurity` precondition **and** a functional group containing
 /// the same service. Returns `(ecu_manager, diag_comm, sid)`.

@@ -85,43 +85,7 @@ impl<S: SecurityPlugin> DiagCommLookup for EcuManager<S> {
         let services: Vec<_> = self
             .lookup_services_by_sid(service_id)?
             .iter()
-            .filter(|service| {
-                let mut byte_idx = 0usize;
-                for param in service.extract_sequential_coded_consts() {
-                    let param_byte_count = param.byte_count();
-                    if param_byte_count > 4 {
-                        return false;
-                    }
-                    let Some(end_idx) = byte_idx.checked_add(param_byte_count) else {
-                        return false;
-                    };
-                    // Ran out of caller-provided bytes, all provided bytes matched, accept
-                    if end_idx > request_bytes.len() {
-                        return true;
-                    }
-                    let Some(param_slice) = request_bytes.get(byte_idx..end_idx) else {
-                        return false;
-                    };
-
-                    let mut buf = [0u8; 4];
-                    // calculate where in the 4-byte buffer to place the parameter bytes.
-                    // i.e. a 2 byte param goes into buf[2..4],
-                    // leaving buf[0..2] as zero-padding,
-                    // copy this into the buffer and convert into u32 big endian.
-                    let start = 4usize.saturating_sub(param_byte_count);
-                    let Some(buf_slice) = buf.get_mut(start..) else {
-                        return false;
-                    };
-                    buf_slice.copy_from_slice(param_slice);
-
-                    let expected_value = u32::from_be_bytes(buf);
-                    if param.value != expected_value {
-                        return false;
-                    }
-                    byte_idx = end_idx;
-                }
-                true // all consts iterated and all matched
-            })
+            .filter(|service| service.matches_request_prefix(request_bytes))
             .filter_map(|service| service.diag_comm())
             .filter_map(|dc| {
                 let short_name = dc.short_name()?;

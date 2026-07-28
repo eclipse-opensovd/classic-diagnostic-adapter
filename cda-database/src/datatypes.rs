@@ -273,6 +273,58 @@ impl DiagService<'_> {
 
         result
     }
+
+    #[must_use]
+    /// Check whether this service's sequential coded-constant parameters (SID,
+    /// sub-function, DID, etc.) match the given raw request bytes.
+    ///
+    /// This compares every coded-constant parameter of the service (as returned
+    /// by [`Self::extract_sequential_coded_consts`]) against the corresponding
+    /// bytes in `request_bytes`. If `request_bytes` is shorter than a given
+    /// parameter's expected position, the match is still considered successful
+    /// for the bytes provided so far (partial prefixes are accepted).
+    ///
+    /// This is used to disambiguate between multiple services that share the
+    /// same SID (e.g. several `WriteDataByIdentifier` service entries, one per
+    /// DID, all sharing SID `0x2E`), by also comparing the bytes following the
+    /// SID (such as the DID) rather than only the first byte.
+    pub fn matches_request_prefix(&self, request_bytes: &[u8]) -> bool {
+        let mut byte_idx = 0usize;
+        for param in self.extract_sequential_coded_consts() {
+            let param_byte_count = param.byte_count();
+            if param_byte_count > 4 {
+                return false;
+            }
+            let Some(end_idx) = byte_idx.checked_add(param_byte_count) else {
+                return false;
+            };
+            // Ran out of caller-provided bytes, all provided bytes matched, accept
+            if end_idx > request_bytes.len() {
+                return true;
+            }
+            let Some(param_slice) = request_bytes.get(byte_idx..end_idx) else {
+                return false;
+            };
+
+            let mut buf = [0u8; 4];
+            // calculate where in the 4-byte buffer to place the parameter bytes.
+            // i.e. a 2 byte param goes into buf[2..4],
+            // leaving buf[0..2] as zero-padding,
+            // copy this into the buffer and convert into u32 big endian.
+            let start = 4usize.saturating_sub(param_byte_count);
+            let Some(buf_slice) = buf.get_mut(start..) else {
+                return false;
+            };
+            buf_slice.copy_from_slice(param_slice);
+
+            let expected_value = u32::from_be_bytes(buf);
+            if param.value != expected_value {
+                return false;
+            }
+            byte_idx = end_idx;
+        }
+        true // all consts iterated and all matched
+    }
 }
 
 impl TryInto<cda_interfaces::DiagComm> for DiagService<'_> {
