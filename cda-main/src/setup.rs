@@ -269,8 +269,6 @@ where
     Ok(())
 }
 
-// Tests
-
 #[cfg(test)]
 mod tests {
     use cda_interfaces::runtime_update_api::{
@@ -283,7 +281,6 @@ mod tests {
     use crate::update::{UpdatePluginFn, update_plugin_fn};
 
     // Minimal no-op plugin for type-checking.
-
     struct NoOpPlugin;
 
     #[async_trait::async_trait]
@@ -316,16 +313,16 @@ mod tests {
             Ok(BulkDataCreatedList::default())
         }
 
-        async fn delete_nextupdate(&self) -> Result<(), RuntimeUpdateError> {
-            Ok(())
+        async fn delete_nextupdate(&self) -> Result<Vec<String>, RuntimeUpdateError> {
+            Ok(vec![])
         }
 
         async fn delete_nextupdate_by_id(&self, _id: &str) -> Result<(), RuntimeUpdateError> {
             Ok(())
         }
 
-        async fn delete_backup(&self) -> Result<(), RuntimeUpdateError> {
-            Ok(())
+        async fn delete_backup(&self) -> Result<Vec<String>, RuntimeUpdateError> {
+            Ok(vec![])
         }
 
         async fn start_execution(
@@ -350,8 +347,6 @@ mod tests {
     fn documented_public_api_type_checks() {
         let _: Option<CdaRuntime<DefaultSecurityPluginData>> = None;
     }
-
-    // Builder pattern: type-state transitions.
 
     #[test]
     fn new_has_no_preload_and_no_plugin() {
