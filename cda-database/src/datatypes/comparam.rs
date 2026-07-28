@@ -14,11 +14,16 @@
 use cda_interfaces::{
     DiagServiceError, HashMap,
     datatypes::{ComParamSimpleValue, ComParamValue, Unit},
+    util::try_strip_hex_prefix,
 };
 
 use crate::flatbuf::diagnostic_description::dataformat;
 
-pub(super) fn lookup(
+/// Lookup a COM parameter by name and return its raw value
+///
+/// # Errors
+/// Returns an error if the COM parameter is not found or cannot be resolved
+pub fn lookup(
     ecu_data: &crate::datatypes::DiagnosticDatabase,
     protocol: Option<&dataformat::Protocol>,
     param_name: &str,
@@ -26,7 +31,7 @@ pub(super) fn lookup(
     let ignore_protocol = ecu_data.config().ignore_protocol;
 
     let protocol_name: Option<&str> = match protocol {
-        Some(proto) => Some(proto.diag_layer().and_then(|dl| dl.short_name()).ok_or(
+        Some(proto) => Some(crate::datatypes::protocol_short_name(proto).ok_or(
             DiagServiceError::InvalidDatabase("Protocol has no short name".to_owned()),
         )?),
         None if ignore_protocol => None,
@@ -58,7 +63,8 @@ pub(super) fn lookup(
                     && (ignore_protocol
                         || cp_ref
                             .protocol()
-                            .and_then(|p| p.diag_layer().and_then(|dl| dl.short_name()))
+                            .as_ref()
+                            .and_then(|p| crate::datatypes::protocol_short_name(p))
                             .is_some_and(|sn| {
                                 protocol_name.is_some_and(|pn| sn.eq_ignore_ascii_case(pn))
                             }))
@@ -259,7 +265,7 @@ pub fn map_nack_number_of_retries<K: AsRef<str>>(
     (name, value): (K, &u32),
 ) -> Result<(u8, u32), DiagServiceError> {
     let name = name.as_ref();
-    let key_result = if let Some(hex_str) = name.strip_prefix("0x") {
+    let key_result = if let Some(hex_str) = try_strip_hex_prefix(name) {
         u8::from_str_radix(hex_str, 16)
     } else {
         name.parse::<u8>()

@@ -19,8 +19,8 @@ use std::{
 
 use cda_interfaces::{
     DiagServiceError, DoipComParams, DoipGatewaySetupError, EcuAddresses, EcuConnectivityHandler,
-    EcuGateway, HashMap, HashMapExtensions, ServicePayload, TransmissionParameters,
-    UDS_ID_RESPONSE_BITMASK, UdsResponse, dlt_ctx,
+    EcuGateway, HashMap, HashMapExtensions, ServicePayload, TransmissionParameters, UdsResponse,
+    dlt_ctx,
     util::{self, tokio_ext},
 };
 use doip_definitions::{
@@ -96,10 +96,11 @@ impl DiagnosticResponse {
 
         match self {
             Self::Ack((_, previous)) => request.starts_with(previous),
-            Self::Msg(msg) => msg
-                .message
-                .first()
-                .is_some_and(|response_sid| *response_sid == (*sid | UDS_ID_RESPONSE_BITMASK)),
+            // Positive and negative echoes both belong to the request: a
+            // final NRC can overtake the ACK, and ignoring it here consumes
+            // it from the receiver - the later response read then times out
+            // although the ECU answered.
+            Self::Msg(msg) => util::uds_response_matches_request_sid(*sid, &msg.message),
             Self::Pending { request_sid, .. }
             | Self::BusyRepeatRequest { request_sid, .. }
             | Self::TemporarilyNotAvailable { request_sid, .. } => *request_sid == *sid,
@@ -420,27 +421,6 @@ impl<T: EcuAddresses + DoipComParams> DoipDiagGateway<T> {
         })
     }
 
-    pub async fn shutdown(&mut self) {
-        self.cancel_token.cancel();
-
-        if let Some(vam_listener_handle) = self.vam_listener_handle.lock().await.take() {
-            // Abort and await the VAM listener task so it stops reading from the
-            // shared UDP socket before a new gateway reuses it.
-            vam_listener_handle.abort();
-            let _ = vam_listener_handle.await;
-        }
-
-        // Abort all background tasks (sender, receiver, connection-reset) for each
-        // gateway connection. This immediately drops their TCP socket halves.
-        let connections = self.state.doip_connections.write().await;
-        let mut tasks = self.state.connection_tasks.lock().await;
-        tasks.abort_all();
-        while tasks.join_next().await.is_some() {}
-        drop(tasks);
-        drop(connections);
-        self.state.doip_connections.write().await.clear();
-    }
-
     /// Returns a clone of the UDP socket Arc for reuse in a new gateway instance.
     /// This avoids binding a second socket on the same port during reloads.
     #[must_use]
@@ -503,6 +483,27 @@ impl<T: EcuAddresses + DoipComParams> DoipDiagGateway<T> {
 }
 
 impl<T: EcuAddresses + DoipComParams> EcuGateway for DoipDiagGateway<T> {
+    async fn shutdown(&mut self) {
+        self.cancel_token.cancel();
+
+        if let Some(vam_listener_handle) = self.vam_listener_handle.lock().await.take() {
+            // Abort and await the VAM listener task so it stops reading from the
+            // shared UDP socket before a new gateway reuses it.
+            vam_listener_handle.abort();
+            let _ = vam_listener_handle.await;
+        }
+
+        // Abort all background tasks (sender, receiver, connection-reset) for each
+        // gateway connection. This immediately drops their TCP socket halves.
+        let connections = self.state.doip_connections.write().await;
+        let mut tasks = self.state.connection_tasks.lock().await;
+        tasks.abort_all();
+        while tasks.join_next().await.is_some() {}
+        drop(tasks);
+        drop(connections);
+        self.state.doip_connections.write().await.clear();
+    }
+
     async fn get_gateway_network_address(&self, logical_address: u16) -> Option<String> {
         self.state
             .doip_connections

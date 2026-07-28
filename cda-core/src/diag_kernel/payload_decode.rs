@@ -1714,14 +1714,7 @@ fn map_param_reserved_from_uds(
         DiagServiceError::InvalidDatabase("Expected Reserved specific data".to_owned()),
     )?;
 
-    // RESERVED parameters have no semantic type of their own. Blocks up to 32
-    // bits are exposed as UInt32; anything wider cannot be represented
-    // numerically and is exposed as raw bytes instead.
-    let data_type = if r.bit_length() > 32 {
-        datatypes::DataType::ByteField
-    } else {
-        datatypes::DataType::UInt32
-    };
+    let data_type = super::reserved_param_data_type(r.bit_length());
     let coded_type = datatypes::DiagCodedType::new_high_low_byte_order(
         data_type,
         datatypes::DiagCodedTypeVariant::StandardLength(datatypes::StandardLengthType {

@@ -19,7 +19,7 @@ use cda_database::datatypes::{
 };
 use cda_interfaces::{
     DiagServiceError,
-    util::{decode_hex, tracing::print_hex},
+    util::{decode_hex, tracing::print_hex, try_strip_hex_prefix},
 };
 
 use crate::diag_kernel::{
@@ -774,7 +774,7 @@ fn decode_hex_with_optional_prefix(value: &str) -> Result<Vec<u8>, DiagServiceEr
         .split([' ', ','])
         .filter(|v: &&str| !v.is_empty())
         .map(|value| {
-            if let Some(stripped) = value.to_lowercase().strip_prefix("0x") {
+            if let Some(stripped) = try_strip_hex_prefix(value) {
                 decode_hex(stripped)
             } else {
                 decode_hex(value)

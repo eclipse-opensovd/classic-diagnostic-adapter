@@ -20,6 +20,11 @@ use serde::{Deserialize, Serialize};
 /// `DoIP` (Diagnostics over IP) transport layer configuration.
 #[derive(Deserialize, Serialize, Clone, Debug, schemars::JsonSchema)]
 pub struct DoipConfig {
+    /// Whether the `DoIP` transport is enabled.
+    /// When `false`, CDA skips `DoIP` initialization entirely (useful for
+    /// CAN-only or DoIP-less test setups).
+    /// Defaults to `true` to preserve the historical DoIP-first behavior.
+    pub enabled: bool,
     /// IP address of the diagnostic tester interface.
     pub tester_address: String,
     /// Subnet mask for the tester network.
@@ -38,12 +43,16 @@ pub struct DoipConfig {
     pub alive_check_interval_secs: u64,
     /// The name of the protocol to use.
     /// Matched case-insensitive against the database.
+    /// The special value `"auto-can"` defers the choice to the MDD-driven
+    /// CAN protocol auto-detection (see `into_db_protocol`; the markers are
+    /// configurable via `database.naming_convention.can_protocol_markers`).
     pub protocol_name: String,
 }
 
 impl Default for DoipConfig {
     fn default() -> Self {
         Self {
+            enabled: true,
             tester_address: "127.0.0.1".to_owned(),
             tester_subnet: "255.255.0.0".to_owned(),
             gateway_port: 13400,
@@ -87,6 +96,14 @@ impl ConfigSanity for DoipConfig {
             Ok(())
         }
 
+        // A disabled DoIP transport binds no endpoint (CAN-only operation), so
+        // its address/port/timeout fields are unused and may be left at their
+        // zero/placeholder defaults; validating them would reject a valid
+        // CAN-only configuration.
+        if !self.enabled {
+            return Ok(());
+        }
+
         validate_ip(&self.tester_address, "tester_address")?;
         validate_ip(&self.tester_subnet, "tester_address")?;
         validate_port(self.gateway_port, "gateway_port")?;
@@ -105,7 +122,37 @@ impl ConfigSanity for DoipConfig {
 
 #[cfg(test)]
 mod tests {
+    use cda_interfaces::config::ConfigSanity;
     use doip_definitions::header::ProtocolVersion;
+
+    use super::DoipConfig;
+
+    #[test]
+    fn disabled_doip_skips_field_validation() {
+        // CAN-only operation: DoIP is disabled and its endpoint fields are left
+        // at zero/placeholder defaults. Sanity must accept this instead of
+        // rejecting the unused gateway_port == 0.
+        let config = DoipConfig {
+            enabled: false,
+            gateway_port: 0,
+            tls_port: 0,
+            tester_address: String::new(),
+            tester_subnet: String::new(),
+            send_timeout_ms: 0,
+            ..Default::default()
+        };
+        assert!(config.validate_sanity().is_ok());
+    }
+
+    #[test]
+    fn enabled_doip_still_rejects_zero_port() {
+        let config = DoipConfig {
+            enabled: true,
+            gateway_port: 0,
+            ..Default::default()
+        };
+        assert!(config.validate_sanity().is_err());
+    }
 
     #[test]
     fn protocol_version_from_u8() {

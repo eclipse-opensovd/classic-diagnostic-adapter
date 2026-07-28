@@ -111,6 +111,24 @@ impl From<DoipGatewaySetupError> for AppError {
     }
 }
 
+#[cfg(feature = "can")]
+impl From<cda_comm_can::error::CanGatewaySetupError> for AppError {
+    fn from(value: cda_comm_can::error::CanGatewaySetupError) -> Self {
+        use cda_comm_can::error::CanGatewaySetupError;
+        match value {
+            CanGatewaySetupError::InterfaceOpenFailed(_, _) => {
+                Self::InitializationFailed(value.to_string())
+            }
+            CanGatewaySetupError::InvalidConfiguration(_) | CanGatewaySetupError::NoEcuMappings => {
+                Self::ConfigurationError {
+                    message: value.to_string(),
+                    source: None,
+                }
+            }
+        }
+    }
+}
+
 impl From<TracingSetupError> for AppError {
     fn from(value: TracingSetupError) -> Self {
         match value {

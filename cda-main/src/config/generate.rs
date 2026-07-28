@@ -11,7 +11,10 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-use std::{collections::BTreeMap, fmt::Write};
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    fmt::Write,
+};
 
 use cda_interfaces::{FunctionalDescriptionConfig, datatypes::FaultConfig};
 
@@ -62,9 +65,50 @@ precedence = "Config"
 [doip.routing_activation_timeout.value]
 secs = 42
 nanos = 0
+
+[can.physical_request_id]
+name = "CP_CanPhysReqId"
+precedence = "Config"
+value = 2014
+
+[can.physical_response_id]
+name = "CP_CanRespUSDTId"
+precedence = "Config"
+value = 2024
+
+[can.functional_id]
+name = "CP_CanFuncReqId"
+precedence = "Config"
+value = 2015
 "#,
     )
     .expect("valid partial com_params TOML");
+
+    // Top-level CAN bus transport configuration. Populated with example
+    // values so the optional `can` field appears in the generated
+    // reference config (and `reference_config_covers_all_schema_fields`
+    // stays green as new CAN fields are added to the schema).
+    // `CanConfig` is compiled regardless of the `can` feature, so this is
+    // not feature-gated: the generated reference config (and the guard
+    // tests below) are identical in every build.
+    //
+    // We deliberately leave `ecu_mappings` empty: that field is a
+    // `Vec<CanEcuMapping>` with non-optional fields, and the generated
+    // reference config comments out all values, so a non-empty list
+    // would emit commented-out required fields that the TOML parser
+    // then sees as missing (failing `generate_reference_config_parses_as_valid_config`).
+    config.can = Some(cda_comm_can::config::CanConfig {
+        interface: "vcan0".to_owned(),
+        ..Default::default()
+    });
+
+    // Set the global `com_params.can.*.value` to `Some(...)` so the
+    // generated reference config emits those leaves (otherwise the
+    // `reference_config_covers_all_schema_fields` test would flag
+    // `com_params.can.functional_id.value` etc. as missing).
+    config.com_params.can.functional_id.value = Some(0x7DF);
+    config.com_params.can.physical_request_id.value = Some(0x7E0);
+    config.com_params.can.physical_response_id.value = Some(0x7E8);
 
     config.ecu.insert(
         "FLXC1000".to_owned(),
@@ -135,11 +179,51 @@ pub fn generate_reference_config() -> Result<String, GenerateConfigError> {
     let formatted_toml = format_selected_hex_literals(&default_toml);
 
     let desc_map = build_description_map(&schema_json);
+    // Section paths that exist in the *default* configuration. Sections the
+    // reference instance adds on top (optional sections like `[can]`, or
+    // example entries like `[ecu.FLXC1000]`) get their headers commented out:
+    // a bare header of a typed optional section would otherwise deserialize
+    // as `Some(<empty table>)` and fail on missing required fields when a
+    // user loads the reference file verbatim.
+    let default_sections = {
+        let default_value = toml::Value::try_from(crate::config::default_config())
+            .map_err(GenerateConfigError::TomlValue)?;
+        let mut sections = BTreeSet::new();
+        collect_table_paths(&default_value, "", &mut sections);
+        sections
+    };
 
     Ok(format!(
         "{SPDX_HEADER}{}",
-        process_toml(&formatted_toml, &desc_map)
+        process_toml(&formatted_toml, &desc_map, &default_sections)
     ))
+}
+
+/// Collect the dotted paths of all tables (and tables inside arrays) in a
+/// TOML value, i.e. every path that may appear as a `[section]` /
+/// `[[section]]` header.
+fn collect_table_paths(value: &toml::Value, path: &str, sections: &mut BTreeSet<String>) {
+    match value {
+        toml::Value::Table(table) => {
+            if !path.is_empty() {
+                sections.insert(path.to_owned());
+            }
+            for (key, child) in table {
+                let child_path = if path.is_empty() {
+                    key.clone()
+                } else {
+                    format!("{path}.{key}")
+                };
+                collect_table_paths(child, &child_path, sections);
+            }
+        }
+        toml::Value::Array(items) => {
+            for item in items {
+                collect_table_paths(item, path, sections);
+            }
+        }
+        _ => {}
+    }
 }
 
 /// Recursively sort all tables in a TOML value by key to ensure deterministic output.
@@ -382,12 +466,23 @@ fn is_toml_section_header(trimmed: &str) -> bool {
     }
 }
 
-/// Post-process the raw TOML string: comment out value lines, inject descriptions.
-fn process_toml(raw_toml: &str, desc_map: &BTreeMap<String, String>) -> String {
+/// Post-process the raw TOML string: comment out value lines (and section
+/// headers that do not exist in the default configuration), inject
+/// descriptions.
+fn process_toml(
+    raw_toml: &str,
+    desc_map: &BTreeMap<String, String>,
+    default_sections: &BTreeSet<String>,
+) -> String {
     raw_toml
         .lines()
         .scan(Vec::<String>::new(), |section_stack, line| {
-            Some(format_toml_line(line, section_stack, desc_map))
+            Some(format_toml_line(
+                line,
+                section_stack,
+                desc_map,
+                default_sections,
+            ))
         })
         .collect()
 }
@@ -396,6 +491,7 @@ fn format_toml_line(
     line: &str,
     section_stack: &mut Vec<String>,
     desc_map: &BTreeMap<String, String>,
+    default_sections: &BTreeSet<String>,
 ) -> String {
     let trimmed = line.trim();
 
@@ -406,6 +502,16 @@ fn format_toml_line(
     if is_toml_section_header(trimmed) {
         let section_name = trimmed.trim_start_matches('[').trim_end_matches(']');
         *section_stack = section_name.split('.').map(String::from).collect();
+
+        // Headers of sections absent from the default configuration are
+        // commented out like the values: an uncommented header of a typed
+        // optional section (e.g. `[can]`) would deserialize as an empty
+        // table and fail on missing required fields.
+        let header_line = if default_sections.contains(section_name) {
+            line.to_owned()
+        } else {
+            format!("# {}", line.trim_start())
+        };
 
         return desc_map
             .get(section_name)
@@ -418,7 +524,7 @@ fn format_toml_line(
                     format!("# {l}")
                 }
             })
-            .chain(std::iter::once(line.to_owned()))
+            .chain(std::iter::once(header_line))
             .fold(String::new(), |mut acc, l| {
                 let _ = writeln!(acc, "{l}");
                 acc
@@ -532,6 +638,11 @@ mod tests {
         };
 
         let reference = generate_reference_config().unwrap();
+        // This mirrors the user's load path (`load_config`): defaults merged
+        // with the reference file. It guards against the generator emitting
+        // anything a verbatim copy of the reference config cannot load -
+        // e.g. a bare `[can]` header, which would deserialize the optional
+        // typed section as an empty table and fail on `interface`.
         let config: crate::config::configfile::Configuration =
             Figment::from(Serialized::defaults(crate::config::default_config()))
                 .merge(Toml::string(&reference))
@@ -540,6 +651,34 @@ mod tests {
         config
             .validate_sanity()
             .expect("parsed reference config should pass sanity validation");
+    }
+
+    /// The committed CAN example config must stay loadable through the real
+    /// config pipeline (figment defaults + file) and pass sanity validation,
+    /// so schema changes cannot silently break the documented setup.
+    #[cfg(feature = "can")]
+    #[test]
+    fn can_example_config_parses_as_valid_config() {
+        use figment::{
+            Figment,
+            providers::{Format, Serialized, Toml},
+        };
+
+        let example_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("..")
+            .join("opensovd-cda-can.toml");
+        let config: crate::config::configfile::Configuration =
+            Figment::from(Serialized::defaults(crate::config::default_config()))
+                .merge(Toml::file(&example_path))
+                .extract()
+                .expect("opensovd-cda-can.toml should be parseable as a valid Configuration");
+        assert!(
+            config.can.is_some(),
+            "the CAN example config must configure the [can] section"
+        );
+        config
+            .validate_sanity()
+            .expect("CAN example config should pass sanity validation");
     }
 
     /// Collect all leaf property paths from the JSON Schema.

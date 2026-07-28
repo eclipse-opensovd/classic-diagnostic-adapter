@@ -53,6 +53,12 @@ pub struct EcuCoordinatorHandle {
     /// Shared state for direct synchronous reads. The actor is the sole writer
     /// for connectivity; variant detection writes directly.
     pub state: EcuRuntimeState,
+    /// Serializes variant detections for this ECU (held for the duration of
+    /// one `detect_variant` run); see [`Self::begin_detection`].
+    detection_lock: std::sync::Arc<tokio::sync::Mutex<()>>,
+    /// Trigger generation for detections on this handle; see
+    /// [`Self::begin_detection`].
+    detection_generation: std::sync::Arc<std::sync::atomic::AtomicU64>,
 }
 
 impl EcuCoordinatorHandle {
@@ -76,7 +82,12 @@ impl EcuCoordinatorHandle {
             ecu_name,
             suppress_disconnect: false,
         });
-        Self { actor_ref, state }
+        Self {
+            actor_ref,
+            state,
+            detection_lock: std::sync::Arc::new(tokio::sync::Mutex::new(())),
+            detection_generation: std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0)),
+        }
     }
 
     /// Read the current ECU status (synchronous, no mailbox round-trip).
@@ -97,6 +108,41 @@ impl EcuCoordinatorHandle {
         std_ext::lock_read(&self.state.service_states)
             .get(&sid)
             .cloned()
+    }
+
+    /// Claims the variant-detection slot of this handle (the group
+    /// representative's, for duplicate groups): detection writes the state of
+    /// every group member, so two members must never detect concurrently - a
+    /// reconnect burst would otherwise race concurrent detections
+    /// last-writer-wins, and a stale run against an already replaced
+    /// connection could overwrite the state a successful run just wrote.
+    ///
+    /// Entrants coalesce: every caller bumps the trigger generation before
+    /// waiting for the lock, and a waiter that acquires it only proceeds if
+    /// it is still the newest trigger. This bounds a burst to the in-flight
+    /// run plus one fresh run, instead of draining stale (potentially
+    /// 10s-timeout) detections one at a time.
+    ///
+    /// Returns the guard to hold for the duration of the detection run, or
+    /// `None` when this trigger was superseded by a newer one and the caller
+    /// should skip its run entirely.
+    pub async fn begin_detection(&self) -> Option<tokio::sync::OwnedMutexGuard<()>> {
+        let my_generation = self
+            .detection_generation
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst)
+            .wrapping_add(1);
+        let guard = std::sync::Arc::clone(&self.detection_lock)
+            .lock_owned()
+            .await;
+        if self
+            .detection_generation
+            .load(std::sync::atomic::Ordering::SeqCst)
+            == my_generation
+        {
+            Some(guard)
+        } else {
+            None
+        }
     }
 }
 
@@ -211,12 +257,15 @@ impl Message<EcuDisconnected> for EcuCoordinator {
 ///
 /// Only transitions from `Offline` to `Online`. If already `Online`, this is a no-op.
 /// Variant state is cleared to `NotTested` because the ECU may have rebooted while offline
-/// (e.g. into a different session/variant). The pre-send guard will trigger re-detection
-/// on the next UDS request.
+/// (e.g. into a different session/variant).
+///
+/// Replies with `true` when an actual `Offline` -> `Online` transition happened, so the
+/// caller can push a variant re-detection; the pre-send guard alone would leave the ECU
+/// `NotTested` until the next UDS request arrives.
 pub struct EcuConnected;
 
 impl Message<EcuConnected> for EcuCoordinator {
-    type Reply = ();
+    type Reply = bool;
 
     async fn handle(
         &mut self,
@@ -234,12 +283,14 @@ impl Message<EcuConnected> for EcuCoordinator {
             ecu_state.connectivity = Connectivity::Online;
             ecu_state.variant_state = VariantState::NotTested;
             ecu_state.variant_index = None;
+            true
         } else {
             tracing::debug!(
                 ecu = %self.ecu_name,
                 current = ?ecu_state.connectivity,
                 "ECU connected received but already Online..skipping"
             );
+            false
         }
     }
 }
@@ -578,5 +629,44 @@ mod tests {
         tokio::task::yield_now().await;
 
         assert_eq!(handle.ecu_status().variant_state, VariantState::NotDetected);
+    }
+
+    // begin_detection: serialization + trigger coalescing
+
+    #[tokio::test]
+    async fn begin_detection_grants_the_slot_when_uncontended() {
+        let handle = spawn_test_coordinator("TestECU");
+        let guard = handle.begin_detection().await;
+        assert!(guard.is_some(), "sole entrant must get the slot");
+        // Releasing and re-entering works (generation moved on, no stale skip).
+        drop(guard);
+        assert!(handle.begin_detection().await.is_some());
+    }
+
+    #[tokio::test]
+    async fn begin_detection_coalesces_a_burst_to_the_newest_trigger() {
+        let handle = spawn_test_coordinator("TestECU");
+
+        // Entrant 1 runs and holds the slot.
+        let in_flight = handle.begin_detection().await.expect("first entrant");
+
+        // Entrants 2 and 3 queue up behind it, in order (each is polled
+        // until it is parked on the lock before the next one bumps the
+        // generation, so the mutex queue order matches the trigger order).
+        let h2 = handle.clone();
+        let waiter2 = tokio::spawn(async move { h2.begin_detection().await });
+        tokio::task::yield_now().await;
+        let h3 = handle.clone();
+        let waiter3 = tokio::spawn(async move { h3.begin_detection().await });
+        tokio::task::yield_now().await;
+
+        // The in-flight run finishes; the queued triggers resolve.
+        drop(in_flight);
+        let second = waiter2.await.expect("waiter 2 must not panic");
+        let third = waiter3.await.expect("waiter 3 must not panic");
+
+        // The stale intermediate trigger is skipped, the newest one runs.
+        assert!(second.is_none(), "superseded trigger must be skipped");
+        assert!(third.is_some(), "newest trigger must run");
     }
 }

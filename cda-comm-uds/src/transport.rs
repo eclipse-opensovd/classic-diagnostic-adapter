@@ -183,17 +183,17 @@ impl<S: EcuGateway, T: UdsEcuDb + VariantDetection> UdsManager<S, T> {
 
         let ecu = self.uds_ecu_db(ecu_name)?;
         let (uds_params, transmission_params) = Self::ecu_send_params(ecu).await;
-        let ecu_logical_address = ecu.read().await.logical_address();
         let sent_sid = *payload.data.first().ok_or(DiagServiceError::BadPayload(
             "Cannot sent message without SID".to_owned(),
         ))?;
+        let ecu_sem_key = ecu.read().await.request_lock_key();
 
         let semaphore = {
             Arc::clone(
                 self.ecu_semaphores
                     .lock()
                     .await
-                    .entry(ecu_logical_address)
+                    .entry(ecu_sem_key.clone())
                     .or_insert_with(|| Arc::new(Semaphore::new(1))),
             )
         };
@@ -204,6 +204,7 @@ impl<S: EcuGateway, T: UdsEcuDb + VariantDetection> UdsManager<S, T> {
             .map_err(|_| {
                 tracing::error!(
                     ecu = ecu_name,
+                    request_lock_key = %ecu_sem_key,
                     "Timeout waiting for ecu to become available for requests."
                 );
                 DiagServiceError::Timeout
@@ -718,7 +719,8 @@ mod send_tests {
                 .keys()
                 .map(|name| (name.clone(), EcuRuntimeState::new()))
                 .collect();
-            let state_coordinator = EcuStateCoordinator::new(runtime_states);
+            let (redetect_tx, _redetect_rx) = tokio::sync::mpsc::channel(8);
+            let state_coordinator = EcuStateCoordinator::new(runtime_states, redetect_tx);
             Self {
                 ecus,
                 gateway,
@@ -749,6 +751,8 @@ mod send_tests {
         + Sync;
 
     impl EcuGateway for TestGateway {
+        async fn shutdown(&mut self) {}
+
         async fn get_gateway_network_address(&self, _logical_address: u16) -> Option<String> {
             None
         }

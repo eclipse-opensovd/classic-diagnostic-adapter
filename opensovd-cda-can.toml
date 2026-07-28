@@ -1,0 +1,134 @@
+# SPDX-FileCopyrightText: 2026 Copyright (c) Contributors to the Eclipse Foundation
+#
+# See the NOTICE file(s) distributed with this work for additional
+# information regarding copyright ownership.
+#
+# This program and the accompanying materials are made available under the
+# terms of the Apache License Version 2.0 which is available at
+# https://www.apache.org/licenses/LICENSE-2.0
+#
+# SPDX-License-Identifier: Apache-2.0
+
+# Example configuration for CAN bus transport
+# This enables CAN communication while keeping DoIP disabled.
+# Requires a binary built with the `can` cargo feature, e.g.
+#   CDA_CONFIG_FILE=opensovd-cda-can.toml cargo run -p opensovd-cda --features can
+
+flash_files_path = "./flash"
+
+[server]
+address = "0.0.0.0"
+port = 20002
+
+[database]
+path = "./mdds"
+fallback_to_base_variant = true
+
+# DoIP is disabled. The block is still required (Configuration.doip is
+# non-Option), but CDA skips DoIP initialization when enabled = false.
+# Set enabled = true and fill in tester_address if you want DoIP as well.
+[doip]
+enabled = false
+tester_address = "127.0.0.1"
+tester_subnet = "255.255.0.0"
+gateway_port = 13400
+send_timeout_ms = 1000
+
+# CAN bus configuration
+[can]
+# CAN interface name (e.g., "vxcan0", "can0", "vcan0")
+interface = "vxcan0"
+
+# Response timeout in milliseconds (default: 5000ms)
+response_timeout_ms = 2000
+
+# Functional-broadcast TesterPresent keep-alive interval in milliseconds.
+# The default (0) disables the broadcast for resident on-board operation.
+# This file is the external-tester example, so it enables the keep-alive:
+# it holds ECUs awake for the diagnostic session, making discovery work
+# even on a quiet bus.
+keepalive_interval_ms = 2000
+
+# Probe timeout in milliseconds for ECU discovery (default: 100ms)
+probe_timeout_ms = 100
+
+# Extra rounds through the probe sequence for ECUs that did not answer,
+# self-healing transiently lost exchanges inside the transport
+# (default: 0 = probe each ECU once per discovery)
+# probe_retries = 0
+
+# Delay between probe retry rounds in milliseconds (default: 100ms)
+# probe_retry_delay_ms = 100
+
+# Whether the built-in TesterPresent probe heads the discovery probe
+# sequence (default: true). Set to false for fleets whose ECUs never answer
+# TesterPresent; [[can.probe_fallbacks]] must then be non-empty and is used
+# as the complete probe sequence.
+# default_probes = true
+
+# CAN ID mappings. CDA extracts CAN addressing from the MDD com-params
+# (per-ECU CP_UniqueRespIdTable entries first, then top-level
+# CP_CanPhysReqId / CP_CanRespUSDTId scalars); an [[can.ecu_mappings]]
+# entry OVERRIDES whatever the MDD provides for that ECU. The example
+# MDDs in testcontainer/odx/ (e.g. FLXC1000) do not carry CAN addressing
+# com-params, so a fallback request/response ID pair is required here.
+# 0x7E0/0x7E8 are the OBD-II request/response IDs and work as a generic
+# default for the test/example MDDs.
+[[can.ecu_mappings]]
+ecu_name = "FLXC1000"
+request_id = 0x7E0
+response_id = 0x7E8
+
+# CAN ECUs need a protocol override: the global default protocol name
+# (doip.protocol_name, "UDS_Ethernet_DoIP_DOBT") is DoIP-specific and will
+# not match the diag layers in a CAN MDD, which makes the ECU fail to load.
+# Any name from database.naming_convention.can_protocol_aliases (default:
+# UDS_CAN, ISO_11898_2_DWCAN, ISO_11898_3_DWFTCAN, CAN, ISO_15765_2,
+# ISO_15765_3) engages the CAN alias chain in protocol resolution: on an
+# exact-match miss the other aliases are tried in order. Alternatively
+# "auto-can" picks the first protocol whose name matches the configured
+# CAN markers (database.naming_convention.can_protocol_markers).
+[ecu.FLXC1000]
+protocol = "UDS_CAN"
+
+# Optional: explicit CAN ID mappings
+# Use this to override CAN IDs from MDD files or when MDD doesn't contain them
+# [[can.ecu_mappings]]
+# ecu_name = "MyECU"
+# request_id = 0x7E0    # Physical request CAN ID
+# response_id = 0x7E8   # Physical response CAN ID
+#
+# [[can.ecu_mappings]]
+# ecu_name = "AnotherECU"
+# request_id = 0x700
+# response_id = 0x708
+
+# Optional: per-ECU transport selection overrides
+#
+# By default, DoIP is used when a DoIP gateway is available, falling back to CAN.
+# Use transport_overrides to force specific ECUs onto a particular transport.
+# This is useful when:
+#   - An ECU is CAN-only and has no DoIP logical address
+#   - The MDD contains DoIP COM params for a gateway device, but you want to
+#     talk to the ECU directly over CAN
+#   - You want to test CAN communication for an ECU that is also reachable via DoIP
+#
+# Supported transport spellings: "can" / "Can" / "CAN" and
+# "doip" / "DoIP" / "DOIP" (exact aliases, other casings are rejected).
+# ECU names are matched case-insensitively.
+#
+# [[can.transport_overrides]]
+# ecu_name = "CanOnlyEcu"
+# transport = "can"
+#
+# [[can.transport_overrides]]
+# ecu_name = "ForceDoipEcu"
+# transport = "doip"
+
+[logging.otel]
+enabled = false
+
+# Uncomment to enable OpenTelemetry tracing
+# [logging.otel]
+# enabled = true
+# endpoint = "http://localhost:4317"
