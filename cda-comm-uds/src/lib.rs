@@ -256,6 +256,60 @@ impl<S: EcuGateway, T: EcuManager> UdsManager<S, T> {
         )
         .await
     }
+
+    /// Send a diagnostic service by its SID and name, looking up the service
+    /// definition via `lookup_service_by_sid_and_name` and encoding JSON
+    /// parameters according to the service's parameter definitions.
+    ///
+    /// This method performs prefix/suffix matching on the service short name
+    /// in the ODX database using the `database_naming_convention` settings.
+    /// The `name` argument is matched against the trimmed short name of all
+    /// services with the given `service_id`.
+    ///
+    /// # Arguments
+    /// * `ecu_name` - The name of the target ECU
+    /// * `service_id` - The UDS service identifier (SID), e.g. 0xBB for PeriodicReadDID
+    /// * `name` - The service short name (or name affix) to match against ODX service definitions
+    /// * `security_plugin` - Security plugin to validate the request
+    /// * `params` - JSON parameters keyed by ODX parameter short names
+    /// * `map_to_json` - Whether to map the response to JSON format
+    ///
+    /// # Example
+    /// ```ignore
+    /// // PeriodicReadDID matching name "myReadService" with SID 0xBB
+    /// uds.send_by_sid_and_name(
+    ///     "ECU_NAME",
+    ///     0xBB,                              // SID
+    ///     "myReadService",                   // name to match
+    ///     &security_plugin,
+    ///     HashMap::from([("did".into(), json!(0xF190))]),
+    ///     true,
+    /// ).await?;
+    /// ```
+    pub async fn send_by_sid_and_name(
+        &self,
+        ecu_name: &str,
+        service_id: u8,
+        name: &str,
+        security_plugin: &DynamicPlugin,
+        params: HashMap<String, serde_json::Value>,
+        map_to_json: bool,
+    ) -> Result<<T as cda_interfaces::PayloadDecoder>::Response, DiagServiceError> {
+        let ecu = self.uds_ecu_db(ecu_name)?;
+        let diag_comm = ecu
+            .read()
+            .await
+            .lookup_service_by_sid_and_name(service_id, name, None)?;
+
+        self.send(
+            ecu_name,
+            diag_comm,
+            security_plugin,
+            Some(UdsPayloadData::ParameterMap(params)),
+            map_to_json,
+        )
+        .await
+    }
 }
 
 impl<S: Clone + EcuGateway, T: UdsEcuDb> Clone for UdsManager<S, T> {
