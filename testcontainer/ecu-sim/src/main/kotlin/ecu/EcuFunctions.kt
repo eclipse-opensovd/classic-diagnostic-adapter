@@ -18,6 +18,10 @@ import DoipEntityDataHandler
 import NetworkingData
 import RequestsData
 import addDtcRequests
+import can.CanNetworking
+import can.CanNetworks
+import library.can.CanTransport
+import networkInstances
 
 private fun generateDefaultEcuState() = EcuState()
 
@@ -63,6 +67,36 @@ fun DoipEntityData.addCanEcu(
     }
 }
 
+/**
+ * Attach an existing [SimEcu] (defined in the `network { ... }` DoIP block) to a
+ * [CanNetworking] so the *same* ECU instance is reachable over both DoIP and
+ * CAN. Sharing one instance is what makes the REST control plane work across
+ * transports: an interceptor or state change applied via `findByEcuName` (which
+ * resolves the DoIP-side instance) is observed by CAN traffic too, because there
+ * is only one [SimEcu] behind the name.
+ *
+ * The ECU must already exist; define it with [addDoipEntity] / [addCanEcu] in
+ * the `network { ... }` block before calling this.
+ */
+fun CanNetworking.addSimCanEcu(
+    name: String,
+    rxId: Int,
+    txId: Int,
+) {
+    val ecu =
+        networkInstances().firstNotNullOfOrNull { it.findEcuByName(name, true) }
+            ?: error(
+                "No ECU named '$name' found in the DoIP network; define it in the " +
+                    "network { ... } block before attaching it to a CAN network",
+            )
+    addEcu(
+        name = name,
+        ecu = ecu,
+        rxId = rxId,
+        txId = txId,
+    )
+}
+
 fun RequestsData.addAllFunctionality() {
     addSessionRequests()
     addResetRequests()
@@ -74,4 +108,24 @@ fun RequestsData.addAllFunctionality() {
     addDiagnosticRequests()
     addFlashRequests()
     addDtcRequests()
+}
+
+/**
+ * Top-level builder for a CAN network. Mirrors the DSL's `network { ... }`
+ * but operates on a [CanNetworking] instead of [NetworkingData].
+ *
+ * [transportFactory] creates the raw-frame [CanTransport] the network's ISO-TP
+ * endpoints run on (e.g. a `SocketcandTransport`); it is invoked once, on
+ * [CanNetworking.start]. Multiple CAN networks are supported (one process-global
+ * registry per `CanNetworks`); the integration tests use a single network.
+ */
+fun canNetwork(
+    transportFactory: () -> CanTransport,
+    block: CanNetworking.() -> Unit,
+): CanNetworking {
+    val net = CanNetworking(transportFactory)
+    net.block()
+    CanNetworks.add(net)
+    net.start()
+    return net
 }

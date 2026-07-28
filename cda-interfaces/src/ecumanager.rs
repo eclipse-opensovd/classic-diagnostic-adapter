@@ -450,6 +450,59 @@ pub trait EcuAddresses: Send + Sync + 'static {
     fn ecu_name(&self) -> String;
     #[must_use]
     fn logical_address_eq<T: EcuAddresses>(&self, other: &T) -> bool;
+
+    /// Stable key used to serialize requests that must not overlap on the same
+    /// transport target; see [`request_lock_key_for`] for the semantics.
+    ///
+    /// This default assumes the gateway/logical address pair is genuinely
+    /// resolved. Implementations that can carry unresolved fallback addresses
+    /// (all ECUs of a CAN-only database share the com-param default) must
+    /// override it with [`request_lock_key_for`], their resolved-ness flag
+    /// and their CAN IDs, otherwise unrelated ECUs end up serialized behind
+    /// one semaphore.
+    #[must_use]
+    fn request_lock_key(&self) -> String {
+        request_lock_key_for(
+            true,
+            self.logical_gateway_address(),
+            self.logical_address(),
+            None,
+            "",
+        )
+    }
+}
+
+/// Builds the key under which requests to the same transport target are
+/// serialized (the per-ECU request semaphore).
+///
+/// A transport target is shared by every candidate description of the same
+/// physical node (a duplicate group), and concurrent requests to one node
+/// must never overlap - on CAN they would even corrupt each other's
+/// segmented transfers via doubled flow control. In priority order:
+///
+/// 1. Resolved `DoIP` gateway/logical address pair - the established key;
+///    duplicate-group ECUs share their pair on purpose.
+/// 2. The CAN arbitration ID pair from the MDD com-params - the target
+///    identity for ECUs without `DoIP` addressing (CAN-only databases);
+///    candidate models sharing one pair share the key.
+/// 3. The unique ECU name - when nothing identifies the target, the shared
+///    com-param fallback addresses must NOT collapse unrelated ECUs onto one
+///    semaphore.
+#[must_use]
+pub fn request_lock_key_for(
+    addresses_resolved: bool,
+    logical_gateway_address: u16,
+    logical_address: u16,
+    can_ids: Option<crate::CanIds>,
+    ecu_name: &str,
+) -> String {
+    if addresses_resolved {
+        format!("logical:0x{logical_gateway_address:04X}@0x{logical_address:04X}")
+    } else if let Some(ids) = can_ids {
+        format!("can:{:#X}@{:#X}", ids.request.raw(), ids.response.raw())
+    } else {
+        format!("ecu:{}", ecu_name.to_lowercase())
+    }
 }
 
 /// Encodes UDS request payloads from structured data.
@@ -1102,5 +1155,98 @@ mod tests {
         // Response: positive with wrong DID
         let response = make_payload(vec![0x6E, 0xF2, 0x00]);
         assert!(!response.has_matching_echo_bytes(&request));
+    }
+
+    // request_lock_key_for: the per-ECU request-serialization key
+
+    #[test]
+    fn resolved_addresses_share_the_key_per_target() {
+        // Duplicate-group ECUs share their resolved address pair on purpose:
+        // both names map onto the same key, serializing requests to the
+        // shared physical node.
+        let a = request_lock_key_for(true, 0x1000, 0x0712, None, "R0_13_453");
+        let b = request_lock_key_for(true, 0x1000, 0x0712, None, "R_MID453");
+        assert_eq!(a, b);
+        assert_eq!(a, "logical:0x1000@0x0712");
+        // Distinct resolved addresses keep distinct keys.
+        assert_ne!(a, request_lock_key_for(true, 0x1000, 0x0713, None, "OTHER"));
+        // Resolved DoIP addressing outranks CAN IDs: the established key
+        // stays stable when an MDD carries both.
+        assert_eq!(
+            request_lock_key_for(
+                true,
+                0x1000,
+                0x0712,
+                Some(crate::CanIds::try_from_raw(0x712, 0x732).expect("valid pair")),
+                "R0_13_453"
+            ),
+            a
+        );
+    }
+
+    #[test]
+    fn can_ids_share_the_key_per_node() {
+        // CAN-only duplicate group: R0_13_453 and R_MID453 both derive
+        // 0x712/0x732 from their MDDs - one physical radio, two candidate
+        // descriptions. They must share the key so their requests serialize.
+        let a = request_lock_key_for(
+            false,
+            0,
+            0,
+            Some(crate::CanIds::try_from_raw(0x712, 0x732).expect("valid pair")),
+            "R0_13_453",
+        );
+        let b = request_lock_key_for(
+            false,
+            0,
+            0,
+            Some(crate::CanIds::try_from_raw(0x712, 0x732).expect("valid pair")),
+            "R_MID453",
+        );
+        assert_eq!(a, b);
+        assert_eq!(a, "can:0x712@0x732");
+        // Distinct nodes keep distinct keys.
+        assert_ne!(
+            a,
+            request_lock_key_for(
+                false,
+                0,
+                0,
+                Some(crate::CanIds::try_from_raw(0x79B, 0x7BB).expect("valid pair")),
+                "BMS453"
+            )
+        );
+    }
+
+    #[test]
+    fn unresolved_addresses_without_can_ids_key_by_name() {
+        // Neither resolved DoIP addressing nor CAN IDs: the shared com-param
+        // fallback addresses must not collapse unrelated ECUs onto one
+        // semaphore, so the unique name is the key.
+        let a = request_lock_key_for(false, 0, 0, None, "BMS453");
+        let b = request_lock_key_for(false, 0, 0, None, "BIC453");
+        assert_ne!(a, b);
+        assert_eq!(a, "ecu:bms453");
+        // Case-insensitive: the ECU map is lowercase-keyed, config casing may
+        // differ.
+        assert_eq!(
+            request_lock_key_for(false, 0, 0, None, "Bms453"),
+            request_lock_key_for(false, 0, 0, None, "BMS453")
+        );
+        // The three key namespaces can never collide.
+        assert_ne!(
+            request_lock_key_for(false, 0x1000, 0x0712, None, "ecu1"),
+            request_lock_key_for(true, 0x1000, 0x0712, None, "ecu1")
+        );
+        assert_ne!(
+            request_lock_key_for(
+                false,
+                0,
+                0,
+                Some(crate::CanIds::try_from_raw(0x1000, 0x0712).expect("valid pair")),
+                "ecu1"
+            ),
+            request_lock_key_for(true, 0x1000, 0x0712, None, "ecu1")
+        );
     }
 }

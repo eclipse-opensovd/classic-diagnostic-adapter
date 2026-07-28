@@ -249,6 +249,18 @@ impl TryInto<u32> for DiagDataValue {
     }
 }
 
+/// Data type used to expose a RESERVED parameter, which has no semantic type
+/// of its own: blocks up to 32 bits are exposed as `UInt32`; anything wider
+/// cannot be represented numerically and is treated as raw bytes instead.
+/// Shared between the encode and decode paths so they cannot drift.
+pub(in crate::diag_kernel) fn reserved_param_data_type(bit_length: u32) -> datatypes::DataType {
+    if bit_length > 32 {
+        datatypes::DataType::ByteField
+    } else {
+        datatypes::DataType::UInt32
+    }
+}
+
 pub fn into_db_protocol<'db>(
     database: &'db datatypes::DiagnosticDatabase,
     protocol: &cda_interfaces::Protocol,
@@ -256,13 +268,64 @@ pub fn into_db_protocol<'db>(
     let protocol_name = protocol.to_string();
     let all_protocols = database.protocols()?;
 
-    // Try exact match first.
-    if let Some(p) = all_protocols.iter().find(|p| {
-        p.diag_layer()
-            .and_then(|dl| dl.short_name())
-            .is_some_and(|sn| sn.eq_ignore_ascii_case(&protocol_name))
-    }) {
-        return Ok(datatypes::Protocol(*p));
+    let find_by_name = |name: &str| {
+        all_protocols
+            .iter()
+            .find(|p| {
+                datatypes::protocol_short_name(p).is_some_and(|sn| sn.eq_ignore_ascii_case(name))
+            })
+            .map(|p| datatypes::Protocol(*p))
+    };
+    // CAN protocol naming is OEM-specific and therefore configurable via the
+    // database naming convention (database.naming_convention.can_protocol_*).
+    let naming_convention = &database.config().naming_convention;
+
+    // CAN handling, part 1: auto-detection. The sentinel `"auto-can"` scans
+    // the MDD's protocols for a CAN-named one (per the configured markers).
+    // This lets a CAN-only setup work without a per-ECU `[ecu.<name>]
+    // protocol = "UDS_CAN"` override. There is deliberately no silent
+    // fallback: using an arbitrary protocol would run the ECU with the wrong
+    // com-param set (timings, addressing) and produce failures far from the
+    // root cause.
+    if protocol_name == "auto-can" {
+        if let Some(p) = all_protocols.iter().find(|p| {
+            datatypes::protocol_short_name(p).is_some_and(|sn| {
+                let up = sn.to_ascii_uppercase();
+                naming_convention
+                    .can_protocol_markers
+                    .iter()
+                    .any(|marker| up.contains(&marker.to_ascii_uppercase()))
+            })
+        }) {
+            tracing::info!("Auto-detected CAN protocol from MDD; using it as the default");
+            return Ok(datatypes::Protocol(*p));
+        }
+        return Err(DiagServiceError::InvalidDatabase(
+            "Protocol auto-detection found no CAN protocol in the database; configure an explicit \
+             protocol name for this ECU"
+                .to_owned(),
+        ));
+    }
+
+    // Exact match against the configured protocol name.
+    if let Some(p) = find_by_name(&protocol_name) {
+        return Ok(p);
+    }
+
+    // CAN handling, part 2: when the configured name is one of the known CAN
+    // protocol names but the database uses a sibling name, try the other
+    // aliases in order. On a miss, fall through to the strict handling below
+    // instead of picking an arbitrary protocol.
+    if naming_convention
+        .can_protocol_aliases
+        .iter()
+        .any(|alias| alias.eq_ignore_ascii_case(&protocol_name))
+        && let Some(p) = naming_convention
+            .can_protocol_aliases
+            .iter()
+            .find_map(|alias| find_by_name(alias))
+    {
+        return Ok(p);
     }
 
     // Fallback: when ignore_protocol is enabled and only one distinct protocol

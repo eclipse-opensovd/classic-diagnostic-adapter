@@ -405,13 +405,7 @@ impl<S: SecurityPlugin> EcuManager<S> {
                     "Expected Reserved specific data".to_owned(),
                 ))?;
         let bit_length = reserved_param.bit_length();
-        // Mirror the decode side: reserved blocks wider than 32 bits are
-        // treated as byte fields (UInt32 cannot represent them).
-        let data_type = if bit_length > 32 {
-            datatypes::DataType::ByteField
-        } else {
-            datatypes::DataType::UInt32
-        };
+        let data_type = super::reserved_param_data_type(bit_length);
         let coded_type = datatypes::DiagCodedType::new_high_low_byte_order(
             data_type,
             datatypes::DiagCodedTypeVariant::StandardLength(datatypes::StandardLengthType {

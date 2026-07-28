@@ -28,17 +28,18 @@ use cda_interfaces::{
 
 use crate::{UdsManager, util::check_sd_sdg_recursive};
 
-/// Newtype wrapper for a gateway logical address.
+/// Grouping key for the network structure.
 ///
-/// Needed because `&u16` does not implement `From<&u16> -> u16`, which causes
-/// issues with `HashMap::entry_ref`. The newtype allows implementing `From<&GatewayAddress>`.
+/// `DoIP` ECUs group under their gateway's logical address. ECUs the
+/// transport identifies by name (CAN: the arbitration ID pair is the
+/// address, there is no gateway node) each form their own entry - their
+/// logical addresses are unresolved com-param defaults shared by every such
+/// ECU, so grouping by address would collapse unrelated ECUs into one
+/// pseudo-gateway with a single (necessarily wrong) network address.
 #[derive(Eq, Hash, PartialEq)]
-struct GatewayAddress(u16);
-
-impl From<&GatewayAddress> for GatewayAddress {
-    fn from(value: &GatewayAddress) -> Self {
-        GatewayAddress(value.0)
-    }
+enum GatewayKey {
+    Address(u16),
+    Ecu(String),
 }
 
 #[async_trait]
@@ -107,7 +108,7 @@ impl<S: EcuGateway, T: EcuManager> UdsQuery for UdsManager<S, T> {
             }
         }
 
-        let mut gateways: HashMap<GatewayAddress, Gateway> = HashMap::new();
+        let mut gateways: HashMap<GatewayKey, Gateway> = HashMap::new();
 
         for ecu in self.ecus.values() {
             let ecu = ecu.read().await;
@@ -118,9 +119,24 @@ impl<S: EcuGateway, T: EcuManager> UdsQuery for UdsManager<S, T> {
 
             let network_ecu = ecu_to_network_ecu(&*ecu);
 
+            if let Some(network_address) = self.gateway.get_ecu_network_address(&ecu_name).await {
+                // Name-identified ECU (CAN): its own entry, carrying its own
+                // transport address.
+                gateways.insert(
+                    GatewayKey::Ecu(ecu_name.clone()),
+                    Gateway {
+                        name: ecu_name,
+                        network_address,
+                        logical_address: network_ecu.logical_address.clone(),
+                        ecus: vec![network_ecu],
+                    },
+                );
+                continue;
+            }
+
             let gateway_addr = ecu.logical_gateway_address();
             let gateway = gateways
-                .entry(GatewayAddress(gateway_addr))
+                .entry(GatewayKey::Address(gateway_addr))
                 .or_insert(Gateway {
                     name: String::new(),
                     network_address: String::new(),
@@ -142,7 +158,7 @@ impl<S: EcuGateway, T: EcuManager> UdsQuery for UdsManager<S, T> {
                     tracing::warn!(
                         gateway_name = %ecu_name,
                         logical_address = %network_ecu.logical_address,
-                        "No IP address found for gateway"
+                        "No network address found for gateway"
                     );
                 }
             }

@@ -135,3 +135,37 @@ This returns all DTCs stored in the ECU's fault memory, including their status f
 ```sh
 docker compose down
 ```
+
+## Local CAN Setup (Optional)
+
+The CAN integration suites run against a virtual CAN bus. To prepare one
+locally (requires root and the `vcan` kernel module):
+
+```sh
+sudo modprobe vcan
+sudo ip link add dev vcan0 type vcan
+sudo ip link set up vcan0
+```
+
+The pure-CAN and mixed suites are then run with:
+
+```sh
+CDA_INTEGRATION_TEST_USE_CAN=true cargo test --locked -p integration-tests \
+  --features can-integration-tests --test integration_tests -- --test-threads=1
+CDA_INTEGRATION_TEST_USE_MIXED=true cargo test --locked -p integration-tests \
+  --features can-integration-tests --test integration_tests -- --test-threads=1
+```
+
+## Quick API Access
+
+Fetch a token and read data from an ECU (the test credentials work against
+the integration-test configuration):
+
+```sh
+TOKEN=$(curl -s -X POST http://localhost:20002/vehicle/v15/authorize \
+  -H "Content-Type: application/json" \
+  -d '{"client_id": "test", "client_secret": "test"}' | jq -r '.access_token')
+
+curl -s http://localhost:20002/vehicle/v15/components/<ecu>/data \
+  -H "Authorization: Bearer $TOKEN" | jq .
+```

@@ -248,6 +248,137 @@ jobs:
         with:
           name: pr-comment-coverage
           path: pr-comment-coverage/
+  can_integration_tests:
+    name: CAN integration tests
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v6
+        with:
+          submodules: false
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+      - name: Install Rust toolchain
+        uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          toolchain: 1.88.0
+          components: clippy, rustfmt
+      # The vcan kernel module backs the socketcand container's shared bus.
+      - name: Load vcan kernel module
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y "linux-modules-extra-$(uname -r)" || true
+          sudo modprobe vcan
+      # The CAN suite runs the same containers as the DoIP suite plus a
+      # socketcand daemon (compose profile `can`) that fronts a shared vcan
+      # bus. The CDA image is built with the `can-socketcand` transport and the
+      # ecu-sim connects to the daemon (wired via docker-compose
+      # `SIM_CAN_SOCKETCAND_*`/`CDA_FEATURES`, written into the generated .env by
+      # the test harness). CDA and the ecu-sim reach the bus over TCP.
+      - name: Build CDA docker image (can-socketcand)
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          file: testcontainer/cda/Dockerfile
+          push: false
+          tags: ghcr.io/${{ github.repository }}/opensovd-cda:can
+          load: true
+          build-args: |
+            CDA_FEATURES=can-socketcand
+          cache-from: |
+            type=gha,scope=cda-can-cargo-${{ github.ref_name }}
+            type=gha,scope=cda-can-cargo-main
+            type=gha,scope=cda-can-sccache-${{ github.ref_name }}
+            type=gha,scope=cda-can-sccache-main
+          cache-to: |
+            type=gha,mode=max,scope=cda-can-cargo-${{ github.ref_name }}
+            type=gha,mode=max,scope=cda-can-sccache-${{ github.ref_name }}
+      - name: Build ECU Sim docker image
+        uses: docker/build-push-action@v5
+        with:
+          context: testcontainer/ecu-sim/
+          file: testcontainer/ecu-sim/docker/Dockerfile
+          push: false
+          tags: ghcr.io/${{ github.repository }}/ecu-sim:latest
+          load: true
+          cache-from: |
+            type=gha,scope=ecu-sim-gradle-${{ github.ref_name }}
+            type=gha,scope=ecu-sim-gradle-main
+          cache-to: |
+            type=gha,mode=max,scope=ecu-sim-gradle-${{ github.ref_name }}
+      - name: Run CAN integration tests
+        env:
+          CACHE_REGISTRY: ghcr.io/${{ github.repository }}
+          CDA_INTEGRATION_TEST_USE_CAN: "true"
+        # Run serially: the CAN transport is timing-sensitive (per-transaction
+        # TCP sockets + TesterPresent keepalive), so parallel tests can flake.
+        run: cargo test --locked -p integration-tests --features can-integration-tests --test integration_tests -- --show-output --test-threads=1
+
+  mixed_integration_tests:
+    name: Mixed DoIP+CAN integration tests
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v6
+        with:
+          submodules: false
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+      - name: Install Rust toolchain
+        uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          toolchain: 1.88.0
+          components: clippy, rustfmt
+      - name: Load vcan kernel module
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y "linux-modules-extra-$(uname -r)" || true
+          sudo modprobe vcan
+      # Mixed mode runs DoIP and CAN simultaneously against the same sim:
+      # TMCC3000/HOVR4000/JGWT5000 are pinned to CAN, FLXC1000 to DoIP, the
+      # remaining ECUs bind to the transport that detects them first. This is
+      # the only job that exercises MultiTransportGateway routing (pins,
+      # DoIP-preferred first detection, sticky bindings) with both gateways
+      # alive, and it also runs the session/security tests that the pure-CAN
+      # job skips.
+      - name: Build CDA docker image (can-socketcand)
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          file: testcontainer/cda/Dockerfile
+          push: false
+          tags: ghcr.io/${{ github.repository }}/opensovd-cda:can
+          load: true
+          build-args: |
+            CDA_FEATURES=can-socketcand
+          cache-from: |
+            type=gha,scope=cda-can-cargo-${{ github.ref_name }}
+            type=gha,scope=cda-can-cargo-main
+            type=gha,scope=cda-can-sccache-${{ github.ref_name }}
+            type=gha,scope=cda-can-sccache-main
+          cache-to: |
+            type=gha,mode=max,scope=cda-can-cargo-${{ github.ref_name }}
+            type=gha,mode=max,scope=cda-can-sccache-${{ github.ref_name }}
+      - name: Build ECU Sim docker image
+        uses: docker/build-push-action@v5
+        with:
+          context: testcontainer/ecu-sim/
+          file: testcontainer/ecu-sim/docker/Dockerfile
+          push: false
+          tags: ghcr.io/${{ github.repository }}/ecu-sim:latest
+          load: true
+          cache-from: |
+            type=gha,scope=ecu-sim-gradle-${{ github.ref_name }}
+            type=gha,scope=ecu-sim-gradle-main
+          cache-to: |
+            type=gha,mode=max,scope=ecu-sim-gradle-${{ github.ref_name }}
+      - name: Run mixed integration tests
+        env:
+          CACHE_REGISTRY: ghcr.io/${{ github.repository }}
+          CDA_INTEGRATION_TEST_USE_MIXED: "true"
+        run: cargo test --locked -p integration-tests --features can-integration-tests --test integration_tests -- --show-output --test-threads=1
 
   cargo-crap:
     name: CRAP (Change Risk Anti-Patterns)
