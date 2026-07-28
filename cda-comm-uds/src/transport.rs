@@ -751,7 +751,6 @@ mod send_tests {
         + Sync;
 
     impl EcuGateway for TestGateway {
-
         fn get_gateway_network_address(
             &self,
             _logical_address: u16,
