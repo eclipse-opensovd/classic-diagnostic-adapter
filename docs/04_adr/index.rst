@@ -14,7 +14,7 @@ Architecture Decision Records
 *****************************
 
 .. include:: 01_mimalloc.rst
-
 .. include:: 02_mbedtls_tls_backend.rst
 .. include:: 03_mmap_strategy.rst
 .. include:: 04_wal_format.rst
+.. include:: 05_error_handling_library.rst
