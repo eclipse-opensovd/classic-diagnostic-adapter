@@ -17,7 +17,7 @@ use cda_interfaces::{HashMap, HashMapExtensions};
 use http::{Method, StatusCode};
 use opensovd_cda_lib::config::configfile::Configuration;
 use sovd_interfaces::{
-    apps::sovd2uds::bulk_data::{BulkDataList, runtimefiles::ExecutionMode},
+    apps::sovd2uds::{bulk_data::BulkDataList, operations::runtimefilesupdate::ExecutionMode},
     common::operations::OperationIdItem,
     locking::post_put::Response as LockResponse,
     sovd2uds::BulkDataDescriptor,
@@ -42,8 +42,8 @@ use crate::{
 const RUNTIMEFILES_NEXTUPDATE: &str = "apps/sovd2uds/bulk-data/runtimefiles-nextupdate";
 const RUNTIMEFILES_CURRENT: &str = "apps/sovd2uds/bulk-data/runtimefiles-current";
 const RUNTIMEFILES_BACKUP: &str = "apps/sovd2uds/bulk-data/runtimefiles-backup";
-const RUNTIMEFILES_EXECUTIONS: &str = "apps/sovd2uds/bulk-data/runtimefiles-nextupdate/executions";
-const RUNTIMEFILES_OPERATIONS: &str = "apps/sovd2uds/operations/diagnostic-database-update";
+const RUNTIMEFILES_UPDATE_EXECUTIONS: &str =
+    "apps/sovd2uds/operations/runtimefilesupdate/executions";
 
 /// Tests that mutating endpoints return 403 Forbidden without a vehicle lock.
 #[tokio::test]
@@ -91,7 +91,7 @@ async fn runtimefiles_requires_lock() -> Result<(), TestingError> {
     let body = mode_json(ExecutionMode::Apply);
     send_cda_request(
         &runtime.config,
-        RUNTIMEFILES_EXECUTIONS,
+        RUNTIMEFILES_UPDATE_EXECUTIONS,
         StatusCode::FORBIDDEN,
         Method::POST,
         Some(&body),
@@ -103,7 +103,7 @@ async fn runtimefiles_requires_lock() -> Result<(), TestingError> {
     let body = mode_json(ExecutionMode::Rollback);
     send_cda_request(
         &runtime.config,
-        RUNTIMEFILES_EXECUTIONS,
+        RUNTIMEFILES_UPDATE_EXECUTIONS,
         StatusCode::FORBIDDEN,
         Method::POST,
         Some(&body),
@@ -115,7 +115,7 @@ async fn runtimefiles_requires_lock() -> Result<(), TestingError> {
     let body = mode_json(ExecutionMode::Cleanup);
     send_cda_request(
         &runtime.config,
-        RUNTIMEFILES_EXECUTIONS,
+        RUNTIMEFILES_UPDATE_EXECUTIONS,
         StatusCode::FORBIDDEN,
         Method::POST,
         Some(&body),
@@ -417,10 +417,10 @@ async fn runtimefiles_execution_mode_case_insensitive() -> Result<(), TestingErr
     // Test lowercase "apply"
     send_cda_request(
         &runtime.config,
-        RUNTIMEFILES_EXECUTIONS,
+        RUNTIMEFILES_UPDATE_EXECUTIONS,
         StatusCode::ACCEPTED,
         Method::POST,
-        Some(r#"{"mode": "apply"}"#),
+        Some(r#"{"parameters": {"mode": "apply"}}"#),
         Some(&auth),
         None,
     )
@@ -438,43 +438,10 @@ async fn runtimefiles_execution_mode_case_insensitive() -> Result<(), TestingErr
     // Test uppercase "APPLY"
     send_cda_request(
         &runtime.config,
-        RUNTIMEFILES_EXECUTIONS,
+        RUNTIMEFILES_UPDATE_EXECUTIONS,
         StatusCode::ACCEPTED,
         Method::POST,
-        Some(r#"{"mode": "APPLY"}"#),
-        Some(&auth),
-        None,
-    )
-    .await?;
-    cda_interfaces::util::tokio_ext::sleep_for(Duration::from_secs(3)).await;
-
-    teardown_lock(&runtime.config, &auth, &lock_id).await;
-    Ok(())
-}
-
-/// Spec: The operations endpoint must be accessible as an alternative alias for executions.
-#[tokio::test]
-async fn runtimefiles_operations_endpoint_alias() -> Result<(), TestingError> {
-    let (runtime, _lock) = setup_integration_test(true).await?;
-    let auth = auth_header(&runtime.config, None).await?;
-    let lock_id = setup_with_lock(&runtime.config, &auth).await;
-
-    // Upload a file so Apply has something to work with
-    let upload_response = upload_mdd(&runtime.config, &auth).await;
-    assert!(
-        upload_response.status().is_success(),
-        "Precondition: upload must succeed, got {}",
-        upload_response.status()
-    );
-
-    // Use RUNTIMEFILES_OPERATIONS instead of RUNTIMEFILES_EXECUTIONS
-    let body = mode_json(ExecutionMode::Apply);
-    send_cda_request(
-        &runtime.config,
-        RUNTIMEFILES_OPERATIONS,
-        StatusCode::ACCEPTED,
-        Method::POST,
-        Some(&body),
+        Some(r#"{"parameters": {"mode": "APPLY"}}"#),
         Some(&auth),
         None,
     )
@@ -649,7 +616,7 @@ async fn runtimefiles_apply_with_no_pending_changes() -> Result<(), TestingError
     let body = mode_json(ExecutionMode::Apply);
     let apply_response = send_cda_request(
         &runtime.config,
-        RUNTIMEFILES_EXECUTIONS,
+        RUNTIMEFILES_UPDATE_EXECUTIONS,
         StatusCode::NOT_FOUND,
         Method::POST,
         Some(&body),
@@ -707,7 +674,7 @@ async fn runtimefiles_rollback_with_no_backup() -> Result<(), TestingError> {
     let body = mode_json(ExecutionMode::Rollback);
     send_cda_request(
         &runtime.config,
-        RUNTIMEFILES_EXECUTIONS,
+        RUNTIMEFILES_UPDATE_EXECUTIONS,
         StatusCode::NOT_FOUND,
         Method::POST,
         Some(&body),
@@ -817,7 +784,7 @@ async fn runtimefiles_apply_blocked_by_active_operations() -> Result<(), Testing
     let body = mode_json(ExecutionMode::Apply);
     send_cda_request(
         &runtime.config,
-        RUNTIMEFILES_EXECUTIONS,
+        RUNTIMEFILES_UPDATE_EXECUTIONS,
         StatusCode::CONFLICT,
         Method::POST,
         Some(&body),
@@ -1004,7 +971,7 @@ async fn get_file_list(
 
 /// Serializes an `ExecutionMode` into the JSON body expected by execution endpoints.
 fn mode_json(mode: ExecutionMode) -> String {
-    serde_json::json!({ "mode": mode }).to_string()
+    serde_json::json!({ "parameters": { "mode": mode } }).to_string()
 }
 
 /// Helper: POSTs an execution mode to the executions endpoint (expects 202 Accepted).
@@ -1016,7 +983,7 @@ async fn execute_mode(
     let body = mode_json(mode);
     let response = send_cda_request(
         config,
-        RUNTIMEFILES_EXECUTIONS,
+        RUNTIMEFILES_UPDATE_EXECUTIONS,
         StatusCode::ACCEPTED,
         Method::POST,
         Some(&body),
@@ -1580,7 +1547,7 @@ async fn runtimefiles_only_lock_holder_can_mutate() -> Result<(), TestingError> 
     let body = mode_json(ExecutionMode::Apply);
     send_cda_request(
         &runtime.config,
-        RUNTIMEFILES_EXECUTIONS,
+        RUNTIMEFILES_UPDATE_EXECUTIONS,
         StatusCode::FORBIDDEN,
         Method::POST,
         Some(&body),
@@ -1593,7 +1560,7 @@ async fn runtimefiles_only_lock_holder_can_mutate() -> Result<(), TestingError> 
     let body = mode_json(ExecutionMode::Rollback);
     send_cda_request(
         &runtime.config,
-        RUNTIMEFILES_EXECUTIONS,
+        RUNTIMEFILES_UPDATE_EXECUTIONS,
         StatusCode::FORBIDDEN,
         Method::POST,
         Some(&body),
@@ -1606,7 +1573,7 @@ async fn runtimefiles_only_lock_holder_can_mutate() -> Result<(), TestingError> 
     let body = mode_json(ExecutionMode::Cleanup);
     send_cda_request(
         &runtime.config,
-        RUNTIMEFILES_EXECUTIONS,
+        RUNTIMEFILES_UPDATE_EXECUTIONS,
         StatusCode::FORBIDDEN,
         Method::POST,
         Some(&body),
@@ -1750,7 +1717,7 @@ async fn runtimefiles_apply_blocked_by_vehicle_and_ecu_lock() -> Result<(), Test
     let body = mode_json(ExecutionMode::Apply);
     send_cda_request(
         &runtime.config,
-        RUNTIMEFILES_EXECUTIONS,
+        RUNTIMEFILES_UPDATE_EXECUTIONS,
         StatusCode::CONFLICT,
         Method::POST,
         Some(&body),

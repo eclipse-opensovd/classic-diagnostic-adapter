@@ -23,12 +23,7 @@ use cda_interfaces::runtime_update_api::{
 };
 use sovd_interfaces::error::{ApiErrorResponse, ErrorCode};
 
-use crate::{VendorErrorCode, sovd::update_guard::ExemptRoute};
-
-const EXECUTIONS_ROUTE: &str =
-    "/vehicle/v15/apps/sovd2uds/bulk-data/runtimefiles-nextupdate/executions";
-const EXECUTIONS_ID_ROUTE: &str =
-    "/vehicle/v15/apps/sovd2uds/bulk-data/runtimefiles-nextupdate/executions/{id}";
+use crate::VendorErrorCode;
 
 pub struct RuntimeUpdateRouteState<P, L> {
     pub plugin: Arc<P>,
@@ -46,13 +41,13 @@ impl<P, L> Clone for RuntimeUpdateRouteState<P, L> {
     }
 }
 
-struct DbUpdateErrorResponse {
+pub(crate) struct DbUpdateErrorResponse {
     error: RuntimeUpdateError,
     retry_after_seconds: u64,
 }
 
 impl DbUpdateErrorResponse {
-    fn new(error: RuntimeUpdateError, retry_after_seconds: u64) -> Self {
+    pub(crate) fn new(error: RuntimeUpdateError, retry_after_seconds: u64) -> Self {
         Self {
             error,
             retry_after_seconds,
@@ -170,7 +165,7 @@ fn bulk_data_list_response(
     (StatusCode::OK, Json(list)).into_response()
 }
 
-async fn require_vehicle_lock(
+pub(crate) async fn require_vehicle_lock(
     lock_state: &dyn LockStateProvider,
     claims: &dyn cda_plugin_security::Claims,
     retry_after_seconds: u64,
@@ -398,117 +393,6 @@ pub(crate) mod backup {
     }
 }
 
-pub(crate) mod executions {
-    use axum::{
-        Json,
-        extract::{Query, State},
-        http::StatusCode,
-        response::IntoResponse,
-    };
-    use axum_extra::extract::WithRejection;
-    use cda_interfaces::runtime_update_api::{LockStateProvider, RuntimeFilesUpdatePlugin};
-    use cda_plugin_security::Secured;
-    use sovd_interfaces::apps::sovd2uds::bulk_data::runtimefiles::{
-        ExecutionListResponse, ExecutionResponse, ExecutionsQuery,
-    };
-
-    use super::{DbUpdateErrorResponse, RuntimeUpdateRouteState, require_vehicle_lock};
-    use crate::sovd::error::ApiError;
-
-    pub(crate) async fn get<P: RuntimeFilesUpdatePlugin, L: LockStateProvider>(
-        State(route_state): State<RuntimeUpdateRouteState<P, L>>,
-        WithRejection(Query(query), _): WithRejection<Query<ExecutionsQuery>, ApiError>,
-    ) -> impl IntoResponse {
-        let items = route_state
-            .plugin
-            .list_executions()
-            .await
-            .into_iter()
-            .map(ExecutionResponse::from)
-            .collect();
-        let schema = if query.include_schema {
-            Some(crate::create_schema!(ExecutionListResponse))
-        } else {
-            None
-        };
-        (
-            StatusCode::OK,
-            Json(ExecutionListResponse { items, schema }),
-        )
-            .into_response()
-    }
-
-    pub(crate) async fn post<P: RuntimeFilesUpdatePlugin, L: LockStateProvider>(
-        State(route_state): State<RuntimeUpdateRouteState<P, L>>,
-        Secured(sec_plugin): Secured,
-        Json(body): Json<
-            sovd_interfaces::apps::sovd2uds::bulk_data::runtimefiles::ExecutionRequest,
-        >,
-    ) -> impl IntoResponse {
-        let claims = sec_plugin.as_auth_plugin().claims();
-        if let Err(resp) = require_vehicle_lock(
-            &*route_state.vehicle_lock_states,
-            *claims,
-            route_state.retry_after_seconds,
-        )
-        .await
-        {
-            return resp.into_response();
-        }
-
-        route_state
-            .plugin
-            .start_execution(body.mode)
-            .await
-            .map_or_else(
-                |e| DbUpdateErrorResponse::new(e, route_state.retry_after_seconds).into_response(),
-                |id| {
-                    (
-                        StatusCode::ACCEPTED,
-                        Json(
-                            sovd_interfaces::apps::sovd2uds::bulk_data::runtimefiles::ExecutionCreatedResponse { id },
-                        ),
-                    )
-                        .into_response()
-                },
-            )
-    }
-
-    pub(crate) mod id {
-        use axum::{
-            Json,
-            extract::{Path, Query, State},
-            http::StatusCode,
-            response::IntoResponse,
-        };
-        use axum_extra::extract::WithRejection;
-        use cda_interfaces::runtime_update_api::{LockStateProvider, RuntimeFilesUpdatePlugin};
-        use sovd_interfaces::apps::sovd2uds::bulk_data::runtimefiles::{
-            ExecutionResponse, ExecutionsQuery,
-        };
-
-        use super::super::RuntimeUpdateRouteState;
-        use crate::sovd::error::ApiError;
-
-        pub(crate) async fn get<P: RuntimeFilesUpdatePlugin, L: LockStateProvider>(
-            State(route_state): State<RuntimeUpdateRouteState<P, L>>,
-            Path(id): Path<String>,
-            WithRejection(Query(query), _): WithRejection<Query<ExecutionsQuery>, ApiError>,
-        ) -> impl IntoResponse {
-            match route_state.plugin.get_execution_status(&id).await {
-                Some(exec) => {
-                    let mut resp = ExecutionResponse::from(exec);
-                    if query.include_schema {
-                        resp.schema = Some(crate::create_schema!(ExecutionResponse));
-                    }
-                    (StatusCode::OK, Json(resp)).into_response()
-                }
-                None => StatusCode::NOT_FOUND.into_response(),
-            }
-        }
-    }
-}
-
 pub fn routes<
     S: cda_plugin_security::SecurityPluginLoader,
     P: RuntimeFilesUpdatePlugin,
@@ -537,28 +421,8 @@ pub fn routes<
             "/vehicle/v15/apps/sovd2uds/bulk-data/runtimefiles-backup",
             axum::routing::get(backup::get::<P, L>).delete(backup::delete::<P, L>),
         )
-        .route(
-            EXECUTIONS_ROUTE,
-            axum::routing::get(executions::get::<P, L>).post(executions::post::<P, L>),
-        )
-        .route(
-            EXECUTIONS_ID_ROUTE,
-            axum::routing::get(executions::id::get::<P, L>),
-        )
-        .route(
-            "/vehicle/v15/apps/sovd2uds/operations/diagnostic-database-update",
-            axum::routing::post(executions::post::<P, L>),
-        )
         .layer(axum::middleware::from_fn(
             cda_plugin_security::security_plugin_middleware::<S>,
         ))
         .with_state(state)
-}
-
-/// Returns the [`ExemptRoute`]s that must remain accessible during a database update.
-pub fn update_exempt_routes() -> Vec<ExemptRoute> {
-    vec![ExemptRoute {
-        prefix: EXECUTIONS_ROUTE.to_string(),
-        methods: vec![http::Method::GET],
-    }]
 }

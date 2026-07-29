@@ -1,0 +1,152 @@
+/*
+ * SPDX-FileCopyrightText: 2026 Copyright (c) Contributors to the Eclipse Foundation
+ *
+ * See the NOTICE file(s) distributed with this work for additional
+ * information regarding copyright ownership.
+ *
+ * This program and the accompanying materials are made available under the
+ * terms of the Apache License Version 2.0 which is available at
+ * https://www.apache.org/licenses/LICENSE-2.0
+ *
+ * SPDX-License-Identifier: Apache-2.0
+ */
+
+pub(crate) mod runtimefilesupdate {
+    use axum::{
+        Json,
+        extract::{Query, State},
+        http::StatusCode,
+        response::IntoResponse,
+    };
+    use axum_extra::extract::WithRejection;
+    use cda_interfaces::runtime_update_api::{LockStateProvider, RuntimeFilesUpdatePlugin};
+    use cda_plugin_security::Secured;
+    use sovd_interfaces::apps::sovd2uds::operations::runtimefilesupdate::{
+        ExecutionCreatedResponse, ExecutionListResponse, ExecutionRequest, ExecutionResponse,
+        ExecutionsQuery,
+    };
+
+    use crate::sovd::{
+        apps::sovd2uds::bulk_data::runtimefiles::{
+            DbUpdateErrorResponse, RuntimeUpdateRouteState, require_vehicle_lock,
+        },
+        error::ApiError,
+        update_guard::ExemptRoute,
+    };
+
+    const EXECUTIONS_ROUTE: &str =
+        "/vehicle/v15/apps/sovd2uds/operations/runtimefilesupdate/executions";
+    const EXECUTIONS_ID_ROUTE: &str =
+        "/vehicle/v15/apps/sovd2uds/operations/runtimefilesupdate/executions/{id}";
+
+    pub(crate) async fn get<P: RuntimeFilesUpdatePlugin, L: LockStateProvider>(
+        State(route_state): State<RuntimeUpdateRouteState<P, L>>,
+        WithRejection(Query(query), _): WithRejection<Query<ExecutionsQuery>, ApiError>,
+    ) -> impl IntoResponse {
+        let items = route_state
+            .plugin
+            .list_executions()
+            .await
+            .into_iter()
+            .map(ExecutionResponse::from)
+            .collect();
+        let schema = if query.include_schema {
+            Some(crate::create_schema!(ExecutionListResponse))
+        } else {
+            None
+        };
+        (
+            StatusCode::OK,
+            Json(ExecutionListResponse { items, schema }),
+        )
+            .into_response()
+    }
+
+    pub(crate) async fn post<P: RuntimeFilesUpdatePlugin, L: LockStateProvider>(
+        State(route_state): State<RuntimeUpdateRouteState<P, L>>,
+        Secured(sec_plugin): Secured,
+        Json(body): Json<ExecutionRequest>,
+    ) -> impl IntoResponse {
+        let claims = sec_plugin.as_auth_plugin().claims();
+        if let Err(resp) = require_vehicle_lock(
+            &*route_state.vehicle_lock_states,
+            *claims,
+            route_state.retry_after_seconds,
+        )
+        .await
+        {
+            return resp.into_response();
+        }
+
+        route_state
+            .plugin
+            .start_execution(body.parameters.mode)
+            .await
+            .map_or_else(
+                |e| DbUpdateErrorResponse::new(e, route_state.retry_after_seconds).into_response(),
+                |id| (StatusCode::ACCEPTED, Json(ExecutionCreatedResponse { id })).into_response(),
+            )
+    }
+
+    pub(crate) mod id {
+        use axum::{
+            Json,
+            extract::{Path, Query, State},
+            http::StatusCode,
+            response::IntoResponse,
+        };
+        use axum_extra::extract::WithRejection;
+        use cda_interfaces::runtime_update_api::{LockStateProvider, RuntimeFilesUpdatePlugin};
+        use sovd_interfaces::apps::sovd2uds::operations::runtimefilesupdate::{
+            ExecutionResponse, ExecutionsQuery,
+        };
+
+        use crate::sovd::{
+            apps::sovd2uds::bulk_data::runtimefiles::RuntimeUpdateRouteState, error::ApiError,
+        };
+
+        pub(crate) async fn get<P: RuntimeFilesUpdatePlugin, L: LockStateProvider>(
+            State(route_state): State<RuntimeUpdateRouteState<P, L>>,
+            Path(id): Path<String>,
+            WithRejection(Query(query), _): WithRejection<Query<ExecutionsQuery>, ApiError>,
+        ) -> impl IntoResponse {
+            match route_state.plugin.get_execution_status(&id).await {
+                Some(exec) => {
+                    let mut resp = ExecutionResponse::from(exec);
+                    if query.include_schema {
+                        resp.schema = Some(crate::create_schema!(ExecutionResponse));
+                    }
+                    (StatusCode::OK, Json(resp)).into_response()
+                }
+                None => StatusCode::NOT_FOUND.into_response(),
+            }
+        }
+    }
+
+    pub fn routes<
+        S: cda_plugin_security::SecurityPluginLoader,
+        P: RuntimeFilesUpdatePlugin,
+        L: LockStateProvider,
+    >(
+        state: RuntimeUpdateRouteState<P, L>,
+    ) -> axum::Router {
+        axum::Router::new()
+            .route(
+                EXECUTIONS_ROUTE,
+                axum::routing::get(get::<P, L>).post(post::<P, L>),
+            )
+            .route(EXECUTIONS_ID_ROUTE, axum::routing::get(id::get::<P, L>))
+            .layer(axum::middleware::from_fn(
+                cda_plugin_security::security_plugin_middleware::<S>,
+            ))
+            .with_state(state)
+    }
+
+    /// Returns the [`ExemptRoute`]s that must remain accessible during a database update.
+    pub fn update_exempt_routes() -> Vec<ExemptRoute> {
+        vec![ExemptRoute {
+            prefix: EXECUTIONS_ROUTE.to_string(),
+            methods: vec![http::Method::GET],
+        }]
+    }
+}

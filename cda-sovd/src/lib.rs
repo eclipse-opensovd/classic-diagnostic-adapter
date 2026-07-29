@@ -203,7 +203,7 @@ where
     L: cda_interfaces::runtime_update_api::LockStateProvider,
 {
     update_guard
-        .extend_exempt(sovd::apps::sovd2uds::bulk_data::runtimefiles::update_exempt_routes())
+        .extend_exempt(sovd::apps::sovd2uds::operations::runtimefilesupdate::update_exempt_routes())
         .await;
 
     let route_state = RuntimeUpdateRouteState {
@@ -211,8 +211,13 @@ where
         vehicle_lock_states: lock_state,
         retry_after_seconds,
     };
-    let router =
-        sovd::apps::sovd2uds::bulk_data::runtimefiles::routes::<S, P, L>(route_state, upload_limit);
+    let bulk_data_router = sovd::apps::sovd2uds::bulk_data::runtimefiles::routes::<S, P, L>(
+        route_state.clone(),
+        upload_limit,
+    );
+    let operations_router =
+        sovd::apps::sovd2uds::operations::runtimefilesupdate::routes::<S, P, L>(route_state);
+    let router = bulk_data_router.merge(operations_router);
     let handle = dynamic_router.add_routes(router.into()).await;
     tracing::info!("Runtime update routes added to webserver");
     handle

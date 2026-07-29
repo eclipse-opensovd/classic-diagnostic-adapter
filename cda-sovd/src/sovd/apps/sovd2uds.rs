@@ -23,6 +23,7 @@ use crate::sovd::{error::ApiError, resource_response};
 
 pub(crate) mod bulk_data;
 pub(crate) mod data;
+pub(crate) mod operations;
 
 pub(crate) async fn get(
     UseApi(ExtractHost(host), _): UseApi<ExtractHost, String>,
