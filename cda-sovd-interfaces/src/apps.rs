@@ -24,15 +24,30 @@ pub mod sovd2uds {
         }
 
         pub mod runtimefiles {
+            pub use cda_interfaces::runtime_update_api::RuntimeFilesQuery;
+        }
+    }
+
+    pub mod operations {
+        pub mod runtimefilesupdate {
             pub use cda_interfaces::runtime_update_api::{
-                ExecutionMode, ExecutionStatus, RuntimeFilesQuery, UpdateExecution,
+                ExecutionMode, ExecutionStatus, UpdateExecution,
             };
 
-            /// Request body for an execution.
+            /// The operation-specific parameters for a diagnostic database update execution.
             #[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
-            pub struct ExecutionRequest {
+            pub struct ExecutionParameters {
                 /// The operation to perform on the staged runtime files.
                 pub mode: ExecutionMode,
+            }
+
+            /// Request body for an execution.
+            ///
+            /// Follows the standard operations convention of wrapping the
+            /// operation-specific inputs in a `parameters` field.
+            #[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+            pub struct ExecutionRequest {
+                pub parameters: ExecutionParameters,
             }
 
             /// The discriminant of an execution's status without the inner payload.

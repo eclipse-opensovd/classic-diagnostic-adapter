@@ -29,7 +29,8 @@ Diagnostic Database Update Plugin
     This behavior and additional security requirements must be modifiable through a trait provided to the plugin,
     to support more specific OEM requirements for security and individual environments during the update process.
 
-    The diagnostic database update plugin must provide the following bulk-data categories/endpoints:
+    The diagnostic database update plugin must provide the following bulk-data categories/endpoints for
+    file management, and a separate ``operations`` endpoint for applying/rolling back/cleaning up updates:
 
     .. list-table:: Bulk-Data Paths for Diagnostic Database Update Preparation
        :header-rows: 1
@@ -66,16 +67,23 @@ Diagnostic Database Update Plugin
          - ``/apps/sovd2uds/bulk-data/runtimefiles-backup``
          - Deletes the backup of the previously used diagnostic database, to free up storage space. This also means that rolling back to the previous state isn't possible anymore after deleting the backup.
 
+    .. list-table:: Operations Paths for Applying/Rolling Back/Cleaning Up Diagnostic Database Updates
+       :header-rows: 1
+
+       * - Method
+         - Path
+         - Description
+
        * - GET
-         - ``/apps/sovd2uds/bulk-data/runtimefiles-nextupdate/executions``
+         - ``/apps/sovd2uds/operations/runtimefilesupdate/executions``
          - Returns the list of current executions. Always contains at most one entry. Supports the ``include-schema`` query parameter.
 
        * - GET
-         - ``/apps/sovd2uds/bulk-data/runtimefiles-nextupdate/executions/{id}``
+         - ``/apps/sovd2uds/operations/runtimefilesupdate/executions/{id}``
          - Returns the status of a specific execution by its ID.
 
        * - POST
-         - ``/apps/sovd2uds/bulk-data/runtimefiles-nextupdate/executions``
+         - ``/apps/sovd2uds/operations/runtimefilesupdate/executions``
          - Starts a new execution (Apply, Rollback, or Cleanup). Returns 202 Accepted with the execution ID.
 
     .. note:: The following query parameters must be supported for the GET endpoints:
@@ -99,8 +107,9 @@ Diagnostic Database Update Plugin
     All GET endpoints (``runtimefiles-current``, ``runtimefiles-nextupdate``, ``runtimefiles-backup``)
     return both MDD and configuration file entries in a single combined response.
 
-    The HTTP handler implementation for these endpoints resides in
-    ``cda-sovd/src/sovd/apps/sovd2uds/bulk_data/runtimefiles.rs``.
+    The HTTP handler implementation for the bulk-data endpoints resides in
+    ``cda-sovd/src/sovd/apps/sovd2uds/bulk_data/runtimefiles.rs``. The execution endpoints
+    (Apply/Rollback/Cleanup) reside in ``cda-sovd/src/sovd/apps/sovd2uds/operations.rs``.
 
     **Coupled MDD and Configuration Updates**
 
@@ -152,15 +161,14 @@ Diagnostic Database Update Plugin
 
     To apply all the pending updates to the current diagnostic database, an additional endpoint is required:
 
-    ``POST /apps/sovd2uds/bulk-data/runtimefiles-nextupdate/executions`` with a JSON-payload containing the property
-    ``mode``, with the following possible values (all case-insensitive):
+    ``POST /apps/sovd2uds/operations/runtimefilesupdate/executions`` with a JSON-payload containing a
+    ``parameters`` object with the property ``mode``, following the standard convention of wrapping
+    operation-specific inputs in a ``parameters`` field, with the following possible values for ``mode``
+    (all case-insensitive):
 
     - ``Apply`` - to apply the pending updates.
     - ``Rollback`` - to roll back to the backup state of the diagnostic database (also clears pending nextupdate)
     - ``Cleanup`` - to reset all pending updates, as well as deleting the backup
-
-    The same endpoint must also be made available as ``/apps/sovd2uds/operations/diagnostic-database-update``
-    to allow triggering the actions through a standard compliant operation.
 
     **Execution Lifecycle**
 
@@ -168,12 +176,12 @@ Diagnostic Database Update Plugin
     be rejected with a conflict error.
 
     Execution entries are retained in memory and remain queryable via
-    ``GET /apps/sovd2uds/bulk-data/runtimefiles-nextupdate/executions/{id}`` until the next execution is
+    ``GET /apps/sovd2uds/operations/runtimefilesupdate/executions/{id}`` until the next execution is
     started. When a new execution is started, all previous terminal-state (``Completed`` or ``Failed``)
     entries are removed. Entries must not be removed based on time (no TTL). This ensures that the result
     of the last execution remains available for inspection without requiring indefinite memory growth.
 
-    The list endpoint ``GET /apps/sovd2uds/bulk-data/runtimefiles-nextupdate/executions`` returns all
+    The list endpoint ``GET /apps/sovd2uds/operations/runtimefilesupdate/executions`` returns all
     currently tracked executions and always contains at most one entry. It supports the ``include-schema``
     query parameter to include the JSON Schema of the response. No vehicle lock is required to use the
     list or status endpoints.
