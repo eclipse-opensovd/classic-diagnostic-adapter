@@ -202,7 +202,11 @@ pub async fn load_databases<S: SecurityPlugin>(
         "Loaded databases"
     );
 
-    let status = if databases.is_empty() {
+    // When `exit_no_database_loaded = false` the operator has explicitly opted
+    // into running without any ECU databases.  Marking health `Failed` in that
+    // case would block the readiness probe forever, so treat empty-but-allowed
+    // as `Up`.
+    let status = if databases.is_empty() && config.database.exit_no_database_loaded {
         cda_health::Status::Failed
     } else {
         cda_health::Status::Up
