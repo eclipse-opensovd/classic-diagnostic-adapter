@@ -592,7 +592,7 @@ pub async fn load_vehicle_data<
     let mdd_paths: Vec<PathBuf> = {
         let storage_dir = &config.runtime_update_config.storage_dir;
         let paths = resolve_mdd_paths(storage_dir, &config.database.path).await;
-        if paths.is_empty() {
+        if paths.is_empty() && config.database.exit_no_database_loaded {
             return Err(AppError::InitializationFailed(
                 "No MDD files found".to_string(),
             ));

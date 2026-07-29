@@ -77,6 +77,8 @@ libc = { workspace = true }
 
 # compile time format
 const_format = { workspace = true }
+# temp directories for isolated tests
+tempfile = { workspace = true }
 
 [build-dependencies]
 cda-build = { workspace = true }

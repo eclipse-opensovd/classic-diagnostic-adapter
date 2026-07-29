@@ -441,7 +441,7 @@ pub(crate) fn host() -> String {
     }
 }
 
-fn start_cda(config: Configuration) {
+pub(crate) fn start_cda(config: Configuration) {
     // Some unwraps are used here, this is on purpose
     // as we want the tests to fail hard if CDA fails to start.
     TOKIO_RUNTIME.spawn(async move {
@@ -568,7 +568,7 @@ fn start_cda(config: Configuration) {
     });
 }
 
-async fn stop_cda() -> Result<(), TestingError> {
+pub(crate) async fn stop_cda() -> Result<(), TestingError> {
     if let Some(sender) = CDA_SHUTDOWN.lock().await.as_ref() {
         sender.send(()).ok();
         Ok(())
