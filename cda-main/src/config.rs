@@ -13,6 +13,7 @@
 use std::path::Path;
 
 use cda_interfaces::storage_api::{Collection, RandomAccessData, Storage};
+use cda_storage::LocalStorage;
 use figment::{
     Figment,
     providers::{Env, Format as _, Serialized, Toml},
@@ -23,6 +24,75 @@ use crate::AppError;
 pub mod com_params;
 pub mod configfile;
 pub mod generate;
+
+pub(super) async fn load_config_from_file_or_storage(
+    config_file: Option<&Path>,
+) -> Result<configfile::Configuration, AppError> {
+    let config_file = match config_file {
+        Some(config_file) => {
+            if config_file.exists() {
+                config_file
+            } else {
+                // ignore `config-optional` feature here, because it's specifically for when no config was specified
+                return Err(AppError::ConfigurationError {
+                    message: format!(
+                        "Specified configuration file {} does not exist",
+                        config_file.display()
+                    ),
+                    source: None,
+                });
+            }
+        }
+        None => Path::new("opensovd-cda.toml"),
+    };
+
+    let storage_dir_override = None; //only needed for tests
+    load_config_from_file_or_storage_with_storage_dir_override(config_file, storage_dir_override)
+        .await
+}
+
+async fn load_config_from_file_or_storage_with_storage_dir_override(
+    config_file: &Path,
+    storage_override: Option<LocalStorage>,
+) -> Result<configfile::Configuration, AppError> {
+    let (figment_config, loaded_via_figment) = match load_config(config_file) {
+        Ok(c) => (c, true),
+        Err(e) => {
+            println!("Failed to load configuration: {e}");
+            (default_config(), false)
+        }
+    };
+
+    let storage = match storage_override {
+        Some(storage) => storage,
+        None => match LocalStorage::new(&figment_config.runtime_update_config.storage_dir) {
+            Ok(storage) => storage,
+            Err(e) => {
+                tracing::warn!(error = %e, "Storage not available, not loading config from storage, nor seeding it.");
+                return Ok(figment_config);
+            }
+        },
+    };
+
+    let config = if let Some(storage_config) = load_config_with_storage_override(&storage).await? {
+        storage_config
+    } else {
+        if !loaded_via_figment {
+            require_config_source()?;
+        }
+
+        if figment_config
+            .runtime_update_config
+            .init_storage_from_config_file
+        {
+            seed_storage_if_empty_from_config_file(&storage, config_file).await?;
+        }
+
+        figment_config
+    };
+
+    Ok(config)
+}
 
 /// Loads the configuration, merged with defaults and `CDA`-prefixed env vars.
 ///
@@ -46,30 +116,17 @@ pub fn default_config() -> configfile::Configuration {
     configfile::Configuration::default()
 }
 
-/// Attempt to load config from file; on failure, fall back to defaults.
-/// Returns the configuration and whether it was successfully loaded from file.
-#[must_use]
-pub fn load_config_with_fallback(config_path: &Path) -> (configfile::Configuration, bool) {
-    match load_config(config_path) {
-        Ok(c) => (c, true),
-        Err(e) => {
-            println!("Failed to load configuration: {e}");
-            (default_config(), false)
-        }
-    }
-}
-
 /// Checks whether a configuration source is available.
 ///
 /// # Errors
-/// Returns [`AppError`](crate::AppError) when no configuration source is found
+/// Returns [`AppError`] when no configuration source is found
 /// (only when the `config-optional` feature is disabled).
-pub fn require_config_source() -> Result<(), crate::AppError> {
+pub fn require_config_source() -> Result<(), AppError> {
     if cfg!(feature = "config-optional") {
         println!("No configuration found on disk or in storage. Using default values.");
         Ok(())
     } else {
-        Err(crate::AppError::ConfigurationError {
+        Err(AppError::ConfigurationError {
             message: "No configuration found. Provide a configuration file, store one via runtime \
                       update, or build with the 'config-optional' feature to allow starting \
                       without one."
@@ -84,12 +141,12 @@ pub fn require_config_source() -> Result<(), crate::AppError> {
 /// has a populated baseline to work with.
 ///
 /// # Errors
-/// Returns [`AppError`](crate::AppError) when no configuration file
+/// Returns [`AppError`] when no configuration file
 /// is accessible.
-pub async fn seed_storage_from_config_file(
-    storage: &cda_storage::LocalStorage,
+pub async fn seed_storage_if_empty_from_config_file(
+    storage: &LocalStorage,
     config_file: &Path,
-) -> Result<(), crate::AppError> {
+) -> Result<(), AppError> {
     let data = tokio::fs::read(config_file).await.map_err(|source| {
         crate::AppError::ConfigurationError {
             message: format!(
@@ -112,7 +169,7 @@ pub async fn seed_storage_from_config_file(
         .to_string_lossy()
         .to_string();
 
-    let count = cda_storage::storage_seed::seed_storage_collection(
+    let count = cda_storage::storage_seed::seed_storage_collection_if_empty(
         storage,
         &cda_interfaces::storage_api::CollectionName::Configuration,
         std::iter::once((key.clone(), data)),
@@ -145,7 +202,7 @@ pub async fn seed_storage_from_config_file(
 /// - `Ok(None)` - storage is unavailable or the collection is empty (no override).
 /// - `Ok(Some(config))` - exactly one configuration was found and parsed successfully.
 pub async fn load_config_with_storage_override(
-    storage: &cda_storage::LocalStorage,
+    storage: &LocalStorage,
 ) -> Result<Option<configfile::Configuration>, AppError> {
     let collection = match storage
         .get_or_create_collection(&cda_interfaces::storage_api::CollectionName::Configuration)
@@ -218,21 +275,67 @@ pub async fn load_config_with_storage_override(
 
 #[cfg(test)]
 mod tests {
-    use std::path::Path;
+    use std::path::PathBuf;
 
-    use cda_interfaces::storage_api::{CollectionName, RandomAccessData, Storage};
-    use cda_storage::LocalStorage;
+    use cda_interfaces::storage_api::CollectionName;
 
     use super::*;
 
     #[tokio::test]
+    async fn should_load_config_from_file_when_storage_is_empty() {
+        let fixture = StorageFixture::new();
+
+        let mut config = default_config();
+        config.database.path = "configured_dir/".to_string();
+        fixture.write_config(&config);
+
+        let result = load_config_from_file_or_storage_with_storage_dir_override(
+            &fixture.config_file,
+            Some(fixture.storage),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(result.database.path, "configured_dir/");
+    }
+
+    #[tokio::test]
+    async fn should_load_config_from_storage_when_storage_has_been_seeded() {
+        let fixture = StorageFixture::new();
+
+        {
+            let mut config = default_config();
+            config.database.path = "stored_dir/".to_string();
+            fixture.write_config(&config);
+
+            seed_storage_if_empty_from_config_file(&fixture.storage, &fixture.config_file)
+                .await
+                .unwrap();
+        }
+
+        {
+            let mut config = default_config();
+            config.database.path = "configured_dir/".to_string();
+            fixture.write_config(&config);
+        }
+
+        let result = load_config_from_file_or_storage_with_storage_dir_override(
+            &fixture.config_file,
+            Some(fixture.storage),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(result.database.path, "stored_dir/");
+    }
+
+    #[tokio::test]
     async fn seed_copies_config_file_into_empty_storage() {
         let fixture = StorageFixture::new();
-        let config_dir = tempfile::tempdir().expect("config dir");
-        let config_file = config_dir.path().join("opensovd-cda.toml");
-        std::fs::write(&config_file, b"[database]\npath = \".\"").expect("write config");
 
-        seed_storage_from_config_file(&fixture.storage, &config_file)
+        std::fs::write(&fixture.config_file, b"[database]\npath = \".\"").expect("write config");
+
+        seed_storage_if_empty_from_config_file(&fixture.storage, &fixture.config_file)
             .await
             .unwrap();
 
@@ -248,9 +351,8 @@ mod tests {
     #[tokio::test]
     async fn seed_skips_when_collection_already_populated() {
         let fixture = StorageFixture::new();
-        let config_dir = tempfile::tempdir().expect("config dir");
-        let config_file = config_dir.path().join("new.toml");
-        std::fs::write(&config_file, b"[database]\npath = \".\"").expect("write config");
+
+        std::fs::write(&fixture.config_file, b"[database]\npath = \".\"").expect("write config");
 
         // Pre-populate storage with an existing entry.
         let collection = fixture
@@ -266,7 +368,7 @@ mod tests {
             .unwrap();
         tx.commit().await.unwrap();
 
-        seed_storage_from_config_file(&fixture.storage, &config_file)
+        seed_storage_if_empty_from_config_file(&fixture.storage, &fixture.config_file)
             .await
             .unwrap();
 
@@ -284,7 +386,7 @@ mod tests {
     async fn seed_errors_on_nonexistent_config_file() {
         let fixture = StorageFixture::new();
 
-        let result = seed_storage_from_config_file(
+        let result = seed_storage_if_empty_from_config_file(
             &fixture.storage,
             Path::new("/tmp/nonexistent_cda_config_test_12345.toml"),
         )
@@ -296,12 +398,11 @@ mod tests {
     #[tokio::test]
     async fn seed_preserves_config_content_through_storage_roundtrip() {
         let fixture = StorageFixture::new();
-        let config_dir = tempfile::tempdir().expect("config dir");
-        let original_data = b"[database]\npath = \"/app/database\"\n";
-        let config_file = config_dir.path().join("opensovd-cda.toml");
-        std::fs::write(&config_file, original_data).expect("write config");
 
-        seed_storage_from_config_file(&fixture.storage, &config_file)
+        let original_data = b"[database]\npath = \"/app/database\"\n";
+        std::fs::write(&fixture.config_file, original_data).expect("write config");
+
+        seed_storage_if_empty_from_config_file(&fixture.storage, &fixture.config_file)
             .await
             .unwrap();
 
@@ -336,17 +437,25 @@ mod tests {
 
     struct StorageFixture {
         storage: LocalStorage,
+        config_file: PathBuf,
         /// Carried along, so that it gets dropped at the end of the test
         _temp_dir: tempfile::TempDir,
     }
     impl StorageFixture {
         fn new() -> Self {
-            let temp_dir = tempfile::tempdir().expect("storage dir");
+            let temp_dir = tempfile::tempdir().expect("temp dir");
             let storage = LocalStorage::new(temp_dir.path()).unwrap();
+            let config_file = temp_dir.path().join("opensovd-cda.toml");
             Self {
                 storage,
+                config_file,
                 _temp_dir: temp_dir,
             }
+        }
+        fn write_config(&self, config: &configfile::Configuration) {
+            let config = toml::to_string(&config).unwrap();
+
+            std::fs::write(&self.config_file, config).expect("write config");
         }
     }
 }
