@@ -270,29 +270,9 @@ where
         return generate_config_cmd(output.as_ref());
     }
 
-    let (mut config, disk_loaded) = config::load_config_with_fallback(&args.config);
+    let mut config = config::load_config_from_file_or_storage(&args.config).await?;
 
-    match cda_storage::LocalStorage::new(&config.runtime_update_config.storage_dir) {
-        Ok(storage) => {
-            if config.runtime_update_config.init_storage_from_config_file {
-                config::seed_storage_from_config_file(&storage, &args.config).await?;
-            }
-
-            if let Some(storage_config) =
-                config::load_config_with_storage_override(&storage).await?
-            {
-                config = storage_config;
-            } else if !disk_loaded {
-                config::require_config_source()?;
-            }
-        }
-        Err(e) => {
-            tracing::warn!(error = %e, "Storage not available, skipping seed and config override");
-            return Ok(());
-        }
-    }
-
-    // Command line arguments always take precedence over stored configuration
+    // Command line arguments always take precedence over loaded configuration
     args.update_config(&mut config);
 
     config.validate_sanity().map_err(AppError::from)?;

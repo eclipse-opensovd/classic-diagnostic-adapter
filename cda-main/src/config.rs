@@ -24,6 +24,48 @@ pub mod com_params;
 pub mod configfile;
 pub mod generate;
 
+pub(super) async fn load_config_from_file_or_storage(
+    config_path: &Path,
+) -> Result<configfile::Configuration, AppError> {
+    let (figment_config, loaded_via_figment) = match load_config(config_path) {
+        Ok(c) => (c, true),
+        Err(e) => {
+            println!("Failed to load configuration: {e}");
+            (default_config(), false)
+        }
+    };
+
+    let config = match cda_storage::LocalStorage::new(
+        &figment_config.runtime_update_config.storage_dir,
+    ) {
+        Ok(storage) => {
+            if let Some(storage_config) = load_config_with_storage_override(&storage).await? {
+                storage_config
+            } else {
+                if !loaded_via_figment {
+                    require_config_source()?;
+                }
+
+                // only seed when not already in storage, so that previously stored modifications don't get overridden
+                if figment_config
+                    .runtime_update_config
+                    .init_storage_from_config_file
+                {
+                    seed_storage_from_config_file(&storage, config_path).await?;
+                }
+
+                figment_config
+            }
+        }
+        Err(e) => {
+            tracing::warn!(error = %e, "Storage not available, not loading config from storage, nor seeding it.");
+            figment_config
+        }
+    };
+
+    Ok(config)
+}
+
 /// Loads the configuration, merged with defaults and `CDA`-prefixed env vars.
 ///
 /// Config file resolved in priority order:
@@ -44,19 +86,6 @@ pub fn load_config(config_file: &Path) -> Result<configfile::Configuration, Stri
 #[must_use]
 pub fn default_config() -> configfile::Configuration {
     configfile::Configuration::default()
-}
-
-/// Attempt to load config from file; on failure, fall back to defaults.
-/// Returns the configuration and whether it was successfully loaded from file.
-#[must_use]
-pub fn load_config_with_fallback(config_path: &Path) -> (configfile::Configuration, bool) {
-    match load_config(config_path) {
-        Ok(c) => (c, true),
-        Err(e) => {
-            println!("Failed to load configuration: {e}");
-            (default_config(), false)
-        }
-    }
 }
 
 /// Checks whether a configuration source is available.
