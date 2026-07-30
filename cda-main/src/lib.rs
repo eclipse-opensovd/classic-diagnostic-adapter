@@ -1015,7 +1015,10 @@ pub fn setup_tracing(config: &Configuration) -> Result<TracingGuards, TracingSet
     })
 }
 
+/// Returns the CDA version string, which is either
+/// the value of the `CDA_VERSION` environment variable (if set)
+/// or the Cargo package version.
 #[must_use]
 pub fn cda_version() -> &'static str {
-    env!("CARGO_PKG_VERSION")
+    option_env!("CDA_VERSION").unwrap_or(env!("CARGO_PKG_VERSION"))
 }
