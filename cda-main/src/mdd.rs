@@ -296,7 +296,7 @@ async fn load_mdd_paths_from_storage(storage_dir: &str) -> Option<Vec<PathBuf>> 
 /// Seeds the `DiagnosticDatabase` storage collection from `database_path` when the collection
 /// is empty. This copies all `.mdd` files from the filesystem into storage so that the runtime
 /// update plugin has a populated baseline to work with.
-pub async fn seed_storage_from_database_path(storage_dir: &str, database_path: &str) {
+pub async fn seed_empty_storage_from_database_path(storage_dir: &str, database_path: &str) {
     let mdd_files = match std::fs::read_dir(database_path) {
         Ok(entries) => get_mdd_files_and_size(entries),
         Err(e) => {
@@ -337,7 +337,7 @@ pub async fn seed_storage_from_database_path(storage_dir: &str, database_path: &
         }
     };
 
-    if let Some(count) = cda_storage::storage_seed::seed_storage_collection(
+    if let Some(count) = cda_storage::storage_seed::seed_empty_storage_collection(
         &storage,
         &CollectionName::DiagnosticDatabase,
         entries,
@@ -697,7 +697,7 @@ mod tests {
     use cda_interfaces::storage_api::{Collection as _, CollectionName, DirectFileAccess, Storage};
     use cda_storage::LocalStorage;
 
-    use super::{resolve_mdd_paths, seed_storage_from_database_path};
+    use super::{resolve_mdd_paths, seed_empty_storage_from_database_path};
 
     /// Helper: create a temp dir with `.mdd` files containing given data.
     fn create_database_dir(files: &[(&str, &[u8])]) -> tempfile::TempDir {
@@ -716,7 +716,7 @@ mod tests {
             ("ecu_b.mdd", b"MDD_CONTENT_B"),
         ]);
 
-        seed_storage_from_database_path(
+        seed_empty_storage_from_database_path(
             storage_dir.path().to_str().unwrap(),
             db_dir.path().to_str().unwrap(),
         )
@@ -753,7 +753,7 @@ mod tests {
         tx.commit().await.unwrap();
         drop(storage);
 
-        seed_storage_from_database_path(
+        seed_empty_storage_from_database_path(
             storage_dir.path().to_str().unwrap(),
             db_dir.path().to_str().unwrap(),
         )
@@ -778,7 +778,7 @@ mod tests {
             ("data.bin", b"BIN"),
         ]);
 
-        seed_storage_from_database_path(
+        seed_empty_storage_from_database_path(
             storage_dir.path().to_str().unwrap(),
             db_dir.path().to_str().unwrap(),
         )
@@ -798,7 +798,7 @@ mod tests {
         let storage_dir = tempfile::tempdir().expect("storage dir");
         let db_dir = tempfile::tempdir().expect("empty db dir");
 
-        seed_storage_from_database_path(
+        seed_empty_storage_from_database_path(
             storage_dir.path().to_str().unwrap(),
             db_dir.path().to_str().unwrap(),
         )
@@ -817,7 +817,7 @@ mod tests {
         let storage_dir = tempfile::tempdir().expect("storage dir");
 
         // Should not panic, just return early.
-        seed_storage_from_database_path(
+        seed_empty_storage_from_database_path(
             storage_dir.path().to_str().unwrap(),
             "/tmp/nonexistent_cda_test_path_12345",
         )
@@ -836,7 +836,7 @@ mod tests {
         let storage_dir = tempfile::tempdir().expect("storage dir");
         let db_dir = create_database_dir(&[("ECU_UPPER.mdd", b"UPPER_DATA")]);
 
-        seed_storage_from_database_path(
+        seed_empty_storage_from_database_path(
             storage_dir.path().to_str().unwrap(),
             db_dir.path().to_str().unwrap(),
         )
@@ -857,7 +857,7 @@ mod tests {
         let original_data = b"MDD_BINARY_PAYLOAD_1234567890";
         let db_dir = create_database_dir(&[("FLXC1000.mdd", original_data)]);
 
-        seed_storage_from_database_path(
+        seed_empty_storage_from_database_path(
             storage_dir.path().to_str().unwrap(),
             db_dir.path().to_str().unwrap(),
         )
@@ -885,7 +885,7 @@ mod tests {
         let storage_str = storage_dir.path().to_str().unwrap();
         let db_str = db_dir.path().to_str().unwrap();
 
-        seed_storage_from_database_path(storage_str, db_str).await;
+        seed_empty_storage_from_database_path(storage_str, db_str).await;
         let paths = resolve_mdd_paths(storage_str, db_str).await;
 
         assert_eq!(paths.len(), 2, "Expected 2 MDD paths from storage");
