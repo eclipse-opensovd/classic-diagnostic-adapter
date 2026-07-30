@@ -49,7 +49,7 @@ Diagnostic Database Update Plugin
 
        * - POST
          - ``/apps/sovd2uds/bulk-data/runtimefiles-nextupdate``
-         - Adds files to the next update of the diagnostic database, using multipart form data. The files provided through this endpoint are added to the pending update.
+         - Adds files to the next update of the diagnostic database. Two content types are supported: ``multipart/form-data`` (one or more files, filenames taken from each part's ``filename`` parameter), and ``application/octet-stream`` (a single file per request, whose filename must be provided via the ``Content-Disposition`` header, e.g. ``Content-Disposition: attachment; filename="foo.mdd"``).
 
        * - DELETE
          - ``/apps/sovd2uds/bulk-data/runtimefiles-nextupdate``

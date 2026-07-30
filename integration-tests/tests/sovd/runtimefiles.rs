@@ -591,6 +591,147 @@ async fn runtimefiles_upload_multiple_files() -> Result<(), TestingError> {
     Ok(())
 }
 
+/// Spec: The nextupdate upload endpoint must also accept a single file uploaded as
+/// `application/octet-stream`, with the filename taken from the `Content-Disposition`
+/// header (quoted form: `attachment; filename="foo.mdd"`).
+#[tokio::test]
+async fn runtimefiles_upload_octet_stream() -> Result<(), TestingError> {
+    let (runtime, _lock) = setup_integration_test(true).await?;
+    let auth = auth_header(&runtime.config, None).await?;
+    let lock_id = setup_with_lock(&runtime.config, &auth).await;
+
+    let response = upload_mdd_octet_stream(
+        &runtime.config,
+        &auth,
+        Some("attachment; filename=\"FLXC1000.mdd\""),
+    )
+    .await;
+
+    assert_eq!(
+        response.status(),
+        StatusCode::CREATED,
+        "Expected 201 Created for octet-stream upload, got {}",
+        response.status()
+    );
+
+    let list_response = send_cda_request(
+        &runtime.config,
+        RUNTIMEFILES_NEXTUPDATE,
+        StatusCode::OK,
+        Method::GET,
+        None,
+        Some(&auth),
+        None,
+    )
+    .await?;
+    let items = response_to_t::<BulkDataList>(&list_response)?.items;
+    assert!(
+        items
+            .iter()
+            .any(|item| item.id.to_lowercase() == "flxc1000.mdd"),
+        "Expected FLXC1000.mdd to appear in nextupdate after octet-stream upload"
+    );
+
+    teardown_lock(&runtime.config, &auth, &lock_id).await;
+    Ok(())
+}
+
+/// Spec: The `Content-Disposition` filename parameter must also be accepted in its
+/// unquoted form (`filename=foo.mdd`).
+#[tokio::test]
+async fn runtimefiles_upload_octet_stream_unquoted_filename() -> Result<(), TestingError> {
+    let (runtime, _lock) = setup_integration_test(true).await?;
+    let auth = auth_header(&runtime.config, None).await?;
+    let lock_id = setup_with_lock(&runtime.config, &auth).await;
+
+    let response = upload_mdd_octet_stream(
+        &runtime.config,
+        &auth,
+        Some("attachment; filename=FLXC1000.mdd"),
+    )
+    .await;
+
+    assert_eq!(
+        response.status(),
+        StatusCode::CREATED,
+        "Expected 201 Created for octet-stream upload with unquoted filename, got {}",
+        response.status()
+    );
+
+    teardown_lock(&runtime.config, &auth, &lock_id).await;
+    Ok(())
+}
+
+/// Spec: An `application/octet-stream` upload without a `Content-Disposition` header
+/// must be rejected with 400 Bad Request.
+#[tokio::test]
+async fn runtimefiles_upload_octet_stream_missing_content_disposition() -> Result<(), TestingError>
+{
+    let (runtime, _lock) = setup_integration_test(true).await?;
+    let auth = auth_header(&runtime.config, None).await?;
+    let lock_id = setup_with_lock(&runtime.config, &auth).await;
+
+    let response = upload_mdd_octet_stream(&runtime.config, &auth, None).await;
+
+    assert_eq!(
+        response.status(),
+        StatusCode::BAD_REQUEST,
+        "Expected 400 Bad Request for octet-stream upload without Content-Disposition, got {}",
+        response.status()
+    );
+
+    teardown_lock(&runtime.config, &auth, &lock_id).await;
+    Ok(())
+}
+
+/// Spec: An `application/octet-stream` upload with a `Content-Disposition` header that
+/// has no `filename` parameter must be rejected with 400 Bad Request.
+#[tokio::test]
+async fn runtimefiles_upload_octet_stream_missing_filename_param() -> Result<(), TestingError> {
+    let (runtime, _lock) = setup_integration_test(true).await?;
+    let auth = auth_header(&runtime.config, None).await?;
+    let lock_id = setup_with_lock(&runtime.config, &auth).await;
+
+    let response = upload_mdd_octet_stream(&runtime.config, &auth, Some("attachment")).await;
+
+    assert_eq!(
+        response.status(),
+        StatusCode::BAD_REQUEST,
+        "Expected 400 Bad Request for octet-stream upload without filename param, got {}",
+        response.status()
+    );
+
+    teardown_lock(&runtime.config, &auth, &lock_id).await;
+    Ok(())
+}
+
+/// Spec: An upload with an unsupported `Content-Type` (neither `multipart/form-data`
+/// nor `application/octet-stream`) must be rejected with 400 Bad Request.
+#[tokio::test]
+async fn runtimefiles_upload_unsupported_content_type() -> Result<(), TestingError> {
+    let (runtime, _lock) = setup_integration_test(true).await?;
+    let auth = auth_header(&runtime.config, None).await?;
+    let lock_id = setup_with_lock(&runtime.config, &auth).await;
+
+    let response = upload_mdd_raw(
+        &runtime.config,
+        &auth,
+        "text/plain",
+        Some("attachment; filename=\"FLXC1000.mdd\""),
+    )
+    .await;
+
+    assert_eq!(
+        response.status(),
+        StatusCode::BAD_REQUEST,
+        "Expected 400 Bad Request for upload with unsupported Content-Type, got {}",
+        response.status()
+    );
+
+    teardown_lock(&runtime.config, &auth, &lock_id).await;
+    Ok(())
+}
+
 /// Spec: Applying when there are no pending changes (nextupdate == current)
 /// must not return 202 Accepted (primary expectation: 404).
 #[tokio::test]
@@ -918,6 +1059,58 @@ async fn upload_mdd_with_filename(
         .send()
         .await
         .expect("upload request failed")
+}
+
+/// Helper: uploads the `FLXC1000.mdd` fixture as a single raw-body request with the
+/// given `Content-Type`, optionally setting a `Content-Disposition` header value.
+async fn upload_mdd_raw(
+    config: &Configuration,
+    auth: &http::HeaderMap,
+    content_type: &str,
+    content_disposition: Option<&str>,
+) -> reqwest::Response {
+    let mdd_bytes = std::fs::read(
+        test_container_dir()
+            .expect("testcontainer dir")
+            .join("odx/FLXC1000.mdd"),
+    )
+    .expect("MDD fixture not found");
+    let auth_value = auth
+        .get(reqwest::header::AUTHORIZATION)
+        .expect("Authorization header missing")
+        .clone();
+    let upload_url = format!(
+        "http://{}:{}/vehicle/v15/{RUNTIMEFILES_NEXTUPDATE}",
+        config.server.address, config.server.port
+    );
+    let mut request = reqwest::Client::new()
+        .post(&upload_url)
+        .header(reqwest::header::AUTHORIZATION, auth_value)
+        .header(reqwest::header::CONTENT_TYPE, content_type.to_owned());
+    if let Some(content_disposition) = content_disposition {
+        request = request.header(reqwest::header::CONTENT_DISPOSITION, content_disposition);
+    }
+    request
+        .body(mdd_bytes)
+        .send()
+        .await
+        .expect("raw upload request failed")
+}
+
+/// Helper: uploads the `FLXC1000.mdd` fixture as a single `application/octet-stream`
+/// request, optionally setting a `Content-Disposition` header value.
+async fn upload_mdd_octet_stream(
+    config: &Configuration,
+    auth: &http::HeaderMap,
+    content_disposition: Option<&str>,
+) -> reqwest::Response {
+    upload_mdd_raw(
+        config,
+        auth,
+        "application/octet-stream",
+        content_disposition,
+    )
+    .await
 }
 
 /// Helper: creates a vehicle lock and returns the lock id.

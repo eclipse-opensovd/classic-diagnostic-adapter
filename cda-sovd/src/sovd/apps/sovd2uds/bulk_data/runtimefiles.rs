@@ -211,9 +211,9 @@ pub(crate) mod current {
 
 pub(crate) mod nextupdate {
     use axum::{
-        Json,
-        extract::{Query, State},
-        http::StatusCode,
+        Json, RequestExt,
+        extract::{FromRequest, Query, Request, State},
+        http::{HeaderMap, StatusCode, header::CONTENT_TYPE},
         response::{IntoResponse, Response},
     };
     use cda_interfaces::runtime_update_api::{
@@ -240,11 +240,189 @@ pub(crate) mod nextupdate {
             )
     }
 
+    /// Parses the `filename` parameter out of a `Content-Disposition` header value.
+    ///
+    /// Supports both the quoted form (`filename="foo.mdd"`) and the unquoted form
+    /// (`filename=foo.mdd`). Returns `None` if the header is missing, or if no
+    /// non-empty `filename` parameter can be found.
+    fn parse_content_disposition_filename(headers: &HeaderMap) -> Option<String> {
+        headers
+            .get(axum::http::header::CONTENT_DISPOSITION)
+            .and_then(|v| v.to_str().ok())
+            .and_then(|value| {
+                split_content_disposition_parameters(value).find_map(|part| {
+                    let part = part.trim();
+                    let (key, val) = part.split_once('=')?;
+                    if !key.trim().eq_ignore_ascii_case("filename") {
+                        return None;
+                    }
+                    let val = val.trim();
+                    let filename = val
+                        .strip_prefix('"')
+                        .and_then(|v| v.strip_suffix('"'))
+                        .unwrap_or(val);
+                    (!filename.is_empty()).then(|| filename.to_owned())
+                })
+            })
+    }
+
+    /// Splits `Content-Disposition` parameters without treating semicolons in quoted values
+    /// as delimiters.
+    fn split_content_disposition_parameters(value: &str) -> impl Iterator<Item = &str> {
+        let mut in_quotes = false;
+        let mut escaped = false;
+        value.split(move |character| {
+            if escaped {
+                escaped = false;
+            } else if in_quotes && character == '\\' {
+                escaped = true;
+            } else if character == '"' {
+                in_quotes = !in_quotes;
+            }
+            character == ';' && !in_quotes
+        })
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use axum::http::{HeaderMap, HeaderValue, header::CONTENT_DISPOSITION};
+
+        use super::parse_content_disposition_filename;
+
+        fn headers_with_content_disposition(value: &str) -> HeaderMap {
+            let mut headers = HeaderMap::new();
+            headers.insert(CONTENT_DISPOSITION, HeaderValue::from_str(value).unwrap());
+            headers
+        }
+
+        #[test]
+        fn missing_header_returns_none() {
+            let headers = HeaderMap::new();
+            assert_eq!(parse_content_disposition_filename(&headers), None);
+        }
+
+        #[test]
+        fn quoted_filename_after_disposition_type() {
+            // Regression test: the `attachment` segment (with no `=`) precedes
+            // `filename=...` and must not cause the whole parse to bail out early.
+            let headers = headers_with_content_disposition(r#"attachment; filename="foo.mdd""#);
+            assert_eq!(
+                parse_content_disposition_filename(&headers),
+                Some("foo.mdd".to_owned())
+            );
+        }
+
+        #[test]
+        fn quoted_filename_may_contain_semicolons() {
+            let headers =
+                headers_with_content_disposition(r#"attachment; filename="database;backup.mdd""#);
+            assert_eq!(
+                parse_content_disposition_filename(&headers),
+                Some("database;backup.mdd".to_owned())
+            );
+        }
+
+        #[test]
+        fn unquoted_filename_after_disposition_type() {
+            let headers = headers_with_content_disposition("attachment; filename=foo.mdd");
+            assert_eq!(
+                parse_content_disposition_filename(&headers),
+                Some("foo.mdd".to_owned())
+            );
+        }
+
+        #[test]
+        fn filename_only_no_disposition_type() {
+            let headers = headers_with_content_disposition(r#"filename="foo.mdd""#);
+            assert_eq!(
+                parse_content_disposition_filename(&headers),
+                Some("foo.mdd".to_owned())
+            );
+        }
+
+        #[test]
+        fn filename_parameter_is_case_insensitive() {
+            let headers = headers_with_content_disposition(r#"attachment; FileName="foo.mdd""#);
+            assert_eq!(
+                parse_content_disposition_filename(&headers),
+                Some("foo.mdd".to_owned())
+            );
+        }
+
+        #[test]
+        fn empty_filename_returns_none() {
+            let headers = headers_with_content_disposition(r#"attachment; filename="""#);
+            assert_eq!(parse_content_disposition_filename(&headers), None);
+        }
+
+        #[test]
+        fn missing_filename_parameter_returns_none() {
+            let headers = headers_with_content_disposition("attachment");
+            assert_eq!(parse_content_disposition_filename(&headers), None);
+        }
+
+        #[test]
+        fn ignores_other_parameters_before_filename() {
+            let headers =
+                headers_with_content_disposition(r#"attachment; name="field"; filename="foo.mdd""#);
+            assert_eq!(
+                parse_content_disposition_filename(&headers),
+                Some("foo.mdd".to_owned())
+            );
+        }
+    }
+
+    /// Accepts either a `multipart/form-data` upload (potentially multiple files,
+    /// filenames taken from each field's `filename` parameter), or a single
+    /// `application/octet-stream` upload, where the filename must be provided via
+    /// the `Content-Disposition` header (e.g. `attachment; filename="foo.mdd"`).
     pub(crate) async fn post<P: RuntimeFilesUpdatePlugin, L: LockStateProvider>(
         State(route_state): State<RuntimeUpdateRouteState<P, L>>,
         Secured(sec_plugin): Secured,
-        mut multipart: axum::extract::Multipart,
+        request: Request,
     ) -> impl IntoResponse {
+        let content_type = request
+            .headers()
+            .get(CONTENT_TYPE)
+            .and_then(|v| v.to_str().ok())
+            .and_then(|v| v.parse::<mime::Mime>().ok());
+
+        match content_type.as_ref().map(|m| (m.type_(), m.subtype())) {
+            Some((mime::MULTIPART, mime::FORM_DATA)) => {
+                handle_multipart_upload(route_state, sec_plugin, request).await
+            }
+            Some((mime::APPLICATION, mime::OCTET_STREAM)) => {
+                handle_octet_stream_upload(route_state, sec_plugin, request).await
+            }
+            _ => DbUpdateErrorResponse::new(
+                RuntimeUpdateError::ValidationFailed(
+                    "Unsupported Content-Type, expected multipart/form-data or \
+                     application/octet-stream"
+                        .to_owned(),
+                ),
+                route_state.retry_after_seconds,
+            )
+            .into_response(),
+        }
+    }
+
+    async fn handle_multipart_upload<P: RuntimeFilesUpdatePlugin, L: LockStateProvider>(
+        route_state: RuntimeUpdateRouteState<P, L>,
+        sec_plugin: cda_plugin_security::SecurityPluginData,
+        request: Request,
+    ) -> Response {
+        let mut multipart =
+            match axum::extract::Multipart::from_request(request, &route_state).await {
+                Ok(multipart) => multipart,
+                Err(e) => {
+                    return DbUpdateErrorResponse::new(
+                        RuntimeUpdateError::ValidationFailed(e.to_string()),
+                        route_state.retry_after_seconds,
+                    )
+                    .into_response();
+                }
+            };
+
         // The plugin takes care about rejecting new uploads during an active apply
         let claims = sec_plugin.as_auth_plugin().claims();
         if let Err(resp) = require_vehicle_lock(
@@ -285,6 +463,62 @@ pub(crate) mod nextupdate {
             |e| DbUpdateErrorResponse::new(e, route_state.retry_after_seconds).into_response(),
             |result| (StatusCode::CREATED, Json(result)).into_response(),
         )
+    }
+
+    async fn handle_octet_stream_upload<P: RuntimeFilesUpdatePlugin, L: LockStateProvider>(
+        route_state: RuntimeUpdateRouteState<P, L>,
+        sec_plugin: cda_plugin_security::SecurityPluginData,
+        request: Request,
+    ) -> Response {
+        let claims = sec_plugin.as_auth_plugin().claims();
+        if let Err(resp) = require_vehicle_lock(
+            &*route_state.vehicle_lock_states,
+            *claims,
+            route_state.retry_after_seconds,
+        )
+        .await
+        {
+            // As with the multipart path: drain the (potentially large) body before
+            // responding, so an early rejection doesn't race the client's in-flight
+            // write and cause a transport-level error instead of a clean response.
+            let _ = axum::body::to_bytes(request.into_limited_body(), usize::MAX).await;
+            return resp.into_response();
+        }
+
+        let Some(filename) = parse_content_disposition_filename(request.headers()) else {
+            // Drain the body before rejecting the request for the same reason as the
+            // lock-rejection path above.
+            let _ = axum::body::to_bytes(request.into_limited_body(), usize::MAX).await;
+            return DbUpdateErrorResponse::new(
+                RuntimeUpdateError::ValidationFailed(
+                    "Missing or invalid Content-Disposition header, expected e.g. 'attachment; \
+                     filename=\"foo.mdd\"'"
+                        .to_owned(),
+                ),
+                route_state.retry_after_seconds,
+            )
+            .into_response();
+        };
+
+        let data = match axum::body::to_bytes(request.into_limited_body(), usize::MAX).await {
+            Ok(data) => data,
+            Err(e) => {
+                return DbUpdateErrorResponse::new(
+                    RuntimeUpdateError::ValidationFailed(e.to_string()),
+                    route_state.retry_after_seconds,
+                )
+                .into_response();
+            }
+        };
+
+        route_state
+            .plugin
+            .upload(vec![UploadFile { filename, data }])
+            .await
+            .map_or_else(
+                |e| DbUpdateErrorResponse::new(e, route_state.retry_after_seconds).into_response(),
+                |result| (StatusCode::CREATED, Json(result)).into_response(),
+            )
     }
 
     pub(crate) async fn delete<P: RuntimeFilesUpdatePlugin, L: LockStateProvider>(
