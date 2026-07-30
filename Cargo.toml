@@ -164,6 +164,7 @@ disallowed_methods = "deny"
 string_slice = "deny"
 needless_pass_by_ref_mut = "deny"
 allow_attributes_without_reason = "deny"
+mod_module_files = "deny"
 
 [workspace.lints.rust]
 unexpected_cfgs = { level = "warn", check-cfg = ['cfg(nightly)'] }
