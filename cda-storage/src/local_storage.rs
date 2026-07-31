@@ -238,6 +238,7 @@ impl Storage for LocalStorage {
         let op = Operation::CopyCollection {
             source: source.clone(),
             dest: dest.clone(),
+            dest_existed: self.collection_dir(dest)?.exists(),
         };
         wal::append_operation(tx.journal_path(), &op)?;
         tx.record(op);
@@ -365,68 +366,69 @@ impl LocalStorageCommitter {
     /// In these cases, it's better to continue with the commit instead of failing it,
     /// as the end result is the same (the file/directory is gone).
     fn apply_operations(&self, operations: &[Operation]) -> Result<(), StorageError> {
-        for op in operations {
-            match op {
-                Operation::Write {
-                    collection,
-                    key,
-                    staged_path,
-                } => {
-                    let target_dir = self.collections_dir.join(collection.as_str());
-                    std::fs::create_dir_all(&target_dir)?;
-                    let target = target_dir.join(key);
+        operations
+            .iter()
+            .try_for_each(|op| -> Result<(), StorageError> {
+                match op {
+                    Operation::Write {
+                        collection,
+                        key,
+                        staged_path,
+                    } => {
+                        let target_dir = self.collections_dir.join(collection.as_str());
+                        std::fs::create_dir_all(&target_dir)?;
+                        let target = target_dir.join(key);
 
-                    // Backup existing file if present.
-                    if target.exists() {
-                        let backup = append_extension(&target, BACKUP_EXTENSION);
-                        std::fs::rename(&target, &backup)?;
-                    }
+                        // Backup existing file if present.
+                        if target.exists() {
+                            let backup = append_extension(&target, BACKUP_EXTENSION);
+                            std::fs::rename(&target, &backup)?;
+                        }
 
-                    // Move staged file into place.
-                    std::fs::rename(staged_path, &target)?;
-                }
-                Operation::Delete { collection, key } => {
-                    let target = self.collections_dir.join(collection.as_str()).join(key);
-                    if target.exists() {
-                        let backup = append_extension(&target, BACKUP_EXTENSION);
-                        std::fs::rename(&target, &backup)?;
+                        // Move staged file into place.
+                        std::fs::rename(staged_path, &target)?;
                     }
-                }
-                Operation::DeleteAll { collection } => {
-                    let dir = self.collections_dir.join(collection.as_str());
-                    if dir.exists() {
-                        backup_all_files_in_dir(&dir)?;
+                    Operation::Delete { collection, key } => {
+                        let target = self.collections_dir.join(collection.as_str()).join(key);
+                        if target.exists() {
+                            let backup = append_extension(&target, BACKUP_EXTENSION);
+                            std::fs::rename(&target, &backup)?;
+                        }
                     }
-                }
-                Operation::CreateCollection { name } => {
-                    let dir = self.collections_dir.join(name.as_str());
-                    std::fs::create_dir_all(&dir)?;
-                }
-                Operation::DeleteCollection { name } => {
-                    let dir = self.collections_dir.join(name.as_str());
-                    if dir.exists() {
-                        let backup = append_extension(&dir, BACKUP_EXTENSION);
-                        std::fs::rename(&dir, &backup)?;
+                    Operation::DeleteAll { collection } => {
+                        let dir = self.collections_dir.join(collection.as_str());
+                        if dir.exists() {
+                            backup_all_files_in_dir(&dir)?;
+                        }
                     }
-                }
-                Operation::CopyCollection { source, dest } => {
-                    let source_dir = self.collections_dir.join(source.as_str());
-                    let dest_dir = self.collections_dir.join(dest.as_str());
+                    Operation::CreateCollection { name } => {
+                        let dir = self.collections_dir.join(name.as_str());
+                        std::fs::create_dir_all(&dir)?;
+                    }
+                    Operation::DeleteCollection { name } => {
+                        let dir = self.collections_dir.join(name.as_str());
+                        if dir.exists() {
+                            let backup = append_extension(&dir, BACKUP_EXTENSION);
+                            std::fs::rename(&dir, &backup)?;
+                        }
+                    }
+                    Operation::CopyCollection { source, dest, .. } => {
+                        let source_dir = self.collections_dir.join(source.as_str());
+                        let dest_dir = self.collections_dir.join(dest.as_str());
 
-                    // Back up existing destination for rollback, then create a fresh directory.
-                    // This ensures "replace" semantics: the destination ends up with exactly
-                    // the source's contents, not a merge of old and new files.
-                    if dest_dir.exists() {
-                        let backup = append_extension(&dest_dir, BACKUP_EXTENSION);
-                        std::fs::rename(&dest_dir, &backup)?;
-                    }
+                        // Back up an existing destination before creating the replacement.
+                        if dest_dir.exists() {
+                            let backup = append_extension(&dest_dir, BACKUP_EXTENSION);
+                            std::fs::rename(&dest_dir, &backup)?;
+                        }
 
-                    std::fs::create_dir_all(&dest_dir)?;
-                    copy_dir_contents(&source_dir, &dest_dir)?;
+                        // Create a fresh directory to provide replace rather than merge semantics.
+                        std::fs::create_dir_all(&dest_dir)?;
+                        copy_dir_contents(&source_dir, &dest_dir)?;
+                    }
                 }
-            }
-        }
-        Ok(())
+                Ok(())
+            })
     }
 }
 

@@ -63,6 +63,8 @@ pub enum Operation {
         source: CollectionName,
         /// The destination collection.
         dest: CollectionName,
+        /// Whether the destination existed before the transaction began.
+        dest_existed: bool,
     },
 }
 

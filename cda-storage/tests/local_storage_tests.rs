@@ -865,6 +865,45 @@ async fn recovery_create_collection_with_write_removes_orphaned_dir() {
     );
 }
 
+/// A failed collection swap can leave a COMMITTING WAL where a pre-existing destination was
+/// never renamed to its backup (for example, when `rename` returns EXDEV). Recovery must retain
+/// that untouched current collection rather than treating it as an artifact of the failed copy.
+#[tokio::test]
+async fn recovery_preserves_untouched_existing_copy_destination() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    let collections_dir = root.join("collections");
+    let journal_dir = root.join("journal");
+    let staging_dir = journal_dir.join("staging");
+    let current_dir = collections_dir.join("diagnostic_database");
+    std::fs::create_dir_all(&current_dir).unwrap();
+    std::fs::create_dir_all(&staging_dir).unwrap();
+    std::fs::write(current_dir.join("ecu1.mdd"), b"current data").unwrap();
+
+    let wal_path = journal_dir.join("transaction.wal");
+    cda_storage::wal::create_wal(&wal_path).unwrap();
+    cda_storage::wal::append_operation(
+        &wal_path,
+        &cda_interfaces::storage_api::Operation::CopyCollection {
+            source: CollectionName::DiagnosticDatabaseNextUpdate,
+            dest: CollectionName::DiagnosticDatabase,
+            dest_existed: true,
+        },
+    )
+    .unwrap();
+    cda_storage::wal::mark_committing(&wal_path).unwrap();
+
+    let storage = LocalStorage::new(root).unwrap();
+    let current = storage
+        .get_collection(&CollectionName::DiagnosticDatabase)
+        .await
+        .unwrap();
+    let handle = current.read("ecu1.mdd").await.unwrap();
+    let mut data = vec![0; "current data".len()];
+    handle.read_at(0, &mut data).unwrap();
+    assert_eq!(data, b"current data");
+}
+
 /// Regression test for a bug where `list()` returned a file's on-disk (possibly mixed-case)
 /// name verbatim, while `metadata()`/`read()`/`file_path()` normalize keys to lowercase before
 /// resolving them to a path. On a case-sensitive filesystem this mismatch caused every
