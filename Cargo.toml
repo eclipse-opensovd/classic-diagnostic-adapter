@@ -175,6 +175,9 @@ opt-level = 3
 [profile.release-with-debug]
 inherits = "release"
 debug = true
+opt-level = 3
+codegen-units = 1
+strip = false
 
 [patch.crates-io]
 # Necessary because upstream is still using an older version of serde_qs (0.14 instead of 1.0.0-rc.3)

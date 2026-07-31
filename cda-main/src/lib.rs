@@ -51,6 +51,10 @@ pub mod error;
 pub mod mdd;
 pub mod update;
 
+// Valgrind and other profing tools intercept the system allocator, whereas mimalloc
+// manages allocations internally. Keep mimalloc in normal builds but omit it
+// from profiling builds so allocation call stacks remain visible.
+#[cfg(not(feature = "heap-profiling"))]
 #[global_allocator]
 static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
 
