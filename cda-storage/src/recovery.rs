@@ -192,13 +192,14 @@ pub(crate) fn remove_new_artifacts(
                     tracing::debug!(path = %dir.display(), "Removed newly created collection dir");
                 }
             }
-            Operation::CopyCollection { dest, .. } => {
+            Operation::CopyCollection {
+                dest, dest_existed, ..
+            } => {
                 let dest_dir = collections_dir.join(dest.as_str());
                 let backup = append_bak_extension(&dest_dir);
-                // If a .bak exists, the dest pre-existed and was backed up --
-                // rollback_partial_commit will restore it. Only remove if no .bak
-                // (dest was newly created by this op).
-                if dest_dir.exists() && !backup.exists() {
+                // Existing destinations are restored from their .bak file. Only remove a
+                // destination that was created by this transaction and has no backup.
+                if !dest_existed && dest_dir.exists() && !backup.exists() {
                     std::fs::remove_dir_all(&dest_dir)?;
                     tracing::debug!(
                         path = %dest_dir.display(),
@@ -280,10 +281,12 @@ fn has_new_artifacts(collections_dir: &Path, operations: &[Operation]) -> bool {
                     return true;
                 }
             }
-            Operation::CopyCollection { dest, .. } => {
+            Operation::CopyCollection {
+                dest, dest_existed, ..
+            } => {
                 let dest_dir = collections_dir.join(dest.as_str());
                 let backup = append_bak_extension(&dest_dir);
-                if dest_dir.exists() && !backup.exists() {
+                if !dest_existed && dest_dir.exists() && !backup.exists() {
                     return true;
                 }
             }
