@@ -197,6 +197,22 @@ pub struct BulkDataCreated {
     pub id: String,
 }
 
+/// Response body for deleting all bulk-data in a category (ISO 17978-3 Table 306).
+#[derive(Debug, Clone, Deserialize, Serialize, schemars::JsonSchema)]
+pub struct BulkDataDeleted {
+    pub deleted_ids: Vec<String>,
+    // spec requires an errors array to be present, however with transaction semantics
+    // this will always be an empty array
+    pub errors: Vec<BulkDataDeletionError>,
+}
+
+/// A bulk-data item that could not be deleted and its reason.
+#[derive(Debug, Clone, Deserialize, Serialize, schemars::JsonSchema)]
+pub struct BulkDataDeletionError {
+    pub id: String,
+    pub error: serde_json::Value,
+}
+
 /// Generic list wrapper used for bulk-data responses.
 #[derive(Deserialize, Serialize, Debug, schemars::JsonSchema)]
 pub struct BulkDataItems<T> {
@@ -220,6 +236,8 @@ impl<T> Default for BulkDataItems<T> {
 pub struct BulkDataDescriptor {
     pub id: String,
     pub mimetype: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub size: Option<u64>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -275,6 +293,12 @@ pub struct RuntimeFilesQuery {
     pub include_file_size: bool,
     #[serde(rename = "x-sovd2uds-include-revision", default)]
     pub include_revision: bool,
+    /// Accepted for ISO 17978-3 compatibility but not currently applied.
+    #[serde(rename = "created-after")]
+    pub created_after: Option<String>,
+    /// Accepted for ISO 17978-3 compatibility but not currently applied.
+    #[serde(rename = "created-before")]
+    pub created_before: Option<String>,
 }
 
 /// Stored state for a single database update execution.
@@ -326,14 +350,14 @@ pub trait RuntimeFilesUpdatePlugin: Send + Sync + 'static {
         files: Vec<UploadFile>,
     ) -> Result<BulkDataCreatedList, RuntimeUpdateError>;
 
-    /// Deletes all files from the next-update staging area.
-    async fn delete_nextupdate(&self) -> Result<(), RuntimeUpdateError>;
+    /// Deletes all files from the next-update staging area and returns their identifiers.
+    async fn delete_nextupdate(&self) -> Result<Vec<String>, RuntimeUpdateError>;
 
     /// Deletes a single file by ID from the next-update staging area.
     async fn delete_nextupdate_by_id(&self, file_id: &str) -> Result<(), RuntimeUpdateError>;
 
-    /// Deletes all files from the backup area.
-    async fn delete_backup(&self) -> Result<(), RuntimeUpdateError>;
+    /// Deletes all files from the backup area and returns their identifiers.
+    async fn delete_backup(&self) -> Result<Vec<String>, RuntimeUpdateError>;
 
     /// Starts an asynchronous execution (Apply, Rollback, or Cleanup).
     ///
@@ -413,7 +437,7 @@ impl<P: RuntimeFilesUpdatePlugin> RuntimeFilesUpdatePlugin for ExclusiveRuntimeP
         self.inner.upload(files).await
     }
 
-    async fn delete_nextupdate(&self) -> Result<(), RuntimeUpdateError> {
+    async fn delete_nextupdate(&self) -> Result<Vec<String>, RuntimeUpdateError> {
         let _guard = self.lock.write().await;
         self.inner.delete_nextupdate().await
     }
@@ -423,7 +447,7 @@ impl<P: RuntimeFilesUpdatePlugin> RuntimeFilesUpdatePlugin for ExclusiveRuntimeP
         self.inner.delete_nextupdate_by_id(file_id).await
     }
 
-    async fn delete_backup(&self) -> Result<(), RuntimeUpdateError> {
+    async fn delete_backup(&self) -> Result<Vec<String>, RuntimeUpdateError> {
         let _guard = self.lock.write().await;
         self.inner.delete_backup().await
     }

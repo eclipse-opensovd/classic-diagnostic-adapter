@@ -15,7 +15,10 @@ use std::sync::Arc;
 
 use axum::{
     Json,
-    http::{HeaderValue, StatusCode, header::RETRY_AFTER},
+    http::{
+        HeaderValue, StatusCode,
+        header::{LOCATION, RETRY_AFTER},
+    },
     response::{IntoResponse, Response},
 };
 use cda_interfaces::runtime_update_api::{
@@ -165,6 +168,26 @@ fn bulk_data_list_response(
     (StatusCode::OK, Json(list)).into_response()
 }
 
+fn bulk_data_created_response(
+    host: &str,
+    result: cda_interfaces::runtime_update_api::BulkDataCreatedList,
+) -> Response {
+    let Some(first) = result.items.first() else {
+        return DbUpdateErrorResponse::new(
+            RuntimeUpdateError::StorageError(cda_interfaces::storage_api::StorageError::Other(
+                "upload completed without creating bulk-data".to_owned(),
+            )),
+            0,
+        )
+        .into_response();
+    };
+    let location = format!(
+        "http://{host}/vehicle/v15/apps/sovd2uds/bulk-data/runtimefiles-nextupdate/{}",
+        first.id
+    );
+    (StatusCode::CREATED, [(LOCATION, location)], Json(result)).into_response()
+}
+
 pub(crate) async fn require_vehicle_lock(
     lock_state: &dyn LockStateProvider,
     claims: &dyn cda_plugin_security::Claims,
@@ -210,6 +233,7 @@ pub(crate) mod current {
 }
 
 pub(crate) mod nextupdate {
+    use aide::UseApi;
     use axum::{
         Json, RequestExt,
         extract::{FromRequest, Query, Request, State},
@@ -220,6 +244,7 @@ pub(crate) mod nextupdate {
         LockStateProvider, RuntimeFilesUpdatePlugin, RuntimeUpdateError, UploadFile,
     };
     use cda_plugin_security::Secured;
+    use opensovd_axum_extra::ExtractHost;
 
     use super::{DbUpdateErrorResponse, RuntimeUpdateRouteState, require_vehicle_lock};
 
@@ -378,6 +403,7 @@ pub(crate) mod nextupdate {
     /// the `Content-Disposition` header (e.g. `attachment; filename="foo.mdd"`).
     pub(crate) async fn post<P: RuntimeFilesUpdatePlugin, L: LockStateProvider>(
         State(route_state): State<RuntimeUpdateRouteState<P, L>>,
+        UseApi(ExtractHost(host), _): UseApi<ExtractHost, String>,
         Secured(sec_plugin): Secured,
         request: Request,
     ) -> impl IntoResponse {
@@ -389,10 +415,10 @@ pub(crate) mod nextupdate {
 
         match content_type.as_ref().map(|m| (m.type_(), m.subtype())) {
             Some((mime::MULTIPART, mime::FORM_DATA)) => {
-                handle_multipart_upload(route_state, sec_plugin, request).await
+                handle_multipart_upload(route_state, sec_plugin, host, request).await
             }
             Some((mime::APPLICATION, mime::OCTET_STREAM)) => {
-                handle_octet_stream_upload(route_state, sec_plugin, request).await
+                handle_octet_stream_upload(route_state, sec_plugin, host, request).await
             }
             _ => DbUpdateErrorResponse::new(
                 RuntimeUpdateError::ValidationFailed(
@@ -409,6 +435,7 @@ pub(crate) mod nextupdate {
     async fn handle_multipart_upload<P: RuntimeFilesUpdatePlugin, L: LockStateProvider>(
         route_state: RuntimeUpdateRouteState<P, L>,
         sec_plugin: cda_plugin_security::SecurityPluginData,
+        host: String,
         request: Request,
     ) -> Response {
         let mut multipart =
@@ -461,13 +488,14 @@ pub(crate) mod nextupdate {
 
         route_state.plugin.upload(files).await.map_or_else(
             |e| DbUpdateErrorResponse::new(e, route_state.retry_after_seconds).into_response(),
-            |result| (StatusCode::CREATED, Json(result)).into_response(),
+            |result| super::bulk_data_created_response(&host, result),
         )
     }
 
     async fn handle_octet_stream_upload<P: RuntimeFilesUpdatePlugin, L: LockStateProvider>(
         route_state: RuntimeUpdateRouteState<P, L>,
         sec_plugin: cda_plugin_security::SecurityPluginData,
+        host: String,
         request: Request,
     ) -> Response {
         let claims = sec_plugin.as_auth_plugin().claims();
@@ -517,7 +545,7 @@ pub(crate) mod nextupdate {
             .await
             .map_or_else(
                 |e| DbUpdateErrorResponse::new(e, route_state.retry_after_seconds).into_response(),
-                |result| (StatusCode::CREATED, Json(result)).into_response(),
+                |result| super::bulk_data_created_response(&host, result),
             )
     }
 
@@ -537,7 +565,16 @@ pub(crate) mod nextupdate {
         }
         route_state.plugin.delete_nextupdate().await.map_or_else(
             |e| DbUpdateErrorResponse::new(e, route_state.retry_after_seconds).into_response(),
-            |()| StatusCode::NO_CONTENT.into_response(),
+            |deleted_ids| {
+                (
+                    StatusCode::OK,
+                    Json(cda_interfaces::runtime_update_api::BulkDataDeleted {
+                        deleted_ids,
+                        errors: vec![],
+                    }),
+                )
+                    .into_response()
+            },
         )
     }
 
@@ -584,6 +621,7 @@ pub(crate) mod nextupdate {
 
 pub(crate) mod backup {
     use axum::{
+        Json,
         extract::{Query, State},
         http::StatusCode,
         response::{IntoResponse, Response},
@@ -622,7 +660,16 @@ pub(crate) mod backup {
         }
         route_state.plugin.delete_backup().await.map_or_else(
             |e| DbUpdateErrorResponse::new(e, route_state.retry_after_seconds).into_response(),
-            |()| StatusCode::NO_CONTENT.into_response(),
+            |deleted_ids| {
+                (
+                    StatusCode::OK,
+                    Json(cda_interfaces::runtime_update_api::BulkDataDeleted {
+                        deleted_ids,
+                        errors: vec![],
+                    }),
+                )
+                    .into_response()
+            },
         )
     }
 }

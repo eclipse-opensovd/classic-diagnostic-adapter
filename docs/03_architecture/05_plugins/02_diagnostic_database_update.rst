@@ -49,11 +49,11 @@ Diagnostic Database Update Plugin
 
        * - POST
          - ``/apps/sovd2uds/bulk-data/runtimefiles-nextupdate``
-         - Adds files to the next update of the diagnostic database. Two content types are supported: ``multipart/form-data`` (one or more files, filenames taken from each part's ``filename`` parameter), and ``application/octet-stream`` (a single file per request, whose filename must be provided via the ``Content-Disposition`` header, e.g. ``Content-Disposition: attachment; filename="foo.mdd"``).
+         - Adds files to the next update of the diagnostic database. Two content types are supported: ``multipart/form-data`` (one or more files, filenames taken from each part's ``filename`` parameter), and ``application/octet-stream`` (a single file per request, whose filename must be provided via the ``Content-Disposition`` header, e.g. ``Content-Disposition: attachment; filename="foo.mdd"``). Returns 201 with all created IDs and a ``Location`` header for the first created file.
 
        * - DELETE
          - ``/apps/sovd2uds/bulk-data/runtimefiles-nextupdate``
-         - Removes all pending changes to the next update of the diagnostic database, to reset the state of the next update to the currently active database.
+         - Removes all pending changes to the next update of the diagnostic database, to reset the state of the next update to the currently active database. Returns 200 with ``deleted_ids`` and ``errors``.
 
        * - DELETE
          - ``/apps/sovd2uds/bulk-data/runtimefiles-nextupdate/{id}``
@@ -65,7 +65,7 @@ Diagnostic Database Update Plugin
 
        * - DELETE
          - ``/apps/sovd2uds/bulk-data/runtimefiles-backup``
-         - Deletes the backup of the previously used diagnostic database, to free up storage space. This also means that rolling back to the previous state isn't possible anymore after deleting the backup.
+         - Deletes the backup of the previously used diagnostic database, to free up storage space. This also means that rolling back to the previous state isn't possible anymore after deleting the backup. Returns 200 with ``deleted_ids`` and ``errors``.
 
     .. list-table:: Operations Paths for Applying/Rolling Back/Cleaning Up Diagnostic Database Updates
        :header-rows: 1
@@ -76,7 +76,7 @@ Diagnostic Database Update Plugin
 
        * - GET
          - ``/apps/sovd2uds/operations/runtimefilesupdate/executions``
-         - Returns the list of current executions. Always contains at most one entry. Supports the ``include-schema`` query parameter.
+         - Returns the list of current execution identifiers. Always contains at most one entry.
 
        * - GET
          - ``/apps/sovd2uds/operations/runtimefilesupdate/executions/{id}``
@@ -91,6 +91,7 @@ Diagnostic Database Update Plugin
        - ``x-sovd2uds-include-hash`` (string, default: not present -- supported is only sha256) - to include file hashes of the files
        - ``x-sovd2uds-include-file-size`` (boolean, default: false) - to include file sizes of the files
        - ``x-sovd2uds-include-revision`` (boolean, default: false) - to include the revision inside the files
+       - ``created-after`` and ``created-before`` (string:date-time) are accepted for ISO 17978-3 compatibility but do not currently filter results.
 
     **Configuration File Support**
 
@@ -182,9 +183,8 @@ Diagnostic Database Update Plugin
     of the last execution remains available for inspection without requiring indefinite memory growth.
 
     The list endpoint ``GET /apps/sovd2uds/operations/runtimefilesupdate/executions`` returns all
-    currently tracked executions and always contains at most one entry. It supports the ``include-schema``
-    query parameter to include the JSON Schema of the response. No vehicle lock is required to use the
-    list or status endpoints.
+    currently tracked execution identifiers and always contains at most one entry. No vehicle lock is
+    required to use the list or status endpoints.
 
     After applying, or rolling back the diagnostic database, the new database must be active immediately, without
     requiring a restart of the CDA, and the old state must be available as a backup until the next update is applied,

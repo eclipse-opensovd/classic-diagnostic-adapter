@@ -35,7 +35,12 @@ pub(crate) async fn get(
     resource_response(
         &host,
         &uri,
-        vec![("flashfiles", None)],
+        vec![
+            ("flashfiles", None),
+            ("runtimefiles-current", None),
+            ("runtimefiles-nextupdate", None),
+            ("runtimefiles-backup", None),
+        ],
         query.include_schema,
     )
 }

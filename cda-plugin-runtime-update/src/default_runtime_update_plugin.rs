@@ -131,7 +131,7 @@ impl<
         crate::storage::upload_files(&*self.storage, &*self.security_handler, files).await
     }
 
-    async fn delete_nextupdate(&self) -> Result<(), RuntimeUpdateError> {
+    async fn delete_nextupdate(&self) -> Result<Vec<String>, RuntimeUpdateError> {
         crate::storage::delete_all_nextupdate(&*self.storage).await
     }
 
@@ -139,7 +139,7 @@ impl<
         crate::storage::delete_nextupdate_file(&*self.storage, file_id).await
     }
 
-    async fn delete_backup(&self) -> Result<(), RuntimeUpdateError> {
+    async fn delete_backup(&self) -> Result<Vec<String>, RuntimeUpdateError> {
         crate::storage::delete_all_backup(&*self.storage).await
     }
 
