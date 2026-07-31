@@ -14,7 +14,7 @@
 pub mod sovd2uds {
     pub mod bulk_data {
         pub use cda_interfaces::runtime_update_api::{
-            BulkDataCreated, BulkDataCreatedList, BulkDataList,
+            BulkDataCreated, BulkDataCreatedList, BulkDataDeleted, BulkDataList,
         };
 
         pub mod flash_files {
@@ -66,34 +66,33 @@ pub mod sovd2uds {
                 pub id: String,
             }
 
-            /// Response body returned by `GET /executions/{id}`.
+            /// Operation-specific values reported for an execution.
             #[derive(Debug, serde::Serialize, schemars::JsonSchema)]
-            pub struct ExecutionResponse {
-                /// Unique execution identifier.
-                pub id: String,
+            pub struct ExecutionResponseParameters {
                 /// The operation that was requested.
                 pub mode: ExecutionMode,
-                /// Current lifecycle state of the execution.
-                pub status: ExecutionStatusKind,
                 /// Human-readable failure description, present only when `status` is `failed`.
                 #[serde(skip_serializing_if = "Option::is_none")]
                 pub reason: Option<String>,
+            }
+
+            /// Response body returned by `GET /executions/{id}`.
+            #[derive(Debug, serde::Serialize, schemars::JsonSchema)]
+            pub struct ExecutionResponse {
+                /// Current lifecycle state of the execution.
+                pub status: ExecutionStatusKind,
+                /// Operation-specific status details.
+                pub parameters: ExecutionResponseParameters,
                 #[schemars(skip)]
                 #[serde(skip_serializing_if = "Option::is_none")]
                 pub schema: Option<schemars::Schema>,
             }
 
             /// Response body returned by `GET /executions`.
-            #[derive(Debug, serde::Serialize, schemars::JsonSchema)]
+            #[derive(serde::Serialize, schemars::JsonSchema)]
             pub struct ExecutionListResponse {
-                pub items: Vec<ExecutionResponse>,
-                #[schemars(skip)]
-                #[serde(skip_serializing_if = "Option::is_none")]
-                pub schema: Option<schemars::Schema>,
+                pub items: Vec<crate::common::operations::OperationIdItem>,
             }
-
-            /// Query parameters for the executions list endpoint.
-            pub type ExecutionsQuery = crate::IncludeSchemaQuery;
 
             impl From<UpdateExecution> for ExecutionResponse {
                 fn from(exec: UpdateExecution) -> Self {
@@ -103,12 +102,38 @@ pub mod sovd2uds {
                         ExecutionStatus::Failed(msg) => (ExecutionStatusKind::Failed, Some(msg)),
                     };
                     Self {
-                        id: exec.id,
-                        mode: exec.mode,
                         status,
-                        reason,
+                        parameters: ExecutionResponseParameters {
+                            mode: exec.mode,
+                            reason,
+                        },
                         schema: None,
                     }
+                }
+            }
+
+            #[cfg(test)]
+            mod tests {
+                use super::*;
+
+                #[test]
+                fn failed_execution_places_mode_and_reason_in_parameters() {
+                    let response = ExecutionResponse::from(UpdateExecution {
+                        id: "execution-id".to_string(),
+                        mode: ExecutionMode::Apply,
+                        status: ExecutionStatus::Failed("verification failed".to_string()),
+                    });
+
+                    assert_eq!(
+                        serde_json::to_value(response).unwrap(),
+                        serde_json::json!({
+                            "status": "failed",
+                            "parameters": {
+                                "mode": "apply",
+                                "reason": "verification failed"
+                            }
+                        })
+                    );
                 }
             }
         }

@@ -108,6 +108,7 @@ pub(crate) async fn list_collection_files(
         let mut item = BulkDataDescriptor {
             id: key.clone(),
             mimetype: mime_for_key(key),
+            name: Some(key.clone()),
             size: None,
             hash: None,
             hash_algorithm: None,
@@ -257,7 +258,18 @@ pub(crate) async fn delete_nextupdate_file(
 
 pub(crate) async fn delete_all_nextupdate(
     storage: &impl Storage,
-) -> Result<(), RuntimeUpdateError> {
+) -> Result<Vec<String>, RuntimeUpdateError> {
+    let mut deleted_ids = Vec::new();
+    for collection_name in [
+        CollectionName::DiagnosticDatabaseNextUpdate,
+        CollectionName::ConfigurationNextUpdate,
+    ] {
+        match storage.get_collection(&collection_name).await {
+            Ok(collection) => deleted_ids.extend(collection.list().await?),
+            Err(StorageError::CollectionNotFound(_)) => {}
+            Err(e) => return Err(RuntimeUpdateError::from(e)),
+        }
+    }
     let mut tx = storage.begin_transaction()?;
 
     match storage
@@ -277,7 +289,7 @@ pub(crate) async fn delete_all_nextupdate(
     }
 
     tx.commit().await?;
-    Ok(())
+    Ok(deleted_ids)
 }
 
 /// Returns `true` if both backup collections (MDD and configuration) are empty or do not exist.
@@ -293,7 +305,9 @@ pub(crate) async fn is_backup_empty(storage: &impl Storage) -> Result<bool, Runt
     Ok(mdd_backup.is_empty().await? && cfg_backup.is_empty().await?)
 }
 
-pub(crate) async fn delete_all_backup(storage: &impl Storage) -> Result<(), RuntimeUpdateError> {
+pub(crate) async fn delete_all_backup(
+    storage: &impl Storage,
+) -> Result<Vec<String>, RuntimeUpdateError> {
     let mdd_backup = storage
         .get_or_create_collection(&CollectionName::DiagnosticDatabaseBackup)
         .await?;
@@ -302,10 +316,12 @@ pub(crate) async fn delete_all_backup(storage: &impl Storage) -> Result<(), Runt
         .await?;
 
     let mut tx = storage.begin_transaction()?;
+    let mut deleted_ids = mdd_backup.list().await?;
+    deleted_ids.extend(cfg_backup.list().await?);
     mdd_backup.delete_all(&mut tx).await?;
     cfg_backup.delete_all(&mut tx).await?;
     tx.commit().await?;
-    Ok(())
+    Ok(deleted_ids)
 }
 
 /// Computes the "next update" state from the pending `NextUpdate` collections, falling back to
@@ -922,7 +938,7 @@ mod tests {
         let json = serde_json::to_string(&item).unwrap();
         assert_eq!(
             json,
-            r#"{"id":"plain.mdd","mimetype":"application/octet-stream"}"#
+            r#"{"id":"plain.mdd","mimetype":"application/octet-stream","name":"plain.mdd"}"#
         );
     }
 
@@ -942,6 +958,8 @@ mod tests {
             include_hash: Some(HashAlgorithm::Sha256),
             include_file_size: true,
             include_revision: true,
+            created_after: None,
+            created_before: None,
         };
         let result = list_collection_files(&*collection, &query).await.unwrap();
 

@@ -319,20 +319,20 @@ mod tests {
             Ok(<_>::default())
         }
 
-        async fn delete_nextupdate(&self) -> Result<(), RuntimeUpdateError> {
+        async fn delete_nextupdate(&self) -> Result<Vec<String>, RuntimeUpdateError> {
             self.concurrent_writes.fetch_add(1, Ordering::SeqCst);
             self.write_barrier.wait().await;
             self.write_notify.notified().await;
             self.concurrent_writes.fetch_sub(1, Ordering::SeqCst);
-            Ok(())
+            Ok(vec![])
         }
 
         async fn delete_nextupdate_by_id(&self, _file_id: &str) -> Result<(), RuntimeUpdateError> {
             Ok(())
         }
 
-        async fn delete_backup(&self) -> Result<(), RuntimeUpdateError> {
-            Ok(())
+        async fn delete_backup(&self) -> Result<Vec<String>, RuntimeUpdateError> {
+            Ok(vec![])
         }
 
         async fn start_execution(

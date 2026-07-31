@@ -61,6 +61,7 @@ async fn process_directory(
                         hash_algorithm: None,
                         id: file_name_to_id(&file_name),
                         mimetype: mime::APPLICATION_OCTET_STREAM.essence_str().to_string(),
+                        name: Some(file_name.clone()),
                         size: Some(metadata.len()),
                         origin_path: Some(file_name),
                         revision: None,
@@ -143,6 +144,7 @@ pub(crate) fn docs_get(op: TransformOperation) -> TransformOperation {
                 files: vec![sovd_interfaces::sovd2uds::BulkDataDescriptor {
                     id: "example_file".to_string(),
                     mimetype: "application/octet-stream".to_string(),
+                    name: Some("example_file".to_string()),
                     size: Some(1234),
                     hash: None,
                     hash_algorithm: None,
