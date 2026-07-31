@@ -87,7 +87,7 @@ pub fn require_config_source() -> Result<(), crate::AppError> {
 /// Returns [`AppError`](crate::AppError) when no configuration file
 /// is accessible.
 pub async fn seed_storage_from_config_file(
-    storage_dir: &str,
+    storage: &cda_storage::LocalStorage,
     config_file: &Path,
 ) -> Result<(), crate::AppError> {
     let data = tokio::fs::read(config_file).await.map_err(|source| {
@@ -112,16 +112,8 @@ pub async fn seed_storage_from_config_file(
         .to_string_lossy()
         .to_string();
 
-    let storage = match cda_storage::LocalStorage::new(storage_dir) {
-        Ok(s) => s,
-        Err(e) => {
-            tracing::warn!(error = %e, "Storage not available, skipping seed");
-            return Ok(());
-        }
-    };
-
     let count = cda_storage::storage_seed::seed_storage_collection(
-        &storage,
+        storage,
         &cda_interfaces::storage_api::CollectionName::Configuration,
         std::iter::once((key.clone(), data)),
     )
@@ -134,7 +126,6 @@ pub async fn seed_storage_from_config_file(
         tracing::info!(
             key,
             config_file,
-            storage_dir,
             "Seeded Configuration collection from config file"
         );
     }
@@ -154,16 +145,8 @@ pub async fn seed_storage_from_config_file(
 /// - `Ok(None)` - storage is unavailable or the collection is empty (no override).
 /// - `Ok(Some(config))` - exactly one configuration was found and parsed successfully.
 pub async fn load_config_with_storage_override(
-    storage_path: &str,
+    storage: &cda_storage::LocalStorage,
 ) -> Result<Option<configfile::Configuration>, AppError> {
-    let storage = match cda_storage::LocalStorage::new(storage_path) {
-        Ok(s) => s,
-        Err(e) => {
-            tracing::debug!(error = %e, "Storage not available, no config override");
-            return Ok(None);
-        }
-    };
-
     let collection = match storage
         .get_or_create_collection(&cda_interfaces::storage_api::CollectionName::Configuration)
         .await
@@ -244,17 +227,17 @@ mod tests {
 
     #[tokio::test]
     async fn seed_copies_config_file_into_empty_storage() {
-        let storage_dir = tempfile::tempdir().expect("storage dir");
+        let fixture = StorageFixture::new();
         let config_dir = tempfile::tempdir().expect("config dir");
         let config_file = config_dir.path().join("opensovd-cda.toml");
         std::fs::write(&config_file, b"[database]\npath = \".\"").expect("write config");
 
-        seed_storage_from_config_file(storage_dir.path().to_str().unwrap(), &config_file)
+        seed_storage_from_config_file(&fixture.storage, &config_file)
             .await
             .unwrap();
 
-        let storage = LocalStorage::new(storage_dir.path()).unwrap();
-        let collection = storage
+        let collection = fixture
+            .storage
             .get_or_create_collection(&CollectionName::Configuration)
             .await
             .unwrap();
@@ -264,33 +247,32 @@ mod tests {
 
     #[tokio::test]
     async fn seed_skips_when_collection_already_populated() {
-        let storage_dir = tempfile::tempdir().expect("storage dir");
+        let fixture = StorageFixture::new();
         let config_dir = tempfile::tempdir().expect("config dir");
         let config_file = config_dir.path().join("new.toml");
         std::fs::write(&config_file, b"[database]\npath = \".\"").expect("write config");
 
         // Pre-populate storage with an existing entry.
-        let storage = LocalStorage::new(storage_dir.path()).unwrap();
-        let collection = storage
+        let collection = fixture
+            .storage
             .get_or_create_collection(&CollectionName::Configuration)
             .await
             .unwrap();
-        let mut tx = storage.begin_transaction().unwrap();
+        let mut tx = fixture.storage.begin_transaction().unwrap();
         let mut data: &[u8] = b"EXISTING";
         collection
             .write(&mut tx, "existing.toml", &mut data)
             .await
             .unwrap();
         tx.commit().await.unwrap();
-        drop(storage);
 
-        seed_storage_from_config_file(storage_dir.path().to_str().unwrap(), &config_file)
+        seed_storage_from_config_file(&fixture.storage, &config_file)
             .await
             .unwrap();
 
         // Verify collection was NOT modified.
-        let storage = LocalStorage::new(storage_dir.path()).unwrap();
-        let collection = storage
+        let collection = fixture
+            .storage
             .get_or_create_collection(&CollectionName::Configuration)
             .await
             .unwrap();
@@ -300,10 +282,10 @@ mod tests {
 
     #[tokio::test]
     async fn seed_errors_on_nonexistent_config_file() {
-        let storage_dir = tempfile::tempdir().expect("storage dir");
+        let fixture = StorageFixture::new();
 
         let result = seed_storage_from_config_file(
-            storage_dir.path().to_str().unwrap(),
+            &fixture.storage,
             Path::new("/tmp/nonexistent_cda_config_test_12345.toml"),
         )
         .await;
@@ -313,18 +295,18 @@ mod tests {
 
     #[tokio::test]
     async fn seed_preserves_config_content_through_storage_roundtrip() {
-        let storage_dir = tempfile::tempdir().expect("storage dir");
+        let fixture = StorageFixture::new();
         let config_dir = tempfile::tempdir().expect("config dir");
         let original_data = b"[database]\npath = \"/app/database\"\n";
         let config_file = config_dir.path().join("opensovd-cda.toml");
         std::fs::write(&config_file, original_data).expect("write config");
 
-        seed_storage_from_config_file(storage_dir.path().to_str().unwrap(), &config_file)
+        seed_storage_from_config_file(&fixture.storage, &config_file)
             .await
             .unwrap();
 
-        let storage = LocalStorage::new(storage_dir.path()).unwrap();
-        let collection = storage
+        let collection = fixture
+            .storage
             .get_or_create_collection(&CollectionName::Configuration)
             .await
             .unwrap();
@@ -350,5 +332,21 @@ mod tests {
             err.contains("Failed to build configuration"),
             "unexpected error: {err:?}"
         );
+    }
+
+    struct StorageFixture {
+        storage: LocalStorage,
+        /// Carried along, so that it gets dropped at the end of the test
+        _temp_dir: tempfile::TempDir,
+    }
+    impl StorageFixture {
+        fn new() -> Self {
+            let temp_dir = tempfile::tempdir().expect("storage dir");
+            let storage = LocalStorage::new(temp_dir.path()).unwrap();
+            Self {
+                storage,
+                _temp_dir: temp_dir,
+            }
+        }
     }
 }

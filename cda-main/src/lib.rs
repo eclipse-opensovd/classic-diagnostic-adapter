@@ -289,20 +289,24 @@ where
 
     let (mut config, disk_loaded) = config::load_config_with_fallback(config_file);
 
-    if config.runtime_update_config.init_storage_from_config_file {
-        config::seed_storage_from_config_file(
-            &config.runtime_update_config.storage_dir,
-            config_file,
-        )
-        .await?;
-    }
+    match cda_storage::LocalStorage::new(&config.runtime_update_config.storage_dir) {
+        Ok(storage) => {
+            if config.runtime_update_config.init_storage_from_config_file {
+                config::seed_storage_from_config_file(&storage, config_file).await?;
+            }
 
-    if let Some(storage_config) =
-        config::load_config_with_storage_override(&config.runtime_update_config.storage_dir).await?
-    {
-        config = storage_config;
-    } else if !disk_loaded {
-        config::require_config_source()?;
+            if let Some(storage_config) =
+                config::load_config_with_storage_override(&storage).await?
+            {
+                config = storage_config;
+            } else if !disk_loaded {
+                config::require_config_source()?;
+            }
+        }
+        Err(e) => {
+            tracing::warn!(error = %e, "Storage not available, skipping seed and config override");
+            return Ok(());
+        }
     }
 
     // Command line arguments always take precedence over stored configuration
