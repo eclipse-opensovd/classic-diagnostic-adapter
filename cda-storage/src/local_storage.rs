@@ -242,13 +242,13 @@ impl Storage for LocalStorage {
                 return Err(StorageError::CollectionNotFound(source.to_string()));
             }
 
-        let op = Operation::CopyCollection {
-            source: source.clone(),
-            dest: dest.clone(),
-            dest_existed: self.collection_dir(dest)?.exists(),
-        };
-        wal::append_operation(tx.journal_path(), &op)?;
-        tx.record(op);
+            let op = Operation::CopyCollection {
+                source: source.clone(),
+                dest: dest.clone(),
+                dest_existed: self.collection_dir(dest)?.exists(),
+            };
+            wal::append_operation(tx.journal_path(), &op)?;
+            tx.record(op);
 
             Ok(())
         })();

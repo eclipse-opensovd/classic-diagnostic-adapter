@@ -431,48 +431,60 @@ mod tests {
         }
 
         impl EcuGateway for DoipStub {
-            async fn get_gateway_network_address(&self, _logical_address: u16) -> Option<String> {
-                self.online
+            fn get_gateway_network_address(
+                &self,
+                _logical_address: u16,
+            ) -> impl Future<Output = Option<String>> + Send {
+                let result = self
+                    .online
                     .load(Ordering::SeqCst)
-                    .then(|| "1.2.3.4".to_owned())
+                    .then(|| "1.2.3.4".to_owned());
+                std::future::ready(result)
             }
 
-            async fn send(
+            fn send(
                 &self,
                 _transmission_params: TransmissionParameters,
                 _message: ServicePayload,
                 _response_sender: mpsc::Sender<Result<Option<UdsResponse>, DiagServiceError>>,
                 _expect_uds_reply: bool,
-            ) -> Result<(), DiagServiceError> {
-                Ok(())
+            ) -> impl Future<Output = Result<(), DiagServiceError>> + Send {
+                std::future::ready(Ok(()))
             }
 
-            async fn ecu_online<T: EcuAddresses>(
+            fn ecu_online<T: EcuAddresses>(
                 &self,
                 ecu_name: &str,
                 _ecu_db: &RwLock<T>,
-            ) -> Result<(), DiagServiceError> {
+            ) -> impl Future<Output = Result<(), DiagServiceError>> + Send {
                 self.ecu_online_calls.fetch_add(1, Ordering::SeqCst);
-                if self.online.load(Ordering::SeqCst) {
+                let result = if self.online.load(Ordering::SeqCst) {
                     Ok(())
                 } else {
                     Err(DiagServiceError::EcuOffline(ecu_name.to_owned()))
-                }
+                };
+                std::future::ready(result)
             }
 
-            async fn send_functional(
+            fn send_functional(
                 &self,
                 _transmission_params: TransmissionParameters,
                 _message: ServicePayload,
                 _expected_ecu_logical_addrs: HashMap<u16, String>,
                 _timeout: std::time::Duration,
                 _expect_positive_response: bool,
-            ) -> Result<HashMap<String, Result<UdsResponse, DiagServiceError>>, DiagServiceError>
-            {
-                Ok(HashMap::default())
+            ) -> impl Future<
+                Output = Result<
+                    HashMap<String, Result<UdsResponse, DiagServiceError>>,
+                    DiagServiceError,
+                >,
+            > + Send {
+                std::future::ready(Ok(HashMap::default()))
             }
 
-            async fn shutdown(&mut self) {}
+            fn shutdown(&mut self) -> impl Future<Output = ()> + Send {
+                std::future::ready(())
+            }
         }
 
         struct EcuStub;

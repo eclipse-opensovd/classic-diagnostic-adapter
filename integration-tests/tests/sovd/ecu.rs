@@ -190,7 +190,7 @@ async fn test_can_only_ecu_from_configuration() {
         .map(|structures| {
             structures
                 .iter()
-                .flat_map(|ns| ns.get("Gateways").and_then(|g| g.as_array()))
+                .filter_map(|ns| ns.get("Gateways").and_then(|g| g.as_array()))
                 .flatten()
                 .collect()
         })

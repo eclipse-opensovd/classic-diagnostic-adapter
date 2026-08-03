@@ -708,29 +708,36 @@ impl EcuGateway for CanDiagGateway {
         }
     }
 
-    async fn get_ecu_network_address(&self, ecu_name: &str) -> Option<String> {
-        self.get_connection(&ecu_name.to_lowercase())
-            .map(|conn| conn.network_address())
+    fn get_ecu_network_address(
+        &self,
+        ecu_name: &str,
+    ) -> impl Future<Output = Option<String>> + Send {
+        let result = self
+            .get_connection(&ecu_name.to_lowercase())
+            .map(|conn| conn.network_address());
+        std::future::ready(result)
     }
 
-    async fn send_functional(
+    fn send_functional(
         &self,
         _transmission_params: cda_interfaces::TransmissionParameters,
         _message: cda_interfaces::ServicePayload,
         _expected_ecu_logical_addrs: cda_interfaces::HashMap<u16, String>,
         _timeout: std::time::Duration,
         _expect_positive_response: bool,
-    ) -> Result<
-        cda_interfaces::HashMap<String, Result<cda_interfaces::UdsResponse, DiagServiceError>>,
-        DiagServiceError,
-    > {
+    ) -> impl Future<
+        Output = Result<
+            cda_interfaces::HashMap<String, Result<cda_interfaces::UdsResponse, DiagServiceError>>,
+            DiagServiceError,
+        >,
+    > + Send {
         // CAN functional addressing is not implemented yet, see #417.
         // Fail the whole request honestly; the UDS layer maps a gateway-level
         // error to a per-ECU error result, so clients see WHY it failed
         // instead of every ECU appearing to be offline.
-        Err(DiagServiceError::RequestNotSupported(
+        std::future::ready(Err(DiagServiceError::RequestNotSupported(
             "functional addressing is not implemented for the CAN transport".to_owned(),
-        ))
+        )))
     }
 }
 
