@@ -84,6 +84,9 @@ chrono = { workspace = true }
 
 [features]
 default = ["health", "openssl", "config-optional"]
+# Uses Rust's system allocator so allocator-interposition profilers such as
+# Heaptrack and Valgrind can attribute CDA allocations.
+heap-profiling = []
 tokio-tracing = ["cda-interfaces/tokio-tracing", "cda-tracing/tokio-tracing"]
 openssl = ["cda-comm-doip/openssl"]
 openssl-vendored = [
