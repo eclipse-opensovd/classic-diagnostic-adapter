@@ -27,7 +27,7 @@ pub enum AppError {
     #[error("Configuration error `{message}`")]
     ConfigurationError {
         message: String,
-        source: Option<Box<dyn std::error::Error>>,
+        source: Option<Box<dyn std::error::Error + Send + Sync>>,
     },
     #[error("Data error `{0}`")]
     DataError(String),
