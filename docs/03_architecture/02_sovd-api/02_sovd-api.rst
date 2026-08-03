@@ -755,6 +755,226 @@ Faults -- SID 14\ :sub:`16` & 19\ :sub:`16`
     .. uml:: 02_sovd-api/images/fault_read.puml
 
 
+Locks
+-----
+
+.. arch:: Lock API
+    :id: arch~sovd-api-lock-api
+    :status: draft
+
+    All three lock scopes share the same CRUD API shape. The scope paths are:
+
+    - Vehicle: ``/locks``
+    - ECU: ``/components/{ecu-name}/locks``
+    - Functional group: ``/functions/functionalgroups/{group-name}/locks``
+
+    **Request fields (POST / PUT)**
+
+    .. list-table::
+       :header-rows: 1
+       :widths: 25 20 55
+
+       * - Field
+         - Type
+         - Description
+       * - ``lock_expiration``
+         - unsigned integer
+         - Duration in seconds from the current time. The absolute expiration instant is
+           computed at request time.
+       * - ``break_lock``
+         - boolean (optional, default ``false``)
+         - Whether an existing lock shall be broken/preempted. See
+           :need:`arch~sovd-api-lock-priority`.
+       * - ``x_sovd2uds_isexclusive``
+         - boolean (optional, default ``false``)
+         - Selects exclusive or non-exclusive enforcement mode.
+       * - Other properties
+         - any (optional)
+         - Passed verbatim to the priority plugin. Shape is vendor-defined.
+
+    **Response fields (POST / PUT)**
+
+    ``id`` (UUID string), ``owned`` (boolean, always ``true`` for the creating client).
+
+    **Response fields (GET /locks/{id})**
+
+    ``lock_expiration`` (ISO 8601 string). For defunct locks: additionally
+    ``x_sovd2uds_broken_by`` (string), ``x_sovd2uds_broken_at`` (ISO 8601 string), and
+    ``x_sovd2uds_current_holder`` (string, the identity of the current lock holder).
+
+
+.. arch:: Lock Exclusivity
+    :id: arch~sovd-api-lock-exclusivity
+    :status: draft
+
+    The ``x_sovd2uds_isexclusive`` boolean from the POST/PUT request body is stored as a field on the
+    lock object. When a request arrives at a communication endpoint the stored flag is
+    read to select the enforcement level applied by
+    :need:`arch~sovd-api-lock-ecu-enforcement` and
+    :need:`arch~sovd-api-lock-fg-enforcement`.
+
+
+.. arch:: Lock Expiration
+    :id: arch~sovd-api-lock-expiration
+    :status: draft
+
+    When a lock is created, a background task is spawned that fires at the computed
+    absolute expiration instant. On firing, the task acquires the write lock on the lock
+    map, confirms the stored lock ID still matches (guarding against a race with an extend
+    or a preemption), invokes the lock's cleanup function, and removes it from the map.
+
+    On ``PUT /locks/{id}`` (extend), the existing background task is aborted and a new one
+    is spawned for the updated instant.
+
+    On explicit ``DELETE /locks/{id}`` the background task is aborted before the cleanup
+    function is called, preventing a double-cleanup.
+
+    Defunct locks retain their original expiration task, but the task only removes the
+    defunct entry from the defunct store without invoking cleanup.
+
+
+.. arch:: ECU Lock Endpoint Enforcement
+    :id: arch~sovd-api-lock-ecu-enforcement
+    :links: arch~sovd-api-lock-exclusivity, arch~sovd-api-lock-defunct-enforcement
+    :status: draft
+
+    A ``validate_lock`` check is applied at the entry of every ECU communication endpoint.
+    The check proceeds as follows:
+
+    .. uml::
+        :caption: ECU Lock Enforcement Decision
+
+        @startuml
+        skinparam backgroundColor #FFFFFF
+        skinparam defaultTextAlignment center
+
+        start
+
+        :Identify caller from JWT claims;
+
+        if (Caller owns a defunct lock\nfor this ECU?) then (yes)
+          :HTTP 409 (Conflict);
+          stop
+        endif
+
+        if (Active lock held by\nanother client?) then (yes)
+          if (Lock is exclusive, or\nwrite operation?) then (yes)
+            :HTTP 423 (Locked);
+            stop
+          else (non-exclusive and read)
+            :Proceed;
+            stop
+          endif
+        else (no active lock by another)
+          if (Caller owns active ECU lock\nor vehicle lock?) then (yes)
+            :Proceed;
+            stop
+          else (no lock held by caller)
+            if (Write operation?) then (yes)
+              :HTTP 409 (Conflict\n- lock required);
+              stop
+            else (read)
+              :Proceed;
+              stop
+            endif
+          endif
+        endif
+
+        @enduml
+
+    The check accepts a vehicle lock owned by the caller as equivalent to owning the ECU
+    lock, granting full write access.
+
+
+.. arch:: Functional Group Lock Endpoint Enforcement
+    :id: arch~sovd-api-lock-fg-enforcement
+    :links: arch~sovd-api-lock-exclusivity, arch~sovd-api-lock-defunct-enforcement
+    :status: draft
+
+    A ``validate_fg_lock`` check is applied at the entry of every functional group
+    communication endpoint. It follows the same decision logic as
+    :need:`arch~sovd-api-lock-ecu-enforcement`, operating on the functional group lock
+    and the functional group endpoints (``/data``, ``/operations``, ``/modes``).
+
+    See also :need:`arch~sovd-api-functional-communication-locks` for the Tester Present
+    side-effects associated with acquiring and releasing a functional group lock.
+
+
+.. arch:: Vehicle Lock Blocks Child Lock Acquisition
+    :id: arch~sovd-api-lock-vehicle-blocking
+    :status: draft
+
+    The ECU lock POST handler and the functional group lock POST handler each check for an
+    active vehicle lock before creating the child lock. If a vehicle lock is present and
+    owned by a different client the request is rejected with HTTP 409.
+
+    If the vehicle lock is held by the same caller, or if no vehicle lock is held, the
+    child lock creation proceeds normally.
+
+
+.. arch:: Lock Priority Mechanism Interface
+    :id: arch~sovd-api-lock-priority
+    :links: arch~sovd-api-lock-defunct
+    :status: draft
+
+    When a lock POST request arrives and a lock is already held by a different client, the
+    priority mechanism -- if one is registered -- is invoked before returning HTTP 409.
+
+    **Mechanism input**
+
+    - JWT claims of the requesting client
+    - The identity of the current lock holder, as well as the original properties
+      (TODO: probably better to send all locks to mechanism and let mechanism handle it?)
+
+    **Mechanism output**
+
+    - ``granted: bool`` -- whether the requesting client has sufficient priority to preempt
+    - ``broken_by: String`` -- the identity string to record in the defunct lock's
+      ``x_sovd2uds_broken_by`` field (typically the requesting client's JWT ``sub``, but
+      the exact value is determined by the plugin)
+
+    If ``granted`` is ``true``, the existing lock is transitioned to defunct state (see
+    :need:`arch~sovd-api-lock-defunct`) and a new lock is created for the requesting
+    client. If no mechanism is registered the handler returns HTTP 409 as normal.
+
+
+.. arch:: Defunct Lock Lifecycle
+    :id: arch~sovd-api-lock-defunct
+    :status: draft
+
+    When preemption is granted by the priority mechanism:
+
+    1. The current active lock is marked defunct: a ``defunct`` flag is set on the lock
+       object along with ``broken_by`` (string returned by the mechanism) and ``broken_at``
+       (current UTC timestamp).
+    2. The defunct lock is moved from the active lock slot to a separate per-entity defunct
+       store. The active slot is now free for the new lock.
+    3. The defunct lock's original expiration task is **not** aborted. When it fires it
+       removes the defunct entry from the defunct store without invoking any cleanup
+       function.
+    4. A new lock is created for the preempting client and placed in the active slot with
+       its own expiration task and cleanup function.
+
+    ``GET /locks`` returns both the active lock and any defunct locks for the entity.
+    Defunct lock entries carry ``x_sovd2uds_broken_by``, ``x_sovd2uds_broken_at``, and
+    ``x_sovd2uds_current_holder`` in addition to the standard fields.
+
+
+.. arch:: HTTP 409 for Preempted Clients
+    :id: arch~sovd-api-lock-defunct-enforcement
+    :status: draft
+
+    The ``validate_lock`` and ``validate_fg_lock`` checks are extended with a pre-check
+    that runs before the existing ownership and exclusivity evaluation:
+
+    1. Look up the defunct store for the target entity.
+    2. If any defunct lock in that store is owned by the calling client, return HTTP 409
+       immediately.
+
+    This pre-check takes precedence over the HTTP 409 or HTTP 423 that would otherwise be
+    returned for a missing or non-owned active lock.
+
+
 Generic Service
 ---------------
 

@@ -10,6 +10,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import os
+import shutil
 
 extensions = [
     "sphinx_needs",
@@ -40,7 +41,11 @@ copyright = "%Y, Eclipse OpenSOVD authors"
 version = "1.0"
 html_theme = "bizstyle"
 
-plantuml = os.environ.get("PLANTUML", "java -jar /usr/local/bin/plantuml.jar")
+plantuml = (
+    os.environ.get("PLANTUML")
+    or shutil.which("plantuml")
+    or "java -jar /usr/local/bin/plantuml.jar"
+)
 
 # a needs json should be generated
 needs_build_json = True
