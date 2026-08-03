@@ -246,7 +246,7 @@ async fn test_ecu_session_switching() {
         &runtime.config,
         &auth,
         ecu_endpoint,
-        StatusCode::FORBIDDEN,
+        StatusCode::CONFLICT,
     )
     .await
     .unwrap();
@@ -620,7 +620,7 @@ async fn test_communication_control() {
         &runtime.config,
         &auth,
         ecu_endpoint,
-        StatusCode::FORBIDDEN,
+        StatusCode::CONFLICT,
     )
     .await
     .unwrap();
@@ -861,7 +861,7 @@ async fn test_communication_control() {
         &runtime.config,
         &auth,
         ecu_endpoint,
-        StatusCode::FORBIDDEN,
+        StatusCode::CONFLICT,
     )
     .await
     .unwrap();

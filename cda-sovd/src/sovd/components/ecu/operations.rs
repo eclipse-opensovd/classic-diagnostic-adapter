@@ -918,7 +918,6 @@ pub(crate) mod service {
                 })
                 .with(openapi::error_bad_request)
                 .with(openapi::error_not_found)
-                .with(openapi::error_forbidden)
                 .with(openapi::error_conflict)
                 .with(openapi::error_internal_server)
                 .with(openapi::error_bad_gateway)
@@ -1839,7 +1838,7 @@ pub(crate) mod service {
                 .with(openapi::error_not_found)
                 .with(openapi::error_bad_request)
                 .with(openapi::error_bad_gateway)
-                .with(openapi::error_forbidden)
+                .with(openapi::error_conflict)
             }
         }
     }

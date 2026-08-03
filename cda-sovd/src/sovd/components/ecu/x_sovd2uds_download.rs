@@ -118,6 +118,7 @@ pub(crate) mod request_download {
             WebserverEcuState, create_response_schema,
             error::{ApiError, ErrorWrapper, VendorErrorCode},
             field_parse_errors_to_json,
+            locks::validate_lock,
             x_sovd2uds_download::{
                 FLASH_DOWNLOAD_UPLOAD_FUNC_CLASS, sovd_to_func_class_service_exec,
             },
@@ -130,10 +131,19 @@ pub(crate) mod request_download {
             Query<sovd_interfaces::IncludeSchemaQuery>,
             ApiError,
         >,
-        State(WebserverEcuState { ecu_name, uds, .. }): State<WebserverEcuState<T, U>>,
+        State(WebserverEcuState {
+            ecu_name,
+            uds,
+            locks,
+            ..
+        }): State<WebserverEcuState<T, U>>,
         body: Json<sovd2uds::download::request_download::put::Request>,
     ) -> Response {
         let include_schema = query.include_schema;
+        let claims = security_plugin.as_auth_plugin().claims();
+        if let Some(response) = validate_lock(&claims, &ecu_name, &locks, include_schema).await {
+            return response;
+        }
         let schema = if include_schema {
             'schema: {
                 let Ok(service) = uds
@@ -236,6 +246,7 @@ pub(crate) mod request_download {
                 },
             )
             .with(openapi::error_bad_request)
+            .with(openapi::error_conflict)
             .with(openapi::error_not_found)
             .with(openapi::error_internal_server)
             .with(openapi::error_bad_gateway)
@@ -265,6 +276,7 @@ pub(crate) mod flash_transfer {
         sovd::{
             IntoSovd, WebserverEcuState, create_schema,
             error::{ApiError, ErrorWrapper},
+            locks::validate_lock,
             x_sovd2uds_download::FLASH_DOWNLOAD_UPLOAD_FUNC_CLASS,
         },
     };
@@ -279,11 +291,17 @@ pub(crate) mod flash_transfer {
             ecu_name,
             uds,
             flash_data,
+            locks,
             ..
         }): State<WebserverEcuState<T, U>>,
         body: Json<sovd2uds::download::flash_transfer::post::Request>,
     ) -> Response {
         let include_schema = query.include_schema;
+        let claims = security_plugin.as_auth_plugin().claims();
+        if let Some(response) = validate_lock(&claims, &ecu_name, &locks, include_schema).await {
+            return response;
+        }
+        let owner = claims.sub().to_owned();
         match flash_data
             .read()
             .await
@@ -326,6 +344,7 @@ pub(crate) mod flash_transfer {
                                 .to_string_lossy(),
                             offset: body.offset,
                             length: body.length,
+                            owner,
                             transfer_meta_data: transfer,
                         },
                     )
@@ -372,6 +391,7 @@ pub(crate) mod flash_transfer {
                 },
             )
             .with(openapi::error_bad_request)
+            .with(openapi::error_conflict)
             .with(openapi::error_not_found)
     }
 
@@ -485,11 +505,26 @@ pub(crate) mod flash_transfer {
         }
 
         pub(crate) async fn delete<T: UdsEcu + Clone, U: FileManager>(
-            UseApi(Secured(_security_plugin), _): UseApi<Secured, ()>,
+            UseApi(Secured(security_plugin), _): UseApi<Secured, ()>,
             Path(id): Path<IdPathParam>,
-            State(WebserverEcuState { ecu_name, uds, .. }): State<WebserverEcuState<T, U>>,
+            State(WebserverEcuState {
+                ecu_name,
+                uds,
+                locks,
+                ..
+            }): State<WebserverEcuState<T, U>>,
         ) -> Response {
-            match uds.ecu_flash_transfer_exit(&ecu_name, &id).await {
+            let claims = security_plugin.as_auth_plugin().claims();
+            if let Some(response) =
+                crate::sovd::locks::validate_lock(&claims, &ecu_name, &locks, false).await
+            {
+                return response;
+            }
+
+            match uds
+                .ecu_flash_transfer_exit(&ecu_name, &id, claims.sub())
+                .await
+            {
                 Ok(()) => StatusCode::NO_CONTENT.into_response(),
                 Err(e) => ErrorWrapper {
                     error: e.into(),
@@ -505,6 +540,7 @@ pub(crate) mod flash_transfer {
                  started.",
             )
             .response_with::<204, (), _>(|res| res)
+            .with(openapi::error_conflict)
             .with(openapi::error_not_found)
             .with(openapi::error_bad_request)
         }
@@ -579,6 +615,7 @@ pub(crate) mod transferexit {
         openapi,
         sovd::{
             WebserverEcuState,
+            locks::validate_lock,
             x_sovd2uds_download::{
                 FLASH_DOWNLOAD_UPLOAD_FUNC_CLASS, sovd_to_func_class_service_exec,
             },
@@ -587,8 +624,18 @@ pub(crate) mod transferexit {
 
     pub(crate) async fn put<T: UdsEcu + Clone, U: FileManager>(
         UseApi(Secured(security_plugin), _): UseApi<Secured, ()>,
-        State(WebserverEcuState { ecu_name, uds, .. }): State<WebserverEcuState<T, U>>,
+        State(WebserverEcuState {
+            ecu_name,
+            uds,
+            locks,
+            ..
+        }): State<WebserverEcuState<T, U>>,
     ) -> Response {
+        let claims = security_plugin.as_auth_plugin().claims();
+        if let Some(response) = validate_lock(&claims, &ecu_name, &locks, false).await {
+            return response;
+        }
+
         match sovd_to_func_class_service_exec::<T>(
             &uds,
             FLASH_DOWNLOAD_UPLOAD_FUNC_CLASS,
@@ -608,6 +655,7 @@ pub(crate) mod transferexit {
     pub(crate) fn docs_put(op: TransformOperation) -> TransformOperation {
         op.description("Exit a transfer session")
             .response_with::<204, (), _>(|res| res)
+            .with(openapi::error_conflict)
             .with(openapi::error_bad_request)
             .with(openapi::error_not_found)
             .with(openapi::error_bad_gateway)
