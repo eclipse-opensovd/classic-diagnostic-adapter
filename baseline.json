@@ -66,6 +66,15 @@
       "crate": "cda-database"
     },
     {
+      "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-storage/src/recovery.rs",
+      "function": "has_new_artifacts",
+      "line": 265,
+      "cyclomatic": 12.0,
+      "coverage": 0.0,
+      "crap": 156.0,
+      "crate": "cda-storage"
+    },
+    {
       "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-sovd/src/sovd/functions/functional_groups/data.rs",
       "function": "diag_service::functional_data_request",
       "line": 243,
@@ -73,15 +82,6 @@
       "coverage": 0.0,
       "crap": 156.0,
       "crate": "cda-sovd"
-    },
-    {
-      "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-storage/src/recovery.rs",
-      "function": "has_new_artifacts",
-      "line": 264,
-      "cyclomatic": 11.0,
-      "coverage": 0.0,
-      "crap": 132.0,
-      "crate": "cda-storage"
     },
     {
       "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-comm-doip/src/connections.rs",
@@ -768,15 +768,6 @@
       "crate": "cda-core"
     },
     {
-      "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-storage/src/recovery.rs",
-      "function": "remove_new_artifacts",
-      "line": 170,
-      "cyclomatic": 16.0,
-      "coverage": 64.51612903225806,
-      "crap": 27.437548252828037,
-      "crate": "cda-storage"
-    },
-    {
       "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-core/src/diag_kernel/diagservices.rs",
       "function": "DiagServiceResponseStruct::map_data",
       "line": 257,
@@ -838,15 +829,6 @@
       "coverage": 30.76923076923077,
       "crap": 23.25898953117888,
       "crate": "cda-sovd"
-    },
-    {
-      "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-storage/src/local_storage.rs",
-      "function": "LocalStorageCommitter::apply_operations",
-      "line": 367,
-      "cyclomatic": 23.0,
-      "coverage": 93.33333333333333,
-      "crap": 23.15674074074074,
-      "crate": "cda-storage"
     },
     {
       "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-core/src/diag_kernel/operations.rs",
@@ -923,7 +905,7 @@
     {
       "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-storage/src/local_storage.rs",
       "function": "LocalStorageCommitter::apply",
-      "line": 262,
+      "line": 263,
       "cyclomatic": 17.0,
       "coverage": 75.60975609756098,
       "crap": 21.19320671493449,
@@ -1171,6 +1153,15 @@
       "coverage": 91.75257731958763,
       "crap": 19.202517221392547,
       "crate": "cda-core"
+    },
+    {
+      "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-storage/src/recovery.rs",
+      "function": "remove_new_artifacts",
+      "line": 170,
+      "cyclomatic": 17.0,
+      "coverage": 80.64516129032258,
+      "crap": 19.09539793897486,
+      "crate": "cda-storage"
     },
     {
       "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-plugin-runtime-update/src/storage.rs",
@@ -1481,7 +1472,7 @@
     {
       "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-storage/src/recovery.rs",
       "function": "delete_all_backup_files",
-      "line": 302,
+      "line": 305,
       "cyclomatic": 13.0,
       "coverage": 80.95238095238095,
       "crap": 14.167908433214556,
@@ -1580,7 +1571,7 @@
     {
       "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-storage/src/local_storage.rs",
       "function": "cleanup_backup_files",
-      "line": 470,
+      "line": 472,
       "cyclomatic": 13.0,
       "coverage": 94.73684210526315,
       "crap": 13.024639160227439,
@@ -1850,7 +1841,7 @@
     {
       "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-storage/src/local_storage.rs",
       "function": "rollback_applied_operations",
-      "line": 503,
+      "line": 505,
       "cyclomatic": 3.0,
       "coverage": 0.0,
       "crap": 12.0,
@@ -1859,7 +1850,7 @@
     {
       "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-storage/src/local_storage.rs",
       "function": "sync_collection_dirs",
-      "line": 523,
+      "line": 525,
       "cyclomatic": 12.0,
       "coverage": 100.0,
       "crap": 12.0,
@@ -2120,7 +2111,7 @@
     {
       "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-storage/src/recovery.rs",
       "function": "restore_bak_files_in_dir",
-      "line": 333,
+      "line": 336,
       "cyclomatic": 10.0,
       "coverage": 85.0,
       "crap": 10.3375,
@@ -2687,7 +2678,7 @@
     {
       "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-storage/src/recovery.rs",
       "function": "has_backup_files",
-      "line": 219,
+      "line": 220,
       "cyclomatic": 7.0,
       "coverage": 73.07692307692307,
       "crap": 7.956247155211654,
@@ -2804,7 +2795,7 @@
     {
       "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-storage/src/recovery.rs",
       "function": "cleanup_staging_dir",
-      "line": 363,
+      "line": 366,
       "cyclomatic": 7.0,
       "coverage": 83.33333333333334,
       "crap": 7.226851851851851,
@@ -2813,7 +2804,7 @@
     {
       "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-storage/src/local_storage.rs",
       "function": "cleanup_directory_contents",
-      "line": 574,
+      "line": 576,
       "cyclomatic": 7.0,
       "coverage": 83.33333333333334,
       "crap": 7.226851851851851,
@@ -2912,7 +2903,7 @@
     {
       "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-storage/src/local_storage.rs",
       "function": "copy_dir_contents",
-      "line": 455,
+      "line": 457,
       "cyclomatic": 7.0,
       "coverage": 90.9090909090909,
       "crap": 7.036814425244177,
@@ -3290,7 +3281,7 @@
     {
       "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-storage/src/local_storage.rs",
       "function": "backup_all_files_in_dir",
-      "line": 442,
+      "line": 444,
       "cyclomatic": 6.0,
       "coverage": 90.0,
       "crap": 6.036,
@@ -4467,6 +4458,15 @@
       "crate": "cda-comm-uds"
     },
     {
+      "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-storage/src/local_storage.rs",
+      "function": "LocalStorage::copy_collection",
+      "line": 227,
+      "cyclomatic": 5.0,
+      "coverage": 100.0,
+      "crap": 5.0,
+      "crate": "cda-storage"
+    },
+    {
       "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-sovd/src/sovd/locks.rs",
       "function": "delete_lock",
       "line": 993,
@@ -4658,7 +4658,7 @@
     {
       "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-storage/src/local_storage.rs",
       "function": "LocalStorageCommitter::discard",
-      "line": 345,
+      "line": 346,
       "cyclomatic": 4.0,
       "coverage": 81.81818181818183,
       "crap": 4.096168294515402,
@@ -5127,15 +5127,6 @@
       "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-storage/src/local_storage.rs",
       "function": "LocalStorage::delete_collection",
       "line": 210,
-      "cyclomatic": 4.0,
-      "coverage": 100.0,
-      "crap": 4.0,
-      "crate": "cda-storage"
-    },
-    {
-      "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-storage/src/local_storage.rs",
-      "function": "LocalStorage::copy_collection",
-      "line": 227,
       "cyclomatic": 4.0,
       "coverage": 100.0,
       "crap": 4.0,
@@ -5700,15 +5691,6 @@
       "crate": "cda-database"
     },
     {
-      "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-interfaces/src/strings.rs",
-      "function": "Strings::get_or_insert",
-      "line": 94,
-      "cyclomatic": 3.0,
-      "coverage": 92.85714285714286,
-      "crap": 3.003279883381924,
-      "crate": "cda-interfaces"
-    },
-    {
       "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-comm-doip/src/lib.rs",
       "function": "DoipDiagGateway::shutdown",
       "line": 486,
@@ -5851,6 +5833,15 @@
       "coverage": 100.0,
       "crap": 3.0,
       "crate": "cda-database"
+    },
+    {
+      "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-interfaces/src/strings.rs",
+      "function": "Strings::get_or_insert",
+      "line": 94,
+      "cyclomatic": 3.0,
+      "coverage": 100.0,
+      "crap": 3.0,
+      "crate": "cda-interfaces"
     },
     {
       "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-interfaces/src/can_id.rs",
@@ -7070,7 +7061,7 @@
     {
       "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-interfaces/src/storage_api/transaction.rs",
       "function": "Transaction::drop",
-      "line": 204,
+      "line": 206,
       "cyclomatic": 2.0,
       "coverage": 100.0,
       "crap": 2.0,
@@ -8825,7 +8816,7 @@
     {
       "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-storage/src/recovery.rs",
       "function": "is_dir_empty",
-      "line": 388,
+      "line": 391,
       "cyclomatic": 2.0,
       "coverage": 100.0,
       "crap": 2.0,
@@ -9831,6 +9822,15 @@
       "crate": "cda-comm-uds"
     },
     {
+      "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-storage/src/local_storage.rs",
+      "function": "LocalStorageCommitter::apply_operations",
+      "line": 368,
+      "cyclomatic": 1.0,
+      "coverage": 93.75,
+      "crap": 1.000244140625,
+      "crate": "cda-storage"
+    },
+    {
       "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-database/src/datatypes/database_builder.rs",
       "function": "EcuDataBuilder::create_text_table_compu_method",
       "line": 1327,
@@ -10742,7 +10742,7 @@
     {
       "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-interfaces/src/storage_api/transaction.rs",
       "function": "Transaction::new",
-      "line": 137,
+      "line": 139,
       "cyclomatic": 1.0,
       "coverage": 100.0,
       "crap": 1.0,
@@ -10751,7 +10751,7 @@
     {
       "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-interfaces/src/storage_api/transaction.rs",
       "function": "Transaction::commit",
-      "line": 163,
+      "line": 165,
       "cyclomatic": 1.0,
       "coverage": 100.0,
       "crap": 1.0,
@@ -10760,7 +10760,7 @@
     {
       "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-interfaces/src/storage_api/transaction.rs",
       "function": "Transaction::rollback",
-      "line": 174,
+      "line": 176,
       "cyclomatic": 1.0,
       "coverage": 100.0,
       "crap": 1.0,
@@ -10769,7 +10769,7 @@
     {
       "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-interfaces/src/storage_api/transaction.rs",
       "function": "Transaction::staging_dir",
-      "line": 183,
+      "line": 185,
       "cyclomatic": 1.0,
       "coverage": 100.0,
       "crap": 1.0,
@@ -10778,7 +10778,7 @@
     {
       "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-interfaces/src/storage_api/transaction.rs",
       "function": "Transaction::record",
-      "line": 192,
+      "line": 194,
       "cyclomatic": 1.0,
       "coverage": 100.0,
       "crap": 1.0,
@@ -10787,7 +10787,7 @@
     {
       "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-interfaces/src/storage_api/transaction.rs",
       "function": "Transaction::journal_path",
-      "line": 198,
+      "line": 200,
       "cyclomatic": 1.0,
       "coverage": 100.0,
       "crap": 1.0,
@@ -13271,7 +13271,7 @@
     {
       "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-storage/src/recovery.rs",
       "function": "append_bak_extension",
-      "line": 380,
+      "line": 383,
       "cyclomatic": 1.0,
       "coverage": 100.0,
       "crap": 1.0,
@@ -13316,7 +13316,7 @@
     {
       "file": "/home/runner/work/classic-diagnostic-adapter/classic-diagnostic-adapter/cda-storage/src/local_storage.rs",
       "function": "append_extension",
-      "line": 434,
+      "line": 436,
       "cyclomatic": 1.0,
       "coverage": 100.0,
       "crap": 1.0,
