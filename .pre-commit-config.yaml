@@ -10,6 +10,9 @@
 # SPDX-License-Identifier: Apache-2.0
 
 exclude: ^cda-database/src/(flatbuf/diagnostic_description|proto/fileformat)\.rs$
+default_install_hook_types:
+  - pre-commit
+  - commit-msg
 
 repos:
   - repo: https://github.com/pre-commit/pre-commit-hooks
@@ -45,6 +48,11 @@ repos:
     hooks:
       - id: shellcheck
         exclude: ^testcontainer/ecu-sim/gradlew$
+  - repo: https://github.com/compilerla/conventional-pre-commit
+    rev: v4.4.0
+    hooks:
+      - id: conventional-pre-commit
+        stages: [commit-msg]
   - repo: https://github.com/compilerla/conventional-pre-commit
     rev: v4.4.0
     hooks:
