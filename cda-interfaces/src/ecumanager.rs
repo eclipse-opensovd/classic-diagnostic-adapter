@@ -11,8 +11,6 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-use std::future::Future;
-
 use async_trait::async_trait;
 use serde::Serialize;
 use strum_macros::Display;

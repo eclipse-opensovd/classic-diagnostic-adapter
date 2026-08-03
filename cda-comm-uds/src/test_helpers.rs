@@ -13,7 +13,7 @@
 
 //! Shared test doubles for `cda-comm-uds` tests.
 
-use std::{future::Future, time::Duration};
+use std::time::Duration;
 
 use async_trait::async_trait;
 use cda_interfaces::{
