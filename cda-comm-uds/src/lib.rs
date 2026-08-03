@@ -14,9 +14,9 @@
 use std::sync::{Arc, atomic::AtomicBool};
 
 use cda_interfaces::{
-    DiagComm, DiagServiceError, EcuGateway, EcuManager, FunctionalDescriptionConfig, HashMap,
-    HashMapExtensions, HashSet, HashSetExtensions, SchemaDescription, SchemaProvider, UdsEcu,
-    UdsEcuDb, datatypes::FaultConfig,
+    DiagComm, DiagServiceError, EcuGateway, EcuManager, FunctionalDescriptionConfig,
+    FunctionalTransport, HashMap, HashMapExtensions, HashSet, HashSetExtensions, SchemaDescription,
+    SchemaProvider, UdsEcu, UdsEcuDb, datatypes::FaultConfig,
 };
 use tokio::{
     sync::{Mutex, RwLock, Semaphore, mpsc},
@@ -197,7 +197,7 @@ impl<S: EcuGateway, T: EcuManager> cda_interfaces::Shutdown for UdsManager<S, T>
     }
 }
 
-impl<S: EcuGateway, T: EcuManager> UdsEcu for UdsManager<S, T> {}
+impl<S: EcuGateway + FunctionalTransport, T: EcuManager> UdsEcu for UdsManager<S, T> {}
 
 impl<S: EcuGateway, T: EcuManager> SchemaProvider for UdsManager<S, T> {
     async fn schema_for_request(

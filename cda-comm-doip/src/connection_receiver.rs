@@ -100,27 +100,6 @@ pub(super) fn handle_diagnostic_message_ack(
         skip_all,
         fields(dlt_context = dlt_ctx!("DOIP"))
     )]
-pub(super) async fn handle_diagnostic_message(
-    gateway_name: &str,
-    outtx: &HashMap<u16, broadcast::Sender<Result<DiagnosticResponse, EcuError>>>,
-    msg: doip_definitions::payload::DiagnosticMessage,
-) {
-    let addr = u16::from_be_bytes(msg.source_address);
-    // ISO 13400-2:2012 9.5 states that only a server should send ACKs,
-    // therefore forwarding the message to the client without sending an ACK to the gateway.
-    tracing::debug!(
-            gateway_name = %gateway_name,
-            ecu_address = %addr,
-            "Received message from ECU");
-    outtx
-        .get(&addr)
-        .map(|router| router.send(Ok(DiagnosticResponse::Msg(msg))));
-}
-
-#[tracing::instrument(
-        skip_all,
-        fields(dlt_context = dlt_ctx!("DOIP"))
-    )]
 pub(super) fn handle_alive_check_request() {
     tracing::debug!("Received Alive Check Response. Probably ECU responded too slow");
 }
@@ -161,7 +140,7 @@ pub(super) async fn handle_response(
     }
 }
 
-/// Handles all variants of a successfully decoded `DiagnosticResponse`.
+/// Handles all variants of a successfully decoded [`DiagnosticResponse`].
 #[tracing::instrument(
         skip_all,
         fields(dlt_context = dlt_ctx!("DOIP"))
@@ -182,22 +161,21 @@ async fn handle_ok_response(
                 response,
             );
         }
-        DiagnosticResponse::Pending { source_address, .. }
-        | DiagnosticResponse::BusyRepeatRequest { source_address, .. }
-        | DiagnosticResponse::TemporarilyNotAvailable { source_address, .. } => {
-            outtx
-                .get(&source_address)
-                .map(|router| router.send(Ok(response)));
+        DiagnosticResponse::Msg {
+            source_address: addr,
+            ..
+        } => {
+            tracing::debug!(
+                gateway_name = %gateway_name,
+                ecu_address = %addr,
+                "Received message from ECU"
+            );
+            outtx.get(&addr).map(|router| router.send(Ok(response)));
         }
-        DiagnosticResponse::Msg(msg) => {
-            handle_diagnostic_message(gateway_name, outtx, msg).await;
-        }
-        DiagnosticResponse::Nack(nack) => {
+        DiagnosticResponse::Nack(ref nack) => {
             tracing::debug!(nack = ?nack, "Received NACK");
             let addr = u16::from_be_bytes(nack.source_address);
-            outtx
-                .get(&addr)
-                .map(|router| router.send(Ok(DiagnosticResponse::Nack(nack))));
+            outtx.get(&addr).map(|router| router.send(Ok(response)));
         }
         DiagnosticResponse::GenericNack(_) => {
             handle_generic_nack();
@@ -344,7 +322,6 @@ struct GatewayIdentity {
 #[cfg(test)]
 mod tests {
     use cda_interfaces::HashMapExtensions;
-    use doip_definitions::payload::DiagnosticMessage;
     use tokio::sync::broadcast;
 
     use super::*;
@@ -366,16 +343,21 @@ mod tests {
         let target: u16 = 0x0001;
         let (outtx, mut ecu_rx) = make_outtx(source);
 
-        let msg = DiagnosticMessage {
-            source_address: source.to_be_bytes(),
-            target_address: target.to_be_bytes(),
-            message: vec![0x50, 0x01],
-        };
-
-        handle_diagnostic_message("gw", &outtx, msg).await;
-        // The message must have been forwarded to the ECU channel
-        let resp = ecu_rx.try_recv().expect("expected DiagnosticResponse::Msg");
-        assert!(matches!(resp, Ok(DiagnosticResponse::Msg(_))));
+        handle_ok_response(
+            "gw",
+            "1.2.3.4",
+            &outtx,
+            DiagnosticResponse::Msg {
+                source_address: source,
+                target_address: target,
+                data: vec![0x50, 0x01],
+            },
+        )
+        .await;
+        let resp = ecu_rx
+            .try_recv()
+            .expect("expected DiagnosticResponse::Diagnostic");
+        assert!(matches!(resp, Ok(DiagnosticResponse::Msg { .. })));
     }
 
     #[tokio::test]
@@ -383,19 +365,21 @@ mod tests {
         let addr: u16 = 0x0030;
         let (outtx, mut rx) = make_outtx(addr);
 
+        // A raw pending NRC arrives as DiagnosticResponse::Diagnostic (no pre-classification)
         handle_ok_response(
             "gw",
             "1.2.3.4",
             &outtx,
-            DiagnosticResponse::Pending {
+            DiagnosticResponse::Msg {
                 source_address: addr,
-                request_sid: 0x42,
+                target_address: 0x0001,
+                data: vec![0x7F, 0x22, 0x78],
             },
         )
         .await;
 
-        let msg = rx.try_recv().expect("expected Pending on channel");
-        assert!(matches!(msg, Ok(DiagnosticResponse::Pending { .. })));
+        let msg = rx.try_recv().expect("expected Diagnostic on channel");
+        assert!(matches!(msg, Ok(DiagnosticResponse::Msg { .. })));
     }
 
     #[tokio::test]

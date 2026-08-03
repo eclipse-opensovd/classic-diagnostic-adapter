@@ -15,9 +15,9 @@ use std::{sync::Arc, time::Duration};
 
 use async_trait::async_trait;
 use cda_interfaces::{
-    DiagComm, DiagServiceError, DynamicPlugin, EcuGateway, EcuManager, HashMap, HashMapExtensions,
-    PayloadDecoder, ServicePayload, TransmissionParameters, UdsFunctionalGroup, UdsResponse,
-    UdsTransport,
+    DiagComm, DiagServiceError, DynamicPlugin, EcuGateway, EcuManager, FunctionalTransport,
+    HashMap, HashMapExtensions, PayloadDecoder, ServicePayload, TransmissionParameters,
+    UdsFunctionalGroup, UdsTransport,
     datatypes::{ComponentDataInfo, ComponentOperationsInfo, RoutineSubfunctions},
     diagservices::{DiagServiceResponse, DiagServiceResponseType, UdsPayloadData},
     dlt_ctx,
@@ -29,7 +29,7 @@ use crate::{
     types::{PerGatewayInfo, ResetType},
 };
 
-impl<S: EcuGateway, T: EcuManager> UdsManager<S, T> {
+impl<S: EcuGateway + FunctionalTransport, T: EcuManager> UdsManager<S, T> {
     /// Send a functional request to a single gateway and collect responses from all expected ECUs
     #[allow(
         clippy::too_many_arguments,
@@ -74,7 +74,7 @@ impl<S: EcuGateway, T: EcuManager> UdsManager<S, T> {
                 };
                 for (ecu_name, uds_result) in uds_responses {
                     match uds_result {
-                        Ok(UdsResponse::Message(msg)) => {
+                        Ok(msg) => {
                             // Process the response using the ECU's convert_from_uds
                             let ecu_read = fgl_ecu.read().await;
                             let response = ecu_read
@@ -86,16 +86,6 @@ impl<S: EcuGateway, T: EcuManager> UdsManager<S, T> {
                                 )
                                 .await;
                             result_map.insert(ecu_name, response);
-                        }
-                        Ok(_) => {
-                            // Other UDS response types shouldn't occur in functional communication
-                            result_map.insert(
-                                ecu_name,
-                                Err(DiagServiceError::UnexpectedResponse(Some(
-                                    "Unexpected UDS response type in functional communication"
-                                        .to_string(),
-                                ))),
-                            );
                         }
                         Err(e) => {
                             result_map.insert(ecu_name, Err(e));
@@ -118,7 +108,7 @@ impl<S: EcuGateway, T: EcuManager> UdsManager<S, T> {
 }
 
 #[async_trait]
-impl<S: EcuGateway, T: EcuManager> UdsFunctionalGroup for UdsManager<S, T> {
+impl<S: EcuGateway + FunctionalTransport, T: EcuManager> UdsFunctionalGroup for UdsManager<S, T> {
     async fn get_functional_group_data_info(
         &self,
         security_plugin: &DynamicPlugin,

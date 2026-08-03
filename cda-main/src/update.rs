@@ -13,7 +13,7 @@
 use std::{path::PathBuf, sync::Arc};
 
 use async_trait::async_trait;
-use cda_comm_can::MultiTransportGateway;
+use cda_comm_can::CanDiagGateway;
 use cda_comm_doip::DoipDiagGateway;
 use cda_core::EcuManager;
 use cda_interfaces::{
@@ -32,6 +32,7 @@ use cda_plugin_runtime_update::{
 use cda_plugin_security::{SecurityPlugin, SecurityPluginLoader};
 use cda_sovd::{SovdLockStateProvider, UpdateGuardState};
 use cda_storage::LocalStorage;
+use cda_transport_router::DiagnosticTransportRouter;
 use tokio::sync::Mutex;
 
 use crate::{
@@ -130,7 +131,7 @@ impl<SP>
     VehicleComponentFactory<
         Configuration,
         UdsManagerType<SP>,
-        MultiTransportGateway<DoipDiagGateway<EcuManager<SP>>>,
+        DiagnosticTransportRouter<DoipDiagGateway<EcuManager<SP>>, CanDiagGateway>,
     > for CdaMainVehicleFactory<SP>
 where
     SP: SecurityPlugin,
@@ -146,7 +147,7 @@ where
     ) -> Result<
         VehicleComponents<
             UdsManagerType<SP>,
-            MultiTransportGateway<DoipDiagGateway<EcuManager<SP>>>,
+            DiagnosticTransportRouter<DoipDiagGateway<EcuManager<SP>>, CanDiagGateway>,
             Self::FileManager,
         >,
         ReloadError,
@@ -250,7 +251,7 @@ where
 
     let reloader_plugin = Arc::new(DefaultRuntimeReloaderPlugin::<
         UdsManagerType<SP>,
-        MultiTransportGateway<DoipDiagGateway<EcuManager<SP>>>,
+        DiagnosticTransportRouter<DoipDiagGateway<EcuManager<SP>>, CanDiagGateway>,
         Configuration,
         SL,
         _,

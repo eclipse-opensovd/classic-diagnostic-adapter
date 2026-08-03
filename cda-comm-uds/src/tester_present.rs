@@ -13,9 +13,9 @@
 
 use async_trait::async_trait;
 use cda_interfaces::{
-    Connectivity, DiagServiceError, EcuGateway, EcuManager, SUPPRESS_POSITIVE_RESPONSE_BIT,
-    ServicePayload, TesterPresentControlMessage, TesterPresentMode, TesterPresentType,
-    UdsFunctionalGroup, UdsTesterPresent, dlt_ctx, service_ids,
+    Connectivity, DiagServiceError, EcuGateway, EcuManager, FunctionalTransport,
+    SUPPRESS_POSITIVE_RESPONSE_BIT, ServicePayload, TesterPresentControlMessage, TesterPresentMode,
+    TesterPresentType, UdsFunctionalGroup, UdsTesterPresent, dlt_ctx, service_ids,
 };
 use tokio::time::{MissedTickBehavior, interval as tokio_interval};
 
@@ -170,7 +170,7 @@ impl<S: EcuGateway, T: EcuManager> UdsManager<S, T> {
 }
 
 #[async_trait]
-impl<S: EcuGateway, T: EcuManager> UdsTesterPresent for UdsManager<S, T> {
+impl<S: EcuGateway + FunctionalTransport, T: EcuManager> UdsTesterPresent for UdsManager<S, T> {
     #[tracing::instrument(skip_all,
         fields(dlt_context = dlt_ctx!("UDS"))
     )]
