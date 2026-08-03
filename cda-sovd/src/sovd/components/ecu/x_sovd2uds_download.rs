@@ -41,7 +41,7 @@ async fn sovd_to_func_class_service_exec<T: UdsEcu + Clone>(
     parameters: HashMap<String, serde_json::Value>,
     security_plugin: Box<dyn SecurityPlugin>,
     include_schema: bool,
-) -> Result<DiagServiceJsonResponse, Response> {
+) -> Result<DiagServiceJsonResponse, Box<Response>> {
     let params = UdsPayloadData::ParameterMap(parameters);
     let response = match uds
         .ecu_exec_service_from_function_class(
@@ -55,26 +55,32 @@ async fn sovd_to_func_class_service_exec<T: UdsEcu + Clone>(
     {
         Ok(v) => v,
         Err(e) => {
-            return Err(ErrorWrapper {
-                error: e.into(),
-                include_schema,
-            }
-            .into_response());
+            return Err(Box::new(
+                ErrorWrapper {
+                    error: e.into(),
+                    include_schema,
+                }
+                .into_response(),
+            ));
         }
     };
 
     if let DiagServiceResponseType::Negative = response.response_type() {
-        return Err(api_error_from_diag_response(&response, include_schema).into_response());
+        return Err(Box::new(
+            api_error_from_diag_response(&response, include_schema).into_response(),
+        ));
     }
 
     let mapped_data = match response.into_json() {
         Ok(v) => v,
         Err(e) => {
-            return Err(ErrorWrapper {
-                error: ApiError::InternalServerError(Some(format!("{e:?}"))),
-                include_schema,
-            }
-            .into_response());
+            return Err(Box::new(
+                ErrorWrapper {
+                    error: ApiError::InternalServerError(Some(format!("{e:?}"))),
+                    include_schema,
+                }
+                .into_response(),
+            ));
         }
     };
     Ok(mapped_data)
@@ -212,7 +218,7 @@ pub(crate) mod request_download {
                 include_schema,
             }
             .into_response(),
-            Err(response) => response,
+            Err(response) => *response,
         }
     }
 
@@ -601,7 +607,7 @@ pub(crate) mod transferexit {
         .await
         {
             Ok(_) => StatusCode::NO_CONTENT.into_response(),
-            Err(response) => response,
+            Err(response) => *response,
         }
     }
 

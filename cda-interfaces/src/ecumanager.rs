@@ -11,10 +11,9 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-use std::{fmt::Display, future::Future};
-
 use async_trait::async_trait;
 use serde::Serialize;
+use strum_macros::Display;
 
 use crate::{
     DiagComm, DiagServiceError, DoipComParams, DynamicPlugin, EcuSchemas, HashMap,
@@ -133,21 +132,12 @@ pub struct MuxCaseInfo {
 /// Derived from [`Connectivity`] + [`VariantState`] via [`EcuStatus::to_ecu_state()`].
 ///
 /// ECU connectivity state, eg. reachable via underlying transport
-#[derive(Clone, Copy, Debug, Serialize, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Display, Serialize, PartialEq, Eq)]
 pub enum Connectivity {
     /// ECU responded to the last communication attempt.
     Online,
     /// ECU is currently unreachable (never connected, or lost connection).
     Offline,
-}
-
-impl Display for Connectivity {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::Online => f.write_str("Online"),
-            Self::Offline => f.write_str("Offline"),
-        }
-    }
 }
 
 /// ECU variant detection result.

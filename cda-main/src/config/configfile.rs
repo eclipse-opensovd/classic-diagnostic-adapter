@@ -449,7 +449,7 @@ interface = "vcan0"
     #[cfg(feature = "can")]
     #[tokio::test]
     async fn can_ecu_mappings_sanity_rejects_ambiguity() -> Result<(), Box<dyn std::error::Error>> {
-        async fn config_with_mappings(
+        fn config_with_mappings(
             mappings: &str,
         ) -> Result<Configuration, Box<dyn std::error::Error>> {
             let config_str = format!(
@@ -475,8 +475,7 @@ ecu_name = "ECU2"
 request_id = 0x7E1
 response_id = 0x7E9
 "#,
-        )
-        .await?;
+        )?;
         valid
             .validate_sanity()
             .expect("distinct mappings should pass sanity");
@@ -493,8 +492,7 @@ ecu_name = "ecu1"
 request_id = 0x7E1
 response_id = 0x7E9
 "#,
-        )
-        .await?;
+        )?;
         let err = duplicate_name
             .validate_sanity()
             .expect_err("case-insensitive duplicate ECU name should fail sanity");
@@ -512,8 +510,7 @@ ecu_name = "ECU2"
 request_id = 0x7E0
 response_id = 0x7E8
 "#,
-        )
-        .await?;
+        )?;
         let err = duplicate_pair
             .validate_sanity()
             .expect_err("reused CAN ID pair should fail sanity");
@@ -526,8 +523,7 @@ ecu_name = "ECU1"
 request_id = 0x7E0
 response_id = 0x7E0
 "#,
-        )
-        .await?;
+        )?;
         let err = self_answering
             .validate_sanity()
             .expect_err("request_id == response_id should fail sanity");

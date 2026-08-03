@@ -192,9 +192,18 @@ async fn runtimefiles_execution_responses_follow_operation_standard() -> Result<
         execution.get("id").is_none() && execution.get("mode").is_none(),
         "execution details must not expose operation-specific values at the top level"
     );
-    assert_eq!(execution["parameters"]["mode"], "cleanup");
+    assert_eq!(
+        execution
+            .get("parameters")
+            .and_then(|p| p.get("mode"))
+            .expect("mode should exist"),
+        "cleanup"
+    );
     assert!(
-        execution["parameters"].get("reason").is_none(),
+        execution
+            .get("parameters")
+            .and_then(|p| p.get("reason"))
+            .is_none(),
         "a successful execution must not include a failure reason"
     );
     assert!(execution.get("status").is_some());
@@ -228,8 +237,12 @@ async fn runtimefiles_bulk_data_responses_follow_standard() -> Result<(), Testin
             .expect("upload response body must be readable"),
     )
     .expect("upload response must be JSON");
-    let first_id = upload_body["items"][0]["id"]
-        .as_str()
+    let first_id = upload_body
+        .get("items")
+        .and_then(|items| items.as_array())
+        .and_then(|items| items.first())
+        .and_then(|item| item.get("id"))
+        .and_then(|id| id.as_str())
         .expect("upload response must identify the created file");
     let expected_location = format!(
         "http://{}:{}/vehicle/v15/{RUNTIMEFILES_NEXTUPDATE}/{first_id}",
@@ -304,9 +317,14 @@ async fn runtimefiles_bulk_data_responses_follow_standard() -> Result<(), Testin
         "runtimefiles-backup",
     ] {
         assert!(
-            categories["items"]
-                .as_array()
-                .is_some_and(|items| items.iter().any(|item| item["name"] == name)),
+            categories
+                .get("items")
+                .and_then(|items| items.as_array())
+                .is_some_and(|items| {
+                    items
+                        .iter()
+                        .any(|item| item.get("name").is_some_and(|item_name| item_name == name))
+                }),
             "bulk-data discovery must include {name}"
         );
     }

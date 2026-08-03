@@ -11,6 +11,12 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+#![allow(
+    clippy::extra_unused_lifetimes,
+    reason = "The `self_referencing` macro from ouroboros generates a lifetime that clippy cannot \
+              see is used"
+)]
+
 use std::fmt::Debug;
 
 use cda_interfaces::{

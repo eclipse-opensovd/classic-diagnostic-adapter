@@ -965,8 +965,8 @@ macro_rules! create_response_schema {
                     Some(s) => s.to_value(),
                 };
                 obj.insert($target_field.into(), value);
-                if let Some(mut errs) = obj.get_mut("errors") {
-                    crate::sovd::remove_descriptions_recursive(&mut errs);
+                if let Some(errs) = obj.get_mut("errors") {
+                    crate::sovd::remove_descriptions_recursive(&mut *errs);
                 }
             }
         }

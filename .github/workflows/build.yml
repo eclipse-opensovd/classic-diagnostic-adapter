@@ -41,7 +41,7 @@ jobs:
       - name: Install Rust toolchain
         uses: actions-rust-lang/setup-rust-toolchain@v1
         with:
-          toolchain: nightly-2025-07-14
+          toolchain: nightly-2026-07-21
       - name: Install Protoc
         uses: arduino/setup-protoc@v3
         with:
