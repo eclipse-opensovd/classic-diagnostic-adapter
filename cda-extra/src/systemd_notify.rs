@@ -84,8 +84,11 @@ where
 /// Interval at which watchdog notifications should be sent: half of the
 /// systemd-configured watchdog timeout, per the systemd-recommended convention
 /// (see `sd_watchdog_enabled(3)`).
+///
+/// Clamped to at least 1ms so a very small (or zero) `WatchdogSec` can never
+/// produce a zero-length interval, which `tokio::time::interval` panics on.
 fn watchdog_notify_interval() -> Option<Duration> {
-    sd_notify::watchdog_enabled().map(|timeout| timeout / 2)
+    sd_notify::watchdog_enabled().map(|timeout| (timeout / 2).max(Duration::from_millis(1)))
 }
 
 async fn trigger_watchdog(
