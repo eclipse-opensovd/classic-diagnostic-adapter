@@ -17,8 +17,11 @@ In this requirements documentation, the sections represent the functional requir
 
 The actual architecture and implementation details are defined in different documents for traceability and separation of concerns.
 
-.. include:: 01_general.rst
-.. include:: 02_sovd.rst
-.. include:: 03_diagnostic_tester.rst
-.. include:: 04_communication.rst
-.. include:: 05_plugins.rst
+.. toctree::
+   :maxdepth: 2
+
+   01_general
+   02_sovd
+   03_diagnostic_tester
+   04_communication
+   05_plugins
