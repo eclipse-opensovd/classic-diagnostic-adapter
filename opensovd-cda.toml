@@ -452,8 +452,8 @@
 # attempting a lookup with this flag set against a multi-protocol database
 # returns `DiagServiceError::InvalidDatabase`.
 # ignore_protocol = false
-# Path to load the databases from, this must be a directory.
-# path = "."
+# Directory to load the databases from, if none have been loaded into storage before.
+# seed_dir = "."
 
 # Holds configuration for diagnostic service naming conventions.
 #
