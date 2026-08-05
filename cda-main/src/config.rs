@@ -286,7 +286,7 @@ mod tests {
         let fixture = StorageFixture::new();
 
         let mut config = default_config();
-        config.database.path = "configured_dir/".to_string();
+        config.database.seed_dir = "configured_dir/".to_string();
         fixture.write_config(&config);
 
         let result = load_config_from_file_or_storage_with_storage_dir_override(
@@ -296,7 +296,7 @@ mod tests {
         .await
         .unwrap();
 
-        assert_eq!(result.database.path, "configured_dir/");
+        assert_eq!(result.database.seed_dir, "configured_dir/");
     }
 
     #[tokio::test]
@@ -305,7 +305,7 @@ mod tests {
 
         {
             let mut config = default_config();
-            config.database.path = "stored_dir/".to_string();
+            config.database.seed_dir = "stored_dir/".to_string();
             fixture.write_config(&config);
 
             seed_empty_storage_from_config_file(&fixture.storage, &fixture.config_file)
@@ -315,7 +315,7 @@ mod tests {
 
         {
             let mut config = default_config();
-            config.database.path = "configured_dir/".to_string();
+            config.database.seed_dir = "configured_dir/".to_string();
             fixture.write_config(&config);
         }
 
@@ -326,7 +326,7 @@ mod tests {
         .await
         .unwrap();
 
-        assert_eq!(result.database.path, "stored_dir/");
+        assert_eq!(result.database.seed_dir, "stored_dir/");
     }
 
     #[tokio::test]
