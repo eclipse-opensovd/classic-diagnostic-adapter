@@ -519,6 +519,7 @@ mod tests {
                         "test0".to_owned(),
                         CanId::try_from(0x700).expect("valid CAN ID"),
                         CanId::try_from(0x708).expect("valid CAN ID"),
+                        None,
                     ),
                 )],
                 vec!["ecu1"],

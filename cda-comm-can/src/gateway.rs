@@ -169,6 +169,7 @@ impl CanDiagGateway {
                     config.interface.clone(),
                     request_id,
                     response_id,
+                    mapping.address_extension,
                 );
 
                 tracing::debug!(
@@ -343,6 +344,7 @@ impl CanDiagGateway {
                 config.interface.clone(),
                 ids.request,
                 ids.response,
+                None,
             );
             tracing::debug!(
                 ecu = %name,
