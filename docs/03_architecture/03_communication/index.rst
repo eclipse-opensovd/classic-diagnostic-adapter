@@ -9,13 +9,12 @@
 ..
 .. SPDX-License-Identifier: Apache-2.0
 
-Plugins
-=======
+Communication
+=============
 
-.. include:: /03_architecture/05_plugins/01_content.rst
+.. toctree::
+   :maxdepth: 2
 
-.. include:: /03_architecture/05_plugins/02_diagnostic_database_update.rst
-
-.. include:: /03_architecture/05_plugins/03_dlt_logging.rst
-
-.. include:: /03_architecture/05_plugins/04_vehicle_topology.rst
+   01_doip_communication
+   02_can_communication
+   03_uds_communication

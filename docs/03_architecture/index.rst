@@ -13,9 +13,12 @@
 Architecture
 ************
 
-.. include:: 00_overview.rst
-.. include:: 01_general.rst
-.. include:: 02_sovd-api.rst
-.. include:: 03_communication.rst
-.. include:: 04_diagnostic_tester.rst
-.. include:: 05_plugins.rst
+.. toctree::
+   :maxdepth: 2
+
+   00_overview
+   01_general
+   02_sovd-api/index
+   03_communication/index
+   04_diagnostic_tester
+   05_plugins/index

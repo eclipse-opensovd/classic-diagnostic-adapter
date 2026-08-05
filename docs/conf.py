@@ -22,23 +22,22 @@ src_trace_config_from_toml = "cda_trace.toml"
 
 # Exclude build artifacts and editor/project files so Sphinx doesn't treat generated
 # files under `_build` as additional source documents (this caused duplicate needs).
-# Also exclude individual RST files that are intended to be included into
-# `02_requirements/index.rst` using `.. include::` so they are not treated as
-# standalone documents by Sphinx (which would register needs twice).
 exclude_patterns = [
     "_build",
     "**/_build/**",
     ".venv",
     "Thumbs.db",
     ".DS_Store",
-    "**/0**.rst",
 ]
 
 project = "CDA"
 copyright = "%Y, Eclipse OpenSOVD authors"
 # todo, automatically retrieve from project version
 version = "1.0"
-html_theme = "bizstyle"
+html_theme = "furo"
+html_static_path = ["_static"]
+html_css_files = ["force_light_theme.css"]
+html_js_files = ["force_light_theme.js"]
 
 plantuml = os.environ.get("PLANTUML", "java -jar /usr/local/bin/plantuml.jar")
 
