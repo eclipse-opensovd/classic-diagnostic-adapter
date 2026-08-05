@@ -15,6 +15,7 @@ use std::time::Duration;
 
 use cda_interfaces::{
     HashMap, TransmissionParameters,
+    communication_control::CommunicationGuard,
     datatypes::{DataTransferMetaData, RetryPolicy},
 };
 use strum::Display;
@@ -52,6 +53,7 @@ pub(crate) struct EcuDataTransfer {
     pub(crate) meta_data: DataTransferMetaData,
     pub(crate) status_receiver: watch::Receiver<bool>,
     pub(crate) task: JoinHandle<()>,
+    pub(crate) _communication_guard: CommunicationGuard,
 }
 
 pub struct TesterPresentTask {

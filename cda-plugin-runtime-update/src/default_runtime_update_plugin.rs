@@ -11,20 +11,12 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-// SPDX-License-Identifier: Apache-2.0
-//
-// See the NOTICE file(s) distributed with this work for additional
-// information regarding copyright ownership.
-//
-// This program and the accompanying materials are made available under the
-// terms of the Apache License Version 2.0 which is available at
-// https://www.apache.org/licenses/LICENSE-2.0
-
-use std::sync::{Arc, atomic::AtomicBool};
+use std::{sync::Arc, time::Duration};
 
 use async_trait::async_trait;
 use cda_interfaces::{
     HashMap,
+    communication_control::{CommunicationAccess, PostUpdateCommunicationMode},
     runtime_update_api::{
         BulkDataCreatedList, BulkDataList, ExecutionMode, LockStateProvider, RuntimeFilesQuery,
         RuntimeFilesUpdatePlugin, RuntimeReloaderPlugin, RuntimeUpdateError,
@@ -32,10 +24,12 @@ use cda_interfaces::{
     },
     storage_api::Storage,
 };
+use cda_plugin_communication_management::{
+    http_protection::registry::HttpProtectionRegistry, lifecycle::disable::DisableCommunication,
+};
 use tokio::sync::RwLock;
 
 /// Default implementation of [`RuntimeFilesUpdatePlugin`] with injectable security and storage.
-///
 pub struct DefaultRuntimeUpdatePlugin<
     Store: Storage,
     UpdateSecurityPlugin: RuntimeUpdateSecurityPlugin<Lock, Store::CollectionHandle>,
@@ -53,10 +47,13 @@ pub struct DefaultRuntimeUpdatePlugin<
     executions: Arc<RwLock<HashMap<String, UpdateExecution>>>,
     /// If true, call `update_mdd_uncompressed()` after Apply for each MDD file
     mdd_decompress: bool,
-    /// Shared flag indicating whether an update is currently in progress.
-    /// Other components (e.g. the HTTP update guard, UDS layer) hold clones of this Arc
-    /// to observe update state.
-    update_in_progress: Arc<AtomicBool>,
+    communication_disable: Arc<dyn DisableCommunication>,
+    /// Used to request the configured post-update communication state. Requests
+    /// only - `init_mode` still decides whether one is honoured.
+    communication_access: Arc<dyn CommunicationAccess>,
+    http_protections: HttpProtectionRegistry,
+    update_retry_after: Duration,
+    post_update_mode: PostUpdateCommunicationMode,
 }
 
 impl<
@@ -73,14 +70,27 @@ impl<
     /// * `security_handler` - Validates authorization and file integrity
     /// * `lock_provider` - Provides lock state for security validation
     /// * `mdd_decompress` - Whether to decompress MDD files after apply
-    /// * `update_in_progress` - Shared flag read by other components to gate operations
+    /// * `communication_disable` - Used to acquire exclusive transport disable ownership
+    /// * `communication_access` - Used to request the configured post-update
+    ///   communication state, subject to `init_mode`
+    /// * `update_retry_after` - Retry-After duration while an update owns protection
+    /// * `post_update_mode` - Communication state to restore after an update
+    #[allow(
+        clippy::too_many_arguments,
+        reason = "Constructor requires many dependencies for plugin initialization, adding a \
+                  struct of this is pointless, as it is only used once."
+    )]
     pub fn new(
         storage: Arc<Store>,
         reloader_plugin: Arc<dyn RuntimeReloaderPlugin>,
         security_handler: Arc<UpdateSecurityPlugin>,
         lock_provider: Arc<Lock>,
         mdd_decompress: bool,
-        update_in_progress: Arc<AtomicBool>,
+        communication_disable: Arc<dyn DisableCommunication>,
+        communication_access: Arc<dyn CommunicationAccess>,
+        http_protections: HttpProtectionRegistry,
+        update_retry_after: Duration,
+        post_update_mode: PostUpdateCommunicationMode,
     ) -> Self {
         Self {
             storage,
@@ -89,7 +99,11 @@ impl<
             lock_provider,
             executions: Arc::new(RwLock::new(HashMap::default())),
             mdd_decompress,
-            update_in_progress,
+            communication_disable,
+            communication_access,
+            http_protections,
+            update_retry_after,
+            post_update_mode,
         }
     }
 }
@@ -147,7 +161,11 @@ impl<
             security_handler: &self.security_handler,
             reload_handler: &self.reloader_plugin,
             executions: &self.executions,
-            update_in_progress: &self.update_in_progress,
+            communication_disable: &self.communication_disable,
+            communication_access: &self.communication_access,
+            http_protections: &self.http_protections,
+            update_retry_after: self.update_retry_after,
+            post_update_mode: self.post_update_mode.clone(),
             mdd_decompress: self.mdd_decompress,
             lock_state_provider: &*self.lock_provider,
         };
@@ -165,21 +183,30 @@ impl<
 
 #[cfg(test)]
 mod tests {
-    use std::sync::Arc;
+    use std::{sync::Arc, time::Duration};
 
     use cda_interfaces::{
+        communication_control::{CommunicationState, PostUpdateCommunicationMode},
         runtime_update_api::{
             ExecutionMode, HashAlgorithm, RuntimeFilesQuery, RuntimeFilesUpdatePlugin,
             RuntimeUpdateError,
         },
         storage_api::CollectionName,
     };
+    use cda_plugin_communication_management::{
+        http_protection::registry::HttpProtectionRegistry,
+        lifecycle::{
+            communication_disable_for_test,
+            disable::{DisableCommunication, DisableReason},
+            enabled_communication_access_for_test,
+        },
+    };
     use cda_storage::LocalStorage;
 
     use crate::{
         DefaultRuntimeUpdatePlugin,
         test_utils::{
-            MockLockProvider, MockSecurityHandler, NoopReloadHandler, make_storage,
+            MockLockProvider, MockSecurityHandler, NoopReloadHandler, StubTransport, make_storage,
             make_upload_files, make_valid_config, write_test_file,
         },
     };
@@ -187,15 +214,23 @@ mod tests {
     fn make_plugin(
         storage: LocalStorage,
     ) -> DefaultRuntimeUpdatePlugin<LocalStorage, MockSecurityHandler, MockLockProvider> {
-        make_state_with_lock(storage, Some("test-user"), false)
+        let (plugin, _disable_comm) = make_state_with_lock(storage, Some("test-user"), false);
+        plugin
     }
 
     fn make_state_with_lock(
         storage: LocalStorage,
         owner: Option<&str>,
         has_conflicts: bool,
-    ) -> DefaultRuntimeUpdatePlugin<LocalStorage, MockSecurityHandler, MockLockProvider> {
-        DefaultRuntimeUpdatePlugin::new(
+    ) -> (
+        DefaultRuntimeUpdatePlugin<LocalStorage, MockSecurityHandler, MockLockProvider>,
+        Arc<dyn DisableCommunication>,
+    ) {
+        let transport = StubTransport::new();
+        let http_protections = HttpProtectionRegistry::new();
+        let communication_disable = communication_disable_for_test(transport, false);
+
+        let plugin = DefaultRuntimeUpdatePlugin::new(
             Arc::new(storage),
             Arc::new(NoopReloadHandler),
             Arc::new(MockSecurityHandler::new()),
@@ -204,8 +239,13 @@ mod tests {
                 has_conflicts,
             }),
             false,
-            Arc::new(std::sync::atomic::AtomicBool::new(false)),
-        )
+            Arc::clone(&communication_disable),
+            enabled_communication_access_for_test(),
+            http_protections,
+            Duration::from_secs(1),
+            PostUpdateCommunicationMode::Enabled,
+        );
+        (plugin, communication_disable)
     }
 
     #[tokio::test]
@@ -345,7 +385,6 @@ mod tests {
 
         plugin.delete_nextupdate().await.unwrap();
 
-        // After delete_all_nextupdate, list_nextupdate should return no items
         let query = RuntimeFilesQuery::default();
         let result = plugin.list_nextupdate(&query).await.unwrap();
         assert!(result.items.is_empty());
@@ -461,8 +500,11 @@ mod tests {
         assert!(matches!(err, RuntimeUpdateError::InvalidFileType(_)));
     }
 
+    /// An update needs no transport, so a deferred runtime must not have to
+    /// bring the whole network up just to become eligible for one.
+    /// The fixture's communication starts `Disabled`.
     #[tokio::test]
-    async fn start_execution_apply_returns_execution_id() {
+    async fn start_execution_allowed_while_communication_is_deferred() {
         let (storage, _dir) = make_storage();
         write_test_file(
             &storage,
@@ -474,15 +516,18 @@ mod tests {
 
         let plugin = make_plugin(storage);
 
-        let exec_id = plugin.start_execution(ExecutionMode::Apply).await.unwrap();
-        assert!(!exec_id.is_empty());
-
-        let status = plugin.get_execution_status(&exec_id).await;
-        assert!(status.is_some());
+        plugin
+            .start_execution(ExecutionMode::Apply)
+            .await
+            .expect("an update must start while communication is deferred");
+        assert_eq!(plugin.list_executions().await.len(), 1);
     }
 
+    /// The exclusive disable lease is what serializes updates, so an execution
+    /// is refused while anything else holds it - including a still-running
+    /// earlier execution.
     #[tokio::test]
-    async fn start_execution_conflict_when_already_running() {
+    async fn start_execution_conflict_while_disable_lease_held() {
         let (storage, _dir) = make_storage();
         write_test_file(
             &storage,
@@ -492,11 +537,19 @@ mod tests {
         )
         .await;
 
-        let plugin = make_plugin(storage);
+        let (plugin, communication_disable) =
+            make_state_with_lock(storage, Some("test-user"), false);
+        let lease = communication_disable
+            .disable(DisableReason::Custom("test".to_owned()))
+            .await
+            .expect("lease must be granted from a deferred runtime");
 
-        let _exec_id = plugin.start_execution(ExecutionMode::Apply).await.unwrap();
-
-        let result = plugin.start_execution(ExecutionMode::Cleanup).await;
+        let result = plugin.start_execution(ExecutionMode::Apply).await;
         assert!(matches!(result, Err(RuntimeUpdateError::ExecutionConflict)));
+        assert!(plugin.list_executions().await.is_empty());
+
+        // Releasing a lease taken from `Disabled` leaves communication
+        // deferred rather than enabling it.
+        assert_eq!(lease.release().await, Ok(CommunicationState::Disabled));
     }
 }

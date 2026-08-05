@@ -36,17 +36,6 @@ mod gateway;
 #[cfg(feature = "can")]
 pub use gateway::{CanDiagGateway, error};
 
-#[cfg(feature = "can")]
-impl cda_interfaces::ReusableTransportResource for CanDiagGateway {
-    type TransportResource = ();
-
-    fn reusable_transport_resource(
-        &self,
-    ) -> Option<std::sync::Arc<tokio::sync::Mutex<Self::TransportResource>>> {
-        None
-    }
-}
-
 /// Stub `CanDiagGateway` when the `can` feature is disabled.
 ///
 /// This type exists only to satisfy the `Option<CanDiagGateway>` field in
@@ -121,13 +110,34 @@ impl cda_interfaces::FunctionalTransport for CanDiagGateway {
 }
 
 #[cfg(not(feature = "can"))]
-impl cda_interfaces::ReusableTransportResource for CanDiagGateway {
-    type TransportResource = ();
-
-    fn reusable_transport_resource(
+#[async_trait::async_trait]
+impl cda_interfaces::communication_control::TransportControl for CanDiagGateway {
+    async fn enable(
         &self,
-    ) -> Option<std::sync::Arc<tokio::sync::Mutex<Self::TransportResource>>> {
-        None
+    ) -> Result<(), cda_interfaces::communication_control::error::CommControlError> {
+        #[allow(
+            clippy::used_underscore_binding,
+            reason = "Type is unconstructable, this match is unreachable"
+        )]
+        match self._unconstructable {}
+    }
+
+    async fn disable(
+        &self,
+    ) -> Result<(), cda_interfaces::communication_control::error::CommControlError> {
+        #[allow(
+            clippy::used_underscore_binding,
+            reason = "Type is unconstructable, this match is unreachable"
+        )]
+        match self._unconstructable {}
+    }
+
+    async fn state(&self) -> cda_interfaces::communication_control::TransportState {
+        #[allow(
+            clippy::used_underscore_binding,
+            reason = "Type is unconstructable, this match is unreachable"
+        )]
+        match self._unconstructable {}
     }
 }
 
@@ -158,21 +168,50 @@ mod transport_routing_tests {
         atomic::{AtomicBool, AtomicUsize, Ordering},
     };
 
+    use async_trait::async_trait;
     use cda_interfaces::{
         CanId, DiagServiceError, EcuAddresses, FunctionalTransport, HashMap, NetworkTopology,
         PhysicalTransport, RouteStatus, ServicePayload, TransmissionParameters, TransportProbe,
         TransportType,
+        communication_control::{TransportControl, TransportState, error::CommControlError},
     };
     use cda_transport_router::DiagnosticTransportRouter;
-    use tokio::sync::{RwLock, mpsc};
+    use tokio::sync::{Notify, RwLock, mpsc};
 
     use crate::{CanDiagGateway, gateway::connection::CanEcuConnection};
 
     /// `DoIP` gateway stub whose ECU knowledge can be toggled at runtime.
-    #[derive(Clone, Default)]
+    #[derive(Clone)]
     struct DoipStub {
         online: Arc<AtomicBool>,
+        communication_active: Arc<AtomicBool>,
         ecu_online_calls: Arc<AtomicUsize>,
+        enable_calls: Arc<AtomicUsize>,
+        disable_calls: Arc<AtomicUsize>,
+        shutdown_calls: Arc<AtomicUsize>,
+        fail_enable: Arc<AtomicBool>,
+        fail_disable: Arc<AtomicBool>,
+        block_enable: Arc<AtomicBool>,
+        enable_started: Arc<Notify>,
+        release_enable: Arc<Notify>,
+    }
+
+    impl Default for DoipStub {
+        fn default() -> Self {
+            Self {
+                online: Arc::new(AtomicBool::new(false)),
+                communication_active: Arc::new(AtomicBool::new(true)),
+                ecu_online_calls: Arc::new(AtomicUsize::new(0)),
+                enable_calls: Arc::new(AtomicUsize::new(0)),
+                disable_calls: Arc::new(AtomicUsize::new(0)),
+                shutdown_calls: Arc::new(AtomicUsize::new(0)),
+                fail_enable: Arc::new(AtomicBool::new(false)),
+                fail_disable: Arc::new(AtomicBool::new(false)),
+                block_enable: Arc::new(AtomicBool::new(false)),
+                enable_started: Arc::new(Notify::new()),
+                release_enable: Arc::new(Notify::new()),
+            }
+        }
     }
 
     impl PhysicalTransport for DoipStub {
@@ -248,9 +287,49 @@ mod transport_routing_tests {
         }
     }
 
-    #[async_trait::async_trait]
+    #[async_trait]
     impl cda_interfaces::Shutdown for DoipStub {
-        async fn shutdown(&self) {}
+        async fn shutdown(&self) {
+            self.shutdown_calls.fetch_add(1, Ordering::SeqCst);
+            self.communication_active.store(false, Ordering::Release);
+        }
+    }
+
+    #[async_trait]
+    impl TransportControl for DoipStub {
+        async fn enable(&self) -> Result<(), CommControlError> {
+            self.enable_calls.fetch_add(1, Ordering::SeqCst);
+            if self.fail_enable.load(Ordering::Acquire) {
+                return Err(CommControlError::InitFailed(
+                    "DoIP enable failed".to_owned(),
+                ));
+            }
+            if self.block_enable.load(Ordering::Acquire) {
+                self.enable_started.notify_one();
+                self.release_enable.notified().await;
+            }
+            self.communication_active.store(true, Ordering::Release);
+            Ok(())
+        }
+
+        async fn disable(&self) -> Result<(), CommControlError> {
+            self.disable_calls.fetch_add(1, Ordering::SeqCst);
+            if self.fail_disable.load(Ordering::Acquire) {
+                return Err(CommControlError::InitFailed(
+                    "DoIP disable failed".to_owned(),
+                ));
+            }
+            self.communication_active.store(false, Ordering::Release);
+            Ok(())
+        }
+
+        async fn state(&self) -> TransportState {
+            if self.communication_active.load(Ordering::Acquire) {
+                TransportState::Enabled
+            } else {
+                TransportState::Disabled
+            }
+        }
     }
 
     struct EcuStub;
@@ -303,6 +382,7 @@ mod transport_routing_tests {
         let gw = DiagnosticTransportRouter::<_, CanDiagGateway>::new(overrides)
             .with_doip(doip.clone())
             .with_can(can_gateway_with_discovered_ecu1());
+        gw.enable().await.expect("enable test router");
 
         let db = RwLock::new(EcuStub);
         assert!(gw.ecu_online("ECU1", &db).await.is_ok());
@@ -317,6 +397,7 @@ mod transport_routing_tests {
         let gw = DiagnosticTransportRouter::<_, CanDiagGateway>::new(HashMap::default())
             .with_doip(doip)
             .with_can(can_gateway_with_discovered_ecu1());
+        gw.enable().await.expect("enable test router");
 
         let db = RwLock::new(EcuStub);
         assert!(gw.ecu_online("ecu1", &db).await.is_ok());
@@ -332,6 +413,7 @@ mod transport_routing_tests {
         let gw = DiagnosticTransportRouter::<_, CanDiagGateway>::new(HashMap::default())
             .with_doip(doip.clone())
             .with_can(can.clone());
+        gw.enable().await.expect("enable test router");
 
         let db = RwLock::new(EcuStub);
         assert!(gw.ecu_online("ecu1", &db).await.is_ok());
@@ -374,6 +456,7 @@ mod transport_routing_tests {
         // (the stub returns an empty result map).
         let gw = DiagnosticTransportRouter::<_, CanDiagGateway>::new(HashMap::default())
             .with_doip(DoipStub::default());
+        gw.enable().await.expect("enable test router");
         let (params, payload) = test_send_params();
         let result = gw
             .send_functional(
@@ -394,6 +477,7 @@ mod transport_routing_tests {
         // offline.
         let gw = DiagnosticTransportRouter::<DoipStub, CanDiagGateway>::new(HashMap::default())
             .with_can(can_gateway_with_discovered_ecu1());
+        gw.enable().await.expect("enable test router");
         let (params, payload) = test_send_params();
         let result = gw
             .send_functional(
@@ -413,6 +497,7 @@ mod transport_routing_tests {
     #[tokio::test]
     async fn send_functional_without_transports_is_offline() {
         let gw = DiagnosticTransportRouter::<DoipStub, CanDiagGateway>::new(HashMap::default());
+        gw.enable().await.expect("enable test router");
         let (params, payload) = test_send_params();
         let result = gw
             .send_functional(
@@ -431,11 +516,135 @@ mod transport_routing_tests {
         let doip = DoipStub::default();
         let gw = DiagnosticTransportRouter::<DoipStub, CanDiagGateway>::new(HashMap::default())
             .with_doip(doip);
+        gw.enable().await.expect("enable test router");
 
         let db = RwLock::new(EcuStub);
         assert!(matches!(
             gw.ecu_online("ecu1", &db).await,
             Err(DiagServiceError::EcuOffline(_))
         ));
+    }
+
+    #[tokio::test]
+    async fn router_lifecycle_fans_out_and_supports_re_enable() {
+        // enable -> disable -> enable must drive the wrapped gateway and keep
+        // the aggregated state consistent.
+        let doip = DoipStub::default();
+        let gw = DiagnosticTransportRouter::<DoipStub, CanDiagGateway>::new(HashMap::default())
+            .with_doip(doip.clone());
+
+        assert_eq!(gw.state().await, TransportState::Disabled);
+
+        gw.enable().await.expect("enable succeeds");
+        assert_eq!(gw.state().await, TransportState::Enabled);
+        assert!(doip.communication_active.load(Ordering::Acquire));
+
+        gw.disable().await.expect("disable succeeds");
+        assert_eq!(gw.state().await, TransportState::Disabled);
+        assert!(!doip.communication_active.load(Ordering::Acquire));
+
+        gw.enable().await.expect("re-enable succeeds");
+        assert_eq!(gw.state().await, TransportState::Enabled);
+    }
+
+    #[tokio::test]
+    async fn router_rolls_back_successful_gateway_after_partial_enable_failure() {
+        // DoIP fails first, CAN enables second. CAN must be disabled again so
+        // its keepalive and rediscovery tasks cannot outlive the failed router.
+        let doip = DoipStub::default();
+        doip.fail_enable.store(true, Ordering::Release);
+        let can = can_gateway_with_discovered_ecu1();
+        let gw = DiagnosticTransportRouter::<_, CanDiagGateway>::new(HashMap::default())
+            .with_doip(doip.clone())
+            .with_can(can.clone());
+
+        assert!(gw.enable().await.is_err());
+        assert_eq!(gw.state().await, TransportState::Failed);
+        assert_eq!(can.state().await, TransportState::Disabled);
+        assert_eq!(doip.disable_calls.load(Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test]
+    async fn router_shutdowns_gateway_when_partial_enable_rollback_fails() {
+        // CAN fails after DoIP enables. A failed normal rollback must still use
+        // the gateway shutdown path to terminate DoIP background work.
+        let doip = DoipStub::default();
+        doip.fail_disable.store(true, Ordering::Release);
+        let can = CanDiagGateway::test_instance(vec![], vec![]);
+        can.disable().await.expect("disable test CAN gateway");
+        let gw = DiagnosticTransportRouter::<_, CanDiagGateway>::new(HashMap::default())
+            .with_doip(doip.clone())
+            .with_can(can);
+
+        assert!(gw.enable().await.is_err());
+        assert_eq!(gw.state().await, TransportState::Failed);
+        assert_eq!(doip.disable_calls.load(Ordering::SeqCst), 1);
+        assert_eq!(doip.shutdown_calls.load(Ordering::SeqCst), 1);
+        assert!(!doip.communication_active.load(Ordering::Acquire));
+    }
+
+    #[tokio::test]
+    async fn router_gates_datapath_while_disabled() {
+        // A disabled router must reject sends even though the wrapped gateway
+        // would otherwise reach the ECU.
+        let doip = DoipStub::default();
+        doip.online.store(true, Ordering::SeqCst);
+        let gw = DiagnosticTransportRouter::<DoipStub, CanDiagGateway>::new(HashMap::default())
+            .with_doip(doip);
+
+        let (params, payload) = test_send_params();
+        let (tx, _rx) = mpsc::channel(1);
+        assert!(matches!(
+            gw.send(params, payload, tx, true).await,
+            Err(DiagServiceError::CommunicationDisabled(_))
+        ));
+
+        gw.enable().await.expect("enable succeeds");
+        let (params, payload) = test_send_params();
+        let (tx, _rx) = mpsc::channel(1);
+        assert!(gw.send(params, payload, tx, true).await.is_ok());
+    }
+
+    #[tokio::test]
+    async fn router_clones_share_lifecycle_state() {
+        // Clones handed to UDS, deferred init, and update must observe the
+        // same lifecycle transitions.
+        let gw = DiagnosticTransportRouter::<DoipStub, CanDiagGateway>::new(HashMap::default())
+            .with_doip(DoipStub::default());
+        let clone = gw.clone();
+
+        gw.enable().await.expect("enable succeeds");
+        assert_eq!(clone.state().await, TransportState::Enabled);
+    }
+
+    #[tokio::test]
+    async fn concurrent_router_enables_fan_out_once() {
+        let doip = DoipStub::default();
+        doip.block_enable.store(true, Ordering::Release);
+        let gw = DiagnosticTransportRouter::<DoipStub, CanDiagGateway>::new(HashMap::default())
+            .with_doip(doip.clone());
+        let first = gw.clone();
+        let enable_started = doip.enable_started.notified();
+
+        let first_enable = tokio::spawn(async move { first.enable().await });
+        enable_started.await;
+
+        let second = gw.clone();
+        let second_enable = tokio::spawn(async move { second.enable().await });
+        tokio::task::yield_now().await;
+        assert_eq!(doip.enable_calls.load(Ordering::SeqCst), 1);
+
+        doip.release_enable.notify_one();
+        first_enable
+            .await
+            .expect("first task joins")
+            .expect("first enable succeeds");
+        second_enable
+            .await
+            .expect("second task joins")
+            .expect("second enable succeeds");
+
+        assert_eq!(doip.enable_calls.load(Ordering::SeqCst), 1);
+        assert_eq!(gw.state().await, TransportState::Enabled);
     }
 }

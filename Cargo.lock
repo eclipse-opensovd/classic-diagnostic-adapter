@@ -424,13 +424,13 @@ dependencies = [
  "async-trait",
  "cda-build",
  "cda-interfaces",
- "cda-plugin-runtime-update",
+ "cda-plugin-communication-management",
  "futures",
  "kameo",
  "serde_json",
- "socket2",
  "strum",
  "tokio",
+ "tokio-util",
  "tracing",
 ]
 
@@ -530,6 +530,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "cda-plugin-communication-management"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "cda-interfaces",
+ "http",
+ "thiserror 2.0.17",
+ "tokio",
+ "tracing",
+ "uuid",
+]
+
+[[package]]
 name = "cda-plugin-runtime-update"
 version = "0.1.0"
 dependencies = [
@@ -537,6 +550,7 @@ dependencies = [
  "bytes",
  "cda-database",
  "cda-interfaces",
+ "cda-plugin-communication-management",
  "cda-plugin-security",
  "cda-sovd",
  "cda-storage",
@@ -545,7 +559,6 @@ dependencies = [
  "serde_json",
  "sha2",
  "tempfile",
- "thiserror 2.0.17",
  "tokio",
  "tracing",
  "uuid",
@@ -584,6 +597,7 @@ dependencies = [
  "cda-build",
  "cda-comm-doip",
  "cda-interfaces",
+ "cda-plugin-communication-management",
  "cda-plugin-security",
  "chrono",
  "http",
@@ -1573,12 +1587,11 @@ dependencies = [
 
 [[package]]
 name = "http"
-version = "1.3.1"
+version = "1.5.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f4a85d31aea989eead29a3aaf9e1115a180df8282431156e533de47660892565"
+checksum = "918d3568bebf352712bc2ef3d46a8bcf1a75b373be6539de198e9105cbbf9ce0"
 dependencies = [
  "bytes",
- "fnv",
  "itoa",
 ]
 
@@ -1886,6 +1899,7 @@ dependencies = [
  "cda-database",
  "cda-health",
  "cda-interfaces",
+ "cda-plugin-communication-management",
  "cda-plugin-security",
  "cda-sovd",
  "cda-tracing",
@@ -2444,6 +2458,7 @@ dependencies = [
  "cda-extra",
  "cda-health",
  "cda-interfaces",
+ "cda-plugin-communication-management",
  "cda-plugin-runtime-update",
  "cda-plugin-security",
  "cda-sovd",
@@ -4024,6 +4039,7 @@ dependencies = [
  "bytes",
  "futures-core",
  "futures-sink",
+ "futures-util",
  "pin-project-lite",
  "tokio",
 ]

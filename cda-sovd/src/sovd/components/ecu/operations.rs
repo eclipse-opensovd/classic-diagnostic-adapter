@@ -95,15 +95,19 @@ pub(crate) mod comparams {
             response::{IntoResponse as _, Response},
         };
         use axum_extra::extract::WithRejection;
-        use cda_interfaces::{HashMap, HashMapExtensions, UdsEcu, file_manager::FileManager};
+        use cda_interfaces::{
+            HashMap, HashMapExtensions, UdsEcu,
+            communication_control::{CommunicationAccess, CommunicationGuard},
+            file_manager::FileManager,
+        };
         use indexmap::IndexMap;
         use opensovd_axum_extra::ExtractHost;
         use sovd_interfaces::components::ecu::operations::comparams as sovd_comparams;
-        use tokio::sync::RwLock;
+        use tokio::sync::{Mutex, RwLock};
         use uuid::Uuid;
 
         use crate::sovd::{
-            IntoSovd, WebserverEcuState, create_schema,
+            IntoSovd, WebserverEcuState, acquire_communication_activity, create_schema,
             error::{ApiError, ErrorWrapper},
         };
 
@@ -147,7 +151,8 @@ pub(crate) mod comparams {
             >,
             State(WebserverEcuState {
                 comparam_executions,
-                update_in_progress,
+                communication_activities,
+                communication_access,
                 ..
             }): State<WebserverEcuState<T, U>>,
             UseApi(ExtractHost(host), _): UseApi<ExtractHost, String>,
@@ -162,10 +167,11 @@ pub(crate) mod comparams {
             };
             handler_write(
                 comparam_executions,
+                communication_activities,
+                communication_access,
                 path,
                 body,
                 query.include_schema,
-                &update_in_progress,
             )
             .await
         }
@@ -209,23 +215,25 @@ pub(crate) mod comparams {
         }
         async fn handler_write(
             executions: Arc<RwLock<IndexMap<Uuid, sovd_comparams::Execution>>>,
+            communication_activities: Arc<Mutex<HashMap<Uuid, CommunicationGuard>>>,
+            communication_access: Arc<dyn CommunicationAccess>,
             base_path: String,
             request: Option<sovd_comparams::executions::update::Request>,
             include_schema: bool,
-            update_in_progress: &std::sync::atomic::AtomicBool,
         ) -> Response {
             // todo: not in scope for now: request can take body with
             // { timeout: INT, parameters: { ... }, proximity_response: STRING }
-            let mut executions = executions.write().await;
-            if update_in_progress.load(std::sync::atomic::Ordering::Acquire) {
-                return ErrorWrapper {
-                    error: ApiError::Conflict(
-                        "Runtime update in progress, operation blocked".to_owned(),
-                    ),
-                    include_schema,
-                }
-                .into_response();
-            }
+            let communication_activity =
+                match acquire_communication_activity(&*communication_access) {
+                    Ok(activity) => activity,
+                    Err(error) => {
+                        return ErrorWrapper {
+                            error,
+                            include_schema,
+                        }
+                        .into_response();
+                    }
+                };
             let id = Uuid::new_v4();
             let mut comparam_override: HashMap<String, sovd_comparams::ComParamValue> =
                 HashMap::new();
@@ -251,6 +259,12 @@ pub(crate) mod comparams {
                 status: sovd_comparams::executions::Status::Running,
                 schema,
             };
+            // Publish the lease before the execution becomes observable to DELETE.
+            communication_activities
+                .lock()
+                .await
+                .insert(id, communication_activity);
+            let mut executions = executions.write().await;
             executions.insert(
                 id,
                 sovd_comparams::Execution {
@@ -370,6 +384,7 @@ pub(crate) mod comparams {
                 Path(id): Path<IdPathParam>,
                 State(WebserverEcuState {
                     comparam_executions,
+                    communication_activities,
                     ..
                 }): State<WebserverEcuState<T, U>>,
             ) -> Response {
@@ -377,8 +392,11 @@ pub(crate) mod comparams {
                     Ok(v) => v,
                     Err(e) => return e.into_response(),
                 };
-                let mut executions = comparam_executions.write().await;
-                if executions.shift_remove(&id).is_none() {
+                let removed = {
+                    let mut executions = comparam_executions.write().await;
+                    executions.shift_remove(&id).is_some()
+                };
+                if !removed {
                     return ErrorWrapper {
                         error: ApiError::NotFound(Some(format!(
                             "Execution with id {id} not found"
@@ -387,6 +405,7 @@ pub(crate) mod comparams {
                     }
                     .into_response();
                 }
+                crate::sovd::release_communication_activity(&communication_activities, &id).await;
                 StatusCode::NO_CONTENT.into_response()
             }
 
@@ -747,6 +766,8 @@ pub(crate) mod service {
     }
 
     pub(crate) mod executions {
+        use std::sync::Arc;
+
         use aide::{UseApi, transform::TransformOperation};
         use axum::{
             Json,
@@ -758,6 +779,7 @@ pub(crate) mod service {
         use axum_extra::extract::{Host, WithRejection};
         use cda_interfaces::{
             DiagComm, DiagCommType, DynamicPlugin, SchemaProvider, UdsEcu,
+            communication_control::{CommunicationAccess, CommunicationGuard},
             diagservices::{DiagServiceJsonResponse, DiagServiceResponse, DiagServiceResponseType},
             file_manager::FileManager,
             subfunction_ids,
@@ -770,18 +792,19 @@ pub(crate) mod service {
                 OperationQuery, service::executions as sovd_executions,
             },
         };
+        use tokio::sync::{Mutex, RwLock};
         use uuid::Uuid;
 
         use crate::{
             openapi,
             sovd::{
-                self, ServiceExecution, WebserverEcuState, api_error_from_diag_response,
+                self, ServiceExecution, WebserverEcuState, acquire_and_reserve_execution,
+                api_error_from_diag_response,
                 components::get_content_type_and_accept,
                 create_response_schema, create_schema,
                 error::{ApiError, ErrorWrapper, VendorErrorCode},
                 field_parse_errors_to_json, finalize_execution, guard_execution,
                 locks::validate_lock,
-                remove_reserved_execution, reserve_execution,
             },
         };
 
@@ -853,7 +876,8 @@ pub(crate) mod service {
                 uds,
                 locks,
                 service_executions,
-                update_in_progress,
+                communication_activities,
+                communication_access,
                 ..
             }): State<WebserverEcuState<T, U>>,
             UseApi(Host(host), _): UseApi<Host, String>,
@@ -867,7 +891,12 @@ pub(crate) mod service {
             {
                 return response;
             }
-            ecu_operation_write_handler::<T>(
+            let ctx = OperationWriteContext::new(
+                service_executions,
+                communication_activities,
+                communication_access,
+            );
+            ecu_operation_write_handler_with_activity::<T>(
                 WriteHandlerRequest {
                     service,
                     headers,
@@ -875,14 +904,13 @@ pub(crate) mod service {
                 },
                 &ecu_name,
                 &uds,
-                service_executions,
+                ctx,
                 security_plugin,
                 WriteHandlerOptions {
                     include_schema: query.include_schema,
                     suppress_service: query.suppress_service,
                     base_path: format!("http://{host}{uri}"),
                 },
-                &update_in_progress,
             )
             .await
         }
@@ -945,19 +973,50 @@ pub(crate) mod service {
             Ok((data, accept == mime::APPLICATION_JSON))
         }
 
-        pub(crate) async fn ecu_operation_write_handler<T: UdsEcu + SchemaProvider + Clone>(
+        /// Context for ECU operation write handlers, grouping execution-related state.
+        pub(crate) struct OperationWriteContext {
+            service_executions: Arc<
+                RwLock<cda_interfaces::HashMap<String, indexmap::IndexMap<Uuid, ServiceExecution>>>,
+            >,
+            communication_activities: Arc<Mutex<cda_interfaces::HashMap<Uuid, CommunicationGuard>>>,
+            communication_access: Arc<dyn CommunicationAccess>,
+        }
+
+        impl OperationWriteContext {
+            pub(crate) fn new(
+                service_executions: Arc<
+                    RwLock<
+                        cda_interfaces::HashMap<String, indexmap::IndexMap<Uuid, ServiceExecution>>,
+                    >,
+                >,
+                communication_activities: Arc<
+                    Mutex<cda_interfaces::HashMap<Uuid, CommunicationGuard>>,
+                >,
+                communication_access: Arc<dyn CommunicationAccess>,
+            ) -> Self {
+                Self {
+                    service_executions,
+                    communication_activities,
+                    communication_access,
+                }
+            }
+        }
+
+        pub(crate) async fn ecu_operation_write_handler_with_activity<
+            T: UdsEcu + SchemaProvider + Clone,
+        >(
             req: WriteHandlerRequest,
             ecu_name: &str,
             uds: &T,
-            service_executions: std::sync::Arc<
-                tokio::sync::RwLock<
-                    cda_interfaces::HashMap<String, indexmap::IndexMap<Uuid, ServiceExecution>>,
-                >,
-            >,
+            ctx: OperationWriteContext,
             security_plugin: Box<dyn SecurityPlugin>,
             opts: WriteHandlerOptions,
-            update_in_progress: &std::sync::atomic::AtomicBool,
         ) -> Response {
+            let OperationWriteContext {
+                service_executions,
+                communication_activities,
+                communication_access,
+            } = ctx;
             let WriteHandlerRequest {
                 service,
                 headers,
@@ -990,17 +1049,20 @@ pub(crate) mod service {
             // Reserve an execution slot atomically: checks for a running
             // conflict and, if none, inserts a placeholder so that a second
             // concurrent POST for the same operation sees 409 Conflict.
-            let exec_id = match reserve_execution(
-                &service_executions,
+            // The lease is the active-execution marker for update arbitration. It is
+            // published with the reservation and retained until the entry is removed.
+            let (exec_id, guard) = match acquire_and_reserve_execution(
+                &*communication_access,
+                Arc::clone(&service_executions),
+                Arc::clone(&communication_activities),
                 &service,
                 &service,
                 include_schema,
-                update_in_progress,
             )
             .await
             {
-                Ok(id) => id,
-                Err(err) => return err.into_response(),
+                Ok(v) => v,
+                Err(e) => return e.into_response(),
             };
 
             let security_plugin: DynamicPlugin = security_plugin;
@@ -1010,7 +1072,7 @@ pub(crate) mod service {
                 match check_if_async(uds, ecu_name, &service, &security_plugin).await {
                     Ok(v) => v,
                     Err(e) => {
-                        remove_reserved_execution(&service_executions, &service, &exec_id).await;
+                        guard.cleanup().await;
                         return err_response(e);
                     }
                 }
@@ -1019,7 +1081,7 @@ pub(crate) mod service {
             let (data, map_to_json) = match validate_and_parse_write_request(&headers, &body) {
                 Ok(v) => v,
                 Err(e) => {
-                    remove_reserved_execution(&service_executions, &service, &exec_id).await;
+                    guard.cleanup().await;
                     return err_response(e);
                 }
             };
@@ -1046,7 +1108,7 @@ pub(crate) mod service {
                 {
                     Ok(r) => r,
                     Err(e) => {
-                        remove_reserved_execution(&service_executions, &service, &exec_id).await;
+                        guard.cleanup().await;
                         return *e;
                     }
                 }
@@ -1064,7 +1126,7 @@ pub(crate) mod service {
                 )
                 .await
             } else {
-                remove_reserved_execution(&service_executions, &service, &exec_id).await;
+                guard.cleanup().await;
                 handle_sync_post::<T>(
                     response,
                     map_to_json,
@@ -1549,6 +1611,7 @@ pub(crate) mod service {
                 service_executions: &tokio::sync::RwLock<
                     cda_interfaces::HashMap<String, indexmap::IndexMap<Uuid, ServiceExecution>>,
                 >,
+                communication_activities: &Mutex<cda_interfaces::HashMap<Uuid, CommunicationGuard>>,
                 include_schema: bool,
             ) -> Response {
                 if let DiagServiceResponseType::Negative = response.response_type() {
@@ -1573,6 +1636,7 @@ pub(crate) mod service {
                 {
                     stored_mut.parameters.clone_from(&parameters);
                 }
+                sovd::release_communication_activity(communication_activities, &exec_id).await;
 
                 get_by_id_response(
                     ExecutionStatus::Completed,
@@ -1590,6 +1654,7 @@ pub(crate) mod service {
                     ecu_name,
                     uds,
                     service_executions,
+                    communication_activities,
                     ..
                 }): State<WebserverEcuState<T, U>>,
             ) -> Response {
@@ -1676,6 +1741,7 @@ pub(crate) mod service {
                             &service,
                             exec_id,
                             &service_executions,
+                            &communication_activities,
                             include_schema,
                         )
                         .await
@@ -1707,6 +1773,7 @@ pub(crate) mod service {
                     uds,
                     locks,
                     service_executions,
+                    communication_activities,
                     ..
                 }): State<WebserverEcuState<T, U>>,
             ) -> Response {
@@ -1755,6 +1822,11 @@ pub(crate) mod service {
                         if let Some(op_map) = service_executions.write().await.get_mut(&service) {
                             op_map.shift_remove(&exec_id);
                         }
+                        crate::sovd::release_communication_activity(
+                            &communication_activities,
+                            &exec_id,
+                        )
+                        .await;
                         if r.is_empty() {
                             StatusCode::NO_CONTENT.into_response()
                         } else {
@@ -1779,6 +1851,11 @@ pub(crate) mod service {
                         if let Some(op_map) = service_executions.write().await.get_mut(&service) {
                             op_map.shift_remove(&exec_id);
                         }
+                        crate::sovd::release_communication_activity(
+                            &communication_activities,
+                            &exec_id,
+                        )
+                        .await;
                         StatusCode::NO_CONTENT.into_response()
                     }
                     result => {
@@ -1801,6 +1878,11 @@ pub(crate) mod service {
                             {
                                 op_map.shift_remove(&exec_id);
                             }
+                            crate::sovd::release_communication_activity(
+                                &communication_activities,
+                                &exec_id,
+                            )
+                            .await;
                             return StatusCode::NO_CONTENT.into_response();
                         } else if let Some(exec) = service_executions
                             .write()
@@ -1904,8 +1986,9 @@ mod tests {
         use axum::{extract::State, http::StatusCode};
         use axum_extra::extract::WithRejection;
         use cda_interfaces::{
-            datatypes::ComponentOperationsInfo, file_manager::mock::MockFileManager,
-            mock::MockUdsEcu,
+            datatypes::ComponentOperationsInfo,
+            file_manager::mock::MockFileManager,
+            mock::{MockUdsEcu, mock_ecu_state_online_variant_detected},
         };
         use cda_plugin_security::{Secured, mock::TestSecurityPlugin};
         use sovd_interfaces::components::ecu::operations::OperationCollectionItem;
@@ -1919,6 +2002,9 @@ mod tests {
             let mut mock_uds = MockUdsEcu::new();
             let mock_file_manager = MockFileManager::new();
 
+            mock_uds
+                .expect_get_ecu_state()
+                .returning(|_| Ok(mock_ecu_state_online_variant_detected()));
             mock_uds
                 .expect_get_components_operations_info()
                 .withf(|ecu, _| ecu == "TestECU")
@@ -1963,6 +2049,9 @@ mod tests {
             let mock_file_manager = MockFileManager::new();
 
             mock_uds
+                .expect_get_ecu_state()
+                .returning(|_| Ok(mock_ecu_state_online_variant_detected()));
+            mock_uds
                 .expect_get_components_operations_info()
                 .withf(|ecu, _| ecu == "TestECU")
                 .times(1)
@@ -1995,7 +2084,7 @@ mod tests {
                     std::marker::PhantomData,
                 ),
                 WithRejection(
-                    axum::extract::Query(sovd_interfaces::IncludeSchemaQuery {
+                    Query(sovd_interfaces::IncludeSchemaQuery {
                         include_schema: false,
                     }),
                     std::marker::PhantomData,
@@ -2030,6 +2119,9 @@ mod tests {
             let mut mock_uds = MockUdsEcu::new();
             let mock_file_manager = MockFileManager::new();
 
+            mock_uds
+                .expect_get_ecu_state()
+                .returning(|_| Ok(mock_ecu_state_online_variant_detected()));
             mock_uds
                 .expect_get_components_operations_info()
                 .times(1)
@@ -2086,6 +2178,7 @@ mod tests {
             file_manager::mock::MockFileManager,
             mock::MockUdsEcu,
         };
+        use cda_plugin_communication_management::lifecycle::enabled_communication_access_for_test;
         use cda_plugin_security::{Secured, mock::TestSecurityPlugin};
         use indexmap::IndexMap;
         use sovd_interfaces::{
@@ -2132,6 +2225,39 @@ mod tests {
                 })
             });
             resp
+        }
+
+        async fn ecu_operation_write_handler<
+            T: cda_interfaces::UdsEcu + cda_interfaces::SchemaProvider + Clone,
+        >(
+            req: handlers::WriteHandlerRequest,
+            ecu_name: &str,
+            uds: &T,
+            service_executions: Arc<
+                tokio::sync::RwLock<
+                    cda_interfaces::HashMap<
+                        String,
+                        indexmap::IndexMap<uuid::Uuid, ServiceExecution>,
+                    >,
+                >,
+            >,
+            security_plugin: Box<dyn cda_plugin_security::SecurityPlugin>,
+            opts: handlers::WriteHandlerOptions,
+        ) -> axum::response::Response {
+            let ctx = handlers::OperationWriteContext::new(
+                service_executions,
+                Arc::new(tokio::sync::Mutex::new(cda_interfaces::HashMap::default())),
+                enabled_communication_access_for_test(),
+            );
+            handlers::ecu_operation_write_handler_with_activity::<T>(
+                req,
+                ecu_name,
+                uds,
+                ctx,
+                security_plugin,
+                opts,
+            )
+            .await
         }
 
         #[tokio::test]
@@ -3503,7 +3629,7 @@ mod tests {
                     },
                 );
 
-            let response = handlers::ecu_operation_write_handler::<MockUdsEcu>(
+            let response = ecu_operation_write_handler::<MockUdsEcu>(
                 handlers::WriteHandlerRequest {
                     service: "CalibrateSensor".to_string(),
                     headers: make_post_headers(),
@@ -3518,7 +3644,6 @@ mod tests {
                     suppress_service: false,
                     base_path: "http://localhost/operations/CalibrateSensor/executions".to_string(),
                 },
-                &std::sync::atomic::AtomicBool::new(false),
             )
             .await;
 
@@ -3569,7 +3694,7 @@ mod tests {
                     },
                 );
 
-            let response = handlers::ecu_operation_write_handler::<MockUdsEcu>(
+            let response = ecu_operation_write_handler::<MockUdsEcu>(
                 handlers::WriteHandlerRequest {
                     service: "CalibrateSensor".to_string(),
                     headers: make_post_headers(),
@@ -3584,7 +3709,6 @@ mod tests {
                     suppress_service: false,
                     base_path: "http://localhost/operations/CalibrateSensor/executions".to_string(),
                 },
-                &std::sync::atomic::AtomicBool::new(false),
             )
             .await;
 
@@ -3614,7 +3738,7 @@ mod tests {
                 mock_file_manager,
             );
 
-            let response = handlers::ecu_operation_write_handler::<MockUdsEcu>(
+            let response = ecu_operation_write_handler::<MockUdsEcu>(
                 handlers::WriteHandlerRequest {
                     service: "CalibrateSensor".to_string(),
                     headers: make_post_headers(),
@@ -3629,7 +3753,6 @@ mod tests {
                     suppress_service: false,
                     base_path: "http://localhost/operations/CalibrateSensor/executions".to_string(),
                 },
-                &std::sync::atomic::AtomicBool::new(false),
             )
             .await;
 
@@ -3662,7 +3785,7 @@ mod tests {
                 mock_file_manager,
             );
 
-            let response = handlers::ecu_operation_write_handler::<MockUdsEcu>(
+            let response = ecu_operation_write_handler::<MockUdsEcu>(
                 handlers::WriteHandlerRequest {
                     service: "CalibrateSensor".to_string(),
                     headers: make_post_headers(),
@@ -3677,7 +3800,6 @@ mod tests {
                     suppress_service: false,
                     base_path: "http://localhost/operations/CalibrateSensor/executions".to_string(),
                 },
-                &std::sync::atomic::AtomicBool::new(false),
             )
             .await;
 
@@ -3712,7 +3834,7 @@ mod tests {
 
             let service_executions_ref = Arc::clone(&state.service_executions);
 
-            let response = handlers::ecu_operation_write_handler::<MockUdsEcu>(
+            let response = ecu_operation_write_handler::<MockUdsEcu>(
                 handlers::WriteHandlerRequest {
                     service: "CalibrateSensor".to_string(),
                     headers: make_post_headers(),
@@ -3727,7 +3849,6 @@ mod tests {
                     suppress_service: false,
                     base_path: "http://localhost/operations/CalibrateSensor/executions".to_string(),
                 },
-                &std::sync::atomic::AtomicBool::new(false),
             )
             .await;
 
@@ -3753,7 +3874,7 @@ mod tests {
 
             let service_executions_ref = Arc::clone(&state.service_executions);
 
-            let response = handlers::ecu_operation_write_handler::<MockUdsEcu>(
+            let response = ecu_operation_write_handler::<MockUdsEcu>(
                 handlers::WriteHandlerRequest {
                     service: "CalibrateSensor".to_string(),
                     headers: make_post_headers(),
@@ -3768,7 +3889,6 @@ mod tests {
                     suppress_service: true,
                     base_path: "http://localhost/operations/CalibrateSensor/executions".to_string(),
                 },
-                &std::sync::atomic::AtomicBool::new(false),
             )
             .await;
 
@@ -3814,7 +3934,7 @@ mod tests {
 
             let service_executions_ref = Arc::clone(&state.service_executions);
 
-            let response = handlers::ecu_operation_write_handler::<MockUdsEcu>(
+            let response = ecu_operation_write_handler::<MockUdsEcu>(
                 handlers::WriteHandlerRequest {
                     service: "CalibrateSensor".to_string(),
                     headers: make_post_headers(),
@@ -3829,7 +3949,6 @@ mod tests {
                     suppress_service: false,
                     base_path: "http://localhost/operations/CalibrateSensor/executions".to_string(),
                 },
-                &std::sync::atomic::AtomicBool::new(false),
             )
             .await;
 
@@ -3888,7 +4007,7 @@ mod tests {
 
             let service_executions_ref = Arc::clone(&state.service_executions);
 
-            let response = handlers::ecu_operation_write_handler::<MockUdsEcu>(
+            let response = ecu_operation_write_handler::<MockUdsEcu>(
                 handlers::WriteHandlerRequest {
                     service: "CalibrateSensor".to_string(),
                     headers: make_post_headers(),
@@ -3903,7 +4022,6 @@ mod tests {
                     suppress_service: false,
                     base_path: "http://localhost/operations/CalibrateSensor/executions".to_string(),
                 },
-                &std::sync::atomic::AtomicBool::new(false),
             )
             .await;
 

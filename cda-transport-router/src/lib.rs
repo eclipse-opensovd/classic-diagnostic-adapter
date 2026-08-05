@@ -39,16 +39,19 @@
 //!     .with_can(can_gateway);
 //! ```
 
-use std::sync::Arc;
+use std::{future::Future, pin::Pin, sync::Arc};
 
 use async_trait::async_trait;
 pub use cda_interfaces::TransportType;
 use cda_interfaces::{
     DiagServiceError, EcuAddresses, EcuGateway, FunctionalTransport, HashMap, NetworkTopology,
-    PhysicalTransport, ReusableTransportResource, RouteStatus, ServicePayload, Shutdown,
-    TransmissionParameters, TransportProbe, TransportResponse,
+    PhysicalTransport, RouteStatus, ServicePayload, Shutdown, TransmissionParameters,
+    TransportProbe, TransportResponse,
+    communication_control::{
+        TransportControl, TransportState, TransportStateTracker, error::CommControlError,
+    },
 };
-use tokio::sync::{RwLock, mpsc};
+use tokio::sync::{Mutex, RwLock, mpsc};
 
 /// A router that can route diagnostic messages over multiple transports.
 ///
@@ -69,6 +72,11 @@ pub struct DiagnosticTransportRouter<D: EcuGateway + TransportProbe, C: EcuGatew
     /// transport). Entries are written once and never change at runtime, so
     /// a diagnostic session can never silently switch transports.
     ecu_bindings: Arc<RwLock<HashMap<String, TransportType>>>,
+    /// Authoritative router lifecycle state.
+    transport_state: Arc<TransportStateTracker>,
+    /// Serializes a complete lifecycle operation (status check, gateway
+    /// fan-out, final transition) against concurrent enable/disable callers.
+    operation_lock: Arc<Mutex<()>>,
 }
 
 impl<D: EcuGateway + TransportProbe, C: EcuGateway + TransportProbe>
@@ -77,11 +85,14 @@ impl<D: EcuGateway + TransportProbe, C: EcuGateway + TransportProbe>
     /// Creates a new diagnostic transport router with the given per-ECU transport overrides.
     #[must_use]
     pub fn new(transport_overrides: HashMap<String, TransportType>) -> Self {
+        let tracker = TransportStateTracker::new(TransportState::Disabled);
         Self {
             doip_gateway: None,
             can_gateway: None,
             transport_overrides: Arc::new(transport_overrides),
             ecu_bindings: Arc::new(RwLock::new(HashMap::default())),
+            transport_state: Arc::new(tracker),
+            operation_lock: Arc::new(Mutex::new(())),
         }
     }
 
@@ -213,6 +224,19 @@ impl<D: EcuGateway + TransportProbe, C: EcuGateway + TransportProbe>
 
         Err(DiagServiceError::EcuOffline(ecu_name.to_owned()))
     }
+
+    /// Router-level send gate. Rejects datapath traffic while communication is
+    /// inhibited so requests cannot reach transport before the
+    /// lifecycle is enabled.
+    async fn ensure_communication_active(&self) -> Result<(), DiagServiceError> {
+        if self.transport_state.active().await {
+            Ok(())
+        } else {
+            Err(DiagServiceError::CommunicationDisabled(
+                "Diagnostic communication disabled".to_owned(),
+            ))
+        }
+    }
 }
 
 impl<D: EcuGateway + TransportProbe, C: EcuGateway + TransportProbe> PhysicalTransport
@@ -229,6 +253,7 @@ impl<D: EcuGateway + TransportProbe, C: EcuGateway + TransportProbe> PhysicalTra
         response_sender: mpsc::Sender<Result<Option<TransportResponse>, DiagServiceError>>,
         expect_uds_reply: bool,
     ) -> Result<tokio::task::JoinHandle<()>, DiagServiceError> {
+        self.ensure_communication_active().await?;
         let ecu_name = transmission_params.ecu_name.to_lowercase();
         let transport = self.resolve_transport(&ecu_name).await?;
 
@@ -266,6 +291,7 @@ impl<D: EcuGateway + TransportProbe, C: EcuGateway + TransportProbe> PhysicalTra
         ecu_db: &RwLock<E>,
     ) -> Result<(), DiagServiceError> {
         // resolve_transport handles: overrides -> existing bindings -> first detection
+        self.ensure_communication_active().await?;
         let transport = self.resolve_transport(ecu_name).await?;
 
         // Online check on the resolved transport only (no failover)
@@ -293,6 +319,7 @@ impl<D: EcuGateway + TransportProbe, C: EcuGateway + TransportProbe> FunctionalT
         timeout: std::time::Duration,
         expect_positive_response: bool,
     ) -> Result<HashMap<String, Result<ServicePayload, DiagServiceError>>, DiagServiceError> {
+        self.ensure_communication_active().await?;
         if let Some(ref doip) = self.doip_gateway {
             return doip
                 .send_functional(
@@ -380,23 +407,6 @@ impl<D: EcuGateway + TransportProbe, C: EcuGateway + TransportProbe> Shutdown
     }
 }
 
-/// The router's reusable transport resource is the `DoIP` gateway's (a UDP
-/// socket that survives a database reload). CAN has no such resource, so a
-/// CAN-only router yields `None`.
-impl<D: EcuGateway + TransportProbe + ReusableTransportResource, C: EcuGateway + TransportProbe>
-    ReusableTransportResource for DiagnosticTransportRouter<D, C>
-{
-    type TransportResource = D::TransportResource;
-
-    fn reusable_transport_resource(
-        &self,
-    ) -> Option<Arc<tokio::sync::Mutex<Self::TransportResource>>> {
-        self.doip_gateway
-            .as_ref()
-            .and_then(ReusableTransportResource::reusable_transport_resource)
-    }
-}
-
 impl<D: EcuGateway + TransportProbe, C: EcuGateway + TransportProbe> Clone
     for DiagnosticTransportRouter<D, C>
 {
@@ -406,17 +416,318 @@ impl<D: EcuGateway + TransportProbe, C: EcuGateway + TransportProbe> Clone
             can_gateway: self.can_gateway.clone(),
             transport_overrides: Arc::clone(&self.transport_overrides),
             ecu_bindings: Arc::clone(&self.ecu_bindings),
+            transport_state: Arc::clone(&self.transport_state),
+            operation_lock: Arc::clone(&self.operation_lock),
         }
+    }
+}
+
+impl<
+    D: EcuGateway + FunctionalTransport + TransportProbe + TransportControl,
+    C: EcuGateway + TransportProbe + TransportControl,
+> DiagnosticTransportRouter<D, C>
+{
+    /// Shared body for [`TransportControl::enable`] and [`TransportControl::disable`].
+    ///
+    /// * `in_progress`   - state to enter before fanning out to gateways.
+    /// * `gateway_op`    - the [`TransportControl`] method to call on each gateway.
+    /// * `success_state` - state to enter when all gateways succeed.
+    async fn run_lifecycle_operation<F>(
+        &self,
+        in_progress: TransportState,
+        gateway_op: F,
+        target_state: TransportState,
+    ) -> Result<(), CommControlError>
+    where
+        F: for<'a> Fn(
+            &'a dyn TransportControl,
+        )
+            -> Pin<Box<dyn Future<Output = Result<(), CommControlError>> + Send + 'a>>,
+    {
+        let _lifecycle = self.operation_lock.lock().await;
+        // Check after acquiring the guard so concurrent callers observe the
+        // lifecycle operation completed by the caller that acquired it first.
+        if self.transport_state.state().await == target_state {
+            return Ok(());
+        }
+
+        self.transport_state.transition(in_progress).await;
+
+        let mut errors = Vec::new();
+        let mut doip_succeeded = false;
+        let mut can_succeeded = false;
+        if let Some(doip) = &self.doip_gateway {
+            let gateway = doip as &dyn TransportControl;
+            if let Err(e) = gateway_op(gateway).await {
+                errors.push(e.to_string());
+            } else {
+                doip_succeeded = true;
+            }
+        }
+        if let Some(can) = &self.can_gateway {
+            let gateway = can as &dyn TransportControl;
+            if let Err(e) = gateway_op(gateway).await {
+                errors.push(e.to_string());
+            } else {
+                can_succeeded = true;
+            }
+        }
+
+        if errors.is_empty() {
+            self.transport_state.transition(target_state).await;
+            Ok(())
+        } else {
+            if target_state == TransportState::Enabled {
+                // An incomplete enable must not leave a gateway's background
+                // work active while the router rejects all diagnostic traffic.
+                if doip_succeeded
+                    && let Some(doip) = &self.doip_gateway
+                    && let Err(error) = doip.disable().await
+                {
+                    tracing::error!(error = %error, "Failed to roll back partially enabled DoIP gateway");
+                    doip.shutdown().await;
+                }
+                if can_succeeded
+                    && let Some(can) = &self.can_gateway
+                    && let Err(error) = can.disable().await
+                {
+                    tracing::error!(error = %error, "Failed to roll back partially enabled CAN gateway");
+                    can.shutdown().await;
+                }
+            }
+            self.transport_state
+                .transition(TransportState::Failed)
+                .await;
+            Err(CommControlError::InitFailedMultipleComponents(errors))
+        }
+    }
+}
+
+/// Delegates the communication lifecycle to every configured gateway.
+///
+/// `enable`/`disable` fan out to the `DoIP` and CAN gateways. The router
+/// manages its **own** [`TransportStateTracker`] independently of the trackers
+/// inside each gateway. The router's tracker is the single source of truth
+/// observed by the communication manager (via `SwappableGateway`).
+///
+/// Each gateway's `enable()`/`disable()` also transitions the gateway's own
+/// internal tracker. This is expected and harmless - those transitions serve
+/// the gateway's idempotency guard and have no effect on the router's reported
+/// state or the coordinator's view.
+///
+/// The data-path gate ([`ensure_communication_active`](DiagnosticTransportRouter::ensure_communication_active))
+/// checks only the router-level status.
+#[async_trait]
+impl<
+    D: EcuGateway + FunctionalTransport + TransportProbe + TransportControl,
+    C: EcuGateway + TransportProbe + TransportControl,
+> TransportControl for DiagnosticTransportRouter<D, C>
+{
+    async fn enable(&self) -> Result<(), CommControlError> {
+        self.run_lifecycle_operation(
+            TransportState::Enabling,
+            |g| Box::pin(g.enable()),
+            TransportState::Enabled,
+        )
+        .await
+    }
+
+    async fn disable(&self) -> Result<(), CommControlError> {
+        self.run_lifecycle_operation(
+            TransportState::Disabling,
+            |g| Box::pin(g.disable()),
+            TransportState::Disabled,
+        )
+        .await
+    }
+
+    async fn state(&self) -> TransportState {
+        self.transport_state.state().await
     }
 }
 
 #[cfg(test)]
 mod tests {
+    use std::{
+        sync::atomic::{AtomicUsize, Ordering},
+        time::Duration,
+    };
+
+    use cda_interfaces::{EcuAddresses, RouteStatus, uds::TransportResponse};
+
     use super::*;
 
     #[test]
     fn test_transport_type_debug() {
         assert_eq!(format!("{:?}", TransportType::DoIP), "DoIP");
         assert_eq!(format!("{:?}", TransportType::Can), "Can");
+    }
+
+    /// A gateway whose `enable`/`disable` outcomes and call counts are
+    /// externally observable and configurable, so a test can distinguish
+    /// "never called" from "called and it failed".
+    #[derive(Clone)]
+    struct FakeGateway {
+        enable_fails: bool,
+        enable_calls: Arc<AtomicUsize>,
+        disable_calls: Arc<AtomicUsize>,
+        state: Arc<RwLock<TransportState>>,
+    }
+
+    impl FakeGateway {
+        fn new(enable_fails: bool) -> Self {
+            Self {
+                enable_fails,
+                enable_calls: Arc::new(AtomicUsize::new(0)),
+                disable_calls: Arc::new(AtomicUsize::new(0)),
+                state: Arc::new(RwLock::new(TransportState::Disabled)),
+            }
+        }
+    }
+
+    #[async_trait]
+    impl Shutdown for FakeGateway {
+        async fn shutdown(&self) {}
+    }
+
+    impl cda_interfaces::PhysicalTransport for FakeGateway {
+        fn send(
+            &self,
+            _transmission_params: TransmissionParameters,
+            _message: ServicePayload,
+            _response_sender: mpsc::Sender<Result<Option<TransportResponse>, DiagServiceError>>,
+            _expect_uds_reply: bool,
+        ) -> impl Future<Output = Result<tokio::task::JoinHandle<()>, DiagServiceError>> {
+            std::future::ready(Err(DiagServiceError::RequestNotSupported(
+                "fake gateway".to_owned(),
+            )))
+        }
+
+        fn ecu_online<T: EcuAddresses>(
+            &self,
+            ecu_name: &str,
+            _ecu_db: &RwLock<T>,
+        ) -> impl Future<Output = Result<(), DiagServiceError>> {
+            std::future::ready(Err(DiagServiceError::EcuOffline(ecu_name.to_owned())))
+        }
+    }
+
+    impl FunctionalTransport for FakeGateway {
+        fn send_functional(
+            &self,
+            _transmission_params: TransmissionParameters,
+            _message: ServicePayload,
+            _expected_ecu_logical_addrs: HashMap<u16, String>,
+            _timeout: Duration,
+            _expect_positive_response: bool,
+        ) -> impl Future<
+            Output = Result<
+                HashMap<String, Result<ServicePayload, DiagServiceError>>,
+                DiagServiceError,
+            >,
+        > {
+            std::future::ready(Ok(HashMap::default()))
+        }
+    }
+
+    impl cda_interfaces::NetworkTopology for FakeGateway {
+        fn get_gateway_network_address(
+            &self,
+            _logical_address: u16,
+        ) -> impl Future<Output = Option<String>> {
+            std::future::ready(None)
+        }
+    }
+
+    impl TransportProbe for FakeGateway {
+        fn route_status(&self, _ecu_name: &str) -> impl Future<Output = RouteStatus> {
+            std::future::ready(RouteStatus::NotConfigured)
+        }
+
+        fn probe_ecu(&self, _ecu_name: &str) -> impl Future<Output = bool> {
+            std::future::ready(false)
+        }
+    }
+
+    #[async_trait]
+    impl TransportControl for FakeGateway {
+        async fn enable(&self) -> Result<(), CommControlError> {
+            self.enable_calls.fetch_add(1, Ordering::Relaxed);
+            if self.enable_fails {
+                return Err(CommControlError::InitFailed(
+                    "fake enable failure".to_owned(),
+                ));
+            }
+            *self.state.write().await = TransportState::Enabled;
+            Ok(())
+        }
+
+        async fn disable(&self) -> Result<(), CommControlError> {
+            self.disable_calls.fetch_add(1, Ordering::Relaxed);
+            *self.state.write().await = TransportState::Disabled;
+            Ok(())
+        }
+
+        async fn state(&self) -> TransportState {
+            *self.state.read().await
+        }
+    }
+
+    /// When one gateway's `enable()` fails partway through the fan-out, the
+    /// router must roll back any gateway that *did* succeed rather than
+    /// leaving it live underneath a router that reports the overall
+    /// operation failed - see `run_lifecycle_operation`'s rollback branch.
+    #[tokio::test]
+    async fn failed_enable_rolls_back_the_gateway_that_already_succeeded() {
+        let doip = FakeGateway::new(false);
+        let can = FakeGateway::new(true);
+        let router = DiagnosticTransportRouter::new(HashMap::default())
+            .with_doip(doip.clone())
+            .with_can(can.clone());
+
+        let result = router.enable().await;
+
+        assert!(matches!(
+            result,
+            Err(CommControlError::InitFailedMultipleComponents(_))
+        ));
+        assert_eq!(
+            doip.enable_calls.load(Ordering::Relaxed),
+            1,
+            "the DoIP gateway must have been asked to enable"
+        );
+        assert_eq!(
+            doip.disable_calls.load(Ordering::Relaxed),
+            1,
+            "the DoIP gateway succeeded, so it must be rolled back once CAN fails"
+        );
+        assert_eq!(can.enable_calls.load(Ordering::Relaxed), 1);
+        assert_eq!(
+            can.disable_calls.load(Ordering::Relaxed),
+            0,
+            "CAN never succeeded, so there is nothing on it to roll back"
+        );
+        assert_eq!(
+            router.state().await,
+            TransportState::Failed,
+            "the router itself must report the overall operation as failed"
+        );
+    }
+
+    /// A gateway that never succeeded must not be rolled back, and a fully
+    /// successful enable must roll back nothing.
+    #[tokio::test]
+    async fn successful_enable_rolls_back_nothing() {
+        let doip = FakeGateway::new(false);
+        let can = FakeGateway::new(false);
+        let router = DiagnosticTransportRouter::new(HashMap::default())
+            .with_doip(doip.clone())
+            .with_can(can.clone());
+
+        assert_eq!(router.enable().await, Ok(()));
+
+        assert_eq!(doip.disable_calls.load(Ordering::Relaxed), 0);
+        assert_eq!(can.disable_calls.load(Ordering::Relaxed), 0);
+        assert_eq!(router.state().await, TransportState::Enabled);
     }
 }
