@@ -26,8 +26,8 @@ pub enum Status {
 /// Read-only health status provider, queried on-demand when a health check request arrives.
 ///
 /// Implement this trait for components whose health is derived from internal state
-/// (e.g. [`CommState`]) rather than set externally. The health endpoint only requires
-/// `HealthStatus`, so read-only providers do not need to implement `HealthProvider`.
+/// (e.g. [`TransportState`](crate::communication_control::TransportState)) rather than set externally.
+/// The health endpoint only requires `HealthStatus`, so read-only providers do not need to implement `HealthProvider`.
 #[async_trait]
 pub trait HealthStatus: Send + Sync + 'static {
     /// Returns the current health status of the component.

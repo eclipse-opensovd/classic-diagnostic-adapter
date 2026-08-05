@@ -42,6 +42,7 @@ cda-tracing = { workspace = true }
 cda-plugin-security = { workspace = true }
 cda-health = { workspace = true }
 cda-extra = { workspace = true, optional = true }
+cda-plugin-communication-management = { workspace = true }
 cda-plugin-runtime-update = { workspace = true }
 cda-storage = { workspace = true }
 # args
