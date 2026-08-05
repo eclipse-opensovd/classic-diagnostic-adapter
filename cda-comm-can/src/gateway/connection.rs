@@ -26,6 +26,8 @@ pub struct CanEcuConnection {
     pub request_id: CanId,
     /// Physical response CAN ID
     pub response_id: CanId,
+    /// Optional ISO-TP address extension byte for mixed addressing.
+    address_extension: Option<u8>,
     /// CAN interface name
     interface: String,
 }
@@ -33,11 +35,18 @@ pub struct CanEcuConnection {
 impl CanEcuConnection {
     /// Creates a new CAN ECU connection configuration.
     #[must_use]
-    pub fn new(ecu_name: String, interface: String, request_id: CanId, response_id: CanId) -> Self {
+    pub fn new(
+        ecu_name: String,
+        interface: String,
+        request_id: CanId,
+        response_id: CanId,
+        address_extension: Option<u8>,
+    ) -> Self {
         Self {
             ecu_name,
             request_id,
             response_id,
+            address_extension,
             interface,
         }
     }
@@ -53,14 +62,27 @@ impl CanEcuConnection {
         let src = self.response_id.to_socket_id()?;
         let dst = self.request_id.to_socket_id()?;
 
-        // Enable TX padding to send 8-byte CAN frames (required by many ECUs)
+        // Enable TX padding to send 8-byte CAN frames (required by many ECUs).
+        // When configured, also enable ISO-TP mixed addressing with the given
+        // address extension byte for both TX and RX.
+        let (behaviour, ext_address, rx_ext_address) = match self.address_extension {
+            Some(address_extension) => (
+                IsoTpBehaviour::CAN_ISOTP_TX_PADDING
+                    | IsoTpBehaviour::CAN_ISOTP_EXTEND_ADDR
+                    | IsoTpBehaviour::CAN_ISOTP_RX_EXT_ADDR,
+                address_extension,
+                address_extension,
+            ),
+            None => (IsoTpBehaviour::CAN_ISOTP_TX_PADDING, 0, 0),
+        };
+
         let isotp_opts = IsoTpOptions::new(
-            IsoTpBehaviour::CAN_ISOTP_TX_PADDING,
+            behaviour,
             Duration::ZERO, // frame_txtime
-            0,              // ext_address
-            0x00,           // txpad_content (padding byte value)
-            0x00,           // rxpad_content
-            0,              // rx_ext_address
+            ext_address,
+            0x00, // txpad_content (padding byte value)
+            0x00, // rxpad_content
+            rx_ext_address,
         )
         .ok();
 
@@ -200,6 +222,7 @@ impl std::fmt::Debug for CanEcuConnection {
             .field("interface", &self.interface)
             .field("request_id", &self.request_id.to_string())
             .field("response_id", &self.response_id.to_string())
+            .field("address_extension", &self.address_extension)
             .finish()
     }
 }
@@ -255,6 +278,7 @@ mod tests {
             IFACE.to_owned(),
             CanId::try_from(REQ_ID).unwrap(),
             CanId::try_from(RESP_ID).unwrap(),
+            None,
         );
         let response = conn
             .send_receive(&[0x3E, 0x00], Duration::from_secs(2))

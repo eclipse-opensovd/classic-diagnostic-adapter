@@ -426,6 +426,7 @@ fn can_ecu_mappings() -> Vec<CanEcuMapping> {
             ecu_name: (*name).to_owned(),
             request_id: *req,
             response_id: *resp,
+            address_extension: None,
         })
         .collect()
 }
