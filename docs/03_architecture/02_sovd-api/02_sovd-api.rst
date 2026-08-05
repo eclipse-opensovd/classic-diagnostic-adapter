@@ -156,6 +156,9 @@ Entities
 
     - The ECU identifier and name
     - Variant information (name, base variant flag, connectivity state, and logical address)
+    - A ``last_seen`` timestamp of the last successful diagnostic contact with the ECU (see
+      :need:`arch~dt-ecu-states`), if the ECU has ever been contacted (either in the current session, or,
+      when loaded from a persisted ECU list, in a previous session)
     - URI references to the standardized resource collection endpoints: data, operations, configurations, faults, modes, locks, and extension endpoints
 
     The connectivity state of an ECU reflects its current diagnostic reachability and variant detection status:
@@ -166,7 +169,10 @@ Entities
        * - State
          - Description
        * - Online
-         - The ECU is reachable and has a detected variant
+         - The ECU is reachable and has a detected variant. This also covers the internal AssumedOnline
+           state (see :need:`arch~dt-ecu-states`), i.e. an ECU known to have been Online in a previous
+           session (from a persisted ECU list) but not yet contacted in the current session; the
+           ``last_seen`` timestamp allows clients to tell these two cases apart.
        * - Offline
          - The ECU has not been contacted since startup
        * - NotTested

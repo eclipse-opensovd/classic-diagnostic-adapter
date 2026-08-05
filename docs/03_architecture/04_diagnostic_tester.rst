@@ -370,6 +370,11 @@ Deferred Initialization
     - **On-demand**: First diagnostic request to any ECU endpoint triggers initialization
     - **Plugin API**: A custom plugin calls the initialization API based on application-specific
       conditions (e.g., security unlock, session establishment)
+    - **Explicit networkreset execution**: The ``networkreset`` operation is executed with
+      ``trigger_detection=true`` (see :need:`arch~plugin-vehicle-topology-reset-persistence`). This is the
+      only trigger recognized in the "quiet" startup detection mode (see
+      :need:`arch~dt-startup-detection-mode`); the on-demand and plugin-API triggers do not apply in that
+      mode.
 
     **Pre-initialization State**
 
@@ -607,6 +612,9 @@ ECU States
 
     - **NotTested**: Initial state after registration; variant detection has not yet been performed
     - **Online**: ECU is reachable and variant has been successfully detected
+    - **AssumedOnline**: ECU was registered from a persisted ECU topology (see
+      :need:`arch~dt-ecu-list-persistence`) with a last known state of Online, but has not yet been
+      contacted in the current session
     - **NoVariantDetected**: ECU is reachable but no matching variant pattern was found
     - **Duplicate**: ECU shares its logical address with another ECU identified as the correct variant
     - **Offline**: ECU was tested but could not be reached; it has never been successfully online
@@ -615,14 +623,31 @@ ECU States
 
     The distinction between Offline and Disconnected reflects whether the ECU has ever been
     successfully communicated with. An ECU that fails its first contact attempt transitions to
-    Offline; an ECU that was previously Online, NoVariantDetected, or Disconnected and loses
-    communication transitions to Disconnected.
+    Offline; an ECU that was previously Online, NoVariantDetected, Disconnected, or AssumedOnline and
+    loses (or fails to establish) communication transitions to Disconnected -- since, in all of these
+    cases, the ECU is known to have been reachable at some point (either in the current session, or, for
+    AssumedOnline, according to the persisted topology from a previous session).
+
+    **External Representation**
+
+    The AssumedOnline state is an internal-only distinction. Externally, via the SOVD API (see
+    :need:`arch~sovd-api-components-entity-collection` and
+    :need:`arch~plugin-vehicle-topology-retrieval`), an ECU in the AssumedOnline state is reported with
+    connectivity state ``Online``, so that clients do not need to be aware of whether the ECU has actually
+    been contacted in the current session. The ``last_seen`` timestamp (see State Storage below) allows
+    clients to judge how current that information is.
 
     **State Storage**
 
     ECU state is maintained within the ECU manager structure, which wraps the diagnostic
     database and adds runtime state information. The state is queryable through the SOVD API
     component endpoints.
+
+    In addition to the state enum, each ECU manager stores a ``last_seen`` timestamp, updated whenever a
+    diagnostic exchange with the ECU succeeds (e.g. a successful variant detection response, or a successful
+    diagnostic service response during normal operation). For ECUs registered in the AssumedOnline state,
+    the initial value of ``last_seen`` is taken from the persisted topology (see
+    :need:`arch~dt-ecu-list-persistence`) and reflects the last successful contact from a previous session.
 
     **State Transitions**
 
@@ -633,6 +658,8 @@ ECU States
     - **Variant Detection**: Detection success, failure, or duplicate identification
     - **API Requests**: Explicit re-detection requests via POST to ECU endpoint
     - **Communication Errors**: Timeout, NACK, or connection closure during diagnostic requests
+    - **Persisted Topology Load**: Registration of an ECU from a persisted topology with last known state
+      Online transitions it directly to AssumedOnline instead of NotTested
 
     **Concurrent Access**
 
@@ -643,8 +670,220 @@ ECU States
     **State Query**
 
     The SOVD API exposes ECU state through the component collection endpoint. Clients can
-    query individual ECU status or list all ECUs with their current states. The state is
-    included in the component response to inform clients of ECU availability.
+    query individual ECU status or list all ECUs with their current states. The state (with AssumedOnline
+    mapped to Online) and the ``last_seen`` timestamp are included in the component response to inform
+    clients of ECU availability.
+
+
+ECU List Persistence
+--------------------
+
+ECU List Persistence
+^^^^^^^^^^^^^^^^^^^^
+
+.. arch:: ECU List Persistence
+    :id: arch~dt-ecu-list-persistence
+    :status: draft
+
+    The detected ECU/gateway topology is persisted on top of the generic Persistence API (see
+    :need:`arch~system-persistence-api`), so that the CDA does not have to unconditionally rediscover it on
+    every startup.
+
+    **Enable/Disable Configuration**
+
+    A configuration flag (``ecu_list_persistence.enabled``, default ``true``) gates this entire feature.
+    When set to ``false``, the ``ecu-topology`` bucket is never read at startup and never written (neither
+    after a detection run nor at shutdown, see :need:`arch~dt-ecu-list-persistence-shutdown`). The CDA
+    startup path always takes the "no persisted topology" branch in that configuration (see
+    :need:`arch~dt-startup-detection-mode`), and the AssumedOnline state can never be entered.
+
+    **Bucket Layout**
+
+    A dedicated Bucket (e.g. ``ecu-topology``) is used. One entry is stored per gateway, keyed by the
+    gateway's logical address. Each value serializes:
+
+    - The gateway's network address and logical address
+    - The list of ECUs reachable through that gateway, each with its logical address, name, last known
+      variant, last known state, and ``last_seen`` timestamp (see :need:`arch~dt-ecu-states`)
+
+    .. uml::
+        :caption: ECU Topology Persistence
+
+        @startuml
+        skinparam backgroundColor #FFFFFF
+        skinparam sequenceArrowThickness 2
+
+        participant "CDA Startup" as Startup
+        participant "Persistence API" as Persist
+        participant "DoIP Gateway" as DOIP
+        participant "UDS Manager" as UDS
+
+        == Startup ==
+        alt ecu_list_persistence.enabled = false
+            note over Startup: skip persistence entirely,\nalways take "no persisted topology" branch
+        else ecu_list_persistence.enabled = true
+            Startup -> Persist: load bucket "ecu-topology"
+            alt bucket present
+                Persist --> Startup: persisted topology
+                note right: See arch~dt-persisted-list-communication-mode
+            else bucket absent
+                Persist --> Startup: not found
+                note right: See arch~dt-startup-detection-mode
+            end
+        end
+
+        == Detection completes (startup or networkreset) ==
+        DOIP -> UDS: ECUs registered, states updated
+        opt ecu_list_persistence.enabled = true
+            UDS -> Persist: set bucket "ecu-topology" (per gateway)
+            UDS -> Persist: flush
+        end
+        @enduml
+
+    **Write Timing**
+
+    The persisted topology is written after a detection run completes -- both after the initial startup
+    detection (unless deferred/quiet, see :need:`arch~dt-startup-detection-mode`) and after a
+    ``networkreset`` execution that triggers detection (see
+    :need:`arch~plugin-vehicle-topology-reset-persistence`). A ``flush`` is issued to guarantee durability
+    of the persisted data. This write is skipped entirely when ``ecu_list_persistence.enabled`` is
+    ``false``.
+
+    **Read Timing**
+
+    The persisted topology is read once, early during the Vehicle Data Loading Phase of
+    :need:`arch~dt-startup-sequence`, before deciding whether to apply
+    :need:`arch~dt-startup-detection-mode` (no persisted data) or
+    :need:`arch~dt-persisted-list-communication-mode` (persisted data present). This read is skipped
+    entirely when ``ecu_list_persistence.enabled`` is ``false``, in which case
+    :need:`arch~dt-startup-detection-mode` unconditionally applies.
+
+    When ECUs are registered from a persisted topology, an ECU whose persisted state was Online is
+    registered in the AssumedOnline state (see :need:`arch~dt-ecu-states`), with its ``last_seen``
+    timestamp initialized from the persisted value.
+
+
+ECU List Persistence - Shutdown Update
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+.. arch:: ECU List Persistence - Shutdown Update
+    :id: arch~dt-ecu-list-persistence-shutdown
+    :status: draft
+
+    The ``last_seen`` timestamp maintained per ECU (see :need:`arch~dt-ecu-states`) changes far more
+    frequently than the rest of the persisted topology (on every successful diagnostic exchange), so it is
+    not flushed to the Persistence API on every update.
+
+    Instead, the in-memory ``last_seen`` values are written back to the ``ecu-topology`` bucket as part of
+    the graceful shutdown sequence (triggered by the shared shutdown signal, see
+    :need:`arch~dt-startup-sequence`), immediately before the persistence provider is closed. A final
+    ``flush`` is issued after this update to guarantee durability. This shutdown write-back is skipped
+    entirely when ``ecu_list_persistence.enabled`` is ``false`` (see :need:`arch~dt-ecu-list-persistence`),
+    since there is no persisted bucket to update in that configuration.
+
+    .. uml::
+        :caption: last_seen Persistence at Shutdown
+
+        @startuml
+        skinparam backgroundColor #FFFFFF
+        skinparam sequenceArrowThickness 2
+
+        participant "Shutdown Signal" as Signal
+        participant "UDS Manager" as UDS
+        participant "Persistence API" as Persist
+
+        Signal -> UDS: shutdown requested
+        alt ecu_list_persistence.enabled = true
+            UDS -> UDS: collect current last_seen\nper ECU
+            UDS -> Persist: update last_seen in\nbucket "ecu-topology"
+            UDS -> Persist: flush
+            Persist --> UDS: durable
+        else ecu_list_persistence.enabled = false
+            note over UDS: nothing to persist, skip
+        end
+        UDS --> Signal: shutdown complete
+        @enduml
+
+    **Rationale**
+
+    Deferring the persistence of ``last_seen`` to shutdown avoids a flush (and associated flash write) on
+    every diagnostic exchange, while still ensuring that, barring an unclean shutdown (e.g. power loss), the
+    timestamp available after a restart reflects the most recent contact from the previous session.
+    In case of an unclean shutdown, the persisted ``last_seen`` simply remains at its last successfully
+    flushed value, which is still a valid (if slightly stale) lower bound on the actual last contact time.
+
+
+Startup Detection Mode
+^^^^^^^^^^^^^^^^^^^^^^
+
+.. arch:: Startup Detection Mode
+    :id: arch~dt-startup-detection-mode
+    :status: draft
+
+    When no persisted ECU topology is found (see :need:`arch~dt-ecu-list-persistence`), the startup
+    sequence branches based on the configured ``startup_detection_mode``:
+
+    - **immediate** (default): proceeds exactly as the existing immediate initialization path described in
+      :need:`arch~dt-startup-sequence` (DoIP gateway creation, UDS manager creation, asynchronous variant
+      detection).
+    - **quiet**: DoIP gateway creation, UDS manager creation, and variant detection are skipped entirely at
+      startup. No socket is opened and no VIR is broadcast. ECU-related SOVD routes are registered in a
+      pending state, identical in effect to the deferred-initialization pending state described in
+      :need:`arch~dt-deferred-initialization`, except that the only trigger that ends the quiet state is an
+      explicit ``networkreset`` execution with ``trigger_detection=true`` (see
+      :need:`arch~plugin-vehicle-topology-reset-persistence`) -- neither the on-demand (first request) nor
+      the plugin-API trigger apply in this mode.
+
+    This extends the set of initialization triggers recognized by
+    :need:`arch~dt-deferred-initialization` with a third trigger: explicit ``networkreset`` execution.
+
+    Once detection is triggered (by whichever mechanism applies), the resulting topology is persisted as
+    described in :need:`arch~dt-ecu-list-persistence`, so that subsequent startups can use
+    :need:`arch~dt-persisted-list-communication-mode` instead.
+
+
+Persisted List Communication Mode
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+.. arch:: Persisted List Communication Mode
+    :id: arch~dt-persisted-list-communication-mode
+    :status: draft
+
+    When a persisted ECU topology is found (see :need:`arch~dt-ecu-list-persistence`), the startup sequence
+    branches based on the configured ``persisted_list_communication_mode``:
+
+    - **immediate** (default): for each persisted gateway, the CDA attempts a direct (unicast) DoIP
+      connection to its persisted network address, skipping the broadcast VIR step. If the connection
+      attempt fails (timeout or refused), the CDA falls back to broadcast-based discovery for that specific
+      gateway, as described in :need:`arch~doip-vehicle-identification`. If broadcast discovery also fails
+      to locate the gateway, its ECUs are marked Offline (see :need:`arch~dt-ecu-states`).
+    - **on-demand**: the persisted topology is loaded directly into the ECU registry and UDS manager state
+      (so ECUs and their last known state/variant are immediately visible via the SOVD API), but no DoIP
+      connections are opened. This reuses the on-demand initialization trigger described in
+      :need:`arch~dt-deferred-initialization`: the first diagnostic request targeting a given ECU triggers
+      connection establishment (direct connect with broadcast fallback, as in the immediate case above) for
+      that ECU's gateway.
+
+    .. uml::
+        :caption: Persisted List Communication Mode - immediate
+
+        @startuml
+        skinparam backgroundColor #FFFFFF
+        skinparam sequenceArrowThickness 2
+
+        participant "CDA Startup" as Startup
+        participant "DoIP Entity\n(persisted address)" as GW
+
+        Startup -> GW: unicast connect (known IP/logical address)
+        alt connection succeeds
+            GW --> Startup: connected
+            Startup -> Startup: trigger variant detection
+        else connection fails / timeout
+            GW --> Startup: unreachable
+            note right: Fallback to broadcast VIR\n(see arch~doip-vehicle-identification)
+            Startup -> Startup: mark gateway's ECUs Offline\nif still not found
+        end
+        @enduml
 
 
 Error Handling
