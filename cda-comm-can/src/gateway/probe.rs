@@ -254,7 +254,7 @@ mod tests {
     use super::*;
     use crate::config::CanProbeConfig;
     #[cfg(feature = "can-socketcand")]
-    use crate::gateway::connection::CanEcuConnection;
+    use crate::{config::CanAddressingMode, gateway::connection::CanEcuConnection};
 
     #[test]
     fn default_probe_sequence_starts_with_tester_present() {
@@ -312,6 +312,7 @@ mod tests {
                         INTERFACE.to_owned(),
                         CanId::try_from(0x600).unwrap(),
                         CanId::try_from(0x608).unwrap(),
+                        CanAddressingMode::Standard,
                     ),
                 ),
                 (
@@ -321,6 +322,7 @@ mod tests {
                         INTERFACE.to_owned(),
                         CanId::try_from(0x610).unwrap(),
                         CanId::try_from(0x618).unwrap(),
+                        CanAddressingMode::Standard,
                     ),
                 ),
                 (
@@ -330,6 +332,7 @@ mod tests {
                         INTERFACE.to_owned(),
                         CanId::try_from(0x620).unwrap(),
                         CanId::try_from(0x628).unwrap(),
+                        CanAddressingMode::Standard,
                     ),
                 ),
             ],
