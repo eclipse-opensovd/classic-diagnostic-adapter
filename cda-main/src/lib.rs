@@ -75,14 +75,16 @@ pub enum Command {
 #[derive(Parser, Debug)]
 #[command(version, about, long_about = None)]
 pub struct AppArgs {
-    #[arg(short, long, env = "CDA_CONFIG_FILE")]
-    pub config: Option<String>,
+    /// Configuration file to load, if none has been loaded into storage before.
+    #[arg(short = 'c', long, env = "CDA_CONFIG_FILE")]
+    pub seed_config: Option<PathBuf>,
 
     #[command(subcommand)]
     pub command: Option<Command>,
 
-    #[arg(short, long)]
-    pub databases_path: Option<String>,
+    /// Directory with diagnostic databases to load, if none have been loaded into storage before.
+    #[arg(short = 'd', long)]
+    pub seed_databases_dir: Option<String>,
 
     #[arg(short, long)]
     pub tester_address: Option<String>,
@@ -157,8 +159,8 @@ impl AppArgs {
         )
     )]
     pub fn update_config(self, config: &mut Configuration) {
-        if let Some(databases_path) = self.databases_path {
-            config.database.path = databases_path;
+        if let Some(seed_databases_path) = self.seed_databases_dir {
+            config.database.seed_dir = seed_databases_path;
         }
         if let Some(exit_no_database_loaded) = self.exit_no_database_loaded {
             config.database.exit_no_database_loaded = exit_no_database_loaded;
@@ -265,26 +267,9 @@ where
         return generate_config_cmd(output.as_ref());
     }
 
-    let (mut config, disk_loaded) = config::load_config_with_fallback(args.config.as_deref());
+    let mut config = config::load_config_from_file_or_storage(args.seed_config.as_deref()).await?;
 
-    if disk_loaded && config.runtime_update_config.init_storage_from_config_file {
-        let config_file = config::resolve_config_file_path(args.config.as_deref());
-        config::seed_storage_from_config_file(
-            &config.runtime_update_config.storage_dir,
-            &config_file,
-        )
-        .await;
-    }
-
-    if let Some(storage_config) =
-        config::load_config_with_storage_override(&config.runtime_update_config.storage_dir).await?
-    {
-        config = storage_config;
-    } else if !disk_loaded {
-        config::require_config_source()?;
-    }
-
-    // Command line arguments always take precedence over stored configuration
+    // Command line arguments always take precedence over loaded configuration
     args.update_config(&mut config);
 
     config.validate_sanity().map_err(AppError::from)?;
@@ -591,7 +576,7 @@ pub async fn load_vehicle_data<
 ) -> Result<VehicleData<S>, AppError> {
     let mdd_paths: Vec<PathBuf> = {
         let storage_dir = &config.runtime_update_config.storage_dir;
-        let paths = resolve_mdd_paths(storage_dir, &config.database.path).await;
+        let paths = resolve_mdd_paths(storage_dir, &config.database.seed_dir).await;
         if paths.is_empty() && config.database.exit_no_database_loaded {
             return Err(AppError::InitializationFailed(
                 "No MDD files found".to_string(),

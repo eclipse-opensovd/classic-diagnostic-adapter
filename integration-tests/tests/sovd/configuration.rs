@@ -26,7 +26,7 @@ async fn cda_stays_running_when_no_database_loaded_and_exit_flag_is_false() {
 
     let mut config = Configuration {
         database: DatabaseConfig {
-            path: empty_db_dir.path().to_string_lossy().into_owned(),
+            seed_dir: empty_db_dir.path().to_string_lossy().into_owned(),
             exit_no_database_loaded: false,
             ..Default::default()
         },
