@@ -20,17 +20,17 @@ pub(crate) mod runtimefilesupdate {
         response::IntoResponse,
     };
     use cda_interfaces::runtime_update_api::{LockStateProvider, RuntimeFilesUpdatePlugin};
+    use cda_plugin_communication_management::http_protection::config::{
+        HttpMethod, HttpRouteMatcher,
+    };
     use cda_plugin_security::Secured;
     use opensovd_axum_extra::ExtractHost;
     use sovd_interfaces::apps::sovd2uds::operations::runtimefilesupdate::{
         ExecutionCreatedResponse, ExecutionListResponse, ExecutionRequest,
     };
 
-    use crate::sovd::{
-        apps::sovd2uds::bulk_data::runtimefiles::{
-            DbUpdateErrorResponse, RuntimeUpdateRouteState, require_vehicle_lock,
-        },
-        update_guard::ExemptRoute,
+    use crate::sovd::apps::sovd2uds::bulk_data::runtimefiles::{
+        DbUpdateErrorResponse, RuntimeUpdateRouteState, require_vehicle_lock,
     };
 
     const EXECUTIONS_ROUTE: &str =
@@ -141,11 +141,11 @@ pub(crate) mod runtimefilesupdate {
             .with_state(state)
     }
 
-    /// Returns the [`ExemptRoute`]s that must remain accessible during a database update.
-    pub fn update_exempt_routes() -> Vec<ExemptRoute> {
-        vec![ExemptRoute {
+    /// Returns the [`HttpRouteMatcher`]s that must remain accessible during a database update.
+    pub fn routes_accessible_during_update() -> Vec<HttpRouteMatcher> {
+        vec![HttpRouteMatcher {
             prefix: EXECUTIONS_ROUTE.to_string(),
-            methods: vec![http::Method::GET],
+            methods: vec![HttpMethod::GET],
         }]
     }
 }

@@ -200,6 +200,17 @@ impl<S: EcuGateway + FunctionalTransport, T: EcuManager> UdsFunctionalGroup for 
             return HashMap::new();
         }
 
+        let _guard = match self.require_communication_ready() {
+            Ok(guard) => guard,
+            Err(error) => {
+                let mut result_map = HashMap::new();
+                for ecu_name in ecu_list {
+                    result_map.insert(ecu_name, Err(error.clone()));
+                }
+                return result_map;
+            }
+        };
+
         let Some(globals_ecu) = self.ecus.get(&self.functional_description_database) else {
             tracing::warn!(
                 functional_group = %functional_group,

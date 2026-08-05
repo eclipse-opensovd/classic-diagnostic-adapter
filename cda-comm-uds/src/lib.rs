@@ -82,6 +82,61 @@ impl<S: EcuGateway, T: UdsEcuDb> UdsManager<S, T> {
             .get(ecu_name)
             .ok_or_else(|| DiagServiceError::NotFound(format!("ECU {ecu_name} not found")))
     }
+
+    /// Acquires a communication guard without attempting on-demand
+    /// activation. For background/keep-alive traffic (tester present) that
+    /// must never itself bring communication up - only a genuine diagnostic
+    /// request may trigger activation.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`DiagServiceError::CommunicationDisabled`] when communication
+    /// is not currently enabled.
+    pub(crate) fn acquire_communication_guard(
+        &self,
+    ) -> Result<CommunicationGuard, DiagServiceError> {
+        self.communication_access.acquire().map_err(|error| {
+            DiagServiceError::CommunicationNotReady {
+                message: error.to_string(),
+                retry_after_seconds: self.communication_retry_after_seconds,
+            }
+        })
+    }
+
+    /// Requires diagnostic communication to already be enabled before
+    /// sending a UDS request. When it is not, this fires a non-blocking
+    /// activation request (on demand, when `init_mode` allows it) and
+    /// returns [`DiagServiceError::CommunicationNotReady`] immediately,
+    /// rather than awaiting the full activation sequence inline, which can
+    /// take seconds due to variant detection, and would otherwise turn the
+    /// first diagnostic request into a long hang instead of a fast "not
+    /// ready, retry" response. The returned guard must be held for the
+    /// duration of the send so a concurrent disable cannot tear down the
+    /// transport underneath it.
+    ///
+    /// Must never be called from the variant-detection path ([`UdsManager::detect_variant`]
+    /// and everything it reaches, i.e. [`UdsManager::send_without_variant_guard`]:
+    /// detection runs as part of *becoming* enabled, before the state
+    /// reaches `Enabled`, so gating it here would deadlock activation
+    /// against itself.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`DiagServiceError::CommunicationNotReady`] when communication
+    /// is not currently enabled.
+    pub(crate) fn require_communication_ready(
+        &self,
+    ) -> Result<CommunicationGuard, DiagServiceError> {
+        if let Ok(guard) = self.communication_access.acquire() {
+            return Ok(guard);
+        }
+        self.communication_access
+            .request_activate(ActivationCause::DiagnosticRequest);
+        Err(DiagServiceError::CommunicationNotReady {
+            message: "Communication is not currently enabled".to_owned(),
+            retry_after_seconds: self.communication_retry_after_seconds,
+        })
+    }
 }
 
 impl<S: EcuGateway, T: EcuManager> UdsManager<S, T> {

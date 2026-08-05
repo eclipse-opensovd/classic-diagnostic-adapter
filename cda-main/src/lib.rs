@@ -16,7 +16,7 @@
 // query depth (128) on stable 1.97. Default limit otherwise.
 #![recursion_limit = "256"]
 
-use std::{future::Future, path::PathBuf, sync::Arc};
+use std::{path::PathBuf, sync::Arc};
 
 use cda_comm_can::{CanDiagGateway, config::CanConfig};
 use cda_comm_doip::{DoipDiagGateway, config::DoipConfig};
@@ -25,8 +25,10 @@ use cda_core::EcuManager;
 use cda_database::FileManager;
 use cda_interfaces::{
     EcuConnectivityHandler, FunctionalDescriptionConfig, HashMap, HashMapExtensions, TransportType,
-    UdsQuery, UdsVariant, config::ConfigSanity, datatypes::FaultConfig, dlt_ctx,
-    health::HealthProvider,
+    config::ConfigSanity, datatypes::FaultConfig, dlt_ctx, health::HealthProvider,
+};
+use cda_plugin_communication_management::{
+    lifecycle::access::CommunicationAccess, plugin::CommunicationPluginBuilder,
 };
 use cda_plugin_security::{
     DefaultSecurityPlugin, DefaultSecurityPluginData, SecurityPlugin, SecurityPluginLoader,

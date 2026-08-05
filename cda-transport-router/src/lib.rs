@@ -46,6 +46,9 @@ use cda_interfaces::{
     DiagServiceError, EcuAddresses, EcuGateway, FunctionalTransport, HashMap, NetworkTopology,
     PhysicalTransport, ReusableTransportResource, RouteStatus, ServicePayload, Shutdown,
     TransmissionParameters, TransportProbe, TransportResponse,
+    communication_control::{
+        TransportControl, TransportState, TransportStateTracker, error::CommControlError,
+    },
 };
 use tokio::sync::{RwLock, mpsc};
 
@@ -70,6 +73,8 @@ pub struct DiagnosticTransportRouter<
     /// transport). Entries are written once and never change at runtime, so
     /// a diagnostic session can never silently switch transports.
     ecu_bindings: Arc<RwLock<HashMap<String, TransportType>>>,
+    /// Authoritative router lifecycle state and its operation serialization.
+    transport_state: Arc<TransportStateTracker>,
 }
 
 impl<D: EcuGateway + FunctionalTransport + TransportProbe, C: EcuGateway + TransportProbe>
@@ -78,11 +83,13 @@ impl<D: EcuGateway + FunctionalTransport + TransportProbe, C: EcuGateway + Trans
     /// Creates a new diagnostic transport router with the given per-ECU transport overrides.
     #[must_use]
     pub fn new(transport_overrides: HashMap<String, TransportType>) -> Self {
+        let tracker = TransportStateTracker::new(TransportState::Disabled);
         Self {
             doip_gateway: None,
             can_gateway: None,
             transport_overrides: Arc::new(transport_overrides),
             ecu_bindings: Arc::new(RwLock::new(HashMap::default())),
+            transport_state: Arc::new(tracker),
         }
     }
 
@@ -214,6 +221,19 @@ impl<D: EcuGateway + FunctionalTransport + TransportProbe, C: EcuGateway + Trans
 
         Err(DiagServiceError::EcuOffline(ecu_name.to_owned()))
     }
+
+    /// Router-level send gate. Rejects datapath traffic while communication is
+    /// inhibited so requests cannot reach transport before the
+    /// lifecycle is enabled.
+    async fn ensure_communication_active(&self) -> Result<(), DiagServiceError> {
+        if self.transport_state.active().await {
+            Ok(())
+        } else {
+            Err(DiagServiceError::CommunicationDisabled(
+                "Diagnostic communication disabled".to_owned(),
+            ))
+        }
+    }
 }
 
 impl<D: EcuGateway + FunctionalTransport + TransportProbe, C: EcuGateway + TransportProbe>
@@ -230,6 +250,7 @@ impl<D: EcuGateway + FunctionalTransport + TransportProbe, C: EcuGateway + Trans
         response_sender: mpsc::Sender<Result<Option<TransportResponse>, DiagServiceError>>,
         expect_uds_reply: bool,
     ) -> Result<(), DiagServiceError> {
+        self.ensure_communication_active().await?;
         let ecu_name = transmission_params.ecu_name.to_lowercase();
         let transport = self.resolve_transport(&ecu_name).await?;
 
@@ -267,6 +288,7 @@ impl<D: EcuGateway + FunctionalTransport + TransportProbe, C: EcuGateway + Trans
         ecu_db: &RwLock<E>,
     ) -> Result<(), DiagServiceError> {
         // resolve_transport handles: overrides -> existing bindings -> first detection
+        self.ensure_communication_active().await?;
         let transport = self.resolve_transport(ecu_name).await?;
 
         // Online check on the resolved transport only (no failover)
@@ -294,6 +316,7 @@ impl<D: EcuGateway + FunctionalTransport + TransportProbe, C: EcuGateway + Trans
         timeout: std::time::Duration,
         expect_positive_response: bool,
     ) -> Result<HashMap<String, Result<ServicePayload, DiagServiceError>>, DiagServiceError> {
+        self.ensure_communication_active().await?;
         if let Some(ref doip) = self.doip_gateway {
             return doip
                 .send_functional(
@@ -318,6 +341,7 @@ impl<D: EcuGateway + FunctionalTransport + TransportProbe, C: EcuGateway + Trans
     }
 }
 
+#[async_trait]
 impl<D: EcuGateway + FunctionalTransport + TransportProbe, C: EcuGateway + TransportProbe>
     NetworkTopology for DiagnosticTransportRouter<D, C>
 {

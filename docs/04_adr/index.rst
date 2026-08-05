@@ -18,3 +18,4 @@ Architecture Decision Records
 .. include:: 03_mmap_strategy.rst
 .. include:: 04_wal_format.rst
 .. include:: 05_error_handling_library.rst
+.. include:: 06_deferred_initialization.rst

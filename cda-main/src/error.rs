@@ -48,6 +48,8 @@ impl From<DiagServiceError> for AppError {
     fn from(value: DiagServiceError) -> Self {
         match value {
             DiagServiceError::RequestNotSupported(_)
+            | DiagServiceError::CommunicationDisabled(_)
+            | DiagServiceError::CommunicationNotReady { .. }
             | DiagServiceError::BadPayload(_)
             | DiagServiceError::ConnectionClosed(_)
             | DiagServiceError::UnexpectedResponse(_)

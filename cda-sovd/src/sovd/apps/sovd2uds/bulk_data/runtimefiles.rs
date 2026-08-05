@@ -126,14 +126,15 @@ impl IntoResponse for DbUpdateErrorResponse {
                 Some(VendorErrorCode::InvalidData),
                 None,
             ),
-            RuntimeUpdateError::StorageError(_) | RuntimeUpdateError::ReloadFailed(_) => {
-                build_api_error_response(
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    ErrorCode::SovdServerFailure,
-                    None,
-                    None,
-                )
-            }
+            RuntimeUpdateError::StorageError(_)
+            | RuntimeUpdateError::ReloadFailed(_)
+            | RuntimeUpdateError::CommunicationFailure(_)
+            | RuntimeUpdateError::ReplacementFailure(_) => build_api_error_response(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                ErrorCode::SovdServerFailure,
+                None,
+                None,
+            ),
             RuntimeUpdateError::NoLock(_) => build_api_error_response(
                 StatusCode::FORBIDDEN,
                 ErrorCode::InsufficientAccessRights,
@@ -674,6 +675,12 @@ pub(crate) mod backup {
     }
 }
 
+const RUNTIMEFILES_CURRENT_ROUTE: &str =
+    "/vehicle/v15/apps/sovd2uds/bulk-data/runtimefiles-current";
+const RUNTIMEFILES_NEXTUPDATE_ROUTE: &str =
+    "/vehicle/v15/apps/sovd2uds/bulk-data/runtimefiles-nextupdate";
+const RUNTIMEFILES_BACKUP_ROUTE: &str = "/vehicle/v15/apps/sovd2uds/bulk-data/runtimefiles-backup";
+
 pub fn routes<
     S: cda_plugin_security::SecurityPluginLoader,
     P: RuntimeFilesUpdatePlugin,
@@ -684,11 +691,11 @@ pub fn routes<
 ) -> axum::Router {
     axum::Router::new()
         .route(
-            "/vehicle/v15/apps/sovd2uds/bulk-data/runtimefiles-current",
+            RUNTIMEFILES_CURRENT_ROUTE,
             axum::routing::get(current::get::<P, L>),
         )
         .route(
-            "/vehicle/v15/apps/sovd2uds/bulk-data/runtimefiles-nextupdate",
+            RUNTIMEFILES_NEXTUPDATE_ROUTE,
             axum::routing::get(nextupdate::get::<P, L>)
                 .post(nextupdate::post::<P, L>)
                 .layer(axum::extract::DefaultBodyLimit::max(upload_limit))
@@ -699,7 +706,7 @@ pub fn routes<
             axum::routing::delete(nextupdate::id::delete::<P, L>),
         )
         .route(
-            "/vehicle/v15/apps/sovd2uds/bulk-data/runtimefiles-backup",
+            RUNTIMEFILES_BACKUP_ROUTE,
             axum::routing::get(backup::get::<P, L>).delete(backup::delete::<P, L>),
         )
         .layer(axum::middleware::from_fn(

@@ -22,13 +22,18 @@
 pub use cda_comm_can::config::{CanConfig, CanEcuMapping, TransportOverride};
 pub use cda_comm_doip::config::DoipConfig;
 pub use cda_database::DatabaseConfig;
-pub use cda_interfaces::TransportType;
 use cda_interfaces::{
     FunctionalDescriptionConfig, HashMap,
     config::{ConfigSanity, ConfigSanityError},
     datatypes::{
         ComParams, ComponentsConfig, FaultConfig, FlatbBufConfig, SdBoolMappings,
         SdMappingsTruthyValue,
+    },
+};
+pub use cda_interfaces::{
+    TransportType,
+    communication_control::{
+        CommunicationInitMode, CommunicationSettings, PostUpdateCommunicationMode,
     },
 };
 pub use cda_plugin_runtime_update::config::RuntimeUpdateConfig;
@@ -100,6 +105,8 @@ pub struct Configuration {
     pub ecu: HashMap<String, EcuConfig>,
     /// Configuration for update plugin, i.e. storage paths
     pub runtime_update_config: RuntimeUpdateConfig,
+    /// Diagnostic communication initialization and post-update behavior.
+    pub communication: CommunicationSettings,
     /// Strict-mode validation flags.
     pub strict: StrictConfig,
 }
@@ -182,6 +189,7 @@ impl Default for Configuration {
             faults: FaultConfig::default(),
             ecu: HashMap::default(),
             runtime_update_config: RuntimeUpdateConfig::default(),
+            communication: CommunicationSettings::default(),
             strict: StrictConfig::default(),
         }
     }
@@ -473,7 +481,7 @@ interface = "vcan0"
     #[cfg(feature = "can")]
     #[tokio::test]
     async fn can_ecu_mappings_sanity_rejects_ambiguity() -> Result<(), Box<dyn std::error::Error>> {
-        async fn config_with_mappings(
+        fn config_with_mappings(
             mappings: &str,
         ) -> Result<Configuration, Box<dyn std::error::Error>> {
             let config_str = format!(
@@ -499,8 +507,7 @@ ecu_name = "ECU2"
 request_id = 0x7E1
 response_id = 0x7E9
 "#,
-        )
-        .await?;
+        )?;
         valid
             .validate_sanity()
             .expect("distinct mappings should pass sanity");
@@ -517,8 +524,7 @@ ecu_name = "ecu1"
 request_id = 0x7E1
 response_id = 0x7E9
 "#,
-        )
-        .await?;
+        )?;
         let err = duplicate_name
             .validate_sanity()
             .expect_err("case-insensitive duplicate ECU name should fail sanity");
@@ -536,8 +542,7 @@ ecu_name = "ECU2"
 request_id = 0x7E0
 response_id = 0x7E8
 "#,
-        )
-        .await?;
+        )?;
         let err = duplicate_pair
             .validate_sanity()
             .expect_err("reused CAN ID pair should fail sanity");
@@ -550,8 +555,7 @@ ecu_name = "ECU1"
 request_id = 0x7E0
 response_id = 0x7E0
 "#,
-        )
-        .await?;
+        )?;
         let err = self_answering
             .validate_sanity()
             .expect_err("request_id == response_id should fail sanity");

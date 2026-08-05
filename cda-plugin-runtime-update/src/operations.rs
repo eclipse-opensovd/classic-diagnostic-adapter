@@ -72,7 +72,7 @@ pub(crate) async fn reload_configuration_if_present<
         reload_handler
             .reload_configuration(path)
             .await
-            .map_err(|e| RuntimeUpdateError::ReloadFailed(e.to_string()))?;
+            .map_err(RuntimeUpdateError::from)?;
     }
     Ok(())
 }
@@ -125,7 +125,7 @@ pub(crate) async fn reload_database_if_present<S: Storage, R: RuntimeReloaderPlu
     reload_handler
         .reload_databases(mdd_paths)
         .await
-        .map_err(|e| RuntimeUpdateError::ReloadFailed(e.to_string()))
+        .map_err(RuntimeUpdateError::from)
 }
 
 #[cfg(test)]

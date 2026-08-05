@@ -16,7 +16,9 @@ use std::time::Duration;
 use async_trait::async_trait;
 use cda_interfaces::{
     DiagComm, DiagServiceError, DynamicPlugin, EcuGateway, EcuManager, EcuState, HashMap,
-    HashMapExtensions, PayloadDecoder, UdsVariant, dlt_ctx,
+    HashMapExtensions, PayloadDecoder, UdsVariant,
+    communication_control::{CommunicationInitializer, error::CommControlError},
+    dlt_ctx,
 };
 use tokio::sync::RwLock;
 
@@ -446,5 +448,17 @@ impl<S: EcuGateway, T: EcuManager> UdsVariant for UdsManager<S, T> {
         let ecu = self.uds_ecu_db(ecu_name)?;
         let logical_address = ecu.read().await.logical_address();
         Ok(logical_address)
+    }
+}
+
+#[async_trait::async_trait]
+impl<S: EcuGateway, T: EcuManager> CommunicationInitializer for UdsManager<S, T> {
+    fn name(&self) -> &'static str {
+        "variant-detection"
+    }
+
+    async fn initialize(&self) -> Result<(), CommControlError> {
+        self.start_variant_detection().await;
+        Ok(())
     }
 }

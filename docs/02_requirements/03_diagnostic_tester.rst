@@ -183,8 +183,11 @@ Deferred Initialization
       - The plugin API may be used by a custom plugin to trigger the activation of ECU communication based on specific conditions
 
     - The HTTP server and SOVD API must be available before ECU communication is initialized
-    - ECU endpoints must return an appropriate status indicating pending initialization
-    - Once triggered, initialization must proceed as defined in :need:`req~dt-startup-sequence`
+    - ECU-specific diagnostic endpoints must return an appropriate error response indicating that
+      initialization is pending, including a suggested retry interval that is configurable.
+    - Non-diagnostic endpoints must pass through unconditionally and must not trigger initialization
+    - Once triggered, initialization must proceed as defined in :need:`req~dt-startup-sequence`.
+    - After a runtime database update, the communication initialization behavior must be configurable.
 
     **Rationale**
 

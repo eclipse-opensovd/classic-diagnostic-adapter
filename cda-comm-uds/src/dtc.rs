@@ -654,6 +654,11 @@ impl<S: EcuGateway, T: EcuManager> UdsDtc for UdsManager<S, T> {
             .is_service_allowed(&delete_dtc_service, security_plugin)
             .await?;
 
+        // `send_with_raw_payload` does not call ready communication, so we have to
+        // make sure ourselves.
+        // See the methods docstring for details.
+        let _guard = self.require_communication_ready()?;
+
         // For now only all or single DTC clear is supported.
         // This means we can simply build the payload according to ISO spec here.
         // Once we support clear by group we will need to lookup things from the db.

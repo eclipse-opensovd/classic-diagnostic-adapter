@@ -16,7 +16,8 @@
 //! [`Setup`] is the public entry-point for applications that need to customize how the CDA
 //! boots. The default startup path uses [`Setup::new`] with the standard update plugin; a
 //! custom path calls [`Setup::with_update_plugin`] to inject any [`RuntimeFilesUpdatePlugin`]
-//! implementation before handing the `Setup` to one of the `run_*` functions.
+//! implementation and [`Setup::with_communication_plugin`] to replace the default on-demand
+//! communication plugin, before handing the `Setup` to one of the `run_*` functions.
 //!
 //! [`RuntimeFilesUpdatePlugin`]: cda_interfaces::runtime_update_api::RuntimeFilesUpdatePlugin
 
@@ -24,9 +25,30 @@ use std::{future::Future, sync::Arc};
 
 use cda_comm_can::CanDiagGateway;
 use cda_comm_doip::DoipDiagGateway;
-use cda_comm_uds::FlashTransferObserver;
 use cda_core::EcuManager;
-use cda_interfaces::{HashMap, ShutdownSignal, health::HealthProvider};
+use cda_interfaces::{
+    HashMap, ShutdownSignal, UdsVariant,
+    communication_control::{
+        CommunicationInitMode, CommunicationInitializer, PostUpdateCommunicationMode,
+        error::CommControlError,
+    },
+    health::HealthProvider,
+};
+use cda_plugin_communication_management::{
+    http_protection::{
+        config::{
+            HttpMethod, HttpProtectionConfig, HttpProtectionReason, HttpRouteMatcher,
+            HttpStatusCode, http_method_all,
+        },
+        manager::HttpProtectionRegistry,
+    },
+    lifecycle::{
+        access::{CommunicationAccess, CommunicationAccessView},
+        build_communication_plugin,
+        suspension::{SuspendCommunication, CommunicationSuspensionView},
+    },
+    plugin::{CommunicationPlugin, CommunicationPluginBuilder, on_demand::OnDemandPluginBuilder},
+};
 use cda_plugin_security::{SecurityPlugin, SecurityPluginLoader};
 use cda_transport_router::DiagnosticTransportRouter;
 use futures::future::BoxFuture;
@@ -53,26 +75,46 @@ pub struct CdaRuntime<SP: SecurityPlugin> {
     pub config: Arc<RwLock<Configuration>>,
     pub uds_manager: Arc<RwLock<UdsManagerType<SP>>>,
     pub gateway:
-        Arc<RwLock<DiagnosticTransportRouter<DoipDiagGateway<EcuManager<SP>>, CanDiagGateway>>>,
+        Arc<Mutex<DiagnosticTransportRouter<DoipDiagGateway<EcuManager<SP>>, CanDiagGateway>>>,
     pub dynamic_router: cda_sovd::dynamic_router::DynamicRouter,
     pub vehicle_route_handle: cda_sovd::RouteHandle,
     pub lock_provider: Arc<cda_sovd::SovdLockStateProvider>,
-    pub ecu_execution_registry: cda_sovd::EcuExecutionRegistry,
-    pub update_guard: cda_sovd::UpdateGuardState,
-    pub update_in_progress: Arc<std::sync::atomic::AtomicBool>,
     pub flash_files_path: String,
     pub components_config: cda_interfaces::datatypes::ComponentsConfig,
-    pub variant_detection_handle: Mutex<Option<tokio::task::JoinHandle<()>>>,
     pub health: Option<HashMap<String, Arc<dyn HealthProvider>>>,
-    pub flash_transfer_guard: FlashTransferObserver,
     pub storage_dir: String,
     pub mdd_decompress: bool,
     pub shutdown_signal: ShutdownSignal,
+    pub post_update_mode: PostUpdateCommunicationMode,
+    pub communication_access: Arc<dyn CommunicationAccess>,
+    pub communication_suspension: Arc<dyn SuspendCommunication>,
+    pub http_protections: HttpProtectionRegistry,
+    pub update_retry_after_seconds: u64,
 }
 
-// Setup
+/// Adapter that bridges the `RwLock`-wrapped `UdsManager` to the
+/// `CommunicationInitializer` trait.
+struct VariantDetectionInitializer<SP: SecurityPlugin> {
+    uds_manager: Arc<RwLock<UdsManagerType<SP>>>,
+}
 
-/// Builder for customising the CDA startup sequence.
+#[async_trait::async_trait]
+impl<SP: SecurityPlugin> CommunicationInitializer for VariantDetectionInitializer<SP> {
+    fn name(&self) -> &'static str {
+        "variant-detection"
+    }
+
+    async fn initialize(&self) -> Result<(), CommControlError> {
+        self.uds_manager
+            .read()
+            .await
+            .start_variant_detection()
+            .await;
+        Ok(())
+    }
+}
+
+/// Builder for customizing the CDA startup sequence.
 ///
 /// Use [`Setup::new`] to start with the defaults and then chain optional
 /// configuration methods:
@@ -90,7 +132,8 @@ pub struct CdaRuntime<SP: SecurityPlugin> {
 ///     })
 ///     .with_update_plugin(update_plugin_fn(|infra| async move {
 ///         Ok(MyCustomUpdatePlugin::new(infra))
-///     }));
+///     }))
+///     .with_communication_plugin(MyCommunicationPluginBuilder);
 ///
 /// opensovd_cda_lib::run_with_ext_from_config(config, setup).await?;
 /// ```
@@ -100,16 +143,28 @@ pub struct CdaRuntime<SP: SecurityPlugin> {
 /// [`UpdatePluginBuilder`], to enable them.
 ///
 /// [`update_plugin_fn`]: crate::update::update_plugin_fn
-/// [`UpdatePluginBuilder`]: crate::update::UpdatePluginBuilder
-pub struct Setup<SP: SecurityPlugin, SL: SecurityPluginLoader, UPB = ()> {
+/// [`UpdatePluginBuilder`]: UpdatePluginBuilder
+///
+/// Type parameters:
+/// - `SP`: security plugin
+/// - `SL`: security plugin loader
+/// - `UPB`: update plugin builder, defaults to `()`
+/// - `CPB`: communication plugin builder, defaults to [`OnDemandPluginBuilder`]
+pub struct Setup<
+    SP: SecurityPlugin,
+    SL: SecurityPluginLoader,
+    UPB = (),
+    CPB = OnDemandPluginBuilder,
+> {
     pub(crate) _phantom: std::marker::PhantomData<(SP, SL)>,
-
     /// Optional callback run after the webserver starts but before vehicle data is loaded.
     pub(crate) pre_load: Option<PreLoadHook>,
-
     /// Optional update-plugin builder. When `None` (or `UPB = ()`) the runtime-update
     /// routes are not registered.
     pub(crate) build_update_plugin: Option<UPB>,
+    pub(crate) build_communication_plugin: CPB,
+    pub(crate) initialize_tracing: bool,
+    pub(crate) shutdown_signal: Option<ShutdownSignal>,
 }
 
 impl<SP: SecurityPlugin, SL: SecurityPluginLoader> Default for Setup<SP, SL> {
@@ -126,11 +181,28 @@ impl<SP: SecurityPlugin, SL: SecurityPluginLoader> Setup<SP, SL> {
             _phantom: std::marker::PhantomData,
             pre_load: None,
             build_update_plugin: None,
+            build_communication_plugin: OnDemandPluginBuilder,
+            initialize_tracing: true,
+            shutdown_signal: None,
         }
     }
 }
 
-impl<SP: SecurityPlugin, SL: SecurityPluginLoader, UPB> Setup<SP, SL, UPB> {
+impl<SP: SecurityPlugin, SL: SecurityPluginLoader, UPB, CPB> Setup<SP, SL, UPB, CPB> {
+    /// Uses the tracing subscriber already installed by the embedding process.
+    #[must_use]
+    pub fn with_existing_tracing(mut self) -> Self {
+        self.initialize_tracing = false;
+        self
+    }
+
+    /// Uses an externally managed shutdown signal instead of process signals.
+    #[must_use]
+    pub fn with_shutdown_signal(mut self, shutdown_signal: ShutdownSignal) -> Self {
+        self.shutdown_signal = Some(shutdown_signal);
+        self
+    }
+
     /// Registers a preload hook.
     ///
     /// The hook is called after the webserver starts, health state and sd-notify are
@@ -174,11 +246,31 @@ impl<SP: SecurityPlugin, SL: SecurityPluginLoader, UPB> Setup<SP, SL, UPB> {
     pub fn with_update_plugin<UPB2: UpdatePluginBuilder<SP>>(
         self,
         builder: UPB2,
-    ) -> Setup<SP, SL, UPB2> {
+    ) -> Setup<SP, SL, UPB2, CPB> {
         Setup {
             _phantom: self._phantom,
             pre_load: self.pre_load,
             build_update_plugin: Some(builder),
+            build_communication_plugin: self.build_communication_plugin,
+            initialize_tracing: self.initialize_tracing,
+            shutdown_signal: self.shutdown_signal,
+        }
+    }
+
+    /// Replaces the default communication plugin factory.
+    ///
+    /// The factory is invoked after the passive transport and authoritative manager exist.
+    pub fn with_communication_plugin<CPB2: CommunicationPluginBuilder>(
+        self,
+        plugin: CPB2,
+    ) -> Setup<SP, SL, UPB, CPB2> {
+        Setup {
+            _phantom: self._phantom,
+            pre_load: self.pre_load,
+            build_update_plugin: self.build_update_plugin,
+            build_communication_plugin: plugin,
+            initialize_tracing: self.initialize_tracing,
+            shutdown_signal: self.shutdown_signal,
         }
     }
 }
@@ -268,7 +360,34 @@ where
     cda_sovd::add_openapi_routes(&ws.dynamic_router, &vehicle_data.update_guard).await;
     cda_sovd::install_update_guard(&ws.dynamic_router, vehicle_data.update_guard.clone()).await;
 
-    Ok(())
+
+/// Build the configuration which routes are accessible even when transport is disabled
+/// or communication is disabled / deferred.
+/// These routes are internal to the CDA, do not
+fn transport_restriction_config(config: &Configuration) -> HttpProtectionConfig {
+    // Build the transport restriction config.
+    let mut exempt_routes = vec![
+        HttpRouteMatcher::new("/vehicle/v15/authorize", http_method_all()),
+        HttpRouteMatcher::new("/vehicle/v15/data/version", http_method_all()),
+        // Allow creating and listing locks, prevent deletion of locks.
+        // For example, during a flash procedure we do not allow clients to drop their locks this
+        // way, but make sure they can extend them.
+        HttpRouteMatcher::new("/vehicle/v15/locks", vec![HttpMethod::GET, HttpMethod::POST, HttpMethod::PUT]),
+    ];
+    exempt_routes.extend(cda_sovd::routes_accessible_during_update());
+    exempt_routes.extend(cda_sovd::routes_exempt_from_communication_restriction());
+
+    HttpProtectionConfig::new(
+        HttpProtectionReason::CommunicationNotReady,
+        HttpStatusCode::SERVICE_UNAVAILABLE,
+        "ECU communication not available",
+    )
+        .with_blocked_routes(vec![HttpRouteMatcher::new(
+            "/vehicle/v15/",
+            http_method_all(),
+        )])
+        .with_exempt_routes(exempt_routes)
+        .with_retry_after(config.communication.deferred_retry_after_seconds)
 }
 
 #[cfg(test)]

@@ -17,6 +17,7 @@ use cda_interfaces::{
     HashMap, TransmissionParameters,
     datatypes::{DataTransferMetaData, RetryPolicy},
 };
+use cda_plugin_communication_management::lifecycle::guard::CommunicationGuard;
 use strum::Display;
 use tokio::{sync::watch, task::JoinHandle};
 
@@ -45,6 +46,7 @@ pub(crate) struct EcuDataTransfer {
     pub(crate) meta_data: DataTransferMetaData,
     pub(crate) status_receiver: watch::Receiver<bool>,
     pub(crate) task: JoinHandle<()>,
+    pub(crate) _communication_guard: CommunicationGuard,
 }
 
 pub struct TesterPresentTask {

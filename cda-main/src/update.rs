@@ -17,12 +17,13 @@ use cda_comm_can::CanDiagGateway;
 use cda_comm_doip::DoipDiagGateway;
 use cda_core::EcuManager;
 use cda_interfaces::{
-    HashMap, ShutdownSignal,
+    HashMap,
     health::HealthProvider,
     runtime_update_api::{
         ReloadError, RuntimeFilesUpdatePlugin, VehicleComponentFactory, VehicleComponents,
     },
 };
+use cda_plugin_communication_management::lifecycle::access::CommunicationAccess;
 use cda_plugin_runtime_update::{
     DefaultRuntimeUpdatePlugin, DefaultUpdateSecurityHandler,
     default_runtime_reloader_plugin::{
@@ -30,7 +31,7 @@ use cda_plugin_runtime_update::{
     },
 };
 use cda_plugin_security::{SecurityPlugin, SecurityPluginLoader};
-use cda_sovd::{SovdLockStateProvider, UpdateGuardState};
+use cda_sovd::SovdLockStateProvider;
 use cda_storage::LocalStorage;
 use cda_transport_router::DiagnosticTransportRouter;
 use tokio::sync::Mutex;
@@ -104,8 +105,8 @@ pub struct CdaMainVehicleFactory<SP>
 where
     SP: SecurityPlugin,
 {
-    shutdown_signal: ShutdownSignal,
     health_providers: Option<HashMap<String, Arc<dyn HealthProvider>>>,
+    communication_access: Arc<dyn CommunicationAccess>,
     _phantom: std::marker::PhantomData<SP>,
 }
 
@@ -115,12 +116,12 @@ where
 {
     #[must_use]
     pub fn new(
-        shutdown_signal: ShutdownSignal,
         health_providers: Option<HashMap<String, Arc<dyn HealthProvider>>>,
+        communication_access: Arc<dyn CommunicationAccess>,
     ) -> Self {
         Self {
-            shutdown_signal,
             health_providers,
+            communication_access,
             _phantom: std::marker::PhantomData,
         }
     }
@@ -142,8 +143,9 @@ where
         &self,
         config: &Configuration,
         mdd_paths: &[PathBuf],
-        update_in_progress: Arc<std::sync::atomic::AtomicBool>,
-        reusable_transport_resource: Option<Arc<Mutex<cda_comm_doip::socket::DoIPUdpSocket>>>,
+        reusable_transport_resource: Option<
+            Arc<Mutex<Option<cda_comm_doip::socket::DoIPUdpSocket>>>,
+        >,
     ) -> Result<
         VehicleComponents<
             UdsManagerType<SP>,
@@ -155,19 +157,19 @@ where
         let crate_components = crate::create_vehicle_components::<SP>(
             config,
             mdd_paths,
-            self.shutdown_signal.clone(),
             self.health_providers.as_ref(),
-            update_in_progress,
+            Arc::clone(&self.communication_access),
             reusable_transport_resource,
         )
         .await
-        .map_err(|e| ReloadError(format!("Failed to create vehicle components: {e}")))?;
+        .map_err(|e| {
+            ReloadError::ReplacementFailure(format!("Failed to create new vehicle components: {e}"))
+        })?;
 
         Ok(VehicleComponents {
             uds_manager: crate_components.uds_manager,
             diagnostic_gateway: crate_components.diagnostic_gateway,
             file_managers: crate_components.file_managers,
-            variant_detection_handle: crate_components.variant_detection_handle,
             functional_group_config: config.functional_description.clone(),
         })
     }
@@ -184,7 +186,6 @@ pub async fn add_runtime_update_routes<S, P>(
     dynamic_router: &cda_sovd::dynamic_router::DynamicRouter,
     plugin: P,
     lock_provider: Arc<SovdLockStateProvider>,
-    update_guard: &UpdateGuardState,
     upload_body_limit_bytes: usize,
     retry_after_seconds: u64,
 ) where
@@ -196,7 +197,6 @@ pub async fn add_runtime_update_routes<S, P>(
         dynamic_router,
         service,
         lock_provider,
-        update_guard,
         upload_body_limit_bytes,
         retry_after_seconds,
     )
@@ -214,7 +214,7 @@ pub async fn add_runtime_update_routes<S, P>(
 ///
 /// # Errors
 /// Returns [`AppError::RuntimeUpdateError`] if plugin initialization fails.
-pub(crate) async fn create_default_update_plugin<SP, SL>(
+pub async fn create_default_update_plugin<SP, SL>(
     infra: CdaRuntime<SP>,
 ) -> Result<impl RuntimeFilesUpdatePlugin, AppError>
 where
@@ -222,10 +222,9 @@ where
     SL: SecurityPluginLoader,
 {
     let health_for_factory = infra.health.clone();
-    let shutdown_signal = infra.shutdown_signal.clone();
     let factory = Arc::new(CdaMainVehicleFactory::<SP>::new(
-        shutdown_signal,
         health_for_factory,
+        Arc::clone(&infra.communication_access),
     ));
 
     let reloader_infra = ReloaderContext {
@@ -236,12 +235,10 @@ where
         components_config: infra.components_config,
         lock_provider: Arc::clone(&infra.lock_provider),
         shutdown_signal: infra.shutdown_signal,
+        communication_access: Arc::clone(&infra.communication_access),
         uds_manager: infra.uds_manager,
         diagnostic_gateway: infra.gateway,
-        update_guard: infra.update_guard,
-        ecu_execution_registry: infra.ecu_execution_registry.clone(),
         health: infra.health,
-        variant_detection_handle: Mutex::new(infra.variant_detection_handle.lock().await.take()),
         storage_dir: infra.storage_dir.clone(),
         mdd_decompress: infra.mdd_decompress,
     };
@@ -263,16 +260,15 @@ where
     Ok(DefaultRuntimeUpdatePlugin::new(
         storage,
         reloader_plugin,
-        Arc::new(DefaultUpdateSecurityHandler::new(
-            Arc::clone(&infra.lock_provider),
-            vec![
-                Box::new(infra.flash_transfer_guard),
-                Box::new(infra.ecu_execution_registry.clone()),
-            ],
-        )),
+        Arc::new(DefaultUpdateSecurityHandler::new(Arc::clone(
+            &infra.lock_provider,
+        ))),
         Arc::clone(&infra.lock_provider),
         infra.mdd_decompress,
-        Arc::clone(&infra.update_in_progress),
+        infra.communication_disable,
+        infra.http_protections,
+        infra.update_retry_after_seconds,
+        infra.post_update_mode,
         ConfigurationValidator::new(),
     ))
 }
