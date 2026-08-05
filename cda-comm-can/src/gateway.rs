@@ -40,7 +40,7 @@ use self::{
     error::{CanError, CanGatewaySetupError},
     probe::ProbeRequest,
 };
-use crate::config::CanConfig;
+use crate::config::{CanAddressingMode, CanConfig};
 
 /// The instant `timeout` from now, saturating instead of panicking on the
 /// (theoretical) overflow of the underlying monotonic clock.
@@ -169,6 +169,7 @@ impl CanDiagGateway {
                     config.interface.clone(),
                     request_id,
                     response_id,
+                    mapping.addressing_mode,
                 );
 
                 tracing::debug!(
@@ -343,6 +344,7 @@ impl CanDiagGateway {
                 config.interface.clone(),
                 ids.request,
                 ids.response,
+                CanAddressingMode::Standard,
             );
             tracing::debug!(
                 ecu = %name,
