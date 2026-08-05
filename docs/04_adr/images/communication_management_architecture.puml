@@ -1,0 +1,87 @@
+' SPDX-FileCopyrightText: 2026 Copyright (c) Contributors to the Eclipse Foundation
+' SPDX-License-Identifier: Apache-2.0
+
+@startuml
+
+skinparam dpi 150
+skinparam shadowing false
+skinparam linetype polyline
+skinparam componentStyle rectangle
+
+skinparam package {
+  BackgroundColor #FAFAFA
+  BorderColor #777777
+  FontSize 11
+  Padding 20
+}
+
+skinparam component {
+  BackgroundColor #FFFFFF
+  BorderColor #333333
+  FontSize 10
+  Padding 15
+}
+
+title Authoritative Communication Lifecycle Architecture
+
+left to right direction
+
+actor "Diagnostic Client" as Client
+
+package "Request Interface" {
+  component "Request Admission" as RequestAdmission
+  component "SOVD API" as API
+}
+
+package "Communication Management" {
+  component "Authoritative\nCommunication Plugin\n(applies init_mode policy)" as Plugin
+  component "CommunicationHandle +\nLifecycle Worker" as Lifecycle
+  component "HTTP Protection\nRegistry" as Protections
+  component "CommunicationAccess\n(narrow view)" as Access
+  component "DisableCommunication\n(narrow view)" as Disable
+}
+
+package "Diagnostic Runtime" {
+  component "Diagnostic Operations" as Diagnostics
+  component "Vehicle Transport" as Transport
+}
+
+component "Runtime Update" as Update
+
+Client --> RequestAdmission : HTTP request
+RequestAdmission --> API : admitted request
+API --> Diagnostics : diagnostic operation
+
+Diagnostics --> Access : acquire CommunicationGuard,\ninspect state and\nvariant_detection()
+Diagnostics --> Access : request_activate() when\nnot ready, then answer\npending immediately
+RequestAdmission --> Protections : first matching protection\nselects response
+Access --> Plugin : forwards to the same\nselected plugin
+Plugin --> Lifecycle : activate, request_activate,\ntrigger_detection, disable\nprivate handle
+Lifecycle --> Transport : enable or disable\n(lazy DoIP socket bind\ninside enable())
+Diagnostics --> Transport : communicate with vehicle
+
+Update --> Protections : own UpdateInProgress\nprotection (409)
+Update --> Disable : acquire sole\nDisableLease
+Update --> Diagnostics : replace runtime components
+
+note bottom of Plugin
+  Startup-selected public facade.
+  Sole place init_mode policy is applied.
+  No event channel or restricted-request hook:
+  a consumer that finds communication not ready
+  calls request_activate() through its own view.
+end note
+
+note bottom of Lifecycle
+  Capacity-8 command mailbox; sole owner of
+  transport and initializers.
+  Admission is durable and coalesced; shutdown
+  uses an out-of-band barrier.
+end note
+
+note bottom of Protections
+  Runtime update owns an opaque UpdateInProgress
+  token. Dropping it removes only its own record.
+end note
+
+@enduml

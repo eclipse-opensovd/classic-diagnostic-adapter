@@ -11,17 +11,21 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-use std::sync::{Arc, atomic::AtomicBool};
+use std::{sync::Arc, time::Duration};
 
 use cda_interfaces::{
     DiagComm, DiagServiceError, DynamicPlugin, EcuGateway, EcuManager, FunctionalDescriptionConfig,
-    HashMap, HashMapExtensions, HashSet, HashSetExtensions, SchemaDescription, SchemaProvider,
-    UdsEcu, UdsEcuDb, UdsTransport, datatypes::FaultConfig, diagservices::UdsPayloadData,
+    HashMap, HashMapExtensions, SchemaDescription, SchemaProvider, TesterPresentType, UdsEcu,
+    UdsEcuDb, UdsTransport, VariantDetectionReceiver,
+    communication_control::{ActivationCause, CommunicationAccess, CommunicationGuard},
+    datatypes::FaultConfig,
+    diagservices::UdsPayloadData,
 };
 use tokio::{
-    sync::{Mutex, RwLock, Semaphore, mpsc},
+    sync::{Mutex, RwLock, Semaphore},
     task::JoinHandle,
 };
+use tokio_util::sync::CancellationToken;
 
 pub mod coordinator;
 mod data_transfer;
@@ -44,6 +48,21 @@ pub use state_coordinator::EcuStateCoordinator;
 pub use types::TesterPresentTask;
 use types::{EcuDataTransfer, EcuIdentifier};
 
+/// The running variant-detection listener task, with the token that cancels it.
+///
+/// The task hands the receiver back when canceled, so the next communication
+/// initialization can resume reading from the same channel rather than losing
+/// queued discoveries.
+type VariantDetectionListener =
+    Arc<Mutex<Option<(CancellationToken, JoinHandle<VariantDetectionReceiver>)>>>;
+
+enum ReceiverRetention {
+    /// Keep the receiver when the listener may be restarted later.
+    Keep,
+    /// Discard the receiver when the listener will not be restarted.
+    Discard,
+}
+
 pub struct UdsManager<S: EcuGateway, T: UdsEcuDb> {
     ecus: Arc<HashMap<String, RwLock<T>>>,
     gateway: S,
@@ -55,25 +74,18 @@ pub struct UdsManager<S: EcuGateway, T: UdsEcuDb> {
     state_coordinator: EcuStateCoordinator,
     functional_description_database: String,
     fault_config: FaultConfig,
-    update_in_progress: Arc<AtomicBool>,
-}
-
-/// Guard that reports whether any ECU flash data transfers are currently active.
-///
-/// Used by the runtime update plugin to block updates while transfers are in progress.
-/// Implements [`cda_interfaces::runtime_update_api::ActivityGuard`] with a conservative
-/// locking strategy: if the internal mutex is contended, it reports active transfers
-/// to prevent TOCTOU races.
-pub struct FlashTransferObserver {
-    data_transfers: Arc<Mutex<HashMap<EcuIdentifier, EcuDataTransfer>>>,
-}
-
-impl cda_interfaces::runtime_update_api::ActivityGuard for FlashTransferObserver {
-    fn is_active(&self) -> bool {
-        self.data_transfers
-            .try_lock()
-            .map_or(true, |guard| !guard.is_empty())
-    }
+    communication_access: Arc<dyn CommunicationAccess>,
+    /// Configured retry hint surfaced on [`DiagServiceError::CommunicationNotReady`].
+    communication_retry_after: Duration,
+    /// Held until communication initialization starts the listener. Deferred
+    /// rather than spawned in [`UdsManager::new`] so no VAM-triggered detection
+    /// work runs before an authorized activation.
+    variant_detection_receiver: Arc<Mutex<Option<VariantDetectionReceiver>>>,
+    variant_detection_listener: VariantDetectionListener,
+    /// Tester-present types that were running at the last `deinitialize()` call,
+    /// to be restarted in the next `initialize()` call when communication is
+    /// re-enabled.
+    tester_present_snapshot: Arc<Mutex<Vec<TesterPresentType>>>,
 }
 
 impl<S: EcuGateway, T: UdsEcuDb> UdsManager<S, T> {
@@ -82,20 +94,65 @@ impl<S: EcuGateway, T: UdsEcuDb> UdsManager<S, T> {
             .get(ecu_name)
             .ok_or_else(|| DiagServiceError::NotFound(format!("ECU {ecu_name} not found")))
     }
+
+    /// Requires diagnostic communication to be enabled before sending a UDS
+    /// request. Otherwise, requests activation when permitted by `init_mode`
+    /// and immediately returns [`DiagServiceError::CommunicationNotReady`].
+    ///
+    /// The returned guard must be held for the duration of the send.
+    ///
+    /// # Constraints
+    ///
+    /// Must not be called from [`UdsManager::detect_variant`] or anything it
+    /// invokes, including [`UdsManager::send_without_variant_guard`], because
+    /// variant detection runs before communication reaches the enabled state.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`DiagServiceError::CommunicationNotReady`] when communication
+    /// is not currently enabled.
+    pub(crate) fn require_communication_ready(
+        &self,
+    ) -> Result<CommunicationGuard, DiagServiceError> {
+        if let Ok(guard) = self.communication_access.acquire() {
+            return Ok(guard);
+        }
+        self.communication_access
+            .request_activate(ActivationCause::DiagnosticRequest);
+        Err(self.build_communication_not_ready_err("Communication is not currently enabled"))
+    }
+
+    /// Builds a [`DiagServiceError::CommunicationNotReady`] carrying this
+    /// manager's configured retry hint.
+    pub(crate) fn build_communication_not_ready_err(
+        &self,
+        message: impl Into<String>,
+    ) -> DiagServiceError {
+        DiagServiceError::CommunicationNotReady {
+            message: message.into(),
+            retry_after: self.communication_retry_after,
+        }
+    }
 }
 
 impl<S: EcuGateway, T: EcuManager> UdsManager<S, T> {
     /// Create a new [`UdsManager`].
+    #[allow(
+        clippy::too_many_arguments,
+        reason = "Combining parameters into a struct is not preferred here, to keep constructor \
+                  call semantics explicit"
+    )]
     pub fn new(
         gateway: S,
         ecus: Arc<HashMap<String, RwLock<T>>>,
-        mut variant_detection_receiver: mpsc::Receiver<Vec<String>>,
+        variant_detection_receiver: VariantDetectionReceiver,
         state_coordinator: EcuStateCoordinator,
         functional_description_config: &FunctionalDescriptionConfig,
         fault_config: FaultConfig,
-        update_in_progress: Arc<AtomicBool>,
+        communication_access: Arc<dyn CommunicationAccess>,
+        communication_retry_after: Duration,
     ) -> Self {
-        let manager = Self {
+        Self {
             ecus,
             gateway,
             data_transfers: Arc::new(Mutex::new(HashMap::new())),
@@ -108,50 +165,32 @@ impl<S: EcuGateway, T: EcuManager> UdsManager<S, T> {
                 .description_database
                 .clone(),
             fault_config,
-            update_in_progress,
-        };
-
-        let vd_uds_clone = manager.clone();
-        cda_interfaces::spawn_named!("variant-detection-receiver", async move {
-            while let Some(ecus) = variant_detection_receiver.recv().await {
-                let mut processed_duplicates = HashSet::new();
-                let mut deduplicated_ecus = Vec::new();
-
-                for ecu_name in ecus {
-                    if processed_duplicates.contains(&ecu_name) {
-                        continue;
-                    }
-
-                    if let Some(ecu) = vd_uds_clone.ecus.get(&ecu_name) {
-                        let ecu_read = ecu.read().await;
-                        if let Some(duplicates) = ecu_read.duplicating_ecu_names() {
-                            processed_duplicates.extend(duplicates.iter().cloned());
-                        }
-                        deduplicated_ecus.push(ecu_name);
-                    } else {
-                        // A silent drop here once masked a casing mismatch
-                        // between a transport's discovery names and the
-                        // lowercase-keyed ECU map, leaving discovered ECUs
-                        // NotTested until their first request.
-                        tracing::warn!(
-                            ecu_name,
-                            "Variant detection trigger for unknown ECU dropped"
-                        );
-                    }
-                }
-
-                vd_uds_clone
-                    .start_variant_detection_for_ecus(deduplicated_ecus)
-                    .await;
-            }
-        });
-
-        manager
+            communication_access,
+            communication_retry_after,
+            variant_detection_receiver: Arc::new(Mutex::new(Some(variant_detection_receiver))),
+            variant_detection_listener: Arc::new(Mutex::new(None)),
+            tester_present_snapshot: Arc::new(Mutex::new(Vec::new())),
+        }
     }
 
-    pub fn flash_transfer_guard(&self) -> FlashTransferObserver {
-        FlashTransferObserver {
-            data_transfers: Arc::clone(&self.data_transfers),
+    /// Stops the listener, then either drops its receiver or drains and retains
+    /// it for the next initialization, which preserves the channel held by
+    /// long-lived senders.
+    async fn stop_variant_detection_listener(&self, receiver_retention: ReceiverRetention) {
+        let Some((cancel_token, listener)) = self.variant_detection_listener.lock().await.take()
+        else {
+            return;
+        };
+        cancel_token.cancel();
+        match listener.await {
+            Ok(mut receiver) if matches!(receiver_retention, ReceiverRetention::Keep) => {
+                while receiver.try_recv().is_ok() {}
+                *self.variant_detection_receiver.lock().await = Some(receiver);
+            }
+            Ok(_) => {}
+            Err(error) => {
+                tracing::error!(%error, "Variant detection listener failed during shutdown");
+            }
         }
     }
 
@@ -289,7 +328,11 @@ impl<S: Clone + EcuGateway, T: UdsEcuDb> Clone for UdsManager<S, T> {
             state_coordinator: self.state_coordinator.clone(),
             functional_description_database: self.functional_description_database.clone(),
             fault_config: self.fault_config.clone(),
-            update_in_progress: Arc::clone(&self.update_in_progress),
+            communication_access: Arc::clone(&self.communication_access),
+            communication_retry_after: self.communication_retry_after,
+            variant_detection_receiver: Arc::clone(&self.variant_detection_receiver),
+            variant_detection_listener: Arc::clone(&self.variant_detection_listener),
+            tester_present_snapshot: Arc::clone(&self.tester_present_snapshot),
         }
     }
 }
@@ -297,6 +340,8 @@ impl<S: Clone + EcuGateway, T: UdsEcuDb> Clone for UdsManager<S, T> {
 #[async_trait::async_trait]
 impl<S: EcuGateway, T: EcuManager> cda_interfaces::Shutdown for UdsManager<S, T> {
     async fn shutdown(&self) {
+        self.stop_variant_detection_listener(ReceiverRetention::Discard)
+            .await;
         let mut tester_present_tasks = self.tester_present_tasks.write().await;
         let mut session_reset_tasks = self.session_reset_tasks.write().await;
         let mut security_reset_tasks = self.security_reset_tasks.write().await;
@@ -319,11 +364,8 @@ impl<S: EcuGateway, T: EcuManager> SchemaProvider for UdsManager<S, T> {
         ecu: &str,
         service: &DiagComm,
     ) -> Result<SchemaDescription, DiagServiceError> {
-        self.uds_ecu_db(ecu)?
-            .read()
-            .await
-            .schema_for_request(service)
-            .await
+        let ecu = self.uds_ecu_variant_detection_concluded(ecu).await?;
+        ecu.read().await.schema_for_request(service).await
     }
 
     async fn schema_for_responses(
@@ -331,11 +373,8 @@ impl<S: EcuGateway, T: EcuManager> SchemaProvider for UdsManager<S, T> {
         ecu: &str,
         service: &DiagComm,
     ) -> Result<SchemaDescription, DiagServiceError> {
-        self.uds_ecu_db(ecu)?
-            .read()
-            .await
-            .schema_for_responses(service)
-            .await
+        let ecu = self.uds_ecu_variant_detection_concluded(ecu).await?;
+        ecu.read().await.schema_for_responses(service).await
     }
 
     async fn schema_for_fg_request(

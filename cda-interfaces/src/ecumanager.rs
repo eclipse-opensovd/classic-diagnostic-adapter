@@ -258,15 +258,21 @@ pub struct EcuRuntimeState {
     pub ecu_state: std::sync::Arc<std::sync::RwLock<EcuState>>,
     /// Active service states keyed by SID (0x10 = session, 0x27 = security, etc.).
     pub service_states: std::sync::Arc<std::sync::RwLock<HashMap<u8, String>>>,
+    /// Publishes every write to `ecu_state.variant_state`, so callers can await
+    /// variant detection's conclusion instead of polling. `Arc`-wrapped so that
+    /// cloning `EcuRuntimeState` shares one channel, like `ecu_state` itself.
+    variant_state_tx: std::sync::Arc<tokio::sync::watch::Sender<VariantState>>,
 }
 
 impl EcuRuntimeState {
     /// Create initial state for a newly constructed ECU (not yet variant-detected).
     #[must_use]
     pub fn new() -> Self {
+        let (variant_state_tx, _rx) = tokio::sync::watch::channel(VariantState::NotTested);
         Self {
             ecu_state: std::sync::Arc::new(std::sync::RwLock::new(EcuState::default())),
             service_states: std::sync::Arc::new(std::sync::RwLock::new(HashMap::new())),
+            variant_state_tx: std::sync::Arc::new(variant_state_tx),
         }
     }
 
@@ -274,6 +280,22 @@ impl EcuRuntimeState {
     #[must_use]
     pub fn status(&self) -> EcuState {
         std_ext::lock_read(&self.ecu_state).clone()
+    }
+
+    /// Subscribes to variant-state changes, seeded with the current value, so a
+    /// subscriber arriving after detection concluded observes it immediately.
+    #[must_use]
+    pub fn variant_state_rx(&self) -> tokio::sync::watch::Receiver<VariantState> {
+        self.variant_state_tx.subscribe()
+    }
+
+    /// Publishes a new variant-state value to subscribers.
+    ///
+    /// Always notifies, even when the value is unchanged, so a detection attempt
+    /// that settles into the same terminal state still wakes anything blocked on
+    /// `changed()`.
+    pub fn publish_variant_state(&self, state: VariantState) {
+        self.variant_state_tx.send_replace(state);
     }
 }
 

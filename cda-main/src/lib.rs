@@ -17,9 +17,9 @@
 #![recursion_limit = "256"]
 
 use std::{
-    future::Future,
     path::{Path, PathBuf},
     sync::Arc,
+    time::Duration,
 };
 
 use cda_comm_can::{CanDiagGateway, config::CanConfig};
@@ -28,10 +28,12 @@ use cda_comm_uds::{UdsManager, state_coordinator::EcuStateCoordinator};
 use cda_core::EcuManager;
 use cda_database::FileManager;
 use cda_interfaces::{
-    EcuConnectivityHandler, FunctionalDescriptionConfig, HashMap, HashMapExtensions, TransportType,
-    UdsQuery, UdsVariant, config::ConfigSanity, datatypes::FaultConfig, dlt_ctx,
-    health::HealthProvider,
+    EcuConnectivityHandler, EcuRuntimeState, FunctionalDescriptionConfig, HashMap,
+    HashMapExtensions, TransportType, VariantDetectionReceiver, VariantDetectionSender,
+    communication_control::CommunicationAccess, component_slot::ComponentSlot,
+    config::ConfigSanity, datatypes::FaultConfig, dlt_ctx, health::HealthProvider,
 };
+use cda_plugin_communication_management::plugin::CommunicationPluginBuilder;
 use cda_plugin_security::{
     DefaultSecurityPlugin, DefaultSecurityPluginData, SecurityPlugin, SecurityPluginLoader,
 };
@@ -39,7 +41,7 @@ use cda_sovd::Locks;
 use cda_tracing::{OtelGuard, TracingSetupError, TracingWorkerGuard};
 use cda_transport_router::DiagnosticTransportRouter;
 use clap::{Parser, Subcommand};
-use tokio::sync::{Mutex, RwLock, mpsc};
+use tokio::sync::{RwLock, mpsc};
 use tracing_subscriber::layer::SubscriberExt;
 
 use crate::{
@@ -145,13 +147,11 @@ pub struct AppArgs {
 
 pub struct VehicleData<S: SecurityPlugin> {
     pub file_managers: FileManagerMap,
-    pub uds_manager: UdsManagerType<S>,
     pub diagnostic_gateway:
-        DiagnosticTransportRouter<DoipDiagGateway<EcuManager<S>>, CanDiagGateway>,
+        ComponentSlot<DiagnosticTransportRouter<DoipDiagGateway<EcuManager<S>>, CanDiagGateway>>,
     pub locks: Arc<cda_sovd::Locks>,
-    pub update_guard: cda_sovd::UpdateGuardState,
+    pub(crate) prepared: PreparedVehicleComponents<S>,
     pub databases: Arc<DatabaseMap<S>>,
-    pub variant_detection_handle: tokio::task::JoinHandle<()>,
     pub health_providers: Option<HashMap<String, Arc<dyn HealthProvider>>>,
 }
 
@@ -161,7 +161,6 @@ pub struct VehicleComponents<S: SecurityPlugin> {
         DiagnosticTransportRouter<DoipDiagGateway<EcuManager<S>>, CanDiagGateway>,
     pub databases: Arc<DatabaseMap<S>>,
     pub file_managers: FileManagerMap,
-    pub variant_detection_handle: tokio::task::JoinHandle<()>,
 }
 
 impl AppArgs {
@@ -239,14 +238,15 @@ pub async fn run_from_cli() -> Result<(), AppError> {
 ///
 /// # Errors
 /// Returns [`AppError`] if configuration loading, validation, or startup fails.
-pub async fn run_with_ext<SP, SL, UPB>(
+pub async fn run_with_ext<SP, SL, UPB, CPB>(
     args: AppArgs,
-    setup: Setup<SP, SL, UPB>,
+    setup: Setup<SP, SL, UPB, CPB>,
 ) -> Result<(), AppError>
 where
     SP: SecurityPlugin,
     SL: SecurityPluginLoader,
     UPB: UpdatePluginBuilder<SP>,
+    CPB: CommunicationPluginBuilder,
 {
     if let Some(Command::GenerateConfig { output }) = args.command.as_ref() {
         // Exiting after generating config is on purpose.
@@ -296,7 +296,7 @@ where
 /// let config: Configuration = // ... load or construct ...
 /// # todo!();
 ///
-/// run_with_ext_from_config::<MySecurityPlugin, MySecurityLoader, _>(
+/// run_with_ext_from_config::<MySecurityPlugin, MySecurityLoader, _, _>(
 ///     config,
 ///     Setup::new().with_update_plugin(update_plugin_fn(|infra| async move {
 ///         Ok(MyPlugin::new(infra))
@@ -306,32 +306,35 @@ where
 ///
 /// # Errors
 /// Returns [`AppError`] if tracing setup, webserver startup, data loading, or route setup fails.
-pub async fn run_with_ext_from_config<SP, SL, UPB>(
+pub async fn run_with_ext_from_config<SP, SL, UPB, CPB>(
     config: Configuration,
-    setup: Setup<SP, SL, UPB>,
+    setup: Setup<SP, SL, UPB, CPB>,
 ) -> Result<(), AppError>
 where
     SP: SecurityPlugin,
     SL: SecurityPluginLoader,
     UPB: UpdatePluginBuilder<SP>,
+    CPB: CommunicationPluginBuilder,
 {
-    let webserver_state = init_webserver(&config, setup.pre_load).await?;
+    let webserver_state = init_webserver(
+        &config,
+        setup.pre_load,
+        setup.initialize_tracing,
+        setup.shutdown_signal,
+    )
+    .await?;
 
     tracing::debug!("Webserver is running. Loading sovd routes...");
-    let vehicle_data = match load_vehicle_data::<SP>(
-        &config,
-        webserver_state.shutdown_signal.clone(),
-        webserver_state.health_state.as_ref(),
-    )
-    .await
-    {
-        Ok(data) => data,
-        Err(AppError::ShutdownRequested) => {
-            tracing::info!("Shutdown requested during database load, exiting cleanly");
-            return Ok(());
-        }
-        Err(e) => return Err(e),
-    };
+
+    let vehicle_data =
+        match load_vehicle_data::<SP>(&config, webserver_state.health_state.as_ref()).await {
+            Ok(data) => data,
+            Err(AppError::ShutdownRequested) => {
+                tracing::info!("Shutdown requested during database load, exiting cleanly");
+                return Ok(());
+            }
+            Err(e) => return Err(e),
+        };
 
     if vehicle_data.databases.is_empty() && config.database.exit_no_database_loaded {
         return Err(AppError::ResourceError(
@@ -339,11 +342,14 @@ where
         ));
     }
 
-    setup::setup_runtime_routes::<SP, SL, UPB>(
+    // Retained for the full server lifetime, so its event dispatcher keeps
+    // running until explicit shutdown.
+    let communication_runtime = setup::setup_runtime_routes::<SP, SL, UPB, CPB>(
         config,
         vehicle_data,
         &webserver_state,
         setup.build_update_plugin,
+        setup.build_communication_plugin,
     )
     .await?;
 
@@ -356,6 +362,7 @@ where
     webserver_state.shutdown_signal.clone().await;
     tracing::info!("Shutting down...");
     webserver_state.join().await?;
+    cda_interfaces::Shutdown::shutdown(&*communication_runtime.plugin).await;
 
     Ok(())
 }
@@ -371,6 +378,7 @@ pub async fn run(args: AppArgs) -> Result<(), AppError> {
     Box::pin(run_with_ext::<
         DefaultSecurityPluginData,
         DefaultSecurityPlugin,
+        _,
         _,
     >(
         args,
@@ -394,6 +402,7 @@ pub async fn run_with_config(config: Configuration) -> Result<(), AppError> {
         DefaultSecurityPluginData,
         DefaultSecurityPlugin,
         _,
+        _,
     >(
         config,
         Setup::new().with_update_plugin(update_plugin_fn(
@@ -411,8 +420,17 @@ pub async fn run_with_config(config: Configuration) -> Result<(), AppError> {
 async fn init_webserver(
     config: &Configuration,
     pre_load: Option<PreLoadHook>,
+    initialize_tracing: bool,
+    shutdown_signal: Option<cda_interfaces::ShutdownSignal>,
 ) -> Result<ApplicationState, AppError> {
-    let tracing_guards = setup_tracing(config)?;
+    let tracing_guards = if initialize_tracing {
+        setup_tracing(config)?
+    } else {
+        TracingGuards {
+            _file: None,
+            _otel: None,
+        }
+    };
     tracing::info!("Starting CDA - version {}", cda_version());
 
     // Vendor overrides are registered via `linkme` distributed slices, whose
@@ -432,7 +450,8 @@ async fn init_webserver(
         port: config.server.port,
     };
 
-    let clonable_shutdown_signal = cda_interfaces::shutdown_signal(shutdown_signal());
+    let clonable_shutdown_signal = shutdown_signal
+        .unwrap_or_else(|| cda_interfaces::shutdown_signal(crate::shutdown_signal()));
 
     let (dynamic_router, webserver_task) =
         cda_sovd::launch_webserver(webserver_config.clone(), clonable_shutdown_signal.clone())
@@ -529,7 +548,6 @@ async fn register_version_endpoints(dynamic_router: &cda_sovd::dynamic_router::D
 /// Returns [`AppError`] if MDD path resolution, database loading, or component creation fails.
 pub async fn load_vehicle_data<S: SecurityPlugin>(
     config: &Configuration,
-    clonable_shutdown_signal: cda_interfaces::ShutdownSignal,
     health: Option<&cda_health::HealthState>,
 ) -> Result<VehicleData<S>, AppError> {
     let mdd_paths: Vec<PathBuf> = {
@@ -578,27 +596,19 @@ pub async fn load_vehicle_data<S: SecurityPlugin>(
         None
     };
 
-    let update_guard = cda_sovd::UpdateGuardState::new();
-    let components = create_vehicle_components::<S>(
-        config,
-        &mdd_paths,
-        clonable_shutdown_signal,
-        health_providers.as_ref(),
-        update_guard.busy_handle(),
-        None,
-    )
-    .await?;
+    let prepared =
+        prepare_vehicle_components::<S>(config, &mdd_paths, health_providers.as_ref()).await?;
 
-    let ecu_names = components.uds_manager.get_physical_ecus().await;
+    // Gateway constructors are passive. The selected plugin is built before
+    // consumers receive narrow views over the communication framework.
+    let gateway = ComponentSlot::new(prepared.diagnostic_gateway.clone());
     Ok(VehicleData {
-        uds_manager: components.uds_manager,
-        diagnostic_gateway: components.diagnostic_gateway,
-        file_managers: components.file_managers,
-        locks: Arc::new(Locks::new(ecu_names)),
-        update_guard,
-        databases: Arc::clone(&components.databases),
-        variant_detection_handle: components.variant_detection_handle,
+        diagnostic_gateway: gateway,
+        file_managers: prepared.file_managers.clone(),
+        locks: Arc::new(Locks::new(Vec::new())),
+        databases: Arc::clone(&prepared.databases),
         health_providers,
+        prepared,
     })
 }
 
@@ -626,14 +636,20 @@ pub struct TransportConfigs<'a> {
         dlt_context = dlt_ctx!("MAIN"),
     )
 )]
+#[allow(
+    clippy::too_many_arguments,
+    reason = "Combining parameters into a struct is not preferred here, to keep constructor call \
+              semantics explicit"
+)]
 pub fn create_uds_manager<S: SecurityPlugin>(
     gateway: DiagnosticTransportRouter<DoipDiagGateway<EcuManager<S>>, CanDiagGateway>,
     databases: Arc<HashMap<String, RwLock<EcuManager<S>>>>,
-    variant_detection_receiver: mpsc::Receiver<Vec<String>>,
+    variant_detection_receiver: VariantDetectionReceiver,
     state_coordinator: EcuStateCoordinator,
     functional_description_config: &FunctionalDescriptionConfig,
     fault_config: FaultConfig,
-    update_in_progress: Arc<std::sync::atomic::AtomicBool>,
+    communication_access: Arc<dyn CommunicationAccess>,
+    communication_retry_after: Duration,
 ) -> UdsManagerType<S> {
     UdsManager::new(
         gateway,
@@ -642,7 +658,8 @@ pub fn create_uds_manager<S: SecurityPlugin>(
         state_coordinator,
         functional_description_config,
         fault_config,
-        update_in_progress,
+        communication_access,
+        communication_retry_after,
     )
 }
 
@@ -692,11 +709,30 @@ impl ApplicationState {
 pub async fn create_vehicle_components<S: SecurityPlugin>(
     config: &Configuration,
     mdd_paths: &[PathBuf],
-    shutdown_signal: cda_interfaces::ShutdownSignal,
     health_providers: Option<&HashMap<String, Arc<dyn HealthProvider>>>,
-    update_in_progress: Arc<std::sync::atomic::AtomicBool>,
-    reusable_doip_socket: Option<Arc<Mutex<cda_comm_doip::socket::DoIPUdpSocket>>>,
+    communication_access: Arc<dyn CommunicationAccess>,
 ) -> Result<VehicleComponents<S>, AppError> {
+    let prepared = prepare_vehicle_components(config, mdd_paths, health_providers).await?;
+    Ok(finish_vehicle_components(
+        prepared,
+        config,
+        communication_access,
+    ))
+}
+
+struct PreparedVehicleComponents<S: SecurityPlugin> {
+    databases: Arc<DatabaseMap<S>>,
+    file_managers: FileManagerMap,
+    diagnostic_gateway: DiagnosticTransportRouter<DoipDiagGateway<EcuManager<S>>, CanDiagGateway>,
+    variant_detection_rx: VariantDetectionReceiver,
+    state_coordinator: EcuStateCoordinator,
+}
+
+async fn prepare_vehicle_components<S: SecurityPlugin>(
+    config: &Configuration,
+    mdd_paths: &[PathBuf],
+    health_providers: Option<&HashMap<String, Arc<dyn HealthProvider>>>,
+) -> Result<PreparedVehicleComponents<S>, AppError> {
     let db_provider: Option<&Arc<dyn HealthProvider>> =
         health_providers.and_then(|h| h.get(mdd::DB_HEALTH_COMPONENT_KEY));
     let doip_provider: Option<&Arc<dyn HealthProvider>> =
@@ -705,17 +741,11 @@ pub async fn create_vehicle_components<S: SecurityPlugin>(
     let (databases, file_managers) = load_databases::<S>(config, mdd_paths, db_provider).await?;
 
     let (variant_detection_tx, variant_detection_rx) = mpsc::channel(50);
+    let variant_detection_tx = VariantDetectionSender::new(variant_detection_tx);
+    let variant_detection_rx = VariantDetectionReceiver::new(variant_detection_rx);
     let databases = Arc::new(databases);
 
-    // Build runtime states for EcuStateCoordinator from all loaded ECU databases.
-    let runtime_states = {
-        let mut states = HashMap::new();
-        for (ecu_name, ecu_lock) in databases.as_ref() {
-            let state = ecu_lock.read().await.runtime_state();
-            states.insert(ecu_name.clone(), state);
-        }
-        states
-    };
+    let runtime_states = build_runtime_states(&databases).await;
     let state_coordinator = EcuStateCoordinator::new(runtime_states, variant_detection_tx.clone());
     let connectivity_handler: Arc<dyn EcuConnectivityHandler> = Arc::new(state_coordinator.clone());
 
@@ -727,38 +757,59 @@ pub async fn create_vehicle_components<S: SecurityPlugin>(
         },
         variant_detection_tx,
         connectivity_handler,
-        shutdown_signal,
         doip_provider,
-        reusable_doip_socket,
     )
     .await?;
 
-    let uds_manager = create_uds_manager(
-        diagnostic_gateway.clone(),
-        Arc::clone(&databases),
-        variant_detection_rx,
-        state_coordinator,
-        &config.functional_description,
-        config.faults.clone(),
-        update_in_progress,
-    );
-
-    let vd = uds_manager.clone();
-    let variant_detection_handle = cda_interfaces::spawn_named!("variant-detection", async move {
-        vd.start_variant_detection().await;
-    });
-
-    Ok(VehicleComponents {
-        uds_manager,
-        diagnostic_gateway,
+    Ok(PreparedVehicleComponents {
         databases,
         file_managers,
-        variant_detection_handle,
+        diagnostic_gateway,
+        variant_detection_rx,
+        state_coordinator,
     })
 }
 
+async fn build_runtime_states<S: SecurityPlugin>(
+    databases: &DatabaseMap<S>,
+) -> HashMap<String, EcuRuntimeState> {
+    let mut states = HashMap::new();
+    for (ecu_name, ecu_lock) in databases {
+        states.insert(ecu_name.clone(), ecu_lock.read().await.runtime_state());
+    }
+    states
+}
+
+// The UDS manager, and the SOVD routes `setup::setup_runtime_routes` builds
+// from it, are constructed eagerly regardless of `init_mode`, pointed at a
+// gateway that stays network-inert until an authorized
+// `activate()`/`trigger_detection()` binds its DoIP socket (see
+// `init_doip_gateway`).
+pub(crate) fn finish_vehicle_components<S: SecurityPlugin>(
+    prepared: PreparedVehicleComponents<S>,
+    config: &Configuration,
+    communication_access: Arc<dyn CommunicationAccess>,
+) -> VehicleComponents<S> {
+    let uds_manager = create_uds_manager(
+        prepared.diagnostic_gateway.clone(),
+        Arc::clone(&prepared.databases),
+        prepared.variant_detection_rx,
+        prepared.state_coordinator,
+        &config.functional_description,
+        config.faults.clone(),
+        communication_access,
+        Duration::from_secs(config.communication.deferred_retry_after_seconds),
+    );
+    VehicleComponents {
+        uds_manager,
+        diagnostic_gateway: prepared.diagnostic_gateway,
+        databases: prepared.databases,
+        file_managers: prepared.file_managers,
+    }
+}
+
 #[tracing::instrument(
-    skip(databases, transports, variant_detection, connectivity_handler, shutdown_signal, doip_health_provider, reusable_doip_socket),
+    skip(databases, transports, variant_detection, connectivity_handler, doip_health_provider),
     fields(
         database_count = databases.len(),
         dlt_context = dlt_ctx!("MAIN"),
@@ -772,14 +823,9 @@ pub async fn create_vehicle_components<S: SecurityPlugin>(
 pub async fn create_diagnostic_gateway<S: SecurityPlugin>(
     databases: Arc<DatabaseMap<S>>,
     transports: TransportConfigs<'_>,
-    variant_detection: mpsc::Sender<Vec<String>>,
+    variant_detection: VariantDetectionSender,
     connectivity_handler: Arc<dyn EcuConnectivityHandler>,
-    shutdown_signal: impl Future<Output = ()> + Send + 'static,
     doip_health_provider: Option<&Arc<dyn HealthProvider>>,
-    // `None` on initial startup - `init_doip_gateway` creates the socket.
-    // `None` in CAN-only operation - DoIP is skipped entirely.
-    // `Some(socket)` on reload - reused to avoid rebinding the DoIP port.
-    reusable_doip_socket: Option<Arc<Mutex<cda_comm_doip::socket::DoIPUdpSocket>>>,
 ) -> Result<DiagnosticTransportRouter<DoipDiagGateway<EcuManager<S>>, CanDiagGateway>, AppError> {
     let TransportConfigs {
         doip: doip_config,
@@ -820,9 +866,7 @@ pub async fn create_diagnostic_gateway<S: SecurityPlugin>(
         doip_config,
         variant_detection.clone(),
         connectivity_handler,
-        shutdown_signal,
         doip_health_provider,
-        reusable_doip_socket,
     )
     .await?
     {
@@ -837,20 +881,21 @@ pub async fn create_diagnostic_gateway<S: SecurityPlugin>(
     Ok(gateway)
 }
 
-/// Initializes the `DoIP` transport, reporting the attempt on the health
-/// provider. Returns `Ok(None)` when `DoIP` is disabled by config; in that
-/// CAN-only operation (`validate_sanity` rejects configs with no transport
-/// at all) the health provider is marked `Up` immediately so readiness
-/// (/health/ready) does not wait forever on an intentionally disabled
-/// transport.
+/// Constructs the (passive) `DoIP` gateway, reporting the attempt on the health
+/// provider. Returns `Ok(None)` when `DoIP` is disabled by config, marking the
+/// health provider `Up` immediately so that readiness does not wait forever on
+/// an intentionally disabled transport.
+///
+/// [`DoipDiagGateway::new`] is purely in-memory. Binding the UDP socket,
+/// broadcasting VIR and starting listeners all happen lazily in the gateway's
+/// own `enable()`, reached only through an authorized `activate()` or
+/// `trigger_detection()`. Safe to call at startup in any `init_mode`.
 async fn init_doip_gateway<S: SecurityPlugin>(
     databases: &Arc<DatabaseMap<S>>,
     doip_config: &DoipConfig,
-    variant_detection: mpsc::Sender<Vec<String>>,
+    variant_detection: VariantDetectionSender,
     connectivity_handler: Arc<dyn EcuConnectivityHandler>,
-    shutdown_signal: impl Future<Output = ()> + Send + 'static,
     doip_health_provider: Option<&Arc<dyn HealthProvider>>,
-    reusable_doip_socket: Option<Arc<Mutex<cda_comm_doip::socket::DoIPUdpSocket>>>,
 ) -> Result<Option<DoipDiagGateway<EcuManager<S>>>, AppError> {
     if !doip_config.enabled {
         tracing::info!("DoIP transport disabled by config (doip.enabled = false)");
@@ -860,12 +905,6 @@ async fn init_doip_gateway<S: SecurityPlugin>(
         return Ok(None);
     }
 
-    let doip_socket = reuse_or_create_transport_resource(reusable_doip_socket, || {
-        cda_comm_doip::create_udp_vir_socket(&doip_config.tester_address, doip_config.gateway_port)
-            .map_err(|e| {
-                AppError::InitializationFailed(format!("Failed to create DoIP socket: {e}"))
-            })
-    })?;
     if let Some(provider) = doip_health_provider {
         provider.set_status(cda_health::Status::Starting).await;
     }
@@ -874,8 +913,6 @@ async fn init_doip_gateway<S: SecurityPlugin>(
         Arc::clone(databases),
         variant_detection,
         connectivity_handler,
-        shutdown_signal,
-        doip_socket,
     )
     .await;
     let status = if result.is_ok() {
@@ -896,23 +933,12 @@ async fn init_doip_gateway<S: SecurityPlugin>(
     }
 }
 
-/// Reuses the transport resource supplied by a previous runtime or creates the initial resource.
-fn reuse_or_create_transport_resource<T, E>(
-    reusable_resource: Option<Arc<Mutex<T>>>,
-    create: impl FnOnce() -> Result<T, E>,
-) -> Result<Arc<Mutex<T>>, E> {
-    match reusable_resource {
-        Some(resource) => Ok(resource),
-        None => create().map(|resource| Arc::new(Mutex::new(resource))),
-    }
-}
-
 /// Initializes the CAN transport. Like for `DoIP`, an init failure is fatal.
 #[cfg(feature = "can")]
 async fn init_can_gateway<S: SecurityPlugin>(
     databases: &Arc<DatabaseMap<S>>,
     can_cfg: &CanConfig,
-    variant_detection: mpsc::Sender<Vec<String>>,
+    variant_detection: VariantDetectionSender,
 ) -> Result<CanDiagGateway, AppError> {
     match CanDiagGateway::new(can_cfg, databases, variant_detection).await {
         Ok(c) => {

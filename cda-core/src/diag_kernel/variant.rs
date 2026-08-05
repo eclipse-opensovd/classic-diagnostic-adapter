@@ -30,12 +30,13 @@ impl<S: SecurityPlugin> EcuManager<S> {
     ) {
         {
             let mut ecu_state = std_ext::lock_write(&self.runtime_state.ecu_state);
-            ecu_state.variant_state = variant_state;
+            ecu_state.variant_state = variant_state.clone();
             ecu_state.variant_index = None;
             if let Some(connectivity) = connectivity {
                 ecu_state.connectivity = connectivity;
             }
         }
+        self.runtime_state.publish_variant_state(variant_state);
         self.db_cache.reset().await;
         self.diag_database.unload();
     }
@@ -67,7 +68,16 @@ impl<S: SecurityPlugin> VariantDetection for EcuManager<S> {
         if service_responses.is_empty() {
             // No responses means ECU is unreachable -> set connectivity to Offline.
             // Variant state is intentionally preserved (we still know what variant it was).
-            std_ext::lock_write(&self.runtime_state.ecu_state).connectivity = Connectivity::Offline;
+            let current_variant_state = {
+                let mut ecu_state = std_ext::lock_write(&self.runtime_state.ecu_state);
+                ecu_state.connectivity = Connectivity::Offline;
+                ecu_state.variant_state.clone()
+            };
+            // Publish unconditionally, even when unchanged. This is the ECU's
+            // detection attempt settling, and anything awaiting its conclusion
+            // must be woken rather than left to its own timeout.
+            self.runtime_state
+                .publish_variant_state(current_variant_state);
             return Ok(());
         }
 

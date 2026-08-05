@@ -31,6 +31,7 @@ members = [
   "cda-tracing",
   "cda-plugin-security",
   "cda-plugin-runtime-update",
+  "cda-plugin-communication-management",
   "cda-health",
   "cda-extra",
   "cda-storage",
@@ -56,6 +57,7 @@ cda-comm-uds = { path = "cda-comm-uds" }
 cda-database = { path = "cda-database" }
 cda-plugin-security = { path = "cda-plugin-security" }
 cda-plugin-runtime-update = { path = "cda-plugin-runtime-update" }
+cda-plugin-communication-management = { path = "cda-plugin-communication-management" }
 cda-sovd = { path = "cda-sovd" }
 cda-tracing = { path = "cda-tracing" }
 cda-health = { path = "cda-health" }
