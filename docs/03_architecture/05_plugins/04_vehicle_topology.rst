@@ -35,8 +35,9 @@ Vehicle Topology Plugin
     - **Functional groups** -- a qualifier, and the list of ECUs belonging to that functional group.
     - **Gateways** -- a name, network address, logical address, and the list of ECUs reachable through
       that gateway.
-    - **ECUs** -- a qualifier (name), current variant/connectivity state, logical address, and logical link
-      name, for each ECU listed under a functional group or a gateway.
+    - **ECUs** -- a qualifier (name), current variant/connectivity state (with the internal AssumedOnline
+      state, see :need:`arch~dt-ecu-states`, reported as ``Online``), a ``last_seen`` timestamp, logical
+      address, and logical link name, for each ECU listed under a functional group or a gateway.
 
     While a ``networkreset`` execution is in progress, this endpoint must respond with ``409 Conflict``, to
     avoid returning stale or partially updated topology data during the reset.
@@ -116,4 +117,78 @@ Vehicle Topology Plugin
 
         == Postcondition (released independently, after reset completes) ==
         Client -> lock : release exclusive vehicle lock
+        @enduml
+
+
+Reset with Persisted List Control
+----------------------------------
+
+.. arch:: Vehicle Topology Plugin - Reset with Persisted List Control
+    :id: arch~plugin-vehicle-topology-reset-persistence
+    :status: draft
+
+    The ``POST /apps/sovd2uds/operations/networkreset/executions`` request body accepts two independent,
+    optional boolean fields, both defaulting to ``true``:
+
+    .. list-table:: networkreset Request Body
+       :header-rows: 1
+
+       * - Field
+         - Default
+         - Description
+       * - ``clear_persisted``
+         - ``true``
+         - Clear the persisted ECU topology (see :need:`arch~dt-ecu-list-persistence`) as part of this
+           execution.
+       * - ``trigger_detection``
+         - ``true``
+         - Perform a live ECU detection run (VIR/VAM discovery and variant detection) as part of this
+           execution.
+
+    Handling of the four flag combinations:
+
+    - ``clear_persisted=true``, ``trigger_detection=true``: the persisted "ecu-topology" bucket is cleared
+      first, then a full detection run is performed and its results are persisted -- functionally
+      equivalent to the previously specified ``networkreset`` behavior.
+    - ``clear_persisted=true``, ``trigger_detection=false``: the persisted "ecu-topology" bucket is cleared
+      and no detection is performed; no vehicle communication occurs. Subsequent CDA behavior (until the
+      next ``networkreset`` or restart) follows :need:`arch~dt-startup-detection-mode` as if no persisted
+      topology had ever existed.
+    - ``clear_persisted=false``, ``trigger_detection=true``: a detection run is performed and its results
+      are upserted per-gateway into the existing persisted topology; entries for gateways/ECUs not observed
+      during this run are left unchanged in the persisted bucket.
+    - ``clear_persisted=false``, ``trigger_detection=false``: rejected with an error response, as this
+      combination would perform no observable action.
+
+    When ``ecu_list_persistence.enabled`` is ``false`` (see :need:`arch~dt-ecu-list-persistence`), there is
+    no ``ecu-topology`` bucket to operate on; ``clear_persisted`` is then a no-op regardless of its value,
+    and only ``trigger_detection`` has an observable effect (running or skipping a live detection).
+
+    .. uml::
+        :caption: networkreset with Persisted List Control
+
+        @startuml
+        actor Client
+        participant "Vehicle Topology Plugin" as plugin
+        participant "Persistence API\n(ecu-topology bucket)" as Persist
+        participant "DoIP/UDS Detection" as Detect
+
+        Client -> plugin : POST .../executions\n{clear_persisted, trigger_detection}
+        plugin -> plugin : validate flag combination
+        alt clear_persisted = false and trigger_detection = false
+            plugin --> Client : error (no-op combination rejected)
+        else valid combination
+            plugin --> Client : 202 Accepted (execution id)
+            opt clear_persisted = true
+                plugin -> Persist : clear bucket "ecu-topology"
+            end
+            opt trigger_detection = true
+                plugin -> Detect : run VIR/VAM discovery + variant detection
+                Detect --> plugin : detection results
+                plugin -> Persist : set/upsert bucket "ecu-topology"
+                plugin -> Persist : flush
+            end
+            Client -> plugin : GET .../executions/{id}
+            plugin --> Client : 200 OK (status: completed)
+        end
         @enduml
