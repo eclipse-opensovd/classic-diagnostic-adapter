@@ -265,3 +265,30 @@ impl<S: EcuGateway, T: EcuManager> UdsTesterPresent for UdsManager<S, T> {
         }
     }
 }
+
+impl<S: EcuGateway, T: EcuManager> UdsManager<S, T> {
+    /// Restarts the tester-present tasks captured by
+    /// [`UdsManager::snapshot_and_abort_tester_present`].
+    ///
+    /// The snapshot holds one entry per ECU the tasks map was keyed by, so a
+    /// functional-group tester present shows up once per member ECU; those
+    /// duplicates are collapsed here since [`UdsTesterPresent::start_tester_present`]
+    /// already re-enumerates the whole group from a single `Functional` entry.
+    pub(crate) async fn restart_tester_present_snapshot(&self) {
+        let snapshot = self.take_tester_present_snapshot().await;
+        let mut started = Vec::with_capacity(snapshot.len());
+        for type_ in snapshot {
+            if started.contains(&type_) {
+                continue;
+            }
+            started.push(type_.clone());
+            if let Err(e) = self.start_tester_present(type_.clone()).await {
+                tracing::warn!(
+                    ?type_,
+                    error = %e,
+                    "Failed to restart tester present after communication re-enable"
+                );
+            }
+        }
+    }
+}

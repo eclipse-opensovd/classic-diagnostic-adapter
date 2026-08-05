@@ -33,6 +33,7 @@ pub(crate) mod test_utils {
     use async_trait::async_trait;
     use bytes::Bytes;
     use cda_interfaces::{
+        communication_control::{TransportControl, TransportState, error::CommControlError},
         runtime_update_api::{
             LockStateProvider, ReloadError, RuntimeReloaderPlugin, RuntimeUpdateError, UploadFile,
             VerificationError,
@@ -42,6 +43,35 @@ pub(crate) mod test_utils {
         },
     };
     use cda_storage::LocalStorage;
+
+    pub(crate) struct StubTransport {
+        state: tokio::sync::Mutex<TransportState>,
+    }
+
+    impl StubTransport {
+        pub(crate) fn new() -> Arc<Self> {
+            Arc::new(Self {
+                state: tokio::sync::Mutex::new(TransportState::Disabled),
+            })
+        }
+    }
+
+    #[async_trait]
+    impl TransportControl for StubTransport {
+        async fn enable(&self) -> Result<(), CommControlError> {
+            *self.state.lock().await = TransportState::Enabled;
+            Ok(())
+        }
+
+        async fn disable(&self) -> Result<(), CommControlError> {
+            *self.state.lock().await = TransportState::Disabled;
+            Ok(())
+        }
+
+        async fn state(&self) -> TransportState {
+            *self.state.lock().await
+        }
+    }
 
     pub(crate) async fn write_file(
         storage: &impl Storage,
@@ -218,7 +248,19 @@ pub(crate) mod test_utils {
     #[async_trait]
     impl RuntimeReloaderPlugin for FailingReloadHandler {
         async fn reload_databases(&self, _mdd_paths: Vec<PathBuf>) -> Result<(), ReloadError> {
-            Err(ReloadError("simulated reload failure".to_string()))
+            Err(ReloadError::General("Simulated reload failure".to_string()))
+        }
+    }
+
+    /// A [`RuntimeReloaderPlugin`] whose database reload panics, useful for
+    /// exercising the execution-supervisor path that catches a spawned
+    /// execution task ending abnormally instead of writing a terminal status.
+    pub struct PanickingReloadHandler;
+
+    #[async_trait]
+    impl RuntimeReloaderPlugin for PanickingReloadHandler {
+        async fn reload_databases(&self, _mdd_paths: Vec<PathBuf>) -> Result<(), ReloadError> {
+            panic!("Simulated reload panic");
         }
     }
 }

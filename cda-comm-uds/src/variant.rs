@@ -16,7 +16,12 @@ use std::time::Duration;
 use async_trait::async_trait;
 use cda_interfaces::{
     DiagComm, DiagServiceError, DynamicPlugin, EcuGateway, EcuManager, EcuState, HashMap,
-    HashMapExtensions, PayloadDecoder, UdsVariant, dlt_ctx,
+    HashMapExtensions, PayloadDecoder, UdsVariant, VariantState,
+    communication_control::{
+        ActivationCause, CommunicationLifecycle, CommunicationState, CommunicationVariantDetection,
+        VariantDetectionMode, error::CommControlError,
+    },
+    dlt_ctx,
 };
 use tokio::sync::RwLock;
 
@@ -37,10 +42,110 @@ enum GroupDetectionResult {
 }
 
 impl<S: EcuGateway, T: EcuManager> UdsManager<S, T> {
+    /// Requires `ecu_name`'s variant detection to have concluded before serving
+    /// variant-dependent content (service catalogs, session/security/mode state,
+    /// DTCs, or a data/config/operation send).
+    ///
+    /// Returns the ECU's database handle on success.
+    ///
+    /// `CommunicationState::Enabled` means activation completed, **not** that
+    /// variant detection concluded: detection is dispatched per ECU and settles
+    /// asynchronously (see ADR-006). Per-ECU [`VariantState`] is the actual
+    /// readiness signal.
+    ///
+    /// - Steady state: if the ECU's `VariantState` has already left
+    ///   `NotTested`, returns immediately.
+    /// - Unknown ECU: the initial lookup itself fails with `NotFound`, so
+    ///   there's no separate case to special-case here. The caller gets the
+    ///   same error it would have gotten from its own follow-up lookup.
+    /// - Nothing in flight at all (`Disabled`/`Error`): fires a non-blocking
+    ///   activation request so a later request finds a generation in flight and
+    ///   waits, then returns [`DiagServiceError::CommunicationNotReady`]
+    ///   immediately without blocking this request. Whether that request is
+    ///   honoured is the communication plugin's `init_mode` decision, not this
+    ///   gate's -- under `OnDemand` it is what brings the vehicle up.
+    /// - Nothing that will settle it: if the communication runtime reports
+    ///   [`VariantDetectionMode::Never`], automatic detection is configured
+    ///   off, no detector is registered, or the plugin enabled communication
+    ///   without one, waiting out the full timeout would buy nothing, so this
+    ///   answers immediately instead. This is a statement about *now*, not
+    ///   forever: an explicit `trigger_detection()` from the communication
+    ///   plugin still settles these ECUs, which is why the response keeps its
+    ///   retry hint.
+    /// - Otherwise an activation is in flight (`Enabling`), or communication is
+    ///   already `Enabled`: checks the ECU's variant-state watch receiver once
+    ///   and serves immediately if it has left `NotTested`.
+    /// - If detection has not concluded yet, returns `CommunicationNotReady`
+    ///   immediately without waiting, so the caller keeps retrying against a
+    ///   detection that is guaranteed to eventually settle every ECU into a
+    ///   defined state.
+    ///
+    /// The state check has to come *first*. The effective
+    /// [`VariantDetectionMode`] describes the runtime that is enabled or being
+    /// enabled, and it is only written when an operation is claimed - before
+    /// the first claim it still reads `Never` regardless of configuration.
+    /// Consulting it while `Disabled` would therefore read that initial value
+    /// as "nothing will ever settle this" and skip the activation request,
+    /// which is precisely the request that `OnDemand` relies on to bring
+    /// communication up at all.
+    pub(crate) async fn uds_ecu_variant_detection_concluded(
+        &self,
+        ecu_name: &str,
+    ) -> Result<&RwLock<T>, DiagServiceError> {
+        let ecu = self.uds_ecu_db(ecu_name)?;
+
+        if ecu.read().await.ecu_status().variant_state != VariantState::NotTested {
+            return Ok(ecu);
+        }
+
+        let rx = ecu.read().await.runtime_state().variant_state_rx();
+
+        let detection_in_flight = matches!(
+            self.communication_access.state(),
+            CommunicationState::Enabling(_) | CommunicationState::Enabled
+        );
+
+        if !detection_in_flight {
+            self.communication_access
+                .request_activate(ActivationCause::DiagnosticRequest);
+            return Err(self.communication_not_ready("Communication is not currently enabled"));
+        }
+
+        if self.communication_access.variant_detection() == VariantDetectionMode::Never {
+            return Err(self.communication_not_ready(
+                "Variant detection is not running automatically; awaiting an explicit detection \
+                 trigger",
+            ));
+        }
+
+        if *rx.borrow() == VariantState::NotTested {
+            Err(self.communication_not_ready("Variant detection has not concluded"))
+        } else {
+            Ok(ecu)
+        }
+    }
+
+    /// Spawns one detached detection task per duplicate group and returns
+    /// without waiting for them.
+    ///
+    /// `deinitialize()` does not cancel these: only the spontaneous-discovery
+    /// listener is stopped there. This is bounded rather than a leak - each
+    /// task's own retry budget (see `OFFLINE_VERDICT_RETRIES` below) caps its
+    /// lifetime to a few seconds even if the transport goes back down while
+    /// it is running.
     #[tracing::instrument(skip_all,
         fields(dlt_context = dlt_ctx!("UDS"))
     )]
     pub(crate) async fn start_variant_detection_for_ecus(&self, ecus: Vec<String>) {
+        // Most callers are the discovery listener, fed by a transport's own
+        // topology discovery (CAN probe, DoIP VAM) independently of
+        // `variant_detection`. Skip the automatic detect_variant here so
+        // `Never` holds; discovery/connectivity still proceeds, and an
+        // explicit per-ECU trigger still settles these ECUs.
+        if self.communication_access.variant_detection() == VariantDetectionMode::Never {
+            return;
+        }
+
         // detect_variant on any member of a duplicate group evaluates and
         // writes the state of every member. Different callers pick different
         // members (the boot path iterates a HashMap, the reconnect path
@@ -102,6 +207,55 @@ impl<S: EcuGateway, T: EcuManager> UdsManager<S, T> {
                 }
             });
         }
+    }
+
+    /// Performs the initial sweep of all ECUs, checking online status and
+    /// triggering variant detection for those that are reachable. ECUs that
+    /// are offline get their state set immediately; duplicate groups are
+    /// deduplicated so only one detection runs per physical node.
+    #[tracing::instrument(skip_all,
+        fields(dlt_context = dlt_ctx!("UDS"))
+    )]
+    async fn start_variant_detection(&self) {
+        let mut ecus = Vec::new();
+        for (ecu_name, db) in self.ecus.iter() {
+            if !db.read().await.is_physical_ecu() {
+                tracing::debug!(
+                    ecu_name = %ecu_name,
+                    "Skip variant detection for functional description"
+                );
+                continue;
+            }
+            if let Err(DiagServiceError::EcuOffline(_)) =
+                self.gateway.ecu_online(ecu_name, db).await
+            {
+                // ECU is offline -> call detect_variant with empty responses to set
+                // appropriate state (Disconnected if was online, Offline if never tested)
+                if let Err(e) = db
+                    .write()
+                    .await
+                    .detect_variant::<<T as PayloadDecoder>::Response>(HashMap::new())
+                    .await
+                {
+                    tracing::error!(ecu_name = %ecu_name,
+                        "Failed to set ECU offline during variant detection: {e:?}");
+                }
+                continue;
+            }
+
+            if db
+                .read()
+                .await
+                .duplicating_ecu_names()
+                .is_some_and(|d| ecus.iter().any(|e| d.contains(e)))
+            {
+                continue; // Only do one variant detection for duplicated ECUs
+            }
+
+            ecus.push(ecu_name.to_owned());
+        }
+        let cloned = self.clone();
+        cloned.start_variant_detection_for_ecus(ecus).await;
     }
 
     /// Deterministic representative of the ECU's duplicate group: the
@@ -402,54 +556,64 @@ impl<S: EcuGateway, T: EcuManager> UdsVariant for UdsManager<S, T> {
         Ok(status)
     }
 
-    #[tracing::instrument(skip_all,
-        fields(dlt_context = dlt_ctx!("UDS"))
-    )]
-    async fn start_variant_detection(&self) {
-        let mut ecus = Vec::new();
-        for (ecu_name, db) in self.ecus.iter() {
-            if !db.read().await.is_physical_ecu() {
-                tracing::debug!(
-                    ecu_name = %ecu_name,
-                    "Skip variant detection for functional description"
-                );
-                continue;
-            }
-            if let Err(DiagServiceError::EcuOffline(_)) =
-                self.gateway.ecu_online(ecu_name, db).await
-            {
-                // ECU is offline -> call detect_variant with empty responses to set
-                // appropriate state (Disconnected if was online, Offline if never tested)
-                if let Err(e) = db
-                    .write()
-                    .await
-                    .detect_variant::<<T as PayloadDecoder>::Response>(HashMap::new())
-                    .await
-                {
-                    tracing::error!(ecu_name = %ecu_name,
-                        "Failed to set ECU offline during variant detection: {e:?}");
-                }
-                continue;
-            }
-
-            if db
-                .read()
-                .await
-                .duplicating_ecu_names()
-                .is_some_and(|d| ecus.iter().any(|e| d.contains(e)))
-            {
-                continue; // Only do one variant detection for duplicated ECUs
-            }
-
-            ecus.push(ecu_name.to_owned());
-        }
-        let cloned = self.clone();
-        cloned.start_variant_detection_for_ecus(ecus).await;
-    }
-
     async fn get_logical_address(&self, ecu_name: &str) -> Result<u16, DiagServiceError> {
         let ecu = self.uds_ecu_db(ecu_name)?;
         let logical_address = ecu.read().await.logical_address();
         Ok(logical_address)
+    }
+
+    async fn variant_state_rx(
+        &self,
+        ecu_name: &str,
+    ) -> Option<tokio::sync::watch::Receiver<VariantState>> {
+        let ecu = self.ecus.get(ecu_name)?;
+        Some(ecu.read().await.runtime_state().variant_state_rx())
+    }
+}
+
+/// Transport-coupled half: the spontaneous VAM-discovery listener and the
+/// tester-present pause/resume around it.
+///
+/// The listener deliberately does *not* sweep for variants. It follows the
+/// transport, it must run whenever the transport is up, including for an
+/// enable that detects nothing and it has a matching teardown, which the
+/// sweep does not. Sweeping lives in the [`CommunicationVariantDetection`] impl below.
+///
+/// Tester-present tasks are paused here too: they poll a transport that
+/// [`deinitialize`](CommunicationLifecycle::deinitialize) is about to tear
+/// down, so they are aborted and snapshotted before that happens, and
+/// restarted from the snapshot once [`initialize`](CommunicationLifecycle::initialize)
+/// has brought the transport back up.
+#[async_trait::async_trait]
+impl<S: EcuGateway, T: EcuManager> CommunicationLifecycle for UdsManager<S, T> {
+    fn name(&self) -> &'static str {
+        "variant-detection-listener"
+    }
+
+    async fn initialize(&self) -> Result<(), CommControlError> {
+        self.start_variant_detection_listener().await?;
+        self.restart_tester_present_snapshot().await;
+        Ok(())
+    }
+
+    async fn deinitialize(&self) {
+        self.snapshot_and_abort_tester_present().await;
+        self.stop_variant_detection_listener(true).await;
+    }
+}
+
+/// Detection half: the whole-vehicle sweep.
+///
+/// Runs after every lifecycle hook has initialized, so the listener above is
+/// already draining by the time the sweep starts.
+#[async_trait::async_trait]
+impl<S: EcuGateway, T: EcuManager> CommunicationVariantDetection for UdsManager<S, T> {
+    fn name(&self) -> &'static str {
+        "variant-detection"
+    }
+
+    async fn detect(&self) -> Result<(), CommControlError> {
+        self.start_variant_detection().await;
+        Ok(())
     }
 }

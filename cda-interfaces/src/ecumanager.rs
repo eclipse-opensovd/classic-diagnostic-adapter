@@ -258,15 +258,23 @@ pub struct EcuRuntimeState {
     pub ecu_state: std::sync::Arc<std::sync::RwLock<EcuState>>,
     /// Active service states keyed by SID (0x10 = session, 0x27 = security, etc.).
     pub service_states: std::sync::Arc<std::sync::RwLock<HashMap<u8, String>>>,
+    /// Publishes every write to `ecu_state.variant_state`, seeded with the
+    /// initial [`VariantState::NotTested`]. Lets callers await variant
+    /// detection's conclusion for this ECU (readiness gating) instead of
+    /// polling. Wrapped in `Arc` so cloning `EcuRuntimeState` shares one
+    /// channel, matching `ecu_state`'s own sharing.
+    variant_state_tx: std::sync::Arc<tokio::sync::watch::Sender<VariantState>>,
 }
 
 impl EcuRuntimeState {
     /// Create initial state for a newly constructed ECU (not yet variant-detected).
     #[must_use]
     pub fn new() -> Self {
+        let (variant_state_tx, _rx) = tokio::sync::watch::channel(VariantState::NotTested);
         Self {
             ecu_state: std::sync::Arc::new(std::sync::RwLock::new(EcuState::default())),
             service_states: std::sync::Arc::new(std::sync::RwLock::new(HashMap::new())),
+            variant_state_tx: std::sync::Arc::new(variant_state_tx),
         }
     }
 
@@ -274,6 +282,24 @@ impl EcuRuntimeState {
     #[must_use]
     pub fn status(&self) -> EcuState {
         std_ext::lock_read(&self.ecu_state).clone()
+    }
+
+    /// Subscribes to variant-state changes. Seeded with the current value, so
+    /// a subscriber arriving after detection already concluded observes it
+    /// immediately without awaiting a change.
+    #[must_use]
+    pub fn variant_state_rx(&self) -> tokio::sync::watch::Receiver<VariantState> {
+        self.variant_state_tx.subscribe()
+    }
+
+    /// Publishes a new variant-state value to subscribers.
+    ///
+    /// Always notifies, even when the value is unchanged from the previous
+    /// publish, so a detection attempt that settles into the *same* terminal
+    /// state (e.g. an ECU that was and remains `NotTested` because it is
+    /// offline) still wakes anything blocked on `changed()`.
+    pub fn publish_variant_state(&self, state: VariantState) {
+        self.variant_state_tx.send_replace(state);
     }
 }
 

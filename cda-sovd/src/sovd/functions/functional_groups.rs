@@ -25,11 +25,12 @@ use axum::{
 use axum_extra::extract::WithRejection;
 use cda_interfaces::{
     FunctionalDescriptionConfig, HashMap, SchemaProvider, UdsEcu,
+    communication_control::{CommunicationAccess, CommunicationGuard},
     diagservices::{DiagServiceResponse, DiagServiceResponseType},
 };
 use http::StatusCode;
 use indexmap::IndexMap;
-use tokio::sync::RwLock;
+use tokio::sync::{Mutex, RwLock};
 use uuid::Uuid;
 
 use crate::{
@@ -53,7 +54,8 @@ pub(crate) struct WebserverFgState<T: UdsEcu + Clone> {
     locks: Arc<Locks>,
     functional_group_name: String,
     fg_executions: Arc<RwLock<HashMap<String, IndexMap<Uuid, FgServiceExecution>>>>,
-    update_in_progress: Arc<std::sync::atomic::AtomicBool>,
+    communication_activities: Arc<tokio::sync::Mutex<HashMap<Uuid, CommunicationGuard>>>,
+    communication_access: Arc<dyn CommunicationAccess>,
 }
 
 pub(crate) async fn create_functional_group_routes<T: UdsEcu + SchemaProvider + Clone>(
@@ -143,7 +145,8 @@ pub(crate) async fn create_functional_group_routes<T: UdsEcu + SchemaProvider + 
             locks: Arc::clone(&state.locks),
             functional_group_name: group.clone(),
             fg_executions: Arc::new(RwLock::new(HashMap::default())),
-            update_in_progress: Arc::clone(&state.update_in_progress),
+            communication_activities: Arc::new(Mutex::new(HashMap::default())),
+            communication_access: Arc::clone(&state.communication_access),
         };
         functional_groups_router = functional_groups_router.nest_api_service(
             &format!("/functionalgroups/{group}"),
@@ -486,6 +489,7 @@ pub(crate) mod tests {
     use std::sync::Arc;
 
     use cda_interfaces::UdsEcu;
+    use cda_plugin_communication_management::lifecycle::enabled_communication_access_for_test;
     use tokio::sync::RwLock;
 
     use super::WebserverFgState;
@@ -509,7 +513,8 @@ pub(crate) mod tests {
             }),
             functional_group_name,
             fg_executions: Arc::new(RwLock::new(HashMap::default())),
-            update_in_progress: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            communication_activities: Arc::new(tokio::sync::Mutex::new(HashMap::default())),
+            communication_access: enabled_communication_access_for_test(),
         }
     }
 }

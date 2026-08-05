@@ -11,14 +11,14 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-use std::{collections::HashSet, sync::Arc};
+use std::collections::HashSet;
 
 use async_trait::async_trait;
 use cda_database::mmap_and_decode_mdd;
 use cda_interfaces::{
     runtime_update_api::{
-        ActivityGuard, LockStateProvider, RuntimeUpdateError, RuntimeUpdateSecurityPlugin,
-        UpdateCollections, VerificationError,
+        LockStateProvider, RuntimeUpdateError, RuntimeUpdateSecurityPlugin, UpdateCollections,
+        VerificationError,
     },
     storage_api::{Collection, DirectFileAccess},
 };
@@ -27,22 +27,19 @@ use cda_interfaces::{
 ///
 /// Validates vehicle lock ownership, detects lock conflicts, and verifies
 /// MDD file integrity.
-pub struct DefaultUpdateSecurityHandler<L: LockStateProvider> {
-    guard: Vec<Box<dyn ActivityGuard>>,
-    _lock_provider: std::marker::PhantomData<L>,
-}
+pub struct DefaultUpdateSecurityHandler<L: LockStateProvider>(std::marker::PhantomData<L>);
 
 impl<L: LockStateProvider> DefaultUpdateSecurityHandler<L> {
-    /// Creates a new security handler with the given activity guards.
-    ///
-    /// # Arguments
-    /// * `_lock_provider` - The lock state provider (used for type inference)
-    /// * `guard` - Activity guards that prevent updates while operations are in progress
-    pub fn new(_lock_provider: Arc<L>, guard: Vec<Box<dyn ActivityGuard>>) -> Self {
-        Self {
-            guard,
-            _lock_provider: std::marker::PhantomData,
-        }
+    /// Creates a security handler.
+    #[must_use]
+    pub fn new() -> Self {
+        Self(std::marker::PhantomData)
+    }
+}
+
+impl<L: LockStateProvider> Default for DefaultUpdateSecurityHandler<L> {
+    fn default() -> Self {
+        Self::new()
     }
 }
 
@@ -53,7 +50,8 @@ impl<L: LockStateProvider, C: Collection + DirectFileAccess + Send + Sync + 'sta
     /// Validates that the caller is allowed to start an execution (apply/rollback/cleanup).
     ///
     /// Ensures the caller owns the vehicle lock, no ECU or functional-group locks
-    /// are held, and no active operations are in progress.
+    /// are held. Conflicting communication activity is excluded atomically by the
+    /// coordinator's runtime-update block before this handler runs.
     async fn check_apply_allowed(
         &self,
         lock_state_provider: &L,
@@ -70,12 +68,6 @@ impl<L: LockStateProvider, C: Collection + DirectFileAccess + Send + Sync + 'sta
                 "Non-vehicle locks are held, cannot apply update".to_owned(),
             ));
         }
-        if self.guard.is_active() {
-            return Err(RuntimeUpdateError::OperationsInProgress(
-                "Another operation is running already (i.e. flash transfer)".to_owned(),
-            ));
-        }
-
         // Example, validate that no ECUs are added or deleted
         if let (Some(pending), Some(current)) = (&collections.pending_mdd, &collections.current_mdd)
         {
@@ -160,13 +152,6 @@ mod tests {
         }
     }
 
-    struct NoOpGuard;
-    impl ActivityGuard for NoOpGuard {
-        fn is_active(&self) -> bool {
-            false
-        }
-    }
-
     fn make_lock_provider(
         owner: Option<&str>,
         has_ecu_conflicts: bool,
@@ -239,14 +224,7 @@ mod tests {
         MockLockProvider,
     ) {
         let lock_provider = make_lock_provider(owner, has_ecu_conflicts, has_fg_conflicts);
-        let handler = DefaultUpdateSecurityHandler::new(
-            Arc::new(MockLockProvider {
-                owner: owner.map(ToOwned::to_owned),
-                has_ecu_conflicts,
-                has_fg_conflicts,
-            }),
-            vec![Box::new(NoOpGuard) as Box<dyn ActivityGuard>],
-        );
+        let handler = DefaultUpdateSecurityHandler::new();
         (handler, lock_provider)
     }
 

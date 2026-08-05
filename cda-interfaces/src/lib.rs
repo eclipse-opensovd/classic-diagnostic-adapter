@@ -29,8 +29,8 @@ pub mod datatypes;
 pub mod diagservices;
 mod ecugateway;
 pub use ecugateway::{
-    EcuGateway, FunctionalTransport, NetworkTopology, PhysicalTransport, ReusableTransportResource,
-    RouteStatus, TransmissionParameters, TransportProbe,
+    EcuGateway, FunctionalTransport, NetworkTopology, PhysicalTransport, RouteStatus,
+    TransmissionParameters, TransportProbe,
 };
 mod ecumanager;
 pub use ecumanager::*;
@@ -40,6 +40,8 @@ pub mod file_manager;
 pub mod health;
 mod schema;
 pub use schema::*;
+pub mod communication_control;
+pub mod component_slot;
 pub mod config;
 pub mod runtime_update_api;
 pub mod storage_api;
@@ -265,6 +267,16 @@ pub enum DiagServiceError {
     NotFound(String),
     #[error("Request not supported: {0}")]
     RequestNotSupported(String),
+    #[error("Communication disabled: {0}")]
+    CommunicationDisabled(String),
+    /// Communication was not enabled and either activation is not authorized
+    /// under the current `init_mode` or activation itself failed. Carries a
+    /// configured retry hint, unlike the coarser [`CommunicationDisabled`](Self::CommunicationDisabled).
+    #[error("Communication not ready: {message}")]
+    CommunicationNotReady {
+        message: String,
+        retry_after: Duration,
+    },
     #[error("Invalid database: {0}")]
     InvalidDatabase(String),
     #[error("Invalid request: {0}")]
