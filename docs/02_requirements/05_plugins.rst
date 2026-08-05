@@ -189,3 +189,35 @@ DLT Logging Plugin
 
     Application log levels must be mapped to their corresponding DLT log levels, so that DLT-side filtering by
     severity works correctly.
+
+
+Vehicle Topology Plugin
+------------------------
+
+.. req:: Vehicle Topology Plugin
+    :id: req~plugin-vehicle-topology
+    :links: arch~plugin-vehicle-topology-retrieval
+    :status: draft
+
+    A vehicle topology plugin must be available. It must provide an SOVD-API endpoint that returns the
+    network structure of the vehicle, consisting of functional groups, gateways, and the ECUs reachable
+    through them.
+
+    While a ``networkreset`` execution is in progress, this endpoint must respond with ``409 Conflict``.
+
+
+.. req:: Vehicle Topology Plugin - Reset
+    :id: req~plugin-vehicle-topology-reset
+    :links: arch~plugin-vehicle-topology-reset
+    :status: draft
+
+    It must be possible to reset the network structure via the ``networkreset`` operation, following the
+    standard SOVD operations semantics (i.e. listed under ``/apps/sovd2uds/operations``, executed via
+    ``POST /apps/sovd2uds/operations/networkreset/executions``, with the list of current execution
+    identifiers queryable via ``GET /apps/sovd2uds/operations/networkreset/executions``, the status of a
+    specific execution queryable via ``GET /apps/sovd2uds/operations/networkreset/executions/{id}``, and
+    the execution terminable and removable via ``DELETE
+    /apps/sovd2uds/operations/networkreset/executions/{id}``).
+
+    Executing the ``networkreset`` operation must require the caller to already hold an exclusive vehicle
+    lock, and no diagnostic operations may be in progress while the network structure is being reset.
