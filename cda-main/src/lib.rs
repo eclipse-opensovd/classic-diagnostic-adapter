@@ -16,7 +16,11 @@
 // query depth (128) on stable 1.97. Default limit otherwise.
 #![recursion_limit = "256"]
 
-use std::{future::Future, path::PathBuf, sync::Arc};
+use std::{
+    future::Future,
+    path::{Path, PathBuf},
+    sync::Arc,
+};
 
 #[cfg(feature = "can")]
 use cda_comm_can::CanDiagGateway;
@@ -76,7 +80,7 @@ pub enum Command {
 #[command(version, about, long_about = None)]
 pub struct AppArgs {
     #[arg(short, long, env = "CDA_CONFIG_FILE")]
-    pub config: Option<String>,
+    pub config: Option<PathBuf>,
 
     #[command(subcommand)]
     pub command: Option<Command>,
@@ -265,23 +269,44 @@ where
         return generate_config_cmd(output.as_ref());
     }
 
-    let (mut config, disk_loaded) = config::load_config_with_fallback(args.config.as_deref());
+    let config_file = match &args.config {
+        Some(config_file) => {
+            if config_file.exists() {
+                config_file
+            } else {
+                // ignore `config-optional` feature here, because it's specifically for when no config was specified
+                return Err(AppError::ConfigurationError {
+                    message: format!(
+                        "Specified configuration file {} does not exist",
+                        config_file.display()
+                    ),
+                    source: None,
+                });
+            }
+        }
+        None => Path::new("opensovd-cda.toml"),
+    };
 
-    if disk_loaded && config.runtime_update_config.init_storage_from_config_file {
-        let config_file = config::resolve_config_file_path(args.config.as_deref());
-        config::seed_storage_from_config_file(
-            &config.runtime_update_config.storage_dir,
-            &config_file,
-        )
-        .await;
-    }
+    let (mut config, disk_loaded) = config::load_config_with_fallback(config_file);
 
-    if let Some(storage_config) =
-        config::load_config_with_storage_override(&config.runtime_update_config.storage_dir).await?
-    {
-        config = storage_config;
-    } else if !disk_loaded {
-        config::require_config_source()?;
+    match cda_storage::LocalStorage::new(&config.runtime_update_config.storage_dir) {
+        Ok(storage) => {
+            if config.runtime_update_config.init_storage_from_config_file {
+                config::seed_storage_from_config_file(&storage, config_file).await?;
+            }
+
+            if let Some(storage_config) =
+                config::load_config_with_storage_override(&storage).await?
+            {
+                config = storage_config;
+            } else if !disk_loaded {
+                config::require_config_source()?;
+            }
+        }
+        Err(e) => {
+            tracing::warn!(error = %e, "Storage not available, skipping seed and config override");
+            return Ok(());
+        }
     }
 
     // Command line arguments always take precedence over stored configuration
