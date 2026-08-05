@@ -167,13 +167,24 @@ pub struct CanEcuMapping {
     /// - 29-bit extended CAN IDs (e.g. `0x18DAF110`)
     pub response_id: u32,
 
-    /// Optional ISO-TP address extension byte for mixed addressing.
-    ///
-    /// When set, CDA enables ISO-TP extended/mixed addressing and uses this
-    /// value as the first payload byte on transmit and as the expected first
-    /// payload byte on receive.
+    /// ISO-TP addressing mode. Extended addressing prefixes the given byte to every
+    /// ISO-TP payload; Standard uses only the CAN ID for addressing.
     #[serde(default)]
-    pub address_extension: Option<u8>,
+    pub addressing_mode: CanAddressingMode,
+}
+
+#[derive(
+    Deserialize, Serialize, Clone, Copy, Default, PartialEq, Eq, Debug, schemars::JsonSchema,
+)]
+#[serde(rename_all = "lowercase")]
+pub enum CanAddressingMode {
+    /// No address-extension byte; ISO-TP addressing comes entirely from the
+    /// CAN ID.
+    #[default]
+    Standard,
+    /// Mixed/extended addressing: the given address-extension byte is
+    /// prefixed to every ISO-TP payload.
+    Extended(u8),
 }
 
 impl Default for CanConfig {

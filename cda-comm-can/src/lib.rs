@@ -166,7 +166,7 @@ mod transport_routing_tests {
     use cda_transport_router::DiagnosticTransportRouter;
     use tokio::sync::{RwLock, mpsc};
 
-    use crate::{CanDiagGateway, gateway::connection::CanEcuConnection};
+    use crate::{CanDiagGateway, config::CanAddressingMode, gateway::connection::CanEcuConnection};
 
     /// `DoIP` gateway stub whose ECU knowledge can be toggled at runtime.
     #[derive(Clone, Default)]
@@ -285,6 +285,7 @@ mod transport_routing_tests {
                     "test0".to_owned(),
                     CanId::try_from(0x700).expect("valid CAN ID"),
                     CanId::try_from(0x708).expect("valid CAN ID"),
+                    CanAddressingMode::Standard,
                 ),
             )],
             vec!["ecu1"],

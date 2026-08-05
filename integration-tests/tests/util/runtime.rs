@@ -31,8 +31,9 @@ use http::{Method, StatusCode};
 use opensovd_cda_lib::{
     cda_version,
     config::configfile::{
-        CanConfig, CanEcuMapping, Configuration, DatabaseConfig, EcuComParams, EcuConfig,
-        RuntimeUpdateConfig, ServerConfig, StrictConfig, TransportOverride, TransportType,
+        CanAddressingMode, CanConfig, CanEcuMapping, Configuration, DatabaseConfig, EcuComParams,
+        EcuConfig, RuntimeUpdateConfig, ServerConfig, StrictConfig, TransportOverride,
+        TransportType,
     },
 };
 use sovd_interfaces::apps::sovd2uds::data::network_structure::get::Response as NetworkStructureResponse;
@@ -425,7 +426,7 @@ fn can_ecu_mappings() -> Vec<CanEcuMapping> {
             ecu_name: (*name).to_owned(),
             request_id: *req,
             response_id: *resp,
-            address_extension: None,
+            addressing_mode: CanAddressingMode::Standard,
         })
         .collect()
 }

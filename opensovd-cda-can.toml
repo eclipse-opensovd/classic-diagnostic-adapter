@@ -78,8 +78,11 @@ probe_timeout_ms = 100
 ecu_name = "FLXC1000"
 request_id = 0x7E0
 response_id = 0x7E8
-# Optional: ISO-TP mixed addressing extension byte.
-# address_extension = 0xF1
+# Optional: ISO-TP addressing mode. Defaults to "standard" (no
+# address-extension byte). "extended" prefixes every ISO-TP payload with
+# the given address-extension byte.
+# addressing_mode = "standard"
+# addressing_mode = { extended = 0xF1 }
 
 # CAN ECUs need a protocol override: the global default protocol name
 # (doip.protocol_name, "UDS_Ethernet_DoIP_DOBT") is DoIP-specific and will
@@ -99,13 +102,12 @@ protocol = "UDS_CAN"
 # ecu_name = "MyECU"
 # request_id = 0x7E0    # Physical request CAN ID
 # response_id = 0x7E8   # Physical response CAN ID
-# address_extension = 0xF1  # Optional mixed-addressing extension byte
+# addressing_mode = { extended = 0x33 }  # Optional: ISO-TP mixed addressing
 #
 # [[can.ecu_mappings]]
 # ecu_name = "AnotherECU"
 # request_id = 0x700
 # response_id = 0x708
-# address_extension = 0x33
 
 # Optional: per-ECU transport selection overrides
 #
