@@ -170,7 +170,12 @@ impl<S: EcuGateway, T: EcuManager> UdsManager<S, T> {
                     &(Box::new(()) as DynamicPlugin),
                     None,
                     true,
-                    Some(Duration::from_secs(10)),
+                    // Use the ECU's configured response timeout (`CP_P6Max`,
+                    // via `UdsComParams::timeout_default`) instead of a
+                    // hardcoded value, so variant-detection sends respect the
+                    // same, correctly configured comparam as every other UDS
+                    // send (see `send_with_raw_payload`'s `rx_timeout`).
+                    None,
                 )
                 .await
             {
