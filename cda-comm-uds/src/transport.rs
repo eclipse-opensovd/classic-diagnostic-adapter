@@ -823,6 +823,22 @@ mod send_tests {
         )
     }
 
+    fn make_manager_with_timeout_default(
+        gateway: TestGateway,
+        timeout_default: Duration,
+    ) -> UdsManager<TestGateway, TestEcuDb> {
+        let ecus = Arc::new(HashMap::from_iter([(
+            "TestECU".to_string(),
+            RwLock::new(TestEcuDb::with_timeout_default(timeout_default)),
+        )]));
+        UdsManager::new_for_raw_payload_tests(
+            gateway,
+            ecus,
+            FaultConfig::default(),
+            Arc::new(AtomicBool::new(false)),
+        )
+    }
+
     fn make_manager_no_ecus(gateway: TestGateway) -> UdsManager<TestGateway, TestEcuDb> {
         let ecus = Arc::new(HashMap::new());
         UdsManager::new_for_raw_payload_tests(
@@ -970,6 +986,57 @@ mod send_tests {
         assert!(
             matches!(result, Err(DiagServiceError::Timeout)),
             "Expected Timeout error"
+        );
+    }
+
+    /// Regression test: sends that omit an explicit timeout
+    /// must fall back to the ECU's configured `CP_P6Max`-backed
+    /// `UdsComParams::timeout_default`, not a hardcoded literal. Previously,
+    /// `gather_detection_responses` (in `variant.rs`) hardcoded a 10s timeout
+    /// for every `0x22 F100` variant-detection send, ignoring the ECU's
+    /// actual configured response timeout entirely. The fix changed that
+    /// call site to pass `None` instead, relying on exactly the fallback
+    /// (`timeout.unwrap_or(uds_params.timeout_default)`) exercised here.
+    ///
+    /// This test exercises `send_with_raw_payload` directly rather than
+    /// `gather_detection_responses`/`detect_variant` itself, since those
+    /// require the full `EcuManager` trait (a much larger surface than the
+    /// `UdsEcuDb + VariantDetection` bound used by the existing test double
+    /// in this module), which is out of proportion for this scoped fix.
+    #[tokio::test]
+    async fn test_send_with_raw_payload_uses_configured_timeout_default_when_none() {
+        let gateway = TestGateway {
+            send_fn: Arc::new(|_response_tx, _| {
+                // Don't send any response - the call must time out based on
+                // the ECU's configured `timeout_default`.
+                Ok(())
+            }),
+        };
+        let short_timeout = Duration::from_millis(100);
+        let manager = make_manager_with_timeout_default(gateway, short_timeout);
+        let payload = make_test_payload(0x10, &[0x01]);
+
+        let start = std::time::Instant::now();
+        // No explicit timeout: must fall back to `uds_params.timeout_default`
+        // (this is exactly what `send_without_variant_guard` does when
+        // called from `gather_detection_responses` post-fix).
+        let result = manager
+            .send_with_raw_payload("TestECU", payload, None, true)
+            .await;
+        let elapsed = start.elapsed();
+
+        assert!(
+            matches!(result, Err(DiagServiceError::Timeout)),
+            "Expected Timeout error, got {result:?}"
+        );
+        assert!(
+            elapsed < Duration::from_secs(1),
+            "Expected timeout close to the configured {short_timeout:?}, but took {elapsed:?} (a \
+             regression would hardcode ~10s here)"
+        );
+        assert!(
+            elapsed >= short_timeout,
+            "Timeout fired earlier than the configured {short_timeout:?}: {elapsed:?}"
         );
     }
 

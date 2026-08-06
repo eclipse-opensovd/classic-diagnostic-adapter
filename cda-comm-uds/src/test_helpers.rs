@@ -26,12 +26,25 @@ use cda_interfaces::{
 /// Minimal test double satisfying `UdsEcuDb + VariantDetection`.
 pub(crate) struct TestEcuDb {
     service_states: tokio::sync::Mutex<std::collections::HashMap<u8, String>>,
+    /// Configurable `CP_P6Max`-backed timeout, so tests can verify that
+    /// callers fall back to this comparam-derived value instead of using a
+    /// hardcoded literal. Defaults to 5s to match the previous fixed value.
+    timeout_default: Duration,
 }
 
 impl TestEcuDb {
     pub fn new() -> Self {
         Self {
             service_states: tokio::sync::Mutex::new(std::collections::HashMap::new()),
+            timeout_default: Duration::from_secs(5),
+        }
+    }
+
+    /// Create a test double with a custom `timeout_default` (`CP_P6Max`).
+    pub fn with_timeout_default(timeout_default: Duration) -> Self {
+        Self {
+            service_states: tokio::sync::Mutex::new(std::collections::HashMap::new()),
+            timeout_default,
         }
     }
 }
@@ -147,7 +160,7 @@ impl UdsComParams for TestEcuDb {
         Duration::from_millis(10)
     }
     fn timeout_default(&self) -> Duration {
-        Duration::from_secs(5)
+        self.timeout_default
     }
 }
 
