@@ -243,7 +243,7 @@ Vehicle Topology Plugin
       defined ``networkreset`` behavior.
     - ``clear_persisted=true``, ``trigger_detection=false``: the persisted topology is cleared without
       performing any live detection or vehicle communication. Subsequent behavior is governed by
-      :need:`req~dt-startup-detection-mode` as if no persisted topology had ever existed.
+      :need:`req~dt-deferred-initialization` (``init_mode``) as if no persisted topology had ever existed.
     - ``clear_persisted=false``, ``trigger_detection=true``: a live detection run is performed and its
       results are merged (upserted) into the existing persisted topology, without first removing entries
       for gateways/ECUs not seen during this run.

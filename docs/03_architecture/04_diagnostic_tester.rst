@@ -56,29 +56,36 @@ Startup Sequence
        through the health endpoint when this feature is enabled.
 
     5. **Vehicle Data Loading Phase**: Load diagnostic databases (MDD files) and, depending on
-       the configured initialization mode, initialize the communication layer.
+       the configured ``init_mode``, initialize the communication layer.
 
-       **Immediate mode (default)**:
+       **Always / WhenNotPersisted mode** (``Always`` is the default):
 
        - Parallel MDD file loading
-       - DoIP gateway creation (VIR/VAM exchange, TCP connections)
-       - UDS manager creation
+       - DoIP gateway creation -- a full VIR/VAM broadcast exchange for ``Always``, or for
+         ``WhenNotPersisted``, either a full broadcast exchange (no persisted topology available) or a
+         direct reconnect to persisted gateway addresses
+       - TCP connections established, UDS manager creation
        - Asynchronous variant detection startup
 
-       **Deferred mode** (see :need:`arch~dt-deferred-initialization`):
+       **OnDemand / Disabled mode** (see :need:`arch~dt-deferred-initialization`):
 
        - Parallel MDD file loading proceeds as normal
        - DoIP gateway creation, UDS manager creation, and variant detection are **not** performed
-         during startup. Instead, these steps are postponed until a trigger event occurs
-         (first diagnostic request or explicit plugin API activation)
+         during startup. Instead, these steps are postponed until a trigger event occurs: in
+         **OnDemand** mode, either a whole-vehicle plugin-API activation, or a first diagnostic request to
+         a specific ECU (scoped to just that ECU's gateway when a persisted topology exists, or triggering
+         a full broadcast otherwise); in **Disabled** mode, only an explicitly initiated detection run --
+         typically via ``networkreset``, but potentially via a plugin or other custom code -- applies
 
     6. **Route Registration Phase**: Register SOVD API routes, version endpoints, and
-       OpenAPI documentation routes on the dynamic router. In deferred mode, ECU-specific
-       routes are registered with handlers that trigger initialization on first access
-       (on-demand mode) or return a pending status until explicitly activated (plugin API mode).
+       OpenAPI documentation routes on the dynamic router. In on-demand/disabled mode, ECU-specific
+       routes are registered with handlers that trigger initialization on first access (single-ECU scope,
+       **OnDemand** only) or return a pending status until a detection run is explicitly initiated
+       (whole-vehicle scope: plugin API in **OnDemand**, or the equivalent explicit trigger in
+       **Disabled** mode).
 
     7. **Ready Phase**: When the health feature is enabled, update the main health status to
-       "Up" indicating the CDA's HTTP API is operational. In deferred mode, the DoIP health
+       "Up" indicating the CDA's HTTP API is operational. In deferred/disabled mode, the DoIP health
        provider remains in "Pending" state until communication initialization is triggered
        and completed (see :need:`arch~dt-deferred-initialization`). When the health feature
        is disabled, this phase is a no-op.
@@ -147,7 +154,7 @@ Startup Sequence
             UDS -> UDS: spawn variant detection task
             UDS --> Main: UdsManager
             deactivate UDS
-        else Deferred communication (on-demand or plugin API)
+        else OnDemand / Disabled communication (postponed until triggered)
             note over Main,UDS
                 DoIP gateway creation, UDS manager
                 creation, and variant detection are
@@ -343,15 +350,16 @@ DoIP Gateway Initialization
         .. note:: In case of a TLS required activation response, the connection is reestablished with TLS enabled.
 
 
-Deferred Initialization
-^^^^^^^^^^^^^^^^^^^^^^^
+Communication Initialization Mode
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 
-.. arch:: Deferred Initialization
+.. arch:: Communication Initialization Mode
     :id: arch~dt-deferred-initialization
     :status: draft
 
-    The CDA supports deferred initialization of ECU communication to enable scenarios where
-    the HTTP API must be available before vehicle communication begins.
+    The CDA supports a configurable ``[communication] init_mode`` to enable scenarios where
+    the HTTP API must be available before vehicle communication begins, or where communication must remain
+    fully quiet until explicitly authorized.
 
     **Dynamic Router Architecture**
 
@@ -362,35 +370,94 @@ Deferred Initialization
     2. Deferred registration of SOVD API routes after ECU discovery
     3. Hot-reloading of routes when the diagnostic database is updated at runtime
 
-    **Initialization Triggers**
+    **``init_mode`` Values**
 
-    When deferred initialization is configured, DoIP gateway creation and ECU discovery are
-    postponed until one of the following triggers:
+    - **Always** (default): DoIP gateway creation and ECU discovery proceed immediately at startup, as
+      described in :need:`arch~dt-startup-sequence`, always performing a full VIR/VAM broadcast discovery
+      regardless of whether a persisted topology exists (see :need:`arch~dt-ecu-list-persistence`). If ECU
+      list persistence is enabled, results are still persisted afterward (topology, states, ``last_seen``),
+      but the persisted topology is never consulted to skip or replace the broadcast discovery itself. This
+      matches the CDA's established default behavior prior to the introduction of ECU list persistence.
+    - **WhenNotPersisted**: DoIP gateway creation and ECU discovery proceed immediately at startup, but a
+      full VIR/VAM broadcast discovery is only performed when no persisted topology is available (e.g. on
+      the first-ever startup, or any time after the persisted topology has been cleared). Whenever a
+      persisted topology exists, the CDA instead attempts a direct (unicast) DoIP connection to each
+      persisted gateway's known network address, skipping the broadcast VIR step; if a gateway cannot be
+      reached at its persisted address, the CDA falls back to broadcast-based discovery for that specific
+      gateway, as described in :need:`arch~doip-vehicle-identification`, before marking its ECUs as Offline.
+      Requires ECU list persistence to be enabled; behaves identically to **Always** if persistence is
+      disabled, since no persisted topology can ever exist in that configuration.
+    - **OnDemand**: DoIP gateway creation and ECU discovery are postponed until one of the following
+      triggers, which intentionally differ in scope:
 
-    - **On-demand**: First diagnostic request to any ECU endpoint triggers initialization
-    - **Plugin API**: A custom plugin calls the initialization API based on application-specific
-      conditions (e.g., security unlock, session establishment)
-    - **Explicit networkreset execution**: The ``networkreset`` operation is executed with
-      ``trigger_detection=true`` (see :need:`arch~plugin-vehicle-topology-reset-persistence`). This is the
-      only trigger recognized in the "quiet" startup detection mode (see
-      :need:`arch~dt-startup-detection-mode`); the on-demand and plugin-API triggers do not apply in that
-      mode.
+      - **Plugin API** (whole-vehicle scope): a custom plugin calls the initialization API based on
+        application-specific conditions (e.g., security unlock, session establishment). This triggers a
+        full initialization of all gateways/ECUs at once, applying the same persisted-vs-broadcast
+        behavior as **WhenNotPersisted** described above.
+      - **On-demand** (single-ECU scope): the first diagnostic request to a specific ECU endpoint triggers
+        initialization. If a persisted topology exists, this establishes a connection only to that ECU's
+        gateway (direct reconnect, with broadcast fallback for that gateway alone, as in
+        **WhenNotPersisted**); other persisted gateways remain unconnected until their own first request.
+        If no persisted topology exists, no gateway network address is yet known, so this necessarily
+        triggers a full, vehicle-wide VIR broadcast, discovering and connecting all gateways at once,
+        since VIR-based discovery is inherently broadcast-based and cannot be scoped to a single ECU.
+
+    - **Disabled**: DoIP gateway creation and ECU discovery are postponed exactly as in **OnDemand** mode,
+      except that only an explicitly initiated detection run applies -- typically via the ``networkreset``
+      operation executed with ``trigger_detection=true`` (see
+      :need:`arch~plugin-vehicle-topology-reset-persistence`), but a plugin or other custom code may
+      equally initiate it directly; the on-demand (first-request) and plugin-API triggers are not
+      recognized in this mode. No socket is opened and no VIR is broadcast until that detection run is
+      explicitly initiated. Once triggered, this always initializes all gateways/ECUs at once (there is no
+      per-ECU auto-trigger in this mode), applying the same persisted-vs-broadcast behavior as
+      **WhenNotPersisted**.
+
+    **OnDemand** and **Disabled** always behave like **WhenNotPersisted** once triggered (at whichever
+    scope applies), rather than offering their own **Always**/**WhenNotPersisted** choice, since these
+    modes exist specifically to minimize vehicle network traffic until explicitly authorized.
+
+    .. uml::
+        :caption: WhenNotPersisted -- Reconnect to a Persisted Gateway
+
+        @startuml
+        skinparam backgroundColor #FFFFFF
+        skinparam sequenceArrowThickness 2
+
+        participant "CDA" as Startup
+        participant "DoIP Entity\n(persisted address)" as GW
+
+        Startup -> GW: unicast connect (known IP/logical address)
+        alt connection succeeds
+            GW --> Startup: connected
+            Startup -> Startup: trigger variant detection
+        else connection fails / timeout
+            GW --> Startup: unreachable
+            note right: Fallback to broadcast VIR\n(see arch~doip-vehicle-identification)
+            Startup -> Startup: mark gateway's ECUs Offline\nif still not found
+        end
+        @enduml
 
     **Pre-initialization State**
 
-    While initialization is deferred:
+    While initialization is deferred (``OnDemand`` or ``Disabled``, before their respective trigger fires):
 
     - When health monitoring is enabled, health endpoints report status for available components
       (configuration, HTTP server)
     - ECU-specific endpoints return an appropriate status code indicating pending initialization
     - The dynamic router is prepared to receive SOVD routes once initialization completes
+    - No spontaneous VAM listener is started (see :need:`arch~doip-vam-handling-mode`)
 
     **Initialization Sequence**
 
-    Once triggered, initialization proceeds identically to the immediate initialization path:
-    DoIP gateway creation, TCP connection establishment, UDS manager creation, and variant
-    detection. Upon completion, SOVD routes are registered and, when health monitoring is
-    enabled, health status transitions to "Up".
+    Once triggered, initialization proceeds identically to the immediate initialization path (subject to
+    the **Always**/**WhenNotPersisted** distinction described above, and, for **OnDemand**, scoped to a
+    single gateway or all gateways depending on which trigger fired): DoIP gateway creation (broadcast
+    discovery or direct reconnect), TCP connection establishment, UDS manager creation, and variant
+    detection. Upon completion, SOVD routes are registered and, when health monitoring is enabled, health
+    status transitions to "Up" (for **OnDemand**'s single-ECU trigger, this refers to the routes/health of
+    the affected gateway only). The resulting topology is persisted as described in
+    :need:`arch~dt-ecu-list-persistence`, so that subsequent startups can reuse it (unless ``init_mode`` is
+    ``Always``).
 
 
 Health Monitoring
@@ -691,11 +758,12 @@ ECU List Persistence
 
     **Enable/Disable Configuration**
 
-    A configuration flag (``ecu_list_persistence.enabled``, default ``true``) gates this entire feature.
-    When set to ``false``, the ``ecu-topology`` bucket is never read at startup and never written (neither
-    after a detection run nor at shutdown, see :need:`arch~dt-ecu-list-persistence-shutdown`). The CDA
-    startup path always takes the "no persisted topology" branch in that configuration (see
-    :need:`arch~dt-startup-detection-mode`), and the AssumedOnline state can never be entered.
+    A configuration flag (``communication.ecu_list_persistence.enabled``, default ``false``) gates this
+    entire feature. When left at ``false`` (the default), the ``ecu-topology`` bucket is never read at
+    startup and never written (neither after a detection run nor at shutdown, see
+    :need:`arch~dt-ecu-list-persistence-shutdown`). The CDA startup path always takes the "no persisted
+    topology" branch in that configuration (see :need:`arch~dt-deferred-initialization`), and the
+    AssumedOnline state can never be entered.
 
     **Bucket Layout**
 
@@ -719,22 +787,22 @@ ECU List Persistence
         participant "UDS Manager" as UDS
 
         == Startup ==
-        alt ecu_list_persistence.enabled = false
+        alt communication.ecu_list_persistence.enabled = false
             note over Startup: skip persistence entirely,\nalways take "no persisted topology" branch
-        else ecu_list_persistence.enabled = true
+        else communication.ecu_list_persistence.enabled = true
             Startup -> Persist: load bucket "ecu-topology"
             alt bucket present
                 Persist --> Startup: persisted topology
-                note right: See arch~dt-persisted-list-communication-mode
+                note right: See arch~dt-deferred-initialization\n(WhenNotPersisted/OnDemand/Disabled reuse)
             else bucket absent
                 Persist --> Startup: not found
-                note right: See arch~dt-startup-detection-mode
+                note right: See arch~dt-deferred-initialization
             end
         end
 
         == Detection completes (startup or networkreset) ==
         DOIP -> UDS: ECUs registered, states updated
-        opt ecu_list_persistence.enabled = true
+        opt communication.ecu_list_persistence.enabled = true
             UDS -> Persist: set bucket "ecu-topology" (per gateway)
             UDS -> Persist: flush
         end
@@ -743,20 +811,22 @@ ECU List Persistence
     **Write Timing**
 
     The persisted topology is written after a detection run completes -- both after the initial startup
-    detection (unless deferred/quiet, see :need:`arch~dt-startup-detection-mode`) and after a
-    ``networkreset`` execution that triggers detection (see
-    :need:`arch~plugin-vehicle-topology-reset-persistence`). A ``flush`` is issued to guarantee durability
-    of the persisted data. This write is skipped entirely when ``ecu_list_persistence.enabled`` is
-    ``false``.
+    detection (unless deferred/disabled without a trigger having fired yet, see
+    :need:`arch~dt-deferred-initialization`) and after a ``networkreset`` execution that triggers detection
+    (see :need:`arch~plugin-vehicle-topology-reset-persistence`). This applies regardless of whether
+    ``init_mode`` is ``Always`` or ``WhenNotPersisted`` -- a detection run's results are always persisted
+    when it occurs; only ``WhenNotPersisted`` additionally uses the persisted data to decide whether to skip
+    that detection run in the first place. A ``flush`` is issued to guarantee durability of the persisted
+    data. This write is skipped entirely when ``communication.ecu_list_persistence.enabled`` is ``false``.
 
     **Read Timing**
 
     The persisted topology is read once, early during the Vehicle Data Loading Phase of
-    :need:`arch~dt-startup-sequence`, before deciding whether to apply
-    :need:`arch~dt-startup-detection-mode` (no persisted data) or
-    :need:`arch~dt-persisted-list-communication-mode` (persisted data present). This read is skipped
-    entirely when ``ecu_list_persistence.enabled`` is ``false``, in which case
-    :need:`arch~dt-startup-detection-mode` unconditionally applies.
+    :need:`arch~dt-startup-sequence`, before deciding whether to perform a full broadcast discovery or reuse
+    the persisted data (relevant for ``init_mode = WhenNotPersisted``, or once triggered for
+    ``OnDemand``/``Disabled``, see :need:`arch~dt-deferred-initialization`). This read is skipped entirely
+    when ``communication.ecu_list_persistence.enabled`` is ``false``, in which case a full broadcast
+    discovery unconditionally applies with no persisted topology available.
 
     When ECUs are registered from a persisted topology, an ECU whose persisted state was Online is
     registered in the AssumedOnline state (see :need:`arch~dt-ecu-states`), with its ``last_seen``
@@ -771,15 +841,16 @@ ECU List Persistence - Shutdown Update
     :status: draft
 
     The ``last_seen`` timestamp maintained per ECU (see :need:`arch~dt-ecu-states`) changes far more
-    frequently than the rest of the persisted topology (on every successful diagnostic exchange), so it is
+    frequently than the rest of the persisted topology (on every successful diagnostic response), so it is
     not flushed to the Persistence API on every update.
 
     Instead, the in-memory ``last_seen`` values are written back to the ``ecu-topology`` bucket as part of
     the graceful shutdown sequence (triggered by the shared shutdown signal, see
     :need:`arch~dt-startup-sequence`), immediately before the persistence provider is closed. A final
     ``flush`` is issued after this update to guarantee durability. This shutdown write-back is skipped
-    entirely when ``ecu_list_persistence.enabled`` is ``false`` (see :need:`arch~dt-ecu-list-persistence`),
-    since there is no persisted bucket to update in that configuration.
+    entirely when ``communication.ecu_list_persistence.enabled`` is ``false`` (see
+    :need:`arch~dt-ecu-list-persistence`), since there is no persisted bucket to update in that
+    configuration.
 
     .. uml::
         :caption: last_seen Persistence at Shutdown
@@ -793,12 +864,12 @@ ECU List Persistence - Shutdown Update
         participant "Persistence API" as Persist
 
         Signal -> UDS: shutdown requested
-        alt ecu_list_persistence.enabled = true
+        alt communication.ecu_list_persistence.enabled = true
             UDS -> UDS: collect current last_seen\nper ECU
             UDS -> Persist: update last_seen in\nbucket "ecu-topology"
             UDS -> Persist: flush
             Persist --> UDS: durable
-        else ecu_list_persistence.enabled = false
+        else communication.ecu_list_persistence.enabled = false
             note over UDS: nothing to persist, skip
         end
         UDS --> Signal: shutdown complete
@@ -807,83 +878,10 @@ ECU List Persistence - Shutdown Update
     **Rationale**
 
     Deferring the persistence of ``last_seen`` to shutdown avoids a flush (and associated flash write) on
-    every diagnostic exchange, while still ensuring that, barring an unclean shutdown (e.g. power loss), the
+    every diagnostic response, while still ensuring that, barring an unclean shutdown (e.g. power loss), the
     timestamp available after a restart reflects the most recent contact from the previous session.
     In case of an unclean shutdown, the persisted ``last_seen`` simply remains at its last successfully
     flushed value, which is still a valid (if slightly stale) lower bound on the actual last contact time.
-
-
-Startup Detection Mode
-^^^^^^^^^^^^^^^^^^^^^^
-
-.. arch:: Startup Detection Mode
-    :id: arch~dt-startup-detection-mode
-    :status: draft
-
-    When no persisted ECU topology is found (see :need:`arch~dt-ecu-list-persistence`), the startup
-    sequence branches based on the configured ``startup_detection_mode``:
-
-    - **immediate** (default): proceeds exactly as the existing immediate initialization path described in
-      :need:`arch~dt-startup-sequence` (DoIP gateway creation, UDS manager creation, asynchronous variant
-      detection).
-    - **quiet**: DoIP gateway creation, UDS manager creation, and variant detection are skipped entirely at
-      startup. No socket is opened and no VIR is broadcast. ECU-related SOVD routes are registered in a
-      pending state, identical in effect to the deferred-initialization pending state described in
-      :need:`arch~dt-deferred-initialization`, except that the only trigger that ends the quiet state is an
-      explicit ``networkreset`` execution with ``trigger_detection=true`` (see
-      :need:`arch~plugin-vehicle-topology-reset-persistence`) -- neither the on-demand (first request) nor
-      the plugin-API trigger apply in this mode.
-
-    This extends the set of initialization triggers recognized by
-    :need:`arch~dt-deferred-initialization` with a third trigger: explicit ``networkreset`` execution.
-
-    Once detection is triggered (by whichever mechanism applies), the resulting topology is persisted as
-    described in :need:`arch~dt-ecu-list-persistence`, so that subsequent startups can use
-    :need:`arch~dt-persisted-list-communication-mode` instead.
-
-
-Persisted List Communication Mode
-^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-
-.. arch:: Persisted List Communication Mode
-    :id: arch~dt-persisted-list-communication-mode
-    :status: draft
-
-    When a persisted ECU topology is found (see :need:`arch~dt-ecu-list-persistence`), the startup sequence
-    branches based on the configured ``persisted_list_communication_mode``:
-
-    - **immediate** (default): for each persisted gateway, the CDA attempts a direct (unicast) DoIP
-      connection to its persisted network address, skipping the broadcast VIR step. If the connection
-      attempt fails (timeout or refused), the CDA falls back to broadcast-based discovery for that specific
-      gateway, as described in :need:`arch~doip-vehicle-identification`. If broadcast discovery also fails
-      to locate the gateway, its ECUs are marked Offline (see :need:`arch~dt-ecu-states`).
-    - **on-demand**: the persisted topology is loaded directly into the ECU registry and UDS manager state
-      (so ECUs and their last known state/variant are immediately visible via the SOVD API), but no DoIP
-      connections are opened. This reuses the on-demand initialization trigger described in
-      :need:`arch~dt-deferred-initialization`: the first diagnostic request targeting a given ECU triggers
-      connection establishment (direct connect with broadcast fallback, as in the immediate case above) for
-      that ECU's gateway.
-
-    .. uml::
-        :caption: Persisted List Communication Mode - immediate
-
-        @startuml
-        skinparam backgroundColor #FFFFFF
-        skinparam sequenceArrowThickness 2
-
-        participant "CDA Startup" as Startup
-        participant "DoIP Entity\n(persisted address)" as GW
-
-        Startup -> GW: unicast connect (known IP/logical address)
-        alt connection succeeds
-            GW --> Startup: connected
-            Startup -> Startup: trigger variant detection
-        else connection fails / timeout
-            GW --> Startup: unreachable
-            note right: Fallback to broadcast VIR\n(see arch~doip-vehicle-identification)
-            Startup -> Startup: mark gateway's ECUs Offline\nif still not found
-        end
-        @enduml
 
 
 Error Handling
