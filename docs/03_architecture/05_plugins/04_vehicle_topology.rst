@@ -152,7 +152,7 @@ Reset with Persisted List Control
       equivalent to the previously specified ``networkreset`` behavior.
     - ``clear_persisted=true``, ``trigger_detection=false``: the persisted "ecu-topology" bucket is cleared
       and no detection is performed; no vehicle communication occurs. Subsequent CDA behavior (until the
-      next ``networkreset`` or restart) follows :need:`arch~dt-startup-detection-mode` as if no persisted
+      next ``networkreset`` or restart) follows :need:`arch~dt-deferred-initialization` as if no persisted
       topology had ever existed.
     - ``clear_persisted=false``, ``trigger_detection=true``: a detection run is performed and its results
       are upserted per-gateway into the existing persisted topology; entries for gateways/ECUs not observed
@@ -160,7 +160,7 @@ Reset with Persisted List Control
     - ``clear_persisted=false``, ``trigger_detection=false``: rejected with an error response, as this
       combination would perform no observable action.
 
-    When ``ecu_list_persistence.enabled`` is ``false`` (see :need:`arch~dt-ecu-list-persistence`), there is
+    When ``communication.ecu_list_persistence.enabled`` is ``false`` (see :need:`arch~dt-ecu-list-persistence`), there is
     no ``ecu-topology`` bucket to operate on; ``clear_persisted`` is then a no-op regardless of its value,
     and only ``trigger_detection`` has an observable effect (running or skipping a live detection).
 
