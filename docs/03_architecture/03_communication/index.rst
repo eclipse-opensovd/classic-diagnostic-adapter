@@ -1,4 +1,4 @@
-.. SPDX-FileCopyrightText: 2025 Copyright (c) Contributors to the Eclipse Foundation
+.. SPDX-FileCopyrightText: 2026 Copyright (c) Contributors to the Eclipse Foundation
 ..
 .. See the NOTICE file(s) distributed with this work for additional
 .. information regarding copyright ownership.
@@ -9,11 +9,11 @@
 ..
 .. SPDX-License-Identifier: Apache-2.0
 
-Plugins
-=======
+Communication
+=============
 
-.. include:: /03_architecture/05_plugins/01_content.rst
+.. toctree::
+   :maxdepth: 2
 
-.. include:: /03_architecture/05_plugins/02_diagnostic_database_update.rst
-
-.. include:: /03_architecture/05_plugins/03_dlt_logging.rst
+   01_doip_communication
+   02_uds_communication

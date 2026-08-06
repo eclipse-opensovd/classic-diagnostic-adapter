@@ -273,7 +273,8 @@ Vehicle Identification
     **Spontaneous VAM Listener**
 
     After initial discovery, a background task continuously listens on the gateway port
-    for spontaneous VAM broadcasts. This handles:
+    for spontaneous VAM broadcasts, subject to the configured spontaneous VAM handling mode (see
+    :need:`arch~doip-vam-handling-mode`). When active, this handles:
 
     - Gateways coming online after the initial VIR broadcast
     - Gateways reconnecting after a temporary disconnection
@@ -312,6 +313,72 @@ Vehicle Identification
         GWA --> UDP: Spontaneous VAM\n(entity came online)
         UDP --> CDA: New VAM received
         CDA -> CDA: Establish connection\nand trigger variant detection
+        @enduml
+
+
+Spontaneous VAM Handling Mode
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+.. arch:: Spontaneous VAM Handling Mode
+    :id: arch~doip-vam-handling-mode
+    :status: draft
+
+    The spontaneous VAM listener's behavior is governed by the configured
+    ``communication.vam_handling_mode``:
+
+    - **always** (default): the listener is active and any spontaneous VAM whose logical address matches a
+      known ECU from the diagnostic databases triggers connection establishment and variant detection, as
+      described in the Spontaneous VAM Listener section above.
+    - **persisted-only**: the listener is active only while a persisted ECU topology exists (see
+      :need:`arch~dt-ecu-list-persistence`); this is a one-time check of whether the persistence bucket is
+      present, not a per-VAM lookup of the responding entity's logical address. When a topology exists,
+      spontaneous VAMs are handled identically to **always** mode, including VAMs from entities not yet
+      present in the persisted topology -- such entities are discovered and added like any other. When no
+      persisted topology exists, the listener discards all spontaneous VAMs (logged only) until a topology
+      has been persisted (via startup detection or ``networkreset``, see
+      :need:`arch~plugin-vehicle-topology-reset-persistence`), at which point it starts handling spontaneous
+      VAMs normally without requiring a restart. When ``communication.ecu_list_persistence.enabled`` is
+      ``false`` (see :need:`arch~dt-ecu-list-persistence`), a persisted topology can never exist, so this
+      mode is functionally identical to **never** in that configuration.
+    - **never**: the spontaneous VAM listener task is not started. Gateways can only be (re-)discovered via
+      an explicit ``networkreset`` execution (see :need:`arch~plugin-vehicle-topology-reset-persistence`) or
+      via the DoIP connection retry mechanism operating on already-established connections (see
+      ``CP_DoIPConnectionRetryDelay`` / ``CP_DoIPConnectionRetryAttempts``).
+
+    Independent of ``vam_handling_mode``, the spontaneous VAM listener task itself is only started once
+    ECU/DoIP communication has actually been initialized (see :need:`arch~dt-deferred-initialization`).
+    While ``init_mode`` is ``OnDemand`` or ``Disabled`` and its trigger has not yet fired, no listener task
+    exists, regardless of the configured mode.
+
+    .. uml::
+        :caption: Spontaneous VAM Handling Mode
+
+        @startuml
+        skinparam backgroundColor #FFFFFF
+        skinparam sequenceArrowThickness 2
+
+        participant "DoIP Entity" as GW
+        participant "Spontaneous VAM\nListener" as Listener
+        participant "Persisted Topology" as Persist
+
+        == communication.vam_handling_mode = always ==
+        GW --> Listener: spontaneous VAM
+        Listener -> Listener: connect + trigger variant detection
+
+        == communication.vam_handling_mode = persisted-only ==
+        Listener -> Persist: does a persisted topology exist?
+        alt persisted topology exists
+            Persist --> Listener: yes
+            GW --> Listener: spontaneous VAM\n(known or new entity)
+            Listener -> Listener: connect + trigger variant detection
+        else no persisted topology
+            Persist --> Listener: no
+            GW --> Listener: spontaneous VAM
+            Listener -> Listener: discard (log only)
+        end
+
+        == communication.vam_handling_mode = never ==
+        note over Listener: listener task not started
         @enduml
 
 
