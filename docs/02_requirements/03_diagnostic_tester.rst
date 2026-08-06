@@ -164,35 +164,96 @@ DoIP Gateway Initialization
     allow adaptation to different network topologies and timing requirements.
 
 
-Deferred Initialization
-^^^^^^^^^^^^^^^^^^^^^^^
+Communication Initialization Mode
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 
-.. req:: Deferred Initialization
+.. req:: Communication Initialization Mode
     :id: req~dt-deferred-initialization
     :links: arch~dt-deferred-initialization
     :status: draft
 
-    The CDA must support deferred initialization of ECU discovery and communication.
+    The CDA must support a configurable ``[communication] init_mode``, controlling when DoIP gateway
+    initialization and ECU discovery are allowed to begin, and, once begun, whether they always perform a
+    full VIR/VAM broadcast discovery or reuse a previously persisted topology when available:
 
-    When deferred initialization is enabled:
+    - **Always** (default) -- DoIP gateway initialization and ECU discovery proceed immediately at
+      startup, as defined in :need:`req~dt-startup-sequence`, always performing a full VIR/VAM broadcast
+      discovery, regardless of whether a persisted topology exists (see
+      :need:`req~dt-ecu-list-persistence`). If ECU list persistence is enabled, results are still persisted
+      afterward (updating the stored topology, states, and ``last_seen`` timestamps), but the persisted
+      topology is never used to skip or replace the broadcast discovery itself. This matches the CDA's
+      established default behavior of always performing a full detection run at startup.
+    - **WhenNotPersisted** -- DoIP gateway initialization and ECU discovery proceed immediately at startup,
+      but a full VIR/VAM broadcast discovery is only performed when no persisted topology exists (e.g. on
+      the first-ever startup, or any time after the persisted topology has been cleared, see
+      :need:`req~dt-ecu-list-persistence`). Whenever a persisted topology exists, the CDA must instead
+      attempt a direct (unicast) DoIP connection to each persisted gateway's known network address,
+      skipping the broadcast VIR step; if a gateway cannot be reached at its persisted address, the CDA
+      must fall back to broadcast-based discovery for that specific gateway, as defined in
+      :need:`req~doip-vehicle-identification`, before marking its ECUs as Offline. This mode requires ECU
+      list persistence to be enabled; it is equivalent to **Always** if persistence is disabled, since no
+      persisted topology can ever exist in that configuration.
+    - **OnDemand** -- DoIP gateway initialization and ECU discovery are postponed until one of the
+      following triggers occurs:
 
-    - DoIP gateway initialization must be postponed until one of the following triggers:
+      - **Explicit activation via the plugin API** -- a custom plugin may trigger the activation of ECU
+        communication based on specific conditions (e.g., security unlock, session establishment). This
+        triggers a full initialization of all gateways/ECUs at once, applying the same
+        persisted-vs-broadcast behavior as **WhenNotPersisted** described above.
+      - **First diagnostic request to a specific ECU** (on-demand initialization) -- if a persisted
+        topology exists, this establishes a connection only to that ECU's gateway (direct reconnect, with
+        broadcast fallback for that gateway alone, as in **WhenNotPersisted**); other persisted gateways
+        remain unconnected until their own first request. If no persisted topology exists, no gateway
+        network address is yet known, so this necessarily triggers a full, vehicle-wide VIR broadcast
+        discovering and connecting all gateways at once, since VIR-based discovery is inherently
+        broadcast-based and cannot be scoped to a single ECU.
 
-      - First diagnostic request to any ECU (on-demand initialization)
-      - Explicit activation via the plugin API
-      - The plugin API may be used by a custom plugin to trigger the activation of ECU communication based on specific conditions
+    - **Disabled** -- DoIP gateway initialization and ECU discovery are postponed like in **OnDemand**
+      mode, but neither the first-diagnostic-request nor the plugin-API trigger apply. Communication only
+      starts once a detection run is explicitly initiated -- typically via the ``networkreset`` operation
+      with ``trigger_detection=true`` (see :need:`req~plugin-vehicle-topology-reset-clear-persisted`), but
+      a plugin or other custom code may equally initiate a detection run directly. Once triggered, this
+      always initializes all gateways/ECUs at once (there is no per-ECU auto-trigger in this mode),
+      applying the same persisted-vs-broadcast behavior as **WhenNotPersisted**.
+
+    In both **OnDemand** and **Disabled** mode:
 
     - The HTTP server and SOVD API must be available before ECU communication is initialized
     - ECU endpoints must return an appropriate status indicating pending initialization
-    - Once triggered, initialization must proceed as defined in :need:`req~dt-startup-sequence`
+    - Once triggered, initialization must proceed as defined in :need:`req~dt-startup-sequence`, scoped to
+      either a single gateway or all gateways as described above
+
+    Once a detection run has completed (regardless of the triggering ``init_mode``), the resulting
+    topology is persisted as described in :need:`req~dt-ecu-list-persistence`, so that subsequent startups
+    may reuse it (unless ``init_mode`` is configured as **Always**).
 
     **Rationale**
 
-    Deferred initialization supports use cases where the CDA must start quickly without immediately
+    Configurable initialization supports use cases where the CDA must start quickly without immediately
     consuming network resources, or where ECU communication should only begin after explicit
-    authorization (e.g., security unlock, session establishment, or plugin-controlled activation).
-    This is particularly useful in diagnostic scenarios where the tester must be fully operational
-    before any vehicle communication occurs.
+    authorization (e.g., security unlock, session establishment, or plugin-controlled activation). The
+    **Disabled** mode additionally supports deployments that require the CDA to be reachable via its SOVD
+    API immediately, without generating any vehicle network traffic, until a detection run is explicitly
+    initiated (typically via ``networkreset``, but potentially by a plugin or other custom code) -- as
+    opposed to **OnDemand** mode, where the first diagnostic request to any ECU implicitly authorizes
+    (at least that ECU's) communication.
+
+    Distinguishing **Always** from **WhenNotPersisted** avoids leaving the choice between "always
+    rebroadcast, but keep tracking state/``last_seen`` across restarts" and "skip rebroadcasting whenever
+    possible" as an implicit side effect of whether a persisted topology happens to exist. Some deployments
+    may want the freshness/robustness guarantees of always rebroadcasting while still benefiting from
+    persisted state across restarts (e.g. ``last_seen`` history); others may prioritize minimizing startup
+    time and vehicle network traffic once an initial topology has been established.
+
+    **OnDemand** and **Disabled** always behave like **WhenNotPersisted** once triggered, rather than
+    offering their own **Always**/**WhenNotPersisted** choice: these modes exist specifically to avoid
+    vehicle network traffic until explicitly authorized, so unconditionally rebroadcasting even when a
+    persisted topology is already available would be counter to their purpose. Within **OnDemand**, the two
+    triggers intentionally differ in scope: the plugin-API trigger is a deliberate, whole-vehicle "start
+    communication now" signal and must activate every gateway, matching what a plugin expects after an
+    explicit authorization event; the first-diagnostic-request trigger, by contrast, is an implicit,
+    incidental signal tied to one specific ECU, so it should only establish what is strictly needed to
+    serve that request when a persisted topology makes this possible.
 
 
 ECU Detection and Variant Detection
@@ -357,10 +418,10 @@ ECU States
     Explicit state management provides clients with visibility into ECU availability and allows
     appropriate error handling based on the current state. The AssumedOnline state allows the CDA to
     immediately report ECUs as reachable based on prior knowledge (e.g. in
-    :need:`req~dt-persisted-list-communication-mode`'s on-demand mode) while still internally tracking that
-    this assumption has not yet been confirmed in the current session. The ``last_seen`` timestamp gives
-    clients visibility into how stale that assumption might be, which is especially relevant while an ECU
-    remains in the AssumedOnline state.
+    :need:`req~dt-deferred-initialization`'s **OnDemand** mode, before its per-ECU trigger has fired) while
+    still internally tracking that this assumption has not yet been confirmed in the current session. The
+    ``last_seen`` timestamp gives clients visibility into how stale that assumption might be, which is
+    especially relevant while an ECU remains in the AssumedOnline state.
 
 
 ECU List Persistence
@@ -377,12 +438,27 @@ ECU List Persistence
     The CDA must be able to persist the detected ECU/gateway topology, so that it does not necessarily need
     to re-run full ECU detection (VIR/VAM discovery and variant detection) on every startup.
 
-    This capability must be configurable via an ``enabled`` flag, defaulting to ``true``. When disabled:
+    This is a core diagnostic-tester capability, usable purely through ``[communication]`` configuration
+    (``ecu_list_persistence.enabled``, ``init_mode``); it does not require the Vehicle Topology Plugin (see
+    :need:`req~plugin-vehicle-topology`) to be loaded. For example, with ``ecu_list_persistence.enabled =
+    true`` and ``init_mode = WhenNotPersisted`` (see :need:`req~dt-deferred-initialization`), the
+    first-ever startup (or any startup without a persisted topology) performs a full detection run and
+    persists its results; every subsequent startup then reconnects directly to the persisted gateways
+    without needing a full VIR/VAM broadcast again, and without any plugin involvement. When the Vehicle
+    Topology Plugin is loaded, it additionally exposes the ``networkreset`` SOVD operation to explicitly
+    (re-)trigger detection or clear the persisted topology at runtime (see
+    :need:`req~plugin-vehicle-topology-reset-clear-persisted`).
+
+    This capability must be configurable via an ``enabled`` flag, defaulting to ``false``. With persistence
+    disabled, no persisted topology can ever exist, so the default ``init_mode = Always`` (see
+    :need:`req~dt-deferred-initialization`) always performs a full VIR/VAM broadcast detection at every
+    startup -- matching CDA behavior prior to the introduction of this feature. When disabled (the
+    default):
 
     - The persisted topology must not be read at startup, and must not be written after a detection run
       or at shutdown (see :need:`req~dt-ecu-list-persistence-shutdown`).
-    - The CDA must behave exactly as if no persisted topology exists, i.e. :need:`req~dt-startup-detection-mode`
-      always applies; :need:`req~dt-persisted-list-communication-mode` never applies, and the AssumedOnline
+    - The CDA must behave exactly as if no persisted topology exists, i.e. ``init_mode = WhenNotPersisted``
+      (see :need:`req~dt-deferred-initialization`) becomes equivalent to ``Always``, and the AssumedOnline
       state (see :need:`req~dt-ecu-states`) can never occur.
 
     The following requirements apply when persistence is enabled:
@@ -391,23 +467,31 @@ ECU List Persistence
       ECUs reachable through it (logical address, name, last known variant, last known state, and
       ``last_seen`` timestamp, see :need:`req~dt-ecu-states`)
     - Persisted data must be written using the persistence API (see :need:`req~system-persistence-api`)
-      after a detection run completes, whether triggered at startup or via the ``networkreset`` operation
-      (see :need:`req~plugin-vehicle-topology-reset`)
-    - On startup, the CDA must check whether a persisted topology exists and use its presence/absence to
-      select the applicable startup behavior (see :need:`req~dt-startup-detection-mode` and
-      :need:`req~dt-persisted-list-communication-mode`)
+      after any detection run completes, regardless of what triggered it -- the initial startup detection
+      alone is sufficient; if the Vehicle Topology Plugin is loaded, a detection run triggered via its
+      ``networkreset`` operation (see :need:`req~plugin-vehicle-topology-reset`) is persisted identically.
+      This applies for both ``init_mode = Always`` and ``init_mode = WhenNotPersisted`` (see
+      :need:`req~dt-deferred-initialization`); the persisted data is only ever used to skip rebroadcasting
+      when ``init_mode = WhenNotPersisted`` (or, once triggered, for ``OnDemand``/``Disabled``).
+    - On startup, the CDA must check whether a persisted topology exists and, combined with the configured
+      ``init_mode``, select the applicable startup behavior (see :need:`req~dt-deferred-initialization`)
     - When an ECU is loaded from a persisted topology with a last known state of Online, it must be
       registered in the AssumedOnline state (see :need:`req~dt-ecu-states`) rather than NotTested
-    - It must be possible to clear the persisted topology independently of triggering a new detection run
-      (see :need:`req~plugin-vehicle-topology-reset-clear-persisted`); this has no observable effect when
-      persistence is disabled, since there is nothing stored to clear
+    - When the Vehicle Topology Plugin is loaded, it must be possible to clear the persisted topology
+      independently of triggering a new detection run (see
+      :need:`req~plugin-vehicle-topology-reset-clear-persisted`); this has no observable effect when
+      persistence is disabled, since there is nothing stored to clear. Without the plugin loaded, no
+      runtime clearing mechanism is required by this specification.
 
     **Rationale**
 
     Full ECU detection involves broadcasting a VIR, waiting for VAM responses, and running variant
     detection for every discovered ECU, which can take a noticeable amount of time in vehicles with many
     ECUs. Persisting the previously detected topology allows the CDA to skip or defer this work on
-    subsequent startups, improving startup time and reducing unnecessary vehicle network traffic.
+    subsequent startups, improving startup time and reducing unnecessary vehicle network traffic. This is
+    an opt-in capability (disabled by default), preserving the CDA's established default behavior of always
+    performing a full VIR/VAM broadcast detection at startup when left unconfigured (see the **Always** vs
+    **WhenNotPersisted** distinction in :need:`req~dt-deferred-initialization`).
 
 
 ECU List Persistence - Shutdown Update
@@ -427,61 +511,9 @@ ECU List Persistence - Shutdown Update
     **Rationale**
 
     The ``last_seen`` timestamp is updated frequently during normal operation (on every successful
-    diagnostic contact), which is not practical to persist and flush on every single occurrence without
+    diagnostic response), which is not practical to persist and flush on every single occurrence without
     impacting performance and flash wear. Persisting the latest value at shutdown ensures the timestamp
-    surviving a restart is reasonably up to date, without requiring a flush on every diagnostic exchange.
-
-
-Startup Detection Mode
-^^^^^^^^^^^^^^^^^^^^^^
-
-.. req:: Startup Detection Mode
-    :id: req~dt-startup-detection-mode
-    :links: arch~dt-startup-detection-mode
-    :status: draft
-
-    When no persisted ECU topology exists (see :need:`req~dt-ecu-list-persistence`), the CDA must support a
-    configurable startup detection mode:
-
-    - **immediate** (default) -- perform ECU detection at startup as defined in
-      :need:`req~dt-startup-sequence`.
-    - **quiet** -- perform no ECU/DoIP communication at startup. The CDA must remain fully quiet on the
-      vehicle network until ECU detection is explicitly triggered via the ``networkreset`` operation (see
-      :need:`req~plugin-vehicle-topology-reset`). While quiet, ECU-related SOVD API endpoints must indicate
-      that detection has not yet been performed.
-
-    **Rationale**
-
-    Some deployments require the CDA to be reachable via its SOVD API immediately, without generating any
-    vehicle network traffic, until a client explicitly authorizes ECU discovery.
-
-
-Persisted List Communication Mode
-^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-
-.. req:: Persisted List Communication Mode
-    :id: req~dt-persisted-list-communication-mode
-    :links: arch~dt-persisted-list-communication-mode
-    :status: draft
-
-    When a persisted ECU topology exists (see :need:`req~dt-ecu-list-persistence`), the CDA must support a
-    configurable communication mode that defines how communication with the previously detected ECUs is
-    handled at startup:
-
-    - **immediate** (default) -- attempt to connect directly to the persisted gateway network addresses
-      without a broadcast VIR. If a gateway cannot be reached at its persisted address, the CDA must fall
-      back to broadcast-based discovery for that gateway, as defined in
-      :need:`req~doip-vehicle-identification`, before marking its ECUs as Offline.
-    - **on-demand** -- load the persisted topology into the ECU registry, so the persisted ECUs and their
-      last known state are immediately queryable via the SOVD API, but do not open any DoIP connections at
-      startup. Communication with a given ECU/gateway must only be established on the first diagnostic
-      request targeting it, reusing the on-demand trigger defined in :need:`req~dt-deferred-initialization`.
-
-    **Rationale**
-
-    Reusing a persisted topology still allows a choice between minimizing startup latency of the SOVD API
-    (on-demand) and minimizing the latency of the first diagnostic request (immediate), depending on
-    deployment needs.
+    surviving a restart is reasonably up to date, without requiring a flush on every diagnostic response.
 
 
 Error Handling

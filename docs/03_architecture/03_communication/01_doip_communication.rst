@@ -323,7 +323,8 @@ Spontaneous VAM Handling Mode
     :id: arch~doip-vam-handling-mode
     :status: draft
 
-    The spontaneous VAM listener's behavior is governed by the configured ``vam_handling_mode``:
+    The spontaneous VAM listener's behavior is governed by the configured
+    ``communication.vam_handling_mode``:
 
     - **always** (default): the listener is active and any spontaneous VAM whose logical address matches a
       known ECU from the diagnostic databases triggers connection establishment and variant detection, as
@@ -336,13 +337,18 @@ Spontaneous VAM Handling Mode
       persisted topology exists, the listener discards all spontaneous VAMs (logged only) until a topology
       has been persisted (via startup detection or ``networkreset``, see
       :need:`arch~plugin-vehicle-topology-reset-persistence`), at which point it starts handling spontaneous
-      VAMs normally without requiring a restart. When ``ecu_list_persistence.enabled`` is ``false`` (see
-      :need:`arch~dt-ecu-list-persistence`), a persisted topology can never exist, so this mode is
-      functionally identical to **never** in that configuration.
+      VAMs normally without requiring a restart. When ``communication.ecu_list_persistence.enabled`` is
+      ``false`` (see :need:`arch~dt-ecu-list-persistence`), a persisted topology can never exist, so this
+      mode is functionally identical to **never** in that configuration.
     - **never**: the spontaneous VAM listener task is not started. Gateways can only be (re-)discovered via
       an explicit ``networkreset`` execution (see :need:`arch~plugin-vehicle-topology-reset-persistence`) or
       via the DoIP connection retry mechanism operating on already-established connections (see
       ``CP_DoIPConnectionRetryDelay`` / ``CP_DoIPConnectionRetryAttempts``).
+
+    Independent of ``vam_handling_mode``, the spontaneous VAM listener task itself is only started once
+    ECU/DoIP communication has actually been initialized (see :need:`arch~dt-deferred-initialization`).
+    While ``init_mode`` is ``OnDemand`` or ``Disabled`` and its trigger has not yet fired, no listener task
+    exists, regardless of the configured mode.
 
     .. uml::
         :caption: Spontaneous VAM Handling Mode
@@ -355,11 +361,11 @@ Spontaneous VAM Handling Mode
         participant "Spontaneous VAM\nListener" as Listener
         participant "Persisted Topology" as Persist
 
-        == vam_handling_mode = always ==
+        == communication.vam_handling_mode = always ==
         GW --> Listener: spontaneous VAM
         Listener -> Listener: connect + trigger variant detection
 
-        == vam_handling_mode = persisted-only ==
+        == communication.vam_handling_mode = persisted-only ==
         Listener -> Persist: does a persisted topology exist?
         alt persisted topology exists
             Persist --> Listener: yes
@@ -371,7 +377,7 @@ Spontaneous VAM Handling Mode
             Listener -> Listener: discard (log only)
         end
 
-        == vam_handling_mode = never ==
+        == communication.vam_handling_mode = never ==
         note over Listener: listener task not started
         @enduml
 

@@ -211,8 +211,8 @@ Spontaneous VAM Handling Mode
     :links: arch~doip-vam-handling-mode
     :status: draft
 
-    The CDA must support a configurable mode for handling spontaneous (unsolicited) VAM broadcasts received
-    outside of an active VIR/VAM discovery exchange:
+    The CDA must support a configurable ``[communication] vam_handling_mode`` for handling spontaneous
+    (unsolicited) VAM broadcasts received outside of an active VIR/VAM discovery exchange:
 
     - **always** (default) -- any spontaneous VAM matching a known ECU logical address from the diagnostic
       databases triggers a connection attempt and variant detection, regardless of whether that entity has
@@ -228,12 +228,21 @@ Spontaneous VAM Handling Mode
       possible via explicit ``networkreset`` execution or the configured DoIP connection retry mechanism
       (see :need:`req~doip-communication-parameters`).
 
+    Regardless of the configured mode, spontaneous VAM handling must only be active while ECU/DoIP
+    communication has actually been initialized. While ``init_mode`` (see
+    :need:`req~dt-deferred-initialization`) is ``OnDemand`` or ``Disabled`` and communication has not yet
+    been triggered, no spontaneous VAM listener must be running; it is started only once initialization
+    proceeds.
+
     **Rationale**
 
     Always reacting to spontaneous VAMs is convenient for dynamic environments, but may be undesirable in
     setups that require the first-ever detection to only occur following an explicit, authorized trigger
     (e.g. ``networkreset``), while still allowing organic discovery of new ECUs/gateways once an initial
-    topology has been established.
+    topology has been established. Suppressing spontaneous VAM handling until communication is initialized
+    ensures the CDA remains fully quiet on the vehicle network for as long as
+    :need:`req~dt-deferred-initialization` postpones communication, regardless of the configured
+    ``vam_handling_mode``.
 
 
 Routing Activation
