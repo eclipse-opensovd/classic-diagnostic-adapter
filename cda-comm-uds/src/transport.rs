@@ -19,8 +19,10 @@ use std::{
 use cda_interfaces::{
     Connectivity, DiagComm, DiagServiceError, DynamicPlugin, EcuGateway, EcuManager, EcuState,
     PayloadDecoder, ServicePayload, TransmissionParameters, UdsResponse, UdsTransport, UdsVariant,
-    VariantDetection, VariantState, datatypes::RetryPolicy, diagservices::UdsPayloadData, dlt_ctx,
-    service_ids,
+    VariantDetection, VariantState,
+    datatypes::RetryPolicy,
+    diagservices::{DiagServiceResponse, UdsPayloadData},
+    dlt_ctx, service_ids,
 };
 use tokio::sync::{RwLock, Semaphore, mpsc};
 
@@ -115,24 +117,37 @@ impl<S: EcuGateway, T: EcuManager> UdsManager<S, T> {
 
         let payload_build_after = start.elapsed();
 
+        // Inspect the subfunction byte for `suppressPosRspMsgIndicationBit` (bit 7).
+        // When set, the ECU is not expected to send a positive response, so the
+        // absence of a response must not be treated as a timeout/error (mirrors
+        // the same check already applied for functional sends, see
+        // `send_functional_to_gateway`).
+        let expect_response = !payload.is_suppress_positive_response();
+
         let response = self
-            .send_with_raw_payload(ecu_name, payload.clone(), timeout, true)
+            .send_with_raw_payload(ecu_name, payload.clone(), timeout, expect_response)
             .await;
         let response_after = start.elapsed().saturating_sub(payload_build_after);
 
         let response = match response {
-            Ok(msg) => {
+            Ok(Some(msg)) => {
                 self.uds_ecu_db(ecu_name)
                     .expect("ECU name has been already checked")
                     .read()
                     .await
-                    .convert_from_uds(
-                        &service,
-                        &msg.expect("response expected"),
-                        map_to_json,
-                        None,
-                    )
+                    .convert_from_uds(&service, &msg, map_to_json, None)
                     .await
+            }
+            Ok(None) => {
+                // Only reachable when `expect_response` was `false`, i.e. the
+                // suppress-positive-response bit was set: the ECU legitimately
+                // did not respond. This is a success, not an error - mirror the
+                // treatment already applied on the raw path (`send_genericservice`,
+                // which maps `Ok(None)` to an empty result) by returning a
+                // positive, empty response. Callers render it as no-content.
+                Ok(<T as PayloadDecoder>::Response::empty_positive(
+                    service.clone(),
+                ))
             }
             Err(e) => Err(e),
         };
@@ -213,17 +228,42 @@ impl<S: EcuGateway, T: UdsEcuDb + VariantDetection> UdsManager<S, T> {
         let rx_timeout = timeout.unwrap_or(uds_params.timeout_default);
         let mut rx_timeout_next = None;
 
+        // Counts application-layer retries per ISO 14229-2:2021 Table 9
+        // ("Client error handling"): a transmission failure, a raw receive
+        // error, or a plain timeout with no response at all shall each cause
+        // the client to repeat the last request, up to `CP_RepeatReqCountApp`
+        // times (independent of, and not to be confused with, the NRC
+        // 0x21/0x78/0x94 busy-repeat handling below, which has its own,
+        // separate time-bounded retry policy).
+        let mut app_retry_count: u32 = 0;
+
         // outer loop to retry sending frames, resend frames must deal with (N)ACK again
         let (response_tx, mut response_rx) = mpsc::channel(2);
         let (response, sent_after) = 'send: loop {
-            self.gateway
+            if let Err(e) = self
+                .gateway
                 .send(
                     transmission_params.clone(),
                     payload.clone(),
                     response_tx.clone(),
                     expect_response,
                 )
-                .await?;
+                .await
+            {
+                if app_retry_count < uds_params.repeat_req_count_app {
+                    app_retry_count = app_retry_count.saturating_add(1);
+                    tracing::debug!(
+                        ecu_name,
+                        attempt = app_retry_count,
+                        max_attempts = uds_params.repeat_req_count_app,
+                        error = %e,
+                        "Transmission error, repeating request (CP_RepeatReqCountApp)"
+                    );
+                    rx_timeout_next = None;
+                    continue 'send;
+                }
+                return Err(e);
+            }
             let sent_after = start.elapsed();
 
             // responses might be disabled, i.e. for functional tester presents...
@@ -328,8 +368,20 @@ impl<S: EcuGateway, T: UdsEcuDb + VariantDetection> UdsManager<S, T> {
                             // or no (n)ack was received before timeout.
                             // The Gateway will handle these cases and only
                             // return this error if there is no recovery path left.
-                            // The UdsManager cannot do anything else, so we
-                            // just forward the error to the caller.
+                            // Per ISO 14229-2 Table 9 ("Response reception" error),
+                            // repeat the last request up to CP_RepeatReqCountApp
+                            // times before giving up.
+                            if app_retry_count < uds_params.repeat_req_count_app {
+                                app_retry_count = app_retry_count.saturating_add(1);
+                                tracing::debug!(
+                                    ecu_name,
+                                    attempt = app_retry_count,
+                                    max_attempts = uds_params.repeat_req_count_app,
+                                    "Repeating request after receive error (CP_RepeatReqCountApp)"
+                                );
+                                rx_timeout_next = None;
+                                continue 'send;
+                            }
                             break 'read_uds_messages Err(e);
                         }
                     },
@@ -346,6 +398,24 @@ impl<S: EcuGateway, T: UdsEcuDb + VariantDetection> UdsManager<S, T> {
                             "Timeout waiting for UDS response from gateway after {:?}",
                             rx_timeout_next.unwrap_or(rx_timeout)
                         );
+                        // Per ISO 14229-2 Table 9 (`tP_Client`/`tP*_Client`
+                        // timeout), repeat the last request up to
+                        // CP_RepeatReqCountApp times before giving up. This is
+                        // independent of NRC 0x21/0x78/0x94 busy-repeat
+                        // handling above, which is not affected by this
+                        // counter and keeps its own, separate time-bounded
+                        // retry policy.
+                        if app_retry_count < uds_params.repeat_req_count_app {
+                            app_retry_count = app_retry_count.saturating_add(1);
+                            tracing::debug!(
+                                ecu_name,
+                                attempt = app_retry_count,
+                                max_attempts = uds_params.repeat_req_count_app,
+                                "Repeating request after timeout (CP_RepeatReqCountApp)"
+                            );
+                            rx_timeout_next = None;
+                            continue 'send;
+                        }
                         break 'read_uds_messages Err(DiagServiceError::Timeout);
                     }
                 }
@@ -414,6 +484,7 @@ impl<S: EcuGateway, T: UdsEcuDb + VariantDetection> UdsManager<S, T> {
                     rc_94_retry_policy: ecu.rc_94_retry_policy(),
                     rc_94_completion_timeout: ecu.rc_94_completion_timeout(),
                     rc_94_repeat_request_time: ecu.rc_94_repeat_request_time(),
+                    repeat_req_count_app: ecu.repeat_req_count_app(),
                 },
                 TransmissionParameters {
                     gateway_address: ecu.logical_gateway_address(),
@@ -489,8 +560,11 @@ impl<S: EcuGateway, T: EcuManager> UdsTransport for UdsManager<S, T> {
             .check_genericservice(security_plugin, payload)
             .await?;
 
+        // See `send_without_variant_guard` for why this bit must be respected.
+        let expect_response = !payload.is_suppress_positive_response();
+
         match self
-            .send_with_raw_payload(ecu_name, payload, timeout, true)
+            .send_with_raw_payload(ecu_name, payload, timeout, expect_response)
             .await?
         {
             Some(response) => Ok(response.data),
@@ -697,7 +771,7 @@ mod send_tests {
     use cda_interfaces::{
         DiagServiceError, EcuAddresses, EcuGateway, EcuRuntimeState, EcuStateManager, HashMap,
         HashMapExtensions, ServicePayload, TransmissionParameters, UdsResponse, VariantDetection,
-        datatypes::FaultConfig,
+        datatypes::FaultConfig, service_ids,
     };
     use tokio::sync::{RwLock, mpsc};
 
@@ -823,6 +897,42 @@ mod send_tests {
         )
     }
 
+    fn make_manager_with_timeout_default(
+        gateway: TestGateway,
+        timeout_default: Duration,
+    ) -> UdsManager<TestGateway, TestEcuDb> {
+        let ecus = Arc::new(HashMap::from_iter([(
+            "TestECU".to_string(),
+            RwLock::new(TestEcuDb::with_timeout_default(timeout_default)),
+        )]));
+        UdsManager::new_for_raw_payload_tests(
+            gateway,
+            ecus,
+            FaultConfig::default(),
+            Arc::new(AtomicBool::new(false)),
+        )
+    }
+
+    fn make_manager_with_timeout_default_and_repeat_req_count_app(
+        gateway: TestGateway,
+        timeout_default: Duration,
+        repeat_req_count_app: u32,
+    ) -> UdsManager<TestGateway, TestEcuDb> {
+        let ecus = Arc::new(HashMap::from_iter([(
+            "TestECU".to_string(),
+            RwLock::new(TestEcuDb::with_timeout_default_and_repeat_req_count_app(
+                timeout_default,
+                repeat_req_count_app,
+            )),
+        )]));
+        UdsManager::new_for_raw_payload_tests(
+            gateway,
+            ecus,
+            FaultConfig::default(),
+            Arc::new(AtomicBool::new(false)),
+        )
+    }
+
     fn make_manager_no_ecus(gateway: TestGateway) -> UdsManager<TestGateway, TestEcuDb> {
         let ecus = Arc::new(HashMap::new());
         UdsManager::new_for_raw_payload_tests(
@@ -886,6 +996,43 @@ mod send_tests {
 
         assert!(result.is_ok());
         assert!(result.expect("should be Ok").is_none());
+    }
+
+    /// A request with `suppressPosRspMsgIndicationBit` set (here
+    /// `ECUReset 0x81`) drives `expect_response = false`, so
+    /// `send_with_raw_payload` completes with `Ok(None)` once the frame is
+    /// (n)ack'd - never a `Timeout`/`NoResponse` error - even though the ECU
+    /// deliberately sends no response. `send_without_variant_guard` then
+    /// converts this `Ok(None)` into a positive, empty decoded response via
+    /// `DiagServiceResponse::empty_positive` (unit-tested in cda-core), which
+    /// callers render as no-content instead of an error.
+    #[tokio::test]
+    async fn test_send_with_raw_payload_suppress_positive_response_returns_ok_none() {
+        let gateway = TestGateway {
+            send_fn: Arc::new(|response_tx, _| {
+                // Only an ack (None); the ECU sends no positive response.
+                response_tx.try_send(Ok(None)).ok();
+                Ok(())
+            }),
+        };
+        let manager = make_manager(gateway);
+        // ECUReset (0x11) with SPRMIB bit set on the subfunction byte (0x81).
+        let payload = make_test_payload(service_ids::ECU_RESET, &[0x81]);
+        assert!(
+            payload.is_suppress_positive_response(),
+            "test payload must have the suppress-positive-response bit set"
+        );
+        let expect_response = !payload.is_suppress_positive_response();
+
+        let result = manager
+            .send_with_raw_payload("TestECU", payload, None, expect_response)
+            .await;
+
+        assert!(result.is_ok(), "expected Ok(None), got {result:?}");
+        assert!(
+            result.expect("should be Ok").is_none(),
+            "suppressed response must yield Ok(None), not a decoded payload"
+        );
     }
 
     #[tokio::test]
@@ -970,6 +1117,195 @@ mod send_tests {
         assert!(
             matches!(result, Err(DiagServiceError::Timeout)),
             "Expected Timeout error"
+        );
+    }
+
+    /// ISO 14229-2:2021 Table 9 ("Client error handling"): on a plain timeout
+    /// with no response at all, the client shall repeat the last request, up
+    /// to `CP_RepeatReqCountApp` times (worst case: `1 + N` total
+    /// transmissions).
+    #[tokio::test]
+    async fn test_send_with_raw_payload_retries_on_timeout_up_to_repeat_req_count_app() {
+        let send_count = Arc::new(std::sync::atomic::AtomicU32::new(0));
+        let send_count_clone = Arc::clone(&send_count);
+        let gateway = TestGateway {
+            send_fn: Arc::new(move |_response_tx, _| {
+                send_count_clone.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                // Never send any response - every attempt times out.
+                Ok(())
+            }),
+        };
+        let repeat_req_count_app = 3;
+        let manager = make_manager_with_timeout_default_and_repeat_req_count_app(
+            gateway,
+            Duration::from_millis(20),
+            repeat_req_count_app,
+        );
+        let payload = make_test_payload(0x10, &[0x01]);
+
+        let result = manager
+            .send_with_raw_payload("TestECU", payload, None, true)
+            .await;
+
+        assert!(
+            matches!(result, Err(DiagServiceError::Timeout)),
+            "Expected Timeout error, got {result:?}"
+        );
+        assert_eq!(
+            send_count.load(std::sync::atomic::Ordering::SeqCst),
+            1 + repeat_req_count_app,
+            "Expected exactly 1 original transmission + {repeat_req_count_app} repeats"
+        );
+    }
+
+    /// ISO 14229-2:2021 Table 9: a request-transmission failure shall also be
+    /// repeated up to `CP_RepeatReqCountApp` times, and should succeed once
+    /// the gateway accepts a subsequent attempt.
+    #[tokio::test]
+    async fn test_send_with_raw_payload_retries_on_transmission_error_then_succeeds() {
+        let call_count = Arc::new(std::sync::atomic::AtomicU32::new(0));
+        let call_count_clone = Arc::clone(&call_count);
+        let gateway = TestGateway {
+            send_fn: Arc::new(move |response_tx, _| {
+                let count = call_count_clone.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                if count < 2 {
+                    // First two attempts fail to transmit at all.
+                    return Err(DiagServiceError::SendFailed("simulated".to_owned()));
+                }
+                let msg = UdsResponse::Message(ServicePayload {
+                    data: vec![0x50, 0x01],
+                    source_address: 0x0001,
+                    target_address: 0x0E00,
+                    new_session: None,
+                    new_security: None,
+                });
+                response_tx.try_send(Ok(Some(msg))).ok();
+                Ok(())
+            }),
+        };
+        let manager = make_manager_with_timeout_default_and_repeat_req_count_app(
+            gateway,
+            Duration::from_secs(5),
+            3,
+        );
+        let payload = make_test_payload(0x10, &[0x01]);
+
+        let result = manager
+            .send_with_raw_payload("TestECU", payload, None, true)
+            .await;
+
+        assert!(result.is_ok(), "Expected eventual success, got {result:?}");
+        assert_eq!(
+            call_count.load(std::sync::atomic::Ordering::SeqCst),
+            3,
+            "Expected 2 failed transmission attempts + 1 successful one"
+        );
+    }
+
+    /// NRC 0x21 (`BusyRepeatRequest`) busy-repeat handling is independent of
+    /// `CP_RepeatReqCountApp`: once its own, time-bounded completion timeout
+    /// is exhausted, the result must still be `Timeout`, without any
+    /// additional application-layer retries layered on top (ISO 14229-2
+    /// Table 9's repeat-on-timeout applies to a *raw* timeout with no
+    /// response at all, not to NRC-driven busy-repeat exhaustion).
+    #[tokio::test]
+    async fn test_send_with_raw_payload_nrc_busy_repeat_exhaustion_not_subject_to_app_level_retry()
+    {
+        let send_count = Arc::new(std::sync::atomic::AtomicU32::new(0));
+        let send_count_clone = Arc::clone(&send_count);
+        let gateway = TestGateway {
+            send_fn: Arc::new(move |response_tx, _| {
+                send_count_clone.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                // Always respond with NRC 0x21 (BusyRepeatRequest).
+                response_tx
+                    .try_send(Ok(Some(UdsResponse::BusyRepeatRequest(0x0001))))
+                    .ok();
+                Ok(())
+            }),
+        };
+        // A short rc_21_completion_timeout via a short overall test bound:
+        // TestEcuDb's rc_21_completion_timeout is 10s and rc_21_repeat_request_time
+        // is 10ms, so this test would take too long to exhaust naturally;
+        // instead, this test only asserts that the NRC-driven `continue 'send`
+        // path (busy-repeat) is not itself gated by `repeat_req_count_app` by
+        // running a bounded number of iterations and confirming the call
+        // count exceeds `repeat_req_count_app` (which would be impossible if
+        // the two mechanisms were conflated).
+        let repeat_req_count_app = 1;
+        let manager = make_manager_with_timeout_default_and_repeat_req_count_app(
+            gateway,
+            Duration::from_millis(50),
+            repeat_req_count_app,
+        );
+        let payload = make_test_payload(0x10, &[0x01]);
+
+        let result = tokio::time::timeout(
+            Duration::from_millis(200),
+            manager.send_with_raw_payload("TestECU", payload, None, true),
+        )
+        .await;
+
+        // The overall test-level timeout fires first (NRC busy-repeat keeps
+        // going well past repeat_req_count_app+1 sends), proving the NRC loop
+        // is not bounded by `repeat_req_count_app`.
+        assert!(
+            result.is_err(),
+            "Expected the NRC busy-repeat loop to still be running after the test timeout"
+        );
+        assert!(
+            send_count.load(std::sync::atomic::Ordering::SeqCst) > 1 + repeat_req_count_app,
+            "NRC busy-repeat retries must not be bounded by CP_RepeatReqCountApp"
+        );
+    }
+
+    /// Regression test: sends that omit an explicit timeout
+    /// must fall back to the ECU's configured `CP_P6Max`-backed
+    /// `UdsComParams::timeout_default`, not a hardcoded literal. Previously,
+    /// `gather_detection_responses` (in `variant.rs`) hardcoded a 10s timeout
+    /// for every `0x22 F100` variant-detection send, ignoring the ECU's
+    /// actual configured response timeout entirely. The fix changed that
+    /// call site to pass `None` instead, relying on exactly the fallback
+    /// (`timeout.unwrap_or(uds_params.timeout_default)`) exercised here.
+    ///
+    /// This test exercises `send_with_raw_payload` directly rather than
+    /// `gather_detection_responses`/`detect_variant` itself, since those
+    /// require the full `EcuManager` trait (a much larger surface than the
+    /// `UdsEcuDb + VariantDetection` bound used by the existing test double
+    /// in this module), which is out of proportion for this scoped fix.
+    #[tokio::test]
+    async fn test_send_with_raw_payload_uses_configured_timeout_default_when_none() {
+        let gateway = TestGateway {
+            send_fn: Arc::new(|_response_tx, _| {
+                // Don't send any response - the call must time out based on
+                // the ECU's configured `timeout_default`.
+                Ok(())
+            }),
+        };
+        let short_timeout = Duration::from_millis(100);
+        let manager = make_manager_with_timeout_default(gateway, short_timeout);
+        let payload = make_test_payload(0x10, &[0x01]);
+
+        let start = std::time::Instant::now();
+        // No explicit timeout: must fall back to `uds_params.timeout_default`
+        // (this is exactly what `send_without_variant_guard` does when
+        // called from `gather_detection_responses` post-fix).
+        let result = manager
+            .send_with_raw_payload("TestECU", payload, None, true)
+            .await;
+        let elapsed = start.elapsed();
+
+        assert!(
+            matches!(result, Err(DiagServiceError::Timeout)),
+            "Expected Timeout error, got {result:?}"
+        );
+        assert!(
+            elapsed < Duration::from_secs(1),
+            "Expected timeout close to the configured {short_timeout:?}, but took {elapsed:?} (a \
+             regression would hardcode ~10s here)"
+        );
+        assert!(
+            elapsed >= short_timeout,
+            "Timeout fired earlier than the configured {short_timeout:?}: {elapsed:?}"
         );
     }
 

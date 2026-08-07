@@ -26,12 +26,44 @@ use cda_interfaces::{
 /// Minimal test double satisfying `UdsEcuDb + VariantDetection`.
 pub(crate) struct TestEcuDb {
     service_states: tokio::sync::Mutex<std::collections::HashMap<u8, String>>,
+    /// Configurable `CP_P6Max`-backed timeout, so tests can verify that
+    /// callers fall back to this comparam-derived value instead of using a
+    /// hardcoded literal. Defaults to 5s to match the previous fixed value.
+    timeout_default: Duration,
+    /// Configurable `CP_RepeatReqCountApp`, so tests can verify the exact
+    /// number of application-layer retries performed on timeout/transmission/
+    /// receive errors. Defaults to 3 to match the previous fixed value.
+    repeat_req_count_app: u32,
 }
 
 impl TestEcuDb {
     pub fn new() -> Self {
         Self {
             service_states: tokio::sync::Mutex::new(std::collections::HashMap::new()),
+            timeout_default: Duration::from_secs(5),
+            repeat_req_count_app: 3,
+        }
+    }
+
+    /// Create a test double with a custom `timeout_default` (`CP_P6Max`).
+    pub fn with_timeout_default(timeout_default: Duration) -> Self {
+        Self {
+            service_states: tokio::sync::Mutex::new(std::collections::HashMap::new()),
+            timeout_default,
+            repeat_req_count_app: 3,
+        }
+    }
+
+    /// Create a test double with a custom `timeout_default` (`CP_P6Max`) and
+    /// `repeat_req_count_app` (`CP_RepeatReqCountApp`).
+    pub fn with_timeout_default_and_repeat_req_count_app(
+        timeout_default: Duration,
+        repeat_req_count_app: u32,
+    ) -> Self {
+        Self {
+            service_states: tokio::sync::Mutex::new(std::collections::HashMap::new()),
+            timeout_default,
+            repeat_req_count_app,
         }
     }
 }
@@ -117,7 +149,7 @@ impl UdsComParams for TestEcuDb {
         Duration::from_secs(2)
     }
     fn repeat_req_count_app(&self) -> u32 {
-        3
+        self.repeat_req_count_app
     }
     fn rc_21_retry_policy(&self) -> RetryPolicy {
         RetryPolicy::ContinueUntilTimeout
@@ -147,7 +179,7 @@ impl UdsComParams for TestEcuDb {
         Duration::from_millis(10)
     }
     fn timeout_default(&self) -> Duration {
-        Duration::from_secs(5)
+        self.timeout_default
     }
 }
 
