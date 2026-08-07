@@ -39,6 +39,13 @@ pub(crate) struct UdsParameters {
     pub(crate) rc_94_completion_timeout: Duration,
     pub(crate) rc_94_retry_policy: RetryPolicy,
     pub(crate) rc_94_repeat_request_time: Duration,
+    /// `CP_RepeatReqCountApp`: number of times the application layer repeats
+    /// the last request after a transmission failure, a raw receive error, or
+    /// a plain timeout with no response at all (ISO 14229-2:2021, Table 9 -
+    /// "Client error handling"). Independent of NRC 0x21/0x78/0x94 busy-repeat
+    /// handling (`rc_21/78/94_*` above), which already have their own,
+    /// time-bounded retry semantics.
+    pub(crate) repeat_req_count_app: u32,
 }
 
 pub(crate) struct EcuDataTransfer {

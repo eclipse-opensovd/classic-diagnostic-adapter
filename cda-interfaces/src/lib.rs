@@ -214,6 +214,7 @@ pub mod service_ids {
     pub const REQUEST_TRANSFER_EXIT: u8 = 0x37;
     pub const TESTER_PRESENT: u8 = 0x3E;
     pub const CONTROL_DTC_SETTING: u8 = 0x85;
+    pub const LINK_CONTROL: u8 = 0x87;
     pub const NEGATIVE_RESPONSE: u8 = 0x7F;
 }
 
