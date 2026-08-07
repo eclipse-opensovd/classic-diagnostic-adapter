@@ -336,13 +336,34 @@ impl ServicePayload {
         self.is_negative_response_for_sid(sent_sid) || self.is_positive_response_for_sid(sent_sid)
     }
 
-    /// Returns `true` if the UDS subfunction byte (byte index 1) has bit 7 set,
-    /// indicating the `suppressPosRspMsgIndicationBit` (SPRMIB) is active.
-    /// When this bit is set, the ECU is not expected to send a positive response, so callers
-    /// should not treat the absence of a positive response as an error.
+    /// Returns `true` if this request's SID uses a subfunction byte (byte index 1) with
+    /// `suppressPosRspMsgIndicationBit` (SPRMIB) semantics per ISO 14229-1, and that bit
+    /// (bit 7) is set. When set, the ECU is not expected to send a positive response, so
+    /// callers should not treat the absence of a positive response as an error.
+    ///
+    /// Only a subset of services actually carry a subfunction byte with SPRMIB semantics
+    /// (`DiagnosticSessionControl`, `ECUReset`, `CommunicationControl`, `Authentication`,
+    /// `ControlDTCSetting`, `LinkControl`, `TesterPresent`). Other services either have no subfunction byte
+    /// at all, or use byte index 1 for something else entirely - most notably
+    /// `ReadDataByIdentifier`/`WriteDataByIdentifier`, where byte index 1 is the *high byte
+    /// of the 2-byte data identifier* and can legitimately have bit 7 set (e.g. any DID in
+    /// the `0xF1xx`-`0xFFxx` range), which must never be misread as SPRMIB.
     #[must_use]
     pub fn is_suppress_positive_response(&self) -> bool {
-        self.data.get(1).is_some_and(|&b| b & 0x80 != 0)
+        let Some(&sid) = self.data.first() else {
+            return false;
+        };
+        let sprmib_capable = matches!(
+            sid,
+            service_ids::SESSION_CONTROL
+                | service_ids::ECU_RESET
+                | service_ids::COMMUNICATION_CONTROL
+                | service_ids::AUTHENTICATION
+                | service_ids::CONTROL_DTC_SETTING
+                | service_ids::LINK_CONTROL
+                | service_ids::TESTER_PRESENT
+        );
+        sprmib_capable && self.data.get(1).is_some_and(|&b| b & 0x80 != 0)
     }
 
     /// Validates that a positive response echoes back the expected identifier bytes
@@ -1145,6 +1166,85 @@ mod tests {
         // Response: positive with wrong DID
         let response = make_payload(vec![0x6E, 0xF2, 0x00]);
         assert!(!response.has_matching_echo_bytes(&request));
+    }
+
+    // is_suppress_positive_response
+
+    #[test]
+    fn rdbi_with_did_high_byte_f1_is_not_suppress_positive_response() {
+        // Regression test: ReadDataByIdentifier's byte index 1 is the high byte of the
+        // 2-byte DID, not a subfunction byte. DID 0xF100 ("Identification") has bit 7 set
+        // in its high byte and must NOT be misread as suppressPosRspMsgIndicationBit.
+        let request = make_payload(vec![service_ids::READ_DATA_BY_IDENTIFIER, 0xF1, 0x00]);
+        assert!(!request.is_suppress_positive_response());
+    }
+
+    #[test]
+    fn wdbi_with_did_high_byte_set_is_not_suppress_positive_response() {
+        let request = make_payload(vec![
+            service_ids::WRITE_DATA_BY_IDENTIFIER,
+            0xF1,
+            0x90,
+            0xAA,
+        ]);
+        assert!(!request.is_suppress_positive_response());
+    }
+
+    #[test]
+    fn session_control_with_sprmib_bit_set_is_suppress_positive_response() {
+        // DiagnosticSessionControl subfunction 0x03 with SPRMIB (bit 7) set.
+        let request = make_payload(vec![service_ids::SESSION_CONTROL, 0x83]);
+        assert!(request.is_suppress_positive_response());
+    }
+
+    #[test]
+    fn session_control_without_sprmib_bit_is_not_suppress_positive_response() {
+        let request = make_payload(vec![service_ids::SESSION_CONTROL, 0x03]);
+        assert!(!request.is_suppress_positive_response());
+    }
+
+    #[test]
+    fn ecu_reset_with_sprmib_bit_set_is_suppress_positive_response() {
+        let request = make_payload(vec![service_ids::ECU_RESET, 0x81]);
+        assert!(request.is_suppress_positive_response());
+    }
+
+    #[test]
+    fn communication_control_with_sprmib_bit_set_is_suppress_positive_response() {
+        let request = make_payload(vec![service_ids::COMMUNICATION_CONTROL, 0x83, 0x01]);
+        assert!(request.is_suppress_positive_response());
+    }
+
+    #[test]
+    fn tester_present_with_sprmib_bit_set_is_suppress_positive_response() {
+        let request = make_payload(vec![service_ids::TESTER_PRESENT, 0x80]);
+        assert!(request.is_suppress_positive_response());
+    }
+
+    #[test]
+    fn control_dtc_setting_with_sprmib_bit_set_is_suppress_positive_response() {
+        let request = make_payload(vec![service_ids::CONTROL_DTC_SETTING, 0x81]);
+        assert!(request.is_suppress_positive_response());
+    }
+
+    #[test]
+    fn link_control_with_sprmib_bit_set_is_suppress_positive_response() {
+        let request = make_payload(vec![service_ids::LINK_CONTROL, 0x83]);
+        assert!(request.is_suppress_positive_response());
+    }
+
+    #[test]
+    fn routine_control_with_high_bit_set_is_not_suppress_positive_response() {
+        // RoutineControl does not have SPRMIB semantics; its subfunction byte is the
+        // routineControlType (bits 6-0), so a set bit 7 here must not be treated as SPRMIB.
+        let request = make_payload(vec![service_ids::ROUTINE_CONTROL, 0x81, 0xF1, 0x90]);
+        assert!(!request.is_suppress_positive_response());
+    }
+
+    #[test]
+    fn empty_payload_is_not_suppress_positive_response() {
+        let request = make_payload(vec![]);
+        assert!(!request.is_suppress_positive_response());
     }
 
     // request_lock_key_for: the per-ECU request-serialization key
