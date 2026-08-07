@@ -16,8 +16,9 @@
 //! [`Setup`] is the public entry-point for applications that need to customize how the CDA
 //! boots. The default startup path uses [`Setup::new`] with the standard update plugin; a
 //! custom path calls [`Setup::with_update_plugin`] to inject any [`RuntimeFilesUpdatePlugin`]
-//! implementation and [`Setup::with_communication_plugin`] to replace the default on-demand
-//! communication plugin, before handing the `Setup` to one of the `run_*` functions.
+//! implementation and [`Setup::with_communication_plugin`] to replace the default
+//! `init_mode`-aware communication plugin, before handing the `Setup` to one of the
+//! `run_*` functions.
 //!
 //! [`RuntimeFilesUpdatePlugin`]: cda_interfaces::runtime_update_api::RuntimeFilesUpdatePlugin
 
@@ -35,19 +36,14 @@ use cda_interfaces::{
     health::HealthProvider,
 };
 use cda_plugin_communication_management::{
-    http_protection::{
-        config::{
-            HttpMethod, HttpProtectionConfig, HttpProtectionReason, HttpRouteMatcher,
-            HttpStatusCode, http_method_all,
-        },
-        manager::HttpProtectionRegistry,
-    },
+    http_protection::registry::HttpProtectionRegistry,
     lifecycle::{
+        CommunicationRuntime,
         access::{CommunicationAccess, CommunicationAccessView},
-        build_communication_plugin,
-        suspension::{SuspendCommunication, CommunicationSuspensionView},
+        build_communication_runtime,
+        disable::{CommunicationDisableView, DisableCommunication},
     },
-    plugin::{CommunicationPlugin, CommunicationPluginBuilder, on_demand::OnDemandPluginBuilder},
+    plugin::{CommunicationPluginBuilder, default::DefaultCommunicationPluginBuilder},
 };
 use cda_plugin_security::{SecurityPlugin, SecurityPluginLoader};
 use cda_transport_router::DiagnosticTransportRouter;
@@ -87,7 +83,7 @@ pub struct CdaRuntime<SP: SecurityPlugin> {
     pub shutdown_signal: ShutdownSignal,
     pub post_update_mode: PostUpdateCommunicationMode,
     pub communication_access: Arc<dyn CommunicationAccess>,
-    pub communication_suspension: Arc<dyn SuspendCommunication>,
+    pub communication_disable: Arc<dyn DisableCommunication>,
     pub http_protections: HttpProtectionRegistry,
     pub update_retry_after_seconds: u64,
 }
@@ -105,6 +101,17 @@ impl<SP: SecurityPlugin> CommunicationInitializer for VariantDetectionInitialize
     }
 
     async fn initialize(&self) -> Result<(), CommControlError> {
+        // Start the listener before the initial sweep: the initial discovery
+        // burst arriving during `transport_control.enable()` simply buffers
+        // in the channel until the listener starts draining it (the sweep
+        // below covers every ECU regardless, so it never depends on the
+        // listener). The listener's real job is spontaneous VAM discoveries
+        // arriving after this activation completes.
+        self.uds_manager
+            .read()
+            .await
+            .start_variant_detection_listener()
+            .await?;
         self.uds_manager
             .read()
             .await
@@ -149,12 +156,12 @@ impl<SP: SecurityPlugin> CommunicationInitializer for VariantDetectionInitialize
 /// - `SP`: security plugin
 /// - `SL`: security plugin loader
 /// - `UPB`: update plugin builder, defaults to `()`
-/// - `CPB`: communication plugin builder, defaults to [`OnDemandPluginBuilder`]
+/// - `CPB`: communication plugin builder, defaults to [`DefaultCommunicationPluginBuilder`]
 pub struct Setup<
     SP: SecurityPlugin,
     SL: SecurityPluginLoader,
     UPB = (),
-    CPB = OnDemandPluginBuilder,
+    CPB = DefaultCommunicationPluginBuilder,
 > {
     pub(crate) _phantom: std::marker::PhantomData<(SP, SL)>,
     /// Optional callback run after the webserver starts but before vehicle data is loaded.
@@ -181,7 +188,7 @@ impl<SP: SecurityPlugin, SL: SecurityPluginLoader> Setup<SP, SL> {
             _phantom: std::marker::PhantomData,
             pre_load: None,
             build_update_plugin: None,
-            build_communication_plugin: OnDemandPluginBuilder,
+            build_communication_plugin: DefaultCommunicationPluginBuilder,
             initialize_tracing: true,
             shutdown_signal: None,
         }
@@ -275,29 +282,95 @@ impl<SP: SecurityPlugin, SL: SecurityPluginLoader, UPB, CPB> Setup<SP, SL, UPB, 
     }
 }
 
-// Route setup
-
 /// Registers all SOVD routes, the runtime-update plugin, `OpenAPI` routes, and the update guard.
-///
-/// This is called after vehicle data has been loaded. The `build_update_plugin` optional
-/// builder is consumed here; when `None` the runtime-update endpoints are simply not mounted.
-pub(crate) async fn setup_runtime_routes<SP, SL, UPB>(
+#[allow(
+    clippy::too_many_lines,
+    reason = "Route setup function requires multiple initialization steps"
+)] // todo alexmohr
+pub(crate) async fn setup_runtime_routes<SP, SL, UPB, CPB>(
     config: Configuration,
     vehicle_data: VehicleData<SP>,
     ws: &WebserverState,
     build_update_plugin: Option<UPB>,
-) -> Result<(), AppError>
+    communication_plugin: CPB,
+) -> Result<CommunicationRuntime, AppError>
 where
     SP: SecurityPlugin,
     SL: SecurityPluginLoader,
     UPB: UpdatePluginBuilder<SP>,
+    CPB: CommunicationPluginBuilder,
 {
     let flash_files_path = config.flash_files_path.clone();
     let components_config = config.components.clone();
-    let runtime_update_config = config.runtime_update_config.clone();
     let mdd_decompress = config.flat_buf.mdd_decompress;
 
-    let (ecu_execution_registry, vehicle_route_handle) = cda_sovd::add_vehicle_routes::<_, _, SL>(
+    let runtime_update_config = config.runtime_update_config.clone();
+    let post_update_mode = config.communication.post_update_mode.clone();
+
+    let lock_provider: Arc<cda_sovd::SovdLockStateProvider> = Arc::new(
+        cda_sovd::SovdLockStateProvider::new(Arc::clone(&vehicle_data.locks)),
+    );
+
+    let shutdown_signal = cda_interfaces::shutdown_signal(ws.shutdown_signal.clone());
+    let gateway = Arc::clone(&vehicle_data.diagnostic_gateway);
+    let http_protections = HttpProtectionRegistry::new();
+
+    // Install global HTTP protection guard before publishing vehicle routes.
+    cda_sovd::install_http_restriction_guard(
+        &ws.dynamic_router,
+        Arc::new(http_protections.clone()),
+    )
+    .await;
+
+    // Step 4: Build and retain the authoritative plugin runtime with its private
+    // context. The caller either supplied a custom plugin or we build the
+    // default here. Diagnostic operations request activation directly at the
+    // point they need communication (see `CommunicationAccess::request_activate`),
+    // so no HTTP-layer restriction is installed here; `http_protections` above
+    // remains for the runtime-update plugin's own protection.
+    let transport_control = Arc::new(
+        cda_interfaces::communication_control::SwappableGateway::new(Arc::clone(
+            &vehicle_data.diagnostic_gateway,
+        )),
+    );
+    let communication_runtime = build_communication_runtime(
+        communication_plugin,
+        transport_control,
+        None,
+        config.communication.init_mode,
+    )
+    .await
+    .map_err(|error| AppError::InitializationFailed(error.to_string()))?;
+    let plugin = Arc::clone(&communication_runtime.plugin);
+
+    // Create a narrow access view for UDS manager construction. The UDS manager
+    // needs communication access to enforce guards during diagnostic operations.
+    let communication_access: Arc<dyn CommunicationAccess> =
+        Arc::new(CommunicationAccessView::new(Arc::clone(&plugin)));
+
+    let components = crate::finish_vehicle_components(
+        vehicle_data.prepared,
+        &config,
+        Arc::clone(&communication_access),
+    );
+    let uds_manager = Arc::new(RwLock::new(components.uds_manager));
+    let file_managers = components.file_managers;
+
+    // Step 6: Register variant detection by calling the full authoritative plugin's
+    // initializer-registration method; that method delegates through its private controller.
+    plugin
+        .register_initializer(Arc::new(VariantDetectionInitializer {
+            uds_manager: Arc::clone(&uds_manager),
+        }))
+        .await;
+
+    // Step 7: Derive narrow disable view. The access view was created earlier
+    // for UDS manager construction; both views are now available for resource building.
+    let communication_disable: Arc<dyn DisableCommunication> =
+        Arc::new(CommunicationDisableView::new(Arc::clone(&plugin)));
+    // Step 8-9: Build UDS/SOVD resources with narrow views and publish routes.
+    // Routes are published only after the plugin, initializers, and narrow views are ready.
+    let vehicle_route_handle = cda_sovd::add_vehicle_routes::<_, _, SL>(
         &ws.dynamic_router,
         cda_sovd::VehicleConfig {
             flash_files_path: config.flash_files_path.clone(),
@@ -305,24 +378,31 @@ where
             components_config: config.components.clone(),
         },
         cda_sovd::VehicleResources {
-            ecu_uds: vehicle_data.uds_manager.clone(),
-            file_manager: vehicle_data.file_managers,
+            ecu_uds: uds_manager.read().await.clone(),
+            file_managers,
             locks: Arc::clone(&vehicle_data.locks),
-            update_in_progress: vehicle_data.update_guard.busy_handle(),
+            communication_access: Arc::clone(&communication_access),
         },
     )
     .await?;
 
-    let lock_provider: Arc<cda_sovd::SovdLockStateProvider> = Arc::new(
-        cda_sovd::SovdLockStateProvider::new(Arc::clone(&vehicle_data.locks)),
-    );
+    // Step 10: `Always` initializes whole-vehicle communication eagerly at startup and
+    // propagates failure according to existing application-start semantics. `OnDemand`
+    // and `Disabled` keep communication uninitialized; HTTP/SOVD is already available
+    // via the routes registered above, and later authorized triggers (explicit
+    // `activate()`, a qualifying ECU request, or `trigger_detection()`) initialize it.
+    match config.communication.init_mode {
+        CommunicationInitMode::Always => {
+            if let Err(failure) = plugin
+                .activate(cda_plugin_communication_management::lifecycle::operation::ActivationCause::Startup)
+                .await
+            {
+                return Err(AppError::InitializationFailed(failure.to_string()));
+            }
+        }
+        CommunicationInitMode::OnDemand | CommunicationInitMode::Disabled => {}
+    }
 
-    let flash_transfer_guard = vehicle_data.uds_manager.flash_transfer_guard();
-    let update_in_progress = vehicle_data.update_guard.busy_handle();
-
-    let shutdown_signal = cda_interfaces::shutdown_signal(ws.shutdown_signal.clone());
-
-    // Build the CdaRuntime context for the update plugin builder.
     let infra = CdaRuntime {
         config: Arc::new(RwLock::new(config)),
         dynamic_router: ws.dynamic_router.clone(),
@@ -330,64 +410,34 @@ where
         flash_files_path,
         components_config,
         lock_provider: Arc::clone(&lock_provider),
-        update_guard: vehicle_data.update_guard.clone(),
         shutdown_signal,
-        uds_manager: Arc::new(RwLock::new(vehicle_data.uds_manager)),
-        gateway: Arc::new(RwLock::new(vehicle_data.diagnostic_gateway)),
-        ecu_execution_registry: ecu_execution_registry.clone(),
+        post_update_mode,
+        communication_access,
+        communication_disable,
+        http_protections,
+        update_retry_after_seconds: runtime_update_config.retry_after_seconds,
+        uds_manager,
+        gateway,
         health: vehicle_data.health_providers,
-        variant_detection_handle: Mutex::new(Some(vehicle_data.variant_detection_handle)),
         storage_dir: runtime_update_config.storage_dir.clone(),
         mdd_decompress,
-        flash_transfer_guard,
-        update_in_progress,
     };
 
-    // Invoke the builder (if any) and mount the update plugin.
     if let Some(builder) = build_update_plugin {
         let plugin = builder.build(infra).await?;
         add_runtime_update_routes::<SL, _>(
             &ws.dynamic_router,
             plugin,
             lock_provider,
-            &vehicle_data.update_guard,
             runtime_update_config.upload_body_limit_bytes,
             runtime_update_config.retry_after_seconds,
         )
         .await;
     }
 
-    cda_sovd::add_openapi_routes(&ws.dynamic_router, &vehicle_data.update_guard).await;
-    cda_sovd::install_update_guard(&ws.dynamic_router, vehicle_data.update_guard.clone()).await;
+    cda_sovd::add_openapi_routes(&ws.dynamic_router, &ws.webserver_config).await;
 
-
-/// Build the configuration which routes are accessible even when transport is disabled
-/// or communication is disabled / deferred.
-/// These routes are internal to the CDA, do not
-fn transport_restriction_config(config: &Configuration) -> HttpProtectionConfig {
-    // Build the transport restriction config.
-    let mut exempt_routes = vec![
-        HttpRouteMatcher::new("/vehicle/v15/authorize", http_method_all()),
-        HttpRouteMatcher::new("/vehicle/v15/data/version", http_method_all()),
-        // Allow creating and listing locks, prevent deletion of locks.
-        // For example, during a flash procedure we do not allow clients to drop their locks this
-        // way, but make sure they can extend them.
-        HttpRouteMatcher::new("/vehicle/v15/locks", vec![HttpMethod::GET, HttpMethod::POST, HttpMethod::PUT]),
-    ];
-    exempt_routes.extend(cda_sovd::routes_accessible_during_update());
-    exempt_routes.extend(cda_sovd::routes_exempt_from_communication_restriction());
-
-    HttpProtectionConfig::new(
-        HttpProtectionReason::CommunicationNotReady,
-        HttpStatusCode::SERVICE_UNAVAILABLE,
-        "ECU communication not available",
-    )
-        .with_blocked_routes(vec![HttpRouteMatcher::new(
-            "/vehicle/v15/",
-            http_method_all(),
-        )])
-        .with_exempt_routes(exempt_routes)
-        .with_retry_after(config.communication.deferred_retry_after_seconds)
+    Ok(communication_runtime)
 }
 
 #[cfg(test)]
@@ -493,7 +543,6 @@ mod tests {
 
     #[test]
     fn with_update_plugin_stores_builder() {
-        // Use `update_plugin_fn` as a convenient closure adapter.
         let builder: UpdatePluginFn<_> =
             update_plugin_fn(|_infra: CdaRuntime<DefaultSecurityPluginData>| async {
                 Ok(NoOpPlugin)

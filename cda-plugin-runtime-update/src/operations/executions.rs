@@ -20,18 +20,23 @@
 // terms of the Apache License Version 2.0 which is available at
 // https://www.apache.org/licenses/LICENSE-2.0
 
-use std::sync::{
-    Arc,
-    atomic::{AtomicBool, Ordering},
-};
+use std::sync::Arc;
 
 use cda_interfaces::{
     HashMap,
+    communication_control::PostUpdateCommunicationMode,
     runtime_update_api::{
         ExecutionMode, ExecutionStatus, LockStateProvider, RuntimeReloaderPlugin,
         RuntimeUpdateError, RuntimeUpdateSecurityPlugin, UpdateCollections, UpdateExecution,
     },
     storage_api::{CollectionName, Storage},
+};
+use cda_plugin_communication_management::{
+    http_protection::{
+        config::{HttpProtectionConfig, HttpProtectionReason, HttpStatusCode},
+        registry::HttpProtectionRegistry,
+    },
+    lifecycle::disable::{DisableCommunication, DisableError, DisableReason},
 };
 use tokio::sync::RwLock;
 
@@ -40,10 +45,28 @@ pub(crate) struct ExecutionParams<'a, S, R: ?Sized, T, L> {
     pub(crate) security_handler: &'a Arc<T>,
     pub(crate) reload_handler: &'a Arc<R>,
     pub(crate) executions: &'a Arc<RwLock<HashMap<String, UpdateExecution>>>,
-    pub(crate) update_in_progress: &'a Arc<AtomicBool>,
+    pub(crate) communication_disable: &'a Arc<dyn DisableCommunication>,
+    pub(crate) http_protections: &'a HttpProtectionRegistry,
+    pub(crate) update_retry_after_seconds: u64,
+    pub(crate) post_update_mode: PostUpdateCommunicationMode,
     pub(crate) mdd_decompress: bool,
     pub(crate) lock_state_provider: &'a L,
 }
+
+fn http_protection_config_for_update(retry_after_seconds: u64) -> HttpProtectionConfig {
+    HttpProtectionConfig::new(
+        HttpProtectionReason::UpdateInProgress,
+        HttpStatusCode::CONFLICT,
+        "Update in progress",
+    )
+    .with_exempt_routes(crate::routes_exempt_from_update_protection())
+    .with_retry_after(retry_after_seconds)
+}
+
+#[allow(
+    clippy::too_many_lines,
+    reason = "Function length acceptable for complex orchestration logic"
+)]
 pub(crate) async fn start_execution<S, R, T, L>(
     params: &ExecutionParams<'_, S, R, T, L>,
     mode: ExecutionMode,
@@ -54,10 +77,32 @@ where
     T: RuntimeUpdateSecurityPlugin<L, S::CollectionHandle>,
     L: LockStateProvider,
 {
-    params
-        .update_in_progress
-        .compare_exchange(false, true, Ordering::Acquire, Ordering::Relaxed)
-        .map_err(|_| RuntimeUpdateError::ExecutionConflict)?;
+    // Check for a running execution before attempting to disable transport.
+    // This prevents two concurrent callers from both passing the check.
+    {
+        let execs = params.executions.read().await;
+        let has_running = execs.values().any(|e| e.status == ExecutionStatus::Running);
+        if has_running {
+            return Err(RuntimeUpdateError::ExecutionConflict);
+        }
+    }
+
+    let protection = params
+        .http_protections
+        .protect(http_protection_config_for_update(
+            params.update_retry_after_seconds,
+        ))
+        .map_err(|error| RuntimeUpdateError::FatalError(error.to_string()))?;
+    let disable_lease = params
+        .communication_disable
+        .disable(DisableReason::RuntimeUpdate)
+        .await
+        .map_err(|error| match error {
+            DisableError::Conflict | DisableError::InUse => RuntimeUpdateError::ExecutionConflict,
+            DisableError::Failed(failure) => {
+                RuntimeUpdateError::CommunicationFailure(failure.to_string())
+            }
+        })?;
 
     let collections = UpdateCollections {
         pending_mdd: params
@@ -87,55 +132,41 @@ where
         .check_apply_allowed(params.lock_state_provider, &collections)
         .await
     {
-        params.update_in_progress.store(false, Ordering::Release);
+        let _ = disable_lease.release().await;
+        drop(protection);
         return Err(e);
-    }
-    {
-        let execs = params.executions.read().await;
-        let has_running = execs.values().any(|e| e.status == ExecutionStatus::Running);
-        if has_running {
-            params.update_in_progress.store(false, Ordering::Release);
-            return Err(RuntimeUpdateError::ExecutionConflict);
-        }
     }
 
     // For Rollback: verify backup is non-empty before accepting the request.
-    // This must happen before spawning the task so that the 404 is returned
-    // synchronously instead of 202 being sent with a later Failed status.
     if mode == ExecutionMode::Rollback {
         match crate::storage::is_backup_empty(&**params.storage).await {
             Ok(true) => {
-                params.update_in_progress.store(false, Ordering::Release);
+                let _ = disable_lease.release().await;
+                drop(protection);
                 return Err(RuntimeUpdateError::NoBackup);
             }
             Err(e) => {
-                params.update_in_progress.store(false, Ordering::Release);
+                let _ = disable_lease.release().await;
+                drop(protection);
                 return Err(e);
             }
             Ok(false) => {}
         }
     }
 
-    // For Apply: verify there is at least one pending NextUpdate collection before
-    // accepting the request. This mirrors the Rollback check above, and must happen
-    // before spawning the task so that the 404 is returned synchronously instead of
-    // 202 being sent with a later Failed status (execute_apply's own check runs
-    // inside the spawned task and is too late to affect the HTTP response).
+    // For Apply: verify there is at least one pending NextUpdate collection.
     if mode == ExecutionMode::Apply
         && collections.pending_mdd.is_none()
         && collections.pending_config.is_none()
     {
-        params.update_in_progress.store(false, Ordering::Release);
+        let _ = disable_lease.release().await;
+        drop(protection);
         return Err(RuntimeUpdateError::NoPendingUpdate);
     }
 
     let execution_id = uuid::Uuid::new_v4().to_string();
     {
         let mut execs = params.executions.write().await;
-        // Purge all terminal-state entries before inserting the new one. Entries
-        // are not evicted by a TTL; they live until the next execution is started.
-        // At this point the has_running guard above guarantees no Running entries
-        // exist, so this unconditionally clears the map.
         execs.retain(|_, e| e.status == ExecutionStatus::Running);
         execs.insert(
             execution_id.clone(),
@@ -152,8 +183,10 @@ where
     let executions = Arc::clone(params.executions);
     let exec_id_clone = execution_id.clone();
     let mode_clone = mode;
-    let update_in_progress = Arc::clone(params.update_in_progress);
     let mdd_decompress = params.mdd_decompress;
+    let post_update_mode = params.post_update_mode.clone();
+    let disable_lease = disable_lease;
+    let protection = protection;
 
     tokio::spawn(async move {
         let result =
@@ -163,11 +196,22 @@ where
         if let Some(exec) = map.get_mut(&exec_id_clone) {
             exec.status = match result {
                 Ok(()) => ExecutionStatus::Completed,
-                Err(e) => ExecutionStatus::Failed(e.to_string()),
+                Err(ref e) => ExecutionStatus::Failed(e.to_string()),
             };
         }
+        drop(map);
 
-        update_in_progress.store(false, Ordering::Release);
+        let should_defer = result.is_ok()
+            && matches!(mode_clone, ExecutionMode::Apply | ExecutionMode::Rollback)
+            && matches!(post_update_mode, PostUpdateCommunicationMode::Deferred);
+        if should_defer {
+            // Release the disable lease, anyone can re-enable communication when needed now.
+            // For example done in the 'on demand' plugin upon the next request
+            drop(disable_lease);
+        } else if let Err(failure) = disable_lease.release().await {
+            tracing::error!(%failure, "failed to resume transport after runtime update");
+        }
+        drop(protection);
     });
 
     Ok(execution_id)
@@ -204,12 +248,24 @@ where
 
 #[cfg(test)]
 mod tests {
-    use std::sync::{Arc, atomic::AtomicBool};
+    use std::sync::Arc;
 
+    use async_trait::async_trait;
     use cda_interfaces::{
         HashMap,
+        communication_control::{
+            PostUpdateCommunicationMode, TransportControl, TransportState, error::CommControlError,
+        },
         runtime_update_api::{ExecutionMode, ExecutionStatus, RuntimeUpdateError, UpdateExecution},
         storage_api::CollectionName,
+    };
+    use cda_plugin_communication_management::{
+        http_protection::{
+            config::{HttpProtectionConfig, HttpProtectionReason, HttpStatusCode},
+            evaluator::{HttpRestrictionDecision, HttpRestrictionGuard},
+            registry::HttpProtectionRegistry,
+        },
+        lifecycle::{communication_disable_for_test, disable::DisableCommunication},
     };
     use cda_storage::LocalStorage;
     use tokio::sync::RwLock;
@@ -218,13 +274,62 @@ mod tests {
         MockLockProvider, MockSecurityHandler, NoopReloadHandler, make_storage, write_test_file,
     };
 
+    /// A simple transport stub that starts disabled (can be enabled/disabled freely).
+    struct StubTransport {
+        state: tokio::sync::Mutex<TransportState>,
+    }
+
+    impl StubTransport {
+        fn new() -> Arc<Self> {
+            Arc::new(Self {
+                state: tokio::sync::Mutex::new(TransportState::Disabled),
+            })
+        }
+    }
+
+    #[async_trait]
+    impl TransportControl for StubTransport {
+        async fn enable(&self) -> Result<(), CommControlError> {
+            *self.state.lock().await = TransportState::Enabled;
+            Ok(())
+        }
+
+        async fn disable(&self) -> Result<(), CommControlError> {
+            *self.state.lock().await = TransportState::Disabled;
+            Ok(())
+        }
+
+        async fn state(&self) -> TransportState {
+            *self.state.lock().await
+        }
+    }
+
+    fn make_transport_and_disable() -> (HttpProtectionRegistry, Arc<dyn DisableCommunication>) {
+        let transport = StubTransport::new();
+        let restrictions = HttpProtectionRegistry::new();
+        let disable = communication_disable_for_test(
+            Arc::<StubTransport>::clone(&transport),
+            Some((
+                restrictions.clone(),
+                HttpProtectionConfig::new(
+                    HttpProtectionReason::UpdateInProgress,
+                    HttpStatusCode::CONFLICT,
+                    "Update in progress",
+                ),
+            )),
+            true,
+        );
+        (restrictions, disable)
+    }
+
     struct TestFixture {
         storage: Arc<LocalStorage>,
         security_handler: Arc<MockSecurityHandler>,
         reload_handler: Arc<NoopReloadHandler>,
         lock_provider: MockLockProvider,
         executions: Arc<RwLock<HashMap<String, UpdateExecution>>>,
-        update_in_progress: Arc<AtomicBool>,
+        communication_disable: Arc<dyn DisableCommunication>,
+        http_restriction_manager: HttpProtectionRegistry,
         _dir: tempfile::TempDir,
     }
 
@@ -243,7 +348,10 @@ mod tests {
                 security_handler: &self.security_handler,
                 reload_handler: &self.reload_handler,
                 executions: &self.executions,
-                update_in_progress: &self.update_in_progress,
+                communication_disable: &self.communication_disable,
+                http_protections: &self.http_restriction_manager,
+                update_retry_after_seconds: 1,
+                post_update_mode: PostUpdateCommunicationMode::Enabled,
                 mdd_decompress: false,
                 lock_state_provider: &self.lock_provider,
             }
@@ -252,6 +360,7 @@ mod tests {
 
     fn make_fixture() -> TestFixture {
         let (storage, dir) = make_storage();
+        let (mgr, communication_disable) = make_transport_and_disable();
         TestFixture {
             storage: Arc::new(storage),
             security_handler: Arc::new(MockSecurityHandler::new()),
@@ -261,7 +370,8 @@ mod tests {
                 has_conflicts: false,
             },
             executions: Arc::new(RwLock::new(HashMap::default())),
-            update_in_progress: Arc::new(AtomicBool::new(false)),
+            communication_disable,
+            http_restriction_manager: mgr,
             _dir: dir,
         }
     }
@@ -327,11 +437,6 @@ mod tests {
     #[tokio::test]
     async fn start_execution_apply_with_no_pending_update_rejected_synchronously() {
         let f = make_fixture();
-
-        // Nothing seeded into DiagnosticDatabaseNextUpdate or ConfigurationNextUpdate:
-        // Apply must be rejected synchronously (i.e. `start_execution` itself returns
-        // an error) rather than accepted (202-equivalent execution id) only to fail
-        // later inside the spawned task.
         let result = super::start_execution(&f.params(), ExecutionMode::Apply).await;
 
         assert!(
@@ -342,17 +447,16 @@ mod tests {
             f.executions.read().await.is_empty(),
             "no execution should have been recorded for a synchronously-rejected apply"
         );
+        // Transport should be re-enabled (restriction removed) after the error path.
         assert!(
-            !f.update_in_progress
-                .load(std::sync::atomic::Ordering::Acquire),
-            "update_in_progress must be released after a synchronously-rejected apply"
+            !f.http_restriction_manager.is_active(),
+            "update restriction must be released after a synchronously-rejected apply"
         );
     }
 
     #[tokio::test]
     async fn start_execution_cleanup_succeeds() {
         let f = make_fixture();
-
         let exec_id = super::start_execution(&f.params(), ExecutionMode::Cleanup)
             .await
             .unwrap();
@@ -372,7 +476,6 @@ mod tests {
     #[tokio::test]
     async fn start_execution_conflict_when_already_running() {
         let f = make_fixture();
-
         {
             let mut execs = f.executions.write().await;
             execs.insert(
@@ -386,13 +489,16 @@ mod tests {
         }
 
         let result = super::start_execution(&f.params(), ExecutionMode::Cleanup).await;
+        // The "already running" check fires before transport disable, so transport
+        // stays enabled (restriction remains inactive).
         assert!(matches!(result, Err(RuntimeUpdateError::ExecutionConflict)));
+        // Restriction is NOT installed because disable was never called.
+        assert!(!f.http_restriction_manager.is_active());
     }
 
     #[tokio::test]
     async fn start_execution_allowed_when_previous_completed() {
         let f = make_fixture();
-
         {
             let mut execs = f.executions.write().await;
             execs.insert(
@@ -414,21 +520,16 @@ mod tests {
     #[tokio::test]
     async fn previous_execution_removed_when_new_one_starts() {
         let f = make_fixture();
-
-        // Start a first execution (Cleanup always succeeds with an empty storage).
         let first_id = super::start_execution(&f.params(), ExecutionMode::Cleanup)
             .await
             .unwrap();
 
-        // Wait for it to reach a terminal state so it is eligible for removal.
         poll_until_terminal(&f.executions, &first_id).await;
 
-        // Start a second execution - this must purge the first entry.
         let _second_id = super::start_execution(&f.params(), ExecutionMode::Cleanup)
             .await
             .unwrap();
 
-        // The first execution ID must no longer be present.
         let status = super::get_execution_status(&f.executions, &first_id).await;
         assert!(
             status.is_none(),
@@ -439,9 +540,6 @@ mod tests {
     #[tokio::test]
     async fn execution_transitions_to_failed_on_error() {
         let f = make_fixture();
-        // Seed a pending MDD so Apply passes the synchronous NoPendingUpdate
-        // pre-check in `start_execution`, and use a reload handler that fails so
-        // the execution fails asynchronously inside the spawned task instead.
         write_test_file(
             &f.storage,
             &CollectionName::DiagnosticDatabaseNextUpdate,
@@ -455,7 +553,10 @@ mod tests {
             security_handler: &f.security_handler,
             reload_handler: &failing_reload_handler,
             executions: &f.executions,
-            update_in_progress: &f.update_in_progress,
+            communication_disable: &f.communication_disable,
+            http_protections: &f.http_restriction_manager,
+            update_retry_after_seconds: 1,
+            post_update_mode: PostUpdateCommunicationMode::Enabled,
             mdd_decompress: false,
             lock_state_provider: &f.lock_provider,
         };
@@ -466,5 +567,43 @@ mod tests {
 
         let status = poll_until_terminal(&f.executions, &exec_id).await;
         assert!(matches!(status, ExecutionStatus::Failed(_)));
+        // After failure the spawned task re-enables, removing the restriction.
+        assert!(!f.http_restriction_manager.is_active());
+    }
+
+    #[test]
+    fn update_protection_blocks_all_routes_except_confirmed_get_routes() {
+        let config = super::http_protection_config_for_update(17);
+
+        assert_eq!(config.status, HttpStatusCode::CONFLICT);
+        assert_eq!(config.retry_after_seconds, Some(17));
+        let factory = HttpProtectionRegistry::new();
+        let _protection = factory.protect(config).unwrap();
+        for path in [
+            "/health",
+            "/health/ready",
+            "/vehicle/v15/data/version",
+            "/vehicle/v15/apps/sovd2uds/operations/runtimefilesupdate/executions",
+            "/vehicle/v15/apps/sovd2uds/operations/runtimefilesupdate/executions/abc",
+        ] {
+            assert!(matches!(
+                factory.evaluate(path, &http::Method::GET),
+                HttpRestrictionDecision::Pass
+            ));
+            assert!(matches!(
+                factory.evaluate(path, &http::Method::POST),
+                HttpRestrictionDecision::Deny(denial)
+                if denial.status == HttpStatusCode::CONFLICT
+                    && denial.retry_after_seconds == Some(17)
+            ));
+        }
+        assert!(matches!(
+            factory.evaluate(
+                "/vehicle/v15/apps/sovd2uds/authorization",
+                &http::Method::GET,
+            ),
+            HttpRestrictionDecision::Deny(denial)
+            if denial.status == HttpStatusCode::CONFLICT
+        ));
     }
 }

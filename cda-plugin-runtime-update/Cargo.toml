@@ -27,13 +27,17 @@ path = "src/lib.rs"
 cda-interfaces = { workspace = true }
 cda-database = { workspace = true }
 cda-plugin-security = { workspace = true }
+cda-plugin-communication-management = { workspace = true }
 cda-sovd = { workspace = true }
 cda-storage = { workspace = true }
+kameo = { workspace = true }
 async-trait = { workspace = true }
 bytes = { workspace = true }
+http = { workspace = true }
 serde_json = { workspace = true }
 serde = { workspace = true }
 sha2 = { workspace = true }
+sovd-interfaces = { workspace = true }
 thiserror = { workspace = true }
 tokio = { workspace = true, features = ["rt", "sync", "macros", "fs"] }
 toml = { workspace = true }
@@ -43,4 +47,5 @@ schemars = { workspace = true }
 
 [dev-dependencies]
 cda-database = { workspace = true, features = ["database-builder"] }
+cda-plugin-communication-management = { workspace = true, features = ["test-utils"] }
 tempfile = { workspace = true }

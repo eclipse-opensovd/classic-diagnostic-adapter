@@ -463,7 +463,7 @@ impl<S: EcuGateway, T: EcuManager> UdsDtc for UdsManager<S, T> {
         scope: Option<String>,
         memory_selection: Option<u8>,
     ) -> Result<HashMap<DtcCode, DtcRecordAndStatus>, DiagServiceError> {
-        let ecu = self.uds_ecu_db(ecu_name)?;
+        let ecu = self.ecu_concluded_variant_detection(ecu_name).await?;
         let mut all_dtcs = HashMap::new();
         let scoped_services: Vec<_> = ecu
             .read()
@@ -644,7 +644,12 @@ impl<S: EcuGateway, T: EcuManager> UdsDtc for UdsManager<S, T> {
         security_plugin: &DynamicPlugin,
         fault_code: Option<String>,
     ) -> Result<Self::Response, DiagServiceError> {
-        let ecu = self.uds_ecu_db(ecu_name)?;
+        // `send_with_raw_payload` does not call require_communication_ready or
+        // ecu_concluded_variant_detection, so we have to make sure ourselves.
+        // See `require_communication_ready`'s docstring for details.
+        let _guard = self.require_communication_ready()?;
+        let ecu = self.ecu_concluded_variant_detection(ecu_name).await?;
+
         let delete_dtc_service = ecu.read().await.lookup_service_through_func_class(
             "faultmem",
             service_ids::CLEAR_DIAGNOSTIC_INFORMATION,
@@ -653,11 +658,6 @@ impl<S: EcuGateway, T: EcuManager> UdsDtc for UdsManager<S, T> {
             .await
             .is_service_allowed(&delete_dtc_service, security_plugin)
             .await?;
-
-        // `send_with_raw_payload` does not call ready communication, so we have to
-        // make sure ourselves.
-        // See the methods docstring for details.
-        let _guard = self.require_communication_ready()?;
 
         // For now only all or single DTC clear is supported.
         // This means we can simply build the payload according to ISO spec here.
@@ -701,7 +701,7 @@ impl<S: EcuGateway, T: EcuManager> UdsDtc for UdsManager<S, T> {
         security_plugin: &DynamicPlugin,
         scope: &str,
     ) -> Result<Self::Response, DiagServiceError> {
-        let ecu = self.uds_ecu_db(ecu_name)?;
+        let ecu = self.ecu_concluded_variant_detection(ecu_name).await?;
 
         // If the requested scope is the default scope, delegate to the standard delete_dtcs path.
         if scope.eq_ignore_ascii_case(&self.fault_config.default_scope) {

@@ -199,11 +199,13 @@ impl<S: EcuGateway + FunctionalTransport, T: EcuManager> UdsQuery for UdsManager
         ecu_name: &str,
         service: Option<&DiagComm>,
     ) -> Result<Vec<SdSdg>, DiagServiceError> {
-        self.uds_ecu_db(ecu_name)?.read().await.sdgs(service).await
+        let ecu = self.ecu_concluded_variant_detection(ecu_name).await?;
+        ecu.read().await.sdgs(service).await
     }
 
     async fn get_comparams(&self, ecu: &str) -> Result<ComplexComParamValue, DiagServiceError> {
-        self.uds_ecu_db(ecu)?.read().await.comparams()
+        let ecu = self.ecu_concluded_variant_detection(ecu).await?;
+        ecu.read().await.comparams()
     }
 
     async fn get_components_data_info(
@@ -211,11 +213,8 @@ impl<S: EcuGateway + FunctionalTransport, T: EcuManager> UdsQuery for UdsManager
         ecu: &str,
         security_plugin: &DynamicPlugin,
     ) -> Result<Vec<ComponentDataInfo>, DiagServiceError> {
-        let items = self
-            .uds_ecu_db(ecu)?
-            .read()
-            .await
-            .get_components_data_info(security_plugin);
+        let ecu = self.ecu_concluded_variant_detection(ecu).await?;
+        let items = ecu.read().await.get_components_data_info(security_plugin);
 
         Ok(items)
     }
@@ -225,8 +224,8 @@ impl<S: EcuGateway + FunctionalTransport, T: EcuManager> UdsQuery for UdsManager
         ecu: &str,
         security_plugin: &DynamicPlugin,
     ) -> Result<Vec<ComponentConfigurationsInfo>, DiagServiceError> {
-        self.uds_ecu_db(ecu)?
-            .read()
+        let ecu = self.ecu_concluded_variant_detection(ecu).await?;
+        ecu.read()
             .await
             .get_components_configurations_info(security_plugin)
     }
@@ -236,8 +235,8 @@ impl<S: EcuGateway + FunctionalTransport, T: EcuManager> UdsQuery for UdsManager
         ecu: &str,
         security_plugin: &DynamicPlugin,
     ) -> Result<Vec<ComponentOperationsInfo>, DiagServiceError> {
-        let items = self
-            .uds_ecu_db(ecu)?
+        let ecu = self.ecu_concluded_variant_detection(ecu).await?;
+        let items = ecu
             .read()
             .await
             .get_components_operations_info(security_plugin);
@@ -250,8 +249,8 @@ impl<S: EcuGateway + FunctionalTransport, T: EcuManager> UdsQuery for UdsManager
         service_name: &str,
         security_plugin: &DynamicPlugin,
     ) -> Result<RoutineSubfunctions, DiagServiceError> {
-        self.uds_ecu_db(ecu_name)?
-            .read()
+        let ecu = self.ecu_concluded_variant_detection(ecu_name).await?;
+        ecu.read()
             .await
             .get_routine_subfunctions(service_name, security_plugin)
     }
@@ -260,13 +259,8 @@ impl<S: EcuGateway + FunctionalTransport, T: EcuManager> UdsQuery for UdsManager
         &self,
         ecu: &str,
     ) -> Result<Vec<ComponentDataInfo>, DiagServiceError> {
-        let items = self
-            .ecus
-            .get(ecu)
-            .ok_or_else(|| DiagServiceError::NotFound(format!("Unknown ECU: {ecu}")))?
-            .read()
-            .await
-            .get_components_single_ecu_jobs_info();
+        let ecu = self.ecu_concluded_variant_detection(ecu).await?;
+        let items = ecu.read().await.get_components_single_ecu_jobs_info();
 
         Ok(items)
     }
@@ -276,17 +270,16 @@ impl<S: EcuGateway + FunctionalTransport, T: EcuManager> UdsQuery for UdsManager
         ecu: &str,
         job_name: &str,
     ) -> Result<single_ecu::Job, DiagServiceError> {
-        self.uds_ecu_db(ecu)?
-            .read()
-            .await
-            .lookup_single_ecu_job(job_name)
+        let ecu = self.ecu_concluded_variant_detection(ecu).await?;
+        ecu.read().await.lookup_single_ecu_job(job_name)
     }
 
     async fn get_ecu_reset_services(
         &self,
         ecu_name: &str,
     ) -> Result<Vec<String>, DiagServiceError> {
-        let diag_manager = self.uds_ecu_db(ecu_name)?.read().await;
+        let ecu = self.ecu_concluded_variant_detection(ecu_name).await?;
+        let diag_manager = ecu.read().await;
 
         let reset_services = diag_manager
             .lookup_diagcomms_by_request_prefix(&[service_ids::ECU_RESET])?
@@ -303,7 +296,8 @@ impl<S: EcuGateway + FunctionalTransport, T: EcuManager> UdsQuery for UdsManager
         ecu_name: &str,
         service: u8,
     ) -> Result<String, DiagServiceError> {
-        let diag_manager = self.uds_ecu_db(ecu_name)?.read().await;
+        let ecu = self.ecu_concluded_variant_detection(ecu_name).await?;
+        let diag_manager = ecu.read().await;
         diag_manager
             .get_service_state(service)
             .await
@@ -320,7 +314,7 @@ impl<S: EcuGateway + FunctionalTransport, T: EcuManager> UdsQuery for UdsManager
         security_plugin: &DynamicPlugin,
         data: UdsPayloadData,
     ) -> Result<Self::Response, DiagServiceError> {
-        let ecu_diag_service = self.uds_ecu_db(ecu_name)?;
+        let ecu_diag_service = self.ecu_concluded_variant_detection(ecu_name).await?;
         let ecu = ecu_diag_service.read().await;
         let request = ecu.lookup_service_through_func_class(func_class_name, service_id)?;
         self.send(ecu_name, request, security_plugin, Some(data), true)
@@ -333,7 +327,7 @@ impl<S: EcuGateway + FunctionalTransport, T: EcuManager> UdsQuery for UdsManager
         func_class_name: &str,
         service_id: u8,
     ) -> Result<DiagComm, DiagServiceError> {
-        let ecu_diag_service = self.uds_ecu_db(ecu_name)?;
+        let ecu_diag_service = self.ecu_concluded_variant_detection(ecu_name).await?;
         let ecu = ecu_diag_service.read().await;
         ecu.lookup_service_through_func_class(func_class_name, service_id)
     }

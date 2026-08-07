@@ -907,7 +907,7 @@ impl<S: SecurityPlugin> EcuManager<S> {
         }
 
         tracing::debug!("Setting variant to '{variant_name}'");
-        {
+        let published_variant_state = {
             let mut ecu_state = std_ext::lock_write(&self.runtime_state.ecu_state);
 
             if variant_index.is_some() {
@@ -922,7 +922,10 @@ impl<S: SecurityPlugin> EcuManager<S> {
                 ecu_state.variant_state = VariantState::NotDetected;
             }
             ecu_state.variant_index = variant_index;
-        }
+            ecu_state.variant_state.clone()
+        };
+        self.runtime_state
+            .publish_variant_state(published_variant_state);
 
         self.set_default_states().await
     }
@@ -1038,6 +1041,79 @@ mod tests {
             },
         )
         .await;
+    }
+
+    /// A watcher already subscribed before detection concludes observes the
+    /// published `VariantState`, and a watcher subscribing afterwards (the
+    /// steady-state case) sees it immediately via the seeded initial value.
+    #[tokio::test]
+    async fn variant_state_watch_channel_publishes_on_detection() {
+        let mut ecu_manager = create_ecu_manager_variant_detection(true);
+        let mut early_rx = ecu_manager.runtime_state.variant_state_rx();
+        assert_eq!(*early_rx.borrow(), VariantState::NotTested);
+
+        let response = create_variant_response(
+            "ReadVariantData",
+            [("variant_code".to_owned(), 0)].into_iter().collect(),
+        );
+        let mut service_responses = HashMap::new();
+        service_responses.insert("ReadVariantData".to_owned(), response);
+        ecu_manager.detect_variant(service_responses).await.unwrap();
+
+        early_rx
+            .changed()
+            .await
+            .expect("sender must not be dropped");
+        let published = early_rx.borrow().clone();
+        assert_eq!(
+            published,
+            VariantState::Detected {
+                name: "BaseVariant".to_owned(),
+                is_base_variant: true,
+                is_fallback: false,
+            }
+        );
+
+        // A subscriber arriving after detection concluded observes the
+        // current value immediately, without awaiting a change.
+        let late_rx = ecu_manager.runtime_state.variant_state_rx();
+        assert_eq!(*late_rx.borrow(), published);
+    }
+
+    /// An ECU that never responds (offline path) still settles and
+    /// publishes, unblocking a waiter rather than leaving it to hang forever
+    /// on `changed()`.
+    #[tokio::test]
+    async fn variant_state_watch_channel_publishes_on_offline_detection() {
+        let mut ecu_manager = create_ecu_manager_variant_detection(true);
+        // The builder pre-seeds `Detected` directly on the shared state (see
+        // `new_ecu_manager`'s doc comment) without going through
+        // `publish_variant_state`, so reset to the genuine not-yet-tested
+        // baseline this test needs.
+        {
+            let mut ecu_state = ecu_manager.runtime_state.ecu_state.write().unwrap();
+            ecu_state.variant_state = VariantState::NotTested;
+            ecu_state.variant_index = None;
+        }
+        let mut rx = ecu_manager.runtime_state.variant_state_rx();
+        assert_eq!(*rx.borrow(), VariantState::NotTested);
+
+        // Empty responses: the offline path in `detect_variant`.
+        ecu_manager
+            .detect_variant::<DiagServiceResponseStruct>(HashMap::new())
+            .await
+            .unwrap();
+
+        rx.changed()
+            .await
+            .expect("the offline path must still publish so waiters settle");
+        // Still NotTested (never having been detected before): the point is
+        // that a publish happened at all, not that the value changed.
+        assert_eq!(*rx.borrow(), VariantState::NotTested);
+        assert_eq!(
+            ecu_manager.runtime_state.status().connectivity,
+            Connectivity::Offline
+        );
     }
 
     #[tokio::test]

@@ -13,6 +13,7 @@
 
 use std::{sync::Arc, time::Duration};
 
+use async_trait::async_trait;
 use tokio::sync::{Mutex, RwLock, mpsc};
 
 use crate::{
@@ -94,15 +95,13 @@ pub trait FunctionalTransport: PhysicalTransport {
 }
 
 /// Network topology queries.
+#[async_trait]
 pub trait NetworkTopology: Send + Sync {
     /// Retrieves the network address of the gateway for a given logical address.
     /// For DOIP, this is the IP address of the gateway.
     /// This function is used to build the network structure of the ECUs.
     /// Returns `None` if the logical address cannot be resolved to a network address.
-    fn get_gateway_network_address(
-        &self,
-        logical_address: u16,
-    ) -> impl Future<Output = Option<String>> + Send;
+    async fn get_gateway_network_address(&self, logical_address: u16) -> Option<String>;
 
     /// Network address of a specific ECU, looked up by name.
     ///
@@ -111,11 +110,8 @@ pub trait NetworkTopology: Send + Sync {
     /// address-based [`Self::get_gateway_network_address`] cannot identify
     /// them). Transports whose addressing is genuinely logical-address-based
     /// (`DoIP`) keep the default `None`.
-    fn get_ecu_network_address(
-        &self,
-        _ecu_name: &str,
-    ) -> impl Future<Output = Option<String>> + Send {
-        std::future::ready(None)
+    async fn get_ecu_network_address(&self, _ecu_name: &str) -> Option<String> {
+        None
     }
 }
 

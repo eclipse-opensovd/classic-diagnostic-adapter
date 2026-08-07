@@ -11,6 +11,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+use cda_plugin_communication_management::http_protection::config::{HttpMethod, HttpRouteMatcher};
 pub use default_runtime_update_plugin::DefaultRuntimeUpdatePlugin;
 pub use security::DefaultUpdateSecurityHandler;
 
@@ -21,6 +22,20 @@ pub mod default_runtime_update_plugin;
 pub mod operations;
 pub mod security;
 pub mod storage;
+
+/// Routes that remain readable while an update execution owns the transport disable lease.
+#[must_use]
+pub fn routes_exempt_from_update_protection() -> Vec<HttpRouteMatcher> {
+    vec![
+        HttpRouteMatcher::new("/health", vec![HttpMethod::GET]),
+        HttpRouteMatcher::new("/health/ready", vec![HttpMethod::GET]),
+        HttpRouteMatcher::new("/vehicle/v15/data/version", vec![HttpMethod::GET]),
+        HttpRouteMatcher::new(
+            "/vehicle/v15/apps/sovd2uds/operations/runtimefilesupdate/executions",
+            vec![HttpMethod::GET],
+        ),
+    ]
+}
 
 /// Shared test utilities for the runtime update plugin tests.
 #[cfg(test)]
@@ -230,7 +245,7 @@ pub(crate) mod test_utils {
     #[async_trait]
     impl RuntimeReloaderPlugin for FailingReloadHandler {
         async fn reload_databases(&self, _mdd_paths: Vec<PathBuf>) -> Result<(), ReloadError> {
-            Err(ReloadError("simulated reload failure".to_string()))
+            Err(ReloadError::General("simulated reload failure".to_string()))
         }
 
         async fn reload_configuration(&self, _config_path: PathBuf) -> Result<(), ReloadError> {

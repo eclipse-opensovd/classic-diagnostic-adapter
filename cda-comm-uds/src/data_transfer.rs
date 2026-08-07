@@ -191,6 +191,8 @@ impl<S: EcuGateway, T: EcuManager> UdsDataTransfer for UdsManager<S, T> {
         security_plugin: &DynamicPlugin,
         parameters: FlashTransferStartParams<'_>,
     ) -> Result<(), DiagServiceError> {
+        let ecu = self.ecu_concluded_variant_detection(ecu_name).await?;
+
         let FlashTransferStartParams {
             file_path,
             offset,
@@ -228,7 +230,6 @@ impl<S: EcuGateway, T: EcuManager> UdsDataTransfer for UdsManager<S, T> {
                 DiagServiceError::InvalidRequest(format!("Failed to seek to offset in file: {e:?}"))
             })?;
 
-        let ecu = self.uds_ecu_db(ecu_name)?;
         let request = ecu
             .read()
             .await

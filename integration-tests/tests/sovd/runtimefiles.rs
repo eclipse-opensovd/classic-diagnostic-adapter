@@ -192,12 +192,20 @@ async fn runtimefiles_execution_responses_follow_operation_standard() -> Result<
         execution.get("id").is_none() && execution.get("mode").is_none(),
         "execution details must not expose operation-specific values at the top level"
     );
-    assert_eq!(execution["parameters"]["mode"], "cleanup");
+    let parameters = execution
+        .get("parameters")
+        .expect("execution details must include parameters");
+    assert_eq!(
+        parameters.get("mode"),
+        Some(&serde_json::Value::from("cleanup"))
+    );
     assert!(
-        execution["parameters"].get("reason").is_none(),
+        parameters.get("reason").is_none(),
         "a successful execution must not include a failure reason"
     );
     assert!(execution.get("status").is_some());
+
+    wait_for_execution_completion(&runtime.config, &auth, &execution_id).await?;
 
     lock_operation(
         locks::VEHICLE_ENDPOINT,
@@ -228,8 +236,12 @@ async fn runtimefiles_bulk_data_responses_follow_standard() -> Result<(), Testin
             .expect("upload response body must be readable"),
     )
     .expect("upload response must be JSON");
-    let first_id = upload_body["items"][0]["id"]
-        .as_str()
+    let first_id = upload_body
+        .get("items")
+        .and_then(serde_json::Value::as_array)
+        .and_then(|items| items.first())
+        .and_then(|item| item.get("id"))
+        .and_then(serde_json::Value::as_str)
         .expect("upload response must identify the created file");
     let expected_location = format!(
         "http://{}:{}/vehicle/v15/{RUNTIMEFILES_NEXTUPDATE}/{first_id}",
@@ -304,9 +316,14 @@ async fn runtimefiles_bulk_data_responses_follow_standard() -> Result<(), Testin
         "runtimefiles-backup",
     ] {
         assert!(
-            categories["items"]
-                .as_array()
-                .is_some_and(|items| items.iter().any(|item| item["name"] == name)),
+            categories
+                .get("items")
+                .and_then(serde_json::Value::as_array)
+                .is_some_and(|items| {
+                    items
+                        .iter()
+                        .any(|item| item.get("name") == Some(&serde_json::Value::from(name)))
+                }),
             "bulk-data discovery must include {name}"
         );
     }
@@ -1385,7 +1402,85 @@ async fn execute_mode(
         None,
     )
     .await?;
-    response_to_t::<OperationIdItem>(&response)
+    let execution = response_to_t::<OperationIdItem>(&response)?;
+    wait_for_execution_completion(config, auth, &execution.id).await?;
+    Ok(execution)
+}
+
+/// Waits through the update-protection-exempt execution resource until cleanup has run.
+async fn wait_for_execution_completion(
+    config: &Configuration,
+    auth: &http::HeaderMap,
+    execution_id: &str,
+) -> Result<(), TestingError> {
+    let execution_path = format!("{RUNTIMEFILES_UPDATE_EXECUTIONS}/{execution_id}");
+    for _ in 0..50 {
+        let response = send_cda_request(
+            config,
+            &execution_path,
+            StatusCode::OK,
+            Method::GET,
+            None,
+            Some(auth),
+            None,
+        )
+        .await?;
+        let execution = response_to_json(&response)?;
+        match execution.get("status").and_then(serde_json::Value::as_str) {
+            Some("completed") => break,
+            Some("failed") => {
+                return Err(TestingError::InvalidData(format!(
+                    "runtime update {execution_id} failed: {}",
+                    execution
+                        .get("parameters")
+                        .and_then(|parameters| parameters.get("reason"))
+                        .unwrap_or(&serde_json::Value::Null)
+                )));
+            }
+            Some("running") => {
+                cda_interfaces::util::tokio_ext::sleep_for(Duration::from_millis(100)).await;
+            }
+            status => {
+                return Err(TestingError::InvalidData(format!(
+                    "runtime update {execution_id} returned invalid status: {status:?}"
+                )));
+            }
+        }
+    }
+
+    let authorization = auth
+        .get(reqwest::header::AUTHORIZATION)
+        .expect("Authorization header missing");
+    let url = format!(
+        "http://{}:{}/vehicle/v15/{RUNTIMEFILES_CURRENT}",
+        config.server.address, config.server.port
+    );
+    for _ in 0..50 {
+        let response = reqwest::Client::new()
+            .get(&url)
+            .header(reqwest::header::AUTHORIZATION, authorization)
+            .send()
+            .await
+            .map_err(|error| TestingError::ProcessFailed(error.to_string()))?;
+        match response.status() {
+            StatusCode::OK => return Ok(()),
+            StatusCode::CONFLICT => {
+                cda_interfaces::util::tokio_ext::sleep_for(Duration::from_millis(100)).await;
+            }
+            status => {
+                return Err(TestingError::UnexpectedResponse {
+                    expected: StatusCode::OK,
+                    actual: status,
+                    body: response.text().await.ok(),
+                    message: "waiting for update protection cleanup".to_owned(),
+                    url,
+                });
+            }
+        }
+    }
+    Err(TestingError::Timeout(format!(
+        "runtime update {execution_id} did not complete"
+    )))
 }
 
 /// Helper: asserts the uploaded FLXC1000.mdd is visible in nextupdate (case-insensitive).

@@ -134,6 +134,7 @@ pub(crate) mod request_download {
         body: Json<sovd2uds::download::request_download::put::Request>,
     ) -> Response {
         let include_schema = query.include_schema;
+
         let schema = if include_schema {
             'schema: {
                 let Ok(service) = uds

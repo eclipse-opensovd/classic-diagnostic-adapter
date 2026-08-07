@@ -45,14 +45,18 @@ impl<S: EcuGateway, T: EcuManager> UdsManager<S, T> {
         map_to_json: bool,
         timeout: Option<Duration>,
     ) -> Result<<T as PayloadDecoder>::Response, DiagServiceError> {
+        let _guard = self.require_communication_ready()?;
         let ecu = self.uds_ecu_db(ecu_name)?;
 
-        // Pre-send: run variant detection when required (see
-        // `needs_variant_detection`). Detection also acts as a reachability
-        // probe for ECUs marked Offline.
+        // Pre-send: gate on variant detection when the variant has never been
+        // tested (see ``ecu_concluded_variant_detection``), and separately run
+        // detection as a reachability probe for ECUs marked Offline (see
+        // `needs_variant_detection`).
         {
             let status = ecu.read().await.ecu_status();
-            if needs_variant_detection(&status) {
+            if status.variant_state == VariantState::NotTested {
+                self.ecu_concluded_variant_detection(ecu_name).await?;
+            } else if needs_variant_detection(&status) {
                 tracing::info!(
                     ecu_name,
                     connectivity = ?status.connectivity,
@@ -170,6 +174,11 @@ impl<S: EcuGateway, T: UdsEcuDb + VariantDetection> UdsManager<S, T> {
             payload_size = payload.data.len(),
             dlt_context = dlt_ctx!("UDS"))
     )]
+    /// Sends the raw payload to the ecu.
+    /// This does **not** call [`Self::require_communication_ready`] because it's
+    /// part of the variant detection call chain
+    /// (see docstring of [`Self::require_communication_ready`] for details).
+    /// Caller must make sure on their own that communication is ready.
     pub(crate) async fn send_with_raw_payload(
         &self,
         ecu_name: &str,
@@ -482,8 +491,10 @@ impl<S: EcuGateway, T: EcuManager> UdsTransport for UdsManager<S, T> {
     ) -> Result<Vec<u8>, DiagServiceError> {
         tracing::trace!(ecu_name = %ecu_name, payload = ?payload, "Sending raw UDS packet");
 
-        let payload = self
-            .uds_ecu_db(ecu_name)?
+        let _guard = self.require_communication_ready()?;
+        let ecu = self.ecu_concluded_variant_detection(ecu_name).await?;
+
+        let payload = ecu
             .read()
             .await
             .check_genericservice(security_plugin, payload)
@@ -689,10 +700,7 @@ mod tests {
 
 #[cfg(test)]
 mod send_tests {
-    use std::{
-        sync::{Arc, atomic::AtomicBool},
-        time::Duration,
-    };
+    use std::{sync::Arc, time::Duration};
 
     use async_trait::async_trait;
     use cda_interfaces::{
@@ -700,6 +708,11 @@ mod send_tests {
         FunctionalTransport, HashMap, HashMapExtensions, NetworkTopology, PendingNrc,
         PhysicalTransport, ServicePayload, Shutdown, TransmissionParameters, TransportResponse,
         VariantDetection, datatypes::FaultConfig,
+    };
+    use cda_plugin_communication_management::lifecycle::{
+        access::CommunicationAccess, enabled_communication_access_for_test,
+        error::CommunicationError, guard::CommunicationGuard, operation::ActivationCause,
+        state::CommunicationState,
     };
     use tokio::sync::{RwLock, mpsc};
 
@@ -715,7 +728,7 @@ mod send_tests {
             gateway: S,
             ecus: Arc<HashMap<String, RwLock<T>>>,
             fault_config: FaultConfig,
-            update_in_progress: Arc<AtomicBool>,
+            communication_access: Arc<dyn CommunicationAccess>,
         ) -> Self {
             let runtime_states: HashMap<String, EcuRuntimeState> = ecus
                 .keys()
@@ -734,7 +747,92 @@ mod send_tests {
                 state_coordinator,
                 functional_description_database: String::new(),
                 fault_config,
-                update_in_progress,
+                communication_access,
+                communication_retry_after_seconds: TEST_COMMUNICATION_RETRY_AFTER_SECONDS,
+                variant_detection_receiver: Arc::new(tokio::sync::Mutex::new(None)),
+            }
+        }
+    }
+
+    const TEST_COMMUNICATION_RETRY_AFTER_SECONDS: u64 = 7;
+
+    fn disabled_communication_access() -> Arc<dyn CommunicationAccess> {
+        struct Disabled;
+        impl CommunicationAccess for Disabled {
+            fn state(&self) -> CommunicationState {
+                CommunicationState::Disabled
+            }
+
+            fn acquire(&self) -> Result<CommunicationGuard, CommunicationError> {
+                Err(CommunicationError::Disabled)
+            }
+
+            fn request_activate(&self, _cause: ActivationCause) -> CommunicationState {
+                CommunicationState::Disabled
+            }
+        }
+        Arc::new(Disabled)
+    }
+
+    /// A `CommunicationAccess` fake whose `acquire`/`request_activate` behavior is
+    /// fully controllable, for testing `require_communication_ready`'s gating
+    /// and on-demand activation logic. Delegates real guard minting to
+    /// [`enabled_communication_access_for_test`] once "enabled" so tests
+    /// never need the crate-private `CommunicationGuard` constructor.
+    struct FakeCommunicationAccess {
+        enabled: std::sync::atomic::AtomicBool,
+        activate_calls: std::sync::atomic::AtomicUsize,
+        activate_succeeds: bool,
+        real: Arc<dyn CommunicationAccess>,
+    }
+
+    impl FakeCommunicationAccess {
+        fn new(initially_enabled: bool, activate_succeeds: bool) -> Arc<Self> {
+            Arc::new(Self {
+                enabled: std::sync::atomic::AtomicBool::new(initially_enabled),
+                activate_calls: std::sync::atomic::AtomicUsize::new(0),
+                activate_succeeds,
+                real: enabled_communication_access_for_test(),
+            })
+        }
+
+        fn activate_call_count(&self) -> usize {
+            self.activate_calls
+                .load(std::sync::atomic::Ordering::SeqCst)
+        }
+    }
+
+    impl CommunicationAccess for FakeCommunicationAccess {
+        fn state(&self) -> CommunicationState {
+            if self.enabled.load(std::sync::atomic::Ordering::SeqCst) {
+                CommunicationState::Enabled
+            } else {
+                CommunicationState::Disabled
+            }
+        }
+
+        fn acquire(&self) -> Result<CommunicationGuard, CommunicationError> {
+            if self.enabled.load(std::sync::atomic::Ordering::SeqCst) {
+                self.real.acquire()
+            } else {
+                Err(CommunicationError::Disabled)
+            }
+        }
+
+        fn request_activate(&self, _cause: ActivationCause) -> CommunicationState {
+            self.activate_calls
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            // Fire-and-forget: like the real worker-backed implementation,
+            // this returns immediately without waiting for the (simulated)
+            // activation to finish. The fake models "finishes instantly" by
+            // flipping `enabled` synchronously when authorized, so a caller
+            // that retries after this call observes the effect.
+            if self.activate_succeeds {
+                self.enabled
+                    .store(true, std::sync::atomic::Ordering::SeqCst);
+                CommunicationState::Enabled
+            } else {
+                self.state()
             }
         }
     }
@@ -792,6 +890,7 @@ mod send_tests {
         }
     }
 
+    #[async_trait]
     impl NetworkTopology for TestGateway {
         async fn get_gateway_network_address(&self, _logical_address: u16) -> Option<String> {
             None
@@ -821,7 +920,7 @@ mod send_tests {
             gateway,
             ecus,
             FaultConfig::default(),
-            Arc::new(AtomicBool::new(false)),
+            disabled_communication_access(),
         )
     }
 
@@ -831,7 +930,20 @@ mod send_tests {
             gateway,
             ecus,
             FaultConfig::default(),
-            Arc::new(AtomicBool::new(false)),
+            disabled_communication_access(),
+        )
+    }
+
+    fn make_manager_with_access(
+        gateway: TestGateway,
+        communication_access: Arc<dyn CommunicationAccess>,
+    ) -> UdsManager<TestGateway, TestEcuDb> {
+        let ecus = Arc::new(HashMap::new());
+        UdsManager::new_for_raw_payload_tests(
+            gateway,
+            ecus,
+            FaultConfig::default(),
+            communication_access,
         )
     }
 
@@ -1166,7 +1278,7 @@ mod send_tests {
             gateway,
             Arc::clone(&ecus),
             FaultConfig::default(),
-            Arc::new(AtomicBool::new(false)),
+            disabled_communication_access(),
         );
 
         // Payload with new_session set - should be stored on positive response
@@ -1256,5 +1368,101 @@ mod send_tests {
         let msg = result.expect("should be Ok").expect("should have message");
         // Should have received the second message (correct DID)
         assert_eq!(msg.data, vec![0x62, 0xF1, 0x90, 0xBB]);
+    }
+
+    // require_communication_ready / acquire_communication_guard tests
+
+    #[tokio::test]
+    async fn require_communication_ready_returns_guard_immediately_when_already_enabled() {
+        let access = FakeCommunicationAccess::new(true, true);
+        let manager = make_manager_with_access(make_gateway(), Arc::clone(&access) as _);
+
+        let result = manager.require_communication_ready();
+
+        assert!(result.is_ok());
+        assert_eq!(access.activate_call_count(), 0);
+    }
+
+    /// The fast-503 contract: the first call while not enabled must return
+    /// immediately with `CommunicationNotReady`, never block through the
+    /// activation it just fired. A later retry (after the background trigger
+    /// has taken effect) succeeds.
+    #[tokio::test]
+    async fn require_communication_ready_fires_background_trigger_and_returns_not_ready_immediately()
+     {
+        let access = FakeCommunicationAccess::new(false, true);
+        let manager = make_manager_with_access(make_gateway(), Arc::clone(&access) as _);
+
+        let first = manager.require_communication_ready();
+        assert!(matches!(
+            first,
+            Err(DiagServiceError::CommunicationNotReady {
+                retry_after_seconds: TEST_COMMUNICATION_RETRY_AFTER_SECONDS,
+                ..
+            })
+        ));
+        assert_eq!(access.activate_call_count(), 1);
+
+        // The background trigger has taken effect by the time of a retry.
+        assert_eq!(access.state(), CommunicationState::Enabled);
+        let retry = manager.require_communication_ready();
+        assert!(retry.is_ok());
+        // The retry found communication already enabled -- no second trigger.
+        assert_eq!(access.activate_call_count(), 1);
+    }
+
+    #[tokio::test]
+    async fn require_communication_ready_surfaces_not_ready_when_activation_not_authorized() {
+        let access = FakeCommunicationAccess::new(false, false);
+        let manager = make_manager_with_access(make_gateway(), Arc::clone(&access) as _);
+
+        let result = manager.require_communication_ready();
+
+        assert!(matches!(
+            result,
+            Err(DiagServiceError::CommunicationNotReady {
+                retry_after_seconds: TEST_COMMUNICATION_RETRY_AFTER_SECONDS,
+                ..
+            })
+        ));
+        assert_eq!(access.activate_call_count(), 1);
+        assert_eq!(access.state(), CommunicationState::Disabled);
+    }
+
+    #[tokio::test]
+    async fn acquire_communication_guard_never_triggers_activation() {
+        let access = FakeCommunicationAccess::new(false, true);
+        let manager = make_manager_with_access(make_gateway(), Arc::clone(&access) as _);
+
+        let result = manager.acquire_communication_guard();
+
+        assert!(matches!(
+            result,
+            Err(DiagServiceError::CommunicationNotReady {
+                retry_after_seconds: TEST_COMMUNICATION_RETRY_AFTER_SECONDS,
+                ..
+            })
+        ));
+        // Background/keep-alive traffic must never itself bring communication
+        // up, even though activation would have succeeded if attempted.
+        assert_eq!(access.activate_call_count(), 0);
+    }
+
+    #[tokio::test]
+    async fn concurrent_require_communication_ready_calls_do_not_serialize_while_enabled() {
+        let access = FakeCommunicationAccess::new(true, true);
+        let manager = Arc::new(make_manager_with_access(make_gateway(), access as _));
+
+        let mut handles = Vec::new();
+        for _ in 0..32 {
+            let manager = Arc::clone(&manager);
+            handles.push(tokio::spawn(async move {
+                manager.require_communication_ready().is_ok()
+            }));
+        }
+
+        for handle in handles {
+            assert!(handle.await.expect("task should not panic"));
+        }
     }
 }

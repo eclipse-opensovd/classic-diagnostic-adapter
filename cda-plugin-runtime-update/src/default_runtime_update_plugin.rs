@@ -20,11 +20,12 @@
 // terms of the Apache License Version 2.0 which is available at
 // https://www.apache.org/licenses/LICENSE-2.0
 
-use std::sync::{Arc, atomic::AtomicBool};
+use std::sync::Arc;
 
 use async_trait::async_trait;
 use cda_interfaces::{
     HashMap,
+    communication_control::PostUpdateCommunicationMode,
     runtime_update_api::{
         BulkDataCreatedList, BulkDataList, ConfigValidator, ExecutionMode, LockStateProvider,
         RuntimeFilesQuery, RuntimeFilesUpdatePlugin, RuntimeReloaderPlugin, RuntimeUpdateError,
@@ -32,10 +33,12 @@ use cda_interfaces::{
     },
     storage_api::Storage,
 };
+use cda_plugin_communication_management::{
+    http_protection::registry::HttpProtectionRegistry, lifecycle::disable::DisableCommunication,
+};
 use tokio::sync::RwLock;
 
 /// Default implementation of [`RuntimeFilesUpdatePlugin`] with injectable security and storage.
-///
 pub struct DefaultRuntimeUpdatePlugin<
     Store: Storage,
     UpdateSecurityPlugin: RuntimeUpdateSecurityPlugin<Lock, Store::CollectionHandle>,
@@ -56,10 +59,10 @@ pub struct DefaultRuntimeUpdatePlugin<
     executions: Arc<RwLock<HashMap<String, UpdateExecution>>>,
     /// If true, call `update_mdd_uncompressed()` after Apply for each MDD file
     mdd_decompress: bool,
-    /// Shared flag indicating whether an update is currently in progress.
-    /// Other components (e.g. the HTTP update guard, UDS layer) hold clones of this Arc
-    /// to observe update state.
-    update_in_progress: Arc<AtomicBool>,
+    communication_disable: Arc<dyn DisableCommunication>,
+    http_protections: HttpProtectionRegistry,
+    update_retry_after_seconds: u64,
+    post_update_mode: PostUpdateCommunicationMode,
 }
 
 impl<
@@ -77,15 +80,25 @@ impl<
     /// * `security_handler` - Validates authorization and file integrity
     /// * `lock_provider` - Provides lock state for security validation
     /// * `mdd_decompress` - Whether to decompress MDD files after apply
-    /// * `update_in_progress` - Shared flag read by other components to gate operations
+    /// * `communication_disable` - Used to acquire exclusive transport disable ownership
+    /// * `update_retry_after_seconds` - Retry-After value while an update owns protection
+    /// * `post_update_mode` - Communication state to restore after an update
     /// * `config_validator` - Validator for configuration file content (use `()` if not needed)
+    #[allow(
+        clippy::too_many_arguments,
+        reason = "Constructor requires many dependencies for plugin initialization, adding a \
+                  struct of this is pointless, as it is only used once."
+    )]
     pub fn new(
         storage: Arc<Store>,
         reloader_plugin: Arc<dyn RuntimeReloaderPlugin>,
         security_handler: Arc<UpdateSecurityPlugin>,
         lock_provider: Arc<Lock>,
         mdd_decompress: bool,
-        update_in_progress: Arc<AtomicBool>,
+        communication_disable: Arc<dyn DisableCommunication>,
+        http_protections: HttpProtectionRegistry,
+        update_retry_after_seconds: u64,
+        post_update_mode: PostUpdateCommunicationMode,
         config_validator: Validator,
     ) -> Self {
         Self {
@@ -96,7 +109,10 @@ impl<
             config_validator,
             executions: Arc::new(RwLock::new(HashMap::default())),
             mdd_decompress,
-            update_in_progress,
+            communication_disable,
+            http_protections,
+            update_retry_after_seconds,
+            post_update_mode,
         }
     }
 }
@@ -162,7 +178,10 @@ impl<
             security_handler: &self.security_handler,
             reload_handler: &self.reloader_plugin,
             executions: &self.executions,
-            update_in_progress: &self.update_in_progress,
+            communication_disable: &self.communication_disable,
+            http_protections: &self.http_protections,
+            update_retry_after_seconds: self.update_retry_after_seconds,
+            post_update_mode: self.post_update_mode.clone(),
             mdd_decompress: self.mdd_decompress,
             lock_state_provider: &*self.lock_provider,
         };
@@ -182,12 +201,23 @@ impl<
 mod tests {
     use std::sync::Arc;
 
+    use async_trait::async_trait;
     use cda_interfaces::{
+        communication_control::{
+            PostUpdateCommunicationMode, TransportControl, TransportState, error::CommControlError,
+        },
         runtime_update_api::{
             ExecutionMode, HashAlgorithm, RuntimeFilesQuery, RuntimeFilesUpdatePlugin,
             RuntimeUpdateError,
         },
         storage_api::CollectionName,
+    };
+    use cda_plugin_communication_management::{
+        http_protection::{
+            config::{HttpProtectionConfig, HttpProtectionReason, HttpStatusCode},
+            registry::HttpProtectionRegistry,
+        },
+        lifecycle::communication_disable_for_test,
     };
     use cda_storage::LocalStorage;
 
@@ -198,6 +228,35 @@ mod tests {
             make_upload_files, make_valid_config, make_valid_mdd, write_test_file,
         },
     };
+
+    struct StubTransport {
+        state: tokio::sync::Mutex<TransportState>,
+    }
+
+    impl StubTransport {
+        fn new() -> Arc<Self> {
+            Arc::new(Self {
+                state: tokio::sync::Mutex::new(TransportState::Disabled),
+            })
+        }
+    }
+
+    #[async_trait]
+    impl TransportControl for StubTransport {
+        async fn enable(&self) -> Result<(), CommControlError> {
+            *self.state.lock().await = TransportState::Enabled;
+            Ok(())
+        }
+
+        async fn disable(&self) -> Result<(), CommControlError> {
+            *self.state.lock().await = TransportState::Disabled;
+            Ok(())
+        }
+
+        async fn state(&self) -> TransportState {
+            *self.state.lock().await
+        }
+    }
 
     fn make_plugin(
         storage: LocalStorage,
@@ -210,6 +269,21 @@ mod tests {
         owner: Option<&str>,
         has_conflicts: bool,
     ) -> DefaultRuntimeUpdatePlugin<LocalStorage, MockSecurityHandler, MockLockProvider, ()> {
+        let transport = StubTransport::new();
+        let http_protections = HttpProtectionRegistry::new();
+        let communication_disable = communication_disable_for_test(
+            transport,
+            Some((
+                http_protections.clone(),
+                HttpProtectionConfig::new(
+                    HttpProtectionReason::UpdateInProgress,
+                    HttpStatusCode::CONFLICT,
+                    "Update in progress",
+                ),
+            )),
+            false,
+        );
+
         DefaultRuntimeUpdatePlugin::new(
             Arc::new(storage),
             Arc::new(NoopReloadHandler),
@@ -219,7 +293,10 @@ mod tests {
                 has_conflicts,
             }),
             false,
-            Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            communication_disable,
+            http_protections,
+            1,
+            PostUpdateCommunicationMode::Enabled,
             (),
         )
     }
@@ -368,7 +445,6 @@ mod tests {
 
         plugin.delete_nextupdate().await.unwrap();
 
-        // After delete_all_nextupdate, list_nextupdate should return no items
         let query = RuntimeFilesQuery::default();
         let result = plugin.list_nextupdate(&query).await.unwrap();
         assert!(result.items.is_empty());
@@ -493,7 +569,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn start_execution_apply_returns_execution_id() {
+    async fn start_execution_requires_enabled_communication() {
         let (storage, _dir) = make_storage();
         write_test_file(
             &storage,
@@ -505,11 +581,8 @@ mod tests {
 
         let plugin = make_plugin(storage);
 
-        let exec_id = plugin.start_execution(ExecutionMode::Apply).await.unwrap();
-        assert!(!exec_id.is_empty());
-
-        let status = plugin.get_execution_status(&exec_id).await;
-        assert!(status.is_some());
+        let result = plugin.start_execution(ExecutionMode::Apply).await;
+        assert!(matches!(result, Err(RuntimeUpdateError::ExecutionConflict)));
     }
 
     #[tokio::test]
@@ -525,9 +598,7 @@ mod tests {
 
         let plugin = make_plugin(storage);
 
-        let _exec_id = plugin.start_execution(ExecutionMode::Apply).await.unwrap();
-
-        let result = plugin.start_execution(ExecutionMode::Cleanup).await;
+        let result = plugin.start_execution(ExecutionMode::Apply).await;
         assert!(matches!(result, Err(RuntimeUpdateError::ExecutionConflict)));
     }
 }

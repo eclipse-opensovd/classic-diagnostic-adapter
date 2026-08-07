@@ -19,7 +19,7 @@ use axum::{
         Request,
         rejection::{JsonRejection, QueryRejection},
     },
-    http::{StatusCode, Uri},
+    http::{HeaderValue, StatusCode, Uri, header::RETRY_AFTER},
     middleware::Next,
     response::{IntoResponse, Response},
 };
@@ -31,6 +31,14 @@ use cda_interfaces::{
 use serde::{Deserialize, Serialize};
 use serde_qs::axum::QsQueryRejection;
 use sovd_interfaces::error::{ApiErrorResponse, ErrorCode};
+
+/// Fallback retry hint for [`ApiError::ServiceUnavailable`] responses whose
+/// source ([`DiagServiceError::CommunicationDisabled`]) has no configured
+/// value in scope (the transport-router-level safety net that produces it
+/// sits below the application config). [`DiagServiceError::CommunicationNotReady`]
+/// carries the real configured `deferred_retry_after_seconds` value instead
+/// and does not use this fallback.
+const SERVICE_UNAVAILABLE_FALLBACK_RETRY_AFTER_SECONDS: u64 = 30;
 
 #[allow(
     dead_code,
@@ -50,6 +58,11 @@ pub enum ApiError {
     Conflict(String),
     #[error("Not Responding: {0}")]
     NotResponding(String),
+    #[error("Service Unavailable: {message}")]
+    ServiceUnavailable {
+        message: String,
+        retry_after_seconds: u64,
+    },
     #[error("The value of the parameter is not of the allowed values")]
     InvalidParameter { possible_values: HashSet<String> },
 }
@@ -68,6 +81,10 @@ impl ApiError {
             ApiError::InvalidParameter { .. } => (
                 ErrorCode::VendorSpecific,
                 Some(VendorErrorCode::InvalidParameter),
+            ),
+            ApiError::ServiceUnavailable { .. } => (
+                ErrorCode::VendorSpecific,
+                Some(VendorErrorCode::CommunicationNotReady),
             ),
             _ => (ErrorCode::SovdServerFailure, None),
         }
@@ -111,6 +128,17 @@ impl From<DiagServiceError> for ApiError {
             | DiagServiceError::AmbiguousParameters { .. } => {
                 ApiError::BadRequest(value.to_string())
             }
+            DiagServiceError::CommunicationNotReady {
+                message,
+                retry_after_seconds,
+            } => ApiError::ServiceUnavailable {
+                message,
+                retry_after_seconds,
+            },
+            DiagServiceError::CommunicationDisabled(_) => ApiError::ServiceUnavailable {
+                message: value.to_string(),
+                retry_after_seconds: SERVICE_UNAVAILABLE_FALLBACK_RETRY_AFTER_SECONDS,
+            },
             DiagServiceError::AccessDenied(_) => ApiError::Forbidden(Some(value.to_string())),
         }
     }
@@ -193,6 +221,9 @@ pub enum VendorErrorCode {
     /// A severe error occurred that needs further investigation, safe operation is still possible
     /// but this indicates an issue that should be investigated
     SevereError,
+    /// ECU communication is not currently available; retry after the interval given in the
+    /// `Retry-After` header.
+    CommunicationNotReady,
     /// Indicates that something went terribly wrong and safe operation cannot be guaranteed at
     /// this point. The application still tries to serve requests in the best effort,
     /// but correctness may be affected by this error.
@@ -324,9 +355,44 @@ impl IntoResponse for ErrorWrapper {
                     },
                 ),
             ),
+            ApiError::ServiceUnavailable {
+                message,
+                retry_after_seconds,
+            } => {
+                return service_unavailable_response(message, retry_after_seconds, schema);
+            }
         }
         .into_response()
     }
+}
+
+/// Builds the `ServiceUnavailable` response separately to keep
+/// `ErrorWrapper::into_response` within the line-count lint: a plain
+/// `(StatusCode, Json<_>)` tuple can't carry the `Retry-After` header, so
+/// this variant needs the extra header-insertion step the others don't.
+fn service_unavailable_response(
+    message: String,
+    retry_after_seconds: u64,
+    schema: Option<schemars::Schema>,
+) -> Response {
+    let mut response = (
+        StatusCode::SERVICE_UNAVAILABLE,
+        Json(
+            sovd_interfaces::error::ApiErrorResponse::<VendorErrorCode> {
+                message,
+                error_code: ErrorCode::VendorSpecific,
+                vendor_code: Some(VendorErrorCode::CommunicationNotReady),
+                parameters: None,
+                error_source: None,
+                schema,
+            },
+        ),
+    )
+        .into_response();
+    if let Ok(v) = HeaderValue::from_str(&retry_after_seconds.to_string()) {
+        response.headers_mut().insert(RETRY_AFTER, v);
+    }
+    response
 }
 
 pub(crate) fn nrc_to_api_error_response(

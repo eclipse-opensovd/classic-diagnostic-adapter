@@ -13,11 +13,13 @@
 
 use std::{
     fmt::{Display, Formatter},
+    future::Future,
+    pin::Pin,
     time::Duration,
 };
 
 use async_trait::async_trait;
-use futures::{FutureExt, future::BoxFuture};
+use futures::FutureExt;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
@@ -40,6 +42,7 @@ pub mod file_manager;
 pub mod health;
 mod schema;
 pub use schema::*;
+pub mod communication_control;
 pub mod config;
 pub mod runtime_update_api;
 pub mod storage_api;
@@ -265,6 +268,16 @@ pub enum DiagServiceError {
     NotFound(String),
     #[error("Request not supported: {0}")]
     RequestNotSupported(String),
+    #[error("Communication disabled: {0}")]
+    CommunicationDisabled(String),
+    /// Communication was not enabled and either activation is not authorized
+    /// under the current `init_mode` or activation itself failed. Carries a
+    /// configured retry hint, unlike the coarser [`CommunicationDisabled`](Self::CommunicationDisabled).
+    #[error("Communication not ready: {message}")]
+    CommunicationNotReady {
+        message: String,
+        retry_after_seconds: u64,
+    },
     #[error("Invalid database: {0}")]
     InvalidDatabase(String),
     #[error("Invalid request: {0}")]
@@ -355,15 +368,19 @@ impl Display for DiagCommAction {
     }
 }
 
+// todo alexmohr: revert this
 /// Type alias for the boxed shared shutdown signal.
 /// This provides a concrete named type for use in generic bounds.
-pub type ShutdownSignal = futures::future::Shared<BoxFuture<'static, ()>>;
+pub type ShutdownSignal =
+    futures::future::Shared<Pin<Box<dyn Future<Output = ()> + Send + Sync + 'static>>>;
 
+/// Helper function to create a `ShutdownSignal` from a future.
+/// This allows ergonomic creation without needing to type the full Pin<Box<dyn ...>> type.
 pub fn shutdown_signal<F>(future: F) -> ShutdownSignal
 where
-    F: Future<Output = ()> + Send + 'static,
+    F: Future<Output = ()> + Send + Sync + 'static,
 {
-    future.boxed().shared()
+    (Box::pin(future) as Pin<Box<dyn Future<Output = ()> + Send + Sync + 'static>>).shared()
 }
 
 /// Capability for gracefully shutting down background tasks/connections, e.g. before a

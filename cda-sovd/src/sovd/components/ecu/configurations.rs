@@ -257,9 +257,27 @@ pub(crate) mod diag_service {
             use super::*;
             use crate::sovd::tests::create_test_webserver_state;
 
+            /// A detected `VariantState` so `ensure_variant_ready` serves
+            /// immediately instead of waiting on the (unconfigured, in these
+            /// tests) variant-state watch channel.
+            fn detected_ecu_state() -> cda_interfaces::EcuState {
+                cda_interfaces::EcuState {
+                    connectivity: cda_interfaces::Connectivity::Online,
+                    variant_state: cda_interfaces::VariantState::Detected {
+                        name: "TestVariant".to_owned(),
+                        is_base_variant: true,
+                        is_fallback: false,
+                    },
+                    variant_index: Some(0),
+                }
+            }
+
             #[tokio::test]
             async fn returns_200_with_openapi_doc_when_config_exists() {
                 let mut mock_uds = MockUdsEcu::new();
+                mock_uds
+                    .expect_get_ecu_state()
+                    .returning(|_| Ok(detected_ecu_state()));
                 mock_uds
                     .expect_get_components_configuration_info()
                     .withf(|ecu, _| ecu == "TestECU")
@@ -307,6 +325,9 @@ pub(crate) mod diag_service {
             async fn returns_404_when_config_not_found() {
                 let mut mock_uds = MockUdsEcu::new();
                 mock_uds
+                    .expect_get_ecu_state()
+                    .returning(|_| Ok(detected_ecu_state()));
+                mock_uds
                     .expect_get_components_configuration_info()
                     .returning(|_, _| {
                         Ok(vec![ComponentConfigurationsInfo {
@@ -341,6 +362,9 @@ pub(crate) mod diag_service {
             #[tokio::test]
             async fn returns_error_when_config_info_lookup_fails() {
                 let mut mock_uds = MockUdsEcu::new();
+                mock_uds
+                    .expect_get_ecu_state()
+                    .returning(|_| Ok(detected_ecu_state()));
                 mock_uds
                     .expect_get_components_configuration_info()
                     .returning(|_, _| {

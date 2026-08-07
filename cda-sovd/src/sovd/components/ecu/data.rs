@@ -192,6 +192,7 @@ pub(crate) mod diag_service {
         State(WebserverEcuState { ecu_name, uds, .. }): State<WebserverEcuState<T, U>>,
     ) -> Response {
         let include_schema = query.include_schema;
+
         if query.include_sdgs {
             get_sdgs_handler::<T>(diag_service, &ecu_name, &uds, include_schema).await
         } else {
@@ -354,9 +355,27 @@ pub(crate) mod diag_service {
             use super::*;
             use crate::sovd::tests::create_test_webserver_state;
 
+            /// A detected `VariantState` so `ensure_variant_ready` serves
+            /// immediately instead of waiting on the (unconfigured, in these
+            /// tests) variant-state watch channel.
+            fn detected_ecu_state() -> cda_interfaces::EcuState {
+                cda_interfaces::EcuState {
+                    connectivity: cda_interfaces::Connectivity::Online,
+                    variant_state: cda_interfaces::VariantState::Detected {
+                        name: "TestVariant".to_owned(),
+                        is_base_variant: true,
+                        is_fallback: false,
+                    },
+                    variant_index: Some(0),
+                }
+            }
+
             #[tokio::test]
             async fn returns_200_with_openapi_doc_when_service_exists() {
                 let mut mock_uds = MockUdsEcu::new();
+                mock_uds
+                    .expect_get_ecu_state()
+                    .returning(|_| Ok(detected_ecu_state()));
                 mock_uds
                     .expect_get_components_data_info()
                     .withf(|ecu, _| ecu == "TestECU")
@@ -403,6 +422,9 @@ pub(crate) mod diag_service {
             async fn returns_404_when_service_not_found() {
                 let mut mock_uds = MockUdsEcu::new();
                 mock_uds
+                    .expect_get_ecu_state()
+                    .returning(|_| Ok(detected_ecu_state()));
+                mock_uds
                     .expect_get_components_data_info()
                     .returning(|_, _| {
                         Ok(vec![ComponentDataInfo {
@@ -436,6 +458,9 @@ pub(crate) mod diag_service {
             #[tokio::test]
             async fn returns_error_when_data_info_lookup_fails() {
                 let mut mock_uds = MockUdsEcu::new();
+                mock_uds
+                    .expect_get_ecu_state()
+                    .returning(|_| Ok(detected_ecu_state()));
                 mock_uds
                     .expect_get_components_data_info()
                     .returning(|_, _| Err(DiagServiceError::NotFound("ECU not found".to_owned())));

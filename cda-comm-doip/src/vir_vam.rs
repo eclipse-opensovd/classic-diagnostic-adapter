@@ -296,9 +296,7 @@ where
                 // always be bound by the time we get here. Log and stop rather
                 // than panic if that invariant is ever violated.
                 let Some(socket) = socket_guard.as_mut() else {
-                    tracing::error!(
-                        "Broadcast socket unexpectedly unbound; stopping vam listener"
-                    );
+                    tracing::error!("Broadcast socket unexpectedly unbound; stopping vam listener");
                     break;
                 };
                 tokio::select! {

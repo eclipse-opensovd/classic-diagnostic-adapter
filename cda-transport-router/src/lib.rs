@@ -38,7 +38,7 @@
 //!     .with_doip(doip_gateway)
 //!     .with_can(can_gateway);
 //! ```
-use std::sync::Arc;
+use std::{future::Future, pin::Pin, sync::Arc};
 
 use async_trait::async_trait;
 pub use cda_interfaces::TransportType;
@@ -430,6 +430,112 @@ impl<D: EcuGateway + FunctionalTransport + TransportProbe, C: EcuGateway + Trans
             can_gateway: self.can_gateway.clone(),
             transport_overrides: Arc::clone(&self.transport_overrides),
             ecu_bindings: Arc::clone(&self.ecu_bindings),
+            transport_state: Arc::clone(&self.transport_state),
         }
+    }
+}
+
+impl<
+    D: EcuGateway + FunctionalTransport + TransportProbe + TransportControl,
+    C: EcuGateway + TransportProbe + TransportControl,
+> DiagnosticTransportRouter<D, C>
+{
+    /// Shared body for [`TransportControl::enable`] and [`TransportControl::disable`].
+    ///
+    /// * `already_done`  – when `true`, returns `Ok(())` immediately (idempotency guard).
+    /// * `in_progress`   – state to enter before fanning out to gateways.
+    /// * `gateway_op`    – the [`TransportControl`] method to call on each gateway.
+    /// * `success_state` – state to enter when all gateways succeed.
+    async fn run_lifecycle_operation<F>(
+        &self,
+        already_done: bool,
+        in_progress: TransportState,
+        gateway_op: F,
+        success_state: TransportState,
+    ) -> Result<(), CommControlError>
+    where
+        F: for<'a> Fn(
+            &'a dyn TransportControl,
+        )
+            -> Pin<Box<dyn Future<Output = Result<(), CommControlError>> + Send + 'a>>,
+    {
+        let _lifecycle = self.transport_state.lifecycle_guard().await;
+        if already_done {
+            return Ok(());
+        }
+
+        self.transport_state.transition(in_progress).await;
+
+        let mut errors = Vec::new();
+        for gateway in [
+            self.doip_gateway
+                .as_ref()
+                .map(|g| g as &dyn TransportControl),
+            self.can_gateway
+                .as_ref()
+                .map(|g| g as &dyn TransportControl),
+        ]
+        .into_iter()
+        .flatten()
+        {
+            if let Err(e) = gateway_op(gateway).await {
+                errors.push(e.to_string());
+            }
+        }
+
+        if errors.is_empty() {
+            self.transport_state.transition(success_state).await;
+            Ok(())
+        } else {
+            self.transport_state
+                .transition(TransportState::Failed)
+                .await;
+            Err(CommControlError::InitFailedMultipleComponents(errors))
+        }
+    }
+}
+
+/// Delegates the communication lifecycle to every configured gateway.
+///
+/// `enable`/`disable` fan out to the `DoIP` and CAN gateways. The router
+/// manages its **own** [`TransportStateTracker`] independently of the trackers
+/// inside each gateway. The router's tracker is the single source of truth
+/// observed by the communication manager (via `SwappableGateway`).
+///
+/// Each gateway's `enable()`/`disable()` also transitions the gateway's own
+/// internal tracker. This is expected and harmless - those transitions serve
+/// the gateway's idempotency guard and have no effect on the router's reported
+/// state or the coordinator's view.
+///
+/// The data-path gate ([`ensure_communication_active`](DiagnosticTransportRouter::ensure_communication_active))
+/// checks only the router-level status.
+#[async_trait]
+impl<
+    D: EcuGateway + FunctionalTransport + TransportProbe + TransportControl,
+    C: EcuGateway + TransportProbe + TransportControl,
+> TransportControl for DiagnosticTransportRouter<D, C>
+{
+    async fn enable(&self) -> Result<(), CommControlError> {
+        self.run_lifecycle_operation(
+            self.transport_state.active().await,
+            TransportState::Enabling,
+            |g| Box::pin(g.enable()),
+            TransportState::Enabled,
+        )
+        .await
+    }
+
+    async fn disable(&self) -> Result<(), CommControlError> {
+        self.run_lifecycle_operation(
+            !self.transport_state.active().await,
+            TransportState::Disabling,
+            |g| Box::pin(g.disable()),
+            TransportState::Disabled,
+        )
+        .await
+    }
+
+    async fn state(&self) -> TransportState {
+        self.transport_state.state().await
     }
 }

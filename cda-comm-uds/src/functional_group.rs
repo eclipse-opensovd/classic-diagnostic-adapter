@@ -368,7 +368,7 @@ impl<S: EcuGateway + FunctionalTransport, T: EcuManager> UdsFunctionalGroup for 
         params: Option<HashMap<String, serde_json::Value>>,
         map_to_json: bool,
     ) -> Result<Self::Response, DiagServiceError> {
-        let ecu = self.uds_ecu_db(ecu_name)?;
+        let ecu = self.ecu_concluded_variant_detection(ecu_name).await?;
         let service = ecu
             .read()
             .await

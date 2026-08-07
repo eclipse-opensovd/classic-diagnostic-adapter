@@ -12,18 +12,22 @@
  */
 use std::{path::PathBuf, sync::Arc};
 
+// Type aliases for backward compatibility in this file
+use TransportControl as CommunicationControl;
 use async_trait::async_trait;
 use cda_interfaces::{
     EcuGateway, HashMap, ReusableTransportResource, SchemaProvider, Shutdown, ShutdownSignal,
     UdsEcu,
+    communication_control::TransportControl,
     datatypes::ComponentsConfig,
     health::HealthProvider,
     runtime_update_api::{
         ReloadError, RuntimeReloaderPlugin, VehicleComponentFactory, VehicleComponents,
     },
 };
+use cda_plugin_communication_management::lifecycle::access::CommunicationAccess;
 use cda_plugin_security::SecurityPluginLoader;
-use cda_sovd::{SovdLockStateProvider, UpdateGuardState, dynamic_router::DynamicRouter};
+use cda_sovd::{SovdLockStateProvider, dynamic_router::DynamicRouter};
 use tokio::sync::{Mutex, RwLock};
 
 /// Context for the runtime reload operation.
@@ -33,7 +37,7 @@ use tokio::sync::{Mutex, RwLock};
 pub struct DefaultReloadContext<Uds, Gateway, Config>
 where
     Uds: UdsEcu + SchemaProvider + Clone + Shutdown + Send + Sync + 'static,
-    Gateway: ReusableTransportResource + Shutdown,
+    Gateway: CommunicationControl + ReusableTransportResource + Shutdown,
     Config: Clone + serde::de::DeserializeOwned + Send + Sync + 'static,
 {
     /// Application configuration
@@ -43,7 +47,7 @@ where
     pub uds_manager: Arc<RwLock<Uds>>,
 
     /// Diagnostic gateway across all configured transports
-    pub diagnostic_gateway: Arc<RwLock<Gateway>>,
+    pub diagnostic_gateway: Arc<Mutex<Gateway>>,
 
     /// Dynamic router for hot-swapping routes
     pub dynamic_router: DynamicRouter,
@@ -54,26 +58,15 @@ where
     /// Lock state provider for SOVD locks
     pub lock_provider: Arc<SovdLockStateProvider>,
 
-    /// ECU execution registry for tracking in-flight operations
-    pub ecu_execution_registry: cda_sovd::EcuExecutionRegistry,
-
-    /// Update guard state
-    pub update_guard: UpdateGuardState,
-
     /// Path for flash files
     pub flash_files_path: String,
 
     /// Component configuration
     pub components_config: ComponentsConfig,
 
-    /// Handle for variant detection background task
-    pub variant_detection_handle: Mutex<Option<tokio::task::JoinHandle<()>>>,
-
     /// Health providers for monitoring
     pub health: Option<HashMap<String, Arc<dyn HealthProvider>>>,
 
-    // /// Guard that signals whether a flash transfer is in progress
-    // pub flash_transfer_guard: cda_comm_uds::FlashTransferObserver,
     /// Storage directory for runtime update files
     pub storage_dir: String,
 
@@ -82,18 +75,23 @@ where
 
     /// Shutdown signal for graceful termination
     pub shutdown_signal: ShutdownSignal,
+
+    /// Shared coordinator used by rebuilt SOVD routes.
+    pub communication_access: Arc<dyn CommunicationAccess>,
 }
 
 /// Default reload handler for runtime database and configuration updates.
 ///
 /// Implements [`RuntimeReloaderPlugin`] by:
-/// - Shutting down existing UDS and `DoIP` components
 /// - Delegating component creation to a [`VehicleComponentFactory`]
 /// - Replacing running routes via the [`DynamicRouter`]
+///
+/// Transport disable/enable is now owned by `start_execution` in the runtime-update
+/// plugin; `reload_databases` is purely a component-replacement operation.
 pub struct DefaultRuntimeReloaderPlugin<Uds, Gateway, Config, SecurityLoader, VehicleFactory>
 where
     Uds: UdsEcu + SchemaProvider + Clone + Shutdown + Send + Sync + 'static,
-    Gateway: ReusableTransportResource + Shutdown,
+    Gateway: CommunicationControl + ReusableTransportResource + Shutdown,
     Config: Clone + serde::de::DeserializeOwned + Send + Sync + 'static,
     SecurityLoader: SecurityPluginLoader,
     VehicleFactory: VehicleComponentFactory<Config, Uds, Gateway>,
@@ -105,11 +103,9 @@ where
     components_config: ComponentsConfig,
     lock_provider: Arc<SovdLockStateProvider>,
     uds_manager: Arc<RwLock<Uds>>,
-    diagnostic_gateway: Arc<RwLock<Gateway>>,
-    update_guard: UpdateGuardState,
-    ecu_execution_registry: cda_sovd::EcuExecutionRegistry,
-    variant_detection_handle: Mutex<Option<tokio::task::JoinHandle<()>>>,
+    diagnostic_gateway: Arc<Mutex<Gateway>>,
     factory: Arc<VehicleFactory>,
+    communication_access: Arc<dyn CommunicationAccess>,
     _phantom: std::marker::PhantomData<SecurityLoader>,
 }
 
@@ -120,7 +116,7 @@ where
 pub struct RuntimeReloaderConfig<Uds, Gateway, Config, VehicleFactory>
 where
     Uds: UdsEcu + SchemaProvider + Clone + Shutdown + Send + Sync + 'static,
-    Gateway: ReusableTransportResource + Shutdown,
+    Gateway: CommunicationControl + ReusableTransportResource + Shutdown,
     Config: Clone + serde::de::DeserializeOwned + Send + Sync + 'static,
     VehicleFactory: VehicleComponentFactory<Config, Uds, Gateway>,
 {
@@ -134,7 +130,7 @@ impl<Uds, Gateway, Config, VehicleFactory>
     RuntimeReloaderConfig<Uds, Gateway, Config, VehicleFactory>
 where
     Uds: UdsEcu + SchemaProvider + Clone + Shutdown + Send + Sync + 'static,
-    Gateway: ReusableTransportResource + Shutdown,
+    Gateway: CommunicationControl + ReusableTransportResource + Shutdown,
     Config: Clone + serde::de::DeserializeOwned + Send + Sync + 'static,
     VehicleFactory: VehicleComponentFactory<Config, Uds, Gateway>,
 {
@@ -155,7 +151,7 @@ impl<Uds, Gateway, Config, SecurityLoader, VehicleFactory>
     DefaultRuntimeReloaderPlugin<Uds, Gateway, Config, SecurityLoader, VehicleFactory>
 where
     Uds: UdsEcu + SchemaProvider + Clone + Shutdown + Send + Sync + 'static,
-    Gateway: EcuGateway + ReusableTransportResource + Shutdown,
+    Gateway: EcuGateway + CommunicationControl + ReusableTransportResource + Shutdown,
     Config: Clone + serde::de::DeserializeOwned + Send + Sync + 'static,
     SecurityLoader: SecurityPluginLoader,
     VehicleFactory: VehicleComponentFactory<Config, Uds, Gateway>,
@@ -172,10 +168,8 @@ where
             lock_provider: config.infrastructure.lock_provider,
             uds_manager: config.infrastructure.uds_manager,
             diagnostic_gateway: config.infrastructure.diagnostic_gateway,
-            update_guard: config.infrastructure.update_guard,
-            ecu_execution_registry: config.infrastructure.ecu_execution_registry,
-            variant_detection_handle: config.infrastructure.variant_detection_handle,
             factory: config.factory,
+            communication_access: config.infrastructure.communication_access,
             _phantom: std::marker::PhantomData,
         }
     }
@@ -186,7 +180,7 @@ impl<Uds, Gateway, Config, SecurityLoader, VehicleFactory> RuntimeReloaderPlugin
     for DefaultRuntimeReloaderPlugin<Uds, Gateway, Config, SecurityLoader, VehicleFactory>
 where
     Uds: UdsEcu + SchemaProvider + Clone + Shutdown + Send + Sync + 'static,
-    Gateway: EcuGateway + ReusableTransportResource + Shutdown,
+    Gateway: EcuGateway + CommunicationControl + ReusableTransportResource + Shutdown,
     Config: Clone + serde::de::DeserializeOwned + Send + Sync + 'static,
     SecurityLoader: SecurityPluginLoader,
     VehicleFactory: VehicleComponentFactory<Config, Uds, Gateway>,
@@ -194,73 +188,63 @@ where
     async fn reload_databases(&self, mdd_paths: Vec<PathBuf>) -> Result<(), ReloadError> {
         let cfg = self.config.read().await.clone();
 
-        // Shut down old components BEFORE creating new ones to avoid port/socket
-        // conflicts. Reuse the existing UDP socket so that there is never a second
-        // socket bound to the same DoIP port (which would cause non-deterministic
-        // VAM delivery between old and new listeners).
-        if let Some(variant_detection_handle) = self.variant_detection_handle.lock().await.take() {
-            variant_detection_handle.abort();
-            let _ = variant_detection_handle.await;
-        }
+        let reusable_transport_resource = self
+            .diagnostic_gateway
+            .lock()
+            .await
+            .reusable_transport_resource();
 
-        self.uds_manager.write().await.shutdown().await;
-        let reusable_transport_resource = {
-            let gw = self.diagnostic_gateway.write().await;
-            let resource = gw.reusable_transport_resource();
-            gw.shutdown().await;
-            resource
-        };
+        let components = self
+            .factory
+            .create(&cfg, &mdd_paths, reusable_transport_resource)
+            .await?;
 
         let VehicleComponents {
             uds_manager,
             diagnostic_gateway,
-            file_managers: file_manager,
-            variant_detection_handle,
+            file_managers,
             functional_group_config,
-        } = self
-            .factory
-            .create(
-                &cfg,
-                &mdd_paths,
-                self.update_guard.busy_handle(),
-                reusable_transport_resource,
-            )
-            .await?;
+        } = components;
 
-        // Replace with new components
-        *self.variant_detection_handle.lock().await = Some(variant_detection_handle);
-        *self.uds_manager.write().await = uds_manager.clone();
-        *self.diagnostic_gateway.write().await = diagnostic_gateway;
+        {
+            let mut gateway = self.diagnostic_gateway.lock().await;
+            let old_gateway = std::mem::replace(&mut *gateway, diagnostic_gateway);
+            // Shut down the old gateway outside the lock to avoid holding it during I/O.
+            drop(gateway);
+            old_gateway.shutdown().await;
+        }
 
-        // Update lock entries, to make sure new ECUs or removed ECUs are updated.
+        let old_uds_manager = {
+            let mut current_uds_manager = self.uds_manager.write().await;
+            std::mem::replace(&mut *current_uds_manager, uds_manager.clone())
+        };
+        old_uds_manager.shutdown().await;
+
         let ecu_names = uds_manager.get_physical_ecus().await;
         self.lock_provider
             .update_entries(ecu_names)
             .await
-            .map_err(|e| ReloadError(e.to_string()))?;
+            .map_err(|e| ReloadError::General(e.to_string()))?;
         let current_locks = self.lock_provider.current_locks().await;
 
-        // Build and replace vehicle routes
-        let (vehicle_router, new_registry) =
-            cda_sovd::build_vehicle_routes::<_, _, SecurityLoader>(
-                cda_sovd::VehicleConfig {
-                    flash_files_path: self.flash_files_path.clone(),
-                    functional_group_config,
-                    components_config: self.components_config.clone(),
-                },
-                cda_sovd::VehicleResources {
-                    ecu_uds: uds_manager,
-                    file_manager,
-                    locks: current_locks,
-                    update_in_progress: self.update_guard.busy_handle(),
-                },
-            )
-            .await;
-        self.ecu_execution_registry.replace(&new_registry).await;
+        let vehicle_router = cda_sovd::build_vehicle_routes::<_, _, SecurityLoader>(
+            cda_sovd::VehicleConfig {
+                flash_files_path: self.flash_files_path.clone(),
+                functional_group_config,
+                components_config: self.components_config.clone(),
+            },
+            cda_sovd::VehicleResources {
+                ecu_uds: uds_manager,
+                file_managers,
+                locks: current_locks,
+                communication_access: Arc::clone(&self.communication_access),
+            },
+        )
+        .await;
         self.dynamic_router
             .replace_routes(&self.vehicle_route_handle, vehicle_router)
             .await
-            .map_err(|e| ReloadError(format!("Failed to replace vehicle routes: {e}")))?;
+            .map_err(|e| ReloadError::ReplacementFailure(e.to_string()))?;
 
         Ok(())
     }
@@ -283,9 +267,9 @@ where
 {
     let content = tokio::fs::read_to_string(&config_path)
         .await
-        .map_err(|e| ReloadError(format!("Failed to read config: {e}")))?;
+        .map_err(|e| ReloadError::General(format!("Failed to read config: {e}")))?;
     let parsed = toml::from_str(&content)
-        .map_err(|e| ReloadError(format!("Failed to parse config: {e}")))?;
+        .map_err(|e| ReloadError::General(format!("Failed to parse config: {e}")))?;
     *config.write().await = parsed;
     Ok(())
 }
@@ -318,7 +302,7 @@ mod tests {
         assert!(result.is_err());
         let err = result.unwrap_err();
         assert!(
-            err.0.contains("Failed to read config"),
+            err.to_string().contains("Failed to read config"),
             "unexpected error: {err:?}"
         );
     }
@@ -334,7 +318,7 @@ mod tests {
         assert!(result.is_err());
         let err = result.unwrap_err();
         assert!(
-            err.0.contains("Failed to parse config"),
+            err.to_string().contains("Failed to parse config"),
             "unexpected error: {err:?}"
         );
     }
@@ -360,7 +344,7 @@ mod tests {
         assert!(result.is_err());
         let err = result.unwrap_err();
         assert!(
-            err.0.contains("Failed to parse config"),
+            err.to_string().contains("Failed to parse config"),
             "unexpected error: {err:?}"
         );
     }

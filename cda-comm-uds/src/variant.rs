@@ -16,13 +16,31 @@ use std::time::Duration;
 use async_trait::async_trait;
 use cda_interfaces::{
     DiagComm, DiagServiceError, DynamicPlugin, EcuGateway, EcuManager, EcuState, HashMap,
-    HashMapExtensions, PayloadDecoder, UdsVariant,
+    HashMapExtensions, PayloadDecoder, UdsVariant, VariantState,
     communication_control::{CommunicationInitializer, error::CommControlError},
     dlt_ctx,
+};
+use cda_plugin_communication_management::lifecycle::{
+    operation::ActivationCause, state::CommunicationState,
 };
 use tokio::sync::RwLock;
 
 use crate::UdsManager;
+
+/// Bound on how long [`UdsManager::ecu_concluded_variant_detection`] awaits a specific ECU's
+/// variant detection before giving up and returning a pending response.
+///
+/// Detection's own worst-case retry budget runs longer than this (up to
+/// `OFFLINE_VERDICT_RETRIES` (3) retries at `OFFLINE_VERDICT_RETRY_DELAY` (1s)
+/// intervals, each preceded by sending every detection request with its own
+/// ~10s timeout, for a worst case around 43s), so this gate can time out
+/// before a detection genuinely in flight concludes. That is by design, not a
+/// bug: detection keeps running in the background regardless of this gate, so
+/// timing out here only means this particular call returns
+/// `CommunicationNotReady` instead of blocking further; a following retry
+/// picks up the result once detection actually settles. Kept comfortably
+/// under the 30s/60s defaults common to HTTP clients and reverse proxies.
+const VARIANT_READINESS_TIMEOUT: Duration = Duration::from_secs(1);
 
 /// Result of evaluating every member of a duplicate group against one set of
 /// detection responses.
@@ -322,6 +340,76 @@ impl<S: EcuGateway, T: EcuManager> UdsManager<S, T> {
             GroupDetectionResult::NoOnlineEcu | GroupDetectionResult::NoDetection => {}
         }
     }
+
+    /// Requires `ecu_name`'s variant detection to have concluded before serving
+    /// variant-dependent content (service catalogs, session/security/mode state,
+    /// DTCs, or a data/config/operation send).
+    ///
+    /// Returns the ECU's database handle on success, so callers that need it
+    /// anyway (almost all of them, right after this call) can reuse this
+    /// lookup instead of a second `uds_ecu_db` call.
+    ///
+    /// `CommunicationState::Enabled` means activation completed, **not** that
+    /// variant detection concluded: detection is dispatched per ECU and settles
+    /// asynchronously (see ADR-006). Per-ECU [`VariantState`] is the actual
+    /// readiness signal.
+    ///
+    /// - Steady state: if the ECU's `VariantState` has already left
+    ///   `NotTested`, returns immediately.
+    /// - Unknown ECU: the initial lookup itself fails with `NotFound`, so
+    ///   there's no separate case to special-case here -- the caller gets the
+    ///   same error it would have gotten from its own follow-up lookup.
+    /// - If an activation is in flight (`Enabling`), or communication is already
+    ///   `Enabled`, awaits the ECU's variant-state watch receiver, bounded by
+    ///   [`VARIANT_READINESS_TIMEOUT`], then serves.
+    /// - On timeout, returns [`DiagServiceError::CommunicationNotReady`], so the
+    ///   caller keeps retrying against a detection that is (per D3/ADR-006)
+    ///   guaranteed to eventually settle every ECU into a defined state.
+    /// - Otherwise (`Disabled`/`Error`, nothing in flight): fires a non-blocking
+    ///   activation request (mode-gated -- a no-op under `Disabled`, matching its
+    ///   "stay quiet" contract) so a later request finds a generation in flight
+    ///   and waits, then returns `CommunicationNotReady` immediately without
+    ///   blocking this request.
+    pub(crate) async fn ecu_concluded_variant_detection(
+        &self,
+        ecu_name: &str,
+    ) -> Result<&RwLock<T>, DiagServiceError> {
+        let ecu = self.uds_ecu_db(ecu_name)?;
+
+        if ecu.read().await.ecu_status().variant_state != VariantState::NotTested {
+            return Ok(ecu);
+        }
+
+        let mut rx = ecu.read().await.runtime_state().variant_state_rx();
+
+        let detection_in_flight = matches!(
+            self.communication_access.state(),
+            CommunicationState::Enabling | CommunicationState::Enabled
+        );
+
+        if !detection_in_flight {
+            self.communication_access
+                .request_activate(ActivationCause::DiagnosticRequest);
+            return Err(DiagServiceError::CommunicationNotReady {
+                message: "communication is not currently enabled".to_owned(),
+                retry_after_seconds: self.communication_retry_after_seconds,
+            });
+        }
+
+        match tokio::time::timeout(
+            VARIANT_READINESS_TIMEOUT,
+            rx.wait_for(|state| *state != VariantState::NotTested),
+        )
+        .await
+        {
+            Ok(Ok(_)) => Ok(ecu),
+            // Timeout, or the watch sender was dropped (ECU torn down mid-wait).
+            _ => Err(DiagServiceError::CommunicationNotReady {
+                message: "Variant detection has not concluded".to_owned(),
+                retry_after_seconds: self.communication_retry_after_seconds,
+            }),
+        }
+    }
 }
 
 #[async_trait]
@@ -449,6 +537,14 @@ impl<S: EcuGateway, T: EcuManager> UdsVariant for UdsManager<S, T> {
         let logical_address = ecu.read().await.logical_address();
         Ok(logical_address)
     }
+
+    async fn variant_state_rx(
+        &self,
+        ecu_name: &str,
+    ) -> Option<tokio::sync::watch::Receiver<VariantState>> {
+        let ecu = self.ecus.get(ecu_name)?;
+        Some(ecu.read().await.runtime_state().variant_state_rx())
+    }
 }
 
 #[async_trait::async_trait]
@@ -458,6 +554,7 @@ impl<S: EcuGateway, T: EcuManager> CommunicationInitializer for UdsManager<S, T>
     }
 
     async fn initialize(&self) -> Result<(), CommControlError> {
+        self.start_variant_detection_listener().await?;
         self.start_variant_detection().await;
         Ok(())
     }

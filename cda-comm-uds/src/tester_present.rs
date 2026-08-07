@@ -159,6 +159,10 @@ impl<S: EcuGateway, T: EcuManager> UdsManager<S, T> {
             }
         };
 
+        // Background keep-alive traffic must never itself bring communication
+        // up; only a genuine diagnostic request may trigger activation.
+        let _guard = self.acquire_communication_guard()?;
+
         match self
             .send_with_raw_payload(&control_msg.ecu, payload, None, false)
             .await

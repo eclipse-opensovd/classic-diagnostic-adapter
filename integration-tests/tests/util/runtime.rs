@@ -12,13 +12,14 @@
  */
 
 use std::{
-    sync::{Arc, LazyLock},
+    sync::LazyLock,
     time::{Duration, Instant},
 };
 
 use cda_health::config::HealthConfig;
 use cda_interfaces::{
     FunctionalDescriptionConfig, HashMap, HashMapExtensions,
+    communication_control::CommunicationSettings,
     config::ConfigSanity,
     datatypes::{
         ComParamConfig, ComParamPrecedence, ComParams, ComponentsConfig, DatabaseNamingConvention,
@@ -29,11 +30,11 @@ use cda_plugin_security::{DefaultSecurityPlugin, DefaultSecurityPluginData};
 use cda_tracing::LoggingConfig;
 use http::{Method, StatusCode};
 use opensovd_cda_lib::{
-    cda_version,
     config::configfile::{
         CanConfig, CanEcuMapping, Configuration, DatabaseConfig, EcuComParams, EcuConfig,
         RuntimeUpdateConfig, ServerConfig, StrictConfig, TransportOverride, TransportType,
     },
+    update::UpdatePluginBuilder,
 };
 use sovd_interfaces::apps::sovd2uds::data::network_structure::get::Response as NetworkStructureResponse;
 use tokio::sync::{Mutex, MutexGuard, OnceCell};
@@ -76,8 +77,6 @@ const CAN_BUS_NAME: &str = "vcan0";
 /// socketcand host CDA + ecu-sim use *inside* their containers: the socketcand
 /// service is reachable by its compose service name over the bridge network.
 const CAN_DOCKER_SOCKETCAND_HOST: &str = "socketcand";
-
-const MAIN_HEALTH_COMPONENT_KEY: &str = "main";
 
 pub(crate) struct TestRuntime {
     pub(crate) config: Configuration,
@@ -318,6 +317,7 @@ fn base_test_config(
             init_storage_from_database_path: true,
             ..RuntimeUpdateConfig::default()
         },
+        communication: CommunicationSettings::default(),
         strict: StrictConfig::default(),
     })
 }
@@ -441,128 +441,42 @@ pub(crate) fn host() -> String {
 }
 
 pub(crate) fn start_cda(config: Configuration) {
-    // Some unwraps are used here, this is on purpose
-    // as we want the tests to fail hard if CDA fails to start.
-    TOKIO_RUNTIME.spawn(async move {
-        let webserver_config = cda_sovd::WebServerConfig {
-            host: config.server.address.clone(),
-            port: config.server.port,
-        };
-
-        let (shutdown_tx, mut shutdown_rx) = tokio::sync::broadcast::channel(1);
-        *CDA_SHUTDOWN.lock().await = Some(shutdown_tx);
-
-        let clonable_shutdown_signal = cda_interfaces::shutdown_signal(async move {
-            shutdown_rx.recv().await.ok();
-        });
-
-        // Launch the webserver with deferred initialization
-        let (dynamic_router, webserver_join_handle) =
-            match cda_sovd::launch_webserver(webserver_config, clonable_shutdown_signal.clone())
-                .await
-            {
-                Ok((router, jh)) => (router, jh),
-                Err(e) => {
-                    tracing::error!(error = ?e, "Failed to launch webserver");
-                    std::process::exit(1);
-                }
-            };
-
-        let health = cda_health::add_health_routes(&dynamic_router, cda_version().to_owned()).await;
-        let main_health_provider = {
-            let provider = Arc::new(cda_health::StatusHealthProvider::new(
-                cda_health::Status::Starting,
-            ));
-            health
-                .register_provider(
-                    MAIN_HEALTH_COMPONENT_KEY,
-                    Arc::clone(&provider) as Arc<dyn cda_health::HealthProvider>,
-                )
-                .await
-                .map_err(|e| {
-                    tracing::error!(error = %e, "Failed to register main health provider");
-                    std::process::exit(1);
-                })
-                .ok();
-            provider
-        };
-        let health = Some(health);
-
-        let vehicle_data = opensovd_cda_lib::load_vehicle_data::<DefaultSecurityPluginData>(
-            &config,
-            clonable_shutdown_signal.clone(),
-            health.as_ref(),
-        )
-        .await
-        .map_err(|e| {
-            tracing::error!({error=?e});
-            std::process::exit(1);
-        })
-        .unwrap();
-
-        // Register version endpoints
-        if let serde_json::Value::Object(version_info) = serde_json::json!({
-            "id": "version",
-            "data": {
-                "name": "Eclipse OpenSOVD Classic Diagnostic Adapter",
-                "api": {
-                    "version": "1.1"
+    start_cda_with_setup(
+        config,
+        opensovd_cda_lib::Setup::<DefaultSecurityPluginData, DefaultSecurityPlugin>::new()
+            .with_existing_tracing()
+            .with_update_plugin(opensovd_cda_lib::update::update_plugin_fn(
+                |infra: opensovd_cda_lib::setup::CdaRuntime<DefaultSecurityPluginData>| async {
+                    opensovd_cda_lib::update::create_default_update_plugin::<
+                        DefaultSecurityPluginData,
+                        DefaultSecurityPlugin,
+                    >(infra)
+                    .await
                 },
-                "implementation": {
-                    "version": cda_version(),
-                }
-            }
-        }) {
-            cda_sovd::add_static_data_endpoint(
-                &dynamic_router,
-                version_info.clone(),
-                "/vehicle/v15/apps/sovd2uds/data/version",
-            )
-            .await;
-            cda_sovd::add_static_data_endpoint(
-                &dynamic_router,
-                version_info,
-                "/vehicle/v15/data/version",
-            )
-            .await;
-        }
+            )),
+    );
+}
 
-        cda_sovd::add_vehicle_routes::<_, _, DefaultSecurityPlugin>(
-            &dynamic_router,
-            cda_sovd::VehicleConfig {
-                flash_files_path: config.flash_files_path.clone(),
-                functional_group_config: config.functional_description,
-                components_config: config.components,
-            },
-            cda_sovd::VehicleResources {
-                ecu_uds: vehicle_data.uds_manager,
-                file_manager: vehicle_data.file_managers,
-                locks: vehicle_data.locks,
-                update_in_progress: Arc::new(std::sync::atomic::AtomicBool::new(false)),
-            },
-        )
-        .await
-        .map_err(|e| {
-            tracing::error!({error=?e});
-            std::process::exit(1);
-        })
-        .unwrap();
+/// Start a CDA instance on the shared `TOKIO_RUNTIME` with a custom [`Setup`].
+///
+/// The shutdown sender is stored in `CDA_SHUTDOWN` so that [`stop_cda`] and
+/// [`restart_cda`] work regardless of which setup was used.
+pub(crate) fn start_cda_with_setup<UPB>(
+    config: Configuration,
+    setup: opensovd_cda_lib::Setup<DefaultSecurityPluginData, DefaultSecurityPlugin, UPB>,
+) where
+    UPB: UpdatePluginBuilder<DefaultSecurityPluginData> + Send + 'static,
+{
+    let (shutdown_tx, mut shutdown_rx) = tokio::sync::broadcast::channel(1);
+    let setup = setup.with_shutdown_signal(cda_interfaces::shutdown_signal(async move {
+        shutdown_rx.recv().await.ok();
+    }));
 
-        tracing::info!("CDA fully initialized and ready to serve requests");
-        main_health_provider
-            .update_status(cda_health::Status::Up)
-            .await;
-
-        // Wait for shutdown signal
-        clonable_shutdown_signal.await;
-        tracing::info!("Shutting down...");
-        webserver_join_handle
+    TOKIO_RUNTIME.spawn(async move {
+        *CDA_SHUTDOWN.lock().await = Some(shutdown_tx);
+        opensovd_cda_lib::run_with_ext_from_config(config, setup)
             .await
-            .map_err(|e| {
-                tracing::error!({error=?e}, "Webserver task join error");
-                std::process::exit(1);
-            })
-            .ok();
+            .expect("CDA exited with error");
     });
 }
 
@@ -1001,6 +915,7 @@ fn docker_compose_restart(container: Option<String>) -> Result<(), TestingError>
 
 pub(crate) async fn restart_cda(config: &Configuration) -> Result<(), TestingError> {
     if use_docker() {
+        write_config_toml(&test_container_dir()?, config.clone())?;
         docker_compose_restart(Some("cda".to_owned()))?;
     } else {
         stop_cda().await?;

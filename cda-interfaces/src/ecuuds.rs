@@ -17,7 +17,7 @@ use async_trait::async_trait;
 
 use crate::{
     DiagComm, DiagServiceError, DoipComParams, DynamicPlugin, EcuAddresses, EcuState,
-    EcuStateManager, HashMap, SecurityAccess, TesterPresentType, UdsComParams,
+    EcuStateManager, HashMap, SecurityAccess, TesterPresentType, UdsComParams, VariantState,
     datatypes::{
         ComplexComParamValue, ComponentConfigurationsInfo, ComponentDataInfo,
         ComponentOperationsInfo, DataTransferMetaData, DtcCode, DtcExtendedInfo,
@@ -588,6 +588,18 @@ pub trait UdsVariant {
     /// # Errors
     /// Will return Err if the ECU does not exist.
     async fn get_logical_address(&self, ecu_name: &str) -> Result<u16, DiagServiceError>;
+
+    /// Subscribes to the given ECU's variant-detection state.
+    ///
+    /// Seeded with the ECU's current state, so a subscriber arriving after
+    /// detection already concluded observes it immediately without awaiting
+    /// a change. Used to gate variant-dependent content on detection's
+    /// conclusion instead of polling. Returns `None` if the ECU does not
+    /// exist.
+    async fn variant_state_rx(
+        &self,
+        ecu_name: &str,
+    ) -> Option<tokio::sync::watch::Receiver<VariantState>>;
 }
 
 /// UDS communication interface - composite supertrait combining all UDS subtraits.
@@ -957,6 +969,10 @@ pub mod mock {
                 &self,
                 ecu_name: &str,
             ) -> Result<u16, DiagServiceError>;
+            async fn variant_state_rx(
+                &self,
+                ecu_name: &str,
+            ) -> Option<tokio::sync::watch::Receiver<crate::VariantState>>;
         }
 
         #[async_trait]

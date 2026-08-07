@@ -76,7 +76,7 @@ impl<S: EcuGateway, T: EcuManager> UdsSecurity for UdsManager<S, T> {
         security_plugin: &DynamicPlugin,
         expiration: Option<Duration>,
     ) -> Result<(SecurityAccess, Self::Response), DiagServiceError> {
-        let ecu_diag_service = self.uds_ecu_db(ecu_name)?;
+        let ecu_diag_service = self.ecu_concluded_variant_detection(ecu_name).await?;
         let security_access = ecu_diag_service
             .read()
             .await
@@ -116,7 +116,7 @@ impl<S: EcuGateway, T: EcuManager> UdsSecurity for UdsManager<S, T> {
         ecu_name: &str,
         level: &str,
     ) -> Result<String, DiagServiceError> {
-        let ecu_diag_service = self.uds_ecu_db(ecu_name)?;
+        let ecu_diag_service = self.ecu_concluded_variant_detection(ecu_name).await?;
         let security_access = ecu_diag_service
             .read()
             .await

@@ -285,6 +285,10 @@ fn parse_data_request(
 
 /// Fetches the optional response schema and sends the UDS diagnostic request.
 /// Returns the raw response and optional schema on success, or an [`ApiError`] on failure.
+#[allow(
+    clippy::too_many_arguments,
+    reason = "Struct would not improve readability here"
+)]
 async fn execute_uds_data_request<T: UdsEcu + SchemaProvider + Clone>(
     gateway: &T,
     ecu_name: &str,
@@ -393,6 +397,10 @@ fn format_data_response<R: cda_interfaces::diagservices::DiagServiceResponse>(
 
 /// Orchestrates [`parse_data_request`], [`execute_uds_data_request`], and
 /// [`format_data_response`] to handle a complete ECU data service request.
+#[allow(
+    clippy::too_many_arguments,
+    reason = "Struct would not improve readability here"
+)]
 async fn data_request<T: UdsEcu + SchemaProvider + Clone>(
     service: DiagComm,
     ecu_name: &str,

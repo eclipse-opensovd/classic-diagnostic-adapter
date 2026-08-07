@@ -27,17 +27,13 @@
 //!
 //! The concrete plugin implementation lives in `cda-plugin-runtime-update`.
 
-use std::{
-    path::PathBuf,
-    str::FromStr,
-    sync::{Arc, atomic::AtomicBool},
-};
+use std::{path::PathBuf, str::FromStr, sync::Arc};
 
 use async_trait::async_trait;
 use bytes::Bytes;
 use serde::{Deserialize, Deserializer, Serialize};
 use strum_macros::EnumString;
-use tokio::{sync::Mutex, task::JoinHandle};
+use tokio::sync::Mutex;
 
 use crate::{
     FunctionalDescriptionConfig, HashMap, Shutdown, UdsQuery,
@@ -48,17 +44,6 @@ use crate::{
 
 mod error;
 pub use error::{ConfigValidationError, ReloadError, RuntimeUpdateError, VerificationError};
-
-/// Guards against activity during a runtime update.
-pub trait ActivityGuard: Send + Sync + 'static {
-    fn is_active(&self) -> bool;
-}
-
-impl ActivityGuard for Vec<Box<dyn ActivityGuard>> {
-    fn is_active(&self) -> bool {
-        self.iter().any(|g| g.is_active())
-    }
-}
 
 /// The result of creating a fresh set of vehicle components inside
 /// [`VehicleComponentFactory::create`].
@@ -71,12 +56,11 @@ where
     pub uds_manager: UdsManager,
     pub file_managers: HashMap<String, File>,
     pub diagnostic_gateway: Gateway,
-    pub variant_detection_handle: JoinHandle<()>,
     pub functional_group_config: FunctionalDescriptionConfig,
 }
 
 /// Async factory that recreates vehicle components (UDS manager, diagnostic gateway,
-/// file managers, variant-detection task) from a configuration snapshot and new MDD paths.
+/// file managers) from a configuration snapshot and new MDD paths.
 ///
 ///
 /// # Type parameters
@@ -101,7 +85,6 @@ where
         &self,
         config: &Config,
         mdd_paths: &[PathBuf],
-        update_in_progress: Arc<AtomicBool>,
         reusable_transport_resource: Option<Arc<Mutex<Gateway::TransportResource>>>,
     ) -> Result<VehicleComponents<Uds, Gateway, Self::FileManager>, ReloadError>;
 }
