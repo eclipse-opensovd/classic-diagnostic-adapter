@@ -19,8 +19,10 @@ use std::{
 use cda_interfaces::{
     Connectivity, DiagComm, DiagServiceError, DynamicPlugin, EcuGateway, EcuManager, EcuState,
     PayloadDecoder, ServicePayload, TransmissionParameters, UdsResponse, UdsTransport, UdsVariant,
-    VariantDetection, VariantState, datatypes::RetryPolicy, diagservices::UdsPayloadData, dlt_ctx,
-    service_ids,
+    VariantDetection, VariantState,
+    datatypes::RetryPolicy,
+    diagservices::{DiagServiceResponse, UdsPayloadData},
+    dlt_ctx, service_ids,
 };
 use tokio::sync::{RwLock, Semaphore, mpsc};
 
@@ -139,11 +141,13 @@ impl<S: EcuGateway, T: EcuManager> UdsManager<S, T> {
             Ok(None) => {
                 // Only reachable when `expect_response` was `false`, i.e. the
                 // suppress-positive-response bit was set: the ECU legitimately
-                // did not respond, so there is nothing to decode.
-                Err(DiagServiceError::NoResponse(format!(
-                    "No response expected for {} due to suppressPosRspMsgIndicationBit",
-                    service.name
-                )))
+                // did not respond. This is a success, not an error - mirror the
+                // treatment already applied on the raw path (`send_genericservice`,
+                // which maps `Ok(None)` to an empty result) by returning a
+                // positive, empty response. Callers render it as no-content.
+                Ok(<T as PayloadDecoder>::Response::empty_positive(
+                    service.clone(),
+                ))
             }
             Err(e) => Err(e),
         };
@@ -767,7 +771,7 @@ mod send_tests {
     use cda_interfaces::{
         DiagServiceError, EcuAddresses, EcuGateway, EcuRuntimeState, EcuStateManager, HashMap,
         HashMapExtensions, ServicePayload, TransmissionParameters, UdsResponse, VariantDetection,
-        datatypes::FaultConfig,
+        datatypes::FaultConfig, service_ids,
     };
     use tokio::sync::{RwLock, mpsc};
 
@@ -990,6 +994,43 @@ mod send_tests {
 
         assert!(result.is_ok());
         assert!(result.expect("should be Ok").is_none());
+    }
+
+    /// A request with `suppressPosRspMsgIndicationBit` set (here
+    /// `ECUReset 0x81`) drives `expect_response = false`, so
+    /// `send_with_raw_payload` completes with `Ok(None)` once the frame is
+    /// (n)ack'd - never a `Timeout`/`NoResponse` error - even though the ECU
+    /// deliberately sends no response. `send_without_variant_guard` then
+    /// converts this `Ok(None)` into a positive, empty decoded response via
+    /// `DiagServiceResponse::empty_positive` (unit-tested in cda-core), which
+    /// callers render as no-content instead of an error.
+    #[tokio::test]
+    async fn test_send_with_raw_payload_suppress_positive_response_returns_ok_none() {
+        let gateway = TestGateway {
+            send_fn: Arc::new(|response_tx, _| {
+                // Only an ack (None); the ECU sends no positive response.
+                response_tx.try_send(Ok(None)).ok();
+                Ok(())
+            }),
+        };
+        let manager = make_manager(gateway);
+        // ECUReset (0x11) with SPRMIB bit set on the subfunction byte (0x81).
+        let payload = make_test_payload(service_ids::ECU_RESET, &[0x81]);
+        assert!(
+            payload.is_suppress_positive_response(),
+            "test payload must have the suppress-positive-response bit set"
+        );
+        let expect_response = !payload.is_suppress_positive_response();
+
+        let result = manager
+            .send_with_raw_payload("TestECU", payload, None, expect_response)
+            .await;
+
+        assert!(result.is_ok(), "expected Ok(None), got {result:?}");
+        assert!(
+            result.expect("should be Ok").is_none(),
+            "suppressed response must yield Ok(None), not a decoded payload"
+        );
     }
 
     #[tokio::test]
