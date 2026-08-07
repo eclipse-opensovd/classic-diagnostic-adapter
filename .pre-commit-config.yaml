@@ -75,7 +75,6 @@ repos:
         args:
           - --allowed-chars=µ,§
       - id: no-banner-comment-check
-        exclude: ^comm-mbedtls/
       - id: validate-cargo-lints
       - id: cargo-fmt
         name: make fmt-check
