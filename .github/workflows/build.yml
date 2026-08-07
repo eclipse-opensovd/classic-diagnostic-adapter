@@ -31,6 +31,21 @@ jobs:
   versions:
     uses: ./.github/workflows/tool-versions.yml
 
+  bazel:
+    name: Bazel (Ubuntu)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v6
+        with:
+          submodules: false
+      - name: Install Bazelisk
+        uses: bazelbuild/setup-bazelisk@v3
+      - name: Verify Bazel configuration
+        run: make bazel-check
+      - name: Build Bazel targets
+        run: make bazel-build
+
   features:
     needs: versions
     runs-on: ubuntu-latest
