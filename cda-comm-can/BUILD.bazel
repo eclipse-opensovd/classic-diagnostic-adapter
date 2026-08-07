@@ -12,19 +12,29 @@
 load("//bazel:rust_crate.bzl", "workspace_rust_library")
 
 workspace_rust_library(
-    name = "opensovd_axum_extra",
+    name = "cda_comm_can",
     srcs = glob(["src/**/*.rs"]),
     crate_deps = [
-        "aide",
-        "axum",
-        "http",
+        "futures",
+        "hex",
+        "schemars",
+        "serde",
+        "thiserror",
+        "tokio",
+        "tokio-util",
+        "tracing",
     ],
-    crate_name = "opensovd_axum_extra",
+    crate_features = select({
+        "//:can_enabled": ["can"],
+        "//conditions:default": [],
+    }),
+    crate_name = "cda_comm_can",
     crate_root = "src/lib.rs",
-    rustc_flags = [
-        "--cfg=feature=\"forwarded\"",
-        "--cfg=feature=\"host-header\"",
-        "--cfg=feature=\"uri-authority\"",
-        "--cfg=feature=\"x-forwarded-host\"",
-    ],
+    proc_macro_crate_deps = ["async-trait"],
+    deps = [
+        "//cda-interfaces:cda_interfaces",
+    ] + select({
+        "//:can_enabled": ["@can_crates//:tokio-socketcan-isotp"],
+        "//conditions:default": [],
+    }),
 )

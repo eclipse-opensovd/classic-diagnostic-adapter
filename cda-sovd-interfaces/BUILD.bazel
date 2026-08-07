@@ -12,19 +12,18 @@
 load("//bazel:rust_crate.bzl", "workspace_rust_library")
 
 workspace_rust_library(
-    name = "opensovd_axum_extra",
+    name = "sovd_interfaces",
     srcs = glob(["src/**/*.rs"]),
     crate_deps = [
-        "aide",
-        "axum",
-        "http",
+        "chrono",
+        "schemars",
+        "serde",
+        "serde_json",
+        "strum",
     ],
-    crate_name = "opensovd_axum_extra",
+    crate_name = "sovd_interfaces",
     crate_root = "src/lib.rs",
-    rustc_flags = [
-        "--cfg=feature=\"forwarded\"",
-        "--cfg=feature=\"host-header\"",
-        "--cfg=feature=\"uri-authority\"",
-        "--cfg=feature=\"x-forwarded-host\"",
+    deps = [
+        "//cda-interfaces:cda_interfaces",
     ],
 )

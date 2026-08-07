@@ -9,15 +9,11 @@
 #
 # SPDX-License-Identifier: Apache-2.0
 
-[styles]
-c = ["*.rs", "*.kt", "*.kts", "*.fbs"]
-python = [
-  ".env.example",
-  ".gitkeep",
-  ".markdownlintignore",
-  ".yamlfmt",
-  "*.bazel",
-  "*.bzl",
-  "*.env",
-]
-html = ["*.odx-*"]
+common --registry=https://bcr.bazel.build
+
+build --incompatible_strict_action_env
+build --lockfile_mode=error
+
+build:can --define=can=true
+build:macos-clt --repo_env=DEVELOPER_DIR=/Library/Developer/CommandLineTools
+build:macos-clt --action_env=DEVELOPER_DIR=/Library/Developer/CommandLineTools

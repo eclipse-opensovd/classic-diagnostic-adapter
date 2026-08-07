@@ -12,19 +12,23 @@
 load("//bazel:rust_crate.bzl", "workspace_rust_library")
 
 workspace_rust_library(
-    name = "opensovd_axum_extra",
+    name = "cda_health",
     srcs = glob(["src/**/*.rs"]),
     crate_deps = [
         "aide",
         "axum",
-        "http",
+        "chrono",
+        "futures",
+        "schemars",
+        "serde",
+        "thiserror",
+        "tokio",
     ],
-    crate_name = "opensovd_axum_extra",
+    crate_name = "cda_health",
     crate_root = "src/lib.rs",
-    rustc_flags = [
-        "--cfg=feature=\"forwarded\"",
-        "--cfg=feature=\"host-header\"",
-        "--cfg=feature=\"uri-authority\"",
-        "--cfg=feature=\"x-forwarded-host\"",
+    proc_macro_crate_deps = ["async-trait"],
+    deps = [
+        "//cda-interfaces:cda_interfaces",
+        "//cda-sovd:cda_sovd",
     ],
 )

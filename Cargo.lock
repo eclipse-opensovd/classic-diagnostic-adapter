@@ -467,9 +467,9 @@ dependencies = [
 
 [[package]]
 name = "cargo-platform"
-version = "0.3.3"
+version = "0.3.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "dd0061da739915fae12ea00e16397555ed4371a6bb285431aab930f61b0aa4ba"
+checksum = "87a0c0e6148f11f01f32650a2ea02d532b2ad4e81d8bd41e6e565b5adc5e6082"
 dependencies = [
  "serde",
  "serde_core",
@@ -2492,7 +2492,7 @@ checksum = "47e1ffaa40ddd1f3ed91f717a33c8c0ee23fff369e3aa8772b9605cc1d22f4c3"
 [[package]]
 name = "mbedtls-rs"
 version = "0.1.0"
-source = "git+https://github.com/eclipse-opensovd/mbedtls-rs.git?rev=f55669ea6d5b4e58c5251aa2054a25b61bb15876#f55669ea6d5b4e58c5251aa2054a25b61bb15876"
+source = "git+https://github.com/eclipse-opensovd/mbedtls-rs.git?rev=00247f4486fd4c627db714657af1a9c067720786#00247f4486fd4c627db714657af1a9c067720786"
 dependencies = [
  "ed25519-dalek",
  "mbedtls-sys",
@@ -2503,7 +2503,7 @@ dependencies = [
 [[package]]
 name = "mbedtls-sys"
 version = "0.1.0"
-source = "git+https://github.com/eclipse-opensovd/mbedtls-rs.git?rev=f55669ea6d5b4e58c5251aa2054a25b61bb15876#f55669ea6d5b4e58c5251aa2054a25b61bb15876"
+source = "git+https://github.com/eclipse-opensovd/mbedtls-rs.git?rev=00247f4486fd4c627db714657af1a9c067720786#00247f4486fd4c627db714657af1a9c067720786"
 dependencies = [
  "cc",
  "cmake",

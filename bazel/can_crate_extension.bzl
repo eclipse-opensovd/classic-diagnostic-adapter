@@ -9,15 +9,8 @@
 #
 # SPDX-License-Identifier: Apache-2.0
 
-[styles]
-c = ["*.rs", "*.kt", "*.kts", "*.fbs"]
-python = [
-  ".env.example",
-  ".gitkeep",
-  ".markdownlintignore",
-  ".yamlfmt",
-  "*.bazel",
-  "*.bzl",
-  "*.env",
-]
-html = ["*.odx-*"]
+"""Separate crate-universe extension identity for optional CAN dependencies."""
+
+load("@rules_rust//crate_universe:extensions.bzl", _crate = "crate")
+
+crate = _crate

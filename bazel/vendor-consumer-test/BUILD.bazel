@@ -1,0 +1,60 @@
+# SPDX-FileCopyrightText: 2026 Copyright (c) Contributors to the Eclipse Foundation
+#
+# See the NOTICE file(s) distributed with this work for additional
+# information regarding copyright ownership.
+#
+# This program and the accompanying materials are made available under the
+# terms of the Apache License Version 2.0 which is available at
+# https://www.apache.org/licenses/LICENSE-2.0
+#
+# SPDX-License-Identifier: Apache-2.0
+
+load("@rules_rust//rust:defs.bzl", "rust_binary", "rust_library")
+
+rust_library(
+    name = "fancy_cda_extensions",
+    srcs = ["src/lib.rs"],
+    crate_name = "fancy_cda_extensions",
+    edition = "2024",
+    proc_macro_deps = [
+        "@classic-diagnostic-adapter//:dep_async_trait",
+        "@classic-diagnostic-adapter//:vendor_override_macros",
+    ],
+    visibility = ["//visibility:public"],
+    deps = [
+        "@classic-diagnostic-adapter//:cda_lib",
+        "@classic-diagnostic-adapter//:core",
+        "@classic-diagnostic-adapter//:database",
+        "@classic-diagnostic-adapter//:dep_aide",
+        "@classic-diagnostic-adapter//:dep_axum",
+        "@classic-diagnostic-adapter//:dep_axum_extra",
+        "@classic-diagnostic-adapter//:dep_bytes",
+        "@classic-diagnostic-adapter//:dep_futures",
+        "@classic-diagnostic-adapter//:dep_http",
+        "@classic-diagnostic-adapter//:dep_linkme",
+        "@classic-diagnostic-adapter//:dep_schemars",
+        "@classic-diagnostic-adapter//:dep_serde",
+        "@classic-diagnostic-adapter//:dep_serde_json",
+        "@classic-diagnostic-adapter//:dep_tokio",
+        "@classic-diagnostic-adapter//:dep_tracing",
+        "@classic-diagnostic-adapter//:interfaces",
+        "@classic-diagnostic-adapter//:plugin_communication_management",
+        "@classic-diagnostic-adapter//:plugin_runtime_update",
+        "@classic-diagnostic-adapter//:plugin_security",
+        "@classic-diagnostic-adapter//:sovd",
+        "@classic-diagnostic-adapter//:sovd_interfaces",
+        "@classic-diagnostic-adapter//:storage",
+    ],
+)
+
+rust_binary(
+    name = "fancy-cda",
+    srcs = ["src/main.rs"],
+    crate_name = "fancy_cda",
+    edition = "2024",
+    deps = [
+        ":fancy_cda_extensions",
+        "@classic-diagnostic-adapter//:cda_lib",
+        "@classic-diagnostic-adapter//:dep_tokio",
+    ],
+)
