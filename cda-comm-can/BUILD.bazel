@@ -1,0 +1,23 @@
+# SPDX-License-Identifier: Apache-2.0
+
+load("//bazel:rust_crate.bzl", "workspace_rust_library")
+
+workspace_rust_library(
+    name = "cda_comm_can",
+    srcs = glob(["src/**/*.rs"]),
+    crate_deps = [
+        "hex",
+        "schemars",
+        "serde",
+        "thiserror",
+        "tokio",
+        "tokio-util",
+        "tracing",
+    ],
+    crate_name = "cda_comm_can",
+    crate_root = "src/lib.rs",
+    visibility = ["//cda-main:__pkg__"],
+    deps = [
+        "//cda-interfaces:cda_interfaces",
+    ],
+)

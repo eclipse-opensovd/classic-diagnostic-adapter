@@ -1,0 +1,45 @@
+# SPDX-License-Identifier: Apache-2.0
+
+load("//bazel:rust_crate.bzl", "workspace_rust_library")
+
+workspace_rust_library(
+    name = "cda_sovd",
+    srcs = glob(["src/**/*.rs"]),
+    crate_deps = [
+        "aide",
+        "axum",
+        "axum-extra",
+        "bytes",
+        "chrono",
+        "http",
+        "indexmap",
+        "mime",
+        "percent-encoding",
+        "regex",
+        "schemars",
+        "serde",
+        "serde_json",
+        "serde_qs",
+        "thiserror",
+        "tokio",
+        "tower",
+        "tower-http",
+        "tracing",
+        "uuid",
+    ],
+    crate_name = "cda_sovd",
+    crate_root = "src/lib.rs",
+    proc_macro_crate_deps = ["async-trait"],
+    visibility = [
+        "//cda-health:__pkg__",
+        "//cda-main:__pkg__",
+    ],
+    deps = [
+        "//cda-interfaces:cda_interfaces",
+        "//cda-plugin-runtime-update:cda_plugin_runtime_update",
+        "//cda-plugin-security:cda_plugin_security",
+        "//cda-sovd-interfaces:sovd_interfaces",
+        "//cda-tracing:cda_tracing",
+        "//opensovd-axum-extra:opensovd_axum_extra",
+    ],
+)

@@ -1,0 +1,44 @@
+# SPDX-License-Identifier: Apache-2.0
+
+module(
+    name = "classic-diagnostic-adapter",
+    version = "0.1.0",
+    bazel_compatibility = [">=8.6.0"],
+)
+
+bazel_dep(name = "rules_rust", version = "0.68.1-score")
+bazel_dep(name = "mbedtls-rs", version = "0.1.0")
+git_override(
+    module_name = "mbedtls-rs",
+    commit = "f55669ea6d5b4e58c5251aa2054a25b61bb15876",
+    remote = "https://github.com/eclipse-opensovd/mbedtls-rs.git",
+)
+
+rust = use_extension(
+    "@rules_rust//rust:extensions.bzl",
+    "rust",
+    dev_dependency = True,
+)
+rust.toolchain(
+    edition = "2024",
+    versions = ["1.88.0"],
+)
+use_repo(rust, "rust_toolchains")
+
+register_toolchains(
+    "@rust_toolchains//:all",
+    dev_dependency = True,
+)
+
+cda_crate_universe = use_extension(
+    "@rules_rust//crate_universe:extensions.bzl",
+    "crate",
+    isolate = True,
+)
+cda_crate_universe.from_cargo(
+    name = "cda_crates",
+    cargo_lockfile = "//:Cargo.lock",
+    manifests = ["//:Cargo.toml"],
+    skip_cargo_lockfile_overwrite = True,
+)
+use_repo(cda_crate_universe, "cda_crates")
