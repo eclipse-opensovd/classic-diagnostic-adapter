@@ -1,0 +1,22 @@
+# SPDX-License-Identifier: Apache-2.0
+
+load("//bazel:rust_crate.bzl", "workspace_rust_library")
+
+workspace_rust_library(
+    name = "opensovd_axum_extra",
+    srcs = glob(["src/**/*.rs"]),
+    crate_deps = [
+        "aide",
+        "axum",
+        "http",
+    ],
+    crate_name = "opensovd_axum_extra",
+    crate_root = "src/lib.rs",
+    rustc_flags = [
+        "--cfg=feature=\"forwarded\"",
+        "--cfg=feature=\"host-header\"",
+        "--cfg=feature=\"uri-authority\"",
+        "--cfg=feature=\"x-forwarded-host\"",
+    ],
+    visibility = ["//cda-sovd:__pkg__"],
+)
