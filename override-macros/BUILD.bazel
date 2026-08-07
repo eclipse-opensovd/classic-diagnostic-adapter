@@ -9,15 +9,16 @@
 #
 # SPDX-License-Identifier: Apache-2.0
 
-[styles]
-c = ["*.rs", "*.kt", "*.kts", "*.fbs"]
-python = [
-  ".env.example",
-  ".gitkeep",
-  ".markdownlintignore",
-  ".yamlfmt",
-  "*.bazel",
-  "*.bzl",
-  "*.env",
-]
-html = ["*.odx-*"]
+load("//bazel:rust_crate.bzl", "workspace_rust_proc_macro")
+
+workspace_rust_proc_macro(
+    name = "override_macros",
+    srcs = glob(["src/**/*.rs"]),
+    crate_deps = [
+        "proc-macro2",
+        "quote",
+        "syn",
+    ],
+    crate_name = "override_macros",
+    crate_root = "src/lib.rs",
+)
