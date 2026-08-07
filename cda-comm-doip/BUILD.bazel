@@ -1,0 +1,41 @@
+# SPDX-FileCopyrightText: 2026 Copyright (c) Contributors to the Eclipse Foundation
+#
+# See the NOTICE file(s) distributed with this work for additional
+# information regarding copyright ownership.
+#
+# This program and the accompanying materials are made available under the
+# terms of the Apache License Version 2.0 which is available at
+# https://www.apache.org/licenses/LICENSE-2.0
+#
+# SPDX-License-Identifier: Apache-2.0
+
+load("//bazel:rust_crate.bzl", "workspace_mbedtls_rs_library", "workspace_rust_library")
+
+workspace_mbedtls_rs_library(
+    name = "mbedtls_rs",
+)
+
+workspace_rust_library(
+    name = "cda_comm_doip",
+    srcs = glob(["src/**/*.rs"]),
+    crate_deps = [
+        "doip-codec",
+        "doip-definitions",
+        "futures",
+        "schemars",
+        "serde",
+        "socket2",
+        "thiserror",
+        "tokio",
+        "tokio-util",
+        "tracing",
+    ],
+    crate_name = "cda_comm_doip",
+    crate_root = "src/lib.rs",
+    rustc_flags = ["--cfg=feature=\"mbedtls\""],
+    visibility = ["//cda-main:__pkg__"],
+    deps = [
+        ":mbedtls_rs",
+        "//cda-interfaces:cda_interfaces",
+    ],
+)
