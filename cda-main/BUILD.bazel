@@ -1,0 +1,67 @@
+# SPDX-License-Identifier: Apache-2.0
+
+load("//bazel:rust_crate.bzl", "workspace_rust_binary", "workspace_rust_library")
+
+workspace_rust_library(
+    name = "opensovd_cda_lib",
+    srcs = glob(
+        ["src/**/*.rs"],
+        exclude = ["src/main.rs"],
+    ),
+    crate_deps = [
+        "clap",
+        "figment",
+        "futures",
+        "mimalloc",
+        "schemars",
+        "serde",
+        "serde_json",
+        "thiserror",
+        "tokio",
+        "toml",
+        "tracing",
+        "tracing-subscriber",
+    ],
+    crate_name = "opensovd_cda_lib",
+    crate_root = "src/lib.rs",
+    proc_macro_crate_deps = ["async-trait"],
+    rustc_env = {
+        "BUILD_DATE": "1970-01-01T00:00:00Z",
+        "CARGO_MANIFEST_DIR": "cda-main",
+        "CARGO_PKG_NAME": "opensovd-cda",
+        "CARGO_PKG_VERSION": "0.1.0",
+        "GIT_COMMIT_HASH": "unknown",
+    },
+    rustc_flags = [
+        "--cfg=feature=\"config-optional\"",
+        "--cfg=feature=\"health\"",
+        "--cfg=feature=\"mbedtls\"",
+    ],
+    visibility = ["//visibility:public"],
+    deps = [
+        "//cda-comm-can:cda_comm_can",
+        "//cda-comm-doip:cda_comm_doip",
+        "//cda-comm-uds:cda_comm_uds",
+        "//cda-core:cda_core",
+        "//cda-database:cda_database",
+        "//cda-health:cda_health",
+        "//cda-interfaces:cda_interfaces",
+        "//cda-plugin-runtime-update:cda_plugin_runtime_update",
+        "//cda-plugin-security:cda_plugin_security",
+        "//cda-sovd:cda_sovd",
+        "//cda-storage:cda_storage",
+        "//cda-tracing:cda_tracing",
+    ],
+)
+
+workspace_rust_binary(
+    name = "opensovd-cda",
+    srcs = ["src/main.rs"],
+    crate_deps = ["tokio"],
+    crate_name = "opensovd_cda",
+    crate_root = "src/main.rs",
+    visibility = ["//visibility:public"],
+    deps = [
+        ":opensovd_cda_lib",
+    ],
+)

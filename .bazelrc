@@ -1,0 +1,7 @@
+# SPDX-License-Identifier: Apache-2.0
+
+common --registry=https://raw.githubusercontent.com/eclipse-score/bazel_registry/main/
+common --registry=https://bcr.bazel.build
+common --experimental_isolated_extension_usages
+
+build --incompatible_strict_action_env
