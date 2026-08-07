@@ -353,6 +353,26 @@ Deferred Initialization
     The CDA supports deferred initialization of ECU communication to enable scenarios where
     the HTTP API must be available before vehicle communication begins.
 
+    **Configuration**
+
+    Deferred initialization is controlled by three fields in the ``[database]`` section of the
+    configuration file:
+
+    - ``communication_init``: controls when the diagnostic gateway is initialized.
+
+      - ``Enabled`` (default): gateway is created and communication starts immediately during startup.
+      - ``Deferred`` or ``Disabled```: gateway creation is postponed until a trigger event occurs.
+
+    - ``post_update_communication``: controls gateway behavior after a runtime database update.
+
+      - ``Enabled`` (default): reconnect immediately after each update.
+      - ``Deferred`` or ``Disabled``: return to deferred state after each update.
+      - ``Last``: preserve the communication state from before the update started.
+
+    - ``deferred_retry_after_seconds`` (default: 30): value for the HTTP ``Retry-After`` response
+      header when a diagnostic request arrives while initialization is still pending.
+      Allows time for variant detection to complete before the client retries.
+
     **Dynamic Router Architecture**
 
     The HTTP server is launched with a dynamic router that supports adding routes after the server
@@ -364,7 +384,7 @@ Deferred Initialization
 
     **Initialization Triggers**
 
-    When deferred initialization is configured, DoIP gateway creation and ECU discovery are
+    When deferred initialization is configured, gateway creation and ECU discovery are
     postponed until one of the following triggers:
 
     - **On-demand**: First diagnostic request to any ECU endpoint triggers initialization
@@ -382,10 +402,58 @@ Deferred Initialization
 
     **Initialization Sequence**
 
-    Once triggered, initialization proceeds identically to the immediate initialization path:
-    DoIP gateway creation, TCP connection establishment, UDS manager creation, and variant
-    detection. Upon completion, SOVD routes are registered and, when health monitoring is
-    enabled, health status transitions to "Up".
+    Once triggered (by an HTTP request or plugin API), initialization proceeds:
+
+    1. The communication actor receives an ``Enable`` message and transitions to
+       ``Initializing``: performs transport-specific discovery and connection setup
+       (e.g., VIR/VAM exchange and routing activation for DoIP), establishes
+       diagnostic connections, and performs variant detection.
+    2. On success, the actor populates the ``DeferredGateway``'s shared slot with
+       the live ``DiagGateway`` and sets the atomic ``active`` flag to
+       ``true``. The guard's fast-path (``is_active()``) immediately starts
+       passing diagnostic requests through to the now-functional handlers.
+    3. The transport health provider transitions to ``Up`` (or ``Failed`` on error).
+    4. The communication plugin removes its coordinator lease after successful enable. A failed
+       attempt leaves the block active for a later request or proactive retry.
+
+    Route registration happens **once at startup** and is not repeated on
+    initialization. The runtime-update reload path uses
+    ``DynamicRouter::replace_routes`` when the ECU set changes after a database
+    update, but this is independent of the deferred initialization path.
+
+    **Post-Update Behavior**
+
+    The ``post_update_communication`` configuration field controls what happens after a
+    runtime database update. The reloader in ``cda-plugin-runtime-update`` reads the
+    ``PostUpdateCommunicationMode`` value and requests the corresponding generic operation through
+    ``CommunicationLifecycleHandle``. The reloader never manipulates communication guard blocks:
+
+    .. list-table:: Post-Update Behavior Matrix
+       :header-rows: 1
+
+       * - Mode
+         - Pre-update state
+         - Post-update state
+         - Reloader action
+       * - ``Enabled`` (default)
+         - Any
+         - Gateway reconnects immediately
+         - ``replace_gateway()`` (disable + rebuild + enable)
+       * - ``Deferred``
+         - Any
+         - Returns to deferred (503) state
+         - ``replace_gateway_deferred()`` (install gateway disabled; guard re-arms)
+       * - ``Last``
+         - Active (initialized)
+         - Gateway reconnects immediately
+         - ``replace_gateway()``
+       * - ``Last``
+         - Deferred (not yet triggered)
+         - Stays deferred (503) state
+         - ``replace_gateway_deferred()``
+
+    In ``Deferred`` mode the communication plugin retains its block after replacement. In
+    ``Enabled`` mode it enables and unblocks immediately; ``Last`` restores prior readiness.
 
 
 Health Monitoring
@@ -695,11 +763,12 @@ Error Handling
       NoVariantDetected state; diagnostic operations may still be attempted with base variant.
 
     - **Deferred initialization failure**: When deferred initialization is triggered
-      (by first request or plugin API) and the subsequent DoIP gateway creation or
-      UDS manager creation fails, the error is reported to the caller. When health
-      monitoring is enabled, the DoIP health provider transitions to "Failed" state.
-      The HTTP server and non-ECU endpoints remain operational. Subsequent trigger
-      attempts may retry initialization.
+      (by first request or plugin API) and the subsequent DoIP communication setup
+      fails, the communication plugin logs the control error and retains its block lease. When
+      health monitoring is enabled, the DoIP health provider transitions to "Failed"
+      state. The HTTP server and non-ECU endpoints remain operational. Subsequent
+      trigger attempts may retry initialization. Timeout and cancellation during
+      shutdown are reported by the communication subsystem.
 
     - **Configuration file load failure**: The system falls back to default configuration values
       and logs a warning. Startup continues with defaults, which may be overridden by CLI arguments.

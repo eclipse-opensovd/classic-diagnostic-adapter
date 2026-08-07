@@ -1,0 +1,115 @@
+' SPDX-FileCopyrightText: 2026 Copyright (c) Contributors to the Eclipse Foundation
+' SPDX-License-Identifier: Apache-2.0
+
+@startuml
+
+skinparam dpi 150
+skinparam shadowing false
+skinparam linetype polyline
+skinparam componentStyle rectangle
+skinparam nodesep 45
+skinparam ranksep 70
+skinparam ArrowFontSize 10
+
+skinparam package {
+  BackgroundColor #FAFAFA
+  BorderColor #777777
+  FontSize 11
+  Padding 20
+}
+
+skinparam component {
+  BackgroundColor #FFFFFF
+  BorderColor #333333
+  FontSize 10
+  Padding 14
+}
+
+skinparam component<<management>> BackgroundColor #E8F5E9
+skinparam component<<consumer>> BackgroundColor #E3F2FD
+skinparam component<<transport>> BackgroundColor #FFF3E0
+skinparam component<<composition>> BackgroundColor #F3E5F5
+
+title Authoritative Communication Lifecycle Module Architecture
+
+' Top-to-bottom flow: cda-main -> Request/Diagnostic -> Communication
+' Management -> Transport. Packages and components below are declared in
+' that dependency order so the layout engine can rank them without having
+' to route edges backwards.
+
+package "cda-main" {
+  component "setup\n(constructs immutable prep,\nthen builds the plugin)" as Setup <<composition>>
+}
+
+package "Request and Diagnostic Modules" {
+  component "cda-plugin-runtime-update" as RuntimeUpdate <<consumer>>
+  component "cda-sovd" as Sovd <<consumer>>
+  component "cda-comm-uds" as Uds <<consumer>>
+
+  RuntimeUpdate ..> Sovd : replaces vehicle routes
+  RuntimeUpdate ..> Uds : replaces diagnostic runtime
+  Sovd --> Uds : invokes diagnostics
+}
+
+package "cda-plugin-communication-management" {
+  component "CommunicationAccess\nview" as Access <<management>>
+  component "DisableCommunication\nview" as Disable <<management>>
+  component "plugin\nCommunicationPlugin\n(default: init_mode policy)" as Plugin <<management>>
+  component "CommunicationHandle\n(synchronous claim/join)" as Handle <<management>>
+  component "lifecycle worker\n(capacity-8, owns transport,\ninitializers, protection)" as Worker <<management>>
+  component "http_protection\nHttpProtectionRegistry\nOwnedHttpProtection" as HttpProtection <<management>>
+
+  Access --> Plugin : state and acquire only
+  Disable --> Plugin : disable only
+  Plugin --> Handle : private handle\nonly plugin receives it
+  Handle --> Worker : submits durable,\ncoalesced commands
+  Worker --> HttpProtection : retains worker-owned\ncommunication protection
+}
+
+package "Transport Modules" {
+  component "SwappableGateway\n(cda-interfaces)" as Swappable <<transport>>
+  component "cda-transport-router" as Router <<transport>>
+  component "cda-comm-doip\n(lazy socket bind\ninside enable())" as Doip <<transport>>
+  component "cda-comm-can" as Can <<transport>>
+
+  Swappable --> Router : delegates lifecycle and traffic
+  Router --> Doip : routes and controls
+  Router --> Can : routes and controls
+}
+
+Setup ..> Sovd : installs request guard
+Setup --> Plugin : builds, retains, delivers\ninit_mode, registers initializers
+Setup ..> Access : derives access view
+Setup ..> Disable : derives disable view
+Setup ..> Swappable : supplies transport control
+
+' Hidden edges: not part of the model, only used to pin cda-main strictly
+' above the Request/Diagnostic rank and Request/Diagnostic strictly above
+' Communication Management, since Setup's and RuntimeUpdate's real edges
+' otherwise let the layout engine collapse those ranks together.
+Setup -[hidden]-> RuntimeUpdate
+Uds -[hidden]-> Disable
+
+Sovd --> HttpProtection : evaluates request protections
+Sovd --> Access : acquire guard for protected operations
+Uds --> Access : acquire guard for data transfers
+Uds --> Router : sends diagnostic traffic
+Worker --> Swappable : enable, disable, query state
+
+RuntimeUpdate --> HttpProtection : owns UpdateInProgress\nprotection
+RuntimeUpdate --> Disable : acquires sole disable lease
+RuntimeUpdate --> Swappable : replaces active gateway
+
+note bottom of HttpProtection
+  Registry is cloneable. Each owner token is opaque,
+  non-cloneable, and can lift only its own protection.
+  First installed matching protection wins.
+end note
+
+note bottom of Worker
+  Sole task touching transport, initializers, and
+  protection. Mailbox capacity bounds admission only;
+  shutdown uses a separate out-of-band channel.
+end note
+
+@enduml
