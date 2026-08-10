@@ -36,6 +36,8 @@ jobs:
         uses: actions/checkout@v6
         with:
           submodules: false
+      - name: Verify mbedTLS revision consistency
+        run: python3 bazel/check_mbedtls_revision.py
       - name: Install Bazelisk
         uses: bazelbuild/setup-bazelisk@v3
       - name: Build mbedTLS library

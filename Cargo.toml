@@ -58,7 +58,7 @@ cda-storage = { path = "cda-storage" }
 cda-extra = { path = "cda-extra" }
 sovd-interfaces = { path = "cda-sovd-interfaces" }
 cda-build = { path = "cda-build" }
-mbedtls-rs = { git = "https://github.com/eclipse-opensovd/mbedtls-rs.git", rev = "f55669ea6d5b4e58c5251aa2054a25b61bb15876" }
+mbedtls-rs = { git = "https://github.com/eclipse-opensovd/mbedtls-rs.git", rev = "13ab7cd5593ebae81f604d4a61ce8476656010ac" }
 
 # ---- common crates ----
 async-trait = "0.1.89"
