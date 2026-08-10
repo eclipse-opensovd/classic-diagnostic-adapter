@@ -400,10 +400,31 @@ impl<S: EcuGateway, T: UdsEcuDb + VariantDetection> UdsManager<S, T> {
                         }
                     },
                     Ok(None) => {
-                        tracing::warn!("None response received");
-                        break 'read_uds_messages Err(DiagServiceError::UnexpectedResponse(Some(
-                            "None response received".to_owned(),
-                        )));
+                        // The gateway closed the response channel without
+                        // delivering a usable response for this request (e.g.
+                        // its per-request task ended after forwarding only
+                        // non-matching frames, such as a wrong-DID echo that
+                        // was ignored above). This is a "no response" condition
+                        // per ISO 14229-2 Table 9, not an unexpected response:
+                        // treat it exactly like a plain timeout, applying the
+                        // CP_RepeatReqCountApp retry policy and ultimately
+                        // surfacing DiagServiceError::Timeout.
+                        tracing::debug!(
+                            "Response channel closed with no matching response for request"
+                        );
+                        if app_retry_count < uds_params.repeat_req_count_app {
+                            app_retry_count = app_retry_count.saturating_add(1);
+                            tracing::debug!(
+                                ecu_name,
+                                attempt = app_retry_count,
+                                max_attempts = uds_params.repeat_req_count_app,
+                                "Repeating request after response channel closed \
+                                 (CP_RepeatReqCountApp)"
+                            );
+                            rx_timeout_next = None;
+                            continue 'send;
+                        }
+                        break 'read_uds_messages Err(DiagServiceError::Timeout);
                     }
                     Err(_) => {
                         // error means the tokio::time::timeout
@@ -840,6 +861,26 @@ mod send_tests {
         + Send
         + Sync;
 
+    /// Keeps a `response_sender` alive for the remainder of the test process,
+    /// modelling a real gateway task that stays parked (holding its sender)
+    /// after sending no usable response - e.g. an offline or answer-suppressing
+    /// ECU that positively ACKs but never replies. This lets the caller's
+    /// `rx_timeout` fire instead of the channel closing early (`recv() == None`).
+    ///
+    /// Closures that instead want to model a gateway which closes the channel
+    /// after forwarding its frame(s) (e.g. the CAN gateway breaking after the
+    /// first SID-matching response) must simply let the sender drop.
+    fn park_sender(sender: mpsc::Sender<Result<Option<UdsResponse>, DiagServiceError>>) {
+        type ParkedSenders =
+            std::sync::Mutex<Vec<mpsc::Sender<Result<Option<UdsResponse>, DiagServiceError>>>>;
+        static PARKED: std::sync::OnceLock<ParkedSenders> = std::sync::OnceLock::new();
+        PARKED
+            .get_or_init(|| std::sync::Mutex::new(Vec::new()))
+            .lock()
+            .unwrap()
+            .push(sender);
+    }
+
     impl EcuGateway for TestGateway {
         fn get_gateway_network_address(
             &self,
@@ -855,20 +896,18 @@ mod send_tests {
             response_sender: mpsc::Sender<Result<Option<UdsResponse>, DiagServiceError>>,
             expect_uds_reply: bool,
         ) -> impl Future<Output = Result<(), DiagServiceError>> + Send {
-            // Mirror the real gateways: the actual send happens on a detached
-            // task that keeps `response_sender` alive until either it produces a
-            // response or the caller drops its `response_rx` (which fires
-            // `response_sender.closed()`). Modelling this is essential for the
-            // per-attempt-channel retry semantics: a `send_fn` that never
-            // answers must leave the channel open so the UDS-layer `rx_timeout`
-            // fires, and must have its sender released once the caller moves on
-            // to the next attempt.
-            let send_fn = Arc::clone(&self.send_fn);
-            let result = send_fn(response_sender.clone(), expect_uds_reply);
-            tokio::spawn(async move {
-                // Hold the sender until the caller's receiver is dropped.
-                response_sender.closed().await;
-            });
+            // The closure receives `response_sender` by value and fully owns its
+            // lifetime, mirroring how the real gateways manage their per-request
+            // task's sender:
+            //   * to model a gateway that closes the channel after forwarding
+            //     its frame(s) (e.g. the CAN gateway breaking after the first
+            //     SID-matching response), simply let the sender drop when the
+            //     closure returns -> the caller's `recv()` observes `None`.
+            //   * to model a gateway task that stays parked with no (further)
+            //     response until the caller gives up (e.g. an offline/answer-
+            //     suppressing ECU), the closure must keep the sender alive
+            //     itself (store a clone), so the caller's `rx_timeout` fires.
+            let result = (self.send_fn)(response_sender, expect_uds_reply);
             async move { result }
         }
 
@@ -1128,8 +1167,11 @@ mod send_tests {
     #[tokio::test]
     async fn test_send_with_raw_payload_timeout() {
         let gateway = TestGateway {
-            send_fn: Arc::new(|_response_tx, _| {
-                // Don't send any response - channel will be empty, causing timeout
+            send_fn: Arc::new(|response_tx, _| {
+                // Model a parked gateway task: keep the channel open with no
+                // response so the caller's rx_timeout fires (instead of the
+                // channel closing early).
+                park_sender(response_tx);
                 Ok(())
             }),
         };
@@ -1147,6 +1189,52 @@ mod send_tests {
         );
     }
 
+    /// Regression test (mirrors the `test_wrong_did_in_response_returns_504`
+    /// CAN integration test): when the ECU replies with the correct SID but a
+    /// mismatched echo (e.g. wrong DID), that frame is ignored and the gateway
+    /// then closes the response channel. This must surface as
+    /// `DiagServiceError::Timeout` (HTTP 504), not `UnexpectedResponse` (HTTP
+    /// 500). With a per-attempt channel, the closed channel yields
+    /// `recv() == None`, which the read loop now treats as a "no response"
+    /// condition per ISO 14229-2 Table 9.
+    #[tokio::test]
+    async fn test_send_with_raw_payload_wrong_echo_then_channel_close_is_timeout() {
+        let gateway = TestGateway {
+            send_fn: Arc::new(|response_tx, _| {
+                // Correct SID (0x62 for 0x22) but wrong DID (0xF200 instead of
+                // 0xF190) plus fake data. The read loop matches the SID, sees
+                // the mismatched echo bytes, ignores the frame, and loops back
+                // to recv(); the gateway task then ends and drops its sender.
+                let msg = UdsResponse::Message(ServicePayload {
+                    data: vec![0x62, 0xF2, 0x00, 0x41, 0x42, 0x43, 0x44],
+                    source_address: 0x0001,
+                    target_address: 0x0E00,
+                    new_session: None,
+                    new_security: None,
+                });
+                response_tx.try_send(Ok(Some(msg))).ok();
+                Ok(())
+            }),
+        };
+        // No app-layer retries so the first channel-close resolves directly.
+        let manager = make_manager_with_timeout_default_and_repeat_req_count_app(
+            gateway,
+            Duration::from_millis(50),
+            0,
+        );
+        // Request: 22 F1 90 (ReadDataByIdentifier, DID 0xF190).
+        let payload = make_test_payload(0x22, &[0xF1, 0x90]);
+
+        let result = manager
+            .send_with_raw_payload("TestECU", payload, None, true)
+            .await;
+
+        assert!(
+            matches!(result, Err(DiagServiceError::Timeout)),
+            "Expected Timeout (504) for wrong-DID response then channel close, got {result:?}"
+        );
+    }
+
     /// ISO 14229-2:2021 Table 9 ("Client error handling"): on a plain timeout
     /// with no response at all, the client shall repeat the last request, up
     /// to `CP_RepeatReqCountApp` times (worst case: `1 + N` total
@@ -1156,9 +1244,12 @@ mod send_tests {
         let send_count = Arc::new(std::sync::atomic::AtomicU32::new(0));
         let send_count_clone = Arc::clone(&send_count);
         let gateway = TestGateway {
-            send_fn: Arc::new(move |_response_tx, _| {
+            send_fn: Arc::new(move |response_tx, _| {
                 send_count_clone.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-                // Never send any response - every attempt times out.
+                // Never send any response - every attempt times out. Park the
+                // sender so the channel stays open and the caller's rx_timeout
+                // fires for each attempt.
+                park_sender(response_tx);
                 Ok(())
             }),
         };
@@ -1384,9 +1475,11 @@ mod send_tests {
     #[tokio::test]
     async fn test_send_with_raw_payload_uses_configured_timeout_default_when_none() {
         let gateway = TestGateway {
-            send_fn: Arc::new(|_response_tx, _| {
+            send_fn: Arc::new(|response_tx, _| {
                 // Don't send any response - the call must time out based on
-                // the ECU's configured `timeout_default`.
+                // the ECU's configured `timeout_default`. Park the sender so
+                // the channel stays open until that timeout fires.
+                park_sender(response_tx);
                 Ok(())
             }),
         };
