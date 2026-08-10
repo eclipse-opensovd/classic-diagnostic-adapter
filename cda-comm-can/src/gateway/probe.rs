@@ -192,34 +192,50 @@ impl CanDiagGateway {
     /// A list of ECU names that responded to a probe.
     #[tracing::instrument(skip_all, fields(dlt_context = dlt_ctx!("CAN")))]
     pub async fn discover_ecus(&self) -> Vec<String> {
-        let mut discovered = Vec::new();
+        let futures: Vec<_> = self
+            .connections
+            .iter()
+            .map(|(ecu_name, conn)| {
+                let logical_addr = self.logical_address_for_ecu(ecu_name);
 
-        for (ecu_name, conn) in self.connections.iter() {
-            let logical_addr = self.logical_address_for_ecu(ecu_name);
-
-            match self.probe_connection(conn, logical_addr).await {
-                Ok(()) => {
-                    tracing::info!(
-                        ecu = %conn.ecu_name,
-                        logical_addr = logical_addr,
-                        network_addr = %conn.network_address(),
-                        "ECU discovered on CAN"
-                    );
-                    self.discovered_ecus.write().await.insert(ecu_name.clone());
-                    // Push the lowercase map key, not `conn.ecu_name`: for
+                async move {
+                    let result = self.probe_connection(conn, logical_addr).await;
+                    match &result {
+                        Ok(()) => tracing::info!(
+                            ecu = %conn.ecu_name,
+                            logical_addr = logical_addr,
+                            network_addr = %conn.network_address(),
+                            "ECU discovered on CAN"
+                        ),
+                        Err(e) => tracing::debug!(
+                            ecu = %conn.ecu_name,
+                            logical_addr = logical_addr,
+                            error = %e,
+                            "ECU not responding on CAN"
+                        ),
+                    }
+                    // Return the lowercase map key, not `conn.ecu_name`: for
                     // ECUs from [[can.ecu_mappings]] the latter carries the
                     // config-file casing, which the variant-detection
                     // consumer would not find in its lowercase-keyed ECU map.
-                    discovered.push(ecu_name.clone());
+                    (ecu_name.clone(), result)
                 }
-                Err(e) => {
-                    tracing::debug!(
-                        ecu = %conn.ecu_name,
-                        logical_addr = logical_addr,
-                        error = %e,
-                        "ECU not responding on CAN"
-                    );
-                    self.discovered_ecus.write().await.remove(ecu_name);
+            })
+            .collect();
+
+        let results = futures::future::join_all(futures).await;
+
+        let mut discovered = Vec::new();
+        let mut cache = self.discovered_ecus.write().await;
+
+        for (ecu_name, result) in results {
+            match result {
+                Ok(()) => {
+                    cache.insert(ecu_name.clone());
+                    discovered.push(ecu_name);
+                }
+                Err(_) => {
+                    cache.remove(&ecu_name);
                 }
             }
         }

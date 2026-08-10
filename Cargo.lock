@@ -381,6 +381,7 @@ name = "cda-comm-can"
 version = "0.1.0"
 dependencies = [
  "cda-interfaces",
+ "futures",
  "hex",
  "schemars",
  "serde",
