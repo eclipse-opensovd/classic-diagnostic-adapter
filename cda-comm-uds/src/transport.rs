@@ -238,14 +238,28 @@ impl<S: EcuGateway, T: UdsEcuDb + VariantDetection> UdsManager<S, T> {
         let mut app_retry_count: u32 = 0;
 
         // outer loop to retry sending frames, resend frames must deal with (N)ACK again
-        let (response_tx, mut response_rx) = mpsc::channel(2);
         let (response, sent_after) = 'send: loop {
+            // Create a fresh response channel for every attempt. Each
+            // `continue 'send` (transmission/receive error, plain timeout, or
+            // NRC 0x21/0x94 busy-repeat) drops the previous attempt's
+            // `response_rx` together with its sole `response_tx`, which in turn
+            // fires `response_sender.closed()` in the gateway's per-request
+            // task. That releases the (shared) ECU lock and tears the stale
+            // task down *before* the next attempt is sent.
+            //
+            // Reusing a single channel across attempts (as done previously)
+            // kept every prior gateway task alive and subscribed to the same
+            // sender; a stale task could then push a late response or error
+            // into the shared channel and trip the receive-error branch below,
+            // causing a retry to fire immediately instead of only after this
+            // attempt's `rx_timeout` had elapsed.
+            let (response_tx, mut response_rx) = mpsc::channel(2);
             if let Err(e) = self
                 .gateway
                 .send(
                     transmission_params.clone(),
                     payload.clone(),
-                    response_tx.clone(),
+                    response_tx,
                     expect_response,
                 )
                 .await
@@ -421,9 +435,11 @@ impl<S: EcuGateway, T: UdsEcuDb + VariantDetection> UdsManager<S, T> {
                 }
             };
             tracing::debug!("Finished reading UDS messages from gateway");
+            // `response_rx` (and its `response_tx`) are dropped here as this
+            // attempt's scope ends, closing the channel and releasing the
+            // gateway's per-request task and the ECU lock it holds.
             break 'send (uds_result, sent_after);
         };
-        drop(response_rx);
         drop(ecu_sem);
 
         // Post-send: if a service send (not tester present) timed out,
@@ -841,7 +857,20 @@ mod send_tests {
             response_sender: mpsc::Sender<Result<Option<UdsResponse>, DiagServiceError>>,
             expect_uds_reply: bool,
         ) -> impl Future<Output = Result<(), DiagServiceError>> + Send {
-            let result = (self.send_fn)(response_sender, expect_uds_reply);
+            // Mirror the real gateways: the actual send happens on a detached
+            // task that keeps `response_sender` alive until either it produces a
+            // response or the caller drops its `response_rx` (which fires
+            // `response_sender.closed()`). Modelling this is essential for the
+            // per-attempt-channel retry semantics: a `send_fn` that never
+            // answers must leave the channel open so the UDS-layer `rx_timeout`
+            // fires, and must have its sender released once the caller moves on
+            // to the next attempt.
+            let send_fn = Arc::clone(&self.send_fn);
+            let result = send_fn(response_sender.clone(), expect_uds_reply);
+            tokio::spawn(async move {
+                // Hold the sender until the caller's receiver is dropped.
+                response_sender.closed().await;
+            });
             async move { result }
         }
 
@@ -1199,6 +1228,88 @@ mod send_tests {
             call_count.load(std::sync::atomic::Ordering::SeqCst),
             3,
             "Expected 2 failed transmission attempts + 1 successful one"
+        );
+    }
+
+    /// Regression test for the "immediate retry" bug observed on offline/answer-
+    /// suppressing ECUs (positive ACK, then no UDS reply). Previously a single
+    /// response channel was shared across all retries, so a stale gateway task
+    /// from a prior attempt could push a late response/error into that shared
+    /// channel and trip the receive-error branch, firing the next
+    /// `CP_RepeatReqCountApp` retry *immediately* instead of only after this
+    /// attempt's `rx_timeout` had elapsed (see log.pcapng: retry #1 correctly
+    /// waited ~`P6Max`, retry #2 fired ~1ms later).
+    ///
+    /// With a per-attempt channel, dropping the previous attempt's
+    /// `response_rx`/`response_tx` closes the stale task's sender, so a late
+    /// error injected into a *prior* attempt's sender cannot reach the current
+    /// attempt. Every retry must therefore be gated by the full timeout, so the
+    /// total elapsed time is `(1 + repeat_req_count_app) * timeout`.
+    #[tokio::test]
+    async fn test_stale_task_error_does_not_cause_sub_timeout_retry() {
+        // Holds the `response_tx` handed to the *previous* attempt, so we can
+        // simulate a stale gateway task pushing a late error into it after the
+        // next attempt has already started.
+        type ResponseSender = mpsc::Sender<Result<Option<UdsResponse>, DiagServiceError>>;
+        let prev_tx: Arc<std::sync::Mutex<Option<ResponseSender>>> =
+            Arc::new(std::sync::Mutex::new(None));
+        let send_count = Arc::new(std::sync::atomic::AtomicU32::new(0));
+
+        let prev_tx_clone = Arc::clone(&prev_tx);
+        let send_count_clone = Arc::clone(&send_count);
+        let gateway = TestGateway {
+            send_fn: Arc::new(move |response_tx, _| {
+                send_count_clone.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                // Simulate the stale task of the *previous* attempt delivering a
+                // late receive-error. Post-fix the previous sender is already
+                // closed (its `response_rx` was dropped), so this is a no-op and
+                // must not influence the current attempt.
+                if let Some(stale) = prev_tx_clone.lock().unwrap().take() {
+                    let _ = stale.try_send(Err(DiagServiceError::NoResponse(
+                        "stale task late error".to_owned(),
+                    )));
+                }
+                // Retain this attempt's sender as the "previous" one for the
+                // next attempt, and otherwise never answer -> this attempt must
+                // time out on its own channel.
+                *prev_tx_clone.lock().unwrap() = Some(response_tx);
+                Ok(())
+            }),
+        };
+
+        let repeat_req_count_app = 2;
+        let timeout = Duration::from_millis(50);
+        let manager = make_manager_with_timeout_default_and_repeat_req_count_app(
+            gateway,
+            timeout,
+            repeat_req_count_app,
+        );
+        let payload = make_test_payload(0x10, &[0x01]);
+
+        let start = std::time::Instant::now();
+        let result = manager
+            .send_with_raw_payload("TestECU", payload, None, true)
+            .await;
+        let elapsed = start.elapsed();
+
+        assert!(
+            matches!(result, Err(DiagServiceError::Timeout)),
+            "Expected Timeout error, got {result:?}"
+        );
+        assert_eq!(
+            send_count.load(std::sync::atomic::Ordering::SeqCst),
+            1 + repeat_req_count_app,
+            "Expected exactly 1 original transmission + {repeat_req_count_app} repeats"
+        );
+        // The crux: each attempt (including retries) must wait its full timeout.
+        // Pre-fix, the stale error tripped the receive-error branch and retries
+        // fired near-instantly, so total elapsed was ~one timeout. Require the
+        // total to be at least the sum for all attempts.
+        let min_expected = timeout * (1 + repeat_req_count_app);
+        assert!(
+            elapsed >= min_expected,
+            "Retries fired before their timeout elapsed: total {elapsed:?} < expected \
+             {min_expected:?} (stale-task error must not trigger a sub-timeout retry)"
         );
     }
 
