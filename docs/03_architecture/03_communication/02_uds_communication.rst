@@ -244,6 +244,14 @@ Request-Response Flow
     layer retries (``CP_RepeatReqCountApp``) are independent of DoIP transport-layer
     retries (``CP_RepeatReqCountTrans``).
 
+    Each application-layer attempt uses a *fresh* response channel. When an attempt
+    is retried (transmission error, receive error, or plain timeout with no response),
+    the previous attempt's channel is dropped, which signals the gateway's per-request
+    task to stop and release the ECU lock *before* the next request is sent. This
+    ensures a retry is gated solely by that attempt's own timeout: a late response or
+    error from a prior, superseded attempt can no longer leak into the current attempt
+    and trigger an immediate (sub-timeout) retry.
+
     .. uml::
         :caption: UDS Request-Response Flow
 
