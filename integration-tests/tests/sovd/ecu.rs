@@ -947,6 +947,7 @@ async fn test_ecu_session_reset_on_lock_reacquire() {
             value: "extended".to_owned(),
             mode_expiration: Some(session_expiration),
             key: None,
+            parameters: None,
         },
         StatusCode::OK,
     )
@@ -1355,6 +1356,7 @@ pub(crate) async fn switch_session(
             value: name.to_owned(),
             mode_expiration: None,
             key: None,
+            parameters: None,
         },
         expected_status,
     )
@@ -1379,6 +1381,7 @@ async fn request_seed(
             value: name,
             mode_expiration: None,
             key: None,
+            parameters: None,
         },
         StatusCode::OK,
     )
@@ -1409,6 +1412,7 @@ async fn send_key(
                     send_key: key,
                 },
             ),
+            parameters: None,
         },
         excepted_status,
     )
